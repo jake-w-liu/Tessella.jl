@@ -14,8 +14,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | 1 | 2-D Delaunay + CDT + quality refinement | **DONE — gate green** | exact empty-circumcircle oracle ✓; 2n−2−h count + hull ✓; CDT constraints present + locally Delaunay ✓; Ruppert angle/area bound achieved, domain area preserved ✓ |
 | 2 | 1-D edge meshing + parametric surface meshing | **DONE — gate green** | size-graded edge mesh vs analytic arc length ✓; planar face exact area + quality ✓; cylinder watertight + area convergence ✓; parametric area convergence ✓ |
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; interface recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; conforming interface recovery + exact enclosure geometry OPEN |
-| 4 | size fields + optimization | not started | quality ≥ gmsh on 22 cases |
-| 5 | geometry kernel (OCC interop / native CSG) + heal | not started | ingest ASCENT `solid_model` |
+| 4 | size fields + optimization | **partial** | tet quality report + Laplacian smoothing ✓ (volume/validity preserved, mean dihedral up, slivers down); 3-D sliver exudation + domain-bounded refinement WIP |
+| 5 | geometry kernel (OCC interop / native CSG) + heal | **partial** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel) ✓ + fill to exact volume; Boolean CSG + OCC interop WIP |
 | 6 | high-order + ASCENT integration + 22-case regression | not started | all HFSS cases solve via Tessella |
 
 ## Standing acceptance cases (regression, CRC-stamped when they pass)
@@ -126,3 +126,19 @@ the `.geo` into `test/fixtures/` at Stage 0.
     diverged under perturbation and was removed) and evaluating the literal
     enclosure `.geo` (needs the Stage-5 geometry kernel) remain. Full `Pkg.test()`
     green: **142,335 assertions**.
+- **2026-08-11** — **Stages 4–5 partials + integration.**
+  - `src/Optimize.jl` — `mesh_quality` (dihedral/radius-edge/sliver report) and
+    boundary-preserving `smooth_laplacian` (positive-volume guard; volume/validity/
+    tags preserved; mean dihedral up, slivers down). `refine3d!` was prototyped and
+    **removed** (unconstrained circumcentre insertion raised mean circumradius by
+    creating slivers — CRC: don't ship a tool that degrades its output).
+  - `src/Heal.jl` — `surface_diagnostics`/`is_meshable`: detect open, non-manifold,
+    degenerate, duplicate, mis-oriented, and near-coincident defects (the detection
+    half of "heal, don't fail").
+  - `src/Geometry.jl` — native `box_surface`/`cylinder_surface`/`box_tunnel_surface`
+    primitives (closed, manifold, fill to exact analytic volume).
+  - Top-level `Tessella.mesh_volume` — surface→volume pipeline with the
+    validated-or-explicit-blocker contract (Heal gate → fill → smooth → validate).
+  - Deep-debug pass on the 3-D+ modules: default path (`perturb=true`) robust; the
+    `perturb=false` coplanar case is the known SoS-artifact (perturbation is the
+    fix), documented. Full `Pkg.test()` green: **142,388 assertions**.
