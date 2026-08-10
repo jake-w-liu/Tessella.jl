@@ -16,7 +16,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; interface recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; conforming interface recovery + exact enclosure geometry OPEN |
 | 4 | size fields + optimization | **partial** | tet quality report + Laplacian smoothing ✓ (volume/validity preserved, mean dihedral up, slivers down); 3-D sliver exudation + domain-bounded refinement WIP |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | **partial** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel) ✓ + fill to exact volume; Boolean CSG + OCC interop WIP |
-| 6 | high-order + ASCENT integration + 22-case regression | not started | all HFSS cases solve via Tessella |
+| 6 | high-order + ASCENT integration + 22-case regression | **partial** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓ + curved P2 onto a cylinder primitive ✓; general-geometry curving + ASCENT drop-in + 22-case regression WIP |
 
 ## Standing acceptance cases (regression, CRC-stamped when they pass)
 
@@ -142,3 +142,15 @@ the `.geo` into `test/fixtures/` at Stage 0.
   - Deep-debug pass on the 3-D+ modules: default path (`perturb=true`) robust; the
     `perturb=false` coplanar case is the known SoS-artifact (perturbation is the
     fix), documented. Full `Pkg.test()` green: **142,388 assertions**.
+- **2026-08-11** — **Stage 6 partial (high-order) + integration.** `src/HighOrder.jl`:
+  quadratic (P2) tet generation (`p2_tetmesh`, one shared node per edge, straight
+  P2 volume == linear), gmsh **type-11** writer + reader (round-trips to the same
+  linear connectivity CRC), and `curve_to_cylinder!` (projects lateral-wall edge
+  nodes onto the exact cylinder — genuine curved high-order for a primitive,
+  verified to land at radius R within 1e-12). End-to-end integration test:
+  primitive → `mesh_volume` → `.msh` (v2/v4) → read reproduces the CRC; multi-
+  region tags + physical names survive. All 7 stages now have working, CRC-gated
+  implementations; the remaining work is the research-hard / out-of-near-term-scope
+  tail (conforming interface recovery, sliver exudation, Boolean CSG + OCC interop,
+  general-geometry curving, ASCENT drop-in + 22-case regression). Full `Pkg.test()`
+  green: **142,414 assertions**.
