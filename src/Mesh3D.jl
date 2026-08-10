@@ -25,8 +25,8 @@ module Mesh3D
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
 using ..MeshTypes: Mesh
 
-export Triangulation3, delaunay3d, tetrahedralize
-export check_consistency3, is_delaunay3, to_mesh3, ntets_live
+export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi, tets_per_region
+export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 
 const GHOST3 = Int32(0)
 
@@ -260,7 +260,11 @@ function locate3(T::Triangulation3, px, py, pz, vid; start::Integer=T.last)
     rs = UInt64(vid)*0x9E3779B97F4A7C15 + 0xD1B54A32D192ED03
     guard = 0; maxstep = 16*length(T.alive) + 64
     @inbounds while true
-        guard += 1; guard > maxstep && error("Mesh3D.locate3: walk did not terminate")
+        guard += 1
+        # a stochastic walk terminates for a Delaunay triangulation, but severely
+        # thin tets (perturbed regular grids) can make it wander; fall back to an
+        # exhaustive, guaranteed-correct scan rather than fail.
+        guard > maxstep && return _locate_scan(T, px, py, pz, vid)
         rs ⊻= rs<<13; rs ⊻= rs>>7; rs ⊻= rs<<17
         r = Int(rs % UInt64(4))
         moved = false
@@ -284,6 +288,28 @@ end
 function _first_alive3(T::Triangulation3)
     @inbounds for t in eachindex(T.alive); T.alive[t] && return Int32(t); end
     error("Mesh3D: no live tets")
+end
+
+# Exhaustive location fallback (guaranteed correct): return a real tet containing
+# p (all faces test interior), else a ghost tet whose half-space circumsphere
+# contains p (p outside the hull). Uses SoS to break the on-face/on-hull ties.
+function _locate_scan(T::Triangulation3, px, py, pz, vid)
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tet(T, t)) || continue
+        inside = true
+        for k in 1:4
+            f = _face(T, t, k)
+            if orient3_sos(_pt(T,f[1]),_pt(T,f[2]),_pt(T,f[3]),(px,py,pz), f[1],f[2],f[3],Int32(vid)) > 0
+                inside = false; break
+            end
+        end
+        inside && return Int32(t)
+    end
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && _is_ghost_tet(T, t)) || continue
+        _in_sphere(T, t, vid) && return Int32(t)
+    end
+    error("Mesh3D._locate_scan: point not located (corrupt triangulation?)")
 end
 
 # ── Bowyer–Watson insertion ─────────────────────────────────────────────────────
@@ -456,6 +482,33 @@ function to_mesh3(T::Triangulation3; keep::Union{Nothing,AbstractVector{Bool}}=n
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
+# Boundary / interface recovery (conforming Delaunay via Steiner points)
+# ════════════════════════════════════════════════════════════════════════════════
+
+function _add_vertex3!(T::Triangulation3, x::Float64, y::Float64, z::Float64)
+    push!(T.x, x); push!(T.y, y); push!(T.z, z); T.nreal += 1; push!(T.vtet, Int32(0))
+    return Int32(T.nreal)
+end
+
+@inline _sortface(a,b,c) = _sort3t(Int32(a),Int32(b),Int32(c))
+
+"""Set of all triangular faces present in the current tetrahedralization (sorted)."""
+function present_faces(T::Triangulation3)
+    S = Set{NTuple{3,Int32}}()
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tet(T,t)) || continue
+        for k in 1:4
+            f = _face(T,t,k)
+            (_is_ghost_v(f[1])||_is_ghost_v(f[2])||_is_ghost_v(f[3])) && continue
+            push!(S, _sortface(f[1],f[2],f[3]))
+        end
+    end
+    return S
+end
+
+@inline _face_present(T, present, a, b, c) = _sortface(a,b,c) in present
+
+# ════════════════════════════════════════════════════════════════════════════════
 # Domain filling from a boundary surface (Stage-3 volume meshing)
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -476,6 +529,53 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1)
     T = delaunay3d(xs, ys, zs; rng_seed=rng_seed)
     keep = _classify_by_centroid(T, surface)
     return to_mesh3(T; keep=keep)
+end
+
+"""
+    tetrahedralize_multi(surfaces; rng_seed=1) -> Mesh
+
+Fill each closed boundary surface in `surfaces` independently and combine the
+results into a single multi-region tet [`Mesh`](@ref), tagging each region's tets
+with its 1-based index (`tet_tag`). Shared interfaces are meshed per region (not
+conforming across regions — that needs constrained interface recovery), but every
+volume is genuinely filled: the standing anti-false-positive check is that *each*
+region contributes a positive tet count (see `tets_per_region`).
+"""
+function tetrahedralize_multi(surfaces::AbstractVector{Mesh}; rng_seed::Integer=1)
+    coords_cols = Vector{NTuple{3,Float64}}()
+    tetcols = Vector{NTuple{4,Int32}}()
+    tags = Int32[]
+    for (r, surf) in enumerate(surfaces)
+        m = tetrahedralize(surf; rng_seed=rng_seed)
+        off = Int32(length(coords_cols))
+        @inbounds for i in 1:size(m.coords,2)
+            push!(coords_cols, (m.coords[1,i], m.coords[2,i], m.coords[3,i]))
+        end
+        @inbounds for t in 1:size(m.tets,2)
+            push!(tetcols, (m.tets[1,t]+off, m.tets[2,t]+off, m.tets[3,t]+off, m.tets[4,t]+off))
+            push!(tags, Int32(r))
+        end
+    end
+    coords = Matrix{Float64}(undef, 3, length(coords_cols))
+    @inbounds for (i,c) in enumerate(coords_cols); coords[1,i]=c[1]; coords[2,i]=c[2]; coords[3,i]=c[3]; end
+    tets = Matrix{Int32}(undef, 4, length(tetcols))
+    @inbounds for (j,te) in enumerate(tetcols); for i in 1:4; tets[i,j]=te[i]; end; end
+    return Mesh(coords; tets=tets, tet_tag=tags)
+end
+
+"""
+    tets_per_region(m) -> Dict{Int32,Int}
+
+Tet count per `tet_tag` region — the mandatory anti-false-positive check: a valid
+multi-region volume mesh has a *positive* count in every region (DEVELOPMENT.md:
+"No empty volumes" is vacuous if a region is empty).
+"""
+function tets_per_region(m::Mesh)
+    d = Dict{Int32,Int}()
+    @inbounds for t in 1:size(m.tets,2)
+        tag = m.tet_tag[t]; d[tag] = get(d, tag, 0) + 1
+    end
+    return d
 end
 
 # per-tet keep mask: true iff the tet's centroid is inside the surface

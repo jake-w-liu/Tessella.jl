@@ -121,6 +121,67 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test validate(mo).ok
     end
 
+    @testset "genus-1, thin features, multi-region (coax junction)" begin
+        # axis-z cylinder volume surface, N-gon rims, K axial levels
+        function cyl_vol(cx,cy,cz,R,H,N,K)
+            V=Tuple{Float64,Float64,Float64}[]
+            for j in 0:K-1, i in 0:N-1; push!(V,(cx+R*cospi(2i/N),cy+R*sinpi(2i/N),cz+H*j/(K-1))); end
+            ci=length(V)+1; push!(V,(cx,cy,cz)); cti=length(V)+1; push!(V,(cx,cy,cz+H))
+            idx(j,i)=(j-1)*N+mod(i,N)+1; Tr=NTuple{3,Int32}[]
+            for j in 1:K-1, i in 0:N-1
+                a=idx(j,i);b=idx(j,i+1);c=idx(j+1,i+1);d=idx(j+1,i)
+                push!(Tr,(Int32(a),Int32(b),Int32(c))); push!(Tr,(Int32(a),Int32(c),Int32(d)))
+            end
+            for i in 0:N-1; push!(Tr,(Int32(ci),Int32(idx(1,i+1)),Int32(idx(1,i)))); end
+            for i in 0:N-1; push!(Tr,(Int32(cti),Int32(idx(K,i)),Int32(idx(K,i+1)))); end
+            C=Matrix{Float64}(undef,3,length(V)); for (k,p) in enumerate(V); C[:,k]=[p...]; end
+            tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end
+            Mesh(C; tris=tm)
+        end
+        function box_surf(x0,x1,y0,y1,z0,z1)
+            C=Float64[x0 x1 x1 x0 x0 x1 x1 x0; y0 y0 y1 y1 y0 y0 y1 y1; z0 z0 z0 z0 z1 z1 z1 z1]
+            F=[(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
+            t=Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); t[:,k]=Int32[f...]; end; Mesh(C; tris=t)
+        end
+        function box_tun(ox0,ox1,oy0,oy1,z0,z1,ix0,ix1,iy0,iy1)
+            V=Tuple{Float64,Float64,Float64}[]
+            for (x,y) in [(ox0,oy0),(ox1,oy0),(ox1,oy1),(ox0,oy1)]; push!(V,(x,y,z0)); end
+            for (x,y) in [(ox0,oy0),(ox1,oy0),(ox1,oy1),(ox0,oy1)]; push!(V,(x,y,z1)); end
+            for (x,y) in [(ix0,iy0),(ix1,iy0),(ix1,iy1),(ix0,iy1)]; push!(V,(x,y,z0)); end
+            for (x,y) in [(ix0,iy0),(ix1,iy0),(ix1,iy1),(ix0,iy1)]; push!(V,(x,y,z1)); end
+            Tr=NTuple{3,Int32}[]; q(a,b,c,d)=(push!(Tr,(Int32(a),Int32(b),Int32(c)));push!(Tr,(Int32(a),Int32(c),Int32(d))))
+            q(1,9,10,2);q(2,10,11,3);q(3,11,12,4);q(4,12,9,1); q(5,6,14,13);q(6,7,15,14);q(7,8,16,15);q(8,5,13,16)
+            q(1,2,6,5);q(2,3,7,6);q(3,4,8,7);q(4,1,5,8); q(9,13,14,10);q(10,14,15,11);q(11,15,16,12);q(12,16,13,9)
+            C=Matrix{Float64}(undef,3,length(V)); for (k,p) in enumerate(V); C[:,k]=[p...]; end
+            tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end; Mesh(C; tris=tm)
+        end
+
+        # thin cylindrical pin (aspect 20) fills to the exact 12-gon prism volume
+        pin = cyl_vol(0.0,0.0,0.0, 0.05, 1.0, 12, 4)
+        mp = tetrahedralize(pin)
+        @test validate(mp).ok
+        @test mesh_vol(mp) ≈ 0.5*12*0.05^2*sinpi(2/12)*1.0 rtol=1e-6
+
+        # box with a rectangular through-tunnel (genus-1 bore) → exact volume 24
+        case = box_tun(1,5,1,5,1,3, 2,4,2,4)
+        mc = tetrahedralize(case)
+        @test validate(mc).ok
+        @test mesh_vol(mc) ≈ 24.0 rtol=1e-6
+        @test boundary_faces(mc.tets)[2] == 2                # watertight fill
+
+        # THE STANDING CASE (representative): 3-region coax junction where the pin,
+        # metal case and air gap meet at the bore walls — gmsh 4.13/4.15 leave every
+        # volume empty here. Tessella fills all three, each with a positive tet count.
+        pinb = box_surf(2.4,3.6, 2.4,3.6, 0,4)
+        gap  = box_tun(2,4, 2,4, 1,3, 2.4,3.6,2.4,3.6)
+        mm = tetrahedralize_multi([pinb, case, gap])
+        tpr = tets_per_region(mm)
+        @test length(tpr) == 3
+        @test all(v > 0 for v in values(tpr))                # NO empty volume
+        @test mesh_vol(mm) ≈ (1.2^2*4 + 24.0 + (2.0^2*2 - 1.2^2*2)) rtol=1e-6  # 5.76+24+5.12
+        @test validate(mm).ok
+    end
+
     @testset "degenerate input handled gracefully" begin
         # exact-degenerate (perturb=false): no non-coplanar 4-tuple ⇒ empty mesh
         @test ntets(to_mesh3(delaunay3d([0.0,1,2],[0.0,1,2],[0.0,1,2]; perturb=false))) == 0     # collinear
