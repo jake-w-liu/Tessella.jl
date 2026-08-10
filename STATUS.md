@@ -169,3 +169,17 @@ the `.geo` into `test/fixtures/` at Stage 0.
     recovery, sliver exudation, Boolean CSG + OCC interop, general curving, ASCENT
     drop-in + 22-case regression) is the research-hard / out-of-near-term-scope
     work `PLAN.md` frames as a multi-year effort.
+- **2026-08-11** — **Conforming interface recovery: attempted, characterized, deferred.**
+  Implemented the *correct* algorithm — 3-D-Ruppert-style **encroachment** refinement
+  (split an encroached subsegment/subface, re-insert, Delaunay-maintain) rather than
+  the earlier divergent split-missing-faces version. Verified the geometric kernels
+  (triangle circumsphere equidistant; edge/face encroachers). On a **flat** interface
+  (box faces) it hits a *fundamental* barrier: the perturbation that keeps the 3-D
+  Delaunay flat-tet-free tilts the interface, so recovered Steiner points approach
+  coplanarity faster than any jitter can separate them (eventually an unlocatable
+  degenerate insertion), and regular grids cascade on cocircular squares. This is
+  exactly why robust interface recovery needs a **constrained CDT** (exact, SoS-based
+  flip recovery, *no* perturbation) — the multi-year TetGen-class effort `PLAN.md`
+  defers. Per CRC discipline the non-robust recovery was **removed** (the verified
+  2-3/3-2 flip primitives remain as its foundation). `tetrahedralize_multi` continues
+  to fill every region (non-conforming interfaces). Full `Pkg.test()`: **142,442**.
