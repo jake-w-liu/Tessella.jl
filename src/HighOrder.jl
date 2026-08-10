@@ -17,7 +17,7 @@ using ..MeshTypes: Mesh, node, tet_volume
 import ..MeshTypes: nnodes, ntets     # extended for P2Mesh
 using Printf: @printf
 
-export P2Mesh, p2_tetmesh, p2_volume, write_msh_p2
+export P2Mesh, p2_tetmesh, p2_volume, write_msh_p2, curve_to_cylinder!
 
 """
     P2Mesh(coords, tet10)
@@ -77,6 +77,52 @@ function p2_volume(p::P2Mesh)
         v += tet_volume(a,b,c,d)
     end
     return v
+end
+
+"""
+    curve_to_cylinder!(p::P2Mesh, center, axis, radius; rtol=1e-6) -> n_curved
+
+Curve the quadratic mesh onto a cylinder: every edge-mid node whose *both*
+endpoints lie on the lateral surface (distance `radius` from the axis) is
+projected radially onto the exact cylinder — turning the straight chord into a
+true curved P2 edge. Returns the number of nodes moved. This is genuine
+curved-boundary high-order for a known primitive; the flat caps are untouched.
+"""
+function curve_to_cylinder!(p::P2Mesh, center, axis, radius::Real; rtol::Real=1e-6)
+    R = Float64(radius)
+    c = (Float64(center[1]),Float64(center[2]),Float64(center[3]))
+    ez = _unit3((Float64(axis[1]),Float64(axis[2]),Float64(axis[3])))
+    tol = rtol * R
+    radial(v) = begin
+        rel = (p.coords[1,v]-c[1], p.coords[2,v]-c[2], p.coords[3,v]-c[3])
+        ax = rel[1]*ez[1]+rel[2]*ez[2]+rel[3]*ez[3]
+        rv = (rel[1]-ax*ez[1], rel[2]-ax*ez[2], rel[3]-ax*ez[3])
+        (sqrt(rv[1]^2+rv[2]^2+rv[3]^2), ax, rv)
+    end
+    # mid-node → its two corner endpoints (consistent across tets)
+    endp = Dict{Int32, Tuple{Int32,Int32}}()
+    slots = ((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4))
+    @inbounds for t in 1:ntets(p), (s,i,j) in slots
+        endp[p.tet10[s,t]] = (p.tet10[i,t], p.tet10[j,t])
+    end
+    ncurved = 0
+    for (mid, (a,b)) in endp
+        (abs(radial(a)[1]-R) <= tol && abs(radial(b)[1]-R) <= tol) || continue
+        d, ax, rv = radial(mid)
+        d == 0 && continue                       # degenerate (on the axis) — skip
+        f = R/d
+        @inbounds begin
+            p.coords[1,mid] = c[1] + ax*ez[1] + rv[1]*f
+            p.coords[2,mid] = c[2] + ax*ez[2] + rv[2]*f
+            p.coords[3,mid] = c[3] + ax*ez[3] + rv[3]*f
+        end
+        ncurved += 1
+    end
+    return ncurved
+end
+
+@inline function _unit3(a)
+    l=sqrt(a[1]^2+a[2]^2+a[3]^2); l==0 && error("curve_to_cylinder!: zero axis"); (a[1]/l,a[2]/l,a[3]/l)
 end
 
 """
