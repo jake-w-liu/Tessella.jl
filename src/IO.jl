@@ -28,7 +28,8 @@ const MSH_POINT = 15
 const MSH_LINE  = 1
 const MSH_TRI   = 2
 const MSH_TET   = 4
-const _NN = Dict(MSH_POINT => 1, MSH_LINE => 2, MSH_TRI => 3, MSH_TET => 4)
+const MSH_TET2  = 11    # 10-node (quadratic) tet — read as its 4 corner vertices
+const _NN = Dict(MSH_POINT => 1, MSH_LINE => 2, MSH_TRI => 3, MSH_TET => 4, MSH_TET2 => 10)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Reading
@@ -235,7 +236,8 @@ function _push_element!(acc, etype::Int, phys::Int, nodetoks)
     elseif etype == MSH_TRI
         a = idx(nodetoks[1]); b = idx(nodetoks[2]); c = idx(nodetoks[3])
         push!(acc.tris, (Int32(a), Int32(b), Int32(c))); push!(acc.tri_tag, Int32(phys))
-    elseif etype == MSH_TET
+    elseif etype == MSH_TET || etype == MSH_TET2
+        # linear tet, or quadratic tet read as its 4 corner vertices (first 4 nodes)
         a = idx(nodetoks[1]); b = idx(nodetoks[2]); c = idx(nodetoks[3]); d = idx(nodetoks[4])
         push!(acc.tets, (Int32(a), Int32(b), Int32(c), Int32(d))); push!(acc.tet_tag, Int32(phys))
     end

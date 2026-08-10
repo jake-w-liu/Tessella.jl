@@ -34,6 +34,7 @@ include("Mesh3D.jl")         # Stage 3: 3-D Delaunay + volume filling (+ multi-r
 include("Optimize.jl")       # Stage 4: tet quality report + Laplacian smoothing
 include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't fail")
 include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
+include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
 using .MeshTypes: Mesh, validate, mesh_crc
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tets_per_region

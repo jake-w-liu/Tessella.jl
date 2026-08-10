@@ -25,6 +25,9 @@ using Tessella
     include("geometry_test.jl")     # box / cylinder / box-tunnel primitives
     include("pipeline_test.jl")     # mesh_volume: validated-or-explicit-blocker
 
+    # Stage 6 — high-order elements.
+    include("highorder_test.jl")    # quadratic (P2) tet generation + type-11 I/O
+
     @testset "stage banner" begin
         @test Tessella.stage() isa Int
         @test Tessella.stage() >= 1     # Stage 0 gate is green
