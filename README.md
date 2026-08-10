@@ -7,10 +7,28 @@ toolchain, where gmsh's OpenCASCADE boundary recovery fails on hard geometries
 (thin features, multi-way Boolean junctions) that a solver must nevertheless
 mesh.
 
-> **Status: scaffolding only.** No meshing is implemented yet. This repository
-> currently holds the architecture (`PLAN.md`), the development/CRC discipline
-> (`DEVELOPMENT.md`), the status tracker (`STATUS.md`), and a package skeleton.
-> Development begins from **`startup.md`**.
+> **Status: a working pipeline (142k+ CRC-verified assertions), built from
+> `startup.md` under the mandatory CRC discipline.** Implemented and gated:
+> exact adaptive predicates (Shewchuk + SoS, vs an independent exact-rational
+> oracle); compact mesh types + topology + deterministic checksums; gmsh `.msh`
+> v2/v4 + STL I/O; **2-D** Delaunay + constrained Delaunay + Ruppert refinement;
+> size fields + graded 1-D + planar/cylinder/parametric **surface** meshing;
+> a robust **3-D** Delaunay kernel + **volume filling** (convex, non-convex,
+> genus-1, thin, and multi-region — including a representative coax junction with
+> **all volumes filled** where gmsh leaves them empty); tet quality reporting +
+> Laplacian smoothing; surface healing (defect detection); and a top-level
+> `mesh_volume` with a *validated-or-explicit-blocker* contract.
+>
+> **Remaining** (tracked honestly in `STATUS.md`): conforming interface recovery
+> and sliver exudation for the *literal* enclosure `.geo`; the OpenCASCADE / CSG
+> geometry kernel; high-order elements; ASCENT integration. See `STATUS.md` for
+> the live stage board.
+
+```julia
+using Tessella
+m = mesh_volume(surface)          # closed triangle surface → validated tet mesh
+                                  #   (throws with a precise report if the surface is defective)
+```
 
 ## Why
 

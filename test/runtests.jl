@@ -20,8 +20,9 @@ using Tessella
     # Stage 4 — optimization + quality (CRC-gated; sliver removal WIP).
     include("optimize_test.jl")     # tet quality report + Laplacian smoothing
 
-    # Stage 5 — heal (surface-defect detection) + top-level pipeline.
+    # Stage 5 — heal + native primitives + top-level pipeline.
     include("heal_test.jl")         # surface diagnostics (open/non-manifold/degenerate…)
+    include("geometry_test.jl")     # box / cylinder / box-tunnel primitives
     include("pipeline_test.jl")     # mesh_volume: validated-or-explicit-blocker
 
     @testset "stage banner" begin
