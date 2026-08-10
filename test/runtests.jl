@@ -15,7 +15,10 @@ using Tessella
     include("meshsurface_test.jl")  # planar/cylinder/parametric surface meshing
 
     # Stage 3 — 3-D meshing (CRC-gated; boundary recovery lands incrementally).
-    include("mesh3d_test.jl")       # 3-D Delaunay: exact empty-circumsphere oracle
+    include("mesh3d_test.jl")       # 3-D Delaunay + volume filling + coax junction
+
+    # Stage 4 — optimization + quality (CRC-gated; sliver removal WIP).
+    include("optimize_test.jl")     # tet quality report + Laplacian smoothing
 
     @testset "stage banner" begin
         @test Tessella.stage() isa Int
