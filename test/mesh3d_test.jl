@@ -246,19 +246,22 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test flipped                                                  # a flippable face existed
     end
 
-    @testset "optimize_flips! is safe (consistent, volume/min-dihedral preserved)" begin
-        r = _R3(0xABCDEF); n = 120
+    @testset "optimize_flips! is safe and reduces slivers (2-3 + 3-2 flips)" begin
+        r = _R3(0xABCDEF); n = 300
         xs=Float64[_nf(r) for _ in 1:n]; ys=Float64[_nf(r) for _ in 1:n]; zs=Float64[_nf(r) for _ in 1:n]
         T = delaunay3d(xs, ys, zs; rng_seed=1)
         m0 = to_mesh3(T)
-        v0 = mesh_vol(m0)
-        d0 = mesh_quality(m0).min_dihedral_deg
-        optimize_flips!(T; passes=4)
+        v0 = mesh_vol(m0); q0 = mesh_quality(m0)
+        nf = optimize_flips!(T; passes=6)
+        @test nf > 0
         @test check_consistency3(T)[1]                                 # still a valid complex
         m1 = to_mesh3(T)
-        @test mesh_vol(m1) ≈ v0 rtol=1e-9                              # volume preserved
+        @test mesh_vol(m1) ≈ v0 rtol=1e-9                              # volume preserved (flips)
         @test validate(m1).ok
-        @test mesh_quality(m1).min_dihedral_deg >= d0 - 1e-9           # never worsens the min
+        q1 = mesh_quality(m1)
+        @test q1.min_dihedral_deg >= q0.min_dihedral_deg - 1e-9        # min never worsens (safe)
+        @test q1.n_slivers < q0.n_slivers                              # 3-2 flips collapse slivers
+        @test q1.mean_dihedral_deg > q0.mean_dihedral_deg              # mean quality up
     end
 
     @testset "degenerate input handled gracefully" begin
