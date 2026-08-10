@@ -25,6 +25,7 @@ include("Mesh2D.jl")
 include("SizeField.jl")
 include("Mesh1D.jl")
 include("MeshSurface.jl")
+include("Mesh3D.jl")
 
 """
     stage() -> Int
