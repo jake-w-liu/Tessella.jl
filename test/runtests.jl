@@ -20,6 +20,10 @@ using Tessella
     # Stage 4 — optimization + quality (CRC-gated; sliver removal WIP).
     include("optimize_test.jl")     # tet quality report + Laplacian smoothing
 
+    # Stage 5 — heal (surface-defect detection) + top-level pipeline.
+    include("heal_test.jl")         # surface diagnostics (open/non-manifold/degenerate…)
+    include("pipeline_test.jl")     # mesh_volume: validated-or-explicit-blocker
+
     @testset "stage banner" begin
         @test Tessella.stage() isa Int
         @test Tessella.stage() >= 1     # Stage 0 gate is green
