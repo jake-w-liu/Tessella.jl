@@ -84,6 +84,43 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test all(==(shas[1]), shas)
     end
 
+    @testset "tetrahedralize: fill a domain from its boundary surface" begin
+        # closed cube surface (12 outward triangles) → filled volume 1
+        C=Float64[0 1 1 0 0 1 1 0; 0 0 1 1 0 0 1 1; 0 0 0 0 1 1 1 1]
+        F=[(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
+        ct=Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); ct[:,k]=Int32[f...]; end
+        cs=Mesh(C; tris=ct)
+        @test boundary_edges(cs.tris)[1] |> isempty       # closed surface
+        m=tetrahedralize(cs)
+        @test mesh_vol(m) ≈ 1.0 rtol=1e-6
+        @test validate(m).ok
+        _, mi = boundary_faces(m.tets); @test mi == 2      # watertight fill
+
+        # non-convex L-prism (2×2×1 minus a 1×1×1 corner) → volume 3
+        base=[(0.0,0.0),(2.0,0.0),(2.0,1.0),(1.0,1.0),(1.0,2.0),(0.0,2.0)]; nb=length(base)
+        LC=Matrix{Float64}(undef,3,2nb)
+        for (i,(x,y)) in enumerate(base); LC[:,i]=[x,y,0.0]; LC[:,i+nb]=[x,y,1.0]; end
+        bt=[(1,2,3),(1,3,4),(1,4,5),(1,5,6)]
+        lt=NTuple{3,Int32}[]
+        for (a,b,c) in bt; push!(lt,(Int32(a),Int32(c),Int32(b))); end
+        for (a,b,c) in bt; push!(lt,(Int32(a+nb),Int32(b+nb),Int32(c+nb))); end
+        for i in 1:nb; j=i%nb+1; push!(lt,(Int32(i),Int32(j),Int32(j+nb))); push!(lt,(Int32(i),Int32(j+nb),Int32(i+nb))); end
+        ltm=Matrix{Int32}(undef,3,length(lt)); for (k,f) in enumerate(lt); ltm[:,k]=Int32[f...]; end
+        ls=Mesh(LC; tris=ltm)
+        ml=tetrahedralize(ls)
+        @test mesh_vol(ml) ≈ 3.0 rtol=1e-6                 # concave corner excluded
+        @test validate(ml).ok
+
+        # convex octahedron (vertices ±1 on axes) → volume 4/3
+        OC=Float64[1 -1 0 0 0 0; 0 0 1 -1 0 0; 0 0 0 0 1 -1]
+        OF=[(1,3,5),(3,2,5),(2,4,5),(4,1,5),(3,1,6),(2,3,6),(4,2,6),(1,4,6)]
+        ot=Matrix{Int32}(undef,3,length(OF)); for (k,f) in enumerate(OF); ot[:,k]=Int32[f...]; end
+        os=Mesh(OC; tris=ot)
+        mo=tetrahedralize(os)
+        @test mesh_vol(mo) ≈ 4/3 rtol=1e-6
+        @test validate(mo).ok
+    end
+
     @testset "degenerate input handled gracefully" begin
         # exact-degenerate (perturb=false): no non-coplanar 4-tuple ⇒ empty mesh
         @test ntets(to_mesh3(delaunay3d([0.0,1,2],[0.0,1,2],[0.0,1,2]; perturb=false))) == 0     # collinear

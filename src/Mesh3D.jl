@@ -429,17 +429,20 @@ function _shuffle3!(a::Vector{Int32}, seed::UInt64)
 end
 
 """
-    to_mesh3(T) -> Mesh
+    to_mesh3(T; keep=nothing) -> Mesh
 
 Export live real tets (ghosts dropped), nodes compacted canonically by coordinate.
+If `keep` (a per-tet `Bool` mask indexed by tet id) is given, only kept tets are
+exported — used to drop exterior tets after domain classification.
 """
-function to_mesh3(T::Triangulation3)
+function to_mesh3(T::Triangulation3; keep::Union{Nothing,AbstractVector{Bool}}=nothing)
     # internal orientation is orient3(v1,v2,v3,v4) > 0, which is tet_signed_volume
     # < 0 (opposite convention). Swap v3,v4 on export so MeshTypes sees positive
     # signed volumes (the geometric standard `validate` checks).
     tets = NTuple{4,Int32}[]
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && !_is_ghost_tet(T,t)) || continue
+        (keep !== nothing && !(t <= length(keep) && keep[t])) && continue
         push!(tets, (_vert(T,t,1),_vert(T,t,2),_vert(T,t,4),_vert(T,t,3)))
     end
     used = Set{Int32}(); for te in tets, v in te; push!(used, v); end
@@ -450,6 +453,73 @@ function to_mesh3(T::Triangulation3)
     M = Matrix{Int32}(undef,4,length(tets))
     @inbounds for (j,te) in enumerate(tets); for i in 1:4; M[i,j]=nid[te[i]]; end; end
     return Mesh(coords; tets=M)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Domain filling from a boundary surface (Stage-3 volume meshing)
+# ════════════════════════════════════════════════════════════════════════════════
+
+"""
+    tetrahedralize(surface::Mesh; rng_seed=1) -> Mesh
+
+Fill the volume enclosed by a closed triangulated `surface` with tetrahedra:
+Delaunay-tetrahedralize the surface vertices, then keep the tets whose centroid
+lies inside the surface (robust point-in-polyhedron by ray casting against the
+original surface). Exact for convex domains; for non-convex domains the boundary
+is the Delaunay restriction (conforming boundary recovery refines this — see
+[`tetrahedralize_recover`](@ref)). Returns the interior tet [`Mesh`](@ref).
+"""
+function tetrahedralize(surface::Mesh; rng_seed::Integer=1)
+    nn = size(surface.coords, 2)
+    xs = Vector{Float64}(undef, nn); ys = similar(xs); zs = similar(xs)
+    @inbounds for i in 1:nn; xs[i]=surface.coords[1,i]; ys[i]=surface.coords[2,i]; zs[i]=surface.coords[3,i]; end
+    T = delaunay3d(xs, ys, zs; rng_seed=rng_seed)
+    keep = _classify_by_centroid(T, surface)
+    return to_mesh3(T; keep=keep)
+end
+
+# per-tet keep mask: true iff the tet's centroid is inside the surface
+function _classify_by_centroid(T::Triangulation3, surface::Mesh)
+    keep = falses(length(T.alive))
+    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))   # generic, avoids grazing
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tet(T,t)) || continue
+        a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3);d=_vert(T,t,4)
+        cx=(T.x[a]+T.x[b]+T.x[c]+T.x[d])/4
+        cy=(T.y[a]+T.y[b]+T.y[c]+T.y[d])/4
+        cz=(T.z[a]+T.z[b]+T.z[c]+T.z[d])/4
+        keep[t] = _inside_surface((cx,cy,cz), dir, surface)
+    end
+    return keep
+end
+
+# ray-cast parity test: is p inside the closed surface?
+function _inside_surface(p, dir, surface::Mesh)
+    crossings = 0
+    @inbounds for f in 1:size(surface.tris, 2)
+        a=surface.tris[1,f]; b=surface.tris[2,f]; c=surface.tris[3,f]
+        pa=(surface.coords[1,a],surface.coords[2,a],surface.coords[3,a])
+        pb=(surface.coords[1,b],surface.coords[2,b],surface.coords[3,b])
+        pc=(surface.coords[1,c],surface.coords[2,c],surface.coords[3,c])
+        _ray_hits_tri(p, dir, pa, pb, pc) && (crossings += 1)
+    end
+    return isodd(crossings)
+end
+
+# Möller–Trumbore ray/triangle intersection for t > 0 (positive ray direction).
+@inline function _ray_hits_tri(o, d, v0, v1, v2)
+    e1 = _subn(v1, v0); e2 = _subn(v2, v0)
+    pv = _cross(d, e2); det = _dot(e1, pv)
+    abs(det) < 1e-300 && return false           # ray parallel to triangle plane
+    inv = 1.0/det
+    tv = _subn(o, v0)
+    u = _dot(tv, pv)*inv
+    (u < 0.0 || u > 1.0) && return false
+    qv = _cross(tv, e1)
+    v = _dot(d, qv)*inv
+    (v < 0.0 || u+v > 1.0) && return false
+    t = _dot(e2, qv)*inv
+    return t > 1e-12                              # strictly ahead of the origin
 end
 
 """
