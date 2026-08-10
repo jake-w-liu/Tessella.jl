@@ -13,7 +13,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | 0 | Foundations: repo, CI, mesh types, `.msh` I/O, exact predicates | **DONE — gate green** | predicates vs exact-rational oracle ✓; `.msh` round-trip (v2↔v4) CRC-preserving ✓ |
 | 1 | 2-D Delaunay + CDT + quality refinement | **DONE — gate green** | exact empty-circumcircle oracle ✓; 2n−2−h count + hull ✓; CDT constraints present + locally Delaunay ✓; Ruppert angle/area bound achieved, domain area preserved ✓ |
 | 2 | 1-D edge meshing + parametric surface meshing | **DONE — gate green** | size-graded edge mesh vs analytic arc length ✓; planar face exact area + quality ✓; cylinder watertight + area convergence ✓; parametric area convergence ✓ |
-| 3 | 3-D Delaunay + **robust boundary recovery** + slivers | in progress | **mesh enclosure coax junction (9.2)** |
+| 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; interface recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; conforming interface recovery + exact enclosure geometry OPEN |
 | 4 | size fields + optimization | not started | quality ≥ gmsh on 22 cases |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | not started | ingest ASCENT `solid_model` |
 | 6 | high-order + ASCENT integration + 22-case regression | not started | all HFSS cases solve via Tessella |
@@ -22,7 +22,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 | id | geometry | why | status |
 |---|---|---|---|
-| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **OPEN — reference input captured** |
+| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL** — a *representative* 3-region coax junction (pin/case/air-gap meeting at the bore walls) is filled with all three volumes non-empty & validated (`mesh3d_test.jl`), the exact failure mode gmsh cannot. Meshing the *literal* `.geo` still needs the geometry kernel (Stage 5) to produce its boundary surfaces + conforming interface recovery. |
 | THIN-SLOT | enclosure 1 mm coupling slot | thin-feature Boolean sliver | open |
 | SPIRAL | 10.1 silicon spiral (thin swept traces, layered stack) | high-aspect thin conductors | open |
 | ARRAY-PML | 5.7 endfire unit cell (periodic + PML) | conformal periodic faces | open |
@@ -110,3 +110,19 @@ the `.geo` into `test/fixtures/` at Stage 0.
     approximation; area converges to analytic).
   - `refine!` extended with a `size` callback (refine where an edge exceeds the
     local target). Full `Pkg.test()` green: **142,282 assertions**. `stage()` → 3.
+- **2026-08-11** — **Stage 3 core (3-D kernel + volume filling).** `src/Mesh3D.jl`:
+  - Incremental 3-D Delaunay via ghost tetrahedra on exact `orient3_sos`/
+    `insphere_sos`; correct hull extension; face-orientation invariant proved and
+    checked. Deterministic ~1e-8 symbolic perturbation breaks coplanar/cospherical
+    degeneracies (the maximally-degenerate unit cube tetrahedralizes cleanly).
+    Bugs fixed via oracles: ghost in-sphere sign, new-tet face orientation, and a
+    walk-termination gap (brute-force `_locate_scan` fallback).
+  - `tetrahedralize` (fill from a closed surface, ray-cast point-in-polyhedron)
+    and `tetrahedralize_multi` (per-region, tagged). Verified fills at *exact*
+    volume: convex cube/octahedron, non-convex L-prism, genus-1 box-with-tunnel,
+    thin cylindrical pin (aspect 20), and a **3-region coax junction with all
+    volumes filled** — the multi-way junction gmsh leaves empty.
+  - Honest scope: robust conforming *interface* recovery (a naive Steiner version
+    diverged under perturbation and was removed) and evaluating the literal
+    enclosure `.geo` (needs the Stage-5 geometry kernel) remain. Full `Pkg.test()`
+    green: **142,335 assertions**.
