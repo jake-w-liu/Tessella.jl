@@ -10,6 +10,7 @@
 # Completeness : exported tet meshes validate() (positive volumes, manifold).
 
 using Test
+using Tessella
 using Tessella.Mesh3D
 using Tessella.MeshTypes
 using Tessella.Geometry
@@ -201,6 +202,48 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         tpr = tets_per_region(mm)
         @test length(tpr) == 3 && all(v > 0 for v in values(tpr))                 # NO empty volume
         @test validate(mm).ok
+    end
+
+    @testset "2-3 / 3-2 flips: consistent, volume-preserving, round-trip identity" begin
+        M3 = Tessella.Mesh3D
+        totvol(T) = begin
+            s=0.0
+            for t in eachindex(T.alive)
+                (T.alive[t] && !M3._is_ghost_tet(T,t)) || continue
+                a=M3._pt(T,M3._vert(T,t,1)); b=M3._pt(T,M3._vert(T,t,2))
+                c=M3._pt(T,M3._vert(T,t,3)); d=M3._pt(T,M3._vert(T,t,4))
+                s += abs(M3._dot(M3._subn(b,a), M3._cross(M3._subn(c,a), M3._subn(d,a)))/6)
+            end; s
+        end
+        r = _R3(0x999); n = 40
+        xs=Float64[_nf(r) for _ in 1:n]; ys=Float64[_nf(r) for _ in 1:n]; zs=Float64[_nf(r) for _ in 1:n]
+        T = delaunay3d(xs, ys, zs; rng_seed=1)
+        v0 = totvol(T); nt0 = ntets_live(T)
+        # find a flippable interior face
+        flipped = false
+        for t1 in 1:length(T.alive)
+            (T.alive[t1] && !M3._is_ghost_tet(T,t1)) || continue
+            for k1 in 1:4
+                t2 = M3._nbr(T,t1,k1)
+                (t2 != 0 && !M3._is_ghost_tet(T,t2)) || continue
+                d = M3._vert(T,t1,k1); e = M3._vert(T,t2, M3._nslot(T,t2,t1))
+                if flip23!(T, t1, k1)
+                    @test check_consistency3(T)[1]
+                    @test ntets_live(T) == nt0 + 1                     # 2 → 3
+                    @test totvol(T) ≈ v0 rtol=1e-9                     # volume preserved
+                    ring = tets_around_edge(T, d, e)
+                    @test length(ring) == 3
+                    @test flip32!(T, d, e, ring)                       # reverse it
+                    @test check_consistency3(T)[1]
+                    @test ntets_live(T) == nt0                         # back to 2 → identity
+                    @test totvol(T) ≈ v0 rtol=1e-9
+                    flipped = true
+                    break
+                end
+            end
+            flipped && break
+        end
+        @test flipped                                                  # a flippable face existed
     end
 
     @testset "degenerate input handled gracefully" begin

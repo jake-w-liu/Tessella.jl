@@ -27,6 +27,7 @@ using ..MeshTypes: Mesh
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi, tets_per_region
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
+export flip23!, flip32!, tets_around_edge
 
 const GHOST3 = Int32(0)
 
@@ -479,6 +480,126 @@ function to_mesh3(T::Triangulation3; keep::Union{Nothing,AbstractVector{Bool}}=n
     M = Matrix{Int32}(undef,4,length(tets))
     @inbounds for (j,te) in enumerate(tets); for i in 1:4; M[i,j]=nid[te[i]]; end; end
     return Mesh(coords; tets=M)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Local mesh modification: 2-3 / 3-2 flips (Stage-3/4 kernel primitives)
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Replace a small region: create each tet in `newverts` (oriented positive),
+# link its faces to the recorded outer neighbours (`outer`: sorted-face → outside
+# tet) and, for faces shared between the new tets, to each other. The reversed-
+# shared-face invariant holds automatically for positively-oriented tets. Returns
+# the new tet ids.
+function _rebuild_region!(T::Triangulation3, newverts, outer::Dict{NTuple{3,Int32},Int32})
+    internal = Dict{NTuple{3,Int32}, Tuple{Int32,Int32}}()
+    ids = Int32[]
+    for v in newverts
+        a,b,c,d = v
+        orient3(_pt(T,a),_pt(T,b),_pt(T,c),_pt(T,d)) < 0 && ((c,d)=(d,c))   # → positive
+        t = _newtet!(T, a, b, c, d); push!(ids, t)
+        for k in 1:4
+            f = _face(T, t, k); key = _sort3t(f[1],f[2],f[3])
+            if haskey(outer, key)
+                nb = outer[key]; _setn!(T, t, k, nb)
+                if nb != 0
+                    j = _nslot_by_face(T, nb, f[1], f[2], f[3]); j != 0 && _setn!(T, nb, j, t)
+                end
+            elseif haskey(internal, key)
+                (t2, s2) = internal[key]; _setn!(T, t, k, t2); _setn!(T, t2, Int(s2), t); delete!(internal, key)
+            else
+                internal[key] = (t, Int32(k))
+            end
+        end
+    end
+    isempty(internal) || error("Mesh3D._rebuild_region!: unmatched internal face")
+    return ids
+end
+
+"""
+    flip23!(T, t1, k1) -> Bool
+
+2→3 flip across the face opposite local vertex `k1` of tet `t1`: the two tets
+sharing that face (apexes `d`, `e`) become three tets sharing the new edge `d–e`.
+Performed only if the bipyramid is convex (else it would create inverted tets);
+returns `false` if not flippable. Neither tet may be a ghost.
+"""
+function flip23!(T::Triangulation3, t1::Integer, k1::Integer)
+    t2 = _nbr(T, t1, k1)
+    (t2 == 0 || _is_ghost_tet(T, t1) || _is_ghost_tet(T, t2)) && return false
+    d = _vert(T, t1, k1)
+    f = _face(T, t1, k1); a,b,c = f[1], f[2], f[3]
+    j2 = _nslot(T, t2, t1); e = _vert(T, t2, j2)
+    # convexity: the three candidate tets must share one orientation sign
+    o1 = orient3(_pt(T,a),_pt(T,b),_pt(T,d),_pt(T,e))
+    o2 = orient3(_pt(T,b),_pt(T,c),_pt(T,d),_pt(T,e))
+    o3 = orient3(_pt(T,c),_pt(T,a),_pt(T,d),_pt(T,e))
+    (o1 != 0 && o2 != 0 && o3 != 0 && (o1>0)==(o2>0) && (o2>0)==(o3>0)) || return false
+    outer = Dict{NTuple{3,Int32},Int32}()
+    for k in 1:4
+        k == k1 && continue
+        ff = _face(T, t1, k); outer[_sort3t(ff[1],ff[2],ff[3])] = _nbr(T, t1, k)
+    end
+    for k in 1:4
+        k == j2 && continue
+        ff = _face(T, t2, k); outer[_sort3t(ff[1],ff[2],ff[3])] = _nbr(T, t2, k)
+    end
+    _killtet!(T, t1); _killtet!(T, t2)
+    ids = _rebuild_region!(T, ((a,b,d,e),(b,c,d,e),(c,a,d,e)), outer)
+    T.last = ids[1]
+    return true
+end
+
+"""
+    tets_around_edge(T, u, v) -> Vector{Int32}
+
+All live (real) tets incident to the undirected edge `(u,v)`.
+"""
+function tets_around_edge(T::Triangulation3, u::Integer, v::Integer)
+    out = Int32[]
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tet(T,t)) || continue
+        has_u=false; has_v=false
+        for k in 1:4
+            vv=_vert(T,t,k); vv==u && (has_u=true); vv==v && (has_v=true)
+        end
+        (has_u && has_v) && push!(out, Int32(t))
+    end
+    return out
+end
+
+"""
+    flip32!(T, edge_de, tets3) -> Bool
+
+3→2 flip: the three tets in `tets3` sharing edge `(d,e)` become two tets sharing
+the triangle `(a,b,c)` of the other three vertices. `tets3` must be exactly the
+three tets around the interior edge `(d,e)`. Returns `false` if not applicable.
+"""
+function flip32!(T::Triangulation3, d::Integer, e::Integer, tets3)
+    length(tets3) == 3 || return false
+    any(t -> _is_ghost_tet(T, t), tets3) && return false
+    # the "ring" vertices a,b,c = the vertices other than d,e across the three tets
+    ring = Int32[]
+    for t in tets3, k in 1:4
+        v = _vert(T, t, k)
+        (v == d || v == e) && continue
+        v in ring || push!(ring, v)
+    end
+    length(ring) == 3 || return false
+    a,b,c = ring[1], ring[2], ring[3]
+    # collect outer faces: the faces of the three tets that do NOT contain edge (d,e)
+    outer = Dict{NTuple{3,Int32},Int32}()
+    for t in tets3, k in 1:4
+        ff = _face(T, t, k)
+        (d in ff && e in ff) && continue          # internal (d,e)-faces vanish
+        nb = _nbr(T, t, k)
+        (nb in tets3) && continue                  # face between two ring tets — also internal
+        outer[_sort3t(ff[1],ff[2],ff[3])] = nb
+    end
+    for t in tets3; _killtet!(T, t); end
+    ids = _rebuild_region!(T, ((a,b,c,d),(a,b,c,e)), outer)
+    T.last = ids[1]
+    return true
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
