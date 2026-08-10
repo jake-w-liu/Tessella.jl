@@ -21,6 +21,7 @@ const TESSELLA_STAGE = 1  # see STATUS.md stage board
 include("Predicates.jl")
 include("MeshTypes.jl")
 include("IO.jl")
+include("Mesh2D.jl")
 
 """
     stage() -> Int
