@@ -135,3 +135,101 @@ end
         @test all(==(crcs[1]), crcs)     # identical topology regardless of insertion order
     end
 end
+
+# ── independent oracle: total mesh area over a triangle Mesh ─────────────────────
+mesh_area(m) = sum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2,t]),node(m,m.tris[3,t]))
+                   for t in 1:ntris(m); init=0.0)
+edge_in(T, vi, vj) = Tessella.Mesh2D._edge_between(T, Int32(vi), Int32(vj))[1] != 0
+
+@testset "Mesh2D CDT (Stage 1)" begin
+
+    @testset "skew constraint crossing a grid" begin
+        xs=Float64[]; ys=Float64[]
+        for i in 0:4, j in 0:4; push!(xs,float(i)); push!(ys,float(j)); end
+        p00=findfirst(k->xs[k]==0&&ys[k]==0,1:25); p41=findfirst(k->xs[k]==4&&ys[k]==1,1:25)
+        T=constrained_delaunay(xs,ys,[(p00,p41)];rng_seed=1)
+        @test check_consistency(T)[1]
+        ok,miss,viol = is_constrained_delaunay(T)
+        @test ok && miss==0 && viol==0
+        @test edge_in(T, p00, p41)                    # the constraint is an edge
+    end
+
+    @testset "through-vertex constraint splits into collinear sub-edges" begin
+        xs=Float64[]; ys=Float64[]
+        for i in 0:4, j in 0:4; push!(xs,float(i)); push!(ys,float(j)); end
+        p00=findfirst(k->xs[k]==0&&ys[k]==0,1:25); p44=findfirst(k->xs[k]==4&&ys[k]==4,1:25)
+        T=constrained_delaunay(xs,ys,[(p00,p44)];rng_seed=1)
+        @test check_consistency(T)[1]
+        @test is_constrained_delaunay(T)[1]
+        # the collinear sub-edges (0,0)-(1,1)-(2,2)-(3,3)-(4,4) are all present
+        pt(a,b)=findfirst(k->xs[k]==a&&ys[k]==b,1:25)
+        diag = [(0,0),(1,1),(2,2),(3,3),(4,4)]
+        for i in 1:length(diag)-1
+            @test edge_in(T, pt(diag[i]...), pt(diag[i+1]...))
+        end
+    end
+
+    @testset "already-an-edge constraint is a no-op (just marked)" begin
+        xs=Float64[0,1,0,1]; ys=Float64[0,0,1,1]
+        T0=delaunay2d(xs,ys)
+        # find any existing edge and constrain it
+        # (0,0)-(1,0) is a hull edge → an edge
+        T=constrained_delaunay(xs,ys,[(1,2)])
+        @test check_consistency(T)[1]
+        @test is_constrained_delaunay(T)[1]
+        @test edge_in(T,1,2)
+    end
+
+    @testset "square domain: interior area == domain area" begin
+        r = _RNG(0xBEEF)
+        xs=Float64[0,10,10,0]; ys=Float64[0,0,10,10]
+        for _ in 1:150; push!(xs, _nf(r)*10); push!(ys, _nf(r)*10); end
+        segs=[(1,2),(2,3),(3,4),(4,1)]
+        T=constrained_delaunay(xs,ys,segs;rng_seed=3)
+        @test check_consistency(T)[1]
+        @test is_constrained_delaunay(T)[1]
+        m=to_mesh(T; interior=classify_interior(T))
+        @test mesh_area(m) ≈ 100.0 atol=1e-9
+        @test validate(m).ok
+    end
+
+    @testset "domain with a hole: interior excludes the hole" begin
+        r = _RNG(0xC0FFEE)
+        xs=Float64[0,10,10,0, 4,6,6,4]; ys=Float64[0,0,10,10, 4,4,6,6]
+        for _ in 1:200
+            x=_nf(r)*10; y=_nf(r)*10
+            (4<x<6 && 4<y<6) && continue
+            push!(xs,x); push!(ys,y)
+        end
+        segs=[(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5)]
+        T=constrained_delaunay(xs,ys,segs;rng_seed=2)
+        @test check_consistency(T)[1]
+        @test is_constrained_delaunay(T)[1]
+        m=to_mesh(T; interior=classify_interior(T))
+        @test mesh_area(m) ≈ 96.0 atol=1e-9    # 100 − 4 (hole)
+        @test validate(m).ok
+    end
+
+    @testset "many random non-crossing constraints stay Delaunay-constrained" begin
+        # constrain a fan of chords from one hull-ish point that don't cross
+        r = _RNG(0x5EED)
+        n=120
+        xs=Float64[_nf(r) for _ in 1:n]; ys=Float64[_nf(r) for _ in 1:n]
+        # constrain edges of the point with smallest x to a few others (star, no crossings)
+        c = argmin(xs)
+        others = sort(setdiff(1:n, [c]); by=k->atan(ys[k]-ys[c], xs[k]-xs[c]))
+        segs = [(c, others[k]) for k in 1:10:length(others)]
+        T=constrained_delaunay(xs,ys,segs;rng_seed=7)
+        @test check_consistency(T)[1]
+        ok,miss,viol = is_constrained_delaunay(T)
+        @test ok
+        @test miss==0
+        for s in segs; @test edge_in(T, s[1], s[2]); end
+    end
+
+    @testset "crossing constraints are rejected" begin
+        xs=Float64[0,2,0,2]; ys=Float64[0,2,2,0]
+        # segments (1,2)=(0,0)-(2,2) and (3,4)=(0,2)-(2,0) cross at center
+        @test_throws ArgumentError constrained_delaunay(xs,ys,[(1,2),(3,4)])
+    end
+end

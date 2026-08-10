@@ -32,6 +32,7 @@ using ..MeshTypes: Mesh
 
 export Triangulation, triangulate, delaunay2d, dedup_points
 export check_consistency, is_delaunay, to_mesh, ntriangles_live, insert_point!
+export insert_segment!, constrained_delaunay, classify_interior, is_constrained_delaunay
 
 const GHOST = Int32(0)   # the single vertex at infinity closing the convex hull
 
@@ -48,6 +49,8 @@ mutable struct Triangulation
     freelist::Vector{Int32}
     nreal::Int
     last::Int32                 # walk hint
+    vtri::Vector{Int32}         # per real vertex: one incident triangle (O(1) lookup hint)
+    seg::Set{NTuple{2,Int32}}   # constrained edges (sorted vertex pairs) for CDT
 end
 
 @inline _pt(T::Triangulation, i::Integer) = @inbounds (T.x[i], T.y[i])
@@ -74,13 +77,26 @@ ntriangles_live(T::Triangulation) = count(T.alive)
         @inbounds T.tv[base+1]=a; T.tv[base+2]=b; T.tv[base+3]=c
         @inbounds T.tn[base+1]=0; T.tn[base+2]=0; T.tn[base+3]=0
         @inbounds T.alive[t]=true
+        _touch_vtri!(T, Int32(t), a, b, c)
         return Int32(t)
     else
         push!(T.tv, Int32(a), Int32(b), Int32(c))
         push!(T.tn, Int32(0), Int32(0), Int32(0))
         push!(T.alive, true)
-        return Int32(length(T.alive))
+        t = Int32(length(T.alive))
+        _touch_vtri!(T, t, a, b, c)
+        return t
     end
+end
+
+# record `t` as an incident triangle for each of its real vertices (lookup hint)
+@inline function _touch_vtri!(T::Triangulation, t::Int32, a, b, c)
+    @inbounds begin
+        (1 <= a <= T.nreal) && (T.vtri[a] = t)
+        (1 <= b <= T.nreal) && (T.vtri[b] = t)
+        (1 <= c <= T.nreal) && (T.vtri[c] = t)
+    end
+    return nothing
 end
 
 @inline function _killtri!(T::Triangulation, t)
@@ -168,7 +184,8 @@ end
 
 function Triangulation(xs::Vector{Float64}, ys::Vector{Float64})
     n = length(xs); @assert length(ys) == n
-    return Triangulation(xs, ys, Int32[], Int32[], Bool[], Int32[], n, Int32(0))
+    return Triangulation(xs, ys, Int32[], Int32[], Bool[], Int32[], n, Int32(0),
+                         zeros(Int32, n), Set{NTuple{2,Int32}}())
 end
 
 # Build the seed: first non-collinear triple → 1 real triangle ringed by 3 ghosts.
@@ -318,6 +335,259 @@ function _retriangulate_cavity!(T::Triangulation, boundary, vid::Int32)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
+# Edge flip (foundation of constrained insertion & Lawson legalization)
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Flip the edge opposite local vertex `k` in triangle `t` (shared with its
+# neighbour). The two triangles t=[p,q,r] (apex p) and t2 (apex s) forming the
+# quad p→q→s→r are replaced in place by [p,q,s] and [p,s,r] (the other diagonal
+# p–s). All four outer neighbours and both apex spokes are relinked. Returns the
+# two new triangle ids. Neither triangle may be a ghost, and the quad must be
+# strictly convex (checked by callers via orient2).
+function _flip!(T::Triangulation, t::Integer, k::Integer)
+    p = _vert(T, t, k)
+    q, r = _edge(T, t, k)                     # CCW edge q→r, p to its left
+    t2 = _nbr(T, t, k)
+    j = _nslot(T, t2, t)
+    s = _vert(T, t2, j)                       # apex of t2
+    # outer neighbours by undirected edge
+    Npq = _nbr(T, t, _nslot_by_edge(T, t, p, q))
+    Nrp = _nbr(T, t, _nslot_by_edge(T, t, r, p))
+    Nqs = _nbr(T, t2, _nslot_by_edge(T, t2, q, s))
+    Nsr = _nbr(T, t2, _nslot_by_edge(T, t2, s, r))
+    # rebuild in place: A reuses t = [p,q,s]; B reuses t2 = [p,s,r]
+    A = Int32(t); B = Int32(t2)
+    _setv!(T, A, 1, p); _setv!(T, A, 2, q); _setv!(T, A, 3, s)
+    _setv!(T, B, 1, p); _setv!(T, B, 2, s); _setv!(T, B, 3, r)
+    # A neighbours: opp p(slot1)=(q,s)→Nqs; opp q(slot2)=(s,p)→B; opp s(slot3)=(p,q)→Npq
+    _setn!(T, A, 1, Nqs); _setn!(T, A, 2, B); _setn!(T, A, 3, Npq)
+    # B neighbours: opp p(slot1)=(s,r)→Nsr; opp s(slot2)=(r,p)→Nrp; opp r(slot3)=(p,s)→A
+    _setn!(T, B, 1, Nsr); _setn!(T, B, 2, Nrp); _setn!(T, B, 3, A)
+    # relink outer neighbours' back-pointers (match by undirected edge)
+    _relink!(T, Npq, A, p, q)
+    _relink!(T, Nqs, A, q, s)
+    _relink!(T, Nsr, B, s, r)
+    _relink!(T, Nrp, B, r, p)
+    _touch_vtri!(T, A, p, q, s); _touch_vtri!(T, B, p, s, r)
+    T.last = A
+    return A, B
+end
+
+@inline function _relink!(T::Triangulation, nb, newt, u, w)
+    nb == 0 && return
+    slot = _nslot_by_edge(T, nb, u, w)
+    slot != 0 && _setn!(T, nb, slot, newt)
+    return
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Constrained Delaunay: segment insertion (flip-based, Sloan/Anglada)
+# ════════════════════════════════════════════════════════════════════════════════
+
+@inline _skey(a, b) = a < b ? (Int32(a), Int32(b)) : (Int32(b), Int32(a))
+@inline _vslot(T::Triangulation, t, v) =
+    (@inbounds T.tv[3*(t-1)+1]==v) ? 1 : ((@inbounds T.tv[3*(t-1)+2]==v) ? 2 :
+     ((@inbounds T.tv[3*(t-1)+3]==v) ? 3 : 0))
+
+# a live real triangle incident to real vertex vi (hint, with scan fallback)
+function _find_incident(T::Triangulation, vi::Integer)
+    h = @inbounds T.vtri[vi]
+    (h != 0 && T.alive[h] && _vslot(T, h, vi) != 0) && return Int32(h)
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && _vslot(T, t, vi) != 0) && (T.vtri[vi] = Int32(t); return Int32(t))
+    end
+    error("Mesh2D: vertex $vi not incident to any live triangle")
+end
+
+# rotate CCW around vi: from triangle t (vi at slot s), the next incident triangle
+# is across the edge (vi, w) where w is the CCW-previous vertex — that edge is
+# opposite the CCW-next vertex u (slot s%3+1).
+@inline function _rotate_ccw(T::Triangulation, t, s)
+    return _nbr(T, t, s % 3 + 1)
+end
+
+"""Is `(vi,vj)` already an edge of the triangulation? Return `(t, k)` or `(0,0)`."""
+function _edge_between(T::Triangulation, vi::Integer, vj::Integer)
+    t0 = _find_incident(T, vi); t = t0
+    while true
+        s = _vslot(T, t, vi)
+        u = _vert(T, t, s % 3 + 1)          # CCW-next
+        if u == vj
+            k = _nslot_by_edge(T, t, vi, vj)
+            return (Int32(t), Int32(k))
+        end
+        nt = _rotate_ccw(T, t, s)
+        (nt == 0 || nt == t0) && break
+        t = nt
+    end
+    return (Int32(0), Int32(0))
+end
+
+# proper crossing of open segments (e1,e2) and (vi,vj); shared endpoints ⇒ false
+function _crosses_segment(T::Triangulation, e1, e2, vi, vj)
+    (e1==vi||e1==vj||e2==vi||e2==vj) && return false
+    o1 = orient2(_pt(T,vi),_pt(T,vj),_pt(T,e1))
+    o2 = orient2(_pt(T,vi),_pt(T,vj),_pt(T,e2))
+    o3 = orient2(_pt(T,e1),_pt(T,e2),_pt(T,vi))
+    o4 = orient2(_pt(T,e1),_pt(T,e2),_pt(T,vj))
+    return (o1>0) != (o2>0) && (o3>0) != (o4>0) && o1!=0 && o2!=0 && o3!=0 && o4!=0
+end
+
+# entry into the segment walk: rotate around vi to the triangle whose opposite
+# edge vi→vj crosses. Returns (:cross, t, u, w) with the entry triangle t and its
+# opposite edge (u,w) — u left, w right of vi→vj — or (:vertex, w, t) if vj is
+# collinear beyond an incident vertex w (split there).
+function _segment_entry(T::Triangulation, vi::Integer, vj::Integer)
+    t0 = _find_incident(T, vi); t = t0
+    while true
+        s = _vslot(T, t, vi)
+        u = _vert(T, t, s % 3 + 1)          # CCW-next
+        w = _vert(T, t, (s+1) % 3 + 1)      # CCW-prev
+        if !_is_ghost_v(u) && !_is_ghost_v(w)
+            ou = orient2(_pt(T,vi), _pt(T,u), _pt(T,vj))
+            ow = orient2(_pt(T,vi), _pt(T,w), _pt(T,vj))
+            (ou == 0 && _forward(T, vi, u, vj)) && return (:vertex, Int32(t), Int32(u), Int32(0))
+            (ow == 0 && _forward(T, vi, w, vj)) && return (:vertex, Int32(t), Int32(w), Int32(0))
+            (ou > 0 && ow < 0) && return (:cross, Int32(t), Int32(u), Int32(w))
+        end
+        nt = _rotate_ccw(T, t, s)
+        (nt == 0 || nt == t0) && break
+        t = nt
+    end
+    error("Mesh2D._segment_entry: no entry triangle for ($vi,$vj)")
+end
+
+# is w strictly between vi and vj on their common line (assumes collinear)?
+@inline function _forward(T, vi, w, vj)
+    pv=_pt(T,vi); pw=_pt(T,w); pj=_pt(T,vj)
+    dx=pj[1]-pv[1]; dy=pj[2]-pv[2]
+    s=(pw[1]-pv[1])*dx+(pw[2]-pv[2])*dy
+    L=dx*dx+dy*dy
+    return 0.0 < s < L
+end
+
+# triangles sharing undirected edge (a,b): returns (t1, k1, t2) with k1 the slot
+# in t1 opposite (a,b); (0,0,0) if the edge doesn't exist.
+function _edge_triangles(T::Triangulation, a, b)
+    t0 = _find_incident(T, a); t = t0
+    while true
+        s = _vslot(T, t, a)
+        u = _vert(T, t, s % 3 + 1)
+        if u == b
+            k = _nslot_by_edge(T, t, a, b)
+            return (Int32(t), Int32(k), _nbr(T, t, k))
+        end
+        nt = _rotate_ccw(T, t, s)
+        (nt == 0 || nt == t0) && break
+        t = nt
+    end
+    return (Int32(0), Int32(0), Int32(0))
+end
+
+"""
+    insert_segment!(T, vi, vj)
+
+Force segment `(vi, vj)` to appear as an edge (constrained Delaunay), then mark
+it constrained. Crossed edges are removed by flips; if a vertex lies on the
+segment the segment is split there. Finally the affected non-constrained edges
+are re-legalized to restore the constrained-Delaunay property.
+"""
+function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
+    vi == vj && return
+    vi = Int32(vi); vj = Int32(vj)
+    et, _ = _edge_between(T, vi, vj)
+    if et != 0
+        push!(T.seg, _skey(vi, vj)); return
+    end
+    kind, t, u, w = _segment_entry(T, vi, vj)
+    if kind === :vertex
+        insert_segment!(T, vi, u); insert_segment!(T, u, vj); return
+    end
+    # kind === :cross : entry triangle t, opposite (crossed) edge = {u,w}. Assign
+    # left/right by side of the segment vi→vj (the wedge order u,w is unrelated).
+    crossed = Tuple{Int32,Int32}[]
+    la, ra = orient2(_pt(T,vi), _pt(T,vj), _pt(T,u)) > 0 ? (u, w) : (w, u)
+    push!(crossed, _skey(la, ra))
+    guard = 0; maxstep = 8*length(T.alive) + 64
+    while true
+        guard += 1; guard > maxstep && error("Mesh2D: segment walk stalled")
+        k = _nslot_by_edge(T, t, la, ra)
+        nt = _nbr(T, t, k)
+        _is_ghost_tri(T, nt) && error("Mesh2D: segment walk left the hull (bug)")
+        c = _vert(T, nt, _nslot(T, nt, t))           # apex of the triangle ahead
+        c == vj && break
+        o = orient2(_pt(T,vi), _pt(T,vj), _pt(T,c))
+        if o == 0
+            insert_segment!(T, vi, c); insert_segment!(T, c, vj); return
+        elseif o > 0                                  # c left → next edge (c, ra)
+            la = Int32(c)
+        else                                          # c right → next edge (la, c)
+            ra = Int32(c)
+        end
+        push!(crossed, _skey(la, ra))
+        t = nt
+    end
+    # flip crossed edges until the segment exists
+    newedges = Tuple{Int32,Int32}[]
+    queue = crossed
+    guard = 0; maxflip = 200*length(crossed) + 1000
+    while !isempty(queue)
+        guard += 1; guard > maxflip && error("Mesh2D: segment flip loop stalled")
+        (a, b) = popfirst!(queue)
+        _skey(a, b) in T.seg &&
+            throw(ArgumentError("Mesh2D: constraint ($vi,$vj) crosses existing constraint ($a,$b); PSLG segments must not cross (split them at the intersection first)"))
+        t1, k1, t2 = _edge_triangles(T, a, b)
+        t1 == 0 && continue                          # edge already gone
+        (_is_ghost_tri(T, t1) || _is_ghost_tri(T, t2)) && continue
+        p = _vert(T, t1, k1)                          # apex of t1
+        x, y = _edge(T, t1, k1)                        # the shared edge, CCW in t1
+        s = _vert(T, t2, _nslot(T, t2, t1))           # apex of t2
+        # convex quad ⇔ x, y on opposite sides of line p→s (orientation-agnostic)
+        ox = orient2(_pt(T,p),_pt(T,s),_pt(T,x)); oy = orient2(_pt(T,p),_pt(T,s),_pt(T,y))
+        if (ox > 0) != (oy > 0) && ox != 0 && oy != 0
+            _flip!(T, t1, k1)                          # (x,y) → (p,s)
+            if _crosses_segment(T, p, s, vi, vj)
+                push!(queue, _skey(p, s))
+            else
+                push!(newedges, _skey(p, s))
+            end
+        else
+            push!(queue, (a, b))                       # non-convex: defer
+        end
+    end
+    push!(T.seg, _skey(vi, vj))
+    _legalize!(T, newedges)
+    return nothing
+end
+
+# Constrained Lawson legalization: flip any non-constrained edge in `edges` (and
+# edges exposed by those flips) that violates the empty-circumcircle test.
+function _legalize!(T::Triangulation, edges::Vector{Tuple{Int32,Int32}})
+    stack = copy(edges)
+    guard = 0; maxg = 500*length(edges) + 2000
+    while !isempty(stack)
+        guard += 1; guard > maxg && break
+        (a, b) = pop!(stack)
+        (_skey(a,b) in T.seg) && continue             # never flip a constraint
+        t1, k1, t2 = _edge_triangles(T, a, b)
+        t1 == 0 && continue
+        (_is_ghost_tri(T, t1) || _is_ghost_tri(T, t2)) && continue
+        p = _vert(T, t1, k1)
+        x, y = _edge(T, t1, k1)                        # shared edge, CCW in t1 ⇒ (p,x,y) CCW
+        s = _vert(T, t2, _nslot(T, t2, t1))
+        ox = orient2(_pt(T,p),_pt(T,s),_pt(T,x)); oy = orient2(_pt(T,p),_pt(T,s),_pt(T,y))
+        ((ox > 0) != (oy > 0) && ox != 0 && oy != 0) || continue   # convex only
+        # s inside circumcircle of t1=(p,x,y) ⇒ edge illegal, flip it
+        if incircle_sos(_pt(T,p),_pt(T,x),_pt(T,y),_pt(T,s), p,x,y,s) > 0
+            _flip!(T, t1, k1)                          # (x,y)→(p,s)
+            push!(stack, _skey(p,x)); push!(stack, _skey(x,s))
+            push!(stack, _skey(s,y)); push!(stack, _skey(y,p))
+        end
+    end
+    return nothing
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
 # Driver + export
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -388,7 +658,7 @@ geometry yields an identical `mesh_crc` regardless of insertion order). If
 `interior` (a per-triangle `Bool` vector) is given, only interior triangles are
 kept — used by CDT/refinement to drop exterior/hole regions.
 """
-function to_mesh(T::Triangulation; interior::Union{Nothing,Vector{Bool}}=nothing)
+function to_mesh(T::Triangulation; interior::Union{Nothing,AbstractVector{Bool}}=nothing)
     tris = NTuple{3,Int32}[]
     @inbounds for t in eachindex(T.alive)
         T.alive[t] || continue
@@ -415,6 +685,68 @@ end
 
 triangulate(xs::Vector{Float64}, ys::Vector{Float64}; rng_seed::Integer=1) =
     to_mesh(delaunay2d(xs, ys; rng_seed=rng_seed))
+
+"""
+    constrained_delaunay(xs, ys, segments; rng_seed=1) -> Triangulation
+
+Constrained Delaunay triangulation of the PSLG: points `(xs, ys)` plus `segments`
+(a vector of `(i, j)` index pairs into the original points). Every segment is
+forced to appear as an edge and marked constrained. Coincident points are merged
+and segment indices relabelled consistently.
+"""
+function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
+                              segments::AbstractVector{<:Tuple{Integer,Integer}};
+                              rng_seed::Integer=1)
+    ux, uy, remap = dedup_points(xs, ys)
+    T = Triangulation(ux, uy)
+    placed = _init_triangulation!(T)
+    if !isempty(placed)
+        placedset = Set{Int32}(placed)
+        order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
+        _shuffle_det!(order, UInt64(rng_seed))
+        for v in order; insert_point!(T, v); end
+    end
+    for (i, j) in segments
+        vi = remap[i]; vj = remap[j]
+        vi != vj && insert_segment!(T, vi, vj)
+    end
+    return T
+end
+
+"""
+    classify_interior(T) -> Vector{Bool}
+
+Per-triangle interior flag by a **parity** flood-fill from the ghost region:
+crossing a constrained edge toggles inside/outside, other edges keep it. A real
+triangle is interior iff its parity is odd. This correctly excludes nested holes
+(inside the outer loop but inside a hole loop → even parity → exterior). Requires
+the domain boundary to be closed constrained loops (as a meshing domain must be).
+"""
+function classify_interior(T::Triangulation)
+    ntri = length(T.alive)
+    visited = falses(ntri)
+    par = falses(ntri)                 # false = exterior side, true = interior
+    stack = Tuple{Int32,Bool}[]
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && _is_ghost_tri(T, t)) || continue
+        visited[t] = true; par[t] = false; push!(stack, (Int32(t), false))
+    end
+    @inbounds while !isempty(stack)
+        t, p = pop!(stack)
+        for k in 1:3
+            nb = _nbr(T, t, k)
+            (nb == 0 || visited[nb] || !T.alive[nb]) && continue
+            a, b = _edge(T, t, k)
+            np = (_skey(a, b) in T.seg) ? !p : p    # crossing a constraint toggles
+            visited[nb] = true; par[nb] = np; push!(stack, (nb, np))
+        end
+    end
+    interior = falses(ntri)
+    @inbounds for t in eachindex(T.alive)
+        interior[t] = T.alive[t] && !_is_ghost_tri(T, t) && par[t]
+    end
+    return interior
+end
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Verification helpers (CRC test suite)
@@ -470,6 +802,36 @@ function is_delaunay(T::Triangulation)
         end
     end
     return (nviol == 0, nviol)
+end
+
+"""
+    is_constrained_delaunay(T) -> (ok, n_missing_constraints, n_local_violations)
+
+Constrained-Delaunay oracle: every constrained segment is present as an edge, and
+every **non-constrained** interior edge is locally Delaunay (the opposite vertex
+of its neighbour is not strictly inside the triangle's circumcircle).
+"""
+function is_constrained_delaunay(T::Triangulation)
+    missing = 0
+    for (a, b) in T.seg
+        _edge_between(T, a, b)[1] == 0 && (missing += 1)
+    end
+    viol = 0
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tri(T, t)) || continue
+        for k in 1:3
+            nb = _nbr(T, t, k)
+            (nb == 0 || _is_ghost_tri(T, nb)) && continue
+            a, b = _edge(T, t, k)
+            _skey(a, b) in T.seg && continue
+            s = _vert(T, nb, _nslot(T, nb, t))
+            p = _vert(T, t, k)                        # t = (p,a,b) CCW
+            if incircle_sos(_pt(T,p),_pt(T,a),_pt(T,b),_pt(T,s), p,a,b,s) > 0
+                viol += 1
+            end
+        end
+    end
+    return (missing == 0 && viol == 0, missing, viol)
 end
 
 end # module Mesh2D
