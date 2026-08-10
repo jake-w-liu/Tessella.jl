@@ -12,8 +12,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 |---|---|---|---|
 | 0 | Foundations: repo, CI, mesh types, `.msh` I/O, exact predicates | **DONE — gate green** | predicates vs exact-rational oracle ✓; `.msh` round-trip (v2↔v4) CRC-preserving ✓ |
 | 1 | 2-D Delaunay + CDT + quality refinement | **DONE — gate green** | exact empty-circumcircle oracle ✓; 2n−2−h count + hull ✓; CDT constraints present + locally Delaunay ✓; Ruppert angle/area bound achieved, domain area preserved ✓ |
-| 2 | 1-D edge meshing + parametric surface meshing | in progress | HFSS flat/patch/coax faces |
-| 3 | 3-D Delaunay + **robust boundary recovery** + slivers | not started | **mesh enclosure coax junction (9.2)** |
+| 2 | 1-D edge meshing + parametric surface meshing | **DONE — gate green** | size-graded edge mesh vs analytic arc length ✓; planar face exact area + quality ✓; cylinder watertight + area convergence ✓; parametric area convergence ✓ |
+| 3 | 3-D Delaunay + **robust boundary recovery** + slivers | in progress | **mesh enclosure coax junction (9.2)** |
 | 4 | size fields + optimization | not started | quality ≥ gmsh on 22 cases |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | not started | ingest ASCENT `solid_model` |
 | 6 | high-order + ASCENT integration + 22-case regression | not started | all HFSS cases solve via Tessella |
@@ -97,3 +97,16 @@ the `.geo` into `test/fixtures/` at Stage 0.
   - Oracles: exact empty-circumcircle, 2n−2−h + hull cross-check, constrained-
     Delaunay locally-Delaunay check, min-angle/area quality, domain-area
     conservation. Full `Pkg.test()` green: **142,240 assertions**. `stage()` → 2.
+- **2026-08-11** — **Stage 2 complete, gate green.**
+  - `src/SizeField.jl` — `ConstantSize`/`FunctionSize`/`MinSize`, `size_at`.
+  - `src/Mesh1D.jl` — graded 1-D edge meshing: nodes at equal increments of the
+    metric length ∫|γ'|/h. Verified vs analytic arc length (segment/circle/helix),
+    uniform + graded spacing, closed loops (no duplicate node).
+  - `src/MeshSurface.jl` — planar faces (Newell frame → project → CDT + size-
+    driven Ruppert → lift; exact area, quality preserved), cylinder lateral
+    surface (**graded structured**, watertight by construction — replaced a
+    Ruppert-unrolled variant whose seam gapped under a varying size field, a bug
+    caught by a seam-gap-edge count), and parametric patches (isotropic-metric
+    approximation; area converges to analytic).
+  - `refine!` extended with a `size` callback (refine where an edge exceeds the
+    local target). Full `Pkg.test()` green: **142,282 assertions**. `stage()` → 3.

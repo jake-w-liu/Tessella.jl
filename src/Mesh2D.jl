@@ -793,9 +793,16 @@ function _radius_edge2(a, b, c)
     return R / min(lab,lbc,lca)
 end
 
-@inline _is_skinny(T, t, B, maxarea) = begin
+@inline function _needs_refine(T, t, B, maxarea, sizefn)
     a=_pt(T,_vert(T,t,1)); b=_pt(T,_vert(T,t,2)); c=_pt(T,_vert(T,t,3))
-    _tri_area2(a,b,c) > maxarea || _radius_edge2(a,b,c) > B
+    (_tri_area2(a,b,c) > maxarea || _radius_edge2(a,b,c) > B) && return true
+    if sizefn !== nothing
+        cx = (a[1]+b[1]+c[1])/3; cy = (a[2]+b[2]+c[2])/3
+        h = sizefn(cx, cy)
+        emax = max(_dist(a,b), _dist(b,c), _dist(c,a))
+        emax > h && return true
+    end
+    return false
 end
 
 # is subsegment (a,b) encroached by point p? (p strictly inside the diametral disk)
@@ -842,7 +849,7 @@ holds. Constraints are preserved (constrained point insertion). Returns the fina
 per-triangle interior mask. `min_angle_deg ≲ 20.7°` guarantees termination.
 """
 function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
-                 maxsteps::Integer=300_000)
+                 size::Union{Nothing,Function}=nothing, maxsteps::Integer=300_000)
     B = 1.0 / (2.0*sind(float(min_angle_deg)))
     interior = Vector{Bool}(collect(classify_interior(T)))
     steps = 0
@@ -854,8 +861,8 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             _split_subsegment!(T, enc[1], enc[2], interior)
             continue
         end
-        # (2) pick a skinny interior triangle
-        t = _find_bad(T, interior, B, max_area)
+        # (2) pick a triangle that violates the angle/area/size criteria
+        t = _find_bad(T, interior, B, max_area, size)
         t == 0 && break
         a=_vert(T,t,1); b=_vert(T,t,2); c=_vert(T,t,3)
         cc = _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
@@ -882,10 +889,10 @@ function _find_encroached(T::Triangulation)
     return nothing
 end
 
-function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea)
+function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn)
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) || continue
-        _is_skinny(T, t, B, maxarea) && return Int32(t)
+        _needs_refine(T, t, B, maxarea, sizefn) && return Int32(t)
     end
     return Int32(0)
 end
