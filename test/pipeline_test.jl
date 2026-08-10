@@ -44,6 +44,18 @@ end
         @test mvpvol(m1) ≈ mvpvol(m2) rtol=1e-6
     end
 
+    @testset "mesh_planar: 2-D PSLG → quality mesh (validated)" begin
+        # unit square domain with an interior point; boundary is a closed loop
+        xs = Float64[0,10,10,0]; ys = Float64[0,0,10,10]
+        segs = [(1,2),(2,3),(3,4),(4,1)]
+        m = mesh_planar(xs, ys, segs; min_angle_deg=25.0, max_area=2.0)
+        @test validate(m).ok
+        area = sum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2,t]),node(m,m.tris[3,t]))
+                   for t in 1:ntris(m); init=0.0)
+        @test area ≈ 100.0 atol=1e-8            # domain area
+        @test all(m.coords[3,:] .== 0.0)        # planar
+    end
+
     @testset "optimize=true reduces slivers, preserves volume + validity" begin
         s = cylinder_surface((0.,0,0),(0.,0,1),2.0,5.0; nθ=20, nz=4)
         m0 = mesh_volume(s; optimize=false, smooth=false)

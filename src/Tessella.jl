@@ -37,11 +37,12 @@ include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
 using .MeshTypes: Mesh, validate, mesh_crc
+using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tets_per_region
 using .Optimize: smooth_laplacian, mesh_quality
 using .Heal: is_meshable
 
-export mesh_volume, stage
+export mesh_volume, mesh_planar, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
 export tetrahedralize, tetrahedralize_multi, tets_per_region, smooth_laplacian
@@ -52,6 +53,27 @@ export tetrahedralize, tetrahedralize_multi, tets_per_region, smooth_laplacian
 Current implemented development stage (see the `STATUS.md` stage board).
 """
 stage() = TESSELLA_STAGE
+
+"""
+    mesh_planar(xs, ys, segments; min_angle_deg=25.0, max_area=Inf, rng_seed=1) -> Mesh
+
+Quality 2-D triangle mesh of the planar straight-line graph (points `(xs,ys)` +
+constraint `segments`, `(i,j)` index pairs): constrained-Delaunay triangulate,
+Ruppert-refine to the angle/area bound, keep the interior of the constrained
+domain, and return a validated 2-D [`Mesh`](@ref) (nodes carry `z = 0`). The
+domain boundary must be closed constrained loops. This is the 2-D counterpart of
+[`mesh_volume`](@ref).
+"""
+function mesh_planar(xs::Vector{Float64}, ys::Vector{Float64},
+                     segments::AbstractVector{<:Tuple{Integer,Integer}};
+                     min_angle_deg::Real=25.0, max_area::Real=Inf, rng_seed::Integer=1)
+    T = constrained_delaunay(xs, ys, segments; rng_seed=rng_seed)
+    interior = refine!(T; min_angle_deg=min_angle_deg, max_area=max_area)
+    m = to_mesh(T; interior=interior)
+    diag = validate(m)
+    diag.ok || throw(ErrorException("mesh_planar: produced an invalid mesh — " * join(diag.messages, "; ")))
+    return m
+end
 
 """
     mesh_volume(surface; smooth=true, smooth_iters=5, rng_seed=1, check=true) -> Mesh
