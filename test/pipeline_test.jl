@@ -8,6 +8,9 @@
 using Test
 using Tessella
 using Tessella.MeshTypes
+using Tessella.IO
+using Tessella.Geometry
+using Tessella.Mesh3D: tetrahedralize_multi
 
 mvpvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
                 for t in 1:ntets(m); init=0.0)
@@ -39,5 +42,27 @@ end
         m1 = mesh_volume(_cube_surface(); smooth=false)
         m2 = mesh_volume(_cube_surface(); smooth=true, smooth_iters=8)
         @test mvpvol(m1) ≈ mvpvol(m2) rtol=1e-6
+    end
+
+    @testset "end-to-end: primitive → volume → .msh → read (solver-consumable)" begin
+        dir = mktempdir()
+        for surf in (box_surface(0,2,0,1,0,1), cylinder_surface((0.,0,0),(0.,0,1),1.0,2.0; nθ=16))
+            m = mesh_volume(surf; smooth=false)
+            for ver in (2.2, 4.1)
+                p = joinpath(dir, "vol_$(ver).msh")
+                write_msh(p, m; version=ver)
+                back = read_msh(p).mesh
+                @test mesh_crc(back).sha == mesh_crc(m).sha    # connectivity preserved
+                @test validate(back).ok
+            end
+        end
+        # multi-region tags + physical names survive the round-trip
+        mm = tetrahedralize_multi([box_surface(0,1,0,1,0,1), box_surface(1,2,0,1,0,1)])
+        p = joinpath(dir, "multi.msh")
+        write_msh(p, mm; version=4.1, physical_names=Dict((3,1)=>"regA",(3,2)=>"regB"))
+        f = read_msh(p)
+        @test mesh_crc(f.mesh).sha == mesh_crc(mm).sha
+        @test sort(unique(f.mesh.tet_tag)) == Int32[1,2]
+        @test f.physical_names[(3,1)] == "regA" && f.physical_names[(3,2)] == "regB"
     end
 end
