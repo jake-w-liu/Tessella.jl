@@ -23,11 +23,11 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
-using ..MeshTypes: Mesh
+using ..MeshTypes: Mesh, tet_dihedral_extrema
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi, tets_per_region
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
-export flip23!, flip32!, tets_around_edge
+export flip23!, flip32!, tets_around_edge, optimize_flips!
 
 const GHOST3 = Int32(0)
 
@@ -548,6 +548,52 @@ function flip23!(T::Triangulation3, t1::Integer, k1::Integer)
     ids = _rebuild_region!(T, ((a,b,d,e),(b,c,d,e),(c,a,d,e)), outer)
     T.last = ids[1]
     return true
+end
+
+@inline function _tet_mindihedral(T::Triangulation3, t)
+    a=_pt(T,_vert(T,t,1)); b=_pt(T,_vert(T,t,2)); c=_pt(T,_vert(T,t,3)); d=_pt(T,_vert(T,t,4))
+    mn, _ = tet_dihedral_extrema(a,b,c,d); mn
+end
+
+"""
+    optimize_flips!(T; passes=4, tol=1e-9) -> n_flips
+
+Local quality optimization by hill-climbing **2-3 flips**: a flip is kept only if
+it strictly increases the minimum dihedral angle of the tets it touches, otherwise
+it is reverted by its exact inverse (3-2 flip). Volume and validity are preserved
+and the global minimum dihedral is **non-decreasing** (a safe optimizer). The
+result is generally not Delaunay. Effect is *limited* on a Delaunay mesh — 2-3
+flips rarely improve the local minimum, and slivers are not removed by flips alone
+(that needs 3-2-driven collapse + exudation, remaining Stage-4 work). Returns the
+number of flips applied.
+"""
+function optimize_flips!(T::Triangulation3; passes::Integer=4, tol::Real=1e-9)
+    nflips = 0
+    for _ in 1:passes
+        changed = false
+        # 2→3 flips over interior faces
+        @inbounds for t1 in 1:length(T.alive)
+            (T.alive[t1] && !_is_ghost_tet(T,t1)) || continue
+            for k1 in 1:4
+                t2 = _nbr(T, t1, k1)
+                (t2 != 0 && !_is_ghost_tet(T,t2)) || continue
+                before = min(_tet_mindihedral(T,t1), _tet_mindihedral(T,t2))
+                d = _vert(T,t1,k1); e = _vert(T,t2,_nslot(T,t2,t1))
+                if flip23!(T, t1, k1)
+                    ring = tets_around_edge(T, d, e)
+                    after = minimum(_tet_mindihedral(T,t) for t in ring)
+                    if after > before + tol
+                        nflips += 1; changed = true
+                    else
+                        flip32!(T, d, e, ring)                   # revert
+                    end
+                    break     # t1 was killed by the flip (kept or reverted) — stop its face loop
+                end
+            end
+        end
+        changed || break
+    end
+    return nflips
 end
 
 """

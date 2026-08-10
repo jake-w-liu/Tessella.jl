@@ -246,6 +246,21 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test flipped                                                  # a flippable face existed
     end
 
+    @testset "optimize_flips! is safe (consistent, volume/min-dihedral preserved)" begin
+        r = _R3(0xABCDEF); n = 120
+        xs=Float64[_nf(r) for _ in 1:n]; ys=Float64[_nf(r) for _ in 1:n]; zs=Float64[_nf(r) for _ in 1:n]
+        T = delaunay3d(xs, ys, zs; rng_seed=1)
+        m0 = to_mesh3(T)
+        v0 = mesh_vol(m0)
+        d0 = mesh_quality(m0).min_dihedral_deg
+        optimize_flips!(T; passes=4)
+        @test check_consistency3(T)[1]                                 # still a valid complex
+        m1 = to_mesh3(T)
+        @test mesh_vol(m1) ≈ v0 rtol=1e-9                              # volume preserved
+        @test validate(m1).ok
+        @test mesh_quality(m1).min_dihedral_deg >= d0 - 1e-9           # never worsens the min
+    end
+
     @testset "degenerate input handled gracefully" begin
         # exact-degenerate (perturb=false): no non-coplanar 4-tuple ⇒ empty mesh
         @test ntets(to_mesh3(delaunay3d([0.0,1,2],[0.0,1,2],[0.0,1,2]; perturb=false))) == 0     # collinear
