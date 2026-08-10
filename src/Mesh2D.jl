@@ -706,12 +706,16 @@ function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
     ux, uy, remap = dedup_points(xs, ys)
     T = Triangulation(ux, uy)
     placed = _init_triangulation!(T)
-    if !isempty(placed)
-        placedset = Set{Int32}(placed)
-        order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
-        _shuffle_det!(order, UInt64(rng_seed))
-        for v in order; insert_point!(T, v); end
+    if isempty(placed)
+        isempty(segments) && return T          # no non-collinear triple → empty (valid)
+        throw(ArgumentError("constrained_delaunay: the points are degenerate (fewer than 3 " *
+              "non-coincident, non-collinear points); a 2-D triangulation with constraints " *
+              "does not exist"))
     end
+    placedset = Set{Int32}(placed)
+    order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
+    _shuffle_det!(order, UInt64(rng_seed))
+    for v in order; insert_point!(T, v); end
     for (i, j) in segments
         vi = remap[i]; vj = remap[j]
         vi != vj && insert_segment!(T, vi, vj)
