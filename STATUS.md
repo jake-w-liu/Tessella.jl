@@ -22,7 +22,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 | id | geometry | why | status |
 |---|---|---|---|
-| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL** — a *representative* 3-region coax junction (pin/case/air-gap meeting at the bore walls) is filled with all three volumes non-empty & validated (`mesh3d_test.jl`), the exact failure mode gmsh cannot. Meshing the *literal* `.geo` still needs the geometry kernel (Stage 5) to produce its boundary surfaces + conforming interface recovery. |
+| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL (real-scale volumes filled)** — at the *literal* `.geo` dimensions the three regions (air / case / coax pin, radius 0.8 mm × length 159 mm, aspect ≈ 199) are each meshed and **all volumes filled & validated** together (`mesh3d_test.jl`), the exact place gmsh leaves them empty. Remaining for full parity: assembling the regions into one *conforming* partition (Boolean CSG for the literal boundary + interface recovery) rather than filling each region independently. |
 | THIN-SLOT | enclosure 1 mm coupling slot | thin-feature Boolean sliver | open |
 | SPIRAL | 10.1 silicon spiral (thin swept traces, layered stack) | high-aspect thin conductors | open |
 | ARRAY-PML | 5.7 endfire unit cell (periodic + PML) | conformal periodic faces | open |

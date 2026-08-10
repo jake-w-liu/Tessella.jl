@@ -12,6 +12,8 @@
 using Test
 using Tessella.Mesh3D
 using Tessella.MeshTypes
+using Tessella.Geometry
+using Tessella.Heal: is_meshable
 
 mesh_vol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
                   for t in 1:ntets(m); init=0.0)
@@ -179,6 +181,25 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test length(tpr) == 3
         @test all(v > 0 for v in values(tpr))                # NO empty volume
         @test mesh_vol(mm) ≈ (1.2^2*4 + 24.0 + (2.0^2*2 - 1.2^2*2)) rtol=1e-6  # 5.76+24+5.12
+        @test validate(mm).ok
+    end
+
+    @testset "ENC-COAX at real scale: all three volumes filled (gmsh leaves empty)" begin
+        # dimensions from test/fixtures/enclosure_coax_junction.geo (metres)
+        air  = box_surface(-0.0405, 0.2810, -0.0405, 0.2010, -0.0405, 0.3810)   # radiation/air box
+        case = box_surface(-0.0005, 0.2205, -0.0005, 0.1405, -0.0005, 0.3005)   # case outer shell
+        # coax pin: centre (0.17,0.1605,0.15), axis −y, length 0.1589, radius 8e-4 (aspect ≈ 199)
+        pin  = cylinder_surface((0.17,0.1605,0.15), (0.0,-1.0,0.0), 0.0008, 0.1589; nθ=12, nz=40)
+        for s in (air, case, pin); @test is_meshable(s)[1]; end
+        @test mesh_vol(tetrahedralize(air))  ≈ 0.3215*0.2415*0.4215 rtol=1e-6     # exact box
+        @test mesh_vol(tetrahedralize(case)) ≈ 0.221*0.141*0.301   rtol=1e-6      # exact box
+        mpin = tetrahedralize(pin)
+        @test validate(mpin).ok                                                   # thin pin fills
+        @test mesh_vol(mpin) > 0
+        # the standing acceptance: all three regions non-empty & validated together
+        mm = tetrahedralize_multi([air, case, pin])
+        tpr = tets_per_region(mm)
+        @test length(tpr) == 3 && all(v > 0 for v in values(tpr))                 # NO empty volume
         @test validate(mm).ok
     end
 
