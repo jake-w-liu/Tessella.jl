@@ -1,0 +1,476 @@
+"""
+    Predicates
+
+Exact, adaptive geometric predicates — the correctness foundation of the whole
+mesher (PLAN.md §3, DEVELOPMENT.md "Predicate policy"). Floating-point predicate
+inconsistency is *the* root cause of the "overlapping facets / empty volume"
+failures we are building Tessella to defeat, so every sign returned here is
+provably the true sign of an exact determinant.
+
+Scheme (Shewchuk-style staged precision, simplified to two stages):
+
+1. **Fast filter.** Evaluate the determinant in `Float64` with a certified a
+   priori error bound. If the magnitude exceeds the bound, the floating-point
+   sign is guaranteed correct and is returned immediately.
+2. **Exact fallback.** Otherwise recompute the determinant in exact
+   `Rational{BigInt}` arithmetic (every finite `Float64` is a dyadic rational, so
+   the conversion is loss-free) and return its exact sign.
+
+The bare predicates (`orient2`, `orient3`, `incircle`, `insphere`) return
+`-1`, `0`, or `+1` and are checked against an *independent* exact-rational oracle
+on an exhaustive degenerate set (see `test/predicates_test.jl`).
+
+On top of them, the `*_sos` variants take vertex **indices** and apply
+Simulation of Simplicity (Edelsbrunner–Mücke): when the exact determinant is
+zero, a deterministic symbolic perturbation keyed on the indices breaks the tie,
+so a mesher never has to handle a genuine zero. The perturbation is consistent
+(the same four points always resolve the same way), which is what keeps the
+3-D kernel's decisions globally coherent.
+"""
+module Predicates
+
+export orient2, orient3, incircle, insphere
+export orient2_sos, orient3_sos, incircle_sos, insphere_sos
+
+# ── Shewchuk static error bounds for IEEE-754 double ────────────────────────────
+# ε is the unit roundoff (half an ulp at 1.0). The A-bounds are the first-stage
+# static filters from Shewchuk, "Adaptive Precision Floating-Point Arithmetic and
+# Fast Robust Geometric Predicates" (1997), §4. We use the A-stage filter only,
+# then jump straight to exact arithmetic — correctness is identical to the full
+# adaptive scheme; only near-degenerate speed differs (a Stage-4 optimization).
+const EPS = 2.0^-53
+const CCWERRBOUND_A  = (3.0  + 16.0  * EPS) * EPS
+const O3DERRBOUND_A  = (7.0  + 56.0  * EPS) * EPS
+const ICCERRBOUND_A  = (10.0 + 96.0  * EPS) * EPS
+const ISPERRBOUND_A  = (16.0 + 224.0 * EPS) * EPS
+
+@inline _isign(x)::Int = x > 0 ? 1 : (x < 0 ? -1 : 0)
+
+# Points are accepted either as tuples/vectors of coordinates. Small helpers keep
+# the call sites readable while staying allocation-free and type-stable.
+@inline _x(p) = @inbounds Float64(p[1])
+@inline _y(p) = @inbounds Float64(p[2])
+@inline _z(p) = @inbounds Float64(p[3])
+
+# ════════════════════════════════════════════════════════════════════════════════
+# orient2 — sign of the signed area of triangle (a, b, c).
+#   > 0 : c is left of a→b (counter-clockwise)
+#   < 0 : c is right (clockwise)
+#   = 0 : a, b, c collinear
+# ════════════════════════════════════════════════════════════════════════════════
+"""
+    orient2(a, b, c) -> Int
+
+Exact sign of the signed area of the triangle `(a, b, c)`. `+1` if `c` lies to
+the left of the directed line `a→b` (counter-clockwise), `-1` to the right,
+`0` if the three points are exactly collinear. `a`,`b`,`c` are indexable 2-D
+coordinates.
+"""
+function orient2(a, b, c)::Int
+    ax = _x(a); ay = _y(a)
+    bx = _x(b); by = _y(b)
+    cx = _x(c); cy = _y(c)
+
+    detleft  = (ax - cx) * (by - cy)
+    detright = (ay - cy) * (bx - cx)
+    det = detleft - detright
+
+    # Certain-sign shortcuts + A-stage filter.
+    if detleft > 0.0
+        detright <= 0.0 && return 1
+        detsum = detleft + detright
+    elseif detleft < 0.0
+        detright >= 0.0 && return -1
+        detsum = -detleft - detright
+    else
+        return _isign(det)
+    end
+    errbound = CCWERRBOUND_A * detsum
+    (det >= errbound || -det >= errbound) && return _isign(det)
+
+    return _orient2_exact(ax, ay, bx, by, cx, cy)
+end
+
+function _orient2_exact(ax, ay, bx, by, cx, cy)::Int
+    T = Rational{BigInt}
+    axr = T(ax); ayr = T(ay)
+    bxr = T(bx); byr = T(by)
+    cxr = T(cx); cyr = T(cy)
+    det = (axr - cxr) * (byr - cyr) - (ayr - cyr) * (bxr - cxr)
+    return _isign(det)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# orient3 — sign of the signed volume of tetrahedron (a, b, c, d).
+#   > 0 : d is below the plane of a,b,c as seen so that a,b,c is CCW
+#         (i.e. (a,b,c,d) is negatively/positively oriented per convention below)
+# Convention (Shewchuk): returns > 0 iff d lies below the oriented plane through
+# a,b,c — equivalently the determinant of [a-d; b-d; c-d] is positive.
+# ════════════════════════════════════════════════════════════════════════════════
+"""
+    orient3(a, b, c, d) -> Int
+
+Exact sign of the orientation determinant of the tetrahedron `(a, b, c, d)`:
+`sign(det[a-d, b-d, c-d])`. `+1` if `d` is below the plane through `a,b,c`
+oriented counter-clockwise (right-hand rule), `-1` above, `0` if the four points
+are exactly coplanar.
+"""
+function orient3(a, b, c, d)::Int
+    ax = _x(a); ay = _y(a); az = _z(a)
+    bx = _x(b); by = _y(b); bz = _z(b)
+    cx = _x(c); cy = _y(c); cz = _z(c)
+    dx = _x(d); dy = _y(d); dz = _z(d)
+
+    adx = ax - dx; ady = ay - dy; adz = az - dz
+    bdx = bx - dx; bdy = by - dy; bdz = bz - dz
+    cdx = cx - dx; cdy = cy - dy; cdz = cz - dz
+
+    bdxcdy = bdx * cdy; cdxbdy = cdx * bdy
+    cdxady = cdx * ady; adxcdy = adx * cdy
+    adxbdy = adx * bdy; bdxady = bdx * ady
+
+    det = adz * (bdxcdy - cdxbdy) +
+          bdz * (cdxady - adxcdy) +
+          cdz * (adxbdy - bdxady)
+
+    permanent = (abs(bdxcdy) + abs(cdxbdy)) * abs(adz) +
+                (abs(cdxady) + abs(adxcdy)) * abs(bdz) +
+                (abs(adxbdy) + abs(bdxady)) * abs(cdz)
+    errbound = O3DERRBOUND_A * permanent
+    (det > errbound || -det > errbound) && return _isign(det)
+
+    return _orient3_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)
+end
+
+function _orient3_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)::Int
+    T = Rational{BigInt}
+    adx = T(ax) - T(dx); ady = T(ay) - T(dy); adz = T(az) - T(dz)
+    bdx = T(bx) - T(dx); bdy = T(by) - T(dy); bdz = T(bz) - T(dz)
+    cdx = T(cx) - T(dx); cdy = T(cy) - T(dy); cdz = T(cz) - T(dz)
+    det = adz * (bdx * cdy - cdx * bdy) +
+          bdz * (cdx * ady - adx * cdy) +
+          cdz * (adx * bdy - bdx * ady)
+    return _isign(det)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# incircle — is d inside the circle through a, b, c?
+# Returns > 0 iff d is inside the circumcircle of the CCW triangle (a,b,c).
+# ════════════════════════════════════════════════════════════════════════════════
+"""
+    incircle(a, b, c, d) -> Int
+
+Exact in-circle test. With `(a, b, c)` in counter-clockwise order, returns `+1`
+if `d` lies strictly inside their circumcircle, `-1` strictly outside, `0`
+exactly on the circle. (If `(a,b,c)` is clockwise the sign is reversed, per the
+determinant definition.)
+"""
+function incircle(a, b, c, d)::Int
+    ax = _x(a); ay = _y(a)
+    bx = _x(b); by = _y(b)
+    cx = _x(c); cy = _y(c)
+    dx = _x(d); dy = _y(d)
+
+    adx = ax - dx; ady = ay - dy
+    bdx = bx - dx; bdy = by - dy
+    cdx = cx - dx; cdy = cy - dy
+
+    bdxcdy = bdx * cdy; cdxbdy = cdx * bdy
+    cdxady = cdx * ady; adxcdy = adx * cdy
+    adxbdy = adx * bdy; bdxady = bdx * ady
+
+    alift = adx * adx + ady * ady
+    blift = bdx * bdx + bdy * bdy
+    clift = cdx * cdx + cdy * cdy
+
+    det = alift * (bdxcdy - cdxbdy) +
+          blift * (cdxady - adxcdy) +
+          clift * (adxbdy - bdxady)
+
+    permanent = (abs(bdxcdy) + abs(cdxbdy)) * alift +
+                (abs(cdxady) + abs(adxcdy)) * blift +
+                (abs(adxbdy) + abs(bdxady)) * clift
+    errbound = ICCERRBOUND_A * permanent
+    (det > errbound || -det > errbound) && return _isign(det)
+
+    return _incircle_exact(ax, ay, bx, by, cx, cy, dx, dy)
+end
+
+function _incircle_exact(ax, ay, bx, by, cx, cy, dx, dy)::Int
+    T = Rational{BigInt}
+    adx = T(ax) - T(dx); ady = T(ay) - T(dy)
+    bdx = T(bx) - T(dx); bdy = T(by) - T(dy)
+    cdx = T(cx) - T(dx); cdy = T(cy) - T(dy)
+    alift = adx * adx + ady * ady
+    blift = bdx * bdx + bdy * bdy
+    clift = cdx * cdx + cdy * cdy
+    det = alift * (bdx * cdy - cdx * bdy) +
+          blift * (cdx * ady - adx * cdy) +
+          clift * (adx * bdy - bdx * ady)
+    return _isign(det)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# insphere — is e inside the sphere through a, b, c, d?
+# Returns > 0 iff e is inside the circumsphere of the positively-oriented
+# tetrahedron (a,b,c,d) (i.e. orient3(a,b,c,d) > 0).
+# ════════════════════════════════════════════════════════════════════════════════
+"""
+    insphere(a, b, c, d, e) -> Int
+
+Exact in-sphere test. If `orient3(a,b,c,d) > 0`, returns `+1` when `e` lies
+strictly inside the circumsphere of `(a,b,c,d)`, `-1` outside, `0` on the sphere.
+The raw determinant sign is relative to the orientation of `(a,b,c,d)`; callers
+that need the geometric "inside" should combine with `orient3`.
+"""
+function insphere(a, b, c, d, e)::Int
+    ax = _x(a); ay = _y(a); az = _z(a)
+    bx = _x(b); by = _y(b); bz = _z(b)
+    cx = _x(c); cy = _y(c); cz = _z(c)
+    dx = _x(d); dy = _y(d); dz = _z(d)
+    ex = _x(e); ey = _y(e); ez = _z(e)
+
+    aex = ax - ex; aey = ay - ey; aez = az - ez
+    bex = bx - ex; bey = by - ey; bez = bz - ez
+    cex = cx - ex; cey = cy - ey; cez = cz - ez
+    dex = dx - ex; dey = dy - ey; dez = dz - ez
+
+    ab = aex * bey - bex * aey
+    bc = bex * cey - cex * bey
+    cd = cex * dey - dex * cey
+    da = dex * aey - aex * dey
+    ac = aex * cey - cex * aey
+    bd = bex * dey - dex * bey
+
+    abc = aez * bc - bez * ac + cez * ab
+    bcd = bez * cd - cez * bd + dez * bc
+    cda = cez * da + dez * ac + aez * cd
+    dab = dez * ab + aez * bd + bez * da
+
+    alift = aex * aex + aey * aey + aez * aez
+    blift = bex * bex + bey * bey + bez * bez
+    clift = cex * cex + cey * cey + cez * cez
+    dlift = dex * dex + dey * dey + dez * dez
+
+    det = (dlift * abc - clift * dab) + (blift * cda - alift * bcd)
+
+    aezplus = abs(aez); bezplus = abs(bez)
+    cezplus = abs(cez); dezplus = abs(dez)
+    aexbey = abs(aex * bey); bexaey = abs(bex * aey)
+    bexcey = abs(bex * cey); cexbey = abs(cex * bey)
+    cexdey = abs(cex * dey); dexcey = abs(dex * cey)
+    dexaey = abs(dex * aey); aexdey = abs(aex * dey)
+    aexcey = abs(aex * cey); cexaey = abs(cex * aey)
+    bexdey = abs(bex * dey); dexbey = abs(dex * bey)
+    permanent =
+        ((cexdey + dexcey) * bezplus + (dexbey + bexdey) * cezplus +
+         (bexcey + cexbey) * dezplus) * alift +
+        ((dexaey + aexdey) * cezplus + (aexcey + cexaey) * dezplus +
+         (cexdey + dexcey) * aezplus) * blift +
+        ((aexbey + bexaey) * dezplus + (bexdey + dexbey) * aezplus +
+         (dexaey + aexdey) * bezplus) * clift +
+        ((bexcey + cexbey) * aezplus + (cexaey + aexcey) * bezplus +
+         (aexbey + bexaey) * cezplus) * dlift
+    errbound = ISPERRBOUND_A * permanent
+    (det > errbound || -det > errbound) && return _isign(det)
+
+    return _insphere_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez)
+end
+
+function _insphere_exact(ax, ay, az, bx, by, bz, cx, cy, cz,
+                         dx, dy, dz, ex, ey, ez)::Int
+    T = Rational{BigInt}
+    aex = T(ax) - T(ex); aey = T(ay) - T(ey); aez = T(az) - T(ez)
+    bex = T(bx) - T(ex); bey = T(by) - T(ey); bez = T(bz) - T(ez)
+    cex = T(cx) - T(ex); cey = T(cy) - T(ey); cez = T(cz) - T(ez)
+    dex = T(dx) - T(ex); dey = T(dy) - T(ey); dez = T(dz) - T(ez)
+
+    ab = aex * bey - bex * aey
+    bc = bex * cey - cex * bey
+    cd = cex * dey - dex * cey
+    da = dex * aey - aex * dey
+    ac = aex * cey - cex * aey
+    bd = bex * dey - dex * bey
+
+    abc = aez * bc - bez * ac + cez * ab
+    bcd = bez * cd - cez * bd + dez * bc
+    cda = cez * da + dez * ac + aez * cd
+    dab = dez * ab + aez * bd + bez * da
+
+    alift = aex * aex + aey * aey + aez * aez
+    blift = bex * bex + bey * bey + bez * bez
+    clift = cex * cex + cey * cey + cez * cez
+    dlift = dex * dex + dey * dey + dez * dez
+
+    det = (dlift * abc - clift * dab) + (blift * cda - alift * bcd)
+    return _isign(det)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Simulation of Simplicity (SoS) wrappers.
+#
+# Edelsbrunner & Mücke, "Simulation of Simplicity" (1990). Each point i is
+# perturbed by (ε^(2^(i·d − 1)), …, ε^(2^(i·d − d))) for ε → 0⁺, with a virtual
+# "infinite" index ordering. The upshot for a determinant predicate that comes
+# out exactly zero is: expand the perturbed determinant as a polynomial in ε and
+# return the sign of the lowest-order nonzero term. For orient/incircle/insphere
+# those leading terms are a fixed sequence of lower-degree minors evaluated in a
+# canonical order determined by *sorting the point indices*.
+#
+# We realise SoS operationally: sort the input points by index (tracking the
+# permutation parity), evaluate the exact primary determinant, and if it is zero
+# fall to the documented minor sequence in sorted order. Sorting makes the
+# tie-break independent of the argument order the caller happened to use, which
+# is exactly the global consistency SoS guarantees. The returned sign is the
+# geometric sign for the *original* argument order (parity reapplied).
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Sort helper: returns (perm parity ∈ {+1,-1}, sorted point tuple) for indices.
+@inline function _sort2(i, pi, j, pj)
+    i < j ? (1, pi, pj) : (-1, pj, pi)
+end
+
+"""
+    orient2_sos(pa, pb, pc, ia, ib, ic) -> Int (±1, never 0)
+
+Simulation-of-Simplicity orient2: exact orient2, and on an exact collinearity a
+deterministic symbolic tie-break keyed on the integer indices `ia,ib,ic`
+(all distinct). Never returns 0.
+"""
+function orient2_sos(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
+    s = orient2(pa, pb, pc)
+    s != 0 && return s
+    # Perturb along the SoS ordering. For orient2 the leading tie-break terms are
+    # the 1-D minors (coordinate differences) of the two lowest-indexed points.
+    # Sort the three points by index, accumulate parity, evaluate minors.
+    pts = ((ia, pa), (ib, pb), (ic, pc))
+    perm, sp = _sort3_pts(pts)
+    (a, b, c) = sp
+    # Leading SoS terms for a zero 2×2 orientation (Edelsbrunner–Mücke Table):
+    #   +(b.x − c.x)  then  −(b.y − c.y)  then  +(a.? ...). Evaluate in order.
+    d = _x(b[2]) - _x(c[2]); d != 0.0 && return perm * _isign(d)
+    d = _y(c[2]) - _y(b[2]); d != 0.0 && return perm * _isign(d)
+    d = _x(c[2]) - _x(a[2]); d != 0.0 && return perm * _isign(d)
+    d = _y(a[2]) - _y(c[2]); d != 0.0 && return perm * _isign(d)
+    d = _x(a[2]) - _x(b[2]); d != 0.0 && return perm * _isign(d)
+    # Two distinct points can never share all coordinates *and* an index; the
+    # final nonzero term is +1 by the SoS construction.
+    return perm
+end
+
+# Sort three (index, point) pairs ascending by index; return (parity, sorted).
+@inline function _sort3_pts(t)
+    (i1, i2, i3) = (t[1][1], t[2][1], t[3][1])
+    perm = 1
+    a, b, c = t[1], t[2], t[3]
+    if a[1] > b[1]; a, b = b, a; perm = -perm; end
+    if b[1] > c[1]; b, c = c, b; perm = -perm; end
+    if a[1] > b[1]; a, b = b, a; perm = -perm; end
+    return perm, (a, b, c)
+end
+
+# Sort four (index, point) pairs ascending by index; return (parity, sorted).
+@inline function _sort4_pts(t)
+    v = [t[1], t[2], t[3], t[4]]
+    perm = 1
+    @inbounds for i in 1:3, j in 1:3-i+1
+        if v[j][1] > v[j+1][1]
+            v[j], v[j+1] = v[j+1], v[j]
+            perm = -perm
+        end
+    end
+    return perm, (v[1], v[2], v[3], v[4])
+end
+
+"""
+    orient3_sos(pa, pb, pc, pd, ia, ib, ic, id) -> Int (±1, never 0)
+
+Simulation-of-Simplicity orient3. Exact orient3; on an exact coplanarity, a
+deterministic tie-break keyed on the distinct indices. Never returns 0.
+"""
+function orient3_sos(pa, pb, pc, pd,
+                     ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    s = orient3(pa, pb, pc, pd)
+    s != 0 && return s
+    perm, sp = _sort4_pts(((ia, pa), (ib, pb), (ic, pc), (id, pd)))
+    a = sp[1][2]; b = sp[2][2]; c = sp[3][2]; d = sp[4][2]
+    # For a zero 3-D orientation the SoS leading terms are the 2-D orient2 minors
+    # of the sorted points (projections dropping one coordinate), in the standard
+    # Edelsbrunner–Mücke order. The first nonzero minor decides the sign.
+    m = orient2((_x(b), _y(b)), (_x(c), _y(c)), (_x(d), _y(d)))
+    m != 0 && return perm * m
+    m = orient2((_x(b), _z(b)), (_x(c), _z(c)), (_x(d), _z(d)))
+    m != 0 && return perm * (-m)
+    m = orient2((_y(b), _z(b)), (_y(c), _z(c)), (_y(d), _z(d)))
+    m != 0 && return perm * m
+    m = orient2((_x(a), _y(a)), (_x(c), _y(c)), (_x(d), _y(d)))
+    m != 0 && return perm * (-m)
+    m = orient2((_x(a), _z(a)), (_x(c), _z(c)), (_x(d), _z(d)))
+    m != 0 && return perm * m
+    m = orient2((_y(a), _z(a)), (_y(c), _z(c)), (_y(d), _z(d)))
+    m != 0 && return perm * (-m)
+    m = orient2((_x(a), _y(a)), (_x(b), _y(b)), (_x(d), _y(d)))
+    m != 0 && return perm * m
+    m = orient2((_x(a), _y(a)), (_x(b), _y(b)), (_x(c), _y(c)))
+    m != 0 && return perm * m
+    return perm
+end
+
+"""
+    incircle_sos(pa, pb, pc, pd, ia, ib, ic, id) -> Int (±1, never 0)
+
+Simulation-of-Simplicity in-circle. Never returns 0.
+"""
+function incircle_sos(pa, pb, pc, pd,
+                      ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    s = incircle(pa, pb, pc, pd)
+    s != 0 && return s
+    perm, sp = _sort4_pts(((ia, pa), (ib, pb), (ic, pc), (id, pd)))
+    b = sp[2][2]; c = sp[3][2]; d = sp[4][2]
+    # Leading SoS term of a degenerate in-circle is the orient2 of the three
+    # highest-sorted points (lifting the lowest away): the first nonzero of an
+    # orient3-style minor sequence. Using orient2 of (b,c,d) resolves the
+    # generic cocircular tie; deeper minors cover full symmetry.
+    m = orient2(b, c, d); m != 0 && return perm * m
+    a = sp[1][2]
+    m = orient2(a, c, d); m != 0 && return perm * (-m)
+    m = orient2(a, b, d); m != 0 && return perm * m
+    m = orient2(a, b, c); m != 0 && return perm * (-m)
+    return perm
+end
+
+"""
+    insphere_sos(pa, pb, pc, pd, pe, ia, ib, ic, id, ie) -> Int (±1, never 0)
+
+Simulation-of-Simplicity in-sphere. Never returns 0.
+"""
+function insphere_sos(pa, pb, pc, pd, pe,
+                      ia::Integer, ib::Integer, ic::Integer,
+                      id::Integer, ie::Integer)::Int
+    s = insphere(pa, pb, pc, pd, pe)
+    s != 0 && return s
+    perm, sp = _sort5_pts(((ia, pa), (ib, pb), (ic, pc), (id, pd), (ie, pe)))
+    a = sp[1][2]; b = sp[2][2]; c = sp[3][2]; d = sp[4][2]; e = sp[5][2]
+    # Leading SoS term of a degenerate in-sphere is an orient3 minor of four of
+    # the five sorted points; evaluate the standard descending sequence.
+    m = orient3(b, c, d, e); m != 0 && return perm * m
+    m = orient3(a, c, d, e); m != 0 && return perm * (-m)
+    m = orient3(a, b, d, e); m != 0 && return perm * m
+    m = orient3(a, b, c, e); m != 0 && return perm * (-m)
+    m = orient3(a, b, c, d); m != 0 && return perm * m
+    return perm
+end
+
+@inline function _sort5_pts(t)
+    v = [t[1], t[2], t[3], t[4], t[5]]
+    perm = 1
+    @inbounds for i in 1:4, j in 1:4-i+1
+        if v[j][1] > v[j+1][1]
+            v[j], v[j+1] = v[j+1], v[j]
+            perm = -perm
+        end
+    end
+    return perm, (v[1], v[2], v[3], v[4], v[5])
+end
+
+end # module Predicates

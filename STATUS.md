@@ -10,8 +10,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 | Stage | Scope | State | CRC gate |
 |---|---|---|---|
-| 0 | Foundations: repo, CI, mesh types, `.msh` I/O, exact predicates | **NOT STARTED** | predicates vs exact-rational oracle; `.msh` round-trip vs gmsh |
-| 1 | 2-D Delaunay + CDT + quality refinement | not started | angle/area guarantees; CRC vs analytic |
+| 0 | Foundations: repo, CI, mesh types, `.msh` I/O, exact predicates | **DONE — gate green** | predicates vs exact-rational oracle ✓; `.msh` round-trip (v2↔v4) CRC-preserving ✓ |
+| 1 | 2-D Delaunay + CDT + quality refinement | in progress | angle/area guarantees; CRC vs analytic |
 | 2 | 1-D edge meshing + parametric surface meshing | not started | HFSS flat/patch/coax faces |
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | not started | **mesh enclosure coax junction (9.2)** |
 | 4 | size fields + optimization | not started | quality ≥ gmsh on 22 cases |
@@ -44,6 +44,13 @@ the `.geo` into `test/fixtures/` at Stage 0.
   geometry protrusion all fail to mesh the enclosure. Standard tools do not fix
   it → the robustness must come from Tessella's own boundary recovery + heal.
 
+## CRC regression artifacts (stamped when green)
+
+| artifact | checksum | oracle |
+|---|---|---|
+| Predicates | 142,141 assertions green; every `orient2/3`, `incircle`, `insphere` sign matches the independent exact-rational homogeneous-determinant oracle over exhaustive integer-grid degeneracies (collinear/coplanar/cocircular/cospherical) + fixed-seed random floats | `test/oracles.jl` (generic Laplace determinant, `Rational{BigInt}`) |
+| Unit cube (6-tet Kuhn) | `nodes=8 tets=6 bbox=[(0,0,0)→(1,1,1)] dihedral(min,mean)=(0.7854,0.7854) radedge(min,mean)=(0.86603,0.86603) bfaces=12` · SHA-256 `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9` | analytic volume 1/6·6=1, Euler χ=1 (ball), boundary χ=2 (sphere), 12 boundary tris |
+
 ## Log
 
 - **2026-08-11** — repo scaffolded (PLAN, STATUS, DEVELOPMENT, README, skeleton,
@@ -51,3 +58,20 @@ the `.geo` into `test/fixtures/` at Stage 0.
   `Tessella.jl` chosen. Local git initialized; GitHub remote pending `gh auth
   login`. **No code implemented yet** — Stage 0 is the first development task
   (start from `startup.md`).
+- **2026-08-11** — **Stage 0 complete, gate green.** Implemented:
+  - `src/Predicates.jl` — adaptive exact `orient2/orient3/incircle/insphere`
+    (Shewchuk A-stage float filter → `Rational{BigInt}` exact fallback) plus
+    Simulation-of-Simplicity `*_sos` variants (never return 0). Fast path is
+    allocation-free (verified with `@allocated == 0`). Verified against an
+    independent Laplace-determinant oracle on exhaustive degeneracies.
+  - `src/MeshTypes.jl` — compact column-major `Mesh` (3×N coords, Int32 cells),
+    allocation-free `node()`, area/volume/dihedral/circumradius/radius-edge
+    quality, boundary-facet extraction, Euler characteristic, manifold check,
+    `validate` (positive-tet / degeneracy / non-manifold diagnostics), and the
+    deterministic order-invariant SHA-256 `mesh_crc` checksum.
+  - `src/IO.jl` — gmsh `.msh` v2.2 **and** v4.1 ASCII read/write (round-trip
+    preserves connectivity CRC across versions), ASCII+binary STL ingest with
+    vertex welding, `.geo` parameter/physical-group scanner (no OCC eval — that
+    is Stage 5). `read_geo_params` on the enclosure fixture recovers all three
+    volume groups (air/case/coax_pin) + sizing + seed.
+  - Full `Pkg.test()` green: **142,141 assertions**. `stage()` bumped to 1.

@@ -71,8 +71,6 @@ working session. Keep `main` green. Commit in small, oracle-justified steps.
 
 ## Housekeeping
 
-- Local git is initialized with an initial commit.
-- **GitHub remote is pending**: run `! gh auth login` once, then
-  `gh repo create Tessella.jl --private --source=. --remote=origin --push`
-  (or ask the assistant to do it after you authenticate).
+- Local git is initialized with an initial commit (pushed to main).
+- For every implementation run, git push to main directly.
 - Julia ≥ 1.11. `julia --project=. -e 'using Pkg; Pkg.test()'` must stay green.
