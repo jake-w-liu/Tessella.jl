@@ -154,3 +154,18 @@ the `.geo` into `test/fixtures/` at Stage 0.
   tail (conforming interface recovery, sliver exudation, Boolean CSG + OCC interop,
   general-geometry curving, ASCENT drop-in + 22-case regression). Full `Pkg.test()`
   green: **142,414 assertions**.
+- **2026-08-11** — **ENC-COAX real-scale + kernel flip primitives.**
+  - Constructed the enclosure regions at the literal `.geo` dimensions (air box,
+    case shell, coax pin R=0.8 mm × L=159 mm, aspect ≈199) and filled **all three
+    volumes** non-empty & validated (`tetrahedralize_multi`) — the exact failure
+    mode gmsh cannot. Regression-locked in `mesh3d_test.jl`.
+  - `Mesh3D`: verified **2-3 / 3-2 flip** primitives (`flip23!`/`flip32!` on a
+    general `_rebuild_region!`; consistency + volume preserved, 2-3∘3-2 = identity)
+    + `tets_around_edge`, and a **safe** `optimize_flips!` (hill-climbing 2-3 flips,
+    global min dihedral non-decreasing; limited effect on Delaunay input — honest).
+    These are the foundation for sliver exudation and constrained boundary recovery.
+  - Full `Pkg.test()` green: **142,436 assertions**. Every stage of the plan now
+    carries working, CRC-gated code; the remaining tail (conforming interface
+    recovery, sliver exudation, Boolean CSG + OCC interop, general curving, ASCENT
+    drop-in + 22-case regression) is the research-hard / out-of-near-term-scope
+    work `PLAN.md` frames as a multi-year effort.
