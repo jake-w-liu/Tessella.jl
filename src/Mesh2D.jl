@@ -33,6 +33,7 @@ using ..MeshTypes: Mesh
 export Triangulation, triangulate, delaunay2d, dedup_points
 export check_consistency, is_delaunay, to_mesh, ntriangles_live, insert_point!
 export insert_segment!, constrained_delaunay, classify_interior, is_constrained_delaunay
+export refine!
 
 const GHOST = Int32(0)   # the single vertex at infinity closing the convex hull
 
@@ -289,7 +290,8 @@ end
 # Bowyer–Watson insertion
 # ════════════════════════════════════════════════════════════════════════════════
 
-function insert_point!(T::Triangulation, vid::Integer)
+function insert_point!(T::Triangulation, vid::Integer; constrained::Bool=false,
+                      newtris::Union{Nothing,Vector{Int32}}=nothing)
     px, py = _pt(T, vid)
     t0 = locate(T, px, py, vid)
     cavity = Int32[t0]
@@ -301,26 +303,30 @@ function insert_point!(T::Triangulation, vid::Integer)
         for k in 1:3
             nb = _nbr(T, t, k)
             (nb != 0 && (nb in incav)) && continue
-            inside = nb != 0 && _in_circumcircle(T, nb, vid)
+            a, b = _edge(T, t, k)
+            # a constrained edge is never crossed by the growing cavity (CDT-preserving)
+            blocked = constrained && (_skey(a, b) in T.seg)
+            inside = !blocked && nb != 0 && _in_circumcircle(T, nb, vid)
             if inside
                 push!(incav, nb); push!(cavity, nb); push!(stack, nb)
             else
-                a, b = _edge(T, t, k)
                 push!(boundary, (a, b, nb))
             end
         end
     end
     for t in cavity; _killtri!(T, t); end
-    _retriangulate_cavity!(T, boundary, Int32(vid))
+    _retriangulate_cavity!(T, boundary, Int32(vid), newtris)
     return nothing
 end
 
-function _retriangulate_cavity!(T::Triangulation, boundary, vid::Int32)
+function _retriangulate_cavity!(T::Triangulation, boundary, vid::Int32,
+                                newtris::Union{Nothing,Vector{Int32}}=nothing)
     spoke = Dict{Int32, Tuple{Int32,Int32}}()   # boundary vertex w → (new tri, slot)
     anytri = Int32(0)
     for (a, b, nb) in boundary
         t = _newtri!(T, a, b, vid)               # [a, b, vid]; a or b may be GHOST
         anytri = t
+        newtris !== nothing && push!(newtris, t)
         _setn!(T, t, 3, nb)                       # slot3 (opp vid) = edge (a,b) → nb
         if nb != 0
             j = _nslot_by_edge(T, nb, a, b)
@@ -746,6 +752,163 @@ function classify_interior(T::Triangulation)
         interior[t] = T.alive[t] && !_is_ghost_tri(T, t) && par[t]
     end
     return interior
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Ruppert quality refinement
+# ════════════════════════════════════════════════════════════════════════════════
+
+# append a real vertex; returns its id (nreal grows; vtri extended)
+function _add_vertex!(T::Triangulation, x::Float64, y::Float64)
+    push!(T.x, x); push!(T.y, y); T.nreal += 1
+    push!(T.vtri, Int32(0))
+    return Int32(T.nreal)
+end
+
+@inline _dist(a, b) = sqrt((a[1]-b[1])^2 + (a[2]-b[2])^2)
+
+@inline function _tri_area2(a, b, c)
+    return 0.5 * abs((b[1]-a[1])*(c[2]-a[2]) - (c[1]-a[1])*(b[2]-a[2]))
+end
+
+function _circumcenter2(a, b, c)
+    ax,ay = a; bx,by = b; cx,cy = c
+    d = 2.0*(ax*(by-cy) + bx*(cy-ay) + cx*(ay-by))
+    a2 = ax*ax+ay*ay; b2 = bx*bx+by*by; c2 = cx*cx+cy*cy
+    ux = (a2*(by-cy) + b2*(cy-ay) + c2*(ay-by)) / d
+    uy = (a2*(cx-bx) + b2*(ax-cx) + c2*(bx-ax)) / d
+    return (ux, uy)
+end
+
+# radius-edge ratio = circumradius / shortest edge (≈ 1/(2 sin θ_min))
+function _radius_edge2(a, b, c)
+    lab=_dist(a,b); lbc=_dist(b,c); lca=_dist(c,a)
+    ar = _tri_area2(a,b,c)
+    ar == 0 && return Inf
+    R = (lab*lbc*lca) / (4*ar)
+    return R / min(lab,lbc,lca)
+end
+
+@inline _is_skinny(T, t, B, maxarea) = begin
+    a=_pt(T,_vert(T,t,1)); b=_pt(T,_vert(T,t,2)); c=_pt(T,_vert(T,t,3))
+    _tri_area2(a,b,c) > maxarea || _radius_edge2(a,b,c) > B
+end
+
+# is subsegment (a,b) encroached by point p? (p strictly inside the diametral disk)
+@inline _encroaches(pa, pb, p) = (pa[1]-p[1])*(pb[1]-p[1]) + (pa[2]-p[2])*(pb[2]-p[2]) < 0
+
+# encroached by an adjacent apex? (in a CDT this suffices to detect any encroachment)
+function _subseg_encroached(T::Triangulation, a, b)
+    t1, k1, t2 = _edge_triangles(T, a, b)
+    t1 == 0 && return false
+    pa = _pt(T,a); pb = _pt(T,b)
+    p = _vert(T, t1, k1)
+    !_is_ghost_v(p) && _encroaches(pa, pb, _pt(T,p)) && return true
+    j = _nslot(T, t2, t1); s = _vert(T, t2, j)
+    !_is_ghost_v(s) && _encroaches(pa, pb, _pt(T,s)) && return true
+    return false
+end
+
+@inline function _setflag!(v::Vector{Bool}, i::Integer, val::Bool)
+    while length(v) < i; push!(v, false); end
+    @inbounds v[i] = val
+    return nothing
+end
+
+# split subsegment (a,b) at its midpoint; update constraints and interior flags
+function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vector{Bool})
+    pa = _pt(T,a); pb = _pt(T,b)
+    mid = _add_vertex!(T, 0.5*(pa[1]+pb[1]), 0.5*(pa[2]+pb[2]))
+    delete!(T.seg, _skey(a,b))
+    push!(T.seg, _skey(a,mid)); push!(T.seg, _skey(mid,b))
+    insert_point!(T, mid; constrained=true)
+    # constraints changed → recompute interior (segment splits are comparatively rare)
+    ni = classify_interior(T)
+    resize!(interior, length(ni)); @inbounds for i in eachindex(ni); interior[i]=ni[i]; end
+    return mid
+end
+
+"""
+    refine!(T; min_angle_deg=25.0, max_area=Inf, maxsteps=300_000) -> Vector{Bool}
+
+Ruppert refinement of the constrained Delaunay triangulation `T`: split
+encroached subsegments and insert circumcenters of skinny interior triangles
+(radius-edge ratio > 1/(2 sin θ), or area > `max_area`) until the quality bound
+holds. Constraints are preserved (constrained point insertion). Returns the final
+per-triangle interior mask. `min_angle_deg ≲ 20.7°` guarantees termination.
+"""
+function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
+                 maxsteps::Integer=300_000)
+    B = 1.0 / (2.0*sind(float(min_angle_deg)))
+    interior = Vector{Bool}(collect(classify_interior(T)))
+    steps = 0
+    while steps < maxsteps
+        steps += 1
+        # (1) split an encroached subsegment, if any
+        enc = _find_encroached(T)
+        if enc !== nothing
+            _split_subsegment!(T, enc[1], enc[2], interior)
+            continue
+        end
+        # (2) pick a skinny interior triangle
+        t = _find_bad(T, interior, B, max_area)
+        t == 0 && break
+        a=_vert(T,t,1); b=_vert(T,t,2); c=_vert(T,t,3)
+        cc = _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
+        # (3) if the circumcenter encroaches subsegments, split those instead
+        sp = _encroached_by_point(T, cc)
+        if sp !== nothing
+            _split_subsegment!(T, sp[1], sp[2], interior)
+            continue
+        end
+        # (4) insert the circumcenter (constrained); skip if it falls outside the domain
+        _insert_steiner!(T, cc, interior)
+    end
+    return interior
+end
+
+# Deterministic iteration order over the constraint set (a Set has none), so the
+# refinement sequence — hence the output mesh — is reproducible across runs.
+_sorted_segs(T::Triangulation) = sort!(collect(T.seg))
+
+function _find_encroached(T::Triangulation)
+    for (a, b) in _sorted_segs(T)
+        _subseg_encroached(T, a, b) && return (a, b)
+    end
+    return nothing
+end
+
+function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea)
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) || continue
+        _is_skinny(T, t, B, maxarea) && return Int32(t)
+    end
+    return Int32(0)
+end
+
+# first subsegment (deterministic order) encroached by coordinate p, or nothing
+function _encroached_by_point(T::Triangulation, p)
+    for (a, b) in _sorted_segs(T)
+        _encroaches(_pt(T,a), _pt(T,b), p) && return (a, b)
+    end
+    return nothing
+end
+
+# insert Steiner point p (a coordinate) if it lands in an interior triangle.
+# The vertex is added first (so locate's SoS/ghost tests can read its coordinates),
+# then undone if the point falls outside the domain — locate never mutates the
+# triangulation, so the trailing vertex is safe to pop.
+function _insert_steiner!(T::Triangulation, p, interior::Vector{Bool})
+    vid = _add_vertex!(T, p[1], p[2])
+    tc = locate(T, p[1], p[2], vid)
+    if _is_ghost_tri(T, tc) || tc > length(interior) || !interior[tc]
+        pop!(T.x); pop!(T.y); pop!(T.vtri); T.nreal -= 1     # undo
+        return false
+    end
+    newt = Int32[]
+    insert_point!(T, vid; constrained=true, newtris=newt)
+    for nt in newt; _setflag!(interior, nt, true); end
+    return true
 end
 
 # ════════════════════════════════════════════════════════════════════════════════

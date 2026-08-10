@@ -233,3 +233,71 @@ edge_in(T, vi, vj) = Tessella.Mesh2D._edge_between(T, Int32(vi), Int32(vj))[1] !
         @test_throws ArgumentError constrained_delaunay(xs,ys,[(1,2),(3,4)])
     end
 end
+
+# minimum interior angle (degrees) over a triangle Mesh — independent quality oracle
+function mesh_min_angle(m)
+    mn = 180.0
+    for t in 1:ntris(m)
+        p = (node(m,m.tris[1,t]), node(m,m.tris[2,t]), node(m,m.tris[3,t]))
+        for i in 1:3
+            a=p[i]; b=p[mod1(i+1,3)]; c=p[mod1(i+2,3)]
+            v1=(b[1]-a[1],b[2]-a[2]); v2=(c[1]-a[1],c[2]-a[2])
+            cang = clamp((v1[1]*v2[1]+v1[2]*v2[2])/(hypot(v1...)*hypot(v2...)), -1.0, 1.0)
+            mn = min(mn, acosd(cang))
+        end
+    end
+    return mn
+end
+mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2,t]),node(m,m.tris[3,t]))
+                               for t in 1:ntris(m); init=0.0)
+
+@testset "Mesh2D Ruppert refinement (Stage 1)" begin
+
+    @testset "angle bound achieved, area & constraints preserved" begin
+        r = _RNG(0xBEEF01)
+        xs=Float64[0,10,10,0]; ys=Float64[0,0,10,10]
+        for _ in 1:20; push!(xs, 1+_nf(r)*8); push!(ys, 1+_nf(r)*8); end
+        segs=[(1,2),(2,3),(3,4),(4,1)]
+        T=constrained_delaunay(xs,ys,segs;rng_seed=3)
+        m0=to_mesh(T; interior=classify_interior(T))
+        @test mesh_min_angle(m0) < 20.0            # starts skinny
+        interior=refine!(T; min_angle_deg=20.0)
+        @test check_consistency(T)[1]
+        @test is_constrained_delaunay(T)[1]
+        m=to_mesh(T; interior=interior)
+        @test validate(m).ok
+        @test mesh_min_angle(m) >= 20.0 - 1e-6     # angle guarantee met
+        @test mesh_area(m) ≈ 100.0 atol=1e-9       # domain area preserved
+    end
+
+    @testset "area-bounded refinement" begin
+        xs=Float64[0,10,10,0]; ys=Float64[0,0,10,10]; segs=[(1,2),(2,3),(3,4),(4,1)]
+        T=constrained_delaunay(xs,ys,segs)
+        interior=refine!(T; min_angle_deg=20.0, max_area=2.0)
+        m=to_mesh(T; interior=interior)
+        @test mesh_max_tri_area(m) <= 2.0 + 1e-9
+        @test mesh_min_angle(m) >= 20.0 - 1e-6
+        @test mesh_area(m) ≈ 100.0 atol=1e-9
+        @test is_constrained_delaunay(T)[1]
+    end
+
+    @testset "refinement respects a hole" begin
+        # interior points kept well clear of both the outer boundary and the hole
+        # (Ruppert's angle guarantee requires input to respect local feature size).
+        r = _RNG(0xABC)
+        xs=Float64[0,10,10,0, 4,6,6,4]; ys=Float64[0,0,10,10, 4,4,6,6]
+        for _ in 1:30
+            x=1.0+_nf(r)*8.0; y=1.0+_nf(r)*8.0
+            (3.0 < x < 7.0 && 3.0 < y < 7.0) && continue   # ≥1 from the hole
+            push!(xs,x); push!(ys,y)
+        end
+        segs=[(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5)]
+        T=constrained_delaunay(xs,ys,segs;rng_seed=1)
+        interior=refine!(T; min_angle_deg=20.0)
+        m=to_mesh(T; interior=interior)
+        @test validate(m).ok
+        @test mesh_min_angle(m) >= 20.0 - 1e-6
+        @test mesh_area(m) ≈ 96.0 atol=1e-9        # hole preserved through refinement
+        @test is_constrained_delaunay(T)[1]
+    end
+end

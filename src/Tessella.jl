@@ -13,9 +13,9 @@ the project plan. Begin from `startup.md`.
 module Tessella
 
 # ── Version / capability banner ────────────────────────────────────────────────
-# Highest development stage whose CRC gate (STATUS.md) is green. 1 ⇒ Stage 0
-# (Foundations: exact predicates, mesh types, .msh/STL/.geo I/O) complete.
-const TESSELLA_STAGE = 1  # see STATUS.md stage board
+# Highest development stage whose CRC gate (STATUS.md) is green. 2 ⇒ Stage 1
+# (2-D Delaunay + CDT + Ruppert refinement) complete; 1 ⇒ Stage 0 foundations.
+const TESSELLA_STAGE = 2  # see STATUS.md stage board
 
 # ── Submodules (filled per PLAN.md §3 as stages land) ──────────────────────────
 include("Predicates.jl")

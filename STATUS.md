@@ -11,8 +11,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | Stage | Scope | State | CRC gate |
 |---|---|---|---|
 | 0 | Foundations: repo, CI, mesh types, `.msh` I/O, exact predicates | **DONE — gate green** | predicates vs exact-rational oracle ✓; `.msh` round-trip (v2↔v4) CRC-preserving ✓ |
-| 1 | 2-D Delaunay + CDT + quality refinement | in progress | angle/area guarantees; CRC vs analytic |
-| 2 | 1-D edge meshing + parametric surface meshing | not started | HFSS flat/patch/coax faces |
+| 1 | 2-D Delaunay + CDT + quality refinement | **DONE — gate green** | exact empty-circumcircle oracle ✓; 2n−2−h count + hull ✓; CDT constraints present + locally Delaunay ✓; Ruppert angle/area bound achieved, domain area preserved ✓ |
+| 2 | 1-D edge meshing + parametric surface meshing | in progress | HFSS flat/patch/coax faces |
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | not started | **mesh enclosure coax junction (9.2)** |
 | 4 | size fields + optimization | not started | quality ≥ gmsh on 22 cases |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | not started | ingest ASCENT `solid_model` |
@@ -50,6 +50,8 @@ the `.geo` into `test/fixtures/` at Stage 0.
 |---|---|---|
 | Predicates | 142,141 assertions green; every `orient2/3`, `incircle`, `insphere` sign matches the independent exact-rational homogeneous-determinant oracle over exhaustive integer-grid degeneracies (collinear/coplanar/cocircular/cospherical) + fixed-seed random floats | `test/oracles.jl` (generic Laplace determinant, `Rational{BigInt}`) |
 | Unit cube (6-tet Kuhn) | `nodes=8 tets=6 bbox=[(0,0,0)→(1,1,1)] dihedral(min,mean)=(0.7854,0.7854) radedge(min,mean)=(0.86603,0.86603) bfaces=12` · SHA-256 `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9` | analytic volume 1/6·6=1, Euler χ=1 (ball), boundary χ=2 (sphere), 12 boundary tris |
+| 2-D Delaunay (random/grid/cocircular) | exact empty-circumcircle holds (0 violations, `incircle_sos`); triangle count = 2n−2−h vs independent monotone-chain hull; seed-independent (SoS) | `is_delaunay`, hull oracle, Euler χ=1 |
+| 10×10 square refined to 20° (max_area 1.0, seed 1) | `nodes=91 tris=148 bbox=[(0,0,0)→(10,10,0)]` · SHA-256 `583c615df1862c8518bbda409347f109dc25f7f8f5362562badf160fe6af30c1` | min angle ≥ 20°, max tri area ≤ 1.0, domain area = 100 preserved, CDT locally Delaunay |
 
 ## Log
 
@@ -75,3 +77,23 @@ the `.geo` into `test/fixtures/` at Stage 0.
     is Stage 5). `read_geo_params` on the enclosure fixture recovers all three
     volume groups (air/case/coax_pin) + sizing + seed.
   - Full `Pkg.test()` green: **142,141 assertions**. `stage()` bumped to 1.
+- **2026-08-11** — **Stage 1 complete, gate green.** `src/Mesh2D.jl`:
+  - **Delaunay** (incremental Bowyer–Watson) closed by a single GHOST vertex at
+    infinity — *not* a finite super-triangle, which is not robust (a point outside
+    the evolving hull can be wrongly excluded from a super-adjacent circumcircle,
+    cracking the boundary; verified failure on ~half of random seeds). Ghost
+    in-circle = orientation test on the real hull edge; collinear-aware so
+    collinear hull points never spawn flat triangles. Remembering stochastic walk.
+  - **CDT**: flip-based (Sloan) constrained segment insertion with `_flip!`
+    (verified: double-flip = identity), through-vertex splitting, Lawson
+    legalization; parity flood-fill `classify_interior` (nested holes correct).
+  - **Ruppert refinement**: encroached-subsegment splitting + skinny-triangle
+    circumcenter insertion (constrained), achieving the min-angle/max-area bound
+    while preserving the domain and constraints.
+  - Bug caught by `--check-bounds=yes` (Pkg.test): a Steiner-insertion OOB read
+    (`_pt(T, nreal+1)`) masked by `@inbounds` in normal mode; fixed. Lesson:
+    verify under bounds-checking. Determinism bug (Set iteration order in
+    encroachment scans) fixed by sorted iteration.
+  - Oracles: exact empty-circumcircle, 2n−2−h + hull cross-check, constrained-
+    Delaunay locally-Delaunay check, min-angle/area quality, domain-area
+    conservation. Full `Pkg.test()` green: **142,240 assertions**. `stage()` → 2.
