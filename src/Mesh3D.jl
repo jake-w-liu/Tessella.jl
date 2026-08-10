@@ -757,11 +757,12 @@ original surface). Exact for convex domains; for non-convex domains the boundary
 is the Delaunay restriction (conforming boundary recovery refines this — see
 [`tetrahedralize_recover`](@ref)). Returns the interior tet [`Mesh`](@ref).
 """
-function tetrahedralize(surface::Mesh; rng_seed::Integer=1)
+function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false)
     nn = size(surface.coords, 2)
     xs = Vector{Float64}(undef, nn); ys = similar(xs); zs = similar(xs)
     @inbounds for i in 1:nn; xs[i]=surface.coords[1,i]; ys[i]=surface.coords[2,i]; zs[i]=surface.coords[3,i]; end
     T = delaunay3d(xs, ys, zs; rng_seed=rng_seed)
+    optimize && optimize_flips!(T; passes=4)     # sliver-reducing flips (safe, volume-preserving)
     keep = _classify_by_centroid(T, surface)
     return to_mesh3(T; keep=keep)
 end

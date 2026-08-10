@@ -64,13 +64,13 @@ with tetrahedra ([`tetrahedralize`](@ref)) and, if `smooth`, Laplacian-smoothed
 ([`smooth_laplacian`](@ref)). The result is `validate`-checked before return.
 """
 function mesh_volume(surface::Mesh; smooth::Bool=true, smooth_iters::Integer=5,
-                     rng_seed::Integer=1, check::Bool=true)
+                     optimize::Bool=false, rng_seed::Integer=1, check::Bool=true)
     if check
         ok, report = is_meshable(surface)
         ok || throw(ArgumentError("mesh_volume: input surface is not meshable — " *
                                   join(report.messages, "; ")))
     end
-    m = tetrahedralize(surface; rng_seed=rng_seed)
+    m = tetrahedralize(surface; rng_seed=rng_seed, optimize=optimize)
     smooth && (m = smooth_laplacian(m; iters=smooth_iters))
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_volume: produced an invalid mesh — " *

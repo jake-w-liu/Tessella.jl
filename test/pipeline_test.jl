@@ -44,6 +44,15 @@ end
         @test mvpvol(m1) ≈ mvpvol(m2) rtol=1e-6
     end
 
+    @testset "optimize=true reduces slivers, preserves volume + validity" begin
+        s = cylinder_surface((0.,0,0),(0.,0,1),2.0,5.0; nθ=20, nz=4)
+        m0 = mesh_volume(s; optimize=false, smooth=false)
+        m1 = mesh_volume(s; optimize=true,  smooth=true)
+        @test mvpvol(m1) ≈ mvpvol(m0) rtol=1e-6      # flips+smoothing preserve volume
+        @test validate(m1).ok
+        @test mesh_quality(m1).n_slivers < mesh_quality(m0).n_slivers
+    end
+
     @testset "end-to-end: primitive → volume → .msh → read (solver-consumable)" begin
         dir = mktempdir()
         for surf in (box_surface(0,2,0,1,0,1), cylinder_surface((0.,0,0),(0.,0,1),1.0,2.0; nθ=16))
