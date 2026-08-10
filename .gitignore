@@ -1,0 +1,19 @@
+# Julia
+Manifest.toml
+/docs/build/
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+.DS_Store
+
+# Test / build artifacts
+/test/tmp/
+/test/artifacts/*.tmp
+*.msh.tmp
+
+# Editor
+.vscode/
+.idea/
+
+# Local reference material (gmsh source study, not distributed)
+reference/

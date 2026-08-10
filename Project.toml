@@ -1,0 +1,13 @@
+name = "Tessella"
+uuid = "b6a9d00f-e4b0-4f2d-b0cf-3bfe84a413e6"
+authors = ["Jake Liu"]
+version = "0.0.1"
+
+[compat]
+julia = "1.11"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
