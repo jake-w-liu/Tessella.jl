@@ -23,11 +23,12 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
-using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold
+using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges
+using ..Mesh2D: constrained_delaunay, to_mesh
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
-       recover_boundary
+       recover_boundary, mesh_boolean
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -1487,6 +1488,526 @@ function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer
     end
     throw(ErrorException("recover_boundary: recovery FAILED after $max_seeds seeds " *
         "($(lastnrec)/$(length(facets)) facets recovered). First blocker: $lastreason"))
+end
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# mesh_boolean — native mesh-Boolean CSG for module Mesh3D (no OpenCASCADE).
+#
+# Add these two lines to the module's existing `using` block (both submodules are
+# included before Mesh3D in Tessella.jl, so `..Mesh2D` / `..MeshTypes` resolve):
+#     using ..Mesh2D: constrained_delaunay, to_mesh
+#     using ..MeshTypes: boundary_edges
+# (orient3 is already imported; _inside_surface, _unitn are Mesh3D internals.)
+# Add `mesh_boolean` to the module's `export` list.
+#
+# Two exact engines, dispatched automatically:
+#   • AXIS-ALIGNED inputs (boxes / box-unions, incl. every coplanar shared-face case)
+#     -> exact plane-arrangement path: cut space by all face planes, classify each
+#        grid cell by centroid ray-cast, emit cell faces separating kept/not-kept.
+#        Volume is the exact sum of grid-cell volumes; surface watertight by construction.
+#   • GENERAL-POSITION inputs (e.g. box × cylinder) -> Cork/libigl-style tri-tri path:
+#        exact orient3 tri-tri intersection with Rational{BigInt} endpoints (bit-identical
+#        shared seam) -> coplanar-region grouping -> per-region Mesh2D CDT retriangulation
+#        with the intersection chords as constraints -> centroid ray-cast classification
+#        vs the ORIGINAL opposite closed solid -> per-op assembly.  Any non-general-position
+#        degeneracy in this path is an explicit THROW, never a wrong surface.
+# The assembled result is verified watertight+manifold before return.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+
+# ── SECTION A — oracles: divergence-theorem volume + watertight/manifold gate ──────
+
+# Signed volume of a closed, consistently outward-oriented triangle surface by the
+# divergence theorem: V = (1/6) Σ_faces v0·(v1×v2). Positive for outward normals.
+function _bool_signed_volume(m::Mesh)
+    V = 0.0
+    @inbounds for f in 1:size(m.tris,2)
+        a=m.tris[1,f]; b=m.tris[2,f]; c=m.tris[3,f]
+        v0=(m.coords[1,a],m.coords[2,a],m.coords[3,a])
+        v1=(m.coords[1,b],m.coords[2,b],m.coords[3,b])
+        v2=(m.coords[1,c],m.coords[2,c],m.coords[3,c])
+        cx = v1[2]*v2[3]-v1[3]*v2[2]
+        cy = v1[3]*v2[1]-v1[1]*v2[3]
+        cz = v1[1]*v2[2]-v1[2]*v2[1]
+        V += v0[1]*cx + v0[2]*cy + v0[3]*cz
+    end
+    return V/6.0
+end
+
+# (watertight, manifold): watertight ⇔ no boundary edge; manifold ⇔ max edge
+# incidence ≤ 2. Together ⇒ every edge shared by exactly two triangles (closed 2-mfd).
+function _bool_watertight(m::Mesh)
+    bnd, maxinc = boundary_edges(m.tris)
+    return (isempty(bnd), isempty(bnd) && maxinc <= 2, length(bnd), maxinc)
+end
+
+# ── SECTION A2 — input normalization ───────────────────────────────────────────────
+
+# Dedup coords by exact value; drop degenerate tris; return a clean Mesh (tris only).
+function _bool_clean(m::Mesh)
+    seen = Dict{NTuple{3,Float64},Int32}()
+    xs=Float64[]; ys=Float64[]; zs=Float64[]
+    remap = Vector{Int32}(undef, size(m.coords,2))
+    @inbounds for i in 1:size(m.coords,2)
+        k=(m.coords[1,i],m.coords[2,i],m.coords[3,i])
+        id=get(seen,k,Int32(0))
+        if id==0
+            push!(xs,k[1]); push!(ys,k[2]); push!(zs,k[3]); id=Int32(length(xs)); seen[k]=id
+        end
+        remap[i]=id
+    end
+    tris=NTuple{3,Int32}[]
+    @inbounds for f in 1:size(m.tris,2)
+        a=remap[m.tris[1,f]]; b=remap[m.tris[2,f]]; c=remap[m.tris[3,f]]
+        (a==b||b==c||a==c) && continue
+        push!(tris,(a,b,c))
+    end
+    C=Matrix{Float64}(undef,3,length(xs))
+    @inbounds for i in 1:length(xs); C[1,i]=xs[i]; C[2,i]=ys[i]; C[3,i]=zs[i]; end
+    tm=Matrix{Int32}(undef,3,length(tris))
+    @inbounds for (j,t) in enumerate(tris); tm[1,j]=t[1]; tm[2,j]=t[2]; tm[3,j]=t[3]; end
+    return Mesh(C; tris=tm)
+end
+
+# Ensure outward orientation: if the divergence-theorem signed volume is negative,
+# flip every triangle's winding. Returns an outward-oriented Mesh and its |volume|.
+function _bool_orient_outward(m::Mesh)
+    v = _bool_signed_volume(m)
+    v == 0 && throw(ArgumentError("mesh_boolean: input surface has zero signed volume (not a closed solid)"))
+    if v < 0
+        tm = copy(m.tris)
+        @inbounds for f in 1:size(tm,2); tm[2,f],tm[3,f] = tm[3,f],tm[2,f]; end
+        return Mesh(copy(m.coords); tris=tm), -v
+    end
+    return m, v
+end
+
+function _bool_prepare(m::Mesh, name::AbstractString)
+    c = _bool_clean(m)
+    wt, mf, nb, mx = _bool_watertight(c)
+    wt || throw(ArgumentError("mesh_boolean: input $name is not watertight ($nb boundary edges)"))
+    mf || throw(ArgumentError("mesh_boolean: input $name is not manifold (max edge incidence $mx)"))
+    o, _ = _bool_orient_outward(c)
+    return o
+end
+
+# ── SECTION B — exact plane-arrangement Boolean for AXIS-ALIGNED solids ─────────────
+# (both inputs' faces all lie in axis planes ⇒ boxes / box-unions).  Handles ALL
+#  coplanar/shared-face degeneracies exactly; volume is the exact sum of grid-cell
+#  volumes; surface is watertight+manifold by construction.
+
+# A triangle is axis-aligned iff its 3 vertices share one coordinate (it lies in an
+# x=, y=, or z= plane). A solid is axis-aligned iff all its triangles are.
+function _bool_is_axis_aligned(m::Mesh)
+    @inbounds for f in 1:size(m.tris,2)
+        a=m.tris[1,f]; b=m.tris[2,f]; c=m.tris[3,f]
+        sx = m.coords[1,a]==m.coords[1,b]==m.coords[1,c]
+        sy = m.coords[2,a]==m.coords[2,b]==m.coords[2,c]
+        sz = m.coords[3,a]==m.coords[3,b]==m.coords[3,c]
+        (sx||sy||sz) || return false
+    end
+    return true
+end
+
+# Emit the 2 outward triangles of an axis-aligned rectangle face. `ax` ∈ 1:3 is the
+# constant axis, `cval` its coordinate; (a0,a1),(b0,b1) span axes axA,axB; `outsign`
+# = +1/−1 outward direction along `ax`. Corners deduped into `V`; tris appended.
+function _bool_emit_face!(V::Dict{NTuple{3,Float64},Int32}, coords::Vector{NTuple{3,Float64}},
+                          Tr::Vector{NTuple{3,Int32}}, ax::Int, cval::Float64,
+                          a0::Float64,a1::Float64, b0::Float64,b1::Float64,
+                          axA::Int, axB::Int, outsign::Int)
+    function vid(p::NTuple{3,Float64})
+        id=get(V,p,Int32(0))
+        if id==0; push!(coords,p); id=Int32(length(coords)); V[p]=id; end
+        return id
+    end
+    mk(a,b) = begin
+        p=zeros(3); p[ax]=cval; p[axA]=a; p[axB]=b; (p[1],p[2],p[3])
+    end
+    p00=mk(a0,b0); p10=mk(a1,b0); p11=mk(a1,b1); p01=mk(a0,b1)
+    i00=vid(p00); i10=vid(p10); i11=vid(p11); i01=vid(p01)
+    # normal of (p00->p10->p11); flip winding so its `ax` component matches outsign.
+    e1=(p10[1]-p00[1],p10[2]-p00[2],p10[3]-p00[3])
+    e2=(p11[1]-p00[1],p11[2]-p00[2],p11[3]-p00[3])
+    n=(e1[2]*e2[3]-e1[3]*e2[2], e1[3]*e2[1]-e1[1]*e2[3], e1[1]*e2[2]-e1[2]*e2[1])
+    ndir = n[ax] > 0 ? 1 : -1
+    if ndir == outsign
+        push!(Tr,(i00,i10,i11)); push!(Tr,(i00,i11,i01))
+    else
+        push!(Tr,(i00,i11,i10)); push!(Tr,(i00,i01,i11))
+    end
+    return nothing
+end
+
+@inline function _bool_keep(op::Symbol, inA::Bool, inB::Bool)
+    op === :union        && return inA || inB
+    op === :intersection && return inA && inB
+    op === :difference   && return inA && !inB
+    throw(ArgumentError("mesh_boolean: op must be :union, :intersection, or :difference (got $op)"))
+end
+
+function _bool_axis_aligned_boolean(A::Mesh, B::Mesh, op::Symbol)
+    xs = sort!(unique(vcat(A.coords[1,:], B.coords[1,:])))
+    ys = sort!(unique(vcat(A.coords[2,:], B.coords[2,:])))
+    zs = sort!(unique(vcat(A.coords[3,:], B.coords[3,:])))
+    nx=length(xs)-1; ny=length(ys)-1; nz=length(zs)-1
+    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))       # generic ray, avoids grazing
+    keep = falses(nx,ny,nz)
+    @inbounds for i in 1:nx, j in 1:ny, k in 1:nz
+        cx=0.5*(xs[i]+xs[i+1]); cy=0.5*(ys[j]+ys[j+1]); cz=0.5*(zs[k]+zs[k+1])
+        inA=_inside_surface((cx,cy,cz),dir,A); inB=_inside_surface((cx,cy,cz),dir,B)
+        keep[i,j,k]=_bool_keep(op,inA,inB)
+    end
+    @inline kept(i,j,k) = (1<=i<=nx && 1<=j<=ny && 1<=k<=nz) ? keep[i,j,k] : false
+    V=Dict{NTuple{3,Float64},Int32}(); coords=NTuple{3,Float64}[]; Tr=NTuple{3,Int32}[]
+    @inbounds for i in 1:nx, j in 1:ny, k in 1:nz
+        keep[i,j,k] || continue
+        kept(i-1,j,k) || _bool_emit_face!(V,coords,Tr, 1, xs[i],   ys[j],ys[j+1], zs[k],zs[k+1], 2,3, -1)
+        kept(i+1,j,k) || _bool_emit_face!(V,coords,Tr, 1, xs[i+1], ys[j],ys[j+1], zs[k],zs[k+1], 2,3, +1)
+        kept(i,j-1,k) || _bool_emit_face!(V,coords,Tr, 2, ys[j],   xs[i],xs[i+1], zs[k],zs[k+1], 1,3, -1)
+        kept(i,j+1,k) || _bool_emit_face!(V,coords,Tr, 2, ys[j+1], xs[i],xs[i+1], zs[k],zs[k+1], 1,3, +1)
+        kept(i,j,k-1) || _bool_emit_face!(V,coords,Tr, 3, zs[k],   xs[i],xs[i+1], ys[j],ys[j+1], 1,2, -1)
+        kept(i,j,k+1) || _bool_emit_face!(V,coords,Tr, 3, zs[k+1], xs[i],xs[i+1], ys[j],ys[j+1], 1,2, +1)
+    end
+    isempty(Tr) && throw(ErrorException("mesh_boolean: $op of the two solids is empty"))
+    C=Matrix{Float64}(undef,3,length(coords))
+    @inbounds for (n,p) in enumerate(coords); C[1,n]=p[1]; C[2,n]=p[2]; C[3,n]=p[3]; end
+    tm=Matrix{Int32}(undef,3,length(Tr))
+    @inbounds for (n,t) in enumerate(Tr); tm[1,n]=t[1]; tm[2,n]=t[2]; tm[3,n]=t[3]; end
+    return Mesh(C; tris=tm)
+end
+
+# ── SECTION C — general-position exact mesh Boolean (Cork/libigl-style) ─────────────
+
+const _RB3 = NTuple{3,Rational{BigInt}}
+@inline _bl_rat(p) = (Rational{BigInt}(p[1]), Rational{BigInt}(p[2]), Rational{BigInt}(p[3]))
+@inline _bl_sub(a,b) = (a[1]-b[1], a[2]-b[2], a[3]-b[3])
+@inline _bl_cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
+@inline _bl_dot(a,b) = a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+
+# exact rational point where edge (u,v) crosses plane {x : N·(x−P0)=0}. Caller
+# guarantees the edge properly crosses (endpoints strictly on opposite sides).
+function _bl_edge_plane(u::_RB3, v::_RB3, N::_RB3, P0::_RB3)
+    den = _bl_dot(N, _bl_sub(v,u))
+    den == 0 && throw(ErrorException("mesh_boolean: edge parallel to plane in a crossing pair (degeneracy)"))
+    t = _bl_dot(N, _bl_sub(P0,u)) // den
+    return (u[1]+t*(v[1]-u[1]), u[2]+t*(v[2]-u[2]), u[3]+t*(v[3]-u[3]))
+end
+
+# The (at most one) tri-tri intersection segment of fa=(a0,a1,a2), fb=(b0,b1,b2),
+# given exact rational vertices. Returns nothing (no proper crossing), :degenerate
+# (any orient3 sign zero / coplanar — unsupported), or (p,q)::Tuple{_RB3,_RB3}.
+# Branch decisions use the EXACT orient3 predicate on the float points fa*,fb*.
+function _bl_tritri(a0f,a1f,a2f, b0f,b1f,b2f, a0,a1,a2, b0,b1,b2)
+    sb1 = orient3(a0f,a1f,a2f,b0f); sb2 = orient3(a0f,a1f,a2f,b1f); sb3 = orient3(a0f,a1f,a2f,b2f)
+    sa1 = orient3(b0f,b1f,b2f,a0f); sa2 = orient3(b0f,b1f,b2f,a1f); sa3 = orient3(b0f,b1f,b2f,a2f)
+    (sb1==0||sb2==0||sb3==0||sa1==0||sa2==0||sa3==0) && return :degenerate
+    (sb1==sb2==sb3) && return nothing        # neither triangle crosses the other's plane
+    (sa1==sa2==sa3) && return nothing
+    Na = _bl_cross(_bl_sub(a1,a0), _bl_sub(a2,a0))
+    Nb = _bl_cross(_bl_sub(b1,b0), _bl_sub(b2,b0))
+    D  = _bl_cross(Na, Nb)
+    (D[1]==0 && D[2]==0 && D[3]==0) && return :degenerate    # parallel but crossing ⇒ coplanar
+    apts = _RB3[]; averts=((a0,sa1),(a1,sa2),(a2,sa3))
+    for k in 1:3
+        (u,su)=averts[k]; (v,sv)=averts[k%3+1]
+        (su != sv) && push!(apts, _bl_edge_plane(u,v,Nb,b0))
+    end
+    bpts = _RB3[]; bverts=((b0,sb1),(b1,sb2),(b2,sb3))
+    for k in 1:3
+        (u,su)=bverts[k]; (v,sv)=bverts[k%3+1]
+        (su != sv) && push!(bpts, _bl_edge_plane(u,v,Na,a0))
+    end
+    (length(apts)==2 && length(bpts)==2) || return :degenerate
+    pa1=_bl_dot(D,apts[1]); pa2=_bl_dot(D,apts[2])
+    alo,alopt,ahi,ahipt = pa1<=pa2 ? (pa1,apts[1],pa2,apts[2]) : (pa2,apts[2],pa1,apts[1])
+    pb1=_bl_dot(D,bpts[1]); pb2=_bl_dot(D,bpts[2])
+    blo,blopt,bhi,bhipt = pb1<=pb2 ? (pb1,bpts[1],pb2,bpts[2]) : (pb2,bpts[2],pb1,bpts[1])
+    lo,lopt = alo>=blo ? (alo,alopt) : (blo,blopt)
+    hi,hipt = ahi<=bhi ? (ahi,ahipt) : (bhi,bhipt)
+    lo >= hi && return nothing               # intervals disjoint or touch at a point
+    return (lopt, hipt)
+end
+
+# global point registry keyed on EXACT rational coordinate => identical geometric
+# points (whatever pairing produced them) collapse to one id => watertight seam.
+mutable struct _BLReg
+    id::Dict{_RB3,Int32}
+    X::Vector{Float64}; Y::Vector{Float64}; Z::Vector{Float64}
+    RAT::Vector{_RB3}                     # exact rational coord per id (for on-edge tests)
+end
+_bl_reg() = _BLReg(Dict{_RB3,Int32}(), Float64[], Float64[], Float64[], _RB3[])
+function _bl_gid!(R::_BLReg, rp::_RB3)
+    id = get(R.id, rp, Int32(0))
+    id != 0 && return id
+    push!(R.X, Float64(rp[1])); push!(R.Y, Float64(rp[2])); push!(R.Z, Float64(rp[3]))
+    push!(R.RAT, rp)
+    id = Int32(length(R.X)); R.id[rp] = id; return id
+end
+@inline _bl_pt(R::_BLReg,i) = (R.X[i], R.Y[i], R.Z[i])
+
+# ── coplanar-region grouping (exact) ────────────────────────────────────────────
+# A surface's triangles are grouped into maximal coplanar-connected regions (adjacent
+# triangles sharing an edge whose four vertices are coplanar, exact orient3==0). Each
+# region is retriangulated AS A WHOLE (its true outer boundary + chords), so a face's
+# internal triangulation diagonal — an artifact that would otherwise split the shared
+# intersection seam at a spurious point — never becomes a constraint.
+struct _BLRegion
+    faces::Vector{Int}                 # indices into the surface's face list
+    bnd::Vector{NTuple{2,Int32}}       # region boundary edges (global-id pairs)
+    N::_RB3                            # rational normal
+end
+@inline _bl_ekey(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
+
+function _bl_regions(R::_BLReg, faces::Vector{NTuple{3,Int32}})
+    nf=length(faces)
+    e2f=Dict{NTuple{2,Int32},Vector{Int}}()
+    for (fi,t) in enumerate(faces)
+        for e in (_bl_ekey(t[1],t[2]),_bl_ekey(t[2],t[3]),_bl_ekey(t[1],t[3])); push!(get!(e2f,e,Int[]),fi); end
+    end
+    par=collect(1:nf)
+    find(i)=(while par[i]!=i; par[i]=par[par[i]]; i=par[i]; end; i)
+    for (e,fs) in e2f
+        length(fs)==2 || continue
+        t1=faces[fs[1]]; t2=faces[fs[2]]; u,v=e
+        w1=t1[1]; (w1==u||w1==v)&&(w1=t1[2]); (w1==u||w1==v)&&(w1=t1[3])
+        w2=t2[1]; (w2==u||w2==v)&&(w2=t2[2]); (w2==u||w2==v)&&(w2=t2[3])
+        orient3(_bl_pt(R,u),_bl_pt(R,v),_bl_pt(R,w1),_bl_pt(R,w2))==0 && (par[find(fs[1])]=find(fs[2]))
+    end
+    comps=Dict{Int,Vector{Int}}()
+    for fi in 1:nf; push!(get!(comps,find(fi),Int[]),fi); end
+    out=_BLRegion[]
+    for (_,fis) in comps
+        inc=Dict{NTuple{2,Int32},Int}()
+        for fi in fis; t=faces[fi]; for e in (_bl_ekey(t[1],t[2]),_bl_ekey(t[2],t[3]),_bl_ekey(t[1],t[3])); inc[e]=get(inc,e,0)+1; end; end
+        bnd=NTuple{2,Int32}[]; for (e,c) in inc; c==1 && push!(bnd,e); end
+        t0=faces[fis[1]]
+        N=_bl_cross(_bl_sub(_bl_rat(_bl_pt(R,t0[2])),_bl_rat(_bl_pt(R,t0[1]))),
+                    _bl_sub(_bl_rat(_bl_pt(R,t0[3])),_bl_rat(_bl_pt(R,t0[1]))))
+        push!(out,_BLRegion(fis,bnd,N))
+    end
+    return out
+end
+
+# is global vertex v exactly on region boundary edge (a,b): collinear + between (exact)?
+function _bl_on_edge(R::_BLReg, v::Int32, a::Int32, b::Int32)
+    (v==a||v==b) && return true
+    d=_bl_sub(R.RAT[b],R.RAT[a]); w=_bl_sub(R.RAT[v],R.RAT[a]); cr=_bl_cross(w,d)
+    (cr[1]==0&&cr[2]==0&&cr[3]==0) || return false
+    s=_bl_dot(w,d); L=_bl_dot(d,d); return 0<s<L
+end
+
+# Merge chords that meet at a spurious interior degree-2 collinear vertex (an
+# intersection point landing on a face-internal diagonal — the two adjacent triangles
+# of one coplanar face each contribute half of one straight chord). Real seam vertices
+# are never degree-2-collinear (adjacent facets of the OTHER solid bend), so this only
+# removes artifacts and keeps the seam identical on both surfaces.
+function _bl_merge_collinear(R::_BLReg, reg::_BLRegion, chords::Vector{NTuple{2,Int32}}, origset::Set{Int32})
+    onbnd(v) = any(e->_bl_on_edge(R,v,e[1],e[2]), reg.bnd)
+    chords = copy(chords); alive=trues(length(chords))
+    while true
+        adj=Dict{Int32,Vector{Int}}()
+        for ci in 1:length(chords)
+            alive[ci] || continue
+            a,b=chords[ci]; push!(get!(adj,a,Int[]),ci); push!(get!(adj,b,Int[]),ci)
+        end
+        merged=false
+        for (v,cis) in adj
+            (v in origset) && continue
+            length(cis)==2 || continue
+            onbnd(v) && continue
+            (a1,b1)=chords[cis[1]]; (a2,b2)=chords[cis[2]]
+            n1 = a1==v ? b1 : a1; n2 = a2==v ? b2 : a2
+            (n1==n2||n1==v||n2==v) && continue
+            cr=_bl_cross(_bl_sub(R.RAT[v],R.RAT[n1]), _bl_sub(R.RAT[n2],R.RAT[n1]))
+            (cr[1]==0&&cr[2]==0&&cr[3]==0) || continue
+            alive[cis[1]]=false; alive[cis[2]]=false
+            push!(chords,_bl_ekey(n1,n2)); push!(alive,true)
+            merged=true; break
+        end
+        merged || break
+    end
+    return NTuple{2,Int32}[chords[i] for i in 1:length(chords) if alive[i]]
+end
+
+# 2-D crossing-number point-in-polygon over the region boundary loop — keeps only
+# sub-triangles whose centroid is inside a (possibly non-convex) region. A float test
+# suffices here: sub-triangle centroids sit well away from the boundary edges.
+function _bl_pip(cx, cy, bnd2::Vector{NTuple{4,Float64}})
+    cnt=0
+    for (x1,y1,x2,y2) in bnd2
+        ((y1>cy) != (y2>cy)) || continue
+        xint = x1 + (cy-y1)/(y2-y1)*(x2-x1)
+        xint > cx && (cnt+=1)
+    end
+    return isodd(cnt)
+end
+
+# Retriangulate a whole coplanar region: pre-split boundary edges at on-edge chord
+# points (a constructed on-edge point rounds ~1 ulp off the float line through the
+# corners, so a single long edge constraint would make Mesh2D's exact-on-float
+# predicates read a T-junction as a crossing — the vertex chain removes that), add
+# the (collinear-merged) chords, CDT, keep interior triangles, lift + orient to N.
+function _bl_retri_region(R::_BLReg, reg::_BLRegion, faces::Vector{NTuple{3,Int32}},
+                          chords_in::Vector{NTuple{2,Int32}}, origset::Set{Int32})
+    Nrat=reg.N
+    chords = _bl_merge_collinear(R, reg, chords_in, origset)
+    ids = Int32[]
+    for (a,b) in reg.bnd; push!(ids,a); push!(ids,b); end
+    for (a,b) in chords;  push!(ids,a); push!(ids,b); end
+    ids = unique(ids)
+    an = (abs(Nrat[1]),abs(Nrat[2]),abs(Nrat[3]))
+    drop = an[1]>=an[2] ? (an[1]>=an[3] ? 1 : 3) : (an[2]>=an[3] ? 2 : 3)
+    proj(i) = begin p=_bl_pt(R,i); drop==1 ? (p[2],p[3]) : (drop==2 ? (p[1],p[3]) : (p[1],p[2])) end
+    edgeseg = NTuple{2,Int32}[]
+    for (ci,cj) in reg.bnd
+        pci=R.RAT[ci]; pcj=R.RAT[cj]; d=_bl_sub(pcj,pci); L=_bl_dot(d,d)
+        onedge=Tuple{Rational{BigInt},Int32}[]
+        for g in ids
+            (g==ci||g==cj) && continue
+            w=_bl_sub(R.RAT[g],pci); cr=_bl_cross(w,d)
+            (cr[1]==0&&cr[2]==0&&cr[3]==0) || continue
+            s=_bl_dot(w,d); (s>0 && s<L) || continue
+            push!(onedge,(s//L,g))
+        end
+        sort!(onedge, by=x->x[1])
+        chain=vcat(Int32[ci],Int32[g for (_,g) in onedge],Int32[cj])
+        for k in 1:length(chain)-1; push!(edgeseg,(chain[k],chain[k+1])); end
+    end
+    g2local=Dict{Int32,Int}(); xs=Float64[]; ys=Float64[]; back=Dict{NTuple{2,Float64},Int32}()
+    for (li,g) in enumerate(ids)
+        p2=proj(g); push!(xs,p2[1]); push!(ys,p2[2]); g2local[g]=li; back[(p2[1],p2[2])]=g
+    end
+    segs=Tuple{Int,Int}[]
+    for (p,q) in edgeseg; push!(segs,(g2local[p],g2local[q])); end
+    for (p,q) in chords;  push!(segs,(g2local[p],g2local[q])); end
+    T=constrained_delaunay(xs,ys,segs); m2=to_mesh(T)
+    bnd2=NTuple{4,Float64}[]
+    for (a,b) in reg.bnd; pa=proj(a); pb=proj(b); push!(bnd2,(pa[1],pa[2],pb[1],pb[2])); end
+    Nf=(Float64(Nrat[1]),Float64(Nrat[2]),Float64(Nrat[3]))
+    out=NTuple{3,Int32}[]
+    for f in 1:size(m2.tris,2)
+        gs=ntuple(k->begin nd=m2.tris[k,f]; back[(m2.coords[1,nd],m2.coords[2,nd])] end, 3)
+        pc=((proj(gs[1])[1]+proj(gs[2])[1]+proj(gs[3])[1])/3, (proj(gs[1])[2]+proj(gs[2])[2]+proj(gs[3])[2])/3)
+        _bl_pip(pc[1],pc[2],bnd2) || continue        # drop triangles outside a non-convex region
+        p0=_bl_pt(R,gs[1]); p1=_bl_pt(R,gs[2]); p2=_bl_pt(R,gs[3])
+        n=_bl_cross(_bl_sub(_bl_rat(p1),_bl_rat(p0)), _bl_sub(_bl_rat(p2),_bl_rat(p0)))
+        (n[1]==0&&n[2]==0&&n[3]==0) && continue
+        d=Float64(n[1])*Nf[1]+Float64(n[2])*Nf[2]+Float64(n[3])*Nf[3]
+        push!(out, d>=0 ? (gs[1],gs[2],gs[3]) : (gs[1],gs[3],gs[2]))
+    end
+    return out
+end
+
+# AABB of a triangle (min,max) per axis, from float coords
+@inline function _bl_tri_aabb(R,g0,g1,g2)
+    p0=_bl_pt(R,g0);p1=_bl_pt(R,g1);p2=_bl_pt(R,g2)
+    (min(p0[1],p1[1],p2[1]),min(p0[2],p1[2],p2[2]),min(p0[3],p1[3],p2[3])),
+    (max(p0[1],p1[1],p2[1]),max(p0[2],p1[2],p2[2]),max(p0[3],p1[3],p2[3]))
+end
+@inline _bl_aabb_overlap(la,ha,lb,hb) =
+    la[1]<=hb[1]&&lb[1]<=ha[1] && la[2]<=hb[2]&&lb[2]<=ha[2] && la[3]<=hb[3]&&lb[3]<=ha[3]
+
+function _bool_general_boolean(A::Mesh, B::Mesh, op::Symbol)
+    R = _bl_reg()
+    gA = [ _bl_gid!(R, _bl_rat((A.coords[1,i],A.coords[2,i],A.coords[3,i]))) for i in 1:size(A.coords,2) ]
+    gB = [ _bl_gid!(R, _bl_rat((B.coords[1,i],B.coords[2,i],B.coords[3,i]))) for i in 1:size(B.coords,2) ]
+    faceA = [ (gA[A.tris[1,f]],gA[A.tris[2,f]],gA[A.tris[3,f]]) for f in 1:size(A.tris,2) ]
+    faceB = [ (gB[B.tris[1,f]],gB[B.tris[2,f]],gB[B.tris[3,f]]) for f in 1:size(B.tris,2) ]
+    aabbA=[_bl_tri_aabb(R,t...) for t in faceA]; aabbB=[_bl_tri_aabb(R,t...) for t in faceB]
+    origset = Set{Int32}(vcat(gA, gB))
+    regA = _bl_regions(R, faceA); regB = _bl_regions(R, faceB)
+    regOfA = Dict{Int,Int}(); for (ri,rg) in enumerate(regA), fi in rg.faces; regOfA[fi]=ri; end
+    regOfB = Dict{Int,Int}(); for (ri,rg) in enumerate(regB), fi in rg.faces; regOfB[fi]=ri; end
+    chordsA = [NTuple{2,Int32}[] for _ in regA]; chordsB = [NTuple{2,Int32}[] for _ in regB]
+    cutA = falses(length(regA)); cutB = falses(length(regB))
+    for fa in 1:length(faceA)
+        la,ha = aabbA[fa]; g=faceA[fa]
+        a0=_bl_pt(R,g[1]);a1=_bl_pt(R,g[2]);a2=_bl_pt(R,g[3])
+        a0r=_bl_rat(a0);a1r=_bl_rat(a1);a2r=_bl_rat(a2)
+        for fb in 1:length(faceB)
+            _bl_aabb_overlap(la,ha,aabbB[fb][1],aabbB[fb][2]) || continue
+            h=faceB[fb]
+            b0=_bl_pt(R,h[1]);b1=_bl_pt(R,h[2]);b2=_bl_pt(R,h[3])
+            res = _bl_tritri(a0,a1,a2,b0,b1,b2, a0r,a1r,a2r, _bl_rat(b0),_bl_rat(b1),_bl_rat(b2))
+            res === nothing && continue
+            res === :degenerate && throw(ErrorException(
+                "mesh_boolean: non-general-position degeneracy between A-face $fa and B-face $fb " *
+                "(vertex/edge on the other's plane, or coplanar overlap) — unsupported by the general " *
+                "tri-tri path; use axis-aligned inputs for coplanar cases"))
+            p,q = res
+            ip=_bl_gid!(R,p); iq=_bl_gid!(R,q)
+            ip==iq && continue
+            ra=regOfA[fa]; rb=regOfB[fb]
+            push!(chordsA[ra],_bl_ekey(ip,iq)); push!(chordsB[rb],_bl_ekey(ip,iq))
+            cutA[ra]=true; cutB[rb]=true
+        end
+    end
+    subA = NTuple{3,Int32}[]
+    for (ri,rg) in enumerate(regA)
+        if !cutA[ri]; for fi in rg.faces; push!(subA, faceA[fi]); end
+        else; append!(subA, _bl_retri_region(R, rg, faceA, chordsA[ri], origset)); end
+    end
+    subB = NTuple{3,Int32}[]
+    for (ri,rg) in enumerate(regB)
+        if !cutB[ri]; for fi in rg.faces; push!(subB, faceB[fi]); end
+        else; append!(subB, _bl_retri_region(R, rg, faceB, chordsB[ri], origset)); end
+    end
+    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))
+    cen(t) = ((_bl_pt(R,t[1])[1]+_bl_pt(R,t[2])[1]+_bl_pt(R,t[3])[1])/3,
+              (_bl_pt(R,t[1])[2]+_bl_pt(R,t[2])[2]+_bl_pt(R,t[3])[2])/3,
+              (_bl_pt(R,t[1])[3]+_bl_pt(R,t[2])[3]+_bl_pt(R,t[3])[3])/3)
+    inB = [ _inside_surface(cen(t), dir, B) for t in subA ]     # classify vs ORIGINAL solids
+    inA = [ _inside_surface(cen(t), dir, A) for t in subB ]
+    keptA = NTuple{3,Int32}[]; keptB = NTuple{3,Int32}[]
+    if op === :union
+        for (i,t) in enumerate(subA); inB[i] || push!(keptA,t); end
+        for (i,t) in enumerate(subB); inA[i] || push!(keptB,t); end
+    elseif op === :intersection
+        for (i,t) in enumerate(subA); inB[i] && push!(keptA,t); end
+        for (i,t) in enumerate(subB); inA[i] && push!(keptB,t); end
+    else # difference A∖B: A outside B, plus B inside A with reversed winding
+        for (i,t) in enumerate(subA); inB[i] || push!(keptA,t); end
+        for (i,t) in enumerate(subB); inA[i] && push!(keptB,(t[1],t[3],t[2])); end
+    end
+    allt = vcat(keptA, keptB)
+    isempty(allt) && throw(ErrorException("mesh_boolean: $op of the two solids is empty"))
+    used = sort!(unique(vcat([t[1] for t in allt],[t[2] for t in allt],[t[3] for t in allt])))
+    nid = Dict{Int32,Int32}(); for (k,g) in enumerate(used); nid[g]=Int32(k); end
+    C=Matrix{Float64}(undef,3,length(used))
+    for (k,g) in enumerate(used); p=_bl_pt(R,g); C[1,k]=p[1]; C[2,k]=p[2]; C[3,k]=p[3]; end
+    tm=Matrix{Int32}(undef,3,length(allt))
+    for (j,t) in enumerate(allt); tm[1,j]=nid[t[1]]; tm[2,j]=nid[t[2]]; tm[3,j]=nid[t[3]]; end
+    return Mesh(C; tris=tm)
+end
+
+# ── SECTION D — public entry point ─────────────────────────────────────────────────
+
+"""
+    mesh_boolean(A::Mesh, B::Mesh, op::Symbol) -> Mesh
+
+Native mesh-Boolean CSG of two closed, watertight, manifold triangulated solids
+`A`, `B`. `op` ∈ (`:union`, `:intersection`, `:difference` = A∖B). Returns the
+closed, watertight, outward-oriented surface `Mesh` of the result (fillable by
+[`recover_boundary`](@ref)), or THROWS an explicit blocker naming an unsupported
+degeneracy — never a silently wrong surface. Axis-aligned inputs (boxes / box-unions,
+including every coplanar shared-face case) take an exact plane-arrangement path whose
+volume is the exact sum of grid-cell volumes; general-position inputs (e.g.
+box × cylinder) take a Cork/libigl-style exact tri-tri + Mesh2D-CDT path.
+"""
+function mesh_boolean(A::Mesh, B::Mesh, op::Symbol)
+    (op === :union || op === :intersection || op === :difference) ||
+        throw(ArgumentError("mesh_boolean: op must be :union, :intersection, or :difference (got $op)"))
+    Ao = _bool_prepare(A, "A"); Bo = _bool_prepare(B, "B")
+    r = (_bool_is_axis_aligned(Ao) && _bool_is_axis_aligned(Bo)) ?
+        _bool_axis_aligned_boolean(Ao, Bo, op) : _bool_general_boolean(Ao, Bo, op)
+    wt, mf, nb, mx = _bool_watertight(r)
+    (wt && mf) || throw(ErrorException(
+        "mesh_boolean: assembled $op result is not watertight/manifold " *
+        "(boundary edges=$nb, max edge incidence=$mx) — refusing to return a leaky surface"))
+    return r
 end
 
 end # module Mesh3D
