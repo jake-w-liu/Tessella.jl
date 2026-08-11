@@ -7,15 +7,16 @@ path). Each builder returns a **closed, manifold, outward-oriented** triangle
 [`mesh_volume`](@ref). All are verified `Heal.is_meshable` and, when filled, to
 reproduce the exact analytic volume.
 
-These are the primitives the ASCENT `solid_model` emits (boxes, cylinders, and
-holes/bores); a full Boolean CSG kernel that combines them into the literal
-enclosure geometry is the remaining Stage-5 work.
+These are the primitives the ASCENT `solid_model` emits (boxes, cylinders, holes/
+bores, and axis-aligned cavities via [`box_shell_surface`](@ref)); a full Boolean
+CSG kernel that combines them into the literal enclosure geometry is the remaining
+Stage-5 work.
 """
 module Geometry
 
 using ..MeshTypes: Mesh
 
-export box_surface, cylinder_surface, box_tunnel_surface
+export box_surface, cylinder_surface, box_tunnel_surface, box_shell_surface
 
 # ── box ─────────────────────────────────────────────────────────────────────────
 """
@@ -93,6 +94,37 @@ function box_tunnel_surface(ox0,ox1, oy0,oy1, z0,z1, ix0,ix1, iy0,iy1)
     C=Matrix{Float64}(undef,3,length(V)); for (k,p) in enumerate(V); C[:,k]=[p...]; end
     tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end
     return Mesh(C; tris=tm)
+end
+
+# ── hollow box (axis-aligned Boolean difference: outer box MINUS inner cavity) ──
+"""
+    box_shell_surface(ox0,ox1, oy0,oy1, oz0,oz1, ix0,ix1, iy0,iy1, iz0,iz1) -> Mesh
+
+Closed boundary surface of the axis-aligned outer box `[ox0,ox1]×[oy0,oy1]×[oz0,oz1]`
+MINUS a strictly-interior inner box `[ix0,ix1]×[iy0,iy1]×[iz0,iz1]` — a hollow box
+(cavity / "case shell"), the native axis-aligned CSG difference. The inner box must
+lie strictly inside the outer one (validated).
+
+The boundary has **two** components: the outer box surface (12 outward triangles,
+the [`box_surface`](@ref) pattern) and the inner cavity surface (the same pattern
+with **reversed** triangle winding, so its normals face the cavity interior — i.e.
+point out of the solid shell). Together they form a closed, manifold, 2-component
+surface with zero open edges, ready for [`Mesh3D.tetrahedralize`](@ref) — which
+fills the shell and reports the exact volume `outer − inner`.
+"""
+function box_shell_surface(ox0::Real,ox1::Real, oy0::Real,oy1::Real, oz0::Real,oz1::Real,
+                           ix0::Real,ix1::Real, iy0::Real,iy1::Real, iz0::Real,iz1::Real)
+    (ox0<ix0<ix1<ox1 && oy0<iy0<iy1<oy1 && oz0<iz0<iz1<oz1) ||
+        throw(ArgumentError("box_shell_surface: inner box must be strictly inside the outer"))
+    Co = Float64[ox0 ox1 ox1 ox0 ox0 ox1 ox1 ox0; oy0 oy0 oy1 oy1 oy0 oy0 oy1 oy1; oz0 oz0 oz0 oz0 oz1 oz1 oz1 oz1]
+    Ci = Float64[ix0 ix1 ix1 ix0 ix0 ix1 ix1 ix0; iy0 iy0 iy1 iy1 iy0 iy0 iy1 iy1; iz0 iz0 iz0 iz0 iz1 iz1 iz1 iz1]
+    C = hcat(Co, Ci)                                     # inner vertices are 9..16
+    Fo = [(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),
+          (2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]   # outer: outward normals
+    Fi = [(a+8, c+8, b+8) for (a,b,c) in Fo]             # inner: +8 offset, reversed winding
+    F = vcat(Fo, Fi)
+    t = Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); t[:,k]=Int32[f...]; end
+    return Mesh(C; tris=t)
 end
 
 @inline _cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])

@@ -8,19 +8,23 @@ on finalized tetrahedral [`Mesh`](@ref)es:
   volume, and a sliver count (the honest quality report a solver needs).
 * [`smooth_laplacian`](@ref) — boundary-preserving Laplacian smoothing of interior
   nodes, with a positive-volume guard so a move never inverts an incident tet.
+* [`smooth_odt`](@ref) — boundary-preserving optimal-Delaunay-triangulation (ODT)
+  smoothing: interior nodes move to the volume-weighted average of the circumcenters
+  of their incident tets, under the same positive-volume guard.
 
-Both preserve total volume (boundary fixed) and mesh validity. Smoothing improves
-the *mean* dihedral and typically reduces the sliver count; it is **not** min-angle
-optimal (Laplacian relaxation can leave or slightly worsen an individual worst
-element — genuine sliver removal needs targeted flips/exudation, tracked as
-remaining Stage-4 work). All of these properties are verified in the tests.
+Both smoothers preserve total volume (boundary fixed) and mesh validity, and lift
+the *mean* dihedral; neither is min-angle optimal (relaxation can leave or slightly
+worsen an individual worst element — genuine sliver removal needs targeted flips/
+exudation, tracked as remaining Stage-4 work). The two use different node targets
+(edge-neighbour centroid vs. volume-weighted circumcenter) and neither dominates
+the other on mean dihedral in general. These properties are verified in the tests.
 """
 module Optimize
 
 using ..MeshTypes: Mesh, nnodes, ntets, node, tet_signed_volume, tet_dihedral_extrema,
                    tet_radius_edge, tet_volume, boundary_faces, validate
 
-export mesh_quality, smooth_laplacian, TetQuality
+export mesh_quality, smooth_laplacian, smooth_odt, TetQuality
 
 struct TetQuality
     n_tets::Int
@@ -109,6 +113,89 @@ function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
         end
     end
     return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+end
+
+"""
+    smooth_odt(m; iters=5) -> Mesh
+
+Boundary-preserving optimal-Delaunay-triangulation (ODT) smoothing. Each interior
+node is moved to the **volume-weighted average of the circumcenters** of its
+incident tets (the ODT node update), but only if the move keeps every incident tet
+positively-oriented (otherwise it is skipped, so validity and total volume are
+preserved). Boundary nodes (on any boundary face) stay fixed; near-zero-volume
+incident tets are skipped when averaging (their circumcenter is ill-conditioned).
+Like [`smooth_laplacian`](@ref) it lifts the *mean* dihedral and is not min-angle
+optimal (targeted flips/exudation remain the fix for an individual worst sliver);
+it simply uses a different node target. Returns a new smoothed `Mesh`.
+"""
+function smooth_odt(m::Mesh; iters::Integer=5)
+    nn = nnodes(m)
+    coords = copy(m.coords)
+    isboundary = _boundary_nodes(m)
+    inc = _node_tets(m)
+    @inbounds for _ in 1:iters
+        for v in 1:nn
+            isboundary[v] && continue
+            isempty(inc[v]) && continue
+            # ODT target: circumcenters of incident tets weighted by their volume
+            sx=0.0; sy=0.0; sz=0.0; wsum=0.0
+            for t in inc[v]
+                a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
+                pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
+                pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
+                vol = tet_volume(pa,pb,pc,pd)
+                vol <= _odt_voleps(pa,pb,pc,pd) && continue    # skip degenerate tet
+                cc = _tet_circumcenter(pa,pb,pc,pd)
+                (isfinite(cc[1]) && isfinite(cc[2]) && isfinite(cc[3])) || continue
+                sx += vol*cc[1]; sy += vol*cc[2]; sz += vol*cc[3]; wsum += vol
+            end
+            wsum > 0 || continue                               # no usable incident tet
+            tx = sx/wsum; ty = sy/wsum; tz = sz/wsum
+            # accept only if no incident tet inverts (positive signed volume kept)
+            ox=coords[1,v]; oy=coords[2,v]; oz=coords[3,v]
+            coords[1,v]=tx; coords[2,v]=ty; coords[3,v]=tz
+            ok = true
+            for t in inc[v]
+                a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
+                pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
+                pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
+                if tet_signed_volume(pa,pb,pc,pd) <= 0; ok=false; break; end
+            end
+            ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
+        end
+    end
+    return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+end
+
+# Circumcenter of tet (a,b,c,d): solve |x−a|=|x−b|=|x−c|=|x−d|, denom = 2·A·(B×C) =
+# 12·signed volume (same system as MeshTypes.tet_circumradius) but returning the
+# absolute point. A degenerate (flat) tet gives denom≈0 → non-finite coords, which
+# the caller filters out.
+@inline function _tet_circumcenter(a, b, c, d)
+    Ax=b[1]-a[1]; Ay=b[2]-a[2]; Az=b[3]-a[3]
+    Bx=c[1]-a[1]; By=c[2]-a[2]; Bz=c[3]-a[3]
+    Cx=d[1]-a[1]; Cy=d[2]-a[2]; Cz=d[3]-a[3]
+    bcx=By*Cz-Bz*Cy; bcy=Bz*Cx-Bx*Cz; bcz=Bx*Cy-By*Cx        # B×C
+    cax=Cy*Az-Cz*Ay; cay=Cz*Ax-Cx*Az; caz=Cx*Ay-Cy*Ax        # C×A
+    abx=Ay*Bz-Az*By; aby=Az*Bx-Ax*Bz; abz=Ax*By-Ay*Bx        # A×B
+    denom=2.0*(Ax*bcx+Ay*bcy+Az*bcz)                         # 12·signed volume
+    la=Ax*Ax+Ay*Ay+Az*Az; lb=Bx*Bx+By*By+Bz*Bz; lc=Cx*Cx+Cy*Cy+Cz*Cz
+    ox=(la*bcx+lb*cax+lc*abx)/denom
+    oy=(la*bcy+lb*cay+lc*aby)/denom
+    oz=(la*bcz+lb*caz+lc*abz)/denom
+    return (a[1]+ox, a[2]+oy, a[3]+oz)                       # absolute circumcenter
+end
+
+# Scale-invariant "degenerate tet" volume threshold: a tet whose volume is a
+# vanishing fraction of its longest-edge cube is numerically flat (circumcenter
+# blows up). Per-tet, so non-uniform meshes are handled correctly.
+@inline function _odt_voleps(a, b, c, d)
+    P = (a, b, c, d); e2 = 0.0
+    @inbounds for i in 1:4, j in i+1:4
+        dx=P[i][1]-P[j][1]; dy=P[i][2]-P[j][2]; dz=P[i][3]-P[j][3]
+        l2=dx*dx+dy*dy+dz*dz; l2 > e2 && (e2 = l2)
+    end
+    return 1e-12 * e2 * sqrt(e2)                             # 1e-12 · (max edge)³
 end
 
 # nodes lying on any boundary face (fixed during smoothing)

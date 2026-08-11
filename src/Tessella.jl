@@ -39,13 +39,13 @@ include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 
 using .MeshTypes: Mesh, validate, mesh_crc
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tets_per_region
-using .Optimize: smooth_laplacian, mesh_quality
+using .Optimize: smooth_laplacian, smooth_odt, mesh_quality
 using .Heal: is_meshable
 
 export mesh_volume, mesh_planar, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
-export tetrahedralize, tetrahedralize_multi, tets_per_region, smooth_laplacian
+export tetrahedralize, tetrahedralize_multi, tets_per_region, smooth_laplacian, smooth_odt
 
 """
     stage() -> Int

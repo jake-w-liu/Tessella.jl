@@ -1,8 +1,14 @@
-# ── Stage-6 CRC suite: quadratic (P2) tet generation + type-11 I/O ──────────────
+# ── Stage-6 CRC suite: quadratic (P2) tet generation + curving + type-11 I/O ────
 #
 # Correctness  : exactly one shared mid-node per edge (node count = corners + edges,
 #                cross-checked against MeshTypes.unique_edges); corners preserved;
 #                edge nodes are exact midpoints; straight P2 volume == linear volume.
+# Curving      : only genuine BOUNDARY-surface edges are curved (interior chords are
+#                left untouched — regression against the "both corners on surface"
+#                bug that tangled the volume); curved nodes land exactly on the true
+#                surface; NO element is inverted (checked by an INDEPENDENT P2
+#                Jacobian sampler, not the production guard); the validity guard
+#                reverts a projection that would invert an incident element.
 # Robustness   : single tet, filled volume mesh, empty mesh.
 # Completeness : gmsh type-11 file writes and reads back to the same linear
 #                connectivity (CRC) — solver-consumable.
@@ -11,11 +17,81 @@ using Test
 using Tessella.MeshTypes
 using Tessella.Mesh3D
 using Tessella.Geometry
+using Tessella.Heal
 using Tessella.HighOrder
 using Tessella.IO
 
 lvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
               for t in 1:ntets(m); init=0.0)
+
+# ── INDEPENDENT P2 Jacobian oracle (loop-form gradients; distinct from the module's
+#    hand-expanded _p2_grads and its 20-node sample set) ───────────────────────────
+function _oracle_grads(r, s, t)
+    L = (1-r-s-t, r, s, t)
+    dL = ((-1.0,-1.0,-1.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0))
+    g = Vector{NTuple{3,Float64}}(undef, 10)
+    for i in 1:4; c = 4L[i]-1; g[i] = (c*dL[i][1], c*dL[i][2], c*dL[i][3]); end
+    for (k,(a,b)) in enumerate(((1,2),(2,3),(3,1),(1,4),(2,4),(3,4)))
+        g[4+k] = (4*(L[a]*dL[b][1]+L[b]*dL[a][1]), 4*(L[a]*dL[b][2]+L[b]*dL[a][2]), 4*(L[a]*dL[b][3]+L[b]*dL[a][3]))
+    end
+    return g
+end
+function _oracle_detJ(p::P2Mesh, t, r, s, u)
+    g = _oracle_grads(r, s, u); J = zeros(3,3)
+    for k in 1:10
+        v = p.tet10[k,t]
+        for d in 1:3
+            J[d,1]+=g[k][1]*p.coords[d,v]; J[d,2]+=g[k][2]*p.coords[d,v]; J[d,3]+=g[k][3]*p.coords[d,v]
+        end
+    end
+    J[1,1]*(J[2,2]*J[3,3]-J[2,3]*J[3,2]) - J[1,2]*(J[2,1]*J[3,3]-J[2,3]*J[3,1]) + J[1,3]*(J[2,1]*J[3,2]-J[2,2]*J[3,1])
+end
+# Independent DENSER sample set: the degree-6 barycentric lattice (i,j,k)/6 → 84
+# points, distinct from and finer than the module guard's degree-3 (20-node) set,
+# so it catches any between-node Jacobian dip the guard could miss. Deterministic.
+const _ORACLE_PTS = let S = NTuple{3,Float64}[]
+    for j in 0:6, k in 0:6-j, l in 0:6-j-k; push!(S, (j/6, k/6, l/6)); end
+    S
+end
+function _oracle_min_detJ(p::P2Mesh)
+    mn = Inf
+    for t in 1:ntets(p), (r,s,u) in _ORACLE_PTS; mn = min(mn, _oracle_detJ(p, t, r, s, u)); end
+    mn
+end
+_straight_mid(p, a, b) = ((p.coords[1,a]+p.coords[1,b])/2, (p.coords[2,a]+p.coords[2,b])/2, (p.coords[3,a]+p.coords[3,b])/2)
+
+# mid-node → its two corner endpoints (independent bookkeeping)
+function _endpoints(p::P2Mesh)
+    slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4)); e=Dict{Int32,Tuple{Int32,Int32}}()
+    for t in 1:ntets(p), (sl,i,j) in slots; e[p.tet10[sl,t]]=(p.tet10[i,t],p.tet10[j,t]); end
+    e
+end
+function _boundary_edge_set(m::Mesh)
+    bf,_ = boundary_faces(m.tets); s=Set{Tuple{Int32,Int32}}()
+    for f in bf; push!(s,minmax(f[1],f[2]));push!(s,minmax(f[2],f[3]));push!(s,minmax(f[1],f[3])); end
+    s
+end
+
+# closed sphere of radius R: octahedron subdivided twice, verts snapped to |p|=R.
+function _sphere_surface(R)
+    octaV=[(R,0.,0.),(-R,0.,0.),(0.,R,0.),(0.,-R,0.),(0.,0.,R),(0.,0.,-R)]
+    octaF=[(1,3,5),(1,6,3),(1,5,4),(1,4,6),(2,5,3),(2,3,6),(2,4,5),(2,6,4)]
+    snap(q)=(sc=R/sqrt(q[1]^2+q[2]^2+q[3]^2);(q[1]*sc,q[2]*sc,q[3]*sc))
+    function subdivide(V,F)
+        verts=collect(V); mid=Dict{Tuple{Int,Int},Int}()
+        gm(a,b)=get!(mid,(min(a,b),max(a,b))) do
+            pa=verts[a];pb=verts[b]; push!(verts,snap(((pa[1]+pb[1])/2,(pa[2]+pb[2])/2,(pa[3]+pb[3])/2))); length(verts)
+        end
+        nF=Tuple{Int,Int,Int}[]
+        for (a,b,c) in F; ab=gm(a,b);bc=gm(b,c);ca=gm(c,a)
+            push!(nF,(a,ab,ca));push!(nF,(ab,b,bc));push!(nF,(ca,bc,c));push!(nF,(ab,bc,ca)); end
+        verts,nF
+    end
+    V1,F1=subdivide(octaV,octaF); V2,F2=subdivide(V1,F1)
+    C=Matrix{Float64}(undef,3,length(V2)); for (k,v) in enumerate(V2); C[:,k]=[v...]; end
+    Tm=Matrix{Int32}(undef,3,length(F2)); for (k,f) in enumerate(F2); Tm[:,k]=Int32[f...]; end
+    Mesh(C; tris=Tm)
+end
 
 @testset "HighOrder P2 (Stage 6)" begin
 
@@ -24,11 +100,10 @@ lvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3
         p = p2_tetmesh(m)
         @test size(p.tet10) == (10, 1)
         @test size(p.coords, 2) == 4 + 6            # 4 corners + 6 edges
-        # corners unchanged
-        @test p.coords[:,1:4] == m.coords
-        # node 5 = midpoint of edge (1,2) = (0.5,0,0)
-        @test p.coords[:, p.tet10[5,1]] ≈ [0.5,0.0,0.0]
+        @test p.coords[:,1:4] == m.coords           # corners unchanged
+        @test p.coords[:, p.tet10[5,1]] ≈ [0.5,0.0,0.0]   # mid of edge (1,2)
         @test p2_volume(p) ≈ 1/6 rtol=1e-12
+        @test p2_min_jacobian(p) ≈ 6*(1/6) rtol=1e-12     # straight ⇒ detJ = 6·vol > 0
     end
 
     @testset "shared mid-nodes: node count = corners + unique edges" begin
@@ -52,24 +127,96 @@ lvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3
         @test validate(f.mesh).ok
     end
 
-    @testset "curve_to_cylinder!: mid-nodes land on the true cylinder" begin
+    @testset "curve_to_cylinder!: curved nodes on the true cylinder, NO inversion" begin
         R = 2.0
         m = tetrahedralize(cylinder_surface((0.,0,0),(0.,0,1),R,5.0; nθ=16, nz=3))
         p = p2_tetmesh(m)
+        @test p2_min_jacobian(p) > 0                       # straight mesh is valid
         nc = curve_to_cylinder!(p, (0.,0,0), (0.,0,1), R)
-        @test nc > 0
-        # every mid-node whose both endpoints are on the lateral wall is now exactly
-        # at radius R (a genuine curved P2 edge), not on the straight chord.
-        slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4))
-        endp=Dict{Int32,Tuple{Int32,Int32}}()
-        for t in 1:ntets(p), (sl,i,j) in slots; endp[p.tet10[sl,t]]=(p.tet10[i,t],p.tet10[j,t]); end
-        rad(v)=sqrt(p.coords[1,v]^2 + p.coords[2,v]^2)
-        maxdev = 0.0
-        for (mid,(a,b)) in endp
-            (abs(rad(a)-R)<1e-6 && abs(rad(b)-R)<1e-6) || continue
-            maxdev = max(maxdev, abs(rad(mid)-R))
+        @test nc > 0                                       # boundary-wall edges were curved
+        # CORE: no element inverted — verified by BOTH the module guard's node set
+        # and an INDEPENDENT, finer sampler (distinct gradients + degree-6 lattice).
+        @test p2_min_jacobian(p) > 0
+        @test _oracle_min_detJ(p) > 0
+        # Each boundary-wall mid is EITHER curved exactly onto the cylinder OR left on
+        # its straight chord (the validity guard reverts a curve that would invert an
+        # incident element — a legitimate outcome). Count the curved ones; it is `nc`.
+        e = _endpoints(p); be = _boundary_edge_set(m)
+        rad(v) = sqrt(p.coords[1,v]^2 + p.coords[2,v]^2)
+        onwall(v) = abs(rad(v) - R) <= 1e-6*R              # tol > SoS perturbation (~5e-8)
+        curved = 0
+        for (mid,(a,b)) in e
+            (onwall(a) && onwall(b) && minmax(a,b) in be) || continue
+            on_cyl = abs(rad(mid) - R) < 1e-9
+            straight = (p.coords[1,mid],p.coords[2,mid],p.coords[3,mid]) == _straight_mid(p,a,b)
+            @test on_cyl || straight                       # curved onto the wall, or reverted
+            on_cyl && (curved += 1)
         end
-        @test maxdev < 1e-12                     # curved nodes exactly on the cylinder
+        # every displaced mid lands on the cylinder, so the on-wall count ≥ nc (it
+        # also includes vertical wall edges whose straight midpoint is already at R).
+        @test curved >= nc && nc > 0
+    end
+
+    @testset "curve_to_surface! (sphere): interior chords untouched, boundary curved" begin
+        R = 1.7
+        sphere = _sphere_surface(R)
+        @test is_meshable(sphere)[1]                       # watertight, oriented, manifold
+        m = tetrahedralize(sphere)
+        @test validate(m).ok && is_closed_manifold(m)
+        p = p2_tetmesh(m)
+        @test p2_min_jacobian(p) > 0                       # straight mesh valid
+
+        proj(x,y,z)   = (s = R/sqrt(x^2+y^2+z^2); (x*s, y*s, z*s))
+        onsurf(x,y,z) = abs(sqrt(x^2+y^2+z^2) - R) <= 1e-6*R
+        nc = curve_to_surface!(p, proj, onsurf)
+        @test nc > 0
+
+        # CORE fix: NO element inverted (was 127/166 with the "both corners" bug),
+        # by the independent finer oracle AND the module's own metric.
+        @test _oracle_min_detJ(p) > 0
+        @test p2_min_jacobian(p) > 0
+
+        # Partition mid-nodes whose BOTH corner endpoints are on the sphere into
+        # boundary-surface edges vs interior chords, using an INDEPENDENT recompute.
+        e = _endpoints(p); be = _boundary_edge_set(m)
+        rad(v) = sqrt(p.coords[1,v]^2 + p.coords[2,v]^2 + p.coords[3,v]^2)
+        onS(v) = abs(rad(v) - R) <= 1e-6*R
+        curved_bnd = 0; interior_seen = 0
+        for (mid,(a,b)) in e
+            (onS(a) && onS(b)) || continue
+            here = (p.coords[1,mid],p.coords[2,mid],p.coords[3,mid])
+            if minmax(a,b) in be
+                # boundary edge: curved exactly onto the sphere, or reverted (left straight)
+                @test abs(rad(mid) - R) < 1e-9 || here == _straight_mid(p,a,b)
+                abs(rad(mid) - R) < 1e-9 && (curved_bnd += 1)
+            else
+                interior_seen += 1
+                # REGRESSION: an interior chord's mid is byte-identical to its straight
+                # midpoint — NEVER moved (the old "both corners on surface" code snapped
+                # every such mid out onto the sphere, tangling 127/166 elements).
+                @test here == _straight_mid(p,a,b)
+            end
+        end
+        @test interior_seen > 0                            # interior chords do exist here
+        @test curved_bnd == nc && curved_bnd > 0           # all curves are boundary-surface edges
+    end
+
+    @testset "validity guard reverts an inverting projection" begin
+        # A single reference tet: all 4 faces are boundary ⇒ all 6 edges qualify.
+        # `onedge12` marks only the two corners of edge (1,2) (they lie on the x-axis);
+        # `far` would drag that edge's mid out to (5,0,0), folding the element.
+        m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tets=reshape(Int32[1,2,3,4],4,1))
+        onedge12(x,y,z) = abs(y) < 1e-12 && abs(z) < 1e-12
+        far(x,y,z) = (5.0, 0.0, 0.0)
+        # self-validating: placing the mid at (5,0,0) really does invert the element.
+        bad = p2_tetmesh(m); bad.coords[:, bad.tet10[5,1]] = [5.0, 0.0, 0.0]
+        @test p2_min_jacobian(bad) < 0                         # the projection WOULD invert
+        # the guard must therefore refuse it, leaving the mesh straight and valid.
+        p = p2_tetmesh(m)
+        nc = curve_to_surface!(p, far, onedge12)
+        @test nc == 0                                          # only qualifying move is reverted
+        @test p.coords[:, p.tet10[5,1]] == [0.5, 0.0, 0.0]     # edge-(1,2) mid unchanged
+        @test p2_min_jacobian(p) > 0                           # still valid (≈ straight)
     end
 
     @testset "empty mesh" begin
@@ -77,5 +224,8 @@ lvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3
         p = p2_tetmesh(e)
         @test size(p.tet10, 2) == 0
         @test p2_volume(p) == 0.0
+        @test p2_min_jacobian(p) == 0.0
+        @test curve_to_cylinder!(p, (0.,0,0), (0.,0,1), 1.0) == 0
+        @test curve_to_surface!(p, (x,y,z)->(x,y,z), (x,y,z)->true) == 0
     end
 end

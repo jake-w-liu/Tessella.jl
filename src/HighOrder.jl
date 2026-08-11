@@ -8,16 +8,23 @@ one shared node at the midpoint of every edge, in gmsh's type-11 node order
 
 Straight-sided P2 is geometrically identical to the linear mesh (edge nodes are
 exact midpoints) — the total volume is unchanged — and is what a P2 FEM solver
-consumes. *Curving* the edge nodes onto the true geometry (for curved-boundary
-accuracy) needs the geometry model and is the remaining piece.
+consumes. [`curve_to_cylinder!`](@ref) / [`curve_to_surface!`](@ref) then curve the
+edge nodes onto the true boundary geometry for curved-boundary accuracy.
+
+Curving is done safely: only mid-nodes on genuine **boundary-surface edges** are
+moved (never interior chords — moving those tangles the volume), and every
+projection is reverted if it would drive an incident element's Jacobian
+non-positive at the P2 sample nodes, so the result never contains an inverted
+element (a strong sampled validity guard, not a formal global-positivity proof).
 """
 module HighOrder
 
-using ..MeshTypes: Mesh, node, tet_volume
+using ..MeshTypes: Mesh, node, tet_volume, boundary_faces
 import ..MeshTypes: nnodes, ntets     # extended for P2Mesh
 using Printf: @printf
 
-export P2Mesh, p2_tetmesh, p2_volume, write_msh_p2, curve_to_cylinder!
+export P2Mesh, p2_tetmesh, p2_volume, write_msh_p2,
+       curve_to_cylinder!, curve_to_surface!, p2_min_jacobian
 
 """
     P2Mesh(coords, tet10)
@@ -79,54 +86,211 @@ function p2_volume(p::P2Mesh)
     return v
 end
 
-"""
-    curve_to_cylinder!(p::P2Mesh, center, axis, radius; rtol=1e-6) -> n_curved
+# ════════════════════════════════════════════════════════════════════════════════
+# P2 element validity — Jacobian of the isoparametric map at the sample nodes.
+# ════════════════════════════════════════════════════════════════════════════════
+# Reference tet corners N1=(0,0,0),N2=(1,0,0),N3=(0,1,0),N4=(0,0,1);
+# barycentric L1=1-r-s-t, L2=r, L3=s, L4=t.  Shape functions (type-11 order):
+#   corner i : Li(2Li-1)  ->  grad = (4Li-1)·grad(Li)
+#   edge(a,b): 4·La·Lb    ->  grad = 4·(La·grad(Lb) + Lb·grad(La))
+# with grad(L1)=(-1,-1,-1), grad(L2)=(1,0,0), grad(L3)=(0,1,0), grad(L4)=(0,0,1).
+@inline function _p2_grads(r::Float64, s::Float64, t::Float64)
+    L1=1.0-r-s-t; L2=r; L3=s; L4=t
+    g1=(-(4L1-1), -(4L1-1), -(4L1-1))
+    g2=(4L2-1, 0.0, 0.0)
+    g3=(0.0, 4L3-1, 0.0)
+    g4=(0.0, 0.0, 4L4-1)
+    # edge(a,b) = 4(La·grad Lb + Lb·grad La)
+    g5=(4*(L1*1.0 + L2*(-1.0)), 4*(L2*(-1.0)),           4*(L2*(-1.0)))          # (1,2)
+    g6=(4*(L3*1.0),             4*(L2*1.0),               0.0)                    # (2,3)
+    g7=(4*(L3*(-1.0)),          4*(L1*1.0 + L3*(-1.0)),   4*(L3*(-1.0)))          # (3,1)
+    g8=(4*(L4*(-1.0)),          4*(L4*(-1.0)),            4*(L1*1.0 + L4*(-1.0))) # (1,4)
+    g9=(4*(L4*1.0),             0.0,                      4*(L2*1.0))             # (2,4)
+    g10=(0.0,                   4*(L4*1.0),               4*(L3*1.0))             # (3,4)
+    return (g1,g2,g3,g4,g5,g6,g7,g8,g9,g10)
+end
 
-Curve the quadratic mesh onto a cylinder: every edge-mid node whose *both*
-endpoints lie on the lateral surface (distance `radius` from the axis) is
-projected radially onto the exact cylinder — turning the straight chord into a
-true curved P2 edge. Returns the number of nodes moved. This is genuine
-curved-boundary high-order for a known primitive; the flat caps are untouched.
+# The degree-3 Lagrange lattice of the reference tet — barycentric (i,j,k,l)/3 with
+# i+j+k+l=3 → 20 nodes (4 corners, 2 per edge, 1 per face). These are exactly where
+# a curved P2 edge tangles an incident element, so they make a discriminating
+# sampled validity check. Precomputed shape-gradients at each node (const).
+const _JAC_NODES = let pts = NTuple{3,Float64}[]
+    for j in 0:3, k in 0:3-j, l in 0:3-j-k
+        push!(pts, (j/3, k/3, l/3))   # (r,s,t) = (L2,L3,L4)
+    end
+    Tuple(_p2_grads(r,s,t) for (r,s,t) in pts)
+end
+
+@inline function _detJ(coords, tet10, t::Integer, grads)
+    j11=0.0;j12=0.0;j13=0.0;j21=0.0;j22=0.0;j23=0.0;j31=0.0;j32=0.0;j33=0.0
+    @inbounds for k in 1:10
+        v=tet10[k,t]; x=coords[1,v]; y=coords[2,v]; z=coords[3,v]; g=grads[k]
+        j11+=x*g[1]; j12+=x*g[2]; j13+=x*g[3]
+        j21+=y*g[1]; j22+=y*g[2]; j23+=y*g[3]
+        j31+=z*g[1]; j32+=z*g[2]; j33+=z*g[3]
+    end
+    return j11*(j22*j33-j23*j32) - j12*(j21*j33-j23*j31) + j13*(j21*j32-j22*j31)
+end
+
+# min Jacobian determinant of P2 tet `t` over the degree-3 sample nodes.
+@inline function _p2_min_detJ(coords, tet10, t::Integer)
+    mn = Inf
+    for grads in _JAC_NODES
+        d = _detJ(coords, tet10, t, grads)
+        d < mn && (mn = d)
+    end
+    return mn
+end
+
 """
-function curve_to_cylinder!(p::P2Mesh, center, axis, radius::Real; rtol::Real=1e-6)
-    R = Float64(radius)
-    c = (Float64(center[1]),Float64(center[2]),Float64(center[3]))
-    ez = _unit3((Float64(axis[1]),Float64(axis[2]),Float64(axis[3])))
-    tol = rtol * R
-    radial(v) = begin
-        rel = (p.coords[1,v]-c[1], p.coords[2,v]-c[2], p.coords[3,v]-c[3])
-        ax = rel[1]*ez[1]+rel[2]*ez[2]+rel[3]*ez[3]
-        rv = (rel[1]-ax*ez[1], rel[2]-ax*ez[2], rel[3]-ax*ez[3])
-        (sqrt(rv[1]^2+rv[2]^2+rv[3]^2), ax, rv)
+    p2_min_jacobian(p::P2Mesh) -> Float64
+
+Minimum, over all elements and the degree-3 sample nodes, of the P2 isoparametric
+Jacobian determinant. `> 0` ⇒ no sampled inversion (all elements valid at the
+sample nodes); `≤ 0` ⇒ at least one tangled/inverted curved element. For a
+straight-sided mesh this equals `6·min tet volume > 0`.
+"""
+function p2_min_jacobian(p::P2Mesh)
+    ntets(p) == 0 && return 0.0
+    mn = Inf
+    for t in 1:ntets(p)
+        d = _p2_min_detJ(p.coords, p.tet10, t)
+        d < mn && (mn = d)
     end
-    # mid-node → its two corner endpoints (consistent across tets)
+    return mn
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Curving edge nodes onto boundary geometry (safe: boundary edges only + validity)
+# ════════════════════════════════════════════════════════════════════════════════
+# mid-node → its two corner endpoints, and mid-node → incident tet list.
+function _mid_maps(p::P2Mesh)
     endp = Dict{Int32, Tuple{Int32,Int32}}()
+    midtets = Dict{Int32, Vector{Int32}}()
     slots = ((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4))
-    @inbounds for t in 1:ntets(p), (s,i,j) in slots
-        endp[p.tet10[s,t]] = (p.tet10[i,t], p.tet10[j,t])
+    @inbounds for t in 1:ntets(p), (sl,i,j) in slots
+        m = p.tet10[sl,t]
+        endp[m] = (p.tet10[i,t], p.tet10[j,t])
+        push!(get!(() -> Int32[], midtets, m), Int32(t))
     end
+    return endp, midtets
+end
+
+# undirected corner-edges that lie on a boundary surface face (of the linear tets).
+function _boundary_corner_edges(p::P2Mesh)
+    bf, _ = boundary_faces(@view p.tet10[1:4, :])
+    edges = Set{Tuple{Int32,Int32}}()
+    for f in bf
+        a,b,c = f[1],f[2],f[3]
+        push!(edges, minmax(a,b)); push!(edges, minmax(b,c)); push!(edges, minmax(a,c))
+    end
+    return edges
+end
+
+# bounding-box diagonal → relative displacement scale for the "actually moved" test.
+function _bbox_diag(p::P2Mesh)
+    lo1=lo2=lo3=Inf; hi1=hi2=hi3=-Inf
+    @inbounds for i in 1:nnodes(p)
+        x=p.coords[1,i]; y=p.coords[2,i]; z=p.coords[3,i]
+        x<lo1 && (lo1=x); x>hi1 && (hi1=x)
+        y<lo2 && (lo2=y); y>hi2 && (hi2=y)
+        z<lo3 && (lo3=z); z>hi3 && (hi3=z)
+    end
+    sqrt((hi1-lo1)^2 + (hi2-lo2)^2 + (hi3-lo3)^2)
+end
+
+# Core curving. `qualifies(a,b)::Bool` gates on the two corner endpoints; `project`
+# snaps a point onto the surface. Only boundary-surface edges are curved, and any
+# projection that would make an incident element's min sampled Jacobian ≤ 0 is
+# reverted (so the mesh never gains an inverted element). Deterministic (mid-nodes
+# processed in ascending id order). Returns the number of nodes actually moved.
+function _curve_boundary!(p::P2Mesh, qualifies, project; rtol::Float64=1e-6)
+    ntets(p) == 0 && return 0
+    bnd = _boundary_corner_edges(p)
+    endp, midtets = _mid_maps(p)
+    movetol2 = (rtol * _bbox_diag(p))^2
     ncurved = 0
-    for (mid, (a,b)) in endp
-        (abs(radial(a)[1]-R) <= tol && abs(radial(b)[1]-R) <= tol) || continue
-        d, ax, rv = radial(mid)
-        d == 0 && continue                       # degenerate (on the axis) — skip
-        f = R/d
-        @inbounds begin
-            p.coords[1,mid] = c[1] + ax*ez[1] + rv[1]*f
-            p.coords[2,mid] = c[2] + ax*ez[2] + rv[2]*f
-            p.coords[3,mid] = c[3] + ax*ez[3] + rv[3]*f
+    for mid in sort!(collect(keys(endp)))
+        a, b = endp[mid]
+        (minmax(a,b) in bnd) || continue        # boundary-surface edge only
+        qualifies(a, b) || continue             # geometric predicate on endpoints
+        @inbounds ox=p.coords[1,mid]; oy=p.coords[2,mid]; oz=p.coords[3,mid]
+        q = project(ox, oy, oz)
+        (isfinite(q[1]) && isfinite(q[2]) && isfinite(q[3])) || continue
+        @inbounds begin p.coords[1,mid]=q[1]; p.coords[2,mid]=q[2]; p.coords[3,mid]=q[3] end
+        ok = true
+        for t in midtets[mid]
+            if _p2_min_detJ(p.coords, p.tet10, t) <= 0.0; ok = false; break; end
         end
-        ncurved += 1
+        if ok
+            ((q[1]-ox)^2 + (q[2]-oy)^2 + (q[3]-oz)^2) > movetol2 && (ncurved += 1)
+        else
+            @inbounds begin p.coords[1,mid]=ox; p.coords[2,mid]=oy; p.coords[3,mid]=oz end
+        end
     end
     return ncurved
 end
 
+"""
+    curve_to_cylinder!(p::P2Mesh, center, axis, radius; rtol=1e-6) -> n_curved
+
+Curve the quadratic mesh onto a cylinder of the given `center`, `axis`, `radius`:
+every **boundary-surface** edge whose *both* corner endpoints lie on the lateral
+wall (radial distance `radius` from the axis, within `rtol`) has its mid-node
+projected radially onto the exact cylinder — turning the straight chord into a
+true curved P2 edge. Interior chords are never touched, and any projection that
+would invert an incident element is reverted (see module docstring). Flat caps and
+axial spokes stay straight. Returns the number of mid-nodes moved.
+"""
+function curve_to_cylinder!(p::P2Mesh, center, axis, radius::Real; rtol::Real=1e-6)
+    R = Float64(radius)
+    c = (Float64(center[1]), Float64(center[2]), Float64(center[3]))
+    ez = _unit3((Float64(axis[1]), Float64(axis[2]), Float64(axis[3])))
+    tol = Float64(rtol) * R
+    @inline function radial(x, y, z)
+        rx=x-c[1]; ry=y-c[2]; rz=z-c[3]
+        ax = rx*ez[1] + ry*ez[2] + rz*ez[3]
+        vx=rx-ax*ez[1]; vy=ry-ax*ez[2]; vz=rz-ax*ez[3]
+        (sqrt(vx*vx+vy*vy+vz*vz), ax, vx, vy, vz)
+    end
+    onwall(v::Integer) = abs(radial(p.coords[1,v], p.coords[2,v], p.coords[3,v])[1] - R) <= tol
+    qualifies(a::Integer, b::Integer) = onwall(a) && onwall(b)
+    function project(x, y, z)
+        d, ax, vx, vy, vz = radial(x, y, z)
+        d == 0 && return (Inf, Inf, Inf)          # on the axis — unprojectable, skip
+        f = R/d
+        (c[1] + ax*ez[1] + vx*f, c[2] + ax*ez[2] + vy*f, c[3] + ax*ez[3] + vz*f)
+    end
+    return _curve_boundary!(p, qualifies, project; rtol=Float64(rtol))
+end
+
 @inline function _unit3(a)
-    l=sqrt(a[1]^2+a[2]^2+a[3]^2); l==0 && error("curve_to_cylinder!: zero axis"); (a[1]/l,a[2]/l,a[3]/l)
+    l = sqrt(a[1]^2 + a[2]^2 + a[3]^2)
+    l == 0 && error("curve_to_cylinder!: zero axis")
+    (a[1]/l, a[2]/l, a[3]/l)
 end
 
 """
-    write_msh_p2(path, p::P2Mesh; tags=zeros) -> path
+    curve_to_surface!(p::P2Mesh, project, on_surface; rtol=1e-6) -> n_curved
+
+Curve the quadratic mesh onto an **arbitrary** target surface — the general form
+of [`curve_to_cylinder!`](@ref). `project(x,y,z) -> (x,y,z)` snaps a point onto the
+surface; `on_surface(x,y,z) -> Bool` tests whether a *corner* lies on it. A
+mid-node is curved only when it sits on a genuine **boundary-surface edge** *and*
+both its corner endpoints satisfy `on_surface` — interior chords (whose endpoints
+may also lie on the surface) are never moved. Any projection that would invert an
+incident element, or that returns a non-finite point, is reverted, so the result
+never contains an inverted element. Returns the number of mid-nodes actually moved
+(displacement > `rtol` × bounding-box diagonal).
+"""
+function curve_to_surface!(p::P2Mesh, project, on_surface; rtol::Real=1e-6)
+    onsurf(v::Integer) = @inbounds on_surface(p.coords[1,v], p.coords[2,v], p.coords[3,v])
+    qualifies(a::Integer, b::Integer) = onsurf(a) && onsurf(b)
+    return _curve_boundary!(p, qualifies, (x,y,z) -> project(x,y,z); rtol=Float64(rtol))
+end
+
+"""
+    write_msh_p2(path, p::P2Mesh; tet_tag=zeros) -> path
 
 Write a quadratic tet mesh as gmsh MSH v2.2 with 10-node (type-11) elements.
 """

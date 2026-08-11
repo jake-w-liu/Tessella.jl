@@ -428,11 +428,15 @@ function _stl_is_binary(path)
             expected = 84 + 50 * Int(ntri)
             filesize(path) == expected && return true
         end
-        return !(length(head) >= 5 && String(head[1:5]) == "solid" && _looks_ascii(head))
+        # A valid ASCII STL may carry a UTF-8 BOM and/or a non-ASCII solid name,
+        # so test only for the "solid" keyword followed by ASCII whitespace (after
+        # skipping an optional BOM) — NOT that the whole 84-byte header is 7-bit
+        # ASCII (which misclassifies such files as binary → a garbage-count crash).
+        i = (length(head) >= 3 && head[1] == 0xEF && head[2] == 0xBB && head[3] == 0xBF) ? 4 : 1
+        isws(b) = b == 0x20 || b == 0x09 || b == 0x0a || b == 0x0d
+        return !(length(head) >= i + 5 && @view(head[i:i+4]) == b"solid" && isws(head[i+5]))
     end
 end
-
-_looks_ascii(bytes) = all(b -> b == 0x09 || b == 0x0a || b == 0x0d || (0x20 <= b <= 0x7e), bytes)
 
 function _read_stl_ascii(path)
     tris = NTuple{9,Float64}[]
@@ -478,7 +482,11 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
     diag = sqrt((hi[1]-lo[1])^2 + (hi[2]-lo[2])^2 + (hi[3]-lo[3])^2)
     tol = max(diag * reltol, eps(Float64))
     inv = 1.0 / tol
-    keyof(p) = (round(Int, p[1]*inv), round(Int, p[2]*inv), round(Int, p[3]*inv))
+    # Quantize relative to the bbox min corner `lo`, not the absolute coordinate:
+    # a constant per-axis bucket shift (does not change which vertices merge) that
+    # bounds every key to [0, diag/tol] so far-from-origin coords can't overflow
+    # Int64 in round(Int, ·) — an unshifted absolute coord ~1e11 does.
+    keyof(p) = (round(Int, (p[1]-lo[1])*inv), round(Int, (p[2]-lo[2])*inv), round(Int, (p[3]-lo[3])*inv))
     idxmap = Dict{NTuple{3,Int},Int32}()
     xs=Float64[]; ys=Float64[]; zs=Float64[]
     getid(p) = get!(idxmap, keyof(p)) do

@@ -138,6 +138,25 @@ end
         @test euler_characteristic(m) == 1       # cube ≅ ball
         @test boundary_euler(m) == 2             # cube surface ≅ sphere
         @test is_closed_manifold(m)
+        # segment nodes are NOT counted in V (E carries no segment edges): a tet plus
+        # a disjoint segment still reads χ=1, not 3 (regression).
+        seg = Mesh(Float64[0 1 0 0 5 6; 0 0 1 0 0 0; 0 0 0 1 0 0];
+                   tets=reshape(Int32[1,2,3,4],4,1), segs=reshape(Int32[5,6],2,1))
+        @test euler_characteristic(seg) == 1
+    end
+
+    @testset "bounding_box / mesh_crc exclude unreferenced nodes" begin
+        # node 5 is isolated far away; the contract is "over referenced nodes", and
+        # the bbox feeds mesh_crc — a stray node must not enlarge either.
+        m = Mesh(Float64[0 1 0 0 1000; 0 0 1 0 0; 0 0 0 1 0]; tets=reshape(Int32[1,2,3,4],4,1))
+        lo, hi = bounding_box(m)
+        @test lo == (0.0, 0.0, 0.0)
+        @test hi == (1.0, 1.0, 1.0)                       # not (1000,1,1)
+        @test mesh_crc(m).bbox == ((0.0,0.0,0.0),(1.0,1.0,1.0))
+        # referenced segment nodes DO count toward the geometric bbox
+        ms = Mesh(Float64[0 1 0 0 2; 0 0 1 0 3; 0 0 0 1 0];
+                  tets=reshape(Int32[1,2,3,4],4,1), segs=reshape(Int32[1,5],2,1))
+        @test bounding_box(ms)[2] == (2.0, 3.0, 1.0)
     end
 
     @testset "validate contract" begin

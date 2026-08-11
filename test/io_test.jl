@@ -190,6 +190,42 @@ end
         @test ntris(m) == 4
     end
 
+    @testset "STL robustness: far-from-origin welding + ASCII detection (BOM / UTF-8 name)" begin
+        write_ascii_tri(path, name, tri) = open(path, "w") do io
+            println(io, "solid ", name); println(io, "facet normal 0 0 0"); println(io, "  outer loop")
+            for v in tri; println(io, "    vertex $(v[1]) $(v[2]) $(v[3])"); end
+            println(io, "  endloop"); println(io, "endfacet"); println(io, "endsolid ", name)
+        end
+        # far from the origin: welding must quantize relative to the bbox, not the
+        # absolute coordinate (else round(Int, coord/tol) overflows Int64 → crash).
+        pfar = joinpath(dir, "far.stl")
+        write_ascii_tri(pfar, "far", ((1e11,0.0,0.0),(1e11+1,0.0,0.0),(1e11,1.0,0.0)))
+        mf = read_stl(pfar)                                # must not throw InexactError
+        @test ntris(mf) == 1 && nnodes(mf) == 3
+
+        # ASCII STL prefixed with a UTF-8 BOM must not be misdetected as binary.
+        bom = joinpath(dir, "bom.stl")
+        open(bom, "w") do io
+            write(io, UInt8[0xEF,0xBB,0xBF])
+            println(io, "solid tet"); println(io, "facet normal 0 0 0"); println(io, "  outer loop")
+            println(io, "    vertex 0 0 0"); println(io, "    vertex 1 0 0"); println(io, "    vertex 0 1 0")
+            println(io, "  endloop"); println(io, "endfacet"); println(io, "endsolid tet")
+        end
+        mb = read_stl(bom); @test ntris(mb) == 1 && nnodes(mb) == 3
+
+        # ASCII STL whose solid name carries a non-ASCII (UTF-8) char, likewise.
+        pacc = joinpath(dir, "acc.stl")
+        write_ascii_tri(pacc, "pièce_de_test", ((0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0)))
+        ma = read_stl(pacc); @test ntris(ma) == 1 && nnodes(ma) == 3
+
+        # a genuine BINARY STL whose 80-byte header text begins with "solid" is still
+        # detected as binary via the size check (not misread as ASCII).
+        buf = IOBuffer(); hdr = zeros(UInt8, 80); hdr[1:5] = collect(codeunits("solid")); write(buf, hdr)
+        write(buf, UInt32(1)); write(buf, 0f0,0f0,0f0, 0f0,0f0,0f0, 1f0,0f0,0f0, 0f0,1f0,0f0, UInt16(0))
+        pbs = joinpath(dir, "binsolid.stl"); write(pbs, take!(buf))
+        @test ntris(read_stl(pbs)) == 1
+    end
+
     @testset "read_geo_params on the enclosure fixture" begin
         gp = read_geo_params(joinpath(@__DIR__, "fixtures", "enclosure_coax_junction.geo"))
         @test gp.mesh_size_min ≈ 0.00026669999999999933 rtol=1e-9

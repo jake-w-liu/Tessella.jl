@@ -15,6 +15,21 @@ using Tessella.Heal
 gvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
               for t in 1:ntets(m); init=0.0)
 
+# Signed volume enclosed by a triangle surface via the divergence theorem:
+# V = (1/6) Σ_faces (v1 × v2) · v3.  For an OUTWARD-oriented closed surface this is
+# +(enclosed volume); it is sign-sensitive to triangle winding, so it is the oracle
+# that distinguishes a correctly-oriented cavity (inner normals into the cavity)
+# from an un-reversed one.
+function signed_surface_volume(s)
+    v = 0.0
+    for k in 1:ntris(s)
+        a = node(s, s.tris[1,k]); b = node(s, s.tris[2,k]); c = node(s, s.tris[3,k])
+        cx = a[2]*b[3]-a[3]*b[2]; cy = a[3]*b[1]-a[1]*b[3]; cz = a[1]*b[2]-a[2]*b[1]
+        v += (cx*c[1] + cy*c[2] + cz*c[3])
+    end
+    v/6
+end
+
 @testset "Geometry primitives (Stage 5)" begin
 
     @testset "box_surface: closed, meshable, exact volume" begin
@@ -47,6 +62,22 @@ gvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3
         @test validate(m).ok
         @test boundary_faces(m.tets)[2] == 2               # watertight fill
         @test_throws ArgumentError box_tunnel_surface(1,5,1,5,1,3, 0,6,2,4)  # inner not inside
+    end
+
+    @testset "box_shell_surface: hollow box (Boolean difference), oriented, exact volume" begin
+        # outer [-1,2]×[0,3]×[1,5] = 3·3·4 = 36 ; inner [0,1]×[1,2]×[2,3] = 1 ⇒ 35
+        s = box_shell_surface(-1,2, 0,3, 1,5, 0,1, 1,2, 2,3)
+        @test is_meshable(s)[1]                             # closed & manifold (2 components, 0 open edges)
+        # ORIENTATION ORACLE (mutation-sensitive): outer outward (+36) + inner into
+        # cavity (−1) ⇒ +35. An un-reversed inner winding would read +37, not 35.
+        @test signed_surface_volume(s) ≈ 35.0 rtol=1e-12
+        m = tetrahedralize(s)
+        @test gvol(m) ≈ 35.0 rtol=1e-6                     # fill volume = outer − inner (cavity carved)
+        @test validate(m).ok
+        @test boundary_faces(m.tets)[2] == 2               # manifold fill (max face incidence 2)
+        # non-strictly-inside inner boxes are rejected
+        @test_throws ArgumentError box_shell_surface(-1,2,0,3,1,5, -1,1, 1,2, 2,3)  # inner touches outer face
+        @test_throws ArgumentError box_shell_surface(-1,2,0,3,1,5, 0,1, -1,4, 2,3)  # inner spans past outer
     end
 
     @testset "primitives feed mesh_volume directly" begin

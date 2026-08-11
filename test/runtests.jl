@@ -18,7 +18,7 @@ using Tessella
     include("mesh3d_test.jl")       # 3-D Delaunay + volume filling + coax junction
 
     # Stage 4 — optimization + quality (CRC-gated; sliver removal WIP).
-    include("optimize_test.jl")     # tet quality report + Laplacian smoothing
+    include("optimize_test.jl")     # tet quality report + Laplacian & ODT smoothing
 
     # Stage 5 — heal + native primitives + top-level pipeline.
     include("heal_test.jl")         # surface diagnostics (open/non-manifold/degenerate…)

@@ -1,8 +1,10 @@
-# ── Stage-4 CRC suite: tet-mesh quality reporting + Laplacian smoothing ─────────
+# ── Stage-4 CRC suite: tet-mesh quality reporting + Laplacian & ODT smoothing ───
 #
 # Correctness  : quality metrics on a known-good mesh (regular-ish tets); smoothing
 #                preserves total volume (boundary fixed) and validity; improves the
-#                mean dihedral and does not increase the sliver count.
+#                mean dihedral and does not increase the sliver count. ODT is checked
+#                against an INDEPENDENT volume-weighted-circumcenter oracle that a
+#                centroid/Lloyd update would fail (it discriminates the algorithm).
 # Robustness   : slivery Delaunay-of-random-cloud input, boundary nodes pinned.
 # Completeness  : no tet inverted (positive-volume guard), tags preserved.
 
@@ -16,6 +18,18 @@ mvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3
 
 mutable struct _RO; s::UInt64; end
 _nfo(r::_RO) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Float64(2^53))
+
+_dist(p, q) = sqrt((p[1]-q[1])^2 + (p[2]-q[2])^2 + (p[3]-q[3])^2)
+
+# INDEPENDENT circumcenter (Cramer linear solve of |x−vᵢ|² equal), distinct from the
+# production _tet_circumcenter — the oracle for the ODT node update.
+function cramer_circumcenter(a,b,c,d)
+    v1=collect(Float64,a); v2=collect(Float64,b); v3=collect(Float64,c); v4=collect(Float64,d)
+    A=[ (v2.-v1)'; (v3.-v1)'; (v4.-v1)' ].*2
+    rhs=[sum(v2.^2)-sum(v1.^2), sum(v3.^2)-sum(v1.^2), sum(v4.^2)-sum(v1.^2)]
+    d3(M)=M[1,1]*(M[2,2]*M[3,3]-M[2,3]*M[3,2])-M[1,2]*(M[2,1]*M[3,3]-M[2,3]*M[3,1])+M[1,3]*(M[2,1]*M[3,2]-M[2,2]*M[3,1])
+    D=d3(A); (d3([rhs A[:,2] A[:,3]])/D, d3([A[:,1] rhs A[:,3]])/D, d3([A[:,1] A[:,2] rhs])/D)
+end
 
 @testset "Optimize (Stage 4)" begin
 
@@ -64,5 +78,63 @@ _nfo(r::_RO) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/F
         mt = Mesh(m.coords; tets=m.tets, tet_tag=tags)
         ms = smooth_laplacian(mt; iters=3)
         @test ms.tet_tag == tags
+    end
+
+    @testset "ODT update = volume-weighted circumcenter average (discriminates from Lloyd)" begin
+        # A stretched box (8 corners) with ONE off-centre interior node. One ODT step
+        # must move that node to the volume-weighted average of its incident tets'
+        # circumcenters — a target the centroid/Lloyd update does NOT hit.
+        C = Float64[0 3 3 0 0 3 3 0 1.1; 0 0 1 1 0 0 1 1 0.35; 0 0 0 0 1 1 1 1 0.65]
+        m = to_mesh3(delaunay3d(C[1,:], C[2,:], C[3,:]; rng_seed=1))
+        bf,_ = boundary_faces(m.tets); onb = falses(nnodes(m))
+        for f in bf; onb[f[1]]=true; onb[f[2]]=true; onb[f[3]]=true; end
+        interior = findall(!, onb)
+        @test length(interior) == 1                       # exactly one movable node
+        v = interior[1]
+        inc = [t for t in 1:ntets(m) if v in (m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])]
+        # independent ODT target: Σ volₜ·circumcenterₜ / Σ volₜ
+        sx=0.0; sy=0.0; sz=0.0; w=0.0
+        for t in inc
+            a=node(m,m.tets[1,t]); b=node(m,m.tets[2,t]); c=node(m,m.tets[3,t]); d=node(m,m.tets[4,t])
+            vol=tet_volume(a,b,c,d); cc=cramer_circumcenter(a,b,c,d)
+            sx+=vol*cc[1]; sy+=vol*cc[2]; sz+=vol*cc[3]; w+=vol
+        end
+        odt_target = (sx/w, sy/w, sz/w)
+        # centroid (Lloyd) target, for contrast
+        neigh=Set{Int}(); for t in inc, i in 1:4; push!(neigh, Int(m.tets[i,t])); end; delete!(neigh, Int(v))
+        cen = (sum(node(m,n)[1] for n in neigh)/length(neigh),
+               sum(node(m,n)[2] for n in neigh)/length(neigh),
+               sum(node(m,n)[3] for n in neigh)/length(neigh))
+        ms = smooth_odt(m; iters=1)
+        got = (ms.coords[1,v], ms.coords[2,v], ms.coords[3,v])
+        @test _dist(got, node(m,v)) > 0.1                 # the node genuinely moved
+        @test collect(got) ≈ collect(odt_target) rtol=1e-11   # ODT update matched to machine precision
+        @test _dist(odt_target, cen) > 1e-10              # ODT target ≠ centroid target
+        @test _dist(got, cen) > 1e3 * _dist(got, odt_target)  # got is orders closer to ODT than to centroid
+        @test validate(ms).ok
+    end
+
+    @testset "ODT preserves volume + validity, lifts mean dihedral (slivery cloud)" begin
+        r = _RO(0xC0FFEE); n = 300
+        xs=Float64[_nfo(r) for _ in 1:n]; ys=Float64[_nfo(r) for _ in 1:n]; zs=Float64[_nfo(r) for _ in 1:n]
+        m = to_mesh3(delaunay3d(xs, ys, zs; rng_seed=1))
+        q0 = mesh_quality(m)
+        ms = smooth_odt(m; iters=5)
+        q1 = mesh_quality(ms)
+        @test mvol(ms) ≈ mvol(m) rtol=1e-9                # boundary fixed ⇒ volume preserved
+        @test validate(ms).ok                             # no inverted tets
+        @test ntets(ms) == ntets(m)                       # topology unchanged
+        @test ms.coords != m.coords                       # interior nodes moved
+        @test q1.mean_dihedral_deg > q0.mean_dihedral_deg # ODT lifts the mean dihedral
+    end
+
+    @testset "ODT pins boundary nodes (cube unchanged)" begin
+        C=Float64[0 1 1 0 0 1 1 0; 0 0 1 1 0 0 1 1; 0 0 0 0 1 1 1 1]
+        F=[(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
+        ct=Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); ct[:,k]=Int32[f...]; end
+        m = tetrahedralize(Mesh(C; tris=ct))
+        ms = smooth_odt(m; iters=5)
+        @test ms.coords == m.coords                       # all nodes on the boundary ⇒ fixed
+        @test mvol(ms) ≈ 1.0 rtol=1e-6
     end
 end

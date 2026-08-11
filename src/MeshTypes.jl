@@ -267,11 +267,13 @@ triangulated 3-ball this is `1`; for a triangulated 2-sphere (tris only, closed)
 it is `2`.
 """
 function euler_characteristic(m::Mesh)
-    # V counts nodes actually referenced by cells (isolated coords excluded).
+    # V counts nodes referenced by the triangle+tet complex (isolated coords
+    # excluded). Segment nodes are deliberately NOT counted: E/F/T span only
+    # tris+tets, so adding segment vertices to V without their 1-cells to E would
+    # inflate V − E + F − T (a lone segment would read χ=2 instead of 1).
     used = falses(nnodes(m))
     @inbounds for t in axes(m.tris, 2), i in 1:3; used[m.tris[i,t]] = true; end
     @inbounds for t in axes(m.tets, 2), i in 1:4; used[m.tets[i,t]] = true; end
-    @inbounds for t in axes(m.segs, 2), i in 1:2; used[m.segs[i,t]] = true; end
     V = count(used)
     E = length(unique_edges(m.tris, m.tets))
     F = length(unique_faces(m.tris, m.tets))
@@ -308,15 +310,25 @@ end
 # Bounding box, validation, checksum
 # ════════════════════════════════════════════════════════════════════════════════
 
-"""Axis-aligned bounding box `(lo, hi)` over referenced nodes."""
+"""Axis-aligned bounding box `(lo, hi)` over referenced nodes (isolated coords
+excluded, matching [`euler_characteristic`](@ref)). Since `mesh_crc` embeds this
+box, an unreferenced far-away node must not be allowed to enlarge it."""
 function bounding_box(m::Mesh)
     nnodes(m) == 0 && return ((0.0,0.0,0.0), (0.0,0.0,0.0))
+    used = falses(nnodes(m))
+    @inbounds for t in axes(m.segs, 2), i in 1:2; used[m.segs[i,t]] = true; end
+    @inbounds for t in axes(m.tris, 2), i in 1:3; used[m.tris[i,t]] = true; end
+    @inbounds for t in axes(m.tets, 2), i in 1:4; used[m.tets[i,t]] = true; end
     lo = (Inf, Inf, Inf); hi = (-Inf, -Inf, -Inf)
+    any_used = false
     @inbounds for i in 1:nnodes(m)
+        used[i] || continue
+        any_used = true
         p = node(m, i)
         lo = (min(lo[1],p[1]), min(lo[2],p[2]), min(lo[3],p[3]))
         hi = (max(hi[1],p[1]), max(hi[2],p[2]), max(hi[3],p[3]))
     end
+    any_used || return ((0.0,0.0,0.0), (0.0,0.0,0.0))
     return lo, hi
 end
 

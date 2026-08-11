@@ -346,15 +346,21 @@ function orient2_sos(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
     pts = ((ia, pa), (ib, pb), (ic, pc))
     perm, sp = _sort3_pts(pts)
     (a, b, c) = sp
-    # Leading SoS terms for a zero 2×2 orientation (Edelsbrunner–Mücke Table):
-    #   +(b.x − c.x)  then  −(b.y − c.y)  then  +(a.? ...). Evaluate in order.
-    d = _x(b[2]) - _x(c[2]); d != 0.0 && return perm * _isign(d)
-    d = _y(c[2]) - _y(b[2]); d != 0.0 && return perm * _isign(d)
-    d = _x(c[2]) - _x(a[2]); d != 0.0 && return perm * _isign(d)
-    d = _y(a[2]) - _y(c[2]); d != 0.0 && return perm * _isign(d)
-    d = _x(a[2]) - _x(b[2]); d != 0.0 && return perm * _isign(d)
-    # Two distinct points can never share all coordinates *and* an index; the
-    # final nonzero term is +1 by the SoS construction.
+    # Leading SoS terms of a zero 2×2 orientation under the +ε Edelsbrunner–Mücke
+    # perturbation ε^(2^(i·d−j)), ε→0⁺. For sorted a<b<c the dominant term (perturb
+    # a.y) has cofactor +(c.x − b.x), the next +(b.y − c.y), … — i.e. each coordinate
+    # difference below is written in the +ε order, so this scheme MATCHES orient3_sos/
+    # incircle_sos/insphere_sos rather than evaluating the opposite (−ε) perturbation.
+    # (Verified against an exact Rational{BigInt} SoS oracle over all degenerate
+    # collinear labelings; the earlier −ε form was inconsistent with incircle_sos and
+    # broke 2-D degenerate tie-breaks — Mesh2D uses both on the same point set.)
+    d = _x(c[2]) - _x(b[2]); d != 0.0 && return perm * _isign(d)
+    d = _y(b[2]) - _y(c[2]); d != 0.0 && return perm * _isign(d)
+    d = _x(a[2]) - _x(c[2]); d != 0.0 && return perm * _isign(d)
+    d = _y(c[2]) - _y(a[2]); d != 0.0 && return perm * _isign(d)
+    d = _x(b[2]) - _x(a[2]); d != 0.0 && return perm * _isign(d)
+    # Two distinct points can never share all coordinates *and* an index; the final
+    # nonzero term carries +perm by the SoS construction.
     return perm
 end
 
