@@ -264,6 +264,27 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test count(v -> sort(v) == Int32[1,2], values(fc)) == 4*8       # all 32 pin faces conform to air
         @test count(v -> sort(v) == Int32[1,3], values(fc)) == 0         # pin does not touch the case
         @test count(v -> sort(v) == Int32[2,3], values(fc)) > 0          # air/case cavity interface conforms too
+
+        # THE FEED-THROUGH: the coax pin now CROSSES the case wall (z=5) — from the air
+        # cavity into/through the metal case. Classification [pin,air,case] tags any
+        # in-cylinder tet as `pin` whether it is in the cavity or the wall, so the
+        # cylindrical BORE is handled with NO explicit CSG bore surface. Both the
+        # pin↔air (cavity) and pin↔case (bore) interfaces appear and conform, and the
+        # air↔case cavity boundary conforms around the bore hole.
+        nθ, nz = 8, 3
+        pinf = cylinder_surface((3.,3.,2.), (0.,0.,1.), 0.7, 3.5; nθ=nθ, nz=nz)   # z 2..5.5 crosses z=5
+        mf = tetrahedralize_conforming([pinf, cavity, outer])
+        @test validate(mf).ok
+        @test mesh_vol(mf) ≈ 216.0 rtol=1e-9                     # total = outer box, EXACT
+        tpf = tets_per_region(mf)
+        @test length(tpf) == 3 && all(v > 0 for v in values(tpf))
+        ff = facetags(mf)
+        @test all(length(v) <= 2 for v in values(ff))           # manifold everywhere
+        pin_air  = count(v -> sort(v) == Int32[1,2], values(ff))
+        pin_case = count(v -> sort(v) == Int32[1,3], values(ff))
+        @test pin_air > 0 && pin_case > 0                        # pin passes THROUGH the wall — both interfaces
+        @test pin_air + pin_case == 2*nθ*nz                      # every pin face conforms (none lost at the wall)
+        @test count(v -> sort(v) == Int32[2,3], values(ff)) > 0  # air/case boundary conforms around the bore
     end
 
     @testset "2-3 / 3-2 flips: consistent, volume-preserving, round-trip identity" begin
