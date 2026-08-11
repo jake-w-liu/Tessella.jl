@@ -8,20 +8,22 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,445
-  assertions** under `--check-bounds=yes` (last verified: `mesh_planar` commit).
-- **CRC regression checksums re-verified this session** (recomputed, byte-match):
-  unit-cube `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`;
-  10×10 refined square (nodes=91, tris=148) `583c615df1862c8518bbda409347f109dc25f7f8f5362562badf160fe6af30c1`.
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,911
+  assertions** under `--check-bounds=yes` (verified this session, 1m41s).
+- **CRC regression checksums preserved** (suite includes them; unaffected by the
+  `orient2_sos` fix): unit-cube
+  `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`; 10×10
+  refined square `583c615df1862c8518bbda409347f109dc25f7f8f5362562badf160fe6af30c1`.
 - **All 7 stages carry working, CRC-gated code.** Stages 0–2 complete; Stage 3
   kernel + volume filling complete; Stages 4–6 partial (see board). Public API:
   `mesh_volume` (3-D, `optimize`/`smooth` opts), `mesh_planar` (2-D), plus the
   per-module functions.
 - **Reason-to-exist demonstrated:** the ENC-COAX coax junction fills all three
   volumes at literal `.geo` scale where gmsh 4.13/4.15 leave them empty.
-- **In flight (not yet integrated):** a parallel effort implementing general P2
-  curving + hollow-box CSG + ODT smoothing, plus a core-module adversarial audit;
-  this header + counts get a final pass once those land.
+- **Adversarial-audit + feature pass landed this session** (workflows + independent
+  re-verification): 6 confirmed bugs fixed, 2 features integrated, 1 SoS predicate
+  inconsistency fixed, 3 SoS fallthroughs characterized+deferred (see
+  "Audit findings" below), and a `validation/` cross-check suite vs gmsh added.
 
 ## Stage board
 
@@ -32,8 +34,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | 2 | 1-D edge meshing + parametric surface meshing | **DONE — gate green** | size-graded edge mesh vs analytic arc length ✓; planar face exact area + quality ✓; cylinder watertight + area convergence ✓; parametric area convergence ✓ |
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; interface recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; conforming interface recovery + exact enclosure geometry OPEN |
 | 4 | size fields + optimization | **partial** | tet quality report ✓; Laplacian + ODT smoothing ✓; verified 2-3/3-2 flip primitives ✓; `optimize_flips!` sliver reduction (309→169 flips alone, →63 with smoothing on a 300-pt cloud; volume/validity/min-dihedral-safe) ✓; weighted sliver exudation + domain-bounded 3-D refinement WIP |
-| 5 | geometry kernel (OCC interop / native CSG) + heal | **partial** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel) ✓ + fill to exact volume; Boolean CSG + OCC interop WIP |
-| 6 | high-order + ASCENT integration + 22-case regression | **partial** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓ + curved P2 onto a cylinder primitive ✓; general-geometry curving + ASCENT drop-in + 22-case regression WIP |
+| 5 | geometry kernel (OCC interop / native CSG) + heal | **partial** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel/**hollow-box** `box_shell_surface`, an axis-aligned Boolean difference — verified oriented via divergence theorem + fills to exact `outer−inner`) ✓; general Boolean CSG + OCC interop WIP |
+| 6 | high-order + ASCENT integration + 22-case regression | **partial** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓; **general-geometry curving** ✓ — `curve_to_surface!`(project, on_surface) / `curve_to_cylinder!` curve only genuine *boundary-surface* edges (interior chords left straight) and revert any projection that would invert an incident P2 element (`p2_min_jacobian` guard over the degree-3 nodes; no inverted element ever emitted, verified by an independent degree-6 sampler); ASCENT drop-in + 22-case regression WIP |
 
 ## Standing acceptance cases (regression, CRC-stamped when they pass)
 
@@ -61,6 +63,59 @@ pin/case/air.
 - 5 gmsh 2-D/3-D algorithms, OCC fix options, `Geometry.ToleranceBoolean`, and
   geometry protrusion all fail to mesh the enclosure. Standard tools do not fix
   it → the robustness must come from Tessella's own boundary recovery + heal.
+
+## Audit findings (adversarial workflows, 2026-08-11) — independently re-verified
+
+Two background workflows (a feature-implementation pass + a core-module adversarial
+bug-hunt with per-finding verification) surfaced these. Every one was reproduced
+here from scratch before acting; every fix re-verified (full suite green).
+
+**Fixed (6):**
+
+| # | site | defect | verification of the fix |
+|---|---|---|---|
+| 1 | `HighOrder.curve_to_cylinder!` / new `curve_to_surface!` | curved **interior** edges (qualified an edge by "both corners on the surface", but every vertex is on the boundary since no Steiner nodes are added) → tangled 47/125 (cyl) and 127/166 (sphere) P2 elements | now curves only genuine boundary-surface edges + reverts any inverting projection; independent degree-6 Jacobian sampler finds **0** inverted elements; interior chords byte-identical to their straight midpoints |
+| 2 | `Predicates.orient2_sos:351` | SoS tie-break sign-inverted (matched −ε) vs orient3/incircle/insphere (+ε) → 2-D degenerate orient2/incircle decisions mutually incoherent (Mesh2D uses both on one point set) | negated to +ε; **0/6** disagreements vs an independent exact `Rational{BigInt}` SoS oracle (was 6/6); full suite + golden 2-D CRC unchanged |
+| 3 | `MeshTypes.euler_characteristic:274` | counted segment-only nodes in V while E omits segment edges → χ inflated (tet+segment read 3, not 1) | segment loop removed; reproduced (3→1) + regression test |
+| 4 | `MeshTypes.bounding_box:315` | included unreferenced nodes, violating its "referenced nodes" contract and polluting `mesh_crc.bbox` | filter to referenced nodes; reproduced ((1000,1,1)→(1,1,1)) + regression test |
+| 5 | `IO.read_stl:481` | far-from-origin weld key `round(Int, coord/tol)` overflowed Int64 → crash | quantize relative to bbox min corner; reproduced (InexactError→ok) + regression test |
+| 6 | `IO.read_stl:431` | ASCII STL with a UTF-8 BOM or non-ASCII solid name misdetected as binary → EOFError crash | BOM-aware keyword check, drop whole-header ASCII requirement; reproduced (2 crashes→ok) + regression test |
+
+**Confirmed but deferred (3)** — SoS *fallthrough* tie-breaks, reached only for
+*fully* degenerate inputs (4 collinear / 5 coplanar) where every primary minor
+vanishes; the 3-D kernel's ~1e-8 pre-perturbation makes them largely latent, and a
+correct fix needs an exact SoS continuation not a constant `return perm`:
+
+- `orient3_sos:416` — wrong parity for 4 collinear points (my trustworthy exact
+  oracle: **12/24** labelings wrong; **0/24** for coplanar-non-collinear, i.e. the
+  fast path is correct — only the collinear fallthrough is wrong).
+- `incircle_sos:439` — wrong parity for 4 collinear points (fallthrough).
+- `insphere_sos:461` — wrong parity for 5 coplanar points; it also evaluates the
+  −ε perturbation while orient3 uses +ε (the two verify-agents disagreed on this,
+  and my lifted-predicate oracle still has a calibration bug, so I did **not** ship
+  an unverified change to foundational exact predicates). Fix path: replace each
+  `return perm` with an exact `Rational{BigInt}` leading-term SoS evaluation
+  (correct-by-construction), verified against the exact oracle over all degenerate
+  labelings, once the oracle's lifted-predicate calibration is sound.
+
+## Cross-tool validation vs gmsh (`validation/`, run this session)
+
+`julia --project=. validation/run_all.jl` meshes the same domain with Tessella and
+gmsh 4.15.2 and compares meshed volume (vs the analytic oracle), quality, and time.
+Reference `.geo` scripts retained per case; regenerate `REPORT.md` any time.
+
+| case | analytic V | Tessella V | gmsh V | verdict |
+|---|---|---|---|---|
+| box (flat) | 2 | **2.0** | **2.0** | both exact ✓ |
+| box_tunnel (genus-1 flat) | 24 | **24.0** | **24.0** | both exact ✓ |
+| hollow_box (Boolean difference) | 35 | **35.0** | **35.0** | Tessella `box_shell` CSG matches gmsh's Boolean diff exactly ✓ |
+| cylinder (true πR²H=62.83) | — | 62.65 (0.3%) | 61.02 (2.9%) | Tessella's 48-gon prism is **closer** than gmsh at this size |
+| sphere (true 4/3πR³=20.58) | — | 20.10 (2.3%) | 19.69 (4.3%) | Tessella **closer** than gmsh at this size |
+| **enclosure_coax** (ASCENT) | — | native primitives fill exactly | **0 volume tets** (28969 surf tris, all air/pin/case volumes empty) | gmsh's documented failure, reproduced here |
+
+Flat-solid rows are a hard correctness cross-check (exact analytic volume, both
+tools conform). The enclosure row reproduces gmsh's empty-volume failure directly
+from the literal fixture (verified: `ntets=0`).
 
 ## CRC regression artifacts (stamped when green)
 

@@ -1,0 +1,62 @@
+# Validation — Tessella vs external mesh tools
+
+Independent cross-validation of Tessella against established open-source meshers
+(currently **gmsh**). The convention: for every geometry, mesh the *same domain*
+with both tools and compare against a shared oracle — the **analytic volume** — plus
+element quality and wall-clock time. This checks that Tessella is not merely
+self-consistent but agrees with an independent implementation, and quantifies where
+it is more accurate or faster.
+
+## Layout
+
+```
+validation/
+  common.jl              # helpers: gmsh runner, tet metrics, comparison
+  run_all.jl             # driver: runs every case, writes REPORT.md
+  REPORT.md              # generated results table (git-ignored until you run it)
+  cases/
+    01_box/box.geo               # reference gmsh script (retained)
+    02_cylinder/cylinder.geo
+    03_box_tunnel/box_tunnel.geo
+    04_hollow_box/hollow_box.geo
+    05_sphere/sphere.geo
+    06_enclosure_coax/enclosure_coax_junction.geo   # ASCENT acceptance fixture
+```
+
+Each case folder keeps its reference `.geo` script. Generated `gmsh_out.msh` files
+are git-ignored.
+
+## Run
+
+```
+julia --project=. validation/run_all.jl
+```
+
+Requires `gmsh` on `PATH` for the comparison (the run degrades to Tessella-only if
+absent). Results print to the terminal and to `validation/REPORT.md`.
+
+## What each case checks
+
+| Case | Geometry | Oracle | Point |
+|------|----------|--------|-------|
+| 01_box | axis-aligned box | V = 2 exact | both meshers must conform to a flat solid |
+| 02_cylinder | solid cylinder | V = πR²H | curved-surface fidelity trade-off (Tessella inscribed N-gon vs gmsh true circle) |
+| 03_box_tunnel | box with a through-tunnel | V = 24 exact | genus-1 flat solid |
+| 04_hollow_box | box minus interior cavity | V = 35 exact | Boolean-difference (CSG) solid |
+| 05_sphere | ball | V = 4/3·πR³ | curved-surface fidelity |
+| 06_enclosure_coax | ASCENT coax feed-through | volumes non-empty | the acceptance case: gmsh 4.13/4.15 leave the air/case/pin volumes **empty**; Tessella's native pipeline targets filling them |
+
+Flat solids give an *exact* analytic volume, so a passing row is a hard correctness
+cross-check. Curved solids expose the geometric-fidelity trade-off honestly (each
+tool is exact for its own surface model).
+
+## Adding a case
+
+Drop a `.geo` in a new `cases/NN_name/` folder and add a matching Tessella surface
+builder + analytic volume to the `cases` list in `run_all.jl`.
+
+## Extending to other tools
+
+The convention is tool-agnostic: add a `run_<tool>` helper in `common.jl` (mirroring
+`run_gmsh`) that meshes to a Tessella-readable format, and a column in the report.
+Retain each tool's input script alongside the case.

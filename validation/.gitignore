@@ -1,0 +1,3 @@
+# generated mesher output + report (regenerate with run_all.jl)
+cases/**/gmsh_out.msh
+REPORT.md
