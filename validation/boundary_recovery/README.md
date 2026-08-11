@@ -19,9 +19,15 @@ The regression form of both lives in `test/mesh3d_test.jl` ("recover_boundary:
 conforming tetrahedralization of arbitrary PLCs"), which also covers a star-shaped
 L-prism and a faceted (octagonal) cylinder.
 
-**Open:** Steiner-point recovery for **non-star-shaped** non-tetrahedralizable
-inputs (needs boundary-face-splitting Steiner points à la TetGen). Star-shaped
-Schönhardt-type inputs are handled by `recover_boundary(...; steiner=true)`.
+**Coverage boundary (measured):** `recover_boundary` conforms convex, non-convex
+Delaunay-recoverable (tunnel, shell, L-prism, faceted cylinder, **and non-star
+U-channel / comb / star**), and star-shaped non-tetrahedralizable (Schönhardt via
+`steiner=true`). The **one unhandled class** — *non-star AND reflex* (a **twisted
+non-convex prism**, a concrete constructed case) — correctly raises the **explicit
+blocker** under both `steiner` modes (never a silent bad mesh; regression-pinned in
+`mesh3d_test.jl`). Closing it needs TetGen-style boundary-face-splitting Steiner
+recovery (a subdivision-retry probe was slow/uncertain — research-grade), not a
+quick addition.
 
 Run either:
 

@@ -604,6 +604,36 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test bndarea(m) ≈ surfarea(s) rtol=1e-9                 # boundary == input surface ⇒ conforming
             @test ntets(m) == ntris(s)                               # one tet per facet (fan)
         end
+
+        @testset "exotic non-star + reflex (twisted prism) ⇒ explicit blocker, never silent" begin
+            # A non-convex polygon extruded WITH A TWIST is both non-star-shaped AND
+            # reflex/non-Delaunay-recoverable — the one class recover_boundary cannot
+            # mesh (needs TetGen-style boundary Steiner splitting). The recover-or-blocker
+            # guarantee must still hold: an explicit throw, never a silent bad mesh, even
+            # with steiner=true (the fan fallback rightly declines — not star-shaped).
+            U = [(0.,0.),(3.,0.),(3.,3.),(2.,3.),(2.,1.),(1.,1.),(1.,3.),(0.,3.)]
+            twisted = begin
+                n=length(U); cx=sum(p[1] for p in U)/n; cy=sum(p[2] for p in U)/n; θ=deg2rad(40)
+                rot(p)=((p[1]-cx)*cos(θ)-(p[2]-cy)*sin(θ)+cx, (p[1]-cx)*sin(θ)+(p[2]-cy)*cos(θ)+cy)
+                xs=Float64[p[1] for p in U]; ys=Float64[p[2] for p in U]
+                cdt=constrained_delaunay(xs,ys,[(i,i%n+1) for i in 1:n])
+                cap=to_mesh(cdt; interior=classify_interior(cdt))
+                capn=[(cap.coords[1,i],cap.coords[2,i]) for i in 1:size(cap.coords,2)]
+                pid=Dict((U[i][1],U[i][2])=>i for i in 1:n)
+                coords=vcat([(p[1],p[2],0.0) for p in U], [(rot(p)[1],rot(p)[2],1.0) for p in U])
+                tr=NTuple{3,Int}[]
+                for i in 1:n; j=i%n+1; push!(tr,(i,j,n+j)); push!(tr,(i,n+j,n+i)); end
+                for t in 1:ntris(cap)
+                    a=pid[capn[cap.tris[1,t]]]; b=pid[capn[cap.tris[2,t]]]; c=pid[capn[cap.tris[3,t]]]
+                    push!(tr,(a,c,b)); push!(tr,(n+a,n+b,n+c))
+                end
+                C=Matrix{Float64}(undef,3,length(coords)); for (i,p) in enumerate(coords); C[:,i]=[p...]; end
+                Tm=Matrix{Int32}(undef,3,length(tr)); for (t,f) in enumerate(tr); Tm[:,t]=Int32[f...]; end
+                Mesh(C; tris=Tm)
+            end
+            @test_throws ErrorException recover_boundary(twisted; max_seeds=12)
+            @test_throws ErrorException recover_boundary(twisted; max_seeds=12, steiner=true)
+        end
         @testset "error paths" begin
             @test_throws ArgumentError recover_boundary(Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1)))
         end
