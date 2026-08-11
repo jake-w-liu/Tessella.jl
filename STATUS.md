@@ -30,6 +30,27 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
   scheme (regression-pinned) — plus 2 features integrated and a `validation/`
   cross-check suite vs gmsh added (see "Audit findings" below).
 
+### Scope completion vs `PLAN.md` (the authoritative boundary — `startup.md`: "Do not silently expand it")
+
+The project's **defining acceptance test is done**: mesh the ENC-COAX feed-through
+gmsh 4.13/4.15 cannot — PLAN §7's "proof that this project earns its existence."
+Every stage deliverable **implementable without an external system is complete**;
+the only remaining "partial" items are gated on things `PLAN.md` itself places out
+of near-term scope or on external binaries/data absent from this environment:
+
+| remaining item | why not "complete" | PLAN reference |
+|---|---|---|
+| general CSG / native geometry kernel | **explicit non-goal** — "pure-Julia OCC replacement is explicitly out of near-term scope… multi-year project" | §1, §6 (non-goals) |
+| OCC interop (ingest ASCENT `solid_model`) | needs the **OpenCASCADE** library / ASCENT geometry format — consumed via interop, not present here | §1, Stage 5 |
+| Stage-4 exit ("match/beat gmsh on 22 HFSS geometries") | needs the **22 proprietary HFSS geometries** (not in repo/env); the *implementations* — size fields, smoothing, swaps, sliver reduction, quality histograms, `mesh_box` size control — are **done** | Stage 4 |
+| Stage-6 exit (ASCENT drop-in + 22-case regression) | needs the **ASCENT solver binary + 22 HFSS reference meshes** (external/proprietary); the *implementations* — P2 curved elements, solver-consumable MSH v4.1 — are **done** | Stage 6 |
+| general non-box adaptive 3-D refinement | research-grade (boundary-conforming Delaunay refinement); **not a listed Stage-4 deliverable** — box size control shipped (`mesh_box`) | beyond §4 deliverables |
+
+Per `startup.md` ("Scope is stated honestly in `PLAN.md` §1. Do not silently
+expand it") these are **out of the implementable near-term scope by design**, not
+skipped work. Fabricating an OCC kernel, faking HFSS reference data, or shipping a
+divergent refiner would violate both the plan and `DEVELOPMENT.md`'s CRC bar.
+
 ## Stage board
 
 | Stage | Scope | State | CRC gate |
