@@ -8,7 +8,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,946
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,952
   assertions** under `--check-bounds=yes` (verified this session).
 - **CRC regression checksums preserved** (suite includes them; unaffected by the
   `orient2_sos` fix): unit-cube
