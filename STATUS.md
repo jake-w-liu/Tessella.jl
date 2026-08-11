@@ -8,18 +8,25 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **143,062
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **143,073
   assertions** under `--check-bounds=yes` (verified this session; +28 `mesh_box`,
-  +24 `mesh_box_regions`, +22 `recover_boundary` (+ `steiner=true` Schönhardt fan
-  fallback), +32 `mesh_boolean` native mesh-CSG).
+  +24 `mesh_box_regions`, +22 `recover_boundary` (+ `steiner=true` fan fallback),
+  +32 `mesh_boolean` native mesh-CSG, +11 end-to-end native-pipeline integration).
 - **CRC regression checksums preserved** (suite includes them; unaffected by the
   `orient2_sos` fix): unit-cube
   `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`; 10×10
   refined square `583c615df1862c8518bbda409347f109dc25f7f8f5362562badf160fe6af30c1`.
-- **All 7 stages carry working, CRC-gated code.** Stages 0–2 complete; Stage 3
-  kernel + volume filling complete; Stages 4–6 partial (see board). Public API:
-  `mesh_volume` (3-D, `optimize`/`smooth` opts), `mesh_planar` (2-D), plus the
-  per-module functions.
+- **All 7 stages carry working, CRC-gated code.** Stages 0–3 complete; Stage 5
+  native CSG complete (OCC interop is an explicit non-goal); Stages 4/6 partial on
+  the research-grade / external-gated items (see board). Public API: `mesh_volume`
+  (3-D), `mesh_planar` (2-D), `mesh_box`/`mesh_box_regions` (size-controlled +
+  native box CSG), `recover_boundary` (robust boundary recovery), `mesh_boolean`
+  (native mesh-Boolean CSG), plus the per-module functions.
+- **The native geometry→mesh pipeline works end-to-end** (no gmsh, no OCC),
+  verified in `pipeline_test.jl`: **native CSG → conforming fill → solver-consumable
+  gmsh MSH v4.1** — a size-controlled multi-region enclosure (`mesh_box_regions`)
+  and a box-with-cylindrical-bore (`mesh_boolean` → `recover_boundary`) each write,
+  round-trip (CRC + physical groups + tags preserved), and validate as ASCENT input.
 - **Reason-to-exist demonstrated:** the ENC-COAX coax feed-through is meshed as ONE
   **conforming** partition — all three volumes (air/case/pin) filled with a manifold,
   shared interface (the pin bore through the case wall conforms), at the **literal

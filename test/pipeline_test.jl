@@ -109,4 +109,40 @@ end
               f.physical_names[(3,2)] == "air" && f.physical_names[(3,3)] == "case"
         @test validate(f.mesh).ok                                   # round-tripped mesh still valid
     end
+
+    @testset "native pipeline end-to-end: CSG → conforming fill → solver-consumable .msh" begin
+        # The project's "design → mesh always works" goal, exercised entirely through
+        # the native geometry+meshing stack (no OpenCASCADE): build geometry with the
+        # native CSG operators, mesh it conformingly at a controlled size, and confirm
+        # the result is a validated, ASCENT-consumable gmsh MSH v4.1 with physical groups.
+        dir = mktempdir()
+
+        # (A) size-controlled conforming MULTI-REGION enclosure via mesh_box_regions
+        #     (native volumetric CSG): case shell (tag 1) around an air cavity (tag 2).
+        enc = mesh_box_regions([BoxRegion(0,6,0,6,0,6,1), BoxRegion(1,5,1,5,1,5,2)]; hmax=1.5)
+        @test validate(enc).ok
+        @test sort(unique(enc.tet_tag)) == Int32[1,2]
+        @test mvpvol(enc) ≈ 216.0 rtol=1e-9                          # exact filled volume
+        pA = joinpath(dir, "enclosure_csg.msh")
+        write_msh(pA, enc; version=4.1, physical_names=Dict((3,1)=>"case", (3,2)=>"air"))
+        fA = read_msh(pA)
+        @test mesh_crc(fA.mesh).sha == mesh_crc(enc).sha            # connectivity preserved
+        @test sort(unique(fA.mesh.tet_tag)) == Int32[1,2]
+        @test fA.physical_names[(3,1)] == "case" && fA.physical_names[(3,2)] == "air"
+        @test validate(fA.mesh).ok
+
+        # (B) general native CSG → boundary recovery → volume mesh → .msh: a box with a
+        #     cylindrical bore (mesh_boolean difference), filled conformingly and written.
+        bored = mesh_boolean(box_surface(0,4,0,4,0,4),
+                             cylinder_surface((2.,2.,-1.),(0.,0.,1.),1.0,6.0; nθ=12), :difference)
+        vol = recover_boundary(bored)
+        @test validate(vol).ok
+        removed = 0.5*12*1.0^2*sin(2pi/12)*4.0                       # inscribed 12-gon × height 4
+        @test mvpvol(vol) ≈ 64.0 - removed rtol=1e-6                 # exact faceted-bore volume, conformed
+        pB = joinpath(dir, "bored_block.msh")
+        write_msh(pB, vol; version=4.1)
+        fB = read_msh(pB)
+        @test mesh_crc(fB.mesh).sha == mesh_crc(vol).sha
+        @test validate(fB.mesh).ok
+    end
 end
