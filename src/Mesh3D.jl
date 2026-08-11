@@ -28,7 +28,7 @@ using ..Mesh2D: constrained_delaunay, to_mesh
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
-       recover_boundary, mesh_boolean
+       recover_boundary, mesh_boolean, mesh_sized_conforming
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -2070,6 +2070,66 @@ function mesh_boolean(A::Mesh, B::Mesh, op::Symbol)
         "mesh_boolean: assembled $op result is not watertight/manifold " *
         "(boundary edges=$nb, max edge incidence=$mx) — refusing to return a leaky surface"))
     return r
+end
+
+
+"""
+    mesh_sized_conforming(surface::Mesh; hmax, inset=hmax, rng_seed=1, max_seeds=32) -> Mesh
+
+CONFORMING tet mesh of the closed PLC `surface` **with interior size control**: a
+background lattice of interior Steiner points (spacing `hmax/√3`, kept strictly
+inside and inset ≥ `inset` from the boundary so the input facets stay recoverable)
+is added, then Delaunay-filled, and accepted only if the exact `Rational{BigInt}`
+conformity + validity gate passes — every input facet a tet face, all-positive,
+closed-manifold. **Interior** edges are then `≤ hmax`; a boundary transition layer
+of thickness ~`inset` stays at the input-surface resolution (pass a finely-
+triangulated surface — e.g. from `MeshSurface` — for a fine boundary).
+
+Robust for well-conditioned curved domains (spheres, generic surfaces). For
+**maximally-cospherical** inputs (e.g. a fine axis-aligned cylinder's exact rings)
+the lattice can break validity — the gate then **throws an explicit blocker**
+rather than return an invalid mesh (never silent). For axis-aligned box assemblies
+prefer [`mesh_box_regions`](@ref) (uniform `maxedge ≤ hmax`, exact).
+"""
+function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
+                               rng_seed::Integer=1, max_seeds::Integer=32)
+    hmax > 0 || throw(ArgumentError("mesh_sized_conforming: hmax must be positive (got $hmax)"))
+    Px,Py,Pz,facets = _rb_dedup_surface(surface)
+    length(Px) >= 4 || throw(ArgumentError("mesh_sized_conforming: need >= 4 distinct surface vertices"))
+    isempty(facets) && throw(ArgumentError("mesh_sized_conforming: surface has no facets"))
+    regions = _rb_build_regions(Px,Py,Pz,facets)
+    S = _rb_crease_segments(regions)
+    xlo=minimum(Px); xhi=maximum(Px); ylo=minimum(Py); yhi=maximum(Py); zlo=minimum(Pz); zhi=maximum(Pz)
+    a = float(hmax)/sqrt(3.0); insd2 = float(inset)^2
+    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))
+    nx=max(1,ceil(Int,(xhi-xlo)/a)); ny=max(1,ceil(Int,(yhi-ylo)/a)); nz=max(1,ceil(Int,(zhi-zlo)/a))
+    nn=length(Px); Ix=Float64[]; Iy=Float64[]; Iz=Float64[]
+    @inbounds for i in 0:nx, j in 0:ny, k in 0:nz
+        px=xlo+i*(xhi-xlo)/nx; py=ylo+j*(yhi-ylo)/ny; pz=zlo+k*(zhi-zlo)/nz
+        _inside_surface((px,py,pz),dir,surface) || continue
+        ok=true
+        for v in 1:nn
+            if (px-Px[v])^2+(py-Py[v])^2+(pz-Pz[v])^2 < insd2; ok=false; break; end
+        end
+        ok && (push!(Ix,px); push!(Iy,py); push!(Iz,pz))
+    end
+    lastreason="no seed produced a conforming valid sized mesh"; lastnrec=0
+    for kk in 0:max_seeds-1
+        seed=Int(rng_seed)+kk
+        T=delaunay3d(vcat(Px,Ix), vcat(Py,Iy), vcat(Pz,Iz); perturb=false, rng_seed=seed)
+        keep=_classify_by_centroid(T,surface)
+        for drop in (false,true)
+            k2 = drop ? _rb_drop_flats(T,keep) : keep
+            any(k2) || continue
+            m=to_mesh3(T; keep=k2)
+            ok,nrec,reason=_rb_gate(surface,m,regions,S,Px,Py,Pz,facets)
+            ok && return m
+            nrec>=lastnrec && (lastnrec=nrec; lastreason=reason)
+        end
+    end
+    throw(ErrorException("mesh_sized_conforming: no conforming valid sized mesh after \$max_seeds seeds " *
+        "(\$(lastnrec)/\$(length(facets)) facets recovered — likely a cospherical-degenerate input; use " *
+        "recover_boundary without interior size control, or mesh_box_regions for boxes). Blocker: \$lastreason"))
 end
 
 end # module Mesh3D

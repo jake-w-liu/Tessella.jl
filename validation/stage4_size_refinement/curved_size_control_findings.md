@@ -9,13 +9,17 @@ achievable** for curved domains with the pragmatic routes — a fundamental tens
 (it is exactly what Shewchuk's Delaunay-refinement *terminator* exists to manage,
 and the terminator itself struggles on the massively-cospherical cylinder rings).
 Three approaches were probed; each lands at a different, honestly-characterized
-trade-off point. The most promising (b) was then **implemented and directly
-re-measured on a cylinder** — it emits an **invalid, non-conforming** mesh
-(cospherical degeneracy), so **no fallback is shipped**: shipping it would emit
-invalid meshes on the enclosure's own coax-pin geometry, violating the correctness
-bar. The conforming route that IS robust for curved surfaces — `recover_boundary`
-at the input-surface resolution — is shipped; it just does not add interior size
-control.
+trade-off point. Approach (b) was implemented **with the exact
+conformity+validity gate + insertion-order retry** and shipped as
+**`mesh_sized_conforming`**: it adds an inset interior Steiner lattice and accepts
+only a *gated* (conforming + valid) result, else raises an **explicit blocker** —
+so it can **never** emit the invalid mesh a raw (b) does on cospherical inputs.
+Measured: on a **sphere** (thick curved) it conforms and genuinely reduces the
+interior edge length (`int_maxedge ≤ hmax`, tets 436→577); on a **thin** cylinder
+the inset removes the interior lattice so it degrades safely to conforming-only.
+What remains genuinely open is **uniform** (not graded) interior size control on
+**thin / maximally-cospherical** curved domains — the cospherical-robust Shewchuk
+terminator.
 
 | approach | size control | boundary conformity | measured / blocker |
 |---|---|---|---|
