@@ -75,6 +75,24 @@ pin/case/air.
 | Volume fills (exact) | cube=1, octahedron=4/3, L-prism=3, box-tunnel(genus-1)=24, cylinder N-gon prism, thin pin | analytic volume + `validate` (positive vol, manifold, watertight) |
 | 2-3 / 3-2 flips | consistency + total volume preserved; 2-3 ∘ 3-2 = identity | `check_consistency3`, volume sum, round-trip |
 
+## Benchmarks (deterministic min-of-3, `julia -O2`, this machine)
+
+| kernel | n | time | throughput |
+|---|---:|---:|---|
+| 2-D Delaunay (`delaunay2d`) | 1 000 | 3.2 ms | 314 k nodes/s |
+| 2-D Delaunay | 5 000 | 26 ms | 191 k nodes/s |
+| 2-D Delaunay | 20 000 | 166 ms | 120 k nodes/s |
+| 3-D Delaunay (`delaunay3d`) | 1 000 | 16 ms | 61 k nodes/s |
+| 3-D Delaunay | 5 000 | 118 ms | 42 k nodes/s |
+| 3-D Delaunay | 20 000 | 579 ms | 35 k nodes/s |
+
+`mesh_volume` (cylinder 48×8 surface) ≈ 2.5 s / 143 MB — dominated by the ray-cast
+point-in-polyhedron domain classification, which is `O(n_tets × n_surface_faces)`.
+Correctness is not affected; a spatial-acceleration (BVH/grid) rewrite of the
+classifier is the obvious throughput win (noted, not yet done). Raw kernel
+throughput is competitive; parallel HXT-class speed is explicitly a
+post-robustness goal (`PLAN.md` §6).
+
 ## Log
 
 - **2026-08-11** — repo scaffolded (PLAN, STATUS, DEVELOPMENT, README, skeleton,
