@@ -568,4 +568,51 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test_throws ArgumentError recover_boundary(Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1)))
         end
     end
+
+    # ── Stage-5: mesh_boolean — native mesh-CSG (union/intersection/difference) ──────
+    # No OCC. Independent oracle: divergence-theorem volume of the RESULT surface ==
+    # the analytic Boolean volume; the result is watertight; and it fills into a valid
+    # tet mesh via recover_boundary. Axis-aligned inputs (exact plane-arrangement path,
+    # handles coplanar shared faces); box×cylinder exercises the tri-tri + CDT path.
+    @testset "mesh_boolean: native mesh-CSG (no OCC)" begin
+        divvol(s) = abs(sum(begin
+            a=node(s,s.tris[1,t]); b=node(s,s.tris[2,t]); c=node(s,s.tris[3,t])
+            a[1]*(b[2]*c[3]-b[3]*c[2]) - a[2]*(b[1]*c[3]-b[3]*c[1]) + a[3]*(b[1]*c[2]-b[2]*c[1])
+        end for t in 1:ntris(s); init=0.0) / 6)
+        watertight(s) = isempty(first(boundary_edges(s.tris)))
+        csg(A,B,op,exactvol) = begin
+            R = mesh_boolean(A,B,op)
+            @test watertight(R)                          # closed result surface
+            @test divvol(R) ≈ exactvol rtol=1e-9         # exact Boolean volume
+            @test validate(recover_boundary(R)).ok       # result fills into a valid tet mesh
+            R
+        end
+
+        @testset "box ∪/∩/∖ box, x-offset (coplanar shared faces)" begin
+            A=box_surface(0,4,0,4,0,4); B=box_surface(2,6,0,4,0,4)   # ∩ = [2,4]×[0,4]×[0,4] = 32
+            csg(A,B,:union,96.0); csg(A,B,:intersection,32.0); csg(A,B,:difference,32.0)
+        end
+        @testset "box ∪/∩/∖ box, xy-offset" begin
+            A=box_surface(0,4,0,4,0,4); B=box_surface(2,6,2,6,0,4)   # ∩ = [2,4]×[2,4]×[0,4] = 16
+            csg(A,B,:union,112.0); csg(A,B,:intersection,16.0); csg(A,B,:difference,48.0)
+        end
+        @testset "box ∪/∩/∖ box, general position" begin
+            A=box_surface(0,10,0,10,0,10); B=box_surface(5,15,5,15,5,15)  # ∩ = [5,10]³ = 125
+            csg(A,B,:union,1875.0); csg(A,B,:intersection,125.0); csg(A,B,:difference,875.0)
+        end
+        @testset "box − cylinder (tri-tri + CDT path): watertight + exact faceted volume" begin
+            A=box_surface(0,4,0,4,0,4)
+            cyl=cylinder_surface((2.,2.,-1.),(0.,0.,1.),1.0,6.0; nθ=16)   # r=1 through the box
+            removed = 0.5*16*1.0^2*sin(2pi/16)*4.0                        # inscribed 16-gon × height 4
+            R=mesh_boolean(A,cyl,:difference)
+            @test watertight(R)
+            @test divvol(R) ≈ 64.0 - removed rtol=1e-9
+            @test validate(recover_boundary(R)).ok
+        end
+        @testset "error paths" begin
+            A=box_surface(0,4,0,4,0,4); B=box_surface(2,6,2,6,0,4)
+            @test_throws ArgumentError mesh_boolean(A,B,:foo)                       # bad op
+            @test_throws ArgumentError mesh_boolean(Mesh(A.coords; tris=A.tris[:,1:end-1]), B, :union)  # open input
+        end
+    end
 end
