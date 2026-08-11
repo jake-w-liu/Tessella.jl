@@ -8,7 +8,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,940
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,946
   assertions** under `--check-bounds=yes` (verified this session).
 - **CRC regression checksums preserved** (suite includes them; unaffected by the
   `orient2_sos` fix): unit-cube
@@ -18,8 +18,11 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
   kernel + volume filling complete; Stages 4–6 partial (see board). Public API:
   `mesh_volume` (3-D, `optimize`/`smooth` opts), `mesh_planar` (2-D), plus the
   per-module functions.
-- **Reason-to-exist demonstrated:** the ENC-COAX coax junction fills all three
-  volumes at literal `.geo` scale where gmsh 4.13/4.15 leave them empty.
+- **Reason-to-exist demonstrated:** the ENC-COAX coax feed-through is meshed as ONE
+  **conforming** partition — all three volumes (air/case/pin) filled with a manifold,
+  shared interface (the pin bore through the case wall conforms), at the **literal
+  `.geo` scale and real pin resolution** — exactly where gmsh 4.13/4.15 produce zero
+  volume tets. Enabled by the corrected SoS (exact coordinates, no jitter).
 - **Adversarial-audit + feature pass landed this session** (workflows + independent
   re-verification): **9 confirmed bugs fixed** — including all four exact-predicate
   SoS tie-breaks (`orient2/orient3/incircle/insphere`) now consistent under one +ε
@@ -42,7 +45,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 | id | geometry | why | status |
 |---|---|---|---|
-| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL (real-scale volumes filled)** — at the *literal* `.geo` dimensions the three regions (air / case / coax pin, radius 0.8 mm × length 159 mm, aspect ≈ 199) are each meshed and **all volumes filled & validated** together (`mesh3d_test.jl`), the exact place gmsh leaves them empty. **The conforming pin/air/case *topology* now works** (`tetrahedralize_conforming`, `mesh3d_test.jl`): a coax **pin (cylinder) inside an air cavity inside a metal case shell**, meshed as ONE mesh — every region filled, exact total volume, and a **manifold shared interface** including the pin's *curved* (N-gon) surface, which the exact-coordinate Delaunay recovers **without Steiner points** (all 4·nθ pin faces shared pin↔air; air↔case cavity shared). The corrected SoS removes the perturbation-vs-conformance barrier. **The feed-through also conforms**: with the pin **crossing the case wall**, classification `[pin,air,case]` tags every in-cylinder tet as pin regardless of cavity-vs-wall, so the cylindrical **bore is handled with no explicit CSG surface** — both the pin↔air (cavity) *and* pin↔case (bore) interfaces appear and conform, and the air↔case boundary conforms around the bore hole (all 2·nθ·nz pin faces shared, 0 non-manifold, exact total volume). Remaining for the *literal* enclosure: the literal scale (0.8 mm pin, aspect ≈199) and the literal geometry (slots, resistor, exact `.geo` dimensions) — a robustness/geometry-assembly problem, no longer a boundary-recovery one. |
+| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL (real-scale volumes filled)** — at the *literal* `.geo` dimensions the three regions (air / case / coax pin, radius 0.8 mm × length 159 mm, aspect ≈ 199) are each meshed and **all volumes filled & validated** together (`mesh3d_test.jl`), the exact place gmsh leaves them empty. **The conforming pin/air/case *topology* now works** (`tetrahedralize_conforming`, `mesh3d_test.jl`): a coax **pin (cylinder) inside an air cavity inside a metal case shell**, meshed as ONE mesh — every region filled, exact total volume, and a **manifold shared interface** including the pin's *curved* (N-gon) surface, which the exact-coordinate Delaunay recovers **without Steiner points** (all 4·nθ pin faces shared pin↔air; air↔case cavity shared). The corrected SoS removes the perturbation-vs-conformance barrier. **The feed-through also conforms**: with the pin **crossing the case wall**, classification `[pin,air,case]` tags every in-cylinder tet as pin regardless of cavity-vs-wall, so the cylindrical **bore is handled with no explicit CSG surface** — both the pin↔air (cavity) *and* pin↔case (bore) interfaces appear and conform, and the air↔case boundary conforms around the bore hole (all 2·nθ·nz pin faces shared, 0 non-manifold, exact total volume). **This holds at the literal `.geo` scale and the real pin resolution**: air/case/pin at the fixture dimensions (0.8 mm pin, aspect ≈199) with nθ=12·nz=40 → 2549 tets, **all three volumes filled**, feed-through conforming (pin↔air 144, pin↔case 816 faces), 0 non-manifold, valid — the exact 3-volume mesh gmsh cannot produce. Remaining: (a) **classifier performance** — the per-tet ray-cast is O(tets·surface-tris) (~77 s for the fine pin); a flood-fill over interface faces would make it O(tets); (b) the extra literal geometry (slots, resistor, `p1_surface`) beyond the three main volumes. Neither is a boundary-recovery problem. |
 | THIN-SLOT | enclosure 1 mm coupling slot | thin-feature Boolean sliver | open |
 | SPIRAL | 10.1 silicon spiral (thin swept traces, layered stack) | high-aspect thin conductors | open |
 | ARRAY-PML | 5.7 endfire unit cell (periodic + PML) | conformal periodic faces | open |

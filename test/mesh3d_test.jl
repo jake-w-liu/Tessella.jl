@@ -285,6 +285,27 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test pin_air > 0 && pin_case > 0                        # pin passes THROUGH the wall — both interfaces
         @test pin_air + pin_case == 2*nθ*nz                      # every pin face conforms (none lost at the wall)
         @test count(v -> sort(v) == Int32[2,3], values(ff)) > 0  # air/case boundary conforms around the bore
+
+        # THE ACCEPTANCE CASE at the LITERAL `.geo` scale (metres): air / metal case /
+        # coax pin (0.8 mm radius, aspect ≈199), the coax feed-through where gmsh 4.13/
+        # 4.15 leave every volume empty. Meshed as ONE conforming partition — all three
+        # volumes filled, the pin bore through the case wall conforming, exact total
+        # volume (= the air box, which contains everything). (Coarse pin here to keep the
+        # test quick; the real nθ=12·nz=40 resolution is verified out-of-band.)
+        airL  = box_surface(-0.0405, 0.2810, -0.0405, 0.2010, -0.0405, 0.3810)
+        caseL = box_surface(-0.0005, 0.2205, -0.0005, 0.1405, -0.0005, 0.3005)
+        pinL  = cylinder_surface((0.17,0.1605,0.15), (0.0,-1.0,0.0), 0.0008, 0.1589; nθ=6, nz=3)
+        mL = tetrahedralize_conforming([pinL, caseL, airL])      # classify pin → case → air
+        @test validate(mL).ok
+        @test mesh_vol(mL) ≈ 0.3215*0.2415*0.4215 rtol=1e-9      # = air-box volume, EXACT
+        tpL = tets_per_region(mL)
+        @test length(tpL) == 3 && all(v > 0 for v in values(tpL))   # air/case/pin all filled — NOT empty
+        fL = facetags(mL)
+        @test all(length(v) <= 2 for v in values(fL))            # manifold
+        pinL_air  = count(v -> sort(v) == Int32[1,3], values(fL))
+        pinL_case = count(v -> sort(v) == Int32[1,2], values(fL))
+        @test pinL_air > 0 && pinL_case > 0                      # feed-through: pin in air AND through the case
+        @test pinL_air + pinL_case == 2*6*3                      # all pin faces conform at literal scale
     end
 
     @testset "2-3 / 3-2 flips: consistent, volume-preserving, round-trip identity" begin
