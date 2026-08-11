@@ -17,3 +17,6 @@ Manifest.toml
 
 # Local reference material (gmsh source study, not distributed)
 reference/
+
+# Local Claude Code config + workflow worktrees (not distributed)
+.claude/
