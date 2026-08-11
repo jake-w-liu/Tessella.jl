@@ -6,6 +6,23 @@ Package: `Tessella` · Julia ≥ 1.11 · goal: robust Julia-native mesh generato
 replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 (`DEVELOPMENT.md`).
 
+## Current state (verified at HEAD)
+
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,445
+  assertions** under `--check-bounds=yes` (last verified: `mesh_planar` commit).
+- **CRC regression checksums re-verified this session** (recomputed, byte-match):
+  unit-cube `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`;
+  10×10 refined square (nodes=91, tris=148) `583c615df1862c8518bbda409347f109dc25f7f8f5362562badf160fe6af30c1`.
+- **All 7 stages carry working, CRC-gated code.** Stages 0–2 complete; Stage 3
+  kernel + volume filling complete; Stages 4–6 partial (see board). Public API:
+  `mesh_volume` (3-D, `optimize`/`smooth` opts), `mesh_planar` (2-D), plus the
+  per-module functions.
+- **Reason-to-exist demonstrated:** the ENC-COAX coax junction fills all three
+  volumes at literal `.geo` scale where gmsh 4.13/4.15 leave them empty.
+- **In flight (not yet integrated):** a parallel effort implementing general P2
+  curving + hollow-box CSG + ODT smoothing, plus a core-module adversarial audit;
+  this header + counts get a final pass once those land.
+
 ## Stage board
 
 | Stage | Scope | State | CRC gate |
@@ -14,7 +31,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | 1 | 2-D Delaunay + CDT + quality refinement | **DONE — gate green** | exact empty-circumcircle oracle ✓; 2n−2−h count + hull ✓; CDT constraints present + locally Delaunay ✓; Ruppert angle/area bound achieved, domain area preserved ✓ |
 | 2 | 1-D edge meshing + parametric surface meshing | **DONE — gate green** | size-graded edge mesh vs analytic arc length ✓; planar face exact area + quality ✓; cylinder watertight + area convergence ✓; parametric area convergence ✓ |
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; interface recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; conforming interface recovery + exact enclosure geometry OPEN |
-| 4 | size fields + optimization | **partial** | tet quality report + Laplacian smoothing ✓ (volume/validity preserved, mean dihedral up, slivers down); 3-D sliver exudation + domain-bounded refinement WIP |
+| 4 | size fields + optimization | **partial** | tet quality report ✓; Laplacian + ODT smoothing ✓; verified 2-3/3-2 flip primitives ✓; `optimize_flips!` sliver reduction (309→169 flips alone, →63 with smoothing on a 300-pt cloud; volume/validity/min-dihedral-safe) ✓; weighted sliver exudation + domain-bounded 3-D refinement WIP |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | **partial** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel) ✓ + fill to exact volume; Boolean CSG + OCC interop WIP |
 | 6 | high-order + ASCENT integration + 22-case regression | **partial** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓ + curved P2 onto a cylinder primitive ✓; general-geometry curving + ASCENT drop-in + 22-case regression WIP |
 
@@ -27,10 +44,11 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | SPIRAL | 10.1 silicon spiral (thin swept traces, layered stack) | high-aspect thin conductors | open |
 | ARRAY-PML | 5.7 endfire unit cell (periodic + PML) | conformal periodic faces | open |
 
-Reference artifact for ENC-COAX: the failing gmsh `.geo` and the gmsh-API
-diagnosis (surface 86 bbox ≈ (168.4,140,148.4)–(171.6,160.5,151.6) mm; empty
-volumes = pin/case/air) are recorded in the session that created this repo; copy
-the `.geo` into `test/fixtures/` at Stage 0.
+Reference artifact for ENC-COAX: the failing gmsh `.geo` is captured at
+`test/fixtures/enclosure_coax_junction.geo` (parsed by `IO.read_geo_params`, which
+recovers the air/case/coax_pin groups + sizing + seed). gmsh-API diagnosis:
+surface 86 bbox ≈ (168.4,140,148.4)–(171.6,160.5,151.6) mm; empty volumes =
+pin/case/air.
 
 ## Verified facts carried in from the ASCENT campaign (2026-08-11)
 
@@ -52,6 +70,10 @@ the `.geo` into `test/fixtures/` at Stage 0.
 | Unit cube (6-tet Kuhn) | `nodes=8 tets=6 bbox=[(0,0,0)→(1,1,1)] dihedral(min,mean)=(0.7854,0.7854) radedge(min,mean)=(0.86603,0.86603) bfaces=12` · SHA-256 `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9` | analytic volume 1/6·6=1, Euler χ=1 (ball), boundary χ=2 (sphere), 12 boundary tris |
 | 2-D Delaunay (random/grid/cocircular) | exact empty-circumcircle holds (0 violations, `incircle_sos`); triangle count = 2n−2−h vs independent monotone-chain hull; seed-independent (SoS) | `is_delaunay`, hull oracle, Euler χ=1 |
 | 10×10 square refined to 20° (max_area 1.0, seed 1) | `nodes=91 tris=148 bbox=[(0,0,0)→(10,10,0)]` · SHA-256 `583c615df1862c8518bbda409347f109dc25f7f8f5362562badf160fe6af30c1` | min angle ≥ 20°, max tri area ≤ 1.0, domain area = 100 preserved, CDT locally Delaunay |
+| 3-D Delaunay (random/box/cube) | exact empty-circumsphere holds (0 violations, `insphere_sos`); Σ tet volume = convex box volume; Euler χ=1 (ball) + boundary χ=2 (sphere) + manifold; seed-independent | `is_delaunay3`, box-volume conservation, `boundary_euler` |
+| ENC-COAX (real `.geo` scale) | air/case/coax-pin (R 0.8 mm × L 159 mm, aspect ≈199) — `tets_per_region` all > 0, every region validated, `tetrahedralize_multi` | per-region tet count > 0 (anti-false-positive), exact box volumes, thin-pin fill |
+| Volume fills (exact) | cube=1, octahedron=4/3, L-prism=3, box-tunnel(genus-1)=24, cylinder N-gon prism, thin pin | analytic volume + `validate` (positive vol, manifold, watertight) |
+| 2-3 / 3-2 flips | consistency + total volume preserved; 2-3 ∘ 3-2 = identity | `check_consistency3`, volume sum, round-trip |
 
 ## Log
 
@@ -183,3 +205,17 @@ the `.geo` into `test/fixtures/` at Stage 0.
   defers. Per CRC discipline the non-robust recovery was **removed** (the verified
   2-3/3-2 flip primitives remain as its foundation). `tetrahedralize_multi` continues
   to fill every region (non-conforming interfaces). Full `Pkg.test()`: **142,442**.
+- **2026-08-11** — **Working sliver reduction + 2-D/3-D top-level APIs.**
+  - `optimize_flips!` gained **3-2 flips** (with `flip32!` validity guards — the
+    edge must be interior and the two apexes must straddle the ring triangle; a
+    bug where boundary/degenerate edges relinked wrongly was found and fixed). They
+    collapse slivers: 309→169 from flips alone, 309→63 with Laplacian smoothing on
+    a 300-pt random Delaunay; volume/validity preserved, min dihedral non-decreasing.
+  - `mesh_volume(optimize=true)` runs the flips in the pipeline (cylinder fill
+    102→73 slivers, volume preserved). `Tessella.mesh_planar` added — the 2-D
+    counterpart of `mesh_volume` (CDT + Ruppert + interior → validated 2-D mesh).
+  - Empirical recovery characterization (`scratchpad/analyze.jl`): on the perturbed
+    two-region box the interface is *mostly* conforming (6/8 faces present); the 2
+    missing faces have missing edges and are not single-flip recoverable → they need
+    full edge+facet recovery (constrained CDT), confirming the deferral. Full
+    `Pkg.test()` green: **142,445 assertions**.
