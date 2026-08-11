@@ -374,4 +374,63 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test ntets(to_mesh3(delaunay3d([0.0,1,0,1],[0.0,0,1,1],[0.0,0,0,0]; perturb=false))) == 0 # coplanar
         @test ntets(to_mesh3(delaunay3d([0.0],[0.0],[0.0]))) == 0                                 # 1 point
     end
+
+    # ── Stage-4: mesh_box — size-controlled structured (Kuhn/Freudenthal) box mesh ──
+    # Independent oracles: the max-edge GUARANTEE (recomputed from scratch), exact
+    # volume + boundary-area (analytic box formulas), a watertight boundary via
+    # boundary Euler χ=2 (sphere), sliver-free quality via tet_dihedral_extrema, and
+    # CRC determinism. This is a *provably*-correct capability (explicit connectivity,
+    # not Delaunay-of-degenerate-lattice — see validation/stage4_size_refinement/).
+    @testset "mesh_box: guaranteed max-edge, exact fill, watertight, sliver-free" begin
+        boxvol(bx)  = (bx[2]-bx[1])*(bx[4]-bx[3])*(bx[6]-bx[5])
+        boxarea(bx) = 2*((bx[2]-bx[1])*(bx[4]-bx[3]) + (bx[4]-bx[3])*(bx[6]-bx[5]) + (bx[2]-bx[1])*(bx[6]-bx[5]))
+        maxedge(m) = maximum(begin
+            vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); e=0.0
+            for i in 1:4, j in i+1:4
+                p=node(m,vs[i]); q=node(m,vs[j]); e=max(e, hypot(p[1]-q[1],p[2]-q[2],p[3]-q[3]))
+            end; e end for t in 1:ntets(m))
+
+        @testset "cube: max-edge bound + exact volume + valid + watertight, sweep hmax" begin
+            bx = (0.0,4.0,0.0,4.0,0.0,4.0)
+            for hmax in (3.0, 2.0, 1.0, 0.6)
+                m = mesh_box(bx...; hmax=hmax)
+                @test maxedge(m) <= hmax + 1e-9            # THE guarantee, recomputed
+                @test mesh_vol(m) ≈ boxvol(bx) rtol=1e-9   # exact fill (independent sum)
+                @test validate(m).ok                       # positive tets, non-degenerate, manifold
+                @test boundary_euler(m) == 2               # boundary is a 2-sphere ⇒ watertight
+            end
+        end
+
+        @testset "general (non-cube, shifted) box: volume + boundary-area + bbox oracle" begin
+            bx = (-1.0, 2.0, 0.0, 5.0, 1.0, 3.0)           # 3×5×2 = 30, offset from origin
+            m = mesh_box(bx...; hmax=0.8)
+            @test mesh_vol(m) ≈ boxvol(bx) rtol=1e-9
+            @test validate(m).ok
+            @test boundary_euler(m) == 2
+            bf, _ = boundary_faces(m.tets)
+            area = sum(triangle_area(node(m,f[1]),node(m,f[2]),node(m,f[3])) for f in bf)
+            @test area ≈ boxarea(bx) rtol=1e-9             # boundary == the 6 box faces exactly
+            lo, hi = bounding_box(m)
+            @test all(abs.(lo .- (bx[1],bx[3],bx[5])) .< 1e-12)
+            @test all(abs.(hi .- (bx[2],bx[4],bx[6])) .< 1e-12)
+        end
+
+        @testset "quality: no slivers (bounded min dihedral, radius-edge)" begin
+            m = mesh_box(0,4,0,4,0,4; hmax=1.0)
+            dmin = minimum(tet_dihedral_extrema(node(m,m.tets[1,t]),node(m,m.tets[2,t]),
+                            node(m,m.tets[3,t]),node(m,m.tets[4,t]))[1] for t in 1:ntets(m))
+            remax = maximum(tet_radius_edge(node(m,m.tets[1,t]),node(m,m.tets[2,t]),
+                            node(m,m.tets[3,t]),node(m,m.tets[4,t])) for t in 1:ntets(m))
+            @test dmin > 0.6            # radians (~34°); Kuhn cube min dihedral = π/4 = 45°
+            @test remax < 1.0           # radius-edge ratio well below the sliver regime
+        end
+
+        @testset "determinism (CRC) + error paths" begin
+            @test mesh_crc(mesh_box(0,2,0,2,0,2; hmax=0.7)).sha ==
+                  mesh_crc(mesh_box(0,2,0,2,0,2; hmax=0.7)).sha
+            @test_throws ArgumentError mesh_box(0,0,0,1,0,1; hmax=0.5)   # zero x-extent
+            @test_throws ArgumentError mesh_box(0,1,0,1,0,1; hmax=0.0)   # non-positive hmax
+            @test_throws ArgumentError mesh_box(0,1,0,1,0,1; hmax=-1.0)
+        end
+    end
 end

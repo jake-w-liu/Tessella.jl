@@ -26,7 +26,7 @@ using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
-       tetrahedralize_conforming, tets_per_region
+       tetrahedralize_conforming, tets_per_region, mesh_box
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -766,6 +766,72 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false
     optimize && optimize_flips!(T; passes=4)     # sliver-reducing flips (safe, volume-preserving)
     keep = _classify_by_centroid(T, surface)
     return to_mesh3(T; keep=keep)
+end
+
+"""
+    mesh_box(x0, x1, y0, y1, z0, z1; hmax) -> Mesh
+
+Size-controlled tetrahedral mesh of the axis-aligned box `[x0,x1]×[y0,y1]×[z0,z1]`
+with **guaranteed maximum edge length ≤ `hmax`**. Unlike the Delaunay path
+([`tetrahedralize`](@ref)), which inherits the input surface's resolution and adds
+no interior points, this places a regular grid at spacing `hmax/√3` per axis and
+tetrahedralizes each grid cube by the **Kuhn/Freudenthal subdivision** — six
+path-tetrahedra sharing the cube's main diagonal.
+
+The subdivision is *explicit connectivity* (no Delaunay of the degenerate lattice,
+whose cospherical ties break validity — see `validation/stage4_size_refinement/`),
+so the result is provably **valid** (all tets positively oriented, no slivers),
+**watertight/conforming** (every cube uses the same diagonal ⇒ shared faces match),
+**exact in volume** (`∑vol == box volume`), and **terminating** (finite grid).
+The cube main diagonal `= (hmax/√3)·√3 = hmax` bounds the longest edge, so
+`maxedge ≤ hmax` holds by construction. This is the Stage-4 size-control primitive
+for box regions (e.g. the enclosure case/air cavities).
+"""
+function mesh_box(x0::Real, x1::Real, y0::Real, y1::Real, z0::Real, z1::Real; hmax::Real)
+    x0,x1,y0,y1,z0,z1 = float(x0),float(x1),float(y0),float(y1),float(z0),float(z1)
+    Lx = x1-x0; Ly = y1-y0; Lz = z1-z0
+    (Lx > 0 && Ly > 0 && Lz > 0) ||
+        throw(ArgumentError("mesh_box: box must have positive extent in every axis (got Lx=$Lx, Ly=$Ly, Lz=$Lz)"))
+    hmax > 0 || throw(ArgumentError("mesh_box: hmax must be positive (got $hmax)"))
+    a  = hmax / sqrt(3.0)                                   # cube edge; main diagonal = a√3 = hmax
+    nx = max(1, ceil(Int, Lx/a)); ny = max(1, ceil(Int, Ly/a)); nz = max(1, ceil(Int, Lz/a))
+    hx = Lx/nx; hy = Ly/ny; hz = Lz/nz
+    nid(i,j,k) = ((k*(ny+1) + j)*(nx+1) + i) + 1            # 1-based grid-node id
+    npts = (nx+1)*(ny+1)*(nz+1)
+    C = Matrix{Float64}(undef, 3, npts)
+    @inbounds for k in 0:nz, j in 0:ny, i in 0:nx
+        n = nid(i,j,k); C[1,n]=x0+i*hx; C[2,n]=y0+j*hy; C[3,n]=z0+k*hz
+    end
+    # six path-tetrahedra per cube: 000 → step1 → step2 → 111 (the 3! monotone
+    # lattice paths from the low corner to the high corner). Emitted CCW-positive.
+    paths = (((1,0,0),(1,1,0)), ((1,0,0),(1,0,1)), ((0,1,0),(1,1,0)),
+             ((0,1,0),(0,1,1)), ((0,0,1),(1,0,1)), ((0,0,1),(0,1,1)))
+    tets = Matrix{Int32}(undef, 4, 6*nx*ny*nz); nt = 0
+    @inbounds for k in 0:nz-1, j in 0:ny-1, i in 0:nx-1
+        c(di,dj,dk) = nid(i+di, j+dj, k+dk)
+        v0 = c(0,0,0); v7 = c(1,1,1)
+        for (s1,s2) in paths
+            v1 = c(s1...); v2 = c(s2...)
+            # orient so the signed volume is positive (swap the last two if not)
+            p0=(C[1,v0],C[2,v0],C[3,v0]); p1=(C[1,v1],C[2,v1],C[3,v1])
+            p2=(C[1,v2],C[2,v2],C[3,v2]); p3=(C[1,v7],C[2,v7],C[3,v7])
+            nt += 1; tets[1,nt]=v0; tets[2,nt]=v1
+            if _signed_vol6(p0,p1,p2,p3) >= 0
+                tets[3,nt]=v2; tets[4,nt]=v7
+            else
+                tets[3,nt]=v7; tets[4,nt]=v2
+            end
+        end
+    end
+    return Mesh(C; tets=tets)
+end
+
+# 6× signed tet volume (sign only matters here); positive ⇔ (p1-p0,p2-p0,p3-p0) right-handed
+@inline function _signed_vol6(p0,p1,p2,p3)
+    ax=p1[1]-p0[1]; ay=p1[2]-p0[2]; az=p1[3]-p0[3]
+    bx=p2[1]-p0[1]; by=p2[2]-p0[2]; bz=p2[3]-p0[3]
+    cx=p3[1]-p0[1]; cy=p3[2]-p0[2]; cz=p3[3]-p0[3]
+    return ax*(by*cz-bz*cy) - ay*(bx*cz-bz*cx) + az*(bx*cy-by*cx)
 end
 
 """
