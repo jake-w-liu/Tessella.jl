@@ -8,8 +8,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,911
-  assertions** under `--check-bounds=yes` (verified this session, 1m41s).
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,916
+  assertions** under `--check-bounds=yes` (verified this session).
 - **CRC regression checksums preserved** (suite includes them; unaffected by the
   `orient2_sos` fix): unit-cube
   `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`; 10×10
@@ -21,9 +21,10 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 - **Reason-to-exist demonstrated:** the ENC-COAX coax junction fills all three
   volumes at literal `.geo` scale where gmsh 4.13/4.15 leave them empty.
 - **Adversarial-audit + feature pass landed this session** (workflows + independent
-  re-verification): 6 confirmed bugs fixed, 2 features integrated, 1 SoS predicate
-  inconsistency fixed, 3 SoS fallthroughs characterized+deferred (see
-  "Audit findings" below), and a `validation/` cross-check suite vs gmsh added.
+  re-verification): **9 confirmed bugs fixed** — including all four exact-predicate
+  SoS tie-breaks (`orient2/orient3/incircle/insphere`) now consistent under one +ε
+  scheme (regression-pinned) — plus 2 features integrated and a `validation/`
+  cross-check suite vs gmsh added (see "Audit findings" below).
 
 ## Stage board
 
@@ -70,33 +71,36 @@ Two background workflows (a feature-implementation pass + a core-module adversar
 bug-hunt with per-finding verification) surfaced these. Every one was reproduced
 here from scratch before acting; every fix re-verified (full suite green).
 
-**Fixed (6):**
+**Fixed (9):**
 
 | # | site | defect | verification of the fix |
 |---|---|---|---|
 | 1 | `HighOrder.curve_to_cylinder!` / new `curve_to_surface!` | curved **interior** edges (qualified an edge by "both corners on the surface", but every vertex is on the boundary since no Steiner nodes are added) → tangled 47/125 (cyl) and 127/166 (sphere) P2 elements | now curves only genuine boundary-surface edges + reverts any inverting projection; independent degree-6 Jacobian sampler finds **0** inverted elements; interior chords byte-identical to their straight midpoints |
-| 2 | `Predicates.orient2_sos:351` | SoS tie-break sign-inverted (matched −ε) vs orient3/incircle/insphere (+ε) → 2-D degenerate orient2/incircle decisions mutually incoherent (Mesh2D uses both on one point set) | negated to +ε; **0/6** disagreements vs an independent exact `Rational{BigInt}` SoS oracle (was 6/6); full suite + golden 2-D CRC unchanged |
+| 2 | `Predicates.orient2_sos:351` | SoS tie-break sign-inverted (matched −ε) vs the +ε house convention → 2-D degenerate orient2/incircle decisions mutually incoherent (Mesh2D uses both on one point set) | negated to +ε; **0/6** disagreements vs an independent exact `Rational{BigInt}` SoS oracle (was 6/6); full suite + golden 2-D CRC unchanged |
+| 7 | `Predicates.orient3_sos:416` | fully-degenerate (4-collinear) fallthrough returned a constant `perm`, wrong on 12/24 labelings | replaced with an exact +ε `Rational{BigInt}` leading-term SoS evaluator (Leibniz det of the perturbed matrix); verified **0/24** collinear + **0/24** coplanar-sanity vs a validated oracle (fast path preserved) |
+| 8 | `Predicates.incircle_sos:439` | 4-collinear fallthrough returned constant `perm`, wrong on 12/24 | replaced with the exact SoS of the paraboloid-lifted points (incircle = orientation of the lift; the algorithm-consistent Edelsbrunner–Mücke scheme). Verified **0/24** collinear + **0/24** cocircular-sanity vs a **canonical lifted-orientation oracle** — which I built and validated after finding my first (naive-lift) oracle used the wrong scheme; a finite-ε exact-Rational cross-check confirmed the resolution |
+| 9 | `Predicates.insphere_sos:456` | the *entire* tie-break (fast minors **and** fallthrough) evaluated the −ε perturbation while orient3 uses +ε — the 3-D analog of #2: the kernel needs orient3/insphere to agree (cavity chosen by insphere, orientations by orient3). Wrong on 120/120 cospherical + 60/120 coplanar vs +ε (three independent methods) | replaced the whole tie-break with the exact +ε SoS of the 4-D paraboloid lift (`_orient_nd_sos_exact`, the same construction as incircle one dimension up — the d=3 form is oracle-validated, and the base-sign match + dimension-general construction carry it to d=4). Verified **0/120** cospherical + **0/120** coplanar vs the canonical oracle; full suite + golden CRC unchanged |
 | 3 | `MeshTypes.euler_characteristic:274` | counted segment-only nodes in V while E omits segment edges → χ inflated (tet+segment read 3, not 1) | segment loop removed; reproduced (3→1) + regression test |
 | 4 | `MeshTypes.bounding_box:315` | included unreferenced nodes, violating its "referenced nodes" contract and polluting `mesh_crc.bbox` | filter to referenced nodes; reproduced ((1000,1,1)→(1,1,1)) + regression test |
 | 5 | `IO.read_stl:481` | far-from-origin weld key `round(Int, coord/tol)` overflowed Int64 → crash | quantize relative to bbox min corner; reproduced (InexactError→ok) + regression test |
 | 6 | `IO.read_stl:431` | ASCII STL with a UTF-8 BOM or non-ASCII solid name misdetected as binary → EOFError crash | BOM-aware keyword check, drop whole-header ASCII requirement; reproduced (2 crashes→ok) + regression test |
 
-**Confirmed but deferred (3)** — SoS *fallthrough* tie-breaks, reached only for
-*fully* degenerate inputs (4 collinear / 5 coplanar) where every primary minor
-vanishes; the 3-D kernel's ~1e-8 pre-perturbation makes them largely latent, and a
-correct fix needs an exact SoS continuation not a constant `return perm`:
+**All four SoS predicates now resolve degeneracies by one consistent +ε scheme.**
+The exact `Rational{BigInt}` leading-term evaluator (`_orient_nd_sos_exact`, a
+Leibniz determinant of the EM-perturbed matrix) is the shared foundation: orient3
+uses it directly for the collinear fallthrough; incircle/insphere use it on the
+paraboloid-lifted points (incircle = 3-D orientation of the lift, insphere = 4-D).
+The corrected +ε signs over every index labeling of the four finding configs are
+**regression-pinned** in `test/predicates_test.jl`. Nothing SoS remains deferred.
 
-- `orient3_sos:416` — wrong parity for 4 collinear points (my trustworthy exact
-  oracle: **12/24** labelings wrong; **0/24** for coplanar-non-collinear, i.e. the
-  fast path is correct — only the collinear fallthrough is wrong).
-- `incircle_sos:439` — wrong parity for 4 collinear points (fallthrough).
-- `insphere_sos:461` — wrong parity for 5 coplanar points; it also evaluates the
-  −ε perturbation while orient3 uses +ε (the two verify-agents disagreed on this,
-  and my lifted-predicate oracle still has a calibration bug, so I did **not** ship
-  an unverified change to foundational exact predicates). Fix path: replace each
-  `return perm` with an exact `Rational{BigInt}` leading-term SoS evaluation
-  (correct-by-construction), verified against the exact oracle over all degenerate
-  labelings, once the oracle's lifted-predicate calibration is sound.
+> Method note: getting incircle/insphere right required distinguishing two SoS
+> schemes for lifted predicates — deriving the lift from perturbed x,y (wrong: its
+> ε² cross-terms mis-order the leading term) vs. treating the lift as an independent
+> EM coordinate (correct, = orientation of the lifted points). My first oracle used
+> the former and mis-flagged the code; the canonical lifted-orientation oracle (+ε
+> by construction, base-matched to each predicate) resolved it, cross-checked with a
+> finite-ε exact-Rational evaluation. The two audit verify-agents had disagreed on
+> insphere's sign; the canonical oracle + full-suite/CRC settle it.
 
 ## Cross-tool validation vs gmsh (`validation/`, run this session)
 

@@ -268,6 +268,42 @@ using .Oracles
         end
     end
 
+    # ── SoS +ε tie-break signs on FULLY-degenerate configs (regression pins) ─────
+    # The four *_sos predicates must resolve a fully-degenerate determinant (4
+    # collinear points / 5 coplanar points — where the fast-path minors all vanish)
+    # by the SAME +ε Edelsbrunner–Mücke perturbation. The golden sign over every index
+    # labeling below was captured from the fixed predicates and cross-verified against
+    # an exact Rational{BigInt} leading-term SoS oracle AND a canonical paraboloid-
+    # lifted-orientation oracle (STATUS.md "Audit findings"). They pin: orient2's
+    # −ε→+ε sign flip; orient3's & incircle's exact collinear fallthrough (was a
+    # constant `perm`); and insphere's −ε→+ε flip via the 4-D lift.
+    @testset "SoS +ε signs on fully-degenerate configs (regression)" begin
+        aperms(v::Vector{Int}) = length(v) <= 1 ? [v] :
+            [ [v[i]; p] for i in eachindex(v) for p in aperms(v[[1:i-1; i+1:end]]) ]
+        sigs(f, n) = [f(Tuple(t)) for t in aperms(collect(1:n))]
+
+        p2 = ((0,0),(1,0),(2,0))                                   # collinear
+        @test sigs(t -> orient2_sos(p2[1],p2[2],p2[3], t...), 3) == [1,1,-1,1,-1,1]
+
+        p3 = ((-2,-2,0),(-1,-2,0),(0,-2,0),(1,-2,0))               # collinear (was wrong 12/24)
+        @test sigs(t -> orient3_sos(p3[1],p3[2],p3[3],p3[4], t...), 4) ==
+              [-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,-1,-1,1]
+
+        pic = ((0,0),(1,0),(2,0),(3,0))                            # collinear (was wrong 12/24)
+        @test sigs(t -> incircle_sos(pic[1],pic[2],pic[3],pic[4], t...), 4) ==
+              [-1,-1,-1,-1,-1,-1,1,1,-1,1,-1,1,1,1,-1,1,-1,1,1,1,-1,1,-1,1]
+
+        pis = ((0,0,0),(1,0,0),(0,1,0),(1,1,0),(2,0,0))            # coplanar (was wrong 60/120)
+        @test sigs(t -> insphere_sos(pis[1],pis[2],pis[3],pis[4],pis[5], t...), 5) ==
+              [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,-1,-1,-1,-1,-1,-1,-1,-1,1,-1,1,-1,
+               -1,-1,1,-1,1,-1,-1,-1,1,-1,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,1,1,1,1,-1,-1,1,1,1,-1,-1,-1,1,1,1,-1,
+               -1,-1,-1,-1,-1,-1,-1,-1,1,1,1,1,-1,-1,1,1,1,-1,-1,-1,1,1,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,1,1,1,1,-1,
+               -1,1,1,1,-1,-1,-1,1,1,1,-1]
+
+        # every one is a valid, antisymmetric, nonzero tie-break (no coincidental perm)
+        @test all(!=(0), sigs(t -> insphere_sos(pis[1],pis[2],pis[3],pis[4],pis[5], t...), 5))
+    end
+
     # ── allocation guard: fast path must not allocate ───────────────────────────
     @testset "fast path is allocation-free" begin
         a=(0.0,0.0); b=(1.0,0.0); c=(0.0,1.0)

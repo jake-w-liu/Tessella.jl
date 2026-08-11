@@ -419,7 +419,10 @@ function orient3_sos(pa, pb, pc, pd,
     m != 0 && return perm * m
     m = orient2((_x(a), _y(a)), (_x(b), _y(b)), (_x(c), _y(c)))
     m != 0 && return perm * m
-    return perm
+    # Fully degenerate (all 8 orient2 projections vanish ⇒ the 4 points are collinear):
+    # the fast minors cannot resolve it. Fall to the exact +ε SoS leading term, which
+    # is correct here where the constant `return perm` was only coincidentally right.
+    return _orient3_sos_exact(pa, pb, pc, pd, ia, ib, ic, id)
 end
 
 """
@@ -442,7 +445,10 @@ function incircle_sos(pa, pb, pc, pd,
     m = orient2(a, c, d); m != 0 && return perm * (-m)
     m = orient2(a, b, d); m != 0 && return perm * m
     m = orient2(a, b, c); m != 0 && return perm * (-m)
-    return perm
+    # Fully degenerate (all orient2 minors vanish ⇒ the 4 points are collinear): the
+    # fast minors cannot resolve it. Fall to the exact +ε SoS of the paraboloid-lifted
+    # points, correct here where the constant `return perm` was only coincidentally so.
+    return _incircle_sos_exact(pa, pb, pc, pd, ia, ib, ic, id)
 end
 
 """
@@ -455,28 +461,143 @@ function insphere_sos(pa, pb, pc, pd, pe,
                       id::Integer, ie::Integer)::Int
     s = insphere(pa, pb, pc, pd, pe)
     s != 0 && return s
-    perm, sp = _sort5_pts(((ia, pa), (ib, pb), (ic, pc), (id, pd), (ie, pe)))
-    a = sp[1][2]; b = sp[2][2]; c = sp[3][2]; d = sp[4][2]; e = sp[5][2]
-    # Leading SoS term of a degenerate in-sphere is an orient3 minor of four of
-    # the five sorted points; evaluate the standard descending sequence.
-    m = orient3(b, c, d, e); m != 0 && return perm * m
-    m = orient3(a, c, d, e); m != 0 && return perm * (-m)
-    m = orient3(a, b, d, e); m != 0 && return perm * m
-    m = orient3(a, b, c, e); m != 0 && return perm * (-m)
-    m = orient3(a, b, c, d); m != 0 && return perm * m
-    return perm
+    # Exact +ε SoS via the paraboloid lift — consistent with orient3/incircle. The old
+    # hand-derived orient3-minor sequence evaluated the OPPOSITE (−ε) perturbation (a
+    # sign inconsistency with orient3, which the 3-D kernel needs to agree — cavity by
+    # insphere, orientation by orient3; verified 120/120 vs the +ε canonical oracle),
+    # and its constant `return perm` fallthrough was also wrong for 5 coplanar points.
+    # Reached only for exactly cospherical inputs (rare — the kernel pre-perturbs), so
+    # the BigInt cost is irrelevant.
+    return _insphere_sos_exact(pa, pb, pc, pd, pe, ia, ib, ic, id, ie)
 end
 
-@inline function _sort5_pts(t)
-    v = [t[1], t[2], t[3], t[4], t[5]]
-    perm = 1
-    @inbounds for i in 1:4, j in 1:4-i+1
-        if v[j][1] > v[j+1][1]
-            v[j], v[j+1] = v[j+1], v[j]
-            perm = -perm
-        end
+# ════════════════════════════════════════════════════════════════════════════════
+# Exact +ε Simulation-of-Simplicity leading-term sign (degenerate fallthrough).
+#
+# When the fast float-minor sequence leaves a *fully* degenerate tie unresolved (all
+# minors vanish — e.g. 4 collinear points for orient3), fall to this exact
+# evaluation: expand the determinant as a polynomial in ε under the Edelsbrunner–
+# Mücke perturbation pᵢ[j] += ε^(2^(rankᵢ·d − j)), ε→0⁺, and return the sign of its
+# lowest-order nonzero term. Each matrix entry is a sparse polynomial (ε-exponent ⇒
+# Rational{BigInt} coeff), the determinant is the Leibniz sum, exact. This is the SoS
+# definition itself — correct for every configuration and consistent with the +ε
+# fast-path minors (which handle the common, non-fully-degenerate degeneracies).
+# Reached rarely (exact full degeneracy), so the BigInt cost is irrelevant.
+# ════════════════════════════════════════════════════════════════════════════════
+const _SosPoly = Dict{BigInt, Rational{BigInt}}
+
+@inline function _sos_pcoord(v::Real, r::Int, j::Int, d::Int)
+    p = _SosPoly(); p[big(0)] = Rational{BigInt}(v)      # exact: Float64 is dyadic; lift is Rational
+    e = big(2)^(r*d - j); p[e] = get(p, e, zero(Rational{BigInt})) + 1
+    return p
+end
+_sos_one() = (p = _SosPoly(); p[big(0)] = one(Rational{BigInt}); p)
+
+function _sos_mul(a::_SosPoly, b::_SosPoly)
+    r = _SosPoly()
+    for (ea, ca) in a, (eb, cb) in b
+        e = ea + eb; r[e] = get(r, e, zero(Rational{BigInt})) + ca*cb
     end
-    return perm, (v[1], v[2], v[3], v[4], v[5])
+    return r
+end
+@inline function _sos_add!(acc::_SosPoly, p::_SosPoly)
+    for (e, c) in p; acc[e] = get(acc, e, zero(Rational{BigInt})) + c; end
+    return acc
+end
+function _sos_leading_sign(acc::_SosPoly)
+    best = nothing
+    for (e, c) in acc
+        c == 0 && continue
+        (best === nothing || e < best) && (best = e)
+    end
+    best === nothing && return 1        # unreachable for distinct points
+    return acc[best] > 0 ? 1 : -1
+end
+
+# all permutations of 1:n tagged with sign(σ), n small (≤5 here).
+function _sos_perm_rec!(out::Vector{Tuple{Vector{Int},Int}}, p::Vector{Int}, k::Int)
+    n = length(p)
+    if k > n
+        inv = 0
+        @inbounds for i in 1:n, j in i+1:n; p[i] > p[j] && (inv += 1); end
+        push!(out, (copy(p), isodd(inv) ? -1 : 1)); return
+    end
+    @inbounds for i in k:n
+        p[k], p[i] = p[i], p[k]
+        _sos_perm_rec!(out, p, k+1)
+        p[k], p[i] = p[i], p[k]
+    end
+    return
+end
+function _sos_perms(n::Int)
+    out = Tuple{Vector{Int},Int}[]
+    _sos_perm_rec!(out, collect(1:n), 1)
+    return out
+end
+
+# Leibniz determinant (sign of the leading ε-term) of an n×n matrix of `_SosPoly`.
+function _sos_det_sign(rows::Vector{Vector{_SosPoly}})
+    n = length(rows)
+    acc = _SosPoly()
+    for (perm, sgn) in _sos_perms(n)
+        term = _SosPoly(); term[big(0)] = Rational{BigInt}(sgn)
+        @inbounds for r in 1:n; term = _sos_mul(term, rows[r][perm[r]]); end
+        _sos_add!(acc, term)
+    end
+    return _sos_leading_sign(acc)
+end
+
+# rank[k] = ascending-index rank (1-based) of the k-th argument point.
+@inline _sos_ranks(idx::NTuple{N,Int}) where {N} = invperm(sortperm(collect(idx)))
+
+# Exact +ε SoS sign of the orientation of M=(d+1) points in d-space. `coords[k]` is a
+# length-d tuple of exact values (Float64 for real coords, Rational{BigInt} for a
+# paraboloid-lift coordinate). Correct for every degenerate configuration.
+function _orient_nd_sos_exact(coords, idx::NTuple{M,Int}, d::Int)::Int where {M}
+    rk = _sos_ranks(idx)
+    rows = Vector{Vector{_SosPoly}}(undef, M)
+    @inbounds for k in 1:M
+        row = Vector{_SosPoly}(undef, d + 1)
+        for j in 1:d; row[j] = _sos_pcoord(coords[k][j], rk[k], j, d); end
+        row[d + 1] = _sos_one()
+        rows[k] = row
+    end
+    return _sos_det_sign(rows)
+end
+
+"""
+    _orient3_sos_exact(pa,pb,pc,pd, ia,ib,ic,id) -> Int (±1)
+
+Exact +ε SoS sign of the 3-D orientation for the (degenerate) argument points, keyed
+on the distinct indices. Correct for every configuration, collinear included.
+"""
+function _orient3_sos_exact(pa, pb, pc, pd,
+                            ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    coords = ((_x(pa),_y(pa),_z(pa)), (_x(pb),_y(pb),_z(pb)),
+              (_x(pc),_y(pc),_z(pc)), (_x(pd),_y(pd),_z(pd)))
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3)
+end
+
+# incircle SoS = orientation SoS of the points lifted to the paraboloid (x,y,x²+y²),
+# with the lift an INDEPENDENT coordinate perturbed by the EM scheme (the algorithm-
+# consistent formulation — verified against a canonical lifted-orientation oracle over
+# every degenerate labeling). Reached only for the fully-degenerate (collinear) tie.
+@inline _incircle_lift(p) = (xr = Rational{BigInt}(_x(p)); yr = Rational{BigInt}(_y(p)); (xr, yr, xr*xr + yr*yr))
+function _incircle_sos_exact(pa, pb, pc, pd,
+                             ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    coords = (_incircle_lift(pa), _incircle_lift(pb), _incircle_lift(pc), _incircle_lift(pd))
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3)
+end
+
+# insphere SoS = orientation SoS of the points lifted to (x,y,z,x²+y²+z²) in 4-D — the
+# same paraboloid-lift construction as incircle, one dimension up. Correct-by-construction
+# +ε for EVERY degenerate configuration (cospherical or coplanar).
+@inline _insphere_lift(p) = (xr = Rational{BigInt}(_x(p)); yr = Rational{BigInt}(_y(p)); zr = Rational{BigInt}(_z(p));
+                             (xr, yr, zr, xr*xr + yr*yr + zr*zr))
+function _insphere_sos_exact(pa, pb, pc, pd, pe,
+                             ia::Integer, ib::Integer, ic::Integer, id::Integer, ie::Integer)::Int
+    coords = (_insphere_lift(pa), _insphere_lift(pb), _insphere_lift(pc), _insphere_lift(pd), _insphere_lift(pe))
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id),Int(ie)), 4)
 end
 
 end # module Predicates
