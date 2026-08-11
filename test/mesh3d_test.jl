@@ -204,6 +204,47 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test validate(mm).ok
     end
 
+    @testset "tetrahedralize_conforming: one partition, interfaces SHARED across regions" begin
+        # Independent conformance oracle: map each triangular face to the tet-tags
+        # incident to it. A conforming partition has (a) no face in >2 tets (manifold),
+        # and (b) interface faces incident to two DIFFERENT region tags.
+        facetags(m) = begin
+            ft = Dict{NTuple{3,Int32},Vector{Int32}}()
+            for t in 1:ntets(m), k in 1:4
+                vs = (m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])
+                f = Tuple(sort(Int32[vs[j] for j in 1:4 if j != k]))
+                push!(get!(ft, f, Int32[]), m.tet_tag[t])
+            end
+            ft
+        end
+
+        # two unit boxes sharing the plane x=1 → ONE mesh; the interface faces are shared
+        # between region 1 and region 2 (with perturb-jitter they would be duplicated/off-plane).
+        mm = tetrahedralize_conforming([box_surface(0,1,0,1,0,1), box_surface(1,2,0,1,0,1)])
+        @test validate(mm).ok
+        @test mesh_vol(mm) ≈ 2.0 rtol=1e-9                       # EXACT — no perturbation drift
+        tprc = tets_per_region(mm)
+        @test length(tprc) == 2 && all(v > 0 for v in values(tprc))
+        ft = facetags(mm)
+        @test all(length(v) <= 2 for v in values(ft))           # manifold: no face in >2 tets
+        @test count(v -> length(v) == 2 && v[1] != v[2], values(ft)) > 0   # ≥1 shared interface face
+
+        # ENCLOSURE air/case pattern: inner solid box (region 1) inside a surrounding shell
+        # (region 2). Meshing all vertices together makes the inner box's 12 faces SHARED
+        # between the two regions — a conforming interface, the exact thing coordinate jitter
+        # (and hence gmsh's failure mode) destroys.
+        inner = box_surface(1,2,1,2,1,2)
+        shell = box_shell_surface(0,3,0,3,0,3, 1,2,1,2,1,2)
+        me = tetrahedralize_conforming([inner, shell])
+        @test validate(me).ok
+        @test mesh_vol(me) ≈ 27.0 rtol=1e-9                      # inner(1) + shell(26) = outer(27)
+        tpe = tets_per_region(me)
+        @test length(tpe) == 2 && all(v > 0 for v in values(tpe))
+        fe = facetags(me)
+        @test all(length(v) <= 2 for v in values(fe))           # manifold
+        @test count(v -> length(v) == 2 && v[1] != v[2], values(fe)) == 12   # the inner box's 12 faces, shared
+    end
+
     @testset "2-3 / 3-2 flips: consistent, volume-preserving, round-trip identity" begin
         M3 = Tessella.Mesh3D
         totvol(T) = begin
