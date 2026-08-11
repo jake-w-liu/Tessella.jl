@@ -10,7 +10,7 @@ using Tessella
 using Tessella.MeshTypes
 using Tessella.IO
 using Tessella.Geometry
-using Tessella.Mesh3D: tetrahedralize_multi
+using Tessella.Mesh3D: tetrahedralize_multi, tetrahedralize_conforming
 
 mvpvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
                 for t in 1:ntets(m); init=0.0)
@@ -85,5 +85,28 @@ end
         @test mesh_crc(f.mesh).sha == mesh_crc(mm).sha
         @test sort(unique(f.mesh.tet_tag)) == Int32[1,2]
         @test f.physical_names[(3,1)] == "regA" && f.physical_names[(3,2)] == "regB"
+    end
+
+    @testset "conforming ENC-COAX mesh is solver-consumable (.msh with physical volumes)" begin
+        # The whole point of the acceptance case: a CONFORMING air/case/pin mesh a
+        # solver (ASCENT) can read. Build it, write gmsh MSH v4.1 with the three
+        # physical volumes, read it back, and confirm connectivity (CRC), region tags,
+        # and physical-group names all survive — i.e. the acceptance mesh is usable.
+        dir = mktempdir()
+        pin  = cylinder_surface((3.,3.,1.5), (0.,0.,1.), 0.7, 3.0; nθ=8, nz=2)   # inside the cavity
+        air  = box_surface(1,5,1,5,1,5)
+        case = box_surface(0,6,0,6,0,6)
+        enc = tetrahedralize_conforming([pin, air, case])            # tags 1=pin, 2=air, 3=case
+        @test validate(enc).ok
+        @test sort(unique(enc.tet_tag)) == Int32[1,2,3]              # all three volumes present
+        p = joinpath(dir, "enclosure.msh")
+        names = Dict((3,1)=>"coax_pin", (3,2)=>"air", (3,3)=>"case")
+        write_msh(p, enc; version=4.1, physical_names=names)
+        f = read_msh(p)
+        @test mesh_crc(f.mesh).sha == mesh_crc(enc).sha             # conforming connectivity preserved
+        @test sort(unique(f.mesh.tet_tag)) == Int32[1,2,3]
+        @test f.physical_names[(3,1)] == "coax_pin" &&
+              f.physical_names[(3,2)] == "air" && f.physical_names[(3,3)] == "case"
+        @test validate(f.mesh).ok                                   # round-tripped mesh still valid
     end
 end
