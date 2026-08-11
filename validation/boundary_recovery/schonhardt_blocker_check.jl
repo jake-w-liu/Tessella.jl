@@ -33,7 +33,15 @@ for (θ,diag) in ((pi/6,:aibn),(pi/6,:anbi),(pi/4,:aibn),(pi/4,:anbi))
         m=recover_boundary(s; max_seeds=16)
         println("MESHED ntets=$(ntets(m)) (tetrahedralizable)")
     catch e
-        println("BLOCKED ✓ (explicit): ", sprint(showerror,e)[1:min(end,60)])
+        println("BLOCKED ✓ (explicit): ", sprint(showerror,e)[1:min(end,50)])
     end
 end
-# Observed: reflex diagonal (:aibn) ⇒ BLOCKED; convex diagonal (:anbi) ⇒ MESHED.
+# Observed: reflex diagonal (:aibn) ⇒ BLOCKED by default; convex diagonal (:anbi) ⇒ MESHED.
+
+# Steiner fallback: the reflex Schönhardt (star-shaped) IS meshed with steiner=true
+# (fan-tetrahedralization from an interior kernel point — one tet per facet, conforming).
+println("\n--- steiner=true (fan fallback) ---")
+for θ in (pi/6, pi/4)
+    m=recover_boundary(schon(θ,:aibn); steiner=true)
+    println("θ=$(round(Int,rad2deg(θ)))° diag=aibn steiner=true → MESHED ntets=$(ntets(m)) valid=$(validate(m).ok) closed=$(is_closed_manifold(m))")
+end

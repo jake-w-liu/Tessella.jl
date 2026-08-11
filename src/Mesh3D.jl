@@ -1453,8 +1453,50 @@ function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz
     return (true, nrec, "ok")
 end
 
+# Steiner fallback for a STAR-SHAPED polyhedron (e.g. Schönhardt — not tetrahedraliz-
+# able without a Steiner point): find an interior kernel point that sees every facet
+# (exact orient3 shares one sign across all faces), then fan-tetrahedralize — one tet
+# {facet ∪ p} per facet. Conforming by construction (each input facet IS a tet face)
+# and all-positive. Returns the fan Mesh, or `nothing` if no simple candidate kernel
+# point works (not obviously star-shaped ⇒ caller blocks). Quality is fan-poor; a
+# caller wanting quality should run `optimize_flips!` after.
+function _rb_fan_steiner(Px,Py,Pz, facets::Vector{NTuple{3,Int32}})
+    nn = length(Px); nf = length(facets)
+    vt(i) = (Px[i], Py[i], Pz[i])
+    vc = (sum(Px)/nn, sum(Py)/nn, sum(Pz)/nn)
+    fcx=0.0; fcy=0.0; fcz=0.0
+    @inbounds for (a,b,c) in facets
+        fcx += (Px[a]+Px[b]+Px[c])/3; fcy += (Py[a]+Py[b]+Py[c])/3; fcz += (Pz[a]+Pz[b]+Pz[c])/3
+    end
+    fca = (fcx/nf, fcy/nf, fcz/nf)
+    function kernel(p)                                   # p strictly interior to every face plane?
+        s0 = 0
+        @inbounds for (a,b,c) in facets
+            o = orient3(vt(a),vt(b),vt(c),p); o == 0 && return false
+            sg = o > 0 ? 1 : -1
+            s0 == 0 ? (s0 = sg) : (sg == s0 || return false)
+        end
+        return true
+    end
+    p = kernel(vc) ? vc : (kernel(fca) ? fca : nothing)
+    p === nothing && return nothing
+    C = Matrix{Float64}(undef, 3, nn+1)
+    @inbounds for i in 1:nn; C[1,i]=Px[i]; C[2,i]=Py[i]; C[3,i]=Pz[i]; end
+    C[1,nn+1]=p[1]; C[2,nn+1]=p[2]; C[3,nn+1]=p[3]; pv=Int32(nn+1)
+    tets = Matrix{Int32}(undef, 4, nf)
+    @inbounds for (t,(a,b,c)) in enumerate(facets)
+        d0=(C[1,a],C[2,a],C[3,a]); d1=(C[1,b],C[2,b],C[3,b]); d2=(C[1,c],C[2,c],C[3,c]); dp=(p[1],p[2],p[3])
+        if _signed_vol6(d0,d1,d2,dp) >= 0
+            tets[1,t]=a; tets[2,t]=b; tets[3,t]=c; tets[4,t]=pv
+        else
+            tets[1,t]=a; tets[2,t]=c; tets[3,t]=b; tets[4,t]=pv
+        end
+    end
+    return Mesh(C; tets=tets)
+end
+
 """
-    recover_boundary(surface::Mesh; rng_seed=1, max_seeds=64) -> Mesh
+    recover_boundary(surface::Mesh; rng_seed=1, max_seeds=64, steiner=false) -> Mesh
 
 Recover the closed, watertight, manifold PLC `surface` (vertices + triangular
 facets, possibly NON-CONVEX) as a CONFORMING interior tet mesh: every input facet
@@ -1464,8 +1506,16 @@ positive, no zero-volume, manifold <=2 faces/edge); interior/exterior is correct
 classified (ray-cast, orientation-independent). Returns the interior tet [`Mesh`],
 or THROWS an explicit blocker naming the first unrecovered input facet (never a
 silently non-conforming mesh).
+
+`steiner=true` enables a **Steiner-point fallback** for genuinely non-tetrahedral-
+izable but STAR-SHAPED inputs (e.g. the Schönhardt polyhedron): when Delaunay
+recovery cannot conform, fan-tetrahedralize from an interior kernel point (one
+Steiner vertex, one tet per facet — conforming and valid, but fan-quality; run
+`optimize_flips!` for quality). If the input is not star-shaped from a simple
+kernel candidate, it still throws the explicit blocker.
 """
-function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer=64)
+function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer=64,
+                          steiner::Bool=false)
     Px,Py,Pz,facets = _rb_dedup_surface(surface)
     length(Px) >= 4 || throw(ArgumentError("recover_boundary: need >= 4 distinct surface vertices"))
     isempty(facets) && throw(ArgumentError("recover_boundary: surface has no facets"))
@@ -1486,8 +1536,20 @@ function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer
             nrec >= lastnrec && (lastnrec = nrec; lastreason = reason)
         end
     end
+    # Steiner fallback for star-shaped non-tetrahedralizable inputs (e.g. Schönhardt):
+    # fan-tetrahedralize from an interior kernel point. Conforming by construction
+    # (each input facet is a literal tet face); accept only if valid + closed-manifold.
+    if steiner
+        fm = _rb_fan_steiner(Px,Py,Pz, facets)
+        if fm !== nothing && validate(fm).ok && is_closed_manifold(fm)
+            return fm
+        end
+    end
     throw(ErrorException("recover_boundary: recovery FAILED after $max_seeds seeds " *
-        "($(lastnrec)/$(length(facets)) facets recovered). First blocker: $lastreason"))
+        "($(lastnrec)/$(length(facets)) facets recovered)" *
+        (steiner ? " and the Steiner fan fallback did not apply (input not star-shaped from a simple kernel point)" : "") *
+        ". First blocker: $lastreason" *
+        (steiner ? "" : " (try steiner=true for star-shaped non-tetrahedralizable inputs)")))
 end
 
 
