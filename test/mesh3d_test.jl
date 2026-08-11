@@ -498,4 +498,74 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test_throws ArgumentError mesh_box_regions([BoxRegion(0,2,0,2,0,2,0)]; hmax=1.0)   # all void → empty
         end
     end
+
+    # ── Stage-3: recover_boundary — robust boundary recovery / conforming tetra ──────
+    # Recover an arbitrary closed PLC surface (possibly NON-convex) as a conforming
+    # tet mesh, or throw an explicit blocker (never a silent bad mesh). Independent
+    # conformity oracle: the tet-mesh boundary area == the input surface area (the
+    # boundary IS the input surface, triangulation-independently), plus exact domain
+    # volume, validity, and closed-manifold. Genuinely non-tetrahedralizable inputs
+    # (Schönhardt) MUST raise the explicit blocker.
+    @testset "recover_boundary: conforming tetrahedralization of arbitrary PLCs" begin
+        surfarea(s) = sum(triangle_area(node(s,s.tris[1,t]),node(s,s.tris[2,t]),node(s,s.tris[3,t]))
+                          for t in 1:ntris(s); init=0.0)
+        bndarea(m)  = (bf = first(boundary_faces(m.tets));
+                       sum(triangle_area(node(m,f[1]),node(m,f[2]),node(m,f[3])) for f in bf; init=0.0))
+        conforms(s, exactvol) = begin
+            m = recover_boundary(s)
+            @test validate(m).ok                          # positive, non-degenerate, manifold
+            @test is_closed_manifold(m)
+            @test bndarea(m) ≈ surfarea(s) rtol=1e-9       # tet-mesh boundary == input surface
+            @test mesh_vol(m) ≈ exactvol rtol=1e-9         # exact domain volume ⇒ boundary conformed
+            m
+        end
+        # star-shaped L-prism (square minus a corner, extruded): area 12 × height 2 = 24
+        function _Lprism()
+            P=[(0.0,0.0),(4.0,0.0),(4.0,2.0),(2.0,2.0),(2.0,4.0),(0.0,4.0)]; n=length(P)
+            xs=Float64[];ys=Float64[];zs=Float64[]
+            for z in (0.0,2.0), (x,y) in P; push!(xs,x);push!(ys,y);push!(zs,z); end
+            tr=NTuple{3,Int}[]; bot(i)=i; top(i)=n+i
+            for i in 1:n; j=i%n+1; push!(tr,(bot(i),bot(j),top(j))); push!(tr,(bot(i),top(j),top(i))); end
+            for i in 2:n-1; push!(tr,(bot(1),bot(i+1),bot(i))); push!(tr,(top(1),top(i),top(i+1))); end
+            C=Matrix{Float64}(undef,3,length(xs)); for k in 1:length(xs); C[:,k]=[xs[k],ys[k],zs[k]]; end
+            T=Matrix{Int32}(undef,3,length(tr)); for (t,f) in enumerate(tr); T[:,t]=Int32[f...]; end
+            Mesh(C; tris=T)
+        end
+        # regular octagonal prism (a faceted cylinder), exact octagon area (1/2)·ns·r²·sin(2π/ns)·h
+        function _octprism(r,h,ns)
+            xs=Float64[];ys=Float64[];zs=Float64[]
+            for z in (0.0,h), k in 0:ns-1; push!(xs,r*cos(2pi*k/ns)); push!(ys,r*sin(2pi*k/ns)); push!(zs,z); end
+            tr=NTuple{3,Int}[]; bot(i)=i; top(i)=ns+i
+            for k in 0:ns-1; a=k+1; b=(k+1)%ns+1; push!(tr,(bot(a),bot(b),top(b))); push!(tr,(bot(a),top(b),top(a))); end
+            for k in 1:ns-2; push!(tr,(bot(1),bot(k+2),bot(k+1))); push!(tr,(top(1),top(k+1),top(k+2))); end
+            C=Matrix{Float64}(undef,3,length(xs)); for i in 1:length(xs); C[:,i]=[xs[i],ys[i],zs[i]]; end
+            T=Matrix{Int32}(undef,3,length(tr)); for (t,f) in enumerate(tr); T[:,t]=Int32[f...]; end
+            Mesh(C; tris=T), 0.5*ns*r^2*sin(2pi/ns)*h
+        end
+        # Schönhardt polyhedron (twist θ, reflex diagonal) — NOT tetrahedralizable w/o Steiner
+        function _schonhardt(θ)
+            C=Matrix{Float64}(undef,3,6)
+            for k in 0:2; C[:,k+1]=[cos(2pi*k/3),sin(2pi*k/3),0.0]; end
+            for k in 0:2; C[:,k+4]=[cos(2pi*k/3+θ),sin(2pi*k/3+θ),1.0]; end
+            tr=NTuple{3,Int}[(1,3,2),(4,5,6)]
+            for i in 1:3
+                ai=i; an=i%3+1; bi=i+3; bn=(i%3)+1+3
+                push!(tr,(ai,an,bn)); push!(tr,(ai,bn,bi))     # reflex diagonal ai-bn
+            end
+            T=Matrix{Int32}(undef,3,length(tr)); for (t,f) in enumerate(tr); T[:,t]=Int32[f...]; end
+            Mesh(C; tris=T)
+        end
+
+        @testset "convex box"                              begin conforms(box_surface(0,4,0,4,0,4), 64.0) end
+        @testset "non-convex genus-1 (through-tunnel)"     begin conforms(box_tunnel_surface(0,6,0,6,0,6, 2,4,2,4), 216.0-24.0) end
+        @testset "non-convex hollow shell"                 begin conforms(box_shell_surface(0,6,0,6,0,6, 1,5,1,5,1,5), 216.0-64.0) end
+        @testset "non-convex star-shaped L-prism"          begin conforms(_Lprism(), 24.0) end
+        @testset "faceted cylinder (octagonal prism)"      begin s,v=_octprism(2.0,3.0,8); conforms(s, v) end
+        @testset "Schönhardt ⇒ explicit blocker (no silent bad mesh)" begin
+            @test_throws ErrorException recover_boundary(_schonhardt(pi/6))
+        end
+        @testset "error paths" begin
+            @test_throws ArgumentError recover_boundary(Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1)))
+        end
+    end
 end
