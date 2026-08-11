@@ -6,8 +6,31 @@ tet mesher for axis-aligned boxes (Kuhn/Freudenthal explicit subdivision):
 `maxedge ≤ hmax`, exact volume, `validate.ok`, watertight (boundary χ=2), min
 dihedral 45°/≥42° — for arbitrary `hmax`. It covers the enclosure's box regions.
 The three failures below are *why the naive routes don't work* and what pointed
-at the explicit-connectivity fix `mesh_box` uses; general **non-box adaptive**
-refinement (arbitrary surface) remains the research-grade open item.
+at the explicit-connectivity fix `mesh_box` uses.
+
+**Extended (shipped):** [`mesh_box_regions`](../../src/Mesh3D.jl) generalizes the
+same explicit-lattice route to a **shared global grid with per-cell region
+classification** — conforming, size-controlled, **multi-region** meshing of
+**unions / differences / nestings of axis-aligned boxes** (native box CSG). This
+handles **non-convex** axis-aligned domains (a hollow shell = `box − void`) with
+exact per-region volumes and a manifold-conforming interface — the fast, correct
+answer for enclosure-class box assemblies (`mesh3d_test.jl`, independent oracles).
+
+**The general non-convex Delaunay-refinement route was attempted and measured**
+(`delaunay_refiner_convex_ATTEMPT.jl`, from a design→implement→verify workflow):
+proper Shewchuk-style circumcenter refinement with hull-subface/subsegment
+encroachment protection. Verified outcome: **correct for box-like convex domains
+without small input angles** (box `hmax`∈{3,2,1}: `maxedge≤hmax`, `validate.ok`,
+Delaunay `nviol=0`, exact volume, χ=2) — but **(a) impractically slow** (it must
+*rebuild* the exact Delaunay each pass to avoid the cospherical-cavity degeneracy;
+box `hmax=1` ≈ 200 s, `hmax=2` did not finish in 10 min on this machine) and
+**(b) fails on a regular tetrahedron** (small solid angles → invalid mesh), the
+classic Delaunay-refinement small-angle failure. It is therefore **not shipped**
+(slow + small-angle-fragile + redundant with `mesh_box` for the boxes it handles);
+the explicit-lattice `mesh_box`/`mesh_box_regions` route is strictly better for
+axis-aligned geometry. Robust general **curved / arbitrary-angle** refinement
+remains the research-grade open item (boundary recovery + Shewchuk terminator with
+small-angle protection).
 
 Three naive approaches were built and **measured** to fail on a convex box `[0,4]³`:
 

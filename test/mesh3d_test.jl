@@ -433,4 +433,69 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test_throws ArgumentError mesh_box(0,1,0,1,0,1; hmax=-1.0)
         end
     end
+
+    # ── Stage-4/5: mesh_box_regions — conforming multi-region + native box CSG ──────
+    # Shared-grid Kuhn subdivision with per-cell region classification: union,
+    # difference (void), nesting, multi-material — all at guaranteed edge size.
+    # Independent oracles: exact per-region and total volumes (analytic), manifold
+    # conformity (max face incidence == 2 everywhere ⇒ no gaps/T-junctions across
+    # region interfaces), boundary Euler χ (counts boundary components), CRC.
+    @testset "mesh_box_regions: conforming multi-region + native box CSG" begin
+        maxedge(m) = maximum(begin
+            vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); e=0.0
+            for i in 1:4, j in i+1:4
+                p=node(m,vs[i]); q=node(m,vs[j]); e=max(e, hypot(p[1]-q[1],p[2]-q[2],p[3]-q[3]))
+            end; e end for t in 1:ntets(m))
+        voltag(m,tag) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
+                            for t in 1:ntets(m) if m.tet_tag[t]==tag; init=0.0)
+
+        @testset "nested: air inside case — conforming, exact per-region volumes" begin
+            R = [BoxRegion(0,6,0,6,0,6,1), BoxRegion(1,5,1,5,1,5,2)]  # air (tag2) higher priority
+            m = mesh_box_regions(R; hmax=1.5)
+            @test maxedge(m) <= 1.5 + 1e-9
+            @test validate(m).ok                            # positive + manifold ⇒ conforming
+            @test sort(unique(m.tet_tag)) == Int32[1,2]
+            @test voltag(m,2) ≈ 64.0 rtol=1e-9              # air = 4^3
+            @test voltag(m,1) ≈ 216.0 - 64.0 rtol=1e-9      # case shell around the air
+            @test mesh_vol(m) ≈ 216.0 rtol=1e-9             # exact union fill
+            @test boundary_euler(m) == 2                    # air/case interface is INTERNAL ⇒ one boundary
+        end
+
+        @testset "interface conformity: no non-manifold face across a region split" begin
+            R = [BoxRegion(0,4,0,4,0,4,1), BoxRegion(0,2,0,4,0,4,2)]  # split at x=2 (a grid plane)
+            m = mesh_box_regions(R; hmax=1.0)
+            _, maxinc = boundary_faces(m.tets)
+            @test maxinc == 2                               # every internal face shared by exactly 2 tets
+            @test 1 in m.tet_tag && 2 in m.tet_tag
+            @test mesh_vol(m) ≈ 64.0 rtol=1e-9
+            @test validate(m).ok
+        end
+
+        @testset "difference: hollow shell (box − void) is watertight with a cavity" begin
+            R = [BoxRegion(0,6,0,6,0,6,1), BoxRegion(2,4,2,4,2,4,0)]  # inner box is void (tag 0)
+            m = mesh_box_regions(R; hmax=1.5)
+            @test mesh_vol(m) ≈ 216.0 - 8.0 rtol=1e-9       # 216 − 2^3
+            @test validate(m).ok
+            @test boundary_euler(m) == 4                    # outer sphere (2) + inner cavity sphere (2)
+            @test maxedge(m) <= 1.5 + 1e-9
+        end
+
+        @testset "union of two adjacent boxes fuses conformingly" begin
+            R = [BoxRegion(0,2,0,2,0,2,1), BoxRegion(2,4,0,2,0,2,1)]  # share the face x=2
+            m = mesh_box_regions(R; hmax=1.0)
+            @test mesh_vol(m) ≈ 16.0 rtol=1e-9              # 8 + 8, shared face internal
+            @test validate(m).ok
+            @test boundary_euler(m) == 2                    # one fused solid
+        end
+
+        @testset "single region matches mesh_box; determinism; error paths" begin
+            @test mesh_vol(mesh_box_regions([BoxRegion(0,4,0,4,0,4,1)]; hmax=1.0)) ≈ 64.0 rtol=1e-9
+            @test mesh_crc(mesh_box_regions([BoxRegion(0,2,0,2,0,2,7)]; hmax=0.7)).sha ==
+                  mesh_crc(mesh_box_regions([BoxRegion(0,2,0,2,0,2,7)]; hmax=0.7)).sha
+            @test_throws ArgumentError mesh_box_regions(BoxRegion[]; hmax=1.0)                  # no regions
+            @test_throws ArgumentError mesh_box_regions([BoxRegion(0,0,0,1,0,1,1)]; hmax=0.5)   # degenerate box
+            @test_throws ArgumentError mesh_box_regions([BoxRegion(0,1,0,1,0,1,1)]; hmax=0.0)   # bad hmax
+            @test_throws ArgumentError mesh_box_regions([BoxRegion(0,2,0,2,0,2,0)]; hmax=1.0)   # all void → empty
+        end
+    end
 end
