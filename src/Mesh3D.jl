@@ -26,7 +26,7 @@ using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
-       tetrahedralize_conforming, tets_per_region, mesh_box
+       tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -832,6 +832,106 @@ end
     bx=p2[1]-p0[1]; by=p2[2]-p0[2]; bz=p2[3]-p0[3]
     cx=p3[1]-p0[1]; cy=p3[2]-p0[2]; cz=p3[3]-p0[3]
     return ax*(by*cz-bz*cy) - ay*(bx*cz-bz*cx) + az*(bx*cy-by*cx)
+end
+
+"""
+    BoxRegion(x0,x1,y0,y1,z0,z1, tag)
+
+An axis-aligned box `[x0,x1]×[y0,y1]×[z0,z1]` carrying an integer region `tag`.
+`tag == 0` is reserved for a **void** (a hole): grid cells classified into a void
+region are dropped, so a later void box carves a CSG difference out of an earlier
+solid one. Used by [`mesh_box_regions`](@ref).
+"""
+struct BoxRegion
+    x0::Float64; x1::Float64; y0::Float64; y1::Float64; z0::Float64; z1::Float64
+    tag::Int
+end
+# (Julia's auto-generated outer constructor already converts, so BoxRegion(0,6,0,6,0,6,1) works.)
+@inline _br_contains(b::BoxRegion, x,y,z) =
+    (b.x0<=x<=b.x1) && (b.y0<=y<=b.y1) && (b.z0<=z<=b.z1)
+
+# 1-D grid on one axis: every region face coordinate is a breakpoint, and each gap
+# is subdivided so no sub-interval exceeds `a` (⇒ every cell main diagonal ≤ a√3).
+function _region_axis_grid(faces::Vector{Float64}, a::Float64)
+    b = sort!(unique(faces)); g = Float64[b[1]]
+    @inbounds for i in 1:length(b)-1
+        lo=b[i]; hi=b[i+1]; L=hi-lo
+        n = max(1, ceil(Int, L/a - 1e-9)); h = L/n
+        for k in 1:n; push!(g, lo + k*h); end
+    end
+    return g
+end
+
+"""
+    mesh_box_regions(regions::AbstractVector{BoxRegion}; hmax) -> Mesh
+
+Conforming, size-controlled, **multi-region** tetrahedral mesh of an assembly of
+axis-aligned boxes — the native-CSG counterpart of [`mesh_box`](@ref). Every
+region face becomes a plane of one shared global grid, each gap subdivided so
+`maxedge ≤ hmax`; each grid cell is split by the same Kuhn/Freudenthal diagonal, so
+tets on either side of a region interface **share faces exactly** (conforming, no
+T-junctions). A cell is tagged by the **last** (highest-priority) region whose box
+contains its centre; cells in a `tag==0` (void) region or in no region are dropped.
+
+This realizes, for axis-aligned box primitives, **union** (several solid boxes),
+**difference** (a `tag==0` box carves a hole), **nesting** (priority order), and
+multi-material partitions (distinct tags) — all provably valid (positive tets),
+watertight/conforming, with exact per-region volumes, at a guaranteed edge size.
+Handles non-convex domains (a hollow shell is `box − void`). `tet_tag` holds the
+region tag of each tet. Errors if no cell is kept (empty domain).
+"""
+function mesh_box_regions(regions::AbstractVector{BoxRegion}; hmax::Real)
+    hmax > 0 || throw(ArgumentError("mesh_box_regions: hmax must be positive (got $hmax)"))
+    isempty(regions) && throw(ArgumentError("mesh_box_regions: no regions"))
+    @inbounds for r in regions
+        (r.x1>r.x0 && r.y1>r.y0 && r.z1>r.z0) ||
+            throw(ArgumentError("mesh_box_regions: every region needs positive extent (bad box tag=$(r.tag))"))
+    end
+    a = float(hmax)/sqrt(3.0)
+    fx=Float64[]; fy=Float64[]; fz=Float64[]
+    @inbounds for r in regions
+        push!(fx,r.x0); push!(fx,r.x1); push!(fy,r.y0); push!(fy,r.y1); push!(fz,r.z0); push!(fz,r.z1)
+    end
+    X=_region_axis_grid(fx,a); Y=_region_axis_grid(fy,a); Z=_region_axis_grid(fz,a)
+    nx=length(X)-1; ny=length(Y)-1; nz=length(Z)-1
+    LX=length(X); LY=length(Y)
+    gnid(i,j,k) = ((k*LY + j)*LX + i) + 1
+    tetv = NTuple{4,Int32}[]; tett = Int32[]; used = Set{Int32}()
+    @inbounds for k in 0:nz-1, j in 0:ny-1, i in 0:nx-1
+        cx=0.5*(X[i+1]+X[i+2]); cy=0.5*(Y[j+1]+Y[j+2]); cz=0.5*(Z[k+1]+Z[k+2])
+        tag = 0
+        for r in regions
+            _br_contains(r,cx,cy,cz) && (tag = r.tag)     # last (highest-priority) wins
+        end
+        tag == 0 && continue                              # void / outside → drop cell
+        cn(di,dj,dk) = gnid(i+di, j+dj, k+dk)
+        pc(di,dj,dk) = (X[i+di+1], Y[j+dj+1], Z[k+dk+1])
+        v0=cn(0,0,0); v7=cn(1,1,1); p0=pc(0,0,0); p7=pc(1,1,1)
+        for (s1,s2) in ((( 1,0,0),(1,1,0)), ((1,0,0),(1,0,1)), ((0,1,0),(1,1,0)),
+                        (( 0,1,0),(0,1,1)), ((0,0,1),(1,0,1)), ((0,0,1),(0,1,1)))
+            v1=cn(s1...); v2=cn(s2...); p1=pc(s1...); p2=pc(s2...)
+            if _signed_vol6(p0,p1,p2,p7) >= 0
+                push!(tetv,(v0,v1,v2,v7))
+            else
+                push!(tetv,(v0,v1,v7,v2))
+            end
+            push!(tett, Int32(tag))
+            push!(used,v0); push!(used,v1); push!(used,v2); push!(used,v7)
+        end
+    end
+    isempty(tetv) && throw(ArgumentError("mesh_box_regions: no cells kept (empty domain — all void/outside)"))
+    usedv = sort!(collect(used)); remap = Dict{Int32,Int32}()
+    @inbounds for (n,v) in enumerate(usedv); remap[v]=Int32(n); end
+    C = Matrix{Float64}(undef, 3, length(usedv))
+    @inbounds for (n,v) in enumerate(usedv)
+        v0=Int(v)-1; i=v0 % LX; j=(v0 ÷ LX) % LY; k=v0 ÷ (LX*LY)
+        C[1,n]=X[i+1]; C[2,n]=Y[j+1]; C[3,n]=Z[k+1]
+    end
+    Tm = Matrix{Int32}(undef, 4, length(tetv)); tags = Vector{Int32}(undef, length(tetv))
+    @inbounds for (t,f) in enumerate(tetv)
+        Tm[1,t]=remap[f[1]]; Tm[2,t]=remap[f[2]]; Tm[3,t]=remap[f[3]]; Tm[4,t]=remap[f[4]]; tags[t]=tett[t]
+    end
+    return Mesh(C; tets=Tm, tet_tag=tags)
 end
 
 """
