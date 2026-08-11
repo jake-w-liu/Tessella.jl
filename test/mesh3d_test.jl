@@ -561,8 +561,14 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @testset "non-convex hollow shell"                 begin conforms(box_shell_surface(0,6,0,6,0,6, 1,5,1,5,1,5), 216.0-64.0) end
         @testset "non-convex star-shaped L-prism"          begin conforms(_Lprism(), 24.0) end
         @testset "faceted cylinder (octagonal prism)"      begin s,v=_octprism(2.0,3.0,8); conforms(s, v) end
-        @testset "Schönhardt ⇒ explicit blocker (no silent bad mesh)" begin
-            @test_throws ErrorException recover_boundary(_schonhardt(pi/6))
+        @testset "Schönhardt: blocks by default, meshes with steiner=true" begin
+            s = _schonhardt(pi/6)
+            @test_throws ErrorException recover_boundary(s)          # default: explicit blocker
+            m = recover_boundary(s; steiner=true)                    # Steiner fan-tetrahedralization
+            @test validate(m).ok
+            @test is_closed_manifold(m)
+            @test bndarea(m) ≈ surfarea(s) rtol=1e-9                 # boundary == input surface ⇒ conforming
+            @test ntets(m) == ntris(s)                               # one tet per facet (fan)
         end
         @testset "error paths" begin
             @test_throws ArgumentError recover_boundary(Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1)))
