@@ -15,6 +15,7 @@ using Tessella.Mesh3D
 using Tessella.MeshTypes
 using Tessella.Geometry
 using Tessella.Heal: is_meshable
+using Tessella.Mesh2D: constrained_delaunay, to_mesh, classify_interior
 
 mesh_vol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
                   for t in 1:ntets(m); init=0.0)
@@ -561,6 +562,39 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @testset "non-convex hollow shell"                 begin conforms(box_shell_surface(0,6,0,6,0,6, 1,5,1,5,1,5), 216.0-64.0) end
         @testset "non-convex star-shaped L-prism"          begin conforms(_Lprism(), 24.0) end
         @testset "faceted cylinder (octagonal prism)"      begin s,v=_octprism(2.0,3.0,8); conforms(s, v) end
+
+        # NON-STAR-SHAPED non-convex prisms (extruded U-channel / comb / star): these have
+        # no single kernel point, yet recover_boundary conforms them (Delaunay-recoverable).
+        # Demonstrates the breadth — the only unhandled class is non-star AND non-Delaunay-
+        # recoverable (exotic). Caps triangulated by Mesh2D CDT (handles non-convex loops).
+        _prism(poly, h) = begin
+            n=length(poly); xs=Float64[p[1] for p in poly]; ys=Float64[p[2] for p in poly]
+            cap = to_mesh(constrained_delaunay(xs, ys, [(i, i%n+1) for i in 1:n]);
+                          interior=classify_interior(constrained_delaunay(xs, ys, [(i, i%n+1) for i in 1:n])))
+            capnode=[(cap.coords[1,i],cap.coords[2,i]) for i in 1:size(cap.coords,2)]
+            pid=Dict((poly[i][1],poly[i][2])=>i for i in 1:n)
+            coords=vcat([(p[1],p[2],0.0) for p in poly], [(p[1],p[2],h) for p in poly])
+            tris=NTuple{3,Int}[]
+            for i in 1:n; j=i%n+1; push!(tris,(i,j,n+j)); push!(tris,(i,n+j,n+i)); end
+            for t in 1:ntris(cap)
+                a=pid[capnode[cap.tris[1,t]]]; b=pid[capnode[cap.tris[2,t]]]; c=pid[capnode[cap.tris[3,t]]]
+                push!(tris,(a,c,b)); push!(tris,(n+a,n+b,n+c))
+            end
+            C=Matrix{Float64}(undef,3,length(coords)); for (i,p) in enumerate(coords); C[:,i]=[p...]; end
+            Tm=Matrix{Int32}(undef,3,length(tris)); for (t,f) in enumerate(tris); Tm[:,t]=Int32[f...]; end
+            Mesh(C; tris=Tm)
+        end
+        _parea(poly)=abs(sum(poly[i][1]*poly[i%length(poly)+1][2]-poly[i%length(poly)+1][1]*poly[i][2]
+                             for i in 1:length(poly)))/2
+        @testset "non-star-shaped non-convex prisms (U-channel, comb, star)" begin
+            U   = [(0.,0.),(3.,0.),(3.,3.),(2.,3.),(2.,1.),(1.,1.),(1.,3.),(0.,3.)]
+            comb= [(0.,0.),(5.,0.),(5.,2.),(4.,2.),(4.,1.),(3.,1.),(3.,2.),(2.,2.),(2.,1.),(1.,1.),(1.,2.),(0.,2.)]
+            star= [(2.,0.),(2.6,1.4),(4.,1.5),(3.,2.6),(3.4,4.),(2.,3.2),(0.6,4.),(1.,2.6),(0.,1.5),(1.4,1.4)]
+            for poly in (U, comb, star)
+                conforms(_prism(poly, 1.0), _parea(poly)*1.0)
+            end
+        end
+
         @testset "Schönhardt: blocks by default, meshes with steiner=true" begin
             s = _schonhardt(pi/6)
             @test_throws ErrorException recover_boundary(s)          # default: explicit blocker
