@@ -1,8 +1,15 @@
 # Stage-4 size refinement — measured findings
 
-Why Tessella ships **no** 3-D size-controlled volume mesher (a broken one would
-fail the correctness bar). Three concrete approaches were built and **measured**
-to fail on a convex box `[0,4]³`:
+**Resolution (shipped):** `works_mesh_box_kuhn.jl` demonstrates
+[`mesh_box`](../../src/Mesh3D.jl) — a **correct, sliver-free, size-controlled**
+tet mesher for axis-aligned boxes (Kuhn/Freudenthal explicit subdivision):
+`maxedge ≤ hmax`, exact volume, `validate.ok`, watertight (boundary χ=2), min
+dihedral 45°/≥42° — for arbitrary `hmax`. It covers the enclosure's box regions.
+The three failures below are *why the naive routes don't work* and what pointed
+at the explicit-connectivity fix `mesh_box` uses; general **non-box adaptive**
+refinement (arbitrary surface) remains the research-grade open item.
+
+Three naive approaches were built and **measured** to fail on a convex box `[0,4]³`:
 
 | script | approach | result |
 |---|---|---|
