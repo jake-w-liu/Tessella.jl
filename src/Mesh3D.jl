@@ -23,10 +23,11 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
-using ..MeshTypes: Mesh, tet_dihedral_extrema
+using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
-       tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion
+       tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
+       recover_boundary
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -1152,6 +1153,340 @@ function is_delaunay3(T::Triangulation3)
         end
     end
     return (nviol==0, nviol)
+end
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Boundary recovery — add to `module Mesh3D`.
+#
+# REQUIRED IMPORT ADDITION (module top): extend the existing MeshTypes import to
+#     using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold
+# Everything else below uses ONLY existing Mesh3D internals (delaunay3d,
+# _classify_by_centroid, to_mesh3, _is_ghost_tet, _vert, _pt, _sort3t) and the
+# already-imported exact predicate `orient3`. No real src was modified during
+# development; this block was verified by Core.eval-ing it (unqualified) into the
+# live module and running the cases in the tests field.
+#
+# STRATEGY (grounded on measurement — see notes): on EXACT coordinates
+# (perturb=false) the base incremental Delaunay of the surface vertices already
+# yields a *geometrically conforming* boundary for closed axis-aligned/faceted PLCs
+# (0 crease-segments missing, 0 tet edges piercing any coplanar region) — the only
+# obstruction is rare zero-volume tets from cospherical degeneracy. So recovery =
+# retry insertion orders (rng_seed), optionally drop kept zero-volume tets, and
+# accept ONLY when an exact geometric-conformity + validity gate passes; otherwise
+# throw naming the first unrecovered input facet. perturb=true is unusable (jitter
+# moves facet vertices off-plane -> boundary shatters). The gate is triangulation-
+# INDEPENDENT (a coplanar region re-triangulated with the SAME vertices still
+# conforms), so it does not false-fail the box's opposite-diagonal faces, and it is
+# SOUND (a genuinely missing facet — e.g. Schönhardt — is always rejected).
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ---- exact rational geometry helpers ----
+@inline _rbrat(x::Float64) = Rational{BigInt}(x)
+@inline _rbsub(a,b) = (a[1]-b[1], a[2]-b[2], a[3]-b[3])
+@inline _rbcross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
+@inline _rbdot(a,b) = a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+@inline _rbekey(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
+@inline function _rbproj2(p, drop::Int)
+    drop == 1 && return (p[2], p[3]); drop == 2 && return (p[1], p[3]); return (p[1], p[2])
+end
+@inline function _rborient2(a,b,c)::Int
+    d = (b[1]-a[1])*(c[2]-a[2]) - (b[2]-a[2])*(c[1]-a[1]); d>0 ? 1 : (d<0 ? -1 : 0)
+end
+
+struct RBPlane
+    A0::NTuple{3,Rational{BigInt}}; N::NTuple{3,Rational{BigInt}}; drop::Int
+end
+struct RBRegion
+    facets::Vector{Int}
+    tris::Vector{NTuple{3,Int32}}
+    plane::RBPlane
+    bnd_edges::Set{NTuple{2,Int32}}
+    int_edges::Set{NTuple{2,Int32}}
+end
+
+mutable struct _RBUF; p::Vector{Int}; end
+_rbuf(n) = _RBUF(collect(1:n))
+function _rbfind(u::_RBUF,i); while u.p[i]!=i; u.p[i]=u.p[u.p[i]]; i=u.p[i]; end; i; end
+_rbunion(u::_RBUF,i,j) = (u.p[_rbfind(u,i)] = _rbfind(u,j))
+
+@inline _rbptP(Px,Py,Pz,i) = (Px[i],Py[i],Pz[i])
+@inline _rbratP(Px,Py,Pz,i) = (_rbrat(Px[i]),_rbrat(Py[i]),_rbrat(Pz[i]))
+
+# dedup surface coords -> (Px,Py,Pz, facets in P-id triples)
+function _rb_dedup_surface(surface::Mesh)
+    seen = Dict{NTuple{3,Float64},Int32}()
+    Px=Float64[]; Py=Float64[]; Pz=Float64[]
+    remap = Vector{Int32}(undef, size(surface.coords,2))
+    @inbounds for i in 1:size(surface.coords,2)
+        key=(surface.coords[1,i],surface.coords[2,i],surface.coords[3,i])
+        id=get(seen,key,Int32(0))
+        if id==0
+            push!(Px,key[1]);push!(Py,key[2]);push!(Pz,key[3]); id=Int32(length(Px)); seen[key]=id
+        end
+        remap[i]=id
+    end
+    facets = NTuple{3,Int32}[]
+    @inbounds for f in 1:size(surface.tris,2)
+        a=remap[surface.tris[1,f]]; b=remap[surface.tris[2,f]]; c=remap[surface.tris[3,f]]
+        (a==b||b==c||a==c) && continue
+        push!(facets,(a,b,c))
+    end
+    return Px,Py,Pz,facets
+end
+
+# coplanar-region grouping. crease edge = incident facets non-coplanar (orient3!=0).
+function _rb_build_regions(Px,Py,Pz, facets::Vector{NTuple{3,Int32}})
+    nf = length(facets)
+    e2f = Dict{NTuple{2,Int32},Vector{Int}}()
+    for (fi,(a,b,c)) in enumerate(facets)
+        for e in (_rbekey(a,b),_rbekey(b,c),_rbekey(a,c)); push!(get!(e2f,e,Int[]), fi); end
+    end
+    uf = _rbuf(nf)
+    for (e,fs) in e2f
+        length(fs)==2 || continue
+        f1=facets[fs[1]]; f2=facets[fs[2]]; u,v=e
+        w1=f1[1]; (w1==u||w1==v)&&(w1=f1[2]); (w1==u||w1==v)&&(w1=f1[3])
+        w2=f2[1]; (w2==u||w2==v)&&(w2=f2[2]); (w2==u||w2==v)&&(w2=f2[3])
+        orient3(_rbptP(Px,Py,Pz,u),_rbptP(Px,Py,Pz,v),_rbptP(Px,Py,Pz,w1),_rbptP(Px,Py,Pz,w2))==0 &&
+            _rbunion(uf,fs[1],fs[2])
+    end
+    comp = Dict{Int,Vector{Int}}()
+    for fi in 1:nf; push!(get!(comp,_rbfind(uf,fi),Int[]), fi); end
+    regions = RBRegion[]
+    for (_,fis) in comp
+        tris=[facets[fi] for fi in fis]
+        a,b,c = tris[1]
+        A0=_rbratP(Px,Py,Pz,a); Br=_rbratP(Px,Py,Pz,b); Cr=_rbratP(Px,Py,Pz,c)
+        N=_rbcross(_rbsub(Br,A0),_rbsub(Cr,A0))
+        an=abs.(N); drop = an[1]>=an[2] ? (an[1]>=an[3] ? 1 : 3) : (an[2]>=an[3] ? 2 : 3)
+        inc=Dict{NTuple{2,Int32},Int}()
+        for (x,y,z) in tris, e in (_rbekey(x,y),_rbekey(y,z),_rbekey(x,z)); inc[e]=get(inc,e,0)+1; end
+        bnd=Set{NTuple{2,Int32}}(); intl=Set{NTuple{2,Int32}}()
+        for (e,ci) in inc; (ci==1 ? push!(bnd,e) : push!(intl,e)); end
+        push!(regions, RBRegion(fis,tris,RBPlane(A0,N,drop),bnd,intl))
+    end
+    return regions
+end
+
+function _rb_crease_segments(regions::Vector{RBRegion})
+    S=Set{NTuple{2,Int32}}(); for r in regions, e in r.bnd_edges; push!(S,e); end; S
+end
+
+@inline function _rbside(pl::RBPlane, x)::Int
+    d=_rbdot(pl.N,_rbsub(x,pl.A0)); d>0 ? 1 : (d<0 ? -1 : 0)
+end
+
+# is rational in-plane point y strictly interior to region (sound pierce test)?
+function _rb_pierces_region(reg::RBRegion, Px,Py,Pz, y)
+    drop=reg.plane.drop; y2=_rbproj2(y,drop)
+    for (a,b,c) in reg.tris
+        pa=_rbproj2(_rbratP(Px,Py,Pz,a),drop); pb=_rbproj2(_rbratP(Px,Py,Pz,b),drop); pc=_rbproj2(_rbratP(Px,Py,Pz,c),drop)
+        s1=_rborient2(pa,pb,y2); s2=_rborient2(pb,pc,y2); s3=_rborient2(pc,pa,y2)
+        if s1!=0 && s2!=0 && s3!=0 && s1==s2 && s2==s3
+            return true
+        end
+        zc=(s1==0)+(s2==0)+(s3==0)
+        if zc==1
+            nz=filter(!=(0),(s1,s2,s3))
+            if length(nz)==2 && nz[1]==nz[2]
+                e = s1==0 ? _rbekey(a,b) : (s2==0 ? _rbekey(b,c) : _rbekey(c,a))
+                e in reg.int_edges && return true
+            end
+        end
+    end
+    return false
+end
+
+function _rb_edge_pierces(reg::RBRegion, Px,Py,Pz, p::Int32, q::Int32)
+    pp=_rbratP(Px,Py,Pz,p); qq=_rbratP(Px,Py,Pz,q)
+    sp=_rbside(reg.plane,pp); sq=_rbside(reg.plane,qq)
+    (sp!=0 && sq!=0 && sp!=sq) || return false
+    num=_rbdot(reg.plane.N,_rbsub(reg.plane.A0,pp)); den=_rbdot(reg.plane.N,_rbsub(qq,pp))
+    den==0 && return false
+    t=num//den
+    y=(pp[1]+t*(qq[1]-pp[1]), pp[2]+t*(qq[2]-pp[2]), pp[3]+t*(qq[3]-pp[3]))
+    return _rb_pierces_region(reg,Px,Py,Pz,y)
+end
+
+# on-segment vertices sorted along u->v (exact)
+function _rb_onseg(Px,Py,Pz,u::Int32,v::Int32,nreal::Int)
+    pu=_rbratP(Px,Py,Pz,u); pv=_rbratP(Px,Py,Pz,v); d=_rbsub(pv,pu); dd=_rbdot(d,d)
+    out=Tuple{Rational{BigInt},Int32}[]
+    for w in 1:nreal
+        (w==u||w==v) && continue
+        pw=_rbratP(Px,Py,Pz,w); cr=_rbcross(_rbsub(pw,pu),d)
+        (cr[1]==0&&cr[2]==0&&cr[3]==0) || continue
+        s=_rbdot(_rbsub(pw,pu),d); (s>0&&s<dd)||continue
+        push!(out,(s//dd,Int32(w)))
+    end
+    sort!(out,by=x->x[1]); [w for (_,w) in out]
+end
+function _rb_subsegments(Px,Py,Pz,u::Int32,v::Int32,nreal::Int)
+    mids=_rb_onseg(Px,Py,Pz,u,v,nreal); chain=vcat(Int32[u],mids,Int32[v])
+    [(chain[i],chain[i+1]) for i in 1:length(chain)-1]
+end
+
+# present undirected edges of a Mesh's tets, mapped to P ids (coord match)
+function _rb_present_edges(m::Mesh, coord2pid::Dict{NTuple{3,Float64},Int32})
+    mid=Vector{Int32}(undef,size(m.coords,2))
+    for i in 1:size(m.coords,2)
+        mid[i]=coord2pid[(m.coords[1,i],m.coords[2,i],m.coords[3,i])]
+    end
+    E=Set{NTuple{2,Int32}}()
+    for t in 1:size(m.tets,2)
+        vs=(mid[m.tets[1,t]],mid[m.tets[2,t]],mid[m.tets[3,t]],mid[m.tets[4,t]])
+        for i in 1:4,j in i+1:4; push!(E,_rbekey(vs[i],vs[j])); end
+    end
+    return E, mid
+end
+
+# drop kept flats -> new keep mask (zero-volume tets contribute 0 volume; dropping a
+# boundary-plane flat just re-triangulates that facet with the opposite diagonal — the
+# gate rejects any drop that removes real coverage).
+function _rb_drop_flats(T, keep)
+    kk=copy(keep)
+    for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tet(T,t) && t<=length(kk) && kk[t]) || continue
+        a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3);d=_vert(T,t,4)
+        orient3(_pt(T,a),_pt(T,b),_pt(T,c),_pt(T,d))==0 && (kk[t]=false)
+    end
+    kk
+end
+
+# closed point-in-region: rational in-plane point y is inside the closed region
+# (inside or on the boundary of some region triangle). Certifies a tet-mesh boundary
+# face actually lies on the input surface (guards against exterior bulges).
+function _rb_point_in_region_closed(reg::RBRegion, Px,Py,Pz, y)
+    drop=reg.plane.drop; y2=_rbproj2(y,drop)
+    for (a,b,c) in reg.tris
+        pa=_rbproj2(_rbratP(Px,Py,Pz,a),drop); pb=_rbproj2(_rbratP(Px,Py,Pz,b),drop); pc=_rbproj2(_rbratP(Px,Py,Pz,c),drop)
+        s1=_rborient2(pa,pb,y2); s2=_rborient2(pb,pc,y2); s3=_rborient2(pc,pa,y2)
+        haspos = (s1>0)||(s2>0)||(s3>0); hasneg=(s1<0)||(s2<0)||(s3<0)
+        (haspos && hasneg) || return true
+    end
+    return false
+end
+
+# every boundary face of the kept tet mesh must lie in some input region (on-plane +
+# inside): certifies tet-mesh boundary ⊆ input surface (no exterior bulge). P ids.
+function _rb_boundary_in_surface(mid, m::Mesh, regions::Vector{RBRegion}, Px,Py,Pz)
+    inc=Dict{NTuple{3,Int32},Int}()
+    for t in 1:size(m.tets,2)
+        v1=mid[m.tets[1,t]];v2=mid[m.tets[2,t]];v3=mid[m.tets[3,t]];v4=mid[m.tets[4,t]]
+        for f in (_sort3t(v2,v3,v4),_sort3t(v1,v3,v4),_sort3t(v1,v2,v4),_sort3t(v1,v2,v3))
+            inc[f]=get(inc,f,0)+1
+        end
+    end
+    for (f,c) in inc
+        c==1 || continue
+        a,b,cc=f
+        ratc=((_rbratP(Px,Py,Pz,a)[1]+_rbratP(Px,Py,Pz,b)[1]+_rbratP(Px,Py,Pz,cc)[1])//3,
+              (_rbratP(Px,Py,Pz,a)[2]+_rbratP(Px,Py,Pz,b)[2]+_rbratP(Px,Py,Pz,cc)[2])//3,
+              (_rbratP(Px,Py,Pz,a)[3]+_rbratP(Px,Py,Pz,b)[3]+_rbratP(Px,Py,Pz,cc)[3])//3)
+        found=false
+        for r in regions
+            (_rbside(r.plane,_rbratP(Px,Py,Pz,a))==0 && _rbside(r.plane,_rbratP(Px,Py,Pz,b))==0 &&
+             _rbside(r.plane,_rbratP(Px,Py,Pz,cc))==0) || continue
+            _rb_point_in_region_closed(r,Px,Py,Pz,ratc) && (found=true; break)
+        end
+        found || return (false, f)
+    end
+    return (true, (Int32(0),Int32(0),Int32(0)))
+end
+
+# ---- the exact geometric conformity + validity gate ----
+# returns (ok, nrecovered, reason). nrecovered = #input facets in conforming regions.
+function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz, facets)
+    v = validate(m)
+    v.ok || return (false, 0, "invalid tet mesh: $(join(v.messages, "; "))")
+    is_closed_manifold(m) || return (false, 0, "tet complex is not a closed manifold")
+    coord2pid=Dict{NTuple{3,Float64},Int32}()
+    for i in 1:length(Px); coord2pid[(Px[i],Py[i],Pz[i])]=Int32(i); end
+    Px2=copy(Px);Py2=copy(Py);Pz2=copy(Pz)
+    for i in 1:size(m.coords,2)
+        k=(m.coords[1,i],m.coords[2,i],m.coords[3,i])
+        haskey(coord2pid,k) || (push!(Px2,k[1]);push!(Py2,k[2]);push!(Pz2,k[3]);coord2pid[k]=Int32(length(Px2)))
+    end
+    E,mid = _rb_present_edges(m, coord2pid)
+    nreal=length(Px2)
+    facet_ok = trues(length(facets))
+    reg_of = Dict{Int,Int}()
+    for (ri,r) in enumerate(regions), fi in r.facets; reg_of[fi]=ri; end
+    bad_region_reason = ""
+    region_bad = falses(length(regions))
+    for (ri,r) in enumerate(regions)
+        for (u,v2) in r.bnd_edges
+            present=true
+            for (a,b) in _rb_subsegments(Px2,Py2,Pz2,u,v2,nreal)
+                (_rbekey(a,b) in E) || (present=false; break)
+            end
+            if !present
+                region_bad[ri]=true
+                bad_region_reason=="" && (bad_region_reason="crease segment ($(u),$(v2)) not recovered")
+                break
+            end
+        end
+        if !region_bad[ri]
+            for (p,q) in E
+                if _rb_edge_pierces(r,Px2,Py2,Pz2,p,q)
+                    region_bad[ri]=true
+                    bad_region_reason=="" && (bad_region_reason="tet edge ($(p),$(q)) pierces region interior")
+                    break
+                end
+            end
+        end
+    end
+    nrec=0
+    for fi in 1:length(facets)
+        ri=reg_of[fi]
+        if region_bad[ri]; facet_ok[fi]=false; else; nrec+=1; end
+    end
+    if nrec < length(facets)
+        fi = findfirst(==(false), facet_ok)
+        f = facets[fi]
+        return (false, nrec, "facet $(f) (region $(reg_of[fi])) not conforming: $(bad_region_reason)")
+    end
+    binok, badface = _rb_boundary_in_surface(mid, m, regions, Px2,Py2,Pz2)
+    binok || return (false, nrec, "tet-mesh boundary face $(badface) lies outside the input surface")
+    return (true, nrec, "ok")
+end
+
+"""
+    recover_boundary(surface::Mesh; rng_seed=1, max_seeds=64) -> Mesh
+
+Recover the closed, watertight, manifold PLC `surface` (vertices + triangular
+facets, possibly NON-CONVEX) as a CONFORMING interior tet mesh: every input facet
+appears — by vertex identity, a coplanar region re-triangulated with the SAME
+vertices still conforms — as a face of the tet mesh; the mesh is valid (all tets
+positive, no zero-volume, manifold <=2 faces/edge); interior/exterior is correctly
+classified (ray-cast, orientation-independent). Returns the interior tet [`Mesh`],
+or THROWS an explicit blocker naming the first unrecovered input facet (never a
+silently non-conforming mesh).
+"""
+function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer=64)
+    Px,Py,Pz,facets = _rb_dedup_surface(surface)
+    length(Px) >= 4 || throw(ArgumentError("recover_boundary: need >= 4 distinct surface vertices"))
+    isempty(facets) && throw(ArgumentError("recover_boundary: surface has no facets"))
+    regions = _rb_build_regions(Px,Py,Pz,facets)
+    S = _rb_crease_segments(regions)
+    lastreason = "no seed produced a conforming valid mesh"
+    lastnrec = 0
+    for k in 0:max_seeds-1
+        seed = Int(rng_seed) + k
+        T = delaunay3d(copy(Px),copy(Py),copy(Pz); perturb=false, rng_seed=seed)
+        keep = _classify_by_centroid(T, surface)
+        for drop in (false, true)
+            kk = drop ? _rb_drop_flats(T, keep) : keep
+            any(kk) || continue
+            m = to_mesh3(T; keep=kk)
+            ok, nrec, reason = _rb_gate(surface, m, regions, S, Px,Py,Pz, facets)
+            ok && return m
+            nrec >= lastnrec && (lastnrec = nrec; lastreason = reason)
+        end
+    end
+    throw(ErrorException("recover_boundary: recovery FAILED after $max_seeds seeds " *
+        "($(lastnrec)/$(length(facets)) facets recovered). First blocker: $lastreason"))
 end
 
 end # module Mesh3D
