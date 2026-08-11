@@ -837,6 +837,16 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
     T = delaunay3d(xs, ys, zs; rng_seed=rng_seed, perturb=false)   # EXACT coords ⇒ conforming
     m0 = to_mesh3(T)
     dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))          # generic ray, avoids grazing
+    # per-surface bounding boxes: a centroid OUTSIDE a surface's bbox is definitively
+    # outside that surface, so skip its (O(#tris)) ray-cast — the small coax pin's box
+    # excludes almost every air/case tet, turning O(tets·Σtris) into ~O(tets) in practice.
+    bboxes = [begin
+        lo=(Inf,Inf,Inf); hi=(-Inf,-Inf,-Inf)
+        @inbounds for i in 1:size(s.coords,2)
+            lo=(min(lo[1],s.coords[1,i]),min(lo[2],s.coords[2,i]),min(lo[3],s.coords[3,i]))
+            hi=(max(hi[1],s.coords[1,i]),max(hi[2],s.coords[2,i]),max(hi[3],s.coords[3,i]))
+        end; (lo,hi)
+    end for s in surfaces]
     keep = Int32[]; tags = Int32[]
     @inbounds for t in 1:size(m0.tets, 2)
         a=m0.tets[1,t]; b=m0.tets[2,t]; c=m0.tets[3,t]; d=m0.tets[4,t]
@@ -844,6 +854,8 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
         cy=(m0.coords[2,a]+m0.coords[2,b]+m0.coords[2,c]+m0.coords[2,d])/4
         cz=(m0.coords[3,a]+m0.coords[3,b]+m0.coords[3,c]+m0.coords[3,d])/4
         for (r, s) in enumerate(surfaces)
+            lo, hi = bboxes[r]
+            (lo[1] <= cx <= hi[1] && lo[2] <= cy <= hi[2] && lo[3] <= cz <= hi[3]) || continue
             if _inside_surface((cx,cy,cz), dir, s)
                 push!(keep, Int32(t)); push!(tags, Int32(r)); break
             end
