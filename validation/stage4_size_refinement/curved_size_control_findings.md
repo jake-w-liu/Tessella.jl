@@ -9,12 +9,18 @@ achievable** for curved domains with the pragmatic routes — a fundamental tens
 (it is exactly what Shewchuk's Delaunay-refinement *terminator* exists to manage,
 and the terminator itself struggles on the massively-cospherical cylinder rings).
 Three approaches were probed; each lands at a different, honestly-characterized
-trade-off point:
+trade-off point. The most promising (b) was then **implemented and directly
+re-measured on a cylinder** — it emits an **invalid, non-conforming** mesh
+(cospherical degeneracy), so **no fallback is shipped**: shipping it would emit
+invalid meshes on the enclosure's own coax-pin geometry, violating the correctness
+bar. The conforming route that IS robust for curved surfaces — `recover_boundary`
+at the input-surface resolution — is shipped; it just does not add interior size
+control.
 
 | approach | size control | boundary conformity | measured / blocker |
 |---|---|---|---|
 | **(a) background-lattice clip** (mesh_box + centroid-keep) | **uniform** interior `≤hmax`, sliver-free (45°) | **resampled** — lattice verts aren't on the surface: no-snap ⇒ *staircase* (non-conforming), snap ⇒ overshoot ~1.3× (1.269 at hmax=1.0) and ~1% inverted tets | good interior, non-input-conforming boundary |
-| **(b) fine-surface + inset interior lattice + `recover_boundary`** | **graded**: boundary edges `≤hmax` (fine input surface) and deep-interior `≤hmax` (lattice diagonal = hmax, measured 1.0 at hmax=1.0), **but a ~hmax-thick boundary shell at ~2·hmax** | **exact** (enforced by the `recover_boundary` `_rb_gate`) | convex-only; a non-convex concavity's inset point can pierce a region ⇒ the gate rejects |
+| **(b) fine-surface + inset interior lattice** | claimed graded (deep-interior `≤hmax`) | claimed exact | **directly re-measured: FAILS on a cylinder** — the inset lattice + the cylinder's cospherical rings make `delaunay3d(perturb=false)` emit **invalid, non-conforming** output (coarse 9-gon cylinder: `valid=false`, boundary-area ≠ surface-area; fine cylinder: also cospherical-slow, >5 min). Not shippable — it emits invalid meshes on the actual enclosure geometry |
 | **(c) recover-then-protect** (insert interior circumcenters that don't encroach boundary faces) | **stalls**: boundary diametral balls blanket the interior — 48/48 circumcenters rejected on the cylinder; maxedge stays ~1.4–2.2 ≫ hmax=0.6 | exact at the seed | + **cospherical invalidity**: `delaunay3d(perturb=false)` on the circular rings emits positively-oriented **overlapping** tets (vol 6.0→9.5), *not* caught by `validate` — the BCC/lattice degeneracy the parent README documents |
 
 **What is achievable and shipped instead:**
