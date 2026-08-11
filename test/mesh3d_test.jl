@@ -243,6 +243,27 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         fe = facetags(me)
         @test all(length(v) <= 2 for v in values(fe))           # manifold
         @test count(v -> length(v) == 2 && v[1] != v[2], values(fe)) == 12   # the inner box's 12 faces, shared
+
+        # THE ENC-COAX TOPOLOGY, conforming: a coax PIN (cylinder) inside an AIR cavity
+        # inside a metal CASE shell. Classified innermost→outermost. The pin's CURVED
+        # (N-gon) lateral+cap faces are recovered as shared interface faces too — the
+        # exact-coordinate Delaunay conforms to the cylinder without any Steiner points.
+        outer  = box_surface(0,6,0,6,0,6)                        # case outer (vol 216)
+        cavity = box_surface(1,5,1,5,1,5)                        # air+pin live here (vol 64)
+        pin    = cylinder_surface((3.,3.,1.5), (0.,0.,1.), 0.7, 3.0; nθ=8, nz=2)  # fully inside the cavity
+        mc = tetrahedralize_conforming([pin, cavity, outer])     # order = pin, air, case
+        @test validate(mc).ok
+        @test mesh_vol(mc) ≈ 216.0 rtol=1e-9                     # pin + air + case = outer box, EXACT
+        tpc = tets_per_region(mc)
+        @test length(tpc) == 3 && all(v > 0 for v in values(tpc))   # every region filled (pin/air/case)
+        fc = facetags(mc)
+        @test all(length(v) <= 2 for v in values(fc))           # manifold everywhere
+        # the pin/air interface — the cylinder's 4·nθ surface faces (nθ wall quads×2 + 2 caps×nθ),
+        # since the pin sits fully inside the air — are EACH shared between region 1 (pin) and
+        # region 2 (air): the CURVED interface is recovered conformingly, no Steiner points.
+        @test count(v -> sort(v) == Int32[1,2], values(fc)) == 4*8       # all 32 pin faces conform to air
+        @test count(v -> sort(v) == Int32[1,3], values(fc)) == 0         # pin does not touch the case
+        @test count(v -> sort(v) == Int32[2,3], values(fc)) > 0          # air/case cavity interface conforms too
     end
 
     @testset "2-3 / 3-2 flips: consistent, volume-preserving, round-trip identity" begin
