@@ -8,7 +8,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,916
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **142,926
   assertions** under `--check-bounds=yes` (verified this session).
 - **CRC regression checksums preserved** (suite includes them; unaffected by the
   `orient2_sos` fix): unit-cube
@@ -33,7 +33,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | 0 | Foundations: repo, CI, mesh types, `.msh` I/O, exact predicates | **DONE — gate green** | predicates vs exact-rational oracle ✓; `.msh` round-trip (v2↔v4) CRC-preserving ✓ |
 | 1 | 2-D Delaunay + CDT + quality refinement | **DONE — gate green** | exact empty-circumcircle oracle ✓; 2n−2−h count + hull ✓; CDT constraints present + locally Delaunay ✓; Ruppert angle/area bound achieved, domain area preserved ✓ |
 | 2 | 1-D edge meshing + parametric surface meshing | **DONE — gate green** | size-graded edge mesh vs analytic arc length ✓; planar face exact area + quality ✓; cylinder watertight + area convergence ✓; parametric area convergence ✓ |
-| 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; interface recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; conforming interface recovery + exact enclosure geometry OPEN |
+| 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; conforming partitions (planar interfaces) DONE; general recovery + slivers WIP** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; representative coax junction all volumes filled ✓; **`tetrahedralize_conforming`** — exact-coordinate Delaunay (no jitter) + per-region ray-cast tagging → interfaces are *shared* Delaunay faces (verified manifold, exact volume, all regions filled on the enclosure air/case pattern) ✓, **enabled by the corrected SoS** (jitter of `perturb=true` moved interface vertices off-plane, destroying conformance); general constrained recovery for interfaces that are *not* a union of Delaunay faces (non-convex / curved) OPEN |
 | 4 | size fields + optimization | **partial** | tet quality report ✓; Laplacian + ODT smoothing ✓; verified 2-3/3-2 flip primitives ✓; `optimize_flips!` sliver reduction (309→169 flips alone, →63 with smoothing on a 300-pt cloud; volume/validity/min-dihedral-safe) ✓; weighted sliver exudation + domain-bounded 3-D refinement WIP |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | **partial** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel/**hollow-box** `box_shell_surface`, an axis-aligned Boolean difference — verified oriented via divergence theorem + fills to exact `outer−inner`) ✓; general Boolean CSG + OCC interop WIP |
 | 6 | high-order + ASCENT integration + 22-case regression | **partial** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓; **general-geometry curving** ✓ — `curve_to_surface!`(project, on_surface) / `curve_to_cylinder!` curve only genuine *boundary-surface* edges (interior chords left straight) and revert any projection that would invert an incident P2 element (`p2_min_jacobian` guard over the degree-3 nodes; no inverted element ever emitted, verified by an independent degree-6 sampler); ASCENT drop-in + 22-case regression WIP |
@@ -42,7 +42,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 | id | geometry | why | status |
 |---|---|---|---|
-| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL (real-scale volumes filled)** — at the *literal* `.geo` dimensions the three regions (air / case / coax pin, radius 0.8 mm × length 159 mm, aspect ≈ 199) are each meshed and **all volumes filled & validated** together (`mesh3d_test.jl`), the exact place gmsh leaves them empty. Remaining for full parity: assembling the regions into one *conforming* partition (Boolean CSG for the literal boundary + interface recovery) rather than filling each region independently. |
+| ENC-COAX | enclosure coax feed-through (HFSS 9.2), surface 86 shield/case/air junction | gmsh 4.13.1 **and** 4.15.2 fail (`overlapping facets`, all volumes empty); the project's reason to exist | **PARTIAL (real-scale volumes filled)** — at the *literal* `.geo` dimensions the three regions (air / case / coax pin, radius 0.8 mm × length 159 mm, aspect ≈ 199) are each meshed and **all volumes filled & validated** together (`mesh3d_test.jl`), the exact place gmsh leaves them empty. **Conforming partitions now work for the planar air/case pattern** (`tetrahedralize_conforming`: inner region + surrounding shell meshed as ONE mesh with a shared, manifold interface — the corrected SoS lets the kernel run on exact coordinates, removing the perturbation-vs-conformance barrier). Remaining for full parity on the *literal* enclosure: the curved coax-pin/bore interface (a cylinder is not a union of Delaunay faces → needs constrained recovery with Steiner points) and Boolean CSG for the literal boundary. |
 | THIN-SLOT | enclosure 1 mm coupling slot | thin-feature Boolean sliver | open |
 | SPIRAL | 10.1 silicon spiral (thin swept traces, layered stack) | high-aspect thin conductors | open |
 | ARRAY-PML | 5.7 endfire unit cell (periodic + PML) | conformal periodic faces | open |
@@ -296,3 +296,23 @@ post-robustness goal (`PLAN.md` §6).
     missing faces have missing edges and are not single-flip recoverable → they need
     full edge+facet recovery (constrained CDT), confirming the deferral. Full
     `Pkg.test()` green: **142,445 assertions**.
+- **2026-08-11** — **Audit + feature pass, exact-predicate SoS completed, and the
+  conforming-interface barrier broken.**
+  - Two adversarial workflows (feature impl + core bug-hunt), every finding
+    independently reproduced + re-verified (see "Audit findings"): **9 bugs fixed**
+    (P2 curving inversion; `euler_characteristic`; `bounding_box`; two `read_stl`
+    crashes; and **all four SoS tie-breaks** — `orient2/orient3/incircle/insphere`
+    now resolve degeneracies by one consistent **+ε** scheme, an exact
+    `Rational{BigInt}` leading-term evaluator shared by all, regression-pinned).
+  - `box_shell_surface` (hollow-box CSG) + `smooth_odt` integrated, review-hardened.
+    `validation/` suite added (Tessella vs gmsh 4.15; enclosure = 0 gmsh volume tets).
+  - **The conforming-interface prediction above came true.** With the SoS predicates
+    correct and consistent, `delaunay3d(perturb=false)` runs on **exact coordinates**
+    (SoS breaks coplanar/cospherical degeneracies symbolically — no jitter). New
+    `tetrahedralize_conforming` meshes all region vertices together and ray-cast-tags
+    each tet by region: interfaces become **shared** Delaunay faces. Verified on the
+    enclosure **air/case pattern** (inner box + surrounding shell): one mesh, exact
+    volume, **manifold shared interface** (the inner box's 12 faces), every region
+    filled. The barrier was the coordinate jitter, which the corrected SoS removes.
+    General recovery for non-Delaunay/curved interfaces (the literal coax pin) stays
+    open. Full `Pkg.test()` green: **142,926 assertions** (+ conforming tests).

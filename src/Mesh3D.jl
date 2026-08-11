@@ -25,7 +25,8 @@ module Mesh3D
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema
 
-export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi, tets_per_region
+export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
+       tetrahedralize_conforming, tets_per_region
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -797,6 +798,65 @@ function tetrahedralize_multi(surfaces::AbstractVector{Mesh}; rng_seed::Integer=
     tets = Matrix{Int32}(undef, 4, length(tetcols))
     @inbounds for (j,te) in enumerate(tetcols); for i in 1:4; tets[i,j]=te[i]; end; end
     return Mesh(coords; tets=tets, tet_tag=tags)
+end
+
+"""
+    tetrahedralize_conforming(surfaces; rng_seed=1) -> Mesh
+
+Mesh several region boundary `surfaces` into ONE **conforming** partition. All region
+vertices are Delaunay-tetrahedralized *together* on **exact coordinates** — the SoS
+predicates break coplanar/cospherical degeneracies symbolically, with **no coordinate
+jitter** — then each tet is tagged (`tet_tag`, 1-based) by the region whose surface
+contains its centroid (ray-cast point-in-polyhedron). Because it is a single
+triangulation, an interface between two regions is a shared set of tet faces —
+**conforming across regions**, unlike [`tetrahedralize_multi`](@ref) which fills each
+region independently and leaves interfaces non-matching. Tets outside every region
+(convex-hull filler) are dropped; it errors if any region receives no tet (the
+anti-false-positive contract — a valid partition fills every region).
+
+This is the piece the coordinate-jitter of [`delaunay3d`](@ref)`(perturb=true)` made
+impossible: jitter of ~1e-8 moves shared interface vertices off their plane, so no tet
+face lies on the interface. Exact coordinates + correct SoS keep the interface a union
+of Delaunay faces. Suited to partitions with planar/axis-aligned interfaces (the
+enclosure air/case pattern); an interface that is *not* a union of Delaunay faces would
+still need constrained boundary recovery.
+"""
+function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Integer=1)
+    isempty(surfaces) && return Mesh(Matrix{Float64}(undef, 3, 0))
+    # collect every region vertex once (shared interface vertices are deduplicated)
+    seen = Set{NTuple{3,Float64}}(); V = NTuple{3,Float64}[]
+    for s in surfaces
+        @inbounds for i in 1:size(s.coords, 2)
+            p = (s.coords[1,i], s.coords[2,i], s.coords[3,i])
+            (p in seen) || (push!(seen, p); push!(V, p))
+        end
+    end
+    n = length(V)
+    xs = Vector{Float64}(undef, n); ys = similar(xs); zs = similar(xs)
+    @inbounds for i in 1:n; xs[i]=V[i][1]; ys[i]=V[i][2]; zs[i]=V[i][3]; end
+    T = delaunay3d(xs, ys, zs; rng_seed=rng_seed, perturb=false)   # EXACT coords ⇒ conforming
+    m0 = to_mesh3(T)
+    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))          # generic ray, avoids grazing
+    keep = Int32[]; tags = Int32[]
+    @inbounds for t in 1:size(m0.tets, 2)
+        a=m0.tets[1,t]; b=m0.tets[2,t]; c=m0.tets[3,t]; d=m0.tets[4,t]
+        cx=(m0.coords[1,a]+m0.coords[1,b]+m0.coords[1,c]+m0.coords[1,d])/4
+        cy=(m0.coords[2,a]+m0.coords[2,b]+m0.coords[2,c]+m0.coords[2,d])/4
+        cz=(m0.coords[3,a]+m0.coords[3,b]+m0.coords[3,c]+m0.coords[3,d])/4
+        for (r, s) in enumerate(surfaces)
+            if _inside_surface((cx,cy,cz), dir, s)
+                push!(keep, Int32(t)); push!(tags, Int32(r)); break
+            end
+        end
+    end
+    tets = Matrix{Int32}(undef, 4, length(keep))
+    @inbounds for (j, t) in enumerate(keep), i in 1:4; tets[i,j] = m0.tets[i,t]; end
+    mm = Mesh(m0.coords; tets=tets, tet_tag=tags)
+    tpr = tets_per_region(mm)
+    for r in 1:length(surfaces)
+        get(tpr, Int32(r), 0) > 0 || error("tetrahedralize_conforming: region $r received no tet")
+    end
+    return mm
 end
 
 """
