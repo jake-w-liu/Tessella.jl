@@ -32,6 +32,7 @@ include("SizeField.jl")      # Stage 2/4: size fields
 include("Mesh1D.jl")         # Stage 2: graded 1-D edge meshing
 include("MeshSurface.jl")    # Stage 2: planar / cylinder / parametric surface meshing
 include("Mesh3D.jl")         # Stage 3: 3-D Delaunay + volume filling (+ multi-region)
+include("RecoverCDT.jl")     # Stage 3: general conforming-Delaunay boundary recovery (exact)
 include("Optimize.jl")       # Stage 4: tet quality report + Laplacian smoothing
 include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't fail")
 include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
@@ -40,13 +41,14 @@ include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 
 using .MeshTypes: Mesh, validate, mesh_crc
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
+using .RecoverCDT: recover_boundary_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, mesh_quality
 using .Heal: is_meshable
 
 export mesh_volume, mesh_planar, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
-export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize
+export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize
 
 """
     stage() -> Int

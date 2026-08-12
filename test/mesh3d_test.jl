@@ -702,12 +702,13 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test ntets(m) == ntris(s)                               # one tet per facet (fan)
         end
 
-        @testset "exotic non-star + reflex (twisted prism) ⇒ explicit blocker, never silent" begin
+        @testset "exotic non-star + reflex (twisted prism): recover_boundary_cdt CONFORMS it" begin
             # A non-convex polygon extruded WITH A TWIST is both non-star-shaped AND
-            # reflex/non-Delaunay-recoverable — the one class recover_boundary cannot
-            # mesh (needs TetGen-style boundary Steiner splitting). The recover-or-blocker
-            # guarantee must still hold: an explicit throw, never a silent bad mesh, even
-            # with steiner=true (the fan fallback rightly declines — not star-shaped).
+            # reflex/non-Delaunay-recoverable — the one class the Float64 `recover_boundary`
+            # cannot mesh (it still correctly raises its blocker, even with steiner=true).
+            # `recover_boundary_cdt` (exact-kernel conforming-Delaunay refinement) CLOSES it:
+            # a valid, closed-manifold, exactly-conforming tet mesh via boundary-Steiner
+            # points at exact rational positions (impossible with a Float64 kernel).
             U = [(0.,0.),(3.,0.),(3.,3.),(2.,3.),(2.,1.),(1.,1.),(1.,3.),(0.,3.)]
             twisted = begin
                 n=length(U); cx=sum(p[1] for p in U)/n; cy=sum(p[2] for p in U)/n; θ=deg2rad(40)
@@ -728,8 +729,28 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
                 Tm=Matrix{Int32}(undef,3,length(tr)); for (t,f) in enumerate(tr); Tm[:,t]=Int32[f...]; end
                 Mesh(C; tris=Tm)
             end
+            # the Float64 recover_boundary still declines (its safe blocker) ...
             @test_throws ErrorException recover_boundary(twisted; max_seeds=12)
             @test_throws ErrorException recover_boundary(twisted; max_seeds=12, steiner=true)
+            # ... but recover_boundary_cdt CONFORMS it (exact-kernel Steiner recovery):
+            mc = recover_boundary_cdt(twisted)
+            @test validate(mc).ok
+            @test is_closed_manifold(mc)
+            @test bndarea(mc) ≈ surfarea(twisted) rtol=1e-9      # boundary == input surface ⇒ conforming
+            @test ntets(mc) > ntris(twisted)                      # genuine interior fill (Steiner points added)
+            # exact twist-preserved volume: cross-section area 7 stays, faceted solid ≈ 4.4186
+            @test mesh_vol(mc) ≈ 4.418609603270241 rtol=1e-9
+        end
+        @testset "recover_boundary_cdt is general (supported classes too)" begin
+            # the same exact CDT recovery conforms the supported classes with the exact volume.
+            for (s, v) in ((box_surface(0,4,0,4,0,4), 64.0),
+                           (box_tunnel_surface(0,6,0,6,0,6,2,4,2,4), 192.0),
+                           (box_shell_surface(0,6,0,6,0,6,1,5,1,5,1,5), 152.0))
+                m = recover_boundary_cdt(s)
+                @test validate(m).ok && is_closed_manifold(m)
+                @test bndarea(m) ≈ surfarea(s) rtol=1e-9
+                @test mesh_vol(m) ≈ v rtol=1e-9
+            end
         end
         @testset "error paths" begin
             @test_throws ArgumentError recover_boundary(Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1)))
