@@ -8,12 +8,17 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-13)
 
-**Suite green: 143,174 assertions** (`--check-bounds=yes`). Everything below is committed to
+**Suite green: 143,188 assertions** (`--check-bounds=yes`). Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
 ### ✅ DONE + verified
 - **Stages 0–3 core** — exact predicates, 2-D & 3-D Delaunay/CDT, volume fill, boundary recovery
-  for the *supported* classes (convex, non-convex Delaunay-recoverable, star-shaped Schönhardt).
+  for the *supported* classes **plus the exotic non-star+reflex twisted prism** (see below).
+- **`recover_boundary_cdt` — GENERAL robust boundary recovery (2026-08-13, `src/RecoverCDT.jl`)**:
+  exact-kernel conforming-Delaunay refinement closes the ONE class the Float64 `recover_boundary`
+  couldn't — the **non-star + reflex twisted prism** — as a valid, closed-manifold,
+  **exactly-conforming** tet mesh (boundary area == surface area & exact volume, verified), and
+  also recovers box/genus-1 tunnel/hollow shell/faceted cylinder. **Item #7 is now DONE.**
 - **Stage 4** — size control for **boxes + cylinders**; sliver removal (2-3/3-2 flips +
   `smooth_optimize` min-dihedral optimization-based smoothing).
 - **Stage 5** — native CSG (`mesh_boolean`, `mesh_box_regions`). OCC-*library* interop = PLAN §1/§6 non-goal.
@@ -30,8 +35,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 ### ⬜ NOT DONE (honest — with the precise blocker)
 | # | item | status | blocker |
 |---|---|---|---|
-| 7 | non-star+reflex recovery (twisted prism) | **NOT done** — safe explicit blocker holds | needs the **boundary-Steiner CDT engine**; 16 approaches measured (all 6 columns provably non-star); correct algorithm identified, needs spatial-index acceleration + `ExactMesh` output (multi-session build — a parallel workflow is attempting it now) |
-| 8 | arbitrary-surface uniform sizing | **NOT done** | shares the #7 CDT engine |
+| 7 | non-star+reflex recovery (twisted prism) | ✅ **DONE (2026-08-13)** | closed by `recover_boundary_cdt` — exact-kernel conforming-Delaunay refinement (Gabriel-encroachment driven off the exact DT, with exact-rational boundary-Steiner points); twisted prism now conforms (86 tets, exact area+volume, regression-pinned) |
+| 8 | arbitrary-surface uniform sizing | **NOT done** | the #7 CDT engine now exists (`recover_boundary_cdt`); adding a size target to its refinement is the remaining step |
 | 9 | *literal* ENC-COAX geometry | representative + BC tags **DONE**; literal **NOT done** | literal OCC `.geo` eval is a PLAN non-goal; native pin/air/case + BC surface tags delivered + ASCENT-verified |
 | 11 | Delaunay cospherical perf | **NOT done** | documented-deep (3 fixes measured-and-rejected); exact kernel is O(n²), doesn't help large-n |
 | 12 | 22-case HFSS regression | mesh interface **DONE** (volumes+BCs load in ASCENT); the 22 solves **NOT done** | a heavy EM-solve compute campaign on OCC geometries in the ASCENT solver |
