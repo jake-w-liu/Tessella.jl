@@ -433,6 +433,25 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test_throws ArgumentError mesh_box(0,1,0,1,0,1; hmax=0.0)   # non-positive hmax
             @test_throws ArgumentError mesh_box(0,1,0,1,0,1; hmax=-1.0)
         end
+
+        @testset "conformal periodic faces (ARRAY-PML class): opposite faces match under period" begin
+            # A periodic unit cell needs opposite boundary faces to carry IDENTICAL
+            # triangulations so periodic BCs pair nodes 1:1. The Kuhn subdivision is
+            # translation-symmetric per cell, so each pair of opposite box faces matches
+            # exactly under the period translation — the conformal-periodic-face capability.
+            m = mesh_box(0.,2., 0.,2., 0.,2.; hmax=0.7)
+            @test validate(m).ok
+            bf, _ = boundary_faces(m.tets)
+            cd(i) = (m.coords[1,i], m.coords[2,i], m.coords[3,i])
+            onplane(f, ax, val) = all(abs(cd(v)[ax]-val) < 1e-12 for v in f)
+            key(f, ax, sh) = sort([ntuple(k -> round(cd(v)[k] + (k==ax ? sh : 0.0); digits=9), 3) for v in f])
+            for (ax, lo, hi) in ((1,0.,2.),(2,0.,2.),(3,0.,2.))
+                loset = Set(key(f, ax, hi-lo) for f in bf if onplane(f, ax, lo))
+                hiset = Set(key(f, ax, 0.0)  for f in bf if onplane(f, ax, hi))
+                @test !isempty(loset)
+                @test loset == hiset            # opposite faces conformal under the period
+            end
+        end
     end
 
     # ── Stage-4/5: mesh_box_regions — conforming multi-region + native box CSG ──────
