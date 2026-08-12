@@ -870,6 +870,20 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         boxes2 = [box_surface(Float64(ix),Float64(ix+1),Float64(iy),Float64(iy+1),Float64(iz),Float64(iz+1))
                   for ix in 0:1 for iy in 0:1 for iz in 0:1]
         @test_throws ErrorException tetrahedralize_conforming(boxes2)
+        # ...and the EXACT-coordinate path MESHES the same cospherical assembly (the exact
+        # kernel breaks the degeneracy validly where the Float64 perturb=false path must
+        # raise its blocker): valid, all 8 regions filled, conforming, exact volume.
+        me = tetrahedralize_conforming_exact(boxes2)
+        @test validate(me).ok
+        tpe = tets_per_region(me)
+        @test length(tpe) == 8 && all(v -> v > 0, values(tpe))
+        @test mesh_vol(me) ≈ 8.0 rtol=1e-9
+        ftc = Dict{NTuple{3,Int32},Int}()
+        for t in 1:ntets(me), k in 1:4
+            vs=(me.tets[1,t],me.tets[2,t],me.tets[3,t],me.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j != k]))
+            ftc[f] = get(ftc, f, 0) + 1
+        end
+        @test maximum(values(ftc)) <= 2                       # conforming: no face shared by >2 tets
     end
 
     @testset "exact-coordinate Delaunay kernel (Rational{BigInt})" begin

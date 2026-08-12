@@ -25,9 +25,10 @@ module Mesh3D
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges
 using ..Mesh2D: constrained_delaunay, to_mesh
+using ..ExactMesh3D: delaunay3d_exact
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
-       tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
+       tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
        recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
@@ -1115,6 +1116,72 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
         "vertices is not a valid conforming mesh (" * join(diag.messages, "; ") * ") — a cospherical/" *
         "coplanar degeneracy the exact kernel cannot break into positive-volume tets. Use " *
         "mesh_box_regions for axis-aligned box unions, or recover_boundary per region."))
+    return mm
+end
+
+"""
+    tetrahedralize_conforming_exact(surfaces; rng_seed=1) -> Mesh
+
+Like [`tetrahedralize_conforming`](@ref) but tetrahedralizes the shared region-vertex
+set with the **exact-coordinate** Delaunay kernel ([`ExactMesh3D.delaunay3d_exact`](@ref))
+instead of the Float64 `perturb=false` kernel. The exact kernel breaks the cospherical/
+coplanar degeneracies *deterministically and validly* (no jitter, no degenerate tets),
+so it **conformingly meshes multi-region assemblies the Float64 path cannot** — e.g. a
+2×2×2 assembly of unit boxes (27 cospherical shared corners), where
+`tetrahedralize_conforming` correctly raises its blocker. Each tet is region-tagged by
+centroid ray-cast (same shared-Delaunay-face ⇒ conforming interfaces); the result is
+validated and every region is checked non-empty, else an explicit blocker — never a
+silent bad mesh. Costs exact `Rational{BigInt}` arithmetic (heavier than Float64), so
+it is the robust fallback for degenerate inputs, not the default path.
+"""
+function tetrahedralize_conforming_exact(surfaces::AbstractVector{Mesh}; rng_seed::Integer=1)
+    isempty(surfaces) && throw(ArgumentError("tetrahedralize_conforming_exact: no surfaces"))
+    seen = Dict{NTuple{3,Float64},Int32}()
+    pts = NTuple{3,Rational{BigInt}}[]; xf = Float64[]; yf = Float64[]; zf = Float64[]
+    @inbounds for s in surfaces, i in 1:size(s.coords, 2)
+        k = (s.coords[1,i], s.coords[2,i], s.coords[3,i])
+        if !haskey(seen, k)
+            seen[k] = Int32(length(pts) + 1)
+            push!(pts, (Rational{BigInt}(k[1]), Rational{BigInt}(k[2]), Rational{BigInt}(k[3])))
+            push!(xf, k[1]); push!(yf, k[2]); push!(zf, k[3])
+        end
+    end
+    length(pts) >= 4 || throw(ArgumentError("tetrahedralize_conforming_exact: need ≥ 4 distinct vertices"))
+    etets = delaunay3d_exact(pts)
+    np = length(pts)
+    coords = Matrix{Float64}(undef, 3, np)
+    @inbounds for i in 1:np; coords[1,i]=xf[i]; coords[2,i]=yf[i]; coords[3,i]=zf[i]; end
+    grids = [_raygrid(s) for s in surfaces]
+    bboxes = [begin
+        lo=(Inf,Inf,Inf); hi=(-Inf,-Inf,-Inf)
+        @inbounds for i in 1:size(s.coords,2)
+            lo=(min(lo[1],s.coords[1,i]),min(lo[2],s.coords[2,i]),min(lo[3],s.coords[3,i]))
+            hi=(max(hi[1],s.coords[1,i]),max(hi[2],s.coords[2,i]),max(hi[3],s.coords[3,i]))
+        end; (lo,hi)
+    end for s in surfaces]
+    keep = NTuple{4,Int32}[]; tags = Int32[]
+    @inbounds for t in etets
+        cx=(xf[t[1]]+xf[t[2]]+xf[t[3]]+xf[t[4]])/4
+        cy=(yf[t[1]]+yf[t[2]]+yf[t[3]]+yf[t[4]])/4
+        cz=(zf[t[1]]+zf[t[2]]+zf[t[3]]+zf[t[4]])/4
+        for r in 1:length(surfaces)
+            lo,hi = bboxes[r]
+            (lo[1] <= cx <= hi[1] && lo[2] <= cy <= hi[2] && lo[3] <= cz <= hi[3]) || continue
+            if _inside_grid((cx,cy,cz), grids[r])
+                push!(keep, (Int32(t[1]),Int32(t[2]),Int32(t[3]),Int32(t[4]))); push!(tags, Int32(r)); break
+            end
+        end
+    end
+    tets = Matrix{Int32}(undef, 4, length(keep))
+    @inbounds for (j,t) in enumerate(keep); tets[1,j]=t[1]; tets[2,j]=t[2]; tets[3,j]=t[3]; tets[4,j]=t[4]; end
+    mm = Mesh(coords; tets=tets, tet_tag=tags)
+    tpr = tets_per_region(mm)
+    for r in 1:length(surfaces)
+        get(tpr, Int32(r), 0) > 0 || error("tetrahedralize_conforming_exact: region $r received no tet")
+    end
+    diag = validate(mm)
+    diag.ok || throw(ErrorException("tetrahedralize_conforming_exact: produced an invalid mesh (" *
+        join(diag.messages, "; ") * ")"))
     return mm
 end
 
