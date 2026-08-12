@@ -82,8 +82,12 @@ curl-curl stiffness PSD: cᵀKc = 2.08e9 ≥ 0  (physically correct)
 ASCENT_SOLVE_STEP_OK
 ```
 
-So ASCENT builds the finite-element Maxwell system on a Tessella-generated mesh, with the
-operator's physics (complex symmetry, PSD stiffness) holding — the mesh is not just
-loadable but **usable by the solver**. The full 22-case HFSS regression (each case: geometry
-+ BCs + frequency sweep + solve + compare to the guide) is the remaining compute campaign;
-this proves the fundamental solver-usability it builds on.
+and then **solves** it: with a manufactured solution (known non-trivial field `x_true`,
+`b = A·x_true`), `A \ b` recovers `x_true` to `1.06e-15` (residual `2.9e-16`).
+
+So ASCENT builds AND solves the finite-element Maxwell system on a Tessella-generated mesh,
+with the operator's physics (complex symmetry, PSD stiffness) holding and the linear solve
+correct to round-off — the mesh is not just loadable but **solved-on by the solver**. The
+full 22-case HFSS regression (each case: geometry + BCs + frequency sweep + solve + compare
+to the guide) is the remaining compute campaign; this proves the fundamental solve-usability
+it builds on.

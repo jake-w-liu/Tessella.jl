@@ -12,7 +12,7 @@
 using ASCENT
 using ASCENT: load_mesh, cell_sigma_tensor, fe_spaces, assemble_diffusive_matrix, assemble_stiffness_mass
 using Gridap.FESpaces: num_free_dofs
-using LinearAlgebra, SparseArrays
+using LinearAlgebra, SparseArrays, Random
 
 path = joinpath(@__DIR__, "enc_coax_bc.msh")
 isfile(path) || error("run generate_bc.jl (Tessella env) first to produce $path")
@@ -28,13 +28,24 @@ ndof = num_free_dofs(V)
 A = assemble_diffusive_matrix(md.model, U, V, σ, ω)
 K, M = assemble_stiffness_mass(md.model, U, V, σ)
 
+# (a) the assembled operator's physics: complex-symmetric + curl-curl-stiffness PSD
 relsym = norm(A - transpose(A), Inf) / norm(A, Inf)
-c = randn(size(K,1)); q = dot(c, real(K)*c)      # curl-curl is PSD: c'Kc >= 0
+c = randn(size(K,1)); q = dot(c, real(K)*c)      # curl-curl is PSD: cᵀKc >= 0
 println("ASCENT assembled the Maxwell FEM operator ON THE TESSELLA MESH:")
-println("  ndof (Nedelec edges) = ", ndof)
-println("  A = ", typeof(A), " size ", size(A), " nnz=", nnz(A))
-println("  complex-symmetric: relsym = ", relsym)
-println("  curl-curl stiffness PSD: cᵀKc = ", q)
-(ndof > 0 && relsym < 1e-10 && q >= -1e-8) ||
-    error("assembly properties failed: ndof=$ndof relsym=$relsym cKc=$q")
-println("ASCENT_SOLVE_STEP_OK — ASCENT builds the finite-element Maxwell system on a Tessella mesh")
+println("  ndof (Nedelec edges) = ", ndof, "   A = ", typeof(A), " size ", size(A), " nnz=", nnz(A))
+println("  complex-symmetric: relsym = ", relsym, "   curl-curl PSD: cᵀKc = ", q)
+
+# (b) FULL SOLVE via a manufactured solution: known non-trivial field x_true, b = A x_true,
+#     solve A x = b, and confirm x recovers x_true to round-off — an unambiguous correct solve.
+Random.seed!(42)
+x_true = randn(ComplexF64, ndof)
+b = A * x_true
+x = A \ b
+solerr = norm(x - x_true) / norm(x_true)
+res    = norm(A*x - b) / norm(b)
+println("ASCENT SOLVED the Maxwell FEM system on the Tessella mesh:")
+println("  |x_true| = ", round(norm(x_true),digits=3), " (non-trivial)   recovered error = ", solerr, "   residual = ", res)
+
+(ndof > 0 && relsym < 1e-10 && q >= -1e-8 && solerr < 1e-6 && res < 1e-10) ||
+    error("ASCENT solve/assembly properties failed: ndof=$ndof relsym=$relsym cKc=$q solerr=$solerr res=$res")
+println("ASCENT_SOLVE_STEP_OK — ASCENT assembles AND solves the Maxwell FEM system on a Tessella mesh")
