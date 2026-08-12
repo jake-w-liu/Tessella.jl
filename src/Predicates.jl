@@ -611,6 +611,44 @@ function _rat_det(M::AbstractMatrix{_RAT})::_RAT
     return acc
 end
 
+# Fraction-free (Bareiss) exact integer determinant — O(n³) with exact integer
+# division (each cross-multiply is exactly divisible by the previous pivot), no gcd,
+# no fraction growth. Much faster than rational Laplace for the kernel's n≤5 matrices.
+function _bigint_det(A::Matrix{BigInt})::BigInt
+    n = size(A, 1)
+    n == 1 && return A[1, 1]
+    prev = one(BigInt); sgn = 1
+    @inbounds for k in 1:n-1
+        if A[k, k] == 0
+            piv = 0
+            for i in k+1:n; A[i, k] != 0 && (piv = i; break); end
+            piv == 0 && return zero(BigInt)                 # singular
+            for j in 1:n; A[k, j], A[piv, j] = A[piv, j], A[k, j]; end
+            sgn = -sgn
+        end
+        for i in k+1:n, j in k+1:n
+            A[i, j] = (A[i, j]*A[k, k] - A[i, k]*A[k, j]) ÷ prev
+        end
+        prev = A[k, k]
+    end
+    return sgn * A[n, n]
+end
+
+# Exact SIGN of a rational determinant, fast: clear each row's denominators (scaling a
+# row by its positive lcm-of-denominators multiplies det by a POSITIVE number, so the
+# sign is preserved), then take the fraction-free integer determinant sign.
+function _rat_det_sign(M::AbstractMatrix{_RAT})::Int
+    n = size(M, 1)
+    A = Matrix{BigInt}(undef, n, n)
+    @inbounds for i in 1:n
+        d = one(BigInt)
+        for j in 1:n; d = lcm(d, denominator(M[i, j])); end
+        for j in 1:n; A[i, j] = numerator(M[i, j]) * (d ÷ denominator(M[i, j])); end
+    end
+    s = _bigint_det(A)
+    return s > 0 ? 1 : (s < 0 ? -1 : 0)
+end
+
 """
     orient3_rat(a,b,c,d, ia,ib,ic,id) -> Int (±1)
 
@@ -620,7 +658,7 @@ by the shared +ε SoS). Matches `orient3`/`orient3_sos` on dyadic input.
 function orient3_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
     M = _RAT[a[1] a[2] a[3] one(_RAT); b[1] b[2] b[3] one(_RAT);
              c[1] c[2] c[3] one(_RAT); d[1] d[2] d[3] one(_RAT)]
-    s = _rat_det(M)
+    s = _rat_det_sign(M)
     s > 0 && return 1
     s < 0 && return -1
     return _orient_nd_sos_exact((a, b, c, d), (Int(ia), Int(ib), Int(ic), Int(id)), 3)
@@ -638,7 +676,7 @@ function insphere_rat(a, b, c, d, e, ia::Integer, ib::Integer, ic::Integer, id::
     M = _RAT[a[1] a[2] a[3] lift(a) one(_RAT); b[1] b[2] b[3] lift(b) one(_RAT);
              c[1] c[2] c[3] lift(c) one(_RAT); d[1] d[2] d[3] lift(d) one(_RAT);
              e[1] e[2] e[3] lift(e) one(_RAT)]
-    s = _rat_det(M)
+    s = _rat_det_sign(M)
     s > 0 && return 1
     s < 0 && return -1
     lp(p) = (p[1], p[2], p[3], lift(p))
@@ -653,7 +691,7 @@ Exact 2-D orientation sign on `Rational{BigInt}` points; degeneracies break by S
 """
 function orient2_rat(a, b, c, ia::Integer, ib::Integer, ic::Integer)::Int
     M = _RAT[a[1] a[2] one(_RAT); b[1] b[2] one(_RAT); c[1] c[2] one(_RAT)]
-    s = _rat_det(M)
+    s = _rat_det_sign(M)
     s > 0 && return 1
     s < 0 && return -1
     return _orient_nd_sos_exact((a, b, c), (Int(ia), Int(ib), Int(ic)), 2)
@@ -668,7 +706,7 @@ function incircle_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Int
     lift(p) = p[1]*p[1] + p[2]*p[2]
     M = _RAT[a[1] a[2] lift(a) one(_RAT); b[1] b[2] lift(b) one(_RAT);
              c[1] c[2] lift(c) one(_RAT); d[1] d[2] lift(d) one(_RAT)]
-    s = _rat_det(M)
+    s = _rat_det_sign(M)
     s > 0 && return 1
     s < 0 && return -1
     lp(p) = (p[1], p[2], lift(p))

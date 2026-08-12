@@ -473,7 +473,11 @@ explicitly a post-robustness goal (`PLAN.md` §6).
   - **Exact-coordinate 3-D Delaunay kernel SHIPPED + verified** (`src/ExactMesh3D.jl`):
     a valid Delaunay tetrahedralization on exact `Rational{BigInt}` coords via a bounded
     super-tetrahedron + exact Bowyer–Watson (only the verified `orient3_rat`/`insphere_rat`
-    + shared +ε SoS; no ghost tets, no coplanar-in-circle sqrt, no jitter). Verified: exact
+    + shared +ε SoS; no ghost tets, no coplanar-in-circle sqrt, no jitter). The exact
+    predicates evaluate their determinant sign by a **fraction-free Bareiss** integer
+    algorithm (clear row denominators → exact O(n³) integer determinant, no gcd/fraction
+    growth) — verified sign-identical to the rational Laplace form, much faster (n=80
+    exact Delaunay ~1 s). Verified: exact
     empty-circumsphere (0 violations), valid closed-manifold positive-volume mesh (χ=2),
     exact box fill (volume 8), and it breaks the maximally-cospherical 3×3×3 grid cleanly
     where the Float64 perturb=false kernel emits degenerate tets. Regression-pinned
