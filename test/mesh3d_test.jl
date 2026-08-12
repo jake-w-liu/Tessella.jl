@@ -542,6 +542,27 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
                 @test tets_per_region(m)[Int32(2)] > 0                      # thin region genuinely filled
             end
         end
+
+        @testset "spiral conductor trace (SPIRAL class): thin winding conductor in a substrate" begin
+            # Representative of the silicon-spiral thin swept conductor — a planar square-
+            # spiral trace (thin high-aspect winding, connected axis-aligned segments) as a
+            # native-CSG union embedded in a substrate. The structured route meshes the
+            # winding conductor VALID and CONFORMING with the trace filled as one region.
+            w=0.5; h=0.5; L=4.0
+            segs=[(0.0,L,0.0,w,0.0,h),(L-w,L,0.0,L,0.0,h),(w,L,L-w,L,0.0,h),(w,2w,w,L,0.0,h)]
+            R=BoxRegion[BoxRegion(-0.5,L+0.5,-0.5,L+0.5,-0.5,h+0.5,2)]   # substrate
+            for s in segs; push!(R, BoxRegion(s..., 1)); end            # conductor segments
+            m=mesh_box_regions(R; hmax=1.0)
+            @test validate(m).ok                                        # valid winding
+            @test maxedge(m) <= 1.0 + 1e-9
+            tpr=tets_per_region(m)
+            @test Set(keys(tpr)) == Set(Int32[1,2]) && all(v->v>0, values(tpr))  # conductor + substrate filled
+            ftc=Dict{NTuple{3,Int32},Int}()
+            for t in 1:ntets(m), k in 1:4
+                vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j!=k])); ftc[f]=get(ftc,f,0)+1
+            end
+            @test maximum(values(ftc)) <= 2                             # conforming (conductor/substrate interface shared)
+        end
     end
 
     # ── Stage-4: mesh_cylinder — uniform size-controlled cylinder (no Delaunay) ──────
