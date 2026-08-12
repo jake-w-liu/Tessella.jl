@@ -28,7 +28,7 @@ using ..Mesh2D: constrained_delaunay, to_mesh
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
-       recover_boundary, mesh_boolean, mesh_sized_conforming
+       recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!
 
@@ -934,6 +934,68 @@ function mesh_box_regions(regions::AbstractVector{BoxRegion}; hmax::Real)
         Tm[1,t]=remap[f[1]]; Tm[2,t]=remap[f[2]]; Tm[3,t]=remap[f[3]]; Tm[4,t]=remap[f[4]]; tags[t]=tett[t]
     end
     return Mesh(C; tets=Tm, tet_tag=tags)
+end
+
+"""
+    mesh_cylinder(center, axis, radius, height; hmax) -> Mesh
+
+Size-controlled tetrahedral mesh of a cylinder (axis start `center`, direction
+`axis`, `radius`, `height`) with **guaranteed maximum edge length ≤ `hmax`** — the
+uniform-size counterpart of [`mesh_box`](@ref) for the *cylindrical* primitive, and
+the robust route for the exact-cospherical case where a Delaunay fill degenerates.
+
+Explicit structured `(r,θ,z)` grid (spacings `≤ hmax/√3`): each index cube is split
+by the Kuhn/Freudenthal subdivision, the axis column (`r=0`) collapses to one node
+per level (its degenerate tets are dropped), and the angular seam wraps — so the
+mesh is **valid** (all-positive), **watertight** (boundary χ=2), **exact in volume**
+(the faceted-`nθ`-gon prism volume), and `maxedge ≤ hmax` by construction, with **no
+Delaunay** (hence no cospherical degeneracy). *Quality note:* the collapsed axis
+gives thinner tets there (min dihedral degrades toward the axis as `nθ` grows — the
+inherent singularity of structured cylinder meshes); the size/validity guarantees
+hold regardless.
+"""
+function mesh_cylinder(center, axis, radius::Real, height::Real; hmax::Real)
+    R=float(radius); H=float(height)
+    (R > 0 && H > 0) || throw(ArgumentError("mesh_cylinder: radius and height must be positive (got R=$R, H=$H)"))
+    hmax > 0 || throw(ArgumentError("mesh_cylinder: hmax must be positive (got $hmax)"))
+    a = float(hmax)/sqrt(3.0)
+    nr=max(1,ceil(Int,R/a)); nz=max(1,ceil(Int,H/a)); nθ=max(3,ceil(Int,2π*R/a))
+    ez=_unitn((float(axis[1]),float(axis[2]),float(axis[3])))
+    axc = abs(ez[1])<=abs(ez[2]) ? (abs(ez[1])<=abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
+                                   (abs(ez[2])<=abs(ez[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
+    d=axc[1]*ez[1]+axc[2]*ez[2]+axc[3]*ez[3]
+    ex=_unitn((axc[1]-d*ez[1], axc[2]-d*ez[2], axc[3]-d*ez[3]))
+    ey=(ez[2]*ex[3]-ez[3]*ex[2], ez[3]*ex[1]-ez[1]*ex[3], ez[1]*ex[2]-ez[2]*ex[1])
+    cx,cy,cz=float(center[1]),float(center[2]),float(center[3])
+    @inline function pos(i,k,j)
+        r=R*i/nr; θ=2π*(mod(k,nθ))/nθ; z=H*j/nz; rc=r*cos(θ); rs=r*sin(θ)
+        (cx+rc*ex[1]+rs*ey[1]+z*ez[1], cy+rc*ex[2]+rs*ey[2]+z*ez[2], cz+rc*ex[3]+rs*ey[3]+z*ez[3])
+    end
+    nid=Dict{NTuple{3,Int},Int32}(); coords=NTuple{3,Float64}[]
+    @inline function id(i,k,j)
+        key = i==0 ? (0,0,j) : (i, Int(mod(k,nθ)), j)
+        get!(nid,key) do; push!(coords, pos(i,k,j)); Int32(length(coords)); end
+    end
+    tets=NTuple{4,Int32}[]
+    @inbounds for j in 0:nz-1, k in 0:nθ-1, i in 0:nr-1
+        crn(a1,a2,a3)=id(i+a1, k+a2, j+a3)
+        v0=crn(0,0,0); v7=crn(1,1,1)
+        for (s1,s2) in ((( 1,0,0),(1,1,0)), ((1,0,0),(1,0,1)), ((0,1,0),(1,1,0)),
+                        (( 0,1,0),(0,1,1)), ((0,0,1),(1,0,1)), ((0,0,1),(0,1,1)))
+            v1=crn(s1...); v2=crn(s2...)
+            (v0==v1||v0==v2||v0==v7||v1==v2||v1==v7||v2==v7) && continue   # drop axis-collapsed degenerates
+            p0=coords[v0]; p1=coords[v1]; p2=coords[v2]; p3=coords[v7]
+            sv=_signed_vol6(p0,p1,p2,p3)
+            abs(sv) < 1e-14 && continue                                     # drop zero-volume
+            push!(tets, sv>=0 ? (v0,v1,v2,v7) : (v0,v1,v7,v2))
+        end
+    end
+    isempty(tets) && throw(ErrorException("mesh_cylinder: produced no tets (degenerate parameters)"))
+    C=Matrix{Float64}(undef,3,length(coords))
+    @inbounds for (n,p) in enumerate(coords); C[1,n]=p[1]; C[2,n]=p[2]; C[3,n]=p[3]; end
+    Tm=Matrix{Int32}(undef,4,length(tets))
+    @inbounds for (t,f) in enumerate(tets); Tm[1,t]=f[1]; Tm[2,t]=f[2]; Tm[3,t]=f[3]; Tm[4,t]=f[4]; end
+    return Mesh(C; tets=Tm)
 end
 
 """

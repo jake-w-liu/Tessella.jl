@@ -500,6 +500,38 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         end
     end
 
+    # ── Stage-4: mesh_cylinder — uniform size-controlled cylinder (no Delaunay) ──────
+    # Structured (r,θ,z) Kuhn mesh with axis collapse: uniform maxedge ≤ hmax, exact
+    # faceted volume, watertight, valid — the cospherical-robust route the Delaunay
+    # fill can't take. (Near-axis tets are thinner; size/validity guarantees hold.)
+    @testset "mesh_cylinder: uniform size-controlled cylinder (cospherical-robust)" begin
+        maxedge(m) = maximum(begin
+            vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); e=0.0
+            for i in 1:4, j in i+1:4
+                p=node(m,vs[i]); q=node(m,vs[j]); e=max(e, hypot(p[1]-q[1],p[2]-q[2],p[3]-q[3]))
+            end; e end for t in 1:ntets(m))
+        facetvol(R,H,nt) = 0.5*nt*R^2*sin(2π/nt)*H
+
+        @testset "uniform maxedge ≤ hmax + exact volume + watertight, sweep hmax" begin
+            for hmax in (2.0, 1.0, 0.6)
+                m = mesh_cylinder((0.,0.,0.),(0.,0.,1.),2.0,4.0; hmax=hmax)
+                @test maxedge(m) <= hmax + 1e-9               # THE uniform guarantee
+                @test validate(m).ok                          # all-positive, manifold
+                @test boundary_euler(m) == 2                  # watertight (cylinder ≅ sphere)
+                nt = max(3, ceil(Int, 2π*2.0/(hmax/sqrt(3.0))))
+                @test mesh_vol(m) ≈ facetvol(2.0,4.0,nt) rtol=1e-9   # exact faceted-prism volume
+            end
+        end
+        @testset "tilted/offset cylinder valid + watertight; error paths" begin
+            m = mesh_cylinder((1.,2.,3.),(1.,1.,1.),1.5,3.0; hmax=1.0)
+            @test validate(m).ok
+            @test boundary_euler(m) == 2
+            @test maxedge(m) <= 1.0 + 1e-9
+            @test_throws ArgumentError mesh_cylinder((0.,0.,0.),(0.,0.,1.),0.0,1.0; hmax=0.5)   # R=0
+            @test_throws ArgumentError mesh_cylinder((0.,0.,0.),(0.,0.,1.),1.0,1.0; hmax=0.0)   # hmax=0
+        end
+    end
+
     # ── Stage-3: recover_boundary — robust boundary recovery / conforming tetra ──────
     # Recover an arbitrary closed PLC surface (possibly NON-convex) as a conforming
     # tet mesh, or throw an explicit blocker (never a silent bad mesh). Independent
