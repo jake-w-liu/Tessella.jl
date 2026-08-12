@@ -25,9 +25,21 @@ U-channel / comb / star**), and star-shaped non-tetrahedralizable (Schönhardt v
 `steiner=true`). The **one unhandled class** — *non-star AND reflex* (a **twisted
 non-convex prism**, a concrete constructed case) — correctly raises the **explicit
 blocker** under both `steiner` modes (never a silent bad mesh; regression-pinned in
-`mesh3d_test.jl`). Closing it needs TetGen-style boundary-face-splitting Steiner
-recovery (a subdivision-retry probe was slow/uncertain — research-grade), not a
-quick addition.
+`mesh3d_test.jl`). Closing it needs TetGen-style boundary-Steiner recovery. A design→implement→verify
+workflow **designed the complete algorithm** (conforming-Delaunay by Gabriel-
+encroachment Steiner insertion — segments before faces, reject-circumcenter-that-
+encroaches-a-subsegment; provably terminating by the Murphy–Mount–Gable /
+Cohen-Steiner–Colin-de-Verdière–Yvinec packing bound) and **measured the precise
+blocker**: the algorithm needs Steiner points *on slanted creases*, whose exact
+positions are irrational; the **Float64 kernel rounds them off the feature** (5/11
+crease midpoints of the twisted U-prism become non-collinear), so the exact
+`_rb_gate` correctly rejects them and the loop never converges (68+ Steiner points,
+injects non-manifold invalidity). **Closing this class therefore requires an
+exact-coordinate (`Rational{BigInt}`) 3-D Delaunay kernel** — a substantial new
+subsystem — not a localized addition. (A narrow extruded-prism column-decomposition
+using strictly-*interior* Steiner points does mesh twisted prisms up to θ≈25°, but
+does not generalize; not integrated.) The current safe behaviour — an **explicit
+blocker, never a silent bad mesh** — is regression-pinned.
 
 Run either:
 
