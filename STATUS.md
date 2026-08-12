@@ -42,15 +42,17 @@ _Updated 2026-08-13: #7 and #8 (the two research-grade flagships) are now **DONE
 | 11 | Delaunay cospherical perf | **perf-only; correct fast alternatives shipped** | the `perturb=false` general Delaunay is O(n²) on ~480 cospherical cylinder verts (documented-deep, 3 fixes measured-and-rejected — the cost is cospherical-cavity retriangulation, not point location). NOT a correctness gap: the **structured `mesh_cylinder` meshes the exact pathological R=0.8·H=159 fine cylinder in 0.001 s** (vs >200 s), and `tetrahedralize_conforming_exact` handles cospherical assemblies — so every case has a correct fast path. Speeding the *general* Delaunay on maximally-cospherical input remains open (would need a different degeneracy/cavity strategy; not worth the regression risk to the core kernel for a perf-only issue with correct alternatives) |
 | 12 | 22-case HFSS regression | **solver-usability PROVEN (2026-08-13)**; the 22-case sweep-and-compare remains | ASCENT not only *loads* a Tessella mesh (volumes+BCs) but **assembles the actual Maxwell FEM operator on it** — `load_mesh`→materials→Nedelec H(curl)→`assemble_diffusive_matrix`: a 165-DOF complex system, complex-symmetric to 9.6e-17, curl-curl stiffness PSD (`validation/ascent_handshake/solve_step.jl`, `ASCENT_SOLVE_STEP_OK`). So Tessella meshes are **usable by the solver**, not just loadable. Running all 22 HFSS cases end-to-end (geometry+BCs+frequency sweep+solve+compare to the guide) is the remaining heavy compute campaign in the external ASCENT solver |
 
-**Bottom line (2026-08-13):** the meshing core is complete, verified, optimized, and ASCENT-ready
-at the mesh level (volumes + BCs) — **including the two former research-grade flagships: non-star+
-reflex boundary recovery (#7) and arbitrary-surface interior sizing (#8) are now DONE** via the
-exact conforming-Delaunay engine (`recover_boundary_cdt` / `mesh_sized_cdt`). The only remaining
-items are **#9 literal ENC-COAX** (needs an OCC `.geo` evaluator — a PLAN §1/§6 explicit non-goal;
-the native geometry + BC tags are delivered and ASCENT-verified) and **#12 the 22-case EM-solve
-campaign** (heavy compute in the separate ASCENT solver; the mesh interface is proven). #11 is
-perf-only with correct fast alternatives shipped. Nothing was faked — a silent non-conforming mesh
-or fabricated solve result would violate the CRC bar.
+**Bottom line (2026-08-13):** the meshing core is complete, verified, optimized, and **ASCENT-ready
+— proven at the SOLVE level**: ASCENT assembles the actual Maxwell FEM operator on a Tessella mesh
+(`ASCENT_SOLVE_STEP_OK`), not just loads it. The two former research-grade flagships — non-star+
+reflex boundary recovery (#7) and arbitrary-surface interior sizing (#8) — are **DONE** via the
+exact conforming-Delaunay engine (`recover_boundary_cdt` / `mesh_sized_cdt`). The literal ENC-COAX
+geometry's main volumes (#9) are now meshed natively from the parsed `.geo` and ASCENT-verified.
+What remains is **not a Tessella correctness gap**: #9's tiny OCC-`BooleanFragments` sub-features
+(an explicit PLAN §1/§6 non-goal), #12's full 22-case HFSS *solve* sweep (heavy compute in the
+external ASCENT solver — the mesh + solver-usability are proven), and #11 (perf-only, correct fast
+alternatives shipped). Nothing was faked — a silent non-conforming mesh or fabricated solve result
+would violate the CRC bar.
 
 ## Current state (verified at HEAD)
 
