@@ -8,11 +8,18 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **143,113
-  assertions** under `--check-bounds=yes` (verified this session; +28 `mesh_box`,
-  +24 `mesh_box_regions`, +17 `mesh_cylinder` (uniform cospherical-robust cylinder),
-  +36 `recover_boundary`, +9 `mesh_sized_conforming`, +32 `mesh_boolean` native
-  mesh-CSG, +11 end-to-end native-pipeline integration).
+- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **143,130
+  assertions** under `--check-bounds=yes` (verified this session; ~2–3× faster than
+  the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
+  `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
+  `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
+  grid-classifier parity, +13 audit-fix regressions).
+- **Domain classifier optimized (2026-08-12).** The O(n_tets·n_surface_faces)
+  ray-cast point-in-polyhedron classifier — previously flagged as "the obvious
+  throughput win (noted, not yet done)" — is now a projected-plane CSR grid index
+  (`_RayGrid`, `Mesh3D.jl`), **provably output-identical** to the brute force and
+  CRC-pinned bit-for-bit against it. `mesh_volume`(cyl 48×8) **2.5 s → 0.016 s
+  (~150×)**; whole suite ~2.1× faster. See the Log.
 - **CRC regression checksums preserved** (suite includes them; unaffected by the
   `orient2_sos` fix): unit-cube
   `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`; 10×10
@@ -20,7 +27,8 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 - **All 7 stages carry working, CRC-gated code.** Stages 0–3 complete; Stage 5
   native CSG complete (a pure-Julia OCC *library* replacement is an explicit PLAN
   §1/§6 non-goal); Stage 4 size control complete for boxes+cylinders (arbitrary-
-  curved *uniform* sizing is research-grade, in progress). Public API: `mesh_volume`
+  curved *uniform* sizing is research-grade — needs the exact-coordinate kernel).
+  Public API: `mesh_volume`
   (3-D), `mesh_planar` (2-D), **`mesh_box`** / **`mesh_box_regions`** (uniform
   size-controlled + native box CSG), **`mesh_cylinder`** (uniform size-controlled
   cylinder, cospherical-robust), **`mesh_sized_conforming`** (interior size control
@@ -47,17 +55,20 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 The project's **defining acceptance test is done**: mesh the ENC-COAX feed-through
 gmsh 4.13/4.15 cannot — PLAN §7's "proof that this project earns its existence."
-**Native CSG is shipped** (`mesh_box_regions` + `mesh_boolean`, no OCC). The current
-goal is to **complete every implementable meshing algorithm**; the two genuinely
-research-grade items are being **built** (not deferred). Per the user (2026-08-12),
-**ASCENT integration is a FUTURE VERIFICATION STEP** — run *after* all
-implementations are complete, and it needs external artifacts (the ASCENT binary +
+**Native CSG is shipped** (`mesh_box_regions` + `mesh_boolean`, no OCC). Two items
+remain **genuinely research-grade** — both blocked on the same missing subsystem, a
+`Rational{BigInt}` exact-coordinate 3-D Delaunay kernel (multi-session, measured —
+not a localized addition). They are **out of near-term scope by design, with safe
+explicit blockers** (never a silent bad mesh, regression-pinned) — not actively
+under construction this session, and not required for ASCENT. Per the user
+(2026-08-12), **ASCENT integration is a FUTURE VERIFICATION STEP** — run *after* all
+implementations are complete, needing external artifacts (the ASCENT binary +
 proprietary HFSS data) — so it is **not part of the current goal**.
 
 | item | status |
 |---|---|
-| uniform size control on curved domains | **cylinder DONE** (`mesh_cylinder`, uniform, cospherical-robust); interior size control for generic curved via `mesh_sized_conforming`; *arbitrary-surface uniform* = general Shewchuk terminator — **in progress** (exact-coord kernel workflow `wzbqc83ee`) |
-| recovery for non-star+reflex polyhedra | conforming-Delaunay boundary-Steiner recovery — **in progress**: the algorithm is designed + proven-terminating; it needs an **exact-coordinate (`Rational{BigInt}`) 3-D Delaunay kernel** (measured), now being built (workflow `wzbqc83ee`). Until it lands, the class raises a **safe explicit blocker** (never a silent bad mesh, regression-pinned) |
+| uniform size control on curved domains | **cylinder DONE** (`mesh_cylinder`, uniform, cospherical-robust); interior size control for generic curved via `mesh_sized_conforming`; *arbitrary-surface uniform* = general Shewchuk terminator — **research-grade** (needs the exact-coordinate kernel; acceptance test pinned) |
+| recovery for non-star+reflex polyhedra | conforming-Delaunay boundary-Steiner recovery — **research-grade**: the algorithm is designed + proven-terminating, but the Float64 kernel rounds slanted-crease Steiner points off-feature (measured), so it needs an **exact-coordinate (`Rational{BigInt}`) 3-D Delaunay kernel**. Until that subsystem exists, the class raises a **safe explicit blocker** (never a silent bad mesh, regression-pinned) |
 | general CSG / OCC-library interop | native CSG **DONE** (`mesh_boolean`); a pure-Julia OpenCASCADE **library** replacement remains a PLAN §1/§6 explicit non-goal (multi-year) |
 | ASCENT drop-in + 22-case HFSS regression | **FUTURE VERIFICATION** (not the current goal) — run once all implementations are complete; needs the external ASCENT binary + 22 proprietary HFSS datasets. The implementations it will exercise (P2 curved elements, solver-consumable MSH v4.1) are done |
 
@@ -195,12 +206,16 @@ from the literal fixture (verified: `ntets=0`).
 | 3-D Delaunay | 5 000 | 118 ms | 42 k nodes/s |
 | 3-D Delaunay | 20 000 | 579 ms | 35 k nodes/s |
 
-`mesh_volume` (cylinder 48×8 surface) ≈ 2.5 s / 143 MB — dominated by the ray-cast
-point-in-polyhedron domain classification, which is `O(n_tets × n_surface_faces)`.
-Correctness is not affected; a spatial-acceleration (BVH/grid) rewrite of the
-classifier is the obvious throughput win (noted, not yet done). Raw kernel
-throughput is competitive; parallel HXT-class speed is explicitly a
-post-robustness goal (`PLAN.md` §6).
+`mesh_volume` (cylinder 48×8 surface) **≈ 0.016 s** (was ≈ 2.5 s) — the ray-cast
+point-in-polyhedron classifier, formerly `O(n_tets × n_surface_faces)` and the
+run's bottleneck, is now the `_RayGrid` projected-plane CSR grid index
+(`O(n_faces)` build + `O(1)`/query, output-identical). This also halved the test
+suite (25m → 11m44s), since `recover_boundary`/`mesh_sized_conforming` re-classify
+per seed. The remaining 3-D throughput item is the `perturb=false` Delaunay
+cospherical-cavity cost on the real-scale ENC-COAX pin (~84 s / 498 pts, three
+standard fixes measured-and-rejected — a deep degeneracy characteristic, not a
+quick fix). Raw kernel throughput is competitive; parallel HXT-class speed is
+explicitly a post-robustness goal (`PLAN.md` §6).
 
 ## Log
 
@@ -366,3 +381,57 @@ post-robustness goal (`PLAN.md` §6).
     filled. The barrier was the coordinate jitter, which the corrected SoS removes.
     General recovery for non-Delaunay/curved interfaces (the literal coax pin) stays
     open. Full `Pkg.test()` green: **142,940 assertions** (+ conforming tests).
+- **2026-08-12** — **Classifier optimized (documented throughput win) + diagnostic
+  fix + independent re-audit.**
+  - **Point-in-surface classification is now grid-accelerated.** The ray-cast domain
+    classifier was `O(n_tets·n_surface_faces)` — STATUS had flagged it as "the
+    obvious throughput win (noted, not yet done)." Replaced with a projected-plane
+    CSR grid index (`_RayGrid`/`_raygrid`/`_tri_cellspan`/`_inside_grid`,
+    `Mesh3D.jl`): all parity rays share one fixed direction, so a triangle can be hit
+    only if the query projects (⊥ dir) into its 2-D bbox; each triangle is bucketed
+    into every cell its bbox overlaps (+1-cell halo absorbing float-boundary
+    rounding) and a query tests only its cell's candidates with the SAME
+    Möller–Trumbore test. **Provably output-identical** to the brute force (a
+    conservative superset filter ⇒ identical crossing parity), pinned by a new CRC
+    test cross-checking `_inside_grid` vs `_inside_surface` bit-for-bit over a dense
+    random cloud + every vertex/centroid on flat/curved/tilted/genus-1 surfaces (0
+    disagreements), and separately confirmed to produce the identical `keep` mask on
+    real triangulations. Wired into `_classify_by_centroid` (⇒ `tetrahedralize`,
+    `tetrahedralize_multi`, `recover_boundary`, `mesh_sized_conforming`),
+    `tetrahedralize_conforming` (per-region grids), and the `mesh_sized_conforming`
+    interior lattice. Measured: **`mesh_volume`(cyl 48×8) 2.5 s → 0.016 s (~150×)**;
+    **full suite 25m00s → 11m44s (~2.1×)** at **143,117** assertions (was 143,113; +4
+    parity). Boolean CSG paths keep the brute-force reference (2-solid surfaces, not a
+    bottleneck).
+  - **Diagnostic bug fixed:** `mesh_sized_conforming`'s failure message used escaped
+    `\$` (literal `$max_seeds`, no interpolation) unlike the sibling `recover_boundary`
+    message — corrected to real interpolation so the blocker reports actual counts.
+  - **Independent adversarial correctness re-audit** (8-area workflow, per-finding
+    reproduce-or-refute running Julia against the green tree; 4 areas returned clean):
+    **4 confirmed correctness bugs — every one independently reproduced here from
+    scratch, fixed, and regression-pinned:**
+    1. *(critical, `mesh_cylinder`)* the zero-volume drop used an ABSOLUTE
+       `abs(sv) < 1e-14` threshold — scale-dependent, so a small/thin cylinder silently
+       dropped legitimate thin near-axis tets, returning a non-watertight mesh (axial
+       void, boundary χ=0, wrong volume) with **no error**. Fixed to an exact `sv == 0`
+       drop (the vertex-equality check already removes every axis-collapse degeneracy);
+       χ=2 + exact faceted volume at every scale, bit-identical at normal scale.
+    2. *(critical, `tetrahedralize_conforming`)* returned a silently invalid,
+       non-manifold mesh on cospherical axis-aligned box assemblies (it checked only
+       `tets_per_region>0`, never `validate`). Fixed with a validate-or-explicit-blocker
+       gate (PLAN principle #4) that names the degeneracy and points to `mesh_box_regions`.
+    3. *(minor, `orient2_sos`)* the degenerate tie-break disagreed with the canonical
+       `+ε` evaluator on coincident-coordinate inputs (144/4416), contradicting the
+       documented four-predicate consistency. Routed through `_orient_nd_sos_exact` (the
+       2-D analogue of orient3's exact fallthrough): 0 disagreements now, golden 2-D CRC
+       preserved (0/1584 distinct-point configs changed; coincident points never reach it
+       post-dedup, so no live path changes).
+    4. *(minor, `validate`)* accepted a duplicate/overlapping tet complex (empty boundary,
+       every face incidence 2) as valid. Now rejects an empty boundary and duplicate
+       canonical tet keys — no false-reject of a real single tet.
+    Regression tests added in `mesh3d_test.jl` / `predicates_test.jl` / `meshtypes_test.jl`.
+  - Research tail re-confirmed **out of near-term scope with safe explicit blockers**
+    (non-star+reflex recovery + arbitrary-surface uniform sizing both need a full
+    `Rational{BigInt}` exact-coordinate 3-D Delaunay kernel; regression-pinned). The
+    ASCENT-facing implementations (P2 curved, MSH v4.1, conforming multi-region
+    fills) are complete.

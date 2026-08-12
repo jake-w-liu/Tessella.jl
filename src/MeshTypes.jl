@@ -377,10 +377,21 @@ function validate(m::Mesh; require_positive_tets::Bool=true)
         triangle_area(a, b, c) == 0 && (ndegtri += 1)
     end
     ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
-    # non-manifold faces
+    # non-manifold faces + degenerate closed complexes
     if ntets(m) > 0
-        _, maxinc = boundary_faces(m.tets)
+        bnd, maxinc = boundary_faces(m.tets)
         maxinc > 2 && push!(msgs, "non-manifold: a face is shared by $maxinc tets")
+        # A real solid always has a non-empty boundary surface; an empty boundary means
+        # every face is shared an even number of times — overlapping/duplicate tets that a
+        # face-incidence≤2 test alone cannot distinguish from a valid interior.
+        isempty(bnd) && push!(msgs, "closed tet complex with empty boundary (overlapping or duplicate tets)")
+        # duplicate (coincident) tets: a real complex never repeats a canonical tet key.
+        seen = Set{NTuple{4,Int32}}(); ndup = 0
+        @inbounds for t in 1:ntets(m)
+            k = _sort4(Int32(m.tets[1,t]), Int32(m.tets[2,t]), Int32(m.tets[3,t]), Int32(m.tets[4,t]))
+            (k in seen) ? (ndup += 1) : push!(seen, k)
+        end
+        ndup > 0 && push!(msgs, "$ndup duplicate (coincident) tets")
     end
     return MeshDiagnostic(isempty(msgs), msgs)
 end

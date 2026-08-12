@@ -986,7 +986,13 @@ function mesh_cylinder(center, axis, radius::Real, height::Real; hmax::Real)
             (v0==v1||v0==v2||v0==v7||v1==v2||v1==v7||v2==v7) && continue   # drop axis-collapsed degenerates
             p0=coords[v0]; p1=coords[v1]; p2=coords[v2]; p3=coords[v7]
             sv=_signed_vol6(p0,p1,p2,p3)
-            abs(sv) < 1e-14 && continue                                     # drop zero-volume
+            sv == 0.0 && continue                                           # drop only exactly-flat tets:
+            # the vertex-equality check above already removes every genuine axis-collapse
+            # degeneracy (distinct (i,k,j) keys ⇒ distinct coords for r>0), so the remaining
+            # tets are all non-degenerate. An ABSOLUTE volume tolerance here would be
+            # scale-dependent — at small geometric scale it silently drops legitimate thin
+            # near-axis tets (6·vol ~ a³·Δθ), leaving an axial void (χ=0, wrong volume). An
+            # exact-zero test keeps the watertight/exact-volume guarantee at every scale.
             push!(tets, sv>=0 ? (v0,v1,v2,v7) : (v0,v1,v7,v2))
         end
     end
@@ -1066,10 +1072,12 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
     @inbounds for i in 1:n; xs[i]=V[i][1]; ys[i]=V[i][2]; zs[i]=V[i][3]; end
     T = delaunay3d(xs, ys, zs; rng_seed=rng_seed, perturb=false)   # EXACT coords ⇒ conforming
     m0 = to_mesh3(T)
-    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))          # generic ray, avoids grazing
     # per-surface bounding boxes: a centroid OUTSIDE a surface's bbox is definitively
-    # outside that surface, so skip its (O(#tris)) ray-cast — the small coax pin's box
-    # excludes almost every air/case tet, turning O(tets·Σtris) into ~O(tets) in practice.
+    # outside that surface, so skip its ray-cast — the small coax pin's box excludes
+    # almost every air/case tet. The grid index then makes each remaining ray-cast
+    # O(1) in the surface's face count (see `_raygrid`), turning O(tets·Σtris) into
+    # ~O(tets) with a small constant.
+    grids = [_raygrid(s) for s in surfaces]
     bboxes = [begin
         lo=(Inf,Inf,Inf); hi=(-Inf,-Inf,-Inf)
         @inbounds for i in 1:size(s.coords,2)
@@ -1083,10 +1091,10 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
         cx=(m0.coords[1,a]+m0.coords[1,b]+m0.coords[1,c]+m0.coords[1,d])/4
         cy=(m0.coords[2,a]+m0.coords[2,b]+m0.coords[2,c]+m0.coords[2,d])/4
         cz=(m0.coords[3,a]+m0.coords[3,b]+m0.coords[3,c]+m0.coords[3,d])/4
-        for (r, s) in enumerate(surfaces)
+        for r in 1:length(surfaces)
             lo, hi = bboxes[r]
             (lo[1] <= cx <= hi[1] && lo[2] <= cy <= hi[2] && lo[3] <= cz <= hi[3]) || continue
-            if _inside_surface((cx,cy,cz), dir, s)
+            if _inside_grid((cx,cy,cz), grids[r])
                 push!(keep, Int32(t)); push!(tags, Int32(r)); break
             end
         end
@@ -1098,6 +1106,15 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
     for r in 1:length(surfaces)
         get(tpr, Int32(r), 0) > 0 || error("tetrahedralize_conforming: region $r received no tet")
     end
+    # Always-valid-or-explicit-blocker (PLAN principle #4): the single perturb=false
+    # Delaunay can leave exact zero-volume/non-manifold tets on cospherical inputs (e.g.
+    # an axis-aligned box assembly with shared corners). Validate before returning —
+    # never hand back a silently invalid/non-conforming mesh.
+    diag = validate(mm)
+    diag.ok || throw(ErrorException("tetrahedralize_conforming: the joint Delaunay of the region " *
+        "vertices is not a valid conforming mesh (" * join(diag.messages, "; ") * ") — a cospherical/" *
+        "coplanar degeneracy the exact kernel cannot break into positive-volume tets. Use " *
+        "mesh_box_regions for axis-aligned box unions, or recover_boundary per region."))
     return mm
 end
 
@@ -1116,17 +1133,126 @@ function tets_per_region(m::Mesh)
     return d
 end
 
-# per-tet keep mask: true iff the tet's centroid is inside the surface
+# ── projected-plane grid index for point-in-surface parity classification ─────────
+# Every parity ray-cast uses ONE fixed generic direction, so a triangle can be hit
+# by a ray from p only if p projects (⊥ dir) into that triangle's 2-D bbox. We index
+# the surface triangles in a uniform grid over that projection and, per query, test
+# only the query cell's candidates with the SAME Möller–Trumbore `_ray_hits_tri`.
+# This turns the O(n_tets·n_faces) classifier into O(n_faces build + O(1)/query).
+#
+# Correctness (why `_inside_grid` == `_inside_surface` bit-for-bit): a ray hit point
+# q = p + s·dir satisfies proj(q) = proj(p) (dir is annihilated) and proj(q) ∈
+# proj(Tri) (an affine map preserves barycentric membership), so proj(p) ∈ bbox of
+# proj(Tri). Any triangle whose 2-D bbox excludes proj(p) is therefore never hit and
+# dropping it cannot change the crossing parity. Each triangle is bucketed into every
+# cell its bbox overlaps plus a 1-cell halo (which absorbs any float rounding at cell
+# boundaries), so the query cell's candidate list is a conservative SUPERSET of the
+# truly-hittable triangles ⇒ identical crossing count ⇒ identical parity.
+const _CLASSIFY_DIR = _unitn((1.0, 0.3141592653589793, 0.01720209895))
+
+struct _RayGrid
+    dir::NTuple{3,Float64}
+    u::NTuple{3,Float64}
+    v::NTuple{3,Float64}
+    smin::Float64; tmin::Float64
+    invcs::Float64; invct::Float64
+    nx::Int; ny::Int
+    off::Vector{Int32}      # CSR offsets, length nx*ny+1
+    items::Vector{Int32}    # triangle ids grouped by cell
+    tris::Matrix{Int32}
+    coords::Matrix{Float64}
+end
+
+# 2-D cell span [i0,i1]×[j0,j1] of triangle f's projected bbox, +1-cell halo.
+@inline function _tri_cellspan(smin, tmin, invcs, invct, nx, ny, u, v, tris, coords, f)
+    a = tris[1, f]; b = tris[2, f]; c = tris[3, f]
+    pa = (coords[1, a], coords[2, a], coords[3, a])
+    pb = (coords[1, b], coords[2, b], coords[3, b])
+    pc = (coords[1, c], coords[2, c], coords[3, c])
+    sa = _dot(pa, u); sb = _dot(pb, u); sc = _dot(pc, u)
+    ta = _dot(pa, v); tb = _dot(pb, v); tc = _dot(pc, v)
+    smn = min(sa, sb, sc); smx = max(sa, sb, sc)
+    tmn = min(ta, tb, tc); tmx = max(ta, tb, tc)
+    i0 = clamp(floor(Int, (smn - smin) * invcs) - 1, 0, nx - 1)
+    i1 = clamp(floor(Int, (smx - smin) * invcs) + 1, 0, nx - 1)
+    j0 = clamp(floor(Int, (tmn - tmin) * invct) - 1, 0, ny - 1)
+    j1 = clamp(floor(Int, (tmx - tmin) * invct) + 1, 0, ny - 1)
+    return (i0, i1, j0, j1)
+end
+
+function _raygrid(surface::Mesh, dir::NTuple{3,Float64}=_CLASSIFY_DIR)
+    tris = surface.tris; coords = surface.coords
+    nf = size(tris, 2); nc = size(coords, 2)
+    a = abs(dir[1]) < 0.9 ? (1.0, 0.0, 0.0) : (0.0, 1.0, 0.0)
+    u = _unitn(_cross(dir, a)); v = _cross(dir, u)   # v is unit: dir⊥u, both unit
+    if nf == 0 || nc == 0
+        return _RayGrid(dir, u, v, 0.0, 0.0, 1.0, 1.0, 1, 1, Int32[0, 0], Int32[], tris, coords)
+    end
+    smin = Inf; smax = -Inf; tmin = Inf; tmax = -Inf
+    @inbounds for i in 1:nc
+        p = (coords[1, i], coords[2, i], coords[3, i])
+        s = _dot(p, u); t = _dot(p, v)
+        s < smin && (smin = s); s > smax && (smax = s)
+        t < tmin && (tmin = t); t > tmax && (tmax = t)
+    end
+    ncell = max(1, ceil(Int, sqrt(2 * nf)))          # ~2·nf cells ⇒ few candidates/query
+    nx = ncell; ny = ncell
+    invcs = nx / max(smax - smin, 1e-300)
+    invct = ny / max(tmax - tmin, 1e-300)
+    cnt = zeros(Int32, nx * ny)
+    @inbounds for f in 1:nf
+        i0, i1, j0, j1 = _tri_cellspan(smin, tmin, invcs, invct, nx, ny, u, v, tris, coords, f)
+        for j in j0:j1, i in i0:i1
+            cnt[j * nx + i + 1] += Int32(1)
+        end
+    end
+    off = Vector{Int32}(undef, nx * ny + 1)
+    off[1] = Int32(1)
+    @inbounds for c in 1:(nx*ny)
+        off[c+1] = off[c] + cnt[c]
+    end
+    items = Vector{Int32}(undef, Int(off[end]) - 1)
+    cur = copy(off)
+    @inbounds for f in 1:nf
+        i0, i1, j0, j1 = _tri_cellspan(smin, tmin, invcs, invct, nx, ny, u, v, tris, coords, f)
+        for j in j0:j1, i in i0:i1
+            c = j * nx + i + 1
+            items[cur[c]] = Int32(f); cur[c] += Int32(1)
+        end
+    end
+    return _RayGrid(dir, u, v, smin, tmin, invcs, invct, nx, ny, off, items, tris, coords)
+end
+
+# parity ray-cast via the grid: identical crossing count to `_inside_surface`.
+@inline function _inside_grid(p, g::_RayGrid)
+    isempty(g.items) && return false
+    s = _dot(p, g.u); t = _dot(p, g.v)
+    ci = clamp(floor(Int, (s - g.smin) * g.invcs), 0, g.nx - 1)
+    cj = clamp(floor(Int, (t - g.tmin) * g.invct), 0, g.ny - 1)
+    c = cj * g.nx + ci + 1
+    crossings = 0
+    tris = g.tris; coords = g.coords
+    @inbounds for idx in g.off[c]:(g.off[c+1]-Int32(1))
+        f = g.items[idx]
+        a = tris[1, f]; b = tris[2, f]; cc = tris[3, f]
+        pa = (coords[1, a], coords[2, a], coords[3, a])
+        pb = (coords[1, b], coords[2, b], coords[3, b])
+        pc = (coords[1, cc], coords[2, cc], coords[3, cc])
+        _ray_hits_tri(p, g.dir, pa, pb, pc) && (crossings += 1)
+    end
+    return isodd(crossings)
+end
+
 function _classify_by_centroid(T::Triangulation3, surface::Mesh)
     keep = falses(length(T.alive))
-    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))   # generic, avoids grazing
+    g = _raygrid(surface)
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && !_is_ghost_tet(T,t)) || continue
         a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3);d=_vert(T,t,4)
         cx=(T.x[a]+T.x[b]+T.x[c]+T.x[d])/4
         cy=(T.y[a]+T.y[b]+T.y[c]+T.y[d])/4
         cz=(T.z[a]+T.z[b]+T.z[c]+T.z[d])/4
-        keep[t] = _inside_surface((cx,cy,cz), dir, surface)
+        keep[t] = _inside_grid((cx,cy,cz), g)
     end
     return keep
 end
@@ -2163,12 +2289,12 @@ function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
     S = _rb_crease_segments(regions)
     xlo=minimum(Px); xhi=maximum(Px); ylo=minimum(Py); yhi=maximum(Py); zlo=minimum(Pz); zhi=maximum(Pz)
     a = float(hmax)/sqrt(3.0); insd2 = float(inset)^2
-    dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))
+    sg = _raygrid(surface)
     nx=max(1,ceil(Int,(xhi-xlo)/a)); ny=max(1,ceil(Int,(yhi-ylo)/a)); nz=max(1,ceil(Int,(zhi-zlo)/a))
     nn=length(Px); Ix=Float64[]; Iy=Float64[]; Iz=Float64[]
     @inbounds for i in 0:nx, j in 0:ny, k in 0:nz
         px=xlo+i*(xhi-xlo)/nx; py=ylo+j*(yhi-ylo)/ny; pz=zlo+k*(zhi-zlo)/nz
-        _inside_surface((px,py,pz),dir,surface) || continue
+        _inside_grid((px,py,pz),sg) || continue
         ok=true
         for v in 1:nn
             if (px-Px[v])^2+(py-Py[v])^2+(pz-Pz[v])^2 < insd2; ok=false; break; end
@@ -2189,9 +2315,9 @@ function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
             nrec>=lastnrec && (lastnrec=nrec; lastreason=reason)
         end
     end
-    throw(ErrorException("mesh_sized_conforming: no conforming valid sized mesh after \$max_seeds seeds " *
-        "(\$(lastnrec)/\$(length(facets)) facets recovered — likely a cospherical-degenerate input; use " *
-        "recover_boundary without interior size control, or mesh_box_regions for boxes). Blocker: \$lastreason"))
+    throw(ErrorException("mesh_sized_conforming: no conforming valid sized mesh after $max_seeds seeds " *
+        "($(lastnrec)/$(length(facets)) facets recovered — likely a cospherical-degenerate input; use " *
+        "recover_boundary without interior size control, or mesh_box_regions for boxes). Blocker: $lastreason"))
 end
 
 end # module Mesh3D

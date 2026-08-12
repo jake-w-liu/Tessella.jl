@@ -766,4 +766,65 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test_throws ArgumentError mesh_boolean(Mesh(A.coords; tris=A.tris[:,1:end-1]), B, :union)  # open input
         end
     end
+
+    # CRC gate for the grid-accelerated point-in-surface classifier: the grid filter
+    # (_inside_grid) MUST return bit-identical parity to the brute-force reference
+    # (_inside_surface) on every query, or the domain classification (and thus which
+    # tets are kept) would silently change. Cross-checked on flat/curved/genus-1
+    # surfaces over a dense random cloud that straddles inside/outside/near-face plus
+    # every surface vertex and face centroid (the boundary/degenerate cases).
+    @testset "raygrid classifier == brute-force parity (bit-identical)" begin
+        dir = Mesh3D._CLASSIFY_DIR
+        for surf in (box_surface(0.0,3.0, 0.0,2.0, 0.0,1.0),
+                     cylinder_surface((0.0,0.0,0.0),(0.0,0.0,1.0), 1.0, 2.0; nθ=24),
+                     cylinder_surface((0.3,-0.2,0.1),(0.2,0.3,1.0), 0.8, 5.0; nθ=40, nz=6),
+                     box_tunnel_surface(0.0,4.0, 0.0,3.0, 0.0,2.0, 1.0,3.0, 1.0,2.0))
+            g = Mesh3D._raygrid(surf, dir)
+            lo = (minimum(surf.coords[1,:]), minimum(surf.coords[2,:]), minimum(surf.coords[3,:]))
+            hi = (maximum(surf.coords[1,:]), maximum(surf.coords[2,:]), maximum(surf.coords[3,:]))
+            pad = 0.15 .* (hi .- lo) .+ 1e-6
+            rr = _R3(UInt64(20260812))
+            disagree = 0
+            for _ in 1:20000
+                p = (lo[1]-pad[1] + _nf(rr)*(hi[1]-lo[1]+2pad[1]),
+                     lo[2]-pad[2] + _nf(rr)*(hi[2]-lo[2]+2pad[2]),
+                     lo[3]-pad[3] + _nf(rr)*(hi[3]-lo[3]+2pad[3]))
+                Mesh3D._inside_surface(p, dir, surf) == Mesh3D._inside_grid(p, g) || (disagree += 1)
+            end
+            for f in 1:size(surf.tris,2)
+                a=surf.tris[1,f]; b=surf.tris[2,f]; c=surf.tris[3,f]
+                for pid in (a,b,c)
+                    p=(surf.coords[1,pid],surf.coords[2,pid],surf.coords[3,pid])
+                    Mesh3D._inside_surface(p,dir,surf)==Mesh3D._inside_grid(p,g) || (disagree+=1)
+                end
+                cx=(surf.coords[1,a]+surf.coords[1,b]+surf.coords[1,c])/3
+                cy=(surf.coords[2,a]+surf.coords[2,b]+surf.coords[2,c])/3
+                cz=(surf.coords[3,a]+surf.coords[3,b]+surf.coords[3,c])/3
+                Mesh3D._inside_surface((cx,cy,cz),dir,surf)==Mesh3D._inside_grid((cx,cy,cz),g) || (disagree+=1)
+            end
+            @test disagree == 0
+        end
+    end
+
+    @testset "audit-fix regressions (2026-08-12): silent-invalid-mesh guards" begin
+        # F1: mesh_cylinder's zero-volume drop must be scale-independent. A small/thin
+        # cylinder must stay watertight (boundary χ=2) with the exact faceted-prism
+        # volume — an ABSOLUTE volume threshold silently dropped legitimate near-axis
+        # tets at small scale, leaving an axial void (χ=0, wrong volume, no error).
+        facet_vol(R,H,nθ) = 0.5*nθ*R^2*sin(2π/nθ)*H
+        for (R,H,hmax) in ((1.0, 2.0, 0.2), (5e-4, 9e-5, 5.2e-5))
+            m = mesh_cylinder((0.,0.,0.),(0.,0.,1.), R, H; hmax=hmax)
+            a = hmax/sqrt(3.0); nθ = max(3, ceil(Int, 2π*R/a))
+            @test validate(m).ok
+            @test boundary_euler(m) == 2                          # watertight at every scale
+            @test mesh_vol(m) ≈ facet_vol(R,H,nθ) rtol=1e-9       # exact faceted volume
+        end
+
+        # F2: tetrahedralize_conforming must raise an explicit blocker — never return a
+        # silently invalid (zero-volume / non-manifold) mesh — on a cospherical
+        # axis-aligned box assembly the exact kernel cannot break into positive tets.
+        boxes2 = [box_surface(Float64(ix),Float64(ix+1),Float64(iy),Float64(iy+1),Float64(iz),Float64(iz+1))
+                  for ix in 0:1 for iy in 0:1 for iz in 0:1]
+        @test_throws ErrorException tetrahedralize_conforming(boxes2)
+    end
 end

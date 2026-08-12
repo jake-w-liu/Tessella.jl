@@ -352,39 +352,14 @@ deterministic symbolic tie-break keyed on the integer indices `ia,ib,ic`
 function orient2_sos(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
     s = orient2(pa, pb, pc)
     s != 0 && return s
-    # Perturb along the SoS ordering. For orient2 the leading tie-break terms are
-    # the 1-D minors (coordinate differences) of the two lowest-indexed points.
-    # Sort the three points by index, accumulate parity, evaluate minors.
-    pts = ((ia, pa), (ib, pb), (ic, pc))
-    perm, sp = _sort3_pts(pts)
-    (a, b, c) = sp
-    # Leading SoS terms of a zero 2×2 orientation under the +ε Edelsbrunner–Mücke
-    # perturbation ε^(2^(i·d−j)), ε→0⁺. For sorted a<b<c the dominant term (perturb
-    # a.y) has cofactor +(c.x − b.x), the next +(b.y − c.y), … — i.e. each coordinate
-    # difference below is written in the +ε order, so this scheme MATCHES orient3_sos/
-    # incircle_sos/insphere_sos rather than evaluating the opposite (−ε) perturbation.
-    # (Verified against an exact Rational{BigInt} SoS oracle over all degenerate
-    # collinear labelings; the earlier −ε form was inconsistent with incircle_sos and
-    # broke 2-D degenerate tie-breaks — Mesh2D uses both on the same point set.)
-    d = _x(c[2]) - _x(b[2]); d != 0.0 && return perm * _isign(d)
-    d = _y(b[2]) - _y(c[2]); d != 0.0 && return perm * _isign(d)
-    d = _x(a[2]) - _x(c[2]); d != 0.0 && return perm * _isign(d)
-    d = _y(c[2]) - _y(a[2]); d != 0.0 && return perm * _isign(d)
-    d = _x(b[2]) - _x(a[2]); d != 0.0 && return perm * _isign(d)
-    # Two distinct points can never share all coordinates *and* an index; the final
-    # nonzero term carries +perm by the SoS construction.
-    return perm
-end
-
-# Sort three (index, point) pairs ascending by index; return (parity, sorted).
-@inline function _sort3_pts(t)
-    (i1, i2, i3) = (t[1][1], t[2][1], t[3][1])
-    perm = 1
-    a, b, c = t[1], t[2], t[3]
-    if a[1] > b[1]; a, b = b, a; perm = -perm; end
-    if b[1] > c[1]; b, c = c, b; perm = -perm; end
-    if a[1] > b[1]; a, b = b, a; perm = -perm; end
-    return perm, (a, b, c)
+    # Degenerate (collinear/coincident): resolve by the exact +ε Edelsbrunner–Mücke SoS
+    # via the SAME canonical evaluator (`_orient_nd_sos_exact`) that orient3_sos/
+    # incircle_sos/insphere_sos fall through to, so all four predicates break ties under
+    # ONE consistent +ε scheme. (The earlier hand-coded first-order minor sequence agreed
+    # on all distinct-point configs but disagreed with the canonical evaluator on
+    # coincident-coordinate inputs — measured 144/4416 coincident vs 0/1584 distinct; the
+    # canonical route makes the four-predicate consistency hold for every input.)
+    return _orient2_sos_exact(pa, pb, pc, ia, ib, ic)
 end
 
 # Sort four (index, point) pairs ascending by index; return (parity, sorted).
@@ -575,6 +550,18 @@ function _orient_nd_sos_exact(coords, idx::NTuple{M,Int}, d::Int)::Int where {M}
         rows[k] = row
     end
     return _sos_det_sign(rows)
+end
+
+"""
+    _orient2_sos_exact(pa,pb,pc, ia,ib,ic) -> Int (±1)
+
+Exact +ε SoS sign of the 2-D orientation for the (degenerate) argument points, keyed
+on the distinct indices — the 2-D analogue of `_orient3_sos_exact`, so `orient2_sos`
+resolves ties by the same canonical evaluator as the higher-dimension predicates.
+"""
+function _orient2_sos_exact(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
+    coords = ((_x(pa),_y(pa)), (_x(pb),_y(pb)), (_x(pc),_y(pc)))
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic)), 2)
 end
 
 """
