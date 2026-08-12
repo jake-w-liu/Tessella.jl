@@ -804,6 +804,23 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @testset "error path" begin
             @test_throws ArgumentError mesh_sized_conforming(box_surface(0,1,0,1,0,1); hmax=0.0)
         end
+
+        @testset "mesh_sized_cdt: arbitrary-surface interior sizing on the exact CDT engine" begin
+            # #8 — uniform interior size control on an arbitrary curved domain, built on the
+            # exact conforming-Delaunay recovery. Conforming (exact), valid, closed, with
+            # interior edges driven toward ≤ hmax; the certify gate guarantees it never
+            # returns a non-conforming mesh (falls back to the conforming baseline if the
+            # interior lattice would break conformity).
+            s = _icosphere(3.0, 1)
+            base = recover_boundary_cdt(s)
+            m = mesh_sized_cdt(s; hmax=2.5)
+            @test validate(m).ok
+            @test is_closed_manifold(m)
+            @test _bfa(m) ≈ _sfa(s) rtol=1e-9                 # boundary conforms exactly
+            @test _intmax(m) <= 2.5 + 1e-9                    # interior edges size-controlled
+            @test ntets(m) >= ntets(base)                     # refined (or safe baseline), never worse
+            @test_throws ArgumentError mesh_sized_cdt(s; hmax=0.0)
+        end
     end
 
     # ── Stage-5: mesh_boolean — native mesh-CSG (union/intersection/difference) ──────

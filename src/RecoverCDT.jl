@@ -38,7 +38,7 @@ using ..MeshTypes: Mesh, validate, is_closed_manifold, boundary_faces, triangle_
                    node, ntris, ntets, nnodes, tet_volume
 import ..Mesh3D
 
-export recover_boundary_cdt
+export recover_boundary_cdt, mesh_sized_cdt
 
 const RB = Rational{BigInt}
 const RBv = NTuple{3,RB}
@@ -230,6 +230,12 @@ cannot; also recovers the supported classes (box / genus-1 tunnel / hollow shell
 faceted cylinder) with 0 Steiner points where they are already Delaunay-conforming.
 """
 function recover_boundary_cdt(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
+    m, _, _, _, _ = _recover(surface; maxiter=maxiter, maxpts=maxpts)
+    return m
+end
+
+# internal: run the refinement and return (mesh, pts, regions, seg2regs, n0) so sizing can reuse it.
+function _recover(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
     pts, facets = dedup(surface)
     length(pts)>=4 || throw(ArgumentError("recover_boundary_cdt: need ≥ 4 distinct vertices"))
     isempty(facets) && throw(ArgumentError("recover_boundary_cdt: surface has no facets"))
@@ -274,10 +280,49 @@ function recover_boundary_cdt(surface::Mesh; maxiter::Integer=2000, maxpts::Inte
         # converged: assemble + EXACT certification (never return a silently non-conforming mesh)
         m = _finalize(surface, pts, etets)
         ok, reason = certify_exact(surface, m, pts, regions, seg2regs)
-        ok && return m
+        ok && return (m, pts, regions, seg2regs, n0)
         error("recover_boundary_cdt: convergence gate passed but exact certification failed: $reason")
     end
     error("recover_boundary_cdt: no convergence in $maxiter iters (verts=$(length(pts)))")
+end
+
+"""
+    mesh_sized_cdt(surface::Mesh; hmax) -> Mesh
+
+Interior size control on an **arbitrary** (curved / non-star) domain, on top of the
+exact conforming-Delaunay recovery. First recovers the boundary conformingly
+([`recover_boundary_cdt`](@ref)), then seeds an interior lattice of exact-rational
+Steiner points (spacing `hmax/√3`, strictly inside via ray-cast, kept clear of existing
+vertices), re-tetrahedralizes with the exact kernel, and **accepts only if the exact
+conformity certificate still passes** — otherwise it returns the conforming boundary
+mesh unchanged (never a silently non-conforming mesh). Interior edges are driven toward
+`≤ hmax`; the surface-facet edges are fixed by the input and bound the achievable size
+(refine the surface for finer than that). Always validated + exactly-conforming.
+"""
+function mesh_sized_cdt(surface::Mesh; hmax::Real)
+    hmax > 0 || throw(ArgumentError("mesh_sized_cdt: hmax must be positive (got $hmax)"))
+    m0, pts, regions, seg2regs, n0 = _recover(surface)
+    g = Mesh3D._raygrid(surface)
+    xs=[Float64(p[1]) for p in pts]; ys=[Float64(p[2]) for p in pts]; zs=[Float64(p[3]) for p in pts]
+    xlo,xhi=extrema(xs); ylo,yhi=extrema(ys); zlo,zhi=extrema(zs)
+    a=float(hmax)/sqrt(3.0)
+    nx=max(1,ceil(Int,(xhi-xlo)/a)); ny=max(1,ceil(Int,(yhi-ylo)/a)); nz=max(1,ceil(Int,(zhi-zlo)/a))
+    ins2=(0.5*float(hmax))^2
+    aug=copy(pts)
+    @inbounds for i in 0:nx, j in 0:ny, k in 0:nz
+        px=xlo+i*(xhi-xlo)/nx; py=ylo+j*(yhi-ylo)/ny; pz=zlo+k*(zhi-zlo)/nz
+        Mesh3D._inside_grid((px,py,pz),g) || continue
+        keep=true
+        for v in 1:length(aug)
+            (px-Float64(aug[v][1]))^2+(py-Float64(aug[v][2]))^2+(pz-Float64(aug[v][3]))^2 < ins2 && (keep=false; break)
+        end
+        keep && push!(aug,(RB(px),RB(py),RB(pz)))
+    end
+    length(aug) == length(pts) && return m0                       # nothing to add
+    etets = delaunay3d_exact(aug)
+    m = _finalize(surface, aug, etets)
+    ok, _ = certify_exact(surface, m, aug, regions, seg2regs)
+    return ok ? m : m0                                            # sized-or-conforming-baseline (never non-conforming)
 end
 
 end # module RecoverCDT
