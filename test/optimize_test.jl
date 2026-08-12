@@ -137,4 +137,29 @@ end
         @test ms.coords == m.coords                       # all nodes on the boundary ⇒ fixed
         @test mvol(ms) ≈ 1.0 rtol=1e-6
     end
+
+    @testset "smooth_optimize targets slivers (min-dihedral), preserves volume/validity" begin
+        r = _RO(UInt64(12345)); n = 300
+        xs = [_nfo(r) for _ in 1:n]; ys = [_nfo(r) for _ in 1:n]; zs = [_nfo(r) for _ in 1:n]
+        m = to_mesh3(delaunay3d(xs, ys, zs; rng_seed=1))
+        q0 = mesh_quality(m)
+        @test q0.n_slivers > 0                            # the random-cloud input is genuinely slivery
+        mo = smooth_optimize(m; iters=10)
+        q1 = mesh_quality(mo)
+        @test validate(mo).ok                             # no inverted/degenerate tet
+        @test mvol(mo) ≈ mvol(m) rtol=1e-9                # boundary fixed ⇒ total volume preserved
+        @test ntets(mo) == ntets(m)                       # geometry-only move: topology unchanged
+        @test q1.n_slivers < q0.n_slivers                 # strictly fewer slivers (it works)
+        # and it beats the mean-optimizing Laplacian on the sliver count (targets the min angle)
+        @test q1.n_slivers <= mesh_quality(smooth_laplacian(m; iters=10)).n_slivers
+    end
+
+    @testset "smooth_optimize pins boundary nodes (all-boundary cube unchanged)" begin
+        C=Float64[0 1 1 0 0 1 1 0; 0 0 1 1 0 0 1 1; 0 0 0 0 1 1 1 1]
+        F=[(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
+        ct=Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); ct[:,k]=Int32[f...]; end
+        m = tetrahedralize(Mesh(C; tris=ct))
+        mo = smooth_optimize(m; iters=5)
+        @test mo.coords == m.coords                       # every node on the boundary ⇒ nothing moves
+    end
 end

@@ -11,20 +11,24 @@ on finalized tetrahedral [`Mesh`](@ref)es:
 * [`smooth_odt`](@ref) — boundary-preserving optimal-Delaunay-triangulation (ODT)
   smoothing: interior nodes move to the volume-weighted average of the circumcenters
   of their incident tets, under the same positive-volume guard.
+* [`smooth_optimize`](@ref) — boundary-preserving **optimization-based** smoothing
+  that maximizes each poor vertex's *worst* local dihedral (a pattern search), so it
+  removes needle **and** cap slivers the mean-smoothers leave behind — the geometric
+  half of sliver removal, complementing the topological flips in `Mesh3D`.
 
-Both smoothers preserve total volume (boundary fixed) and mesh validity, and lift
-the *mean* dihedral; neither is min-angle optimal (relaxation can leave or slightly
-worsen an individual worst element — genuine sliver removal needs targeted flips/
-exudation, tracked as remaining Stage-4 work). The two use different node targets
-(edge-neighbour centroid vs. volume-weighted circumcenter) and neither dominates
-the other on mean dihedral in general. These properties are verified in the tests.
+All three smoothers preserve total volume (boundary fixed) and mesh validity. The
+first two lift the *mean* dihedral (relaxation, not min-angle optimal);
+`smooth_optimize` targets the *min* angle directly. Slivers whose four vertices are
+topology-locked still need [`Mesh3D.optimize_flips!`](@ref) (2-3/3-2 flips) — the two
+together are the sliver-removal toolkit; the `mesh_volume(optimize=true)` pipeline
+runs flips then optimization smoothing. These properties are verified in the tests.
 """
 module Optimize
 
 using ..MeshTypes: Mesh, nnodes, ntets, node, tet_signed_volume, tet_dihedral_extrema,
                    tet_radius_edge, tet_volume, boundary_faces, validate
 
-export mesh_quality, smooth_laplacian, smooth_odt, TetQuality
+export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, TetQuality
 
 struct TetQuality
     n_tets::Int
@@ -165,6 +169,96 @@ function smooth_odt(m::Mesh; iters::Integer=5)
         end
     end
     return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+end
+
+"""
+    smooth_optimize(m; iters=8, sliver_deg=10.0) -> Mesh
+
+Boundary-preserving **optimization-based** smoothing that targets slivers directly.
+Unlike [`smooth_laplacian`](@ref)/[`smooth_odt`](@ref) (which relax toward a
+geometric average and lift the *mean* dihedral), this maximizes the **worst** local
+dihedral quality of each poor interior vertex's star via a pattern search: the
+objective per star is `min over incident tets of min(min_dihedral, π − max_dihedral)`,
+so it penalizes both needle (tiny min-angle) and cap (near-flat, huge max-angle)
+slivers. Only vertices whose star quality is below `sliver_deg` are moved (targeted),
+and a move is accepted only if it *improves* that objective while keeping every
+incident tet positively oriented — so validity and total volume are preserved and the
+per-star worst angle is monotone non-worsening. Complements the topological
+[`Mesh3D.optimize_flips!`](@ref) (flips change connectivity; this repositions nodes).
+Returns a new `Mesh`.
+"""
+function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
+    nn = nnodes(m)
+    coords = copy(m.coords)
+    isboundary = _boundary_nodes(m)
+    inc = _node_tets(m)
+    thr = deg2rad(float(sliver_deg))
+    dirs = ((1.,0.,0.),(-1.,0.,0.),(0.,1.,0.),(0.,-1.,0.),(0.,0.,1.),(0.,0.,-1.))
+    @inbounds for _ in 1:iters
+        for v in 1:nn
+            (isboundary[v] || isempty(inc[v])) && continue
+            tv = inc[v]
+            q0 = _star_quality(m, coords, tv)
+            q0 >= thr && continue                          # targeted: skip already-good stars
+            scale = _star_scale(m, coords, tv)
+            scale > 0 || continue
+            bq = q0; bx=coords[1,v]; by=coords[2,v]; bz=coords[3,v]
+            h = 0.25 * scale
+            for _pass in 1:24
+                improved = false
+                for (dx,dy,dz) in dirs
+                    coords[1,v]=bx+h*dx; coords[2,v]=by+h*dy; coords[3,v]=bz+h*dz
+                    if _star_positive(m, coords, tv)
+                        q = _star_quality(m, coords, tv)
+                        if q > bq; bq=q; bx=coords[1,v]; by=coords[2,v]; bz=coords[3,v]; improved=true; end
+                    end
+                end
+                coords[1,v]=bx; coords[2,v]=by; coords[3,v]=bz
+                improved || (h *= 0.5)
+                h < 1e-4 * scale && break
+            end
+        end
+    end
+    return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+end
+
+# star quality = min over incident tets of min(min_dihedral, π − max_dihedral): a
+# sliver (needle OR cap) drives this toward 0. Maximizing it removes both sliver types.
+@inline function _star_quality(m::Mesh, coords, tv)
+    q = Inf
+    @inbounds for t in tv
+        a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
+        pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
+        pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
+        dmn, dmx = tet_dihedral_extrema(pa,pb,pc,pd)
+        q = min(q, dmn, pi - dmx)
+    end
+    return q
+end
+
+# all incident tets strictly positively oriented at the current coords?
+@inline function _star_positive(m::Mesh, coords, tv)
+    @inbounds for t in tv
+        a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
+        pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
+        pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
+        tet_signed_volume(pa,pb,pc,pd) <= 0 && return false
+    end
+    return true
+end
+
+# characteristic length of a vertex star = mean edge length over its incident tets.
+@inline function _star_scale(m::Mesh, coords, tv)
+    s = 0.0; n = 0
+    @inbounds for t in tv
+        vs = (m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])
+        for i in 1:4, j in i+1:4
+            a=vs[i]; b=vs[j]
+            dx=coords[1,a]-coords[1,b]; dy=coords[2,a]-coords[2,b]; dz=coords[3,a]-coords[3,b]
+            s += sqrt(dx*dx+dy*dy+dz*dz); n += 1
+        end
+    end
+    return n == 0 ? 0.0 : s / n
 end
 
 # Circumcenter of tet (a,b,c,d): solve |x−a|=|x−b|=|x−c|=|x−d|, denom = 2·A·(B×C) =
