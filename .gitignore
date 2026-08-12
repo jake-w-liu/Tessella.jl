@@ -14,6 +14,7 @@ Manifest.toml
 /validation/ascent_handshake/ascent_coax.msh
 /validation/ascent_handshake/enc_coax_bc.msh
 /validation/enclosure_literal/enclosure_literal.msh
+/validation/ascent_solve_regression/*.msh
 
 # Editor
 .vscode/
