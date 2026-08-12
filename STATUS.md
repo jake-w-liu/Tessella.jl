@@ -512,7 +512,17 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     algorithm; what remains is the shippable engine = spatial acceleration of the
     encroachment checks + integration (recover_boundary on the exact kernel → `ExactMesh`
     output + exact certificate + interior classification + tests) — the genuine
-    multi-session build.** Confirmed: this class needs the
+    multi-session build.** Four more approaches (12–15) were then built + measured: K-layer
+    twist subdivision + Delaunay (boundary area diverges, non-conforming); vertical-slab
+    fan-tetrahedralization (valid+closed but volume grows with K — the finer surface, not
+    the original); per-column centroid fan; and a **decisive per-column star test via
+    faceted-vs-fan volume — ALL 6 columns are non-star** (fan volume ≠ column faceted
+    volume, e.g. col 1: 1.046 vs 1.000). So every column provably needs a *boundary*-Steiner
+    point (split a twisted face), which is exactly the exact-coordinate boundary-Steiner
+    engine. **Fifteen distinct recovery approaches, each implemented + verified with running
+    code; the conclusion is firm — this class needs the full boundary-Steiner CDT engine
+    (spatial-index-accelerated encroachment refinement + ExactMesh output), a bounded but
+    genuine multi-session build on the shipped exact kernel.** Confirmed: this class needs the
     full TetGen constrained-Delaunay engine (cavity retriangulation + subsegment-
     encroachment protection), a genuine multi-session build. Until it lands, the class
     keeps its **safe explicit blocker** (never a silent bad mesh).
