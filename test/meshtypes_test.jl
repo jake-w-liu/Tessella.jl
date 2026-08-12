@@ -211,4 +211,16 @@ end
         @test c.n_tets == 0
         @test validate(e).ok           # vacuously valid; empty-region detection is caller's job
     end
+
+    @testset "validate rejects duplicate / empty-boundary tet complexes" begin
+        # Regression: two identical tets give every face incidence 2, so a manifold test
+        # of "no face in >2 tets" alone wrongly accepted them (empty boundary, physically
+        # impossible). validate now flags an empty boundary and duplicate canonical tets.
+        C = Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]
+        dup = Mesh(C; tets=Int32[1 1; 2 2; 3 3; 4 4])   # two identical positively-oriented tets
+        @test !validate(dup).ok
+        # a single (non-duplicated) tet with a real boundary is still valid — no false-reject
+        single = Mesh(C; tets=reshape(Int32[1,2,3,4], 4, 1))
+        @test validate(single).ok
+    end
 end

@@ -316,4 +316,33 @@ using .Oracles
         @test (@allocated incircle(a,b,c,(0.4,0.4))) == 0
         @test (@allocated insphere(a3,b3,c3,d3,(0.1,0.1,0.1))) == 0
     end
+
+    @testset "orient2_sos degenerate ties match the canonical +ε SoS (four-predicate consistency)" begin
+        # Regression: orient2_sos's degenerate branch now routes through the SAME
+        # canonical evaluator (_orient_nd_sos_exact) as orient3_sos/incircle_sos/
+        # insphere_sos, so all four agree under one +ε scheme on EVERY input. The old
+        # hand-coded first-order minor sequence agreed on distinct points but disagreed
+        # on coincident coordinates (measured 144/4416); it never returns 0.
+        pts = [(Float64(x),Float64(y)) for x in 0:3 for y in 0:3]
+        perms = [(1,2,3),(1,3,2),(2,1,3),(2,3,1),(3,1,2),(3,2,1)]
+        function scan()
+            dis=0; nz=0; ntot=0
+            for pa in pts, pb in pts, pc in pts
+                orient2(pa,pb,pc) == 0 || continue
+                for (ia,ib,ic) in perms
+                    s1 = orient2_sos(pa,pb,pc, ia,ib,ic); ntot += 1
+                    s1 == 0 && (nz += 1)
+                    s2 = Predicates._orient_nd_sos_exact(((pa[1],pa[2]),(pb[1],pb[2]),(pc[1],pc[2])),(ia,ib,ic),2)
+                    s1 == s2 || (dis += 1)
+                end
+            end
+            (dis, nz, ntot)
+        end
+        d, z, n = scan()
+        @test n > 0
+        @test z == 0            # a *_sos predicate must never return 0
+        @test d == 0            # full agreement with the canonical evaluator
+        # the exact finding config (coincident): +1 canonical, was −1 under the old branch
+        @test orient2_sos((0.0,0.0),(0.0,0.0),(0.0,1.0), 2,3,1) == 1
+    end
 end
