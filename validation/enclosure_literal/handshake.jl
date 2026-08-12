@@ -9,7 +9,9 @@ isfile(path) || error("run reconstruct.jl (Tessella env) first to produce $path"
 model = try; GmshDiscreteModel(path; renumber=false); catch; GmshDiscreteModel(path); end
 labels = get_face_labeling(model)
 names = [String(get_tag_name(labels, i)) for i in 1:num_tags(labels)]
-vols = intersect(names, ["coax_pin", "slot", "air", "case"])
-println("LITERAL ENC-COAX → ASCENT: num_cells=", num_cells(model), " volumes=", vols)
-length(vols) == 4 || error("INCOMPLETE: volumes=$vols")
-println("LITERAL_HANDSHAKE_OK — the literal enclosure (pin/slot/air/case) meshes natively and loads in ASCENT")
+want = ["coax_pin","slot","air","case", "radiation","coax_pin_pecskin","case_pecskin","resistor","p1_surface"]
+got = intersect(names, want)
+println("LITERAL ENC-COAX → ASCENT: num_cells=", num_cells(model), "  physical groups = ", length(got), "/9")
+println("  ", sort(got))
+length(got) == 9 || error("INCOMPLETE: missing $(setdiff(want,got))")
+println("LITERAL_HANDSHAKE_OK — the literal enclosure meshes natively with ALL 9 physical groups (4 volumes + 5 BC surfaces) and loads in ASCENT")

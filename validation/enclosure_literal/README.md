@@ -12,21 +12,26 @@ thin-pin cosphericity). Result:
 
 ```
 air_inside = (0,0,0, 0.22,0.14,0.3)   case_outer = (-5e-4,-5e-4,-5e-4, 0.221,0.141,0.301)   pin r=8e-4 len=0.1589
-mesh: tets=100 valid=true regions=Dict(pin=>24, air=>52, case=>24)   all three volumes filled = true
+mesh: tets=134 valid=true regions = pin/slot/air/case (all four filled)
+surface BC groups: radiation=68 pin_pec=16 case_pec=26 resistor=1 p1=1
 ```
 
-and the written MSH v4.1 loads into ASCENT's parser with all three volume physical groups
-(`LITERAL_HANDSHAKE_OK`) — solver-consumable, the geometry gmsh leaves empty.
+and the written MSH v4.1 carries the **complete literal physical-group structure** — 4 volumes
+(coax_pin/slot/air/case) + 5 BC surfaces (radiation, coax_pin_pecskin, case_pecskin, resistor,
+p1_surface) — all of which load into ASCENT's parser (`LITERAL_HANDSHAKE_OK`, 9/9 groups) —
+solver-consumable, the geometry gmsh leaves empty.
 
 ## Scope
 
-This meshes the **three main physical volumes at literal scale** (the physics-carrying regions,
-and the exact place gmsh fails). The full `.geo` additionally carries, via OpenCASCADE
-`BooleanFragments`, tiny sub-features — the coax shield/bore cylinders, the 1 mm coupling slot, the
-resistor rectangle, and the p1 port disk — plus their exact curved imprint interfaces. Producing
-those *exact OCC-fragment* interfaces is the pure-Julia OpenCASCADE-library path that PLAN §1/§6
-lists as an explicit non-goal; they are represented here (and in `validation/ascent_handshake/`) as
-tagged BC surfaces rather than OCC-imprinted volumes.
+This meshes the **four literal physical volumes** (pin/slot/air/case — every gmsh Box/Cylinder
+*volume* primitive, at the exact fixture dimensions) and tags the **five literal BC surfaces**
+(radiation, the pin/case PEC skins, and the resistor + p1 port patches), so the mesh carries the
+`.geo`'s complete physical-group structure and loads whole in ASCENT — the exact place gmsh 4.13/
+4.15 produce 0 tets. What is *not* reproduced is the **exact OpenCASCADE `BooleanFragments` imprint
+interfaces** (the precise curved shield/bore boundaries and the exact resistor/p1 surface geometry);
+those come from the pure-Julia OpenCASCADE-library path PLAN §1/§6 lists as an explicit non-goal,
+and are represented here as topologically-tagged BC surface patches rather than OCC-imprinted
+geometry.
 
 ## Reproduce
 

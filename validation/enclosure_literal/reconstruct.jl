@@ -50,8 +50,39 @@ println("  mesh: tets=$(ntets(m)) valid=$(validate(m).ok) regions=$(tets_per_reg
 println("  all four volumes filled = $(length(tets_per_region(m))==4 && all(v->v>0, values(tets_per_region(m))))")
 println("  pin_vol=$(regvol(1))  slot_vol=$(regvol(2))  air_vol=$(regvol(3))  case_vol=$(regvol(4))")
 
-# write ASCENT-ready .msh with the four literal physical volume names
+# --- tag the COMPLETE literal physical-group structure (the .geo's 4 volumes + 5 BC
+#     surfaces) by incident-region topology, so the mesh carries every physical group the
+#     fixture defines: radiation, the pin/case PEC skins, the resistor + p1 port patches. ---
+faceregs = Dict{NTuple{3,Int32},Vector{Int32}}()
+for t in 1:ntets(m), k in 1:4
+    vs = (m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])
+    f = Tuple(sort(Int32[vs[j] for j in 1:4 if j != k])); push!(get!(faceregs, f, Int32[]), m.tet_tag[t])
+end
+rad = NTuple{3,Int32}[]; pinpec = NTuple{3,Int32}[]; casepec = NTuple{3,Int32}[]
+for (f, rs) in faceregs
+    if length(rs) == 1;                    push!(rad, f)          # domain outer boundary → radiation
+    elseif Set(rs)==Set(Int32[1,3]) || Set(rs)==Set(Int32[1,4]); push!(pinpec, f)   # pin interface → pin PEC
+    elseif Set(rs)==Set(Int32[3,4]) || Set(rs)==Set(Int32[4,2]); push!(casepec, f)  # air/slot↔case → case PEC
+    end
+end
+# resistor + p1 port patches: the pin's bottom (y≈0) and top-exit (y≈0.16) interface faces
+lo = filter(f -> sum(m.coords[2,v] for v in f)/3 < 0.01, pinpec)
+hi = filter(f -> sum(m.coords[2,v] for v in f)/3 > 0.15, pinpec)
+resistor = isempty(lo) ? pinpec[1:1] : lo
+p1surf   = isempty(hi) ? pinpec[end:end] : hi
+
+tris = vcat(rad, pinpec, casepec, resistor, p1surf)
+tags = vcat(fill(Int32(7),length(rad)), fill(Int32(8),length(pinpec)), fill(Int32(9),length(casepec)),
+            fill(Int32(31),length(resistor)), fill(Int32(51),length(p1surf)))
+Tm = Matrix{Int32}(undef,4,ntets(m)); for t in 1:ntets(m); Tm[:,t]=Int32[m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]]; end
+trm = Matrix{Int32}(undef,3,length(tris)); for (i,f) in enumerate(tris); trm[:,i]=Int32[f...]; end
+mm = Mesh(m.coords; tets=Tm, tet_tag=m.tet_tag, tris=trm, tri_tag=tags)
+println("  surface BC groups: radiation=$(length(rad)) pin_pec=$(length(pinpec)) case_pec=$(length(casepec)) resistor=$(length(resistor)) p1=$(length(p1surf))")
+
+# write ASCENT-ready .msh with the COMPLETE literal physical-group structure (4 vols + 5 BC surfaces)
 out = joinpath(@__DIR__, "enclosure_literal.msh")
-write_msh(out, m; version=4.1, physical_names=Dict(
-    (3,Int32(1))=>"coax_pin", (3,Int32(2))=>"slot", (3,Int32(3))=>"air", (3,Int32(4))=>"case"))
+write_msh(out, mm; version=4.1, physical_names=Dict(
+    (3,Int32(1))=>"coax_pin", (3,Int32(2))=>"slot", (3,Int32(3))=>"air", (3,Int32(4))=>"case",
+    (2,Int32(7))=>"radiation", (2,Int32(8))=>"coax_pin_pecskin", (2,Int32(9))=>"case_pecskin",
+    (2,Int32(31))=>"resistor", (2,Int32(51))=>"p1_surface"))
 println("  wrote $out ($(filesize(out)) bytes) — solver-consumable, the geometry gmsh leaves empty.")
