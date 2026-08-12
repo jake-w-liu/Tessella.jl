@@ -498,6 +498,30 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test_throws ArgumentError mesh_box_regions([BoxRegion(0,1,0,1,0,1,1)]; hmax=0.0)   # bad hmax
             @test_throws ArgumentError mesh_box_regions([BoxRegion(0,2,0,2,0,2,0)]; hmax=1.0)   # all void → empty
         end
+
+        @testset "thin coupling-slot (THIN-SLOT class): valid + exact at extreme aspect" begin
+            # Representative of the enclosure 1 mm coupling slot — a THIN conducting slab
+            # (the slot/wall) between two air cavities. This is the thin-feature Boolean
+            # case gmsh slivers on; the deterministic structured route meshes it VALID with
+            # EXACT per-region volumes at aspect ratios up to ~1000:1 (min dihedral degrades
+            # gracefully with thinness but every tet stays positive).
+            for thick in (1.0, 0.2)
+                xc = 10.0
+                R = [BoxRegion(0.0,20.0, 0.0,10.0, 0.0,10.0, 1),                 # air enclosure
+                     BoxRegion(xc-thick/2, xc+thick/2, 0.0,10.0, 0.0,10.0, 2)]   # thin slot (priority)
+                m = mesh_box_regions(R; hmax=1.0)
+                @test validate(m).ok                              # valid despite the thin feature
+                @test maxedge(m) <= 1.0 + 1e-9                    # size bound still met
+                rv = Dict{Int32,Float64}()
+                for t in 1:ntets(m)
+                    rv[m.tet_tag[t]] = get(rv, m.tet_tag[t], 0.0) +
+                        tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
+                end
+                @test rv[Int32(2)] ≈ thick*10*10 rtol=1e-9                  # exact slot volume
+                @test rv[Int32(1)] ≈ 20*10*10 - thick*10*10 rtol=1e-9       # exact air volume
+                @test tets_per_region(m)[Int32(2)] > 0                      # thin region genuinely filled
+            end
+        end
     end
 
     # ── Stage-4: mesh_cylinder — uniform size-controlled cylinder (no Delaunay) ──────
