@@ -220,17 +220,21 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             m = match(r"(\w+)\s*=\s*newv;\s*Cylinder\(\w+\)\s*=\s*\{([^}]+)\}", ln)
             m !== nothing && (cyls[m.captures[1]] = Tuple(parse.(Float64, split(m.captures[2],","))))
         end
-        @test haskey(boxes,"sm_air_inside") && haskey(boxes,"sm_case_outer") && haskey(cyls,"sm_coax_pin") && haskey(boxes,"sm_air")
-        ab = boxes["sm_air_inside"]; co = boxes["sm_case_outer"]; pn = cyls["sm_coax_pin"]; ao = boxes["sm_air"]
-        airs  = box_surface(ab[1],ab[1]+ab[4], ab[2],ab[2]+ab[5], ab[3],ab[3]+ab[6])
+        for k in ("sm_air_inside","sm_case_outer","sm_air","sm_slot"); @test haskey(boxes,k); end
+        @test haskey(cyls,"sm_coax_pin")
+        ab = boxes["sm_air_inside"]; co = boxes["sm_case_outer"]; pn = cyls["sm_coax_pin"]
+        ao = boxes["sm_air"]; sl = boxes["sm_slot"]
+        bsurf(b) = box_surface(b[1],b[1]+b[4], b[2],b[2]+b[5], b[3],b[3]+b[6])
+        airs  = bsurf(ab); slots = bsurf(sl)
         shell = box_shell_surface(co[1],co[1]+co[4], co[2],co[2]+co[5], co[3],co[3]+co[6],
                                   ab[1],ab[1]+ab[4], ab[2],ab[2]+ab[5], ab[3],ab[3]+ab[6])
         pinl  = sqrt(pn[4]^2+pn[5]^2+pn[6]^2)
         pins  = cylinder_surface((pn[1],pn[2],pn[3]), (pn[4],pn[5],pn[6]), pn[7], pinl; nθ=8, nz=2)
-        ml = tetrahedralize_conforming_exact([pins, airs, shell])                 # pin(1)/air(2)/case(3)
+        # pin(1)/slot(2)/air(3)/case(4) — four literal regions, all native Box/Cylinder primitives
+        ml = tetrahedralize_conforming_exact([pins, slots, airs, shell])
         @test validate(ml).ok                                                     # the mesh gmsh cannot produce
         tprl = tets_per_region(ml)
-        @test length(tprl) == 3 && all(v -> v > 0, values(tprl))                  # all three literal volumes filled (NO empty volume)
+        @test length(tprl) == 4 && all(v -> v > 0, values(tprl))                  # all four literal volumes filled (NO empty volume)
         @test is_closed_manifold(ml)
         # total filled volume is positive and bounded by the air outer box (sm_air) that
         # contains the whole assembly — the pin feed-through extends past the case wall.

@@ -9,7 +9,7 @@ isfile(path) || error("run reconstruct.jl (Tessella env) first to produce $path"
 model = try; GmshDiscreteModel(path; renumber=false); catch; GmshDiscreteModel(path); end
 labels = get_face_labeling(model)
 names = [String(get_tag_name(labels, i)) for i in 1:num_tags(labels)]
-vols = intersect(names, ["coax_pin", "air", "case"])
+vols = intersect(names, ["coax_pin", "slot", "air", "case"])
 println("LITERAL ENC-COAX → ASCENT: num_cells=", num_cells(model), " volumes=", vols)
-length(vols) == 3 || error("INCOMPLETE: volumes=$vols")
-println("LITERAL_HANDSHAKE_OK — the literal enclosure meshes natively and loads in ASCENT")
+length(vols) == 4 || error("INCOMPLETE: volumes=$vols")
+println("LITERAL_HANDSHAKE_OK — the literal enclosure (pin/slot/air/case) meshes natively and loads in ASCENT")
