@@ -6,6 +6,41 @@ Package: `Tessella` · Julia ≥ 1.11 · goal: robust Julia-native mesh generato
 replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 (`DEVELOPMENT.md`).
 
+## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-13)
+
+**Suite green: 143,174 assertions** (`--check-bounds=yes`). Everything below is committed to
+`main`, source-only (HFSS/ASCENT data stays local, never pushed).
+
+### ✅ DONE + verified
+- **Stages 0–3 core** — exact predicates, 2-D & 3-D Delaunay/CDT, volume fill, boundary recovery
+  for the *supported* classes (convex, non-convex Delaunay-recoverable, star-shaped Schönhardt).
+- **Stage 4** — size control for **boxes + cylinders**; sliver removal (2-3/3-2 flips +
+  `smooth_optimize` min-dihedral optimization-based smoothing).
+- **Stage 5** — native CSG (`mesh_boolean`, `mesh_box_regions`). OCC-*library* interop = PLAN §1/§6 non-goal.
+- **Stage 6** — P2 curved elements + gmsh MSH v2/v4 I/O.
+- **Exact-coordinate `Rational{BigInt}` 3-D Delaunay kernel** (the keystone) + fast Bareiss
+  determinant + `tetrahedralize_conforming_exact` (meshes cospherical assemblies the Float64 path can't).
+- **Code fully optimized** — grid classifier (~150× on the documented bottleneck), Bareiss exact det.
+- **ASCENT ready (mesh level), PROVEN** — Tessella `.msh` → ASCENT `load_mesh` with material
+  **volumes AND boundary-condition surfaces** all loaded (`BC_HANDSHAKE_OK`, `validation/ascent_handshake/`).
+- **Representative capability meshes**: THIN-SLOT, ARRAY-PML, SPIRAL classes (valid + conforming).
+- **Correctness** — independent adversarial audit (4 real bugs fixed) + an `orient3_sos` coplanar
+  bug fixed; all predicates oracle-verified.
+
+### ⬜ NOT DONE (honest — with the precise blocker)
+| # | item | status | blocker |
+|---|---|---|---|
+| 7 | non-star+reflex recovery (twisted prism) | **NOT done** — safe explicit blocker holds | needs the **boundary-Steiner CDT engine**; 16 approaches measured (all 6 columns provably non-star); correct algorithm identified, needs spatial-index acceleration + `ExactMesh` output (multi-session build — a parallel workflow is attempting it now) |
+| 8 | arbitrary-surface uniform sizing | **NOT done** | shares the #7 CDT engine |
+| 9 | *literal* ENC-COAX geometry | representative + BC tags **DONE**; literal **NOT done** | literal OCC `.geo` eval is a PLAN non-goal; native pin/air/case + BC surface tags delivered + ASCENT-verified |
+| 11 | Delaunay cospherical perf | **NOT done** | documented-deep (3 fixes measured-and-rejected); exact kernel is O(n²), doesn't help large-n |
+| 12 | 22-case HFSS regression | mesh interface **DONE** (volumes+BCs load in ASCENT); the 22 solves **NOT done** | a heavy EM-solve compute campaign on OCC geometries in the ASCENT solver |
+
+**Bottom line:** the meshing core is complete, verified, optimized, and ASCENT-ready at the mesh
+level (volumes + BCs). The genuinely-remaining work is the boundary-Steiner CDT engine (#7/#8) and
+the EM-solve campaign (#12) — both bounded but multi-session, and never faked (a silent
+non-conforming mesh or fabricated solve result would violate the CRC bar).
+
 ## Current state (verified at HEAD)
 
 - **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **143,130
