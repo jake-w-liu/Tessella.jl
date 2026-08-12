@@ -8,7 +8,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-13)
 
-**Suite green: 143,188 assertions** (`--check-bounds=yes`). Everything below is committed to
+**Suite green: 143,194 assertions** (`--check-bounds=yes`). Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
 ### ✅ DONE + verified
@@ -36,7 +36,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 | # | item | status | blocker |
 |---|---|---|---|
 | 7 | non-star+reflex recovery (twisted prism) | ✅ **DONE (2026-08-13)** | closed by `recover_boundary_cdt` — exact-kernel conforming-Delaunay refinement (Gabriel-encroachment driven off the exact DT, with exact-rational boundary-Steiner points); twisted prism now conforms (86 tets, exact area+volume, regression-pinned) |
-| 8 | arbitrary-surface uniform sizing | **NOT done** | the #7 CDT engine now exists (`recover_boundary_cdt`); adding a size target to its refinement is the remaining step |
+| 8 | arbitrary-surface uniform sizing | ✅ **DONE (2026-08-13)** | `mesh_sized_cdt` — interior size control on the exact CDT engine (lattice Steiner points gated by the exact conformity certificate); sphere hmax sweep → conforming + valid + interior maxedge ≤ hmax, regression-pinned. Surface-facet edges bound the achievable size (refine the surface for finer) |
 | 9 | *literal* ENC-COAX geometry | representative + BC tags **DONE**; literal **NOT done** | literal OCC `.geo` eval is a PLAN non-goal; native pin/air/case + BC surface tags delivered + ASCENT-verified |
 | 11 | Delaunay cospherical perf | **NOT done** | documented-deep (3 fixes measured-and-rejected); exact kernel is O(n²), doesn't help large-n |
 | 12 | 22-case HFSS regression | mesh interface **DONE** (volumes+BCs load in ASCENT); the 22 solves **NOT done** | a heavy EM-solve compute campaign on OCC geometries in the ASCENT solver |
