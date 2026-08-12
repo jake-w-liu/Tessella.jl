@@ -46,3 +46,23 @@ The generated `.msh` is a build artifact (git-ignored) — regenerate it with st
 The full 22-case HFSS regression (mesh each guide geometry with Tessella → ASCENT
 solve → compare) builds on this handshake and needs the ASCENT solver + datasets
 (local, not in this repo).
+
+## Boundary-condition handshake (verified 2026-08-12)
+
+`generate_bc.jl` / `bc_handshake.jl` extend the proof to the **full solver-ready
+structure**: the ENC-COAX mesh carries not just the 3 material **volumes**
+(`coax_pin`/`air`/`case`, 3-D physical groups) but also 2 **BC surfaces** — `radiation`
+on the domain boundary and `coax_pin_pec` on the pin↔air material interface (2-D
+physical groups on tagged boundary/interface faces). ASCENT's parser loads **all five**:
+
+```
+num_cells=144 num_tags=5
+materials (volumes): ["coax_pin", "air", "case"]
+boundary conditions (surfaces): ["radiation", "coax_pin_pec"]
+BC_HANDSHAKE_OK — ASCENT sees all 3 material volumes + 2 BC surfaces
+```
+
+i.e. Tessella emits both material regions AND boundary conditions that ASCENT ingests —
+the mesh is solver-consumable with BCs, not volumes alone. (The BC *assignment* here is
+geometrically representative — outer boundary → radiation, pin interface → PEC — since
+the literal ENC-COAX BC map lives in the OCC-built `.geo`.)
