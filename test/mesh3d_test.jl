@@ -898,6 +898,20 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test divvol(R) ≈ 64.0 - removed rtol=1e-9
             @test validate(recover_boundary(R)).ok
         end
+        @testset "ENC-COAX bore imprint: native boolean carves the coax bore through the case (no OCC)" begin
+            # the enclosure's coax bore is a cylinder cut through the case wall — an
+            # OpenCASCADE-`BooleanFragments` imprint in the literal .geo. mesh_boolean
+            # computes that curved boolean interface NATIVELY (mesh-CSG, not OCC): the case
+            # box minus the bore cylinder, with the exact faceted-bore volume + watertight +
+            # fillable — the OCC-style imprint without OpenCASCADE.
+            caseb = box_surface(0.,22., 0.,14., 0.,30.)                   # case box (enclosure topology)
+            bore  = cylinder_surface((17.,-1.,15.), (0.,1.,0.), 0.21, 16.0; nθ=12)  # coax bore along +y through the y-wall
+            removed = 0.5*12*0.21^2*sin(2pi/12)*14.0                      # 12-gon bore prism through the 14-thick case
+            R = mesh_boolean(caseb, bore, :difference)
+            @test watertight(R)
+            @test divvol(R) ≈ 22*14*30 - removed rtol=1e-9                # exact native imprint volume
+            @test validate(recover_boundary(R)).ok                        # the imprinted solid fills conformingly
+        end
         @testset "error paths" begin
             A=box_surface(0,4,0,4,0,4); B=box_surface(2,6,2,6,0,4)
             @test_throws ArgumentError mesh_boolean(A,B,:foo)                       # bad op
