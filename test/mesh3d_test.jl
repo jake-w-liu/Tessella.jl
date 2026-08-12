@@ -206,6 +206,37 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test validate(mm).ok
     end
 
+    @testset "ENC-COAX LITERAL: parsed from the .geo, native reconstruction, conforming" begin
+        # The enclosure .geo is fully parametric — every solid is a gmsh Box/Cylinder.
+        # Parse those LITERAL primitives directly (no OCC eval) and reconstruct + mesh the
+        # three main volumes at the exact fixture dimensions, as ONE conforming partition
+        # (tetrahedralize_conforming_exact — robust to the thin-pin cosphericity). This is
+        # the geometry gmsh 4.13/4.15 leave empty.
+        geo = joinpath(@__DIR__, "fixtures", "enclosure_coax_junction.geo")
+        boxes = Dict{String,NTuple{6,Float64}}(); cyls = Dict{String,NTuple{7,Float64}}()
+        for ln in eachline(geo)
+            m = match(r"(\w+)\s*=\s*newv;\s*Box\(\w+\)\s*=\s*\{([^}]+)\}", ln)
+            m !== nothing && (boxes[m.captures[1]] = Tuple(parse.(Float64, split(m.captures[2],","))))
+            m = match(r"(\w+)\s*=\s*newv;\s*Cylinder\(\w+\)\s*=\s*\{([^}]+)\}", ln)
+            m !== nothing && (cyls[m.captures[1]] = Tuple(parse.(Float64, split(m.captures[2],","))))
+        end
+        @test haskey(boxes,"sm_air_inside") && haskey(boxes,"sm_case_outer") && haskey(cyls,"sm_coax_pin") && haskey(boxes,"sm_air")
+        ab = boxes["sm_air_inside"]; co = boxes["sm_case_outer"]; pn = cyls["sm_coax_pin"]; ao = boxes["sm_air"]
+        airs  = box_surface(ab[1],ab[1]+ab[4], ab[2],ab[2]+ab[5], ab[3],ab[3]+ab[6])
+        shell = box_shell_surface(co[1],co[1]+co[4], co[2],co[2]+co[5], co[3],co[3]+co[6],
+                                  ab[1],ab[1]+ab[4], ab[2],ab[2]+ab[5], ab[3],ab[3]+ab[6])
+        pinl  = sqrt(pn[4]^2+pn[5]^2+pn[6]^2)
+        pins  = cylinder_surface((pn[1],pn[2],pn[3]), (pn[4],pn[5],pn[6]), pn[7], pinl; nθ=8, nz=2)
+        ml = tetrahedralize_conforming_exact([pins, airs, shell])                 # pin(1)/air(2)/case(3)
+        @test validate(ml).ok                                                     # the mesh gmsh cannot produce
+        tprl = tets_per_region(ml)
+        @test length(tprl) == 3 && all(v -> v > 0, values(tprl))                  # all three literal volumes filled (NO empty volume)
+        @test is_closed_manifold(ml)
+        # total filled volume is positive and bounded by the air outer box (sm_air) that
+        # contains the whole assembly — the pin feed-through extends past the case wall.
+        @test 0 < mesh_vol(ml) <= ao[4]*ao[5]*ao[6] + 1e-9
+    end
+
     @testset "tetrahedralize_conforming: one partition, interfaces SHARED across regions" begin
         # Independent conformance oracle: map each triangular face to the tet-tags
         # incident to it. A conforming partition has (a) no face in >2 tets (manifold),
