@@ -31,6 +31,7 @@ module Predicates
 
 export orient2, orient3, incircle, insphere
 export orient2_sos, orient3_sos, incircle_sos, insphere_sos
+export orient2_rat, orient3_rat, incircle_rat, insphere_rat
 
 # ── Shewchuk static error bounds for IEEE-754 double ────────────────────────────
 # ε is the unit roundoff (half an ulp at 1.0). The A-bounds are the first-stage
@@ -385,30 +386,13 @@ function orient3_sos(pa, pb, pc, pd,
                      ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
     s = orient3(pa, pb, pc, pd)
     s != 0 && return s
-    perm, sp = _sort4_pts(((ia, pa), (ib, pb), (ic, pc), (id, pd)))
-    a = sp[1][2]; b = sp[2][2]; c = sp[3][2]; d = sp[4][2]
-    # For a zero 3-D orientation the SoS leading terms are the 2-D orient2 minors
-    # of the sorted points (projections dropping one coordinate), in the standard
-    # Edelsbrunner–Mücke order. The first nonzero minor decides the sign.
-    m = orient2((_x(b), _y(b)), (_x(c), _y(c)), (_x(d), _y(d)))
-    m != 0 && return perm * m
-    m = orient2((_x(b), _z(b)), (_x(c), _z(c)), (_x(d), _z(d)))
-    m != 0 && return perm * (-m)
-    m = orient2((_y(b), _z(b)), (_y(c), _z(c)), (_y(d), _z(d)))
-    m != 0 && return perm * m
-    m = orient2((_x(a), _y(a)), (_x(c), _y(c)), (_x(d), _y(d)))
-    m != 0 && return perm * (-m)
-    m = orient2((_x(a), _z(a)), (_x(c), _z(c)), (_x(d), _z(d)))
-    m != 0 && return perm * m
-    m = orient2((_y(a), _z(a)), (_y(c), _z(c)), (_y(d), _z(d)))
-    m != 0 && return perm * (-m)
-    m = orient2((_x(a), _y(a)), (_x(b), _y(b)), (_x(d), _y(d)))
-    m != 0 && return perm * m
-    m = orient2((_x(a), _y(a)), (_x(b), _y(b)), (_x(c), _y(c)))
-    m != 0 && return perm * m
-    # Fully degenerate (all 8 orient2 projections vanish ⇒ the 4 points are collinear):
-    # the fast minors cannot resolve it. Fall to the exact +ε SoS leading term, which
-    # is correct here where the constant `return perm` was only coincidentally right.
+    # Exact coplanarity: resolve by the canonical +ε Edelsbrunner–Mücke SoS, the SAME
+    # evaluator orient2_sos/incircle_sos/insphere_sos use — so all four predicates break
+    # ties under ONE consistent scheme. (The earlier hand-coded 8-minor sequence agreed
+    # with the canonical evaluator on most configs but MIScomputed the +ε leading term on
+    # some coplanar-distinct configs — verified against a finite-ε exact-rational oracle:
+    # e.g. points on x=2 gave −1 where the true +ε limit is +1. That path is reachable in
+    # the perturb=false kernel, so it is replaced with the always-correct exact SoS.)
     return _orient3_sos_exact(pa, pb, pc, pd, ia, ib, ic, id)
 end
 
@@ -597,6 +581,99 @@ function _insphere_sos_exact(pa, pb, pc, pd, pe,
                              ia::Integer, ib::Integer, ic::Integer, id::Integer, ie::Integer)::Int
     coords = (_insphere_lift(pa), _insphere_lift(pb), _insphere_lift(pc), _insphere_lift(pd), _insphere_lift(pe))
     return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id),Int(ie)), 4)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Exact-coordinate predicates (Rational{BigInt}) — for the exact recovery kernel.
+#
+# The predicates above take Float64 (dyadic) coordinates and exploit dyadic
+# representability. The exact kernel places Steiner points at rational positions that
+# are NOT Float64-representable (e.g. a crease midpoint of two float vertices), so it
+# needs predicates that consume exact `Rational{BigInt}` coordinates directly. These
+# evaluate the SAME homogeneous-determinant forms as `test/oracles.jl` (so on dyadic
+# input they agree with orient2/3/incircle/insphere_sos), and on a zero (degenerate)
+# determinant fall through to the SHARED +ε SoS `_orient_nd_sos_exact` — identical tie-
+# break scheme as the Float64 predicates, keeping the two kernels mutually consistent.
+# Points are `NTuple`s of `Rational{BigInt}` (or anything the arithmetic promotes).
+# ════════════════════════════════════════════════════════════════════════════════
+const _RAT = Rational{BigInt}
+
+# exact determinant by recursive Laplace expansion (n ≤ 5 here; O(n!) but exact).
+function _rat_det(M::AbstractMatrix{_RAT})::_RAT
+    n = size(M, 1)
+    n == 1 && return M[1, 1]
+    n == 2 && return M[1, 1]*M[2, 2] - M[1, 2]*M[2, 1]
+    acc = zero(_RAT); sgn = one(_RAT)
+    @inbounds for j in 1:n
+        keep = [c for c in 1:n if c != j]
+        acc += sgn * M[1, j] * _rat_det(@view M[2:n, keep]); sgn = -sgn
+    end
+    return acc
+end
+
+"""
+    orient3_rat(a,b,c,d, ia,ib,ic,id) -> Int (±1)
+
+Exact 3-D orientation sign on `Rational{BigInt}` points (never 0: degeneracies break
+by the shared +ε SoS). Matches `orient3`/`orient3_sos` on dyadic input.
+"""
+function orient3_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    M = _RAT[a[1] a[2] a[3] one(_RAT); b[1] b[2] b[3] one(_RAT);
+             c[1] c[2] c[3] one(_RAT); d[1] d[2] d[3] one(_RAT)]
+    s = _rat_det(M)
+    s > 0 && return 1
+    s < 0 && return -1
+    return _orient_nd_sos_exact((a, b, c, d), (Int(ia), Int(ib), Int(ic), Int(id)), 3)
+end
+
+"""
+    insphere_rat(a,b,c,d,e, ia,ib,ic,id,ie) -> Int (±1)
+
+Exact in-sphere sign on `Rational{BigInt}` points: `>0` matches `insphere_sos` (for a
+positively-oriented `a,b,c,d`, `e` strictly inside the circumsphere). Cospherical ties
+break by the shared +ε SoS via the 4-D paraboloid lift.
+"""
+function insphere_rat(a, b, c, d, e, ia::Integer, ib::Integer, ic::Integer, id::Integer, ie::Integer)::Int
+    lift(p) = p[1]*p[1] + p[2]*p[2] + p[3]*p[3]
+    M = _RAT[a[1] a[2] a[3] lift(a) one(_RAT); b[1] b[2] b[3] lift(b) one(_RAT);
+             c[1] c[2] c[3] lift(c) one(_RAT); d[1] d[2] d[3] lift(d) one(_RAT);
+             e[1] e[2] e[3] lift(e) one(_RAT)]
+    s = _rat_det(M)
+    s > 0 && return 1
+    s < 0 && return -1
+    lp(p) = (p[1], p[2], p[3], lift(p))
+    return _orient_nd_sos_exact((lp(a), lp(b), lp(c), lp(d), lp(e)),
+                                (Int(ia), Int(ib), Int(ic), Int(id), Int(ie)), 4)
+end
+
+"""
+    orient2_rat(a,b,c, ia,ib,ic) -> Int (±1)
+
+Exact 2-D orientation sign on `Rational{BigInt}` points; degeneracies break by SoS.
+"""
+function orient2_rat(a, b, c, ia::Integer, ib::Integer, ic::Integer)::Int
+    M = _RAT[a[1] a[2] one(_RAT); b[1] b[2] one(_RAT); c[1] c[2] one(_RAT)]
+    s = _rat_det(M)
+    s > 0 && return 1
+    s < 0 && return -1
+    return _orient_nd_sos_exact((a, b, c), (Int(ia), Int(ib), Int(ic)), 2)
+end
+
+"""
+    incircle_rat(a,b,c,d, ia,ib,ic,id) -> Int (±1)
+
+Exact in-circle sign on `Rational{BigInt}` 2-D points (paraboloid-lift SoS for ties).
+"""
+function incircle_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    lift(p) = p[1]*p[1] + p[2]*p[2]
+    M = _RAT[a[1] a[2] lift(a) one(_RAT); b[1] b[2] lift(b) one(_RAT);
+             c[1] c[2] lift(c) one(_RAT); d[1] d[2] lift(d) one(_RAT)]
+    s = _rat_det(M)
+    s > 0 && return 1
+    s < 0 && return -1
+    lp(p) = (p[1], p[2], lift(p))
+    return _orient_nd_sos_exact((lp(a), lp(b), lp(c), lp(d)),
+                                (Int(ia), Int(ib), Int(ic), Int(id)), 3)
 end
 
 end # module Predicates
