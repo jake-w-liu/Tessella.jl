@@ -13,6 +13,7 @@
 # the oracle cross-check below fails on a degenerate config.
 
 using Test
+using Random
 using Tessella.Predicates
 include("oracles.jl")
 using .Oracles
@@ -344,5 +345,38 @@ using .Oracles
         @test d == 0            # full agreement with the canonical evaluator
         # the exact finding config (coincident): +1 canonical, was −1 under the old branch
         @test orient2_sos((0.0,0.0),(0.0,0.0),(0.0,1.0), 2,3,1) == 1
+    end
+
+    @testset "exact-rational predicates match production; orient3_sos coplanar consistency" begin
+        # The exact-coordinate kernel's predicates (orient*/incircle/insphere_rat on
+        # Rational{BigInt}) evaluate the SAME homogeneous determinants and share the
+        # canonical +ε SoS, so on dyadic input they must agree with the Float64 SoS
+        # predicates for EVERY configuration — distinct AND coincident, general AND
+        # degenerate. This also pins the orient3_sos fix: its degenerate branch now
+        # routes through the canonical evaluator (the old 8-minor path miscomputed the
+        # +ε sign on some coplanar-distinct configs).
+        Q(x) = Rational{BigInt}(Float64(x))
+        r3(p) = (Q(p[1]), Q(p[2]), Q(p[3])); r2(p) = (Q(p[1]), Q(p[2]))
+        function scan()
+            G = Float64.(-2:2); rng = MersenneTwister(20260812)
+            d = 0; n = 0
+            for _ in 1:6000
+                a=(rand(rng,G),rand(rng,G),rand(rng,G)); b=(rand(rng,G),rand(rng,G),rand(rng,G))
+                c=(rand(rng,G),rand(rng,G),rand(rng,G)); dd=(rand(rng,G),rand(rng,G),rand(rng,G)); e=(rand(rng,G),rand(rng,G),rand(rng,G))
+                ix=(2,4,6,8,10); n += 1
+                orient3_sos(a,b,c,dd,ix[1:4]...)==orient3_rat(r3(a),r3(b),r3(c),r3(dd),ix[1:4]...) || (d+=1)
+                insphere_sos(a,b,c,dd,e,ix...)==insphere_rat(r3(a),r3(b),r3(c),r3(dd),r3(e),ix...) || (d+=1)
+                a2=(rand(rng,G),rand(rng,G));b2=(rand(rng,G),rand(rng,G));c2=(rand(rng,G),rand(rng,G));d2=(rand(rng,G),rand(rng,G))
+                orient2_sos(a2,b2,c2,ix[1:3]...)==orient2_rat(r2(a2),r2(b2),r2(c2),ix[1:3]...) || (d+=1)
+                incircle_sos(a2,b2,c2,d2,ix[1:4]...)==incircle_rat(r2(a2),r2(b2),r2(c2),r2(d2),ix[1:4]...) || (d+=1)
+            end
+            (d, n)
+        end
+        d, n = scan()
+        @test n > 0
+        @test d == 0
+        # the confirmed coplanar-distinct config (all on x=2): true +ε sign is +1 (was −1)
+        @test orient3_sos((2.,1.,0.),(2.,-2.,1.),(2.,-2.,2.),(2.,-2.,-2.), 2,4,6,8) == 1
+        @test orient3_rat((Q(2),Q(1),Q(0)),(Q(2),Q(-2),Q(1)),(Q(2),Q(-2),Q(2)),(Q(2),Q(-2),Q(-2)), 2,4,6,8) == 1
     end
 end

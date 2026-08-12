@@ -454,3 +454,21 @@ explicitly a post-robustness goal (`PLAN.md` §6).
   - Remaining implementable tail being worked run-by-run: the exact-coordinate kernel
     (→ non-star+reflex recovery + arbitrary-surface sizing), ENC-COAX `.geo` extras,
     native representative thin-slot/spiral/PML geometries, Delaunay cospherical perf.
+- **2026-08-12 (cont.) — exact-coordinate kernel foundation + orient3_sos coplanar bug.**
+  Building the exact-coordinate 3-D Delaunay kernel (keystone for non-star+reflex
+  recovery + arbitrary-surface sizing; user: complete ALL, no defer):
+  - **Exact-rational predicates shipped** (`Predicates.jl`): `orient2_rat`/`orient3_rat`/
+    `incircle_rat`/`insphere_rat` on `Rational{BigInt}` coords (same homogeneous
+    determinants as the oracle + shared +ε SoS), so boundary-Steiner points at
+    non-Float64 rational positions stay exactly on-feature. Verified to match the Float64
+    SoS predicates on **all** dyadic inputs (random + integer-grid degeneracies).
+  - **Found + fixed a real `orient3_sos` bug** while building them: its degenerate branch
+    used a hand-coded 8-minor sequence that MIScomputed the +ε SoS on some
+    **coplanar-DISTINCT** configs (verified against an independent finite-ε exact-rational
+    oracle: points on x=2 gave −1 where the true +ε limit is +1) — reachable in the
+    perturb=false kernel, masked by the perturb default + the recover gate + seed retry.
+    Routed its degenerate branch through the canonical `_orient3_sos_exact` (same fix
+    pattern as the earlier orient2_sos audit fix); now all four predicates break ties by
+    ONE canonical +ε evaluator. Regression-pinned; suite re-verified.
+  - Exact-rational Delaunay + boundary-Steiner recovery: in progress (a design/feasibility
+    workflow is resolving the Float64-output-vs-exact-conformity question first).
