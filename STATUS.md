@@ -470,7 +470,24 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     Routed its degenerate branch through the canonical `_orient3_sos_exact` (same fix
     pattern as the earlier orient2_sos audit fix); now all four predicates break ties by
     ONE canonical +ε evaluator. Regression-pinned; suite re-verified.
-  - Exact-rational Delaunay + boundary-Steiner recovery: **design vetted** (multi-agent
+  - **Exact-coordinate 3-D Delaunay kernel SHIPPED + verified** (`src/ExactMesh3D.jl`):
+    a valid Delaunay tetrahedralization on exact `Rational{BigInt}` coords via a bounded
+    super-tetrahedron + exact Bowyer–Watson (only the verified `orient3_rat`/`insphere_rat`
+    + shared +ε SoS; no ghost tets, no coplanar-in-circle sqrt, no jitter). Verified: exact
+    empty-circumsphere (0 violations), valid closed-manifold positive-volume mesh (χ=2),
+    exact box fill (volume 8), and it breaks the maximally-cospherical 3×3×3 grid cleanly
+    where the Float64 perturb=false kernel emits degenerate tets. Regression-pinned
+    (`mesh3d_test.jl`), suite 143,166 green. **This is the foundation the tracker always
+    named as the recovery blocker.**
+  - Boundary-Steiner recovery ON that kernel is the remaining piece and is genuinely
+    **TetGen-class** (measured, not assumed): the exact Delaunay of the twisted prism's 16
+    vertices recovers 18/28 facets (10 missing lateral faces); **naive facet-centroid
+    Steiner insertion diverges** (each split spawns 3 coplanar sub-facets that are also
+    missing ⇒ growth), so it needs the encroachment-ordered CDT / column decomposition
+    with robust per-column boundary-Steiner (the majority of the 6 columns are non-star,
+    needing on-face Steiner points — exactly the `ExactMesh` output the design requires).
+    Until that engine lands, the class keeps its **safe explicit blocker**.
+  - (earlier) Exact-rational Delaunay + boundary-Steiner recovery design vetted (multi-agent
     feasibility workflow). Verdict on the pinned U/40 twisted prism: closing it to the
     exact-conformity CRC bar is **NOT possible with a Float64-coordinate output** — the
     locked columns need *boundary*-Steiner splits, and there is no Float64-representable
