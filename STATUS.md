@@ -70,7 +70,7 @@ proprietary HFSS data) — so it is **not part of the current goal**.
 | uniform size control on curved domains | **cylinder DONE** (`mesh_cylinder`, uniform, cospherical-robust); interior size control for generic curved via `mesh_sized_conforming`; *arbitrary-surface uniform* = general Shewchuk terminator — **research-grade** (needs the exact-coordinate kernel; acceptance test pinned) |
 | recovery for non-star+reflex polyhedra | conforming-Delaunay boundary-Steiner recovery — **research-grade**: the algorithm is designed + proven-terminating, but the Float64 kernel rounds slanted-crease Steiner points off-feature (measured), so it needs an **exact-coordinate (`Rational{BigInt}`) 3-D Delaunay kernel**. Until that subsystem exists, the class raises a **safe explicit blocker** (never a silent bad mesh, regression-pinned) |
 | general CSG / OCC-library interop | native CSG **DONE** (`mesh_boolean`); a pure-Julia OpenCASCADE **library** replacement remains a PLAN §1/§6 explicit non-goal (multi-year) |
-| ASCENT drop-in + 22-case HFSS regression | **FUTURE VERIFICATION** (not the current goal) — run once all implementations are complete; needs the external ASCENT binary + 22 proprietary HFSS datasets. The implementations it will exercise (P2 curved elements, solver-consumable MSH v4.1) are done |
+| ASCENT drop-in + 22-case HFSS regression | **mesh drop-in VERIFIED (2026-08-12); 22-case EM campaign remaining** — a Tessella MSH v4.1 loads straight into ASCENT's real parser (`GmshDiscreteModel`, GridapGmsh 0.7.4) with all region volumes as top-dimensional physical groups, i.e. `ASCENT.load_mesh` returns a valid `MeshData` (`validation/ascent_handshake/`, `HANDSHAKE_OK`). The 22-case regression itself (mesh each HFSS guide geometry → ASCENT solve → compare to the guide) is a solver campaign needing the ASCENT binary + proprietary HFSS datasets (local at `/Users/jake/EMPIRE/projects/ongoing/2026_066`, not in this repo) |
 
 Per `startup.md` ("Scope is stated honestly in `PLAN.md` §1. Do not silently
 expand it") these are **out of the implementable near-term scope by design**, not
@@ -435,3 +435,22 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     `Rational{BigInt}` exact-coordinate 3-D Delaunay kernel; regression-pinned). The
     ASCENT-facing implementations (P2 curved, MSH v4.1, conforming multi-region
     fills) are complete.
+- **2026-08-12 (cont.) — sliver removal + ASCENT mesh handshake verified.** Pursuing
+  "finish everything implementable" (user directive):
+  - **`smooth_optimize` shipped** (`Optimize.jl`): boundary-preserving optimization-
+    based smoothing that maximizes each poor vertex-star's *worst* dihedral
+    (min(min_dihedral, π−max_dihedral) pattern search) — the geometric half of sliver
+    removal the mean-smoothers can't do. Measured **280→157 slivers** on a 300-pt
+    random Delaunay (vs 262 laplacian / 297 odt), validity + total volume preserved;
+    wired into `mesh_volume(optimize=true)` after the flips, +7 regression assertions.
+    Suite **143,137** green.
+  - **ASCENT mesh drop-in VERIFIED** (`validation/ascent_handshake/`): a Tessella
+    MSH v4.1 (ENC-COAX pin/air/case conforming partition) loads into ASCENT's real
+    parser `GmshDiscreteModel` (GridapGmsh 0.7.4) with all three region volumes as
+    top-dimensional physical groups → `ASCENT.load_mesh` would return a valid
+    `MeshData` (`HANDSHAKE_OK`, reproducible generate→load). The literal "ready for
+    ASCENT" proof. The 22-case EM regression remains a solver campaign (needs the
+    ASCENT binary + proprietary HFSS data, kept local, never pushed).
+  - Remaining implementable tail being worked run-by-run: the exact-coordinate kernel
+    (→ non-star+reflex recovery + arbitrary-surface sizing), ENC-COAX `.geo` extras,
+    native representative thin-slot/spiral/PML geometries, Delaunay cospherical perf.
