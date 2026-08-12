@@ -10,9 +10,10 @@ Manifest.toml
 /test/tmp/
 /test/artifacts/*.tmp
 *.msh.tmp
-# Generated handshake meshes (regenerate via validation/ascent_handshake/generate*.jl)
+# Generated handshake meshes (regenerate via validation/*/reconstruct|generate*.jl)
 /validation/ascent_handshake/ascent_coax.msh
 /validation/ascent_handshake/enc_coax_bc.msh
+/validation/enclosure_literal/enclosure_literal.msh
 
 # Editor
 .vscode/
