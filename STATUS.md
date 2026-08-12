@@ -481,8 +481,12 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     empty-circumsphere (0 violations), valid closed-manifold positive-volume mesh (χ=2),
     exact box fill (volume 8), and it breaks the maximally-cospherical 3×3×3 grid cleanly
     where the Float64 perturb=false kernel emits degenerate tets. Regression-pinned
-    (`mesh3d_test.jl`), suite 143,166 green. **This is the foundation the tracker always
-    named as the recovery blocker.**
+    (`mesh3d_test.jl`), suite green. **This is the foundation the tracker always named
+    as the recovery blocker.** First payoff: **`tetrahedralize_conforming_exact`** — the
+    exact-kernel conforming multi-region mesher **conformingly meshes the cospherical
+    2×2×2 unit-box assembly** (48 tets, valid, all 8 regions filled, exact volume 8,
+    max-face-incidence 2) that the Float64 `tetrahedralize_conforming` must raise its
+    blocker on (regression-pinned).
   - Boundary-Steiner recovery ON that kernel is the remaining piece and is genuinely
     **TetGen-class** (measured, not assumed): the exact Delaunay of the twisted prism's 16
     vertices recovers 18/28 facets (10 missing lateral faces); **naive facet-centroid
