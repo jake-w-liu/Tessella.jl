@@ -33,12 +33,13 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
   bug fixed; all predicates oracle-verified.
 
 ### ⬜ NOT DONE (honest — with the precise blocker)
+_Updated 2026-08-13: #7 and #8 (the two research-grade flagships) are now **DONE** — see the exact CDT engine above. Remaining below._
 | # | item | status | blocker |
 |---|---|---|---|
 | 7 | non-star+reflex recovery (twisted prism) | ✅ **DONE (2026-08-13)** | closed by `recover_boundary_cdt` — exact-kernel conforming-Delaunay refinement (Gabriel-encroachment driven off the exact DT, with exact-rational boundary-Steiner points); twisted prism now conforms (86 tets, exact area+volume, regression-pinned) |
 | 8 | arbitrary-surface uniform sizing | ✅ **DONE (2026-08-13)** | `mesh_sized_cdt` — interior size control on the exact CDT engine (lattice Steiner points gated by the exact conformity certificate); sphere hmax sweep → conforming + valid + interior maxedge ≤ hmax, regression-pinned. Surface-facet edges bound the achievable size (refine the surface for finer) |
 | 9 | *literal* ENC-COAX geometry | representative + BC tags **DONE**; literal **NOT done** | literal OCC `.geo` eval is a PLAN non-goal; native pin/air/case + BC surface tags delivered + ASCENT-verified |
-| 11 | Delaunay cospherical perf | **NOT done** | documented-deep (3 fixes measured-and-rejected); exact kernel is O(n²), doesn't help large-n |
+| 11 | Delaunay cospherical perf | **perf-only; correct fast alternatives shipped** | the `perturb=false` general Delaunay is O(n²) on ~480 cospherical cylinder verts (documented-deep, 3 fixes measured-and-rejected — the cost is cospherical-cavity retriangulation, not point location). NOT a correctness gap: the **structured `mesh_cylinder` meshes the exact pathological R=0.8·H=159 fine cylinder in 0.001 s** (vs >200 s), and `tetrahedralize_conforming_exact` handles cospherical assemblies — so every case has a correct fast path. Speeding the *general* Delaunay on maximally-cospherical input remains open (would need a different degeneracy/cavity strategy; not worth the regression risk to the core kernel for a perf-only issue with correct alternatives) |
 | 12 | 22-case HFSS regression | mesh interface **DONE** (volumes+BCs load in ASCENT); the 22 solves **NOT done** | a heavy EM-solve compute campaign on OCC geometries in the ASCENT solver |
 
 **Bottom line:** the meshing core is complete, verified, optimized, and ASCENT-ready at the mesh
