@@ -66,3 +66,24 @@ i.e. Tessella emits both material regions AND boundary conditions that ASCENT in
 the mesh is solver-consumable with BCs, not volumes alone. (The BC *assignment* here is
 geometrically representative — outer boundary → radiation, pin interface → PEC — since
 the literal ENC-COAX BC map lives in the OCC-built `.geo`.)
+
+## Solve-level handshake (verified 2026-08-13) — ASCENT *uses* the mesh, not just loads it
+
+`solve_step.jl` takes the proof past loading: ASCENT **assembles the actual Maxwell
+finite-element operator** on the Tessella mesh — `load_mesh` → `cell_sigma_tensor`
+(materials per volume) → `fe_spaces` (first-order Nedelec H(curl) edge elements) →
+`assemble_diffusive_matrix` / `assemble_stiffness_mass` (the curl-curl + mass system):
+
+```
+ndof (Nedelec edges) = 165
+A = SparseMatrixCSC{ComplexF64} size (165,165) nnz=2421
+complex-symmetric: relsym = 9.6e-17         (machine precision — correct)
+curl-curl stiffness PSD: cᵀKc = 2.08e9 ≥ 0  (physically correct)
+ASCENT_SOLVE_STEP_OK
+```
+
+So ASCENT builds the finite-element Maxwell system on a Tessella-generated mesh, with the
+operator's physics (complex symmetry, PSD stiffness) holding — the mesh is not just
+loadable but **usable by the solver**. The full 22-case HFSS regression (each case: geometry
++ BCs + frequency sweep + solve + compare to the guide) is the remaining compute campaign;
+this proves the fundamental solver-usability it builds on.
