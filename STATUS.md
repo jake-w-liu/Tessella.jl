@@ -470,5 +470,19 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     Routed its degenerate branch through the canonical `_orient3_sos_exact` (same fix
     pattern as the earlier orient2_sos audit fix); now all four predicates break ties by
     ONE canonical +ε evaluator. Regression-pinned; suite re-verified.
-  - Exact-rational Delaunay + boundary-Steiner recovery: in progress (a design/feasibility
-    workflow is resolving the Float64-output-vs-exact-conformity question first).
+  - Exact-rational Delaunay + boundary-Steiner recovery: **design vetted** (multi-agent
+    feasibility workflow). Verdict on the pinned U/40 twisted prism: closing it to the
+    exact-conformity CRC bar is **NOT possible with a Float64-coordinate output** — the
+    locked columns need *boundary*-Steiner splits, and there is no Float64-representable
+    point exactly on a cos40°/sin40° twisted edge/face (measured: 4/8 twisted lateral
+    edges have no Float64-exact on-edge midpoint), so a rounded boundary Steiner point
+    leaves the feature and the exact gate correctly rejects it. It **IS closeable** via
+    an **`ExactMesh`** output: Steiner nodes carry exact `Rational{BigInt}` coords and the
+    conformity/validity certificate runs on those stored rationals (no rounding between
+    certifying and returning ⇒ bit-for-bit certified). Concrete pieces vetted: the exact
+    ghost/coplanar in-circle is done sqrt-free by dropping the dominant-normal axis then
+    `incircle_rat`; interior Steiner points are safe (margin ≫ ulp, verified per point
+    with `orient3_rat`). Remaining build ≈ exact kernel + Gabriel-encroachment Steiner
+    recovery + `ExactMesh` type/certificate (~500–800 LOC exact-arithmetic), in verified
+    increments. Until it lands, the class keeps its **safe explicit blocker** (never a
+    silent bad mesh, regression-pinned).
