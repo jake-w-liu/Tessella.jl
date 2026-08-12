@@ -15,6 +15,7 @@ Manifest.toml
 /validation/ascent_handshake/enc_coax_bc.msh
 /validation/enclosure_literal/enclosure_literal.msh
 /validation/ascent_solve_regression/*.msh
+/validation/ascent_cavity_eigenmode/cavity.msh
 
 # Editor
 .vscode/
