@@ -10,18 +10,22 @@ For `a=1, b=0.5, d=0.75 m` the dominant TE101 mode is `f = (c/2)·√(1/a²+1/d�
 
 `generate_cavity.jl` (Tessella env) meshes the cavity (`mesh_box`, structured Kuhn, 3564 tets).
 `solve_eigenmode.jl` (ASCENT env) loads it, builds the FEM cache (first-order Nedelec H(curl), PEC
-walls), and runs `solve_eigenmodes`. Result:
+walls), runs `solve_eigenmodes`, and matches each of the first 5 FEM modes to its nearest analytic
+resonance (robust to degeneracies). Result:
 
 ```
-lowest resonant f (FEM) = 249.711 MHz
-analytic TE101          = 249.827 MHz
-relative error          = 0.046 %
-CAVITY_EIGENMODE_OK
+FEM mode 1 = 249.711 MHz → analytic 249.827 MHz  (err 0.046 %)
+FEM mode 2 = 334.435 MHz → analytic 335.178 MHz  (err 0.222 %)
+FEM mode 3 = 359.241 MHz → analytic 360.306 MHz  (err 0.296 %)
+FEM mode 4 = 359.814 MHz → analytic 360.306 MHz  (err 0.137 %)   # the degenerate pair, resolved
+FEM mode 5 = 390.305 MHz → analytic 390.242 MHz  (err 0.016 %)
+CAVITY_EIGENMODE_OK  (max err 0.296 %)
 ```
 
-**0.046 % error** — within first-order-Nedelec discretization on this mesh. So ASCENT solves the
-Maxwell eigenvalue problem on a Tessella mesh and recovers the correct physics against a first-
-principles reference.
+**The whole first-5-mode spectrum matches to <0.3 %** — within first-order-Nedelec discretization on
+this mesh, including the correctly-resolved near-degenerate pair at ~360 MHz. So ASCENT solves the
+Maxwell eigenvalue problem on a Tessella mesh and recovers the correct physical **spectrum** against
+a first-principles reference.
 
 This is a *complete physics regression case* on a Tessella mesh with an independent (analytic)
 oracle — the same shape as an HFSS UserGuide cavity example. The literal 22 HFSS cases run this
