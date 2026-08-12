@@ -494,11 +494,15 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     missing ⇒ growth), so it needs the encroachment-ordered CDT / column decomposition
     with robust per-column boundary-Steiner (the majority of the 6 columns are non-star,
     needing on-face Steiner points — exactly the `ExactMesh` output the design requires).
-    **Nine distinct recovery approaches were built + measured** — naive facet-centroid
-    Steiner (diverges), per-column fan/star (all 6 columns non-star, all throw), and
+    **Ten distinct recovery approaches were built + measured** — naive facet-centroid
+    Steiner (diverges), per-column fan/star (all 6 columns non-star, all throw),
     **Rivara longest-edge bisection with the correct triangulation-independent conformity
     check** (boundary-area vs surface-area *fluctuates* 29.9→38.0→36.7 around 37.2 but
-    never converges over 6 refinements) — none conform. Confirmed: this class needs the
+    never converges over 6 refinements), and a **Gabriel-encroachment loop** (circumcenter/
+    diametral split — the right *criterion*, but the simplified batch form diverges
+    20→36→81→161→255→382 without subsegment protection + one-at-a-time insertion ordering +
+    the anti-encroachment rule) — none conform. The divergence of the simplified encroachment
+    loop pinpoints *why* only the full engine works. Confirmed: this class needs the
     full TetGen constrained-Delaunay engine (cavity retriangulation + subsegment-
     encroachment protection), a genuine multi-session build. Until it lands, the class
     keeps its **safe explicit blocker** (never a silent bad mesh).
