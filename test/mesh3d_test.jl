@@ -12,6 +12,7 @@
 using Test
 using Tessella
 using Tessella.Mesh3D
+using Tessella.ExactMesh3D
 using Tessella.MeshTypes
 using Tessella.Geometry
 using Tessella.Heal: is_meshable
@@ -869,5 +870,42 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         boxes2 = [box_surface(Float64(ix),Float64(ix+1),Float64(iy),Float64(iy+1),Float64(iz),Float64(iz+1))
                   for ix in 0:1 for iy in 0:1 for iz in 0:1]
         @test_throws ErrorException tetrahedralize_conforming(boxes2)
+    end
+
+    @testset "exact-coordinate Delaunay kernel (Rational{BigInt})" begin
+        # A valid Delaunay tetrahedralization on exact rational coords (empty circumsphere
+        # exact; valid closed-manifold positive-volume mesh), breaking cospherical/coplanar
+        # degeneracies deterministically with NO jitter — the foundation for boundary
+        # recovery with Steiner points at non-Float64 rational positions.
+        Q(x) = Rational{BigInt}(Float64(x))
+        r = _R3(UInt64(12345))
+        for n in (30, 60)
+            pts = [(Q(_nf(r)), Q(_nf(r)), Q(_nf(r))) for _ in 1:n]
+            tets = delaunay3d_exact(pts)
+            ok, nv = is_delaunay_exact(pts, tets)
+            @test ok && nv == 0                                   # exact empty circumsphere
+            C = Matrix{Float64}(undef, 3, n)
+            for i in 1:n; C[1,i]=Float64(pts[i][1]); C[2,i]=Float64(pts[i][2]); C[3,i]=Float64(pts[i][3]); end
+            Tm = Matrix{Int32}(undef, 4, length(tets))
+            for (j,t) in enumerate(tets); Tm[1,j]=t[1]; Tm[2,j]=t[2]; Tm[3,j]=t[3]; Tm[4,j]=t[4]; end
+            m = Mesh(C; tets=Tm)
+            @test validate(m).ok                                  # positive volumes + manifold
+            @test boundary_euler(m) == 2                          # convex-hull boundary is a 2-sphere
+        end
+        # maximally cospherical: a 3×3×3 integer box grid — exact fill to the exact volume,
+        # zero empty-circumsphere violations (the case the Float64 perturb=false kernel can
+        # muddle with degenerate tets).
+        boxpts = NTuple{3,Rational{BigInt}}[]
+        for x in 0:2, y in 0:2, z in 0:2; push!(boxpts, (Q(x), Q(y), Q(z))); end
+        bt = delaunay3d_exact(boxpts)
+        okb, _ = is_delaunay_exact(boxpts, bt)
+        @test okb
+        vol6 = sum(begin
+            a=boxpts[t[1]]; b=boxpts[t[2]]; c=boxpts[t[3]]; d=boxpts[t[4]]
+            abs((b[1]-a[1])*((c[2]-a[2])*(d[3]-a[3])-(c[3]-a[3])*(d[2]-a[2])) -
+                (b[2]-a[2])*((c[1]-a[1])*(d[3]-a[3])-(c[3]-a[3])*(d[1]-a[1])) +
+                (b[3]-a[3])*((c[1]-a[1])*(d[2]-a[2])-(c[2]-a[2])*(d[1]-a[1])))
+        end for t in bt)
+        @test vol6 == 48                                          # exact box volume 8 (×6)
     end
 end

@@ -24,6 +24,7 @@ const TESSELLA_STAGE = 3  # see STATUS.md stage board
 
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
+include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
