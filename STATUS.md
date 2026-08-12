@@ -502,7 +502,17 @@ explicitly a post-robustness goal (`PLAN.md` §6).
     diametral split — the right *criterion*, but the simplified batch form diverges
     20→36→81→161→255→382 without subsegment protection + one-at-a-time insertion ordering +
     the anti-encroachment rule) — none conform. The divergence of the simplified encroachment
-    loop pinpoints *why* only the full engine works. Confirmed: this class needs the
+    loop pinpoints *why* only the full engine works. An **11th attempt implemented the
+    CORRECT algorithm** — segment-first Gabriel-encroachment refinement, one feature at a
+    time, reject-circumcenter-that-encroaches-a-subsegment (Shewchuk's provably-terminating
+    conforming-Delaunay), with encroachment checked against the vertex set (no re-Delaunay
+    in the loop). It runs without diverging, but the naive exact-arithmetic
+    O(features·verts)/step form is too slow (>3.6 s/step) to confirm termination
+    in-session. **So the class is closeable-in-principle with the now-identified correct
+    algorithm; what remains is the shippable engine = spatial acceleration of the
+    encroachment checks + integration (recover_boundary on the exact kernel → `ExactMesh`
+    output + exact certificate + interior classification + tests) — the genuine
+    multi-session build.** Confirmed: this class needs the
     full TetGen constrained-Delaunay engine (cavity retriangulation + subsegment-
     encroachment protection), a genuine multi-session build. Until it lands, the class
     keeps its **safe explicit blocker** (never a silent bad mesh).
