@@ -1,64 +1,66 @@
 # Tessella.jl
 
-A Julia-native, robust, memory-efficient **mesh generator** — built so that
-*design → mesh always works*, the way HFSS meshing "just works". It replaces the
-external `gmsh` dependency in the ASCENT / ascent-studio electromagnetics
-toolchain, where gmsh's OpenCASCADE boundary recovery fails on hard geometries
-(thin features, multi-way Boolean junctions) that a solver must nevertheless
-mesh.
+Tessella is a Julia-native tetrahedral mesh generator built around exact geometric
+predicates, certified topology, conforming boundary recovery, and explicit failure
+diagnostics. It was created for the ASCENT electromagnetics workflow after gmsh
+4.13.1 and 4.15.2-git left the enclosure/coax acceptance geometry with zero volume
+elements.
 
-> **Status: a working pipeline (142k+ CRC-verified assertions), built from
-> `startup.md` under the mandatory CRC discipline.** Implemented and gated:
-> exact adaptive predicates (Shewchuk + SoS, vs an independent exact-rational
-> oracle); compact mesh types + topology + deterministic checksums; gmsh `.msh`
-> v2/v4 + STL I/O; **2-D** Delaunay + constrained Delaunay + Ruppert refinement;
-> size fields + graded 1-D + planar/cylinder/parametric **surface** meshing;
-> a robust **3-D** Delaunay kernel + **volume filling** (convex, non-convex,
-> genus-1, thin, and multi-region — including a representative coax junction with
-> **all volumes filled** where gmsh leaves them empty); tet quality reporting +
-> Laplacian smoothing; surface healing (defect detection); and a top-level
-> `mesh_volume` with a *validated-or-explicit-blocker* contract.
->
-> **Remaining** (tracked honestly in `STATUS.md`): conforming interface recovery
-> and sliver exudation for the *literal* enclosure `.geo`; the OpenCASCADE / CSG
-> geometry kernel; high-order elements; ASCENT integration. See `STATUS.md` for
-> the live stage board.
+The package implementation is complete through Stage 6. The bounds-checked package
+suite currently contains 151,787 passing assertions. Package evidence and exact
+commands are recorded in [`STATUS.md`](STATUS.md); the separate external ASCENT solve
+campaign is recorded in [`ASCENT.md`](ASCENT.md).
 
 ```julia
 using Tessella
-m = mesh_volume(surface)          # closed triangle surface → validated tet mesh
-                                  #   (throws with a precise report if the surface is defective)
+using Tessella.IO: write_msh
+
+m = mesh_volume(surface)                 # closed triangle surface → validated tets
+ms = mesh_sized(surface; hmax=0.5)       # certified maximum-edge size bound
+write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 ```
 
-## Why
+## Implemented scope
 
-During the ASCENT HFSS-UserGuide validation campaign, gmsh 4.13.1 **and**
-4.15.2-git both fail to mesh a shielded-enclosure coax feed-through
-(`Invalid boundary mesh (overlapping facets)` → every volume empty). It is a
-geometry/boundary-recovery defect, **not** a memory limit (peak 3.3 GB), and it
-resists every standard remedy (algorithm switches, OCC healing, tolerances). A
-solver cannot depend on a mesher that fails on valid geometry. Tessella owns the
-meshing pipeline in Julia so robustness is ours to guarantee.
+- adaptive exact 2-D/3-D predicates with one consistent Simulation-of-Simplicity
+  convention and exact-rational test oracles;
+- compact simplex meshes with finite-input, cell, tag, manifold-link, and quality
+  validation;
+- 2-D Delaunay/CDT and quality refinement, graded curves, and planar, cylindrical,
+  and parametric surface meshing;
+- Float64 and exact-coordinate 3-D Delaunay kernels, constrained boundary recovery,
+  multi-region partitions, and explicit recovery blockers;
+- uniform sizing for boxes, cylinders, extrusions, and arbitrary closed faceted
+  surfaces, with lower-dimensional cells and tags preserved through refinement;
+- quality reporting, flips, Laplacian/ODT/targeted sliver smoothing, healing
+  diagnostics, native primitives, analytical surfaces, imprints, and mesh Boolean CSG;
+- globally certified quadratic tetrahedra, plus strict and atomic MSH v2.2/v4.1 and
+  STL I/O.
 
-## Scope (honest)
+Tessella does not attempt to reimplement OpenCASCADE/NURBS, a GUI, or an FEM solver.
+Those are explicit non-goals; ASCENT remains the solver.
 
-Tessella is **not** a literal port of gmsh (~340k LOC core; >1.5M with its
-OpenCASCADE/TetGen/Netgen contrib), and it does **not** reimplement OpenCASCADE.
-It owns the part that matters for solver robustness — the **meshing algorithms
-and boundary recovery** — and consumes geometry via OCC interop initially. See
-`PLAN.md` §1 for the full scope statement and staged roadmap.
+## Verification
 
-## Layout
-
+```sh
+julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
+julia --project --check-bounds=yes validation/run_all.jl
 ```
-PLAN.md         architecture + rigorous staged port plan (read first)
-DEVELOPMENT.md  CRC (Correctness–Robustness–Completeness) discipline — mandatory
-STATUS.md       stage board + acceptance cases + log (update every session)
-startup.md      entry point for a fresh development session
-src/Tessella.jl  package skeleton
-test/           test harness (CRC suites arrive per stage)
-```
+
+The first command runs the full CRC suite. The second compares analytic volumes and
+quality with the installed gmsh and reproduces the enclosure/coax failure. See
+[`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
+rules.
+
+## Repository map
+
+- [`src/`](src/) — package implementation
+- [`test/`](test/) — package regression and independent-oracle tests
+- [`validation/`](validation/) — external-tool and solver-facing validation fixtures
+- [`PLAN.md`](PLAN.md) — architecture and scope boundary
+- [`STATUS.md`](STATUS.md) — current package verification record
+- [`ASCENT.md`](ASCENT.md) — external solver integration and HFSS campaign
 
 ## License
 
-TBD by the author.
+No license has been declared by the repository owner.
