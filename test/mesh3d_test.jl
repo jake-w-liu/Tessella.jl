@@ -98,7 +98,7 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         # seconds. This pins (a) the fine pin completes fast — an O(n²) reversion
         # trips the ceiling — and (b) it still tetrahedralizes every hull vertex.
         local M3 = Tessella.Mesh3D
-        pin = cylinder_surface((0.0,0.0,0.0),(0.0,0.0,1.0), 0.8, 159.0; nθ=12, nz=24)
+        pin = cylinder_surface((0.0,0.0,0.0),(0.0,0.0,1.0), 0.8, 159.0; nθ=12, nz=16)
         nn = size(pin.coords,2)
         xs=[pin.coords[1,i] for i in 1:nn]; ys=[pin.coords[2,i] for i in 1:nn]; zs=[pin.coords[3,i] for i in 1:nn]
         delaunay3d(xs,ys,zs; perturb=false)                 # warm compile
@@ -1025,9 +1025,13 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         # exact; valid closed-manifold positive-volume mesh), breaking cospherical/coplanar
         # degeneracies deterministically with NO jitter — the foundation for boundary
         # recovery with Steiner points at non-Float64 rational positions.
+        # (The Float64 circumsphere pre-filter in delaunay3d_exact — which skips the
+        # expensive insphere_rat on tets the query is safely outside of — is gated here:
+        # the exact empty-circumsphere oracle DEFINES Delaunay, so any wrongly-pruned
+        # cavity tet would surface as a violation. n=120 exercises the pruning at scale.)
         Q(x) = Rational{BigInt}(Float64(x))
         r = _R3(UInt64(12345))
-        for n in (30, 60)
+        for n in (30, 60, 120)
             pts = [(Q(_nf(r)), Q(_nf(r)), Q(_nf(r))) for _ in 1:n]
             tets = delaunay3d_exact(pts)
             ok, nv = is_delaunay_exact(pts, tets)

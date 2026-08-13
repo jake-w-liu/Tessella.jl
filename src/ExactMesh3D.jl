@@ -27,6 +27,41 @@ const RB = Rational{BigInt}
 @inline _sort3(a, b, c) = a <= b ? (a <= c ? (c <= b ? (a, c, b) : (a, b, c)) : (c, a, b)) :
                                    (b <= c ? (c <= a ? (b, c, a) : (b, a, c)) : (c, b, a))
 
+# Float64 circumsphere (centre, radius²) of a tet, for the cavity pre-filter ONLY.
+# Returns r²=Inf for a (near-)degenerate tet so it is NEVER pruned — the exact
+# `insphere_rat` then decides. The filter is used only to SKIP tets where the query is
+# *safely* outside (see `_maybe_in_sphere`), so the exact result is unchanged.
+@inline function _fcircum(a::NTuple{3,RB}, b::NTuple{3,RB}, c::NTuple{3,RB}, d::NTuple{3,RB})
+    ax=Float64(a[1]); ay=Float64(a[2]); az=Float64(a[3])
+    Ax=Float64(b[1])-ax; Ay=Float64(b[2])-ay; Az=Float64(b[3])-az
+    Bx=Float64(c[1])-ax; By=Float64(c[2])-ay; Bz=Float64(c[3])-az
+    Cx=Float64(d[1])-ax; Cy=Float64(d[2])-ay; Cz=Float64(d[3])-az
+    bcx=By*Cz-Bz*Cy; bcy=Bz*Cx-Bx*Cz; bcz=Bx*Cy-By*Cx
+    denom=2.0*(Ax*bcx+Ay*bcy+Az*bcz)
+    # scale-relative degeneracy guard: a tet whose signed volume is a vanishing
+    # fraction of its edge cube has an ill-conditioned circumcentre → don't prune it.
+    e2=max(Ax*Ax+Ay*Ay+Az*Az, Bx*Bx+By*By+Bz*Bz, Cx*Cx+Cy*Cy+Cz*Cz)
+    (isfinite(denom) && abs(denom) > 1e-9*(e2^1.5 + 1e-300)) || return (0.0,0.0,0.0,Inf)
+    cax=Cy*Az-Cz*Ay; cay=Cz*Ax-Cx*Az; caz=Cx*Ay-Cy*Ax
+    abx=Ay*Bz-Az*By; aby=Az*Bx-Ax*Bz; abz=Ax*By-Ay*Bx
+    la=Ax*Ax+Ay*Ay+Az*Az; lb=Bx*Bx+By*By+Bz*Bz; lc=Cx*Cx+Cy*Cy+Cz*Cz
+    ox=(la*bcx+lb*cax+lc*abx)/denom; oy=(la*bcy+lb*cay+lc*aby)/denom; oz=(la*bcz+lb*caz+lc*abz)/denom
+    r2=ox*ox+oy*oy+oz*oz
+    isfinite(r2) || return (0.0,0.0,0.0,Inf)
+    return (ax+ox, ay+oy, az+oz, r2)
+end
+
+# Conservative pre-filter: TRUE unless the query is *safely* outside the tet's float
+# circumsphere. A tet that (exactly) contains the query has float dist² ≤ r²; the 1e-6
+# relative slack keeps every borderline tet (within ~1e-6 of the sphere) in the exact
+# test, and degenerate tets carry r²=Inf ⇒ always TRUE. So this never skips a tet the
+# exact predicate would include — verified by the exact empty-circumsphere oracle.
+@inline function _maybe_in_sphere(cs::NTuple{4,Float64}, px::Float64, py::Float64, pz::Float64)
+    cs[4] == Inf && return true
+    dx=px-cs[1]; dy=py-cs[2]; dz=pz-cs[3]
+    (dx*dx+dy*dy+dz*dz) <= cs[4]*(1.0+1e-6) + 1e-12*(1.0+cs[4])
+end
+
 """
     delaunay3d_exact(pts::Vector{NTuple{3,RB}}) -> Vector{NTuple{4,Int}}
 
@@ -58,20 +93,24 @@ function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
 
     tets = NTuple{4,Int}[]
     alive = Bool[]
+    csph = NTuple{4,Float64}[]              # parallel: each tet's Float64 circumsphere (pre-filter)
+    addtet!(t) = (push!(tets, t); push!(alive, true); push!(csph, _fcircum(X[t[1]],X[t[2]],X[t[3]],X[t[4]])))
     # initial super-tet, positively oriented
     if orient3_rat(X[n+1], X[n+2], X[n+3], X[n+4], n+1, n+2, n+3, n+4) > 0
-        push!(tets, (n+1, n+2, n+3, n+4))
+        addtet!((n+1, n+2, n+3, n+4))
     else
-        push!(tets, (n+1, n+2, n+4, n+3))
+        addtet!((n+1, n+2, n+4, n+3))
     end
-    push!(alive, true)
 
     cav = Int[]
     for i in 1:n
-        p = X[i]
+        p = X[i]; pfx=Float64(p[1]); pfy=Float64(p[2]); pfz=Float64(p[3])
         empty!(cav)
         @inbounds for ti in eachindex(tets)
             alive[ti] || continue
+            # cheap Float64 circumsphere reject before the expensive exact insphere_rat;
+            # only tets that might contain p (borderline/degenerate included) are tested.
+            _maybe_in_sphere(csph[ti], pfx, pfy, pfz) || continue
             t = tets[ti]
             insphere_rat(X[t[1]], X[t[2]], X[t[3]], X[t[4]], p, t[1], t[2], t[3], t[4], i) > 0 && push!(cav, ti)
         end
@@ -93,7 +132,7 @@ function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
             f = fverts[key]
             nt = orient3_rat(X[f[1]], X[f[2]], X[f[3]], p, f[1], f[2], f[3], i) > 0 ?
                  (f[1], f[2], f[3], i) : (f[1], f[3], f[2], i)
-            push!(tets, nt); push!(alive, true)
+            addtet!(nt)
         end
     end
 

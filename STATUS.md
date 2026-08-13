@@ -627,6 +627,17 @@ throughput is competitive; parallel HXT-class speed is a post-robustness goal
   - **`remove_slivers` shipped** (`Optimize.jl`): converging exudation driver
     (smooth_optimize to convergence, validity+volume-gated) — 278→158 slivers on a random
     cloud, valid, volume-preserving; pinned in `optimize_test.jl`.
+  - **Exact-coordinate kernel sped up ~20–40× (`ExactMesh3D.delaunay3d_exact`).** It was
+    O(n²): a brute-force cavity scan tested the expensive `insphere_rat` against *every*
+    live tet per insertion, with no point location. Added a **conservative Float64
+    circumsphere pre-filter** (`_fcircum`/`_maybe_in_sphere`): skip the exact test on a tet
+    only when the query is *safely* outside its float circumsphere (borderline + degenerate
+    tets keep the exact test), so the result is **provably unchanged** — verified
+    byte-identical vs the full-scan reference AND `is_delaunay_exact` = 0 violations on
+    random + degenerate-grid inputs; measured **19.5× (n=120), 41× (n=200)**, speedup
+    growing with n. This accelerates every exact-kernel path (`tetrahedralize_conforming_
+    exact`, `mesh_sized_cdt`, `recover_boundary_cdt`). Regression-pinned (`mesh3d_test.jl`,
+    n=120 exercises the pruning; oracle gates correctness).
   - **Arbitrary-surface *uniform* sizing: assessed, not shipped.** A POC (exact-midpoint
     flat-facet surface refinement to `hmax` + `mesh_sized_cdt` interior lattice) is
     **correct in principle** but **impractically slow** — the exact kernel's
