@@ -43,6 +43,8 @@ end
             (u,v)->(u,v,0.0),1.0,0.0,0.0,1.0,sf)
         @test_throws ArgumentError mesh_parametric_face(
             (u,v)->(NaN,v,0.0),0.0,1.0,0.0,1.0,sf)
+        @test_throws ArgumentError mesh_parametric_face(
+            (u,v)->(u,0.0,0.0),0.0,1.0,0.0,1.0,sf)
     end
 
     @testset "tilted planar rectangle: exact area + quality" begin
@@ -85,6 +87,14 @@ end
                                (abs(node(mv,e[1])[3]-5)<1e-6 && abs(node(mv,e[2])[3]-5)<1e-6)), bev)
         @test seamgap == 0
         @test validate(mv).ok
+        controlled=mesh_cylinder_face((0.,0.,0.),(0.,0.,1.),2.0,5.0,ConstantSize(0.8);
+                                      min_angle_deg=25.0,max_area=0.05)
+        @test surf_min_angle(controlled)>=25.0-1e-9
+        @test maximum(triangle_area(node(controlled,controlled.tris[1,t]),
+                                    node(controlled,controlled.tris[2,t]),
+                                    node(controlled,controlled.tris[3,t])) for t in 1:ntris(controlled))<=0.05*(1+1e-12)
+        @test_throws ArgumentError mesh_cylinder_face((0.,0.,0.),(0.,0.,1.),2.0,5.0,
+                                                       ConstantSize(0.8);min_angle_deg=40.0)
     end
 
     @testset "parametric planar patch equals 2-D meshing" begin

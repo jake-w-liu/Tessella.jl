@@ -14,10 +14,10 @@ using Tessella
     include("mesh1d_test.jl")       # size fields + graded edge meshing vs arc length
     include("meshsurface_test.jl")  # planar/cylinder/parametric surface meshing
 
-    # Stage 3 — 3-D meshing (CRC-gated; boundary recovery lands incrementally).
+    # Stage 3 — 3-D meshing and certified boundary recovery (CRC-gated).
     include("mesh3d_test.jl")       # 3-D Delaunay + volume filling + coax junction
 
-    # Stage 4 — optimization + quality (CRC-gated; sliver removal WIP).
+    # Stage 4 — optimization, quality, and sliver removal (CRC-gated).
     include("optimize_test.jl")     # tet quality report + Laplacian & ODT smoothing
 
     # Stage 5 — heal + native primitives + top-level pipeline.

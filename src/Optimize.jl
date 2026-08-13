@@ -27,6 +27,7 @@ module Optimize
 
 using ..MeshTypes: Mesh, nnodes, ntets, node, tet_signed_volume, tet_dihedral_extrema,
                    tet_radius_edge, tet_volume, boundary_faces, validate
+using ..Predicates: orient3
 
 export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, TetQuality
 
@@ -59,28 +60,29 @@ edge ratios, minimum tet volume, and the count of slivers (min dihedral <
 `sliver_deg` or max dihedral > `180 − sliver_deg`).
 """
 function mesh_quality(m::Mesh; sliver_deg::Real=10.0)
-    threshold = float(sliver_deg)
+    threshold = _opt_float(sliver_deg,"mesh_quality","sliver_deg")
     (isfinite(threshold) && 0 <= threshold < 90) ||
         throw(ArgumentError("mesh_quality: sliver_deg must be finite and in [0, 90) (got $sliver_deg)"))
+    _require_valid_tetmesh(m, "mesh_quality")
     nt = ntets(m)
     nt == 0 && return TetQuality(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
-    dmin = Inf; dmax = -Inf; dsum = 0.0
-    remin = Inf; resum = 0.0
+    dmin = Inf; dmax = -Inf; dmean = 0.0
+    remin = Inf; remean = 0.0
     vmin = Inf; nsliv = 0
     lo = deg2rad(threshold); hi = deg2rad(180 - threshold)
     @inbounds for t in 1:nt
         a=node(m,m.tets[1,t]); b=node(m,m.tets[2,t]); c=node(m,m.tets[3,t]); d=node(m,m.tets[4,t])
         mn, mx = tet_dihedral_extrema(a,b,c,d)
-        dmin = min(dmin, mn); dmax = max(dmax, mx); dsum += mn
+        dmin = min(dmin, mn); dmax = max(dmax, mx); dmean += (mn-dmean)/t
         (mn < lo || mx > hi) && (nsliv += 1)
         re = tet_radius_edge(a,b,c,d)
         (isfinite(mn) && isfinite(mx) && isfinite(re)) ||
             throw(ArgumentError("mesh_quality: tet $t has non-finite computed quality; validate the mesh first"))
-        remin = min(remin, re); resum += re
+        remin = min(remin, re); remean += (re-remean)/t
         vmin = min(vmin, tet_volume(a,b,c,d))
     end
-    return TetQuality(nt, rad2deg(dmin), rad2deg(dsum/nt), rad2deg(dmax),
-                      remin, resum/nt, vmin, nsliv)
+    return TetQuality(nt, rad2deg(dmin), rad2deg(dmean), rad2deg(dmax),
+                      remin, remean, vmin, nsliv)
 end
 
 """
@@ -93,26 +95,32 @@ volume are preserved). Improves the mean dihedral / reduces slivers; not min-ang
 optimal. Returns a new smoothed `Mesh`.
 """
 function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
-    iters >= 0 || throw(ArgumentError("smooth_laplacian: iters must be non-negative (got $iters)"))
-    r = float(relax)
+    niters = _opt_count(iters,"smooth_laplacian","iters")
+    r = _opt_float(relax,"smooth_laplacian","relax")
     (isfinite(r) && 0 <= r <= 1) ||
         throw(ArgumentError("smooth_laplacian: relax must be finite and in [0, 1] (got $relax)"))
+    _require_valid_tetmesh(m, "smooth_laplacian")
     nn = nnodes(m); nt = ntets(m)
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
     neigh = _node_neighbours(m)
     inc = _node_tets(m)
-    @inbounds for _ in 1:iters
+    @inbounds for _ in 1:niters
         for v in 1:nn
             isboundary[v] && continue
             isempty(neigh[v]) && continue
             # target = neighbour centroid
-            sx=0.0; sy=0.0; sz=0.0
-            for w in neigh[v]; sx+=coords[1,w]; sy+=coords[2,w]; sz+=coords[3,w]; end
-            k = length(neigh[v])
-            tx = coords[1,v] + r*(sx/k - coords[1,v])
-            ty = coords[2,v] + r*(sy/k - coords[2,v])
-            tz = coords[3,v] + r*(sz/k - coords[3,v])
+            sx=0.0; sy=0.0; sz=0.0;k=0
+            for w in neigh[v]
+                k+=1;f=inv(k)
+                sx=_convex_combine(sx,coords[1,w],f)
+                sy=_convex_combine(sy,coords[2,w],f)
+                sz=_convex_combine(sz,coords[3,w],f)
+            end
+            tx = _convex_combine(coords[1,v],sx,r)
+            ty = _convex_combine(coords[2,v],sy,r)
+            tz = _convex_combine(coords[3,v],sz,r)
+            (isfinite(tx)&&isfinite(ty)&&isfinite(tz)) || continue
             # accept only if no incident tet inverts (positive signed volume kept)
             ox=coords[1,v]; oy=coords[2,v]; oz=coords[3,v]
             coords[1,v]=tx; coords[2,v]=ty; coords[3,v]=tz
@@ -121,7 +129,7 @@ function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
                 a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
                 pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
                 pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
-                if tet_signed_volume(pa,pb,pc,pd) <= 0; ok=false; break; end
+                if !_positive_tet(pa,pb,pc,pd); ok=false; break; end
             end
             ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
         end
@@ -140,21 +148,22 @@ positively-oriented (otherwise it is skipped, so validity and total volume are
 preserved). Boundary nodes (on any boundary face) stay fixed; near-zero-volume
 incident tets are skipped when averaging (their circumcenter is ill-conditioned).
 Like [`smooth_laplacian`](@ref) it lifts the *mean* dihedral and is not min-angle
-optimal (targeted flips/exudation remain the fix for an individual worst sliver);
+optimal (targeted flips and [`remove_slivers`](@ref) handle individual worst slivers);
 it simply uses a different node target. Returns a new smoothed `Mesh`.
 """
 function smooth_odt(m::Mesh; iters::Integer=5)
-    iters >= 0 || throw(ArgumentError("smooth_odt: iters must be non-negative (got $iters)"))
+    niters = _opt_count(iters,"smooth_odt","iters")
+    _require_valid_tetmesh(m, "smooth_odt")
     nn = nnodes(m)
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
     inc = _node_tets(m)
-    @inbounds for _ in 1:iters
+    @inbounds for _ in 1:niters
         for v in 1:nn
             isboundary[v] && continue
             isempty(inc[v]) && continue
             # ODT target: circumcenters of incident tets weighted by their volume
-            sx=0.0; sy=0.0; sz=0.0; wsum=0.0
+            sx=0.0; sy=0.0; sz=0.0; wsum=0.0;wmax=0.0
             for t in inc[v]
                 a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
                 pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
@@ -163,10 +172,23 @@ function smooth_odt(m::Mesh; iters::Integer=5)
                 vol <= _odt_voleps(pa,pb,pc,pd) && continue    # skip degenerate tet
                 cc = _tet_circumcenter(pa,pb,pc,pd)
                 (isfinite(cc[1]) && isfinite(cc[2]) && isfinite(cc[3])) || continue
-                sx += vol*cc[1]; sy += vol*cc[2]; sz += vol*cc[3]; wsum += vol
+                if vol>wmax
+                    wsum *= wmax==0 ? 0.0 : wmax/vol
+                    wmax=vol
+                end
+                w=vol/wmax;newsum=wsum+w;f=w/newsum
+                if wsum==0
+                    sx=cc[1];sy=cc[2];sz=cc[3]
+                else
+                    sx=_convex_combine(sx,cc[1],f)
+                    sy=_convex_combine(sy,cc[2],f)
+                    sz=_convex_combine(sz,cc[3],f)
+                end
+                wsum=newsum
             end
             wsum > 0 || continue                               # no usable incident tet
-            tx = sx/wsum; ty = sy/wsum; tz = sz/wsum
+            tx = sx; ty = sy; tz = sz
+            (isfinite(tx)&&isfinite(ty)&&isfinite(tz)) || continue
             # A symmetric star can reproduce the current point up to a few rounding
             # ulps.  Treat that as an exact no-op so smoothing does not create
             # meaningless coordinate drift (and remains bit-stable on fixed points).
@@ -181,7 +203,7 @@ function smooth_odt(m::Mesh; iters::Integer=5)
                 a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
                 pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
                 pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
-                if tet_signed_volume(pa,pb,pc,pd) <= 0; ok=false; break; end
+                if !_positive_tet(pa,pb,pc,pd); ok=false; break; end
             end
             ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
         end
@@ -207,17 +229,18 @@ per-star worst angle is monotone non-worsening. Complements the topological
 Returns a new `Mesh`.
 """
 function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
-    iters >= 0 || throw(ArgumentError("smooth_optimize: iters must be non-negative (got $iters)"))
-    threshold = float(sliver_deg)
+    niters = _opt_count(iters,"smooth_optimize","iters")
+    threshold = _opt_float(sliver_deg,"smooth_optimize","sliver_deg")
     (isfinite(threshold) && 0 <= threshold < 90) ||
         throw(ArgumentError("smooth_optimize: sliver_deg must be finite and in [0, 90) (got $sliver_deg)"))
+    _require_valid_tetmesh(m, "smooth_optimize")
     nn = nnodes(m)
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
     inc = _node_tets(m)
     thr = deg2rad(threshold)
     dirs = ((1.,0.,0.),(-1.,0.,0.),(0.,1.,0.),(0.,-1.,0.),(0.,0.,1.),(0.,0.,-1.))
-    @inbounds for _ in 1:iters
+    @inbounds for _ in 1:niters
         for v in 1:nn
             (isboundary[v] || isempty(inc[v])) && continue
             tv = inc[v]
@@ -246,6 +269,49 @@ function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
                 seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
 end
 
+# Every quality/smoothing contract assumes a finite, positively oriented
+# tetrahedral manifold.  Validate once at the public boundary so NaNs cannot pass
+# the move guards (`NaN <= 0` is false), and callers never receive an invalid mesh
+# represented as a successful optimization result.
+function _require_valid_tetmesh(m::Mesh, caller::AbstractString)
+    d = validate(m)
+    d.ok || throw(ArgumentError("$caller: input mesh is invalid — " * join(d.messages, "; ")))
+    return nothing
+end
+
+function _opt_float(x::Real,caller::AbstractString,name::AbstractString)
+    try
+        return Float64(x)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name must be representable as Float64"))
+    end
+end
+
+function _opt_count(x::Integer, caller::AbstractString, name::AbstractString)
+    (0 <= x <= typemax(Int)) ||
+        throw(ArgumentError("$caller: $name must be in 0:$(typemax(Int)) (got $x)"))
+    return Int(x)
+end
+
+# A convex combination of finite Float64 endpoints is mathematically finite, but
+# `x + t*(y-x)` can overflow when the endpoints have opposite signs.  The ordinary
+# product form is fast; the exact binary-to-BigFloat fallback only runs if its
+# rounded intermediates overflow.
+@inline function _convex_combine(x::Float64, y::Float64, t::Float64)
+    t == 0.0 && return x
+    t == 1.0 && return y
+    z = (1.0-t)*x + t*y
+    isfinite(z) && return z
+    return setprecision(BigFloat, 128) do
+        Float64((1-BigFloat(t))*BigFloat(x) + BigFloat(t)*BigFloat(y))
+    end
+end
+
+@inline function _positive_tet(a,b,c,d)
+    all(isfinite,(a...,b...,c...,d...)) && orient3(a,b,c,d)<0
+end
+
 """
     remove_slivers(m; max_rounds=8, sliver_deg=10.0) -> (Mesh, report)
 
@@ -261,11 +327,10 @@ flips that repair slivers connectivity-smoothing cannot reach) is
 [`Mesh3D.optimize_flips!`](@ref); `mesh_volume(optimize=true)` runs both.
 """
 function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
-    max_rounds >= 0 ||
-        throw(ArgumentError("remove_slivers: max_rounds must be non-negative (got $max_rounds)"))
+    nrounds = _opt_count(max_rounds,"remove_slivers","max_rounds")
     q0 = mesh_quality(m; sliver_deg=sliver_deg)
     best = m; bestn = q0.n_slivers
-    for _ in 1:max_rounds
+    for _ in 1:nrounds
         bestn == 0 && break
         cand = smooth_optimize(best; iters=4, sliver_deg=sliver_deg)
         (validate(cand).ok) || break
@@ -298,7 +363,7 @@ end
         a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
         pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
         pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
-        tet_signed_volume(pa,pb,pc,pd) <= 0 && return false
+        _positive_tet(pa,pb,pc,pd) || return false
     end
     return true
 end
@@ -311,10 +376,11 @@ end
         for i in 1:4, j in i+1:4
             a=vs[i]; b=vs[j]
             dx=coords[1,a]-coords[1,b]; dy=coords[2,a]-coords[2,b]; dz=coords[3,a]-coords[3,b]
-            s += sqrt(dx*dx+dy*dy+dz*dz); n += 1
+            ell=hypot(dx,dy,dz);isfinite(ell)||return 0.0
+            s += (ell-s)/(n+1); n += 1
         end
     end
-    return n == 0 ? 0.0 : s / n
+    return n == 0 ? 0.0 : s
 end
 
 # Circumcenter of tet (a,b,c,d): solve |x−a|=|x−b|=|x−c|=|x−d|, denom = 2·A·(B×C) =
@@ -343,7 +409,7 @@ end
     P = (a, b, c, d); e2 = 0.0
     @inbounds for i in 1:4, j in i+1:4
         dx=P[i][1]-P[j][1]; dy=P[i][2]-P[j][2]; dz=P[i][3]-P[j][3]
-        l2=dx*dx+dy*dy+dz*dz; l2 > e2 && (e2 = l2)
+        ell=hypot(dx,dy,dz);l2=ell*ell; l2 > e2 && (e2 = l2)
     end
     return 1e-12 * e2 * sqrt(e2)                             # 1e-12 · (max edge)³
 end

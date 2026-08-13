@@ -8,13 +8,13 @@ path). Each builder returns a **closed, manifold, outward-oriented** triangle
 reproduce the exact analytic volume.
 
 These are the primitives the ASCENT `solid_model` emits (boxes, cylinders, holes/
-bores, and axis-aligned cavities via [`box_shell_surface`](@ref)); a full Boolean
-CSG kernel that combines them into the literal enclosure geometry is the remaining
-Stage-5 work.
+bores, and axis-aligned cavities via [`box_shell_surface`](@ref)); general Boolean
+composition is provided by `Mesh3D.mesh_boolean`.
 """
 module Geometry
 
-using ..MeshTypes: Mesh
+using ..MeshTypes: Mesh, validate
+using ..Heal: is_meshable
 
 export box_surface, cylinder_surface, box_tunnel_surface, box_shell_surface
 
@@ -22,6 +22,7 @@ export box_surface, cylinder_surface, box_tunnel_surface, box_shell_surface
     y = try
         Float64(x)
     catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: $name must be Float64-representable: $(sprint(showerror, err))"))
     end
     isfinite(y) || throw(ArgumentError("$caller: $name must be finite (got $x)"))
@@ -51,7 +52,7 @@ function box_surface(x0::Real,x1::Real, y0::Real,y1::Real, z0::Real,z1::Real)
     F = [(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),
          (2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
     t = Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); t[:,k]=Int32[f...]; end
-    return Mesh(C; tris=t)
+    return _checked_surface(Mesh(C; tris=t),"box_surface")
 end
 
 # ── cylinder (solid, watertight lateral + caps) ─────────────────────────────────
@@ -71,16 +72,20 @@ function cylinder_surface(center, axis, radius::Real, height::Real; nθ::Integer
     ntheta=Int(nθ); nlevels=Int(nz)
     nv = try
         Base.checked_add(Base.checked_mul(ntheta,nlevels), 2)
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("cylinder_surface: requested node count overflows the platform Int limit"))
     end
     nv <= typemax(Int32) ||
         throw(ArgumentError("cylinder_surface: $nv nodes exceed the Int32 indexing limit"))
-    try
+    ntriout=try
         Base.checked_mul(Base.checked_mul(2,ntheta),nlevels)
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("cylinder_surface: requested triangle count overflows the platform Int limit"))
     end
+    ntriout<=typemax(Int32) ||
+        throw(ArgumentError("cylinder_surface: $ntriout triangles exceed the Int32 topology limit"))
     c=_point3(center,"cylinder_surface","center")
     ez=_unit(_point3(axis,"cylinder_surface","axis"))
     ax = abs(ez[1])<=abs(ez[2]) ? (abs(ez[1])<=abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
@@ -91,7 +96,9 @@ function cylinder_surface(center, axis, radius::Real, height::Real; nθ::Integer
                c[3]+R*cos(θ)*ex[3]+R*sin(θ)*ey[3]+z*ez[3])
     V=Tuple{Float64,Float64,Float64}[]
     sizehint!(V, nv)
-    for j in 0:nlevels-1, i in 0:ntheta-1; push!(V, on(2π*i/ntheta, H*j/(nlevels-1))); end
+    for j in 0:nlevels-1, i in 0:ntheta-1
+        push!(V,on(2π*i/ntheta,H*(j/(nlevels-1))))
+    end
     ci=length(V)+1; push!(V, (c[1], c[2], c[3]))          # bottom centre
     cti=length(V)+1; push!(V, (c[1]+H*ez[1], c[2]+H*ez[2], c[3]+H*ez[3]))   # top centre
     idx(j,i)=(j-1)*ntheta + mod(i,ntheta) + 1
@@ -104,7 +111,7 @@ function cylinder_surface(center, axis, radius::Real, height::Real; nθ::Integer
     for i in 0:ntheta-1; push!(Tr,(Int32(cti),Int32(idx(nlevels,i)),Int32(idx(nlevels,i+1)))); end # top cap
     C=Matrix{Float64}(undef,3,length(V)); for (k,p) in enumerate(V); C[:,k]=[p...]; end
     tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end
-    return Mesh(C; tris=tm)
+    return _checked_surface(Mesh(C; tris=tm),"cylinder_surface")
 end
 
 # ── box with a rectangular through-tunnel (genus-1 bore) ────────────────────────
@@ -134,7 +141,7 @@ function box_tunnel_surface(ox0,ox1, oy0,oy1, z0,z1, ix0,ix1, iy0,iy1)
     q(9,13,14,10);q(10,14,15,11);q(11,15,16,12);q(12,16,13,9)  # inner tunnel walls
     C=Matrix{Float64}(undef,3,length(V)); for (k,p) in enumerate(V); C[:,k]=[p...]; end
     tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end
-    return Mesh(C; tris=tm)
+    return _checked_surface(Mesh(C; tris=tm),"box_tunnel_surface")
 end
 
 # ── hollow box (axis-aligned Boolean difference: outer box MINUS inner cavity) ──
@@ -169,14 +176,22 @@ function box_shell_surface(ox0::Real,ox1::Real, oy0::Real,oy1::Real, oz0::Real,o
     Fi = [(a+8, c+8, b+8) for (a,b,c) in Fo]             # inner: +8 offset, reversed winding
     F = vcat(Fo, Fi)
     t = Matrix{Int32}(undef,3,length(F)); for (k,f) in enumerate(F); t[:,k]=Int32[f...]; end
-    return Mesh(C; tris=t)
+    return _checked_surface(Mesh(C; tris=t),"box_shell_surface")
 end
 
 @inline _cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
 @inline function _unit(a)
-    l=sqrt(a[1]^2+a[2]^2+a[3]^2)
+    l=hypot(a[1],a[2],a[3])
     (isfinite(l) && l > 0) || throw(ArgumentError("Geometry: axis must have finite positive length"))
     (a[1]/l,a[2]/l,a[3]/l)
+end
+
+function _checked_surface(m::Mesh,caller::AbstractString)
+    d=validate(m)
+    d.ok || throw(ErrorException("$caller: constructed surface is invalid — "*join(d.messages,"; ")))
+    ok,report=is_meshable(m)
+    ok || throw(ErrorException("$caller: constructed surface is not meshable — "*join(report.messages,"; ")))
+    return m
 end
 
 end # module Geometry

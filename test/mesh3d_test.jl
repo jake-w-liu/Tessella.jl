@@ -1058,26 +1058,23 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test mesh_vol(m) ≈ facet_vol(R,H,nθ) rtol=1e-9       # exact faceted volume
         end
 
-        # F2: tetrahedralize_conforming must raise an explicit blocker — never return a
-        # silently invalid (zero-volume / non-manifold) mesh — on a cospherical
-        # axis-aligned box assembly the exact kernel cannot break into positive tets.
+        # F2: the projection-exact coplanar ghost predicate must mesh a cospherical
+        # axis-aligned box assembly without zero-volume/non-manifold tetrahedra.
         boxes2 = [box_surface(Float64(ix),Float64(ix+1),Float64(iy),Float64(iy+1),Float64(iz),Float64(iz+1))
                   for ix in 0:1 for iy in 0:1 for iz in 0:1]
-        @test_throws ErrorException tetrahedralize_conforming(boxes2)
-        # ...and the EXACT-coordinate path MESHES the same cospherical assembly (the exact
-        # kernel breaks the degeneracy validly where the Float64 perturb=false path must
-        # raise its blocker): valid, all 8 regions filled, conforming, exact volume.
-        me = tetrahedralize_conforming_exact(boxes2)
-        @test validate(me).ok
-        tpe = tets_per_region(me)
-        @test length(tpe) == 8 && all(v -> v > 0, values(tpe))
-        @test mesh_vol(me) ≈ 8.0 rtol=1e-9
-        ftc = Dict{NTuple{3,Int32},Int}()
-        for t in 1:ntets(me), k in 1:4
-            vs=(me.tets[1,t],me.tets[2,t],me.tets[3,t],me.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j != k]))
-            ftc[f] = get(ftc, f, 0) + 1
+        # The Rational-coordinate backend remains an independent topology route.
+        for me in (tetrahedralize_conforming(boxes2),tetrahedralize_conforming_exact(boxes2))
+            @test validate(me).ok
+            tpe = tets_per_region(me)
+            @test length(tpe) == 8 && all(v -> v > 0, values(tpe))
+            @test mesh_vol(me) ≈ 8.0 rtol=1e-9
+            ftc = Dict{NTuple{3,Int32},Int}()
+            for t in 1:ntets(me), k in 1:4
+                vs=(me.tets[1,t],me.tets[2,t],me.tets[3,t],me.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j != k]))
+                ftc[f] = get(ftc, f, 0) + 1
+            end
+            @test maximum(values(ftc)) <= 2                   # conforming: no face shared by >2 tets
         end
-        @test maximum(values(ftc)) <= 2                       # conforming: no face shared by >2 tets
     end
 
     @testset "mesh_sized_extrude: uniform sizing on extruded (prismatic) domains" begin
@@ -1242,6 +1239,16 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test Set(ht[1]) == Set(1:4)
             @test is_delaunay_exact(hp, ht) == (true, 0)
         end
+        base = [(Q(0),Q(0),Q(0)),(Q(1),Q(0),Q(0)),
+                (Q(0),Q(1),Q(0)),(Q(0),Q(0),Q(1))]
+        @test is_delaunay_exact(base,NTuple{4,Int}[]) == (false,1)
+        @test is_delaunay_exact(base,[(1,2,3,4),(1,2,3,4)]) == (false,1)
+        @test is_delaunay_exact(base,[(1,1,3,4)]) == (false,1)
+        @test is_delaunay_exact(base,[(1,2,3,5)]) == (false,1)
+        pinched=[(Q(0),Q(0),Q(0)),(Q(1),Q(0),Q(0)),(Q(0),Q(1),Q(0)),
+                 (Q(0),Q(0),Q(1)),(Q(-1),Q(0),Q(0)),(Q(0),Q(-1),Q(0)),
+                 (Q(0),Q(0),Q(-1))]
+        @test is_delaunay_exact(pinched,[(1,2,3,4),(1,5,7,6)]) == (false,1)
         # maximally cospherical: a 3×3×3 integer box grid — exact fill to the exact volume,
         # zero empty-circumsphere violations (the case the Float64 perturb=false kernel can
         # muddle with degenerate tets).

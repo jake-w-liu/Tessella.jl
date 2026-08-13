@@ -17,7 +17,12 @@ abstract type AbstractSizeField end
 struct ConstantSize <: AbstractSizeField
     h::Float64
     function ConstantSize(h::Real)
-        hf = Float64(h)
+        hf = try
+            Float64(h)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("ConstantSize: h must be representable as Float64"))
+        end
         (isfinite(hf) && hf > 0) ||
             throw(ArgumentError("ConstantSize: h must be finite and positive (got $h)"))
         new(hf)
@@ -46,6 +51,7 @@ end
     hf = try
         Float64(h)
     catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("FunctionSize: f returned size $h that is not representable as Float64 at ($x,$y,$z): $(sprint(showerror, err))"))
     end
     (hf > 0 && isfinite(hf)) ||

@@ -28,7 +28,7 @@ after operations in the test suite.
 module Mesh2D
 
 using ..Predicates: orient2, orient2_sos, incircle_sos
-using ..MeshTypes: Mesh
+using ..MeshTypes: Mesh, triangle_area
 
 export Triangulation, triangulate, delaunay2d, dedup_points
 export check_consistency, is_delaunay, to_mesh, ntriangles_live, insert_point!
@@ -81,6 +81,8 @@ ntriangles_live(T::Triangulation) = count(T.alive)
         _touch_vtri!(T, Int32(t), a, b, c)
         return Int32(t)
     else
+        length(T.alive)<typemax(Int32) ||
+            throw(ArgumentError("Mesh2D: triangle storage exceeds the Int32 indexing limit"))
         push!(T.tv, Int32(a), Int32(b), Int32(c))
         push!(T.tn, Int32(0), Int32(0), Int32(0))
         push!(T.alive, true)
@@ -172,11 +174,13 @@ end
     end
 end
 
-@inline function _strictly_between(u, v, p)
-    dx = v[1]-u[1]; dy = v[2]-u[2]
-    s = (p[1]-u[1])*dx + (p[2]-u[2])*dy
-    L = dx*dx + dy*dy
-    return 0.0 < s < L
+function _strictly_between(u, v, p)
+    # The caller has already certified exact collinearity.  Comparing along any
+    # coordinate on which the endpoints differ is exact for Float64 and avoids
+    # overflowing the dot-product form on opposite-sign extreme coordinates.
+    u[1]!=v[1] && return min(u[1],v[1])<p[1]<max(u[1],v[1])
+    u[2]!=v[2] && return min(u[2],v[2])<p[2]<max(u[2],v[2])
+    return false
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -754,6 +758,7 @@ function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
     seed = _seed64(rng_seed, "constrained_delaunay")
     ux, uy, remap = dedup_points(xs, ys)
     n = length(xs)
+    segseen=Set{NTuple{2,Int32}}()
     for (s, (i, j)) in enumerate(segments)
         1 <= i <= n ||
             throw(ArgumentError("constrained_delaunay: segment $s endpoint $i is outside 1:$n"))
@@ -763,6 +768,9 @@ function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
             throw(ArgumentError("constrained_delaunay: segment $s has identical endpoints $i"))
         remap[i] != remap[j] ||
             throw(ArgumentError("constrained_delaunay: segment $s collapses after coincident-point deduplication"))
+        key=_skey(remap[i],remap[j])
+        key in segseen && throw(ArgumentError("constrained_delaunay: duplicate segment $s after point deduplication"))
+        push!(segseen,key)
     end
     T = Triangulation(ux, uy)
     placed = _init_triangulation!(T)
@@ -846,32 +854,36 @@ end
 
 # append a real vertex; returns its id (nreal grows; vtri extended)
 function _add_vertex!(T::Triangulation, x::Float64, y::Float64)
+    (isfinite(x)&&isfinite(y)) || throw(ArgumentError("refine!: attempted to add a non-finite vertex"))
+    T.nreal<typemax(Int32) || throw(ArgumentError("refine!: node count exceeds the Int32 indexing limit"))
     push!(T.x, x); push!(T.y, y); T.nreal += 1
     push!(T.vtri, Int32(0))
     return Int32(T.nreal)
 end
 
-@inline _dist(a, b) = sqrt((a[1]-b[1])^2 + (a[2]-b[2])^2)
+@inline _dist(a, b) = hypot(a[1]-b[1],a[2]-b[2])
 
 @inline function _tri_area2(a, b, c)
-    return 0.5 * abs((b[1]-a[1])*(c[2]-a[2]) - (c[1]-a[1])*(b[2]-a[2]))
+    return triangle_area((a[1],a[2],0.0),(b[1],b[2],0.0),(c[1],c[2],0.0))
 end
 
 function _circumcenter2(a, b, c)
-    ax,ay = a; bx,by = b; cx,cy = c
-    d = 2.0*(ax*(by-cy) + bx*(cy-ay) + cx*(ay-by))
-    a2 = ax*ax+ay*ay; b2 = bx*bx+by*by; c2 = cx*cx+cy*cy
-    ux = (a2*(by-cy) + b2*(cy-ay) + c2*(ay-by)) / d
-    uy = (a2*(cx-bx) + b2*(ax-cx) + c2*(bx-ax)) / d
-    return (ux, uy)
+    ax,ay=a;bx=b[1]-ax;by=b[2]-ay;cx=c[1]-ax;cy=c[2]-ay
+    scale=max(abs(bx),abs(by),abs(cx),abs(cy))
+    (isfinite(scale)&&scale>0)||return (NaN,NaN)
+    bx/=scale;by/=scale;cx/=scale;cy/=scale
+    d=2.0*(bx*cy-by*cx);d==0&&return (NaN,NaN)
+    b2=bx*bx+by*by;c2=cx*cx+cy*cy
+    ux=ax+scale*(cy*b2-by*c2)/d
+    uy=ay+scale*(bx*c2-cx*b2)/d
+    return (ux,uy)
 end
 
 # radius-edge ratio = circumradius / shortest edge (≈ 1/(2 sin θ_min))
 function _radius_edge2(a, b, c)
     lab=_dist(a,b); lbc=_dist(b,c); lca=_dist(c,a)
-    ar = _tri_area2(a,b,c)
-    ar == 0 && return Inf
-    R = (lab*lbc*lca) / (4*ar)
+    cc=_circumcenter2(a,b,c);R=_dist(a,cc)
+    isfinite(R)||return Inf
     return R / min(lab,lbc,lca)
 end
 
@@ -879,12 +891,13 @@ end
     a=_pt(T,_vert(T,t,1)); b=_pt(T,_vert(T,t,2)); c=_pt(T,_vert(T,t,3))
     (_tri_area2(a,b,c) > maxarea || _radius_edge2(a,b,c) > B) && return true
     if sizefn !== nothing
-        cx = (a[1]+b[1]+c[1])/3; cy = (a[2]+b[2]+c[2])/3
-        h = sizefn(cx, cy)
-        h isa Real ||
-            throw(ArgumentError("refine!: size callback must return a real size (got $(typeof(h))) at ($cx,$cy)"))
-        (!isnan(h) && h > 0) ||
-            throw(ArgumentError("refine!: size callback returned invalid size $h at ($cx,$cy)"))
+        cx = a[1]/3+b[1]/3+c[1]/3; cy = a[2]/3+b[2]/3+c[2]/3
+        rawh = sizefn(cx, cy)
+        rawh isa Real ||
+            throw(ArgumentError("refine!: size callback must return a real size (got $(typeof(rawh))) at ($cx,$cy)"))
+        h=_mesh2_float(rawh,"size callback result")
+        (isfinite(h) && h > 0) ||
+            throw(ArgumentError("refine!: size callback returned invalid size $rawh at ($cx,$cy)"))
         emax = max(_dist(a,b), _dist(b,c), _dist(c,a))
         emax > h && return true
     end
@@ -892,7 +905,19 @@ end
 end
 
 # is subsegment (a,b) encroached by point p? (p strictly inside the diametral disk)
-@inline _encroaches(pa, pb, p) = (pa[1]-p[1])*(pb[1]-p[1]) + (pa[2]-p[2])*(pb[2]-p[2]) < 0
+function _encroaches(pa,pb,p)
+    ax=pa[1]-p[1];ay=pa[2]-p[2];bx=pb[1]-p[1];by=pb[2]-p[2]
+    scale=max(abs(ax),abs(ay),abs(bx),abs(by))
+    if isfinite(scale)&&scale>0
+        ax/=scale;ay/=scale;bx/=scale;by/=scale
+        dot=ax*bx+ay*by;perm=abs(ax*bx)+abs(ay*by)
+        abs(dot)>16eps(Float64)*perm && return dot<0
+    end
+    R=Rational{BigInt}
+    axb=R(pa[1])-R(p[1]);ayb=R(pa[2])-R(p[2])
+    bxb=R(pb[1])-R(p[1]);byb=R(pb[2])-R(p[2])
+    return axb*bxb+ayb*byb<0
+end
 
 # encroached by an adjacent apex? (in a CDT this suffices to detect any encroachment)
 function _subseg_encroached(T::Triangulation, a, b)
@@ -913,9 +938,16 @@ end
 end
 
 # split subsegment (a,b) at its midpoint; update constraints and interior flags
-function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vector{Bool})
+function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vector{Bool},pointids)
     pa = _pt(T,a); pb = _pt(T,b)
-    mid = _add_vertex!(T, 0.5*(pa[1]+pb[1]), 0.5*(pa[2]+pb[2]))
+    mx=pa[1]/2+pb[1]/2;my=pa[2]/2+pb[2]/2
+    mp=(mx==0 ? 0.0 : mx,my==0 ? 0.0 : my)
+    (isfinite(mp[1])&&isfinite(mp[2])&&mp!=pa&&mp!=pb) ||
+        throw(ErrorException("refine!: constrained-segment midpoint is below Float64 coordinate resolution"))
+    existing=get(pointids,mp,Int32(0))
+    existing==0 || throw(ErrorException("refine!: constrained-segment midpoint already exists as vertex $existing"))
+    mid = _add_vertex!(T,mp[1],mp[2])
+    pointids[mp]=mid
     delete!(T.seg, _skey(a,b))
     push!(T.seg, _skey(a,mid)); push!(T.seg, _skey(mid,b))
     insert_point!(T, mid; constrained=true)
@@ -938,20 +970,29 @@ explicit blocker rather than returning a mesh that violates the requested bounds
 """
 function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
                  size=nothing, maxsteps::Integer=300_000)
-    angle = float(min_angle_deg)
+    angle = _mesh2_float(min_angle_deg,"min_angle_deg")
     (isfinite(angle) && 0 <= angle < 60) ||
         throw(ArgumentError("refine!: min_angle_deg must be finite and in [0, 60) (got $min_angle_deg)"))
-    area = float(max_area)
+    area = _mesh2_float(max_area,"max_area")
     (!isnan(area) && area > 0) ||
         throw(ArgumentError("refine!: max_area must be positive or Inf (got $max_area)"))
     maxsteps > 0 || throw(ArgumentError("refine!: maxsteps must be positive (got $maxsteps)"))
+    maxsteps<=typemax(Int) || throw(ArgumentError("refine!: maxsteps exceeds the platform Int limit"))
+    nsteps=Int(maxsteps)
     B = angle == 0 ? Inf : 1.0 / (2.0*sind(angle))
     interior = Vector{Bool}(collect(classify_interior(T)))
-    for _ in 1:maxsteps
+    pointids=Dict{NTuple{2,Float64},Int32}()
+    sizehint!(pointids,T.nreal)
+    @inbounds for i in 1:T.nreal
+        key=(T.x[i]==0 ? 0.0 : T.x[i],T.y[i]==0 ? 0.0 : T.y[i])
+        haskey(pointids,key) && throw(ArgumentError("refine!: triangulation contains duplicate point coordinates"))
+        pointids[key]=Int32(i)
+    end
+    for _ in 1:nsteps
         # (1) split an encroached subsegment, if any
         enc = _find_encroached(T)
         if enc !== nothing
-            _split_subsegment!(T, enc[1], enc[2], interior)
+            _split_subsegment!(T, enc[1], enc[2], interior,pointids)
             continue
         end
         # (2) pick a triangle that violates the angle/area/size criteria
@@ -962,11 +1003,13 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         # (3) if the circumcenter encroaches subsegments, split those instead
         sp = _encroached_by_point(T, cc)
         if sp !== nothing
-            _split_subsegment!(T, sp[1], sp[2], interior)
+            _split_subsegment!(T, sp[1], sp[2], interior,pointids)
             continue
         end
         # (4) insert the circumcenter (constrained); skip if it falls outside the domain
-        _insert_steiner!(T, cc, interior)
+        pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+        fallback=(pa[1]/3+pb[1]/3+pc[1]/3,pa[2]/3+pb[2]/3+pc[2]/3)
+        _insert_steiner!(T, cc, interior,pointids;fallback=fallback)
     end
     enc = _find_encroached(T)
     bad = _find_bad(T, interior, B, area, size)
@@ -1007,17 +1050,41 @@ end
 # The vertex is added first (so locate's SoS/ghost tests can read its coordinates),
 # then undone if the point falls outside the domain — locate never mutates the
 # triangulation, so the trailing vertex is safe to pop.
-function _insert_steiner!(T::Triangulation, p, interior::Vector{Bool})
+function _insert_steiner!(T::Triangulation,p,interior::Vector{Bool},pointids;fallback=nothing)
+    if !(isfinite(p[1])&&isfinite(p[2]))
+        fallback===nothing &&
+            throw(ErrorException("refine!: triangle circumcenter is not representable as a finite Float64 point"))
+        return _insert_steiner!(T,fallback,interior,pointids)
+    end
+    key=(p[1]==0 ? 0.0 : p[1],p[2]==0 ? 0.0 : p[2])
+    existing=get(pointids,key,Int32(0))
+    if existing!=0
+        fallback===nothing &&
+            throw(ErrorException("refine!: required Steiner point coincides with existing vertex $existing at Float64 resolution"))
+        return _insert_steiner!(T,fallback,interior,pointids)
+    end
     vid = _add_vertex!(T, p[1], p[2])
+    pointids[key]=vid
     tc = locate(T, p[1], p[2], vid)
     if _is_ghost_tri(T, tc) || tc > length(interior) || !interior[tc]
-        pop!(T.x); pop!(T.y); pop!(T.vtri); T.nreal -= 1     # undo
-        return false
+        pop!(T.x); pop!(T.y); pop!(T.vtri); T.nreal -= 1;delete!(pointids,key)     # undo
+        fallback===nothing &&
+            throw(ErrorException("refine!: no representable interior Steiner point for the selected triangle"))
+        return _insert_steiner!(T,fallback,interior,pointids)
     end
     newt = Int32[]
     insert_point!(T, vid; constrained=true, newtris=newt)
     for nt in newt; _setflag!(interior, nt, true); end
     return true
+end
+
+function _mesh2_float(x::Real,name::AbstractString)
+    try
+        return Float64(x)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("refine!: $name must be representable as Float64"))
+    end
 end
 
 # ════════════════════════════════════════════════════════════════════════════════

@@ -22,6 +22,7 @@ can be satisfied.  Thus a non-coplanar input never returns a silent partial/empt
 module ExactMesh3D
 
 using ..Predicates: orient3_rat, insphere_rat
+using ..MeshTypes: _tet_topology
 
 export RB, delaunay3d_exact, is_delaunay_exact
 
@@ -113,11 +114,10 @@ end
     return (ax+ox, ay+oy, az+oz, r2)
 end
 
-# Conservative pre-filter: TRUE unless the query is *safely* outside the tet's float
-# circumsphere. A tet that (exactly) contains the query has float dist² ≤ r²; the 1e-6
-# relative slack keeps every borderline tet (within ~1e-6 of the sphere) in the exact
-# test, and degenerate tets carry r²=Inf ⇒ always TRUE. So this never skips a tet the
-# exact predicate would include — verified by the exact empty-circumsphere oracle.
+# Heuristic pre-filter: TRUE unless the query is well outside the tet's Float64
+# circumsphere. Borderline and ill-conditioned cases keep the exact test. Because a
+# fixed Float64 slack is not a formal roundoff proof, each completed build is checked
+# by `is_delaunay_exact`; a failed check is rebuilt with this filter disabled.
 @inline function _maybe_in_sphere(cs::NTuple{4,Float64}, px::Float64, py::Float64, pz::Float64)
     cs[4] == Inf && return true
     dx=px-cs[1]; dy=py-cs[2]; dz=pz-cs[3]
@@ -137,6 +137,7 @@ a partial/empty result.
 function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
     n = length(pts)
     n >= 4 || throw(ArgumentError("delaunay3d_exact: need ≥ 4 points (got $n)"))
+    n<=typemax(Int32) || throw(ArgumentError("delaunay3d_exact: point count exceeds Int32 indexing"))
 
     # Duplicate coordinates are not separate vertices of a geometric triangulation.
     # Reject them explicitly instead of retrying forever while requiring every index.
@@ -156,13 +157,21 @@ function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
 
     lastreason = "no build attempted"
     for growth in 0:_MAX_SUPER_GROWTHS
-        out = _delaunay3d_exact_build(pts, m, D, K)
-        if out === nothing
-            lastreason = "an insertion had an empty cavity"
-        else
+        for allow_prefilter in (true,false)
+            out = _delaunay3d_exact_build(pts,m,D,K,allow_prefilter)
+            if out===nothing
+                lastreason=allow_prefilter ? "a filtered insertion had an empty cavity" :
+                                             "an exact insertion had an empty cavity"
+                continue
+            end
             ok, reason = _complete_exact_output(pts, out)
-            ok && return out
-            lastreason = reason
+            if ok
+                dok,nviol=_empty_sphere_exact(pts,out)
+                dok && return out
+                lastreason="exact empty-circumsphere certification found $nviol violation(s)"
+            else
+                lastreason=reason
+            end
         end
         if growth == 0
             conditioned = _initial_super_scale(pts, D)
@@ -179,7 +188,8 @@ end
 
 # One exact Bowyer–Watson build at a specified super-tet scale.  `nothing` requests
 # a larger scale (an input point had no cavity in the current finite construction).
-function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::BigInt)
+function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::BigInt,
+                                 allow_prefilter::Bool=true)
     n = length(pts)
 
     # Bounding super-tetrahedron.  The point cloud lies in [m,m+D]³.  All four
@@ -214,7 +224,7 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
     end
     extent = max(mxx-mnx, mxy-mny, mxz-mnz)
     fextent = Float64(extent)
-    usePF = isfinite(fextent) && fextent < 1.0e11
+    usePF = allow_prefilter && isfinite(fextent) && fextent < 1.0e11
     Xf = Vector{NTuple{3,Float64}}(undef, n + 4)
     if usePF
         @inbounds for i in 1:n+4
@@ -228,8 +238,13 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
     alive = Bool[]
     csph = NTuple{4,Float64}[]              # parallel: each tet's Float64 circumsphere (pre-filter)
     sizehint!(tets, max(16, 12n)); sizehint!(alive, max(16, 12n)); sizehint!(csph, max(16, 12n))
-    addtet!(t) = (push!(tets, t); push!(alive, true);
-                  push!(csph, usePF ? _fcircum(Xf[t[1]],Xf[t[2]],Xf[t[3]],Xf[t[4]]) : (0.0,0.0,0.0,Inf)))
+    function addtet!(t)
+        length(tets)<typemax(Int32) ||
+            throw(ErrorException("delaunay3d_exact: tetrahedron storage exceeds Int32"))
+        push!(tets,t);push!(alive,true)
+        push!(csph,usePF ? _fcircum(Xf[t[1]],Xf[t[2]],Xf[t[3]],Xf[t[4]]) :
+                             (0.0,0.0,0.0,Inf))
+    end
     # initial super-tet, positively oriented
     if orient3_rat(X[n+1], X[n+2], X[n+3], X[n+4], n+1, n+2, n+3, n+4) > 0
         addtet!((n+1, n+2, n+3, n+4))
@@ -294,21 +309,24 @@ end
 function _complete_exact_output(pts::Vector{NTuple{3,RB}}, out::Vector{NTuple{4,Int}})
     n = length(pts)
     isempty(out) && return (false, "all real tetrahedra were removed")
+    length(out)<=typemax(Int32) || return (false,"tetrahedron count exceeds Int32")
     used = falses(n)
     tetkeys = Vector{NTuple{4,Int}}(undef, length(out))
-    facekeys = Vector{NTuple{3,Int}}(undef, 4length(out))
+    facerecords = Vector{NTuple{4,Int}}(undef, 4length(out)) # sorted face key + owner tet
+    topology=Matrix{Int32}(undef,4,length(out))
     fi = 0
     @inbounds for (ti, t) in enumerate(out)
-        for v in t
+        for (k,v) in enumerate(t)
             1 <= v <= n || return (false, "tet $ti references vertex $v outside 1:$n")
             used[v] = true
+            topology[k,ti]=Int32(v)
         end
         _orient3_det(pts[t[1]], pts[t[2]], pts[t[3]], pts[t[4]]) > 0 ||
             return (false, "tet $ti is physically flat or negatively oriented")
         tetkeys[ti] = _sort4(t[1], t[2], t[3], t[4])
         for f in (_sort3(t[2],t[3],t[4]), _sort3(t[1],t[3],t[4]),
                   _sort3(t[1],t[2],t[4]), _sort3(t[1],t[2],t[3]))
-            fi += 1; facekeys[fi] = f
+            fi += 1; facerecords[fi] = (f[1],f[2],f[3],ti)
         end
     end
     all(used) || return (false, "output omits $(count(!, used)) of $n input points")
@@ -316,28 +334,75 @@ function _complete_exact_output(pts::Vector{NTuple{3,RB}}, out::Vector{NTuple{4,
     @inbounds for i in 2:length(tetkeys)
         tetkeys[i] == tetkeys[i-1] && return (false, "duplicate tetrahedron at output cell $i")
     end
-    sort!(facekeys)
+    topok,topreason=_tet_topology(topology)
+    topok || return (false,"tet complex is not a combinatorial manifold — $topreason")
+
+    sort!(facerecords)
+    parent=Int32[i for i in eachindex(out)]
+    findroot(i::Int32)=begin
+        while parent[i]!=i
+            parent[i]=parent[parent[i]];i=parent[i]
+        end
+        i
+    end
+    function unite(a::Int32,b::Int32)
+        ra=findroot(a);rb=findroot(b);ra!=rb&&(parent[ra]=rb);nothing
+    end
     hasboundary = false; i = 1
-    @inbounds while i <= length(facekeys)
+    @inbounds while i <= length(facerecords)
         j = i + 1
-        while j <= length(facekeys) && facekeys[j] == facekeys[i]; j += 1; end
+        while j<=length(facerecords) &&
+              facerecords[j][1]==facerecords[i][1] &&
+              facerecords[j][2]==facerecords[i][2] &&
+              facerecords[j][3]==facerecords[i][3]
+            j+=1
+        end
         incidence = j - i
         incidence <= 2 || return (false, "a triangular face has incidence greater than two")
-        incidence == 1 && (hasboundary = true)
+        if incidence==2
+            unite(Int32(facerecords[i][4]),Int32(facerecords[i+1][4]))
+        else
+            hasboundary=true
+            a,b,c,owner=facerecords[i];tet=out[owner]
+            opp=first(v for v in tet if v!=a&&v!=b&&v!=c)
+            sopp=_orient3_det(pts[a],pts[b],pts[c],pts[opp])
+            sopp!=0 || return (false,"a boundary face has a coplanar owner vertex")
+            for v in 1:n
+                sp=_orient3_det(pts[a],pts[b],pts[c],pts[v])
+                sp==0&&continue
+                (sp>0)==(sopp>0) || return (false,
+                    "a boundary face is not a supporting face of the input convex hull")
+            end
+        end
         i = j
     end
     hasboundary || return (false, "tet complex has no boundary faces")
+    root=findroot(Int32(1))
+    @inbounds for t in 2:length(out)
+        findroot(Int32(t))==root || return (false,"tet complex is disconnected across faces")
+    end
     return (true, "complete")
 end
 
 """
     is_delaunay_exact(pts, tets) -> (ok::Bool, nviol::Int)
 
-Exact empty-circumsphere oracle: no input point lies strictly inside any tet's
-circumsphere (`insphere_rat`). This DEFINES the Delaunay property, exactly.
+Exact empty-circumsphere oracle for a complete tetrahedral complex. Malformed,
+duplicate, flat, incomplete, or non-manifold input returns `(false,nviol)` rather
+than being accepted vacuously. For a structurally valid complex, `nviol` is the
+number of strict empty-circumsphere violations (`insphere_rat`).
 """
 function is_delaunay_exact(pts::Vector{NTuple{3,RB}}, tets::Vector{NTuple{4,Int}})
     n = length(pts); nviol = 0
+    n>=4 || return (false,1)
+    length(Set(pts))==n || return (false,1)
+    ok,_=_complete_exact_output(pts,tets)
+    ok || return (false,1)
+    return _empty_sphere_exact(pts,tets)
+end
+
+function _empty_sphere_exact(pts,tets)
+    n=length(pts);nviol=0
     @inbounds for t0 in tets
         a, b, c, d = t0[1], t0[2], t0[3], t0[4]
         # normalize to orient3_rat > 0 so insphere_rat > 0 means "strictly inside"

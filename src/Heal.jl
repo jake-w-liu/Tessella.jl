@@ -14,7 +14,7 @@ is the go/no-go gate used by the volume mesher.
 """
 module Heal
 
-using ..MeshTypes: Mesh, nnodes, ntris, node, triangle_area, boundary_edges
+using ..MeshTypes: Mesh, nnodes, ntris, node, triangle_area, boundary_edges, _tri_topology
 
 export SurfaceReport, surface_diagnostics, is_meshable
 
@@ -54,7 +54,8 @@ Analyse a triangle surface mesh for the defects that break volume meshing.
 function surface_diagnostics(m::Mesh; tol::Real=1e-9)
     reltol = try
         Float64(tol)
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("surface_diagnostics: tol must be a finite non-negative number (got $tol)"))
     end
     (isfinite(reltol) && reltol >= 0.0) ||
@@ -102,12 +103,14 @@ function surface_diagnostics(m::Mesh; tol::Real=1e-9)
     ndup = sum(v-1 for v in values(facekeys) if v > 1; init=0)
     ncoin = nnonfinite == 0 ? _count_coincident(m, reltol) : 0
 
+    topok,topreason=_tri_topology(m.tris)
     closed = nt > 0 && nopen == 0
-    manifold = nnon == 0
+    manifold = nnon == 0 && topok
     oriented = noriented_bad == 0
     nt == 0 && push!(msgs, "surface has no triangles")
     nt > 0 && !closed && push!(msgs, "$nopen open (boundary) edges — surface is not closed")
-    manifold || push!(msgs, "$nnon non-manifold edges (shared by >2 triangles)")
+    nnon==0 || push!(msgs, "$nnon non-manifold edges (shared by >2 triangles)")
+    topok || push!(msgs,"non-manifold triangle topology: $topreason")
     (closed && manifold && !oriented) && push!(msgs, "$noriented_bad edges with inconsistent triangle orientation")
     ndeg > 0 && push!(msgs, "$ndeg degenerate or non-finite-area triangles")
     ndup > 0 && push!(msgs, "$ndup duplicate triangles")
@@ -153,8 +156,32 @@ function _count_coincident(m::Mesh, reltol::Float64)
         hi=(max(hi[1],q[1]),max(hi[2],q[2]),max(hi[3],q[3]))
     end
     diag = hypot(hi[1]-lo[1], hi[2]-lo[2], hi[3]-lo[3])
-    cellsize = max(diag*reltol, eps(Float64))
+    cellsize = diag*reltol
+    if cellsize==0
+        counts=Dict{NTuple{3,Float64},Int}()
+        pairs=0
+        @inbounds for i in 1:nn
+            p=node(m,i);key=(p[1]==0 ? 0.0 : p[1],p[2]==0 ? 0.0 : p[2],p[3]==0 ? 0.0 : p[3])
+            old=get(counts,key,0);pairs+=old;counts[key]=old+1
+        end
+        return pairs
+    end
     inv = 1.0/cellsize
+    if !isfinite(inv) || diag*inv>typemax(Int)-2
+        order=sortperm(1:nn;by=i->node(m,i)[1]/scale)
+        cnt=0
+        @inbounds for ii in eachindex(order)
+            i=order[ii];qi=(node(m,i)[1]/scale,node(m,i)[2]/scale,node(m,i)[3]/scale)
+            jj=ii-1
+            while jj>=1
+                j=order[jj];qj=(node(m,j)[1]/scale,node(m,j)[2]/scale,node(m,j)[3]/scale)
+                qi[1]-qj[1] < cellsize || break
+                hypot(qi[1]-qj[1],qi[2]-qj[2],qi[3]-qj[3]) < cellsize && (cnt+=1)
+                jj-=1
+            end
+        end
+        return cnt
+    end
     cell = Dict{NTuple{3,Int}, Vector{Int}}()
     sizehint!(cell, nn)
     qcoord(p) = (p[1]/scale-lo[1], p[2]/scale-lo[2], p[3]/scale-lo[3])

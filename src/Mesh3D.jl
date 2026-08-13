@@ -22,7 +22,7 @@ neighbours/tet, one opposite each vertex) plus a free list.
 """
 module Mesh3D
 
-using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
+using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, tet_signed_volume
 using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
@@ -46,6 +46,7 @@ const GHOST3 = Int32(0)
     y = try
         Float64(x)
     catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: $name must be Float64-representable: $(sprint(showerror, err))"))
     end
     isfinite(y) || throw(ArgumentError("$caller: $name must be finite (got $x)"))
@@ -64,7 +65,8 @@ end
         throw(ArgumentError("$caller: computed $name count is not finite and non-negative"))
     value=try
         ceil(Int,x)
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: requested $name count exceeds the platform Int limit"))
     end
     return max(minimum,value)
@@ -76,7 +78,8 @@ end
         for x in xs
             value = Base.checked_mul(value, x)
         end
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: requested $name count overflows the platform Int limit"))
     end
     return value
@@ -85,7 +88,8 @@ end
 @inline function _checked_add3(caller::AbstractString, name::AbstractString, x::Int, y::Int)
     try
         return Base.checked_add(x,y)
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: requested $name count overflows the platform Int limit"))
     end
 end
@@ -148,6 +152,8 @@ end
         _touch_vtet!(T, Int32(t), a, b, c, d)
         return Int32(t)
     else
+        length(T.alive)<typemax(Int32) ||
+            throw(ArgumentError("Mesh3D: tetrahedron storage exceeds the Int32 indexing limit"))
         push!(T.tv, Int32(a),Int32(b),Int32(c),Int32(d))
         push!(T.tn, Int32(0),Int32(0),Int32(0),Int32(0))
         push!(T.alive, true)
@@ -213,15 +219,21 @@ end
 # p coplanar with (u,v,w): is it inside their circumcircle (in the shared plane)?
 function _in_face_circle(T::Triangulation3, u, v, w, p)
     pu=_pt(T,u); pv=_pt(T,v); pw=_pt(T,w)
-    # in-plane orthonormal axes
-    e1 = _subn(pv, pu); e2 = _subn(pw, pu)
-    n = _cross(e1, e2)
-    nl = sqrt(_dot(n,n)); nl == 0 && return false     # degenerate face
-    ax = _unitn(e1)
-    ay = _cross((n[1]/nl, n[2]/nl, n[3]/nl), ax)
-    pr(q) = (_dot(_subn(q,pu), ax), _dot(_subn(q,pu), ay))
-    a2=pr(pu); b2=pr(pv); c2=pr(pw); p2=pr(_pt(T,p))
-    ic = incircle_sos(a2,b2,c2,p2, u,v,w,Int32(p))
+    # Pick a non-degenerate coordinate projection for the orientation sign.  The
+    # circle predicate itself retains the full 3-D Euclidean metric exactly; a raw
+    # affine projection would turn an oblique circle into an ellipse.
+    proj=if orient2((pu[1],pu[2]),(pv[1],pv[2]),(pw[1],pw[2]))!=0
+        (1,2)
+    elseif orient2((pu[2],pu[3]),(pv[2],pv[3]),(pw[2],pw[3]))!=0
+        (2,3)
+    elseif orient2((pu[3],pu[1]),(pv[3],pv[1]),(pw[3],pw[1]))!=0
+        (3,1)
+    else
+        return false
+    end
+    pr(q)=(q[proj[1]],q[proj[2]])
+    a2=pr(pu); b2=pr(pv); c2=pr(pw)
+    ic = incircle3_sos(pu,pv,pw,_pt(T,p),u,v,w,Int32(p))
     o2 = orient2(a2,b2,c2)                            # face triangle orientation in-plane
     # inside ⇔ in-circle sign matches the CCW/CW orientation of (u,v,w)
     return (ic > 0) == (o2 > 0)
@@ -262,7 +274,7 @@ function _init3!(T::Triangulation3)
     @inbounds for i in 2:n
         i==b && continue
         # not collinear with a,b
-        if _tri_area_sq(_pt(T,a),_pt(T,b),_pt(T,i)) > 0; c=Int32(i); break; end
+        if _noncollinear3(_pt(T,a),_pt(T,b),_pt(T,i)); c=Int32(i); break; end
     end
     c == 0 && return Int32[]
     d = Int32(0)
@@ -282,9 +294,10 @@ function _init3!(T::Triangulation3)
     return Int32[a,b,c,d]
 end
 
-@inline function _tri_area_sq(a,b,c)
-    cr = _cross(_subn(b,a), _subn(c,a)); _dot(cr,cr)
-end
+@inline _noncollinear3(a,b,c) =
+    orient2((a[1],a[2]),(b[1],b[2]),(c[1],c[2]))!=0 ||
+    orient2((a[2],a[3]),(b[2],b[3]),(c[2],c[3]))!=0 ||
+    orient2((a[3],a[1]),(b[3],b[1]),(c[3],c[1]))!=0
 
 # create ghost tets on all current boundary faces (faces whose neighbour is 0) and
 # link them (to the real neighbour across the real face, and to each other across
@@ -331,7 +344,7 @@ end
 # ── point location (jump-and-walk) ──────────────────────────────────────────────
 @inline function _dist2_v(T::Triangulation3, v, px, py, pz)
     @inbounds dx=T.x[v]-px; @inbounds dy=T.y[v]-py; @inbounds dz=T.z[v]-pz
-    dx*dx + dy*dy + dz*dz
+    hypot(dx,dy,dz)
 end
 
 # Pick a walk-start tet by jump-and-walk (Mücke–Saias–Zhu): sample ~∛n already-
@@ -934,8 +947,16 @@ function refine_to_size(m::Mesh, hmax::Real)
     tags0 = m.tet_tag                                                    # input tags (length = ntets)
     inc = Dict{Tuple{Int32,Int32},Vector{Int32}}()
     heap = _EHeap()
+    queued = Set{Tuple{Int32,Int32}}()
     @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
     @inline elen(a,b) = hypot(cx[a]-cx[b], cy[a]-cy[b], cz[a]-cz[b])
+    function queueedge!(u,v,len)
+        e=ek(u,v)
+        if len>target && !(e in queued)
+            push!(queued,e);_hpush!(heap,(len,e[1],e[2]))
+        end
+        return nothing
+    end
 
     # Lower-dimensional cells are part of Mesh's public data contract.  Whenever a
     # tet edge is bisected, split every coincident segment/triangle edge as well so
@@ -954,11 +975,15 @@ function refine_to_size(m::Mesh, hmax::Real)
         end
     end
     function addseg!(q::NTuple{2,Int32}, tag::Int32)
+        length(segv)<typemax(Int32) ||
+            throw(ErrorException("refine_to_size: segment count exceeds the Int32 working limit"))
         push!(segv,q); push!(segalive,true); push!(segtag,tag); s=length(segv)
         push!(get!(() -> Int[],seginc,ek(q...)),s)
         return nothing
     end
     function addtri!(q::NTuple{3,Int32}, tag::Int32)
+        length(triv)<typemax(Int32) ||
+            throw(ErrorException("refine_to_size: triangle count exceeds the Int32 working limit"))
         push!(triv,q); push!(trialive,true); push!(tritag,tag); f=length(triv)
         for e in (ek(q[1],q[2]),ek(q[2],q[3]),ek(q[3],q[1]))
             push!(get!(() -> Int[],triinc,e),f)
@@ -1010,18 +1035,19 @@ function refine_to_size(m::Mesh, hmax::Real)
             u,v = q[i],q[j]; push!(get!(inc, ek(u,v)) do; Int32[] end, id)
             len=elen(u,v)
             isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
-            push_edges && len > target && _hpush!(heap, (len, Int32(u), Int32(v)))
+            push_edges && queueedge!(u,v,len)
         end
         id
     end
     @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false, tags0[t]); end
     for (e,_) in inc
         len=elen(e[1],e[2]); isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
-        len > target && _hpush!(heap, (len, e[1], e[2]))
+        queueedge!(e[1],e[2],len)
     end
     guard = 0
     while !isempty(heap.d)
         (len, a, b) = _hpop!(heap)
+        delete!(queued,ek(a,b))
         len <= target && break                               # global max edge ≤ hmax ⇒ finished
         e = ek(a, b); haskey(inc, e) || continue
         ts = Int32[]
@@ -1287,12 +1313,7 @@ function mesh_box(x0::Real, x1::Real, y0::Real, y1::Real, z0::Real, z1::Real; hm
 end
 
 # 6× signed tet volume (sign only matters here); positive ⇔ (p1-p0,p2-p0,p3-p0) right-handed
-@inline function _signed_vol6(p0,p1,p2,p3)
-    ax=p1[1]-p0[1]; ay=p1[2]-p0[2]; az=p1[3]-p0[3]
-    bx=p2[1]-p0[1]; by=p2[2]-p0[2]; bz=p2[3]-p0[3]
-    cx=p3[1]-p0[1]; cy=p3[2]-p0[2]; cz=p3[3]-p0[3]
-    return ax*(by*cz-bz*cy) - ay*(bx*cz-bz*cx) + az*(bx*cy-by*cx)
-end
+@inline _signed_vol6(p0,p1,p2,p3) = -orient3(p0,p1,p2,p3)
 
 """
     BoxRegion(x0,x1,y0,y1,z0,z1, tag)

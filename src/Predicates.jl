@@ -31,6 +31,7 @@ module Predicates
 
 export orient2, orient3, incircle, insphere
 export orient2_sos, orient3_sos, incircle_sos, insphere_sos
+export incircle3_sos
 export orient2_rat, orient3_rat, incircle_rat, insphere_rat
 
 # ── Shewchuk static error bounds for IEEE-754 double ────────────────────────────
@@ -47,11 +48,54 @@ const ISPERRBOUND_A  = (16.0 + 224.0 * EPS) * EPS
 
 @inline _isign(x)::Int = x > 0 ? 1 : (x < 0 ? -1 : 0)
 
-# Points are accepted either as tuples/vectors of coordinates. Small helpers keep
-# the call sites readable while staying allocation-free and type-stable.
-@inline _x(p) = @inbounds Float64(p[1])
-@inline _y(p) = @inbounds Float64(p[2])
-@inline _z(p) = @inbounds Float64(p[3])
+# Points are accepted either as tuples/vectors of coordinates.  Predicates are public
+# numerical contracts, so a non-finite or non-representable coordinate is an explicit
+# input error rather than a fabricated zero sign (NaN comparisons are all false).
+@inline function _coordf(p,i::Int)
+    v=try
+        Float64(p[i])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("geometric predicate: coordinate $i must be Float64-representable: " *
+                            sprint(showerror,err)))
+    end
+    isfinite(v)||throw(ArgumentError("geometric predicate: coordinate $i must be finite (got $v)"))
+    v
+end
+@inline _x(p) = _coordf(p,1)
+@inline _y(p) = _coordf(p,2)
+@inline _z(p) = _coordf(p,3)
+
+@inline function _sos_indices(idx::Tuple{Vararg{Integer,N}},caller::AbstractString) where {N}
+    out=ntuple(N) do k
+        i=idx[k]
+        (typemin(Int)<=i<=typemax(Int)) ||
+            throw(ArgumentError("$caller: index $i does not fit the platform Int type"))
+        Int(i)
+    end
+    @inbounds for i in 1:N-1,j in i+1:N
+        out[i]!=out[j] || throw(ArgumentError("$caller: SoS indices must be pairwise distinct"))
+    end
+    out
+end
+
+@inline function _ratpoint(p,d::Int,caller::AbstractString)
+    ntuple(d) do k
+        try
+            Rational{BigInt}(p[k])
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$caller: coordinate $k must be an exact finite real: " *
+                                sprint(showerror,err)))
+        end
+    end
+end
+@inline function _ratpoint(p::NTuple{2,Rational{BigInt}},d::Int,caller::AbstractString)
+    d==2||throw(ArgumentError("$caller: point has 2 coordinates but $d are required"));p
+end
+@inline function _ratpoint(p::NTuple{3,Rational{BigInt}},d::Int,caller::AbstractString)
+    d==3||throw(ArgumentError("$caller: point has 3 coordinates but $d are required"));p
+end
 
 # ════════════════════════════════════════════════════════════════════════════════
 # orient2 — sign of the signed area of triangle (a, b, c).
@@ -351,6 +395,7 @@ deterministic symbolic tie-break keyed on the integer indices `ia,ib,ic`
 (all distinct). Never returns 0.
 """
 function orient2_sos(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
+    idx=_sos_indices((ia,ib,ic),"orient2_sos")
     s = orient2(pa, pb, pc)
     s != 0 && return s
     # Degenerate (collinear/coincident): resolve by the exact +ε Edelsbrunner–Mücke SoS
@@ -360,7 +405,7 @@ function orient2_sos(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
     # on all distinct-point configs but disagreed with the canonical evaluator on
     # coincident-coordinate inputs — measured 144/4416 coincident vs 0/1584 distinct; the
     # canonical route makes the four-predicate consistency hold for every input.)
-    return _orient2_sos_exact(pa, pb, pc, ia, ib, ic)
+    return _orient2_sos_exact(pa, pb, pc, idx...)
 end
 
 # Sort four (index, point) pairs ascending by index; return (parity, sorted).
@@ -384,6 +429,7 @@ deterministic tie-break keyed on the distinct indices. Never returns 0.
 """
 function orient3_sos(pa, pb, pc, pd,
                      ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id),"orient3_sos")
     s = orient3(pa, pb, pc, pd)
     s != 0 && return s
     # Exact coplanarity: resolve by the canonical +ε Edelsbrunner–Mücke SoS, the SAME
@@ -393,7 +439,7 @@ function orient3_sos(pa, pb, pc, pd,
     # some coplanar-distinct configs — verified against a finite-ε exact-rational oracle:
     # e.g. points on x=2 gave −1 where the true +ε limit is +1. That path is reachable in
     # the perturb=false kernel, so it is replaced with the always-correct exact SoS.)
-    return _orient3_sos_exact(pa, pb, pc, pd, ia, ib, ic, id)
+    return _orient3_sos_exact(pa, pb, pc, pd, idx...)
 end
 
 """
@@ -403,9 +449,10 @@ Simulation-of-Simplicity in-circle. Never returns 0.
 """
 function incircle_sos(pa, pb, pc, pd,
                       ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id),"incircle_sos")
     s = incircle(pa, pb, pc, pd)
     s != 0 && return s
-    perm, sp = _sort4_pts(((ia, pa), (ib, pb), (ic, pc), (id, pd)))
+    perm, sp = _sort4_pts(((idx[1], pa), (idx[2], pb), (idx[3], pc), (idx[4], pd)))
     b = sp[2][2]; c = sp[3][2]; d = sp[4][2]
     # Leading SoS term of a degenerate in-circle is the orient2 of the three
     # highest-sorted points (lifting the lowest away): the first nonzero of an
@@ -419,7 +466,7 @@ function incircle_sos(pa, pb, pc, pd,
     # Fully degenerate (all orient2 minors vanish ⇒ the 4 points are collinear): the
     # fast minors cannot resolve it. Fall to the exact +ε SoS of the paraboloid-lifted
     # points, correct here where the constant `return perm` was only coincidentally so.
-    return _incircle_sos_exact(pa, pb, pc, pd, ia, ib, ic, id)
+    return _incircle_sos_exact(pa, pb, pc, pd, idx...)
 end
 
 """
@@ -430,6 +477,7 @@ Simulation-of-Simplicity in-sphere. Never returns 0.
 function insphere_sos(pa, pb, pc, pd, pe,
                       ia::Integer, ib::Integer, ic::Integer,
                       id::Integer, ie::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id,ie),"insphere_sos")
     s = insphere(pa, pb, pc, pd, pe)
     s != 0 && return s
     # Exact +ε SoS via the paraboloid lift — consistent with orient3/incircle. The old
@@ -439,7 +487,7 @@ function insphere_sos(pa, pb, pc, pd, pe,
     # and its constant `return perm` fallthrough was also wrong for 5 coplanar points.
     # Reached only for exactly cospherical inputs (rare — the kernel pre-perturbs), so
     # the BigInt cost is irrelevant.
-    return _insphere_sos_exact(pa, pb, pc, pd, pe, ia, ib, ic, id, ie)
+    return _insphere_sos_exact(pa, pb, pc, pd, pe, idx...)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -541,6 +589,42 @@ function _incircle_sos_exact(pa, pb, pc, pd,
     return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3)
 end
 
+"""
+    incircle3_sos(a,b,c,p, ia,ib,ic,ip) -> Int
+
+Exact in-circle sign for four coplanar 3-D `Float64` points.  The first three
+points define the oriented plane circle; the result has the sign of their chosen
+non-degenerate coordinate projection and is positive on the inside for a positive
+projected orientation.  Exact cocircular ties use the same +ε SoS evaluator as
+the other predicates.
+"""
+function incircle3_sos(pa,pb,pc,pd,
+                       ia::Integer,ib::Integer,ic::Integer,id::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id),"incircle3_sos")
+    a=(_coordf(pa,1),_coordf(pa,2),_coordf(pa,3))
+    b=(_coordf(pb,1),_coordf(pb,2),_coordf(pb,3))
+    c=(_coordf(pc,1),_coordf(pc,2),_coordf(pc,3))
+    d=(_coordf(pd,1),_coordf(pd,2),_coordf(pd,3))
+    orient3(a,b,c,d)==0 ||
+        throw(ArgumentError("incircle3_sos: a,b,c,d must be coplanar"))
+    axes=orient2((a[1],a[2]),(b[1],b[2]),(c[1],c[2]))!=0 ? (1,2) :
+         orient2((a[2],a[3]),(b[2],b[3]),(c[2],c[3]))!=0 ? (2,3) :
+         orient2((a[3],a[1]),(b[3],b[1]),(c[3],c[1]))!=0 ? (3,1) :
+         throw(ArgumentError("incircle3_sos: a,b,c are collinear"))
+    R=Rational{BigInt}
+    rel(q)=ntuple(k->R(q[k])-R(d[k]),3)
+    ar=rel(a);br=rel(b);cr=rel(c)
+    lift(q)=q[1]^2+q[2]^2+q[3]^2
+    ax,ay=ar[axes[1]],ar[axes[2]];bx,by=br[axes[1]],br[axes[2]]
+    cx,cy=cr[axes[1]],cr[axes[2]];al=lift(ar);bl=lift(br);cl=lift(cr)
+    det=al*(bx*cy-cx*by)+bl*(cx*ay-ax*cy)+cl*(ax*by-bx*ay)
+    det>0&&return 1;det<0&&return -1
+    lifted=ntuple(4) do k
+        q=(a,b,c,d)[k];(R(q[axes[1]]),R(q[axes[2]]),sum(R(q[j])^2 for j in 1:3))
+    end
+    return _orient_nd_sos_exact(lifted,idx,3)
+end
+
 # insphere SoS = orientation SoS of the points lifted to (x,y,z,x²+y²+z²) in 4-D — the
 # same paraboloid-lift construction as incircle, one dimension up. Correct-by-construction
 # +ε for EVERY degenerate configuration (cospherical or coplanar).
@@ -625,12 +709,15 @@ Exact 3-D orientation sign on `Rational{BigInt}` points (never 0: degeneracies b
 by the shared +ε SoS). Matches `orient3`/`orient3_sos` on dyadic input.
 """
 function orient3_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id),"orient3_rat")
+    a=_ratpoint(a,3,"orient3_rat");b=_ratpoint(b,3,"orient3_rat")
+    c=_ratpoint(c,3,"orient3_rat");d=_ratpoint(d,3,"orient3_rat")
     M = _RAT[a[1] a[2] a[3] one(_RAT); b[1] b[2] b[3] one(_RAT);
              c[1] c[2] c[3] one(_RAT); d[1] d[2] d[3] one(_RAT)]
     s = _rat_det_sign(M)
     s > 0 && return 1
     s < 0 && return -1
-    return _orient_nd_sos_exact((a, b, c, d), (Int(ia), Int(ib), Int(ic), Int(id)), 3)
+    return _orient_nd_sos_exact((a, b, c, d), idx, 3)
 end
 
 """
@@ -641,6 +728,9 @@ positively-oriented `a,b,c,d`, `e` strictly inside the circumsphere). Cospherica
 break by the shared +ε SoS via the 4-D paraboloid lift.
 """
 function insphere_rat(a, b, c, d, e, ia::Integer, ib::Integer, ic::Integer, id::Integer, ie::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id,ie),"insphere_rat")
+    a=_ratpoint(a,3,"insphere_rat");b=_ratpoint(b,3,"insphere_rat")
+    c=_ratpoint(c,3,"insphere_rat");d=_ratpoint(d,3,"insphere_rat");e=_ratpoint(e,3,"insphere_rat")
     lift(p) = p[1]*p[1] + p[2]*p[2] + p[3]*p[3]
     M = _RAT[a[1] a[2] a[3] lift(a) one(_RAT); b[1] b[2] b[3] lift(b) one(_RAT);
              c[1] c[2] c[3] lift(c) one(_RAT); d[1] d[2] d[3] lift(d) one(_RAT);
@@ -650,7 +740,7 @@ function insphere_rat(a, b, c, d, e, ia::Integer, ib::Integer, ic::Integer, id::
     s < 0 && return -1
     lp(p) = (p[1], p[2], p[3], lift(p))
     return _orient_nd_sos_exact((lp(a), lp(b), lp(c), lp(d), lp(e)),
-                                (Int(ia), Int(ib), Int(ic), Int(id), Int(ie)), 4)
+                                idx, 4)
 end
 
 """
@@ -659,11 +749,13 @@ end
 Exact 2-D orientation sign on `Rational{BigInt}` points; degeneracies break by SoS.
 """
 function orient2_rat(a, b, c, ia::Integer, ib::Integer, ic::Integer)::Int
+    idx=_sos_indices((ia,ib,ic),"orient2_rat")
+    a=_ratpoint(a,2,"orient2_rat");b=_ratpoint(b,2,"orient2_rat");c=_ratpoint(c,2,"orient2_rat")
     M = _RAT[a[1] a[2] one(_RAT); b[1] b[2] one(_RAT); c[1] c[2] one(_RAT)]
     s = _rat_det_sign(M)
     s > 0 && return 1
     s < 0 && return -1
-    return _orient_nd_sos_exact((a, b, c), (Int(ia), Int(ib), Int(ic)), 2)
+    return _orient_nd_sos_exact((a, b, c), idx, 2)
 end
 
 """
@@ -672,6 +764,9 @@ end
 Exact in-circle sign on `Rational{BigInt}` 2-D points (paraboloid-lift SoS for ties).
 """
 function incircle_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
+    idx=_sos_indices((ia,ib,ic,id),"incircle_rat")
+    a=_ratpoint(a,2,"incircle_rat");b=_ratpoint(b,2,"incircle_rat")
+    c=_ratpoint(c,2,"incircle_rat");d=_ratpoint(d,2,"incircle_rat")
     lift(p) = p[1]*p[1] + p[2]*p[2]
     M = _RAT[a[1] a[2] lift(a) one(_RAT); b[1] b[2] lift(b) one(_RAT);
              c[1] c[2] lift(c) one(_RAT); d[1] d[2] lift(d) one(_RAT)]
@@ -680,7 +775,7 @@ function incircle_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Int
     s < 0 && return -1
     lp(p) = (p[1], p[2], lift(p))
     return _orient_nd_sos_exact((lp(a), lp(b), lp(c), lp(d)),
-                                (Int(ia), Int(ib), Int(ic), Int(id)), 3)
+                                idx, 3)
 end
 
 end # module Predicates

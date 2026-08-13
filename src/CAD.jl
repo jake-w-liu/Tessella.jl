@@ -22,6 +22,7 @@ export on_surface, project_to, surface_residual, imprint_circle, imprint_ellipse
     q = try
         (Float64(a[1]), Float64(a[2]), Float64(a[3]))
     catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("CAD: coordinates must be Float64-representable: $(sprint(showerror, err))"))
     end
     (isfinite(q[1]) && isfinite(q[2]) && isfinite(q[3])) ||
@@ -33,14 +34,19 @@ end
 @inline _add(a,b) = (a[1]+b[1], a[2]+b[2], a[3]+b[3])
 @inline _scale(a,s) = (a[1]*s, a[2]*s, a[3]*s)
 @inline _cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
-@inline _norm(a) = sqrt(_dot(a,a))
+@inline _norm(a) = hypot(a[1],a[2],a[3])
 @inline function _unit(a)
     l=_norm(a)
     (isfinite(l) && l > 0) || throw(ArgumentError("CAD: vector must have finite positive length"))
     (a[1]/l,a[2]/l,a[3]/l)
 end
 @inline function _radius(r, caller)
-    rf = Float64(r)
+    rf = try
+        Float64(r)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: radius must be representable as Float64"))
+    end
     (isfinite(rf) && rf > 0) || throw(ArgumentError("$caller: radius must be finite and positive (got $r)"))
     return rf
 end
@@ -96,7 +102,12 @@ surface_residual(s::DiskS, x) =
     _result_scalar(_dot(s.n, _sub(_v(x), s.center)), "surface_residual(::DiskS)")
 
 @inline function _tol(tol, caller)
-    t = Float64(tol)
+    t = try
+        Float64(tol)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: tol must be representable as Float64"))
+    end
     (isfinite(t) && t >= 0) || throw(ArgumentError("$caller: tol must be finite and non-negative (got $tol)"))
     return t
 end
@@ -105,7 +116,9 @@ function on_surface(s::DiskS, x; tol=1e-9)
     t = _tol(tol,"on_surface(::DiskS)")
     d = _sub(_v(x), s.center); axial = _dot(d,s.n)
     radial = _sub(d,_scale(s.n,axial))
-    return abs(axial) <= t && _norm(radial) <= s.r + t
+    rl=_norm(radial)
+    radial_ok=rl<=s.r || rl-s.r<=t
+    return abs(axial) <= t && radial_ok
 end
 
 "Project `x` exactly onto surface `s` (nearest point on the true surface)."
@@ -122,7 +135,7 @@ function project_to(s::CylinderS, x)
     # (radial distance 0, residual −r). A scale-relative tolerance detects the on-axis case.
     # The scale is tied to actual floating-point roundoff, not a loose decimal
     # tolerance that would misclassify genuine near-axis points far from `base`.
-    if rl <= 4eps(Float64) * (_norm(d) + s.r + 1.0)    # on axis: pick ANY radial direction
+    if rl <= 16eps(Float64)*max(_norm(d),s.r,1.0)       # on axis: pick ANY radial direction
         # reference the coordinate axis LEAST aligned with s.axis so the cross is never
         # zero (a fixed (1,0,0) fails when the cylinder axis is itself ∥ x, e.g. an
         # x-directed coax bore).
@@ -131,17 +144,20 @@ function project_to(s::CylinderS, x)
         return _result_point(_add(footpt, _scale(_unit(_cross(s.axis, ref)), s.r)),
                              "project_to(::CylinderS)")
     end
-    _result_point(_add(footpt, _scale(rad, s.r/rl)), "project_to(::CylinderS)")
+    ur=(rad[1]/rl,rad[2]/rl,rad[3]/rl)
+    _result_point(_add(footpt, _scale(ur,s.r)), "project_to(::CylinderS)")
 end
 function project_to(s::SphereS, x)
     d = _sub(_v(x), s.center); dl = _norm(d)
     dl == 0 && return _result_point(_add(s.center, (s.r,0.0,0.0)), "project_to(::SphereS)")
-    _result_point(_add(s.center, _scale(d, s.r/dl)), "project_to(::SphereS)")
+    u=(d[1]/dl,d[2]/dl,d[3]/dl)
+    _result_point(_add(s.center, _scale(u,s.r)), "project_to(::SphereS)")
 end
 function project_to(s::DiskS, x)
     d = _sub(_v(x), s.center); axial = _dot(d,s.n)
     planar = _sub(d,_scale(s.n,axial)); rl = _norm(planar)
-    q = rl <= s.r ? _add(s.center,planar) : _add(s.center,_scale(planar,s.r/rl))
+    q = rl <= s.r ? _add(s.center,planar) :
+        _add(s.center,_scale((planar[1]/rl,planar[2]/rl,planar[3]/rl),s.r))
     return _result_point(q, "project_to(::DiskS)")
 end
 
@@ -151,7 +167,8 @@ function _imprint_count(nseg::Integer, caller::AbstractString)
     n = Int(nseg)
     try
         Base.checked_mul(n, sizeof(NTuple{3,Float64}))
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: requested point storage overflows the platform Int limit"))
     end
     return n
@@ -170,14 +187,16 @@ of a coax bore/shield through a flat case wall. Throws if the plane is not ⊥ t
 function imprint_circle(cyl::CylinderS, plane::PlaneS; nseg::Integer=48)
     nseg = _imprint_count(nseg,"imprint_circle")
     ax = cyl.axis
-    abs(abs(_dot(ax, plane.n)) - 1.0) < 1e-12 ||
+    _norm(_cross(ax,plane.n)) == 0.0 ||
         throw(ArgumentError("imprint_circle: plane must be perpendicular to the cylinder axis (use imprint_ellipse)"))
     denom = _dot(plane.n, ax)
     t = -_dot(plane.n, _sub(cyl.base, plane.p0)) / denom
     center = _add(cyl.base, _scale(ax, t))
     a0 = abs(ax[1]) < 0.9 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
     e1 = _unit(_cross(ax, a0)); e2 = _cross(ax, e1)
-    pts = [ _add(center, _add(_scale(e1, cyl.r*cos(2π*k/nseg)), _scale(e2, cyl.r*sin(2π*k/nseg)))) for k in 0:nseg-1 ]
+    center=_result_point(center,"imprint_circle")
+    pts = [ _result_point(_add(center, _add(_scale(e1, cyl.r*cos(2π*k/nseg)), _scale(e2, cyl.r*sin(2π*k/nseg)))),
+                          "imprint_circle") for k in 0:nseg-1 ]
     (center, pts)
 end
 
@@ -191,7 +210,7 @@ bounded intersection ⇒ throws.)
 function imprint_ellipse(cyl::CylinderS, plane::PlaneS; nseg::Integer=48)
     nseg = _imprint_count(nseg,"imprint_ellipse")
     ax = cyl.axis; denom = _dot(plane.n, ax)
-    abs(denom) > 1e-14 || throw(ArgumentError("imprint_ellipse: plane is parallel to the cylinder axis"))
+    denom != 0.0 || throw(ArgumentError("imprint_ellipse: plane is parallel to the cylinder axis"))
     a0 = abs(ax[1]) < 0.9 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
     e1 = _unit(_cross(ax, a0)); e2 = _cross(ax, e1)
     pts = NTuple{3,Float64}[]
@@ -201,11 +220,11 @@ function imprint_ellipse(cyl::CylinderS, plane::PlaneS; nseg::Integer=48)
         rvec = _add(_scale(e1, cyl.r*cos(θ)), _scale(e2, cyl.r*sin(θ)))
         p_ax0 = _add(cyl.base, rvec)                      # on cylinder, at axial 0
         t = -_dot(plane.n, _sub(p_ax0, plane.p0)) / denom # slide along axis onto the plane
-        push!(pts, _add(p_ax0, _scale(ax, t)))
+        push!(pts, _result_point(_add(p_ax0, _scale(ax, t)),"imprint_ellipse"))
     end
     # center = axis∩plane
     tc = -_dot(plane.n, _sub(cyl.base, plane.p0)) / denom
-    (_add(cyl.base, _scale(ax, tc)), pts)
+    (_result_point(_add(cyl.base, _scale(ax, tc)),"imprint_ellipse"), pts)
 end
 
 end # module CAD
