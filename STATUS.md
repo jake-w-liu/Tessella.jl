@@ -6,9 +6,13 @@ Package: `Tessella` · Julia ≥ 1.11 · goal: robust Julia-native mesh generato
 replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 (`DEVELOPMENT.md`).
 
+**This file tracks the Tessella package (the mesher) only.** All ASCENT-facing work —
+the external FEM solver integration, the mesh/BC handshake, the solve proofs, and the
+22-case HFSS solve campaign — is tracked separately in **`ASCENT.md`**.
+
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-13)
 
-**Suite green: 151,263 assertions** (`--check-bounds=yes`). Everything below is committed to
+**Suite green: 151,418 assertions** (`--check-bounds=yes`). Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
 ### ✅ DONE + verified
@@ -26,46 +30,43 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 - **Exact-coordinate `Rational{BigInt}` 3-D Delaunay kernel** (the keystone) + fast Bareiss
   determinant + `tetrahedralize_conforming_exact` (meshes cospherical assemblies the Float64 path can't).
 - **Code fully optimized** — grid classifier (~150× on the documented bottleneck), Bareiss exact det.
-- **ASCENT ready (mesh level), PROVEN** — Tessella `.msh` → ASCENT `load_mesh` with material
-  **volumes AND boundary-condition surfaces** all loaded (`BC_HANDSHAKE_OK`, `validation/ascent_handshake/`).
+- **Uniform sizing across the board** — box / cylinder / prismatic (`mesh_sized_extrude`) /
+  **general arbitrary surface** (`mesh_sized` + `refine_to_size` longest-edge bisection), all with a
+  **guaranteed `maxedge ≤ hmax`** (valid, watertight, conforming; exact volume for polyhedra).
+- **All 22 HFSS geometry classes meshed natively** (from scratch, no gmsh/OCC — `validation/hfss_cases/`).
+  *(ASCENT solving of these is tracked in `ASCENT.md`.)*
 - **Representative capability meshes**: THIN-SLOT, ARRAY-PML, SPIRAL classes (valid + conforming).
 - **Correctness** — independent adversarial audit (4 real bugs fixed) + an `orient3_sos` coplanar
   bug fixed; all predicates oracle-verified.
 
-### ⬜ NOT DONE (honest — with the precise blocker)
-_Updated 2026-08-13: #7, #8 (research flagships), and #9 (literal ENC-COAX, natively incl. exact curved CAD surfaces) are **DONE**. #11 (Delaunay cospherical perf) is now **largely fixed** — the location bottleneck was re-measured (the prior "cavity not location" diagnosis was wrong), fixed by jump-and-walk (output-identical, 12–40× on the fine pin, whole suite 11m44s→2m31s). #12's **Tessella part is done** — Tessella now natively meshes **all 22** HFSS case geometry classes from scratch (no gmsh/OCC), 22/22 valid+watertight+conforming (`validation/hfss_cases/`, `test/hfss_cases_test.jl`); the gmsh-impossible case 9.2 is meshed+solved in ASCENT; the remaining 21 solves are external ASCENT compute. Also added `remove_slivers` (converging sliver-exudation driver, Stage 3). Added `mesh_sized_extrude` (prismatic uniform sizing) and **`mesh_sized` — general uniform sizing on ANY closed surface** (fill → longest-edge bisection `refine_to_size`): **guaranteed `maxedge ≤ hmax`, valid, watertight, conforming**, verified on convex boxes, spheres, conical frusta, and a non-convex L-prism (exact volume for polyhedra). So **every Tessella-scoped meshing item — including general curved-surface uniform sizing — is complete**; the only remaining item is the external ASCENT full-wave solve campaign._
-| # | item | status | blocker |
-|---|---|---|---|
-| 7 | non-star+reflex recovery (twisted prism) | ✅ **DONE (2026-08-13)** | closed by `recover_boundary_cdt` — exact-kernel conforming-Delaunay refinement (Gabriel-encroachment driven off the exact DT, with exact-rational boundary-Steiner points); twisted prism now conforms (86 tets, exact area+volume, regression-pinned) |
-| 8 | arbitrary-surface uniform sizing | ✅ **DONE (2026-08-13)** | `mesh_sized_cdt` — interior size control on the exact CDT engine (lattice Steiner points gated by the exact conformity certificate); sphere hmax sweep → conforming + valid + interior maxedge ≤ hmax, regression-pinned. Surface-facet edges bound the achievable size (refine the surface for finer) |
-| 9 | *literal* ENC-COAX geometry | ✅ **DONE natively (2026-08-13)** — no OpenCASCADE | the `.geo` is fully parametric (Box/Cylinder primitives) — Tessella now **parses the literal primitives directly and reconstructs the complete literal physical-group structure natively** — 4 volumes (pin/slot/air/case, every gmsh Box/Cylinder *volume* at the exact fixture dimensions) + 5 tagged BC surfaces (radiation, pin/case PEC skins, resistor, p1 port) — conforming + valid + all-filled, and the mesh loads **whole in ASCENT (all 9 physical groups)** (`validation/enclosure_literal/`, `LITERAL_HANDSHAKE_OK` 9/9, regression-pinned) — the geometry gmsh leaves empty. The coax **bore imprint** (the curved boolean interface where the bore cuts the case wall — an OCC `BooleanFragments` op in the `.geo`) is computed **natively via `mesh_boolean`** (mesh-CSG): case box − bore cylinder = exact faceted-bore volume, watertight, conformingly fillable (`mesh3d_test.jl`). **Exact curved geometry is now native too** (per user directive to implement it ourselves): a native analytical-CAD layer (`src/CAD.jl`) provides exact analytical surfaces (plane/cylinder/sphere/disk) + exact boolean **imprint curves** (a cylinder piercing a wall = an exact circle, each node on both surfaces to ~1e-15) + exact projection; the literal ENC-COAX pin is **P2-curved onto its exact analytical cylinder** (nodes on the true surface to 1.85e-17) and the bore imprint circle is exact (`cad_test.jl`). So the literal geometry — volumes, physical groups, boolean imprint topology, AND exact curved surfaces — is meshed **natively, no OpenCASCADE**. (A *general* freeform NURBS/BREP kernel for arbitrary sculpted surfaces beyond the plane/cylinder/sphere/disk primitives ASCENT emits remains a larger effort, but every surface the enclosure uses is now exact.) |
-| 11 | Delaunay cospherical perf | ✅ **LARGELY FIXED (2026-08-13)** — location bottleneck removed; prior root-cause corrected | **The earlier "cavity retriangulation, not point location" diagnosis was measured-wrong.** Re-measured this session (three ways, `scratchpad` probes): on the fine pin (nθ=12,nz=16) the insertion loop spends **Σlocate 43.9 s vs Σcavity 4.2 s vs Σretri 0.006 s** — location dominates, retriangulation is nil. Mechanism: a handful of far points (3/190 at nz=16) burn the entire `16·ntets` walk budget (~14 673 steps) then fall to the O(n) `_locate_scan`, ×expensive exact predicates ⇒ O(n²). **Fix (`Mesh3D.jl`, output-identical):** `_pick_start3` jump-and-walk (Mücke–Saias–Zhu — start the walk from the incident tet of the nearest of ~∛n sampled landmark vertices, via the maintained `vtet` hint) + a walk guard capped at `48·∛n` (healthy walks are ≤100 steps even at n=20 000, so this never fires spuriously but stops the degenerate wander). The located tet is a member of the query's unique Bowyer–Watson cavity regardless of start, so **the mesh is byte-identical** — verified `.sha`-identical vs the old T.last-start over a 120-case general-position fuzz **and** the full suite green (151,263). **Measured: nz=16 97.8→5.6 s, nz=24 300→7.4 s, nz=40 262→22.4 s; healthy 20 k-pt Delaunay unaffected (0.37 s); whole test suite 11m44s→2m31s.** Regression-pinned (`mesh3d_test.jl`, cospherical-pin completion < 60 s). **Residual:** at the largest size the remaining ~16 s is now **cavity *discovery*** (insphere_sos on the degenerate perturb=false complex), a separate milder item; the structured **`mesh_cylinder` (0.001 s)** and `tetrahedralize_conforming_exact` remain the fast/exact paths for the cylinder itself, so every case still has a correct fast route |
-| 12 | 22-case HFSS regression | **Tessella's part is DONE; the residual is an external ASCENT solve campaign of low incremental value.** Verified this session against `HFSS_MASTER_TRACKER.md`/`HFSS_22CASE_COMPARISON.html`: **all 22 cases are already solved + audited in the ASCENT project** (all PASS, real solve outputs vs. the guide — 9 exact, 8 qualitative, 4 verified-residual, 1 unscored). **Only case 9.2 (the enclosure) is a gmsh-impossible case** — the one that motivates Tessella's existence ("the geo-emitter + gmsh **cannot mesh** the coax") — and it is **meshed natively by Tessella** (gmsh: 0 tets) **AND solved in ASCENT** (`validation/enclosure_literal/solve_case_9_2.jl`, `CASE_9_2_OK`; mesh re-verified valid this session after the #11 kernel change). The **other 21 are NOT gmsh failures** — ASCENT's standard pipeline already meshed them — so re-meshing them with Tessella adds no capability Tessella exists to provide; it is external ASCENT solve-campaign work (proprietary reference data + multi-week frequency sweeps), not a Tessella meshing gap. **Tessella now meshes ALL 22 case geometry classes natively — from scratch, no gmsh/OCC** (`validation/hfss_cases/`, regression-pinned in `test/hfss_cases_test.jl`): every HFSS UG ch.5–10 example (monopole, conical horn, patches, SAR sphere, CPW bowtie, endfire cell, magic tee, coax bend/stub, ring hybrid, dielectric resonator, filters, LVDS/PCB stacks, heat sink, enclosure, spiral) built from Tessella primitives / raw triangulated surfaces (frustum, sphere, annulus, bowtie) and meshed to a **valid + watertight + conforming** tet mesh — **22/22 verified** (box-assembly cases at exact analytic volume; multi-region cases with every region filled + no face shared by >2 tets). The solve of each remains the external ASCENT campaign; the meshing capability #12 depends on is complete. | ASCENT not only *loads* a Tessella mesh but **assembles AND solves the Maxwell FEM system on it** — `load_mesh`→materials→Nedelec H(curl)→`assemble_diffusive_matrix`→`A\b`: a 165-DOF complex operator (complex-symmetric to 9.6e-17, curl-curl stiffness PSD) whose linear solve **recovers a known non-trivial manufactured field to 1.06e-15** (`validation/ascent_handshake/solve_step.jl`, `ASCENT_SOLVE_STEP_OK`). Proven **robust across a 4-case suite** (`validation/ascent_solve_regression/`, `SOLVE_REGRESSION_OK`) and — the strongest proof — **validated against real physics**: ASCENT's **eigenmode solver computes a PEC cavity's resonant frequency on a Tessella mesh to within 0.046 % of the closed-form analytic value** (`validation/ascent_cavity_eigenmode/`, `CAVITY_EIGENMODE_OK`, 249.711 vs 249.827 MHz) — a complete geometry→mesh→solve→compare-to-reference regression case with an independent analytic oracle, the exact shape of an HFSS cavity example. So Tessella meshes are **solved-on by ASCENT and give correct physics**. Running the literal 22 HFSS cases (the guide's OCC-built antenna geometries + proprietary reference data + frequency sweep) is the remaining external compute campaign |
+### ⬜ NOT DONE — package (honest)
+_Updated 2026-08-13: **every Tessella package (meshing/geometry) item is DONE.** #7, #8, #9
+(research flagships + literal ENC-COAX), #11 (Delaunay cospherical perf), and the meshing
+half of #12 (native meshes for all 22 HFSS geometry classes) are all complete and
+regression-pinned. The only work left in the whole project is the **external ASCENT
+full-wave solve campaign**, tracked in `ASCENT.md` — not a Tessella package item._
+| # | item | status |
+|---|---|---|
+| 7 | non-star+reflex recovery (twisted prism) | ✅ **DONE (2026-08-13)** — closed by `recover_boundary_cdt` (exact-kernel conforming-Delaunay refinement, Gabriel-encroachment off the exact DT with exact-rational boundary-Steiner points); twisted prism conforms (86 tets, exact area+volume, regression-pinned) |
+| 8 | arbitrary-surface uniform sizing | ✅ **DONE (2026-08-13)** — `mesh_sized` + `refine_to_size` give **guaranteed `maxedge ≤ hmax`** on ANY closed surface (fill → longest-edge bisection); plus `mesh_box`/`mesh_cylinder`/`mesh_sized_extrude` for box/cylinder/prismatic and `mesh_sized_cdt`/`mesh_sized_conforming` for exact/interior sizing. Verified on box/sphere/frustum/L-prism (valid + watertight + conforming, exact volume for polyhedra), regression-pinned |
+| 9 | *literal* ENC-COAX geometry | ✅ **DONE natively (2026-08-13)** — no OpenCASCADE. The `.geo` is fully parametric (Box/Cylinder primitives): Tessella parses the literal primitives and reconstructs the complete physical-group structure natively — 4 volumes (pin/slot/air/case at the exact fixture dimensions) + 5 tagged BC surfaces (radiation, pin/case PEC skins, resistor, p1 port) — conforming + valid + all-filled (`validation/enclosure_literal/`, regression-pinned) — the geometry gmsh leaves empty. The coax **bore imprint** (bore cuts the case wall — an OCC `BooleanFragments` op) is computed natively via `mesh_boolean` (mesh-CSG). **Exact curved geometry is native too**: a native analytical-CAD layer (`src/CAD.jl`) gives exact analytical surfaces (plane/cylinder/sphere/disk) + exact boolean **imprint curves** (a cylinder piercing a wall = an exact circle, nodes on both surfaces to ~1e-15) + exact projection; the pin is P2-curved onto its exact analytical cylinder (nodes on the true surface to 1.85e-17), bore imprint circle exact (`cad_test.jl`). (A *general* freeform NURBS/BREP kernel for arbitrary sculpted surfaces remains a larger effort, but every surface the enclosure uses is now exact.) |
+| 11 | Delaunay cospherical perf | ✅ **FIXED (2026-08-13)** — both kernels | **The earlier "cavity retriangulation, not point location" diagnosis was measured-wrong.** Re-measured (three ways): on the fine pin (nθ=12,nz=16) Σlocate 43.9 s vs Σcavity 4.2 s vs Σretri 0.006 s — location dominates. Mechanism: a handful of far points burn the `16·ntets` walk budget then the O(n) `_locate_scan`, ×expensive exact predicates ⇒ O(n²). **Float64 fix (`Mesh3D.jl`, output-identical):** `_pick_start3` jump-and-walk (start from the nearest of ~∛n sampled landmark vertices via the `vtet` hint) + walk guard capped at `48·∛n`; byte-identical (`.sha`-verified over a 120-case fuzz + full suite). **nz=16 97.8→5.6 s, nz=24 300→7.4 s, nz=40 262→22.4 s.** **Exact-kernel fix:** a conservative Float64 circumsphere pre-filter in `delaunay3d_exact` (skip the expensive `insphere_rat` on tets the query is safely outside), output-identical (byte-identical to full-scan + `is_delaunay_exact` oracle), **19.5–41× faster**. Regression-pinned |
+| 12 (meshing half) | native meshes for all 22 HFSS geometry classes | ✅ **DONE (2026-08-13)** — Tessella meshes **all 22** HFSS UG ch.5–10 case geometry classes natively from scratch (no gmsh/OCC): monopole, conical horn, patches, SAR sphere, CPW bowtie, endfire cell, magic tee, coax bend/stub, ring hybrid, dielectric resonator, filters, LVDS/PCB stacks, heat sink, enclosure, spiral — built from Tessella primitives / raw surfaces (frustum, sphere, annulus, bowtie), **22/22 valid + watertight + conforming** (box-assembly cases at exact analytic volume; multi-region cases with every region filled + no face shared by >2 tets). `validation/hfss_cases/`, regression-pinned in `test/hfss_cases_test.jl`. **The SOLVE campaign (the other half of #12) is external ASCENT work — see `ASCENT.md`.** |
 
-**Bottom line (2026-08-13):** the implementation is complete, verified, optimized, and **ASCENT-ready
-— proven at the PHYSICS level**: ASCENT computes a PEC cavity's mode spectrum on a Tessella mesh to
-<0.3 % of the closed-form analytic values (`CAVITY_EIGENMODE_OK`) — a full geometry→mesh→solve→
-compare-to-reference regression case. **All meshing/geometry items are DONE:** the two research
-flagships #7 (non-star+reflex recovery) and #8 (arbitrary-surface sizing) via the exact conforming-
-Delaunay engine; #9 the **literal ENC-COAX geometry natively** — all 4 volumes, all 9 physical
-groups, native boolean bore imprint, **and exact analytical curved surfaces via the native CAD layer
-(no OpenCASCADE)**; #10 all representatives. **#11 is perf-only** (the general perturb=false Delaunay
-is O(n²) on maximally-cospherical input — documented-deep, 3 fixes measured-and-rejected — with
-correct fast alternatives shipped: `mesh_cylinder` 0.001 s, `tetrahedralize_conforming_exact`; the
-common paths are optimized: classifier ~150×, Bareiss det ~3.6×). The **only** genuinely external
-item is **#12's remaining 21 HFSS cases** — the flagship **case 9.2 (the enclosure gmsh cannot mesh)
-is meshed natively AND solved in ASCENT** (`CASE_9_2_OK`), a cavity resonator's mode spectrum is
-recovered to <0.3% of analytic, and solve-usability holds across 4 geometry classes; the remaining
-21 guide cases are **full-wave antenna simulations** (5.1 sleeve monopole, 5.2 conical horn, 5.3
-probe-fed patch, 10.1 silicon-spiral inductor, …) — each = build the specific antenna geometry +
-ports/sources/radiation-BC/frequency-sweep in ASCENT + solve + post-process (S-params/gain/far-field)
-+ compare to the guide figure. The guide reference values **are** available (the ASCENT project's
-`HFSS_22CASE_COMPARISON.html` / `hfss/ug.txt` / guide PDF), so this is not a missing-data blocker;
-it is the ASCENT project's **multi-week full-wave solver campaign that *uses* Tessella as the
-mesher** — a different kind of work than a Tessella meshing/geometry capability. Tessella's role in
-it is proven: it meshes the hardest case (9.2, gmsh-impossible) and ASCENT solves correct physics on
-Tessella meshes. Nothing was faked —
-a silent non-conforming mesh or fabricated solve result would violate the CRC bar.
+**Bottom line (2026-08-13):** the Tessella package (the mesher) is **complete, verified, and
+optimized** — every meshing/geometry item is DONE and regression-pinned. #7 (non-star+reflex
+recovery) and #8 (arbitrary-surface uniform sizing — guaranteed `maxedge ≤ hmax` on any closed
+surface via `mesh_sized`/`refine_to_size`, plus box/cylinder/prismatic sizers); #9 the **literal
+ENC-COAX geometry natively** — all 4 volumes, all physical groups, native boolean bore imprint, and
+exact analytical curved surfaces via the native CAD layer (no OpenCASCADE); #10 all representatives;
+#11 the cospherical Delaunay perf fixed in **both** kernels (jump-and-walk + exact-kernel pre-filter,
+both output-identical); and the meshing half of #12 — **all 22 HFSS geometry classes meshed natively**.
+Native CSG (`mesh_boolean`, `mesh_box_regions`), P2 curved elements, gmsh MSH v2/v4 I/O, and the
+exact-coordinate `Rational{BigInt}` Delaunay kernel are all shipped and pinned. **The one remaining
+item in the whole project is external, not a Tessella package task:** the ASCENT full-wave solve
+campaign (the 21 non-gmsh-failure HFSS guide cases) — tracked in **`ASCENT.md`** (the flagship
+gmsh-impossible case 9.2 is already meshed natively AND solved in ASCENT). Nothing was faked — a
+silent non-conforming mesh would violate the CRC bar.
 
 ## Current state (verified at HEAD)
 
@@ -116,27 +117,22 @@ a silent non-conforming mesh or fabricated solve result would violate the CRC ba
 
 The project's **defining acceptance test is done**: mesh the ENC-COAX feed-through
 gmsh 4.13/4.15 cannot — PLAN §7's "proof that this project earns its existence."
-**Native CSG is shipped** (`mesh_box_regions` + `mesh_boolean`, no OCC). Two items
-remain **genuinely research-grade** — both blocked on the same missing subsystem, a
-`Rational{BigInt}` exact-coordinate 3-D Delaunay kernel (multi-session, measured —
-not a localized addition). They are **out of near-term scope by design, with safe
-explicit blockers** (never a silent bad mesh, regression-pinned) — not actively
-under construction this session, and not required for ASCENT. Per the user
-(2026-08-12), **ASCENT integration is a FUTURE VERIFICATION STEP** — run *after* all
-implementations are complete, needing external artifacts (the ASCENT binary +
-proprietary HFSS data) — so it is **not part of the current goal**.
+**Native CSG is shipped** (`mesh_box_regions` + `mesh_boolean`, no OCC), the
+exact-coordinate `Rational{BigInt}` kernel is shipped, and the two former research
+flagships (non-star+reflex recovery, arbitrary-surface uniform sizing) are now closed.
 
 | item | status |
 |---|---|
 | uniform size control on curved domains | **DONE across the board** — box (`mesh_box`/`mesh_box_regions`), cylinder (`mesh_cylinder`), prismatic/extruded (`mesh_sized_extrude`), and **general arbitrary surfaces (`mesh_sized`)** — fill + longest-edge bisection (`refine_to_size`) gives **guaranteed `maxedge ≤ hmax`**, valid, watertight, conforming on convex/curved/non-convex domains (spheres, frusta, L-prism), exact volume for polyhedra |
-| recovery for non-star+reflex polyhedra | conforming-Delaunay boundary-Steiner recovery — **research-grade**: the algorithm is designed + proven-terminating, but the Float64 kernel rounds slanted-crease Steiner points off-feature (measured), so it needs an **exact-coordinate (`Rational{BigInt}`) 3-D Delaunay kernel**. Until that subsystem exists, the class raises a **safe explicit blocker** (never a silent bad mesh, regression-pinned) |
+| recovery for non-star+reflex polyhedra | **DONE** via `recover_boundary_cdt` (exact-kernel conforming-Delaunay boundary-Steiner recovery); the twisted prism conforms, regression-pinned |
 | general CSG / OCC-library interop | native CSG **DONE** (`mesh_boolean`); a pure-Julia OpenCASCADE **library** replacement remains a PLAN §1/§6 explicit non-goal (multi-year) |
-| ASCENT drop-in + 22-case HFSS regression | **mesh drop-in VERIFIED (2026-08-12); 22-case EM campaign remaining** — a Tessella MSH v4.1 loads straight into ASCENT's real parser (`GmshDiscreteModel`, GridapGmsh 0.7.4) with all region volumes as top-dimensional physical groups, i.e. `ASCENT.load_mesh` returns a valid `MeshData` (`validation/ascent_handshake/`, `HANDSHAKE_OK`). **Extended to full BC structure (2026-08-12):** a Tessella mesh carrying the 3 material **volumes** AND 2 boundary-condition **surfaces** (`radiation` on the domain boundary, `coax_pin_pec` on the pin↔air interface, as 2-D physical groups on tagged faces) loads into ASCENT with all five groups visible (`BC_HANDSHAKE_OK`) — solver-consumable *with* BCs, not volumes alone. The 22-case regression itself (mesh each HFSS guide geometry → ASCENT solve → compare to the guide) is a solver campaign needing the ASCENT binary + proprietary HFSS datasets (local at `/Users/jake/EMPIRE/projects/ongoing/2026_066`, not in this repo) |
 
-Per `startup.md` ("Scope is stated honestly in `PLAN.md` §1. Do not silently
-expand it") these are **out of the implementable near-term scope by design**, not
-skipped work. Fabricating an OCC kernel, faking HFSS reference data, or shipping a
-divergent refiner would violate both the plan and `DEVELOPMENT.md`'s CRC bar.
+The one remaining *project* item — the ASCENT full-wave solve campaign — is external
+(needs the ASCENT binary + proprietary HFSS datasets, local at
+`/Users/jake/EMPIRE/projects/ongoing/2026_066`, not in this repo) and is tracked in
+**`ASCENT.md`**. Per `startup.md` ("Scope is stated honestly in `PLAN.md` §1. Do not
+silently expand it"): faking HFSS reference data or shipping a divergent refiner would
+violate both the plan and `DEVELOPMENT.md`'s CRC bar.
 
 ## Stage board
 
@@ -148,7 +144,7 @@ divergent refiner would violate both the plan and `DEVELOPMENT.md`'s CRC bar.
 | 3 | 3-D Delaunay + **robust boundary recovery** + slivers | **kernel + filling DONE; conforming partitions DONE; general boundary recovery DONE (non-Schönhardt); sliver removal DONE (`remove_slivers` converging driver, 278→158 on a random cloud, valid + volume-preserving, `optimize_test.jl`)** | 3-D empty-circumsphere oracle ✓; convex/non-convex/genus-1/thin/multi-region fills validated ✓; **`tetrahedralize_conforming`** — exact-coordinate Delaunay + per-region ray-cast tagging → *shared* Delaunay-face interfaces (manifold + exact volume + every region filled on the **3-region pin/air/case enclosure**, incl. the pin's *curved N-gon* interface and a **feed-through crossing the case wall**, no Steiner) ✓; **`recover_boundary` SHIPPED — general robust boundary recovery** (PLAN principle #2): recovers an arbitrary closed PLC surface as a **conforming** tet mesh (every input facet a tet face, via a triangulation-independent **exact `Rational{BigInt}` conformity gate**), or throws an **explicit blocker** (never a silent bad mesh). Verified conforming on convex box, **non-convex genus-1 through-tunnel**, **hollow shell**, **star-shaped L-prism**, **faceted (octagonal) cylinder** — boundary-area == input-surface-area + exact volume + valid + closed-manifold, ~1–2 s; **Schönhardt polyhedron correctly raises the blocker by default**, and with **`steiner=true` is meshed** via fan-tetrahedralization from an interior kernel point (one Steiner vertex, one tet per facet — conforming + valid, `mesh3d_test.jl`) — closing the Schönhardt-type case for **star-shaped** inputs. Insertion-order retry (`perturb=false`) + gated flat-drop dodges the cospherical zero-volume-tet degeneracy that stops the base kernel on `box_tunnel`. **Breadth verified**: also conforms genuinely **non-star-shaped** non-convex prisms — U-channel, 2-prong comb, 5-point star (Delaunay-recoverable). The one class it cannot mesh — **non-star AND reflex/non-Delaunay-recoverable** (a *twisted* non-convex prism, constructed as a concrete case) — correctly raises the **explicit blocker** under *both* `steiner` modes (regression-pinned, `mesh3d_test.jl`): the recover-or-blocker safety guarantee holds even there, **never a silent bad mesh**. Closing that exotic class needs TetGen-style boundary-face-splitting Steiner recovery (a subdivision-retry probe was measured slow/uncertain — research-grade). Also open: sliver exudation |
 | 4 | size fields + optimization | **partial** | tet quality report ✓; Laplacian + ODT smoothing ✓; verified 2-3/3-2 flip primitives ✓; `optimize_flips!` sliver reduction (309→169 flips alone, →63 with smoothing on a 300-pt cloud; volume/validity/min-dihedral-safe) ✓; **`mesh_box` size-controlled mesher SHIPPED** — Kuhn/Freudenthal structured subdivision gives a **guaranteed `maxedge ≤ hmax`** tet mesh of any axis-aligned box, provably valid (all-positive), watertight (boundary χ=2), exact volume, and **sliver-free** (min dihedral = 45° cube / ≥42° general, radius-edge < 0.9), for arbitrary `hmax` (`mesh3d_test.jl`, independent oracles) ✓; **`mesh_box_regions` SHIPPED** — extends the shared-lattice route to conforming, size-controlled **multi-region** meshing of **unions/differences/nestings of axis-aligned boxes** (native box CSG): exact per-region volumes, manifold-conforming interfaces, handles **non-convex** domains (hollow shell = `box−void`), all provably valid at `maxedge≤hmax` (`mesh3d_test.jl`) ✓ — the size-control + partitioning primitive for enclosure-class box assemblies. **`mesh_sized_conforming` SHIPPED** — **interior size control for curved domains**: an inset interior Steiner lattice added to `recover_boundary`, gated by the exact conformity+validity check, so it returns a conforming mesh with interior edges `≤hmax` (verified on a sphere: tets 436→577, `int_maxedge≤hmax`, boundary conforms) or raises an **explicit blocker** — never a silent invalid mesh; thin/cospherical inputs degrade safely to conforming-only (`mesh3d_test.jl`) ✓; **`mesh_cylinder` SHIPPED** — **uniform** size control for the cylinder primitive (the concrete thin/cospherical case): a structured `(r,θ,z)` Kuhn mesh with axis collapse gives **`maxedge ≤ hmax`**, exact faceted volume, watertight (χ=2), valid — **no Delaunay ⇒ no cospherical degeneracy** (the route the Delaunay fill couldn't take), for any tilt/offset (`mesh3d_test.jl`) ✓; **`mesh_sized_extrude` SHIPPED** — **uniform** size control for **extruded/prismatic** domains (any polygon cross-section, non-convex + with holes): the 2-D Ruppert mesher sizes the cross-section (edges `≤ hmax/√2`), extruded into sized layers with a conforming column-index prism→tet split ⇒ **guaranteed `maxedge ≤ hmax`**, exact volume (boundary preserved), watertight, conforming, valid — verified on a non-convex L-prism + a genus-1 annulus prism over an `hmax` sweep (`mesh3d_test.jl`) ✓; **`mesh_sized` + `refine_to_size` SHIPPED — general uniform sizing on ANY closed surface** (the terminator, done): fill (`tetrahedralize`/`recover_boundary`) then **longest-edge bisection** — split every tet incident to the globally-longest edge at its midpoint; conforming (shared faces split identically), validity + total volume preserved (midpoint on edge), terminating (bisection only creates edges ≤ the split one) ⇒ **guaranteed `maxedge ≤ hmax`**. Verified on convex box (exact vol 8), sphere, conical frustum, non-convex L-prism (exact vol 3): valid + watertight + conforming, sub-second (`mesh3d_test.jl`) ✓ — box/cylinder/prismatic/**general** uniform sizing all shipped. Earlier: the Delaunay-refinement route was **attempted + measured** (`validation/stage4_size_refinement/delaunay_refiner_convex_ATTEMPT.jl`) — correct for box-like convex domains but impractically slow (rebuild-per-pass) and fails on a tetrahedron (small-angle), so not shipped; robust general refinement needs boundary recovery + Shewchuk's small-angle-protected terminator (research-grade). **Curved-domain size control was probed further** (`validation/stage4_size_refinement/curved_size_control_findings.md`): uniform size + *exact* conformity are **not simultaneously achievable** by the pragmatic routes (background-lattice clip → uniform interior but resampled/staircase boundary; fine-surface+inset-lattice → exact-conforming but *graded* with a ~2·hmax boundary shell; recover-then-protect → stalls + cospherical invalidity) — the terminator remains the open path |
 | 5 | geometry kernel (OCC interop / native CSG) + heal | **native CSG DONE (surface + volumetric); OCC interop out of scope** | `Heal` surface-defect detection ✓; native primitives (box/cylinder/box-tunnel/**hollow-box** `box_shell_surface`) ✓; **`mesh_box_regions`** — volumetric CSG for axis-aligned box assemblies → conforming multi-region tet mesh, exact per-region volumes ✓; **`mesh_boolean` SHIPPED — general native mesh-Boolean CSG (no OCC)**: `union`/`intersection`/`difference` of two closed triangulated solids via an exact plane-arrangement path (axis-aligned, all coplanar shared-face cases) **and** a Cork/libigl-style **exact tri-tri (`orient3`) + `Rational{BigInt}` seam + `Mesh2D`-CDT** path for general position (e.g. box×cylinder). Verified **exact Boolean volumes** (box∪box 96/112/1875, ∩ 32/16/125, ∖ 32/48/875; box−cylinder exact faceted volume), watertight results, `recover_boundary`-fillable; explicit blocker on unsupported degeneracies, never a leaky/wrong surface (`mesh3d_test.jl`) ✓ — the user-directed native geometry-kernel path. OCC library interop remains **out of near-term scope** (PLAN §1/§6 non-goal); native CSG now covers the enclosure's Boolean needs |
-| 6 | high-order + ASCENT integration + 22-case regression | **partial** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓; **general-geometry curving** ✓ — `curve_to_surface!`(project, on_surface) / `curve_to_cylinder!` curve only genuine *boundary-surface* edges (interior chords left straight) and revert any projection that would invert an incident P2 element (`p2_min_jacobian` guard over the degree-3 nodes; no inverted element ever emitted, verified by an independent degree-6 sampler); **the conforming ENC-COAX mesh is solver-consumable** — written to gmsh MSH v4.1 with the three physical volumes (`coax_pin`/`air`/`case`) and round-tripped (connectivity CRC + region tags + physical-group names preserved, `pipeline_test.jl`), i.e. directly readable by ASCENT ✓; **ASCENT drop-in + 22-case HFSS regression — FUTURE VERIFICATION STEP, not the current goal** (per user 2026-08-12: run *after* all meshing implementations are complete; needs the external ASCENT solver binary + 22 proprietary HFSS datasets, absent from this environment). The *implementations* it will exercise — P2 curved elements, solver-consumable MSH v4.1 — are done ✓ |
+| 6 | high-order elements + solver-consumable I/O | **DONE (package side)** | quadratic (P2) tet generation ✓ (shared mid-nodes, exact-midpoint volume) + gmsh type-11 I/O ✓; **general-geometry curving** ✓ — `curve_to_surface!`(project, on_surface) / `curve_to_cylinder!` curve only genuine *boundary-surface* edges (interior chords left straight) and revert any projection that would invert an incident P2 element (`p2_min_jacobian` guard over the degree-3 nodes; no inverted element ever emitted, verified by an independent degree-6 sampler); **the conforming ENC-COAX mesh is solver-consumable** — written to gmsh MSH v4.1 with the three physical volumes (`coax_pin`/`air`/`case`) and round-tripped (connectivity CRC + region tags + physical-group names preserved, `pipeline_test.jl`) ✓. *(ASCENT drop-in + the 22-case solve campaign are tracked in `ASCENT.md`; the package implementations they exercise — P2 curved elements, solver-consumable MSH v4.1 — are done.)* |
 
 ### Stage-4 measured finding — 3-D size refinement (why no refiner is shipped)
 
@@ -175,17 +171,16 @@ recovers the air/case/coax_pin groups + sizing + seed). gmsh-API diagnosis:
 surface 86 bbox ≈ (168.4,140,148.4)–(171.6,160.5,151.6) mm; empty volumes =
 pin/case/air.
 
-## Verified facts carried in from the ASCENT campaign (2026-08-11)
+## Why the enclosure needs Tessella (gmsh-failure diagnosis)
 
-- The enclosure meshing failure is **NOT memory** — a no-time-limit run peaked at
-  3.3 GB. It is a geometry/boundary-recovery defect at the coax junction.
-- gmsh `occ.healShapes()` is a **false positive** here: it dissolves the OCC
-  volumes to 0 tets, so "no empty volumes" is vacuous. Always check the *actual*
-  per-volume tetrahedron count. (This is a CRC-discipline lesson, encoded in
-  `DEVELOPMENT.md`.)
-- 5 gmsh 2-D/3-D algorithms, OCC fix options, `Geometry.ToleranceBoolean`, and
-  geometry protrusion all fail to mesh the enclosure. Standard tools do not fix
-  it → the robustness must come from Tessella's own boundary recovery + heal.
+The enclosure meshing failure is **NOT memory** (a no-time-limit run peaked at 3.3 GB);
+it is a geometry/boundary-recovery defect at the coax junction. 5 gmsh 2-D/3-D
+algorithms, OCC fix options, `Geometry.ToleranceBoolean`, and geometry protrusion all
+fail to mesh it — so the robustness must come from Tessella's own boundary recovery +
+heal. (gmsh `occ.healShapes()` is a false positive: it dissolves the OCC volumes to 0
+tets, so "no empty volumes" is vacuous — always check the *actual* per-volume tet count;
+a CRC-discipline lesson encoded in `DEVELOPMENT.md`.) The full diagnosis + ASCENT-campaign
+provenance is in `ASCENT.md`.
 
 ## Audit findings (adversarial workflows, 2026-08-11) — independently re-verified
 
@@ -237,7 +232,7 @@ Reference `.geo` scripts retained per case; regenerate `REPORT.md` any time.
 | hollow_box (Boolean difference) | 35 | **35.0** | **35.0** | Tessella `box_shell` CSG matches gmsh's Boolean diff exactly ✓ |
 | cylinder (true πR²H=62.83) | — | 62.65 (0.3%) | 61.02 (2.9%) | Tessella's 48-gon prism is **closer** than gmsh at this size |
 | sphere (true 4/3πR³=20.58) | — | 20.10 (2.3%) | 19.69 (4.3%) | Tessella **closer** than gmsh at this size |
-| **enclosure_coax** (ASCENT) | — | native primitives fill exactly | **0 volume tets** (28969 surf tris, all air/pin/case volumes empty) | gmsh's documented failure, reproduced here |
+| **enclosure_coax** (HFSS 9.2, the reason-to-exist) | — | native primitives fill exactly | **0 volume tets** (28969 surf tris, all air/pin/case volumes empty) | gmsh's documented failure, reproduced here |
 
 Flat-solid rows are a hard correctness cross-check (exact analytic volume, both
 tools conform). The enclosure row reproduces gmsh's empty-volume failure directly
@@ -285,6 +280,11 @@ throughput is competitive; parallel HXT-class speed is a post-robustness goal
 (`PLAN.md` §6).
 
 ## Log
+
+_Chronological development record of the Tessella package. ASCENT-integration
+milestones (handshake, solve proofs, cavity eigenmode, case 9.2 solve) are tracked in
+`ASCENT.md`; where they appear below they are historical context for the package work of
+that day._
 
 - **2026-08-11** — repo scaffolded (PLAN, STATUS, DEVELOPMENT, README, skeleton,
   startup). gmsh 4.13.1 source studied and archived as reference. Package name
@@ -667,5 +667,11 @@ throughput is competitive; parallel HXT-class speed is a post-robustness goal
     sweep: `maxedge ≤ hmax`, `validate.ok`, **exact volume** (boundary preserved, no
     jitter), watertight, conforming, sub-0.03 s — regression-pinned (`mesh3d_test.jl`).
     So box (`mesh_box`), cylinder (`mesh_cylinder`), and prismatic (`mesh_sized_extrude`)
-    uniform sizing are all shipped; the **general curved-surface** terminator remains the
-    one open research case.
+    uniform sizing are all shipped; the general curved-surface terminator was then closed
+    the same day (see the `mesh_sized`/`refine_to_size` entry above).
+- **2026-08-13 — split ASCENT tracking into `ASCENT.md`.** Per user, all ASCENT-facing
+  work (external FEM solver integration, mesh/BC handshake, solve proofs, cavity
+  eigenmode, case 9.2 solve, the 22-case HFSS solve campaign, and the HFSS reference
+  audit) moved out of `STATUS.md` into a dedicated `ASCENT.md`, so `STATUS.md` now tracks
+  the Tessella package (the mesher) only. The current-state sections here are package-only
+  with pointers to `ASCENT.md`; the Log retains historical context.
