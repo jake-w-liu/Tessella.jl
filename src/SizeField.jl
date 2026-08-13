@@ -1,9 +1,10 @@
 """
     SizeField
 
-Mesh-size (edge-length target) fields (PLAN.md §3 "SizeField"). A size field maps
-a point to a desired local element size `h`. Stage 2 needs only the basics used to
-drive 1-D and surface meshing; Stage 4 adds curvature/distance/background fields.
+Mesh-size (edge-length target) fields (PLAN.md "Implemented architecture"). A size
+field maps a point to a desired local element size `h`. `FunctionSize` is the checked
+extension point for distance-, curvature-, solution-, or background-mesh-driven
+policies, and `MinSize` combines fields conservatively.
 
 `size_at(sf, x, y, z)` (and the 3-tuple form) returns `h > 0`.
 """

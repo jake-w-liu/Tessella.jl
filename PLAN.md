@@ -1,165 +1,105 @@
-# Tessella.jl — Architecture & Rigorous Port Plan
+# Tessella.jl architecture and scope
 
-> A Julia-native, robust, memory-efficient mesh generator. Goal: **design → mesh
-> always works** (the HFSS experience), so ASCENT/ascent-studio never fail at the
-> geometry→mesh step. Informed by a study of the gmsh 4.13.1 source, but a
-> *rewrite* — not a transliteration — in idiomatic, optimized Julia.
+Tessella is a Julia-native mesh generator for the geometry-to-mesh part of the
+ASCENT electromagnetics workflow. It is informed by gmsh's architecture but is an
+independent implementation. The package roadmap is complete; the live verification
+record is [`STATUS.md`](STATUS.md).
 
----
+## Scope boundary
 
-## 1. Honest scope (read first)
+Tessella owns:
 
-Porting gmsh literally is **not** the plan, and pretending otherwise would be
-dishonest:
+- exact geometric decisions and simplex topology;
+- 1-D, surface, and tetrahedral meshing;
+- conforming boundary and multi-region recovery;
+- uniform and callback-driven size control;
+- mesh quality improvement and sliver reduction;
+- native primitives, analytical surfaces/imprints, and mesh Boolean CSG;
+- linear/P2 mesh validation and solver-consumable MSH/STL I/O.
 
-- gmsh 4.13.1 **core** (`src/`) is **~340k LOC of C++** across 759 files.
-- With its bundled `contrib/` (OpenCASCADE geometry kernel, TetGen, Netgen, HXT,
-  blossom, voro++, …) the full toolkit is **>1.5M LOC**.
-- The geometry kernel gmsh *uses* is **OpenCASCADE (OCC)** — millions of lines of
-  BREP/NURBS/Boolean C++. **A pure-Julia OCC replacement is explicitly out of
-  near-term scope.** It would be its own multi-year project.
+Tessella does not attempt to reproduce gmsh as a whole. In particular, a pure-Julia
+OpenCASCADE/NURBS kernel, GUI, post-processing, FEM solve, and the long tail of mesh
+formats are outside package scope. ASCENT remains the solver. Geometry outside the
+native analytical/CSG set enters as a triangulated boundary mesh.
 
-What gmsh actually *is* = **a geometry model (`GModel`) + meshing algorithms + an
-OCC interface + I/O**. The pain we hit in the ASCENT campaign (the enclosure
-"overlapping facets / no elements in volume") lives in the **meshing algorithms
-(3-D boundary recovery)**, not in OCC. That layer we **can and will own** in
-Julia.
+## Implemented architecture
 
-**Therefore Tessella stages the work:** own the meshing pipeline + robustness
-first (ASCENT's real need), consume geometry from OCC via interop initially, and
-grow toward gmsh feature parity and (optionally, much later) a native geometry
-kernel. Every stage ships something ASCENT can use.
-
-## 2. gmsh architecture as studied (4.13.1 source)
-
-`src/` modules and what each is (LOC approximate, from the extracted source):
-
-| module | LOC | role | port priority |
-|---|---:|---|---|
-| `numeric` | 40k | robust predicates, Gauss rules, bases, `Numeric.cpp` | **core** (predicates only; bases belong to ASCENT) |
-| `geo` | 83k | `GModel`, `GEntity/GVertex/GEdge/GFace/GRegion`, OCC interface (`GModelIO_OCC`), many `GModelIO_*` writers | **core** (model + MSH/geo I/O; skip exotic formats) |
-| `mesh` | 60k | the algorithms — see below | **core** (the heart) |
-| `common` | — | context, options, logging, OS glue | partial (infra only) |
-| `parser` | — | `.geo` scripting language (lex/yacc) | later (compat) |
-| `fltk`,`graphics`,`post`,`plugin`,`solver` | — | GUI, post-processing, FEM | **out of scope** (ASCENT is the solver) |
-
-The meshing pipeline (`src/mesh/Generator.cpp`) is a strict dimensional cascade:
-
-```
-0D vertices → 1D edges (meshGEdge) → 2D faces (meshGFace: Delaunay insertion / BDS /
-frontal / transfinite / pack) → 3D regions (meshGRegion: Delaunay insertion +
-boundary recovery + HXT + local mesh modification) → high order → optimize
-```
-
-**Robustness-critical files** (where gmsh fails on hard geometry):
-- `meshGRegionBoundaryRecovery.cpp` — recovering the 2-D boundary triangulation
-  as constrained facets of the 3-D tetrahedralization. **This is exactly the
-  "Invalid boundary mesh (overlapping facets) on surface 86" failure** on the
-  enclosure coax feed-through.
-- `delaunay3d.cpp`, `meshGRegionDelaunayInsertion.cpp` — 3-D Delaunay kernel.
-- `meshGRegionLocalMeshMod.cpp`, `meshGRegionMMG.cpp` — sliver removal / repair.
-- `numeric` robust predicates — `orient3d`/`insphere` must be *exact* (adaptive)
-  or the kernel produces the inconsistencies that surface as overlapping facets.
-
-Bundled fallback meshers we studied as references: **HXT** (fast parallel 3-D
-Delaunay), **Netgen** (robust OCC advancing-front), **MMG** (remesh/repair),
-**blossom** (quad recombination), **voro++**, **Revoropt** (CVT).
-
-## 3. Tessella architecture (Julia)
-
-Idiomatic, type-stable, allocation-conscious Julia. No transliterated C++.
-
-```
+```text
 Tessella
-├── Predicates    exact adaptive orient2/orient3/incircle/insphere (Shewchuk), SoS
-├── Geometry      GModel, GVertex/GEdge/GFace/GRegion; kernel interop (Stage 5)
-├── MeshTypes     half-facet / compact SoA mesh; Node, Tri, Tet; topology queries
-├── SizeField     background mesh, curvature-, distance-, and boundary-driven sizing
-├── Mesh1D        edge meshing under a size field
-├── Mesh2D        Delaunay + constrained Delaunay (CDT) + Ruppert/Chew refinement + frontal
-├── Mesh3D        Delaunay + constrained + ROBUST BOUNDARY RECOVERY + sliver handling
-├── Optimize      Laplacian/ODT smoothing, edge/face swaps, sliver removal
-├── Heal          coincident-face / sliver / thin-feature detection + repair
-├── IO            .msh (v2/v4) read/write, gmsh .geo compat reader, STL
-└── Fallback      staged strategies + optional external backend shim (transition only)
+├── Predicates    adaptive exact orient/incircle/insphere, exact rationals, SoS
+├── MeshTypes     compact simplex storage, topology, quality, CRC, validation
+├── ExactMesh3D   Rational{BigInt} Delaunay kernel
+├── IO            strict/atomic MSH v2.2/v4.1, STL, limited .geo metadata scan
+├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
+├── SizeField     constant, callable, and pointwise-minimum size fields
+├── Mesh1D        metric-length curve and segment discretization
+├── MeshSurface   planar, cylindrical, and parametric surface meshing
+├── Mesh3D        Delaunay, fills, partitions, sizing, flips, mesh Boolean CSG
+├── RecoverCDT    exact conforming-Delaunay boundary/partition recovery
+├── Optimize      quality reports, Laplacian/ODT/targeted sliver smoothing
+├── Heal          surface defect and meshability diagnostics
+├── Geometry      native closed primitive surfaces
+├── CAD           analytical surfaces, projection, and imprint curves
+└── HighOrder     globally certified quadratic tetrahedra and type-11 I/O
 ```
 
-**Design principles (the reason we do this at all):**
-1. **Exactness where it counts.** Adaptive exact geometric predicates + Simulation
-   of Simplicity. Floating-point predicate inconsistency is *the* root of
-   overlapping-facet failures. This is non-negotiable and gets an exact-arithmetic
-   oracle.
-2. **Robust boundary recovery.** Constrained 3-D Delaunay with a recovery scheme
-   that provably restores every boundary facet (segment/facet recovery via
-   flips + Steiner points), so a valid input surface **always** yields a valid
-   volume mesh. The enclosure coax-junction is the standing acceptance test.
-3. **Heal, don't fail.** Detect near-coincident faces, zero-thickness slivers,
-   and multi-way junctions up front; imprint/merge within tolerance; never emit
-   an invalid BREP to the mesher.
-4. **Always-valid or explicit blocker.** Every run either returns a validated
-   mesh (all regions filled, positive volumes, manifold boundary, Euler check) or
-   a precise diagnostic — never a silent empty volume.
-5. **Memory efficiency.** Compact SoA, in-place kernels, streaming I/O; avoid the
-   pointer-chasing `MVertex*` graph gmsh uses.
+`FunctionSize` is the extension point for distance-, curvature-, solution-, and
+background-mesh-driven sizing; `MinSize` combines such fields conservatively. This
+keeps field policy outside the meshing kernels while preserving a checked `h > 0`
+contract.
 
-## 4. Staged roadmap
+## Design contracts
 
-Each stage follows the repo's core loop: **spec → independent oracle → implement
-→ CRC test → benchmark → gmsh cross-check**. No stage is "done" without a
-mutation-sensitive test suite and a CRC-stamped regression artifact.
+1. Exactness is used for topology-changing geometric decisions. Floating filters are
+   permitted only with exact fallback or an exact post-certificate.
+2. A public meshing operation returns a validated result or a precise blocker. It
+   never reports a silent empty region, partial complex, or nonconforming fallback.
+3. Boundary recovery is independently certified against the input PLC, including
+   manifold vertex links and every required facet/interface.
+4. Size-control operations verify their output bound and preserve lower-dimensional
+   cells, physical tags, conformity, and region volume.
+5. Resource counts are checked before conversion/allocation; connectivity uses Int32,
+   compact flat records, reusable scratch, and bounded retry loops.
+6. File output is validated before an atomic replacement of the destination.
 
-- **Stage 0 — Foundations.** Repo, CI, CRC discipline, mesh data structures,
-  `.msh` v2/v4 read+write (cross-checked against gmsh output), **exact predicates
-  with an exact-rational oracle**. *Exit:* round-trip a gmsh `.msh`; predicates
-  pass exhaustive degenerate-configuration tests.
-- **Stage 1 — 2-D core.** Delaunay (Bowyer–Watson / incremental), constrained
-  Delaunay (CDT) for PSLGs, quality refinement (Ruppert + Chew). *Exit:* mesh
-  arbitrary planar straight-line graphs; angle/area guarantees; CRC vs analytic.
-- **Stage 2 — Surfaces & edges.** 1-D edge meshing under a size field; 2-D
-  meshing of parametric/BREP faces (surface Delaunay in parameter space with the
-  metric). *Exit:* mesh the flat/patch/coax faces from the HFSS cases.
-- **Stage 3 — 3-D core + boundary recovery (the robustness milestone).** 3-D
-  Delaunay, constrained tetrahedralization, **robust boundary recovery**, sliver
-  handling. *Exit:* **mesh the enclosure (9.2) coax feed-through that gmsh
-  4.13.1/4.15.2 cannot**, all volumes filled, validated.
-- **Stage 4 — Sizing & optimization.** Background/curvature/distance size fields;
-  smoothing, swaps, sliver removal; quality histograms. *Exit:* match/beat gmsh
-  quality on the 22 HFSS geometries.
-- **Stage 5 — Geometry kernel.** OCC interop (Booleans → BREP → faces) with the
-  `Heal` layer, or a native CSG path for the primitives ASCENT emits. *Exit:*
-  ingest ASCENT `solid_model` geometry directly.
-- **Stage 6 — Integration & parity.** High-order (curved) elements; drop-in
-  replacement for ASCENT's `gmsh -3` call; **regression across all 22 HFSS
-  UserGuide cases** with CRC-stamped meshes. *Exit:* ASCENT solves every case
-  through Tessella.
+## Completed stages
 
-## 5. CRC & verification discipline (mandatory)
+| Stage | Exit condition | State |
+|---|---|---|
+| 0 | exact predicates, mesh validation/CRC, MSH/STL round trip | DONE |
+| 1 | arbitrary PSLG Delaunay/CDT and bounded quality refinement | DONE |
+| 2 | graded curves and planar/cylinder/parametric surfaces | DONE |
+| 3 | 3-D Delaunay, volume fill, exact conforming recovery, enclosure case | DONE |
+| 4 | uniform/callback sizing, quality reports, flips and sliver reduction | DONE |
+| 5 | native primitives, analytical CAD/imprints, healing gates, mesh CSG | DONE |
+| 6 | globally certified P2 elements, solver I/O, 22 geometry regressions | DONE |
 
-Applies to every function (see `DEVELOPMENT.md`):
-- **Independent oracle** for each algorithm: exact-rational predicate, analytic
-  mesh, Euler/Delaunay invariants, conservation of boundary, or cross-check vs a
-  reference gmsh mesh.
-- **Mutation-sensitive tests** (a sign flip / swapped index / dropped Steiner
-  point must fail a test).
-- **CRC-stamped regression artifacts**: every accepted mesh writes a checksum
-  (node/element counts, bbox, quality stats, boundary hash) recorded in
-  `STATUS.md`; changes require a justified diff.
-- **Bug-first**: suspicious success (e.g. "no empty volumes" with zero tets — the
-  exact false positive we hit with `occ.healShapes`) is a bug until disproven by
-  checking the *actual* element counts.
-- No weakened tolerances, no skipped degenerate cases, no `@test true`.
+The external full-wave rerun of the remaining HFSS guide studies is deliberately
+tracked in [`ASCENT.md`](ASCENT.md), because it requires the solver and proprietary
+reference artifacts and does not add a missing meshing capability.
 
-## 6. Non-goals (near-term, stated so scope stays honest)
+## Verification discipline
 
-- Pure-Julia OpenCASCADE / NURBS CAD kernel.
-- GUI, post-processing, FEM assembly/solve (that is ASCENT), and the long tail of
-  `GModelIO_*` formats (CGNS, MED, NIfTI, …).
-- Beating HXT on raw parallel throughput before correctness/robustness is proven.
+Every change follows:
 
-## 7. First concrete target (bridges the campaign)
+`spec → independent oracle → implementation → CRC test → bounds-checked recheck`
 
-The **enclosure coax feed-through** (surface 86: shield/case/air junction) is the
-standing Stage-3 acceptance case: gmsh 4.13.1 and 4.15.2 both fail it; Tessella's
-robust boundary recovery must mesh it with all three volumes (pin/case/air)
-filled and validated. That single case is the proof that this project earns its
-existence.
+Independent evidence includes exact-rational predicates, analytic area/volume,
+Euler/manifold/link invariants, empty-circle/sphere checks, PLC facet conservation,
+quality monotonicity, MSH round trips, and gmsh cross-validation. The mandatory gate
+is:
+
+```sh
+julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
+```
+
+See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the non-negotiable anti-false-positive
+rules and [`STATUS.md`](STATUS.md) for the last measured gate.
+
+## Standing acceptance case
+
+The enclosure/coax feed-through remains the reason-to-exist regression. gmsh 4.13.1
+and 4.15.2-git leave its solid regions empty; Tessella reconstructs a conforming,
+tagged, all-filled native mesh which is loadable and solvable in ASCENT. The package
+regression is in `test/` and the external proof chain is in `validation/` and
+[`ASCENT.md`](ASCENT.md).
