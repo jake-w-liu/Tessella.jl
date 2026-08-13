@@ -46,6 +46,10 @@ using .RecoverCDT: recover_boundary_cdt, mesh_sized_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, mesh_quality
 using .Heal: is_meshable
 
+# Install Mesh3D's exact-recovery extension only after both modules and their
+# public types are available, avoiding a Mesh3D ↔ RecoverCDT include cycle.
+Mesh3D._recover_boundary_exact(surface::Mesh) = recover_boundary_cdt(surface)
+
 export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
@@ -168,43 +172,19 @@ function mesh_sized(surface::Mesh; hmax::Real)
     return m
 end
 
-# Fill a closed PLC without ever accepting a convex-hull cap as its boundary.  The
-# inexpensive Float64 Delaunay path is certified by Mesh3D's exact geometric gate;
-# failed recovery attempts are retained in the final blocker instead of swallowed.
+# Fill a closed PLC without ever accepting a convex-hull cap as its boundary.
+# `tetrahedralize` owns the restriction, star-shaped fan, exact-CDT recovery, and
+# bounded Float64 fallback, and returns only after Mesh3D's exact geometric gate.
 function _conforming_fill(surface::Mesh; caller::AbstractString,
                           rng_seed::Integer=1, optimize::Bool=false)
-    failures = String[]
     try
-        m = tetrahedralize(surface; rng_seed=rng_seed, optimize=optimize)
-        ok, reason = Mesh3D._certify_surface_fill(surface, m)
-        ok && return m
-        push!(failures, "tetrahedralize: $reason")
+        return tetrahedralize(surface; rng_seed=rng_seed, optimize=optimize)
     catch err
         err isa InterruptException && rethrow()
         (err isa ArgumentError || err isa ErrorException) || rethrow()
-        push!(failures, "tetrahedralize: $(sprint(showerror, err))")
+        throw(ErrorException("$caller: could not construct a conforming volume mesh — " *
+                             sprint(showerror, err)))
     end
-
-    try
-        # recover_boundary returns only after its own exact geometric gate passes.
-        return recover_boundary(surface; rng_seed=rng_seed)
-    catch err
-        err isa InterruptException && rethrow()
-        (err isa ArgumentError || err isa ErrorException) || rethrow()
-        push!(failures, "recover_boundary: $(sprint(showerror, err))")
-    end
-
-    try
-        # recover_boundary_cdt returns only after its Rational{BigInt} certificate.
-        return recover_boundary_cdt(surface)
-    catch err
-        err isa InterruptException && rethrow()
-        (err isa ArgumentError || err isa ErrorException) || rethrow()
-        push!(failures, "recover_boundary_cdt: $(sprint(showerror, err))")
-    end
-
-    throw(ErrorException("$caller: could not construct a conforming volume mesh — " *
-                         join(failures, " | ")))
 end
 
 """
@@ -228,7 +208,7 @@ function mesh_volume(surface::Mesh; smooth::Bool=true, smooth_iters::Integer=5,
     end
     m = check ? _conforming_fill(surface; caller="mesh_volume", rng_seed=rng_seed,
                                  optimize=optimize) :
-                tetrahedralize(surface; rng_seed=rng_seed, optimize=optimize)
+                tetrahedralize(surface; rng_seed=rng_seed, optimize=optimize, check=false)
     smooth && (m = smooth_laplacian(m; iters=smooth_iters))
     # optimization-based (min-dihedral) smoothing targets slivers the mean-smoother and
     # topological flips leave behind; only in the optimize path (it is a local search).

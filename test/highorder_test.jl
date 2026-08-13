@@ -161,7 +161,10 @@ end
         R = 1.7
         sphere = _sphere_surface(R)
         @test is_meshable(sphere)[1]                       # watertight, oriented, manifold
-        m = tetrahedralize(sphere)
+        # Exercise the interior-chord regression on the raw restricted Delaunay.
+        # The certified public fill may repair this faceted sphere with a one-centre
+        # boundary fan, which correctly has no surface-to-surface interior chords.
+        m = tetrahedralize(sphere; check=false)
         @test validate(m).ok && is_closed_manifold(m)
         p = p2_tetmesh(m)
         @test p2_min_jacobian(p) > 0                       # straight mesh valid

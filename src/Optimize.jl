@@ -155,8 +155,14 @@ function smooth_odt(m::Mesh; iters::Integer=5)
             end
             wsum > 0 || continue                               # no usable incident tet
             tx = sx/wsum; ty = sy/wsum; tz = sz/wsum
-            # accept only if no incident tet inverts (positive signed volume kept)
+            # A symmetric star can reproduce the current point up to a few rounding
+            # ulps.  Treat that as an exact no-op so smoothing does not create
+            # meaningless coordinate drift (and remains bit-stable on fixed points).
             ox=coords[1,v]; oy=coords[2,v]; oz=coords[3,v]
+            move = max(abs(tx-ox), abs(ty-oy), abs(tz-oz))
+            movescl = max(abs(ox), abs(oy), abs(oz), abs(tx), abs(ty), abs(tz), 1.0)
+            move <= 32eps(Float64)*movescl && continue
+            # accept only if no incident tet inverts (positive signed volume kept)
             coords[1,v]=tx; coords[2,v]=ty; coords[3,v]=tz
             ok = true
             for t in inc[v]
