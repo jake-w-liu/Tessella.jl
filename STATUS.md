@@ -43,9 +43,10 @@ Verified on 2026-08-14 with Julia 1.12.6:
 - `git diff --check` passed, and the source/test scan found no `TODO`, `FIXME`,
   `WIP`, placeholder, or unimplemented markers.
 
-The verified package head for this gate is `27010e312455fe3dbb67ce0efd2f51800487c3ad`,
-and `origin/main` was checked to the same SHA after its push. The documentation-only
-status commit that contains this file is newer; it does not change the tested package.
+The last runtime-bearing package head for this gate is
+`27010e312455fe3dbb67ce0efd2f51800487c3ad`, and `origin/main` was checked to the
+same SHA after its push. Later commits change documentation/docstrings only; their
+package-load/focused checks and remote synchronization were also verified.
 
 ## Deep-debug closure
 
