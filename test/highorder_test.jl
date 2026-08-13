@@ -7,7 +7,7 @@
 #                left untouched — regression against the "both corners on surface"
 #                bug that tangled the volume); curved nodes land exactly on the true
 #                surface; NO element is inverted (checked by an INDEPENDENT P2
-#                Jacobian sampler, not the production guard); the validity guard
+#                Jacobian sampler in addition to the exact global guard); the guard
 #                reverts a projection that would invert an incident element.
 # Robustness   : single tet, filled volume mesh, empty mesh.
 # Completeness : gmsh type-11 file writes and reads back to the same linear
@@ -254,6 +254,48 @@ end
                 _oracle_detJ(p,1,1/6,1/6,0.5)]
         oracle = abs(((-4/5)*vals[1] + (9/20)*sum(vals[2:5])) / 6)
         @test p2_volume(p) ≈ oracle rtol=1e-13
+    end
+
+    @testset "global Jacobian certificate catches a between-sample fold" begin
+        # This deterministic P2 tet is positive at all 20 nodes used by the old
+        # degree-3 lattice guard (minimum 0.0843), but det(J)=-1.197 at the interior
+        # point (1/4,1/2,1/4). A sampled guard silently accepted the fold.
+        m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                 tets=reshape(Int32[1,2,3,4],4,1))
+        p = p2_tetmesh(m)
+        p.coords[:,p.tet10[5:10,1]] = Float64[
+             0.598244   1.71802  -0.674877  -0.150606   0.694353  -1.12732;
+             0.152545   0.407208  1.05877   -0.0461052  0.280946   0.525971;
+             0.0303981 -1.00104   0.0559645  0.276108   0.981785   0.689428]
+        old_samples = [(j/3,k/3,l/3) for j in 0:3 for k in 0:3-j for l in 0:3-j-k]
+        @test minimum(_oracle_detJ(p,1,r,s,t) for (r,s,t) in old_samples) > 0.08
+        @test _oracle_detJ(p,1,0.25,0.5,0.25) < -1.19
+        @test p2_min_jacobian(p) < 0
+        @test_throws ArgumentError p2_volume(p)
+    end
+
+    @testset "midpoint and P2 writer contracts" begin
+        huge = Mesh(Float64[1e308 1e308; 0 1; 0 0];
+                    segs=reshape(Int32[1,2],2,1))
+        @test p2_tetmesh(huge).coords == huge.coords # no tets: no midpoint needed
+        collapsed = Mesh(Float64[1e308 nextfloat(1e308) 0 0;
+                                  0 0 1 0; 0 0 0 1];
+                         tets=reshape(Int32[1,2,3,4],4,1))
+        @test_throws ArgumentError p2_tetmesh(collapsed)
+
+        p = p2_tetmesh(Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                            tets=reshape(Int32[1,2,3,4],4,1)))
+        @test_throws ArgumentError write_msh_p2("ignored.msh",p;tet_tag=Int64[typemax(Int64)])
+        @test_throws ArgumentError write_msh_p2("ignored.msh",p;tet_tag=Int32[-1])
+
+        two=Mesh(Float64[0 1 0 0 0;0 0 1 0 0;0 0 0 1 -1];
+                 tets=Int32[1 1;2 3;3 2;4 5])
+        q=p2_tetmesh(two);badT=copy(q.tet10);badC=hcat(q.coords,q.coords[:,badT[5,1]])
+        edge_slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4))
+        slot=only(s for (s,i,j) in edge_slots
+                    if minmax(badT[i,2],badT[j,2])==(Int32(1),Int32(2)))
+        badT[slot,2]=Int32(size(badC,2))
+        @test_throws ArgumentError P2Mesh(badC,badT)
     end
 
     @testset "empty mesh" begin

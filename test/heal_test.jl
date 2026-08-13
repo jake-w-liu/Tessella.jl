@@ -79,6 +79,15 @@ end
         @test !r.manifold
     end
 
+    @testset "vertex-pinch topology detected" begin
+        C=Float64[0 1 0 -1 0;0 0 1 0 -1;0 0 0 0 0]
+        m=Mesh(C;tris=Int32[1 1;2 4;3 5])
+        r=surface_diagnostics(m)
+        @test !r.manifold
+        @test r.n_nonmanifold_edges==0
+        @test any(occursin("disconnected triangle link",s) for s in r.messages)
+    end
+
     @testset "coincident vertices detected" begin
         # vertex 9 coincides with vertex 1
         m = clean_cube()
@@ -108,12 +117,13 @@ end
         @test surface_diagnostics(far_dup).n_coincident_pairs == 1
 
         C = copy(cube.coords); C[1,1] = NaN
-        oknan, rnan = is_meshable(Mesh(C; tris=cube.tris))
+        nanmesh=Mesh(cube.coords;tris=cube.tris);nanmesh.coords[1,1]=NaN
+        oknan, rnan = is_meshable(nanmesh)
         @test !oknan
         @test any(occursin("non-finite coordinates", s) for s in rnan.messages)
 
-        C[1,1] = Inf
-        okinf, rinf = is_meshable(Mesh(C; tris=cube.tris))
+        infmesh=Mesh(cube.coords;tris=cube.tris);infmesh.coords[1,1]=Inf
+        okinf, rinf = is_meshable(infmesh)
         @test !okinf
         @test any(occursin("non-finite coordinates", s) for s in rinf.messages)
     end

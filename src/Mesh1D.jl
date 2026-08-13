@@ -24,21 +24,32 @@ export mesh_curve, mesh_segment, curve_length, metric_length
     q = try
         (Float64(p[1]), Float64(p[2]), length(p) >= 3 ? Float64(p[3]) : 0.0)
     catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("Mesh1D: point coordinates must be real and Float64-convertible: $(sprint(showerror, err))"))
     end
     (isfinite(q[1]) && isfinite(q[2]) && isfinite(q[3])) ||
         throw(ArgumentError("Mesh1D: point has non-finite coordinates $q"))
     return q
 end
-@inline _dist3(a, b) = sqrt((a[1]-b[1])^2 + (a[2]-b[2])^2 + (a[3]-b[3])^2)
+@inline _dist3(a, b) = hypot(a[1]-b[1],a[2]-b[2],a[3]-b[3])
 
 function _curve_args(t0::Real, t1::Real, nsample::Integer, caller::AbstractString)
-    a = Float64(t0); b = Float64(t1)
+    a = try Float64(t0) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: t0 must be representable as Float64"))
+    end
+    b = try Float64(t1) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: t1 must be representable as Float64"))
+    end
     (isfinite(a) && isfinite(b)) ||
         throw(ArgumentError("$caller: t0 and t1 must be finite (got $t0, $t1)"))
     a < b || throw(ArgumentError("$caller: require t0 < t1 (got $a, $b)"))
+    isfinite(b-a) || throw(ArgumentError("$caller: parameter span t1-t0 overflowed Float64"))
     nsample > 0 || throw(ArgumentError("$caller: nsample must be positive (got $nsample)"))
-    return a, b
+    nsample <= typemax(Int)-1 ||
+        throw(ArgumentError("$caller: nsample exceeds the platform Int limit (got $nsample)"))
+    return a, b, Int(nsample)
 end
 
 @inline function _checked_distance(a, b, caller::AbstractString)
@@ -47,13 +58,21 @@ end
     return d
 end
 
+# Evaluate the trapezoidal reciprocal-size metric as `(distance / h)` terms.
+# Forming `1/h` first overflows for subnormal but usable pairs such as
+# `distance == h == 1e-320`, whose metric increment is exactly one.
+@inline function _metric_increment(distance::Float64,h0::Float64,h1::Float64)
+    distance==0 && return 0.0
+    return (distance/h0)/2 + (distance/h1)/2
+end
+
 """
     curve_length(γ; t0=0.0, t1=1.0, nsample=2000) -> Float64
 
 Euclidean arc length of `γ` over `[t0,t1]` by dense polyline sampling.
 """
 function curve_length(γ; t0::Real=0.0, t1::Real=1.0, nsample::Integer=2000)
-    t0, t1 = _curve_args(t0, t1, nsample, "curve_length")
+    t0, t1, nsample = _curve_args(t0, t1, nsample, "curve_length")
     prev = _pt3(γ(t0)); L = 0.0
     @inbounds for i in 1:nsample
         t = t0 + (t1-t0)*i/nsample
@@ -69,15 +88,15 @@ end
 Metric length `∫ |γ'| / h`, i.e. the ideal number of edges under size field `sf`.
 """
 function metric_length(γ, sf::AbstractSizeField; t0::Real=0.0, t1::Real=1.0, nsample::Integer=2000)
-    t0, t1 = _curve_args(t0, t1, nsample, "metric_length")
-    prev = _pt3(γ(t0)); M = 0.0
+    t0, t1, nsample = _curve_args(t0, t1, nsample, "metric_length")
+    prev = _pt3(γ(t0)); hprev=size_at(sf,prev); M = 0.0
     @inbounds for i in 1:nsample
         t = t0 + (t1-t0)*i/nsample
         p = _pt3(γ(t))
-        hmid = 0.5*(size_at(sf, prev) + size_at(sf, p))
-        M += _checked_distance(prev, p, "metric_length") / hmid
+        hcur=size_at(sf,p)
+        M += _metric_increment(_checked_distance(prev,p,"metric_length"),hprev,hcur)
         isfinite(M) || throw(ArgumentError("metric_length: accumulated metric length overflowed Float64"))
-        prev = p
+        prev = p;hprev=hcur
     end
     return M
 end
@@ -94,23 +113,23 @@ the last node is *not* duplicated).
 """
 function mesh_curve(γ, sf::AbstractSizeField; t0::Real=0.0, t1::Real=1.0,
                     closed::Bool=false, nsample::Integer=2000)
-    t0, t1 = _curve_args(t0, t1, nsample, "mesh_curve")
+    t0, t1, nsample = _curve_args(t0, t1, nsample, "mesh_curve")
     # cumulative metric length at each sample parameter
     ts = Vector{Float64}(undef, nsample+1)
     cum = Vector{Float64}(undef, nsample+1)
-    prev = _pt3(γ(t0)); ts[1] = t0; cum[1] = 0.0
+    prev = _pt3(γ(t0));hprev=size_at(sf,prev); ts[1] = t0; cum[1] = 0.0
     @inbounds for i in 1:nsample
         t = t0 + (t1-t0)*i/nsample
         p = _pt3(γ(t))
-        hmid = 0.5*(size_at(sf, prev) + size_at(sf, p))
-        cum[i+1] = cum[i] + _checked_distance(prev, p, "mesh_curve")/hmid
+        hcur=size_at(sf,p)
+        cum[i+1] = cum[i] + _metric_increment(_checked_distance(prev,p,"mesh_curve"),hprev,hcur)
         isfinite(cum[i+1]) ||
             throw(ArgumentError("mesh_curve: cumulative metric length overflowed Float64; use a larger size field"))
-        ts[i+1] = t; prev = p
+        ts[i+1] = t; prev = p;hprev=hcur
     end
     Mtot = cum[end]
     Mtot > 0 || throw(ArgumentError("mesh_curve: curve has zero sampled metric length"))
-    Mtot <= typemax(Int)-1 ||
+    Mtot <= prevfloat(Float64(typemax(Int))) ||
         throw(ArgumentError("mesh_curve: requested edge count exceeds the platform Int limit; use a larger size field"))
     nedge = max(closed ? 3 : 1, round(Int, Mtot))
     nnode = closed ? nedge : nedge + 1

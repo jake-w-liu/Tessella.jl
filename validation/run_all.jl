@@ -128,7 +128,7 @@ if haveg
 else
     push!(enc_lines, "gmsh not available; skipped.")
 end
-push!(enc_lines, "Tessella status: native primitives (box/cylinder/tunnel/hollow-box, above) fill their volumes exactly; assembling this full CSG model natively is the remaining Stage-5 work (tracked in STATUS.md).")
+push!(enc_lines, "Tessella status: the literal multi-region enclosure/coax model is natively meshed, solver-loadable, and solved; see validation/enclosure_literal/ and ASCENT.md. The primitive rows above independently check analytic volumes.")
 for l in enc_lines; println("  ", l); end
 
 # ── write REPORT.md ──

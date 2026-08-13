@@ -9,6 +9,7 @@
 # Completeness  : no tet inverted (positive-volume guard), tags preserved.
 
 using Test
+import Tessella
 using Tessella.Mesh3D
 using Tessella.MeshTypes
 using Tessella.Optimize
@@ -48,12 +49,28 @@ end
         @test_throws ArgumentError smooth_optimize(m; iters=-1)
         @test_throws ArgumentError smooth_optimize(m; sliver_deg=Inf)
         @test_throws ArgumentError remove_slivers(m; max_rounds=-1)
+        @test_throws ArgumentError smooth_laplacian(m; iters=big(typemax(Int))+1)
+        @test_throws ArgumentError smooth_odt(m; iters=big(typemax(Int))+1)
+        @test_throws ArgumentError smooth_optimize(m; iters=big(typemax(Int))+1)
+        @test_throws ArgumentError remove_slivers(m; max_rounds=big(typemax(Int))+1)
+        @test Tessella.Optimize._convex_combine(-floatmax(Float64),floatmax(Float64),0.5) == 0.0
         for smoothed in (smooth_laplacian(m; iters=0), smooth_odt(m; iters=0),
                          smooth_optimize(m; iters=0))
             @test smoothed.segs == m.segs && smoothed.seg_tag == m.seg_tag
             @test smoothed.tris == m.tris && smoothed.tri_tag == m.tri_tag
             @test smoothed.tets == m.tets && smoothed.tet_tag == m.tet_tag
         end
+        invalid = Mesh(C; tets=reshape(Int32[1,2,4,3],4,1))
+        @test_throws ArgumentError mesh_quality(invalid)
+        @test_throws ArgumentError smooth_laplacian(invalid)
+        @test_throws ArgumentError smooth_odt(invalid)
+        @test_throws ArgumentError smooth_optimize(invalid)
+        nonfinite = Mesh(C; tets=reshape(Int32[1,2,3,4],4,1))
+        nonfinite.coords[1,1] = NaN
+        @test_throws ArgumentError smooth_laplacian(nonfinite)
+        invalid_notets=Mesh(Float64[0 0;0 0;0 0];segs=reshape(Int32[1,2],2,1))
+        @test_throws ArgumentError mesh_quality(invalid_notets)
+        @test_throws ArgumentError smooth_odt(invalid_notets)
     end
 
     @testset "mesh_quality on a single unit tet" begin

@@ -318,6 +318,55 @@ using .Oracles
         @test (@allocated insphere(a3,b3,c3,d3,(0.1,0.1,0.1))) == 0
     end
 
+    @testset "public input contracts" begin
+        p2=((0.0,0.0),(1.0,0.0),(0.0,1.0),(1.0,1.0))
+        p3=((0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0),(1.0,1.0,1.0))
+        @test_throws ArgumentError orient2((NaN,0.0),p2[2],p2[3])
+        @test_throws ArgumentError orient3(p3[1],p3[2],p3[3],(0.0,0.0,Inf))
+        @test_throws ArgumentError incircle(p2[1],p2[2],p2[3],(0.0,))
+        @test_throws ArgumentError insphere(p3[1],p3[2],p3[3],p3[4],(NaN,0.0,0.0))
+        @test_throws ArgumentError orient2_sos(p2[1],p2[2],p2[3],1,1,3)
+        @test_throws ArgumentError orient3_sos(p3[1],p3[2],p3[3],p3[4],1,2,2,4)
+        @test_throws ArgumentError incircle_sos(p2...,1,2,3,3)
+        @test_throws ArgumentError insphere_sos(p3...,1,2,3,4,4)
+        @test_throws ArgumentError incircle3_sos(p3[1],p3[1],p3[1],p3[2],1,2,3,4)
+        @test_throws ArgumentError incircle3_sos(p3[1],p3[2],p3[3],p3[4],1,2,3,4)
+        q2(p)=(Rational{BigInt}(p[1]),Rational{BigInt}(p[2]))
+        q3(p)=(Rational{BigInt}(p[1]),Rational{BigInt}(p[2]),Rational{BigInt}(p[3]))
+        @test_throws ArgumentError orient2_rat(q2(p2[1]),q2(p2[2]),q2(p2[3]),1,1,3)
+        @test_throws ArgumentError orient3_rat(q3(p3[1]),q3(p3[2]),q3(p3[3]),q3(p3[4]),1,2,2,4)
+        @test_throws ArgumentError incircle_rat(q2.(p2)...,1,2,3,3)
+        @test_throws ArgumentError insphere_rat(q3.(p3)...,1,2,3,4,4)
+        @test_throws ArgumentError orient2_rat((NaN,0.0),q2(p2[2]),q2(p2[3]),1,2,3)
+        @test_throws ArgumentError orient2_sos(p2[1],p2[2],p2[3],big(typemax(Int))+1,2,3)
+        orient3_sos(p3[1],p3[2],p3[3],p3[4],1,2,3,4) # warm compilation
+        @test (@allocated orient3_sos(p3[1],p3[2],p3[3],p3[4],1,2,3,4)) == 0
+    end
+
+    @testset "coplanar 3-D in-circle preserves the Euclidean plane metric" begin
+        # Plane map (u,v) -> (u+v,v,u) is oblique. Raw xy projection changes
+        # circles into ellipses and gives the opposite sign on this measured case.
+        a=(-6.,-3.,-3.);b=(-5.,-2.,-3.);c=(-4.,-2.,-2.);d=(-3.,-3.,0.)
+        @test oracle_incircle3(a,b,c,d)==1
+        @test incircle3_sos(a,b,c,d,1,2,9,22)==1
+        @test incircle_sos((a[1],a[2]),(b[1],b[2]),(c[1],c[2]),(d[1],d[2]),1,2,9,22)==-1
+        rng=MersenneTwister(0x3dc1ac1e);mismatch=0;tested=0
+        plane(u,v)=(Float64(u+v),Float64(v),Float64(u))
+        grid=[plane(u,v) for u in -3:3 for v in -3:3]
+        for _ in 1:3000
+            ids=randperm(rng,length(grid))[1:4];pa,pb,pc,pd=grid[ids]
+            noncol=oracle_orient2((pa[1],pa[2]),(pb[1],pb[2]),(pc[1],pc[2]))!=0 ||
+                   oracle_orient2((pa[2],pa[3]),(pb[2],pb[3]),(pc[2],pc[3]))!=0 ||
+                   oracle_orient2((pa[3],pa[1]),(pb[3],pb[1]),(pc[3],pc[1]))!=0
+            noncol||continue
+            want=oracle_incircle3(pa,pb,pc,pd);want==0&&continue
+            tested+=1
+            incircle3_sos(pa,pb,pc,pd,ids...)==want || (mismatch+=1)
+        end
+        @test tested>1000
+        @test mismatch==0
+    end
+
     @testset "orient2_sos degenerate ties match the canonical +ε SoS (four-predicate consistency)" begin
         # Regression: orient2_sos's degenerate branch now routes through the SAME
         # canonical evaluator (_orient_nd_sos_exact) as orient3_sos/incircle_sos/

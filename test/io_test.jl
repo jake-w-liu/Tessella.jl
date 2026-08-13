@@ -8,6 +8,7 @@
 # Completeness : cross-format (v2→v4→v2) preserves connectivity CRC exactly.
 
 using Test
+import Tessella
 using Tessella.MeshTypes
 using Tessella.IO
 
@@ -74,6 +75,41 @@ end
         unknown=joinpath(dir,"unknown_node.msh")
         write(unknown,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n1\n1 0 0 0\n\$EndNodes\n\$Elements\n1\n1 1 0 1 2\n\$EndElements\n")
         @test_throws ArgumentError read_msh(unknown)
+
+        badentity=joinpath(dir,"bad_entity_header.msh")
+        write(badentity,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 0\n\$EndEntities\n")
+        @test_throws ArgumentError read_msh(badentity)
+        negentity=joinpath(dir,"negative_entity.msh")
+        write(negentity,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n-1 0 0 0\n\$EndEntities\n")
+        @test_throws ArgumentError read_msh(negentity)
+        zeroentity=joinpath(dir,"zero_entity.msh")
+        write(zeroentity,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 0 0 1\n0 0 0 0 1 1 1 0 0\n\$EndEntities\n")
+        @test_throws ArgumentError read_msh(zeroentity)
+        missingbound=joinpath(dir,"missing_boundary_entity.msh")
+        write(missingbound,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 1 0 0\n1 0 0 0 1 1 1 0 1 9\n\$EndEntities\n")
+        @test_throws ArgumentError read_msh(missingbound)
+        dupv4=joinpath(dir,"duplicate_v4_node.msh")
+        write(dupv4,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Nodes\n1 2 1 2\n3 1 0 2\n1\n1\n0 0 0\n1 0 0\n\$EndNodes\n")
+        @test_throws ArgumentError read_msh(dupv4)
+        dupelem=joinpath(dir,"duplicate_element.msh")
+        write(dupelem,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n2\n1 1 0 1 2\n1 1 0 1 2\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(dupelem)
+        zeroelem=joinpath(dir,"zero_element.msh")
+        write(zeroelem,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n0 1 0 1 2\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(zeroelem)
+        bigphys=joinpath(dir,"big_physical.msh")
+        write(bigphys,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 1 1 999999999999 1 2\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(bigphys)
+        unsupported_elem=joinpath(dir,"unsupported_element.msh")
+        write(unsupported_elem,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 1 1 0\n4 0 1 0\n\$EndNodes\n\$Elements\n1\n1 3 0 1 2 3 4\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(unsupported_elem)
+        multiphys=joinpath(dir,"multiple_physical_groups.msh")
+        write(multiphys,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 0 0 1\n1 0 0 0 1 1 1 2 11 12 0\n\$EndEntities\n\$Nodes\n0 0 0 0\n\$EndNodes\n")
+        @test_throws ArgumentError read_msh(multiphys)
+
+        dirty=_cube(); dirty.coords[1,1]=NaN; write(p,"sentinel")
+        @test_throws ArgumentError write_msh(p,dirty)
+        @test read(p,String)=="sentinel"
     end
 
     @testset "v4.1 round-trip preserves connectivity CRC" begin
@@ -268,6 +304,12 @@ end
         nonfinite=joinpath(dir,"nonfinite.stl")
         write(nonfinite,"solid x\nvertex NaN 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid x\n")
         @test_throws ArgumentError read_stl(nonfinite)
+        soup=joinpath(dir,"unframed_soup.stl")
+        write(soup,"solid x\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid x\n")
+        @test_throws ArgumentError read_stl(soup)
+        four=joinpath(dir,"four_vertex_facet.stl")
+        write(four,"solid x\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nvertex 1 1 0\nendloop\nendfacet\nendsolid x\n")
+        @test_throws ArgumentError read_stl(four)
 
         # Two vertices within tolerance but on opposite hash-cell sides must weld.
         within = NTuple{9,Float64}[

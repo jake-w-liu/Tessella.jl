@@ -23,6 +23,7 @@ quality) in `test/meshtypes_test.jl`.
 module MeshTypes
 
 import SHA
+using ..Predicates: orient3
 
 export Mesh, nnodes, nsegs, ntris, ntets, node, node2
 export triangle_area, tet_volume, tet_signed_volume
@@ -67,11 +68,41 @@ struct Mesh
         length(tri_tag) == size(tris, 2) || throw(ArgumentError("tri_tag length mismatch"))
         length(tet_tag) == size(tets, 2) || throw(ArgumentError("tet_tag length mismatch"))
         nn = size(coords, 2)
+        nn <= typemax(Int32) || throw(ArgumentError("Mesh: $nn nodes exceed Int32 indexing"))
+        for (what,cells) in (("segments",segs),("triangles",tris),("tetrahedra",tets))
+            size(cells,2)<=typemax(Int32) ||
+                throw(ArgumentError("Mesh: $(size(cells,2)) $what exceed the Int32 topology limit"))
+        end
         _check_ids(segs, nn, "segment"); _check_ids(tris, nn, "triangle"); _check_ids(tets, nn, "tet")
-        new(Matrix{Float64}(coords), Matrix{Int32}(segs), Matrix{Int32}(tris),
-            Matrix{Int32}(tets), Vector{Int32}(seg_tag), Vector{Int32}(tri_tag),
-            Vector{Int32}(tet_tag))
+        C=try Matrix{Float64}(coords) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("Mesh: coordinates must be Float64-representable: "*sprint(showerror,err)))
+        end
+        @inbounds for i in axes(C,2),d in 1:3
+            isfinite(C[d,i]) || throw(ArgumentError("Mesh: node $i has a non-finite coordinate"))
+        end
+        S=_connectivity_i32(segs,"segment");F=_connectivity_i32(tris,"triangle")
+        T=_connectivity_i32(tets,"tet")
+        st=_tags_i32(seg_tag,"segment");ft=_tags_i32(tri_tag,"triangle");tt=_tags_i32(tet_tag,"tet")
+        new(C,S,F,T,st,ft,tt)
     end
+end
+
+function _connectivity_i32(cells,what)
+    try Matrix{Int32}(cells) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("Mesh: $what connectivity does not fit Int32: "*sprint(showerror,err)))
+    end
+end
+function _tags_i32(tags,what)
+    out=try Vector{Int32}(tags) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("Mesh: $what tags do not fit Int32: "*sprint(showerror,err)))
+    end
+    @inbounds for (i,tag) in pairs(out)
+        tag>=0 || throw(ArgumentError("Mesh: $what tag $i is negative ($tag)"))
+    end
+    return out
 end
 
 function _check_ids(cells::AbstractMatrix, nn::Integer, what::AbstractString)
@@ -88,11 +119,13 @@ end
 
 """`node(m, i)` → the `(x,y,z)` of node `i` as an allocation-free `NTuple{3}`."""
 @inline function node(m::Mesh, i::Integer)
+    @boundscheck 1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
     @inbounds (m.coords[1, i], m.coords[2, i], m.coords[3, i])
 end
 
 """`node2(m, i)` → the `(x,y)` of node `i` (planar), allocation-free."""
 @inline function node2(m::Mesh, i::Integer)
+    @boundscheck 1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
     @inbounds (m.coords[1, i], m.coords[2, i])
 end
 
@@ -103,21 +136,69 @@ end
 @inline _sub(a, b) = (a[1]-b[1], a[2]-b[2], a[3]-b[3])
 @inline _dot(a, b) = a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
 @inline _cross(a, b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
-@inline _norm(a) = sqrt(_dot(a, a))
+@inline _norm(a) = hypot(a[1],a[2],a[3])
 @inline _scale(a, s) = (a[1]*s, a[2]*s, a[3]*s)
 @inline _add(a, b) = (a[1]+b[1], a[2]+b[2], a[3]+b[3])
 
 """Unsigned area of triangle `(a,b,c)` (3-D points)."""
-@inline function triangle_area(a, b, c)
-    return 0.5 * _norm(_cross(_sub(b, a), _sub(c, a)))
+function triangle_area(a, b, c)
+    all(isfinite,(a...,b...,c...)) || return NaN
+    A=_sub(b,a);B=_sub(c,a);C=_cross(A,B)
+    fast=0.5*_norm(C)
+    safe=isfinite(fast)&&fast>0
+    @inbounds for (ci,i,j,k,l) in ((1,2,3,3,2),(2,3,1,1,3),(3,1,2,2,1))
+        perm=abs(A[i]*B[j])+abs(A[k]*B[l])
+        safe &= isfinite(perm)&&(perm==0 || abs(C[ci])>16eps(Float64)*perm)
+    end
+    safe && return fast
+    return _triangle_area_big(a,b,c)
 end
 
 """Signed volume of tet `(a,b,c,d)` = det[b-a, c-a, d-a]/6 (sign = orientation)."""
-@inline function tet_signed_volume(a, b, c, d)
-    return _dot(_sub(b, a), _cross(_sub(c, a), _sub(d, a))) / 6.0
+function tet_signed_volume(a, b, c, d)
+    all(isfinite,(a...,b...,c...,d...)) || return NaN
+    A=_sub(b,a);B=_sub(c,a);C=_sub(d,a)
+    det=_dot(A,_cross(B,C));sgn=-orient3(a,b,c,d)
+    sgn==0 && return 0.0
+    permanent=abs(A[1])*(abs(B[2]*C[3])+abs(B[3]*C[2]))+
+              abs(A[2])*(abs(B[1]*C[3])+abs(B[3]*C[1]))+
+              abs(A[3])*(abs(B[1]*C[2])+abs(B[2]*C[1]))
+    if isfinite(det)&&isfinite(permanent)&&abs(det)>32eps(Float64)*permanent
+        v=abs(det)/6
+        v>0 && return copysign(v,sgn)
+    end
+    v=_tet_volume_big(a,b,c,d)
+    return sgn>0 ? v : -v
 end
 
 @inline tet_volume(a, b, c, d) = abs(tet_signed_volume(a, b, c, d))
+
+function _triangle_area_big(a,b,c)
+    R=Rational{BigInt}
+    A=ntuple(i->R(b[i])-R(a[i]),3)
+    B=ntuple(i->R(c[i])-R(a[i]),3)
+    C=(A[2]*B[3]-A[3]*B[2],A[3]*B[1]-A[1]*B[3],A[1]*B[2]-A[2]*B[1])
+    sq=C[1]^2+C[2]^2+C[3]^2
+    sq==0&&return 0.0
+    setprecision(BigFloat,256) do
+        y=Float64(sqrt(BigFloat(sq))/2)
+        y==0.0 ? nextfloat(0.0) : y
+    end
+end
+
+function _tet_volume_big(a,b,c,d)
+    R=Rational{BigInt}
+    A=ntuple(i->R(b[i])-R(a[i]),3)
+    B=ntuple(i->R(c[i])-R(a[i]),3)
+    C=ntuple(i->R(d[i])-R(a[i]),3)
+    det=A[1]*(B[2]*C[3]-B[3]*C[2])-A[2]*(B[1]*C[3]-B[3]*C[1])+
+        A[3]*(B[1]*C[2]-B[2]*C[1])
+    det==0&&return 0.0
+    setprecision(BigFloat,256) do
+        y=Float64(BigFloat(abs(det))/6)
+        y==0.0 ? nextfloat(0.0) : y
+    end
+end
 
 """
     tet_dihedral_extrema(a,b,c,d) -> (min_angle, max_angle) in radians
@@ -141,7 +222,8 @@ function tet_dihedral_extrema(a, b, c, d)
         nl = _sub(vl, _scale(u, _dot(vl, u)))
         dk = _norm(nk); dl = _norm(nl)
         (dk == 0 || dl == 0) && return (0.0, Float64(pi))
-        cosang = clamp(_dot(nk, nl) / (dk*dl), -1.0, 1.0)
+        cosang = clamp((nk[1]/dk)*(nl[1]/dl)+(nk[2]/dk)*(nl[2]/dl)+
+                       (nk[3]/dk)*(nl[3]/dl), -1.0, 1.0)
         ang = acos(cosang)
         ang < mn && (mn = ang)
         ang > mx && (mx = ang)
@@ -152,13 +234,17 @@ end
 """Circumradius of tet `(a,b,c,d)`. Returns `Inf` for a degenerate (flat) tet."""
 function tet_circumradius(a, b, c, d)
     A = _sub(b, a); B = _sub(c, a); C = _sub(d, a)
-    denom = 2.0 * _dot(A, _cross(B, C))       # 12·signed volume
+    scale=max(abs(A[1]),abs(A[2]),abs(A[3]),abs(B[1]),abs(B[2]),abs(B[3]),
+              abs(C[1]),abs(C[2]),abs(C[3]))
+    (isfinite(scale)&&scale>0) || return Inf
+    An=_scale(A,inv(scale));Bn=_scale(B,inv(scale));Cn=_scale(C,inv(scale))
+    denom = 2.0 * _dot(An, _cross(Bn, Cn))       # normalized 12·signed volume
     denom == 0 && return Inf
-    la = _dot(A, A); lb = _dot(B, B); lc = _dot(C, C)
-    O = _add(_add(_scale(_cross(B, C), la), _scale(_cross(C, A), lb)),
-             _scale(_cross(A, B), lc))
-    O = _scale(O, 1/denom)                     # circumcenter relative to a
-    return _norm(O)
+    la = _dot(An, An); lb = _dot(Bn, Bn); lc = _dot(Cn, Cn)
+    O = _add(_add(_scale(_cross(Bn, Cn), la), _scale(_cross(Cn, An), lb)),
+             _scale(_cross(An, Bn), lc))
+    O = _scale(O, 1/denom)
+    return scale*_norm(O)
 end
 
 """Radius-edge ratio = circumradius / shortest edge (Delaunay-refinement quality)."""
@@ -342,7 +428,8 @@ function _tet_topology(tets::AbstractMatrix{<:Integer})
         return (false, "tet count $nt exceeds the Int32 topology-audit limit")
     n4 = try
         Base.checked_mul(4, nt)
-    catch
+    catch err
+        err isa InterruptException && rethrow()
         return (false, "tet topology record count overflow")
     end
 
@@ -437,6 +524,71 @@ function _tet_topology(tets::AbstractMatrix{<:Integer})
     return (true, "ok")
 end
 
+# Triangle analogue of the tetrahedral vertex-link audit.  At each original vertex,
+# every incident triangle contributes one edge to its link.  A 2-manifold link is a
+# connected cycle (interior vertex) or a connected path (boundary vertex).  This
+# catches edge incidence >2 and triangles that meet only at a pinched vertex, neither
+# of which an area check can detect.
+function _tri_topology(tris::AbstractMatrix{<:Integer})
+    nt=size(tris,2)
+    nt==0&&return (true,"ok")
+    nt<=typemax(Int32)||return (false,"triangle count $nt exceeds the Int32 topology-audit limit")
+    n3=try Base.checked_mul(3,nt) catch err
+        err isa InterruptException && rethrow()
+        return (false,"triangle topology record count overflow")
+    end
+    vertex_tris=Vector{NTuple{2,Int32}}(undef,n3)
+    trikeys=Vector{NTuple{3,Int32}}(undef,nt);ri=0
+    @inbounds for t in 1:nt
+        a=Int32(tris[1,t]);b=Int32(tris[2,t]);c=Int32(tris[3,t])
+        (a==b||a==c||b==c)&&return (false,"triangle $t repeats a vertex")
+        trikeys[t]=_sort3(a,b,c);ti=Int32(t)
+        for v in (a,b,c);ri+=1;vertex_tris[ri]=(v,ti);end
+    end
+    sort!(trikeys;alg=QuickSort)
+    @inbounds for i in 2:nt
+        trikeys[i]==trikeys[i-1]&&return (false,"duplicate triangle")
+    end
+    sort!(vertex_tris;alg=QuickSort)
+    endpoints=NTuple{2,Int32}[] # (link vertex, local link-edge id)
+    parent=Int32[];i=1
+    while i<=n3
+        j=i+1
+        @inbounds while j<=n3&&vertex_tris[j][1]==vertex_tris[i][1];j+=1;end
+        v=@inbounds vertex_tris[i][1];degree=j-i
+        empty!(endpoints);resize!(parent,degree)
+        @inbounds for k in 1:degree;parent[k]=Int32(k);end
+        @inbounds for k in i:j-1
+            t=Int(vertex_tris[k][2]);eid=Int32(k-i+1)
+            a=Int32(tris[1,t]);b=Int32(tris[2,t]);c=Int32(tris[3,t])
+            x,y=v==a ? (b,c) : (v==b ? (a,c) : (a,b))
+            push!(endpoints,(x,eid),(y,eid))
+        end
+        sort!(endpoints;alg=QuickSort)
+        ndegree1=0;k=1
+        @inbounds while k<=length(endpoints)
+            l=k+1
+            while l<=length(endpoints)&&endpoints[l][1]==endpoints[k][1];l+=1;end
+            inc=l-k
+            inc<=2||return (false,"vertex $v has a non-manifold triangle-link vertex")
+            if inc==1
+                ndegree1+=1
+            else
+                _uf_union!(parent,endpoints[k][2],endpoints[k+1][2])
+            end
+            k=l
+        end
+        root=_uf_find!(parent,Int32(1))
+        @inbounds for k in 2:degree
+            _uf_find!(parent,Int32(k))==root||return (false,"vertex $v has a disconnected triangle link")
+        end
+        (ndegree1==0||ndegree1==2)||return (false,
+            "vertex $v triangle link has $ndegree1 endpoints (expected 0 or 2)")
+        i=j
+    end
+    return (true,"ok")
+end
+
 # ════════════════════════════════════════════════════════════════════════════════
 # Bounding box, validation, checksum
 # ════════════════════════════════════════════════════════════════════════════════
@@ -488,6 +640,25 @@ function validate(m::Mesh; require_positive_tets::Bool=true)
         (isfinite(p[1]) && isfinite(p[2]) && isfinite(p[3])) ||
             (push!(msgs, "node $i has non-finite coordinate"); break)
     end
+    # Segments are cells too: repeated endpoints, geometrically coincident
+    # endpoints, overflowed lengths, and duplicate undirected cells are invalid.
+    ndegseg = 0; nbadseg = 0
+    segkeys = Vector{NTuple{2,Int32}}(undef, nsegs(m))
+    @inbounds for s in 1:nsegs(m)
+        a = m.segs[1,s]; b = m.segs[2,s]
+        segkeys[s] = _sort2(a,b)
+        pa = node(m,a); pb = node(m,b)
+        len = hypot(pb[1]-pa[1], pb[2]-pa[2], pb[3]-pa[3])
+        !isfinite(len) ? (nbadseg += 1) : (len == 0 && (ndegseg += 1))
+    end
+    nbadseg > 0 && push!(msgs, "$nbadseg segments have non-finite computed length")
+    ndegseg > 0 && push!(msgs, "$ndegseg degenerate (zero-length) segments")
+    sort!(segkeys; alg=QuickSort)
+    ndupseg = 0
+    @inbounds for s in 2:length(segkeys)
+        segkeys[s] == segkeys[s-1] && (ndupseg += 1)
+    end
+    ndupseg > 0 && push!(msgs, "$ndupseg duplicate undirected segments")
     # degenerate / inverted tets
     nneg = 0; nflat = 0; nbadvol = 0
     @inbounds for t in 1:ntets(m)
@@ -513,7 +684,11 @@ function validate(m::Mesh; require_positive_tets::Bool=true)
     end
     nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
     ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
-    # Full combinatorial-manifold audit (faces alone miss edge/vertex pinches).
+    # Full combinatorial-manifold audits (incidence alone misses vertex pinches).
+    if ntris(m) > 0
+        topok, reason = _tri_topology(m.tris)
+        topok || push!(msgs, "non-manifold triangle complex: $reason")
+    end
     if ntets(m) > 0
         topok, reason = _tet_topology(m.tets)
         topok || push!(msgs, "non-manifold tet complex: $reason")

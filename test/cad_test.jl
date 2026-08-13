@@ -32,11 +32,14 @@ using Tessella.Mesh3D: recover_boundary, tetrahedralize_conforming_exact
         @test !on_surface(disk,(1.,2.,3.1))
         @test project_to(disk,(1.,2.,9.)) == (1.,2.,3.)
         @test project_to(disk,(5.,2.,9.)) == (3.,2.,3.)
+        @test project_to(SphereS((0.,0.,0.),1.),(nextfloat(0.0),0.,0.)) == (1.,0.,0.)
 
         cyl = CylinderS((0.,0.,0.),(0.,0.,1.),1.)
         pln = PlaneS((0.,0.,0.),(0.,0.,1.))
         @test_throws ArgumentError imprint_circle(cyl,pln;nseg=0)
         @test_throws ArgumentError imprint_ellipse(cyl,pln;nseg=typemax(Int))
+        almost=PlaneS((0.,0.,0.),(1e-13,0.,1.))
+        @test_throws ArgumentError imprint_circle(cyl,almost)
     end
 
     @testset "exact surface membership + projection" begin

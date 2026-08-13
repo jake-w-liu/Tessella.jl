@@ -9,6 +9,7 @@
 # Completeness : exported meshes validate(); adjacency is mutually consistent.
 
 using Test
+import Tessella
 using Tessella.Mesh2D
 using Tessella.MeshTypes
 
@@ -86,6 +87,12 @@ end
             [0.0,1.0,0.0], [0.0,0.0,1.0], [(2,2)])
         @test_throws ArgumentError constrained_delaunay(
             [0.0,-0.0,1.0,0.0], [0.0,0.0,0.0,1.0], [(1,2)])
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0], [0.0,0.0,1.0], [(1,2),(2,1)])
+        @test Tessella.Mesh2D._strictly_between((-floatmax(Float64),0.0),
+                                                 (floatmax(Float64),0.0),(0.0,0.0))
+        @test Tessella.Mesh2D._encroaches((-floatmax(Float64),0.0),
+                                           (floatmax(Float64),0.0),(0.0,0.0))
 
         @test_throws ArgumentError Tessella.mesh_planar(
             Float64[0,1,0], Float64[0,0,1], Tuple{Int,Int}[])
@@ -302,10 +309,13 @@ mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2
         @test_throws ArgumentError refine!(makeT(); max_area=0)
         @test_throws ArgumentError refine!(makeT(); max_area=NaN)
         @test_throws ArgumentError refine!(makeT(); maxsteps=0)
+        @test_throws ArgumentError refine!(makeT(); maxsteps=big(typemax(Int))+1)
         @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
                                            size=(x,y)->NaN, maxsteps=1)
         @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
                                            size=(x,y)->"bad", maxsteps=1)
+        @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
+                                           size=(x,y)->Inf, maxsteps=1)
         @test_throws ErrorException refine!(makeT(); min_angle_deg=0,
                                             max_area=0.01, maxsteps=1)
     end

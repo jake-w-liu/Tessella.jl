@@ -23,8 +23,8 @@ const TESSELLA_STAGE = 6  # see STATUS.md stage board
 
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
-include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
+include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
 include("SizeField.jl")      # Stage 2/4: size fields
@@ -102,19 +102,22 @@ prism face-diagonal `√(edge²+layer²) ≤ hmax`.
 Handles **non-convex** cross-sections and polygons with holes (via the `segments`
 constrained-Delaunay + interior classification). This is the extruded/prismatic case of
 uniform sizing on an arbitrary domain — complementing [`mesh_box`](@ref) (box) and
-[`mesh_cylinder`](@ref) (cylinder); a general curved-surface uniform sizer (Shewchuk
-terminator) remains the open research case.
+[`mesh_cylinder`](@ref) (cylinder). For a general closed faceted surface, use
+[`mesh_sized`](@ref).
 """
 function mesh_sized_extrude(xs::AbstractVector, ys::AbstractVector,
                             segments::AbstractVector{<:Tuple{Integer,Integer}},
                             z0::Real, z1::Real; hmax::Real, min_angle_deg::Real=25.0)
     hm=try Float64(hmax) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_extrude: hmax must be Float64-representable: $(sprint(showerror,err))"))
     end
     za=try Float64(z0) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_extrude: z0 must be Float64-representable: $(sprint(showerror,err))"))
     end
     zb=try Float64(z1) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_extrude: z1 must be Float64-representable: $(sprint(showerror,err))"))
     end
     (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized_extrude: hmax must be finite and positive (got $hmax)"))
@@ -132,10 +135,12 @@ function mesh_sized_extrude(xs::AbstractVector, ys::AbstractVector,
     (isfinite(ratio)&&ratio<=typemax(Int)) ||
         throw(ArgumentError("mesh_sized_extrude: axial layer count exceeds the platform Int limit"))
     nz=max(1,ceil(Int,ratio));dz=(zb-za)/nz
-    levels=try Base.checked_add(nz,1) catch
+    levels=try Base.checked_add(nz,1) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_extrude: axial layer count overflows Int"))
     end
-    nout=try Base.checked_mul(levels,nv2) catch
+    nout=try Base.checked_mul(levels,nv2) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_extrude: node count overflows Int"))
     end
     nout<=typemax(Int32) || throw(ArgumentError("mesh_sized_extrude: $nout nodes exceed Int32"))
@@ -145,7 +150,8 @@ function mesh_sized_extrude(xs::AbstractVector, ys::AbstractVector,
         coords[1,id] = m2.coords[1,i]; coords[2,id] = m2.coords[2,i]; coords[3,id] = za + k*dz
     end
     _n(id) = @inbounds (coords[1,id], coords[2,id], coords[3,id])
-    ntout=try Base.checked_mul(3,Base.checked_mul(size(m2.tris,2),nz)) catch
+    ntout=try Base.checked_mul(3,Base.checked_mul(size(m2.tris,2),nz)) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_extrude: tetrahedron count overflows Int"))
     end
     tets = Matrix{Int32}(undef, 4, ntout); col = 0
@@ -191,6 +197,7 @@ axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_ext
 """
 function mesh_sized(surface::Mesh; hmax::Real)
     hm=try Float64(hmax) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized: hmax must be Float64-representable: $(sprint(showerror,err))"))
     end
     (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized: hmax must be finite and positive (got $hmax)"))

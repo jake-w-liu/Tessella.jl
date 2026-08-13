@@ -10,7 +10,7 @@ oracle; a transcription/sign/index bug in either shows up as a mismatch.
 """
 module Oracles
 
-export exact_det, oracle_orient2, oracle_orient3, oracle_incircle, oracle_insphere
+export exact_det, oracle_orient2, oracle_orient3, oracle_incircle, oracle_incircle3, oracle_insphere
 
 const QBig = Rational{BigInt}
 
@@ -64,6 +64,18 @@ function oracle_incircle(a, b, c, d)::Int
              _q(b[1]) _q(b[2]) lb 1;
              _q(c[1]) _q(c[2]) lc 1;
              _q(d[1]) _q(d[2]) ld 1]
+    return _isign(exact_det(M))
+end
+
+"""Exact in-circle determinant for coplanar 3-D points using a non-degenerate projection and the full 3-D squared norm."""
+function oracle_incircle3(a,b,c,d)::Int
+    axes=oracle_orient2((a[1],a[2]),(b[1],b[2]),(c[1],c[2]))!=0 ? (1,2) :
+         oracle_orient2((a[2],a[3]),(b[2],b[3]),(c[2],c[3]))!=0 ? (2,3) : (3,1)
+    lift(p)=_q(p[1])^2+_q(p[2])^2+_q(p[3])^2
+    M=QBig[_q(a[axes[1]]) _q(a[axes[2]]) lift(a) 1;
+           _q(b[axes[1]]) _q(b[axes[2]]) lift(b) 1;
+           _q(c[axes[1]]) _q(c[axes[2]]) lift(c) 1;
+           _q(d[axes[1]]) _q(d[axes[2]]) lift(d) 1]
     return _isign(exact_det(M))
 end
 

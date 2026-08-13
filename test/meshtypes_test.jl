@@ -63,6 +63,10 @@ end
         @test ntets(m) == 6
         @test node(m, 7) == (1.0, 1.0, 1.0)
         @test node2(m, 3) == (1.0, 1.0)
+        @test_throws BoundsError node(m, 0)
+        @test_throws BoundsError node(m, nnodes(m)+1)
+        @test_throws BoundsError node2(m, 0)
+        @test_throws BoundsError node2(m, nnodes(m)+1)
         node(m, 1); node2(m, 1)
         @test (@allocated node(m, 1)) == 0
         @test (@allocated node2(m, 1)) == 0
@@ -172,12 +176,24 @@ end
         # degenerate (flat) tet → flagged
         flat = Mesh(Float64[0 1 2 3; 0 0 0 1; 0 0 0 0]; tets=reshape(Int32[1,2,3,4],4,1))
         @test !validate(flat).ok
+        # Direct Float64 products overflow on these finite, well-conditioned cells;
+        # the exact-sign/scaled fallback must recover the representable measures.
+        ta=(-1e308,0.,0.);tb=(1e308,0.,0.);tc=(0.,1e-308,0.)
+        @test triangle_area(ta,tb,tc) ≈ 1.0 rtol=1e-14
+        td=(0.,0.,1e-308)
+        @test tet_volume(ta,tb,tc,td) ≈ 1e-308/3 rtol=1e-12
+        ua=(0.,0.,0.);ub=(1e-200,0.,0.);uc=(0.,1e-200,0.);ud=(0.,0.,1e-200)
+        @test triangle_area(ua,ub,uc)==nextfloat(0.0)
+        @test tet_signed_volume(ua,ub,uc,ud)==nextfloat(0.0)
     end
 
     @testset "constructor rejects bad input" begin
         @test_throws ArgumentError Mesh(Float64[0 1; 0 0]; )                 # coords not 3×n
         @test_throws ArgumentError Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tets=reshape(Int32[1,2,3,9],4,1))  # id out of range
         @test_throws ArgumentError Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tris=reshape(Int32[1,2,3],3,1), tri_tag=Int32[1,2])  # tag mismatch
+        @test_throws ArgumentError Mesh(fill(big(10)^1000,3,1))
+        @test_throws ArgumentError Mesh(Float64[0 1;0 0;0 0];segs=reshape(Int32[1,2],2,1),seg_tag=Int64[typemax(Int64)])
+        @test_throws ArgumentError Mesh(Float64[0 1;0 0;0 0];segs=reshape(Int32[1,2],2,1),seg_tag=Int32[-1])
     end
 
     @testset "mesh_crc determinism + order-invariance + mutation-sensitivity" begin
@@ -258,5 +274,34 @@ end
         @test !validate(mt).ok
         ms = Mesh(C[:,1:3]; tris=reshape(Int32[1,2,3],3,1))
         @test !validate(ms).ok
+        ml = Mesh(Float64[-1e308 1e308; 0 0; 0 0]; segs=reshape(Int32[1,2],2,1))
+        @test !validate(ml).ok
+    end
+
+    @testset "segment and triangle topology validation" begin
+        Cseg = Float64[0 1 2; 0 0 0; 0 0 0]
+        repeated = Mesh(Cseg; segs=reshape(Int32[1,1],2,1))
+        @test !validate(repeated).ok
+        coincident = Mesh(Float64[0 0; 0 0; 0 0]; segs=reshape(Int32[1,2],2,1))
+        @test !validate(coincident).ok
+        duplicate = Mesh(Cseg; segs=Int32[1 2; 2 1])
+        @test !validate(duplicate).ok
+
+        C = Float64[0 1 0 -1 0; 0 0 1 0 -1; 0 0 0 0 0]
+        duptri = Mesh(C; tris=Int32[1 3; 2 2; 3 1])
+        @test !validate(duptri).ok
+        pinch = Mesh(C; tris=Int32[1 1; 2 4; 3 5])
+        @test !validate(pinch).ok
+
+        Cedge = Float64[0 1 0 0 0; 0 0 1 -1 0; 0 0 0 0 1]
+        edge3 = Mesh(Cedge; tris=Int32[1 2 1; 2 1 2; 3 4 5])
+        @test !validate(edge3).ok
+
+        quad = Mesh(Float64[0 1 1 0; 0 0 1 1; 0 0 0 0];
+                    tris=Int32[1 1; 2 3; 3 4])
+        @test validate(quad).ok
+        disjoint = Mesh(Float64[0 1 0 3 4 3; 0 0 1 0 0 1; 0 0 0 0 0 0];
+                        tris=Int32[1 4; 2 5; 3 6])
+        @test validate(disjoint).ok
     end
 end

@@ -484,7 +484,8 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
     end
     segs=sort!(collect(segset));nseg=length(segs)
     nseg>0||throw(ErrorException("recover_partition_cdt: prismatic arrangement has no projected segments"))
-    pairs=try Base.checked_mul(nseg,nseg-1)÷2 catch
+    pairs=try Base.checked_mul(nseg,nseg-1)÷2 catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("recover_partition_cdt: projected arrangement pair count overflows Int"))
     end
     pairs<=5_000_000||throw(ArgumentError(
@@ -541,7 +542,8 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
     sort!(unique!(levels));length(levels)>=2||throw(ErrorException(
         "recover_partition_cdt: prismatic surfaces have fewer than two axial levels"))
     nv=size(m2.coords,2);nl=length(levels)
-    nall=try Base.checked_mul(nv,nl) catch
+    nall=try Base.checked_mul(nv,nl) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("recover_partition_cdt: prismatic node count overflows Int"))
     end
     nall<=nmax||throw(ArgumentError(
@@ -553,7 +555,8 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
     end
     grids=[Mesh3D._raygrid(s) for s in surfaces]
     tv=NTuple{4,Int}[];tags=Int32[];used=Set{Int}()
-    potential=try Base.checked_mul(3,Base.checked_mul(size(m2.tris,2),nl-1)) catch
+    potential=try Base.checked_mul(3,Base.checked_mul(size(m2.tris,2),nl-1)) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("recover_partition_cdt: prismatic tetrahedron count overflows Int"))
     end
     sizehint!(tv,potential);sizehint!(tags,potential)
@@ -786,6 +789,7 @@ blocker, never a silent unsized fallback.
 """
 function mesh_sized_cdt(surface::Mesh; hmax::Real)
     hm=try Float64(hmax) catch err
+        err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_cdt: hmax must be Float64-representable: $(sprint(showerror,err))"))
     end
     (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized_cdt: hmax must be finite and positive (got $hmax)"))

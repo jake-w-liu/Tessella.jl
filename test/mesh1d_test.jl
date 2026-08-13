@@ -37,6 +37,8 @@ dist(a,b) = sqrt(sum((a[i]-b[i])^2 for i in 1:3))
     @testset "curve contract and resource bounds" begin
         seg(t) = (t, 0.0, 0.0)
         @test_throws ArgumentError curve_length(seg; nsample=0)
+        @test_throws ArgumentError curve_length(seg; nsample=big(typemax(Int))+1)
+        @test curve_length(seg; nsample=big(2)) == 1.0
         @test_throws ArgumentError curve_length(seg; t0=1, t1=0)
         @test_throws ArgumentError curve_length(t->(NaN,0.0,0.0); nsample=2)
         @test_throws ArgumentError metric_length(seg, ConstantSize(1.0); nsample=-1)
@@ -44,6 +46,8 @@ dist(a,b) = sqrt(sum((a[i]-b[i])^2 for i in 1:3))
         @test_throws ArgumentError mesh_curve(seg, ConstantSize(1.0); closed=true)
         @test_throws ArgumentError mesh_segment((0.0,0.0,0.0), (1.0,0.0,0.0),
                                                 ConstantSize(1e-300); nsample=1)
+        tiny(t)=(1e-320*t,0.0,0.0)
+        @test metric_length(tiny,ConstantSize(1e-320);nsample=1) ≈ 1.0
     end
 
     @testset "constant size → uniform spacing, correct count" begin
