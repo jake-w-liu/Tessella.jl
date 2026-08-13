@@ -87,4 +87,34 @@ end
         r = surface_diagnostics(m2; tol=1e-9)
         @test r.n_coincident_pairs >= 1
     end
+
+    @testset "empty, non-finite, invalid-tolerance, and far-origin inputs block safely" begin
+        empty_surface = Mesh(Matrix{Float64}(undef, 3, 0))
+        ok, r = is_meshable(empty_surface)
+        @test !ok && !r.closed
+        @test any(occursin("no triangles", s) for s in r.messages)
+
+        for badtol in (-1.0, Inf, NaN)
+            @test_throws ArgumentError surface_diagnostics(empty_surface; tol=badtol)
+        end
+
+        cube = clean_cube()
+        far = Mesh(cube.coords .+ 1.0e15; tris=cube.tris)
+        okfar, rfar = is_meshable(far)
+        @test okfar
+        @test rfar.n_coincident_pairs == 0
+        @test rfar.min_edge_length ≈ 1.0
+        far_dup = Mesh(hcat(far.coords, far.coords[:,1]); tris=far.tris)
+        @test surface_diagnostics(far_dup).n_coincident_pairs == 1
+
+        C = copy(cube.coords); C[1,1] = NaN
+        oknan, rnan = is_meshable(Mesh(C; tris=cube.tris))
+        @test !oknan
+        @test any(occursin("non-finite coordinates", s) for s in rnan.messages)
+
+        C[1,1] = Inf
+        okinf, rinf = is_meshable(Mesh(C; tris=cube.tris))
+        @test !okinf
+        @test any(occursin("non-finite coordinates", s) for s in rinf.messages)
+    end
 end
