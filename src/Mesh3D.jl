@@ -725,15 +725,18 @@ global minimum dihedral is **non-decreasing** (a safe optimizer); the result is
 generally not Delaunay. The 3-2 flips collapse many slivers — on a random-cloud
 Delaunay this cuts the sliver count substantially and raises the mean dihedral
 (e.g. 25.6°→28.8° from flips alone, 25.6°→37.8° combined with smoothing). A few
-stubborn slivers remain (min dihedral is only non-decreasing, not driven up —
-that needs weighted exudation, remaining). Returns the number of flips applied.
+topology-locked slivers can remain; combine this with
+`Optimize.remove_slivers`, which targets poor vertex stars geometrically.
+Returns the number of flips applied.
 """
 function optimize_flips!(T::Triangulation3; passes::Integer=4, tol::Real=1e-9)
-    passes >= 0 || throw(ArgumentError("optimize_flips!: passes must be non-negative (got $passes)"))
+    (0<=passes<=typemax(Int)) || throw(ArgumentError(
+        "optimize_flips!: passes must be in 0:$(typemax(Int)) (got $passes)"))
+    npasses=Int(passes)
     ftol = _finite3(tol, "optimize_flips!", "tol")
     ftol >= 0 || throw(ArgumentError("optimize_flips!: tol must be non-negative (got $tol)"))
     nflips = 0
-    for _ in 1:passes
+    for _ in 1:npasses
         changed = false
         # 2→3 flips over interior faces
         @inbounds for t1 in 1:length(T.alive)
