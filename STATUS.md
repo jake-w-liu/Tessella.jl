@@ -8,7 +8,7 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-13)
 
-**Suite green: 143,206 assertions** (`--check-bounds=yes`). Everything below is committed to
+**Suite green: 151,216 assertions** (`--check-bounds=yes`). Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
 ### ✅ DONE + verified

@@ -36,6 +36,7 @@ include("RecoverCDT.jl")     # Stage 3: general conforming-Delaunay boundary rec
 include("Optimize.jl")       # Stage 4: tet quality report + Laplacian smoothing
 include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't fail")
 include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
+include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
 using .MeshTypes: Mesh, validate, mesh_crc
