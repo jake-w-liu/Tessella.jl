@@ -39,14 +39,14 @@ include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
 include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
-using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume
+using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
-using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
+using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder, refine_to_size
 using .RecoverCDT: recover_boundary_cdt, mesh_sized_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, mesh_quality
 using .Heal: is_meshable
 
-export mesh_volume, mesh_planar, mesh_sized_extrude, stage
+export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
 export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
@@ -134,6 +134,42 @@ function mesh_sized_extrude(xs::AbstractVector, ys::AbstractVector,
     m = Mesh(coords; tets=tets)
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_sized_extrude: produced an invalid mesh — " * join(diag.messages, "; ")))
+    return m
+end
+
+"""
+    mesh_sized(surface::Mesh; hmax) -> Mesh
+
+**General uniform size-controlled** tet mesh of the domain enclosed by an arbitrary
+closed triangulated `surface` (curved or polyhedral, convex or non-convex), with a
+**guaranteed maximum edge length `≤ hmax`**. Two stages:
+
+1. **Fill** — [`tetrahedralize`](@ref) (Delaunay + ray-cast interior classification)
+   gives a valid conforming tet mesh of the domain; if that is not watertight (a
+   non-convex boundary the Delaunay restriction misses), [`recover_boundary`](@ref) is
+   used instead.
+2. **Size** — [`refine_to_size`](@ref) longest-edge-bisects the fill until every edge is
+   `≤ hmax`. Bisection is conforming, validity/volume-preserving, and terminating, so the
+   result is a valid, watertight, conforming mesh with `maxedge ≤ hmax` at the domain's
+   own (faceted-surface) volume.
+
+Verified on convex boxes, spheres, conical frusta, and a non-convex L-prism (guaranteed
+`maxedge ≤ hmax`, valid, watertight, conforming). Returns the mesh, or throws an explicit
+blocker if the surface cannot be filled watertight (never a silently bad mesh). For
+axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_extrude`](@ref)
+(exact boundary, no faceting); `mesh_sized` is the general fallback for arbitrary surfaces.
+"""
+function mesh_sized(surface::Mesh; hmax::Real)
+    hmax > 0 || throw(ArgumentError("mesh_sized: hmax must be positive (got $hmax)"))
+    m0 = tetrahedralize(surface)
+    if !(validate(m0).ok && boundary_faces(m0.tets)[2] == 2)
+        m0 = recover_boundary(surface)                      # non-convex boundary fallback
+    end
+    (validate(m0).ok && boundary_faces(m0.tets)[2] == 2) ||
+        throw(ErrorException("mesh_sized: could not fill the surface into a watertight mesh (try recover_boundary_cdt / check the surface is closed + manifold)"))
+    m = refine_to_size(m0, hmax)
+    diag = validate(m)
+    diag.ok || throw(ErrorException("mesh_sized: refinement produced an invalid mesh — " * join(diag.messages, "; ")))
     return m
 end
 
