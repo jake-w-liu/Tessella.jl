@@ -89,6 +89,32 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test all(==(shas[1]), shas)
     end
 
+    @testset "cospherical cylinder pin: jump-and-walk keeps location out of O(n²) (#11)" begin
+        # The exact-coordinate (perturb=false) Delaunay of a fine cylinder's hull
+        # vertices was O(n²): a handful of far points made the point-location walk
+        # wander the whole mesh (the old 16·ntets step budget) and then fall to the
+        # O(n) exhaustive scan — measured ~300 s at nθ=12,nz=24. `_pick_start3`
+        # (jump-and-walk near start) + a walk guard capped at ~48·∛n cut that to
+        # seconds. This pins (a) the fine pin completes fast — an O(n²) reversion
+        # trips the ceiling — and (b) it still tetrahedralizes every hull vertex.
+        local M3 = Tessella.Mesh3D
+        pin = cylinder_surface((0.0,0.0,0.0),(0.0,0.0,1.0), 0.8, 159.0; nθ=12, nz=24)
+        nn = size(pin.coords,2)
+        xs=[pin.coords[1,i] for i in 1:nn]; ys=[pin.coords[2,i] for i in 1:nn]; zs=[pin.coords[3,i] for i in 1:nn]
+        delaunay3d(xs,ys,zs; perturb=false)                 # warm compile
+        t = @elapsed T = delaunay3d(xs,ys,zs; perturb=false)
+        # every distinct hull vertex is tetrahedralized (nothing dropped by the fix)
+        ndistinct = length(unique([(xs[i],ys[i],zs[i]) for i in 1:nn]))
+        used = Set{Int32}()
+        for tt in 1:length(T.alive)
+            (T.alive[tt] && !M3._is_ghost_tet(T,tt)) || continue
+            for k in 1:4; v=M3._vert(T,tt,k); v != 0 && push!(used, v); end
+        end
+        @test count(T.alive) > 0
+        @test length(used) == ndistinct
+        @test t < 60.0                                      # generous; ~300 s O(n²) reversion trips this
+    end
+
     @testset "tetrahedralize: fill a domain from its boundary surface" begin
         # closed cube surface (12 outward triangles) → filled volume 1
         C=Float64[0 1 1 0 0 1 1 0; 0 0 1 1 0 0 1 1; 0 0 0 0 1 1 1 1]

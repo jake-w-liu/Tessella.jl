@@ -256,19 +256,67 @@ end
     end
 end
 
-# ── point location (stochastic walk) ────────────────────────────────────────────
-function locate3(T::Triangulation3, px, py, pz, vid; start::Integer=T.last)
-    t = start
-    (t==0 || !T.alive[t]) && (t=_first_alive3(T))
+# ── point location (jump-and-walk) ──────────────────────────────────────────────
+@inline function _dist2_v(T::Triangulation3, v, px, py, pz)
+    @inbounds dx=T.x[v]-px; @inbounds dy=T.y[v]-py; @inbounds dz=T.z[v]-pz
+    dx*dx + dy*dy + dz*dz
+end
+
+# Pick a walk-start tet by jump-and-walk (Mücke–Saias–Zhu): sample ~∛n already-
+# inserted landmark vertices and start from the live incident tet of whichever is
+# nearest the query. This keeps the subsequent walk short (O(∛n) expected) and —
+# the point of it — prevents the walk from wandering the whole mesh (then falling
+# to the O(n) exhaustive `_locate_scan`) when the query is far from `T.last`, the
+# pathology that made the exact-coordinate (perturb=false) Delaunay O(n²) on
+# maximally-cospherical input (e.g. a fine cylinder's ~500 hull vertices).
+# Output-identical: the walk's terminal tet is a member of the query's unique
+# Bowyer–Watson cavity regardless of start, so the mesh is unchanged — only faster.
+# Deterministic: the landmark sample stream is keyed by `vid`.
+function _pick_start3(T::Triangulation3, px, py, pz, vid)
+    start = T.last
+    (start==0 || start>length(T.alive) || !T.alive[start]) && (start=_first_alive3(T))
+    n = T.nreal
+    n <= 4 && return start
+    bestd = Inf
+    # seed the "nearest" contest with the current start's real vertices so the
+    # sample can only improve on it (never regress below the T.last locality).
+    @inbounds for k in 1:4
+        v = _vert(T, start, k)
+        (v==GHOST3) && continue
+        d = _dist2_v(T, v, px, py, pz); d < bestd && (bestd = d)
+    end
+    k = clamp(round(Int, cbrt(n)) + 3, 4, 64)
+    rs = UInt64(vid)*0x9E3779B97F4A7C15 + 0xD1B54A32D192ED03
+    @inbounds for _ in 1:k
+        rs ⊻= rs<<13; rs ⊻= rs>>7; rs ⊻= rs<<17
+        v = Int32(rs % UInt64(n)) + Int32(1)
+        vt = T.vtet[v]
+        (vt==0 || vt>length(T.alive) || !T.alive[vt]) && continue
+        d = _dist2_v(T, v, px, py, pz)
+        if d < bestd; bestd = d; start = vt; end
+    end
+    return start
+end
+
+function locate3(T::Triangulation3, px, py, pz, vid; start::Integer=0)
+    t = start == 0 ? _pick_start3(T, px, py, pz, vid) : Int32(start)
+    (t==0 || t>length(T.alive) || !T.alive[t]) && (t=_first_alive3(T))
     gs = _ghost_slot(T, t); gs != 0 && (t = _nbr(T, t, gs))
     prev = Int32(0)
     rs = UInt64(vid)*0x9E3779B97F4A7C15 + 0xD1B54A32D192ED03
-    guard = 0; maxstep = 16*length(T.alive) + 64
+    # Guard for the walk. With the jump-and-walk near start, a walk on a valid
+    # Delaunay mesh converges in O(∛n) steps (measured ≤100 even at n=20 000). A
+    # walk that exceeds a generous multiple of that is NOT converging — the
+    # perturb=false complex is degenerate on maximally-cospherical input (flat
+    # tets), where a visibility walk has no termination guarantee — so cut the
+    # losses and locate by exhaustive scan rather than wander the whole mesh
+    # (16·ntets steps, the old bound, was ~28 000 wasted steps × expensive exact
+    # predicates per hard point, the O(n²) cliff on the fine cylinder). Purely a
+    # performance knob: the scan returns the same uniquely-determined tet, so the
+    # mesh is unchanged (CRC-identical) — only faster.
+    guard = 0; maxstep = max(1000, 48*round(Int, cbrt(length(T.alive))))
     @inbounds while true
         guard += 1
-        # a stochastic walk terminates for a Delaunay triangulation, but severely
-        # thin tets (perturbed regular grids) can make it wander; fall back to an
-        # exhaustive, guaranteed-correct scan rather than fail.
         guard > maxstep && return _locate_scan(T, px, py, pz, vid)
         rs ⊻= rs<<13; rs ⊻= rs>>7; rs ⊻= rs<<17
         r = Int(rs % UInt64(4))
