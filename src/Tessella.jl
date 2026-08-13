@@ -161,12 +161,49 @@ axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_ext
 """
 function mesh_sized(surface::Mesh; hmax::Real)
     hmax > 0 || throw(ArgumentError("mesh_sized: hmax must be positive (got $hmax)"))
-    m0 = tetrahedralize(surface)
-    if !(validate(m0).ok && boundary_faces(m0.tets)[2] == 2)
-        m0 = recover_boundary(surface)                      # non-convex boundary fallback
+    @inline _tarea(x1,y1,z1,x2,y2,z2,x3,y3,z3) = begin
+        ux=x2-x1; uy=y2-y1; uz=z2-z1; vx=x3-x1; vy=y3-y1; vz=z3-z1
+        cx=uy*vz-uz*vy; cy=uz*vx-ux*vz; cz=ux*vy-uy*vx; 0.5*sqrt(cx*cx+cy*cy+cz*cz)
     end
-    (validate(m0).ok && boundary_faces(m0.tets)[2] == 2) ||
-        throw(ErrorException("mesh_sized: could not fill the surface into a watertight mesh (try recover_boundary_cdt / check the surface is closed + manifold)"))
+    sa = 0.0                                                # input surface area (geometry to conform to)
+    @inbounds for t in 1:size(surface.tris,2)
+        a=surface.tris[1,t]; b=surface.tris[2,t]; c=surface.tris[3,t]
+        sa += _tarea(surface.coords[1,a],surface.coords[2,a],surface.coords[3,a],
+                     surface.coords[1,b],surface.coords[2,b],surface.coords[3,b],
+                     surface.coords[1,c],surface.coords[2,c],surface.coords[3,c])
+    end
+    # A fill CONFORMS to the domain iff it is valid, manifold (no face shared by >2 tets),
+    # AND its boundary area equals the input surface area. The area test is essential: a
+    # Delaunay fill of a NON-convex surface can cap a concavity — still valid + watertight
+    # (max incidence ≤ 2) but the WRONG (over-filled) domain — and only the boundary-area
+    # match detects it. (`≤ 2` not `== 2` so a single-tet domain, whose faces all have
+    # incidence 1, is accepted.)
+    function conforms(m)
+        validate(m).ok || return false
+        bf, mi = boundary_faces(m.tets)
+        mi <= 2 || return false
+        ba = 0.0
+        @inbounds for f in bf
+            a=f[1]; b=f[2]; c=f[3]
+            ba += _tarea(m.coords[1,a],m.coords[2,a],m.coords[3,a],
+                         m.coords[1,b],m.coords[2,b],m.coords[3,b],
+                         m.coords[1,c],m.coords[2,c],m.coords[3,c])
+        end
+        isapprox(ba, sa; rtol=1e-6)
+    end
+    m0 = tetrahedralize(surface)
+    if !conforms(m0)
+        for fb in (recover_boundary, recover_boundary_cdt)  # non-convex → exact fallbacks
+            try
+                cand = fb(surface)
+                conforms(cand) && (m0 = cand; break)
+            catch
+                # this fallback raised its safe blocker on this input — try the next
+            end
+        end
+    end
+    conforms(m0) ||
+        throw(ErrorException("mesh_sized: could not fill the surface into a conforming mesh matching the input surface (check it is closed + manifold; for exotic non-star reflex inputs call recover_boundary_cdt directly)"))
     m = refine_to_size(m0, hmax)
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_sized: refinement produced an invalid mesh — " * join(diag.messages, "; ")))

@@ -29,6 +29,13 @@ using Tessella.Mesh3D: recover_boundary, tetrahedralize_conforming_exact
             @test abs(surface_residual(cyl, project_to(cyl, p))) < 1e-11
             @test on_surface(cyl, project_to(cyl, p))
         end
+        # regression: projecting an ON-AXIS point (radial distance 0) must pick a valid radial
+        # for ANY axis — including one parallel to x, where a fixed (1,0,0) cross reference fails.
+        for ax in ((1.,0.,0.), (0.,1.,0.), (0.,0.,1.), (0.6,0.,0.8))
+            c = CylinderS((0.,0.,0.), ax, 1.0)
+            q = project_to(c, (0.,0.,0.))                    # exactly on the axis
+            @test abs(surface_residual(c, q)) < 1e-11        # lands on the cylinder (r=1)
+        end
         for _ in 1:2000
             p = (3randn(rng), 3randn(rng), 3randn(rng))
             @test abs(surface_residual(sph, project_to(sph, p))) < 1e-11

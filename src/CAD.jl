@@ -71,7 +71,14 @@ function project_to(s::CylinderS, x)
     d = _sub(_v(x), s.base); axl = _dot(d, s.axis)
     footpt = _add(s.base, _scale(s.axis, axl))       # closest axis point
     rad = _sub(_v(x), footpt); rl = _norm(rad)
-    rl == 0 && return _add(footpt, _scale(_unit(_cross(s.axis,(1.0,0.0,0.0))), s.r))  # on axis: pick any radial
+    if rl == 0                                        # on axis: pick ANY radial direction
+        # reference the coordinate axis LEAST aligned with s.axis so the cross is never
+        # zero (a fixed (1,0,0) fails when the cylinder axis is itself ∥ x, e.g. an
+        # x-directed coax bore).
+        a1=abs(s.axis[1]); a2=abs(s.axis[2]); a3=abs(s.axis[3])
+        ref = a1<=a2 ? (a1<=a3 ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) : (a2<=a3 ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
+        return _add(footpt, _scale(_unit(_cross(s.axis, ref)), s.r))
+    end
     _add(footpt, _scale(rad, s.r/rl))
 end
 function project_to(s::SphereS, x)

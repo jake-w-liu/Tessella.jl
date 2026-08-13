@@ -810,6 +810,30 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
                 @test mesh_vol(m) ≈ v rtol=1e-9
             end
         end
+        @testset "disconnected coplanar regions (U-channel): no spurious area-mismatch blocker" begin
+            # A U-channel prism has TWO disconnected coplanar wall faces on the same plane (y=3),
+            # which build_regions splits into two regions. certify_exact's per-region area check
+            # must scope faces by region membership, NOT by plane, or it double-counts and throws a
+            # spurious "area mismatch" on this valid conforming mesh (regression for that fix).
+            poly=[(0.0,0.0),(3.0,0.0),(3.0,3.0),(2.0,3.0),(2.0,1.0),(1.0,1.0),(1.0,3.0),(0.0,3.0)]; np=length(poly)
+            xs=[p[1] for p in poly]; ys=[p[2] for p in poly]; segs=[(i,i%np+1) for i in 1:np]
+            T2=constrained_delaunay(Float64.(xs),Float64.(ys),segs); cap=to_mesh(T2; interior=collect(classify_interior(T2)))
+            nc=size(cap.coords,2); V=Matrix{Float64}(undef,3,2nc)
+            for i in 1:nc; V[:,i]=[cap.coords[1,i],cap.coords[2,i],0.0]; V[:,i+nc]=[cap.coords[1,i],cap.coords[2,i],1.0]; end
+            Tr=NTuple{3,Int32}[]
+            for t in 1:size(cap.tris,2); a,b,c=cap.tris[1,t],cap.tris[2,t],cap.tris[3,t]
+                push!(Tr,(Int32(a),Int32(c),Int32(b))); push!(Tr,(Int32(a+nc),Int32(b+nc),Int32(c+nc))); end
+            ei=Dict{Tuple{Int,Int},Int}()
+            for t in 1:size(cap.tris,2), (a,b) in ((cap.tris[1,t],cap.tris[2,t]),(cap.tris[2,t],cap.tris[3,t]),(cap.tris[3,t],cap.tris[1,t]))
+                k=a<b ? (a,b) : (b,a); ei[k]=get(ei,k,0)+1; end
+            for (e,c) in ei; c==1||continue; a,b=e; push!(Tr,(Int32(a),Int32(b),Int32(b+nc))); push!(Tr,(Int32(a),Int32(b+nc),Int32(a+nc))); end
+            tm=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tm[:,k]=Int32[f...]; end
+            Usurf=Mesh(V; tris=tm)
+            m = recover_boundary_cdt(Usurf)                      # must NOT throw
+            @test validate(m).ok && is_closed_manifold(m)
+            @test boundary_faces(m.tets)[2] == 2
+            @test mesh_vol(m) ≈ 7.0 rtol=1e-9                    # U cross-section area 7 × height 1
+        end
         @testset "error paths" begin
             @test_throws ArgumentError recover_boundary(Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1)))
         end
@@ -1074,6 +1098,16 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test conf3(mr) <= 2
             @test vol3(mr) ≈ 27.0 rtol=1e-9                   # bisection preserves volume exactly
         end
+        # refine_to_size PROPAGATES region tags (each child inherits its parent's tag) —
+        # a multi-region mesh keeps its partition + per-region volumes through refinement.
+        mreg = mesh_box_regions([BoxRegion(0.0,2.0, 0.0,1.0, 0.0,1.0, 1),
+                                 BoxRegion(2.0,4.0, 0.0,1.0, 0.0,1.0, 2)]; hmax=1.0)
+        mrf = refine_to_size(mreg, 0.5)
+        @test validate(mrf).ok
+        @test Set(unique(mrf.tet_tag)) == Set(Int32[1,2])            # tags not dropped
+        rv(m,tg) = sum((m.tet_tag[t]==tg ? tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t])) : 0.0) for t in 1:ntets(m))
+        @test rv(mrf,1) ≈ 2.0 rtol=1e-9                             # per-region volumes preserved
+        @test rv(mrf,2) ≈ 2.0 rtol=1e-9
         # mesh_sized on a convex box surface — exact volume + guaranteed maxedge
         mS = mesh_sized(box_surface(0.0,2.0, 0.0,2.0, 0.0,2.0); hmax=0.6)
         @test validate(mS).ok
@@ -1100,8 +1134,35 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test me3(mC) <= 0.6 + 1e-9
         @test boundary_faces(mC.tets)[2] == 2
         @test conf3(mC) <= 2
+        # deep-debug regressions:
+        # (a) a non-convex Schönhardt (twisted prism) — tetrahedralize would silently CAP the
+        #     concavity (valid+watertight but the WRONG, over-filled domain). The boundary-area
+        #     conformity check must reject that fill and fall to recover_boundary_cdt ⇒ CORRECT volume.
+        schon = begin
+            ang=[deg2rad(90),deg2rad(210),deg2rad(330)]; V=Matrix{Float64}(undef,3,6)
+            for i in 1:3; V[:,i]=[cos(ang[i]),sin(ang[i]),0.0]; V[:,i+3]=[cos(ang[i]+deg2rad(30)),sin(ang[i]+deg2rad(30)),1.0]; end
+            Tr=NTuple{3,Int32}[]; push!(Tr,(Int32(1),Int32(3),Int32(2))); push!(Tr,(Int32(4),Int32(5),Int32(6)))
+            for i in 1:3; j=i%3+1; push!(Tr,(Int32(i),Int32(j),Int32(j+3))); push!(Tr,(Int32(i),Int32(j+3),Int32(i+3))); end
+            tmS=Matrix{Int32}(undef,3,length(Tr)); for (k,f) in enumerate(Tr); tmS[:,k]=Int32[f...]; end; Mesh(V; tris=tmS)
+        end
+        mSch = mesh_sized(schon; hmax=0.5)
+        @test validate(mSch).ok && me3(mSch) <= 0.5 + 1e-9
+        @test vol3(mSch) ≈ 0.8660254 rtol=1e-3               # NOT the 1.116 convex-hull over-fill
+        # (b) a single-tetrahedron domain (all faces incidence 1) must NOT be false-rejected
+        mtet = mesh_sized(Mesh(Float64[0 1 0 0;0 0 1 0;0 0 0 1]; tris=Matrix{Int32}([1 3 2;1 2 4;2 3 4;1 4 3]')); hmax=0.5)
+        @test validate(mtet).ok
+        @test vol3(mtet) ≈ 1/6 rtol=1e-6
         @test_throws ArgumentError mesh_sized(box_surface(0.,1.,0.,1.,0.,1.); hmax=0.0)
         @test_throws ArgumentError refine_to_size(mb0, -1.0)
+        # mesh_cylinder / cylinder_surface reject a zero-length axis (no silent NaN mesh)
+        @test_throws ArgumentError mesh_cylinder((0.,0.,0.),(0.,0.,0.),1.0,1.0; hmax=0.5)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,0.),1.0,1.0)
+        # exact kernel is conservative FAR FROM ORIGIN (fractional coords at ~5.6e14): valid Delaunay
+        let Q(x)=Rational{BigInt}(x), off=Rational{BigInt}(big(56)*10^13)
+            rr=_R3(UInt64(20260813)); pv=[(Q(_nf(rr))+off, Q(_nf(rr))+off, Q(_nf(rr))+off) for _ in 1:40]
+            et=delaunay3d_exact(pv); ok,nv=is_delaunay_exact(pv, et)
+            @test ok && nv == 0                              # far-from-origin pre-filter stays conservative
+        end
     end
 
     @testset "exact-coordinate Delaunay kernel (Rational{BigInt})" begin
