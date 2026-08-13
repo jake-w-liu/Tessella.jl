@@ -9,7 +9,11 @@
 
 using Test
 using Random
+using Tessella
 using Tessella.CAD
+using Tessella.MeshTypes
+using Tessella.HighOrder
+using Tessella.Mesh3D: recover_boundary
 
 @testset "CAD (native analytical geometry, Stage 5)" begin
 
@@ -53,5 +57,30 @@ using Tessella.CAD
         @test maximum(abs(surface_residual(obl, p)) for p in ell) < 1e-12
         # a perpendicular request on an oblique plane is rejected (routed to the ellipse)
         @test_throws ArgumentError imprint_circle(cyl, obl)
+    end
+
+    @testset "exact-surface meshing: curve P2 elements onto the analytical surface (any primitive)" begin
+        # The native CAD layer plugs into HighOrder.curve_to_surface! — so a mesh's P2
+        # mid-nodes land EXACTLY on the true analytical surface (the "NURBS surface" a mesh
+        # can carry), generalized beyond cylinders to ANY CAD primitive. Here: a sphere.
+        R = 2.0
+        t = (1+sqrt(5))/2
+        V = [(-1.,t,0.),(1.,t,0.),(-1.,-t,0.),(1.,-t,0.),(0.,-1.,t),(0.,1.,t),(0.,-1.,-t),(0.,1.,-t),(t,0.,-1.),(t,0.,1.),(-t,0.,-1.),(-t,0.,1.)]
+        F = [(1,12,6),(1,6,2),(1,2,8),(1,8,11),(1,11,12),(2,6,10),(6,12,5),(12,11,3),(11,8,7),(8,2,9),(4,10,5),(4,5,3),(4,3,7),(4,7,9),(4,9,10),(5,10,6),(3,5,12),(7,3,11),(9,7,8),(10,9,2)]
+        C = Matrix{Float64}(undef,3,12)
+        for (i,v) in enumerate(V); p = collect(v) .* (R/sqrt(sum(collect(v).^2))); C[:,i] = p; end
+        Tm = Matrix{Int32}(undef,3,20); for (i,f) in enumerate(F); Tm[:,i] = Int32[f...]; end
+        m  = recover_boundary(Mesh(C; tris=Tm))
+        p2 = p2_tetmesh(m)
+        sph = SphereS((0.,0.,0.), R)
+        nc = curve_to_surface!(p2, (x,y,z)->project_to(sph,(x,y,z)), (x,y,z)->on_surface(sph,(x,y,z); tol=1e-9))
+        @test nc > 0                                       # boundary edges were curved onto the sphere
+        # every mid-node that sits on the sphere reads zero surface residual (exact geometry)
+        maxres = 0.0
+        for i in 1:size(p2.coords,2)
+            p = (p2.coords[1,i], p2.coords[2,i], p2.coords[3,i])
+            abs(sqrt(sum(p.^2)) - R) < 1e-9 && (maxres = max(maxres, abs(surface_residual(sph, p))))
+        end
+        @test maxres < 1e-9
     end
 end
