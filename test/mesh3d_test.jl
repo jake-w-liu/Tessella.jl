@@ -1053,6 +1053,57 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test_throws ArgumentError mesh_sized_extrude(Lx, Ly, Lseg, 1.0, 1.0; hmax=0.5)
     end
 
+    @testset "mesh_sized + refine_to_size: general uniform sizing (arbitrary surface)" begin
+        # Fill an arbitrary closed surface, then longest-edge-bisect to a GUARANTEED
+        # maxedge ≤ hmax. Conforming, valid, watertight, volume-preserving — for convex
+        # polyhedra, curved (faceted) surfaces, AND non-convex domains. This is the
+        # general curved-surface uniform sizer (bisection terminator).
+        me3(m) = maximum(begin vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); e=0.0
+            for i in 1:4,j in i+1:4; a=vs[i];b=vs[j]; e=max(e, sqrt(sum((m.coords[k,a]-m.coords[k,b])^2 for k in 1:3))); end; e end for t in 1:ntets(m))
+        vol3(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t])) for t in 1:ntets(m))
+        conf3(m) = begin ftc=Dict{NTuple{3,Int32},Int}()
+            for t in 1:ntets(m),k in 1:4; vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j!=k])); ftc[f]=get(ftc,f,0)+1; end
+            maximum(values(ftc)) end
+        # refine_to_size directly on a coarse box: guaranteed bound, valid, volume-preserved
+        mb0 = mesh_box(0.0,3.0, 0.0,3.0, 0.0,3.0; hmax=3.0)
+        for h in (1.0, 0.6)
+            mr = refine_to_size(mb0, h)
+            @test validate(mr).ok
+            @test me3(mr) <= h + 1e-9
+            @test boundary_faces(mr.tets)[2] == 2
+            @test conf3(mr) <= 2
+            @test vol3(mr) ≈ 27.0 rtol=1e-9                   # bisection preserves volume exactly
+        end
+        # mesh_sized on a convex box surface — exact volume + guaranteed maxedge
+        mS = mesh_sized(box_surface(0.0,2.0, 0.0,2.0, 0.0,2.0); hmax=0.6)
+        @test validate(mS).ok
+        @test me3(mS) <= 0.6 + 1e-9
+        @test boundary_faces(mS.tets)[2] == 2
+        @test conf3(mS) <= 2
+        @test vol3(mS) ≈ 8.0 rtol=1e-6
+        # mesh_sized on a NON-CONVEX L-prism surface (exact volume, conforming)
+        base=[(0.0,0.0),(2.0,0.0),(2.0,1.0),(1.0,1.0),(1.0,2.0),(0.0,2.0)]; nbp=length(base)
+        LC=Matrix{Float64}(undef,3,2nbp); for (i,(x,y)) in enumerate(base); LC[:,i]=[x,y,0.0]; LC[:,i+nbp]=[x,y,1.0]; end
+        btf=[(1,2,3),(1,3,4),(1,4,5),(1,5,6)]; lt=NTuple{3,Int32}[]
+        for f in btf; push!(lt,(Int32(f[1]),Int32(f[3]),Int32(f[2]))); push!(lt,(Int32(f[1]+nbp),Int32(f[2]+nbp),Int32(f[3]+nbp))); end
+        for i in 1:nbp; j=i%nbp+1; push!(lt,(Int32(i),Int32(j),Int32(j+nbp))); push!(lt,(Int32(i),Int32(j+nbp),Int32(i+nbp))); end
+        tmm=Matrix{Int32}(undef,3,length(lt)); for (k,f) in enumerate(lt); tmm[:,k]=Int32[f...]; end
+        mL = mesh_sized(Mesh(LC; tris=tmm); hmax=0.6)
+        @test validate(mL).ok
+        @test me3(mL) <= 0.6 + 1e-9
+        @test boundary_faces(mL.tets)[2] == 2
+        @test conf3(mL) <= 2
+        @test vol3(mL) ≈ 3.0 rtol=1e-6                        # non-convex, exact volume
+        # curved (faceted cylinder) surface: guaranteed maxedge, valid, watertight
+        mC = mesh_sized(cylinder_surface((0.,0.,0.),(0.,0.,1.), 1.0, 2.0; nθ=16, nz=2); hmax=0.6)
+        @test validate(mC).ok
+        @test me3(mC) <= 0.6 + 1e-9
+        @test boundary_faces(mC.tets)[2] == 2
+        @test conf3(mC) <= 2
+        @test_throws ArgumentError mesh_sized(box_surface(0.,1.,0.,1.,0.,1.); hmax=0.0)
+        @test_throws ArgumentError refine_to_size(mb0, -1.0)
+    end
+
     @testset "exact-coordinate Delaunay kernel (Rational{BigInt})" begin
         # A valid Delaunay tetrahedralization on exact rational coords (empty circumsphere
         # exact; valid closed-manifold positive-volume mesh), breaking cospherical/coplanar

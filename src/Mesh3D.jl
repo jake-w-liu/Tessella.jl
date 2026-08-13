@@ -23,7 +23,7 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle_sos, orient2
-using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges
+using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, tet_signed_volume
 using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
 
@@ -31,7 +31,7 @@ export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
        recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
-export flip23!, flip32!, tets_around_edge, optimize_flips!
+export flip23!, flip32!, tets_around_edge, optimize_flips!, refine_to_size
 
 const GHOST3 = Int32(0)
 
@@ -766,6 +766,109 @@ function flip32!(T::Triangulation3, d::Integer, e::Integer, tets3)
     ids = _rebuild_region!(T, ((a,b,c,d),(a,b,c,e)), outer)
     T.last = ids[1]
     return true
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Longest-edge bisection — size refinement of a tet mesh to a guaranteed max edge
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Minimal binary MAX-heap on (len², a, b). Edge lengths are fixed once created (vertices
+# never move — only midpoints are added), so heap entries never go stale in value.
+struct _EHeap
+    d::Vector{Tuple{Float64,Int32,Int32}}
+end
+_EHeap() = _EHeap(Tuple{Float64,Int32,Int32}[])
+@inline function _hpush!(h::_EHeap, x)
+    d = h.d; push!(d, x); i = length(d)
+    @inbounds while i > 1
+        p = i >> 1; d[p][1] >= d[i][1] && break; d[p], d[i] = d[i], d[p]; i = p
+    end
+end
+@inline function _hpop!(h::_EHeap)
+    d = h.d; top = d[1]; last = pop!(d)
+    if !isempty(d)
+        d[1] = last; i = 1; n = length(d)
+        @inbounds while true
+            l = 2i; r = 2i + 1; big = i
+            l <= n && d[l][1] > d[big][1] && (big = l)
+            r <= n && d[r][1] > d[big][1] && (big = r)
+            big == i && break; d[i], d[big] = d[big], d[i]; i = big
+        end
+    end
+    top
+end
+
+"""
+    refine_to_size(m::Mesh, hmax) -> Mesh
+
+Refine a valid tet mesh so **every edge is `≤ hmax`**, by longest-edge bisection:
+repeatedly take the globally longest edge and split *every* tet incident to it at the
+edge midpoint. Splitting all tets around one edge keeps the mesh **conforming** (the
+shared faces are split identically in both incident tets); the midpoint lies on the
+edge so **validity** (positive volumes) and **total volume** are preserved; and because
+a bisection only creates edges no longer than the one it splits (median inequality), the
+global maximum edge is non-increasing, so the process **terminates** at `maxedge ≤ hmax`.
+Interior edges are refined too (no interior lattice needed). Boundary vertices are
+preserved and boundary edges' midpoints stay on the boundary, so the boundary geometry
+is unchanged. This is the size-refinement terminator behind [`Tessella.mesh_sized`](@ref).
+"""
+function refine_to_size(m::Mesh, hmax::Real)
+    hmax > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
+    h2 = float(hmax)^2
+    nv0 = size(m.coords, 2)
+    cx = Vector{Float64}(undef, nv0); cy = similar(cx); cz = similar(cx)
+    @inbounds for i in 1:nv0; cx[i]=m.coords[1,i]; cy[i]=m.coords[2,i]; cz[i]=m.coords[3,i]; end
+    tv = Vector{NTuple{4,Int32}}(); alive = Bool[]
+    inc = Dict{Tuple{Int32,Int32},Vector{Int32}}()
+    heap = _EHeap()
+    @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
+    @inline d2(a,b) = (cx[a]-cx[b])^2 + (cy[a]-cy[b])^2 + (cz[a]-cz[b])^2
+    # add a tet (oriented positive); register its 6 edges; if `push_edges`, enqueue any
+    # edge longer than hmax (duplicates are harmless — the heap is checked against `inc`).
+    function addtet!(a, b, c, d, push_edges::Bool)
+        tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),(cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d])) < 0 && ((c,d)=(d,c))
+        push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true); id = Int32(length(tv))
+        q = (a,b,c,d)
+        @inbounds for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+            u,v = q[i],q[j]; push!(get!(inc, ek(u,v)) do; Int32[] end, id)
+            push_edges && d2(u,v) > h2 && _hpush!(heap, (d2(u,v), Int32(u), Int32(v)))
+        end
+        id
+    end
+    @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false); end
+    for (e,_) in inc; d2(e[1],e[2]) > h2 && _hpush!(heap, (d2(e[1],e[2]), e[1], e[2])); end
+    guard = 0; maxguard = 200_000_000
+    while !isempty(heap.d)
+        (len2, a, b) = _hpop!(heap)
+        len2 <= h2 && break                                  # global max edge ≤ hmax ⇒ finished
+        e = ek(a, b); haskey(inc, e) || continue
+        ts = Int32[]
+        @inbounds for t in inc[e]
+            alive[t] || continue
+            q = tv[t]; ((a==q[1]||a==q[2]||a==q[3]||a==q[4]) && (b==q[1]||b==q[2]||b==q[3]||b==q[4])) || continue
+            push!(ts, t)
+        end
+        isempty(ts) && continue
+        guard += 1; guard > maxguard && error("refine_to_size: bisection guard tripped (degenerate input?)")
+        push!(cx, 0.5*(cx[a]+cx[b])); push!(cy, 0.5*(cy[a]+cy[b])); push!(cz, 0.5*(cz[a]+cz[b]))
+        mvid = length(cx)
+        @inbounds for t in ts
+            q = tv[t]; a1=Int32(0); a2=Int32(0)
+            for v in q; (v!=a && v!=b) && (a1==0 ? (a1=v) : (a2=v)); end
+            alive[t] = false
+            addtet!(a, mvid, a1, a2, true); addtet!(mvid, b, a1, a2, true)
+        end
+    end
+    keep = Int32[t for t in 1:length(tv) if alive[t]]
+    used = Int32[]; seenv = Set{Int32}()
+    for t in keep, v in tv[t]; (v in seenv) || (push!(used, v); push!(seenv, v)); end
+    sort!(used)
+    nid = Dict{Int32,Int32}(); for (i,v) in enumerate(used); nid[v]=Int32(i); end
+    C = Matrix{Float64}(undef, 3, length(used))
+    @inbounds for (i,v) in enumerate(used); C[1,i]=cx[v]; C[2,i]=cy[v]; C[3,i]=cz[v]; end
+    M = Matrix{Int32}(undef, 4, length(keep))
+    @inbounds for (j,t) in enumerate(keep); q=tv[t]; M[1,j]=nid[q[1]]; M[2,j]=nid[q[2]]; M[3,j]=nid[q[3]]; M[4,j]=nid[q[4]]; end
+    return Mesh(C; tets=M)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
