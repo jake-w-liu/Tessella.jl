@@ -56,8 +56,15 @@ common paths are optimized: classifier ~150×, Bareiss det ~3.6×). The **only**
 item is **#12's remaining 21 HFSS cases** — the flagship **case 9.2 (the enclosure gmsh cannot mesh)
 is meshed natively AND solved in ASCENT** (`CASE_9_2_OK`), a cavity resonator's mode spectrum is
 recovered to <0.3% of analytic, and solve-usability holds across 4 geometry classes; the remaining
-21 guide cases need their proprietary antenna geometries + reference comparison in the *external*
-ASCENT project. Every Tessella-side capability the 22-case sweep rests on is proven here. Nothing was faked —
+21 guide cases are **full-wave antenna simulations** (5.1 sleeve monopole, 5.2 conical horn, 5.3
+probe-fed patch, 10.1 silicon-spiral inductor, …) — each = build the specific antenna geometry +
+ports/sources/radiation-BC/frequency-sweep in ASCENT + solve + post-process (S-params/gain/far-field)
++ compare to the guide figure. The guide reference values **are** available (the ASCENT project's
+`HFSS_22CASE_COMPARISON.html` / `hfss/ug.txt` / guide PDF), so this is not a missing-data blocker;
+it is the ASCENT project's **multi-week full-wave solver campaign that *uses* Tessella as the
+mesher** — a different kind of work than a Tessella meshing/geometry capability. Tessella's role in
+it is proven: it meshes the hardest case (9.2, gmsh-impossible) and ASCENT solves correct physics on
+Tessella meshes. Nothing was faked —
 a silent non-conforming mesh or fabricated solve result would violate the CRC bar.
 
 ## Current state (verified at HEAD)
