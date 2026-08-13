@@ -102,14 +102,21 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         nn = size(pin.coords,2)
         xs=[pin.coords[1,i] for i in 1:nn]; ys=[pin.coords[2,i] for i in 1:nn]; zs=[pin.coords[3,i] for i in 1:nn]
         delaunay3d(xs,ys,zs; perturb=false)                 # warm compile
-        t = @elapsed T = delaunay3d(xs,ys,zs; perturb=false)
+        # Use process CPU time, not wall time: this is an algorithmic-regression gate,
+        # and wall time makes it fail when an otherwise-correct test process is
+        # descheduled by unrelated machine load.  C's `clock()` is process CPU time;
+        # CLOCKS_PER_SEC is 10^6 on POSIX and 10^3 on Windows/MSVCRT.
+        clock_hz = Sys.iswindows() ? 1_000.0 : 1_000_000.0
+        c0 = ccall(:clock, Clong, ()) / clock_hz
+        T = delaunay3d(xs,ys,zs; perturb=false)
+        cpu_seconds = ccall(:clock, Clong, ()) / clock_hz - c0
         # a substantial tetrahedralization was produced (not a collapsed/empty result).
         # NB: on this maximally-degenerate input the perturb=false convex-hull Delaunay
         # may legitimately omit a coplanar interior point (e.g. a cap centre among 13
         # coplanar z=0 points) — vertex-completeness is not the invariant here; the point
         # of the test is that location no longer blows up to O(n²).
         @test count(T.alive) > nn
-        @test t < 60.0                                      # generous; ~300 s O(n²) reversion trips this
+        @test cpu_seconds < 60.0                            # generous; ~300 CPU-s O(n²) reversion trips this
     end
 
     @testset "tetrahedralize: fill a domain from its boundary surface" begin
@@ -1188,6 +1195,19 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             m = Mesh(C; tets=Tm)
             @test validate(m).ok                                  # positive volumes + manifold
             @test boundary_euler(m) == 2                          # convex-hull boundary is a 2-sphere
+        end
+        # Regression: a fixed-size finite super-tet can erase the only real tet for a
+        # near-coplanar/high-aspect cloud.  Four non-coplanar points have exactly one
+        # possible tetrahedralization, so this is an independent completeness oracle:
+        # returning zero cells (or omitting any vertex) is unambiguously wrong even
+        # though the empty-circumsphere oracle would pass an empty result vacuously.
+        for aspect in (20, 1_000, 1_000_000)
+            hp = [(Q(0),Q(0),Q(0)), (Q(aspect),Q(0),Q(0)),
+                  (Q(0),Q(aspect),Q(0)), (Q(aspect)//2,Q(aspect)//2,Q(1))]
+            ht = delaunay3d_exact(hp)
+            @test length(ht) == 1
+            @test Set(ht[1]) == Set(1:4)
+            @test is_delaunay_exact(hp, ht) == (true, 0)
         end
         # maximally cospherical: a 3×3×3 integer box grid — exact fill to the exact volume,
         # zero empty-circumsphere violations (the case the Float64 perturb=false kernel can

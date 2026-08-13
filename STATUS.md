@@ -10,9 +10,10 @@ replacing the gmsh dependency (see `PLAN.md`). CRC discipline mandatory
 the external FEM solver integration, the mesh/BC handshake, the solve proofs, and the
 22-case HFSS solve campaign — is tracked separately in **`ASCENT.md`**.
 
-## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-13)
+## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,418 assertions** (`--check-bounds=yes`). Everything below is committed to
+**Suite green: 151,464 assertions** (`--check-bounds=yes`, Julia 1.12.6; 20m16s).
+Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
 ### ✅ DONE + verified
@@ -70,8 +71,8 @@ silent non-conforming mesh would violate the CRC bar.
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. -e 'using Pkg; Pkg.test()'` green — **143,130
-  assertions** under `--check-bounds=yes` (verified this session; ~2–3× faster than
+- **Suite:** `julia --project=. --check-bounds=yes -e 'using Pkg; Pkg.test(; julia_args=["--check-bounds=yes"])'`
+  green — **151,464 assertions** under `--check-bounds=yes` (Julia 1.12.6; 20m16s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -711,7 +712,7 @@ that day._
   degrades only at sub-picometer scale (out of the mm/m domain; documented, both classifiers
   degrade identically so their pinned equivalence holds). Predicates + MeshTypes oracles:
   audited clean.
-- **2026-08-13 — deep-debug PASS 2 (audit the fixes) + 1 OPEN pre-existing bug.** A second
+- **2026-08-13 — deep-debug PASS 2 (audit the fixes) + 1 pre-existing bug, resolved in PASS 3.** A second
   fresh pass over the 8 fixes + a public-API sweep.
   - **Fixed: `CAD.project_to(::CylinderS)` — the pass-1 on-axis fix was INCOMPLETE.** For an
     axis with irrational unit components (e.g. `(1,1,1)/√3`), the foot-point rounding leaves a
@@ -722,7 +723,7 @@ that day._
     points + off-axis still exact. `cad_test` green (8078). Pinned. Pass-2 otherwise clean
     (certify_exact fix, refine_to_size tags, ExactMesh3D shift edge cases, mesh_sized curved,
     mesh_box_regions/mesh_boolean/tetrahedralize_multi/p2 all re-verified correct).
-  - **OPEN (pre-existing, NOT from any fix): `ExactMesh3D.delaunay3d_exact` returns 0 tets
+  - **RESOLVED in PASS 3: `ExactMesh3D.delaunay3d_exact` returned 0 tets
     for a near-coplanar / high-aspect point set.** The finite super-tetrahedron (`K=10`,
     lines ~84-95) is too small: a flat/sliver tet has a circumsphere of radius ~base²/height
     that strictly contains the super-vertices, so the real tet is dropped by the final
@@ -736,5 +737,23 @@ that day._
     build with a geometrically growing super-tet** (K×=4 each attempt, exact rational so no
     overflow) until **every input point appears in some output tet** (a correct 3-D Delaunay
     uses all points); cap the growths and raise an explicit blocker rather than ever return a
-    silent partial/empty mesh for a non-coplanar input. This was in progress when the session
-    paused — the analysis + repro are here; the kernel edit is not yet applied.
+    silent partial/empty mesh for a non-coplanar input. PASS 3 implemented and verified this
+    bounded construction and completeness gate.
+- **2026-08-14 — deep-debug PASS 3, exact-kernel completeness fix.** Reproduced the
+  PASS-2 bug before editing: aspect 2/10 produced
+  one tet while 20/50/100/500/1000 produced **zero**, and the empty output passed
+  `is_delaunay_exact` vacuously. The direct cause is now pinned in code: growing only
+  the positive super-vertices cannot release the fixed negative super-vertex from a
+  sliver's huge circumsphere. Fixed `delaunay3d_exact` with a first-pass-compatible
+  K=1 build, exact affine-conditioning fallback, all-four-vertex geometric growth,
+  bounded retries, physical-orientation/duplicate/face-incidence/vertex-completeness
+  certification, and explicit rejection of duplicate inputs. The 4-point independent
+  oracle passes at aspect 20, 1000, and 1,000,000 (9/9 assertions); coplanar input still
+  correctly returns no volume cells and duplicates raise `ArgumentError`; the full
+  `mesh3d_test.jl` passed **410/410** under `--check-bounds=yes` (9m23s). Allocation
+  measurement on a 40-point exact build: **17,920,376 B before vs 18,161,840 B after**
+  (+241,464 B / +1.35%), with cavity scratch dictionaries now reused per insertion.
+  Full post-fix package gate: **151,464/151,464** assertions passed under
+  `--check-bounds=yes` on Julia 1.12.6 (20m16s). The cospherical performance gate now
+  measures process CPU time so unrelated scheduler contention cannot create a false
+  regression; the previously failing run measured 76.13s wall but only 9.26s CPU.
