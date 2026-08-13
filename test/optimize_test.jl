@@ -154,6 +154,21 @@ end
         @test q1.n_slivers <= mesh_quality(smooth_laplacian(m; iters=10)).n_slivers
     end
 
+    @testset "remove_slivers: converging exudation driver — fewer slivers, valid, volume-preserving" begin
+        r = _RO(UInt64(12345)); n = 300
+        xs = [_nfo(r) for _ in 1:n]; ys = [_nfo(r) for _ in 1:n]; zs = [_nfo(r) for _ in 1:n]
+        m = to_mesh3(delaunay3d(xs, ys, zs; rng_seed=1))
+        q0 = mesh_quality(m)
+        @test q0.n_slivers > 0
+        mo, rep = remove_slivers(m)
+        @test validate(mo).ok                                 # never emits an invalid mesh
+        @test mvol(mo) ≈ mvol(m) rtol=1e-9                    # boundary-preserving ⇒ volume conserved
+        @test ntets(mo) == ntets(m)                           # geometric route: topology unchanged
+        @test rep.slivers_after < rep.slivers_before          # it strictly reduces slivers
+        @test rep.slivers_after == mesh_quality(mo).n_slivers # report is the measured truth
+        @test rep.min_dihedral_after >= rep.min_dihedral_before - 1e-9   # worst angle non-worsening
+    end
+
     @testset "smooth_optimize pins boundary nodes (all-boundary cube unchanged)" begin
         C=Float64[0 1 1 0 0 1 1 0; 0 0 1 1 0 0 1 1; 0 0 0 0 1 1 1 1]
         F=[(1,3,2),(1,4,3),(5,6,7),(5,7,8),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,4,8),(3,8,7),(4,1,5),(4,5,8)]
