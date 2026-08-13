@@ -39,14 +39,14 @@ include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
 include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
-using .MeshTypes: Mesh, validate, mesh_crc
+using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
 using .RecoverCDT: recover_boundary_cdt, mesh_sized_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, mesh_quality
 using .Heal: is_meshable
 
-export mesh_volume, mesh_planar, stage
+export mesh_volume, mesh_planar, mesh_sized_extrude, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
 export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
@@ -76,6 +76,64 @@ function mesh_planar(xs::Vector{Float64}, ys::Vector{Float64},
     m = to_mesh(T; interior=interior)
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_planar: produced an invalid mesh — " * join(diag.messages, "; ")))
+    return m
+end
+
+"""
+    mesh_sized_extrude(xs, ys, segments, z0, z1; hmax, min_angle_deg=25.0) -> Mesh
+
+**Uniform size-controlled** tet mesh of the prismatic (extruded) domain whose
+cross-section is the polygon `(xs, ys)` with boundary/hole `segments`, extruded from
+`z=z0` to `z=z1`, with a **guaranteed maximum edge length `≤ hmax`**. The cross-section
+is meshed by the size-controlled 2-D Ruppert mesher (edges `≤ hmax/√2`), then extruded
+into `⌈(z1−z0)/(hmax/√2)⌉` layers; each triangular prism is split into three tets by a
+**column-global-index diagonal rule**, so every shared quad face picks the same diagonal
+in both incident prisms — the result is **conforming** (no face shared by >2 tets),
+watertight, provably valid (each tet oriented positive), and of **exact volume**
+(area(polygon)·(z1−z0), boundary preserved — no jitter). The `√2` factor bounds the
+prism face-diagonal `√(edge²+layer²) ≤ hmax`.
+
+Handles **non-convex** cross-sections and polygons with holes (via the `segments`
+constrained-Delaunay + interior classification). This is the extruded/prismatic case of
+uniform sizing on an arbitrary domain — complementing [`mesh_box`](@ref) (box) and
+[`mesh_cylinder`](@ref) (cylinder); a general curved-surface uniform sizer (Shewchuk
+terminator) remains the open research case.
+"""
+function mesh_sized_extrude(xs::AbstractVector, ys::AbstractVector,
+                            segments::AbstractVector{<:Tuple{Integer,Integer}},
+                            z0::Real, z1::Real; hmax::Real, min_angle_deg::Real=25.0)
+    hmax > 0 || throw(ArgumentError("mesh_sized_extrude: hmax must be positive (got $hmax)"))
+    z1 > z0 || throw(ArgumentError("mesh_sized_extrude: need z1 > z0 (got z0=$z0, z1=$z1)"))
+    h2 = float(hmax)/sqrt(2.0)                              # prism face-diagonal ≤ hmax
+    T2 = constrained_delaunay(Float64.(xs), Float64.(ys), segments)
+    interior = refine!(T2; min_angle_deg=min_angle_deg, max_area=0.5*h2*h2, size=(cx,cy)->h2)
+    m2 = to_mesh(T2; interior=interior)                    # 2-D mesh: coords (z=0), tris
+    nv2 = size(m2.coords, 2)
+    nv2 >= 3 && size(m2.tris, 2) >= 1 ||
+        throw(ErrorException("mesh_sized_extrude: cross-section produced no interior triangles (check segments orientation/closure)"))
+    nz = max(1, ceil(Int, (z1 - z0)/h2)); dz = (z1 - z0)/nz
+    coords = Matrix{Float64}(undef, 3, (nz+1)*nv2)
+    @inbounds for k in 0:nz, i in 1:nv2
+        id = k*nv2 + i
+        coords[1,id] = m2.coords[1,i]; coords[2,id] = m2.coords[2,i]; coords[3,id] = z0 + k*dz
+    end
+    _n(id) = @inbounds (coords[1,id], coords[2,id], coords[3,id])
+    tets = Matrix{Int32}(undef, 4, 3*size(m2.tris,2)*nz); col = 0
+    @inbounds for ti in 1:size(m2.tris,2)
+        v = sort!(Int[m2.tris[1,ti], m2.tris[2,ti], m2.tris[3,ti]])   # v[1]<v[2]<v[3] (column-index rule)
+        for k in 0:nz-1
+            b1=k*nv2+v[1]; b2=k*nv2+v[2]; b3=k*nv2+v[3]
+            t1=(k+1)*nv2+v[1]; t2=(k+1)*nv2+v[2]; t3=(k+1)*nv2+v[3]
+            for te in ((b1,b2,b3,t3), (b1,b2,t3,t2), (b1,t2,t3,t1))
+                a,b,c,d = te
+                tet_signed_volume(_n(a),_n(b),_n(c),_n(d)) < 0 && ((c,d) = (d,c))   # orient positive
+                col += 1; tets[1,col]=a; tets[2,col]=b; tets[3,col]=c; tets[4,col]=d
+            end
+        end
+    end
+    m = Mesh(coords; tets=tets)
+    diag = validate(m)
+    diag.ok || throw(ErrorException("mesh_sized_extrude: produced an invalid mesh — " * join(diag.messages, "; ")))
     return m
 end
 
