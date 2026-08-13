@@ -1871,6 +1871,21 @@ function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz
     return (true, nrec, "ok")
 end
 
+# Certify that an arbitrary tet fill has the same piecewise-linear boundary as
+# `surface`.  This is the reusable front door to the exact recovery gate: validity
+# and closed-manifold checks alone are insufficient because a restricted Delaunay
+# fill can cap a non-convex PLC while remaining a perfectly valid convex-hull mesh.
+function _certify_surface_fill(surface::Mesh, m::Mesh)
+    Px, Py, Pz, facets = _rb_dedup_surface(surface)
+    length(Px) >= 4 || return (false, "input has fewer than four distinct vertices")
+    isempty(facets) && return (false, "input has no non-degenerate facets")
+    regions = _rb_build_regions(Px, Py, Pz, facets)
+    isempty(regions) && return (false, "input has no non-degenerate surface regions")
+    gate = _rb_gate(surface, m, regions, _rb_crease_segments(regions),
+                    Px, Py, Pz, facets)
+    return (gate[1], gate[3])
+end
+
 # Steiner fallback for a STAR-SHAPED polyhedron (e.g. Schönhardt — not tetrahedraliz-
 # able without a Steiner point): find an interior kernel point that sees every facet
 # (exact orient3 shares one sign across all faces), then fan-tetrahedralize — one tet

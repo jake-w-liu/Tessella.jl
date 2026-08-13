@@ -12,7 +12,7 @@ the external FEM solver integration, the mesh/BC handshake, the solve proofs, an
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,464 assertions** (`--check-bounds=yes`, Julia 1.12.6; 20m16s).
+**Suite green: 151,466 assertions** (`--check-bounds=yes`, Julia 1.12.6; 12m53s).
 Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
@@ -72,7 +72,7 @@ silent non-conforming mesh would violate the CRC bar.
 ## Current state (verified at HEAD)
 
 - **Suite:** `julia --project=. --check-bounds=yes -e 'using Pkg; Pkg.test(; julia_args=["--check-bounds=yes"])'`
-  green — **151,464 assertions** under `--check-bounds=yes` (Julia 1.12.6; 20m16s; ~2–3× faster than
+  green — **151,466 assertions** under `--check-bounds=yes` (Julia 1.12.6; 12m53s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -757,3 +757,13 @@ that day._
   `--check-bounds=yes` on Julia 1.12.6 (20m16s). The cospherical performance gate now
   measures process CPU time so unrelated scheduler contention cannot create a false
   regression; the previously failing run measured 76.13s wall but only 9.26s CPU.
+- **2026-08-14 — deep-debug PASS 4, top-level PLC conformity.** Reproduced a silent
+  wrong-domain result from `mesh_volume`: a reflex twisted prism returned a valid,
+  watertight convex-hull cap of volume **1.1160253971** instead of the PLC volume
+  **0.8660254038**. `mesh_volume` and `mesh_sized` now share a conforming-fill path:
+  the fast restricted-Delaunay result must pass the exact region/crease/boundary gate,
+  otherwise boundary recovery and exact conforming-Delaunay recovery are tried, with
+  all blocker reasons retained. `check=false` intentionally preserves the documented
+  caller-responsibility bypass. Regression result: the twisted prism validates at
+  `sqrt(3)/2`; pipeline **42/42**, Mesh3D **410/410**, and the full package suite
+  **151,466/151,466** pass under bounds checking on Julia 1.12.6 (12m53s).
