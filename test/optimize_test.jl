@@ -33,6 +33,29 @@ end
 
 @testset "Optimize (Stage 4)" begin
 
+    @testset "public parameter and metadata contracts" begin
+        C = Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]
+        m = Mesh(C; segs=reshape(Int32[1,2],2,1),
+                 tris=reshape(Int32[1,2,3],3,1),
+                 tets=reshape(Int32[1,2,3,4],4,1),
+                 seg_tag=Int32[7], tri_tag=Int32[8], tet_tag=Int32[9])
+        @test_throws ArgumentError mesh_quality(m; sliver_deg=NaN)
+        @test_throws ArgumentError mesh_quality(m; sliver_deg=-1)
+        @test_throws ArgumentError smooth_laplacian(m; iters=-1)
+        @test_throws ArgumentError smooth_laplacian(m; relax=NaN)
+        @test_throws ArgumentError smooth_laplacian(m; relax=1.1)
+        @test_throws ArgumentError smooth_odt(m; iters=-1)
+        @test_throws ArgumentError smooth_optimize(m; iters=-1)
+        @test_throws ArgumentError smooth_optimize(m; sliver_deg=Inf)
+        @test_throws ArgumentError remove_slivers(m; max_rounds=-1)
+        for smoothed in (smooth_laplacian(m; iters=0), smooth_odt(m; iters=0),
+                         smooth_optimize(m; iters=0))
+            @test smoothed.segs == m.segs && smoothed.seg_tag == m.seg_tag
+            @test smoothed.tris == m.tris && smoothed.tri_tag == m.tri_tag
+            @test smoothed.tets == m.tets && smoothed.tet_tag == m.tet_tag
+        end
+    end
+
     @testset "mesh_quality on a single unit tet" begin
         m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tets=reshape(Int32[1,2,3,4],4,1))
         q = mesh_quality(m)

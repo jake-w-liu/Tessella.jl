@@ -95,6 +95,20 @@ end
 
 @testset "HighOrder P2 (Stage 6)" begin
 
+    @testset "P2 container and curving contracts" begin
+        @test_throws ArgumentError P2Mesh(zeros(2,10), zeros(Int32,10,0))
+        @test_throws ArgumentError P2Mesh(zeros(3,10), zeros(Int32,9,0))
+        @test_throws ArgumentError P2Mesh(fill(NaN,3,10), reshape(Int32.(1:10),10,1))
+        @test_throws ArgumentError P2Mesh(zeros(3,10), reshape(Int32[1,2,3,4,5,6,7,8,9,11],10,1))
+        @test_throws ArgumentError P2Mesh(zeros(3,10), reshape(Int32[1,2,3,4,5,6,7,8,9,9],10,1))
+
+        empty = P2Mesh(zeros(3,0), zeros(Int32,10,0))
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.), -1)
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,0.), 1)
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.), 1; rtol=NaN)
+        @test_throws ArgumentError curve_to_surface!(empty, identity, (x,y,z)->true; rtol=-1)
+    end
+
     @testset "single tet → 10 nodes, midpoints, volume preserved" begin
         m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tets=reshape(Int32[1,2,3,4],4,1))
         p = p2_tetmesh(m)
@@ -220,6 +234,26 @@ end
         @test nc == 0                                          # only qualifying move is reverted
         @test p.coords[:, p.tet10[5,1]] == [0.5, 0.0, 0.0]     # edge-(1,2) mid unchanged
         @test p2_min_jacobian(p) > 0                           # still valid (≈ straight)
+    end
+
+    @testset "p2_volume integrates curved geometry, not only corner tets" begin
+        m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                 tets=reshape(Int32[1,2,3,4],4,1))
+        p = p2_tetmesh(m)
+        linear = p2_volume(p)
+        # Move one mid-edge node without folding the element. The corner tet is
+        # unchanged, but the isoparametric P2 volume must respond to the curvature.
+        p.coords[3,p.tet10[5,1]] += 0.05
+        @test p2_min_jacobian(p) > 0
+        @test p2_volume(p) != linear
+        # Independent degree-3 quadrature oracle for the exact cubic determinant.
+        vals = [_oracle_detJ(p,1,0.25,0.25,0.25),
+                _oracle_detJ(p,1,1/6,1/6,1/6),
+                _oracle_detJ(p,1,0.5,1/6,1/6),
+                _oracle_detJ(p,1,1/6,0.5,1/6),
+                _oracle_detJ(p,1,1/6,1/6,0.5)]
+        oracle = abs(((-4/5)*vals[1] + (9/20)*sum(vals[2:5])) / 6)
+        @test p2_volume(p) ≈ oracle rtol=1e-13
     end
 
     @testset "empty mesh" begin
