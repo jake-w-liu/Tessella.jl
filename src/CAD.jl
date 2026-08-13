@@ -71,7 +71,12 @@ function project_to(s::CylinderS, x)
     d = _sub(_v(x), s.base); axl = _dot(d, s.axis)
     footpt = _add(s.base, _scale(s.axis, axl))       # closest axis point
     rad = _sub(_v(x), footpt); rl = _norm(rad)
-    if rl == 0                                        # on axis: pick ANY radial direction
+    # On (or numerically on) the axis: `rad` is not exactly zero when `axis` has irrational
+    # unit components (e.g. (1,1,1)/√3) — the `axl·axis` foot-point rounding leaves a tiny
+    # axis-PARALLEL residual, whose magnitude is ~ε·|axl|. A `== 0` test misses it and the
+    # normal branch would then normalise that parallel residual and move along the axis
+    # (radial distance 0, residual −r). A scale-relative tolerance detects the on-axis case.
+    if rl <= 1e-10 * (abs(axl) + s.r + 1.0)           # on axis: pick ANY radial direction
         # reference the coordinate axis LEAST aligned with s.axis so the cross is never
         # zero (a fixed (1,0,0) fails when the cylinder axis is itself ∥ x, e.g. an
         # x-directed coax bore).

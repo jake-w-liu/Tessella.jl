@@ -711,3 +711,30 @@ that day._
   degrades only at sub-picometer scale (out of the mm/m domain; documented, both classifiers
   degrade identically so their pinned equivalence holds). Predicates + MeshTypes oracles:
   audited clean.
+- **2026-08-13 — deep-debug PASS 2 (audit the fixes) + 1 OPEN pre-existing bug.** A second
+  fresh pass over the 8 fixes + a public-API sweep.
+  - **Fixed: `CAD.project_to(::CylinderS)` — the pass-1 on-axis fix was INCOMPLETE.** For an
+    axis with irrational unit components (e.g. `(1,1,1)/√3`), the foot-point rounding leaves a
+    tiny axis-PARALLEL residual, so `rl==0` misses the on-axis case and the normal branch
+    normalises that parallel residual → the projected point moves ALONG the axis (radial
+    distance 0, residual −r). Fixed with a **scale-relative** on-axis tolerance
+    (`rl ≤ 1e-10·(|axl|+r+1)`); verified residual <1e-11 for all axes at multiple on-axis
+    points + off-axis still exact. `cad_test` green (8078). Pinned. Pass-2 otherwise clean
+    (certify_exact fix, refine_to_size tags, ExactMesh3D shift edge cases, mesh_sized curved,
+    mesh_box_regions/mesh_boolean/tetrahedralize_multi/p2 all re-verified correct).
+  - **OPEN (pre-existing, NOT from any fix): `ExactMesh3D.delaunay3d_exact` returns 0 tets
+    for a near-coplanar / high-aspect point set.** The finite super-tetrahedron (`K=10`,
+    lines ~84-95) is too small: a flat/sliver tet has a circumsphere of radius ~base²/height
+    that strictly contains the super-vertices, so the real tet is dropped by the final
+    super-vertex filter ⇒ a **silent empty (vacuously "Delaunay") result**. Triggers at aspect
+    ratio ≳ 20. Repro: `delaunay3d_exact([(0,0,0),(1000,0,0),(0,1000,0),(500,500,1)])` → 0
+    (expect 1); aspect sweep 2/10 → 1 tet, 20/50/100/500/1000 → 0. **Reachability is limited**
+    — a thin *box* (20×20×0.2, aspect 100) via `recover_boundary_cdt` gives the correct 6 tets
+    (vol 80), so the common thin-feature paths route through configurations that work; it
+    triggers on sparse-off-plane near-coplanar clouds. **Fix direction (bounded + correct):**
+    a coplanarity pre-check (all-coplanar ⇒ return empty, which is correct) then **retry the
+    build with a geometrically growing super-tet** (K×=4 each attempt, exact rational so no
+    overflow) until **every input point appears in some output tet** (a correct 3-D Delaunay
+    uses all points); cap the growths and raise an explicit blocker rather than ever return a
+    silent partial/empty mesh for a non-coplanar input. This was in progress when the session
+    paused — the analysis + repro are here; the kernel edit is not yet applied.
