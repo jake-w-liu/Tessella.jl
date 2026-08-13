@@ -78,6 +78,8 @@ function mesh_planar(xs::Vector{Float64}, ys::Vector{Float64},
     T = constrained_delaunay(xs, ys, segments; rng_seed=rng_seed)
     interior = refine!(T; min_angle_deg=min_angle_deg, max_area=max_area)
     m = to_mesh(T; interior=interior)
+    size(m.tris, 2) > 0 ||
+        throw(ArgumentError("mesh_planar: constrained boundary encloses no triangles"))
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_planar: produced an invalid mesh — " * join(diag.messages, "; ")))
     return m

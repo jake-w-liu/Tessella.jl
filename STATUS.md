@@ -12,7 +12,7 @@ the external FEM solver integration, the mesh/BC handshake, the solve proofs, an
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,477 assertions** (`--check-bounds=yes`, Julia 1.12.6; 6m39.4s,
+**Suite green: 151,506 assertions** (`--check-bounds=yes`, Julia 1.12.6; 7m00.3s,
 direct `test/runtests.jl` run).
 Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
@@ -73,7 +73,7 @@ silent non-conforming mesh would violate the CRC bar.
 ## Current state (verified at HEAD)
 
 - **Suite:** `julia --project=. --startup-file=no --check-bounds=yes test/runtests.jl`
-  green — **151,477 assertions** under `--check-bounds=yes` (Julia 1.12.6; 6m39.4s; ~2–3× faster than
+  green — **151,506 assertions** under `--check-bounds=yes` (Julia 1.12.6; 7m00.3s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -800,3 +800,18 @@ that day._
   Optimize **39/39**, HighOrder **441/441**, pipeline **42/42**, HFSS **95/95**;
   the full direct suite passed **151,477/151,477** under bounds checking on Julia
   1.12.6 (6m39.4s).
+- **2026-08-14 — deep-debug PASS 7, 2-D kernel/refinement contracts.** Public
+  2-D constructors now reject length mismatches, non-finite coordinates, invalid
+  constraint indices, collapsed constraints, and out-of-range seeds with stable
+  `ArgumentError`s; geometric duplicate keys canonicalize signed zero. Direct
+  mutation rejects out-of-range/already-inserted vertices and invalid constraint
+  endpoints, while export rejects a stale/short interior mask. Interior parity now
+  requires closed non-branching constrained loops and checks consistency when a
+  visited region is reached again. Ruppert refinement validates its angle, area,
+  callback, and step-limit inputs and raises an explicit non-convergence blocker if
+  `maxsteps` expires with an unmet criterion; top-level `mesh_planar` also rejects
+  an empty/unbounded result. The segment-flip FIFO no longer uses quadratic
+  `popfirst!`, and constrained legalization can no longer silently return after its
+  guard expires. Focused gates passed: Mesh2D **128/128**, MeshSurface **21/21**,
+  pipeline **42/42**, Mesh3D **410/410**; the full direct suite passed
+  **151,506/151,506** under bounds checking on Julia 1.12.6 (7m00.3s).
