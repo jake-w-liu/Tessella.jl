@@ -84,6 +84,7 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         T=delaunay3d([0.,1.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.])
         @test_throws ArgumentError to_mesh3(T;keep=Bool[])
         @test_throws ArgumentError optimize_flips!(T;passes=-1)
+        @test_throws ArgumentError optimize_flips!(T;passes=big(typemax(Int))+1)
         @test_throws ArgumentError tets_around_edge(T,1,1)
 
         tiny=box_surface(0,1e-15,0,1e-15,0,1e-15)
