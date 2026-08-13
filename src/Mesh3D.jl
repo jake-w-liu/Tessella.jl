@@ -38,8 +38,62 @@ export flip23!, flip32!, tets_around_edge, optimize_flips!, refine_to_size
 # the public volume front door use exact conforming-Delaunay recovery as its final
 # robust fallback.
 function _recover_boundary_exact end
+function _recover_partition_exact end
 
 const GHOST3 = Int32(0)
+
+@inline function _finite3(x::Real, caller::AbstractString, name::AbstractString)
+    y = try
+        Float64(x)
+    catch err
+        throw(ArgumentError("$caller: $name must be Float64-representable: $(sprint(showerror, err))"))
+    end
+    isfinite(y) || throw(ArgumentError("$caller: $name must be finite (got $x)"))
+    return y
+end
+
+@inline function _seed3(seed::Integer, caller::AbstractString)
+    (0 <= seed <= typemax(Int)) ||
+        throw(ArgumentError("$caller: rng_seed must be in 0:$(typemax(Int)) (got $seed)"))
+    return Int(seed)
+end
+
+@inline function _ceil_count3(x::Float64, caller::AbstractString, name::AbstractString;
+                              minimum::Int=1)
+    (isfinite(x) && x >= 0) ||
+        throw(ArgumentError("$caller: computed $name count is not finite and non-negative"))
+    value=try
+        ceil(Int,x)
+    catch
+        throw(ArgumentError("$caller: requested $name count exceeds the platform Int limit"))
+    end
+    return max(minimum,value)
+end
+
+@inline function _checked_mul3(caller::AbstractString, name::AbstractString, xs::Int...)
+    value = 1
+    try
+        for x in xs
+            value = Base.checked_mul(value, x)
+        end
+    catch
+        throw(ArgumentError("$caller: requested $name count overflows the platform Int limit"))
+    end
+    return value
+end
+
+@inline function _checked_add3(caller::AbstractString, name::AbstractString, x::Int, y::Int)
+    try
+        return Base.checked_add(x,y)
+    catch
+        throw(ArgumentError("$caller: requested $name count overflows the platform Int limit"))
+    end
+end
+
+@inline function _midpoint3(a::Float64, b::Float64)
+    # Same-sign subtraction cannot overflow; opposite-sign half-sums cannot overflow.
+    return signbit(a) == signbit(b) ? a + (b-a)/2 : a/2 + b/2
+end
 
 mutable struct Triangulation3
     x::Vector{Float64}
@@ -176,11 +230,23 @@ end
 @inline _subn(a,b) = (a[1]-b[1], a[2]-b[2], a[3]-b[3])
 @inline _dot(a,b) = a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
 @inline _cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
-@inline function _unitn(a); l=sqrt(_dot(a,a)); (a[1]/l,a[2]/l,a[3]/l); end
+@inline function _unitn(a)
+    l = hypot(a[1], a[2], a[3])
+    (isfinite(l) && l > 0) || throw(ArgumentError("Mesh3D: direction must have finite positive length"))
+    return (a[1]/l,a[2]/l,a[3]/l)
+end
 
 # ── construction ────────────────────────────────────────────────────────────────
 function Triangulation3(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64})
-    n = length(xs); @assert length(ys)==n && length(zs)==n
+    n = length(xs)
+    (length(ys)==n && length(zs)==n) ||
+        throw(ArgumentError("Triangulation3: coordinate lengths differ ($(length(xs)), $(length(ys)), $(length(zs)))"))
+    n <= typemax(Int32) ||
+        throw(ArgumentError("Triangulation3: $n points exceed the Int32 indexing limit"))
+    @inbounds for i in 1:n
+        (isfinite(xs[i]) && isfinite(ys[i]) && isfinite(zs[i])) ||
+            throw(ArgumentError("Triangulation3: point $i has a non-finite coordinate"))
+    end
     return Triangulation3(xs, ys, zs, Int32[], Int32[], Bool[], Int32[], n, Int32(0), zeros(Int32,n))
 end
 
@@ -373,6 +439,9 @@ end
 
 # ── Bowyer–Watson insertion ─────────────────────────────────────────────────────
 function insert_point3!(T::Triangulation3, vid::Integer; newtets::Union{Nothing,Vector{Int32}}=nothing)
+    1 <= vid <= T.nreal ||
+        throw(ArgumentError("insert_point3!: vertex $vid is outside 1:$(T.nreal)"))
+    T.vtet[vid] == 0 || throw(ArgumentError("insert_point3!: vertex $vid is already inserted"))
     px,py,pz = _pt(T, vid)
     t0 = locate3(T, px, py, pz, vid)
     cavity = Int32[t0]; incav = Set{Int32}(); push!(incav, t0)
@@ -460,6 +529,15 @@ end
 """
 function delaunay3d(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64};
                     rng_seed::Integer=1, perturb::Bool=true)
+    seed = _seed3(rng_seed, "delaunay3d")
+    (length(ys)==length(xs) && length(zs)==length(xs)) ||
+        throw(ArgumentError("delaunay3d: coordinate lengths differ ($(length(xs)), $(length(ys)), $(length(zs)))"))
+    length(xs) <= typemax(Int32) ||
+        throw(ArgumentError("delaunay3d: $(length(xs)) points exceed the Int32 indexing limit"))
+    @inbounds for i in eachindex(xs)
+        (isfinite(xs[i]) && isfinite(ys[i]) && isfinite(zs[i])) ||
+            throw(ArgumentError("delaunay3d: point $i has a non-finite coordinate"))
+    end
     ux,uy,uz,_ = _dedup3(xs,ys,zs)
     perturb && _perturb3!(ux,uy,uz)
     T = Triangulation3(ux,uy,uz)
@@ -467,7 +545,7 @@ function delaunay3d(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64
     isempty(placed) && return T
     ps = Set{Int32}(placed)
     order = Int32[i for i in 1:T.nreal if !(Int32(i) in ps)]
-    _shuffle3!(order, UInt64(rng_seed))
+    _shuffle3!(order, UInt64(seed))
     for v in order; insert_point3!(T, v); end
     return T
 end
@@ -481,13 +559,17 @@ end
 function _perturb3!(x::Vector{Float64}, y::Vector{Float64}, z::Vector{Float64})
     n = length(x); n == 0 && return
     xmin,xmax = extrema(x); ymin,ymax = extrema(y); zmin,zmax = extrema(z)
-    diag = sqrt((xmax-xmin)^2 + (ymax-ymin)^2 + (zmax-zmin)^2)
+    diag = hypot(xmax-xmin, ymax-ymin, zmax-zmin)
+    isfinite(diag) || throw(ArgumentError(
+        "delaunay3d: point-cloud extent is too large for finite Float64 perturbation; use perturb=false"))
     diag == 0 && (diag = 1.0)
     eps = 1e-8 * diag
     @inbounds for i in 1:n
         s = UInt64(i)*0x9E3779B97F4A7C15 + 0xD1B54A32D192ED03
         r() = (s ⊻= s<<13; s ⊻= s>>7; s ⊻= s<<17; (Float64(s >> 11)/Float64(1<<53)) - 0.5)
         x[i] += eps*r(); y[i] += eps*r(); z[i] += eps*r()
+        (isfinite(x[i]) && isfinite(y[i]) && isfinite(z[i])) ||
+            throw(ArgumentError("delaunay3d: deterministic perturbation overflowed at point $i"))
     end
     return
 end
@@ -496,8 +578,9 @@ function _dedup3(xs,ys,zs)
     n=length(xs); seen=Dict{NTuple{3,Float64},Int32}()
     ux=Float64[]; uy=Float64[]; uz=Float64[]; remap=Vector{Int32}(undef,n)
     @inbounds for i in 1:n
-        key=(xs[i],ys[i],zs[i]); id=get(seen,key,Int32(0))
-        if id==0; push!(ux,xs[i]);push!(uy,ys[i]);push!(uz,zs[i]); id=Int32(length(ux)); seen[key]=id; end
+        key=(xs[i]==0 ? 0.0 : xs[i], ys[i]==0 ? 0.0 : ys[i], zs[i]==0 ? 0.0 : zs[i])
+        id=get(seen,key,Int32(0))
+        if id==0; push!(ux,key[1]);push!(uy,key[2]);push!(uz,key[3]); id=Int32(length(ux)); seen[key]=id; end
         remap[i]=id
     end
     return ux,uy,uz,remap
@@ -521,13 +604,15 @@ If `keep` (a per-tet `Bool` mask indexed by tet id) is given, only kept tets are
 exported — used to drop exterior tets after domain classification.
 """
 function to_mesh3(T::Triangulation3; keep::Union{Nothing,AbstractVector{Bool}}=nothing)
+    keep === nothing || length(keep) == length(T.alive) ||
+        throw(ArgumentError("to_mesh3: keep length $(length(keep)) does not match tet storage length $(length(T.alive))"))
     # internal orientation is orient3(v1,v2,v3,v4) > 0, which is tet_signed_volume
     # < 0 (opposite convention). Swap v3,v4 on export so MeshTypes sees positive
     # signed volumes (the geometric standard `validate` checks).
     tets = NTuple{4,Int32}[]
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && !_is_ghost_tet(T,t)) || continue
-        (keep !== nothing && !(t <= length(keep) && keep[t])) && continue
+        (keep !== nothing && !keep[t]) && continue
         push!(tets, (_vert(T,t,1),_vert(T,t,2),_vert(T,t,4),_vert(T,t,3)))
     end
     used = Set{Int32}(); for te in tets, v in te; push!(used, v); end
@@ -583,6 +668,10 @@ Performed only if the bipyramid is convex (else it would create inverted tets);
 returns `false` if not flippable. Neither tet may be a ghost.
 """
 function flip23!(T::Triangulation3, t1::Integer, k1::Integer)
+    1 <= t1 <= length(T.alive) ||
+        throw(ArgumentError("flip23!: tet $t1 is outside 1:$(length(T.alive))"))
+    1 <= k1 <= 4 || throw(ArgumentError("flip23!: local face slot must be in 1:4 (got $k1)"))
+    T.alive[t1] || return false
     t2 = _nbr(T, t1, k1)
     (t2 == 0 || _is_ghost_tet(T, t1) || _is_ghost_tet(T, t2)) && return false
     d = _vert(T, t1, k1)
@@ -627,6 +716,9 @@ stubborn slivers remain (min dihedral is only non-decreasing, not driven up —
 that needs weighted exudation, remaining). Returns the number of flips applied.
 """
 function optimize_flips!(T::Triangulation3; passes::Integer=4, tol::Real=1e-9)
+    passes >= 0 || throw(ArgumentError("optimize_flips!: passes must be non-negative (got $passes)"))
+    ftol = _finite3(tol, "optimize_flips!", "tol")
+    ftol >= 0 || throw(ArgumentError("optimize_flips!: tol must be non-negative (got $tol)"))
     nflips = 0
     for _ in 1:passes
         changed = false
@@ -641,7 +733,7 @@ function optimize_flips!(T::Triangulation3; passes::Integer=4, tol::Real=1e-9)
                 if flip23!(T, t1, k1)
                     ring = tets_around_edge(T, d, e)
                     after = minimum(_tet_mindihedral(T,t) for t in ring)
-                    if after > before + tol
+                    if after > before + ftol
                         nflips += 1; changed = true
                     else
                         flip32!(T, d, e, ring)                   # revert
@@ -671,7 +763,7 @@ function optimize_flips!(T::Triangulation3; passes::Integer=4, tol::Real=1e-9)
                     new2 = _face_tets(T, abc[1], abc[2], abc[3])
                     if length(new2) == 2
                         after = min(_tet_mindihedral(T,new2[1]), _tet_mindihedral(T,new2[2]))
-                        if after > before + tol
+                        if after > before + ftol
                             nflips += 1; changed = true
                         else
                             k = _nslot_by_face(T, new2[1], abc[1], abc[2], abc[3])   # revert via 2-3
@@ -720,6 +812,9 @@ end
 All live (real) tets incident to the undirected edge `(u,v)`.
 """
 function tets_around_edge(T::Triangulation3, u::Integer, v::Integer)
+    (1 <= u <= T.nreal && 1 <= v <= T.nreal) ||
+        throw(ArgumentError("tets_around_edge: endpoints ($u,$v) must lie in 1:$(T.nreal)"))
+    u != v || throw(ArgumentError("tets_around_edge: endpoints must be distinct"))
     out = Int32[]
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && !_is_ghost_tet(T,t)) || continue
@@ -741,6 +836,10 @@ three tets around the interior edge `(d,e)`. Returns `false` if not applicable.
 """
 function flip32!(T::Triangulation3, d::Integer, e::Integer, tets3)
     length(tets3) == 3 || return false
+    (1 <= d <= T.nreal && 1 <= e <= T.nreal && d != e) ||
+        throw(ArgumentError("flip32!: edge endpoints ($d,$e) must be distinct vertices in 1:$(T.nreal)"))
+    length(unique(tets3)) == 3 || return false
+    all(t -> 1 <= t <= length(T.alive) && T.alive[t], tets3) || return false
     any(t -> _is_ghost_tet(T, t), tets3) && return false
     # the edge must be interior: no ghost tet may touch it (else the 3 real tets do
     # not close the ring and the flip would relink to the wrong neighbours).
@@ -778,7 +877,7 @@ end
 # Longest-edge bisection — size refinement of a tet mesh to a guaranteed max edge
 # ════════════════════════════════════════════════════════════════════════════════
 
-# Minimal binary MAX-heap on (len², a, b). Edge lengths are fixed once created (vertices
+# Minimal binary MAX-heap on (length, a, b). Edge lengths are fixed once created (vertices
 # never move — only midpoints are added), so heap entries never go stale in value.
 struct _EHeap
     d::Vector{Tuple{Float64,Int32,Int32}}
@@ -821,8 +920,13 @@ tet's tag — so multi-region meshes keep their partition. This is the size-refi
 terminator behind [`Tessella.mesh_sized`](@ref).
 """
 function refine_to_size(m::Mesh, hmax::Real)
-    hmax > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
-    h2 = float(hmax)^2
+    target = _finite3(hmax, "refine_to_size", "hmax")
+    target > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
+    nt0 = size(m.tets,2)
+    nt0 > 0 || throw(ArgumentError("refine_to_size: input contains no tetrahedra"))
+    inputdiag = validate(m)
+    inputdiag.ok || throw(ArgumentError("refine_to_size: input mesh is invalid — " *
+                                        join(inputdiag.messages, "; ")))
     nv0 = size(m.coords, 2)
     cx = Vector{Float64}(undef, nv0); cy = similar(cx); cz = similar(cx)
     @inbounds for i in 1:nv0; cx[i]=m.coords[1,i]; cy[i]=m.coords[2,i]; cz[i]=m.coords[3,i]; end
@@ -831,25 +935,94 @@ function refine_to_size(m::Mesh, hmax::Real)
     inc = Dict{Tuple{Int32,Int32},Vector{Int32}}()
     heap = _EHeap()
     @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
-    @inline d2(a,b) = (cx[a]-cx[b])^2 + (cy[a]-cy[b])^2 + (cz[a]-cz[b])^2
+    @inline elen(a,b) = hypot(cx[a]-cx[b], cy[a]-cy[b], cz[a]-cz[b])
+
+    # Lower-dimensional cells are part of Mesh's public data contract.  Whenever a
+    # tet edge is bisected, split every coincident segment/triangle edge as well so
+    # boundary/feature cells and all of their tags remain conforming instead of being
+    # silently discarded.
+    segv = NTuple{2,Int32}[(m.segs[1,s],m.segs[2,s]) for s in axes(m.segs,2)]
+    segalive = trues(length(segv)); segtag = copy(m.seg_tag)
+    triv = NTuple{3,Int32}[(m.tris[1,f],m.tris[2,f],m.tris[3,f]) for f in axes(m.tris,2)]
+    trialive = trues(length(triv)); tritag = copy(m.tri_tag)
+    seginc = Dict{Tuple{Int32,Int32},Vector{Int}}()
+    triinc = Dict{Tuple{Int32,Int32},Vector{Int}}()
+    @inbounds for (s,q) in enumerate(segv); push!(get!(() -> Int[],seginc,ek(q...)),s); end
+    @inbounds for (f,q) in enumerate(triv)
+        for e in (ek(q[1],q[2]),ek(q[2],q[3]),ek(q[3],q[1]))
+            push!(get!(() -> Int[],triinc,e),f)
+        end
+    end
+    function addseg!(q::NTuple{2,Int32}, tag::Int32)
+        push!(segv,q); push!(segalive,true); push!(segtag,tag); s=length(segv)
+        push!(get!(() -> Int[],seginc,ek(q...)),s)
+        return nothing
+    end
+    function addtri!(q::NTuple{3,Int32}, tag::Int32)
+        push!(triv,q); push!(trialive,true); push!(tritag,tag); f=length(triv)
+        for e in (ek(q[1],q[2]),ek(q[2],q[3]),ek(q[3],q[1]))
+            push!(get!(() -> Int[],triinc,e),f)
+        end
+        return nothing
+    end
+    function split_lower!(a::Int32,b::Int32,mid::Int32)
+        e=ek(a,b)
+        for s in get(seginc,e,Int[])
+            segalive[s] || continue
+            q=segv[s]; ek(q...)==e || continue
+            segalive[s]=false; g=segtag[s]
+            if q[1]==a
+                addseg!((a,mid),g); addseg!((mid,b),g)
+            else
+                addseg!((b,mid),g); addseg!((mid,a),g)
+            end
+        end
+        for f in get(triinc,e,Int[])
+            trialive[f] || continue
+            q=triv[f]
+            hit=0
+            for i in 1:3
+                j=i==3 ? 1 : i+1
+                ek(q[i],q[j])==e && (hit=i; break)
+            end
+            hit==0 && continue
+            j=hit==3 ? 1 : hit+1; k=j==3 ? 1 : j+1
+            x=q[hit]; y=q[j]; z=q[k]; g=tritag[f]; trialive[f]=false
+            addtri!((x,mid,z),g); addtri!((mid,y,z),g)
+        end
+        delete!(seginc,e); delete!(triinc,e)
+        return nothing
+    end
+
     # add a tet (oriented positive) carrying region tag `tag`; register its 6 edges; if
     # `push_edges`, enqueue any edge longer than hmax (duplicates harmless — heap checked vs `inc`).
     function addtet!(a, b, c, d, push_edges::Bool, tag::Int32)
-        tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),(cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d])) < 0 && ((c,d)=(d,c))
+        length(tv) < typemax(Int32) ||
+            throw(ErrorException("refine_to_size: working tet count exceeds the Int32 incidence limit"))
+        sv=tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),
+                             (cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d]))
+        (isfinite(sv) && sv != 0) ||
+            throw(ErrorException("refine_to_size: bisection produced a non-finite or flat tetrahedron"))
+        sv < 0 && ((c,d)=(d,c))
         push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true); push!(ttag, tag); id = Int32(length(tv))
         q = (a,b,c,d)
         @inbounds for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
             u,v = q[i],q[j]; push!(get!(inc, ek(u,v)) do; Int32[] end, id)
-            push_edges && d2(u,v) > h2 && _hpush!(heap, (d2(u,v), Int32(u), Int32(v)))
+            len=elen(u,v)
+            isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
+            push_edges && len > target && _hpush!(heap, (len, Int32(u), Int32(v)))
         end
         id
     end
     @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false, tags0[t]); end
-    for (e,_) in inc; d2(e[1],e[2]) > h2 && _hpush!(heap, (d2(e[1],e[2]), e[1], e[2])); end
-    guard = 0; maxguard = 200_000_000
+    for (e,_) in inc
+        len=elen(e[1],e[2]); isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
+        len > target && _hpush!(heap, (len, e[1], e[2]))
+    end
+    guard = 0
     while !isempty(heap.d)
-        (len2, a, b) = _hpop!(heap)
-        len2 <= h2 && break                                  # global max edge ≤ hmax ⇒ finished
+        (len, a, b) = _hpop!(heap)
+        len <= target && break                               # global max edge ≤ hmax ⇒ finished
         e = ek(a, b); haskey(inc, e) || continue
         ts = Int32[]
         @inbounds for t in inc[e]
@@ -858,19 +1031,28 @@ function refine_to_size(m::Mesh, hmax::Real)
             push!(ts, t)
         end
         isempty(ts) && continue
-        guard += 1; guard > maxguard && error("refine_to_size: bisection guard tripped (degenerate input?)")
-        push!(cx, 0.5*(cx[a]+cx[b])); push!(cy, 0.5*(cy[a]+cy[b])); push!(cz, 0.5*(cz[a]+cz[b]))
-        mvid = length(cx)
+        guard += 1
+        guard <= typemax(Int32) || throw(ErrorException("refine_to_size: bisection count exceeds Int32"))
+        length(cx) < typemax(Int32) ||
+            throw(ErrorException("refine_to_size: refined node count exceeds the Int32 indexing limit"))
+        mx=_midpoint3(cx[a],cx[b]); my=_midpoint3(cy[a],cy[b]); mz=_midpoint3(cz[a],cz[b])
+        ((mx,my,mz)!=(cx[a],cy[a],cz[a]) && (mx,my,mz)!=(cx[b],cy[b],cz[b])) ||
+            throw(ErrorException("refine_to_size: hmax=$target is below Float64 coordinate resolution on edge ($a,$b)"))
+        push!(cx,mx); push!(cy,my); push!(cz,mz)
+        mvid = Int32(length(cx)); split_lower!(a,b,mvid)
         @inbounds for t in ts
             q = tv[t]; a1=Int32(0); a2=Int32(0)
             for v in q; (v!=a && v!=b) && (a1==0 ? (a1=v) : (a2=v)); end
             g = ttag[t]; alive[t] = false                    # children inherit the parent tet's region tag
             addtet!(a, mvid, a1, a2, true, g); addtet!(mvid, b, a1, a2, true, g)
         end
+        delete!(inc,e)
     end
     keep = Int32[t for t in 1:length(tv) if alive[t]]
     used = Int32[]; seenv = Set{Int32}()
     for t in keep, v in tv[t]; (v in seenv) || (push!(used, v); push!(seenv, v)); end
+    for s in eachindex(segv); segalive[s] || continue; for v in segv[s]; (v in seenv)||(push!(used,v);push!(seenv,v)); end; end
+    for f in eachindex(triv); trialive[f] || continue; for v in triv[f]; (v in seenv)||(push!(used,v);push!(seenv,v)); end; end
     sort!(used)
     nid = Dict{Int32,Int32}(); for (i,v) in enumerate(used); nid[v]=Int32(i); end
     C = Matrix{Float64}(undef, 3, length(used))
@@ -878,7 +1060,21 @@ function refine_to_size(m::Mesh, hmax::Real)
     M = Matrix{Int32}(undef, 4, length(keep))
     @inbounds for (j,t) in enumerate(keep); q=tv[t]; M[1,j]=nid[q[1]]; M[2,j]=nid[q[2]]; M[3,j]=nid[q[3]]; M[4,j]=nid[q[4]]; end
     tetags = Int32[ttag[t] for t in keep]
-    return Mesh(C; tets=M, tet_tag=tetags)
+    keeps=Int[s for s in eachindex(segv) if segalive[s]]
+    keepf=Int[f for f in eachindex(triv) if trialive[f]]
+    S=Matrix{Int32}(undef,2,length(keeps)); st=Vector{Int32}(undef,length(keeps))
+    @inbounds for (j,s) in enumerate(keeps); q=segv[s];S[1,j]=nid[q[1]];S[2,j]=nid[q[2]];st[j]=segtag[s];end
+    F=Matrix{Int32}(undef,3,length(keepf)); ft=Vector{Int32}(undef,length(keepf))
+    @inbounds for (j,f) in enumerate(keepf); q=triv[f];F[1,j]=nid[q[1]];F[2,j]=nid[q[2]];F[3,j]=nid[q[3]];ft[j]=tritag[f];end
+    out=Mesh(C;segs=S,tris=F,tets=M,seg_tag=st,tri_tag=ft,tet_tag=tetags)
+    diag=validate(out)
+    diag.ok || throw(ErrorException("refine_to_size: produced an invalid mesh — " * join(diag.messages,"; ")))
+    @inbounds for t in axes(M,2), (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+        u=M[i,t];v=M[j,t]
+        hypot(C[1,u]-C[1,v],C[2,u]-C[2,v],C[3,u]-C[3,v]) <= target ||
+            throw(ErrorException("refine_to_size: postcondition failed: an output edge exceeds hmax=$target"))
+    end
+    return out
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -886,6 +1082,9 @@ end
 # ════════════════════════════════════════════════════════════════════════════════
 
 function _add_vertex3!(T::Triangulation3, x::Float64, y::Float64, z::Float64)
+    T.nreal < typemax(Int32) || throw(ArgumentError("Mesh3D: node count exceeds Int32"))
+    (isfinite(x)&&isfinite(y)&&isfinite(z)) ||
+        throw(ArgumentError("Mesh3D: cannot add a non-finite vertex"))
     push!(T.x, x); push!(T.y, y); push!(T.z, z); T.nreal += 1; push!(T.vtet, Int32(0))
     return Int32(T.nreal)
 end
@@ -912,6 +1111,35 @@ end
 # Domain filling from a boundary surface (Stage-3 volume meshing)
 # ════════════════════════════════════════════════════════════════════════════════
 
+function _require_surface3(surface::Mesh, caller::AbstractString; oriented::Bool=false)
+    size(surface.coords,2) <= typemax(Int32) ||
+        throw(ArgumentError("$caller: surface node count exceeds the Int32 indexing limit"))
+    size(surface.tris,2)>0 || throw(ArgumentError("$caller: surface has no triangles"))
+    d=validate(surface)
+    d.ok || throw(ArgumentError("$caller: input surface is invalid — " * join(d.messages,"; ")))
+    inc=Dict{NTuple{2,Int32},Int}()
+    dirs=Dict{NTuple{2,Int32},Int}()
+    faces=Set{NTuple{3,Int32}}()
+    @inbounds for f in axes(surface.tris,2)
+        a=surface.tris[1,f];b=surface.tris[2,f];c=surface.tris[3,f]
+        key=_sort3t(a,b,c)
+        key in faces && throw(ArgumentError("$caller: surface contains duplicate triangle $key"))
+        push!(faces,key)
+        for (u,v) in ((a,b),(b,c),(c,a))
+            e=_edgekey(u,v);inc[e]=get(inc,e,0)+1
+            dirs[(u,v)]=get(dirs,(u,v),0)+1
+        end
+    end
+    for (e,n) in inc
+        n==2 || throw(ArgumentError("$caller: surface edge $e has incidence $n (expected exactly 2)"))
+        if oriented
+            (get(dirs,(e[1],e[2]),0)==1 && get(dirs,(e[2],e[1]),0)==1) ||
+                throw(ArgumentError("$caller: surface has inconsistent winding at edge $e"))
+        end
+    end
+    return nothing
+end
+
 """
     tetrahedralize(surface::Mesh; rng_seed=1, optimize=false, check=true) -> Mesh
 
@@ -931,6 +1159,7 @@ validation and conformity checks; [`mesh_volume`](@ref) exposes the same bypass.
 """
 function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false,
                         check::Bool=true)
+    check && _require_surface3(surface,"tetrahedralize")
     nn = size(surface.coords, 2)
     xs = Vector{Float64}(undef, nn); ys = similar(xs); zs = similar(xs)
     @inbounds for i in 1:nn; xs[i]=surface.coords[1,i]; ys[i]=surface.coords[2,i]; zs[i]=surface.coords[3,i]; end
@@ -1002,16 +1231,30 @@ The cube main diagonal `= (hmax/√3)·√3 = hmax` bounds the longest edge, so
 for box regions (e.g. the enclosure case/air cavities).
 """
 function mesh_box(x0::Real, x1::Real, y0::Real, y1::Real, z0::Real, z1::Real; hmax::Real)
-    x0,x1,y0,y1,z0,z1 = float(x0),float(x1),float(y0),float(y1),float(z0),float(z1)
+    x0=_finite3(x0,"mesh_box","x0"); x1=_finite3(x1,"mesh_box","x1")
+    y0=_finite3(y0,"mesh_box","y0"); y1=_finite3(y1,"mesh_box","y1")
+    z0=_finite3(z0,"mesh_box","z0"); z1=_finite3(z1,"mesh_box","z1")
+    hm=_finite3(hmax,"mesh_box","hmax")
     Lx = x1-x0; Ly = y1-y0; Lz = z1-z0
-    (Lx > 0 && Ly > 0 && Lz > 0) ||
+    (isfinite(Lx) && isfinite(Ly) && isfinite(Lz) && Lx > 0 && Ly > 0 && Lz > 0) ||
         throw(ArgumentError("mesh_box: box must have positive extent in every axis (got Lx=$Lx, Ly=$Ly, Lz=$Lz)"))
-    hmax > 0 || throw(ArgumentError("mesh_box: hmax must be positive (got $hmax)"))
-    a  = hmax / sqrt(3.0)                                   # cube edge; main diagonal = a√3 = hmax
-    nx = max(1, ceil(Int, Lx/a)); ny = max(1, ceil(Int, Ly/a)); nz = max(1, ceil(Int, Lz/a))
+    hm > 0 || throw(ArgumentError("mesh_box: hmax must be positive (got $hmax)"))
+    a  = hm / sqrt(3.0)                                     # cube edge; main diagonal = a√3 = hmax
+    (isfinite(a) && a > 0) || throw(ArgumentError("mesh_box: hmax is below Float64 spacing resolution"))
+    nx=_ceil_count3(Lx/a,"mesh_box","x intervals")
+    ny=_ceil_count3(Ly/a,"mesh_box","y intervals")
+    nz=_ceil_count3(Lz/a,"mesh_box","z intervals")
     hx = Lx/nx; hy = Ly/ny; hz = Lz/nz
     nid(i,j,k) = ((k*(ny+1) + j)*(nx+1) + i) + 1            # 1-based grid-node id
-    npts = (nx+1)*(ny+1)*(nz+1)
+    npx=_checked_add3("mesh_box","node",nx,1)
+    npy=_checked_add3("mesh_box","node",ny,1)
+    npz=_checked_add3("mesh_box","node",nz,1)
+    npts=_checked_mul3("mesh_box","node",npx,npy,npz)
+    npts <= typemax(Int32) ||
+        throw(ArgumentError("mesh_box: $npts nodes exceed the Int32 indexing limit"))
+    ntotal=_checked_mul3("mesh_box","tetrahedron",6,nx,ny,nz)
+    ntotal <= typemax(Int32) ||
+        throw(ArgumentError("mesh_box: $ntotal tetrahedra exceed the Int32 working limit"))
     C = Matrix{Float64}(undef, 3, npts)
     @inbounds for k in 0:nz, j in 0:ny, i in 0:nx
         n = nid(i,j,k); C[1,n]=x0+i*hx; C[2,n]=y0+j*hy; C[3,n]=z0+k*hz
@@ -1020,7 +1263,7 @@ function mesh_box(x0::Real, x1::Real, y0::Real, y1::Real, z0::Real, z1::Real; hm
     # lattice paths from the low corner to the high corner). Emitted CCW-positive.
     paths = (((1,0,0),(1,1,0)), ((1,0,0),(1,0,1)), ((0,1,0),(1,1,0)),
              ((0,1,0),(0,1,1)), ((0,0,1),(1,0,1)), ((0,0,1),(0,1,1)))
-    tets = Matrix{Int32}(undef, 4, 6*nx*ny*nz); nt = 0
+    tets = Matrix{Int32}(undef, 4, ntotal); nt = 0
     @inbounds for k in 0:nz-1, j in 0:ny-1, i in 0:nx-1
         c(di,dj,dk) = nid(i+di, j+dj, k+dk)
         v0 = c(0,0,0); v7 = c(1,1,1)
@@ -1037,7 +1280,10 @@ function mesh_box(x0::Real, x1::Real, y0::Real, y1::Real, z0::Real, z1::Real; hm
             end
         end
     end
-    return Mesh(C; tets=tets)
+    out=Mesh(C; tets=tets)
+    d=validate(out)
+    d.ok || throw(ErrorException("mesh_box: constructed mesh failed validation — " * join(d.messages,"; ")))
+    return out
 end
 
 # 6× signed tet volume (sign only matters here); positive ⇔ (p1-p0,p2-p0,p3-p0) right-handed
@@ -1059,18 +1305,29 @@ solid one. Used by [`mesh_box_regions`](@ref).
 struct BoxRegion
     x0::Float64; x1::Float64; y0::Float64; y1::Float64; z0::Float64; z1::Float64
     tag::Int
+    function BoxRegion(x0::Real,x1::Real,y0::Real,y1::Real,z0::Real,z1::Real,tag::Integer)
+        a0=_finite3(x0,"BoxRegion","x0");a1=_finite3(x1,"BoxRegion","x1")
+        b0=_finite3(y0,"BoxRegion","y0");b1=_finite3(y1,"BoxRegion","y1")
+        c0=_finite3(z0,"BoxRegion","z0");c1=_finite3(z1,"BoxRegion","z1")
+        (a0<a1 && b0<b1 && c0<c1) ||
+            throw(ArgumentError("BoxRegion: every axis must have finite positive extent"))
+        0 <= tag <= typemax(Int32) ||
+            throw(ArgumentError("BoxRegion: tag must be in 0:$(typemax(Int32)) (got $tag)"))
+        new(a0,a1,b0,b1,c0,c1,Int(tag))
+    end
 end
-# (Julia's auto-generated outer constructor already converts, so BoxRegion(0,6,0,6,0,6,1) works.)
 @inline _br_contains(b::BoxRegion, x,y,z) =
     (b.x0<=x<=b.x1) && (b.y0<=y<=b.y1) && (b.z0<=z<=b.z1)
 
 # 1-D grid on one axis: every region face coordinate is a breakpoint, and each gap
 # is subdivided so no sub-interval exceeds `a` (⇒ every cell main diagonal ≤ a√3).
 function _region_axis_grid(faces::Vector{Float64}, a::Float64)
+    isempty(faces) && throw(ArgumentError("mesh_box_regions: an axis has no region faces"))
     b = sort!(unique(faces)); g = Float64[b[1]]
     @inbounds for i in 1:length(b)-1
         lo=b[i]; hi=b[i+1]; L=hi-lo
-        n = max(1, ceil(Int, L/a - 1e-9)); h = L/n
+        n = _ceil_count3(max(0.0,L/a-1e-9),"mesh_box_regions","axis intervals"); h = L/n
+        _checked_add3("mesh_box_regions","axis grid",length(g),n)
         for k in 1:n; push!(g, lo + k*h); end
     end
     return g
@@ -1095,13 +1352,16 @@ Handles non-convex domains (a hollow shell is `box − void`). `tet_tag` holds t
 region tag of each tet. Errors if no cell is kept (empty domain).
 """
 function mesh_box_regions(regions::AbstractVector{BoxRegion}; hmax::Real)
-    hmax > 0 || throw(ArgumentError("mesh_box_regions: hmax must be positive (got $hmax)"))
+    hm=_finite3(hmax,"mesh_box_regions","hmax")
+    hm > 0 || throw(ArgumentError("mesh_box_regions: hmax must be positive (got $hmax)"))
     isempty(regions) && throw(ArgumentError("mesh_box_regions: no regions"))
     @inbounds for r in regions
         (r.x1>r.x0 && r.y1>r.y0 && r.z1>r.z0) ||
             throw(ArgumentError("mesh_box_regions: every region needs positive extent (bad box tag=$(r.tag))"))
     end
-    a = float(hmax)/sqrt(3.0)
+    a = hm/sqrt(3.0)
+    (isfinite(a) && a > 0) ||
+        throw(ArgumentError("mesh_box_regions: hmax is below Float64 spacing resolution"))
     fx=Float64[]; fy=Float64[]; fz=Float64[]
     @inbounds for r in regions
         push!(fx,r.x0); push!(fx,r.x1); push!(fy,r.y0); push!(fy,r.y1); push!(fz,r.z0); push!(fz,r.z1)
@@ -1109,6 +1369,13 @@ function mesh_box_regions(regions::AbstractVector{BoxRegion}; hmax::Real)
     X=_region_axis_grid(fx,a); Y=_region_axis_grid(fy,a); Z=_region_axis_grid(fz,a)
     nx=length(X)-1; ny=length(Y)-1; nz=length(Z)-1
     LX=length(X); LY=length(Y)
+    globalnodes=_checked_mul3("mesh_box_regions","global grid node",LX,LY,length(Z))
+    globalnodes <= typemax(Int32) ||
+        throw(ArgumentError("mesh_box_regions: $globalnodes global grid nodes exceed the Int32 indexing limit"))
+    ncells=_checked_mul3("mesh_box_regions","grid cell",nx,ny,nz)
+    ntmax=_checked_mul3("mesh_box_regions","tetrahedron",6,ncells)
+    ntmax <= typemax(Int32) ||
+        throw(ArgumentError("mesh_box_regions: the grid can produce $ntmax tetrahedra, exceeding the Int32 working limit"))
     gnid(i,j,k) = ((k*LY + j)*LX + i) + 1
     tetv = NTuple{4,Int32}[]; tett = Int32[]; used = Set{Int32}()
     @inbounds for k in 0:nz-1, j in 0:ny-1, i in 0:nx-1
@@ -1145,7 +1412,10 @@ function mesh_box_regions(regions::AbstractVector{BoxRegion}; hmax::Real)
     @inbounds for (t,f) in enumerate(tetv)
         Tm[1,t]=remap[f[1]]; Tm[2,t]=remap[f[2]]; Tm[3,t]=remap[f[3]]; Tm[4,t]=remap[f[4]]; tags[t]=tett[t]
     end
-    return Mesh(C; tets=Tm, tet_tag=tags)
+    out=Mesh(C; tets=Tm, tet_tag=tags)
+    d=validate(out)
+    d.ok || throw(ErrorException("mesh_box_regions: constructed mesh failed validation — " * join(d.messages,"; ")))
+    return out
 end
 
 """
@@ -1167,30 +1437,57 @@ inherent singularity of structured cylinder meshes); the size/validity guarantee
 hold regardless.
 """
 function mesh_cylinder(center, axis, radius::Real, height::Real; hmax::Real)
-    R=float(radius); H=float(height)
+    length(center)>=3 || throw(ArgumentError("mesh_cylinder: center needs three coordinates"))
+    length(axis)>=3 || throw(ArgumentError("mesh_cylinder: axis needs three coordinates"))
+    R=_finite3(radius,"mesh_cylinder","radius"); H=_finite3(height,"mesh_cylinder","height")
+    hm=_finite3(hmax,"mesh_cylinder","hmax")
+    cx=_finite3(center[1],"mesh_cylinder","center[1]")
+    cy=_finite3(center[2],"mesh_cylinder","center[2]")
+    cz=_finite3(center[3],"mesh_cylinder","center[3]")
+    av=(_finite3(axis[1],"mesh_cylinder","axis[1]"),
+        _finite3(axis[2],"mesh_cylinder","axis[2]"),
+        _finite3(axis[3],"mesh_cylinder","axis[3]"))
     (R > 0 && H > 0) || throw(ArgumentError("mesh_cylinder: radius and height must be positive (got R=$R, H=$H)"))
-    hmax > 0 || throw(ArgumentError("mesh_cylinder: hmax must be positive (got $hmax)"))
-    (float(axis[1])^2 + float(axis[2])^2 + float(axis[3])^2) > 0 ||
+    hm > 0 || throw(ArgumentError("mesh_cylinder: hmax must be positive (got $hmax)"))
+    hypot(av...) > 0 ||
         throw(ArgumentError("mesh_cylinder: axis must be a nonzero direction vector (got $((axis[1],axis[2],axis[3])))"))
-    a = float(hmax)/sqrt(3.0)
-    nr=max(1,ceil(Int,R/a)); nz=max(1,ceil(Int,H/a)); nθ=max(3,ceil(Int,2π*R/a))
-    ez=_unitn((float(axis[1]),float(axis[2]),float(axis[3])))
+    a = hm/sqrt(3.0)
+    (isfinite(a) && a > 0) || throw(ArgumentError("mesh_cylinder: hmax is below Float64 spacing resolution"))
+    nr=_ceil_count3(R/a,"mesh_cylinder","radial intervals")
+    nz=_ceil_count3(H/a,"mesh_cylinder","axial intervals")
+    nθ=_ceil_count3(2π*R/a,"mesh_cylinder","angular intervals";minimum=3)
+    ringnodes=_checked_mul3("mesh_cylinder","ring node",nr,nθ)
+    perlevel=_checked_add3("mesh_cylinder","nodes per level",ringnodes,1)
+    levels=_checked_add3("mesh_cylinder","axial level",nz,1)
+    nmax=_checked_mul3("mesh_cylinder","node",perlevel,levels)
+    nmax <= typemax(Int32) ||
+        throw(ArgumentError("mesh_cylinder: $nmax nodes exceed the Int32 indexing limit"))
+    ntcandidate=_checked_mul3("mesh_cylinder","candidate tetrahedron",6,nr,nθ,nz)
+    ntcandidate <= typemax(Int32) ||
+        throw(ArgumentError("mesh_cylinder: $ntcandidate candidate tetrahedra exceed the Int32 working limit"))
+    ez=_unitn(av)
     axc = abs(ez[1])<=abs(ez[2]) ? (abs(ez[1])<=abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
                                    (abs(ez[2])<=abs(ez[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
     d=axc[1]*ez[1]+axc[2]*ez[2]+axc[3]*ez[3]
     ex=_unitn((axc[1]-d*ez[1], axc[2]-d*ez[2], axc[3]-d*ez[3]))
     ey=(ez[2]*ex[3]-ez[3]*ex[2], ez[3]*ex[1]-ez[1]*ex[3], ez[1]*ex[2]-ez[2]*ex[1])
-    cx,cy,cz=float(center[1]),float(center[2]),float(center[3])
     @inline function pos(i,k,j)
         r=R*i/nr; θ=2π*(mod(k,nθ))/nθ; z=H*j/nz; rc=r*cos(θ); rs=r*sin(θ)
         (cx+rc*ex[1]+rs*ey[1]+z*ez[1], cy+rc*ex[2]+rs*ey[2]+z*ez[2], cz+rc*ex[3]+rs*ey[3]+z*ez[3])
     end
     nid=Dict{NTuple{3,Int},Int32}(); coords=NTuple{3,Float64}[]
+    sizehint!(nid,nmax); sizehint!(coords,nmax)
     @inline function id(i,k,j)
         key = i==0 ? (0,0,j) : (i, Int(mod(k,nθ)), j)
-        get!(nid,key) do; push!(coords, pos(i,k,j)); Int32(length(coords)); end
+        get!(nid,key) do
+            p=pos(i,k,j)
+            (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
+                throw(ArgumentError("mesh_cylinder: generated coordinate overflowed Float64"))
+            push!(coords,p); Int32(length(coords))
+        end
     end
     tets=NTuple{4,Int32}[]
+    sizehint!(tets,ntcandidate)
     @inbounds for j in 0:nz-1, k in 0:nθ-1, i in 0:nr-1
         crn(a1,a2,a3)=id(i+a1, k+a2, j+a3)
         v0=crn(0,0,0); v7=crn(1,1,1)
@@ -1215,7 +1512,15 @@ function mesh_cylinder(center, axis, radius::Real, height::Real; hmax::Real)
     @inbounds for (n,p) in enumerate(coords); C[1,n]=p[1]; C[2,n]=p[2]; C[3,n]=p[3]; end
     Tm=Matrix{Int32}(undef,4,length(tets))
     @inbounds for (t,f) in enumerate(tets); Tm[1,t]=f[1]; Tm[2,t]=f[2]; Tm[3,t]=f[3]; Tm[4,t]=f[4]; end
-    return Mesh(C; tets=Tm)
+    out=Mesh(C; tets=Tm)
+    d=validate(out)
+    d.ok || throw(ErrorException("mesh_cylinder: constructed mesh failed validation — " * join(d.messages,"; ")))
+    @inbounds for t in axes(Tm,2), (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+        u=Tm[i,t];v=Tm[j,t]
+        hypot(C[1,u]-C[1,v],C[2,u]-C[2,v],C[3,u]-C[3,v]) <= hm*(1+16eps(Float64)) ||
+            throw(ErrorException("mesh_cylinder: postcondition failed: an output edge exceeds hmax=$hm"))
+    end
+    return out
 end
 
 """
@@ -1229,11 +1534,16 @@ volume is genuinely filled: the standing anti-false-positive check is that *each
 region contributes a positive tet count (see `tets_per_region`).
 """
 function tetrahedralize_multi(surfaces::AbstractVector{Mesh}; rng_seed::Integer=1)
+    seed=_seed3(rng_seed,"tetrahedralize_multi")
+    length(surfaces)<=typemax(Int32) ||
+        throw(ArgumentError("tetrahedralize_multi: region count exceeds Int32 tags"))
     coords_cols = Vector{NTuple{3,Float64}}()
     tetcols = Vector{NTuple{4,Int32}}()
     tags = Int32[]
     for (r, surf) in enumerate(surfaces)
-        m = tetrahedralize(surf; rng_seed=rng_seed)
+        m = tetrahedralize(surf; rng_seed=seed)
+        length(coords_cols) <= typemax(Int32)-size(m.coords,2) ||
+            throw(ArgumentError("tetrahedralize_multi: combined node count exceeds Int32"))
         off = Int32(length(coords_cols))
         @inbounds for i in 1:size(m.coords,2)
             push!(coords_cols, (m.coords[1,i], m.coords[2,i], m.coords[3,i]))
@@ -1273,18 +1583,25 @@ still need constrained boundary recovery.
 """
 function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Integer=1)
     isempty(surfaces) && return Mesh(Matrix{Float64}(undef, 3, 0))
+    seed=_seed3(rng_seed,"tetrahedralize_conforming")
+    length(surfaces)<=typemax(Int32) ||
+        throw(ArgumentError("tetrahedralize_conforming: region count exceeds Int32 tags"))
+    for (r,s) in enumerate(surfaces);_require_surface3(s,"tetrahedralize_conforming region $r");end
     # collect every region vertex once (shared interface vertices are deduplicated)
     seen = Set{NTuple{3,Float64}}(); V = NTuple{3,Float64}[]
     for s in surfaces
         @inbounds for i in 1:size(s.coords, 2)
-            p = (s.coords[1,i], s.coords[2,i], s.coords[3,i])
+            p = (s.coords[1,i]==0 ? 0.0 : s.coords[1,i],
+                 s.coords[2,i]==0 ? 0.0 : s.coords[2,i],
+                 s.coords[3,i]==0 ? 0.0 : s.coords[3,i])
             (p in seen) || (push!(seen, p); push!(V, p))
         end
     end
     n = length(V)
+    n<=typemax(Int32) || throw(ArgumentError("tetrahedralize_conforming: $n distinct nodes exceed Int32"))
     xs = Vector{Float64}(undef, n); ys = similar(xs); zs = similar(xs)
     @inbounds for i in 1:n; xs[i]=V[i][1]; ys[i]=V[i][2]; zs[i]=V[i][3]; end
-    T = delaunay3d(xs, ys, zs; rng_seed=rng_seed, perturb=false)   # EXACT coords ⇒ conforming
+    T = delaunay3d(xs, ys, zs; rng_seed=seed, perturb=false)   # EXACT coords ⇒ conforming
     m0 = to_mesh3(T)
     # per-surface bounding boxes: a centroid OUTSIDE a surface's bbox is definitively
     # outside that surface, so skip its ray-cast — the small coax pin's box excludes
@@ -1329,7 +1646,22 @@ function tetrahedralize_conforming(surfaces::AbstractVector{Mesh}; rng_seed::Int
         "vertices is not a valid conforming mesh (" * join(diag.messages, "; ") * ") — a cospherical/" *
         "coplanar degeneracy the exact kernel cannot break into positive-volume tets. Use " *
         "mesh_box_regions for axis-aligned box unions, or recover_boundary per region."))
-    return mm
+    try
+        _certify_regions3(surfaces,mm,"tetrahedralize_conforming")
+        return mm
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        if all(_bool_is_axis_aligned,surfaces)
+            fallback=_axis_partition3(surfaces,"tetrahedralize_conforming")
+            _certify_regions3(surfaces,fallback,"tetrahedralize_conforming")
+            return fallback
+        end
+        if applicable(_recover_partition_exact,surfaces)
+            return _recover_partition_exact(surfaces)
+        end
+        rethrow()
+    end
 end
 
 """
@@ -1349,10 +1681,16 @@ it is the robust fallback for degenerate inputs, not the default path.
 """
 function tetrahedralize_conforming_exact(surfaces::AbstractVector{Mesh}; rng_seed::Integer=1)
     isempty(surfaces) && throw(ArgumentError("tetrahedralize_conforming_exact: no surfaces"))
+    _seed3(rng_seed,"tetrahedralize_conforming_exact") # reserved for API parity/determinism
+    length(surfaces)<=typemax(Int32) ||
+        throw(ArgumentError("tetrahedralize_conforming_exact: region count exceeds Int32 tags"))
+    for (r,s) in enumerate(surfaces);_require_surface3(s,"tetrahedralize_conforming_exact region $r");end
     seen = Dict{NTuple{3,Float64},Int32}()
     pts = NTuple{3,Rational{BigInt}}[]; xf = Float64[]; yf = Float64[]; zf = Float64[]
     @inbounds for s in surfaces, i in 1:size(s.coords, 2)
-        k = (s.coords[1,i], s.coords[2,i], s.coords[3,i])
+        k = (s.coords[1,i]==0 ? 0.0 : s.coords[1,i],
+             s.coords[2,i]==0 ? 0.0 : s.coords[2,i],
+             s.coords[3,i]==0 ? 0.0 : s.coords[3,i])
         if !haskey(seen, k)
             seen[k] = Int32(length(pts) + 1)
             push!(pts, (Rational{BigInt}(k[1]), Rational{BigInt}(k[2]), Rational{BigInt}(k[3])))
@@ -1360,6 +1698,8 @@ function tetrahedralize_conforming_exact(surfaces::AbstractVector{Mesh}; rng_see
         end
     end
     length(pts) >= 4 || throw(ArgumentError("tetrahedralize_conforming_exact: need ≥ 4 distinct vertices"))
+    length(pts)<=typemax(Int32) ||
+        throw(ArgumentError("tetrahedralize_conforming_exact: distinct node count exceeds Int32"))
     etets = delaunay3d_exact(pts)
     np = length(pts)
     coords = Matrix{Float64}(undef, 3, np)
@@ -1395,7 +1735,130 @@ function tetrahedralize_conforming_exact(surfaces::AbstractVector{Mesh}; rng_see
     diag = validate(mm)
     diag.ok || throw(ErrorException("tetrahedralize_conforming_exact: produced an invalid mesh (" *
         join(diag.messages, "; ") * ")"))
-    return mm
+    try
+        _certify_regions3(surfaces,mm,"tetrahedralize_conforming_exact")
+        return mm
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        if all(_bool_is_axis_aligned,surfaces)
+            fallback=_axis_partition3(surfaces,"tetrahedralize_conforming_exact")
+            _certify_regions3(surfaces,fallback,"tetrahedralize_conforming_exact")
+            return fallback
+        end
+        applicable(_recover_partition_exact,surfaces) && return _recover_partition_exact(surfaces)
+        rethrow()
+    end
+end
+
+function _certify_regions3(surfaces::AbstractVector{Mesh},m::Mesh,caller::AbstractString)
+    combined=_combined_surface3(surfaces)
+    Px,Py,Pz,facets=_rb_dedup_surface(combined)
+    regions=_rb_build_regions(Px,Py,Pz,facets)
+    @inbounds for r in eachindex(surfaces)
+        count_r=count(==(Int32(r)),m.tet_tag)
+        count_r>0 || throw(ErrorException("$caller: effective region $r received no tetrahedra"))
+        tm=Matrix{Int32}(undef,4,count_r);j=0
+        for t in axes(m.tets,2)
+            m.tet_tag[t]==Int32(r) || continue
+            j+=1
+            for k in 1:4;tm[k,j]=m.tets[k,t];end
+        end
+        part=Mesh(m.coords;tets=tm)
+        d=validate(part)
+        d.ok || throw(ErrorException("$caller: effective region $r is not a tetrahedral manifold — " *
+                                     join(d.messages,"; ")))
+        coord2pid=Dict{NTuple{3,Float64},Int32}()
+        for i in eachindex(Px);coord2pid[(Px[i],Py[i],Pz[i])]=Int32(i);end
+        Px2=copy(Px);Py2=copy(Py);Pz2=copy(Pz)
+        for i in axes(part.coords,2)
+            k=(part.coords[1,i],part.coords[2,i],part.coords[3,i])
+            if !haskey(coord2pid,k)
+                length(Px2)<typemax(Int32) || throw(ErrorException("$caller: certificate node count exceeds Int32"))
+                push!(Px2,k[1]);push!(Py2,k[2]);push!(Pz2,k[3]);coord2pid[k]=Int32(length(Px2))
+            end
+        end
+        _,mid=_rb_present_edges(part,coord2pid)
+        ok,bad=_rb_boundary_in_surface(mid,part,regions,Px2,Py2,Pz2)
+        ok || throw(ErrorException("$caller: effective region $r has boundary face $bad outside every input PLC"))
+    end
+    return nothing
+end
+
+function _combined_surface3(surfaces::AbstractVector{Mesh})
+    ids=Dict{NTuple{3,Float64},Int32}();pts=NTuple{3,Float64}[]
+    faces=Dict{NTuple{3,Int32},NTuple{3,Int32}}()
+    for s in surfaces
+        map=Vector{Int32}(undef,size(s.coords,2))
+        @inbounds for i in eachindex(map)
+            p=(s.coords[1,i]==0 ? 0.0 : s.coords[1,i],
+               s.coords[2,i]==0 ? 0.0 : s.coords[2,i],
+               s.coords[3,i]==0 ? 0.0 : s.coords[3,i])
+            map[i]=get!(ids,p) do
+                length(pts)<typemax(Int32) || throw(ArgumentError("combined PLC node count exceeds Int32"))
+                push!(pts,p);Int32(length(pts))
+            end
+        end
+        @inbounds for f in axes(s.tris,2)
+            q=(map[s.tris[1,f]],map[s.tris[2,f]],map[s.tris[3,f]])
+            faces[_sort3t(q...)]=q
+        end
+    end
+    C=Matrix{Float64}(undef,3,length(pts));F=Matrix{Int32}(undef,3,length(faces))
+    @inbounds for (i,p) in enumerate(pts);C[1,i]=p[1];C[2,i]=p[2];C[3,i]=p[3];end
+    @inbounds for (j,q) in enumerate(values(faces));F[1,j]=q[1];F[2,j]=q[2];F[3,j]=q[3];end
+    return Mesh(C;tris=F)
+end
+
+# Deterministic structured fallback for purely axis-aligned PLC partitions.  It
+# uses every input face coordinate as a shared grid plane, classifies each open
+# cell by the same first-containing-region rule, and applies one global Kuhn split.
+# Thus shell/cavity partitions cannot acquire the tag-pinches possible when a
+# degenerate joint Delaunay is classified only by tet centroids.
+function _axis_partition3(surfaces::AbstractVector{Mesh},caller::AbstractString)
+    canon(v)=v==0 ? 0.0 : v
+    X=sort!(unique(canon.(vcat([collect(s.coords[1,:]) for s in surfaces]...))))
+    Y=sort!(unique(canon.(vcat([collect(s.coords[2,:]) for s in surfaces]...))))
+    Z=sort!(unique(canon.(vcat([collect(s.coords[3,:]) for s in surfaces]...))))
+    nx=length(X)-1;ny=length(Y)-1;nz=length(Z)-1
+    _checked_mul3(caller,"axis partition cell",nx,ny,nz)
+    LX=length(X);LY=length(Y);LZ=length(Z)
+    ng=_checked_mul3(caller,"axis partition node",LX,LY,LZ)
+    ng<=typemax(Int32) || throw(ArgumentError("$caller: axis-partition grid exceeds Int32 nodes"))
+    ntmax=_checked_mul3(caller,"axis partition tetrahedron",6,nx,ny,nz)
+    ntmax<=typemax(Int32) || throw(ArgumentError("$caller: axis-partition tetrahedra exceed Int32"))
+    gid(i,j,k)=((k*LY+j)*LX+i)+1
+    grids=[_raygrid(s) for s in surfaces]
+    tv=NTuple{4,Int32}[];tags=Int32[];used=Set{Int32}()
+    paths=(((1,0,0),(1,1,0)),((1,0,0),(1,0,1)),((0,1,0),(1,1,0)),
+           ((0,1,0),(0,1,1)),((0,0,1),(1,0,1)),((0,0,1),(0,1,1)))
+    @inbounds for k in 0:nz-1,j in 0:ny-1,i in 0:nx-1
+        p=(_midpoint3(X[i+1],X[i+2]),_midpoint3(Y[j+1],Y[j+2]),_midpoint3(Z[k+1],Z[k+2]))
+        (X[i+1]<p[1]<X[i+2]&&Y[j+1]<p[2]<Y[j+2]&&Z[k+1]<p[3]<Z[k+2]) ||
+            throw(ArgumentError("$caller: adjacent axis planes are below Float64 midpoint resolution"))
+        tag=0
+        for r in eachindex(grids);_inside_grid(p,grids[r])&&(tag=r;break);end
+        tag==0&&continue
+        cn(a,b,c)=Int32(gid(i+a,j+b,k+c));pc(a,b,c)=(X[i+a+1],Y[j+b+1],Z[k+c+1])
+        v0=cn(0,0,0);v7=cn(1,1,1);p0=pc(0,0,0);p7=pc(1,1,1)
+        for (s1,s2) in paths
+            v1=cn(s1...);v2=cn(s2...);p1=pc(s1...);p2=pc(s2...)
+            q=_signed_vol6(p0,p1,p2,p7)>=0 ? (v0,v1,v2,v7) : (v0,v1,v7,v2)
+            push!(tv,q);push!(tags,Int32(tag));union!(used,q)
+        end
+    end
+    isempty(tv)&&throw(ErrorException("$caller: axis partition is empty"))
+    uv=sort!(collect(used));nid=Dict{Int32,Int32}(v=>Int32(i) for (i,v) in enumerate(uv))
+    C=Matrix{Float64}(undef,3,length(uv))
+    @inbounds for (n,v) in enumerate(uv)
+        q=Int(v)-1;i=q%LX;j=(q÷LX)%LY;k=q÷(LX*LY)
+        C[1,n]=X[i+1];C[2,n]=Y[j+1];C[3,n]=Z[k+1]
+    end
+    T=Matrix{Int32}(undef,4,length(tv))
+    @inbounds for (t,q) in enumerate(tv),i in 1:4;T[i,t]=nid[q[i]];end
+    out=Mesh(C;tets=T,tet_tag=tags);d=validate(out)
+    d.ok||throw(ErrorException("$caller: structured fallback invalid — "*join(d.messages,"; ")))
+    return out
 end
 
 """
@@ -1434,8 +1897,9 @@ struct _RayGrid
     dir::NTuple{3,Float64}
     u::NTuple{3,Float64}
     v::NTuple{3,Float64}
+    origin::NTuple{3,Float64}
     smin::Float64; tmin::Float64
-    invcs::Float64; invct::Float64
+    sspan::Float64; tspan::Float64
     nx::Int; ny::Int
     off::Vector{Int32}      # CSR offsets, length nx*ny+1
     items::Vector{Int32}    # triangle ids grouped by cell
@@ -1443,72 +1907,104 @@ struct _RayGrid
     coords::Matrix{Float64}
 end
 
+@inline _gridproj(p,o,a)=_dot(_subn(p,o),a)
+@inline function _gridcell(q, qmin, qspan, n)
+    qspan == 0 && return 0
+    r=(q-qmin)/qspan
+    isfinite(r) || throw(ArgumentError("Mesh3D classifier: non-finite projected grid coordinate"))
+    return clamp(floor(Int,r*n),0,n-1)
+end
+
 # 2-D cell span [i0,i1]×[j0,j1] of triangle f's projected bbox, +1-cell halo.
-@inline function _tri_cellspan(smin, tmin, invcs, invct, nx, ny, u, v, tris, coords, f)
+@inline function _tri_cellspan(origin,smin,tmin,sspan,tspan,nx,ny,u,v,tris,coords,f)
     a = tris[1, f]; b = tris[2, f]; c = tris[3, f]
     pa = (coords[1, a], coords[2, a], coords[3, a])
     pb = (coords[1, b], coords[2, b], coords[3, b])
     pc = (coords[1, c], coords[2, c], coords[3, c])
-    sa = _dot(pa, u); sb = _dot(pb, u); sc = _dot(pc, u)
-    ta = _dot(pa, v); tb = _dot(pb, v); tc = _dot(pc, v)
+    sa=_gridproj(pa,origin,u);sb=_gridproj(pb,origin,u);sc=_gridproj(pc,origin,u)
+    ta=_gridproj(pa,origin,v);tb=_gridproj(pb,origin,v);tc=_gridproj(pc,origin,v)
     smn = min(sa, sb, sc); smx = max(sa, sb, sc)
     tmn = min(ta, tb, tc); tmx = max(ta, tb, tc)
-    i0 = clamp(floor(Int, (smn - smin) * invcs) - 1, 0, nx - 1)
-    i1 = clamp(floor(Int, (smx - smin) * invcs) + 1, 0, nx - 1)
-    j0 = clamp(floor(Int, (tmn - tmin) * invct) - 1, 0, ny - 1)
-    j1 = clamp(floor(Int, (tmx - tmin) * invct) + 1, 0, ny - 1)
+    i0=clamp(_gridcell(smn,smin,sspan,nx)-1,0,nx-1)
+    i1=clamp(_gridcell(smx,smin,sspan,nx)+1,0,nx-1)
+    j0=clamp(_gridcell(tmn,tmin,tspan,ny)-1,0,ny-1)
+    j1=clamp(_gridcell(tmx,tmin,tspan,ny)+1,0,ny-1)
     return (i0, i1, j0, j1)
 end
 
 function _raygrid(surface::Mesh, dir::NTuple{3,Float64}=_CLASSIFY_DIR)
     tris = surface.tris; coords = surface.coords
     nf = size(tris, 2); nc = size(coords, 2)
-    a = abs(dir[1]) < 0.9 ? (1.0, 0.0, 0.0) : (0.0, 1.0, 0.0)
-    u = _unitn(_cross(dir, a)); v = _cross(dir, u)   # v is unit: dir⊥u, both unit
+    nf <= typemax(Int32) ||
+        throw(ArgumentError("Mesh3D classifier: $nf triangles exceed the Int32 CSR limit"))
+    ndir=_unitn(dir)
+    a = abs(ndir[1]) < 0.9 ? (1.0, 0.0, 0.0) : (0.0, 1.0, 0.0)
+    u = _unitn(_cross(ndir, a)); v = _cross(ndir, u)   # v is unit: dir⊥u, both unit
+    origin=nc==0 ? (0.0,0.0,0.0) :
+        (coords[1,1],coords[2,1],coords[3,1])
     if nf == 0 || nc == 0
-        return _RayGrid(dir, u, v, 0.0, 0.0, 1.0, 1.0, 1, 1, Int32[0, 0], Int32[], tris, coords)
+        return _RayGrid(ndir,u,v,origin,0.0,0.0,0.0,0.0,1,1,Int32[1,1],Int32[],tris,coords)
     end
     smin = Inf; smax = -Inf; tmin = Inf; tmax = -Inf
     @inbounds for i in 1:nc
         p = (coords[1, i], coords[2, i], coords[3, i])
-        s = _dot(p, u); t = _dot(p, v)
+        (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
+            throw(ArgumentError("Mesh3D classifier: node $i has a non-finite coordinate"))
+        s=_gridproj(p,origin,u);t=_gridproj(p,origin,v)
+        (isfinite(s)&&isfinite(t)) ||
+            throw(ArgumentError("Mesh3D classifier: projected coordinate overflowed Float64"))
         s < smin && (smin = s); s > smax && (smax = s)
         t < tmin && (tmin = t); t > tmax && (tmax = t)
     end
-    ncell = max(1, ceil(Int, sqrt(2 * nf)))          # ~2·nf cells ⇒ few candidates/query
-    nx = ncell; ny = ncell
-    invcs = nx / max(smax - smin, 1e-300)
-    invct = ny / max(tmax - tmin, 1e-300)
-    cnt = zeros(Int32, nx * ny)
-    @inbounds for f in 1:nf
-        i0, i1, j0, j1 = _tri_cellspan(smin, tmin, invcs, invct, nx, ny, u, v, tris, coords, f)
-        for j in j0:j1, i in i0:i1
-            cnt[j * nx + i + 1] += Int32(1)
+    sspan=smax-smin;tspan=tmax-tmin
+    (isfinite(sspan)&&isfinite(tspan)&&sspan>=0&&tspan>=0) ||
+        throw(ArgumentError("Mesh3D classifier: projected extent is non-finite"))
+    csrmax=Int(typemax(Int32))-1
+    ncell=max(1,floor(Int,sqrt(min(csrmax,2nf))))       # initially ~2·nf cells
+    maxrefs=min(csrmax,nf>csrmax÷64 ? csrmax : max(nf,64nf))
+    nx=ncell;ny=ncell;totalrefs=0
+    while true
+        nx=ncell;ny=ncell;totalrefs=0;fits=true
+        @inbounds for f in 1:nf
+            i0,i1,j0,j1=_tri_cellspan(origin,smin,tmin,sspan,tspan,nx,ny,u,v,tris,coords,f)
+            add=(i1-i0+1)*(j1-j0+1)
+            if add>maxrefs-totalrefs;fits=false;break;end
+            totalrefs+=add
         end
+        fits && break
+        ncell==1 && throw(ArgumentError("Mesh3D classifier: CSR reference count exceeds Int32"))
+        ncell=max(1,ncell÷2)
     end
-    off = Vector{Int32}(undef, nx * ny + 1)
+    ncells=_checked_mul3("Mesh3D classifier","grid cell",nx,ny)
+    cnt=zeros(Int32,ncells)
+    @inbounds for f in 1:nf
+        i0,i1,j0,j1=_tri_cellspan(origin,smin,tmin,sspan,tspan,nx,ny,u,v,tris,coords,f)
+        for j in j0:j1,i in i0:i1;cnt[j*nx+i+1]+=Int32(1);end
+    end
+    off = Vector{Int32}(undef, ncells + 1)
     off[1] = Int32(1)
-    @inbounds for c in 1:(nx*ny)
+    @inbounds for c in 1:ncells
         off[c+1] = off[c] + cnt[c]
     end
-    items = Vector{Int32}(undef, Int(off[end]) - 1)
+    Int(off[end])-1==totalrefs || error("Mesh3D classifier: internal CSR count mismatch")
+    items = Vector{Int32}(undef,totalrefs)
     cur = copy(off)
     @inbounds for f in 1:nf
-        i0, i1, j0, j1 = _tri_cellspan(smin, tmin, invcs, invct, nx, ny, u, v, tris, coords, f)
+        i0,i1,j0,j1=_tri_cellspan(origin,smin,tmin,sspan,tspan,nx,ny,u,v,tris,coords,f)
         for j in j0:j1, i in i0:i1
             c = j * nx + i + 1
             items[cur[c]] = Int32(f); cur[c] += Int32(1)
         end
     end
-    return _RayGrid(dir, u, v, smin, tmin, invcs, invct, nx, ny, off, items, tris, coords)
+    return _RayGrid(ndir,u,v,origin,smin,tmin,sspan,tspan,nx,ny,off,items,tris,coords)
 end
 
 # parity ray-cast via the grid: identical crossing count to `_inside_surface`.
 @inline function _inside_grid(p, g::_RayGrid)
     isempty(g.items) && return false
-    s = _dot(p, g.u); t = _dot(p, g.v)
-    ci = clamp(floor(Int, (s - g.smin) * g.invcs), 0, g.nx - 1)
-    cj = clamp(floor(Int, (t - g.tmin) * g.invct), 0, g.ny - 1)
+    s=_gridproj(p,g.origin,g.u);t=_gridproj(p,g.origin,g.v)
+    ci=_gridcell(s,g.smin,g.sspan,g.nx)
+    cj=_gridcell(t,g.tmin,g.tspan,g.ny)
     c = cj * g.nx + ci + 1
     crossings = 0
     tris = g.tris; coords = g.coords
@@ -1554,7 +2050,7 @@ end
 @inline function _ray_hits_tri(o, d, v0, v1, v2)
     e1 = _subn(v1, v0); e2 = _subn(v2, v0)
     pv = _cross(d, e2); det = _dot(e1, pv)
-    abs(det) < 1e-300 && return false           # ray parallel to triangle plane
+    det == 0.0 && return false                  # ray parallel to triangle plane
     inv = 1.0/det
     tv = _subn(o, v0)
     u = _dot(tv, pv)*inv
@@ -1563,13 +2059,11 @@ end
     v = _dot(d, qv)*inv
     (v < 0.0 || u+v > 1.0) && return false
     t = _dot(e2, qv)*inv
-    # strictly ahead of the origin. The 1e-12 floor rejects hits essentially at the query
-    # point (a vertex/edge exactly on the ray) to avoid double-counting; it assumes the
-    # coordinate scale is ≫ 1e-12 (true for the mm/m RF-mesh domain). At sub-picometer
-    # coordinate scales (≤ ~1e-12) legitimate crossings fall below this floor and the
-    # classifier degrades — outside the intended domain, and both _inside_grid and
-    # _inside_surface degrade identically so their pinned equivalence is preserved.
-    return t > 1e-12
+    # Centroids/cell centres classified by this module are strictly off the input
+    # surface, so the scale-independent geometric condition is simply t>0.  An
+    # absolute floor incorrectly classified every solid smaller than that floor as
+    # exterior (e.g. a valid 1e-15 box returned no tetrahedra).
+    return t > 0.0
 end
 
 """
@@ -2056,6 +2550,13 @@ kernel candidate, it still throws the explicit blocker.
 """
 function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer=64,
                           steiner::Bool=false)
+    _require_surface3(surface,"recover_boundary")
+    base=_seed3(rng_seed,"recover_boundary")
+    (1 <= max_seeds <= typemax(Int)) ||
+        throw(ArgumentError("recover_boundary: max_seeds must be in 1:$(typemax(Int)) (got $max_seeds)"))
+    nseeds=Int(max_seeds)
+    base <= typemax(Int)-(nseeds-1) ||
+        throw(ArgumentError("recover_boundary: rng_seed + max_seeds overflows Int"))
     Px,Py,Pz,facets = _rb_dedup_surface(surface)
     length(Px) >= 4 || throw(ArgumentError("recover_boundary: need >= 4 distinct surface vertices"))
     isempty(facets) && throw(ArgumentError("recover_boundary: surface has no facets"))
@@ -2063,8 +2564,8 @@ function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer
     S = _rb_crease_segments(regions)
     lastreason = "no seed produced a conforming valid mesh"
     lastnrec = 0
-    for k in 0:max_seeds-1
-        seed = Int(rng_seed) + k
+    for k in 0:nseeds-1
+        seed = base + k
         try
             T = delaunay3d(copy(Px),copy(Py),copy(Pz); perturb=false, rng_seed=seed)
             keep = _classify_by_centroid(T, surface)
@@ -2092,7 +2593,7 @@ function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer
             return fm
         end
     end
-    throw(ErrorException("recover_boundary: recovery FAILED after $max_seeds seeds " *
+    throw(ErrorException("recover_boundary: recovery FAILED after $nseeds seeds " *
         "($(lastnrec)/$(length(facets)) facets recovered)" *
         (steiner ? " and the Steiner fan fallback did not apply (input not star-shaped from a simple kernel point)" : "") *
         ". First blocker: $lastreason" *
@@ -2160,7 +2661,9 @@ function _bool_clean(m::Mesh)
     xs=Float64[]; ys=Float64[]; zs=Float64[]
     remap = Vector{Int32}(undef, size(m.coords,2))
     @inbounds for i in 1:size(m.coords,2)
-        k=(m.coords[1,i],m.coords[2,i],m.coords[3,i])
+        k=(m.coords[1,i]==0 ? 0.0 : m.coords[1,i],
+           m.coords[2,i]==0 ? 0.0 : m.coords[2,i],
+           m.coords[3,i]==0 ? 0.0 : m.coords[3,i])
         id=get(seen,k,Int32(0))
         if id==0
             push!(xs,k[1]); push!(ys,k[2]); push!(zs,k[3]); id=Int32(length(xs)); seen[k]=id
@@ -2184,6 +2687,7 @@ end
 # flip every triangle's winding. Returns an outward-oriented Mesh and its |volume|.
 function _bool_orient_outward(m::Mesh)
     v = _bool_signed_volume(m)
+    isfinite(v) || throw(ArgumentError("mesh_boolean: input surface signed volume is non-finite"))
     v == 0 && throw(ArgumentError("mesh_boolean: input surface has zero signed volume (not a closed solid)"))
     if v < 0
         tm = copy(m.tris)
@@ -2194,6 +2698,7 @@ function _bool_orient_outward(m::Mesh)
 end
 
 function _bool_prepare(m::Mesh, name::AbstractString)
+    _require_surface3(m,"mesh_boolean input $name";oriented=true)
     c = _bool_clean(m)
     wt, mf, nb, mx = _bool_watertight(c)
     wt || throw(ArgumentError("mesh_boolean: input $name is not watertight ($nb boundary edges)"))
@@ -2229,7 +2734,11 @@ function _bool_emit_face!(V::Dict{NTuple{3,Float64},Int32}, coords::Vector{NTupl
                           axA::Int, axB::Int, outsign::Int)
     function vid(p::NTuple{3,Float64})
         id=get(V,p,Int32(0))
-        if id==0; push!(coords,p); id=Int32(length(coords)); V[p]=id; end
+        if id==0
+            length(coords)<typemax(Int32) ||
+                throw(ArgumentError("mesh_boolean: result node count exceeds Int32"))
+            push!(coords,p); id=Int32(length(coords)); V[p]=id
+        end
         return id
     end
     mk(a,b) = begin
@@ -2258,14 +2767,18 @@ end
 end
 
 function _bool_axis_aligned_boolean(A::Mesh, B::Mesh, op::Symbol)
-    xs = sort!(unique(vcat(A.coords[1,:], B.coords[1,:])))
-    ys = sort!(unique(vcat(A.coords[2,:], B.coords[2,:])))
-    zs = sort!(unique(vcat(A.coords[3,:], B.coords[3,:])))
+    canon(v)=v==0 ? 0.0 : v
+    xs = sort!(unique(canon.(vcat(A.coords[1,:], B.coords[1,:]))))
+    ys = sort!(unique(canon.(vcat(A.coords[2,:], B.coords[2,:]))))
+    zs = sort!(unique(canon.(vcat(A.coords[3,:], B.coords[3,:]))))
     nx=length(xs)-1; ny=length(ys)-1; nz=length(zs)-1
+    _checked_mul3("mesh_boolean","axis-aligned classification cell",nx,ny,nz)
     dir = _unitn((1.0, 0.3141592653589793, 0.01720209895))       # generic ray, avoids grazing
     keep = falses(nx,ny,nz)
     @inbounds for i in 1:nx, j in 1:ny, k in 1:nz
-        cx=0.5*(xs[i]+xs[i+1]); cy=0.5*(ys[j]+ys[j+1]); cz=0.5*(zs[k]+zs[k+1])
+        cx=_midpoint3(xs[i],xs[i+1]);cy=_midpoint3(ys[j],ys[j+1]);cz=_midpoint3(zs[k],zs[k+1])
+        (xs[i]<cx<xs[i+1]&&ys[j]<cy<ys[j+1]&&zs[k]<cz<zs[k+1]) ||
+            throw(ArgumentError("mesh_boolean: adjacent axis planes are below Float64 midpoint resolution"))
         inA=_inside_surface((cx,cy,cz),dir,A); inB=_inside_surface((cx,cy,cz),dir,B)
         keep[i,j,k]=_bool_keep(op,inA,inB)
     end
@@ -2351,6 +2864,8 @@ _bl_reg() = _BLReg(Dict{_RB3,Int32}(), Float64[], Float64[], Float64[], _RB3[])
 function _bl_gid!(R::_BLReg, rp::_RB3)
     id = get(R.id, rp, Int32(0))
     id != 0 && return id
+    length(R.X)<typemax(Int32) ||
+        throw(ArgumentError("mesh_boolean: exact point registry exceeds Int32"))
     push!(R.X, Float64(rp[1])); push!(R.Y, Float64(rp[2])); push!(R.Z, Float64(rp[3]))
     push!(R.RAT, rp)
     id = Int32(length(R.X)); R.id[rp] = id; return id
@@ -2584,6 +3099,7 @@ function _bool_general_boolean(A::Mesh, B::Mesh, op::Symbol)
     allt = vcat(keptA, keptB)
     isempty(allt) && throw(ErrorException("mesh_boolean: $op of the two solids is empty"))
     used = sort!(unique(vcat([t[1] for t in allt],[t[2] for t in allt],[t[3] for t in allt])))
+    length(used)<=typemax(Int32) || throw(ArgumentError("mesh_boolean: result node count exceeds Int32"))
     nid = Dict{Int32,Int32}(); for (k,g) in enumerate(used); nid[g]=Int32(k); end
     C=Matrix{Float64}(undef,3,length(used))
     for (k,g) in enumerate(used); p=_bl_pt(R,g); C[1,k]=p[1]; C[2,k]=p[2]; C[3,k]=p[3]; end
@@ -2616,6 +3132,7 @@ function mesh_boolean(A::Mesh, B::Mesh, op::Symbol)
     (wt && mf) || throw(ErrorException(
         "mesh_boolean: assembled $op result is not watertight/manifold " *
         "(boundary edges=$nb, max edge incidence=$mx) — refusing to return a leaky surface"))
+    _require_surface3(r,"mesh_boolean result";oriented=true)
     return r
 end
 
@@ -2640,29 +3157,48 @@ prefer [`mesh_box_regions`](@ref) (uniform `maxedge ≤ hmax`, exact).
 """
 function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
                                rng_seed::Integer=1, max_seeds::Integer=32)
-    hmax > 0 || throw(ArgumentError("mesh_sized_conforming: hmax must be positive (got $hmax)"))
+    hm=_finite3(hmax,"mesh_sized_conforming","hmax")
+    ins=_finite3(inset,"mesh_sized_conforming","inset")
+    hm > 0 || throw(ArgumentError("mesh_sized_conforming: hmax must be positive (got $hmax)"))
+    ins >= 0 || throw(ArgumentError("mesh_sized_conforming: inset must be non-negative (got $inset)"))
+    _require_surface3(surface,"mesh_sized_conforming")
+    base=_seed3(rng_seed,"mesh_sized_conforming")
+    (1 <= max_seeds <= typemax(Int)) ||
+        throw(ArgumentError("mesh_sized_conforming: max_seeds must be positive and fit Int (got $max_seeds)"))
+    nseeds=Int(max_seeds)
+    base <= typemax(Int)-(nseeds-1) ||
+        throw(ArgumentError("mesh_sized_conforming: rng_seed + max_seeds overflows Int"))
     Px,Py,Pz,facets = _rb_dedup_surface(surface)
     length(Px) >= 4 || throw(ArgumentError("mesh_sized_conforming: need >= 4 distinct surface vertices"))
     isempty(facets) && throw(ArgumentError("mesh_sized_conforming: surface has no facets"))
     regions = _rb_build_regions(Px,Py,Pz,facets)
     S = _rb_crease_segments(regions)
     xlo=minimum(Px); xhi=maximum(Px); ylo=minimum(Py); yhi=maximum(Py); zlo=minimum(Pz); zhi=maximum(Pz)
-    a = float(hmax)/sqrt(3.0); insd2 = float(inset)^2
+    a = hm/sqrt(3.0)
+    (isfinite(a)&&a>0) || throw(ArgumentError("mesh_sized_conforming: hmax is below Float64 spacing resolution"))
     sg = _raygrid(surface)
-    nx=max(1,ceil(Int,(xhi-xlo)/a)); ny=max(1,ceil(Int,(yhi-ylo)/a)); nz=max(1,ceil(Int,(zhi-zlo)/a))
+    nx=_ceil_count3((xhi-xlo)/a,"mesh_sized_conforming","x intervals")
+    ny=_ceil_count3((yhi-ylo)/a,"mesh_sized_conforming","y intervals")
+    nz=_ceil_count3((zhi-zlo)/a,"mesh_sized_conforming","z intervals")
+    candidates=_checked_mul3("mesh_sized_conforming","lattice candidate",
+                             _checked_add3("mesh_sized_conforming","x lattice",nx,1),
+                             _checked_add3("mesh_sized_conforming","y lattice",ny,1),
+                             _checked_add3("mesh_sized_conforming","z lattice",nz,1))
+    candidates <= typemax(Int32)-length(Px) ||
+        throw(ArgumentError("mesh_sized_conforming: lattice candidate count exceeds Int32 capacity"))
     nn=length(Px); Ix=Float64[]; Iy=Float64[]; Iz=Float64[]
     @inbounds for i in 0:nx, j in 0:ny, k in 0:nz
         px=xlo+i*(xhi-xlo)/nx; py=ylo+j*(yhi-ylo)/ny; pz=zlo+k*(zhi-zlo)/nz
         _inside_grid((px,py,pz),sg) || continue
         ok=true
         for v in 1:nn
-            if (px-Px[v])^2+(py-Py[v])^2+(pz-Pz[v])^2 < insd2; ok=false; break; end
+            if hypot(px-Px[v],py-Py[v],pz-Pz[v]) < ins; ok=false; break; end
         end
         ok && (push!(Ix,px); push!(Iy,py); push!(Iz,pz))
     end
     lastreason="no seed produced a conforming valid sized mesh"; lastnrec=0
-    for kk in 0:max_seeds-1
-        seed=Int(rng_seed)+kk
+    for kk in 0:nseeds-1
+        seed=base+kk
         T=delaunay3d(vcat(Px,Ix), vcat(Py,Iy), vcat(Pz,Iz); perturb=false, rng_seed=seed)
         keep=_classify_by_centroid(T,surface)
         for drop in (false,true)
@@ -2674,7 +3210,7 @@ function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
             nrec>=lastnrec && (lastnrec=nrec; lastreason=reason)
         end
     end
-    throw(ErrorException("mesh_sized_conforming: no conforming valid sized mesh after $max_seeds seeds " *
+    throw(ErrorException("mesh_sized_conforming: no conforming valid sized mesh after $nseeds seeds " *
         "($(lastnrec)/$(length(facets)) facets recovered — likely a cospherical-degenerate input; use " *
         "recover_boundary without interior size control, or mesh_box_regions for boxes). Blocker: $lastreason"))
 end

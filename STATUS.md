@@ -12,7 +12,7 @@ the external FEM solver integration, the mesh/BC handshake, the solve proofs, an
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,585 assertions** (`--check-bounds=yes`, Julia 1.12.6; 7m08.9s,
+**Suite green: 151,684 assertions** (`--check-bounds=yes`, Julia 1.12.6; 5m33.4s,
 direct `test/runtests.jl` run).
 Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
@@ -73,7 +73,7 @@ silent non-conforming mesh would violate the CRC bar.
 ## Current state (verified at HEAD)
 
 - **Suite:** `julia --project=. --startup-file=no --check-bounds=yes test/runtests.jl`
-  green — **151,585 assertions** under `--check-bounds=yes` (Julia 1.12.6; 7m08.9s; ~2–3× faster than
+  green — **151,684 assertions** under `--check-bounds=yes` (Julia 1.12.6; 5m33.4s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -845,3 +845,22 @@ that day._
   hash-key coincidence. Focused gates passed: Optimize **57/57**, HighOrder
   **453/453**, Geometry **29/29**, CAD **8091/8091**, IO **62/62**; the full direct
   suite passed **151,585/151,585** under bounds checking on Julia 1.12.6 (7m08.9s).
+- **2026-08-14 — deep-debug PASS 10, volume meshing, partition recovery, and
+  bounded SoS evaluation.** Public 3-D APIs now reject malformed/non-finite inputs,
+  impossible index/allocation counts, invalid controls, undersized masks, and
+  Float64-resolution blockers before constructing partial meshes. Longest-edge
+  refinement preserves and conformingly subdivides segment/triangle/tetrahedron
+  metadata and verifies its maximum-edge postcondition. Ray classification is
+  origin-relative and uses a bounded CSR index, including scale-independent tiny-
+  solid intersections. Multi-material fills now certify each effective region as
+  a tetrahedral manifold with PLC-only boundaries; axis-aligned and co-axial
+  prismatic assemblies have deterministic structured recovery, while other failed
+  vertex-only partitions fall through exact-preimage conforming-Delaunay recovery.
+  The literal pin/slot/air/case enclosure now returns 594 valid tagged tetrahedra
+  instead of accepting an off-PLC material boundary. The exact SoS fallthrough now
+  visits exact generalized cofactors in epsilon-exponent order, avoiding the large
+  sparse-polynomial intermediates observed during partition recovery while retaining
+  the canonical predicate results. Focused gates passed: Predicates **140208/140208**
+  and Mesh3D **430/430**; the full direct suite passed **151,684/151,684** under
+  bounds checking on Julia 1.12.6 (**5m33.4s**, `real 335.35`, `user 279.38`,
+  `sys 28.20`).
