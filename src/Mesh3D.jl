@@ -33,6 +33,12 @@ export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!, refine_to_size
 
+# Extension hook installed by the downstream RecoverCDT module after both modules
+# have loaded.  Keeping the declaration here avoids an include cycle while letting
+# the public volume front door use exact conforming-Delaunay recovery as its final
+# robust fallback.
+function _recover_boundary_exact end
+
 const GHOST3 = Int32(0)
 
 mutable struct Triangulation3
@@ -907,23 +913,73 @@ end
 # ════════════════════════════════════════════════════════════════════════════════
 
 """
-    tetrahedralize(surface::Mesh; rng_seed=1) -> Mesh
+    tetrahedralize(surface::Mesh; rng_seed=1, optimize=false, check=true) -> Mesh
 
-Fill the volume enclosed by a closed triangulated `surface` with tetrahedra:
-Delaunay-tetrahedralize the surface vertices, then keep the tets whose centroid
-lies inside the surface (robust point-in-polyhedron by ray casting against the
-original surface). Exact for convex domains; for non-convex domains the boundary
-is the Delaunay restriction (conforming boundary recovery refines this — see
-[`tetrahedralize_recover`](@ref)). Returns the interior tet [`Mesh`](@ref).
+Fill the volume enclosed by a closed triangulated `surface` with tetrahedra.  The
+fast path Delaunay-tetrahedralizes the surface vertices and retains tets whose
+centroids lie inside.  Before that result can escape, the same exact PLC gate used
+by boundary recovery certifies positive volume, manifold vertex links, creases,
+and the complete input boundary.  A failed restriction is rebuilt by the exact
+conforming-Delaunay backend, with bounded multi-seed [`recover_boundary`](@ref)
+as a final alternative.  If neither recovery succeeds, an explicit blocker is
+thrown.  Thus this public entry point never returns a topologically pinched or
+convex-hull-capped approximation of a non-convex domain.
+
+`check=false` is the explicit expert bypass: it returns the raw centroid-restricted
+Delaunay fill without the PLC certificate or repair.  The caller then owns all
+validation and conformity checks; [`mesh_volume`](@ref) exposes the same bypass.
 """
-function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false)
+function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false,
+                        check::Bool=true)
     nn = size(surface.coords, 2)
     xs = Vector{Float64}(undef, nn); ys = similar(xs); zs = similar(xs)
     @inbounds for i in 1:nn; xs[i]=surface.coords[1,i]; ys[i]=surface.coords[2,i]; zs[i]=surface.coords[3,i]; end
     T = delaunay3d(xs, ys, zs; rng_seed=rng_seed)
     optimize && optimize_flips!(T; passes=4)     # sliver-reducing flips (safe, volume-preserving)
     keep = _classify_by_centroid(T, surface)
-    return to_mesh3(T; keep=keep)
+    m = to_mesh3(T; keep=keep)
+    check || return m
+    ok, reason = _certify_surface_fill(surface, m)
+    ok && return m
+    # A kernel fan is the cheapest conforming repair for star-shaped PLCs and avoids
+    # repeating equivalent cospherical Delaunay builds (notably polygonal cylinders).
+    # It is accepted only through the full PLC certificate; non-star-shaped inputs
+    # fall through to general boundary recovery.
+    Px, Py, Pz, facets = _rb_dedup_surface(surface)
+    if length(Px) >= 4 && !isempty(facets)
+        fan = _rb_fan_steiner(Px, Py, Pz, facets)
+        if fan !== nothing
+            fanok, _ = _certify_surface_fill(surface, fan)
+            fanok && return fan
+        end
+    end
+    exact_reason = ""
+    if applicable(_recover_boundary_exact, surface)
+        try
+            return _recover_boundary_exact(surface)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            exact_reason = sprint(showerror, err)
+        end
+    else
+        exact_reason = "exact recovery backend is unavailable"
+    end
+    # The exact engine is deterministic and normally settles hard non-star-shaped
+    # PLCs directly.  Bound the alternative randomized search here so one public
+    # call cannot spend its full 64-seed expert-API budget after exact recovery has
+    # already reported a blocker.
+    recovery_reason = ""
+    try
+        return recover_boundary(surface; rng_seed=rng_seed, max_seeds=8)
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        recovery_reason = sprint(showerror, err)
+    end
+    throw(ErrorException("tetrahedralize: restricted Delaunay failed the PLC gate ($reason); " *
+                         "exact conforming-Delaunay recovery also failed: $exact_reason; " *
+                         "boundary recovery also failed: $recovery_reason"))
 end
 
 """
@@ -1819,7 +1875,9 @@ end
 function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz, facets)
     v = validate(m)
     v.ok || return (false, 0, "invalid tet mesh: $(join(v.messages, "; "))")
-    is_closed_manifold(m) || return (false, 0, "tet complex is not a closed manifold")
+    # `validate` already runs the complete vertex-link manifold audit.  Repeating
+    # `is_closed_manifold` here would rebuild all topology records and double the
+    # peak work of every PLC certificate.
     coord2pid=Dict{NTuple{3,Float64},Int32}()
     for i in 1:length(Px); coord2pid[(Px[i],Py[i],Pz[i])]=Int32(i); end
     Px2=copy(Px);Py2=copy(Py);Pz2=copy(Pz)
@@ -1886,25 +1944,74 @@ function _certify_surface_fill(surface::Mesh, m::Mesh)
     return (gate[1], gate[3])
 end
 
+# Consistently orient one connected closed triangle surface without trusting input
+# winding.  Adjacent faces must traverse their shared edge in opposite directions.
+# Returns a copy with the necessary flips, or `nothing` for an open, non-manifold,
+# disconnected, or non-orientable facet complex.  The fan fallback intentionally
+# handles one boundary component only; cavities are not star-shaped fan domains.
+function _rb_orient_facets(facets::Vector{NTuple{3,Int32}})
+    nf = length(facets)
+    nf == 0 && return nothing
+    incid = Dict{NTuple{2,Int32},Vector{Tuple{Int32,Bool}}}()
+    sizehint!(incid, 3nf ÷ 2)
+    @inbounds for (fi, (a,b,c)) in enumerate(facets)
+        for (u,v) in ((a,b),(b,c),(c,a))
+            key = _rbekey(u,v)
+            push!(get!(() -> Tuple{Int32,Bool}[], incid, key),
+                  (Int32(fi), u < v))
+        end
+    end
+    adjacency = [Tuple{Int32,Bool}[] for _ in 1:nf] # neighbour, same original direction
+    for entries in values(incid)
+        length(entries) == 2 || return nothing
+        (f1,d1), (f2,d2) = entries
+        same = d1 == d2
+        push!(adjacency[f1], (f2,same)); push!(adjacency[f2], (f1,same))
+    end
+    seen = falses(nf); flipped = falses(nf)
+    stack = Int32[1]; seen[1] = true; nseen = 0
+    while !isempty(stack)
+        f = pop!(stack); nseen += 1
+        @inbounds for (g,same) in adjacency[f]
+            want = xor(flipped[f], same)
+            if seen[g]
+                flipped[g] == want || return nothing
+            else
+                seen[g] = true; flipped[g] = want; push!(stack, g)
+            end
+        end
+    end
+    nseen == nf || return nothing
+    oriented = copy(facets)
+    @inbounds for i in 1:nf
+        if flipped[i]
+            a,b,c = oriented[i]; oriented[i] = (a,c,b)
+        end
+    end
+    return oriented
+end
+
 # Steiner fallback for a STAR-SHAPED polyhedron (e.g. Schönhardt — not tetrahedraliz-
-# able without a Steiner point): find an interior kernel point that sees every facet
-# (exact orient3 shares one sign across all faces), then fan-tetrahedralize — one tet
-# {facet ∪ p} per facet. Conforming by construction (each input facet IS a tet face)
-# and all-positive. Returns the fan Mesh, or `nothing` if no simple candidate kernel
-# point works (not obviously star-shaped ⇒ caller blocks). Quality is fan-poor; a
-# caller wanting quality should run `optimize_flips!` after.
+# able without a Steiner point): orient the closed surface, find an interior kernel
+# point that sees every facet (exact orient3 shares one sign across all consistently
+# oriented faces), then fan-tetrahedralize — one tet {facet ∪ p} per facet.
+# Conforming by construction and all-positive. Returns the fan Mesh, or `nothing` if
+# no simple candidate kernel point works. Quality is fan-poor; a caller wanting
+# quality should run `optimize_flips!` after.
 function _rb_fan_steiner(Px,Py,Pz, facets::Vector{NTuple{3,Int32}})
-    nn = length(Px); nf = length(facets)
+    oriented = _rb_orient_facets(facets)
+    oriented === nothing && return nothing
+    nn = length(Px); nf = length(oriented)
     vt(i) = (Px[i], Py[i], Pz[i])
     vc = (sum(Px)/nn, sum(Py)/nn, sum(Pz)/nn)
     fcx=0.0; fcy=0.0; fcz=0.0
-    @inbounds for (a,b,c) in facets
+    @inbounds for (a,b,c) in oriented
         fcx += (Px[a]+Px[b]+Px[c])/3; fcy += (Py[a]+Py[b]+Py[c])/3; fcz += (Pz[a]+Pz[b]+Pz[c])/3
     end
     fca = (fcx/nf, fcy/nf, fcz/nf)
     function kernel(p)                                   # p strictly interior to every face plane?
         s0 = 0
-        @inbounds for (a,b,c) in facets
+        @inbounds for (a,b,c) in oriented
             o = orient3(vt(a),vt(b),vt(c),p); o == 0 && return false
             sg = o > 0 ? 1 : -1
             s0 == 0 ? (s0 = sg) : (sg == s0 || return false)
@@ -1917,7 +2024,7 @@ function _rb_fan_steiner(Px,Py,Pz, facets::Vector{NTuple{3,Int32}})
     @inbounds for i in 1:nn; C[1,i]=Px[i]; C[2,i]=Py[i]; C[3,i]=Pz[i]; end
     C[1,nn+1]=p[1]; C[2,nn+1]=p[2]; C[3,nn+1]=p[3]; pv=Int32(nn+1)
     tets = Matrix{Int32}(undef, 4, nf)
-    @inbounds for (t,(a,b,c)) in enumerate(facets)
+    @inbounds for (t,(a,b,c)) in enumerate(oriented)
         d0=(C[1,a],C[2,a],C[3,a]); d1=(C[1,b],C[2,b],C[3,b]); d2=(C[1,c],C[2,c],C[3,c]); dp=(p[1],p[2],p[3])
         if _signed_vol6(d0,d1,d2,dp) >= 0
             tets[1,t]=a; tets[2,t]=b; tets[3,t]=c; tets[4,t]=pv
@@ -1958,15 +2065,22 @@ function recover_boundary(surface::Mesh; rng_seed::Integer=1, max_seeds::Integer
     lastnrec = 0
     for k in 0:max_seeds-1
         seed = Int(rng_seed) + k
-        T = delaunay3d(copy(Px),copy(Py),copy(Pz); perturb=false, rng_seed=seed)
-        keep = _classify_by_centroid(T, surface)
-        for drop in (false, true)
-            kk = drop ? _rb_drop_flats(T, keep) : keep
-            any(kk) || continue
-            m = to_mesh3(T; keep=kk)
-            ok, nrec, reason = _rb_gate(surface, m, regions, S, Px,Py,Pz, facets)
-            ok && return m
-            nrec >= lastnrec && (lastnrec = nrec; lastreason = reason)
+        try
+            T = delaunay3d(copy(Px),copy(Py),copy(Pz); perturb=false, rng_seed=seed)
+            keep = _classify_by_centroid(T, surface)
+            for drop in (false, true)
+                kk = drop ? _rb_drop_flats(T, keep) : keep
+                any(kk) || continue
+                m = to_mesh3(T; keep=kk)
+                ok, nrec, reason = _rb_gate(surface, m, regions, S, Px,Py,Pz, facets)
+                ok && return m
+                nrec >= lastnrec && (lastnrec = nrec; lastreason = reason)
+            end
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            lastnrec == 0 &&
+                (lastreason = "seed $seed failed internally: $(sprint(showerror, err))")
         end
     end
     # Steiner fallback for star-shaped non-tetrahedralizable inputs (e.g. Schönhardt):

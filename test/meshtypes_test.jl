@@ -219,8 +219,44 @@ end
         C = Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]
         dup = Mesh(C; tets=Int32[1 1; 2 2; 3 3; 4 4])   # two identical positively-oriented tets
         @test !validate(dup).ok
+        @test !is_closed_manifold(dup)
         # a single (non-duplicated) tet with a real boundary is still valid — no false-reject
         single = Mesh(C; tets=reshape(Int32[1,2,3,4], 4, 1))
         @test validate(single).ok
+    end
+
+
+    @testset "vertex links reject lower-dimensional tet contacts" begin
+        # Two otherwise-valid solids meeting only at a vertex or edge have face
+        # incidence 1 everywhere, so the historical face-count audit accepted them.
+        # Their shared-vertex links are disconnected and they are not 3-manifolds.
+        Cv = Float64[0 1 0 0 -1 0 0; 0 0 1 0 0 -1 0; 0 0 0 1 0 0 -1]
+        Tv = Int32[1 1; 2 6; 3 5; 4 7]  # both columns positively oriented, share node 1 only
+        mv = Mesh(Cv; tets=Tv)
+        @test !validate(mv).ok
+        @test !is_closed_manifold(mv)
+
+        Ce = Float64[0 1 0 0 0 0; 0 0 1 0 -1 0; 0 0 0 1 0 -1]
+        Te = Int32[1 1; 2 2; 3 6; 4 5]  # positively oriented, share edge (1,2) only
+        me = Mesh(Ce; tets=Te)
+        @test !validate(me).ok
+        @test !is_closed_manifold(me)
+
+        # Disconnected components that do not touch are individually manifold and
+        # remain a valid multi-solid mesh (the audit is local, not over-restrictive).
+        Cd = Float64[0 1 0 0 3 4 3 3; 0 0 1 0 0 0 1 0; 0 0 0 1 0 0 0 1]
+        md = Mesh(Cd; tets=Int32[1 5; 2 6; 3 7; 4 8])
+        @test validate(md).ok
+        @test is_closed_manifold(md)
+    end
+
+    @testset "validate rejects non-finite computed measures" begin
+        # All coordinates are finite, but these geometric measures overflow Float64;
+        # Inf must not pass the `v == 0` / `v < 0` tests vacuously.
+        C = Float64[0 1e308 0 0; 0 0 1e308 0; 0 0 0 1e308]
+        mt = Mesh(C; tets=reshape(Int32[1,2,3,4],4,1))
+        @test !validate(mt).ok
+        ms = Mesh(C[:,1:3]; tris=reshape(Int32[1,2,3],3,1))
+        @test !validate(ms).ok
     end
 end

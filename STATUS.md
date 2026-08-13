@@ -12,7 +12,8 @@ the external FEM solver integration, the mesh/BC handshake, the solve proofs, an
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,479 assertions** (`--check-bounds=yes`, Julia 1.12.6; 12m27s).
+**Suite green: 151,477 assertions** (`--check-bounds=yes`, Julia 1.12.6; 6m39.4s,
+direct `test/runtests.jl` run).
 Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
 
@@ -71,8 +72,8 @@ silent non-conforming mesh would violate the CRC bar.
 
 ## Current state (verified at HEAD)
 
-- **Suite:** `julia --project=. --check-bounds=yes -e 'using Pkg; Pkg.test(; julia_args=["--check-bounds=yes"])'`
-  green — **151,479 assertions** under `--check-bounds=yes` (Julia 1.12.6; 12m27s; ~2–3× faster than
+- **Suite:** `julia --project=. --startup-file=no --check-bounds=yes test/runtests.jl`
+  green — **151,477 assertions** under `--check-bounds=yes` (Julia 1.12.6; 6m39.4s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -767,7 +768,7 @@ that day._
   caller-responsibility bypass. Regression result: the twisted prism validates at
   `sqrt(3)/2`; pipeline **42/42**, Mesh3D **410/410**, and the full package suite
   **151,466/151,466** pass under bounds checking on Julia 1.12.6 (12m53s).
-- **2026-08-14 — deep-debug PASS 5, safe surface diagnostics (working tree).**
+- **2026-08-14 — deep-debug PASS 5, safe surface diagnostics.**
   Reproduced four public-gate failures: an empty surface passed `is_meshable`
   vacuously; negative/NaN/Inf tolerances were accepted on that path; a valid cube
   translated to `1e15` threw `InexactError` while quantizing absolute coordinates;
@@ -778,3 +779,24 @@ that day._
   differences retain far-origin local precision. Heal regression suite **32/32**
   and the full package suite **151,479/151,479** pass under bounds checking on
   Julia 1.12.6 (12m27s).
+- **2026-08-14 — deep-debug PASS 6, complete tetrahedral-manifold and PLC audit.**
+  Reproduced three topology holes in the old face-incidence check: duplicate tets
+  and two positive tets touching only at a vertex or edge were reported as closed
+  manifolds; all-finite coordinates near `1e308` also overflowed computed volumes
+  and areas to `Inf` while passing `validate`. `MeshTypes` now certifies every
+  vertex link as a connected triangulated sphere or disk (including link-edge
+  incidence, circular boundary degree, and Euler characteristic), rejects duplicate
+  cells, and rejects non-finite computed measures. Flat compact records and reused
+  scratch keep the audit industrially bounded: on the 34,992-tet allocation fixture,
+  `validate` fell from **4,400,272 B to 1,708,080 B** (**−61.18%**), identical across
+  five measured runs. The stronger gate then exposed public `tetrahedralize` results
+  with pinched vertex links on an L-prism and polygonal cylinders. The public path
+  now certifies every restricted fill, consistently orients closed input facets for
+  the star-shaped fan repair, and falls through the exact conforming-Delaunay backend
+  (with bounded Float64 recovery as an alternative); `check=false` remains the
+  explicit raw expert bypass. This repaired the mixed-winding SAR sphere and annular
+  ring HFSS fixtures. A symmetric ODT star is now an exact no-op within a scaled ulp
+  tolerance. Focused gates passed: MeshTypes **1917/1917**, Mesh3D **410/410**,
+  Optimize **39/39**, HighOrder **441/441**, pipeline **42/42**, HFSS **95/95**;
+  the full direct suite passed **151,477/151,477** under bounds checking on Julia
+  1.12.6 (6m39.4s).

@@ -297,13 +297,144 @@ end
 """
     is_closed_manifold(m) -> Bool
 
-True iff the tet complex is a manifold with no dangling faces: every triangular
-face is shared by ≤ 2 tets (no non-manifold face) and the volume is nonempty.
+True iff the nonempty tet complex is a combinatorial 3-manifold with boundary.
+Besides face incidence, every vertex link is certified as a connected triangulated
+sphere (interior vertex) or disk (boundary vertex); this rejects cells that touch
+only at an edge/vertex and other pinched complexes that a face-count test misses.
 """
 function is_closed_manifold(m::Mesh)
-    ntets(m) == 0 && return false
-    _, maxinc = boundary_faces(m.tets)
-    return maxinc <= 2
+    ok, _ = _tet_topology(m.tets)
+    return ok
+end
+
+# A tetrahedral pseudocomplex can have face incidence <= 2 yet fail to be a
+# 3-manifold (two solids touching only at one edge or vertex are the common case).
+# The definitive local criterion is the link of every vertex: it must be a connected
+# 2-manifold homeomorphic to S² (interior) or D² (boundary).  For each link we check
+# edge incidence, triangle connectivity, boundary degree, and Euler characteristic.
+# A link edge is the original face opposite one of its vertices, so these incidence
+# checks also certify every tet face without a redundant global face table.  Global
+# records are flat, compact arrays; per-link scratch is reused, avoiding one
+# Set/Vector allocation per mesh vertex.
+@inline function _uf_find!(p::Vector{Int32}, i::Int32)
+    while @inbounds(p[i] != i)
+        @inbounds p[i] = p[p[i]]
+        @inbounds i = p[i]
+    end
+    return i
+end
+@inline function _uf_union!(p::Vector{Int32}, a::Int32, b::Int32)
+    ra = _uf_find!(p, a); rb = _uf_find!(p, b)
+    ra != rb && (@inbounds p[ra] = rb)
+    return nothing
+end
+@inline function _nunique_sorted(v)
+    isempty(v) && return 0
+    n = 1
+    @inbounds for i in 2:length(v); v[i] != v[i-1] && (n += 1); end
+    return n
+end
+
+function _tet_topology(tets::AbstractMatrix{<:Integer})
+    nt = size(tets, 2)
+    nt == 0 && return (false, "tet complex is empty")
+    nt <= typemax(Int32) ||
+        return (false, "tet count $nt exceeds the Int32 topology-audit limit")
+    n4 = try
+        Base.checked_mul(4, nt)
+    catch
+        return (false, "tet topology record count overflow")
+    end
+
+    vertex_tets = Vector{NTuple{2,Int32}}(undef, n4)
+    tetkeys = Vector{NTuple{4,Int32}}(undef, nt)
+    vi = 0
+    @inbounds for t in 1:nt
+        a=Int32(tets[1,t]); b=Int32(tets[2,t]); c=Int32(tets[3,t]); d=Int32(tets[4,t])
+        (a==b || a==c || a==d || b==c || b==d || c==d) &&
+            return (false, "tet $t repeats a vertex")
+        tetkeys[t] = _sort4(a,b,c,d)
+        ti = Int32(t)
+        for v in (a,b,c,d); vi += 1; vertex_tets[vi] = (v,ti); end
+    end
+
+    sort!(tetkeys; alg=QuickSort)
+    @inbounds for i in 2:nt
+        tetkeys[i] == tetkeys[i-1] && return (false, "duplicate tetrahedron")
+    end
+
+    sort!(vertex_tets; alg=QuickSort)
+    linkverts = Int32[]
+    linkedges = NTuple{3,Int32}[]       # (link edge endpoints, local triangle id)
+    boundaryverts = Int32[]             # endpoints of incidence-1 link edges
+    parent = Int32[]
+    hasboundary = false
+    i = 1
+    while i <= n4
+        j = i + 1
+        @inbounds while j <= n4 && vertex_tets[j][1] == vertex_tets[i][1]; j += 1; end
+        v = @inbounds vertex_tets[i][1]
+        degree = j - i
+        empty!(linkverts); empty!(linkedges); empty!(boundaryverts)
+        resize!(parent, degree)
+        @inbounds for k in 1:degree; parent[k] = Int32(k); end
+
+        @inbounds for k in i:j-1
+            t = Int(vertex_tets[k][2]); localid = Int32(k-i+1)
+            a=Int32(tets[1,t]); b=Int32(tets[2,t]); c=Int32(tets[3,t]); d=Int32(tets[4,t])
+            x,y,z = v==a ? (b,c,d) : (v==b ? (a,c,d) : (v==c ? (a,b,d) : (a,b,c)))
+            push!(linkverts, x, y, z)
+            e1=_sort2(x,y); e2=_sort2(y,z); e3=_sort2(x,z)
+            push!(linkedges, (e1[1],e1[2],localid),
+                             (e2[1],e2[2],localid),
+                             (e3[1],e3[2],localid))
+        end
+
+        sort!(linkedges; alg=QuickSort)
+        nedges = 0; k = 1
+        @inbounds while k <= length(linkedges)
+            l = k + 1
+            while l <= length(linkedges) &&
+                  linkedges[l][1] == linkedges[k][1] && linkedges[l][2] == linkedges[k][2]
+                l += 1
+            end
+            incidence = l-k; nedges += 1
+            incidence > 2 && return (false, "vertex $v has a non-manifold link edge")
+            if incidence == 2
+                _uf_union!(parent, linkedges[k][3], linkedges[k+1][3])
+            else
+                hasboundary = true
+                push!(boundaryverts, linkedges[k][1], linkedges[k][2])
+            end
+            k = l
+        end
+
+        root = _uf_find!(parent, Int32(1))
+        @inbounds for k in 2:degree
+            _uf_find!(parent, Int32(k)) == root ||
+                return (false, "vertex $v has a disconnected link")
+        end
+
+        sort!(linkverts; alg=QuickSort)
+        nlinkverts = _nunique_sorted(linkverts)
+        if !isempty(boundaryverts)
+            sort!(boundaryverts; alg=QuickSort)
+            k = 1
+            @inbounds while k <= length(boundaryverts)
+                l = k + 1
+                while l <= length(boundaryverts) && boundaryverts[l] == boundaryverts[k]; l += 1; end
+                l-k == 2 || return (false, "vertex $v has a non-circular link boundary")
+                k = l
+            end
+        end
+        chi = nlinkverts - nedges + degree
+        expected = isempty(boundaryverts) ? 2 : 1
+        chi == expected ||
+            return (false, "vertex $v link has Euler characteristic $chi (expected $expected)")
+        i = j
+    end
+    hasboundary || return (false, "tet complex has an empty boundary")
+    return (true, "ok")
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -358,40 +489,34 @@ function validate(m::Mesh; require_positive_tets::Bool=true)
             (push!(msgs, "node $i has non-finite coordinate"); break)
     end
     # degenerate / inverted tets
-    nneg = 0; nflat = 0
+    nneg = 0; nflat = 0; nbadvol = 0
     @inbounds for t in 1:ntets(m)
         a = node(m, m.tets[1,t]); b = node(m, m.tets[2,t])
         c = node(m, m.tets[3,t]); d = node(m, m.tets[4,t])
         v = tet_signed_volume(a, b, c, d)
-        v == 0 && (nflat += 1)
-        v < 0 && (nneg += 1)
+        if !isfinite(v); nbadvol += 1
+        elseif v == 0; nflat += 1
+        elseif v < 0; nneg += 1
+        end
     end
+    nbadvol > 0 && push!(msgs, "$nbadvol tets have non-finite computed volume")
     nflat > 0 && push!(msgs, "$nflat degenerate (zero-volume) tets")
     if require_positive_tets && nneg > 0
         push!(msgs, "$nneg negatively-oriented tets")
     end
     # degenerate triangles
-    ndegtri = 0
+    ndegtri = 0; nbadtri = 0
     @inbounds for t in 1:ntris(m)
         a = node(m, m.tris[1,t]); b = node(m, m.tris[2,t]); c = node(m, m.tris[3,t])
-        triangle_area(a, b, c) == 0 && (ndegtri += 1)
+        ar = triangle_area(a, b, c)
+        !isfinite(ar) ? (nbadtri += 1) : (ar == 0 && (ndegtri += 1))
     end
+    nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
     ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
-    # non-manifold faces + degenerate closed complexes
+    # Full combinatorial-manifold audit (faces alone miss edge/vertex pinches).
     if ntets(m) > 0
-        bnd, maxinc = boundary_faces(m.tets)
-        maxinc > 2 && push!(msgs, "non-manifold: a face is shared by $maxinc tets")
-        # A real solid always has a non-empty boundary surface; an empty boundary means
-        # every face is shared an even number of times — overlapping/duplicate tets that a
-        # face-incidence≤2 test alone cannot distinguish from a valid interior.
-        isempty(bnd) && push!(msgs, "closed tet complex with empty boundary (overlapping or duplicate tets)")
-        # duplicate (coincident) tets: a real complex never repeats a canonical tet key.
-        seen = Set{NTuple{4,Int32}}(); ndup = 0
-        @inbounds for t in 1:ntets(m)
-            k = _sort4(Int32(m.tets[1,t]), Int32(m.tets[2,t]), Int32(m.tets[3,t]), Int32(m.tets[4,t]))
-            (k in seen) ? (ndup += 1) : push!(seen, k)
-        end
-        ndup > 0 && push!(msgs, "$ndup duplicate (coincident) tets")
+        topok, reason = _tet_topology(m.tets)
+        topok || push!(msgs, "non-manifold tet complex: $reason")
     end
     return MeshDiagnostic(isempty(msgs), msgs)
 end
@@ -415,7 +540,8 @@ function mesh_crc(m::Mesh)
         dmn, _ = tet_dihedral_extrema(a, b, c, d)
         dmn < dmin && (dmin = dmn); dsum += dmn
         re = tet_radius_edge(a, b, c, d)
-        re < remin && (remin = re); resum += isfinite(re) ? re : 0.0
+        re < remin && (remin = re)
+        resum += re
     end
     dihedral = nt == 0 ? (0.0, 0.0) : (dmin, dsum/nt)
     radedge  = nt == 0 ? (0.0, 0.0) : (remin, resum/nt)
