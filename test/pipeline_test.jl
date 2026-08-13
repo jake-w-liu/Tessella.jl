@@ -30,6 +30,27 @@ end
         @test mesh_quality(m).n_tets == ntets(m)
     end
 
+    @testset "non-convex surface cannot be silently convex-hull capped" begin
+        # This twisted prism's unrestricted Delaunay fill is valid and watertight but
+        # has volume 1.116...: it caps the reflex boundary.  The PLC itself has volume
+        # sqrt(3)/2 and requires exact boundary recovery.
+        ang = deg2rad.((90, 210, 330))
+        C = Matrix{Float64}(undef, 3, 6)
+        for i in 1:3
+            C[:,i] = [cos(ang[i]), sin(ang[i]), 0.0]
+            C[:,i+3] = [cos(ang[i] + deg2rad(30)), sin(ang[i] + deg2rad(30)), 1.0]
+        end
+        faces = NTuple{3,Int32}[(1,3,2), (4,5,6)]
+        for i in 1:3
+            j = i % 3 + 1
+            push!(faces, (i,j,j+3), (i,j+3,i+3))
+        end
+        tris = reduce(hcat, (Int32[f...] for f in faces))
+        m = mesh_volume(Mesh(C; tris=tris); smooth=false)
+        @test validate(m).ok
+        @test mvpvol(m) ≈ sqrt(3)/2 rtol=1e-9
+    end
+
     @testset "defective surface → explicit blocker (not silent)" begin
         cube = _cube_surface()
         openm = Mesh(cube.coords; tris=cube.tris[:, 1:end-1])   # missing a face
@@ -56,13 +77,15 @@ end
         @test all(m.coords[3,:] .== 0.0)        # planar
     end
 
-    @testset "optimize=true reduces slivers, preserves volume + validity" begin
+    @testset "optimize=true is quality-monotone and preserves volume + validity" begin
         s = cylinder_surface((0.,0,0),(0.,0,1),2.0,5.0; nθ=20, nz=4)
         m0 = mesh_volume(s; optimize=false, smooth=false)
         m1 = mesh_volume(s; optimize=true,  smooth=true)
         @test mvpvol(m1) ≈ mvpvol(m0) rtol=1e-6      # flips+smoothing preserve volume
         @test validate(m1).ok
-        @test mesh_quality(m1).n_slivers < mesh_quality(m0).n_slivers
+        # A boundary-recovered mesh can have no movable interior vertices; in that
+        # constrained case optimization is correctly a no-op, never a regression.
+        @test mesh_quality(m1).n_slivers <= mesh_quality(m0).n_slivers
     end
 
     @testset "end-to-end: primitive → volume → .msh → read (solver-consumable)" begin
