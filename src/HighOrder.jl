@@ -35,6 +35,30 @@ nodes); `tet10` is `10 × ntet` in gmsh type-11 order.
 struct P2Mesh
     coords::Matrix{Float64}
     tet10::Matrix{Int32}
+    function P2Mesh(coords::AbstractMatrix{<:Real}, tet10::AbstractMatrix{<:Integer})
+        size(coords, 1) == 3 || throw(ArgumentError("P2Mesh: coords must be 3 × nnodes"))
+        size(tet10, 1) == 10 || throw(ArgumentError("P2Mesh: tet10 must be 10 × ntets"))
+        nn = size(coords, 2)
+        nn <= typemax(Int32) ||
+            throw(ArgumentError("P2Mesh: $nn nodes exceed the Int32 indexing limit"))
+        C = Matrix{Float64}(coords)
+        @inbounds for i in axes(C,2), d in 1:3
+            isfinite(C[d,i]) ||
+                throw(ArgumentError("P2Mesh: node $i has a non-finite coordinate"))
+        end
+        T = Matrix{Int32}(tet10)
+        @inbounds for t in axes(T,2)
+            for k in 1:10
+                1 <= T[k,t] <= nn ||
+                    throw(ArgumentError("P2Mesh: tet $t references node $(T[k,t]) outside 1:$nn"))
+                for j in 1:k-1
+                    T[j,t] != T[k,t] ||
+                        throw(ArgumentError("P2Mesh: tet $t repeats node $(T[k,t])"))
+                end
+            end
+        end
+        new(C, T)
+    end
 end
 
 nnodes(p::P2Mesh) = size(p.coords, 2)
@@ -73,15 +97,25 @@ function p2_tetmesh(m::Mesh)
     return P2Mesh(coords, tet10)
 end
 
-"""Total volume of a straight-sided P2 mesh (from the 4 corner nodes of each tet)."""
+"""
+Total isoparametric volume of a P2 mesh. The P2 Jacobian determinant is cubic, so
+the five-point degree-3 tetrahedral quadrature integrates its signed volume exactly
+(up to floating-point evaluation); the absolute value is accumulated per element.
+For a straight-sided P2 tet this reduces exactly to its linear corner-tet volume.
+"""
 function p2_volume(p::P2Mesh)
     v = 0.0
     @inbounds for t in 1:ntets(p)
-        a=(p.coords[1,p.tet10[1,t]],p.coords[2,p.tet10[1,t]],p.coords[3,p.tet10[1,t]])
-        b=(p.coords[1,p.tet10[2,t]],p.coords[2,p.tet10[2,t]],p.coords[3,p.tet10[2,t]])
-        c=(p.coords[1,p.tet10[3,t]],p.coords[2,p.tet10[3,t]],p.coords[3,p.tet10[3,t]])
-        d=(p.coords[1,p.tet10[4,t]],p.coords[2,p.tet10[4,t]],p.coords[3,p.tet10[4,t]])
-        v += tet_volume(a,b,c,d)
+        dc = _detJ(p.coords, p.tet10, t, _p2_grads(0.25,0.25,0.25))
+        ds = _detJ(p.coords, p.tet10, t, _p2_grads(1/6,1/6,1/6)) +
+             _detJ(p.coords, p.tet10, t, _p2_grads(0.5,1/6,1/6)) +
+             _detJ(p.coords, p.tet10, t, _p2_grads(1/6,0.5,1/6)) +
+             _detJ(p.coords, p.tet10, t, _p2_grads(1/6,1/6,0.5))
+        signed = ((-4/5)*dc + (9/20)*ds) / 6
+        isfinite(signed) ||
+            throw(ArgumentError("p2_volume: tet $t has non-finite integrated Jacobian"))
+        v += abs(signed)
+        isfinite(v) || throw(ArgumentError("p2_volume: accumulated volume overflowed Float64"))
     end
     return v
 end
@@ -137,6 +171,8 @@ end
     mn = Inf
     for grads in _JAC_NODES
         d = _detJ(coords, tet10, t, grads)
+        isfinite(d) ||
+            throw(ArgumentError("P2 Jacobian: tet $t has a non-finite determinant"))
         d < mn && (mn = d)
     end
     return mn
@@ -196,7 +232,9 @@ function _bbox_diag(p::P2Mesh)
         y<lo2 && (lo2=y); y>hi2 && (hi2=y)
         z<lo3 && (lo3=z); z>hi3 && (hi3=z)
     end
-    sqrt((hi1-lo1)^2 + (hi2-lo2)^2 + (hi3-lo3)^2)
+    d = sqrt((hi1-lo1)^2 + (hi2-lo2)^2 + (hi3-lo3)^2)
+    isfinite(d) || throw(ArgumentError("P2 curving: mesh bounding-box diagonal is non-finite"))
+    return d
 end
 
 # Core curving. `qualifies(a,b)::Bool` gates on the two corner endpoints; `project`
@@ -245,8 +283,15 @@ axial spokes stay straight. Returns the number of mid-nodes moved.
 function curve_to_cylinder!(p::P2Mesh, center, axis, radius::Real; rtol::Real=1e-6)
     R = Float64(radius)
     c = (Float64(center[1]), Float64(center[2]), Float64(center[3]))
+    (isfinite(R) && R > 0) ||
+        throw(ArgumentError("curve_to_cylinder!: radius must be finite and positive (got $radius)"))
+    (isfinite(c[1]) && isfinite(c[2]) && isfinite(c[3])) ||
+        throw(ArgumentError("curve_to_cylinder!: center must be finite"))
+    tolrel = Float64(rtol)
+    (isfinite(tolrel) && tolrel >= 0) ||
+        throw(ArgumentError("curve_to_cylinder!: rtol must be finite and non-negative (got $rtol)"))
     ez = _unit3((Float64(axis[1]), Float64(axis[2]), Float64(axis[3])))
-    tol = Float64(rtol) * R
+    tol = tolrel * R
     @inline function radial(x, y, z)
         rx=x-c[1]; ry=y-c[2]; rz=z-c[3]
         ax = rx*ez[1] + ry*ez[2] + rz*ez[3]
@@ -261,12 +306,13 @@ function curve_to_cylinder!(p::P2Mesh, center, axis, radius::Real; rtol::Real=1e
         f = R/d
         (c[1] + ax*ez[1] + vx*f, c[2] + ax*ez[2] + vy*f, c[3] + ax*ez[3] + vz*f)
     end
-    return _curve_boundary!(p, qualifies, project; rtol=Float64(rtol))
+    return _curve_boundary!(p, qualifies, project; rtol=tolrel)
 end
 
 @inline function _unit3(a)
     l = sqrt(a[1]^2 + a[2]^2 + a[3]^2)
-    l == 0 && error("curve_to_cylinder!: zero axis")
+    (isfinite(l) && l > 0) ||
+        throw(ArgumentError("curve_to_cylinder!: axis must have finite positive length"))
     (a[1]/l, a[2]/l, a[3]/l)
 end
 
@@ -284,9 +330,12 @@ never contains an inverted element. Returns the number of mid-nodes actually mov
 (displacement > `rtol` × bounding-box diagonal).
 """
 function curve_to_surface!(p::P2Mesh, project, on_surface; rtol::Real=1e-6)
+    tolrel = Float64(rtol)
+    (isfinite(tolrel) && tolrel >= 0) ||
+        throw(ArgumentError("curve_to_surface!: rtol must be finite and non-negative (got $rtol)"))
     onsurf(v::Integer) = @inbounds on_surface(p.coords[1,v], p.coords[2,v], p.coords[3,v])
     qualifies(a::Integer, b::Integer) = onsurf(a) && onsurf(b)
-    return _curve_boundary!(p, qualifies, (x,y,z) -> project(x,y,z); rtol=Float64(rtol))
+    return _curve_boundary!(p, qualifies, (x,y,z) -> project(x,y,z); rtol=tolrel)
 end
 
 """

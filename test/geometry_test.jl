@@ -32,6 +32,16 @@ end
 
 @testset "Geometry primitives (Stage 5)" begin
 
+    @testset "finite geometry and resource contracts" begin
+        @test_throws ArgumentError box_surface(0,1,0,1,0,NaN)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(Inf,0.,0.),1.,1.)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),Inf,1.)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,1.;
+                                                    nθ=typemax(Int), nz=2)
+        @test_throws ArgumentError box_tunnel_surface(0,4,0,4,0,2,1,3,1,NaN)
+        @test_throws ArgumentError box_shell_surface(0,4,0,4,0,4,1,3,1,3,1,Inf)
+    end
+
     @testset "box_surface: closed, meshable, exact volume" begin
         s = box_surface(-1, 2, 0, 3, 1, 5)          # 3×3×4 = 36
         @test is_meshable(s)[1]

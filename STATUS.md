@@ -12,7 +12,7 @@ the external FEM solver integration, the mesh/BC handshake, the solve proofs, an
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,523 assertions** (`--check-bounds=yes`, Julia 1.12.6; 6m56.5s,
+**Suite green: 151,585 assertions** (`--check-bounds=yes`, Julia 1.12.6; 7m08.9s,
 direct `test/runtests.jl` run).
 Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
@@ -73,7 +73,7 @@ silent non-conforming mesh would violate the CRC bar.
 ## Current state (verified at HEAD)
 
 - **Suite:** `julia --project=. --startup-file=no --check-bounds=yes test/runtests.jl`
-  green — **151,523 assertions** under `--check-bounds=yes` (Julia 1.12.6; 6m56.5s; ~2–3× faster than
+  green — **151,585 assertions** under `--check-bounds=yes` (Julia 1.12.6; 7m08.9s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -829,3 +829,19 @@ that day._
   MeshSurface **27/27**, Mesh3D **410/410**, pipeline **42/42**, HFSS **95/95**;
   the full direct suite passed **151,523/151,523** under bounds checking on Julia
   1.12.6 (6m56.5s).
+- **2026-08-14 — deep-debug PASS 9, geometry, optimization, P2, CAD, and file-I/O
+  contracts.** Mesh optimizers now reject invalid controls and preserve every
+  lower-dimensional cell and tag. P2 containers reject malformed, non-finite, or
+  repeated connectivity; curved volume uses exact degree-3 tetrahedral quadrature
+  for the cubic isoparametric Jacobian and rejects non-finite determinants.
+  Primitive geometry and analytical CAD constructors now enforce finite geometry,
+  positive radii, bounded allocation/index counts, and valid tolerances; bounded
+  disks gained correct membership and nearest-point projection. MSH reads now
+  validate their format/count/connectivity contracts, physical names escape and
+  round-trip quotes, backslashes, and control characters, and ordinary MSH writes
+  are staged beside the target before atomic replacement. STL reads now validate
+  file structure and finite coordinates, decode binary words as little-endian, and
+  weld by actual Euclidean distance across neighboring spatial buckets instead of
+  hash-key coincidence. Focused gates passed: Optimize **57/57**, HighOrder
+  **453/453**, Geometry **29/29**, CAD **8091/8091**, IO **62/62**; the full direct
+  suite passed **151,585/151,585** under bounds checking on Julia 1.12.6 (7m08.9s).

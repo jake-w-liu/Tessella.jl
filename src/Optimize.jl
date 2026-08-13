@@ -59,18 +59,24 @@ edge ratios, minimum tet volume, and the count of slivers (min dihedral <
 `sliver_deg` or max dihedral > `180 − sliver_deg`).
 """
 function mesh_quality(m::Mesh; sliver_deg::Real=10.0)
+    threshold = float(sliver_deg)
+    (isfinite(threshold) && 0 <= threshold < 90) ||
+        throw(ArgumentError("mesh_quality: sliver_deg must be finite and in [0, 90) (got $sliver_deg)"))
     nt = ntets(m)
     nt == 0 && return TetQuality(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0)
     dmin = Inf; dmax = -Inf; dsum = 0.0
     remin = Inf; resum = 0.0
     vmin = Inf; nsliv = 0
-    lo = deg2rad(sliver_deg); hi = deg2rad(180 - sliver_deg)
+    lo = deg2rad(threshold); hi = deg2rad(180 - threshold)
     @inbounds for t in 1:nt
         a=node(m,m.tets[1,t]); b=node(m,m.tets[2,t]); c=node(m,m.tets[3,t]); d=node(m,m.tets[4,t])
         mn, mx = tet_dihedral_extrema(a,b,c,d)
         dmin = min(dmin, mn); dmax = max(dmax, mx); dsum += mn
         (mn < lo || mx > hi) && (nsliv += 1)
-        re = tet_radius_edge(a,b,c,d); isfinite(re) && (remin = min(remin, re); resum += re)
+        re = tet_radius_edge(a,b,c,d)
+        (isfinite(mn) && isfinite(mx) && isfinite(re)) ||
+            throw(ArgumentError("mesh_quality: tet $t has non-finite computed quality; validate the mesh first"))
+        remin = min(remin, re); resum += re
         vmin = min(vmin, tet_volume(a,b,c,d))
     end
     return TetQuality(nt, rad2deg(dmin), rad2deg(dsum/nt), rad2deg(dmax),
@@ -87,6 +93,10 @@ volume are preserved). Improves the mean dihedral / reduces slivers; not min-ang
 optimal. Returns a new smoothed `Mesh`.
 """
 function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
+    iters >= 0 || throw(ArgumentError("smooth_laplacian: iters must be non-negative (got $iters)"))
+    r = float(relax)
+    (isfinite(r) && 0 <= r <= 1) ||
+        throw(ArgumentError("smooth_laplacian: relax must be finite and in [0, 1] (got $relax)"))
     nn = nnodes(m); nt = ntets(m)
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
@@ -100,9 +110,9 @@ function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
             sx=0.0; sy=0.0; sz=0.0
             for w in neigh[v]; sx+=coords[1,w]; sy+=coords[2,w]; sz+=coords[3,w]; end
             k = length(neigh[v])
-            tx = coords[1,v] + relax*(sx/k - coords[1,v])
-            ty = coords[2,v] + relax*(sy/k - coords[2,v])
-            tz = coords[3,v] + relax*(sz/k - coords[3,v])
+            tx = coords[1,v] + r*(sx/k - coords[1,v])
+            ty = coords[2,v] + r*(sy/k - coords[2,v])
+            tz = coords[3,v] + r*(sz/k - coords[3,v])
             # accept only if no incident tet inverts (positive signed volume kept)
             ox=coords[1,v]; oy=coords[2,v]; oz=coords[3,v]
             coords[1,v]=tx; coords[2,v]=ty; coords[3,v]=tz
@@ -116,7 +126,8 @@ function smooth_laplacian(m::Mesh; iters::Integer=5, relax::Real=1.0)
             ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
         end
     end
-    return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+    return Mesh(coords; segs=copy(m.segs), tris=copy(m.tris), tets=copy(m.tets),
+                seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
 end
 
 """
@@ -133,6 +144,7 @@ optimal (targeted flips/exudation remain the fix for an individual worst sliver)
 it simply uses a different node target. Returns a new smoothed `Mesh`.
 """
 function smooth_odt(m::Mesh; iters::Integer=5)
+    iters >= 0 || throw(ArgumentError("smooth_odt: iters must be non-negative (got $iters)"))
     nn = nnodes(m)
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
@@ -174,7 +186,8 @@ function smooth_odt(m::Mesh; iters::Integer=5)
             ok || (coords[1,v]=ox; coords[2,v]=oy; coords[3,v]=oz)
         end
     end
-    return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+    return Mesh(coords; segs=copy(m.segs), tris=copy(m.tris), tets=copy(m.tets),
+                seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
 end
 
 """
@@ -194,11 +207,15 @@ per-star worst angle is monotone non-worsening. Complements the topological
 Returns a new `Mesh`.
 """
 function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
+    iters >= 0 || throw(ArgumentError("smooth_optimize: iters must be non-negative (got $iters)"))
+    threshold = float(sliver_deg)
+    (isfinite(threshold) && 0 <= threshold < 90) ||
+        throw(ArgumentError("smooth_optimize: sliver_deg must be finite and in [0, 90) (got $sliver_deg)"))
     nn = nnodes(m)
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
     inc = _node_tets(m)
-    thr = deg2rad(float(sliver_deg))
+    thr = deg2rad(threshold)
     dirs = ((1.,0.,0.),(-1.,0.,0.),(0.,1.,0.),(0.,-1.,0.),(0.,0.,1.),(0.,0.,-1.))
     @inbounds for _ in 1:iters
         for v in 1:nn
@@ -225,7 +242,8 @@ function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
             end
         end
     end
-    return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+    return Mesh(coords; segs=copy(m.segs), tris=copy(m.tris), tets=copy(m.tets),
+                seg_tag=copy(m.seg_tag), tri_tag=copy(m.tri_tag), tet_tag=copy(m.tet_tag))
 end
 
 """
@@ -243,6 +261,8 @@ flips that repair slivers connectivity-smoothing cannot reach) is
 [`Mesh3D.optimize_flips!`](@ref); `mesh_volume(optimize=true)` runs both.
 """
 function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
+    max_rounds >= 0 ||
+        throw(ArgumentError("remove_slivers: max_rounds must be non-negative (got $max_rounds)"))
     q0 = mesh_quality(m; sliver_deg=sliver_deg)
     best = m; bestn = q0.n_slivers
     for _ in 1:max_rounds

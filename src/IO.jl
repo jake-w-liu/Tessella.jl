@@ -90,15 +90,21 @@ function _read_msh(io::Base.IO)
         isempty(line) && continue
         if line == "\$MeshFormat"
             fmt = split(strip(readline(io)))
+            length(fmt) >= 3 || throw(ArgumentError("IO: malformed \$MeshFormat header"))
             version = parse(Float64, fmt[1])
+            version in (2.2, 4.1) ||
+                throw(ArgumentError("IO: unsupported .msh version $version (supported: 2.2 and 4.1)"))
             filetype = length(fmt) >= 2 ? parse(Int, fmt[2]) : 0
             filetype == 0 || error("IO: binary .msh not supported (file-type $filetype); use ASCII")
+            parse(Int,fmt[3]) == 8 || throw(ArgumentError("IO: unsupported .msh floating-point data size $(fmt[3])"))
             _expect_end(io, "\$EndMeshFormat")
         elseif line == "\$PhysicalNames"
             _read_physical_names!(acc, io)
         elseif line == "\$Nodes"
+            version != 0 || throw(ArgumentError("IO: \$Nodes appeared before \$MeshFormat"))
             version < 3 ? _read_nodes_v2!(acc, io) : _read_nodes_v4!(acc, io)
         elseif line == "\$Elements"
+            version != 0 || throw(ArgumentError("IO: \$Elements appeared before \$MeshFormat"))
             version < 3 ? _read_elements_v2!(acc, io) : _read_elements_v4!(acc, io)
         elseif line == "\$Entities"
             _read_entities_v4!(acc, io)
@@ -106,6 +112,7 @@ function _read_msh(io::Base.IO)
             _skip_section(io, "\$End" * line[2:end])   # ignore unknown sections
         end
     end
+    version != 0 || throw(ArgumentError("IO: missing \$MeshFormat section"))
     return MshFile(_to_mesh(acc), acc.pnames)
 end
 
@@ -123,35 +130,54 @@ end
 
 function _read_physical_names!(acc, io)
     n = parse(Int, strip(readline(io)))
+    n >= 0 || throw(ArgumentError("IO: negative physical-name count $n"))
     for _ in 1:n
         line = strip(readline(io))
         # format: `dim tag "name"`. Take the name between the first and last quote VERBATIM
         # — splitting on whitespace and rejoining collapses runs of interior spaces/tabs and
         # breaks the name-preservation round-trip contract.
-        q1 = findfirst('"', line); q2 = findlast('"', line)
-        if q1 !== nothing && q2 !== nothing && q2 > q1
-            hdr = split(strip(line[1:prevind(line, q1)]))
-            dim = parse(Int, hdr[1]); tag = parse(Int, hdr[2])
-            acc.pnames[(dim, tag)] = line[nextind(line, q1):prevind(line, q2)]
-        else
-            parts = split(line)
-            dim = parse(Int, parts[1]); tag = parse(Int, parts[2])
-            acc.pnames[(dim, tag)] = length(parts) >= 3 ? strip(join(parts[3:end], " "), ['"']) : ""
-        end
+        m = match(r"^([+-]?\d+)\s+([+-]?\d+)\s+\"((?:\\.|[^\"])*)\"\s*$", line)
+        m === nothing && throw(ArgumentError("IO: malformed physical-name record '$line'"))
+        dim = parse(Int,m.captures[1]); tag = parse(Int,m.captures[2])
+        0 <= dim <= 3 || throw(ArgumentError("IO: physical-name dimension $dim is outside 0:3"))
+        haskey(acc.pnames,(dim,tag)) &&
+            throw(ArgumentError("IO: duplicate physical name for dimension/tag ($dim,$tag)"))
+        acc.pnames[(dim, tag)] = _unescape_name(m.captures[3])
     end
     _expect_end(io, "\$EndPhysicalNames")
+end
+
+function _unescape_name(s::AbstractString)
+    io = IOBuffer(); i = firstindex(s)
+    while i <= lastindex(s)
+        c = s[i]
+        if c == '\\'
+            i = nextind(s,i); i <= lastindex(s) ||
+                throw(ArgumentError("IO: trailing escape in physical name"))
+            e = s[i]
+            write(io, e == 'n' ? '\n' : e == 'r' ? '\r' : e == 't' ? '\t' : e)
+        else
+            write(io,c)
+        end
+        i = nextind(s,i)
+    end
+    return String(take!(io))
 end
 
 # ── v2 ──────────────────────────────────────────────────────────────────────────
 function _read_nodes_v2!(acc, io)
     n = parse(Int, strip(readline(io)))
+    n >= 0 || throw(ArgumentError("IO: negative v2 node count $n"))
     sizehint!(acc.node_x, n); sizehint!(acc.node_y, n); sizehint!(acc.node_z, n)
     for _ in 1:n
         p = split(strip(readline(io)))
+        length(p) == 4 || throw(ArgumentError("IO: malformed v2 node record (expected 4 fields)"))
         tag = parse(Int, p[1])
-        push!(acc.node_x, parse(Float64, p[2]))
-        push!(acc.node_y, parse(Float64, p[3]))
-        push!(acc.node_z, parse(Float64, p[4]))
+        tag > 0 || throw(ArgumentError("IO: node tag must be positive (got $tag)"))
+        haskey(acc.tag2idx,tag) && throw(ArgumentError("IO: duplicate node tag $tag"))
+        x=parse(Float64,p[2]); y=parse(Float64,p[3]); z=parse(Float64,p[4])
+        (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError("IO: node $tag has non-finite coordinates"))
+        push!(acc.node_x, x); push!(acc.node_y, y); push!(acc.node_z, z)
         acc.tag2idx[tag] = length(acc.node_x)
     end
     _expect_end(io, "\$EndNodes")
@@ -159,12 +185,19 @@ end
 
 function _read_elements_v2!(acc, io)
     n = parse(Int, strip(readline(io)))
+    n >= 0 || throw(ArgumentError("IO: negative v2 element count $n"))
     for _ in 1:n
         p = split(strip(readline(io)))
+        length(p) >= 3 || throw(ArgumentError("IO: malformed v2 element record"))
         etype = parse(Int, p[2])
         ntags = parse(Int, p[3])
+        ntags >= 0 || throw(ArgumentError("IO: negative element tag count $ntags"))
+        length(p) >= 3+ntags || throw(ArgumentError("IO: truncated v2 element tags"))
         phys = ntags >= 1 ? parse(Int, p[4]) : 0
         nodestart = 3 + ntags + 1
+        needed = get(_NN,etype,0)
+        needed == 0 || length(p) == nodestart+needed-1 ||
+            throw(ArgumentError("IO: element type $etype expects $needed node tags"))
         _push_element!(acc, etype, phys, @view p[nodestart:end])
     end
     _expect_end(io, "\$EndElements")
@@ -197,47 +230,73 @@ end
 
 function _read_nodes_v4!(acc, io)
     hdr = split(strip(readline(io)))
+    length(hdr) == 4 || throw(ArgumentError("IO: malformed v4 node header"))
     numBlocks = parse(Int, hdr[1]); numNodes = parse(Int, hdr[2])
+    (numBlocks >= 0 && numNodes >= 0) || throw(ArgumentError("IO: negative v4 node count"))
+    nread = 0
     sizehint!(acc.node_x, numNodes); sizehint!(acc.node_y, numNodes); sizehint!(acc.node_z, numNodes)
     for _ in 1:numBlocks
         bh = split(strip(readline(io)))
+        length(bh) == 4 || throw(ArgumentError("IO: malformed v4 node-block header"))
         nInBlock = parse(Int, bh[4])
+        nInBlock >= 0 || throw(ArgumentError("IO: negative v4 node-block count"))
         tags = Vector{Int}(undef, nInBlock)
         for i in 1:nInBlock
             tags[i] = parse(Int, strip(readline(io)))
+            tags[i] > 0 || throw(ArgumentError("IO: node tag must be positive (got $(tags[i]))"))
+            haskey(acc.tag2idx,tags[i]) && throw(ArgumentError("IO: duplicate node tag $(tags[i])"))
         end
         for i in 1:nInBlock
             c = split(strip(readline(io)))
-            push!(acc.node_x, parse(Float64, c[1]))
-            push!(acc.node_y, parse(Float64, c[2]))
-            push!(acc.node_z, parse(Float64, c[3]))
+            length(c) >= 3 || throw(ArgumentError("IO: truncated v4 node coordinates"))
+            x=parse(Float64,c[1]); y=parse(Float64,c[2]); z=parse(Float64,c[3])
+            (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError("IO: node $(tags[i]) has non-finite coordinates"))
+            push!(acc.node_x,x); push!(acc.node_y,y); push!(acc.node_z,z)
             acc.tag2idx[tags[i]] = length(acc.node_x)
+            nread += 1
         end
     end
+    nread == numNodes || throw(ArgumentError("IO: v4 header declared $numNodes nodes but blocks contained $nread"))
     _expect_end(io, "\$EndNodes")
 end
 
 function _read_elements_v4!(acc, io)
     ep = acc.ep
     hdr = split(strip(readline(io)))
+    length(hdr) == 4 || throw(ArgumentError("IO: malformed v4 element header"))
     numBlocks = parse(Int, hdr[1])
+    numElements = parse(Int,hdr[2])
+    (numBlocks >= 0 && numElements >= 0) || throw(ArgumentError("IO: negative v4 element count"))
+    nread = 0
     for _ in 1:numBlocks
         bh = split(strip(readline(io)))
+        length(bh) == 4 || throw(ArgumentError("IO: malformed v4 element-block header"))
         edim = parse(Int, bh[1]); etag = parse(Int, bh[2])
         etype = parse(Int, bh[3]); nInBlock = parse(Int, bh[4])
+        nInBlock >= 0 || throw(ArgumentError("IO: negative v4 element-block count"))
         phys = get(ep, (edim, etag), 0)
         for _ in 1:nInBlock
             p = split(strip(readline(io)))
+            isempty(p) && throw(ArgumentError("IO: empty v4 element record"))
+            needed=get(_NN,etype,0)
+            needed==0 || length(p)==needed+1 ||
+                throw(ArgumentError("IO: element type $etype expects $needed node tags"))
             _push_element!(acc, etype, phys, @view p[2:end])   # p[1] = element tag
+            nread += 1
         end
     end
+    nread == numElements || throw(ArgumentError("IO: v4 header declared $numElements elements but blocks contained $nread"))
     _expect_end(io, "\$EndElements")
 end
 
 # ── shared element push (relabel tags → compact indices) ────────────────────────
 function _push_element!(acc, etype::Int, phys::Int, nodetoks)
     haskey(_NN, etype) || return   # ignore element types we don't model (higher order, quads…)
-    idx(t) = acc.tag2idx[parse(Int, t)]
+    function idx(t)
+        tag=parse(Int,t); i=get(acc.tag2idx,tag,0)
+        i != 0 || throw(ArgumentError("IO: element references unknown node tag $tag"))
+        return i
+    end
     if etype == MSH_LINE
         a = idx(nodetoks[1]); b = idx(nodetoks[2])
         push!(acc.segs, (Int32(a), Int32(b))); push!(acc.seg_tag, Int32(phys))
@@ -285,22 +344,38 @@ mesh's `*_tag` vectors; cells are grouped into entity blocks by `(dim, tag)`.
 """
 function write_msh(path::AbstractString, mesh::Mesh; version::Real=2.2,
                    physical_names::AbstractDict=Dict{Tuple{Int,Int},String}())
-    open(path, "w") do io
-        if version < 3
+    ver = Float64(version)
+    ver in (2.2,4.1) ||
+        throw(ArgumentError("write_msh: version must be 2.2 or 4.1 (got $version)"))
+    target = abspath(path); parent = dirname(target)
+    isdir(parent) || throw(ArgumentError("write_msh: parent directory does not exist: $parent"))
+    # Build beside the destination and atomically rename only after a complete,
+    # flushed write. A formatter/error cannot truncate a previously valid mesh.
+    mktemp(parent) do tmp, io
+        if ver == 2.2
             _write_msh_v2(io, mesh, physical_names)
         else
             _write_msh_v4(io, mesh, physical_names)
         end
+        flush(io); close(io)
+        mv(tmp,target;force=true)
     end
     return path
 end
+
+_escape_name(s::AbstractString) = replace(s, "\\"=>"\\\\", "\""=>"\\\"",
+                                           "\n"=>"\\n", "\r"=>"\\r")
 
 function _write_physical_names(io, physical_names)
     isempty(physical_names) && return
     println(io, "\$PhysicalNames")
     println(io, length(physical_names))
     for ((dim, tag), name) in sort(collect(physical_names); by=x->x[1])
-        println(io, dim, " ", tag, " \"", name, "\"")
+        (dim isa Integer && 0 <= dim <= 3 && tag isa Integer) ||
+            throw(ArgumentError("write_msh: invalid physical-name key ($dim,$tag)"))
+        name isa AbstractString ||
+            throw(ArgumentError("write_msh: physical name for ($dim,$tag) must be a string"))
+        println(io, dim, " ", tag, " \"", _escape_name(name), "\"")
     end
     println(io, "\$EndPhysicalNames")
 end
@@ -421,9 +496,12 @@ the bounding-box diagonal) are merged so the result is a connected triangle
 surface, not a triangle soup.
 """
 function read_stl(path::AbstractString; merge_tol::Real=1e-9)
+    mtol=Float64(merge_tol)
+    (isfinite(mtol) && mtol >= 0) ||
+        throw(ArgumentError("read_stl: merge_tol must be finite and non-negative (got $merge_tol)"))
     isbin = _stl_is_binary(path)
     tris_xyz = isbin ? _read_stl_binary(path) : _read_stl_ascii(path)
-    return _weld_triangles(tris_xyz, merge_tol)
+    return _weld_triangles(tris_xyz, mtol)
 end
 
 function _stl_is_binary(path)
@@ -432,7 +510,7 @@ function _stl_is_binary(path)
         # ASCII STL starts with "solid"; but some binary files do too, so also
         # check the 80-byte-header + uint32 triangle count against file size.
         if length(head) >= 84
-            ntri = reinterpret(UInt32, head[81:84])[1]
+            ntri = ltoh(reinterpret(UInt32, head[81:84])[1])
             expected = 84 + 50 * Int(ntri)
             filesize(path) == expected && return true
         end
@@ -453,26 +531,45 @@ function _read_stl_ascii(path)
         s = split(strip(line))
         isempty(s) && continue
         if s[1] == "vertex"
-            push!(verts, (parse(Float64,s[2]), parse(Float64,s[3]), parse(Float64,s[4])))
+            length(s) == 4 || throw(ArgumentError("read_stl: malformed ASCII vertex record '$line'"))
+            p=(parse(Float64,s[2]),parse(Float64,s[3]),parse(Float64,s[4]))
+            (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
+                throw(ArgumentError("read_stl: ASCII vertex has non-finite coordinates"))
+            push!(verts,p)
             if length(verts) == 3
                 push!(tris, (verts[1]..., verts[2]..., verts[3]...))
                 empty!(verts)
             end
         end
     end
+    isempty(verts) || throw(ArgumentError("read_stl: incomplete ASCII facet (expected three vertices)"))
+    isempty(tris) && throw(ArgumentError("read_stl: ASCII STL contains no complete facets"))
     return tris
 end
 
 function _read_stl_binary(path)
     open(path, "r") do io
+        filesize(path) >= 84 || throw(ArgumentError("read_stl: truncated binary STL header"))
         skip(io, 80)
-        ntri = Int(read(io, UInt32))
+        ntri = Int(ltoh(read(io, UInt32)))
+        expected = try Base.checked_add(84,Base.checked_mul(50,ntri)) catch
+            throw(ArgumentError("read_stl: binary triangle count overflows file-size arithmetic"))
+        end
+        filesize(path)==expected ||
+            throw(ArgumentError("read_stl: binary STL size $(filesize(path)) does not match triangle count $ntri (expected $expected bytes)"))
         tris = Vector{NTuple{9,Float64}}(undef, ntri)
-        for t in 1:ntri
-            skip(io, 12)   # normal vector (3× Float32) — recomputed on demand
-            v = ntuple(_ -> Float64(read(io, Float32)), 9)
-            tris[t] = v
-            skip(io, 2)    # attribute byte count
+        try
+            for t in 1:ntri
+                skip(io, 12)   # normal vector (3× Float32) — recomputed on demand
+                v = ntuple(_ -> Float64(reinterpret(Float32,ltoh(read(io,UInt32)))), 9)
+                all(isfinite,v) || throw(ArgumentError("read_stl: binary facet $t has non-finite coordinates"))
+                tris[t] = v
+                skip(io, 2)    # attribute byte count
+            end
+        catch err
+            err isa ArgumentError && rethrow()
+            err isa EOFError && throw(ArgumentError("read_stl: truncated binary STL facet data"))
+            rethrow()
         end
         return tris
     end
@@ -484,21 +581,48 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
     lo = (Inf,Inf,Inf); hi = (-Inf,-Inf,-Inf)
     for t in tris_xyz, k in (1,4,7)
         p = (t[k], t[k+1], t[k+2])
+        all(isfinite,p) || throw(ArgumentError("read_stl: facet has non-finite coordinates"))
         lo = (min(lo[1],p[1]),min(lo[2],p[2]),min(lo[3],p[3]))
         hi = (max(hi[1],p[1]),max(hi[2],p[2]),max(hi[3],p[3]))
     end
-    diag = sqrt((hi[1]-lo[1])^2 + (hi[2]-lo[2])^2 + (hi[3]-lo[3])^2)
-    tol = max(diag * reltol, eps(Float64))
-    inv = 1.0 / tol
+    diag = hypot(hi[1]-lo[1],hi[2]-lo[2],hi[3]-lo[3])
+    isfinite(diag) || throw(ArgumentError("read_stl: bounding-box diagonal is non-finite"))
+    tol = diag * reltol
+    isfinite(tol) || throw(ArgumentError("read_stl: absolute welding tolerance is non-finite"))
     # Quantize relative to the bbox min corner `lo`, not the absolute coordinate:
     # a constant per-axis bucket shift (does not change which vertices merge) that
     # bounds every key to [0, diag/tol] so far-from-origin coords can't overflow
     # Int64 in round(Int, ·) — an unshifted absolute coord ~1e11 does.
-    keyof(p) = (round(Int, (p[1]-lo[1])*inv), round(Int, (p[2]-lo[2])*inv), round(Int, (p[3]-lo[3])*inv))
-    idxmap = Dict{NTuple{3,Int},Int32}()
     xs=Float64[]; ys=Float64[]; zs=Float64[]
-    getid(p) = get!(idxmap, keyof(p)) do
-        push!(xs,p[1]); push!(ys,p[2]); push!(zs,p[3]); Int32(length(xs))
+    exactmap=Dict{NTuple{3,Float64},Int32}()
+    buckets=Dict{NTuple{3,Int},Vector{Int32}}()
+    inv = tol == 0 ? 0.0 : 1/tol
+    if tol > 0
+        cells = diag*inv
+        (isfinite(cells) && cells <= typemax(Int)-2) ||
+            throw(ArgumentError("read_stl: merge_tol is too small for Int bucket indices at this extent"))
+    end
+    keyof(p) = (floor(Int,(p[1]-lo[1])*inv),floor(Int,(p[2]-lo[2])*inv),floor(Int,(p[3]-lo[3])*inv))
+    function getid(p)
+        if tol == 0
+            key=(p[1]==0 ? 0.0 : p[1],p[2]==0 ? 0.0 : p[2],p[3]==0 ? 0.0 : p[3])
+            return get!(exactmap,key) do
+                length(xs)<typemax(Int32) || throw(ArgumentError("read_stl: unique vertex count exceeds Int32"))
+                push!(xs,p[1]);push!(ys,p[2]);push!(zs,p[3]);Int32(length(xs))
+            end
+        end
+        key=keyof(p)
+        for dz in -1:1, dy in -1:1, dx in -1:1
+            ids=get(buckets,(key[1]+dx,key[2]+dy,key[3]+dz),nothing)
+            ids === nothing && continue
+            for id in ids
+                hypot(p[1]-xs[id],p[2]-ys[id],p[3]-zs[id]) <= tol && return id
+            end
+        end
+        length(xs)<typemax(Int32) || throw(ArgumentError("read_stl: unique vertex count exceeds Int32"))
+        push!(xs,p[1]);push!(ys,p[2]);push!(zs,p[3]);id=Int32(length(xs))
+        push!(get!(() -> Int32[],buckets,key),id)
+        return id
     end
     tris = Matrix{Int32}(undef, 3, length(tris_xyz))
     ntri = 0

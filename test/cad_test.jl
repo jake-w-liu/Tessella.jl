@@ -18,6 +18,27 @@ using Tessella.Mesh3D: recover_boundary, tetrahedralize_conforming_exact
 
 @testset "CAD (native analytical geometry, Stage 5)" begin
 
+    @testset "analytical surface contracts and bounded disk projection" begin
+        @test_throws ArgumentError PlaneS((NaN,0,0),(0,0,1))
+        @test_throws ArgumentError CylinderS((0,0,0),(0,0,1),-1)
+        @test_throws ArgumentError SphereS((0,0,0),Inf)
+        @test_throws ArgumentError DiskS((0,0,0),(0,0,0),1)
+        @test_throws ArgumentError on_surface(SphereS((0,0,0),1),(1,0,0);tol=-1)
+
+        disk = DiskS((1.,2.,3.),(0.,0.,1.),2.)
+        @test on_surface(disk,(1.,2.,3.))
+        @test on_surface(disk,(3.,2.,3.))
+        @test !on_surface(disk,(3.1,2.,3.))
+        @test !on_surface(disk,(1.,2.,3.1))
+        @test project_to(disk,(1.,2.,9.)) == (1.,2.,3.)
+        @test project_to(disk,(5.,2.,9.)) == (3.,2.,3.)
+
+        cyl = CylinderS((0.,0.,0.),(0.,0.,1.),1.)
+        pln = PlaneS((0.,0.,0.),(0.,0.,1.))
+        @test_throws ArgumentError imprint_circle(cyl,pln;nseg=0)
+        @test_throws ArgumentError imprint_ellipse(cyl,pln;nseg=typemax(Int))
+    end
+
     @testset "exact surface membership + projection" begin
         rng = MersenneTwister(1)
         cyl = CylinderS((17.,10.,15.), (0.,1.,0.), 0.21)

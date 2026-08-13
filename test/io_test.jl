@@ -50,6 +50,30 @@ end
             write_msh(p, m; version=v, physical_names=Dict((3,4)=>nm))
             @test read_msh(p).physical_names[(3,4)] == nm
         end
+        nm = "quoted \"name\" \\ path\nline two"
+        write_msh(p, m; version=2.2, physical_names=Dict((3,4)=>nm))
+        @test read_msh(p).physical_names[(3,4)] == nm
+    end
+
+    @testset "MSH format errors are explicit and writes are atomic" begin
+        m=_cube(); p=joinpath(dir,"atomic.msh")
+        @test_throws ArgumentError write_msh(p,m;version=3.0)
+        write(p,"sentinel")
+        @test_throws ArgumentError write_msh(p,m;physical_names=Dict((3,4)=>17))
+        @test read(p,String)=="sentinel"                 # failed write did not truncate target
+
+        missing=joinpath(dir,"missing_format.msh")
+        write(missing,"\$Nodes\n0\n\$EndNodes\n")
+        @test_throws ArgumentError read_msh(missing)
+        unsupported=joinpath(dir,"unsupported.msh")
+        write(unsupported,"\$MeshFormat\n3.0 0 8\n\$EndMeshFormat\n")
+        @test_throws ArgumentError read_msh(unsupported)
+        duplicate=joinpath(dir,"duplicate_node.msh")
+        write(duplicate,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n1 1 0 0\n\$EndNodes\n")
+        @test_throws ArgumentError read_msh(duplicate)
+        unknown=joinpath(dir,"unknown_node.msh")
+        write(unknown,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n1\n1 0 0 0\n\$EndNodes\n\$Elements\n1\n1 1 0 1 2\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(unknown)
     end
 
     @testset "v4.1 round-trip preserves connectivity CRC" begin
@@ -234,6 +258,31 @@ end
         write(buf, UInt32(1)); write(buf, 0f0,0f0,0f0, 0f0,0f0,0f0, 1f0,0f0,0f0, 0f0,1f0,0f0, UInt16(0))
         pbs = joinpath(dir, "binsolid.stl"); write(pbs, take!(buf))
         @test ntris(read_stl(pbs)) == 1
+    end
+
+    @testset "STL parser and geometric welding contracts" begin
+        @test_throws ArgumentError read_stl(joinpath(dir,"tet.stl");merge_tol=-1)
+        malformed=joinpath(dir,"malformed.stl")
+        write(malformed,"solid x\nvertex 0 0 0\nvertex 1 0 0\nendsolid x\n")
+        @test_throws ArgumentError read_stl(malformed)
+        nonfinite=joinpath(dir,"nonfinite.stl")
+        write(nonfinite,"solid x\nvertex NaN 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid x\n")
+        @test_throws ArgumentError read_stl(nonfinite)
+
+        # Two vertices within tolerance but on opposite hash-cell sides must weld.
+        within = NTuple{9,Float64}[
+            (0.099,0.1,0.1, 10.,0.,0., 10.,1.,0.),
+            (0.101,0.1,0.1, 0.,10.,0., 1.,10.,0.)]
+        mw = Tessella.IO._weld_triangles(within,0.0071) # abs tol ≈0.100; gap=0.002
+        @test nnodes(mw)==5 && ntris(mw)==2
+
+        # Sharing a hash neighbourhood is insufficient: Euclidean distance is the
+        # contract, so a 3-D diagonal farther than tolerance stays distinct.
+        apart = NTuple{9,Float64}[
+            (0.10,0.10,0.10, 10.,0.,0., 10.,1.,0.),
+            (0.18,0.18,0.18, 0.,10.,0., 1.,10.,0.)]
+        ma = Tessella.IO._weld_triangles(apart,0.0071) # distance≈0.139 > tol≈0.100
+        @test nnodes(ma)==6 && ntris(ma)==2
     end
 
     @testset "read_geo_params on the enclosure fixture" begin
