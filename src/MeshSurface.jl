@@ -36,7 +36,22 @@ export PlaneFrame, plane_frame, project, lift
 @inline _cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
 @inline _norm(a) = sqrt(_dot(a,a))
 @inline function _unit(a)
-    n = _norm(a); n == 0 && error("MeshSurface: zero-length vector"); (a[1]/n,a[2]/n,a[3]/n)
+    n = _norm(a)
+    (isfinite(n) && n > 0) ||
+        throw(ArgumentError("MeshSurface: vector must have finite positive length (got $a)"))
+    (a[1]/n,a[2]/n,a[3]/n)
+end
+
+@inline function _point3(p, caller::AbstractString)
+    length(p) >= 3 || throw(ArgumentError("$caller: each point needs three coordinates"))
+    q = try
+        (Float64(p[1]), Float64(p[2]), Float64(p[3]))
+    catch err
+        throw(ArgumentError("$caller: point coordinates must be Float64-convertible: $(sprint(showerror, err))"))
+    end
+    (isfinite(q[1]) && isfinite(q[2]) && isfinite(q[3])) ||
+        throw(ArgumentError("$caller: point has non-finite coordinates $q"))
+    return q
 end
 
 # ── planar frame ────────────────────────────────────────────────────────────────
@@ -47,13 +62,29 @@ struct PlaneFrame
     n::NTuple{3,Float64}   # unit normal
 end
 
+function _validate_coplanar_loops(loops, fr::PlaneFrame)
+    scale = 1.0
+    for loop in loops, p0 in loop
+        p = _point3(p0, "mesh_planar_face")
+        scale = max(scale, abs(p[1]-fr.o[1]), abs(p[2]-fr.o[2]), abs(p[3]-fr.o[3]))
+    end
+    tol = 256eps(Float64)*scale
+    for (li, loop) in enumerate(loops), (pi, p0) in enumerate(loop)
+        p = _point3(p0, "mesh_planar_face")
+        dist = abs(_dot(_sub(p, fr.o), fr.n))
+        dist <= tol ||
+            throw(ArgumentError("mesh_planar_face: loop $li point $pi is not coplanar (plane distance $dist > tolerance $tol)"))
+    end
+    return nothing
+end
+
 """Orthonormal in-plane frame of a coplanar loop (Newell's method for the normal)."""
 function plane_frame(loop)
     m = length(loop)
     m >= 3 || throw(ArgumentError("plane_frame: loop needs ≥3 points"))
     nx=ny=nz=0.0
     @inbounds for i in 1:m
-        p = loop[i]; q = loop[mod1(i+1,m)]
+        p = _point3(loop[i], "plane_frame"); q = _point3(loop[mod1(i+1,m)], "plane_frame")
         nx += (p[2]-q[2])*(p[3]+q[3])
         ny += (p[3]-q[3])*(p[1]+q[1])
         nz += (p[1]-q[1])*(p[2]+q[2])
@@ -67,7 +98,7 @@ function plane_frame(loop)
          (abs(n[2]) <= abs(n[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
     u = _unit(_cross(ax, n))
     v = _cross(n, u)          # already unit (n,u orthonormal)
-    return PlaneFrame(Tuple(Float64.(loop[1])), u, v, n)
+    return PlaneFrame(_point3(loop[1], "plane_frame"), u, v, n)
 end
 
 @inline project(fr::PlaneFrame, p) = (_dot(_sub(p, fr.o), fr.u), _dot(_sub(p, fr.o), fr.v))
@@ -87,6 +118,7 @@ function mesh_planar_face(loops::AbstractVector, sf::AbstractSizeField;
                           min_angle_deg::Real=25.0, max_area::Real=Inf)
     isempty(loops) && throw(ArgumentError("mesh_planar_face: no loops"))
     fr = plane_frame(loops[1])
+    _validate_coplanar_loops(loops, fr)
     xs = Float64[]; ys = Float64[]; segs = Tuple{Int,Int}[]
     for loop in loops
         _add_loop!(xs, ys, segs, loop, sf, fr)
@@ -104,7 +136,8 @@ function _add_loop!(xs, ys, segs, loop, sf, fr)
     m >= 3 || throw(ArgumentError("mesh_planar_face: a loop needs ≥3 points"))
     start = length(xs) + 1
     for i in 1:m
-        p = Tuple(Float64.(loop[i])); q = Tuple(Float64.(loop[mod1(i+1,m)]))
+        p = _point3(loop[i], "mesh_planar_face")
+        q = _point3(loop[mod1(i+1,m)], "mesh_planar_face")
         pts, _ = mesh_segment(p, q, sf)
         # append all but the last node (shared with the next edge / loop closure)
         @inbounds for k in 1:length(pts)-1
@@ -146,8 +179,10 @@ guarantee once the two seam edges refine asymmetrically.
 function mesh_cylinder_face(center, axis, radius::Real, height::Real,
                             sf::AbstractSizeField; min_angle_deg::Real=25.0, max_area::Real=Inf)
     R = Float64(radius); H = Float64(height)
-    (R > 0 && H > 0) || throw(ArgumentError("mesh_cylinder_face: radius and height must be positive"))
-    c = Tuple(Float64.(center)); ez = _unit(Tuple(Float64.(axis)))
+    (isfinite(R) && isfinite(H) && R > 0 && H > 0) ||
+        throw(ArgumentError("mesh_cylinder_face: radius and height must be finite and positive (got $radius, $height)"))
+    c = _point3(center, "mesh_cylinder_face")
+    ez = _unit(_point3(axis, "mesh_cylinder_face"))
     ax = abs(ez[1]) <= abs(ez[2]) ?
          (abs(ez[1]) <= abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
          (abs(ez[2]) <= abs(ez[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
@@ -164,7 +199,16 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
     for k in 0:11
         hmin = min(hmin, size_at(sf, on(2π*k/12, H/2)))
     end
-    ntheta = max(6, round(Int, 2π*R / hmin))
+    sectors = 2π*R / hmin
+    sectors <= typemax(Int) ||
+        throw(ArgumentError("mesh_cylinder_face: requested circumferential node count exceeds the platform Int limit"))
+    ntheta = max(6, round(Int, sectors))
+    try
+        Base.checked_mul(nz, ntheta)
+        Base.checked_mul(Base.checked_mul(2, nz-1), ntheta)
+    catch
+        throw(ArgumentError("mesh_cylinder_face: requested mesh dimensions overflow the platform Int limit"))
+    end
     # structured nodes: level j (1..nz) × sector i (0..ntheta-1)
     coords = Matrix{Float64}(undef, 3, nz*ntheta)
     idx(j, i) = (j-1)*ntheta + (mod(i, ntheta)) + 1
@@ -195,15 +239,24 @@ to 3-D. Suitable for gently-curved patches; developable surfaces are exact via
 function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
                               sf::AbstractSizeField; min_angle_deg::Real=25.0, max_area::Real=Inf)
     umin=Float64(umin); umax=Float64(umax); vmin=Float64(vmin); vmax=Float64(vmax)
+    (isfinite(umin) && isfinite(umax) && isfinite(vmin) && isfinite(vmax) &&
+     umin < umax && vmin < vmax) ||
+        throw(ArgumentError("mesh_parametric_face: require finite bounds umin < umax and vmin < vmax"))
     du = 1e-6*(umax-umin); dv = 1e-6*(vmax-vmin)
+    surf(u,v) = _point3(s(u,v), "mesh_parametric_face")
     # local stretch factors (√E, √G) from finite differences
     stretch(u,v) = begin
-        su = _sub(s(u+du,v), s(u-du,v)); sv = _sub(s(u,v+dv), s(u,v-dv))
-        (_norm(su)/(2du), _norm(sv)/(2dv))
+        ul = max(umin, u-du); ur = min(umax, u+du)
+        vl = max(vmin, v-dv); vr = min(vmax, v+dv)
+        su = _sub(surf(ur,v), surf(ul,v)); sv = _sub(surf(u,vr), surf(u,vl))
+        a = _norm(su)/(ur-ul); b = _norm(sv)/(vr-vl)
+        (isfinite(a) && isfinite(b)) ||
+            throw(ArgumentError("mesh_parametric_face: non-finite surface stretch at ($u,$v)"))
+        (a,b)
     end
     # parameter-space size target: physical h divided by stretch (per axis, use min)
     sizefn = (u,v) -> begin
-        p = s(u,v); h = size_at(sf, p); (a,b) = stretch(u,v)
+        p = surf(u,v); h = size_at(sf, p); (a,b) = stretch(u,v)
         h / max(a, b, 1e-30)
     end
     # PSLG = parameter rectangle boundary, graded in parameter space
@@ -213,7 +266,10 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
     for i in 1:4
         p=corners[i]; q=corners[mod1(i+1,4)]
         # metric length along the edge in physical space
-        n = max(1, round(Int, _param_edge_metric(s, sf, p, q)))
+        metric = _param_edge_metric(surf, sf, p, q)
+        metric <= typemax(Int) ||
+            throw(ArgumentError("mesh_parametric_face: requested boundary node count exceeds the platform Int limit"))
+        n = max(1, round(Int, metric))
         for k in 0:n-1
             t=k/n; push!(xs, p[1]+t*(q[1]-p[1])); push!(ys, p[2]+t*(q[2]-p[2]))
         end
@@ -226,7 +282,7 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
     # map parameter mesh to 3-D
     nn=nnodes(m2); coords=Matrix{Float64}(undef,3,nn)
     @inbounds for i in 1:nn
-        p=s(m2.coords[1,i], m2.coords[2,i]); coords[1,i]=p[1]; coords[2,i]=p[2]; coords[3,i]=p[3]
+        p=surf(m2.coords[1,i], m2.coords[2,i]); coords[1,i]=p[1]; coords[2,i]=p[2]; coords[3,i]=p[3]
     end
     return Mesh(coords; tris=copy(m2.tris))
 end

@@ -20,7 +20,11 @@ dist(a,b) = sqrt(sum((a[i]-b[i])^2 for i in 1:3))
         @test size_at(mn, 0.05, 0.0, 0.0) ≈ 0.15    # 0.1+0.05 < 0.3
         @test size_at(mn, 1.0, 0.0, 0.0) ≈ 0.3      # 0.3 < 1.1
         @test_throws ArgumentError ConstantSize(-1.0)
+        @test_throws ArgumentError ConstantSize(Inf)
+        @test_throws ArgumentError ConstantSize(NaN)
         @test_throws ArgumentError size_at(FunctionSize((x,y,z)->-1.0), 0.0,0.0,0.0)
+        @test_throws ArgumentError size_at(FunctionSize((x,y,z)->"bad"), 0.0,0.0,0.0)
+        @test_throws ArgumentError size_at(FunctionSize((x,y,z)->big(10)^1000), 0.0,0.0,0.0)
     end
 
     @testset "arc length vs analytic" begin
@@ -28,6 +32,18 @@ dist(a,b) = sqrt(sum((a[i]-b[i])^2 for i in 1:3))
         @test curve_length(seg) ≈ 5.0 rtol=1e-9
         circ(t) = (2.0*cospi(2t), 2.0*sinpi(2t), 0.0)  # circumference 4π
         @test curve_length(circ; nsample=20000) ≈ 4π rtol=1e-6
+    end
+
+    @testset "curve contract and resource bounds" begin
+        seg(t) = (t, 0.0, 0.0)
+        @test_throws ArgumentError curve_length(seg; nsample=0)
+        @test_throws ArgumentError curve_length(seg; t0=1, t1=0)
+        @test_throws ArgumentError curve_length(t->(NaN,0.0,0.0); nsample=2)
+        @test_throws ArgumentError metric_length(seg, ConstantSize(1.0); nsample=-1)
+        @test_throws ArgumentError mesh_curve(t->(0.0,0.0,0.0), ConstantSize(1.0))
+        @test_throws ArgumentError mesh_curve(seg, ConstantSize(1.0); closed=true)
+        @test_throws ArgumentError mesh_segment((0.0,0.0,0.0), (1.0,0.0,0.0),
+                                                ConstantSize(1e-300); nsample=1)
     end
 
     @testset "constant size → uniform spacing, correct count" begin

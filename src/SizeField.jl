@@ -17,8 +17,10 @@ abstract type AbstractSizeField end
 struct ConstantSize <: AbstractSizeField
     h::Float64
     function ConstantSize(h::Real)
-        h > 0 || throw(ArgumentError("ConstantSize: h must be positive"))
-        new(Float64(h))
+        hf = Float64(h)
+        (isfinite(hf) && hf > 0) ||
+            throw(ArgumentError("ConstantSize: h must be finite and positive (got $h)"))
+        new(hf)
     end
 end
 
@@ -39,8 +41,16 @@ end
 @inline size_at(sf::ConstantSize, x, y, z) = sf.h
 @inline function size_at(sf::FunctionSize, x, y, z)
     h = sf.f(x, y, z)
-    (h > 0 && isfinite(h)) || throw(ArgumentError("FunctionSize: f returned non-positive/NaN size $h at ($x,$y,$z)"))
-    return Float64(h)
+    h isa Real ||
+        throw(ArgumentError("FunctionSize: f must return a real size (got $(typeof(h))) at ($x,$y,$z)"))
+    hf = try
+        Float64(h)
+    catch err
+        throw(ArgumentError("FunctionSize: f returned size $h that is not representable as Float64 at ($x,$y,$z): $(sprint(showerror, err))"))
+    end
+    (hf > 0 && isfinite(hf)) ||
+        throw(ArgumentError("FunctionSize: f returned non-finite or non-positive size $h at ($x,$y,$z)"))
+    return hf
 end
 function size_at(sf::MinSize, x, y, z)
     m = Inf

@@ -30,6 +30,21 @@ end
 
 @testset "MeshSurface (Stage 2)" begin
 
+    @testset "surface input contracts" begin
+        sf = ConstantSize(1.0)
+        @test_throws ArgumentError plane_frame([(0.0,0.0,0.0),(1.0,0.0,0.0),(NaN,1.0,0.0)])
+        @test_throws ArgumentError mesh_planar_face(
+            [[(0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,1.0,1.0),(0.0,1.0,0.0)]], sf)
+        @test_throws ArgumentError mesh_cylinder_face(
+            (0.0,0.0,0.0),(0.0,0.0,1.0),1.0,Inf,sf)
+        @test_throws ArgumentError mesh_cylinder_face(
+            (0.0,0.0,0.0),(0.0,0.0,0.0),1.0,1.0,sf)
+        @test_throws ArgumentError mesh_parametric_face(
+            (u,v)->(u,v,0.0),1.0,0.0,0.0,1.0,sf)
+        @test_throws ArgumentError mesh_parametric_face(
+            (u,v)->(NaN,v,0.0),0.0,1.0,0.0,1.0,sf)
+    end
+
     @testset "tilted planar rectangle: exact area + quality" begin
         o=(1.0,2.0,3.0); u=(1/sqrt(2),1/sqrt(2),0.0); v=(0.0,0.0,1.0)
         c1=o; c2=o.+6.0.*u; c3=o.+6.0.*u.+4.0.*v; c4=o.+4.0.*v
