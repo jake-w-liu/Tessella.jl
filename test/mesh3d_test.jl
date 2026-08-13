@@ -624,6 +624,44 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             end
             @test maximum(values(ftc)) <= 2                             # conforming (conductor/substrate interface shared)
         end
+
+        @testset "finned heat sink (HFSS 9.1 class): base + fins as one native box union" begin
+            # Representative of the 9.1 heat-sink eigenmode geometry — a finned metal
+            # block (base slab + parallel fins) built as ONE conforming solid via native
+            # box CSG (all fins share the base's top face). Exact total volume + valid +
+            # size-controlled + watertight — the kind of enclosure-metal Tessella meshes.
+            R = BoxRegion[BoxRegion(0.0,20.0, 0.0,20.0, 0.0,2.0, 1)]        # base slab
+            for x0 in (1.0,5.0,9.0,13.0,17.0)
+                push!(R, BoxRegion(x0,x0+2.0, 0.0,20.0, 2.0,12.0, 1))       # fin (same tag ⇒ fused)
+            end
+            m = mesh_box_regions(R; hmax=3.0)
+            @test validate(m).ok
+            @test maxedge(m) <= 3.0 + 1e-9
+            vol = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t])) for t in 1:ntets(m))
+            @test vol ≈ (20*20*2 + 5*(2*20*10)) rtol=1e-9                    # base + 5 fins = 2800 exactly
+            _, mi = boundary_faces(m.tets); @test mi == 2                    # watertight
+        end
+    end
+
+    @testset "dielectric resonator (HFSS 6.6 class): cylinder puck in a cavity, conforming" begin
+        # Representative of the 6.6 dielectric-resonator geometry — a cylindrical
+        # dielectric puck seated inside a metal air cavity, meshed as ONE conforming
+        # partition (puck region + surrounding air region) on the exact kernel. This is
+        # the coax-junction pattern applied to a puck, and exercises the #11-fixed
+        # cospherical cylinder input. Every region filled, manifold, watertight.
+        puck = cylinder_surface((10.0,10.0,5.0),(0.0,0.0,1.0), 5.0, 4.0; nθ=16, nz=3)
+        air  = box_surface(0.0,20.0, 0.0,20.0, 0.0,15.0)
+        m = tetrahedralize_conforming_exact([puck, air])
+        @test validate(m).ok
+        tpr = tets_per_region(m)
+        @test Set(keys(tpr)) == Set(Int32[1,2]) && all(v->v>0, values(tpr))   # puck + air filled
+        _, mi = boundary_faces(m.tets); @test mi == 2                         # watertight overall
+        # conforming: no interface face shared by more than two tets
+        ftc=Dict{NTuple{3,Int32},Int}()
+        for t in 1:ntets(m), k in 1:4
+            vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j!=k])); ftc[f]=get(ftc,f,0)+1
+        end
+        @test maximum(values(ftc)) <= 2
     end
 
     # ── Stage-4: mesh_cylinder — uniform size-controlled cylinder (no Delaunay) ──────
