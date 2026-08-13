@@ -29,6 +29,9 @@ using Tessella
     # Stage 6 — high-order elements.
     include("highorder_test.jl")    # quadratic (P2) tet generation + type-11 I/O
 
+    # Application: native meshes for all 22 HFSS User Guide case geometries (no gmsh/OCC).
+    include("hfss_cases_test.jl")   # STATUS #12 meshing half — valid+watertight+conforming
+
     @testset "stage banner" begin
         @test Tessella.stage() isa Int
         @test Tessella.stage() >= 1     # Stage 0 gate is green

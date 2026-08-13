@@ -28,7 +28,7 @@ module Optimize
 using ..MeshTypes: Mesh, nnodes, ntets, node, tet_signed_volume, tet_dihedral_extrema,
                    tet_radius_edge, tet_volume, boundary_faces, validate
 
-export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, TetQuality
+export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, TetQuality
 
 struct TetQuality
     n_tets::Int
@@ -220,6 +220,36 @@ function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
         end
     end
     return Mesh(coords; tets=copy(m.tets), tet_tag=copy(m.tet_tag))
+end
+
+"""
+    remove_slivers(m; max_rounds=8, sliver_deg=10.0) -> (Mesh, report)
+
+Converging sliver-exudation driver (geometric route). Repeatedly applies the
+targeted optimization-based smoother [`smooth_optimize`](@ref) — re-identifying the
+poor vertex stars each round after the previous round's moves reshape their
+neighbourhoods — and **accepts a round only if it is valid and strictly reduces the
+sliver count**, so the result is monotone-non-worsening and stops at convergence.
+Validity, total volume, boundary, and region tags are all preserved. Returns the
+improved mesh and a report NamedTuple `(slivers_before, slivers_after,
+min_dihedral_before, min_dihedral_after)`. The topological complement (2-3/3-2
+flips that repair slivers connectivity-smoothing cannot reach) is
+[`Mesh3D.optimize_flips!`](@ref); `mesh_volume(optimize=true)` runs both.
+"""
+function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
+    q0 = mesh_quality(m; sliver_deg=sliver_deg)
+    best = m; bestn = q0.n_slivers
+    for _ in 1:max_rounds
+        bestn == 0 && break
+        cand = smooth_optimize(best; iters=4, sliver_deg=sliver_deg)
+        (validate(cand).ok) || break
+        q = mesh_quality(cand; sliver_deg=sliver_deg)
+        (q.n_slivers < bestn) || break                # converged / no further gain
+        best = cand; bestn = q.n_slivers
+    end
+    qf = mesh_quality(best; sliver_deg=sliver_deg)
+    return best, (slivers_before = q0.n_slivers, slivers_after = qf.n_slivers,
+                  min_dihedral_before = q0.min_dihedral_deg, min_dihedral_after = qf.min_dihedral_deg)
 end
 
 # star quality = min over incident tets of min(min_dihedral, π − max_dihedral): a
