@@ -1017,6 +1017,42 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test maximum(values(ftc)) <= 2                       # conforming: no face shared by >2 tets
     end
 
+    @testset "mesh_sized_extrude: uniform sizing on extruded (prismatic) domains" begin
+        # Guaranteed maxedge ≤ hmax on an EXTRUDED polygon — 2-D Ruppert cross-section
+        # (edges ≤ hmax/√2) + sized layers + conforming column-index prism→tet split.
+        # Valid + watertight + EXACT volume (boundary preserved, no jitter) + conforming,
+        # for non-convex sections and sections with holes. The prismatic case of uniform
+        # sizing on an arbitrary domain (complements mesh_box / mesh_cylinder).
+        me3(m) = maximum(begin vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); e=0.0
+            for i in 1:4,j in i+1:4; a=vs[i];b=vs[j]; e=max(e, sqrt(sum((m.coords[k,a]-m.coords[k,b])^2 for k in 1:3))); end; e end for t in 1:ntets(m))
+        vol3(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t])) for t in 1:ntets(m))
+        conf3(m) = begin ftc=Dict{NTuple{3,Int32},Int}()
+            for t in 1:ntets(m),k in 1:4; vs=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t]); f=Tuple(sort(Int32[vs[j] for j in 1:4 if j!=k])); ftc[f]=get(ftc,f,0)+1; end
+            maximum(values(ftc)) end
+        # non-convex L-prism (area 3, extruded z 0..1 → volume 3), hmax sweep
+        Lx=[0.0,2,2,1,1,0]; Ly=[0.0,0,1,1,2,2]; Lseg=[(1,2),(2,3),(3,4),(4,5),(5,6),(6,1)]
+        for h in (0.6, 0.4, 0.25)
+            m = mesh_sized_extrude(Lx, Ly, Lseg, 0.0, 1.0; hmax=h)
+            @test validate(m).ok
+            @test me3(m) <= h + 1e-9                          # guaranteed max-edge
+            @test vol3(m) ≈ 3.0 rtol=1e-9                     # exact volume (boundary preserved)
+            @test boundary_faces(m.tets)[2] == 2              # watertight
+            @test conf3(m) <= 2                               # conforming
+        end
+        # cross-section WITH A HOLE: square [0,4]² minus [1.5,2.5]², extruded z 0..2 → vol 30
+        Hx=[0.0,4,4,0, 1.5,2.5,2.5,1.5]; Hy=[0.0,0,4,4, 1.5,1.5,2.5,2.5]
+        Hseg=[(1,2),(2,3),(3,4),(4,1), (5,6),(6,7),(7,8),(8,5)]
+        m = mesh_sized_extrude(Hx, Hy, Hseg, 0.0, 2.0; hmax=0.6)
+        @test validate(m).ok
+        @test me3(m) <= 0.6 + 1e-9
+        @test vol3(m) ≈ 30.0 rtol=1e-9                        # genus-1 prism, exact volume
+        @test boundary_faces(m.tets)[2] == 2
+        @test conf3(m) <= 2
+        # error paths
+        @test_throws ArgumentError mesh_sized_extrude(Lx, Ly, Lseg, 0.0, 1.0; hmax=-1.0)
+        @test_throws ArgumentError mesh_sized_extrude(Lx, Ly, Lseg, 1.0, 1.0; hmax=0.5)
+    end
+
     @testset "exact-coordinate Delaunay kernel (Rational{BigInt})" begin
         # A valid Delaunay tetrahedralization on exact rational coords (empty circumsphere
         # exact; valid closed-manifold positive-volume mesh), breaking cospherical/coplanar
