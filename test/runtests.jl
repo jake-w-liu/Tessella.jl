@@ -23,6 +23,7 @@ using Tessella
     # Stage 5 — heal + native primitives + top-level pipeline.
     include("heal_test.jl")         # surface diagnostics (open/non-manifold/degenerate…)
     include("geometry_test.jl")     # box / cylinder / box-tunnel primitives
+    include("cad_test.jl")          # native analytical geometry (surfaces + exact imprints), no OCC
     include("pipeline_test.jl")     # mesh_volume: validated-or-explicit-blocker
 
     # Stage 6 — high-order elements.
