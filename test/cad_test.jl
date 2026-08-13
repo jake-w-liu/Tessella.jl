@@ -13,7 +13,8 @@ using Tessella
 using Tessella.CAD
 using Tessella.MeshTypes
 using Tessella.HighOrder
-using Tessella.Mesh3D: recover_boundary
+using Tessella.Geometry
+using Tessella.Mesh3D: recover_boundary, tetrahedralize_conforming_exact
 
 @testset "CAD (native analytical geometry, Stage 5)" begin
 
@@ -82,5 +83,36 @@ using Tessella.Mesh3D: recover_boundary
             abs(sqrt(sum(p.^2)) - R) < 1e-9 && (maxres = max(maxres, abs(surface_residual(sph, p))))
         end
         @test maxres < 1e-9
+    end
+
+    @testset "literal ENC-COAX with EXACT native curved geometry (no OCC)" begin
+        # the literal enclosure meshed with exact analytical curved surfaces + the exact
+        # boolean bore imprint, all native (CAD + P2 curving) — the OCC-`BooleanFragments`
+        # exact geometry the .geo builds, computed ourselves to round-off.
+        pin = (0.17, 0.1605, 0.15,  0.0, -0.1589, 0.0,  0.0008)   # sm_coax_pin from the fixture
+        pinl = sqrt(pin[4]^2+pin[5]^2+pin[6]^2)
+        airs  = box_surface(0.,0.22, 0.,0.14, 0.,0.30)
+        shell = box_shell_surface(-5e-4,0.2205, -5e-4,0.1405, -5e-4,0.3005, 0.,0.22, 0.,0.14, 0.,0.30)
+        pins  = cylinder_surface((pin[1],pin[2],pin[3]), (pin[4],pin[5],pin[6]), pin[7], pinl; nθ=8, nz=2)
+        m  = tetrahedralize_conforming_exact([pins, airs, shell])
+        @test validate(m).ok
+        p2 = p2_tetmesh(m)
+        pincyl = CylinderS((pin[1],pin[2],pin[3]), (pin[4],pin[5],pin[6]), pin[7])
+        nc = curve_to_surface!(p2, (x,y,z)->project_to(pincyl,(x,y,z)),
+                                   (x,y,z)->on_surface(pincyl,(x,y,z); tol=1e-9*pin[7]))
+        @test nc > 0                                          # pin wall curved onto the exact cylinder
+        # curved pin nodes lie exactly on the analytical pin cylinder
+        for i in 1:size(p2.coords,2)
+            p = (p2.coords[1,i], p2.coords[2,i], p2.coords[3,i])
+            if abs(surface_residual(pincyl, p)) < 1e-9*pin[7]
+                @test abs(surface_residual(pincyl, p)) < 1e-10
+            end
+        end
+        # exact bore imprint where the pin axis pierces the top air-cavity wall (y = 0.14)
+        wall = PlaneS((0.,0.14,0.), (0.,1.,0.))
+        ctr, circ = imprint_circle(pincyl, wall; nseg=24)
+        @test ctr == (0.17, 0.14, 0.15)
+        @test maximum(abs(surface_residual(pincyl, p)) for p in circ) < 1e-12   # on the exact cylinder
+        @test maximum(abs(surface_residual(wall,   p)) for p in circ) < 1e-12   # and on the exact wall
     end
 end
