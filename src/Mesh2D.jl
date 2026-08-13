@@ -184,9 +184,28 @@ end
 # ════════════════════════════════════════════════════════════════════════════════
 
 function Triangulation(xs::Vector{Float64}, ys::Vector{Float64})
-    n = length(xs); @assert length(ys) == n
+    n = _validate_points(xs, ys, "Triangulation")
     return Triangulation(xs, ys, Int32[], Int32[], Bool[], Int32[], n, Int32(0),
                          zeros(Int32, n), Set{NTuple{2,Int32}}())
+end
+
+function _validate_points(xs::Vector{Float64}, ys::Vector{Float64}, caller::AbstractString)
+    n = length(xs)
+    length(ys) == n ||
+        throw(ArgumentError("$caller: xs and ys must have the same length (got $n and $(length(ys)))"))
+    n <= typemax(Int32) ||
+        throw(ArgumentError("$caller: $n points exceed the Int32 indexing limit"))
+    @inbounds for i in 1:n
+        (isfinite(xs[i]) && isfinite(ys[i])) ||
+            throw(ArgumentError("$caller: point $i has non-finite coordinates ($(xs[i]), $(ys[i]))"))
+    end
+    return n
+end
+
+function _seed64(seed::Integer, caller::AbstractString)
+    0 <= seed <= typemax(UInt64) ||
+        throw(ArgumentError("$caller: rng_seed must be in 0:$(typemax(UInt64)) (got $seed)"))
+    return UInt64(seed)
 end
 
 # Build the seed: first non-collinear triple → 1 real triangle ringed by 3 ghosts.
@@ -292,6 +311,11 @@ end
 
 function insert_point!(T::Triangulation, vid::Integer; constrained::Bool=false,
                       newtris::Union{Nothing,Vector{Int32}}=nothing)
+    1 <= vid <= T.nreal ||
+        throw(ArgumentError("insert_point!: vertex $vid is outside 1:$(T.nreal)"))
+    @inbounds T.vtri[vid] == 0 ||
+        throw(ArgumentError("insert_point!: vertex $vid is already present in the triangulation"))
+    vid = Int32(vid)
     px, py = _pt(T, vid)
     t0 = locate(T, px, py, vid)
     cavity = Int32[t0]
@@ -499,7 +523,15 @@ segment the segment is split there. Finally the affected non-constrained edges
 are re-legalized to restore the constrained-Delaunay property.
 """
 function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
-    vi == vj && return
+    1 <= vi <= T.nreal ||
+        throw(ArgumentError("insert_segment!: vertex $vi is outside 1:$(T.nreal)"))
+    1 <= vj <= T.nreal ||
+        throw(ArgumentError("insert_segment!: vertex $vj is outside 1:$(T.nreal)"))
+    vi == vj && throw(ArgumentError("insert_segment!: a constraint must have two distinct endpoints"))
+    (@inbounds T.vtri[vi] != 0) ||
+        throw(ArgumentError("insert_segment!: vertex $vi has not been inserted"))
+    (@inbounds T.vtri[vj] != 0) ||
+        throw(ArgumentError("insert_segment!: vertex $vj has not been inserted"))
     vi = Int32(vi); vj = Int32(vj)
     et, _ = _edge_between(T, vi, vj)
     if et != 0
@@ -535,11 +567,18 @@ function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
     end
     # flip crossed edges until the segment exists
     newedges = Tuple{Int32,Int32}[]
-    queue = crossed
+    # Amortized-O(1) FIFO. `popfirst!` shifts the full vector on every flip and made
+    # long constraint walks quadratic in both copied bytes and wall time.
+    front = reverse!(crossed)
+    back = Tuple{Int32,Int32}[]
     guard = 0; maxflip = 200*length(crossed) + 1000
-    while !isempty(queue)
+    while !isempty(front) || !isempty(back)
         guard += 1; guard > maxflip && error("Mesh2D: segment flip loop stalled")
-        (a, b) = popfirst!(queue)
+        if isempty(front)
+            reverse!(back)
+            front, back = back, front
+        end
+        (a, b) = pop!(front)
         _skey(a, b) in T.seg &&
             throw(ArgumentError("Mesh2D: constraint ($vi,$vj) crosses existing constraint ($a,$b); PSLG segments must not cross (split them at the intersection first)"))
         t1, k1, t2 = _edge_triangles(T, a, b)
@@ -553,12 +592,12 @@ function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
         if (ox > 0) != (oy > 0) && ox != 0 && oy != 0
             _flip!(T, t1, k1)                          # (x,y) → (p,s)
             if _crosses_segment(T, p, s, vi, vj)
-                push!(queue, _skey(p, s))
+                push!(back, _skey(p, s))
             else
                 push!(newedges, _skey(p, s))
             end
         else
-            push!(queue, (a, b))                       # non-convex: defer
+            push!(back, (a, b))                        # non-convex: defer
         end
     end
     push!(T.seg, _skey(vi, vj))
@@ -572,7 +611,9 @@ function _legalize!(T::Triangulation, edges::Vector{Tuple{Int32,Int32}})
     stack = copy(edges)
     guard = 0; maxg = 500*length(edges) + 2000
     while !isempty(stack)
-        guard += 1; guard > maxg && break
+        guard += 1
+        guard > maxg &&
+            error("Mesh2D: constrained-edge legalization did not converge after $maxg operations")
         (a, b) = pop!(stack)
         (_skey(a,b) in T.seg) && continue             # never flip a constraint
         t1, k1, t2 = _edge_triangles(T, a, b)
@@ -605,13 +646,14 @@ fixed-seed randomized order; the resulting triangulation is order-independent
 (SoS makes even degenerate ties deterministic in the vertex indices).
 """
 function delaunay2d(xs::Vector{Float64}, ys::Vector{Float64}; rng_seed::Integer=1)
+    seed = _seed64(rng_seed, "delaunay2d")
     ux, uy, _ = dedup_points(xs, ys)
     T = Triangulation(ux, uy)
     placed = _init_triangulation!(T)
     isempty(placed) && return T                    # <3 non-collinear points → no triangles
     placedset = Set{Int32}(placed)
     order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
-    _shuffle_det!(order, UInt64(rng_seed))
+    _shuffle_det!(order, seed)
     for v in order
         insert_point!(T, v)
     end
@@ -626,14 +668,18 @@ Merge exactly-coincident points (Delaunay of duplicated points is undefined).
 relabelling).
 """
 function dedup_points(xs::Vector{Float64}, ys::Vector{Float64})
-    n = length(xs); @assert length(ys) == n
+    n = _validate_points(xs, ys, "dedup_points")
     seen = Dict{Tuple{Float64,Float64},Int32}()
     ux = Float64[]; uy = Float64[]; remap = Vector{Int32}(undef, n)
     @inbounds for i in 1:n
-        key = (xs[i], ys[i])
+        # Dict uses `isequal`, which distinguishes -0.0 from +0.0 even though they
+        # are the same geometric coordinate. Canonicalize zeros before keying.
+        x = xs[i] == 0.0 ? 0.0 : xs[i]
+        y = ys[i] == 0.0 ? 0.0 : ys[i]
+        key = (x, y)
         id = get(seen, key, Int32(0))
         if id == 0
-            push!(ux, xs[i]); push!(uy, ys[i]); id = Int32(length(ux)); seen[key] = id
+            push!(ux, x); push!(uy, y); id = Int32(length(ux)); seen[key] = id
         end
         remap[i] = id
     end
@@ -665,6 +711,8 @@ geometry yields an identical `mesh_crc` regardless of insertion order). If
 kept — used by CDT/refinement to drop exterior/hole regions.
 """
 function to_mesh(T::Triangulation; interior::Union{Nothing,AbstractVector{Bool}}=nothing)
+    interior !== nothing && length(interior) != length(T.alive) &&
+        throw(ArgumentError("to_mesh: interior mask length $(length(interior)) does not match triangle storage length $(length(T.alive))"))
     tris = NTuple{3,Int32}[]
     @inbounds for t in eachindex(T.alive)
         T.alive[t] || continue
@@ -703,7 +751,19 @@ and segment indices relabelled consistently.
 function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
                               segments::AbstractVector{<:Tuple{Integer,Integer}};
                               rng_seed::Integer=1)
+    seed = _seed64(rng_seed, "constrained_delaunay")
     ux, uy, remap = dedup_points(xs, ys)
+    n = length(xs)
+    for (s, (i, j)) in enumerate(segments)
+        1 <= i <= n ||
+            throw(ArgumentError("constrained_delaunay: segment $s endpoint $i is outside 1:$n"))
+        1 <= j <= n ||
+            throw(ArgumentError("constrained_delaunay: segment $s endpoint $j is outside 1:$n"))
+        i != j ||
+            throw(ArgumentError("constrained_delaunay: segment $s has identical endpoints $i"))
+        remap[i] != remap[j] ||
+            throw(ArgumentError("constrained_delaunay: segment $s collapses after coincident-point deduplication"))
+    end
     T = Triangulation(ux, uy)
     placed = _init_triangulation!(T)
     if isempty(placed)
@@ -714,11 +774,11 @@ function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
     end
     placedset = Set{Int32}(placed)
     order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
-    _shuffle_det!(order, UInt64(rng_seed))
+    _shuffle_det!(order, seed)
     for v in order; insert_point!(T, v); end
     for (i, j) in segments
         vi = remap[i]; vj = remap[j]
-        vi != vj && insert_segment!(T, vi, vj)
+        insert_segment!(T, vi, vj)
     end
     return T
 end
@@ -734,6 +794,23 @@ the domain boundary to be closed constrained loops (as a meshing domain must be)
 """
 function classify_interior(T::Triangulation)
     ntri = length(T.alive)
+    if !isempty(T.seg)
+        degree = zeros(UInt8, T.nreal)
+        for (a, b) in T.seg
+            @inbounds begin
+                degree[a] < 2 ||
+                    throw(ArgumentError("classify_interior: constrained boundary branches at vertex $a"))
+                degree[b] < 2 ||
+                    throw(ArgumentError("classify_interior: constrained boundary branches at vertex $b"))
+                degree[a] += 1; degree[b] += 1
+            end
+        end
+        @inbounds for v in eachindex(degree)
+            degree[v] == 0 && continue
+            degree[v] == 2 ||
+                throw(ArgumentError("classify_interior: constrained boundary is open at vertex $v (degree $(degree[v]))"))
+        end
+    end
     visited = falses(ntri)
     par = falses(ntri)                 # false = exterior side, true = interior
     stack = Tuple{Int32,Bool}[]
@@ -745,9 +822,14 @@ function classify_interior(T::Triangulation)
         t, p = pop!(stack)
         for k in 1:3
             nb = _nbr(T, t, k)
-            (nb == 0 || visited[nb] || !T.alive[nb]) && continue
+            (nb == 0 || !T.alive[nb]) && continue
             a, b = _edge(T, t, k)
             np = (_skey(a, b) in T.seg) ? !p : p    # crossing a constraint toggles
+            if visited[nb]
+                par[nb] == np ||
+                    throw(ArgumentError("classify_interior: inconsistent boundary parity across edge $(_skey(a,b))"))
+                continue
+            end
             visited[nb] = true; par[nb] = np; push!(stack, (nb, np))
         end
     end
@@ -799,6 +881,10 @@ end
     if sizefn !== nothing
         cx = (a[1]+b[1]+c[1])/3; cy = (a[2]+b[2]+c[2])/3
         h = sizefn(cx, cy)
+        h isa Real ||
+            throw(ArgumentError("refine!: size callback must return a real size (got $(typeof(h))) at ($cx,$cy)"))
+        (!isnan(h) && h > 0) ||
+            throw(ArgumentError("refine!: size callback returned invalid size $h at ($cx,$cy)"))
         emax = max(_dist(a,b), _dist(b,c), _dist(c,a))
         emax > h && return true
     end
@@ -847,14 +933,21 @@ encroached subsegments and insert circumcenters of skinny interior triangles
 (radius-edge ratio > 1/(2 sin θ), or area > `max_area`) until the quality bound
 holds. Constraints are preserved (constrained point insertion). Returns the final
 per-triangle interior mask. `min_angle_deg ≲ 20.7°` guarantees termination.
+If `maxsteps` is exhausted while any criterion remains unmet, refinement throws an
+explicit blocker rather than returning a mesh that violates the requested bounds.
 """
 function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
-                 size::Union{Nothing,Function}=nothing, maxsteps::Integer=300_000)
-    B = 1.0 / (2.0*sind(float(min_angle_deg)))
+                 size=nothing, maxsteps::Integer=300_000)
+    angle = float(min_angle_deg)
+    (isfinite(angle) && 0 <= angle < 60) ||
+        throw(ArgumentError("refine!: min_angle_deg must be finite and in [0, 60) (got $min_angle_deg)"))
+    area = float(max_area)
+    (!isnan(area) && area > 0) ||
+        throw(ArgumentError("refine!: max_area must be positive or Inf (got $max_area)"))
+    maxsteps > 0 || throw(ArgumentError("refine!: maxsteps must be positive (got $maxsteps)"))
+    B = angle == 0 ? Inf : 1.0 / (2.0*sind(angle))
     interior = Vector{Bool}(collect(classify_interior(T)))
-    steps = 0
-    while steps < maxsteps
-        steps += 1
+    for _ in 1:maxsteps
         # (1) split an encroached subsegment, if any
         enc = _find_encroached(T)
         if enc !== nothing
@@ -862,8 +955,8 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             continue
         end
         # (2) pick a triangle that violates the angle/area/size criteria
-        t = _find_bad(T, interior, B, max_area, size)
-        t == 0 && break
+        t = _find_bad(T, interior, B, area, size)
+        t == 0 && return interior
         a=_vert(T,t,1); b=_vert(T,t,2); c=_vert(T,t,3)
         cc = _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
         # (3) if the circumcenter encroaches subsegments, split those instead
@@ -875,7 +968,12 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         # (4) insert the circumcenter (constrained); skip if it falls outside the domain
         _insert_steiner!(T, cc, interior)
     end
-    return interior
+    enc = _find_encroached(T)
+    bad = _find_bad(T, interior, B, area, size)
+    enc === nothing && bad == 0 && return interior
+    remaining = enc === nothing ? "a triangle still violates a quality/area/size bound" :
+                                  "constrained segment $(enc) remains encroached"
+    throw(ErrorException("refine!: reached maxsteps=$maxsteps before convergence; $remaining"))
 end
 
 # Deterministic iteration order over the constraint set (a Set has none), so the

@@ -59,6 +59,40 @@ end
 
 @testset "Mesh2D Delaunay (Stage 1)" begin
 
+    @testset "public input and state contracts" begin
+        @test_throws ArgumentError dedup_points([0.0], [0.0, 1.0])
+        @test_throws ArgumentError delaunay2d([0.0, 1.0, NaN], [0.0, 0.0, 1.0])
+        @test_throws ArgumentError delaunay2d([0.0, 1.0, 0.0], [0.0, Inf, 1.0])
+        @test_throws ArgumentError delaunay2d([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]; rng_seed=-1)
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0], [0.0,0.0,1.0], Tuple{Int,Int}[]; rng_seed=big(2)^80)
+
+        ux, uy, remap = dedup_points([-0.0, 0.0], [0.0, -0.0])
+        @test ux == [0.0] && uy == [0.0]
+        @test !signbit(ux[1]) && !signbit(uy[1])
+        @test remap == Int32[1, 1]
+
+        T = delaunay2d([0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+        @test_throws ArgumentError insert_point!(T, 0)
+        @test_throws ArgumentError insert_point!(T, 4)
+        @test_throws ArgumentError insert_point!(T, 1)       # already inserted
+        @test_throws ArgumentError insert_segment!(T, 0, 1)
+        @test_throws ArgumentError insert_segment!(T, 1, 1)
+        @test_throws ArgumentError to_mesh(T; interior=Bool[true])
+
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0], [0.0,0.0,1.0], [(1,4)])
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0], [0.0,0.0,1.0], [(2,2)])
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,-0.0,1.0,0.0], [0.0,0.0,0.0,1.0], [(1,2)])
+
+        @test_throws ArgumentError Tessella.mesh_planar(
+            Float64[0,1,0], Float64[0,0,1], Tuple{Int,Int}[])
+        @test_throws ArgumentError Tessella.mesh_planar(
+            Float64[0,1,1,0], Float64[0,0,1,1], [(1,2)])
+    end
+
     @testset "tiny cases" begin
         # single triangle
         m = triangulate([0.0,1.0,0.0], [0.0,0.0,1.0])
@@ -142,6 +176,12 @@ mesh_area(m) = sum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2,t]),node(m,
 edge_in(T, vi, vj) = Tessella.Mesh2D._edge_between(T, Int32(vi), Int32(vj))[1] != 0
 
 @testset "Mesh2D CDT (Stage 1)" begin
+
+    @testset "interior classification requires closed boundary loops" begin
+        xs=Float64[0,1,1,0]; ys=Float64[0,0,1,1]
+        openT = constrained_delaunay(xs, ys, [(1,2)])
+        @test_throws ArgumentError classify_interior(openT)
+    end
 
     @testset "skew constraint crossing a grid" begin
         xs=Float64[]; ys=Float64[]
@@ -252,6 +292,23 @@ mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2
                                for t in 1:ntris(m); init=0.0)
 
 @testset "Mesh2D Ruppert refinement (Stage 1)" begin
+
+    @testset "parameter validation and explicit step-limit blocker" begin
+        makeT() = constrained_delaunay(Float64[0,1,1,0], Float64[0,0,1,1],
+                                       [(1,2),(2,3),(3,4),(4,1)])
+        @test_throws ArgumentError refine!(makeT(); min_angle_deg=NaN)
+        @test_throws ArgumentError refine!(makeT(); min_angle_deg=-1)
+        @test_throws ArgumentError refine!(makeT(); min_angle_deg=60)
+        @test_throws ArgumentError refine!(makeT(); max_area=0)
+        @test_throws ArgumentError refine!(makeT(); max_area=NaN)
+        @test_throws ArgumentError refine!(makeT(); maxsteps=0)
+        @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
+                                           size=(x,y)->NaN, maxsteps=1)
+        @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
+                                           size=(x,y)->"bad", maxsteps=1)
+        @test_throws ErrorException refine!(makeT(); min_angle_deg=0,
+                                            max_area=0.01, maxsteps=1)
+    end
 
     @testset "angle bound achieved, area & constraints preserved" begin
         r = _RNG(0xBEEF01)
