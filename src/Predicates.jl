@@ -447,76 +447,14 @@ end
 #
 # When the fast float-minor sequence leaves a *fully* degenerate tie unresolved (all
 # minors vanish — e.g. 4 collinear points for orient3), fall to this exact
-# evaluation: expand the determinant as a polynomial in ε under the Edelsbrunner–
-# Mücke perturbation pᵢ[j] += ε^(2^(rankᵢ·d − j)), ε→0⁺, and return the sign of its
-# lowest-order nonzero term. Each matrix entry is a sparse polynomial (ε-exponent ⇒
-# Rational{BigInt} coeff), the determinant is the Leibniz sum, exact. This is the SoS
-# definition itself — correct for every configuration and consistent with the +ε
-# fast-path minors (which handle the common, non-fully-degenerate degeneracies).
-# Reached rarely (exact full degeneracy), so the BigInt cost is irrelevant.
+# evaluation under the Edelsbrunner–Mücke perturbation
+# pᵢ[j] += ε^(2^(rankᵢ·d − j)), ε→0⁺. Distinct powers of two make every subset of
+# perturbed entries carry a unique exponent, so generalized exact cofactors can be
+# visited in exponent order and evaluation stops at the first nonzero coefficient.
+# This is the SoS definition itself, without materialising a potentially huge sparse
+# polynomial. It is correct for every configuration and consistent with the +ε fast-
+# path minors (which handle the common, non-fully-degenerate degeneracies).
 # ════════════════════════════════════════════════════════════════════════════════
-const _SosPoly = Dict{BigInt, Rational{BigInt}}
-
-@inline function _sos_pcoord(v::Real, r::Int, j::Int, d::Int)
-    p = _SosPoly(); p[big(0)] = Rational{BigInt}(v)      # exact: Float64 is dyadic; lift is Rational
-    e = big(2)^(r*d - j); p[e] = get(p, e, zero(Rational{BigInt})) + 1
-    return p
-end
-_sos_one() = (p = _SosPoly(); p[big(0)] = one(Rational{BigInt}); p)
-
-function _sos_mul(a::_SosPoly, b::_SosPoly)
-    r = _SosPoly()
-    for (ea, ca) in a, (eb, cb) in b
-        e = ea + eb; r[e] = get(r, e, zero(Rational{BigInt})) + ca*cb
-    end
-    return r
-end
-@inline function _sos_add!(acc::_SosPoly, p::_SosPoly)
-    for (e, c) in p; acc[e] = get(acc, e, zero(Rational{BigInt})) + c; end
-    return acc
-end
-function _sos_leading_sign(acc::_SosPoly)
-    best = nothing
-    for (e, c) in acc
-        c == 0 && continue
-        (best === nothing || e < best) && (best = e)
-    end
-    best === nothing && return 1        # unreachable for distinct points
-    return acc[best] > 0 ? 1 : -1
-end
-
-# all permutations of 1:n tagged with sign(σ), n small (≤5 here).
-function _sos_perm_rec!(out::Vector{Tuple{Vector{Int},Int}}, p::Vector{Int}, k::Int)
-    n = length(p)
-    if k > n
-        inv = 0
-        @inbounds for i in 1:n, j in i+1:n; p[i] > p[j] && (inv += 1); end
-        push!(out, (copy(p), isodd(inv) ? -1 : 1)); return
-    end
-    @inbounds for i in k:n
-        p[k], p[i] = p[i], p[k]
-        _sos_perm_rec!(out, p, k+1)
-        p[k], p[i] = p[i], p[k]
-    end
-    return
-end
-function _sos_perms(n::Int)
-    out = Tuple{Vector{Int},Int}[]
-    _sos_perm_rec!(out, collect(1:n), 1)
-    return out
-end
-
-# Leibniz determinant (sign of the leading ε-term) of an n×n matrix of `_SosPoly`.
-function _sos_det_sign(rows::Vector{Vector{_SosPoly}})
-    n = length(rows)
-    acc = _SosPoly()
-    for (perm, sgn) in _sos_perms(n)
-        term = _SosPoly(); term[big(0)] = Rational{BigInt}(sgn)
-        @inbounds for r in 1:n; term = _sos_mul(term, rows[r][perm[r]]); end
-        _sos_add!(acc, term)
-    end
-    return _sos_leading_sign(acc)
-end
 
 # rank[k] = ascending-index rank (1-based) of the k-th argument point.
 @inline _sos_ranks(idx::NTuple{N,Int}) where {N} = invperm(sortperm(collect(idx)))
@@ -526,14 +464,45 @@ end
 # paraboloid-lift coordinate). Correct for every degenerate configuration.
 function _orient_nd_sos_exact(coords, idx::NTuple{M,Int}, d::Int)::Int where {M}
     rk = _sos_ranks(idx)
-    rows = Vector{Vector{_SosPoly}}(undef, M)
-    @inbounds for k in 1:M
-        row = Vector{_SosPoly}(undef, d + 1)
-        for j in 1:d; row[j] = _sos_pcoord(coords[k][j], rk[k], j, d); end
-        row[d + 1] = _sos_one()
-        rows[k] = row
+    M == d + 1 || throw(ArgumentError("SoS orientation requires d+1 points"))
+
+    # Each perturbation exponent is a distinct power of two.  Consequently every
+    # subset of perturbed matrix entries has a unique epsilon exponent: coefficients
+    # from different subsets can never cancel.  Expand by generalized cofactors over
+    # the at-most 501 partial row/coordinate-column matchings of a 5x5 determinant,
+    # ordered by exponent, and stop at the first nonzero exact minor.  This computes
+    # the identical leading term as the sparse-polynomial Leibniz expansion above,
+    # without constructing its large Rational{BigInt} polynomial intermediates.
+    base=Matrix{_RAT}(undef,M,M)
+    @inbounds for r in 1:M
+        for c in 1:d;base[r,c]=_RAT(coords[r][c]);end
+        base[r,M]=one(_RAT)
     end
-    return _sos_det_sign(rows)
+    choices=Tuple{BigInt,Vector{Int},Vector{Int}}[]
+    rows=Int[];cols=Int[]
+    function visit(nextrow::Int,used::UInt,exponent::BigInt)
+        push!(choices,(exponent,copy(rows),copy(cols)))
+        @inbounds for r in nextrow:M,c in 1:d
+            bit=UInt(1)<<(c-1)
+            used&bit==0 || continue
+            push!(rows,r);push!(cols,c)
+            visit(r+1,used|bit,exponent+(big(1)<<(rk[r]*d-c)))
+            pop!(rows);pop!(cols)
+        end
+    end
+    visit(1,zero(UInt),big(0));sort!(choices;by=first)
+    allrows=collect(1:M);allcols=collect(1:M)
+    for (_,rs,cs) in choices
+        rset=Set(rs);cset=Set(cs)
+        rr=Int[r for r in allrows if !(r in rset)]
+        cc=Int[c for c in allcols if !(c in cset)]
+        s=_rat_det_sign(base[rr,cc]);s==0&&continue
+        inversions=0
+        @inbounds for i in 1:length(cs),j in i+1:length(cs);cs[i]>cs[j]&&(inversions+=1);end
+        isodd(sum(rs)+sum(cs)+inversions) && (s=-s)
+        return s
+    end
+    error("SoS determinant remained identically zero")
 end
 
 """

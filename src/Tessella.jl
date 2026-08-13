@@ -17,10 +17,9 @@ together with the *validated-or-explicit-blocker* contract.
 module Tessella
 
 # ── Version / capability banner ────────────────────────────────────────────────
-# Highest development stage whose CRC gate (STATUS.md) is green. 3 ⇒ Stage 2
-# (1-D + surface meshing) complete; Stage 3 (3-D kernel + volume filling) + Stage 4
-# (quality/smoothing) + Stage 5 (heal detection) landed incrementally on top.
-const TESSELLA_STAGE = 3  # see STATUS.md stage board
+# Highest development stage whose CRC gate (STATUS.md) is green. Stage 6 includes
+# high-order elements and solver-consumable I/O; stages 0–5 are prerequisites.
+const TESSELLA_STAGE = 6  # see STATUS.md stage board
 
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
@@ -42,18 +41,19 @@ include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder, refine_to_size
-using .RecoverCDT: recover_boundary_cdt, mesh_sized_cdt
+using .RecoverCDT: recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, mesh_quality
 using .Heal: is_meshable
 
 # Install Mesh3D's exact-recovery extension only after both modules and their
 # public types are available, avoiding a Mesh3D ↔ RecoverCDT include cycle.
 Mesh3D._recover_boundary_exact(surface::Mesh) = recover_boundary_cdt(surface)
+Mesh3D._recover_partition_exact(surfaces::AbstractVector{Mesh}) = recover_partition_cdt(surfaces)
 
 export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
-export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
+export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
 
 """
     stage() -> Int
@@ -108,23 +108,47 @@ terminator) remains the open research case.
 function mesh_sized_extrude(xs::AbstractVector, ys::AbstractVector,
                             segments::AbstractVector{<:Tuple{Integer,Integer}},
                             z0::Real, z1::Real; hmax::Real, min_angle_deg::Real=25.0)
-    hmax > 0 || throw(ArgumentError("mesh_sized_extrude: hmax must be positive (got $hmax)"))
-    z1 > z0 || throw(ArgumentError("mesh_sized_extrude: need z1 > z0 (got z0=$z0, z1=$z1)"))
-    h2 = float(hmax)/sqrt(2.0)                              # prism face-diagonal ≤ hmax
+    hm=try Float64(hmax) catch err
+        throw(ArgumentError("mesh_sized_extrude: hmax must be Float64-representable: $(sprint(showerror,err))"))
+    end
+    za=try Float64(z0) catch err
+        throw(ArgumentError("mesh_sized_extrude: z0 must be Float64-representable: $(sprint(showerror,err))"))
+    end
+    zb=try Float64(z1) catch err
+        throw(ArgumentError("mesh_sized_extrude: z1 must be Float64-representable: $(sprint(showerror,err))"))
+    end
+    (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized_extrude: hmax must be finite and positive (got $hmax)"))
+    (isfinite(za)&&isfinite(zb)&&zb>za) ||
+        throw(ArgumentError("mesh_sized_extrude: need finite z1 > z0 (got z0=$z0, z1=$z1)"))
+    h2 = hm/sqrt(2.0)                                      # prism face-diagonal ≤ hmax
+    (isfinite(h2)&&h2>0) || throw(ArgumentError("mesh_sized_extrude: hmax is below Float64 spacing resolution"))
     T2 = constrained_delaunay(Float64.(xs), Float64.(ys), segments)
     interior = refine!(T2; min_angle_deg=min_angle_deg, max_area=0.5*h2*h2, size=(cx,cy)->h2)
     m2 = to_mesh(T2; interior=interior)                    # 2-D mesh: coords (z=0), tris
     nv2 = size(m2.coords, 2)
     nv2 >= 3 && size(m2.tris, 2) >= 1 ||
         throw(ErrorException("mesh_sized_extrude: cross-section produced no interior triangles (check segments orientation/closure)"))
-    nz = max(1, ceil(Int, (z1 - z0)/h2)); dz = (z1 - z0)/nz
-    coords = Matrix{Float64}(undef, 3, (nz+1)*nv2)
+    ratio=(zb-za)/h2
+    (isfinite(ratio)&&ratio<=typemax(Int)) ||
+        throw(ArgumentError("mesh_sized_extrude: axial layer count exceeds the platform Int limit"))
+    nz=max(1,ceil(Int,ratio));dz=(zb-za)/nz
+    levels=try Base.checked_add(nz,1) catch
+        throw(ArgumentError("mesh_sized_extrude: axial layer count overflows Int"))
+    end
+    nout=try Base.checked_mul(levels,nv2) catch
+        throw(ArgumentError("mesh_sized_extrude: node count overflows Int"))
+    end
+    nout<=typemax(Int32) || throw(ArgumentError("mesh_sized_extrude: $nout nodes exceed Int32"))
+    coords = Matrix{Float64}(undef, 3, nout)
     @inbounds for k in 0:nz, i in 1:nv2
         id = k*nv2 + i
-        coords[1,id] = m2.coords[1,i]; coords[2,id] = m2.coords[2,i]; coords[3,id] = z0 + k*dz
+        coords[1,id] = m2.coords[1,i]; coords[2,id] = m2.coords[2,i]; coords[3,id] = za + k*dz
     end
     _n(id) = @inbounds (coords[1,id], coords[2,id], coords[3,id])
-    tets = Matrix{Int32}(undef, 4, 3*size(m2.tris,2)*nz); col = 0
+    ntout=try Base.checked_mul(3,Base.checked_mul(size(m2.tris,2),nz)) catch
+        throw(ArgumentError("mesh_sized_extrude: tetrahedron count overflows Int"))
+    end
+    tets = Matrix{Int32}(undef, 4, ntout); col = 0
     @inbounds for ti in 1:size(m2.tris,2)
         v = sort!(Int[m2.tris[1,ti], m2.tris[2,ti], m2.tris[3,ti]])   # v[1]<v[2]<v[3] (column-index rule)
         for k in 0:nz-1
@@ -166,9 +190,12 @@ axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_ext
 (exact boundary, no faceting); `mesh_sized` is the general fallback for arbitrary surfaces.
 """
 function mesh_sized(surface::Mesh; hmax::Real)
-    hmax > 0 || throw(ArgumentError("mesh_sized: hmax must be positive (got $hmax)"))
+    hm=try Float64(hmax) catch err
+        throw(ArgumentError("mesh_sized: hmax must be Float64-representable: $(sprint(showerror,err))"))
+    end
+    (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized: hmax must be finite and positive (got $hmax)"))
     m0 = _conforming_fill(surface; caller="mesh_sized")
-    m = refine_to_size(m0, hmax)
+    m = refine_to_size(m0, hm)
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_sized: refinement produced an invalid mesh — " * join(diag.messages, "; ")))
     return m

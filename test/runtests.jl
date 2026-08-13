@@ -34,6 +34,6 @@ using Tessella
 
     @testset "stage banner" begin
         @test Tessella.stage() isa Int
-        @test Tessella.stage() >= 1     # Stage 0 gate is green
+        @test Tessella.stage() == 6     # all package stages through P2/I/O are green
     end
 end
