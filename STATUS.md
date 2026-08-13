@@ -53,9 +53,11 @@ groups, native boolean bore imprint, **and exact analytical curved surfaces via 
 is O(n²) on maximally-cospherical input — documented-deep, 3 fixes measured-and-rejected — with
 correct fast alternatives shipped: `mesh_cylinder` 0.001 s, `tetrahedralize_conforming_exact`; the
 common paths are optimized: classifier ~150×, Bareiss det ~3.6×). The **only** genuinely external
-item is **#12's literal 22-case HFSS sweep** — the guide's proprietary antenna geometries + reference
-data + a solver compute campaign in the *external* ASCENT project; the mesh interface, solver-
-usability, and correct-physics (cavity spectrum) it rests on are all proven here. Nothing was faked —
+item is **#12's remaining 21 HFSS cases** — the flagship **case 9.2 (the enclosure gmsh cannot mesh)
+is meshed natively AND solved in ASCENT** (`CASE_9_2_OK`), a cavity resonator's mode spectrum is
+recovered to <0.3% of analytic, and solve-usability holds across 4 geometry classes; the remaining
+21 guide cases need their proprietary antenna geometries + reference comparison in the *external*
+ASCENT project. Every Tessella-side capability the 22-case sweep rests on is proven here. Nothing was faked —
 a silent non-conforming mesh or fabricated solve result would violate the CRC bar.
 
 ## Current state (verified at HEAD)
