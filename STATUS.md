@@ -12,7 +12,7 @@ the external FEM solver integration, the mesh/BC handshake, the solve proofs, an
 
 ## ✅ DONE vs ⬜ NOT DONE — at a glance (updated 2026-08-14)
 
-**Suite green: 151,506 assertions** (`--check-bounds=yes`, Julia 1.12.6; 7m00.3s,
+**Suite green: 151,523 assertions** (`--check-bounds=yes`, Julia 1.12.6; 6m56.5s,
 direct `test/runtests.jl` run).
 Everything below is committed to
 `main`, source-only (HFSS/ASCENT data stays local, never pushed).
@@ -73,7 +73,7 @@ silent non-conforming mesh would violate the CRC bar.
 ## Current state (verified at HEAD)
 
 - **Suite:** `julia --project=. --startup-file=no --check-bounds=yes test/runtests.jl`
-  green — **151,506 assertions** under `--check-bounds=yes` (Julia 1.12.6; 7m00.3s; ~2–3× faster than
+  green — **151,523 assertions** under `--check-bounds=yes` (Julia 1.12.6; 6m56.5s; ~2–3× faster than
   the 25m00s baseline after the classifier optimization below; +28 `mesh_box`, +24
   `mesh_box_regions`, +17 `mesh_cylinder`, +36 `recover_boundary`, +9
   `mesh_sized_conforming`, +32 `mesh_boolean`, +11 native-pipeline integration, +4
@@ -815,3 +815,17 @@ that day._
   guard expires. Focused gates passed: Mesh2D **128/128**, MeshSurface **21/21**,
   pipeline **42/42**, Mesh3D **410/410**; the full direct suite passed
   **151,506/151,506** under bounds checking on Julia 1.12.6 (7m00.3s).
+- **2026-08-14 — deep-debug PASS 8, size-field/curve/surface robustness.**
+  Constant fields now require a finite positive size; function fields require a
+  real, finite, positive Float64-representable result. The 1-D integration and
+  graded-mesh APIs reject invalid parameter intervals/sample counts, malformed or
+  non-finite sampled points, zero-length curves, non-closing `closed=true` curves,
+  accumulated metric overflow, and platform-impossible node counts with explicit
+  diagnostics. Surface construction now verifies finite three-dimensional inputs,
+  strict coplanarity of every planar-loop point, finite positive cylinder geometry,
+  bounded structured allocation counts, ordered finite parametric bounds, finite
+  mapped points/stretch, one-sided finite differences at domain boundaries, and
+  bounded boundary-node counts. Focused gates passed: SizeField/Mesh1D **32/32**,
+  MeshSurface **27/27**, Mesh3D **410/410**, pipeline **42/42**, HFSS **95/95**;
+  the full direct suite passed **151,523/151,523** under bounds checking on Julia
+  1.12.6 (6m56.5s).
