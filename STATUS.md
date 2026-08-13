@@ -37,9 +37,9 @@ Verified on 2026-08-14 with Julia 1.12.6:
   zero tagged volume tetrahedra.
 - A mixed segment/triangle/tetrahedron MSH v4.1 written by Tessella passed
   `gmsh <file> -check -v 3` with exit 0.
-- `using Tessella; detect_ambiguities(Tessella; recursive=true)` reported 0 method
-  ambiguities. `Base.Docs.undocumented_names(Tessella; private=false)` reported 0
-  undocumented public names.
+- `using Test, Tessella; detect_ambiguities(Tessella; recursive=true)` reported 0
+  method ambiguities. `Base.Docs.undocumented_names(Tessella; private=false)`
+  reported 0 undocumented public names.
 - `git diff --check` passed, and the source/test scan found no `TODO`, `FIXME`,
   `WIP`, placeholder, or unimplemented markers.
 
