@@ -124,12 +124,20 @@ end
 function _read_physical_names!(acc, io)
     n = parse(Int, strip(readline(io)))
     for _ in 1:n
-        parts = split(strip(readline(io)))
-        dim = parse(Int, parts[1]); tag = parse(Int, parts[2])
-        # name is quoted, possibly containing spaces — rejoin remaining tokens
-        nm = join(parts[3:end], " ")
-        nm = strip(nm, ['"'])
-        acc.pnames[(dim, tag)] = nm
+        line = strip(readline(io))
+        # format: `dim tag "name"`. Take the name between the first and last quote VERBATIM
+        # — splitting on whitespace and rejoining collapses runs of interior spaces/tabs and
+        # breaks the name-preservation round-trip contract.
+        q1 = findfirst('"', line); q2 = findlast('"', line)
+        if q1 !== nothing && q2 !== nothing && q2 > q1
+            hdr = split(strip(line[1:prevind(line, q1)]))
+            dim = parse(Int, hdr[1]); tag = parse(Int, hdr[2])
+            acc.pnames[(dim, tag)] = line[nextind(line, q1):prevind(line, q2)]
+        else
+            parts = split(line)
+            dim = parse(Int, parts[1]); tag = parse(Int, parts[2])
+            acc.pnames[(dim, tag)] = length(parts) >= 3 ? strip(join(parts[3:end], " "), ['"']) : ""
+        end
     end
     _expect_end(io, "\$EndPhysicalNames")
 end

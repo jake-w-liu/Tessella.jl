@@ -675,3 +675,39 @@ that day._
   audit) moved out of `STATUS.md` into a dedicated `ASCENT.md`, so `STATUS.md` now tracks
   the Tessella package (the mesher) only. The current-state sections here are package-only
   with pointers to `ASCENT.md`; the Log retains historical context.
+- **2026-08-13 — deep-debug audit: 8 real bugs found + fixed (every one reproduced,
+  fixed, and CRC-regression-pinned).** A fresh 12-area adversarial audit (parallel
+  agents + own verification; every finding reproduced against running Julia before any
+  fix). Suite green after: **151,438 assertions**.
+  1. *(critical, `ExactMesh3D`)* the Float64 circumsphere pre-filter was **non-conservative
+     for far-from-origin coordinates** — `Float64(b)−Float64(a)` catastrophically cancels
+     at magnitude ≳1e13 with fractional coords, so it wrongly skipped cavity tets and
+     `delaunay3d_exact` emitted a non-Delaunay/non-conforming mesh (the exact "overlapping
+     facets" failure the package exists to prevent). Fixed: run the pre-filter on **per-axis
+     origin-shifted** coords (shift exact in rational ⇒ small, well-conditioned Float64),
+     and disable it for absurd (>1e11) extents (full exact test). Verified 0 invalid to
+     offset 1e16, byte-identical near-origin.
+  2. *(major, `RecoverCDT.certify_exact`)* the per-region area certificate filtered boundary
+     faces by **plane, not region membership**, so two disconnected coplanar regions (a
+     U/plus/slot/multi-component surface) double-counted and `recover_boundary_cdt` /
+     `mesh_sized_cdt` threw a **spurious area-mismatch blocker on valid conforming meshes**.
+     Fixed with a centroid `in_region_closed` scope; U-channel now recovers.
+  3. *(major, `Tessella.mesh_sized`)* silently returned an **over-filled** mesh for a
+     non-convex (Schönhardt) domain — `tetrahedralize` caps a concavity, still valid +
+     watertight but the wrong domain. Fixed: require the fill's **boundary area == input
+     surface area**, else fall through `recover_boundary → recover_boundary_cdt`.
+  4. *(minor, `mesh_sized`)* false-rejected a single-tet domain (max face incidence 1, not
+     2); the manifold test is now `≤ 2`.
+  5. *(minor, `refine_to_size`)* dropped `tet_tag` — multi-region meshes lost their
+     partition. Now each child inherits its parent tet's tag.
+  6. *(minor, `mesh_cylinder`/`cylinder_surface`)* a zero-length axis produced a silent
+     NaN mesh; now throws `ArgumentError`.
+  7. *(minor, `IO._read_physical_names!`)* collapsed runs of interior whitespace in a
+     `$PhysicalNames` name; now parses the quoted substring verbatim.
+  8. *(minor, `CAD.project_to(::CylinderS)`)* on-axis projection crashed for an x-parallel
+     axis; now references the least-aligned coordinate axis.
+  Not bugs: `mesh_boolean` on a tilted-axis cylinder throws its safe watertight blocker
+  (never a leaky surface — correct fail-safe); `_ray_hits_tri`'s absolute `1e-12` cutoff
+  degrades only at sub-picometer scale (out of the mm/m domain; documented, both classifiers
+  degrade identically so their pinned equivalence holds). Predicates + MeshTypes oracles:
+  audited clean.

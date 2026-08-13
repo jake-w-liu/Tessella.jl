@@ -45,6 +45,8 @@ fans share the rim rings (watertight by construction).
 function cylinder_surface(center, axis, radius::Real, height::Real; nθ::Integer=24, nz::Integer=2)
     R=Float64(radius); H=Float64(height)
     (R>0 && H>0 && nθ>=3 && nz>=2) || throw(ArgumentError("cylinder_surface: R,H>0, nθ≥3, nz≥2"))
+    (Float64(axis[1])^2+Float64(axis[2])^2+Float64(axis[3])^2) > 0 ||
+        throw(ArgumentError("cylinder_surface: axis must be a nonzero direction vector"))
     c=(Float64(center[1]),Float64(center[2]),Float64(center[3]))
     ez=_unit((Float64(axis[1]),Float64(axis[2]),Float64(axis[3])))
     ax = abs(ez[1])<=abs(ez[2]) ? (abs(ez[1])<=abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :

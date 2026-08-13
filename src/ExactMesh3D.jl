@@ -30,12 +30,15 @@ const RB = Rational{BigInt}
 # Float64 circumsphere (centre, radius²) of a tet, for the cavity pre-filter ONLY.
 # Returns r²=Inf for a (near-)degenerate tet so it is NEVER pruned — the exact
 # `insphere_rat` then decides. The filter is used only to SKIP tets where the query is
-# *safely* outside (see `_maybe_in_sphere`), so the exact result is unchanged.
-@inline function _fcircum(a::NTuple{3,RB}, b::NTuple{3,RB}, c::NTuple{3,RB}, d::NTuple{3,RB})
-    ax=Float64(a[1]); ay=Float64(a[2]); az=Float64(a[3])
-    Ax=Float64(b[1])-ax; Ay=Float64(b[2])-ay; Az=Float64(b[3])-az
-    Bx=Float64(c[1])-ax; By=Float64(c[2])-ay; Bz=Float64(c[3])-az
-    Cx=Float64(d[1])-ax; Cy=Float64(d[2])-ay; Cz=Float64(d[3])-az
+# *safely* outside (see `_maybe_in_sphere`), so the exact result is unchanged. Takes
+# Float64 coords ALREADY SHIFTED to a per-axis local origin (see `delaunay3d_exact`): the
+# shift is done in exact rational, so these are small, well-conditioned values and the
+# differences below carry no catastrophic cancellation (the far-from-origin failure mode).
+@inline function _fcircum(a::NTuple{3,Float64}, b::NTuple{3,Float64}, c::NTuple{3,Float64}, d::NTuple{3,Float64})
+    ax=a[1]; ay=a[2]; az=a[3]
+    Ax=b[1]-ax; Ay=b[2]-ay; Az=b[3]-az
+    Bx=c[1]-ax; By=c[2]-ay; Bz=c[3]-az
+    Cx=d[1]-ax; Cy=d[2]-ay; Cz=d[3]-az
     bcx=By*Cz-Bz*Cy; bcy=Bz*Cx-Bx*Cz; bcz=Bx*Cy-By*Cx
     denom=2.0*(Ax*bcx+Ay*bcy+Az*bcz)
     # scale-relative degeneracy guard: a tet whose signed volume is a vanishing
@@ -91,10 +94,31 @@ function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
     @inbounds for i in 1:n; X[i] = pts[i]; end
     X[n+1] = s1; X[n+2] = s2; X[n+3] = s3; X[n+4] = s4
 
+    # Per-axis-shifted Float64 coordinates for the cavity PRE-FILTER only (the exact tests
+    # below always use the unshifted `X`). Shifting by the per-axis minimum is exact
+    # (rational), so `Xf` holds small, well-conditioned values — this removes the
+    # catastrophic cancellation `Float64(b)−Float64(a)` suffers when the model sits far
+    # from the origin. If the shifted extent is still enormous (a physically absurd
+    # >~1e11-span model where Float64 cannot resolve tet sizes), the pre-filter is disabled
+    # (`usePF=false`) and every tet gets the exact `insphere_rat` test — correct, just slower.
+    mnx = X[1][1]; mny = X[1][2]; mnz = X[1][3]; mxx = mnx; mxy = mny; mxz = mnz
+    @inbounds for i in 1:n+4
+        p = X[i]
+        p[1] < mnx && (mnx = p[1]); p[1] > mxx && (mxx = p[1])
+        p[2] < mny && (mny = p[2]); p[2] > mxy && (mxy = p[2])
+        p[3] < mnz && (mnz = p[3]); p[3] > mxz && (mxz = p[3])
+    end
+    Xf = Vector{NTuple{3,Float64}}(undef, n + 4)
+    @inbounds for i in 1:n+4
+        Xf[i] = (Float64(X[i][1]-mnx), Float64(X[i][2]-mny), Float64(X[i][3]-mnz))
+    end
+    usePF = max(Float64(mxx-mnx), Float64(mxy-mny), Float64(mxz-mnz)) < 1.0e11
+
     tets = NTuple{4,Int}[]
     alive = Bool[]
     csph = NTuple{4,Float64}[]              # parallel: each tet's Float64 circumsphere (pre-filter)
-    addtet!(t) = (push!(tets, t); push!(alive, true); push!(csph, _fcircum(X[t[1]],X[t[2]],X[t[3]],X[t[4]])))
+    addtet!(t) = (push!(tets, t); push!(alive, true);
+                  push!(csph, usePF ? _fcircum(Xf[t[1]],Xf[t[2]],Xf[t[3]],Xf[t[4]]) : (0.0,0.0,0.0,Inf)))
     # initial super-tet, positively oriented
     if orient3_rat(X[n+1], X[n+2], X[n+3], X[n+4], n+1, n+2, n+3, n+4) > 0
         addtet!((n+1, n+2, n+3, n+4))
@@ -104,7 +128,7 @@ function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
 
     cav = Int[]
     for i in 1:n
-        p = X[i]; pfx=Float64(p[1]); pfy=Float64(p[2]); pfz=Float64(p[3])
+        p = X[i]; pfx=Xf[i][1]; pfy=Xf[i][2]; pfz=Xf[i][3]
         empty!(cav)
         @inbounds for ti in eachindex(tets)
             alive[ti] || continue

@@ -810,7 +810,9 @@ a bisection only creates edges no longer than the one it splits (median inequali
 global maximum edge is non-increasing, so the process **terminates** at `maxedge ≤ hmax`.
 Interior edges are refined too (no interior lattice needed). Boundary vertices are
 preserved and boundary edges' midpoints stay on the boundary, so the boundary geometry
-is unchanged. This is the size-refinement terminator behind [`Tessella.mesh_sized`](@ref).
+is unchanged. **Region tags (`tet_tag`) are propagated** — each child inherits its parent
+tet's tag — so multi-region meshes keep their partition. This is the size-refinement
+terminator behind [`Tessella.mesh_sized`](@ref).
 """
 function refine_to_size(m::Mesh, hmax::Real)
     hmax > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
@@ -818,16 +820,17 @@ function refine_to_size(m::Mesh, hmax::Real)
     nv0 = size(m.coords, 2)
     cx = Vector{Float64}(undef, nv0); cy = similar(cx); cz = similar(cx)
     @inbounds for i in 1:nv0; cx[i]=m.coords[1,i]; cy[i]=m.coords[2,i]; cz[i]=m.coords[3,i]; end
-    tv = Vector{NTuple{4,Int32}}(); alive = Bool[]
+    tv = Vector{NTuple{4,Int32}}(); alive = Bool[]; ttag = Int32[]      # ttag: per-tet region tag
+    tags0 = m.tet_tag                                                    # input tags (length = ntets)
     inc = Dict{Tuple{Int32,Int32},Vector{Int32}}()
     heap = _EHeap()
     @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
     @inline d2(a,b) = (cx[a]-cx[b])^2 + (cy[a]-cy[b])^2 + (cz[a]-cz[b])^2
-    # add a tet (oriented positive); register its 6 edges; if `push_edges`, enqueue any
-    # edge longer than hmax (duplicates are harmless — the heap is checked against `inc`).
-    function addtet!(a, b, c, d, push_edges::Bool)
+    # add a tet (oriented positive) carrying region tag `tag`; register its 6 edges; if
+    # `push_edges`, enqueue any edge longer than hmax (duplicates harmless — heap checked vs `inc`).
+    function addtet!(a, b, c, d, push_edges::Bool, tag::Int32)
         tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),(cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d])) < 0 && ((c,d)=(d,c))
-        push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true); id = Int32(length(tv))
+        push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true); push!(ttag, tag); id = Int32(length(tv))
         q = (a,b,c,d)
         @inbounds for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
             u,v = q[i],q[j]; push!(get!(inc, ek(u,v)) do; Int32[] end, id)
@@ -835,7 +838,7 @@ function refine_to_size(m::Mesh, hmax::Real)
         end
         id
     end
-    @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false); end
+    @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false, tags0[t]); end
     for (e,_) in inc; d2(e[1],e[2]) > h2 && _hpush!(heap, (d2(e[1],e[2]), e[1], e[2])); end
     guard = 0; maxguard = 200_000_000
     while !isempty(heap.d)
@@ -855,8 +858,8 @@ function refine_to_size(m::Mesh, hmax::Real)
         @inbounds for t in ts
             q = tv[t]; a1=Int32(0); a2=Int32(0)
             for v in q; (v!=a && v!=b) && (a1==0 ? (a1=v) : (a2=v)); end
-            alive[t] = false
-            addtet!(a, mvid, a1, a2, true); addtet!(mvid, b, a1, a2, true)
+            g = ttag[t]; alive[t] = false                    # children inherit the parent tet's region tag
+            addtet!(a, mvid, a1, a2, true, g); addtet!(mvid, b, a1, a2, true, g)
         end
     end
     keep = Int32[t for t in 1:length(tv) if alive[t]]
@@ -868,7 +871,8 @@ function refine_to_size(m::Mesh, hmax::Real)
     @inbounds for (i,v) in enumerate(used); C[1,i]=cx[v]; C[2,i]=cy[v]; C[3,i]=cz[v]; end
     M = Matrix{Int32}(undef, 4, length(keep))
     @inbounds for (j,t) in enumerate(keep); q=tv[t]; M[1,j]=nid[q[1]]; M[2,j]=nid[q[2]]; M[3,j]=nid[q[3]]; M[4,j]=nid[q[4]]; end
-    return Mesh(C; tets=M)
+    tetags = Int32[ttag[t] for t in keep]
+    return Mesh(C; tets=M, tet_tag=tetags)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1110,6 +1114,8 @@ function mesh_cylinder(center, axis, radius::Real, height::Real; hmax::Real)
     R=float(radius); H=float(height)
     (R > 0 && H > 0) || throw(ArgumentError("mesh_cylinder: radius and height must be positive (got R=$R, H=$H)"))
     hmax > 0 || throw(ArgumentError("mesh_cylinder: hmax must be positive (got $hmax)"))
+    (float(axis[1])^2 + float(axis[2])^2 + float(axis[3])^2) > 0 ||
+        throw(ArgumentError("mesh_cylinder: axis must be a nonzero direction vector (got $((axis[1],axis[2],axis[3])))"))
     a = float(hmax)/sqrt(3.0)
     nr=max(1,ceil(Int,R/a)); nz=max(1,ceil(Int,H/a)); nθ=max(3,ceil(Int,2π*R/a))
     ez=_unitn((float(axis[1]),float(axis[2]),float(axis[3])))
@@ -1501,7 +1507,13 @@ end
     v = _dot(d, qv)*inv
     (v < 0.0 || u+v > 1.0) && return false
     t = _dot(e2, qv)*inv
-    return t > 1e-12                              # strictly ahead of the origin
+    # strictly ahead of the origin. The 1e-12 floor rejects hits essentially at the query
+    # point (a vertex/edge exactly on the ray) to avoid double-counting; it assumes the
+    # coordinate scale is ≫ 1e-12 (true for the mm/m RF-mesh domain). At sub-picometer
+    # coordinate scales (≤ ~1e-12) legitimate crossings fall below this floor and the
+    # classifier degrades — outside the intended domain, and both _inside_grid and
+    # _inside_surface degrade identically so their pinned equivalence is preserved.
+    return t > 1e-12
 end
 
 """

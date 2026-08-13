@@ -196,6 +196,12 @@ function certify_exact(surface::Mesh, m::Mesh, pts::Vector{RBv}, regions, seg2re
         for f in bf
             a=mid[f[1]]; b=mid[f[2]]; c=mid[f[3]]
             (side(reg.plane,pts[a])==0 && side(reg.plane,pts[b])==0 && side(reg.plane,pts[c])==0) || continue
+            # count only faces belonging to THIS region — not merely coplanar with its plane.
+            # Two DISCONNECTED coplanar regions (a slot / U / plus / multi-component surface) share
+            # a geometric plane, so a plane-only filter double-counts the sibling region's faces and
+            # spuriously fails the area certificate; the centroid membership test scopes it correctly.
+            cen=rscale(radd(radd(pts[a],pts[b]),pts[c]), 1//3)
+            in_region_closed(reg,pts,cen) || continue
             got += parea2(pts[a],pts[b],pts[c],reg.plane.drop)
         end
         want==got || return (false,"region $ri exact area mismatch: want $(Float64(want)) got $(Float64(got))")

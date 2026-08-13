@@ -42,6 +42,16 @@ end
         @test f.physical_names[(3,4)] == "case"
     end
 
+    @testset "physical name with interior whitespace round-trips verbatim" begin
+        # regression: the reader must NOT collapse runs of spaces/tabs inside a quoted name
+        # (split/join-on-whitespace did; the quoted-substring parse preserves it exactly).
+        m = _cube(); p = joinpath(dir, "cube_names.msh")
+        for (v, nm) in ((2.2, "air  region"), (4.1, "co ax\tpin"))
+            write_msh(p, m; version=v, physical_names=Dict((3,4)=>nm))
+            @test read_msh(p).physical_names[(3,4)] == nm
+        end
+    end
+
     @testset "v4.1 round-trip preserves connectivity CRC" begin
         m = _cube()
         p = joinpath(dir, "cube_v4.msh")
