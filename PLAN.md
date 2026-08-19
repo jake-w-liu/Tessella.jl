@@ -1,26 +1,29 @@
 # Tessella.jl architecture and scope
 
-Tessella is a Julia-native mesh generator for the geometry-to-mesh part of the
-ASCENT electromagnetics workflow. It is informed by gmsh's architecture but is an
-independent implementation. The package roadmap is complete; the live verification
-record is [`STATUS.md`](STATUS.md).
+Tessella is a Julia-native mesh generator for the ASCENT electromagnetics workflow.
+It is an independent implementation informed by Gmsh's architecture. The original
+simplex-mesher roadmap is complete; the active goal is now full Gmsh 4.15.2 feature
+and behavioral parity, prioritized by ASCENT meshing value. The parity goal is not
+complete. The live verification record is [`STATUS.md`](STATUS.md).
 
-## Scope boundary
+## Target scope
 
-Tessella owns:
+The parity end state includes:
 
-- exact geometric decisions and simplex topology;
-- 1-D, surface, and tetrahedral meshing;
-- conforming boundary and multi-region recovery;
-- uniform and callback-driven size control;
-- mesh quality improvement and sliver reduction;
-- native primitives, analytical surfaces/imprints, and mesh Boolean CSG;
-- linear/P2 mesh validation and solver-consumable MSH/STL I/O.
+- Gmsh's geometry/entity model, built-in geometry kernel, OpenCASCADE-facing CAD
+  capabilities, transformations, Boolean operations, imports, and `.geo` language;
+- all supported element families, orders, structured/unstructured algorithms,
+  recombination, boundary layers, adaptation, partitioning, periodicity, embedding,
+  sizing fields, and optimization operations;
+- compatible model/mesh APIs, options, physical groups, file formats, views, plugins,
+  command-line behavior, GUI/post-processing, and parallel workflows;
+- differential conformance against the pinned Gmsh release, in addition to Tessella's
+  stronger exact-predicate and validated-or-explicit-blocker contracts.
 
-Tessella does not attempt to reproduce gmsh as a whole. In particular, a pure-Julia
-OpenCASCADE/NURBS kernel, GUI, post-processing, FEM solve, and the long tail of mesh
-formats are outside package scope. ASCENT remains the solver. Geometry outside the
-native analytical/CSG set enters as a triangulated boundary mesh.
+This supersedes the former non-goal boundary around OpenCASCADE/NURBS, mixed elements,
+GUI/post-processing, and long-tail formats. Those capabilities are now pending work,
+not exclusions. Reimplementation remains independent; calling Gmsh as the production
+meshing backend would not resolve the ASCENT failure that motivated Tessella.
 
 ## Implemented architecture
 
@@ -31,7 +34,7 @@ Tessella
 ├── ExactMesh3D   Rational{BigInt} Delaunay kernel
 ├── IO            strict/atomic MSH v2.2/v4.1, STL, limited .geo metadata scan
 ├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
-├── SizeField     constant, callable, and pointwise-minimum size fields
+├── SizeField     scalar graph; distance/analytic/composite fields + callbacks
 ├── Mesh1D        metric-length curve and segment discretization
 ├── MeshSurface   planar, cylindrical, and parametric surface meshing
 ├── Mesh3D        Delaunay, fills, partitions, sizing, flips, mesh Boolean CSG
@@ -43,10 +46,13 @@ Tessella
 └── HighOrder     globally certified quadratic tetrahedra and type-11 I/O
 ```
 
-`FunctionSize` is the extension point for distance-, curvature-, solution-, and
-background-mesh-driven sizing; `MinSize` combines such fields conservatively. This
-keeps field policy outside the meshing kernels while preserving a checked `h > 0`
-contract.
+`DistanceField`, `ThresholdField`, `BoxField`, `BallField`, `CylinderField`,
+`FrustumField`, `MinSize`, `MaxSize`, and `BoundedSize` implement the first native
+Gmsh-compatible field graph. Discrete point/segment/triangle distance queries use a
+deterministic AABB hierarchy. `FunctionSize` remains the checked callback extension
+point. Generic fields may return zero (e.g. distance on a target); only
+`AbstractSizeField` reaches a meshing kernel, where `size_at` enforces a finite
+`h > 0` contract.
 
 ## Design contracts
 
@@ -62,7 +68,7 @@ contract.
    compact flat records, reusable scratch, and bounded retry loops.
 6. File output is validated before an atomic replacement of the destination.
 
-## Completed stages
+## Completed baseline stages
 
 | Stage | Exit condition | State |
 |---|---|---|
@@ -74,9 +80,19 @@ contract.
 | 5 | native primitives, analytical CAD/imprints, healing gates, mesh CSG | DONE |
 | 6 | globally certified P2 elements, solver I/O, 22 geometry regressions | DONE |
 
-The external full-wave rerun of the remaining HFSS guide studies is deliberately
-tracked in [`ASCENT.md`](ASCENT.md), because it requires the solver and proprietary
-reference artifacts and does not add a missing meshing capability.
+## Gmsh parity tracks
+
+| Track | Exit condition | State |
+|---|---|---|
+| P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — Distance, Threshold, Box, Ball, Cylinder, Frustum, Min, Max, bounds shipped |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | PENDING |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | PENDING |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | PENDING |
+| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
+
+The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
+consumer-side validation track, not a substitute for the parity work above.
 
 ## Verification discipline
 

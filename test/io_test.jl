@@ -330,6 +330,8 @@ end
     @testset "read_geo_params on the enclosure fixture" begin
         gp = read_geo_params(joinpath(@__DIR__, "fixtures", "enclosure_coax_junction.geo"))
         @test gp.mesh_size_min ≈ 0.00026669999999999933 rtol=1e-9
+        @test gp.mesh_size_max == 0.012
+        @test gp.mesh_size_factor == 1.0
         @test gp.random_seed == 1
         # physical groups declared in the .geo (dim, tag) => name
         @test gp.physical_groups[(3,1)] == "air"
@@ -341,6 +343,29 @@ end
         # the three volumes the mesher must fill are all present
         vols = sort([name for ((d,t),name) in gp.physical_groups if d==3])
         @test vols == ["air", "case", "coax_pin"]
+
+        @test gp.background_field == 8
+        @test length(gp.fields) == 8
+        @test [gp.fields[i].kind for i in 1:8] ==
+              ["Distance","Threshold","Distance","Threshold",
+               "Distance","Threshold","Box","Min"]
+        @test gp.fields[1].options["SurfacesList"] == "{sm_coax_pin_pec[]}"
+        @test gp.fields[2].options["InField"] == "1"
+        @test gp.fields[8].options["FieldsList"] == "{2, 4, 6, 7}"
+
+        # The original four-argument constructor remains source-compatible.
+        old=GeoParams(0.1,1.0,7,Dict{Tuple{Int,Int},String}())
+        @test old.mesh_size_factor==1.0 && isempty(old.fields) && old.background_field==0
+
+        duplicate=joinpath(dir,"duplicate_field.geo")
+        write(duplicate,"Field[1] = Box; Field[1] = Min; Background Field = 1;\n")
+        @test_throws ArgumentError read_geo_params(duplicate)
+        undeclared=joinpath(dir,"undeclared_field.geo")
+        write(undeclared,"Field[2].VIn = 1;\n")
+        @test_throws ArgumentError read_geo_params(undeclared)
+        malformed=joinpath(dir,"malformed_size.geo")
+        write(malformed,"Mesh.MeshSizeMin = nope;\n")
+        @test_throws ArgumentError read_geo_params(malformed)
     end
 
     @testset "empty mesh round-trips" begin

@@ -39,6 +39,10 @@ include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + e
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
+using .SizeField: AbstractField, AbstractSizeField, ConstantSize, FunctionSize,
+                  DistanceField, ThresholdField, BoxField, BallField, CylinderField,
+                  FrustumField, MinSize, MaxSize,
+                  BoundedSize, field_value, size_at, build_geo_size_field
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder, refine_to_size
 using .RecoverCDT: recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
@@ -53,6 +57,10 @@ Mesh3D._recover_partition_exact(surfaces::AbstractVector{Mesh}) = recover_partit
 export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
+export AbstractField, AbstractSizeField, ConstantSize, FunctionSize, DistanceField,
+       ThresholdField, BoxField, BallField, CylinderField, FrustumField,
+       MinSize, MaxSize, BoundedSize, field_value, size_at
+export build_geo_size_field
 export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
 
 """
@@ -175,10 +183,14 @@ end
 
 """
     mesh_sized(surface::Mesh; hmax) -> Mesh
+    mesh_sized(surface::Mesh; field) -> Mesh
+    mesh_sized(surface::Mesh, field::AbstractSizeField) -> Mesh
 
-**General uniform size-controlled** tet mesh of the domain enclosed by an arbitrary
-closed triangulated `surface` (curved or polyhedral, convex or non-convex), with a
-**guaranteed maximum edge length `≤ hmax`**. Two stages:
+Size-controlled tet mesh of the domain enclosed by an arbitrary closed triangulated
+`surface` (curved or polyhedral, convex or non-convex).  Pass exactly one of a uniform
+`hmax` or a spatial [`AbstractSizeField`](@ref).  Uniform sizing guarantees maximum edge
+length `≤ hmax`; field sizing enforces each edge against the minimum field value sampled
+at its endpoints and midpoint. Two stages:
 
 1. **Fill** — [`tetrahedralize`](@ref) (Delaunay + ray-cast interior classification)
    gives a valid conforming tet mesh of the domain; if that is not watertight (a
@@ -195,18 +207,29 @@ blocker if the surface cannot be filled watertight (never a silently bad mesh). 
 axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_extrude`](@ref)
 (exact boundary, no faceting); `mesh_sized` is the general fallback for arbitrary surfaces.
 """
-function mesh_sized(surface::Mesh; hmax::Real)
-    hm=try Float64(hmax) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("mesh_sized: hmax must be Float64-representable: $(sprint(showerror,err))"))
+function mesh_sized(surface::Mesh; hmax::Union{Nothing,Real}=nothing,
+                    field::Union{Nothing,AbstractSizeField}=nothing)
+    (hmax===nothing) == (field===nothing) &&
+        throw(ArgumentError("mesh_sized: pass exactly one of hmax or field"))
+    target = if hmax===nothing
+        field::AbstractSizeField
+    else
+        hm=try Float64(hmax) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("mesh_sized: hmax must be Float64-representable: $(sprint(showerror,err))"))
+        end
+        (isfinite(hm)&&hm>0) ||
+            throw(ArgumentError("mesh_sized: hmax must be finite and positive (got $hmax)"))
+        ConstantSize(hm)
     end
-    (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized: hmax must be finite and positive (got $hmax)"))
     m0 = _conforming_fill(surface; caller="mesh_sized")
-    m = refine_to_size(m0, hm)
+    m = refine_to_size(m0, target)
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_sized: refinement produced an invalid mesh — " * join(diag.messages, "; ")))
     return m
 end
+
+mesh_sized(surface::Mesh, field::AbstractSizeField) = mesh_sized(surface; field=field)
 
 # Fill a closed PLC without ever accepting a convex-hull cap as its boundary.
 # `tetrahedralize` owns the restriction, star-shaped fan, exact-CDT recovery, and

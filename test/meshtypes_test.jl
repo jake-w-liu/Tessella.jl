@@ -185,6 +185,23 @@ end
         ua=(0.,0.,0.);ub=(1e-200,0.,0.);uc=(0.,1e-200,0.);ud=(0.,0.,1e-200)
         @test triangle_area(ua,ub,uc)==nextfloat(0.0)
         @test tet_signed_volume(ua,ub,uc,ud)==nextfloat(0.0)
+
+        # Three physical surfaces can share an edge at a material junction even
+        # though their union is not a 2-manifold. Each tagged entity is manifold.
+        Cj=Float64[0 1 0 0 0;0 0 1 0 -1;0 0 0 1 0]
+        Tj=Int32[1 1 1;2 2 2;3 4 5]
+        junction=Mesh(Cj;tris=Tj,tri_tag=Int32[1,2,3])
+        @test !validate(junction).ok
+        @test validate(junction;require_manifold_tris=false).ok
+        mixed=Mesh(Cj;tets=reshape(Int32[1,2,3,4],4,1),tris=Tj,
+                   tri_tag=Int32[1,2,3])
+        @test validate(mixed).ok
+        @test !validate(mixed;require_manifold_tris=true).ok
+        same=Mesh(Cj;tris=Tj,tri_tag=Int32[1,1,1])
+        @test !validate(same).ok
+        duplicate=Mesh(Cj;tris=Int32[1 1;2 2;3 3],tri_tag=Int32[1,2])
+        @test !validate(duplicate).ok
+        @test any(occursin("duplicate triangle",s) for s in validate(duplicate).messages)
     end
 
     @testset "constructor rejects bad input" begin

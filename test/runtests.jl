@@ -10,7 +10,8 @@ using Tessella
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle
 
-    # Stage 2 — 1-D edge meshing + surface meshing (CRC-gated).
+    # Stage 2 — Gmsh-compatible size fields + 1-D/surface meshing (CRC-gated).
+    include("sizefield_test.jl") # Distance/Threshold/Box/Min fields + local 3-D sizing
     include("mesh1d_test.jl")       # size fields + graded edge meshing vs arc length
     include("meshsurface_test.jl")  # planar/cylinder/parametric surface meshing
 

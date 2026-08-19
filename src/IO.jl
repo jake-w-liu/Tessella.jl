@@ -3,7 +3,7 @@
 
 Mesh file I/O (PLAN.md §3 "IO"): gmsh **MSH v2.2 and v4.1** (ASCII) read/write,
 ASCII/binary **STL** ingest for boundary surface meshes, and a lightweight
-**`.geo`** parameter/structure scanner.
+**`.geo`** parameter/structure and mesh-field scanner.
 
 The round-trip contract (DEVELOPMENT.md CRC gate for Stage 0) is *connectivity
 preservation*: reading a mesh and writing it back — in either format version —
@@ -12,8 +12,8 @@ arbitrary node/element tags; we relabel to a compact `1:N` on read (connectivity
 is invariant under a consistent relabel) while preserving physical-group tags.
 
 Full evaluation of a `.geo` OpenCASCADE CSG script (Booleans → BREP → faces) is
-the Stage-5 geometry kernel and is *not* attempted here; `read_geo_params` reads
-only what is tractable without OCC (mesh sizing, physical-group declarations).
+still pending. `read_geo_params` reads the declarations that do not require a CAD
+evaluator: global mesh sizing, physical groups, and the raw background-field graph.
 """
 module IO
 
@@ -21,7 +21,7 @@ using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
 using Printf: @printf, @sprintf
 
 export read_msh, write_msh, MshFile
-export read_stl, read_geo_params, GeoParams
+export read_stl, read_geo_params, GeoParams, GeoFieldSpec
 
 # gmsh element type codes we handle. (type => n_nodes)
 const MSH_POINT = 15
@@ -898,59 +898,119 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
-# .geo parameter / structure scan (no OCC evaluation — Stage 5)
+# .geo parameter / structure and field scan (no OCC evaluation)
 # ════════════════════════════════════════════════════════════════════════════════
+
+"""
+    GeoFieldSpec
+
+A parsed `Field[tag] = Kind` declaration. Option values remain normalized `.geo`
+source strings: [`Tessella.SizeField.build_geo_size_field`](@ref) interprets the
+supported field kinds after geometric entity references have been resolved.
+"""
+struct GeoFieldSpec
+    tag::Int
+    kind::String
+    options::Dict{String,String}
+end
 
 """
     GeoParams
 
 What `read_geo_params` can extract from a `.geo` without a geometry kernel:
-`mesh_size_min/max`, `random_seed`, and `physical_groups` (a `(dim, tag) => name`
-map, dim ∈ {0:point,1:curve,2:surface,3:volume}).
+`mesh_size_min/max/factor`, `random_seed`, `physical_groups` (a `(dim, tag) =>
+name` map, dim ∈ {0:point,1:curve,2:surface,3:volume}), raw `fields`, and the
+`background_field` tag. Missing numeric mesh options are represented by `NaN`;
+no background field is tag `0`.
 """
 struct GeoParams
     mesh_size_min::Float64
     mesh_size_max::Float64
+    mesh_size_factor::Float64
     random_seed::Int
     physical_groups::Dict{Tuple{Int,Int},String}
+    fields::Dict{Int,GeoFieldSpec}
+    background_field::Int
 end
+
+# Preserve the original public positional constructor.
+GeoParams(mesh_size_min::Real, mesh_size_max::Real, random_seed::Integer,
+          physical_groups::Dict{Tuple{Int,Int},String}) =
+    GeoParams(Float64(mesh_size_min), Float64(mesh_size_max), 1.0, Int(random_seed),
+              physical_groups, Dict{Int,GeoFieldSpec}(), 0)
 
 const _PHYS_DIM = Dict("Point"=>0, "Curve"=>1, "Line"=>1, "Surface"=>2, "Volume"=>3)
 
 """
     read_geo_params(path) -> GeoParams
 
-Scan a gmsh `.geo`/`.geo_unrolled` for mesh-sizing options and Physical group
-declarations. Deliberately does **not** evaluate CSG/Boolean geometry.
+Scan a gmsh `.geo`/`.geo_unrolled` for mesh-sizing options, Physical group
+declarations, and `Field[...]`/`Background Field` statements. Deliberately does
+**not** evaluate expressions, loops, CSG, or Boolean geometry; field option right-hand
+sides are retained as source strings for later strict interpretation.
 """
 function read_geo_params(path::AbstractString)
-    smin = NaN; smax = NaN; seed = 0
+    smin = NaN; smax = NaN; sfactor = 1.0; seed = 0; background = 0
     groups = Dict{Tuple{Int,Int},String}()
+    kinds = Dict{Int,String}()
+    options = Dict{Int,Dict{String,String}}()
     for raw in eachline(path)
-        line = strip(raw)
+        line = strip(first(split(raw, "//"; limit=2)))
         (isempty(line) || startswith(line, "//")) && continue
-        _scan_opt!(line, "Mesh.MeshSizeMin", v -> (smin = v)) ||
+        _scan_opt!(line, "Mesh.MeshSizeMin", v -> (smin = v))
         _scan_opt!(line, "Mesh.MeshSizeMax", v -> (smax = v))
+        _scan_opt!(line, "Mesh.MeshSizeFactor", v -> (sfactor = v))
         if occursin("Mesh.RandomSeed", line)
             m = match(r"Mesh\.RandomSeed\s*=\s*([0-9]+)", line)
             m !== nothing && (seed = parse(Int, m.captures[1]))
         end
         # Physical Volume("air", 1) = {...};  /  Physical Surface("s", 3) = {...};
-        pm = match(r"Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*([0-9]+)\s*\)", line)
-        if pm !== nothing
+        for pm in eachmatch(r"Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*([0-9]+)\s*\)", line)
             dim = _PHYS_DIM[pm.captures[1]]
             name = pm.captures[2]
             tag = parse(Int, pm.captures[3])
             groups[(dim, tag)] = name
         end
+        for fm in eachmatch(r"Field\s*\[\s*([0-9]+)\s*\]\s*=\s*([A-Za-z][A-Za-z0-9_]*)\s*;", line)
+            tag=parse(Int,fm.captures[1]); kind=fm.captures[2]
+            tag>0 || throw(ArgumentError("read_geo_params: field tags must be positive"))
+            haskey(kinds,tag) &&
+                throw(ArgumentError("read_geo_params: duplicate declaration for Field[$tag]"))
+            kinds[tag]=kind
+        end
+        for om in eachmatch(r"Field\s*\[\s*([0-9]+)\s*\]\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*([^;]+)\s*;", line)
+            tag=parse(Int,om.captures[1]); name=om.captures[2]; value=strip(om.captures[3])
+            tag>0 || throw(ArgumentError("read_geo_params: field tags must be positive"))
+            isempty(value) &&
+                throw(ArgumentError("read_geo_params: Field[$tag].$name has an empty value"))
+            get!(() -> Dict{String,String}(),options,tag)[name]=value
+        end
+        for bm in eachmatch(r"Background\s+Field\s*=\s*([0-9]+)\s*;",line)
+            background=parse(Int,bm.captures[1])
+            background>0 ||
+                throw(ArgumentError("read_geo_params: Background Field tag must be positive"))
+        end
     end
-    return GeoParams(smin, smax, seed, groups)
+    undeclared=sort!(collect(setdiff(keys(options),keys(kinds))))
+    isempty(undeclared) || throw(ArgumentError(
+        "read_geo_params: options provided for undeclared field tag(s) $(join(undeclared, ", "))"))
+    background==0 || haskey(kinds,background) || throw(ArgumentError(
+        "read_geo_params: Background Field $background is not declared"))
+    fields=Dict{Int,GeoFieldSpec}()
+    for (tag,kind) in kinds
+        fields[tag]=GeoFieldSpec(tag,kind,get(options,tag,Dict{String,String}()))
+    end
+    return GeoParams(smin, smax, sfactor, seed, groups, fields, background)
 end
 
 function _scan_opt!(line, key, setter)
     occursin(key, line) || return false
     m = match(Regex(replace(key, "."=>"\\.") * raw"\s*=\s*([-+0-9.eE]+)"), line)
-    m !== nothing && setter(parse(Float64, m.captures[1]))
+    m !== nothing || throw(ArgumentError("read_geo_params: $key must be a numeric literal"))
+    value=tryparse(Float64,m.captures[1])
+    (value!==nothing && isfinite(value)) ||
+        throw(ArgumentError("read_geo_params: $key must be finite"))
+    setter(value)
     return true
 end
 

@@ -1,19 +1,23 @@
 # Tessella.jl session handoff
 
-Tessella's package roadmap is complete. Start a maintenance or development session by
-reading, in order:
+Tessella's Stage 0–6 simplex baseline is complete; full Gmsh 4.15.2 parity is active
+and incomplete. Start a development session by reading, in order:
 
-1. [`PLAN.md`](PLAN.md) — current architecture and scope boundary;
+1. [`PLAN.md`](PLAN.md) — current architecture and parity tracks;
 2. [`DEVELOPMENT.md`](DEVELOPMENT.md) — mandatory CRC discipline;
 3. [`STATUS.md`](STATUS.md) — latest verified package gate;
 4. [`ASCENT.md`](ASCENT.md) only for external solver/HFSS work.
 
 ## Project contract
 
-Tessella is an independent Julia mesh generator, not a literal gmsh port and not an
-OpenCASCADE/NURBS reimplementation. It owns exact predicates, simplex meshing,
-conforming recovery, sizing, quality improvement, native analytical/CSG geometry,
-P2 elements, and solver-consumable mesh I/O.
+Tessella is an independent Julia mesh generator pursuing Gmsh 4.15.2 feature and
+behavioral parity. It must not delegate production meshing back to Gmsh: the ASCENT
+acceptance geometry is precisely a Gmsh failure. Implement meshing capabilities first,
+then the remaining CAD/API/UI/post-processing tracks in `PLAN.md`.
+
+The verified baseline owns exact predicates, simplex meshing, conforming recovery,
+sizing, quality improvement, native analytical/CSG geometry, P2 elements, and
+solver-consumable mesh I/O. Do not confuse that baseline with parity completion.
 
 Every public operation must return a validated result or an explicit diagnostic.
 Count actual cells per region; an empty list of regions is not proof that no region is
@@ -23,7 +27,7 @@ empty. Never weaken a geometric or topology check to make a fixture pass.
 
 - Reproduce the issue against the current `main`; historical notes are not proof.
 - Identify an independent oracle or invariant that will fail before the fix.
-- Preserve unrelated working-tree changes and the explicit scope in `PLAN.md`.
+- Preserve unrelated working-tree changes and the full parity scope in `PLAN.md`.
 - Treat the enclosure/coax fixture as a standing regression, not as a one-off special
   case.
 

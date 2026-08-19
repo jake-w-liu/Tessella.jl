@@ -5,7 +5,7 @@
 is fully parametric — every solid is a gmsh `Box` or `Cylinder` primitive.
 
 `reconstruct.jl` **parses those literal primitives directly** (no OpenCASCADE evaluation) and
-reconstructs the three main physical volumes — **air cavity, metal case shell, coax pin** — with
+reconstructs four physical volumes — **air cavity, metal case shell, coax pin, and slot** — with
 Tessella's native primitives at the **exact literal dimensions** from the fixture, then meshes them
 as ONE conforming partition (`tetrahedralize_conforming_exact`, exact-kernel — robust to the
 thin-pin cosphericity). Result:
@@ -28,15 +28,20 @@ This meshes the **four literal physical volumes** (pin/slot/air/case — every g
 (radiation, the pin/case PEC skins, and the resistor + p1 port patches), so the mesh carries the
 `.geo`'s complete physical-group structure and loads whole in ASCENT — the exact place gmsh 4.13/
 4.15 produce 0 tets. What is *not* reproduced is the **exact OpenCASCADE `BooleanFragments` imprint
-interfaces** (the precise curved shield/bore boundaries and the exact resistor/p1 surface geometry);
-those come from the pure-Julia OpenCASCADE-library path PLAN §1/§6 lists as an explicit non-goal,
-and are represented here as topologically-tagged BC surface patches rather than OCC-imprinted
-geometry.
+interfaces** (the precise curved shield/bore boundaries and the exact resistor/p1 surface geometry).
+Those remain pending CAD-parity work and are represented here as topologically tagged BC surface
+patches rather than OCC-imprinted geometry.
+
+The script also resolves the literal `.geo` entity names and constructs its
+`Distance`/`Threshold`/`Box`/`Min` background-field graph. Pass `--apply-fields` to refine with the
+literal graph before writing. That full-resolution path is a scalability acceptance, not part of
+the fast topology reconstruction reported above.
 
 ## Reproduce
 
 ```
 julia --project=<Tessella.jl> validation/enclosure_literal/reconstruct.jl        # parse + mesh + write .msh
+julia --project=<Tessella.jl> validation/enclosure_literal/reconstruct.jl --apply-fields
 julia --project=<2026_066/ASCENT> validation/enclosure_literal/handshake.jl      # confirm it loads in ASCENT
 ```
 
