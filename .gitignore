@@ -26,3 +26,6 @@ reference/
 
 # Local Claude Code config + workflow worktrees (not distributed)
 .claude/
+
+# Local Grok session state (not distributed)
+.grok/
