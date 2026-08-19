@@ -26,6 +26,7 @@ using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, tet_signed_volume
 using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
+using ..SizeField: AbstractSizeField, ConstantSize, size_at
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
@@ -893,8 +894,8 @@ end
 # Longest-edge bisection — size refinement of a tet mesh to a guaranteed max edge
 # ════════════════════════════════════════════════════════════════════════════════
 
-# Minimal binary MAX-heap on (length, a, b). Edge lengths are fixed once created (vertices
-# never move — only midpoints are added), so heap entries never go stale in value.
+# Minimal binary MAX-heap on (violation ratio, a, b). Vertices never move; queued
+# records remain valid until their edge is split or disappears from the incidence map.
 struct _EHeap
     d::Vector{Tuple{Float64,Int32,Int32}}
 end
@@ -921,23 +922,44 @@ end
 
 """
     refine_to_size(m::Mesh, hmax) -> Mesh
+    refine_to_size(m::Mesh, field::AbstractSizeField) -> Mesh
 
-Refine a valid tet mesh so **every edge is `≤ hmax`**, by longest-edge bisection:
-repeatedly take the globally longest edge and split *every* tet incident to it at the
-edge midpoint. Splitting all tets around one edge keeps the mesh **conforming** (the
-shared faces are split identically in both incident tets); the midpoint lies on the
-edge so **validity** (positive volumes) and **total volume** are preserved; and because
-a bisection only creates edges no longer than the one it splits (median inequality), the
-global maximum edge is non-increasing, so the process **terminates** at `maxedge ≤ hmax`.
+Refine a valid tet mesh by longest-edge subdivision.  The scalar overload guarantees
+**every edge is `≤ hmax`**.  The field overload requires every edge length to be no
+larger than the minimum target sampled at its two endpoints and midpoint; edges are
+processed by descending violation ratio `length / local_target`.
+
+Splitting all tets around one edge keeps the mesh **conforming** (the shared faces are
+split identically in every incident tet). The representable midpoint is used normally.
+Its three independently rounded coordinates can differ infinitesimally from the exact
+represented line; that unique canonical point is accepted only after exact child-
+orientation checks. If it coincides with an existing vertex, a checked representable
+interior point is selected that makes both children nondegenerate in every incident
+tet. Additional ULP offsets are permitted only for an unconstrained, single-region
+interior edge star, whose cavity boundary remains unchanged; boundary, interface, and
+explicit feature edges require an exactly collinear fallback point or return a
+representability blocker. For a constant positive target, every selected point lies
+strictly inside the edge's coordinate bounds, so repeated subdivision terminates at
+`maxedge ≤ hmax`. A spatial field is evaluated on every new edge and terminates
+whenever its sampled targets remain resolvable in `Float64`.
 Interior edges are refined too (no interior lattice needed). Boundary vertices are
-preserved and boundary edges' midpoints stay on the boundary, so the boundary geometry
-is unchanged. **Region tags (`tet_tag`) are propagated** — each child inherits its parent
+preserved and boundary edges stay on the boundary to Float64 midpoint resolution.
+**Region tags (`tet_tag`) are propagated** — each child inherits its parent
 tet's tag — so multi-region meshes keep their partition. This is the size-refinement
 terminator behind [`Tessella.mesh_sized`](@ref).
 """
 function refine_to_size(m::Mesh, hmax::Real)
     target = _finite3(hmax, "refine_to_size", "hmax")
     target > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
+    return _refine_to_size(m, ConstantSize(target); target_description="hmax=$target")
+end
+
+function refine_to_size(m::Mesh, field::AbstractSizeField)
+    return _refine_to_size(m, field; target_description=string(nameof(typeof(field))))
+end
+
+function _refine_to_size(m::Mesh, field::AbstractSizeField;
+                         target_description::AbstractString="size field")
     nt0 = size(m.tets,2)
     nt0 > 0 || throw(ArgumentError("refine_to_size: input contains no tetrahedra"))
     inputdiag = validate(m)
@@ -946,17 +968,32 @@ function refine_to_size(m::Mesh, hmax::Real)
     nv0 = size(m.coords, 2)
     cx = Vector{Float64}(undef, nv0); cy = similar(cx); cz = similar(cx)
     @inbounds for i in 1:nv0; cx[i]=m.coords[1,i]; cy[i]=m.coords[2,i]; cz[i]=m.coords[3,i]; end
+    @inline coordkey(x,y,z)=(x==0 ? 0.0 : x,y==0 ? 0.0 : y,z==0 ? 0.0 : z)
+    coordids=Dict{NTuple{3,Float64},Int32}()
+    @inbounds for i in 1:nv0; coordids[coordkey(cx[i],cy[i],cz[i])]=Int32(i); end
     tv = Vector{NTuple{4,Int32}}(); alive = Bool[]; ttag = Int32[]      # ttag: per-tet region tag
     tags0 = m.tet_tag                                                    # input tags (length = ntets)
     inc = Dict{Tuple{Int32,Int32},Vector{Int32}}()
     heap = _EHeap()
     queued = Set{Tuple{Int32,Int32}}()
+    deferred = Set{Tuple{Int32,Int32}}()
+    deferred_signature = Dict{Tuple{Int32,Int32},Tuple}()
     @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
     @inline elen(a,b) = hypot(cx[a]-cx[b], cy[a]-cy[b], cz[a]-cz[b])
+    @inline function edge_target(a,b)
+        mx=_midpoint3(cx[a],cx[b]); my=_midpoint3(cy[a],cy[b]); mz=_midpoint3(cz[a],cz[b])
+        return min(size_at(field,cx[a],cy[a],cz[a]),
+                   size_at(field,cx[b],cy[b],cz[b]),size_at(field,mx,my,mz))
+    end
     function queueedge!(u,v,len)
         e=ek(u,v)
-        if len>target && !(e in queued)
-            push!(queued,e);_hpush!(heap,(len,e[1],e[2]))
+        (e in queued || e in deferred) && return nothing
+        target=edge_target(u,v)
+        if len>target
+            score=len/target
+            score>1 || throw(ErrorException(
+                "refine_to_size: local edge violation underflowed for edge $e"))
+            push!(queued,e);_hpush!(heap,(score,e[1],e[2]))
         end
         return nothing
     end
@@ -1023,14 +1060,22 @@ function refine_to_size(m::Mesh, hmax::Real)
     end
 
     # add a tet (oriented positive) carrying region tag `tag`; register its 6 edges; if
-    # `push_edges`, enqueue any edge longer than hmax (duplicates harmless — heap checked vs `inc`).
-    function addtet!(a, b, c, d, push_edges::Bool, tag::Int32)
+    # `push_edges` enqueues every edge that violates its sampled local target.
+    function addtet!(a, b, c, d, push_edges::Bool, tag::Int32,
+                     volume_hint::Union{Nothing,Float64}=nothing)
         length(tv) < typemax(Int32) ||
             throw(ErrorException("refine_to_size: working tet count exceeds the Int32 incidence limit"))
-        sv=tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),
-                             (cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d]))
-        (isfinite(sv) && sv != 0) ||
-            throw(ErrorException("refine_to_size: bisection produced a non-finite or flat tetrahedron"))
+        sv=volume_hint===nothing ?
+           tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),
+                             (cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d])) : volume_hint
+        if !(isfinite(sv) && sv != 0)
+            pts=((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),
+                 (cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d]))
+            exactsign=-orient3(pts...)
+            throw(ErrorException(
+                "refine_to_size: bisection produced a non-finite or flat tetrahedron " *
+                "at vertices ($a,$b,$c,$d), signed_volume=$sv, exact_sign=$exactsign, points=$pts"))
+        end
         sv < 0 && ((c,d)=(d,c))
         push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true); push!(ttag, tag); id = Int32(length(tv))
         q = (a,b,c,d)
@@ -1047,11 +1092,285 @@ function refine_to_size(m::Mesh, hmax::Real)
         len=elen(e[1],e[2]); isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
         queueedge!(e[1],e[2],len)
     end
+
+    # Return the two vertices opposite edge (a,b), ordered so (a,b,u,v) has the
+    # same positive orientation as the stored tet. This derives the sign from
+    # permutation parity and avoids recomputing the parent's exact volume.
+    function edge_opposites(q::NTuple{4,Int32},a::Int32,b::Int32)
+        u=Int32(0);v=Int32(0)
+        for w in q;(w!=a&&w!=b)&&(u==0 ? (u=w) : (v=w));end
+        u!=0&&v!=0||return nothing
+        r=(a,b,u,v)
+        pos=ntuple(i -> q[1]==r[i] ? 1 : q[2]==r[i] ? 2 : q[3]==r[i] ? 3 : 4,4)
+        inversions=0
+        for i in 1:3,j in i+1:4;pos[i]>pos[j]&&(inversions+=1);end
+        if isodd(inversions)
+            u,v=v,u
+        end
+        return (u,v)
+    end
+
+    # Certify p = ((den-num)*a + num*b)/den exactly in represented Float64
+    # coordinates without allocating Rational{BigInt}. Float64 significands have at
+    # most 53 bits; the conservative exponent-gap limit below leaves ample Int128
+    # headroom for coefficients through 32 and the two-term sum.
+    function exact_affine_coordinate(a::Float64,b::Float64,p::Float64,
+                                     num::Int,den::Int)
+        0<num<den<=32 || return false
+        ma,ea,sa=Base.decompose(a);mb,eb,sb=Base.decompose(b)
+        mp,ep,sp=Base.decompose(p)
+        lp=Int128(sp)*Int128(mp)*den
+        la=Int128(sa)*Int128(ma)*(den-num)
+        lb=Int128(sb)*Int128(mb)*num
+        (lp==0&&la==0&&lb==0) && return true
+        emin=typemax(Int);emax=typemin(Int)
+        if lp!=0;emin=min(emin,ep);emax=max(emax,ep);end
+        if la!=0;emin=min(emin,ea);emax=max(emax,ea);end
+        if lb!=0;emin=min(emin,eb);emax=max(emax,eb);end
+        emax-emin<=60 || return false
+        lp=lp==0 ? Int128(0) : lp<<(ep-emin)
+        la=la==0 ? Int128(0) : la<<(ea-emin)
+        lb=lb==0 ? Int128(0) : lb<<(eb-emin)
+        return lp==la+lb
+    end
+    exact_affine_point(a::Int32,b::Int32,p,num::Int,den::Int)=
+        exact_affine_coordinate(cx[a],cx[b],p[1],num,den) &&
+        exact_affine_coordinate(cy[a],cy[b],p[2],num,den) &&
+        exact_affine_coordinate(cz[a],cz[b],p[3],num,den)
+
+    exactly_on_edge(a::Int32,b::Int32,p)=
+        orient2((cx[a],cy[a]),(cx[b],cy[b]),(p[1],p[2]))==0 &&
+        orient2((cx[a],cz[a]),(cx[b],cz[b]),(p[1],p[3]))==0 &&
+        orient2((cy[a],cz[a]),(cy[b],cz[b]),(p[2],p[3]))==0
+
+    function split_child_volumes(a::Int32,b::Int32,ts::Vector{Int32},p;
+                                 fraction::Union{Nothing,Tuple{Int,Int}}=nothing)
+        volumes=Vector{NTuple{2,Float64}}(undef,length(ts))
+        affine=fraction!==nothing && exact_affine_point(a,b,p,fraction...)
+        @inbounds for (k,t) in enumerate(ts)
+            alive[t]||return nothing
+            opposite=edge_opposites(tv[t],a,b);opposite===nothing&&return nothing
+            u,v=opposite
+            if affine
+                # The stored parent (a,b,u,v) is positive. Exact affine linearity
+                # proves both child determinants positive without another predicate.
+                volumes[k]=(1.0,1.0)
+            else
+                c1=-orient3((cx[a],cy[a],cz[a]),p,
+                            (cx[u],cy[u],cz[u]),(cx[v],cy[v],cz[v]))
+                c2=-orient3(p,(cx[b],cy[b],cz[b]),
+                            (cx[u],cy[u],cz[u]),(cx[v],cy[v],cz[v]))
+                (c1>0&&c2>0)||return nothing
+                volumes[k]=(1.0,1.0)
+            end
+        end
+        return volumes
+    end
+
+    # An off-edge point changes a piecewise-linear boundary or material interface,
+    # even when its displacement is only one ULP. It is safe only in a closed,
+    # single-region interior edge star: the cavity boundary then consists solely of
+    # faces opposite the edge and is retained verbatim by the two child fans.
+    function edge_is_constrained(a::Int32,b::Int32,ts::Vector{Int32})
+        e=ek(a,b)
+        any(s -> segalive[s],get(seginc,e,Int[])) && return true
+        any(f -> trialive[f],get(triinc,e,Int[])) && return true
+        faces=Dict{NTuple{3,Int32},Vector{Int32}}()
+        @inbounds for t in ts
+            alive[t] || return true
+            opposite=edge_opposites(tv[t],a,b)
+            opposite===nothing && return true
+            for u in opposite
+                push!(get!(() -> Int32[],faces,_sort3t(a,b,u)),ttag[t])
+            end
+        end
+        return any(tags -> length(tags)!=2 || tags[1]!=tags[2],values(faces))
+    end
+
+    # A rounded midpoint can equal an existing vertex or land exactly in a child
+    # face plane even when the parent is exactly nondegenerate. Search dyadic
+    # positions near 1/2 and retain the most balanced valid candidate, preferring
+    # fewer ULP shifts. The fused convex interpolation avoids Rational allocations.
+    function fallback_split_point(a::Int32,b::Int32,ts::Vector{Int32},constrained::Bool)
+        best=nothing;bestvolumes=nothing;bestscore=nothing
+        lerp(x,y,t)=signbit(x)==signbit(y) ? muladd(t,y-x,x) : (1-t)*x+t*y
+        shiftulp(x,k)=begin
+            y=x
+            if k<0;for _ in 1:-k;y=prevfloat(y);end
+            elseif k>0;for _ in 1:k;y=nextfloat(y);end
+            end
+            y
+        end
+        for radius in 0:2,n in 1:31
+            n==16&&continue
+            t=n/32
+            base=(lerp(cx[a],cx[b],t),lerp(cy[a],cy[b],t),lerp(cz[a],cz[b],t))
+            for ox in -radius:radius,oy in -radius:radius,oz in -radius:radius
+                max(abs(ox),abs(oy),abs(oz))==radius||continue
+                ((cx[a]==cx[b]&&ox!=0)||(cy[a]==cy[b]&&oy!=0)||
+                 (cz[a]==cz[b]&&oz!=0))&&continue
+                p=(shiftulp(base[1],ox),shiftulp(base[2],oy),shiftulp(base[3],oz))
+                all(min((cx[a],cy[a],cz[a])[i],(cx[b],cy[b],cz[b])[i])<=p[i]<=
+                    max((cx[a],cy[a],cz[a])[i],(cx[b],cy[b],cz[b])[i]) for i in 1:3)||continue
+            (p!=(cx[a],cy[a],cz[a])&&p!=(cx[b],cy[b],cz[b]))||continue
+            haskey(coordids,coordkey(p...))&&continue
+            constrained && !exactly_on_edge(a,b,p) && continue
+            volumes=split_child_volumes(a,b,ts,p;fraction=(n,32))
+            volumes===nothing&&continue
+            score=(abs(n-16),radius,abs(ox)+abs(oy)+abs(oz),ox,oy,oz)
+            if bestscore===nothing || score<bestscore
+                best=p;bestvolumes=volumes;bestscore=score
+            end
+            end
+        end
+        best===nothing&&return nothing
+        return best::NTuple{3,Float64},bestvolumes::Vector{NTuple{2,Float64}}
+    end
+
+    retriangulation_reason=Ref("")
+
+    # Remove an unsplittable interior edge by retriangulating its closed star. This
+    # is a checked 3-2/4-4/general fan flip: boundary faces and boundary-side
+    # orientations must be identical, all new internal faces must separate opposite
+    # vertices, volumes must agree to Float64 resolution, and region tags must match.
+    function retriangulate_edge!(a::Int32,b::Int32,ts::Vector{Int32})
+        e=ek(a,b)
+        if any(s -> segalive[s],get(seginc,e,Int[]))
+            retriangulation_reason[]="edge belongs to a segment cell";return false
+        end
+        if any(f -> trialive[f],get(triinc,e,Int[]))
+            retriangulation_reason[]="edge belongs to a triangle cell";return false
+        end
+        n=length(ts)
+        3<=n<=12||(retriangulation_reason[]="edge-star size $n is outside 3:12";return false)
+        tags=unique(Int32[ttag[t] for t in ts])
+        length(tags)==1||(retriangulation_reason[]="edge star crosses region tags $tags";return false)
+
+        linkedges=NTuple{2,Int32}[]
+        @inbounds for t in ts
+            alive[t]||(retriangulation_reason[]="edge star contains a dead tet";return false)
+            rem=Int32[v for v in tv[t] if v!=a&&v!=b]
+            length(rem)==2||(retriangulation_reason[]="edge incidence is inconsistent";return false)
+            push!(linkedges,ek(rem[1],rem[2]))
+        end
+        length(unique(linkedges))==n||
+            (retriangulation_reason[]="edge link contains duplicate edges";return false)
+        adj=Dict{Int32,Vector{Int32}}()
+        for (u,v) in linkedges
+            push!(get!(() -> Int32[],adj,u),v);push!(get!(() -> Int32[],adj,v),u)
+        end
+        length(adj)==n&&all(length(unique(ns))==2 for ns in values(adj))||
+            (retriangulation_reason[]="edge link is not a simple cycle";return false)
+        start=minimum(keys(adj));cycle=Int32[start];prev=Int32(0);cur=start
+        for k in 2:n
+            ns=sort!(unique(adj[cur]));nxt=prev==0 ? ns[1] : (ns[1]==prev ? ns[2] : ns[1])
+            (nxt!=start&&!(nxt in cycle))||
+                (retriangulation_reason[]="edge link closes early";return false)
+            push!(cycle,nxt);prev,cur=cur,nxt
+        end
+        start in adj[cur]||(retriangulation_reason[]="edge link does not close";return false)
+
+        function face_opposites(cells)
+            out=Dict{NTuple{3,Int32},Vector{Int32}}()
+            for q in cells,k in 1:4
+                f=ntuple(i -> q[i<k ? i : i+1],3)
+                push!(get!(() -> Int32[],out,_sort3t(f...)),q[k])
+            end
+            out
+        end
+        oldcells=NTuple{4,Int32}[tv[t] for t in ts]
+        oldfaces=face_opposites(oldcells)
+        all(length(v)<=2 for v in values(oldfaces))||
+            (retriangulation_reason[]="old cavity is non-manifold";return false)
+        oldboundary=Set(k for (k,v) in oldfaces if length(v)==1)
+        oldvolume=sum(abs(tet_signed_volume(
+            (cx[q[1]],cy[q[1]],cz[q[1]]),(cx[q[2]],cy[q[2]],cz[q[2]]),
+            (cx[q[3]],cy[q[3]],cz[q[3]]),(cx[q[4]],cy[q[4]],cz[q[4]]))) for q in oldcells)
+        (isfinite(oldvolume)&&oldvolume>0)||
+            (retriangulation_reason[]="old cavity volume is invalid";return false)
+        cavityverts=unique(Int32[v for q in oldcells for v in q])
+        scale=0.0
+        for i in eachindex(cavityverts),j in i+1:length(cavityverts)
+            scale=max(scale,elen(cavityverts[i],cavityverts[j]))
+        end
+        voltol=max(1e-10*oldvolume,256eps(Float64)*scale^3)
+
+        bestcells=nothing;bestvolumes=nothing;bestscore=Inf
+        stats=Dict(:flat=>0,:duplicate=>0,:incidence=>0,:boundary=>0,
+                   :orientation=>0,:volume=>0,:accepted=>0)
+        for root in 1:n
+            order=Int32[cycle[mod1(root+j,n)] for j in 0:n-1]
+            cells=NTuple{4,Int32}[];volumes=Float64[];ok=true
+            for j in 2:n-1
+                x,y,z=order[1],order[j],order[j+1]
+                for q0 in ((a,x,y,z),(b,x,z,y))
+                    q=q0
+                    sv=tet_signed_volume((cx[q[1]],cy[q[1]],cz[q[1]]),
+                                         (cx[q[2]],cy[q[2]],cz[q[2]]),
+                                         (cx[q[3]],cy[q[3]],cz[q[3]]),
+                                         (cx[q[4]],cy[q[4]],cz[q[4]]))
+                    if !(isfinite(sv)&&sv!=0);ok=false;break end
+                    sv<0&&(q=(q[1],q[2],q[4],q[3]);sv=-sv)
+                    push!(cells,q);push!(volumes,sv)
+                end
+                ok||break
+            end
+            if !ok;stats[:flat]+=1;continue end
+            if length(Set(Tuple(sort(collect(q))) for q in cells))!=length(cells)
+                stats[:duplicate]+=1;continue
+            end
+            newfaces=face_opposites(cells)
+            if !all(length(v)<=2 for v in values(newfaces))
+                stats[:incidence]+=1;continue
+            end
+            if Set(k for (k,v) in newfaces if length(v)==1)!=oldboundary
+                stats[:boundary]+=1;continue
+            end
+            for (f,opps) in newfaces
+                fp=ntuple(i -> (cx[f[i]],cy[f[i]],cz[f[i]]),3)
+                if length(opps)==2
+                    s1=orient3(fp...,(cx[opps[1]],cy[opps[1]],cz[opps[1]]))
+                    s2=orient3(fp...,(cx[opps[2]],cy[opps[2]],cz[opps[2]]))
+                    (s1!=0&&s2!=0&&s1==-s2)||(ok=false;break)
+                else
+                    oldopp=oldfaces[f][1]
+                    sn=orient3(fp...,(cx[opps[1]],cy[opps[1]],cz[opps[1]]))
+                    so=orient3(fp...,(cx[oldopp],cy[oldopp],cz[oldopp]))
+                    (sn!=0&&sn==so)||(ok=false;break)
+                end
+            end
+            if !ok;stats[:orientation]+=1;continue end
+            drift=abs(sum(volumes)-oldvolume)
+            if drift>voltol;stats[:volume]+=1;continue end
+            stats[:accepted]+=1
+            score=drift/voltol-min(volumes...)/max(volumes...)
+            if score<bestscore
+                bestcells=cells;bestvolumes=volumes;bestscore=score
+            end
+        end
+        if bestcells===nothing
+            linkpoints=Tuple((v,(cx[v],cy[v],cz[v])) for v in cycle)
+            retriangulation_reason[]="no fan passed: stats=$stats, cycle=$linkpoints, " *
+                                     "old_volume=$oldvolume, volume_tolerance=$voltol"
+            return false
+        end
+        length(tv)+length(bestcells)<typemax(Int32)||
+            (retriangulation_reason[]="replacement exceeds Int32 tet storage";return false)
+        for t in ts;alive[t]=false;end
+        tag=first(tags)
+        for (q,sv) in zip(bestcells,bestvolumes)
+            addtet!(q[1],q[2],q[3],q[4],true,tag,sv)
+        end
+        delete!(inc,e)
+        return true
+    end
+
     guard = 0
-    while !isempty(heap.d)
-        (len, a, b) = _hpop!(heap)
+    while true
+      while !isempty(heap.d)
+        (score, a, b) = _hpop!(heap)
         delete!(queued,ek(a,b))
-        len <= target && break                               # global max edge ≤ hmax ⇒ finished
+        score <= 1 && break                                  # no sampled local violation remains
         e = ek(a, b); haskey(inc, e) || continue
         ts = Int32[]
         @inbounds for t in inc[e]
@@ -1066,16 +1385,80 @@ function refine_to_size(m::Mesh, hmax::Real)
             throw(ErrorException("refine_to_size: refined node count exceeds the Int32 indexing limit"))
         mx=_midpoint3(cx[a],cx[b]); my=_midpoint3(cy[a],cy[b]); mz=_midpoint3(cz[a],cz[b])
         ((mx,my,mz)!=(cx[a],cy[a],cz[a]) && (mx,my,mz)!=(cx[b],cy[b],cz[b])) ||
-            throw(ErrorException("refine_to_size: hmax=$target is below Float64 coordinate resolution on edge ($a,$b)"))
+            throw(ErrorException("refine_to_size: $target_description is below Float64 coordinate resolution on edge ($a,$b)"))
+        splitpoint=(mx,my,mz)
+        midpoint_affine=exact_affine_point(a,b,splitpoint,1,2)
+        constrained=!midpoint_affine && edge_is_constrained(a,b,ts)
+        # `_midpoint3` is the canonical Float64 representation of the geometric
+        # midpoint. On a general 3-D edge its independently rounded coordinates need
+        # not be exactly collinear with the represented endpoints. Accept that unique
+        # canonical point when both exact child-orientation tests pass. If it collides
+        # with an existing vertex, however, the fallback may move by additional ULPs;
+        # constrained edges then retain the strict exact-collinearity requirement in
+        # `fallback_split_point`.
+        childvolumes=haskey(coordids,coordkey(splitpoint...)) ? nothing :
+                     split_child_volumes(a,b,ts,splitpoint;fraction=(1,2))
+        if childvolumes===nothing
+            constrained=constrained||edge_is_constrained(a,b,ts)
+            fallback=fallback_split_point(a,b,ts,constrained)
+            if fallback===nothing
+                retriangulate_edge!(a,b,ts)&&continue
+                reason=
+                    "refine_to_size: no conforming representable split or valid local " *
+                    "edge-star retriangulation exists for edge ($a,$b) from " *
+                    "$((cx[a],cy[a],cz[a])) to $((cx[b],cy[b],cz[b])) across " *
+                    "$(length(ts)) incident tetrahedra $(Tuple(tv[t] for t in ts)) " *
+                    "with tags $(Tuple(ttag[t] for t in ts)); local retriangulation: " *
+                    retriangulation_reason[]
+                constrained && throw(ErrorException(reason*"; constrained edge geometry cannot be moved"))
+                signature=Tuple(sort(ts))
+                if get(deferred_signature,e,nothing)==signature
+                    throw(ErrorException(reason*"; neighboring refinement did not change the edge star"))
+                end
+                deferred_signature[e]=signature;push!(deferred,e)
+                continue
+            end
+            splitpoint,childvolumes=fallback
+            mx,my,mz=splitpoint
+        end
         push!(cx,mx); push!(cy,my); push!(cz,mz)
-        mvid = Int32(length(cx)); split_lower!(a,b,mvid)
-        @inbounds for t in ts
-            q = tv[t]; a1=Int32(0); a2=Int32(0)
-            for v in q; (v!=a && v!=b) && (a1==0 ? (a1=v) : (a2=v)); end
+        mvid = Int32(length(cx));coordids[coordkey(mx,my,mz)]=mvid;split_lower!(a,b,mvid)
+        @inbounds for (k,t) in enumerate(ts)
+            opposite=edge_opposites(tv[t],a,b)
+            opposite===nothing&&throw(ErrorException(
+                "refine_to_size: edge incidence changed during subdivision"))
+            a1,a2=opposite
             g = ttag[t]; alive[t] = false                    # children inherit the parent tet's region tag
-            addtet!(a, mvid, a1, a2, true, g); addtet!(mvid, b, a1, a2, true, g)
+            addtet!(a,mvid,a1,a2,true,g,childvolumes[k][1])
+            addtet!(mvid,b,a1,a2,true,g,childvolumes[k][2])
         end
         delete!(inc,e)
+      end
+      isempty(deferred)&&break
+      pending=collect(deferred);empty!(deferred)
+      for e in pending
+          haskey(inc,e)||continue
+          len=elen(e[1],e[2])
+          isfinite(len)||throw(ErrorException("refine_to_size: a deferred edge length is non-finite"))
+          queueedge!(e[1],e[2],len)
+      end
+      isempty(heap.d)&&break
+    end
+    # `inc` contains every generated edge. Split edges are deleted; other stale
+    # entries can only reference dead tets. Certify each live output edge once here
+    # instead of evaluating an expensive spatial field up to once per incident tet.
+    @inbounds for ((u,v),ts) in inc
+        live=false
+        for t in ts
+            if alive[t];live=true;break;end
+        end
+        live||continue
+        len=elen(u,v)
+        mx=_midpoint3(cx[u],cx[v]);my=_midpoint3(cy[u],cy[v]);mz=_midpoint3(cz[u],cz[v])
+        target=min(size_at(field,cx[u],cy[u],cz[u]),
+                   size_at(field,cx[v],cy[v],cz[v]),size_at(field,mx,my,mz))
+        len<=target || throw(ErrorException(
+            "refine_to_size: postcondition failed: an output edge exceeds its local target from $target_description"))
     end
     keep = Int32[t for t in 1:length(tv) if alive[t]]
     used = Int32[]; seenv = Set{Int32}()
@@ -1098,11 +1481,6 @@ function refine_to_size(m::Mesh, hmax::Real)
     out=Mesh(C;segs=S,tris=F,tets=M,seg_tag=st,tri_tag=ft,tet_tag=tetags)
     diag=validate(out)
     diag.ok || throw(ErrorException("refine_to_size: produced an invalid mesh — " * join(diag.messages,"; ")))
-    @inbounds for t in axes(M,2), (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
-        u=M[i,t];v=M[j,t]
-        hypot(C[1,u]-C[1,v],C[2,u]-C[2,v],C[3,u]-C[3,v]) <= target ||
-            throw(ErrorException("refine_to_size: postcondition failed: an output edge exceeds hmax=$target"))
-    end
     return out
 end
 

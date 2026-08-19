@@ -623,16 +623,21 @@ Base.show(io::IO, d::MeshDiagnostic) =
     print(io, "MeshDiagnostic(ok=$(d.ok)" * (isempty(d.messages) ? "" : ", " * join(d.messages, "; ")) * ")")
 
 """
-    validate(m; require_positive_tets=true) -> MeshDiagnostic
+    validate(m; require_positive_tets=true,
+             require_manifold_tris=(ntets(m)==0)) -> MeshDiagnostic
 
 Completeness contract (DEVELOPMENT.md): a mesh is either validated or carries a
 precise diagnostic — never a silent defect. Checks index bounds (already enforced
 at construction), non-degenerate cells, positive tet volumes, finite coordinates,
-and non-manifold faces. Empty-region detection is the caller's job (it must count
-tets *per region*); `validate` reports the global tet count so "no empty volumes"
-can never be vacuously true.
+and non-manifold cells. Standalone surface meshes require a 2-manifold by default.
+In a volume mesh, triangles are lower-dimensional physical/embedded cells: their
+union need not be a 2-manifold, so only finiteness, degeneracy, and global duplication
+are checked unless `require_manifold_tris=true` is requested explicitly. Empty-region
+detection is the caller's job (it must count tets *per region*); `validate` reports the
+global tet count so "no empty volumes" can never be vacuously true.
 """
-function validate(m::Mesh; require_positive_tets::Bool=true)
+function validate(m::Mesh; require_positive_tets::Bool=true,
+                  require_manifold_tris::Bool=ntets(m)==0)
     msgs = String[]
     # finite coordinates
     @inbounds for i in 1:nnodes(m)
@@ -685,9 +690,19 @@ function validate(m::Mesh; require_positive_tets::Bool=true)
     nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
     ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
     # Full combinatorial-manifold audits (incidence alone misses vertex pinches).
+    # Lower-dimensional cells in a volume mesh may be arbitrary physical or embedded
+    # entity subsets. They still may not duplicate a canonical cell globally.
     if ntris(m) > 0
-        topok, reason = _tri_topology(m.tris)
-        topok || push!(msgs, "non-manifold triangle complex: $reason")
+        trikeys=NTuple{3,Int32}[_sort3(Int32(m.tris[1,t]),Int32(m.tris[2,t]),
+                                      Int32(m.tris[3,t])) for t in axes(m.tris,2)]
+        sort!(trikeys;alg=QuickSort)
+        duplicate=any(trikeys[i]==trikeys[i-1] for i in 2:length(trikeys))
+        if duplicate
+            push!(msgs,"non-manifold triangle complex: duplicate triangle")
+        elseif require_manifold_tris
+            topok,reason=_tri_topology(m.tris)
+            topok || push!(msgs,"non-manifold triangle complex: $reason")
+        end
     end
     if ntets(m) > 0
         topok, reason = _tet_topology(m.tets)

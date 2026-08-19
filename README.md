@@ -6,10 +6,12 @@ diagnostics. It was created for the ASCENT electromagnetics workflow after gmsh
 4.13.1 and 4.15.2-git left the enclosure/coax acceptance geometry with zero volume
 elements.
 
-The package implementation is complete through Stage 6. The bounds-checked package
-suite currently contains 151,787 passing assertions. Package evidence and exact
-commands are recorded in [`STATUS.md`](STATUS.md); the separate external ASCENT solve
-campaign is recorded in [`ASCENT.md`](ASCENT.md).
+The original simplex-mesher roadmap is complete through Stage 6. Development has now
+expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
+ASCENT-relevant meshing capabilities implemented first. That parity target is **not
+complete**. The current bounds-checked suite passes 152,789/152,789 assertions; the
+live implementation and verification record is [`STATUS.md`](STATUS.md).
+The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
 
 ```julia
 using Tessella
@@ -17,6 +19,10 @@ using Tessella.IO: write_msh
 
 m = mesh_volume(surface)                 # closed triangle surface → validated tets
 ms = mesh_sized(surface; hmax=0.5)       # certified maximum-edge size bound
+near = DistanceField(surface)
+field = ThresholdField(near; dist_min=0.0, dist_max=0.2,
+                       size_min=0.02, size_max=0.5)
+mf = mesh_sized(surface; field=field)    # spatially graded volume mesh
 write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 ```
 
@@ -30,15 +36,21 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   and parametric surface meshing;
 - Float64 and exact-coordinate 3-D Delaunay kernels, constrained boundary recovery,
   multi-region partitions, and explicit recovery blockers;
-- uniform sizing for boxes, cylinders, extrusions, and arbitrary closed faceted
-  surfaces, with lower-dimensional cells and tags preserved through refinement;
+- uniform and field-driven sizing for boxes, cylinders, extrusions, and arbitrary
+  closed faceted surfaces, including Gmsh-compatible `Distance`, `Threshold`, `Box`,
+  `Ball`, finite `Cylinder`, `Frustum`, `Min`, `Max`, and final size-bound semantics;
+  discrete distance queries use a deterministic AABB hierarchy, and
+  lower-dimensional cells and tags are preserved through volume refinement;
 - quality reporting, flips, Laplacian/ODT/targeted sliver smoothing, healing
   diagnostics, native primitives, analytical surfaces, imprints, and mesh Boolean CSG;
 - globally certified quadratic tetrahedra, plus strict and atomic MSH v2.2/v4.1 and
   STL I/O.
 
-Tessella does not attempt to reimplement OpenCASCADE/NURBS, a GUI, or an FEM solver.
-Those are explicit non-goals; ASCENT remains the solver.
+Mixed element families, the remaining Gmsh field types and algorithms, complete CAD/
+BREP and scripting support, broad file/API compatibility, GUI, and post-processing are
+still pending parity work. See [`PLAN.md`](PLAN.md) rather than treating the completed
+Stage 0–6 baseline as Gmsh completeness. ASCENT remains Tessella's primary solver
+consumer.
 
 ## Verification
 
