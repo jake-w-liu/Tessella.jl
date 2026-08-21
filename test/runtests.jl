@@ -7,7 +7,7 @@ using Tessella
     include("meshtypes_test.jl")    # mesh container, topology, quality, checksum
     include("transform_test.jl")    # validated affine transforms + orientation preservation
     include("io_test.jl")           # .msh v2/v4 round-trip, STL, .geo scan
-    include("elements_test.jl")     # all fixed-node Gmsh 4.15.2 families + mixed entity I/O
+    include("elements_test.jl")     # fixed/special Gmsh 4.15.2 records + mixed entity I/O
     include("recombine_test.jl")    # deterministic triangle-to-quad recombination
     include("refine_test.jl")       # deterministic one-level uniform simplex refinement
 

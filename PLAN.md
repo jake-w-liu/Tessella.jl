@@ -34,7 +34,7 @@ Tessella
 ├── Transform     validated affine transforms for finalized simplex meshes
 ├── ExactMesh3D   Rational{BigInt} Delaunay kernel
 ├── IO            strict/atomic MSH v2.2/v4.1, STL, bounded .geo constant scan
-├── Elements      fixed-node Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
+├── Elements      fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
 ├── Recombine     deterministic physical-tag-preserving triangle-to-quad pairing
 ├── Refine        deterministic one-level uniform linear-simplex refinement
 ├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
@@ -89,7 +89,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | Track | Exit condition | State |
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types, mixed metadata, validation/CRC, and ASCII/binary MSH v2.2/v4.1 shipped |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus ten serializable cut/border/child/sub-element records, mixed metadata, validation/CRC, and ASCII/binary MSH v2.2/v4.1 shipped |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, mesh Booleans, finalized-mesh affine transforms, and bounded `.geo` constant expressions shipped |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — deterministic surface recombination and one-level uniform simplex refinement shipped |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
@@ -102,13 +102,19 @@ quadrangles, `PostView` tensor-to-metric evaluation,
 direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD
 distance queries. P2 does not yet claim general mixed-element generation or
 recombination beyond P4's first-order surface pairing, integration of mixed blocks
-into the simplex meshing kernels, variable-connectivity or
-internal element types, curved high-order Jacobian certification, preservation of
+into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, curved
+high-order Jacobian certification, preservation of
 ancillary/unknown MSH sections (binary readers reject unsupported sections
 explicitly), repeated `$Nodes` sections, non-8-byte binary data, internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
-Some registered fixed tags also require explicit Tessella-only output because Gmsh
-4.15.2 cannot re-import them. P3 currently provides the native analytical and
+Variable-connectivity types 34/35/69 and parent/domain links are lossless in MSH2
+ASCII. Binary MSH2 has fixed widths and supports only fixed special records and parent
+links; MSH4 supports fixed unlinked special records. Type 69 and some registered fixed
+tags require explicit Tessella-only output because Gmsh 4.15.2 cannot consume them
+safely. Pinned Gmsh 4.15.2 also corrupts distinct parent links when it rewrites MSH2
+binary, while Tessella's binary round trip and Gmsh's ASCII rewrite preserve them.
+Nonzero-physical special MSH4 output requires compatible node/entity classification
+metadata for Gmsh-safe rewrites. P3 currently provides the native analytical and
 polyhedral path used by ASCENT, including boxes, cylinders, cones, geodesic spheres,
 projection/imprint curves, cavities, mesh Booleans, and validated translation,
 rotation, dilation, reflection, and general affine transforms of finalized simplex

@@ -24,7 +24,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | Track | State | Verified implementation increment |
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
-| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
+| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
 | P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination and one-level uniform linear-simplex refinement |
 | P5–P6 | **PENDING** | No state change |
@@ -34,13 +34,17 @@ pipeline, high-order/custom-interpolation, multiple-time-step, or mixed-componen
 `PostView`, materially warped quadrangles, `PostView` tensor-to-metric evaluation, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
 not claim general mixed-element generation or recombination beyond P4's first-order
-surface pairing, variable-connectivity/internal types, integration of mixed blocks
-into the simplex meshing kernels, curved high-order
+surface pairing, MINI basis-selector tags 138/139 as mesh records, integration of
+mixed blocks into the simplex meshing kernels, curved high-order
 Jacobian certification, ancillary/unknown-section preservation (binary readers reject
 unsupported sections explicitly), repeated `$Nodes`, non-8-byte binary data, internal
 indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection. Some
-registered fixed tags require explicit Tessella-only output because
-Gmsh 4.15.2 cannot re-import them. P3 does not yet claim a general entity kernel,
+registered fixed tags and polygon-border type 69 require explicit Tessella-only output
+because Gmsh 4.15.2 cannot consume them safely. MSH2 ASCII preserves variable records
+and parent/domain links; binary MSH2 and MSH4 have explicitly narrower special-record
+contracts. Pinned Gmsh 4.15.2 corrupts distinct parent links in its own binary MSH2
+rewrite, and nonzero-physical special MSH4 requires compatible node/entity
+classification metadata for a safe rewrite. P3 does not yet claim a general entity kernel,
 OpenCASCADE/BREP/NURBS, CAD import/export, transformations of analytical/CAD
 entities, or full `.geo` execution. Its scanner handles finite arithmetic constants,
 pure numeric functions, prior scalar bindings, and explicit field/physical tags; it
@@ -121,6 +125,17 @@ combined fixture produced 10 nodes and CRC
 Refining 2,000 and 4,000 connected segments allocated 423,504 and 845,648 bytes,
 respectively (1.99679×). The focused module ambiguity and public-doc scans both
 returned zero.
+
+The following special-element increment passed 2,822/2,822 bounds-checked assertions
+under Julia 1.12.7 and Julia 1.11.9. It covers types 34/35/67/68/69/70/133–136,
+compact variable connectivity, parent/domain references, validation and CRC, MSH2
+ASCII and fixed-width binary records, and fixed unlinked MSH4 records. Pinned source
+hashes and installed Gmsh 4.15.2 probes cover the accepted formats and their explicit
+blockers. Rejected 30,000- and 300,000-entry variable records allocated 5,328 and
+5,120 bytes after warm-up with `max_connectivity=0`; accepted 2,000- and 4,000-record
+fixtures allocated 13,000,112 and 26,462,288 bytes. The tests pin Gmsh's type-69
+normal-lifecycle crash and binary distinct-parent rewrite corruption as external
+limitations instead of claiming unsafe compatibility.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
