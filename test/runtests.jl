@@ -13,6 +13,7 @@ using Tessella
     include("transfinite_test.jl")  # validated four-sided planar structured patches
     include("transfinite_curve_test.jl") # straight-curve Progression/Bump/Beta laws
     include("transfinite_triangle_test.jl") # specific three-sided structured patches
+    include("transfinite_volume_test.jl") # affine six-face structured volumes
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle

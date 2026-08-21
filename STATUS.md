@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
-| P4 | **IN PROGRESS** | Surface recombination, uniform simplex refinement, straight-curve laws, and three-/four-sided planar transfinite patches |
+| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar transfinite patches, and affine six-face transfinite volumes |
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -56,10 +56,12 @@ and tetrahedron child templates while sharing edge midpoints, compacting unused 
 and preserving parent tags. Its straight-curve slice covers normalized affine-line
 Progression/Power, Bump, and Beta parameters. Its surface transfinite slice covers
 already-discretized, count-matched, three- and four-sided planar chains using Gmsh's
-specific triangular and average-chord Coons interpolation. P4 does not yet claim Gmsh's Blossom/full-quad
+specific triangular and average-chord Coons interpolation. Affine eight-corner blocks
+use Gmsh's unrecombined six-tetrahedron transfinite volume subdivision. P4 does not yet claim Gmsh's Blossom/full-quad
 algorithms, non-affine CAD curve integration, FlexibleTransfinite or HWall/size-map
 curve laws, quasi-transfinite or holed patches,
-general CAD parameterizations, transfinite quadrangles or volumes, volume/hybrid
+general CAD parameterizations, transfinite quadrangles, five-face or curved/warped
+transfinite volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening, boundary-layer element
 topology, or periodic/embedded model constraints.
 
@@ -166,6 +168,13 @@ four resolutions, and planar/tilted geometries, with maximum coordinate error
 `5f231f0c22f6812c247514103e21653e15281194911bf456b4c00a9d190a40df`.
 The 64- and 128-division fixtures allocated 2,383,144 and 6,154,008 bytes under Julia
 1.12.7; focused ambiguity and public-documentation scans returned zero.
+
+The subsequent affine-volume increment passed 74/74 bounds-checked assertions under
+Julia 1.12.7 and Julia 1.11.9. Its required Gmsh 4.15.2 differential matched all 144
+tetrahedra, 128 boundary triangles, and 72 mapped nodes across two affine blocks, with
+maximum coordinate residual `9.51e-12`. The 8×8×4 and 16×8×4 fixtures allocated
+385,984 and 774,128 bytes under Julia 1.12.7. Focused ambiguity and public-documentation
+scans returned zero.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:

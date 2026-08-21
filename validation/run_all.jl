@@ -104,6 +104,12 @@ transfinite_triangle_command = `$(Base.julia_cmd()) --startup-file=no --check-bo
 println("  command: ", transfinite_triangle_command)
 run(transfinite_triangle_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── transfinite_volume ──  Gmsh 4.15.2 affine six-face volumes")
+transfinite_volume_script = joinpath(HERE, "transfinite_volume", "differential.jl")
+transfinite_volume_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_volume_script`
+println("  command: ", transfinite_volume_command)
+run(transfinite_volume_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),

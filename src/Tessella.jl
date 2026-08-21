@@ -31,6 +31,7 @@ include("Refine.jl")         # P4: deterministic one-level uniform simplex refin
 include("Transfinite.jl")    # P4: validated four-sided planar transfinite patches
 include("TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
 include("TransfiniteTriangle.jl") # P4: three-sided structured triangle patches
+include("TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
@@ -57,6 +58,7 @@ using .Refine: refine_uniform
 using .Transfinite: mesh_transfinite_patch
 using .TransfiniteCurve: transfinite_curve_parameters
 using .TransfiniteTriangle: mesh_transfinite_triangle
+using .TransfiniteVolume: mesh_transfinite_volume
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -94,6 +96,7 @@ export refine_uniform
 export mesh_transfinite_patch
 export transfinite_curve_parameters
 export mesh_transfinite_triangle
+export mesh_transfinite_volume
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
        MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,
