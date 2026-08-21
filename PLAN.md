@@ -42,6 +42,7 @@ Tessella
 ├── TransfiniteTriangle validated three-sided structured triangle patches
 ├── TransfiniteQuad recombined four-sided structured quadrangle patches
 ├── TransfiniteVolume affine six-face structured tetrahedral volumes
+├── TransfinitePrism affine five-face structured tetrahedral prisms
 ├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
 ├── SizeField     scalar/anisotropic catalog, .geo field graph, context resolvers
 ├── Mesh1D        metric-length curve and segment discretization
@@ -96,7 +97,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus ten serializable cut/border/child/sub-element records, mixed metadata, validation/CRC, and ASCII/binary MSH v2.2/v4.1 shipped |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, mesh Booleans, finalized-mesh affine transforms, and bounded `.geo` constant expressions shipped |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — recombination, uniform refinement, curve laws, planar triangle/quad patches, and affine six-face transfinite volumes shipped |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — recombination, uniform refinement, curve laws, planar triangle/quad patches, and affine five-/six-face transfinite volumes shipped |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
 
@@ -142,12 +143,13 @@ patches implement Gmsh's specific triangular and average-chord Coons interpolati
 for already-discretized, count-matched boundary chains. Four-sided grids can also be
 emitted as Gmsh-compatible first-order quadrangles with exact projected
 corner-Jacobian certification. Positively ordered affine eight-corner blocks
-implement Gmsh's unrecombined six-tetrahedron transfinite volume subdivision. P4
-does not yet claim Gmsh's
+implement Gmsh's unrecombined six-tetrahedron transfinite volume subdivision;
+canonical affine triangular prisms implement Gmsh's legacy collapsed-grid five-face
+tetrahedral path. P4 does not yet claim Gmsh's
 Blossom/full-quad algorithms, non-affine CAD curve integration, FlexibleTransfinite
 or HWall/size-map curve laws,
 quasi-transfinite or holed patches, general CAD parameterizations,
-five-face or curved/warped transfinite volumes, recombined three-sided patches,
+curved/warped or compact-TransfiniteTri volumes, recombined three-sided patches,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, boundary-layer element topology, or
 periodic/embedded model constraints. P5–P6 remain pending.
@@ -173,8 +175,8 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The aggregate validation launches the Gmsh 4.15.2 size-field, uniform-refinement,
 four-sided transfinite, straight transfinite curve-law, three-sided transfinite,
-recombined-quadrangle, and affine transfinite-volume differentials as required
-bounds-checked children. A
+recombined-quadrangle, affine transfinite-volume, and five-face-prism differentials
+as required bounds-checked children. A
 missing or wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
 aggregate command fail.
 

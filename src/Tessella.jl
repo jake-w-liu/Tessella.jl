@@ -33,6 +33,7 @@ include("TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
 include("TransfiniteTriangle.jl") # P4: three-sided structured triangle patches
 include("TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
 include("TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
+include("TransfinitePrism.jl") # P4: affine five-face transfinite prisms
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
@@ -61,6 +62,7 @@ using .TransfiniteCurve: transfinite_curve_parameters
 using .TransfiniteTriangle: mesh_transfinite_triangle
 using .TransfiniteQuad: mesh_transfinite_quad_patch
 using .TransfiniteVolume: mesh_transfinite_volume
+using .TransfinitePrism: mesh_transfinite_prism
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -100,6 +102,7 @@ export transfinite_curve_parameters
 export mesh_transfinite_triangle
 export mesh_transfinite_quad_patch
 export mesh_transfinite_volume
+export mesh_transfinite_prism
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
        MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,

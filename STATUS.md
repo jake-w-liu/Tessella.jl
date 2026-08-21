@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
-| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar triangle/quad transfinite patches, and affine six-face transfinite volumes |
+| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar triangle/quad transfinite patches, and affine five-/six-face transfinite volumes |
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -59,11 +59,12 @@ already-discretized, count-matched, three- and four-sided planar chains using Gm
 specific triangular and average-chord Coons interpolation. Four-sided grids can also
 be emitted as first-order Gmsh type-3 quadrangles with exact projected
 corner-Jacobian certification. Affine eight-corner blocks use Gmsh's unrecombined
-six-tetrahedron transfinite volume subdivision. P4 does not yet claim Gmsh's Blossom/full-quad
+six-tetrahedron transfinite volume subdivision; canonical affine triangular prisms
+use its legacy collapsed-grid five-face tetrahedral path. P4 does not yet claim Gmsh's Blossom/full-quad
 algorithms, non-affine CAD curve integration, FlexibleTransfinite or HWall/size-map
 curve laws, quasi-transfinite or holed patches,
-general CAD parameterizations, recombined three-sided patches, five-face or curved/warped
-transfinite volumes, volume/hybrid
+general CAD parameterizations, recombined three-sided patches, curved/warped or
+compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening, boundary-layer element
 topology, or periodic/embedded model constraints.
 
@@ -188,6 +189,17 @@ The 64×64 and 128×64 fixtures allocated 3,430,528 and 6,274,688 bytes under Ju
 1.12.7. Exact-rational fallback regressions cover valid thin affine patches whose
 Float64 plane-normal or normalized-projection calculations cancel; focused ambiguity
 and public-documentation scans returned zero.
+
+The subsequent five-face-prism increment passed 130/130 bounds-checked assertions
+under Julia 1.12.7 and Julia 1.11.9. Its required Gmsh 4.15.2 differential matched
+the exact canonical tetrahedron vertex order and boundary topology for 117
+tetrahedra, 106 boundary triangles, and 63 nodes across three affine prisms; maximum
+coordinate error was `6.840577468974138e-12`. The deterministic mesh SHA-256 is
+`a16de779890f62f8a09d928cbef67a6f13b09c6765a7d91ce8e86de78c14db6e`.
+The 24×12×6 and 48×12×6 fixtures allocated 1,997,056 and 4,008,256 bytes under
+Julia 1.12.7. Exact-predicate and exponent-scaled volume gates reject represented
+folds or material loss while accepting verified subnormal affine prisms; focused
+ambiguity and public-documentation scans returned zero.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
