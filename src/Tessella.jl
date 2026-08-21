@@ -27,6 +27,7 @@ include("MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC
 include("Transform.jl")      # P3: validated affine mesh transformations
 include("Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
 include("Recombine.jl")      # P4: deterministic triangle-to-quad surface recombination
+include("Refine.jl")         # P4: deterministic one-level uniform simplex refinement
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
@@ -48,6 +49,7 @@ using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimensio
                  MixedMesh, mixed_crc, simplex_to_mixed, mixed_to_simplex,
                  write_mixed_msh, read_mixed_msh, lagrange_nodes, add_block!
 using .Recombine: recombine_triangles
+using .Refine: refine_uniform
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -81,6 +83,7 @@ export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_ord
        simplex_to_mixed, mixed_to_simplex, write_mixed_msh, read_mixed_msh,
        lagrange_nodes, add_block!
 export recombine_triangles
+export refine_uniform
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
        MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,

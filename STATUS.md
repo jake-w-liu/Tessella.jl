@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
-| P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination with retained boundary segments and unpaired triangles |
+| P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination and one-level uniform linear-simplex refinement |
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -47,9 +47,12 @@ pure numeric functions, prior scalar bindings, and explicit field/physical tags;
 rejects loops, macros, dynamic tags, option reads, stateful functions, ranges,
 logical/ternary syntax, CSG statements, and physical-group right-hand sides.
 
-P4 does not yet claim Gmsh's Blossom/full-quad algorithms, structured/transfinite
-grids, volume/hybrid recombination, boundary-layer element topology,
-coarsening/adaptation, or periodic/embedded model constraints.
+P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
+and tetrahedron child templates while sharing edge midpoints, compacting unused nodes,
+and preserving parent tags. P4 does not yet claim Gmsh's Blossom/full-quad algorithms,
+structured/transfinite grids, volume/hybrid recombination, selective or high-order
+refinement, coarsening, boundary-layer element topology, or periodic/embedded model
+constraints.
 
 OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
 post-processing are unfinished parity tracks, not project non-goals.
@@ -109,6 +112,15 @@ views preserve Gmsh's scalar `MAX_LC` result. The Gmsh 4.15.2 pointwise oracle c
 160 samples with maximum absolute error `6.66e-16`, plus eight exact closest-node
 fallbacks. Warm 10,000-query loops for quadrangle, hexahedron, prism, pyramid, and
 vector-quadrangle fields allocated at most 64 bytes in total.
+
+The subsequent uniform-refinement increment passed 78/78 bounds-checked assertions
+under Julia 1.12.7 and Julia 1.11.9. Its required Gmsh 4.15.2 API differential matched
+the ordered 2/4/8 segment/triangle/tetrahedron child templates and physical tags; the
+combined fixture produced 10 nodes and CRC
+`db9a1713d1174be1035ef3e9d6380a01ed419797a91ded9a2b8508d0b038f031`.
+Refining 2,000 and 4,000 connected segments allocated 423,504 and 845,648 bytes,
+respectively (1.99679×). The focused module ambiguity and public-doc scans both
+returned zero.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:

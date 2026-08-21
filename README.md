@@ -60,7 +60,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1
   mixed-element I/O with opposite-endian decoding;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
-  recombination with convexity, resource-growth, CRC, and Gmsh-load gates.
+  recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
+- one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
+  child templates, shared deterministic edge midpoints, tag preservation, resource
+  bounds, and output validation.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer element
 construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
@@ -69,7 +72,8 @@ quadrangles, mixed component counts, and tensor-to-metric evaluation,
 general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros,
 dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
-simplex-kernel integration, variable-connectivity/internal types, curved-cell Jacobian
+selective/high-order refinement, simplex-kernel integration,
+variable-connectivity/internal types, curved-cell Jacobian
 certification, non-8-byte binary data, and ancillary-section preservation. Some
 registered fixed tags require Tessella-only output because Gmsh 4.15.2 cannot
 re-import them. Complete CAD/BREP, broad file/API compatibility, GUI, and
@@ -86,8 +90,9 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field differential as a mandatory bounds-checked child. Missing or
-wrong-version Gmsh and differential failures make the aggregate command fail. See
+Gmsh 4.15.2 size-field and uniform-refinement differentials as mandatory
+bounds-checked children. Missing or wrong-version Gmsh and differential failures
+make the aggregate command fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
 rules.
 
