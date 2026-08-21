@@ -1,7 +1,30 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris
+using Tessella.MeshTypes: ntris, triangle_area
 using Tessella.Elements: validate
+
+function _bl_quad_area(mesh)
+    area=0.0
+    for block in mesh.blocks
+        if block.msh==3
+            for cell in axes(block.nodes,2)
+                p1=ntuple(d->mesh.coords[d,block.nodes[1,cell]],3)
+                p2=ntuple(d->mesh.coords[d,block.nodes[2,cell]],3)
+                p3=ntuple(d->mesh.coords[d,block.nodes[3,cell]],3)
+                p4=ntuple(d->mesh.coords[d,block.nodes[4,cell]],3)
+                area+=triangle_area(p1,p2,p4)+triangle_area(p4,p2,p3)
+            end
+        elseif block.msh==2
+            for cell in axes(block.nodes,2)
+                p1=ntuple(d->mesh.coords[d,block.nodes[1,cell]],3)
+                p2=ntuple(d->mesh.coords[d,block.nodes[2,cell]],3)
+                p3=ntuple(d->mesh.coords[d,block.nodes[3,cell]],3)
+                area+=triangle_area(p1,p2,p3)
+            end
+        end
+    end
+    return area
+end
 
 @testset "prismatic boundary layer" begin
     # Unit square in z=0, two triangles.
@@ -24,4 +47,66 @@ using Tessella.Elements: validate
     @test zmax≈H atol=1e-12
     @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.0, nlayers=1)
     @test_throws ArgumentError mesh_boundary_layer(face; hwall=-0.1, ratio=1.2, nlayers=1)
+end
+
+@testset "2-D boundary-layer quads" begin
+    # Unit segment along x, left-normal +y. Area = length * H.
+    coords=Float64[0 1; 0 0; 0 0]
+    segs=Int32[1; 2;;]
+    edge=Mesh(coords; segs=segs)
+    hw=0.1; ra=1.2; nl=2
+    H=hw*(ra^nl-1)/(ra-1)
+    bl=mesh_boundary_layer_2d(edge; hwall=hw, ratio=ra, nlayers=nl)
+    @test validate(bl).ok
+    quads=only(b for b in bl.blocks if b.msh==3)
+    @test size(quads.nodes,2)==nl
+    @test _bl_quad_area(bl)≈H atol=1e-12
+    @test maximum(bl.coords[2,:])≈H atol=1e-12
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge; hwall=hw, ratio=1.0, nlayers=1)
+end
+
+@testset "2-D boundary-layer closed square" begin
+    coords=Float64[0 1 1 0; 0 0 1 1; 0 0 0 0]
+    segs=Int32[1 2 3 4; 2 3 4 1]
+    square=Mesh(coords; segs=segs)
+    hw=0.05; ra=1.4; nl=1
+    H=hw*(ra^nl-1)/(ra-1)
+    @test H==hw
+    bl=mesh_boundary_layer_2d(square; hwall=hw, ratio=ra, nlayers=nl)
+    @test validate(bl).ok
+    quads=only(b for b in bl.blocks if b.msh==3)
+    @test size(quads.nodes,2)==4
+    # Vertex-normal extrusion: inner side 1-H√2, strip area 2√2 H - 2 H^2.
+    expected=2*sqrt(2)*H - 2*H^2
+    @test _bl_quad_area(bl)≈expected atol=1e-12
+end
+
+@testset "2-D boundary-layer corner fan" begin
+    coords=Float64[0 1 1; 0 0 1; 0 0 0]
+    segs=reshape(Int32[1,2,2,3],2,2)
+    ell=Mesh(coords; segs=segs)
+    hw=0.1; ra=1.5; nl=2; nfan=2
+    H=hw*(ra^nl-1)/(ra-1)
+    bl=mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl, fans=(2,), fan_elements=nfan)
+    @test validate(bl).ok
+    tris=only(b for b in bl.blocks if b.msh==2)
+    quads=only(b for b in bl.blocks if b.msh==3)
+    @test size(tris.nodes,2)==nfan
+    @test size(quads.nodes,2)==2*nl + nfan*(nl-1)
+    # Two unit legs of height H plus a polygonal quarter-disk of radii
+    # r_k = hwall*(ratio^k-1)/(ratio-1). Each of nfan equal wedges has
+    # area 0.5*sin(π/(2 nfan))*(r_k^2 - r_{k-1}^2).
+    α=π/(2*nfan)
+    r0=0.0
+    fan_area=0.0
+    for k in 1:nl
+        rk=hw*(ra^k-1)/(ra-1)
+        fan_area+=nfan*0.5*sin(α)*(rk^2-r0^2)
+        r0=rk
+    end
+    @test _bl_quad_area(bl)≈2*H + fan_area atol=1e-12
+    @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
+                                                     fans=(1,), fan_elements=nfan)
+    @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
+                                                     fans=(2,), fan_elements=1)
 end

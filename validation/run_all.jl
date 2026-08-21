@@ -176,6 +176,12 @@ esheet_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --pro
 println("  command: ", esheet_command)
 run(esheet_command)
 
+println("\n── gmsh_parity 2-D boundary layer ──  Tessella vs analytic/Gmsh BL quads")
+bl2d_script = joinpath(HERE, "gmsh_parity", "boundary_layer_2d.jl")
+bl2d_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $bl2d_script`
+println("  command: ", bl2d_command)
+run(bl2d_command)
+
 println("\n── transfinite_hex ──  Gmsh 4.15.2 affine six-face hexahedra")
 transfinite_hex_script = joinpath(HERE, "transfinite_hex", "differential.jl")
 transfinite_hex_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_hex_script`
