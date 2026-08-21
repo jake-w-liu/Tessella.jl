@@ -64,7 +64,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
-  bounds, and output validation.
+  bounds, and output validation;
+- validated four-sided planar transfinite triangle patches using average-chord Coons
+  interpolation, all four Gmsh diagonal arrangements, physical tags, bounded
+  intersection auditing, and exact orientation postconditions.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer element
 construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
@@ -73,7 +76,8 @@ quadrangles, mixed component counts, and tensor-to-metric evaluation,
 general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros,
 dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
-selective/high-order refinement, simplex-kernel integration,
+curve discretization laws, three-sided/quasi-transfinite or holed patches, transfinite
+quadrangles/volumes, selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
 non-8-byte binary data, and ancillary-section preservation. MSH2 ASCII is the lossless
 format for variable connectivity and parent/domain links; binary MSH2 and MSH4 have
@@ -94,9 +98,9 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field and uniform-refinement differentials as mandatory
-bounds-checked children. Missing or wrong-version Gmsh and differential failures
-make the aggregate command fail. See
+Gmsh 4.15.2 size-field, uniform-refinement, and transfinite-patch differentials as
+mandatory bounds-checked children. Missing or wrong-version Gmsh and differential
+failures make the aggregate command fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
 rules.
 

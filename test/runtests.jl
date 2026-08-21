@@ -10,6 +10,7 @@ using Tessella
     include("elements_test.jl")     # fixed/special Gmsh 4.15.2 records + mixed entity I/O
     include("recombine_test.jl")    # deterministic triangle-to-quad recombination
     include("refine_test.jl")       # deterministic one-level uniform simplex refinement
+    include("transfinite_test.jl")  # validated four-sided planar structured patches
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle
