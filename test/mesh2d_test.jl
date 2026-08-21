@@ -181,6 +181,7 @@ end
 mesh_area(m) = sum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2,t]),node(m,m.tris[3,t]))
                    for t in 1:ntris(m); init=0.0)
 edge_in(T, vi, vj) = Tessella.Mesh2D._edge_between(T, Int32(vi), Int32(vj))[1] != 0
+_skey_in_internal(T, vi, vj) = (Int32(min(vi,vj)), Int32(max(vi,vj))) in T.internal
 
 @testset "Mesh2D CDT (Stage 1)" begin
 
@@ -188,6 +189,26 @@ edge_in(T, vi, vj) = Tessella.Mesh2D._edge_between(T, Int32(vi), Int32(vj))[1] !
         xs=Float64[0,1,1,0]; ys=Float64[0,0,1,1]
         openT = constrained_delaunay(xs, ys, [(1,2)])
         @test_throws ArgumentError classify_interior(openT)
+    end
+
+    @testset "internal constraint is recovered and does not create a hole" begin
+        xs=Float64[0,1,1,0,0.25,0.75]; ys=Float64[0,0,1,1,0.5,0.5]
+        T=constrained_delaunay(xs,ys,[(1,2),(2,3),(3,4),(4,1)];
+                               internal_segments=[(5,6)])
+        @test check_consistency(T)[1]
+        ok,miss,viol=is_constrained_delaunay(T)
+        @test ok && miss==0 && viol==0
+        @test edge_in(T,5,6)
+        @test _skey_in_internal(T,5,6)
+        interior=classify_interior(T)
+        m=to_mesh(T; interior=interior)
+        @test validate(m).ok
+        @test mesh_area(m)≈1.0 atol=1e-12
+        interior2=refine!(T; min_angle_deg=20.0)
+        m2=to_mesh(T; interior=interior2)
+        @test validate(m2).ok
+        @test mesh_area(m2)≈1.0 atol=1e-12
+        @test is_constrained_delaunay(T)[1]
     end
 
     @testset "skew constraint crossing a grid" begin

@@ -292,4 +292,88 @@ using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node
     end
     @test any(i->hypot(embedgeo.mesh.coords[1,i]-0.5,embedgeo.mesh.coords[2,i]-0.5)<=1e-12,
               1:nnodes(embedgeo.mesh))
+
+    lineemb=GeoModel()
+    add_point!(lineemb,0,0,0; tag=1, mesh_size=0.5)
+    add_point!(lineemb,1,0,0; tag=2, mesh_size=0.5)
+    add_point!(lineemb,1,1,0; tag=3, mesh_size=0.5)
+    add_point!(lineemb,0,1,0; tag=4, mesh_size=0.5)
+    add_point!(lineemb,0.25,0.5,0; tag=5, mesh_size=0.5)
+    add_point!(lineemb,0.75,0.5,0; tag=6, mesh_size=0.5)
+    add_line!(lineemb,1,2; tag=1); add_line!(lineemb,2,3; tag=2)
+    add_line!(lineemb,3,4; tag=3); add_line!(lineemb,4,1; tag=4)
+    add_line!(lineemb,5,6; tag=5)
+    add_curve_loop!(lineemb,[1,2,3,4]; tag=1)
+    add_plane_surface!(lineemb,[1]; tag=1)
+    embed!(lineemb,1,[5],2,1)
+    lmesh=mesh_model_surface(lineemb,1)
+    @test validate(lmesh).ok
+    larea=sum(abs((node(lmesh,lmesh.tris[2,t])[1]-node(lmesh,lmesh.tris[1,t])[1])*
+                  (node(lmesh,lmesh.tris[3,t])[2]-node(lmesh,lmesh.tris[1,t])[2])-
+                  (node(lmesh,lmesh.tris[3,t])[1]-node(lmesh,lmesh.tris[1,t])[1])*
+                  (node(lmesh,lmesh.tris[2,t])[2]-node(lmesh,lmesh.tris[1,t])[2]))/2
+              for t in 1:ntris(lmesh))
+    @test larea≈1.0 atol=1e-12
+    @test Tessella.Model._mesh_covers_segment(lmesh,(0.25,0.5,0.0),(0.75,0.5,0.0))
+
+    volpt=GeoModel()
+    add_box!(volpt,0,0,0,1,1,1; tag=1)
+    add_point!(volpt,0.2,0.3,0.4; tag=10)
+    embed!(volpt,0,[10],3,1)
+    vmesh=mesh_model_volume(volpt,1)
+    @test validate(vmesh).ok
+    @test ntets(vmesh)>0
+    VV=sum(tet_volume(node(vmesh,vmesh.tets[1,t]),node(vmesh,vmesh.tets[2,t]),
+                      node(vmesh,vmesh.tets[3,t]),node(vmesh,vmesh.tets[4,t]))
+           for t in 1:ntets(vmesh))
+    @test VV≈1.0 atol=1e-12
+    @test any(i->hypot(vmesh.coords[1,i]-0.2,vmesh.coords[2,i]-0.3,vmesh.coords[3,i]-0.4)<=1e-12,
+              1:nnodes(vmesh))
+
+    linegeo=mktemp() do path,io
+        write(io, """
+            Point(1) = {0, 0, 0, 0.5};
+            Point(2) = {1, 0, 0, 0.5};
+            Point(3) = {1, 1, 0, 0.5};
+            Point(4) = {0, 1, 0, 0.5};
+            Point(5) = {0.25, 0.5, 0, 0.5};
+            Point(6) = {0.75, 0.5, 0, 0.5};
+            Line(1) = {1, 2};
+            Line(2) = {2, 3};
+            Line(3) = {3, 4};
+            Line(4) = {4, 1};
+            Line(5) = {5, 6};
+            Line Loop(1) = {1, 2, 3, 4};
+            Plane Surface(1) = {1};
+            Line{5} In Surface{1};
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=2)
+    end
+    @test Tessella.Model._mesh_covers_segment(linegeo.mesh,(0.25,0.5,0.0),(0.75,0.5,0.0))
+    lgarea=sum(abs((node(linegeo.mesh,linegeo.mesh.tris[2,t])[1]-node(linegeo.mesh,linegeo.mesh.tris[1,t])[1])*
+                   (node(linegeo.mesh,linegeo.mesh.tris[3,t])[2]-node(linegeo.mesh,linegeo.mesh.tris[1,t])[2])-
+                   (node(linegeo.mesh,linegeo.mesh.tris[3,t])[1]-node(linegeo.mesh,linegeo.mesh.tris[1,t])[1])*
+                   (node(linegeo.mesh,linegeo.mesh.tris[2,t])[2]-node(linegeo.mesh,linegeo.mesh.tris[1,t])[2]))/2
+               for t in 1:ntris(linegeo.mesh))
+    @test lgarea≈1.0 atol=1e-12
+
+    volgeo=mktemp() do path,io
+        write(io, """
+            SetFactory("OpenCASCADE");
+            Box(1) = {0, 0, 0, 1, 1, 1};
+            Point(10) = {0.2, 0.3, 0.4, 0.5};
+            Point{10} In Volume{1};
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=3)
+    end
+    @test any(i->hypot(volgeo.mesh.coords[1,i]-0.2,volgeo.mesh.coords[2,i]-0.3,
+                       volgeo.mesh.coords[3,i]-0.4)<=1e-12, 1:nnodes(volgeo.mesh))
+    VG=sum(tet_volume(node(volgeo.mesh,volgeo.mesh.tets[1,t]),
+                      node(volgeo.mesh,volgeo.mesh.tets[2,t]),
+                      node(volgeo.mesh,volgeo.mesh.tets[3,t]),
+                      node(volgeo.mesh,volgeo.mesh.tets[4,t]))
+           for t in 1:ntets(volgeo.mesh))
+    @test VG≈1.0 atol=1e-12
 end

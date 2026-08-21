@@ -184,10 +184,13 @@ function _exec_line!(m::GeoModel, line::AbstractString)
                        (axis[1],axis[2],axis[3]), (origin[1],origin[2],origin[3]), angle)
         return
     elseif (mm=match(r"^(Point|Line|Curve)\s*\{\s*([^}]+)\s*\}\s+In\s+Surface\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
-        mm.captures[1]=="Point" || throw(ArgumentError(
-            "execute_geo: only Point In Surface embeddings are implemented"))
+        dim=mm.captures[1]=="Point" ? 0 : 1
         ids=parse.(Int, split(mm.captures[2],','))
-        embed!(m, 0, ids, 2, parse(Int,mm.captures[3]))
+        embed!(m, dim, ids, 2, parse(Int,mm.captures[3]))
+        return
+    elseif (mm=match(r"^Point\s*\{\s*([^}]+)\s*\}\s+In\s+Volume\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
+        ids=parse.(Int, split(mm.captures[1],','))
+        embed!(m, 0, ids, 3, parse(Int,mm.captures[2]))
         return
     elseif (mm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
         dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]

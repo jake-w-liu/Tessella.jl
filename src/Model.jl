@@ -36,7 +36,7 @@ mutable struct GeoModel
     cones::Dict{Int,NamedTuple{(:center,:axis,:r1,:r2,:height),
                                Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64,Float64}}}
     booleans::Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}
-    embeds::Dict{Int,Vector{NTuple{2,Int}}}
+    embeds::Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}
     next_tag::Vector{Int}
 end
 
@@ -52,7 +52,7 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NamedTuple{(:center,:axis,:r1,:r2,:height),
                            Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64,Float64}}}(),
                       Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}(),
-                      Dict{Int,Vector{NTuple{2,Int}}}(),
+                      Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}(),
                       Int[0,0,0,0])
 
 function _tag(value, caller, dim::Int)
@@ -203,15 +203,24 @@ end
 function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
     caller="embed!"
     d=Int(dim); td=Int(target_dim); tt=_tag(target_tag,caller,td)
-    d==0 && td==2 || throw(ArgumentError(
-        "$caller: only Point In Surface is implemented (got dim=$d in dim=$td)"))
-    haskey(m.surfaces,tt) || throw(ArgumentError("$caller: unknown Surface[$tt]"))
-    list=get!(Vector{NTuple{2,Int}}, m.embeds, tt)
+    (d==0 && td==2) || (d==1 && td==2) || (d==0 && td==3) || throw(ArgumentError(
+        "$caller: supported embeddings are Point/Line In Surface and Point In Volume (got dim=$d in dim=$td)"))
+    if td==2
+        haskey(m.surfaces,tt) || throw(ArgumentError("$caller: unknown Surface[$tt]"))
+    else
+        haskey(m.volumes,tt) || throw(ArgumentError("$caller: unknown Volume[$tt]"))
+    end
+    list=get!(Vector{NTuple{2,Int}}, m.embeds, (td,tt))
     for raw in tags
-        pt=_tag(raw,caller,0)
-        haskey(m.points,pt) || throw(ArgumentError("$caller: unknown Point[$pt]"))
-        (0,pt) in list && throw(ArgumentError("$caller: Point[$pt] already embedded in Surface[$tt]"))
-        push!(list, (0,pt))
+        ent=_tag(raw,caller,d)
+        if d==0
+            haskey(m.points,ent) || throw(ArgumentError("$caller: unknown Point[$ent]"))
+        else
+            haskey(m.curves,ent) || throw(ArgumentError("$caller: unknown Curve[$ent]"))
+        end
+        (d,ent) in list && throw(ArgumentError(
+            "$caller: entity ($d,$ent) already embedded in ($td,$tt)"))
+        push!(list, (d,ent))
     end
     return tt
 end
@@ -388,38 +397,93 @@ function _loop_points(m::GeoModel, loop_id::Int)
     return pts
 end
 
+function _add_surface_point!(xs, ys, index, m::GeoModel, pid::Int, caller)
+    haskey(index, pid) && return index[pid]
+    haskey(m.points,pid) || throw(ArgumentError("$caller: unknown Point[$pid]"))
+    p=m.points[pid]
+    abs(p[3])<=1e-12 || throw(ArgumentError(
+        "$caller: Point[$pid] is not planar in z=0 (got z=$(p[3]))"))
+    push!(xs,p[1]); push!(ys,p[2])
+    index[pid]=length(xs)
+    return index[pid]
+end
+
+function _node_at(mesh::Mesh, p; atol=1e-12)
+    @inbounds for i in 1:nnodes(mesh)
+        hypot(mesh.coords[1,i]-p[1],mesh.coords[2,i]-p[2],mesh.coords[3,i]-p[3])<=atol && return i
+    end
+    return 0
+end
+
+function _on_segment(x, p, q; atol=1e-12)
+    vx,vy=q[1]-p[1], q[2]-p[2]
+    wx,wy=x[1]-p[1], x[2]-p[2]
+    L2=vx*vx+vy*vy
+    L2>0 || return hypot(wx,wy)<=atol
+    cross=vx*wy-vy*wx
+    abs(cross)<=atol*sqrt(L2) || return false
+    t=(wx*vx+wy*vy)/L2
+    return -atol<=t<=1+atol
+end
+
+function _mesh_covers_segment(mesh::Mesh, p, q; atol=1e-12)
+    a=_node_at(mesh,p; atol=atol); b=_node_at(mesh,q; atol=atol)
+    a==0 && return false; b==0 && return false
+    a==b && return true
+    adj=Dict{Int,Vector{Int}}()
+    @inbounds for t in 1:ntris(mesh), e in ((1,2),(2,3),(3,1))
+        i=Int(mesh.tris[e[1],t]); j=Int(mesh.tris[e[2],t])
+        pi=(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
+        pj=(mesh.coords[1,j],mesh.coords[2,j],mesh.coords[3,j])
+        (_on_segment(pi,p,q; atol=atol) && _on_segment(pj,p,q; atol=atol)) || continue
+        push!(get!(Vector{Int}, adj, i), j)
+        push!(get!(Vector{Int}, adj, j), i)
+    end
+    seen=falses(nnodes(mesh)); qn=Int[a]; seen[a]=true; head=1
+    while head<=length(qn)
+        v=qn[head]; head+=1
+        v==b && return true
+        for u in get(adj, v, Int[])
+            seen[u] && continue
+            seen[u]=true; push!(qn,u)
+        end
+    end
+    return false
+end
+
 function mesh_model_surface(m::GeoModel, tag::Integer; min_angle_deg::Real=25.0)
     caller="mesh_model_surface"
     t=_tag(tag,caller,2)
     haskey(m.surfaces,t) || throw(ArgumentError("$caller: unknown Surface[$t]"))
     loops=m.surfaces[t]
     xs=Float64[]; ys=Float64[]; segs=Tuple{Int,Int}[]
-    for (li,loop_id) in enumerate(loops)
+    index=Dict{Int,Int}()
+    for loop_id in loops
         ids=_loop_points(m,loop_id)
-        start=length(xs)+1
-        for pid in ids
-            p=m.points[pid]
-            abs(p[3])<=1e-12 || throw(ArgumentError(
-                "$caller: Surface[$t] is not planar in z=0 (got z=$(p[3]))"))
-            push!(xs,p[1]); push!(ys,p[2])
-        end
-        stop=length(xs)
-        for i in start:stop
-            j=i==stop ? start : i+1
-            push!(segs,(i,j))
+        loop_idx=Int[_add_surface_point!(xs,ys,index,m,pid,caller) for pid in ids]
+        nloop=length(loop_idx)
+        nloop>=3 || throw(ArgumentError("$caller: Loop[$loop_id] needs at least three points"))
+        for k in 1:nloop
+            push!(segs,(loop_idx[k], loop_idx[mod1(k+1,nloop)]))
         end
     end
-    embedded=get(m.embeds,t,NTuple{2,Int}[])
+    embedded=get(m.embeds,(2,t),NTuple{2,Int}[])
+    internal=Tuple{Int,Int}[]
     for (edim,etag) in embedded
-        edim==0 || throw(ArgumentError(
-            "$caller: only Point In Surface embeddings are implemented"))
-        haskey(m.points,etag) || throw(ArgumentError("$caller: unknown embedded Point[$etag]"))
-        p=m.points[etag]
-        abs(p[3])<=1e-12 || throw(ArgumentError(
-            "$caller: embedded Point[$etag] is not planar in z=0 (got z=$(p[3]))"))
-        push!(xs,p[1]); push!(ys,p[2])
+        if edim==0
+            _add_surface_point!(xs,ys,index,m,etag,caller)
+        elseif edim==1
+            haskey(m.curves,etag) || throw(ArgumentError("$caller: unknown embedded Curve[$etag]"))
+            a,b=m.curves[etag]
+            ia=_add_surface_point!(xs,ys,index,m,a,caller)
+            ib=_add_surface_point!(xs,ys,index,m,b,caller)
+            ia==ib && throw(ArgumentError("$caller: embedded Curve[$etag] has coincident endpoints"))
+            push!(internal,(ia,ib))
+        else
+            throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
+        end
     end
-    T=constrained_delaunay(xs,ys,segs)
+    T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
     hmin=minimum(m.point_size[pid] for pid in _loop_points(m,loops[1]))
     sizefn=(x,y)->hmin
     interior=refine!(T; min_angle_deg=min_angle_deg, size=sizefn)
@@ -428,16 +492,15 @@ function mesh_model_surface(m::GeoModel, tag::Integer; min_angle_deg::Real=25.0)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntris(mesh)>0 || throw(ErrorException("$caller: Surface[$t] produced no triangles"))
     for (edim,etag) in embedded
-        edim==0 || continue
-        p=m.points[etag]
-        found=false
-        @inbounds for i in 1:nnodes(mesh)
-            if hypot(mesh.coords[1,i]-p[1],mesh.coords[2,i]-p[2],mesh.coords[3,i]-p[3])<=1e-12
-                found=true; break
-            end
+        if edim==0
+            p=m.points[etag]
+            _node_at(mesh,p)==0 && throw(ErrorException(
+                "$caller: embedded Point[$etag] at $p is not a mesh node"))
+        elseif edim==1
+            a,b=m.curves[etag]
+            _mesh_covers_segment(mesh, m.points[a], m.points[b]) || throw(ErrorException(
+                "$caller: embedded Curve[$etag] is not a chain of mesh edges"))
         end
-        found || throw(ErrorException(
-            "$caller: embedded Point[$etag] at $p is not a mesh node"))
     end
     return mesh
 end
@@ -468,7 +531,14 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
     surface=_volume_surface(m,t)
-    mesh=tetrahedralize(surface)
+    extra=NTuple{3,Float64}[]
+    for (edim,etag) in get(m.embeds,(3,t),NTuple{2,Int}[])
+        edim==0 || throw(ArgumentError(
+            "$caller: only Point In Volume embeddings are implemented (got dim=$edim)"))
+        haskey(m.points,etag) || throw(ArgumentError("$caller: unknown embedded Point[$etag]"))
+        push!(extra, m.points[etag])
+    end
+    mesh=isempty(extra) ? tetrahedralize(surface) : tetrahedralize(surface; interior_points=extra)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntets(mesh)>0 || throw(ErrorException("$caller: Volume[$t] produced no tetrahedra"))

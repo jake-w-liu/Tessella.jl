@@ -1752,9 +1752,103 @@ convex-hull-capped approximation of a non-convex domain.
 Delaunay fill without the PLC certificate or repair.  The caller then owns all
 validation and conformity checks; [`mesh_volume`](@ref) exposes the same bypass.
 """
+function _node_at3(mesh::Mesh, p; atol=1e-12)
+    @inbounds for i in axes(mesh.coords,2)
+        hypot(mesh.coords[1,i]-p[1],mesh.coords[2,i]-p[2],mesh.coords[3,i]-p[3])<=atol && return i
+    end
+    return 0
+end
+
+function _containing_tet(mesh::Mesh, p)
+    @inbounds for t in axes(mesh.tets,2)
+        a=(mesh.coords[1,mesh.tets[1,t]],mesh.coords[2,mesh.tets[1,t]],mesh.coords[3,mesh.tets[1,t]])
+        b=(mesh.coords[1,mesh.tets[2,t]],mesh.coords[2,mesh.tets[2,t]],mesh.coords[3,mesh.tets[2,t]])
+        c=(mesh.coords[1,mesh.tets[3,t]],mesh.coords[2,mesh.tets[3,t]],mesh.coords[3,mesh.tets[3,t]])
+        d=(mesh.coords[1,mesh.tets[4,t]],mesh.coords[2,mesh.tets[4,t]],mesh.coords[3,mesh.tets[4,t]])
+        s=tet_signed_volume(a,b,c,d)
+        s==0 && continue
+        signs=(tet_signed_volume(p,b,c,d), tet_signed_volume(a,p,c,d),
+               tet_signed_volume(a,b,p,d), tet_signed_volume(a,b,c,p))
+        zeros=0; ok=true
+        for si in signs
+            if si==0
+                zeros+=1
+            elseif (si>0)!=(s>0)
+                ok=false; break
+            end
+        end
+        ok && return t, zeros
+    end
+    return 0, 0
+end
+
+function _finish_interior(mesh::Mesh, extra)
+    isempty(extra) && return mesh
+    m=insert_interior_points(mesh, extra)
+    diag=validate(m)
+    diag.ok || throw(ErrorException(
+        "tetrahedralize: interior-point insertion produced an invalid mesh — "*
+        join(diag.messages,"; ")))
+    return m
+end
+
+function insert_interior_points(mesh::Mesh, extra)
+    isempty(extra) && return mesh
+    out=mesh
+    for (k,p) in enumerate(extra)
+        all(isfinite,p) || throw(ArgumentError("insert_interior_points: point $k is non-finite"))
+        _node_at3(out,p)!=0 && continue
+        t,zeros=_containing_tet(out,p)
+        t==0 && throw(ArgumentError(
+            "insert_interior_points: point $k at $p is not strictly inside the volume"))
+        zeros==0 || throw(ArgumentError(
+            "insert_interior_points: point $k at $p lies on a tet face or edge"))
+        out=_split_tet_one_to_four(out,t,p)
+    end
+    return out
+end
+
+function _split_tet_one_to_four(mesh::Mesh, t::Int, p)
+    nn=size(mesh.coords,2)+1
+    coords=hcat(mesh.coords, [p[1],p[2],p[3]])
+    v=Int32(nn)
+    a,b,c,d=mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t]
+    nt=size(mesh.tets,2)
+    tets=Matrix{Int32}(undef,4,nt+3)
+    @inbounds for j in 1:nt
+        if j==t
+            tets[1,j]=v; tets[2,j]=b; tets[3,j]=c; tets[4,j]=d
+        else
+            for i in 1:4; tets[i,j]=mesh.tets[i,j]; end
+        end
+    end
+    tets[1,nt+1]=a; tets[2,nt+1]=v; tets[3,nt+1]=c; tets[4,nt+1]=d
+    tets[1,nt+2]=a; tets[2,nt+2]=b; tets[3,nt+2]=v; tets[4,nt+2]=d
+    tets[1,nt+3]=a; tets[2,nt+3]=b; tets[3,nt+3]=c; tets[4,nt+3]=v
+    function _pos!(col)
+        pa=(coords[1,tets[1,col]],coords[2,tets[1,col]],coords[3,tets[1,col]])
+        pb=(coords[1,tets[2,col]],coords[2,tets[2,col]],coords[3,tets[2,col]])
+        pc=(coords[1,tets[3,col]],coords[2,tets[3,col]],coords[3,tets[3,col]])
+        pd=(coords[1,tets[4,col]],coords[2,tets[4,col]],coords[3,tets[4,col]])
+        if tet_signed_volume(pa,pb,pc,pd)<0
+            tets[2,col],tets[3,col]=tets[3,col],tets[2,col]
+        end
+    end
+    _pos!(t); _pos!(nt+1); _pos!(nt+2); _pos!(nt+3)
+    tags=if isempty(mesh.tet_tag)
+        Int32[]
+    else
+        tag=mesh.tet_tag[t]
+        vcat(mesh.tet_tag, Int32[tag,tag,tag])
+    end
+    return Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris), tets=tets,
+                seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag), tet_tag=tags)
+end
+
 function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false,
-                        check::Bool=true)
+                        check::Bool=true, interior_points=nothing)
     check && _require_surface3(surface,"tetrahedralize")
+    extra = interior_points===nothing ? NTuple{3,Float64}[] : collect(NTuple{3,Float64}, interior_points)
     nn = size(surface.coords, 2)
     xs = Vector{Float64}(undef, nn); ys = similar(xs); zs = similar(xs)
     @inbounds for i in 1:nn; xs[i]=surface.coords[1,i]; ys[i]=surface.coords[2,i]; zs[i]=surface.coords[3,i]; end
@@ -1762,9 +1856,11 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false
     optimize && optimize_flips!(T; passes=4)     # sliver-reducing flips (safe, volume-preserving)
     keep = _classify_by_centroid(T, surface)
     m = to_mesh3(T; keep=keep)
-    check || return m
+    check || return insert_interior_points(m, extra)
     ok, reason = _certify_surface_fill(surface, m)
-    ok && return m
+    if ok
+        return _finish_interior(m, extra)
+    end
     # A kernel fan is the cheapest conforming repair for star-shaped PLCs and avoids
     # repeating equivalent cospherical Delaunay builds (notably polygonal cylinders).
     # It is accepted only through the full PLC certificate; non-star-shaped inputs
@@ -1774,13 +1870,13 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false
         fan = _rb_fan_steiner(Px, Py, Pz, facets)
         if fan !== nothing
             fanok, _ = _certify_surface_fill(surface, fan)
-            fanok && return fan
+            fanok && return _finish_interior(fan, extra)
         end
     end
     exact_reason = ""
     if applicable(_recover_boundary_exact, surface)
         try
-            return _recover_boundary_exact(surface)
+            return _finish_interior(_recover_boundary_exact(surface), extra)
         catch err
             err isa InterruptException && rethrow()
             (err isa ArgumentError || err isa ErrorException) || rethrow()
@@ -1795,7 +1891,7 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false
     # already reported a blocker.
     recovery_reason = ""
     try
-        return recover_boundary(surface; rng_seed=rng_seed, max_seeds=8)
+        return _finish_interior(recover_boundary(surface; rng_seed=rng_seed, max_seeds=8), extra)
     catch err
         err isa InterruptException && rethrow()
         (err isa ArgumentError || err isa ErrorException) || rethrow()
