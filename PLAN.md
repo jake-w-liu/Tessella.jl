@@ -33,7 +33,7 @@ Tessella
 ├── MeshTypes     compact simplex storage, topology, quality, CRC, validation
 ├── Transform     validated affine transforms for finalized simplex meshes
 ├── ExactMesh3D   Rational{BigInt} Delaunay kernel
-├── IO            strict/atomic simplex MSH v2.2/v4.1, STL, limited .geo scan
+├── IO            strict/atomic MSH v2.2/v4.1, STL, bounded .geo constant scan
 ├── Elements      fixed-node Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
 ├── Recombine     deterministic physical-tag-preserving triangle-to-quad pairing
 ├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
@@ -89,7 +89,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types, mixed metadata, validation/CRC, and ASCII/binary MSH v2.2/v4.1 shipped |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, mesh Booleans, and finalized-mesh affine transforms shipped |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, mesh Booleans, finalized-mesh affine transforms, and bounded `.geo` constant expressions shipped |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — deterministic surface triangle-to-quad recombination shipped |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
@@ -111,7 +111,11 @@ projection/imprint curves, cavities, mesh Booleans, and validated translation,
 rotation, dilation, reflection, and general affine transforms of finalized simplex
 meshes. It does not yet claim a general entity kernel, OpenCASCADE/BREP/NURBS, CAD
 import/export, transformations of analytical/CAD entities, or complete `.geo`
-execution.
+execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
+functions, prior scalar bindings, and explicit field/physical tags with resource
+bounds. It deliberately rejects loops, macros, dynamic tag allocators, option reads,
+stateful functions, ranges, logical/ternary syntax, CSG statements, and physical-group
+right-hand-side evaluation instead of pretending to be a complete interpreter.
 
 P4 currently covers validated, deterministic pairing of adjacent same-physical-tag
 surface triangles into first-order quadrangles, with unpaired triangles and boundary

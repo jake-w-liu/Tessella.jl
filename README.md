@@ -53,6 +53,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   finalized simplex meshes with orientation and physical-tag preservation;
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
+- a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
+  functions, prior scalar bindings, sizing options, and explicit field/physical tags;
 - a 125-type fixed-node Gmsh element catalog, mixed blocks and entity/classification
   metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1
   mixed-element I/O with opposite-endian decoding;
@@ -61,8 +63,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer element
 construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
-general entity/OCC/BREP/NURBS and full `.geo` execution, mixed-element generation or
-recombination beyond first-order surface triangle pairing,
+general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros,
+dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
+mixed-element generation or recombination beyond first-order surface triangle pairing,
 simplex-kernel integration, variable-connectivity/internal types, curved-cell Jacobian
 certification, non-8-byte binary data, and ancillary-section preservation. Some
 registered fixed tags require Tessella-only output because Gmsh 4.15.2 cannot

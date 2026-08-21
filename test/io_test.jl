@@ -410,23 +410,256 @@ end
         malformed=joinpath(dir,"malformed_size.geo")
         write(malformed,"Mesh.MeshSizeMin = nope;\n")
         @test_throws ArgumentError read_geo_params(malformed)
-        for expression in ("1 + 2","1oops")
-            invalid=joinpath(dir,"unsupported_size_expression.geo")
-            write(invalid,"Mesh.MeshSizeMin = $expression;\n")
-            @test_throws ArgumentError read_geo_params(invalid)
-        end
+        invalid=joinpath(dir,"unsupported_size_expression.geo")
+        write(invalid,"Mesh.MeshSizeMin = 1oops;\n")
+        @test_throws ArgumentError read_geo_params(invalid)
         valid_numeric=joinpath(dir,"numeric_mesh_options.geo")
-        write(valid_numeric,"Mesh.MeshSizeMin = +.25e-2; Mesh.RandomSeed = 17;\n")
+        write(valid_numeric,"Mesh.MeshSizeMin = 1 + 2 * 3; Mesh.RandomSeed = 17;\n")
         numeric_params=read_geo_params(valid_numeric)
-        @test numeric_params.mesh_size_min==0.0025
+        @test numeric_params.mesh_size_min==7.0
         @test numeric_params.random_seed==17
         geometry_option=joinpath(dir,"geometry_tolerance.geo")
         write(geometry_option,"Geometry.Tolerance = 2e-5;\n")
         @test read_geo_params(geometry_option).geometry_tolerance==2e-5
-        for expression in ("1 + 2","1oops","-1","1.0")
-            invalid=joinpath(dir,"unsupported_seed_expression.geo")
-            write(invalid,"Mesh.RandomSeed = $expression;\n")
-            @test_throws ArgumentError read_geo_params(invalid)
+        invalid=joinpath(dir,"unsupported_seed_expression.geo")
+        write(invalid,"Mesh.RandomSeed = 1oops;\n")
+        @test_throws ArgumentError read_geo_params(invalid)
+
+        @testset "finite Gmsh constant expressions" begin
+            expressions=joinpath(dir,"constant_expressions.geo")
+            write(expressions,raw"""
+                base = 2;
+                half = base^-1;
+                angle = Pi / 2;
+                Physical Point("expression point", Min(10, base + 1.9)) = {1};
+                Mesh.MeshSizeMin = half * Sin(angle);
+                Mesh.MeshSizeMax = 2^3^2;
+                Mesh.MeshSizeFactor = Sqrt(9) / 3;
+                Mesh.RandomSeed = 3.9;
+                Geometry.Tolerance = Min(1e-4, Hypot(3, 4) * 1e-5);
+                curvature = 4.9;
+                Mesh.MeshSizeFromCurvature = curvature;
+                field_tag = 1.9;
+                Field[field_tag] = AutomaticMeshSizeField;
+                curvature = 7.9;
+                Mesh.MinimumElementsPerTwoPi = curvature;
+                field_tag = 2.9;
+                Field[field_tag] = AutomaticMeshSizeField;
+                field_tag = 3.9;
+                Field[field_tag] = BoundaryLayer;
+                Field[field_tag].Size = half;
+                Field[field_tag].hwall_n = base / 8;
+                Field[field_tag].SizesList = {half, Atan2(1, 1), Round(-1.5)};
+                Field[field_tag].SurfacesList = {surface_group[], base + 2};
+                Field[Sin[Pi / 2] + 3] = Min;
+                Field[Min[8, Sin[Pi / 2] + 3]].FieldsList = {1, Min(4, 2) + 2};
+                Field[Round(4.5)] = MathEval;
+                Field[Round(4.5)].F = "Sin(x) + base; // source, not a scanner expression";
+                BoundaryLayer Field = {base + 1};
+                Background Field = base + 2;
+                """)
+            params=read_geo_params(expressions)
+            @test params.mesh_size_min==0.5
+            @test params.mesh_size_max==512.0
+            @test params.mesh_size_factor==1.0
+            @test params.random_seed==3
+            @test params.geometry_tolerance==5e-5
+            @test params.physical_groups[(0,3)]=="expression point"
+            @test params.fields[1].creation_mesh_size_from_curvature==4
+            @test params.fields[2].creation_mesh_size_from_curvature==7
+            @test params.fields[3].options["Size"]=="0.5"
+            @test params.fields[3].options["hwall_n"]=="0.25"
+            @test parse.(Float64,Tessella.SizeField._geo_list(
+                params.fields[3],"SizesList")) ≈
+                [0.5,0.7853981633974483,-1.0]
+            @test params.fields[3].options["SurfacesList"]==
+                  "{surface_group[], 4}"
+            @test params.fields[4].options["FieldsList"]=="{1, 4}"
+            @test params.fields[3].option_order==
+                  ["Size","hwall_n","SizesList","SurfacesList"]
+            @test params.fields[5].options["F"]==
+                  raw"\"Sin(x) + base; // source, not a scanner expression\""
+            @test params.boundary_layer_fields==[3]
+            @test params.background_field==4
+
+            # Gmsh 4.15.2 truncates then clamps RandomSeed to UInt32's range.
+            for (source,expected) in (("-2",0),("0.9",0),("3.9",3),
+                                      ("1e300",Int(typemax(UInt32))))
+                write(expressions,"Mesh.RandomSeed = $source;\n")
+                @test read_geo_params(expressions).random_seed==expected
+            end
+        end
+
+        @testset "Gmsh 4.15.2 numeric-function oracle" begin
+            # Expected values were independently obtained with the local 4.15.2
+            # parser and Printf("%.17g", expression).
+            oracles=(
+                "Acos(1)"=>0.0,
+                "Asin(1)"=>1.5707963267948966,
+                "Atan(1)"=>0.78539816339744828,
+                "Atan2(1, 1)"=>0.78539816339744828,
+                "Ceil(1.1)"=>2.0,
+                "Cos(0)"=>1.0,
+                "Cosh(1)"=>1.5430806348152437,
+                "Exp(1)"=>2.7182818284590451,
+                "Fabs(-2)"=>2.0,
+                "Abs(-2)"=>2.0,
+                "Floor(1.9)"=>1.0,
+                "Hypot(3, 4)"=>5.0,
+                "Log(Exp(1))"=>1.0,
+                "Log10(1000)"=>3.0,
+                "Max(3, 2)"=>3.0,
+                "Min(3, 2)"=>2.0,
+                "Modulo(7, 4)"=>3.0,
+                "Fmod(-7, 4)"=>-3.0,
+                "Round(-1.5)"=>-1.0,
+                "Sqrt(9)"=>3.0,
+                "Sin[Pi / 2]"=>1.0,
+                "Sinh(1)"=>1.1752011936438014,
+                "Step(-0.)"=>1.0,
+                "Tan(Pi / 4)"=>0.99999999999999989,
+                "Tanh(1)"=>0.76159415595576485)
+            oracle_file=joinpath(dir,"numeric_function_oracle.geo")
+            for (expression,expected) in oracles
+                write(oracle_file,
+                    "Field[1] = Box; Field[1].VIn = $expression; Background Field = 1;\n")
+                parsed=read_geo_params(oracle_file)
+                actual=parse(Float64,parsed.fields[1].options["VIn"])
+                @test actual ≈ expected rtol=4eps(Float64) atol=4eps(Float64)
+            end
+            precedence=("1 + 2 * 3"=>7.0,"(1 + 2) * 3"=>9.0,
+                        "2^3^2"=>512.0,"-2^2"=>-4.0,
+                        "2^-2^2"=>0.0625,"- -2"=>2.0,"+ +2"=>2.0,
+                        "7%(-4)"=>3.0,"1.e-2"=>0.01)
+            for (expression,expected) in precedence
+                write(oracle_file,
+                    "Mesh.MeshSizeMin = $expression;\n")
+                @test read_geo_params(oracle_file).mesh_size_min==expected
+            end
+        end
+
+        @testset "expression safety and resource limits" begin
+            function geo_error(source)
+                path=joinpath(dir,"expression_error.geo")
+                write(path,source)
+                try
+                    read_geo_params(path)
+                    return nothing
+                catch err
+                    return err
+                end
+            end
+            invalid_expressions=(
+                "missing"=>"unknown scalar identifier",
+                "sin(1)"=>"unknown numeric function",
+                "Rand(1)"=>"non-constant or externally stateful",
+                "newp"=>"side-effecting Gmsh symbol",
+                "1 < 2"=>"outside the supported arithmetic subset",
+                "1 / 0"=>"non-finite",
+                "1e309"=>"must be finite",
+                "Sqrt(-1)"=>"finite real domain",
+                "2++"=>"increment and decrement",
+                "(1 + 2"=>"closing parenthesis")
+            for (expression,message) in invalid_expressions
+                err=geo_error("Mesh.MeshSizeMin = $expression;\n")
+                @test err isa ArgumentError
+                @test occursin(message,sprint(showerror,err))
+            end
+
+            err=geo_error("a = Rand(1); Mesh.MeshSizeMin = a;\n")
+            @test err isa ArgumentError
+            @test occursin("scalar variable a is unavailable",sprint(showerror,err))
+            err=geo_error("a = 1; a += 1; Mesh.MeshSizeMin = a;\n")
+            @test err isa ArgumentError
+            @test occursin("compound assignment",sprint(showerror,err))
+            err=geo_error("a = 1; a[] = {2}; Mesh.MeshSizeMin = a;\n")
+            @test err isa ArgumentError
+            @test occursin("list assignment",sprint(showerror,err))
+            err=geo_error("a = 1; For i In {1:2}\n a += 1; EndFor\n" *
+                          "junk = newp; Mesh.MeshSizeMin = a;\n")
+            @test err isa ArgumentError
+            @test occursin("unsupported loop",sprint(showerror,err))
+            err=geo_error("For i In {1:2}\nMesh.MeshSizeMin = i; EndFor\n")
+            @test err isa ArgumentError
+            @test occursin("unsupported control-flow",sprint(showerror,err))
+            err=geo_error("If (0)\n dummy = 1;\n Mesh.MeshSizeMin = 5;\n" *
+                          "EndIf\n Mesh.MeshSizeMax = 9;\n")
+            @test err isa ArgumentError
+            @test occursin("unsupported control-flow",sprint(showerror,err))
+            control_ignored=joinpath(dir,"control_ignored.geo")
+            write(control_ignored,"If (0)\n dummy = 1;\n EndIf\n" *
+                                  "Mesh.MeshSizeMax = 9;\n")
+            @test read_geo_params(control_ignored).mesh_size_max==9.0
+            err=geo_error("a = 1; If (0)\n dummy = 1; a = 5; EndIf\n" *
+                          "Mesh.MeshSizeMin = a;\n")
+            @test err isa ArgumentError
+            @test occursin("scalar variable a is unavailable",sprint(showerror,err))
+
+            strict_list="Field[1] = Min; Field[1].FieldsList = {1:3}; " *
+                        "Background Field = 1;\n"
+            err=geo_error(strict_list)
+            @test err isa ArgumentError
+            @test occursin("outside the supported arithmetic subset",sprint(showerror,err))
+            @test geo_error("Field[1] = Box; Background Field = 1e100;\n") isa ArgumentError
+            @test geo_error("Field[1] = Threshold; Field[1].InField = 1e100;\n") isa ArgumentError
+            for source in (
+                "Physical Point(\"bad\", missing) = {1};\n",
+                "Physical Point(\"bad\", -1) = {1};\n",
+                "Physical Point(\"bad\", 0.9) = {1};\n",
+                "Physical Point(\"bad\", 2147483648) = {1};\n",
+                "Physical Point(\"bad\", 1e100) = {1};\n",
+                "Field[0.9] = Box;\n",
+                "Field[newf] = Box;\n",
+                "Field[2147483648] = Box;\n",
+                "Field[1e100] = Box;\n",
+                "Field[1] = Box; Field[missing].VIn = 1;\n",
+                "Field[1] = Box; Background Field = 2147483648;\n",
+                "Field[1] = Min; Field[1].FieldsList = {2147483648};\n")
+                @test geo_error(source) isa ArgumentError
+            end
+            @test geo_error("Field[1 + 1] = Box; Field[2.9] = Min;\n") isa ArgumentError
+
+            too_many_tokens=join(fill("1",div(Tessella.IO._MAX_GEO_EXPRESSION_TOKENS,2)+1),"+")
+            err=geo_error("Mesh.MeshSizeMin = $too_many_tokens;\n")
+            @test err isa ArgumentError
+            @test occursin("tokens",sprint(showerror,err))
+            err=geo_error("Physical Point(\"too many\", $too_many_tokens) = {1};\n")
+            @test err isa ArgumentError
+            @test occursin("tokens",sprint(showerror,err))
+            too_deep=repeat("(",Tessella.IO._MAX_GEO_EXPRESSION_DEPTH+1)*"1"*
+                     repeat(")",Tessella.IO._MAX_GEO_EXPRESSION_DEPTH+1)
+            err=geo_error("Mesh.MeshSizeMin = $too_deep;\n")
+            @test err isa ArgumentError
+            @test occursin("nesting",sprint(showerror,err))
+            too_long="1"*repeat(" ",Tessella.IO._MAX_GEO_EXPRESSION_BYTES)*"+0"
+            err=geo_error("Mesh.MeshSizeMin = $too_long;\n")
+            @test err isa ArgumentError
+            @test occursin("bytes",sprint(showerror,err))
+            too_many_items=join(fill("1",Tessella.IO._MAX_GEO_LIST_ITEMS+1),",")
+            err=geo_error("Field[1] = Min; Field[1].FieldsList = {$too_many_items};\n")
+            @test err isa ArgumentError
+            @test occursin("entries",sprint(showerror,err))
+        end
+
+        @testset "comments and quoted strings cannot inject assignments" begin
+            safe=joinpath(dir,"safe_quoted_expressions.geo")
+            write(safe,raw"""
+                base = 2 /* Mesh.MeshSizeMin = 999; */ + 1;
+                Mesh.MeshSizeMin = base; // Field[999] = Box;
+                Field[1] = ExternalProcess;
+                Field[1].CommandLine = "printf '; Mesh.MeshSizeMax = 999; // still text'";
+                Field[2] = MathEval;
+                Field[2].F = "Sin(x); Background Field = 999;";
+                Background Field = 2;
+                """)
+            params=read_geo_params(safe)
+            @test params.mesh_size_min==3.0
+            @test isnan(params.mesh_size_max)
+            @test params.background_field==2
+            @test params.fields[1].options["CommandLine"]==
+                  raw"\"printf '; Mesh.MeshSizeMax = 999; // still text'\""
+            @test params.fields[2].options["F"]==
+                  raw"\"Sin(x); Background Field = 999;\""
         end
     end
 

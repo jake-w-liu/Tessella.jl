@@ -904,8 +904,10 @@ end
 """
     GeoFieldSpec
 
-A parsed `Field[tag] = Kind` declaration. Option values remain normalized `.geo`
-source strings: [`Tessella.SizeField.build_geo_size_field`](@ref) interprets the
+A parsed `Field[tag] = Kind` declaration. Constant numeric expressions in known
+numeric options are evaluated while scanning and stored as normalized literals;
+string, point-dependent expression, and geometric-entity values remain `.geo`
+source strings. [`Tessella.SizeField.build_geo_size_field`](@ref) interprets the
 supported field kinds after geometric entity references have been resolved.
 """
 struct GeoFieldSpec
@@ -936,7 +938,7 @@ name` map, dim ∈ {0:point,1:curve,2:surface,3:volume}), raw `fields`, and the
 no background field is tag `0`. `boundary_layer_fields` preserves the distinct,
 deduplicated `BoundaryLayer Field = ...` declarations; these are mesher controls,
 not background scalar fields. `geometry_tolerance` stores `Geometry.Tolerance`
-when it is a literal, or `NaN` when absent.
+when it is a finite constant numeric expression, or `NaN` when absent.
 `mesh_boundary_layer_fan_elements` stores the final
 `Mesh.BoundaryLayerFanElements` value (default 5). Automatic-field declarations
 also snapshot `Mesh.MeshSizeFromCurvature` in their `GeoFieldSpec`, since Gmsh
@@ -992,6 +994,590 @@ GeoParams(mesh_size_min::Real, mesh_size_max::Real, random_seed::Integer,
 const _PHYS_DIM = Dict("Point"=>0, "Curve"=>1, "Line"=>1, "Surface"=>2, "Volume"=>3)
 
 const _MAX_GEO_STATEMENT_BYTES=1_000_000
+const _MAX_GEO_EXPRESSION_BYTES=65_536
+const _MAX_GEO_EXPRESSION_TOKENS=4_096
+const _MAX_GEO_EXPRESSION_DEPTH=128
+const _MAX_GEO_LIST_ITEMS=65_536
+
+# This is deliberately a constant-expression evaluator, not a Julia evaluator
+# and not a general Gmsh interpreter.  Keeping a small lexer/parser here makes
+# unknown identifiers, assignments and stateful built-ins impossible to execute.
+struct _GeoExprToken
+    kind::Symbol
+    text::String
+    value::Float64
+    pos::Int
+end
+
+mutable struct _GeoNumericContext
+    values::Dict{String,Float64}
+    unavailable::Dict{String,String}
+end
+_GeoNumericContext()=_GeoNumericContext(Dict{String,Float64}(),Dict{String,String}())
+
+mutable struct _GeoExprParser
+    source::String
+    index::Int
+    token::_GeoExprToken
+    token_count::Int
+    depth::Int
+    context::_GeoNumericContext
+    caller::String
+end
+
+const _GEO_SIDE_EFFECT_SYMBOLS=Set((
+    "newp","newl","newc","newcl","newll","news","newsl","newreg","newv","newf"))
+const _GEO_NONCONSTANT_FUNCTIONS=Set((
+    "Rand","DefineNumber","GetNumber","GetValue","Exists","FileExists",
+    "StringToName","S2N","Find","StrFind","StrCmp","StrLen","TextAttributes"))
+
+@inline _geo_ascii_letter(c::Char)=('a'<=c<='z') || ('A'<=c<='Z') || c=='_'
+@inline _geo_ascii_digit(c::Char)=('0'<=c<='9')
+@inline _geo_ascii_ident(c::Char)=_geo_ascii_letter(c) || _geo_ascii_digit(c)
+
+function _geo_expr_preview(source::AbstractString)
+    ncodeunits(source)<=160 && return String(source)
+    return String(first(source,120))*"…"*String(last(source,24))
+end
+
+function _geo_expr_error(parser::_GeoExprParser,message::AbstractString,
+                         pos::Int=parser.token.pos)
+    throw(ArgumentError("$(parser.caller): $message at byte $pos in expression `" *
+                        _geo_expr_preview(parser.source)*"`"))
+end
+
+function _geo_lex_token!(parser::_GeoExprParser)
+    source=parser.source
+    last=lastindex(source)
+    i=parser.index
+    while i<=last && isspace(source[i])
+        i=nextind(source,i)
+    end
+    if i>last
+        parser.index=i
+        return _GeoExprToken(:eof,"",0.0,ncodeunits(source)+1)
+    end
+    start=i;c=source[i];i=nextind(source,i)
+    token=if _geo_ascii_digit(c) ||
+             (c=='.' && i<=last && _geo_ascii_digit(source[i]))
+        had_digit=_geo_ascii_digit(c)
+        while i<=last && _geo_ascii_digit(source[i])
+            had_digit=true;i=nextind(source,i)
+        end
+        if i<=last && source[i]=='.'
+            i=nextind(source,i)
+            while i<=last && _geo_ascii_digit(source[i])
+                had_digit=true;i=nextind(source,i)
+            end
+        end
+        had_digit || _geo_expr_error(parser,"malformed numeric literal",start)
+        if i<=last && (source[i]=='e' || source[i]=='E')
+            i=nextind(source,i)
+            if i<=last && (source[i]=='+' || source[i]=='-')
+                i=nextind(source,i)
+            end
+            exponent_start=i
+            while i<=last && _geo_ascii_digit(source[i])
+                i=nextind(source,i)
+            end
+            exponent_start!=i ||
+                _geo_expr_error(parser,"malformed numeric exponent",start)
+        end
+        text=String(source[start:prevind(source,i)])
+        value=tryparse(Float64,text)
+        (value!==nothing && isfinite(value)) ||
+            _geo_expr_error(parser,"numeric literal must be finite",start)
+        _GeoExprToken(:number,text,value::Float64,start)
+    elseif _geo_ascii_letter(c)
+        while i<=last && _geo_ascii_ident(source[i])
+            i=nextind(source,i)
+        end
+        text=String(source[start:prevind(source,i)])
+        _GeoExprToken(:identifier,text,0.0,start)
+    else
+        kind=if c=='+'
+            i<=last && source[i]=='+' ? :side_effect : :plus
+        elseif c=='-'
+            i<=last && source[i]=='-' ? :side_effect : :minus
+        elseif c=='*'; :star
+        elseif c=='/'; :slash
+        elseif c=='%'; :percent
+        elseif c=='^'; :caret
+        elseif c=='('; :left_paren
+        elseif c==')'; :right_paren
+        elseif c=='['; :left_bracket
+        elseif c==']'; :right_bracket
+        elseif c==','; :comma
+        elseif c in ('=','!','<','>','&','|','?',':')
+            :unsupported_operator
+        elseif c in ('"','\'')
+            :quoted
+        else
+            :invalid
+        end
+        if kind==:side_effect
+            i=nextind(source,i)
+        end
+        _GeoExprToken(kind,String(source[start:prevind(source,i)]),0.0,start)
+    end
+    parser.index=i
+    parser.token_count+=1
+    parser.token_count<=_MAX_GEO_EXPRESSION_TOKENS ||
+        _geo_expr_error(parser,
+            "expression exceeds $_MAX_GEO_EXPRESSION_TOKENS tokens",start)
+    return token
+end
+
+@inline function _geo_advance!(parser::_GeoExprParser)
+    parser.token=_geo_lex_token!(parser)
+    return nothing
+end
+
+function _geo_enter!(parser::_GeoExprParser)
+    parser.depth+=1
+    parser.depth<=_MAX_GEO_EXPRESSION_DEPTH || _geo_expr_error(parser,
+        "expression nesting exceeds $_MAX_GEO_EXPRESSION_DEPTH")
+    return nothing
+end
+@inline _geo_leave!(parser::_GeoExprParser)=(parser.depth-=1;nothing)
+
+function _geo_finite_result(parser::_GeoExprParser,value,operation::AbstractString,
+                            pos::Int)
+    value isa Real || _geo_expr_error(parser,"$operation did not return a number",pos)
+    result=Float64(value)
+    isfinite(result) || _geo_expr_error(parser,"$operation produced a non-finite value",pos)
+    return result
+end
+
+function _geo_apply_binary(parser::_GeoExprParser,kind::Symbol,a::Float64,
+                           b::Float64,pos::Int)
+    label=kind==:plus ? "addition" : kind==:minus ? "subtraction" :
+          kind==:star ? "multiplication" : kind==:slash ? "division" :
+          kind==:percent ? "modulo" : "exponentiation"
+    value=try
+        kind==:plus ? a+b : kind==:minus ? a-b : kind==:star ? a*b :
+        kind==:slash ? a/b : kind==:percent ? rem(a,b) : a^b
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa DomainError || err isa OverflowError || err isa DivideError) || rethrow()
+        _geo_expr_error(parser,"$label is outside its finite real domain",pos)
+    end
+    return _geo_finite_result(parser,value,label,pos)
+end
+
+function _geo_apply_function(parser::_GeoExprParser,name::String,
+                             args::Vector{Float64},pos::Int)
+    name in _GEO_NONCONSTANT_FUNCTIONS && _geo_expr_error(parser,
+        "non-constant or externally stateful function $name is not supported",pos)
+    unary=if name=="Acos"; acos
+    elseif name=="Asin"; asin
+    elseif name=="Atan"; atan
+    elseif name=="Ceil"; ceil
+    elseif name=="Cos"; cos
+    elseif name=="Cosh"; cosh
+    elseif name=="Exp"; exp
+    elseif name=="Fabs" || name=="Abs"; abs
+    elseif name=="Floor"; floor
+    elseif name=="Log"; log
+    elseif name=="Log10"; log10
+    elseif name=="Round"; x->round(x,RoundNearestTiesUp)
+    elseif name=="Sqrt"; sqrt
+    elseif name=="Sin"; sin
+    elseif name=="Sinh"; sinh
+    elseif name=="Step"; x->x<0 ? 0.0 : 1.0
+    elseif name=="Tan"; tan
+    elseif name=="Tanh"; tanh
+    else; nothing
+    end
+    binary=if name=="Atan2"; (y,x)->atan(y,x)
+    elseif name=="Fmod" || name=="Modulo"; rem
+    elseif name=="Hypot"; hypot
+    elseif name=="Max"; max
+    elseif name=="Min"; min
+    else; nothing
+    end
+    if unary!==nothing
+        length(args)==1 || _geo_expr_error(parser,
+            "function $name requires exactly one argument",pos)
+        value=try
+            unary(args[1])
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa DomainError || err isa OverflowError) || rethrow()
+            _geo_expr_error(parser,"function $name is outside its finite real domain",pos)
+        end
+        return _geo_finite_result(parser,value,"function $name",pos)
+    elseif binary!==nothing
+        length(args)==2 || _geo_expr_error(parser,
+            "function $name requires exactly two arguments",pos)
+        value=try
+            binary(args[1],args[2])
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa DomainError || err isa OverflowError || err isa DivideError) || rethrow()
+            _geo_expr_error(parser,"function $name is outside its finite real domain",pos)
+        end
+        return _geo_finite_result(parser,value,"function $name",pos)
+    end
+    _geo_expr_error(parser,"unknown numeric function $name",pos)
+end
+
+function _geo_parse_additive!(parser::_GeoExprParser)
+    value=_geo_parse_multiplicative!(parser)
+    while parser.token.kind==:plus || parser.token.kind==:minus
+        kind=parser.token.kind;pos=parser.token.pos;_geo_advance!(parser)
+        value=_geo_apply_binary(parser,kind,value,
+                                _geo_parse_multiplicative!(parser),pos)
+    end
+    return value
+end
+
+function _geo_parse_multiplicative!(parser::_GeoExprParser)
+    value=_geo_parse_unary!(parser)
+    while parser.token.kind in (:star,:slash,:percent)
+        kind=parser.token.kind;pos=parser.token.pos;_geo_advance!(parser)
+        value=_geo_apply_binary(parser,kind,value,_geo_parse_unary!(parser),pos)
+    end
+    return value
+end
+
+function _geo_parse_unary!(parser::_GeoExprParser)
+    if parser.token.kind==:plus || parser.token.kind==:minus
+        kind=parser.token.kind;pos=parser.token.pos;_geo_advance!(parser)
+        _geo_enter!(parser)
+        value=_geo_parse_unary!(parser)
+        _geo_leave!(parser)
+        kind==:minus && (value=_geo_finite_result(parser,-value,"unary minus",pos))
+        return value
+    end
+    return _geo_parse_power!(parser)
+end
+
+function _geo_parse_power!(parser::_GeoExprParser)
+    value=_geo_parse_primary!(parser)
+    if parser.token.kind==:caret
+        pos=parser.token.pos;_geo_advance!(parser);_geo_enter!(parser)
+        exponent=_geo_parse_unary!(parser)
+        _geo_leave!(parser)
+        value=_geo_apply_binary(parser,:caret,value,exponent,pos)
+    end
+    return value
+end
+
+function _geo_parse_primary!(parser::_GeoExprParser)
+    token=parser.token
+    if token.kind==:number
+        _geo_advance!(parser)
+        return token.value
+    elseif token.kind==:left_paren
+        _geo_advance!(parser);_geo_enter!(parser)
+        value=_geo_parse_additive!(parser)
+        parser.token.kind==:right_paren ||
+            _geo_expr_error(parser,"expected closing parenthesis")
+        _geo_advance!(parser);_geo_leave!(parser)
+        return value
+    elseif token.kind==:identifier
+        name=token.text;_geo_advance!(parser)
+        if parser.token.kind==:left_paren || parser.token.kind==:left_bracket
+            opener=parser.token.kind
+            closer=opener==:left_paren ? :right_paren : :right_bracket
+            _geo_advance!(parser);_geo_enter!(parser)
+            args=Float64[]
+            if parser.token.kind!=closer
+                while true
+                    push!(args,_geo_parse_additive!(parser))
+                    parser.token.kind==:comma || break
+                    _geo_advance!(parser)
+                end
+            end
+            parser.token.kind==closer || _geo_expr_error(parser,
+                opener==:left_paren ? "expected closing parenthesis" :
+                                      "expected closing bracket")
+            _geo_advance!(parser);_geo_leave!(parser)
+            return _geo_apply_function(parser,name,args,token.pos)
+        elseif name=="Pi"
+            return Float64(pi)
+        elseif haskey(parser.context.values,name)
+            return parser.context.values[name]
+        elseif name in _GEO_SIDE_EFFECT_SYMBOLS
+            _geo_expr_error(parser,"side-effecting Gmsh symbol $name is not supported",token.pos)
+        elseif haskey(parser.context.unavailable,name)
+            _geo_expr_error(parser,
+                "scalar variable $name is unavailable ($(parser.context.unavailable[name]))",
+                token.pos)
+        else
+            _geo_expr_error(parser,"unknown scalar identifier $name",token.pos)
+        end
+    elseif token.kind==:side_effect
+        _geo_expr_error(parser,"increment and decrement operators are not supported",token.pos)
+    elseif token.kind==:unsupported_operator
+        _geo_expr_error(parser,"operator $(token.text) is outside the supported arithmetic subset",
+                        token.pos)
+    elseif token.kind==:quoted
+        _geo_expr_error(parser,"quoted strings are not numeric expressions",token.pos)
+    elseif token.kind==:invalid
+        _geo_expr_error(parser,"invalid token $(repr(token.text))",token.pos)
+    end
+    _geo_expr_error(parser,"expected a numeric value",token.pos)
+end
+
+function _geo_eval_numeric(raw::AbstractString,context::_GeoNumericContext,
+                           caller::AbstractString)
+    source=String(strip(raw))
+    isempty(source) && throw(ArgumentError("$caller: numeric expression must not be empty"))
+    ncodeunits(source)<=_MAX_GEO_EXPRESSION_BYTES || throw(ArgumentError(
+        "$caller: expression exceeds $_MAX_GEO_EXPRESSION_BYTES bytes"))
+    parser=_GeoExprParser(source,firstindex(source),_GeoExprToken(:eof,"",0.0,1),
+                          0,0,context,String(caller))
+    _geo_advance!(parser)
+    value=_geo_parse_additive!(parser)
+    parser.token.kind==:eof || begin
+        token=parser.token
+        if token.kind==:side_effect
+            _geo_expr_error(parser,"increment and decrement operators are not supported",
+                            token.pos)
+        elseif token.kind==:unsupported_operator
+            _geo_expr_error(parser,
+                "operator $(token.text) is outside the supported arithmetic subset",token.pos)
+        end
+        _geo_expr_error(parser,"unexpected token $(repr(token.text))",token.pos)
+    end
+    return _geo_finite_result(parser,value,"expression",1)
+end
+
+@inline _geo_number_source(value::Float64)=repr(value)
+
+function _geo_int_value(value::Float64,caller::AbstractString)
+    return try
+        trunc(Int,value)
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa InexactError || err isa OverflowError) || rethrow()
+        throw(ArgumentError("$caller: value is outside the platform Int range"))
+    end
+end
+
+const _GMSH_TAG_MAX=Int(typemax(Int32))
+
+function _geo_positive_gmsh_tag(value::Float64,caller::AbstractString)
+    tag=_geo_int_value(value,caller)
+    tag>0 || throw(ArgumentError("$caller must evaluate to a positive tag"))
+    tag<=_GMSH_TAG_MAX || throw(ArgumentError(
+        "$caller exceeds Gmsh's signed 32-bit tag range"))
+    return tag
+end
+
+function _geo_split_list(raw::AbstractString,caller::AbstractString)
+    value=String(strip(raw))
+    (startswith(value,"{") && endswith(value,"}")) ||
+        throw(ArgumentError("$caller: expected a brace-delimited list"))
+    body=String(strip(value[nextind(value,firstindex(value)):prevind(value,lastindex(value))]))
+    isempty(body) && return String[]
+    items=String[];start=firstindex(body);i=start;last=lastindex(body)
+    parens=0;brackets=0
+    while i<=last
+        c=body[i]
+        if c=='(';parens+=1
+        elseif c==')'
+            parens-=1;parens>=0 || throw(ArgumentError(
+                "$caller: unmatched closing parenthesis in list"))
+        elseif c=='[';brackets+=1
+        elseif c==']'
+            brackets-=1;brackets>=0 || throw(ArgumentError(
+                "$caller: unmatched closing bracket in list"))
+        elseif c=='{' || c=='}'
+            throw(ArgumentError("$caller: nested brace lists are not supported"))
+        elseif c==',' && parens==0 && brackets==0
+            item=String(strip(body[start:prevind(body,i)]))
+            isempty(item) && throw(ArgumentError("$caller: list contains an empty entry"))
+            length(items)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                "$caller: list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+            push!(items,item);start=nextind(body,i)
+        end
+        i=nextind(body,i)
+    end
+    parens==0 || throw(ArgumentError("$caller: unmatched opening parenthesis in list"))
+    brackets==0 || throw(ArgumentError("$caller: unmatched opening bracket in list"))
+    item=String(strip(body[start:last]))
+    isempty(item) && throw(ArgumentError("$caller: list contains an empty entry"))
+    length(items)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+        "$caller: list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+    push!(items,item)
+    return items
+end
+
+const _GEO_FIELD_RAW_OPTIONS=Set((
+    "F","FX","FY","FZ","M11","M22","M33","M12","M13","M23",
+    "m11","m22","m33","m12","m13","m23","FileName","CommandLine",
+    "p4estFileToLoad"))
+const _GEO_FIELD_FLOAT_LIST_OPTIONS=Set(("SizesList","hwall_n_nodes"))
+const _GEO_FIELD_INTEGER_LIST_OPTIONS=Set((
+    "FieldsList","FanPointsSizesList","PointsList","NodesList","VerticesList",
+    "FanPointsList","FanNodesList","CurvesList","EdgesList","SurfacesList",
+    "FacesList","VolumesList","RegionsList","ExcludedSurfacesList",
+    "ExcludedFaceList"))
+const _GEO_FIELD_ENTITY_LIST_OPTIONS=Set((
+    "PointsList","NodesList","VerticesList","CurvesList","EdgesList",
+    "SurfacesList","FacesList","VolumesList","RegionsList"))
+const _GEO_FIELD_NUMERIC_OPTIONS=Set((
+    "Sampling","NNodesByEdge","NumPointsPerCurve","FieldX","FieldY","FieldZ",
+    "InField","IField","DistMin","DistMax","SizeMin","SizeMax","Sigmoid",
+    "StopAtDistMax","LcMin","LcMax","VIn","VOut","XMin","XMax","YMin",
+    "YMax","ZMin","ZMax","Thickness","XCenter","YCenter","ZCenter",
+    "Radius","XAxis","YAxis","ZAxis","X1","Y1","Z1","X2","Y2","Z2",
+    "InnerR1","OuterR1","InnerR2","OuterR2","InnerV1","OuterV1","InnerV2",
+    "OuterV2","R1_inner","R1_outer","R2_inner","R2_outer","V1_inner",
+    "V1_outer","V2_inner","V2_outer","Kind","Delta","FromStereo",
+    "RadiusStereo","TextFormat","SetOutsideValue","OutsideValue",
+    "IncludeBoundary","IncludeEmbedded","Power","ViewIndex","ViewTag","IView",
+    "CropNegativeValues","UseClosest","dMin","dMax","SizeMinTangent",
+    "SizeMaxTangent","SizeMinNormal","SizeMaxNormal","lMinTangent",
+    "lMaxTangent","lMinNormal","lMaxNormal","Size","hwall_n","Ratio","ratio",
+    "SizeFar","hfar","thickness","Quads","IntersectMetrics","AnisoMax",
+    "BetaLaw","Beta","NbLayers","nPointsPerCircle","nPointsPerGap","hMin",
+    "hMax","hBulk","gradation","smoothing","features"))
+const _GEO_FIELD_INTEGER_OPTIONS=Set((
+    "Sampling","NNodesByEdge","NumPointsPerCurve","FieldX","FieldY","FieldZ",
+    "InField","IField","Kind","FromStereo","ViewIndex","ViewTag","IView",
+    "Quads","IntersectMetrics","BetaLaw","NbLayers","nPointsPerCircle",
+    "nPointsPerGap"))
+
+function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractString,
+                                     context::_GeoNumericContext,caller::AbstractString)
+    name=String(name_raw);caller_string=String(caller)
+    value=String(strip(raw))
+    name in _GEO_FIELD_RAW_OPTIONS && return value
+    if name in _GEO_FIELD_FLOAT_LIST_OPTIONS || name in _GEO_FIELD_INTEGER_LIST_OPTIONS
+        items=_geo_split_list(value,caller_string)
+        normalized=String[]
+        for item in items
+            if name in _GEO_FIELD_ENTITY_LIST_OPTIONS &&
+               occursin(r"^[+-]?[A-Za-z_][A-Za-z0-9_]*(?:\[\])?$",item)
+                bare=replace(item,r"^[+-]"=>"");bare=endswith(bare,"[]") ? bare[1:end-2] : bare
+                if !haskey(context.values,bare) && bare!="Pi"
+                    push!(normalized,item)
+                    continue
+                end
+            end
+            number=_geo_eval_numeric(item,context,"$caller_string entry")
+            if name in _GEO_FIELD_INTEGER_LIST_OPTIONS
+                integer=name=="FieldsList" ?
+                    _geo_positive_gmsh_tag(number,"$caller_string entry") :
+                    _geo_int_value(number,"$caller_string entry")
+                push!(normalized,string(integer))
+            else
+                push!(normalized,_geo_number_source(number))
+            end
+        end
+        return "{"*join(normalized,", ")*"}"
+    elseif name in _GEO_FIELD_NUMERIC_OPTIONS
+        (startswith(value,"{") || endswith(value,"}")) && throw(ArgumentError(
+            "$caller_string: numeric scalar option cannot use a brace list"))
+        number=_geo_eval_numeric(value,context,caller_string)
+        return name in _GEO_FIELD_INTEGER_OPTIONS ?
+            string(_geo_int_value(number,caller_string)) : _geo_number_source(number)
+    end
+    # Unknown options are retained so the field builder can issue its kind-aware
+    # unsupported-option diagnostic.  Guessing that an unknown value is numeric
+    # would make future string-valued Gmsh options unsafe.
+    return value
+end
+
+function _geo_unquoted_code(source::AbstractString)
+    out=IOBuffer();quote_char='\0'
+    for c in source
+        if quote_char!='\0'
+            c==quote_char && (quote_char='\0')
+            write(out,' ')
+        elseif c=='"' || c=='\''
+            quote_char=c;write(out,' ')
+        else
+            write(out,c)
+        end
+    end
+    return String(take!(out))
+end
+
+function _geo_invalidate_context!(context::_GeoNumericContext,reason::AbstractString)
+    for name in keys(context.values)
+        context.unavailable[name]=String(reason)
+    end
+    empty!(context.values)
+    return nothing
+end
+
+function _geo_strip_control_terminators(source::AbstractString)
+    body=String(strip(source))
+    closed=0
+    while true
+        m=match(r"^(?:EndIf|EndFor|Return)\b\s*(.*)$",body)
+        m===nothing && return body,closed
+        closed+=1
+        body=String(strip(m.captures[1]))
+    end
+end
+
+@inline function _geo_relevant_code(code::AbstractString)
+    return occursin(r"\b(?:Mesh\.(?:MeshSizeMin|MeshSizeMax|MeshSizeFactor|RandomSeed|MeshSizeFromCurvature|MinimumElementsPerTwoPi|BoundaryLayerFanElements|BoundaryLayerFanPoints)|Geometry\.Tolerance)\b",code) ||
+           occursin(r"\bField\s*\[",code) ||
+           occursin(r"\b(?:Background|BoundaryLayer)\s+Field\b",code) ||
+           occursin(r"\bPhysical\s+(?:Point|Curve|Line|Surface|Volume)\b",code)
+end
+
+function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractString,
+                             raw::AbstractString)
+    name=String(name_raw)
+    # `Pi` is a lexical Gmsh constant, not a mutable scalar binding.
+    name=="Pi" && return nothing
+    try
+        context.values[name]=_geo_eval_numeric(raw,context,
+            "read_geo_params: scalar variable $name")
+        delete!(context.unavailable,name)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        delete!(context.values,name)
+        message=sprint(showerror,err)
+        context.unavailable[name]=ncodeunits(message)<=240 ? message :
+            String(first(message,220))*"…"
+    end
+    return nothing
+end
+
+function _geo_expression_field_tags(raw::AbstractString,context::_GeoNumericContext,
+                                    caller::AbstractString)
+    value=String(strip(raw))
+    items=if startswith(value,"{") || endswith(value,"}")
+        (startswith(value,"{") && endswith(value,"}")) ||
+            throw(ArgumentError("$caller: malformed field-tag list $raw"))
+        _geo_split_list(value,String(caller))
+    else
+        isempty(value) ? String[] : String[value]
+    end
+    isempty(items) && throw(ArgumentError("$caller: field-tag list must not be empty"))
+    tags=Int[]
+    for item in items
+        numeric=_geo_eval_numeric(item,context,"$caller entry")
+        tag=_geo_positive_gmsh_tag(numeric,"$caller entry")
+        tag in tags || push!(tags,tag)
+    end
+    return tags
+end
+
+function _geo_positive_tag_value(raw::AbstractString,context::_GeoNumericContext,
+                                 caller::AbstractString)
+    numeric=_geo_eval_numeric(raw,context,caller)
+    return _geo_positive_gmsh_tag(numeric,caller)
+end
+
+function _gmsh_random_seed(value::Float64)
+    # Gmsh 4.15.2 stores this option as an unsigned 32-bit value: assignments
+    # are truncated toward zero and clamped to the option range.
+    value<=0 && return 0
+    upper=min(Float64(typemax(Int)),Float64(typemax(UInt32)))
+    value>=upper && return _geo_int_value(upper,"read_geo_params: Mesh.RandomSeed")
+    return _geo_int_value(value,"read_geo_params: Mesh.RandomSeed")
+end
 
 function _scan_geo_statements(consume,path::AbstractString)
     buffer=IOBuffer();quote_char='\0';block_comment=false
@@ -1035,11 +1621,12 @@ function _scan_geo_statements(consume,path::AbstractString)
     quote_char=='\0' || throw(ArgumentError("read_geo_params: unterminated quoted string"))
     block_comment && throw(ArgumentError("read_geo_params: unterminated block comment"))
     tail=strip(String(take!(buffer)))
-    if !isempty(tail) && (occursin(r"Field\s*\[",tail) ||
-                           occursin(r"(?:Background|BoundaryLayer)\s+Field",tail) ||
-                           occursin(r"Mesh\.(?:MeshSize|RandomSeed)",tail) ||
-                           occursin("Geometry.Tolerance",tail) ||
-                           occursin(r"Physical\s+(?:Point|Curve|Line|Surface|Volume)",tail))
+    code=_geo_unquoted_code(tail)
+    if !isempty(tail) && (occursin(r"Field\s*\[",code) ||
+                           occursin(r"(?:Background|BoundaryLayer)\s+Field",code) ||
+                           occursin(r"Mesh\.(?:MeshSize|RandomSeed)",code) ||
+                           occursin("Geometry.Tolerance",code) ||
+                           occursin(r"Physical\s+(?:Point|Curve|Line|Surface|Volume)",code))
         throw(ArgumentError("read_geo_params: unterminated relevant statement (missing semicolon)"))
     end
     return nothing
@@ -1049,31 +1636,14 @@ end
     read_geo_params(path) -> GeoParams
 
 Scan a gmsh `.geo`/`.geo_unrolled` for mesh-sizing options, Physical group
-declarations, and `Field[...]`/`Background Field` statements. Deliberately does
-**not** evaluate expressions, loops, CSG, or Boolean geometry; field option right-hand
-sides are retained as source strings for later strict interpretation.
+declarations, and `Field[...]`/`Background Field` statements. Deterministic,
+finite arithmetic expressions can use `Pi`, prior scalar variables and Gmsh's
+pure numeric functions, including in explicit Physical-group tags and
+`Field[...]` tags. Loops, macros, option reads, random/external functions, list
+ranges, CSG and Boolean geometry are deliberately not evaluated. Numeric field
+options are normalized to literals; geometric references and string or
+point-dependent field expressions remain source strings.
 """
-function _geo_literal_field_tags(raw::AbstractString,caller::AbstractString)
-    value=strip(raw)
-    if startswith(value,"{") || endswith(value,"}")
-        (startswith(value,"{") && endswith(value,"}")) || throw(ArgumentError(
-            "$caller: malformed field-tag list $raw"))
-        value=strip(value[2:end-1])
-    end
-    isempty(value) && throw(ArgumentError("$caller: field-tag list must not be empty"))
-    tags=Int[]
-    for token in split(value,',')
-        item=strip(token)
-        occursin(r"^[0-9]+$",item) || throw(ArgumentError(
-            "$caller: field tags must be positive integer literals (got $item)"))
-        tag=tryparse(Int,item)
-        tag!==nothing && tag>0 || throw(ArgumentError(
-            "$caller: field tag $item is outside the positive Int range"))
-        tag in tags || push!(tags,tag)
-    end
-    return tags
-end
-
 function read_geo_params(path::AbstractString)
     smin = NaN; smax = NaN; sfactor = 1.0; seed = 0; background = 0
     geometry_tolerance=NaN
@@ -1084,59 +1654,137 @@ function read_geo_params(path::AbstractString)
     options = Dict{Int,Dict{String,String}}()
     option_order=Dict{Int,Vector{String}}()
     creation_curvature=Dict{Int,Int}()
+    context=_GeoNumericContext()
+    control_depth=0
     _scan_geo_statements(path) do line
-        _scan_opt!(line, "Mesh.MeshSizeMin", v -> (smin = v))
-        _scan_opt!(line, "Mesh.MeshSizeMax", v -> (smax = v))
-        _scan_opt!(line, "Mesh.MeshSizeFactor", v -> (sfactor = v))
-        _scan_int_opt!(line,"Mesh.RandomSeed",v -> (seed=v))
-        _scan_opt!(line,"Geometry.Tolerance",v -> (geometry_tolerance=v))
-        _scan_opt!(line,"Mesh.MeshSizeFromCurvature",v ->
-            (mesh_size_from_curvature=_gmsh_int_option(
-                v,"Mesh.MeshSizeFromCurvature")))
-        _scan_opt!(line,"Mesh.MinimumElementsPerTwoPi",v ->
-            (mesh_size_from_curvature=_gmsh_int_option(
-                v,"Mesh.MinimumElementsPerTwoPi")))
-        _scan_opt!(line,"Mesh.BoundaryLayerFanElements",v ->
-            (boundary_layer_fan_elements=_gmsh_int_option(
-                v,"Mesh.BoundaryLayerFanElements")))
-        _scan_opt!(line,"Mesh.BoundaryLayerFanPoints",v ->
-            (boundary_layer_fan_elements=_gmsh_int_option(
-                v,"Mesh.BoundaryLayerFanPoints")))
-        # Physical Volume("air", 1) = {...};  /  Physical Surface("s", 3) = {...};
-        for pm in eachmatch(r"Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*([0-9]+)\s*\)", line)
+        endswith(line,";") || throw(ArgumentError(
+            "read_geo_params: internal statement scanner lost a semicolon"))
+        raw_body=String(strip(line[firstindex(line):prevind(line,lastindex(line))]))
+        raw_code=_geo_unquoted_code(raw_body)
+
+        # Any control-flow/macro context could mutate prior scalar bindings.  We
+        # do not interpret it, so invalidate those bindings instead of using a
+        # stale value later.
+        if occursin(r"\b(?:For|EndFor|If|ElseIf|Else|EndIf|Macro|Function|Return|Call|Include|DefineConstant|UndefineConstant)\b",raw_code)
+            _geo_invalidate_context!(context,"an unsupported loop, conditional, macro or include may have changed it")
+        end
+        # Gmsh's EndIf/EndFor/Return do not carry semicolons; the streaming
+        # scanner consequently receives them as a harmless prefix of the first
+        # statement after the closed block.
+        body,closed=_geo_strip_control_terminators(raw_body)
+        control_depth=max(0,control_depth-closed)
+        code=_geo_unquoted_code(body)
+        opened=count(_ -> true,eachmatch(r"\b(?:For|If|Macro|Function)\b",code))
+        control_depth+=opened
+        if control_depth>0
+            _geo_invalidate_context!(context,
+                "an unsupported loop, conditional or macro may have changed it")
+            _geo_relevant_code(code) && throw(ArgumentError(
+                "read_geo_params: malformed relevant statement or unsupported control-flow/macro context: " *
+                _geo_expr_preview(body)))
+            return
+        end
+
+        mesh=match(r"^(Mesh\.(?:MeshSizeMin|MeshSizeMax|MeshSizeFactor|RandomSeed|MeshSizeFromCurvature|MinimumElementsPerTwoPi|BoundaryLayerFanElements|BoundaryLayerFanPoints)|Geometry\.Tolerance)\s*=\s*(.*)$",body)
+        if mesh!==nothing
+            key=mesh.captures[1];raw=String(strip(mesh.captures[2]))
+            value=_geo_eval_numeric(raw,context,"read_geo_params: $key")
+            if key=="Mesh.MeshSizeMin";smin=value
+            elseif key=="Mesh.MeshSizeMax";smax=value
+            elseif key=="Mesh.MeshSizeFactor";sfactor=value
+            elseif key=="Mesh.RandomSeed";seed=_gmsh_random_seed(value)
+            elseif key=="Geometry.Tolerance";geometry_tolerance=value
+            elseif key=="Mesh.MeshSizeFromCurvature" ||
+                   key=="Mesh.MinimumElementsPerTwoPi"
+                mesh_size_from_curvature=_gmsh_int_option(value,key)
+            else
+                boundary_layer_fan_elements=_gmsh_int_option(value,key)
+            end
+            return
+        end
+
+        # Physical Volume("air", 1) = {...}; / Physical Surface("s", 3) = {...};
+        pm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*(.+?)\s*\)\s*=\s*\{.*\}$",body)
+        if pm!==nothing
             dim = _PHYS_DIM[pm.captures[1]]
             name = pm.captures[2]
-            tag = parse(Int, pm.captures[3])
+            tag = _geo_positive_tag_value(pm.captures[3],context,
+                "read_geo_params: Physical $(pm.captures[1]) tag")
             groups[(dim, tag)] = name
+            return
         end
-        for fm in eachmatch(r"Field\s*\[\s*([0-9]+)\s*\]\s*=\s*([A-Za-z][A-Za-z0-9_]*)\s*;", line)
-            tag=parse(Int,fm.captures[1]); kind=fm.captures[2]
-            tag>0 || throw(ArgumentError("read_geo_params: field tags must be positive"))
+
+        fm=match(r"^Field\s*\[\s*(.*)\s*\]\s*=\s*([A-Za-z][A-Za-z0-9_]*)$",body)
+        if fm!==nothing
+            tag=_geo_positive_tag_value(fm.captures[1],context,
+                "read_geo_params: Field declaration tag")
+            kind=fm.captures[2]
             haskey(kinds,tag) &&
                 throw(ArgumentError("read_geo_params: duplicate declaration for Field[$tag]"))
             kinds[tag]=kind
             creation_curvature[tag]=mesh_size_from_curvature
+            return
         end
-        for om in eachmatch(r"Field\s*\[\s*([0-9]+)\s*\]\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*)\s*;\s*$", line)
-            tag=parse(Int,om.captures[1]); name=om.captures[2]; value=strip(om.captures[3])
-            tag>0 || throw(ArgumentError("read_geo_params: field tags must be positive"))
+
+        om=match(r"^Field\s*\[\s*(.*)\s*\]\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*)$",body)
+        if om!==nothing
+            tag=_geo_positive_tag_value(om.captures[1],context,
+                "read_geo_params: Field option tag")
+            name=om.captures[2];value=String(strip(om.captures[3]))
             isempty(value) &&
                 throw(ArgumentError("read_geo_params: Field[$tag].$name has an empty value"))
-            get!(() -> Dict{String,String}(),options,tag)[name]=value
+            caller="read_geo_params: Field[$tag].$name"
+            normalized=_geo_normalize_field_option(value,name,context,caller)
+            get!(() -> Dict{String,String}(),options,tag)[name]=normalized
             push!(get!(() -> String[],option_order,tag),name)
+            return
         end
-        for bm in eachmatch(r"Background\s+Field\s*=\s*([^;]+)\s*;",line)
-            tags=_geo_literal_field_tags(bm.captures[1],
-                                         "read_geo_params: Background Field")
+
+        bm=match(r"^Background\s+Field\s*=\s*(.*)$",body)
+        if bm!==nothing
+            tags=_geo_expression_field_tags(bm.captures[1],context,
+                                            "read_geo_params: Background Field")
             length(tags)==1 || throw(ArgumentError(
                 "read_geo_params: Background Field requires exactly one field tag"))
             background=tags[1]
+            return
         end
-        for bm in eachmatch(r"BoundaryLayer\s+Field\s*=\s*([^;]+)\s*;",line)
-            for tag in _geo_literal_field_tags(bm.captures[1],
-                                                "read_geo_params: BoundaryLayer Field")
+
+        blm=match(r"^BoundaryLayer\s+Field\s*=\s*(.*)$",body)
+        if blm!==nothing
+            for tag in _geo_expression_field_tags(blm.captures[1],context,
+                                                   "read_geo_params: BoundaryLayer Field")
                 tag in boundary_layers || push!(boundary_layers,tag)
             end
+            return
+        end
+
+        scalar=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$",body)
+        if scalar!==nothing
+            _geo_record_scalar!(context,scalar.captures[1],scalar.captures[2])
+            return
+        end
+        mutation=match(r"^(?:\+\+|--)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--|\+=|-=|\*=|/=).*$",body)
+        if mutation!==nothing
+            name=mutation.captures[1]
+            delete!(context.values,name)
+            context.unavailable[name]="an unsupported increment or compound assignment changed it"
+            return
+        end
+        array_assignment=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[.*\]\s*(?:=|\+=|-=|\*=|/=).*$",body)
+        if array_assignment!==nothing
+            name=array_assignment.captures[1]
+            delete!(context.values,name)
+            context.unavailable[name]="an unsupported list assignment changed it"
+            return
+        end
+
+        # Reject relevant assignments hidden in a loop/macro/prefix or malformed
+        # on their left-hand side. Quoted occurrences were removed from `code`.
+        if _geo_relevant_code(code)
+            throw(ArgumentError(
+                "read_geo_params: malformed relevant statement or unsupported control-flow/macro context: " *
+                _geo_expr_preview(body)))
         end
     end
     undeclared=sort!(collect(setdiff(keys(options),keys(kinds))))
@@ -1165,38 +1813,6 @@ function _gmsh_int_option(value::Float64,key::AbstractString)
         (err isa InexactError || err isa OverflowError) || rethrow()
         throw(ArgumentError("read_geo_params: $key is outside the platform Int range"))
     end
-end
-
-function _scan_opt!(line, key, setter)
-    escaped=replace(key, "."=>"\\.")
-    occursin(Regex(raw"\b" * escaped * raw"\b"),line) || return false
-    m = match(Regex(raw"\b" * escaped *
-                    raw"\s*=\s*([^;]*?)\s*;\s*$"),line)
-    m !== nothing || throw(ArgumentError("read_geo_params: $key must be a numeric literal"))
-    literal=strip(m.captures[1])
-    occursin(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$",literal) ||
-        throw(ArgumentError("read_geo_params: $key must be a numeric literal"))
-    value=tryparse(Float64,literal)
-    (value!==nothing && isfinite(value)) ||
-        throw(ArgumentError("read_geo_params: $key must be finite"))
-    setter(value)
-    return true
-end
-
-function _scan_int_opt!(line,key,setter)
-    escaped=replace(key,"."=>"\\.")
-    occursin(Regex(raw"\b" * escaped * raw"\b"),line) || return false
-    m=match(Regex(raw"\b" * escaped *
-                  raw"\s*=\s*([^;]*?)\s*;\s*$"),line)
-    m!==nothing || throw(ArgumentError(
-        "read_geo_params: $key must be a non-negative integer literal"))
-    literal=strip(m.captures[1])
-    occursin(r"^[0-9]+$",literal) || throw(ArgumentError(
-        "read_geo_params: $key must be a non-negative integer literal"))
-    value=tryparse(Int,literal)
-    value!==nothing || throw(ArgumentError("read_geo_params: $key is outside the Int range"))
-    setter(value)
-    return true
 end
 
 end # module IO
