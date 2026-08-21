@@ -24,6 +24,7 @@ const TESSELLA_STAGE = 6  # see STATUS.md stage board
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
+include("Transform.jl")      # P3: validated affine mesh transformations
 include("Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
@@ -40,6 +41,7 @@ include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + e
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
+using .Transform: affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension,
                  msh_order, msh_family, ElementBlock, MixedEntity, MixedEntityData,
                  MixedMesh, mixed_crc, simplex_to_mixed, mixed_to_simplex,
@@ -71,6 +73,7 @@ Mesh3D._recover_partition_exact(surfaces::AbstractVector{Mesh}) = recover_partit
 export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
+export affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
        msh_family, ElementBlock, MixedEntity, MixedEntityData, MixedMesh, mixed_crc,
        simplex_to_mixed, mixed_to_simplex, write_mixed_msh, read_mixed_msh,

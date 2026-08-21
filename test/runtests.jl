@@ -5,6 +5,7 @@ using Tessella
     # Stage 0 — Foundations (CRC-gated, DEVELOPMENT.md discipline).
     include("predicates_test.jl")   # exact predicates vs exact-rational oracle
     include("meshtypes_test.jl")    # mesh container, topology, quality, checksum
+    include("transform_test.jl")    # validated affine transforms + orientation preservation
     include("io_test.jl")           # .msh v2/v4 round-trip, STL, .geo scan
     include("elements_test.jl")     # all fixed-node Gmsh 4.15.2 families + mixed entity I/O
 
