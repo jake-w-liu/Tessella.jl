@@ -51,8 +51,11 @@ mutable struct Triangulation
     nreal::Int
     last::Int32                 # walk hint
     vtri::Vector{Int32}         # per real vertex: one incident triangle (O(1) lookup hint)
-    seg::Set{NTuple{2,Int32}}   # constrained edges (sorted vertex pairs) for CDT
+    seg::Set{NTuple{2,Int32}}   # boundary constrained edges (toggle interior/exterior)
+    internal::Set{NTuple{2,Int32}}  # embedded constrained edges (recovered, no toggle)
 end
+
+@inline _constrained_edge(T::Triangulation, key) = key in T.seg || key in T.internal
 
 @inline _pt(T::Triangulation, i::Integer) = @inbounds (T.x[i], T.y[i])
 @inline _vert(T::Triangulation, t::Integer, k::Integer) = @inbounds T.tv[3*(t-1)+k]
@@ -190,7 +193,7 @@ end
 function Triangulation(xs::Vector{Float64}, ys::Vector{Float64})
     n = _validate_points(xs, ys, "Triangulation")
     return Triangulation(xs, ys, Int32[], Int32[], Bool[], Int32[], n, Int32(0),
-                         zeros(Int32, n), Set{NTuple{2,Int32}}())
+                         zeros(Int32, n), Set{NTuple{2,Int32}}(), Set{NTuple{2,Int32}}())
 end
 
 function _validate_points(xs::Vector{Float64}, ys::Vector{Float64}, caller::AbstractString)
@@ -333,7 +336,7 @@ function insert_point!(T::Triangulation, vid::Integer; constrained::Bool=false,
             (nb != 0 && (nb in incav)) && continue
             a, b = _edge(T, t, k)
             # a constrained edge is never crossed by the growing cavity (CDT-preserving)
-            blocked = constrained && (_skey(a, b) in T.seg)
+            blocked = constrained && _constrained_edge(T, _skey(a, b))
             inside = !blocked && nb != 0 && _in_circumcircle(T, nb, vid)
             if inside
                 push!(incav, nb); push!(cavity, nb); push!(stack, nb)
@@ -526,7 +529,7 @@ it constrained. Crossed edges are removed by flips; if a vertex lies on the
 segment the segment is split there. Finally the affected non-constrained edges
 are re-legalized to restore the constrained-Delaunay property.
 """
-function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
+function insert_segment!(T::Triangulation, vi::Integer, vj::Integer; internal::Bool=false)
     1 <= vi <= T.nreal ||
         throw(ArgumentError("insert_segment!: vertex $vi is outside 1:$(T.nreal)"))
     1 <= vj <= T.nreal ||
@@ -539,11 +542,14 @@ function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
     vi = Int32(vi); vj = Int32(vj)
     et, _ = _edge_between(T, vi, vj)
     if et != 0
-        push!(T.seg, _skey(vi, vj)); return
+        _mark_constraint!(T, vi, vj, internal)
+        return
     end
     kind, t, u, w = _segment_entry(T, vi, vj)
     if kind === :vertex
-        insert_segment!(T, vi, u); insert_segment!(T, u, vj); return
+        insert_segment!(T, vi, u; internal=internal)
+        insert_segment!(T, u, vj; internal=internal)
+        return
     end
     # kind === :cross : entry triangle t, opposite (crossed) edge = {u,w}. Assign
     # left/right by side of the segment vi→vj (the wedge order u,w is unrelated).
@@ -560,7 +566,9 @@ function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
         c == vj && break
         o = orient2(_pt(T,vi), _pt(T,vj), _pt(T,c))
         if o == 0
-            insert_segment!(T, vi, c); insert_segment!(T, c, vj); return
+            insert_segment!(T, vi, c; internal=internal)
+            insert_segment!(T, c, vj; internal=internal)
+            return
         elseif o > 0                                  # c left → next edge (c, ra)
             la = Int32(c)
         else                                          # c right → next edge (la, c)
@@ -583,7 +591,7 @@ function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
             front, back = back, front
         end
         (a, b) = pop!(front)
-        _skey(a, b) in T.seg &&
+        _constrained_edge(T, _skey(a, b)) &&
             throw(ArgumentError("Mesh2D: constraint ($vi,$vj) crosses existing constraint ($a,$b); PSLG segments must not cross (split them at the intersection first)"))
         t1, k1, t2 = _edge_triangles(T, a, b)
         t1 == 0 && continue                          # edge already gone
@@ -604,8 +612,19 @@ function insert_segment!(T::Triangulation, vi::Integer, vj::Integer)
             push!(back, (a, b))                        # non-convex: defer
         end
     end
-    push!(T.seg, _skey(vi, vj))
+    _mark_constraint!(T, vi, vj, internal)
     _legalize!(T, newedges)
+    return nothing
+end
+
+function _mark_constraint!(T::Triangulation, vi::Int32, vj::Int32, internal::Bool)
+    key=_skey(vi, vj)
+    if internal
+        key in T.seg || push!(T.internal, key)
+    else
+        delete!(T.internal, key)
+        push!(T.seg, key)
+    end
     return nothing
 end
 
@@ -619,7 +638,7 @@ function _legalize!(T::Triangulation, edges::Vector{Tuple{Int32,Int32}})
         guard > maxg &&
             error("Mesh2D: constrained-edge legalization did not converge after $maxg operations")
         (a, b) = pop!(stack)
-        (_skey(a,b) in T.seg) && continue             # never flip a constraint
+        _constrained_edge(T, _skey(a,b)) && continue             # never flip a constraint
         t1, k1, t2 = _edge_triangles(T, a, b)
         t1 == 0 && continue
         (_is_ghost_tri(T, t1) || _is_ghost_tri(T, t2)) && continue
@@ -754,28 +773,48 @@ and segment indices relabelled consistently.
 """
 function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
                               segments::AbstractVector{<:Tuple{Integer,Integer}};
-                              rng_seed::Integer=1)
+                              internal_segments=Tuple{Int,Int}[], rng_seed::Integer=1)
     seed = _seed64(rng_seed, "constrained_delaunay")
     ux, uy, remap = dedup_points(xs, ys)
     n = length(xs)
     segseen=Set{NTuple{2,Int32}}()
-    for (s, (i, j)) in enumerate(segments)
+    function _register!(i, j, s, kind)
         1 <= i <= n ||
-            throw(ArgumentError("constrained_delaunay: segment $s endpoint $i is outside 1:$n"))
+            throw(ArgumentError("constrained_delaunay: $kind $s endpoint $i is outside 1:$n"))
         1 <= j <= n ||
-            throw(ArgumentError("constrained_delaunay: segment $s endpoint $j is outside 1:$n"))
+            throw(ArgumentError("constrained_delaunay: $kind $s endpoint $j is outside 1:$n"))
         i != j ||
-            throw(ArgumentError("constrained_delaunay: segment $s has identical endpoints $i"))
+            throw(ArgumentError("constrained_delaunay: $kind $s has identical endpoints $i"))
         remap[i] != remap[j] ||
-            throw(ArgumentError("constrained_delaunay: segment $s collapses after coincident-point deduplication"))
+            throw(ArgumentError("constrained_delaunay: $kind $s collapses after coincident-point deduplication"))
         key=_skey(remap[i],remap[j])
-        key in segseen && throw(ArgumentError("constrained_delaunay: duplicate segment $s after point deduplication"))
+        key in segseen && throw(ArgumentError(
+            "constrained_delaunay: duplicate $kind $s after point deduplication"))
         push!(segseen,key)
+        return nothing
+    end
+    for (s, (i, j)) in enumerate(segments)
+        _register!(i, j, s, "segment")
+    end
+    internals=Tuple{Int,Int}[]
+    for (s, (i, j)) in enumerate(internal_segments)
+        1 <= i <= n ||
+            throw(ArgumentError("constrained_delaunay: internal segment $s endpoint $i is outside 1:$n"))
+        1 <= j <= n ||
+            throw(ArgumentError("constrained_delaunay: internal segment $s endpoint $j is outside 1:$n"))
+        i != j ||
+            throw(ArgumentError("constrained_delaunay: internal segment $s has identical endpoints $i"))
+        remap[i] != remap[j] ||
+            throw(ArgumentError("constrained_delaunay: internal segment $s collapses after coincident-point deduplication"))
+        key=_skey(remap[i],remap[j])
+        key in segseen && continue
+        push!(segseen,key)
+        push!(internals,(i,j))
     end
     T = Triangulation(ux, uy)
     placed = _init_triangulation!(T)
     if isempty(placed)
-        isempty(segments) && return T          # no non-collinear triple → empty (valid)
+        isempty(segments) && isempty(internal_segments) && return T
         throw(ArgumentError("constrained_delaunay: the points are degenerate (fewer than 3 " *
               "non-coincident, non-collinear points); a 2-D triangulation with constraints " *
               "does not exist"))
@@ -785,8 +824,10 @@ function constrained_delaunay(xs::Vector{Float64}, ys::Vector{Float64},
     _shuffle_det!(order, seed)
     for v in order; insert_point!(T, v); end
     for (i, j) in segments
-        vi = remap[i]; vj = remap[j]
-        insert_segment!(T, vi, vj)
+        insert_segment!(T, remap[i], remap[j])
+    end
+    for (i, j) in internals
+        insert_segment!(T, remap[i], remap[j]; internal=true)
     end
     return T
 end
@@ -962,8 +1003,14 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
     existing==0 || throw(ErrorException("refine!: constrained-segment midpoint already exists as vertex $existing"))
     mid = _add_vertex!(T,mp[1],mp[2])
     pointids[mp]=mid
-    delete!(T.seg, _skey(a,b))
-    push!(T.seg, _skey(a,mid)); push!(T.seg, _skey(mid,b))
+    key=_skey(a,b)
+    if key in T.internal
+        delete!(T.internal, key)
+        push!(T.internal, _skey(a,mid)); push!(T.internal, _skey(mid,b))
+    else
+        delete!(T.seg, key)
+        push!(T.seg, _skey(a,mid)); push!(T.seg, _skey(mid,b))
+    end
     insert_point!(T, mid; constrained=true)
     # constraints changed → recompute interior (segment splits are comparatively rare)
     ni = classify_interior(T)
@@ -1038,7 +1085,7 @@ end
 
 # Deterministic iteration order over the constraint set (a Set has none), so the
 # refinement sequence — hence the output mesh — is reproducible across runs.
-_sorted_segs(T::Triangulation) = sort!(collect(T.seg))
+_sorted_segs(T::Triangulation) = sort!(vcat(collect(T.seg), collect(T.internal)))
 
 function _find_encroached(T::Triangulation)
     for (a, b) in _sorted_segs(T)
@@ -1172,6 +1219,9 @@ function is_constrained_delaunay(T::Triangulation)
     for (a, b) in T.seg
         _edge_between(T, a, b)[1] == 0 && (missing += 1)
     end
+    for (a, b) in T.internal
+        _edge_between(T, a, b)[1] == 0 && (missing += 1)
+    end
     viol = 0
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && !_is_ghost_tri(T, t)) || continue
@@ -1179,7 +1229,7 @@ function is_constrained_delaunay(T::Triangulation)
             nb = _nbr(T, t, k)
             (nb == 0 || _is_ghost_tri(T, nb)) && continue
             a, b = _edge(T, t, k)
-            _skey(a, b) in T.seg && continue
+            _constrained_edge(T, _skey(a, b)) && continue
             s = _vert(T, nb, _nslot(T, nb, t))
             p = _vert(T, t, k)                        # t = (p,a,b) CCW
             if incircle_sos(_pt(T,p),_pt(T,a),_pt(T,b),_pt(T,s), p,a,b,s) > 0

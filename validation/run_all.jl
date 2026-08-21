@@ -164,6 +164,12 @@ embed_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --proj
 println("  command: ", embed_command)
 run(embed_command)
 
+println("\n── gmsh_parity embed line ──  Tessella vs Gmsh Line-In-Surface chain")
+eline_script = joinpath(HERE, "gmsh_parity", "embed_line.jl")
+eline_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $eline_script`
+println("  command: ", eline_command)
+run(eline_command)
+
 println("\n── transfinite_hex ──  Gmsh 4.15.2 affine six-face hexahedra")
 transfinite_hex_script = joinpath(HERE, "transfinite_hex", "differential.jl")
 transfinite_hex_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_hex_script`
