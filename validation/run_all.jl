@@ -80,6 +80,12 @@ size_field_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes -
 println("  command: ", size_field_command)
 run(size_field_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── uniform_refine ──  exact Gmsh 4.15.2 simplex templates")
+uniform_refine_script = joinpath(HERE, "uniform_refine", "differential.jl")
+uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $uniform_refine_script`
+println("  command: ", uniform_refine_command)
+run(uniform_refine_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),
