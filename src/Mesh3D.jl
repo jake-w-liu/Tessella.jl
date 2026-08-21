@@ -26,7 +26,8 @@ using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, tet_signed_volume
 using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
-using ..SizeField: AbstractSizeField, ConstantSize, size_at
+using ..SizeField: AbstractSizeField, ConstantSize, metric_edge_length,
+                   directional_size
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
@@ -52,6 +53,92 @@ const GHOST3 = Int32(0)
     end
     isfinite(y) || throw(ArgumentError("$caller: $name must be finite (got $x)"))
     return y
+end
+
+@inline function _mesh3_entity_context(value, caller::AbstractString)
+    value===nothing && return nothing
+    value isa Tuple && length(value)==2 &&
+        value[1] isa Integer && !(value[1] isa Bool) &&
+        value[2] isa Integer && !(value[2] isa Bool) ||
+        throw(ArgumentError("$caller: an entity context must be nothing or a " *
+                            "(dimension, tag) integer tuple (got $value)"))
+    dim=try
+        Int(value[1])
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa InexactError || err isa OverflowError) || rethrow()
+        throw(ArgumentError("$caller: entity dimension is outside the platform Int range"))
+    end
+    tag=try
+        Int(value[2])
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa InexactError || err isa OverflowError) || rethrow()
+        throw(ArgumentError("$caller: entity tag is outside the platform Int range"))
+    end
+    dim in 0:3 || throw(ArgumentError("$caller: entity dimension must be in 0:3"))
+    tag>0 || throw(ArgumentError("$caller: entity tag must be positive"))
+    return (dim,tag)
+end
+
+function _mesh3_vertex_entities(m::Mesh,resolver,caller::AbstractString)
+    resolver===nothing && return nothing
+    count=size(m.coords,2)
+    resolver isa AbstractVector && length(resolver)!=count && throw(ArgumentError(
+        "$caller: vertex_entities must have one entry per mesh node"))
+    out=Vector{Union{Nothing,Tuple{Int,Int}}}(undef,count)
+    @inbounds for index in 1:count
+        point=(m.coords[1,index],m.coords[2,index],m.coords[3,index])
+        raw=if resolver isa Tuple
+            resolver
+        elseif resolver isa AbstractVector
+            resolver[index]
+        elseif resolver isa AbstractDict
+            get(resolver,index,nothing)
+        elseif applicable(resolver,index,point)
+            resolver(index,point)
+        else
+            throw(ArgumentError(
+                "$caller: vertex_entities must be a point-entity tuple, per-node " *
+                "vector/dictionary, or callable (index, point)"))
+        end
+        context=_mesh3_entity_context(raw,"$caller vertex $index")
+        (context===nothing || context[1]==0) || throw(ArgumentError(
+            "$caller: vertex_entities entry $index must have dimension 0"))
+        out[index]=context
+    end
+    return out
+end
+
+function _mesh3_tag_entities(tags::AbstractVector{Int32}, resolver, dim::Int,
+                             caller::AbstractString;required::Bool)
+    resolver===nothing && return nothing
+    out=Dict{Int32,Union{Nothing,Tuple{Int,Int}}}()
+    for tag in tags
+        haskey(out,tag) && continue
+        raw=if resolver isa AbstractDict
+            key=(dim,Int(tag))
+            if haskey(resolver,key)
+                resolver[key]
+            elseif dim==3 && haskey(resolver,tag)
+                resolver[tag]
+            elseif dim==3 && haskey(resolver,Int(tag))
+                resolver[Int(tag)]
+            elseif required
+                throw(ArgumentError(
+                    "$caller: entity_resolver has no entry for dimension-$dim cell tag $tag"))
+            else
+                nothing
+            end
+        elseif applicable(resolver,dim,Int(tag))
+            resolver(dim,Int(tag))
+        else
+            throw(ArgumentError("$caller: entity_resolver must be a dictionary keyed by " *
+                                "tet_tag/(dimension, cell_tag), or a callable (dimension, tag)"))
+        end
+        out[tag]=_mesh3_entity_context(raw,caller)
+    end
+    return out
 end
 
 @inline function _seed3(seed::Integer, caller::AbstractString)
@@ -925,9 +1012,29 @@ end
     refine_to_size(m::Mesh, field::AbstractSizeField) -> Mesh
 
 Refine a valid tet mesh by longest-edge subdivision.  The scalar overload guarantees
-**every edge is `≤ hmax`**.  The field overload requires every edge length to be no
-larger than the minimum target sampled at its two endpoints and midpoint; edges are
-processed by descending violation ratio `length / local_target`.
+**every edge is `≤ hmax`**.  The field overload requires every edge's metric length,
+sampled at its two endpoints and midpoint, to be at most one; edges are processed by
+descending metric violation ratio. This is `length / local_target` for scalar fields
+and the directional `√(dᵀMd)` criterion for anisotropic fields.
+
+`entity` supplies one fixed geometric-entity context. For a classified mesh,
+`entity_resolver` may instead be a dictionary keyed by `(dimension, cell_tag)`
+(with bare `tet_tag` keys retained for compatibility), or a callable
+`(dimension, cell_tag) -> entity`. Every edge is evaluated in each distinct
+incident segment, triangle, and live-tetrahedron context and the largest metric
+violation is used. Interface and boundary edges are therefore refined whenever
+any adjacent geometric entity requires it. Dictionary entries are mandatory for
+tetrahedron tags and optional for lower-dimensional tags. The two keywords are
+mutually exclusive. This explicit mapping is necessary because legacy cell tags
+can be physical tags and are not assumed to be geometric entity tags.
+`vertex_entities` independently classifies original mesh nodes as Gmsh point
+entities. It accepts one `(0, tag)` tuple, a per-node vector, a sparse dictionary
+keyed by node index, or a callable `(index, point) -> entity`; `nothing` entries
+are unclassified. Point contexts seed only original classified boundary edges:
+they are sampled at the corresponding endpoint on the first split, while child
+edges and newly inserted edge-interior nodes use their curve/surface/volume
+contexts. This mirrors Gmsh's use of vertex sizes during boundary discretization
+without turning a point value into a recursive radial volume-size constraint.
 
 Splitting all tets around one edge keeps the mesh **conforming** (the shared faces are
 split identically in every incident tet). The representable midpoint is used normally.
@@ -948,24 +1055,37 @@ preserved and boundary edges stay on the boundary to Float64 midpoint resolution
 tet's tag — so multi-region meshes keep their partition. This is the size-refinement
 terminator behind [`Tessella.mesh_sized`](@ref).
 """
-function refine_to_size(m::Mesh, hmax::Real)
+function refine_to_size(m::Mesh,hmax::Real;entity=nothing,entity_resolver=nothing,
+                        vertex_entities=nothing)
     target = _finite3(hmax, "refine_to_size", "hmax")
     target > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
-    return _refine_to_size(m, ConstantSize(target); target_description="hmax=$target")
+    return _refine_to_size(m,ConstantSize(target);target_description="hmax=$target",
+                           entity=entity,entity_resolver=entity_resolver,
+                           vertex_entities=vertex_entities)
 end
 
-function refine_to_size(m::Mesh, field::AbstractSizeField)
-    return _refine_to_size(m, field; target_description=string(nameof(typeof(field))))
+function refine_to_size(m::Mesh,field::AbstractSizeField;entity=nothing,
+                        entity_resolver=nothing,vertex_entities=nothing)
+    return _refine_to_size(m,field;target_description=string(nameof(typeof(field))),
+                           entity=entity,entity_resolver=entity_resolver,
+                           vertex_entities=vertex_entities)
 end
 
 function _refine_to_size(m::Mesh, field::AbstractSizeField;
-                         target_description::AbstractString="size field")
+                         target_description::AbstractString="size field",entity=nothing,
+                         entity_resolver=nothing,vertex_entities=nothing)
     nt0 = size(m.tets,2)
     nt0 > 0 || throw(ArgumentError("refine_to_size: input contains no tetrahedra"))
     inputdiag = validate(m)
     inputdiag.ok || throw(ArgumentError("refine_to_size: input mesh is invalid — " *
                                         join(inputdiag.messages, "; ")))
     nv0 = size(m.coords, 2)
+    entity!==nothing && entity_resolver!==nothing && throw(ArgumentError(
+        "refine_to_size: entity and entity_resolver are mutually exclusive"))
+    fixed_entity=_mesh3_entity_context(entity,"refine_to_size")
+    vertex_contexts=_mesh3_vertex_entities(m,vertex_entities,"refine_to_size")
+    tet_entities=_mesh3_tag_entities(m.tet_tag,entity_resolver,3,"refine_to_size";
+                                     required=true)
     cx = Vector{Float64}(undef, nv0); cy = similar(cx); cz = similar(cx)
     @inbounds for i in 1:nv0; cx[i]=m.coords[1,i]; cy[i]=m.coords[2,i]; cz[i]=m.coords[3,i]; end
     @inline coordkey(x,y,z)=(x==0 ? 0.0 : x,y==0 ? 0.0 : y,z==0 ? 0.0 : z)
@@ -980,19 +1100,105 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     deferred_signature = Dict{Tuple{Int32,Int32},Tuple}()
     @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
     @inline elen(a,b) = hypot(cx[a]-cx[b], cy[a]-cy[b], cz[a]-cz[b])
-    @inline function edge_target(a,b)
-        mx=_midpoint3(cx[a],cx[b]); my=_midpoint3(cy[a],cy[b]); mz=_midpoint3(cz[a],cz[b])
-        return min(size_at(field,cx[a],cy[a],cz[a]),
-                   size_at(field,cx[b],cy[b],cz[b]),size_at(field,mx,my,mz))
+    # Lower-dimensional cells participate both in conformity updates and in field
+    # classification. Resolve their tags once; missing dictionary entries mean
+    # "unclassified at this dimension" while tetrahedron entries remain required.
+    segv = NTuple{2,Int32}[(m.segs[1,s],m.segs[2,s]) for s in axes(m.segs,2)]
+    segalive = trues(length(segv)); segtag = copy(m.seg_tag)
+    triv = NTuple{3,Int32}[(m.tris[1,f],m.tris[2,f],m.tris[3,f]) for f in axes(m.tris,2)]
+    trialive = trues(length(triv)); tritag = copy(m.tri_tag)
+    seg_entities=_mesh3_tag_entities(m.seg_tag,entity_resolver,1,"refine_to_size";
+                                     required=false)
+    tri_entities=_mesh3_tag_entities(m.tri_tag,entity_resolver,2,"refine_to_size";
+                                     required=false)
+    seginc = Dict{Tuple{Int32,Int32},Vector{Int}}()
+    triinc = Dict{Tuple{Int32,Int32},Vector{Int}}()
+    @inbounds for (s,q) in enumerate(segv); push!(get!(() -> Int[],seginc,ek(q...)),s); end
+    @inbounds for (f,q) in enumerate(triv)
+        for e in (ek(q[1],q[2]),ek(q[2],q[3]),ek(q[3],q[1]))
+            push!(get!(() -> Int[],triinc,e),f)
+        end
+    end
+    @inline function vertex_score(a,b)
+        vertex_contexts===nothing && return 0.0
+        (a<=nv0 && b<=nv0) || return 0.0
+        e=ek(a,b)
+        (haskey(seginc,e) || haskey(triinc,e)) || return 0.0
+        context=vertex_contexts[a]
+        context===nothing && return 0.0
+        p=(cx[a],cy[a],cz[a]);q=(cx[b],cy[b],cz[b])
+        direction=(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+        distance=hypot(direction...)
+        distance==0 && return 0.0
+        return distance/directional_size(field,p,direction;entity=context)
+    end
+    @inline function edge_score(a,b)
+        p=(cx[a],cy[a],cz[a]);q=(cx[b],cy[b],cz[b])
+        e=ek(a,b)
+        best=if tet_entities===nothing
+            metric_edge_length(field,p,q;entity=fixed_entity)
+        else
+            ts=get(inc,e,nothing)
+            local_score=0.0
+            if ts!==nothing
+                @inbounds for i in eachindex(ts)
+                    t=ts[i];alive[t]||continue
+                    tag=ttag[t]
+                    duplicate=false
+                    for j in firstindex(ts):i-1
+                        u=ts[j]
+                        if alive[u] && ttag[u]==tag
+                            duplicate=true;break
+                        end
+                    end
+                    duplicate&&continue
+                    local_score=max(local_score,metric_edge_length(
+                        field,p,q;entity=tet_entities[tag]))
+                end
+            end
+            local_score
+        end
+        surface_cells=get(triinc,e,nothing)
+        if surface_cells!==nothing && tri_entities!==nothing
+            @inbounds for i in eachindex(surface_cells)
+                f=surface_cells[i];trialive[f]||continue;tag=tritag[f]
+                context=tri_entities[tag];context===nothing&&continue
+                duplicate=false
+                for j in firstindex(surface_cells):i-1
+                    g=surface_cells[j]
+                    if trialive[g] && tritag[g]==tag
+                        duplicate=true;break
+                    end
+                end
+                duplicate&&continue
+                best=max(best,metric_edge_length(field,p,q;entity=context))
+            end
+        end
+        curve_cells=get(seginc,e,nothing)
+        if curve_cells!==nothing && seg_entities!==nothing
+            @inbounds for i in eachindex(curve_cells)
+                s=curve_cells[i];segalive[s]||continue;tag=segtag[s]
+                context=seg_entities[tag];context===nothing&&continue
+                duplicate=false
+                for j in firstindex(curve_cells):i-1
+                    g=curve_cells[j]
+                    if segalive[g] && segtag[g]==tag
+                        duplicate=true;break
+                    end
+                end
+                duplicate&&continue
+                best=max(best,metric_edge_length(field,p,q;entity=context))
+            end
+        end
+        return max(best,vertex_score(a,b),vertex_score(b,a))
     end
     function queueedge!(u,v,len)
+        (isfinite(len) && len>=0) || throw(ArgumentError(
+            "refine_to_size: edge length is not finite"))
         e=ek(u,v)
         (e in queued || e in deferred) && return nothing
-        target=edge_target(u,v)
-        if len>target
-            score=len/target
-            score>1 || throw(ErrorException(
-                "refine_to_size: local edge violation underflowed for edge $e"))
+        score=edge_score(u,v)
+        if score>1
             push!(queued,e);_hpush!(heap,(score,e[1],e[2]))
         end
         return nothing
@@ -1002,18 +1208,6 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     # tet edge is bisected, split every coincident segment/triangle edge as well so
     # boundary/feature cells and all of their tags remain conforming instead of being
     # silently discarded.
-    segv = NTuple{2,Int32}[(m.segs[1,s],m.segs[2,s]) for s in axes(m.segs,2)]
-    segalive = trues(length(segv)); segtag = copy(m.seg_tag)
-    triv = NTuple{3,Int32}[(m.tris[1,f],m.tris[2,f],m.tris[3,f]) for f in axes(m.tris,2)]
-    trialive = trues(length(triv)); tritag = copy(m.tri_tag)
-    seginc = Dict{Tuple{Int32,Int32},Vector{Int}}()
-    triinc = Dict{Tuple{Int32,Int32},Vector{Int}}()
-    @inbounds for (s,q) in enumerate(segv); push!(get!(() -> Int[],seginc,ek(q...)),s); end
-    @inbounds for (f,q) in enumerate(triv)
-        for e in (ek(q[1],q[2]),ek(q[2],q[3]),ek(q[3],q[1]))
-            push!(get!(() -> Int[],triinc,e),f)
-        end
-    end
     function addseg!(q::NTuple{2,Int32}, tag::Int32)
         length(segv)<typemax(Int32) ||
             throw(ErrorException("refine_to_size: segment count exceeds the Int32 working limit"))
@@ -1062,7 +1256,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     # add a tet (oriented positive) carrying region tag `tag`; register its 6 edges; if
     # `push_edges` enqueues every edge that violates its sampled local target.
     function addtet!(a, b, c, d, push_edges::Bool, tag::Int32,
-                     volume_hint::Union{Nothing,Float64}=nothing)
+                     volume_hint::Union{Nothing,Float64})
         length(tv) < typemax(Int32) ||
             throw(ErrorException("refine_to_size: working tet count exceeds the Int32 incidence limit"))
         sv=volume_hint===nothing ?
@@ -1087,7 +1281,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         end
         id
     end
-    @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false, tags0[t]); end
+    @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false, tags0[t], nothing); end
     for (e,_) in inc
         len=elen(e[1],e[2]); isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
         queueedge!(e[1],e[2],len)
@@ -1143,28 +1337,25 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         orient2((cx[a],cz[a]),(cx[b],cz[b]),(p[1],p[3]))==0 &&
         orient2((cy[a],cz[a]),(cy[b],cz[b]),(p[2],p[3]))==0
 
-    function split_child_volumes(a::Int32,b::Int32,ts::Vector{Int32},p;
-                                 fraction::Union{Nothing,Tuple{Int,Int}}=nothing)
-        volumes=Vector{NTuple{2,Float64}}(undef,length(ts))
+    function split_children_valid(a::Int32,b::Int32,ts::Vector{Int32},p,
+                                  fraction::Union{Nothing,Tuple{Int,Int}})
         affine=fraction!==nothing && exact_affine_point(a,b,p,fraction...)
-        @inbounds for (k,t) in enumerate(ts)
-            alive[t]||return nothing
-            opposite=edge_opposites(tv[t],a,b);opposite===nothing&&return nothing
+        @inbounds for t in ts
+            alive[t]||return false
+            opposite=edge_opposites(tv[t],a,b);opposite===nothing&&return false
             u,v=opposite
             if affine
                 # The stored parent (a,b,u,v) is positive. Exact affine linearity
                 # proves both child determinants positive without another predicate.
-                volumes[k]=(1.0,1.0)
             else
                 c1=-orient3((cx[a],cy[a],cz[a]),p,
                             (cx[u],cy[u],cz[u]),(cx[v],cy[v],cz[v]))
                 c2=-orient3(p,(cx[b],cy[b],cz[b]),
                             (cx[u],cy[u],cz[u]),(cx[v],cy[v],cz[v]))
-                (c1>0&&c2>0)||return nothing
-                volumes[k]=(1.0,1.0)
+                (c1>0&&c2>0)||return false
             end
         end
-        return volumes
+        return true
     end
 
     # An off-edge point changes a piecewise-linear boundary or material interface,
@@ -1192,7 +1383,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     # positions near 1/2 and retain the most balanced valid candidate, preferring
     # fewer ULP shifts. The fused convex interpolation avoids Rational allocations.
     function fallback_split_point(a::Int32,b::Int32,ts::Vector{Int32},constrained::Bool)
-        best=nothing;bestvolumes=nothing;bestscore=nothing
+        best=nothing;bestscore=nothing
         lerp(x,y,t)=signbit(x)==signbit(y) ? muladd(t,y-x,x) : (1-t)*x+t*y
         shiftulp(x,k)=begin
             y=x
@@ -1215,16 +1406,15 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             (p!=(cx[a],cy[a],cz[a])&&p!=(cx[b],cy[b],cz[b]))||continue
             haskey(coordids,coordkey(p...))&&continue
             constrained && !exactly_on_edge(a,b,p) && continue
-            volumes=split_child_volumes(a,b,ts,p;fraction=(n,32))
-            volumes===nothing&&continue
+            split_children_valid(a,b,ts,p,(n,32))||continue
             score=(abs(n-16),radius,abs(ox)+abs(oy)+abs(oz),ox,oy,oz)
             if bestscore===nothing || score<bestscore
-                best=p;bestvolumes=volumes;bestscore=score
+                best=p;bestscore=score
             end
             end
         end
         best===nothing&&return nothing
-        return best::NTuple{3,Float64},bestvolumes::Vector{NTuple{2,Float64}}
+        return best::NTuple{3,Float64}
     end
 
     retriangulation_reason=Ref("")
@@ -1271,12 +1461,12 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         start in adj[cur]||(retriangulation_reason[]="edge link does not close";return false)
 
         function face_opposites(cells)
-            out=Dict{NTuple{3,Int32},Vector{Int32}}()
+            faces=Dict{NTuple{3,Int32},Vector{Int32}}()
             for q in cells,k in 1:4
                 f=ntuple(i -> q[i<k ? i : i+1],3)
-                push!(get!(() -> Int32[],out,_sort3t(f...)),q[k])
+                push!(get!(() -> Int32[],faces,_sort3t(f...)),q[k])
             end
-            out
+            faces
         end
         oldcells=NTuple{4,Int32}[tv[t] for t in ts]
         oldfaces=face_opposites(oldcells)
@@ -1368,10 +1558,11 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     guard = 0
     while true
       while !isempty(heap.d)
-        (score, a, b) = _hpop!(heap)
+        (_, a, b) = _hpop!(heap)
         delete!(queued,ek(a,b))
-        score <= 1 && break                                  # no sampled local violation remains
         e = ek(a, b); haskey(inc, e) || continue
+        score=edge_score(a,b)
+        score <= 1 && continue
         ts = Int32[]
         @inbounds for t in inc[e]
             alive[t] || continue
@@ -1396,9 +1587,9 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         # with an existing vertex, however, the fallback may move by additional ULPs;
         # constrained edges then retain the strict exact-collinearity requirement in
         # `fallback_split_point`.
-        childvolumes=haskey(coordids,coordkey(splitpoint...)) ? nothing :
-                     split_child_volumes(a,b,ts,splitpoint;fraction=(1,2))
-        if childvolumes===nothing
+        splitvalid=!haskey(coordids,coordkey(splitpoint...)) &&
+                   split_children_valid(a,b,ts,splitpoint,(1,2))
+        if !splitvalid
             constrained=constrained||edge_is_constrained(a,b,ts)
             fallback=fallback_split_point(a,b,ts,constrained)
             if fallback===nothing
@@ -1418,19 +1609,19 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
                 deferred_signature[e]=signature;push!(deferred,e)
                 continue
             end
-            splitpoint,childvolumes=fallback
+            splitpoint=fallback
             mx,my,mz=splitpoint
         end
         push!(cx,mx); push!(cy,my); push!(cz,mz)
         mvid = Int32(length(cx));coordids[coordkey(mx,my,mz)]=mvid;split_lower!(a,b,mvid)
-        @inbounds for (k,t) in enumerate(ts)
+        @inbounds for t in ts
             opposite=edge_opposites(tv[t],a,b)
             opposite===nothing&&throw(ErrorException(
                 "refine_to_size: edge incidence changed during subdivision"))
             a1,a2=opposite
             g = ttag[t]; alive[t] = false                    # children inherit the parent tet's region tag
-            addtet!(a,mvid,a1,a2,true,g,childvolumes[k][1])
-            addtet!(mvid,b,a1,a2,true,g,childvolumes[k][2])
+            addtet!(a,mvid,a1,a2,true,g,1.0)
+            addtet!(mvid,b,a1,a2,true,g,1.0)
         end
         delete!(inc,e)
       end
@@ -1453,12 +1644,9 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             if alive[t];live=true;break;end
         end
         live||continue
-        len=elen(u,v)
-        mx=_midpoint3(cx[u],cx[v]);my=_midpoint3(cy[u],cy[v]);mz=_midpoint3(cz[u],cz[v])
-        target=min(size_at(field,cx[u],cy[u],cz[u]),
-                   size_at(field,cx[v],cy[v],cz[v]),size_at(field,mx,my,mz))
-        len<=target || throw(ErrorException(
-            "refine_to_size: postcondition failed: an output edge exceeds its local target from $target_description"))
+        score=edge_score(u,v)
+        score<=1 || throw(ErrorException(
+            "refine_to_size: postcondition failed: an output edge exceeds its local metric target from $target_description"))
     end
     keep = Int32[t for t in 1:length(tv) if alive[t]]
     used = Int32[]; seenv = Set{Int32}()

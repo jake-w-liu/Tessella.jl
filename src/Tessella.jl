@@ -24,6 +24,7 @@ const TESSELLA_STAGE = 6  # see STATUS.md stage board
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
+include("Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
@@ -39,10 +40,23 @@ include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + e
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
-using .SizeField: AbstractField, AbstractSizeField, ConstantSize, FunctionSize,
+using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension,
+                 msh_order, msh_family, ElementBlock, MixedEntity, MixedEntityData,
+                 MixedMesh, mixed_crc, simplex_to_mixed, mixed_to_simplex,
+                 write_mixed_msh, read_mixed_msh, lagrange_nodes, add_block!
+using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
-                  BoundedSize, field_value, size_at, build_geo_size_field
+                  BoundedSize, field_value, size_at, metric_at, build_geo_size_field,
+                  build_geo_boundary_layer_fields,
+                  Metric3, isotropic_metric, metric_size, metric_eigenvalues,
+                  directional_size, metric_edge_length,
+                  MathEvalField, MathEvalAnisoField, GradientField, LaplacianField,
+                  MeanField, CurvatureField, MaxEigenHessianField, LonLatField, ParametricField,
+                  StructuredField, RestrictField, ConstantField, ExtendField, OctreeField,
+                  PostViewField, MinAnisoField, IntersectAnisoField, AttractorAnisoCurveField,
+                  BoundaryLayerField, AutomaticMeshSizeField, ExternalProcessField
+using .Mesh1D: mesh_segment
 using .Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder, refine_to_size
 using .RecoverCDT: recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
@@ -57,10 +71,21 @@ Mesh3D._recover_partition_exact(surfaces::AbstractVector{Mesh}) = recover_partit
 export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size, stage
 # curated re-exports of the public API
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
-export AbstractField, AbstractSizeField, ConstantSize, FunctionSize, DistanceField,
+export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
+       msh_family, ElementBlock, MixedEntity, MixedEntityData, MixedMesh, mixed_crc,
+       simplex_to_mixed, mixed_to_simplex, write_mixed_msh, read_mixed_msh,
+       lagrange_nodes, add_block!
+export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
-       MinSize, MaxSize, BoundedSize, field_value, size_at
-export build_geo_size_field
+       MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,
+       isotropic_metric, metric_size, metric_eigenvalues, directional_size,
+       metric_edge_length
+export MathEvalField, MathEvalAnisoField, GradientField, LaplacianField, MeanField,
+       CurvatureField, MaxEigenHessianField, LonLatField, ParametricField, StructuredField,
+       RestrictField, ConstantField, ExtendField, OctreeField, PostViewField,
+       MinAnisoField, IntersectAnisoField, AttractorAnisoCurveField, BoundaryLayerField,
+       AutomaticMeshSizeField, ExternalProcessField
+export build_geo_size_field, build_geo_boundary_layer_fields
 export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
 
 """
@@ -70,21 +95,164 @@ Current implemented development stage (see the `STATUS.md` stage board).
 """
 stage() = TESSELLA_STAGE
 
+function _planar_entity_context(value,caller::AbstractString)
+    value===nothing && return nothing
+    value isa Tuple && length(value)==2 && value[1] isa Integer && value[2] isa Integer ||
+        throw(ArgumentError("$caller: entity context must be nothing or a (dimension, tag) integer tuple"))
+    (value[1] isa Bool || value[2] isa Bool) && throw(ArgumentError(
+        "$caller: entity dimension and tag must not be Bool"))
+    dim=try Int(value[1]) catch err
+        err isa InterruptException && rethrow()
+        err isa InexactError || rethrow()
+        throw(ArgumentError("$caller: entity dimension is outside the platform Int range"))
+    end
+    tag=try Int(value[2]) catch err
+        err isa InterruptException && rethrow()
+        err isa InexactError || rethrow()
+        throw(ArgumentError("$caller: entity tag is outside the platform Int range"))
+    end
+    dim in 0:3 || throw(ArgumentError("$caller: entity dimension must be in 0:3"))
+    tag>0 || throw(ArgumentError("$caller: entity tag must be positive"))
+    return (dim,tag)
+end
+
+function _planar_vertex_context(spec,npoints::Int,index::Int,p)
+    spec===nothing && return nothing
+    raw=if spec isa Tuple
+        spec
+    elseif spec isa AbstractVector
+        length(spec)==npoints || throw(ArgumentError(
+            "mesh_planar: vertex_entities must have one entry per input point"))
+        spec[index]
+    elseif spec isa AbstractDict
+        haskey(spec,index) || throw(ArgumentError(
+            "mesh_planar: vertex_entities has no entry for point $index"))
+        spec[index]
+    elseif applicable(spec,index,p)
+        spec(index,p)
+    else
+        throw(ArgumentError(
+            "mesh_planar: vertex_entities must be a point-entity tuple, per-point vector/dictionary, or callable (index, p)"))
+    end
+    context=_planar_entity_context(raw,"mesh_planar point $index")
+    (context===nothing || context[1]==0) || throw(ArgumentError(
+        "mesh_planar: vertex_entities point $index must have dimension 0"))
+    return context
+end
+
+function _mesh_sized_vertex_context(spec,npoints::Int,index::Int,p)
+    spec===nothing && return nothing
+    raw=if spec isa Tuple
+        spec
+    elseif spec isa AbstractVector
+        length(spec)==npoints || throw(ArgumentError(
+            "mesh_sized: vertex_entities must have one entry per surface point"))
+        spec[index]
+    elseif spec isa AbstractDict
+        get(spec,index,nothing)
+    elseif applicable(spec,index,p)
+        spec(index,p)
+    else
+        throw(ArgumentError(
+            "mesh_sized: vertex_entities must be a point-entity tuple, per-surface-point vector/dictionary, or callable (index, p)"))
+    end
+    context=_planar_entity_context(raw,"mesh_sized surface point $index")
+    (context===nothing || context[1]==0) || throw(ArgumentError(
+        "mesh_sized: vertex_entities point $index must have dimension 0"))
+    return context
+end
+
+function _planar_boundary_context(spec,nsegments::Int,index::Int,p,q,fallback)
+    spec===nothing && return fallback
+    raw = if spec isa Tuple
+        spec
+    elseif spec isa AbstractVector
+        length(spec)==nsegments || throw(ArgumentError(
+            "mesh_planar: boundary_entities must have one entry per segment"))
+        spec[index]
+    elseif spec isa AbstractDict
+        haskey(spec,index) || throw(ArgumentError(
+            "mesh_planar: boundary_entities has no entry for segment $index"))
+        spec[index]
+    elseif applicable(spec,index,p,q)
+        spec(index,p,q)
+    else
+        throw(ArgumentError(
+            "mesh_planar: boundary_entities must be an entity tuple, per-segment vector/dictionary, or callable (index, p, q)"))
+    end
+    return _planar_entity_context(raw,"mesh_planar boundary segment $index")
+end
+
+function _grade_planar_constraints(xs::Vector{Float64},ys::Vector{Float64},segments,
+                                   field::AbstractSizeField,face_entity,boundary_entities,
+                                   vertex_entities)
+    outx=copy(xs);outy=copy(ys);outsegments=Tuple{Int,Int}[]
+    npoints=length(xs);nsegments=length(segments)
+    for (index,segment) in pairs(segments)
+        a=Int(segment[1]);b=Int(segment[2])
+        (1<=a<=npoints && 1<=b<=npoints && a!=b) || throw(ArgumentError(
+            "mesh_planar: segment $index has invalid endpoints ($a,$b) for $npoints points"))
+        p=(xs[a],ys[a],0.0);q=(xs[b],ys[b],0.0)
+        edge_entity=_planar_boundary_context(boundary_entities,nsegments,Int(index),
+                                             p,q,face_entity)
+        begin_entity=_planar_vertex_context(vertex_entities,npoints,a,p)
+        end_entity=_planar_vertex_context(vertex_entities,npoints,b,q)
+        points,_=mesh_segment(p,q,field;entity=edge_entity,
+                              endpoint_entities=(begin_entity,end_entity))
+        previous=a
+        @inbounds for k in 2:length(points)-1
+            length(outx)<typemax(Int32) || throw(ArgumentError(
+                "mesh_planar: graded boundary node count exceeds Int32 indexing"))
+            push!(outx,points[k][1]);push!(outy,points[k][2])
+            current=length(outx)
+            push!(outsegments,(previous,current));previous=current
+        end
+        push!(outsegments,(previous,b))
+    end
+    return outx,outy,outsegments
+end
+
 """
-    mesh_planar(xs, ys, segments; min_angle_deg=25.0, max_area=Inf, rng_seed=1) -> Mesh
+    mesh_planar(xs, ys, segments; min_angle_deg=25.0, max_area=Inf, rng_seed=1,
+                field=nothing, entity=nothing, boundary_entities=nothing,
+                vertex_entities=nothing) -> Mesh
 
 Quality 2-D triangle mesh of the planar straight-line graph (points `(xs,ys)` +
 constraint `segments`, `(i,j)` index pairs): constrained-Delaunay triangulate,
-Ruppert-refine to the angle/area bound, keep the interior of the constrained
-domain, and return a validated 2-D [`Mesh`](@ref) (nodes carry `z = 0`). The
-domain boundary must be closed constrained loops. This is the 2-D counterpart of
-[`mesh_volume`](@ref).
+Ruppert-refine to the angle/area bound and optional [`AbstractSizeField`](@ref),
+keep the interior of the constrained domain, and return a validated 2-D
+[`Mesh`](@ref) (nodes carry `z = 0`). The domain boundary must be closed
+constrained loops. `entity` classifies interior field queries. `boundary_entities`
+can separately classify each input constraint as one entity tuple, a vector or
+dictionary keyed by segment index, or a callable `(index, p, q) -> entity`; this
+is required for curve-sensitive `Restrict` and `Constant` fields.
+`vertex_entities` similarly accepts a point entity, per-point vector/dictionary,
+or `(index, p) -> entity` callable and applies Gmsh's endpoint size rule. This is
+the 2-D counterpart of [`mesh_volume`](@ref).
 """
 function mesh_planar(xs::Vector{Float64}, ys::Vector{Float64},
                      segments::AbstractVector{<:Tuple{Integer,Integer}};
-                     min_angle_deg::Real=25.0, max_area::Real=Inf, rng_seed::Integer=1)
-    T = constrained_delaunay(xs, ys, segments; rng_seed=rng_seed)
-    interior = refine!(T; min_angle_deg=min_angle_deg, max_area=max_area)
+                     min_angle_deg::Real=25.0, max_area::Real=Inf, rng_seed::Integer=1,
+                     field::Union{Nothing,AbstractSizeField}=nothing, entity=nothing,
+                     boundary_entities=nothing,vertex_entities=nothing)
+    face_entity=_planar_entity_context(entity,"mesh_planar")
+    if field===nothing
+        (boundary_entities===nothing && vertex_entities===nothing) ||
+            throw(ArgumentError(
+                "mesh_planar: boundary_entities and vertex_entities require a size field"))
+        mesh_xs=xs;mesh_ys=ys;mesh_segments=segments
+    else
+        mesh_xs,mesh_ys,mesh_segments=_grade_planar_constraints(
+            xs,ys,segments,field,face_entity,boundary_entities,vertex_entities)
+    end
+    T = constrained_delaunay(mesh_xs, mesh_ys, mesh_segments; rng_seed=rng_seed)
+    sizefn = (field===nothing || field isa AbstractAnisoField) ? nothing :
+             (x,y)->size_at(field,x,y,0.0,face_entity)
+    edgefn = field isa AbstractAnisoField ?
+             (ax,ay,bx,by)->metric_edge_length(field,(ax,ay,0.0),(bx,by,0.0);
+                                                    entity=face_entity) : nothing
+    interior = refine!(T; min_angle_deg=min_angle_deg, max_area=max_area,
+                       size=sizefn,edge_metric=edgefn)
     m = to_mesh(T; interior=interior)
     size(m.tris, 2) > 0 ||
         throw(ArgumentError("mesh_planar: constrained boundary encloses no triangles"))
@@ -206,9 +374,18 @@ Verified on convex boxes, spheres, conical frusta, and a non-convex L-prism (gua
 blocker if the surface cannot be filled watertight (never a silently bad mesh). For
 axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_extrude`](@ref)
 (exact boundary, no faceting); `mesh_sized` is the general fallback for arbitrary surfaces.
+`entity` and `entity_resolver` have the classification semantics documented by
+[`refine_to_size`](@ref); input surface triangles/segments and their tags are
+reattached to the conforming fill before field refinement. `vertex_entities`
+classifies the input surface vertices as point entities. It accepts one `(0,tag)`
+tuple, a per-surface-point vector, a sparse dictionary keyed by point index, or a
+callable `(index, point) -> entity`; point classifications are remapped through
+the conforming fill and used to seed the original classified boundary edges;
+the point value is not recursively imposed on the resulting child edges.
 """
 function mesh_sized(surface::Mesh; hmax::Union{Nothing,Real}=nothing,
-                    field::Union{Nothing,AbstractSizeField}=nothing)
+                    field::Union{Nothing,AbstractSizeField}=nothing, entity=nothing,
+                    entity_resolver=nothing,vertex_entities=nothing)
     (hmax===nothing) == (field===nothing) &&
         throw(ArgumentError("mesh_sized: pass exactly one of hmax or field"))
     target = if hmax===nothing
@@ -222,14 +399,69 @@ function mesh_sized(surface::Mesh; hmax::Union{Nothing,Real}=nothing,
             throw(ArgumentError("mesh_sized: hmax must be finite and positive (got $hmax)"))
         ConstantSize(hm)
     end
-    m0 = _conforming_fill(surface; caller="mesh_sized")
-    m = refine_to_size(m0, target)
+    m0,mapping = _attach_surface_classification(
+        _conforming_fill(surface;caller="mesh_sized"),surface,"mesh_sized")
+    point_contexts=if vertex_entities===nothing
+        nothing
+    else
+        contexts=Vector{Union{Nothing,Tuple{Int,Int}}}(nothing,size(m0.coords,2))
+        @inbounds for index in axes(surface.coords,2)
+            point=(surface.coords[1,index],surface.coords[2,index],surface.coords[3,index])
+            contexts[mapping[index]]=_mesh_sized_vertex_context(
+                vertex_entities,size(surface.coords,2),index,point)
+        end
+        contexts
+    end
+    m = refine_to_size(m0,target;entity=entity,entity_resolver=entity_resolver,
+                       vertex_entities=point_contexts)
     diag = validate(m)
     diag.ok || throw(ErrorException("mesh_sized: refinement produced an invalid mesh — " * join(diag.messages, "; ")))
     return m
 end
 
-mesh_sized(surface::Mesh, field::AbstractSizeField) = mesh_sized(surface; field=field)
+mesh_sized(surface::Mesh,field::AbstractSizeField;entity=nothing,
+           entity_resolver=nothing,vertex_entities=nothing)=
+    mesh_sized(surface;field=field,entity=entity,entity_resolver=entity_resolver,
+               vertex_entities=vertex_entities)
+
+@inline _classification_coord_key(x::Float64,y::Float64,z::Float64)=
+    (x==0 ? 0.0 : x,y==0 ? 0.0 : y,z==0 ? 0.0 : z)
+
+function _attach_surface_classification(volume::Mesh,surface::Mesh,
+                                        caller::AbstractString)
+    ids=Dict{NTuple{3,Float64},Int32}()
+    @inbounds for i in axes(volume.coords,2)
+        key=_classification_coord_key(volume.coords[1,i],volume.coords[2,i],
+                                      volume.coords[3,i])
+        haskey(ids,key) && throw(ErrorException(
+            "$caller: conforming fill contains duplicate represented coordinates"))
+        ids[key]=Int32(i)
+    end
+    mapping=Vector{Int32}(undef,size(surface.coords,2))
+    @inbounds for i in eachindex(mapping)
+        key=_classification_coord_key(surface.coords[1,i],surface.coords[2,i],
+                                      surface.coords[3,i])
+        mapped=get(ids,key,Int32(0))
+        mapped!=0 || throw(ErrorException(
+            "$caller: conforming fill did not preserve surface vertex $i at $key"))
+        mapping[i]=mapped
+    end
+    S=Matrix{Int32}(undef,2,size(surface.segs,2))
+    @inbounds for s in axes(surface.segs,2),i in 1:2
+        S[i,s]=mapping[surface.segs[i,s]]
+    end
+    F=Matrix{Int32}(undef,3,size(surface.tris,2))
+    @inbounds for f in axes(surface.tris,2),i in 1:3
+        F[i,f]=mapping[surface.tris[i,f]]
+    end
+    out=Mesh(copy(volume.coords);segs=S,tris=F,tets=copy(volume.tets),
+             seg_tag=copy(surface.seg_tag),tri_tag=copy(surface.tri_tag),
+             tet_tag=copy(volume.tet_tag))
+    diagnostic=validate(out)
+    diagnostic.ok || throw(ErrorException(
+        "$caller: classified conforming fill is invalid — "*join(diagnostic.messages,"; ")))
+    return out,mapping
+end
 
 # Fill a closed PLC without ever accepting a convex-hull cap as its boundary.
 # `tetrahedralize` owns the restriction, star-shaped fan, exact-CDT recovery, and

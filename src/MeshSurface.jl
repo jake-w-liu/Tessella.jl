@@ -25,10 +25,57 @@ module MeshSurface
 using ..MeshTypes: Mesh, ntris, nnodes, node, triangle_area, validate
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using ..Mesh1D: mesh_segment
-using ..SizeField: AbstractSizeField, size_at, ConstantSize
+using ..SizeField: AbstractSizeField, AbstractAnisoField, size_at, ConstantSize,
+                   directional_size, metric_edge_length, _metric_curve_increment
 
 export mesh_planar_face, mesh_cylinder_face, mesh_parametric_face
 export PlaneFrame, plane_frame, project, lift
+
+@inline function _surface_entity_context(value, caller::AbstractString)
+    value === nothing && return nothing
+    value isa Tuple && length(value) == 2 &&
+        value[1] isa Integer && !(value[1] isa Bool) &&
+        value[2] isa Integer && !(value[2] isa Bool) ||
+        throw(ArgumentError("$caller: an entity context must be nothing or a " *
+                            "(dimension, tag) integer tuple (got $value)"))
+    dim=Int(value[1]); tag=Int(value[2])
+    dim in 0:3 || throw(ArgumentError("$caller: entity dimension must be in 0:3"))
+    tag>0 || throw(ArgumentError("$caller: entity tag must be positive"))
+    return (dim,tag)
+end
+
+@inline _entity_tuple(value)=value isa Tuple && length(value)==2 &&
+    value[1] isa Integer && !(value[1] isa Bool) &&
+    value[2] isa Integer && !(value[2] isa Bool)
+
+function _surface_boundary_entity(spec, nloops::Int, loop_index::Int,
+                                  edge_index::Int, edge_count::Int, p, q,
+                                  default, caller::AbstractString)
+    spec===nothing && return default
+    raw=if _entity_tuple(spec)
+        spec
+    elseif applicable(spec,loop_index,edge_index,p,q)
+        spec(loop_index,edge_index,p,q)
+    elseif spec isa AbstractVector
+        length(spec)==nloops || throw(ArgumentError(
+            "$caller: boundary_entities must have one entry per boundary loop"))
+        entry=spec[loop_index]
+        if entry===nothing || _entity_tuple(entry)
+            entry
+        elseif entry isa AbstractVector
+            length(entry)==edge_count || throw(ArgumentError(
+                "$caller: boundary_entities[$loop_index] must have one entry per loop edge"))
+            entry[edge_index]
+        else
+            throw(ArgumentError(
+                "$caller: each boundary_entities entry must be an entity tuple, nothing, or a per-edge vector"))
+        end
+    else
+        throw(ArgumentError(
+            "$caller: boundary_entities must be an entity tuple, a per-loop vector, or a callable (loop_index, edge_index, p, q)"))
+    end
+    return _surface_entity_context(raw,caller)
+end
 
 # ── vector helpers (tuples) ─────────────────────────────────────────────────────
 @inline _sub(a,b) = (a[1]-b[1], a[2]-b[2], a[3]-b[3])
@@ -112,38 +159,55 @@ end
 
 # ── planar face meshing ─────────────────────────────────────────────────────────
 """
-    mesh_planar_face(loops, sf; min_angle_deg=25.0, max_area=Inf) -> Mesh
+    mesh_planar_face(loops, sf; min_angle_deg=25.0, max_area=Inf,
+                     entity=nothing, boundary_entities=nothing) -> Mesh
 
 Mesh a planar face bounded by `loops` (a vector of loops; `loops[1]` is the outer
 boundary, the rest are holes). Each loop is a vector of coplanar 3-D points in
 order. Boundary edges are size-graded, then the interior is constrained-Delaunay
 meshed and Ruppert-refined under `sf`, and lifted back to 3-D.
+
+`entity` is the face context used for interior field samples. `boundary_entities`
+optionally supplies the actual curve context for each boundary edge, either as one
+entity tuple, one tuple per loop, one tuple per edge within each loop, or a callable
+`(loop_index, edge_index, p, q) -> entity`. This distinction is required by Gmsh
+`Restrict` and `Constant`: a face does not implicitly classify its boundary curves
+when `IncludeBoundary` is false.
 """
 function mesh_planar_face(loops::AbstractVector, sf::AbstractSizeField;
-                          min_angle_deg::Real=25.0, max_area::Real=Inf)
+                          min_angle_deg::Real=25.0, max_area::Real=Inf,
+                          entity=nothing,boundary_entities=nothing)
     isempty(loops) && throw(ArgumentError("mesh_planar_face: no loops"))
+    face_entity=_surface_entity_context(entity,"mesh_planar_face")
     fr = plane_frame(loops[1])
     _validate_coplanar_loops(loops, fr)
     xs = Float64[]; ys = Float64[]; segs = Tuple{Int,Int}[]
-    for loop in loops
-        _add_loop!(xs, ys, segs, loop, sf, fr)
+    for (loop_index,loop) in pairs(loops)
+        _add_loop!(xs,ys,segs,loop,sf,fr,face_entity,boundary_entities,
+                   length(loops),Int(loop_index))
     end
     T = constrained_delaunay(xs, ys, segs)
-    sizefn = (a, b) -> size_at(sf, lift(fr, a, b))
-    interior = refine!(T; min_angle_deg=min_angle_deg, max_area=max_area, size=sizefn)
+    sizefn = sf isa AbstractAnisoField ? nothing :
+             (a, b) -> size_at(sf, lift(fr, a, b)...,face_entity)
+    edgefn = sf isa AbstractAnisoField ? (ax,ay,bx,by) ->
+             metric_edge_length(sf,lift(fr,ax,ay),lift(fr,bx,by);entity=face_entity) : nothing
+    interior = refine!(T; min_angle_deg=min_angle_deg, max_area=max_area,
+                       size=sizefn,edge_metric=edgefn)
     m2 = to_mesh(T; interior=interior)
     return _lift_mesh(m2, fr)
 end
 
 # discretize one loop's edges under sf and append its cyclic boundary as segments
-function _add_loop!(xs, ys, segs, loop, sf, fr)
+function _add_loop!(xs,ys,segs,loop,sf,fr,entity,boundary_entities,nloops,loop_index)
     m = length(loop)
     m >= 3 || throw(ArgumentError("mesh_planar_face: a loop needs ≥3 points"))
     start = length(xs) + 1
     for i in 1:m
         p = _point3(loop[i], "mesh_planar_face")
         q = _point3(loop[mod1(i+1,m)], "mesh_planar_face")
-        pts, _ = mesh_segment(p, q, sf)
+        edge_entity=_surface_boundary_entity(boundary_entities,nloops,loop_index,
+            i,m,p,q,entity,"mesh_planar_face")
+        pts, _ = mesh_segment(p,q,sf;entity=edge_entity)
         # append all but the last node (shared with the next edge / loop closure)
         length(pts)-1 <= typemax(Int32)-length(xs) ||
             throw(ArgumentError("mesh_planar_face: boundary node count exceeds Int32 indexing"))
@@ -176,7 +240,9 @@ end
 
 # ── developable cylinder face ───────────────────────────────────────────────────
 """
-    mesh_cylinder_face(center, axis, radius, height, sf; kwargs...) -> Mesh
+    mesh_cylinder_face(center, axis, radius, height, sf;
+                       entity=nothing, boundary_entities=nothing,
+                       max_refine_passes=16, kwargs...) -> Mesh
 
 Mesh the lateral surface of a cylinder: axis start `center`, direction `axis`,
 `radius`, `height`. Built as a **graded structured** grid — axial levels are
@@ -185,9 +251,23 @@ uniformly into `nθ = max(6, round(2πR/h))` sectors, and each quad is split int
 two triangles with the seam wrapping (θ_{nθ} ≡ θ_0). Watertight by construction
 (no seam to weld), which a Ruppert mesh of the unrolled rectangle cannot
 guarantee once the two seam edges refine asymmetrically.
+
+`entity` classifies lateral-face and axial sizing queries. `boundary_entities`
+optionally supplies the actual curve contexts for the bottom and top rings,
+respectively, as one entity tuple, a two-entry vector, or a callable
+`(ring_index, edge_index, p, q) -> entity`. Since the structured surface uses a
+single circumferential division count, either ring may conservatively refine
+both rings.
+
+The structured grid is rechecked against `sf` at every horizontal, vertical,
+and diagonal edge endpoint and midpoint. Violating intervals are subdivided
+until the metric-edge bound is certified or `max_refine_passes` is exhausted.
 """
 function mesh_cylinder_face(center, axis, radius::Real, height::Real,
-                            sf::AbstractSizeField; min_angle_deg::Real=25.0, max_area::Real=Inf)
+                            sf::AbstractSizeField; min_angle_deg::Real=25.0,
+                            max_area::Real=Inf, entity=nothing,
+                            boundary_entities=nothing,
+                            max_refine_passes::Integer=16)
     R = _surface_float(radius,"mesh_cylinder_face","radius")
     H = _surface_float(height,"mesh_cylinder_face","height")
     (isfinite(R) && isfinite(H) && R > 0 && H > 0) ||
@@ -198,8 +278,20 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
     area=_surface_float(max_area,"mesh_cylinder_face","max_area")
     (!isnan(area)&&area>0) ||
         throw(ArgumentError("mesh_cylinder_face: max_area must be positive or Inf"))
+    max_refine_passes isa Bool && throw(ArgumentError(
+        "mesh_cylinder_face: max_refine_passes must be a positive integer"))
+    passes=try
+        Int(max_refine_passes)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_cylinder_face: max_refine_passes exceeds the platform Int limit"))
+    end
+    passes>0 || throw(ArgumentError(
+        "mesh_cylinder_face: max_refine_passes must be positive"))
     c = _point3(center, "mesh_cylinder_face")
     ez = _unit(_point3(axis, "mesh_cylinder_face"))
+    face_entity=_surface_entity_context(entity,"mesh_cylinder_face")
     ax = abs(ez[1]) <= abs(ez[2]) ?
          (abs(ez[1]) <= abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
          (abs(ez[2]) <= abs(ez[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
@@ -207,15 +299,26 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
     on(θ, z) = (c[1]+R*cos(θ)*ex[1]+R*sin(θ)*ey[1]+z*ez[1],
                 c[2]+R*cos(θ)*ex[2]+R*sin(θ)*ey[2]+z*ez[2],
                 c[3]+R*cos(θ)*ex[3]+R*sin(θ)*ey[3]+z*ez[3])
+    bottom_entity=_surface_boundary_entity(boundary_entities,2,1,1,1,
+        on(0.0,0.0),on(π,0.0),face_entity,"mesh_cylinder_face")
+    top_entity=_surface_boundary_entity(boundary_entities,2,2,1,1,
+        on(0.0,H),on(π,H),face_entity,"mesh_cylinder_face")
     # axial levels: size-graded along the axis (uses the real 3-D size field)
-    apts, _ = mesh_segment(c, (c[1]+H*ez[1], c[2]+H*ez[2], c[3]+H*ez[3]), sf)
+    apts, _ = mesh_segment(c, (c[1]+H*ez[1], c[2]+H*ez[2], c[3]+H*ez[3]), sf;
+                           entity=face_entity)
     zlev = Float64[_dot(_sub(p, c), ez) for p in apts]     # 0 .. H, graded
     nz = length(zlev)
     # Circumferential divisions use the smallest sampled target over all axial
     # levels, not only the equator (an axial size field must also refine rings).
     hmin = Inf
-    for z in zlev,k in 0:11
-        hmin = min(hmin, size_at(sf, on(2π*k/12,z)))
+    for (j,z) in pairs(zlev),k in 0:11
+        θ=2π*k/12
+        tangent=(-sin(θ)*ex[1]+cos(θ)*ey[1],
+                 -sin(θ)*ex[2]+cos(θ)*ey[2],
+                 -sin(θ)*ex[3]+cos(θ)*ey[3])
+        ring_entity=j==1 ? bottom_entity : j==length(zlev) ? top_entity : face_entity
+        hmin = min(hmin, directional_size(sf,on(θ,z),tangent;
+                                          entity=ring_entity))
     end
     mindz=minimum(zlev[i+1]-zlev[i] for i in 1:length(zlev)-1)
     (isfinite(mindz)&&mindz>0) ||
@@ -257,6 +360,9 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
         end
     end
     zlev=refined_z;nz=length(zlev)
+    zlev,ntheta=_refine_cylinder_metric_grid(sf,on,zlev,ntheta,R,angle,
+        face_entity,bottom_entity,top_entity,passes)
+    nz=length(zlev)
     nnout=try
         Base.checked_mul(nz, ntheta)
     catch err
@@ -300,6 +406,131 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
     return out
 end
 
+@inline function _cylinder_subdivision_factor(value::Float64)
+    value<=1+256eps(Float64) && return 1
+    value<=prevfloat(Float64(typemax(Int))) || throw(ArgumentError(
+        "mesh_cylinder_face: field sizing requests more subdivisions than the platform Int limit"))
+    return ceil(Int,value)
+end
+
+function _refine_cylinder_metric_grid(sf,on,zlev::Vector{Float64},ntheta::Int,
+                                      radius::Float64,angle::Float64,
+                                      face_entity,bottom_entity,top_entity,
+                                      maxpasses::Int)
+    for pass in 1:maxpasses
+        nz=length(zlev)
+        axial_factors=ones(Int,nz-1)
+        angular_factor=1
+        @inbounds for j in 1:nz
+            z=zlev[j]
+            ring_entity=j==1 ? bottom_entity : j==nz ? top_entity : face_entity
+            for i in 0:ntheta-1
+                a=on(2π*i/ntheta,z);b=on(2π*(i+1)/ntheta,z)
+                angular_factor=max(angular_factor,_cylinder_subdivision_factor(
+                    metric_edge_length(sf,a,b;entity=ring_entity)))
+            end
+        end
+        @inbounds for j in 1:nz-1, i in 0:ntheta-1
+            a=on(2π*i/ntheta,zlev[j])
+            b=on(2π*(i+1)/ntheta,zlev[j])
+            c=on(2π*(i+1)/ntheta,zlev[j+1])
+            d=on(2π*i/ntheta,zlev[j+1])
+            vertical=max(metric_edge_length(sf,a,d;entity=face_entity),
+                         metric_edge_length(sf,b,c;entity=face_entity))
+            diagonal=metric_edge_length(sf,a,c;entity=face_entity)
+            axial_factors[j]=max(axial_factors[j],
+                                 _cylinder_subdivision_factor(max(vertical,diagonal)))
+            angular_factor=max(angular_factor,
+                               _cylinder_subdivision_factor(diagonal))
+        end
+        next_ntheta=try
+            Base.checked_mul(ntheta,angular_factor)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "mesh_cylinder_face: field-refined circumferential count overflows the platform Int limit"))
+        end
+
+        # Field-driven subdivisions can change the structured cell aspect ratio.
+        # Couple the two directions so the requested physical-space angle bound
+        # remains true after every refinement pass.
+        if angle>0
+            tana=tand(angle)
+            chord=2radius*sinpi(inv(ntheta))
+            @inbounds for j in eachindex(axial_factors)
+                dz=zlev[j+1]-zlev[j]
+                axial_factors[j]=max(axial_factors[j],
+                    _cylinder_subdivision_factor(
+                        (dz*tana/chord)*(1+2048eps(Float64))))
+            end
+            @inbounds for j in eachindex(axial_factors)
+                piece=(zlev[j+1]-zlev[j])/axial_factors[j]
+                next_ntheta=_cylinder_sectors_for_chord(
+                    radius,(piece/tana)*(1-2048eps(Float64)),next_ntheta)
+            end
+        end
+
+        next_ntheta==ntheta && all(==(1),axial_factors) && return zlev,ntheta
+        pass<maxpasses || throw(ErrorException(
+            "mesh_cylinder_face: field metric did not converge within max_refine_passes=$maxpasses"))
+        ntheta=next_ntheta
+        ntheta<=typemax(Int32) || throw(ArgumentError(
+            "mesh_cylinder_face: field-refined circumferential count exceeds Int32 indexing"))
+        refined_count=1
+        for factor in axial_factors
+            refined_count=try
+                Base.checked_add(refined_count,factor)
+            catch err
+                err isa InterruptException && rethrow()
+                throw(ArgumentError(
+                    "mesh_cylinder_face: field-refined axial count overflows the platform Int limit"))
+            end
+        end
+        refined_count<=typemax(Int32) || throw(ArgumentError(
+            "mesh_cylinder_face: field-refined axial count exceeds Int32 indexing"))
+        try
+            Base.checked_mul(refined_count,ntheta)<=typemax(Int32) ||
+                throw(ArgumentError(
+                    "mesh_cylinder_face: field-refined node count exceeds Int32 indexing"))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError && rethrow()
+            throw(ArgumentError(
+                "mesh_cylinder_face: field-refined node count overflows the platform Int limit"))
+        end
+        refined=Vector{Float64}(undef,refined_count);out=1;refined[1]=zlev[1]
+        @inbounds for j in eachindex(axial_factors)
+            n=axial_factors[j];z0=zlev[j];z1=zlev[j+1]
+            for k in 1:n
+                out+=1
+                refined[out]=k==n ? z1 : z0+(z1-z0)*(k/n)
+            end
+        end
+        zlev=refined
+    end
+    throw(ErrorException("mesh_cylinder_face: unreachable metric-refinement state"))
+end
+
+function _cylinder_sectors_for_chord(radius::Float64,target::Float64,
+                                     current::Int)
+    (isfinite(target)&&target>0) || throw(ArgumentError(
+        "mesh_cylinder_face: requested angle bound is below Float64 resolution"))
+    2radius*sinpi(inv(current))<=target && return current
+    ratio=target/(2radius)
+    ratio>0 || throw(ArgumentError(
+        "mesh_cylinder_face: requested circumferential count exceeds the platform Int limit"))
+    estimate=π/asin(min(ratio,1.0))
+    estimate<=prevfloat(Float64(typemax(Int))) || throw(ArgumentError(
+        "mesh_cylinder_face: requested circumferential count exceeds the platform Int limit"))
+    required=max(current,ceil(Int,estimate))
+    while 2radius*sinpi(inv(required))>target
+        required<typemax(Int) || throw(ArgumentError(
+            "mesh_cylinder_face: requested circumferential count exceeds the platform Int limit"))
+        required+=1
+    end
+    return required
+end
+
 function _triangle_min_angle_deg(a,b,c)
     sides=sort([_norm(_sub(a,b)),_norm(_sub(b,c)),_norm(_sub(c,a))])
     sides[1]>0 || return 0.0
@@ -319,7 +550,10 @@ to 3-D. Suitable for gently-curved patches; developable surfaces are exact via
 [`mesh_cylinder_face`](@ref).
 """
 function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
-                              sf::AbstractSizeField; min_angle_deg::Real=25.0, max_area::Real=Inf)
+                              sf::AbstractSizeField; min_angle_deg::Real=25.0,
+                              max_area::Real=Inf, entity=nothing,
+                              boundary_entities=nothing)
+    face_entity=_surface_entity_context(entity,"mesh_parametric_face")
     umin=_surface_float(umin,"mesh_parametric_face","umin")
     umax=_surface_float(umax,"mesh_parametric_face","umax")
     vmin=_surface_float(vmin,"mesh_parametric_face","vmin")
@@ -344,9 +578,10 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
             throw(ArgumentError("mesh_parametric_face: singular or non-finite surface Jacobian at ($u,$v)"))
         (a,b)
     end
-    # parameter-space size target: physical h divided by stretch (per axis, use min)
-    sizefn = (u,v) -> begin
-        p = surf(u,v); h = size_at(sf, p); (a,b) = stretch(u,v)
+    # Isotropic fields use the established local-stretch approximation. Anisotropic
+    # fields are checked directly on each physical edge below.
+    sizefn = sf isa AbstractAnisoField ? nothing : (u,v) -> begin
+        p = surf(u,v); h = size_at(sf,p...,face_entity); (a,b) = stretch(u,v)
         hp=h/max(a,b)
         (isfinite(hp)&&hp>0) || throw(ArgumentError(
             "mesh_parametric_face: parameter-space size is not representable at ($u,$v)"))
@@ -358,8 +593,10 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
     start=1
     for i in 1:4
         p=corners[i]; q=corners[mod1(i+1,4)]
+        edge_entity=_surface_boundary_entity(boundary_entities,1,1,i,4,p,q,
+            face_entity,"mesh_parametric_face")
         # metric length along the edge in physical space
-        metric = _param_edge_metric(surf, sf, p, q)
+        metric = _param_edge_metric(surf,sf,p,q,edge_entity)
         (isfinite(metric)&&metric>0&&metric<=prevfloat(Float64(typemax(Int)))) ||
             throw(ArgumentError("mesh_parametric_face: requested boundary node count exceeds the platform Int limit"))
         n = max(1, round(Int, metric))
@@ -372,7 +609,10 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
     stop=length(xs)
     for i in start:stop; push!(segs, (i, i==stop ? start : i+1)); end
     T=constrained_delaunay(xs,ys,segs)
-    interior=refine!(T; min_angle_deg=min_angle_deg, max_area=max_area, size=sizefn)
+    edgefn=sf isa AbstractAnisoField ? (u1,v1,u2,v2) ->
+        metric_edge_length(sf,surf(u1,v1),surf(u2,v2);entity=face_entity) : nothing
+    interior=refine!(T; min_angle_deg=min_angle_deg, max_area=max_area,
+                     size=sizefn,edge_metric=edgefn)
     m2=to_mesh(T; interior=interior)
     # map parameter mesh to 3-D
     nn=nnodes(m2); coords=Matrix{Float64}(undef,3,nn)
@@ -385,14 +625,12 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
     return out
 end
 
-@inline function _param_edge_metric(s, sf, p, q)
-    N = 32; L = 0.0; prev = s(p[1], p[2]);hprev=size_at(sf,prev)
+@inline function _param_edge_metric(s, sf, p, q, entity)
+    N = 32; L = 0.0; prev = s(p[1], p[2])
     @inbounds for k in 1:N
         t = k/N; u = p[1]+t*(q[1]-p[1]); v = p[2]+t*(q[2]-p[2])
-        cur = s(u,v); h = size_at(sf, cur)
-        distance=_norm(_sub(cur,prev))
-        increment=distance==0 ? 0.0 : (distance/hprev)/2+(distance/h)/2
-        L += increment; prev = cur;hprev=h
+        cur = s(u,v)
+        L += _metric_curve_increment(sf,prev,cur,entity); prev = cur
         isfinite(L) || throw(ArgumentError("mesh_parametric_face: boundary metric length overflowed Float64"))
     end
     return L

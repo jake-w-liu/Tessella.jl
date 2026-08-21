@@ -912,7 +912,19 @@ struct GeoFieldSpec
     tag::Int
     kind::String
     options::Dict{String,String}
+    option_order::Vector{String}
+    creation_mesh_size_from_curvature::Int
 end
+
+# Programmatic specifications cannot recover source assignment order from a
+# plain dictionary. Use a stable lexical order there; the parser-populated
+# parser-populated five-argument form below preserves exact statement order for
+# Gmsh aliases and construction-time globals.
+GeoFieldSpec(tag::Integer,kind::AbstractString,options::Dict{String,String})=
+    GeoFieldSpec(Int(tag),String(kind),options,sort!(collect(keys(options))),0)
+GeoFieldSpec(tag::Integer,kind::AbstractString,options::Dict{String,String},
+             option_order::Vector{String})=
+    GeoFieldSpec(Int(tag),String(kind),options,option_order,0)
 
 """
     GeoParams
@@ -921,7 +933,14 @@ What `read_geo_params` can extract from a `.geo` without a geometry kernel:
 `mesh_size_min/max/factor`, `random_seed`, `physical_groups` (a `(dim, tag) =>
 name` map, dim ∈ {0:point,1:curve,2:surface,3:volume}), raw `fields`, and the
 `background_field` tag. Missing numeric mesh options are represented by `NaN`;
-no background field is tag `0`.
+no background field is tag `0`. `boundary_layer_fields` preserves the distinct,
+deduplicated `BoundaryLayer Field = ...` declarations; these are mesher controls,
+not background scalar fields. `geometry_tolerance` stores `Geometry.Tolerance`
+when it is a literal, or `NaN` when absent.
+`mesh_boundary_layer_fan_elements` stores the final
+`Mesh.BoundaryLayerFanElements` value (default 5). Automatic-field declarations
+also snapshot `Mesh.MeshSizeFromCurvature` in their `GeoFieldSpec`, since Gmsh
+uses that global at field construction time.
 """
 struct GeoParams
     mesh_size_min::Float64
@@ -931,15 +950,100 @@ struct GeoParams
     physical_groups::Dict{Tuple{Int,Int},String}
     fields::Dict{Int,GeoFieldSpec}
     background_field::Int
+    boundary_layer_fields::Vector{Int}
+    geometry_tolerance::Float64
+    mesh_boundary_layer_fan_elements::Int
 end
+
+# Preserve the former full positional constructor, adding the new global with
+# its Gmsh default.
+GeoParams(mesh_size_min::Real,mesh_size_max::Real,mesh_size_factor::Real,
+          random_seed::Integer,physical_groups::Dict{Tuple{Int,Int},String},
+          fields::Dict{Int,GeoFieldSpec},background_field::Integer,
+          boundary_layer_fields::Vector{Int},geometry_tolerance::Real)=
+    GeoParams(Float64(mesh_size_min),Float64(mesh_size_max),Float64(mesh_size_factor),
+              Int(random_seed),physical_groups,fields,Int(background_field),
+              boundary_layer_fields,Float64(geometry_tolerance),5)
+
+# Preserve the eight-argument constructor introduced with boundary-layer
+# declarations.
+GeoParams(mesh_size_min::Real,mesh_size_max::Real,mesh_size_factor::Real,
+          random_seed::Integer,physical_groups::Dict{Tuple{Int,Int},String},
+          fields::Dict{Int,GeoFieldSpec},background_field::Integer,
+          boundary_layer_fields::Vector{Int})=
+    GeoParams(Float64(mesh_size_min),Float64(mesh_size_max),Float64(mesh_size_factor),
+              Int(random_seed),physical_groups,fields,Int(background_field),
+              boundary_layer_fields,NaN,5)
+
+# Preserve the seven-argument field-aware constructor used before boundary-layer
+# declarations became part of the parsed model.
+GeoParams(mesh_size_min::Real,mesh_size_max::Real,mesh_size_factor::Real,
+          random_seed::Integer,physical_groups::Dict{Tuple{Int,Int},String},
+          fields::Dict{Int,GeoFieldSpec},background_field::Integer)=
+    GeoParams(Float64(mesh_size_min),Float64(mesh_size_max),Float64(mesh_size_factor),
+              Int(random_seed),physical_groups,fields,Int(background_field),Int[],NaN,5)
 
 # Preserve the original public positional constructor.
 GeoParams(mesh_size_min::Real, mesh_size_max::Real, random_seed::Integer,
           physical_groups::Dict{Tuple{Int,Int},String}) =
     GeoParams(Float64(mesh_size_min), Float64(mesh_size_max), 1.0, Int(random_seed),
-              physical_groups, Dict{Int,GeoFieldSpec}(), 0)
+              physical_groups, Dict{Int,GeoFieldSpec}(), 0, Int[],NaN,5)
 
 const _PHYS_DIM = Dict("Point"=>0, "Curve"=>1, "Line"=>1, "Surface"=>2, "Volume"=>3)
+
+const _MAX_GEO_STATEMENT_BYTES=1_000_000
+
+function _scan_geo_statements(consume,path::AbstractString)
+    buffer=IOBuffer();quote_char='\0';block_comment=false
+    for raw in eachline(path)
+        i=firstindex(raw);lastindex_raw=lastindex(raw)
+        while i<=lastindex_raw
+            c=raw[i];j=nextind(raw,i)
+            nextc=j<=lastindex_raw ? raw[j] : '\0'
+            if block_comment
+                if c=='*' && nextc=='/'
+                    block_comment=false;i=nextind(raw,j);continue
+                end
+                i=j;continue
+            elseif quote_char!='\0'
+                write(buffer,c)
+                c==quote_char && (quote_char='\0')
+                i=j;continue
+            elseif c=='/' && nextc=='/'
+                break
+            elseif c=='/' && nextc=='*'
+                block_comment=true;i=nextind(raw,j);continue
+            elseif c=='"' || c=='\''
+                quote_char=c;write(buffer,c)
+            elseif c==';'
+                write(buffer,c)
+                statement=strip(String(take!(buffer)))
+                isempty(statement) || consume(statement)
+            else
+                write(buffer,c)
+            end
+            position(buffer)<=_MAX_GEO_STATEMENT_BYTES || throw(ArgumentError(
+                "read_geo_params: statement exceeds $_MAX_GEO_STATEMENT_BYTES bytes"))
+            i=j
+        end
+        if quote_char!='\0'
+            write(buffer,'\n')
+        elseif position(buffer)>0
+            write(buffer,' ')
+        end
+    end
+    quote_char=='\0' || throw(ArgumentError("read_geo_params: unterminated quoted string"))
+    block_comment && throw(ArgumentError("read_geo_params: unterminated block comment"))
+    tail=strip(String(take!(buffer)))
+    if !isempty(tail) && (occursin(r"Field\s*\[",tail) ||
+                           occursin(r"(?:Background|BoundaryLayer)\s+Field",tail) ||
+                           occursin(r"Mesh\.(?:MeshSize|RandomSeed)",tail) ||
+                           occursin("Geometry.Tolerance",tail) ||
+                           occursin(r"Physical\s+(?:Point|Curve|Line|Surface|Volume)",tail))
+        throw(ArgumentError("read_geo_params: unterminated relevant statement (missing semicolon)"))
+    end
+    return nothing
+end
 
 """
     read_geo_params(path) -> GeoParams
@@ -949,21 +1053,55 @@ declarations, and `Field[...]`/`Background Field` statements. Deliberately does
 **not** evaluate expressions, loops, CSG, or Boolean geometry; field option right-hand
 sides are retained as source strings for later strict interpretation.
 """
+function _geo_literal_field_tags(raw::AbstractString,caller::AbstractString)
+    value=strip(raw)
+    if startswith(value,"{") || endswith(value,"}")
+        (startswith(value,"{") && endswith(value,"}")) || throw(ArgumentError(
+            "$caller: malformed field-tag list $raw"))
+        value=strip(value[2:end-1])
+    end
+    isempty(value) && throw(ArgumentError("$caller: field-tag list must not be empty"))
+    tags=Int[]
+    for token in split(value,',')
+        item=strip(token)
+        occursin(r"^[0-9]+$",item) || throw(ArgumentError(
+            "$caller: field tags must be positive integer literals (got $item)"))
+        tag=tryparse(Int,item)
+        tag!==nothing && tag>0 || throw(ArgumentError(
+            "$caller: field tag $item is outside the positive Int range"))
+        tag in tags || push!(tags,tag)
+    end
+    return tags
+end
+
 function read_geo_params(path::AbstractString)
     smin = NaN; smax = NaN; sfactor = 1.0; seed = 0; background = 0
+    geometry_tolerance=NaN
+    mesh_size_from_curvature=0;boundary_layer_fan_elements=5
+    boundary_layers=Int[]
     groups = Dict{Tuple{Int,Int},String}()
     kinds = Dict{Int,String}()
     options = Dict{Int,Dict{String,String}}()
-    for raw in eachline(path)
-        line = strip(first(split(raw, "//"; limit=2)))
-        (isempty(line) || startswith(line, "//")) && continue
+    option_order=Dict{Int,Vector{String}}()
+    creation_curvature=Dict{Int,Int}()
+    _scan_geo_statements(path) do line
         _scan_opt!(line, "Mesh.MeshSizeMin", v -> (smin = v))
         _scan_opt!(line, "Mesh.MeshSizeMax", v -> (smax = v))
         _scan_opt!(line, "Mesh.MeshSizeFactor", v -> (sfactor = v))
-        if occursin("Mesh.RandomSeed", line)
-            m = match(r"Mesh\.RandomSeed\s*=\s*([0-9]+)", line)
-            m !== nothing && (seed = parse(Int, m.captures[1]))
-        end
+        _scan_int_opt!(line,"Mesh.RandomSeed",v -> (seed=v))
+        _scan_opt!(line,"Geometry.Tolerance",v -> (geometry_tolerance=v))
+        _scan_opt!(line,"Mesh.MeshSizeFromCurvature",v ->
+            (mesh_size_from_curvature=_gmsh_int_option(
+                v,"Mesh.MeshSizeFromCurvature")))
+        _scan_opt!(line,"Mesh.MinimumElementsPerTwoPi",v ->
+            (mesh_size_from_curvature=_gmsh_int_option(
+                v,"Mesh.MinimumElementsPerTwoPi")))
+        _scan_opt!(line,"Mesh.BoundaryLayerFanElements",v ->
+            (boundary_layer_fan_elements=_gmsh_int_option(
+                v,"Mesh.BoundaryLayerFanElements")))
+        _scan_opt!(line,"Mesh.BoundaryLayerFanPoints",v ->
+            (boundary_layer_fan_elements=_gmsh_int_option(
+                v,"Mesh.BoundaryLayerFanPoints")))
         # Physical Volume("air", 1) = {...};  /  Physical Surface("s", 3) = {...};
         for pm in eachmatch(r"Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*([0-9]+)\s*\)", line)
             dim = _PHYS_DIM[pm.captures[1]]
@@ -977,18 +1115,28 @@ function read_geo_params(path::AbstractString)
             haskey(kinds,tag) &&
                 throw(ArgumentError("read_geo_params: duplicate declaration for Field[$tag]"))
             kinds[tag]=kind
+            creation_curvature[tag]=mesh_size_from_curvature
         end
-        for om in eachmatch(r"Field\s*\[\s*([0-9]+)\s*\]\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*([^;]+)\s*;", line)
+        for om in eachmatch(r"Field\s*\[\s*([0-9]+)\s*\]\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*)\s*;\s*$", line)
             tag=parse(Int,om.captures[1]); name=om.captures[2]; value=strip(om.captures[3])
             tag>0 || throw(ArgumentError("read_geo_params: field tags must be positive"))
             isempty(value) &&
                 throw(ArgumentError("read_geo_params: Field[$tag].$name has an empty value"))
             get!(() -> Dict{String,String}(),options,tag)[name]=value
+            push!(get!(() -> String[],option_order,tag),name)
         end
-        for bm in eachmatch(r"Background\s+Field\s*=\s*([0-9]+)\s*;",line)
-            background=parse(Int,bm.captures[1])
-            background>0 ||
-                throw(ArgumentError("read_geo_params: Background Field tag must be positive"))
+        for bm in eachmatch(r"Background\s+Field\s*=\s*([^;]+)\s*;",line)
+            tags=_geo_literal_field_tags(bm.captures[1],
+                                         "read_geo_params: Background Field")
+            length(tags)==1 || throw(ArgumentError(
+                "read_geo_params: Background Field requires exactly one field tag"))
+            background=tags[1]
+        end
+        for bm in eachmatch(r"BoundaryLayer\s+Field\s*=\s*([^;]+)\s*;",line)
+            for tag in _geo_literal_field_tags(bm.captures[1],
+                                                "read_geo_params: BoundaryLayer Field")
+                tag in boundary_layers || push!(boundary_layers,tag)
+            end
         end
     end
     undeclared=sort!(collect(setdiff(keys(options),keys(kinds))))
@@ -996,20 +1144,57 @@ function read_geo_params(path::AbstractString)
         "read_geo_params: options provided for undeclared field tag(s) $(join(undeclared, ", "))"))
     background==0 || haskey(kinds,background) || throw(ArgumentError(
         "read_geo_params: Background Field $background is not declared"))
+    missing_boundary=filter(tag->!haskey(kinds,tag),boundary_layers)
+    isempty(missing_boundary) || throw(ArgumentError(
+        "read_geo_params: BoundaryLayer Field tag(s) $(join(missing_boundary, ", ")) are not declared"))
     fields=Dict{Int,GeoFieldSpec}()
     for (tag,kind) in kinds
-        fields[tag]=GeoFieldSpec(tag,kind,get(options,tag,Dict{String,String}()))
+        fields[tag]=GeoFieldSpec(tag,kind,get(options,tag,Dict{String,String}()),
+                                 get(option_order,tag,String[]),
+                                 get(creation_curvature,tag,0))
     end
-    return GeoParams(smin, smax, sfactor, seed, groups, fields, background)
+    return GeoParams(smin,smax,sfactor,seed,groups,fields,background,boundary_layers,
+                     geometry_tolerance,boundary_layer_fan_elements)
+end
+
+function _gmsh_int_option(value::Float64,key::AbstractString)
+    return try
+        trunc(Int,value)
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa InexactError || err isa OverflowError) || rethrow()
+        throw(ArgumentError("read_geo_params: $key is outside the platform Int range"))
+    end
 end
 
 function _scan_opt!(line, key, setter)
-    occursin(key, line) || return false
-    m = match(Regex(replace(key, "."=>"\\.") * raw"\s*=\s*([-+0-9.eE]+)"), line)
+    escaped=replace(key, "."=>"\\.")
+    occursin(Regex(raw"\b" * escaped * raw"\b"),line) || return false
+    m = match(Regex(raw"\b" * escaped *
+                    raw"\s*=\s*([^;]*?)\s*;\s*$"),line)
     m !== nothing || throw(ArgumentError("read_geo_params: $key must be a numeric literal"))
-    value=tryparse(Float64,m.captures[1])
+    literal=strip(m.captures[1])
+    occursin(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$",literal) ||
+        throw(ArgumentError("read_geo_params: $key must be a numeric literal"))
+    value=tryparse(Float64,literal)
     (value!==nothing && isfinite(value)) ||
         throw(ArgumentError("read_geo_params: $key must be finite"))
+    setter(value)
+    return true
+end
+
+function _scan_int_opt!(line,key,setter)
+    escaped=replace(key,"."=>"\\.")
+    occursin(Regex(raw"\b" * escaped * raw"\b"),line) || return false
+    m=match(Regex(raw"\b" * escaped *
+                  raw"\s*=\s*([^;]*?)\s*;\s*$"),line)
+    m!==nothing || throw(ArgumentError(
+        "read_geo_params: $key must be a non-negative integer literal"))
+    literal=strip(m.captures[1])
+    occursin(r"^[0-9]+$",literal) || throw(ArgumentError(
+        "read_geo_params: $key must be a non-negative integer literal"))
+    value=tryparse(Int,literal)
+    value!==nothing || throw(ArgumentError("read_geo_params: $key is outside the Int range"))
     setter(value)
     return true
 end

@@ -9,8 +9,8 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The current bounds-checked suite passes 152,789/152,789 assertions; the
-live implementation and verification record is [`STATUS.md`](STATUS.md).
+complete**. The current bounds-checked package gate passes 161,183/161,183
+assertions; the live implementation and verification record is [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
 
 ```julia
@@ -36,21 +36,32 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   and parametric surface meshing;
 - Float64 and exact-coordinate 3-D Delaunay kernels, constrained boundary recovery,
   multi-region partitions, and explicit recovery blockers;
-- uniform and field-driven sizing for boxes, cylinders, extrusions, and arbitrary
-  closed faceted surfaces, including Gmsh-compatible `Distance`, `Threshold`, `Box`,
-  `Ball`, finite `Cylinder`, `Frustum`, `Min`, `Max`, and final size-bound semantics;
-  discrete distance queries use a deterministic AABB hierarchy, and
-  lower-dimensional cells and tags are preserved through volume refinement;
+- uniform and field-driven 1-D, 2-D, surface, and 3-D sizing, including geometric and
+  composite (`Distance`, `Threshold`, `Box`, `Ball`, finite `Cylinder`, `Frustum`,
+  `Min`, `Max`, bounds), analytic/derivative (`MathEval`, `Gradient`, `Laplacian`,
+  `Mean`, `Curvature`, `MaxEigenHessian`), coordinate/storage (`LonLat`, `Parametric`,
+  `Structured`), entity-aware (`Restrict`, `Constant`), sampled/context (`Extend`,
+  `Octree`, scalar-point/first-order-simplex `PostView`), scalar `BoundaryLayer`,
+  discrete `AutomaticMeshSizeField` analogue, and `ExternalProcess` fields;
+- anisotropic metric primitives and `MathEvalAniso`, `MinAniso`, `IntersectAniso`, and
+  `AttractorAnisoCurve`; discrete distance queries use a deterministic AABB hierarchy,
+  and lower-dimensional cells and tags are preserved through volume refinement;
 - quality reporting, flips, Laplacian/ODT/targeted sliver smoothing, healing
   diagnostics, native primitives, analytical surfaces, imprints, and mesh Boolean CSG;
-- globally certified quadratic tetrahedra, plus strict and atomic MSH v2.2/v4.1 and
-  STL I/O.
+- globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
+  v2.2/v4.1 and STL I/O;
+- a 125-type fixed-node Gmsh element catalog, mixed blocks and entity/classification
+  metadata, structural validation/CRC, and ASCII MSH v2.2/v4.1 mixed-element I/O.
 
-Mixed element families, the remaining Gmsh field types and algorithms, complete CAD/
-BREP and scripting support, broad file/API compatibility, GUI, and post-processing are
-still pending parity work. See [`PLAN.md`](PLAN.md) rather than treating the completed
-Stage 0–6 baseline as Gmsh completeness. ASCENT remains Tessella's primary solver
-consumer.
+P1 and P2 remain **in progress**. Current non-claims include boundary-layer element
+construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
+full `.geo`/CAD-model execution, mixed-element generation/recombination,
+simplex-kernel integration, variable-connectivity/internal types, curved-cell Jacobian
+certification, binary MSH, and ancillary-section preservation. Some registered fixed
+tags require Tessella-only output because Gmsh 4.15.2 cannot re-import them. Complete
+CAD/BREP, broad file/API compatibility, GUI, and post-processing remain pending. See
+[`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
+completeness. ASCENT remains Tessella's primary solver consumer.
 
 ## Verification
 
@@ -59,8 +70,10 @@ julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
 julia --project --check-bounds=yes validation/run_all.jl
 ```
 
-The first command runs the full CRC suite. The second compares analytic volumes and
-quality with the installed gmsh and reproduces the enclosure/coax failure. See
+The first command runs the full package/CRC suite. The second compares analytic
+volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
+Gmsh 4.15.2 size-field differential as a mandatory bounds-checked child. Missing or
+wrong-version Gmsh and differential failures make the aggregate command fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
 rules.
 

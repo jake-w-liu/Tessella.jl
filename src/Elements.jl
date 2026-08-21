@@ -1,0 +1,2365 @@
+"""
+    Elements
+
+Gmsh 4.15.2 fixed-node element families and orders in memory, plus a
+mixed-element mesh container with MSH v2.2/v4.1 round-trip. Simplex
+[`Mesh`](@ref) remains the certified volume kernel. Variable-connectivity and
+internal element tags are classified separately and are rejected by the public
+fixed-node API.
+"""
+module Elements
+
+using ..MeshTypes: Mesh, MeshDiagnostic, nnodes, nsegs, ntris, ntets
+import ..MeshTypes: validate
+using SHA
+using Printf: @printf, @sprintf
+
+export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order, msh_family
+export ElementBlock, MixedEntity, MixedEntityData, MixedMesh
+export mixed_crc, simplex_to_mixed, mixed_to_simplex
+export write_mixed_msh, read_mixed_msh
+export lagrange_nodes, add_block!, validate
+
+"""One Gmsh `.msh` element type."""
+struct ElementSpec
+    msh::Int
+    family::Symbol
+    dim::Int
+    order::Int
+    nnodes::Int
+    serendipity::Bool
+end
+
+# Authority: Gmsh 4.15.2 `GmshDefines.h`, `ElementType.cpp`, and
+# `pointsGenerators.cpp`. Only element types with a fixed connectivity and a
+# well-defined local-node layout are admitted here.
+"""Fixed-node element specifications keyed by Gmsh 4.15.2 numeric type."""
+const MSH_CATALOG = Dict{Int,ElementSpec}()
+
+function _expected_num_nodes(family::Symbol, order::Int, serendipity::Bool)
+    order >= 0 || return -1
+    family === :pnt && return order == 0 && !serendipity ? 1 : -1
+    family === :lin && return !serendipity ? order + 1 : -1
+    family === :tri && return serendipity ? (order == 0 ? 1 : 3order) :
+        (order + 1) * (order + 2) ÷ 2
+    family === :qua && return serendipity ? (order == 0 ? 1 : 4order) :
+        (order + 1)^2
+    family === :tet && return serendipity ? (order == 0 ? 1 : 4 + 6(order - 1)) :
+        (order + 1) * (order + 2) * (order + 3) ÷ 6
+    family === :hex && return serendipity ? (order == 0 ? 1 : 8 + 12(order - 1)) :
+        (order + 1)^3
+    family === :pri && return serendipity ? (order == 0 ? 1 : 6 + 9(order - 1)) :
+        (order + 1)^2 * (order + 2) ÷ 2
+    family === :pyr && return serendipity ? (order == 0 ? 1 : 5 + 8(order - 1)) :
+        (order + 1) * (order + 2) * (2order + 3) ÷ 6
+    family === :trih && return order == 1 && !serendipity ? 4 : -1
+    return -1
+end
+
+function _reg(s::ElementSpec)
+    1 <= s.msh <= 140 || throw(ErrorException("invalid MSH type $(s.msh)"))
+    0 <= s.dim <= 3 || throw(ErrorException("invalid dimension $(s.dim) for MSH type $(s.msh)"))
+    expected = _expected_num_nodes(s.family, s.order, s.serendipity)
+    expected == s.nnodes || throw(ErrorException(
+        "MSH type $(s.msh) has $(s.nnodes) nodes, expected $expected for " *
+        "$(s.family) P$(s.order)"))
+    haskey(MSH_CATALOG, s.msh) && throw(ErrorException("duplicate MSH type $(s.msh)"))
+    MSH_CATALOG[s.msh] = s
+    return s
+end
+for s in (
+    ElementSpec(15,:pnt,0,0,1,false),
+    ElementSpec(84,:lin,1,0,1,false),
+    ElementSpec(1,:lin,1,1,2,false), ElementSpec(8,:lin,1,2,3,false),
+    ElementSpec(26,:lin,1,3,4,false), ElementSpec(27,:lin,1,4,5,false),
+    ElementSpec(28,:lin,1,5,6,false), ElementSpec(62,:lin,1,6,7,false),
+    ElementSpec(63,:lin,1,7,8,false), ElementSpec(64,:lin,1,8,9,false),
+    ElementSpec(65,:lin,1,9,10,false), ElementSpec(66,:lin,1,10,11,false),
+    ElementSpec(85,:tri,2,0,1,false),
+    ElementSpec(2,:tri,2,1,3,false), ElementSpec(9,:tri,2,2,6,false),
+    ElementSpec(21,:tri,2,3,10,false), ElementSpec(23,:tri,2,4,15,false),
+    ElementSpec(25,:tri,2,5,21,false), ElementSpec(42,:tri,2,6,28,false),
+    ElementSpec(43,:tri,2,7,36,false), ElementSpec(44,:tri,2,8,45,false),
+    ElementSpec(45,:tri,2,9,55,false), ElementSpec(46,:tri,2,10,66,false),
+    ElementSpec(20,:tri,2,3,9,true), ElementSpec(22,:tri,2,4,12,true),
+    ElementSpec(24,:tri,2,5,15,true), ElementSpec(52,:tri,2,6,18,true),
+    ElementSpec(53,:tri,2,7,21,true), ElementSpec(54,:tri,2,8,24,true),
+    ElementSpec(55,:tri,2,9,27,true), ElementSpec(56,:tri,2,10,30,true),
+    ElementSpec(86,:qua,2,0,1,false),
+    ElementSpec(3,:qua,2,1,4,false), ElementSpec(10,:qua,2,2,9,false),
+    ElementSpec(36,:qua,2,3,16,false), ElementSpec(37,:qua,2,4,25,false),
+    ElementSpec(38,:qua,2,5,36,false), ElementSpec(47,:qua,2,6,49,false),
+    ElementSpec(48,:qua,2,7,64,false), ElementSpec(49,:qua,2,8,81,false),
+    ElementSpec(50,:qua,2,9,100,false), ElementSpec(51,:qua,2,10,121,false),
+    ElementSpec(16,:qua,2,2,8,true), ElementSpec(39,:qua,2,3,12,true),
+    ElementSpec(40,:qua,2,4,16,true), ElementSpec(41,:qua,2,5,20,true),
+    ElementSpec(57,:qua,2,6,24,true), ElementSpec(58,:qua,2,7,28,true),
+    ElementSpec(59,:qua,2,8,32,true), ElementSpec(60,:qua,2,9,36,true),
+    ElementSpec(61,:qua,2,10,40,true),
+    ElementSpec(87,:tet,3,0,1,false),
+    ElementSpec(4,:tet,3,1,4,false), ElementSpec(11,:tet,3,2,10,false),
+    ElementSpec(29,:tet,3,3,20,false), ElementSpec(30,:tet,3,4,35,false),
+    ElementSpec(31,:tet,3,5,56,false), ElementSpec(71,:tet,3,6,84,false),
+    ElementSpec(72,:tet,3,7,120,false), ElementSpec(73,:tet,3,8,165,false),
+    ElementSpec(74,:tet,3,9,220,false), ElementSpec(75,:tet,3,10,286,false),
+    ElementSpec(32,:tet,3,4,22,true), ElementSpec(33,:tet,3,5,28,true),
+    ElementSpec(79,:tet,3,6,34,true), ElementSpec(80,:tet,3,7,40,true),
+    ElementSpec(81,:tet,3,8,46,true), ElementSpec(82,:tet,3,9,52,true),
+    ElementSpec(83,:tet,3,10,58,true), ElementSpec(137,:tet,3,3,16,true),
+    ElementSpec(88,:hex,3,0,1,false),
+    ElementSpec(5,:hex,3,1,8,false), ElementSpec(12,:hex,3,2,27,false),
+    ElementSpec(92,:hex,3,3,64,false), ElementSpec(93,:hex,3,4,125,false),
+    ElementSpec(94,:hex,3,5,216,false), ElementSpec(95,:hex,3,6,343,false),
+    ElementSpec(96,:hex,3,7,512,false), ElementSpec(97,:hex,3,8,729,false),
+    ElementSpec(98,:hex,3,9,1000,false),
+    ElementSpec(17,:hex,3,2,20,true), ElementSpec(99,:hex,3,3,32,true),
+    ElementSpec(100,:hex,3,4,44,true), ElementSpec(101,:hex,3,5,56,true),
+    ElementSpec(102,:hex,3,6,68,true), ElementSpec(103,:hex,3,7,80,true),
+    ElementSpec(104,:hex,3,8,92,true), ElementSpec(105,:hex,3,9,104,true),
+    ElementSpec(89,:pri,3,0,1,false),
+    ElementSpec(6,:pri,3,1,6,false), ElementSpec(13,:pri,3,2,18,false),
+    ElementSpec(18,:pri,3,2,15,true),
+    ElementSpec(90,:pri,3,3,40,false), ElementSpec(91,:pri,3,4,75,false),
+    ElementSpec(106,:pri,3,5,126,false), ElementSpec(107,:pri,3,6,196,false),
+    ElementSpec(108,:pri,3,7,288,false), ElementSpec(109,:pri,3,8,405,false),
+    ElementSpec(110,:pri,3,9,550,false),
+    ElementSpec(111,:pri,3,3,24,true), ElementSpec(112,:pri,3,4,33,true),
+    ElementSpec(113,:pri,3,5,42,true), ElementSpec(114,:pri,3,6,51,true),
+    ElementSpec(115,:pri,3,7,60,true), ElementSpec(116,:pri,3,8,69,true),
+    ElementSpec(117,:pri,3,9,78,true),
+    ElementSpec(132,:pyr,3,0,1,false),
+    ElementSpec(7,:pyr,3,1,5,false), ElementSpec(14,:pyr,3,2,14,false),
+    ElementSpec(19,:pyr,3,2,13,true),
+    ElementSpec(118,:pyr,3,3,30,false), ElementSpec(119,:pyr,3,4,55,false),
+    ElementSpec(120,:pyr,3,5,91,false), ElementSpec(121,:pyr,3,6,140,false),
+    ElementSpec(122,:pyr,3,7,204,false), ElementSpec(123,:pyr,3,8,285,false),
+    ElementSpec(124,:pyr,3,9,385,false),
+    ElementSpec(125,:pyr,3,3,21,true), ElementSpec(126,:pyr,3,4,29,true),
+    ElementSpec(127,:pyr,3,5,37,true), ElementSpec(128,:pyr,3,6,45,true),
+    ElementSpec(129,:pyr,3,7,53,true), ElementSpec(130,:pyr,3,8,61,true),
+    ElementSpec(131,:pyr,3,9,69,true),
+    ElementSpec(140,:trih,3,1,4,false),
+)
+    _reg(s)
+end
+
+# These are real Gmsh numeric tags, but not ordinary fixed-connectivity nodal
+# elements: polygons/polyhedra have variable connectivity; border, child and
+# XFEM tags carry extra ownership/cut data; MINI tags are internal basis tags.
+# Keeping the classification here makes rejection deliberate instead of
+# conflating these tags with unknown/reserved IDs.
+const MSH_SPECIAL_TYPES = Dict{Int,NamedTuple}(
+    34 => (family=:polygon, dim=2, order=1, nnodes=nothing, kind=:variable),
+    35 => (family=:polyhedron, dim=3, order=1, nnodes=nothing, kind=:variable),
+    67 => (family=:line_border, dim=1, order=1, nnodes=2, kind=:internal),
+    68 => (family=:triangle_border, dim=2, order=1, nnodes=3, kind=:internal),
+    69 => (family=:polygon_border, dim=2, order=1, nnodes=nothing, kind=:variable),
+    70 => (family=:line_child, dim=1, order=1, nnodes=2, kind=:internal),
+    133 => (family=:point_xfem, dim=0, order=1, nnodes=1, kind=:internal),
+    134 => (family=:line_xfem, dim=1, order=1, nnodes=2, kind=:internal),
+    135 => (family=:triangle_xfem, dim=2, order=1, nnodes=3, kind=:internal),
+    136 => (family=:tetrahedron_xfem, dim=3, order=1, nnodes=4, kind=:internal),
+    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis),
+    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis),
+)
+
+"""Return the fixed-node [`ElementSpec`](@ref) for a Gmsh numeric type."""
+function msh_spec(msh::Integer)
+    tag = try
+        Int(msh)
+    catch err
+        err isa InexactError || rethrow()
+        throw(ArgumentError("Elements: Gmsh element type is outside Int bounds"))
+    end
+    s=get(MSH_CATALOG, tag, nothing)
+    if s === nothing
+        haskey(MSH_SPECIAL_TYPES, tag) && throw(ArgumentError(
+            "Elements: Gmsh element type $tag is special/variable and is not a supported fixed-node element"))
+        throw(ArgumentError("Elements: unknown Gmsh element type $msh"))
+    end
+    return s
+end
+"""Return the fixed number of local nodes for a Gmsh numeric type."""
+msh_num_nodes(msh::Integer)=msh_spec(msh).nnodes
+"""Return the topological dimension for a Gmsh numeric type."""
+msh_dimension(msh::Integer)=msh_spec(msh).dim
+"""Return the polynomial order for a Gmsh numeric type."""
+msh_order(msh::Integer)=msh_spec(msh).order
+"""Return the element-family symbol for a Gmsh numeric type."""
+msh_family(msh::Integer)=msh_spec(msh).family
+
+"""One homogeneous block: `nodes` is `nnodes × ncells` (1-based indices)."""
+struct ElementBlock
+    msh::Int
+    nodes::Matrix{Int32}
+    tags::Vector{Int32}
+    function ElementBlock(msh::Integer, nodes::AbstractMatrix{<:Integer},
+                          tags::AbstractVector{<:Integer}=zeros(Int32,size(nodes,2)))
+        spec=msh_spec(msh)
+        size(nodes,1)==spec.nnodes || throw(ArgumentError(
+            "ElementBlock: type $msh expects $(spec.nnodes) nodes per cell, got $(size(nodes,1))"))
+        length(tags)==size(nodes,2) || throw(ArgumentError("ElementBlock: tag length mismatch"))
+        size(nodes,2) <= typemax(Int32) || throw(ArgumentError(
+            "ElementBlock: cell count exceeds the Int32 MSH limit"))
+        N = try
+            Matrix{Int32}(nodes)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("ElementBlock: node indices must fit Int32: " *
+                                sprint(showerror, err)))
+        end
+        T = try
+            Vector{Int32}(tags)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("ElementBlock: physical tags must fit Int32: " *
+                                sprint(showerror, err)))
+        end
+        @inbounds for j in axes(N,2), i in axes(N,1)
+            N[i,j]>=1 || throw(ArgumentError("ElementBlock: node index must be positive"))
+        end
+        @inbounds for t in T
+            t>=0 || throw(ArgumentError("ElementBlock: negative physical tag"))
+        end
+        return new(Int(msh),N,T)
+    end
+end
+
+function _mixed_positive_int32(value,context::AbstractString)
+    value isa Integer || throw(ArgumentError("$context must be an integer"))
+    converted=try Int(value) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$context is outside Int bounds"))
+    end
+    1<=converted<=typemax(Int32) || throw(ArgumentError(
+        "$context must be positive and fit Int32"))
+    return Int32(converted)
+end
+
+function _mixed_int32_vector(values,context::AbstractString;
+                             positive=false,nonzero=false,absolute_fits=false,
+                             unique_values=false)
+    (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
+        "$context values must be a vector or tuple"))
+    out=Int32[]; seen=Set{Int32}()
+    for value in values
+        value isa Integer || throw(ArgumentError("$context must be an integer"))
+        converted=try Int(value) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$context is outside Int bounds"))
+        end
+        if absolute_fits
+            -typemax(Int32)<=converted<=typemax(Int32) || throw(ArgumentError(
+                "$context magnitude must fit Int32"))
+        else
+            typemin(Int32)<=converted<=typemax(Int32) || throw(ArgumentError(
+                "$context must fit Int32"))
+        end
+        positive && converted<=0 && throw(ArgumentError("$context must be positive"))
+        nonzero && converted==0 && throw(ArgumentError("$context cannot be zero"))
+        item=Int32(converted)
+        unique_values && item in seen && throw(ArgumentError(
+            "$context values must be unique"))
+        push!(seen,item); push!(out,item)
+    end
+    return out
+end
+
+function _mixed_positive_tag_vector(values,context::AbstractString;unique_values=false)
+    (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
+        "$context values must be a vector or tuple"))
+    out=UInt64[]; seen=Set{UInt64}()
+    for value in values
+        value isa Integer || throw(ArgumentError("$context must be an integer"))
+        value>0 || throw(ArgumentError("$context must be positive"))
+        converted=try UInt64(value) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$context must fit an unsigned 64-bit MSH tag"))
+        end
+        unique_values && converted in seen && throw(ArgumentError(
+            "$context values must be unique"))
+        push!(seen,converted); push!(out,converted)
+    end
+    return out
+end
+
+"""One MSH v4 geometric entity, including all physical memberships and signed boundary tags."""
+struct MixedEntity
+    dim::Int
+    tag::Int32
+    bbox::NTuple{6,Float64}
+    physical_tags::Vector{Int32}
+    boundaries::Vector{Int32}
+    function MixedEntity(dim::Integer,tag::Integer,bounds;
+                         physical_tags=Int32[],boundaries=Int32[])
+        d=try Int(dim) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedEntity: dimension is outside Int bounds"))
+        end
+        0<=d<=3 || throw(ArgumentError("MixedEntity: dimension $d is outside 0:3"))
+        t=_mixed_positive_int32(tag,"MixedEntity: entity tag")
+        (bounds isa Tuple || bounds isa AbstractVector) || throw(ArgumentError(
+            "MixedEntity: bounds must be a tuple or vector"))
+        raw=collect(bounds)
+        if d==0 && length(raw)==3
+            raw=vcat(raw,raw)
+        end
+        length(raw)==6 || throw(ArgumentError(
+            "MixedEntity: bounds must contain six values (or three for a point)"))
+        converted=ntuple(6) do i
+            value=try Float64(raw[i]) catch err
+                err isa InterruptException && rethrow()
+                throw(ArgumentError("MixedEntity: bounds must be Float64-representable"))
+            end
+            isfinite(value) || throw(ArgumentError("MixedEntity: non-finite bound"))
+            value
+        end
+        all(converted[i]<=converted[i+3] for i in 1:3) || throw(ArgumentError(
+            "MixedEntity: reversed bounding box"))
+        if d==0
+            all(isequal(converted[i],converted[i+3]) for i in 1:3) || throw(ArgumentError(
+                "MixedEntity: point bounds must be degenerate"))
+        end
+        physical=_mixed_int32_vector(physical_tags,"MixedEntity: physical tag";
+                                     positive=true)
+        boundary=_mixed_int32_vector(boundaries,"MixedEntity: boundary tag";
+                                     nonzero=true,absolute_fits=true)
+        d==0 && !isempty(boundary) && throw(ArgumentError(
+            "MixedEntity: point entities cannot have boundaries"))
+        return new(d,t,converted,physical,boundary)
+    end
+end
+
+"""
+    MixedEntityData(entities; ...)
+
+Optional lossless MSH v4 metadata. Node arrays align with mesh coordinates;
+`block_entities` and `external_element_tags` align with every block and cell.
+`nothing` in `node_parametric` denotes a non-parametric node block, while an
+empty vector preserves a parametric dimension-zero block. External node and
+element tags use the format's full unsigned 64-bit `size_t` range.
+"""
+struct MixedEntityData
+    entities::Dict{Tuple{Int,Int},MixedEntity}
+    node_entities::Vector{Tuple{Int,Int32}}
+    node_parametric::Vector{Union{Nothing,Vector{Float64}}}
+    external_node_tags::Vector{UInt64}
+    block_entities::Vector{Vector{Int32}}
+    external_element_tags::Vector{Vector{UInt64}}
+end
+
+function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}();
+                         node_entities=Tuple{Int,Int32}[],
+                         node_parametric=Union{Nothing,Vector{Float64}}[],
+                         external_node_tags=UInt64[],
+                         block_entities=Vector{Int32}[],
+                         external_element_tags=Vector{UInt64}[])
+    copied_entities=Dict{Tuple{Int,Int},MixedEntity}()
+    for (key,entity) in pairs(entities)
+        entity isa MixedEntity || throw(ArgumentError(
+            "MixedEntityData: entity values must be MixedEntity objects"))
+        key isa Tuple && length(key)==2 || throw(ArgumentError(
+            "MixedEntityData: entity keys must be (dimension, tag) tuples"))
+        (key[1] isa Integer && key[2] isa Integer) || throw(ArgumentError(
+            "MixedEntityData: entity keys must contain integers"))
+        key_dim=try Int(key[1]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedEntityData: entity-key dimension is outside Int bounds"))
+        end
+        key_tag=try Int(key[2]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedEntityData: entity-key tag is outside Int bounds"))
+        end
+        (key_dim,key_tag)==(entity.dim,Int(entity.tag)) || throw(ArgumentError(
+            "MixedEntityData: entity key does not match its record"))
+        copied_entities[(key_dim,key_tag)]=MixedEntity(
+            entity.dim,entity.tag,entity.bbox;
+            physical_tags=entity.physical_tags,boundaries=entity.boundaries)
+    end
+    copied_node_entities=Tuple{Int,Int32}[]
+    for key in node_entities
+        key isa Tuple && length(key)==2 || throw(ArgumentError(
+            "MixedEntityData: node classification must be a (dimension, tag) tuple"))
+        (key[1] isa Integer && key[2] isa Integer) || throw(ArgumentError(
+            "MixedEntityData: node classification must contain integers"))
+        dim=try Int(key[1]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedEntityData: node dimension is outside Int bounds"))
+        end
+        0<=dim<=3 || throw(ArgumentError(
+            "MixedEntityData: node dimension $dim is outside 0:3"))
+        tag=_mixed_positive_int32(key[2],"MixedEntityData: node entity tag")
+        push!(copied_node_entities,(dim,tag))
+    end
+    copied_parametric=Vector{Union{Nothing,Vector{Float64}}}()
+    for parameters in node_parametric
+        if parameters===nothing
+            push!(copied_parametric,nothing)
+        else
+            parameters isa AbstractVector{<:Real} || throw(ArgumentError(
+                "MixedEntityData: node parameters must be vectors or nothing"))
+            values=try Vector{Float64}(parameters) catch err
+                err isa InterruptException && rethrow()
+                throw(ArgumentError("MixedEntityData: node parameters must be Float64-representable"))
+            end
+            all(isfinite,values) || throw(ArgumentError(
+                "MixedEntityData: non-finite node parameter"))
+            push!(copied_parametric,values)
+        end
+    end
+    node_tags=_mixed_positive_tag_vector(
+        external_node_tags,"MixedEntityData: external node tag";unique_values=true)
+    length(copied_node_entities)==length(copied_parametric)==length(node_tags) ||
+        throw(ArgumentError(
+            "MixedEntityData: node metadata arrays must have equal lengths"))
+    for i in eachindex(copied_node_entities)
+        parameters=copied_parametric[i]
+        parameters===nothing || length(parameters)==copied_node_entities[i][1] ||
+            throw(ArgumentError(
+                "MixedEntityData: node $i parametric-coordinate length mismatch"))
+    end
+    copied_block_entities=Vector{Vector{Int32}}()
+    for entities_in_block in block_entities
+        push!(copied_block_entities,_mixed_int32_vector(
+            entities_in_block,"MixedEntityData: cell entity tag";positive=true))
+    end
+    copied_element_tags=Vector{Vector{UInt64}}()
+    seen_element_tags=Set{UInt64}()
+    for tags_in_block in external_element_tags
+        tags=_mixed_positive_tag_vector(
+            tags_in_block,"MixedEntityData: external element tag")
+        for tag in tags
+            tag in seen_element_tags && throw(ArgumentError(
+                "MixedEntityData: duplicate external element tag $tag"))
+            push!(seen_element_tags,tag)
+        end
+        push!(copied_element_tags,tags)
+    end
+    length(copied_block_entities)==length(copied_element_tags) || throw(ArgumentError(
+        "MixedEntityData: cell metadata block arrays must have equal lengths"))
+    for i in eachindex(copied_block_entities)
+        length(copied_block_entities[i])==length(copied_element_tags[i]) ||
+            throw(ArgumentError(
+                "MixedEntityData: cell metadata length mismatch in block $i"))
+    end
+    return MixedEntityData(copied_entities,copied_node_entities,copied_parametric,
+                           node_tags,copied_block_entities,copied_element_tags)
+end
+
+"""Mixed-element mesh: coordinates plus homogeneous MSH blocks."""
+struct MixedMesh
+    coords::Matrix{Float64}
+    blocks::Vector{ElementBlock}
+    physical_names::Dict{Tuple{Int,Int},String}
+    entity_data::Union{Nothing,MixedEntityData}
+    function MixedMesh(coords::AbstractMatrix{<:Real}, blocks::AbstractVector{<:ElementBlock};
+                       physical_names=Dict{Tuple{Int,Int},String}(),entity_data=nothing)
+        size(coords,1)==3 || throw(ArgumentError("MixedMesh: coords must be 3×n"))
+        size(coords,2) <= typemax(Int32) || throw(ArgumentError(
+            "MixedMesh: node count exceeds Int32 indexing"))
+        C = try
+            Matrix{Float64}(coords)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedMesh: coordinates must be Float64-representable: " *
+                                sprint(showerror, err)))
+        end
+        @inbounds for i in axes(C,2), d in 1:3
+            isfinite(C[d,i]) || throw(ArgumentError("MixedMesh: non-finite coordinate"))
+        end
+        nn=size(C,2)
+        B=Vector{ElementBlock}(blocks)
+        for b in B
+            spec=msh_spec(b.msh)
+            size(b.nodes,1)==spec.nnodes || throw(ArgumentError(
+                "MixedMesh: block node arity does not match type $(b.msh)"))
+            size(b.nodes,2)>0 || throw(ArgumentError(
+                "MixedMesh: element blocks must be nonempty (type $(b.msh))"))
+            length(b.tags)==size(b.nodes,2) || throw(ArgumentError(
+                "MixedMesh: block type $(b.msh) tag length mismatch"))
+            all(>=(0),b.tags) || throw(ArgumentError(
+                "MixedMesh: block type $(b.msh) has a negative physical tag"))
+        end
+        for b in B, j in axes(b.nodes,2), i in axes(b.nodes,1)
+            1<=b.nodes[i,j]<=nn || throw(ArgumentError(
+                "MixedMesh: block type $(b.msh) references node $(b.nodes[i,j]) outside 1:$nn"))
+        end
+        names=_copy_physical_names(physical_names,"MixedMesh")
+        data=entity_data===nothing ? nothing :
+             entity_data isa MixedEntityData ? _copy_mixed_entity_data(entity_data) :
+             throw(ArgumentError("MixedMesh: entity_data must be MixedEntityData or nothing"))
+        mesh=new(C,B,names,data)
+        data===nothing || _assert_mixed_entity_data(mesh,"MixedMesh")
+        return mesh
+    end
+end
+
+function _copy_physical_names(names, context::AbstractString)
+    names isa AbstractDict || throw(ArgumentError(
+        "$context: physical_names must be a dictionary"))
+    out=Dict{Tuple{Int,Int},String}()
+    for (key,value) in pairs(names)
+        key isa Tuple && length(key)==2 || throw(ArgumentError(
+            "$context: physical-name keys must be (dimension, tag) tuples"))
+        dim,tag=key
+        (dim isa Integer && tag isa Integer) || throw(ArgumentError(
+            "$context: physical-name keys must contain integers"))
+        d = try Int(dim) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$context: physical-name dimension is outside Int bounds"))
+        end
+        t = try Int(tag) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$context: physical-name tag is outside Int bounds"))
+        end
+        0<=d<=3 || throw(ArgumentError(
+            "$context: physical-name dimension $d is outside 0:3"))
+        1<=t<=typemax(Int32) || throw(ArgumentError(
+            "$context: physical-name tag $t must be positive and fit Int32"))
+        value isa AbstractString || throw(ArgumentError(
+            "$context: physical name for ($d,$t) must be a string"))
+        s=String(value)
+        isvalid(s) || throw(ArgumentError(
+            "$context: physical name for ($d,$t) is not valid UTF-8"))
+        occursin('\0',s) && throw(ArgumentError(
+            "$context: physical name for ($d,$t) contains a NUL byte"))
+        haskey(out,(d,t)) && throw(ArgumentError(
+            "$context: duplicate physical name for ($d,$t)"))
+        out[(d,t)]=s
+    end
+    return out
+end
+
+function _copy_mixed_entity_data(data::MixedEntityData)
+    return MixedEntityData(data.entities;
+        node_entities=data.node_entities,
+        node_parametric=data.node_parametric,
+        external_node_tags=data.external_node_tags,
+        block_entities=data.block_entities,
+        external_element_tags=data.external_element_tags)
+end
+
+function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
+    data=m.entity_data
+    data===nothing && return nothing
+    for (key,entity) in data.entities
+        key==(entity.dim,Int(entity.tag)) || throw(ArgumentError(
+            "$context: entity key $key does not match its record"))
+        0<=entity.dim<=3 || throw(ArgumentError(
+            "$context: entity $key has an invalid dimension"))
+        entity.tag>0 || throw(ArgumentError(
+            "$context: entity $key has a non-positive tag"))
+        all(isfinite,entity.bbox) || throw(ArgumentError(
+            "$context: entity $key has non-finite bounds"))
+        all(entity.bbox[i]<=entity.bbox[i+3] for i in 1:3) || throw(ArgumentError(
+            "$context: entity $key has reversed bounds"))
+        if entity.dim==0
+            isempty(entity.boundaries) || throw(ArgumentError(
+                "$context: point entity $key has boundaries"))
+            all(isequal(entity.bbox[i],entity.bbox[i+3]) for i in 1:3) || throw(ArgumentError(
+                "$context: point entity $key has non-degenerate bounds"))
+        end
+        for physical in entity.physical_tags
+            physical>0 || throw(ArgumentError(
+                "$context: entity $key has a non-positive physical tag"))
+        end
+        for boundary in entity.boundaries
+            boundary!=0 || throw(ArgumentError(
+                "$context: entity $key has a zero boundary tag"))
+            boundary!=typemin(Int32) || throw(ArgumentError(
+                "$context: entity $key has a boundary magnitude outside Int32"))
+            boundary_key=(entity.dim-1,abs(Int(boundary)))
+            haskey(data.entities,boundary_key) || throw(ArgumentError(
+                "$context: entity $key references missing boundary entity $boundary_key"))
+        end
+    end
+    nn=size(m.coords,2)
+    length(data.node_entities)==nn || throw(ArgumentError(
+        "$context: node entity-classification length mismatch"))
+    length(data.node_parametric)==nn || throw(ArgumentError(
+        "$context: node parametric-data length mismatch"))
+    length(data.external_node_tags)==nn || throw(ArgumentError(
+        "$context: external node-tag length mismatch"))
+    seen_nodes=Set{UInt64}()
+    classified_entities=Set{Tuple{Int,Int}}()
+    for i in 1:nn
+        dim,tag=data.node_entities[i]
+        0<=dim<=3 || throw(ArgumentError(
+            "$context: node $i has invalid entity dimension $dim"))
+        tag>0 || throw(ArgumentError(
+            "$context: node $i has a non-positive entity tag"))
+        push!(classified_entities,(dim,Int(tag)))
+        parameters=data.node_parametric[i]
+        if parameters!==nothing
+            length(parameters)==dim || throw(ArgumentError(
+                "$context: node $i has $(length(parameters)) parametric coordinates; expected $dim"))
+            all(isfinite,parameters) || throw(ArgumentError(
+                "$context: node $i has non-finite parametric coordinates"))
+        end
+        external=data.external_node_tags[i]
+        external>0 || throw(ArgumentError(
+            "$context: node $i has a non-positive external tag"))
+        external in seen_nodes && throw(ArgumentError(
+            "$context: duplicate external node tag $external"))
+        push!(seen_nodes,external)
+    end
+    length(data.block_entities)==length(m.blocks) || throw(ArgumentError(
+        "$context: block entity-classification length mismatch"))
+    length(data.external_element_tags)==length(m.blocks) || throw(ArgumentError(
+        "$context: external element-tag block count mismatch"))
+    seen_elements=Set{UInt64}()
+    for (bi,block) in pairs(m.blocks)
+        entities=data.block_entities[bi]
+        external_tags=data.external_element_tags[bi]
+        ncells=size(block.nodes,2)
+        length(entities)==ncells || throw(ArgumentError(
+            "$context: block $bi entity-classification length mismatch"))
+        length(external_tags)==ncells || throw(ArgumentError(
+            "$context: block $bi external element-tag length mismatch"))
+        dim=msh_spec(block.msh).dim
+        for j in 1:ncells
+            entity_tag=entities[j]
+            entity_tag>0 || throw(ArgumentError(
+                "$context: block $bi cell $j has a non-positive entity tag"))
+            key=(dim,Int(entity_tag))
+            entity=get(data.entities,key,nothing)
+            entity===nothing && !(key in classified_entities) && throw(ArgumentError(
+                "$context: block $bi cell $j references an entity not declared or created by nodes: $key"))
+            projected=entity===nothing || isempty(entity.physical_tags) ? Int32(0) :
+                      first(entity.physical_tags)
+            block.tags[j]==projected || throw(ArgumentError(
+                "$context: block $bi cell $j legacy physical tag $(block.tags[j]) " *
+                "does not match entity $key projection $projected"))
+            external=external_tags[j]
+            external>0 || throw(ArgumentError(
+                "$context: block $bi cell $j has a non-positive external element tag"))
+            external in seen_elements && throw(ArgumentError(
+                "$context: duplicate external element tag $external"))
+            push!(seen_elements,external)
+        end
+    end
+    return nothing
+end
+
+"""Append a nonempty, in-range element block to `m` and return `m`."""
+function add_block!(m::MixedMesh, block::ElementBlock)
+    m.entity_data===nothing || throw(ArgumentError(
+        "add_block!: cannot append without synchronized v4 entity metadata"))
+    size(block.nodes,2)>0 || throw(ArgumentError("add_block!: block must be nonempty"))
+    spec=msh_spec(block.msh)
+    size(block.nodes,1)==spec.nnodes || throw(ArgumentError(
+        "add_block!: block node arity does not match type $(block.msh)"))
+    length(block.tags)==size(block.nodes,2) || throw(ArgumentError(
+        "add_block!: tag length mismatch"))
+    nn=size(m.coords,2)
+    @inbounds for j in axes(block.nodes,2), i in axes(block.nodes,1)
+        1<=block.nodes[i,j]<=nn || throw(ArgumentError("add_block!: node out of range"))
+    end
+    @inbounds for tag in block.tags
+        tag>=0 || throw(ArgumentError("add_block!: negative physical tag"))
+    end
+    push!(m.blocks,block)
+    return m
+end
+
+"""Convert a simplex [`Mesh`](@ref) to linear Gmsh element blocks."""
+function simplex_to_mixed(m::Mesh; physical_names=Dict{Tuple{Int,Int},String}())
+    blocks=ElementBlock[]
+    nsegs(m)>0 && push!(blocks,ElementBlock(1,m.segs,m.seg_tag))
+    ntris(m)>0 && push!(blocks,ElementBlock(2,m.tris,m.tri_tag))
+    ntets(m)>0 && push!(blocks,ElementBlock(4,m.tets,m.tet_tag))
+    return MixedMesh(m.coords,blocks; physical_names=physical_names)
+end
+
+"""
+    mixed_to_simplex(m) -> Mesh
+
+Fold point/linear-line/linear-triangle/linear-tetrahedron blocks into a simplex
+[`Mesh`](@ref). Any nonempty higher-order or non-simplex block is an explicit
+blocker.
+"""
+function mixed_to_simplex(m::MixedMesh)
+    _assert_mixed_structure(m,"mixed_to_simplex")
+    ns=0; nf=0; nt=0
+    for b in m.blocks
+        isempty(b.tags) && continue
+        spec=msh_spec(b.msh)
+        if spec.family===:lin && spec.order==1
+            ns=Base.checked_add(ns,size(b.nodes,2))
+        elseif spec.family===:tri && spec.order==1
+            nf=Base.checked_add(nf,size(b.nodes,2))
+        elseif spec.family===:tet && spec.order==1
+            nt=Base.checked_add(nt,size(b.nodes,2))
+        elseif spec.family===:pnt
+            continue
+        else
+            throw(ArgumentError(
+                "mixed_to_simplex: cannot fold type $(b.msh) ($(spec.family) P$(spec.order)) into Mesh"))
+        end
+    end
+    segs=Matrix{Int32}(undef,2,ns); st=Vector{Int32}(undef,ns)
+    tris=Matrix{Int32}(undef,3,nf); tt=Vector{Int32}(undef,nf)
+    tets=Matrix{Int32}(undef,4,nt); qt=Vector{Int32}(undef,nt)
+    js=0; jf=0; jt=0
+    @inbounds for b in m.blocks
+        spec=msh_spec(b.msh); n=size(b.nodes,2); n==0 && continue
+        if spec.family===:lin && spec.order==1
+            copyto!(segs,2js+1,b.nodes,1,2n); copyto!(st,js+1,b.tags,1,n); js+=n
+        elseif spec.family===:tri && spec.order==1
+            copyto!(tris,3jf+1,b.nodes,1,3n); copyto!(tt,jf+1,b.tags,1,n); jf+=n
+        elseif spec.family===:tet && spec.order==1
+            copyto!(tets,4jt+1,b.nodes,1,4n); copyto!(qt,jt+1,b.tags,1,n); jt+=n
+        end
+    end
+    return Mesh(m.coords; segs=segs, tris=tris, tets=tets, seg_tag=st, tri_tag=tt, tet_tag=qt)
+end
+
+struct _MixedCellRef
+    block::Int
+    cell::Int
+end
+
+function _assert_mixed_structure(m::MixedMesh, context::AbstractString)
+    size(m.coords,1)==3 || throw(ArgumentError("$context: coords must be 3×n"))
+    nn=size(m.coords,2)
+    nn<=typemax(Int32) || throw(ArgumentError("$context: node count exceeds Int32 indexing"))
+    @inbounds for i in axes(m.coords,2),d in 1:3
+        isfinite(m.coords[d,i]) || throw(ArgumentError(
+            "$context: node $i has a non-finite coordinate"))
+    end
+    total=0
+    for (bi,b) in pairs(m.blocks)
+        spec=msh_spec(b.msh)
+        size(b.nodes,1)==spec.nnodes || throw(ArgumentError(
+            "$context: block $bi type $(b.msh) has the wrong node arity"))
+        size(b.nodes,2)>0 || throw(ArgumentError("$context: block $bi is empty"))
+        length(b.tags)==size(b.nodes,2) || throw(ArgumentError(
+            "$context: block $bi tag length mismatch"))
+        total=try Base.checked_add(total,size(b.nodes,2)) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$context: element count overflows Int"))
+        end
+        total<=typemax(Int32) || throw(ArgumentError(
+            "$context: element count exceeds the Int32 MSH limit"))
+        @inbounds for j in axes(b.nodes,2)
+            b.tags[j]>=0 || throw(ArgumentError(
+                "$context: block $bi cell $j has negative physical tag $(b.tags[j])"))
+            for i in 1:spec.nnodes
+                n=b.nodes[i,j]
+                1<=n<=nn || throw(ArgumentError(
+                    "$context: block $bi cell $j references node $n outside 1:$nn"))
+            end
+        end
+    end
+    _copy_physical_names(m.physical_names,context)
+    _assert_mixed_entity_data(m,context)
+    return total
+end
+
+"""
+    validate(m::MixedMesh; reject_duplicate_cells=true) -> MeshDiagnostic
+
+Validate finite coordinates and fixed-node connectivity. The check rejects
+repeated local node indices and, by default, duplicate cells independent of
+their local orientation. Lossless v4 metadata is checked for aligned arrays,
+valid entity references and topology, legacy-tag consistency, finite
+parametrics, and globally unique positive external tags. Geometry/Jacobian
+validity for curved high-order cells is not inferred from nodal coordinates by
+this structural validator.
+"""
+function validate(m::MixedMesh; reject_duplicate_cells::Bool=true)
+    messages=String[]
+    try
+        _assert_mixed_structure(m,"validate(MixedMesh)")
+    catch err
+        err isa InterruptException && rethrow()
+        push!(messages,sprint(showerror,err))
+        return MeshDiagnostic(false,messages)
+    end
+    seen=reject_duplicate_cells ? Set{Any}() : nothing
+    for (bi,b) in pairs(m.blocks)
+        k=size(b.nodes,1); scratch=Vector{Int32}(undef,k)
+        @inbounds for j in axes(b.nodes,2)
+            copyto!(scratch,1,b.nodes,(j-1)k+1,k)
+            sort!(scratch)
+            repeated=false
+            for i in 2:k
+                if scratch[i]==scratch[i-1]
+                    repeated=true; break
+                end
+            end
+            repeated && push!(messages,
+                "block $bi type $(b.msh) cell $j repeats a node index")
+            if reject_duplicate_cells
+                key=(b.msh,Tuple(scratch))
+                if key in seen
+                    push!(messages,
+                        "duplicate type $(b.msh) cell at block $bi cell $j")
+                else
+                    push!(seen,key)
+                end
+            end
+        end
+    end
+    return MeshDiagnostic(isempty(messages),messages)
+end
+
+@inline function _mixed_cell_lt(m::MixedMesh,a::_MixedCellRef,b::_MixedCellRef)
+    ba=m.blocks[a.block]; bb=m.blocks[b.block]
+    ba.msh!=bb.msh && return ba.msh<bb.msh
+    na=size(ba.nodes,1)
+    @inbounds for i in 1:na
+        va=ba.nodes[i,a.cell]; vb=bb.nodes[i,b.cell]
+        va!=vb && return va<vb
+    end
+    ta=ba.tags[a.cell]; tb=bb.tags[b.cell]
+    ta!=tb && return ta<tb
+    data=m.entity_data
+    if data!==nothing
+        ea=data.block_entities[a.block][a.cell]
+        eb=data.block_entities[b.block][b.cell]
+        ea!=eb && return ea<eb
+        xa=data.external_element_tags[a.block][a.cell]
+        xb=data.external_element_tags[b.block][b.cell]
+        xa!=xb && return xa<xb
+    end
+    return false
+end
+
+"""
+    mixed_crc(m) -> NamedTuple
+
+Return a deterministic SHA-256 regression record. The digest includes every
+coordinate bit pattern, Gmsh type/dimension/order, oriented local connectivity,
+physical tag, and physical name. When present, lossless v4 entity records,
+classification, parametric coordinates, and external tags are also included.
+Cell and block iteration order do not affect the digest; reversing a cell does.
+Empty meshes have a finite zero bounding box.
+"""
+function mixed_crc(m::MixedMesh)
+    ncells=_assert_mixed_structure(m,"mixed_crc")
+    nn=size(m.coords,2)
+    if nn==0
+        lo=(0.0,0.0,0.0); hi=lo
+    else
+        l1=l2=l3=Inf; h1=h2=h3=-Inf
+        @inbounds for i in axes(m.coords,2)
+            x=m.coords[1,i]; y=m.coords[2,i]; z=m.coords[3,i]
+            l1=min(l1,x); l2=min(l2,y); l3=min(l3,z)
+            h1=max(h1,x); h2=max(h2,y); h3=max(h3,z)
+        end
+        lo=(l1,l2,l3); hi=(h1,h2,h3)
+    end
+    refs=Vector{_MixedCellRef}(undef,ncells); q=0
+    @inbounds for (bi,b) in pairs(m.blocks),j in axes(b.nodes,2)
+        q+=1; refs[q]=_MixedCellRef(bi,j)
+    end
+    sort!(refs;lt=(a,b)->_mixed_cell_lt(m,a,b),alg=MergeSort)
+    ctx=SHA.SHA2_256_CTX()
+    data=m.entity_data
+    SHA.update!(ctx,codeunits(data===nothing ?
+        "Tessella.MixedMesh.CRC.v1\0" : "Tessella.MixedMesh.CRC.v2\0"))
+    buf8=Vector{UInt8}(undef,8); buf4=Vector{UInt8}(undef,4)
+    _sha_u64!(ctx,buf8,UInt64(nn))
+    @inbounds for i in axes(m.coords,2),d in 1:3
+        _sha_u64!(ctx,buf8,reinterpret(UInt64,m.coords[d,i]))
+    end
+    names=sort!(collect(m.physical_names);by=first)
+    _sha_u64!(ctx,buf8,UInt64(length(names)))
+    for ((dim,tag),name) in names
+        _sha_i32!(ctx,buf4,Int32(dim)); _sha_i32!(ctx,buf4,Int32(tag))
+        bytes=codeunits(name); _sha_u64!(ctx,buf8,UInt64(length(bytes)))
+        SHA.update!(ctx,bytes)
+    end
+    if data!==nothing
+        entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
+        _sha_u64!(ctx,buf8,UInt64(length(entities)))
+        for entity in entities
+            _sha_i32!(ctx,buf4,Int32(entity.dim))
+            _sha_i32!(ctx,buf4,entity.tag)
+            for value in entity.bbox
+                _sha_u64!(ctx,buf8,reinterpret(UInt64,value))
+            end
+            _sha_u64!(ctx,buf8,UInt64(length(entity.physical_tags)))
+            for physical in entity.physical_tags
+                _sha_i32!(ctx,buf4,physical)
+            end
+            _sha_u64!(ctx,buf8,UInt64(length(entity.boundaries)))
+            for boundary in entity.boundaries
+                _sha_i32!(ctx,buf4,boundary)
+            end
+        end
+        @inbounds for i in 1:nn
+            dim,entity=data.node_entities[i]
+            _sha_u64!(ctx,buf8,UInt64(data.external_node_tags[i]))
+            _sha_i32!(ctx,buf4,Int32(dim)); _sha_i32!(ctx,buf4,entity)
+            parameters=data.node_parametric[i]
+            _sha_i32!(ctx,buf4,Int32(parameters===nothing ? 0 : 1))
+            if parameters!==nothing
+                _sha_u64!(ctx,buf8,UInt64(length(parameters)))
+                for value in parameters
+                    _sha_u64!(ctx,buf8,reinterpret(UInt64,value))
+                end
+            end
+        end
+    end
+    _sha_u64!(ctx,buf8,UInt64(ncells))
+    @inbounds for ref in refs
+        b=m.blocks[ref.block]; spec=msh_spec(b.msh)
+        _sha_i32!(ctx,buf4,Int32(b.msh)); _sha_i32!(ctx,buf4,Int32(spec.dim))
+        _sha_i32!(ctx,buf4,Int32(spec.order))
+        _sha_i32!(ctx,buf4,Int32(spec.serendipity))
+        _sha_i32!(ctx,buf4,b.tags[ref.cell])
+        _sha_i32!(ctx,buf4,Int32(spec.nnodes))
+        for i in 1:spec.nnodes
+            _sha_i32!(ctx,buf4,b.nodes[i,ref.cell])
+        end
+        if data!==nothing
+            _sha_i32!(ctx,buf4,data.block_entities[ref.block][ref.cell])
+            _sha_u64!(ctx,buf8,
+                UInt64(data.external_element_tags[ref.block][ref.cell]))
+        end
+    end
+    return (n_nodes=nn,n_blocks=length(m.blocks),n_cells=ncells,
+            bbox=(lo,hi),sha=bytes2hex(SHA.digest!(ctx)))
+end
+
+@inline function _put_i32!(buf,off,v::Int32)
+    u=reinterpret(UInt32,v)
+    @inbounds buf[off]=u%UInt8
+    @inbounds buf[off+1]=(u>>8)%UInt8
+    @inbounds buf[off+2]=(u>>16)%UInt8
+    @inbounds buf[off+3]=(u>>24)%UInt8
+    return nothing
+end
+@inline function _put_u64!(buf,off,u::UInt64)
+    @inbounds for shift in 0:8:56
+        buf[off+(shift>>3)]=(u>>shift)%UInt8
+    end
+    return nothing
+end
+@inline function _sha_i32!(ctx,buf,v::Int32)
+    _put_i32!(buf,1,v); SHA.update!(ctx,buf); return nothing
+end
+@inline function _sha_u64!(ctx,buf,v::UInt64)
+    _put_u64!(buf,1,v); SHA.update!(ctx,buf); return nothing
+end
+
+# ── Gmsh local nodes ────────────────────────────────────────────────────────
+
+# Gmsh's local-node order is topological: vertices, oriented edges, oriented
+# face interiors, then volume interiors. These integral monomial lattices are a
+# direct translation of `numeric/pointsGenerators.cpp`; scaling happens once at
+# the end to avoid accumulated floating-point drift.
+const _TRI_EDGES = ((0,1), (1,2), (2,0))
+const _QUA_EDGES = ((0,1), (1,2), (2,3), (3,0))
+const _TET_EDGES = ((0,1), (1,2), (2,0), (3,0), (3,2), (3,1))
+const _TET_FACES = ((0,2,1), (0,1,3), (0,3,2), (3,1,2))
+const _PRI_EDGES = ((0,1), (0,2), (0,3), (1,2), (1,4), (2,5),
+                    (3,4), (3,5), (4,5))
+const _PRI_FACES = ((0,2,1,-1), (3,4,5,-1), (0,1,4,3),
+                    (0,3,5,2), (1,2,5,4))
+const _HEX_EDGES = ((0,1), (0,3), (0,4), (1,2), (1,5), (2,3),
+                    (2,6), (3,7), (4,5), (4,7), (5,6), (6,7))
+const _HEX_FACES = ((0,3,2,1), (0,1,5,4), (0,4,7,3),
+                    (1,2,6,5), (2,3,7,6), (4,5,6,7))
+const _PYR_EDGES = ((0,1), (0,3), (0,4), (1,2),
+                    (1,4), (2,3), (2,4), (3,4))
+const _PYR_FACES = ((0,1,4,-1), (3,0,4,-1), (1,2,4,-1),
+                    (2,3,4,-1), (0,3,2,1))
+
+function _append_edges!(points::Vector{NTuple{D,Int}},
+                        vertices::Vector{NTuple{D,Int}}, edges, p::Int) where {D}
+    p > 1 || return points
+    for (a, b) in edges
+        v0, v1 = vertices[a + 1], vertices[b + 1]
+        step = ntuple(d -> (v1[d] - v0[d]) ÷ p, D)
+        for i in 1:p-1
+            push!(points, ntuple(d -> v0[d] + i * step[d], D))
+        end
+    end
+    return points
+end
+
+function _append_face!(points::Vector{NTuple{D,Int}},
+                       vertices::Vector{NTuple{D,Int}},
+                       face, local_points, p::Int) where {D}
+    i0, i1 = face[1] + 1, face[2] + 1
+    # For quadrilateral faces Gmsh uses vertex 3 as the second axis.
+    i2 = (length(face) == 4 && face[4] != -1 ? face[4] : face[3]) + 1
+    v0, v1, v2 = vertices[i0], vertices[i1], vertices[i2]
+    u = ntuple(d -> (v1[d] - v0[d]) ÷ p, D)
+    v = ntuple(d -> (v2[d] - v0[d]) ÷ p, D)
+    for q in local_points
+        push!(points, ntuple(d -> v0[d] + u[d] * q[1] + v[d] * q[2], D))
+    end
+    return points
+end
+
+function _line_monomials(p::Int)
+    points = NTuple{1,Int}[(0,)]
+    p == 0 && return points
+    push!(points, (p,))
+    append!(points, ((i,) for i in 1:p-1))
+    return points
+end
+
+function _tri_monomials(p::Int, serendipity::Bool=false)
+    p == 0 && return NTuple{2,Int}[(0,0)]
+    vertices = NTuple{2,Int}[(0,0), (p,0), (0,p)]
+    points = copy(vertices)
+    _append_edges!(points, vertices, _TRI_EDGES, p)
+    if !serendipity && p > 2
+        append!(points, ((q[1] + 1, q[2] + 1) for q in _tri_monomials(p - 3)))
+    end
+    return points
+end
+
+function _qua_monomials(p::Int, serendipity::Bool=false)
+    p == 0 && return NTuple{2,Int}[(0,0)]
+    vertices = NTuple{2,Int}[(0,0), (p,0), (p,p), (0,p)]
+    points = copy(vertices)
+    _append_edges!(points, vertices, _QUA_EDGES, p)
+    if !serendipity && p > 1
+        append!(points, ((q[1] + 1, q[2] + 1) for q in _qua_monomials(p - 2)))
+    end
+    return points
+end
+
+function _tet_monomials(p::Int, serendipity::Bool=false)
+    p == 0 && return NTuple{3,Int}[(0,0,0)]
+    vertices = NTuple{3,Int}[(0,0,0), (p,0,0), (0,p,0), (0,0,p)]
+    points = copy(vertices)
+    _append_edges!(points, vertices, _TET_EDGES, p)
+    if !serendipity && p > 2
+        face_points = [(q[1] + 1, q[2] + 1) for q in _tri_monomials(p - 3)]
+        for face in _TET_FACES
+            _append_face!(points, vertices, face, face_points, p)
+        end
+        if p > 3
+            append!(points, ((q[1] + 1, q[2] + 1, q[3] + 1)
+                             for q in _tet_monomials(p - 4)))
+        end
+    end
+    return points
+end
+
+function _pri_monomials(p::Int, serendipity::Bool=false)
+    p == 0 && return NTuple{3,Int}[(0,0,0)]
+    vertices = NTuple{3,Int}[(0,0,0), (p,0,0), (0,p,0),
+                             (0,0,p), (p,0,p), (0,p,p)]
+    points = copy(vertices)
+    _append_edges!(points, vertices, _PRI_EDGES, p)
+    if !serendipity && p > 1
+        quad_points = [(q[1] + 1, q[2] + 1) for q in _qua_monomials(p - 2)]
+        tri_points = p > 2 ?
+            [(q[1] + 1, q[2] + 1) for q in _tri_monomials(p - 3)] :
+            NTuple{2,Int}[]
+        for face in _PRI_FACES
+            local_points = face[4] == -1 ? tri_points : quad_points
+            isempty(local_points) || _append_face!(points, vertices, face, local_points, p)
+        end
+        if p > 2
+            for q in _tri_monomials(p - 3), r in _line_monomials(p - 2)
+                push!(points, (q[1] + 1, q[2] + 1, r[1] + 1))
+            end
+        end
+    end
+    return points
+end
+
+function _hex_monomials(p::Int, serendipity::Bool=false)
+    p == 0 && return NTuple{3,Int}[(0,0,0)]
+    vertices = NTuple{3,Int}[(0,0,0), (p,0,0), (p,p,0), (0,p,0),
+                             (0,0,p), (p,0,p), (p,p,p), (0,p,p)]
+    points = copy(vertices)
+    _append_edges!(points, vertices, _HEX_EDGES, p)
+    if !serendipity && p > 1
+        face_points = [(q[1] + 1, q[2] + 1) for q in _qua_monomials(p - 2)]
+        for face in _HEX_FACES
+            _append_face!(points, vertices, face, face_points, p)
+        end
+        append!(points, ((q[1] + 1, q[2] + 1, q[3] + 1)
+                         for q in _hex_monomials(p - 2)))
+    end
+    return points
+end
+
+function _pyr_monomials(p::Int, serendipity::Bool=false)
+    p == 0 && return NTuple{3,Int}[(0,0,0)]
+    vertices = NTuple{3,Int}[(0,0,p), (p,0,p), (p,p,p), (0,p,p), (0,0,0)]
+    points = copy(vertices)
+    _append_edges!(points, vertices, _PYR_EDGES, p)
+    if !serendipity && p > 1
+        quad_points = [(q[1] + 1, q[2] + 1) for q in _qua_monomials(p - 2)]
+        tri_points = p > 2 ?
+            [(q[1] + 1, q[2] + 1) for q in _tri_monomials(p - 3)] :
+            NTuple{2,Int}[]
+        for face in _PYR_FACES
+            local_points = face[4] == -1 ? tri_points : quad_points
+            isempty(local_points) || _append_face!(points, vertices, face, local_points, p)
+        end
+        if p > 2
+            append!(points, ((q[1] + 1, q[2] + 1, q[3] + 2)
+                             for q in _pyr_monomials(p - 3)))
+        end
+    end
+    return points
+end
+
+const _MSH_BY_SHAPE = let by_shape = Dict{Tuple{Symbol,Int,Bool},Int}()
+    for (tag, spec) in MSH_CATALOG
+        key = (spec.family, spec.order, spec.serendipity)
+        haskey(by_shape, key) && throw(ErrorException("duplicate Gmsh element shape $key"))
+        by_shape[key] = tag
+    end
+    by_shape
+end
+
+function _scaled_nodes(spec::ElementSpec)
+    p, family = spec.order, spec.family
+    family === :trih && return Float64[-1 1 1 -1; -1 -1 1 1; 0 0 0 0]
+
+    monomials = if family === :pnt
+        NTuple{1,Int}[(0,)]
+    elseif family === :lin
+        _line_monomials(p)
+    elseif family === :tri
+        _tri_monomials(p, spec.serendipity)
+    elseif family === :qua
+        _qua_monomials(p, spec.serendipity)
+    elseif family === :tet
+        _tet_monomials(p, spec.serendipity)
+    elseif family === :hex
+        _hex_monomials(p, spec.serendipity)
+    elseif family === :pri
+        _pri_monomials(p, spec.serendipity)
+    elseif family === :pyr
+        _pyr_monomials(p, spec.serendipity)
+    else
+        throw(ErrorException("unsupported catalog family $family"))
+    end
+
+    length(monomials) == spec.nnodes || throw(ErrorException(
+        "local-node generator produced $(length(monomials)) nodes for Gmsh type " *
+        "$(spec.msh), expected $(spec.nnodes)"))
+    coordinates = zeros(Float64, 3, length(monomials))
+    p == 0 && return coordinates
+    @inbounds for (column, q) in enumerate(monomials)
+        if family === :lin
+            coordinates[1,column] = 2q[1] / p - 1
+        elseif family === :tri
+            coordinates[1,column] = q[1] / p
+            coordinates[2,column] = q[2] / p
+        elseif family === :qua
+            coordinates[1,column] = 2q[1] / p - 1
+            coordinates[2,column] = 2q[2] / p - 1
+        elseif family === :tet
+            coordinates[1,column] = q[1] / p
+            coordinates[2,column] = q[2] / p
+            coordinates[3,column] = q[3] / p
+        elseif family === :hex
+            coordinates[1,column] = 2q[1] / p - 1
+            coordinates[2,column] = 2q[2] / p - 1
+            coordinates[3,column] = 2q[3] / p - 1
+        elseif family === :pri
+            coordinates[1,column] = q[1] / p
+            coordinates[2,column] = q[2] / p
+            coordinates[3,column] = 2q[3] / p - 1
+        elseif family === :pyr
+            coordinates[3,column] = 1 - q[3] / p
+            coordinates[1,column] = (2q[1] - q[3]) / p
+            coordinates[2,column] = (2q[2] - q[3]) / p
+        end
+    end
+    return coordinates
+end
+
+"""Return Gmsh-ordered local coordinates as a `3 × nnodes` matrix."""
+lagrange_nodes(msh::Integer) = _scaled_nodes(msh_spec(msh))
+
+"""
+    lagrange_nodes(family, order; serendipity=false)
+
+Return local nodes for the unique catalogued Gmsh type with this shape. The
+lookup bounds accepted orders to those defined by Gmsh 4.15.2.
+"""
+function lagrange_nodes(family::Symbol, order::Integer; serendipity::Bool=false)
+    p = try
+        Int(order)
+    catch err
+        err isa InexactError || rethrow()
+        throw(ArgumentError("lagrange_nodes: order is outside Int bounds"))
+    end
+    p >= 0 || throw(ArgumentError("lagrange_nodes: order must be non-negative"))
+    tag = get(_MSH_BY_SHAPE, (family, p, serendipity), nothing)
+    tag === nothing && throw(ArgumentError(
+        "lagrange_nodes: no Gmsh 4.15.2 element for family $family, order $p, " *
+        "serendipity=$serendipity"))
+    return lagrange_nodes(tag)
+end
+
+# ── MSH I/O for MixedMesh ─────────────────────────────────────────────────────
+
+const DEFAULT_MAX_MIXED_NAME_BYTES = 1 << 20
+const MSH_PHYSICAL_NAME_MAX_BYTES = 128
+
+# `MElementFactory::create()` in pinned Gmsh 4.15.2 has no constructor for
+# these otherwise-catalogued fixed-node tags. Its own MSH reader consequently
+# rejects them. Keep Tessella round-trip support, but make incompatible output
+# an explicit opt-in instead of silently producing a file Gmsh cannot reopen.
+const GMSH_4_15_2_MSH_READER_GAPS_V4 = (
+    84,85,86,87,88,             # P0 line/triangle/quad/tet/hex
+    100,101,102,103,104,105,    # incomplete hex P4:P9
+    125,126,127,128,129,130,131,# incomplete pyramid P3:P9
+    132,                         # P0 pyramid
+)
+const GMSH_4_15_2_MSH_READER_GAPS_V2 = (
+    GMSH_4_15_2_MSH_READER_GAPS_V4...,
+    89,140) # v2 additionally crashes on P0 prism and rejects trihedron
+
+struct _MixedReadLimits
+    max_nodes::Int
+    max_elements::Int
+    max_blocks::Int
+    max_entities::Int
+    max_physical_names::Int
+    max_name_bytes::Int
+    max_file_bytes::Int
+end
+
+mutable struct _MixedReadBucket
+    nodes::Vector{Int32}
+    tags::Vector{Int32}
+    entities::Vector{Int32}
+    external_tags::Vector{UInt64}
+end
+
+mutable struct _MixedReadAccum
+    x::Vector{Float64}
+    y::Vector{Float64}
+    z::Vector{Float64}
+    node_map::Dict{UInt64,Int32}
+    buckets::Dict{Int,_MixedReadBucket}
+    physical_names::Dict{Tuple{Int,Int},String}
+    entity_physical::Dict{Tuple{Int,Int},Int32}
+    entities::Dict{Tuple{Int,Int},MixedEntity}
+    implicit_entities::Set{Tuple{Int,Int}}
+    external_node_tags::Vector{UInt64}
+    node_entities::Vector{Tuple{Int,Int32}}
+    node_parametric::Vector{Union{Nothing,Vector{Float64}}}
+    element_tags::Set{UInt64}
+    physical_name_records::Int
+    node_blocks::Int
+    element_blocks::Int
+end
+
+_MixedReadAccum() = _MixedReadAccum(
+    Float64[],Float64[],Float64[],Dict{UInt64,Int32}(),
+    Dict{Int,_MixedReadBucket}(),Dict{Tuple{Int,Int},String}(),
+    Dict{Tuple{Int,Int},Int32}(),Dict{Tuple{Int,Int},MixedEntity}(),
+    Set{Tuple{Int,Int}}(),UInt64[],Tuple{Int,Int32}[],
+    Union{Nothing,Vector{Float64}}[],Set{UInt64}(),0,0,0)
+
+function _read_limit(value,name::AbstractString;ceiling=typemax(Int))
+    value isa Integer || throw(ArgumentError("read_mixed_msh: $name must be an integer"))
+    ceiling isa Integer || throw(ArgumentError("read_mixed_msh: invalid internal limit ceiling"))
+    upper=Int(ceiling)
+    out = try
+        Int(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: $name is outside Int bounds"))
+    end
+    0<=out<=upper || throw(ArgumentError(
+        "read_mixed_msh: $name must be in 0:$upper"))
+    return out
+end
+
+"""
+    read_mixed_msh(path; tessella_extensions=false, resource limits...) -> MixedMesh
+
+Read an ASCII Gmsh MSH v2.2 or v4.1 file. Arbitrary positive node tags are
+compacted to `1:N`; oriented connectivity, all fixed-node element types,
+physical names, and complete fixed-node v4 entity metadata are preserved.
+[`ElementBlock`](@ref) `tags` remains the legacy projection to the first entity
+physical membership (or zero), while [`MixedEntityData`](@ref) retains every
+membership, signed boundary, classification, parametric coordinate, and
+external node/element tag. Count and file-size limits are checked before bulk
+allocation. Repeated physical-name, entity and element sections are merged;
+repeated node sections are rejected explicitly. Gmsh treats backslashes in
+physical names literally. Set
+`tessella_extensions=true` only when reading Tessella's escaped name extension
+produced by `write_mixed_msh(...; gmsh_compatible=false)`.
+"""
+function read_mixed_msh(path::AbstractString;
+                        tessella_extensions=false,
+                        max_nodes=typemax(Int32),
+                        max_elements=typemax(Int32),
+                        max_blocks=typemax(Int32),
+                        max_entities=typemax(Int32),
+                        max_physical_names=typemax(Int32),
+                        max_name_bytes=DEFAULT_MAX_MIXED_NAME_BYTES,
+                        max_file_bytes=typemax(Int))
+    isfile(path) || throw(ArgumentError("read_mixed_msh: missing regular file $path"))
+    tessella_extensions isa Bool || throw(ArgumentError(
+        "read_mixed_msh: tessella_extensions must be Bool"))
+    limits=_MixedReadLimits(
+        _read_limit(max_nodes,"max_nodes";ceiling=typemax(Int32)),
+        _read_limit(max_elements,"max_elements";ceiling=typemax(Int32)),
+        _read_limit(max_blocks,"max_blocks";ceiling=typemax(Int32)),
+        _read_limit(max_entities,"max_entities";ceiling=typemax(Int32)),
+        _read_limit(max_physical_names,"max_physical_names";ceiling=typemax(Int32)),
+        _read_limit(max_name_bytes,"max_name_bytes"),
+        _read_limit(max_file_bytes,"max_file_bytes"))
+    filesize(path)<=limits.max_file_bytes || throw(ArgumentError(
+        "read_mixed_msh: file exceeds max_file_bytes=$(limits.max_file_bytes)"))
+    open(path,"r") do io
+        try
+            return _read_mixed_stream(io,limits,tessella_extensions)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa EOFError && throw(ArgumentError("read_mixed_msh: truncated MSH file"))
+            rethrow()
+        end
+    end
+end
+
+@inline function _msh_line(io,context::AbstractString)
+    eof(io) && throw(ArgumentError("read_mixed_msh: unexpected end of file in $context"))
+    return readline(io)
+end
+
+function _msh_int(token::AbstractString,context::AbstractString)
+    try
+        return parse(Int,token)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: invalid integer in $context"))
+    end
+end
+
+function _msh_size_t(token::AbstractString,context::AbstractString)
+    try
+        return parse(UInt64,token)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: invalid unsigned 64-bit value in $context"))
+    end
+end
+
+function _msh_float(token::AbstractString,context::AbstractString)
+    value = try
+        parse(Float64,token)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: invalid floating-point value in $context"))
+    end
+    isfinite(value) || throw(ArgumentError(
+        "read_mixed_msh: non-finite floating-point value in $context"))
+    return value
+end
+
+_msh_fields(io,context::AbstractString)=split(strip(_msh_line(io,context)))
+
+mutable struct _MshTokenReader
+    io::IO
+    tokens::Vector{SubString{String}}
+    next::Int
+end
+
+_MshTokenReader(io::IO)=_MshTokenReader(io,SubString{String}[],1)
+
+function _msh_token!(reader::_MshTokenReader,context::AbstractString)
+    while reader.next>length(reader.tokens)
+        line=_msh_line(reader.io,context)
+        reader.tokens=split(line)
+        reader.next=1
+    end
+    token=reader.tokens[reader.next]
+    reader.next+=1
+    return token
+end
+
+function _expect_msh_token_end!(reader::_MshTokenReader,token::AbstractString)
+    actual=_msh_token!(reader,token)
+    actual==token || throw(ArgumentError(
+        "read_mixed_msh: expected $token, got '$actual'"))
+    reader.next>length(reader.tokens) || throw(ArgumentError(
+        "read_mixed_msh: unexpected content after $token"))
+    return nothing
+end
+
+function _expect_msh_end(io,token::AbstractString)
+    line=strip(_msh_line(io,token))
+    line==token || throw(ArgumentError(
+        "read_mixed_msh: expected $token, got '$line'"))
+    return nothing
+end
+
+function _skip_msh_section(io,endtoken::AbstractString)
+    while !eof(io)
+        strip(readline(io))==endtoken && return nothing
+    end
+    throw(ArgumentError("read_mixed_msh: unterminated section; missing $endtoken"))
+end
+
+function _section_count(io,context::AbstractString,maximum::Int)
+    fields=_msh_fields(io,context)
+    length(fields)==1 || throw(ArgumentError(
+        "read_mixed_msh: malformed $context count"))
+    n=_msh_int(fields[1],context)
+    0<=n<=maximum || throw(ArgumentError(
+        "read_mixed_msh: $context count $n exceeds allowed range 0:$maximum"))
+    return n
+end
+
+function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Bool)
+    acc=_MixedReadAccum()
+    version=0.0
+    seen_format=false; seen_names=false; seen_entities=false
+    seen_nodes=false; seen_elements=false
+    while !eof(io)
+        header=strip(readline(io)); isempty(header) && continue
+        if header=="\$MeshFormat"
+            seen_format && throw(ArgumentError("read_mixed_msh: duplicate \$MeshFormat section"))
+            (seen_names||seen_entities||seen_nodes||seen_elements) && throw(ArgumentError(
+                "read_mixed_msh: \$MeshFormat must be the first MSH section"))
+            seen_format=true
+            fields=_msh_fields(io,"MeshFormat header")
+            length(fields)==3 || throw(ArgumentError(
+                "read_mixed_msh: malformed MeshFormat header"))
+            version=_msh_float(fields[1],"MeshFormat version")
+            version in (2.2,4.1) || throw(ArgumentError(
+                "read_mixed_msh: unsupported MSH version $version (supported: 2.2, 4.1)"))
+            _msh_int(fields[2],"MeshFormat file type")==0 || throw(ArgumentError(
+                "read_mixed_msh: binary MSH is not supported"))
+            _msh_int(fields[3],"MeshFormat data size")==8 || throw(ArgumentError(
+                "read_mixed_msh: only 8-byte floating-point MSH data is supported"))
+            _expect_msh_end(io,"\$EndMeshFormat")
+        elseif header=="\$PhysicalNames"
+            seen_format || throw(ArgumentError(
+                "read_mixed_msh: \$PhysicalNames appeared before \$MeshFormat"))
+            seen_names=true
+            _read_mixed_physical_names!(acc,io,limits,tessella_extensions)
+        elseif header=="\$Entities"
+            seen_format || throw(ArgumentError(
+                "read_mixed_msh: \$Entities appeared before \$MeshFormat"))
+            version==4.1 || throw(ArgumentError(
+                "read_mixed_msh: \$Entities is only valid in MSH v4.1"))
+            (seen_nodes||seen_elements) && throw(ArgumentError(
+                "read_mixed_msh: \$Entities must precede nodes and elements"))
+            seen_entities=true
+            _read_mixed_entities_v4!(acc,io,limits)
+        elseif header=="\$Nodes"
+            seen_format || throw(ArgumentError(
+                "read_mixed_msh: \$Nodes appeared before \$MeshFormat"))
+            seen_nodes && throw(ArgumentError(
+                "read_mixed_msh: repeated \$Nodes sections are not supported"))
+            seen_elements && throw(ArgumentError(
+                "read_mixed_msh: \$Nodes must precede \$Elements"))
+            seen_nodes=true
+            version==2.2 ? _read_mixed_nodes_v2!(acc,io,limits) :
+                           _read_mixed_nodes_v4!(acc,io,limits)
+        elseif header=="\$Elements"
+            seen_nodes || throw(ArgumentError(
+                "read_mixed_msh: \$Elements appeared before \$Nodes"))
+            seen_elements=true
+            version==2.2 ? _read_mixed_elements_v2!(acc,io,limits) :
+                           _read_mixed_elements_v4!(acc,io,limits)
+        elseif startswith(header,"\$End")
+            throw(ArgumentError("read_mixed_msh: unexpected section terminator $header"))
+        elseif startswith(header,"\$")
+            seen_format || throw(ArgumentError(
+                "read_mixed_msh: section $header appeared before \$MeshFormat"))
+            _skip_msh_section(io,"\$End"*header[2:end])
+        else
+            throw(ArgumentError("read_mixed_msh: unexpected content outside a section"))
+        end
+    end
+    seen_format || throw(ArgumentError("read_mixed_msh: missing \$MeshFormat section"))
+    seen_nodes || throw(ArgumentError("read_mixed_msh: missing \$Nodes section"))
+    return _finish_mixed_read(acc,version==4.1)
+end
+
+function _unescape_mixed_name(encoded::AbstractString)
+    out=IOBuffer(); i=firstindex(encoded)
+    while i<=lastindex(encoded)
+        c=encoded[i]
+        if c=='\\'
+            i=nextind(encoded,i)
+            i<=lastindex(encoded) || throw(ArgumentError(
+                "read_mixed_msh: trailing escape in physical name"))
+            e=encoded[i]
+            if e=='\\' || e=='\"'
+                write(out,e)
+            elseif e=='n'
+                write(out,'\n')
+            elseif e=='r'
+                write(out,'\r')
+            elseif e=='t'
+                write(out,'\t')
+            else
+                # Gmsh itself treats backslashes literally. Preserve unknown
+                # pairs so paths and names from non-Tessella writers survive.
+                write(out,'\\'); write(out,e)
+            end
+        else
+            c=='\"' && throw(ArgumentError(
+                "read_mixed_msh: unescaped quote in physical name"))
+            write(out,c)
+        end
+        i=nextind(encoded,i)
+    end
+    return String(take!(out))
+end
+
+function _read_mixed_physical_names!(acc,io,limits,tessella_extensions::Bool)
+    n=_section_count(io,"physical-name",limits.max_physical_names)
+    acc.physical_name_records=try
+        Base.checked_add(acc.physical_name_records,n)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: physical-name record count overflows Int"))
+    end
+    acc.physical_name_records<=limits.max_physical_names || throw(ArgumentError(
+        "read_mixed_msh: cumulative physical-name count exceeds max_physical_names"))
+    pattern=r"^([+-]?\d+)\s+([+-]?\d+)\s+(.*)$"
+    for _ in 1:n
+        line=_msh_line(io,"PhysicalNames record")
+        isvalid(line) || throw(ArgumentError(
+            "read_mixed_msh: physical-name record is not valid UTF-8"))
+        line_limit=limits.max_name_bytes>typemax(Int)-128 ? typemax(Int) :
+                   limits.max_name_bytes+128
+        ncodeunits(line)<=line_limit || throw(ArgumentError(
+            "read_mixed_msh: physical-name record exceeds max_name_bytes"))
+        record=match(pattern,line)
+        record===nothing && throw(ArgumentError(
+            "read_mixed_msh: malformed physical-name record"))
+        dim=_msh_int(record.captures[1],"physical-name dimension")
+        tag=_msh_int(record.captures[2],"physical-name tag")
+        0<=dim<=3 || throw(ArgumentError(
+            "read_mixed_msh: physical-name dimension $dim is outside 0:3"))
+        1<=tag<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: physical-name tag must be positive and fit Int32"))
+        key=(dim,tag)
+        quoted=strip(record.captures[3])
+        ncodeunits(quoted)>=2 && first(quoted)=='\"' && last(quoted)=='\"' ||
+            throw(ArgumentError("read_mixed_msh: malformed quoted physical name"))
+        encoded=ncodeunits(quoted)==2 ? "" :
+            SubString(quoted,nextind(quoted,firstindex(quoted)),
+                      prevind(quoted,lastindex(quoted)))
+        name=tessella_extensions ? _unescape_mixed_name(encoded) : String(encoded)
+        !tessella_extensions && occursin('\"',name) && throw(ArgumentError(
+            "read_mixed_msh: unescaped quote in physical name"))
+        ncodeunits(name)<=limits.max_name_bytes || throw(ArgumentError(
+            "read_mixed_msh: physical name exceeds max_name_bytes"))
+        occursin('\0',name) && throw(ArgumentError(
+            "read_mixed_msh: physical name contains a NUL byte"))
+        if haskey(acc.physical_names,key)
+            acc.physical_names[key]==name || throw(ArgumentError(
+                "read_mixed_msh: conflicting physical names for ($dim,$tag)"))
+        else
+            acc.physical_names[key]=name
+        end
+    end
+    _expect_msh_end(io,"\$EndPhysicalNames")
+end
+
+function _read_mixed_entities_v4!(acc,io,limits)
+    reader=_MshTokenReader(io)
+    counts=ntuple(4) do _
+        _msh_int(_msh_token!(reader,"Entities header"),"Entities header")
+    end
+    all(>=(0),counts) || throw(ArgumentError(
+        "read_mixed_msh: negative v4 entity count"))
+    total=0
+    for count in counts
+        total=try Base.checked_add(total,count) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("read_mixed_msh: v4 entity count overflows Int"))
+        end
+    end
+    existing=try Base.checked_add(length(acc.entities),length(acc.implicit_entities)) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative=try Base.checked_add(existing,total) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative<=limits.max_entities || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 entity count $cumulative exceeds " *
+        "max_entities=$(limits.max_entities)"))
+    for dim in 0:3
+        for _ in 1:counts[dim+1]
+            tag=_msh_int(_msh_token!(reader,"dimension-$dim entity"),"entity tag")
+            1<=tag<=typemax(Int32) || throw(ArgumentError(
+                "read_mixed_msh: entity tags must be positive and fit Int32"))
+            key=(dim,tag); haskey(acc.entities,key) && throw(ArgumentError(
+                "read_mixed_msh: duplicate entity ($dim,$tag)"))
+            ncoordinates=dim==0 ? 3 : 6
+            box=ntuple(ncoordinates) do _
+                _msh_float(_msh_token!(reader,"entity bounds"),"entity bounds")
+            end
+            if dim>0
+                all(box[i]<=box[i+3] for i in 1:3) || throw(ArgumentError(
+                    "read_mixed_msh: entity ($dim,$tag) has reversed bounds"))
+            end
+            nphysical=_msh_int(
+                _msh_token!(reader,"entity physical-tag count"),
+                "entity physical-tag count")
+            nphysical>=0 || throw(ArgumentError(
+                "read_mixed_msh: negative physical-tag count on entity ($dim,$tag)"))
+            physical_tags=Int32[]
+            for _ in 1:nphysical
+                value=_msh_int(
+                    _msh_token!(reader,"entity physical tag"),"entity physical tag")
+                1<=value<=typemax(Int32) || throw(ArgumentError(
+                    "read_mixed_msh: entity physical tag must be positive and fit Int32"))
+                push!(physical_tags,Int32(value))
+            end
+            boundaries=Int32[]
+            if dim>0
+                nboundary=_msh_int(
+                    _msh_token!(reader,"entity boundary count"),
+                    "entity boundary count")
+                nboundary>=0 || throw(ArgumentError(
+                    "read_mixed_msh: negative boundary count on entity ($dim,$tag)"))
+                for _ in 1:nboundary
+                    boundary=_msh_int(
+                        _msh_token!(reader,"entity boundary tag"),"entity boundary tag")
+                    boundary!=0 || throw(ArgumentError(
+                        "read_mixed_msh: entity boundary tag cannot be zero"))
+                    boundary_tag=try abs(boundary) catch err
+                        err isa InterruptException && rethrow()
+                        throw(ArgumentError("read_mixed_msh: entity boundary tag overflows Int"))
+                    end
+                    boundary_tag<=typemax(Int32) || throw(ArgumentError(
+                        "read_mixed_msh: entity boundary tag does not fit Int32"))
+                    haskey(acc.entities,(dim-1,boundary_tag)) || throw(ArgumentError(
+                        "read_mixed_msh: entity ($dim,$tag) references undeclared boundary entity"))
+                    push!(boundaries,Int32(boundary))
+                end
+            end
+            record=MixedEntity(dim,tag,box;
+                               physical_tags=physical_tags,boundaries=boundaries)
+            acc.entities[key]=record
+            acc.entity_physical[key]=isempty(physical_tags) ? Int32(0) : first(physical_tags)
+        end
+    end
+    _expect_msh_token_end!(reader,"\$EndEntities")
+end
+
+function _read_mixed_nodes_v2!(acc,io,limits)
+    remaining=limits.max_nodes-length(acc.x)
+    count=_section_count(io,"v2 node",remaining)
+    for _ in 1:count
+        fields=_msh_fields(io,"v2 node record")
+        length(fields)==4 || throw(ArgumentError(
+            "read_mixed_msh: v2 node records require exactly 4 fields"))
+        tag=_msh_size_t(fields[1],"v2 node tag")
+        tag>0 || throw(ArgumentError("read_mixed_msh: node tags must be positive"))
+        haskey(acc.node_map,tag) && throw(ArgumentError(
+            "read_mixed_msh: duplicate node tag $tag"))
+        push!(acc.x,_msh_float(fields[2],"node coordinate"))
+        push!(acc.y,_msh_float(fields[3],"node coordinate"))
+        push!(acc.z,_msh_float(fields[4],"node coordinate"))
+        acc.node_map[tag]=Int32(length(acc.x))
+    end
+    _expect_msh_end(io,"\$EndNodes")
+end
+
+function _ensure_mixed_implicit_entity!(acc,dim::Int,tag::Int,limits)
+    key=(dim,tag)
+    (haskey(acc.entities,key) || key in acc.implicit_entities) && return nothing
+    length(acc.entities)+length(acc.implicit_entities)<limits.max_entities || throw(ArgumentError(
+        "read_mixed_msh: implicit entity count exceeds max_entities=$(limits.max_entities)"))
+    acc.entity_physical[key]=Int32(0)
+    push!(acc.implicit_entities,key)
+    return nothing
+end
+
+function _read_mixed_nodes_v4!(acc,io,limits)
+    reader=_MshTokenReader(io)
+    nblocks=_msh_int(
+        _msh_token!(reader,"v4 Nodes header"),"v4 node-block count")
+    count=_msh_int(
+        _msh_token!(reader,"v4 Nodes header"),"v4 node count")
+    declared_min=_msh_size_t(
+        _msh_token!(reader,"v4 Nodes header"),"v4 node tag range")
+    declared_max=_msh_size_t(
+        _msh_token!(reader,"v4 Nodes header"),"v4 node tag range")
+    nblocks>=0 || throw(ArgumentError(
+        "read_mixed_msh: negative v4 node-block count"))
+    count>=0 || throw(ArgumentError("read_mixed_msh: negative v4 node count"))
+    cumulative_blocks=try Base.checked_add(acc.node_blocks,nblocks) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 node-block count overflows Int"))
+    end
+    cumulative_blocks<=limits.max_blocks || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 node-block count exceeds max_blocks"))
+    count<=limits.max_nodes-length(acc.x) || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 node count exceeds max_nodes"))
+    nblocks<=count || throw(ArgumentError(
+        "read_mixed_msh: v4 node-block count exceeds node count"))
+    (count==0)==(nblocks==0) || throw(ArgumentError(
+        "read_mixed_msh: empty v4 node count and block count disagree"))
+    if count==0
+        (declared_min==0&&declared_max==0) || throw(ArgumentError(
+            "read_mixed_msh: empty v4 Nodes must declare range 0 0"))
+    else
+        0<declared_min<=declared_max || throw(ArgumentError(
+            "read_mixed_msh: invalid v4 node-tag range"))
+    end
+    actual_min=typemax(UInt64); actual_max=zero(UInt64); nread=0
+    for _ in 1:nblocks
+        dim=_msh_int(_msh_token!(reader,"v4 node-block header"),
+                     "node-block dimension")
+        entity=_msh_int(_msh_token!(reader,"v4 node-block header"),
+                        "node-block entity")
+        parametric=_msh_int(_msh_token!(reader,"v4 node-block header"),
+                            "node-block parametric flag")
+        nlocal=_msh_int(_msh_token!(reader,"v4 node-block header"),
+                        "node-block count")
+        0<=dim<=3 || throw(ArgumentError(
+            "read_mixed_msh: node-block dimension $dim is outside 0:3"))
+        1<=entity<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: node-block entity tags must be positive and fit Int32"))
+        # Gmsh creates a discrete entity when a node block refers to one that
+        # was not declared in an optional $Entities section.
+        _ensure_mixed_implicit_entity!(acc,dim,entity,limits)
+        parametric in (0,1) || throw(ArgumentError(
+            "read_mixed_msh: node-block parametric flag must be 0 or 1"))
+        0<nlocal<=count-nread || throw(ArgumentError(
+            "read_mixed_msh: invalid or excessive v4 node-block size"))
+        tags=UInt64[]
+        for i in 1:nlocal
+            tag=_msh_size_t(_msh_token!(reader,"v4 node tag"),"v4 node tag")
+            tag>0 || throw(ArgumentError("read_mixed_msh: node tags must be positive"))
+            haskey(acc.node_map,tag) && throw(ArgumentError(
+                "read_mixed_msh: duplicate node tag $tag"))
+            push!(tags,tag); acc.node_map[tag]=Int32(0)
+            actual_min=min(actual_min,tag); actual_max=max(actual_max,tag)
+        end
+        for i in 1:nlocal
+            x=_msh_float(_msh_token!(reader,"v4 node coordinates"),"node coordinate")
+            y=_msh_float(_msh_token!(reader,"v4 node coordinates"),"node coordinate")
+            z=_msh_float(_msh_token!(reader,"v4 node coordinates"),"node coordinate")
+            parameters=parametric==1 ? Float64[] : nothing
+            if parameters!==nothing
+                for _ in 1:dim
+                    push!(parameters,_msh_float(
+                        _msh_token!(reader,"parametric node coordinate"),
+                        "parametric node coordinate"))
+                end
+            end
+            push!(acc.x,x); push!(acc.y,y); push!(acc.z,z)
+            push!(acc.external_node_tags,tags[i])
+            push!(acc.node_entities,(dim,Int32(entity)))
+            push!(acc.node_parametric,parameters)
+            acc.node_map[tags[i]]=Int32(length(acc.x)); nread+=1
+        end
+    end
+    nread==count || throw(ArgumentError(
+        "read_mixed_msh: v4 Nodes declared $count nodes but contained $nread"))
+    count==0 || (actual_min==declared_min&&actual_max==declared_max) || throw(ArgumentError(
+        "read_mixed_msh: v4 node-tag range does not match records"))
+    _expect_msh_token_end!(reader,"\$EndNodes")
+    acc.node_blocks=cumulative_blocks
+end
+
+function _mixed_physical_tag(value::Int,context::AbstractString)
+    0<=value<=typemax(Int32) || throw(ArgumentError(
+        "read_mixed_msh: $context must be non-negative and fit Int32"))
+    return Int32(value)
+end
+
+function _record_mixed_element_tag!(acc,tag::UInt64)
+    tag>0 || throw(ArgumentError("read_mixed_msh: element tags must be positive"))
+    tag in acc.element_tags && throw(ArgumentError(
+        "read_mixed_msh: duplicate element tag $tag"))
+    push!(acc.element_tags,tag); return nothing
+end
+
+function _push_mixed_cell!(acc,etype::Int,physical::Int32,entity::Int32,
+                           element_tag::UInt64,node_tokens)
+    spec=msh_spec(etype)
+    length(node_tokens)==spec.nnodes || throw(ArgumentError(
+        "read_mixed_msh: type $etype expects $(spec.nnodes) node tags"))
+    bucket=get!(acc.buckets,etype) do
+        _MixedReadBucket(Int32[],Int32[],Int32[],UInt64[])
+    end
+    for token in node_tokens
+        external=_msh_size_t(token,"element node tag")
+        internal=get(acc.node_map,external,Int32(0))
+        internal!=0 || throw(ArgumentError(
+            "read_mixed_msh: element references unknown node tag $external"))
+        push!(bucket.nodes,internal)
+    end
+    push!(bucket.tags,physical)
+    push!(bucket.entities,entity)
+    push!(bucket.external_tags,element_tag)
+    return nothing
+end
+
+function _read_mixed_elements_v2!(acc,io,limits)
+    remaining=limits.max_elements-length(acc.element_tags)
+    count=_section_count(io,"v2 element",remaining)
+    for _ in 1:count
+        fields=_msh_fields(io,"v2 element record")
+        length(fields)>=3 || throw(ArgumentError(
+            "read_mixed_msh: malformed v2 element record"))
+        element_tag=_msh_size_t(fields[1],"v2 element tag")
+        _record_mixed_element_tag!(acc,element_tag)
+        etype=_msh_int(fields[2],"v2 element type")
+        spec=msh_spec(etype)
+        ntags=_msh_int(fields[3],"v2 element tag count")
+        ntags>=0 || throw(ArgumentError(
+            "read_mixed_msh: negative v2 element tag count"))
+        expected=try Base.checked_add(3,Base.checked_add(ntags,spec.nnodes)) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("read_mixed_msh: v2 element field count overflows Int"))
+        end
+        length(fields)==expected || throw(ArgumentError(
+            "read_mixed_msh: type $etype v2 record has $(length(fields)) fields; expected $expected"))
+        physical=Int32(0)
+        for i in 1:ntags
+            value=_msh_int(fields[3+i],"v2 element metadata tag")
+            i==1 && (physical=_mixed_physical_tag(value,"physical tag"))
+        end
+        first_node=4+ntags
+        _push_mixed_cell!(acc,etype,physical,Int32(0),element_tag,
+                          @view fields[first_node:end])
+    end
+    _expect_msh_end(io,"\$EndElements")
+end
+
+function _read_mixed_elements_v4!(acc,io,limits)
+    reader=_MshTokenReader(io)
+    nblocks=_msh_int(
+        _msh_token!(reader,"v4 Elements header"),"v4 element-block count")
+    count=_msh_int(
+        _msh_token!(reader,"v4 Elements header"),"v4 element count")
+    declared_min=_msh_size_t(
+        _msh_token!(reader,"v4 Elements header"),"v4 element tag range")
+    declared_max=_msh_size_t(
+        _msh_token!(reader,"v4 Elements header"),"v4 element tag range")
+    nblocks>=0 || throw(ArgumentError(
+        "read_mixed_msh: negative v4 element-block count"))
+    count>=0 || throw(ArgumentError("read_mixed_msh: negative v4 element count"))
+    cumulative_blocks=try Base.checked_add(acc.element_blocks,nblocks) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "read_mixed_msh: cumulative v4 element-block count overflows Int"))
+    end
+    cumulative_blocks<=limits.max_blocks || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 element-block count exceeds max_blocks"))
+    count<=limits.max_elements-length(acc.element_tags) || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 element count exceeds max_elements"))
+    nblocks<=count || throw(ArgumentError(
+        "read_mixed_msh: v4 element-block count exceeds element count"))
+    (count==0)==(nblocks==0) || throw(ArgumentError(
+        "read_mixed_msh: empty v4 element count and block count disagree"))
+    if count==0
+        (declared_min==0&&declared_max==0) || throw(ArgumentError(
+            "read_mixed_msh: empty v4 Elements must declare range 0 0"))
+    else
+        0<declared_min<=declared_max || throw(ArgumentError(
+            "read_mixed_msh: invalid v4 element-tag range"))
+    end
+    actual_min=typemax(UInt64); actual_max=zero(UInt64); nread=0
+    for _ in 1:nblocks
+        dim=_msh_int(
+            _msh_token!(reader,"v4 element-block header"),
+            "element-block dimension")
+        entity=_msh_int(
+            _msh_token!(reader,"v4 element-block header"),
+            "element-block entity")
+        etype=_msh_int(
+            _msh_token!(reader,"v4 element-block header"),
+            "element-block type")
+        nlocal=_msh_int(
+            _msh_token!(reader,"v4 element-block header"),
+            "element-block count")
+        0<=dim<=3 || throw(ArgumentError(
+            "read_mixed_msh: element-block dimension $dim is outside 0:3"))
+        1<=entity<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: element-block entity tags must be positive and fit Int32"))
+        haskey(acc.entity_physical,(dim,entity)) || throw(ArgumentError(
+            "read_mixed_msh: element block references undeclared entity ($dim,$entity)"))
+        spec=msh_spec(etype)
+        spec.dim==dim || throw(ArgumentError(
+            "read_mixed_msh: type $etype is incompatible with entity dimension $dim"))
+        0<nlocal<=count-nread || throw(ArgumentError(
+            "read_mixed_msh: invalid or excessive v4 element-block size"))
+        physical=acc.entity_physical[(dim,entity)]
+        for _ in 1:nlocal
+            tag=_msh_size_t(
+                _msh_token!(reader,"v4 element tag"),"v4 element tag")
+            _record_mixed_element_tag!(acc,tag)
+            actual_min=min(actual_min,tag); actual_max=max(actual_max,tag)
+            bucket=get!(acc.buckets,etype) do
+                _MixedReadBucket(Int32[],Int32[],Int32[],UInt64[])
+            end
+            for _ in 1:spec.nnodes
+                external=_msh_size_t(
+                    _msh_token!(reader,"v4 element node tag"),
+                    "v4 element node tag")
+                internal=get(acc.node_map,external,Int32(0))
+                internal!=0 || throw(ArgumentError(
+                    "read_mixed_msh: element references unknown node tag $external"))
+                push!(bucket.nodes,internal)
+            end
+            push!(bucket.tags,physical)
+            push!(bucket.entities,Int32(entity))
+            push!(bucket.external_tags,tag)
+            nread+=1
+        end
+    end
+    nread==count || throw(ArgumentError(
+        "read_mixed_msh: v4 Elements declared $count elements but contained $nread"))
+    count==0 || (actual_min==declared_min&&actual_max==declared_max) || throw(ArgumentError(
+        "read_mixed_msh: v4 element-tag range does not match records"))
+    _expect_msh_token_end!(reader,"\$EndElements")
+    acc.element_blocks=cumulative_blocks
+end
+
+function _finish_mixed_read(acc,is_v4::Bool)
+    nn=length(acc.x); coords=Matrix{Float64}(undef,3,nn)
+    @inbounds for i in 1:nn
+        coords[1,i]=acc.x[i]; coords[2,i]=acc.y[i]; coords[3,i]=acc.z[i]
+    end
+    blocks=ElementBlock[]
+    block_entities=Vector{Int32}[]
+    external_element_tags=Vector{UInt64}[]
+    for (etype,bucket) in sort!(collect(acc.buckets);by=first)
+        spec=msh_spec(etype); count=length(bucket.tags)
+        length(bucket.nodes)==spec.nnodes*count || throw(ErrorException(
+            "read_mixed_msh: internal connectivity accumulation mismatch"))
+        push!(blocks,ElementBlock(etype,reshape(bucket.nodes,spec.nnodes,count),bucket.tags))
+        push!(block_entities,copy(bucket.entities))
+        push!(external_element_tags,copy(bucket.external_tags))
+    end
+    data=is_v4 ? MixedEntityData(acc.entities;
+        node_entities=acc.node_entities,
+        node_parametric=acc.node_parametric,
+        external_node_tags=acc.external_node_tags,
+        block_entities=block_entities,
+        external_element_tags=external_element_tags) : nothing
+    return MixedMesh(coords,blocks;physical_names=acc.physical_names,
+                     entity_data=data)
+end
+
+function _escape_mixed_name(name::AbstractString)
+    out=IOBuffer()
+    for c in name
+        c=='\\' ? write(out,"\\\\") :
+        c=='\"' ? write(out,"\\\"") :
+        c=='\n' ? write(out,"\\n") :
+        c=='\r' ? write(out,"\\r") :
+        c=='\t' ? write(out,"\\t") : write(out,c)
+    end
+    return String(take!(out))
+end
+
+function _write_mixed_physical_names(io,names)
+    isempty(names) && return nothing
+    println(io,"\$PhysicalNames"); println(io,length(names))
+    for ((dim,tag),name) in sort!(collect(names);by=first)
+        encoded=_escape_mixed_name(name)
+        ncodeunits(encoded)<=MSH_PHYSICAL_NAME_MAX_BYTES || throw(ArgumentError(
+            "write_mixed_msh: escaped physical name for ($dim,$tag) exceeds " *
+            "$MSH_PHYSICAL_NAME_MAX_BYTES bytes"))
+        println(io,dim," ",tag," \"",encoded,"\"")
+    end
+    println(io,"\$EndPhysicalNames")
+    return nothing
+end
+
+"""
+    write_mixed_msh(path, mesh; version=4.1, gmsh_compatible=true) -> path
+
+Validate and atomically write a mixed mesh as ASCII MSH v2.2 or v4.1. V4
+entity metadata is preserved exactly when present; legacy meshes receive a
+deterministic discrete-entity layout with coordinate-derived bounds. MSH v2.2
+necessarily writes the legacy first-physical-tag projection. By default,
+element tags that pinned Gmsh 4.15.2 itself cannot re-import, and names needing
+an escape that Gmsh does not decode, are explicit blockers. Set
+`gmsh_compatible=false` only for Tessella-to-Tessella serialization of those
+records, and read such escaped names with
+`read_mixed_msh(...; tessella_extensions=true)`.
+"""
+function write_mixed_msh(path::AbstractString,m::MixedMesh;version::Real=4.1,
+                         gmsh_compatible=true)
+    value = try
+        Float64(version)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("write_mixed_msh: version must be representable as Float64"))
+    end
+    value in (2.2,4.1) || throw(ArgumentError(
+        "write_mixed_msh: version must be 2.2 or 4.1"))
+    gmsh_compatible isa Bool || throw(ArgumentError(
+        "write_mixed_msh: gmsh_compatible must be Bool"))
+    if gmsh_compatible
+        reader_gaps=value==2.2 ? GMSH_4_15_2_MSH_READER_GAPS_V2 :
+                                GMSH_4_15_2_MSH_READER_GAPS_V4
+        gaps=sort!(unique!(Int[b.msh for b in m.blocks
+                              if b.msh in reader_gaps]))
+        isempty(gaps) || throw(ArgumentError(
+            "write_mixed_msh: Gmsh 4.15.2 cannot re-import element type(s) " *
+            join(gaps,",") * "; use gmsh_compatible=false only for a " *
+            "Tessella-only round trip"))
+        bad_names=Tuple{Int,Int}[]
+        for (key,name) in m.physical_names
+            any(c->c=='\\' || c=='\"' || c<' ',name) && push!(bad_names,key)
+        end
+        isempty(bad_names) || throw(ArgumentError(
+            "write_mixed_msh: Gmsh 4.15.2 cannot decode escaped physical " *
+            "name(s) " * join(sort!(bad_names),",") *
+            "; use gmsh_compatible=false only for a Tessella-only round trip"))
+    end
+    diagnostic=validate(m)
+    diagnostic.ok || throw(ArgumentError(
+        "write_mixed_msh: invalid mixed mesh: "*join(diagnostic.messages,"; ")))
+    names=_copy_physical_names(m.physical_names,"write_mixed_msh")
+    target=abspath(path); parent=dirname(target)
+    isdir(parent) || throw(ArgumentError(
+        "write_mixed_msh: parent directory does not exist: $parent"))
+    isdir(target) && throw(ArgumentError(
+        "write_mixed_msh: destination is a directory: $target"))
+    mktemp(parent) do temporary,io
+        value==2.2 ? _write_mixed_v2(io,m,names) : _write_mixed_v4(io,m,names)
+        flush(io); close(io)
+        mv(temporary,target;force=true)
+    end
+    return path
+end
+
+function _v2_entity_ids(m::MixedMesh)
+    keys=Set{Tuple{Int,Int32}}()
+    @inbounds for b in m.blocks
+        dim=msh_spec(b.msh).dim
+        for tag in b.tags
+            push!(keys,(dim,tag))
+        end
+    end
+    counters=zeros(Int,4); ids=Dict{Tuple{Int,Int32},Int}()
+    for key in sort!(collect(keys))
+        dim=key[1]; counters[dim+1]+=1; ids[key]=counters[dim+1]
+    end
+    return ids
+end
+
+function _write_mixed_v2(io,m::MixedMesh,names)
+    println(io,"\$MeshFormat"); println(io,"2.2 0 8"); println(io,"\$EndMeshFormat")
+    _write_mixed_physical_names(io,names)
+    nn=size(m.coords,2)
+    println(io,"\$Nodes"); println(io,nn)
+    @inbounds for i in 1:nn
+        @printf(io,"%d %.17g %.17g %.17g\n",i,m.coords[1,i],m.coords[2,i],m.coords[3,i])
+    end
+    println(io,"\$EndNodes")
+    nel=_assert_mixed_structure(m,"write_mixed_msh")
+    println(io,"\$Elements"); println(io,nel)
+    ids=_v2_entity_ids(m); eid=0
+    @inbounds for b in m.blocks
+        spec=msh_spec(b.msh)
+        for j in axes(b.nodes,2)
+            eid+=1; physical=b.tags[j]; entity=ids[(spec.dim,physical)]
+            print(io,eid," ",b.msh," 2 ",physical," ",entity)
+            for i in 1:spec.nnodes
+                print(io," ",b.nodes[i,j])
+            end
+            println(io)
+        end
+    end
+    println(io,"\$EndElements")
+    return nothing
+end
+
+struct _MixedWriteGroup
+    dim::Int
+    entity::Int
+    msh::Int
+    cells::Vector{_MixedCellRef}
+end
+
+struct _MixedWriteEntity
+    dim::Int
+    tag::Int
+    physical::Int32
+    bounds::NTuple{6,Float64}
+end
+
+@inline function _grow_bounds!(bounds::Vector{Float64},m::MixedMesh,b::ElementBlock,j::Int)
+    @inbounds for i in axes(b.nodes,1)
+        n=b.nodes[i,j]; x=m.coords[1,n]; y=m.coords[2,n]; z=m.coords[3,n]
+        bounds[1]=min(bounds[1],x); bounds[2]=min(bounds[2],y); bounds[3]=min(bounds[3],z)
+        bounds[4]=max(bounds[4],x); bounds[5]=max(bounds[5],y); bounds[6]=max(bounds[6],z)
+    end
+    return nothing
+end
+
+function _all_mixed_bounds(m::MixedMesh)
+    size(m.coords,2)==0 && return (0.0,0.0,0.0,0.0,0.0,0.0)
+    bounds=Float64[Inf,Inf,Inf,-Inf,-Inf,-Inf]
+    @inbounds for i in axes(m.coords,2)
+        x=m.coords[1,i]; y=m.coords[2,i]; z=m.coords[3,i]
+        bounds[1]=min(bounds[1],x); bounds[2]=min(bounds[2],y); bounds[3]=min(bounds[3],z)
+        bounds[4]=max(bounds[4],x); bounds[5]=max(bounds[5],y); bounds[6]=max(bounds[6],z)
+    end
+    return Tuple(bounds)
+end
+
+function _mixed_v4_layout(m::MixedMesh)
+    raw_groups=Dict{Tuple{Int,Int32,Int},Vector{_MixedCellRef}}()
+    entity_bounds=Dict{Tuple{Int,Int32},Vector{Float64}}()
+    point_cells=_MixedCellRef[]
+    @inbounds for (bi,b) in pairs(m.blocks)
+        spec=msh_spec(b.msh)
+        for j in axes(b.nodes,2)
+            ref=_MixedCellRef(bi,j)
+            if spec.dim==0
+                push!(point_cells,ref)
+            else
+                key=(spec.dim,b.tags[j],b.msh)
+                cells=get!(raw_groups,key) do
+                    _MixedCellRef[]
+                end
+                push!(cells,ref)
+                entity_key=(spec.dim,b.tags[j])
+                bounds=get!(entity_bounds,entity_key) do
+                    Float64[Inf,Inf,Inf,-Inf,-Inf,-Inf]
+                end
+                _grow_bounds!(bounds,m,b,j)
+            end
+        end
+    end
+    sort!(point_cells;lt=(a,b)->_mixed_cell_lt(m,a,b),alg=MergeSort)
+    entity_ids=Dict{Tuple{Int,Int32},Int}(); counters=zeros(Int,4)
+    for key in sort!(collect(keys(entity_bounds)))
+        dim=key[1]; counters[dim+1]+=1; entity_ids[key]=counters[dim+1]
+    end
+    entities=_MixedWriteEntity[]; groups=_MixedWriteGroup[]
+    for ref in point_cells
+        counters[1]+=1; entity=counters[1]
+        b=m.blocks[ref.block]; n=b.nodes[1,ref.cell]
+        x=m.coords[1,n]; y=m.coords[2,n]; z=m.coords[3,n]
+        push!(entities,_MixedWriteEntity(0,entity,b.tags[ref.cell],(x,y,z,x,y,z)))
+        push!(groups,_MixedWriteGroup(0,entity,b.msh,_MixedCellRef[ref]))
+    end
+    for key in sort!(collect(keys(entity_bounds)))
+        dim,physical=key; entity=entity_ids[key]
+        push!(entities,_MixedWriteEntity(dim,entity,physical,Tuple(entity_bounds[key])))
+    end
+    for (key,cells) in sort!(collect(raw_groups);by=first)
+        dim,physical,msh=key
+        sort!(cells;lt=(a,b)->_mixed_cell_lt(m,a,b),alg=MergeSort)
+        push!(groups,_MixedWriteGroup(dim,entity_ids[(dim,physical)],msh,cells))
+    end
+    node_entity=0
+    if size(m.coords,2)>0
+        counters[4]+=1; node_entity=counters[4]
+        push!(entities,_MixedWriteEntity(3,node_entity,Int32(0),_all_mixed_bounds(m)))
+    end
+    sort!(entities;by=e->(e.dim,e.tag))
+    sort!(groups;by=g->(g.dim,g.entity,g.msh))
+    return entities,groups,node_entity
+end
+
+function _write_mixed_entity(io,entity::_MixedWriteEntity)
+    if entity.dim==0
+        @printf(io,"%d %.17g %.17g %.17g %d",entity.tag,
+                entity.bounds[1],entity.bounds[2],entity.bounds[3],
+                entity.physical==0 ? 0 : 1)
+        entity.physical==0 || print(io," ",entity.physical)
+        println(io)
+    else
+        @printf(io,"%d %.17g %.17g %.17g %.17g %.17g %.17g %d",
+                entity.tag,entity.bounds...,entity.physical==0 ? 0 : 1)
+        entity.physical==0 || print(io," ",entity.physical)
+        println(io," 0")
+    end
+    return nothing
+end
+
+function _write_mixed_entity(io,entity::MixedEntity)
+    nphysical=length(entity.physical_tags)
+    if entity.dim==0
+        @printf(io,"%d %.17g %.17g %.17g %d",entity.tag,
+                entity.bbox[1],entity.bbox[2],entity.bbox[3],nphysical)
+        for physical in entity.physical_tags
+            print(io," ",physical)
+        end
+        println(io)
+    else
+        @printf(io,"%d %.17g %.17g %.17g %.17g %.17g %.17g %d",
+                entity.tag,entity.bbox...,nphysical)
+        for physical in entity.physical_tags
+            print(io," ",physical)
+        end
+        print(io," ",length(entity.boundaries))
+        for boundary in entity.boundaries
+            print(io," ",boundary)
+        end
+        println(io)
+    end
+    return nothing
+end
+
+function _mixed_metadata_node_runs(data::MixedEntityData)
+    runs=UnitRange{Int}[]
+    n=length(data.external_node_tags); first_node=1
+    while first_node<=n
+        dim,entity=data.node_entities[first_node]
+        parametric=data.node_parametric[first_node]!==nothing
+        last_node=first_node
+        while last_node<n
+            next_dim,next_entity=data.node_entities[last_node+1]
+            next_parametric=data.node_parametric[last_node+1]!==nothing
+            (next_dim==dim && next_entity==entity &&
+             next_parametric==parametric) || break
+            last_node+=1
+        end
+        push!(runs,first_node:last_node); first_node=last_node+1
+    end
+    return runs
+end
+
+struct _MixedMetadataElementRun
+    block::Int
+    cells::UnitRange{Int}
+end
+
+function _mixed_metadata_element_runs(m::MixedMesh,data::MixedEntityData)
+    runs=_MixedMetadataElementRun[]
+    for (bi,block) in pairs(m.blocks)
+        entities=data.block_entities[bi]; first_cell=1; ncells=size(block.nodes,2)
+        while first_cell<=ncells
+            entity=entities[first_cell]; last_cell=first_cell
+            while last_cell<ncells && entities[last_cell+1]==entity
+                last_cell+=1
+            end
+            push!(runs,_MixedMetadataElementRun(bi,first_cell:last_cell))
+            first_cell=last_cell+1
+        end
+    end
+    return runs
+end
+
+function _write_mixed_v4_metadata(io,m::MixedMesh,names,data::MixedEntityData)
+    println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
+    _write_mixed_physical_names(io,names)
+    entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
+    counts=zeros(Int,4)
+    for entity in entities
+        counts[entity.dim+1]+=1
+    end
+    println(io,"\$Entities")
+    println(io,counts[1]," ",counts[2]," ",counts[3]," ",counts[4])
+    for entity in entities
+        _write_mixed_entity(io,entity)
+    end
+    println(io,"\$EndEntities")
+
+    nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
+    minimum_node=nn==0 ? 0 : minimum(data.external_node_tags)
+    maximum_node=nn==0 ? 0 : maximum(data.external_node_tags)
+    println(io,"\$Nodes")
+    println(io,length(node_runs)," ",nn," ",minimum_node," ",maximum_node)
+    @inbounds for run in node_runs
+        first_node=first(run); dim,entity=data.node_entities[first_node]
+        parametric=data.node_parametric[first_node]!==nothing
+        println(io,dim," ",entity," ",parametric ? 1 : 0," ",length(run))
+        for i in run
+            println(io,data.external_node_tags[i])
+        end
+        for i in run
+            @printf(io,"%.17g %.17g %.17g",
+                    m.coords[1,i],m.coords[2,i],m.coords[3,i])
+            parameters=data.node_parametric[i]
+            if parameters!==nothing
+                for value in parameters
+                    @printf(io," %.17g",value)
+                end
+            end
+            println(io)
+        end
+    end
+    println(io,"\$EndNodes")
+
+    nel=_assert_mixed_structure(m,"write_mixed_msh")
+    element_runs=_mixed_metadata_element_runs(m,data)
+    all_element_tags=Iterators.flatten(data.external_element_tags)
+    minimum_element=nel==0 ? 0 : minimum(all_element_tags)
+    maximum_element=nel==0 ? 0 : maximum(Iterators.flatten(data.external_element_tags))
+    println(io,"\$Elements")
+    println(io,length(element_runs)," ",nel," ",minimum_element," ",maximum_element)
+    @inbounds for run in element_runs
+        block=m.blocks[run.block]; spec=msh_spec(block.msh)
+        entity=data.block_entities[run.block][first(run.cells)]
+        println(io,spec.dim," ",entity," ",block.msh," ",length(run.cells))
+        for j in run.cells
+            print(io,data.external_element_tags[run.block][j])
+            for i in 1:spec.nnodes
+                internal=block.nodes[i,j]
+                print(io," ",data.external_node_tags[internal])
+            end
+            println(io)
+        end
+    end
+    println(io,"\$EndElements")
+    return nothing
+end
+
+function _write_mixed_v4(io,m::MixedMesh,names)
+    m.entity_data===nothing || return _write_mixed_v4_metadata(
+        io,m,names,m.entity_data)
+    println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
+    _write_mixed_physical_names(io,names)
+    entities,groups,node_entity=_mixed_v4_layout(m)
+    counts=zeros(Int,4)
+    for entity in entities
+        counts[entity.dim+1]+=1
+    end
+    println(io,"\$Entities")
+    println(io,counts[1]," ",counts[2]," ",counts[3]," ",counts[4])
+    for entity in entities
+        _write_mixed_entity(io,entity)
+    end
+    println(io,"\$EndEntities")
+    nn=size(m.coords,2)
+    println(io,"\$Nodes")
+    println(io,nn==0 ? 0 : 1," ",nn," ",nn==0 ? 0 : 1," ",nn)
+    if nn>0
+        println(io,"3 ",node_entity," 0 ",nn)
+        for i in 1:nn
+            println(io,i)
+        end
+        @inbounds for i in 1:nn
+            @printf(io,"%.17g %.17g %.17g\n",m.coords[1,i],m.coords[2,i],m.coords[3,i])
+        end
+    end
+    println(io,"\$EndNodes")
+    nel=_assert_mixed_structure(m,"write_mixed_msh")
+    println(io,"\$Elements")
+    println(io,length(groups)," ",nel," ",nel==0 ? 0 : 1," ",nel)
+    eid=0
+    @inbounds for group in groups
+        println(io,group.dim," ",group.entity," ",group.msh," ",length(group.cells))
+        spec=msh_spec(group.msh)
+        for ref in group.cells
+            b=m.blocks[ref.block]; eid+=1; print(io,eid)
+            for i in 1:spec.nnodes
+                print(io," ",b.nodes[i,ref.cell])
+            end
+            println(io)
+        end
+    end
+    println(io,"\$EndElements")
+    return nothing
+end
+
+end # module
