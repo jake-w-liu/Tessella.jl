@@ -15,6 +15,7 @@ using Tessella
     include("transfinite_triangle_test.jl") # specific three-sided structured patches
     include("transfinite_quad_test.jl") # recombined four-sided quadrangle patches
     include("transfinite_volume_test.jl") # affine six-face structured volumes
+    include("transfinite_prism_test.jl") # affine five-face transfinite prisms
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle

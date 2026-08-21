@@ -116,6 +116,12 @@ transfinite_volume_command = `$(Base.julia_cmd()) --startup-file=no --check-boun
 println("  command: ", transfinite_volume_command)
 run(transfinite_volume_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── transfinite_prism ──  Gmsh 4.15.2 affine five-face prisms")
+transfinite_prism_script = joinpath(HERE, "transfinite_prism", "differential.jl")
+transfinite_prism_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_prism_script`
+println("  command: ", transfinite_prism_command)
+run(transfinite_prism_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),

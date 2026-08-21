@@ -75,7 +75,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
   physical tags, and exact projected corner-Jacobian certification;
 - affine six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron
-  subdivision, with boundary tags and exact topology/orientation postconditions.
+  subdivision, with boundary tags and exact topology/orientation postconditions;
+- affine five-face triangular prisms using Gmsh's legacy collapsed-grid tetrahedron
+  templates, with exact orientation, boundary, and represented-volume certification.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer element
 construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
@@ -85,8 +87,8 @@ general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros
 dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
 non-affine CAD curve integration and FlexibleTransfinite/HWall laws,
-quasi-transfinite or holed patches, recombined three-sided patches, five-face or
-curved/warped transfinite volumes,
+quasi-transfinite or holed patches, recombined three-sided patches, curved/warped or
+compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
 non-8-byte binary data, and ancillary-section preservation. MSH2 ASCII is the lossless
@@ -109,9 +111,10 @@ julia --project --check-bounds=yes validation/run_all.jl
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, uniform-refinement, transfinite-patch, straight transfinite
-curve-law, three-sided transfinite, recombined-quadrangle, and affine
-transfinite-volume differentials as mandatory bounds-checked children. Missing or
-wrong-version Gmsh and differential failures make the aggregate command fail. See
+curve-law, three-sided transfinite, recombined-quadrangle, affine
+transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
+children. Missing or wrong-version Gmsh and differential failures make the aggregate
+command fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
 rules.
 

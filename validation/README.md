@@ -29,6 +29,8 @@ validation/
     differential.jl      # required Gmsh 4.15.2 recombined-quad differential
   transfinite_volume/
     differential.jl      # required Gmsh 4.15.2 affine-volume differential
+  transfinite_prism/
+    differential.jl      # required Gmsh 4.15.2 five-face-prism differential
   cases/
     01_box/box.geo               # reference gmsh script (retained)
     02_cylinder/cylinder.geo
@@ -49,10 +51,11 @@ julia --project=. --check-bounds=yes validation/run_all.jl
 
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
 the size-field, uniform-refinement, four-sided transfinite, straight transfinite
-curve-law, three-sided transfinite, recombined-quadrangle, and affine
-transfinite-volume differentials as mandatory bounds-checked children; missing or
-wrong-version Gmsh, failed probes, and parity mismatches make the aggregate command
-fail. Mesh-case results print to the terminal and to `validation/REPORT.md`.
+curve-law, three-sided transfinite, recombined-quadrangle, affine
+transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
+children; missing or wrong-version Gmsh, failed probes, and parity mismatches make
+the aggregate command fail. Mesh-case results print to the terminal and to
+`validation/REPORT.md`.
 
 ## What each case checks
 
