@@ -38,6 +38,7 @@ Tessella
 ├── Recombine     deterministic physical-tag-preserving triangle-to-quad pairing
 ├── Refine        deterministic one-level uniform linear-simplex refinement
 ├── Transfinite   validated four-sided planar structured triangle patches
+├── TransfiniteCurve normalized straight-curve Progression/Bump/Beta laws
 ├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
 ├── SizeField     scalar/anisotropic catalog, .geo field graph, context resolvers
 ├── Mesh1D        metric-length curve and segment discretization
@@ -92,7 +93,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus ten serializable cut/border/child/sub-element records, mixed metadata, validation/CRC, and ASCII/binary MSH v2.2/v4.1 shipped |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, mesh Booleans, finalized-mesh affine transforms, and bounded `.geo` constant expressions shipped |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — deterministic surface recombination, uniform simplex refinement, and four-sided planar transfinite patches shipped |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — deterministic surface recombination, uniform simplex refinement, straight-curve laws, and four-sided planar transfinite patches shipped |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
 
@@ -131,10 +132,13 @@ P4 currently covers validated, deterministic pairing of adjacent same-physical-t
 surface triangles into first-order quadrangles, with unpaired triangles and boundary
 segments retained. It also covers one-level uniform refinement of linear segments,
 triangles, and tetrahedra with Gmsh 4.15.2 child templates, shared lexicographic edge
-midpoints, compacted unused nodes, and parent-tag preservation. Four-sided planar
-transfinite patches implement Gmsh's average-chord Coons interpolation and all four
-triangle arrangements for already-discretized, count-matched boundary chains. P4 does
-not yet claim Gmsh's Blossom/full-quad algorithms, curve discretization laws,
+midpoints, compacted unused nodes, and parent-tag preservation. Normalized affine-line
+transfinite parameters cover Gmsh's Progression/Power, Bump, and Beta laws with signed
+orientation and representability gates. Four-sided planar transfinite patches
+implement Gmsh's average-chord Coons interpolation and all four triangle arrangements
+for already-discretized, count-matched boundary chains. P4 does not yet claim Gmsh's
+Blossom/full-quad algorithms, non-affine CAD curve integration, FlexibleTransfinite
+or HWall/size-map curve laws,
 three-sided/quasi-transfinite or holed patches, general CAD parameterizations,
 transfinite quadrangles or volumes, volume/hybrid recombination, selective or
 high-order refinement, coarsening, boundary-layer element topology, or
@@ -160,9 +164,9 @@ julia --project --check-bounds=yes validation/run_all.jl
 ```
 
 The aggregate validation launches the Gmsh 4.15.2 size-field, uniform-refinement,
-and four-sided transfinite differentials as required bounds-checked children. A
-missing or wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
-aggregate command fail.
+four-sided transfinite, and straight transfinite curve-law differentials as required
+bounds-checked children. A missing or wrong-version Gmsh runtime, a failed probe, or
+a parity mismatch makes the aggregate command fail.
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the non-negotiable anti-false-positive
 rules and [`STATUS.md`](STATUS.md) for the last measured gate.

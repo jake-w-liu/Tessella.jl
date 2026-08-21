@@ -29,6 +29,7 @@ include("Elements.jl")       # P2: general fixed-node Gmsh element/entity model 
 include("Recombine.jl")      # P4: deterministic triangle-to-quad surface recombination
 include("Refine.jl")         # P4: deterministic one-level uniform simplex refinement
 include("Transfinite.jl")    # P4: validated four-sided planar transfinite patches
+include("TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
@@ -53,6 +54,7 @@ using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimensio
 using .Recombine: recombine_triangles
 using .Refine: refine_uniform
 using .Transfinite: mesh_transfinite_patch
+using .TransfiniteCurve: transfinite_curve_parameters
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -88,6 +90,7 @@ export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_ord
 export recombine_triangles
 export refine_uniform
 export mesh_transfinite_patch
+export transfinite_curve_parameters
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
        MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,
