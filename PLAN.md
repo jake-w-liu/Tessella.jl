@@ -108,9 +108,9 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O, and a tagged point/curve/surface/volume kernel |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation, classified STEP/IGES solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, Point/Line-In-Surface embeddings, Point-In-Volume Steiner insertion, holed plane surfaces, recombined hexahedra, prismatic boundary layers, and translation periodic identification |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic boundary layers, and translation periodic identification |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — model/mesh API, CLI, headless GUI state, views/plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface embed, API box, OCC cylinder, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, API box, OCC cylinder, and BooleanDifference box corpus |
 
 P1 does not yet claim boundary-layer element topology, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -145,7 +145,9 @@ Dilate about a center, and coordinate-axis rotations by integer multiples of π/
 that preserve axis-aligned boxes. Point-In-Surface embeddings force the classified
 point to appear as a mesh node; Line-In-Surface embeddings recover the curve as an
 interior constrained edge chain without creating a hole; Point-In-Volume embeddings
-insert a Steiner vertex by a 1-to-4 tet split. It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD
+insert a Steiner vertex by a tet split; Line-In-Volume and Surface-In-Volume recover
+interior edge chains and open triangular sheets as tet faces without removing volume.
+It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD
 import/export, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
 functions, prior scalar bindings, and explicit field/physical tags with resource
@@ -179,8 +181,8 @@ or HWall/size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes, recombined three-sided patches,
 volume/hybrid recombination, selective or
-high-order refinement, coarsening, boundary-layer element topology, or
-embedded curves or open sheets in volumes.
+high-order refinement, coarsening, or
+boundary-layer element topology.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.

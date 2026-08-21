@@ -188,9 +188,10 @@ function _exec_line!(m::GeoModel, line::AbstractString)
         ids=parse.(Int, split(mm.captures[2],','))
         embed!(m, dim, ids, 2, parse(Int,mm.captures[3]))
         return
-    elseif (mm=match(r"^Point\s*\{\s*([^}]+)\s*\}\s+In\s+Volume\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
-        ids=parse.(Int, split(mm.captures[1],','))
-        embed!(m, 0, ids, 3, parse(Int,mm.captures[2]))
+    elseif (mm=match(r"^(Point|Line|Curve|Surface)\s*\{\s*([^}]+)\s*\}\s+In\s+Volume\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
+        dim=Dict("Point"=>0,"Line"=>1,"Curve"=>1,"Surface"=>2)[mm.captures[1]]
+        ids=parse.(Int, split(mm.captures[2],','))
+        embed!(m, dim, ids, 3, parse(Int,mm.captures[3]))
         return
     elseif (mm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
         dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]

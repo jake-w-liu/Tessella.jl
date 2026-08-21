@@ -12,7 +12,8 @@ using ..MeshTypes: Mesh, validate, nnodes, ntris, ntets
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using ..SizeField: AbstractSizeField, ConstantSize, size_at
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
-using ..Mesh3D: tetrahedralize, mesh_boolean
+using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3
+using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3
 
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
@@ -203,8 +204,9 @@ end
 function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
     caller="embed!"
     d=Int(dim); td=Int(target_dim); tt=_tag(target_tag,caller,td)
-    (d==0 && td==2) || (d==1 && td==2) || (d==0 && td==3) || throw(ArgumentError(
-        "$caller: supported embeddings are Point/Line In Surface and Point In Volume (got dim=$d in dim=$td)"))
+    (d==0 && td==2) || (d==1 && td==2) || (d==0 && td==3) ||
+    (d==1 && td==3) || (d==2 && td==3) || throw(ArgumentError(
+        "$caller: supported embeddings are Point/Line In Surface and Point/Line/Surface In Volume (got dim=$d in dim=$td)"))
     if td==2
         haskey(m.surfaces,tt) || throw(ArgumentError("$caller: unknown Surface[$tt]"))
     else
@@ -215,8 +217,10 @@ function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
         ent=_tag(raw,caller,d)
         if d==0
             haskey(m.points,ent) || throw(ArgumentError("$caller: unknown Point[$ent]"))
-        else
+        elseif d==1
             haskey(m.curves,ent) || throw(ArgumentError("$caller: unknown Curve[$ent]"))
+        else
+            haskey(m.surfaces,ent) || throw(ArgumentError("$caller: unknown Surface[$ent]"))
         end
         (d,ent) in list && throw(ArgumentError(
             "$caller: entity ($d,$ent) already embedded in ($td,$tt)"))
@@ -532,13 +536,45 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
     surface=_volume_surface(m,t)
     extra=NTuple{3,Float64}[]
+    lines=NTuple{2,NTuple{3,Float64}}[]
+    sheets=NTuple{3,NTuple{3,Float64}}[]
     for (edim,etag) in get(m.embeds,(3,t),NTuple{2,Int}[])
-        edim==0 || throw(ArgumentError(
-            "$caller: only Point In Volume embeddings are implemented (got dim=$edim)"))
-        haskey(m.points,etag) || throw(ArgumentError("$caller: unknown embedded Point[$etag]"))
-        push!(extra, m.points[etag])
+        if edim==0
+            haskey(m.points,etag) || throw(ArgumentError("$caller: unknown embedded Point[$etag]"))
+            push!(extra, m.points[etag])
+        elseif edim==1
+            haskey(m.curves,etag) || throw(ArgumentError("$caller: unknown embedded Curve[$etag]"))
+            a,b=m.curves[etag]
+            push!(lines, (m.points[a], m.points[b]))
+            push!(extra, m.points[a]); push!(extra, m.points[b])
+        elseif edim==2
+            haskey(m.surfaces,etag) || throw(ArgumentError("$caller: unknown embedded Surface[$etag]"))
+            loops=m.surfaces[etag]
+            isempty(loops) && throw(ArgumentError("$caller: embedded Surface[$etag] has no loop"))
+            ids=_loop_points(m, loops[1])
+            length(ids)>=3 || throw(ArgumentError(
+                "$caller: embedded Surface[$etag] needs at least three points"))
+            length(loops)==1 || throw(ArgumentError(
+                "$caller: holed sheets In Volume are a blocker"))
+            pts=[m.points[pid] for pid in ids]
+            for i in 2:length(pts)-1
+                push!(sheets, (pts[1], pts[i], pts[i+1]))
+            end
+        else
+            throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
+        end
     end
     mesh=isempty(extra) ? tetrahedralize(surface) : tetrahedralize(surface; interior_points=extra)
+    for (p,q) in lines
+        mesh=recover_segment3(mesh,p,q)
+        mesh_covers_segment3(mesh,p,q) || throw(ErrorException(
+            "$caller: embedded curve is not a chain of tetrahedron edges"))
+    end
+    for (a,b,c) in sheets
+        mesh=recover_triangle3(mesh,a,b,c)
+        mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
+            "$caller: embedded sheet is not a union of tetrahedron faces"))
+    end
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntets(mesh)>0 || throw(ErrorException("$caller: Volume[$t] produced no tetrahedra"))

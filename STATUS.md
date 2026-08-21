@@ -26,8 +26,8 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder import, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point-In-Volume Steiner insertion, holed plane surfaces, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, and recombined hexahedra |
-| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface embed, API-box, OCC-cylinder, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, and recombined hexahedra |
+| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, API-box, OCC-cylinder, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, multiple-time-step, or mixed-component
@@ -82,12 +82,12 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
-Re-measured on 2026-08-21 with Julia 1.12.7 after Line-In-Surface internal
-constraints, Point-In-Volume 1-to-4 Steiner insertion, and the P6 embed-line
+Re-measured on 2026-08-21 with Julia 1.12.7 after Line-In-Volume edge-chain
+recovery, Surface-In-Volume open-sheet face recovery, and the P6 embed-sheet
 corpus. Both bounds-checked package runs matched:
 
 - `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
-  — 163,209/163,209 assertions passed twice (10m03.9s, then 10m11.2s).
+  — 163,220/163,220 assertions passed twice (10m10.1s, then 10m07.4s).
 - `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
   — exited 0 against Gmsh 4.15.2-git. Exact flat-model volumes box=2, tunnel=24,
   hollow box=35; cylinder prism 62.652572; enclosure gmsh empty solids reproduced.
@@ -107,11 +107,13 @@ corpus. Both bounds-checked package runs matched:
   tessella_tris=16 tessella_nodes=13`.
 - P6 embed-line child: `GMSH_PARITY_EMBED_LINE_OK gmsh=4.15.2 tessella_area=1
   gmsh_tris=22 tessella_tris=22 tessella_nodes=18`.
+- P6 embed-sheet child: `GMSH_PARITY_EMBED_SHEET_OK gmsh=4.15.2 tessella_volume=1
+  gmsh_tets=904 tessella_tets=44 tessella_nodes=17`.
 - P6 cylinder child: `GMSH_PARITY_CYLINDER_OK gmsh=4.15.2
   tessella_prism=6.211657082460498 gmsh_tets=60 tessella_tets=96`.
 - P6 boolean-boxes child: `GMSH_PARITY_BOOLEAN_OK gmsh=4.15.2 tessella_volume=1
   gmsh_tets=100 tessella_tets=12`.
-- Focused CRC: Mesh2D CDT 46/46; entity/`.geo` 66/66.
+- Focused CRC: model/entity/`.geo` 77/77.
 - `git diff --check` passed. `.grok/` is gitignored and absent from the index.
 
 Previous aggregate on the same day with Julia 1.12.7, kept as historical:

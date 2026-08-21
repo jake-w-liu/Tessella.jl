@@ -34,6 +34,8 @@ export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        recover_boundary, mesh_boolean, mesh_sized_conforming, mesh_cylinder
 export check_consistency3, is_delaunay3, to_mesh3, ntets_live, present_faces
 export flip23!, flip32!, tets_around_edge, optimize_flips!, refine_to_size
+export insert_steiner3, recover_segment3, recover_triangle3
+export mesh_covers_segment3, mesh_covers_triangle3
 
 # Extension hook installed by the downstream RecoverCDT module after both modules
 # have loaded.  Keeping the declaration here avoids an include cycle while letting
@@ -1767,19 +1769,25 @@ function _containing_tet(mesh::Mesh, p)
         d=(mesh.coords[1,mesh.tets[4,t]],mesh.coords[2,mesh.tets[4,t]],mesh.coords[3,mesh.tets[4,t]])
         s=tet_signed_volume(a,b,c,d)
         s==0 && continue
+        tol=1e-12*max(abs(s),1.0)
         signs=(tet_signed_volume(p,b,c,d), tet_signed_volume(a,p,c,d),
                tet_signed_volume(a,b,p,d), tet_signed_volume(a,b,c,p))
         zeros=0; ok=true
-        for si in signs
-            if si==0
+        mask=(false,false,false,false)
+        for (k,si) in enumerate(signs)
+            if abs(si)<=tol
                 zeros+=1
+                mask=k==1 ? (true,mask[2],mask[3],mask[4]) :
+                     k==2 ? (mask[1],true,mask[3],mask[4]) :
+                     k==3 ? (mask[1],mask[2],true,mask[4]) :
+                            (mask[1],mask[2],mask[3],true)
             elseif (si>0)!=(s>0)
                 ok=false; break
             end
         end
-        ok && return t, zeros
+        ok && return t, zeros, mask
     end
-    return 0, 0
+    return 0, 0, (false,false,false,false)
 end
 
 function _finish_interior(mesh::Mesh, extra)
@@ -1797,15 +1805,197 @@ function insert_interior_points(mesh::Mesh, extra)
     out=mesh
     for (k,p) in enumerate(extra)
         all(isfinite,p) || throw(ArgumentError("insert_interior_points: point $k is non-finite"))
-        _node_at3(out,p)!=0 && continue
-        t,zeros=_containing_tet(out,p)
-        t==0 && throw(ArgumentError(
-            "insert_interior_points: point $k at $p is not strictly inside the volume"))
-        zeros==0 || throw(ArgumentError(
-            "insert_interior_points: point $k at $p lies on a tet face or edge"))
-        out=_split_tet_one_to_four(out,t,p)
+        out,_=insert_steiner3(out,p)
     end
     return out
+end
+
+@inline function _pt3(mesh::Mesh, i::Integer)
+    i=Int(i)
+    return (mesh.coords[1,i], mesh.coords[2,i], mesh.coords[3,i])
+end
+
+function _on_segment3(x, p, q; atol=1e-12)
+    vx,vy,vz=q[1]-p[1], q[2]-p[2], q[3]-p[3]
+    wx,wy,wz=x[1]-p[1], x[2]-p[2], x[3]-p[3]
+    L2=vx*vx+vy*vy+vz*vz
+    L2>0 || return hypot(wx,wy,wz)<=atol
+    cross=hypot(vy*wz-vz*wy, vz*wx-vx*wz, vx*wy-vy*wx)
+    cross<=atol*sqrt(L2) || return false
+    t=(wx*vx+wy*vy+wz*vz)/L2
+    return -atol<=t<=1+atol
+end
+
+function _tet_edge_set(mesh::Mesh)
+    edges=Set{NTuple{2,Int32}}()
+    @inbounds for t in axes(mesh.tets,2)
+        v=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+            a,b=v[i],v[j]
+            push!(edges, a<b ? (a,b) : (b,a))
+        end
+    end
+    return edges
+end
+
+function mesh_covers_segment3(mesh::Mesh, p, q; atol=1e-12)
+    a=_node_at3(mesh,p; atol=atol); b=_node_at3(mesh,q; atol=atol)
+    a==0 && return false; b==0 && return false
+    a==b && return true
+    adj=Dict{Int,Vector{Int}}()
+    for (u,v) in _tet_edge_set(mesh)
+        pu=_pt3(mesh,u); pv=_pt3(mesh,v)
+        (_on_segment3(pu,p,q; atol=atol) && _on_segment3(pv,p,q; atol=atol)) || continue
+        push!(get!(Vector{Int}, adj, Int(u)), Int(v))
+        push!(get!(Vector{Int}, adj, Int(v)), Int(u))
+    end
+    nn=size(mesh.coords,2)
+    seen=falses(nn); qn=Int[a]; seen[a]=true; head=1
+    while head<=length(qn)
+        v=qn[head]; head+=1
+        v==b && return true
+        for u in get(adj, v, Int[])
+            seen[u] && continue
+            seen[u]=true; push!(qn,u)
+        end
+    end
+    return false
+end
+
+function _cross3(u,v)
+    return (u[2]*v[3]-u[3]*v[2], u[3]*v[1]-u[1]*v[3], u[1]*v[2]-u[2]*v[1])
+end
+@inline _dot3(u,v)=u[1]*v[1]+u[2]*v[2]+u[3]*v[3]
+@inline _sub3(u,v)=(u[1]-v[1],u[2]-v[2],u[3]-v[3])
+@inline _add3(u,v)=(u[1]+v[1],u[2]+v[2],u[3]+v[3])
+@inline _scale3(u,s)=(u[1]*s,u[2]*s,u[3]*s)
+
+function _point_in_triangle3(x, a, b, c; atol=1e-12)
+    n=_cross3(_sub3(b,a), _sub3(c,a))
+    n2=_dot3(n,n)
+    n2>0 || return false
+    abs(_dot3(n, _sub3(x,a)))<=atol*sqrt(n2) || return false
+    # same-side barycentric via areas
+    n1=_cross3(_sub3(b,a), _sub3(x,a))
+    n2c=_cross3(_sub3(c,b), _sub3(x,b))
+    n3=_cross3(_sub3(a,c), _sub3(x,c))
+    return _dot3(n,n1)>=-atol*n2 && _dot3(n,n2c)>=-atol*n2 && _dot3(n,n3)>=-atol*n2
+end
+
+function _segment_triangle_hit(p, q, a, b, c; atol=1e-12)
+    n=_cross3(_sub3(b,a), _sub3(c,a))
+    d=_dot3(n, _sub3(q,p))
+    abs(d)<=atol*hypot(n...) && return nothing
+    t=_dot3(n, _sub3(a,p))/d
+    (t>1e-9 && t<1-1e-9) || return nothing
+    x=_add3(p, _scale3(_sub3(q,p), t))
+    _point_in_triangle3(x,a,b,c; atol=atol) || return nothing
+    return x
+end
+
+function _segment_face_hit(mesh::Mesh, p, q; atol=1e-12)
+    best=nothing; bestt=Inf
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        pts=(_pt3(mesh,ids[1]),_pt3(mesh,ids[2]),_pt3(mesh,ids[3]),_pt3(mesh,ids[4]))
+        for (i,j,k) in ((2,3,4),(1,3,4),(1,2,4),(1,2,3))
+            hit=_segment_triangle_hit(p,q,pts[i],pts[j],pts[k]; atol=atol)
+            hit===nothing && continue
+            _node_at3(mesh,hit; atol=1e-9)!=0 && continue
+            tt=_dot3(_sub3(hit,p), _sub3(q,p))
+            tt<bestt && (bestt=tt; best=hit)
+        end
+    end
+    return best
+end
+
+function recover_segment3(mesh::Mesh, p, q; max_inserts::Integer=256)
+    out,_=insert_steiner3(mesh,p)
+    out,_=insert_steiner3(out,q)
+    for _ in 1:max_inserts
+        mesh_covers_segment3(out,p,q) && return out
+        hit=_segment_face_hit(out,p,q)
+        hit===nothing && throw(ErrorException(
+            "recover_segment3: segment is not a tet-edge chain and no face crossing was found"))
+        out,_=insert_steiner3(out,hit)
+    end
+    throw(ErrorException("recover_segment3: exceeded max_inserts=$max_inserts"))
+end
+
+function _triangle_area3(a,b,c)
+    n=_cross3(_sub3(b,a), _sub3(c,a))
+    return 0.5*hypot(n...)
+end
+
+function mesh_covers_triangle3(mesh::Mesh, a, b, c; rtol=1e-6)
+    target=_triangle_area3(a,b,c)
+    target>0 || return false
+    seen=Set{NTuple{3,Int32}}()
+    covered=0.0
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for (i,j,k) in ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+            u,v,w=ids[i],ids[j],ids[k]
+            s1,s2,s3=u,v,w
+            s1>s2 && ((s1,s2)=(s2,s1)); s2>s3 && ((s2,s3)=(s3,s2)); s1>s2 && ((s1,s2)=(s2,s1))
+            key=(s1,s2,s3)
+            key in seen && continue
+            pa=_pt3(mesh,s1); pb=_pt3(mesh,s2); pc=_pt3(mesh,s3)
+            (_point_in_triangle3(pa,a,b,c) && _point_in_triangle3(pb,a,b,c) &&
+             _point_in_triangle3(pc,a,b,c)) || continue
+            push!(seen,key)
+            covered+=_triangle_area3(pa,pb,pc)
+        end
+    end
+    return abs(covered-target)<=rtol*target
+end
+
+function recover_triangle3(mesh::Mesh, a, b, c; max_inserts::Integer=256)
+    out=recover_segment3(mesh,a,b)
+    out=recover_segment3(out,b,c)
+    out=recover_segment3(out,c,a)
+    for _ in 1:max_inserts
+        mesh_covers_triangle3(out,a,b,c) && return out
+        # split the longest uncovered geometric edge of the sheet by inserting its midpoint
+        mid=_add3(_scale3(_add3(a,b),0.5), (0.0,0.0,0.0))
+        # try midpoints of the three sides, then the centroid
+        candidates=(_scale3(_add3(a,b),0.5), _scale3(_add3(b,c),0.5),
+                    _scale3(_add3(c,a),0.5), _scale3(_add3(_add3(a,b),c),1/3))
+        inserted=false
+        for x in candidates
+            _node_at3(out,x; atol=1e-9)==0 || continue
+            try
+                out,_=insert_steiner3(out,x)
+                inserted=true
+                break
+            catch err
+                err isa InterruptException && rethrow()
+                (err isa ArgumentError || err isa ErrorException) || rethrow()
+            end
+        end
+        inserted || throw(ErrorException("recover_triangle3: could not insert a Steiner point on the sheet"))
+    end
+    throw(ErrorException("recover_triangle3: exceeded max_inserts=$max_inserts"))
+end
+
+function insert_steiner3(mesh::Mesh, p)
+    all(isfinite,p) || throw(ArgumentError("insert_steiner3: point is non-finite"))
+    existing=_node_at3(mesh,p)
+    existing!=0 && return mesh, existing
+    t,zeros,mask=_containing_tet(mesh,p)
+    t==0 && throw(ArgumentError("insert_steiner3: point $p is not inside the volume"))
+    if zeros==0
+        out=_split_tet_one_to_four(mesh,t,p)
+        return out, size(out.coords,2)
+    elseif zeros==1
+        out=_split_tets_on_face(mesh,t,p,mask)
+        return out, size(out.coords,2)
+    elseif zeros==2
+        out=_split_tets_on_edge(mesh,t,p,mask)
+        return out, size(out.coords,2)
+    else
+        throw(ArgumentError("insert_steiner3: point $p coincides with a tet vertex but was not found"))
+    end
 end
 
 function _split_tet_one_to_four(mesh::Mesh, t::Int, p)
@@ -1843,6 +2033,95 @@ function _split_tet_one_to_four(mesh::Mesh, t::Int, p)
     end
     return Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris), tets=tets,
                 seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag), tet_tag=tags)
+end
+
+function _orient_tet!(tets, coords, col)
+    pa=(coords[1,tets[1,col]],coords[2,tets[1,col]],coords[3,tets[1,col]])
+    pb=(coords[1,tets[2,col]],coords[2,tets[2,col]],coords[3,tets[2,col]])
+    pc=(coords[1,tets[3,col]],coords[2,tets[3,col]],coords[3,tets[3,col]])
+    pd=(coords[1,tets[4,col]],coords[2,tets[4,col]],coords[3,tets[4,col]])
+    if tet_signed_volume(pa,pb,pc,pd)<0
+        tets[2,col],tets[3,col]=tets[3,col],tets[2,col]
+    end
+    return nothing
+end
+
+function _rebuild_tets(mesh::Mesh, drop::Set{Int}, news::Vector{NTuple{4,Int32}},
+                       new_tags::Vector{Int32}, p)
+    nn=size(mesh.coords,2)+1
+    coords=hcat(mesh.coords, Float64[p[1],p[2],p[3]])
+    keep=Int[j for j in axes(mesh.tets,2) if !(j in drop)]
+    nout=length(keep)+length(news)
+    tets=Matrix{Int32}(undef,4,nout)
+    tags=isempty(mesh.tet_tag) ? Int32[] : Vector{Int32}(undef,nout)
+    @inbounds for (k,j) in enumerate(keep)
+        for i in 1:4; tets[i,k]=mesh.tets[i,j]; end
+        isempty(tags) || (tags[k]=mesh.tet_tag[j])
+    end
+    base=length(keep)
+    @inbounds for (k,tet) in enumerate(news)
+        col=base+k
+        tets[1,col]=tet[1]; tets[2,col]=tet[2]; tets[3,col]=tet[3]; tets[4,col]=tet[4]
+        _orient_tet!(tets,coords,col)
+        isempty(tags) || (tags[col]=new_tags[k])
+    end
+    return Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris), tets=tets,
+                seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag), tet_tag=tags)
+end
+
+function _split_tets_on_face(mesh::Mesh, t::Int, p, mask)
+    ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+    # mask[k] true ⇒ p on the face opposite vertex k
+    opp = mask[1] ? 1 : mask[2] ? 2 : mask[3] ? 3 : 4
+    face=Int32[ids[i] for i in 1:4 if i!=opp]
+    face_set=Set{Int32}(face)
+    drop=Set{Int}()
+    news=NTuple{4,Int32}[]
+    ntags=Int32[]
+    v=Int32(size(mesh.coords,2)+1)
+    @inbounds for j in axes(mesh.tets,2)
+        verts=(mesh.tets[1,j],mesh.tets[2,j],mesh.tets[3,j],mesh.tets[4,j])
+        count(in(face_set), verts)==3 || continue
+        push!(drop,j)
+        w=verts[1]
+        for u in verts
+            u in face_set || (w=u)
+        end
+        a,b,c=face[1],face[2],face[3]
+        tag=isempty(mesh.tet_tag) ? Int32(0) : mesh.tet_tag[j]
+        push!(news,(v,b,c,w)); push!(ntags,tag)
+        push!(news,(a,v,c,w)); push!(ntags,tag)
+        push!(news,(a,b,v,w)); push!(ntags,tag)
+    end
+    isempty(drop) && throw(ErrorException("insert_steiner3: face split found no incident tetrahedra"))
+    return _rebuild_tets(mesh, drop, news, ntags, p)
+end
+
+function _split_tets_on_edge(mesh::Mesh, t::Int, p, mask)
+    ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+    excluded=Int[i for i in 1:4 if mask[i]]
+    length(excluded)==2 || throw(ErrorException("insert_steiner3: edge split expected two zero barycentric coordinates"))
+    # edge is the two vertices that are NOT the excluded (opposite) vertices
+    edge=Int32[ids[i] for i in 1:4 if !(i in excluded)]
+    length(edge)==2 || throw(ErrorException("insert_steiner3: could not identify the supporting edge"))
+    u,w=edge[1],edge[2]
+    drop=Set{Int}()
+    news=NTuple{4,Int32}[]
+    ntags=Int32[]
+    v=Int32(size(mesh.coords,2)+1)
+    @inbounds for j in axes(mesh.tets,2)
+        verts=(mesh.tets[1,j],mesh.tets[2,j],mesh.tets[3,j],mesh.tets[4,j])
+        (u in verts && w in verts) || continue
+        push!(drop,j)
+        rest=Int32[x for x in verts if x!=u && x!=w]
+        length(rest)==2 || continue
+        c,d=rest[1],rest[2]
+        tag=isempty(mesh.tet_tag) ? Int32(0) : mesh.tet_tag[j]
+        push!(news,(u,v,c,d)); push!(ntags,tag)
+        push!(news,(v,w,c,d)); push!(ntags,tag)
+    end
+    isempty(drop) && throw(ErrorException("insert_steiner3: edge split found no incident tetrahedra"))
+    return _rebuild_tets(mesh, drop, news, ntags, p)
 end
 
 function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false,
