@@ -139,13 +139,18 @@ end
 
 """
     recombine_triangles(mesh; min_quality=0, preserve_segments=true,
-                        physical_names=Dict()) -> MixedMesh
+                        physical_names=Dict(), algorithm=:greedy,
+                        full_quad=false) -> MixedMesh
 
-Greedily pair adjacent, consistently oriented triangles into four-node Gmsh
-quadrangles. Candidates are ordered by a deterministic dimensionless shape score;
-only strictly convex projected quadrangles with matching physical tags and quality
-at least `min_quality` are accepted. Unpaired triangles are retained. Segment
-connectivity and all per-cell physical tags are preserved by default.
+Pair adjacent, consistently oriented triangles into four-node Gmsh quadrangles.
+`:greedy` accepts candidates in deterministic shape-score order. `:blossom` uses
+Edmonds maximum-cardinality matching on the dual of eligible same-tag pairs,
+trying neighbors in that same quality order. `full_quad=true` requires
+`:blossom` and throws if any triangle remains unmatched. Only strictly convex
+projected quadrangles with matching physical tags and quality at least
+`min_quality` are accepted. Unpaired triangles are retained unless `full_quad`
+is requested. Segment connectivity and all per-cell physical tags are preserved
+by default.
 
 The input must be a validated surface/curve mesh without tetrahedra. This is a
 surface recombination operation; it does not generate a structured grid or modify
@@ -153,9 +158,15 @@ the geometry and it never pairs triangles across a physical-tag boundary.
 """
 function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                              preserve_segments=true,
-                             physical_names=Dict{Tuple{Int,Int},String}())
+                             physical_names=Dict{Tuple{Int,Int},String}(),
+                             algorithm::Symbol=:greedy,
+                             full_quad::Bool=false)
     preserve_segments isa Bool || throw(ArgumentError(
         "recombine_triangles: preserve_segments must be Bool"))
+    full_quad isa Bool || throw(ArgumentError(
+        "recombine_triangles: full_quad must be Bool"))
+    algorithm in (:greedy,:blossom) || throw(ArgumentError(
+        "recombine_triangles: algorithm must be :greedy or :blossom"))
     threshold=_recombine_quality(min_quality)
     size(mesh.tets,2)==0 || throw(ArgumentError(
         "recombine_triangles: input must not contain tetrahedra"))
@@ -192,12 +203,46 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
           alg=MergeSort)
 
     used=falses(size(triangles,2));accepted=_QuadCandidate[]
-    for candidate in candidates
-        first=Int(candidate.first_triangle);second=Int(candidate.second_triangle)
-        if !used[first] && !used[second] &&
-           mesh.tri_tag[first]==mesh.tri_tag[second] &&
-           candidate.quality>=threshold
-            used[first]=true;used[second]=true;push!(accepted,candidate)
+    if algorithm===:blossom
+        n=size(triangles,2)
+        adj=[Int[] for _ in 1:n]
+        bypair=Dict{Tuple{Int,Int},_QuadCandidate}()
+        for candidate in candidates
+            a=Int(candidate.first_triangle);b=Int(candidate.second_triangle)
+            mesh.tri_tag[a]==mesh.tri_tag[b] || continue
+            candidate.quality>=threshold || continue
+            push!(adj[a],b); push!(adj[b],a)
+            bypair[(min(a,b),max(a,b))]=candidate
+        end
+        for v in 1:n
+            sort!(adj[v]; by=u->begin
+                c=bypair[(min(v,u),max(v,u))]
+                (-c.quality,c.edge,c.first_triangle,c.second_triangle)
+            end)
+        end
+        mate=_edmonds_matching(n,adj)
+        for v in 1:n
+            u=mate[v]
+            u>v || continue
+            candidate=bypair[(v,u)]
+            used[v]=true; used[u]=true
+            push!(accepted,candidate)
+        end
+        if full_quad && any(!,used)
+            leftover=count(!,used)
+            throw(ArgumentError(
+                "recombine_triangles: full_quad requested but $leftover triangles remain unmatched"))
+        end
+    else
+        full_quad && throw(ArgumentError(
+            "recombine_triangles: full_quad requires algorithm=:blossom"))
+        for candidate in candidates
+            first=Int(candidate.first_triangle);second=Int(candidate.second_triangle)
+            if !used[first] && !used[second] &&
+               mesh.tri_tag[first]==mesh.tri_tag[second] &&
+               candidate.quality>=threshold
+                used[first]=true;used[second]=true;push!(accepted,candidate)
+            end
         end
     end
 
@@ -236,6 +281,84 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
         "recombine_triangles: internal output validation failed — "*
         join(output_diagnostic.messages,"; ")))
     return result
+end
+
+# Edmonds' blossom algorithm: maximum-cardinality matching on a general graph.
+# Neighbors are tried in the given order so the matching is deterministic.
+function _edmonds_matching(n::Int, adj::Vector{Vector{Int}})
+    mate=zeros(Int,n)
+    function lca(a::Int,b::Int,base::Vector{Int},parent::Vector{Int})
+        seen=falses(n)
+        while true
+            a=base[a]
+            seen[a]=true
+            mate[a]==0 && break
+            a=base[parent[mate[a]]]
+        end
+        while true
+            b=base[b]
+            seen[b] && return b
+            b=base[parent[mate[b]]]
+        end
+    end
+    function mark_path!(blossom,v::Int,b::Int,children::Int,
+                        base::Vector{Int},parent::Vector{Int})
+        while base[v]!=b
+            blossom[base[v]]=true
+            blossom[base[mate[v]]]=true
+            parent[v]=children
+            children=mate[v]
+            v=parent[mate[v]]
+        end
+    end
+    function augment(root::Int)
+        used=falses(n)
+        parent=zeros(Int,n)
+        base=collect(1:n)
+        q=Int[root]; used[root]=true; head=1
+        while head<=length(q)
+            v=q[head]; head+=1
+            for u in adj[v]
+                if base[v]==base[u] || mate[v]==u
+                    continue
+                elseif used[u]
+                    b=lca(v,u,base,parent)
+                    blossom=falses(n)
+                    mark_path!(blossom,v,b,u,base,parent)
+                    mark_path!(blossom,u,b,v,base,parent)
+                    for i in 1:n
+                        blossom[base[i]] || continue
+                        base[i]=b
+                        used[i] && continue
+                        used[i]=true
+                        push!(q,i)
+                    end
+                else
+                    used[u]=true
+                    parent[u]=v
+                    if mate[u]==0
+                        # reconstruct augmenting path
+                        while u!=0
+                            pv=parent[u]; nu=mate[pv]
+                            mate[u]=pv; mate[pv]=u
+                            u=nu
+                        end
+                        return true
+                    end
+                    push!(q,mate[u]); used[mate[u]]=true
+                end
+            end
+        end
+        return false
+    end
+    grew=true
+    while grew
+        grew=false
+        for v in 1:n
+            mate[v]==0 && augment(v) && (grew=true)
+        end
+    end
+    return mate
 end
 
 end # module Recombine

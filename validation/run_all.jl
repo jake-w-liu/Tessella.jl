@@ -134,6 +134,24 @@ box_api_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --pr
 println("  command: ", box_api_command)
 run(box_api_command)
 
+println("\n── gmsh_parity t1 square ──  Tessella vs analytic/Gmsh unit-square area")
+t1_script = joinpath(HERE, "gmsh_parity", "t1_square.jl")
+t1_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $t1_script`
+println("  command: ", t1_command)
+run(t1_command)
+
+println("\n── gmsh_parity cylinder ──  Tessella prism vs Gmsh OCC Cylinder")
+cyl_script = joinpath(HERE, "gmsh_parity", "cylinder_geo.jl")
+cyl_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $cyl_script`
+println("  command: ", cyl_command)
+run(cyl_command)
+
+println("\n── gmsh_parity boolean boxes ──  Tessella vs analytic/Gmsh BooleanDifference")
+bool_script = joinpath(HERE, "gmsh_parity", "boolean_boxes.jl")
+bool_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $bool_script`
+println("  command: ", bool_command)
+run(bool_command)
+
 println("\n── transfinite_hex ──  Gmsh 4.15.2 affine six-face hexahedra")
 transfinite_hex_script = joinpath(HERE, "transfinite_hex", "differential.jl")
 transfinite_hex_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_hex_script`

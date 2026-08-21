@@ -139,4 +139,51 @@ end
         @test large>small
         @test large<=5.25small+262_144
     end
+
+    @testset "blossom matching and full-quad" begin
+        matching_size(mate)=count(i->mate[i]>i, eachindex(mate))
+        consistent(mate)=all(i->mate[i]==0 || mate[mate[i]]==i, eachindex(mate))
+
+        path=Tessella.Recombine._edmonds_matching(4,[Int[2],Int[1,3],Int[2,4],Int[3]])
+        @test matching_size(path)==2
+        @test consistent(path)
+
+        triangle=Tessella.Recombine._edmonds_matching(3,[Int[2,3],Int[1,3],Int[1,2]])
+        @test matching_size(triangle)==1
+        @test consistent(triangle)
+
+        flower=Tessella.Recombine._edmonds_matching(4,[Int[2,3,4],Int[1,3],Int[1,2],Int[1]])
+        @test matching_size(flower)==2
+        @test consistent(flower)
+        @test flower[4]!=0
+
+        isolated=Tessella.Recombine._edmonds_matching(1,[Int[]])
+        @test isolated==[0]
+        @test Tessella.Recombine._edmonds_matching(0,Vector{Int}[])==Int[]
+
+        grid=_recombine_grid(12)
+        blossom=recombine_triangles(grid; algorithm=:blossom, full_quad=true,
+                                    preserve_segments=false)
+        greedy=recombine_triangles(grid; preserve_segments=false)
+        @test Tessella.Elements.validate(blossom).ok
+        @test length(blossom.blocks)==1
+        @test blossom.blocks[1].msh==3
+        @test size(blossom.blocks[1].nodes)==(4,144)
+        @test all(==(Int32(1)), blossom.blocks[1].tags)
+        @test Tessella.Elements.mixed_crc(blossom)==
+              Tessella.Elements.mixed_crc(recombine_triangles(grid;
+                  algorithm=:blossom, full_quad=true, preserve_segments=false))
+        @test size(greedy.blocks[1].nodes)==(4,144)
+
+        @test_throws ArgumentError recombine_triangles(grid; full_quad=true)
+        @test_throws ArgumentError recombine_triangles(grid; algorithm=:nope)
+        odd=Mesh(Float64[0 1 0;0 0 1;0 0 0];
+                 tris=reshape(Int32[1,2,3],3,1), tri_tag=Int32[1])
+        @test_throws ArgumentError recombine_triangles(odd; algorithm=:blossom,
+                                                       full_quad=true)
+        split=recombine_triangles(_recombine_square(tags=Int32[7,8]);
+                                  algorithm=:blossom, preserve_segments=false)
+        @test [block.msh for block in split.blocks]==[2]
+        @test size(split.blocks[1].nodes,2)==2
+    end
 end
