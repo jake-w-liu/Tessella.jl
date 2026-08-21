@@ -47,9 +47,9 @@ include("Optimize.jl")       # Stage 4: tet quality report + Laplacian smoothing
 include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't fail")
 include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
 include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
-include("BRep.jl")           # P3: ISO-10303-21 STEP / IGES classified-solid import
-include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 include("NURBS.jl")          # P3: native B-spline/NURBS evaluation
+include("BRep.jl")           # P3: ISO-10303-21 STEP / IGES classified-solid and NURBS import
+include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 include("Model.jl")          # P2: tagged geometry/entity kernel
 include("GeoExec.jl")        # P3: bounded .geo execution
 include("BoundaryLayer.jl")  # P4: prismatic and 2-D quad/fan boundary-layer extrusion
@@ -83,7 +83,8 @@ using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
 using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d
 using .Periodic: periodic_identify
-using .BRep: import_step, import_iges
+using .BRep: import_step, import_iges, import_nurbs_step, import_nurbs_iges,
+                  export_iges_nurbs
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -131,7 +132,7 @@ export embed!, dilate_volume!, rotate_volume!
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d, periodic_identify
-export import_step, import_iges
+export import_step, import_iges, import_nurbs_step, import_nurbs_iges, export_iges_nurbs
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
        MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,

@@ -2,17 +2,21 @@
     BRep
 
 Native ISO-10303-21 STEP and IGES CAD import. Solids that classify as an
-axis-aligned block, sphere, or right circular cylinder are converted to Tessella
-surfaces and filled. Unrecognized topology is an explicit blocker, not a silent
-empty mesh.
+axis-aligned block, sphere, right circular cylinder, or right circular cone
+are converted to Tessella surfaces and filled. NURBS curves and surfaces
+(STEP `B_SPLINE_*` / IGES 126/128) import as [`NURBSCurve`](@ref) /
+[`NURBSSurface`](@ref). Unrecognized topology is an explicit blocker, not a
+silent empty mesh.
 """
 module BRep
 
-using ..Geometry: box_surface, cylinder_surface, sphere_surface
+using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize
 using ..MeshTypes: Mesh, validate, ntets, tet_volume, node
+using ..NURBS: NURBSCurve, NURBSSurface
 
 export import_step, import_iges, parse_step_entities
+export import_nurbs_step, import_nurbs_iges, export_iges_nurbs
 
 # ── STEP (ISO-10303-21) ───────────────────────────────────────────────────────
 
@@ -43,14 +47,19 @@ function parse_step_entities(source::AbstractString)
         j=_step_skipws(data,j,last)
         j<=last && data[j]=='=' || throw(ArgumentError("import_step: entity #$id missing '='"))
         j=_step_skipws(data,nextind(data,j),last)
-        k=j
-        while k<=last && (isletter(data[k]) || isdigit(data[k]) || data[k]=='_')
-            k=nextind(data,k)
+        if j<=last && data[j]=='('
+            args, k=_step_parse_complex(data,j,id)
+            kind="COMPLEX"
+        else
+            k=j
+            while k<=last && (isletter(data[k]) || isdigit(data[k]) || data[k]=='_')
+                k=nextind(data,k)
+            end
+            kind=uppercase(data[j:prevind(data,k)])
+            k=_step_skipws(data,k,last)
+            k<=last && data[k]=='(' || throw(ArgumentError("import_step: entity #$id missing '('"))
+            args, k=_step_parse_list(data,k)
         end
-        kind=uppercase(data[j:prevind(data,k)])
-        k=_step_skipws(data,k,last)
-        k<=last && data[k]=='(' || throw(ArgumentError("import_step: entity #$id missing '('"))
-        args, k=_step_parse_list(data,k)
         k=_step_skipws(data,k,last)
         k<=last && data[k]==';' || throw(ArgumentError("import_step: entity #$id missing ';'"))
         entities[id]=StepEntity(id,kind,args)
@@ -58,6 +67,30 @@ function parse_step_entities(source::AbstractString)
     end
     isempty(entities) && throw(ArgumentError("import_step: DATA section is empty"))
     return entities
+end
+
+function _step_parse_complex(s, start, id)
+    s[start]=='(' || throw(ArgumentError("import_step: expected complex entity"))
+    i=nextind(s,start); parts=Any[]; last=lastindex(s)
+    while i<=last
+        i=_step_skipws(s,i,last)
+        i<=last || throw(ArgumentError("import_step: unterminated complex entity #$id"))
+        s[i]==')' && return parts, nextind(s,i)
+        k=i
+        while k<=last && (isletter(s[k]) || isdigit(s[k]) || s[k]=='_')
+            k=nextind(s,k)
+        end
+        k>i || throw(ArgumentError("import_step: complex entity #$id missing type"))
+        kind=uppercase(s[i:prevind(s,k)])
+        k=_step_skipws(s,k,last)
+        args=Any[]
+        if k<=last && s[k]=='('
+            args, k=_step_parse_list(s,k)
+        end
+        push!(parts, StepEntity(id,kind,args))
+        i=k
+    end
+    throw(ArgumentError("import_step: unterminated complex entity #$id"))
 end
 
 function _step_parse_list(s, start)
@@ -204,6 +237,23 @@ function _as_cylinder(entities)
     return nothing
 end
 
+function _as_cone(entities)
+    for ent in values(entities)
+        ent.kind=="RIGHT_CIRCULAR_CONE" || continue
+        length(ent.args)>=4 || continue
+        height=Float64(ent.args[end-2]); r1=Float64(ent.args[end-1]); r2=Float64(ent.args[end])
+        (height>0 && (r1>0 || r2>0) && r1>=0 && r2>=0) || throw(ArgumentError(
+            "import_step: cone height must be positive and at least one radius must be positive"))
+        place=_first_ref(ent.args)
+        center=_deref_point(entities, place)
+        center===nothing && (center=(0.0,0.0,0.0))
+        axis=_deref_direction(entities, place)
+        axis===nothing && (axis=(0.0,0.0,1.0))
+        return (center,axis,r1,r2,height)
+    end
+    return nothing
+end
+
 function import_step(path::AbstractString; fill::Bool=true)
     isfile(path) || throw(ArgumentError("import_step: missing file $path"))
     source=read(path,String)
@@ -223,6 +273,12 @@ function import_step(path::AbstractString; fill::Bool=true)
         fill || return surface
         return _filled(surface,"import_step")
     end
+    cone=_as_cone(entities)
+    if cone!==nothing
+        surface=cone_surface(cone[1],cone[2],cone[3],cone[4],cone[5])
+        fill || return surface
+        return _filled(surface,"import_step")
+    end
     box=_as_box(points)
     if box!==nothing
         surface=box_surface(box...)
@@ -232,7 +288,8 @@ function import_step(path::AbstractString; fill::Bool=true)
     kinds=sort!(unique(ent.kind for ent in values(entities)))
     throw(ArgumentError(
         "import_step: no supported solid (axis-aligned 8-corner block, SPHERE, " *
-        "or RIGHT_CIRCULAR_CYLINDER); saw $(join(kinds, ", "))"))
+        "RIGHT_CIRCULAR_CYLINDER, or RIGHT_CIRCULAR_CONE); saw $(join(kinds, ", ")). " *
+        "NURBS curves/surfaces use import_nurbs_step"))
 end
 
 function _filled(surface::Mesh, caller)
@@ -264,6 +321,14 @@ function import_iges(path::AbstractString; fill::Bool=true)
             r>0 || throw(ArgumentError("import_iges: Sphere radius must be positive"))
             surface=sphere_surface((x,y,z),r)
             return fill ? _filled(surface,"import_iges") : surface
+        elseif type==156 && length(rec)>=10
+            h,r1,r2=rec[2],rec[3],rec[4]
+            x,y,z=rec[5],rec[6],rec[7]
+            zi,zj,zk=rec[8],rec[9],rec[10]
+            (h>0 && (r1>0 || r2>0) && r1>=0 && r2>=0) || throw(ArgumentError(
+                "import_iges: Cone height must be positive and at least one radius must be positive"))
+            surface=cone_surface((x,y,z),(zi,zj,zk),r1,r2,h)
+            return fill ? _filled(surface,"import_iges") : surface
         elseif type==156 && length(rec)>=8
             r,h=rec[2],rec[3]; x,y,z=rec[4],rec[5],rec[6]
             zi,zj,zk=rec[7],rec[8], length(rec)>=9 ? rec[9] : 1.0
@@ -274,7 +339,8 @@ function import_iges(path::AbstractString; fill::Bool=true)
     end
     types=sort!(unique(Int(rec[1]) for rec in records))
     throw(ArgumentError(
-        "import_iges: no supported solid (150 Block, 158 Sphere, 156 Cylinder); saw types $(types)"))
+        "import_iges: no supported solid (150 Block, 158 Sphere, 156 Cylinder/Cone); saw types $(types). " *
+        "NURBS curves/surfaces use import_nurbs_iges"))
 end
 
 function _iges_records(source::AbstractString)
@@ -301,6 +367,289 @@ function _iges_records(source::AbstractString)
         end
     end
     return records
+end
+
+function _as_int(value, caller, name)
+    x=try Int(value) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name must be an integer"))
+    end
+    return x
+end
+
+function _expand_knots(mults, knots, caller)
+    mults isa Vector && knots isa Vector || throw(ArgumentError(
+        "$caller: knot multiplicities and knots must be lists"))
+    length(mults)==length(knots) || throw(ArgumentError(
+        "$caller: knot multiplicity count mismatch"))
+    U=Float64[]
+    for (m,k) in zip(mults,knots)
+        mm=_as_int(m,caller,"knot multiplicity")
+        mm>=1 || throw(ArgumentError("$caller: knot multiplicity must be ≥ 1"))
+        kk=Float64(k)
+        isfinite(kk) || throw(ArgumentError("$caller: non-finite knot"))
+        for _ in 1:mm
+            push!(U,kk)
+        end
+    end
+    return U
+end
+
+function _ref_points(entities, arg)
+    arg isa Vector || return nothing
+    points=NTuple{3,Float64}[]
+    for item in arg
+        p=_deref_point(entities,item)
+        p===nothing && return nothing
+        push!(points,p)
+    end
+    return points
+end
+
+function _float_vec(arg, caller)
+    arg isa Vector || throw(ArgumentError("$caller: expected a numeric list"))
+    vals=Float64[]
+    for item in arg
+        item isa Real || throw(ArgumentError("$caller: expected numbers"))
+        v=Float64(item)
+        isfinite(v) || throw(ArgumentError("$caller: non-finite number"))
+        push!(vals,v)
+    end
+    return vals
+end
+
+function _skip_name(args)
+    return !isempty(args) && args[1] isa AbstractString ? 2 : 1
+end
+
+function _bspline_curve_from_args(entities, degree_arg, points_arg, mults_arg, knots_arg,
+                                  weights_arg, caller)
+    degree=_as_int(degree_arg,caller,"degree")
+    points=_ref_points(entities, points_arg)
+    points===nothing && throw(ArgumentError("$caller: missing control points"))
+    knots=_expand_knots(mults_arg, knots_arg, caller)
+    weights=weights_arg===nothing ? nothing : _float_vec(weights_arg, caller)
+    return NURBSCurve(degree, knots, points, weights)
+end
+
+function _step_nurbs_curve(ent::StepEntity, entities)
+    if ent.kind=="B_SPLINE_CURVE_WITH_KNOTS"
+        i=_skip_name(ent.args)
+        length(ent.args)>=i+6 || return nothing
+        return _bspline_curve_from_args(entities, ent.args[i], ent.args[i+1],
+                                        ent.args[i+5], ent.args[i+6], nothing,
+                                        "import_nurbs_step")
+    elseif ent.kind=="COMPLEX"
+        parts=Dict{String,StepEntity}()
+        for part in ent.args
+            part isa StepEntity || continue
+            parts[part.kind]=part
+        end
+        haskey(parts,"B_SPLINE_CURVE") || return nothing
+        haskey(parts,"B_SPLINE_CURVE_WITH_KNOTS") || return nothing
+        bc=parts["B_SPLINE_CURVE"]; bk=parts["B_SPLINE_CURVE_WITH_KNOTS"]
+        length(bc.args)>=2 && length(bk.args)>=2 || return nothing
+        weights=if haskey(parts,"RATIONAL_B_SPLINE_CURVE") && !isempty(parts["RATIONAL_B_SPLINE_CURVE"].args)
+            parts["RATIONAL_B_SPLINE_CURVE"].args[1]
+        else
+            nothing
+        end
+        return _bspline_curve_from_args(entities, bc.args[1], bc.args[2],
+                                        bk.args[1], bk.args[2], weights,
+                                        "import_nurbs_step")
+    end
+    return nothing
+end
+
+function _nested_ref_points(entities, arg)
+    arg isa Vector || return nothing
+    rows=Vector{NTuple{3,Float64}}[]
+    for row in arg
+        pts=_ref_points(entities,row)
+        pts===nothing && return nothing
+        push!(rows,pts)
+    end
+    isempty(rows) && return nothing
+    nv=length(rows[1])
+    all(length(r)==nv for r in rows) || return nothing
+    nu=length(rows)
+    C=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    for i in 1:nu, j in 1:nv
+        C[i,j]=rows[i][j]
+    end
+    return C
+end
+
+function _step_nurbs_surface(ent::StepEntity, entities)
+    ent.kind=="B_SPLINE_SURFACE_WITH_KNOTS" || return nothing
+    i=_skip_name(ent.args)
+    length(ent.args)>=i+10 || return nothing
+    du=_as_int(ent.args[i],"import_nurbs_step","degree_u")
+    dv=_as_int(ent.args[i+1],"import_nurbs_step","degree_v")
+    C=_nested_ref_points(entities, ent.args[i+2])
+    C===nothing && throw(ArgumentError("import_nurbs_step: missing surface control points"))
+    u_knots=_expand_knots(ent.args[i+7], ent.args[i+9], "import_nurbs_step")
+    v_knots=_expand_knots(ent.args[i+8], ent.args[i+10], "import_nurbs_step")
+    return NURBSSurface(du,dv,u_knots,v_knots,C)
+end
+
+function import_nurbs_step(path::AbstractString)
+    isfile(path) || throw(ArgumentError("import_nurbs_step: missing file $path"))
+    source=read(path,String)
+    occursin("ISO-10303-21",source) || throw(ArgumentError(
+        "import_nurbs_step: $path is not an ISO-10303-21 STEP file"))
+    entities=parse_step_entities(source)
+    objects=Any[]
+    for ent in sort!(collect(values(entities)); by=e->e.id)
+        c=_step_nurbs_curve(ent,entities)
+        c===nothing || push!(objects,c)
+        s=_step_nurbs_surface(ent,entities)
+        s===nothing || push!(objects,s)
+    end
+    isempty(objects) && throw(ArgumentError(
+        "import_nurbs_step: no B_SPLINE_CURVE_WITH_KNOTS or B_SPLINE_SURFACE_WITH_KNOTS"))
+    return objects
+end
+
+function _iges_nurbs_curve(rec)
+    Int(rec[1])==126 || return nothing
+    length(rec)>=8 || throw(ArgumentError("import_nurbs_iges: IGES 126 record is truncated"))
+    K=_as_int(rec[2],"import_nurbs_iges","K")
+    M=_as_int(rec[3],"import_nurbs_iges","M")
+    n=K+1
+    nknots=K+M+2
+    i=8
+    length(rec)>=i+nknots+n+3n-1 || throw(ArgumentError(
+        "import_nurbs_iges: IGES 126 record is truncated"))
+    knots=Float64[rec[i+k-1] for k in 1:nknots]; i+=nknots
+    weights=Float64[rec[i+k-1] for k in 1:n]; i+=n
+    controls=NTuple{3,Float64}[]
+    for _ in 1:n
+        push!(controls,(rec[i],rec[i+1],rec[i+2])); i+=3
+    end
+    return NURBSCurve(M,knots,controls,weights)
+end
+
+function _iges_nurbs_surface(rec)
+    Int(rec[1])==128 || return nothing
+    length(rec)>=10 || throw(ArgumentError("import_nurbs_iges: IGES 128 record is truncated"))
+    K1=_as_int(rec[2],"import_nurbs_iges","K1")
+    K2=_as_int(rec[3],"import_nurbs_iges","K2")
+    M1=_as_int(rec[4],"import_nurbs_iges","M1")
+    M2=_as_int(rec[5],"import_nurbs_iges","M2")
+    nu,nv=K1+1,K2+1
+    nku,nkv=K1+M1+2,K2+M2+2
+    i=11
+    length(rec)>=i+nku+nkv+nu*nv+3*nu*nv-1 || throw(ArgumentError(
+        "import_nurbs_iges: IGES 128 record is truncated"))
+    knots_u=Float64[rec[i+k-1] for k in 1:nku]; i+=nku
+    knots_v=Float64[rec[i+k-1] for k in 1:nkv]; i+=nkv
+    W=Matrix{Float64}(undef,nu,nv)
+    C=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    for j in 1:nv, iu in 1:nu
+        W[iu,j]=rec[i]; i+=1
+    end
+    for j in 1:nv, iu in 1:nu
+        C[iu,j]=(rec[i],rec[i+1],rec[i+2]); i+=3
+    end
+    return NURBSSurface(M1,M2,knots_u,knots_v,C,W)
+end
+
+function import_nurbs_iges(path::AbstractString)
+    isfile(path) || throw(ArgumentError("import_nurbs_iges: missing file $path"))
+    records=_iges_records(read(path,String))
+    isempty(records) && throw(ArgumentError("import_nurbs_iges: no parameter records"))
+    objects=Any[]
+    for rec in records
+        isempty(rec) && continue
+        c=_iges_nurbs_curve(rec)
+        c===nothing || push!(objects,c)
+        s=_iges_nurbs_surface(rec)
+        s===nothing || push!(objects,s)
+    end
+    isempty(objects) && throw(ArgumentError(
+        "import_nurbs_iges: no IGES 126/128 NURBS records"))
+    return objects
+end
+
+function _iges126_fields(c::NURBSCurve)
+    K=length(c.controls)-1
+    polynomial=all(==(1.0), c.weights) ? 1.0 : 0.0
+    rec=Float64[126,K,c.degree,0,0,polynomial,0]
+    append!(rec,c.knots)
+    append!(rec,c.weights)
+    for p in c.controls
+        append!(rec, (p[1],p[2],p[3]))
+    end
+    push!(rec, c.knots[c.degree+1], c.knots[end-c.degree])
+    return rec
+end
+
+function _iges128_fields(s::NURBSSurface)
+    nu,nv=size(s.controls)
+    K1,K2=nu-1,nv-1
+    polynomial=all(==(1.0), s.weights) ? 1.0 : 0.0
+    rec=Float64[128,K1,K2,s.degree_u,s.degree_v,0,0,0,0,polynomial]
+    append!(rec,s.knots_u)
+    append!(rec,s.knots_v)
+    for j in 1:nv, i in 1:nu
+        push!(rec,s.weights[i,j])
+    end
+    for j in 1:nv, i in 1:nu
+        p=s.controls[i,j]
+        append!(rec,(p[1],p[2],p[3]))
+    end
+    push!(rec, s.knots_u[s.degree_u+1], s.knots_u[end-s.degree_u],
+          s.knots_v[s.degree_v+1], s.knots_v[end-s.degree_v])
+    return rec
+end
+
+function _write_iges(path, records)
+    open(path,"w") do io
+        println(io, rpad("",72)*"S      1")
+        println(io, rpad("1H,,1H;,8HTessella,11HTessella.jl,11HTessella.jl,32,8,15,11HTessella.jl,1.",72)*"G      1")
+        seq=0
+        for rec in records
+            buf=IOBuffer()
+            for (i,v) in enumerate(rec)
+                i>1 && print(buf,',')
+                if v==floor(v) && abs(v)<1e12
+                    print(buf, Int(v))
+                else
+                    print(buf, v)
+                end
+            end
+            print(buf,';')
+            bytes=take!(buf)
+            n=length(bytes)
+            pos=1
+            while pos<=n
+                seq+=1
+                stop=min(pos+63,n)
+                write(io,view(bytes,pos:stop))
+                print(io, " "^(72-(stop-pos+1)))
+                println(io, "P", lpad(seq,7))
+                pos=stop+1
+            end
+        end
+        println(io, rpad("",72)*"T      1")
+    end
+    return path
+end
+
+function export_iges_nurbs(path::AbstractString, objects)
+    isempty(objects) && throw(ArgumentError("export_iges_nurbs: no NURBS objects"))
+    records=Vector{Vector{Float64}}()
+    for obj in objects
+        if obj isa NURBSCurve
+            push!(records,_iges126_fields(obj))
+        elseif obj isa NURBSSurface
+            push!(records,_iges128_fields(obj))
+        else
+            throw(ArgumentError("export_iges_nurbs: expected NURBSCurve or NURBSSurface"))
+        end
+    end
+    return _write_iges(path, records)
 end
 
 end # module
