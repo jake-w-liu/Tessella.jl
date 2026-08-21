@@ -56,8 +56,8 @@ Tessella
 ├── CAD           analytical surfaces, projection, imprints
 ├── BRep          ISO-10303-21 STEP / IGES classified-solid import (box/sphere/cylinder)
 ├── NURBS         native B-spline/NURBS curve and surface evaluation
-├── Model         tagged point/curve/loop/surface/volume entity kernel plus native solids/Booleans
-├── GeoExec       bounded Point/Line/Loop/Surface/Box/Cylinder/Sphere/Boolean/Translate `.geo` execution
+├── Model         tagged point/curve/loop/surface/volume entity kernel plus native solids/Booleans/embeds
+├── GeoExec       bounded Point/Line/Loop/Surface/Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/Rotate `.geo` execution
 ├── BoundaryLayer prismatic first-order boundary-layer extrusion
 ├── Periodic      translation periodic identification
 ├── Post          list-based views and plugins
@@ -107,10 +107,10 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O, and a tagged point/curve/surface/volume kernel |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation, classified STEP/IGES solids, Box/Cylinder/Sphere/Boolean/Translate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined hexahedra, prismatic boundary layers, and translation periodic identification |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation, classified STEP/IGES solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, Point-In-Surface embeddings, holed plane surfaces, recombined hexahedra, prismatic boundary layers, and translation periodic identification |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — model/mesh API, CLI, headless GUI state, views/plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, API box, OCC cylinder, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point-In-Surface embed, API box, OCC cylinder, and BooleanDifference box corpus |
 
 P1 does not yet claim boundary-layer element topology, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -138,10 +138,12 @@ rotation, dilation, reflection, and general affine transforms of finalized simpl
 meshes. Classified ISO-10303-21 STEP and IGES solids that are axis-aligned blocks,
 spheres, or right circular cylinders are imported and filled; any other topology is
 an explicit blocker listing the seen entity types. The entity kernel records native
-boxes, cylinders, spheres, and mesh-Boolean volumes. Bounded `.geo` execution covers
-Point/Line/Loop/Surface, Box/Cylinder/Sphere, BooleanDifference/Union/Intersection
-of those solids (with operand `Delete`), and Translate of remaining boxes, cylinders,
-and spheres. It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD
+boxes, cylinders, spheres, cones, and mesh-Boolean volumes. Bounded `.geo` execution covers
+Point/Line/Loop/Surface, Box/Cylinder/Sphere/Cone, BooleanDifference/Union/Intersection
+of those solids (with operand `Delete`), Translate of remaining native solids,
+Dilate about a center, and coordinate-axis rotations by integer multiples of π/2
+that preserve axis-aligned boxes. Point-In-Surface embeddings force the classified
+point to appear as a mesh node. It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD
 import/export, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
 functions, prior scalar bindings, and explicit field/physical tags with resource
@@ -149,7 +151,7 @@ bounds. Finite constant `start:end[:increment]` lists are expanded in recognized
 numeric field options and field selectors; entirely numeric Physical memberships are
 range-checked but remain geometry data. The scanner deliberately rejects loops,
 macros, dynamic tag allocators, option reads, stateful functions, dynamic/general
-ranges, logical/ternary evaluation, extrusions/fillets/rotates, and mixed
+ranges, logical/ternary evaluation, extrusions/fillets/symmetry, and mixed
 geometry-derived physical right-hand-side evaluation instead of pretending to be a
 complete interpreter.
 
@@ -172,11 +174,11 @@ tetrahedral path; positively ordered affine eight-corner blocks can also be emit
 as first-order recombined hexahedra with type-3 boundary quadrangles. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite
 or HWall/size-map curve laws,
-quasi-transfinite or holed patches, general CAD parameterizations,
+quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes, recombined three-sided patches,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, boundary-layer element topology, or
-embedded model constraints.
+embedded curves/surfaces in volumes.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.
