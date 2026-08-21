@@ -2,14 +2,16 @@
     GeoExec
 
 Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface,
-Box/Cylinder/Sphere, Boolean union/difference/intersection, Translate of those
-solids, Physical groups, and Mesh 2/3 via the native [`Model`](@ref) kernel.
-Loops, macros, extrusions, fillets, and general OCC BREP remain explicit blockers.
+Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
+90°-Rotate of those solids, Point-In-Surface embeddings, Physical groups, and
+Mesh 2/3 via the native [`Model`](@ref) kernel. Loops, macros, extrusions,
+fillets, and general OCC BREP remain explicit blockers.
 """
 module GeoExec
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
-using ..Model: add_box!, add_cylinder!, add_sphere!, boolean_volumes!
+using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
+using ..Model: embed!, dilate_volume!, rotate_volume!
 using ..Model: add_physical_group!, set_physical_name!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -70,7 +72,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     dim=Int(mesh_dim)
     dim in (0,2,3) || throw(ArgumentError("execute_geo: mesh_dim must be 0, 2, or 3"))
     for line in _geo_exec_statements(path)
-        occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Rotate|Dilate|Symmetry)\b",
+        occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
                  line) && throw(ArgumentError(
             "execute_geo: unsupported statement $(line) — loops, macros, and advanced OCC features are blockers"))
         _exec_line!(model,line)
@@ -124,6 +126,12 @@ function _exec_line!(m::GeoModel, line::AbstractString)
         length(nums)==4 || throw(ArgumentError("execute_geo: Sphere needs x,y,z,r"))
         add_sphere!(m, nums[1],nums[2],nums[3],nums[4]; tag=parse(Int,mm.captures[1]))
         return
+    elseif (mm=match(r"^Cone\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
+        nums=parse.(Float64, split(mm.captures[2],','))
+        length(nums)==8 || throw(ArgumentError("execute_geo: Cone needs x,y,z,dx,dy,dz,r1,r2"))
+        add_cone!(m, nums[1],nums[2],nums[3],nums[4],nums[5],nums[6],nums[7],nums[8];
+                  tag=parse(Int,mm.captures[1]))
+        return
     elseif (mm=match(r"^Boolean(Difference|Union|Intersection)\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*Volume\{([0-9]+)\}([^}]*)\}\s*\{\s*Volume\{([0-9]+)\}([^}]*)\}\s*;$", line)) !== nothing
         op=Dict("Difference"=>:difference,"Union"=>:union,"Intersection"=>:intersection)[mm.captures[1]]
         a=parse(Int,mm.captures[3]); b=parse(Int,mm.captures[5])
@@ -151,10 +159,35 @@ function _exec_line!(m::GeoModel, line::AbstractString)
             s=m.spheres[tag]
             m.spheres[tag]=(center=(s.center[1]+nums[1],s.center[2]+nums[2],s.center[3]+nums[3]),
                             radius=s.radius)
+        elseif haskey(m.cones,tag)
+            c=m.cones[tag]
+            m.cones[tag]=(center=(c.center[1]+nums[1],c.center[2]+nums[2],c.center[3]+nums[3]),
+                          axis=c.axis, r1=c.r1, r2=c.r2, height=c.height)
         else
             throw(ArgumentError(
-                "execute_geo: Translate currently supports boxes, cylinders, and spheres (Volume[$tag] is not one)"))
+                "execute_geo: Translate currently supports boxes, cylinders, spheres, and cones (Volume[$tag] is not one)"))
         end
+        return
+    elseif (mm=match(r"^Dilate\s*\{\s*\{\s*([^}]+)\s*\}\s*,\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
+        center=parse.(Float64, split(mm.captures[1],','))
+        length(center)==3 || throw(ArgumentError("execute_geo: Dilate center needs three coordinates"))
+        scale=parse(Float64, mm.captures[2])
+        dilate_volume!(m, parse(Int,mm.captures[3]), (center[1],center[2],center[3]), scale)
+        return
+    elseif (mm=match(r"^Rotate\s*\{\s*\{\s*([^}]+)\s*\}\s*,\s*\{\s*([^}]+)\s*\}\s*,\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
+        axis=parse.(Float64, split(mm.captures[1],','))
+        origin=parse.(Float64, split(mm.captures[2],','))
+        (length(axis)==3 && length(origin)==3) || throw(ArgumentError(
+            "execute_geo: Rotate needs axis and origin triples"))
+        angle=parse(Float64, mm.captures[3])
+        rotate_volume!(m, parse(Int,mm.captures[4]),
+                       (axis[1],axis[2],axis[3]), (origin[1],origin[2],origin[3]), angle)
+        return
+    elseif (mm=match(r"^(Point|Line|Curve)\s*\{\s*([^}]+)\s*\}\s+In\s+Surface\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
+        mm.captures[1]=="Point" || throw(ArgumentError(
+            "execute_geo: only Point In Surface embeddings are implemented"))
+        ids=parse.(Int, split(mm.captures[2],','))
+        embed!(m, 0, ids, 2, parse(Int,mm.captures[3]))
         return
     elseif (mm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
         dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]

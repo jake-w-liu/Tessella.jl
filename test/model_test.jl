@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris, ntets, validate, tet_volume, node
+using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node
 
 @testset "entity model and .geo execution" begin
     m=GeoModel()
@@ -158,4 +158,138 @@ using Tessella.MeshTypes: ntris, ntets, validate, tet_volume, node
         path
     end
     @test_throws ArgumentError execute_geo(extrude)
+
+    hole=GeoModel()
+    add_point!(hole,0,0,0; tag=1, mesh_size=0.5)
+    add_point!(hole,1,0,0; tag=2, mesh_size=0.5)
+    add_point!(hole,1,1,0; tag=3, mesh_size=0.5)
+    add_point!(hole,0,1,0; tag=4, mesh_size=0.5)
+    add_point!(hole,0.25,0.25,0; tag=5, mesh_size=0.5)
+    add_point!(hole,0.75,0.25,0; tag=6, mesh_size=0.5)
+    add_point!(hole,0.75,0.75,0; tag=7, mesh_size=0.5)
+    add_point!(hole,0.25,0.75,0; tag=8, mesh_size=0.5)
+    add_line!(hole,1,2; tag=1); add_line!(hole,2,3; tag=2)
+    add_line!(hole,3,4; tag=3); add_line!(hole,4,1; tag=4)
+    add_line!(hole,5,6; tag=5); add_line!(hole,6,7; tag=6)
+    add_line!(hole,7,8; tag=7); add_line!(hole,8,5; tag=8)
+    add_curve_loop!(hole,[1,2,3,4]; tag=1)
+    add_curve_loop!(hole,[5,6,7,8]; tag=2)
+    add_plane_surface!(hole,[1,2]; tag=1)
+    hmesh=mesh_model_surface(hole,1)
+    @test validate(hmesh).ok
+    harea=sum(abs((node(hmesh,hmesh.tris[2,t])[1]-node(hmesh,hmesh.tris[1,t])[1])*
+                  (node(hmesh,hmesh.tris[3,t])[2]-node(hmesh,hmesh.tris[1,t])[2])-
+                  (node(hmesh,hmesh.tris[3,t])[1]-node(hmesh,hmesh.tris[1,t])[1])*
+                  (node(hmesh,hmesh.tris[2,t])[2]-node(hmesh,hmesh.tris[1,t])[2]))/2
+              for t in 1:ntris(hmesh))
+    @test harea≈0.75 atol=1e-12
+
+    emb=GeoModel()
+    add_point!(emb,0,0,0; tag=1, mesh_size=0.5)
+    add_point!(emb,1,0,0; tag=2, mesh_size=0.5)
+    add_point!(emb,1,1,0; tag=3, mesh_size=0.5)
+    add_point!(emb,0,1,0; tag=4, mesh_size=0.5)
+    add_point!(emb,0.5,0.5,0; tag=5, mesh_size=0.5)
+    add_line!(emb,1,2; tag=1); add_line!(emb,2,3; tag=2)
+    add_line!(emb,3,4; tag=3); add_line!(emb,4,1; tag=4)
+    add_curve_loop!(emb,[1,2,3,4]; tag=1)
+    add_plane_surface!(emb,[1]; tag=1)
+    embed!(emb,0,[5],2,1)
+    emesh=mesh_model_surface(emb,1)
+    @test validate(emesh).ok
+    @test any(i->hypot(emesh.coords[1,i]-0.5,emesh.coords[2,i]-0.5,emesh.coords[3,i])<=1e-12,
+              1:nnodes(emesh))
+    earea=sum(abs((node(emesh,emesh.tris[2,t])[1]-node(emesh,emesh.tris[1,t])[1])*
+                  (node(emesh,emesh.tris[3,t])[2]-node(emesh,emesh.tris[1,t])[2])-
+                  (node(emesh,emesh.tris[3,t])[1]-node(emesh,emesh.tris[1,t])[1])*
+                  (node(emesh,emesh.tris[2,t])[2]-node(emesh,emesh.tris[1,t])[2]))/2
+              for t in 1:ntris(emesh))
+    @test earea≈1.0 atol=1e-12
+    outside=GeoModel()
+    add_point!(outside,0,0,0; tag=1, mesh_size=0.5)
+    add_point!(outside,1,0,0; tag=2, mesh_size=0.5)
+    add_point!(outside,1,1,0; tag=3, mesh_size=0.5)
+    add_point!(outside,0,1,0; tag=4, mesh_size=0.5)
+    add_point!(outside,2,2,0; tag=5, mesh_size=0.5)
+    add_line!(outside,1,2; tag=1); add_line!(outside,2,3; tag=2)
+    add_line!(outside,3,4; tag=3); add_line!(outside,4,1; tag=4)
+    add_curve_loop!(outside,[1,2,3,4]; tag=1)
+    add_plane_surface!(outside,[1]; tag=1)
+    embed!(outside,0,[5],2,1)
+    @test_throws Exception mesh_model_surface(outside,1)
+
+    cone=GeoModel()
+    add_cone!(cone,0,0,0,0,0,2,1,0.5; tag=1)
+    conevol=mesh_model_volume(cone,1)
+    @test validate(conevol).ok
+    @test ntets(conevol)>0
+    nθ=24
+    expected=0.5*nθ*sin(2π/nθ)*2*(1+0.5+0.25)/3
+    CEV=sum(tet_volume(node(conevol,conevol.tets[1,t]),node(conevol,conevol.tets[2,t]),
+                       node(conevol,conevol.tets[3,t]),node(conevol,conevol.tets[4,t]))
+            for t in 1:ntets(conevol))
+    @test CEV≈expected rtol=1e-12
+
+    dilated=GeoModel()
+    add_box!(dilated,0,0,0,1,1,1; tag=1)
+    dilate_volume!(dilated,1,(0,0,0),2)
+    dvol=mesh_model_volume(dilated,1)
+    DV=sum(tet_volume(node(dvol,dvol.tets[1,t]),node(dvol,dvol.tets[2,t]),
+                      node(dvol,dvol.tets[3,t]),node(dvol,dvol.tets[4,t]))
+           for t in 1:ntets(dvol))
+    @test DV≈8.0 atol=1e-12
+
+    rotated=GeoModel()
+    add_box!(rotated,0,0,0,1,1,1; tag=1)
+    rotate_volume!(rotated,1,(0,0,1),(0,0,0),π/2)
+    rvol=mesh_model_volume(rotated,1)
+    RV=sum(tet_volume(node(rvol,rvol.tets[1,t]),node(rvol,rvol.tets[2,t]),
+                      node(rvol,rvol.tets[3,t]),node(rvol,rvol.tets[4,t]))
+           for t in 1:ntets(rvol))
+    @test RV≈1.0 atol=1e-12
+    rx=(rvol.coords[1,i] for i in 1:nnodes(rvol))
+    ry=(rvol.coords[2,i] for i in 1:nnodes(rvol))
+    @test minimum(rx)≈-1.0 atol=1e-12
+    @test maximum(rx)≈0.0 atol=1e-12
+    @test minimum(ry)≈0.0 atol=1e-12
+    @test maximum(ry)≈1.0 atol=1e-12
+
+    xform=mktemp() do path,io
+        write(io, """
+            SetFactory("OpenCASCADE");
+            Box(1) = {0, 0, 0, 1, 1, 1};
+            Dilate {{0, 0, 0}, 2} { Volume{1}; };
+            Rotate {{0, 0, 1}, {0, 0, 0}, $(π/2)} { Volume{1}; };
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=3)
+    end
+    @test validate(xform.mesh).ok
+    XV=sum(tet_volume(node(xform.mesh,xform.mesh.tets[1,t]),
+                      node(xform.mesh,xform.mesh.tets[2,t]),
+                      node(xform.mesh,xform.mesh.tets[3,t]),
+                      node(xform.mesh,xform.mesh.tets[4,t]))
+           for t in 1:ntets(xform.mesh))
+    @test XV≈8.0 atol=1e-12
+
+    embedgeo=mktemp() do path,io
+        write(io, """
+            Point(1) = {0, 0, 0, 0.5};
+            Point(2) = {1, 0, 0, 0.5};
+            Point(3) = {1, 1, 0, 0.5};
+            Point(4) = {0, 1, 0, 0.5};
+            Point(5) = {0.5, 0.5, 0, 0.5};
+            Line(1) = {1, 2};
+            Line(2) = {2, 3};
+            Line(3) = {3, 4};
+            Line(4) = {4, 1};
+            Line Loop(1) = {1, 2, 3, 4};
+            Plane Surface(1) = {1};
+            Point{5} In Surface{1};
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=2)
+    end
+    @test any(i->hypot(embedgeo.mesh.coords[1,i]-0.5,embedgeo.mesh.coords[2,i]-0.5)<=1e-12,
+              1:nnodes(embedgeo.mesh))
 end

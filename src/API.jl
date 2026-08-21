@@ -7,7 +7,8 @@ meshing is never delegated to Gmsh.
 module API
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
-using ..Model: add_box!, add_cylinder!, add_sphere!, boolean_volumes!
+using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
+using ..Model: embed!
 using ..Model: add_physical_group!, mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..GeoExec: execute_geo
@@ -49,7 +50,7 @@ end
 
 module model
 using ..API: _model, add_point!, add_line!, add_curve_loop!, add_plane_surface!
-using ..API: add_box!, add_cylinder!, add_sphere!, boolean_volumes!, add_physical_group!
+using ..API: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!, embed!, add_physical_group!
 add_point(x,y,z; tag=0, meshSize=1.0)=add_point!(_model(),x,y,z; tag=tag, mesh_size=meshSize)
 add_line(a,b; tag=0)=add_line!(_model(),a,b; tag=tag)
 add_curve_loop(curves; tag=0)=add_curve_loop!(_model(),curves; tag=tag)
@@ -57,6 +58,8 @@ add_plane_surface(loops; tag=0)=add_plane_surface!(_model(),loops; tag=tag)
 add_box(x,y,z,dx,dy,dz; tag=0)=add_box!(_model(),x,y,z,dx,dy,dz; tag=tag)
 add_cylinder(x,y,z,dx,dy,dz,r; tag=0)=add_cylinder!(_model(),x,y,z,dx,dy,dz,r; tag=tag)
 add_sphere(x,y,z,r; tag=0)=add_sphere!(_model(),x,y,z,r; tag=tag)
+add_cone(x,y,z,dx,dy,dz,r1,r2; tag=0)=add_cone!(_model(),x,y,z,dx,dy,dz,r1,r2; tag=tag)
+embed(dim,tags,target_dim,target_tag)=embed!(_model(),dim,tags,target_dim,target_tag)
 function _boolean(op,a,b; tag=0)
     m=_model()
     t=boolean_volumes!(m,op,a,b; tag=tag)

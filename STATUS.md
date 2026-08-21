@@ -25,9 +25,9 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder import, Box/Cylinder/Sphere/Boolean/Translate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, and recombined hexahedra |
-| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, API-box, OCC-cylinder, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder import, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point-In-Surface embeddings, holed plane surfaces, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, and recombined hexahedra |
+| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point-In-Surface embed, API-box, OCC-cylinder, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, multiple-time-step, or mixed-component
@@ -48,14 +48,15 @@ classification metadata for a safe rewrite. P3 does not yet claim a general Open
 import/export, transformations of arbitrary CAD entities, or full `.geo` execution.
 Classified STEP/IGES solids that are axis-aligned blocks, spheres, or right circular
 cylinders are imported and filled; other topology is an explicit blocker. Bounded
-`.geo` execution covers Point/Line/Loop/Surface, Box/Cylinder/Sphere,
-BooleanDifference/Union/Intersection of those solids, and Translate of remaining
-boxes/cylinders/spheres. Its scanner handles finite arithmetic constants,
+`.geo` execution covers Point/Line/Loop/Surface, Box/Cylinder/Sphere/Cone,
+BooleanDifference/Union/Intersection of those solids, Translate of remaining
+native solids, Dilate, coordinate-axis π/2 rotations of AABB boxes, and
+Point-In-Surface embeddings. Its scanner handles finite arithmetic constants,
 pure numeric functions, prior scalar bindings, explicit field/physical tags, and
 finite constant ranges in recognized numeric field lists/selectors. Entirely numeric
 Physical memberships are range-checked but remain geometry data. It rejects loops,
 macros, dynamic tags, option reads, stateful functions, dynamic/general ranges,
-logical/ternary evaluation, extrusions/fillets/rotates, and mixed geometry-derived
+logical/ternary evaluation, extrusions/fillets/symmetry, and mixed geometry-derived
 physical-group right-hand-side evaluation.
 
 P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
@@ -81,13 +82,12 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
-Re-measured on 2026-08-21 with Julia 1.12.7 after classified STEP/IGES import,
-Edmonds-blossom/full-quad recombination, Box/Cylinder/Sphere/Boolean/Translate
-`.geo` execution, and the expanded P6 t1/cylinder/boolean corpus. Both
-bounds-checked package runs matched:
+Re-measured on 2026-08-21 with Julia 1.12.7 after Point-In-Surface embeddings,
+holed plane surfaces, Cone/Dilate/90°-Rotate `.geo` execution, and the P6 t4-hole
+and embed-point corpus. Both bounds-checked package runs matched:
 
 - `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
-  — 163,171/163,171 assertions passed twice (10m01.1s, then 10m05.8s).
+  — 163,189/163,189 assertions passed twice (10m14.7s, then 10m10.5s).
 - `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
   — exited 0 against Gmsh 4.15.2-git. Exact flat-model volumes box=2, tunnel=24,
   hollow box=35; cylinder prism 62.652572; enclosure gmsh empty solids reproduced.
@@ -101,16 +101,16 @@ bounds-checked package runs matched:
   gmsh_tets=1158 tessella_tets=12`.
 - P6 t1 child: `GMSH_PARITY_T1_OK gmsh=4.15.2 tessella_area=1 gmsh_tris=14
   tessella_tris=16`.
+- P6 t4 hole child: `GMSH_PARITY_T4_HOLE_OK gmsh=4.15.2 tessella_area=0.75
+  gmsh_tris=12 tessella_tris=12`.
+- P6 embed child: `GMSH_PARITY_EMBED_OK gmsh=4.15.2 tessella_area=1 gmsh_tris=16
+  tessella_tris=16 tessella_nodes=13`.
 - P6 cylinder child: `GMSH_PARITY_CYLINDER_OK gmsh=4.15.2
   tessella_prism=6.211657082460498 gmsh_tets=60 tessella_tets=96`.
 - P6 boolean-boxes child: `GMSH_PARITY_BOOLEAN_OK gmsh=4.15.2 tessella_volume=1
   gmsh_tets=100 tessella_tets=12`.
-- Fresh-process `using Tessella` plus `mesh_volume`/`size_at` succeeded on
-  `box_surface(0,1,0,1,0,1)`: 9 nodes / 12 tets, `size_at==0.5`, `validate` ok.
-- Focused CRC: BRep 28/28; recombination 65/65; entity/`.geo` 37/37;
-  API/CLI/GUI/post 19/19.
-- `git diff --check` passed. `.grok/` is removed from the worktree, gitignored,
-  and absent from the index.
+- Focused CRC: entity/`.geo` 55/55.
+- `git diff --check` passed. `.grok/` is gitignored and absent from the index.
 
 Previous aggregate on the same day with Julia 1.12.7, kept as historical:
 

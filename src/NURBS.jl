@@ -2,8 +2,9 @@
     NURBS
 
 Native B-spline / NURBS curve and surface evaluation (De Boor / Cox–de Boor).
-This is the OCC-equivalent query path for parametric CAD; imports of STEP/IGES
-remain explicit blockers until a BREP reader is shipped.
+This is the OCC-equivalent query path for parametric CAD. Classified STEP/IGES
+solids are imported by [`BRep`](@ref); unrecognized topology remains an explicit
+blocker.
 """
 module NURBS
 

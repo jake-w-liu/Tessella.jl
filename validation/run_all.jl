@@ -152,6 +152,18 @@ bool_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --proje
 println("  command: ", bool_command)
 run(bool_command)
 
+println("\n── gmsh_parity t4 hole ──  Tessella vs analytic/Gmsh holed-square area")
+t4_script = joinpath(HERE, "gmsh_parity", "t4_hole.jl")
+t4_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $t4_script`
+println("  command: ", t4_command)
+run(t4_command)
+
+println("\n── gmsh_parity embed point ──  Tessella vs Gmsh Point-In-Surface node")
+embed_script = joinpath(HERE, "gmsh_parity", "embed_point.jl")
+embed_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $embed_script`
+println("  command: ", embed_command)
+run(embed_command)
+
 println("\n── transfinite_hex ──  Gmsh 4.15.2 affine six-face hexahedra")
 transfinite_hex_script = joinpath(HERE, "transfinite_hex", "differential.jl")
 transfinite_hex_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_hex_script`
