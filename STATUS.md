@@ -25,7 +25,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII MSH v2.2/v4.1 read/write |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, and mesh Boolean CSG |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -37,8 +37,8 @@ Jacobian certification, binary MSH, ancillary/unknown-section preservation, repe
 `$Nodes`, internal indices beyond `Int32`, or lossless multi-physical-group MSH v2.2
 projection. Some registered fixed tags require explicit Tessella-only output because
 Gmsh 4.15.2 cannot re-import them. P3 does not yet claim a general entity kernel,
-OpenCASCADE/BREP/NURBS, CAD import/export, complete transformations, or full `.geo`
-execution.
+OpenCASCADE/BREP/NURBS, CAD import/export, transformations of analytical/CAD
+entities, or full `.geo` execution.
 
 OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
 post-processing are unfinished parity tracks, not project non-goals.
@@ -69,7 +69,11 @@ After that stable aggregate gate, the isolated native-primitive increment passed
 69/69 bounds-checked geometry assertions under both Julia 1.12.7 and Julia 1.11,
 including deterministic CRCs, analytical/polyhedral volume checks, direct volume
 meshing, resource/error paths, and linear allocation-growth ratchets. It will be
-included in the next aggregate package gate.
+included in the next aggregate package gate. The subsequent finalized-mesh transform
+increment passed 56/56 bounds-checked assertions under Julia 1.12.7 and Julia 1.11.9.
+Its independent Gmsh 4.15.2 `model.mesh.affineTransform` oracle matched all four
+fixture nodes exactly; 10,000- and 20,000-node translations allocated 504,984 and
+996,504 bytes respectively, and the method-ambiguity scan remained empty.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:

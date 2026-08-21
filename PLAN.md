@@ -31,6 +31,7 @@ meshing backend would not resolve the ASCENT failure that motivated Tessella.
 Tessella
 ├── Predicates    adaptive exact orient/incircle/insphere, exact rationals, SoS
 ├── MeshTypes     compact simplex storage, topology, quality, CRC, validation
+├── Transform     validated affine transforms for finalized simplex meshes
 ├── ExactMesh3D   Rational{BigInt} Delaunay kernel
 ├── IO            strict/atomic simplex MSH v2.2/v4.1, STL, limited .geo scan
 ├── Elements      fixed-node Gmsh catalog, mixed mesh metadata, ASCII MSH I/O
@@ -87,7 +88,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types, mixed metadata, validation/CRC, and ASCII MSH v2.2/v4.1 shipped |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, and mesh Booleans shipped |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, mesh Booleans, and finalized-mesh affine transforms shipped |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | PENDING |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
@@ -103,9 +104,11 @@ indexing beyond `Int32`, or lossless multi-physical-group projection through MSH
 Some registered fixed tags also require explicit Tessella-only output because Gmsh
 4.15.2 cannot re-import them. P3 currently provides the native analytical and
 polyhedral path used by ASCENT, including boxes, cylinders, cones, geodesic spheres,
-projection/imprint curves, cavities, and mesh Booleans; it does not yet claim a
-general entity kernel, OpenCASCADE/BREP/NURBS, CAD import/export, full transformations,
-or complete `.geo` execution. P4–P6 remain pending.
+projection/imprint curves, cavities, mesh Booleans, and validated translation,
+rotation, dilation, reflection, and general affine transforms of finalized simplex
+meshes. It does not yet claim a general entity kernel, OpenCASCADE/BREP/NURBS, CAD
+import/export, transformations of analytical/CAD entities, or complete `.geo`
+execution. P4–P6 remain pending.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.

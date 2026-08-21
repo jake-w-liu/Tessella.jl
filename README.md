@@ -49,7 +49,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   and lower-dimensional cells and tags are preserved through volume refinement;
 - quality reporting, flips, Laplacian/ODT/targeted sliver smoothing, healing
   diagnostics, native box/cylinder/cone/geodesic-sphere primitives, analytical
-  surfaces, imprints, and mesh Boolean CSG;
+  surfaces, imprints, mesh Boolean CSG, and validated affine transformations of
+  finalized simplex meshes with orientation and physical-tag preservation;
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a 125-type fixed-node Gmsh element catalog, mixed blocks and entity/classification
