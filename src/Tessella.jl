@@ -81,7 +81,7 @@ using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surfac
               add_physical_group!, mesh_model_surface, mesh_model_volume
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
-using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d
+using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled
 using .Periodic: periodic_identify
 using .BRep: import_step, import_iges, import_nurbs_step, import_nurbs_iges,
                   export_iges_nurbs
@@ -131,7 +131,8 @@ export add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, dilate_volume!, rotate_volume!
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
-export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d, periodic_identify
+export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d,
+       mesh_boundary_layer_filled, periodic_identify
 export import_step, import_iges, import_nurbs_step, import_nurbs_iges, export_iges_nurbs
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
