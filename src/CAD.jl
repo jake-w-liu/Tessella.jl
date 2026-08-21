@@ -16,6 +16,7 @@ module CAD
 
 export PlaneS, CylinderS, SphereS, DiskS
 export on_surface, project_to, surface_residual, imprint_circle, imprint_ellipse
+export import_step, import_iges
 
 @inline function _v(a)
     length(a) >= 3 || throw(ArgumentError("CAD: a point/vector needs three coordinates"))
@@ -226,5 +227,11 @@ function imprint_ellipse(cyl::CylinderS, plane::PlaneS; nseg::Integer=48)
     tc = -_dot(plane.n, _sub(cyl.base, plane.p0)) / denom
     (_result_point(_add(cyl.base, _scale(ax, tc)),"imprint_ellipse"), pts)
 end
+
+"""STEP/IGES CAD import is not a silent no-op: it is an explicit blocker."""
+import_step(path::AbstractString) = throw(ArgumentError(
+    "import_step: STEP import is not implemented ($path); provide a triangulated surface"))
+import_iges(path::AbstractString) = throw(ArgumentError(
+    "import_iges: IGES import is not implemented ($path); provide a triangulated surface"))
 
 end # module CAD

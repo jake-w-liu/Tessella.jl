@@ -16,6 +16,12 @@ using Tessella
     include("transfinite_quad_test.jl") # recombined four-sided quadrangle patches
     include("transfinite_volume_test.jl") # affine six-face structured volumes
     include("transfinite_prism_test.jl") # affine five-face transfinite prisms
+    include("transfinite_hex_test.jl") # affine six-face recombined hexahedra
+    include("model_test.jl")          # entity kernel + .geo execution
+    include("nurbs_test.jl")          # De Boor vs Bernstein/circle oracles
+    include("boundarylayer_test.jl")  # prismatic layer extrusion
+    include("periodic_test.jl")       # periodic identification
+    include("api_cli_gui_test.jl")    # API/CLI/GUI/post logic
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle

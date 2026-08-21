@@ -17,6 +17,8 @@ validation/
   size_fields/
     differential.jl      # required Gmsh 4.15.2 field differential
     STATUS.md            # exact coverage and explicit non-claims
+  geo_ranges/
+    differential.jl      # required bit-exact Gmsh 4.15.2 constant-range differential
   uniform_refine/
     differential.jl      # required Gmsh 4.15.2 linear-simplex template differential
   transfinite/
@@ -31,6 +33,10 @@ validation/
     differential.jl      # required Gmsh 4.15.2 affine-volume differential
   transfinite_prism/
     differential.jl      # required Gmsh 4.15.2 five-face-prism differential
+  transfinite_hex/
+    differential.jl      # required Gmsh 4.15.2 recombined-hexahedron differential
+  gmsh_parity/
+    box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
   cases/
     01_box/box.geo               # reference gmsh script (retained)
     02_cylinder/cylinder.geo
@@ -50,7 +56,7 @@ julia --project=. --check-bounds=yes validation/run_all.jl
 ```
 
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
-the size-field, uniform-refinement, four-sided transfinite, straight transfinite
+the size-field, constant-range, uniform-refinement, four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
 children; missing or wrong-version Gmsh, failed probes, and parity mismatches make

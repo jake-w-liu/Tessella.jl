@@ -80,6 +80,12 @@ size_field_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes -
 println("  command: ", size_field_command)
 run(size_field_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── geo_ranges ──  bit-exact Gmsh 4.15.2 finite constant lists")
+geo_range_script = joinpath(HERE, "geo_ranges", "differential.jl")
+geo_range_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_range_script`
+println("  command: ", geo_range_command)
+run(geo_range_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 println("\n── uniform_refine ──  exact Gmsh 4.15.2 simplex templates")
 uniform_refine_script = joinpath(HERE, "uniform_refine", "differential.jl")
 uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $uniform_refine_script`
@@ -121,6 +127,18 @@ transfinite_prism_script = joinpath(HERE, "transfinite_prism", "differential.jl"
 transfinite_prism_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_prism_script`
 println("  command: ", transfinite_prism_command)
 run(transfinite_prism_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
+println("\n── gmsh_parity box ──  Tessella API vs analytic/Gmsh box volume")
+box_api_script = joinpath(HERE, "gmsh_parity", "box_api.jl")
+box_api_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $box_api_script`
+println("  command: ", box_api_command)
+run(box_api_command)
+
+println("\n── transfinite_hex ──  Gmsh 4.15.2 affine six-face hexahedra")
+transfinite_hex_script = joinpath(HERE, "transfinite_hex", "differential.jl")
+transfinite_hex_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_hex_script`
+println("  command: ", transfinite_hex_command)
+run(transfinite_hex_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
