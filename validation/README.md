@@ -19,6 +19,8 @@ validation/
     STATUS.md            # exact coverage and explicit non-claims
   uniform_refine/
     differential.jl      # required Gmsh 4.15.2 linear-simplex template differential
+  transfinite/
+    differential.jl      # required Gmsh 4.15.2 four-sided patch differential
   cases/
     01_box/box.geo               # reference gmsh script (retained)
     02_cylinder/cylinder.geo
@@ -38,10 +40,10 @@ julia --project=. --check-bounds=yes validation/run_all.jl
 ```
 
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
-the size-field and uniform-refinement differentials as mandatory bounds-checked
-children; missing or wrong-version Gmsh, failed probes, and parity mismatches make
-the aggregate command fail. Mesh-case results print to the terminal and to
-`validation/REPORT.md`.
+the size-field, uniform-refinement, and four-sided transfinite differentials as
+mandatory bounds-checked children; missing or wrong-version Gmsh, failed probes, and
+parity mismatches make the aggregate command fail. Mesh-case results print to the
+terminal and to `validation/REPORT.md`.
 
 ## What each case checks
 

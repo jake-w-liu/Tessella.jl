@@ -86,6 +86,12 @@ uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=y
 println("  command: ", uniform_refine_command)
 run(uniform_refine_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── transfinite ──  Gmsh 4.15.2 four-sided planar patches")
+transfinite_script = joinpath(HERE, "transfinite", "differential.jl")
+transfinite_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_script`
+println("  command: ", transfinite_command)
+run(transfinite_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),

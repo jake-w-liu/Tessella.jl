@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
-| P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination and one-level uniform linear-simplex refinement |
+| P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination, one-level uniform linear-simplex refinement, and four-sided planar transfinite patches |
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -53,10 +53,13 @@ logical/ternary syntax, CSG statements, and physical-group right-hand sides.
 
 P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
 and tetrahedron child templates while sharing edge midpoints, compacting unused nodes,
-and preserving parent tags. P4 does not yet claim Gmsh's Blossom/full-quad algorithms,
-structured/transfinite grids, volume/hybrid recombination, selective or high-order
-refinement, coarsening, boundary-layer element topology, or periodic/embedded model
-constraints.
+and preserving parent tags. Its transfinite slice covers already-discretized,
+count-matched, four-sided planar chains with average-chord Coons interpolation and all
+four Gmsh triangle arrangements. P4 does not yet claim Gmsh's Blossom/full-quad
+algorithms, curve discretization laws, three-sided/quasi-transfinite or holed patches,
+general CAD parameterizations, transfinite quadrangles or volumes, volume/hybrid
+recombination, selective or high-order refinement, coarsening, boundary-layer element
+topology, or periodic/embedded model constraints.
 
 OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
 post-processing are unfinished parity tracks, not project non-goals.
@@ -136,6 +139,14 @@ blockers. Rejected 30,000- and 300,000-entry variable records allocated 5,328 an
 fixtures allocated 13,000,112 and 26,462,288 bytes. The tests pin Gmsh's type-69
 normal-lifecycle crash and binary distinct-parent rewrite corruption as external
 limitations instead of claiming unsafe compatibility.
+
+The subsequent transfinite increment passed 91/91 bounds-checked assertions under
+Julia 1.12.7 and Julia 1.11.9. Its required Gmsh 4.15.2 API differential matched all
+four triangle arrangements and 80 boundary/interior coordinate samples with maximum
+absolute node error `4.44e-16`; it also pins Gmsh's mismatched-opposite-side fallback
+at 18 nodes/23 triangles and its holed-surface error. The 64×64 and 128×64 allocation
+fixtures used 1,771,392 and 3,342,496 bytes under Julia 1.12.7. Focused ambiguity and
+public-documentation scans returned zero.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
