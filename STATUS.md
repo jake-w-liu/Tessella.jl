@@ -25,8 +25,8 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
-| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar triangle/quad transfinite patches, and affine five-/six-face transfinite volumes |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions/ranges |
+| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, and recombined hexahedra |
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -47,9 +47,12 @@ rewrite, and nonzero-physical special MSH4 requires compatible node/entity
 classification metadata for a safe rewrite. P3 does not yet claim a general entity kernel,
 OpenCASCADE/BREP/NURBS, CAD import/export, transformations of analytical/CAD
 entities, or full `.geo` execution. Its scanner handles finite arithmetic constants,
-pure numeric functions, prior scalar bindings, and explicit field/physical tags; it
-rejects loops, macros, dynamic tags, option reads, stateful functions, ranges,
-logical/ternary syntax, CSG statements, and physical-group right-hand sides.
+pure numeric functions, prior scalar bindings, explicit field/physical tags, and
+finite constant ranges in recognized numeric field lists/selectors. Entirely numeric
+Physical memberships are range-checked but remain geometry data. It rejects loops,
+macros, dynamic tags, option reads, stateful functions, dynamic/general ranges,
+logical/ternary evaluation, CSG statements, and mixed geometry-derived
+physical-group right-hand-side evaluation.
 
 P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
 and tetrahedron child templates while sharing edge midpoints, compacting unused nodes,
@@ -73,7 +76,30 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
-Verified on 2026-08-21 with Julia 1.12.7:
+Re-measured on 2026-08-21 with Julia 1.12.7 after the transfinite-hex, geo-range,
+entity-kernel, NURBS, `.geo` execution, boundary-layer, periodic, API/CLI/GUI/post,
+and P6 box-API increment. Both bounds-checked package runs matched:
+
+- `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
+  — 163,096/163,096 assertions passed twice (11m08.3s, then 10m40.8s).
+- `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
+  — exited 0 against Gmsh 4.15.2-git. Exact flat-model volumes box=2, tunnel=24,
+  hollow box=35; cylinder prism 62.652572; enclosure gmsh empty solids reproduced.
+- Size-field child: `SIZE_FIELD_DIFFERENTIAL_OK gmsh=4.15.2 plugin_calls=23
+  direct_cases=23 direct_samples=63 mesh_cases=5 context_skips=5`.
+- Geo-range child: `GEO_RANGE_DIFFERENTIAL_OK gmsh=4.15.2-git float_cases=13
+  integer_cases=4 wrapped_cases=2 samples=58 bit_exact=1`.
+- Transfinite hex child: `TRANSFINITE_HEX_DIFFERENTIAL_OK gmsh=4.15.2-git cases=8
+  nodes=288 hexahedra=96 boundary_quadrangles=256 max_node_error=9.50e-12`.
+- P6 box API child: `GMSH_PARITY_BOX_OK gmsh=4.15.2 tessella_volume=1
+  gmsh_tets=1158 tessella_tets=12`.
+- Fresh-process `using Tessella` plus `mesh_volume`/`size_at` succeeded twice on
+  `box_surface(0,1,0,1,0,1)`: 9 nodes / 12 tets, `size_at==0.5`, both `validate` ok.
+- Focused hex CRC 142/142; IO 305/305; NURBS 20/20; entity/`.geo` 15/15;
+  boundary-layer 7/7; periodic 4/4; API/CLI/GUI/post 15/15.
+- `git diff --check` passed. `.grok/` is gitignored and absent from the index.
+
+Previous aggregate on the same day with Julia 1.12.7, kept as historical:
 
 - `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
   — 161,183/161,183 assertions passed in 9m05.3s.

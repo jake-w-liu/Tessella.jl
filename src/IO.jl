@@ -999,6 +999,12 @@ const _MAX_GEO_EXPRESSION_TOKENS=4_096
 const _MAX_GEO_EXPRESSION_DEPTH=128
 const _MAX_GEO_LIST_ITEMS=65_536
 
+struct _GeoNumericListTerm
+    first::Float64
+    step::Float64
+    count::Int
+end
+
 # This is deliberately a constant-expression evaluator, not a Julia evaluator
 # and not a general Gmsh interpreter.  Keeping a small lexer/parser here makes
 # unknown identifiers, assignments and stateful built-ins impossible to execute.
@@ -1155,8 +1161,26 @@ function _geo_apply_binary(parser::_GeoExprParser,kind::Symbol,a::Float64,
           kind==:star ? "multiplication" : kind==:slash ? "division" :
           kind==:percent ? "modulo" : "exponentiation"
     value=try
-        kind==:plus ? a+b : kind==:minus ? a-b : kind==:star ? a*b :
-        kind==:slash ? a/b : kind==:percent ? rem(a,b) : a^b
+        if kind==:percent
+            # Gmsh's grammar evaluates `%` as `(int)lhs % (int)rhs`, not as
+            # floating-point fmod (Gmsh.y, FExpr).  Reject the C++ undefined
+            # cases instead of depending on a platform-specific conversion or
+            # integer trap.
+            ta=trunc(a);tb=trunc(b)
+            int_min=Float64(typemin(Int32));int_max=Float64(typemax(Int32))
+            (int_min<=ta<=int_max && int_min<=tb<=int_max) ||
+                _geo_expr_error(parser,
+                    "modulo operands are outside Gmsh's signed 32-bit integer range",pos)
+            ia=Int32(ta);ib=Int32(tb)
+            iszero(ib) && _geo_expr_error(parser,
+                "modulo divisor truncates to zero",pos)
+            ia==typemin(Int32) && ib==Int32(-1) && _geo_expr_error(parser,
+                "modulo is outside its signed 32-bit integer domain",pos)
+            rem(ia,ib)
+        else
+            kind==:plus ? a+b : kind==:minus ? a-b : kind==:star ? a*b :
+            kind==:slash ? a/b : a^b
+        end
     catch err
         err isa InterruptException && rethrow()
         (err isa DomainError || err isa OverflowError || err isa DivideError) || rethrow()
@@ -1191,7 +1215,9 @@ function _geo_apply_function(parser::_GeoExprParser,name::String,
     end
     binary=if name=="Atan2"; (y,x)->atan(y,x)
     elseif name=="Fmod" || name=="Modulo"; rem
-    elseif name=="Hypot"; hypot
+    # Gmsh 4.15.2 spells this as sqrt(a*a + b*b); preserve its overflow and
+    # underflow behavior, then let the finite-result contract reject Inf/NaN.
+    elseif name=="Hypot"; (a,b)->sqrt(a*a+b*b)
     elseif name=="Max"; max
     elseif name=="Min"; min
     else; nothing
@@ -1357,13 +1383,16 @@ function _geo_int_value(value::Float64,caller::AbstractString)
     end
 end
 
-const _GMSH_TAG_MAX=Int(typemax(Int32))
+function _geo_signed_gmsh_int_value(value::Float64,caller::AbstractString)
+    integer=_geo_int_value(value,caller)
+    typemin(Int32)<=integer<=typemax(Int32) || throw(ArgumentError(
+        "$caller is outside Gmsh's signed 32-bit integer range"))
+    return integer
+end
 
 function _geo_positive_gmsh_tag(value::Float64,caller::AbstractString)
-    tag=_geo_int_value(value,caller)
+    tag=_geo_signed_gmsh_int_value(value,caller)
     tag>0 || throw(ArgumentError("$caller must evaluate to a positive tag"))
-    tag<=_GMSH_TAG_MAX || throw(ArgumentError(
-        "$caller exceeds Gmsh's signed 32-bit tag range"))
     return tag
 end
 
@@ -1404,6 +1433,191 @@ function _geo_split_list(raw::AbstractString,caller::AbstractString)
         "$caller: list exceeds $_MAX_GEO_LIST_ITEMS entries"))
     push!(items,item)
     return items
+end
+
+function _geo_split_range(raw::AbstractString,caller::AbstractString)
+    source=String(strip(raw))
+    isempty(source) && throw(ArgumentError("$caller: range term must not be empty"))
+    pieces=String[];start=firstindex(source);i=start;last=lastindex(source)
+    parens=0;brackets=0
+    while i<=last
+        c=source[i]
+        if c=='(';parens+=1
+        elseif c==')'
+            parens-=1;parens>=0 || throw(ArgumentError(
+                "$caller: unmatched closing parenthesis in range term"))
+        elseif c=='[';brackets+=1
+        elseif c==']'
+            brackets-=1;brackets>=0 || throw(ArgumentError(
+                "$caller: unmatched closing bracket in range term"))
+        elseif c==':' && parens==0 && brackets==0
+            length(pieces)<2 || throw(ArgumentError(
+                "$caller: a Gmsh range has at most two ':' separators"))
+            piece=i==start ? "" : String(strip(source[start:prevind(source,i)]))
+            isempty(piece) && throw(ArgumentError(
+                "$caller: Gmsh range endpoints and increments must not be empty"))
+            push!(pieces,piece)
+            start=nextind(source,i)
+        end
+        i=nextind(source,i)
+    end
+    parens==0 || throw(ArgumentError("$caller: unmatched opening parenthesis in range term"))
+    brackets==0 || throw(ArgumentError("$caller: unmatched opening bracket in range term"))
+    isempty(pieces) && return nothing
+    piece=start>last ? "" : String(strip(source[start:last]))
+    isempty(piece) && throw(ArgumentError(
+        "$caller: Gmsh range endpoints and increments must not be empty"))
+    push!(pieces,piece)
+    return pieces
+end
+
+@inline function _geo_range_contains(value::Float64,last::Float64,step::Float64)
+    return step>0 ? value<=last : value>=last
+end
+
+function _geo_range_count(first::Float64,last::Float64,step::Float64,
+                          limit::Int,caller::AbstractString)
+    iszero(step) && throw(ArgumentError(
+        "$caller: Gmsh range increment must be nonzero"))
+    value=first;count=0
+    while _geo_range_contains(value,last,step)
+        count<limit || throw(ArgumentError(
+            "$caller: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+        count+=1
+        next=value+step
+        if next==value && _geo_range_contains(next,last,step)
+            throw(ArgumentError(
+                "$caller: Gmsh range increment does not advance at Float64 precision"))
+        end
+        value=next
+    end
+    return count
+end
+
+function _geo_numeric_list_term(raw::AbstractString,context::_GeoNumericContext,
+                                caller::AbstractString,limit::Int)
+    pieces=_geo_split_range(raw,caller)
+    if pieces===nothing
+        limit>0 || throw(ArgumentError(
+            "$caller: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+        value=_geo_eval_numeric(raw,context,"$caller entry")
+        return _GeoNumericListTerm(value,0.0,1)
+    end
+    first=_geo_eval_numeric(pieces[1],context,"$caller range start")
+    last=_geo_eval_numeric(pieces[2],context,"$caller range end")
+    # Gmsh's three-term order is start:end:increment. For the two-term form it
+    # chooses +1 when start < end and -1 otherwise (including equal endpoints).
+    step=length(pieces)==2 ? (first<last ? 1.0 : -1.0) :
+         _geo_eval_numeric(pieces[3],context,"$caller range increment")
+    count=_geo_range_count(first,last,step,limit,caller)
+    return _GeoNumericListTerm(first,step,count)
+end
+
+function _geo_numeric_list_terms(items::Vector{String},context::_GeoNumericContext,
+                                 caller::AbstractString)
+    terms=Vector{_GeoNumericListTerm}(undef,length(items));total=0
+    for (i,item) in pairs(items)
+        term=_geo_numeric_list_term(item,context,caller,_MAX_GEO_LIST_ITEMS-total)
+        terms[i]=term
+        total+=term.count
+    end
+    return terms,total
+end
+
+function _geo_validate_physical_ranges(raw::AbstractString,
+                                       context::_GeoNumericContext,
+                                       caller::AbstractString)
+    # Physical membership is intentionally not interpreted by this scanner:
+    # entries can be geometry-derived lists such as `Surface{:}` or
+    # `Surface In BoundingBox{...}`, and can contain ternaries. Preserve the
+    # pre-existing opaque-RHS behavior for those forms. Direct numeric lists
+    # are nevertheless recognized, checked and bounded when ranges are present.
+    occursin(':',raw) || return nothing
+    body=String(strip(raw))
+    if startswith(body,"{") && endswith(body,"}")
+        body_first=nextind(body,firstindex(body))
+        body_last=prevind(body,lastindex(body))
+        body=String(strip(body[body_first:body_last]))
+    end
+    (occursin('{',body) || occursin('}',body) || occursin('?',body)) &&
+        return nothing
+    items=_geo_split_list(raw,caller);total=0
+    for item in items
+        pieces=_geo_split_range(item,caller)
+        if pieces===nothing
+            total<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                "$caller: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+            total+=1
+        else
+            term=_geo_numeric_list_term(item,context,caller,
+                                        _MAX_GEO_LIST_ITEMS-total)
+            total+=term.count
+        end
+    end
+    return nothing
+end
+
+function _geo_multiplier_has_top_level_additive(source::AbstractString,
+                                                 caller::AbstractString)
+    text=String(strip(source))
+    parser=_GeoExprParser(text,firstindex(text),_GeoExprToken(:eof,"",0.0,1),
+                          0,0,_GeoNumericContext(),String(caller))
+    depth=0;previous=:eof
+    while true
+        token=_geo_lex_token!(parser);kind=token.kind
+        kind==:eof && return false
+        if kind==:left_paren || kind==:left_bracket
+            depth+=1
+        elseif kind==:right_paren || kind==:right_bracket
+            depth-=1
+        elseif depth==0 && (kind==:plus || kind==:minus) &&
+               previous in (:number,:identifier,:right_paren,:right_bracket)
+            return true
+        end
+        previous=kind
+    end
+end
+
+function _geo_braced_list_source(raw::AbstractString,context::_GeoNumericContext,
+                                 caller::AbstractString;
+                                 allow_multiplier::Bool)
+    value=String(strip(raw))
+    if startswith(value,"{")
+        endswith(value,"}") ||
+            throw(ArgumentError("$caller: malformed brace list $raw"))
+        return value,1.0
+    end
+    brace=findfirst(==('{'),value)
+    if brace===nothing
+        endswith(value,"}") &&
+            throw(ArgumentError("$caller: malformed brace list $raw"))
+        return nothing,1.0
+    end
+    endswith(value,"}") || throw(ArgumentError(
+        "$caller: malformed brace list $raw"))
+    prefix=String(strip(value[firstindex(value):prevind(value,brace)]))
+    multiplier=if prefix=="-"
+        -1.0
+    elseif allow_multiplier && endswith(prefix,"*")
+        factor_last=prevind(prefix,lastindex(prefix))
+        factor_source=factor_last<firstindex(prefix) ? "" :
+                      String(strip(prefix[firstindex(prefix):factor_last]))
+        isempty(factor_source) && throw(ArgumentError(
+            "$caller: list multiplier must not be empty"))
+        _geo_multiplier_has_top_level_additive(factor_source,caller) &&
+            throw(ArgumentError(
+                "$caller: an additive list multiplier must be parenthesized"))
+        _geo_eval_numeric(factor_source,context,"$caller list multiplier")
+    else
+        throw(ArgumentError("$caller: malformed brace list $raw"))
+    end
+    list_source=String(value[brace:lastindex(value)])
+    body_first=nextind(list_source,firstindex(list_source))
+    body_last=prevind(list_source,lastindex(list_source))
+    body=body_first>body_last ? "" : String(strip(list_source[body_first:body_last]))
+    isempty(body) && throw(ArgumentError(
+        "$caller: a negated or multiplied brace list must not be empty"))
+    return list_source,multiplier
 end
 
 const _GEO_FIELD_RAW_OPTIONS=Set((
@@ -1448,25 +1662,55 @@ function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractStrin
     value=String(strip(raw))
     name in _GEO_FIELD_RAW_OPTIONS && return value
     if name in _GEO_FIELD_FLOAT_LIST_OPTIONS || name in _GEO_FIELD_INTEGER_LIST_OPTIONS
-        items=_geo_split_list(value,caller_string)
-        normalized=String[]
-        for item in items
+        list_source,multiplier=_geo_braced_list_source(
+            value,context,caller_string;allow_multiplier=false)
+        list_source===nothing && throw(ArgumentError(
+            "$caller_string: expected a brace-delimited list"))
+        items=_geo_split_list(list_source,caller_string)
+        entries=Vector{Union{String,_GeoNumericListTerm}}(undef,length(items));total=0
+        for (i,item) in pairs(items)
             if name in _GEO_FIELD_ENTITY_LIST_OPTIONS &&
                occursin(r"^[+-]?[A-Za-z_][A-Za-z0-9_]*(?:\[\])?$",item)
                 bare=replace(item,r"^[+-]"=>"");bare=endswith(bare,"[]") ? bare[1:end-2] : bare
                 if !haskey(context.values,bare) && bare!="Pi"
-                    push!(normalized,item)
+                    total<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                        "$caller_string: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+                    if multiplier==-1.0
+                        entry=startswith(item,"-") ? String(item[nextind(item,firstindex(item)):end]) :
+                              startswith(item,"+") ? "-"*String(item[nextind(item,firstindex(item)):end]) :
+                              "-"*item
+                        entries[i]=entry
+                    else
+                        entries[i]=item
+                    end
+                    total+=1
                     continue
                 end
             end
-            number=_geo_eval_numeric(item,context,"$caller_string entry")
-            if name in _GEO_FIELD_INTEGER_LIST_OPTIONS
-                integer=name=="FieldsList" ?
-                    _geo_positive_gmsh_tag(number,"$caller_string entry") :
-                    _geo_int_value(number,"$caller_string entry")
-                push!(normalized,string(integer))
-            else
-                push!(normalized,_geo_number_source(number))
+            term=_geo_numeric_list_term(item,context,caller_string,
+                                        _MAX_GEO_LIST_ITEMS-total)
+            entries[i]=term;total+=term.count
+        end
+        normalized=Vector{String}(undef,total);output_index=1
+        for entry in entries
+            if entry isa String
+                normalized[output_index]=entry;output_index+=1
+                continue
+            end
+            term=entry::_GeoNumericListTerm;number=term.first
+            for _ in 1:term.count
+                scaled=multiplier*number
+                isfinite(scaled) || throw(ArgumentError(
+                    "$caller_string entry: list multiplication produced a non-finite value"))
+                if name in _GEO_FIELD_INTEGER_LIST_OPTIONS
+                    integer=name=="FieldsList" ?
+                        _geo_positive_gmsh_tag(scaled,"$caller_string entry") :
+                        _geo_signed_gmsh_int_value(scaled,"$caller_string entry")
+                    normalized[output_index]=string(integer)
+                else
+                    normalized[output_index]=_geo_number_source(scaled)
+                end
+                output_index+=1;number+=term.step
             end
         end
         return "{"*join(normalized,", ")*"}"
@@ -1475,7 +1719,8 @@ function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractStrin
             "$caller_string: numeric scalar option cannot use a brace list"))
         number=_geo_eval_numeric(value,context,caller_string)
         return name in _GEO_FIELD_INTEGER_OPTIONS ?
-            string(_geo_int_value(number,caller_string)) : _geo_number_source(number)
+            string(_geo_signed_gmsh_int_value(number,caller_string)) :
+            _geo_number_source(number)
     end
     # Unknown options are retained so the field builder can issue its kind-aware
     # unsupported-option diagnostic.  Guessing that an unknown value is numeric
@@ -1545,21 +1790,28 @@ function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractStrin
 end
 
 function _geo_expression_field_tags(raw::AbstractString,context::_GeoNumericContext,
-                                    caller::AbstractString)
+                                    caller::AbstractString;
+                                    deduplicate::Bool=true)
     value=String(strip(raw))
-    items=if startswith(value,"{") || endswith(value,"}")
-        (startswith(value,"{") && endswith(value,"}")) ||
-            throw(ArgumentError("$caller: malformed field-tag list $raw"))
-        _geo_split_list(value,String(caller))
-    else
-        isempty(value) ? String[] : String[value]
-    end
-    isempty(items) && throw(ArgumentError("$caller: field-tag list must not be empty"))
-    tags=Int[]
-    for item in items
-        numeric=_geo_eval_numeric(item,context,"$caller entry")
-        tag=_geo_positive_gmsh_tag(numeric,"$caller entry")
-        tag in tags || push!(tags,tag)
+    isempty(value) && throw(ArgumentError("$caller: field-tag expression must not be empty"))
+    list_source,multiplier=_geo_braced_list_source(
+        value,context,caller;allow_multiplier=true)
+    items=list_source===nothing ? String[value] :
+          _geo_split_list(list_source,String(caller))
+    terms,total=_geo_numeric_list_terms(items,context,caller)
+    tags=Int[];sizehint!(tags,total);seen=Set{Int}()
+    for term in terms
+        numeric=term.first
+        for _ in 1:term.count
+            scaled=multiplier*numeric
+            isfinite(scaled) || throw(ArgumentError(
+                "$caller entry: list multiplication produced a non-finite value"))
+            tag=_geo_positive_gmsh_tag(scaled,"$caller entry")
+            if !deduplicate || !(tag in seen)
+                push!(seen,tag);push!(tags,tag)
+            end
+            numeric+=term.step
+        end
     end
     return tags
 end
@@ -1598,6 +1850,12 @@ function _scan_geo_statements(consume,path::AbstractString)
             elseif c=='/' && nextc=='/'
                 break
             elseif c=='/' && nextc=='*'
+                # Comments are lexical whitespace in Gmsh.  Retaining one
+                # separator prevents `1/*...*/2` from becoming the valid token
+                # `12` in the scanner.
+                write(buffer,' ')
+                position(buffer)<=_MAX_GEO_STATEMENT_BYTES || throw(ArgumentError(
+                    "read_geo_params: statement exceeds $_MAX_GEO_STATEMENT_BYTES bytes"))
                 block_comment=true;i=nextind(raw,j);continue
             elseif c=='"' || c=='\''
                 quote_char=c;write(buffer,c)
@@ -1639,10 +1897,14 @@ Scan a gmsh `.geo`/`.geo_unrolled` for mesh-sizing options, Physical group
 declarations, and `Field[...]`/`Background Field` statements. Deterministic,
 finite arithmetic expressions can use `Pi`, prior scalar variables and Gmsh's
 pure numeric functions, including in explicit Physical-group tags and
-`Field[...]` tags. Loops, macros, option reads, random/external functions, list
-ranges, CSG and Boolean geometry are deliberately not evaluated. Numeric field
-options are normalized to literals; geometric references and string or
-point-dependent field expressions remain source strings.
+`Field[...]` tags. Finite constant Gmsh list ranges use
+`start:end[:increment]` order and are expanded with a strict resource bound in
+recognized numeric field options and field selectors; entirely numeric Physical
+memberships containing ranges are checked but remain geometry data.
+Loops, macros, option reads, random/external functions, dynamic ranges, CSG and
+Boolean geometry are deliberately not evaluated. Numeric field options are
+normalized to literals; geometric references and string or point-dependent
+field expressions remain source strings.
 """
 function read_geo_params(path::AbstractString)
     smin = NaN; smax = NaN; sfactor = 1.0; seed = 0; background = 0
@@ -1704,12 +1966,14 @@ function read_geo_params(path::AbstractString)
         end
 
         # Physical Volume("air", 1) = {...}; / Physical Surface("s", 3) = {...};
-        pm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*(.+?)\s*\)\s*=\s*\{.*\}$",body)
+        pm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*(.+?)\s*\)\s*=\s*(\{.*\})$",body)
         if pm!==nothing
             dim = _PHYS_DIM[pm.captures[1]]
             name = pm.captures[2]
             tag = _geo_positive_tag_value(pm.captures[3],context,
                 "read_geo_params: Physical $(pm.captures[1]) tag")
+            _geo_validate_physical_ranges(pm.captures[4],context,
+                "read_geo_params: Physical $(pm.captures[1]) membership")
             groups[(dim, tag)] = name
             return
         end
@@ -1743,7 +2007,8 @@ function read_geo_params(path::AbstractString)
         bm=match(r"^Background\s+Field\s*=\s*(.*)$",body)
         if bm!==nothing
             tags=_geo_expression_field_tags(bm.captures[1],context,
-                                            "read_geo_params: Background Field")
+                                            "read_geo_params: Background Field";
+                                            deduplicate=false)
             length(tags)==1 || throw(ArgumentError(
                 "read_geo_params: Background Field requires exactly one field tag"))
             background=tags[1]

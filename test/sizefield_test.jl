@@ -348,6 +348,22 @@ end
                 Dict((0,"p1")=>p1,(0,"p2")=>p2))
             @test size(aliased.input.points,2)==1
             @test aliased.input.points[:,1]==[10.0,0.0,0.0]
+
+            ranged_graph=joinpath(dir,"ranged_field_graph.geo")
+            write(ranged_graph,"""
+                Field[1] = Box;
+                Field[1].VIn = 0.1;
+                Field[1].VOut = 0.1;
+                Field[2] = Box;
+                Field[2].VIn = 0.2;
+                Field[2].VOut = 0.2;
+                Field[3] = Min;
+                Field[3].FieldsList = {1:2};
+                Background Field = 3;
+                """)
+            ranged_params=read_geo_params(ranged_graph)
+            @test ranged_params.fields[3].options["FieldsList"]=="{1, 2}"
+            @test size_at(build_geo_size_field(ranged_params,Dict()),0,0,0)==0.1
         end
         curve_mesh=Mesh(Float64[0 1;0 0;0 0];segs=reshape(Int32[1,2],2,1))
         for (sampling,expected) in ((2,1.0),(3,0.5),(20,1/19))

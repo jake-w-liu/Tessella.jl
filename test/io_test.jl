@@ -538,6 +538,227 @@ end
             end
         end
 
+        @testset "finite Gmsh list ranges" begin
+            ranges=joinpath(dir,"constant_list_ranges.geo")
+            write(ranges,raw"""
+                first = 1;
+                last = 5;
+                increment = 2;
+                Physical Point("ranged membership", 11) = {first:last:increment};
+                Field[1] = Box;
+                Field[2] = Box;
+                Field[3] = Box;
+                Field[4] = Box;
+                Field[5] = Box;
+                Field[6] = Min;
+                Field[6].FieldsList = {first:last:increment, 5:-2:1, 4};
+                Field[7] = BoundaryLayer;
+                Field[7].SizesList = {Min(0, 1):3 / 4:1 / 4};
+                Field[7].PointsList = {point_group[], 5:1:-2};
+                Field[8] = BoundaryLayer;
+                Field[9] = Min;
+                Field[9].FieldsList = {5:-2:1};
+                BoundaryLayer Field = {7:8, 8:7};
+                Background Field = {5:-2:1, 6};
+                """)
+            params=read_geo_params(ranges)
+            @test params.physical_groups[(0,11)]=="ranged membership"
+            @test params.fields[6].options["FieldsList"]=="{1, 3, 5, 4}"
+            @test parse.(Float64,Tessella.SizeField._geo_list(
+                params.fields[7],"SizesList"))==[0.0,0.25,0.5,0.75]
+            @test params.fields[7].options["PointsList"]==
+                  "{point_group[], 5, 3, 1}"
+            @test params.fields[7].option_order==["SizesList","PointsList"]
+            @test params.fields[9].options["FieldsList"]=="{}"
+            @test params.boundary_layer_fields==[7,8]
+            @test params.background_field==6
+
+            multiplied=joinpath(dir,"multiplied_field_range.geo")
+            write(multiplied,"""
+                Field[2] = Box;
+                Field[4] = BoundaryLayer;
+                Field[6] = BoundaryLayer;
+                Background Field = 2 * {1:1};
+                BoundaryLayer Field = 2 * {1:3};
+                """)
+            multiplied_params=read_geo_params(multiplied)
+            @test multiplied_params.background_field==2
+            @test multiplied_params.boundary_layer_fields==[2,4,6]
+
+            wrapped=joinpath(dir,"wrapped_field_ranges.geo")
+            write(wrapped,"""
+                Field[1] = BoundaryLayer;
+                Field[1].PointsList = -{-1:-3};
+                Field[1].SizesList = -{-0.1:-0.3:-0.1};
+                Field[3] = Box;
+                Background Field = (1 + 2) * {1:1};
+                """)
+            wrapped_params=read_geo_params(wrapped)
+            @test wrapped_params.fields[1].options["PointsList"]=="{1, 2, 3}"
+            @test parse.(Float64,Tessella.SizeField._geo_list(
+                wrapped_params.fields[1],"SizesList"))==[0.1,0.2]
+            @test wrapped_params.background_field==3
+
+            modulo=joinpath(dir,"integer_modulo_ranges.geo")
+            write(modulo,"""
+                Field[1] = BoundaryLayer;
+                Field[1].SizesList = {(5.5 % 2.2):(5.5 % 2.2)};
+                Field[11] = Box;
+                Background Field = (5.5 % 2.2) * {11};
+                """)
+            modulo_params=read_geo_params(modulo)
+            @test modulo_params.fields[1].options["SizesList"]=="{1.0}"
+            @test modulo_params.background_field==11
+
+            opaque_physical=joinpath(dir,"opaque_physical_ranges.geo")
+            write(opaque_physical,"""
+                Physical Surface("all", 11) = {Surface{:}};
+                Physical Volume("mixed", 12) = {
+                    Volume In BoundingBox{0,0,0,1,1,1}, 1:2};
+                Physical Point("ternary", 13) = {1 ? 1 : 2};
+                """)
+            opaque_params=read_geo_params(opaque_physical)
+            @test opaque_params.physical_groups[(2,11)]=="all"
+            @test opaque_params.physical_groups[(3,12)]=="mixed"
+            @test opaque_params.physical_groups[(0,13)]=="ternary"
+
+            function range_error(source)
+                path=joinpath(dir,"list_range_error.geo")
+                write(path,source)
+                try
+                    read_geo_params(path)
+                    return nothing
+                catch err
+                    return err
+                end
+            end
+            invalid_ranges=(
+                "Field[1] = Min; Field[1].FieldsList = {1:5:0};\n"=>"nonzero",
+                "Field[1] = Min; Field[1].FieldsList = {:5};\n"=>"must not be empty",
+                "Field[1] = Min; Field[1].FieldsList = {1:};\n"=>"must not be empty",
+                "Field[1] = Min; Field[1].FieldsList = {1:2:3:4};\n"=>"at most two",
+                "Field[1] = Min; Field[1].FieldsList = {missing:5};\n"=>"unknown scalar",
+                "Physical Point(\"dynamic\", 1) = {points[]:5};\n"=>"unknown numeric function",
+                "Field[1] = Distance; Field[1].PointsList = {1e20:1e20 + 1};\n"=>
+                    "does not advance",
+                "Field[1] = Box; Background Field = 0.4 * {3:4};\n"=>
+                    "requires exactly one",
+                "Field[1] = Box; Field[3] = Box; " *
+                    "Background Field = 1 + 2 * {1:1};\n"=>"must be parenthesized",
+                "Field[1] = BoundaryLayer; " *
+                    "Field[1].SizesList = {1/* comment */2:12};\n"=>"unexpected token",
+                "Field[1] = BoundaryLayer; BoundaryLayer Field = -{};\n"=>
+                    "must not be empty",
+                "Field[1] = BoundaryLayer; BoundaryLayer Field = 2 * {};\n"=>
+                    "must not be empty",
+                "Field[1] = Distance; Field[1].PointsList = -{};\n"=>
+                    "must not be empty",
+                "Field[1] = BoundaryLayer; BoundaryLayer Field = ;\n"=>
+                    "must not be empty",
+                "Field[1] = Distance; " *
+                    "Field[1].PointsList = {2147483647:2147483648};\n"=>
+                    "signed 32-bit",
+                "Field[1] = Distance; Field[1].Sampling = 2147483648;\n"=>
+                    "signed 32-bit")
+            for (source,message) in invalid_ranges
+                err=range_error(source)
+                @test err isa ArgumentError
+                @test occursin(message,sprint(showerror,err))
+            end
+            for source in (
+                "Field[1] = Distance; Field[1].PointsList = {1:65537};\n",
+                "Field[1] = Distance; Field[1].PointsList = {point_group[], 1:65536};\n",
+                "Physical Point(\"too large\", 1) = {1:65537};\n")
+                err=range_error(source)
+                @test err isa ArgumentError
+                @test occursin("65536 entries",sprint(showerror,err))
+            end
+            huge_range=
+                "Field[1] = Distance; Field[1].PointsList = {1:1000000000};\n"
+            range_error(huge_range)
+            GC.gc()
+            @test (@allocated range_error(huge_range))<=100_000
+
+            gmsh=Sys.which("gmsh")
+            @test gmsh!==nothing
+            if gmsh!==nothing
+                gmsh_version=strip(read(`$gmsh --version`,String))
+                @test gmsh_version=="4.15.2" ||
+                      startswith(gmsh_version,"4.15.2-")
+                function gmsh_range_output(code)
+                    output=IOBuffer()
+                    command=ignorestatus(`$gmsh /dev/null -parse_and_exit -string $code`)
+                    run(pipeline(command;stdout=output,stderr=output))
+                    return String(take!(output))
+                end
+                values=gmsh_range_output(raw"""
+                    a[] = {1:5}; b[] = {5:1:-2};
+                    c[] = {5:-2:1}; d[] = {5:-2};
+                    Printf("R %g %g %g %g %g %g %g %g %g",
+                           #a[], a[0], a[4], #b[], b[0], b[2], #c[], #d[], d[7]);
+                    """)
+                @test occursin("R 5 1 5 3 5 1 0 8 -2",values)
+                accepted=gmsh_range_output(raw"""
+                    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+                    Point(3)={2,0,0,1}; Point(4)={3,0,0,1};
+                    Point(5)={4,0,0,1};
+                    Physical Point("ranged", 11)={1:5};
+                    Field[1]=Box; Field[2]=Box; Field[3]=Box;
+                    Field[4]=Box; Field[5]=Box; Field[6]=Min;
+                    Field[6].FieldsList={1:5};
+                    Field[7]=BoundaryLayer; Field[8]=BoundaryLayer;
+                    BoundaryLayer Field={7:8};
+                    """)
+                @test !occursin("Error",accepted)
+                wrapped_accepted=gmsh_range_output(raw"""
+                    Field[1]=BoundaryLayer;
+                    Field[1].PointsList=-{-1:-3};
+                    Field[1].SizesList=-{-0.1:-0.3:-0.1};
+                    Field[3]=Box; Background Field=(1+2)*{1:1};
+                    """)
+                @test !occursin("Error",wrapped_accepted)
+                modulo_values=gmsh_range_output(raw"""
+                    a[]={(5.5%2.2):(5.5%2.2)};
+                    Printf("MOD %g %g", #a[], a[0]);
+                    """)
+                @test occursin("MOD 1 1",modulo_values)
+                precedence_rejected=gmsh_range_output(
+                    "Field[1]=Box; Field[3]=Box; " *
+                    "Background Field=1+2*{1:1};")
+                @test occursin("syntax error",precedence_rejected)
+                cardinality_rejected=gmsh_range_output(
+                    "Field[1]=Box; Background Field=0.4*{3:4};")
+                @test occursin("Only 1 field",cardinality_rejected)
+                comment_rejected=gmsh_range_output(
+                    "Field[1]=BoundaryLayer; " *
+                    "Field[1].SizesList={1/* comment */2:12};")
+                @test occursin("syntax error",comment_rejected)
+                for source in (
+                    "Field[1]=BoundaryLayer; BoundaryLayer Field=-{};",
+                    "Field[1]=BoundaryLayer; BoundaryLayer Field=2*{};",
+                    "Field[1]=Distance; Field[1].PointsList=-{};",
+                    "Field[1]=BoundaryLayer; BoundaryLayer Field=;")
+                    @test occursin("syntax error",gmsh_range_output(source))
+                end
+                rejected=gmsh_range_output("a[] = {1:5:0};")
+                @test occursin("Wrong increment in '1:5:0'",rejected)
+            end
+
+            allocation_path=joinpath(dir,"list_range_allocation.geo")
+            function range_allocation(count)
+                write(allocation_path,
+                    "Field[1] = Distance; Field[1].PointsList = {1:$count};\n")
+                read_geo_params(allocation_path)
+                GC.gc()
+                return @allocated read_geo_params(allocation_path)
+            end
+            allocation_2k=range_allocation(2_000)
+            allocation_4k=range_allocation(4_000)
+            @test allocation_2k<=1_000_000
+            @test allocation_4k<=1_800_000
+            @test allocation_4k<=2.15*allocation_2k+75_000
+        end
+
         @testset "expression safety and resource limits" begin
             function geo_error(source)
                 path=joinpath(dir,"expression_error.geo")
@@ -557,6 +778,7 @@ end
                 "1 < 2"=>"outside the supported arithmetic subset",
                 "1 / 0"=>"non-finite",
                 "1e309"=>"must be finite",
+                "Hypot(1e154, 1e154)"=>"non-finite",
                 "Sqrt(-1)"=>"finite real domain",
                 "2++"=>"increment and decrement",
                 "(1 + 2"=>"closing parenthesis")
@@ -595,11 +817,6 @@ end
             @test err isa ArgumentError
             @test occursin("scalar variable a is unavailable",sprint(showerror,err))
 
-            strict_list="Field[1] = Min; Field[1].FieldsList = {1:3}; " *
-                        "Background Field = 1;\n"
-            err=geo_error(strict_list)
-            @test err isa ArgumentError
-            @test occursin("outside the supported arithmetic subset",sprint(showerror,err))
             @test geo_error("Field[1] = Box; Background Field = 1e100;\n") isa ArgumentError
             @test geo_error("Field[1] = Threshold; Field[1].InField = 1e100;\n") isa ArgumentError
             for source in (

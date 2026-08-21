@@ -55,7 +55,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
-  functions, prior scalar bindings, sizing options, and explicit field/physical tags;
+  functions, prior scalar bindings, sizing options, explicit field/physical tags, and
+  finite constant `start:end[:increment]` lists in recognized numeric contexts;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
@@ -84,7 +85,8 @@ construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
 including high-order/custom interpolation, multiple time steps, materially warped
 quadrangles, mixed component counts, and tensor-to-metric evaluation,
 general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros,
-dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
+dynamic tags, option reads, dynamic/general ranges, CSG statements, and mixed
+geometry-derived physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
 non-affine CAD curve integration and FlexibleTransfinite/HWall laws,
 quasi-transfinite or holed patches, recombined three-sided patches, curved/warped or
@@ -110,7 +112,7 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field, uniform-refinement, transfinite-patch, straight transfinite
+Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
 children. Missing or wrong-version Gmsh and differential failures make the aggregate

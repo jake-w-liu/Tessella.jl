@@ -34,6 +34,7 @@ include("TransfiniteTriangle.jl") # P4: three-sided structured triangle patches
 include("TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
 include("TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
 include("TransfinitePrism.jl") # P4: affine five-face transfinite prisms
+include("TransfiniteHex.jl") # P4: affine six-face recombined hexahedra
 include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
 include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
@@ -47,6 +48,15 @@ include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't f
 include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
 include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
+include("NURBS.jl")          # P3: native B-spline/NURBS evaluation
+include("Model.jl")          # P2: tagged geometry/entity kernel
+include("GeoExec.jl")        # P3: bounded .geo execution
+include("BoundaryLayer.jl")  # P4: prismatic boundary-layer extrusion
+include("Periodic.jl")       # P4: periodic identification
+include("Post.jl")           # P5: views and plugins
+include("API.jl")            # P5: model/mesh/option façade
+include("CLI.jl")            # P5: command-line entry
+include("GUI.jl")            # P5: headless GUI state machine
 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
 using .Transform: affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
@@ -63,6 +73,14 @@ using .TransfiniteTriangle: mesh_transfinite_triangle
 using .TransfiniteQuad: mesh_transfinite_quad_patch
 using .TransfiniteVolume: mesh_transfinite_volume
 using .TransfinitePrism: mesh_transfinite_prism
+using .TransfiniteHex: mesh_transfinite_hex
+using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!,
+              add_box!, add_physical_group!, mesh_model_surface, mesh_model_volume
+using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
+using .GeoExec: execute_geo
+using .BoundaryLayer: mesh_boundary_layer
+using .Periodic: periodic_identify
+using .CAD: import_step, import_iges
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -103,6 +121,12 @@ export mesh_transfinite_triangle
 export mesh_transfinite_quad_patch
 export mesh_transfinite_volume
 export mesh_transfinite_prism
+export mesh_transfinite_hex
+export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!, add_box!
+export add_physical_group!, mesh_model_surface, mesh_model_volume
+export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
+export execute_geo, mesh_boundary_layer, periodic_identify
+export import_step, import_iges
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,
        MinSize, MaxSize, BoundedSize, field_value, size_at, metric_at, Metric3,
