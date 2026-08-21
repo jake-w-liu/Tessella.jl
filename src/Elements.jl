@@ -1201,6 +1201,10 @@ end
 
 # ── MSH I/O for MixedMesh ─────────────────────────────────────────────────────
 
+# Binary layout authority: Gmsh tag `gmsh_4_15_2`,
+# `doc/texinfo/gmsh.texi`, `src/geo/GModelIO_MSH2.cpp` and
+# `src/geo/GModelIO_MSH4.cpp`. MSH2 uses interleaved Int32/Float64 records;
+# MSH4 separates Int32 headers, UInt64 `size_t` values and Float64 payloads.
 const DEFAULT_MAX_MIXED_NAME_BYTES = 1 << 20
 const MSH_PHYSICAL_NAME_MAX_BYTES = 128
 
@@ -1279,7 +1283,7 @@ end
 """
     read_mixed_msh(path; tessella_extensions=false, resource limits...) -> MixedMesh
 
-Read an ASCII Gmsh MSH v2.2 or v4.1 file. Arbitrary positive node tags are
+Read an ASCII or binary Gmsh MSH v2.2 or v4.1 file. Arbitrary positive node tags are
 compacted to `1:N`; oriented connectivity, all fixed-node element types,
 physical names, and complete fixed-node v4 entity metadata are preserved.
 [`ElementBlock`](@ref) `tags` remains the legacy projection to the first entity
@@ -1291,6 +1295,12 @@ repeated node sections are rejected explicitly. Gmsh treats backslashes in
 physical names literally. Set
 `tessella_extensions=true` only when reading Tessella's escaped name extension
 produced by `write_mixed_msh(...; gmsh_compatible=false)`.
+
+Binary files are byte-swapped when their 32-bit endianness marker requires it.
+MSH 2.2 binary payloads use 32-bit integer tags and 64-bit coordinates; MSH
+4.1 binary payloads use 32-bit entity/type values, 64-bit `size_t` values and
+64-bit coordinates. Unsupported sections in a binary file are rejected
+explicitly because their payload cannot be skipped safely without decoding it.
 """
 function read_mixed_msh(path::AbstractString;
                         tessella_extensions=false,
@@ -1360,6 +1370,134 @@ function _msh_float(token::AbstractString,context::AbstractString)
     return value
 end
 
+@inline function _binary_available(io,bytes::Int,context::AbstractString)
+    bytes>=0 || throw(ArgumentError(
+        "read_mixed_msh: binary byte count overflows Int in $context"))
+    remaining=try
+        Base.checked_sub(filesize(io),position(io))
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "read_mixed_msh: cannot determine remaining bytes in $context"))
+    end
+    bytes<=remaining || throw(ArgumentError(
+        "read_mixed_msh: truncated binary payload in $context"))
+    return nothing
+end
+
+function _binary_bytes(count::Int,width::Int,context::AbstractString)
+    (count>=0&&width>=0) || throw(ArgumentError(
+        "read_mixed_msh: negative binary extent in $context"))
+    return try
+        Base.checked_mul(count,width)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "read_mixed_msh: binary payload size overflows Int in $context"))
+    end
+end
+
+function _binary_count(value::UInt64,maximum::Int,context::AbstractString)
+    value<=UInt64(maximum) || throw(ArgumentError(
+        "read_mixed_msh: $context count $value exceeds allowed range 0:$maximum"))
+    return Int(value)
+end
+
+@inline function _binary_u32(io,swap::Bool,context::AbstractString)
+    _binary_available(io,sizeof(UInt32),context)
+    return _binary_u32_unchecked(io,swap)
+end
+
+@inline function _binary_u32_unchecked(io,swap::Bool)
+    value=read(io,UInt32)
+    return swap ? bswap(value) : value
+end
+
+@inline function _binary_i32(io,swap::Bool,context::AbstractString)
+    return reinterpret(Int32,_binary_u32(io,swap,context))
+end
+
+@inline function _binary_i32_unchecked(io,swap::Bool)
+    return reinterpret(Int32,_binary_u32_unchecked(io,swap))
+end
+
+@inline function _binary_u64(io,swap::Bool,context::AbstractString)
+    _binary_available(io,sizeof(UInt64),context)
+    value=read(io,UInt64)
+    return swap ? bswap(value) : value
+end
+
+@inline function _binary_f64(io,swap::Bool,context::AbstractString)
+    value=reinterpret(Float64,_binary_u64(io,swap,context))
+    isfinite(value) || throw(ArgumentError(
+        "read_mixed_msh: non-finite floating-point value in $context"))
+    return value
+end
+
+@inline function _binary_f64_unchecked(io,swap::Bool,context::AbstractString)
+    bits=read(io,UInt64); swap && (bits=bswap(bits))
+    value=reinterpret(Float64,bits)
+    isfinite(value) || throw(ArgumentError(
+        "read_mixed_msh: non-finite floating-point value in $context"))
+    return value
+end
+
+function _binary_i32_vector(io,count::Int,swap::Bool,context::AbstractString)
+    bytes=_binary_bytes(count,sizeof(Int32),context)
+    _binary_available(io,bytes,context)
+    values=Vector{Int32}(undef,count)
+    read!(io,values)
+    if swap
+        @inbounds for i in eachindex(values)
+            values[i]=bswap(values[i])
+        end
+    end
+    return values
+end
+
+function _binary_u64_vector(io,count::Int,swap::Bool,context::AbstractString)
+    bytes=_binary_bytes(count,sizeof(UInt64),context)
+    _binary_available(io,bytes,context)
+    values=Vector{UInt64}(undef,count)
+    read!(io,values)
+    if swap
+        @inbounds for i in eachindex(values)
+            values[i]=bswap(values[i])
+        end
+    end
+    return values
+end
+
+function _binary_f64_vector(io,count::Int,swap::Bool,context::AbstractString)
+    bytes=_binary_bytes(count,sizeof(Float64),context)
+    _binary_available(io,bytes,context)
+    values=Vector{Float64}(undef,count)
+    read!(io,values)
+    if swap
+        bits=reinterpret(UInt64,values)
+        @inbounds for i in eachindex(bits)
+            bits[i]=bswap(bits[i])
+        end
+    end
+    all(isfinite,values) || throw(ArgumentError(
+        "read_mixed_msh: non-finite floating-point value in $context"))
+    return values
+end
+
+function _consume_binary_newline(io,context::AbstractString)
+    _binary_available(io,1,context)
+    byte=read(io,UInt8)
+    if byte==UInt8('\r')
+        _binary_available(io,1,context)
+        read(io,UInt8)==UInt8('\n') || throw(ArgumentError(
+            "read_mixed_msh: expected newline after binary $context"))
+    elseif byte!=UInt8('\n')
+        throw(ArgumentError(
+            "read_mixed_msh: expected newline after binary $context"))
+    end
+    return nothing
+end
+
 _msh_fields(io,context::AbstractString)=split(strip(_msh_line(io,context)))
 
 mutable struct _MshTokenReader
@@ -1417,6 +1555,7 @@ end
 function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Bool)
     acc=_MixedReadAccum()
     version=0.0
+    binary=false; swap=false
     seen_format=false; seen_names=false; seen_entities=false
     seen_nodes=false; seen_elements=false
     while !eof(io)
@@ -1432,10 +1571,25 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             version=_msh_float(fields[1],"MeshFormat version")
             version in (2.2,4.1) || throw(ArgumentError(
                 "read_mixed_msh: unsupported MSH version $version (supported: 2.2, 4.1)"))
-            _msh_int(fields[2],"MeshFormat file type")==0 || throw(ArgumentError(
-                "read_mixed_msh: binary MSH is not supported"))
-            _msh_int(fields[3],"MeshFormat data size")==8 || throw(ArgumentError(
-                "read_mixed_msh: only 8-byte floating-point MSH data is supported"))
+            file_type=_msh_int(fields[2],"MeshFormat file type")
+            file_type in (0,1) || throw(ArgumentError(
+                "read_mixed_msh: MeshFormat file type must be 0 or 1"))
+            data_size=_msh_int(fields[3],"MeshFormat data size")
+            data_size==8 || throw(ArgumentError(
+                "read_mixed_msh: only an 8-byte MeshFormat data size is supported"))
+            binary=file_type==1
+            if binary
+                raw_marker=_binary_u32(io,false,"MeshFormat endianness marker")
+                if raw_marker==UInt32(1)
+                    swap=false
+                elseif bswap(raw_marker)==UInt32(1)
+                    swap=true
+                else
+                    throw(ArgumentError(
+                        "read_mixed_msh: invalid binary endianness marker"))
+                end
+                _consume_binary_newline(io,"MeshFormat endianness marker")
+            end
             _expect_msh_end(io,"\$EndMeshFormat")
         elseif header=="\$PhysicalNames"
             seen_format || throw(ArgumentError(
@@ -1450,7 +1604,8 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             (seen_nodes||seen_elements) && throw(ArgumentError(
                 "read_mixed_msh: \$Entities must precede nodes and elements"))
             seen_entities=true
-            _read_mixed_entities_v4!(acc,io,limits)
+            binary ? _read_mixed_entities_v4_binary!(acc,io,limits,swap) :
+                     _read_mixed_entities_v4!(acc,io,limits)
         elseif header=="\$Nodes"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Nodes appeared before \$MeshFormat"))
@@ -1459,26 +1614,39 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             seen_elements && throw(ArgumentError(
                 "read_mixed_msh: \$Nodes must precede \$Elements"))
             seen_nodes=true
-            version==2.2 ? _read_mixed_nodes_v2!(acc,io,limits) :
-                           _read_mixed_nodes_v4!(acc,io,limits)
+            if version==2.2
+                binary ? _read_mixed_nodes_v2_binary!(acc,io,limits,swap) :
+                         _read_mixed_nodes_v2!(acc,io,limits)
+            else
+                binary ? _read_mixed_nodes_v4_binary!(acc,io,limits,swap) :
+                         _read_mixed_nodes_v4!(acc,io,limits)
+            end
         elseif header=="\$Elements"
             seen_nodes || throw(ArgumentError(
                 "read_mixed_msh: \$Elements appeared before \$Nodes"))
             seen_elements=true
-            version==2.2 ? _read_mixed_elements_v2!(acc,io,limits) :
-                           _read_mixed_elements_v4!(acc,io,limits)
+            if version==2.2
+                binary ? _read_mixed_elements_v2_binary!(acc,io,limits,swap) :
+                         _read_mixed_elements_v2!(acc,io,limits)
+            else
+                binary ? _read_mixed_elements_v4_binary!(acc,io,limits,swap) :
+                         _read_mixed_elements_v4!(acc,io,limits)
+            end
         elseif startswith(header,"\$End")
             throw(ArgumentError("read_mixed_msh: unexpected section terminator $header"))
         elseif startswith(header,"\$")
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: section $header appeared before \$MeshFormat"))
+            binary && throw(ArgumentError(
+                "read_mixed_msh: unsupported section $header in binary MSH"))
             _skip_msh_section(io,"\$End"*header[2:end])
         else
             throw(ArgumentError("read_mixed_msh: unexpected content outside a section"))
         end
     end
     seen_format || throw(ArgumentError("read_mixed_msh: missing \$MeshFormat section"))
-    seen_nodes || throw(ArgumentError("read_mixed_msh: missing \$Nodes section"))
+    (seen_nodes||version==4.1) || throw(ArgumentError(
+        "read_mixed_msh: missing \$Nodes section"))
     return _finish_mixed_read(acc,version==4.1)
 end
 
@@ -1651,6 +1819,84 @@ function _read_mixed_entities_v4!(acc,io,limits)
     _expect_msh_token_end!(reader,"\$EndEntities")
 end
 
+function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool)
+    counts=ntuple(4) do dim
+        raw=_binary_u64(io,swap,"v4 binary Entities header")
+        _binary_count(raw,limits.max_entities,"dimension-$(dim-1) entity")
+    end
+    total=0
+    for count in counts
+        total=try Base.checked_add(total,count) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("read_mixed_msh: v4 entity count overflows Int"))
+        end
+    end
+    existing=try Base.checked_add(length(acc.entities),length(acc.implicit_entities)) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative=try Base.checked_add(existing,total) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative<=limits.max_entities || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 entity count $cumulative exceeds " *
+        "max_entities=$(limits.max_entities)"))
+
+    for dim in 0:3
+        for _ in 1:counts[dim+1]
+            tag=Int(_binary_i32(io,swap,"dimension-$dim entity tag"))
+            1<=tag<=typemax(Int32) || throw(ArgumentError(
+                "read_mixed_msh: entity tags must be positive and fit Int32"))
+            key=(dim,tag)
+            haskey(acc.entities,key) && throw(ArgumentError(
+                "read_mixed_msh: duplicate entity ($dim,$tag)"))
+            ncoordinates=dim==0 ? 3 : 6
+            coordinates=_binary_f64_vector(
+                io,ncoordinates,swap,"dimension-$dim entity bounds")
+            box=Tuple(coordinates)
+            if dim>0
+                all(box[i]<=box[i+3] for i in 1:3) || throw(ArgumentError(
+                    "read_mixed_msh: entity ($dim,$tag) has reversed bounds"))
+            end
+            nphysical=_binary_count(
+                _binary_u64(io,swap,"entity physical-tag count"),
+                typemax(Int),"entity physical-tag")
+            physical_tags=_binary_i32_vector(
+                io,nphysical,swap,"entity physical tags")
+            @inbounds for value in physical_tags
+                value>=1 || throw(ArgumentError(
+                    "read_mixed_msh: entity physical tag must be positive and fit Int32"))
+            end
+            boundaries=Int32[]
+            if dim>0
+                nboundary=_binary_count(
+                    _binary_u64(io,swap,"entity boundary count"),
+                    typemax(Int),"entity boundary")
+                boundaries=_binary_i32_vector(
+                    io,nboundary,swap,"entity boundary tags")
+                @inbounds for boundary in boundaries
+                    boundary!=0 || throw(ArgumentError(
+                        "read_mixed_msh: entity boundary tag cannot be zero"))
+                    boundary_tag=abs(Int(boundary))
+                    boundary_tag<=typemax(Int32) || throw(ArgumentError(
+                        "read_mixed_msh: entity boundary tag does not fit Int32"))
+                    haskey(acc.entities,(dim-1,boundary_tag)) || throw(ArgumentError(
+                        "read_mixed_msh: entity ($dim,$tag) references undeclared boundary entity"))
+                end
+            end
+            record=MixedEntity(dim,tag,box;
+                               physical_tags=physical_tags,boundaries=boundaries)
+            acc.entities[key]=record
+            acc.entity_physical[key]=isempty(physical_tags) ? Int32(0) :
+                                     first(physical_tags)
+        end
+    end
+    _consume_binary_newline(io,"Entities section")
+    _expect_msh_end(io,"\$EndEntities")
+    return nothing
+end
+
 function _read_mixed_nodes_v2!(acc,io,limits)
     remaining=limits.max_nodes-length(acc.x)
     count=_section_count(io,"v2 node",remaining)
@@ -1668,6 +1914,35 @@ function _read_mixed_nodes_v2!(acc,io,limits)
         acc.node_map[tag]=Int32(length(acc.x))
     end
     _expect_msh_end(io,"\$EndNodes")
+end
+
+function _read_mixed_nodes_v2_binary!(acc,io,limits,swap::Bool)
+    remaining=limits.max_nodes-length(acc.x)
+    count=_section_count(io,"v2 node",remaining)
+    record_bytes=sizeof(Int32)+3sizeof(Float64)
+    _binary_available(io,_binary_bytes(count,record_bytes,"v2 binary Nodes"),
+                      "v2 binary Nodes")
+    target=try Base.checked_add(length(acc.x),count) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v2 node count overflows Int"))
+    end
+    sizehint!(acc.x,target); sizehint!(acc.y,target); sizehint!(acc.z,target)
+    sizehint!(acc.node_map,target)
+    for _ in 1:count
+        signed_tag=_binary_i32_unchecked(io,swap)
+        signed_tag>0 || throw(ArgumentError(
+            "read_mixed_msh: node tags must be positive"))
+        tag=UInt64(signed_tag)
+        haskey(acc.node_map,tag) && throw(ArgumentError(
+            "read_mixed_msh: duplicate node tag $tag"))
+        push!(acc.x,_binary_f64_unchecked(io,swap,"node coordinate"))
+        push!(acc.y,_binary_f64_unchecked(io,swap,"node coordinate"))
+        push!(acc.z,_binary_f64_unchecked(io,swap,"node coordinate"))
+        acc.node_map[tag]=Int32(length(acc.x))
+    end
+    _consume_binary_newline(io,"Nodes section")
+    _expect_msh_end(io,"\$EndNodes")
+    return nothing
 end
 
 function _ensure_mixed_implicit_entity!(acc,dim::Int,tag::Int,limits)
@@ -1769,6 +2044,117 @@ function _read_mixed_nodes_v4!(acc,io,limits)
     acc.node_blocks=cumulative_blocks
 end
 
+function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool)
+    nblocks=_binary_count(
+        _binary_u64(io,swap,"v4 binary Nodes header"),
+        limits.max_blocks,"v4 node-block")
+    remaining_nodes=limits.max_nodes-length(acc.x)
+    count=_binary_count(
+        _binary_u64(io,swap,"v4 binary Nodes header"),
+        remaining_nodes,"v4 node")
+    declared_min=_binary_u64(io,swap,"v4 binary node tag range")
+    declared_max=_binary_u64(io,swap,"v4 binary node tag range")
+    cumulative_blocks=try Base.checked_add(acc.node_blocks,nblocks) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "read_mixed_msh: cumulative v4 node-block count overflows Int"))
+    end
+    cumulative_blocks<=limits.max_blocks || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 node-block count exceeds max_blocks"))
+    nblocks<=count || throw(ArgumentError(
+        "read_mixed_msh: v4 node-block count exceeds node count"))
+    (count==0)==(nblocks==0) || throw(ArgumentError(
+        "read_mixed_msh: empty v4 node count and block count disagree"))
+    if count==0
+        (declared_min==0&&declared_max==0) || throw(ArgumentError(
+            "read_mixed_msh: empty v4 Nodes must declare range 0 0"))
+    else
+        0<declared_min<=declared_max || throw(ArgumentError(
+            "read_mixed_msh: invalid v4 node-tag range"))
+    end
+    target=try Base.checked_add(length(acc.x),count) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 node count overflows Int"))
+    end
+    for values in (acc.x,acc.y,acc.z,acc.external_node_tags,
+                   acc.node_entities,acc.node_parametric)
+        sizehint!(values,target)
+    end
+    sizehint!(acc.node_map,target)
+
+    actual_min=typemax(UInt64); actual_max=zero(UInt64); nread=0
+    for _ in 1:nblocks
+        dim=Int(_binary_i32(io,swap,"v4 binary node-block dimension"))
+        entity=Int(_binary_i32(io,swap,"v4 binary node-block entity"))
+        parametric=Int(_binary_i32(io,swap,"v4 binary node-block parametric flag"))
+        nlocal=_binary_count(
+            _binary_u64(io,swap,"v4 binary node-block count"),
+            count-nread,"v4 node-block")
+        0<=dim<=3 || throw(ArgumentError(
+            "read_mixed_msh: node-block dimension $dim is outside 0:3"))
+        1<=entity<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: node-block entity tags must be positive and fit Int32"))
+        _ensure_mixed_implicit_entity!(acc,dim,entity,limits)
+        parametric in (0,1) || throw(ArgumentError(
+            "read_mixed_msh: node-block parametric flag must be 0 or 1"))
+        nlocal>0 || throw(ArgumentError(
+            "read_mixed_msh: invalid or excessive v4 node-block size"))
+        stride=3+(parametric==1 ? dim : 0)
+        coordinate_count=try Base.checked_mul(nlocal,stride) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v4 node coordinate count overflows Int"))
+        end
+        # Check the complete block payload before allocating either vector.
+        tag_bytes=_binary_bytes(nlocal,sizeof(UInt64),"v4 node tags")
+        coordinate_bytes=_binary_bytes(
+            coordinate_count,sizeof(Float64),"v4 node coordinates")
+        block_bytes=try Base.checked_add(tag_bytes,coordinate_bytes) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v4 node-block byte count overflows Int"))
+        end
+        _binary_available(io,block_bytes,"v4 node block")
+        tags=_binary_u64_vector(io,nlocal,swap,"v4 node tags")
+        @inbounds for tag in tags
+            tag>0 || throw(ArgumentError(
+                "read_mixed_msh: node tags must be positive"))
+            haskey(acc.node_map,tag) && throw(ArgumentError(
+                "read_mixed_msh: duplicate node tag $tag"))
+            acc.node_map[tag]=Int32(0)
+            actual_min=min(actual_min,tag); actual_max=max(actual_max,tag)
+        end
+        coordinates=_binary_f64_vector(
+            io,coordinate_count,swap,"v4 node coordinates")
+        offset=1
+        @inbounds for i in 1:nlocal
+            push!(acc.x,coordinates[offset]);
+            push!(acc.y,coordinates[offset+1]);
+            push!(acc.z,coordinates[offset+2]);
+            offset+=3
+            parameters=parametric==1 ? Float64[] : nothing
+            if parameters!==nothing
+                sizehint!(parameters,dim)
+                for _ in 1:dim
+                    push!(parameters,coordinates[offset]); offset+=1
+                end
+            end
+            push!(acc.external_node_tags,tags[i])
+            push!(acc.node_entities,(dim,Int32(entity)))
+            push!(acc.node_parametric,parameters)
+            acc.node_map[tags[i]]=Int32(length(acc.x)); nread+=1
+        end
+    end
+    nread==count || throw(ArgumentError(
+        "read_mixed_msh: v4 Nodes declared $count nodes but contained $nread"))
+    count==0 || (actual_min==declared_min&&actual_max==declared_max) || throw(ArgumentError(
+        "read_mixed_msh: v4 node-tag range does not match records"))
+    _consume_binary_newline(io,"Nodes section")
+    _expect_msh_end(io,"\$EndNodes")
+    acc.node_blocks=cumulative_blocks
+    return nothing
+end
+
 function _mixed_physical_tag(value::Int,context::AbstractString)
     0<=value<=typemax(Int32) || throw(ArgumentError(
         "read_mixed_msh: $context must be non-negative and fit Int32"))
@@ -1792,6 +2178,29 @@ function _push_mixed_cell!(acc,etype::Int,physical::Int32,entity::Int32,
     end
     for token in node_tokens
         external=_msh_size_t(token,"element node tag")
+        internal=get(acc.node_map,external,Int32(0))
+        internal!=0 || throw(ArgumentError(
+            "read_mixed_msh: element references unknown node tag $external"))
+        push!(bucket.nodes,internal)
+    end
+    push!(bucket.tags,physical)
+    push!(bucket.entities,entity)
+    push!(bucket.external_tags,element_tag)
+    return nothing
+end
+
+function _push_mixed_cell_binary!(acc,etype::Int,physical::Int32,entity::Int32,
+                                  element_tag::UInt64,external_nodes)
+    spec=msh_spec(etype)
+    length(external_nodes)==spec.nnodes || throw(ArgumentError(
+        "read_mixed_msh: type $etype expects $(spec.nnodes) node tags"))
+    bucket=get!(acc.buckets,etype) do
+        _MixedReadBucket(Int32[],Int32[],Int32[],UInt64[])
+    end
+    @inbounds for raw in external_nodes
+        raw>0 || throw(ArgumentError(
+            "read_mixed_msh: element node tags must be positive"))
+        external=UInt64(raw)
         internal=get(acc.node_map,external,Int32(0))
         internal!=0 || throw(ArgumentError(
             "read_mixed_msh: element references unknown node tag $external"))
@@ -1833,6 +2242,60 @@ function _read_mixed_elements_v2!(acc,io,limits)
                           @view fields[first_node:end])
     end
     _expect_msh_end(io,"\$EndElements")
+end
+
+function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool)
+    remaining=limits.max_elements-length(acc.element_tags)
+    count=_section_count(io,"v2 element",remaining)
+    sizehint!(acc.element_tags,length(acc.element_tags)+count)
+    nread=0
+    while nread<count
+        etype=Int(_binary_i32(io,swap,"v2 binary element-block type"))
+        nlocal=Int(_binary_i32(io,swap,"v2 binary element-block count"))
+        ntags=Int(_binary_i32(io,swap,"v2 binary element tag count"))
+        spec=msh_spec(etype)
+        0<nlocal<=count-nread || throw(ArgumentError(
+            "read_mixed_msh: invalid or excessive v2 binary element-block size"))
+        ntags>=0 || throw(ArgumentError(
+            "read_mixed_msh: negative v2 element tag count"))
+        width=try
+            Base.checked_add(1,Base.checked_add(ntags,spec.nnodes))
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v2 binary element record width overflows Int"))
+        end
+        words=try Base.checked_mul(nlocal,width) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v2 binary element-block size overflows Int"))
+        end
+        data=_binary_i32_vector(io,words,swap,"v2 binary element block")
+        offset=1
+        @inbounds for _ in 1:nlocal
+            signed_element_tag=data[offset]
+            signed_element_tag>0 || throw(ArgumentError(
+                "read_mixed_msh: element tags must be positive"))
+            element_tag=UInt64(signed_element_tag)
+            _record_mixed_element_tag!(acc,element_tag)
+            physical=Int32(0)
+            if ntags>0
+                physical=_mixed_physical_tag(
+                    Int(data[offset+1]),"physical tag")
+            end
+            first_node=offset+1+ntags
+            last_node=first_node+spec.nnodes-1
+            _push_mixed_cell_binary!(
+                acc,etype,physical,Int32(0),element_tag,
+                @view data[first_node:last_node])
+            offset+=width; nread+=1
+        end
+    end
+    nread==count || throw(ArgumentError(
+        "read_mixed_msh: v2 Elements declared $count elements but contained $nread"))
+    _consume_binary_newline(io,"Elements section")
+    _expect_msh_end(io,"\$EndElements")
+    return nothing
 end
 
 function _read_mixed_elements_v4!(acc,io,limits)
@@ -1925,6 +2388,107 @@ function _read_mixed_elements_v4!(acc,io,limits)
     acc.element_blocks=cumulative_blocks
 end
 
+function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool)
+    nblocks=_binary_count(
+        _binary_u64(io,swap,"v4 binary Elements header"),
+        limits.max_blocks,"v4 element-block")
+    remaining_elements=limits.max_elements-length(acc.element_tags)
+    count=_binary_count(
+        _binary_u64(io,swap,"v4 binary Elements header"),
+        remaining_elements,"v4 element")
+    declared_min=_binary_u64(io,swap,"v4 binary element tag range")
+    declared_max=_binary_u64(io,swap,"v4 binary element tag range")
+    cumulative_blocks=try Base.checked_add(acc.element_blocks,nblocks) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "read_mixed_msh: cumulative v4 element-block count overflows Int"))
+    end
+    cumulative_blocks<=limits.max_blocks || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 element-block count exceeds max_blocks"))
+    nblocks<=count || throw(ArgumentError(
+        "read_mixed_msh: v4 element-block count exceeds element count"))
+    (count==0)==(nblocks==0) || throw(ArgumentError(
+        "read_mixed_msh: empty v4 element count and block count disagree"))
+    if count==0
+        (declared_min==0&&declared_max==0) || throw(ArgumentError(
+            "read_mixed_msh: empty v4 Elements must declare range 0 0"))
+    else
+        0<declared_min<=declared_max || throw(ArgumentError(
+            "read_mixed_msh: invalid v4 element-tag range"))
+    end
+    sizehint!(acc.element_tags,length(acc.element_tags)+count)
+    actual_min=typemax(UInt64); actual_max=zero(UInt64); nread=0
+    for _ in 1:nblocks
+        dim=Int(_binary_i32(io,swap,"v4 binary element-block dimension"))
+        entity=Int(_binary_i32(io,swap,"v4 binary element-block entity"))
+        etype=Int(_binary_i32(io,swap,"v4 binary element-block type"))
+        nlocal=_binary_count(
+            _binary_u64(io,swap,"v4 binary element-block count"),
+            count-nread,"v4 element-block")
+        0<=dim<=3 || throw(ArgumentError(
+            "read_mixed_msh: element-block dimension $dim is outside 0:3"))
+        1<=entity<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: element-block entity tags must be positive and fit Int32"))
+        haskey(acc.entity_physical,(dim,entity)) || throw(ArgumentError(
+            "read_mixed_msh: element block references undeclared entity ($dim,$entity)"))
+        spec=msh_spec(etype)
+        spec.dim==dim || throw(ArgumentError(
+            "read_mixed_msh: type $etype is incompatible with entity dimension $dim"))
+        nlocal>0 || throw(ArgumentError(
+            "read_mixed_msh: invalid or excessive v4 element-block size"))
+        width=1+spec.nnodes
+        words=try Base.checked_mul(nlocal,width) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v4 element-block size overflows Int"))
+        end
+        data=_binary_u64_vector(io,words,swap,"v4 element block")
+        physical=acc.entity_physical[(dim,entity)]
+        bucket=get!(acc.buckets,etype) do
+            _MixedReadBucket(Int32[],Int32[],Int32[],UInt64[])
+        end
+        cell_target=try Base.checked_add(length(bucket.tags),nlocal) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v4 element bucket count overflows Int"))
+        end
+        node_target=try Base.checked_mul(cell_target,spec.nnodes) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: v4 connectivity count overflows Int"))
+        end
+        sizehint!(bucket.nodes,node_target); sizehint!(bucket.tags,cell_target)
+        sizehint!(bucket.entities,cell_target); sizehint!(bucket.external_tags,cell_target)
+        offset=1
+        @inbounds for _ in 1:nlocal
+            tag=data[offset]
+            _record_mixed_element_tag!(acc,tag)
+            actual_min=min(actual_min,tag); actual_max=max(actual_max,tag)
+            for i in 1:spec.nnodes
+                external=data[offset+i]
+                external>0 || throw(ArgumentError(
+                    "read_mixed_msh: element node tags must be positive"))
+                internal=get(acc.node_map,external,Int32(0))
+                internal!=0 || throw(ArgumentError(
+                    "read_mixed_msh: element references unknown node tag $external"))
+                push!(bucket.nodes,internal)
+            end
+            push!(bucket.tags,physical)
+            push!(bucket.entities,Int32(entity))
+            push!(bucket.external_tags,tag)
+            offset+=width; nread+=1
+        end
+    end
+    nread==count || throw(ArgumentError(
+        "read_mixed_msh: v4 Elements declared $count elements but contained $nread"))
+    count==0 || (actual_min==declared_min&&actual_max==declared_max) || throw(ArgumentError(
+        "read_mixed_msh: v4 element-tag range does not match records"))
+    _consume_binary_newline(io,"Elements section")
+    _expect_msh_end(io,"\$EndElements")
+    acc.element_blocks=cumulative_blocks
+    return nothing
+end
+
 function _finish_mixed_read(acc,is_v4::Bool)
     nn=length(acc.x); coords=Matrix{Float64}(undef,3,nn)
     @inbounds for i in 1:nn
@@ -1978,9 +2542,10 @@ function _write_mixed_physical_names(io,names)
 end
 
 """
-    write_mixed_msh(path, mesh; version=4.1, gmsh_compatible=true) -> path
+    write_mixed_msh(path, mesh; version=4.1, binary=false,
+                    gmsh_compatible=true) -> path
 
-Validate and atomically write a mixed mesh as ASCII MSH v2.2 or v4.1. V4
+Validate and atomically write a mixed mesh as ASCII or binary MSH v2.2 or v4.1. V4
 entity metadata is preserved exactly when present; legacy meshes receive a
 deterministic discrete-entity layout with coordinate-derived bounds. MSH v2.2
 necessarily writes the legacy first-physical-tag projection. By default,
@@ -1991,7 +2556,7 @@ records, and read such escaped names with
 `read_mixed_msh(...; tessella_extensions=true)`.
 """
 function write_mixed_msh(path::AbstractString,m::MixedMesh;version::Real=4.1,
-                         gmsh_compatible=true)
+                         binary=false,gmsh_compatible=true)
     value = try
         Float64(version)
     catch err
@@ -2002,6 +2567,8 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version::Real=4.1,
         "write_mixed_msh: version must be 2.2 or 4.1"))
     gmsh_compatible isa Bool || throw(ArgumentError(
         "write_mixed_msh: gmsh_compatible must be Bool"))
+    binary isa Bool || throw(ArgumentError(
+        "write_mixed_msh: binary must be Bool"))
     if gmsh_compatible
         reader_gaps=value==2.2 ? GMSH_4_15_2_MSH_READER_GAPS_V2 :
                                 GMSH_4_15_2_MSH_READER_GAPS_V4
@@ -2030,7 +2597,13 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version::Real=4.1,
     isdir(target) && throw(ArgumentError(
         "write_mixed_msh: destination is a directory: $target"))
     mktemp(parent) do temporary,io
-        value==2.2 ? _write_mixed_v2(io,m,names) : _write_mixed_v4(io,m,names)
+        if value==2.2
+            binary ? _write_mixed_v2_binary(io,m,names) :
+                     _write_mixed_v2(io,m,names)
+        else
+            binary ? _write_mixed_v4_binary(io,m,names) :
+                     _write_mixed_v4(io,m,names)
+        end
         flush(io); close(io)
         mv(temporary,target;force=true)
     end
@@ -2076,6 +2649,46 @@ function _write_mixed_v2(io,m::MixedMesh,names)
         end
     end
     println(io,"\$EndElements")
+    return nothing
+end
+
+function _write_mixed_binary_format(io,version::AbstractString)
+    println(io,"\$MeshFormat")
+    println(io,version," 1 8")
+    write(io,Int32(1)); write(io,UInt8('\n'))
+    println(io,"\$EndMeshFormat")
+    return nothing
+end
+
+function _write_mixed_v2_binary(io,m::MixedMesh,names)
+    _write_mixed_binary_format(io,"2.2")
+    _write_mixed_physical_names(io,names)
+    nn=size(m.coords,2)
+    println(io,"\$Nodes"); println(io,nn)
+    @inbounds for i in 1:nn
+        write(io,Int32(i))
+        write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
+    end
+    write(io,UInt8('\n')); println(io,"\$EndNodes")
+    nel=_assert_mixed_structure(m,"write_mixed_msh")
+    println(io,"\$Elements"); println(io,nel)
+    ids=_v2_entity_ids(m); eid=0
+    @inbounds for block in m.blocks
+        ncells=size(block.nodes,2); ncells==0 && continue
+        spec=msh_spec(block.msh)
+        write(io,Int32(block.msh)); write(io,Int32(ncells)); write(io,Int32(2))
+        for j in axes(block.nodes,2)
+            eid+=1
+            write(io,Int32(eid)); write(io,block.tags[j])
+            write(io,Int32(ids[(spec.dim,block.tags[j])]))
+            for i in 1:spec.nnodes
+                write(io,block.nodes[i,j])
+            end
+        end
+    end
+    eid==nel || throw(ErrorException(
+        "write_mixed_msh: internal v2 binary element count mismatch"))
+    write(io,UInt8('\n')); println(io,"\$EndElements")
     return nothing
 end
 
@@ -2209,6 +2822,38 @@ function _write_mixed_entity(io,entity::MixedEntity)
     return nothing
 end
 
+function _write_mixed_entity_binary(io,entity::_MixedWriteEntity)
+    write(io,Int32(entity.tag))
+    ncoordinates=entity.dim==0 ? 3 : 6
+    @inbounds for i in 1:ncoordinates
+        write(io,entity.bounds[i])
+    end
+    nphysical=entity.physical==0 ? 0 : 1
+    write(io,UInt64(nphysical))
+    nphysical==0 || write(io,entity.physical)
+    entity.dim==0 || write(io,UInt64(0))
+    return nothing
+end
+
+function _write_mixed_entity_binary(io,entity::MixedEntity)
+    write(io,Int32(entity.tag))
+    ncoordinates=entity.dim==0 ? 3 : 6
+    @inbounds for i in 1:ncoordinates
+        write(io,entity.bbox[i])
+    end
+    write(io,UInt64(length(entity.physical_tags)))
+    for physical in entity.physical_tags
+        write(io,physical)
+    end
+    if entity.dim>0
+        write(io,UInt64(length(entity.boundaries)))
+        for boundary in entity.boundaries
+            write(io,boundary)
+        end
+    end
+    return nothing
+end
+
 function _mixed_metadata_node_runs(data::MixedEntityData)
     runs=UnitRange{Int}[]
     n=length(data.external_node_tags); first_node=1
@@ -2247,6 +2892,133 @@ function _mixed_metadata_element_runs(m::MixedMesh,data::MixedEntityData)
         end
     end
     return runs
+end
+
+function _write_mixed_v4_binary_metadata(
+    io,m::MixedMesh,names,data::MixedEntityData)
+    _write_mixed_binary_format(io,"4.1")
+    _write_mixed_physical_names(io,names)
+    entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
+    counts=zeros(Int,4)
+    for entity in entities
+        counts[entity.dim+1]+=1
+    end
+    println(io,"\$Entities")
+    for count in counts
+        write(io,UInt64(count))
+    end
+    for entity in entities
+        _write_mixed_entity_binary(io,entity)
+    end
+    write(io,UInt8('\n')); println(io,"\$EndEntities")
+
+    nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
+    minimum_node=nn==0 ? UInt64(0) : minimum(data.external_node_tags)
+    maximum_node=nn==0 ? UInt64(0) : maximum(data.external_node_tags)
+    println(io,"\$Nodes")
+    write(io,UInt64(length(node_runs))); write(io,UInt64(nn))
+    write(io,minimum_node); write(io,maximum_node)
+    @inbounds for run in node_runs
+        first_node=first(run); dim,entity=data.node_entities[first_node]
+        parametric=data.node_parametric[first_node]!==nothing
+        write(io,Int32(dim)); write(io,entity); write(io,Int32(parametric ? 1 : 0))
+        write(io,UInt64(length(run)))
+        for i in run
+            write(io,data.external_node_tags[i])
+        end
+        for i in run
+            write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
+            parameters=data.node_parametric[i]
+            if parameters!==nothing
+                for value in parameters
+                    write(io,value)
+                end
+            end
+        end
+    end
+    write(io,UInt8('\n')); println(io,"\$EndNodes")
+
+    nel=_assert_mixed_structure(m,"write_mixed_msh")
+    element_runs=_mixed_metadata_element_runs(m,data)
+    all_element_tags=Iterators.flatten(data.external_element_tags)
+    minimum_element=nel==0 ? UInt64(0) : minimum(all_element_tags)
+    maximum_element=nel==0 ? UInt64(0) :
+                    maximum(Iterators.flatten(data.external_element_tags))
+    println(io,"\$Elements")
+    write(io,UInt64(length(element_runs))); write(io,UInt64(nel))
+    write(io,minimum_element); write(io,maximum_element)
+    @inbounds for run in element_runs
+        block=m.blocks[run.block]; spec=msh_spec(block.msh)
+        entity=data.block_entities[run.block][first(run.cells)]
+        write(io,Int32(spec.dim)); write(io,entity); write(io,Int32(block.msh))
+        write(io,UInt64(length(run.cells)))
+        for j in run.cells
+            write(io,data.external_element_tags[run.block][j])
+            for i in 1:spec.nnodes
+                internal=block.nodes[i,j]
+                write(io,data.external_node_tags[internal])
+            end
+        end
+    end
+    write(io,UInt8('\n')); println(io,"\$EndElements")
+    return nothing
+end
+
+function _write_mixed_v4_binary(io,m::MixedMesh,names)
+    m.entity_data===nothing || return _write_mixed_v4_binary_metadata(
+        io,m,names,m.entity_data)
+    _write_mixed_binary_format(io,"4.1")
+    _write_mixed_physical_names(io,names)
+    entities,groups,node_entity=_mixed_v4_layout(m)
+    counts=zeros(Int,4)
+    for entity in entities
+        counts[entity.dim+1]+=1
+    end
+    println(io,"\$Entities")
+    for count in counts
+        write(io,UInt64(count))
+    end
+    for entity in entities
+        _write_mixed_entity_binary(io,entity)
+    end
+    write(io,UInt8('\n')); println(io,"\$EndEntities")
+
+    nn=size(m.coords,2)
+    println(io,"\$Nodes")
+    write(io,UInt64(nn==0 ? 0 : 1)); write(io,UInt64(nn))
+    write(io,UInt64(nn==0 ? 0 : 1)); write(io,UInt64(nn))
+    if nn>0
+        write(io,Int32(3)); write(io,Int32(node_entity)); write(io,Int32(0))
+        write(io,UInt64(nn))
+        for i in 1:nn
+            write(io,UInt64(i))
+        end
+        @inbounds for i in 1:nn
+            write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
+        end
+    end
+    write(io,UInt8('\n')); println(io,"\$EndNodes")
+
+    nel=_assert_mixed_structure(m,"write_mixed_msh")
+    println(io,"\$Elements")
+    write(io,UInt64(length(groups))); write(io,UInt64(nel))
+    write(io,UInt64(nel==0 ? 0 : 1)); write(io,UInt64(nel))
+    eid=0
+    @inbounds for group in groups
+        write(io,Int32(group.dim)); write(io,Int32(group.entity))
+        write(io,Int32(group.msh)); write(io,UInt64(length(group.cells)))
+        spec=msh_spec(group.msh)
+        for ref in group.cells
+            block=m.blocks[ref.block]; eid+=1; write(io,UInt64(eid))
+            for i in 1:spec.nnodes
+                write(io,UInt64(block.nodes[i,ref.cell]))
+            end
+        end
+    end
+    eid==nel || throw(ErrorException(
+        "write_mixed_msh: internal v4 binary element count mismatch"))
+    write(io,UInt8('\n')); println(io,"\$EndElements")
+    return nothing
 end
 
 function _write_mixed_v4_metadata(io,m::MixedMesh,names,data::MixedEntityData)

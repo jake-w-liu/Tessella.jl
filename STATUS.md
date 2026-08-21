@@ -24,7 +24,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | Track | State | Verified implementation increment |
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
-| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII MSH v2.2/v4.1 read/write |
+| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4–P6 | **PENDING** | No state change |
 
@@ -33,9 +33,10 @@ pipeline, non-simplex/higher-order/vector/tensor `PostView`, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
 not claim element generation/recombination, variable-connectivity/internal types,
 integration of mixed blocks into the simplex meshing kernels, curved high-order
-Jacobian certification, binary MSH, ancillary/unknown-section preservation, repeated
-`$Nodes`, internal indices beyond `Int32`, or lossless multi-physical-group MSH v2.2
-projection. Some registered fixed tags require explicit Tessella-only output because
+Jacobian certification, ancillary/unknown-section preservation (binary readers reject
+unsupported sections explicitly), repeated `$Nodes`, non-8-byte binary data, internal
+indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection. Some
+registered fixed tags require explicit Tessella-only output because
 Gmsh 4.15.2 cannot re-import them. P3 does not yet claim a general entity kernel,
 OpenCASCADE/BREP/NURBS, CAD import/export, transformations of analytical/CAD
 entities, or full `.geo` execution.
@@ -73,7 +74,11 @@ included in the next aggregate package gate. The subsequent finalized-mesh trans
 increment passed 56/56 bounds-checked assertions under Julia 1.12.7 and Julia 1.11.9.
 Its independent Gmsh 4.15.2 `model.mesh.affineTransform` oracle matched all four
 fixture nodes exactly; 10,000- and 20,000-node translations allocated 504,984 and
-996,504 bytes respectively, and the method-ambiguity scan remained empty.
+996,504 bytes respectively, and the method-ambiguity scan remained empty. The binary
+mixed-MSH increment then passed 2,579/2,579 bounds-checked assertions under both Julia
+1.12.7 and Julia 1.11.9, including native and opposite-endian MSH 2.2/4.1, full-width
+v4 tags, parametric nodes, atomic/resource failures, and Gmsh 4.15.2 acceptance.
+Reading 2,000 and 4,000 nodes allocated 1,670,704 and 4,239,472 bytes respectively.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
