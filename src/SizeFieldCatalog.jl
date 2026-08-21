@@ -2134,7 +2134,9 @@ end
 
 Gmsh `PostView` on first-order list data. `coords` is `3×n`. Scalar `values`
 can be a length-`n` vector or a `1×n` matrix; vector and tensor values are `3×n`
-and `9×n` matrices, respectively. Connectivity is 1-based and can be an
+and `9×n` matrices; multiple time steps pass a `c×n×steps` array and select one
+with `time` (all steps are validated, the selected step is stored). Connectivity
+is 1-based and can be an
 arity-by-element matrix or an iterable of index tuples. When no connectivity is
 supplied, every column remains a point element, preserving the original API.
 With explicit topology, point elements are absent unless supplied through
@@ -2149,7 +2151,7 @@ field. The scalar operator of tensor data is [`GMSH_MAX_SIZE`](@ref), as Gmsh
 does; tensor-to-metric evaluation is not exposed by this scalar constructor.
 Non-positive scalar results become `GMSH_MAX_SIZE` when `crop_negative=true`.
 
-Curved/high-order list interpolation matrices, multiple time steps, mixed component
+Curved/high-order list interpolation matrices, mixed component
 counts, and non-planar quadrangles are rejected or not represented. Gmsh itself
 requires an adapted visualization grid before querying non-adapted high-order list
 data. Vector norms use overflow-safe arithmetic; results that are not representable
@@ -2622,25 +2624,46 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
     return order,lows,highs,left,right,firsts,counts
 end
 
-function _postview_values(values,n::Int)
+function _postview_values(values,n::Int,time::Int)
     if values isa AbstractVector
         length(values)==n || throw(ArgumentError("PostViewField: value count mismatch"))
-        source=reshape(values,1,n)
+        time==1 || throw(ArgumentError(
+            "PostViewField: time step $time is outside the single-step data"))
+        return _postview_finite(Matrix{Float64}(reshape(values,1,n))),1
     elseif values isa AbstractMatrix
         size(values,2)==n || throw(ArgumentError("PostViewField: value count mismatch"))
         size(values,1) in (1,3,9) || throw(ArgumentError(
             "PostViewField: values must have 1, 3, or 9 components per node"))
-        source=values
+        time==1 || throw(ArgumentError(
+            "PostViewField: time step $time is outside the single-step data"))
+        return _postview_finite(Matrix{Float64}(values)),1
+    elseif values isa AbstractArray && ndims(values)==3
+        size(values,2)==n || throw(ArgumentError("PostViewField: value count mismatch"))
+        size(values,1) in (1,3,9) || throw(ArgumentError(
+            "PostViewField: values must have 1, 3, or 9 components per node"))
+        steps=size(values,3)
+        steps<=typemax(Int32) || throw(ArgumentError(
+            "PostViewField: time-step count exceeds the Int32 limit"))
+        steps>0 || throw(ArgumentError("PostViewField: empty time-step array"))
+        1<=time<=steps || throw(ArgumentError(
+            "PostViewField: time step $time is outside 1:$steps"))
+        # Validate every step once; only the selected step is retained.
+        full=try
+            Matrix{Float64}(reshape(values,size(values,1),n*steps))
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("PostViewField: values must be Float64-representable"))
+        end
+        all(isfinite,full) || throw(ArgumentError("PostViewField: values must be finite"))
+        lo=(time-1)*n+1
+        return full[:,lo:lo+n-1],steps
     else
         throw(ArgumentError(
-            "PostViewField: values must be a vector or a 1×n, 3×n, or 9×n matrix"))
+            "PostViewField: values must be a vector, a c×n matrix, or a c×n×steps array"))
     end
-    result=try
-        Matrix{Float64}(source)
-    catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("PostViewField: values must be Float64-representable"))
-    end
+end
+
+@inline function _postview_finite(result::Matrix{Float64})
     all(isfinite,result) || throw(ArgumentError("PostViewField: values must be finite"))
     return result
 end
@@ -2648,6 +2671,7 @@ end
 function PostViewField(coords::AbstractMatrix{<:Real}, values;
                        points=nothing,lines=(),triangles=(),quadrangles=(),
                        tetrahedra=(),hexahedra=(),prisms=(),pyramids=(),
+                       time::Integer=1,
                        crop_negative::Bool=true,use_closest::Bool=true,
                        reference_tolerance::Real=1e-6,
                        max_nodes::Integer=1_000_000,
@@ -2667,7 +2691,10 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values;
         err isa InterruptException && rethrow()
         throw(ArgumentError("PostViewField: coordinates must be Float64-representable"))
     end
-    V=_postview_values(values,n)
+    time==0 && throw(ArgumentError("PostViewField: time step 0 is outside range"))
+    tsel=Int(time); tsel>=1 || throw(ArgumentError(
+        "PostViewField: negative time step $time"))
+    V,_steps=_postview_values(values,n,tsel)
     @inbounds for i in axes(C,2), d in 1:3
         isfinite(C[d,i]) || throw(ArgumentError("PostViewField: non-finite coordinate"))
     end

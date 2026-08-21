@@ -115,7 +115,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
-multiple-time-step, or mixed-component `PostView` data, materially warped
+or mixed-component `PostView` data, materially warped
 quadrangles, `PostView` tensor-to-metric evaluation,
 direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD
 distance queries. P2 does not yet claim general mixed-element generation or
