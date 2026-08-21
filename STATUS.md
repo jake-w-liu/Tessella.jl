@@ -25,7 +25,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, and finalized-mesh affine transforms |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
 | P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination with retained boundary segments and unpaired triangles |
 | P5–P6 | **PENDING** | No state change |
 
@@ -41,7 +41,10 @@ indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection. So
 registered fixed tags require explicit Tessella-only output because
 Gmsh 4.15.2 cannot re-import them. P3 does not yet claim a general entity kernel,
 OpenCASCADE/BREP/NURBS, CAD import/export, transformations of analytical/CAD
-entities, or full `.geo` execution.
+entities, or full `.geo` execution. Its scanner handles finite arithmetic constants,
+pure numeric functions, prior scalar bindings, and explicit field/physical tags; it
+rejects loops, macros, dynamic tags, option reads, stateful functions, ranges,
+logical/ternary syntax, CSG statements, and physical-group right-hand sides.
 
 P4 does not yet claim Gmsh's Blossom/full-quad algorithms, structured/transfinite
 grids, volume/hybrid recombination, boundary-layer element topology,
@@ -90,6 +93,13 @@ Julia 1.12.7 and Julia 1.11.9. Its 12×12 grid produced 144 quadrangles with CRC
 `dbb1bf17965d4e011e7f51a452c6a03e4018a628ffc7e7d9b33d9fc6b922439f`; 20×20 and
 40×40 grids allocated 4,073,984 and 17,348,496 bytes. Gmsh 4.15.2 accepted both the
 ASCII and binary recombined MSH 4.1 fixtures with `-check -parse_and_exit`.
+
+The subsequent `.geo` constant-expression increment passed 231/231 bounds-checked IO
+assertions under Julia 1.12.7 and Julia 1.11.9. An independent Gmsh 4.15.2 expression
+oracle matched 34 accepted expressions exactly and matched seven error cases; an API
+oracle also matched explicit expression-derived physical and field tags. Unsupported
+control-flow contexts are rejected when they can affect relevant statements, and
+their scalar bindings are invalidated before later use.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
