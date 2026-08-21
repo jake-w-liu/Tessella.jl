@@ -7,16 +7,18 @@ path). Each builder returns a **closed, manifold, outward-oriented** triangle
 [`mesh_volume`](@ref). All are verified `Heal.is_meshable` and, when filled, to
 reproduce the exact analytic volume.
 
-These are the primitives the ASCENT `solid_model` emits (boxes, cylinders, holes/
-bores, and axis-aligned cavities via [`box_shell_surface`](@ref)); general Boolean
-composition is provided by `Mesh3D.mesh_boolean`.
+These are the primitives the ASCENT `solid_model` emits (boxes, cylinders, cones,
+geodesic spheres, holes/bores, and axis-aligned cavities via
+[`box_shell_surface`](@ref)); general Boolean composition is provided by
+`Mesh3D.mesh_boolean`.
 """
 module Geometry
 
 using ..MeshTypes: Mesh, validate
 using ..Heal: is_meshable
 
-export box_surface, cylinder_surface, box_tunnel_surface, box_shell_surface
+export box_surface, cylinder_surface, sphere_surface, cone_surface
+export box_tunnel_surface, box_shell_surface
 
 @inline function _finite_real(x::Real, caller::AbstractString, name::AbstractString)
     y = try
@@ -184,6 +186,292 @@ end
     l=hypot(a[1],a[2],a[3])
     (isfinite(l) && l > 0) || throw(ArgumentError("Geometry: axis must have finite positive length"))
     (a[1]/l,a[2]/l,a[3]/l)
+end
+
+@inline function _geometry_count(value::Integer,caller::AbstractString,
+                                 name::AbstractString,minimum::Int)
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
+    converted=try
+        Int(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name is outside the platform Int range"))
+    end
+    converted>=minimum || throw(ArgumentError(
+        "$caller: $name must be at least $minimum (got $value)"))
+    return converted
+end
+
+@inline function _geometry_limit(value::Integer,caller::AbstractString,
+                                 name::AbstractString)
+    return _geometry_count(value,caller,name,1)
+end
+
+@inline function _geometry_nonnegative(value::Real,caller::AbstractString,
+                                       name::AbstractString)
+    result=_finite_real(value,caller,name)
+    result>=0 || throw(ArgumentError(
+        "$caller: $name must be non-negative (got $value)"))
+    return result
+end
+
+@inline function _geometry_point(x::Float64,y::Float64,z::Float64,
+                                 caller::AbstractString)
+    (isfinite(x) && isfinite(y) && isfinite(z)) || throw(ArgumentError(
+        "$caller: generated coordinate is not finite"))
+    return (x,y,z)
+end
+
+@inline function _axis_frame(axis,caller::AbstractString)
+    ez=_unit(_point3(axis,caller,"axis"))
+    reference = abs(ez[1])<=abs(ez[2]) ?
+        (abs(ez[1])<=abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
+        (abs(ez[2])<=abs(ez[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
+    ex=_unit(_cross(reference,ez))
+    ey=_cross(ez,ex)
+    return ex,ey,ez
+end
+
+function _checked_primitive_counts(nodes::Int,triangles::Int,max_nodes::Integer,
+                                   max_triangles::Integer,caller::AbstractString)
+    node_limit=_geometry_limit(max_nodes,caller,"max_nodes")
+    triangle_limit=_geometry_limit(max_triangles,caller,"max_triangles")
+    nodes<=typemax(Int32) || throw(ArgumentError(
+        "$caller: $nodes nodes exceed the Int32 indexing limit"))
+    triangles<=typemax(Int32) || throw(ArgumentError(
+        "$caller: $triangles triangles exceed the Int32 topology limit"))
+    nodes<=node_limit || throw(ArgumentError(
+        "$caller: $nodes nodes exceed max_nodes=$node_limit"))
+    triangles<=triangle_limit || throw(ArgumentError(
+        "$caller: $triangles triangles exceed max_triangles=$triangle_limit"))
+    return nothing
+end
+
+function _sphere_midpoint!(vertices::Vector{NTuple{3,Float64}},
+                           midpoints::Dict{Tuple{Int32,Int32},Int32},
+                           a::Int32,b::Int32,center::NTuple{3,Float64},
+                           radius::Float64)
+    key=a<b ? (a,b) : (b,a)
+    return get!(midpoints,key) do
+        pa=vertices[Int(a)];pb=vertices[Int(b)]
+        dx=(pa[1]-center[1])/2+(pb[1]-center[1])/2
+        dy=(pa[2]-center[2])/2+(pb[2]-center[2])/2
+        dz=(pa[3]-center[3])/2+(pb[3]-center[3])/2
+        midpoint_norm=hypot(dx,dy,dz)
+        (isfinite(midpoint_norm) && midpoint_norm>0) || throw(ArgumentError(
+            "sphere_surface: an edge midpoint cannot be projected to the sphere"))
+        scale=radius/midpoint_norm
+        point=_geometry_point(center[1]+scale*dx,center[2]+scale*dy,
+                              center[3]+scale*dz,"sphere_surface")
+        length(vertices)<typemax(Int32) || throw(ArgumentError(
+            "sphere_surface: node count exceeds the Int32 indexing limit"))
+        push!(vertices,point)
+        Int32(length(vertices))
+    end
+end
+
+"""
+    sphere_surface(center, radius; subdivisions=2, max_nodes=10_000_000,
+                   max_triangles=20_000_000) -> Mesh
+
+Closed outward-oriented geodesic sphere surface. The six vertices of an octahedron are
+projected to the analytical sphere and every subdivision splits one triangle into four,
+projecting shared edge midpoints back to the sphere. `subdivisions=0` returns the
+octahedron. Resource limits are checked before allocation.
+"""
+function sphere_surface(center,radius::Real;subdivisions::Integer=2,
+                        max_nodes::Integer=10_000_000,
+                        max_triangles::Integer=20_000_000)
+    c=_point3(center,"sphere_surface","center")
+    r=_finite_real(radius,"sphere_surface","radius")
+    r>0 || throw(ArgumentError("sphere_surface: radius must be positive"))
+    levels=_geometry_count(subdivisions,"sphere_surface","subdivisions",0)
+    power=4
+    for _ in 1:levels
+        power=try
+            Base.checked_mul(power,4)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("sphere_surface: requested subdivision count overflows Int"))
+        end
+        # Stop before continuing a request that already exceeds either public
+        # resource bound; this also bounds work for very large subdivision counts.
+        nodes=try Base.checked_add(power,2) catch; typemax(Int) end
+        triangles=try Base.checked_mul(2,power) catch; typemax(Int) end
+        _checked_primitive_counts(nodes,triangles,max_nodes,max_triangles,
+                                  "sphere_surface")
+    end
+    nodes=Base.checked_add(power,2);triangles=Base.checked_mul(2,power)
+    _checked_primitive_counts(nodes,triangles,max_nodes,max_triangles,
+                              "sphere_surface")
+
+    vertices=NTuple{3,Float64}[
+        _geometry_point(c[1]+r,c[2],c[3],"sphere_surface"),
+        _geometry_point(c[1]-r,c[2],c[3],"sphere_surface"),
+        _geometry_point(c[1],c[2]+r,c[3],"sphere_surface"),
+        _geometry_point(c[1],c[2]-r,c[3],"sphere_surface"),
+        _geometry_point(c[1],c[2],c[3]+r,"sphere_surface"),
+        _geometry_point(c[1],c[2],c[3]-r,"sphere_surface"),
+    ]
+    faces=NTuple{3,Int32}[(1,3,5),(1,6,3),(1,5,4),(1,4,6),
+                           (2,5,3),(2,3,6),(2,4,5),(2,6,4)]
+    sizehint!(vertices,nodes)
+    for _ in 1:levels
+        midpoints=Dict{Tuple{Int32,Int32},Int32}()
+        sizehint!(midpoints,3length(faces)÷2)
+        next_faces=NTuple{3,Int32}[]
+        sizehint!(next_faces,4length(faces))
+        for (a,b,d) in faces
+            ab=_sphere_midpoint!(vertices,midpoints,a,b,c,r)
+            bd=_sphere_midpoint!(vertices,midpoints,b,d,c,r)
+            da=_sphere_midpoint!(vertices,midpoints,d,a,c,r)
+            push!(next_faces,(a,ab,da),(ab,b,bd),(da,bd,d),(ab,bd,da))
+        end
+        faces=next_faces
+    end
+    length(vertices)==nodes && length(faces)==triangles || throw(ErrorException(
+        "sphere_surface: internal subdivision count invariant failed"))
+    coordinates=Matrix{Float64}(undef,3,nodes)
+    @inbounds for (index,point) in pairs(vertices)
+        coordinates[1,index]=point[1];coordinates[2,index]=point[2]
+        coordinates[3,index]=point[3]
+    end
+    topology=Matrix{Int32}(undef,3,triangles)
+    @inbounds for (index,face) in pairs(faces)
+        topology[1,index]=face[1];topology[2,index]=face[2];topology[3,index]=face[3]
+    end
+    return _checked_surface(Mesh(coordinates;tris=topology),"sphere_surface")
+end
+
+"""
+    cone_surface(base, axis, radius1, radius2, height; nθ=24, nz=2,
+                 max_nodes=10_000_000, max_triangles=20_000_000) -> Mesh
+
+Closed outward-oriented polygonal cone or conical frustum. `radius1` and `radius2`
+are the endpoint radii; either (but not both) can be zero. `nz` is the number of
+axial levels, including both endpoints.
+"""
+function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
+                      nθ::Integer=24,nz::Integer=2,
+                      max_nodes::Integer=10_000_000,
+                      max_triangles::Integer=20_000_000)
+    c=_point3(base,"cone_surface","base")
+    r1=_geometry_nonnegative(radius1,"cone_surface","radius1")
+    r2=_geometry_nonnegative(radius2,"cone_surface","radius2")
+    (r1>0 || r2>0) || throw(ArgumentError(
+        "cone_surface: at least one endpoint radius must be positive"))
+    h=_finite_real(height,"cone_surface","height")
+    h>0 || throw(ArgumentError("cone_surface: height must be positive"))
+    sectors=_geometry_count(nθ,"cone_surface","nθ",3)
+    levels=_geometry_count(nz,"cone_surface","nz",2)
+    zero_endpoints=(r1==0 ? 1 : 0)+(r2==0 ? 1 : 0)
+    ring_levels=levels-zero_endpoints
+    nodes=try
+        Base.checked_add(Base.checked_mul(ring_levels,sectors),2)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("cone_surface: requested node count overflows Int"))
+    end
+    triangles=try
+        Base.checked_mul(Base.checked_mul(2,sectors),levels-zero_endpoints)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("cone_surface: requested triangle count overflows Int"))
+    end
+    _checked_primitive_counts(nodes,triangles,max_nodes,max_triangles,"cone_surface")
+    ex,ey,ez=_axis_frame(axis,"cone_surface")
+
+    coordinates=Matrix{Float64}(undef,3,nodes)
+    level_starts=Vector{Int}(undef,levels)
+    level_is_apex=falses(levels)
+    cursor=1
+    @inbounds for level in 1:levels
+        fraction=(level-1)/(levels-1)
+        radius=(1-fraction)*r1+fraction*r2
+        axial=fraction*h
+        level_starts[level]=cursor
+        if radius==0
+            point=_geometry_point(c[1]+axial*ez[1],c[2]+axial*ez[2],
+                                  c[3]+axial*ez[3],"cone_surface")
+            coordinates[1,cursor]=point[1];coordinates[2,cursor]=point[2]
+            coordinates[3,cursor]=point[3]
+            level_is_apex[level]=true;cursor+=1
+        else
+            for sector in 0:sectors-1
+                angle=2pi*sector/sectors
+                radial_x=cos(angle)*ex[1]+sin(angle)*ey[1]
+                radial_y=cos(angle)*ex[2]+sin(angle)*ey[2]
+                radial_z=cos(angle)*ex[3]+sin(angle)*ey[3]
+                point=_geometry_point(c[1]+axial*ez[1]+radius*radial_x,
+                                      c[2]+axial*ez[2]+radius*radial_y,
+                                      c[3]+axial*ez[3]+radius*radial_z,
+                                      "cone_surface")
+                coordinates[1,cursor]=point[1];coordinates[2,cursor]=point[2]
+                coordinates[3,cursor]=point[3];cursor+=1
+            end
+        end
+    end
+    bottom_center=0;top_center=0
+    if r1>0
+        bottom_center=cursor
+        coordinates[1,cursor]=c[1];coordinates[2,cursor]=c[2]
+        coordinates[3,cursor]=c[3];cursor+=1
+    end
+    if r2>0
+        top_center=cursor
+        point=_geometry_point(c[1]+h*ez[1],c[2]+h*ez[2],c[3]+h*ez[3],
+                              "cone_surface")
+        coordinates[1,cursor]=point[1];coordinates[2,cursor]=point[2]
+        coordinates[3,cursor]=point[3];cursor+=1
+    end
+    cursor==nodes+1 || throw(ErrorException(
+        "cone_surface: internal node count invariant failed"))
+
+    topology=Matrix{Int32}(undef,3,triangles);face=1
+    @inbounds for level in 1:levels-1
+        lower=level_starts[level];upper=level_starts[level+1]
+        if level_is_apex[level]
+            for sector in 0:sectors-1
+                current=upper+sector;next=upper+mod(sector+1,sectors)
+                topology[1,face]=Int32(lower);topology[2,face]=Int32(next)
+                topology[3,face]=Int32(current);face+=1
+            end
+        elseif level_is_apex[level+1]
+            for sector in 0:sectors-1
+                current=lower+sector;next=lower+mod(sector+1,sectors)
+                topology[1,face]=Int32(current);topology[2,face]=Int32(next)
+                topology[3,face]=Int32(upper);face+=1
+            end
+        else
+            for sector in 0:sectors-1
+                a=lower+sector;b=lower+mod(sector+1,sectors)
+                d=upper+sector;e=upper+mod(sector+1,sectors)
+                topology[1,face]=Int32(a);topology[2,face]=Int32(b)
+                topology[3,face]=Int32(e);face+=1
+                topology[1,face]=Int32(a);topology[2,face]=Int32(e)
+                topology[3,face]=Int32(d);face+=1
+            end
+        end
+    end
+    if bottom_center!=0
+        lower=level_starts[1]
+        @inbounds for sector in 0:sectors-1
+            current=lower+sector;next=lower+mod(sector+1,sectors)
+            topology[1,face]=Int32(bottom_center);topology[2,face]=Int32(next)
+            topology[3,face]=Int32(current);face+=1
+        end
+    end
+    if top_center!=0
+        upper=level_starts[end]
+        @inbounds for sector in 0:sectors-1
+            current=upper+sector;next=upper+mod(sector+1,sectors)
+            topology[1,face]=Int32(top_center);topology[2,face]=Int32(current)
+            topology[3,face]=Int32(next);face+=1
+        end
+    end
+    face==triangles+1 || throw(ErrorException(
+        "cone_surface: internal triangle count invariant failed"))
+    return _checked_surface(Mesh(coordinates;tris=topology),"cone_surface")
 end
 
 function _checked_surface(m::Mesh,caller::AbstractString)

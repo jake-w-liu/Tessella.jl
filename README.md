@@ -9,8 +9,9 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The current bounds-checked package gate passes 161,183/161,183
-assertions; the live implementation and verification record is [`STATUS.md`](STATUS.md).
+complete**. The last stable bounds-checked package gate passed 161,183/161,183
+assertions; newer isolated increments and their focused gates are recorded in
+[`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
 
 ```julia
@@ -47,15 +48,16 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   `AttractorAnisoCurve`; discrete distance queries use a deterministic AABB hierarchy,
   and lower-dimensional cells and tags are preserved through volume refinement;
 - quality reporting, flips, Laplacian/ODT/targeted sliver smoothing, healing
-  diagnostics, native primitives, analytical surfaces, imprints, and mesh Boolean CSG;
+  diagnostics, native box/cylinder/cone/geodesic-sphere primitives, analytical
+  surfaces, imprints, and mesh Boolean CSG;
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a 125-type fixed-node Gmsh element catalog, mixed blocks and entity/classification
   metadata, structural validation/CRC, and ASCII MSH v2.2/v4.1 mixed-element I/O.
 
-P1 and P2 remain **in progress**. Current non-claims include boundary-layer element
+P1 through P3 remain **in progress**. Current non-claims include boundary-layer element
 construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
-full `.geo`/CAD-model execution, mixed-element generation/recombination,
+general entity/OCC/BREP/NURBS and full `.geo` execution, mixed-element generation/recombination,
 simplex-kernel integration, variable-connectivity/internal types, curved-cell Jacobian
 certification, binary MSH, and ancillary-section preservation. Some registered fixed
 tags require Tessella-only output because Gmsh 4.15.2 cannot re-import them. Complete
