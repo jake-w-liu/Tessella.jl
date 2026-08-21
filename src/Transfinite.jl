@@ -202,6 +202,55 @@ function _normalized_side(side,origin,scale)
     return result
 end
 
+function _frame_from_normal(normal)
+    reference=abs(normal[1])<=abs(normal[2]) ?
+        (abs(normal[1])<=abs(normal[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
+        (abs(normal[2])<=abs(normal[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
+    axis_u=_cross3(reference,normal);axis_length=_norm3(axis_u)
+    (isfinite(axis_length)&&axis_length>0) || throw(ArgumentError(
+        "mesh_transfinite_patch: could not construct an in-plane frame"))
+    axis_u=(axis_u[1]/axis_length,axis_u[2]/axis_length,axis_u[3]/axis_length)
+    axis_v=_cross3(normal,axis_u)
+    return _PlaneFrame(axis_u,axis_v,normal)
+end
+
+function _exact_plane_frame(ring,origin)
+    exact_origin=ntuple(d->Rational{BigInt}(origin[d]),3)
+    points=Vector{NTuple{3,Rational{BigInt}}}(undef,length(ring))
+    @inbounds for i in eachindex(ring)
+        points[i]=ntuple(d->Rational{BigInt}(ring[i][d])-exact_origin[d],3)
+    end
+    first=1;first_norm=_dot3(points[1],points[1])
+    @inbounds for i in 2:length(points)
+        point_norm=_dot3(points[i],points[i])
+        if point_norm>first_norm
+            first=i;first_norm=point_norm
+        end
+    end
+    axis=points[first]
+    zero_exact=Rational{BigInt}(0)
+    best=(zero_exact,zero_exact,zero_exact);best_norm=zero_exact
+    @inbounds for point in points
+        candidate=_cross3(axis,point)
+        candidate_norm=_dot3(candidate,candidate)
+        if candidate_norm>best_norm
+            best=candidate;best_norm=candidate_norm
+        end
+    end
+    best_norm>0 || return nothing
+    @inbounds for point in points
+        _dot3(best,point)==0 || return nothing
+    end
+    normal=setprecision(BigFloat,256) do
+        length_big=sqrt(best_norm)
+        (Float64(BigFloat(best[1])/length_big),
+         Float64(BigFloat(best[2])/length_big),
+         Float64(BigFloat(best[3])/length_big))
+    end
+    all(isfinite,normal)&&_norm3(normal)>0 || return nothing
+    return _frame_from_normal(normal)
+end
+
 function _plane_frame(ring,origin,scale)
     nx=0.0;ny=0.0;nz=0.0
     @inbounds for i in eachindex(ring)
@@ -212,25 +261,25 @@ function _plane_frame(ring,origin,scale)
         nz+=(p[1]-q[1])*(p[2]+q[2])
     end
     normal_length=hypot(nx,ny,nz)
-    (isfinite(normal_length)&&normal_length>0) || throw(ArgumentError(
-        "mesh_transfinite_patch: boundary has no representable plane normal"))
+    if !(isfinite(normal_length)&&normal_length>0)
+        exact=_exact_plane_frame(ring,origin)
+        exact===nothing && throw(ArgumentError(
+            "mesh_transfinite_patch: boundary has no representable plane normal"))
+        return exact
+    end
     normal=(nx/normal_length,ny/normal_length,nz/normal_length)
-    reference=abs(normal[1])<=abs(normal[2]) ?
-        (abs(normal[1])<=abs(normal[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
-        (abs(normal[2])<=abs(normal[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
-    axis_u=_cross3(reference,normal);axis_length=_norm3(axis_u)
-    (isfinite(axis_length)&&axis_length>0) || throw(ArgumentError(
-        "mesh_transfinite_patch: could not construct an in-plane frame"))
-    axis_u=(axis_u[1]/axis_length,axis_u[2]/axis_length,axis_u[3]/axis_length)
-    axis_v=_cross3(normal,axis_u)
-    frame=_PlaneFrame(axis_u,axis_v,normal)
+    frame=_frame_from_normal(normal)
     tolerance=256eps(Float64)
     @inbounds for (i,point) in pairs(ring)
         normalized=_normalize(point,origin,scale)
         distance=abs(_dot3(normalized,normal))
-        (isfinite(distance)&&distance<=tolerance) || throw(ArgumentError(
-            "mesh_transfinite_patch: boundary node $i is not coplanar " *
-            "(normalized distance $distance exceeds $tolerance)"))
+        if !(isfinite(distance)&&distance<=tolerance)
+            exact=_exact_plane_frame(ring,origin)
+            exact===nothing && throw(ArgumentError(
+                "mesh_transfinite_patch: boundary node $i is not coplanar " *
+                "(normalized distance $distance exceeds $tolerance)"))
+            return exact
+        end
     end
     return frame
 end
