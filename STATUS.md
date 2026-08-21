@@ -21,37 +21,46 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 
 ### Active parity increment
 
-- Implemented native scalar/size field separation and Gmsh-compatible `Distance`,
-  `Threshold` (linear, sigmoid, and `StopAtDistMax`), `Box`, `Ball`, finite
-  `Cylinder`, `Frustum`, `Min`, `Max`, and final clamp/factor semantics.
-- `DistanceField` evaluates discrete points, segments, and triangles; generic distance
-  values can be zero without violating the positive final-size contract. Its
-  deterministic AABB hierarchy was differentially checked against exhaustive
-  primitive scans and allocates zero bytes per warmed query in the enclosure graph.
-- `refine_to_size` and `mesh_sized` now accept spatial size fields and verify every
-  output tet edge against the minimum field value at its endpoints and midpoint.
-- Focused field tests, existing 1-D/surface tests, the full Mesh3D suite, the
-  installed-Gmsh 4.15.2 differential, and the full bounds-checked package gate are
-  green.
+| Track | State | Verified implementation increment |
+|---|---|---|
+| P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
+| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII MSH v2.2/v4.1 read/write |
+| P3–P6 | **PENDING** | No state change |
 
-OpenCASCADE/NURBS, mixed elements, remaining algorithms/fields, broad formats and API,
-GUI, and post-processing are now unfinished parity tracks, not project non-goals.
+P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
+pipeline, non-simplex/higher-order/vector/tensor `PostView`, direct tensor or
+metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
+not claim element generation/recombination, variable-connectivity/internal types,
+integration of mixed blocks into the simplex meshing kernels, curved high-order
+Jacobian certification, binary MSH, ancillary/unknown-section preservation, repeated
+`$Nodes`, internal indices beyond `Int32`, or lossless multi-physical-group MSH v2.2
+projection. Some registered fixed tags require explicit Tessella-only output because
+Gmsh 4.15.2 cannot re-import them.
 
-## Current verified parity gate
+OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
+post-processing are unfinished parity tracks, not project non-goals.
 
-Re-measured on 2026-08-19 with Julia 1.12.7 before the increment was pushed to
-`origin/main`. Both bounds-checked package runs matched:
+## Current worktree verification
 
-- `julia --project=. --check-bounds=yes -e 'using Pkg; Pkg.test()'`
-  — 152,789/152,789 assertions passed twice (3m26.3s, then 3m28.1s).
-- `julia --project=. validation/size_fields/differential.jl`
-  — `SIZE_FIELD_DIFFERENTIAL_OK` against installed Gmsh 4.15.2 for
-  `Distance`→`Threshold`, `Box`, `Ball`, finite `Cylinder`, and `Frustum`
-  line-mesh grading.
-- Fresh-process `using Tessella` plus public `mesh_volume` / `size_at` /
-  `mesh_sized` succeeded twice on `box_surface(0,1,0,1,0,1)`: volume fill
-  9 nodes / 12 tets, `size_at(BoxField(...),0.25,0.5,0.5)==0.5`, field-sized
-  mesh 60 nodes / 167 tets, both `validate` ok.
+Verified on 2026-08-21 with Julia 1.12.7:
+
+- `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
+  — 161,183/161,183 assertions passed in 9m05.3s.
+- `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
+  — exited 0 against Gmsh 4.15.2-git. Tessella preserved the exact flat-model
+  volumes (box 2, tunnel 24, hollow box 35), completed the curved-model comparisons,
+  and reproduced the literal enclosure's non-zero Gmsh exit with zero volume
+  tetrahedra.
+- The required size-field child reported
+  `SIZE_FIELD_DIFFERENTIAL_OK gmsh=4.15.2 plugin_calls=23 direct_cases=23
+  direct_samples=63 mesh_cases=5 context_skips=5`; the context skips are explicit
+  non-claims listed in `validation/size_fields/STATUS.md`.
+- Focused bounds-checked gates passed 6,915/6,915 size-field assertions,
+  2,398/2,398 fixed-node/mixed-element assertions, and 74/74 Mesh1D assertions.
+  The Mesh1D gate also passed under Julia 1.11.
+- `detect_ambiguities(Tessella; recursive=true)` and
+  `Base.Docs.undocumented_names(Tessella; private=false)` both returned zero.
+- `git diff --check` passed.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
@@ -120,22 +129,26 @@ historical Stage 0–6 scope, not to the active Gmsh parity objective.
 
 ## Memory evidence
 
-The 2026-08-14 stress measurement used
+The reproducible stress measurement uses
 `refine_to_size(mesh_box(0,3,0,3,0,3; hmax=3), 0.25)` after one warm-up and `GC.gc()`.
-Both versions produced 22,065 nodes, 98,304 tetrahedra, and a valid mesh:
+Each measured snapshot produced 22,065 nodes, 98,304 tetrahedra, and a valid mesh:
 
 | Version | Allocated bytes | Timed run |
 |---|---:|---:|
 | pre-fix `5d3e466` source snapshot | 75,038,688 | 0.3517 s |
 | previous hardened implementation | 70,337,184 | 0.2972 s |
-| current field/refinement increment | 100,434,688 | 1.1318 s (concurrent enclosure load) |
+| previous field/refinement snapshot | 100,434,688 | 1.1318 s (concurrent enclosure load) |
+| current P1/P2 worktree | 72,870,624 | 0.3027–0.3169 s |
 
 The historical hardened version reduced allocation by 6.27% from `5d3e466`. The
-current increment is 30,097,504 bytes (42.79%) above that version on the same mesh;
-this is an open performance regression, not a resolved result. The refinement queue
-keeps one live heap record per long edge via a companion set, preventing duplicate
-queued records; the benchmark verifies the resulting mesh rather than relying on
-allocation alone.
+previous field/refinement snapshot was 30,097,504 bytes (42.79%) above that version on
+the same mesh. The current worktree is 27,564,064 bytes (27.44%) below that snapshot
+and 2,533,440 bytes (3.60%) above the historical hardened implementation. All three
+current runs produced 22,065 nodes, 98,304 tetrahedra, a valid mesh, and CRC
+`7378bf6e460c596aa04f9f3b4a8cc9ce176a69f2386f253f7bd25057b551ceb9`.
+The refinement queue keeps one live heap record per long edge via a companion set,
+preventing duplicate queued records; the benchmark verifies the resulting mesh rather
+than relying on allocation alone.
 
 ## Acceptance cases
 
@@ -166,6 +179,6 @@ The final hardening commits on `main` were pushed individually, including:
 - `d4b0dc0` industrial closure hardening;
 - `27010e3` bounded flip-optimizer passes and final source marker cleanup.
 
-All code claims above are tied to the commands and measurements in “Current verified
-gate”; historical exploratory findings were removed from this live status file to
-avoid presenting superseded diagnoses as current state.
+Historical closure claims above are tied to their dated commands and measurements.
+Current P1/P2 claims are limited to the checked source, tests, differential, aggregate
+validation, and memory evidence above; the explicit P1/P2 non-claims remain open.

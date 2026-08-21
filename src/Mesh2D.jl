@@ -887,7 +887,17 @@ function _radius_edge2(a, b, c)
     return R / min(lab,lbc,lca)
 end
 
-@inline function _needs_refine(T, t, B, maxarea, sizefn)
+@inline function _edge_metric_violation(edgefn,a,b)
+    raw=edgefn(a[1],a[2],b[1],b[2])
+    raw isa Real || throw(ArgumentError(
+        "refine!: edge_metric callback must return a real metric length (got $(typeof(raw)))"))
+    value=_mesh2_float(raw,"edge_metric callback result")
+    (isfinite(value) && value>=0) || throw(ArgumentError(
+        "refine!: edge_metric callback returned invalid metric length $raw"))
+    return value>1
+end
+
+@inline function _needs_refine(T, t, B, maxarea, sizefn,edgefn)
     a=_pt(T,_vert(T,t,1)); b=_pt(T,_vert(T,t,2)); c=_pt(T,_vert(T,t,3))
     (_tri_area2(a,b,c) > maxarea || _radius_edge2(a,b,c) > B) && return true
     if sizefn !== nothing
@@ -900,6 +910,10 @@ end
             throw(ArgumentError("refine!: size callback returned invalid size $rawh at ($cx,$cy)"))
         emax = max(_dist(a,b), _dist(b,c), _dist(c,a))
         emax > h && return true
+    end
+    if edgefn!==nothing
+        (_edge_metric_violation(edgefn,a,b) || _edge_metric_violation(edgefn,b,c) ||
+         _edge_metric_violation(edgefn,c,a)) && return true
     end
     return false
 end
@@ -958,7 +972,8 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
 end
 
 """
-    refine!(T; min_angle_deg=25.0, max_area=Inf, maxsteps=300_000) -> Vector{Bool}
+    refine!(T; min_angle_deg=25.0, max_area=Inf, size=nothing,
+            edge_metric=nothing, maxsteps=300_000) -> Vector{Bool}
 
 Ruppert refinement of the constrained Delaunay triangulation `T`: split
 encroached subsegments and insert circumcenters of skinny interior triangles
@@ -967,9 +982,11 @@ holds. Constraints are preserved (constrained point insertion). Returns the fina
 per-triangle interior mask. `min_angle_deg ≲ 20.7°` guarantees termination.
 If `maxsteps` is exhausted while any criterion remains unmet, refinement throws an
 explicit blocker rather than returning a mesh that violates the requested bounds.
+`edge_metric(ax,ay,bx,by)` can additionally return the dimensionless metric
+length of an edge; values greater than one request refinement.
 """
 function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
-                 size=nothing, maxsteps::Integer=300_000)
+                 size=nothing, edge_metric=nothing, maxsteps::Integer=300_000)
     angle = _mesh2_float(min_angle_deg,"min_angle_deg")
     (isfinite(angle) && 0 <= angle < 60) ||
         throw(ArgumentError("refine!: min_angle_deg must be finite and in [0, 60) (got $min_angle_deg)"))
@@ -996,7 +1013,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             continue
         end
         # (2) pick a triangle that violates the angle/area/size criteria
-        t = _find_bad(T, interior, B, area, size)
+        t = _find_bad(T, interior, B, area, size,edge_metric)
         t == 0 && return interior
         a=_vert(T,t,1); b=_vert(T,t,2); c=_vert(T,t,3)
         cc = _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
@@ -1012,7 +1029,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         _insert_steiner!(T, cc, interior,pointids;fallback=fallback)
     end
     enc = _find_encroached(T)
-    bad = _find_bad(T, interior, B, area, size)
+    bad = _find_bad(T, interior, B, area, size,edge_metric)
     enc === nothing && bad == 0 && return interior
     remaining = enc === nothing ? "a triangle still violates a quality/area/size bound" :
                                   "constrained segment $(enc) remains encroached"
@@ -1030,10 +1047,10 @@ function _find_encroached(T::Triangulation)
     return nothing
 end
 
-function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn)
+function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn,edgefn)
     @inbounds for t in eachindex(T.alive)
         (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) || continue
-        _needs_refine(T, t, B, maxarea, sizefn) && return Int32(t)
+        _needs_refine(T, t, B, maxarea, sizefn,edgefn) && return Int32(t)
     end
     return Int32(0)
 end

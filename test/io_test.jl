@@ -352,10 +352,54 @@ end
         @test gp.fields[1].options["SurfacesList"] == "{sm_coax_pin_pec[]}"
         @test gp.fields[2].options["InField"] == "1"
         @test gp.fields[8].options["FieldsList"] == "{2, 4, 6, 7}"
+        @test isempty(gp.boundary_layer_fields)
+        @test isnan(gp.geometry_tolerance)
 
         # The original four-argument constructor remains source-compatible.
         old=GeoParams(0.1,1.0,7,Dict{Tuple{Int,Int},String}())
         @test old.mesh_size_factor==1.0 && isempty(old.fields) && old.background_field==0
+        @test isempty(old.boundary_layer_fields)
+        @test isnan(old.geometry_tolerance)
+        @test old.mesh_boundary_layer_fan_elements==5
+
+        construction_defaults=joinpath(dir,"field_construction_defaults.geo")
+        write(construction_defaults,
+              "Mesh.MeshSizeFromCurvature = 0; Field[1] = AutomaticMeshSizeField;\n" *
+              "Mesh.MinimumElementsPerTwoPi = 37.9; Field[2] = AutomaticMeshSizeField;\n" *
+              "Mesh.BoundaryLayerFanElements = 30.8;\n" *
+              "Mesh.BoundaryLayerFanPoints = 12.9; Field[3] = BoundaryLayer;\n")
+        construction_params=read_geo_params(construction_defaults)
+        @test construction_params.fields[1].creation_mesh_size_from_curvature==0
+        @test construction_params.fields[2].creation_mesh_size_from_curvature==37
+        @test construction_params.mesh_boundary_layer_fan_elements==12
+
+        boundary=joinpath(dir,"boundary_layer_fields.geo")
+        write(boundary,"Field[1] = BoundaryLayer; Field[2] = BoundaryLayer;\n" *
+                       "BoundaryLayer Field = {1, 2, 1}; Background Field = {2};\n")
+        boundary_params=read_geo_params(boundary)
+        @test boundary_params.boundary_layer_fields==[1,2]
+        @test boundary_params.background_field==2
+        missing_boundary=joinpath(dir,"missing_boundary_layer_field.geo")
+        write(missing_boundary,"BoundaryLayer Field = 3;\n")
+        @test_throws ArgumentError read_geo_params(missing_boundary)
+        malformed_boundary=joinpath(dir,"malformed_boundary_layer_field.geo")
+        write(malformed_boundary,"Field[1] = BoundaryLayer; BoundaryLayer Field = {1, x};\n")
+        @test_throws ArgumentError read_geo_params(malformed_boundary)
+        quoted=joinpath(dir,"quoted_field_options.geo")
+        write(quoted,raw"""Field[1] = Structured;
+                           Field[1].FileName = "http://host/C:\new\tab\grid.bin";
+                           Field[2] = ExternalProcess;
+                           Field[2].CommandLine = "printf a;b"; // outside comment
+                           Background Field = 1;
+                           """)
+        quoted_params=read_geo_params(quoted)
+        @test quoted_params.fields[1].options["FileName"]==
+              raw"\"http://host/C:\new\tab\grid.bin\""
+        @test quoted_params.fields[2].options["CommandLine"]==raw"\"printf a;b\""
+        @test quoted_params.fields[1].option_order==["FileName"]
+        unterminated_quote=joinpath(dir,"unterminated_quote.geo")
+        write(unterminated_quote,"Field[1] = Structured; Field[1].FileName = \"bad;\n")
+        @test_throws ArgumentError read_geo_params(unterminated_quote)
 
         duplicate=joinpath(dir,"duplicate_field.geo")
         write(duplicate,"Field[1] = Box; Field[1] = Min; Background Field = 1;\n")
@@ -366,6 +410,24 @@ end
         malformed=joinpath(dir,"malformed_size.geo")
         write(malformed,"Mesh.MeshSizeMin = nope;\n")
         @test_throws ArgumentError read_geo_params(malformed)
+        for expression in ("1 + 2","1oops")
+            invalid=joinpath(dir,"unsupported_size_expression.geo")
+            write(invalid,"Mesh.MeshSizeMin = $expression;\n")
+            @test_throws ArgumentError read_geo_params(invalid)
+        end
+        valid_numeric=joinpath(dir,"numeric_mesh_options.geo")
+        write(valid_numeric,"Mesh.MeshSizeMin = +.25e-2; Mesh.RandomSeed = 17;\n")
+        numeric_params=read_geo_params(valid_numeric)
+        @test numeric_params.mesh_size_min==0.0025
+        @test numeric_params.random_seed==17
+        geometry_option=joinpath(dir,"geometry_tolerance.geo")
+        write(geometry_option,"Geometry.Tolerance = 2e-5;\n")
+        @test read_geo_params(geometry_option).geometry_tolerance==2e-5
+        for expression in ("1 + 2","1oops","-1","1.0")
+            invalid=joinpath(dir,"unsupported_seed_expression.geo")
+            write(invalid,"Mesh.RandomSeed = $expression;\n")
+            @test_throws ArgumentError read_geo_params(invalid)
+        end
     end
 
     @testset "empty mesh round-trips" begin

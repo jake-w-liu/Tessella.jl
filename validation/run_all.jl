@@ -66,7 +66,19 @@ push!(rows, "| Case | Tool | Nodes | Tets | Volume | rel.err vs true | min∠° 
 push!(rows, "|------|------|------:|-----:|-------:|----------------:|------:|-------:|--------:|---------:|")
 
 haveg = gmsh_available()
-println("gmsh: ", haveg ? gmsh_version() : "NOT AVAILABLE (Tessella-only run)")
+println("gmsh: ", haveg ? gmsh_version() :
+        "NOT AVAILABLE (required size-field differential will fail)")
+
+# The catalog differential is a required child gate. It performs direct Gmsh
+# API/plugin probes and exits nonzero when Gmsh is missing, is not 4.15.2, or a
+# parity assertion fails. CONTEXT_SKIP lines are explicit non-claims, not a
+# substitute for running Gmsh.
+println("\n── size_fields ──  direct and mesh-observed Gmsh 4.15.2 differential")
+size_field_script = joinpath(HERE, "size_fields", "differential.jl")
+size_field_project = normpath(joinpath(HERE, ".."))
+size_field_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $size_field_script`
+println("  command: ", size_field_command)
+run(size_field_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",

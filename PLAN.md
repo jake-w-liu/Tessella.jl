@@ -32,9 +32,10 @@ Tessella
 ├── Predicates    adaptive exact orient/incircle/insphere, exact rationals, SoS
 ├── MeshTypes     compact simplex storage, topology, quality, CRC, validation
 ├── ExactMesh3D   Rational{BigInt} Delaunay kernel
-├── IO            strict/atomic MSH v2.2/v4.1, STL, limited .geo metadata scan
+├── IO            strict/atomic simplex MSH v2.2/v4.1, STL, limited .geo scan
+├── Elements      fixed-node Gmsh catalog, mixed mesh metadata, ASCII MSH I/O
 ├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
-├── SizeField     scalar graph; distance/analytic/composite fields + callbacks
+├── SizeField     scalar/anisotropic catalog, .geo field graph, context resolvers
 ├── Mesh1D        metric-length curve and segment discretization
 ├── MeshSurface   planar, cylindrical, and parametric surface meshing
 ├── Mesh3D        Delaunay, fills, partitions, sizing, flips, mesh Boolean CSG
@@ -46,13 +47,13 @@ Tessella
 └── HighOrder     globally certified quadratic tetrahedra and type-11 I/O
 ```
 
-`DistanceField`, `ThresholdField`, `BoxField`, `BallField`, `CylinderField`,
-`FrustumField`, `MinSize`, `MaxSize`, and `BoundedSize` implement the first native
-Gmsh-compatible field graph. Discrete point/segment/triangle distance queries use a
-deterministic AABB hierarchy. `FunctionSize` remains the checked callback extension
-point. Generic fields may return zero (e.g. distance on a target); only
-`AbstractSizeField` reaches a meshing kernel, where `size_at` enforces a finite
-`h > 0` contract.
+The native field graph includes geometric/composite, analytic and derivative,
+coordinate-map, structured-grid, entity-aware, sampled-view, anisotropic,
+boundary-layer scalar-law, discrete automatic-sizing analogue, and external-process
+fields. Discrete point/segment/triangle distance queries use a deterministic AABB
+hierarchy. `FunctionSize` remains the checked callback extension point. Generic fields
+may return zero (for example, distance on a target); only `AbstractSizeField` reaches a
+meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 
 ## Design contracts
 
@@ -84,12 +85,23 @@ point. Generic fields may return zero (e.g. distance on a target); only
 
 | Track | Exit condition | State |
 |---|---|---|
-| P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — Distance, Threshold, Box, Ball, Cylinder, Frustum, Min, Max, bounds shipped |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | PENDING |
+| P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types, mixed metadata, validation/CRC, and ASCII MSH v2.2/v4.1 shipped |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | PENDING |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | PENDING |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
+
+P1 does not yet claim boundary-layer element topology, Gmsh's global
+`AutomaticMeshSizeField` pipeline, non-simplex/higher-order/vector/tensor `PostView`,
+direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD
+distance queries. P2 does not yet claim element generation/recombination,
+integration of mixed blocks into the simplex meshing kernels, variable-connectivity or
+internal element types, curved high-order Jacobian certification, binary MSH,
+preservation of ancillary/unknown MSH sections, repeated `$Nodes` sections, internal
+indexing beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
+Some registered fixed tags also require explicit Tessella-only output because Gmsh
+4.15.2 cannot re-import them. P3–P6 remain pending.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.
@@ -102,12 +114,17 @@ Every change follows:
 
 Independent evidence includes exact-rational predicates, analytic area/volume,
 Euler/manifold/link invariants, empty-circle/sphere checks, PLC facet conservation,
-quality monotonicity, MSH round trips, and gmsh cross-validation. The mandatory gate
-is:
+quality monotonicity, MSH round trips, and Gmsh cross-validation. The mandatory gates
+are:
 
 ```sh
 julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
+julia --project --check-bounds=yes validation/run_all.jl
 ```
+
+The aggregate validation launches the Gmsh 4.15.2 size-field differential as a
+required bounds-checked child. A missing or wrong-version Gmsh runtime, a failed probe,
+or a parity mismatch makes the aggregate command fail.
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the non-negotiable anti-false-positive
 rules and [`STATUS.md`](STATUS.md) for the last measured gate.

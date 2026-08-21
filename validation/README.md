@@ -14,6 +14,9 @@ validation/
   common.jl              # helpers: gmsh runner, tet metrics, comparison
   run_all.jl             # driver: runs every case, writes REPORT.md
   REPORT.md              # generated results table (git-ignored until you run it)
+  size_fields/
+    differential.jl      # required Gmsh 4.15.2 field differential
+    STATUS.md            # exact coverage and explicit non-claims
   cases/
     01_box/box.geo               # reference gmsh script (retained)
     02_cylinder/cylinder.geo
@@ -28,12 +31,14 @@ are git-ignored.
 
 ## Run
 
-```
-julia --project=. validation/run_all.jl
+```sh
+julia --project=. --check-bounds=yes validation/run_all.jl
 ```
 
-Requires `gmsh` on `PATH` for the comparison (the run degrades to Tessella-only if
-absent). Results print to the terminal and to `validation/REPORT.md`.
+The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
+`size_fields/differential.jl` as a mandatory bounds-checked child; missing or
+wrong-version Gmsh, failed probes, and parity mismatches make the aggregate command
+fail. Mesh-case results print to the terminal and to `validation/REPORT.md`.
 
 ## What each case checks
 

@@ -1,0 +1,1494 @@
+using Test
+using SHA
+using Tessella
+
+const ElementsUnderTest = Tessella.Elements
+
+const ExpectedSpec = NamedTuple{
+    (:family, :dim, :order, :nnodes, :serendipity),
+    Tuple{Symbol,Int,Int,Int,Bool},
+}
+const EXPECTED_SPECS = Dict{Int,ExpectedSpec}()
+
+function add_expected!(family, dim, orders, tags, node_counts, serendipity=false)
+    length(orders) == length(tags) == length(node_counts) || error("bad oracle table")
+    for (order, tag, nnodes) in zip(orders, tags, node_counts)
+        haskey(EXPECTED_SPECS, tag) && error("duplicate oracle tag $tag")
+        EXPECTED_SPECS[tag] = (; family, dim, order, nnodes, serendipity)
+    end
+end
+
+# Independent transcription of Gmsh 4.15.2's fixed-node type map.
+add_expected!(:pnt, 0, [0], [15], [1])
+add_expected!(:lin, 1, 0:10, [84,1,8,26,27,28,62,63,64,65,66], collect(1:11))
+add_expected!(:tri, 2, 0:10, [85,2,9,21,23,25,42,43,44,45,46],
+              [1,3,6,10,15,21,28,36,45,55,66])
+add_expected!(:qua, 2, 0:10, [86,3,10,36,37,38,47,48,49,50,51],
+              [1,4,9,16,25,36,49,64,81,100,121])
+add_expected!(:tet, 3, 0:10, [87,4,11,29,30,31,71,72,73,74,75],
+              [1,4,10,20,35,56,84,120,165,220,286])
+add_expected!(:hex, 3, 0:9, [88,5,12,92,93,94,95,96,97,98],
+              [1,8,27,64,125,216,343,512,729,1000])
+add_expected!(:pri, 3, 0:9, [89,6,13,90,91,106,107,108,109,110],
+              [1,6,18,40,75,126,196,288,405,550])
+add_expected!(:pyr, 3, 0:9, [132,7,14,118,119,120,121,122,123,124],
+              [1,5,14,30,55,91,140,204,285,385])
+
+add_expected!(:tri, 2, 3:10, [20,22,24,52,53,54,55,56],
+              [9,12,15,18,21,24,27,30], true)
+add_expected!(:qua, 2, 2:10, [16,39,40,41,57,58,59,60,61],
+              [8,12,16,20,24,28,32,36,40], true)
+add_expected!(:tet, 3, 3:10, [137,32,33,79,80,81,82,83],
+              [16,22,28,34,40,46,52,58], true)
+add_expected!(:hex, 3, 2:9, [17,99,100,101,102,103,104,105],
+              [20,32,44,56,68,80,92,104], true)
+add_expected!(:pri, 3, 2:9, [18,111,112,113,114,115,116,117],
+              [15,24,33,42,51,60,69,78], true)
+add_expected!(:pyr, 3, 2:9, [19,125,126,127,128,129,130,131],
+              [13,21,29,37,45,53,61,69], true)
+EXPECTED_SPECS[140] = (family=:trih, dim=3, order=1, nnodes=4,
+                       serendipity=false)
+
+const EXPECTED_SPECIAL = Dict(
+    34 => (family=:polygon, dim=2, order=1, nnodes=nothing, kind=:variable),
+    35 => (family=:polyhedron, dim=3, order=1, nnodes=nothing, kind=:variable),
+    67 => (family=:line_border, dim=1, order=1, nnodes=2, kind=:internal),
+    68 => (family=:triangle_border, dim=2, order=1, nnodes=3, kind=:internal),
+    69 => (family=:polygon_border, dim=2, order=1, nnodes=nothing, kind=:variable),
+    70 => (family=:line_child, dim=1, order=1, nnodes=2, kind=:internal),
+    133 => (family=:point_xfem, dim=0, order=1, nnodes=1, kind=:internal),
+    134 => (family=:line_xfem, dim=1, order=1, nnodes=2, kind=:internal),
+    135 => (family=:triangle_xfem, dim=2, order=1, nnodes=3, kind=:internal),
+    136 => (family=:tetrahedron_xfem, dim=3, order=1, nnodes=4, kind=:internal),
+    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis),
+    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis),
+)
+
+const GMSH_FAMILY_NAME = Dict(
+    :pnt => "Point", :lin => "Line", :tri => "Triangle",
+    :qua => "Quadrangle", :tet => "Tetrahedron", :hex => "Hexahedron",
+    :pri => "Prism", :pyr => "Pyramid",
+)
+const GMSH_NAME_PREFIX = Dict(
+    :pnt => "Point", :lin => "Line", :tri => "Triangle",
+    :qua => "Quadrilateral", :tet => "Tetrahedron", :hex => "Hexahedron",
+    :pri => "Prism", :pyr => "Pyramid",
+)
+const PRIMARY_NODES = Dict(
+    :pnt => 1, :lin => 2, :tri => 3, :qua => 4, :tet => 4,
+    :hex => 8, :pri => 6, :pyr => 5,
+)
+const PROPERTY_API_GAPS = Set([90,91,106,107,108,109,110,
+                               111,112,113,114,115,116,117,140])
+const PRISM_PROPERTY_GAPS = setdiff(PROPERTY_API_GAPS, Set([140]))
+
+function gmsh_python_environment()
+    python_name = get(ENV, "TESSELLA_PYTHON", "python3")
+    python = Sys.which(python_name)
+    python === nothing && error("Python executable '$python_name' was not found")
+
+    paths = String[]
+    explicit = get(ENV, "TESSELLA_GMSH_PYTHONPATH", "")
+    if !isempty(explicit)
+        push!(paths, explicit)
+    else
+        gmsh = Sys.which("gmsh")
+        if gmsh !== nothing
+            candidate = normpath(joinpath(dirname(realpath(gmsh)), "..", "lib"))
+            isfile(joinpath(candidate, "gmsh.py")) && push!(paths, candidate)
+        end
+    end
+    inherited = get(ENV, "PYTHONPATH", "")
+    isempty(inherited) || push!(paths, inherited)
+    return python, join(paths, Sys.iswindows() ? ';' : ':')
+end
+
+function run_gmsh_oracle()
+    tags = join(sort!(collect(keys(EXPECTED_SPECS))), ",")
+    shapes = String[]
+    for tag in sort!(collect(keys(EXPECTED_SPECS)))
+        spec = EXPECTED_SPECS[tag]
+        spec.family === :trih && continue
+        name = repr(GMSH_FAMILY_NAME[spec.family])
+        serendipity = spec.serendipity ? "True" : "False"
+        push!(shapes, "($tag,$name,$(spec.order),$serendipity)")
+    end
+    shape_table = join(shapes, ",")
+
+    script = """
+import gmsh
+
+TAGS = [$tags]
+SHAPES = [$shape_table]
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    print("VERSION\\t" + gmsh.__version__)
+    for element_type in TAGS:
+        try:
+            name, dim, order, nnodes, coords, nprimary = \\
+                gmsh.model.mesh.getElementProperties(element_type)
+            flat = ",".join(format(float(x), ".17g") for x in coords)
+            print("PROP\\t{}\\tOK\\t{}\\t{}\\t{}\\t{}\\t{}\\t{}".format(
+                element_type, name.replace("\\t", " "), dim, order,
+                nnodes, nprimary, flat))
+        except Exception:
+            print("PROP\\t{}\\tERROR".format(element_type))
+
+    for expected, family, order, serendipity in SHAPES:
+        actual = gmsh.model.mesh.getElementType(family, order, serendipity)
+        print("TYPE\\t{}\\t{}".format(expected, actual))
+
+    # getElementProperties currently throws while constructing high-order prism
+    # closures. Generate a straight one-prism mesh instead: its global (x,y,z)
+    # equal local (u,v,(w+1)/2), independently exposing every node in order.
+    for order in range(3, 10):
+        for incomplete in (False, True):
+            expected = gmsh.model.mesh.getElementType("Prism", order, incomplete)
+            gmsh.clear()
+            gmsh.model.add("reference_prism")
+            geo = gmsh.model.geo
+            p = [geo.addPoint(0, 0, 0), geo.addPoint(1, 0, 0),
+                 geo.addPoint(0, 1, 0)]
+            lines = [geo.addLine(p[0], p[1]), geo.addLine(p[1], p[2]),
+                     geo.addLine(p[2], p[0])]
+            surface = geo.addPlaneSurface([geo.addCurveLoop(lines)])
+            geo.extrude([(2, surface)], 0, 0, 1, numElements=[1],
+                        recombine=True)
+            geo.synchronize()
+            for _, curve in gmsh.model.getEntities(1):
+                gmsh.model.mesh.setTransfiniteCurve(curve, 2)
+            gmsh.model.mesh.setTransfiniteSurface(surface)
+            gmsh.model.mesh.generate(3)
+            gmsh.option.setNumber("Mesh.SecondOrderIncomplete", int(incomplete))
+            gmsh.model.mesh.setOrder(order)
+
+            types, element_tags, connectivities = gmsh.model.mesh.getElements(3)
+            volume = [(int(t), ts, ns) for t, ts, ns in
+                      zip(types, element_tags, connectivities) if len(ts)]
+            if len(volume) != 1 or volume[0][0] != expected or len(volume[0][1]) != 1:
+                raise RuntimeError("did not generate the expected single prism")
+            connectivity = volume[0][2]
+            node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+            node_index = {int(tag): i for i, tag in enumerate(node_tags)}
+            flat = []
+            for tag in connectivity:
+                i = node_index[int(tag)]
+                flat.extend(float(x) for x in node_coords[3*i:3*i+3])
+            text = ",".join(format(x, ".17g") for x in flat)
+            print("PRISM\\t{}\\t{}\\t{}".format(expected, len(connectivity), text))
+finally:
+    gmsh.finalize()
+"""
+
+    python, pythonpath = gmsh_python_environment()
+    command = Cmd([python, "-c", script])
+    isempty(pythonpath) || (command = addenv(command, "PYTHONPATH" => pythonpath))
+    output = read(command, String)
+
+    version = ""
+    properties = Dict{Int,Any}()
+    type_lookups = Dict{Int,Int}()
+    prism_nodes = Dict{Int,Tuple{Int,Vector{Float64}}}()
+    for line in eachline(IOBuffer(output))
+        fields = split(line, '\t'; keepempty=true)
+        if fields[1] == "VERSION"
+            version = fields[2]
+        elseif fields[1] == "PROP"
+            tag = parse(Int, fields[2])
+            if fields[3] == "ERROR"
+                properties[tag] = nothing
+            else
+                coordinates = isempty(fields[9]) ? Float64[] :
+                    parse.(Float64, split(fields[9], ','))
+                properties[tag] = (
+                    name=fields[4], dim=parse(Int, fields[5]),
+                    order=parse(Int, fields[6]), nnodes=parse(Int, fields[7]),
+                    nprimary=parse(Int, fields[8]), coordinates=coordinates,
+                )
+            end
+        elseif fields[1] == "TYPE"
+            type_lookups[parse(Int, fields[2])] = parse(Int, fields[3])
+        elseif fields[1] == "PRISM"
+            prism_nodes[parse(Int, fields[2])] = (
+                parse(Int, fields[3]), parse.(Float64, split(fields[4], ',')))
+        else
+            error("unexpected Gmsh oracle output: $line")
+        end
+    end
+    return (; version, properties, type_lookups, prism_nodes)
+end
+
+@testset "Gmsh fixed-node catalog" begin
+    @test length(EXPECTED_SPECS) == 125
+    @test Set(keys(ElementsUnderTest.MSH_CATALOG)) == Set(keys(EXPECTED_SPECS))
+    for tag in sort!(collect(keys(EXPECTED_SPECS)))
+        expected = EXPECTED_SPECS[tag]
+        actual = ElementsUnderTest.msh_spec(tag)
+        @test (actual.family, actual.dim, actual.order, actual.nnodes,
+               actual.serendipity) ==
+              (expected.family, expected.dim, expected.order, expected.nnodes,
+               expected.serendipity)
+        @test ElementsUnderTest.msh_num_nodes(tag) == expected.nnodes
+        @test ElementsUnderTest.msh_dimension(tag) == expected.dim
+        @test ElementsUnderTest.msh_order(tag) == expected.order
+        @test ElementsUnderTest.msh_family(tag) == expected.family
+
+        coordinates = ElementsUnderTest.lagrange_nodes(tag)
+        @test size(coordinates) == (3, expected.nnodes)
+        @test all(isfinite, coordinates)
+        @test length(Set(Tuple(column) for column in eachcol(coordinates))) ==
+              expected.nnodes
+        @test ElementsUnderTest.lagrange_nodes(
+            expected.family, expected.order;
+            serendipity=expected.serendipity) == coordinates
+    end
+
+    # MTrihedron.h::getNode is the sole local-node authority for type 140.
+    @test ElementsUnderTest.lagrange_nodes(140) ==
+          Float64[-1 1 1 -1; -1 -1 1 1; 0 0 0 0]
+end
+
+@testset "special tags and integer bounds" begin
+    @test ElementsUnderTest.MSH_SPECIAL_TYPES == EXPECTED_SPECIAL
+    for tag in keys(EXPECTED_SPECIAL)
+        @test_throws ArgumentError ElementsUnderTest.msh_spec(tag)
+        @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(tag)
+    end
+    @test_throws ArgumentError ElementsUnderTest.msh_spec(0)
+    @test_throws ArgumentError ElementsUnderTest.msh_spec(141)
+    @test_throws ArgumentError ElementsUnderTest.msh_spec(big(typemax(Int)) + 1)
+    @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(:lin, -1)
+    @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(
+        :lin, big(typemax(Int)) + 1)
+    @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(:tri, 11)
+    @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(
+        :tri, 2; serendipity=true)
+end
+
+let source_root = get(ENV, "TESSELLA_GMSH_SOURCE", "")
+    # The installed 4.15.2 API differential below is mandatory. A full source
+    # checkout is an additional provenance gate when explicitly supplied; package
+    # tests must not depend on an ephemeral machine-local `/tmp` checkout.
+    if isempty(source_root)
+        local_checkout = "/tmp/tessella-gmsh-U09p6u"
+        isdir(local_checkout) && (source_root = local_checkout)
+    end
+    if isempty(source_root) || !isdir(source_root)
+        @info "TESSELLA_GMSH_SOURCE not set; skipping optional pinned-source hashes"
+    else
+        @testset "pinned Gmsh source oracle" begin
+            expected_hashes = Dict(
+                "src/numeric/pointsGenerators.cpp" =>
+                    "d24ced74ba29242507d676fe614b6294b909ddf2ff729397519aff1c7cd76699",
+                "src/numeric/ElementType.cpp" =>
+                    "8e470f6c2dfed971e464fb098823e6609fab5d7875b1cf01532ed099577b9489",
+                "src/common/GmshDefines.h" =>
+                    "5e1d894ee09b43e644fa3449945378c569f2dca27292127fe643371a7f4cc1a4",
+                "src/geo/MTrihedron.h" =>
+                    "afddb334f64d8a42e08e7a01f6d1c20fb407c40debc87cb4542dc9409c77c7c4",
+            )
+            for (relative_path, expected_hash) in expected_hashes
+                path = joinpath(source_root, relative_path)
+                @test isfile(path)
+                isfile(path) && @test bytes2hex(sha256(read(path))) == expected_hash
+            end
+        end
+    end
+end
+
+@testset "installed Gmsh 4.15.2 differential" begin
+    oracle = run_gmsh_oracle()
+    @test oracle.version == "4.15.2"
+    @test Set(keys(oracle.properties)) == Set(keys(EXPECTED_SPECS))
+    @test Set(tag for (tag, value) in oracle.properties if value === nothing) ==
+          PROPERTY_API_GAPS
+
+    @test Set(keys(oracle.type_lookups)) == setdiff(Set(keys(EXPECTED_SPECS)), Set([140]))
+    for (expected, actual) in oracle.type_lookups
+        @test actual == expected
+    end
+
+    for tag in sort!(collect(setdiff(Set(keys(EXPECTED_SPECS)),
+                                     PROPERTY_API_GAPS)))
+        expected = EXPECTED_SPECS[tag]
+        actual = oracle.properties[tag]
+        @test startswith(actual.name, GMSH_NAME_PREFIX[expected.family])
+        @test actual.dim == expected.dim
+        @test actual.order == expected.order
+        @test actual.nnodes == expected.nnodes
+        @test actual.nprimary == PRIMARY_NODES[expected.family]
+
+        coordinate_dimension = max(expected.dim, 1)
+        coordinates = ElementsUnderTest.lagrange_nodes(tag)
+        wanted = vec(coordinates[1:coordinate_dimension, :])
+        @test length(actual.coordinates) == length(wanted)
+        @test isapprox(actual.coordinates, wanted; atol=8eps(Float64),
+                       rtol=8eps(Float64))
+    end
+
+    @test Set(keys(oracle.prism_nodes)) == PRISM_PROPERTY_GAPS
+    for tag in sort!(collect(PRISM_PROPERTY_GAPS))
+        expected = EXPECTED_SPECS[tag]
+        nnodes, global_coordinates = oracle.prism_nodes[tag]
+        @test nnodes == expected.nnodes
+        coordinates = copy(ElementsUnderTest.lagrange_nodes(tag))
+        coordinates[3, :] .= (coordinates[3, :] .+ 1) ./ 2
+        @test length(global_coordinates) == length(coordinates)
+        @test isapprox(global_coordinates, vec(coordinates); atol=2e-8, rtol=2e-8)
+    end
+end
+
+function mixed_io_fixture(; escaped_name::Bool=true)
+    coordinates = Float64[
+        -2 0 1 2 3 5 6 5 8 9 8 8;
+         0 0 0 0 0 0 0 1 0 0 1 0;
+         0 0 0 0 0 0 0 0 0 0 0 1
+    ]
+    blocks = ElementsUnderTest.ElementBlock[
+        ElementsUnderTest.ElementBlock(15, reshape(Int32[1], 1, 1), Int32[9]),
+        ElementsUnderTest.ElementBlock(1, Int32[2 4; 3 5], Int32[6, 8]),
+        ElementsUnderTest.ElementBlock(2, reshape(Int32[6,7,8], 3, 1), Int32[5]),
+        ElementsUnderTest.ElementBlock(4, reshape(Int32[9,10,11,12], 4, 1), Int32[7]),
+    ]
+    names = Dict(
+        (0,9) => "probe",
+        (1,6) => "wire A",
+        (1,8) => "wire B",
+        (2,5) => escaped_name ? "surface \"quoted\" \\ path\nline\tend" : "surface",
+        (3,7) => "volume",
+    )
+    return ElementsUnderTest.MixedMesh(coordinates, blocks; physical_names=names)
+end
+
+function legacy_crc(mesh)
+    projection=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;physical_names=mesh.physical_names)
+    return ElementsUnderTest.mixed_crc(projection)
+end
+
+function exhaustive_catalog_mesh(tags=keys(ElementsUnderTest.MSH_CATALOG))
+    tags = sort!(collect(tags))
+    count = sum(ElementsUnderTest.msh_num_nodes(tag) for tag in tags)
+    coordinates = Matrix{Float64}(undef, 3, count)
+    blocks = ElementsUnderTest.ElementBlock[]
+    first_node = 1
+    for (index, tag) in pairs(tags)
+        local_coordinates = ElementsUnderTest.lagrange_nodes(tag)
+        nlocal = size(local_coordinates, 2)
+        range = first_node:first_node+nlocal-1
+        coordinates[:, range] = local_coordinates
+        coordinates[1, range] .+= 4index
+        connectivity = reshape(Int32.(range), nlocal, 1)
+        push!(blocks, ElementsUnderTest.ElementBlock(
+            tag, connectivity, Int32[mod(index, 13)]))
+        first_node += nlocal
+    end
+    return ElementsUnderTest.MixedMesh(coordinates, blocks)
+end
+
+function gmsh_check(path)
+    executable = Sys.which("gmsh")
+    executable === nothing && error("gmsh executable was not found")
+    output = IOBuffer()
+    process = run(pipeline(ignorestatus(
+        `$executable $path -check -parse_and_exit -v 5`),
+        stdout=output, stderr=output))
+    return success(process), String(take!(output))
+end
+
+function gmsh_physical_element_counts(path)
+    script = raw"""
+import gmsh
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    gmsh.open(sys.argv[1])
+    print("VERSION\t" + gmsh.__version__)
+    for dim, physical in sorted(gmsh.model.getPhysicalGroups()):
+        counts = {}
+        for entity in gmsh.model.getEntitiesForPhysicalGroup(dim, physical):
+            types, tags, _ = gmsh.model.mesh.getElements(dim, entity)
+            for element_type, element_tags in zip(types, tags):
+                counts[int(element_type)] = counts.get(int(element_type), 0) + len(element_tags)
+        for element_type, count in sorted(counts.items()):
+            print("COUNT\t{}\t{}\t{}\t{}".format(
+                dim, physical, element_type, count))
+finally:
+    gmsh.finalize()
+"""
+    python, pythonpath = gmsh_python_environment()
+    command = Cmd([python, "-c", script, path])
+    isempty(pythonpath) || (command = addenv(command, "PYTHONPATH" => pythonpath))
+    version = ""
+    counts = Dict{NTuple{3,Int},Int}()
+    for line in eachline(IOBuffer(read(command, String)))
+        fields = split(line, '\t')
+        if fields[1] == "VERSION"
+            version = fields[2]
+        elseif fields[1] == "COUNT"
+            counts[(parse(Int, fields[2]), parse(Int, fields[3]),
+                    parse(Int, fields[4]))] = parse(Int, fields[5])
+        else
+            error("unexpected Gmsh MSH oracle output: $line")
+        end
+    end
+    return version, counts
+end
+
+function gmsh_physical_name(path, dimension, tag)
+    script = raw"""
+import gmsh
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    gmsh.open(sys.argv[1])
+    print(gmsh.__version__)
+    print(gmsh.model.getPhysicalName(int(sys.argv[2]), int(sys.argv[3])))
+finally:
+    gmsh.finalize()
+"""
+    python,pythonpath=gmsh_python_environment()
+    command=Cmd([python,"-c",script,path,string(dimension),string(tag)])
+    isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
+    lines=split(chomp(read(command,String)),'\n';keepempty=true)
+    length(lines)==2 || error("unexpected Gmsh physical-name oracle output")
+    return lines[1],lines[2]
+end
+
+function gmsh_physical_entities(path)
+    script = raw"""
+import gmsh
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    gmsh.open(sys.argv[1])
+    print("VERSION\t" + gmsh.__version__)
+    for dim, physical in sorted(gmsh.model.getPhysicalGroups()):
+        entities = gmsh.model.getEntitiesForPhysicalGroup(dim, physical)
+        print("ENTITY\t{}\t{}\t{}".format(
+            dim, physical, ",".join(str(int(x)) for x in entities)))
+finally:
+    gmsh.finalize()
+"""
+    python,pythonpath=gmsh_python_environment()
+    command=Cmd([python,"-c",script,path])
+    isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
+    version=""; groups=Dict{Tuple{Int,Int},Vector{Int}}()
+    for line in eachline(IOBuffer(read(command,String)))
+        fields=split(line,'\t';keepempty=true)
+        if fields[1]=="VERSION"
+            version=fields[2]
+        elseif fields[1]=="ENTITY"
+            entities=isempty(fields[4]) ? Int[] : parse.(Int,split(fields[4],','))
+            groups[(parse(Int,fields[2]),parse(Int,fields[3]))]=entities
+        else
+            error("unexpected Gmsh physical-entity oracle output: $line")
+        end
+    end
+    return version,groups
+end
+
+function gmsh_external_tags(path)
+    script = raw"""
+import gmsh
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    gmsh.open(sys.argv[1])
+    nodes, _, _ = gmsh.model.mesh.getNodes()
+    _, element_blocks, _ = gmsh.model.mesh.getElements()
+    elements = [int(x) for block in element_blocks for x in block]
+    print("VERSION\t" + gmsh.__version__)
+    print("NODES\t" + ",".join(str(int(x)) for x in sorted(nodes)))
+    print("ELEMENTS\t" + ",".join(str(x) for x in sorted(elements)))
+finally:
+    gmsh.finalize()
+"""
+    python,pythonpath=gmsh_python_environment()
+    command=Cmd([python,"-c",script,path])
+    isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
+    lines=collect(eachline(IOBuffer(read(command,String))))
+    length(lines)==3 || error("unexpected Gmsh external-tag oracle output")
+    parse_tags(line)=begin
+        fields=split(line,'\t';keepempty=true)
+        isempty(fields[2]) ? Int[] : parse.(Int,split(fields[2],','))
+    end
+    return split(lines[1],'\t')[2],parse_tags(lines[2]),parse_tags(lines[3])
+end
+
+function write_gmsh_reference_mesh(directory)
+    script = raw"""
+import gmsh
+import os
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    gmsh.model.add("mixed_reference")
+    cases = [
+        (1, 11, 6, 1, [101, 305],
+         [0, 0, 0, 1, 0, 0]),
+        (2, 22, 5, 2, [701, 702, 999],
+         [3, 0, 0, 4, 0, 0, 3, 1, 0]),
+        (3, 33, 7, 4, [1201, 1202, 1203, 1400],
+         [6, 0, 0, 7, 0, 0, 6, 1, 0, 6, 0, 1]),
+    ]
+    for dim, entity, physical, element_type, nodes, coordinates in cases:
+        gmsh.model.addDiscreteEntity(dim, entity)
+        gmsh.model.mesh.addNodes(dim, entity, nodes, coordinates)
+        gmsh.model.mesh.addElementsByType(
+            entity, element_type, [2000 + entity], nodes)
+        gmsh.model.addPhysicalGroup(dim, [entity], physical)
+        gmsh.model.setPhysicalName(dim, physical, "group {}".format(physical))
+    for version in (2.2, 4.1):
+        gmsh.option.setNumber("Mesh.MshFileVersion", version)
+        gmsh.write(os.path.join(sys.argv[1], "gmsh-reference-{}.msh".format(version)))
+    print(gmsh.__version__)
+finally:
+    gmsh.finalize()
+"""
+    python,pythonpath=gmsh_python_environment()
+    command=Cmd([python,"-c",script,directory])
+    isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
+    return strip(read(command,String))
+end
+
+@testset "MixedMesh structure, CRC, and simplex conversion" begin
+    mesh = mixed_io_fixture()
+    diagnostic = ElementsUnderTest.validate(mesh)
+    @test diagnostic.ok
+    crc = ElementsUnderTest.mixed_crc(mesh)
+    @test crc.n_nodes == 12
+    @test crc.n_blocks == 4
+    @test crc.n_cells == 5
+    @test crc.bbox == ((-2.0,0.0,0.0), (9.0,1.0,1.0))
+    @test crc.sha == "b219f5afde8b589ce8c31c0fb174ebd2373811ab0f4e37a564f18934499e00c0"
+
+    # Canonical cell ordering is insensitive to blocks/cell iteration, but the
+    # local node order is deliberately orientation-sensitive.
+    reordered_blocks = ElementsUnderTest.ElementBlock[]
+    for block in reverse(mesh.blocks)
+        columns = reverse(axes(block.nodes, 2))
+        push!(reordered_blocks, ElementsUnderTest.ElementBlock(
+            block.msh, block.nodes[:, columns], block.tags[columns]))
+    end
+    reordered = ElementsUnderTest.MixedMesh(
+        mesh.coords, reordered_blocks; physical_names=mesh.physical_names)
+    @test ElementsUnderTest.mixed_crc(reordered).sha == crc.sha
+
+    changed_coordinates = copy(mesh.coords)
+    changed_coordinates[1,1] = nextfloat(changed_coordinates[1,1])
+    @test ElementsUnderTest.mixed_crc(ElementsUnderTest.MixedMesh(
+        changed_coordinates, mesh.blocks; physical_names=mesh.physical_names)).sha != crc.sha
+
+    changed_orientation = copy(mesh.blocks)
+    line_nodes = copy(changed_orientation[2].nodes)
+    line_nodes[1,1], line_nodes[2,1] = line_nodes[2,1], line_nodes[1,1]
+    changed_orientation[2] = ElementsUnderTest.ElementBlock(
+        1, line_nodes, changed_orientation[2].tags)
+    @test ElementsUnderTest.mixed_crc(ElementsUnderTest.MixedMesh(
+        mesh.coords, changed_orientation; physical_names=mesh.physical_names)).sha != crc.sha
+
+    changed_tags = copy(mesh.blocks)
+    tags = copy(changed_tags[3].tags); tags[1] += 1
+    changed_tags[3] = ElementsUnderTest.ElementBlock(2, changed_tags[3].nodes, tags)
+    @test ElementsUnderTest.mixed_crc(ElementsUnderTest.MixedMesh(
+        mesh.coords, changed_tags; physical_names=mesh.physical_names)).sha != crc.sha
+
+    changed_names = copy(mesh.physical_names); changed_names[(3,7)] = "other"
+    @test ElementsUnderTest.mixed_crc(ElementsUnderTest.MixedMesh(
+        mesh.coords, mesh.blocks; physical_names=changed_names)).sha != crc.sha
+
+    empty = ElementsUnderTest.MixedMesh(zeros(3,0), ElementsUnderTest.ElementBlock[])
+    @test ElementsUnderTest.validate(empty).ok
+    @test ElementsUnderTest.mixed_crc(empty).bbox ==
+          ((0.0,0.0,0.0), (0.0,0.0,0.0))
+
+    simplex = ElementsUnderTest.mixed_to_simplex(mesh)
+    @test size(simplex.segs) == (2,2)
+    @test size(simplex.tris) == (3,1)
+    @test size(simplex.tets) == (4,1)
+    @test simplex.seg_tag == Int32[6,8]
+    @test simplex.tri_tag == Int32[5]
+    @test simplex.tet_tag == Int32[7]
+    without_point = ElementsUnderTest.MixedMesh(
+        mesh.coords, mesh.blocks[2:end]; physical_names=mesh.physical_names)
+    @test ElementsUnderTest.mixed_crc(
+        ElementsUnderTest.simplex_to_mixed(simplex;
+            physical_names=mesh.physical_names)).sha ==
+          ElementsUnderTest.mixed_crc(without_point).sha
+    high_order = ElementsUnderTest.MixedMesh(
+        Float64[0 0.5 1; 0 0 0; 0 0 0],
+        [ElementsUnderTest.ElementBlock(8,
+            reshape(Int32[1,3,2],3,1),Int32[1])])
+    @test_throws ArgumentError ElementsUnderTest.mixed_to_simplex(high_order)
+end
+
+@testset "MixedMesh structural validation and linear allocation growth" begin
+    @test_throws ArgumentError ElementsUnderTest.ElementBlock(
+        1, reshape(BigInt[1, big(typemax(Int32))+1],2,1))
+    @test_throws ArgumentError ElementsUnderTest.ElementBlock(
+        1, reshape(Int32[1,2],2,1), [big(typemax(Int32))+1])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        reshape(Float64[Inf,0,0],3,1), ElementsUnderTest.ElementBlock[])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        zeros(3,1), [ElementsUnderTest.ElementBlock(
+            1,reshape(Int32[1,2],2,1))])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        zeros(3,0), [ElementsUnderTest.ElementBlock(
+            1,Matrix{Int32}(undef,2,0))])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        zeros(3,0), ElementsUnderTest.ElementBlock[];
+        physical_names=Dict((4,1)=>"bad"))
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        zeros(3,0), ElementsUnderTest.ElementBlock[];
+        physical_names=Dict((1,0)=>"bad"))
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        zeros(3,0), ElementsUnderTest.ElementBlock[];
+        physical_names=Dict((1,1)=>"bad\0name"))
+
+    appended=ElementsUnderTest.MixedMesh(Float64[0 1;0 0;0 0],
+                                          ElementsUnderTest.ElementBlock[])
+    block=ElementsUnderTest.ElementBlock(
+        1,reshape(Int32[1,2],2,1),Int32[3])
+    @test ElementsUnderTest.add_block!(appended,block)===appended
+    @test appended.blocks==[block]
+    @test_throws ArgumentError ElementsUnderTest.add_block!(
+        appended,ElementsUnderTest.ElementBlock(
+            1,reshape(Int32[2,3],2,1),Int32[3]))
+    @test_throws ArgumentError ElementsUnderTest.add_block!(
+        appended,ElementsUnderTest.ElementBlock(
+            1,Matrix{Int32}(undef,2,0)))
+    mutated=ElementsUnderTest.ElementBlock(
+        1,reshape(Int32[1,2],2,1),Int32[3])
+    mutated.tags[1]=Int32(-1)
+    @test_throws ArgumentError ElementsUnderTest.add_block!(appended,mutated)
+    empty!(mutated.tags)
+    @test_throws ArgumentError ElementsUnderTest.add_block!(appended,mutated)
+
+    repeated = ElementsUnderTest.MixedMesh(
+        Float64[0 1;0 0;0 0],
+        [ElementsUnderTest.ElementBlock(1,
+            reshape(Int32[1,1],2,1),Int32[1])])
+    @test !ElementsUnderTest.validate(repeated).ok
+    duplicate = ElementsUnderTest.MixedMesh(
+        Float64[0 1;0 0;0 0],
+        [ElementsUnderTest.ElementBlock(1,
+            Int32[1 2;2 1],Int32[1,2])])
+    @test !ElementsUnderTest.validate(duplicate).ok
+    @test ElementsUnderTest.validate(
+        duplicate; reject_duplicate_cells=false).ok
+
+    function fragmented_lines(count)
+        coordinates = Float64[0 1;0 0;0 0]
+        blocks = [ElementsUnderTest.ElementBlock(
+            1,reshape(Int32[1,2],2,1),Int32[mod(i,7)]) for i in 1:count]
+        return ElementsUnderTest.MixedMesh(coordinates, blocks)
+    end
+    small=fragmented_lines(1_000); large=fragmented_lines(2_000)
+    ElementsUnderTest.mixed_to_simplex(small) # compile before measurement
+    ElementsUnderTest.mixed_crc(small)
+    GC.gc(); allocated_small=@allocated ElementsUnderTest.mixed_to_simplex(small)
+    GC.gc(); allocated_large=@allocated ElementsUnderTest.mixed_to_simplex(large)
+    @test allocated_large <= 2.25allocated_small + 16_384
+    GC.gc(); crc_allocated_small=@allocated ElementsUnderTest.mixed_crc(small)
+    GC.gc(); crc_allocated_large=@allocated ElementsUnderTest.mixed_crc(large)
+    @test crc_allocated_large <= 2.25crc_allocated_small + 16_384
+end
+
+@testset "mixed MSH v2.2/v4.1 round-trip and Gmsh acceptance" begin
+    directory=mktempdir()
+    mesh=mixed_io_fixture(escaped_name=false)
+    expected_crc=ElementsUnderTest.mixed_crc(mesh).sha
+    expected_counts=Dict(
+        (0,9,15)=>1,
+        (1,6,1)=>1,
+        (1,8,1)=>1,
+        (2,5,2)=>1,
+        (3,7,4)=>1,
+    )
+    entities,groups,node_entity=ElementsUnderTest._mixed_v4_layout(mesh)
+    entity_bounds=Dict((entity.dim,Int(entity.physical))=>entity.bounds
+                       for entity in entities)
+    @test entity_bounds[(0,9)][1:3]==(-2.0,0.0,0.0)
+    @test entity_bounds[(1,6)]==(0.0,0.0,0.0,1.0,0.0,0.0)
+    @test entity_bounds[(1,8)]==(2.0,0.0,0.0,3.0,0.0,0.0)
+    @test entity_bounds[(2,5)]==(5.0,0.0,0.0,6.0,1.0,0.0)
+    @test entity_bounds[(3,7)]==(8.0,0.0,0.0,9.0,1.0,1.0)
+    @test entity_bounds[(3,0)]==(-2.0,0.0,0.0,9.0,1.0,1.0)
+    @test node_entity>0
+    @test length(groups)==5
+    for version in (2.2,4.1)
+        path=joinpath(directory,"mixed-$version.msh")
+        @test ElementsUnderTest.write_mixed_msh(path,mesh;version=version)==path
+        back=ElementsUnderTest.read_mixed_msh(path)
+        @test back.coords==mesh.coords
+        @test back.physical_names==mesh.physical_names
+        @test ElementsUnderTest.validate(back).ok
+        @test legacy_crc(back).sha==expected_crc
+        ok,output=gmsh_check(path)
+        @test ok
+        @test !occursin("Error",output)
+        @test occursin("12 nodes",output)
+        @test occursin("5 elements",output)
+        oracle_version,counts=gmsh_physical_element_counts(path)
+        @test oracle_version=="4.15.2"
+        @test counts==expected_counts
+    end
+
+    escaped=mixed_io_fixture()
+    escaped_crc=ElementsUnderTest.mixed_crc(escaped).sha
+    for version in (2.2,4.1)
+        path=joinpath(directory,"escaped-$version.msh")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            path,escaped;version=version)
+        ElementsUnderTest.write_mixed_msh(
+            path,escaped;version=version,gmsh_compatible=false)
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(path)
+        back=ElementsUnderTest.read_mixed_msh(path;tessella_extensions=true)
+        @test back.physical_names==escaped.physical_names
+        @test legacy_crc(back).sha==escaped_crc
+    end
+
+    # Cross-format conversion does not depend on the writer's block grouping.
+    v2=joinpath(directory,"cross-v2.msh")
+    v4=joinpath(directory,"cross-v4.msh")
+    v2_again=joinpath(directory,"cross-v2-again.msh")
+    ElementsUnderTest.write_mixed_msh(v2,mesh;version=2.2)
+    ElementsUnderTest.write_mixed_msh(
+        v4,ElementsUnderTest.read_mixed_msh(v2);version=4.1)
+    ElementsUnderTest.write_mixed_msh(
+        v2_again,ElementsUnderTest.read_mixed_msh(v4);version=2.2)
+    @test ElementsUnderTest.mixed_crc(
+        ElementsUnderTest.read_mixed_msh(v2_again)).sha==expected_crc
+
+    empty=ElementsUnderTest.MixedMesh(zeros(3,0),ElementsUnderTest.ElementBlock[];
+                                      physical_names=Dict((3,1)=>"unused"))
+    for version in (2.2,4.1)
+        path=joinpath(directory,"empty-$version.msh")
+        ElementsUnderTest.write_mixed_msh(path,empty;version=version)
+        back=ElementsUnderTest.read_mixed_msh(path)
+        @test legacy_crc(back).sha==
+              ElementsUnderTest.mixed_crc(empty).sha
+        @test back.physical_names==empty.physical_names
+        ok,output=gmsh_check(path)
+        @test ok
+        @test !occursin("Error",output)
+    end
+
+    @test write_gmsh_reference_mesh(directory)=="4.15.2"
+    gmsh_reference_crc=nothing
+    for version in (2.2,4.1)
+        path=joinpath(directory,"gmsh-reference-$version.msh")
+        reference=ElementsUnderTest.read_mixed_msh(path)
+        @test [(block.msh,size(block.nodes,2),block.tags) for block in reference.blocks]==[
+            (1,1,Int32[6]),(2,1,Int32[5]),(4,1,Int32[7])]
+        @test reference.physical_names==Dict(
+            (1,6)=>"group 6",(2,5)=>"group 5",(3,7)=>"group 7")
+        crc=legacy_crc(reference).sha
+        if gmsh_reference_crc===nothing
+            gmsh_reference_crc=crc
+        else
+            @test crc==gmsh_reference_crc
+        end
+    end
+    @test gmsh_reference_crc==
+          "bce5e5f31440ecf9b0765e116210b6584080663061be00482505d8b658341cf9"
+end
+
+@testset "lossless v4 entity metadata and multiple physical memberships" begin
+    directory=mktempdir()
+    source="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    2
+    1 7 "shared"
+    1 8 "selected"
+    \$EndPhysicalNames
+    \$Entities
+    3 2 0 0
+    1 0 0 0 0
+    2 1 0 0 0
+    3 2 0 0 0
+    11 0 0 0 1 0 0 2 7 8 2 1 -2
+    22 1 0 0 2 0 0 1 7 2 2 -3
+    \$EndEntities
+    \$Nodes
+    3 3 10 30
+    0 1 0 1
+    10
+    0 0 0
+    0 2 0 1
+    20
+    1 0 0
+    0 3 0 1
+    30
+    2 0 0
+    \$EndNodes
+    \$Elements
+    2 2 101 202
+    1 11 1 1
+    101 10 20
+    1 22 1 1
+    202 20 30
+    \$EndElements
+    """
+    input=joinpath(directory,"entity-input.msh"); write(input,source)
+    mesh=ElementsUnderTest.read_mixed_msh(input)
+    @test ElementsUnderTest.validate(mesh).ok
+    @test mesh.blocks[1].tags==Int32[7,7]
+    data=mesh.entity_data
+    @test data!==nothing
+    @test Set(keys(data.entities))==Set([(0,1),(0,2),(0,3),(1,11),(1,22)])
+    @test data.entities[(1,11)].bbox==(0.0,0.0,0.0,1.0,0.0,0.0)
+    @test data.entities[(1,11)].physical_tags==Int32[7,8]
+    @test data.entities[(1,11)].boundaries==Int32[1,-2]
+    @test data.entities[(1,22)].physical_tags==Int32[7]
+    @test data.entities[(1,22)].boundaries==Int32[2,-3]
+    @test data.external_node_tags==[10,20,30]
+    @test data.node_entities==[(0,Int32(1)),(0,Int32(2)),(0,Int32(3))]
+    @test data.node_parametric==[nothing,nothing,nothing]
+    @test data.block_entities==[Int32[11,22]]
+    @test data.external_element_tags==[[101,202]]
+
+    input_ok,input_output=gmsh_check(input)
+    @test input_ok
+    @test !occursin("Error",input_output)
+    output=joinpath(directory,"entity-output.msh")
+    ElementsUnderTest.write_mixed_msh(output,mesh;version=4.1)
+    output_ok,output_text=gmsh_check(output)
+    @test output_ok
+    @test !occursin("Error",output_text)
+    version,physical_entities=gmsh_physical_entities(output)
+    @test version=="4.15.2"
+    @test physical_entities==Dict((1,7)=>[11,22],(1,8)=>[11])
+    oracle_version,physical_counts=gmsh_physical_element_counts(output)
+    @test oracle_version=="4.15.2"
+    @test physical_counts==Dict((1,7,1)=>2,(1,8,1)=>1)
+    external_version,external_nodes,external_elements=gmsh_external_tags(output)
+    @test external_version=="4.15.2"
+    @test external_nodes==[10,20,30]
+    @test external_elements==[101,202]
+
+    roundtrip=ElementsUnderTest.read_mixed_msh(output)
+    @test roundtrip.entity_data.external_node_tags==[10,20,30]
+    @test roundtrip.entity_data.external_element_tags==[[101,202]]
+    @test roundtrip.entity_data.block_entities==[Int32[11,22]]
+    @test roundtrip.entity_data.entities[(1,11)].physical_tags==Int32[7,8]
+    @test roundtrip.entity_data.entities[(1,11)].boundaries==Int32[1,-2]
+    crc=ElementsUnderTest.mixed_crc(mesh).sha
+    @test crc=="c08800cbabb0eb2ffc048481320b9d12e7f3ad5ffce0ffd25beb75f6bd3d608a"
+    @test ElementsUnderTest.mixed_crc(roundtrip).sha==crc
+
+    function rebuild(;entities=data.entities,node_entities=data.node_entities,
+                     node_parametric=data.node_parametric,
+                     external_node_tags=data.external_node_tags,
+                     block_entities=data.block_entities,
+                     external_element_tags=data.external_element_tags)
+        return ElementsUnderTest.MixedEntityData(entities;
+            node_entities=node_entities,node_parametric=node_parametric,
+            external_node_tags=external_node_tags,block_entities=block_entities,
+            external_element_tags=external_element_tags)
+    end
+    function with_data(replacement;blocks=mesh.blocks)
+        return ElementsUnderTest.MixedMesh(mesh.coords,blocks;
+            physical_names=mesh.physical_names,entity_data=replacement)
+    end
+    function changed_entity(key;bounds=data.entities[key].bbox,
+                            physical_tags=data.entities[key].physical_tags,
+                            boundaries=data.entities[key].boundaries)
+        entities=copy(data.entities); old=data.entities[key]
+        entities[key]=ElementsUnderTest.MixedEntity(old.dim,old.tag,bounds;
+            physical_tags=physical_tags,boundaries=boundaries)
+        return rebuild(entities=entities)
+    end
+    variants=ElementsUnderTest.MixedMesh[]
+    push!(variants,with_data(changed_entity((1,11);physical_tags=Int32[7,8,9])))
+    push!(variants,with_data(changed_entity(
+        (1,11);bounds=(0.0,0.0,0.0,1.25,0.0,0.0))))
+    push!(variants,with_data(changed_entity((1,11);boundaries=Int32[-1,-2])))
+    changed_nodes=copy(data.external_node_tags); changed_nodes[1]=11
+    push!(variants,with_data(rebuild(external_node_tags=changed_nodes)))
+    classifications=copy(data.node_entities); classifications[1]=(0,Int32(2))
+    push!(variants,with_data(rebuild(node_entities=classifications)))
+    cell_entities=deepcopy(data.block_entities); cell_entities[1][1]=Int32(22)
+    push!(variants,with_data(rebuild(block_entities=cell_entities)))
+    element_tags=deepcopy(data.external_element_tags); element_tags[1][1]=303
+    push!(variants,with_data(rebuild(external_element_tags=element_tags)))
+    parameters=deepcopy(data.node_parametric); parameters[1]=Float64[]
+    push!(variants,with_data(rebuild(node_parametric=parameters)))
+    @test all(variant->ElementsUnderTest.validate(variant).ok,variants)
+    @test all(variant->ElementsUnderTest.mixed_crc(variant).sha!=crc,variants)
+
+    reordered_block=ElementsUnderTest.ElementBlock(
+        mesh.blocks[1].msh,mesh.blocks[1].nodes[:,end:-1:1],
+        mesh.blocks[1].tags[end:-1:1])
+    reordered_data=rebuild(
+        block_entities=[data.block_entities[1][end:-1:1]],
+        external_element_tags=[data.external_element_tags[1][end:-1:1]])
+    reordered=with_data(reordered_data;blocks=[reordered_block])
+    @test ElementsUnderTest.mixed_crc(reordered).sha==crc
+
+    duplicate_membership=with_data(changed_entity(
+        (1,11);physical_tags=Int32[7,8,7]))
+    duplicate_path=joinpath(directory,"duplicate-membership.msh")
+    ElementsUnderTest.write_mixed_msh(duplicate_path,duplicate_membership;version=4.1)
+    duplicate_back=ElementsUnderTest.read_mixed_msh(duplicate_path)
+    @test duplicate_back.entity_data.entities[(1,11)].physical_tags==Int32[7,8,7]
+    duplicate_ok,duplicate_output=gmsh_check(duplicate_path)
+    @test duplicate_ok
+    @test !occursin("Error",duplicate_output)
+
+    point=data.entities[(0,1)]
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        0,1,(-0.0,0.0,0.0,0.0,0.0,0.0))
+    @test_throws ArgumentError ElementsUnderTest.MixedEntityData(
+        Dict((0.0,1)=>point))
+    @test_throws ArgumentError ElementsUnderTest.MixedEntityData(
+        Dict((0,1)=>point);node_entities=[(0.0,1)])
+
+    missing_cell=with_data(data)
+    missing_cell.entity_data.block_entities[1][1]=Int32(99)
+    @test !ElementsUnderTest.validate(missing_cell).ok
+    duplicate_node=with_data(data)
+    duplicate_node.entity_data.external_node_tags[2]=10
+    @test !ElementsUnderTest.validate(duplicate_node).ok
+    wrong_parameters=with_data(data)
+    wrong_parameters.entity_data.node_parametric[1]=Float64[0]
+    @test !ElementsUnderTest.validate(wrong_parameters).ok
+    bad_boundary=with_data(data)
+    push!(bad_boundary.entity_data.entities[(1,11)].boundaries,Int32(99))
+    @test !ElementsUnderTest.validate(bad_boundary).ok
+    copied_blocks=[ElementsUnderTest.ElementBlock(
+        block.msh,block.nodes,block.tags) for block in mesh.blocks]
+    wrong_projection=with_data(data;blocks=copied_blocks)
+    wrong_projection.blocks[1].tags[1]=Int32(8)
+    @test !ElementsUnderTest.validate(wrong_projection).ok
+    @test_throws ArgumentError ElementsUnderTest.add_block!(
+        mesh,ElementsUnderTest.ElementBlock(
+            1,reshape(Int32[1,2],2,1),Int32[7]))
+end
+
+@testset "repeated v4 entity/element sections and full-width external tags" begin
+    directory=mktempdir()
+    repeated="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    2
+    1 7 "shared"
+    1 8 "selected"
+    \$EndPhysicalNames
+    \$Entities
+    3 1 0 0
+    1 0 0 0 0
+    2 1 0 0 0
+    3 2 0 0 0
+    11 0 0 0 1 0 0 2 7 8 2 1 -2
+    \$EndEntities
+    \$Entities
+    0 1 0 0
+    22 1 0 0 2 0 0 1 7 2 2 -3
+    \$EndEntities
+    \$Nodes
+    3 3 10 30
+    0 1 0 1
+    10
+    0 0 0
+    0 2 0 1
+    20
+    1 0 0
+    0 3 0 1
+    30
+    2 0 0
+    \$EndNodes
+    \$Elements
+    1 1 101 101
+    1 11 1 1 101 10 20
+    \$EndElements
+    \$Elements
+    1 1 202 202
+    1 22 1 1 202 20 30
+    \$EndElements
+    """
+    repeated_path=joinpath(directory,"repeated-v4-sections.msh")
+    write(repeated_path,repeated)
+    mesh=ElementsUnderTest.read_mixed_msh(repeated_path)
+    @test ElementsUnderTest.validate(mesh).ok
+    @test mesh.entity_data.entities[(1,11)].physical_tags==Int32[7,8]
+    @test mesh.entity_data.entities[(1,11)].boundaries==Int32[1,-2]
+    @test mesh.entity_data.entities[(1,22)].physical_tags==Int32[7]
+    @test mesh.entity_data.entities[(1,22)].boundaries==Int32[2,-3]
+    @test mesh.entity_data.external_node_tags==UInt64[10,20,30]
+    @test mesh.entity_data.block_entities==[Int32[11,22]]
+    @test mesh.entity_data.external_element_tags==[UInt64[101,202]]
+    @test ElementsUnderTest.mixed_crc(mesh).sha==
+          "c08800cbabb0eb2ffc048481320b9d12e7f3ad5ffce0ffd25beb75f6bd3d608a"
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        repeated_path;max_entities=4)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        repeated_path;max_nodes=2)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        repeated_path;max_elements=1)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        repeated_path;max_blocks=2)
+    ok,output=gmsh_check(repeated_path)
+    @test ok
+    @test !occursin("Error",output)
+    version,nodes,elements=gmsh_external_tags(repeated_path)
+    @test version=="4.15.2"
+    @test nodes==[10,20,30]
+    @test elements==[101,202]
+
+    canonical_path=joinpath(directory,"canonical-v4-sections.msh")
+    ElementsUnderTest.write_mixed_msh(canonical_path,mesh;version=4.1)
+    canonical_lines=readlines(canonical_path)
+    @test count(==("\$Entities"),canonical_lines)==1
+    @test count(==("\$Nodes"),canonical_lines)==1
+    @test count(==("\$Elements"),canonical_lines)==1
+    @test ElementsUnderTest.mixed_crc(
+        ElementsUnderTest.read_mixed_msh(canonical_path)).sha==
+        ElementsUnderTest.mixed_crc(mesh).sha
+    ok,output=gmsh_check(canonical_path)
+    @test ok
+    @test !occursin("Error",output)
+
+    packed_entities="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    2
+    0 7 "shared points"
+    0 8 "selected point"
+    \$EndPhysicalNames
+    \$Entities
+    2 0 0 0
+    1 0 0 0 1 7 2 1 0 0 2 7 8
+    \$EndEntities
+    \$Nodes
+    2 2 10 20
+    0 1 0 1
+    10
+    0 0 0
+    0 2 0 1
+    20
+    1 0 0
+    \$EndNodes
+    \$Elements
+    0 0 0 0
+    \$EndElements
+    """
+    packed_entities_path=joinpath(directory,"packed-v4-entities.msh")
+    write(packed_entities_path,packed_entities)
+    packed_mesh=ElementsUnderTest.read_mixed_msh(packed_entities_path)
+    @test packed_mesh.entity_data.entities[(0,1)].physical_tags==Int32[7]
+    @test packed_mesh.entity_data.entities[(0,2)].physical_tags==Int32[7,8]
+    @test packed_mesh.entity_data.external_node_tags==UInt64[10,20]
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        packed_entities_path;max_entities=1)
+    ok,output=gmsh_check(packed_entities_path)
+    @test ok
+    @test !occursin("Error",output)
+    version,nodes,elements=gmsh_external_tags(packed_entities_path)
+    @test version=="4.15.2"
+    @test nodes==[10,20]
+    @test isempty(elements)
+
+    high_node=UInt64(typemax(Int))+one(UInt64)
+    high_element=high_node+one(UInt64)
+    full_width="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$Entities
+    1 0 0 0
+    1 -0 0 0 1 9
+    \$EndEntities
+    \$Nodes
+    1 1 $high_node $high_node
+    0 1 0 1
+    $high_node
+    -0 0 0
+    \$EndNodes
+    \$Elements
+    1 1 $high_element $high_element
+    0 1 15 1
+    $high_element $high_node
+    \$EndElements
+    """
+    full_width_path=joinpath(directory,"full-width-tags.msh")
+    write(full_width_path,full_width)
+    full_width_mesh=ElementsUnderTest.read_mixed_msh(full_width_path)
+    @test signbit(full_width_mesh.entity_data.entities[(0,1)].bbox[1])
+    @test signbit(full_width_mesh.entity_data.entities[(0,1)].bbox[4])
+    @test full_width_mesh.entity_data.external_node_tags==UInt64[high_node]
+    @test full_width_mesh.entity_data.external_element_tags==[UInt64[high_element]]
+    @test full_width_mesh.blocks[1].tags==Int32[9]
+    full_width_output=joinpath(directory,"full-width-tags-output.msh")
+    ElementsUnderTest.write_mixed_msh(
+        full_width_output,full_width_mesh;version=4.1)
+    @test ElementsUnderTest.mixed_crc(
+        ElementsUnderTest.read_mixed_msh(full_width_output)).sha==
+        ElementsUnderTest.mixed_crc(full_width_mesh).sha
+    for path in (full_width_path,full_width_output)
+        ok,output=gmsh_check(path)
+        @test ok
+        @test !occursin("Error",output)
+        @test occursin("1 node",output) && occursin("1 element",output)
+    end
+    @test_throws ArgumentError ElementsUnderTest.MixedEntityData(
+        Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}();
+        external_node_tags=[big(typemax(UInt64))+1])
+end
+
+@testset "all 125 fixed-node types survive explicit Tessella-only MSH round-trip" begin
+    mesh=exhaustive_catalog_mesh()
+    @test ElementsUnderTest.validate(mesh).ok
+    expected=ElementsUnderTest.mixed_crc(mesh).sha
+    @test expected=="17f74d0e0185e18bf87eb4d987fe820af43d0ca28c66d29ce7989892aecd3933"
+    @test Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4)==Set([
+        84,85,86,87,88,100,101,102,103,104,105,
+        125,126,127,128,129,130,131,132,
+    ])
+    @test Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V2)==union(
+        Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4),Set([89,140]))
+    directory=mktempdir()
+    for version in (2.2,4.1)
+        path=joinpath(directory,"all-types-$version.msh")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            path,mesh;version=version)
+        ElementsUnderTest.write_mixed_msh(
+            path,mesh;version=version,gmsh_compatible=false)
+        back=ElementsUnderTest.read_mixed_msh(path)
+        @test Set(block.msh for block in back.blocks)==Set(keys(EXPECTED_SPECS))
+        @test sum(size(block.nodes,2) for block in back.blocks)==125
+        @test ElementsUnderTest.validate(back).ok
+        @test legacy_crc(back).sha==expected
+    end
+    for version in (2.2,4.1)
+        gaps=version==2.2 ? ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V2 :
+                           ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4
+        compatible=exhaustive_catalog_mesh(setdiff(Set(keys(EXPECTED_SPECS)),gaps))
+        expected_count=125-length(gaps)
+        @test sum(size(block.nodes,2) for block in compatible.blocks)==expected_count
+        path=joinpath(directory,"gmsh-compatible-types-$version.msh")
+        ElementsUnderTest.write_mixed_msh(path,compatible;version=version)
+        ok,output=gmsh_check(path)
+        @test ok
+        @test !occursin("Error",output)
+        @test occursin("$expected_count elements",output)
+    end
+end
+
+@testset "sparse external tags and v4 entity physical tags" begin
+    directory=mktempdir()
+    v2="""
+    \$MeshFormat
+    2.2 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    1
+    2 5 "surface"
+    \$EndPhysicalNames
+    \$Nodes
+    3
+    100 0 0 0
+    7 1 0 0
+    999 0 1 0
+    \$EndNodes
+    \$Elements
+    1
+    77 2 2 5 17 999 100 7
+    \$EndElements
+    """
+    v4="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    1
+    2 5 "surface"
+    \$EndPhysicalNames
+    \$Entities
+    0 0 1 1
+    17 0 0 0 1 1 0 1 5 0
+    42 0 0 0 1 1 0 0 0
+    \$EndEntities
+    \$Nodes
+    1 3 7 999
+    3 42 0 3
+    100
+    7
+    999
+    0 0 0
+    1 0 0
+    0 1 0
+    \$EndNodes
+    \$Elements
+    1 1 1234 1234
+    2 17 2 1
+    1234 999 100 7
+    \$EndElements
+    """
+    for (name,text) in (("sparse-v2.msh",v2),("sparse-v4.msh",v4))
+        path=joinpath(directory,name); write(path,text)
+        mesh=ElementsUnderTest.read_mixed_msh(path)
+        @test mesh.coords==Float64[0 1 0;0 0 1;0 0 0]
+        @test length(mesh.blocks)==1
+        @test mesh.blocks[1].msh==2
+        @test mesh.blocks[1].nodes[:,1]==Int32[3,1,2]
+        @test mesh.blocks[1].tags==Int32[5]
+        @test mesh.physical_names==Dict((2,5)=>"surface")
+    end
+    packed_v4="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    1
+    2 5 "surface"
+    \$EndPhysicalNames
+    \$Entities
+    0 0 1 0
+    17 0 0 0 1 1 0 1 5 0
+    \$EndEntities
+    \$Nodes
+    1 3 7 999 2 17 0 3 100 7 999 0 0 0 1 0 0 0 1 0
+    \$EndNodes
+    \$Elements
+    1 1 1234 1234
+    2 17 2 1
+    1234 999 100 7
+    \$EndElements
+    """
+    path=joinpath(directory,"packed-v4-nodes.msh"); write(path,packed_v4)
+    packed=ElementsUnderTest.read_mixed_msh(path)
+    @test packed.coords==Float64[0 1 0;0 0 1;0 0 0]
+    @test packed.blocks[1].nodes[:,1]==Int32[3,1,2]
+    @test packed.blocks[1].tags==Int32[5]
+    @test packed.physical_names==Dict((2,5)=>"surface")
+    ok,output=gmsh_check(path)
+    @test ok
+    @test !occursin("Error",output)
+
+    repeated_names="""
+    \$MeshFormat
+    2.2 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    1
+    1 3 "curve"
+    \$EndPhysicalNames
+    \$PhysicalNames
+    2
+    1 3 "curve"
+    2 5 "surface"
+    \$EndPhysicalNames
+    \$Nodes
+    0
+    \$EndNodes
+    """
+    path=joinpath(directory,"repeated-physical-names.msh"); write(path,repeated_names)
+    @test ElementsUnderTest.read_mixed_msh(path).physical_names==
+          Dict((1,3)=>"curve",(2,5)=>"surface")
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        path;max_physical_names=2)
+    ok,output=gmsh_check(path)
+    @test ok
+    @test !occursin("Error",output)
+    @test gmsh_physical_name(path,1,3)==("4.15.2","curve")
+    @test gmsh_physical_name(path,2,5)==("4.15.2","surface")
+
+    conflicting_names=replace(repeated_names,"1 3 \"curve\"\n2 5"=>
+                                              "1 3 \"other\"\n2 5")
+    path=joinpath(directory,"conflicting-physical-names.msh")
+    write(path,conflicting_names)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(path)
+
+    literal_backslash="""
+    \$MeshFormat
+    2.2 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    1
+    1 3 "C:\\new\\tab\\mesh"
+    \$EndPhysicalNames
+    \$Nodes
+    0
+    \$EndNodes
+    """
+    path=joinpath(directory,"literal-backslash.msh"); write(path,literal_backslash)
+    @test ElementsUnderTest.read_mixed_msh(path).physical_names[(1,3)]==
+          raw"C:\new\tab\mesh"
+    @test gmsh_physical_name(path,1,3)==("4.15.2",raw"C:\new\tab\mesh")
+    @test ElementsUnderTest.read_mixed_msh(
+        path;tessella_extensions=true).physical_names[(1,3)]==
+          "C:\n"*"ew\t"*"ab\\mesh"
+    implicit_entity="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$Nodes
+    1 4 1 4
+    3 42 0 4
+    1
+    2
+    3
+    4
+    0 0 0
+    1 0 0
+    0 1 0
+    0 0 1
+    \$EndNodes
+    \$Elements
+    1 1 1 1
+    3 42 4 1
+    1 1 2 3 4
+    \$EndElements
+    """
+    path=joinpath(directory,"implicit-entity.msh"); write(path,implicit_entity)
+    implicit_mesh=ElementsUnderTest.read_mixed_msh(path)
+    @test implicit_mesh.blocks[1].msh==4
+    @test implicit_mesh.blocks[1].tags==Int32[0]
+    @test isempty(implicit_mesh.entity_data.entities)
+    @test implicit_mesh.entity_data.node_entities==fill((3,Int32(42)),4)
+    @test implicit_mesh.entity_data.block_entities==[Int32[42]]
+    ok,output=gmsh_check(path)
+    @test ok
+    @test !occursin("Error",output)
+    implicit_output=joinpath(directory,"implicit-entity-output.msh")
+    ElementsUnderTest.write_mixed_msh(implicit_output,implicit_mesh;version=4.1)
+    implicit_roundtrip=ElementsUnderTest.read_mixed_msh(implicit_output)
+    @test ElementsUnderTest.mixed_crc(implicit_roundtrip).sha==
+          ElementsUnderTest.mixed_crc(implicit_mesh).sha
+    ok,output=gmsh_check(implicit_output)
+    @test ok
+    @test !occursin("Error",output)
+    parametric_nodes="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$Entities
+    0 1 0 0
+    5 0 0 0 1 0 0 0 0
+    \$EndEntities
+    \$Nodes
+    1 2 10 20
+    1 5 1 2
+    10
+    20
+    0 0 0 0
+    1 0 0 1
+    \$EndNodes
+    \$Elements
+    1 1 1 1
+    1 5 1 1
+    1 10 20
+    \$EndElements
+    """
+    path=joinpath(directory,"parametric-nodes.msh"); write(path,parametric_nodes)
+    parametric_mesh=ElementsUnderTest.read_mixed_msh(path)
+    @test parametric_mesh.coords==Float64[0 1;0 0;0 0]
+    @test parametric_mesh.blocks[1].nodes==reshape(Int32[1,2],2,1)
+    @test parametric_mesh.entity_data.external_node_tags==[10,20]
+    @test parametric_mesh.entity_data.node_entities==fill((1,Int32(5)),2)
+    @test parametric_mesh.entity_data.node_parametric==[Float64[0],Float64[1]]
+    @test parametric_mesh.entity_data.external_element_tags==[[1]]
+    parametric_output=joinpath(directory,"parametric-nodes-output.msh")
+    ElementsUnderTest.write_mixed_msh(parametric_output,parametric_mesh;version=4.1)
+    parametric_roundtrip=ElementsUnderTest.read_mixed_msh(parametric_output)
+    @test parametric_roundtrip.entity_data.node_parametric==[Float64[0],Float64[1]]
+    @test ElementsUnderTest.mixed_crc(parametric_roundtrip).sha==
+          ElementsUnderTest.mixed_crc(parametric_mesh).sha
+    ok,output=gmsh_check(parametric_output)
+    @test ok
+    @test !occursin("Error",output)
+end
+
+@testset "mixed MSH malformed input, resource gates, and atomic output" begin
+    directory=mktempdir()
+    function malformed(name,text)
+        path=joinpath(directory,name); write(path,text); return path
+    end
+    cases=Dict(
+        "missing-format.msh" => "\$Nodes\n0\n\$EndNodes\n",
+        "bad-version.msh" =>
+            "\$MeshFormat\n3.0 0 8\n\$EndMeshFormat\n",
+        "binary.msh" =>
+            "\$MeshFormat\n4.1 1 8\n\$EndMeshFormat\n",
+        "duplicate-node.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n1 1 0 0\n\$EndNodes\n",
+        "nonfinite-node.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n1\n1 NaN 0 0\n\$EndNodes\n",
+        "unknown-node.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 1 0 1 9\n\$EndElements\n",
+        "duplicate-element.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n2\n1 1 0 1 2\n1 1 0 1 2\n\$EndElements\n",
+        "special-element.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n1\n1 0 0 0\n\$EndNodes\n\$Elements\n1\n1 34 0 1\n\$EndElements\n",
+        "truncated-section.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Comments\nmissing end\n",
+        "huge-truncated-count.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2147483647\n",
+        "repeated-node-sections.msh" =>
+            "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n" *
+            "\$Nodes\n0 0 0 0\n\$EndNodes\n" *
+            "\$Nodes\n0 0 0 0\n\$EndNodes\n",
+        "bad-boundary.msh" =>
+            "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 1 0 0\n1 0 0 0 1 0 0 0 1 999\n\$EndEntities\n",
+        "bad-v4-range.msh" =>
+            "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 0 0 1\n1 0 0 0 0 0 0 0 0\n\$EndEntities\n\$Nodes\n1 1 1 2\n3 1 0 1\n2\n0 0 0\n\$EndNodes\n",
+        "bad-v4-dimension.msh" =>
+            "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 1 0 1\n1 0 0 0 1 0 0 0 0\n1 0 0 0 1 0 0 0 0\n\$EndEntities\n\$Nodes\n1 2 1 2\n3 1 0 2\n1\n2\n0 0 0\n1 0 0\n\$EndNodes\n\$Elements\n1 1 1 1\n1 1 2 1\n1 1 2 1\n\$EndElements\n",
+    )
+    for (name,text) in cases
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+            malformed(name,text))
+    end
+
+    valid=joinpath(directory,"valid.msh")
+    ElementsUnderTest.write_mixed_msh(
+        valid,mixed_io_fixture(escaped_name=false);version=4.1)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=11)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_elements=4)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_blocks=0)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_entities=5)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_physical_names=4)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_name_bytes=3)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;max_file_bytes=filesize(valid)-1)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=-1)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=1.0)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;tessella_extensions=1)
+
+    target=joinpath(directory,"atomic.msh"); write(target,"sentinel")
+    invalid=mixed_io_fixture(escaped_name=false); invalid.blocks[1].tags[1]=Int32(-1)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(target,invalid)
+    @test read(target,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        target,mixed_io_fixture(escaped_name=false);version=3.0)
+    @test read(target,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        target,mixed_io_fixture(escaped_name=false);gmsh_compatible=1)
+    @test read(target,String)=="sentinel"
+    long_name=mixed_io_fixture(escaped_name=false)
+    long_name.physical_names[(3,7)]=repeat("x",129)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(target,long_name)
+    @test read(target,String)=="sentinel"
+end
