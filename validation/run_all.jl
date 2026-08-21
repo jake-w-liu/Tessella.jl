@@ -98,6 +98,12 @@ transfinite_curve_command = `$(Base.julia_cmd()) --startup-file=no --check-bound
 println("  command: ", transfinite_curve_command)
 run(transfinite_curve_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── transfinite_triangle ──  Gmsh 4.15.2 three-sided patches")
+transfinite_triangle_script = joinpath(HERE, "transfinite_triangle", "differential.jl")
+transfinite_triangle_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_triangle_script`
+println("  command: ", transfinite_triangle_command)
+run(transfinite_triangle_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),
