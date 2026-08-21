@@ -42,7 +42,7 @@ Tessella
 ├── RecoverCDT    exact conforming-Delaunay boundary/partition recovery
 ├── Optimize      quality reports, Laplacian/ODT/targeted sliver smoothing
 ├── Heal          surface defect and meshability diagnostics
-├── Geometry      native closed primitive surfaces
+├── Geometry      native box/cylinder/cone/geodesic-sphere surfaces
 ├── CAD           analytical surfaces, projection, and imprint curves
 └── HighOrder     globally certified quadratic tetrahedra and type-11 I/O
 ```
@@ -87,7 +87,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types, mixed metadata, validation/CRC, and ASCII MSH v2.2/v4.1 shipped |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | PENDING |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — native analytical surfaces/imprints, closed primitives, and mesh Booleans shipped |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | PENDING |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | PENDING |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
@@ -101,7 +101,11 @@ internal element types, curved high-order Jacobian certification, binary MSH,
 preservation of ancillary/unknown MSH sections, repeated `$Nodes` sections, internal
 indexing beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
 Some registered fixed tags also require explicit Tessella-only output because Gmsh
-4.15.2 cannot re-import them. P3–P6 remain pending.
+4.15.2 cannot re-import them. P3 currently provides the native analytical and
+polyhedral path used by ASCENT, including boxes, cylinders, cones, geodesic spheres,
+projection/imprint curves, cavities, and mesh Booleans; it does not yet claim a
+general entity kernel, OpenCASCADE/BREP/NURBS, CAD import/export, full transformations,
+or complete `.geo` execution. P4–P6 remain pending.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.
