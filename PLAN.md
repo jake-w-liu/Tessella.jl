@@ -35,7 +35,7 @@ Tessella
 ├── ExactMesh3D   Rational{BigInt} Delaunay kernel
 ├── IO            strict/atomic MSH v2.2/v4.1, STL, bounded .geo constant/range scan
 ├── Elements      fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
-├── Recombine     deterministic physical-tag-preserving triangle-to-quad pairing
+├── Recombine     greedy or Edmonds-blossom triangle-to-quad pairing, optional full-quad
 ├── Refine        deterministic one-level uniform linear-simplex refinement
 ├── Transfinite   validated four-sided planar structured triangle patches
 ├── TransfiniteCurve normalized straight-curve Progression/Bump/Beta laws
@@ -53,10 +53,11 @@ Tessella
 ├── Optimize      quality reports, Laplacian/ODT/targeted sliver smoothing
 ├── Heal          surface defect and meshability diagnostics
 ├── Geometry      native box/cylinder/cone/geodesic-sphere surfaces
-├── CAD           analytical surfaces, projection, imprints, STEP/IGES blockers
+├── CAD           analytical surfaces, projection, imprints
+├── BRep          ISO-10303-21 STEP / IGES classified-solid import (box/sphere/cylinder)
 ├── NURBS         native B-spline/NURBS curve and surface evaluation
-├── Model         tagged point/curve/loop/surface/volume entity kernel
-├── GeoExec       bounded Point/Line/Loop/Surface/Box `.geo` execution
+├── Model         tagged point/curve/loop/surface/volume entity kernel plus native solids/Booleans
+├── GeoExec       bounded Point/Line/Loop/Surface/Box/Cylinder/Sphere/Boolean/Translate `.geo` execution
 ├── BoundaryLayer prismatic first-order boundary-layer extrusion
 ├── Periodic      translation periodic identification
 ├── Post          list-based views and plugins
@@ -106,10 +107,10 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O, and a tagged point/curve/surface/volume kernel |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation, bounded Point/Line/Loop/Surface/Box `.geo` execution, mesh Booleans/transforms; STEP/IGES remain explicit blockers |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus recombined hexahedra, prismatic boundary layers, and translation periodic identification |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation, classified STEP/IGES solids, Box/Cylinder/Sphere/Boolean/Translate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined hexahedra, prismatic boundary layers, and translation periodic identification |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — model/mesh API, CLI, headless GUI state, views/plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — existing size-field/transfinite/range differentials plus native entity/API box volume |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, API box, OCC cylinder, and BooleanDifference box corpus |
 
 P1 does not yet claim boundary-layer element topology, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -134,21 +135,29 @@ metadata for Gmsh-safe rewrites. P3 currently provides the native analytical and
 polyhedral path used by ASCENT, including boxes, cylinders, cones, geodesic spheres,
 projection/imprint curves, cavities, mesh Booleans, and validated translation,
 rotation, dilation, reflection, and general affine transforms of finalized simplex
-meshes. It does not yet claim a general entity kernel, OpenCASCADE/BREP/NURBS, CAD
-import/export, transformations of analytical/CAD entities, or complete `.geo`
+meshes. Classified ISO-10303-21 STEP and IGES solids that are axis-aligned blocks,
+spheres, or right circular cylinders are imported and filled; any other topology is
+an explicit blocker listing the seen entity types. The entity kernel records native
+boxes, cylinders, spheres, and mesh-Boolean volumes. Bounded `.geo` execution covers
+Point/Line/Loop/Surface, Box/Cylinder/Sphere, BooleanDifference/Union/Intersection
+of those solids (with operand `Delete`), and Translate of remaining boxes, cylinders,
+and spheres. It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD
+import/export, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
 functions, prior scalar bindings, and explicit field/physical tags with resource
 bounds. Finite constant `start:end[:increment]` lists are expanded in recognized
 numeric field options and field selectors; entirely numeric Physical memberships are
 range-checked but remain geometry data. The scanner deliberately rejects loops,
 macros, dynamic tag allocators, option reads, stateful functions, dynamic/general
-ranges, logical/ternary evaluation, CSG statements, and mixed geometry-derived
-physical right-hand-side evaluation instead of pretending to be a complete
-interpreter.
+ranges, logical/ternary evaluation, extrusions/fillets/rotates, and mixed
+geometry-derived physical right-hand-side evaluation instead of pretending to be a
+complete interpreter.
 
 P4 currently covers validated, deterministic pairing of adjacent same-physical-tag
 surface triangles into first-order quadrangles, with unpaired triangles and boundary
-segments retained. It also covers one-level uniform refinement of linear segments,
+segments retained. `:greedy` accepts candidates in shape-score order; `:blossom` runs
+Edmonds maximum-cardinality matching on the dual of eligible pairs, and `full_quad`
+requires a perfect matching. It also covers one-level uniform refinement of linear segments,
 triangles, and tetrahedra with Gmsh 4.15.2 child templates, shared lexicographic edge
 midpoints, compacted unused nodes, and parent-tag preservation. Normalized affine-line
 transfinite parameters cover Gmsh's Progression/Power, Bump, and Beta laws with signed
@@ -160,14 +169,14 @@ corner-Jacobian certification. Positively ordered affine eight-corner blocks
 implement Gmsh's unrecombined six-tetrahedron transfinite volume subdivision;
 canonical affine triangular prisms implement Gmsh's legacy collapsed-grid five-face
 tetrahedral path; positively ordered affine eight-corner blocks can also be emitted
-as first-order recombined hexahedra with type-3 boundary quadrangles. P4 does not yet claim Gmsh's
-Blossom/full-quad algorithms, non-affine CAD curve integration, FlexibleTransfinite
+as first-order recombined hexahedra with type-3 boundary quadrangles. P4 does not yet claim
+non-affine CAD curve integration, FlexibleTransfinite
 or HWall/size-map curve laws,
 quasi-transfinite or holed patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes, recombined three-sided patches,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, boundary-layer element topology, or
-periodic/embedded model constraints. P5–P6 remain pending.
+embedded model constraints.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.
@@ -193,7 +202,8 @@ uniform-refinement,
 four-sided transfinite, straight transfinite curve-law, three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
 recombined-hexahedron differentials
-as required bounds-checked children. A
+as required bounds-checked children, together with the P6 t1-square, OCC-cylinder,
+and BooleanDifference box differentials. A
 missing or wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
 aggregate command fail.
 

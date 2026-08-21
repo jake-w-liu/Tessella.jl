@@ -11,11 +11,12 @@ module Model
 using ..MeshTypes: Mesh, validate, nnodes, ntris, ntets
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using ..SizeField: AbstractSizeField, ConstantSize, size_at
-using ..Geometry: box_surface
-using ..Mesh3D: tetrahedralize
+using ..Geometry: box_surface, cylinder_surface, sphere_surface
+using ..Mesh3D: tetrahedralize, mesh_boolean
 
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
-export add_box!, add_physical_group!, set_physical_name!
+export add_box!, add_cylinder!, add_sphere!, boolean_volumes!
+export add_physical_group!, set_physical_name!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 mutable struct GeoModel
@@ -28,6 +29,10 @@ mutable struct GeoModel
     physical::Dict{Tuple{Int,Int},Vector{Int}}
     physical_names::Dict{Tuple{Int,Int},String}
     box_extents::Dict{Int,NTuple{6,Float64}}
+    cylinders::Dict{Int,NamedTuple{(:center,:axis,:radius,:height),
+                                   Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64}}}
+    spheres::Dict{Int,NamedTuple{(:center,:radius),Tuple{NTuple{3,Float64},Float64}}}
+    booleans::Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}
     next_tag::Vector{Int}
 end
 
@@ -37,6 +42,10 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Tuple{Int,Int},Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
                       Dict{Int,NTuple{6,Float64}}(),
+                      Dict{Int,NamedTuple{(:center,:axis,:radius,:height),
+                           Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64}}}(),
+                      Dict{Int,NamedTuple{(:center,:radius),Tuple{NTuple{3,Float64},Float64}}}(),
+                      Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}(),
                       Int[0,0,0,0])
 
 function _tag(value, caller, dim::Int)
@@ -130,6 +139,52 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
     return t
 end
 
+function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
+    caller="add_cylinder!"
+    c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
+    h=hypot(a...)
+    h>0 || throw(ArgumentError("$caller: axis must have positive length"))
+    r=try Float64(radius) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: radius must be Float64-representable"))
+    end
+    r>0 || throw(ArgumentError("$caller: radius must be positive"))
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    m.volumes[t]=Int[]
+    m.cylinders[t]=(center=c, axis=a, radius=r, height=h)
+    return t
+end
+
+function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
+    caller="add_sphere!"
+    c=_finite3(x,y,z,caller)
+    r=try Float64(radius) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: radius must be Float64-representable"))
+    end
+    r>0 || throw(ArgumentError("$caller: radius must be positive"))
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    m.volumes[t]=Int[]
+    m.spheres[t]=(center=c, radius=r)
+    return t
+end
+
+function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
+    caller="boolean_volumes!"
+    op in (:union,:intersection,:difference) || throw(ArgumentError(
+        "$caller: op must be :union, :intersection, or :difference"))
+    ta=_tag(a,caller,3); tb=_tag(b,caller,3)
+    haskey(m.volumes,ta) || throw(ArgumentError("$caller: unknown Volume[$ta]"))
+    haskey(m.volumes,tb) || throw(ArgumentError("$caller: unknown Volume[$tb]"))
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    m.volumes[t]=Int[]
+    m.booleans[t]=(op=op, a=ta, b=tb)
+    return t
+end
+
 function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, name::AbstractString="")
     caller="add_physical_group!"
     d=_tag(dim,caller,0)
@@ -204,14 +259,29 @@ function mesh_model_surface(m::GeoModel, tag::Integer; min_angle_deg::Real=25.0)
     return mesh
 end
 
+function _volume_surface(m::GeoModel, t::Int)
+    if haskey(m.box_extents,t)
+        x0,y0,z0,dx,dy,dz=m.box_extents[t]
+        return box_surface(x0,x0+dx,y0,y0+dy,z0,z0+dz)
+    elseif haskey(m.cylinders,t)
+        c=m.cylinders[t]
+        return cylinder_surface(c.center,c.axis,c.radius,c.height)
+    elseif haskey(m.spheres,t)
+        s=m.spheres[t]
+        return sphere_surface(s.center,s.radius)
+    elseif haskey(m.booleans,t)
+        spec=m.booleans[t]
+        A=_volume_surface(m,spec.a); B=_volume_surface(m,spec.b)
+        return mesh_boolean(A,B,spec.op)
+    end
+    throw(ArgumentError("mesh_model_volume: Volume[$t] has no native solid encoding"))
+end
+
 function mesh_model_volume(m::GeoModel, tag::Integer)
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    extents=get(m.box_extents,t,nothing)
-    extents===nothing && throw(ArgumentError("$caller: Volume[$t] has no native box encoding"))
-    x0,y0,z0,dx,dy,dz=extents
-    surface=box_surface(x0,x0+dx,y0,y0+dy,z0,z0+dz)
+    surface=_volume_surface(m,t)
     mesh=tetrahedralize(surface)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))

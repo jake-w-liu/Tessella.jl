@@ -41,6 +41,7 @@ using Tessella
     include("heal_test.jl")         # surface diagnostics (open/non-manifold/degenerate…)
     include("geometry_test.jl")     # box / cylinder / box-tunnel primitives
     include("cad_test.jl")          # native analytical geometry (surfaces + exact imprints), no OCC
+    include("brep_test.jl")         # ISO-10303-21 STEP / IGES classified-solid import
     include("pipeline_test.jl")     # mesh_volume: validated-or-explicit-blocker
 
     # Stage 6 — high-order elements.

@@ -47,6 +47,7 @@ include("Optimize.jl")       # Stage 4: tet quality report + Laplacian smoothing
 include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't fail")
 include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
 include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
+include("BRep.jl")           # P3: ISO-10303-21 STEP / IGES classified-solid import
 include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
 include("NURBS.jl")          # P3: native B-spline/NURBS evaluation
 include("Model.jl")          # P2: tagged geometry/entity kernel
@@ -75,12 +76,13 @@ using .TransfiniteVolume: mesh_transfinite_volume
 using .TransfinitePrism: mesh_transfinite_prism
 using .TransfiniteHex: mesh_transfinite_hex
 using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!,
-              add_box!, add_physical_group!, mesh_model_surface, mesh_model_volume
+              add_box!, add_cylinder!, add_sphere!, boolean_volumes!,
+              add_physical_group!, mesh_model_surface, mesh_model_volume
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
 using .BoundaryLayer: mesh_boundary_layer
 using .Periodic: periodic_identify
-using .CAD: import_step, import_iges
+using .BRep: import_step, import_iges
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
                   DistanceField, ThresholdField, BoxField, BallField, CylinderField,
                   FrustumField, MinSize, MaxSize,
@@ -123,6 +125,7 @@ export mesh_transfinite_volume
 export mesh_transfinite_prism
 export mesh_transfinite_hex
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!, add_box!
+export add_cylinder!, add_sphere!, boolean_volumes!
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 export execute_geo, mesh_boundary_layer, periodic_identify

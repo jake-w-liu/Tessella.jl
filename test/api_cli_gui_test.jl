@@ -4,7 +4,7 @@ using Tessella.API
 using Tessella.CLI: main
 using Tessella.GUI: GuiState, gui_command!
 using Tessella.Post: View, view_value, apply_plugin
-using Tessella.MeshTypes: ntets, nnodes, Mesh
+using Tessella.MeshTypes: ntets, nnodes, Mesh, tet_volume, node
 using Tessella.Geometry: box_surface
 
 @testset "API, CLI, GUI, and post views" begin
@@ -19,6 +19,24 @@ using Tessella.Geometry: box_surface
     @test_throws ArgumentError API.option("No.Such.Option")
     API.finalize()
     @test_throws ArgumentError API.mesh.generate(3)
+
+    API.initialize()
+    API.model.add_box(0,0,0,1,1,1; tag=1)
+    API.model.add_box(2,0,0,1,1,1; tag=2)
+    @test_throws ArgumentError API.mesh.generate(3)
+    API.finalize()
+
+    API.initialize()
+    API.model.add_box(0,0,0,2,1,1; tag=1)
+    API.model.add_box(0,0,0,1,1,1; tag=2)
+    @test API.model.boolean_difference(1,2; tag=3)==3
+    cut=API.mesh.generate(3)
+    @test ntets(cut)>0
+    CV=sum(tet_volume(node(cut,cut.tets[1,t]),node(cut,cut.tets[2,t]),
+                      node(cut,cut.tets[3,t]),node(cut,cut.tets[4,t]))
+           for t in 1:ntets(cut))
+    @test CV≈1.0 atol=1e-12
+    API.finalize()
 
     geo=mktemp() do path,io
         write(io,"Box(1) = {0, 0, 0, 1, 1, 1};\n")

@@ -1,0 +1,14 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Tessella unsupported-topology CRC fixture'),'2;1');
+FILE_NAME('unsupported.step','2026-08-21T00:00:00',('Tessella'),('Tessella'),
+          'Tessella.jl','Tessella.jl','');
+FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));
+ENDSEC;
+DATA;
+#1 = CARTESIAN_POINT('',(0.,0.,0.));
+#2 = CARTESIAN_POINT('',(1.,0.,0.));
+#3 = CARTESIAN_POINT('',(0.,1.,0.));
+#4 = MANIFOLD_SOLID_BREP('',#1);
+ENDSEC;
+END-ISO-10303-21;
