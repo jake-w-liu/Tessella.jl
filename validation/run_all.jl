@@ -170,6 +170,12 @@ eline_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --proj
 println("  command: ", eline_command)
 run(eline_command)
 
+println("\n── gmsh_parity embed sheet ──  Tessella vs Gmsh Surface-In-Volume sheet")
+esheet_script = joinpath(HERE, "gmsh_parity", "embed_sheet.jl")
+esheet_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $esheet_script`
+println("  command: ", esheet_command)
+run(esheet_command)
+
 println("\n── transfinite_hex ──  Gmsh 4.15.2 affine six-face hexahedra")
 transfinite_hex_script = joinpath(HERE, "transfinite_hex", "differential.jl")
 transfinite_hex_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_hex_script`

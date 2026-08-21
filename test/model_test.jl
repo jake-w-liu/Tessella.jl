@@ -376,4 +376,63 @@ using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node
                       node(volgeo.mesh,volgeo.mesh.tets[4,t]))
            for t in 1:ntets(volgeo.mesh))
     @test VG≈1.0 atol=1e-12
+
+    linevol=GeoModel()
+    add_box!(linevol,0,0,0,1,1,1; tag=1)
+    add_point!(linevol,0.2,0.3,0.4; tag=1)
+    add_point!(linevol,0.7,0.6,0.5; tag=2)
+    add_line!(linevol,1,2; tag=1)
+    embed!(linevol,1,[1],3,1)
+    lv=mesh_model_volume(linevol,1)
+    @test validate(lv).ok
+    @test ntets(lv)>0
+    LV=sum(tet_volume(node(lv,lv.tets[1,t]),node(lv,lv.tets[2,t]),
+                      node(lv,lv.tets[3,t]),node(lv,lv.tets[4,t]))
+           for t in 1:ntets(lv))
+    @test LV≈1.0 atol=1e-12
+    @test Tessella.Mesh3D.mesh_covers_segment3(lv,(0.2,0.3,0.4),(0.7,0.6,0.5))
+
+    sheet=GeoModel()
+    add_box!(sheet,0,0,0,1,1,1; tag=1)
+    add_point!(sheet,0.2,0.2,0.5; tag=1)
+    add_point!(sheet,0.8,0.2,0.5; tag=2)
+    add_point!(sheet,0.5,0.8,0.5; tag=3)
+    add_line!(sheet,1,2; tag=1); add_line!(sheet,2,3; tag=2); add_line!(sheet,3,1; tag=3)
+    add_curve_loop!(sheet,[1,2,3]; tag=1)
+    add_plane_surface!(sheet,[1]; tag=1)
+    embed!(sheet,2,[1],3,1)
+    sv=mesh_model_volume(sheet,1)
+    @test validate(sv).ok
+    @test ntets(sv)>0
+    SV=sum(tet_volume(node(sv,sv.tets[1,t]),node(sv,sv.tets[2,t]),
+                      node(sv,sv.tets[3,t]),node(sv,sv.tets[4,t]))
+           for t in 1:ntets(sv))
+    @test SV≈1.0 atol=1e-12
+    @test Tessella.Mesh3D.mesh_covers_triangle3(sv,(0.2,0.2,0.5),(0.8,0.2,0.5),(0.5,0.8,0.5))
+
+    sheetgeo=mktemp() do path,io
+        write(io, """
+            SetFactory("OpenCASCADE");
+            Box(1) = {0, 0, 0, 1, 1, 1};
+            Point(1) = {0.2, 0.2, 0.5, 0.5};
+            Point(2) = {0.8, 0.2, 0.5, 0.5};
+            Point(3) = {0.5, 0.8, 0.5, 0.5};
+            Line(1) = {1, 2};
+            Line(2) = {2, 3};
+            Line(3) = {3, 1};
+            Line Loop(1) = {1, 2, 3};
+            Plane Surface(1) = {1};
+            Surface{1} In Volume{1};
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=3)
+    end
+    @test validate(sheetgeo.mesh).ok
+    @test Tessella.Mesh3D.mesh_covers_triangle3(sheetgeo.mesh,(0.2,0.2,0.5),(0.8,0.2,0.5),(0.5,0.8,0.5))
+    SG=sum(tet_volume(node(sheetgeo.mesh,sheetgeo.mesh.tets[1,t]),
+                      node(sheetgeo.mesh,sheetgeo.mesh.tets[2,t]),
+                      node(sheetgeo.mesh,sheetgeo.mesh.tets[3,t]),
+                      node(sheetgeo.mesh,sheetgeo.mesh.tets[4,t]))
+           for t in 1:ntets(sheetgeo.mesh))
+    @test SG≈1.0 atol=1e-12
 end
