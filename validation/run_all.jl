@@ -140,6 +140,18 @@ t1_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project
 println("  command: ", t1_command)
 run(t1_command)
 
+println("\n── gmsh_parity cone ──  Tessella frustum vs Gmsh OCC Cone")
+cone_script = joinpath(HERE, "gmsh_parity", "cone_geo.jl")
+cone_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $cone_script`
+println("  command: ", cone_command)
+run(cone_command)
+
+println("\n── gmsh_parity NURBS surface ──  Tessella IGES-128 vs Gmsh OCC BSpline")
+nurbs_script = joinpath(HERE, "gmsh_parity", "nurbs_surface.jl")
+nurbs_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $nurbs_script`
+println("  command: ", nurbs_command)
+run(nurbs_command)
+
 println("\n── gmsh_parity cylinder ──  Tessella prism vs Gmsh OCC Cylinder")
 cyl_script = joinpath(HERE, "gmsh_parity", "cylinder_geo.jl")
 cyl_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $cyl_script`

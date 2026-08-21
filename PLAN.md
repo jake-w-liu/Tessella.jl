@@ -54,7 +54,7 @@ Tessella
 ├── Heal          surface defect and meshability diagnostics
 ├── Geometry      native box/cylinder/cone/geodesic-sphere surfaces
 ├── CAD           analytical surfaces, projection, imprints
-├── BRep          ISO-10303-21 STEP / IGES classified-solid import (box/sphere/cylinder)
+├── BRep          ISO-10303-21 STEP / IGES classified-solid import (box/sphere/cylinder/cone) plus NURBS 126/128
 ├── NURBS         native B-spline/NURBS curve and surface evaluation
 ├── Model         tagged point/curve/loop/surface/volume entity kernel plus native solids/Booleans/embeds
 ├── GeoExec       bounded Point/Line/Loop/Surface/Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/Rotate `.geo` execution
@@ -107,10 +107,10 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O, and a tagged point/curve/surface/volume kernel |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation, classified STEP/IGES solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers, 2-D quad/fan layers, and translation periodic identification |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — model/mesh API, CLI, headless GUI state, views/plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, 2-D boundary-layer quads, API box, OCC cylinder, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans or remaining-volume
 tet fill after a layer extrusion, Gmsh's global
@@ -137,7 +137,10 @@ polyhedral path used by ASCENT, including boxes, cylinders, cones, geodesic sphe
 projection/imprint curves, cavities, mesh Booleans, and validated translation,
 rotation, dilation, reflection, and general affine transforms of finalized simplex
 meshes. Classified ISO-10303-21 STEP and IGES solids that are axis-aligned blocks,
-spheres, or right circular cylinders are imported and filled; any other topology is
+spheres, right circular cylinders, or right circular cones are imported and filled;
+STEP `B_SPLINE_CURVE_WITH_KNOTS` / `B_SPLINE_SURFACE_WITH_KNOTS` (including
+complex rational instances) and IGES 126/128 import as native NURBS objects, with
+IGES NURBS export. Any other topology is
 an explicit blocker listing the seen entity types. The entity kernel records native
 boxes, cylinders, spheres, cones, and mesh-Boolean volumes. Bounded `.geo` execution covers
 Point/Line/Loop/Surface, Box/Cylinder/Sphere/Cone, BooleanDifference/Union/Intersection
@@ -148,8 +151,8 @@ point to appear as a mesh node; Line-In-Surface embeddings recover the curve as 
 interior constrained edge chain without creating a hole; Point-In-Volume embeddings
 insert a Steiner vertex by a tet split; Line-In-Volume and Surface-In-Volume recover
 interior edge chains and open triangular sheets as tet faces without removing volume.
-It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD
-import/export, transformations of arbitrary CAD entities, or complete `.geo`
+It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD of
+unclassified topology, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
 functions, prior scalar bindings, and explicit field/physical tags with resource
 bounds. Finite constant `start:end[:increment]` lists are expanded in recognized
@@ -213,7 +216,7 @@ four-sided transfinite, straight transfinite curve-law, three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
 recombined-hexahedron differentials
 as required bounds-checked children, together with the P6 t1-square, OCC-cylinder,
-BooleanDifference box, and 2-D boundary-layer differentials. A
+OCC-cone, IGES-128 bilinear, BooleanDifference box, and 2-D boundary-layer differentials. A
 missing or wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
 aggregate command fail.
 
