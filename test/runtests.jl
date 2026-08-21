@@ -11,6 +11,7 @@ using Tessella
     include("recombine_test.jl")    # deterministic triangle-to-quad recombination
     include("refine_test.jl")       # deterministic one-level uniform simplex refinement
     include("transfinite_test.jl")  # validated four-sided planar structured patches
+    include("transfinite_curve_test.jl") # straight-curve Progression/Bump/Beta laws
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle

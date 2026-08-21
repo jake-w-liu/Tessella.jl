@@ -92,6 +92,12 @@ transfinite_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes 
 println("  command: ", transfinite_command)
 run(transfinite_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── transfinite_curve ──  Gmsh 4.15.2 straight-curve laws")
+transfinite_curve_script = joinpath(HERE, "transfinite_curve", "differential.jl")
+transfinite_curve_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_curve_script`
+println("  command: ", transfinite_curve_command)
+run(transfinite_curve_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),
