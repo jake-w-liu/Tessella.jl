@@ -718,6 +718,28 @@ end
         @test field_value(pvcrop,0.5,0.0,0.0)==Tessella.SizeField.GMSH_MAX_SIZE
         @test field_value(PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],[-1.0,1.0];
                           lines=[(1,2)],crop_negative=false),0.5,0.0,0.0)==0.0
+
+        # Multiple time steps: c×n×steps data is validated whole and one step
+        # is selected for storage at construction.
+        steps_data=zeros(1,2,3)
+        steps_data[1,1,:].=[0.2,0.4,0.6]
+        steps_data[1,2,:].=[0.8,1.6,3.2]
+        pv_t1=PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],steps_data; time=1,
+                            lines=[(1,2)],use_closest=false)
+        pv_t3=PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],steps_data; time=3,
+                            lines=[(1,2)],use_closest=false)
+        @test field_value(pv_t1,0.25,0.0,0.0)≈0.35
+        @test field_value(pv_t3,0.25,0.0,0.0)≈1.25
+        @test pv_t1.values==[0.2,0.8]
+        @test pv_t3.values==[0.6,3.2]
+        @test_throws ArgumentError PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],
+                                                 steps_data; time=4)
+        @test_throws ArgumentError PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],
+                                                 [0.2,0.8]; time=2)
+        bad_steps=deepcopy(steps_data)
+        bad_steps[1,2,2]=Inf
+        @test_throws ArgumentError PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],
+                                                 bad_steps; time=1)
         pvactive=PostViewField([0.0 2.0 100.0;0.0 0.0 0.0;0.0 0.0 0.0],
                                [0.2,0.8,0.01];lines=[(1,2)])
         @test field_value(pvactive,99.0,0.0,0.0)==0.8
