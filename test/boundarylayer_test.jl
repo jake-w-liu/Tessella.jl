@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris, triangle_area
+using Tessella.MeshTypes: ntris, triangle_area, tet_volume
 using Tessella.Elements: validate
 
 function _bl_quad_area(mesh)
@@ -24,6 +24,26 @@ function _bl_quad_area(mesh)
         end
     end
     return area
+end
+
+_bl_pt(m,i)=ntuple(d->m.coords[d,i],3)
+
+function _bl_mixed_volumes(m)
+    vp=vt=0.0
+    for block in m.blocks
+        if block.msh==6
+            for c in axes(block.nodes,2)
+                vp+=Tessella.BoundaryLayer._prism_volume6(m.coords,
+                    ntuple(i->Int(block.nodes[i,c]),6))
+            end
+        elseif block.msh==4
+            for c in axes(block.nodes,2)
+                vt+=tet_volume(_bl_pt(m,block.nodes[1,c]),_bl_pt(m,block.nodes[2,c]),
+                               _bl_pt(m,block.nodes[3,c]),_bl_pt(m,block.nodes[4,c]))
+            end
+        end
+    end
+    return vp,vt
 end
 
 @testset "prismatic boundary layer" begin
@@ -109,4 +129,52 @@ end
                                                      fans=(1,), fan_elements=nfan)
     @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
                                                      fans=(2,), fan_elements=1)
+end
+
+@testset "filled prismatic boundary layer" begin
+    # Unit cube wall: two inward layers leave a core that must close the volume.
+    cube=Tessella.Geometry.box_surface(0.0,1.0,0.0,1.0,0.0,1.0)
+    m=mesh_boundary_layer_filled(cube; hwall=0.1, ratio=1.2, nlayers=2)
+    @test validate(m).ok
+    nv=8
+    prisms=only(b for b in m.blocks if b.msh==6)
+    tets=only(b for b in m.blocks if b.msh==4)
+    @test size(prisms.nodes,2)==ntris(cube)*2
+    @test size(tets.nodes,2)>0
+    vp,vt=_bl_mixed_volumes(m)
+    @test vp+vt≈1.0 rtol=1e-12
+    # Interface conformity: every last-layer node is shared with the tet block.
+    capids=Set(2nv+1:3nv)
+    tetnodes=Set(Int(tets.nodes[i,c]) for c in axes(tets.nodes,2), i in 1:4)
+    @test capids ⊆ tetnodes
+
+    # Annulus: outer solid wall + inner cavity wall.
+    outer=Tessella.Geometry.sphere_surface((0.0,0.0,0.0),1.0)
+    inner=Tessella.Geometry.sphere_surface((0.0,0.0,0.0),0.4)
+    n1=size(outer.coords,2)
+    shell=Mesh(hcat(outer.coords,inner.coords);
+               tris=hcat(outer.tris, inner.tris .+ Int32(n1)))
+    ann=mesh_boundary_layer_filled(shell; hwall=0.04, ratio=1.25, nlayers=2,
+                                   cavities=(2,))
+    @test validate(ann).ok
+    _,at=_bl_mixed_volumes(ann)
+    Vout=4/3*pi; Vin=4/3*pi*0.4^3
+    # The vertex-normal offset eats more than an ideal offset, so the filled
+    # core must sit strictly between zero and the analytic annulus volume.
+    @test 0 < at < (Vout-Vin)
+
+    # Blockers: oversized layers fold the shell and violate its identity.
+    @test_throws ErrorException mesh_boundary_layer_filled(cube; hwall=0.6,
+                                                           ratio=1.05, nlayers=2)
+    # Open surface has no enclosed interior to fill.
+    open_sq=Mesh(Float64[0 1 1; 0 0 1; 0 0 0]; tris=[1 2 3]')
+    @test_throws ArgumentError mesh_boundary_layer_filled(open_sq; hwall=0.1,
+                                                          ratio=1.2, nlayers=2)
+    # Cavity bookkeeping.
+    @test_throws ArgumentError mesh_boundary_layer_filled(shell; hwall=0.04,
+        ratio=1.25, nlayers=2, cavities=(1,2))
+    @test_throws ArgumentError mesh_boundary_layer_filled(shell; hwall=0.04,
+        ratio=1.25, nlayers=2, cavities=(5,))
+    @test_throws ArgumentError mesh_boundary_layer_filled(shell; hwall=0.04,
+        ratio=1.25, nlayers=2, cavities=(2,2))
 end
