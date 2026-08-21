@@ -22,7 +22,32 @@ function _nearest_point_checksum(field,point,n::Int)
         d,i=Tessella.SizeField._nearest_point(field,point)
         distance+=d;identity+=i
     end
-    return distance,identity
+    return distance+identity
+end
+
+function _field_value_checksum(field,point,n::Int)
+    value=0.0
+    @inbounds for _ in 1:n
+        value+=field_value(field,point)
+    end
+    return value
+end
+
+function _size_at_checksum(field,point,n::Int)
+    value=0.0
+    @inbounds for _ in 1:n
+        value+=size_at(field,point)
+    end
+    return value
+end
+
+function _metric_eigenvalue_checksum(metric,n::Int)
+    value=0.0
+    @inbounds for _ in 1:n
+        eigenvalues=Tessella.SizeField.metric_eigenvalues(metric)
+        value+=eigenvalues[1]+eigenvalues[2]+eigenvalues[3]
+    end
+    return value
 end
 
 function _attractor_metric_checksum(field,n::Int)
@@ -78,8 +103,9 @@ end
                 [Tessella.SizeField._distance_triangle(q,t...) for t in triangles]))
             @test field_value(accelerated,q)==expected
         end
-        field_value(accelerated,(0.1,0.2,0.3))
-        @test (@allocated field_value(accelerated,(0.1,0.2,0.3)))==0
+        _field_value_checksum(accelerated,(0.1,0.2,0.3),1)
+        @test (@allocated _field_value_checksum(
+            accelerated,(0.1,0.2,0.3),10_000))<=64
     end
 
     @testset "Threshold, Box, Min/Max, and final bounds" begin
@@ -395,8 +421,8 @@ end
         for incompatible in ("π+x","X","PI","E","SIN(x)")
             @test_throws ArgumentError MathEvalField(incompatible)
         end
-        size_at(me,0.1,0.2,0.0) # warm the evaluator before the allocation gate
-        @test (@allocated size_at(me,0.1,0.2,0.0))==0
+        _size_at_checksum(me,(0.1,0.2,0.0),1)
+        @test (@allocated _size_at_checksum(me,(0.1,0.2,0.0),10_000))<=64
 
         # F-tag composition: F1 is Distance to origin, MathEval F1+0.05.
         dist=DistanceField(points=[(0.0,0.0,0.0)])
@@ -404,8 +430,8 @@ end
         @test size_at(composed,3.0,4.0,0.0)==5.05
         @test field_value(MathEvalField("F999+1"),0,0,0)==
               Tessella.SizeField.GMSH_MAX_SIZE+1
-        size_at(composed,3.0,4.0,0.0)
-        @test (@allocated size_at(composed,3.0,4.0,0.0))==0
+        _size_at_checksum(composed,(3.0,4.0,0.0),1)
+        @test (@allocated _size_at_checksum(composed,(3.0,4.0,0.0),10_000))<=64
 
         r2=MathEvalField("x^2 + y^2 + z^2")
         # Independent derivative/laplacian/mean of r².
@@ -539,6 +565,7 @@ end
                                                max_level=1,max_cells=1)
 
         pv=PostViewField([0.0 1.0; 0.0 0.0; 0.0 0.0],[0.2,0.8])
+        @test pv.values==[0.2,0.8]
         @test field_value(pv,0.0,0.0,0.0)==0.2
         @test field_value(pv,0.9,0.0,0.0)==0.8
         pvexact=PostViewField([0.0 1.0;0.0 0.0;0.0 0.0],[0.2,0.8];
@@ -586,8 +613,84 @@ end
             [0.2,0.4,0.6,0.8];tetrahedra=reshape(Int32[1,2,3,4],4,1))
         @test field_value(pvtetra_closest,2.0,2.0,2.0)==0.4
 
-        # Tetrahedra, triangles, lines, then points are searched in Gmsh's
-        # dimensional precedence order even when their coordinates overlap.
+        # Public Gmsh 4.15.2 `view.probe` oracles for first-order SQ/SH/SI/SY.
+        # The physical queries below were generated from the listed reference
+        # coordinates with Gmsh's own shape functions; the returned values were
+        # 0.516, 0.603, 0.695 and 0.645, respectively.
+        quadrangle_coords=[0.0 2.0 2.4 -0.2;
+                           0.0 0.0 1.5  1.0;
+                           0.0 0.0 0.0  0.0]
+        pvquadrangle=PostViewField(quadrangle_coords,[0.2,0.4,0.8,1.0];
+            quadrangles=[(1,2,3,4)],use_closest=false)
+        @test field_value(pvquadrangle,1.256,0.455,0.0)≈0.516
+        @test field_value(pvquadrangle,1.256,0.455,1e-7)≈0.516
+        @test field_value(pvquadrangle,1.256,0.455,1e-6)==
+              Tessella.SizeField.GMSH_MAX_SIZE
+        @test field_value(pvquadrangle,2.240000118,0.900000015,0.0)≈
+              0.639999998
+        affine_origin=[0.1,-0.3,0.7]
+        affine_a=[sqrt(2.0),pi/7,-0.4];affine_b=[-0.2,sqrt(3.0),0.6]
+        affine_quadrangle=hcat(affine_origin,affine_origin+affine_a,
+            affine_origin+affine_a+affine_b,affine_origin+affine_b)
+        affine_query=affine_quadrangle*[0.26,0.39,0.21,0.14]
+        pvaffine_quadrangle=PostViewField(affine_quadrangle,[0.2,0.4,0.8,1.0];
+            quadrangles=[(1,2,3,4)],use_closest=false)
+        @test field_value(pvaffine_quadrangle,affine_query...)≈0.516
+
+        hexahedron_coords=[0.0 2.0 2.2 -0.1  0.1 2.1 2.3 0.0;
+                           0.0 0.0 1.2  1.0 -0.1 0.1 1.1 1.2;
+                           0.0 0.0 0.1  0.0  1.1 1.0 1.4 1.2]
+        pvhexahedron=PostViewField(hexahedron_coords,
+            [0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9];
+            hexahedra=[ntuple(identity,8)],use_closest=false)
+        @test field_value(pvhexahedron,1.298,0.406,0.8029)≈0.603
+
+        prism_coords=[0.0 2.0 0.0  0.2 2.3 -0.1;
+                      0.0 0.0 1.0 -0.1 0.2  1.2;
+                      0.0 0.0 0.0  1.2 1.1  1.3]
+        pvprism=PostViewField(prism_coords,[0.2,0.3,0.5,0.7,0.9,1.1];
+            prisms=[ntuple(identity,6)],use_closest=false)
+        @test field_value(pvprism,0.491,0.335,0.847)≈0.695
+
+        pyramid_coords=[-1.0  1.0 1.0 -1.0  0.2;
+                        -1.0 -1.0 1.0  1.0 -0.1;
+                         0.0  0.0 0.2  0.1  1.4]
+        pvpyramid=PostViewField(pyramid_coords,[0.2,0.3,0.5,0.7,1.1];
+            pyramids=[ntuple(identity,5)],use_closest=false)
+        @test field_value(pvpyramid,0.28,-0.34,0.585)≈0.645
+        pvpyramid_closest=PostViewField(pyramid_coords,[0.2,0.3,0.5,0.7,1.1];
+            pyramids=[ntuple(identity,5)])
+        @test field_value(pvpyramid_closest,10.0,10.0,10.0)==0.5
+
+        # Gmsh interpolates vector components before taking their norm. Its
+        # PostView scalar operator returns MAX_LC for tensor views.
+        vector_values=[3.0 0.0 0.0 1.0;
+                       0.0 4.0 0.0 2.0;
+                       0.0 0.0 5.0 2.0]
+        pvvector=PostViewField(quadrangle_coords,vector_values;
+            quadrangles=[(1,2,3,4)],use_closest=false)
+        @test field_value(pvvector,0.584,0.92,0.0)≈2.862236887471056
+        @test field_value(pvvector,0.584,0.92,0.0,(2,7))≈2.862236887471056
+        @test field_value(pvvector,10.0,10.0,10.0)==
+              Tessella.SizeField.GMSH_MAX_SIZE
+        vector_line=PostViewField([0.0 2.0;zeros(2,2)],
+            [3.0 0.0;0.0 4.0;0.0 0.0];lines=[(1,2)],use_closest=false)
+        @test field_value(vector_line,1.0,0.0,0.0)==2.5
+        zero_vector=PostViewField(reshape(Float64[0,0,0],3,1),zeros(3,1))
+        @test field_value(zero_vector,0.0,0.0,0.0)==
+              Tessella.SizeField.GMSH_MAX_SIZE
+        @test field_value(PostViewField(reshape(Float64[0,0,0],3,1),zeros(3,1);
+                          crop_negative=false),0.0,0.0,0.0)==0.0
+        tensor_values=reshape(
+            [10(k-1)+(component-1)+0.25 for component in 1:9,k in 1:5],9,5)
+        pvtensor=PostViewField(pyramid_coords,tensor_values;
+            pyramids=[ntuple(identity,5)],use_closest=false)
+        @test field_value(pvtensor,0.0,0.0,0.0)==Tessella.SizeField.GMSH_MAX_SIZE
+        @test field_value(pvtensor,100.0,100.0,100.0)==
+              Tessella.SizeField.GMSH_MAX_SIZE
+
+        # SS/SH/SI/SY, then ST/SQ, SL and SP are searched in Gmsh's exact
+        # list-class precedence order even when their coordinates overlap.
         pvmixed=PostViewField(
             [0.0 1.0 0.0  0.0 1.0;0.0 0.0 1.0  0.0 0.0;zeros(1,5)],
             [0.2,0.5,0.8, 1.2,1.8];lines=[(4,5)],triangles=[(1,2,3)])
@@ -628,6 +731,26 @@ end
         @test_throws ArgumentError PostViewField(
             [0.0 1.0 0.0 1.0;0.0 0.0 1.0 1.0;0.0 0.0 0.0 0.0],
             [0.2,0.4,0.6,0.8];tetrahedra=[(1,2,3,4)])
+        @test_throws ArgumentError PostViewField(
+            [0.0 1.0 1.0 0.0;0.0 0.0 1.0 1.0;0.0 0.0 0.2 0.0],
+            [0.2,0.4,0.6,0.8];quadrangles=[(1,2,3,4)])
+        @test_throws ArgumentError PostViewField(
+            [0.0 1.0 1.0 0.0;0.0 0.0 1.0 1.0;zeros(1,4)],
+            [0.2,0.4,0.6,0.8];quadrangles=[(1,2,3,1)])
+        @test_throws ArgumentError PostViewField(zeros(3,8),collect(1.0:8.0);
+            hexahedra=[ntuple(identity,8)])
+        @test_throws ArgumentError PostViewField(zeros(3,6),collect(1.0:6.0);
+            prisms=[ntuple(identity,6)])
+        @test_throws ArgumentError PostViewField(zeros(3,5),collect(1.0:5.0);
+            pyramids=[ntuple(identity,5)])
+        @test_throws ArgumentError PostViewField(zeros(3,2),zeros(2,2))
+        @test_throws ArgumentError PostViewField(zeros(3,2),zeros(3,3))
+        @test_throws ArgumentError PostViewField(zeros(3,2),"unsupported")
+        @test_throws ArgumentError PostViewField(reshape(Float64[0,0,0],3,1),
+            fill(NaN,3,1))
+        @test_throws ArgumentError PostViewField(quadrangle_coords,
+            [0.2,0.4,0.8,1.0];points=[1],quadrangles=[(1,2,3,4)],
+            max_elements=1)
         @test_throws ArgumentError PostViewField(reshape(Float64[0,0,0],3,1),
             [0.2];points=Int[])
         @test_throws ArgumentError PostViewField(reshape(Float64[0,0,0],3,1),
@@ -655,17 +778,49 @@ end
             [-1e308 1e308 -1e308;-1e308 -1e308 1e308;0.0 0.0 0.0],
             [0.2,0.5,0.8];triangles=[(1,2,3)],use_closest=false)
         @test field_value(widetriangle,-5e307,-5e307,0.0)≈0.425
+        largest=floatmax(Float64)
+        widequadrangle=PostViewField(
+            [-largest largest largest -largest;-largest -largest largest largest;
+             0.0 0.0 0.0 0.0],[0.2,0.4,0.8,1.0];
+            quadrangles=[(1,2,3,4)],use_closest=false)
+        @test field_value(widequadrangle,0.0,0.0,0.0)≈0.6
+        widehexahedron=PostViewField(
+            [-largest largest largest -largest -largest largest largest -largest;
+             -largest -largest largest largest -largest -largest largest largest;
+             -largest -largest -largest -largest largest largest largest largest],
+            [0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9];
+            hexahedra=[ntuple(identity,8)],use_closest=false)
+        @test field_value(widehexahedron,0.0,0.0,0.0)≈0.55
         tiny=Float64(2)^-1000
+        tinyquadrangle=PostViewField([0.0 tiny tiny 0.0;0.0 0.0 tiny tiny;
+                                      0.0 0.0 0.0 0.0],
+            [0.2,0.4,0.8,1.0];quadrangles=[(1,2,3,4)],use_closest=false)
+        @test field_value(tinyquadrangle,tiny/2,tiny/2,0.0)≈0.6
         tinytetra=PostViewField(
             [0.0 tiny 0.0 0.0;0.0 0.0 tiny 0.0;0.0 0.0 0.0 tiny],
             [0.2,0.4,0.6,0.8];tetrahedra=[(1,2,3,4)],use_closest=false)
         @test field_value(tinytetra,tiny/10,tiny/5,3tiny/10)≈0.48
+        robust_vector=PostViewField(reshape(Float64[0,0,0],3,1),
+            reshape(fill(floatmax(Float64)/2,3),3,1))
+        @test field_value(robust_vector,0,0,0)≈
+              hypot(floatmax(Float64)/2,floatmax(Float64)/2,floatmax(Float64)/2)
+        overflowing_vector=PostViewField(reshape(Float64[0,0,0],3,1),
+            reshape(fill(floatmax(Float64),3),3,1))
+        @test_throws ArgumentError field_value(overflowing_vector,0,0,0)
         _nearest_point_checksum(pv.tree,(0.2,0.3,0.4),1)
-        @test (@allocated _nearest_point_checksum(pv.tree,(0.2,0.3,0.4),10_000))<=64
+        # Julia 1.11 can box the single checksum returned through `@allocated`;
+        # the bound remains constant over 10,000 nearest-point queries.
+        @test (@allocated _nearest_point_checksum(
+            pv.tree,(0.2,0.3,0.4),10_000))<=256
         for (postview,point) in ((pv,(0.0,0.0,0.0)),
                                  (pvline,(0.5,0.0,0.0)),
                                  (pvtriangle,(0.25,0.25,0.0)),
                                  (pvtetra,(0.1,0.2,0.3)),
+                                 (pvquadrangle,(1.256,0.455,0.0)),
+                                 (pvhexahedron,(1.298,0.406,0.8029)),
+                                 (pvprism,(0.491,0.335,0.847)),
+                                 (pvpyramid,(0.28,-0.34,0.585)),
+                                 (pvvector,(0.584,0.92,0.0)),
                                  (pvforest,(1.0,30.0,0.0)))
             _postview_checksum(postview,point,1)
             @test (@allocated _postview_checksum(postview,point,10_000))<=64
@@ -812,9 +967,9 @@ end
             2.0585825161099052e307,6.215415599727288e307,0.0,0.0)
         @test_throws ErrorException Tessella.SizeField.intersection_alauzet(impossible_a,
                                                                             impossible_b)
-        Tessella.SizeField.metric_eigenvalues(mc) # warm compilation
+        _metric_eigenvalue_checksum(mc,1)
         Tessella.SizeField.intersection_alauzet(ma,mb)
-        @test (@allocated Tessella.SizeField.metric_eigenvalues(mc))==0
+        @test (@allocated _metric_eigenvalue_checksum(mc,10_000))<=64
         expected_checksum=10_000*Tessella.SizeField.intersection_alauzet(ma,mb).m11
         @test _sizefield_intersection_checksum(ma,mb,10_000)≈expected_checksum
         _sizefield_intersection_checksum(ma,mb,1)

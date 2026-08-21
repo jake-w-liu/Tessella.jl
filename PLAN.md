@@ -95,7 +95,9 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | PENDING |
 
 P1 does not yet claim boundary-layer element topology, Gmsh's global
-`AutomaticMeshSizeField` pipeline, non-simplex/higher-order/vector/tensor `PostView`,
+`AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
+multiple-time-step, or mixed-component `PostView` data, materially warped
+quadrangles, `PostView` tensor-to-metric evaluation,
 direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD
 distance queries. P2 does not yet claim general mixed-element generation or
 recombination beyond P4's first-order surface pairing, integration of mixed blocks
