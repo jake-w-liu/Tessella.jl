@@ -52,7 +52,7 @@ include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 
 include("NURBS.jl")          # P3: native B-spline/NURBS evaluation
 include("Model.jl")          # P2: tagged geometry/entity kernel
 include("GeoExec.jl")        # P3: bounded .geo execution
-include("BoundaryLayer.jl")  # P4: prismatic boundary-layer extrusion
+include("BoundaryLayer.jl")  # P4: prismatic and 2-D quad/fan boundary-layer extrusion
 include("Periodic.jl")       # P4: periodic identification
 include("Post.jl")           # P5: views and plugins
 include("API.jl")            # P5: model/mesh/option façade
@@ -81,7 +81,7 @@ using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surfac
               add_physical_group!, mesh_model_surface, mesh_model_volume
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
-using .BoundaryLayer: mesh_boundary_layer
+using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d
 using .Periodic: periodic_identify
 using .BRep: import_step, import_iges
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
@@ -130,7 +130,7 @@ export add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, dilate_volume!, rotate_volume!
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
-export execute_geo, mesh_boundary_layer, periodic_identify
+export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d, periodic_identify
 export import_step, import_iges
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,
        ThresholdField, BoxField, BallField, CylinderField, FrustumField,

@@ -26,10 +26,10 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder import, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, and recombined hexahedra |
-| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, API-box, OCC-cylinder, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers, and 2-D quad/fan layers |
+| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, 2-D boundary-layer quads, API-box, OCC-cylinder, and BooleanDifference box Gmsh 4.15.2 differentials |
 
-P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
+P1 does not claim 3-D multi-wall boundary-layer fans or remaining-volume tet fill after a layer extrusion, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, multiple-time-step, or mixed-component
 `PostView`, materially warped quadrangles, `PostView` tensor-to-metric evaluation, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
@@ -69,25 +69,28 @@ be emitted as first-order Gmsh type-3 quadrangles with exact projected
 corner-Jacobian certification. Affine eight-corner blocks use Gmsh's unrecombined
 six-tetrahedron transfinite volume subdivision; canonical affine triangular prisms
 use its legacy collapsed-grid five-face tetrahedral path. Surface recombination now
-includes Edmonds blossom matching and a `full_quad` perfect-matching gate. P4 does not yet claim
+includes Edmonds blossom matching and a `full_quad` perfect-matching gate.
+Planar constant-`z` polylines extrude to type-3 quadrangles along left-normals,
+with optional convex-corner fans. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite or HWall/size-map
 curve laws, quasi-transfinite or holed patches,
 general CAD parameterizations, recombined three-sided patches, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
-recombination, selective or high-order refinement, coarsening, boundary-layer element
-topology, or periodic/embedded model constraints.
+recombination, selective or high-order refinement, coarsening,
+3-D multi-wall boundary-layer fans, remaining-volume tet fill, or periodic/embedded
+model constraints.
 
 OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
 post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
-Re-measured on 2026-08-21 with Julia 1.12.7 after Line-In-Volume edge-chain
-recovery, Surface-In-Volume open-sheet face recovery, and the P6 embed-sheet
-corpus. Both bounds-checked package runs matched:
+Re-measured on 2026-08-21 with Julia 1.12.7 after 2-D boundary-layer
+quad/fan topology and the P6 BL-quads corpus. Both bounds-checked package
+runs matched:
 
 - `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
-  — 163,220/163,220 assertions passed twice (10m10.1s, then 10m07.4s).
+  — 163,235/163,235 assertions passed twice (10m16.5s, then 10m16.1s).
 - `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
   — exited 0 against Gmsh 4.15.2-git. Exact flat-model volumes box=2, tunnel=24,
   hollow box=35; cylinder prism 62.652572; enclosure gmsh empty solids reproduced.
@@ -109,6 +112,8 @@ corpus. Both bounds-checked package runs matched:
   gmsh_tris=22 tessella_tris=22 tessella_nodes=18`.
 - P6 embed-sheet child: `GMSH_PARITY_EMBED_SHEET_OK gmsh=4.15.2 tessella_volume=1
   gmsh_tets=904 tessella_tets=44 tessella_nodes=17`.
+- P6 2-D boundary-layer child: `GMSH_PARITY_BL2D_OK gmsh=4.15.2
+  tessella_area=0.15960000000000005 gmsh_quads=10 gmsh_tris=24 tessella_quads=3`.
 - P6 cylinder child: `GMSH_PARITY_CYLINDER_OK gmsh=4.15.2
   tessella_prism=6.211657082460498 gmsh_tets=60 tessella_tets=96`.
 - P6 boolean-boxes child: `GMSH_PARITY_BOOLEAN_OK gmsh=4.15.2 tessella_volume=1
