@@ -2127,32 +2127,46 @@ end
 
 """
     PostViewField(coords, values; points=nothing, lines=(), triangles=(),
-                  tetrahedra=(), crop_negative=true, use_closest=true,
+                  quadrangles=(), tetrahedra=(), hexahedra=(), prisms=(),
+                  pyramids=(), crop_negative=true, use_closest=true,
                   reference_tolerance=1e-6, max_nodes=1_000_000,
                   max_elements=1_000_000)
 
-Gmsh `PostView` on first-order scalar list data. `coords` is `3×n`, `values`
-has length `n`, and the optional connectivity is 1-based (`2×m` lines,
-`3×m` triangles, and `4×m` tetrahedra). Connectivity can alternatively
-be an iterable of index tuples. When no connectivity keyword is supplied, every
-column remains a scalar point element, preserving the original point-only API.
-With explicit line/triangle/tetrahedron connectivity, point elements are absent
-unless their indices are supplied through `points`.
+Gmsh `PostView` on first-order list data. `coords` is `3×n`. Scalar `values`
+can be a length-`n` vector or a `1×n` matrix; vector and tensor values are `3×n`
+and `9×n` matrices, respectively. Connectivity is 1-based and can be an
+arity-by-element matrix or an iterable of index tuples. When no connectivity is
+supplied, every column remains a point element, preserving the original API.
+With explicit topology, point elements are absent unless supplied through
+`points`.
 
-Queries inside a simplex use its linear nodal interpolant. If no element contains
-the query, `use_closest=true` evaluates the closest active node, as Gmsh does.
-Non-positive interpolated or closest values become [`GMSH_MAX_SIZE`](@ref) when
-`crop_negative=true`. The supported list-element classes are scalar `SP`, `SL`,
-`ST`, and `SS`; quadrangles, hexahedra, prisms, pyramids, higher-order elements,
-and vector/tensor list data are intentionally not accepted by this constructor.
+Queries use Gmsh's first-order reference-element interpolants for points, lines,
+triangles, planar quadrangles, tetrahedra, hexahedra, prisms and pyramids. If no
+element contains the query, `use_closest=true` retries at the closest active
+node. Scalar data returns the interpolant; vector data returns the Euclidean norm
+of the interpolated vector, matching the scalar operator of Gmsh's `PostView`
+field. The scalar operator of tensor data is [`GMSH_MAX_SIZE`](@ref), as Gmsh
+does; tensor-to-metric evaluation is not exposed by this scalar constructor.
+Non-positive scalar results become `GMSH_MAX_SIZE` when `crop_negative=true`.
+
+Curved/high-order list interpolation matrices, multiple time steps, mixed component
+counts, and non-planar quadrangles are rejected or not represented. Gmsh itself
+requires an adapted visualization grid before querying non-adapted high-order list
+data. Vector norms use overflow-safe arithmetic; results that are not representable
+as finite `Float64` values are rejected by the field-result contract.
 """
 struct PostViewField <: AbstractField
     coords::Matrix{Float64}
     values::Vector{Float64}
+    num_components::UInt8
     points::Matrix{Int32}
     lines::Matrix{Int32}
     triangles::Matrix{Int32}
+    quadrangles::Matrix{Int32}
     tetrahedra::Matrix{Int32}
+    hexahedra::Matrix{Int32}
+    prisms::Matrix{Int32}
+    pyramids::Matrix{Int32}
     crop_negative::Bool
     use_closest::Bool
     reference_tolerance::Float64
@@ -2259,6 +2273,142 @@ end
 
 @inline _postview_det(a,b,c)=_dot3(a,_postview_cross(b,c))
 
+@inline function _postview_shape(kind::UInt8,slot::Int,u,v,w)
+    if kind==7 # quadrangle
+        slot==1 && return 0.25*(1-u)*(1-v)
+        slot==2 && return 0.25*(1+u)*(1-v)
+        slot==3 && return 0.25*(1+u)*(1+v)
+        return 0.25*(1-u)*(1+v)
+    elseif kind==4 # hexahedron
+        slot==1 && return 0.125*(1-u)*(1-v)*(1-w)
+        slot==2 && return 0.125*(1+u)*(1-v)*(1-w)
+        slot==3 && return 0.125*(1+u)*(1+v)*(1-w)
+        slot==4 && return 0.125*(1-u)*(1+v)*(1-w)
+        slot==5 && return 0.125*(1-u)*(1-v)*(1+w)
+        slot==6 && return 0.125*(1+u)*(1-v)*(1+w)
+        slot==7 && return 0.125*(1+u)*(1+v)*(1+w)
+        return 0.125*(1-u)*(1+v)*(1+w)
+    elseif kind==5 # prism
+        slot==1 && return 0.5*(1-u-v)*(1-w)
+        slot==2 && return 0.5*u*(1-w)
+        slot==3 && return 0.5*v*(1-w)
+        slot==4 && return 0.5*(1-u-v)*(1+w)
+        slot==5 && return 0.5*u*(1+w)
+        return 0.5*v*(1+w)
+    elseif kind==6 # pyramid
+        r=(w!=1 && slot!=5) ? u*v*w/(1-w) : zero(u+v+w)
+        slot==1 && return 0.25*((1-u)*(1-v)-w+r)
+        slot==2 && return 0.25*((1+u)*(1-v)-w-r)
+        slot==3 && return 0.25*((1+u)*(1+v)-w+r)
+        slot==4 && return 0.25*((1-u)*(1+v)-w-r)
+        return w
+    end
+    throw(ErrorException("PostViewField: internal unsupported shape kind $kind"))
+end
+
+@inline function _postview_shape_gradient(kind::UInt8,slot::Int,u,v,w)
+    if kind==7
+        slot==1 && return (-0.25*(1-v),-0.25*(1-u),0.0)
+        slot==2 && return ( 0.25*(1-v),-0.25*(1+u),0.0)
+        slot==3 && return ( 0.25*(1+v), 0.25*(1+u),0.0)
+        return (-0.25*(1+v),0.25*(1-u),0.0)
+    elseif kind==4
+        slot==1 && return (-0.125*(1-v)*(1-w),-0.125*(1-u)*(1-w),-0.125*(1-u)*(1-v))
+        slot==2 && return ( 0.125*(1-v)*(1-w),-0.125*(1+u)*(1-w),-0.125*(1+u)*(1-v))
+        slot==3 && return ( 0.125*(1+v)*(1-w), 0.125*(1+u)*(1-w),-0.125*(1+u)*(1+v))
+        slot==4 && return (-0.125*(1+v)*(1-w), 0.125*(1-u)*(1-w),-0.125*(1-u)*(1+v))
+        slot==5 && return (-0.125*(1-v)*(1+w),-0.125*(1-u)*(1+w), 0.125*(1-u)*(1-v))
+        slot==6 && return ( 0.125*(1-v)*(1+w),-0.125*(1+u)*(1+w), 0.125*(1+u)*(1-v))
+        slot==7 && return ( 0.125*(1+v)*(1+w), 0.125*(1+u)*(1+w), 0.125*(1+u)*(1+v))
+        return (-0.125*(1+v)*(1+w),0.125*(1-u)*(1+w),0.125*(1-u)*(1+v))
+    elseif kind==5
+        slot==1 && return (-0.5*(1-w),-0.5*(1-w),-0.5*(1-u-v))
+        slot==2 && return ( 0.5*(1-w),0.0,-0.5*u)
+        slot==3 && return (0.0,0.5*(1-w),-0.5*v)
+        slot==4 && return (-0.5*(1+w),-0.5*(1+w),0.5*(1-u-v))
+        slot==5 && return ( 0.5*(1+w),0.0,0.5*u)
+        return (0.0,0.5*(1+w),0.5*v)
+    elseif kind==6
+        if w==1
+            slot==1 && return (-0.25,-0.25,-0.25)
+            slot==2 && return ( 0.25,-0.25,-0.25)
+            slot==3 && return ( 0.25, 0.25,-0.25)
+            slot==4 && return (-0.25, 0.25,-0.25)
+            return (0.0,0.0,1.0)
+        end
+        denominator=1-w
+        rr=u*v/denominator+u*v*w/(denominator*denominator)
+        slot==1 && return (0.25*(-(1-v)+v*w/denominator),
+                            0.25*(-(1-u)+u*w/denominator),0.25*(-1+rr))
+        slot==2 && return (0.25*((1-v)-v*w/denominator),
+                            0.25*(-(1+u)-u*w/denominator),0.25*(-1-rr))
+        slot==3 && return (0.25*((1+v)+v*w/denominator),
+                            0.25*((1+u)+u*w/denominator),0.25*(-1+rr))
+        slot==4 && return (0.25*(-(1+v)-v*w/denominator),
+                            0.25*((1-u)-u*w/denominator),0.25*(-1-rr))
+        return (0.0,0.0,1.0)
+    end
+    throw(ErrorException("PostViewField: internal unsupported gradient kind $kind"))
+end
+
+@inline function _postview_relative(coords,index::Integer,base::Integer,d::Int,
+                                    scale::Float64)
+    delta=coords[d,index]-coords[d,base]
+    return isfinite(delta) ? delta/scale :
+           coords[d,index]/scale-coords[d,base]/scale
+end
+
+function _postview_cell_scale(coords,cells,j,arity::Int)
+    base=cells[1,j]; scale=0.0
+    @inbounds for slot in 2:arity, d in 1:3
+        delta=coords[d,cells[slot,j]]-coords[d,base]
+        if isfinite(delta)
+            scale=max(scale,abs(delta))
+        else
+            scale=max(scale,abs(coords[d,cells[slot,j]]),abs(coords[d,base]))
+        end
+    end
+    return scale
+end
+
+@inline function _postview_reference_jacobian(coords,cells,j,arity::Int,
+                                               kind::UInt8,u,v,w,scale)
+    du=(0.0,0.0,0.0);dv=(0.0,0.0,0.0);dw=(0.0,0.0,0.0)
+    base=cells[1,j]
+    @inbounds for slot in 1:arity
+        gradient=_postview_shape_gradient(kind,slot,u,v,w)
+        index=cells[slot,j]
+        q=(_postview_relative(coords,index,base,1,scale),
+           _postview_relative(coords,index,base,2,scale),
+           _postview_relative(coords,index,base,3,scale))
+        du=(muladd(q[1],gradient[1],du[1]),muladd(q[2],gradient[1],du[2]),
+            muladd(q[3],gradient[1],du[3]))
+        dv=(muladd(q[1],gradient[2],dv[1]),muladd(q[2],gradient[2],dv[2]),
+            muladd(q[3],gradient[2],dv[3]))
+        dw=(muladd(q[1],gradient[3],dw[1]),muladd(q[2],gradient[3],dw[2]),
+            muladd(q[3],gradient[3],dw[3]))
+    end
+    if kind==7
+        a=( _postview_relative(coords,cells[2,j],base,1,scale),
+            _postview_relative(coords,cells[2,j],base,2,scale),
+            _postview_relative(coords,cells[2,j],base,3,scale))
+        b=( _postview_relative(coords,cells[3,j],base,1,scale),
+            _postview_relative(coords,cells[3,j],base,2,scale),
+            _postview_relative(coords,cells[3,j],base,3,scale))
+        normal=_postview_cross(a,b)
+        physical_scale=(normal[1]*scale,normal[2]*scale,normal[3]*scale)
+        # Gmsh inserts the physical (length-squared) surface normal as the
+        # artificial third Jacobian row. Restore that relative scaling after
+        # normalizing coordinates; for extreme data, retain the finite
+        # normalized normal instead of manufacturing an infinite Jacobian.
+        usable_physical_scale=all(isfinite,physical_scale) &&
+            (!iszero(physical_scale[1]) || !iszero(physical_scale[2]) ||
+             !iszero(physical_scale[3]))
+        dw=usable_physical_scale ? physical_scale : normal
+    end
+    return du,dv,dw
+end
+
 function _postview_triangle_nondegenerate(coords,cell,j)
     a=_postview_point(coords,cell[1,j]);b=_postview_point(coords,cell[2,j])
     c=_postview_point(coords,cell[3,j])
@@ -2284,7 +2434,41 @@ function _postview_tetrahedron_nondegenerate(coords,cell,j)
     return orient3(a,b,c,d)!=0
 end
 
-function _validate_postview_cells(coords,lines,triangles,tetrahedra)
+function _postview_unique_cell(cell,j,arity::Int,what::AbstractString)
+    @inbounds for a in 1:arity-1, b in a+1:arity
+        cell[a,j]!=cell[b,j] || throw(ArgumentError(
+            "PostViewField: $what $j repeats a node index"))
+    end
+    return nothing
+end
+
+function _postview_nonlinear_nondegenerate(coords,cell,j,arity::Int,kind::UInt8)
+    scale=_postview_cell_scale(coords,cell,j,arity)
+    scale>0 || return false
+    du,dv,dw=_postview_reference_jacobian(
+        coords,cell,j,arity,kind,0.0,0.0,0.0,scale)
+    determinant=_postview_det(du,dv,dw)
+    return isfinite(determinant) && !iszero(determinant)
+end
+
+function _postview_quadrangle_planar(coords,cell,j)
+    scale=_postview_cell_scale(coords,cell,j,4)
+    scale>0 || return false
+    base=cell[1,j]
+    a=ntuple(d->_postview_relative(coords,cell[2,j],base,d,scale),3)
+    b=ntuple(d->_postview_relative(coords,cell[3,j],base,d,scale),3)
+    c=ntuple(d->_postview_relative(coords,cell[4,j],base,d,scale),3)
+    normal=_postview_cross(a,b);normal_length=hypot(normal...)
+    (isfinite(normal_length) && normal_length>0) || return false
+    distance=abs(_dot3(c,normal))/normal_length
+    # Affine construction in Float64 can leave an exact-predicate residue of a
+    # few ulps. Accept only that rounding envelope, not geometrically warped
+    # quadrangles whose Gmsh reference lookup is not reliable.
+    return isfinite(distance) && distance<=128eps(Float64)
+end
+
+function _validate_postview_cells(coords,lines,triangles,quadrangles,
+                                  tetrahedra,hexahedra,prisms,pyramids)
     @inbounds for j in axes(lines,2)
         a=lines[1,j];b=lines[2,j]
         a!=b && _postview_point(coords,a)!=_postview_point(coords,b) ||
@@ -2297,6 +2481,13 @@ function _validate_postview_cells(coords,lines,triangles,tetrahedra)
         _postview_triangle_nondegenerate(coords,triangles,j) || throw(ArgumentError(
             "PostViewField: triangle $j is degenerate"))
     end
+    @inbounds for j in axes(quadrangles,2)
+        _postview_unique_cell(quadrangles,j,4,"quadrangle")
+        _postview_quadrangle_planar(coords,quadrangles,j) || throw(ArgumentError(
+            "PostViewField: quadrangle $j is non-planar; warped first-order list quadrangles are unsupported"))
+        _postview_nonlinear_nondegenerate(coords,quadrangles,j,4,UInt8(7)) ||
+            throw(ArgumentError("PostViewField: quadrangle $j is degenerate"))
+    end
     @inbounds for j in axes(tetrahedra,2)
         a=tetrahedra[1,j];b=tetrahedra[2,j]
         c=tetrahedra[3,j];d=tetrahedra[4,j]
@@ -2305,28 +2496,47 @@ function _validate_postview_cells(coords,lines,triangles,tetrahedra)
         _postview_tetrahedron_nondegenerate(coords,tetrahedra,j) ||
             throw(ArgumentError("PostViewField: tetrahedron $j is degenerate"))
     end
+    @inbounds for (cells,arity,kind,what) in
+            ((hexahedra,8,UInt8(4),"hexahedron"),
+             (prisms,6,UInt8(5),"prism"),(pyramids,5,UInt8(6),"pyramid"))
+        for j in axes(cells,2)
+            _postview_unique_cell(cells,j,arity,what)
+            _postview_nonlinear_nondegenerate(coords,cells,j,arity,kind) ||
+                throw(ArgumentError("PostViewField: $what $j is degenerate"))
+        end
+    end
     return nothing
 end
 
 @inline function _postview_cell_kind(field,id::Int)
-    nt=size(field.tetrahedra,2);ntri=size(field.triangles,2)
-    nl=size(field.lines,2)
+    nt=size(field.tetrahedra,2);nh=size(field.hexahedra,2)
+    ni=size(field.prisms,2);ny=size(field.pyramids,2)
+    ntri=size(field.triangles,2);nq=size(field.quadrangles,2);nl=size(field.lines,2)
     id<=nt && return UInt8(3),id
-    id-=nt;id<=ntri && return UInt8(2),id
-    id-=ntri;id<=nl && return UInt8(1),id
+    id-=nt;id<=nh && return UInt8(4),id
+    id-=nh;id<=ni && return UInt8(5),id
+    id-=ni;id<=ny && return UInt8(6),id
+    id-=ny;id<=ntri && return UInt8(2),id
+    id-=ntri;id<=nq && return UInt8(7),id
+    id-=nq;id<=nl && return UInt8(1),id
     return UInt8(0),id-nl
 end
 
-@inline function _postview_cell_indices(tetrahedra,triangles,lines,points,id::Int)
-    nt=size(tetrahedra,2);ntri=size(triangles,2);nl=size(lines,2)
+@inline function _postview_cell_indices(tetrahedra,hexahedra,prisms,pyramids,
+                                        triangles,quadrangles,lines,points,id::Int)
+    nt=size(tetrahedra,2);nh=size(hexahedra,2);ni=size(prisms,2)
+    ny=size(pyramids,2);ntri=size(triangles,2);nq=size(quadrangles,2)
+    nl=size(lines,2)
     if id<=nt
         return tetrahedra,id,4
-    elseif id<=nt+ntri
-        return triangles,id-nt,3
-    elseif id<=nt+ntri+nl
-        return lines,id-nt-ntri,2
     end
-    return points,id-nt-ntri-nl,1
+    id-=nt;id<=nh && return hexahedra,id,8
+    id-=nh;id<=ni && return prisms,id,6
+    id-=ni;id<=ny && return pyramids,id,5
+    id-=ny;id<=ntri && return triangles,id,3
+    id-=ntri;id<=nq && return quadrangles,id,4
+    id-=nq;id<=nl && return lines,id,2
+    return points,id-nl,1
 end
 
 @inline function _postview_saturating_sub(x::Float64,y::Float64)
@@ -2339,13 +2549,16 @@ end
     return isfinite(value) ? value : floatmax(Float64)
 end
 
-function _build_postview_bvh(coords,tetrahedra,triangles,lines,points)
-    ncells=size(tetrahedra,2)+size(triangles,2)+size(lines,2)+size(points,2)
+function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
+                             triangles,quadrangles,lines,points)
+    ncells=sum(size(cells,2) for cells in
+        (tetrahedra,hexahedra,prisms,pyramids,triangles,quadrangles,lines,points))
     primitive_lo=Matrix{Float64}(undef,3,ncells)
     primitive_hi=Matrix{Float64}(undef,3,ncells)
     centroid=Matrix{Float64}(undef,3,ncells)
     @inbounds for id in 1:ncells
-        cells,j,arity=_postview_cell_indices(tetrahedra,triangles,lines,points,id)
+        cells,j,arity=_postview_cell_indices(tetrahedra,hexahedra,prisms,pyramids,
+                                             triangles,quadrangles,lines,points,id)
         for k in 1:3
             lo=Inf;hi=-Inf
             for slot in 1:arity
@@ -2409,14 +2622,37 @@ function _build_postview_bvh(coords,tetrahedra,triangles,lines,points)
     return order,lows,highs,left,right,firsts,counts
 end
 
-function PostViewField(coords::AbstractMatrix{<:Real}, values::AbstractVector{<:Real};
-                       points=nothing,lines=(),triangles=(),tetrahedra=(),
+function _postview_values(values,n::Int)
+    if values isa AbstractVector
+        length(values)==n || throw(ArgumentError("PostViewField: value count mismatch"))
+        source=reshape(values,1,n)
+    elseif values isa AbstractMatrix
+        size(values,2)==n || throw(ArgumentError("PostViewField: value count mismatch"))
+        size(values,1) in (1,3,9) || throw(ArgumentError(
+            "PostViewField: values must have 1, 3, or 9 components per node"))
+        source=values
+    else
+        throw(ArgumentError(
+            "PostViewField: values must be a vector or a 1×n, 3×n, or 9×n matrix"))
+    end
+    result=try
+        Matrix{Float64}(source)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("PostViewField: values must be Float64-representable"))
+    end
+    all(isfinite,result) || throw(ArgumentError("PostViewField: values must be finite"))
+    return result
+end
+
+function PostViewField(coords::AbstractMatrix{<:Real}, values;
+                       points=nothing,lines=(),triangles=(),quadrangles=(),
+                       tetrahedra=(),hexahedra=(),prisms=(),pyramids=(),
                        crop_negative::Bool=true,use_closest::Bool=true,
                        reference_tolerance::Real=1e-6,
                        max_nodes::Integer=1_000_000,
                        max_elements::Integer=1_000_000)
     size(coords,1)==3 || throw(ArgumentError("PostViewField: coords must be 3×n"))
-    size(coords,2)==length(values) || throw(ArgumentError("PostViewField: value count mismatch"))
     size(coords,2)>0 || throw(ArgumentError("PostViewField: empty view"))
     node_limit=_postview_limit(max_nodes,"max_nodes")
     element_limit=_postview_limit(max_elements,"max_elements")
@@ -2431,16 +2667,10 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values::AbstractVector{<:
         err isa InterruptException && rethrow()
         throw(ArgumentError("PostViewField: coordinates must be Float64-representable"))
     end
-    V=try
-        Float64[Float64(v) for v in values]
-    catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("PostViewField: values must be Float64-representable"))
-    end
+    V=_postview_values(values,n)
     @inbounds for i in axes(C,2), d in 1:3
         isfinite(C[d,i]) || throw(ArgumentError("PostViewField: non-finite coordinate"))
     end
-    all(isfinite,V) || throw(ArgumentError("PostViewField: values must be finite"))
     tolerance=_float_value(reference_tolerance,"PostViewField","reference_tolerance")
     tolerance>=0 || throw(ArgumentError(
         "PostViewField: reference_tolerance must be non-negative"))
@@ -2448,8 +2678,12 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values::AbstractVector{<:
     remaining=element_limit
     L=_postview_connectivity(lines,2,n,"line",remaining);remaining-=size(L,2)
     T=_postview_connectivity(triangles,3,n,"triangle",remaining);remaining-=size(T,2)
+    Q=_postview_connectivity(quadrangles,4,n,"quadrangle",remaining);remaining-=size(Q,2)
     S=_postview_connectivity(tetrahedra,4,n,"tetrahedron",remaining);remaining-=size(S,2)
-    explicit_topology=!isempty(L)||!isempty(T)||!isempty(S)
+    H=_postview_connectivity(hexahedra,8,n,"hexahedron",remaining);remaining-=size(H,2)
+    I=_postview_connectivity(prisms,6,n,"prism",remaining);remaining-=size(I,2)
+    Y=_postview_connectivity(pyramids,5,n,"pyramid",remaining);remaining-=size(Y,2)
+    explicit_topology=any(!isempty,(L,T,Q,S,H,I,Y))
     P=if points===nothing
         explicit_topology ? Matrix{Int32}(undef,1,0) :
             reshape(Int32.(1:n),1,n)
@@ -2458,12 +2692,12 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values::AbstractVector{<:
     end
     size(P,2)<=remaining || throw(ArgumentError(
         "PostViewField: element count exceeds max_elements=$element_limit"))
-    ncells=size(P,2)+size(L,2)+size(T,2)+size(S,2)
+    ncells=sum(size(cells,2) for cells in (P,L,T,Q,S,H,I,Y))
     ncells>0 || throw(ArgumentError("PostViewField: view contains no elements"))
-    _validate_postview_cells(C,L,T,S)
+    _validate_postview_cells(C,L,T,Q,S,H,I,Y)
 
     used=falses(n)
-    @inbounds for cells in (P,L,T,S), index in cells
+    @inbounds for cells in (P,L,T,Q,S,H,I,Y), index in cells
         used[index]=true
     end
     nearest_nodes=Int32[i for i in 1:n if used[i]]
@@ -2472,9 +2706,9 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values::AbstractVector{<:
         nearest_coords[d,j]=C[d,index]
     end
     tree=DistanceField(;points=nearest_coords)
-    bvh=_build_postview_bvh(C,S,T,L,P)
-    return PostViewField(C,V,P,L,T,S,crop_negative,use_closest,tolerance,
-                         tree,bvh...)
+    bvh=_build_postview_bvh(C,S,H,I,Y,T,Q,L,P)
+    return PostViewField(C,vec(V),UInt8(size(V,1)),P,L,T,Q,S,H,I,Y,
+                         crop_negative,use_closest,tolerance,tree,bvh...)
 end
 
 @inline function _postview_scaled_query(p,a,scale)
@@ -2484,7 +2718,38 @@ end
             p[3]/scale-a[3]/scale)
 end
 
-function _postview_cell_value_big(field::PostViewField,kind::UInt8,j::Int,p)::Tuple{Bool,Float64}
+@inline _postview_component(field::PostViewField,component::Int,index::Integer)=
+    field.values[component+Int(field.num_components)*(Int(index)-1)]
+
+@inline function _postview_weighted_component(field,cells,j,weights,arity::Int,
+                                              component::Int)
+    value=0.0
+    @inbounds for slot in 1:arity
+        value=muladd(weights[slot],_postview_component(
+            field,component,cells[slot,j]),value)
+    end
+    return value
+end
+
+@inline function _postview_weighted_scalar_operator(field,cells,j,weights,arity::Int)
+    if field.num_components==1
+        return _postview_weighted_component(field,cells,j,weights,arity,1)
+    end
+    x=_postview_weighted_component(field,cells,j,weights,arity,1)
+    y=_postview_weighted_component(field,cells,j,weights,arity,2)
+    z=_postview_weighted_component(field,cells,j,weights,arity,3)
+    return hypot(x,y,z)
+end
+
+@inline function _postview_node_scalar_operator(field,index::Integer)
+    field.num_components==1 && return _postview_component(field,1,index)
+    return hypot(_postview_component(field,1,index),
+                 _postview_component(field,2,index),
+                 _postview_component(field,3,index))
+end
+
+function _postview_cell_value_big(field::PostViewField,kind::UInt8,j::Int,p,
+                                  component::Int)::Tuple{Bool,Float64}
     cells=kind==3 ? field.tetrahedra : kind==2 ? field.triangles : field.lines
     arity=Int(kind)+1
     points=ntuple(slot->ntuple(k->_metric_rational(field.coords[k,cells[slot,j]]),3),arity)
@@ -2536,14 +2801,19 @@ function _postview_cell_value_big(field::PostViewField,kind::UInt8,j::Int,p)::Tu
     end
     value=zero(tolerance)
     @inbounds for slot in 1:arity
-        value+=weights[slot]*_metric_rational(field.values[cells[slot,j]])
+        value+=weights[slot]*_metric_rational(
+            _postview_component(field,component,cells[slot,j]))
     end
     return true,Float64(value)
 end
 
 @inline function _postview_big_value_or_nan(field,kind,j,p)::Float64
-    found,value=_postview_cell_value_big(field,kind,j,p)
-    return found ? value : NaN
+    found,x=_postview_cell_value_big(field,kind,j,p,1)
+    found || return NaN
+    field.num_components==1 && return x
+    _,y=_postview_cell_value_big(field,kind,j,p,2)
+    _,z=_postview_cell_value_big(field,kind,j,p,3)
+    return hypot(x,y,z)
 end
 
 @inline function _postview_line_value(field::PostViewField,j::Int,p)::Float64
@@ -2587,8 +2857,8 @@ end
         return _postview_big_value_or_nan(field,UInt8(1),j,p)
     (u<-(1+tolerance)||u>1+tolerance||abs(v)>tolerance||abs(w)>tolerance) &&
         return NaN
-    v0=field.values[cells[1,j]];v1=field.values[cells[2,j]]
-    value=muladd((1+u)/2,v1,(1-u)/2*v0)
+    value=_postview_weighted_scalar_operator(
+        field,cells,j,((1-u)/2,(1+u)/2),2)
     isnan(value) && throw(ArgumentError(
         "PostViewField: line $j produced a NaN interpolant"))
     return value
@@ -2648,9 +2918,7 @@ end
         abs(1+tolerance-u-v))<=guard &&
         return _postview_big_value_or_nan(field,UInt8(2),j,p)
     (u < -tolerance || v < -tolerance || u > (1+tolerance)-v) && return NaN
-    v0=field.values[cells[1,j]];v1=field.values[cells[2,j]]
-    v2=field.values[cells[3,j]]
-    value=muladd(v,v2,muladd(u,v1,(1-u-v)*v0))
+    value=_postview_weighted_scalar_operator(field,cells,j,(1-u-v,u,v),3)
     isnan(value) && throw(ArgumentError(
         "PostViewField: triangle $j produced a NaN interpolant"))
     return value
@@ -2706,11 +2974,94 @@ end
         return _postview_big_value_or_nan(field,UInt8(3),j,p)
     (u < -tolerance || v < -tolerance || w < -tolerance ||
      u > (1+tolerance)-v-w) && return NaN
-    v0=field.values[cells[1,j]];v1=field.values[cells[2,j]]
-    v2=field.values[cells[3,j]];v3=field.values[cells[4,j]]
-    value=muladd(w,v3,muladd(v,v2,muladd(u,v1,(1-u-v-w)*v0)))
+    value=_postview_weighted_scalar_operator(field,cells,j,(1-u-v-w,u,v,w),4)
     isnan(value) && throw(ArgumentError(
         "PostViewField: tetrahedron $j produced a NaN interpolant"))
+    return value
+end
+
+@inline function _postview_nonlinear_cells(field::PostViewField,kind::UInt8)
+    kind==4 && return field.hexahedra,8,"hexahedron"
+    kind==5 && return field.prisms,6,"prism"
+    kind==6 && return field.pyramids,5,"pyramid"
+    kind==7 && return field.quadrangles,4,"quadrangle"
+    throw(ErrorException("PostViewField: internal unsupported nonlinear cell kind $kind"))
+end
+
+@inline function _postview_nonlinear_scalar_operator(field,cells,j,arity::Int,
+                                                     kind::UInt8,u,v,w)
+    x=0.0;y=0.0;z=0.0
+    if field.num_components==1
+        @inbounds for slot in 1:arity
+            weight=_postview_shape(kind,slot,u,v,w)
+            x=muladd(weight,_postview_component(field,1,cells[slot,j]),x)
+        end
+        return x
+    end
+    @inbounds for slot in 1:arity
+        weight=_postview_shape(kind,slot,u,v,w);index=cells[slot,j]
+        x=muladd(weight,_postview_component(field,1,index),x)
+        y=muladd(weight,_postview_component(field,2,index),y)
+        z=muladd(weight,_postview_component(field,3,index),z)
+    end
+    return hypot(x,y,z)
+end
+
+@inline function _postview_reference_inside(kind::UInt8,u,v,w,tolerance)
+    if kind==7
+        return u>=-(1+tolerance) && u<=1+tolerance &&
+               v>=-(1+tolerance) && v<=1+tolerance && abs(w)<=tolerance
+    elseif kind==4
+        return u>=-(1+tolerance) && u<=1+tolerance &&
+               v>=-(1+tolerance) && v<=1+tolerance &&
+               w>=-(1+tolerance) && w<=1+tolerance
+    elseif kind==5
+        return w>=-(1+tolerance) && w<=1+tolerance && u>=-tolerance &&
+               v>=-tolerance && u<=(1+tolerance)-v
+    end
+    return u>=w-(1+tolerance) && u<=(1+tolerance)-w &&
+           v>=w-(1+tolerance) && v<=(1+tolerance)-w &&
+           w>=-tolerance && w<=1+tolerance
+end
+
+@inline function _postview_nonlinear_value(field::PostViewField,kind::UInt8,
+                                           j::Int,p)::Float64
+    cells,arity,what=_postview_nonlinear_cells(field,kind)
+    scale=_postview_cell_scale(field.coords,cells,j,arity)
+    scale>0 || return NaN
+    base=cells[1,j];a=_postview_point(field.coords,base)
+    query=_postview_scaled_query(p,a,scale)
+    all(isfinite,query) || return NaN
+    u=0.0;v=0.0;w=0.0;error=1.0;iteration=1
+    while error>1e-6 && iteration<20
+        mapped=(0.0,0.0,0.0)
+        @inbounds for slot in 1:arity
+            weight=_postview_shape(kind,slot,u,v,w);index=cells[slot,j]
+            mapped=(muladd(weight,_postview_relative(
+                        field.coords,index,base,1,scale),mapped[1]),
+                    muladd(weight,_postview_relative(
+                        field.coords,index,base,2,scale),mapped[2]),
+                    muladd(weight,_postview_relative(
+                        field.coords,index,base,3,scale),mapped[3]))
+        end
+        residual=_sub3(query,mapped)
+        du,dv,dw=_postview_reference_jacobian(
+            field.coords,cells,j,arity,kind,u,v,w,scale)
+        determinant=_postview_det(du,dv,dw)
+        (isfinite(determinant) && !iszero(determinant)) || return NaN
+        delta_u=_postview_det(residual,dv,dw)/determinant
+        delta_v=_postview_det(du,residual,dw)/determinant
+        delta_w=_postview_det(du,dv,residual)/determinant
+        all(isfinite,(delta_u,delta_v,delta_w)) || return NaN
+        un=u+delta_u;vn=v+delta_v;wn=w+delta_w
+        all(isfinite,(un,vn,wn)) || return NaN
+        error=hypot(un-u,vn-v,wn-w)
+        u=un;v=vn;w=wn;iteration+=1
+    end
+    _postview_reference_inside(kind,u,v,w,field.reference_tolerance) || return NaN
+    value=_postview_nonlinear_scalar_operator(field,cells,j,arity,kind,u,v,w)
+    isnan(value) && throw(ArgumentError(
+        "PostViewField: $what $j produced a NaN interpolant"))
     return value
 end
 
@@ -2720,11 +3071,12 @@ end
         index=field.points[1,j]
         found=p[1]==field.coords[1,index] && p[2]==field.coords[2,index] &&
               p[3]==field.coords[3,index]
-        return found ? field.values[index] : NaN
+        return found ? _postview_node_scalar_operator(field,index) : NaN
     end
     kind==1 && return _postview_line_value(field,j,p)
     kind==2 && return _postview_triangle_value(field,j,p)
     kind==3 && return _postview_tetrahedron_value(field,j,p)
+    kind in UInt8(4):UInt8(7) && return _postview_nonlinear_value(field,kind,j,p)
     throw(ErrorException("PostViewField: internal unsupported cell kind $kind"))
 end
 
@@ -2758,6 +3110,9 @@ end
 function field_value(field::PostViewField,x,y,z)
     p=(_float_value(x,"PostViewField","x"),_float_value(y,"PostViewField","y"),
        _float_value(z,"PostViewField","z"))
+    # `PostViewField::operator()`, unlike its metric overload, deliberately has
+    # no scalar interpretation for tensor views in Gmsh 4.15.2.
+    field.num_components==9 && return GMSH_MAX_SIZE
     _,v,found=_postview_bvh_value(field,1,p,typemax(Int),0.0,false)
     if !found
         field.use_closest || return GMSH_MAX_SIZE

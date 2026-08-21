@@ -42,7 +42,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   `Min`, `Max`, bounds), analytic/derivative (`MathEval`, `Gradient`, `Laplacian`,
   `Mean`, `Curvature`, `MaxEigenHessian`), coordinate/storage (`LonLat`, `Parametric`,
   `Structured`), entity-aware (`Restrict`, `Constant`), sampled/context (`Extend`,
-  `Octree`, scalar-point/first-order-simplex `PostView`), scalar `BoundaryLayer`,
+  `Octree`, first-order scalar/vector `PostView` on every standard point/line/surface/
+  volume list element), scalar `BoundaryLayer`,
   discrete `AutomaticMeshSizeField` analogue, and `ExternalProcess` fields;
 - anisotropic metric primitives and `MathEvalAniso`, `MinAniso`, `IntersectAniso`, and
   `AttractorAnisoCurve`; discrete distance queries use a deterministic AABB hierarchy,
@@ -63,6 +64,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer element
 construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
+including high-order/custom interpolation, multiple time steps, materially warped
+quadrangles, mixed component counts, and tensor-to-metric evaluation,
 general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros,
 dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,

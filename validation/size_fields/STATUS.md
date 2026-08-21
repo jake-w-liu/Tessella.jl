@@ -12,8 +12,8 @@ Intentional context gaps are printed as `CONTEXT_SKIP` and counted separately.
 | Direct sampled/context | `Octree`, `Extend`, scalar `BoundaryLayer`, scalar `AttractorAnisoCurve` | The same sampled representation or entity context is supplied to both implementations. This does not claim broader CAD/topology behavior. |
 | Scalar operator only | `MathEvalAniso`, `MinAniso`, `IntersectAniso` | Gmsh's public plugin exposes the scalar operator, not the underlying `SMetric3`. |
 | Mesh-observed approximate | `Distance→Threshold`, `Box`, `Ball`, finite `Cylinder`, `Frustum` | Node counts and regional spacings are bounded; exact nodes are not expected from different curve discretizers. |
-| Implemented, not directly covered | first-order scalar line/triangle/tetrahedron `PostView` interpolation | Unit-oracle tested, but this runner directly probes only scalar-point views; no Gmsh differential claim is made here. |
-| Explicit context skip/non-claim | anisotropic metric tensors/metric-driven meshing, boundary-layer element topology, `AutomaticMeshSizeField`, and non-simplex/higher-order/vector/tensor `PostView` | No equivalent public oracle/shared model state exists for the first three; the listed broader `PostView` data is unsupported. No parity claim is made. |
+| Implemented, not directly covered | first-order scalar/vector line, triangle, quadrangle, tetrahedron, hexahedron, prism, and pyramid `PostView` interpolation; tensor scalar no-op | Separately checked with `view.probe`, but this runner directly probes only scalar-point views. |
+| Explicit context skip/non-claim | anisotropic metric tensors/metric-driven meshing, boundary-layer element topology, `AutomaticMeshSizeField`, high-order/custom-interpolation, multiple-time-step, or mixed-component `PostView`, materially warped quadrangles, and `PostView` tensor metrics | No equivalent public oracle/shared model state exists for the first three; the listed broader `PostView` data is unsupported. No parity claim is made. |
 
 ## Known Gmsh probe constraints
 

@@ -30,7 +30,8 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
-pipeline, non-simplex/higher-order/vector/tensor `PostView`, direct tensor or
+pipeline, high-order/custom-interpolation, multiple-time-step, or mixed-component
+`PostView`, materially warped quadrangles, `PostView` tensor-to-metric evaluation, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
 not claim general mixed-element generation or recombination beyond P4's first-order
 surface pairing, variable-connectivity/internal types, integration of mixed blocks
@@ -100,6 +101,14 @@ oracle matched 34 accepted expressions exactly and matched seven error cases; an
 oracle also matched explicit expression-derived physical and field tags. Unsupported
 control-flow contexts are rejected when they can affect relevant statements, and
 their scalar bindings are invalidated before later use.
+
+The next PostView increment passed 6,953/6,953 bounds-checked size-field assertions
+under Julia 1.12.7 and Julia 1.11.9. It covers first-order scalar/vector point, line,
+triangle, quadrangle, tetrahedron, hexahedron, prism, and pyramid list data; tensor
+views preserve Gmsh's scalar `MAX_LC` result. The Gmsh 4.15.2 pointwise oracle covered
+160 samples with maximum absolute error `6.66e-16`, plus eight exact closest-node
+fallbacks. Warm 10,000-query loops for quadrangle, hexahedron, prism, pyramid, and
+vector-quadrangle fields allocated at most 64 bytes in total.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
