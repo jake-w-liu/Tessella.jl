@@ -8,6 +8,7 @@ using Tessella
     include("transform_test.jl")    # validated affine transforms + orientation preservation
     include("io_test.jl")           # .msh v2/v4 round-trip, STL, .geo scan
     include("elements_test.jl")     # all fixed-node Gmsh 4.15.2 families + mixed entity I/O
+    include("recombine_test.jl")    # deterministic triangle-to-quad recombination
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("mesh2d_test.jl")       # Delaunay: exact empty-circumcircle oracle

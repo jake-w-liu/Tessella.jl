@@ -26,13 +26,15 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types and local ordering, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4–P6 | **PENDING** | No state change |
+| P4 | **IN PROGRESS** | Deterministic same-tag surface triangle-to-quadrangle recombination with retained boundary segments and unpaired triangles |
+| P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
 pipeline, non-simplex/higher-order/vector/tensor `PostView`, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
-not claim element generation/recombination, variable-connectivity/internal types,
-integration of mixed blocks into the simplex meshing kernels, curved high-order
+not claim general mixed-element generation or recombination beyond P4's first-order
+surface pairing, variable-connectivity/internal types, integration of mixed blocks
+into the simplex meshing kernels, curved high-order
 Jacobian certification, ancillary/unknown-section preservation (binary readers reject
 unsupported sections explicitly), repeated `$Nodes`, non-8-byte binary data, internal
 indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection. Some
@@ -40,6 +42,10 @@ registered fixed tags require explicit Tessella-only output because
 Gmsh 4.15.2 cannot re-import them. P3 does not yet claim a general entity kernel,
 OpenCASCADE/BREP/NURBS, CAD import/export, transformations of analytical/CAD
 entities, or full `.geo` execution.
+
+P4 does not yet claim Gmsh's Blossom/full-quad algorithms, structured/transfinite
+grids, volume/hybrid recombination, boundary-layer element topology,
+coarsening/adaptation, or periodic/embedded model constraints.
 
 OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
 post-processing are unfinished parity tracks, not project non-goals.
@@ -79,6 +85,11 @@ mixed-MSH increment then passed 2,579/2,579 bounds-checked assertions under both
 1.12.7 and Julia 1.11.9, including native and opposite-endian MSH 2.2/4.1, full-width
 v4 tags, parametric nodes, atomic/resource failures, and Gmsh 4.15.2 acceptance.
 Reading 2,000 and 4,000 nodes allocated 1,670,704 and 4,239,472 bytes respectively.
+The following recombination increment passed 44/44 bounds-checked assertions under
+Julia 1.12.7 and Julia 1.11.9. Its 12×12 grid produced 144 quadrangles with CRC
+`dbb1bf17965d4e011e7f51a452c6a03e4018a628ffc7e7d9b33d9fc6b922439f`; 20×20 and
+40×40 grids allocated 4,073,984 and 17,348,496 bytes. Gmsh 4.15.2 accepted both the
+ASCII and binary recombined MSH 4.1 fixtures with `-check -parse_and_exit`.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
