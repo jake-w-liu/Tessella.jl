@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, closed box/cylinder/cone/geodesic-sphere primitives, cavities, mesh Boolean CSG, finalized-mesh affine transforms, and bounded `.geo` constant expressions |
-| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar transfinite patches, and affine six-face transfinite volumes |
+| P4 | **IN PROGRESS** | Recombination, uniform refinement, curve laws, planar triangle/quad transfinite patches, and affine six-face transfinite volumes |
 | P5–P6 | **PENDING** | No state change |
 
 P1 does not claim boundary-layer element topology, the full Gmsh automatic-sizing
@@ -56,11 +56,13 @@ and tetrahedron child templates while sharing edge midpoints, compacting unused 
 and preserving parent tags. Its straight-curve slice covers normalized affine-line
 Progression/Power, Bump, and Beta parameters. Its surface transfinite slice covers
 already-discretized, count-matched, three- and four-sided planar chains using Gmsh's
-specific triangular and average-chord Coons interpolation. Affine eight-corner blocks
-use Gmsh's unrecombined six-tetrahedron transfinite volume subdivision. P4 does not yet claim Gmsh's Blossom/full-quad
+specific triangular and average-chord Coons interpolation. Four-sided grids can also
+be emitted as first-order Gmsh type-3 quadrangles with exact projected
+corner-Jacobian certification. Affine eight-corner blocks use Gmsh's unrecombined
+six-tetrahedron transfinite volume subdivision. P4 does not yet claim Gmsh's Blossom/full-quad
 algorithms, non-affine CAD curve integration, FlexibleTransfinite or HWall/size-map
 curve laws, quasi-transfinite or holed patches,
-general CAD parameterizations, transfinite quadrangles, five-face or curved/warped
+general CAD parameterizations, recombined three-sided patches, five-face or curved/warped
 transfinite volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening, boundary-layer element
 topology, or periodic/embedded model constraints.
@@ -175,6 +177,17 @@ tetrahedra, 128 boundary triangles, and 72 mapped nodes across two affine blocks
 maximum coordinate residual `9.51e-12`. The 8×8×4 and 16×8×4 fixtures allocated
 385,984 and 774,128 bytes under Julia 1.12.7. Focused ambiguity and public-documentation
 scans returned zero.
+
+The subsequent recombined-quadrangle increment passed 128/128 bounds-checked
+assertions under Julia 1.12.7 and Julia 1.11.9. Its required Gmsh 4.15.2 differential
+matched ordered type-1/type-3 connectivity and 151 nodes across four arrangement
+names, four resolutions, and planar/tilted geometries, with maximum coordinate error
+`5.662137425588298e-15`. Its deterministic mixed-mesh SHA-256 is
+`d05e9cbc57de975f1f88d8fb1da62e0636ea4bbe63a038d3ca060b16201b0ea2`.
+The 64×64 and 128×64 fixtures allocated 3,430,528 and 6,274,688 bytes under Julia
+1.12.7. Exact-rational fallback regressions cover valid thin affine patches whose
+Float64 plane-normal or normalized-projection calculations cancel; focused ambiguity
+and public-documentation scans returned zero.
 
 Earlier measurements on 2026-08-14 with Julia 1.12.6, kept because they were
 not re-run in this gate:
