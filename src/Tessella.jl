@@ -45,9 +45,10 @@ include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
 using .Transform: affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension,
-                 msh_order, msh_family, ElementBlock, MixedEntity, MixedEntityData,
-                 MixedMesh, mixed_crc, simplex_to_mixed, mixed_to_simplex,
-                 write_mixed_msh, read_mixed_msh, lagrange_nodes, add_block!
+                 msh_order, msh_family, ElementBlock, ElementRef,
+                 SpecialElementBlock, MixedEntity, MixedEntityData, MixedMesh,
+                 mixed_crc, simplex_to_mixed, mixed_to_simplex, write_mixed_msh,
+                 read_mixed_msh, lagrange_nodes, add_block!
 using .Recombine: recombine_triangles
 using .Refine: refine_uniform
 using .SizeField: AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize,
@@ -79,9 +80,9 @@ export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size,
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
 export affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
-       msh_family, ElementBlock, MixedEntity, MixedEntityData, MixedMesh, mixed_crc,
-       simplex_to_mixed, mixed_to_simplex, write_mixed_msh, read_mixed_msh,
-       lagrange_nodes, add_block!
+       msh_family, ElementBlock, ElementRef, SpecialElementBlock, MixedEntity,
+       MixedEntityData, MixedMesh, mixed_crc, simplex_to_mixed, mixed_to_simplex,
+       write_mixed_msh, read_mixed_msh, lagrange_nodes, add_block!
 export recombine_triangles
 export refine_uniform
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,

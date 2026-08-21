@@ -56,9 +56,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
   functions, prior scalar bindings, sizing options, and explicit field/physical tags;
-- a 125-type fixed-node Gmsh element catalog, mixed blocks and entity/classification
-  metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1
-  mixed-element I/O with opposite-endian decoding;
+- a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
+  sub-element records, compact variable connectivity and parent/domain references,
+  mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
+  MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
@@ -73,10 +74,13 @@ general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros
 dynamic tags, option reads, ranges, CSG statements, and physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
 selective/high-order refinement, simplex-kernel integration,
-variable-connectivity/internal types, curved-cell Jacobian
-certification, non-8-byte binary data, and ancillary-section preservation. Some
-registered fixed tags require Tessella-only output because Gmsh 4.15.2 cannot
-re-import them. Complete CAD/BREP, broad file/API compatibility, GUI, and
+MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
+non-8-byte binary data, and ancillary-section preservation. MSH2 ASCII is the lossless
+format for variable connectivity and parent/domain links; binary MSH2 and MSH4 have
+explicitly narrower special-record contracts. Type 69 and some registered fixed tags
+require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
+nonzero-physical special MSH4 requires compatible classification metadata for a
+Gmsh-safe rewrite. Complete CAD/BREP, broad file/API compatibility, GUI, and
 post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
 completeness. ASCENT remains Tessella's primary solver consumer.

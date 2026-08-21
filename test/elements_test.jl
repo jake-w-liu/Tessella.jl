@@ -50,18 +50,18 @@ EXPECTED_SPECS[140] = (family=:trih, dim=3, order=1, nnodes=4,
                        serendipity=false)
 
 const EXPECTED_SPECIAL = Dict(
-    34 => (family=:polygon, dim=2, order=1, nnodes=nothing, kind=:variable),
-    35 => (family=:polyhedron, dim=3, order=1, nnodes=nothing, kind=:variable),
-    67 => (family=:line_border, dim=1, order=1, nnodes=2, kind=:internal),
-    68 => (family=:triangle_border, dim=2, order=1, nnodes=3, kind=:internal),
-    69 => (family=:polygon_border, dim=2, order=1, nnodes=nothing, kind=:variable),
-    70 => (family=:line_child, dim=1, order=1, nnodes=2, kind=:internal),
-    133 => (family=:point_xfem, dim=0, order=1, nnodes=1, kind=:internal),
-    134 => (family=:line_xfem, dim=1, order=1, nnodes=2, kind=:internal),
-    135 => (family=:triangle_xfem, dim=2, order=1, nnodes=3, kind=:internal),
-    136 => (family=:tetrahedron_xfem, dim=3, order=1, nnodes=4, kind=:internal),
-    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis),
-    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis),
+    34 => (family=:polygon, dim=2, order=1, nnodes=nothing, kind=:decomposed),
+    35 => (family=:polyhedron, dim=3, order=1, nnodes=nothing, kind=:decomposed),
+    67 => (family=:line_border, dim=1, order=1, nnodes=2, kind=:border),
+    68 => (family=:triangle_border, dim=2, order=1, nnodes=3, kind=:border),
+    69 => (family=:polygon_border, dim=2, order=1, nnodes=nothing, kind=:border),
+    70 => (family=:line_child, dim=1, order=1, nnodes=2, kind=:child),
+    133 => (family=:point_xfem, dim=0, order=1, nnodes=1, kind=:subelement),
+    134 => (family=:line_xfem, dim=1, order=1, nnodes=2, kind=:subelement),
+    135 => (family=:triangle_xfem, dim=2, order=1, nnodes=3, kind=:subelement),
+    136 => (family=:tetrahedron_xfem, dim=3, order=1, nnodes=4, kind=:subelement),
+    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis_only),
+    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis_only),
 )
 
 const GMSH_FAMILY_NAME = Dict(
@@ -114,12 +114,14 @@ function run_gmsh_oracle()
         push!(shapes, "($tag,$name,$(spec.order),$serendipity)")
     end
     shape_table = join(shapes, ",")
+    special_tags = join(sort!(collect(keys(EXPECTED_SPECIAL))), ",")
 
     script = """
 import gmsh
 
 TAGS = [$tags]
 SHAPES = [$shape_table]
+SPECIAL_TAGS = [$special_tags]
 
 gmsh.initialize()
 gmsh.option.setNumber("General.Terminal", 0)
@@ -135,6 +137,16 @@ try:
                 nnodes, nprimary, flat))
         except Exception:
             print("PROP\\t{}\\tERROR".format(element_type))
+
+    for element_type in SPECIAL_TAGS:
+        try:
+            name, dim, order, nnodes, coords, nprimary = \\
+                gmsh.model.mesh.getElementProperties(element_type)
+            print("SPECIAL\\t{}\\tOK\\t{}\\t{}\\t{}\\t{}\\t{}".format(
+                element_type, name.replace("\\t", " "), dim, order,
+                nnodes, nprimary))
+        except Exception:
+            print("SPECIAL\\t{}\\tERROR".format(element_type))
 
     for expected, family, order, serendipity in SHAPES:
         actual = gmsh.model.mesh.getElementType(family, order, serendipity)
@@ -189,6 +201,7 @@ finally:
 
     version = ""
     properties = Dict{Int,Any}()
+    special_properties = Dict{Int,Any}()
     type_lookups = Dict{Int,Int}()
     prism_nodes = Dict{Int,Tuple{Int,Vector{Float64}}}()
     for line in eachline(IOBuffer(output))
@@ -208,6 +221,17 @@ finally:
                     nprimary=parse(Int, fields[8]), coordinates=coordinates,
                 )
             end
+        elseif fields[1] == "SPECIAL"
+            tag = parse(Int, fields[2])
+            if fields[3] == "ERROR"
+                special_properties[tag] = nothing
+            else
+                special_properties[tag] = (
+                    name=fields[4], dim=parse(Int, fields[5]),
+                    order=parse(Int, fields[6]), nnodes=parse(Int, fields[7]),
+                    nprimary=parse(Int, fields[8]),
+                )
+            end
         elseif fields[1] == "TYPE"
             type_lookups[parse(Int, fields[2])] = parse(Int, fields[3])
         elseif fields[1] == "PRISM"
@@ -217,7 +241,7 @@ finally:
             error("unexpected Gmsh oracle output: $line")
         end
     end
-    return (; version, properties, type_lookups, prism_nodes)
+    return (; version, properties, special_properties, type_lookups, prism_nodes)
 end
 
 @testset "Gmsh fixed-node catalog" begin
@@ -288,12 +312,46 @@ let source_root = get(ENV, "TESSELLA_GMSH_SOURCE", "")
                     "5e1d894ee09b43e644fa3449945378c569f2dca27292127fe643371a7f4cc1a4",
                 "src/geo/MTrihedron.h" =>
                     "afddb334f64d8a42e08e7a01f6d1c20fb407c40debc87cb4542dc9409c77c7c4",
+                "src/geo/MElement.cpp" =>
+                    "969b99203046f3a6f8bc74c8228f1bc62cb2388946c7ab463c2b90297b0d16b6",
+                "src/geo/MElementCut.h" =>
+                    "c13f6393b7ffa2baf4524072223bad9fa9054fd41270d749199ef07ad7fb2e74",
+                "src/geo/MSubElement.h" =>
+                    "67642d2b7d4179c232f5573c6f0ebc82d3c5b6b524c010fe651dc41eaca050e9",
+                "src/geo/GModelIO_MSH2.cpp" =>
+                    "0f90244e233849fe2620e4a53a34a725d7678359dd2bd600b8f0a05b4819bd31",
+                "src/geo/GModelIO_MSH4.cpp" =>
+                    "183993dca10f546cac5f3304a73beb5f3e83c4b12aeb76929ee16a7f98d6d7cd",
+                "src/numeric/BasisFactory.cpp" =>
+                    "aaf7ab81db649473ecc9351dcba04c30300ff5e43bd6b7d62e6087296295eb58",
+                "src/numeric/miniBasis.cpp" =>
+                    "90166cbf75c0f93f7e7412627843dd8247563b5e38cc2708704336cf70e111db",
             )
             for (relative_path, expected_hash) in expected_hashes
                 path = joinpath(source_root, relative_path)
                 @test isfile(path)
                 isfile(path) && @test bytes2hex(sha256(read(path))) == expected_hash
             end
+            element_source=read(joinpath(source_root,"src/geo/MElement.cpp"),String)
+            for (symbol,width) in (
+                ("MSH_LIN_B",2),("MSH_LIN_C",2),("MSH_TRI_B",3),
+                ("MSH_POLYG_",0),("MSH_POLYG_B",0),("MSH_POLYH_",0),
+                ("MSH_PNT_SUB",1),("MSH_LIN_SUB",2),
+                ("MSH_TRI_SUB",3),("MSH_TET_SUB",4),
+            )
+                pattern=Regex("case "*symbol*":\\s+if\\(name\\) \\*name = [^;]+;\\s+return "*
+                              string(width)*";")
+                @test occursin(pattern,element_source)
+            end
+            @test !occursin("MSH_TRI_MINI",element_source)
+            @test !occursin("MSH_TET_MINI",element_source)
+            cut_source=read(joinpath(source_root,"src/geo/MElementCut.h"),String)
+            @test occursin("return _parts.size() * 3",cut_source)
+            @test occursin("return _parts.size() * 4",cut_source)
+            basis_source=read(
+                joinpath(source_root,"src/numeric/BasisFactory.cpp"),String)
+            @test occursin("tag == MSH_TRI_MINI",basis_source)
+            @test occursin("tag == MSH_TET_MINI",basis_source)
         end
     end
 end
@@ -304,6 +362,24 @@ end
     @test Set(keys(oracle.properties)) == Set(keys(EXPECTED_SPECS))
     @test Set(tag for (tag, value) in oracle.properties if value === nothing) ==
           PROPERTY_API_GAPS
+
+    @test Set(keys(oracle.special_properties)) == Set(keys(EXPECTED_SPECIAL))
+    @test Set(tag for (tag, value) in oracle.special_properties if value === nothing) ==
+          Set([67,68,70,138,139])
+    expected_special_properties = Dict(
+        34 => ("Polygon", 2),
+        35 => ("Polyhedron", 3),
+        69 => ("Polygon Border", 2),
+        133 => ("Point Xfem", 0),
+        134 => ("Line Xfem", 1),
+        135 => ("Triangle Xfem", 2),
+        136 => ("Tetrahedron Xfem", 3),
+    )
+    for (tag, (name, dim)) in expected_special_properties
+        actual = oracle.special_properties[tag]
+        @test (actual.name, actual.dim, actual.order,
+               actual.nnodes, actual.nprimary) == (name, dim, 1, 0, 0)
+    end
 
     @test Set(keys(oracle.type_lookups)) == setdiff(Set(keys(EXPECTED_SPECS)), Set([140]))
     for (expected, actual) in oracle.type_lookups
@@ -362,6 +438,116 @@ function mixed_io_fixture(; escaped_name::Bool=true)
     return ElementsUnderTest.MixedMesh(coordinates, blocks; physical_names=names)
 end
 
+function special_v2_fixture()
+    coordinates=Float64[
+        0 1 1 0 0 1 1 0;
+        0 0 1 1 0 0 1 1;
+        0 0 0 0 1 1 1 1
+    ]
+    domains(a,b)=reshape(Any[a,b],2,1)
+    blocks=Any[
+        ElementsUnderTest.ElementBlock(1,Int32[1 3;2 4],Int32[1,2]),
+        ElementsUnderTest.ElementBlock(2,Int32[1 2;2 4;3 3],Int32[3,4]),
+        ElementsUnderTest.ElementBlock(4,Int32[1 2;2 4;3 3;5 8],Int32[5,6]),
+        ElementsUnderTest.SpecialElementBlock(
+            34,[Int32[1,2,3,1,3,4]],Int32[7];parent_refs=[(2,1)]),
+        ElementsUnderTest.SpecialElementBlock(
+            35,[Int32[1,2,3,5,2,3,5,7]],Int32[8];parent_refs=[(3,1)]),
+        ElementsUnderTest.SpecialElementBlock(
+            67,reshape(Int32[1,2],2,1),Int32[9];
+            domain_refs=domains((2,1),(2,2))),
+        ElementsUnderTest.SpecialElementBlock(
+            68,reshape(Int32[1,2,3],3,1),Int32[10];
+            domain_refs=domains((3,1),(3,2))),
+        ElementsUnderTest.SpecialElementBlock(
+            69,[Int32[1,2,3,1,3,4]],Int32[11];
+            domain_refs=domains((3,1),(3,2))),
+        ElementsUnderTest.SpecialElementBlock(
+            70,reshape(Int32[3,4],2,1),Int32[12];parent_refs=[(1,1)]),
+        ElementsUnderTest.SpecialElementBlock(
+            133,reshape(Int32[1],1,1),Int32[13];parent_refs=[(1,1)]),
+        ElementsUnderTest.SpecialElementBlock(
+            134,reshape(Int32[1,2],2,1),Int32[14];parent_refs=[(1,1)]),
+        ElementsUnderTest.SpecialElementBlock(
+            135,reshape(Int32[1,2,3],3,1),Int32[15];parent_refs=[(2,1)]),
+        ElementsUnderTest.SpecialElementBlock(
+            136,reshape(Int32[1,2,3,5],4,1),Int32[16];parent_refs=[(3,1)]),
+    ]
+    return ElementsUnderTest.MixedMesh(coordinates,blocks)
+end
+
+function special_v2_binary_fixture()
+    full=special_v2_fixture()
+    blocks=Any[full.blocks[1],full.blocks[2],full.blocks[3],
+        ElementsUnderTest.SpecialElementBlock(
+            67,reshape(Int32[1,2],2,1),Int32[9]),
+        ElementsUnderTest.SpecialElementBlock(
+            68,reshape(Int32[1,2,3],3,1),Int32[10]),
+        full.blocks[9],full.blocks[10],full.blocks[11],full.blocks[12],full.blocks[13]]
+    return ElementsUnderTest.MixedMesh(full.coords,blocks)
+end
+
+function special_v4_fixture()
+    coordinates=Float64[0 1 0 0;0 0 1 0;0 0 0 1]
+    blocks=Any[
+        ElementsUnderTest.SpecialElementBlock(
+            67,reshape(Int32[1,2],2,1),Int32[1]),
+        ElementsUnderTest.SpecialElementBlock(
+            68,reshape(Int32[1,2,3],3,1),Int32[2]),
+        ElementsUnderTest.SpecialElementBlock(
+            70,reshape(Int32[1,2],2,1),Int32[3]),
+        ElementsUnderTest.SpecialElementBlock(
+            133,reshape(Int32[1],1,1),Int32[4]),
+        ElementsUnderTest.SpecialElementBlock(
+            134,reshape(Int32[1,2],2,1),Int32[5]),
+        ElementsUnderTest.SpecialElementBlock(
+            135,reshape(Int32[1,2,3],3,1),Int32[6]),
+        ElementsUnderTest.SpecialElementBlock(
+            136,reshape(Int32[1,2,3,4],4,1),Int32[7]),
+    ]
+    return ElementsUnderTest.MixedMesh(coordinates,blocks)
+end
+
+function special_v4_metadata_fixture()
+    records=[
+        (msh=133,tag=4,coordinates=reshape(Float64[9,0,0],3,1)),
+        (msh=67,tag=1,coordinates=Float64[0 1;0 0;0 0]),
+        (msh=70,tag=3,coordinates=Float64[6 7;0 0;0 0]),
+        (msh=134,tag=5,coordinates=Float64[11 12;0 0;0 0]),
+        (msh=68,tag=2,coordinates=Float64[3 4 3;0 0 1;0 0 0]),
+        (msh=135,tag=6,coordinates=Float64[14 15 14;0 0 1;0 0 0]),
+        (msh=136,tag=7,coordinates=Float64[17 18 17 17;0 0 1 0;0 0 0 1]),
+    ]
+    coordinates=hcat((record.coordinates for record in records)...)
+    blocks=Any[]
+    entities=Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}()
+    node_entities=Tuple{Int,Int32}[]
+    physical_names=Dict{Tuple{Int,Int},String}()
+    position=1
+    for record in records
+        dim=EXPECTED_SPECIAL[record.msh].dim
+        count=size(record.coordinates,2)
+        connectivity=reshape(Int32.(position:position+count-1),count,1)
+        push!(blocks,ElementsUnderTest.SpecialElementBlock(
+            record.msh,connectivity,Int32[record.tag]))
+        lower=ntuple(d->minimum(record.coordinates[d,:]),3)
+        upper=ntuple(d->maximum(record.coordinates[d,:]),3)
+        entities[(dim,record.tag)]=ElementsUnderTest.MixedEntity(
+            dim,record.tag,(lower...,upper...);physical_tags=[record.tag])
+        append!(node_entities,fill((dim,Int32(record.tag)),count))
+        physical_names[(dim,record.tag)]="special $(record.msh)"
+        position+=count
+    end
+    data=ElementsUnderTest.MixedEntityData(entities;
+        node_entities=node_entities,
+        node_parametric=fill(nothing,size(coordinates,2)),
+        external_node_tags=UInt64.(101:100+size(coordinates,2)),
+        block_entities=[[Int32(record.tag)] for record in records],
+        external_element_tags=[[UInt64(200+i)] for i in eachindex(records)])
+    return ElementsUnderTest.MixedMesh(
+        coordinates,blocks;physical_names=physical_names,entity_data=data)
+end
+
 function legacy_crc(mesh)
     projection=ElementsUnderTest.MixedMesh(
         mesh.coords,mesh.blocks;physical_names=mesh.physical_names)
@@ -396,6 +582,86 @@ function gmsh_check(path)
         `$executable $path -check -parse_and_exit -v 5`),
         stdout=output, stderr=output))
     return success(process), String(take!(output))
+end
+
+function gmsh_rewrite(input,output;version::Float64,binary::Bool)
+    script = raw"""
+import gmsh
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+try:
+    gmsh.open(sys.argv[1])
+    gmsh.option.setNumber("Mesh.MshFileVersion", float(sys.argv[3]))
+    gmsh.option.setNumber("Mesh.Binary", int(sys.argv[4]))
+    gmsh.write(sys.argv[2])
+    print(gmsh.__version__)
+finally:
+    gmsh.finalize()
+"""
+    python,pythonpath=gmsh_python_environment()
+    command=Cmd([python,"-c",script,input,output,string(version),binary ? "1" : "0"])
+    isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
+    return strip(read(command,String))
+end
+
+function gmsh_element_summary_without_finalize(path;probe_tags=Int[])
+    # Gmsh 4.15.2 constructs type 69 correctly but crashes while destroying it.
+    # Exit the subprocess directly after the independent API has parsed and
+    # enumerated the mesh. This is a parser probe only: normal Gmsh-compatible
+    # output is rejected because a normal process lifecycle is unsafe.
+    script = raw"""
+import gmsh
+import os
+import sys
+
+gmsh.initialize()
+gmsh.option.setNumber("General.Terminal", 0)
+gmsh.logger.start()
+gmsh.open(sys.argv[1])
+node_tags, _, _ = gmsh.model.mesh.getNodes()
+types, element_blocks, _ = gmsh.model.mesh.getElements()
+counts = {int(t): len(tags) for t, tags in zip(types, element_blocks)}
+print("VERSION\t" + gmsh.__version__)
+print("NODES\t{}".format(len(node_tags)))
+print("ELEMENTS\t{}".format(sum(counts.values())))
+for element_type, count in sorted(counts.items()):
+    print("TYPE\t{}\t{}".format(element_type, count))
+for tag in (int(x) for x in sys.argv[2].split(",") if x):
+    element_type, nodes, _, _ = gmsh.model.mesh.getElement(tag)
+    print("PROBE\t{}\t{}\t{}".format(tag, element_type, len(nodes)))
+for message in gmsh.logger.get():
+    print("LOG\t" + message.replace("\t", " "))
+sys.stdout.flush()
+os._exit(0)
+"""
+    python,pythonpath=gmsh_python_environment()
+    probes=join(probe_tags,",")
+    command=Cmd([python,"-c",script,path,probes])
+    isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
+    version=""; nodes=0; elements=0; counts=Dict{Int,Int}()
+    probed=Dict{Int,Tuple{Int,Int}}(); messages=String[]
+    for line in eachline(IOBuffer(read(command,String)))
+        fields=split(line,'\t')
+        if fields[1]=="VERSION"
+            version=fields[2]
+        elseif fields[1]=="NODES"
+            nodes=parse(Int,fields[2])
+        elseif fields[1]=="ELEMENTS"
+            elements=parse(Int,fields[2])
+        elseif fields[1]=="TYPE"
+            counts[parse(Int,fields[2])]=parse(Int,fields[3])
+        elseif fields[1]=="PROBE"
+            probed[parse(Int,fields[2])]=(
+                parse(Int,fields[3]),parse(Int,fields[4]))
+        elseif fields[1]=="LOG"
+            push!(messages,fields[2])
+        else
+            error("unexpected Gmsh summary output: $line")
+        end
+    end
+    return (;version,nodes,elements,counts,probed,messages)
 end
 
 function gmsh_physical_element_counts(path)
@@ -719,6 +985,115 @@ end
     @test crc_allocated_large <= 2.25crc_allocated_small + 16_384
 end
 
+@testset "special-element structure, links, validation, and CRC" begin
+    @test Tessella.ElementRef === ElementsUnderTest.ElementRef
+    @test Tessella.SpecialElementBlock === ElementsUnderTest.SpecialElementBlock
+    missing=ElementsUnderTest.ElementRef()
+    @test (missing.block,missing.cell)==(Int32(0),Int32(0))
+    @test ElementsUnderTest.ElementRef(2,3)==ElementsUnderTest.ElementRef(2,3)
+    @test_throws ArgumentError ElementsUnderTest.ElementRef(0,1)
+    @test_throws ArgumentError ElementsUnderTest.ElementRef(-1,-1)
+    @test_throws ArgumentError ElementsUnderTest.ElementRef(big(typemax(Int32))+1,1)
+
+    polygon=ElementsUnderTest.SpecialElementBlock(
+        34,[Int32[1,2,3,1,3,4]],Int32[7];parent_refs=[(1,1)])
+    @test polygon.connectivity==Int32[1,2,3,1,3,4]
+    @test polygon.offsets==Int32[1,7]
+    @test polygon.parent_refs==[ElementsUnderTest.ElementRef(1,1)]
+    @test size(polygon.domain_refs)==(2,1)
+    line_border=ElementsUnderTest.SpecialElementBlock(
+        67,reshape(Int32[1,2],2,1),Int32[9])
+    @test line_border.offsets==Int32[1,3]
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        138,reshape(Int32[1,2,3,4],4,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        139,reshape(Int32[1,2,3,4,5],5,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        34,[Int32[1,2,3,4]])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        67,[Int32[1,2,3]])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        34,Int32[1,2,3],Int32[0,4],Int32[1])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        34,Int32[1,2,3],Int32[1,5],Int32[1])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        34,[Int32[1,2,3]],Int32[-1])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        34,[Int32[1,2,3]];domain_refs=reshape(Any[(1,1),(1,1)],2,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        67,reshape(Int32[1,2],2,1);parent_refs=[(1,1)])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        67,reshape(Int32[1,2],2,1);
+        domain_refs=reshape(Any[(),(1,1)],2,1))
+
+    valid=special_v2_fixture()
+    diagnostic=ElementsUnderTest.validate(valid)
+    @test diagnostic.ok
+    crc=ElementsUnderTest.mixed_crc(valid)
+    @test crc==(n_nodes=8,n_blocks=13,n_cells=16,
+        bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+        sha="944dbe417200e316bf265d2d6f8a154dfb4c6bec3eb853401f289990a9be4089")
+    @test_throws ArgumentError ElementsUnderTest.mixed_to_simplex(valid)
+
+    changed=special_v2_fixture()
+    changed.blocks[11].parent_refs[1]=ElementsUnderTest.ElementRef(1,2)
+    @test ElementsUnderTest.validate(changed).ok
+    @test ElementsUnderTest.mixed_crc(changed).sha!=crc.sha
+
+    cycle=special_v2_fixture()
+    cycle.blocks[11].parent_refs[1]=ElementsUnderTest.ElementRef(11,1)
+    @test !ElementsUnderTest.validate(cycle).ok
+    @test_throws ArgumentError ElementsUnderTest.mixed_crc(cycle)
+
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(
+            134,reshape(Int32[1,2],2,1);parent_refs=[(2,1)])])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(
+            134,reshape(Int32[1,2],2,1);parent_refs=[(1,2)])])
+
+    shared_nodes=ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(
+            34,[Int32[1,2,3,1,3,4]])])
+    @test ElementsUnderTest.validate(shared_nodes).ok
+    repeated=ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(
+            34,[Int32[1,1,3]])])
+    @test !ElementsUnderTest.validate(repeated).ok
+    repeated_part=ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(
+            34,[Int32[1,2,3,3,2,1]])])
+    @test !ElementsUnderTest.validate(repeated_part).ok
+    duplicate=ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(34,
+            [Int32[1,2,3,1,3,4],Int32[3,2,1,4,3,1]])])
+    @test !ElementsUnderTest.validate(duplicate).ok
+    @test ElementsUnderTest.validate(
+        duplicate;reject_duplicate_cells=false).ok
+    fixed_repeated=ElementsUnderTest.MixedMesh(
+        valid.coords,[ElementsUnderTest.SpecialElementBlock(
+            67,reshape(Int32[1,1],2,1))])
+    @test !ElementsUnderTest.validate(fixed_repeated).ok
+
+    coordinates=Float64[0 1 2;0 0 0;0 0 0]
+    ordinary=ElementsUnderTest.ElementBlock(
+        1,Int32[1 2;2 3],Int32[1,2])
+    ordered=ElementsUnderTest.MixedMesh(coordinates,Any[
+        ordinary,ElementsUnderTest.SpecialElementBlock(
+            134,reshape(Int32[2,3],2,1),Int32[3];parent_refs=[(1,2)])])
+    reordered=ElementsUnderTest.MixedMesh(coordinates,Any[
+        ElementsUnderTest.SpecialElementBlock(
+            134,reshape(Int32[2,3],2,1),Int32[3];parent_refs=[(2,2)]),ordinary])
+    @test ElementsUnderTest.mixed_crc(reordered).sha==
+          ElementsUnderTest.mixed_crc(ordered).sha
+
+    appended=ElementsUnderTest.MixedMesh(coordinates,Any[ordinary])
+    invalid_link=ElementsUnderTest.SpecialElementBlock(
+        134,reshape(Int32[1,2],2,1);parent_refs=[(3,1)])
+    @test_throws ArgumentError ElementsUnderTest.add_block!(appended,invalid_link)
+    @test length(appended.blocks)==1
+end
+
 @testset "mixed MSH v2.2/v4.1 round-trip and Gmsh acceptance" begin
     directory=mktempdir()
     mesh=mixed_io_fixture(escaped_name=false)
@@ -859,6 +1234,258 @@ end
         @test ok
         @test !occursin("Error",output)
     end
+end
+
+@testset "special-element MSH round-trip and Gmsh 4.15.2 acceptance" begin
+    directory=mktempdir()
+    full=special_v2_fixture()
+    expected_crc="944dbe417200e316bf265d2d6f8a154dfb4c6bec3eb853401f289990a9be4089"
+    ascii=joinpath(directory,"special-full-v2-ascii.msh")
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        ascii,full;version=2.2,binary=false)
+    @test !isfile(ascii)
+    @test ElementsUnderTest.write_mixed_msh(
+        ascii,full;version=2.2,binary=false,gmsh_compatible=false)==ascii
+    back=ElementsUnderTest.read_mixed_msh(ascii)
+    @test ElementsUnderTest.validate(back).ok
+    @test ElementsUnderTest.mixed_crc(back).sha==expected_crc
+    @test Set(block.msh for block in back.blocks)==
+          Set([1,2,4,34,35,67,68,69,70,133,134,135,136])
+    summary=gmsh_element_summary_without_finalize(
+        ascii;probe_tags=[10,13,16])
+    @test summary.version=="4.15.2"
+    @test summary.nodes==7
+    @test summary.elements==10
+    @test summary.counts==Dict(
+        1=>1,2=>1,4=>1,67=>1,68=>1,
+        70=>1,133=>1,134=>1,135=>1,136=>1)
+    @test summary.probed==Dict(10=>(34,4),13=>(35,5),16=>(69,4))
+    @test "Info: 8 nodes" in summary.messages
+    @test "Info: 16 elements" in summary.messages
+    @test any(message->endswith(message,"Done reading '$ascii'"),summary.messages)
+
+    binary_mesh=special_v2_binary_fixture()
+    binary_crc="4ef8de3b81b4449aa1b3efc3905f4418e00b5ac96ffd609e6eef2957b1156b68"
+    binary=joinpath(directory,"special-fixed-v2-binary.msh")
+    ElementsUnderTest.write_mixed_msh(binary,binary_mesh;version=2.2,binary=true)
+    binary_back=ElementsUnderTest.read_mixed_msh(binary)
+    @test ElementsUnderTest.validate(binary_back).ok
+    @test ElementsUnderTest.mixed_crc(binary_back).sha==binary_crc
+    @test binary_back.blocks[7].parent_refs==
+          [ElementsUnderTest.ElementRef(1,1)]
+    ok,output=gmsh_check(binary)
+    @test ok
+    @test !occursin("Error",output)
+    @test occursin("8 nodes",output)
+    @test occursin("13 elements",output)
+
+    # Gmsh itself independently reopens and rewrites representative variable,
+    # parent-linked and domain-linked MSH2 records. Polygon-border type 69 has
+    # only the isolated parser probe above: Gmsh 4.15.2 crashes during a normal
+    # close or rewrite, so it is Tessella-only output.
+    polygon=ElementsUnderTest.MixedMesh(
+        Float64[0 1 1 0;0 0 1 1;0 0 0 0],Any[
+            ElementsUnderTest.ElementBlock(
+                2,reshape(Int32[1,2,3],3,1),Int32[2]),
+            ElementsUnderTest.SpecialElementBlock(
+                34,[Int32[1,2,3,1,3,4]],Int32[2];parent_refs=[(1,1)])])
+    polyhedron=ElementsUnderTest.MixedMesh(
+        Float64[0 1 0 0 0;0 0 1 0 0;0 0 0 1 -1],Any[
+            ElementsUnderTest.ElementBlock(
+                4,reshape(Int32[1,2,3,4],4,1),Int32[2]),
+            ElementsUnderTest.SpecialElementBlock(
+                35,[Int32[1,2,3,4,2,1,3,5]],Int32[2];parent_refs=[(1,1)])])
+    border=ElementsUnderTest.MixedMesh(
+        Float64[1 0 0 1;0 1 0 1;0 0 0 0],Any[
+            ElementsUnderTest.ElementBlock(
+                2,Int32[3 1;1 4;2 2],Int32[2,2]),
+            ElementsUnderTest.SpecialElementBlock(
+                67,reshape(Int32[1,2],2,1),Int32[2];
+                domain_refs=reshape(Any[(1,1),(1,2)],2,1))])
+    subelement=ElementsUnderTest.MixedMesh(
+        Float64[0 1;0 0;0 0],Any[
+            ElementsUnderTest.ElementBlock(
+                1,reshape(Int32[1,2],2,1),Int32[2]),
+            ElementsUnderTest.SpecialElementBlock(
+                134,reshape(Int32[1,2],2,1),Int32[2];parent_refs=[(1,1)])])
+    for (name,mesh,special_type,arity) in (
+        ("polygon",polygon,34,6),
+        ("polyhedron",polyhedron,35,8),
+        ("border",border,67,2),
+        ("subelement",subelement,134,2),
+    )
+        source=joinpath(directory,"gmsh-$name-source.msh")
+        rewritten=joinpath(directory,"gmsh-$name-rewritten.msh")
+        ElementsUnderTest.write_mixed_msh(source,mesh;version=2.2)
+        @test gmsh_rewrite(
+            source,rewritten;version=2.2,binary=false)=="4.15.2"
+        ok,output=gmsh_check(rewritten)
+        @test ok
+        @test !occursin("Error",output)
+        rewritten_mesh=ElementsUnderTest.read_mixed_msh(rewritten)
+        @test ElementsUnderTest.validate(rewritten_mesh).ok
+        special=only(filter(block->block.msh==special_type,
+                            rewritten_mesh.blocks))
+        @test length(special.connectivity)==arity
+        if special_type in (34,35,134)
+            @test special.parent_refs==[ElementsUnderTest.ElementRef(1,1)]
+        else
+            @test special.domain_refs[:,1]==[
+                ElementsUnderTest.ElementRef(1,1),
+                ElementsUnderTest.ElementRef(1,2)]
+        end
+        @test Set(Tuple(column) for column in eachcol(rewritten_mesh.coords))==
+              Set(Tuple(column) for column in eachcol(mesh.coords))
+        @test ElementsUnderTest.mixed_crc(rewritten_mesh).sha==
+              ElementsUnderTest.mixed_crc(mesh).sha
+    end
+    for binary_output in (false,true)
+        source=joinpath(directory,"gmsh-sub-source-$binary_output.msh")
+        rewritten=joinpath(directory,"gmsh-sub-rewritten-$binary_output.msh")
+        ElementsUnderTest.write_mixed_msh(source,subelement;version=2.2)
+        @test gmsh_rewrite(source,rewritten;
+                           version=2.2,binary=binary_output)=="4.15.2"
+        @test ElementsUnderTest.mixed_crc(
+            ElementsUnderTest.read_mixed_msh(rewritten)).sha==
+              ElementsUnderTest.mixed_crc(subelement).sha
+    end
+
+    # Pinned Gmsh 4.15.2 preserves distinct parent links when reading Tessella's
+    # binary MSH2 and writing ASCII, but its own binary writer leaves the parent
+    # in an unwritten blob slot and emits a constant third tag of 1
+    # (`MElement.cpp:1447-1454`). Keep this
+    # upstream corruption explicit instead of claiming a binary Gmsh rewrite
+    # round trip that the pinned implementation cannot provide.
+    distinct_parents=ElementsUnderTest.MixedMesh(
+        Float64[0 1 2;0 0 0;0 0 0],Any[
+            ElementsUnderTest.ElementBlock(
+                1,Int32[1 2;2 3],Int32[2,2]),
+            ElementsUnderTest.SpecialElementBlock(
+                134,Int32[1 2;2 3],Int32[2,2];
+                parent_refs=[(1,1),(1,2)])])
+    parent_source=joinpath(directory,"distinct-parent-source.msh")
+    ElementsUnderTest.write_mixed_msh(
+        parent_source,distinct_parents;version=2.2,binary=true)
+    parent_source_back=ElementsUnderTest.read_mixed_msh(parent_source)
+    @test parent_source_back.blocks[2].parent_refs==[
+        ElementsUnderTest.ElementRef(1,1),
+        ElementsUnderTest.ElementRef(1,2)]
+    parent_ascii=joinpath(directory,"distinct-parent-gmsh-ascii.msh")
+    @test gmsh_rewrite(parent_source,parent_ascii;
+                       version=2.2,binary=false)=="4.15.2"
+    @test ElementsUnderTest.read_mixed_msh(parent_ascii).blocks[2].parent_refs==[
+        ElementsUnderTest.ElementRef(1,1),
+        ElementsUnderTest.ElementRef(1,2)]
+    parent_binary=joinpath(directory,"distinct-parent-gmsh-binary.msh")
+    @test gmsh_rewrite(parent_source,parent_binary;
+                       version=2.2,binary=true)=="4.15.2"
+    @test ElementsUnderTest.read_mixed_msh(parent_binary).blocks[2].parent_refs==[
+        ElementsUnderTest.ElementRef(1,1),
+        ElementsUnderTest.ElementRef(1,1)]
+
+    v4_raw=special_v4_fixture()
+    @test ElementsUnderTest.mixed_crc(v4_raw).sha==
+          "c43a87878c4f94bb352de2b16b97b86c274685f6b594d99af1ee5239493e680e"
+    v4_names=Dict(
+        (1,1)=>"line border",(2,2)=>"triangle border",(1,3)=>"line child",
+        (0,4)=>"point xfem",(1,5)=>"line xfem",(2,6)=>"triangle xfem",
+        (3,7)=>"tetrahedron xfem")
+    v4=ElementsUnderTest.MixedMesh(
+        v4_raw.coords,v4_raw.blocks;physical_names=v4_names)
+    v4_crc=ElementsUnderTest.mixed_crc(v4).sha
+    for binary_output in (false,true)
+        mode=binary_output ? "binary" : "ascii"
+        path=joinpath(directory,"special-v4-$mode.msh")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            path,v4;version=4.1,binary=binary_output)
+        @test !isfile(path)
+        ElementsUnderTest.write_mixed_msh(
+            path,v4;version=4.1,binary=binary_output,gmsh_compatible=false)
+        v4_back=ElementsUnderTest.read_mixed_msh(path)
+        @test ElementsUnderTest.validate(v4_back).ok
+        @test legacy_crc(v4_back).sha==v4_crc
+        @test v4_back.physical_names==v4_names
+        @test v4_back.entity_data!==nothing
+        @test v4_back.entity_data.external_node_tags==UInt64[1,2,3,4]
+        @test sort!(reduce(vcat,v4_back.entity_data.external_element_tags))==
+              UInt64[1,2,3,4,5,6,7]
+        metadata_path=joinpath(directory,"special-v4-metadata-$mode.msh")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            metadata_path,v4_back;version=4.1,binary=!binary_output)
+        @test !isfile(metadata_path)
+        ElementsUnderTest.write_mixed_msh(
+            metadata_path,v4_back;version=4.1,binary=!binary_output,
+            gmsh_compatible=false)
+        metadata_back=ElementsUnderTest.read_mixed_msh(metadata_path)
+        @test ElementsUnderTest.mixed_crc(metadata_back).sha==
+              ElementsUnderTest.mixed_crc(v4_back).sha
+    end
+
+
+    # With one neutral physical projection, Gmsh rewrites these fixed-width
+    # special records in both v4 encodings. Its writer emits empty node blocks
+    # for entities that own elements but no classified nodes; those blocks are
+    # legal, bounded by max_blocks, and must not be mistaken for truncation.
+    neutral_blocks=Any[
+        ElementsUnderTest.SpecialElementBlock(
+            block.msh,block.connectivity,block.offsets,
+            zeros(Int32,length(block.tags))) for block in v4_raw.blocks]
+    neutral_v4=ElementsUnderTest.MixedMesh(v4_raw.coords,neutral_blocks)
+    neutral_crc=ElementsUnderTest.mixed_crc(neutral_v4).sha
+    neutral_source=joinpath(directory,"gmsh-neutral-v4-source.msh")
+    ElementsUnderTest.write_mixed_msh(neutral_source,neutral_v4;version=4.1)
+    for binary_output in (false,true)
+        mode=binary_output ? "binary" : "ascii"
+        rewritten=joinpath(directory,"gmsh-neutral-v4-$mode.msh")
+        @test gmsh_rewrite(neutral_source,rewritten;
+                           version=4.1,binary=binary_output)=="4.15.2"
+        rewritten_mesh=ElementsUnderTest.read_mixed_msh(rewritten)
+        @test ElementsUnderTest.validate(rewritten_mesh).ok
+        @test legacy_crc(rewritten_mesh).sha==neutral_crc
+        ok,output=gmsh_check(rewritten)
+        @test ok
+        @test !occursin("Error",output)
+    end
+
+
+    classified_v4=special_v4_metadata_fixture()
+    classified_crc="4948d49bd52c04b3fb755ba8baf3dc7569cf8d5d140ce960dc9c1886434be7a3"
+    @test ElementsUnderTest.validate(classified_v4).ok
+    @test ElementsUnderTest.mixed_crc(classified_v4).sha==classified_crc
+    classified_source=joinpath(directory,"gmsh-classified-v4-source.msh")
+    ElementsUnderTest.write_mixed_msh(
+        classified_source,classified_v4;version=4.1)
+    for binary_output in (false,true)
+        mode=binary_output ? "binary" : "ascii"
+        rewritten=joinpath(directory,"gmsh-classified-v4-$mode.msh")
+        @test gmsh_rewrite(classified_source,rewritten;
+                           version=4.1,binary=binary_output)=="4.15.2"
+        rewritten_mesh=ElementsUnderTest.read_mixed_msh(rewritten)
+        @test ElementsUnderTest.validate(rewritten_mesh).ok
+        @test ElementsUnderTest.mixed_crc(rewritten_mesh).sha==classified_crc
+        @test rewritten_mesh.physical_names==classified_v4.physical_names
+        @test rewritten_mesh.entity_data.external_node_tags==UInt64.(101:117)
+        @test sort!(reduce(vcat,rewritten_mesh.entity_data.external_element_tags))==
+              UInt64.(201:207)
+        ok,output=gmsh_check(rewritten)
+        @test ok
+        @test !occursin("Error",output)
+    end
+
+    atomic=joinpath(directory,"special-atomic.msh")
+    write(atomic,"sentinel")
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        atomic,full;version=2.2,binary=true)
+    @test read(atomic,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        atomic,full;version=4.1,binary=false)
+    @test read(atomic,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        atomic,binary_mesh;version=4.1,binary=true)
+    @test read(atomic,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        atomic,border;version=2.2,binary=true)
+    @test read(atomic,String)=="sentinel"
 end
 
 @testset "lossless v4 entity metadata and multiple physical memberships" begin
@@ -1250,7 +1877,7 @@ end
         125,126,127,128,129,130,131,132,
     ])
     @test Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V2)==union(
-        Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4),Set([89,140]))
+        Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4),Set([69,89,140]))
     directory=mktempdir()
     for version in (2.2,4.1), binary in (false,true)
         path=joinpath(directory,"all-types-$version-$binary.msh")
@@ -1268,7 +1895,7 @@ end
         gaps=version==2.2 ? ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V2 :
                            ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4
         compatible=exhaustive_catalog_mesh(setdiff(Set(keys(EXPECTED_SPECS)),gaps))
-        expected_count=125-length(gaps)
+        expected_count=length(setdiff(Set(keys(EXPECTED_SPECS)),Set(gaps)))
         @test sum(size(block.nodes,2) for block in compatible.blocks)==expected_count
         path=joinpath(directory,"gmsh-compatible-types-$version-$binary.msh")
         ElementsUnderTest.write_mixed_msh(
@@ -1580,6 +2207,62 @@ function write_swapped_binary_v4(path)
     return path
 end
 
+function write_swapped_binary_v2_special(path)
+    open(path,"w") do io
+        println(io,"\$MeshFormat"); println(io,"2.2 1 8")
+        _write_swapped(io,Int32(1)); write(io,UInt8('\n'))
+        println(io,"\$EndMeshFormat")
+        println(io,"\$PhysicalNames\n1\n1 6 \"curve\"\n\$EndPhysicalNames")
+        println(io,"\$Nodes\n2")
+        _write_swapped(io,Int32(10))
+        for value in (0.0,0.0,0.0); _write_swapped(io,value); end
+        _write_swapped(io,Int32(20))
+        for value in (1.0,0.0,0.0); _write_swapped(io,value); end
+        write(io,UInt8('\n')); println(io,"\$EndNodes")
+        println(io,"\$Elements\n2")
+        for value in Int32[1,1,2,77,6,11,10,20]
+            _write_swapped(io,value)
+        end
+        for value in Int32[134,1,3,88,6,11,77,10,20]
+            _write_swapped(io,value)
+        end
+        write(io,UInt8('\n')); println(io,"\$EndElements")
+    end
+    return path
+end
+
+function write_swapped_binary_v4_special(path)
+    open(path,"w") do io
+        println(io,"\$MeshFormat"); println(io,"4.1 1 8")
+        _write_swapped(io,Int32(1)); write(io,UInt8('\n'))
+        println(io,"\$EndMeshFormat")
+        println(io,"\$PhysicalNames\n1\n2 6 \"surface\"\n\$EndPhysicalNames")
+        println(io,"\$Entities")
+        for count in UInt64[0,0,1,0]; _write_swapped(io,count); end
+        _write_swapped(io,Int32(11))
+        for value in (0.0,0.0,0.0,1.0,1.0,0.0); _write_swapped(io,value); end
+        _write_swapped(io,UInt64(1)); _write_swapped(io,Int32(6))
+        _write_swapped(io,UInt64(0))
+        write(io,UInt8('\n')); println(io,"\$EndEntities")
+        println(io,"\$Nodes")
+        for value in UInt64[1,3,10,30]; _write_swapped(io,value); end
+        for value in Int32[2,11,0]; _write_swapped(io,value); end
+        _write_swapped(io,UInt64(3))
+        for value in UInt64[10,20,30]; _write_swapped(io,value); end
+        for value in (0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0,0.0)
+            _write_swapped(io,value)
+        end
+        write(io,UInt8('\n')); println(io,"\$EndNodes")
+        println(io,"\$Elements")
+        for value in UInt64[1,1,77,77]; _write_swapped(io,value); end
+        for value in Int32[2,11,135]; _write_swapped(io,value); end
+        _write_swapped(io,UInt64(1))
+        for value in UInt64[77,10,20,30]; _write_swapped(io,value); end
+        write(io,UInt8('\n')); println(io,"\$EndElements")
+    end
+    return path
+end
+
 @testset "binary MSH opposite-endian decoding" begin
     directory=mktempdir()
     for (version,writer) in ((2.2,write_swapped_binary_v2),
@@ -1608,6 +2291,33 @@ end
         @test ok
         @test !occursin("Error",output)
     end
+
+    v2_special=write_swapped_binary_v2_special(
+        joinpath(directory,"swapped-v2-special.msh"))
+    mesh=ElementsUnderTest.read_mixed_msh(v2_special)
+    @test [block.msh for block in mesh.blocks]==[1,134]
+    @test mesh.blocks[2].connectivity==Int32[1,2]
+    @test mesh.blocks[2].parent_refs==[ElementsUnderTest.ElementRef(1,1)]
+    @test mesh.physical_names==Dict((1,6)=>"curve")
+    @test ElementsUnderTest.validate(mesh).ok
+    ok,output=gmsh_check(v2_special)
+    @test ok
+    @test !occursin("Error",output)
+
+    v4_special=write_swapped_binary_v4_special(
+        joinpath(directory,"swapped-v4-special.msh"))
+    mesh=ElementsUnderTest.read_mixed_msh(v4_special)
+    @test length(mesh.blocks)==1
+    @test mesh.blocks[1].msh==135
+    @test mesh.blocks[1].connectivity==Int32[1,2,3]
+    @test mesh.blocks[1].parent_refs==[ElementsUnderTest.ElementRef()]
+    @test mesh.entity_data.external_node_tags==UInt64[10,20,30]
+    @test mesh.entity_data.external_element_tags==[UInt64[77]]
+    @test mesh.entity_data.block_entities==[Int32[11]]
+    @test ElementsUnderTest.validate(mesh).ok
+    ok,output=gmsh_check(v4_special)
+    @test ok
+    @test !occursin("Error",output)
 end
 
 @testset "mixed MSH malformed input, resource gates, and atomic output" begin
@@ -1635,6 +2345,26 @@ end
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n2\n1 1 0 1 2\n1 1 0 1 2\n\$EndElements\n",
         "special-element.msh" =>
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n1\n1 0 0 0\n\$EndNodes\n\$Elements\n1\n1 34 0 1\n\$EndElements\n",
+        "truncated-variable-element.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 0 1 0\n4 1 1 0\n\$EndNodes\n\$Elements\n1\n1 34 0 6 1 2 3 1 3\n\$EndElements\n",
+        "extra-variable-element-token.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n3\n1 0 0 0\n2 1 0 0\n3 0 1 0\n\$EndNodes\n\$Elements\n1\n1 34 0 3 1 2 3 99\n\$EndElements\n",
+        "huge-variable-element.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n0\n\$EndNodes\n\$Elements\n1\n1 34 0 2147483646\n\$EndElements\n",
+        "dangling-special-parent.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 134 5 0 1 1 0 99 1 2\n\$EndElements\n",
+        "cyclic-special-parents.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n2\n1 134 5 0 1 1 0 2 1 2\n2 134 5 0 1 1 0 1 1 2\n\$EndElements\n",
+        "ambiguous-special-metadata.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 134 3 0 1 7 1 2\n\$EndElements\n",
+        "truncated-special-partitions.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 134 4 0 1 2 0 1 2\n\$EndElements\n",
+        "one-domain-special-metadata.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 67 5 0 1 1 0 9 1 2\n\$EndElements\n",
+        "basis-only-element.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 0 1 0\n4 0.25 0.25 0\n\$EndNodes\n\$Elements\n1\n1 138 0 1 2 3 4\n\$EndElements\n",
+        "v4-variable-element.msh" =>
+            "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 0 1 0\n1 0 0 0 1 1 0 0 0\n\$EndEntities\n\$Nodes\n1 3 1 3\n2 1 0 3\n1 2 3\n0 0 0\n1 0 0\n0 1 0\n\$EndNodes\n\$Elements\n1 1 1 1\n2 1 34 1\n1 1 2 3\n\$EndElements\n",
         "truncated-section.msh" =>
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Comments\nmissing end\n",
         "huge-truncated-count.msh" =>
@@ -1685,6 +2415,31 @@ end
         println(io,"\$Elements\n1")
         write(io,Int32(1)); write(io,Int32(1)); write(io,typemax(Int32))
     end
+    binary_v2_variable=malformed_binary("binary-v2-variable.msh") do io
+        binary_format(io,"2.2")
+        println(io,"\$Nodes\n0"); write(io,UInt8('\n')); println(io,"\$EndNodes")
+        println(io,"\$Elements\n1")
+        write(io,Int32(34)); write(io,Int32(1)); write(io,Int32(0))
+    end
+    truncated_v2_special=malformed_binary("truncated-v2-special.msh") do io
+        binary_format(io,"2.2")
+        println(io,"\$Nodes\n2")
+        write(io,Int32(1)); for value in (0.0,0.0,0.0); write(io,value); end
+        write(io,Int32(2)); for value in (1.0,0.0,0.0); write(io,value); end
+        write(io,UInt8('\n')); println(io,"\$EndNodes")
+        println(io,"\$Elements\n1")
+        write(io,Int32(134)); write(io,Int32(1)); write(io,Int32(2))
+        for value in Int32[1,0,1,1]; write(io,value); end
+    end
+    binary_v2_domain_link=malformed_binary("binary-v2-domain-link.msh") do io
+        binary_format(io,"2.2")
+        println(io,"\$Nodes\n2")
+        write(io,Int32(1)); for value in (0.0,0.0,0.0); write(io,value); end
+        write(io,Int32(2)); for value in (1.0,0.0,0.0); write(io,value); end
+        write(io,UInt8('\n')); println(io,"\$EndNodes")
+        println(io,"\$Elements\n1")
+        for value in Int32[67,1,3,1,0,1,9,1,2]; write(io,value); end
+    end
     huge_v4_entities=malformed_binary("huge-v4-entity-membership.msh") do io
         binary_format(io)
         println(io,"\$Entities")
@@ -1704,7 +2459,8 @@ end
         println(io,"\$Nodes\n0"); write(io,UInt8('x')); println(io,"\$EndNodes")
     end
     for path in (invalid_marker,unknown_binary,truncated_v2_nodes,
-                 huge_v2_element,huge_v4_entities,huge_v4_nodes,
+                 huge_v2_element,binary_v2_variable,truncated_v2_special,
+                 binary_v2_domain_link,huge_v4_entities,huge_v4_nodes,
                  bad_binary_newline)
         @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(path)
     end
@@ -1722,6 +2478,10 @@ end
         valid;max_file_bytes=filesize(valid)-1)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=-1)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=1.0)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;max_connectivity=-1)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;max_connectivity=1.0)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid;tessella_extensions=1)
     valid_binary=joinpath(directory,"valid-binary.msh")
@@ -1742,6 +2502,58 @@ end
         valid_binary;max_name_bytes=3)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid_binary;max_file_bytes=filesize(valid_binary)-1)
+
+    special_valid=joinpath(directory,"special-valid-ascii.msh")
+    ElementsUnderTest.write_mixed_msh(
+        special_valid,special_v2_fixture();version=2.2,
+        gmsh_compatible=false)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        special_valid;max_connectivity=54)
+    @test ElementsUnderTest.mixed_crc(
+        ElementsUnderTest.read_mixed_msh(
+            special_valid;max_connectivity=55)).sha==
+          "944dbe417200e316bf265d2d6f8a154dfb4c6bec3eb853401f289990a9be4089"
+    special_binary=joinpath(directory,"special-valid-binary.msh")
+    ElementsUnderTest.write_mixed_msh(
+        special_binary,special_v2_binary_fixture();version=2.2,binary=true)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        special_binary;max_connectivity=34)
+    @test ElementsUnderTest.mixed_crc(
+        ElementsUnderTest.read_mixed_msh(
+            special_binary;max_connectivity=35)).sha==
+          "4ef8de3b81b4449aa1b3efc3905f4418e00b5ac96ffd609e6eef2957b1156b68"
+
+    function write_rejected_variable_record(path,arity)
+        open(path,"w") do io
+            println(io,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat")
+            println(io,"\$Nodes\n3")
+            println(io,"1 0 0 0\n2 1 0 0\n3 0 1 0")
+            println(io,"\$EndNodes\n\$Elements\n1")
+            print(io,"1 34 0 ",arity)
+            for _ in 1:arity
+                print(io," 1")
+            end
+            println(io,"\n\$EndElements")
+        end
+        return path
+    end
+    function reject_zero_connectivity(path)
+        try
+            ElementsUnderTest.read_mixed_msh(path;max_connectivity=0)
+        catch err
+            err isa ArgumentError || rethrow()
+            return nothing
+        end
+        error("oversized variable record unexpectedly passed max_connectivity=0")
+    end
+    rejected_small=write_rejected_variable_record(
+        joinpath(directory,"rejected-variable-small.msh"),30_000)
+    rejected_large=write_rejected_variable_record(
+        joinpath(directory,"rejected-variable-large.msh"),300_000)
+    reject_zero_connectivity(rejected_small)
+    GC.gc(); rejected_small_bytes=@allocated reject_zero_connectivity(rejected_small)
+    GC.gc(); rejected_large_bytes=@allocated reject_zero_connectivity(rejected_large)
+    @test rejected_large_bytes<=rejected_small_bytes+32_768
 
     target=joinpath(directory,"atomic.msh"); write(target,"sentinel")
     invalid=mixed_io_fixture(escaped_name=false); invalid.blocks[1].tags[1]=Int32(-1)
@@ -1791,6 +2603,39 @@ end
     @test size(small_mesh.coords,2)==2_000
     @test size(large_mesh.coords,2)==4_000
     @test filesize(large)<=2.1filesize(small)
+    GC.gc(); allocated_small=@allocated ElementsUnderTest.read_mixed_msh(small)
+    GC.gc(); allocated_large=@allocated ElementsUnderTest.read_mixed_msh(large)
+    @test allocated_large<=2.8allocated_small+131_072
+end
+
+@testset "variable-connectivity ASCII read allocation grows linearly" begin
+    function write_triangle_decompositions(path,count)
+        open(path,"w") do io
+            println(io,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat")
+            println(io,"\$Nodes\n",count+2)
+            for i in 1:count+2
+                println(io,i," ",i-1," 0 0")
+            end
+            println(io,"\$EndNodes\n\$Elements\n",count)
+            for i in 1:count
+                println(io,i," 34 0 3 ",i," ",i+1," ",i+2)
+            end
+            println(io,"\$EndElements")
+        end
+        return path
+    end
+    directory=mktempdir()
+    small=write_triangle_decompositions(
+        joinpath(directory,"small-variable.msh"),2_000)
+    large=write_triangle_decompositions(
+        joinpath(directory,"large-variable.msh"),4_000)
+    small_mesh=ElementsUnderTest.read_mixed_msh(small)
+    large_mesh=ElementsUnderTest.read_mixed_msh(large)
+    @test ElementsUnderTest.validate(small_mesh).ok
+    @test ElementsUnderTest.validate(large_mesh).ok
+    @test length(small_mesh.blocks[1].offsets)==2_001
+    @test length(large_mesh.blocks[1].offsets)==4_001
+    @test filesize(large)<=2.2filesize(small)
     GC.gc(); allocated_small=@allocated ElementsUnderTest.read_mixed_msh(small)
     GC.gc(); allocated_large=@allocated ElementsUnderTest.read_mixed_msh(large)
     @test allocated_large<=2.8allocated_small+131_072
