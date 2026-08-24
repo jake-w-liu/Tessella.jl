@@ -70,8 +70,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   interpolation, all four Gmsh diagonal arrangements, physical tags, bounded
   intersection auditing, and exact orientation postconditions;
 - normalized straight-curve transfinite parameters for Gmsh's Progression/Power,
-  Bump, Beta, and Progression_HWall laws, with signed orientation and Float64
-  representability gates;
+  Bump, and Beta laws plus all three HWall variants, with signed orientation and
+  Float64 representability gates;
 - validated three-sided planar structured triangle patches using Gmsh's specific
   triangular interpolation, compact topology, and exact boundary postconditions;
 - recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
@@ -89,7 +89,7 @@ general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros
 dynamic tags, option reads, dynamic/general ranges, CSG statements, and mixed
 geometry-derived physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
-non-affine CAD curve integration, FlexibleTransfinite, Bump/Beta HWall, and size-map laws,
+non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
 quasi-transfinite or holed patches, recombined three-sided patches, curved/warped or
 compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,

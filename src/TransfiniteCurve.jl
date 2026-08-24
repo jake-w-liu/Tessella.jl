@@ -2,14 +2,13 @@
     TransfiniteCurve
 
 Validated normalized straight-curve node parameters for Gmsh 4.15.2's
-`Progression`, `Bump`, and `Beta` transfinite laws, plus a wall-height
-(`HWall`) geometric law that solves the progression ratio from a prescribed
-first-segment height and the curve length.
+`Progression`, `Bump`, and `Beta` transfinite laws and their wall-height
+(`HWall`) variants.
 
 This module implements the closed-form distributions on an affine line. It does
 not claim bit-for-bit reproduction of Gmsh's adaptive trapezoidal integration,
-nor parity for curved CAD parameterizations, `FlexibleTransfinite`,
-`Bump_HWall`, `Beta_HWall`, size-map, periodic, or boundary-layer curves.
+nor parity for curved CAD parameterizations, `FlexibleTransfinite`, size-map,
+periodic, or boundary-layer curves.
 """
 module TransfiniteCurve
 
@@ -297,34 +296,163 @@ function _hwall_log_ratio(segments::Int, log_target::Float64)
     return 0.5 * (lo + hi)
 end
 
+@inline function _bump_hwall_primitive(log_inverse_coefficient::Float64,
+                                       wall_fraction::Float64,
+                                       count::Int)
+    log_inverse_coefficient == 0.0 && return count * wall_fraction
+    coefficient = exp(-log_inverse_coefficient)
+    q = sqrt(-expm1(-log_inverse_coefficient))
+    amplitude = log1p(q) + 0.5log_inverse_coefficient
+    primitive = if q < 0.5
+        atanh(2q * wall_fraction /
+              (coefficient + 2q^2 * wall_fraction))
+    else
+        log_plus = log(coefficient + 2wall_fraction * q * (q + 1.0))
+        log_minus = -log_inverse_coefficient +
+                    log1p(-2wall_fraction * q / (1.0 + q))
+        0.5 * (log_plus - log_minus)
+    end
+    return count * primitive / (2amplitude)
+end
+
+function _bump_hwall_log_inverse_coefficient(wall_fraction::Float64,
+                                             count::Int)
+    lo = 0.0
+    hi = 1.0
+    while _bump_hwall_primitive(hi, wall_fraction, count) < 1.0
+        next = 2.0hi
+        isfinite(next) || throw(ArgumentError(
+            "transfinite_curve_hwall: Bump_HWall coefficient is not " *
+            "representable in Float64"))
+        hi = next
+    end
+    for _ in 1:256
+        mid = 0.5 * (lo + hi)
+        (mid == lo || mid == hi) && break
+        if _bump_hwall_primitive(mid, wall_fraction, count) < 1.0
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return 0.5 * (lo + hi)
+end
+
+function _fill_bump_log_inverse!(parameters::Vector{Float64},
+                                 log_inverse_coefficient::Float64)
+    log_inverse_coefficient == 0.0 &&
+        return _fill_progression_log!(parameters, 0.0)
+    segments = length(parameters) - 1
+    q = sqrt(-expm1(-log_inverse_coefficient))
+    amplitude = log1p(q) + 0.5log_inverse_coefficient
+    pairs = fld(segments, 2)
+    @inbounds for k in 1:pairs
+        if 2k == segments
+            parameters[k + 1] = 0.5
+        else
+            u = k / segments
+            log_parameter = _log_sinh_positive(2.0u * amplitude) - _LOG_TWO -
+                            _log_sinh_positive(amplitude) -
+                            _log_cosh((1.0 - 2.0u) * amplitude)
+            value = exp(log_parameter)
+            parameters[k + 1] = value
+            parameters[segments - k + 1] = 1.0 - value
+        end
+    end
+    return parameters
+end
+
+@inline function _log_tanh_positive(value::Float64)
+    value < 20.0 && return log(tanh(value))
+    exponential = exp(-2.0value)
+    return log1p(-exponential) - log1p(exponential)
+end
+
+@inline function _beta_hwall_equation(amplitude::Float64,
+                                      wall_fraction::Float64,
+                                      count::Int)
+    ratio = (count - 1) / count
+    amplitude == 0.0 && return log((1.0 - wall_fraction) / ratio)
+    return log1p(-wall_fraction) + _log_tanh_positive(amplitude) -
+           _log_tanh_positive(ratio * amplitude)
+end
+
+function _beta_hwall_amplitude(wall_fraction::Float64, count::Int)
+    lo = 0.0
+    hi = 1.0
+    while _beta_hwall_equation(hi, wall_fraction, count) > 0.0
+        next = 2.0hi
+        isfinite(next) || throw(ArgumentError(
+            "transfinite_curve_hwall: Beta_HWall coefficient is not " *
+            "representable in Float64"))
+        hi = next
+    end
+    for _ in 1:256
+        mid = 0.5 * (lo + hi)
+        (mid == lo || mid == hi) && break
+        if _beta_hwall_equation(mid, wall_fraction, count) > 0.0
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return 0.5 * (lo + hi)
+end
+
+function _fill_beta_amplitude!(parameters::Vector{Float64},
+                               amplitude::Float64)
+    amplitude == 0.0 && return _fill_progression_log!(parameters, 0.0)
+    segments = length(parameters) - 1
+    log_sinh_amplitude = _log_sinh_positive(amplitude)
+    @inbounds for k in 1:segments-1
+        u = k / segments
+        log_parameter = _log_sinh_positive(u * amplitude) -
+                        log_sinh_amplitude -
+                        _log_cosh((1.0 - u) * amplitude)
+        parameters[k + 1] = exp(log_parameter)
+    end
+    return parameters
+end
+
 """
-    transfinite_curve_hwall(num_nodes; wall_height, curve_length,
-                            orientation=:start, max_nodes=10_000_000)
+    transfinite_curve_hwall(num_nodes; mesh_type=:progression,
+                            wall_height, curve_length, orientation=:start,
+                            max_nodes=10_000_000)
         -> Vector{Float64}
 
 Return the `num_nodes` monotonically increasing parameters in `[0, 1]` of a
-geometric boundary-layer distribution whose wall segment measures
-`wall_height/curve_length` of the affine curve and grows so the segments sum to
-one. This is the transfinite counterpart of Gmsh's `Progression_HWall` law: the
-progression ratio `r ≥ 1` is solved from
+straight `Progression_HWall`, `Bump_HWall`, or `Beta_HWall` transfinite curve.
+Use `mesh_type=:progression` (`:power` is an alias), `:bump`, or `:beta`.
+
+For `:progression`, the wall segment measures `wall_height/curve_length` of the
+affine curve. The progression ratio `r ≥ 1` is solved from
 `wall_height·Σ_{k=0}^{m-1} r^k == curve_length` with `m = num_nodes - 1`
 segments, then applied through the same closed-form `Progression` path as
 [`transfinite_curve_parameters`](@ref).
 
-`orientation=:start` anchors the wall height at parameter zero; `:end` mirrors
-the distribution. Feasibility requires `wall_height ≤ curve_length/m`; equality
-gives the uniform distribution. With two nodes, the only feasible wall height
-equals the curve length. The solved identity is checked to a small multiple of
-Float64 roundoff, and distributions that collapse adjacent parameters are rejected.
-Unlike Gmsh 4.15.2's bounded ratio inversion, this function solves every feasible
-Float64-representable ratio instead of silently replacing large ratios with a
-uniform distribution.
+For `:bump` and `:beta`, Tessella reproduces Gmsh 4.15.2's nominal HWall
+definition: `wall_height/curve_length` locates the first unit of Gmsh's integrated
+transfinite primitive, whose inversion uses `num_nodes` (including endpoints).
+Consequently the emitted first segment is generally not equal to the nominal wall
+height. These laws require `num_nodes ≥ 3` and
+`wall_height/curve_length < 1/num_nodes`. `:bump` is symmetric, so orientation
+does not change it; `:progression` and `:beta` are mirrored by `orientation=:end`.
+
+All inverse identities are checked to Float64 roundoff, and distributions that
+collapse adjacent parameters are rejected. Tessella solves the full representable
+root instead of reproducing Gmsh's bounded-search uniform fallbacks.
 """
 function transfinite_curve_hwall(num_nodes;
+                                 mesh_type=:progression,
                                  wall_height=nothing, curve_length=nothing,
                                  orientation=:start,
                                  max_nodes=_DEFAULT_MAX_NODES)
     caller = "transfinite_curve_hwall"
+    mesh_type isa Symbol || throw(ArgumentError(
+        "$caller: mesh_type must be a Symbol"))
+    mesh_type in (:progression, :power, :bump, :beta) || throw(ArgumentError(
+        "$caller: mesh_type must be :progression, :power, :bump, or :beta"))
+    law = mesh_type === :power ? :progression : mesh_type
     orientation isa Symbol || throw(ArgumentError(
         "$caller: orientation must be :start or :end"))
     orientation in (:start, :end) || throw(ArgumentError(
@@ -354,45 +482,69 @@ function transfinite_curve_hwall(num_nodes;
     len = positive_float(curve_length, "curve_length")
 
     segments = count - 1
-    if segments == 1 && hw != len
-        throw(ArgumentError(
-            "$caller: wall_height must equal curve_length when num_nodes is 2"))
-    end
-    uniform_wall = len / segments
-    uniform_wall > 0.0 || throw(ArgumentError(
-        "$caller: curve_length $len divided over $segments segments is below " *
-        "Float64 resolution"))
-    if hw > uniform_wall
-        throw(ArgumentError(
-            "$caller: wall_height $hw is infeasible for curve_length $len with " *
-            "$segments segments (needs wall_height ≤ $uniform_wall)"))
-    end
     expected_wall = hw / len
     expected_wall > 0.0 || throw(ArgumentError(
         "$caller: wall_height/curve_length is below Float64 resolution"))
-    log_ratio = hw == uniform_wall ?
-        0.0 : _hwall_log_ratio(segments, -log(expected_wall))
+    solver_parameter = if law === :progression
+        if segments == 1 && hw != len
+            throw(ArgumentError(
+                "$caller: wall_height must equal curve_length when num_nodes is 2"))
+        end
+        uniform_wall = len / segments
+        uniform_wall > 0.0 || throw(ArgumentError(
+            "$caller: curve_length $len divided over $segments segments is below " *
+            "Float64 resolution"))
+        hw <= uniform_wall || throw(ArgumentError(
+            "$caller: wall_height $hw is infeasible for curve_length $len with " *
+            "$segments segments (needs wall_height ≤ $uniform_wall)"))
+        hw == uniform_wall ?
+            0.0 : _hwall_log_ratio(segments, -log(expected_wall))
+    else
+        count >= 3 || throw(ArgumentError(
+            "$caller: $law HWall requires num_nodes to be at least 3"))
+        nominal_limit = inv(Float64(count))
+        expected_wall < nominal_limit || throw(ArgumentError(
+            "$caller: $law HWall requires wall_height/curve_length " *
+            "< 1/num_nodes ($nominal_limit)"))
+        if law === :bump
+            value = _bump_hwall_log_inverse_coefficient(expected_wall, count)
+            residual = _bump_hwall_primitive(value, expected_wall, count) - 1.0
+            abs(residual) <= 4096eps(Float64) || throw(ErrorException(
+                "$caller: Bump_HWall inverse residual is $residual"))
+            value
+        else
+            value = _beta_hwall_amplitude(expected_wall, count)
+            residual = _beta_hwall_equation(value, expected_wall, count)
+            abs(residual) <= 4096eps(Float64) || throw(ErrorException(
+                "$caller: Beta_HWall inverse residual is $residual"))
+            value
+        end
+    end
 
     parameters = Vector{Float64}(undef, count)
     parameters[1] = 0.0
     parameters[end] = 1.0
-    if log_ratio == 0.0
-        @inbounds for k in 1:segments-1
-            parameters[k+1] = k / segments
-        end
+    if law === :progression
+        _fill_progression_log!(parameters, solver_parameter)
+    elseif law === :bump
+        _fill_bump_log_inverse!(parameters, solver_parameter)
     else
-        _fill_progression_log!(parameters, log_ratio)
+        _fill_beta_amplitude!(parameters, solver_parameter)
     end
-    orientation === :end && _reverse_orientation!(parameters)
-    _postcondition(parameters, :progression_hwall, expected_wall, caller)
+    orientation === :end && law !== :bump && _reverse_orientation!(parameters)
+    hwall_law = law === :progression ? :progression_hwall :
+                law === :bump ? :bump_hwall : :beta_hwall
+    _postcondition(parameters, hwall_law, expected_wall, caller)
 
-    wall_parameter = orientation === :start ?
-        parameters[2] - parameters[1] : parameters[end] - parameters[end-1]
-    tolerance = max(256eps(Float64) * expected_wall, 8eps(expected_wall))
-    abs(wall_parameter - expected_wall) <= tolerance ||
-        throw(ErrorException(
-            "$caller: solved distribution's wall segment measures $wall_parameter " *
-            "but the requested wall height implies $expected_wall"))
+    if law === :progression
+        wall_parameter = orientation === :start ?
+            parameters[2] - parameters[1] : parameters[end] - parameters[end-1]
+        tolerance = max(256eps(Float64) * expected_wall, 8eps(expected_wall))
+        abs(wall_parameter - expected_wall) <= tolerance ||
+            throw(ErrorException(
+                "$caller: solved distribution's wall segment measures " *
+                "$wall_parameter but the requested wall height implies $expected_wall"))
+    end
 
     return parameters
 end
