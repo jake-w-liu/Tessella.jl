@@ -26,11 +26,11 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers, and 2-D quad/fan layers |
-| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, 2-D boundary-layer quads, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
+| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
-P1 does not claim 3-D multi-wall boundary-layer fans or remaining-volume tet fill after a layer extrusion, the full Gmsh automatic-sizing
-pipeline, high-order/custom-interpolation, multiple-time-step, or mixed-component
+P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
+pipeline, high-order/custom-interpolation, or mixed-component
 `PostView`, materially warped quadrangles, `PostView` tensor-to-metric evaluation, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
 not claim general mixed-element generation or recombination beyond P4's first-order
@@ -52,8 +52,9 @@ IGES 126/128 NURBS import as native curves/surfaces with IGES NURBS export;
 other topology is an explicit blocker. Bounded
 `.geo` execution covers Point/Line/Loop/Surface, Box/Cylinder/Sphere/Cone,
 BooleanDifference/Union/Intersection of those solids, Translate of remaining
-native solids, Dilate, coordinate-axis π/2 rotations of AABB boxes, and
-Point-In-Surface embeddings. Its scanner handles finite arithmetic constants,
+native solids, Dilate, coordinate-axis π/2 rotations of AABB boxes,
+Point/Line-In-Surface embeddings, and Point/Line/Surface-In-Volume recovery. Its
+scanner handles finite arithmetic constants,
 pure numeric functions, prior scalar bindings, explicit field/physical tags, and
 finite constant ranges in recognized numeric field lists/selectors. Entirely numeric
 Physical memberships are range-checked but remain geometry data. It rejects loops,
@@ -74,19 +75,46 @@ six-tetrahedron transfinite volume subdivision; canonical affine triangular pris
 use its legacy collapsed-grid five-face tetrahedral path. Surface recombination now
 includes Edmonds blossom matching and a `full_quad` perfect-matching gate.
 Planar constant-`z` polylines extrude to type-3 quadrangles along left-normals,
-with optional convex-corner fans. P4 does not yet claim
+with optional convex-corner fans. Closed manifold walls can use
+`mesh_boundary_layer_filled` for certified prism shells, cavity walls, and a
+conforming remaining-core tetrahedral fill. Explicit one-to-one translated node
+pairs can be certified and snapped exactly without changing connectivity or tags;
+the pair map remains caller-owned rather than persistent model metadata. P4 does
+not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite or holed patches,
 general CAD parameterizations, recombined three-sided patches, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
-3-D multi-wall boundary-layer fans, remaining-volume tet fill, or periodic/embedded
-model constraints.
+3-D multi-wall boundary-layer fans, or persistent model/I/O periodic entity metadata.
 
-OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
-post-processing are unfinished parity tracks, not project non-goals.
+General OpenCASCADE/unclassified NURBS CAD, remaining algorithms/fields, broad
+formats and API, GUI, and post-processing are unfinished parity tracks, not
+project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening translated
+periodic node-pair certification:
+
+- `periodic_identify` now validates a finite nonzero translation, a finite
+  nonnegative tolerance, representable indices and translated coordinates, and
+  a one-to-one mapping whose master and slave sets are unique and disjoint. All
+  pairs are certified before the copied mesh is mutated; node numbering,
+  connectivity, and tags remain unchanged while slave coordinates are snapped
+  exactly.
+- The periodic unit suite passed 18/18 assertions under Julia 1.12.7 and Julia
+  1.11.9. Its deterministic snapped-mesh SHA-256 is
+  `2d4c3e493639ced1a3a2e21a948e73c36b068c18cd37781760faf32eadd8f6f0`.
+- The bounds-checked package gate passed 163,604/163,604 assertions in 11m48.0s.
+  Recursive ambiguity detection returned zero; the `Periodic` module's public
+  documentation scan returned no missing names, leaving only
+  `mesh_boundary_layer` and `tetrahedralize` undocumented at top level.
+- The aggregate bounds-checked validation exited 0. Its new Gmsh 4.15.2
+  translation-periodic curve differential certified five node pairs with maximum
+  pre-snap error `2.0594637106796654e-12` and deterministic SHA-256
+  `baa96c7ebc0265667209f1940c77d5bdeed5ecb8a12f765d02df9d1945373648`;
+  every existing child passed unchanged.
 
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening native `.geo`
 execution and primitive translation:
