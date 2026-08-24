@@ -11,32 +11,94 @@ using ..IO: write_msh
 
 export main
 
-function main(args::Vector{String})
+const _MAX_ARGUMENTS=10_000
+const _MAX_ARGUMENT_BYTES=1_000_000
+
+function _copy_arguments(args)
+    tokens=String[];sizehint!(tokens,length(args))
+    total=0
+    for raw in args
+        total=try
+            Base.checked_add(total,ncodeunits(raw))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OverflowError || rethrow()
+            throw(ArgumentError("tessella: command-line argument size overflow"))
+        end
+        total<=_MAX_ARGUMENT_BYTES || throw(ArgumentError(
+            "tessella: command-line arguments exceed $_MAX_ARGUMENT_BYTES bytes"))
+        push!(tokens,String(raw))
+    end
+    return tokens
+end
+
+function _path_argument(value::AbstractString,what::AbstractString)
+    path=String(value)
+    isempty(path) && throw(ArgumentError("tessella: $what path must not be empty"))
+    occursin('\0',path) && throw(ArgumentError("tessella: $what path contains a NUL byte"))
+    return path
+end
+
+function _default_output(path::String)
+    stem,extension=splitext(path)
+    return isempty(extension) ? path*".msh" : stem*".msh"
+end
+
+function _same_file_target(a::String,b::String)
+    normpath(abspath(a))==normpath(abspath(b)) && return true
+    return ispath(a) && ispath(b) && samefile(a,b)
+end
+
+"""
+    main(args) -> String
+
+Execute one `.geo` input with optional `-2` or `-3` meshing and `-o output`.
+Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
+and returns its path. Duplicate/conflicting flags, multiple inputs, ignored
+output arguments, and any output that aliases the input are rejected.
+"""
+function main(args::AbstractVector{<:AbstractString})
+    length(args)<=_MAX_ARGUMENTS || throw(ArgumentError(
+        "tessella: more than $_MAX_ARGUMENTS command-line arguments"))
     isempty(args) && throw(ArgumentError("tessella: missing input file"))
-    path=nothing; dim=0; outfile=nothing
+    tokens=_copy_arguments(args)
+    path=nothing;dim=0;outfile=nothing
+    dimension_seen=false;output_seen=false
     i=1
-    while i<=length(args)
-        a=args[i]
+    while i<=length(tokens)
+        a=tokens[i]
         if a in ("-2","-3")
-            dim=parse(Int,a[2:2])
+            dimension_seen && throw(ArgumentError(
+                "tessella: duplicate or conflicting dimension flag $a"))
+            dim=a=="-2" ? 2 : 3
+            dimension_seen=true
         elseif a=="-o"
-            i+=1; i<=length(args) || throw(ArgumentError("tessella: -o needs a path"))
-            outfile=args[i]
+            output_seen && throw(ArgumentError("tessella: duplicate -o flag"))
+            i+=1;i<=length(tokens) || throw(ArgumentError("tessella: -o needs a path"))
+            startswith(tokens[i],'-') && throw(ArgumentError(
+                "tessella: -o needs a path, got flag $(tokens[i])"))
+            outfile=_path_argument(tokens[i],"output")
+            output_seen=true
         elseif startswith(a,"-")
             throw(ArgumentError("tessella: unsupported flag $a"))
         else
             path===nothing || throw(ArgumentError("tessella: multiple input files"))
-            path=a
+            path=_path_argument(a,"input")
         end
         i+=1
     end
     path===nothing && throw(ArgumentError("tessella: missing input file"))
-    result=execute_geo(path; mesh_dim=dim)
+    dim==0 && outfile!==nothing && throw(ArgumentError(
+        "tessella: -o requires -2 or -3"))
+    destination=dim==0 ? nothing : (outfile===nothing ? _default_output(path) : outfile)
+    destination!==nothing && _same_file_target(path,destination) && throw(ArgumentError(
+        "tessella: output path must not alias the input file"))
+
+    result=execute_geo(path;mesh_dim=dim)
     if dim>0
         result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
-        dest=outfile===nothing ? replace(path, r"\.(geo|GEO)$"=>".msh") : outfile
-        write_msh(dest, result.mesh; version=4.1)
-        return dest
+        write_msh(destination,result.mesh;version=4.1)
+        return destination
     end
     return path
 end

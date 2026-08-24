@@ -62,7 +62,9 @@ using Tessella
     include("geometry/nurbs_test.jl")    # De Boor vs Bernstein/circle oracles
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
     include("meshing/periodic_test.jl")  # periodic identification
-    include("interfaces/api_cli_gui_test.jl") # API/CLI/GUI logic
+    include("interfaces/api_test.jl") # synchronized session, detached mesh cache
+    include("interfaces/cli_test.jl") # bounded parser + non-destructive output
+    include("interfaces/gui_test.jl") # validated headless command/state machine
     include("interfaces/post_test.jl") # owned scalar views + synchronized plugins
 
     # Stage 1 — 2-D meshing (CRC-gated).
