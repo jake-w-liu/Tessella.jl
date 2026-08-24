@@ -88,6 +88,32 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after completing the classified
+STEP/IGES interoperability increment:
+
+- STEP parsing now rejects duplicate/out-of-range identifiers and nonfinite data;
+  point-cloud block classification cannot silently replace mixed topology, and
+  multi-solid primitive imports block explicitly. Complex rational STEP surfaces
+  now import with their full weight matrix, closing the prior curve-only complex
+  rational path.
+- IGES input now observes the standard 64-column parameter field instead of
+  consuming the directory pointer, accepts `D` exponents, rejects malformed or
+  unterminated numeric records, checks integer/count arithmetic before allocation,
+  and blocks multiple recognized solids.
+- IGES 126/128 export now writes atomic, exact 80-column S/G/D/P/T sections with
+  directory entries and an untrimmed type-144 wrapper for type-128 surfaces.
+  Mutated/invalid NURBS objects are rejected before replacement. The deterministic
+  curve-plus-surface export SHA-256 is
+  `ae515df934189f3d0b3cf5614bd39427cd6d015ceb07a9858c44fc32ea7986f5`.
+- The bounds-checked package gate passed 163,569/163,569 assertions in 19m18.4s.
+  A final checksum-only assertion was then added without changing production code;
+  the STEP/IGES suite passed 83/83 under Julia 1.12.7 and Julia 1.11.9.
+- The aggregate bounds-checked validation exited 0 against Gmsh 4.15.2-git.
+  Tessella recovered the centre of Gmsh's IGES-128 patch, while Gmsh imported
+  Tessella's standalone IGES-126 curve and IGES-128/144 surface and meshed the
+  latter to area 1 (`export_nodes=50`, `export_tris=66`). Every other required
+  differential and parity child passed unchanged.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening the public NURBS
 evaluation path:
 

@@ -1,4 +1,5 @@
 using Test
+using SHA
 using Tessella
 using Tessella.BRep: parse_step_entities
 using Tessella.MeshTypes: nnodes, ntris, ntets, tet_volume, node, validate
@@ -18,6 +19,11 @@ function _brep_signed_surface_volume(s)
         v += (cx*c[1] + cy*c[2] + cz*c[3])
     end
     v/6
+end
+
+function _brep_iges_parameter_line(payload; pointer=1, sequence=1)
+    ncodeunits(payload)<=64 || throw(ArgumentError("test IGES payload exceeds 64 columns"))
+    return rpad(payload,64)*lpad(pointer,8)*"P"*lpad(sequence,7)*"\n"
 end
 
 @testset "native STEP/IGES classified-solid import" begin
@@ -116,6 +122,12 @@ end
             close(io)
             export_iges_nurbs(p, [circle, NURBSSurface(1,1,[0,0,1,1],[0,0,1,1],
                 [(0.0,0.0,0.0) (0.0,1.0,0.0); (1.0,0.0,0.0) (1.0,1.0,2.0)])])
+            lines=readlines(p)
+            @test all(ncodeunits(line)==80 for line in lines)
+            @test count(line->line[73]=='D',lines)==6
+            @test count(line->line[73]=='P',lines)>=3
+            @test bytes2hex(sha256(read(p)))==
+                  "ae515df934189f3d0b3cf5614bd39427cd6d015ceb07a9858c44fc32ea7986f5"
             import_nurbs_iges(p)
         end
         @test length(imported)==2
@@ -155,6 +167,127 @@ END-ISO-10303-21;
         end
         q=nurbs_eval(cc,0.5); b=bernstein(0.5)
         @test hypot(q[1]-b[1],q[2]-b[2],q[3]-b[3])<=1e-14
+
+        complex_surface_src="""
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('complex rational surface'),'2;1');
+ENDSEC;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(0.,1.,0.));
+#3=CARTESIAN_POINT('',(1.,0.,0.));
+#4=CARTESIAN_POINT('',(1.,1.,2.));
+#5=( BOUNDED_SURFACE()
+     B_SPLINE_SURFACE(1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.)
+     B_SPLINE_SURFACE_WITH_KNOTS((2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.)
+     GEOMETRIC_REPRESENTATION_ITEM()
+     RATIONAL_B_SPLINE_SURFACE(((1.,2.),(3.,4.)))
+     REPRESENTATION_ITEM('') SURFACE() );
+ENDSEC;
+END-ISO-10303-21;
+"""
+        complex_surface=mktemp() do p,io
+            write(io,complex_surface_src); close(io)
+            only(import_nurbs_step(p))
+        end
+        @test complex_surface isa NURBSSurface
+        @test complex_surface.weights==[1.0 2.0; 3.0 4.0]
+        rational_mid=nurbs_eval(complex_surface,0.5,0.5)
+        @test all(isapprox(rational_mid[i],(0.7,0.6,0.8)[i];atol=1e-14)
+                  for i in 1:3)
+    end
+
+    @testset "strict parser, resource, and atomic-write contracts" begin
+        duplicate="""
+ISO-10303-21;
+DATA;
+#1=CARTESIAN_POINT('',(0.,0.,0.));
+#1=CARTESIAN_POINT('',(1.,0.,0.));
+ENDSEC;
+END-ISO-10303-21;
+"""
+        @test_throws ArgumentError parse_step_entities(duplicate)
+        nonfinite=replace(duplicate,
+                          "#1=CARTESIAN_POINT('',(1.,0.,0.));"=>
+                          "#2=CARTESIAN_POINT('',(1e999,0.,0.));")
+        @test_throws ArgumentError parse_step_entities(nonfinite)
+        oversized_id=replace(duplicate,
+                             "#1=CARTESIAN_POINT('',(1.,0.,0.));"=>
+                             "#999999999999999999999999=CARTESIAN_POINT('',(1.,0.,0.));")
+        @test_throws ArgumentError parse_step_entities(oversized_id)
+
+        corners=join(("#$(i)=CARTESIAN_POINT('',($(p[1]),$(p[2]),$(p[3])));"
+                      for (i,p) in enumerate(((0,0,0),(1,0,0),(1,1,0),(0,1,0),
+                                               (0,0,1),(1,0,1),(1,1,1),(0,1,1)))),"\n")
+        conflicting="ISO-10303-21;\nDATA;\n"*corners*
+                    "\n#9=MANIFOLD_SOLID_BREP('',#1);\nENDSEC;\nEND-ISO-10303-21;\n"
+        err=mktemp() do path,io
+            write(io,conflicting); close(io)
+            try import_step(path); nothing catch e e end
+        end
+        @test err isa ArgumentError
+        @test occursin("MANIFOLD_SOLID_BREP",sprint(showerror,err))
+
+        multiple_step="""
+ISO-10303-21;
+DATA;
+#1=SPHERE('',\$,1.);
+#2=SPHERE('',\$,2.);
+ENDSEC;
+END-ISO-10303-21;
+"""
+        multiple_step_error=mktemp() do path,io
+            write(io,multiple_step); close(io)
+            try import_step(path); nothing catch e e end
+        end
+        @test multiple_step_error isa ArgumentError
+        @test occursin("multiple recognized solids",sprint(showerror,multiple_step_error))
+
+        standard=_brep_iges_parameter_line("150,2D0,1D0,1D0,0D0,0D0,0D0;";
+                                            pointer=12345678)
+        standard_surface=mktemp() do path,io
+            write(io,standard); close(io)
+            import_iges(path; fill=false)
+        end
+        @test validate(standard_surface).ok
+        @test _brep_signed_surface_volume(standard_surface)≈2.0 atol=1e-12
+        malformed=_brep_iges_parameter_line("150,2.,bad,1.,0.,0.,0.;")
+        mktemp() do path,io
+            write(io,malformed); close(io)
+            @test_throws ArgumentError import_iges(path)
+        end
+        mktemp() do path,io
+            write(io,_brep_iges_parameter_line("150,2.,1.,1.,0.,0.,0.")); close(io)
+            @test_throws ArgumentError import_iges(path)
+        end
+        multiple_iges=_brep_iges_parameter_line("158,1.,0.,0.,0.;";sequence=1)*
+                      _brep_iges_parameter_line("158,2.,0.,0.,0.;";sequence=2)
+        multiple_iges_error=mktemp() do path,io
+            write(io,multiple_iges); close(io)
+            try import_iges(path); nothing catch e e end
+        end
+        @test multiple_iges_error isa ArgumentError
+        @test occursin("multiple recognized solids",sprint(showerror,multiple_iges_error))
+
+        bad_count=_brep_iges_parameter_line("126,1000001,1,0,0,0,0,0;")
+        mktemp() do path,io
+            write(io,bad_count); close(io)
+            @test_throws ArgumentError import_nurbs_iges(path)
+        end
+        @test_throws ArgumentError Tessella.BRep._expand_knots([1_000_001],[0.0],
+                                                               "test")
+        @test_throws ArgumentError Tessella.BRep._as_int(true,"test","count")
+
+        curve=NURBSCurve(1,[0,0,1,1],[(0.0,0.0,0.0),(1.0,0.0,0.0)])
+        mktemp() do path,io
+            write(io,"preserve-me"); close(io)
+            @test_throws ArgumentError export_iges_nurbs(path,[curve,42])
+            @test read(path,String)=="preserve-me"
+            curve.knots[1]=NaN
+            @test_throws ArgumentError export_iges_nurbs(path,[curve])
+            @test read(path,String)=="preserve-me"
+        end
     end
 
     @testset "explicit blockers" begin
@@ -174,9 +307,9 @@ END-ISO-10303-21;
         end
         @test err isa ArgumentError
         @test occursin("100", sprint(showerror, err))
-        junk=mktemp() do path,io
-            write(io,"not a cad file\n"); close(io); path
+        mktemp() do path,io
+            write(io,"not a cad file\n"); close(io)
+            @test_throws ArgumentError import_step(path)
         end
-        @test_throws ArgumentError import_step(junk)
     end
 end
