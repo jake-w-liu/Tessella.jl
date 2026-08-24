@@ -16,7 +16,41 @@ using Tessella
         s=sum(bspline_basis(i,2,U,t) for i in 1:3)
         @test s≈1.0 atol=1e-14
     end
+    for t in (0.0,0.1,0.5,0.9,1.0)
+        @test bspline_basis(1,2,U,t)≈(1-t)^2 atol=1e-14
+        @test bspline_basis(2,2,U,t)≈2t*(1-t) atol=1e-14
+        @test bspline_basis(3,2,U,t)≈t^2 atol=1e-14
+    end
+    @test bspline_basis(1,2,U,-1.0)==0.0
+    @test bspline_basis(3,2,U,2.0)==0.0
+    nonclamped=collect(0.0:6.0)
+    for t in (2.0,2.5,3.5,4.0)
+        @test sum(bspline_basis(i,2,nonclamped,t) for i in 1:4)≈1.0 atol=1e-14
+    end
+    @test bspline_basis(1,0,[0.0,1.0,2.0],0.5)==1.0
+    @test bspline_basis(2,0,[0.0,1.0,2.0],1.5)==1.0
+    @test bspline_basis(2,0,[0.0,1.0,2.0],2.0)==1.0
+    @test nurbs_eval(c,-1.0)==P[1]
+    @test nurbs_eval(c,2.0)==P[3]
     @test_throws ArgumentError NURBSCurve(2,[0,1],P)
+    @test_throws ArgumentError NURBSCurve(true,[0,0,1,1],P[1:2])
+    @test_throws ArgumentError NURBSCurve(1.0,[0,0,1,1],P[1:2])
+    @test_throws ArgumentError NURBSCurve(big(2)^100,[0,0,1,1],P[1:2])
+    @test_throws ArgumentError NURBSCurve(1,[0,0,0,0],P[1:2])
+    @test_throws ArgumentError bspline_basis(1,-1,U,0.5)
+    @test_throws ArgumentError bspline_basis(1,true,U,0.5)
+    @test_throws ArgumentError bspline_basis(true,2,U,0.5)
+    @test_throws ArgumentError bspline_basis(1,2,[0,1,0,1,1,1],0.5)
+    @test_throws ArgumentError bspline_basis(1,2,[0,0,0,Inf,1,1],0.5)
+    @test_throws ArgumentError bspline_basis(1,2,U,NaN)
+
+    # Homogeneous weights are globally scale invariant. Normalizing them before
+    # multiplication keeps a mathematically finite result finite at Float64 limits.
+    xmax=floatmax(Float64)
+    extreme=NURBSCurve(1,[0,0,1,1],[(xmax,0.0,0.0),(xmax,0.0,0.0)],[2.0,2.0])
+    @test nurbs_eval(extreme,0.5)==(xmax,0.0,0.0)
+    unrepresentable=NURBSCurve(1,[0,0,1,1],P[1:2],[nextfloat(0.0),xmax])
+    @test_throws ArgumentError nurbs_eval(unrepresentable,0.5)
 
     # Quadratic NURBS circle of radius 1 in the xy-plane (9 controls, standard
     # square-to-circle weights). Evaluate at the four axis points.
@@ -38,4 +72,6 @@ using Tessella
                    [(0.0,0.0,0.0) (0.0,1.0,0.0); (1.0,0.0,0.0) (1.0,1.0,2.0)])
     q=nurbs_eval(S,0.5,0.5)
     @test q[1]≈0.5 && q[2]≈0.5 && q[3]≈0.5
+    @test_throws ArgumentError NURBSSurface(true,1,[0,0,1,1],[0,0,1,1],S.controls)
+    @test_throws ArgumentError NURBSSurface(1,1,[0,0,0,0],[0,0,1,1],S.controls)
 end
