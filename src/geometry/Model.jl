@@ -17,7 +17,7 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3
 
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
-export embed!, dilate_volume!, rotate_volume!
+export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export add_physical_group!, set_physical_name!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
@@ -397,6 +397,44 @@ function _dilate_point(p, center, s)
     return (center[1]+s*(p[1]-center[1]),
             center[2]+s*(p[2]-center[2]),
             center[3]+s*(p[3]-center[3]))
+end
+
+"""
+    translate_volume!(model, tag, offset) -> tag
+
+Translate a native primitive volume by the finite three-component `offset`.
+The model is unchanged if a translated coordinate is not representable as a
+finite `Float64` or the volume has no translatable native encoding.
+"""
+function translate_volume!(m::GeoModel, tag, offset)
+    caller="translate_volume!"
+    t=_tag(tag,caller,3)
+    haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
+    delta=_finite_vector3(offset,caller,"offset")
+    if haskey(m.box_extents,t)
+        x0,y0,z0,dx,dy,dz=m.box_extents[t]
+        origin=_finite_result((x0+delta[1],y0+delta[2],z0+delta[3]),caller)
+        m.box_extents[t]=(origin[1],origin[2],origin[3],dx,dy,dz)
+    elseif haskey(m.cylinders,t)
+        cyl=m.cylinders[t]
+        center=_finite_result((cyl.center[1]+delta[1],cyl.center[2]+delta[2],
+                               cyl.center[3]+delta[3]),caller)
+        m.cylinders[t]=(center=center,axis=cyl.axis,radius=cyl.radius,height=cyl.height)
+    elseif haskey(m.spheres,t)
+        sph=m.spheres[t]
+        center=_finite_result((sph.center[1]+delta[1],sph.center[2]+delta[2],
+                               sph.center[3]+delta[3]),caller)
+        m.spheres[t]=(center=center,radius=sph.radius)
+    elseif haskey(m.cones,t)
+        cone=m.cones[t]
+        center=_finite_result((cone.center[1]+delta[1],cone.center[2]+delta[2],
+                               cone.center[3]+delta[3]),caller)
+        m.cones[t]=(center=center,axis=cone.axis,r1=cone.r1,r2=cone.r2,
+                    height=cone.height)
+    else
+        throw(ArgumentError("$caller: Volume[$t] has no translatable native encoding"))
+    end
+    return t
 end
 
 """

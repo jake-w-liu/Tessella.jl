@@ -88,6 +88,31 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening native `.geo`
+execution and primitive translation:
+
+- `translate_volume!` now provides the model-level translation path for boxes,
+  cylinders, spheres, and cones. It checks offset shape/finite conversion and
+  transformed-coordinate representability before mutation; unsupported Boolean
+  encodings remain explicit blockers.
+- Boolean operand `Delete` is now applied independently. The selective case
+  `{ Volume{1}; Delete; }{ Volume{2}; }` leaves volumes `[2,3]`, matching a direct
+  Gmsh 4.15.2 API probe (`[(3,2),(3,3)]`); malformed operand suffixes block.
+- The brace-aware executor now handles `/* ... */` comments, rejects unmatched
+  braces and unterminated comments, and bounds individual statements and the
+  statement count. `mesh_dim` rejects `Bool`, out-of-range integers, and values
+  outside `{0,2,3}` before parsing the file.
+- Two deleted-temp-file false positives in the `.geo` blocker tests were repaired;
+  the intended multi-volume and `Extrude` paths are now exercised while the files
+  still exist.
+- The bounds-checked package gate passed 163,590/163,590 assertions in 12m25.2s.
+  The focused model/`.geo` suite passed 146/146 under Julia 1.12.7 and 1.11.9;
+  public Model, GeoExec, and top-level documentation scans now leave only the
+  three unrelated meshing exports, and recursive ambiguity detection remains 0.
+- The aggregate bounds-checked validation exited 0 against Gmsh 4.15.2-git,
+  including every size-field, transfinite, API, CAD, NURBS/IGES, embedding,
+  Boolean, boundary-layer, and analytic-volume child.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after completing the classified
 STEP/IGES interoperability increment:
 

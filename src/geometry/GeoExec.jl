@@ -11,34 +11,57 @@ module GeoExec
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
-using ..Model: embed!, dilate_volume!, rotate_volume!
-using ..Model: add_physical_group!, set_physical_name!
+using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
+using ..Model: add_physical_group!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params
 
 export execute_geo, GeoExecution
 
+"""
+    GeoExecution
+
+Result of [`execute_geo`](@ref): the populated native `model`, an optional
+validated `mesh`, and the sizing/field `params` recovered by
+[`Tessella.IO.read_geo_params`](@ref).
+"""
 struct GeoExecution
     model::GeoModel
     mesh::Union{Nothing,Mesh}
     params
 end
 
+const _MAX_GEO_EXEC_STATEMENT_BYTES=1_000_000
+const _MAX_GEO_EXEC_STATEMENTS=1_000_000
+
 # Brace-aware statement split so BooleanDifference `{ Volume{1}; Delete; }{...};`
-# is one statement. Quoted strings and `//` comments are respected.
+# is one statement. Quoted strings and line/block comments are respected.
 function _geo_exec_statements(path::AbstractString)
     statements=String[]
     buf=IOBuffer()
     depth=0
     quote_char='\0'
+    block_comment=false
     for raw in eachline(path)
         i=firstindex(raw); last=lastindex(raw)
         while i<=last
             c=raw[i]
             nxt=nextind(raw,i)
-            if quote_char=='\0' && c=='/' && nxt<=last && raw[nxt]=='/'
+            nextc=nxt<=last ? raw[nxt] : '\0'
+            if block_comment
+                if c=='*' && nextc=='/'
+                    block_comment=false
+                    i=nextind(raw,nxt)
+                    continue
+                end
+            elseif quote_char=='\0' && c=='/' && nextc=='/'
                 break
+            elseif quote_char=='\0' && c=='/' && nextc=='*'
+                write(buf,' ')
+                block_comment=true
+                i=nextind(raw,nxt)
+                continue
             elseif quote_char!='\0'
                 write(buf,c)
                 c==quote_char && (quote_char='\0')
@@ -47,30 +70,59 @@ function _geo_exec_statements(path::AbstractString)
             elseif c=='{'
                 depth+=1; write(buf,c)
             elseif c=='}'
-                depth=max(0,depth-1); write(buf,c)
+                depth>0 || throw(ArgumentError(
+                    "execute_geo: unmatched closing brace"))
+                depth-=1; write(buf,c)
             elseif c==';' && depth==0
                 write(buf,c)
                 statement=strip(String(take!(buf)))
-                isempty(statement) || push!(statements, statement)
+                if !isempty(statement)
+                    length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                        "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+                    push!(statements,statement)
+                end
             else
                 write(buf,c)
             end
+            position(buf)<=_MAX_GEO_EXEC_STATEMENT_BYTES || throw(ArgumentError(
+                "execute_geo: statement exceeds $_MAX_GEO_EXEC_STATEMENT_BYTES bytes"))
             i=nxt
         end
-        position(buf)>0 && write(buf,' ')
+        if quote_char!='\0'
+            write(buf,'\n')
+        elseif position(buf)>0
+            write(buf,' ')
+        end
     end
     quote_char=='\0' || throw(ArgumentError("execute_geo: unterminated quoted string"))
+    block_comment && throw(ArgumentError("execute_geo: unterminated block comment"))
+    depth==0 || throw(ArgumentError("execute_geo: unmatched opening brace"))
     tail=strip(String(take!(buf)))
     isempty(tail) || throw(ArgumentError("execute_geo: unterminated statement: $tail"))
     return statements
 end
 
+"""
+    execute_geo(path; mesh_dim=0) -> GeoExecution
+
+Execute Tessella's documented bounded `.geo` subset into a new [`GeoModel`](@ref).
+Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
+`mesh_dim=0` only builds the model. Geometry statements outside the bounded
+subset and malformed input raise `ArgumentError` instead of being partially
+accepted.
+"""
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
+    mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
+    dim=try
+        Int(mesh_dim)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("execute_geo: mesh_dim exceeds the platform Int range"))
+    end
+    dim in (0,2,3) || throw(ArgumentError("execute_geo: mesh_dim must be 0, 2, or 3"))
     params=read_geo_params(path)
     model=GeoModel()
-    dim=Int(mesh_dim)
-    dim in (0,2,3) || throw(ArgumentError("execute_geo: mesh_dim must be 0, 2, or 3"))
     for line in _geo_exec_statements(path)
         occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
                  line) && throw(ArgumentError(
@@ -90,6 +142,13 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
         mesh=mesh_model_volume(model, only(keys(model.volumes)))
     end
     return GeoExecution(model,mesh,params)
+end
+
+function _boolean_delete_operand(raw::AbstractString)
+    suffix=String(strip(raw))
+    match(r"^;?\s*(?:Delete\s*;?)?$",suffix)===nothing && throw(ArgumentError(
+        "execute_geo: Boolean operand suffix must contain only optional Delete; got $(repr(suffix))"))
+    return occursin(r"\bDelete\b",suffix)
 end
 
 function _exec_line!(m::GeoModel, line::AbstractString)
@@ -135,38 +194,17 @@ function _exec_line!(m::GeoModel, line::AbstractString)
     elseif (mm=match(r"^Boolean(Difference|Union|Intersection)\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*Volume\{([0-9]+)\}([^}]*)\}\s*\{\s*Volume\{([0-9]+)\}([^}]*)\}\s*;$", line)) !== nothing
         op=Dict("Difference"=>:difference,"Union"=>:union,"Intersection"=>:intersection)[mm.captures[1]]
         a=parse(Int,mm.captures[3]); b=parse(Int,mm.captures[5])
+        delete_a=_boolean_delete_operand(mm.captures[4])
+        delete_b=_boolean_delete_operand(mm.captures[6])
         boolean_volumes!(m, op, a, b; tag=parse(Int,mm.captures[2]))
-        if occursin("Delete", mm.captures[4]) || occursin("Delete", mm.captures[6]) ||
-           occursin("Delete", line)
-            delete!(m.volumes, a)
-            delete!(m.volumes, b)
-        end
+        delete_a && delete!(m.volumes,a)
+        delete_b && delete!(m.volumes,b)
         return
     elseif (mm=match(r"^Translate\s*\{\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
         nums=parse.(Float64, split(mm.captures[1],','))
         length(nums)==3 || throw(ArgumentError("execute_geo: Translate needs three offsets"))
         tag=parse(Int,mm.captures[2])
-        haskey(m.volumes,tag) || throw(ArgumentError(
-            "execute_geo: Translate of unknown Volume[$tag]"))
-        if haskey(m.box_extents,tag)
-            x0,y0,z0,dx,dy,dz=m.box_extents[tag]
-            m.box_extents[tag]=(x0+nums[1],y0+nums[2],z0+nums[3],dx,dy,dz)
-        elseif haskey(m.cylinders,tag)
-            c=m.cylinders[tag]
-            m.cylinders[tag]=(center=(c.center[1]+nums[1],c.center[2]+nums[2],c.center[3]+nums[3]),
-                              axis=c.axis, radius=c.radius, height=c.height)
-        elseif haskey(m.spheres,tag)
-            s=m.spheres[tag]
-            m.spheres[tag]=(center=(s.center[1]+nums[1],s.center[2]+nums[2],s.center[3]+nums[3]),
-                            radius=s.radius)
-        elseif haskey(m.cones,tag)
-            c=m.cones[tag]
-            m.cones[tag]=(center=(c.center[1]+nums[1],c.center[2]+nums[2],c.center[3]+nums[3]),
-                          axis=c.axis, r1=c.r1, r2=c.r2, height=c.height)
-        else
-            throw(ArgumentError(
-                "execute_geo: Translate currently supports boxes, cylinders, spheres, and cones (Volume[$tag] is not one)"))
-        end
+        translate_volume!(m,tag,(nums[1],nums[2],nums[3]))
         return
     elseif (mm=match(r"^Dilate\s*\{\s*\{\s*([^}]+)\s*\}\s*,\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
         center=parse.(Float64, split(mm.captures[1],','))
