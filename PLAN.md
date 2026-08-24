@@ -31,7 +31,8 @@ meshing backend would not resolve the ASCENT failure that motivated Tessella.
 Tessella
 ├── core/
 │   ├── Predicates  adaptive exact orient/incircle/insphere, exact rationals, SoS
-│   ├── MeshTypes   compact simplex storage, topology, quality, CRC, validation
+│   ├── MeshTypes   compact simplex storage, topology, scale-robust quality,
+│   │               CRC, and mutation-safe validation
 │   ├── Elements    fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
 │   └── Transform   validated affine transforms for finalized simplex meshes
 ├── fields/
