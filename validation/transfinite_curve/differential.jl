@@ -1,5 +1,6 @@
 #!/usr/bin/env julia
-# In-memory straight-line differential for Gmsh 4.15.2 transfinite curve laws.
+# In-memory straight-line differential for Gmsh 4.15.2 transfinite curve laws,
+# including Progression_HWall.
 # No geometry or mesh file is read or written, and Gmsh is always finalized.
 
 using Pkg
@@ -11,11 +12,14 @@ if !isdefined(Tessella, :TransfiniteCurve)
     Base.include(Tessella,
                  joinpath(@__DIR__, "..", "..", "src", "TransfiniteCurve.jl"))
 end
-using Tessella.TransfiniteCurve: transfinite_curve_parameters
+using Tessella.TransfiniteCurve: transfinite_curve_parameters,
+                                 transfinite_curve_hwall
 
 const TARGET_GMSH_VERSION = "4.15.2"
 const PARAMETER_CRC =
     "b525628945d55f49bc5151ad313d697f9c32f7b3325015e5d0080a69260ffd0e"
+const HWALL_PARAMETER_CRC =
+    "8d79e5323a0c4d7c635b4101bad3f1325f33e0badcded389f5b3bd36ea509213"
 
 function find_gmsh_api()
     configured = get(ENV, "GMSH_JULIA_API", "")
@@ -87,6 +91,21 @@ const CASES = (
      coefficient=-0.5, count=17),
     (name=:uniform_two_nodes, law=:progression, gmsh_type="Progression",
      coefficient=1.0, count=2),
+)
+
+const HWALL_CASES = (
+    (name=:progression_hwall_0_01_n6, gmsh_type="Progression_HWall",
+     coefficient=0.01, count=6),
+    (name=:progression_hwall_0_05_n6, gmsh_type="Progression_HWall",
+     coefficient=0.05, count=6),
+    (name=:progression_hwall_0_1_n6, gmsh_type="Progression_HWall",
+     coefficient=0.1, count=6),
+    (name=:progression_hwall_negative_0_1_n6,
+     gmsh_type="Progression_HWall", coefficient=-0.1, count=6),
+    (name=:progression_hwall_0_01_n17, gmsh_type="Progression_HWall",
+     coefficient=0.01, count=17),
+    (name=:progression_hwall_0_05_n17, gmsh_type="Progression_HWall",
+     coefficient=0.05, count=17),
 )
 
 function parameter_crc(groups)
@@ -181,6 +200,20 @@ try
         gmsh_results[case.name] = reference
     end
 
+    hwall_results = Vector{Vector{Float64}}()
+    for case in HWALL_CASES
+        orientation = case.coefficient < 0.0 ? :end : :start
+        tessella = transfinite_curve_hwall(
+            case.count; wall_height=abs(case.coefficient), curve_length=1.0,
+            orientation=orientation, max_nodes=case.count)
+        reference = gmsh_parameters(case)
+        error_value = maximum_difference(tessella, reference)
+        error_value <= 1e-7 || error(
+            "$(case.name): analytic/Gmsh HWall error $error_value exceeds 1e-7")
+        maximum_error = max(maximum_error, error_value)
+        push!(hwall_results, tessella)
+    end
+
     maximum_difference(gmsh_results[:progression_half_n6],
                        gmsh_results[:progression_negative_2_n6]) == 0.0 || error(
         "Gmsh progression coefficient direction/order semantics changed")
@@ -209,16 +242,24 @@ try
     checksum = parameter_crc(checksum_groups)
     checksum == PARAMETER_CRC || error(
         "Tessella transfinite-curve checksum changed: $checksum")
+    hwall_checksum = parameter_crc(hwall_results)
+    hwall_checksum == HWALL_PARAMETER_CRC || error(
+        "Tessella Progression_HWall checksum changed: $hwall_checksum")
+    coordinate_samples =
+        sum(case.count for case in CASES; init=0) +
+        sum(case.count for case in HWALL_CASES; init=0)
 
     println("TRANSFINITE_CURVE_DIFFERENTIAL_OK gmsh=$runtime_version " *
-            "laws=3 cases=$(length(CASES)) coordinate_samples=" *
-            "$(sum(case.count for case in CASES; init=0)) " *
-            "max_abs_error=$maximum_error sha=$checksum")
+            "laws=4 cases=$(length(CASES) + length(HWALL_CASES)) " *
+            "hwall_cases=$(length(HWALL_CASES)) coordinate_samples=" *
+            "$coordinate_samples " *
+            "max_abs_error=$maximum_error sha=$checksum " *
+            "hwall_sha=$hwall_checksum")
 finally
     gmsh.isInitialized() != 0 && gmsh.finalize()
 end
 
 # Intentional nonclaims: non-affine CAD curves and their derivative-weighted
-# adaptive integration, FlexibleTransfinite, *HWall/size-map laws, closed,
+# adaptive integration, FlexibleTransfinite, Bump/Beta HWall and size-map laws, closed,
 # periodic, extruded, degenerate and boundary-layer curves, and bitwise equality
 # with Gmsh's adaptive-trapezoid/linear-inversion roundoff.

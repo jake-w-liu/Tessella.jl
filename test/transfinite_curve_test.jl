@@ -5,7 +5,8 @@ using Tessella
 if !isdefined(Tessella, :TransfiniteCurve)
     Base.include(Tessella, joinpath(@__DIR__, "..", "src", "TransfiniteCurve.jl"))
 end
-using Tessella.TransfiniteCurve: transfinite_curve_parameters
+using Tessella.TransfiniteCurve: transfinite_curve_parameters,
+                                 transfinite_curve_hwall
 
 function _parameter_crc(groups)
     stream = IOBuffer()
@@ -53,6 +54,51 @@ function _big_reference(mesh_type, coefficient, count)
     end
 end
 
+function _big_hwall_reference(count, wall_height, curve_length;
+                              orientation=:start)
+    setprecision(BigFloat, 256) do
+        segments = count - 1
+        fraction = BigFloat(wall_height) / BigFloat(curve_length)
+        target = inv(fraction)
+        ratio = if fraction == inv(BigFloat(segments))
+            BigFloat(1)
+        else
+            geometric_sum(r) = sum(r^k for k in 0:segments-1)
+            lo = BigFloat(1)
+            hi = BigFloat(2)
+            while geometric_sum(hi) < target
+                hi *= 2
+            end
+            for _ in 1:512
+                mid = (lo + hi) / 2
+                if geometric_sum(mid) < target
+                    lo = mid
+                else
+                    hi = mid
+                end
+            end
+            (lo + hi) / 2
+        end
+
+        result = Vector{Float64}(undef, count)
+        result[1] = 0.0
+        accumulated = BigFloat(0)
+        segment = fraction
+        for index in 2:count-1
+            accumulated += segment
+            result[index] = Float64(accumulated)
+            segment *= ratio
+        end
+        result[end] = 1.0
+        if orientation === :end
+            result = 1.0 .- reverse(result)
+            result[1] = 0.0
+            result[end] = 1.0
+        end
+        return result
+    end
+end
+
 @noinline function _curve_allocated(count, mesh_type, coefficient)
     GC.gc()
     return @allocated transfinite_curve_parameters(
@@ -63,6 +109,34 @@ end
     GC.gc()
     return @allocated try
         transfinite_curve_parameters(100_000; max_nodes=10)
+    catch err
+        err isa ArgumentError || rethrow()
+    end
+end
+
+@noinline function _hwall_allocated(count)
+    GC.gc()
+    return @allocated transfinite_curve_hwall(
+        count; wall_height=1 / (2count), curve_length=1.0,
+        max_nodes=count)
+end
+
+@noinline function _hwall_rejected_allocated()
+    GC.gc()
+    return @allocated try
+        transfinite_curve_hwall(
+            100_000; wall_height=1e-6, curve_length=1.0, max_nodes=10)
+    catch err
+        err isa ArgumentError || rethrow()
+    end
+end
+
+@noinline function _hwall_infeasible_allocated()
+    GC.gc()
+    return @allocated try
+        transfinite_curve_hwall(
+            1_000_000; wall_height=0.5, curve_length=1.0,
+            max_nodes=1_000_000)
     catch err
         err isa ArgumentError || rethrow()
     end
@@ -168,6 +242,57 @@ end
         end
     end
 
+    @testset "Progression HWall law and independent geometric-sum oracle" begin
+        exact = transfinite_curve_hwall(
+            6; wall_height=1.0, curve_length=31.0)
+        @test exact ≈ [0.0, 1/31, 3/31, 7/31, 15/31, 1.0]
+        @test all(isapprox(diff(exact)[index + 1] / diff(exact)[index], 2.0;
+                           rtol=64eps(Float64), atol=0.0)
+                  for index in 1:4)
+
+        mirrored = transfinite_curve_hwall(
+            6; wall_height=1.0, curve_length=31.0, orientation=:end)
+        @test mirrored ≈ 1.0 .- reverse(exact) atol=8eps(Float64)
+        @test mirrored[end] - mirrored[end-1] ≈ 1/31 rtol=64eps(Float64)
+        @test transfinite_curve_hwall(
+            6; wall_height=2.0, curve_length=10.0) ==
+              collect(range(0.0, 1.0; length=6))
+        @test transfinite_curve_hwall(
+            2; wall_height=3.5, curve_length=3.5) == [0.0, 1.0]
+        @test transfinite_curve_hwall(
+            3; wall_height=0.01, curve_length=1.0) ≈ [0.0, 0.01, 1.0]
+
+        cases = ((3, 0.125, 1.0), (4, 1.0, 13.0),
+                 (6, 0.1, 1.0), (17, 0.01, 1.0),
+                 (65, prevfloat(1 / 64), 1.0))
+        groups = Vector{Vector{Float64}}()
+        for (count, wall_height, curve_length) in cases,
+            orientation in (:start, :end)
+            actual = transfinite_curve_hwall(
+                count; wall_height=wall_height, curve_length=curve_length,
+                orientation=orientation, max_nodes=count)
+            reference = _big_hwall_reference(
+                count, wall_height, curve_length; orientation=orientation)
+            @test actual ≈ reference atol=32eps(Float64) rtol=128eps(Float64)
+            @test actual[1] === 0.0
+            @test actual[end] === 1.0
+            @test all(isfinite, actual)
+            @test all(>(0.0), diff(actual))
+            wall_parameter = orientation === :start ? actual[2] : 1 - actual[end-1]
+            @test wall_parameter ≈ wall_height / curve_length rtol=256eps(Float64)
+            push!(groups, actual)
+        end
+
+        # The normalized law is invariant under a common physical-length scale.
+        @test transfinite_curve_hwall(
+            6; wall_height=1e299 / 31, curve_length=1e299) ≈ exact
+        @test transfinite_curve_hwall(
+            6; wall_height=1e-299 / 31, curve_length=1e-299) ≈ exact
+        @test Tessella.transfinite_curve_hwall === transfinite_curve_hwall
+        @test _parameter_crc(groups) ==
+              "802ae6dd95259c50b087d03e7b7567b555f6040f8e62b1a2afc3aed6bca22379"
+    end
+
     @testset "validation, resource limits, and representability blockers" begin
         @test transfinite_curve_parameters(2) == [0.0, 1.0]
         @test transfinite_curve_parameters(
@@ -213,6 +338,43 @@ end
             Tessella.TransfiniteCurve; recursive=true))
     end
 
+    @testset "HWall validation, resource, and representability blockers" begin
+        @test_throws ArgumentError transfinite_curve_hwall(
+            6; curve_length=1.0)
+        @test_throws ArgumentError transfinite_curve_hwall(
+            6; wall_height=0.1)
+        for value in (true, 0.0, -0.0, -1.0, NaN, Inf, -Inf, 1 + 2im,
+                      "0.1", BigFloat(2)^20_000)
+            @test_throws ArgumentError transfinite_curve_hwall(
+                6; wall_height=value, curve_length=1.0)
+            @test_throws ArgumentError transfinite_curve_hwall(
+                6; wall_height=0.1, curve_length=value)
+        end
+        for orientation in (:middle, "start", nothing, true)
+            @test_throws ArgumentError transfinite_curve_hwall(
+                6; wall_height=0.1, curve_length=1.0,
+                orientation=orientation)
+        end
+        for count in (true, 1, 0, -1, 2.0, big(typemax(Int32)) + 1)
+            @test_throws ArgumentError transfinite_curve_hwall(
+                count; wall_height=0.1, curve_length=1.0)
+        end
+        @test_throws ArgumentError transfinite_curve_hwall(
+            6; wall_height=nextfloat(0.2), curve_length=1.0)
+        @test_throws ArgumentError transfinite_curve_hwall(
+            2; wall_height=0.5, curve_length=1.0)
+        @test_throws ArgumentError transfinite_curve_hwall(
+            6; wall_height=floatmin(Float64), curve_length=floatmax(Float64))
+        @test_throws ArgumentError transfinite_curve_hwall(
+            3; wall_height=nextfloat(0.0), curve_length=nextfloat(0.0))
+        @test_throws ArgumentError transfinite_curve_hwall(
+            6; wall_height=1e-20, curve_length=1.0, orientation=:end)
+        @test_throws ArgumentError transfinite_curve_hwall(
+            3; wall_height=0.1, curve_length=1.0, max_nodes=2)
+        @test _hwall_rejected_allocated() < 64_000
+        @test _hwall_infeasible_allocated() < 64_000
+    end
+
     @testset "allocation growth is linear in the returned vector" begin
         for (mesh_type, coefficient) in
             ((:progression, 1.00001), (:bump, 0.5), (:beta, 2.0))
@@ -225,5 +387,14 @@ end
             @test large <= 2.15small + 65_536
             @info "transfinite curve allocation ratchet" mesh_type small large
         end
+
+        transfinite_curve_hwall(
+            128; wall_height=1 / 256, curve_length=1.0, max_nodes=128)
+        hwall_small = _hwall_allocated(20_000)
+        hwall_large = _hwall_allocated(40_000)
+        @test hwall_small > 0
+        @test hwall_large > hwall_small
+        @test hwall_large <= 2.15hwall_small + 65_536
+        @info "transfinite curve HWall allocation ratchet" hwall_small hwall_large
     end
 end
