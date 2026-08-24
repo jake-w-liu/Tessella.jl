@@ -94,6 +94,33 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening public
+tetrahedralization and Steiner insertion:
+
+- `tetrahedralize` now has its public documentation attached to the actual
+  method, validates basic surface structure even under the expert `check=false`
+  path, rejects tetrahedra and unreferenced surface nodes, bounds and normalizes
+  interior-point iterables before meshing, and rejects Boolean random seeds and
+  resource limits.
+- `insert_steiner3` now validates its input and three-coordinate point contract,
+  distinguishes exact duplicates, checks Int32 growth before allocation, and
+  certifies both the returned topology and total-volume conservation. Its
+  containing-tet tolerance is relative to the tet volume instead of carrying a
+  unit-scale absolute floor, so a `1e-15`-edge tet distinguishes an interior
+  point from a vertex and rejects a point outside the volume.
+- The focused Mesh3D suite passed 473/473 assertions under Julia 1.12.7 and
+  Julia 1.11.9. The tiny-tet insertion, certified cube fill, and cube fill with
+  one interior point have deterministic SHA-256 values
+  `71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b`,
+  `e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83`,
+  and `4f0d7f17865d02bc785bb2a22b30b7e7de826b771f91ff0b18490657e44fb472`.
+- The bounds-checked package gate passed 163,671/163,671 assertions in 10m56.9s,
+  and the aggregate bounds-checked validation exited 0, including the point,
+  line, and sheet embedding differentials that exercise Steiner recovery.
+- The top-level public documentation scan now returns no missing names;
+  `tetrahedralize` and `insert_steiner3` are documented in `Mesh3D`, and recursive
+  ambiguity detection returned zero.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening the boundary-layer
 entry points:
 
