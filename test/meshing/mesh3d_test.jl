@@ -81,6 +81,8 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test_throws ArgumentError Triangulation3([0.0],[0.0,1.0],[0.0])
         @test_throws ArgumentError delaunay3d([0.,1.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,NaN])
         @test_throws ArgumentError delaunay3d([0.,1.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.];rng_seed=-1)
+        @test_throws ArgumentError delaunay3d([0.,1.,0.,0.],[0.,0.,1.,0.],
+                                              [0.,0.,0.,1.];rng_seed=true)
         T=delaunay3d([0.,1.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.])
         @test_throws ArgumentError to_mesh3(T;keep=Bool[])
         @test_throws ArgumentError optimize_flips!(T;passes=-1)
@@ -91,6 +93,30 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         mtiny=tetrahedralize(tiny;check=false)
         @test ntets(mtiny)>0
         @test mesh_vol(mtiny) ≈ 1e-45 rtol=1e-6
+
+        tiny_tet=Mesh(Float64[0 1e-15 0 0;0 0 1e-15 0;0 0 0 1e-15];
+                      tets=reshape(Int32[1,2,3,4],4,1),tet_tag=Int32[7])
+        inserted,inserted_id=insert_steiner3(tiny_tet,(2e-16,2e-16,2e-16))
+        @test inserted_id==5 && ntets(inserted)==4 && validate(inserted).ok
+        @test all(==(Int32(7)),inserted.tet_tag)
+        @test mesh_vol(inserted)≈mesh_vol(tiny_tet) rtol=1e-12
+        @test mesh_crc(inserted).sha==
+              "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b"
+        @test tiny_tet.coords==Float64[0 1e-15 0 0;0 0 1e-15 0;0 0 0 1e-15]
+        on_face,face_id=insert_steiner3(tiny_tet,(2e-16,2e-16,0.0))
+        @test face_id==5 && ntets(on_face)==3 && validate(on_face).ok
+        on_edge,edge_id=insert_steiner3(tiny_tet,(5e-16,0.0,0.0))
+        @test edge_id==5 && ntets(on_edge)==2 && validate(on_edge).ok
+        duplicate,duplicate_id=insert_steiner3(tiny_tet,(0.0,0.0,0.0))
+        @test duplicate===tiny_tet && duplicate_id==1
+        @test_throws ArgumentError insert_steiner3(tiny_tet,(2e-15,2e-15,2e-15))
+        @test_throws ArgumentError insert_steiner3(tiny_tet,(0.1,0.2))
+        @test_throws ArgumentError insert_steiner3(tiny_tet,(true,0.0,0.0))
+        @test_throws ArgumentError insert_steiner3(tiny_tet,(0.0,0.0,Inf))
+        flat=Mesh(Float64[0 1 0 0;0 0 1 0;0 0 0 0];
+                  tets=reshape(Int32[1,2,3,4],4,1))
+        @test !validate(flat).ok
+        @test_throws ArgumentError insert_steiner3(flat,(0.1,0.1,0.0))
 
         C=Float64[0 1 0 0;0 0 1 0;0 0 0 1]
         tagged=Mesh(C;segs=reshape(Int32[1,2],2,1),tris=reshape(Int32[1,2,3],3,1),
@@ -108,6 +134,7 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test_throws ArgumentError recover_partition_cdt([box_surface(0,1,0,1,0,1)];maxiter=0)
         @test_throws ArgumentError recover_partition_cdt([box_surface(0,1,0,1,0,1)];maxpts=4)
         @test_throws ArgumentError mesh_sized_conforming(box_surface(0,1,0,1,0,1);hmax=1.,inset=-1.)
+        @test isempty(Docs.undocumented_names(Tessella;private=false))
     end
 
     @testset "seed-independence (deterministic perturbation ⇒ same mesh)" begin
@@ -162,7 +189,35 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         m=tetrahedralize(cs)
         @test mesh_vol(m) ≈ 1.0 rtol=1e-6
         @test validate(m).ok
+        @test mesh_crc(m).sha==
+              "e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83"
         _, mi = boundary_faces(m.tets); @test mi == 2      # watertight fill
+
+        with_interior=tetrahedralize(cs;interior_points=[(0.23,0.31,0.41)])
+        @test validate(with_interior).ok && nnodes(with_interior)==nnodes(m)+1
+        @test mesh_vol(with_interior)≈mesh_vol(m) rtol=1e-12
+        @test mesh_crc(with_interior).sha==
+              "4f0d7f17865d02bc785bb2a22b30b7e7de826b771f91ff0b18490657e44fb472"
+        duplicate_interior=tetrahedralize(cs;interior_points=[(0.0,0.0,0.0)])
+        @test mesh_crc(duplicate_interior)==mesh_crc(m)
+        @test_throws ArgumentError tetrahedralize(cs;interior_points=[(2.0,2.0,2.0)])
+        @test_throws ArgumentError tetrahedralize(cs;rng_seed=true)
+        @test_throws ArgumentError tetrahedralize(cs;interior_points=1)
+        @test_throws ArgumentError tetrahedralize(cs;interior_points=[(0.2,0.2)])
+        @test_throws ArgumentError tetrahedralize(cs;interior_points=[(true,0.2,0.2)])
+        @test_throws ArgumentError tetrahedralize(cs;interior_points=[(Inf,0.2,0.2)])
+        @test_throws ArgumentError tetrahedralize(cs;interior_points=[(0.2,0.2,0.2)],
+                                                  max_interior_points=0)
+        @test_throws ArgumentError tetrahedralize(cs;
+            interior_points=Iterators.repeated((0.2,0.2,0.2)),max_interior_points=1)
+        @test_throws ArgumentError tetrahedralize(cs;max_interior_points=true)
+        @test_throws ArgumentError tetrahedralize(cs;max_interior_points=-1)
+        @test_throws ArgumentError tetrahedralize(cs;
+                                                  max_interior_points=big(typemax(Int))+1)
+
+        isolated=Mesh(hcat(C,[0.5,0.5,0.5]);tris=ct)
+        @test_throws ArgumentError tetrahedralize(isolated)
+        @test_throws ArgumentError tetrahedralize(isolated;check=false)
 
         # non-convex L-prism (2×2×1 minus a 1×1×1 corner) → volume 3
         base=[(0.0,0.0),(2.0,0.0),(2.0,1.0),(1.0,1.0),(1.0,2.0),(0.0,2.0)]; nb=length(base)

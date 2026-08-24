@@ -144,9 +144,24 @@ function _mesh3_tag_entities(tags::AbstractVector{Int32}, resolver, dim::Int,
 end
 
 @inline function _seed3(seed::Integer, caller::AbstractString)
+    seed isa Bool && throw(ArgumentError("$caller: rng_seed must not be Bool"))
     (0 <= seed <= typemax(Int)) ||
         throw(ArgumentError("$caller: rng_seed must be in 0:$(typemax(Int)) (got $seed)"))
     return Int(seed)
+end
+
+@inline function _bounded_count3(value::Integer,caller::AbstractString,
+                                 name::AbstractString;minimum::Int=0)
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
+    converted=try
+        Int(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name exceeds the platform Int range"))
+    end
+    converted>=minimum || throw(ArgumentError(
+        "$caller: $name must be ≥ $minimum"))
+    return converted
 end
 
 @inline function _ceil_count3(x::Float64, caller::AbstractString, name::AbstractString;
@@ -1708,12 +1723,26 @@ end
 # Domain filling from a boundary surface (Stage-3 volume meshing)
 # ════════════════════════════════════════════════════════════════════════════════
 
-function _require_surface3(surface::Mesh, caller::AbstractString; oriented::Bool=false)
+function _require_surface_input3(surface::Mesh,caller::AbstractString)
     size(surface.coords,2) <= typemax(Int32) ||
         throw(ArgumentError("$caller: surface node count exceeds the Int32 indexing limit"))
     size(surface.tris,2)>0 || throw(ArgumentError("$caller: surface has no triangles"))
+    size(surface.tets,2)==0 || throw(ArgumentError(
+        "$caller: a boundary surface must not contain tetrahedra"))
     d=validate(surface)
     d.ok || throw(ArgumentError("$caller: input surface is invalid — " * join(d.messages,"; ")))
+    referenced=falses(size(surface.coords,2))
+    @inbounds for f in axes(surface.tris,2),slot in 1:3
+        referenced[Int(surface.tris[slot,f])]=true
+    end
+    missing=findfirst(!,referenced)
+    missing===nothing || throw(ArgumentError(
+        "$caller: surface node $missing is not referenced by a triangle"))
+    return nothing
+end
+
+function _require_surface3(surface::Mesh, caller::AbstractString; oriented::Bool=false)
+    _require_surface_input3(surface,caller)
     inc=Dict{NTuple{2,Int32},Int}()
     dirs=Dict{NTuple{2,Int32},Int}()
     faces=Set{NTuple{3,Int32}}()
@@ -1737,24 +1766,48 @@ function _require_surface3(surface::Mesh, caller::AbstractString; oriented::Bool
     return nothing
 end
 
-"""
-    tetrahedralize(surface::Mesh; rng_seed=1, optimize=false, check=true) -> Mesh
+function _point3_input(raw,caller::AbstractString,name::AbstractString)
+    (raw isa Tuple || raw isa AbstractVector) || throw(ArgumentError(
+        "$caller: $name must be a tuple or vector with 3 real components"))
+    length(raw)==3 || throw(ArgumentError(
+        "$caller: $name must have exactly 3 components"))
+    values=Tuple(raw)
+    return ntuple(3) do component
+        value=values[component]
+        value isa Bool && throw(ArgumentError(
+            "$caller: $name component $component must not be Bool"))
+        value isa Real || throw(ArgumentError(
+            "$caller: $name component $component must be real"))
+        converted=try
+            Float64(value)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "$caller: $name component $component must be Float64-representable"))
+        end
+        isfinite(converted) || throw(ArgumentError(
+            "$caller: $name component $component must be finite"))
+        converted
+    end
+end
 
-Fill the volume enclosed by a closed triangulated `surface` with tetrahedra.  The
-fast path Delaunay-tetrahedralizes the surface vertices and retains tets whose
-centroids lie inside.  Before that result can escape, the same exact PLC gate used
-by boundary recovery certifies positive volume, manifold vertex links, creases,
-and the complete input boundary.  A failed restriction is rebuilt by the exact
-conforming-Delaunay backend, with bounded multi-seed [`recover_boundary`](@ref)
-as a final alternative.  If neither recovery succeeds, an explicit blocker is
-thrown.  Thus this public entry point never returns a topologically pinched or
-convex-hull-capped approximation of a non-convex domain.
+function _interior_points3(raw,limit::Int,nn::Int,caller::AbstractString)
+    raw===nothing && return NTuple{3,Float64}[]
+    applicable(iterate,raw) || throw(ArgumentError(
+        "$caller: interior_points must be an iterable of three-component points"))
+    points=NTuple{3,Float64}[]
+    for value in raw
+        length(points)<limit || throw(ArgumentError(
+            "$caller: interior_points exceed max_interior_points=$limit"))
+        length(points)<typemax(Int32)-nn || throw(ArgumentError(
+            "$caller: surface and interior points exceed the Int32 node limit"))
+        index=length(points)+1
+        push!(points,_point3_input(value,caller,"interior point $index"))
+    end
+    return points
+end
 
-`check=false` is the explicit expert bypass: it returns the raw centroid-restricted
-Delaunay fill without the PLC certificate or repair.  The caller then owns all
-validation and conformity checks; [`mesh_volume`](@ref) exposes the same bypass.
-"""
-function _node_at3(mesh::Mesh, p; atol=1e-12)
+function _node_at3(mesh::Mesh, p; atol=0.0)
     @inbounds for i in axes(mesh.coords,2)
         hypot(mesh.coords[1,i]-p[1],mesh.coords[2,i]-p[2],mesh.coords[3,i]-p[3])<=atol && return i
     end
@@ -1767,21 +1820,24 @@ function _containing_tet(mesh::Mesh, p)
         b=(mesh.coords[1,mesh.tets[2,t]],mesh.coords[2,mesh.tets[2,t]],mesh.coords[3,mesh.tets[2,t]])
         c=(mesh.coords[1,mesh.tets[3,t]],mesh.coords[2,mesh.tets[3,t]],mesh.coords[3,mesh.tets[3,t]])
         d=(mesh.coords[1,mesh.tets[4,t]],mesh.coords[2,mesh.tets[4,t]],mesh.coords[3,mesh.tets[4,t]])
-        s=tet_signed_volume(a,b,c,d)
-        s==0 && continue
-        tol=1e-12*max(abs(s),1.0)
-        signs=(tet_signed_volume(p,b,c,d), tet_signed_volume(a,p,c,d),
-               tet_signed_volume(a,b,p,d), tet_signed_volume(a,b,c,p))
+        volume=tet_signed_volume(a,b,c,d)
+        volume==0 && continue
+        subvolumes=(tet_signed_volume(p,b,c,d),tet_signed_volume(a,p,c,d),
+                    tet_signed_volume(a,b,p,d),tet_signed_volume(a,b,c,p))
+        # Intersections constructed in Float64 need not be bit-exactly coplanar.
+        # Use a tolerance relative to this tet's own volume; the former absolute
+        # `max(abs(volume),1)` scale collapsed every point in a sub-micron mesh.
+        tolerance=1e-12*abs(volume)
         zeros=0; ok=true
         mask=(false,false,false,false)
-        for (k,si) in enumerate(signs)
-            if abs(si)<=tol
+        for (k,subvolume) in enumerate(subvolumes)
+            if abs(subvolume)<=tolerance
                 zeros+=1
                 mask=k==1 ? (true,mask[2],mask[3],mask[4]) :
                      k==2 ? (mask[1],true,mask[3],mask[4]) :
                      k==3 ? (mask[1],mask[2],true,mask[4]) :
                             (mask[1],mask[2],mask[3],true)
-            elseif (si>0)!=(s>0)
+            elseif signbit(subvolume)!=signbit(volume)
                 ok=false; break
             end
         end
@@ -1804,8 +1860,9 @@ function insert_interior_points(mesh::Mesh, extra)
     isempty(extra) && return mesh
     out=mesh
     for (k,p) in enumerate(extra)
-        all(isfinite,p) || throw(ArgumentError("insert_interior_points: point $k is non-finite"))
-        out,_=insert_steiner3(out,p)
+        p isa NTuple{3,Float64} || throw(ArgumentError(
+            "insert_interior_points: point $k is not a normalized Float64 triple"))
+        out,_=_insert_steiner3(out,p)
     end
     return out
 end
@@ -1978,32 +2035,81 @@ function recover_triangle3(mesh::Mesh, a, b, c; max_inserts::Integer=256)
     throw(ErrorException("recover_triangle3: exceeded max_inserts=$max_inserts"))
 end
 
-function insert_steiner3(mesh::Mesh, p)
-    all(isfinite,p) || throw(ArgumentError("insert_steiner3: point is non-finite"))
+"""
+    insert_steiner3(mesh, point) -> (Mesh, node_index)
+
+Insert one finite three-component point into a valid tetrahedral mesh. An exact
+coordinate duplicate returns the unchanged mesh and its existing node index.
+Otherwise the containing tetrahedron, face star, or edge star is split while
+copying lower-dimensional cells unchanged and preserving tetrahedron tags.
+Points outside the volume are rejected. The returned mesh is validated and
+checked for total-volume conservation before return.
+"""
+function insert_steiner3(mesh::Mesh,p)
+    diagnostic=validate(mesh)
+    diagnostic.ok || throw(ArgumentError(
+        "insert_steiner3: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+    size(mesh.tets,2)>0 || throw(ArgumentError(
+        "insert_steiner3: input mesh has no tetrahedra"))
+    point=_point3_input(p,"insert_steiner3","point")
+    return _insert_steiner3(mesh,point)
+end
+
+function _insert_steiner3(mesh::Mesh,p::NTuple{3,Float64})
     existing=_node_at3(mesh,p)
     existing!=0 && return mesh, existing
+    size(mesh.coords,2)<typemax(Int32) || throw(ArgumentError(
+        "insert_steiner3: node count would exceed the Int32 indexing limit"))
     t,zeros,mask=_containing_tet(mesh,p)
     t==0 && throw(ArgumentError("insert_steiner3: point $p is not inside the volume"))
-    if zeros==0
-        out=_split_tet_one_to_four(mesh,t,p)
-        return out, size(out.coords,2)
+    out=if zeros==0
+        _split_tet_one_to_four(mesh,t,p)
     elseif zeros==1
-        out=_split_tets_on_face(mesh,t,p,mask)
-        return out, size(out.coords,2)
+        _split_tets_on_face(mesh,t,p,mask)
     elseif zeros==2
-        out=_split_tets_on_edge(mesh,t,p,mask)
-        return out, size(out.coords,2)
+        _split_tets_on_edge(mesh,t,p,mask)
     else
         throw(ArgumentError("insert_steiner3: point $p coincides with a tet vertex but was not found"))
     end
+    diagnostic=validate(out)
+    diagnostic.ok || throw(ErrorException(
+        "insert_steiner3: insertion produced an invalid mesh — "*
+        join(diagnostic.messages,"; ")))
+    before=_tet_volume_sum3(mesh,"insert_steiner3 input")
+    after=_tet_volume_sum3(out,"insert_steiner3 output")
+    tolerance=max(1e-12*before,128eps(Float64)*max(before,after))
+    abs(after-before)<=tolerance || throw(ErrorException(
+        "insert_steiner3: insertion changed total volume from $before to $after"))
+    return out,size(out.coords,2)
+end
+
+function _tet_volume_sum3(mesh::Mesh,caller::AbstractString)
+    total=0.0
+    correction=0.0
+    @inbounds for t in axes(mesh.tets,2)
+        value=abs(tet_signed_volume(
+            _pt3(mesh,mesh.tets[1,t]),_pt3(mesh,mesh.tets[2,t]),
+            _pt3(mesh,mesh.tets[3,t]),_pt3(mesh,mesh.tets[4,t])))
+        y=value-correction
+        next=total+y
+        correction=(next-total)-y
+        total=next
+    end
+    (isfinite(total) && total>0) || throw(ArgumentError(
+        "$caller: tetrahedron volume sum is not finite and positive"))
+    return total
 end
 
 function _split_tet_one_to_four(mesh::Mesh, t::Int, p)
     nn=size(mesh.coords,2)+1
+    nn<=typemax(Int32) || throw(ArgumentError(
+        "insert_steiner3: node count exceeds the Int32 indexing limit"))
     coords=hcat(mesh.coords, [p[1],p[2],p[3]])
     v=Int32(nn)
     a,b,c,d=mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t]
     nt=size(mesh.tets,2)
+    nt<=typemax(Int32)-3 || throw(ArgumentError(
+        "insert_steiner3: tetrahedron count exceeds the Int32 topology limit"))
     tets=Matrix{Int32}(undef,4,nt+3)
     @inbounds for j in 1:nt
         if j==t
@@ -2049,9 +2155,20 @@ end
 function _rebuild_tets(mesh::Mesh, drop::Set{Int}, news::Vector{NTuple{4,Int32}},
                        new_tags::Vector{Int32}, p)
     nn=size(mesh.coords,2)+1
+    nn<=typemax(Int32) || throw(ArgumentError(
+        "insert_steiner3: node count exceeds the Int32 indexing limit"))
+    length(new_tags)==length(news) || throw(ErrorException(
+        "insert_steiner3: replacement connectivity/tag counts differ"))
+    nkeep=size(mesh.tets,2)-length(drop)
+    nkeep>=0 || throw(ErrorException(
+        "insert_steiner3: replacement removes more tetrahedra than exist"))
+    nkeep<=typemax(Int32)-length(news) || throw(ArgumentError(
+        "insert_steiner3: tetrahedron count exceeds the Int32 topology limit"))
+    nout=nkeep+length(news)
     coords=hcat(mesh.coords, Float64[p[1],p[2],p[3]])
     keep=Int[j for j in axes(mesh.tets,2) if !(j in drop)]
-    nout=length(keep)+length(news)
+    length(keep)==nkeep || throw(ErrorException(
+        "insert_steiner3: replacement keep count mismatch"))
     tets=Matrix{Int32}(undef,4,nout)
     tags=isempty(mesh.tet_tag) ? Int32[] : Vector{Int32}(undef,nout)
     @inbounds for (k,j) in enumerate(keep)
@@ -2124,14 +2241,43 @@ function _split_tets_on_edge(mesh::Mesh, t::Int, p, mask)
     return _rebuild_tets(mesh, drop, news, ntags, p)
 end
 
+"""
+    tetrahedralize(surface; rng_seed=1, optimize=false, check=true,
+                   interior_points=nothing,
+                   max_interior_points=1_000_000) -> Mesh
+
+Fill the volume enclosed by a triangulated `surface` with tetrahedra. The input
+must be a structurally valid triangle surface with no unreferenced nodes or
+tetrahedra. The fast path Delaunay-tetrahedralizes its vertices and retains tets
+whose centroids lie inside. Before a checked result can escape, the PLC gate used
+by boundary recovery certifies positive volume, manifold vertex links, creases,
+and the complete input boundary. A failed restriction is rebuilt by the exact
+conforming-Delaunay backend, with bounded multi-seed [`recover_boundary`](@ref)
+as a final alternative. If neither recovery succeeds, an explicit blocker is
+thrown.
+
+`interior_points`, when supplied, must be an iterable of finite three-component
+real tuples or vectors. Points are inserted after the certified fill, without
+moving the boundary; exact duplicates reuse the existing node. Their count is
+bounded by `max_interior_points` and the Int32 mesh-indexing limit.
+
+`check=false` is an expert bypass for the closed-PLC certificate and recovery;
+basic input structure and all interior-point/output safety checks still apply.
+The caller owns the resulting boundary-conformity assessment.
+"""
 function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false,
-                        check::Bool=true, interior_points=nothing)
-    check && _require_surface3(surface,"tetrahedralize")
-    extra = interior_points===nothing ? NTuple{3,Float64}[] : collect(NTuple{3,Float64}, interior_points)
+                        check::Bool=true, interior_points=nothing,
+                        max_interior_points::Integer=1_000_000)
+    check ? _require_surface3(surface,"tetrahedralize") :
+            _require_surface_input3(surface,"tetrahedralize")
+    interior_limit=_bounded_count3(max_interior_points,"tetrahedralize",
+                                   "max_interior_points")
     nn = size(surface.coords, 2)
+    extra=_interior_points3(interior_points,interior_limit,nn,"tetrahedralize")
+    seed=_seed3(rng_seed,"tetrahedralize")
     xs = Vector{Float64}(undef, nn); ys = similar(xs); zs = similar(xs)
     @inbounds for i in 1:nn; xs[i]=surface.coords[1,i]; ys[i]=surface.coords[2,i]; zs[i]=surface.coords[3,i]; end
-    T = delaunay3d(xs, ys, zs; rng_seed=rng_seed)
+    T = delaunay3d(xs, ys, zs; rng_seed=seed)
     optimize && optimize_flips!(T; passes=4)     # sliver-reducing flips (safe, volume-preserving)
     keep = _classify_by_centroid(T, surface)
     m = to_mesh3(T; keep=keep)
@@ -2170,7 +2316,7 @@ function tetrahedralize(surface::Mesh; rng_seed::Integer=1, optimize::Bool=false
     # already reported a blocker.
     recovery_reason = ""
     try
-        return _finish_interior(recover_boundary(surface; rng_seed=rng_seed, max_seeds=8), extra)
+        return _finish_interior(recover_boundary(surface; rng_seed=seed, max_seeds=8), extra)
     catch err
         err isa InterruptException && rethrow()
         (err isa ArgumentError || err isa ErrorException) || rethrow()
