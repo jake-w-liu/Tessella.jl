@@ -11,7 +11,7 @@ This is the element-topology counterpart of [`BoundaryLayerField`](@ref).
 """
 module BoundaryLayer
 
-using ..MeshTypes: Mesh, nnodes, nsegs, ntris, triangle_area, tet_volume,
+using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, triangle_area, tet_volume,
                    boundary_faces
 using ..Elements: ElementBlock, MixedMesh, validate
 using ..Predicates: orient3
@@ -22,6 +22,7 @@ using ..RecoverCDT: recover_boundary_cdt
 export mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled
 
 function _finite(value, caller, name)
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     v=try Float64(value) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: $name must be Float64-representable"))
@@ -30,25 +31,130 @@ function _finite(value, caller, name)
     return v
 end
 
+function _bounded_int(value::Integer, caller, name; minimum::Int=0)
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
+    result=try
+        Int(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name exceeds the platform Int range"))
+    end
+    result>=minimum || throw(ArgumentError(
+        "$caller: $name must be ≥ $minimum"))
+    return result
+end
+
+function _checked_add(a::Int,b::Int,caller,name)
+    (a>=0 && b>=0) || throw(ArgumentError(
+        "$caller: internal negative operand while computing $name"))
+    a<=typemax(Int)-b || throw(ArgumentError(
+        "$caller: $name exceeds the platform Int range"))
+    return a+b
+end
+
+function _checked_mul(a::Int,b::Int,caller,name)
+    (a>=0 && b>=0) || throw(ArgumentError(
+        "$caller: internal negative operand while computing $name"))
+    (a==0 || b<=typemax(Int)÷a) || throw(ArgumentError(
+        "$caller: $name exceeds the platform Int range"))
+    return a*b
+end
+
+function _validate_input(mesh::Mesh,caller,kind)
+    diagnostic=validate(mesh)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: input $kind is invalid — "*join(diagnostic.messages,"; ")))
+    ntets(mesh)==0 || throw(ArgumentError(
+        "$caller: input $kind must not contain tetrahedra"))
+    return nothing
+end
+
+function _require_all_referenced(cells,nn::Int,caller,kind)
+    referenced=falses(nn)
+    @inbounds for cell in axes(cells,2),slot in axes(cells,1)
+        referenced[Int(cells[slot,cell])]=true
+    end
+    missing=findfirst(!,referenced)
+    missing===nothing || throw(ArgumentError(
+        "$caller: input $kind node $missing is not referenced"))
+    return nothing
+end
+
+function _bounded_index_set(values,upper::Int,caller,name)
+    applicable(iterate,values) || throw(ArgumentError(
+        "$caller: $name must be an iterable of integer indices"))
+    result=Set{Int}()
+    count=0
+    for raw in values
+        count=_checked_add(count,1,caller,"$name count")
+        count<=upper || throw(ArgumentError(
+            "$caller: $name contains more than $upper entries"))
+        raw isa Bool && throw(ArgumentError(
+            "$caller: $name entry $count must not be Bool"))
+        raw isa Integer || throw(ArgumentError(
+            "$caller: $name entry $count must be an integer"))
+        index=try
+            Int(raw)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "$caller: $name entry $count exceeds the platform Int range"))
+        end
+        1<=index<=upper || throw(ArgumentError(
+            "$caller: $name index $index is out of range 1:$upper"))
+        index in result && throw(ArgumentError(
+            "$caller: duplicate $name index $index"))
+        push!(result,index)
+    end
+    return result
+end
+
 function _layer_offsets(hw, ra, nl, caller)
     offsets=Vector{Float64}(undef,nl)
+    width=hw
+    offset=0.0
     @inbounds for k in 1:nl
-        offsets[k]=hw*(ra^k-1)/(ra-1)
-        isfinite(offsets[k]) || throw(ArgumentError("$caller: layer offset overflowed"))
-        offsets[k]>0 || throw(ArgumentError("$caller: layer offset must be positive"))
+        offset+=width
+        (isfinite(offset) && offset>0) || throw(ArgumentError(
+            "$caller: layer offset $k is not finite and positive"))
+        offsets[k]=offset
+        if k<nl
+            width*=ra
+            (isfinite(width) && width>0) || throw(ArgumentError(
+                "$caller: layer width $(k+1) is not finite and positive"))
+        end
     end
     return offsets
 end
 
+"""
+    mesh_boundary_layer(surface; hwall, ratio, nlayers,
+                        max_prisms=10_000_000) -> MixedMesh
+
+Extrude every triangle of a valid surface mesh through `nlayers` first-order
+type-6 prisms along area-weighted vertex normals. The first-layer width is
+`hwall`; each subsequent width is multiplied by `ratio`, which must be greater
+than one. All surface nodes must be referenced by triangles, and the input must
+not contain tetrahedra.
+
+The operation checks all numeric conversions and output counts before
+allocation, leaves `surface` unchanged, and returns a structurally validated
+mixed mesh. Use [`mesh_boundary_layer_filled`](@ref) when the remaining enclosed
+volume must also be tetrahedralized.
+"""
 function mesh_boundary_layer(surface::Mesh; hwall::Real, ratio::Real, nlayers::Integer,
                              max_prisms::Integer=10_000_000)
     caller="mesh_boundary_layer"
     ntris(surface)>0 || throw(ArgumentError("$caller: surface has no triangles"))
+    _validate_input(surface,caller,"surface")
+    _require_all_referenced(surface.tris,nnodes(surface),caller,"surface")
     hw=_finite(hwall,caller,"hwall"); hw>0 || throw(ArgumentError("$caller: hwall must be positive"))
     ra=_finite(ratio,caller,"ratio"); ra>1 || throw(ArgumentError("$caller: ratio must be > 1"))
-    nl=Int(nlayers); nl>=1 || throw(ArgumentError("$caller: nlayers must be ≥ 1"))
-    npr=nl*ntris(surface)
-    npr<=max_prisms || throw(ArgumentError("$caller: $npr prisms exceed max_prisms=$max_prisms"))
+    nl=_bounded_int(nlayers,caller,"nlayers";minimum=1)
+    prism_limit=_bounded_int(max_prisms,caller,"max_prisms")
+    npr=_checked_mul(nl,ntris(surface),caller,"prism count")
+    npr<=prism_limit || throw(ArgumentError(
+        "$caller: $npr prisms exceed max_prisms=$prism_limit"))
     npr<=typemax(Int32) || throw(ArgumentError("$caller: prism count exceeds Int32"))
 
     nv=nnodes(surface)
@@ -74,7 +180,8 @@ function mesh_boundary_layer(surface::Mesh; hwall::Real, ratio::Real, nlayers::I
 
     offsets=_layer_offsets(hw,ra,nl,caller)
 
-    nout=nv*(nl+1)
+    layer_count=_checked_add(nl,1,caller,"layer-node multiplier")
+    nout=_checked_mul(nv,layer_count,caller,"node count")
     nout<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
     coords=Matrix{Float64}(undef,3,nout)
     @inbounds for i in 1:nv
@@ -118,51 +225,60 @@ function _polyline_vertices(curve::Mesh, caller)
     n=nsegs(curve)
     n>0 || throw(ArgumentError("$caller: curve has no segments"))
     nv=nnodes(curve)
-    adj=Dict{Int,Vector{Int}}()
+    next_vertex=Dict{Int,Int}()
+    indegree=zeros(Int,nv)
+    referenced=falses(nv)
     @inbounds for s in 1:n
         a=Int(curve.segs[1,s]); b=Int(curve.segs[2,s])
         (1<=a<=nv && 1<=b<=nv) || throw(ArgumentError("$caller: segment $s is out of range"))
         a==b && throw(ArgumentError("$caller: segment $s is degenerate"))
-        push!(get!(()->Int[], adj, a), b)
-        push!(get!(()->Int[], adj, b), a)
+        haskey(next_vertex,a) && throw(ArgumentError(
+            "$caller: vertex $a has more than one outgoing segment"))
+        indegree[b]=_checked_add(indegree[b],1,caller,"vertex $b indegree")
+        indegree[b]<=1 || throw(ArgumentError(
+            "$caller: vertex $b has more than one incoming segment"))
+        next_vertex[a]=b
+        referenced[a]=true;referenced[b]=true
     end
-    for (v,nbrs) in adj
-        unique!(sort!(nbrs))
-        1<=length(nbrs)<=2 || throw(ArgumentError(
-            "$caller: vertex $v is not on a single polyline"))
+    missing=findfirst(!,referenced)
+    missing===nothing || throw(ArgumentError(
+        "$caller: input curve node $missing is not referenced"))
+    starts=Int[];ends=Int[]
+    @inbounds for v in 1:nv
+        outgoing=haskey(next_vertex,v)
+        indegree[v]==0 && outgoing && push!(starts,v)
+        indegree[v]==1 && !outgoing && push!(ends,v)
+        (indegree[v]<=1 && (outgoing || indegree[v]==1)) || throw(ArgumentError(
+            "$caller: segments are not a coherently directed single polyline"))
     end
-    endpoints=sort!(collect(v for (v,nbrs) in adj if length(nbrs)==1))
-    if length(endpoints)==2
+    if length(starts)==1 && length(ends)==1
         closed=false
-        start=endpoints[1]
-    elseif isempty(endpoints) && length(adj)==n
+        start=only(starts)
+    elseif isempty(starts) && isempty(ends) && length(next_vertex)==nv
         closed=true
-        start=minimum(keys(adj))
+        start=minimum(keys(next_vertex))
     else
-        throw(ArgumentError("$caller: segments are not a single polyline"))
+        throw(ArgumentError(
+            "$caller: segments are not a coherently directed single polyline"))
     end
-    verts=Int[start]
-    prev=0
+    verts=Int[]
+    seen=falses(nv)
+    current=start
     while true
-        nbrs=adj[verts[end]]
-        nxt=if prev==0
-            nbrs[1]
-        else
-            nbrs[1]==prev ? nbrs[end] : nbrs[1]
-        end
+        seen[current] && throw(ArgumentError(
+            "$caller: segments are not a single directed polyline"))
+        push!(verts,current);seen[current]=true
+        nxt=get(next_vertex,current,0)
+        nxt==0 && break
         if closed && nxt==start
             break
         end
-        nxt in verts && throw(ArgumentError("$caller: segments are not a single polyline"))
-        push!(verts,nxt)
-        prev=verts[end-1]
-        if !closed && length(adj[nxt])==1
-            break
-        end
+        current=nxt
         length(verts)>n+1 && throw(ArgumentError("$caller: segments are not a single polyline"))
     end
     expected=closed ? n : n+1
-    length(verts)==expected || throw(ArgumentError("$caller: segments are not a single polyline"))
+    (length(verts)==expected && all(seen)) || throw(ArgumentError(
+        "$caller: segments are not a single directed polyline"))
     return verts, closed
 end
 
@@ -175,21 +291,29 @@ function _id_layer(id_of, v, layer, ray, fan)
 end
 
 """
-    mesh_boundary_layer_2d(curve; hwall, ratio, nlayers, fans=(), fan_elements=5)
+    mesh_boundary_layer_2d(curve; hwall, ratio, nlayers, fans=(),
+                           fan_elements=5, max_cells=10_000_000) -> MixedMesh
 
-Extrude a constant-`z` polyline along its left-normals (CCW of the directed
-chain) into first-order type-3 quadrangles. `fans` lists convex interior
-vertices that receive `fan_elements` first-layer triangles and matching
-ring quadrangles instead of a single averaged-normal column.
+Extrude a valid, coherently directed, constant-`z` polyline along its left
+normals into first-order type-3 quadrangles. `fans` lists convex interior vertex
+indices that receive `fan_elements` first-layer triangles and matching ring
+quadrangles instead of a single averaged-normal column. Every curve node must
+belong to the chain, `fan_elements` must be at least two, and `max_cells` is a
+nonnegative allocation bound. The input is left unchanged.
 """
 function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::Integer,
                                 fans=(), fan_elements::Integer=5,
                                 max_cells::Integer=10_000_000)
     caller="mesh_boundary_layer_2d"
+    nsegs(curve)>0 || throw(ArgumentError("$caller: curve has no segments"))
+    (ntris(curve)==0 && ntets(curve)==0) || throw(ArgumentError(
+        "$caller: input curve must contain only segment cells"))
+    _validate_input(curve,caller,"curve")
     hw=_finite(hwall,caller,"hwall"); hw>0 || throw(ArgumentError("$caller: hwall must be positive"))
     ra=_finite(ratio,caller,"ratio"); ra>1 || throw(ArgumentError("$caller: ratio must be > 1"))
-    nl=Int(nlayers); nl>=1 || throw(ArgumentError("$caller: nlayers must be ≥ 1"))
-    nfan=Int(fan_elements)
+    nl=_bounded_int(nlayers,caller,"nlayers";minimum=1)
+    nfan=_bounded_int(fan_elements,caller,"fan_elements";minimum=2)
+    cell_limit=_bounded_int(max_cells,caller,"max_cells")
     nv=nnodes(curve)
     nv>=2 || throw(ArgumentError("$caller: curve has too few nodes"))
     z0=curve.coords[3,1]
@@ -200,16 +324,7 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
     verts, closed=_polyline_vertices(curve,caller)
     nchain=length(verts)
     nchain_segs=closed ? nchain : nchain-1
-    fan_set=Set{Int}()
-    for raw in fans
-        v=Int(raw)
-        1<=v<=nv || throw(ArgumentError("$caller: fan vertex $v is out of range"))
-        v in fan_set && throw(ArgumentError("$caller: duplicate fan vertex $v"))
-        push!(fan_set,v)
-    end
-    if !isempty(fan_set)
-        nfan>=2 || throw(ArgumentError("$caller: fan_elements must be ≥ 2"))
-    end
+    fan_set=_bounded_index_set(fans,nv,caller,"fan")
     pos=Dict{Int,Int}()
     for (idx,v) in enumerate(verts)
         pos[v]=idx
@@ -221,12 +336,19 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
         interior || throw(ArgumentError("$caller: fan vertex $v is not an interior vertex"))
     end
     n_fans=length(fan_set)
-    ntris_out=n_fans*nfan
-    nquads=nchain_segs*nl + n_fans*nfan*max(nl-1,0)
-    ncells=ntris_out+nquads
-    ncells<=max_cells || throw(ArgumentError("$caller: $ncells cells exceed max_cells=$max_cells"))
+    ntris_out=_checked_mul(n_fans,nfan,caller,"fan triangle count")
+    main_quads=_checked_mul(nchain_segs,nl,caller,"strip quadrangle count")
+    ring_quads=_checked_mul(ntris_out,nl-1,caller,"fan ring quadrangle count")
+    nquads=_checked_add(main_quads,ring_quads,caller,"quadrangle count")
+    ncells=_checked_add(ntris_out,nquads,caller,"cell count")
+    ncells<=cell_limit || throw(ArgumentError(
+        "$caller: $ncells cells exceed max_cells=$cell_limit"))
     ncells<=typemax(Int32) || throw(ArgumentError("$caller: cell count exceeds Int32"))
     ncells>0 || throw(ArgumentError("$caller: no cells to emit"))
+    points_per_layer=_checked_add(nchain,ntris_out,caller,"points per layer")
+    new_points=_checked_mul(nl,points_per_layer,caller,"extruded node count")
+    npoints=_checked_add(nv,new_points,caller,"node count")
+    npoints<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
 
     points=Vector{NTuple{3,Float64}}(undef,nv)
     @inbounds for i in 1:nv
@@ -293,7 +415,7 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
             id_of[(v,k,0)]=length(points)
         end
     end
-    length(points)<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
+    length(points)==npoints || throw(ErrorException("$caller: node count mismatch"))
 
     quads=Matrix{Int32}(undef,4,nquads)
     tris=ntris_out==0 ? Matrix{Int32}(undef,3,0) : Matrix{Int32}(undef,3,ntris_out)
@@ -542,32 +664,34 @@ The returned mesh is certified before return:
 
 Too-large `hwall` (self-intersecting layers), interpenetrating walls, pinched
 or open walls, or an unmeshable core are explicit blockers — never defective
-meshes.
+meshes. The input must be a valid triangle surface without tetrahedra; resource
+limits and all integer controls are validated before output allocation.
 """
 function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
                                     nlayers::Integer, cavities=(),
                                     max_prisms::Integer=10_000_000,
                                     max_tets::Integer=10_000_000)
     caller="mesh_boundary_layer_filled"
+    ntris(surface)>0 || throw(ArgumentError("$caller: surface has no triangles"))
+    _validate_input(surface,caller,"surface")
     hw=_finite(hwall,caller,"hwall"); hw>0 || throw(ArgumentError("$caller: hwall must be positive"))
     ra=_finite(ratio,caller,"ratio"); ra>1 || throw(ArgumentError("$caller: ratio must be > 1"))
-    nl=Int(nlayers); nl>=1 || throw(ArgumentError("$caller: nlayers must be ≥ 1"))
+    nl=_bounded_int(nlayers,caller,"nlayers";minimum=1)
+    prism_limit=_bounded_int(max_prisms,caller,"max_prisms")
+    tet_limit=_bounded_int(max_tets,caller,"max_tets")
     nv=nnodes(surface); nt=ntris(surface)
 
     comp_of,comp_tris,nc=_wall_components(surface,caller)
-    cavity_set=Set{Int}()
-    for raw in cavities
-        c=Int(raw)
-        1<=c<=nc || throw(ArgumentError("$caller: cavity index $c is out of range 1:$nc"))
-        c in cavity_set && throw(ArgumentError("$caller: duplicate cavity index $c"))
-        push!(cavity_set,c)
-    end
+    cavity_set=_bounded_index_set(cavities,nc,caller,"cavity")
     nc>length(cavity_set) || throw(ArgumentError(
         "$caller: every wall is a cavity; there is no solid core to fill"))
 
-    npr=nl*nt
-    npr<=max_prisms || throw(ArgumentError("$caller: $npr prisms exceed max_prisms=$max_prisms"))
-    nout=nv*(nl+1)
+    npr=_checked_mul(nl,nt,caller,"prism count")
+    npr<=prism_limit || throw(ArgumentError(
+        "$caller: $npr prisms exceed max_prisms=$prism_limit"))
+    npr<=typemax(Int32) || throw(ArgumentError("$caller: prism count exceeds Int32"))
+    layer_count=_checked_add(nl,1,caller,"layer-node multiplier")
+    nout=_checked_mul(nv,layer_count,caller,"node count")
     nout<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
 
     offsets=_layer_offsets(hw,ra,nl,caller)
@@ -580,8 +704,8 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
     end
     wall_vol=[_div_volume(surface.coords,wall_faces[c]) for c in 1:nc]
     for c in 1:nc
-        abs(wall_vol[c])>0 || throw(ArgumentError(
-            "$caller: wall $c encloses zero volume"))
+        (isfinite(wall_vol[c]) && abs(wall_vol[c])>0) || throw(ArgumentError(
+            "$caller: wall $c does not have a finite nonzero enclosed volume"))
     end
 
     # Solid walls grow against their winding normal (into the material);
@@ -674,7 +798,11 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
     cap_off=nout-nv
     cap_keys=Dict{NTuple{3,Float64},Int}()
     @inbounds for i in 1:nv
-        cap_keys[_norm_key(cap_coords[1,i],cap_coords[2,i],cap_coords[3,i])]=cap_off+i
+        key=_norm_key(cap_coords[1,i],cap_coords[2,i],cap_coords[3,i])
+        previous=get(cap_keys,key,0)
+        previous==0 || throw(ArgumentError(
+            "$caller: offset cap nodes $(previous-cap_off) and $i coincide"))
+        cap_keys[key]=cap_off+i
     end
 
     # Stage 1 — exact-coordinate Float64 Delaunay with facet recovery. No SoS
@@ -691,7 +819,7 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
             push!(errors,"float fill: "*reason[])
         else
             result=_assemble_and_certify(m...,cand,coords,cap_coords,prisms,
-                surface.tris,cap_off,nt,max_tets,wall_faces,comp_tris,
+                surface.tris,cap_off,nt,tet_limit,wall_faces,comp_tris,
                 cavity_set,wall_vol,caller,reason)
             result===nothing && push!(errors,"float fill: "*reason[])
         end
@@ -711,7 +839,7 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
                 push!(errors,"exact recovery: "*reason[])
             else
                 result=_assemble_and_certify(m...,cand,coords,cap_coords,prisms,
-                    surface.tris,cap_off,nt,max_tets,wall_faces,comp_tris,
+                    surface.tris,cap_off,nt,tet_limit,wall_faces,comp_tris,
                     cavity_set,wall_vol,caller,reason)
                 result===nothing && push!(errors,"exact recovery: "*reason[])
             end
