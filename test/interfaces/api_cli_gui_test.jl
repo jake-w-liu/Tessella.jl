@@ -3,11 +3,9 @@ using Tessella
 using Tessella.API
 using Tessella.CLI: main
 using Tessella.GUI: GuiState, gui_command!
-using Tessella.Post: View, view_value, apply_plugin
-using Tessella.MeshTypes: ntets, nnodes, Mesh, tet_volume, node
-using Tessella.Geometry: box_surface
+using Tessella.MeshTypes: ntets, tet_volume, node
 
-@testset "API, CLI, GUI, and post views" begin
+@testset "API, CLI, and GUI" begin
     API.initialize()
     tag=API.model.add_box(0,0,0,1,1,1; tag=1)
     @test tag==1
@@ -58,12 +56,4 @@ using Tessella.Geometry: box_surface
     @test s.camera==(1.0,2.0,3.0)
     @test_throws ArgumentError gui_command!(s,"explode")
 
-    surf=box_surface(0,1,0,1,0,1)
-    values=collect(Float64, 1:nnodes(surf))
-    v=View("n",surf,values)
-    @test view_value(v,1)==1.0
-    absv=apply_plugin("Abs",v)
-    @test view_value(absv,1)==1.0
-    @test apply_plugin("IsosurfaceZeroCount",v)==0
-    @test_throws ArgumentError apply_plugin("NoPlugin",v)
 end

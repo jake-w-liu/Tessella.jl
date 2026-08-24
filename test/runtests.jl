@@ -62,7 +62,8 @@ using Tessella
     include("geometry/nurbs_test.jl")    # De Boor vs Bernstein/circle oracles
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
     include("meshing/periodic_test.jl")  # periodic identification
-    include("interfaces/api_cli_gui_test.jl") # API/CLI/GUI/post logic
+    include("interfaces/api_cli_gui_test.jl") # API/CLI/GUI logic
+    include("interfaces/post_test.jl") # owned scalar views + synchronized plugins
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("meshing/mesh2d_test.jl") # Delaunay: exact empty-circumcircle oracle
