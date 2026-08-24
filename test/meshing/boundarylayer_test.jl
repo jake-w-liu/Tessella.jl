@@ -1,7 +1,7 @@
 using Test
 using Tessella
 using Tessella.MeshTypes: ntris, triangle_area, tet_volume
-using Tessella.Elements: validate
+using Tessella.Elements: validate, mixed_crc
 
 function _bl_quad_area(mesh)
     area=0.0
@@ -53,6 +53,7 @@ end
     face=Mesh(coords; tris=tris)
     bl=mesh_boundary_layer(face; hwall=0.1, ratio=1.2, nlayers=2)
     @test validate(bl).ok
+    @test mixed_crc(bl).sha=="f37a2141b37471b366cdbcaa5b1ede69c9088833b0f54e142aaa945e4ea23651"
     @test size(bl.coords,2)==4*3
     hexes=only(b for b in bl.blocks if b.msh==6)
     @test size(hexes.nodes,2)==ntris(face)*2
@@ -67,6 +68,27 @@ end
     @test zmax≈H atol=1e-12
     @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.0, nlayers=1)
     @test_throws ArgumentError mesh_boundary_layer(face; hwall=-0.1, ratio=1.2, nlayers=1)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=true, ratio=1.2, nlayers=1)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=true, nlayers=1)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.2, nlayers=true)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.2,
+                                                    nlayers=big(typemax(Int))+1)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.2,
+                                                    nlayers=1, max_prisms=true)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.2,
+                                                    nlayers=1, max_prisms=0)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=floatmax(Float64),
+                                                    ratio=2.0, nlayers=2)
+    @test_throws ArgumentError mesh_boundary_layer(face; hwall=0.1, ratio=1.2,
+                                                    nlayers=typemax(Int),
+                                                    max_prisms=typemax(Int))
+    isolated=Mesh(hcat(coords,[2.0,2.0,0.0]);tris=tris)
+    @test_throws ArgumentError mesh_boundary_layer(isolated;hwall=0.1,ratio=1.2,
+                                                    nlayers=1)
+    invalid=Mesh(coords;tris=reshape(Int32[1,1,2],3,1))
+    @test !Tessella.MeshTypes.validate(invalid).ok
+    @test_throws ArgumentError mesh_boundary_layer(invalid;hwall=0.1,ratio=1.2,
+                                                   nlayers=1)
 end
 
 @testset "2-D boundary-layer quads" begin
@@ -78,11 +100,35 @@ end
     H=hw*(ra^nl-1)/(ra-1)
     bl=mesh_boundary_layer_2d(edge; hwall=hw, ratio=ra, nlayers=nl)
     @test validate(bl).ok
+    @test mixed_crc(bl).sha=="bb9e1fb9a0f0e56de42287ff3f85dd93ea3c7115cc9e51d05a6845d97ce8122b"
     quads=only(b for b in bl.blocks if b.msh==3)
     @test size(quads.nodes,2)==nl
     @test _bl_quad_area(bl)≈H atol=1e-12
     @test maximum(bl.coords[2,:])≈H atol=1e-12
     @test_throws ArgumentError mesh_boundary_layer_2d(edge; hwall=hw, ratio=1.0, nlayers=1)
+    reversed=Mesh(coords;segs=Int32[2;1;;])
+    reverse_bl=mesh_boundary_layer_2d(reversed;hwall=hw,ratio=ra,nlayers=1)
+    @test minimum(reverse_bl.coords[2,:])≈-hw atol=1e-12
+    @test maximum(reverse_bl.coords[2,:])==0.0
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge;hwall=true,ratio=ra,nlayers=1)
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge;hwall=hw,ratio=ra,nlayers=true)
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge;hwall=hw,ratio=ra,nlayers=1,
+                                                      fan_elements=true)
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge;hwall=hw,ratio=ra,nlayers=1,
+                                                      max_cells=true)
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge;hwall=hw,ratio=ra,nlayers=1,
+                                                      max_cells=0)
+    @test_throws ArgumentError mesh_boundary_layer_2d(edge;hwall=hw,ratio=ra,
+                                                      nlayers=typemax(Int),
+                                                      max_cells=typemax(Int))
+
+    incoherent=Mesh(Float64[0 1 2;0 0 0;0 0 0];
+                    segs=reshape(Int32[1,2,3,2],2,2))
+    @test_throws ArgumentError mesh_boundary_layer_2d(incoherent;hwall=hw,ratio=ra,
+                                                      nlayers=1)
+    isolated=Mesh(Float64[0 1 2;0 0 0;0 0 0];segs=Int32[1;2;;])
+    @test_throws ArgumentError mesh_boundary_layer_2d(isolated;hwall=hw,ratio=ra,
+                                                      nlayers=1)
 end
 
 @testset "2-D boundary-layer closed square" begin
@@ -129,6 +175,13 @@ end
                                                      fans=(1,), fan_elements=nfan)
     @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
                                                      fans=(2,), fan_elements=1)
+    @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
+                                                     fans=(true,), fan_elements=nfan)
+    @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
+                                                     fans=(2.0,), fan_elements=nfan)
+    @test_throws ArgumentError mesh_boundary_layer_2d(ell; hwall=hw, ratio=ra, nlayers=nl,
+                                                     fans=(big(typemax(Int))+1,),
+                                                     fan_elements=nfan)
 end
 
 @testset "filled prismatic boundary layer" begin
@@ -177,4 +230,21 @@ end
         ratio=1.25, nlayers=2, cavities=(5,))
     @test_throws ArgumentError mesh_boundary_layer_filled(shell; hwall=0.04,
         ratio=1.25, nlayers=2, cavities=(2,2))
+    @test_throws ArgumentError mesh_boundary_layer_filled(cube;hwall=true,ratio=1.2,
+                                                          nlayers=1)
+    @test_throws ArgumentError mesh_boundary_layer_filled(cube;hwall=0.1,ratio=1.2,
+                                                          nlayers=true)
+    @test_throws ArgumentError mesh_boundary_layer_filled(cube;hwall=0.1,ratio=1.2,
+                                                          nlayers=1,max_prisms=true)
+    @test_throws ArgumentError mesh_boundary_layer_filled(cube;hwall=0.1,ratio=1.2,
+                                                          nlayers=1,max_tets=true)
+    @test_throws ArgumentError mesh_boundary_layer_filled(cube;hwall=0.1,ratio=1.2,
+                                                          nlayers=1,cavities=(true,))
+    @test_throws ArgumentError mesh_boundary_layer_filled(cube;hwall=0.1,ratio=1.2,
+                                                          nlayers=1,
+                                                          cavities=(big(typemax(Int))+1,))
+end
+
+@testset "boundary-layer public documentation" begin
+    @test isempty(Docs.undocumented_names(Tessella.BoundaryLayer;private=false))
 end

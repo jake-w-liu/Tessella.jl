@@ -94,6 +94,31 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening the boundary-layer
+entry points:
+
+- All three public boundary-layer operations now reject invalid input meshes,
+  Boolean or platform-unrepresentable integer controls, nonfinite real controls,
+  and overflowed node/cell counts before allocation. Geometric layer offsets are
+  accumulated without the cancellation in the former closed-form expression.
+- The 2-D path now honors the supplied segment direction when choosing the left
+  side, requires one coherently directed chain with no unreferenced nodes, bounds
+  fan indices/counts, and checks the predicted node count. Filled layers also
+  reject nonfinite wall volumes and coincident offset-cap nodes before core
+  recovery.
+- The focused boundary-layer suite passed 67/67 assertions under Julia 1.12.7
+  and Julia 1.11.9. The deterministic prismatic and 2-D strip SHA-256 values are
+  `f37a2141b37471b366cdbcaa5b1ede69c9088833b0f54e142aaa945e4ea23651`
+  and `bb9e1fb9a0f0e56de42287ff3f85dd93ea3c7115cc9e51d05a6845d97ce8122b`.
+- The bounds-checked package gate passed 163,637/163,637 assertions in 11m32.4s,
+  and the aggregate bounds-checked validation exited 0. The direct Gmsh 4.15.2
+  boundary-layer differential reported
+  `tessella_area=0.15960000000000005`, `gmsh_quads=10`, `gmsh_tris=24`, and
+  `tessella_quads=3`.
+- The `BoundaryLayer` public documentation scan returned no missing names,
+  leaving only `tetrahedralize` undocumented at top level; recursive ambiguity
+  detection returned zero.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening translated
 periodic node-pair certification:
 
