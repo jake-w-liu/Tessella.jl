@@ -30,7 +30,8 @@ meshing backend would not resolve the ASCENT failure that motivated Tessella.
 ```text
 Tessella
 ├── core/
-│   ├── Predicates  adaptive exact orient/incircle/insphere, exact rationals, SoS
+│   ├── Predicates  adaptive exact, subnormal-safe orient/incircle/insphere,
+│   │               exact rationals, and SoS
 │   ├── MeshTypes   compact simplex storage, topology, scale-robust quality,
 │   │               CRC, and mutation-safe validation
 │   ├── Elements    fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
@@ -47,7 +48,8 @@ Tessella
 │   ├── Model       tagged geometry/entity kernel, solids, Booleans, and embeds
 │   └── GeoExec     bounded `.geo` execution
 ├── meshing/
-│   ├── Mesh1D/Mesh2D/MeshSurface/Mesh3D dimensional meshing kernels
+│   ├── Mesh1D/MeshSurface/Mesh3D dimensional meshing kernels
+│   ├── Mesh2D      owned/validated Delaunay, CDT, and refinement topology
 │   ├── ExactMesh3D/RecoverCDT exact Delaunay and conforming recovery
 │   ├── Recombine/Refine/Optimize/HighOrder mesh transformation kernels
 │   └── BoundaryLayer/Periodic boundary-layer and periodic constraints

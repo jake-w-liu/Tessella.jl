@@ -61,10 +61,20 @@ end
 @testset "Mesh2D Delaunay (Stage 1)" begin
 
     @testset "public input and state contracts" begin
+        owned_x=Float64[0,1,0];owned_y=Float64[0,0,1]
+        workspace=Triangulation(owned_x,owned_y)
+        owned_x[1]=NaN;owned_y[1]=Inf
+        @test workspace.x==[0.0,1.0,0.0]&&workspace.y==[0.0,0.0,1.0]
+        @test check_consistency(workspace)==(true,"ok")
+        @test_throws ArgumentError insert_point!(workspace,1)
+        @test !applicable(Triangulation,Float64[],Float64[],Int32[],Int32[],
+                          Bool[],Int32[],0,Int32(0),Int32[],
+                          Set{NTuple{2,Int32}}(),Set{NTuple{2,Int32}}())
         @test_throws ArgumentError dedup_points([0.0], [0.0, 1.0])
         @test_throws ArgumentError delaunay2d([0.0, 1.0, NaN], [0.0, 0.0, 1.0])
         @test_throws ArgumentError delaunay2d([0.0, 1.0, 0.0], [0.0, Inf, 1.0])
         @test_throws ArgumentError delaunay2d([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]; rng_seed=-1)
+        @test_throws ArgumentError delaunay2d([0.0,1.0,0.0],[0.0,0.0,1.0];rng_seed=true)
         @test_throws ArgumentError constrained_delaunay(
             [0.0,1.0,0.0], [0.0,0.0,1.0], Tuple{Int,Int}[]; rng_seed=big(2)^80)
 
@@ -77,7 +87,9 @@ end
         @test_throws ArgumentError insert_point!(T, 0)
         @test_throws ArgumentError insert_point!(T, 4)
         @test_throws ArgumentError insert_point!(T, 1)       # already inserted
+        @test_throws ArgumentError insert_point!(T,true)
         @test_throws ArgumentError insert_segment!(T, 0, 1)
+        @test_throws ArgumentError insert_segment!(T,true,2)
         @test_throws ArgumentError insert_segment!(T, 1, 1)
         @test_throws ArgumentError to_mesh(T; interior=Bool[true])
 
@@ -89,6 +101,14 @@ end
             [0.0,-0.0,1.0,0.0], [0.0,0.0,0.0,1.0], [(1,2)])
         @test_throws ArgumentError constrained_delaunay(
             [0.0,1.0,0.0], [0.0,0.0,1.0], [(1,2),(2,1)])
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0],[0.0,0.0,1.0],[(true,2)])
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0],[0.0,0.0,1.0],Any[(1,2,3)])
+        @test_throws ArgumentError constrained_delaunay(
+            [0.0,1.0,0.0],[0.0,0.0,1.0],Tuple{Int,Int}[];
+            internal_segments=Any[(1,"two")])
+        @test_throws ArgumentError classify_interior(T)
         @test Tessella.Mesh2D._strictly_between((-floatmax(Float64),0.0),
                                                  (floatmax(Float64),0.0),(0.0,0.0))
         @test Tessella.Mesh2D._encroaches((-floatmax(Float64),0.0),
@@ -98,6 +118,26 @@ end
             Float64[0,1,0], Float64[0,0,1], Tuple{Int,Int}[])
         @test_throws ArgumentError Tessella.mesh_planar(
             Float64[0,1,1,0], Float64[0,0,1,1], [(1,2)])
+    end
+
+    @testset "mutable working storage is rejected safely" begin
+        short=delaunay2d(Float64[0,1,0],Float64[0,0,1]);pop!(short.tv)
+        @test !check_consistency(short)[1]
+        @test_throws ArgumentError ntriangles_live(short)
+        @test_throws ArgumentError to_mesh(short)
+        @test_throws ArgumentError is_delaunay(short)
+
+        nonfinite=delaunay2d(Float64[0,1,0],Float64[0,0,1]);nonfinite.x[1]=NaN
+        @test !check_consistency(nonfinite)[1]
+        @test_throws ArgumentError to_mesh(nonfinite)
+
+        missing=delaunay2d(Float64[0,1,1,0],Float64[0,0,1,1])
+        edge=Tessella.Mesh2D._edge_between(missing,1,3)[1]==0 ?
+             (Int32(1),Int32(3)) : (Int32(2),Int32(4))
+        push!(missing.seg,edge)
+        @test check_consistency(missing)[1]
+        @test is_constrained_delaunay(missing)==(false,1,0)
+        @test_throws ArgumentError classify_interior(missing)
     end
 
     @testset "tiny cases" begin
@@ -175,6 +215,30 @@ end
         end
         @test all(==(crcs[1]), crcs)     # identical topology regardless of insertion order
     end
+
+    @testset "topology survives extreme finite coordinate scales" begin
+        r=_RNG(0x2d51)
+        xs=Float64[2*_nf(r)-1 for _ in 1:16]
+        ys=Float64[2*_nf(r)-1 for _ in 1:16]
+        real_topology(T)=sort([Tuple(sort(Int[T.tv[3(t-1)+k] for k in 1:3]))
+                               for t in eachindex(T.alive)
+                               if T.alive[t]&&all(T.tv[3(t-1)+k]>0 for k in 1:3)])
+        reference=real_topology(delaunay2d(xs,ys;rng_seed=7))
+        for scale in (1e-300,1e-150,1.0,1e150,1e300)
+            T=delaunay2d(xs.*scale,ys.*scale;rng_seed=7)
+            @test check_consistency(T)[1]
+            @test is_delaunay(T)[1]
+            @test real_topology(T)==reference
+        end
+        M=floatmax(Float64)
+        extreme=constrained_delaunay(Float64[-M,0,M,0],Float64[0,0,0,1],[(1,3)])
+        @test check_consistency(extreme)[1]
+        @test is_constrained_delaunay(extreme)[1]
+        @test sort(collect(extreme.seg))==[(Int32(1),Int32(2)),(Int32(2),Int32(3))]
+        @test Tessella.Mesh2D._circumcenter2((-1e308,0.0),(1e308,0.0),(0.0,1e308))==(0.0,0.0)
+        @test Tessella.Mesh2D._radius_edge2((-1e308,0.0),(1e308,0.0),(0.0,1e308))≈inv(sqrt(2))
+        @test !Tessella.Mesh2D._encroaches((0.0,0.0),(1.0,0.0),(NaN,NaN))
+    end
 end
 
 # ── independent oracle: total mesh area over a triangle Mesh ─────────────────────
@@ -209,6 +273,16 @@ _skey_in_internal(T, vi, vj) = (Int32(min(vi,vj)), Int32(max(vi,vj))) in T.inter
         @test validate(m2).ok
         @test mesh_area(m2)≈1.0 atol=1e-12
         @test is_constrained_delaunay(T)[1]
+    end
+
+    @testset "public point insertion preserves existing constraints" begin
+        T=constrained_delaunay(Float64[0,1,1,0],Float64[0,0,1,1],
+                               [(1,2),(2,3),(3,4),(4,1)])
+        vertex=Tessella.Mesh2D._add_vertex!(T,0.25,0.4)
+        insert_point!(T,vertex)
+        @test check_consistency(T)[1]
+        @test is_constrained_delaunay(T)[1]
+        @test all(edge_in(T,a,b) for (a,b) in T.seg)
     end
 
     @testset "skew constraint crossing a grid" begin
@@ -299,6 +373,19 @@ _skey_in_internal(T, vi, vj) = (Int32(min(vi,vj)), Int32(max(vi,vj))) in T.inter
         xs=Float64[0,2,0,2]; ys=Float64[0,2,2,0]
         # segments (1,2)=(0,0)-(2,2) and (3,4)=(0,2)-(2,0) cross at center
         @test_throws ArgumentError constrained_delaunay(xs,ys,[(1,2),(3,4)])
+
+        T=constrained_delaunay(xs,ys,[(1,2)])
+        before=(copy(T.tv),copy(T.tn),copy(T.alive),copy(T.freelist),T.last,
+                copy(T.vtri),copy(T.seg),copy(T.internal))
+        @test_throws ArgumentError insert_segment!(T,3,4)
+        after=(T.tv,T.tn,T.alive,T.freelist,T.last,T.vtri,T.seg,T.internal)
+        @test after==before
+        @test check_consistency(T)[1]
+
+        ox=Float64[0,1,2,3,0];oy=Float64[0,0,0,0,1]
+        overlap=constrained_delaunay(ox,oy,[(1,3)])
+        @test_throws ArgumentError insert_segment!(overlap,2,4)
+        @test check_consistency(overlap)[1]
     end
 end
 
@@ -331,12 +418,19 @@ mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2
         @test_throws ArgumentError refine!(makeT(); max_area=NaN)
         @test_throws ArgumentError refine!(makeT(); maxsteps=0)
         @test_throws ArgumentError refine!(makeT(); maxsteps=big(typemax(Int))+1)
+        @test_throws ArgumentError refine!(makeT();min_angle_deg=true)
+        @test_throws ArgumentError refine!(makeT();min_angle_deg=0,max_area=true)
+        @test_throws ArgumentError refine!(makeT();min_angle_deg=0,maxsteps=true)
         @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
                                            size=(x,y)->NaN, maxsteps=1)
         @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
                                            size=(x,y)->"bad", maxsteps=1)
         @test_throws ArgumentError refine!(makeT(); min_angle_deg=0,
                                            size=(x,y)->Inf, maxsteps=1)
+        @test_throws ArgumentError refine!(makeT();min_angle_deg=0,
+                                           size=(x,y)->true,maxsteps=1)
+        @test_throws ArgumentError refine!(makeT();min_angle_deg=0,
+                                           edge_metric=(a,b,c,d)->true,maxsteps=1)
         @test_throws ErrorException refine!(makeT(); min_angle_deg=0,
                                             max_area=0.01, maxsteps=1)
     end
@@ -388,4 +482,10 @@ mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2
         @test mesh_area(m) ≈ 96.0 atol=1e-9        # hole preserved through refinement
         @test is_constrained_delaunay(T)[1]
     end
+end
+
+@testset "Mesh2D public documentation and deterministic CRC" begin
+    square=triangulate(Float64[0,1,1,0],Float64[0,0,1,1];rng_seed=9)
+    @test mesh_crc(square).sha=="850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4"
+    @test isempty(Base.Docs.undocumented_names(Tessella.Mesh2D;private=false))
 end
