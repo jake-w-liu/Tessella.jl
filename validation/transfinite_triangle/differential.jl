@@ -10,7 +10,7 @@ using Tessella.MeshTypes: nnodes, node, nsegs, ntris, validate
 
 if !isdefined(Tessella, :TransfiniteTriangle)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "..", "src",
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
                           "TransfiniteTriangle.jl"))
 end
 using Tessella.TransfiniteTriangle: mesh_transfinite_triangle

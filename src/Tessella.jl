@@ -22,42 +22,42 @@ module Tessella
 const TESSELLA_STAGE = 6  # see STATUS.md stage board
 
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
-include("Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
-include("MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
-include("Transform.jl")      # P3: validated affine mesh transformations
-include("Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
-include("Recombine.jl")      # P4: deterministic triangle-to-quad surface recombination
-include("Refine.jl")         # P4: deterministic one-level uniform simplex refinement
-include("Transfinite.jl")    # P4: validated four-sided planar transfinite patches
-include("TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
-include("TransfiniteTriangle.jl") # P4: three-sided structured triangle patches
-include("TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
-include("TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
-include("TransfinitePrism.jl") # P4: affine five-face transfinite prisms
-include("TransfiniteHex.jl") # P4: affine six-face recombined hexahedra
-include("ExactMesh3D.jl")    # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
-include("IO.jl")             # Stage 0: .msh v2/v4 read/write, STL, .geo scan
-include("Mesh2D.jl")         # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
-include("SizeField.jl")      # Stage 2/4: size fields
-include("Mesh1D.jl")         # Stage 2: graded 1-D edge meshing
-include("MeshSurface.jl")    # Stage 2: planar / cylinder / parametric surface meshing
-include("Mesh3D.jl")         # Stage 3: 3-D Delaunay + volume filling (+ multi-region)
-include("RecoverCDT.jl")     # Stage 3: general conforming-Delaunay boundary recovery (exact)
-include("Optimize.jl")       # Stage 4: tet quality report + Laplacian smoothing
-include("Heal.jl")           # Stage 5: surface-defect detection ("heal, don't fail")
-include("Geometry.jl")       # Stage 5: native constructive primitive surfaces
-include("CAD.jl")            # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
-include("NURBS.jl")          # P3: native B-spline/NURBS evaluation
-include("BRep.jl")           # P3: ISO-10303-21 STEP / IGES classified-solid and NURBS import
-include("HighOrder.jl")      # Stage 6: quadratic (P2) tet generation + type-11 I/O
-include("Model.jl")          # P2: tagged geometry/entity kernel
-include("GeoExec.jl")        # P3: bounded .geo execution
-include("BoundaryLayer.jl")  # P4: prismatic and 2-D quad/fan boundary-layer extrusion
-include("Periodic.jl")       # P4: periodic identification
-include("Post.jl")           # P5: views and plugins
-include("API.jl")            # P5: model/mesh/option façade
-include("CLI.jl")            # P5: command-line entry
-include("GUI.jl")            # P5: headless GUI state machine
+include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
+include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
+include("core/Transform.jl")      # P3: validated affine mesh transformations
+include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
+include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination
+include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex refinement
+include("structured/Transfinite.jl") # P4: validated four-sided planar transfinite patches
+include("structured/TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
+include("structured/TransfiniteTriangle.jl") # P4: three-sided structured triangle patches
+include("structured/TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
+include("structured/TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
+include("structured/TransfinitePrism.jl") # P4: affine five-face transfinite prisms
+include("structured/TransfiniteHex.jl") # P4: affine six-face recombined hexahedra
+include("meshing/ExactMesh3D.jl") # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
+include("interfaces/IO.jl")       # Stage 0: .msh v2/v4 read/write, STL, .geo scan
+include("meshing/Mesh2D.jl")      # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
+include("fields/SizeField.jl")    # Stage 2/4: size fields
+include("meshing/Mesh1D.jl")      # Stage 2: graded 1-D edge meshing
+include("meshing/MeshSurface.jl") # Stage 2: planar / cylinder / parametric surface meshing
+include("meshing/Mesh3D.jl")      # Stage 3: 3-D Delaunay + volume filling (+ multi-region)
+include("meshing/RecoverCDT.jl")  # Stage 3: general conforming-Delaunay boundary recovery (exact)
+include("meshing/Optimize.jl")    # Stage 4: tet quality report + Laplacian smoothing
+include("geometry/Heal.jl")       # Stage 5: surface-defect detection ("heal, don't fail")
+include("geometry/Geometry.jl")   # Stage 5: native constructive primitive surfaces
+include("geometry/CAD.jl")        # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
+include("geometry/NURBS.jl")      # P3: native B-spline/NURBS evaluation
+include("geometry/BRep.jl")       # P3: ISO-10303-21 STEP / IGES classified-solid and NURBS import
+include("meshing/HighOrder.jl")   # Stage 6: quadratic (P2) tet generation + type-11 I/O
+include("geometry/Model.jl")      # P2: tagged geometry/entity kernel
+include("geometry/GeoExec.jl")    # P3: bounded .geo execution
+include("meshing/BoundaryLayer.jl") # P4: prismatic and 2-D quad/fan boundary-layer extrusion
+include("meshing/Periodic.jl")    # P4: periodic identification
+include("interfaces/Post.jl")     # P5: views and plugins
+include("interfaces/API.jl")      # P5: model/mesh/option façade
+include("interfaces/CLI.jl")      # P5: command-line entry
+include("interfaces/GUI.jl")      # P5: headless GUI state machine
 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces
 using .Transform: affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh

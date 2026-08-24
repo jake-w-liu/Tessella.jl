@@ -4,13 +4,13 @@ using Tessella.BRep: parse_step_entities
 using Tessella.MeshTypes: nnodes, ntris, ntets, tet_volume, node, validate
 using Tessella.NURBS: NURBSCurve, NURBSSurface, nurbs_eval
 
-const FIXTURES = joinpath(@__DIR__, "fixtures")
+const FIXTURES = joinpath(@__DIR__, "..", "fixtures")
 
-gvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),
-                         node(m,m.tets[3,t]),node(m,m.tets[4,t]))
-              for t in 1:ntets(m); init=0.0)
+_brep_volume(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),
+                                 node(m,m.tets[3,t]),node(m,m.tets[4,t]))
+                      for t in 1:ntets(m); init=0.0)
 
-function signed_surface_volume(s)
+function _brep_signed_surface_volume(s)
     v = 0.0
     for k in 1:ntris(s)
         a = node(s, s.tris[1,k]); b = node(s, s.tris[2,k]); c = node(s, s.tris[3,k])
@@ -29,11 +29,11 @@ end
         @test validate(surface).ok
         @test nnodes(surface)==8
         @test ntris(surface)==12
-        @test signed_surface_volume(surface)≈2.0 atol=1e-12
+        @test _brep_signed_surface_volume(surface)≈2.0 atol=1e-12
         mesh=import_step(path)
         @test validate(mesh).ok
         @test ntets(mesh)>0
-        @test gvol(mesh)≈2.0 atol=1e-12
+        @test _brep_volume(mesh)≈2.0 atol=1e-12
     end
 
     @testset "ISO-10303-21 SPHERE and cylinder" begin
@@ -41,14 +41,14 @@ end
         @test validate(sph).ok
         @test ntets(sph)>0
         oracle=Tessella.Geometry.sphere_surface((0.5,0.25,0.0),1.5)
-        @test gvol(sph)≈signed_surface_volume(oracle) atol=1e-12
+        @test _brep_volume(sph)≈_brep_signed_surface_volume(oracle) atol=1e-12
 
         cyl=import_step(joinpath(FIXTURES,"cylinder.step"))
         @test validate(cyl).ok
         @test ntets(cyl)>0
         nθ=24
-        @test gvol(cyl)≈0.5*nθ*1.0^2*sin(2π/nθ)*2.0 atol=1e-12
-        @test gvol(cyl)≈signed_surface_volume(
+        @test _brep_volume(cyl)≈0.5*nθ*1.0^2*sin(2π/nθ)*2.0 atol=1e-12
+        @test _brep_volume(cyl)≈_brep_signed_surface_volume(
             Tessella.Geometry.cylinder_surface((0.,0.,0.),(0.,0.,1.),1.0,2.0)) atol=1e-12
     end
 
@@ -56,35 +56,35 @@ end
         box=import_iges(joinpath(FIXTURES,"unit_box.iges"))
         @test validate(box).ok
         @test ntets(box)>0
-        @test gvol(box)≈2.0 atol=1e-12
+        @test _brep_volume(box)≈2.0 atol=1e-12
 
         sph=import_iges(joinpath(FIXTURES,"sphere.iges"))
         @test validate(sph).ok
         @test ntets(sph)>0
-        @test gvol(sph)≈signed_surface_volume(
+        @test _brep_volume(sph)≈_brep_signed_surface_volume(
             Tessella.Geometry.sphere_surface((0.5,0.25,0.0),1.5)) atol=1e-12
     end
 
     @testset "classified cone solids" begin
         nθ=24; h=2.0; r1=1.0; r2=0.4
         oracle=Tessella.Geometry.cone_surface((0.,0.,0.),(0.,0.,1.),r1,r2,h)
-        expected=signed_surface_volume(oracle)
+        expected=_brep_signed_surface_volume(oracle)
         polygon_factor=0.5*nθ*sinpi(2/nθ)
         @test expected≈polygon_factor*h*(r1^2+r1*r2+r2^2)/3 rtol=2e-14
 
         step=import_step(joinpath(FIXTURES,"cone.step"))
         @test validate(step).ok
         @test ntets(step)>0
-        @test gvol(step)≈expected atol=1e-12
+        @test _brep_volume(step)≈expected atol=1e-12
 
         iges=import_iges(joinpath(FIXTURES,"cone.iges"))
         @test validate(iges).ok
         @test ntets(iges)>0
-        @test gvol(iges)≈expected atol=1e-12
+        @test _brep_volume(iges)≈expected atol=1e-12
 
         cyl=import_iges(joinpath(FIXTURES,"cylinder.iges"))
         @test validate(cyl).ok
-        @test gvol(cyl)≈0.5*nθ*1.0^2*sin(2π/nθ)*2.0 atol=1e-12
+        @test _brep_volume(cyl)≈0.5*nθ*1.0^2*sin(2π/nθ)*2.0 atol=1e-12
     end
 
     @testset "STEP/IGES NURBS import and IGES round-trip" begin

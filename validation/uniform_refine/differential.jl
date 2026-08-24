@@ -3,7 +3,8 @@
 using Tessella
 
 if !isdefined(Tessella, :Refine)
-    Base.include(Tessella, joinpath(@__DIR__, "..", "..", "src", "Refine.jl"))
+    Base.include(Tessella, joinpath(
+        @__DIR__, "..", "..", "src", "meshing", "Refine.jl"))
 end
 
 function _gmsh_binding()

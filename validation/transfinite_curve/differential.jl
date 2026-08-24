@@ -10,7 +10,8 @@ using SHA: sha256
 
 if !isdefined(Tessella, :TransfiniteCurve)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "..", "src", "TransfiniteCurve.jl"))
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
+                          "TransfiniteCurve.jl"))
 end
 using Tessella.TransfiniteCurve: transfinite_curve_parameters,
                                  transfinite_curve_hwall

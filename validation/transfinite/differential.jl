@@ -8,7 +8,8 @@ using Tessella
 using Tessella.MeshTypes: nsegs,nnodes,ntris,node,validate
 
 if !isdefined(Tessella,:Transfinite)
-    Base.include(Tessella,joinpath(@__DIR__,"..","..","src","Transfinite.jl"))
+    Base.include(Tessella, joinpath(
+        @__DIR__, "..", "..", "src", "structured", "Transfinite.jl"))
 end
 using Tessella.Transfinite: mesh_transfinite_patch
 

@@ -24,7 +24,7 @@ Two exact engines, auto-dispatched:
 | box − cylinder (tri-tri+CDT path) | — | — | exact faceted |
 
 Every result: **exact volume, watertight, `recover_boundary`-fillable**. The
-regression form lives in `test/mesh3d_test.jl` ("mesh_boolean: native mesh-CSG").
+regression form lives in `test/meshing/mesh3d_test.jl` ("mesh_boolean: native mesh-CSG").
 
 Run:
 

@@ -15,7 +15,7 @@ degeneracy that stops the base kernel on `box_tunnel`.
 | `conformity_check.jl` | box, non-convex **genus-1 through-tunnel**, **hollow shell** — tet-mesh boundary area == input surface area, exact domain volume, `validate.ok`, closed-manifold, ~1–2 s |
 | `schonhardt_blocker_check.jl` | the **Schönhardt** polyhedron (non-tetrahedralizable without a Steiner point) raises the explicit blocker by default; the convex triangulation of the same 6 points meshes — the blocker is exactly discriminating. With **`steiner=true`** the (star-shaped) Schönhardt is meshed by fan-tetrahedralization from an interior kernel point |
 
-The regression form of both lives in `test/mesh3d_test.jl` ("recover_boundary:
+The regression form of both lives in `test/meshing/mesh3d_test.jl` ("recover_boundary:
 conforming tetrahedralization of arbitrary PLCs"), which also covers a star-shaped
 L-prism and a faceted (octagonal) cylinder.
 

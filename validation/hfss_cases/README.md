@@ -13,7 +13,7 @@ julia --project=<Tessella.jl> validation/hfss_cases/hfss_case_meshes.jl
 ```
 
 It prints, per case, `tets / valid / watertight / volume`. The set is also
-regression-pinned in `test/hfss_cases_test.jl` (all 22 assert valid + watertight;
+regression-pinned in `test/integration/hfss_cases_test.jl` (all 22 assert valid + watertight;
 box-assembly cases assert exact volume; multi-region cases assert conforming
 interfaces + every region filled).
 

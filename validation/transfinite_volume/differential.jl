@@ -10,7 +10,8 @@ using Tessella.MeshTypes: nnodes, node, ntris, ntets, validate
 
 if !isdefined(Tessella, :TransfiniteVolume)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "..", "src", "TransfiniteVolume.jl"))
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
+                          "TransfiniteVolume.jl"))
 end
 using Tessella.TransfiniteVolume: mesh_transfinite_volume
 

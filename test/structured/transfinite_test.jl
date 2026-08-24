@@ -4,7 +4,8 @@ using Tessella.MeshTypes: Mesh, boundary_edges, mesh_crc, nnodes, node, nsegs,
                           ntris, triangle_area, validate
 
 if !isdefined(Tessella,:Transfinite)
-    Base.include(Tessella,joinpath(@__DIR__,"..","src","Transfinite.jl"))
+    Base.include(Tessella, joinpath(
+        @__DIR__, "..", "..", "src", "structured", "Transfinite.jl"))
 end
 using Tessella.Transfinite: mesh_transfinite_patch
 
@@ -19,12 +20,12 @@ function _transfinite_rectangle(L::Int,H::Int;
     return bottom,right,top,left
 end
 
-function _surface_area(mesh)
+function _transfinite_surface_area(mesh)
     sum(triangle_area(node(mesh,mesh.tris[1,t]),node(mesh,mesh.tris[2,t]),
                       node(mesh,mesh.tris[3,t])) for t in 1:ntris(mesh);init=0.0)
 end
 
-function _polygon_area(sides)
+function _transfinite_polygon_area(sides)
     ring=NTuple{3,Float64}[]
     for side in sides
         append!(ring,@view side[1:end-1])
@@ -37,7 +38,7 @@ function _polygon_area(sides)
     return abs(area)/2
 end
 
-function _canonical_triangles(mesh)
+function _transfinite_canonical_triangles(mesh)
     result=NTuple{3,Int32}[]
     for t in axes(mesh.tris,2)
         values=sort(mesh.tris[:,t])
@@ -64,7 +65,7 @@ function _expected_triangles(L,H,arrangement)
     sort!(result)
 end
 
-function _edge_set(matrix)
+function _transfinite_edge_set(matrix)
     result=Set{NTuple{2,Int32}}()
     for i in axes(matrix,2)
         a=matrix[1,i];b=matrix[2,i]
@@ -99,13 +100,13 @@ end
             @test (nnodes(mesh),nsegs(mesh),ntris(mesh))==(12,10,12)
             @test mesh_crc(mesh).bbox==((0.0,0.0,0.0),(3.0,2.0,0.0))
             @test mesh_crc(mesh).sha==expected_crc[arrangement]
-            @test _canonical_triangles(mesh)==_expected_triangles(3,2,arrangement)
+            @test _transfinite_canonical_triangles(mesh)==_expected_triangles(3,2,arrangement)
             @test mesh.tri_tag==fill(Int32(21),12)
             @test mesh.seg_tag==Int32[11,11,11,12,12,13,13,13,14,14]
             boundary,maxincidence=boundary_edges(mesh.tris)
             @test maxincidence==2
-            @test Set(boundary)==_edge_set(mesh.segs)
-            @test _surface_area(mesh)==6.0
+            @test Set(boundary)==_transfinite_edge_set(mesh.segs)
+            @test _transfinite_surface_area(mesh)==6.0
             @test mesh_crc(mesh)==mesh_crc(mesh_transfinite_patch(
                 sides...;arrangement=arrangement,face_tag=21,
                 side_tags=(11,12,13,14)))
@@ -121,7 +122,7 @@ end
         mesh=mesh_transfinite_patch(sides...;arrangement=:alternate_left)
         @test (nnodes(mesh),nsegs(mesh),ntris(mesh))==(20,14,24)
         @test validate(mesh).ok
-        @test _surface_area(mesh)≈_polygon_area(sides) atol=64eps(Float64)
+        @test _transfinite_surface_area(mesh)≈_transfinite_polygon_area(sides) atol=64eps(Float64)
 
         # Boundary nodes are copied bit-for-bit, in deterministic row-major order.
         @test [node(mesh,i) for i in 1:5]==bottom
@@ -158,7 +159,7 @@ end
         tilted=map(side->transform.(side),base)
         mesh=mesh_transfinite_patch(tilted...;arrangement=:right)
         @test validate(mesh).ok
-        @test _surface_area(mesh)≈3.0 atol=256eps(Float64)
+        @test _transfinite_surface_area(mesh)≈3.0 atol=256eps(Float64)
 
         clockwise=([(0.,0.,0.),(0.,1.,0.),(0.,2.,0.)],
                    [(0.,2.,0.),(1.,2.,0.),(2.,2.,0.),(3.,2.,0.)],
@@ -167,7 +168,7 @@ end
         reversed_mesh=mesh_transfinite_patch(clockwise...;
                                               arrangement=:alternate_right)
         @test validate(reversed_mesh).ok
-        @test _surface_area(reversed_mesh)==6.0
+        @test _transfinite_surface_area(reversed_mesh)==6.0
 
         long_patch=mesh_transfinite_patch(_transfinite_rectangle(2048,1)...)
         @test (nnodes(long_patch),ntris(long_patch))==(4098,4096)

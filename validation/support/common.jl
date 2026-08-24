@@ -1,5 +1,5 @@
 """
-    validation/common.jl
+    validation/support/common.jl
 
 Shared helpers for the Tessella-vs-external-tools validation suite. The convention
 (see README.md): for each geometry, mesh it with BOTH Tessella and a reference tool

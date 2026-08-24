@@ -8,7 +8,8 @@ using Tessella
 
 if !isdefined(Tessella, :TransfiniteHex)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "..", "src", "TransfiniteHex.jl"))
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
+                          "TransfiniteHex.jl"))
 end
 using Tessella.TransfiniteHex: mesh_transfinite_hex
 

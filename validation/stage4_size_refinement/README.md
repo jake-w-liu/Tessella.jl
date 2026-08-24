@@ -1,14 +1,14 @@
 # Stage-4 size refinement — measured findings
 
 **Resolution (shipped):** `works_mesh_box_kuhn.jl` demonstrates
-[`mesh_box`](../../src/Mesh3D.jl) — a **correct, sliver-free, size-controlled**
+[`mesh_box`](../../src/meshing/Mesh3D.jl) — a **correct, sliver-free, size-controlled**
 tet mesher for axis-aligned boxes (Kuhn/Freudenthal explicit subdivision):
 `maxedge ≤ hmax`, exact volume, `validate.ok`, watertight (boundary χ=2), min
 dihedral 45°/≥42° — for arbitrary `hmax`. It covers the enclosure's box regions.
 The three failures below are *why the naive routes don't work* and what pointed
 at the explicit-connectivity fix `mesh_box` uses.
 
-**Extended (shipped):** [`mesh_box_regions`](../../src/Mesh3D.jl) generalizes the
+**Extended (shipped):** [`mesh_box_regions`](../../src/meshing/Mesh3D.jl) generalizes the
 same explicit-lattice route to a **shared global grid with per-cell region
 classification** — conforming, size-controlled, **multi-region** meshing of
 **unions / differences / nestings of axis-aligned boxes** (native box CSG). This

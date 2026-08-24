@@ -88,6 +88,27 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after the repository-wide Julia-file
+organization:
+
+- The 37 implementation files below `src/Tessella.jl` are divided among `core`,
+  `fields`, `geometry`, `interfaces`, `meshing`, and `structured`. The 33 package
+  test files below `test/runtests.jl` mirror those domains and add `integration`;
+  the shared validation harness is in `validation/support`. The only top-level
+  Julia files in those three trees are their entry points.
+- A nine-assertion repository-layout ratchet now rejects stray top-level Julia
+  files, missing source/test domains, and deeper unclassified Julia paths.
+- The final bounds-checked package run passed 163,454/163,454 assertions in
+  15m46.4s without method-overwrite warnings. The same reorganized package loaded
+  under Julia 1.11.9, whose focused curve suite passed 511/511 assertions.
+- Path-sensitive focused gates passed: predicates 140,230/140,230; STEP/IGES 56/56;
+  I/O 305/305; Mesh3D 439/439; size fields 6,962/6,962; HFSS 95/95; combined
+  structured tests 1,179/1,179; and combined geometry tests 125/125.
+- `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
+  exited 0 against Gmsh 4.15.2-git after every validation include and fallback
+  path was updated. All differential checksums and parity measurements remained
+  unchanged.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after adding the normalized
 `Bump_HWall` and `Beta_HWall` curve laws:
 
@@ -399,7 +420,7 @@ than relying on allocation alone.
   material volumes and tagged boundary groups. The gmsh-impossible case is also
   solver-loadable and solved; those proofs live in [`ASCENT.md`](ASCENT.md).
 - All 22 HFSS guide geometry classes have native, valid, watertight, conforming mesh
-  regressions in `test/hfss_cases_test.jl`. Re-running the remaining literal cases as
+  regressions in `test/integration/hfss_cases_test.jl`. Re-running the remaining literal cases as
   full-wave ASCENT studies is external solver work, not a missing Tessella feature.
 
 ## Provenance

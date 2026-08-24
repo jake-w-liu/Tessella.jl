@@ -29,43 +29,37 @@ meshing backend would not resolve the ASCENT failure that motivated Tessella.
 
 ```text
 Tessella
-├── Predicates    adaptive exact orient/incircle/insphere, exact rationals, SoS
-├── MeshTypes     compact simplex storage, topology, quality, CRC, validation
-├── Transform     validated affine transforms for finalized simplex meshes
-├── ExactMesh3D   Rational{BigInt} Delaunay kernel
-├── IO            strict/atomic MSH v2.2/v4.1, STL, bounded .geo constant/range scan
-├── Elements      fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
-├── Recombine     greedy or Edmonds-blossom triangle-to-quad pairing, optional full-quad
-├── Refine        deterministic one-level uniform linear-simplex refinement
-├── Transfinite   validated four-sided planar structured triangle patches
-├── TransfiniteCurve normalized Progression/Bump/Beta laws and HWall variants
-├── TransfiniteTriangle validated three-sided structured triangle patches
-├── TransfiniteQuad recombined four-sided structured quadrangle patches
-├── TransfiniteVolume affine six-face structured tetrahedral volumes
-├── TransfinitePrism affine five-face structured tetrahedral prisms
-├── TransfiniteHex affine six-face recombined hexahedral volumes
-├── Mesh2D        Delaunay, CDT, interior classification, quality refinement
-├── SizeField     scalar/anisotropic catalog, .geo field graph, context resolvers
-├── Mesh1D        metric-length curve and segment discretization
-├── MeshSurface   planar, cylindrical, and parametric surface meshing
-├── Mesh3D        Delaunay, fills, partitions, sizing, flips, mesh Boolean CSG
-├── RecoverCDT    exact conforming-Delaunay boundary/partition recovery
-├── Optimize      quality reports, Laplacian/ODT/targeted sliver smoothing
-├── Heal          surface defect and meshability diagnostics
-├── Geometry      native box/cylinder/cone/geodesic-sphere surfaces
-├── CAD           analytical surfaces, projection, imprints
-├── BRep          ISO-10303-21 STEP / IGES classified-solid import (box/sphere/cylinder/cone) plus NURBS 126/128
-├── NURBS         native B-spline/NURBS curve and surface evaluation
-├── Model         tagged point/curve/loop/surface/volume entity kernel plus native solids/Booleans/embeds
-├── GeoExec       bounded Point/Line/Loop/Surface/Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/Rotate `.geo` execution
-├── BoundaryLayer prismatic 3-D extrusion, certified remaining-core tet fill,
-│                 plus 2-D quad/fan topology
-├── Periodic      translation periodic identification
-├── Post          list-based views and plugins
-├── API           model/mesh/option façade
-├── CLI           `tessella file.geo -2|-3` entry
-├── GUI           headless command/state machine
-└── HighOrder     globally certified quadratic tetrahedra and type-11 I/O
+├── core/
+│   ├── Predicates  adaptive exact orient/incircle/insphere, exact rationals, SoS
+│   ├── MeshTypes   compact simplex storage, topology, quality, CRC, validation
+│   ├── Elements    fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
+│   └── Transform   validated affine transforms for finalized simplex meshes
+├── fields/
+│   ├── SizeField   scalar/anisotropic field graph and context resolvers
+│   └── SizeFieldCatalog analytic, sampled, anisotropic, and process field implementations
+├── geometry/
+│   ├── Geometry    native box/cylinder/cone/geodesic-sphere surfaces
+│   ├── CAD         analytical surfaces, projection, imprints
+│   ├── NURBS       native B-spline/NURBS curve and surface evaluation
+│   ├── BRep        classified STEP/IGES solid and NURBS import/export
+│   ├── Heal        surface defect and meshability diagnostics
+│   ├── Model       tagged geometry/entity kernel, solids, Booleans, and embeds
+│   └── GeoExec     bounded `.geo` execution
+├── meshing/
+│   ├── Mesh1D/Mesh2D/MeshSurface/Mesh3D dimensional meshing kernels
+│   ├── ExactMesh3D/RecoverCDT exact Delaunay and conforming recovery
+│   ├── Recombine/Refine/Optimize/HighOrder mesh transformation kernels
+│   └── BoundaryLayer/Periodic boundary-layer and periodic constraints
+├── structured/
+│   ├── Transfinite/TransfiniteTriangle/TransfiniteQuad planar structured patches
+│   ├── TransfiniteCurve Progression/Bump/Beta laws and HWall variants
+│   └── TransfiniteVolume/TransfinitePrism/TransfiniteHex structured volumes
+└── interfaces/
+    ├── IO          strict/atomic MSH v2.2/v4.1, STL, bounded `.geo` scan
+    ├── Post        list-based views and plugins
+    ├── API         model/mesh/option façade
+    ├── CLI         `tessella file.geo -2|-3` entry
+    └── GUI         headless command/state machine
 ```
 
 The native field graph includes geometric/composite, analytic and derivative,

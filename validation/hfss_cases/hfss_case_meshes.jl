@@ -10,7 +10,7 @@
 # AND solved; see validation/enclosure_literal/).
 #
 # Run:  julia --project=<Tessella.jl> validation/hfss_cases/hfss_case_meshes.jl
-# (also `include`d by test/hfss_cases_test.jl to regression-pin the whole set)
+# (also `include`d by test/integration/hfss_cases_test.jl to regression-pin the whole set)
 # ══════════════════════════════════════════════════════════════════════════════════
 using Tessella, Tessella.Mesh3D, Tessella.MeshTypes, Tessella.Geometry
 using Tessella: BoxRegion

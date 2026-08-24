@@ -5,13 +5,14 @@ using Tessella.MeshTypes: boundary_edges, mesh_crc, nnodes, node, nsegs,
 
 if !isdefined(Tessella, :TransfiniteTriangle)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "src", "TransfiniteTriangle.jl"))
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
+                          "TransfiniteTriangle.jl"))
 end
 using Tessella.TransfiniteTriangle: mesh_transfinite_triangle
 
 @inline _triangle_node(i::Int, j::Int) = Int32((i * (i + 1)) ÷ 2 + j + 1)
 
-@inline function _lerp3(a, b, t)
+@inline function _triangle_lerp3(a, b, t)
     ((1 - t) * a[1] + t * b[1],
      (1 - t) * a[2] + t * b[2],
      (1 - t) * a[3] + t * b[3])
@@ -23,20 +24,20 @@ function _straight_triangle(divisions::Int;
                                      (0.5, 3.0, 0.0)))
     divisions > 0 || throw(ArgumentError("positive divisions required"))
     c1, c2, c3 = corners
-    side1 = [_lerp3(c1, c2, i / divisions) for i in 0:divisions]
-    side2 = [_lerp3(c2, c3, i / divisions) for i in 0:divisions]
-    side3 = [_lerp3(c3, c1, i / divisions) for i in 0:divisions]
+    side1 = [_triangle_lerp3(c1, c2, i / divisions) for i in 0:divisions]
+    side2 = [_triangle_lerp3(c2, c3, i / divisions) for i in 0:divisions]
+    side3 = [_triangle_lerp3(c3, c1, i / divisions) for i in 0:divisions]
     return side1, side2, side3
 end
 
-function _surface_area(mesh)
+function _triangle_surface_area(mesh)
     return sum(triangle_area(node(mesh, mesh.tris[1, triangle]),
                              node(mesh, mesh.tris[2, triangle]),
                              node(mesh, mesh.tris[3, triangle]))
                for triangle in 1:ntris(mesh); init=0.0)
 end
 
-function _edge_set(matrix)
+function _triangle_edge_set(matrix)
     result = Set{NTuple{2,Int32}}()
     for index in axes(matrix, 2)
         a = matrix[1, index]
@@ -46,7 +47,7 @@ function _edge_set(matrix)
     return result
 end
 
-function _canonical_triangles(mesh)
+function _triangle_canonical_triangles(mesh)
     result = NTuple{3,Int32}[]
     for triangle in axes(mesh.tris, 2)
         values = sort(mesh.tris[:, triangle])
@@ -73,7 +74,7 @@ function _expected_triangles(divisions::Int)
     return result
 end
 
-function _polygon_area(sides)
+function _triangle_polygon_area(sides)
     ring = NTuple{3,Float64}[]
     for side in sides
         append!(ring, @view side[1:end-1])
@@ -108,7 +109,7 @@ function _sample_chord(side, cumulative, t)
     left = right - 1
     fraction = (t * total - cumulative[left]) /
                (cumulative[right] - cumulative[left])
-    return _lerp3(side[left], side[right], fraction)
+    return _triangle_lerp3(side[left], side[right], fraction)
 end
 
 struct _CountOnlyTriangleSide <: AbstractVector{NTuple{3,Float64}}
@@ -145,13 +146,13 @@ end
             @test validate(mesh).ok
             @test (nnodes(mesh), nsegs(mesh), ntris(mesh)) == (15, 12, 16)
             @test mesh_crc(mesh).bbox == ((0.0, 0.0, 0.0), (4.0, 3.0, 0.0))
-            @test _canonical_triangles(mesh) == _expected_triangles(4)
+            @test _triangle_canonical_triangles(mesh) == _expected_triangles(4)
             @test mesh.tri_tag == fill(Int32(21), 16)
             @test mesh.seg_tag == Int32[fill(11, 4); fill(12, 4); fill(13, 4)]
             boundary, max_incidence = boundary_edges(mesh.tris)
             @test max_incidence == 2
-            @test Set(boundary) == _edge_set(mesh.segs)
-            @test _surface_area(mesh) == 6.0
+            @test Set(boundary) == _triangle_edge_set(mesh.segs)
+            @test _triangle_surface_area(mesh) == 6.0
             @test mesh_crc(mesh) == mesh_crc(mesh_transfinite_triangle(
                 sides...; arrangement=arrangement, face_tag=21,
                 side_tags=(11, 12, 13)))
@@ -159,8 +160,8 @@ end
         crcs = Set(mesh_crc(mesh).sha for mesh in values(meshes))
         @test crcs == Set([
             "5f231f0c22f6812c247514103e21653e15281194911bf456b4c00a9d190a40df"])
-        reference = _canonical_triangles(meshes[:left])
-        @test all(_canonical_triangles(mesh) == reference
+        reference = _triangle_canonical_triangles(meshes[:left])
+        @test all(_triangle_canonical_triangles(mesh) == reference
                   for mesh in values(meshes))
     end
 
@@ -175,7 +176,7 @@ end
         mesh = mesh_transfinite_triangle(sides...; arrangement=:right)
         @test validate(mesh).ok
         @test (nnodes(mesh), nsegs(mesh), ntris(mesh)) == (15, 12, 16)
-        @test _surface_area(mesh) ≈ _polygon_area(sides) atol=128eps(Float64)
+        @test _triangle_surface_area(mesh) ≈ _triangle_polygon_area(sides) atol=128eps(Float64)
 
         for i in 0:4
             @test node(mesh, _triangle_node(i, 0)) == side1[i + 1]
@@ -223,7 +224,7 @@ end
         tilted = map(side -> transform.(side), base)
         mesh = mesh_transfinite_triangle(tilted...)
         @test validate(mesh).ok
-        @test _surface_area(mesh) ≈ 6.0 atol=512eps(Float64)
+        @test _triangle_surface_area(mesh) ≈ 6.0 atol=512eps(Float64)
 
         clockwise = _straight_triangle(
             4; corners=((0.0, 0.0, 0.0),
@@ -232,7 +233,7 @@ end
         reversed_mesh = mesh_transfinite_triangle(
             clockwise...; arrangement=:alternate_right)
         @test validate(reversed_mesh).ok
-        @test _surface_area(reversed_mesh) == 3.0
+        @test _triangle_surface_area(reversed_mesh) == 3.0
 
         long_mesh = mesh_transfinite_triangle(_straight_triangle(128)...)
         @test (nnodes(long_mesh), ntris(long_mesh)) == (8385, 16384)

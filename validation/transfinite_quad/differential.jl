@@ -9,7 +9,8 @@ using Tessella.Elements: mixed_crc
 
 if !isdefined(Tessella, :TransfiniteQuad)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "..", "src", "TransfiniteQuad.jl"))
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
+                          "TransfiniteQuad.jl"))
 end
 using Tessella.TransfiniteQuad: mesh_transfinite_quad_patch
 

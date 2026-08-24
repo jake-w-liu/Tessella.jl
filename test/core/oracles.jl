@@ -5,7 +5,7 @@ These deliberately do **not** reuse any production code path. Predicates are
 checked by building the *full homogeneous* determinant matrix (3×3 / 4×4 / 5×5)
 in exact `Rational{BigInt}` and evaluating it with a **generic recursive Laplace
 expansion** — a structurally different computation from the hand-expanded minor
-forms in `src/Predicates.jl`. Agreement across the two independent routes is the
+forms in `src/core/Predicates.jl`. Agreement across the two independent routes is the
 oracle; a transcription/sign/index bug in either shows up as a mismatch.
 """
 module Oracles

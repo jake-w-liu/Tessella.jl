@@ -15,7 +15,7 @@
 
 import Pkg
 Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
-include(joinpath(@__DIR__, "common.jl"))
+include(joinpath(@__DIR__, "support", "common.jl"))
 using Tessella.Geometry
 using Tessella.MeshTypes: Mesh
 
