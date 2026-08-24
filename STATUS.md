@@ -27,7 +27,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
-| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -93,6 +93,32 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening and separating the
+API, CLI, and headless GUI interfaces:
+
+- API sessions and model/cache operations are now serialized. Initialization
+  resets options, model, and cache; option updates validate atomically; model
+  mutations invalidate the cached mesh only after success; generated, cached,
+  and `.geo`-returned meshes/models do not share caller-mutable storage.
+- The CLI now bounds arguments, rejects duplicate/conflicting or ignored flags,
+  derives a safe `.msh` destination for no-extension inputs, and blocks lexical
+  and hard-link aliases of the input before executing or writing. The
+  no-extension regression leaves its source byte-for-byte unchanged.
+- `GuiState` now owns and validates constructor inputs. Commands have byte,
+  token, selection, and log bounds; exact arities; finite numeric parsing;
+  positive unique selections; atomic state updates; and explicit pre-session
+  blockers.
+- The focused API, CLI, and GUI suites passed respectively 58/58, 28/28, and
+  51/51 assertions under Julia 1.12.7 and Julia 1.11.9. A four-thread API stress
+  probe allocated 200 unique automatic point tags without a race. The API cube
+  and CLI square deterministic SHA-256 values are
+  `e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83`
+  and `92e578bac6d8feb3f0f845f100665dcc145edf924965ad72be716da933f34461`.
+- The bounds-checked package gate passed 163,815/163,815 assertions in 10m46.2s,
+  and the aggregate bounds-checked validation exited 0 against Gmsh 4.15.2.
+  Public API, CLI, and GUI documentation scans returned no missing names;
+  recursive ambiguity detection returned zero.
 
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening and separating the
 scalar post-view interface:
