@@ -11,9 +11,10 @@ it is more accurate or faster.
 
 ```
 validation/
-  common.jl              # helpers: gmsh runner, tet metrics, comparison
   run_all.jl             # driver: runs every case, writes REPORT.md
   REPORT.md              # generated results table (git-ignored until you run it)
+  support/
+    common.jl            # helpers: gmsh runner, tet metrics, comparison
   size_fields/
     differential.jl      # required Gmsh 4.15.2 field differential
     STATUS.md            # exact coverage and explicit non-claims
@@ -85,6 +86,6 @@ builder + analytic volume to the `cases` list in `run_all.jl`.
 
 ## Extending to other tools
 
-The convention is tool-agnostic: add a `run_<tool>` helper in `common.jl` (mirroring
+The convention is tool-agnostic: add a `run_<tool>` helper in `support/common.jl` (mirroring
 `run_gmsh`) that meshes to a Tessella-readable format, and a column in the report.
 Retain each tool's input script alongside the case.
