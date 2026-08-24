@@ -94,6 +94,34 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening finalized mesh
+storage, raw topology operations, and tetrahedron quality metrics:
+
+- `Mesh` construction now rejects Boolean coordinates, connectivity, and tags;
+  checks tag representability with cell-local diagnostics; and retains the
+  allocation-free `Int`/`Int32` node-access paths. Public raw-topology
+  operations validate one-based shape, Boolean/range errors, and topology-size
+  limits before entering bounds-elided loops.
+- Finalized mesh arrays remain intentionally mutable, so every public consumer
+  now revalidates structural invariants. `validate` returns a diagnostic instead
+  of indexing corrupt storage; topology/CRC operations reject it explicitly;
+  manifold queries return `false`; and `MeshDiagnostic` owns its messages while
+  enforcing a consistent success/failure state.
+- Tetrahedron dihedral, circumradius, and radius-edge calculations normalize
+  overflowed and subnormal coordinate scales. A finite radius-edge ratio is
+  retained when the corresponding physical circumradius legitimately
+  overflows. Random scale differentials covered 983 finite huge-coordinate
+  cases with maximum angle error `3.0487765090292385e-14`, maximum relative
+  radius-edge error `7.172040739078511e-14`, and maximum relative finite-radius
+  error `8.659739592076221e-15`.
+- The focused `MeshTypes` suite passed 1,993/1,993 assertions under Julia 1.12.7
+  and Julia 1.11.9. Its fixed cube SHA-256 is
+  `7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9`.
+- The bounds-checked package gate passed 163,864/163,864 assertions in 47m40.5s,
+  and the aggregate bounds-checked validation exited 0 against Gmsh 4.15.2.
+  The public `MeshTypes` documentation scan returned no missing names and
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening and separating the
 API, CLI, and headless GUI interfaces:
 

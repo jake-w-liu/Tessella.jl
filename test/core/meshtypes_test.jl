@@ -55,6 +55,9 @@ function cube_mesh()
     return Mesh(coords; tets=tets)
 end
 
+@noinline _node_allocated(mesh)=@allocated node(mesh,1)
+@noinline _node2_allocated(mesh)=@allocated node2(mesh,1)
+
 @testset "MeshTypes (Stage 0)" begin
 
     @testset "accessors + allocation-free node()" begin
@@ -67,9 +70,13 @@ end
         @test_throws BoundsError node(m, nnodes(m)+1)
         @test_throws BoundsError node2(m, 0)
         @test_throws BoundsError node2(m, nnodes(m)+1)
+        @test_throws ArgumentError node(m,true)
+        @test_throws ArgumentError node2(m,true)
+        @test node(m,big(7))==(1.0,1.0,1.0)
+        @test_throws BoundsError node(m,big(typemax(Int))+1)
         node(m, 1); node2(m, 1)
-        @test (@allocated node(m, 1)) == 0
-        @test (@allocated node2(m, 1)) == 0
+        @test _node_allocated(m)==0
+        @test _node2_allocated(m)==0
     end
 
     @testset "triangle_area vs Heron" begin
@@ -115,6 +122,35 @@ end
         # right-corner tet has a π/2 dihedral present
         mn2, mx2 = tet_dihedral_extrema((0,0,0),(1,0,0),(0,1,0),(0,0,1))
         @test mn2 > 0 && mx2 < pi
+
+        # Scale invariance must survive finite coordinates whose pairwise
+        # differences overflow Float64 before normalization.
+        scale=1e308
+        huge=((scale,scale,scale),(scale,-scale,-scale),
+              (-scale,scale,-scale),(-scale,-scale,scale))
+        hmin,hmax=tet_dihedral_extrema(huge...)
+        @test hmin≈acos(1/3) rtol=5e-15
+        @test hmax≈acos(1/3) rtol=5e-15
+        @test tet_circumradius(huge...)≈sqrt(3)*scale rtol=5e-15
+        @test tet_radius_edge(huge...)≈sqrt(3)/(2*sqrt(2)) rtol=5e-15
+        sliver=((0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.5,0.5,0.1))
+        huge_sliver=ntuple(j->ntuple(i->scale*sliver[j][i],3),4)
+        @test isinf(tet_circumradius(huge_sliver...))
+        @test tet_radius_edge(huge_sliver...)≈tet_radius_edge(sliver...) rtol=5e-15
+        @test tet_dihedral_extrema(huge_sliver...)[1]≈
+              tet_dihedral_extrema(sliver...)[1] rtol=5e-15
+        tiny_scale=1e-320
+        tiny=((tiny_scale,tiny_scale,tiny_scale),(tiny_scale,-tiny_scale,-tiny_scale),
+              (-tiny_scale,tiny_scale,-tiny_scale),(-tiny_scale,-tiny_scale,tiny_scale))
+        tmin,tmax=tet_dihedral_extrema(tiny...)
+        @test tmin≈acos(1/3) rtol=5e-4
+        @test tmax≈acos(1/3) rtol=5e-4
+        @test tet_circumradius(tiny...)≈sqrt(3)*tiny_scale rtol=5e-4
+        @test tet_radius_edge(tiny...)≈sqrt(3)/(2*sqrt(2)) rtol=5e-4
+        @test isnan(first(tet_dihedral_extrema((NaN,0,0),b,c,d)))
+        @test tet_circumradius((NaN,0,0),b,c,d)==Inf
+        @test isnan(tet_radius_edge((NaN,0,0),b,c,d))
+        @test_throws ArgumentError tet_circumradius((0,0),b,c,d)
     end
 
     @testset "boundary extraction" begin
@@ -132,6 +168,17 @@ end
         tsurf = Mesh(Float64[0 1 0; 0 0 1; 0 0 0]; tris=reshape(Int32[1,2,3],3,1))
         be, _ = boundary_edges(tsurf.tris)
         @test length(be) == 3
+        empty_tris=Matrix{Int32}(undef,3,0)
+        empty_tets=Matrix{Int32}(undef,4,0)
+        @test boundary_faces(empty_tets)==(NTuple{3,Int32}[],0)
+        @test boundary_edges(empty_tris)==(NTuple{2,Int32}[],0)
+        @test_throws ArgumentError boundary_faces(reshape(Int32[1,2,3],3,1))
+        @test_throws ArgumentError boundary_edges(reshape(Int32[1,2],2,1))
+        @test_throws ArgumentError boundary_faces(reshape(Int64[1,2,3,typemax(Int64)],4,1))
+        @test_throws ArgumentError boundary_edges(reshape(Bool[true,true,true],3,1))
+        @test_throws ArgumentError unique_edges(empty_tris,reshape(Int32[1,2,3],3,1))
+        @test_throws ArgumentError unique_faces(reshape(Int32[1,2],2,1),empty_tets)
+        @test_throws ArgumentError unique_edges(reshape(Int32[0,1,2],3,1),empty_tets)
     end
 
     @testset "Euler characteristic" begin
@@ -211,6 +258,38 @@ end
         @test_throws ArgumentError Mesh(fill(big(10)^1000,3,1))
         @test_throws ArgumentError Mesh(Float64[0 1;0 0;0 0];segs=reshape(Int32[1,2],2,1),seg_tag=Int64[typemax(Int64)])
         @test_throws ArgumentError Mesh(Float64[0 1;0 0;0 0];segs=reshape(Int32[1,2],2,1),seg_tag=Int32[-1])
+        @test_throws ArgumentError Mesh(reshape(Bool[false,true,false],3,1))
+        @test_throws ArgumentError Mesh(Float64[0;0;0;;];segs=reshape(Bool[true,true],2,1))
+        @test_throws ArgumentError Mesh(Float64[0;0;0;;];seg_tag=Bool[])
+        @test_throws ArgumentError Mesh(Float64[0 1;0 0;0 0];
+                                        segs=reshape(Int32[1,2],2,1),seg_tag=Bool[true])
+    end
+
+    @testset "mutable storage is revalidated safely" begin
+        bad_index=cube_mesh();bad_index.tets[1,1]=0
+        diagnostic=validate(bad_index)
+        @test !diagnostic.ok
+        @test any(occursin("outside",message) for message in diagnostic.messages)
+        @test !is_closed_manifold(bad_index)
+        @test_throws ArgumentError bounding_box(bad_index)
+        @test_throws ArgumentError euler_characteristic(bad_index)
+        @test_throws ArgumentError boundary_euler(bad_index)
+        @test_throws ArgumentError mesh_crc(bad_index)
+
+        bad_tags=cube_mesh();bad_tags.tet_tag[1]=-1
+        @test !validate(bad_tags).ok
+        @test_throws ArgumentError mesh_crc(bad_tags)
+        short_tags=cube_mesh();pop!(short_tags.tet_tag)
+        @test !validate(short_tags).ok
+        @test_throws ArgumentError mesh_crc(short_tags)
+
+        source=["corrupt topology"]
+        owned=MeshDiagnostic(false,source)
+        source[1]="changed"
+        @test owned.messages==["corrupt topology"]
+        @test_throws ArgumentError MeshDiagnostic(true,["failure"])
+        @test_throws ArgumentError MeshDiagnostic(false,String[])
+        @test_throws ArgumentError MeshDiagnostic(false,[" "])
     end
 
     @testset "mesh_crc determinism + order-invariance + mutation-sensitivity" begin
@@ -218,6 +297,7 @@ end
         crc1 = mesh_crc(m)
         crc2 = mesh_crc(cube_mesh())
         @test crc1.sha == crc2.sha
+        @test crc1.sha=="7ea403054f05392f18b404a1f5f78b12d70d45d40c7b04ba8f8dc3e030d8f3f9"
         @test crc1.n_tets == 6 && crc1.n_nodes == 8
         @test crc1.n_boundary_faces == 12
 
@@ -321,4 +401,6 @@ end
                         tris=Int32[1 4; 2 5; 3 6])
         @test validate(disjoint).ok
     end
+
+    @test isempty(Docs.undocumented_names(Tessella.MeshTypes;private=false))
 end

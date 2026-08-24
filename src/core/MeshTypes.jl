@@ -67,6 +67,8 @@ struct Mesh
         length(seg_tag) == size(segs, 2) || throw(ArgumentError("seg_tag length mismatch"))
         length(tri_tag) == size(tris, 2) || throw(ArgumentError("tri_tag length mismatch"))
         length(tet_tag) == size(tets, 2) || throw(ArgumentError("tet_tag length mismatch"))
+        (eltype(coords)<:Bool || any(value->value isa Bool,coords)) && throw(ArgumentError(
+            "Mesh: coordinates must not be Bool"))
         nn = size(coords, 2)
         nn <= typemax(Int32) || throw(ArgumentError("Mesh: $nn nodes exceed Int32 indexing"))
         for (what,cells) in (("segments",segs),("triangles",tris),("tetrahedra",tets))
@@ -95,6 +97,12 @@ function _connectivity_i32(cells,what)
     end
 end
 function _tags_i32(tags,what)
+    eltype(tags)<:Bool && throw(ArgumentError("Mesh: $what tags must not be Bool"))
+    @inbounds for (i,tag) in pairs(tags)
+        tag isa Bool && throw(ArgumentError("Mesh: $what tag $i must not be Bool"))
+        (0<=tag<=typemax(Int32)) || throw(ArgumentError(
+            "Mesh: $what tag $i is outside 0:$(typemax(Int32)) ($tag)"))
+    end
     out=try Vector{Int32}(tags) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("Mesh: $what tags do not fit Int32: "*sprint(showerror,err)))
@@ -106,27 +114,51 @@ function _tags_i32(tags,what)
 end
 
 function _check_ids(cells::AbstractMatrix, nn::Integer, what::AbstractString)
+    eltype(cells)<:Bool && throw(ArgumentError("$what node indices must not be Bool"))
     @inbounds for j in axes(cells, 2), i in axes(cells, 1)
         v = cells[i, j]
+        v isa Bool && throw(ArgumentError("$what $j node index must not be Bool"))
         (1 <= v <= nn) || throw(ArgumentError("$what $j references node $v outside 1:$nn"))
     end
 end
 
+"""Return the number of coordinate columns (mesh nodes)."""
 @inline nnodes(m::Mesh) = size(m.coords, 2)
+"""Return the number of segment cells."""
 @inline nsegs(m::Mesh)  = size(m.segs, 2)
+"""Return the number of triangle cells."""
 @inline ntris(m::Mesh)  = size(m.tris, 2)
+"""Return the number of tetrahedron cells."""
 @inline ntets(m::Mesh)  = size(m.tets, 2)
 
 """`node(m, i)` → the `(x,y,z)` of node `i` as an allocation-free `NTuple{3}`."""
-@inline function node(m::Mesh, i::Integer)
+@inline function node(m::Mesh,i::Int)::NTuple{3,Float64}
     @boundscheck 1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
-    @inbounds (m.coords[1, i], m.coords[2, i], m.coords[3, i])
+    @inbounds (m.coords[1,i],m.coords[2,i],m.coords[3,i])
+end
+@inline function node(m::Mesh,i::Int32)::NTuple{3,Float64}
+    @boundscheck 1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
+    @inbounds (m.coords[1,i],m.coords[2,i],m.coords[3,i])
+end
+@inline function node(m::Mesh,i::Integer)::NTuple{3,Float64}
+    i isa Bool && throw(ArgumentError("node: index must not be Bool"))
+    1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
+    return node(m,Int(i))
 end
 
 """`node2(m, i)` → the `(x,y)` of node `i` (planar), allocation-free."""
-@inline function node2(m::Mesh, i::Integer)
+@inline function node2(m::Mesh,i::Int)::NTuple{2,Float64}
     @boundscheck 1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
-    @inbounds (m.coords[1, i], m.coords[2, i])
+    @inbounds (m.coords[1,i],m.coords[2,i])
+end
+@inline function node2(m::Mesh,i::Int32)::NTuple{2,Float64}
+    @boundscheck 1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
+    @inbounds (m.coords[1,i],m.coords[2,i])
+end
+@inline function node2(m::Mesh,i::Integer)::NTuple{2,Float64}
+    i isa Bool && throw(ArgumentError("node2: index must not be Bool"))
+    1<=i<=nnodes(m) || throw(BoundsError(m.coords,(Colon(),i)))
+    return node2(m,Int(i))
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -171,7 +203,8 @@ function tet_signed_volume(a, b, c, d)
     return sgn>0 ? v : -v
 end
 
-@inline tet_volume(a, b, c, d) = abs(tet_signed_volume(a, b, c, d))
+"""Unsigned volume of tetrahedron `(a,b,c,d)`."""
+@inline tet_volume(a,b,c,d)=abs(tet_signed_volume(a,b,c,d))
 
 function _triangle_area_big(a,b,c)
     R=Rational{BigInt}
@@ -207,7 +240,10 @@ Min and max of the six dihedral angles of the tet. Slivers show a min near 0 or
 a max near π. Computed from edge-orthogonal in-face vectors (numerically stable).
 """
 function tet_dihedral_extrema(a, b, c, d)
-    P = (a, b, c, d)
+    normalized=_normalized_quality_tet(a,b,c,d,"tet_dihedral_extrema")
+    normalized===nothing && return (NaN,NaN)
+    _,raw_points=normalized
+    _,P=_relative_quality_tet(raw_points)
     # edges as vertex-index pairs and the two "apex" vertices of each edge
     edges = ((1,2,3,4), (1,3,2,4), (1,4,2,3), (2,3,1,4), (2,4,1,3), (3,4,1,2))
     mn = Inf; mx = -Inf
@@ -233,6 +269,17 @@ end
 
 """Circumradius of tet `(a,b,c,d)`. Returns `Inf` for a degenerate (flat) tet."""
 function tet_circumradius(a, b, c, d)
+    normalized=_normalized_quality_tet(a,b,c,d,"tet_circumradius")
+    normalized===nothing && return Inf
+    coordinate_scale,raw_points=normalized
+    edge_scale,P=_relative_quality_tet(raw_points)
+    radius=_tet_circumradius_normalized(P...)
+    isfinite(radius) || return Inf
+    edge_scaled=edge_scale*radius
+    return coordinate_scale*edge_scaled
+end
+
+function _tet_circumradius_normalized(a,b,c,d)
     A = _sub(b, a); B = _sub(c, a); C = _sub(d, a)
     scale=max(abs(A[1]),abs(A[2]),abs(A[3]),abs(B[1]),abs(B[2]),abs(B[3]),
               abs(C[1]),abs(C[2]),abs(C[3]))
@@ -249,14 +296,67 @@ end
 
 """Radius-edge ratio = circumradius / shortest edge (Delaunay-refinement quality)."""
 function tet_radius_edge(a, b, c, d)
-    R = tet_circumradius(a, b, c, d)
-    P = (a, b, c, d)
+    normalized=_normalized_quality_tet(a,b,c,d,"tet_radius_edge")
+    normalized===nothing && return NaN
+    _,raw_points=normalized
+    _,P=_relative_quality_tet(raw_points)
+    R=_tet_circumradius_normalized(P...)
     mn = Inf
     @inbounds for i in 1:4, j in i+1:4
         l = _norm(_sub(P[i], P[j])); l < mn && (mn = l)
     end
     mn == 0 && return Inf
     return R / mn
+end
+
+function _relative_quality_tet(points)
+    edge_scale=0.0
+    @inbounds for i in 1:3,j in i+1:4,dimension in 1:3
+        edge_scale=max(edge_scale,abs(points[j][dimension]-points[i][dimension]))
+    end
+    edge_scale==0 && return (0.0,points)
+    anchor=points[1]
+    relative=((0.0,0.0,0.0),
+              ntuple(i->(points[2][i]-anchor[i])/edge_scale,3),
+              ntuple(i->(points[3][i]-anchor[i])/edge_scale,3),
+              ntuple(i->(points[4][i]-anchor[i])/edge_scale,3))
+    return edge_scale,relative
+end
+
+function _normalized_quality_tet(a,b,c,d,caller::AbstractString)
+    points=(a,b,c,d)
+    converted=ntuple(4) do j
+        point=points[j]
+        length(point)==3 || throw(ArgumentError("$caller: point $j must have three coordinates"))
+        try
+            (Float64(point[1]),Float64(point[2]),Float64(point[3]))
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$caller: point $j must be Float64-representable"))
+        end
+    end
+    all(isfinite,(converted[1]...,converted[2]...,converted[3]...,converted[4]...)) ||
+        return nothing
+    edge_scale=0.0
+    finite_edges=true
+    @inbounds for i in 1:3,j in i+1:4,dimension in 1:3
+        difference=converted[j][dimension]-converted[i][dimension]
+        if !isfinite(difference)
+            finite_edges=false
+        else
+            edge_scale=max(edge_scale,abs(difference))
+        end
+    end
+    # Preserve ordinary-scale arithmetic exactly. Rescale only when subtraction
+    # overflowed or inversion of a subnormal edge scale would overflow.
+    if finite_edges && (edge_scale==0 || isfinite(inv(edge_scale)))
+        return 1.0,converted
+    end
+    coordinate_scale=maximum(abs,(converted[1]...,converted[2]...,
+                                  converted[3]...,converted[4]...))
+    coordinate_scale==0 && return (0.0,converted)
+    normalized=ntuple(j->ntuple(i->converted[j][i]/coordinate_scale,3),4)
+    return coordinate_scale,normalized
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -267,6 +367,28 @@ end
                                     (b <= c ? (a <= c ? (b,a,c) : (b,c,a)) : (c,b,a))
 @inline _sort2(a, b) = a <= b ? (a, b) : (b, a)
 
+function _check_cell_matrix(cells::AbstractMatrix{<:Integer},arity::Int,
+                            records_per_cell::Int,caller::AbstractString)
+    Base.require_one_based_indexing(cells)
+    size(cells,1)==arity || throw(ArgumentError(
+        "$caller: connectivity must be $arity × ncells"))
+    eltype(cells)<:Bool && throw(ArgumentError(
+        "$caller: node indices must not be Bool"))
+    ncells=size(cells,2)
+    ncells<=typemax(Int32) || throw(ArgumentError(
+        "$caller: $ncells cells exceed the Int32 topology limit"))
+    ncells<=typemax(Int)÷records_per_cell || throw(ArgumentError(
+        "$caller: topology record count exceeds the platform Int limit"))
+    @inbounds for cell in 1:ncells,local_index in 1:arity
+        value=cells[local_index,cell]
+        value isa Bool && throw(ArgumentError(
+            "$caller: cell $cell node index must not be Bool"))
+        (1<=value<=typemax(Int32)) || throw(ArgumentError(
+            "$caller: cell $cell references node $value outside 1:$(typemax(Int32))"))
+    end
+    return ncells
+end
+
 """
     boundary_faces(tets) -> Vector{NTuple{3,Int32}}, max_incidence
 
@@ -275,9 +397,10 @@ sorted vertex triple. Also returns the maximum face incidence: `>2` ⇒ the tet
 complex is non-manifold.
 """
 function boundary_faces(tets::AbstractMatrix{<:Integer})
+    ntets=_check_cell_matrix(tets,4,4,"boundary_faces")
     inc = Dict{NTuple{3,Int32}, Int}()
-    sizehint!(inc, 2 * size(tets, 2))
-    @inbounds for t in axes(tets, 2)
+    sizehint!(inc,2*ntets)
+    @inbounds for t in 1:ntets
         v1 = Int32(tets[1,t]); v2 = Int32(tets[2,t]); v3 = Int32(tets[3,t]); v4 = Int32(tets[4,t])
         for f in (_sort3(v2,v3,v4), _sort3(v1,v3,v4), _sort3(v1,v2,v4), _sort3(v1,v2,v3))
             inc[f] = get(inc, f, 0) + 1
@@ -299,9 +422,10 @@ Edges incident to exactly one triangle (the surface boundary), each a sorted
 vertex pair; plus the max edge incidence (`>2` ⇒ non-manifold surface).
 """
 function boundary_edges(tris::AbstractMatrix{<:Integer})
+    ntris=_check_cell_matrix(tris,3,3,"boundary_edges")
     inc = Dict{NTuple{2,Int32}, Int}()
-    sizehint!(inc, 2 * size(tris, 2))
-    @inbounds for t in axes(tris, 2)
+    sizehint!(inc,2*ntris)
+    @inbounds for t in 1:ntris
         v1 = Int32(tris[1,t]); v2 = Int32(tris[2,t]); v3 = Int32(tris[3,t])
         for e in (_sort2(v1,v2), _sort2(v2,v3), _sort2(v1,v3))
             inc[e] = get(inc, e, 0) + 1
@@ -318,12 +442,14 @@ end
 
 """Set of unique undirected edges over triangles+tets (for Euler characteristic)."""
 function unique_edges(tris::AbstractMatrix{<:Integer}, tets::AbstractMatrix{<:Integer})
+    ntri=_check_cell_matrix(tris,3,3,"unique_edges triangles")
+    ntet=_check_cell_matrix(tets,4,6,"unique_edges tetrahedra")
     edges = Set{NTuple{2,Int32}}()
-    @inbounds for t in axes(tris, 2)
+    @inbounds for t in 1:ntri
         v1=Int32(tris[1,t]); v2=Int32(tris[2,t]); v3=Int32(tris[3,t])
         push!(edges, _sort2(v1,v2)); push!(edges, _sort2(v2,v3)); push!(edges, _sort2(v1,v3))
     end
-    @inbounds for t in axes(tets, 2)
+    @inbounds for t in 1:ntet
         v1=Int32(tets[1,t]); v2=Int32(tets[2,t]); v3=Int32(tets[3,t]); v4=Int32(tets[4,t])
         push!(edges, _sort2(v1,v2)); push!(edges, _sort2(v1,v3)); push!(edges, _sort2(v1,v4))
         push!(edges, _sort2(v2,v3)); push!(edges, _sort2(v2,v4)); push!(edges, _sort2(v3,v4))
@@ -333,11 +459,13 @@ end
 
 """Set of unique triangular faces over triangles+tets (for Euler characteristic)."""
 function unique_faces(tris::AbstractMatrix{<:Integer}, tets::AbstractMatrix{<:Integer})
+    ntri=_check_cell_matrix(tris,3,1,"unique_faces triangles")
+    ntet=_check_cell_matrix(tets,4,4,"unique_faces tetrahedra")
     faces = Set{NTuple{3,Int32}}()
-    @inbounds for t in axes(tris, 2)
+    @inbounds for t in 1:ntri
         push!(faces, _sort3(Int32(tris[1,t]), Int32(tris[2,t]), Int32(tris[3,t])))
     end
-    @inbounds for t in axes(tets, 2)
+    @inbounds for t in 1:ntet
         v1=Int32(tets[1,t]); v2=Int32(tets[2,t]); v3=Int32(tets[3,t]); v4=Int32(tets[4,t])
         push!(faces, _sort3(v2,v3,v4)); push!(faces, _sort3(v1,v3,v4))
         push!(faces, _sort3(v1,v2,v4)); push!(faces, _sort3(v1,v2,v3))
@@ -353,6 +481,7 @@ triangulated 3-ball this is `1`; for a triangulated 2-sphere (tris only, closed)
 it is `2`.
 """
 function euler_characteristic(m::Mesh)
+    _assert_mesh_structure(m,"euler_characteristic")
     # V counts nodes referenced by the triangle+tet complex (isolated coords
     # excluded). Segment nodes are deliberately NOT counted: E/F/T span only
     # tris+tets, so adding segment vertices to V without their 1-cells to E would
@@ -369,6 +498,7 @@ end
 
 """Euler characteristic of the extracted boundary surface (`V − E + F`)."""
 function boundary_euler(m::Mesh)
+    _assert_mesh_structure(m,"boundary_euler")
     bf, _ = boundary_faces(m.tets)
     isempty(bf) && return 0
     verts = Set{Int32}()
@@ -389,6 +519,8 @@ sphere (interior vertex) or disk (boundary vertex); this rejects cells that touc
 only at an edge/vertex and other pinched complexes that a face-count test misses.
 """
 function is_closed_manifold(m::Mesh)
+    messages=String[]
+    _mesh_structure_messages!(messages,m) || return false
     ok, _ = _tet_topology(m.tets)
     return ok
 end
@@ -597,6 +729,11 @@ end
 excluded, matching [`euler_characteristic`](@ref)). Since `mesh_crc` embeds this
 box, an unreferenced far-away node must not be allowed to enlarge it."""
 function bounding_box(m::Mesh)
+    _assert_mesh_structure(m,"bounding_box")
+    return _bounding_box(m)
+end
+
+function _bounding_box(m::Mesh)
     nnodes(m) == 0 && return ((0.0,0.0,0.0), (0.0,0.0,0.0))
     used = falses(nnodes(m))
     @inbounds for t in axes(m.segs, 2), i in 1:2; used[m.segs[i,t]] = true; end
@@ -615,9 +752,24 @@ function bounding_box(m::Mesh)
     return lo, hi
 end
 
+"""
+    MeshDiagnostic(ok, messages)
+
+Owned result from mesh validation. `ok` is true exactly when `messages` is
+empty; a failing diagnostic requires at least one nonempty message.
+"""
 struct MeshDiagnostic
     ok::Bool
     messages::Vector{String}
+
+    function MeshDiagnostic(ok::Bool,messages::AbstractVector{<:AbstractString})
+        owned=String.(messages)
+        all(message->!isempty(strip(message)),owned) || throw(ArgumentError(
+            "MeshDiagnostic: messages must be nonempty"))
+        ok==isempty(owned) || throw(ArgumentError(
+            "MeshDiagnostic: ok must be true exactly when messages is empty"))
+        new(ok,owned)
+    end
 end
 Base.show(io::IO, d::MeshDiagnostic) =
     print(io, "MeshDiagnostic(ok=$(d.ok)" * (isempty(d.messages) ? "" : ", " * join(d.messages, "; ")) * ")")
@@ -639,12 +791,7 @@ global tet count so "no empty volumes" can never be vacuously true.
 function validate(m::Mesh; require_positive_tets::Bool=true,
                   require_manifold_tris::Bool=ntets(m)==0)
     msgs = String[]
-    # finite coordinates
-    @inbounds for i in 1:nnodes(m)
-        p = node(m, i)
-        (isfinite(p[1]) && isfinite(p[2]) && isfinite(p[3])) ||
-            (push!(msgs, "node $i has non-finite coordinate"); break)
-    end
+    _mesh_structure_messages!(msgs,m) || return MeshDiagnostic(false,msgs)
     # Segments are cells too: repeated endpoints, geometrically coincident
     # endpoints, overflowed lengths, and duplicate undirected cells are invalid.
     ndegseg = 0; nbadseg = 0
@@ -711,6 +858,52 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
     return MeshDiagnostic(isempty(msgs), msgs)
 end
 
+function _mesh_structure_messages!(messages::Vector{String},m::Mesh)
+    valid=true
+    @inbounds for i in 1:nnodes(m),dimension in 1:3
+        if !isfinite(m.coords[dimension,i])
+            push!(messages,"node $i has a non-finite coordinate")
+            valid=false
+            break
+        end
+    end
+    for (what,cells,tags) in (("segment",m.segs,m.seg_tag),
+                              ("triangle",m.tris,m.tri_tag),
+                              ("tet",m.tets,m.tet_tag))
+        if length(tags)!=size(cells,2)
+            push!(messages,"$what tag length $(length(tags)) does not match cell count $(size(cells,2))")
+            valid=false
+        end
+        @inbounds for (i,tag) in pairs(tags)
+            if tag<0
+                push!(messages,"$what tag $i is negative ($tag)")
+                valid=false
+                break
+            end
+        end
+        bad=false
+        @inbounds for cell in axes(cells,2)
+            for local_index in axes(cells,1)
+                value=cells[local_index,cell]
+                if !(1<=value<=nnodes(m))
+                    push!(messages,"$what $cell references node $value outside 1:$(nnodes(m))")
+                    valid=false;bad=true
+                    break
+                end
+            end
+            bad && break
+        end
+    end
+    return valid
+end
+
+function _assert_mesh_structure(m::Mesh,caller::AbstractString)
+    messages=String[]
+    _mesh_structure_messages!(messages,m) || throw(ArgumentError(
+        "$caller: invalid mutable mesh structure — "*join(messages,"; ")))
+    return nothing
+end
+
 """
     mesh_crc(m) -> NamedTuple
 
@@ -721,7 +914,8 @@ Deterministic regression checksum (DEVELOPMENT.md "Mesh-CRC checksum"):
 order — so it tracks topology, not incidental labelling).
 """
 function mesh_crc(m::Mesh)
-    lo, hi = bounding_box(m)
+    _assert_mesh_structure(m,"mesh_crc")
+    lo,hi=_bounding_box(m)
     # tet quality aggregates
     dmin = Inf; dsum = 0.0; remin = Inf; resum = 0.0; nt = ntets(m)
     @inbounds for t in 1:nt
