@@ -27,7 +27,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
-| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -93,6 +93,26 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening and separating the
+scalar post-view interface:
+
+- `View` now has one validating construction path for mesh-backed or direct
+  `3 × n` coordinates, checks Float64 conversion and finiteness, and owns copies
+  of both coordinates and samples. This closes the former exact-field-type
+  constructor bypass and prevents caller-array mutation from changing a view.
+- `view_value` now rejects Boolean, platform-unrepresentable, and out-of-range
+  indices. Plugin registration is synchronized, returns a canonical `String`,
+  and documents replacement semantics; plugin lookup releases the registry lock
+  before executing user code.
+- Post tests now live independently in `test/interfaces/post_test.jl`. The
+  focused suite passed 26/26 assertions under Julia 1.12.7 and Julia 1.11.9; its
+  deterministic scalar-view SHA-256 is
+  `56e766682618b76029640b47caa692205eb967a97438ee383eb057fc47cd96cd`.
+- The bounds-checked package gate passed 163,693/163,693 assertions in 10m39.7s,
+  and the aggregate bounds-checked validation exited 0 against Gmsh 4.15.2.
+  Public `Post` and top-level documentation scans returned no missing names, and
+  recursive ambiguity detection returned zero.
 
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening public
 tetrahedralization and Steiner insertion:
