@@ -18,7 +18,7 @@ checksums. Meshing kernels keep their own growable working structures and emit a
 
 Everything here is verified against independent oracles (analytic areas/volumes,
 Euler characteristic of known complexes, hand-computed regular-tetrahedron
-quality) in `test/meshtypes_test.jl`.
+quality) in `test/core/meshtypes_test.jl`.
 """
 module MeshTypes
 

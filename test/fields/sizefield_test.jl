@@ -294,7 +294,8 @@ end
     end
 
     @testset ".geo background-field graph" begin
-        gp=read_geo_params(joinpath(@__DIR__,"fixtures","enclosure_coax_junction.geo"))
+        gp=read_geo_params(joinpath(
+            @__DIR__,"..","fixtures","enclosure_coax_junction.geo"))
         surface(x)=Mesh(Float64[x x+0.001 x; 0 0.001 0.001; 0 0 0];
                         tris=reshape(Int32[1,2,3],3,1))
         line=Mesh(Float64[0.1708 0.1716;0.1605 0.1605;0.15 0.15];
@@ -1088,7 +1089,7 @@ end
         flat_auto=AutomaticMeshSizeField(flat_auto_mesh)
         @test all(==(0.05),flat_auto.h)
 
-        helper=joinpath(@__DIR__,"tmp","extproc_size.jl")
+        helper=joinpath(@__DIR__,"..","tmp","extproc_size.jl")
         mkpath(dirname(helper))
         write(helper,"""
             while true
@@ -1122,7 +1123,7 @@ end
         @test isnothing(close(nested))
         @test !isopen(nested_leaf) && !isopen(nested)
         @test_throws ArgumentError ExternalProcessField("")
-        scalar_helper=joinpath(@__DIR__,"tmp","extproc_scalar.jl")
+        scalar_helper=joinpath(@__DIR__,"..","tmp","extproc_scalar.jl")
         write(scalar_helper,"""
             while true
                 eof(stdin) && break

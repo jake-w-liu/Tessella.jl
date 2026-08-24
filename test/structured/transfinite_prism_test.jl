@@ -22,7 +22,7 @@ end
                  (i == 0 ? 1 : 2 + (i - 1) * (ns + 1) + j))
 end
 
-function _canonical_tets(mesh)
+function _prism_canonical_tets(mesh)
     result = NTuple{4,Int32}[]
     for tet in axes(mesh.tets, 2)
         values = sort(mesh.tets[:, tet])
@@ -31,7 +31,7 @@ function _canonical_tets(mesh)
     sort!(result)
 end
 
-function _canonical_triangles(matrix)
+function _prism_canonical_triangles(matrix)
     result = NTuple{3,Int32}[]
     for triangle in axes(matrix, 2)
         values = sort(matrix[:, triangle])
@@ -40,7 +40,7 @@ function _canonical_triangles(matrix)
     sort!(result)
 end
 
-function _mesh_volume(mesh)
+function _prism_mesh_volume(mesh)
     return sum(tet_volume(node(mesh, mesh.tets[1, tet]),
                           node(mesh, mesh.tets[2, tet]),
                           node(mesh, mesh.tets[3, tet]),
@@ -48,7 +48,7 @@ function _mesh_volume(mesh)
                for tet in axes(mesh.tets, 2); init=0.0)
 end
 
-@inline function _lerp3(a, b, t)
+@inline function _prism_lerp3(a, b, t)
     return ((1 - t) * a[1] + t * b[1],
             (1 - t) * a[2] + t * b[2],
             (1 - t) * a[3] + t * b[3])
@@ -96,7 +96,7 @@ end
 
         boundary, maximum_incidence = boundary_faces(mesh.tets)
         @test maximum_incidence == 2
-        @test sort!(boundary) == _canonical_triangles(mesh.tris)
+        @test sort!(boundary) == _prism_canonical_triangles(mesh.tris)
         face_counts = (8, 12, 8, 9, 9)
         opposite = (corners[3], corners[1], corners[2], corners[4], corners[1])
         triangle = 0
@@ -111,7 +111,7 @@ end
         @test mesh_crc(mesh).bbox == ((0.0, 0.0, 0.0), (3.0, 2.0, 1.0))
         @test mesh_crc(mesh).sha ==
               "a16de779890f62f8a09d928cbef67a6f13b09c6765a7d91ce8e86de78c14db6e"
-        @test _mesh_volume(mesh) == 3.0
+        @test _prism_mesh_volume(mesh) == 3.0
         @test mesh_crc(mesh) == mesh_crc(mesh_transfinite_prism(
             corners, (2, 3, 2); volume_tag=21,
             face_tags=(11, 12, 13, 14, 15)))
@@ -124,7 +124,7 @@ end
                           node(minimal, minimal.tets[3, tet]),
                           node(minimal, minimal.tets[4, tet])) == -1
                   for tet in axes(minimal.tets, 2))
-        @test _canonical_tets(minimal) == sort!(NTuple{4,Int32}[
+        @test _prism_canonical_tets(minimal) == sort!(NTuple{4,Int32}[
             (1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6)])
     end
 
@@ -149,18 +149,20 @@ end
         radial = 2 / nr
         opposite = 1 / ns
         axial = 1 / nw
-        lower = _lerp3(corners[1], _lerp3(corners[2], corners[3], opposite),
+        lower = _prism_lerp3(
+            corners[1], _prism_lerp3(corners[2], corners[3], opposite),
                        radial)
-        upper = _lerp3(corners[4], _lerp3(corners[5], corners[6], opposite),
+        upper = _prism_lerp3(
+            corners[4], _prism_lerp3(corners[5], corners[6], opposite),
                        radial)
-        expected = _lerp3(lower, upper, axial)
+        expected = _prism_lerp3(lower, upper, axial)
         actual = node(mesh, _prism_node(nr, ns, 2, 1, 1))
         @test all(isapprox(actual[dimension], expected[dimension];
                            atol=32eps(Float64), rtol=32eps(Float64))
                   for dimension in 1:3)
         expected_volume = 3tet_volume(corners[1], corners[2],
                                       corners[3], corners[4])
-        @test _mesh_volume(mesh) ≈ expected_volume rtol=512eps(Float64)
+        @test _prism_mesh_volume(mesh) ≈ expected_volume rtol=512eps(Float64)
 
         cancellation = _affine_prism_corners(
             (0.0, 0.0, 0.0), (1.0, 1.0, 1.0),

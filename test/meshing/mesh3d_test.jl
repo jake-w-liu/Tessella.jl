@@ -275,7 +275,8 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         # three main volumes at the exact fixture dimensions, as ONE conforming partition
         # (tetrahedralize_conforming_exact — robust to the thin-pin cosphericity). This is
         # the geometry gmsh 4.13/4.15 leave empty.
-        geo = joinpath(@__DIR__, "fixtures", "enclosure_coax_junction.geo")
+        geo = joinpath(
+            @__DIR__, "..", "fixtures", "enclosure_coax_junction.geo")
         boxes = Dict{String,NTuple{6,Float64}}(); cyls = Dict{String,NTuple{7,Float64}}()
         for ln in eachline(geo)
             m = match(r"(\w+)\s*=\s*newv;\s*Box\(\w+\)\s*=\s*\{([^}]+)\}", ln)

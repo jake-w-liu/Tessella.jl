@@ -5,7 +5,8 @@ using Tessella.MeshTypes: boundary_faces, mesh_crc, nnodes, node, ntris, ntets,
 using Tessella.Predicates: orient3
 
 if !isdefined(Tessella, :TransfiniteVolume)
-    Base.include(Tessella, joinpath(@__DIR__, "..", "src", "TransfiniteVolume.jl"))
+    Base.include(Tessella, joinpath(
+        @__DIR__, "..", "..", "src", "structured", "TransfiniteVolume.jl"))
 end
 using Tessella.TransfiniteVolume: mesh_transfinite_volume
 
@@ -24,7 +25,7 @@ function _affine_corners(origin=(0.0, 0.0, 0.0),
             add(origin, v, w)]
 end
 
-function _canonical_tets(mesh)
+function _volume_canonical_tets(mesh)
     result = NTuple{4,Int32}[]
     for tet in axes(mesh.tets, 2)
         values = sort(mesh.tets[:, tet])
@@ -33,7 +34,7 @@ function _canonical_tets(mesh)
     sort!(result)
 end
 
-function _canonical_triangles(matrix)
+function _volume_canonical_triangles(matrix)
     result = NTuple{3,Int32}[]
     for triangle in axes(matrix, 2)
         values = sort(matrix[:, triangle])
@@ -42,7 +43,7 @@ function _canonical_triangles(matrix)
     sort!(result)
 end
 
-function _mesh_volume(mesh)
+function _transfinite_mesh_volume(mesh)
     sum(tet_volume(node(mesh, mesh.tets[1, tet]),
                    node(mesh, mesh.tets[2, tet]),
                    node(mesh, mesh.tets[3, tet]),
@@ -85,7 +86,7 @@ end
         @test count(==(Int32(16)), mesh.tri_tag) == 8
         boundary, maximum_incidence = boundary_faces(mesh.tets)
         @test maximum_incidence == 2
-        @test sort!(boundary) == _canonical_triangles(mesh.tris)
+        @test sort!(boundary) == _volume_canonical_triangles(mesh.tris)
         center = ntuple(d -> sum(point[d] for point in corners) / 8, 3)
         @test all(orient3(node(mesh, mesh.tris[1, triangle]),
                           node(mesh, mesh.tris[2, triangle]),
@@ -99,7 +100,7 @@ end
             face_tags=(11, 12, 13, 14, 15, 16)))
 
         one = mesh_transfinite_volume(_affine_corners(), (1, 1, 1))
-        @test _canonical_tets(one) == sort!(NTuple{4,Int32}[
+        @test _volume_canonical_tets(one) == sort!(NTuple{4,Int32}[
             (1, 2, 3, 5), (2, 3, 5, 6), (3, 5, 6, 7),
             (2, 3, 4, 6), (3, 4, 6, 7), (4, 6, 7, 8)])
     end
@@ -126,7 +127,7 @@ end
         @test all(isapprox(node(mesh, node_id(2, 1, 1))[d], expected[d];
                            atol=32eps(Float64), rtol=32eps(Float64)) for d in 1:3)
         expected_volume = 6tet_volume(corners[1], corners[2], corners[4], corners[5])
-        @test _mesh_volume(mesh) ≈ expected_volume rtol=256eps(Float64)
+        @test _transfinite_mesh_volume(mesh) ≈ expected_volume rtol=256eps(Float64)
 
         # Exact dyadic affine identities remain valid even when independent
         # normalization rounds a derived corner one ULP away from its sum.

@@ -9,7 +9,7 @@
 # Completeness : the SoS variants never return 0, agree with the base predicate
 #                off-degeneracy, are deterministic and antisymmetric.
 #
-# Mutation sensitivity: flip any sign or swap any index in src/Predicates.jl and
+# Mutation sensitivity: flip any sign or swap any index in src/core/Predicates.jl and
 # the oracle cross-check below fails on a degenerate config.
 
 using Test

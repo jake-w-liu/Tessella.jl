@@ -4,7 +4,8 @@
 # conforming tet mesh. The builders live in validation/hfss_cases/ (also a standalone
 # runner); this asserts the whole set stays green.
 
-include(joinpath(@__DIR__, "..", "validation", "hfss_cases", "hfss_case_meshes.jl"))
+include(joinpath(
+    @__DIR__, "..", "..", "validation", "hfss_cases", "hfss_case_meshes.jl"))
 
 @testset "HFSS 22-case native meshing (no gmsh/OCC)" begin
     # box-assembly cases have EXACT analytic volumes; check representatives hard.

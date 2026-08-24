@@ -5,7 +5,8 @@ using Tessella.MeshTypes: triangle_area
 
 if !isdefined(Tessella, :TransfiniteQuad)
     Base.include(Tessella,
-                 joinpath(@__DIR__, "..", "src", "TransfiniteQuad.jl"))
+                 joinpath(@__DIR__, "..", "..", "src", "structured",
+                          "TransfiniteQuad.jl"))
 end
 using Tessella.TransfiniteQuad: mesh_transfinite_quad_patch
 
@@ -57,7 +58,7 @@ function _quad_area(mesh, block)
     return area
 end
 
-function _polygon_area(sides)
+function _quad_polygon_area(sides)
     ring = NTuple{3,Float64}[]
     for side in sides
         append!(ring, @view side[1:end-1])
@@ -71,7 +72,7 @@ function _polygon_area(sides)
     return abs(area) / 2
 end
 
-function _edge_set(matrix)
+function _quad_edge_set(matrix)
     result = Set{NTuple{2,Int32}}()
     for index in axes(matrix, 2)
         first = matrix[1, index]
@@ -141,7 +142,7 @@ end
             @test quads.tags == fill(Int32(21), 6)
             boundary, max_incidence = _quad_boundary_edges(quads.nodes)
             @test max_incidence == 2
-            @test boundary == _edge_set(lines.nodes)
+            @test boundary == _quad_edge_set(lines.nodes)
             @test _quad_area(mesh, quads) == 6.0
             @test mixed_crc(mesh) == mixed_crc(mesh_transfinite_quad_patch(
                 sides...; arrangement=arrangement, face_tag=21,
@@ -168,7 +169,7 @@ end
         @test Tessella.Elements.validate(mesh).ok
         @test (size(mesh.coords, 2), size(mesh.blocks[1].nodes, 2),
                size(mesh.blocks[2].nodes, 2)) == (20, 14, 12)
-        @test _quad_area(mesh, mesh.blocks[2]) ≈ _polygon_area(sides) atol=128eps(Float64)
+        @test _quad_area(mesh, mesh.blocks[2]) ≈ _quad_polygon_area(sides) atol=128eps(Float64)
 
         width = 5
         for i in 0:4

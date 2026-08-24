@@ -328,7 +328,8 @@ end
     end
 
     @testset "read_geo_params on the enclosure fixture" begin
-        gp = read_geo_params(joinpath(@__DIR__, "fixtures", "enclosure_coax_junction.geo"))
+        gp = read_geo_params(joinpath(
+            @__DIR__, "..", "fixtures", "enclosure_coax_junction.geo"))
         @test gp.mesh_size_min ≈ 0.00026669999999999933 rtol=1e-9
         @test gp.mesh_size_max == 0.012
         @test gp.mesh_size_factor == 1.0

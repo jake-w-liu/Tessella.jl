@@ -18,7 +18,7 @@ Scheme (Shewchuk-style staged precision, simplified to two stages):
 
 The bare predicates (`orient2`, `orient3`, `incircle`, `insphere`) return
 `-1`, `0`, or `+1` and are checked against an *independent* exact-rational oracle
-on an exhaustive degenerate set (see `test/predicates_test.jl`).
+on an exhaustive degenerate set (see `test/core/predicates_test.jl`).
 
 On top of them, the `*_sos` variants take vertex **indices** and apply
 Simulation of Simplicity (Edelsbrunner–Mücke): when the exact determinant is
@@ -643,7 +643,7 @@ end
 # representability. The exact kernel places Steiner points at rational positions that
 # are NOT Float64-representable (e.g. a crease midpoint of two float vertices), so it
 # needs predicates that consume exact `Rational{BigInt}` coordinates directly. These
-# evaluate the SAME homogeneous-determinant forms as `test/oracles.jl` (so on dyadic
+# evaluate the SAME homogeneous-determinant forms as `test/core/oracles.jl` (so on dyadic
 # input they agree with orient2/3/incircle/insphere_sos), and on a zero (degenerate)
 # determinant fall through to the SHARED +ε SoS `_orient_nd_sos_exact` — identical tie-
 # break scheme as the Float64 predicates, keeping the two kernels mutually consistent.

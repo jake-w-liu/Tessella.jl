@@ -123,9 +123,13 @@ rules.
 
 ## Repository map
 
-- [`src/`](src/) — package implementation
-- [`test/`](test/) — package regression and independent-oracle tests
-- [`validation/`](validation/) — external-tool and solver-facing validation fixtures
+- [`src/`](src/) — package entry point plus domain folders: `core`, `fields`,
+  `geometry`, `meshing`, `structured`, and `interfaces`
+- [`test/`](test/) — package runner plus matching `core`, `fields`, `geometry`,
+  `meshing`, `structured`, and `interfaces` suites, with end-to-end cases in
+  `integration`
+- [`validation/`](validation/) — workflow-specific external-tool and solver-facing
+  fixtures, with shared harness code in `support`
 - [`PLAN.md`](PLAN.md) — architecture and scope boundary
 - [`STATUS.md`](STATUS.md) — current package verification record
 - [`ASCENT.md`](ASCENT.md) — external solver integration and HFSS campaign
