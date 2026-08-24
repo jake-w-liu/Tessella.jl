@@ -11,7 +11,7 @@ using Tessella
     include("recombine_test.jl")    # deterministic triangle-to-quad recombination
     include("refine_test.jl")       # deterministic one-level uniform simplex refinement
     include("transfinite_test.jl")  # validated four-sided planar structured patches
-    include("transfinite_curve_test.jl") # straight-curve Progression/Bump/Beta laws
+    include("transfinite_curve_test.jl") # straight Progression/Bump/Beta/HWall laws
     include("transfinite_triangle_test.jl") # specific three-sided structured patches
     include("transfinite_quad_test.jl") # recombined four-sided quadrangle patches
     include("transfinite_volume_test.jl") # affine six-face structured volumes

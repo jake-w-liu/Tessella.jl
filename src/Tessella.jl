@@ -69,7 +69,7 @@ using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimensio
 using .Recombine: recombine_triangles
 using .Refine: refine_uniform
 using .Transfinite: mesh_transfinite_patch
-using .TransfiniteCurve: transfinite_curve_parameters
+using .TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using .TransfiniteTriangle: mesh_transfinite_triangle
 using .TransfiniteQuad: mesh_transfinite_quad_patch
 using .TransfiniteVolume: mesh_transfinite_volume
@@ -120,7 +120,7 @@ export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_ord
 export recombine_triangles
 export refine_uniform
 export mesh_transfinite_patch
-export transfinite_curve_parameters
+export transfinite_curve_parameters, transfinite_curve_hwall
 export mesh_transfinite_triangle
 export mesh_transfinite_quad_patch
 export mesh_transfinite_volume

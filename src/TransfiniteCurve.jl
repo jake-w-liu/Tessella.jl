@@ -2,44 +2,48 @@
     TransfiniteCurve
 
 Validated normalized straight-curve node parameters for Gmsh 4.15.2's
-`Progression`, `Bump`, and `Beta` transfinite laws.
+`Progression`, `Bump`, and `Beta` transfinite laws, plus a wall-height
+(`HWall`) geometric law that solves the progression ratio from a prescribed
+first-segment height and the curve length.
 
 This module implements the closed-form distributions on an affine line. It does
 not claim bit-for-bit reproduction of Gmsh's adaptive trapezoidal integration,
-nor parity for curved CAD parameterizations, `FlexibleTransfinite`, `*HWall`,
-size-map, periodic, or boundary-layer curves.
+nor parity for curved CAD parameterizations, `FlexibleTransfinite`,
+`Bump_HWall`, `Beta_HWall`, size-map, periodic, or boundary-layer curves.
 """
 module TransfiniteCurve
 
-export transfinite_curve_parameters
+export transfinite_curve_parameters, transfinite_curve_hwall
 
 const _DEFAULT_MAX_NODES = 10_000_000
 const _INT32_MAX = Int(typemax(Int32))
 const _LOG_TWO = log(2.0)
 
-function _limit(value, name::AbstractString)
+function _limit(value, name::AbstractString,
+                caller::AbstractString="transfinite_curve_parameters")
     value isa Integer || throw(ArgumentError(
-        "transfinite_curve_parameters: $name must be an integer"))
+        "$caller: $name must be an integer"))
     value isa Bool && throw(ArgumentError(
-        "transfinite_curve_parameters: $name must not be Bool"))
+        "$caller: $name must not be Bool"))
     value >= 0 || throw(ArgumentError(
-        "transfinite_curve_parameters: $name must be non-negative"))
+        "$caller: $name must be non-negative"))
     value <= _INT32_MAX || throw(ArgumentError(
-        "transfinite_curve_parameters: $name exceeds the Int32 node limit"))
+        "$caller: $name exceeds the Int32 node limit"))
     return Int(value)
 end
 
-function _node_count(value, maximum::Int)
+function _node_count(value, maximum::Int,
+                     caller::AbstractString="transfinite_curve_parameters")
     value isa Integer || throw(ArgumentError(
-        "transfinite_curve_parameters: num_nodes must be an integer"))
+        "$caller: num_nodes must be an integer"))
     value isa Bool && throw(ArgumentError(
-        "transfinite_curve_parameters: num_nodes must not be Bool"))
+        "$caller: num_nodes must not be Bool"))
     value >= 2 || throw(ArgumentError(
-        "transfinite_curve_parameters: num_nodes must be at least 2"))
+        "$caller: num_nodes must be at least 2"))
     value <= _INT32_MAX || throw(ArgumentError(
-        "transfinite_curve_parameters: num_nodes exceeds the Int32 node limit"))
+        "$caller: num_nodes exceeds the Int32 node limit"))
     value <= maximum || throw(ArgumentError(
-        "transfinite_curve_parameters: requested $value nodes exceeds max_nodes=$maximum"))
+        "$caller: requested $value nodes exceeds max_nodes=$maximum"))
     return Int(value)
 end
 
@@ -83,10 +87,20 @@ end
 end
 
 function _fill_progression!(parameters::Vector{Float64}, coefficient::Float64)
-    segments = length(parameters) - 1
     magnitude = abs(coefficient)
     ratio = coefficient > 0.0 ? magnitude : inv(magnitude)
-    log_ratio = log(ratio)
+    return _fill_progression_log!(parameters, log(ratio))
+end
+
+function _fill_progression_log!(parameters::Vector{Float64},
+                                log_ratio::Float64)
+    segments = length(parameters) - 1
+    if log_ratio == 0.0
+        @inbounds for k in 1:segments-1
+            parameters[k + 1] = k / segments
+        end
+        return parameters
+    end
     @inbounds for k in 1:segments-1
         parameters[k + 1] = _progression_parameter(k, segments, log_ratio)
     end
@@ -175,22 +189,23 @@ function _reverse_orientation!(parameters::Vector{Float64})
 end
 
 function _postcondition(parameters::Vector{Float64}, mesh_type::Symbol,
-                        coefficient::Float64)
+                        coefficient::Float64,
+                        caller::AbstractString="transfinite_curve_parameters")
     previous = parameters[1]
     previous == 0.0 || throw(ErrorException(
-        "transfinite_curve_parameters: internal first-endpoint invariant failed"))
+        "$caller: internal first-endpoint invariant failed"))
     @inbounds for index in 2:length(parameters)
         current = parameters[index]
         if !(isfinite(current) && previous < current <= 1.0)
             throw(ArgumentError(
-                "transfinite_curve_parameters: $mesh_type coefficient $coefficient " *
+                "$caller: $mesh_type coefficient $coefficient " *
                 "with $(length(parameters)) nodes is not strictly representable in Float64 " *
                 "(node $index is $current after $previous)"))
         end
         previous = current
     end
     previous == 1.0 || throw(ErrorException(
-        "transfinite_curve_parameters: internal last-endpoint invariant failed"))
+        "$caller: internal last-endpoint invariant failed"))
     return parameters
 end
 
@@ -246,6 +261,140 @@ function transfinite_curve_parameters(num_nodes;
         _fill_beta!(parameters, coef)
     end
     return _postcondition(parameters, law, coef)
+end
+
+# log(Σ_{k=0}^{m-1} exp(k*s)), rewritten with negative exponentials so
+# neither the geometric sum nor its largest term needs to be represented.
+@inline function _log_geometric_sum(segments::Int, s::Float64)
+    s == 0.0 && return log(Float64(segments))
+    return (segments - 1) * s +
+           log(-expm1(-segments * s)) - log(-expm1(-s))
+end
+
+# Solve log(Σ_{k=0}^{m-1} exp(k*s)) = log_target for s > 0. The upper
+# bound follows from Σ exp(k*s) ≥ exp((m-1)*s).
+function _hwall_log_ratio(segments::Int, log_target::Float64)
+    log_target > log(Float64(segments)) || return 0.0
+    lo = 0.0
+    hi = log_target / (segments - 1)
+    isfinite(hi) && hi > 0.0 || throw(ArgumentError(
+        "transfinite_curve_hwall: wall ratio is not representable in Float64"))
+    while _log_geometric_sum(segments, hi) < log_target
+        next = 2.0hi
+        isfinite(next) || throw(ArgumentError(
+            "transfinite_curve_hwall: wall ratio is not representable in Float64"))
+        hi = next
+    end
+    for _ in 1:256
+        mid = 0.5 * (lo + hi)
+        (mid == lo || mid == hi) && break
+        if _log_geometric_sum(segments, mid) < log_target
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return 0.5 * (lo + hi)
+end
+
+"""
+    transfinite_curve_hwall(num_nodes; wall_height, curve_length,
+                            orientation=:start, max_nodes=10_000_000)
+        -> Vector{Float64}
+
+Return the `num_nodes` monotonically increasing parameters in `[0, 1]` of a
+geometric boundary-layer distribution whose wall segment measures
+`wall_height/curve_length` of the affine curve and grows so the segments sum to
+one. This is the transfinite counterpart of Gmsh's `Progression_HWall` law: the
+progression ratio `r ≥ 1` is solved from
+`wall_height·Σ_{k=0}^{m-1} r^k == curve_length` with `m = num_nodes - 1`
+segments, then applied through the same closed-form `Progression` path as
+[`transfinite_curve_parameters`](@ref).
+
+`orientation=:start` anchors the wall height at parameter zero; `:end` mirrors
+the distribution. Feasibility requires `wall_height ≤ curve_length/m`; equality
+gives the uniform distribution. With two nodes, the only feasible wall height
+equals the curve length. The solved identity is checked to a small multiple of
+Float64 roundoff, and distributions that collapse adjacent parameters are rejected.
+Unlike Gmsh 4.15.2's bounded ratio inversion, this function solves every feasible
+Float64-representable ratio instead of silently replacing large ratios with a
+uniform distribution.
+"""
+function transfinite_curve_hwall(num_nodes;
+                                 wall_height=nothing, curve_length=nothing,
+                                 orientation=:start,
+                                 max_nodes=_DEFAULT_MAX_NODES)
+    caller = "transfinite_curve_hwall"
+    orientation isa Symbol || throw(ArgumentError(
+        "$caller: orientation must be :start or :end"))
+    orientation in (:start, :end) || throw(ArgumentError(
+        "$caller: orientation must be :start or :end"))
+    maximum = _limit(max_nodes, "max_nodes", caller)
+    count = _node_count(num_nodes, maximum, caller)
+
+    function positive_float(value, name)
+        value === nothing && throw(ArgumentError("$caller: $name is required"))
+        value isa Real || throw(ArgumentError("$caller: $name must be real"))
+        value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
+        converted = try
+            Float64(value)
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "$caller: $name must be Float64-representable: " *
+                sprint(showerror, err)))
+        end
+        isfinite(converted) || throw(ArgumentError(
+            "$caller: $name must be finite"))
+        converted > 0.0 || throw(ArgumentError(
+            "$caller: $name must be positive"))
+        return converted
+    end
+    hw = positive_float(wall_height, "wall_height")
+    len = positive_float(curve_length, "curve_length")
+
+    segments = count - 1
+    if segments == 1 && hw != len
+        throw(ArgumentError(
+            "$caller: wall_height must equal curve_length when num_nodes is 2"))
+    end
+    uniform_wall = len / segments
+    uniform_wall > 0.0 || throw(ArgumentError(
+        "$caller: curve_length $len divided over $segments segments is below " *
+        "Float64 resolution"))
+    if hw > uniform_wall
+        throw(ArgumentError(
+            "$caller: wall_height $hw is infeasible for curve_length $len with " *
+            "$segments segments (needs wall_height ≤ $uniform_wall)"))
+    end
+    expected_wall = hw / len
+    expected_wall > 0.0 || throw(ArgumentError(
+        "$caller: wall_height/curve_length is below Float64 resolution"))
+    log_ratio = hw == uniform_wall ?
+        0.0 : _hwall_log_ratio(segments, -log(expected_wall))
+
+    parameters = Vector{Float64}(undef, count)
+    parameters[1] = 0.0
+    parameters[end] = 1.0
+    if log_ratio == 0.0
+        @inbounds for k in 1:segments-1
+            parameters[k+1] = k / segments
+        end
+    else
+        _fill_progression_log!(parameters, log_ratio)
+    end
+    orientation === :end && _reverse_orientation!(parameters)
+    _postcondition(parameters, :progression_hwall, expected_wall, caller)
+
+    wall_parameter = orientation === :start ?
+        parameters[2] - parameters[1] : parameters[end] - parameters[end-1]
+    tolerance = max(256eps(Float64) * expected_wall, 8eps(expected_wall))
+    abs(wall_parameter - expected_wall) <= tolerance ||
+        throw(ErrorException(
+            "$caller: solved distribution's wall segment measures $wall_parameter " *
+            "but the requested wall height implies $expected_wall"))
+
+    return parameters
 end
 
 end # module TransfiniteCurve
