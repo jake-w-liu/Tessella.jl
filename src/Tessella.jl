@@ -77,7 +77,7 @@ using .TransfinitePrism: mesh_transfinite_prism
 using .TransfiniteHex: mesh_transfinite_hex
 using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!,
               add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!,
-              embed!, dilate_volume!, rotate_volume!,
+              embed!, translate_volume!, dilate_volume!, rotate_volume!,
               add_physical_group!, mesh_model_surface, mesh_model_volume
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
@@ -128,7 +128,7 @@ export mesh_transfinite_prism
 export mesh_transfinite_hex
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!, add_box!
 export add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
-export embed!, dilate_volume!, rotate_volume!
+export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d,

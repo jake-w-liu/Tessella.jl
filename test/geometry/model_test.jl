@@ -56,17 +56,37 @@ using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node, mesh
     transformed=GeoModel()
     add_box!(transformed,0,0,0,1,2,3; tag=1)
     box_before=transformed.box_extents[1]
+    @test_throws ArgumentError translate_volume!(transformed,1,(0,0))
+    @test_throws ArgumentError translate_volume!(transformed,1,(Inf,0,0))
     @test_throws ArgumentError dilate_volume!(transformed,1,(0,0),2)
     @test_throws ArgumentError dilate_volume!(transformed,1,(0,0,0),Inf)
     @test_throws ArgumentError rotate_volume!(transformed,1,(0,0),(0,0,0),π/2)
     @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0),π/2)
     @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0,0),1e300)
     @test transformed.box_extents[1]==box_before
+    @test translate_volume!(transformed,1,(2,-1,0.5))==1
+    @test transformed.box_extents[1]==(2.0,-1.0,0.5,1.0,2.0,3.0)
     oversized=GeoModel()
-    add_sphere!(oversized,0,0,0,floatmax(Float64); tag=1)
+    add_sphere!(oversized,floatmax(Float64),0,0,floatmax(Float64); tag=1)
     sphere_before=oversized.spheres[1]
+    @test_throws ArgumentError translate_volume!(oversized,1,(floatmax(Float64),0,0))
+    @test oversized.spheres[1]==sphere_before
     @test_throws ArgumentError dilate_volume!(oversized,1,(0,0,0),2)
     @test oversized.spheres[1]==sphere_before
+
+    translated_primitives=GeoModel()
+    add_cylinder!(translated_primitives,0,0,0,0,0,2,1;tag=1)
+    add_sphere!(translated_primitives,0,0,0,1;tag=2)
+    add_cone!(translated_primitives,0,0,0,0,0,2,1,0.5;tag=3)
+    for tag in 1:3
+        @test translate_volume!(translated_primitives,tag,(1,2,3))==tag
+    end
+    @test translated_primitives.cylinders[1].center==(1.0,2.0,3.0)
+    @test translated_primitives.spheres[2].center==(1.0,2.0,3.0)
+    @test translated_primitives.cones[3].center==(1.0,2.0,3.0)
+    boolean_volumes!(translated_primitives,:union,1,2;tag=4)
+    @test_throws ArgumentError translate_volume!(translated_primitives,4,(1,0,0))
+    @test translated_primitives.booleans[4]==(op=:union,a=1,b=2)
 
     embedded=GeoModel()
     add_box!(embedded,0,0,0,1,1,1; tag=1)
@@ -243,18 +263,47 @@ end
            for t in 1:ntets(shifted.mesh))
     @test SV≈1.0 atol=1e-12
 
-    two=mktemp() do path,io
+    selective=mktemp() do path,io
+        write(io, """
+            /* A block comment is lexical whitespace. */
+            Box(1) = {0, 0, 0, 1, 1, 1};
+            Box(2) = {0.5, 0, 0, 1, 1, 1};
+            BooleanUnion(3) = { Volume{1}; Delete; }{ Volume{2}; };
+            """)
+        close(io)
+        execute_geo(path)
+    end
+    @test sort!(collect(keys(selective.model.volumes)))==[2,3]
+    mktemp() do path,io
+        write(io,"""
+            Box(1) = {0, 0, 0, 1, 1, 1};
+            Box(2) = {0.5, 0, 0, 1, 1, 1};
+            BooleanUnion(3) = { Volume{1}; Remove; }{ Volume{2}; };
+            """)
+        close(io)
+        @test_throws ArgumentError execute_geo(path)
+    end
+
+    mktemp() do path,io
         write(io, "Box(1) = {0, 0, 0, 1, 1, 1};\nBox(2) = {2, 0, 0, 1, 1, 1};\n")
         close(io)
-        path
+        @test_throws ArgumentError execute_geo(path; mesh_dim=3)
+        @test_throws ArgumentError execute_geo(path; mesh_dim=false)
+        @test_throws ArgumentError execute_geo(path; mesh_dim=big(2)^100)
     end
-    @test_throws ArgumentError execute_geo(two; mesh_dim=3)
-    extrude=mktemp() do path,io
+    mktemp() do path,io
         write(io, "Extrude {0, 0, 1} { Surface{1}; };\n")
         close(io)
-        path
+        @test_throws ArgumentError execute_geo(path)
     end
-    @test_throws ArgumentError execute_geo(extrude)
+    mktemp() do path,io
+        write(io,"/* unterminated\n"); close(io)
+        @test_throws ArgumentError execute_geo(path)
+    end
+    mktemp() do path,io
+        write(io,"Point(1) = {0, 0, 0, 1}};\n"); close(io)
+        @test_throws ArgumentError execute_geo(path)
+    end
 
     hole=GeoModel()
     add_point!(hole,0,0,0; tag=1, mesh_size=0.5)
