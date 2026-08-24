@@ -88,6 +88,29 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening the public NURBS
+evaluation path:
+
+- Curve/surface degrees now reject Boolean, non-integer, negative, and
+  platform-unrepresentable values; knot vectors require a finite, sorted,
+  positive-width active interval. Control points have a strict iterable
+  three-coordinate contract.
+- `bspline_basis` now validates its complete public input contract, handles
+  degree zero, clamped endpoints, non-clamped vectors, and out-of-domain
+  parameters with an iterative Cox–de Boor evaluation instead of recursive
+  failure paths. Homogeneous evaluation normalizes globally scale-invariant
+  weights before multiplication and rejects only unrepresentable relative weights
+  or results.
+- The bounds-checked package gate passed 163,536/163,536 assertions in 20m41.4s.
+  Seven degree-zero/non-clamped test-only regressions were then added; the final
+  focused NURBS suite passed 60/60 assertions under Julia 1.12.7 and Julia 1.11.9.
+  The STEP/IGES suite passed 56/56.
+- The aggregate bounds-checked validation exited 0 against Gmsh 4.15.2-git. Its
+  IGES-128 differential reported `tessella_centre=0.5`, `gmsh_area=1`, and
+  `gmsh_tris=164`; every other required child also passed unchanged.
+- The recursive ambiguity scan returned zero, the `NURBS` module's public
+  documentation scan returned no missing names, and `git diff --check` passed.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after hardening and documenting the
 native geometry/entity model:
 
