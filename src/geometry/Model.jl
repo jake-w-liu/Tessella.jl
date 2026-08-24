@@ -41,6 +41,14 @@ mutable struct GeoModel
     next_tag::Vector{Int}
 end
 
+"""
+    GeoModel()
+
+Create an empty native geometry model. Entity tags are positive 32-bit integers;
+passing `tag=0` to an `add_*!` function allocates the next tag in that entity
+dimension. Geometry is added explicitly and can then be meshed with
+[`mesh_model_surface`](@ref) or [`mesh_model_volume`](@ref).
+"""
 GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
@@ -59,19 +67,47 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
 function _tag(value, caller, dim::Int)
     value isa Integer || throw(ArgumentError("$caller: tag must be an integer"))
     value isa Bool && throw(ArgumentError("$caller: tag must not be Bool"))
-    t=Int(value)
-    t<0 && throw(ArgumentError("$caller: tag must be non-negative"))
-    t>typemax(Int32) && throw(ArgumentError("$caller: tag exceeds Int32"))
-    return t
+    value<0 && throw(ArgumentError("$caller: tag must be non-negative"))
+    value>typemax(Int32) && throw(ArgumentError("$caller: tag exceeds Int32"))
+    return Int(value)
+end
+
+function _signed_curve_tag(value, caller)
+    value isa Integer || throw(ArgumentError("$caller: curve tag must be an integer"))
+    value isa Bool && throw(ArgumentError("$caller: curve tag must not be Bool"))
+    value==0 && throw(ArgumentError("$caller: curve tag must be nonzero"))
+    (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
+        "$caller: curve tag magnitude exceeds Int32"))
+    return Int(value)
+end
+
+function _dimension(value, caller)
+    value isa Integer || throw(ArgumentError("$caller: dimension must be an integer"))
+    value isa Bool && throw(ArgumentError("$caller: dimension must not be Bool"))
+    (0<=value<=3) || throw(ArgumentError("$caller: dimension must be in 0:3"))
+    return Int(value)
 end
 
 function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller)
     if requested==0
+        m.next_tag[dim+1]<typemax(Int32) || throw(ArgumentError(
+            "$caller: no automatic tags remain in dimension $dim"))
         m.next_tag[dim+1]+=1
         return m.next_tag[dim+1]
     end
     m.next_tag[dim+1]=max(m.next_tag[dim+1], requested)
     return requested
+end
+
+function _alloc_physical_tag(m::GeoModel, dim::Int, requested::Int, caller)
+    requested!=0 && return requested
+    current=0
+    for (d,t) in keys(m.physical)
+        d==dim && (current=max(current,t))
+    end
+    current<typemax(Int32) || throw(ArgumentError(
+        "$caller: no automatic physical tags remain in dimension $dim"))
+    return current+1
 end
 
 function _finite3(x,y,z,caller)
@@ -83,6 +119,41 @@ function _finite3(x,y,z,caller)
     return p
 end
 
+function _finite_vector3(value, caller, what)
+    values=try
+        Tuple(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $what must be an iterable with three components"))
+    end
+    length(values)==3 || throw(ArgumentError(
+        "$caller: $what must have exactly three components"))
+    return _finite3(values[1],values[2],values[3],caller)
+end
+
+function _finite_scalar(value, caller, what)
+    result=try
+        Float64(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $what must be Float64-representable"))
+    end
+    isfinite(result) || throw(ArgumentError("$caller: $what must be finite"))
+    return result
+end
+
+function _finite_result(values, caller)
+    all(isfinite,values) || throw(ArgumentError(
+        "$caller: transformed geometry must remain finite"))
+    return values
+end
+
+"""
+    add_point!(model, x, y, z; tag=0, mesh_size=1.0) -> tag
+
+Add a point with finite coordinates and a positive characteristic mesh size.
+`tag=0` requests automatic tag allocation.
+"""
 function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0)
     caller="add_point!"
     p=_finite3(x,y,z,caller)
@@ -97,6 +168,11 @@ function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0)
     return t
 end
 
+"""
+    add_line!(model, start, stop; tag=0) -> tag
+
+Add a straight curve between two distinct existing point tags.
+"""
 function add_line!(m::GeoModel, a, b; tag::Integer=0)
     caller="add_line!"
     ta=_tag(a,caller,1); tb=_tag(b,caller,1)
@@ -109,12 +185,30 @@ function add_line!(m::GeoModel, a, b; tag::Integer=0)
     return t
 end
 
+"""
+    add_curve_loop!(model, curves; tag=0) -> tag
+
+Add an ordered, closed loop of at least three existing curves. A negative curve
+tag traverses that curve in reverse orientation. Consecutive oriented curves
+must share endpoints.
+"""
 function add_curve_loop!(m::GeoModel, curves; tag::Integer=0)
     caller="add_curve_loop!"
-    ids=Int[_tag(c,caller,1) for c in curves]
+    ids=Int[_signed_curve_tag(c,caller) for c in curves]
     length(ids)>=3 || throw(ArgumentError("$caller: a loop needs at least three curves"))
     for id in ids
         haskey(m.curves,abs(id)) || throw(ArgumentError("$caller: unknown Curve[$(abs(id))]"))
+    end
+    oriented=map(ids) do id
+        a,b=m.curves[abs(id)]
+        id>0 ? (a,b) : (b,a)
+    end
+    for i in eachindex(oriented)
+        current=oriented[i]
+        following=oriented[mod1(i+1,length(oriented))]
+        current[2]==following[1] || throw(ArgumentError(
+            "$caller: oriented Curve[$(ids[i])] ends at Point[$(current[2])], " *
+            "but Curve[$(ids[mod1(i+1,length(ids))])] starts at Point[$(following[1])]"))
     end
     t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
     haskey(m.loops,t) && throw(ArgumentError("$caller: Loop[$t] already exists"))
@@ -122,6 +216,12 @@ function add_curve_loop!(m::GeoModel, curves; tag::Integer=0)
     return t
 end
 
+"""
+    add_plane_surface!(model, loops; tag=0) -> tag
+
+Add a planar surface bounded by existing curve loops. The first loop is the
+outer boundary and subsequent loops are holes.
+"""
 function add_plane_surface!(m::GeoModel, loops; tag::Integer=0)
     caller="add_plane_surface!"
     ids=Int[_tag(ℓ,caller,2) for ℓ in loops]
@@ -135,6 +235,12 @@ function add_plane_surface!(m::GeoModel, loops; tag::Integer=0)
     return t
 end
 
+"""
+    add_box!(model, x, y, z, dx, dy, dz; tag=0) -> tag
+
+Add an axis-aligned box volume with finite origin `(x,y,z)` and positive
+extents `(dx,dy,dz)`.
+"""
 function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
     caller="add_box!"
     origin=_finite3(xmin,ymin,zmin,caller)
@@ -147,15 +253,18 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
     return t
 end
 
+"""
+    add_cylinder!(model, x, y, z, dx, dy, dz, radius; tag=0) -> tag
+
+Add a cylinder whose base center is `(x,y,z)` and whose finite, nonzero axis
+vector is `(dx,dy,dz)`. `radius` must be finite and positive.
+"""
 function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
     caller="add_cylinder!"
     c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
     h=hypot(a...)
-    h>0 || throw(ArgumentError("$caller: axis must have positive length"))
-    r=try Float64(radius) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: radius must be Float64-representable"))
-    end
+    (isfinite(h) && h>0) || throw(ArgumentError("$caller: axis must have finite positive length"))
+    r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
     haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
@@ -164,13 +273,15 @@ function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
     return t
 end
 
+"""
+    add_sphere!(model, x, y, z, radius; tag=0) -> tag
+
+Add a sphere with a finite center and finite positive radius.
+"""
 function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
     caller="add_sphere!"
     c=_finite3(x,y,z,caller)
-    r=try Float64(radius) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: radius must be Float64-representable"))
-    end
+    r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
     haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
@@ -179,19 +290,19 @@ function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
     return t
 end
 
+"""
+    add_cone!(model, x, y, z, dx, dy, dz, r1, r2; tag=0) -> tag
+
+Add a cone or conical frustum along the finite, nonzero axis `(dx,dy,dz)`.
+Both radii must be finite and non-negative, and at least one must be positive.
+"""
 function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     caller="add_cone!"
     c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
     h=hypot(a...)
-    h>0 || throw(ArgumentError("$caller: axis must have positive length"))
-    ra=try Float64(r1) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: r1 must be Float64-representable"))
-    end
-    rb=try Float64(r2) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: r2 must be Float64-representable"))
-    end
+    (isfinite(h) && h>0) || throw(ArgumentError("$caller: axis must have finite positive length"))
+    ra=_finite_scalar(r1,caller,"r1")
+    rb=_finite_scalar(r2,caller,"r2")
     (ra>=0 && rb>=0 && (ra>0 || rb>0)) || throw(ArgumentError(
         "$caller: radii must be non-negative with at least one positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
@@ -201,9 +312,17 @@ function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     return t
 end
 
+"""
+    embed!(model, dim, tags, target_dim, target_tag) -> target_tag
+
+Embed existing points or curves in a surface, or existing points, curves, or
+surfaces in a volume. The operation is atomic: invalid or duplicate entries do
+not add a partial embedding.
+"""
 function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
     caller="embed!"
-    d=Int(dim); td=Int(target_dim); tt=_tag(target_tag,caller,td)
+    d=_dimension(dim,caller); td=_dimension(target_dim,caller)
+    tt=_tag(target_tag,caller,td)
     (d==0 && td==2) || (d==1 && td==2) || (d==0 && td==3) ||
     (d==1 && td==3) || (d==2 && td==3) || throw(ArgumentError(
         "$caller: supported embeddings are Point/Line In Surface and Point/Line/Surface In Volume (got dim=$d in dim=$td)"))
@@ -212,9 +331,11 @@ function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
     else
         haskey(m.volumes,tt) || throw(ArgumentError("$caller: unknown Volume[$tt]"))
     end
-    list=get!(Vector{NTuple{2,Int}}, m.embeds, (td,tt))
-    for raw in tags
-        ent=_tag(raw,caller,d)
+    ents=Int[_tag(raw,caller,d) for raw in tags]
+    length(unique(ents))==length(ents) || throw(ArgumentError(
+        "$caller: embedding contains duplicate entity tags"))
+    existing=get(m.embeds,(td,tt),NTuple{2,Int}[])
+    for ent in ents
         if d==0
             haskey(m.points,ent) || throw(ArgumentError("$caller: unknown Point[$ent]"))
         elseif d==1
@@ -222,16 +343,24 @@ function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
         else
             haskey(m.surfaces,ent) || throw(ArgumentError("$caller: unknown Surface[$ent]"))
         end
-        (d,ent) in list && throw(ArgumentError(
+        (d,ent) in existing && throw(ArgumentError(
             "$caller: entity ($d,$ent) already embedded in ($td,$tt)"))
-        push!(list, (d,ent))
     end
+    isempty(ents) || append!(get!(Vector{NTuple{2,Int}},m.embeds,(td,tt)),
+                             ((d,ent) for ent in ents))
     return tt
 end
 
 function _quarter_turns(angle, caller)
     turns=angle/(π/2)
-    k=round(Int,turns)
+    (isfinite(turns) && abs(turns)<=typemax(Int)) || throw(ArgumentError(
+        "$caller: angle is outside the supported integer-turn range"))
+    k=try
+        round(Int,turns)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: angle is outside the supported integer-turn range"))
+    end
     abs(turns-k)<=1e-9 || throw(ArgumentError(
         "$caller: angle must be an integer multiple of π/2 (got $angle)"))
     return mod(k,4)
@@ -270,54 +399,67 @@ function _dilate_point(p, center, s)
             center[3]+s*(p[3]-center[3]))
 end
 
+"""
+    dilate_volume!(model, tag, center, scale) -> tag
+
+Dilate a native primitive volume about the three-component finite `center`.
+`scale` must be finite and positive.
+"""
 function dilate_volume!(m::GeoModel, tag, center, scale)
     caller="dilate_volume!"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    c=_finite3(center[1],center[2],center[3],caller)
-    s=try Float64(scale) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: scale must be Float64-representable"))
-    end
-    (isfinite(s) && s>0) || throw(ArgumentError("$caller: scale must be positive"))
+    c=_finite_vector3(center,caller,"center")
+    s=_finite_scalar(scale,caller,"scale")
+    s>0 || throw(ArgumentError("$caller: scale must be positive"))
     if haskey(m.box_extents,t)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
         p0=_dilate_point((x0,y0,z0),c,s)
-        m.box_extents[t]=(p0[1],p0[2],p0[3],dx*s,dy*s,dz*s)
+        transformed=_finite_result((p0[1],p0[2],p0[3],dx*s,dy*s,dz*s),caller)
+        m.box_extents[t]=transformed
     elseif haskey(m.cylinders,t)
         cyl=m.cylinders[t]
-        m.cylinders[t]=(center=_dilate_point(cyl.center,c,s), axis=cyl.axis,
-                        radius=cyl.radius*s, height=cyl.height*s)
+        center=_dilate_point(cyl.center,c,s)
+        radius,height=cyl.radius*s,cyl.height*s
+        _finite_result((center...,radius,height),caller)
+        m.cylinders[t]=(center=center, axis=cyl.axis, radius=radius, height=height)
     elseif haskey(m.spheres,t)
         sph=m.spheres[t]
-        m.spheres[t]=(center=_dilate_point(sph.center,c,s), radius=sph.radius*s)
+        center=_dilate_point(sph.center,c,s); radius=sph.radius*s
+        _finite_result((center...,radius),caller)
+        m.spheres[t]=(center=center, radius=radius)
     elseif haskey(m.cones,t)
         cone=m.cones[t]
-        m.cones[t]=(center=_dilate_point(cone.center,c,s), axis=cone.axis,
-                    r1=cone.r1*s, r2=cone.r2*s, height=cone.height*s)
+        center=_dilate_point(cone.center,c,s)
+        r1,r2,height=cone.r1*s,cone.r2*s,cone.height*s
+        _finite_result((center...,r1,r2,height),caller)
+        m.cones[t]=(center=center, axis=cone.axis, r1=r1, r2=r2, height=height)
     else
         throw(ArgumentError("$caller: Volume[$t] has no dilatable native encoding"))
     end
     return t
 end
 
+"""
+    rotate_volume!(model, tag, axis, origin, angle) -> tag
+
+Rotate a native primitive volume about a coordinate-aligned `axis` through
+`origin`. The finite angle must be an integer multiple of `π/2`.
+"""
 function rotate_volume!(m::GeoModel, tag, axis, origin, angle)
     caller="rotate_volume!"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    ax=_finite3(axis[1],axis[2],axis[3],caller)
-    o=_finite3(origin[1],origin[2],origin[3],caller)
-    θ=try Float64(angle) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: angle must be Float64-representable"))
-    end
-    isfinite(θ) || throw(ArgumentError("$caller: angle must be finite"))
+    ax=_finite_vector3(axis,caller,"axis")
+    o=_finite_vector3(origin,caller,"origin")
+    θ=_finite_scalar(angle,caller,"angle")
     k=_quarter_turns(θ,caller)
     kind,sgn=_axis_kind(ax,caller)
     rot(p)=_rot90(p,o,kind,sgn,k)
     if haskey(m.box_extents,t)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
         corners=[rot((x0+ix*dx,y0+iy*dy,z0+iz*dz)) for ix in (0,1), iy in (0,1), iz in (0,1)]
+        _finite_result(Iterators.flatten(corners),caller)
         xs=sort!(unique([p[1] for p in corners]))
         ys=sort!(unique([p[2] for p in corners]))
         zs=sort!(unique([p[3] for p in corners]))
@@ -328,16 +470,22 @@ function rotate_volume!(m::GeoModel, tag, axis, origin, angle)
         cyl=m.cylinders[t]
         endp=(cyl.center[1]+cyl.axis[1],cyl.center[2]+cyl.axis[2],cyl.center[3]+cyl.axis[3])
         c2=rot(cyl.center); e2=rot(endp)
-        m.cylinders[t]=(center=c2, axis=(e2[1]-c2[1],e2[2]-c2[2],e2[3]-c2[3]),
+        axis=(e2[1]-c2[1],e2[2]-c2[2],e2[3]-c2[3])
+        _finite_result((c2...,axis...),caller)
+        m.cylinders[t]=(center=c2, axis=axis,
                         radius=cyl.radius, height=cyl.height)
     elseif haskey(m.spheres,t)
         sph=m.spheres[t]
-        m.spheres[t]=(center=rot(sph.center), radius=sph.radius)
+        center=rot(sph.center)
+        _finite_result(center,caller)
+        m.spheres[t]=(center=center, radius=sph.radius)
     elseif haskey(m.cones,t)
         cone=m.cones[t]
         endp=(cone.center[1]+cone.axis[1],cone.center[2]+cone.axis[2],cone.center[3]+cone.axis[3])
         c2=rot(cone.center); e2=rot(endp)
-        m.cones[t]=(center=c2, axis=(e2[1]-c2[1],e2[2]-c2[2],e2[3]-c2[3]),
+        axis=(e2[1]-c2[1],e2[2]-c2[2],e2[3]-c2[3])
+        _finite_result((c2...,axis...),caller)
+        m.cones[t]=(center=c2, axis=axis,
                     r1=cone.r1, r2=cone.r2, height=cone.height)
     else
         throw(ArgumentError("$caller: Volume[$t] has no rotatable native encoding"))
@@ -345,6 +493,12 @@ function rotate_volume!(m::GeoModel, tag, axis, origin, angle)
     return t
 end
 
+"""
+    boolean_volumes!(model, op, a, b; tag=0) -> tag
+
+Add a native Boolean volume combining existing volumes `a` and `b`. Supported
+operations are `:union`, `:intersection`, and `:difference` (`a \\ b`).
+"""
 function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     caller="boolean_volumes!"
     op in (:union,:intersection,:difference) || throw(ArgumentError(
@@ -359,37 +513,79 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     return t
 end
 
+function _has_entity(m::GeoModel, dim::Int, tag::Int)
+    dim==0 && return haskey(m.points,tag)
+    dim==1 && return haskey(m.curves,tag)
+    dim==2 && return haskey(m.surfaces,tag)
+    return haskey(m.volumes,tag)
+end
+
+"""
+    add_physical_group!(model, dim, tags; tag=0, name="") -> tag
+
+Group one or more existing entities of dimension `dim` under an independent
+physical tag. Automatic physical tags use a namespace separate from entity
+tags. An optional nonempty `name` is recorded with the group.
+"""
 function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, name::AbstractString="")
     caller="add_physical_group!"
-    d=_tag(dim,caller,0)
-    0<=d<=3 || throw(ArgumentError("$caller: dimension must be in 0:3"))
+    d=_dimension(dim,caller)
     ents=Int[_tag(t,caller,d) for t in tags]
     isempty(ents) && throw(ArgumentError("$caller: physical group needs at least one entity"))
-    pt=_alloc_tag!(m,d,_tag(tag,caller,d),caller)
+    length(unique(ents))==length(ents) || throw(ArgumentError(
+        "$caller: physical group contains duplicate entity tags"))
+    for ent in ents
+        _has_entity(m,d,ent) || throw(ArgumentError(
+            "$caller: unknown entity ($d,$ent)"))
+    end
+    group_name=String(name)
+    pt=_alloc_physical_tag(m,d,_tag(tag,caller,d),caller)
     haskey(m.physical,(d,pt)) && throw(ArgumentError("$caller: Physical($d,$pt) already exists"))
     m.physical[(d,pt)]=ents
-    isempty(name) || (m.physical_names[(d,pt)]=String(name))
+    isempty(group_name) || (m.physical_names[(d,pt)]=group_name)
     return pt
 end
 
+"""
+    set_physical_name!(model, dim, tag, name) -> name
+
+Replace the name of an existing physical group.
+"""
 function set_physical_name!(m::GeoModel, dim::Integer, tag::Integer, name::AbstractString)
-    key=(Int(dim),Int(tag))
+    caller="set_physical_name!"
+    d=_dimension(dim,caller); t=_tag(tag,caller,d)
+    key=(d,t)
     haskey(m.physical,key) || throw(ArgumentError("set_physical_name!: unknown Physical$key"))
     m.physical_names[key]=String(name)
     return name
 end
 
+"""
+    model_entity(model, dim, tag)
+
+Return the stored native entity representation for `(dim,tag)`, or `nothing`
+when that entity does not exist.
+"""
 function model_entity(m::GeoModel, dim::Integer, tag::Integer)
-    d,t=Int(dim),Int(tag)
+    caller="model_entity"
+    d=_dimension(dim,caller); t=_tag(tag,caller,d)
     d==0 && return get(m.points,t,nothing)
     d==1 && return get(m.curves,t,nothing)
     d==2 && return get(m.surfaces,t,nothing)
     d==3 && return get(m.volumes,t,nothing)
-    throw(ArgumentError("model_entity: dimension must be in 0:3"))
 end
 
-model_physical_tags(m::GeoModel, dim::Integer, tag::Integer) =
-    get(m.physical,(Int(dim),Int(tag)),Int[])
+"""
+    model_physical_tags(model, dim, tag) -> Vector{Int}
+
+Return a copy of the entity tags in a physical group, or an empty vector when
+the group does not exist.
+"""
+function model_physical_tags(m::GeoModel, dim::Integer, tag::Integer)
+    caller="model_physical_tags"
+    d=_dimension(dim,caller); t=_tag(tag,caller,d)
+    return copy(get(m.physical,(d,t),Int[]))
+end
 
 function _loop_points(m::GeoModel, loop_id::Int)
     curves=m.loops[loop_id]
@@ -455,6 +651,13 @@ function _mesh_covers_segment(mesh::Mesh, p, q; atol=1e-12)
     return false
 end
 
+"""
+    mesh_model_surface(model, tag; min_angle_deg=25.0) -> Mesh
+
+Mesh a native planar surface in `z=0`, including holes and embedded points or
+curves. Point characteristic lengths drive refinement. The returned triangle
+mesh is validated before it is returned.
+"""
 function mesh_model_surface(m::GeoModel, tag::Integer; min_angle_deg::Real=25.0)
     caller="mesh_model_surface"
     t=_tag(tag,caller,2)
@@ -488,7 +691,7 @@ function mesh_model_surface(m::GeoModel, tag::Integer; min_angle_deg::Real=25.0)
         end
     end
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
-    hmin=minimum(m.point_size[pid] for pid in _loop_points(m,loops[1]))
+    hmin=minimum(m.point_size[pid] for pid in keys(index))
     sizefn=(x,y)->hmin
     interior=refine!(T; min_angle_deg=min_angle_deg, size=sizefn)
     mesh=to_mesh(T; interior=interior)
@@ -530,6 +733,14 @@ function _volume_surface(m::GeoModel, t::Int)
     throw(ArgumentError("mesh_model_volume: Volume[$t] has no native solid encoding"))
 end
 
+"""
+    mesh_model_volume(model, tag) -> Mesh
+
+Mesh a native primitive or Boolean volume, recovering supported embedded
+points, curves, and unholed planar sheets. The returned tetrahedral mesh is
+validated before it is returned; unsupported solid encodings raise an explicit
+error.
+"""
 function mesh_model_volume(m::GeoModel, tag::Integer)
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)

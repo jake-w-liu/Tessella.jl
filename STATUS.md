@@ -88,6 +88,28 @@ post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-24 with Julia 1.12.7 after hardening and documenting the
+native geometry/entity model:
+
+- Signed curve-loop orientation now accepts negative curve references, verifies
+  ordered endpoint continuity and closure before mutation, and has a deterministic
+  reversed-square mesh CRC. Embeddings validate atomically; physical groups require
+  existing entities and allocate independently of entity tags; returned physical
+  memberships no longer expose mutable model storage.
+- Tags, dimensions, primitive radii/axes, transform vectors, transform results, and
+  automatic-tag exhaustion have explicit finite/range checks. Surface refinement now
+  includes hole and embedded-point characteristic lengths; the embedded-size
+  regression has deterministic SHA-256
+  `13917dad18b19e8376640a379a2f1cd338aacca5b01f66e100b5bc372fc91371`.
+- The bounds-checked package gate passed 163,499/163,499 assertions in 21m30.3s.
+  After the gate, four additional deterministic/overflow regression assertions were
+  added; the focused model suite then passed 126/126 assertions under Julia 1.12.7
+  and Julia 1.11.9. No executable production code changed after the full gate.
+- `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
+  exited 0 against Gmsh 4.15.2-git with every required differential and parity child
+  passing. The recursive ambiguity scan returned zero, the `Model` module's public
+  documentation scan returned no missing names, and `git diff --check` passed.
+
 Re-measured on 2026-08-24 with Julia 1.12.7 after the repository-wide Julia-file
 organization:
 

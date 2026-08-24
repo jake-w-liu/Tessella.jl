@@ -1,6 +1,103 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node
+using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node, mesh_crc
+
+@testset "entity model validation and tag semantics" begin
+    oriented=GeoModel()
+    for (tag,(x,y)) in enumerate(((0,0),(1,0),(1,1),(0,1)))
+        add_point!(oriented,x,y,0; tag=tag, mesh_size=0.5)
+    end
+    add_line!(oriented,1,2; tag=1)
+    add_line!(oriented,2,3; tag=2)
+    add_line!(oriented,3,4; tag=3)
+    add_line!(oriented,4,1; tag=4)
+    @test add_curve_loop!(oriented,[-4,-3,-2,-1]; tag=7)==7
+    @test Tessella.Model._loop_points(oriented,7)==[1,4,3,2]
+    @test add_plane_surface!(oriented,[7]; tag=7)==7
+    reversed_mesh=mesh_model_surface(oriented,7)
+    reversed_area=sum(abs((node(reversed_mesh,reversed_mesh.tris[2,t])[1]-
+                           node(reversed_mesh,reversed_mesh.tris[1,t])[1])*
+                          (node(reversed_mesh,reversed_mesh.tris[3,t])[2]-
+                           node(reversed_mesh,reversed_mesh.tris[1,t])[2])-
+                          (node(reversed_mesh,reversed_mesh.tris[3,t])[1]-
+                           node(reversed_mesh,reversed_mesh.tris[1,t])[1])*
+                          (node(reversed_mesh,reversed_mesh.tris[2,t])[2]-
+                           node(reversed_mesh,reversed_mesh.tris[1,t])[2]))/2
+                      for t in 1:ntris(reversed_mesh))
+    @test validate(reversed_mesh).ok
+    @test reversed_area≈1.0 atol=1e-12
+    @test mesh_crc(reversed_mesh).sha==
+          "d88d6244f73026b3450f9a4be9a0402160cf86ef41ddc047586c0f889b0955b0"
+
+    loops_before=copy(oriented.loops)
+    @test_throws ArgumentError add_curve_loop!(oriented,[1,3,2,4]; tag=8)
+    @test_throws ArgumentError add_curve_loop!(oriented,[1,2,3]; tag=8)
+    @test_throws ArgumentError add_curve_loop!(oriented,[0,2,3,4]; tag=8)
+    @test_throws ArgumentError add_curve_loop!(oriented,(true,2,3,4); tag=8)
+    @test_throws ArgumentError add_curve_loop!(oriented,[-(big(2)^100),2,3,4]; tag=8)
+    @test oriented.loops==loops_before
+
+    exhausted=GeoModel()
+    @test add_point!(exhausted,0,0,0; tag=typemax(Int32))==typemax(Int32)
+    points_before=copy(exhausted.points)
+    @test_throws ArgumentError add_point!(exhausted,1,0,0)
+    @test_throws ArgumentError add_point!(GeoModel(),0,0,0; tag=big(2)^100)
+    @test exhausted.points==points_before
+
+    invalid_primitives=GeoModel()
+    @test_throws ArgumentError add_box!(invalid_primitives,0,0,0,Inf,1,1)
+    @test_throws ArgumentError add_cylinder!(invalid_primitives,0,0,0,0,0,1,Inf)
+    @test_throws ArgumentError add_cylinder!(invalid_primitives,0,0,0,
+                                             floatmax(Float64),floatmax(Float64),0,1)
+    @test_throws ArgumentError add_sphere!(invalid_primitives,0,0,0,NaN)
+    @test_throws ArgumentError add_cone!(invalid_primitives,0,0,0,0,0,1,1,Inf)
+    @test isempty(invalid_primitives.volumes)
+
+    transformed=GeoModel()
+    add_box!(transformed,0,0,0,1,2,3; tag=1)
+    box_before=transformed.box_extents[1]
+    @test_throws ArgumentError dilate_volume!(transformed,1,(0,0),2)
+    @test_throws ArgumentError dilate_volume!(transformed,1,(0,0,0),Inf)
+    @test_throws ArgumentError rotate_volume!(transformed,1,(0,0),(0,0,0),π/2)
+    @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0),π/2)
+    @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0,0),1e300)
+    @test transformed.box_extents[1]==box_before
+    oversized=GeoModel()
+    add_sphere!(oversized,0,0,0,floatmax(Float64); tag=1)
+    sphere_before=oversized.spheres[1]
+    @test_throws ArgumentError dilate_volume!(oversized,1,(0,0,0),2)
+    @test oversized.spheres[1]==sphere_before
+
+    embedded=GeoModel()
+    add_box!(embedded,0,0,0,1,1,1; tag=1)
+    add_point!(embedded,0.2,0.2,0.2; tag=1)
+    add_point!(embedded,0.3,0.3,0.3; tag=2)
+    @test_throws ArgumentError embed!(embedded,true,[1],3,1)
+    @test_throws ArgumentError embed!(embedded,0,[1],true,1)
+    @test_throws ArgumentError embed!(embedded,0,[1,99],3,1)
+    @test !haskey(embedded.embeds,(3,1))
+    @test embed!(embedded,0,[1],3,1)==1
+    embedded_before=copy(embedded.embeds[(3,1)])
+    @test_throws ArgumentError embed!(embedded,0,[2,2],3,1)
+    @test_throws ArgumentError embed!(embedded,0,[1],3,1)
+    @test embedded.embeds[(3,1)]==embedded_before
+
+    physical=GeoModel()
+    add_box!(physical,0,0,0,1,1,1; tag=123)
+    @test add_physical_group!(physical,3,[123])==1
+    @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
+    returned=Tessella.Model.model_physical_tags(physical,3,1)
+    push!(returned,999)
+    @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
+    groups_before=copy(physical.physical)
+    @test_throws ArgumentError add_physical_group!(physical,3,[999])
+    @test_throws ArgumentError add_physical_group!(physical,3,[123,123])
+    @test_throws ArgumentError add_physical_group!(physical,true,[123])
+    @test physical.physical==groups_before
+    @test_throws ArgumentError Tessella.Model.model_entity(physical,true,123)
+    @test_throws ArgumentError Tessella.Model.model_physical_tags(physical,3,big(2)^100)
+    @test_throws ArgumentError Tessella.Model.set_physical_name!(physical,true,1,"bad")
+end
 
 @testset "entity model and .geo execution" begin
     m=GeoModel()
@@ -189,7 +286,7 @@ using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node
     add_point!(emb,1,0,0; tag=2, mesh_size=0.5)
     add_point!(emb,1,1,0; tag=3, mesh_size=0.5)
     add_point!(emb,0,1,0; tag=4, mesh_size=0.5)
-    add_point!(emb,0.5,0.5,0; tag=5, mesh_size=0.5)
+    add_point!(emb,0.5,0.5,0; tag=5, mesh_size=0.25)
     add_line!(emb,1,2; tag=1); add_line!(emb,2,3; tag=2)
     add_line!(emb,3,4; tag=3); add_line!(emb,4,1; tag=4)
     add_curve_loop!(emb,[1,2,3,4]; tag=1)
@@ -197,6 +294,8 @@ using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node
     embed!(emb,0,[5],2,1)
     emesh=mesh_model_surface(emb,1)
     @test validate(emesh).ok
+    @test mesh_crc(emesh).sha==
+          "13917dad18b19e8376640a379a2f1cd338aacca5b01f66e100b5bc372fc91371"
     @test any(i->hypot(emesh.coords[1,i]-0.5,emesh.coords[2,i]-0.5,emesh.coords[3,i])<=1e-12,
               1:nnodes(emesh))
     earea=sum(abs((node(emesh,emesh.tris[2,t])[1]-node(emesh,emesh.tris[1,t])[1])*
