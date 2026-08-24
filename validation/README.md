@@ -38,6 +38,8 @@ validation/
     differential.jl      # required Gmsh 4.15.2 recombined-hexahedron differential
   gmsh_parity/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
+    nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
+    ...                   # focused API, CAD, embedding, and boundary-layer cases
   cases/
     01_box/box.geo               # reference gmsh script (retained)
     02_cylinder/cylinder.geo
@@ -59,10 +61,13 @@ julia --project=. --check-bounds=yes validation/run_all.jl
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
 the size-field, constant-range, uniform-refinement, four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
-transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
-children; missing or wrong-version Gmsh, failed probes, and parity mismatches make
-the aggregate command fail. Mesh-case results print to the terminal and to
-`validation/REPORT.md`.
+transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
+mandatory bounds-checked children. It also runs focused box, square, cone,
+cylinder, Boolean, NURBS/IGES, embedding, and 2-D boundary-layer parity cases.
+The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
+Tessella-generated type 126/128/144 records. Missing or wrong-version Gmsh,
+failed probes, and parity mismatches make the aggregate command fail. Mesh-case
+results print to the terminal and to `validation/REPORT.md`.
 
 ## What each case checks
 
