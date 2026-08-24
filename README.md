@@ -81,13 +81,13 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - affine five-face triangular prisms using Gmsh's legacy collapsed-grid tetrahedron
   templates, with exact orientation, boundary, and represented-volume certification.
 
-P1 through P4 remain **in progress**. Current non-claims include boundary-layer element
-construction, the full Gmsh automatic-sizing pipeline, broader `PostView` data,
-including high-order/custom interpolation, multiple time steps, materially warped
-quadrangles, mixed component counts, and tensor-to-metric evaluation,
-general entity/OCC/BREP/NURBS and full `.geo` execution (including loops, macros,
-dynamic tags, option reads, dynamic/general ranges, CSG statements, and mixed
-geometry-derived physical-group RHSs),
+P1 through P4 remain **in progress**. Current non-claims include 3-D multi-wall
+boundary-layer fan topology beyond the certified closed-wall extrusion, the full
+Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
+interpolation, materially warped quadrangles, mixed component counts, and
+tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
+`.geo` execution (including loops, macros, dynamic tags, option reads,
+dynamic/general ranges, and mixed geometry-derived physical-group RHSs),
 mixed-element generation or recombination beyond first-order surface triangle pairing,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
 quasi-transfinite or holed patches, recombined three-sided patches, curved/warped or

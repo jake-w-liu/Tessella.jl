@@ -188,6 +188,12 @@ esheet_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --pro
 println("  command: ", esheet_command)
 run(esheet_command)
 
+println("\n── gmsh_parity periodic translation ──  Tessella vs Gmsh node correspondence")
+periodic_script = joinpath(HERE, "gmsh_parity", "periodic_translation.jl")
+periodic_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $periodic_script`
+println("  command: ", periodic_command)
+run(periodic_command)
+
 println("\n── gmsh_parity 2-D boundary layer ──  Tessella vs analytic/Gmsh BL quads")
 bl2d_script = joinpath(HERE, "gmsh_parity", "boundary_layer_2d.jl")
 bl2d_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $bl2d_script`
