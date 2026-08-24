@@ -47,13 +47,23 @@ const ICCERRBOUND_A  = (10.0 + 96.0  * EPS) * EPS
 const ISPERRBOUND_A  = (16.0 + 224.0 * EPS) * EPS
 
 @inline _isign(x)::Int = x > 0 ? 1 : (x < 0 ? -1 : 0)
+@inline _normal_errbound(x::Float64) = isfinite(x)&&x>=floatmin(Float64)
 
 # Points are accepted either as tuples/vectors of coordinates.  Predicates are public
 # numerical contracts, so a non-finite or non-representable coordinate is an explicit
 # input error rather than a fabricated zero sign (NaN comparisons are all false).
 @inline function _coordf(p,i::Int)
+    raw=try
+        p[i]
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("geometric predicate: point has no coordinate $i: " *
+                            sprint(showerror,err)))
+    end
+    raw isa Bool && throw(ArgumentError(
+        "geometric predicate: coordinate $i must not be Bool"))
     v=try
-        Float64(p[i])
+        Float64(raw)
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("geometric predicate: coordinate $i must be Float64-representable: " *
@@ -69,6 +79,7 @@ end
 @inline function _sos_indices(idx::Tuple{Vararg{Integer,N}},caller::AbstractString) where {N}
     out=ntuple(N) do k
         i=idx[k]
+        i isa Bool && throw(ArgumentError("$caller: indices must not be Bool"))
         (typemin(Int)<=i<=typemax(Int)) ||
             throw(ArgumentError("$caller: index $i does not fit the platform Int type"))
         Int(i)
@@ -81,8 +92,16 @@ end
 
 @inline function _ratpoint(p,d::Int,caller::AbstractString)
     ntuple(d) do k
+        raw=try
+            p[k]
+        catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("$caller: point has no coordinate $k: " *
+                                sprint(showerror,err)))
+        end
+        raw isa Bool && throw(ArgumentError("$caller: coordinate $k must not be Bool"))
         try
-            Rational{BigInt}(p[k])
+            Rational{BigInt}(raw)
         catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("$caller: coordinate $k must be an exact finite real: " *
@@ -128,10 +147,18 @@ function orient2(a, b, c)::Int
         detright >= 0.0 && return -1
         detsum = -detleft - detright
     else
-        return _isign(det)
+        if ax==cx||by==cy
+            sy=ay>cy ? 1 : (ay<cy ? -1 : 0)
+            sx=bx>cx ? 1 : (bx<cx ? -1 : 0)
+            return -sy*sx
+        end
+        # A nonzero exact product can underflow to signed zero (for example at
+        # coordinate scale 1e-300). Zero floating products therefore do not
+        # certify collinearity; the exact dyadic fallback must decide the sign.
+        return _orient2_exact(ax, ay, bx, by, cx, cy)
     end
     errbound = CCWERRBOUND_A * detsum
-    (det >= errbound || -det >= errbound) && return _isign(det)
+    (_normal_errbound(errbound)&&(det>=errbound||-det>=errbound)) && return _isign(det)
 
     return _orient2_exact(ax, ay, bx, by, cx, cy)
 end
@@ -193,7 +220,7 @@ function orient3(a, b, c, d)::Int
                 (abs(cdxady) + abs(adxcdy)) * abs(bdz) +
                 (abs(adxbdy) + abs(bdxady)) * abs(cdz)
     errbound = O3DERRBOUND_A * permanent
-    (det > errbound || -det > errbound) && return _isign(det)
+    (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
     return _orient3_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)
 end
@@ -247,7 +274,7 @@ function incircle(a, b, c, d)::Int
                 (abs(cdxady) + abs(adxcdy)) * blift +
                 (abs(adxbdy) + abs(bdxady)) * clift
     errbound = ICCERRBOUND_A * permanent
-    (det > errbound || -det > errbound) && return _isign(det)
+    (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
     return _incircle_exact(ax, ay, bx, by, cx, cy, dx, dy)
 end
@@ -328,7 +355,7 @@ function insphere(a, b, c, d, e)::Int
         ((bexcey + cexbey) * aezplus + (cexaey + aexcey) * bezplus +
          (aexbey + bexaey) * cezplus) * dlift
     errbound = ISPERRBOUND_A * permanent
-    (det > errbound || -det > errbound) && return _isign(det)
+    (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
     return _insphere_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez)
 end

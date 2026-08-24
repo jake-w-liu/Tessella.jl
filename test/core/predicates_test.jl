@@ -18,6 +18,12 @@ using Tessella.Predicates
 include("oracles.jl")
 using .Oracles
 
+@noinline _orient2_allocated(a,b,c)=@allocated orient2(a,b,c)
+@noinline _orient3_allocated(a,b,c,d)=@allocated orient3(a,b,c,d)
+@noinline _incircle_allocated(a,b,c,d)=@allocated incircle(a,b,c,d)
+@noinline _insphere_allocated(a,b,c,d,e)=@allocated insphere(a,b,c,d,e)
+@noinline _orient3_sos_allocated(a,b,c,d)=@allocated orient3_sos(a,b,c,d,1,2,3,4)
+
 @testset "Predicates (Stage 0)" begin
 
     # ── orient2: exhaustive integer grid, every ordered triple ──────────────────
@@ -222,6 +228,25 @@ using .Oracles
         end
     end
 
+    @testset "overflow and underflow scales preserve exact signs" begin
+        p2=((0.1,0.2),(0.8,0.3),(0.4,0.9),(-0.2,0.6))
+        p3=((0.1,0.2,0.3),(0.8,0.3,-0.1),(0.4,0.9,0.2),
+            (-0.2,0.6,0.8),(0.7,-0.4,0.5))
+        reference=(oracle_orient2(p2[1:3]...),oracle_orient3(p3[1:4]...),
+                   oracle_incircle(p2...),oracle_insphere(p3...))
+        for scale in (1e-300,1e-150,1.0,1e150,1e300)
+            q2=map(p->(p[1]*scale,p[2]*scale),p2)
+            q3=map(p->(p[1]*scale,p[2]*scale,p[3]*scale),p3)
+            @test orient2(q2[1:3]...)==reference[1]
+            @test orient3(q3[1:4]...)==reference[2]
+            @test incircle(q2...)==reference[3]
+            @test insphere(q3...)==reference[4]
+        end
+        tiny=map(p->(p[1]*1e-300,p[2]*1e-300),p2)
+        @test orient2(tiny[1:3]...)==1 # floating products underflow to zero
+        @test orient2_sos(tiny[1:3]...,1,2,3)==1
+    end
+
     # ── SoS contract: never 0, agrees off-degeneracy, deterministic, antisym ────
     @testset "orient2_sos contract" begin
         grid = [(x,y) for x in -2:2 for y in -2:2]
@@ -309,13 +334,13 @@ using .Oracles
     @testset "fast path is allocation-free" begin
         a=(0.0,0.0); b=(1.0,0.0); c=(0.0,1.0)
         orient2(a,b,c)                        # warmup / compile
-        @test (@allocated orient2(a,b,c)) == 0
+        @test _orient2_allocated(a,b,c)==0
         a3=(0.0,0.0,0.0); b3=(1.0,0.0,0.0); c3=(0.0,1.0,0.0); d3=(0.0,0.0,1.0)
         orient3(a3,b3,c3,d3)
-        @test (@allocated orient3(a3,b3,c3,d3)) == 0
+        @test _orient3_allocated(a3,b3,c3,d3)==0
         incircle(a,b,c,(0.4,0.4)); insphere(a3,b3,c3,d3,(0.1,0.1,0.1))
-        @test (@allocated incircle(a,b,c,(0.4,0.4))) == 0
-        @test (@allocated insphere(a3,b3,c3,d3,(0.1,0.1,0.1))) == 0
+        @test _incircle_allocated(a,b,c,(0.4,0.4))==0
+        @test _insphere_allocated(a3,b3,c3,d3,(0.1,0.1,0.1))==0
     end
 
     @testset "public input contracts" begin
@@ -339,8 +364,11 @@ using .Oracles
         @test_throws ArgumentError insphere_rat(q3.(p3)...,1,2,3,4,4)
         @test_throws ArgumentError orient2_rat((NaN,0.0),q2(p2[2]),q2(p2[3]),1,2,3)
         @test_throws ArgumentError orient2_sos(p2[1],p2[2],p2[3],big(typemax(Int))+1,2,3)
+        @test_throws ArgumentError orient2((false,0.0),p2[2],p2[3])
+        @test_throws ArgumentError orient2_sos(p2[1],p2[2],p2[3],true,2,3)
+        @test_throws ArgumentError orient2_rat((false,0),q2(p2[2]),q2(p2[3]),1,2,3)
         orient3_sos(p3[1],p3[2],p3[3],p3[4],1,2,3,4) # warm compilation
-        @test (@allocated orient3_sos(p3[1],p3[2],p3[3],p3[4],1,2,3,4)) == 0
+        @test _orient3_sos_allocated(p3[1],p3[2],p3[3],p3[4])==0
     end
 
     @testset "coplanar 3-D in-circle preserves the Euclidean plane metric" begin

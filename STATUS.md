@@ -94,6 +94,36 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening exact predicates and
+the planar meshing workspace:
+
+- `orient2` now uses exact dyadic evaluation when a nonzero determinant product
+  underflows to zero. All four filtered predicates accept a floating result only
+  with a normal finite error bound, and predicate coordinates and SoS indices
+  reject Boolean inputs. An independent exact-rational differential covered 480
+  cases from coordinate scales `1e-300` through `1e300` with zero sign
+  mismatches; a 200-case Delaunay scale audit had zero topology mismatches.
+- `Triangulation` now owns its input coordinates and has one validated public
+  construction path. Public topology operations diagnose corrupt mutable state
+  without bounds errors, validate indices and controls, preserve existing
+  constraints during point insertion, and reject crossing or positive-overlap
+  constraints before mutation. A nine-mutation corruption audit was rejected
+  safely in every case.
+- Segment recovery now uses exact collinearity and coordinate-wise betweenness,
+  including a finite `floatmax`-scale through-vertex case. Circumcenters and
+  radius-edge ratios use a scale-normalized frame with exact-rational fallback;
+  2,500 scale-varied triangles had maximum circle residual
+  `1.409222853971538e-15` and maximum relative radius-edge error
+  `7.899298712677908e-14`.
+- The focused predicates suite passed 140,255/140,255 assertions under Julia
+  1.12.7 and Julia 1.11.9. The focused Mesh2D suites passed 198/198 assertions
+  under both versions. The fixed square SHA-256 is
+  `850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4`.
+- The bounds-checked package gate passed 163,945/163,945 assertions in 17m32.1s,
+  and the aggregate bounds-checked validation exited 0 against Gmsh 4.15.2.
+  Public `Predicates` and `Mesh2D` documentation scans returned no missing names;
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening finalized mesh
 storage, raw topology operations, and tetrahedron quality metrics:
 
