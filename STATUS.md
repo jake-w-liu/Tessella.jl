@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta/Progression_HWall curve laws, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers, and 2-D quad/fan layers |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers, and 2-D quad/fan layers |
 | P5–P6 | **IN PROGRESS** | Model/mesh API, CLI, headless GUI, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, 2-D boundary-layer quads, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans or remaining-volume tet fill after a layer extrusion, the full Gmsh automatic-sizing
@@ -64,7 +64,7 @@ physical-group right-hand-side evaluation.
 P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
 and tetrahedron child templates while sharing edge midpoints, compacting unused nodes,
 and preserving parent tags. Its straight-curve slice covers normalized affine-line
-Progression/Power, Bump, Beta, and Progression_HWall parameters. Its surface
+Progression/Power, Bump, and Beta parameters plus all three HWall variants. Its surface
 transfinite slice covers
 already-discretized, count-matched, three- and four-sided planar chains using Gmsh's
 specific triangular and average-chord Coons interpolation. Four-sided grids can also
@@ -75,8 +75,8 @@ use its legacy collapsed-grid five-face tetrahedral path. Surface recombination 
 includes Edmonds blossom matching and a `full_quad` perfect-matching gate.
 Planar constant-`z` polylines extrude to type-3 quadrangles along left-normals,
 with optional convex-corner fans. P4 does not yet claim
-non-affine CAD curve integration, FlexibleTransfinite, Bump/Beta HWall, or size-map
-curve laws, quasi-transfinite or holed patches,
+non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
+quasi-transfinite or holed patches,
 general CAD parameterizations, recombined three-sided patches, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
@@ -87,6 +87,29 @@ OpenCASCADE/NURBS, remaining algorithms/fields, broad formats and API, GUI, and
 post-processing are unfinished parity tracks, not project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-24 with Julia 1.12.7 after adding the normalized
+`Bump_HWall` and `Beta_HWall` curve laws:
+
+- `julia --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'`
+  passed 163,445/163,445 assertions in 16m08.3s.
+- `julia --project=. --startup-file=no --check-bounds=yes validation/run_all.jl`
+  exited 0 against Gmsh 4.15.2-git. The aggregate included 39 straight-curve
+  cases, 18 HWall cases, 393 coordinates, and all existing external validation
+  children. The HWall differential SHA-256 was
+  `7b02b56c7bfc66becafff0793e66df0e24434f15628b24ecb4b555303405cea7`,
+  with maximum absolute coordinate error `7.155441150707986e-8`.
+- The focused bounds-checked curve suite passed 511/511 assertions under both
+  Julia 1.12.7 and Julia 1.11.9. Independent 256-bit primitive-inversion oracles
+  covered Bump/Beta HWall laws at 6, 17, and 65 nodes, both Beta orientations,
+  near-uniform limits, extreme physical scales, invalid and
+  Float64-unrepresentable inputs, and pre-allocation resource rejection. The
+  deterministic Bump/Beta HWall test SHA-256 was
+  `04169f75cdcfabf540e88477ce54b55d0a6eabcfd5ca48f19b332afaac0fb59a`.
+- Allocation ratchets measured 163,904 and 327,744 bytes for 20,000 and 40,000
+  nodes for each of the Progression, Bump, and Beta HWall paths.
+- The recursive method-ambiguity scan returned zero, the public HWall API was
+  documented, and `git diff --check` passed.
 
 Re-measured on 2026-08-24 with Julia 1.12.7 after the normalized
 `Progression_HWall` curve-law increment:

@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 # In-memory straight-line differential for Gmsh 4.15.2 transfinite curve laws,
-# including Progression_HWall.
+# including the Progression_HWall, Bump_HWall, and Beta_HWall variants.
 # No geometry or mesh file is read or written, and Gmsh is always finalized.
 
 using Pkg
@@ -19,7 +19,7 @@ const TARGET_GMSH_VERSION = "4.15.2"
 const PARAMETER_CRC =
     "b525628945d55f49bc5151ad313d697f9c32f7b3325015e5d0080a69260ffd0e"
 const HWALL_PARAMETER_CRC =
-    "8d79e5323a0c4d7c635b4101bad3f1325f33e0badcded389f5b3bd36ea509213"
+    "7b02b56c7bfc66becafff0793e66df0e24434f15628b24ecb4b555303405cea7"
 
 function find_gmsh_api()
     configured = get(ENV, "GMSH_JULIA_API", "")
@@ -94,18 +94,42 @@ const CASES = (
 )
 
 const HWALL_CASES = (
-    (name=:progression_hwall_0_01_n6, gmsh_type="Progression_HWall",
-     coefficient=0.01, count=6),
-    (name=:progression_hwall_0_05_n6, gmsh_type="Progression_HWall",
-     coefficient=0.05, count=6),
-    (name=:progression_hwall_0_1_n6, gmsh_type="Progression_HWall",
-     coefficient=0.1, count=6),
+    (name=:progression_hwall_0_01_n6, law=:progression,
+     gmsh_type="Progression_HWall", coefficient=0.01, count=6),
+    (name=:progression_hwall_0_05_n6, law=:progression,
+     gmsh_type="Progression_HWall", coefficient=0.05, count=6),
+    (name=:progression_hwall_0_1_n6, law=:progression,
+     gmsh_type="Progression_HWall", coefficient=0.1, count=6),
     (name=:progression_hwall_negative_0_1_n6,
-     gmsh_type="Progression_HWall", coefficient=-0.1, count=6),
-    (name=:progression_hwall_0_01_n17, gmsh_type="Progression_HWall",
-     coefficient=0.01, count=17),
-    (name=:progression_hwall_0_05_n17, gmsh_type="Progression_HWall",
-     coefficient=0.05, count=17),
+     law=:progression, gmsh_type="Progression_HWall", coefficient=-0.1, count=6),
+    (name=:progression_hwall_0_01_n17, law=:progression,
+     gmsh_type="Progression_HWall", coefficient=0.01, count=17),
+    (name=:progression_hwall_0_05_n17, law=:progression,
+     gmsh_type="Progression_HWall", coefficient=0.05, count=17),
+    (name=:bump_hwall_0_01_n6, law=:bump,
+     gmsh_type="Bump_HWall", coefficient=0.01, count=6),
+    (name=:bump_hwall_0_05_n6, law=:bump,
+     gmsh_type="Bump_HWall", coefficient=0.05, count=6),
+    (name=:bump_hwall_0_1_n6, law=:bump,
+     gmsh_type="Bump_HWall", coefficient=0.1, count=6),
+    (name=:bump_hwall_negative_0_05_n6, law=:bump,
+     gmsh_type="Bump_HWall", coefficient=-0.05, count=6),
+    (name=:bump_hwall_0_01_n17, law=:bump,
+     gmsh_type="Bump_HWall", coefficient=0.01, count=17),
+    (name=:bump_hwall_0_05_n17, law=:bump,
+     gmsh_type="Bump_HWall", coefficient=0.05, count=17),
+    (name=:beta_hwall_0_01_n6, law=:beta,
+     gmsh_type="Beta_HWall", coefficient=0.01, count=6),
+    (name=:beta_hwall_0_05_n6, law=:beta,
+     gmsh_type="Beta_HWall", coefficient=0.05, count=6),
+    (name=:beta_hwall_0_1_n6, law=:beta,
+     gmsh_type="Beta_HWall", coefficient=0.1, count=6),
+    (name=:beta_hwall_negative_0_05_n6, law=:beta,
+     gmsh_type="Beta_HWall", coefficient=-0.05, count=6),
+    (name=:beta_hwall_0_01_n17, law=:beta,
+     gmsh_type="Beta_HWall", coefficient=0.01, count=17),
+    (name=:beta_hwall_0_05_n17, law=:beta,
+     gmsh_type="Beta_HWall", coefficient=0.05, count=17),
 )
 
 function parameter_crc(groups)
@@ -204,7 +228,8 @@ try
     for case in HWALL_CASES
         orientation = case.coefficient < 0.0 ? :end : :start
         tessella = transfinite_curve_hwall(
-            case.count; wall_height=abs(case.coefficient), curve_length=1.0,
+            case.count; mesh_type=case.law,
+            wall_height=abs(case.coefficient), curve_length=1.0,
             orientation=orientation, max_nodes=case.count)
         reference = gmsh_parameters(case)
         error_value = maximum_difference(tessella, reference)
@@ -244,13 +269,13 @@ try
         "Tessella transfinite-curve checksum changed: $checksum")
     hwall_checksum = parameter_crc(hwall_results)
     hwall_checksum == HWALL_PARAMETER_CRC || error(
-        "Tessella Progression_HWall checksum changed: $hwall_checksum")
+        "Tessella HWall checksum changed: $hwall_checksum")
     coordinate_samples =
         sum(case.count for case in CASES; init=0) +
         sum(case.count for case in HWALL_CASES; init=0)
 
     println("TRANSFINITE_CURVE_DIFFERENTIAL_OK gmsh=$runtime_version " *
-            "laws=4 cases=$(length(CASES) + length(HWALL_CASES)) " *
+            "laws=6 cases=$(length(CASES) + length(HWALL_CASES)) " *
             "hwall_cases=$(length(HWALL_CASES)) coordinate_samples=" *
             "$coordinate_samples " *
             "max_abs_error=$maximum_error sha=$checksum " *
@@ -260,6 +285,6 @@ finally
 end
 
 # Intentional nonclaims: non-affine CAD curves and their derivative-weighted
-# adaptive integration, FlexibleTransfinite, Bump/Beta HWall and size-map laws, closed,
+# adaptive integration, FlexibleTransfinite and size-map laws, closed,
 # periodic, extruded, degenerate and boundary-layer curves, and bitwise equality
 # with Gmsh's adaptive-trapezoid/linear-inversion roundoff.

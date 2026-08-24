@@ -38,7 +38,7 @@ Tessella
 ├── Recombine     greedy or Edmonds-blossom triangle-to-quad pairing, optional full-quad
 ├── Refine        deterministic one-level uniform linear-simplex refinement
 ├── Transfinite   validated four-sided planar structured triangle patches
-├── TransfiniteCurve normalized Progression/Bump/Beta/Progression_HWall laws
+├── TransfiniteCurve normalized Progression/Bump/Beta laws and HWall variants
 ├── TransfiniteTriangle validated three-sided structured triangle patches
 ├── TransfiniteQuad recombined four-sided structured quadrangle patches
 ├── TransfiniteVolume affine six-face structured tetrahedral volumes
@@ -170,8 +170,8 @@ Edmonds maximum-cardinality matching on the dual of eligible pairs, and `full_qu
 requires a perfect matching. It also covers one-level uniform refinement of linear segments,
 triangles, and tetrahedra with Gmsh 4.15.2 child templates, shared lexicographic edge
 midpoints, compacted unused nodes, and parent-tag preservation. Normalized affine-line
-transfinite parameters cover Gmsh's Progression/Power, Bump, Beta, and
-Progression_HWall laws with signed orientation and representability gates. Three-sided
+transfinite parameters cover Gmsh's Progression/Power, Bump, and Beta laws plus
+their HWall variants, with signed orientation and representability gates. Three-sided
 and four-sided planar transfinite
 patches implement Gmsh's specific triangular and average-chord Coons interpolation
 for already-discretized, count-matched boundary chains. Four-sided grids can also be
@@ -184,8 +184,7 @@ as first-order recombined hexahedra with type-3 boundary quadrangles. Planar
 constant-`z` polylines extrude to type-3 quadrangles along left-normals, with
 optional convex-corner fans of first-layer triangles and subsequent ring
 quadrangles. P4 does not yet claim
-non-affine CAD curve integration, FlexibleTransfinite,
-Bump/Beta HWall, or size-map curve laws,
+non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes, recombined three-sided patches,
 volume/hybrid recombination, selective or
