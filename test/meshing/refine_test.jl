@@ -108,6 +108,12 @@ end
         @test source.seg_tag == pristine.seg_tag
         @test source.tri_tag == pristine.tri_tag
         @test source.tet_tag == pristine.tet_tag
+
+        for field in (:coords, :segs, :tris, :tets,
+                      :seg_tag, :tri_tag, :tet_tag)
+            @test !Base.mightalias(getfield(source, field), getfield(refined, field))
+            @test !Base.mightalias(getfield(refined, field), getfield(repeated, field))
+        end
     end
 
     @testset "empty meshes and isolated-node compaction" begin
@@ -170,8 +176,10 @@ end
 
         @test_throws ArgumentError refine_uniform(source; max_nodes=true)
         @test_throws ArgumentError refine_uniform(source; max_cells=false)
-        @test_throws TypeError refine_uniform(source; max_nodes=10.0)
-        @test_throws TypeError refine_uniform(source; max_cells="14")
+        @test_throws ArgumentError refine_uniform(source; max_nodes=10.0)
+        @test_throws ArgumentError refine_uniform(source; max_cells="14")
+        @test_throws ArgumentError refine_uniform(source; max_nodes=nothing)
+        @test_throws ArgumentError refine_uniform(source; max_cells=missing)
         @test_throws ArgumentError refine_uniform(source; max_nodes=-1)
         @test_throws ArgumentError refine_uniform(source; max_cells=-1)
         @test_throws ArgumentError refine_uniform(
@@ -188,6 +196,15 @@ end
             typemax(Int), 2, "test")
         @test_throws ArgumentError Tessella.Refine._checked_add(
             typemax(Int), 1, "test")
+
+        # The former subtract-then-add formula double-rounded this midpoint by
+        # one ulp. A 256-bit calculation gives the literal expected below.
+        midpoint_a = 1.0567732965893495e-70
+        midpoint_b = 4.960979170950746e-63
+        @test Tessella.Refine._midpoint_coordinate(midpoint_a, midpoint_b) ==
+              2.480489638314038e-63
+        @test Tessella.Refine._midpoint_coordinate(midpoint_b, midpoint_a) ==
+              2.480489638314038e-63
 
         upper = floatmax(Float64)
         lower = prevfloat(prevfloat(upper))
@@ -229,6 +246,39 @@ end
                                  for i in 1:4)...) > 0
     end
 
+    @testset "scale and translation invariance" begin
+        reference = refine_uniform(Mesh(
+            Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+            tets=reshape(Int32[1, 2, 3, 4], 4, 1), tet_tag=Int32[9]))
+        for scale in (1e-300, 1e-200, 1.0, 1e100)
+            source = Mesh(
+                Float64[0 scale 0 0; 0 0 scale 0; 0 0 0 scale];
+                tets=reshape(Int32[1, 2, 3, 4], 4, 1), tet_tag=Int32[9])
+            refined = refine_uniform(source)
+            @test refined.tets == reference.tets
+            @test refined.tet_tag == reference.tet_tag
+            @test validate(refined).ok
+            @test refined.coords ./ scale ≈ reference.coords atol=0 rtol=2eps()
+        end
+
+        offset = 1e100
+        width = 16eps(offset)
+        translated = Mesh(
+            Float64[offset offset + width offset offset;
+                    -offset -offset -offset + width -offset;
+                    offset offset offset offset + width];
+            tets=reshape(Int32[1, 2, 3, 4], 4, 1), tet_tag=Int32[9])
+        translated_refined = refine_uniform(translated)
+        @test translated_refined.tets == reference.tets
+        @test translated_refined.tet_tag == reference.tet_tag
+        @test validate(translated_refined).ok
+        normalized = copy(translated_refined.coords)
+        normalized[1, :] .= (normalized[1, :] .- offset) ./ width
+        normalized[2, :] .= (normalized[2, :] .+ offset) ./ width
+        normalized[3, :] .= (normalized[3, :] .- offset) ./ width
+        @test normalized == reference.coords
+    end
+
     @testset "allocation growth remains linear" begin
         # Warm the exact call path before measuring it.
         refine_uniform(_refine_segment_chain(32))
@@ -237,5 +287,10 @@ end
         @test small > 0
         @test large > small
         @test large <= 2.35small + 262_144
+    end
+
+    @testset "public documentation" begin
+        @test isempty(Base.Docs.undocumented_names(Tessella.Refine; private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.Refine; recursive=true))
     end
 end

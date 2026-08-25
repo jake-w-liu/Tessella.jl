@@ -54,7 +54,8 @@ Tessella
 │   ├── MeshSurface validated planar, cylinder, and regular parametric meshing
 │   ├── ExactMesh3D/RecoverCDT exact Delaunay and conforming recovery
 │   ├── Recombine   validated greedy/blossom surface triangle pairing
-│   ├── Refine/HighOrder mesh transformation kernels
+│   ├── Refine      deterministic uniform linear-simplex refinement
+│   ├── HighOrder   globally certified quadratic-tetrahedron conversion
 │   ├── Optimize validated, deterministic, scale-robust tet quality and smoothing
 │   └── BoundaryLayer/Periodic boundary-layer and periodic constraints
 ├── structured/
