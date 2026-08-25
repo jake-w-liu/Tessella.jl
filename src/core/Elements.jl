@@ -3339,13 +3339,13 @@ function _escape_mixed_name(name::AbstractString)
     return String(take!(out))
 end
 
-function _write_mixed_physical_names(io,names)
+function _write_mixed_physical_names(io,names,gmsh_compatible::Bool)
     isempty(names) && return nothing
     println(io,"\$PhysicalNames"); println(io,length(names))
     for ((dim,tag),name) in sort!(collect(names);by=first)
-        encoded=_escape_mixed_name(name)
+        encoded=gmsh_compatible ? name : _escape_mixed_name(name)
         ncodeunits(encoded)<=MSH_PHYSICAL_NAME_MAX_BYTES || throw(ArgumentError(
-            "write_mixed_msh: escaped physical name for ($dim,$tag) exceeds " *
+            "write_mixed_msh: serialized physical name for ($dim,$tag) exceeds " *
             "$MSH_PHYSICAL_NAME_MAX_BYTES bytes"))
         println(io,dim," ",tag," \"",encoded,"\"")
     end
@@ -3366,13 +3366,13 @@ domain-link fields. MSH4 supports only fixed-width, unlinked special records.
 Unsupported combinations are rejected before a temporary file is created.
 MSH v2.2 necessarily writes the legacy first-physical-tag projection. By default,
 element tags that pinned Gmsh 4.15.2 cannot safely consume through its normal
-lifecycle, and names needing an escape that Gmsh does not decode, are explicit
-blockers. Set
+lifecycle, and quoted or line-breaking names that Gmsh cannot preserve, are
+explicit blockers. Backslashes and tabs are standard literal characters. Set
 `gmsh_compatible=false` only for Tessella-to-Tessella serialization of those
 records. Legacy MSH4 synthesis is likewise blocked for nonzero-physical special
 records: Gmsh 4.15.2 can parse such a file, but rewrites an invalid node section
-unless compatible node/entity classification metadata is supplied. Read escaped names with
-`read_mixed_msh(...; tessella_extensions=true)`.
+unless compatible node/entity classification metadata is supplied. Read escaped
+names with `read_mixed_msh(...; tessella_extensions=true)`.
 """
 function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
                          binary=false,gmsh_compatible=true)
@@ -3402,10 +3402,11 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
             "Tessella-only round trip"))
         bad_names=Tuple{Int,Int}[]
         for (key,name) in m.physical_names
-            any(c->c=='\\' || c=='\"' || c<' ',name) && push!(bad_names,key)
+            any(c->c in ('\"','\n','\r'),name) && push!(bad_names,key)
         end
         isempty(bad_names) || throw(ArgumentError(
-            "write_mixed_msh: Gmsh 4.15.2 cannot decode escaped physical " *
+            "write_mixed_msh: Gmsh 4.15.2 cannot preserve quoted or " *
+            "line-breaking physical " *
             "name(s) " * join(sort!(bad_names),",") *
             "; use gmsh_compatible=false only for a Tessella-only round trip"))
     end
@@ -3446,11 +3447,11 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
         "write_mixed_msh: destination is a directory: $target"))
     mktemp(parent) do temporary,io
         if value==2.2
-            binary ? _write_mixed_v2_binary(io,m,names) :
-                     _write_mixed_v2(io,m,names)
+            binary ? _write_mixed_v2_binary(io,m,names,gmsh_compatible) :
+                     _write_mixed_v2(io,m,names,gmsh_compatible)
         else
-            binary ? _write_mixed_v4_binary(io,m,names) :
-                     _write_mixed_v4(io,m,names)
+            binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible) :
+                     _write_mixed_v4(io,m,names,gmsh_compatible)
         end
         flush(io); close(io)
         mv(temporary,target;force=true)
@@ -3558,9 +3559,9 @@ function _v2_entity_ids(m::MixedMesh)
     return ids
 end
 
-function _write_mixed_v2(io,m::MixedMesh,names)
+function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool)
     println(io,"\$MeshFormat"); println(io,"2.2 0 8"); println(io,"\$EndMeshFormat")
-    _write_mixed_physical_names(io,names)
+    _write_mixed_physical_names(io,names,gmsh_compatible)
     nn=size(m.coords,2)
     println(io,"\$Nodes"); println(io,nn)
     @inbounds for i in 1:nn
@@ -3607,9 +3608,9 @@ function _write_mixed_binary_format(io,version::AbstractString)
     return nothing
 end
 
-function _write_mixed_v2_binary(io,m::MixedMesh,names)
+function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool)
     _write_mixed_binary_format(io,"2.2")
-    _write_mixed_physical_names(io,names)
+    _write_mixed_physical_names(io,names,gmsh_compatible)
     nn=size(m.coords,2)
     println(io,"\$Nodes"); println(io,nn)
     @inbounds for i in 1:nn
@@ -3738,14 +3739,24 @@ function _mixed_v4_layout(m::MixedMesh)
         sort!(cells;lt=(a,b)->_mixed_cell_lt(m,a,b),alg=MergeSort)
         push!(groups,_MixedWriteGroup(dim,entity_ids[(dim,physical)],msh,cells))
     end
-    node_entity=0
+    node_owner=(3,0)
     if size(m.coords,2)>0
-        counters[4]+=1; node_entity=counters[4]
-        push!(entities,_MixedWriteEntity(3,node_entity,Int32(0),_all_mixed_bounds(m)))
+        if isempty(groups)
+            counters[4]+=1
+            node_owner=(3,counters[4])
+            push!(entities,_MixedWriteEntity(
+                3,node_owner[2],Int32(0),_all_mixed_bounds(m)))
+        else
+            highest=maximum(group.dim for group in groups)
+            candidates=filter(group->group.dim==highest,groups)
+            sort!(candidates;by=group->(group.entity,group.msh))
+            owner=first(candidates)
+            node_owner=(owner.dim,owner.entity)
+        end
     end
     sort!(entities;by=e->(e.dim,e.tag))
     sort!(groups;by=g->(g.dim,g.entity,g.msh))
-    return entities,groups,node_entity
+    return entities,groups,node_owner
 end
 
 function _write_mixed_entity(io,entity::_MixedWriteEntity)
@@ -3861,9 +3872,9 @@ function _mixed_metadata_element_runs(m::MixedMesh,data::MixedEntityData)
 end
 
 function _write_mixed_v4_binary_metadata(
-    io,m::MixedMesh,names,data::MixedEntityData)
+    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool)
     _write_mixed_binary_format(io,"4.1")
-    _write_mixed_physical_names(io,names)
+    _write_mixed_physical_names(io,names,gmsh_compatible)
     entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
     counts=zeros(Int,4)
     for entity in entities
@@ -3930,12 +3941,13 @@ function _write_mixed_v4_binary_metadata(
     return nothing
 end
 
-function _write_mixed_v4_binary(io,m::MixedMesh,names)
+function _write_mixed_v4_binary(
+    io,m::MixedMesh,names,gmsh_compatible::Bool)
     m.entity_data===nothing || return _write_mixed_v4_binary_metadata(
-        io,m,names,m.entity_data)
+        io,m,names,m.entity_data,gmsh_compatible)
     _write_mixed_binary_format(io,"4.1")
-    _write_mixed_physical_names(io,names)
-    entities,groups,node_entity=_mixed_v4_layout(m)
+    _write_mixed_physical_names(io,names,gmsh_compatible)
+    entities,groups,node_owner=_mixed_v4_layout(m)
     counts=zeros(Int,4)
     for entity in entities
         counts[entity.dim+1]+=1
@@ -3954,7 +3966,8 @@ function _write_mixed_v4_binary(io,m::MixedMesh,names)
     write(io,UInt64(nn==0 ? 0 : 1)); write(io,UInt64(nn))
     write(io,UInt64(nn==0 ? 0 : 1)); write(io,UInt64(nn))
     if nn>0
-        write(io,Int32(3)); write(io,Int32(node_entity)); write(io,Int32(0))
+        write(io,Int32(node_owner[1])); write(io,Int32(node_owner[2]))
+        write(io,Int32(0))
         write(io,UInt64(nn))
         for i in 1:nn
             write(io,UInt64(i))
@@ -3986,9 +3999,10 @@ function _write_mixed_v4_binary(io,m::MixedMesh,names)
     return nothing
 end
 
-function _write_mixed_v4_metadata(io,m::MixedMesh,names,data::MixedEntityData)
+function _write_mixed_v4_metadata(
+    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool)
     println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
-    _write_mixed_physical_names(io,names)
+    _write_mixed_physical_names(io,names,gmsh_compatible)
     entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
     counts=zeros(Int,4)
     for entity in entities
@@ -4051,12 +4065,12 @@ function _write_mixed_v4_metadata(io,m::MixedMesh,names,data::MixedEntityData)
     return nothing
 end
 
-function _write_mixed_v4(io,m::MixedMesh,names)
+function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool)
     m.entity_data===nothing || return _write_mixed_v4_metadata(
-        io,m,names,m.entity_data)
+        io,m,names,m.entity_data,gmsh_compatible)
     println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
-    _write_mixed_physical_names(io,names)
-    entities,groups,node_entity=_mixed_v4_layout(m)
+    _write_mixed_physical_names(io,names,gmsh_compatible)
+    entities,groups,node_owner=_mixed_v4_layout(m)
     counts=zeros(Int,4)
     for entity in entities
         counts[entity.dim+1]+=1
@@ -4071,7 +4085,7 @@ function _write_mixed_v4(io,m::MixedMesh,names)
     println(io,"\$Nodes")
     println(io,nn==0 ? 0 : 1," ",nn," ",nn==0 ? 0 : 1," ",nn)
     if nn>0
-        println(io,"3 ",node_entity," 0 ",nn)
+        println(io,node_owner[1]," ",node_owner[2]," 0 ",nn)
         for i in 1:nn
             println(io,i)
         end

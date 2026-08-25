@@ -285,6 +285,10 @@ end
     @testset "validated blockers and pre-allocation resource limits" begin
         sides = _quad_rectangle(3, 2)
         @test_throws ArgumentError mesh_transfinite_quad_patch(
+            tuple(sides[1]...),sides[2],sides[3],sides[4])
+        @test_throws ArgumentError mesh_transfinite_quad_patch(
+            1,sides[2],sides[3],sides[4])
+        @test_throws ArgumentError mesh_transfinite_quad_patch(
             [(0.0, 0.0, 0.0)], sides[2], sides[3], sides[4])
         mismatched = copy(sides[2])
         insert!(mismatched, 2, (3.0, 0.5, 0.0))

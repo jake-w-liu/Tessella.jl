@@ -262,15 +262,19 @@ general CAD/ruled/spherical parameterization, generate high-order elements,
 recombine three-sided patches, create lossless CAD entity metadata, or construct
 transfinite volumes.
 """
-function mesh_transfinite_quad_patch(side1::AbstractVector,
-                                     side2::AbstractVector,
-                                     side3::AbstractVector,
-                                     side4::AbstractVector;
+function mesh_transfinite_quad_patch(side1,
+                                     side2,
+                                     side3,
+                                     side4;
                                      arrangement=:left,
                                      face_tag=0,
                                      side_tags=(0, 0, 0, 0),
                                      max_nodes=_DEFAULT_MAX_NODES,
                                      max_quadrangles=_DEFAULT_MAX_QUADRANGLES)::MixedMesh
+    for (index,side) in enumerate((side1,side2,side3,side4))
+        side isa AbstractVector || throw(ArgumentError(
+            "$_CALLER: side $index must be an AbstractVector"))
+    end
     _arrangement(arrangement)
     node_limit = _limit(max_nodes, "max_nodes")
     quadrangle_limit = _limit(max_quadrangles, "max_quadrangles")

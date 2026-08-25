@@ -47,21 +47,63 @@ end
         # regression: the reader must NOT collapse runs of spaces/tabs inside a quoted name
         # (split/join-on-whitespace did; the quoted-substring parse preserves it exactly).
         m = _cube(); p = joinpath(dir, "cube_names.msh")
-        for (v, nm) in ((2.2, "air  region"), (4.1, "co ax\tpin"))
-            write_msh(p, m; version=v, physical_names=Dict((3,4)=>nm))
-            @test read_msh(p).physical_names[(3,4)] == nm
+        for (v, nm, compatible) in ((2.2, "air  region", true),
+                                     (4.1, "co ax\tpin", true))
+            write_msh(p, m; version=v, physical_names=Dict((3,4)=>nm),
+                      gmsh_compatible=compatible)
+            @test read_msh(
+                p;tessella_extensions=!compatible).physical_names[(3,4)] == nm
         end
         nm = "quoted \"name\" \\ path\nline two"
-        write_msh(p, m; version=2.2, physical_names=Dict((3,4)=>nm))
-        @test read_msh(p).physical_names[(3,4)] == nm
+        @test_throws ArgumentError write_msh(
+            p,m;version=2.2,physical_names=Dict((3,4)=>nm))
+        write_msh(p,m;version=2.2,physical_names=Dict((3,4)=>nm),
+                  gmsh_compatible=false)
+        @test read_msh(
+            p;tessella_extensions=true).physical_names[(3,4)] == nm
+
+        # Standard Gmsh names treat a backslash literally; decoding Tessella's
+        # opt-in escapes is never implicit.
+        literal=joinpath(dir,"literal_backslash.msh")
+        write(literal,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n" *
+            "\$PhysicalNames\n1\n3 4 \"line\\name\"\n\$EndPhysicalNames\n" *
+            "\$Nodes\n0\n\$EndNodes\n")
+        @test read_msh(literal).physical_names[(3,4)]=="line\\name"
+        @test read_msh(
+            literal;tessella_extensions=true).physical_names[(3,4)]==
+              "line\n"*"ame"
+        write_msh(p,m;version=2.2,
+                  physical_names=Dict((3,4)=>"line\\name"))
+        @test read_msh(p).physical_names[(3,4)]=="line\\name"
+
+        boundary_name=repeat("x",Tessella.Elements.MSH_PHYSICAL_NAME_MAX_BYTES)
+        write_msh(p,m;version=2.2,
+                  physical_names=Dict((3,4)=>boundary_name))
+        @test read_msh(p).physical_names[(3,4)]==boundary_name
+        for compatible in (true,false)
+            @test_throws ArgumentError write_msh(
+                p,m;version=2.2,gmsh_compatible=compatible,
+                physical_names=Dict((3,4)=>boundary_name*"x"))
+        end
     end
 
     @testset "MSH format errors are explicit and writes are atomic" begin
         m=_cube(); p=joinpath(dir,"atomic.msh")
         @test_throws ArgumentError write_msh(p,m;version=3.0)
+        @test_throws ArgumentError write_msh(p,m;version="2.2")
+        @test_throws ArgumentError write_msh(p,m;version=true)
+        @test_throws ArgumentError write_msh(1,m)
+        @test_throws ArgumentError write_msh(p,1)
+        @test_throws ArgumentError write_msh(p,m;gmsh_compatible=1)
+        @test_throws ArgumentError read_msh(1)
         write(p,"sentinel")
         @test_throws ArgumentError write_msh(p,m;physical_names=Dict((3,4)=>17))
         @test read(p,String)=="sentinel"                 # failed write did not truncate target
+        for bad_name in ("quoted \"name\"","line\nbreak","line\rbreak")
+            @test_throws ArgumentError write_msh(
+                p,m;physical_names=Dict((3,4)=>bad_name))
+            @test read(p,String)=="sentinel"
+        end
 
         missing=joinpath(dir,"missing_format.msh")
         write(missing,"\$Nodes\n0\n\$EndNodes\n")
@@ -110,6 +152,78 @@ end
         dirty=_cube(); dirty.coords[1,1]=NaN; write(p,"sentinel")
         @test_throws ArgumentError write_msh(p,dirty)
         @test read(p,String)=="sentinel"
+
+        # Mutable Mesh storage must be validated before either writer indexes or
+        # replaces the destination. Previously v2 serialized the bad index while
+        # v4 escaped as a BoundsError from its entity-bounds pass.
+        badconnectivity=_cube();badconnectivity.tets[1,1]=Int32(99)
+        for version in (2.2,4.1)
+            write(p,"sentinel")
+            @test_throws ArgumentError write_msh(p,badconnectivity;version)
+            @test read(p,String)=="sentinel"
+        end
+        for names in (Dict{Any,Any}((true,true)=>"bad"),
+                      Dict{Any,Any}(1=>"bad"),
+                      Dict{Any,Any}((3,4)=>"ok","bad"=>"value"))
+            write(p,"sentinel")
+            @test_throws ArgumentError write_msh(p,m;physical_names=names)
+            @test read(p,String)=="sentinel"
+        end
+
+        degenerate=joinpath(dir,"degenerate_tet.msh")
+        write(degenerate,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n" *
+            "\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 0 1 0\n4 1 1 0\n\$EndNodes\n" *
+            "\$Elements\n1\n1 4 0 1 2 3 4\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(degenerate)
+
+        huge_tags=joinpath(dir,"huge_v2_tag_count.msh")
+        write(huge_tags,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n" *
+            "\$Nodes\n1\n1 0 0 0\n\$EndNodes\n" *
+            "\$Elements\n1\n1 1 $(typemax(Int))\n\$EndElements\n")
+        @test_throws ArgumentError read_msh(huge_tags)
+
+        repeated_names=joinpath(dir,"repeated_physical_names.msh")
+        write(repeated_names,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n" *
+            "\$PhysicalNames\n1\n3 4 \"case\"\n\$EndPhysicalNames\n" *
+            "\$PhysicalNames\n1\n3 4 \"case\"\n\$EndPhysicalNames\n" *
+            "\$Nodes\n0\n\$EndNodes\n")
+        @test read_msh(repeated_names).physical_names==Dict((3,4)=>"case")
+        @test_throws ArgumentError read_msh(
+            repeated_names;max_physical_names=1)
+        conflicting_names=joinpath(dir,"conflicting_physical_names.msh")
+        write(conflicting_names,replace(
+            read(repeated_names,String),"3 4 \"case\"\n\$EndPhysicalNames\n\$Nodes"=>
+                                        "3 4 \"other\"\n\$EndPhysicalNames\n\$Nodes"))
+        @test_throws ArgumentError read_msh(conflicting_names)
+
+        limited=joinpath(dir,"limited_v2.msh")
+        write_msh(limited,m;version=2.2,physical_names=Dict((3,4)=>"case"))
+        @test_throws ArgumentError read_msh(limited;max_nodes=7)
+        @test_throws ArgumentError read_msh(limited;max_elements=5)
+        @test_throws ArgumentError read_msh(limited;max_physical_names=0)
+        @test_throws ArgumentError read_msh(limited;max_name_bytes=3)
+        @test_throws ArgumentError read_msh(
+            limited;max_file_bytes=filesize(limited)-1)
+        @test_throws ArgumentError read_msh(limited;max_nodes=true)
+        @test_throws ArgumentError read_msh(limited;max_elements=6.0)
+        @test_throws ArgumentError read_msh(limited;tessella_extensions=1)
+
+        limited_v4=joinpath(dir,"limited_v4.msh")
+        write_msh(limited_v4,m;version=4.1)
+        @test_throws ArgumentError read_msh(limited_v4;max_entities=0)
+        @test_throws ArgumentError read_msh(limited_v4;max_blocks=0)
+
+        unreadable=joinpath(dir,"node_preflight.msh")
+        write(unreadable,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n" *
+            "\$Nodes\n4\nthis record must not be read\n")
+        preflight_error=try
+            read_msh(unreadable;max_nodes=3)
+            nothing
+        catch err
+            err
+        end
+        @test preflight_error isa ArgumentError
+        @test occursin("max_nodes",sprint(showerror,preflight_error))
     end
 
     @testset "v4.1 round-trip preserves connectivity CRC" begin
@@ -121,6 +235,32 @@ end
         @test ntets(f.mesh) == 6
         @test all(f.mesh.tet_tag .== 4)
         @test f.physical_names[(3,4)] == "case"
+    end
+
+    @testset "Gmsh v4 rewrite preserves nodes, tags, and CRC" begin
+        gmsh=Sys.which("gmsh")
+        @test gmsh!==nothing
+        if gmsh!==nothing
+            version=strip(read(`$gmsh --version`,String))
+            @test version=="4.15.2" || startswith(version,"4.15.2-")
+            m=_cube()
+            m.tet_tag[1]=Int32(5)
+            names=Dict((3,4)=>"case\tregion",(3,5)=>"insert")
+            source=joinpath(dir,"gmsh_rewrite_source.msh")
+            rewritten=joinpath(dir,"gmsh_rewrite_result.msh")
+            write_msh(source,m;version=4.1,physical_names=names)
+            output=IOBuffer()
+            process=run(pipeline(ignorestatus(
+                `$gmsh $source -0 -save -format msh41 -o $rewritten -v 5`);
+                stdout=output,stderr=output))
+            log=String(take!(output))
+            @test success(process)
+            @test !occursin("Error",log)
+            back=read_msh(rewritten)
+            @test mesh_crc(back.mesh).sha==mesh_crc(m).sha
+            @test back.physical_names==names
+            @test_throws ArgumentError read_msh(rewritten;max_blocks=1)
+        end
     end
 
     @testset "cross-format v2 → v4 → v2 keeps CRC" begin
@@ -220,6 +360,79 @@ end
         @test f.physical_names[(3,1)] == "vol"
         @test tet_volume(node(f.mesh,1),node(f.mesh,2),node(f.mesh,3),node(f.mesh,4)) ≈ 1/6
         @test validate(f.mesh).ok
+
+        with_empty_block=replace(sample,
+            "\$Elements\n1 1 1 1\n3 1 4 1\n"=>
+            "\$Elements\n2 1 1 1\n3 1 4 0\n3 1 4 1\n")
+        empty_block_path=joinpath(dir,"sample_v4_empty_element_block.msh")
+        write(empty_block_path,with_empty_block)
+        @test mesh_crc(read_msh(empty_block_path).mesh).sha==
+              mesh_crc(f.mesh).sha
+        @test_throws ArgumentError read_msh(
+            empty_block_path;max_blocks=1)
+
+        implicit=replace(sample,
+            "\$Entities\n0 0 0 1\n" *
+            "1 0 0 0 1 1 1 1 1 0\n\$EndEntities\n"=>"")
+        implicit_path=joinpath(dir,"sample_v4_implicit_entity.msh")
+        write(implicit_path,implicit)
+        implicit_file=read_msh(implicit_path)
+        @test implicit_file.mesh.coords==f.mesh.coords
+        @test implicit_file.mesh.tets==f.mesh.tets
+        @test implicit_file.mesh.tet_tag==Int32[0]
+        @test_throws ArgumentError read_msh(
+            implicit_path;max_entities=0)
+
+        repeated_sections=raw"""
+        $MeshFormat
+        4.1 0 8
+        $EndMeshFormat
+        $PhysicalNames
+        2
+        2 7 "left"
+        2 8 "right"
+        $EndPhysicalNames
+        $Entities
+        0 0 1 0
+        1 0 0 0 1 1 0 1 7 0
+        $EndEntities
+        $Entities
+        0 0 1 0
+        2 0 0 0 1 1 0 1 8 0
+        $EndEntities
+        $Nodes
+        1 4 1 4
+        2 1 0 4
+        1
+        2
+        3
+        4
+        0 0 0
+        1 0 0
+        1 1 0
+        0 1 0
+        $EndNodes
+        $Elements
+        1 1 101 101
+        2 1 2 1
+        101 1 2 3
+        $EndElements
+        $Elements
+        1 1 202 202
+        2 2 2 1
+        202 1 3 4
+        $EndElements
+        """
+        repeated_path=joinpath(dir,"sample_v4_repeated_sections.msh")
+        write(repeated_path,repeated_sections)
+        repeated_file=read_msh(repeated_path)
+        @test repeated_file.physical_names==
+              Dict((2,7)=>"left",(2,8)=>"right")
+        @test mesh_crc(repeated_file.mesh).sha==
+              "4c4f930b531f67093077abbde261fe1e48b4e163ce4885b89cd2bca83581bf26"
+        @test_throws ArgumentError read_msh(repeated_path;max_entities=1)
+        @test_throws ArgumentError read_msh(repeated_path;max_elements=1)
+        @test_throws ArgumentError read_msh(repeated_path;max_blocks=1)
     end
 
     @testset "STL ingest welds coincident vertices (ASCII)" begin
@@ -297,10 +510,29 @@ end
     end
 
     @testset "STL parser and geometric welding contracts" begin
+        @test_throws ArgumentError read_stl(1)
         @test_throws ArgumentError read_stl(joinpath(dir,"tet.stl");merge_tol=-1)
+        @test_throws ArgumentError read_stl(joinpath(dir,"tet.stl");merge_tol=true)
         malformed=joinpath(dir,"malformed.stl")
         write(malformed,"solid x\nvertex 0 0 0\nvertex 1 0 0\nendsolid x\n")
         @test_throws ArgumentError read_stl(malformed)
+        invalid_text=joinpath(dir,"invalid_utf8.stl")
+        invalid_bytes=Vector{UInt8}(codeunits(
+            "solid t\nfacet normal 0 0 1\nouter loop\n" *
+            "vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n" *
+            "endloop\nendfacet\nendsolid t\n"))
+        invalid_bytes[34]=0xd0
+        invalid_bytes[44]=0x34
+        write(invalid_text,invalid_bytes)
+        invalid_error=try
+            read_stl(invalid_text)
+            nothing
+        catch err
+            err
+        end
+        @test invalid_error isa ArgumentError
+        @test occursin("malformed STL text",
+                       sprint(showerror,invalid_error))
         nonfinite=joinpath(dir,"nonfinite.stl")
         write(nonfinite,"solid x\nvertex NaN 0 0\nvertex 1 0 0\nvertex 0 1 0\nendsolid x\n")
         @test_throws ArgumentError read_stl(nonfinite)
@@ -325,11 +557,42 @@ end
             (0.18,0.18,0.18, 0.,10.,0., 1.,10.,0.)]
         ma = Tessella.IO._weld_triangles(apart,0.0071) # distance≈0.139 > tol≈0.100
         @test nnodes(ma)==6 && ntris(ma)==2
+
+        limited=joinpath(dir,"limited.stl")
+        write(limited,"solid limited\nfacet normal 0 0 1\nouter loop\n" *
+            "vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n" *
+            "endloop\nendfacet\nendsolid limited\n")
+        @test_throws ArgumentError read_stl(limited;max_facets=0)
+        @test_throws ArgumentError read_stl(limited;max_nodes=2)
+        @test_throws ArgumentError read_stl(
+            limited;max_file_bytes=filesize(limited)-1)
+        @test_throws ArgumentError read_stl(limited;max_nodes=true)
+        @test_throws ArgumentError read_stl(limited;max_facets=1.0)
+
+        # With exact welding no diagonal is needed: opposite finite Float64
+        # extrema may overflow on subtraction while still defining a valid,
+        # representable skinny triangle.
+        extreme=joinpath(dir,"extreme_exact.stl")
+        maximum=floatmax(Float64);tiny=nextfloat(0.0)
+        write(extreme,"solid extreme\nfacet normal 0 0 1\nouter loop\n" *
+            "vertex $(-maximum) 0 0\nvertex $maximum 0 0\n" *
+            "vertex 0 $tiny 0\nendloop\nendfacet\nendsolid extreme\n")
+        for tolerance in (0.0,1e-9)
+            extreme_mesh=read_stl(extreme;merge_tol=tolerance)
+            @test nnodes(extreme_mesh)==3 && ntris(extreme_mesh)==1 &&
+                  validate(extreme_mesh).ok
+        end
     end
 
     @testset "read_geo_params on the enclosure fixture" begin
-        gp = read_geo_params(joinpath(
-            @__DIR__, "..", "fixtures", "enclosure_coax_junction.geo"))
+        enclosure_path=joinpath(
+            @__DIR__, "..", "fixtures", "enclosure_coax_junction.geo")
+        gp = read_geo_params(enclosure_path)
+        @test_throws ArgumentError read_geo_params(
+            enclosure_path;max_file_bytes=filesize(enclosure_path)-1)
+        @test_throws ArgumentError read_geo_params(
+            enclosure_path;max_file_bytes=true)
+        @test_throws ArgumentError read_geo_params(1)
         @test gp.mesh_size_min ≈ 0.00026669999999999933 rtol=1e-9
         @test gp.mesh_size_max == 0.012
         @test gp.mesh_size_factor == 1.0

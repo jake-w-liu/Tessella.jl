@@ -383,6 +383,19 @@ end
             6; wall_height=1e299 / 31, curve_length=1e299) ≈ exact
         @test transfinite_curve_hwall(
             6; wall_height=1e-299 / 31, curve_length=1e-299) ≈ exact
+
+        # An end-oriented small wall is recovered by subtracting a node next to
+        # one from the endpoint. Its absolute error is therefore governed by
+        # eps(1.0), not by eps(wall_height/curve_length).
+        small_wall=2.5357353600853538e-8
+        small_end=transfinite_curve_hwall(
+            22;wall_height=small_wall,curve_length=1.0,
+            orientation=:end,max_nodes=22)
+        @test small_end ≈ _big_hwall_reference(
+            22,small_wall,1.0;orientation=:end) atol=8eps(Float64) rtol=0.0
+        @test abs((small_end[end]-small_end[end-1])-small_wall)<=8eps(1.0)
+        @test _parameter_crc([small_end])==
+              "757122bf5807435f676f31ffe748f46bc1577a80d13735f9d8f862180bb341b8"
         @test Tessella.transfinite_curve_hwall === transfinite_curve_hwall
         @test _parameter_crc(groups) ==
               "802ae6dd95259c50b087d03e7b7567b555f6040f8e62b1a2afc3aed6bca22379"

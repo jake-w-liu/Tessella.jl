@@ -256,11 +256,23 @@ if haveg
     # gmsh's documented failure exits NON-ZERO but still writes a partial mesh whose
     # solid volumes are empty — inspect that output regardless of exit status.
     if isfile(out)
-        m = read_msh(out).mesh
+        # The partial file contains duplicate surface triangles and correctly
+        # fails the validated simplex reader. Use the mixed-record parser only
+        # for forensic cell counting, and report its failed structural audit.
+        m = read_mixed_msh(out)
+        diagnostic=validate(m)
         bytag = Dict{Int32,Int}()
-        for t in (isempty(m.tet_tag) ? Int32[] : m.tet_tag); bytag[t] = get(bytag, t, 0) + 1; end
+        for block in m.blocks
+            msh_dimension(block.msh)==3 || continue
+            for tag in block.tags
+                bytag[tag]=get(bytag,tag,0)+1
+            end
+        end
+        nvolume=sum(values(bytag);init=0)
         exit_note = r.ok ? "exit 0" : "exit NON-ZERO (meshing error)"
-        push!(enc_lines, "gmsh $(gmsh_version()) on the literal `.geo` ($exit_note, $(round(r.seconds,digits=1)) s): $(ntets(m)) volume tets total.")
+        validity_note=diagnostic.ok ? "structurally valid" :
+            "structurally invalid (duplicate surface cells)"
+        push!(enc_lines, "gmsh $(gmsh_version()) on the literal `.geo` ($exit_note, $(round(r.seconds,digits=1)) s): $nvolume volume cells total; partial file is $validity_note.")
         push!(enc_lines, "Tets per physical-volume tag (air=1, coax_pin=2, case=4 are the solid regions): $(isempty(bytag) ? "none — no tagged volume elements" : sort(collect(bytag)))")
         solid = sum(get(bytag, Int32(t), 0) for t in (1,2,4))
         push!(enc_lines, solid == 0 ?
