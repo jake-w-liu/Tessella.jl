@@ -12,7 +12,7 @@ strictly-positive mesh size before a meshing kernel can consume it.
 """
 module SizeField
 
-using ..MeshTypes: Mesh
+using ..MeshTypes: Mesh, validate
 using ..IO: GeoParams, GeoFieldSpec, _geo_split_list
 
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize
@@ -56,6 +56,7 @@ scalar fields may legitimately return zero or a negative value.
 function field_value end
 
 @inline function _float_value(x::Real, caller::AbstractString, name::AbstractString)
+    x isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     y = try
         Float64(x)
     catch err
@@ -86,8 +87,16 @@ end
         throw(ArgumentError("$caller: a point must be an indexable coordinate collection"))
     end
     n >= 2 || throw(ArgumentError("$caller: a point needs at least two coordinates"))
+    raw = try
+        (p[1], p[2], n >= 3 ? p[3] : 0.0)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: point coordinates must be Float64-representable"))
+    end
+    any(value -> value isa Bool,raw) && throw(ArgumentError(
+        "$caller: point coordinates must not be Bool"))
     q = try
-        (Float64(p[1]), Float64(p[2]), n >= 3 ? Float64(p[3]) : 0.0)
+        (Float64(raw[1]),Float64(raw[2]),Float64(raw[3]))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: point coordinates must be Float64-representable"))
@@ -100,6 +109,8 @@ end
                                        positive::Bool=false)
     value isa Real ||
         throw(ArgumentError("$caller: field returned $(typeof(value)), not a real value, at ($x,$y,$z)"))
+    value isa Bool && throw(ArgumentError(
+        "$caller: field returned Bool, not a numeric value, at ($x,$y,$z)"))
     v = try
         Float64(value)
     catch err
@@ -283,6 +294,9 @@ end
 
 function DistanceField(mesh::Mesh; include_points::Bool=true,
                        include_segments::Bool=true, include_triangles::Bool=true)
+    diagnostic=validate(mesh;require_positive_tets=false,require_manifold_tris=false)
+    diagnostic.ok || throw(ArgumentError(
+        "DistanceField: invalid source mesh: $(join(diagnostic.messages, "; "))"))
     points = include_points ? [Tuple(mesh.coords[:,i]) for i in axes(mesh.coords,2)] : ()
     segments = include_segments ?
         [(Tuple(mesh.coords[:,mesh.segs[1,i]]), Tuple(mesh.coords[:,mesh.segs[2,i]]))

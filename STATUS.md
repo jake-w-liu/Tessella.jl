@@ -94,6 +94,41 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening scalar and
+anisotropic metric-length evaluation:
+
+- **VERIFIED (exact dyadic oracle):** subtracting the endpoints
+  `-floatmax(Float64)` and `floatmax(Float64)` previously overflowed before an
+  isotropic size of `1e308` could normalize the edge. The certified result is
+  now `3.5953862697246315`. A rotated metric whose two Cholesky products
+  overflow and cancel now returns `1.6968532169535264e301`, matching direct
+  exact evaluation of the stored `Metric3` quadratic form.
+- Floating Cholesky rows retain an allocation-free fast path. Cancellation,
+  subnormal products, non-finite intermediates, and ill-conditioned Schur
+  complements fall back to exact IEEE-dyadic arithmetic and one outward
+  `Float64` rounding. A 20,000-case seeded, exponent-varied audit produced
+  13,778 representable valid metric/direction pairs, no mismatch above
+  `2e-12` relative error, and maximum relative error
+  `3.550982574471733e-13` against an independent 512-bit exact-rational oracle.
+- Direction normalization now handles finite vectors whose unscaled Euclidean
+  norm overflows. Coordinate midpoints matched a 256-bit oracle in all
+  1,000,000 seeded finite pairs; nonzero metric lengths that underflow nearest
+  rounding are conservatively represented by the minimum positive subnormal,
+  while genuinely unrepresentable upper overflow is diagnosed.
+- `DistanceField(mesh)` and `AutomaticMeshSizeField(mesh)` revalidate mutable
+  source storage before connectivity indexing. Central field values, points,
+  metric entries, and numeric constructor inputs diagnose inappropriate `Bool`
+  values explicitly.
+- The focused size-field suite passed 6,976/6,976 assertions under Julia 1.12.7
+  and Julia 1.11.9. The bounds-checked package gate passed
+  164,322/164,322 assertions in 12m15.2s, and aggregate bounds-checked
+  validation exited 0 in 10m32.4s against Gmsh 4.15.2. Recursive package
+  ambiguity detection and the public documentation scan both returned zero.
+- The organized source layout remains enforced: the only top-level Julia files
+  under `src`, `test`, and `validation` are `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl`; implementation files remain
+  categorized in their subfolders.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening the mixed-element
 catalog, containers, and MSH contracts:
 

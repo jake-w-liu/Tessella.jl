@@ -66,6 +66,23 @@ function _postview_checksum(field,point,n::Int)
     return value
 end
 
+struct _FixedMetricField <: AbstractAnisoField
+    metric::Metric3
+end
+Tessella.SizeField.metric_at(field::_FixedMetricField,x,y,z)=field.metric
+
+function _exact_metric_displacement(metric::Metric3,dx,dy,dz)
+    R=Rational{BigInt}
+    x=R(dx); y=R(dy); z=R(dz)
+    squared=R(metric.m11)*x*x+R(metric.m22)*y*y+R(metric.m33)*z*z+
+            2*(R(metric.m12)*x*y+R(metric.m13)*x*z+R(metric.m23)*y*z)
+    return setprecision(BigFloat,512) do
+        setrounding(BigFloat,RoundUp) do
+            Float64(sqrt(BigFloat(squared)),RoundUp)
+        end
+    end
+end
+
 @testset "Gmsh-compatible size fields" begin
     @testset "distance to discrete entities" begin
         fp=DistanceField(points=[(0.0,0.0,0.0),(10.0,0.0,0.0)])
@@ -82,6 +99,10 @@ end
 
         tm=Mesh(Float64[0 1 0;0 0 1;0 0 0];tris=reshape(Int32[1,2,3],3,1))
         @test field_value(DistanceField(tm),0.25,0.25,0.5)==0.5
+        corrupted=Mesh(Float64[0 1 0;0 0 1;0 0 0];
+                       tris=reshape(Int32[1,2,3],3,1))
+        corrupted.tris[1,1]=4
+        @test_throws ArgumentError DistanceField(corrupted)
         @test_throws ArgumentError DistanceField()
         @test_throws ArgumentError field_value(fp,NaN,0.0,0.0)
         @test_throws ArgumentError field_value(fp,(0.0,))
@@ -1088,6 +1109,9 @@ end
             tris=Int32[1 1;2 3;3 4])
         flat_auto=AutomaticMeshSizeField(flat_auto_mesh)
         @test all(==(0.05),flat_auto.h)
+        corrupted_auto=Mesh(copy(C);tris=copy(F))
+        corrupted_auto.tris[1,1]=Int32(size(C,2)+1)
+        @test_throws ArgumentError AutomaticMeshSizeField(corrupted_auto)
 
         helper=joinpath(@__DIR__,"..","tmp","extproc_size.jl")
         mkpath(dirname(helper))
@@ -1178,6 +1202,45 @@ end
         @test directional_size(aniso,(0,0,0),(0,1,0))≈0.4
         @test metric_edge_length(aniso,(0,0,0),(0.2,0,0))≈1.0
         @test metric_edge_length(aniso,(0,0,0),(0,0.4,0))≈1.0
+
+        # Endpoint subtraction and Cholesky row products can overflow even when
+        # the represented metric length is finite. Exact IEEE-dyadic oracles
+        # certify both fallback paths.
+        lo=(-floatmax(Float64),0.0,0.0)
+        hi=(floatmax(Float64),0.0,0.0)
+        exact_isotropic=setprecision(BigFloat,512) do
+            Float64((BigFloat(hi[1])-BigFloat(lo[1]))/BigFloat(1e308),RoundUp)
+        end
+        @test metric_edge_length(ConstantSize(1e308),lo,hi)==exact_isotropic
+        @test Tessella.SizeField._metric_curve_increment(ConstantSize(1e308),lo,hi)==
+              exact_isotropic
+
+        l11=1.1e150; l21=-l11; l22=1e143
+        cancellation_metric=Metric3(l11^2,l21^2+l22^2,1.0,l11*l21,0.0,0.0)
+        cancellation_field=_FixedMetricField(cancellation_metric)
+        displacement=1.7e158
+        expected_displacement=_exact_metric_displacement(
+            cancellation_metric,displacement,displacement,0.0)
+        @test metric_edge_length(cancellation_field,(0.0,0.0,0.0),
+                                 (displacement,displacement,0.0))==expected_displacement
+        @test Tessella.SizeField._metric_curve_increment(
+            cancellation_field,(0.0,0.0,0.0),(displacement,displacement,0.0))==
+              expected_displacement
+        @test directional_size(cancellation_field,(0.0,0.0,0.0),
+                               (floatmax(Float64),floatmax(Float64),0.0))>0
+        @test Tessella.SizeField._metric_curve_increment(
+            _FixedMetricField(Metric3(1,1,1,0,0,0)),(0.0,0.0,0.0),
+            (floatmax(Float64),0.0,0.0))==floatmax(Float64)
+        @test metric_edge_length(ConstantSize(floatmax(Float64)),
+                                 (0.0,0.0,0.0),(nextfloat(0.0),0.0,0.0))==
+              nextfloat(0.0)
+        @test_throws ArgumentError metric_edge_length(
+            ConstantSize(0.5),(0.0,0.0,0.0),(floatmax(Float64),0.0,0.0))
+
+        @test_throws ArgumentError ConstantSize(true)
+        @test_throws ArgumentError Metric3(true,1,1,0,0,0)
+        @test_throws ArgumentError size_at(FunctionSize((x,y,z)->true),0,0,0)
+        @test_throws ArgumentError field_value(ConstantSize(1.0),(true,0.0,0.0))
 
         gp=GeoParams(NaN,NaN,1.0,0,Dict{Tuple{Int,Int},String}(),Dict(
             1=>GeoFieldSpec(1,"MathEval",Dict("F"=>"0.1+0.2*x"))),1)

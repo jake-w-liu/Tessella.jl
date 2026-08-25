@@ -38,8 +38,9 @@ Tessella
 │   │               and ASCII/binary MSH I/O
 │   └── Transform   validated affine transforms for finalized simplex meshes
 ├── fields/
-│   ├── SizeField   scalar/anisotropic field graph and context resolvers
-│   └── SizeFieldCatalog analytic, sampled, anisotropic, and process field implementations
+│   ├── SizeField   scalar/anisotropic field graph, validated mesh adapters, and context resolvers
+│   └── SizeFieldCatalog analytic, sampled, anisotropic, and process fields with
+│                        certified overflow/cancellation fallbacks for metric lengths
 ├── geometry/
 │   ├── Geometry    native box/cylinder/cone/geodesic-sphere surfaces
 │   ├── CAD         analytical surfaces, projection, imprints
