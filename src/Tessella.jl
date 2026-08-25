@@ -103,6 +103,8 @@ using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, 
 using .RecoverCDT: recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, mesh_quality
 using .Heal: is_meshable
+using .HighOrder: P2Mesh, p2_tetmesh, p2_volume, write_msh_p2,
+                  curve_to_cylinder!, curve_to_surface!, p2_min_jacobian
 
 # Install Mesh3D's exact-recovery extension only after both modules and their
 # public types are available, avoiding a Mesh3D ↔ RecoverCDT include cycle.
@@ -146,6 +148,8 @@ export MathEvalField, MathEvalAnisoField, GradientField, LaplacianField, MeanFie
        AutomaticMeshSizeField, ExternalProcessField
 export build_geo_size_field, build_geo_boundary_layer_fields
 export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
+export P2Mesh, p2_tetmesh, p2_volume, write_msh_p2,
+       curve_to_cylinder!, curve_to_surface!, p2_min_jacobian
 
 """
     stage() -> Int
