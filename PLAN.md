@@ -48,8 +48,9 @@ Tessella
 │   ├── Model       tagged geometry/entity kernel, solids, Booleans, and embeds
 │   └── GeoExec     bounded `.geo` execution
 ├── meshing/
-│   ├── Mesh1D/MeshSurface/Mesh3D dimensional meshing kernels
+│   ├── Mesh1D/Mesh3D dimensional curve and volume meshing kernels
 │   ├── Mesh2D      owned/validated Delaunay, CDT, and refinement topology
+│   ├── MeshSurface validated planar, cylinder, and regular parametric meshing
 │   ├── ExactMesh3D/RecoverCDT exact Delaunay and conforming recovery
 │   ├── Recombine/Refine/Optimize/HighOrder mesh transformation kernels
 │   └── BoundaryLayer/Periodic boundary-layer and periodic constraints

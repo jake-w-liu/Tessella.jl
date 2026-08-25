@@ -94,6 +94,40 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening planar, cylindrical,
+and parametric surface meshing:
+
+- `PlaneFrame` now has one validating construction path. `plane_frame` normalizes
+  coordinate scales, certifies the Newell filter, and uses an exact-rational
+  orientation-preserving fallback. Projection and lifting reject malformed,
+  Boolean, nonfinite, or unrepresentable values and use high-precision fallback
+  under cancellation. A 200-frame audit from scales `1e-300` through `1e300`
+  had maximum normal-direction loss `3.3306690738754696e-16` and maximum relative
+  lift/project round-trip residual `1.7826267587088538e-16`; ordinary projection
+  and lifting each allocated zero bytes.
+- Planar inputs are copied into strict three-coordinate loops, resource-counted,
+  and checked with a scale-relative coplanarity tolerance instead of a unit-scale
+  floor. Isotropic as well as anisotropic final edges now reach the physical
+  metric certificate.
+- Cylinder construction validates all controls before meshing, evaluates
+  overflow/cancellation-safe coordinates, rejects unrepresentable axial
+  subdivisions, and post-certifies physical area, angle, and field-metric bounds.
+  A 5,000-case scale-varied quality differential had maximum minimum-angle error
+  `8.368306048112117e-13` degrees against a 256-bit oracle.
+- General parametric patches now adapt and certify boundary and interior chord
+  edges in physical space, preserve curve-vs-face entity context, enforce
+  `max_area` as a physical triangle-area contract, check the sampled surface
+  Jacobian, and reject mapped inversions. Five affine scale cases from `1e-150`
+  through `1e150` had maximum requested-area ratio
+  `0.898589065255732` and maximum field-edge metric `0.7544670215115625`.
+- The focused `MeshSurface` suite passed 60/60 assertions under Julia 1.12.7 and
+  Julia 1.11.9. Its fixed planar-square SHA-256 is
+  `a0cfb73fe65d6814802e2df6d534a985c0bbb8d7e69a35eb860029f9d14a48ee`.
+- The bounds-checked package gate passed 163,974/163,974 assertions in 13m15.2s,
+  and the aggregate bounds-checked validation exited 0 against Gmsh 4.15.2.
+  The public `MeshSurface` documentation scan returned no missing names;
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening exact predicates and
 the planar meshing workspace:
 
