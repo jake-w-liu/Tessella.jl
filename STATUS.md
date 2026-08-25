@@ -94,6 +94,36 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening finalized-mesh
+affine transformations:
+
+- **VERIFIED (exact dyadic oracle):** finite cancellation around a remote pivot
+  made the identity transform map `(1,0,0)` to `(0,0,0)` when the pivot was
+  `(1e16,0,0)`. A conservative accumulated-error filter now sends cancellation,
+  subnormal, overflowed-bound, and non-finite cases through exact rational
+  evaluation before the result is rounded once to `Float64`; the regression now
+  returns `(1,0,0)` exactly.
+- Across 100,000 seeded, scale-varied affine coordinate expressions, comparison
+  with an independent `Rational{BigInt}` oracle found maximum absolute error
+  `3.084631262387123e-16` relative to the conservative expression scale, with
+  50,186 results bit-exact. Identity transformation also preserves the minimum
+  positive subnormal exactly.
+- Transform controls now reject non-Boolean `check` values and non-real angles
+  explicitly, every entry point revalidates mutable input storage, and returned
+  coordinate, connectivity, and tag arrays are detached from the input and from
+  independently repeated results.
+- Affine results were invariant after normalization at scales `1e-100`, `1`, and
+  `1e100`; an exact 90-degree rotation about a pivot of magnitude `1e100`
+  preserved the expected topology and coordinates for a tetrahedron only 16
+  coordinate ulps wide.
+- The focused `Transform` suite passed 103/103 assertions under Julia 1.12.7 and
+  Julia 1.11.9. Its fixed translated-mesh SHA-256 is
+  `cfd2502be91e189981fa6a298a188e500c9180ee05866529897fb0a785b59737`.
+- The bounds-checked package gate passed 164,244/164,244 assertions in 12m05.3s,
+  and the aggregate bounds-checked validation exited 0 in 10m33.0s against Gmsh
+  4.15.2. The public `Transform` documentation scan returned no missing names;
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening quadratic
 tetrahedra and type-11 solver output:
 

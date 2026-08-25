@@ -56,6 +56,8 @@ end
         first=translate_mesh(source,(2.,-3.,4.))
         second=translate_mesh(source,(2.,-3.,4.))
         @test mesh_crc(first)==mesh_crc(second)
+        @test mesh_crc(first).sha==
+              "cfd2502be91e189981fa6a298a188e500c9180ee05866529897fb0a785b59737"
         @test first.coords==source.coords .+ [2.,-3.,4.]
         @test translate_mesh(first,(-2.,3.,-4.)).coords==source.coords
         @test first.segs==source.segs
@@ -64,6 +66,10 @@ end
         @test first.seg_tag==source.seg_tag
         @test first.tri_tag==source.tri_tag
         @test first.tet_tag==source.tet_tag
+        for field in (:coords,:segs,:tris,:tets,:seg_tag,:tri_tag,:tet_tag)
+            @test !Base.mightalias(getfield(first,field),getfield(source,field))
+            @test !Base.mightalias(getfield(first,field),getfield(second,field))
+        end
     end
 
     @testset "rotation and affine analytic oracles" begin
@@ -122,6 +128,20 @@ end
                                    origin=(floatmax(Float64),0.,0.))
         @test node(cancelled,1)==(0.,0.,0.)
 
+        # All intermediates are finite here, but subtracting the remote pivot
+        # loses the node's unit displacement unless the cancellation filter
+        # selects exact dyadic evaluation.
+        remote=Mesh(reshape(Float64[1,0,0],3,1))
+        remote_identity=affine_transform(
+            remote,[1.0 0 0;0 1 0;0 0 1];origin=(1e16,0.,0.))
+        @test node(remote_identity,1)==(1.,0.,0.)
+
+        tiny=nextfloat(0.0)
+        tiny_identity=affine_transform(
+            Mesh(reshape(Float64[tiny,0,0],3,1)),
+            [1.0 0 0;0 1 0;0 0 1])
+        @test node(tiny_identity,1)==(tiny,0.,0.)
+
         @test_throws ArgumentError affine_transform(
             Mesh(reshape(Float64[floatmax(Float64),0,0],3,1)),
             [2.0 0 0;0 1 0;0 0 1])
@@ -138,12 +158,56 @@ end
         @test_throws ArgumentError translate_mesh(source,(0.,NaN,0.))
         @test_throws ArgumentError rotate_mesh(source,(0.,0.,0.),(0.,0.,0.),1.)
         @test_throws ArgumentError rotate_mesh(source,(0.,0.,0.),(0.,0.,1.),true)
+        @test_throws ArgumentError rotate_mesh(source,(0.,0.,0.),(0.,0.,1.),"1")
         @test_throws ArgumentError dilate_mesh(source,(0.,0.,0.),(1.,0.,1.))
         @test_throws ArgumentError mirror_mesh(source,(0.,0.,0.),(0.,0.,0.))
+        @test_throws ArgumentError affine_transform(
+            source,[1 0 0;0 1 0;0 0 1];check=1)
+        @test_throws ArgumentError translate_mesh(source,(0.,0.,0.);check=nothing)
+        @test_throws ArgumentError rotate_mesh(
+            source,(0.,0.,0.),(0.,0.,1.),0.;check=missing)
+        @test_throws ArgumentError dilate_mesh(
+            source,(0.,0.,0.),(1.,1.,1.);check=0)
+        @test_throws ArgumentError mirror_mesh(
+            source,(0.,0.,0.),(1.,0.,0.);check="true")
 
         inverted=Mesh(source.coords;tets=reshape(Int32[1,2,4,3],4,1))
         @test !validate(inverted).ok
         @test_throws ArgumentError translate_mesh(inverted,(1.,0.,0.))
+
+        corrupt=Mesh(source.coords;tets=source.tets)
+        corrupt.tets[1,1]=0
+        @test !validate(corrupt).ok
+        @test_throws ArgumentError translate_mesh(corrupt,(1.,0.,0.))
+    end
+
+    @testset "scale and translation invariance" begin
+        matrix=[2.0 0.5 0.0;-0.25 1.5 0.0;0.0 0.0 3.0]
+        reference=affine_transform(source,matrix;translation=(0.25,-0.5,0.75))
+        for scale in (1e-100,1.0,1e100)
+            scaled=Mesh(source.coords.*scale;segs=source.segs,tris=source.tris,
+                        tets=source.tets,seg_tag=source.seg_tag,
+                        tri_tag=source.tri_tag,tet_tag=source.tet_tag)
+            mapped=affine_transform(
+                scaled,matrix;translation=(0.25scale,-0.5scale,0.75scale))
+            @test mapped.coords./scale≈reference.coords atol=0 rtol=8eps()
+            @test mapped.segs==reference.segs
+            @test mapped.tris==reference.tris
+            @test mapped.tets==reference.tets
+            @test mesh_crc(mapped).n_tets==mesh_crc(reference).n_tets
+            @test validate(mapped).ok
+        end
+
+        offset=1e100
+        width=16eps(offset)
+        translated=Mesh(Float64[offset offset+width offset offset;
+                                 offset offset offset+width offset;
+                                 offset offset offset offset+width];
+                        tets=reshape(Int32[1,2,3,4],4,1))
+        rotated=rotate_mesh(translated,(offset,offset,offset),(0.,0.,1.),pi/2)
+        normalized=(rotated.coords.-offset)./width
+        @test normalized==Float64[0 0 -1 0;0 1 0 0;0 0 0 1]
+        @test validate(rotated).ok
     end
 
     @testset "resource growth" begin
@@ -152,5 +216,10 @@ end
         @test small>0
         @test large>small
         @test large<=2.25small+64_000
+    end
+
+    @testset "public documentation" begin
+        @test isempty(Base.Docs.undocumented_names(Tessella.Transform;private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.Transform;recursive=true))
     end
 end

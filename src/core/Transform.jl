@@ -12,6 +12,11 @@ using ..MeshTypes: Mesh, validate
 
 export affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 
+@inline function _transform_bool(value,caller::AbstractString,name::AbstractString)
+    value isa Bool || throw(ArgumentError("$caller: $name must be Bool"))
+    return value
+end
+
 @inline function _transform_float(value,caller::AbstractString,name::AbstractString)
     value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     value isa Real || throw(ArgumentError("$caller: $name must be real"))
@@ -93,6 +98,24 @@ end
     return (base+shift)+linear
 end
 
+@inline function _affine_error_scale(base::Float64,shift::Float64,
+                                     a::Float64,b::Float64,c::Float64,
+                                     point1::Float64,point2::Float64,
+                                     point3::Float64,origin1::Float64,
+                                     origin2::Float64,origin3::Float64)
+    scale=abs(base)+abs(shift)
+    if a!=0
+        scale += abs(a)*(abs(point1)+abs(origin1))
+    end
+    if b!=0
+        scale += abs(b)*(abs(point2)+abs(origin2))
+    end
+    if c!=0
+        scale += abs(c)*(abs(point3)+abs(origin3))
+    end
+    return scale
+end
+
 function _affine_coordinate_exact(base::Float64,shift::Float64,
                                   a::Float64,b::Float64,c::Float64,
                                   point1::Float64,point2::Float64,point3::Float64,
@@ -118,7 +141,17 @@ end
                                     caller::AbstractString,node::Int)
     result=_affine_coordinate_fast(base,shift,a,b,c,point1,point2,point3,
                                    origin1,origin2,origin3)
-    isfinite(result) && return result
+    scale=_affine_error_scale(base,shift,a,b,c,point1,point2,point3,
+                              origin1,origin2,origin3)
+    # Accept only a normal result separated from the accumulated roundoff
+    # envelope. Near cancellation, subnormal arithmetic, or a non-finite bound,
+    # use the exact dyadic path below.
+    if scale==0 && isfinite(result)
+        return result
+    elseif isfinite(result) && isfinite(scale) && abs(result)>=floatmin(Float64) &&
+           abs(result)>32eps(Float64)*scale
+        return result
+    end
     return _affine_coordinate_exact(base,shift,a,b,c,point1,point2,point3,
                                     origin1,origin2,origin3,caller,node)
 end
@@ -133,8 +166,9 @@ default, the result is independently validated. An orientation-reversing matrix
 rewinds triangle and tetrahedron connectivity while retaining cell order and tags.
 """
 function affine_transform(mesh::Mesh,matrix;origin=(0.,0.,0.),
-                          translation=(0.,0.,0.),check::Bool=true)
+                          translation=(0.,0.,0.),check=true)
     caller="affine_transform"
+    verify=_transform_bool(check,caller,"check")
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
@@ -161,7 +195,7 @@ function affine_transform(mesh::Mesh,matrix;origin=(0.,0.,0.),
     segments,triangles,tetrahedra=_copy_oriented_cells(mesh,orientation)
     result=Mesh(coordinates;segs=segments,tris=triangles,tets=tetrahedra,
                 seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,tet_tag=mesh.tet_tag)
-    if check
+    if verify
         output_diagnostic=validate(result)
         output_diagnostic.ok || throw(ArgumentError(
             "$caller: transformation produced an invalid mesh — "*
@@ -171,10 +205,11 @@ function affine_transform(mesh::Mesh,matrix;origin=(0.,0.,0.),
 end
 
 """Translate `mesh` by a finite three-coordinate displacement."""
-function translate_mesh(mesh::Mesh,displacement;check::Bool=true)
+function translate_mesh(mesh::Mesh,displacement;check=true)
+    verify=_transform_bool(check,"translate_mesh","check")
     shift=_transform_point3(displacement,"translate_mesh","displacement")
     return affine_transform(mesh,[1.0 0.0 0.0;0.0 1.0 0.0;0.0 0.0 1.0];
-                            translation=shift,check=check)
+                            translation=shift,check=verify)
 end
 
 @inline function _unit_axis(axis,caller::AbstractString)
@@ -186,7 +221,8 @@ end
 end
 
 """Rotate `mesh` about the oriented line through `center` along `axis`."""
-function rotate_mesh(mesh::Mesh,center,axis,angle::Real;check::Bool=true)
+function rotate_mesh(mesh::Mesh,center,axis,angle;check=true)
+    verify=_transform_bool(check,"rotate_mesh","check")
     pivot=_transform_point3(center,"rotate_mesh","center")
     ux,uy,uz=_unit_axis(axis,"rotate_mesh")
     theta=_transform_float(angle,"rotate_mesh","angle")
@@ -200,7 +236,7 @@ function rotate_mesh(mesh::Mesh,center,axis,angle::Real;check::Bool=true)
         cosine+uz*uz*one_minus,
     )
     return affine_transform(mesh,reshape(collect(matrix),3,3);origin=pivot,
-                            check=check)
+                            check=verify)
 end
 
 """
@@ -209,23 +245,25 @@ end
 Scale about `center` by three finite nonzero factors. Negative factors are allowed;
 an odd number of them triggers orientation rewinding.
 """
-function dilate_mesh(mesh::Mesh,center,factors;check::Bool=true)
+function dilate_mesh(mesh::Mesh,center,factors;check=true)
+    verify=_transform_bool(check,"dilate_mesh","check")
     pivot=_transform_point3(center,"dilate_mesh","center")
     sx,sy,sz=_transform_point3(factors,"dilate_mesh","factors")
     (sx!=0 && sy!=0 && sz!=0) || throw(ArgumentError(
         "dilate_mesh: scale factors must be nonzero"))
     return affine_transform(mesh,[sx 0.0 0.0;0.0 sy 0.0;0.0 0.0 sz];
-                            origin=pivot,check=check)
+                            origin=pivot,check=verify)
 end
 
 """Reflect `mesh` in the plane through `point` with the given normal."""
-function mirror_mesh(mesh::Mesh,point,normal;check::Bool=true)
+function mirror_mesh(mesh::Mesh,point,normal;check=true)
+    verify=_transform_bool(check,"mirror_mesh","check")
     pivot=_transform_point3(point,"mirror_mesh","point")
     nx,ny,nz=_unit_axis(normal,"mirror_mesh")
     matrix=[1-2nx*nx -2nx*ny -2nx*nz;
             -2ny*nx 1-2ny*ny -2ny*nz;
             -2nz*nx -2nz*ny 1-2nz*nz]
-    return affine_transform(mesh,matrix;origin=pivot,check=check)
+    return affine_transform(mesh,matrix;origin=pivot,check=verify)
 end
 
 end # module Transform
