@@ -94,6 +94,52 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening and organizing the
+top-level planar, extrusion, sizing, and volume-meshing pipelines:
+
+- **VERIFIED (endpoint oracle):** for
+  `z0=4.097470032826895e-162`, `z1=2.5149445970871698e185`, and
+  `hmax=4.710819546778298e182`, the former expression for the last of 755
+  layers evaluated to `2.51494459708717e185`, not the requested upper endpoint.
+  Exact-dyadic layer counting plus endpoint-pinned convex interpolation now
+  produces 756 distinct represented levels, and every node on the final level
+  equals `z1` exactly. The layer and edge certificates are isolated in
+  `src/meshing/PipelineSupport.jl`.
+- Extrusion now chooses a conservative transverse step whose represented
+  diagonal is no greater than `hmax`, audits the refined planar edges and every
+  output tetrahedron edge, rejects non-finite or zero represented volumes, and
+  checks exact node/tetrahedron counts against caller resource ceilings before
+  dense 3-D allocation. An unreadable-vector fixture confirmed that the minimum
+  `max_nodes`/`max_tets` preflight runs before point access.
+- Integer planar coordinates now produce the same fixed topology as Float64
+  coordinates. The planar CRC is
+  `850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4`;
+  the fixed 10-node/12-tetrahedron extrusion CRC is
+  `c7783021725d2dfd0b60b83536b5489f556b564af35fe66ef487e0bce15d9e3e`.
+  Boolean coordinates, bounds, counts, seeds, tags, and pipeline controls now
+  receive explicit `ArgumentError` diagnostics instead of dispatch failures or
+  numeric coercion. Input-driven non-finite derived simplex measures are also
+  `ArgumentError`s, and input `ArgumentError`s retain that category through the
+  top-level fill wrapper.
+- A seeded 5,000-case malformed-input audit returned 5,000 bounded
+  `ArgumentError`s and no other result or exception type. A separate 100-case
+  seeded rectangle/extrusion audit returned 100 valid meshes, pinned every top
+  endpoint, and found no edge-bound failure; its worst measured
+  `maxedge/hmax` was `0.9994607115469736`.
+- The focused pipeline suite passed 82/82 assertions under Julia 1.12.7 and
+  Julia 1.11.9. The focused Mesh3D suite passed 481/481 assertions; the affine
+  volume and prism suites retained 85/85 and 133/133 assertions and their
+  allocation ratchets.
+- The bounds-checked package gate passed 164,387/164,387 assertions in
+  13m29.3s. Aggregate bounds-checked validation exited 0 in approximately
+  11m57s against Gmsh 4.15.2. Recursive package ambiguity detection and the
+  public documentation scan both returned zero.
+- The Julia-file organization is executable policy: the only top-level Julia
+  files under `src`, `test`, and `validation` are `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl`. Pipeline support now lives in
+  the `src/meshing` subfolder, and every other implementation/supporting Julia
+  file remains categorized in an enforced domain subfolder.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening affine
 transfinite-volume interpolation and structured-input diagnostics:
 

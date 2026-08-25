@@ -22,6 +22,14 @@ function _cube_surface()
     Mesh(C; tris=t)
 end
 
+struct _UnreadPipelinePoints <: AbstractVector{Float64}
+    count::Int
+end
+Base.size(values::_UnreadPipelinePoints) = (values.count,)
+Base.IndexStyle(::Type{_UnreadPipelinePoints}) = IndexLinear()
+Base.getindex(::_UnreadPipelinePoints, index::Int) =
+    throw(ErrorException("pipeline resource preflight read point $index"))
+
 @testset "mesh_volume pipeline (integration)" begin
     @testset "clean surface → validated volume mesh" begin
         m = mesh_volume(_cube_surface())
@@ -75,6 +83,105 @@ end
                    for t in 1:ntris(m); init=0.0)
         @test area ≈ 100.0 atol=1e-8            # domain area
         @test all(m.coords[3,:] .== 0.0)        # planar
+    end
+
+    @testset "top-level pipeline input, resource, and CRC contracts" begin
+        square_segments = [(1,2),(2,3),(3,4),(4,1)]
+
+        planar = mesh_planar([0,1,1,0], [0,0,1,1], square_segments;
+                             min_angle_deg=0)
+        @test validate(planar).ok
+        @test mesh_crc(planar).sha ==
+              "850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4"
+        @test mesh_crc(mesh_planar(Float64[0,1,1,0], Float64[0,0,1,1],
+                                   square_segments; min_angle_deg=0)).sha ==
+              mesh_crc(planar).sha
+        @test_throws ArgumentError mesh_planar(
+            Any[0,1,true,0], [0,0,1,1], square_segments; min_angle_deg=0)
+        @test_throws ArgumentError mesh_planar(
+            Any[0,1,"1",0], [0,0,1,1], square_segments; min_angle_deg=0)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1], [0,0,1,1], square_segments; min_angle_deg=0)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1,0], [0,0,1,1],
+            Any[(1,2),(2,3),[3,4],(4,1)]; min_angle_deg=0)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1,0], [0,0,1,1],
+            Any[(1,2),(2,true),(3,4),(4,1)]; min_angle_deg=0)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1,0], [0,0,1,1], square_segments; min_angle_deg=true)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1,0], [0,0,1,1], square_segments; max_area=-Inf)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1,0], [0,0,1,1], square_segments; rng_seed=true)
+        @test_throws ArgumentError mesh_planar(
+            [0,1,1,0], [0,0,1,1], square_segments; field=1)
+
+        extruded = mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, 0, 1;
+            hmax=2, min_angle_deg=0)
+        @test validate(extruded).ok
+        @test size(extruded.coords,2) == 10
+        @test size(extruded.tets,2) == 12
+        @test mesh_crc(extruded).sha ==
+              "c7783021725d2dfd0b60b83536b5489f556b564af35fe66ef487e0bce15d9e3e"
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, 0, 1;
+            hmax=2, min_angle_deg=0, max_nodes=9)
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, 0, 1;
+            hmax=2, min_angle_deg=0, max_tets=11)
+        unread = _UnreadPipelinePoints(4)
+        preflight_error = try
+            mesh_sized_extrude(unread, unread, square_segments, 0, 1;
+                               hmax=2, min_angle_deg=0, max_nodes=5)
+            nothing
+        catch err
+            err
+        end
+        @test preflight_error isa ArgumentError
+        @test preflight_error isa ArgumentError &&
+              occursin("max_nodes=5", sprint(showerror, preflight_error))
+        @test_throws ArgumentError mesh_sized_extrude(
+            unread, unread, square_segments, 0, 1;
+            hmax=2, min_angle_deg=0, max_tets=2)
+        @test_throws ArgumentError mesh_sized_extrude(
+            Any[0,1,true,0], [0,0,1,1], square_segments, 0, 1; hmax=2)
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, true, 1; hmax=2)
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, 0, 1; hmax=true)
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, 0, 1;
+            hmax=2, min_angle_deg=true)
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, 0, 1;
+            hmax=2, max_nodes=true)
+        @test_throws ArgumentError mesh_sized_extrude(
+            [0.0,1e160,1e160,0.0], [0.0,0.0,1e160,1e160],
+            square_segments, 0.0, 1.0; hmax=2e160, min_angle_deg=0)
+
+        remote_z0 = 4.097470032826895e-162
+        remote_z1 = 2.5149445970871698e185
+        remote_hmax = 4.710819546778298e182
+        remote = mesh_sized_extrude(
+            [0,1,1,0], [0,0,1,1], square_segments, remote_z0, remote_z1;
+            hmax=remote_hmax, min_angle_deg=0)
+        @test all(==(remote_z0), view(remote.coords,3,1:4))
+        @test all(==(remote_z1), view(remote.coords,3,size(remote.coords,2)-3:size(remote.coords,2)))
+        @test length(unique(view(remote.coords,3,:))) == 756
+
+        surface = _cube_surface()
+        @test_throws ArgumentError mesh_sized(surface; hmax=true)
+        @test_throws ArgumentError mesh_sized(surface; field=1)
+        @test_throws ArgumentError mesh_sized(surface, 1)
+        @test_throws ArgumentError mesh_sized(Mesh(zeros(3,3)); hmax=1)
+        @test_throws ArgumentError mesh_volume(surface; smooth=1)
+        @test_throws ArgumentError mesh_volume(surface; optimize=1)
+        @test_throws ArgumentError mesh_volume(surface; check=1)
+        @test_throws ArgumentError mesh_volume(surface; smooth_iters=true)
+        @test_throws ArgumentError mesh_volume(surface; smooth_iters=-1)
+        @test_throws ArgumentError mesh_volume(surface; rng_seed=true)
     end
 
     @testset "optimize=true is quality-monotone and preserves volume + validity" begin

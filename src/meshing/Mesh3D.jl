@@ -47,6 +47,7 @@ function _recover_partition_exact end
 const GHOST3 = Int32(0)
 
 @inline function _finite3(x::Real, caller::AbstractString, name::AbstractString)
+    x isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     y = try
         Float64(x)
     catch err
@@ -2417,6 +2418,7 @@ struct BoxRegion
     x0::Float64; x1::Float64; y0::Float64; y1::Float64; z0::Float64; z1::Float64
     tag::Int
     function BoxRegion(x0::Real,x1::Real,y0::Real,y1::Real,z0::Real,z1::Real,tag::Integer)
+        tag isa Bool && throw(ArgumentError("BoxRegion: tag must not be Bool"))
         a0=_finite3(x0,"BoxRegion","x0");a1=_finite3(x1,"BoxRegion","x1")
         b0=_finite3(y0,"BoxRegion","y0");b1=_finite3(y1,"BoxRegion","y1")
         c0=_finite3(z0,"BoxRegion","z0");c1=_finite3(z1,"BoxRegion","z1")

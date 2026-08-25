@@ -15,11 +15,12 @@ values; finite input coordinates alone do not imply finite derived measures.
 """
 module TransfiniteVolume
 
-using ..MeshTypes: Mesh, boundary_faces, nnodes, ntris, ntets, validate
+using ..MeshTypes: Mesh, boundary_faces, nnodes, ntris, ntets, validate,
+                   _throw_simplex_validation
 using ..Predicates: orient3
 using ..StructuredNumerics: _needs_exact_affine, _affine_basis3,
                             _affine_point3, _uses_exact_affine,
-                            _certify_tet_volume, _throw_simplex_validation
+                            _certify_tet_volume
 
 export mesh_transfinite_volume
 
