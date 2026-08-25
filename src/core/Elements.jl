@@ -20,6 +20,17 @@ export mixed_crc, simplex_to_mixed, mixed_to_simplex
 export write_mixed_msh, read_mixed_msh
 export lagrange_nodes, add_block!, validate
 
+@inline function _elements_reject_bool(value,context::AbstractString)
+    value isa Bool && throw(ArgumentError("$context must not be Bool"))
+    return value
+end
+
+function _elements_reject_bool_values(values,context::AbstractString)
+    (eltype(values)<:Bool || any(value->value isa Bool,values)) &&
+        throw(ArgumentError("$context must not contain Bool values"))
+    return values
+end
+
 """One Gmsh `.msh` element type."""
 struct ElementSpec
     msh::Int
@@ -33,8 +44,7 @@ end
 # Authority: Gmsh 4.15.2 `GmshDefines.h`, `ElementType.cpp`, and
 # `pointsGenerators.cpp`. Only element types with a fixed connectivity and a
 # well-defined local-node layout are admitted here.
-"""Fixed-node element specifications keyed by Gmsh 4.15.2 numeric type."""
-const MSH_CATALOG = Dict{Int,ElementSpec}()
+const _MSH_CATALOG_BUILD = Dict{Int,ElementSpec}()
 
 function _expected_num_nodes(family::Symbol, order::Int, serendipity::Bool)
     order >= 0 || return -1
@@ -63,8 +73,8 @@ function _reg(s::ElementSpec)
     expected == s.nnodes || throw(ErrorException(
         "MSH type $(s.msh) has $(s.nnodes) nodes, expected $expected for " *
         "$(s.family) P$(s.order)"))
-    haskey(MSH_CATALOG, s.msh) && throw(ErrorException("duplicate MSH type $(s.msh)"))
-    MSH_CATALOG[s.msh] = s
+    haskey(_MSH_CATALOG_BUILD, s.msh) && throw(ErrorException("duplicate MSH type $(s.msh)"))
+    _MSH_CATALOG_BUILD[s.msh] = s
     return s
 end
 for s in (
@@ -143,6 +153,17 @@ for s in (
     _reg(s)
 end
 
+"""
+Fixed-node element specifications keyed by Gmsh 4.15.2 numeric type.
+
+The catalog is immutable so callers cannot corrupt the process-wide element
+registry. Individual [`ElementSpec`](@ref) records are immutable as well.
+"""
+const MSH_CATALOG = Base.ImmutableDict(
+    sort!(collect(_MSH_CATALOG_BUILD);by=first)...)
+const _MSH_CATALOG_LOOKUP = copy(_MSH_CATALOG_BUILD)
+empty!(_MSH_CATALOG_BUILD)
+
 # These are real Gmsh numeric tags, but not ordinary fixed-connectivity nodal
 # elements. In Gmsh 4.15.2, MSH 34/35/69 records contain packed triangle/tet
 # decompositions, 67/68/69 carry two domain-element links, and 34/35/70/133:136
@@ -183,13 +204,14 @@ const MSH_SPECIAL_RECORDS = Dict{Int,NamedTuple}(
 
 """Return the fixed-node [`ElementSpec`](@ref) for a Gmsh numeric type."""
 function msh_spec(msh::Integer)
+    _elements_reject_bool(msh,"Elements: Gmsh element type")
     tag = try
         Int(msh)
     catch err
         err isa InexactError || rethrow()
         throw(ArgumentError("Elements: Gmsh element type is outside Int bounds"))
     end
-    s=get(MSH_CATALOG, tag, nothing)
+    s=get(_MSH_CATALOG_LOOKUP, tag, nothing)
     if s === nothing
         haskey(MSH_SPECIAL_TYPES, tag) && throw(ArgumentError(
             "Elements: Gmsh element type $tag is special and is not an ordinary fixed-node element"))
@@ -215,6 +237,9 @@ struct ElementBlock <: AbstractElementBlock
     tags::Vector{Int32}
     function ElementBlock(msh::Integer, nodes::AbstractMatrix{<:Integer},
                           tags::AbstractVector{<:Integer}=zeros(Int32,size(nodes,2)))
+        _elements_reject_bool(msh,"ElementBlock: Gmsh type")
+        _elements_reject_bool_values(nodes,"ElementBlock: node indices")
+        _elements_reject_bool_values(tags,"ElementBlock: physical tags")
         spec=msh_spec(msh)
         size(nodes,1)==spec.nnodes || throw(ArgumentError(
             "ElementBlock: type $msh expects $(spec.nnodes) nodes per cell, got $(size(nodes,1))"))
@@ -250,6 +275,8 @@ struct ElementRef
     block::Int32
     cell::Int32
     function ElementRef(block::Integer,cell::Integer)
+        _elements_reject_bool(block,"ElementRef: block index")
+        _elements_reject_bool(cell,"ElementRef: cell index")
         b=try Int(block) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("ElementRef: block index is outside Int bounds"))
@@ -304,6 +331,7 @@ function _special_domain_refs(values,ncells::Int,context::AbstractString)
 end
 
 function _serializable_special_record(msh::Integer)
+    _elements_reject_bool(msh,"SpecialElementBlock: Gmsh type")
     tag=try Int(msh) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("SpecialElementBlock: Gmsh type is outside Int bounds"))
@@ -341,6 +369,10 @@ struct SpecialElementBlock <: AbstractElementBlock
                                  offsets::AbstractVector{<:Integer},
                                  tags::AbstractVector{<:Integer};
                                  parent_refs=nothing,domain_refs=nothing)
+        _elements_reject_bool_values(
+            connectivity,"SpecialElementBlock: node indices")
+        _elements_reject_bool_values(offsets,"SpecialElementBlock: offsets")
+        _elements_reject_bool_values(tags,"SpecialElementBlock: physical tags")
         tag,record=_serializable_special_record(msh)
         length(tags)<=typemax(Int32) || throw(ArgumentError(
             "SpecialElementBlock: cell count exceeds the Int32 MSH limit"))
@@ -429,6 +461,8 @@ function SpecialElementBlock(msh::Integer,cells::AbstractVector,
         @inbounds for value in cell
             value isa Integer || throw(ArgumentError(
                 "SpecialElementBlock: cell $j node indices must be integers"))
+            _elements_reject_bool(
+                value,"SpecialElementBlock: cell $j node index")
             connectivity[position]=try Int32(value) catch err
                 err isa InterruptException && rethrow()
                 throw(ArgumentError(
@@ -467,8 +501,16 @@ const MixedElementBlock=Union{ElementBlock,SpecialElementBlock}
 @inline _cell_node(block::SpecialElementBlock,cell::Int,slot::Int)=
     block.connectivity[Int(block.offsets[cell])+slot-1]
 
+@inline _copy_mixed_block(block::ElementBlock)=
+    ElementBlock(block.msh,block.nodes,block.tags)
+@inline _copy_mixed_block(block::SpecialElementBlock)=
+    SpecialElementBlock(block.msh,block.connectivity,block.offsets,block.tags;
+                        parent_refs=block.parent_refs,
+                        domain_refs=block.domain_refs)
+
 function _mixed_positive_int32(value,context::AbstractString)
     value isa Integer || throw(ArgumentError("$context must be an integer"))
+    _elements_reject_bool(value,context)
     converted=try Int(value) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("$context is outside Int bounds"))
@@ -486,6 +528,7 @@ function _mixed_int32_vector(values,context::AbstractString;
     out=Int32[]; seen=Set{Int32}()
     for value in values
         value isa Integer || throw(ArgumentError("$context must be an integer"))
+        _elements_reject_bool(value,context)
         converted=try Int(value) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("$context is outside Int bounds"))
@@ -513,6 +556,7 @@ function _mixed_positive_tag_vector(values,context::AbstractString;unique_values
     out=UInt64[]; seen=Set{UInt64}()
     for value in values
         value isa Integer || throw(ArgumentError("$context must be an integer"))
+        _elements_reject_bool(value,context)
         value>0 || throw(ArgumentError("$context must be positive"))
         converted=try UInt64(value) catch err
             err isa InterruptException && rethrow()
@@ -534,6 +578,7 @@ struct MixedEntity
     boundaries::Vector{Int32}
     function MixedEntity(dim::Integer,tag::Integer,bounds;
                          physical_tags=Int32[],boundaries=Int32[])
+        _elements_reject_bool(dim,"MixedEntity: dimension")
         d=try Int(dim) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("MixedEntity: dimension is outside Int bounds"))
@@ -543,6 +588,7 @@ struct MixedEntity
         (bounds isa Tuple || bounds isa AbstractVector) || throw(ArgumentError(
             "MixedEntity: bounds must be a tuple or vector"))
         raw=collect(bounds)
+        _elements_reject_bool_values(raw,"MixedEntity: bounds")
         if d==0 && length(raw)==3
             raw=vcat(raw,raw)
         end
@@ -572,6 +618,11 @@ struct MixedEntity
     end
 end
 
+# Suppress the autogenerated positional constructor: all public metadata
+# construction must pass through the copying and validation path below.
+struct _OwnedMixedEntityData end
+const _OWNED_MIXED_ENTITY_DATA = _OwnedMixedEntityData()
+
 """
     MixedEntityData(entities; ...)
 
@@ -588,6 +639,16 @@ struct MixedEntityData
     external_node_tags::Vector{UInt64}
     block_entities::Vector{Vector{Int32}}
     external_element_tags::Vector{Vector{UInt64}}
+    function MixedEntityData(::_OwnedMixedEntityData,
+                             entities::Dict{Tuple{Int,Int},MixedEntity},
+                             node_entities::Vector{Tuple{Int,Int32}},
+                             node_parametric::Vector{Union{Nothing,Vector{Float64}}},
+                             external_node_tags::Vector{UInt64},
+                             block_entities::Vector{Vector{Int32}},
+                             external_element_tags::Vector{Vector{UInt64}})
+        return new(entities,node_entities,node_parametric,external_node_tags,
+                   block_entities,external_element_tags)
+    end
 end
 
 function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}();
@@ -604,6 +665,8 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
             "MixedEntityData: entity keys must be (dimension, tag) tuples"))
         (key[1] isa Integer && key[2] isa Integer) || throw(ArgumentError(
             "MixedEntityData: entity keys must contain integers"))
+        _elements_reject_bool(key[1],"MixedEntityData: entity-key dimension")
+        _elements_reject_bool(key[2],"MixedEntityData: entity-key tag")
         key_dim=try Int(key[1]) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("MixedEntityData: entity-key dimension is outside Int bounds"))
@@ -624,6 +687,7 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
             "MixedEntityData: node classification must be a (dimension, tag) tuple"))
         (key[1] isa Integer && key[2] isa Integer) || throw(ArgumentError(
             "MixedEntityData: node classification must contain integers"))
+        _elements_reject_bool(key[1],"MixedEntityData: node dimension")
         dim=try Int(key[1]) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("MixedEntityData: node dimension is outside Int bounds"))
@@ -640,6 +704,8 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
         else
             parameters isa AbstractVector{<:Real} || throw(ArgumentError(
                 "MixedEntityData: node parameters must be vectors or nothing"))
+            _elements_reject_bool_values(
+                parameters,"MixedEntityData: node parameters")
             values=try Vector{Float64}(parameters) catch err
                 err isa InterruptException && rethrow()
                 throw(ArgumentError("MixedEntityData: node parameters must be Float64-representable"))
@@ -684,19 +750,38 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
             throw(ArgumentError(
                 "MixedEntityData: cell metadata length mismatch in block $i"))
     end
-    return MixedEntityData(copied_entities,copied_node_entities,copied_parametric,
-                           node_tags,copied_block_entities,copied_element_tags)
+    return MixedEntityData(
+        _OWNED_MIXED_ENTITY_DATA,copied_entities,copied_node_entities,
+        copied_parametric,node_tags,copied_block_entities,copied_element_tags)
 end
 
-"""Mixed-element mesh: coordinates plus homogeneous MSH blocks."""
+# Internal readers may transfer freshly allocated storage without a second
+# full copy; public construction always takes the detached path.
+struct _OwnedMixedMesh end
+const _OWNED_MIXED_MESH = _OwnedMixedMesh()
+
+"""
+Mixed-element mesh with owned coordinates, homogeneous MSH blocks, names, and
+optional entity metadata. Construction detaches every mutable array supplied by
+the caller.
+"""
 struct MixedMesh
     coords::Matrix{Float64}
     blocks::Vector{MixedElementBlock}
     physical_names::Dict{Tuple{Int,Int},String}
     entity_data::Union{Nothing,MixedEntityData}
+    function MixedMesh(::_OwnedMixedMesh,C::Matrix{Float64},
+                       B::Vector{MixedElementBlock},
+                       names::Dict{Tuple{Int,Int},String},
+                       data::Union{Nothing,MixedEntityData})
+        mesh=new(C,B,names,data)
+        _assert_mixed_structure(mesh,"MixedMesh")
+        return mesh
+    end
     function MixedMesh(coords::AbstractMatrix{<:Real}, blocks::AbstractVector;
                        physical_names=Dict{Tuple{Int,Int},String}(),entity_data=nothing)
         size(coords,1)==3 || throw(ArgumentError("MixedMesh: coords must be 3×n"))
+        _elements_reject_bool_values(coords,"MixedMesh: coordinates")
         size(coords,2) <= typemax(Int32) || throw(ArgumentError(
             "MixedMesh: node count exceeds Int32 indexing"))
         C = try
@@ -713,15 +798,13 @@ struct MixedMesh
         for (i,block) in pairs(blocks)
             block isa MixedElementBlock || throw(ArgumentError(
                 "MixedMesh: block $i must be an ElementBlock or SpecialElementBlock"))
-            push!(B,block)
+            push!(B,_copy_mixed_block(block))
         end
         names=_copy_physical_names(physical_names,"MixedMesh")
         data=entity_data===nothing ? nothing :
              entity_data isa MixedEntityData ? _copy_mixed_entity_data(entity_data) :
              throw(ArgumentError("MixedMesh: entity_data must be MixedEntityData or nothing"))
-        mesh=new(C,B,names,data)
-        _assert_mixed_structure(mesh,"MixedMesh")
-        return mesh
+        return MixedMesh(_OWNED_MIXED_MESH,C,B,names,data)
     end
 end
 
@@ -735,6 +818,8 @@ function _copy_physical_names(names, context::AbstractString)
         dim,tag=key
         (dim isa Integer && tag isa Integer) || throw(ArgumentError(
             "$context: physical-name keys must contain integers"))
+        _elements_reject_bool(dim,"$context: physical-name dimension")
+        _elements_reject_bool(tag,"$context: physical-name tag")
         d = try Int(dim) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("$context: physical-name dimension is outside Int bounds"))
@@ -878,7 +963,8 @@ function add_block!(m::MixedMesh, block::AbstractElementBlock)
         "add_block!: unsupported element block type"))
     m.entity_data===nothing || throw(ArgumentError(
         "add_block!: cannot append without synchronized v4 entity metadata"))
-    push!(m.blocks,block)
+    owned=_copy_mixed_block(block)
+    push!(m.blocks,owned)
     try
         _assert_mixed_structure(m,"add_block!")
     catch
@@ -1095,7 +1181,9 @@ parametrics, and globally unique positive external tags. Geometry/Jacobian
 validity for curved high-order cells is not inferred from nodal coordinates by
 this structural validator.
 """
-function validate(m::MixedMesh; reject_duplicate_cells::Bool=true)
+function validate(m::MixedMesh; reject_duplicate_cells=true)
+    reject_duplicate_cells isa Bool || throw(ArgumentError(
+        "validate(MixedMesh): reject_duplicate_cells must be Bool"))
     messages=String[]
     try
         _assert_mixed_structure(m,"validate(MixedMesh)")
@@ -1565,7 +1653,10 @@ lagrange_nodes(msh::Integer) = _scaled_nodes(msh_spec(msh))
 Return local nodes for the unique catalogued Gmsh type with this shape. The
 lookup bounds accepted orders to those defined by Gmsh 4.15.2.
 """
-function lagrange_nodes(family::Symbol, order::Integer; serendipity::Bool=false)
+function lagrange_nodes(family::Symbol, order::Integer; serendipity=false)
+    _elements_reject_bool(order,"lagrange_nodes: order")
+    serendipity isa Bool || throw(ArgumentError(
+        "lagrange_nodes: serendipity must be Bool"))
     p = try
         Int(order)
     catch err
@@ -1662,6 +1753,7 @@ _MixedReadAccum() = _MixedReadAccum(
 
 function _read_limit(value,name::AbstractString;ceiling=typemax(Int))
     value isa Integer || throw(ArgumentError("read_mixed_msh: $name must be an integer"))
+    _elements_reject_bool(value,"read_mixed_msh: $name")
     ceiling isa Integer || throw(ArgumentError("read_mixed_msh: invalid internal limit ceiling"))
     upper=Int(ceiling)
     out = try
@@ -3231,8 +3323,8 @@ function _finish_mixed_read(acc,is_v4::Bool)
         external_node_tags=acc.external_node_tags,
         block_entities=block_entities,
         external_element_tags=external_element_tags) : nothing
-    return MixedMesh(coords,blocks;physical_names=acc.physical_names,
-                     entity_data=data)
+    return MixedMesh(
+        _OWNED_MIXED_MESH,coords,blocks,acc.physical_names,data)
 end
 
 function _escape_mixed_name(name::AbstractString)
@@ -3282,8 +3374,11 @@ records: Gmsh 4.15.2 can parse such a file, but rewrites an invalid node section
 unless compatible node/entity classification metadata is supplied. Read escaped names with
 `read_mixed_msh(...; tessella_extensions=true)`.
 """
-function write_mixed_msh(path::AbstractString,m::MixedMesh;version::Real=4.1,
+function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
                          binary=false,gmsh_compatible=true)
+    version isa Real || throw(ArgumentError(
+        "write_mixed_msh: version must be real"))
+    _elements_reject_bool(version,"write_mixed_msh: version")
     value = try
         Float64(version)
     catch err

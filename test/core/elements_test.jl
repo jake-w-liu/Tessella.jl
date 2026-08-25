@@ -247,6 +247,12 @@ end
 @testset "Gmsh fixed-node catalog" begin
     @test length(EXPECTED_SPECS) == 125
     @test Set(keys(ElementsUnderTest.MSH_CATALOG)) == Set(keys(EXPECTED_SPECS))
+    @test_throws MethodError setindex!(
+        ElementsUnderTest.MSH_CATALOG,ElementsUnderTest.msh_spec(1),1)
+    @test_throws ArgumentError ElementsUnderTest.msh_spec(true)
+    @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(:lin,true)
+    @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(
+        :lin,1;serendipity=1)
     for tag in sort!(collect(keys(EXPECTED_SPECS)))
         expected = EXPECTED_SPECS[tag]
         actual = ElementsUnderTest.msh_spec(tag)
@@ -915,11 +921,25 @@ end
 
 @testset "MixedMesh structural validation and linear allocation growth" begin
     @test_throws ArgumentError ElementsUnderTest.ElementBlock(
+        true,reshape(Int32[1],1,1))
+    @test_throws ArgumentError ElementsUnderTest.ElementBlock(
+        1,reshape(Bool[true,true],2,1))
+    @test_throws ArgumentError ElementsUnderTest.ElementBlock(
+        1,reshape(Int32[1,2],2,1),Bool[true])
+    @test_throws ArgumentError ElementsUnderTest.ElementRef(true,1)
+    @test_throws ArgumentError ElementsUnderTest.ElementRef(1,false)
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        134,[Bool[true,true]])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        134,Int32[1,2],Bool[true,false],Int32[0])
+    @test_throws ArgumentError ElementsUnderTest.ElementBlock(
         1, reshape(BigInt[1, big(typemax(Int32))+1],2,1))
     @test_throws ArgumentError ElementsUnderTest.ElementBlock(
         1, reshape(Int32[1,2],2,1), [big(typemax(Int32))+1])
     @test_throws ArgumentError ElementsUnderTest.MixedMesh(
         reshape(Float64[Inf,0,0],3,1), ElementsUnderTest.ElementBlock[])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        reshape(Bool[true,false,false],3,1),ElementsUnderTest.ElementBlock[])
     @test_throws ArgumentError ElementsUnderTest.MixedMesh(
         zeros(3,1), [ElementsUnderTest.ElementBlock(
             1,reshape(Int32[1,2],2,1))])
@@ -935,13 +955,54 @@ end
     @test_throws ArgumentError ElementsUnderTest.MixedMesh(
         zeros(3,0), ElementsUnderTest.ElementBlock[];
         physical_names=Dict((1,1)=>"bad\0name"))
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        zeros(3,0),ElementsUnderTest.ElementBlock[];
+        physical_names=Dict((true,1)=>"bad"))
+
+    owned_coords=Float64[0 1 0;0 0 1;0 0 0]
+    owned_line=ElementsUnderTest.ElementBlock(
+        1,reshape(Int32[1,2],2,1),Int32[3])
+    owned_polygon=ElementsUnderTest.SpecialElementBlock(
+        34,[Int32[1,2,3]],Int32[4];parent_refs=[(1,1)])
+    owned_mesh=ElementsUnderTest.MixedMesh(
+        owned_coords,[owned_line,owned_polygon];physical_names=Dict((1,3)=>"line"))
+    repeated_owned=ElementsUnderTest.MixedMesh(
+        owned_coords,[owned_line,owned_polygon];physical_names=Dict((1,3)=>"line"))
+    @test !Base.mightalias(owned_mesh.coords,owned_coords)
+    @test !Base.mightalias(owned_mesh.coords,repeated_owned.coords)
+    for field in (:nodes,:tags)
+        @test !Base.mightalias(
+            getfield(owned_mesh.blocks[1],field),getfield(owned_line,field))
+        @test !Base.mightalias(
+            getfield(owned_mesh.blocks[1],field),
+            getfield(repeated_owned.blocks[1],field))
+    end
+    for field in (:connectivity,:offsets,:tags,:parent_refs,:domain_refs)
+        @test !Base.mightalias(
+            getfield(owned_mesh.blocks[2],field),getfield(owned_polygon,field))
+        @test !Base.mightalias(
+            getfield(owned_mesh.blocks[2],field),
+            getfield(repeated_owned.blocks[2],field))
+    end
+    owned_line.nodes[1,1]=2
+    owned_polygon.connectivity[1]=2
+    @test ElementsUnderTest.validate(owned_mesh).ok
+    @test owned_mesh.blocks[1].nodes[:,1]==Int32[1,2]
+    @test owned_mesh.blocks[2].connectivity==Int32[1,2,3]
 
     appended=ElementsUnderTest.MixedMesh(Float64[0 1;0 0;0 0],
                                           ElementsUnderTest.ElementBlock[])
     block=ElementsUnderTest.ElementBlock(
         1,reshape(Int32[1,2],2,1),Int32[3])
     @test ElementsUnderTest.add_block!(appended,block)===appended
-    @test appended.blocks==[block]
+    @test length(appended.blocks)==1
+    @test appended.blocks[1].msh==block.msh
+    @test appended.blocks[1].nodes==block.nodes
+    @test appended.blocks[1].tags==block.tags
+    @test !Base.mightalias(appended.blocks[1].nodes,block.nodes)
+    @test !Base.mightalias(appended.blocks[1].tags,block.tags)
+    block.nodes[1,1]=2
+    @test ElementsUnderTest.validate(appended).ok
     @test_throws ArgumentError ElementsUnderTest.add_block!(
         appended,ElementsUnderTest.ElementBlock(
             1,reshape(Int32[2,3],2,1),Int32[3]))
@@ -967,6 +1028,8 @@ end
     @test !ElementsUnderTest.validate(duplicate).ok
     @test ElementsUnderTest.validate(
         duplicate; reject_duplicate_cells=false).ok
+    @test_throws ArgumentError ElementsUnderTest.validate(
+        duplicate;reject_duplicate_cells=1)
 
     function fragmented_lines(count)
         coordinates = Float64[0 1;0 0;0 0]
@@ -1489,6 +1552,60 @@ end
 end
 
 @testset "lossless v4 entity metadata and multiple physical memberships" begin
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        true,1,(0.,0.,0.))
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        0,true,(0.,0.,0.))
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        0,1,(false,0.,0.))
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        0,1,(0.,0.,0.);physical_tags=Bool[true])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        1,1,(0.,0.,0.,1.,0.,0.);boundaries=Bool[true])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntityData(
+        Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}();
+        node_entities=[(true,1)],node_parametric=[Float64[]],
+        external_node_tags=[UInt64(1)])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntityData(
+        Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}();
+        node_entities=[(1,1)],node_parametric=[Bool[true]],
+        external_node_tags=[UInt64(1)])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntityData(
+        Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}();
+        node_entities=[(0,1)],node_parametric=[Float64[]],
+        external_node_tags=Bool[true])
+
+    metadata_entity=ElementsUnderTest.MixedEntity(
+        0,1,(0.,0.,0.);physical_tags=Int32[7])
+    metadata_entities=Dict((0,1)=>metadata_entity)
+    metadata_node_entities=[(0,Int32(1))]
+    metadata_parameters=Union{Nothing,Vector{Float64}}[Float64[]]
+    metadata_node_tags=UInt64[10]
+    metadata_block_entities=Vector{Int32}[]
+    metadata_element_tags=Vector{UInt64}[]
+    metadata=ElementsUnderTest.MixedEntityData(metadata_entities;
+        node_entities=metadata_node_entities,node_parametric=metadata_parameters,
+        external_node_tags=metadata_node_tags,
+        block_entities=metadata_block_entities,
+        external_element_tags=metadata_element_tags)
+    @test !Base.mightalias(
+        metadata.entities[(0,1)].physical_tags,metadata_entity.physical_tags)
+    @test !Base.mightalias(metadata.node_entities,metadata_node_entities)
+    @test !Base.mightalias(metadata.node_parametric,metadata_parameters)
+    @test !Base.mightalias(metadata.node_parametric[1],metadata_parameters[1])
+    @test !Base.mightalias(metadata.external_node_tags,metadata_node_tags)
+    @test_throws MethodError ElementsUnderTest.MixedEntityData(
+        metadata_entities,metadata_node_entities,metadata_parameters,
+        metadata_node_tags,metadata_block_entities,metadata_element_tags)
+    metadata_entity.physical_tags[1]=8
+    metadata_node_entities[1]=(0,Int32(2))
+    push!(metadata_parameters[1],1.)
+    metadata_node_tags[1]=11
+    @test metadata.entities[(0,1)].physical_tags==Int32[7]
+    @test metadata.node_entities==[(0,Int32(1))]
+    @test metadata.node_parametric==[Float64[]]
+    @test metadata.external_node_tags==UInt64[10]
+
     directory=mktempdir()
     source="""
     \$MeshFormat
@@ -2478,6 +2595,7 @@ end
         valid;max_file_bytes=filesize(valid)-1)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=-1)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=1.0)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=true)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid;max_connectivity=-1)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
@@ -2563,6 +2681,12 @@ end
         target,mixed_io_fixture(escaped_name=false);version=3.0)
     @test read(target,String)=="sentinel"
     @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        target,mixed_io_fixture(escaped_name=false);version=true)
+    @test read(target,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        target,mixed_io_fixture(escaped_name=false);version="4.1")
+    @test read(target,String)=="sentinel"
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
         target,mixed_io_fixture(escaped_name=false);gmsh_compatible=1)
     @test read(target,String)=="sentinel"
     @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
@@ -2639,4 +2763,9 @@ end
     GC.gc(); allocated_small=@allocated ElementsUnderTest.read_mixed_msh(small)
     GC.gc(); allocated_large=@allocated ElementsUnderTest.read_mixed_msh(large)
     @test allocated_large<=2.8allocated_small+131_072
+end
+
+@testset "Elements public documentation" begin
+    @test isempty(Base.Docs.undocumented_names(Tessella.Elements;private=false))
+    @test isempty(Test.detect_ambiguities(Tessella.Elements;recursive=true))
 end

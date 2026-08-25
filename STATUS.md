@@ -94,6 +94,40 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening the mixed-element
+catalog, containers, and MSH contracts:
+
+- **VERIFIED (ownership regression):** `MixedMesh` construction and
+  `add_block!` retained the caller's `ElementBlock` arrays. `Base.mightalias`
+  returned true in both paths, and changing the original connectivity made the
+  stored mesh invalid. Ordinary and special blocks are now copied on every
+  public insertion; coordinates, connectivity, CSR offsets, physical tags,
+  parent/domain references, names, and entity metadata are detached from both
+  caller storage and independently repeated results. The MSH reader retains a
+  token-gated transfer path for its freshly allocated storage, avoiding a
+  redundant full-file copy.
+- The exported 125-entry `MSH_CATALOG` is now immutable, while an internal
+  hash table retains the existing lookup path. The positional raw-storage
+  constructor for `MixedEntityData` is sealed so documented construction cannot
+  be bypassed accidentally.
+- Element types, connectivity, tags, entity metadata, local-node orders, read
+  limits, MSH versions, and Boolean controls now diagnose inappropriate `Bool`
+  values explicitly. A 20,000-case seeded byte-mutation audit of ASCII and
+  binary MSH seeds produced 283 still-readable files and 19,717 bounded
+  `ArgumentError` rejections, with no unexpected exception type.
+- The installed Gmsh 4.15.2 element differential retained all 950 assertions,
+  and the fixed mixed-mesh CRC remains
+  `b219f5afde8b589ce8c31c0fb174ebd2373811ab0f4e37a564f18934499e00c0`.
+  Binary/ASCII, opposite-endian, sparse-tag, special-record, and all-125-type
+  round trips, malformed-input gates, atomic output, and allocation ratchets
+  all passed.
+- The focused `Elements` suite passed 2,848/2,848 assertions under Julia 1.12.7
+  and Julia 1.11.9. The bounds-checked package gate passed
+  164,308/164,308 assertions in 12m11.5s, and aggregate bounds-checked
+  validation exited 0 in 10m31.6s against Gmsh 4.15.2. The public `Elements`
+  documentation scan returned no missing names; recursive package ambiguity
+  detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening finalized-mesh
 affine transformations:
 
