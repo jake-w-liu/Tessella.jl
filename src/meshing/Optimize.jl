@@ -31,6 +31,14 @@ using ..Predicates: orient3
 
 export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, TetQuality
 
+"""
+    TetQuality(n_tets, min_dihedral_deg, mean_dihedral_deg, max_dihedral_deg,
+               min_radius_edge, mean_radius_edge, min_volume, n_slivers)
+
+Validated tetrahedron-quality summary returned by [`mesh_quality`](@ref). A
+nonempty report has ordered finite dihedral/radius-edge statistics, positive
+minimum volume, and `0 <= n_slivers <= n_tets`; the empty report is all zeros.
+"""
 struct TetQuality
     n_tets::Int
     min_dihedral_deg::Float64
@@ -40,6 +48,50 @@ struct TetQuality
     mean_radius_edge::Float64
     min_volume::Float64
     n_slivers::Int              # min dihedral < 10° or max dihedral > 170°
+
+    function TetQuality(n_tets::Int,min_dihedral_deg::Float64,
+                        mean_dihedral_deg::Float64,max_dihedral_deg::Float64,
+                        min_radius_edge::Float64,mean_radius_edge::Float64,
+                        min_volume::Float64,n_slivers::Int)
+        (n_tets isa Bool||n_slivers isa Bool) && throw(ArgumentError(
+            "TetQuality: counts must not be Bool"))
+        n_tets>=0 || throw(ArgumentError("TetQuality: n_tets must be nonnegative"))
+        0<=n_slivers<=n_tets || throw(ArgumentError(
+            "TetQuality: n_slivers must be in 0:n_tets"))
+        values=(min_dihedral_deg,mean_dihedral_deg,max_dihedral_deg,
+                min_radius_edge,mean_radius_edge,min_volume)
+        all(isfinite,values) || throw(ArgumentError(
+            "TetQuality: quality statistics must be finite"))
+        if n_tets==0
+            all(iszero,values)&&n_slivers==0 || throw(ArgumentError(
+                "TetQuality: an empty report must contain only zero statistics"))
+        else
+            0<=min_dihedral_deg<=mean_dihedral_deg<=max_dihedral_deg<=180 ||
+                throw(ArgumentError("TetQuality: dihedral statistics are not ordered in [0, 180]"))
+            0<min_radius_edge<=mean_radius_edge || throw(ArgumentError(
+                "TetQuality: radius-edge statistics must be positive and ordered"))
+            min_volume>0 || throw(ArgumentError(
+                "TetQuality: min_volume must be positive for a nonempty report"))
+        end
+        new(n_tets,min_dihedral_deg,mean_dihedral_deg,max_dihedral_deg,
+            min_radius_edge,mean_radius_edge,min_volume,n_slivers)
+    end
+end
+
+function TetQuality(n_tets::Integer,min_dihedral_deg::Real,mean_dihedral_deg::Real,
+                    max_dihedral_deg::Real,min_radius_edge::Real,
+                    mean_radius_edge::Real,min_volume::Real,n_slivers::Integer)
+    (n_tets isa Bool||n_slivers isa Bool) && throw(ArgumentError(
+        "TetQuality: counts must not be Bool"))
+    (typemin(Int)<=n_tets<=typemax(Int)&&typemin(Int)<=n_slivers<=typemax(Int)) ||
+        throw(ArgumentError("TetQuality: counts exceed the platform Int range"))
+    converted=(_opt_float(min_dihedral_deg,"TetQuality","min_dihedral_deg"),
+        _opt_float(mean_dihedral_deg,"TetQuality","mean_dihedral_deg"),
+        _opt_float(max_dihedral_deg,"TetQuality","max_dihedral_deg"),
+        _opt_float(min_radius_edge,"TetQuality","min_radius_edge"),
+        _opt_float(mean_radius_edge,"TetQuality","mean_radius_edge"),
+        _opt_float(min_volume,"TetQuality","min_volume"))
+    return TetQuality(Int(n_tets),converted...,Int(n_slivers))
 end
 
 function Base.show(io::IO, q::TetQuality)
@@ -81,6 +133,7 @@ function mesh_quality(m::Mesh; sliver_deg::Real=10.0)
         remin = min(remin, re); remean += (re-remean)/t
         vmin = min(vmin, tet_volume(a,b,c,d))
     end
+    dmean=clamp(dmean,dmin,dmax);remean=max(remin,remean)
     return TetQuality(nt, rad2deg(dmin), rad2deg(dmean), rad2deg(dmax),
                       remin, remean, vmin, nsliv)
 end
@@ -145,8 +198,9 @@ Boundary-preserving optimal-Delaunay-triangulation (ODT) smoothing. Each interio
 node is moved to the **volume-weighted average of the circumcenters** of its
 incident tets (the ODT node update), but only if the move keeps every incident tet
 positively-oriented (otherwise it is skipped, so validity and total volume are
-preserved). Boundary nodes (on any boundary face) stay fixed; near-zero-volume
-incident tets are skipped when averaging (their circumcenter is ill-conditioned).
+preserved). Boundary nodes (on any boundary face) stay fixed; incident tets whose
+dimensionless volume is negligible relative to their longest edge are skipped when
+averaging because their circumcenters are ill-conditioned.
 Like [`smooth_laplacian`](@ref) it lifts the *mean* dihedral and is not min-angle
 optimal (targeted flips and [`remove_slivers`](@ref) handle individual worst slivers);
 it simply uses a different node target. Returns a new smoothed `Mesh`.
@@ -163,20 +217,19 @@ function smooth_odt(m::Mesh; iters::Integer=5)
             isboundary[v] && continue
             isempty(inc[v]) && continue
             # ODT target: circumcenters of incident tets weighted by their volume
-            sx=0.0; sy=0.0; sz=0.0; wsum=0.0;wmax=0.0
+            sx=0.0; sy=0.0; sz=0.0; wsum=0.0;logwmax=-Inf
             for t in inc[v]
                 a=m.tets[1,t];b=m.tets[2,t];c=m.tets[3,t];d=m.tets[4,t]
                 pa=(coords[1,a],coords[2,a],coords[3,a]); pb=(coords[1,b],coords[2,b],coords[3,b])
                 pc=(coords[1,c],coords[2,c],coords[3,c]); pd=(coords[1,d],coords[2,d],coords[3,d])
-                vol = tet_volume(pa,pb,pc,pd)
-                vol <= _odt_voleps(pa,pb,pc,pd) && continue    # skip degenerate tet
-                cc = _tet_circumcenter(pa,pb,pc,pd)
-                (isfinite(cc[1]) && isfinite(cc[2]) && isfinite(cc[3])) || continue
-                if vol>wmax
-                    wsum *= wmax==0 ? 0.0 : wmax/vol
-                    wmax=vol
+                candidate=_odt_candidate(pa,pb,pc,pd)
+                candidate===nothing && continue
+                cc,logweight=candidate
+                if logweight>logwmax
+                    wsum *= isfinite(logwmax) ? exp(logwmax-logweight) : 0.0
+                    logwmax=logweight
                 end
-                w=vol/wmax;newsum=wsum+w;f=w/newsum
+                w=exp(logweight-logwmax);newsum=wsum+w;f=w/newsum
                 if wsum==0
                     sx=cc[1];sy=cc[2];sz=cc[3]
                 else
@@ -194,7 +247,7 @@ function smooth_odt(m::Mesh; iters::Integer=5)
             # meaningless coordinate drift (and remains bit-stable on fixed points).
             ox=coords[1,v]; oy=coords[2,v]; oz=coords[3,v]
             move = max(abs(tx-ox), abs(ty-oy), abs(tz-oz))
-            movescl = max(abs(ox), abs(oy), abs(oz), abs(tx), abs(ty), abs(tz), 1.0)
+            movescl = max(abs(ox), abs(oy), abs(oz), abs(tx), abs(ty), abs(tz))
             move <= 32eps(Float64)*movescl && continue
             # accept only if no incident tet inverts (positive signed volume kept)
             coords[1,v]=tx; coords[2,v]=ty; coords[3,v]=tz
@@ -280,6 +333,7 @@ function _require_valid_tetmesh(m::Mesh, caller::AbstractString)
 end
 
 function _opt_float(x::Real,caller::AbstractString,name::AbstractString)
+    x isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     try
         return Float64(x)
     catch err
@@ -289,6 +343,7 @@ function _opt_float(x::Real,caller::AbstractString,name::AbstractString)
 end
 
 function _opt_count(x::Integer, caller::AbstractString, name::AbstractString)
+    x isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     (0 <= x <= typemax(Int)) ||
         throw(ArgumentError("$caller: $name must be in 0:$(typemax(Int)) (got $x)"))
     return Int(x)
@@ -296,13 +351,15 @@ end
 
 # A convex combination of finite Float64 endpoints is mathematically finite, but
 # `x + t*(y-x)` can overflow when the endpoints have opposite signs.  The ordinary
-# product form is fast; the exact binary-to-BigFloat fallback only runs if its
-# rounded intermediates overflow.
+# product form is fast; the binary-to-BigFloat fallback runs only when an
+# intermediate overflows or cancellation makes the rounded result unreliable.
 @inline function _convex_combine(x::Float64, y::Float64, t::Float64)
     t == 0.0 && return x
     t == 1.0 && return y
-    z = (1.0-t)*x + t*y
-    isfinite(z) && return z
+    first=(1.0-t)*x;second=t*y;z=first+second
+    permanent=abs(first)+abs(second)
+    isfinite(z)&&isfinite(permanent)&&
+        (permanent==0||abs(z)>32eps(Float64)*permanent) && return z
     return setprecision(BigFloat, 128) do
         Float64((1-BigFloat(t))*BigFloat(x) + BigFloat(t)*BigFloat(y))
     end
@@ -329,7 +386,7 @@ flips that repair slivers connectivity-smoothing cannot reach) is
 function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
     nrounds = _opt_count(max_rounds,"remove_slivers","max_rounds")
     q0 = mesh_quality(m; sliver_deg=sliver_deg)
-    best = m; bestn = q0.n_slivers
+    best = _copy_mesh(m); bestn = q0.n_slivers
     for _ in 1:nrounds
         bestn == 0 && break
         cand = smooth_optimize(best; iters=4, sliver_deg=sliver_deg)
@@ -342,6 +399,10 @@ function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
     return best, (slivers_before = q0.n_slivers, slivers_after = qf.n_slivers,
                   min_dihedral_before = q0.min_dihedral_deg, min_dihedral_after = qf.min_dihedral_deg)
 end
+
+@inline _copy_mesh(m::Mesh)=Mesh(copy(m.coords);segs=copy(m.segs),tris=copy(m.tris),
+    tets=copy(m.tets),seg_tag=copy(m.seg_tag),tri_tag=copy(m.tri_tag),
+    tet_tag=copy(m.tet_tag))
 
 # star quality = min over incident tets of min(min_dihedral, π − max_dihedral): a
 # sliver (needle OR cap) drives this toward 0. Maximizing it removes both sliver types.
@@ -383,35 +444,79 @@ end
     return n == 0 ? 0.0 : s
 end
 
-# Circumcenter of tet (a,b,c,d): solve |x−a|=|x−b|=|x−c|=|x−d|, denom = 2·A·(B×C) =
-# 12·signed volume (same system as MeshTypes.tet_circumradius) but returning the
-# absolute point. A degenerate (flat) tet gives denom≈0 → non-finite coords, which
-# the caller filters out.
-@inline function _tet_circumcenter(a, b, c, d)
-    Ax=b[1]-a[1]; Ay=b[2]-a[2]; Az=b[3]-a[3]
-    Bx=c[1]-a[1]; By=c[2]-a[2]; Bz=c[3]-a[3]
-    Cx=d[1]-a[1]; Cy=d[2]-a[2]; Cz=d[3]-a[3]
-    bcx=By*Cz-Bz*Cy; bcy=Bz*Cx-Bx*Cz; bcz=Bx*Cy-By*Cx        # B×C
-    cax=Cy*Az-Cz*Ay; cay=Cz*Ax-Cx*Az; caz=Cx*Ay-Cy*Ax        # C×A
-    abx=Ay*Bz-Az*By; aby=Az*Bx-Ax*Bz; abz=Ax*By-Ay*Bx        # A×B
-    denom=2.0*(Ax*bcx+Ay*bcy+Az*bcz)                         # 12·signed volume
-    la=Ax*Ax+Ay*Ay+Az*Az; lb=Bx*Bx+By*By+Bz*Bz; lc=Cx*Cx+Cy*Cy+Cz*Cz
-    ox=(la*bcx+lb*cax+lc*abx)/denom
-    oy=(la*bcy+lb*cay+lc*aby)/denom
-    oz=(la*bcz+lb*caz+lc*abz)/denom
-    return (a[1]+ox, a[2]+oy, a[3]+oz)                       # absolute circumcenter
+# Scale-normalized ODT circumcenter and log-volume weight. Normalization keeps the
+# linear solve finite for subnormal and huge (but valid) meshes. Log weights retain
+# relative physical volumes without cubing the coordinate scale. Tets flatter than
+# 1e-12 times their longest-edge cube are deliberately omitted from the ODT average.
+function _odt_candidate(a,b,c,d)
+    points=(a,b,c,d);edge_scale=0.0;finite_edges=true
+    all(isfinite,(a...,b...,c...,d...)) || return nothing
+    @inbounds for i in 1:3,j in i+1:4,dimension in 1:3
+        difference=points[j][dimension]-points[i][dimension]
+        if isfinite(difference)
+            edge_scale=max(edge_scale,abs(difference))
+        else
+            finite_edges=false
+        end
+    end
+    coordinate_scale=1.0;scaled=points
+    if !(finite_edges&&(edge_scale==0||isfinite(inv(edge_scale))))
+        coordinate_scale=maximum(abs,(a...,b...,c...,d...))
+        coordinate_scale>0 || return nothing
+        scaled=ntuple(i->ntuple(j->points[i][j]/coordinate_scale,3),4)
+    end
+    anchor=scaled[1];edge_scale=0.0
+    @inbounds for i in 2:4,dimension in 1:3
+        edge_scale=max(edge_scale,abs(scaled[i][dimension]-anchor[dimension]))
+    end
+    edge_scale>0 || return nothing
+    P=((0.0,0.0,0.0),
+       ntuple(j->(scaled[2][j]-anchor[j])/edge_scale,3),
+       ntuple(j->(scaled[3][j]-anchor[j])/edge_scale,3),
+       ntuple(j->(scaled[4][j]-anchor[j])/edge_scale,3))
+    A=P[2];B=P[3];C=P[4]
+    BC=_cross3(B,C);CA=_cross3(C,A);AB=_cross3(A,B)
+    determinant=_dot3(A,BC);normalized_volume=abs(determinant)/6
+    maxedge=0.0
+    @inbounds for i in 1:3,j in i+1:4
+        maxedge=max(maxedge,_norm3(_sub3(P[i],P[j])))
+    end
+    (isfinite(normalized_volume)&&normalized_volume>
+        1e-12*maxedge^3) || return nothing
+    denominator=2determinant
+    la=_dot3(A,A);lb=_dot3(B,B);lc=_dot3(C,C)
+    offset=((la*BC[1]+lb*CA[1]+lc*AB[1])/denominator,
+            (la*BC[2]+lb*CA[2]+lc*AB[2])/denominator,
+            (la*BC[3]+lb*CA[3]+lc*AB[3])/denominator)
+    all(isfinite,offset) || return nothing
+    center=ntuple(dimension->_scaled_odt_coordinate(
+        coordinate_scale,anchor[dimension],edge_scale,offset[dimension]),3)
+    all(isfinite,center) || return nothing
+    logweight=log(normalized_volume)+3log(coordinate_scale)+3log(edge_scale)
+    isfinite(logweight) || return nothing
+    return center,logweight
 end
 
-# Scale-invariant "degenerate tet" volume threshold: a tet whose volume is a
-# vanishing fraction of its longest-edge cube is numerically flat (circumcenter
-# blows up). Per-tet, so non-uniform meshes are handled correctly.
-@inline function _odt_voleps(a, b, c, d)
-    P = (a, b, c, d); e2 = 0.0
-    @inbounds for i in 1:4, j in i+1:4
-        dx=P[i][1]-P[j][1]; dy=P[i][2]-P[j][2]; dz=P[i][3]-P[j][3]
-        ell=hypot(dx,dy,dz);l2=ell*ell; l2 > e2 && (e2 = l2)
+@inline _sub3(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
+@inline _dot3(a,b)=a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+@inline _cross3(a,b)=(a[2]*b[3]-a[3]*b[2],
+                      a[3]*b[1]-a[1]*b[3],
+                      a[1]*b[2]-a[2]*b[1])
+@inline _norm3(a)=hypot(a[1],a[2],a[3])
+
+function _scaled_odt_coordinate(coordinate_scale,anchor,edge_scale,offset)
+    delta=edge_scale*offset;inside=anchor+delta;value=coordinate_scale*inside
+    permanent=abs(anchor)+abs(delta)
+    if isfinite(value)&&isfinite(permanent)&&
+       (permanent==0||abs(inside)>32eps(Float64)*permanent)
+        return value==0 ? 0.0 : value
     end
-    return 1e-12 * e2 * sqrt(e2)                             # 1e-12 · (max edge)³
+    exact=setprecision(BigFloat,256) do
+        BigFloat(coordinate_scale)*
+            (BigFloat(anchor)+BigFloat(edge_scale)*BigFloat(offset))
+    end
+    result=Float64(exact)
+    return result==0 ? 0.0 : result
 end
 
 # nodes lying on any boundary face (fixed during smoothing)
@@ -431,7 +536,7 @@ function _node_neighbours(m::Mesh)
             push!(nb[v[i]], v[j])
         end
     end
-    return [collect(s) for s in nb]
+    return [sort!(collect(s)) for s in nb]
 end
 
 function _node_tets(m::Mesh)

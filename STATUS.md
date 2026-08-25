@@ -94,6 +94,32 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening tetrahedral quality
+reporting and mesh optimization:
+
+- `TetQuality` now has one documented, validating construction path. All quality
+  and smoother controls reject Boolean, nonfinite, negative, and platform-
+  unrepresentable inputs as applicable; floating means are clamped to their
+  measured extrema before report construction. `remove_slivers`, including a
+  zero-round call, returns detached mesh storage and preserves every cell tag.
+- ODT smoothing now solves each circumcenter in a dimensionless local frame,
+  omits only shape-negligible tetrahedra, and accumulates physical-volume weights
+  in the log domain. Cancellation-safe coordinate reconstruction and convex
+  averaging cover finite extreme coordinates, and sorted neighbour traversal
+  makes Laplacian updates deterministic.
+- A 5,000-tetrahedron scale differential had maximum relative circumcenter error
+  `6.258726052278117e-13` and maximum log-weight shift error
+  `6.821210263296962e-13`. The same ODT mesh update at scales `1e-100`, `1`, and
+  `1e100` differed after normalization by at most
+  `5.862947357926637e-14`.
+- The focused `Optimize` suite passed 96/96 assertions under Julia 1.12.7 and
+  Julia 1.11.9. Its fixed one-step ODT SHA-256 is
+  `31a280b6a063b428a11772b752ca1d9a64f70a8d4728029c23064a78e977ee00`.
+- The bounds-checked package gate passed 164,001/164,001 assertions in 12m02.4s,
+  and the aggregate bounds-checked validation exited 0 in 10m26.5s against Gmsh
+  4.15.2. The public `Optimize` documentation scan returned no missing names;
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening planar, cylindrical,
 and parametric surface meshing:
 
