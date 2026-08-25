@@ -1,5 +1,6 @@
 using Test
 using SHA
+using LinearAlgebra
 using Tessella
 
 const ElementsUnderTest = Tessella.Elements
@@ -552,6 +553,50 @@ function special_v4_metadata_fixture()
         external_element_tags=[[UInt64(200+i)] for i in eachindex(records)])
     return ElementsUnderTest.MixedMesh(
         coordinates,blocks;physical_names=physical_names,entity_data=data)
+end
+
+function periodic_v4_fixture(;links=nothing)
+    coordinates=Float64[1 2 1.5 0 0 0;
+                        0 0 0   1 2 1.5;
+                        0 0 0   0 0 0]
+    blocks=Any[
+        ElementsUnderTest.ElementBlock(
+            15,reshape(Int32[1,2,4,5],1,4),zeros(Int32,4)),
+        ElementsUnderTest.ElementBlock(
+            1,Int32[1 3 4 6;3 2 6 5],zeros(Int32,4)),
+    ]
+    entities=Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}(
+        (0,1)=>ElementsUnderTest.MixedEntity(0,1,(1.0,0.0,0.0)),
+        (0,2)=>ElementsUnderTest.MixedEntity(0,2,(2.0,0.0,0.0)),
+        (0,3)=>ElementsUnderTest.MixedEntity(0,3,(0.0,1.0,0.0)),
+        (0,4)=>ElementsUnderTest.MixedEntity(0,4,(0.0,2.0,0.0)),
+        (1,1)=>ElementsUnderTest.MixedEntity(
+            1,1,(1.0,0.0,0.0,2.0,0.0,0.0);boundaries=Int32[1,2]),
+        (1,2)=>ElementsUnderTest.MixedEntity(
+            1,2,(0.0,1.0,0.0,0.0,2.0,0.0);boundaries=Int32[3,4]),
+    )
+    data=ElementsUnderTest.MixedEntityData(entities;
+        node_entities=[(0,Int32(1)),(0,Int32(2)),(1,Int32(1)),
+                       (0,Int32(3)),(0,Int32(4)),(1,Int32(2))],
+        node_parametric=fill(nothing,6),
+        external_node_tags=UInt64[10,20,15,30,40,35],
+        block_entities=[Int32[1,2,3,4],Int32[1,1,2,2]],
+        external_element_tags=[UInt64[101,102,103,104],
+                               UInt64[201,202,203,204]])
+    rotation=(0.0,-1.0,0.0,0.0,
+              1.0, 0.0,0.0,0.0,
+              0.0, 0.0,1.0,0.0,
+              0.0, 0.0,0.0,1.0)
+    periodic_links=links===nothing ? ElementsUnderTest.MixedPeriodicLink[
+        ElementsUnderTest.MixedPeriodicLink(
+            1,2,1,Int32[4,5,6],Int32[1,2,3];affine=rotation),
+        ElementsUnderTest.MixedPeriodicLink(
+            0,4,2,Int32[5],Int32[2];affine=rotation),
+        ElementsUnderTest.MixedPeriodicLink(
+            0,3,1,Int32[4],Int32[1];affine=rotation),
+    ] : links
+    return ElementsUnderTest.MixedMesh(
+        coordinates,blocks;entity_data=data,periodic_links=periodic_links)
 end
 
 function legacy_crc(mesh)
@@ -2292,6 +2337,196 @@ end
     @test !occursin("Error",output)
 end
 
+@testset "persistent MSH4 periodic entity metadata" begin
+    function external_periodic_map(periodic_mesh)
+        data=periodic_mesh.entity_data
+        data===nothing && error("periodic fixture lost entity metadata")
+        return Dict(
+            (link.dim,link.slave_entity,link.master_entity)=>(
+                affine=link.affine,
+                pairs=sort!([(data.external_node_tags[link.slave_nodes[i]],
+                              data.external_node_tags[link.master_nodes[i]])
+                             for i in eachindex(link.slave_nodes)]))
+            for link in periodic_mesh.periodic_links)
+    end
+    mesh=periodic_v4_fixture()
+    @test ElementsUnderTest.validate(mesh).ok
+    @test length(mesh.periodic_links)==3
+    @test Set((link.dim,link.slave_entity,link.master_entity)
+              for link in mesh.periodic_links)==
+          Set([(1,Int32(2),Int32(1)),(0,Int32(4),Int32(2)),
+               (0,Int32(3),Int32(1))])
+    @test all(link->link.affine!==nothing,mesh.periodic_links)
+    @test sum(length(link.slave_nodes) for link in mesh.periodic_links)==5
+    @test_throws ArgumentError ElementsUnderTest.mixed_to_simplex(mesh)
+    periodic_crc=ElementsUnderTest.mixed_crc(mesh).sha
+    @test periodic_crc==
+          "9b6f017f0bc019b6d96a12496e67d05046387a1e9d1707939d220a669788f348"
+    expected_periodic_map=external_periodic_map(mesh)
+
+    rotation=collect(first(mesh.periodic_links).affine)
+    source_slaves=Int32[4,5,6];source_masters=Int32[1,2,3]
+    source_link=ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,source_slaves,source_masters;affine=rotation)
+    owned=periodic_v4_fixture(links=[source_link])
+    source_slaves[1]=5;source_masters[1]=2;rotation[1]=9
+    source_link.slave_nodes[1]=6
+    @test owned.periodic_links[1].slave_nodes==Int32[4,5,6]
+    @test owned.periodic_links[1].master_nodes==Int32[1,2,3]
+    @test owned.periodic_links[1].affine[1]==0
+
+    # Link and node-pair iteration order is semantic-free in the CRC.
+    reordered_links=ElementsUnderTest.MixedPeriodicLink[]
+    for link in reverse(mesh.periodic_links)
+        order=reverse(eachindex(link.slave_nodes))
+        push!(reordered_links,ElementsUnderTest.MixedPeriodicLink(
+            link.dim,link.slave_entity,link.master_entity,
+            link.slave_nodes[order],link.master_nodes[order];affine=link.affine))
+    end
+    reordered=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;entity_data=mesh.entity_data,
+        periodic_links=reordered_links)
+    @test ElementsUnderTest.mixed_crc(reordered).sha==periodic_crc
+    changed_links=copy(reordered_links)
+    curve=findfirst(link->link.dim==1,changed_links)
+    original=changed_links[curve]
+    changed_links[curve]=ElementsUnderTest.MixedPeriodicLink(
+        original.dim,original.slave_entity,original.master_entity,
+        original.slave_nodes,Int32[2,1,3];affine=original.affine)
+    changed=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;entity_data=mesh.entity_data,
+        periodic_links=changed_links)
+    @test ElementsUnderTest.mixed_crc(changed).sha!=periodic_crc
+
+    directory=mktempdir()
+    for binary in (false,true)
+        path=joinpath(directory,"periodic-$binary.msh")
+        ElementsUnderTest.write_mixed_msh(path,mesh;version=4.1,binary)
+        back=ElementsUnderTest.read_mixed_msh(path)
+        @test ElementsUnderTest.validate(back).ok
+        @test ElementsUnderTest.mixed_crc(back).sha==periodic_crc
+        @test length(back.periodic_links)==3
+        curve_link=only(filter(link->link.dim==1,back.periodic_links))
+        @test Dict(zip(curve_link.slave_nodes,curve_link.master_nodes))==
+              Dict(Int32(4)=>Int32(1),Int32(5)=>Int32(2),Int32(6)=>Int32(3))
+        @test curve_link.affine==first(mesh.periodic_links).affine
+        @test external_periodic_map(back)==expected_periodic_map
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+            path;max_periodic_links=2)
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+            path;max_periodic_pairs=4)
+        ok,output=gmsh_check(path)
+        @test ok
+        @test !occursin("Error",output)
+        rewritten=joinpath(directory,"periodic-rewritten-$binary.msh")
+        @test startswith(gmsh_rewrite(
+            path,rewritten;version=4.1,binary=!binary),"4.15.2")
+        rewritten_mesh=ElementsUnderTest.read_mixed_msh(rewritten)
+        @test length(rewritten_mesh.periodic_links)==3
+        # Gmsh groups nodes and elements by entity when rewriting, so compact
+        # internal indices change. External tags prove the periodic relation
+        # itself is lossless across that independent lifecycle.
+        @test external_periodic_map(rewritten_mesh)==expected_periodic_map
+    end
+    ascii=joinpath(directory,"periodic-false.msh")
+    text=read(ascii,String)
+    @test occursin("\$Periodic\n3\n",text)
+    @test occursin("\n30 10\n",text)
+    @test occursin("\n35 15\n",text)
+
+    no_affine=ElementsUnderTest.MixedPeriodicLink(0,3,1,[4],[1])
+    no_affine_mesh=periodic_v4_fixture(links=[no_affine])
+    no_affine_path=joinpath(directory,"periodic-no-affine.msh")
+    ElementsUnderTest.write_mixed_msh(no_affine_path,no_affine_mesh;version=4.1)
+    no_affine_back=ElementsUnderTest.read_mixed_msh(no_affine_path)
+    @test only(no_affine_back.periodic_links).affine===nothing
+    @test occursin("\n0 3 1\n0\n1\n30 10\n",read(no_affine_path,String))
+
+    # Disjoint repeated sections merge under cumulative link/pair limits.
+    empty_periodic=periodic_v4_fixture(links=ElementsUnderTest.MixedPeriodicLink[])
+    base_path=joinpath(directory,"periodic-base.msh")
+    ElementsUnderTest.write_mixed_msh(base_path,empty_periodic;version=4.1)
+    function periodic_section(links)
+        part_path=joinpath(directory,"periodic-part-$(length(links))-$(links[1].dim).msh")
+        ElementsUnderTest.write_mixed_msh(
+            part_path,periodic_v4_fixture(links=links);version=4.1)
+        matched=match(r"\$Periodic\n.*?\$EndPeriodic\n"s,read(part_path,String))
+        matched===nothing && error("periodic writer omitted a nonempty section")
+        return matched.match
+    end
+    first_section=periodic_section(mesh.periodic_links[1:1])
+    second_section=periodic_section(mesh.periodic_links[2:3])
+    repeated_path=joinpath(directory,"periodic-repeated.msh")
+    write(repeated_path,read(base_path,String)*first_section*second_section)
+    repeated=ElementsUnderTest.read_mixed_msh(repeated_path)
+    @test external_periodic_map(repeated)==expected_periodic_map
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        repeated_path;max_periodic_links=2)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        repeated_path;max_periodic_pairs=4)
+    duplicate_path=joinpath(directory,"periodic-repeated-duplicate.msh")
+    write(duplicate_path,read(base_path,String)*first_section*first_section)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(duplicate_path)
+
+    unknown_node=joinpath(directory,"periodic-unknown-node.msh")
+    write(unknown_node,replace(text,"\n30 10\n"=>"\n999 10\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(unknown_node)
+    unknown_entity=joinpath(directory,"periodic-unknown-entity.msh")
+    write(unknown_entity,replace(text,"\n0 3 1\n"=>"\n0 9 1\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(unknown_entity)
+    bad_affine_count=joinpath(directory,"periodic-bad-affine-count.msh")
+    write(bad_affine_count,replace(text,"\n16 0 -1"=>"\n15 0 -1";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(bad_affine_count)
+
+    v2=joinpath(directory,"periodic-v2.msh")
+    write(v2,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n"*
+             "\$Nodes\n0\n\$EndNodes\n\$Elements\n0\n\$EndElements\n"*
+             "\$Periodic\n0\n\$EndPeriodic\n")
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(v2)
+    target=joinpath(directory,"atomic-periodic.msh");write(target,"sentinel")
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        target,mesh;version=2.2)
+    @test read(target,String)=="sentinel"
+    without_metadata=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;periodic_links=mesh.periodic_links)
+    @test ElementsUnderTest.validate(without_metadata).ok
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        target,without_metadata;version=4.1)
+    @test read(target,String)=="sentinel"
+
+    identity=Matrix{Float64}(I,4,4)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        3,2,1,[1],[2];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        true,2,1,[1],[2];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,1,1,[1],[2];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1,1],[2,3];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1,2],[3,3];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1],[2,3];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1],[2];affine=zeros(4,4))
+    nonfinite=copy(identity);nonfinite[1,1]=Inf
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1],[2];affine=nonfinite)
+    projective=copy(identity);projective[4,1]=1
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1],[2];affine=projective)
+
+    @test_throws ArgumentError periodic_v4_fixture(
+        links=[mesh.periodic_links[1],mesh.periodic_links[1]])
+    missing=ElementsUnderTest.MixedPeriodicLink(
+        1,9,1,[4],[1];affine=identity)
+    @test_throws ArgumentError periodic_v4_fixture(links=[missing])
+    out_of_range=ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[4],[1];affine=identity)
+    out_of_range.slave_nodes[1]=99
+    @test_throws ArgumentError periodic_v4_fixture(links=[out_of_range])
+end
+
 _write_swapped(io,value::Int32)=write(io,bswap(value))
 _write_swapped(io,value::UInt64)=write(io,bswap(value))
 _write_swapped(io,value::Float64)=write(io,bswap(reinterpret(UInt64,value)))
@@ -2352,6 +2587,18 @@ function write_swapped_binary_v4(path)
         _write_swapped(io,UInt64(1))
         for value in UInt64[77,10,20]; _write_swapped(io,value); end
         write(io,UInt8('\n')); println(io,"\$EndElements")
+        println(io,"\$Periodic")
+        _write_swapped(io,UInt64(1))
+        for value in Int32[0,2,1];_write_swapped(io,value);end
+        _write_swapped(io,UInt64(16))
+        affine=(1.0,0.0,0.0,1.0,
+                0.0,1.0,0.0,0.0,
+                0.0,0.0,1.0,0.0,
+                0.0,0.0,0.0,1.0)
+        for value in affine;_write_swapped(io,value);end
+        _write_swapped(io,UInt64(1))
+        for value in UInt64[20,10];_write_swapped(io,value);end
+        write(io,UInt8('\n'));println(io,"\$EndPeriodic")
     end
     return path
 end
@@ -2435,6 +2682,12 @@ end
             @test mesh.entity_data.external_element_tags==[UInt64[77]]
             @test mesh.entity_data.node_parametric==[Float64[0],Float64[1]]
             @test mesh.entity_data.entities[(1,11)].boundaries==Int32[1,-2]
+            @test length(mesh.periodic_links)==1
+            @test mesh.periodic_links[1].dim==0
+            @test mesh.periodic_links[1].slave_entity==2
+            @test mesh.periodic_links[1].master_entity==1
+            @test mesh.periodic_links[1].slave_nodes==Int32[2]
+            @test mesh.periodic_links[1].master_nodes==Int32[1]
         end
         ok,output=gmsh_check(path)
         @test ok
@@ -2770,6 +3023,12 @@ end
         valid;max_connectivity=-1)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid;max_connectivity=1.0)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;max_periodic_links=-1)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;max_periodic_links=1.0)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        valid;max_periodic_pairs=true)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid;tessella_extensions=1)
     valid_binary=joinpath(directory,"valid-binary.msh")

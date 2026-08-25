@@ -10,7 +10,7 @@ Gmsh model-level periodic entity metadata.
 module Periodic
 
 using ..MeshTypes: Mesh, nnodes, validate
-using ..Transform: _affine_coordinate, _determinant_sign, _transform_float
+using ..Transform: _affine_coordinate, _transform_homogeneous
 
 export periodic_identify, periodic_identify_affine
 
@@ -110,36 +110,8 @@ function _periodic_output(mesh::Mesh,slaves::Vector{Int},
 end
 
 function _periodic_affine(raw,caller::AbstractString)
-    entries=Matrix{Float64}(undef,4,4)
-    if raw isa AbstractMatrix
-        size(raw)==(4,4) || throw(ArgumentError(
-            "$caller: affine transform matrix must be 4×4"))
-        for (row,row_index) in enumerate(axes(raw,1)),
-            (column,column_index) in enumerate(axes(raw,2))
-            entries[row,column]=_transform_float(
-                raw[row_index,column_index],caller,"affine[$row,$column]")
-        end
-    elseif raw isa Tuple || raw isa AbstractVector
-        length(raw)==16 || throw(ArgumentError(
-            "$caller: affine transform must contain 16 entries by row"))
-        values=collect(raw)
-        for row in 1:4,column in 1:4
-            flat=4(row-1)+column
-            entries[row,column]=_transform_float(
-                values[flat],caller,"affine[$row,$column]")
-        end
-    else
-        throw(ArgumentError(
-            "$caller: affine transform must be a 4×4 matrix or 16-entry tuple/vector"))
-    end
-    entries[4,1]==0 && entries[4,2]==0 && entries[4,3]==0 && entries[4,4]==1 ||
-        throw(ArgumentError(
-            "$caller: affine transform homogeneous row must be (0, 0, 0, 1)"))
-    coefficients=(entries[1,1],entries[2,1],entries[3,1],
-                  entries[1,2],entries[2,2],entries[3,2],
-                  entries[1,3],entries[2,3],entries[3,3])
-    _determinant_sign(coefficients,caller)
-    return coefficients,(entries[1,4],entries[2,4],entries[3,4])
+    coefficients,translation,_=_transform_homogeneous(raw,caller)
+    return coefficients,translation
 end
 
 """
