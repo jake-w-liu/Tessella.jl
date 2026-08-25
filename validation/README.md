@@ -22,6 +22,8 @@ validation/
     differential.jl      # required bit-exact Gmsh 4.15.2 constant-range differential
   uniform_refine/
     differential.jl      # required Gmsh 4.15.2 linear-simplex template differential
+  high_order/
+    differential.jl      # required Gmsh 4.15.2 type-11 tetrahedron differential
   transfinite/
     differential.jl      # required Gmsh 4.15.2 four-sided patch differential
   transfinite_curve/
@@ -60,7 +62,8 @@ julia --project=. --check-bounds=yes validation/run_all.jl
 ```
 
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
-the size-field, constant-range, uniform-refinement, four-sided transfinite, straight transfinite
+the size-field, constant-range, uniform-refinement, quadratic-tetrahedron,
+four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,

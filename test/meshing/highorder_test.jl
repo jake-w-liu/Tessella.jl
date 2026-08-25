@@ -14,6 +14,8 @@
 #                connectivity (CRC) — solver-consumable.
 
 using Test
+import SHA
+import Tessella
 using Tessella.MeshTypes
 using Tessella.Mesh3D
 using Tessella.Geometry
@@ -31,7 +33,7 @@ function _oracle_grads(r, s, t)
     dL = ((-1.0,-1.0,-1.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0))
     g = Vector{NTuple{3,Float64}}(undef, 10)
     for i in 1:4; c = 4L[i]-1; g[i] = (c*dL[i][1], c*dL[i][2], c*dL[i][3]); end
-    for (k,(a,b)) in enumerate(((1,2),(2,3),(3,1),(1,4),(2,4),(3,4)))
+    for (k,(a,b)) in enumerate(((1,2),(2,3),(3,1),(1,4),(3,4),(2,4)))
         g[4+k] = (4*(L[a]*dL[b][1]+L[b]*dL[a][1]), 4*(L[a]*dL[b][2]+L[b]*dL[a][2]), 4*(L[a]*dL[b][3]+L[b]*dL[a][3]))
     end
     return g
@@ -62,7 +64,7 @@ _straight_mid(p, a, b) = ((p.coords[1,a]+p.coords[1,b])/2, (p.coords[2,a]+p.coor
 
 # mid-node → its two corner endpoints (independent bookkeeping)
 function _endpoints(p::P2Mesh)
-    slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4)); e=Dict{Int32,Tuple{Int32,Int32}}()
+    slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,3,4),(10,2,4)); e=Dict{Int32,Tuple{Int32,Int32}}()
     for t in 1:ntets(p), (sl,i,j) in slots; e[p.tet10[sl,t]]=(p.tet10[i,t],p.tet10[j,t]); end
     e
 end
@@ -96,8 +98,16 @@ end
 @testset "HighOrder P2 (Stage 6)" begin
 
     @testset "P2 container and curving contracts" begin
+        @test_throws ArgumentError P2Mesh(zeros(3), zeros(Int32,10,0))
+        @test_throws ArgumentError P2Mesh(zeros(3,0), zeros(Int32,10))
         @test_throws ArgumentError P2Mesh(zeros(2,10), zeros(Int32,10,0))
         @test_throws ArgumentError P2Mesh(zeros(3,10), zeros(Int32,9,0))
+        @test_throws ArgumentError P2Mesh(trues(3,0), zeros(Int32,10,0))
+        @test_throws ArgumentError P2Mesh(zeros(3,0), falses(10,0))
+        @test_throws ArgumentError P2Mesh(
+            zeros(3,0), zeros(Int32,10,0); tet_tag=Bool[])
+        @test_throws ArgumentError P2Mesh(
+            zeros(3,10), reshape(Int32.(1:10),10,1); tet_tag=Int32[])
         @test_throws ArgumentError P2Mesh(fill(NaN,3,10), reshape(Int32.(1:10),10,1))
         @test_throws ArgumentError P2Mesh(zeros(3,10), reshape(Int32[1,2,3,4,5,6,7,8,9,11],10,1))
         @test_throws ArgumentError P2Mesh(zeros(3,10), reshape(Int32[1,2,3,4,5,6,7,8,9,9],10,1))
@@ -106,18 +116,54 @@ end
         @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.), -1)
         @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,0.), 1)
         @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.), 1; rtol=NaN)
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.), true)
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.), "1")
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.,0.), (0.,0.,1.), 1)
+        @test_throws ArgumentError curve_to_cylinder!(empty, (0.,0.,0.), (0.,0.,1.,0.), 1)
+        @test_throws ArgumentError curve_to_cylinder!(empty, (false,0.,0.), (0.,0.,1.), 1)
         @test_throws ArgumentError curve_to_surface!(empty, identity, (x,y,z)->true; rtol=-1)
+        @test_throws ArgumentError curve_to_surface!(empty, identity, (x,y,z)->true; rtol=true)
+        @test_throws ArgumentError curve_to_surface!(empty, identity, (x,y,z)->true; rtol="1")
+
+        @test Tessella.P2Mesh === P2Mesh
+        @test Tessella.p2_tetmesh === p2_tetmesh
     end
 
     @testset "single tet → 10 nodes, midpoints, volume preserved" begin
-        m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tets=reshape(Int32[1,2,3,4],4,1))
+        m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                 tets=reshape(Int32[1,2,3,4],4,1), tet_tag=Int32[23])
         p = p2_tetmesh(m)
         @test size(p.tet10) == (10, 1)
         @test size(p.coords, 2) == 4 + 6            # 4 corners + 6 edges
         @test p.coords[:,1:4] == m.coords           # corners unchanged
         @test p.coords[:, p.tet10[5,1]] ≈ [0.5,0.0,0.0]   # mid of edge (1,2)
+        @test p.tet_tag == Int32[23]
         @test p2_volume(p) ≈ 1/6 rtol=1e-12
         @test p2_min_jacobian(p) ≈ 6*(1/6) rtol=1e-12     # straight ⇒ detJ = 6·vol > 0
+        @test validate(p).ok
+
+        direct = P2Mesh(p.coords, p.tet10; tet_tag=p.tet_tag)
+        @test !Base.mightalias(direct.coords, p.coords)
+        @test !Base.mightalias(direct.tet10, p.tet10)
+        @test !Base.mightalias(direct.tet_tag, p.tet_tag)
+        @test !Base.mightalias(p.coords, m.coords)
+        @test !Base.mightalias(p.tet10, m.tets)
+        @test !Base.mightalias(p.tet_tag, m.tet_tag)
+
+        @test_throws ArgumentError p2_tetmesh(m; max_nodes=true)
+        @test_throws ArgumentError p2_tetmesh(m; max_tets=false)
+        @test_throws ArgumentError p2_tetmesh(m; max_nodes=10.0)
+        @test_throws ArgumentError p2_tetmesh(m; max_tets="1")
+        @test_throws ArgumentError p2_tetmesh(m; max_nodes=-1)
+        @test_throws ArgumentError p2_tetmesh(m; max_tets=-1)
+        @test_throws ArgumentError p2_tetmesh(
+            m; max_nodes=big(typemax(Int32)) + 1)
+        @test_throws ArgumentError p2_tetmesh(
+            m; max_tets=big(typemax(Int32)) + 1)
+        @test_throws ArgumentError p2_tetmesh(m; max_nodes=9)
+        @test_throws ArgumentError p2_tetmesh(m; max_tets=0)
+        bounded = p2_tetmesh(m; max_nodes=UInt(10), max_tets=BigInt(1))
+        @test (nnodes(bounded), ntets(bounded)) == (10, 1)
     end
 
     @testset "shared mid-nodes: node count = corners + unique edges" begin
@@ -139,6 +185,17 @@ end
         @test mesh_crc(f.mesh).sha == mesh_crc(m).sha     # linear connectivity preserved
         @test all(f.mesh.tet_tag .== 7)
         @test validate(f.mesh).ok
+
+        tagged = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                      tets=reshape(Int32[1,2,3,4],4,1), tet_tag=Int32[23])
+        tagged_p2 = p2_tetmesh(tagged)
+        tagged_path = joinpath(dir, "tagged-p2.msh")
+        write_msh_p2(tagged_path, tagged_p2)
+        tagged_read = read_msh(tagged_path)
+        @test tagged_read.mesh.tet_tag == Int32[23]
+        @test mesh_crc(tagged_read.mesh).sha == mesh_crc(tagged).sha
+        @test bytes2hex(SHA.sha256(read(tagged_path))) ==
+              "5a83ebe0386bda71c6761148ed3fe2f964f16c2da2f0b66b6951ef558f4927ab"
     end
 
     @testset "curve_to_cylinder!: curved nodes on the true cylinder, NO inversion" begin
@@ -236,6 +293,38 @@ end
         @test p2_min_jacobian(p) > 0                           # still valid (≈ straight)
     end
 
+    @testset "curving is transactional across callback failures" begin
+        m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                 tets=reshape(Int32[1,2,3,4],4,1))
+        p = p2_tetmesh(m)
+        pristine = copy(p.coords)
+        calls = Ref(0)
+        function failing_project(x, y, z)
+            calls[] += 1
+            calls[] == 2 && error("deliberate projection failure")
+            return (x, y, z + 0.01)
+        end
+        @test_throws ErrorException curve_to_surface!(
+            p, failing_project, (x,y,z)->true)
+        @test calls[] == 2
+        @test p.coords == pristine
+        @test validate(p).ok
+
+        @test_throws ArgumentError curve_to_surface!(
+            p, (x,y,z)->(x,y), (x,y,z)->true)
+        @test p.coords == pristine
+        @test_throws ArgumentError curve_to_surface!(
+            p, (x,y,z)->(true,y,z), (x,y,z)->true)
+        @test p.coords == pristine
+        @test_throws ArgumentError curve_to_surface!(
+            p, (x,y,z)->(x,y,z), (x,y,z)->1)
+        @test p.coords == pristine
+
+        @test curve_to_surface!(
+            p, (x,y,z)->(Inf,y,z), (x,y,z)->true) == 0
+        @test p.coords == pristine
+    end
+
     @testset "p2_volume integrates curved geometry, not only corner tets" begin
         m = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
                  tets=reshape(Int32[1,2,3,4],4,1))
@@ -264,9 +353,9 @@ end
                  tets=reshape(Int32[1,2,3,4],4,1))
         p = p2_tetmesh(m)
         p.coords[:,p.tet10[5:10,1]] = Float64[
-             0.598244   1.71802  -0.674877  -0.150606   0.694353  -1.12732;
-             0.152545   0.407208  1.05877   -0.0461052  0.280946   0.525971;
-             0.0303981 -1.00104   0.0559645  0.276108   0.981785   0.689428]
+             0.598244   1.71802  -0.674877  -0.150606  -1.12732    0.694353;
+             0.152545   0.407208  1.05877   -0.0461052  0.525971   0.280946;
+             0.0303981 -1.00104   0.0559645  0.276108   0.689428   0.981785]
         old_samples = [(j/3,k/3,l/3) for j in 0:3 for k in 0:3-j for l in 0:3-j-k]
         @test minimum(_oracle_detJ(p,1,r,s,t) for (r,s,t) in old_samples) > 0.08
         @test _oracle_detJ(p,1,0.25,0.5,0.25) < -1.19
@@ -283,19 +372,120 @@ end
                          tets=reshape(Int32[1,2,3,4],4,1))
         @test_throws ArgumentError p2_tetmesh(collapsed)
 
+        tiny = nextfloat(0.0)
+        subnormal = Mesh(Float64[tiny 5tiny tiny tiny;
+                                  0 0 1 0; 0 0 0 1];
+                         tets=reshape(Int32[1,2,3,4],4,1), tet_tag=Int32[9])
+        subnormal_p2 = p2_tetmesh(subnormal)
+        @test subnormal_p2.coords[:, subnormal_p2.tet10[5,1]] ==
+              Float64[3tiny, 0, 0]
+        @test p2_min_jacobian(subnormal_p2) == 4tiny
+        @test p2_volume(subnormal_p2) == tiny
+        @test subnormal_p2.tet_tag == Int32[9]
+        @test validate(subnormal_p2).ok
+
         p = p2_tetmesh(Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
                             tets=reshape(Int32[1,2,3,4],4,1)))
+        @test_throws ArgumentError P2Mesh(p.coords, p.tet10; tet_tag=Int32[-1])
+        @test_throws ArgumentError P2Mesh(p.coords, p.tet10; tet_tag=Bool[true])
         @test_throws ArgumentError write_msh_p2("ignored.msh",p;tet_tag=Int64[typemax(Int64)])
         @test_throws ArgumentError write_msh_p2("ignored.msh",p;tet_tag=Int32[-1])
+        @test_throws ArgumentError write_msh_p2("ignored.msh",p;tet_tag=Bool[true])
+        @test_throws ArgumentError write_msh_p2("ignored.msh",p;tet_tag=[1.0])
+        @test_throws ArgumentError write_msh_p2("",p)
+        @test_throws ArgumentError write_msh_p2(nothing,p)
+
+        atomic_dir = mktempdir()
+        atomic_path = joinpath(atomic_dir, "atomic.msh")
+        write(atomic_path, "preserve-existing-output")
+        folded = P2Mesh(p.coords, p.tet10; tet_tag=p.tet_tag)
+        folded.coords[:, folded.tet10[5,1]] = [5.0, 0.0, 0.0]
+        @test !validate(folded).ok
+        @test_throws ArgumentError write_msh_p2(atomic_path, folded)
+        @test read(atomic_path, String) == "preserve-existing-output"
+        @test_throws ArgumentError write_msh_p2(atomic_dir, p)
 
         two=Mesh(Float64[0 1 0 0 0;0 0 1 0 0;0 0 0 1 -1];
                  tets=Int32[1 1;2 3;3 2;4 5])
         q=p2_tetmesh(two);badT=copy(q.tet10);badC=hcat(q.coords,q.coords[:,badT[5,1]])
-        edge_slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,2,4),(10,3,4))
+        edge_slots=((5,1,2),(6,2,3),(7,3,1),(8,1,4),(9,3,4),(10,2,4))
         slot=only(s for (s,i,j) in edge_slots
                     if minmax(badT[i,2],badT[j,2])==(Int32(1),Int32(2)))
         badT[slot,2]=Int32(size(badC,2))
         @test_throws ArgumentError P2Mesh(badC,badT)
+    end
+
+    @testset "scale, translation, and mutable-storage validation" begin
+        function curved_reference(scale)
+            m = Mesh(Float64[scale 0 0 0;
+                             0 scale 0 0;
+                             0 0 0 scale];
+                     tets=reshape(Int32[1,2,3,4],4,1), tet_tag=Int32[17])
+            p = p2_tetmesh(m)
+            @test curve_to_cylinder!(
+                p, (0.,0.,0.), (0.,0.,1.), scale; rtol=1e-12) == 1
+            return p
+        end
+        reference = curved_reference(1.0)
+        for scale in (1e-100, 1.0, 1e100)
+            p = curved_reference(scale)
+            @test p.tet10 == reference.tet10
+            @test p.tet_tag == reference.tet_tag
+            @test p.coords ./ scale ≈ reference.coords atol=0 rtol=2eps()
+            @test p2_min_jacobian(p) / scale^3 ≈
+                  p2_min_jacobian(reference) atol=0 rtol=8eps()
+            @test validate(p).ok
+        end
+
+        offset = 1e100
+        width = 16eps(offset)
+        translated = Mesh(Float64[offset + width offset offset offset;
+                                   offset offset + width offset offset;
+                                   offset offset offset offset + width];
+                          tets=reshape(Int32[1,2,3,4],4,1), tet_tag=Int32[17])
+        translated_p2 = p2_tetmesh(translated)
+        @test curve_to_cylinder!(translated_p2, (offset,offset,offset),
+                                 (0.,0.,1.), width; rtol=1e-12) == 1
+        @test translated_p2.tet10 == reference.tet10
+        @test validate(translated_p2).ok
+
+        huge = floatmax(Float64)
+        narrow = 1e-154
+        extreme = Mesh(Float64[-huge huge -huge -huge;
+                                0 0 narrow 0;
+                                0 0 0 narrow];
+                       tets=reshape(Int32[1,2,3,4],4,1))
+        extreme_p2 = p2_tetmesh(extreme)
+        @test curve_to_surface!(extreme_p2, (x,y,z)->(x,y,z),
+                                (x,y,z)->false; rtol=1e-308) == 0
+        @test validate(extreme_p2).ok
+
+        function fresh()
+            p2_tetmesh(Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
+                            tets=reshape(Int32[1,2,3,4],4,1), tet_tag=Int32[4]))
+        end
+        corrupt_coordinate = fresh()
+        corrupt_coordinate.coords[1,1] = NaN
+        @test !validate(corrupt_coordinate).ok
+        @test_throws ArgumentError p2_volume(corrupt_coordinate)
+        @test_throws ArgumentError p2_min_jacobian(corrupt_coordinate)
+
+        corrupt_connectivity = fresh()
+        corrupt_connectivity.tet10[1,1] = 0
+        @test !validate(corrupt_connectivity).ok
+        callback_calls = Ref(0)
+        @test_throws ArgumentError curve_to_surface!(
+            corrupt_connectivity,
+            (x,y,z)->(callback_calls[] += 1; (x,y,z)),
+            (x,y,z)->true)
+        @test callback_calls[] == 0
+
+        corrupt_tag = fresh()
+        corrupt_tag.tet_tag[1] = -1
+        @test !validate(corrupt_tag).ok
+        corrupt_path = joinpath(mktempdir(), "corrupt.msh")
+        @test_throws ArgumentError write_msh_p2(corrupt_path, corrupt_tag)
+        @test !ispath(corrupt_path)
     end
 
     @testset "empty mesh" begin
@@ -306,5 +496,10 @@ end
         @test p2_min_jacobian(p) == 0.0
         @test curve_to_cylinder!(p, (0.,0,0), (0.,0,1), 1.0) == 0
         @test curve_to_surface!(p, (x,y,z)->(x,y,z), (x,y,z)->true) == 0
+    end
+
+    @testset "public documentation" begin
+        @test isempty(Base.Docs.undocumented_names(Tessella.HighOrder; private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.HighOrder; recursive=true))
     end
 end

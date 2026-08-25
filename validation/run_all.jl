@@ -92,6 +92,12 @@ uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=y
 println("  command: ", uniform_refine_command)
 run(uniform_refine_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── high_order ──  exact Gmsh 4.15.2 type-11 tetrahedron ordering")
+high_order_script = joinpath(HERE, "high_order", "differential.jl")
+high_order_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $high_order_script`
+println("  command: ", high_order_command)
+run(high_order_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 println("\n── transfinite ──  Gmsh 4.15.2 four-sided planar patches")
 transfinite_script = joinpath(HERE, "transfinite", "differential.jl")
 transfinite_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_script`

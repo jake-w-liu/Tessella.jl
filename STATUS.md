@@ -36,7 +36,7 @@ metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P
 not claim general mixed-element generation or recombination beyond P4's first-order
 surface pairing, MINI basis-selector tags 138/139 as mesh records, integration of
 mixed blocks into the simplex meshing kernels, curved high-order
-Jacobian certification, ancillary/unknown-section preservation (binary readers reject
+Jacobian certification beyond P2 tetrahedra, ancillary/unknown-section preservation (binary readers reject
 unsupported sections explicitly), repeated `$Nodes`, non-8-byte binary data, internal
 indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection. Some
 registered fixed tags and polygon-border type 69 require explicit Tessella-only output
@@ -93,6 +93,42 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening quadratic
+tetrahedra and type-11 solver output:
+
+- **VERIFIED (Gmsh 4.15.2 API differential):** type-11 slots 9 and 10 were
+  reversed. Tessella emitted edge `(2,4)` before `(3,4)`, while Gmsh requires
+  `(3,4)` before `(2,4)`. Generation, shape gradients, edge ownership, curving,
+  and MSH output now use Gmsh's ten-slot order, and Gmsh reads every written
+  local node coordinate back identically.
+- `P2Mesh` now owns and validates tetrahedron tags, `p2_tetmesh` preserves them,
+  and `write_msh_p2` uses them by default. The high-order API is available from
+  the top-level module, and every public consumer safely revalidates mutable
+  coordinate, connectivity, and tag storage before bounds-elided access.
+- **VERIFIED (subnormal regression):** the previous half-plus-half midpoint
+  turned equal minimum-subnormal coordinates into zero and left a valid linear
+  tetrahedron without a positive P2 Jacobian certificate. Correctly rounded
+  midpoint construction now yields Jacobian `2e-323` and representable volume
+  `5e-324`; node/tet allocation limits are checked before dense output arrays.
+- Curving is transactional: a callback failure after one accepted projection
+  previously left node 5 changed, while the same regression now restores every
+  coordinate. Displacement scaling also handles a finite tetrahedron spanning
+  `-floatmax(Float64):floatmax(Float64)` without first overflowing its bounding
+  box diagonal.
+- An independent exact-rational shape-function oracle matched all 19,600
+  evaluations reconstructed from the cubic Bernstein coefficients. Cylinder
+  curving from scales `1e-100` through `1e100` had maximum normalized coordinate
+  difference `1.1102230246251565e-16`, and a 16-ulp-wide tetrahedron translated
+  to `1e100` retained a positive exact certificate.
+- The focused `HighOrder` suite passed 561/561 assertions under Julia 1.12.7 and
+  Julia 1.11.9. Its fixed Gmsh-readable type-11 file SHA-256 is
+  `5a83ebe0386bda71c6761148ed3fe2f964f16c2da2f0b66b6951ef558f4927ab`.
+- The bounds-checked package gate passed 164,197/164,197 assertions in 12m09.3s,
+  and the aggregate bounds-checked validation, including the new mandatory
+  high-order Gmsh child, exited 0 in 10m30.2s against Gmsh 4.15.2. Public module
+  and top-level documentation scans returned no missing names; recursive
+  ambiguity detection returned zero.
 
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening one-level uniform
 simplex refinement:

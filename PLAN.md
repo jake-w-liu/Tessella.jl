@@ -123,7 +123,7 @@ direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exac
 distance queries. P2 does not yet claim general mixed-element generation or
 recombination beyond P4's first-order surface pairing, integration of mixed blocks
 into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, curved
-high-order Jacobian certification, preservation of
+high-order Jacobian certification beyond P2 tetrahedra, preservation of
 ancillary/unknown MSH sections (binary readers reject unsupported sections
 explicitly), repeated `$Nodes` sections, non-8-byte binary data, internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
@@ -220,7 +220,7 @@ julia --project --check-bounds=yes validation/run_all.jl
 ```
 
 The aggregate validation launches the Gmsh 4.15.2 size-field, constant-range,
-uniform-refinement,
+uniform-refinement, quadratic-tetrahedron,
 four-sided transfinite, straight transfinite curve-law/HWall, three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
 recombined-hexahedron differentials
