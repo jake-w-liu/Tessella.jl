@@ -1,29 +1,32 @@
 """
     TransfiniteTriangle
 
-Validated planar, three-sided transfinite triangle patches matching the
-unrecombined `Mesh.TransfiniteTri = 1` path in Gmsh 4.15.2. Boundary chains are
-supplied already discretized, cyclically oriented, and must have the same node
-count. Gmsh's triangular interpolation, chord parameters, compact triangular
-connectivity, and arrangement-independent triangle path are reproduced for an
-affine planar surface.
+Validated planar, three-sided transfinite patches matching the specific
+`Mesh.TransfiniteTri = 1` path in Gmsh 4.15.2. Boundary chains are supplied
+already discretized, cyclically oriented, and must have the same node count.
+Gmsh's triangular interpolation, chord parameters, compact triangular
+connectivity, and arrangement-dependent recombined triangle/quadrangle layouts
+are reproduced for an affine planar surface.
 
 This module does not discretize curves, implement Gmsh's legacy
 `Mesh.TransfiniteTri = 0` collapsed-grid algorithm, quasi-transfinite repair,
-CAD/ruled/spherical parameterizations, recombination or quadrangles, smoothing,
-holes, periodic seams, embedded entities, size/quality fields, or transfinite
-volumes.
+CAD/ruled/spherical parameterizations, smoothing, holes, periodic seams,
+embedded entities, size/quality fields, or transfinite volumes.
 """
 module TransfiniteTriangle
 
 using ..MeshTypes: Mesh, boundary_edges, nnodes, nsegs, ntris, validate
 using ..Predicates: orient2
+import ..Elements
+using ..Elements: ElementBlock, MixedMesh
 
-export mesh_transfinite_triangle
+export mesh_transfinite_triangle, mesh_transfinite_triangle_patch
 
 const _CALLER = "mesh_transfinite_triangle"
+const _RECOMBINED_CALLER = "mesh_transfinite_triangle_patch"
 const _DEFAULT_MAX_NODES = 10_000_000
 const _DEFAULT_MAX_TRIANGLES = 20_000_000
+const _DEFAULT_MAX_QUADRANGLES = 10_000_000
 const _INT32_MAX = Int(typemax(Int32))
 const _BOUNDARY_AUDIT_MULTIPLIER = 64
 const _BOUNDARY_AUDIT_FLOOR = 4096
@@ -60,54 +63,58 @@ end
 @inline _norm3(a) = hypot(a[1], a[2], a[3])
 @inline _edge_key(a::Int32, b::Int32) = a < b ? (a, b) : (b, a)
 
-function _checked_add(a::Int, b::Int, what::AbstractString)
+function _checked_add(a::Int, b::Int, what::AbstractString,
+                      caller::AbstractString=_CALLER)
     try
         return Base.checked_add(a, b)
     catch err
         err isa InterruptException && rethrow()
         err isa OverflowError || rethrow()
-        throw(ArgumentError("$_CALLER: $what count overflows Int"))
+        throw(ArgumentError("$caller: $what count overflows Int"))
     end
 end
 
-function _checked_mul(a::Int, b::Int, what::AbstractString)
+function _checked_mul(a::Int, b::Int, what::AbstractString,
+                      caller::AbstractString=_CALLER)
     try
         return Base.checked_mul(a, b)
     catch err
         err isa InterruptException && rethrow()
         err isa OverflowError || rethrow()
-        throw(ArgumentError("$_CALLER: $what count overflows Int"))
+        throw(ArgumentError("$caller: $what count overflows Int"))
     end
 end
 
-function _limit(value, name::AbstractString)
+function _limit(value, name::AbstractString,
+                caller::AbstractString=_CALLER)
     value isa Integer || throw(ArgumentError(
-        "$_CALLER: $name must be an integer"))
+        "$caller: $name must be an integer"))
     value isa Bool && throw(ArgumentError(
-        "$_CALLER: $name must not be Bool"))
+        "$caller: $name must not be Bool"))
     value >= 0 || throw(ArgumentError(
-        "$_CALLER: $name must be non-negative"))
+        "$caller: $name must be non-negative"))
     value <= typemax(Int32) || throw(ArgumentError(
-        "$_CALLER: $name exceeds the Int32 topology limit"))
+        "$caller: $name exceeds the Int32 topology limit"))
     return Int(value)
 end
 
-function _tag(value, name::AbstractString)
+function _tag(value, name::AbstractString,
+              caller::AbstractString=_CALLER)
     value isa Integer || throw(ArgumentError(
-        "$_CALLER: $name must be an integer"))
+        "$caller: $name must be an integer"))
     value isa Bool && throw(ArgumentError(
-        "$_CALLER: $name must not be Bool"))
+        "$caller: $name must not be Bool"))
     0 <= value <= typemax(Int32) || throw(ArgumentError(
-        "$_CALLER: $name must lie in 0:$(typemax(Int32))"))
+        "$caller: $name must lie in 0:$(typemax(Int32))"))
     return Int32(value)
 end
 
-function _arrangement(value)
+function _arrangement(value, caller::AbstractString=_CALLER)
     value isa Symbol || throw(ArgumentError(
-        "$_CALLER: arrangement must be a Symbol"))
+        "$caller: arrangement must be a Symbol"))
     value in (:left, :right, :alternate_left, :alternate_right) ||
         throw(ArgumentError(
-            "$_CALLER: arrangement must be :left, :right, :alternate_left, " *
+            "$caller: arrangement must be :left, :right, :alternate_left, " *
             "or :alternate_right"))
     return value
 end
@@ -626,6 +633,105 @@ function _fill_triangles!(triangles, divisions::Int)
     return nothing
 end
 
+@inline _atomic_down_id(i::Int, j::Int) =
+    i * i + (j < i ? 2j + 2 : 2i + 1)
+@inline _atomic_up_id(i::Int, j::Int) = i * i + 2j + 1
+
+@inline function _mark_atomic!(covered, id::Int)
+    1 <= id <= length(covered) || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal atomic-cell index invariant failed"))
+    covered[id] && throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal atomic-cell overlap invariant failed"))
+    covered[id] = true
+    return nothing
+end
+
+@inline function _add_recombined_triangle!(triangles, column::Int,
+                                           covered, i::Int, j::Int)
+    triangles[1, column] = _node(i, j)
+    triangles[2, column] = _node(i + 1, j)
+    triangles[3, column] = _node(i + 1, j + 1)
+    _mark_atomic!(covered, _atomic_down_id(i, j))
+    return nothing
+end
+
+@inline function _add_standard_quadrangle!(quadrangles, column::Int,
+                                           covered, i::Int, j::Int)
+    quadrangles[1, column] = _node(i, j)
+    quadrangles[2, column] = _node(i + 1, j)
+    quadrangles[3, column] = _node(i + 1, j + 1)
+    quadrangles[4, column] = _node(i, j + 1)
+    _mark_atomic!(covered, _atomic_up_id(i, j))
+    _mark_atomic!(covered, _atomic_down_id(i, j))
+    return nothing
+end
+
+@inline function _add_shifted_quadrangle!(quadrangles, column::Int,
+                                          covered, i::Int, j::Int)
+    quadrangles[1, column] = _node(i, j)
+    quadrangles[2, column] = _node(i + 1, j + 1)
+    quadrangles[3, column] = _node(i + 1, j + 2)
+    quadrangles[4, column] = _node(i, j + 1)
+    _mark_atomic!(covered, _atomic_up_id(i, j))
+    _mark_atomic!(covered, _atomic_down_id(i, j + 1))
+    return nothing
+end
+
+function _fill_recombined_cells!(triangles, quadrangles, divisions::Int,
+                                 arrangement::Symbol)
+    covered = falses(_checked_mul(
+        divisions, divisions, "certification triangle", _RECOMBINED_CALLER))
+    triangle = 0
+    quadrangle = 0
+    @inbounds for i in 0:divisions-1
+        if arrangement === :right ||
+           (arrangement in (:alternate_left, :alternate_right) && isodd(i))
+            for j in 0:i-1
+                quadrangle += 1
+                _add_standard_quadrangle!(
+                    quadrangles, quadrangle, covered, i, j)
+            end
+            triangle += 1
+            _add_recombined_triangle!(triangles, triangle, covered, i, i)
+        elseif arrangement in (:alternate_left, :alternate_right)
+            triangle += 1
+            _add_recombined_triangle!(triangles, triangle, covered, i, 0)
+            for j in 0:i-1
+                quadrangle += 1
+                _add_shifted_quadrangle!(
+                    quadrangles, quadrangle, covered, i, j)
+            end
+        else
+            # Gmsh's `Left` path walks a four-row central zigzag. The row's
+            # single triangle separates ordinary pairs on its left from
+            # shifted pairs on its right.
+            separator = 2 * (i ÷ 4) + (i % 4 == 0 ? 0 : 1)
+            0 <= separator <= i || throw(ErrorException(
+                "$_RECOMBINED_CALLER: internal separator invariant failed"))
+            for j in 0:separator-1
+                quadrangle += 1
+                _add_standard_quadrangle!(
+                    quadrangles, quadrangle, covered, i, j)
+            end
+            triangle += 1
+            _add_recombined_triangle!(
+                triangles, triangle, covered, i, separator)
+            for j in separator:i-1
+                quadrangle += 1
+                _add_shifted_quadrangle!(
+                    quadrangles, quadrangle, covered, i, j)
+            end
+        end
+    end
+    triangle == size(triangles, 2) || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal triangle count invariant failed"))
+    quadrangle == size(quadrangles, 2) || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal quadrangle count invariant failed"))
+    all(covered) || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal atomic-cell coverage invariant failed"))
+    return nothing
+end
+
 @inline function _project_output(coords, node_id::Int32, origin, scale, frame)
     index = Int(node_id)
     normalized = ((coords[1, index] - origin[1]) / scale,
@@ -672,6 +778,67 @@ function _validate_boundary_postcondition(mesh::Mesh)
     return nothing
 end
 
+function _validate_recombined_geometry(coords, triangles, quadrangles,
+                                       origin, scale, frame, reference::Int)
+    reference != 0 || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal orientation invariant failed"))
+    @inbounds for cell in axes(triangles, 2)
+        first = _project_output(
+            coords, triangles[1, cell], origin, scale, frame)
+        second = _project_output(
+            coords, triangles[2, cell], origin, scale, frame)
+        third = _project_output(
+            coords, triangles[3, cell], origin, scale, frame)
+        orient2(first, second, third) == reference || throw(ArgumentError(
+            "$_RECOMBINED_CALLER: triangle $cell is folded, degenerate, or " *
+            "reverses patch orientation"))
+    end
+    @inbounds for cell in axes(quadrangles, 2)
+        points = ntuple(local_node -> _project_output(
+            coords, quadrangles[local_node, cell], origin, scale, frame), 4)
+        turns = ntuple(local_node -> orient2(
+            points[local_node], points[mod1(local_node + 1, 4)],
+            points[mod1(local_node + 2, 4)]), 4)
+        all(==(reference), turns) || throw(ArgumentError(
+            "$_RECOMBINED_CALLER: quadrangle $cell has a zero or reversed " *
+            "corner Jacobian"))
+    end
+    return nothing
+end
+
+@inline function _record_surface_edge!(incidence, first::Int32, second::Int32)
+    edge = _edge_key(first, second)
+    count = get(incidence, edge, 0) + 1
+    count <= 2 || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal non-manifold edge $edge"))
+    incidence[edge] = count
+    return nothing
+end
+
+function _validate_recombined_boundary(segments, triangles, quadrangles)
+    incidence = Dict{NTuple{2,Int32},Int}()
+    sizehint!(incidence,
+              size(triangles, 2) * 3 + size(quadrangles, 2) * 2)
+    @inbounds for cell in axes(triangles, 2), local_node in 1:3
+        _record_surface_edge!(
+            incidence, triangles[local_node, cell],
+            triangles[mod1(local_node + 1, 3), cell])
+    end
+    @inbounds for cell in axes(quadrangles, 2), local_node in 1:4
+        _record_surface_edge!(
+            incidence, quadrangles[local_node, cell],
+            quadrangles[mod1(local_node + 1, 4), cell])
+    end
+    actual = sort!(NTuple{2,Int32}[
+        edge for (edge, count) in incidence if count == 1])
+    expected = sort!(NTuple{2,Int32}[
+        _edge_key(segments[1, segment], segments[2, segment])
+        for segment in axes(segments, 2)])
+    actual == expected || throw(ErrorException(
+        "$_RECOMBINED_CALLER: mixed-cell boundary does not equal emitted segments"))
+    return nothing
+end
+
 """
     mesh_transfinite_triangle(side1, side2, side3;
         arrangement=:left, face_tag=0, side_tags=(0,0,0),
@@ -688,7 +855,8 @@ The accepted arrangements are `:left`, `:right`, `:alternate_left`, and
 `:alternate_right`. They intentionally produce identical triangle meshes:
 Gmsh's unrecombined specific three-sided path does not consult the arrangement
 when creating triangles. Arrangement-dependent triangular/quadrilateral mixes
-from Gmsh's recombined path are outside this function's simplex-only contract.
+from Gmsh's recombined path are available through
+[`mesh_transfinite_triangle_patch`](@ref).
 
 The returned mesh contains all three boundary segment chains. `face_tag` is
 copied to every triangle and each entry of `side_tags` to the corresponding
@@ -705,14 +873,18 @@ quadrangles, smooth, handle holes/periodic seams/embedded entities, apply size
 or quality fields, or construct volumes. A boundary whose spatial intersection
 audit exceeds its linear candidate budget is rejected.
 """
-function mesh_transfinite_triangle(side1::AbstractVector,
-                                   side2::AbstractVector,
-                                   side3::AbstractVector;
+function mesh_transfinite_triangle(side1,
+                                   side2,
+                                   side3;
                                    arrangement=:left,
                                    face_tag=0,
                                    side_tags=(0, 0, 0),
                                    max_nodes=_DEFAULT_MAX_NODES,
                                    max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
+    for (index, side) in enumerate((side1, side2, side3))
+        side isa AbstractVector || throw(ArgumentError(
+            "$_CALLER: side $index must be an AbstractVector"))
+    end
     # Gmsh 4.15.2 ignores this value for unrecombined transfinite3 triangles;
     # validating it still prevents silent misspellings and preserves API parity.
     _arrangement(arrangement)
@@ -831,6 +1003,156 @@ function mesh_transfinite_triangle(side1::AbstractVector,
         "$_CALLER: internal output count postcondition failed"))
     _validate_boundary_postcondition(mesh)
     return mesh
+end
+
+"""
+    mesh_transfinite_triangle_patch(side1, side2, side3;
+        arrangement=:left, face_tag=0, side_tags=(0,0,0),
+        max_nodes=10_000_000, max_triangles=20_000_000,
+        max_quadrangles=10_000_000) -> MixedMesh
+
+Construct the recombined form of Gmsh 4.15.2's specific three-sided
+`Mesh.TransfiniteTri = 1` patch. Inputs and node placement have the same contract
+as [`mesh_transfinite_triangle`](@ref). The result contains Gmsh type-1 boundary
+lines, one type-2 triangle per logical row, and the remaining cells as type-3
+quadrangles. `face_tag` is preserved on both surface-element families.
+
+The four arrangements reproduce Gmsh's recombined topology. `:right` leaves the
+row triangle against side 3; `:alternate_left` and `:alternate_right` share Gmsh's
+alternating-row layout; `:left` follows its central four-row zigzag. The two
+alternate spellings are therefore intentionally identical for this specific
+three-sided algorithm.
+
+Counts and caller limits are checked before boundary conversion or output
+allocation. The node placement is first certified by the unrecombined simplex
+implementation, which requires `divisions^2 <= typemax(Int32)`. Every emitted
+quadrangle then receives an exact projected four-corner Jacobian check. A
+combinatorial atomic-cell audit proves that the mixed cells cover every certified
+triangle exactly once, and an edge-incidence audit proves exact conservation of
+the emitted boundary segments.
+
+This operation does not discretize curves, implement the legacy collapsed-grid
+algorithm, repair unequal side counts, map general CAD parameterizations, smooth,
+handle holes/periodic seams/embedded entities, generate high-order cells, apply
+size or quality fields, or construct volumes.
+"""
+function mesh_transfinite_triangle_patch(
+    side1, side2, side3;
+    arrangement=:left,
+    face_tag=0,
+    side_tags=(0, 0, 0),
+    max_nodes=_DEFAULT_MAX_NODES,
+    max_triangles=_DEFAULT_MAX_TRIANGLES,
+    max_quadrangles=_DEFAULT_MAX_QUADRANGLES)::MixedMesh
+
+    for (index, side) in enumerate((side1, side2, side3))
+        side isa AbstractVector || throw(ArgumentError(
+            "$_RECOMBINED_CALLER: side $index must be an AbstractVector"))
+    end
+    layout = _arrangement(arrangement, _RECOMBINED_CALLER)
+    node_limit = _limit(max_nodes, "max_nodes", _RECOMBINED_CALLER)
+    triangle_limit = _limit(
+        max_triangles, "max_triangles", _RECOMBINED_CALLER)
+    quadrangle_limit = _limit(
+        max_quadrangles, "max_quadrangles", _RECOMBINED_CALLER)
+    side_tags isa Tuple && length(side_tags) == 3 || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: side_tags must be a three-integer tuple"))
+    physical_side_tags = ntuple(index -> _tag(
+        side_tags[index], "side_tags[$index]", _RECOMBINED_CALLER), 3)
+    physical_face_tag = _tag(face_tag, "face_tag", _RECOMBINED_CALLER)
+
+    lengths = (length(side1), length(side2), length(side3))
+    @inbounds for side in 1:3
+        lengths[side] >= 2 || throw(ArgumentError(
+            "$_RECOMBINED_CALLER: side $side needs at least two points"))
+    end
+    lengths[1] == lengths[2] == lengths[3] || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: all three sides need matching node counts; got " *
+        "$(lengths[1]), $(lengths[2]), and $(lengths[3])"))
+
+    divisions = lengths[1] - 1
+    certification_triangles = _checked_mul(
+        divisions, divisions, "certification triangle", _RECOMBINED_CALLER)
+    twice_nodes = _checked_mul(
+        _checked_add(divisions, 1, "node factor", _RECOMBINED_CALLER),
+        _checked_add(divisions, 2, "node factor", _RECOMBINED_CALLER),
+        "twice-node", _RECOMBINED_CALLER)
+    nodes = twice_nodes ÷ 2
+    triangles = divisions
+    quadrangles = _checked_mul(
+        divisions, divisions - 1, "twice-quadrangle", _RECOMBINED_CALLER) ÷ 2
+    segments = _checked_mul(
+        3, divisions, "segment", _RECOMBINED_CALLER)
+    nodes <= _INT32_MAX || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $nodes nodes exceed the Int32 indexing limit"))
+    certification_triangles <= _INT32_MAX || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $certification_triangles certification triangles " *
+        "exceed the Int32 topology limit"))
+    quadrangles <= _INT32_MAX || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $quadrangles quadrangles exceed the Int32 topology limit"))
+    segments <= _INT32_MAX || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $segments segments exceed the Int32 topology limit"))
+    nodes <= node_limit || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $nodes nodes exceed max_nodes=$node_limit"))
+    triangles <= triangle_limit || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $triangles triangles exceed " *
+        "max_triangles=$triangle_limit"))
+    quadrangles <= quadrangle_limit || throw(ArgumentError(
+        "$_RECOMBINED_CALLER: $quadrangles quadrangles exceed " *
+        "max_quadrangles=$quadrangle_limit"))
+
+    certified = mesh_transfinite_triangle(
+        side1, side2, side3;
+        arrangement=layout,
+        face_tag=physical_face_tag,
+        side_tags=physical_side_tags,
+        max_nodes=node_limit,
+        max_triangles=certification_triangles)
+    (nnodes(certified) == nodes && nsegs(certified) == segments &&
+     ntris(certified) == certification_triangles) || throw(ErrorException(
+        "$_RECOMBINED_CALLER: certified lattice count postcondition failed"))
+
+    triangle_topology = Matrix{Int32}(undef, 3, triangles)
+    quadrangle_topology = Matrix{Int32}(undef, 4, quadrangles)
+    _fill_recombined_cells!(
+        triangle_topology, quadrangle_topology, divisions, layout)
+
+    ring = Vector{NTuple{3,Float64}}(undef, segments)
+    @inbounds for segment in 1:segments
+        index = Int(certified.segs[1, segment])
+        ring[segment] = (certified.coords[1, index],
+                         certified.coords[2, index],
+                         certified.coords[3, index])
+    end
+    origin, scale = _normalization(ring)
+    frame = _plane_frame(ring, origin, scale)
+    reference = _validate_triangle_orientation(
+        certified.coords, certified.tris, origin, scale, frame)
+    _validate_recombined_geometry(
+        certified.coords, triangle_topology, quadrangle_topology,
+        origin, scale, frame, reference)
+    _validate_recombined_boundary(
+        certified.segs, triangle_topology, quadrangle_topology)
+
+    blocks = ElementBlock[
+        ElementBlock(1, certified.segs, certified.seg_tag),
+        ElementBlock(2, triangle_topology,
+                     fill(physical_face_tag, triangles)),
+    ]
+    quadrangles == 0 || push!(blocks, ElementBlock(
+        3, quadrangle_topology, fill(physical_face_tag, quadrangles)))
+    result = MixedMesh(certified.coords, blocks)
+    diagnostic = Elements.validate(result)
+    diagnostic.ok || throw(ErrorException(
+        "$_RECOMBINED_CALLER: internal MixedMesh validation failed — " *
+        join(diagnostic.messages, "; ")))
+    (size(result.coords, 2) == nodes &&
+     size(result.blocks[1].nodes, 2) == segments &&
+     size(result.blocks[2].nodes, 2) == triangles &&
+     (quadrangles == 0 ||
+      size(result.blocks[3].nodes, 2) == quadrangles)) || throw(ErrorException(
+        "$_RECOMBINED_CALLER: output count postcondition failed"))
+    return result
 end
 
 end # module TransfiniteTriangle

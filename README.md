@@ -72,8 +72,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - normalized straight-curve transfinite parameters for Gmsh's Progression/Power,
   Bump, and Beta laws plus all three HWall variants, with signed orientation and
   Float64 representability gates;
-- validated three-sided planar structured triangle patches using Gmsh's specific
-  triangular interpolation, compact topology, and exact boundary postconditions;
+- validated three-sided planar structured patches using Gmsh's specific triangular
+  interpolation, compact unrecombined topology, all four recombined
+  triangle/quadrangle arrangements, and exact geometry/boundary postconditions;
 - recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
   physical tags, and exact projected corner-Jacobian certification;
 - affine six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron
@@ -89,10 +90,9 @@ interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
 `.geo` execution (including loops, macros, dynamic tags, option reads,
 dynamic/general ranges, and mixed geometry-derived physical-group RHSs),
-mixed-element generation or recombination beyond first-order surface triangle pairing,
+mixed-element generation beyond the listed first-order surface recombination paths,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
-quasi-transfinite or holed patches, recombined three-sided patches, curved/warped or
-compact-TransfiniteTri volumes,
+quasi-transfinite or holed patches, curved/warped or compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
 non-8-byte binary data, and ancillary-section preservation. MSH2 ASCII is the lossless
@@ -114,8 +114,9 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch, straight transfinite
-curve-law/HWall, three-sided transfinite, recombined-quadrangle, affine
+Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
+straight transfinite curve-law/HWall, unrecombined/recombined three-sided
+transfinite, recombined-quadrangle, affine
 transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
 children. Missing or wrong-version Gmsh and differential failures make the aggregate
 command fail. See

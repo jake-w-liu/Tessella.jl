@@ -53,7 +53,7 @@ using Tessella
     include("meshing/refine_test.jl")    # deterministic one-level uniform simplex refinement
     include("structured/transfinite_test.jl") # validated four-sided planar structured patches
     include("structured/transfinite_curve_test.jl") # straight Progression/Bump/Beta/HWall laws
-    include("structured/transfinite_triangle_test.jl") # specific three-sided structured patches
+    include("structured/transfinite_triangle_test.jl") # specific three-sided triangle/quad patches
     include("structured/transfinite_quad_test.jl") # recombined four-sided quadrangle patches
     include("structured/transfinite_volume_test.jl") # affine six-face structured volumes
     include("structured/transfinite_prism_test.jl") # affine five-face transfinite prisms

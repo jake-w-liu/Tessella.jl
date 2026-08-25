@@ -13,7 +13,8 @@ if !isdefined(Tessella, :TransfiniteTriangle)
                  joinpath(@__DIR__, "..", "..", "src", "structured",
                           "TransfiniteTriangle.jl"))
 end
-using Tessella.TransfiniteTriangle: mesh_transfinite_triangle
+using Tessella.TransfiniteTriangle: mesh_transfinite_triangle,
+                                    mesh_transfinite_triangle_patch
 
 const TARGET_GMSH_VERSION = "4.15.2"
 
@@ -97,7 +98,30 @@ function canonical_segments(connectivity)
     return result
 end
 
-function add_curved_triangle(arrangement, count; tilted=false)
+function canonical_quadrangles(connectivity)
+    length(connectivity) % 4 == 0 || error(
+        "quadrangle connectivity is not divisible by four")
+    result = NTuple{4,Int32}[]
+    for index in 1:4:length(connectivity)
+        nodes = ntuple(offset -> Int32(connectivity[index + offset - 1]), 4)
+        candidates = NTuple{4,Int32}[]
+        for shift in 0:3
+            push!(candidates,
+                  ntuple(offset -> nodes[mod1(shift + offset, 4)], 4))
+        end
+        reversed = (nodes[1], nodes[4], nodes[3], nodes[2])
+        for shift in 0:3
+            push!(candidates,
+                  ntuple(offset -> reversed[mod1(shift + offset, 4)], 4))
+        end
+        push!(result, minimum(candidates))
+    end
+    sort!(result)
+    return result
+end
+
+function add_curved_triangle(arrangement, count;
+                             tilted=false, recombine=false)
     gmsh.clear()
     gmsh.model.add("transfinite_triangle_" * arrangement *
                    (tilted ? "_tilted" : ""))
@@ -128,6 +152,7 @@ function add_curved_triangle(arrangement, count; tilted=false)
     end
     gmsh.model.geo.mesh.setTransfiniteSurface(
         surface, arrangement, [p1, p2, p3])
+    recombine && gmsh.model.geo.mesh.setRecombine(2, surface)
     gmsh.model.geo.synchronize()
     gmsh.model.mesh.generate(2)
     return curves, surface
@@ -135,13 +160,11 @@ end
 
 function gmsh_to_tessella_node_map(mesh, surface)
     types, _, element_nodes = gmsh.model.mesh.getElements(2, surface)
-    triangle_position = findfirst(==(Int32(2)), types)
-    triangle_position === nothing && error(
-        "Gmsh emitted no first-order triangles")
-    tags = sort!(unique(element_nodes[triangle_position]))
-    length(tags) == nnodes(mesh) || error(
-        "node-count mismatch: Gmsh $(length(tags)), Tessella $(nnodes(mesh))")
-    used = falses(nnodes(mesh))
+    tags = sort!(unique(reduce(vcat, element_nodes; init=UInt64[])))
+    tessella_nodes = size(mesh.coords, 2)
+    length(tags) == tessella_nodes || error(
+        "node-count mismatch: Gmsh $(length(tags)), Tessella $tessella_nodes")
+    used = falses(tessella_nodes)
     mapping = Dict{UInt64,Int32}()
     maximum_error = 0.0
     coordinates = Dict(tag => gmsh.model.mesh.getNode(tag)[1] for tag in tags)
@@ -153,9 +176,12 @@ function gmsh_to_tessella_node_map(mesh, surface)
         point = (raw[1], raw[2], raw[3])
         best = 0
         best_error = Inf
-        for destination in 1:nnodes(mesh)
+        for destination in 1:tessella_nodes
             used[destination] && continue
-            candidate_error = _distance(point, node(mesh, destination))
+            candidate = (mesh.coords[1, destination],
+                         mesh.coords[2, destination],
+                         mesh.coords[3, destination])
+            candidate_error = _distance(point, candidate)
             if candidate_error < best_error
                 best = destination
                 best_error = candidate_error
@@ -210,6 +236,68 @@ function check_arrangement(arrangement, symbol, count=6; tilted=false)
     return maximum_error, canonical_triangles(mapped_triangles)
 end
 
+function check_recombined_arrangement(
+    arrangement, symbol, count=6; tilted=false)
+    curves, surface = add_curved_triangle(
+        arrangement, count; tilted, recombine=true)
+    sides = map(curve_points, curves)
+    all(length(side) == count for side in sides) || error(
+        "Gmsh did not emit $count nodes on each transfinite curve")
+    mesh = mesh_transfinite_triangle_patch(
+        sides...; arrangement=symbol, face_tag=21,
+        side_tags=(11, 12, 13))
+    Tessella.Elements.validate(mesh).ok || error(
+        "Tessella recombined $arrangement patch did not validate")
+    divisions = count - 1
+    expected = (count * (count + 1) ÷ 2, 3divisions, divisions,
+                divisions * (divisions - 1) ÷ 2)
+    line_block = only(filter(block -> block.msh == 1, mesh.blocks))
+    triangle_block = only(filter(block -> block.msh == 2, mesh.blocks))
+    quadrangle_blocks = filter(block -> block.msh == 3, mesh.blocks)
+    quadrangle_count = isempty(quadrangle_blocks) ? 0 :
+                        size(only(quadrangle_blocks).nodes, 2)
+    (size(mesh.coords, 2), size(line_block.nodes, 2),
+     size(triangle_block.nodes, 2), quadrangle_count) == expected || error(
+        "unexpected Tessella recombined $arrangement counts")
+    mapping, maximum_error = gmsh_to_tessella_node_map(mesh, surface)
+
+    types, _, element_nodes = gmsh.model.mesh.getElements(2, surface)
+    triangle_position = findfirst(==(Int32(2)), types)
+    triangle_position === nothing && error(
+        "Gmsh recombined $arrangement emitted no first-order triangles")
+    mapped_triangles = Int32[
+        mapping[tag] for tag in element_nodes[triangle_position]]
+    tessella_triangles = canonical_triangles(vec(triangle_block.nodes))
+    canonical_triangles(mapped_triangles) == tessella_triangles || error(
+        "$arrangement recombined triangle connectivity differs from Gmsh")
+
+    quadrangle_position = findfirst(==(Int32(3)), types)
+    mapped_quadrangles = if quadrangle_position === nothing
+        Int32[]
+    else
+        Int32[mapping[tag] for tag in element_nodes[quadrangle_position]]
+    end
+    tessella_quadrangles = isempty(quadrangle_blocks) ? NTuple{4,Int32}[] :
+        canonical_quadrangles(vec(only(quadrangle_blocks).nodes))
+    canonical_quadrangles(mapped_quadrangles) == tessella_quadrangles || error(
+        "$arrangement quadrangle connectivity differs from Gmsh")
+
+    mapped_segments = Int32[]
+    for curve in curves
+        line_types, _, line_nodes = gmsh.model.mesh.getElements(1, curve)
+        line_position = findfirst(==(Int32(1)), line_types)
+        line_position === nothing && error(
+            "Gmsh curve $curve emitted no first-order lines")
+        append!(mapped_segments,
+                (mapping[tag] for tag in line_nodes[line_position]))
+    end
+    canonical_segments(mapped_segments) ==
+        canonical_segments(vec(line_block.nodes)) || error(
+            "$arrangement recombined boundary connectivity differs from Gmsh")
+    return maximum_error, tessella_triangles, tessella_quadrangles,
+           Tessella.Elements.mixed_crc(mesh).sha
+end
+
 gmsh.initialize([GMSH_EXECUTABLE, "-nopopup"], false, false)
 try
     gmsh.option.setNumber("General.Terminal", 0)
@@ -237,9 +325,9 @@ try
     all(topology == topologies[1] for topology in topologies) || error(
         "unrecombined specific triangular topology changed with arrangement")
 
-    # Exercise the minimal patch and two additional triangular-lattice sizes;
+    # Exercise the minimal patch and three additional triangular-lattice sizes;
     # arrangement parity above uses the nonuniform six-node case.
-    for count in (2, 3, 8)
+    for count in (2, 3, 8, 10)
         maximum_error, _ = check_arrangement("Left", :left, count)
         push!(errors, maximum_error)
         coordinate_samples += count * (count + 1) ÷ 2
@@ -247,12 +335,47 @@ try
     maximum_error, _ = check_arrangement("Left", :left, 6; tilted=true)
     push!(errors, maximum_error)
     coordinate_samples += 21
+
+    recombined_errors = Float64[]
+    recombined_topologies = Tuple{
+        Vector{NTuple{3,Int32}},Vector{NTuple{4,Int32}}}[]
+    recombined_crcs = String[]
+    recombined_coordinate_samples = 0
+    for (arrangement, symbol) in cases
+        maximum_error, triangles, quadrangles, crc =
+            check_recombined_arrangement(arrangement, symbol)
+        push!(recombined_errors, maximum_error)
+        push!(recombined_topologies, (triangles, quadrangles))
+        push!(recombined_crcs, crc)
+        recombined_coordinate_samples += 21
+    end
+    recombined_topologies[3] == recombined_topologies[4] || error(
+        "Gmsh AlternateLeft/AlternateRight recombined layouts diverged")
+    recombined_topologies[1] != recombined_topologies[2] || error(
+        "Gmsh Left/Right recombined layouts unexpectedly coincide")
+    for count in (2, 3, 8, 10)
+        maximum_error, _, _, _ =
+            check_recombined_arrangement("Left", :left, count)
+        push!(recombined_errors, maximum_error)
+        recombined_coordinate_samples += count * (count + 1) ÷ 2
+    end
+    maximum_error, _, _, _ = check_recombined_arrangement(
+        "Left", :left, 6; tilted=true)
+    push!(recombined_errors, maximum_error)
+    recombined_coordinate_samples += 21
     println("TRANSFINITE_TRIANGLE_DIFFERENTIAL_OK gmsh=$api_version " *
-            "arrangements=$(length(cases)) resolutions=4 geometries=2 " *
+            "arrangements=$(length(cases)) resolutions=5 geometries=2 " *
             "coordinate_samples=$coordinate_samples " *
             "max_node_error=$(maximum(errors)) reference_nodes=21 " *
             "reference_segments=15 reference_triangles=25 " *
-            "arrangement_topologies=1")
+            "arrangement_topologies=1 recombined_arrangements=$(length(cases)) " *
+            "recombined_resolutions=5 recombined_geometries=2 " *
+            "recombined_coordinate_samples=$recombined_coordinate_samples " *
+            "recombined_max_node_error=$(maximum(recombined_errors)) " *
+            "recombined_reference_triangles=5 " *
+            "recombined_reference_quadrangles=10 " *
+            "recombined_alternate_topologies=1 " *
+            "recombined_crcs=$(join(recombined_crcs, ','))")
 finally
     gmsh.finalize()
 end

@@ -8,7 +8,8 @@ if !isdefined(Tessella, :TransfiniteTriangle)
                  joinpath(@__DIR__, "..", "..", "src", "structured",
                           "TransfiniteTriangle.jl"))
 end
-using Tessella.TransfiniteTriangle: mesh_transfinite_triangle
+using Tessella.TransfiniteTriangle: mesh_transfinite_triangle,
+                                    mesh_transfinite_triangle_patch
 
 @inline _triangle_node(i::Int, j::Int) = Int32((i * (i + 1)) ÷ 2 + j + 1)
 
@@ -35,6 +36,63 @@ function _triangle_surface_area(mesh)
                              node(mesh, mesh.tris[2, triangle]),
                              node(mesh, mesh.tris[3, triangle]))
                for triangle in 1:ntris(mesh); init=0.0)
+end
+
+function _triangle_mixed_surface_area(mesh)
+    mixed_node(index) = (mesh.coords[1, Int(index)],
+                         mesh.coords[2, Int(index)],
+                         mesh.coords[3, Int(index)])
+    area = 0.0
+    for block in mesh.blocks
+        if block.msh == 2
+            for cell in axes(block.nodes, 2)
+                area += triangle_area(
+                    mixed_node(block.nodes[1, cell]),
+                    mixed_node(block.nodes[2, cell]),
+                    mixed_node(block.nodes[3, cell]))
+            end
+        elseif block.msh == 3
+            for cell in axes(block.nodes, 2)
+                first = mixed_node(block.nodes[1, cell])
+                second = mixed_node(block.nodes[2, cell])
+                third = mixed_node(block.nodes[3, cell])
+                fourth = mixed_node(block.nodes[4, cell])
+                area += triangle_area(first, second, third)
+                area += triangle_area(first, third, fourth)
+            end
+        end
+    end
+    return area
+end
+
+function _triangle_block(mesh, msh::Int)
+    matches = filter(block -> block.msh == msh, mesh.blocks)
+    length(matches) == 1 || error(
+        "expected one mixed block for MSH type $msh, got $(length(matches))")
+    return only(matches)
+end
+
+function _triangle_canonical_block_cells(block)
+    cells = Tuple{Tuple,Int32}[]
+    for cell in axes(block.nodes, 2)
+        nodes = Tuple(block.nodes[:, cell])
+        node_count = length(nodes)
+        candidates = Tuple[]
+        for shift in 0:node_count-1
+            push!(candidates,
+                  ntuple(offset -> nodes[mod1(shift + offset, node_count)],
+                         node_count))
+        end
+        reversed = reverse(nodes)
+        for shift in 0:node_count-1
+            push!(candidates,
+                  ntuple(offset -> reversed[mod1(shift + offset, node_count)],
+                         node_count))
+        end
+        push!(cells, (minimum(candidates), block.tags[cell]))
+    end
+    sort!(cells)
+    return cells
 end
 
 function _triangle_edge_set(matrix)
@@ -125,6 +183,12 @@ Base.getindex(::_CountOnlyTriangleSide, ::Int) =
         sides...; arrangement=:alternate_left)
 end
 
+@noinline function _triangle_patch_allocated(sides)
+    GC.gc()
+    return @allocated mesh_transfinite_triangle_patch(
+        sides...; arrangement=:alternate_left)
+end
+
 @noinline function _triangle_rejected_allocated(side)
     GC.gc()
     return @allocated try
@@ -163,6 +227,114 @@ end
         reference = _triangle_canonical_triangles(meshes[:left])
         @test all(_triangle_canonical_triangles(mesh) == reference
                   for mesh in values(meshes))
+    end
+
+    @testset "Gmsh recombined triangle/quadrangle layouts" begin
+        sides = _straight_triangle(4)
+        # Exact local-node records from the pinned Gmsh 4.15.2
+        # Mesh.TransfiniteTri=1 + Recombine Surface oracle.
+        expected_triangles = Dict(
+            :left => [(1, 2, 3), (3, 5, 6), (5, 8, 9), (8, 12, 13)],
+            :right => [(1, 2, 3), (3, 5, 6), (6, 9, 10), (10, 14, 15)],
+            :alternate_left =>
+                [(1, 2, 3), (3, 5, 6), (4, 7, 8), (10, 14, 15)],
+            :alternate_right =>
+                [(1, 2, 3), (3, 5, 6), (4, 7, 8), (10, 14, 15)],
+        )
+        expected_quadrangles = Dict(
+            :left => [(2, 4, 5, 3), (4, 7, 8, 5),
+                      (5, 9, 10, 6), (7, 11, 12, 8),
+                      (8, 13, 14, 9), (9, 14, 15, 10)],
+            :right => [(2, 4, 5, 3), (4, 7, 8, 5),
+                       (5, 8, 9, 6), (7, 11, 12, 8),
+                       (8, 12, 13, 9), (9, 13, 14, 10)],
+            :alternate_left =>
+                [(2, 4, 5, 3), (4, 8, 9, 5),
+                 (5, 9, 10, 6), (7, 11, 12, 8),
+                 (8, 12, 13, 9), (9, 13, 14, 10)],
+            :alternate_right =>
+                [(2, 4, 5, 3), (4, 8, 9, 5),
+                 (5, 9, 10, 6), (7, 11, 12, 8),
+                 (8, 12, 13, 9), (9, 13, 14, 10)],
+        )
+        expected_crcs = Dict(
+            :left =>
+                "09d6619152fe4f42d604c9a95e3805843825a08615d92778ae4e551d85fa2ce3",
+            :right =>
+                "b401b6bc71cac6dc3f7f44b20a4128ddf4bb439acec941253b7598af19800205",
+            :alternate_left =>
+                "5d200b76825ed699e99b125c28cef49158d30bc56a9e090d8469854cc84dabfa",
+            :alternate_right =>
+                "5d200b76825ed699e99b125c28cef49158d30bc56a9e090d8469854cc84dabfa",
+        )
+        certified = mesh_transfinite_triangle(
+            sides...; face_tag=21, side_tags=(11, 12, 13))
+        for arrangement in
+            (:left, :right, :alternate_left, :alternate_right)
+            mixed = mesh_transfinite_triangle_patch(
+                sides...; arrangement, face_tag=21,
+                side_tags=(11, 12, 13))
+            @test Tessella.Elements.validate(mixed).ok
+            @test [block.msh for block in mixed.blocks] == [1, 2, 3]
+            @test mixed.coords == certified.coords
+            @test mixed.blocks[1].nodes == certified.segs
+            @test mixed.blocks[1].tags == certified.seg_tag
+            triangle_block = _triangle_block(mixed, 2)
+            quadrangle_block = _triangle_block(mixed, 3)
+            @test [Tuple(triangle_block.nodes[:, cell])
+                   for cell in axes(triangle_block.nodes, 2)] ==
+                  expected_triangles[arrangement]
+            @test [Tuple(quadrangle_block.nodes[:, cell])
+                   for cell in axes(quadrangle_block.nodes, 2)] ==
+                  expected_quadrangles[arrangement]
+            @test triangle_block.tags == fill(Int32(21), 4)
+            @test quadrangle_block.tags == fill(Int32(21), 6)
+            @test _triangle_mixed_surface_area(mixed) == 6.0
+            @test Tessella.Elements.mixed_crc(mixed).sha ==
+                  expected_crcs[arrangement]
+            @test Tessella.Elements.mixed_crc(mixed) ==
+                  Tessella.Elements.mixed_crc(mesh_transfinite_triangle_patch(
+                      sides...; arrangement, face_tag=21,
+                      side_tags=(11, 12, 13)))
+        end
+
+        for divisions in 1:8
+            mixed = mesh_transfinite_triangle_patch(
+                _straight_triangle(divisions)...; arrangement=:left)
+            @test size(mixed.coords, 2) ==
+                  (divisions + 1) * (divisions + 2) ÷ 2
+            @test size(_triangle_block(mixed, 2).nodes, 2) == divisions
+            if divisions == 1
+                @test [block.msh for block in mixed.blocks] == [1, 2]
+            else
+                @test size(_triangle_block(mixed, 3).nodes, 2) ==
+                      divisions * (divisions - 1) ÷ 2
+            end
+            @test Tessella.Elements.validate(mixed).ok
+        end
+        roundtrip_source = mesh_transfinite_triangle_patch(
+            sides...; arrangement=:left, face_tag=21,
+            side_tags=(11, 12, 13))
+        mktempdir() do directory
+            for version in (2.2, 4.1), binary in (false, true)
+                path = joinpath(
+                    directory, "triangle-patch-$version-$binary.msh")
+                Tessella.Elements.write_mixed_msh(
+                    path, roundtrip_source; version, binary)
+                roundtrip = Tessella.Elements.read_mixed_msh(path)
+                @test Tessella.Elements.validate(roundtrip).ok
+                @test roundtrip.coords == roundtrip_source.coords
+                @test [block.msh for block in roundtrip.blocks] == [1, 2, 3]
+                for msh in (1, 2, 3)
+                    @test _triangle_canonical_block_cells(
+                        _triangle_block(roundtrip, msh)) ==
+                          _triangle_canonical_block_cells(
+                              _triangle_block(roundtrip_source, msh))
+                end
+            end
+        end
+        @test Tessella.mesh_transfinite_triangle_patch ===
+              mesh_transfinite_triangle_patch
     end
 
     @testset "Gmsh triangular interpolation and boundary conservation" begin
@@ -210,6 +382,17 @@ end
         @test all(isapprox(actual[coordinate], expected[coordinate];
                            atol=32eps(Float64), rtol=32eps(Float64))
                   for coordinate in 1:3)
+
+        for arrangement in
+            (:left, :right, :alternate_left, :alternate_right)
+            mixed = mesh_transfinite_triangle_patch(
+                sides...; arrangement, face_tag=17,
+                side_tags=(3, 4, 5))
+            @test mixed.coords == mesh.coords
+            @test Tessella.Elements.validate(mixed).ok
+            @test _triangle_mixed_surface_area(mixed) ≈
+                  _triangle_polygon_area(sides) atol=128eps(Float64)
+        end
     end
 
     @testset "tilted, clockwise, and long patches" begin
@@ -234,6 +417,10 @@ end
             clockwise...; arrangement=:alternate_right)
         @test validate(reversed_mesh).ok
         @test _triangle_surface_area(reversed_mesh) == 3.0
+        reversed_patch = mesh_transfinite_triangle_patch(
+            clockwise...; arrangement=:alternate_right)
+        @test Tessella.Elements.validate(reversed_patch).ok
+        @test _triangle_mixed_surface_area(reversed_patch) == 3.0
 
         long_mesh = mesh_transfinite_triangle(_straight_triangle(128)...)
         @test (nnodes(long_mesh), ntris(long_mesh)) == (8385, 16384)
@@ -242,6 +429,12 @@ end
 
     @testset "validated blockers and pre-allocation resource limits" begin
         sides = _straight_triangle(3)
+        @test_throws ArgumentError mesh_transfinite_triangle(
+            tuple(sides[1]...), sides[2], sides[3])
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            tuple(sides[1]...), sides[2], sides[3])
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            1, sides[2], sides[3])
         @test_throws ArgumentError mesh_transfinite_triangle(
             [(0.0, 0.0, 0.0)], sides[2], sides[3])
         @test_throws ArgumentError mesh_transfinite_triangle(
@@ -290,6 +483,36 @@ end
         end
         @test fold_error isa ArgumentError
         @test occursin("reverses patch orientation", sprint(showerror, fold_error))
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(folded...)
+
+        # The atomic triangle lattice is valid, but Gmsh's Left pairing would
+        # make its final quadrangle concave. The mixed API blocks that cell.
+        concave_recombined = (
+            [(0.0, 0.0, 0.0),
+             (0.5956665854630816, 0.337420243172981, 0.0),
+             (2.2608011714552694, -1.2585914468342874, 0.0),
+             (3.547736455291709, -1.1126591321601882, 0.0),
+             (4.0, 0.0, 0.0)],
+            [(4.0, 0.0, 0.0),
+             (3.4456458160331973, 0.7367598098341835, 0.0),
+             (2.9501456625323503, 1.5658637318983206, 0.0),
+             (1.4731544508145447, 1.8598054426345922, 0.0),
+             (0.5, 3.0, 0.0)],
+            [(0.5, 3.0, 0.0),
+             (1.068309161473124, 2.3031495146346597, 0.0),
+             (0.33513926989785225, 2.0705405301075386, 0.0),
+             (0.05902398752140388, 1.2101515997372627, 0.0),
+             (0.0, 0.0, 0.0)])
+        @test validate(mesh_transfinite_triangle(concave_recombined...)).ok
+        concave_error = try
+            mesh_transfinite_triangle_patch(
+                concave_recombined...; arrangement=:left)
+            nothing
+        catch err
+            err
+        end
+        @test concave_error isa ArgumentError
+        @test occursin("quadrangle 6", sprint(showerror, concave_error))
 
         @test_throws ArgumentError mesh_transfinite_triangle(
             sides...; arrangement=:alternate)
@@ -313,6 +536,20 @@ end
             sides...; max_nodes=-1)
         @test_throws ArgumentError mesh_transfinite_triangle(
             sides...; max_nodes=10.0)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; arrangement=:alternate)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; max_nodes=9)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; max_triangles=2)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; max_quadrangles=2)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; max_quadrangles=true)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; side_tags=(1, 2))
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; face_tag=true)
         boolean_side = Any[(true, 0.0, 0.0), sides[1][2:end]...]
         @test_throws ArgumentError mesh_transfinite_triangle(
             boolean_side, sides[2], sides[3])
@@ -333,6 +570,8 @@ end
         @test_throws ArgumentError mesh_transfinite_triangle(huge, huge, huge)
         wide = _CountOnlyTriangleSide(100_000)
         @test_throws ArgumentError mesh_transfinite_triangle(wide, wide, wide)
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            wide, wide, wide)
         @test _triangle_rejected_allocated(wide) < 64_000
 
         maximum = floatmax(Float64)
@@ -355,5 +594,16 @@ end
         @test large > small
         @test large <= 4.35small + 1_048_576
         @info "transfinite triangle allocation ratchet" small_bytes=small large_bytes=large
+
+        mesh_transfinite_triangle_patch(
+            small_sides...; arrangement=:alternate_left)
+        mesh_transfinite_triangle_patch(
+            large_sides...; arrangement=:alternate_left)
+        patch_small = _triangle_patch_allocated(small_sides)
+        patch_large = _triangle_patch_allocated(large_sides)
+        @test patch_small > 0
+        @test patch_large > patch_small
+        @test patch_large <= 4.35patch_small + 1_048_576
+        @info "recombined transfinite triangle allocation ratchet" small_bytes=patch_small large_bytes=patch_large
     end
 end
