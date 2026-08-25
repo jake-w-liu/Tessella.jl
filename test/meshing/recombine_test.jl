@@ -29,6 +29,44 @@ function _recombine_grid(n::Int)
     return Mesh(coords;tris=tris,tri_tag=tags)
 end
 
+function _brute_matching_size(adjacency)
+    n=length(adjacency);memo=Dict{UInt,Int}()
+    function search(mask::UInt)
+        haskey(memo,mask) && return memo[mask]
+        vertex=findfirst(i->iszero(mask&(UInt(1)<<(i-1))),1:n)
+        vertex===nothing && return 0
+        occupied=mask|(UInt(1)<<(vertex-1))
+        best=search(occupied)
+        for neighbour in adjacency[vertex]
+            iszero(mask&(UInt(1)<<(neighbour-1))) || continue
+            best=max(best,1+search(occupied|(UInt(1)<<(neighbour-1))))
+        end
+        memo[mask]=best
+        return best
+    end
+    return search(UInt(0))
+end
+
+function _exhaustive_matching_mismatch()
+    cases=0
+    for n in 0:6
+        edges=[(i,j) for i in 1:n-1 for j in i+1:n]
+        for bits in UInt(0):(UInt(1)<<length(edges))-1
+            adjacency=[Int[] for _ in 1:n]
+            for (bit,(i,j)) in pairs(edges)
+                iszero(bits&(UInt(1)<<(bit-1))) && continue
+                push!(adjacency[i],j);push!(adjacency[j],i)
+            end
+            mate=Tessella.Recombine._edmonds_matching(n,adjacency)
+            got=count(i->mate[i]>i,1:n)
+            expected=_brute_matching_size(adjacency)
+            cases+=1
+            got==expected || return (;cases,n,bits,got,expected,adjacency,mate)
+        end
+    end
+    return nothing
+end
+
 @noinline function _recombine_allocated(n::Int)
     mesh=_recombine_grid(n)
     recombine_triangles(mesh)
@@ -39,8 +77,8 @@ end
 @testset "deterministic triangle-to-quadrangle recombination" begin
     @testset "square oracle and metadata preservation" begin
         mesh=_recombine_square()
-        result=recombine_triangles(mesh;
-            physical_names=Dict((1,2)=>"horizontal",(1,3)=>"vertical",(2,7)=>"face"))
+        names=Dict((1,2)=>"horizontal",(1,3)=>"vertical",(2,7)=>"face")
+        result=recombine_triangles(mesh;physical_names=names)
         @test Tessella.Elements.validate(result).ok
         @test [block.msh for block in result.blocks]==[1,3]
         @test result.blocks[1].nodes==mesh.segs
@@ -49,9 +87,15 @@ end
         @test result.blocks[2].tags==Int32[7]
         @test result.physical_names==
               Dict((1,2)=>"horizontal",(1,3)=>"vertical",(2,7)=>"face")
+        @test result.physical_names!==names
+        @test result.coords!==mesh.coords
+        @test result.blocks[1].nodes!==mesh.segs
+        @test result.blocks[1].tags!==mesh.seg_tag
         @test Tessella.Elements.mixed_crc(result)==
               Tessella.Elements.mixed_crc(recombine_triangles(mesh;
                   physical_names=result.physical_names))
+        names[(2,7)]="mutated"
+        @test result.physical_names[(2,7)]=="face"
 
         without_segments=recombine_triangles(mesh;preserve_segments=false)
         @test [block.msh for block in without_segments.blocks]==[3]
@@ -114,6 +158,10 @@ end
         @test_throws ArgumentError recombine_triangles(
             _recombine_square();preserve_segments=1)
         @test_throws ArgumentError recombine_triangles(
+            _recombine_square();full_quad=1)
+        @test_throws ArgumentError recombine_triangles(
+            _recombine_square();algorithm="greedy")
+        @test_throws ArgumentError recombine_triangles(
             _recombine_square();physical_names=Dict((2,0)=>"bad"))
 
         duplicate=Mesh(_recombine_square().coords;
@@ -140,6 +188,28 @@ end
         @test large<=5.25small+262_144
     end
 
+    @testset "scale and translation invariance" begin
+        for scale in (1e-300,1e-150,1.0,1e150)
+            coords=Float64[0 scale scale 0;0 0 scale scale;0 0 0 0]
+            mesh=Mesh(coords;tris=Int32[1 1;2 3;3 4],tri_tag=Int32[7,7])
+            result=recombine_triangles(mesh;min_quality=0.99,
+                                       preserve_segments=false)
+            @test length(result.blocks)==1
+            @test result.blocks[1].msh==3
+            @test result.blocks[1].nodes==reshape(Int32[1,2,3,4],4,1)
+        end
+        for offset in (1e-100,1e100,1e150)
+            width=16eps(offset)
+            coords=Float64[offset offset+width offset+width offset;
+                           offset offset offset+width offset+width;
+                           0 0 0 0]
+            mesh=Mesh(coords;tris=Int32[1 1;2 3;3 4],tri_tag=Int32[7,7])
+            result=recombine_triangles(mesh;min_quality=0.99,
+                                       preserve_segments=false)
+            @test result.blocks[1].msh==3
+        end
+    end
+
     @testset "blossom matching and full-quad" begin
         matching_size(mate)=count(i->mate[i]>i, eachindex(mate))
         consistent(mate)=all(i->mate[i]==0 || mate[mate[i]]==i, eachindex(mate))
@@ -160,6 +230,15 @@ end
         isolated=Tessella.Recombine._edmonds_matching(1,[Int[]])
         @test isolated==[0]
         @test Tessella.Recombine._edmonds_matching(0,Vector{Int}[])==Int[]
+
+        # Regression for an alternating-tree/blossom collision that previously
+        # indexed parent vertex 0. Exhaustive simple graphs through six vertices
+        # are compared with an independent subset-search oracle below.
+        regression=[Int[3,5],Int[3,5],Int[1,2,4,5],Int[3],Int[1,2,3]]
+        regression_mate=Tessella.Recombine._edmonds_matching(5,regression)
+        @test matching_size(regression_mate)==2
+        @test consistent(regression_mate)
+        @test _exhaustive_matching_mismatch()===nothing
 
         grid=_recombine_grid(12)
         blossom=recombine_triangles(grid; algorithm=:blossom, full_quad=true,
@@ -185,5 +264,10 @@ end
                                   algorithm=:blossom, preserve_segments=false)
         @test [block.msh for block in split.blocks]==[2]
         @test size(split.blocks[1].nodes,2)==2
+    end
+
+    @testset "public documentation" begin
+        @test isempty(Base.Docs.undocumented_names(Tessella.Recombine;private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.Recombine;recursive=true))
     end
 end

@@ -159,14 +159,18 @@ the geometry and it never pairs triangles across a physical-tag boundary.
 function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                              preserve_segments=true,
                              physical_names=Dict{Tuple{Int,Int},String}(),
-                             algorithm::Symbol=:greedy,
-                             full_quad::Bool=false)
+                             algorithm=:greedy,
+                             full_quad=false)
     preserve_segments isa Bool || throw(ArgumentError(
         "recombine_triangles: preserve_segments must be Bool"))
     full_quad isa Bool || throw(ArgumentError(
         "recombine_triangles: full_quad must be Bool"))
+    algorithm isa Symbol || throw(ArgumentError(
+        "recombine_triangles: algorithm must be :greedy or :blossom"))
     algorithm in (:greedy,:blossom) || throw(ArgumentError(
         "recombine_triangles: algorithm must be :greedy or :blossom"))
+    full_quad && algorithm!==:blossom && throw(ArgumentError(
+        "recombine_triangles: full_quad requires algorithm=:blossom"))
     threshold=_recombine_quality(min_quality)
     size(mesh.tets,2)==0 || throw(ArgumentError(
         "recombine_triangles: input must not contain tetrahedra"))
@@ -234,8 +238,6 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                 "recombine_triangles: full_quad requested but $leftover triangles remain unmatched"))
         end
     else
-        full_quad && throw(ArgumentError(
-            "recombine_triangles: full_quad requires algorithm=:blossom"))
         for candidate in candidates
             first=Int(candidate.first_triangle);second=Int(candidate.second_triangle)
             if !used[first] && !used[second] &&
@@ -321,7 +323,7 @@ function _edmonds_matching(n::Int, adj::Vector{Vector{Int}})
             for u in adj[v]
                 if base[v]==base[u] || mate[v]==u
                     continue
-                elseif used[u]
+                elseif u==root || (mate[u]!=0 && parent[mate[u]]!=0)
                     b=lca(v,u,base,parent)
                     blossom=falses(n)
                     mark_path!(blossom,v,b,u,base,parent)
@@ -333,8 +335,7 @@ function _edmonds_matching(n::Int, adj::Vector{Vector{Int}})
                         used[i]=true
                         push!(q,i)
                     end
-                else
-                    used[u]=true
+                elseif parent[u]==0
                     parent[u]=v
                     if mate[u]==0
                         # reconstruct augmenting path
@@ -345,7 +346,8 @@ function _edmonds_matching(n::Int, adj::Vector{Vector{Int}})
                         end
                         return true
                     end
-                    push!(q,mate[u]); used[mate[u]]=true
+                    matched=mate[u]
+                    push!(q,matched); used[matched]=true
                 end
             end
         end
