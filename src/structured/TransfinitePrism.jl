@@ -16,9 +16,10 @@ input coordinates alone do not imply that their derived measures are finite.
 """
 module TransfinitePrism
 
-using ..MeshTypes: Mesh, boundary_faces, nnodes, ntris, ntets, validate
+using ..MeshTypes: Mesh, boundary_faces, nnodes, ntris, ntets, validate,
+                   _throw_simplex_validation
 using ..Predicates: orient3
-using ..StructuredNumerics: _certify_tet_volume, _throw_simplex_validation
+using ..StructuredNumerics: _certify_tet_volume
 
 export mesh_transfinite_prism
 

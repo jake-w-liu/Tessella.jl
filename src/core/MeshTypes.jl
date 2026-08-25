@@ -858,6 +858,22 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
     return MeshDiagnostic(isempty(msgs), msgs)
 end
 
+@inline function _nonfinite_simplex_measure(message::AbstractString)
+    return occursin(" tets have non-finite computed volume", message) ||
+           occursin(" triangles have non-finite computed area", message)
+end
+
+function _throw_simplex_validation(caller::AbstractString,
+                                   messages::AbstractVector{<:AbstractString})
+    if !isempty(messages) && all(_nonfinite_simplex_measure, messages)
+        throw(ArgumentError(
+            "$caller: represented boundary areas and tetrahedron volumes must " *
+            "remain finite Float64 values: " * join(messages, "; ")))
+    end
+    throw(ErrorException(
+        "$caller: constructed mesh failed validation: " * join(messages, "; ")))
+end
+
 function _mesh_structure_messages!(messages::Vector{String},m::Mesh)
     valid=true
     @inbounds for i in 1:nnodes(m),dimension in 1:3

@@ -1248,6 +1248,17 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test vol3(mtet) ≈ 1/6 rtol=1e-6
         @test_throws ArgumentError mesh_sized(box_surface(0.,1.,0.,1.,0.,1.); hmax=0.0)
         @test_throws ArgumentError refine_to_size(mb0, -1.0)
+        @test_throws ArgumentError refine_to_size(mb0, true)
+        @test_throws ArgumentError mesh_box(true,1,0,1,0,1; hmax=1)
+        @test_throws ArgumentError mesh_box(0,1,0,1,0,1; hmax=true)
+        @test_throws ArgumentError BoxRegion(true,1,0,1,0,1,1)
+        @test_throws ArgumentError BoxRegion(0,1,0,1,0,1,true)
+        @test_throws ArgumentError mesh_box_regions(
+            [BoxRegion(0,1,0,1,0,1,1)]; hmax=true)
+        @test_throws ArgumentError mesh_cylinder(
+            (true,0,0),(0,0,1),1,1; hmax=1)
+        @test_throws ArgumentError mesh_cylinder(
+            (0,0,0),(0,0,1),true,1; hmax=1)
         # mesh_cylinder / cylinder_surface reject a zero-length axis (no silent NaN mesh)
         @test_throws ArgumentError mesh_cylinder((0.,0.,0.),(0.,0.,0.),1.0,1.0; hmax=0.5)
         @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,0.),1.0,1.0)

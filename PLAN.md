@@ -50,6 +50,8 @@ Tessella
 │   ├── Model       tagged geometry/entity kernel, solids, Booleans, and embeds
 │   └── GeoExec     bounded `.geo` execution
 ├── meshing/
+│   ├── PipelineSupport checked top-level input conversion, resource accounting,
+│   │                   layer construction, and edge-bound certificates
 │   ├── Mesh1D      validated, scale-robust Gmsh-style curve grading
 │   ├── Mesh3D      dimensional volume meshing and recovery workspace
 │   ├── Mesh2D      owned/validated Delaunay, CDT, and refinement topology

@@ -216,20 +216,4 @@ function _certify_tet_volume(coords, tets, expected_points::NTuple{4},
     return nothing
 end
 
-@inline function _nonfinite_simplex_measure(message::AbstractString)
-    return occursin(" tets have non-finite computed volume", message) ||
-           occursin(" triangles have non-finite computed area", message)
-end
-
-function _throw_simplex_validation(caller::AbstractString,
-                                   messages::AbstractVector{<:AbstractString})
-    if !isempty(messages) && all(_nonfinite_simplex_measure, messages)
-        throw(ArgumentError(
-            "$caller: represented boundary areas and tetrahedron volumes must " *
-            "remain finite Float64 values: " * join(messages, "; ")))
-    end
-    throw(ErrorException(
-        "$caller: constructed mesh failed validation: " * join(messages, "; ")))
-end
-
 end # module StructuredNumerics
