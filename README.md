@@ -9,7 +9,7 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 161,183/161,183
+complete**. The last stable bounds-checked package gate passed 165,385/165,385
 assertions; newer isolated increments and their focused gates are recorded in
 [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
@@ -67,6 +67,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - oriented-normal extrusion of coherently directed planar polylines into
   first-order quadrangle strips with optional convex-corner fans, exact projected
   corner-Jacobian checks, resource bounds, and rigid-motion certification;
+- translation and general finite nonsingular affine periodic node-pair
+  certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
+  connectivity, and physical tags preserved;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -104,8 +107,9 @@ format for variable connectivity and parent/domain links; binary MSH2 and MSH4 h
 explicitly narrower special-record contracts. Type 69 and some registered fixed tags
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
-Gmsh-safe rewrite. Complete CAD/BREP, broad file/API compatibility, GUI, and
-post-processing remain pending. See
+Gmsh-safe rewrite. Periodic pair maps/transforms remain caller-owned rather than
+persistent model/MSH entity metadata. Complete CAD/BREP, broad file/API compatibility,
+GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
 completeness. ASCENT remains Tessella's primary solver consumer.
 
@@ -121,7 +125,8 @@ volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs t
 Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
-transfinite-volume, and five-face-prism differentials as mandatory bounds-checked
+transfinite-volume, five-face-prism, and translation/rotation-periodic curve
+differentials as mandatory bounds-checked
 children. Missing or wrong-version Gmsh and differential failures make the aggregate
 command fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness

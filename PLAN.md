@@ -115,9 +115,9 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, and a tagged point/curve/surface/volume kernel |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, and general-affine periodic node-pair certification/snapping |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curves, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation/rotation-periodic curves, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -196,9 +196,11 @@ polylines with an explicit oriented plane normal extrude to type-3 quadrangles
 along left-normals, with optional convex-corner fans of first-layer triangles and
 subsequent ring quadrangles. Their emitted coordinates receive scale-aware
 planarity and exact projected corner-Jacobian certification. `periodic_identify`
-validates and exactly snaps an explicit
-one-to-one translated node pairing while preserving node numbering, connectivity,
-and tags; the caller retains that pair map. P4 does not yet claim
+validates and exactly snaps an explicit one-to-one translated node pairing;
+`periodic_identify_affine` accepts Gmsh's row-major homogeneous representation and
+certifies any finite nonsingular affine pairing with exact-dyadic cancellation
+fallbacks. Both preserve node numbering, connectivity, and tags; the caller retains
+the pair map and transformation. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
@@ -235,7 +237,7 @@ uniform-refinement, quadratic-tetrahedron,
 four-sided transfinite, straight transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
-recombined-hexahedron differentials
+recombined-hexahedron differentials, plus translation/rotation-periodic curves
 as required bounds-checked children, together with the P6 t1-square, OCC-cylinder,
 OCC-cone, IGES-128 bilinear, BooleanDifference box, and 2-D boundary-layer differentials. A
 missing or wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the

@@ -2,15 +2,17 @@
     Periodic
 
 Certification and exact coordinate snapping for equal-count master/slave node
-sets related by a finite translation. Node numbering, connectivity, and tags are
-preserved. The caller retains the node-pair map; this compact `Mesh` operation
-does not claim Gmsh model-level periodic entity metadata.
+sets related by a finite translation or nonsingular affine transformation. Node
+numbering, connectivity, and tags are preserved. The caller retains the
+node-pair map and transformation; these compact `Mesh` operations do not claim
+Gmsh model-level periodic entity metadata.
 """
 module Periodic
 
 using ..MeshTypes: Mesh, nnodes, validate
+using ..Transform: _affine_coordinate, _determinant_sign, _transform_float
 
-export periodic_identify
+export periodic_identify, periodic_identify_affine
 
 function _periodic_translation(raw,caller)
     (raw isa Tuple || raw isa AbstractVector) || throw(ArgumentError(
@@ -52,6 +54,94 @@ function _periodic_index(value,nn::Int,caller,name,index)
     return converted
 end
 
+function _periodic_tolerance(atol,caller::AbstractString)
+    atol isa Bool && throw(ArgumentError("$caller: atol must not be Bool"))
+    atol isa Real || throw(ArgumentError("$caller: atol must be real"))
+    tolerance=try
+        Float64(atol)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: atol must be Float64-representable"))
+    end
+    (isfinite(tolerance) && tolerance>=0) || throw(ArgumentError(
+        "$caller: atol must be finite and non-negative"))
+    return tolerance
+end
+
+function _periodic_pairs(mesh::Mesh,master::AbstractVector{<:Integer},
+                         slave::AbstractVector{<:Integer},caller::AbstractString)
+    length(master)==length(slave) || throw(ArgumentError(
+        "$caller: master and slave node counts differ"))
+    isempty(master) && throw(ArgumentError("$caller: need at least one identified pair"))
+    nn=nnodes(mesh)
+    masters=Vector{Int}(undef,length(master));slaves=similar(masters)
+    used_master=falses(nn);used_slave=falses(nn)
+    for (i,(master_node,slave_node)) in enumerate(zip(master,slave))
+        ia=_periodic_index(master_node,nn,caller,"master",i)
+        ib=_periodic_index(slave_node,nn,caller,"slave",i)
+        used_master[ia] && throw(ArgumentError(
+            "$caller: master node $ia is paired more than once"))
+        used_slave[ib] && throw(ArgumentError(
+            "$caller: slave node $ib is paired more than once"))
+        used_master[ia]=true;used_slave[ib]=true
+        masters[i]=ia;slaves[i]=ib
+    end
+    overlap=findfirst(used_master .& used_slave)
+    overlap===nothing || throw(ArgumentError(
+        "$caller: node $overlap belongs to both master and slave sets"))
+    return masters,slaves
+end
+
+function _periodic_output(mesh::Mesh,slaves::Vector{Int},
+                          expected_coordinates::Vector{NTuple{3,Float64}},
+                          caller::AbstractString)
+    coords=copy(mesh.coords)
+    for i in eachindex(slaves)
+        ib=slaves[i];expected=expected_coordinates[i]
+        coords[1,ib]=expected[1];coords[2,ib]=expected[2];coords[3,ib]=expected[3]
+    end
+    out=Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris), tets=copy(mesh.tets),
+             seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag),
+             tet_tag=copy(mesh.tet_tag))
+    diagnostic=validate(out)
+    diagnostic.ok || throw(ErrorException(
+        "$caller: invalid mesh — "*join(diagnostic.messages,"; ")))
+    return out
+end
+
+function _periodic_affine(raw,caller::AbstractString)
+    entries=Matrix{Float64}(undef,4,4)
+    if raw isa AbstractMatrix
+        size(raw)==(4,4) || throw(ArgumentError(
+            "$caller: affine transform matrix must be 4×4"))
+        for (row,row_index) in enumerate(axes(raw,1)),
+            (column,column_index) in enumerate(axes(raw,2))
+            entries[row,column]=_transform_float(
+                raw[row_index,column_index],caller,"affine[$row,$column]")
+        end
+    elseif raw isa Tuple || raw isa AbstractVector
+        length(raw)==16 || throw(ArgumentError(
+            "$caller: affine transform must contain 16 entries by row"))
+        values=collect(raw)
+        for row in 1:4,column in 1:4
+            flat=4(row-1)+column
+            entries[row,column]=_transform_float(
+                values[flat],caller,"affine[$row,$column]")
+        end
+    else
+        throw(ArgumentError(
+            "$caller: affine transform must be a 4×4 matrix or 16-entry tuple/vector"))
+    end
+    entries[4,1]==0 && entries[4,2]==0 && entries[4,3]==0 && entries[4,4]==1 ||
+        throw(ArgumentError(
+            "$caller: affine transform homogeneous row must be (0, 0, 0, 1)"))
+    coefficients=(entries[1,1],entries[2,1],entries[3,1],
+                  entries[1,2],entries[2,2],entries[3,2],
+                  entries[1,3],entries[2,3],entries[3,3])
+    _determinant_sign(coefficients,caller)
+    return coefficients,(entries[1,4],entries[2,4],entries[3,4])
+end
+
 """
     periodic_identify(mesh, translation, master, slave; atol=1e-12) -> Mesh
 
@@ -75,31 +165,8 @@ function periodic_identify(mesh::Mesh, translation, master::AbstractVector{<:Int
     magnitude=hypot(t...)
     (isfinite(magnitude) && magnitude>0) || throw(ArgumentError(
         "$caller: translation must have finite positive length"))
-    atol isa Bool && throw(ArgumentError("$caller: atol must not be Bool"))
-    tol=try Float64(atol) catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: atol must be Float64-representable"))
-    end
-    (isfinite(tol) && tol>=0) || throw(ArgumentError("$caller: atol must be non-negative"))
-    length(master)==length(slave) || throw(ArgumentError(
-        "$caller: master and slave node counts differ"))
-    isempty(master) && throw(ArgumentError("$caller: need at least one identified pair"))
-    nn=nnodes(mesh)
-    masters=Vector{Int}(undef,length(master));slaves=similar(masters)
-    used_master=falses(nn);used_slave=falses(nn)
-    for (i,(master_node,slave_node)) in enumerate(zip(master,slave))
-        ia=_periodic_index(master_node,nn,caller,"master",i)
-        ib=_periodic_index(slave_node,nn,caller,"slave",i)
-        used_master[ia] && throw(ArgumentError(
-            "$caller: master node $ia is paired more than once"))
-        used_slave[ib] && throw(ArgumentError(
-            "$caller: slave node $ib is paired more than once"))
-        used_master[ia]=true;used_slave[ib]=true
-        masters[i]=ia;slaves[i]=ib
-    end
-    overlap=findfirst(used_master .& used_slave)
-    overlap===nothing || throw(ArgumentError(
-        "$caller: node $overlap belongs to both master and slave sets"))
+    tol=_periodic_tolerance(atol,caller)
+    masters,slaves=_periodic_pairs(mesh,master,slave,caller)
 
     expected_coordinates=Vector{NTuple{3,Float64}}(undef,length(masters))
     for i in eachindex(masters)
@@ -113,16 +180,55 @@ function periodic_identify(mesh::Mesh, translation, master::AbstractVector{<:Int
             throw(ArgumentError("$caller: slave $ib is not master $ia + translation"))
         expected_coordinates[i]=expected
     end
-    coords=copy(mesh.coords)
-    for i in eachindex(slaves)
-        ib=slaves[i];expected=expected_coordinates[i]
-        coords[1,ib]=expected[1];coords[2,ib]=expected[2];coords[3,ib]=expected[3]
+    return _periodic_output(mesh,slaves,expected_coordinates,caller)
+end
+
+"""
+    periodic_identify_affine(mesh, affine, master, slave; atol=1e-12) -> Mesh
+
+Validate a one-to-one correspondence between disjoint `master` and `slave` node
+sets satisfying `slave ≈ affine(master)`, then snap every slave coordinate to
+the transformed master coordinate. `affine` is either a finite 4×4 matrix or a
+16-entry tuple/vector in Gmsh row-major order. Its homogeneous row must be
+`(0, 0, 0, 1)` and its 3×3 linear part must be nonsingular.
+
+The input mesh is validated and left unchanged; node numbering, simplex
+connectivity, and cell tags are copied without remapping. `atol` is an absolute
+Euclidean-distance tolerance. The returned `Mesh` stores corrected geometry,
+not persistent periodic entity metadata; callers that need solver constraints
+must retain the supplied pairs and affine transform.
+"""
+function periodic_identify_affine(mesh::Mesh,affine,
+                                  master::AbstractVector{<:Integer},
+                                  slave::AbstractVector{<:Integer};
+                                  atol::Real=1e-12)
+    caller="periodic_identify_affine"
+    input_diagnostic=validate(mesh)
+    input_diagnostic.ok || throw(ArgumentError(
+        "$caller: input mesh is invalid — "*join(input_diagnostic.messages,"; ")))
+    coefficients,translation=_periodic_affine(affine,caller)
+    tolerance=_periodic_tolerance(atol,caller)
+    masters,slaves=_periodic_pairs(mesh,master,slave,caller)
+    a11,a21,a31,a12,a22,a32,a13,a23,a33=coefficients
+    expected_coordinates=Vector{NTuple{3,Float64}}(undef,length(masters))
+    for i in eachindex(masters)
+        ia=masters[i];ib=slaves[i]
+        x=mesh.coords[1,ia];y=mesh.coords[2,ia];z=mesh.coords[3,ia]
+        expected=(
+            _affine_coordinate(0.0,translation[1],a11,a12,a13,x,y,z,
+                               0.0,0.0,0.0,caller,ia),
+            _affine_coordinate(0.0,translation[2],a21,a22,a23,x,y,z,
+                               0.0,0.0,0.0,caller,ia),
+            _affine_coordinate(0.0,translation[3],a31,a32,a33,x,y,z,
+                               0.0,0.0,0.0,caller,ia),
+        )
+        got=(mesh.coords[1,ib],mesh.coords[2,ib],mesh.coords[3,ib])
+        hypot(expected[1]-got[1],expected[2]-got[2],expected[3]-got[3])<=tolerance ||
+            throw(ArgumentError(
+                "$caller: slave $ib is not affine(master $ia)"))
+        expected_coordinates[i]=expected
     end
-    out=Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris), tets=copy(mesh.tets),
-             seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag), tet_tag=copy(mesh.tet_tag))
-    diag=validate(out)
-    diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
-    return out
+    return _periodic_output(mesh,slaves,expected_coordinates,caller)
 end
 
 end # module

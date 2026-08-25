@@ -26,8 +26,8 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node sections |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and general-affine periodic node-pair certification/snapping |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation/rotation-periodic curves, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -78,9 +78,10 @@ Planar polylines with an explicit oriented plane normal extrude to type-3
 quadrangles along left-normals, with optional convex-corner fans and exact
 projected corner-Jacobian checks. Closed manifold walls can use
 `mesh_boundary_layer_filled` for certified prism shells, cavity walls, and a
-conforming remaining-core tetrahedral fill. Explicit one-to-one translated node
-pairs can be certified and snapped exactly without changing connectivity or tags;
-the pair map remains caller-owned rather than persistent model metadata. P4 does
+conforming remaining-core tetrahedral fill. Explicit one-to-one translated or
+general finite nonsingular affine node pairs can be certified and snapped exactly
+without changing node numbering, connectivity, or tags; pair maps and transforms
+remain caller-owned rather than persistent model metadata. P4 does
 not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite or holed patches,
@@ -94,6 +95,34 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-25 with Julia 1.12.7 after extending periodic node-pair
+certification to general affine transformations:
+
+- `periodic_identify_affine` accepts either a finite 4×4 matrix or Gmsh's
+  16-entry row-major representation, requires an exact affine homogeneous row
+  and an exactly nonsingular 3×3 linear part, and verifies all disjoint
+  one-to-one pairs before snapping a copied mesh. It uses the shared
+  exact-dyadic cancellation fallback, blocks unrepresentable outputs, and
+  independently validates the completed mesh. Translation behavior and its
+  historical CRC remain unchanged.
+- The focused periodic suite passed 559/559 assertions under Julia 1.12.7 and
+  Julia 1.11.9. It includes 128 fixed-seed exact-rational affine oracles spanning
+  rotations, reflections, shear, scaling, and translation. The fixed rotational
+  chain SHA-256 is
+  `ed4b81783f68a3bb092ac6fa2156196efe7f91fec6c7ceeef1aee154fb85261a`.
+- The direct Gmsh 4.15.2 differential certified five translated and five +90°
+  rotated curve-node pairs. Maximum pre-snap errors were
+  `2.0594637106796654e-12` and `0.0`; both canonical outputs have SHA-256
+  `baa96c7ebc0265667209f1940c77d5bdeed5ecb8a12f765d02df9d1945373648`.
+- The bounds-checked package gate passed 165,385/165,385 assertions in 12m42.5s.
+  Aggregate bounds-checked validation exited 0 in 11m0.8s against Gmsh
+  4.15.2-git. Recursive ambiguity and top-level public-documentation scans both
+  returned zero.
+- The repository organization ratchet passed: no tracked root-level Julia file
+  exists; only `src/Tessella.jl`, `test/runtests.jl`, and
+  `validation/run_all.jl` occupy their respective top levels, while every other
+  tracked `.jl` file remains in a categorized subfolder.
 
 Re-measured on 2026-08-25 with Julia 1.12.7 after adding cumulative repeated
 pre-element `$Nodes` sections:
