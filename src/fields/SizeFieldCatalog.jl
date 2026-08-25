@@ -13,6 +13,8 @@ struct Metric3
     m11::Float64; m22::Float64; m33::Float64
     m12::Float64; m13::Float64; m23::Float64
     function Metric3(m11::Real,m22::Real,m33::Real,m12::Real,m13::Real,m23::Real)
+        any(value -> value isa Bool,(m11,m22,m33,m12,m13,m23)) &&
+            throw(ArgumentError("Metric3: entries must not be Bool"))
         values = try
             (Float64(m11),Float64(m22),Float64(m33),
              Float64(m12),Float64(m13),Float64(m23))
@@ -173,7 +175,10 @@ function _metric_cholesky_components(a,b,c,d,e,f)::Union{Nothing,NTuple{6,Float6
     l11=sqrt(a); l21=d/l11; l31=e/l11
     l21sq=l21*l21
     r22=b-l21sq
-    guard=64eps(Float64)
+    # Once a Schur complement loses roughly half the Float64 significand, its
+    # square root is not accurate enough for directional length certificates.
+    # Reconstruct those uncommon, ill-conditioned factors from exact dyadics.
+    guard=sqrt(eps(Float64))
     uncertain22=max(abs(b),abs(l21sq))>0 &&
                 abs(r22)<=guard*max(abs(b),abs(l21sq))
     if r22>0 && !uncertain22
@@ -478,6 +483,7 @@ end
 end
 
 @inline _metric_rational(x::Float64)=Rational{BigInt}(x)
+@inline _metric_rational(x::Rational{BigInt})=x
 
 const _MetricInterval=NTuple{2,Float64}
 
@@ -935,10 +941,12 @@ For an isotropic field this is exactly `size_at(field, point)`.
 function directional_size(field::AbstractSizeField,p,direction;entity=nothing)
     q=_point3(p,"directional_size")
     d=_point3(direction,"directional_size")
-    n=_norm3(d)
-    n>0 || throw(ArgumentError("directional_size: direction must have positive length"))
+    scale=max(abs(d[1]),abs(d[2]),abs(d[3]))
+    scale>0 || throw(ArgumentError("directional_size: direction must have positive length"))
     field isa AbstractAnisoField || return size_at(field,q...,entity)
-    u=(d[1]/n,d[2]/n,d[3]/n)
+    scaled=(d[1]/scale,d[2]/scale,d[3]/scale)
+    n=_norm3(scaled)
+    u=(scaled[1]/n,scaled[2]/n,scaled[3]/n)
     m=metric_at(field,q...,entity)
     m isa Metric3 || throw(ArgumentError(
         "directional_size: metric_at returned $(typeof(m)), not Metric3"))
@@ -951,19 +959,110 @@ function directional_size(field::AbstractSizeField,p,direction;entity=nothing)
     return h
 end
 
+@inline function _metric_linear3(a::Float64,x::Float64,b::Float64,y::Float64,
+                                 c::Float64,z::Float64)
+    p1=a*x; p2=b*y; p3=c*z
+    all(isfinite,(p1,p2,p3)) || return (0.0,false)
+    # Subnormal products and rounded-to-zero products have no useful relative
+    # error bound. They are rare and go through the exact dyadic path below.
+    for (coefficient,component,product) in ((a,x,p1),(b,y,p2),(c,z,p3))
+        coefficient!=0 && component!=0 &&
+            (product==0 || abs(product)<floatmin(Float64)) && return (0.0,false)
+    end
+    magnitude=abs(p1)+abs(p2)+abs(p3)
+    isfinite(magnitude) || return (0.0,false)
+    value=p1+p2+p3
+    isfinite(value) || return (0.0,false)
+    magnitude==0 && return (value,true)
+    abs(value)>64eps(Float64)*magnitude || return (value,false)
+    return (value,true)
+end
+
+@inline function _metric_displacement_fast(m::Metric3,dx::Float64,dy::Float64,
+                                            dz::Float64)
+    l11,l21,l22,l31,l32,l33=_metric_cholesky_components(
+        m.m11,m.m22,m.m33,m.m12,m.m13,m.m23)::NTuple{6,Float64}
+    u,safeu=_metric_linear3(l11,dx,l21,dy,l31,dz)
+    v,safev=_metric_linear3(0.0,dx,l22,dy,l32,dz)
+    w,safew=_metric_linear3(0.0,dx,0.0,dy,l33,dz)
+    safeu && safev && safew || return nothing
+    result=hypot(u,v,w)
+    return isfinite(result) && (result>0 || (dx==0 && dy==0 && dz==0)) ? result : nothing
+end
+
+function _metric_positive_sqrt(value::Rational{BigInt},caller::AbstractString)
+    value>0 || throw(ErrorException(
+        "$caller: a positive-definite metric produced a non-positive squared length"))
+    result=setprecision(BigFloat,256) do
+        setrounding(BigFloat,RoundUp) do
+            Float64(sqrt(BigFloat(value)),RoundUp)
+        end
+    end
+    isfinite(result) || throw(ArgumentError(
+        "$caller: metric displacement is outside the representable Float64 range"))
+    return result
+end
+
+function _metric_displacement_exact(m::Metric3,dx,dy,dz,caller::AbstractString)
+    x=_metric_rational(dx); y=_metric_rational(dy); z=_metric_rational(dz)
+    value=_metric_rational(m.m11)*x*x+
+          _metric_rational(m.m22)*y*y+
+          _metric_rational(m.m33)*z*z+
+          2*(_metric_rational(m.m12)*x*y+
+             _metric_rational(m.m13)*x*z+
+             _metric_rational(m.m23)*y*z)
+    return _metric_positive_sqrt(value,caller)
+end
+
+function _metric_endpoint_displacement_exact(m::Metric3,p,q,caller::AbstractString)
+    dx=_metric_rational(q[1])-_metric_rational(p[1])
+    dy=_metric_rational(q[2])-_metric_rational(p[2])
+    dz=_metric_rational(q[3])-_metric_rational(p[3])
+    return _metric_displacement_exact(m,dx,dy,dz,caller)
+end
+
 @inline function _metric_displacement(m::Metric3,dx::Float64,dy::Float64,dz::Float64,
                                       caller::AbstractString)
     # For M=L*Lᵀ, evaluate ‖Lᵀd‖ with `hypot`. Expanding dᵀMd can
     # become spuriously negative through cancellation for rotated metrics and
     # can overflow while the final norm is still representable.
-    l11,l21,l22,l31,l32,l33=_metric_cholesky_components(
-        m.m11,m.m22,m.m33,m.m12,m.m13,m.m23)::NTuple{6,Float64}
-    u=l11*dx+l21*dy+l31*dz
-    v=l22*dy+l32*dz
-    w=l33*dz
-    result=hypot(u,v,w)
-    isfinite(result) || throw(ArgumentError("$caller: metric displacement overflowed"))
-    return result
+    result=_metric_displacement_fast(m,dx,dy,dz)
+    result===nothing || return result::Float64
+    return _metric_displacement_exact(m,dx,dy,dz,caller)
+end
+
+@inline function _metric_endpoint_displacement(m::Metric3,p,q,caller::AbstractString)
+    dx=q[1]-p[1]; dy=q[2]-p[2]; dz=q[3]-p[3]
+    if all(isfinite,(dx,dy,dz))
+        result=_metric_displacement_fast(m,dx,dy,dz)
+        result===nothing || return result::Float64
+    end
+    return _metric_endpoint_displacement_exact(m,p,q,caller)
+end
+
+function _isotropic_endpoint_ratio_exact(p,q,h::Float64,caller::AbstractString)
+    dx=_metric_rational(q[1])-_metric_rational(p[1])
+    dy=_metric_rational(q[2])-_metric_rational(p[2])
+    dz=_metric_rational(q[3])-_metric_rational(p[3])
+    rh=_metric_rational(h)
+    value=(dx*dx+dy*dy+dz*dz)/(rh*rh)
+    return _metric_positive_sqrt(value,caller)
+end
+
+@inline function _isotropic_endpoint_ratio(p,q,dx,dy,dz,h::Float64,
+                                           caller::AbstractString)
+    distance=hypot(dx,dy,dz)
+    value=distance/h
+    isfinite(value) && value>0 && return value
+    return _isotropic_endpoint_ratio_exact(p,q,h,caller)
+end
+
+@inline function _coordinate_midpoint(a::Float64,b::Float64)
+    if signbit(a)!=signbit(b) ||
+       (abs(a)<=floatmax(Float64)/2 && abs(b)<=floatmax(Float64)/2)
+        return (a+b)/2
+    end
+    return a/2+b/2
 end
 
 """
@@ -977,24 +1076,23 @@ function metric_edge_length(field::AbstractSizeField,a,b;entity=nothing)
     p=_point3(a,"metric_edge_length")
     q=_point3(b,"metric_edge_length")
     dx=q[1]-p[1]; dy=q[2]-p[2]; dz=q[3]-p[3]
-    all(isfinite,(dx,dy,dz)) || throw(ArgumentError(
-        "metric_edge_length: edge displacement is not finite"))
-    dx==0 && dy==0 && dz==0 && return 0.0
-    mx=p[1]/2+q[1]/2; my=p[2]/2+q[2]/2; mz=p[3]/2+q[3]/2
-    all(isfinite,(mx,my,mz)) || throw(ArgumentError(
-        "metric_edge_length: midpoint is not representable"))
+    p==q && return 0.0
+    mx=_coordinate_midpoint(p[1],q[1]); my=_coordinate_midpoint(p[2],q[2])
+    mz=_coordinate_midpoint(p[3],q[3])
     if !(field isa AbstractAnisoField)
-        distance=hypot(dx,dy,dz)
-        return max(distance/size_at(field,p...,entity),distance/size_at(field,q...,entity),
-                   distance/size_at(field,mx,my,mz,entity))
+        h0=size_at(field,p...,entity); h1=size_at(field,q...,entity)
+        hm=size_at(field,mx,my,mz,entity)
+        return max(_isotropic_endpoint_ratio(p,q,dx,dy,dz,h0,"metric_edge_length"),
+                   _isotropic_endpoint_ratio(p,q,dx,dy,dz,h1,"metric_edge_length"),
+                   _isotropic_endpoint_ratio(p,q,dx,dy,dz,hm,"metric_edge_length"))
     end
     m0=metric_at(field,p...,entity); m1=metric_at(field,q...,entity)
     mm=metric_at(field,mx,my,mz,entity)
     (m0 isa Metric3 && m1 isa Metric3 && mm isa Metric3) || throw(ArgumentError(
         "metric_edge_length: metric_at must return Metric3"))
-    return max(_metric_displacement(m0,dx,dy,dz,"metric_edge_length"),
-               _metric_displacement(m1,dx,dy,dz,"metric_edge_length"),
-               _metric_displacement(mm,dx,dy,dz,"metric_edge_length"))
+    return max(_metric_endpoint_displacement(m0,p,q,"metric_edge_length"),
+               _metric_endpoint_displacement(m1,p,q,"metric_edge_length"),
+               _metric_endpoint_displacement(mm,p,q,"metric_edge_length"))
 end
 
 # Trapezoidal metric increment used by curve integration. Keeping this separate
@@ -1002,19 +1100,20 @@ end
 function _metric_curve_increment(field::AbstractSizeField,a,b,entity=nothing)
     p=_point3(a,"metric curve increment"); q=_point3(b,"metric curve increment")
     dx=q[1]-p[1]; dy=q[2]-p[2]; dz=q[3]-p[3]
-    all(isfinite,(dx,dy,dz)) || throw(ArgumentError(
-        "metric curve increment: edge displacement is not finite"))
-    dx==0 && dy==0 && dz==0 && return 0.0
+    p==q && return 0.0
     if !(field isa AbstractAnisoField)
-        distance=hypot(dx,dy,dz)
-        return (distance/size_at(field,p...,entity))/2+
-               (distance/size_at(field,q...,entity))/2
+        first=_isotropic_endpoint_ratio(p,q,dx,dy,dz,size_at(field,p...,entity),
+                                        "metric curve increment")
+        second=_isotropic_endpoint_ratio(p,q,dx,dy,dz,size_at(field,q...,entity),
+                                         "metric curve increment")
+        return first/2+second/2
     end
     m0=metric_at(field,p...,entity); m1=metric_at(field,q...,entity)
     (m0 isa Metric3 && m1 isa Metric3) || throw(ArgumentError(
         "metric curve increment: metric_at must return Metric3"))
-    return (_metric_displacement(m0,dx,dy,dz,"metric curve increment")+
-            _metric_displacement(m1,dx,dy,dz,"metric curve increment"))/2
+    first=_metric_endpoint_displacement(m0,p,q,"metric curve increment")
+    second=_metric_endpoint_displacement(m1,p,q,"metric curve increment")
+    return first/2+second/2
 end
 
 # Entity-aware evaluation. 4-arg methods remain the default; the 5-arg form is
@@ -3387,6 +3486,9 @@ end
 function AutomaticMeshSizeField(surface::Mesh; n_nodes_per_circle::Real=20.0,
                                 hmin=nothing, hmax=nothing)
     n=_positive_value(n_nodes_per_circle,"AutomaticMeshSizeField","n_nodes_per_circle")
+    diagnostic=validate(surface;require_positive_tets=false,require_manifold_tris=true)
+    diagnostic.ok || throw(ArgumentError(
+        "AutomaticMeshSizeField: invalid surface mesh: $(join(diagnostic.messages, "; "))"))
     size(surface.tris,2)>0 || throw(ArgumentError("AutomaticMeshSizeField: surface has no triangles"))
     xmin,xmax=extrema(@view surface.coords[1,:])
     ymin,ymax=extrema(@view surface.coords[2,:])
