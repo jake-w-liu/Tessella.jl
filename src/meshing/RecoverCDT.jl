@@ -33,9 +33,11 @@ shell, faceted cylinder, and the **twisted (non-star+reflex) prism**.
 """
 module RecoverCDT
 
-using ..ExactMesh3D: delaunay3d_exact
+using ..ExactMesh3D: delaunay3d_exact,DEFAULT_MAX_TETS,
+                     DEFAULT_MAX_WORK_TETS,DEFAULT_MAX_PREDICATE_TESTS
 using ..MeshTypes: Mesh, validate, is_closed_manifold, boundary_faces, triangle_area,
                    node, ntris, ntets, nnodes, tet_volume
+using ..PipelineSupport: PIPELINE_DEFAULT_MAX_NODES
 import ..Mesh3D
 import ..Mesh2D
 
@@ -43,6 +45,80 @@ export recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
 
 const RB = Rational{BigInt}
 const RBv = NTuple{3,RB}
+const _DEFAULT_MAX_FACETS = 1_000_000
+const _DEFAULT_MAX_RECOVERY_TESTS = 100_000_000
+
+struct _RecoveryLimits
+    iterations::Int
+    points::Int
+    facets::Int
+    tets::Int
+    work_tets::Int
+    predicate_tests::Int
+    recovery_tests::Int
+end
+
+mutable struct _RecoveryBudget
+    remaining::Int
+    limit::Int
+    caller::String
+end
+
+@inline function _consume_recovery_test!(budget::_RecoveryBudget)
+    budget.remaining>0 || throw(ArgumentError(
+        "$(budget.caller): exact PLC recovery work exceeds " *
+        "max_recovery_tests=$(budget.limit); increase max_recovery_tests " *
+        "or simplify the PLC"))
+    budget.remaining-=1
+    return nothing
+end
+
+@inline function _recovery_limit(value,caller::AbstractString,name::AbstractString;
+                                 minimum::Int=0,maximum::Int=typemax(Int))
+    value isa Integer || throw(ArgumentError("$caller: $name must be an integer"))
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
+    minimum<=value<=maximum || throw(ArgumentError(
+        "$caller: $name must lie in $minimum:$maximum (got $value)"))
+    return Int(value)
+end
+
+function _recovery_limits(caller::AbstractString;
+                          maxiter=2000,maxpts=6000,
+                          max_facets=_DEFAULT_MAX_FACETS,
+                          max_tets=DEFAULT_MAX_TETS,
+                          max_work_tets=DEFAULT_MAX_WORK_TETS,
+                          max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS,
+                          max_recovery_tests=_DEFAULT_MAX_RECOVERY_TESTS)
+    iterations=_recovery_limit(maxiter,caller,"maxiter";minimum=1)
+    points=_recovery_limit(maxpts,caller,"maxpts";minimum=4,
+                           maximum=Int(typemax(Int32)))
+    facets=_recovery_limit(max_facets,caller,"max_facets";minimum=4,
+                           maximum=Int(typemax(Int32)))
+    tets=_recovery_limit(max_tets,caller,"max_tets";minimum=1,
+                         maximum=Int(typemax(Int32)))
+    work_tets=_recovery_limit(max_work_tets,caller,"max_work_tets";minimum=1,
+                              maximum=Int(typemax(Int32)))
+    predicate_tests=_recovery_limit(max_predicate_tests,caller,
+                                    "max_predicate_tests";minimum=1)
+    recovery_tests=_recovery_limit(max_recovery_tests,caller,
+                                   "max_recovery_tests";minimum=1)
+    return _RecoveryLimits(iterations,points,facets,tets,work_tets,
+                           predicate_tests,recovery_tests)
+end
+
+function _partition_facet_count(surfaces,limit::Int,caller::AbstractString)
+    total=0
+    for (region,surface) in enumerate(surfaces)
+        surface isa Mesh || throw(ArgumentError(
+            "$caller: region $region must be a Mesh"))
+        count=size(surface.tris,2)
+        count<=limit-total || throw(ArgumentError(
+            "$caller: input facets exceed max_facets=$limit; increase " *
+            "max_facets or simplify the PLC collection"))
+        total+=count
+    end
+    return total
+end
 
 @inline rsub(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
 @inline radd(a,b)=(a[1]+b[1],a[2]+b[2],a[3]+b[3])
@@ -72,9 +148,10 @@ mutable struct Region
 end
 @inline side(pl::Plane, x)=rsign(rdot(pl.N, rsub(x, pl.A0)))
 
-function pierces_region(reg::Region, pts, y)
+function pierces_region(reg::Region,pts,y,budget::_RecoveryBudget)
     drop=reg.plane.drop; y2=proj2(y,drop)
     for (a,b,c) in reg.tris
+        _consume_recovery_test!(budget)
         pa=proj2(pts[a],drop); pb=proj2(pts[b],drop); pc=proj2(pts[c],drop)
         s1=orient2(pa,pb,y2); s2=orient2(pb,pc,y2); s3=orient2(pc,pa,y2)
         (s1!=0 && s2!=0 && s3!=0 && s1==s2 && s2==s3) && return true
@@ -90,9 +167,10 @@ function pierces_region(reg::Region, pts, y)
     false
 end
 # closed (inside or on boundary) point-in-region test (for boundary-in-surface certification)
-function in_region_closed(reg::Region, pts, y)
+function in_region_closed(reg::Region,pts,y,budget::_RecoveryBudget)
     drop=reg.plane.drop; y2=proj2(y,drop)
     for (a,b,c) in reg.tris
+        _consume_recovery_test!(budget)
         pa=proj2(pts[a],drop); pb=proj2(pts[b],drop); pc=proj2(pts[c],drop)
         s1=orient2(pa,pb,y2); s2=orient2(pb,pc,y2); s3=orient2(pc,pa,y2)
         hp=(s1>0)||(s2>0)||(s3>0); hn=(s1<0)||(s2<0)||(s3<0)
@@ -101,14 +179,15 @@ function in_region_closed(reg::Region, pts, y)
     false
 end
 
-function edge_pierces(reg::Region, pts, p, q)
+function edge_pierces(reg::Region,pts,p,q,budget::_RecoveryBudget)
+    _consume_recovery_test!(budget)
     pp=pts[p]; qq=pts[q]; sp=side(reg.plane,pp); sq=side(reg.plane,qq)
     (sp!=0 && sq!=0 && sp!=sq) || return (false, pp)
     num=rdot(reg.plane.N, rsub(reg.plane.A0, pp)); den=rdot(reg.plane.N, rsub(qq,pp))
     den==0 && return (false, pp)
     t=num//den
     y=(pp[1]+t*(qq[1]-pp[1]), pp[2]+t*(qq[2]-pp[2]), pp[3]+t*(qq[3]-pp[3]))
-    pierces_region(reg,pts,y) ? (true,y) : (false,y)
+    pierces_region(reg,pts,y,budget) ? (true,y) : (false,y)
 end
 
 function dedup(surface)
@@ -131,7 +210,7 @@ end
 # Deduplicate a collection of closed surfaces into one exact point/facet registry.
 # Coincident triangles (the two copies of a shared material interface) are constraints
 # only once.
-function dedup_partition(surfaces::AbstractVector{Mesh})
+function dedup_partition(surfaces::AbstractVector)
     seen=Dict{NTuple{3,Float64},Int}(); pts=RBv[]
     allfacets=NTuple{3,Int}[]; facekeys=Set{NTuple{3,Int}}()
     for surface in surfaces
@@ -189,7 +268,8 @@ function build_regions(pts, facets)
 end
 
 # ---- exact certification: does mesh m conform to the input surface, in exact arithmetic? ----
-function certify_exact(surface::Mesh, m::Mesh, pts::Vector{RBv}, regions, seg2regs)
+function certify_exact(surface::Mesh,m::Mesh,pts::Vector{RBv},regions,seg2regs,
+                       budget::_RecoveryBudget)
     v=validate(m); v.ok || return (false, "invalid mesh: "*join(v.messages,"; "))
     is_closed_manifold(m) || return (false, "not closed manifold")
     key2pid=Dict{NTuple{3,Float64},Int}()
@@ -216,7 +296,7 @@ function certify_exact(surface::Mesh, m::Mesh, pts::Vector{RBv}, regions, seg2re
         (e in E) || return (false,"crease subsegment $e not a tet edge")
     end
     for (ri,reg) in enumerate(regions), e in E
-        pr,_ = edge_pierces(reg, pts, e[1], e[2])
+        pr,_ = edge_pierces(reg,pts,e[1],e[2],budget)
         pr && return (false,"tet edge $e pierces region $ri interior")
     end
     bf = first(boundary_faces(m.tets))
@@ -226,7 +306,7 @@ function certify_exact(surface::Mesh, m::Mesh, pts::Vector{RBv}, regions, seg2re
         found=false
         for reg in regions
             (side(reg.plane,pts[a])==0 && side(reg.plane,pts[b])==0 && side(reg.plane,pts[c])==0) || continue
-            in_region_closed(reg,pts,cen) && (found=true; break)
+            in_region_closed(reg,pts,cen,budget) && (found=true; break)
         end
         found || return (false,"boundary face ($a,$b,$c) lies outside the input surface")
     end
@@ -243,7 +323,7 @@ function certify_exact(surface::Mesh, m::Mesh, pts::Vector{RBv}, regions, seg2re
             # a geometric plane, so a plane-only filter double-counts the sibling region's faces and
             # spuriously fails the area certificate; the centroid membership test scopes it correctly.
             cen=rscale(radd(radd(pts[a],pts[b]),pts[c]), 1//3)
-            in_region_closed(reg,pts,cen) || continue
+            in_region_closed(reg,pts,cen,budget) || continue
             got += parea2(pts[a],pts[b],pts[c],reg.plane.drop)
         end
         want==got || return (false,"region $ri exact area mismatch: want $(Float64(want)) got $(Float64(got))")
@@ -251,18 +331,18 @@ function certify_exact(surface::Mesh, m::Mesh, pts::Vector{RBv}, regions, seg2re
     return (true,"conforming (exact)")
 end
 
-function _finalize(surface, pts, etets)
+function _finalize(surface,pts,etets,tet_limit::Int,caller::AbstractString)
     length(pts)<=typemax(Int32) ||
-        throw(ArgumentError("recover_boundary_cdt: output node count exceeds Int32"))
+        throw(ArgumentError("$caller: output node count exceeds Int32"))
     g=Mesh3D._raygrid(surface)
     coordsF=Matrix{Float64}(undef,3,length(pts))
     seen=Dict{NTuple{3,Float64},Int}()
     for i in 1:length(pts)
         p=(Float64(pts[i][1]),Float64(pts[i][2]),Float64(pts[i][3]))
         (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
-            throw(ErrorException("recover_boundary_cdt: exact point $i cannot be represented by finite Float64 output"))
-        haskey(seen,p) && throw(ErrorException(
-            "recover_boundary_cdt: distinct exact points $(seen[p]) and $i collapse to one Float64 coordinate"))
+            throw(ArgumentError("$caller: exact point $i cannot be represented by finite Float64 output"))
+        haskey(seen,p) && throw(ArgumentError(
+            "$caller: distinct exact points $(seen[p]) and $i collapse to one Float64 coordinate"))
         seen[p]=i;coordsF[1,i]=p[1];coordsF[2,i]=p[2];coordsF[3,i]=p[3]
     end
     keep=NTuple{4,Int}[]
@@ -270,7 +350,12 @@ function _finalize(surface, pts, etets)
         cx=Float64((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4)
         cy=Float64((pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4)
         cz=Float64((pts[t[1]][3]+pts[t[2]][3]+pts[t[3]][3]+pts[t[4]][3])/4)
-        Mesh3D._inside_grid((cx,cy,cz),g) && push!(keep,t)
+        if Mesh3D._inside_grid((cx,cy,cz),g)
+            length(keep)<tet_limit || throw(ArgumentError(
+                "$caller: output tetrahedra exceed max_tets=$tet_limit; " *
+                "increase max_tets or reduce the PLC"))
+            push!(keep,t)
+        end
     end
     tetM=Matrix{Int32}(undef,4,length(keep))
     for (j,t) in enumerate(keep); tetM[1,j]=t[1];tetM[2,j]=t[2];tetM[3,j]=t[3];tetM[4,j]=t[4]; end
@@ -284,15 +369,15 @@ function _float_coords(pts,caller::AbstractString)
     for i in eachindex(pts)
         p=(Float64(pts[i][1]),Float64(pts[i][2]),Float64(pts[i][3]))
         (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
-            throw(ErrorException("$caller: exact point $i cannot be represented by finite Float64 output"))
-        haskey(seen,p) && throw(ErrorException(
+            throw(ArgumentError("$caller: exact point $i cannot be represented by finite Float64 output"))
+        haskey(seen,p) && throw(ArgumentError(
             "$caller: distinct exact points $(seen[p]) and $i collapse to one Float64 coordinate"))
         seen[p]=i;coords[1,i]=p[1];coords[2,i]=p[2];coords[3,i]=p[3]
     end
     coords
 end
 
-function _partition_tets_float(pts;seed::Int=1)
+function _partition_tets_float(pts,limits::_RecoveryLimits;seed::Int=1)
     caller="recover_partition_cdt"
     coords=_float_coords(pts,caller)
     lastreason="no triangulation attempted"
@@ -302,7 +387,11 @@ function _partition_tets_float(pts;seed::Int=1)
     # the physically flat cells possible in the ghost-based Float kernel.
     try
         dyadic=RBv[(RB(coords[1,i]),RB(coords[2,i]),RB(coords[3,i])) for i in axes(coords,2)]
-        candidate=delaunay3d_exact(dyadic);etets=NTuple{4,Int}[];used=falses(length(pts));flat=false
+        candidate=delaunay3d_exact(
+            dyadic;max_points=limits.points,max_tets=limits.work_tets,
+            max_work_tets=limits.work_tets,
+            max_predicate_tests=limits.predicate_tests)
+        etets=NTuple{4,Int}[];used=falses(length(pts));flat=false
         for q0 in candidate
             q=q0;s=det3(rsub(pts[q[2]],pts[q[1]]),rsub(pts[q[3]],pts[q[1]]),rsub(pts[q[4]],pts[q[1]]))
             if s==0;flat=true;break;end
@@ -322,7 +411,8 @@ function _partition_tets_float(pts;seed::Int=1)
         end
     catch err
         err isa InterruptException&&rethrow()
-        (err isa ArgumentError||err isa ErrorException)||rethrow()
+        err isa ArgumentError&&rethrow()
+        err isa ErrorException||rethrow()
         lastreason="dyadic-exact topology failed — "*sprint(showerror,err)
     end
     # The unperturbed topology is preferred.  Cospherical/coplanar Float inputs can
@@ -342,6 +432,8 @@ function _partition_tets_float(pts;seed::Int=1)
                 s=det3(rsub(pts[q[2]],pts[q[1]]),rsub(pts[q[3]],pts[q[1]]),rsub(pts[q[4]],pts[q[1]]))
                 if s==0;flat=true;break;end
                 s<0&&(q=(q[1],q[2],q[4],q[3]))
+                length(etets)<limits.work_tets || throw(ArgumentError(
+                    "$caller: topology tetrahedra exceed max_work_tets=$(limits.work_tets)"))
                 push!(etets,q);for v in q;used[v]=true;end
             end
             flat&&(lastreason="attempt $attempt contained an exactly flat tetrahedron";continue)
@@ -354,14 +446,16 @@ function _partition_tets_float(pts;seed::Int=1)
             lastreason="attempt $attempt was invalid — "*join(diag.messages,"; ")
         catch err
             err isa InterruptException&&rethrow()
-            (err isa ArgumentError||err isa ErrorException)||rethrow()
+            err isa ArgumentError&&rethrow()
+            err isa ErrorException||rethrow()
             lastreason="attempt $attempt failed — "*sprint(showerror,err)
         end
     end
     throw(ErrorException("$caller: no valid Float-assisted topology in 17 deterministic attempts; $lastreason"))
 end
 
-function _certify_partition_exact(surfaces,m,preimage,regions,regionpts=preimage)
+function _certify_partition_exact(surfaces,m,preimage,regions,
+                                  budget::_RecoveryBudget,regionpts=preimage)
     caller="recover_partition_cdt"
     for r in eachindex(surfaces)
         ids=Int[t for t in axes(m.tets,2) if m.tet_tag[t]==Int32(r)]
@@ -376,7 +470,7 @@ function _certify_partition_exact(surfaces,m,preimage,regions,regionpts=preimage
             found=false
             for reg in regions
                 (side(reg.plane,pa)==0&&side(reg.plane,pb)==0&&side(reg.plane,pc)==0)||continue
-                if in_region_closed(reg,regionpts,cen);found=true;break;end
+                if in_region_closed(reg,regionpts,cen,budget);found=true;break;end
             end
             found||return (false,"effective region $r has boundary face ($a,$b,$c) outside every input PLC")
         end
@@ -384,7 +478,8 @@ function _certify_partition_exact(surfaces,m,preimage,regions,regionpts=preimage
     (true,"conforming partition (exact preimage certificate)")
 end
 
-function _finalize_partition(surfaces,pts,etets,regions)
+function _finalize_partition(surfaces,pts,etets,regions,tet_limit::Int,
+                             budget::_RecoveryBudget)
     caller="recover_partition_cdt"
     coords=_float_coords(pts,caller)
     grids=[Mesh3D._raygrid(s) for s in surfaces]
@@ -397,18 +492,22 @@ function _finalize_partition(surfaces,pts,etets,regions)
         (lo,hi)
     end for s in surfaces]
     keep=NTuple{4,Int}[];tags=Int32[]
-    sizehint!(keep,length(etets));sizehint!(tags,length(etets))
+    hint=min(length(etets),tet_limit)
+    sizehint!(keep,hint);sizehint!(tags,hint)
     for t in etets
         c=((pts[t[1]][1]+pts[t[2]][1]+pts[t[3]][1]+pts[t[4]][1])/4,
            (pts[t[1]][2]+pts[t[2]][2]+pts[t[3]][2]+pts[t[4]][2])/4,
            (pts[t[1]][3]+pts[t[2]][3]+pts[t[3]][3]+pts[t[4]][3])/4)
         cf=(Float64(c[1]),Float64(c[2]),Float64(c[3]))
         (isfinite(cf[1])&&isfinite(cf[2])&&isfinite(cf[3])) ||
-            throw(ErrorException("$caller: exact tetrahedron centroid is not finite in Float64"))
+            throw(ArgumentError("$caller: exact tetrahedron centroid is not finite in Float64"))
         for r in eachindex(surfaces)
             lo,hi=bboxes[r]
             (lo[1]<=cf[1]<=hi[1]&&lo[2]<=cf[2]<=hi[2]&&lo[3]<=cf[3]<=hi[3]) || continue
             if Mesh3D._inside_grid(cf,grids[r])
+                length(keep)<tet_limit || throw(ArgumentError(
+                    "$caller: output tetrahedra exceed max_tets=$tet_limit; " *
+                    "increase max_tets or simplify the PLC collection"))
                 push!(keep,t);push!(tags,Int32(r));break
             end
         end
@@ -424,7 +523,7 @@ function _finalize_partition(surfaces,pts,etets,regions)
     for r in eachindex(surfaces)
         get(counts,Int32(r),0)>0 || throw(ErrorException("$caller: effective region $r received no tet"))
     end
-    ok,reason=_certify_partition_exact(surfaces,out,pts,regions)
+    ok,reason=_certify_partition_exact(surfaces,out,pts,regions,budget)
     ok||throw(ErrorException("$caller: exact partition certification failed — $reason"))
     out
 end
@@ -459,7 +558,9 @@ end
 # co-axial prismatic PLCs (boxes, slots, polygonal cylinders, and shells).  This avoids
 # the small-angle nontermination of conforming-Delaunay edge splitting at a feed-through
 # while retaining exact preimages for every line/plane intersection.
-function _recover_prismatic_partition(surfaces,nmax::Int)
+function _recover_prismatic_partition(surfaces,limits::_RecoveryLimits,
+                                      regionpts,facets,budget::_RecoveryBudget)
+    nmax=limits.points;tet_limit=limits.tets
     ax=_prismatic_axis(surfaces);ax==0&&return nothing
     dims=ax==1 ? (2,3) : (ax==2 ? (1,3) : (1,2))
     segset=Set{Tuple{NTuple{2,RB},NTuple{2,RB}}}()
@@ -490,17 +591,34 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
     end
     pairs<=5_000_000||throw(ArgumentError(
         "recover_partition_cdt: projected arrangement has $pairs segment pairs, exceeding the bounded exact-arrangement budget"))
-    splits=[Set{NTuple{2,RB}}((a,b)) for (a,b) in segs]
+    splits=Vector{Set{NTuple{2,RB}}}(undef,nseg)
+    arrangement_points=Set{NTuple{2,RB}}()
+    function record_point!(point)
+        if !(point in arrangement_points)
+            length(arrangement_points)<nmax || throw(ArgumentError(
+                "recover_partition_cdt: planar arrangement points exceed maxpts=$nmax; " *
+                "increase maxpts or simplify the projected interfaces"))
+            push!(arrangement_points,point)
+        end
+        return nothing
+    end
+    for (i,(a,b)) in enumerate(segs)
+        record_point!(a);record_point!(b)
+        splits[i]=Set{NTuple{2,RB}}((a,b))
+    end
     for i in 1:nseg-1,j in i+1:nseg
         a,b=segs[i];c,d=segs[j];r=_rsub2(b,a);s=_rsub2(d,c);den=_rcross2(r,s)
         if den!=0
             ca=_rsub2(c,a);t=_rcross2(ca,s)/den;u=_rcross2(ca,r)/den
             if 0<=t<=1&&0<=u<=1
-                p=(a[1]+t*r[1],a[2]+t*r[2]);push!(splits[i],p);push!(splits[j],p)
+                p=(a[1]+t*r[1],a[2]+t*r[2]);record_point!(p)
+                push!(splits[i],p);push!(splits[j],p)
             end
         elseif _rcross2(_rsub2(c,a),r)==0
             for p in (a,b,c,d)
-                _on_segment2(p,a,b)&&_on_segment2(p,c,d)&&(push!(splits[i],p);push!(splits[j],p))
+                if _on_segment2(p,a,b)&&_on_segment2(p,c,d)
+                    record_point!(p);push!(splits[i],p);push!(splits[j],p)
+                end
             end
         end
     end
@@ -524,9 +642,9 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
     xs=Vector{Float64}(undef,length(p2));ys=similar(xs);fmap=Dict{NTuple{2,Float64},NTuple{2,RB}}()
     for i in eachindex(p2)
         q=(Float64(p2[i][1]),Float64(p2[i][2]))
-        (isfinite(q[1])&&isfinite(q[2]))||throw(ErrorException(
+        (isfinite(q[1])&&isfinite(q[2]))||throw(ArgumentError(
             "recover_partition_cdt: projected exact intersection is not finite in Float64"))
-        haskey(fmap,q)&&fmap[q]!=p2[i]&&throw(ErrorException(
+        haskey(fmap,q)&&fmap[q]!=p2[i]&&throw(ArgumentError(
             "recover_partition_cdt: distinct projected intersections collapse at Float64 point $q"))
         fmap[q]=p2[i];xs[i]=q[1];ys[i]=q[2]
     end
@@ -559,14 +677,14 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
         err isa InterruptException && rethrow()
         throw(ArgumentError("recover_partition_cdt: prismatic tetrahedron count overflows Int"))
     end
-    sizehint!(tv,potential);sizehint!(tags,potential)
+    sizehint!(tv,min(potential,tet_limit));sizehint!(tags,min(potential,tet_limit))
     for k in 1:nl-1,ti in axes(m2.tris,2)
         v=sort!(Int[m2.tris[1,ti],m2.tris[2,ti],m2.tris[3,ti]])
         pce=((pre2[v[1]][1]+pre2[v[2]][1]+pre2[v[3]][1])/3,
              (pre2[v[1]][2]+pre2[v[2]][2]+pre2[v[3]][2])/3)
         pcent=(Float64(pce[1]),Float64(pce[2]));amid=Float64((levels[k]+levels[k+1])/2)
         (isfinite(pcent[1])&&isfinite(pcent[2])&&isfinite(amid)) ||
-            throw(ErrorException("recover_partition_cdt: a prismatic classification point is not finite in Float64"))
+            throw(ArgumentError("recover_partition_cdt: a prismatic classification point is not finite in Float64"))
         p=ax==1 ? (amid,pcent[1],pcent[2]) : (ax==2 ? (pcent[1],amid,pcent[2]) : (pcent[1],pcent[2],amid))
         tag=0
         for r in eachindex(grids);Mesh3D._inside_grid(p,grids[r])&&(tag=r;break);end
@@ -577,6 +695,9 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
             q=q0;s=det3(rsub(preall[q[2]],preall[q[1]]),rsub(preall[q[3]],preall[q[1]]),rsub(preall[q[4]],preall[q[1]]))
             s==0&&throw(ErrorException("recover_partition_cdt: prismatic subdivision produced a flat tetrahedron"))
             s<0&&(q=(q[1],q[2],q[4],q[3]))
+            length(tv)<tet_limit || throw(ArgumentError(
+                "recover_partition_cdt: prismatic output exceeds max_tets=$tet_limit; " *
+                "increase max_tets or simplify the PLC collection"))
             push!(tv,q);push!(tags,Int32(tag));union!(used,q)
         end
     end
@@ -587,14 +708,18 @@ function _recover_prismatic_partition(surfaces,nmax::Int)
     for (j,q) in enumerate(tv),i in 1:4;tm[i,j]=nid[q[i]];end
     out=Mesh(coords;tets=tm,tet_tag=tags);d=validate(out)
     d.ok||throw(ErrorException("recover_partition_cdt: prismatic partition is invalid — "*join(d.messages,"; ")))
-    regionpts,facets=dedup_partition(surfaces);regions=build_regions(regionpts,facets)
-    ok,reason=_certify_partition_exact(surfaces,out,pre,regions,regionpts)
+    regions=build_regions(regionpts,facets)
+    ok,reason=_certify_partition_exact(surfaces,out,pre,regions,budget,regionpts)
     ok||throw(ErrorException("recover_partition_cdt: prismatic exact certificate failed — $reason"))
     out
 end
 
 """
-    recover_boundary_cdt(surface::Mesh; maxiter=2000, maxpts=6000) -> Mesh
+    recover_boundary_cdt(surface; maxiter=2000, maxpts=6000,
+                         max_facets=1_000_000, max_tets=10_000_000,
+                         max_work_tets=20_000_000,
+                         max_predicate_tests=500_000_000,
+                         max_recovery_tests=100_000_000) -> Mesh
 
 Conforming tetrahedralization of a closed PLC `surface` by exact-kernel conforming-
 Delaunay refinement (see the module docstring). Returns a validated, closed-manifold,
@@ -602,14 +727,37 @@ Delaunay refinement (see the module docstring). Returns a validated, closed-mani
 non-conforming mesh). Closes the non-star+reflex class the Float64 `recover_boundary`
 cannot; also recovers the supported classes (box / genus-1 tunnel / hollow shell /
 faceted cylinder) with 0 Steiner points where they are already Delaunay-conforming.
+`maxiter` bounds recovery rounds, `maxpts` bounds exact PLC/Steiner points,
+`max_facets` bounds input triangles, and `max_tets` bounds the returned volume mesh.
+`max_work_tets` and `max_predicate_tests` bound each exact triangulation's retained
+work cells and exact predicate evaluations. `max_recovery_tests` bounds exact
+edge/region and certification tests across the complete recovery call.
 """
-function recover_boundary_cdt(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
-    m, _, _, _, _ = _recover(surface; maxiter=maxiter, maxpts=maxpts)
+function recover_boundary_cdt(surface;
+                              maxiter=2000,maxpts=6000,
+                              max_facets=_DEFAULT_MAX_FACETS,
+                              max_tets=DEFAULT_MAX_TETS,
+                              max_work_tets=DEFAULT_MAX_WORK_TETS,
+                              max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS,
+                              max_recovery_tests=_DEFAULT_MAX_RECOVERY_TESTS)
+    limits=_recovery_limits(
+        "recover_boundary_cdt";maxiter,maxpts,max_facets,max_tets,
+        max_work_tets,max_predicate_tests,max_recovery_tests)
+    surface isa Mesh || throw(ArgumentError(
+        "recover_boundary_cdt: surface must be a Mesh"))
+    ntris(surface)<=limits.facets || throw(ArgumentError(
+        "recover_boundary_cdt: $(ntris(surface)) input facets exceed " *
+        "max_facets=$(limits.facets); increase max_facets or simplify the PLC"))
+    m, _, _, _, _ = _recover(surface,limits,"recover_boundary_cdt")
     return m
 end
 
 """
-    recover_partition_cdt(surfaces; maxiter=2000, maxpts=6000) -> Mesh
+    recover_partition_cdt(surfaces; maxiter=2000, maxpts=6000,
+                          max_facets=1_000_000, max_tets=10_000_000,
+                          max_work_tets=20_000_000,
+                          max_predicate_tests=500_000_000,
+                          max_recovery_tests=100_000_000) -> Mesh
 
 Recover every piecewise-linear interface in an ordered collection of closed surfaces,
 then classify each tetrahedron by the first surface containing its centroid. Co-axial
@@ -619,27 +767,39 @@ priority semantics as `tetrahedralize_conforming[_exact]`, including overlapping
 and adds exact Steiner points wherever the joint vertex-only Delaunay lacks an interface.
 Every effective material region is certified as a tetrahedral manifold whose boundary
 is a subcomplex of the input PLC collection; otherwise the function throws.
+Resource keywords have the meanings documented by [`recover_boundary_cdt`](@ref);
+here `max_facets` applies to the combined input collection.
 """
-function recover_partition_cdt(surfaces::AbstractVector{Mesh};
-                               maxiter::Integer=2000,maxpts::Integer=6000)
+function recover_partition_cdt(surfaces;
+                               maxiter=2000,maxpts=6000,
+                               max_facets=_DEFAULT_MAX_FACETS,
+                               max_tets=DEFAULT_MAX_TETS,
+                               max_work_tets=DEFAULT_MAX_WORK_TETS,
+                               max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS,
+                               max_recovery_tests=_DEFAULT_MAX_RECOVERY_TESTS)
+    limits=_recovery_limits(
+        "recover_partition_cdt";maxiter,maxpts,max_facets,max_tets,
+        max_work_tets,max_predicate_tests,max_recovery_tests)
+    surfaces isa AbstractVector || throw(ArgumentError(
+        "recover_partition_cdt: surfaces must be an AbstractVector of Mesh values"))
     isempty(surfaces) && throw(ArgumentError("recover_partition_cdt: no surfaces"))
     length(surfaces)<=typemax(Int32) ||
         throw(ArgumentError("recover_partition_cdt: region count exceeds Int32 tags"))
-    (1<=maxiter<=typemax(Int)) ||
-        throw(ArgumentError("recover_partition_cdt: maxiter must be positive and fit Int (got $maxiter)"))
-    (4<=maxpts<=typemax(Int32)) ||
-        throw(ArgumentError("recover_partition_cdt: maxpts must be in 4:$(typemax(Int32)) (got $maxpts)"))
+    _partition_facet_count(surfaces,limits.facets,"recover_partition_cdt")
     for (r,s) in enumerate(surfaces)
         Mesh3D._require_surface3(s,"recover_partition_cdt region $r")
     end
-    nit=Int(maxiter);nmax=Int(maxpts)
-    prismatic=_recover_prismatic_partition(surfaces,nmax)
-    prismatic===nothing||return prismatic
+    nit=limits.iterations;nmax=limits.points
     pts,facets=dedup_partition(surfaces)
     length(pts)>=4 || throw(ArgumentError("recover_partition_cdt: need at least 4 distinct vertices"))
     length(pts)<=nmax || throw(ArgumentError(
-        "recover_partition_cdt: input already has $(length(pts)) points, exceeding maxpts=$nmax"))
+        "recover_partition_cdt: input already has $(length(pts)) points, exceeding " *
+        "maxpts=$nmax; increase maxpts or simplify the PLC collection"))
     isempty(facets) && throw(ArgumentError("recover_partition_cdt: combined PLC has no facets"))
+    budget=_RecoveryBudget(limits.recovery_tests,limits.recovery_tests,
+                           "recover_partition_cdt")
+    prismatic=_recover_prismatic_partition(surfaces,limits,pts,facets,budget)
+    prismatic===nothing||return prismatic
     pointmap=Dict{RBv,Int}(p=>i for (i,p) in enumerate(pts))
     regions=build_regions(pts,facets)
     isempty(regions) && throw(ArgumentError("recover_partition_cdt: combined PLC has no planar regions"))
@@ -651,8 +811,9 @@ function recover_partition_cdt(surfaces::AbstractVector{Mesh};
     function split_seg!(e)
         a,b=e;mid=rscale(radd(pts[a],pts[b]),1//2);m=get(pointmap,mid,0)
         if m==0
-            length(pts)<nmax || error(
-                "recover_partition_cdt: maxpts=$nmax reached while splitting a crease")
+            length(pts)<nmax || throw(ArgumentError(
+                "recover_partition_cdt: maxpts=$nmax reached while splitting a crease; " *
+                "increase maxpts or simplify the PLC collection"))
             push!(pts,mid);m=length(pts);pointmap[mid]=m
         end
         regs=seg2regs[e];delete!(seg2regs,e)
@@ -672,7 +833,7 @@ function recover_partition_cdt(surfaces::AbstractVector{Mesh};
         # memory, while every recovery and acceptance decision below uses the exact
         # Rational preimages.  The conversion gate rejects point collisions, and the
         # exact certificate—not the approximate Delaunay property—is authoritative.
-        etets=_partition_tets_float(pts)
+        etets=_partition_tets_float(pts,limits)
         E=Set{NTuple{2,Int}}()
         for t in etets,i in 1:4,j in i+1:4;push!(E,ekey(t[i],t[j]));end
 
@@ -685,38 +846,42 @@ function recover_partition_cdt(surfaces::AbstractVector{Mesh};
         candidates=RBv[]
         for reg in regions
             for e in E
-                pierced,y=edge_pierces(reg,pts,e[1],e[2])
+                pierced,y=edge_pierces(reg,pts,e[1],e[2],budget)
                 if pierced;push!(candidates,y);break;end
             end
         end
         if !isempty(candidates)
             fresh=RBv[y for y in unique(candidates) if !haskey(pointmap,y)]
-            isempty(fresh) && error(
-                "recover_partition_cdt: an interface remains pierced but every exact intersection point already exists")
-            length(fresh)<=nmax-length(pts) || error(
-                "recover_partition_cdt: adding interface points would exceed maxpts=$nmax")
+            isempty(fresh) && throw(ErrorException(
+                "recover_partition_cdt: an interface remains pierced but every exact intersection point already exists"))
+            length(fresh)<=nmax-length(pts) || throw(ArgumentError(
+                "recover_partition_cdt: adding interface points would exceed maxpts=$nmax; " *
+                "increase maxpts or simplify the PLC collection"))
             for y in fresh;push!(pts,y);pointmap[y]=length(pts);end
             continue
         end
 
-        return _finalize_partition(surfaces,pts,etets,regions)
+        return _finalize_partition(
+            surfaces,pts,etets,regions,limits.tets,budget)
     end
-    error("recover_partition_cdt: no convergence in $nit iterations (verts=$(length(pts)))")
+    throw(ArgumentError(
+        "recover_partition_cdt: maxiter=$nit reached before convergence " *
+        "(verts=$(length(pts))); increase maxiter, maxpts, or simplify the PLC"))
 end
 
 # internal: run the refinement and return (mesh, pts, regions, seg2regs, n0) so sizing can reuse it.
-function _recover(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
-    Mesh3D._require_surface3(surface,"recover_boundary_cdt")
-    (1 <= maxiter <= typemax(Int)) ||
-        throw(ArgumentError("recover_boundary_cdt: maxiter must be positive and fit Int (got $maxiter)"))
-    (4 <= maxpts <= typemax(Int32)) ||
-        throw(ArgumentError("recover_boundary_cdt: maxpts must be in 4:$(typemax(Int32)) (got $maxpts)"))
-    nit=Int(maxiter);nmax=Int(maxpts)
+function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
+    Mesh3D._require_surface3(surface,caller)
+    nit=limits.iterations;nmax=limits.points
+    budget=_RecoveryBudget(limits.recovery_tests,limits.recovery_tests,
+                           String(caller))
     pts, facets = dedup(surface)
-    length(pts)>=4 || throw(ArgumentError("recover_boundary_cdt: need ≥ 4 distinct vertices"))
-    isempty(facets) && throw(ArgumentError("recover_boundary_cdt: surface has no facets"))
+    length(pts)>=4 || throw(ArgumentError("$caller: need ≥ 4 distinct vertices"))
+    isempty(facets) && throw(ArgumentError("$caller: surface has no facets"))
     n0=length(pts)
-    n0<=nmax || throw(ArgumentError("recover_boundary_cdt: input already has $n0 points, exceeding maxpts=$nmax"))
+    n0<=nmax || throw(ArgumentError(
+        "$caller: input already has $n0 points, exceeding maxpts=$nmax; " *
+        "increase maxpts or simplify the PLC"))
     pointmap=Dict{RBv,Int}(p=>i for (i,p) in enumerate(pts))
     regions=build_regions(pts,facets)
     seg2regs=Dict{NTuple{2,Int},Vector{Int}}()
@@ -725,7 +890,9 @@ function _recover(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
     function split_seg!(e)
         a,b=e;mid=rscale(radd(pts[a],pts[b]),1//2);m=get(pointmap,mid,0)
         if m==0
-            length(pts)<nmax || error("recover_boundary_cdt: maxpts=$nmax reached while splitting a crease")
+            length(pts)<nmax || throw(ArgumentError(
+                "$caller: maxpts=$nmax reached while splitting a crease; " *
+                "increase maxpts or simplify the PLC"))
             push!(pts,mid);m=length(pts);pointmap[mid]=m
         end
         regs=seg2regs[e]; delete!(seg2regs,e)
@@ -739,8 +906,13 @@ function _recover(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
 
     local etets
     for it in 1:nit
-        length(pts) > nmax && error("recover_boundary_cdt: maxpts exceeded ($(length(pts))) — refinement not converging")
-        etets = delaunay3d_exact(pts)
+        length(pts) <= nmax || throw(ArgumentError(
+            "$caller: maxpts=$nmax exceeded during refinement; " *
+            "increase maxpts or simplify the PLC"))
+        etets = delaunay3d_exact(
+            pts;max_points=nmax,max_tets=limits.work_tets,
+            max_work_tets=limits.work_tets,
+            max_predicate_tests=limits.predicate_tests)
         E=Set{NTuple{2,Int}}()
         for t in etets; for i in 1:4,j in i+1:4; push!(E,ekey(t[i],t[j])); end; end
         # 1) missing crease subsegments -> midpoint split
@@ -754,30 +926,39 @@ function _recover(surface::Mesh; maxiter::Integer=2000, maxpts::Integer=6000)
         newpts=RBv[]
         for reg in regions
             for e in E
-                pr,y=edge_pierces(reg,pts,e[1],e[2])
+                pr,y=edge_pierces(reg,pts,e[1],e[2],budget)
                 pr && (push!(newpts,y); break)
             end
         end
         if !isempty(newpts)
             fresh=RBv[y for y in unique(newpts) if !haskey(pointmap,y)]
-            isempty(fresh) && error(
-                "recover_boundary_cdt: a facet remains pierced but every exact intersection point already exists")
+            isempty(fresh) && throw(ErrorException(
+                "$caller: a facet remains pierced but every exact intersection point already exists"))
             length(fresh)<=nmax-length(pts) ||
-                error("recover_boundary_cdt: adding piercing points would exceed maxpts=$nmax")
+                throw(ArgumentError(
+                    "$caller: adding piercing points would exceed maxpts=$nmax; " *
+                    "increase maxpts or simplify the PLC"))
             for y in fresh;push!(pts,y);pointmap[y]=length(pts);end
             continue
         end
         # converged: assemble + EXACT certification (never return a silently non-conforming mesh)
-        m = _finalize(surface, pts, etets)
-        ok, reason = certify_exact(surface, m, pts, regions, seg2regs)
+        m = _finalize(surface,pts,etets,limits.tets,caller)
+        ok, reason = certify_exact(surface,m,pts,regions,seg2regs,budget)
         ok && return (m, pts, regions, seg2regs, n0)
-        error("recover_boundary_cdt: convergence gate passed but exact certification failed: $reason")
+        throw(ErrorException(
+            "$caller: convergence gate passed but exact certification failed: $reason"))
     end
-    error("recover_boundary_cdt: no convergence in $nit iters (verts=$(length(pts)))")
+    throw(ArgumentError(
+        "$caller: maxiter=$nit reached before convergence " *
+        "(verts=$(length(pts))); increase maxiter, maxpts, or simplify the PLC"))
 end
 
 """
-    mesh_sized_cdt(surface::Mesh; hmax) -> Mesh
+    mesh_sized_cdt(surface; hmax, maxiter=2000, maxpts=6000,
+                   max_nodes=10_000_000, max_facets=1_000_000,
+                   max_tets=10_000_000, max_work_tets=20_000_000,
+                   max_predicate_tests=500_000_000,
+                   max_recovery_tests=100_000_000) -> Mesh
 
 Uniform size control on an **arbitrary** (curved / non-star) domain, on top of the
 exact conforming-Delaunay recovery. First recover the boundary conformingly
@@ -786,15 +967,41 @@ every overlong tet edge. Boundary faces are subdivided on their own planes, so t
 piecewise-linear PLC is unchanged. The returned mesh is exactly PLC-conforming and
 has **every edge `≤ hmax`**; failure to prove either postcondition is an explicit
 blocker, never a silent unsized fallback.
+Recovery limits have the meanings documented by [`recover_boundary_cdt`](@ref).
+`max_nodes`, `max_tets`, and `max_work_tets` also bound the subsequent conforming
+longest-edge refinement.
 """
-function mesh_sized_cdt(surface::Mesh; hmax::Real)
+function mesh_sized_cdt(surface;hmax,
+                        maxiter=2000,maxpts=6000,
+                        max_nodes=PIPELINE_DEFAULT_MAX_NODES,
+                        max_facets=_DEFAULT_MAX_FACETS,
+                        max_tets=DEFAULT_MAX_TETS,
+                        max_work_tets=DEFAULT_MAX_WORK_TETS,
+                        max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS,
+                        max_recovery_tests=_DEFAULT_MAX_RECOVERY_TESTS)
+    limits=_recovery_limits(
+        "mesh_sized_cdt";maxiter,maxpts,max_facets,max_tets,
+        max_work_tets,max_predicate_tests,max_recovery_tests)
+    node_limit=_recovery_limit(max_nodes,"mesh_sized_cdt","max_nodes";
+                               minimum=4,maximum=Int(typemax(Int32)))
+    surface isa Mesh || throw(ArgumentError("mesh_sized_cdt: surface must be a Mesh"))
+    ntris(surface)<=limits.facets || throw(ArgumentError(
+        "mesh_sized_cdt: $(ntris(surface)) input facets exceed " *
+        "max_facets=$(limits.facets); increase max_facets or simplify the PLC"))
+    hmax isa Real || throw(ArgumentError("mesh_sized_cdt: hmax must be real"))
+    hmax isa Bool && throw(ArgumentError("mesh_sized_cdt: hmax must not be Bool"))
     hm=try Float64(hmax) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("mesh_sized_cdt: hmax must be Float64-representable: $(sprint(showerror,err))"))
     end
     (isfinite(hm)&&hm>0) || throw(ArgumentError("mesh_sized_cdt: hmax must be finite and positive (got $hmax)"))
-    m0,_,_,_,_=_recover(surface)
-    m=Mesh3D.refine_to_size(m0,hm)
+    effective_limits=_RecoveryLimits(
+        limits.iterations,min(limits.points,node_limit),limits.facets,limits.tets,
+        limits.work_tets,limits.predicate_tests,limits.recovery_tests)
+    m0,_,_,_,_=_recover(surface,effective_limits,"mesh_sized_cdt")
+    m=Mesh3D.refine_to_size(
+        m0,hm;max_nodes=node_limit,max_tets=limits.tets,
+        max_work_tets=limits.work_tets)
     ok,reason=Mesh3D._certify_surface_fill(surface,m)
     ok || throw(ErrorException("mesh_sized_cdt: refined mesh failed the exact PLC certificate — $reason"))
     return m

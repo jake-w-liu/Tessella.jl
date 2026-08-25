@@ -24,6 +24,13 @@ mesh_vol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.te
 mutable struct _R3; s::UInt64; end
 _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Float64(2^53))
 
+struct _UnreadableExactPoints <: AbstractVector{NTuple{3,Rational{BigInt}}}
+    count::Int
+end
+Base.size(points::_UnreadableExactPoints)=(points.count,)
+Base.getindex(::_UnreadableExactPoints,::Int)=
+    error("exact point storage must not be read after a resource preflight fails")
+
 @testset "Mesh3D Delaunay (Stage 3)" begin
 
     @testset "random clouds: exact empty-circumsphere + valid + manifold" begin
@@ -126,13 +133,43 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         @test nsegs(fine)==2 && all(==(Int32(7)),fine.seg_tag)
         @test ntris(fine)==4 && all(==(Int32(8)),fine.tri_tag)
         @test all(==(Int32(9)),fine.tet_tag) && validate(fine).ok
+        @test mesh_crc(fine).sha==
+              "c3d7c10942ce6348de44d5bb6396a7328c5d035221f1f40fbd34d7064278d8a0"
         @test_throws ArgumentError refine_to_size(tagged,Inf)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_nodes=true)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_tets=1.0)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_nodes=4)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_tets=1)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_work_tets=1)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_segments=1)
+        @test_throws ArgumentError refine_to_size(tagged,0.75;max_triangles=1)
         @test_throws ArgumentError mesh_box(0,1,0,1,0,1;hmax=Inf)
         @test_throws ArgumentError BoxRegion(0,NaN,0,1,0,1,1)
         @test_throws ArgumentError mesh_cylinder((0.,0.,0.),(Inf,0.,0.),1.,1.;hmax=1.)
         @test_throws ArgumentError recover_boundary(box_surface(0,1,0,1,0,1);max_seeds=0)
-        @test_throws ArgumentError recover_partition_cdt([box_surface(0,1,0,1,0,1)];maxiter=0)
-        @test_throws ArgumentError recover_partition_cdt([box_surface(0,1,0,1,0,1)];maxpts=4)
+        cdtbox=box_surface(0,1,0,1,0,1)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;maxiter=true)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;maxiter=1.0)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_facets=11)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_tets=5)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_work_tets=1)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_predicate_tests=1)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_recovery_tests=true)
+        @test_throws ArgumentError recover_boundary_cdt(cdtbox;max_recovery_tests=1)
+        @test_throws ArgumentError recover_boundary_cdt(1)
+        @test_throws ArgumentError recover_partition_cdt([cdtbox];maxiter=0)
+        @test_throws ArgumentError recover_partition_cdt([cdtbox];maxiter=true)
+        @test_throws ArgumentError recover_partition_cdt([cdtbox];maxpts=4)
+        @test_throws ArgumentError recover_partition_cdt((cdtbox,))
+        partition_box=recover_partition_cdt(Any[cdtbox])
+        @test mesh_crc(partition_box).sha==
+              "0d14f7a477b4d7222dce20b61cb1f7663c1c131dfbf1e945b48e5999e93569c1"
+        @test_throws ArgumentError mesh_sized_cdt(cdtbox;hmax=true)
+        @test_throws ArgumentError mesh_sized_cdt(cdtbox;hmax="1")
+        @test_throws ArgumentError mesh_sized_cdt(cdtbox;hmax=0.5,max_nodes=8)
+        sized_box=mesh_sized_cdt(cdtbox;hmax=1.0)
+        @test mesh_crc(sized_box).sha==
+              "83fbfd93eeff0b9dde4e2f661fc589a87c0294a103ce62f1f75702a3efd4f7e1"
         @test_throws ArgumentError mesh_sized_conforming(box_surface(0,1,0,1,0,1);hmax=1.,inset=-1.)
         @test isempty(Docs.undocumented_names(Tessella;private=false))
     end
@@ -897,13 +934,17 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         end
         @testset "recover_boundary_cdt is general (supported classes too)" begin
             # the same exact CDT recovery conforms the supported classes with the exact volume.
-            for (s, v) in ((box_surface(0,4,0,4,0,4), 64.0),
-                           (box_tunnel_surface(0,6,0,6,0,6,2,4,2,4), 192.0),
-                           (box_shell_surface(0,6,0,6,0,6,1,5,1,5,1,5), 152.0))
+            for (s, v, sha) in ((box_surface(0,4,0,4,0,4), 64.0,
+                                  "f2451e6cb9e424bc520d8b9723fe1d307537f99fd9d8404e98490d2fae4b8bab"),
+                                 (box_tunnel_surface(0,6,0,6,0,6,2,4,2,4), 192.0,nothing),
+                                 (box_shell_surface(0,6,0,6,0,6,1,5,1,5,1,5), 152.0,nothing))
                 m = recover_boundary_cdt(s)
                 @test validate(m).ok && is_closed_manifold(m)
                 @test bndarea(m) ≈ surfarea(s) rtol=1e-9
                 @test mesh_vol(m) ≈ v rtol=1e-9
+                if sha!==nothing
+                    @test mesh_crc(m).sha==sha
+                end
             end
         end
         @testset "disconnected coplanar regions (U-channel): no spurious area-mismatch blocker" begin
@@ -1294,6 +1335,29 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
             @test validate(m).ok                                  # positive volumes + manifold
             @test boundary_euler(m) == 2                          # convex-hull boundary is a 2-sphere
         end
+        # Independent implementation oracle: in non-cospherical general position,
+        # the exact-rational and ghost-vertex Float64 kernels must choose the same
+        # unique Delaunay tetrahedra. Compare coordinates because the Float64 kernel
+        # owns an insertion-order node permutation.
+        rcross=_R3(0x91e1_0da5_c79e_7b1d)
+        for _ in 1:12
+            n=8+floor(Int,12*_nf(rcross))
+            xs=[_nf(rcross) for _ in 1:n]
+            ys=[_nf(rcross) for _ in 1:n]
+            zs=[_nf(rcross) for _ in 1:n]
+            coords=[(xs[i],ys[i],zs[i]) for i in 1:n]
+            exactpts=[(Q(p[1]),Q(p[2]),Q(p[3])) for p in coords]
+            exacttets=delaunay3d_exact(exactpts)
+            floatmesh=to_mesh3(delaunay3d(xs,ys,zs;perturb=false))
+            exactcells=Set(Tuple(sort(collect((coords[v] for v in tet))))
+                           for tet in exacttets)
+            floatcells=Set(Tuple(sort(collect((
+                (floatmesh.coords[1,floatmesh.tets[k,t]],
+                 floatmesh.coords[2,floatmesh.tets[k,t]],
+                 floatmesh.coords[3,floatmesh.tets[k,t]]) for k in 1:4))))
+                           for t in axes(floatmesh.tets,2))
+            @test exactcells==floatcells
+        end
         # Regression: a fixed-size finite super-tet can erase the only real tet for a
         # near-coplanar/high-aspect cloud.  Four non-coplanar points have exactly one
         # possible tetrahedralization, so this is an independent completeness oracle:
@@ -1309,6 +1373,28 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         end
         base = [(Q(0),Q(0),Q(0)),(Q(1),Q(0),Q(0)),
                 (Q(0),Q(1),Q(0)),(Q(0),Q(0),Q(1))]
+        rational_int_points=[(0//1,0//1,0//1),(1//1,0//1,0//1),
+                             (0//1,1//1,0//1),(0//1,0//1,1//1)]
+        @test delaunay3d_exact(rational_int_points)==[(1,3,4,2)]
+        @test delaunay3d_exact(view(base,:))==[(1,3,4,2)]
+        @test_throws ArgumentError delaunay3d_exact(tuple(base...))
+        @test_throws ArgumentError delaunay3d_exact(
+            [(0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0)])
+        @test_throws ArgumentError delaunay3d_exact(
+            Any[(false,0,0),(1,0,0),(0,1,0),(0,0,1)])
+        @test_throws ArgumentError delaunay3d_exact(base;max_points=true)
+        @test_throws ArgumentError delaunay3d_exact(base;max_points=3)
+        @test_throws ArgumentError delaunay3d_exact(
+            _UnreadableExactPoints(4);max_points=3)
+        @test_throws ArgumentError delaunay3d_exact(base;max_tets=0)
+        @test_throws ArgumentError delaunay3d_exact(base;max_work_tets=1)
+        @test_throws ArgumentError delaunay3d_exact(base;max_predicate_tests=1)
+        @test is_delaunay_exact(base,NTuple{4,Int32}[(1,3,4,2)])==(true,0)
+        @test is_delaunay_exact(base,[(1,2,true,4)])==(false,1)
+        @test_throws ArgumentError is_delaunay_exact(
+            base,[(1,3,4,2)];max_points=3)
+        @test_throws ArgumentError is_delaunay_exact(
+            base,[(1,3,4,2)];max_tets=0)
         @test is_delaunay_exact(base,NTuple{4,Int}[]) == (false,1)
         @test is_delaunay_exact(base,[(1,2,3,4),(1,2,3,4)]) == (false,1)
         @test is_delaunay_exact(base,[(1,1,3,4)]) == (false,1)
@@ -1325,6 +1411,12 @@ _nf(r::_R3) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/Fl
         bt = delaunay3d_exact(boxpts)
         okb, _ = is_delaunay_exact(boxpts, bt)
         @test okb
+        boxcoords=Matrix{Float64}(undef,3,length(boxpts))
+        for i in eachindex(boxpts),k in 1:3;boxcoords[k,i]=Float64(boxpts[i][k]);end
+        boxtets=Matrix{Int32}(undef,4,length(bt))
+        for (j,t) in enumerate(bt),k in 1:4;boxtets[k,j]=Int32(t[k]);end
+        @test mesh_crc(Mesh(boxcoords;tets=boxtets)).sha==
+              "998c29691aaadcbeed8f47d61c3729f8836e68f33bbc1437448586103003e623"
         vol6 = sum(begin
             a=boxpts[t[1]]; b=boxpts[t[2]]; c=boxpts[t[3]]; d=boxpts[t[4]]
             abs((b[1]-a[1])*((c[2]-a[2])*(d[3]-a[3])-(c[3]-a[3])*(d[2]-a[2])) -

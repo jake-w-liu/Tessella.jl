@@ -28,6 +28,83 @@ export RB, delaunay3d_exact, is_delaunay_exact
 
 const RB = Rational{BigInt}
 const _MAX_SUPER_GROWTHS = 32
+const DEFAULT_MAX_POINTS = 1_000_000
+const DEFAULT_MAX_TETS = 10_000_000
+const DEFAULT_MAX_WORK_TETS = 20_000_000
+const DEFAULT_MAX_PREDICATE_TESTS = 500_000_000
+
+mutable struct _PredicateBudget
+    remaining::Int
+    limit::Int
+    caller::String
+end
+
+@inline function _exact_limit(value,caller::AbstractString,name::AbstractString;
+                              minimum::Int=0, maximum::Int=typemax(Int))
+    value isa Integer || throw(ArgumentError(
+        "$caller: $name must be an integer"))
+    value isa Bool && throw(ArgumentError(
+        "$caller: $name must not be Bool"))
+    minimum <= value <= maximum || throw(ArgumentError(
+        "$caller: $name must lie in $minimum:$maximum (got $value)"))
+    return Int(value)
+end
+
+@inline function _consume_predicates!(budget::_PredicateBudget, count::Int=1)
+    count >= 0 || throw(ArgumentError(
+        "$(budget.caller): internal predicate count must be nonnegative"))
+    count <= budget.remaining || throw(ArgumentError(
+        "$(budget.caller): exact predicate work exceeds " *
+        "max_predicate_tests=$(budget.limit); increase max_predicate_tests " *
+        "or reduce the point set"))
+    budget.remaining -= count
+    return nothing
+end
+
+function _exact_points(raw,point_limit::Int,caller::AbstractString)
+    raw isa AbstractVector || throw(ArgumentError(
+        "$caller: points must be an AbstractVector"))
+    n = length(raw)
+    n <= point_limit || throw(ArgumentError(
+        "$caller: $n input points exceed max_points=$point_limit; " *
+        "increase max_points or reduce the point set"))
+    n <= typemax(Int32) || throw(ArgumentError(
+        "$caller: point count exceeds Int32 indexing"))
+    raw isa Vector{NTuple{3,RB}} && return raw
+    out = Vector{NTuple{3,RB}}(undef, n)
+    cursor = 0
+    for point in raw
+        cursor += 1
+        cursor <= n || throw(ArgumentError(
+            "$caller: point iteration produced more than the reported length $n; " *
+            "supply a vector whose iteration agrees with length"))
+        (point isa Tuple || point isa AbstractVector) || throw(ArgumentError(
+            "$caller: point $cursor must be a tuple or vector"))
+        length(point) == 3 || throw(ArgumentError(
+            "$caller: point $cursor must have exactly 3 coordinates"))
+        values = Tuple(point)
+        out[cursor] = ntuple(3) do coordinate
+            value = values[coordinate]
+            value isa Bool && throw(ArgumentError(
+                "$caller: point $cursor coordinate $coordinate must not be Bool"))
+            (value isa Integer || value isa Rational) || throw(ArgumentError(
+                "$caller: point $cursor coordinate $coordinate must be an " *
+                "integer or Rational"))
+            try
+                RB(value)
+            catch err
+                err isa InterruptException && rethrow()
+                throw(ArgumentError(
+                    "$caller: point $cursor coordinate $coordinate cannot be " *
+                    "represented as Rational{BigInt}: $(sprint(showerror, err))"))
+            end
+        end
+    end
+    cursor == n || throw(ArgumentError(
+        "$caller: point iteration ended after $cursor of $n values; " *
+        "supply a vector whose iteration agrees with length"))
+    return out
+end
 
 @inline _sort3(a, b, c) = a <= b ? (a <= c ? (c <= b ? (a, c, b) : (a, b, c)) : (c, a, b)) :
                                    (b <= c ? (c <= a ? (b, c, a) : (b, a, c)) : (c, b, a))
@@ -125,19 +202,44 @@ end
 end
 
 """
-    delaunay3d_exact(pts::Vector{NTuple{3,RB}}) -> Vector{NTuple{4,Int}}
+    delaunay3d_exact(pts; max_points=1_000_000, max_tets=10_000_000,
+                     max_work_tets=20_000_000,
+                     max_predicate_tests=500_000_000)
+        -> Vector{NTuple{4,Int}}
 
 Delaunay tetrahedralization of the exact `Rational{BigInt}` points. Returns tets as
 1-based index quadruples into `pts`, each physically positively oriented. Requires
 ≥ 4 pairwise-distinct points. An affine-dimension < 3 cloud has no volume cells and
 returns an empty vector. A non-coplanar cloud either returns a complete, gated tet
 complex using every input point or throws an explicit error; it never silently returns
-a partial/empty result.
+a partial/empty result. Coordinates must be integers or exact `Rational` values and
+are losslessly promoted to `Rational{BigInt}`. The resource keywords bound input
+points, returned tetrahedra, accumulated live/dead work tetrahedra, and exact
+in-sphere/supporting-face predicate evaluations respectively.
 """
-function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
+function delaunay3d_exact(raw;
+                          max_points=DEFAULT_MAX_POINTS,
+                          max_tets=DEFAULT_MAX_TETS,
+                          max_work_tets=DEFAULT_MAX_WORK_TETS,
+                          max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS)
+    caller="delaunay3d_exact"
+    point_limit = _exact_limit(max_points,caller,"max_points";
+                               maximum=Int(typemax(Int32)))
+    tet_limit = _exact_limit(max_tets,caller,"max_tets";
+                             maximum=Int(typemax(Int32)))
+    work_limit = _exact_limit(max_work_tets,caller,"max_work_tets";
+                              minimum=1, maximum=Int(typemax(Int32)))
+    predicate_limit = _exact_limit(max_predicate_tests,caller,"max_predicate_tests";
+                                   minimum=1)
+    pts = _exact_points(raw,point_limit,caller)
+    return _delaunay3d_exact(pts, tet_limit, work_limit,
+                             _PredicateBudget(predicate_limit,predicate_limit,caller))
+end
+
+function _delaunay3d_exact(pts::Vector{NTuple{3,RB}}, tet_limit::Int,
+                           work_limit::Int, budget::_PredicateBudget)
     n = length(pts)
     n >= 4 || throw(ArgumentError("delaunay3d_exact: need ≥ 4 points (got $n)"))
-    n<=typemax(Int32) || throw(ArgumentError("delaunay3d_exact: point count exceeds Int32 indexing"))
 
     # Duplicate coordinates are not separate vertices of a geometric triangulation.
     # Reject them explicitly instead of retrying forever while requiring every index.
@@ -158,16 +260,23 @@ function delaunay3d_exact(pts::Vector{NTuple{3,RB}})
     lastreason = "no build attempted"
     for growth in 0:_MAX_SUPER_GROWTHS
         for allow_prefilter in (true,false)
-            out = _delaunay3d_exact_build(pts,m,D,K,allow_prefilter)
+            out = _delaunay3d_exact_build(pts,m,D,K,allow_prefilter,
+                                          work_limit,budget)
             if out===nothing
                 lastreason=allow_prefilter ? "a filtered insertion had an empty cavity" :
                                              "an exact insertion had an empty cavity"
                 continue
             end
-            ok, reason = _complete_exact_output(pts, out)
+            ok, reason = _complete_exact_output(pts, out, work_limit, budget)
             if ok
-                dok,nviol=_empty_sphere_exact(pts,out)
-                dok && return out
+                dok,nviol=_empty_sphere_exact(pts,out,budget)
+                if dok
+                    length(out)<=tet_limit || throw(ArgumentError(
+                        "delaunay3d_exact: $(length(out)) output tetrahedra " *
+                        "exceed max_tets=$tet_limit; increase max_tets or " *
+                        "reduce the point set"))
+                    return out
+                end
                 lastreason="exact empty-circumsphere certification found $nviol violation(s)"
             else
                 lastreason=reason
@@ -188,9 +297,19 @@ end
 
 # One exact Bowyer–Watson build at a specified super-tet scale.  `nothing` requests
 # a larger scale (an input point had no cavity in the current finite construction).
-function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::BigInt,
-                                 allow_prefilter::Bool=true)
+function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB,
+                                 K::BigInt, allow_prefilter::Bool,
+                                 work_limit::Int,budget::_PredicateBudget)
     n = length(pts)
+    storage_count=try
+        Base.checked_add(n,4)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OverflowError || rethrow()
+        throw(ArgumentError(
+            "delaunay3d_exact: point-plus-supervertex storage count overflows Int; " *
+            "reduce max_points or the point set"))
+    end
 
     # Bounding super-tetrahedron.  The point cloud lies in [m,m+D]³.  All four
     # vertices must recede as K grows: keeping the negative vertex fixed at m−D was
@@ -204,7 +323,7 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
     s2 = (m + 10K*D,   m - K*D,     m - K*D)
     s3 = (m - K*D,     m + 10K*D,   m - K*D)
     s4 = (m - K*D,     m - K*D,     m + 10K*D)
-    X = Vector{NTuple{3,RB}}(undef, n + 4)
+    X = Vector{NTuple{3,RB}}(undef,storage_count)
     @inbounds for i in 1:n; X[i] = pts[i]; end
     X[n+1] = s1; X[n+2] = s2; X[n+3] = s3; X[n+4] = s4
 
@@ -216,7 +335,7 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
     # >~1e11-span model where Float64 cannot resolve tet sizes), the pre-filter is disabled
     # (`usePF=false`) and every tet gets the exact `insphere_rat` test — correct, just slower.
     mnx = X[1][1]; mny = X[1][2]; mnz = X[1][3]; mxx = mnx; mxy = mny; mxz = mnz
-    @inbounds for i in 1:n+4
+    @inbounds for i in 1:storage_count
         p = X[i]
         p[1] < mnx && (mnx = p[1]); p[1] > mxx && (mxx = p[1])
         p[2] < mny && (mny = p[2]); p[2] > mxy && (mxy = p[2])
@@ -225,9 +344,9 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
     extent = max(mxx-mnx, mxy-mny, mxz-mnz)
     fextent = Float64(extent)
     usePF = allow_prefilter && isfinite(fextent) && fextent < 1.0e11
-    Xf = Vector{NTuple{3,Float64}}(undef, n + 4)
+    Xf = Vector{NTuple{3,Float64}}(undef,storage_count)
     if usePF
-        @inbounds for i in 1:n+4
+        @inbounds for i in 1:storage_count
             Xf[i] = (Float64(X[i][1]-mnx), Float64(X[i][2]-mny), Float64(X[i][3]-mnz))
         end
     else
@@ -237,10 +356,12 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
     tets = NTuple{4,Int}[]
     alive = Bool[]
     csph = NTuple{4,Float64}[]              # parallel: each tet's Float64 circumsphere (pre-filter)
-    sizehint!(tets, max(16, 12n)); sizehint!(alive, max(16, 12n)); sizehint!(csph, max(16, 12n))
+    hint = min(work_limit, n > (typemax(Int)-16) ÷ 12 ? work_limit : max(16,12n))
+    sizehint!(tets,hint);sizehint!(alive,hint);sizehint!(csph,hint)
     function addtet!(t)
-        length(tets)<typemax(Int32) ||
-            throw(ErrorException("delaunay3d_exact: tetrahedron storage exceeds Int32"))
+        length(tets)<work_limit || throw(ArgumentError(
+            "delaunay3d_exact: working tetrahedra exceed max_work_tets=$work_limit; " *
+            "increase max_work_tets or reduce the point set"))
         push!(tets,t);push!(alive,true)
         push!(csph,usePF ? _fcircum(Xf[t[1]],Xf[t[2]],Xf[t[3]],Xf[t[4]]) :
                              (0.0,0.0,0.0,Inf))
@@ -265,7 +386,9 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB, K::Big
             # only tets that might contain p (borderline/degenerate included) are tested.
             _maybe_in_sphere(csph[ti], pfx, pfy, pfz) || continue
             t = tets[ti]
-            insphere_rat(X[t[1]], X[t[2]], X[t[3]], X[t[4]], p, t[1], t[2], t[3], t[4], i) > 0 && push!(cav, ti)
+            _consume_predicates!(budget)
+            insphere_rat(X[t[1]], X[t[2]], X[t[3]], X[t[4]], p,
+                         t[1], t[2], t[3], t[4], i) > 0 && push!(cav, ti)
         end
         isempty(cav) && return nothing
         # boundary faces of the cavity: a face incident to exactly ONE cavity tet.
@@ -306,13 +429,24 @@ end
 # Cheap independent completeness/topology gate for one build.  The Delaunay
 # predicate is already exact inside the builder; this gate prevents vacuous success
 # after removing super-incident cells and rejects physically unusable SoS-flat cells.
-function _complete_exact_output(pts::Vector{NTuple{3,RB}}, out::Vector{NTuple{4,Int}})
+function _complete_exact_output(pts::Vector{NTuple{3,RB}},
+                                out::Vector{NTuple{4,Int}}, tet_limit::Int,
+                                budget::_PredicateBudget)
     n = length(pts)
     isempty(out) && return (false, "all real tetrahedra were removed")
-    length(out)<=typemax(Int32) || return (false,"tetrahedron count exceeds Int32")
+    length(out)<=tet_limit || return (false,"tetrahedron count exceeds max_tets=$tet_limit")
     used = falses(n)
     tetkeys = Vector{NTuple{4,Int}}(undef, length(out))
-    facerecords = Vector{NTuple{4,Int}}(undef, 4length(out)) # sorted face key + owner tet
+    face_count=try
+        Base.checked_mul(4,length(out))
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OverflowError || rethrow()
+        throw(ArgumentError(
+            "$(budget.caller): face-certificate storage count overflows Int; " *
+            "reduce max_work_tets or the tetrahedral complex"))
+    end
+    facerecords = Vector{NTuple{4,Int}}(undef,face_count) # sorted face key + owner tet
     topology=Matrix{Int32}(undef,4,length(out))
     fi = 0
     @inbounds for (ti, t) in enumerate(out)
@@ -368,6 +502,7 @@ function _complete_exact_output(pts::Vector{NTuple{3,RB}}, out::Vector{NTuple{4,
             sopp=_orient3_det(pts[a],pts[b],pts[c],pts[opp])
             sopp!=0 || return (false,"a boundary face has a coplanar owner vertex")
             for v in 1:n
+                _consume_predicates!(budget)
                 sp=_orient3_det(pts[a],pts[b],pts[c],pts[v])
                 sp==0&&continue
                 (sp>0)==(sopp>0) || return (false,
@@ -385,24 +520,80 @@ function _complete_exact_output(pts::Vector{NTuple{3,RB}}, out::Vector{NTuple{4,
 end
 
 """
-    is_delaunay_exact(pts, tets) -> (ok::Bool, nviol::Int)
+    is_delaunay_exact(pts, tets; max_points=1_000_000,
+                      max_tets=10_000_000,
+                      max_predicate_tests=500_000_000)
+        -> (ok::Bool, nviol::Int)
 
 Exact empty-circumsphere oracle for a complete tetrahedral complex. Malformed,
 duplicate, flat, incomplete, or non-manifold input returns `(false,nviol)` rather
 than being accepted vacuously. For a structurally valid complex, `nviol` is the
 number of strict empty-circumsphere violations (`insphere_rat`).
 """
-function is_delaunay_exact(pts::Vector{NTuple{3,RB}}, tets::Vector{NTuple{4,Int}})
+function is_delaunay_exact(rawpts, rawtets;
+                           max_points=DEFAULT_MAX_POINTS,
+                           max_tets=DEFAULT_MAX_TETS,
+                           max_predicate_tests=DEFAULT_MAX_PREDICATE_TESTS)
+    caller="is_delaunay_exact"
+    point_limit = _exact_limit(max_points,caller,"max_points";
+                               maximum=Int(typemax(Int32)))
+    tet_limit = _exact_limit(max_tets,caller,"max_tets";
+                             maximum=Int(typemax(Int32)))
+    predicate_limit = _exact_limit(max_predicate_tests,caller,"max_predicate_tests";
+                                   minimum=1)
+    rawpts isa AbstractVector || return (false,1)
+    length(rawpts)<=point_limit || throw(ArgumentError(
+        "$caller: $(length(rawpts)) input points exceed max_points=$point_limit; " *
+        "increase max_points or reduce the point set"))
+    pts = try
+        _exact_points(rawpts,point_limit,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        return (false,1)
+    end
+    rawtets isa AbstractVector || return (false,1)
+    length(rawtets)<=tet_limit || throw(ArgumentError(
+        "$caller: $(length(rawtets)) input tetrahedra exceed max_tets=$tet_limit; " *
+        "increase max_tets or reduce the complex"))
+    tets=Vector{NTuple{4,Int}}(undef,length(rawtets))
+    cursor=0
+    for raw in rawtets
+        cursor+=1
+        cursor<=length(tets) || return (false,1)
+        (raw isa Tuple || raw isa AbstractVector) || return (false,1)
+        length(raw)==4 || return (false,1)
+        values=Tuple(raw)
+        all(value -> value isa Integer && !(value isa Bool),values) || return (false,1)
+        converted=try
+            ntuple(k -> Int(values[k]),4)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa InexactError || err isa OverflowError) || rethrow()
+            return (false,1)
+        end
+        tets[cursor]=converted
+    end
+    cursor==length(tets) || return (false,1)
     n = length(pts); nviol = 0
     n>=4 || return (false,1)
     length(Set(pts))==n || return (false,1)
-    ok,_=_complete_exact_output(pts,tets)
+    budget=_PredicateBudget(predicate_limit,predicate_limit,caller)
+    ok,_=_complete_exact_output(pts,tets,tet_limit,budget)
     ok || return (false,1)
-    return _empty_sphere_exact(pts,tets)
+    return _empty_sphere_exact(pts,tets,budget)
 end
 
-function _empty_sphere_exact(pts,tets)
+function _empty_sphere_exact(pts,tets,budget::_PredicateBudget)
     n=length(pts);nviol=0
+    tests=try
+        Base.checked_mul(length(tets),max(0,n-4))
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OverflowError || rethrow()
+        throw(ArgumentError("$(budget.caller): empty-sphere test count overflows Int"))
+    end
+    _consume_predicates!(budget,tests)
     @inbounds for t0 in tets
         a, b, c, d = t0[1], t0[2], t0[3], t0[4]
         # normalize to orient3_rat > 0 so insphere_rat > 0 means "strictly inside"

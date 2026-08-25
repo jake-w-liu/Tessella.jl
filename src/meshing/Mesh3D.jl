@@ -28,6 +28,7 @@ using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
 using ..SizeField: AbstractSizeField, ConstantSize, metric_edge_length,
                    directional_size
+using ..PipelineSupport: PIPELINE_DEFAULT_MAX_NODES, PIPELINE_DEFAULT_MAX_TETS
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
        tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion,
@@ -45,6 +46,9 @@ function _recover_boundary_exact end
 function _recover_partition_exact end
 
 const GHOST3 = Int32(0)
+const _DEFAULT_REFINE_MAX_WORK_TETS = 60_000_000
+const _DEFAULT_REFINE_MAX_SEGMENTS = 60_000_000
+const _DEFAULT_REFINE_MAX_TRIANGLES = 60_000_000
 
 @inline function _finite3(x::Real, caller::AbstractString, name::AbstractString)
     x isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
@@ -163,6 +167,17 @@ end
     converted>=minimum || throw(ArgumentError(
         "$caller: $name must be ≥ $minimum"))
     return converted
+end
+
+@inline function _refine_limit3(value,name::AbstractString;
+                                minimum::Int=0,maximum::Int=Int(typemax(Int32)))
+    value isa Integer || throw(ArgumentError(
+        "refine_to_size: $name must be an integer"))
+    value isa Bool && throw(ArgumentError(
+        "refine_to_size: $name must not be Bool"))
+    minimum<=value<=maximum || throw(ArgumentError(
+        "refine_to_size: $name must lie in $minimum:$maximum (got $value)"))
+    return Int(value)
 end
 
 @inline function _ceil_count3(x::Float64, caller::AbstractString, name::AbstractString;
@@ -1026,8 +1041,10 @@ end
 end
 
 """
-    refine_to_size(m::Mesh, hmax) -> Mesh
-    refine_to_size(m::Mesh, field::AbstractSizeField) -> Mesh
+    refine_to_size(m::Mesh, hmax; max_nodes=10_000_000,
+                   max_tets=60_000_000, max_work_tets=60_000_000,
+                   max_segments=60_000_000, max_triangles=60_000_000) -> Mesh
+    refine_to_size(m::Mesh, field::AbstractSizeField; ...) -> Mesh
 
 Refine a valid tet mesh by longest-edge subdivision.  The scalar overload guarantees
 **every edge is `≤ hmax`**.  The field overload requires every edge's metric length,
@@ -1071,33 +1088,69 @@ Interior edges are refined too (no interior lattice needed). Boundary vertices a
 preserved and boundary edges stay on the boundary to Float64 midpoint resolution.
 **Region tags (`tet_tag`) are propagated** — each child inherits its parent
 tet's tag — so multi-region meshes keep their partition. This is the size-refinement
-terminator behind [`Tessella.mesh_sized`](@ref).
+terminator behind [`Tessella.mesh_sized`](@ref). The `max_*` keywords are checked
+before input-sized allocation and before each subdivision; `max_work_tets` includes
+dead tetrahedra retained by the incremental incidence structure, while
+`max_segments` and `max_triangles` bound accumulated lower-dimensional work cells.
 """
 function refine_to_size(m::Mesh,hmax::Real;entity=nothing,entity_resolver=nothing,
-                        vertex_entities=nothing)
+                        vertex_entities=nothing,
+                        max_nodes=PIPELINE_DEFAULT_MAX_NODES,
+                        max_tets=PIPELINE_DEFAULT_MAX_TETS,
+                        max_work_tets=_DEFAULT_REFINE_MAX_WORK_TETS,
+                        max_segments=_DEFAULT_REFINE_MAX_SEGMENTS,
+                        max_triangles=_DEFAULT_REFINE_MAX_TRIANGLES)
     target = _finite3(hmax, "refine_to_size", "hmax")
     target > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
     return _refine_to_size(m,ConstantSize(target);target_description="hmax=$target",
                            entity=entity,entity_resolver=entity_resolver,
-                           vertex_entities=vertex_entities)
+                           vertex_entities=vertex_entities,max_nodes,max_tets,
+                           max_work_tets,max_segments,max_triangles)
 end
 
 function refine_to_size(m::Mesh,field::AbstractSizeField;entity=nothing,
-                        entity_resolver=nothing,vertex_entities=nothing)
+                        entity_resolver=nothing,vertex_entities=nothing,
+                        max_nodes=PIPELINE_DEFAULT_MAX_NODES,
+                        max_tets=PIPELINE_DEFAULT_MAX_TETS,
+                        max_work_tets=_DEFAULT_REFINE_MAX_WORK_TETS,
+                        max_segments=_DEFAULT_REFINE_MAX_SEGMENTS,
+                        max_triangles=_DEFAULT_REFINE_MAX_TRIANGLES)
     return _refine_to_size(m,field;target_description=string(nameof(typeof(field))),
                            entity=entity,entity_resolver=entity_resolver,
-                           vertex_entities=vertex_entities)
+                           vertex_entities=vertex_entities,max_nodes,max_tets,
+                           max_work_tets,max_segments,max_triangles)
 end
 
 function _refine_to_size(m::Mesh, field::AbstractSizeField;
                          target_description::AbstractString="size field",entity=nothing,
-                         entity_resolver=nothing,vertex_entities=nothing)
+                         entity_resolver=nothing,vertex_entities=nothing,
+                         max_nodes,max_tets,max_work_tets,max_segments,max_triangles)
+    node_limit=_refine_limit3(max_nodes,"max_nodes";minimum=1)
+    tet_limit=_refine_limit3(max_tets,"max_tets";minimum=1)
+    work_tet_limit=_refine_limit3(max_work_tets,"max_work_tets";minimum=1)
+    segment_limit=_refine_limit3(max_segments,"max_segments")
+    triangle_limit=_refine_limit3(max_triangles,"max_triangles")
     nt0 = size(m.tets,2)
     nt0 > 0 || throw(ArgumentError("refine_to_size: input contains no tetrahedra"))
+    nv0 = size(m.coords, 2)
+    nv0<=node_limit || throw(ArgumentError(
+        "refine_to_size: $nv0 input nodes exceed max_nodes=$node_limit; " *
+        "increase max_nodes or use a smaller input mesh"))
+    nt0<=tet_limit || throw(ArgumentError(
+        "refine_to_size: $nt0 input tetrahedra exceed max_tets=$tet_limit; " *
+        "increase max_tets or use a smaller input mesh"))
+    nt0<=work_tet_limit || throw(ArgumentError(
+        "refine_to_size: $nt0 input tetrahedra exceed " *
+        "max_work_tets=$work_tet_limit; increase max_work_tets or use a smaller input mesh"))
+    size(m.segs,2)<=segment_limit || throw(ArgumentError(
+        "refine_to_size: $(size(m.segs,2)) input segments exceed " *
+        "max_segments=$segment_limit; increase max_segments or use a smaller input mesh"))
+    size(m.tris,2)<=triangle_limit || throw(ArgumentError(
+        "refine_to_size: $(size(m.tris,2)) input triangles exceed " *
+        "max_triangles=$triangle_limit; increase max_triangles or use a smaller input mesh"))
     inputdiag = validate(m)
     inputdiag.ok || throw(ArgumentError("refine_to_size: input mesh is invalid — " *
                                         join(inputdiag.messages, "; ")))
-    nv0 = size(m.coords, 2)
     entity!==nothing && entity_resolver!==nothing && throw(ArgumentError(
         "refine_to_size: entity and entity_resolver are mutually exclusive"))
     fixed_entity=_mesh3_entity_context(entity,"refine_to_size")
@@ -1110,6 +1163,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     coordids=Dict{NTuple{3,Float64},Int32}()
     @inbounds for i in 1:nv0; coordids[coordkey(cx[i],cy[i],cz[i])]=Int32(i); end
     tv = Vector{NTuple{4,Int32}}(); alive = Bool[]; ttag = Int32[]      # ttag: per-tet region tag
+    live_tet_count=Ref(0)
     tags0 = m.tet_tag                                                    # input tags (length = ntets)
     inc = Dict{Tuple{Int32,Int32},Vector{Int32}}()
     heap = _EHeap()
@@ -1227,15 +1281,17 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     # boundary/feature cells and all of their tags remain conforming instead of being
     # silently discarded.
     function addseg!(q::NTuple{2,Int32}, tag::Int32)
-        length(segv)<typemax(Int32) ||
-            throw(ErrorException("refine_to_size: segment count exceeds the Int32 working limit"))
+        length(segv)<segment_limit || throw(ArgumentError(
+            "refine_to_size: accumulated segments exceed max_segments=$segment_limit; " *
+            "increase max_segments or use a coarser size target"))
         push!(segv,q); push!(segalive,true); push!(segtag,tag); s=length(segv)
         push!(get!(() -> Int[],seginc,ek(q...)),s)
         return nothing
     end
     function addtri!(q::NTuple{3,Int32}, tag::Int32)
-        length(triv)<typemax(Int32) ||
-            throw(ErrorException("refine_to_size: triangle count exceeds the Int32 working limit"))
+        length(triv)<triangle_limit || throw(ArgumentError(
+            "refine_to_size: accumulated triangles exceed max_triangles=$triangle_limit; " *
+            "increase max_triangles or use a coarser size target"))
         push!(triv,q); push!(trialive,true); push!(tritag,tag); f=length(triv)
         for e in (ek(q[1],q[2]),ek(q[2],q[3]),ek(q[3],q[1]))
             push!(get!(() -> Int[],triinc,e),f)
@@ -1275,8 +1331,12 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     # `push_edges` enqueues every edge that violates its sampled local target.
     function addtet!(a, b, c, d, push_edges::Bool, tag::Int32,
                      volume_hint::Union{Nothing,Float64})
-        length(tv) < typemax(Int32) ||
-            throw(ErrorException("refine_to_size: working tet count exceeds the Int32 incidence limit"))
+        length(tv)<work_tet_limit || throw(ArgumentError(
+            "refine_to_size: accumulated tetrahedra exceed " *
+            "max_work_tets=$work_tet_limit; increase max_work_tets or use a coarser size target"))
+        live_tet_count[]<tet_limit || throw(ArgumentError(
+            "refine_to_size: live tetrahedra exceed max_tets=$tet_limit; " *
+            "increase max_tets or use a coarser size target"))
         sv=volume_hint===nothing ?
            tet_signed_volume((cx[a],cy[a],cz[a]),(cx[b],cy[b],cz[b]),
                              (cx[c],cy[c],cz[c]),(cx[d],cy[d],cz[d])) : volume_hint
@@ -1289,7 +1349,8 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
                 "at vertices ($a,$b,$c,$d), signed_volume=$sv, exact_sign=$exactsign, points=$pts"))
         end
         sv < 0 && ((c,d)=(d,c))
-        push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true); push!(ttag, tag); id = Int32(length(tv))
+        push!(tv, (Int32(a),Int32(b),Int32(c),Int32(d))); push!(alive, true)
+        push!(ttag, tag);live_tet_count[]+=1;id = Int32(length(tv))
         q = (a,b,c,d)
         @inbounds for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
             u,v = q[i],q[j]; push!(get!(inc, ek(u,v)) do; Int32[] end, id)
@@ -1562,9 +1623,14 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
                                      "old_volume=$oldvolume, volume_tolerance=$voltol"
             return false
         end
-        length(tv)+length(bestcells)<typemax(Int32)||
-            (retriangulation_reason[]="replacement exceeds Int32 tet storage";return false)
-        for t in ts;alive[t]=false;end
+        length(bestcells)<=work_tet_limit-length(tv) || throw(ArgumentError(
+            "refine_to_size: local retriangulation would exceed " *
+            "max_work_tets=$work_tet_limit; increase max_work_tets or use a coarser size target"))
+        replacement_live=live_tet_count[]-length(ts)+length(bestcells)
+        replacement_live<=tet_limit || throw(ArgumentError(
+            "refine_to_size: local retriangulation would exceed max_tets=$tet_limit; " *
+            "increase max_tets or use a coarser size target"))
+        for t in ts;alive[t]=false;live_tet_count[]-=1;end
         tag=first(tags)
         for (q,sv) in zip(bestcells,bestvolumes)
             addtet!(q[1],q[2],q[3],q[4],true,tag,sv)
@@ -1590,8 +1656,9 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         isempty(ts) && continue
         guard += 1
         guard <= typemax(Int32) || throw(ErrorException("refine_to_size: bisection count exceeds Int32"))
-        length(cx) < typemax(Int32) ||
-            throw(ErrorException("refine_to_size: refined node count exceeds the Int32 indexing limit"))
+        length(cx)<node_limit || throw(ArgumentError(
+            "refine_to_size: refined nodes exceed max_nodes=$node_limit; " *
+            "increase max_nodes or use a coarser size target"))
         mx=_midpoint3(cx[a],cx[b]); my=_midpoint3(cy[a],cy[b]); mz=_midpoint3(cz[a],cz[b])
         ((mx,my,mz)!=(cx[a],cy[a],cz[a]) && (mx,my,mz)!=(cx[b],cy[b],cz[b])) ||
             throw(ErrorException("refine_to_size: $target_description is below Float64 coordinate resolution on edge ($a,$b)"))
@@ -1630,6 +1697,13 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             splitpoint=fallback
             mx,my,mz=splitpoint
         end
+        child_count=2length(ts)
+        child_count<=work_tet_limit-length(tv) || throw(ArgumentError(
+            "refine_to_size: edge subdivision would exceed " *
+            "max_work_tets=$work_tet_limit; increase max_work_tets or use a coarser size target"))
+        live_tet_count[]+length(ts)<=tet_limit || throw(ArgumentError(
+            "refine_to_size: edge subdivision would exceed max_tets=$tet_limit; " *
+            "increase max_tets or use a coarser size target"))
         push!(cx,mx); push!(cy,my); push!(cz,mz)
         mvid = Int32(length(cx));coordids[coordkey(mx,my,mz)]=mvid;split_lower!(a,b,mvid)
         @inbounds for t in ts
@@ -1637,7 +1711,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             opposite===nothing&&throw(ErrorException(
                 "refine_to_size: edge incidence changed during subdivision"))
             a1,a2=opposite
-            g = ttag[t]; alive[t] = false                    # children inherit the parent tet's region tag
+            g = ttag[t];alive[t]=false;live_tet_count[]-=1 # children inherit the parent tet's region tag
             addtet!(a,mvid,a1,a2,true,g,1.0)
             addtet!(mvid,b,a1,a2,true,g,1.0)
         end
@@ -1667,6 +1741,8 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             "refine_to_size: postcondition failed: an output edge exceeds its local metric target from $target_description"))
     end
     keep = Int32[t for t in 1:length(tv) if alive[t]]
+    length(keep)==live_tet_count[] || error(
+        "refine_to_size: internal live-tetrahedron count mismatch")
     used = Int32[]; seenv = Set{Int32}()
     for t in keep, v in tv[t]; (v in seenv) || (push!(used, v); push!(seenv, v)); end
     for s in eachindex(segv); segalive[s] || continue; for v in segv[s]; (v in seenv)||(push!(used,v);push!(seenv,v)); end; end

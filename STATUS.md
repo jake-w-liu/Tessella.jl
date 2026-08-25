@@ -94,6 +94,45 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after bounding exact 3-D
+tetrahedralization, PLC recovery, and conforming size refinement:
+
+- **VERIFIED (independent topology oracle):** 200/200 seeded,
+  non-cospherical random clouds produced the same coordinate-valued tetrahedron
+  sets in the exact-rational kernel and the separately implemented ghost-vertex
+  Float64 kernel. The 12 fixed cases retained in
+  `test/meshing/mesh3d_test.jl` pass under Julia 1.12.7 and Julia 1.11.9. A
+  `3×3×3` exact grid has 48 tetrahedra and connectivity SHA-256
+  `998c29691aaadcbeed8f47d61c3729f8836e68f33bbc1437448586103003e623`.
+- `delaunay3d_exact` and `is_delaunay_exact` now losslessly accept supported
+  generic rational/integer vectors and integer connectivity, reject malformed
+  or Boolean inputs explicitly, and bound points, returned/work tetrahedra, and
+  cumulative exact-predicate evaluations. An unreadable-vector fixture verifies
+  the point ceiling before point access. A seeded 1,000-call malformed-input
+  audit returned 1,000 `ArgumentError`s and no unexpected result or exception.
+- Exact boundary/partition recovery now bounds input facets, returned/work
+  tetrahedra, predicate work, and cumulative edge/region certification work.
+  `refine_to_size` separately bounds nodes, live and accumulated tetrahedra,
+  segments, and triangles before each growth operation. Successful and failing
+  recovery/refinement probes left their input meshes unchanged. Fixed CRCs are
+  `f2451e6cb9e424bc520d8b9723fe1d307537f99fd9d8404e98490d2fae4b8bab`
+  for the recovered box,
+  `0d14f7a477b4d7222dce20b61cb1f7663c1c131dfbf1e945b48e5999e93569c1`
+  for the one-region partition,
+  `83fbfd93eeff0b9dde4e2f661fc589a87c0294a103ce62f1f75702a3efd4f7e1`
+  for its sized CDT, and
+  `c3d7c10942ce6348de44d5bb6396a7328c5d035221f1f40fbd34d7064278d8a0`
+  for tagged single-tetrahedron refinement.
+- The focused Mesh3D suite passed 534/534 assertions under both Julia 1.12.7
+  and Julia 1.11.9. The bounds-checked package gate passed
+  164,502/164,502 assertions in 18m59.6s; aggregate bounds-checked validation
+  exited 0 against Gmsh 4.15.2. Recursive ambiguity detection and the public
+  documentation scan both returned zero.
+- The enforced Julia-file organization remains satisfied: the only top-level
+  Julia files under `src`, `test`, and `validation` are `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl`; all implementation and
+  supporting `.jl` files are organized in categorized subfolders.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening analytical CAD,
 constructive primitive surfaces, and healing diagnostics:
 
