@@ -113,11 +113,11 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | Track | Exit condition | State |
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections and persistent MSH4 periodic links, and a tagged point/curve/surface/volume kernel |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections and persistent MSH2/MSH4 periodic links, and a tagged point/curve/surface/volume kernel |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, and persistent MSH4 periodic metadata |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, and persistent MSH2/MSH4 periodic metadata |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation/rotation-periodic curves, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation/rotation-periodic curves and MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -130,8 +130,7 @@ into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, c
 high-order Jacobian certification beyond P2 tetrahedra, preservation of
 ancillary/unknown MSH sections (binary readers reject unsupported sections
 explicitly), non-8-byte binary data, internal indexing
-beyond `Int32`, lossless MSH2 periodic elementary-entity metadata, or lossless
-multi-physical-group projection through MSH v2.2.
+beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
 Variable-connectivity types 34/35/69 and parent/domain links are lossless in MSH2
 ASCII. Binary MSH2 has fixed widths and supports only fixed special records and parent
 links; MSH4 supports fixed unlinked special records. Type 69 and some registered fixed
@@ -202,16 +201,17 @@ validates and exactly snaps an explicit one-to-one translated node pairing;
 certifies any finite nonsingular affine pairing with exact-dyadic cancellation
 fallbacks. Both preserve node numbering, connectivity, and tags; the caller retains
 the pair map and transformation. `MixedPeriodicLink` provides an owned persistent
-representation of 0-D/1-D/2-D entity transforms and compact node pairs; ASCII and
-native-endian binary MSH4 read/write preserve it, and opposite-endian binary MSH4
-input is decoded under cumulative resource limits. Its CRC is pair-order
-independent. P4 does not yet claim
+representation of 0-D/1-D/2-D entity transforms and compact node pairs. MSH2
+retains aligned elementary-entity tags and its standard ASCII periodic section in
+both file modes; MSH4 uses its ASCII or native-endian binary section, with
+opposite-endian binary input decoded under cumulative resource limits. The CRC
+is pair-order independent. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
-high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, persistent
-model-level periodic constraints, or lossless MSH2 periodic entity metadata. The
+high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, or persistent
+model-level periodic constraints. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell
 and global fill volume identities and an interface tiling gate; its core engine
 covers Delaunay-friendly caps (planar/primitive walls) directly and smaller
@@ -243,9 +243,10 @@ four-sided transfinite, straight transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
 recombined-hexahedron differentials, plus translation/rotation-periodic curves
-as required bounds-checked children, together with the P6 t1-square, OCC-cylinder,
-OCC-cone, IGES-128 bilinear, BooleanDifference box, and 2-D boundary-layer differentials. A
-missing or wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
+and the MSH2/MSH4 periodic lifecycle as required bounds-checked children,
+together with the P6 t1-square, OCC-cylinder, OCC-cone, IGES-128 bilinear,
+BooleanDifference box, and 2-D boundary-layer differentials. A missing or
+wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
 aggregate command fail.
 
 See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the non-negotiable anti-false-positive
