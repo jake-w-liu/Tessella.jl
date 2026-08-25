@@ -13,6 +13,11 @@ using Tessella.MeshTypes
 using Tessella.Geometry
 using Tessella.Heal
 
+struct UnreadableGeometryPoint end
+Base.length(::UnreadableGeometryPoint)=3
+Base.getindex(::UnreadableGeometryPoint,::Int)=
+    error("geometry point should not be read before resource preflight")
+
 gvol(m) = sum(tet_volume(node(m,m.tets[1,t]),node(m,m.tets[2,t]),node(m,m.tets[3,t]),node(m,m.tets[4,t]))
               for t in 1:ntets(m); init=0.0)
 
@@ -46,19 +51,38 @@ end
 
     @testset "finite geometry and resource contracts" begin
         @test_throws ArgumentError box_surface(0,1,0,1,0,NaN)
+        @test_throws ArgumentError box_surface(true,1,0,1,0,1)
+        @test_throws ArgumentError box_surface("0",1,0,1,0,1)
         @test_throws ArgumentError cylinder_surface((0.,0.,0.),(Inf,0.,0.),1.,1.)
         @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),Inf,1.)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),true,1.)
+        @test_throws ArgumentError cylinder_surface((0.,0.),(0.,0.,1.),1.,1.)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,1.;
+                                                    nθ=true)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,1.;
+                                                    nθ=3.0)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,1.;
+                                                    nθ=8,nz=2,max_nodes=17)
+        @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,1.;
+                                                    nθ=8,nz=2,max_triangles=31)
+        @test_throws ArgumentError cylinder_surface(
+            UnreadableGeometryPoint(),(0.,0.,1.),1.,1.;
+            nθ=8,nz=2,max_nodes=17)
         @test_throws ArgumentError cylinder_surface((0.,0.,0.),(0.,0.,1.),1.,1.;
                                                     nθ=typemax(Int), nz=2)
         @test_throws ArgumentError sphere_surface((0.,0.,0.),0.)
+        @test_throws ArgumentError sphere_surface((0.,0.,0.),true)
         @test_throws ArgumentError sphere_surface((0.,0.,Inf),1.)
         @test_throws ArgumentError sphere_surface((0.,0.,0.),1.;subdivisions=-1)
         @test_throws ArgumentError sphere_surface((0.,0.,0.),1.;subdivisions=true)
         @test_throws ArgumentError sphere_surface((0.,0.,0.),1.;subdivisions=2,
                                                   max_nodes=65)
+        @test_throws ArgumentError sphere_surface(
+            UnreadableGeometryPoint(),1.;subdivisions=2,max_nodes=65)
         @test_throws ArgumentError sphere_surface((floatmax(Float64),0.,0.),
                                                   floatmax(Float64))
         @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,1.),0.,0.,1.)
+        @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,1.),true,0.,1.)
         @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,1.),-1.,0.,1.)
         @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,0.),1.,0.,1.)
         @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,1.),1.,0.,0.)
@@ -66,8 +90,23 @@ end
         @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,1.),1.,0.,1.;nz=1)
         @test_throws ArgumentError cone_surface((0.,0.,0.),(0.,0.,1.),1.,0.,1.;
                                                 nθ=16,nz=3,max_triangles=63)
+        @test_throws ArgumentError cone_surface(
+            UnreadableGeometryPoint(),(0.,0.,1.),1.,0.,1.;
+            nθ=16,nz=3,max_triangles=63)
         @test_throws ArgumentError box_tunnel_surface(0,4,0,4,0,2,1,3,1,NaN)
+        @test_throws ArgumentError box_tunnel_surface(true,4,0,4,0,2,1,3,1,3)
         @test_throws ArgumentError box_shell_surface(0,4,0,4,0,4,1,3,1,3,1,Inf)
+
+        fm=floatmax(Float64)
+        huge_axis=cylinder_surface((0.,0.,0.),(fm,fm,0.),1.,1.;nθ=8,nz=2)
+        @test is_meshable(huge_axis)[1]
+        @test_throws ArgumentError sphere_surface((1.0e16,0.,0.),1.;subdivisions=0)
+        @test_throws ArgumentError cylinder_surface(
+            (1.0e16,0.,0.),(0.,0.,1.),1.,1.;nθ=8,nz=2)
+        @test_throws ArgumentError cone_surface(
+            (1.0e16,0.,0.),(0.,0.,1.),1.,.5,1.;nθ=8,nz=2)
+        @test_throws ArgumentError cone_surface(
+            (0.,0.,0.),(0.,0.,1.),0.,nextfloat(0.0),1.;nθ=8,nz=3)
     end
 
     @testset "sphere_surface: projected geodesic surface and convergent volume" begin

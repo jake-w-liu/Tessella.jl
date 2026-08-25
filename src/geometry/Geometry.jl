@@ -20,7 +20,9 @@ using ..Heal: is_meshable
 export box_surface, cylinder_surface, sphere_surface, cone_surface
 export box_tunnel_surface, box_shell_surface
 
-@inline function _finite_real(x::Real, caller::AbstractString, name::AbstractString)
+@inline function _finite_real(x,caller::AbstractString,name::AbstractString)
+    x isa Real || throw(ArgumentError("$caller: $name must be real"))
+    x isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     y = try
         Float64(x)
     catch err
@@ -32,10 +34,23 @@ export box_tunnel_surface, box_shell_surface
 end
 
 @inline function _point3(p, caller::AbstractString, name::AbstractString)
-    length(p) >= 3 || throw(ArgumentError("$caller: $name needs three coordinates"))
-    return (_finite_real(p[1],caller,"$name[1]"),
-            _finite_real(p[2],caller,"$name[2]"),
-            _finite_real(p[3],caller,"$name[3]"))
+    count=try
+        length(p)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name needs three coordinates"))
+    end
+    count>=3 || throw(ArgumentError("$caller: $name needs three coordinates"))
+    values=try
+        (p[1],p[2],p[3])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: $name coordinates must support integer indexing"))
+    end
+    return (_finite_real(values[1],caller,"$name[1]"),
+            _finite_real(values[2],caller,"$name[2]"),
+            _finite_real(values[3],caller,"$name[3]"))
 end
 
 # ── box ─────────────────────────────────────────────────────────────────────────
@@ -45,7 +60,7 @@ end
 Closed surface of the axis-aligned box `[x0,x1]×[y0,y1]×[z0,z1]` (12 outward
 triangles).
 """
-function box_surface(x0::Real,x1::Real, y0::Real,y1::Real, z0::Real,z1::Real)
+function box_surface(x0,x1,y0,y1,z0,z1)
     x0=_finite_real(x0,"box_surface","x0"); x1=_finite_real(x1,"box_surface","x1")
     y0=_finite_real(y0,"box_surface","y0"); y1=_finite_real(y1,"box_surface","y1")
     z0=_finite_real(z0,"box_surface","z0"); z1=_finite_real(z1,"box_surface","z1")
@@ -59,50 +74,62 @@ end
 
 # ── cylinder (solid, watertight lateral + caps) ─────────────────────────────────
 """
-    cylinder_surface(center, axis, radius, height; nθ=24, nz=2) -> Mesh
+    cylinder_surface(center, axis, radius, height; nθ=24, nz=2,
+                     max_nodes=10_000_000,
+                     max_triangles=20_000_000) -> Mesh
 
 Closed surface of a solid cylinder: base `center`, unit-ish `axis`, `radius`,
 `height`. `nθ` circumferential sectors, `nz` axial levels. Lateral wall + two cap
-fans share the rim rings (watertight by construction).
+fans share the rim rings (watertight by construction). Resource limits are checked
+before coordinate or topology allocation.
 """
-function cylinder_surface(center, axis, radius::Real, height::Real; nθ::Integer=24, nz::Integer=2)
+function cylinder_surface(center,axis,radius,height;nθ=24,nz=2,
+                          max_nodes=10_000_000,
+                          max_triangles=20_000_000)
     R=_finite_real(radius,"cylinder_surface","radius")
     H=_finite_real(height,"cylinder_surface","height")
-    (R>0 && H>0 && nθ>=3 && nz>=2) || throw(ArgumentError("cylinder_surface: R,H>0, nθ≥3, nz≥2"))
-    nθ <= typemax(Int) && nz <= typemax(Int) ||
-        throw(ArgumentError("cylinder_surface: nθ and nz exceed the platform Int limit"))
-    ntheta=Int(nθ); nlevels=Int(nz)
-    nv = try
-        Base.checked_add(Base.checked_mul(ntheta,nlevels), 2)
+    (R>0 && H>0) || throw(ArgumentError(
+        "cylinder_surface: radius and height must be positive"))
+    ntheta=_geometry_count(nθ,"cylinder_surface","nθ",3)
+    nlevels=_geometry_count(nz,"cylinder_surface","nz",2)
+    nodes = try
+        Base.checked_add(Base.checked_mul(ntheta,nlevels),2)
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("cylinder_surface: requested node count overflows the platform Int limit"))
     end
-    nv <= typemax(Int32) ||
-        throw(ArgumentError("cylinder_surface: $nv nodes exceed the Int32 indexing limit"))
-    ntriout=try
+    triangles=try
         Base.checked_mul(Base.checked_mul(2,ntheta),nlevels)
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("cylinder_surface: requested triangle count overflows the platform Int limit"))
     end
-    ntriout<=typemax(Int32) ||
-        throw(ArgumentError("cylinder_surface: $ntriout triangles exceed the Int32 topology limit"))
+    _checked_primitive_counts(nodes,triangles,max_nodes,max_triangles,
+                              "cylinder_surface")
     c=_point3(center,"cylinder_surface","center")
-    ez=_unit(_point3(axis,"cylinder_surface","axis"))
-    ax = abs(ez[1])<=abs(ez[2]) ? (abs(ez[1])<=abs(ez[3]) ? (1.0,0.0,0.0) : (0.0,0.0,1.0)) :
-         (abs(ez[2])<=abs(ez[3]) ? (0.0,1.0,0.0) : (0.0,0.0,1.0))
-    ex=_unit(_cross(ax,ez)); ey=_cross(ez,ex)
-    on(θ,z) = (c[1]+R*cos(θ)*ex[1]+R*sin(θ)*ey[1]+z*ez[1],
-               c[2]+R*cos(θ)*ex[2]+R*sin(θ)*ey[2]+z*ez[2],
-               c[3]+R*cos(θ)*ex[3]+R*sin(θ)*ey[3]+z*ez[3])
+    ex,ey,ez=_axis_frame(axis,"cylinder_surface")
+    function on(θ,z)
+        point=_geometry_point(
+            c[1]+R*cos(θ)*ex[1]+R*sin(θ)*ey[1]+z*ez[1],
+            c[2]+R*cos(θ)*ex[2]+R*sin(θ)*ey[2]+z*ez[2],
+            c[3]+R*cos(θ)*ex[3]+R*sin(θ)*ey[3]+z*ez[3],
+            "cylinder_surface")
+        return _certify_cylindrical_point(
+            point,c,ez,R,z,"cylinder_surface")
+    end
     V=Tuple{Float64,Float64,Float64}[]
-    sizehint!(V, nv)
+    sizehint!(V,nodes)
     for j in 0:nlevels-1, i in 0:ntheta-1
         push!(V,on(2π*i/ntheta,H*(j/(nlevels-1))))
     end
-    ci=length(V)+1; push!(V, (c[1], c[2], c[3]))          # bottom centre
-    cti=length(V)+1; push!(V, (c[1]+H*ez[1], c[2]+H*ez[2], c[3]+H*ez[3]))   # top centre
+    ci=length(V)+1
+    push!(V,_certify_cylindrical_point(c,c,ez,0.0,0.0,
+                                       "cylinder_surface"))
+    cti=length(V)+1
+    top=_geometry_point(c[1]+H*ez[1],c[2]+H*ez[2],c[3]+H*ez[3],
+                        "cylinder_surface")
+    push!(V,_certify_cylindrical_point(top,c,ez,0.0,H,
+                                       "cylinder_surface"))
     idx(j,i)=(j-1)*ntheta + mod(i,ntheta) + 1
     Tr=NTuple{3,Int32}[]
     for j in 1:nlevels-1, i in 0:ntheta-1                            # wall (outward)
@@ -162,8 +189,8 @@ point out of the solid shell). Together they form a closed, manifold, 2-componen
 surface with zero open edges, ready for [`Mesh3D.tetrahedralize`](@ref) — which
 fills the shell and reports the exact volume `outer − inner`.
 """
-function box_shell_surface(ox0::Real,ox1::Real, oy0::Real,oy1::Real, oz0::Real,oz1::Real,
-                           ix0::Real,ix1::Real, iy0::Real,iy1::Real, iz0::Real,iz1::Real)
+function box_shell_surface(ox0,ox1,oy0,oy1,oz0,oz1,
+                           ix0,ix1,iy0,iy1,iz0,iz1)
     raw = (ox0,ox1,oy0,oy1,oz0,oz1,ix0,ix1,iy0,iy1,iz0,iz1)
     names = ("ox0","ox1","oy0","oy1","oz0","oz1","ix0","ix1","iy0","iy1","iz0","iz1")
     vals = ntuple(i -> _finite_real(raw[i],"box_shell_surface",names[i]), 12)
@@ -183,13 +210,20 @@ end
 
 @inline _cross(a,b) = (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
 @inline function _unit(a)
-    l=hypot(a[1],a[2],a[3])
-    (isfinite(l) && l > 0) || throw(ArgumentError("Geometry: axis must have finite positive length"))
-    (a[1]/l,a[2]/l,a[3]/l)
+    scale=max(abs(a[1]),abs(a[2]),abs(a[3]))
+    (isfinite(scale) && scale>0) || throw(ArgumentError(
+        "Geometry: axis must have finite positive length"))
+    scaled=(a[1]/scale,a[2]/scale,a[3]/scale)
+    magnitude=hypot(scaled[1],scaled[2],scaled[3])
+    (isfinite(magnitude) && magnitude>0) || throw(ArgumentError(
+        "Geometry: axis must have finite positive length"))
+    return (scaled[1]/magnitude,scaled[2]/magnitude,scaled[3]/magnitude)
 end
 
-@inline function _geometry_count(value::Integer,caller::AbstractString,
+@inline function _geometry_count(value,caller::AbstractString,
                                  name::AbstractString,minimum::Int)
+    value isa Integer || throw(ArgumentError(
+        "$caller: $name must be an integer"))
     value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     converted=try
         Int(value)
@@ -202,12 +236,12 @@ end
     return converted
 end
 
-@inline function _geometry_limit(value::Integer,caller::AbstractString,
+@inline function _geometry_limit(value,caller::AbstractString,
                                  name::AbstractString)
     return _geometry_count(value,caller,name,1)
 end
 
-@inline function _geometry_nonnegative(value::Real,caller::AbstractString,
+@inline function _geometry_nonnegative(value,caller::AbstractString,
                                        name::AbstractString)
     result=_finite_real(value,caller,name)
     result>=0 || throw(ArgumentError(
@@ -222,6 +256,50 @@ end
     return (x,y,z)
 end
 
+function _certify_cylindrical_point(point::NTuple{3,Float64},
+                                    origin::NTuple{3,Float64},
+                                    axis::NTuple{3,Float64},
+                                    expected_radius::Float64,
+                                    expected_axial::Float64,
+                                    caller::AbstractString)
+    displacement=(point[1]-origin[1],point[2]-origin[2],
+                  point[3]-origin[3])
+    all(isfinite,displacement) || throw(ArgumentError(
+        "$caller: generated displacement is not Float64-representable"))
+    axis_norm_squared=sum(component*component for component in axis)
+    axial=sum(displacement[index]*axis[index] for index in 1:3)/
+          axis_norm_squared
+    radial=ntuple(index->displacement[index]-axial*axis[index],3)
+    radial_distance=hypot(radial...)
+    axial_scale=max(abs(expected_axial),expected_radius,nextfloat(0.0))
+    radial_scale=expected_radius>0 ? expected_radius : axial_scale
+    (isfinite(axial) &&
+     abs(axial-expected_axial)<=256eps(Float64)*axial_scale) ||
+        throw(ArgumentError(
+            "$caller: requested axial position is not representable to round-off"))
+    (isfinite(radial_distance) &&
+     (expected_radius==0 || radial_distance>0) &&
+     abs(radial_distance-expected_radius)<=256eps(Float64)*radial_scale) ||
+        throw(ArgumentError(
+            "$caller: requested radial position is not representable to round-off"))
+    return point
+end
+
+function _certify_sphere_point(point::NTuple{3,Float64},
+                               center::NTuple{3,Float64},radius::Float64)
+    displacement=(point[1]-center[1],point[2]-center[2],
+                  point[3]-center[3])
+    all(isfinite,displacement) || throw(ArgumentError(
+        "sphere_surface: generated displacement is not Float64-representable"))
+    represented_radius=hypot(displacement...)
+    (isfinite(represented_radius) && represented_radius>0 &&
+     abs(represented_radius-radius)<=256eps(Float64)*radius) ||
+        throw(ArgumentError(
+            "sphere_surface: requested radius is not representable to round-off " *
+            "at the supplied center"))
+    return point
+end
+
 @inline function _axis_frame(axis,caller::AbstractString)
     ez=_unit(_point3(axis,caller,"axis"))
     reference = abs(ez[1])<=abs(ez[2]) ?
@@ -232,8 +310,8 @@ end
     return ex,ey,ez
 end
 
-function _checked_primitive_counts(nodes::Int,triangles::Int,max_nodes::Integer,
-                                   max_triangles::Integer,caller::AbstractString)
+function _checked_primitive_counts(nodes::Int,triangles::Int,max_nodes,
+                                   max_triangles,caller::AbstractString)
     node_limit=_geometry_limit(max_nodes,caller,"max_nodes")
     triangle_limit=_geometry_limit(max_triangles,caller,"max_triangles")
     nodes<=typemax(Int32) || throw(ArgumentError(
@@ -263,6 +341,7 @@ function _sphere_midpoint!(vertices::Vector{NTuple{3,Float64}},
         scale=radius/midpoint_norm
         point=_geometry_point(center[1]+scale*dx,center[2]+scale*dy,
                               center[3]+scale*dz,"sphere_surface")
+        _certify_sphere_point(point,center,radius)
         length(vertices)<typemax(Int32) || throw(ArgumentError(
             "sphere_surface: node count exceeds the Int32 indexing limit"))
         push!(vertices,point)
@@ -279,10 +358,9 @@ projected to the analytical sphere and every subdivision splits one triangle int
 projecting shared edge midpoints back to the sphere. `subdivisions=0` returns the
 octahedron. Resource limits are checked before allocation.
 """
-function sphere_surface(center,radius::Real;subdivisions::Integer=2,
-                        max_nodes::Integer=10_000_000,
-                        max_triangles::Integer=20_000_000)
-    c=_point3(center,"sphere_surface","center")
+function sphere_surface(center,radius;subdivisions=2,
+                        max_nodes=10_000_000,
+                        max_triangles=20_000_000)
     r=_finite_real(radius,"sphere_surface","radius")
     r>0 || throw(ArgumentError("sphere_surface: radius must be positive"))
     levels=_geometry_count(subdivisions,"sphere_surface","subdivisions",0)
@@ -304,6 +382,7 @@ function sphere_surface(center,radius::Real;subdivisions::Integer=2,
     nodes=Base.checked_add(power,2);triangles=Base.checked_mul(2,power)
     _checked_primitive_counts(nodes,triangles,max_nodes,max_triangles,
                               "sphere_surface")
+    c=_point3(center,"sphere_surface","center")
 
     vertices=NTuple{3,Float64}[
         _geometry_point(c[1]+r,c[2],c[3],"sphere_surface"),
@@ -313,6 +392,7 @@ function sphere_surface(center,radius::Real;subdivisions::Integer=2,
         _geometry_point(c[1],c[2],c[3]+r,"sphere_surface"),
         _geometry_point(c[1],c[2],c[3]-r,"sphere_surface"),
     ]
+    foreach(point->_certify_sphere_point(point,c,r),vertices)
     faces=NTuple{3,Int32}[(1,3,5),(1,6,3),(1,5,4),(1,4,6),
                            (2,5,3),(2,3,6),(2,4,5),(2,6,4)]
     sizehint!(vertices,nodes)
@@ -351,11 +431,10 @@ Closed outward-oriented polygonal cone or conical frustum. `radius1` and `radius
 are the endpoint radii; either (but not both) can be zero. `nz` is the number of
 axial levels, including both endpoints.
 """
-function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
-                      nθ::Integer=24,nz::Integer=2,
-                      max_nodes::Integer=10_000_000,
-                      max_triangles::Integer=20_000_000)
-    c=_point3(base,"cone_surface","base")
+function cone_surface(base,axis,radius1,radius2,height;
+                      nθ=24,nz=2,
+                      max_nodes=10_000_000,
+                      max_triangles=20_000_000)
     r1=_geometry_nonnegative(radius1,"cone_surface","radius1")
     r2=_geometry_nonnegative(radius2,"cone_surface","radius2")
     (r1>0 || r2>0) || throw(ArgumentError(
@@ -379,6 +458,7 @@ function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
         throw(ArgumentError("cone_surface: requested triangle count overflows Int"))
     end
     _checked_primitive_counts(nodes,triangles,max_nodes,max_triangles,"cone_surface")
+    c=_point3(base,"cone_surface","base")
     ex,ey,ez=_axis_frame(axis,"cone_surface")
 
     coordinates=Matrix{Float64}(undef,3,nodes)
@@ -387,12 +467,19 @@ function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
     cursor=1
     @inbounds for level in 1:levels
         fraction=(level-1)/(levels-1)
-        radius=(1-fraction)*r1+fraction*r2
+        radius=level==1 ? r1 : level==levels ? r2 :
+            (1-fraction)*r1+fraction*r2
+        radius>0 || (r1==0 && level==1) || (r2==0 && level==levels) ||
+            throw(ArgumentError(
+                "cone_surface: a positive interpolated radius is not " *
+                "Float64-representable"))
         axial=fraction*h
         level_starts[level]=cursor
         if radius==0
             point=_geometry_point(c[1]+axial*ez[1],c[2]+axial*ez[2],
                                   c[3]+axial*ez[3],"cone_surface")
+            _certify_cylindrical_point(
+                point,c,ez,0.0,axial,"cone_surface")
             coordinates[1,cursor]=point[1];coordinates[2,cursor]=point[2]
             coordinates[3,cursor]=point[3]
             level_is_apex[level]=true;cursor+=1
@@ -406,6 +493,8 @@ function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
                                       c[2]+axial*ez[2]+radius*radial_y,
                                       c[3]+axial*ez[3]+radius*radial_z,
                                       "cone_surface")
+                _certify_cylindrical_point(
+                    point,c,ez,radius,axial,"cone_surface")
                 coordinates[1,cursor]=point[1];coordinates[2,cursor]=point[2]
                 coordinates[3,cursor]=point[3];cursor+=1
             end
@@ -414,6 +503,7 @@ function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
     bottom_center=0;top_center=0
     if r1>0
         bottom_center=cursor
+        _certify_cylindrical_point(c,c,ez,0.0,0.0,"cone_surface")
         coordinates[1,cursor]=c[1];coordinates[2,cursor]=c[2]
         coordinates[3,cursor]=c[3];cursor+=1
     end
@@ -421,6 +511,7 @@ function cone_surface(base,axis,radius1::Real,radius2::Real,height::Real;
         top_center=cursor
         point=_geometry_point(c[1]+h*ez[1],c[2]+h*ez[2],c[3]+h*ez[3],
                               "cone_surface")
+        _certify_cylindrical_point(point,c,ez,0.0,h,"cone_surface")
         coordinates[1,cursor]=point[1];coordinates[2,cursor]=point[2]
         coordinates[3,cursor]=point[3];cursor+=1
     end
@@ -476,9 +567,28 @@ end
 
 function _checked_surface(m::Mesh,caller::AbstractString)
     d=validate(m)
-    d.ok || throw(ErrorException("$caller: constructed surface is invalid — "*join(d.messages,"; ")))
+    if !d.ok
+        numerical=all(message->
+            occursin("non-finite computed area",message) ||
+            occursin("degenerate (zero-area) triangles",message),d.messages)
+        numerical && throw(ArgumentError(
+            "$caller: input geometry is not representable as a valid " *
+            "Float64 surface — "*join(d.messages,"; ")))
+        throw(ErrorException(
+            "$caller: constructed surface is invalid — "*join(d.messages,"; ")))
+    end
     ok,report=is_meshable(m)
-    ok || throw(ErrorException("$caller: constructed surface is not meshable — "*join(report.messages,"; ")))
+    if !ok
+        numerical=report.closed && report.manifold && report.oriented &&
+            report.n_duplicate_tris==0 &&
+            (report.n_degenerate_tris>0 || report.n_coincident_pairs>0)
+        numerical && throw(ArgumentError(
+            "$caller: input geometry is not representable as a meshable " *
+            "Float64 surface — "*join(report.messages,"; ")))
+        throw(ErrorException(
+            "$caller: constructed surface is not meshable — "*
+            join(report.messages,"; ")))
+    end
     return m
 end
 

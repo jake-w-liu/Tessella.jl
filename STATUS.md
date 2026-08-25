@@ -94,6 +94,59 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening analytical CAD,
+constructive primitive surfaces, and healing diagnostics:
+
+- **VERIFIED (independent projection oracles):** projecting
+  `(floatmax(Float64),floatmax(Float64),0)` onto the unit sphere, z-cylinder,
+  and z-disk now returns the diagonal point
+  `(0.7071067811865475,0.7071067811865475,0)`, rather than a collapsed center
+  or arbitrary radial. A z-cylinder query `(1,0,1e308)` at radius `0.7`
+  formerly returned `(0,0.7,1e308)`; exact-dyadic ambiguity recovery now
+  returns the nearest `(0.7,0,1e308)`. Opposite `±floatmax` endpoints whose
+  direct difference overflows now retain finite plane, disk, sphere, cylinder,
+  and circle-imprint projections. Fast finite projections remain
+  allocation-free; four separately specialized 100,000-call measurements
+  allocated zero bytes.
+- CAD vector normalization is exponent-scaled. Projection uses compensated
+  arithmetic with an exact `Rational{BigInt}` fallback and a 2,304-bit final
+  rounding path, then certifies the represented target surface. Imprints use
+  exact parallel/orthogonality decisions, certify both surfaces, and enforce a
+  caller-visible point ceiling before allocation. A 3,000-case seeded,
+  exponent-varied audit returned 1,149 certified projections and 1,851 precise
+  representability blockers, with no unexpected exception and worst
+  independent 512-bit residual ratio `1.4916992607748145e-13`. A separate
+  5,000-case 1,024-bit nearest-point oracle returned 3,136 projections and
+  1,864 blockers with no mismatch; its worst relative coordinate error was
+  `2.387918906429682e-14`.
+- Primitive builders now reject inappropriate `Bool` and nonnumeric values,
+  normalize finite axes whose ordinary norm overflows, preflight cylinder,
+  sphere, and cone resource counts before reading point storage, and reject
+  radii/levels that collapse at a remote origin or underflow during cone
+  interpolation. Existing sphere and cone connectivity CRCs remain
+  `2c7bf12222ab5796df858b3ef015349be3fc8acecff5d445963f41215377bd54`
+  and `8afc4d9f3bf9740313d9ce099302acb32335a9de392d8940d60cdb42b9465115`.
+  A seeded 1,000-case exponent audit returned 825 valid meshable surfaces and
+  175 explicit blockers with no unexpected exception; a separate 5,000-case
+  malformed audit produced 5,000 `ArgumentError`s.
+- **VERIFIED (healing complexity regression):** 5,000 isolated points sharing
+  one x-coordinate at `tol=1e-320` took 3.554217458 seconds in the former
+  x-only fallback. The exact BigInt spatial grid returns the same zero-pair
+  result in 0.243028958 seconds and exactly preserves strict subnormal
+  distance comparisons. Mutable connectivity and tag structure is checked
+  before indexing, non-finite coordinates remain diagnosable, and a mesh that
+  already contains tetrahedra cannot pass the surface meshability gate.
+- The focused Heal/Geometry/CAD suites passed 45/45, 88/88, and 8,205/8,205
+  assertions under both Julia 1.12.7 and Julia 1.11.9. Related MeshTypes,
+  NURBS, BRep, model, and HighOrder suites passed 2,843 assertions. The
+  bounds-checked package gate passed 164,449/164,449 assertions in 14m29.0s;
+  aggregate bounds-checked validation exited 0 against Gmsh 4.15.2. Recursive
+  ambiguity detection and the public documentation scan both returned zero.
+- The Julia-file organization policy remains satisfied: the only top-level
+  Julia files under `src`, `test`, and `validation` are `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl`; every implementation and
+  supporting Julia file remains in a categorized subfolder.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening and organizing the
 top-level planar, extrusion, sizing, and volume-meshing pipelines:
 
