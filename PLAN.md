@@ -52,7 +52,8 @@ Tessella
 │   ├── Mesh2D      owned/validated Delaunay, CDT, and refinement topology
 │   ├── MeshSurface validated planar, cylinder, and regular parametric meshing
 │   ├── ExactMesh3D/RecoverCDT exact Delaunay and conforming recovery
-│   ├── Recombine/Refine/Optimize/HighOrder mesh transformation kernels
+│   ├── Recombine/Refine/HighOrder mesh transformation kernels
+│   ├── Optimize validated, deterministic, scale-robust tet quality and smoothing
 │   └── BoundaryLayer/Periodic boundary-layer and periodic constraints
 ├── structured/
 │   ├── Transfinite/TransfiniteTriangle/TransfiniteQuad planar structured patches

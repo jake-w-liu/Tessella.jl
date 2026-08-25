@@ -23,7 +23,7 @@ _nfo(r::_RO) = (r.s ⊻= r.s<<13; r.s ⊻= r.s>>7; r.s ⊻= r.s<<17; (r.s>>11)/F
 _dist(p, q) = sqrt((p[1]-q[1])^2 + (p[2]-q[2])^2 + (p[3]-q[3])^2)
 
 # INDEPENDENT circumcenter (Cramer linear solve of |x−vᵢ|² equal), distinct from the
-# production _tet_circumcenter — the oracle for the ODT node update.
+# production scale-normalized `_odt_candidate` solve — the oracle for the ODT update.
 function cramer_circumcenter(a,b,c,d)
     v1=collect(Float64,a); v2=collect(Float64,b); v3=collect(Float64,c); v4=collect(Float64,d)
     A=[ (v2.-v1)'; (v3.-v1)'; (v4.-v1)' ].*2
@@ -42,18 +42,41 @@ end
                  seg_tag=Int32[7], tri_tag=Int32[8], tet_tag=Int32[9])
         @test_throws ArgumentError mesh_quality(m; sliver_deg=NaN)
         @test_throws ArgumentError mesh_quality(m; sliver_deg=-1)
+        @test_throws ArgumentError mesh_quality(m; sliver_deg=true)
         @test_throws ArgumentError smooth_laplacian(m; iters=-1)
+        @test_throws ArgumentError smooth_laplacian(m; iters=true)
         @test_throws ArgumentError smooth_laplacian(m; relax=NaN)
         @test_throws ArgumentError smooth_laplacian(m; relax=1.1)
+        @test_throws ArgumentError smooth_laplacian(m; relax=true)
         @test_throws ArgumentError smooth_odt(m; iters=-1)
+        @test_throws ArgumentError smooth_odt(m; iters=true)
         @test_throws ArgumentError smooth_optimize(m; iters=-1)
+        @test_throws ArgumentError smooth_optimize(m; iters=true)
         @test_throws ArgumentError smooth_optimize(m; sliver_deg=Inf)
+        @test_throws ArgumentError smooth_optimize(m; sliver_deg=true)
         @test_throws ArgumentError remove_slivers(m; max_rounds=-1)
+        @test_throws ArgumentError remove_slivers(m; max_rounds=true)
+        @test_throws ArgumentError remove_slivers(m; sliver_deg=true)
         @test_throws ArgumentError smooth_laplacian(m; iters=big(typemax(Int))+1)
         @test_throws ArgumentError smooth_odt(m; iters=big(typemax(Int))+1)
         @test_throws ArgumentError smooth_optimize(m; iters=big(typemax(Int))+1)
         @test_throws ArgumentError remove_slivers(m; max_rounds=big(typemax(Int))+1)
         @test Tessella.Optimize._convex_combine(-floatmax(Float64),floatmax(Float64),0.5) == 0.0
+        near_cancel=Tessella.Optimize._convex_combine(
+            nextfloat(-1e308),1e308,0.5)
+        cancel_reference=setprecision(BigFloat,256) do
+            Float64((BigFloat(nextfloat(-1e308))+BigFloat(1e308))/2)
+        end
+        @test near_cancel==cancel_reference
+        @test TetQuality(1,10,20,30,1,2,0.1,0).n_tets==1
+        @test_throws ArgumentError TetQuality(true,0,0,0,0,0,0,0)
+        @test_throws ArgumentError TetQuality(1,true,20,30,1,2,0.1,0)
+        @test_throws ArgumentError TetQuality(1,10,20,30,1,2,NaN,0)
+        @test_throws ArgumentError TetQuality(big(typemax(Int))+1,10,20,30,1,2,0.1,0)
+        @test_throws ArgumentError TetQuality(0,0,0,0,0,0,1,0)
+        @test_throws ArgumentError TetQuality(1,30,20,40,1,2,0.1,0)
+        @test_throws ArgumentError TetQuality(1,10,20,30,2,1,0.1,0)
+        @test_throws ArgumentError TetQuality(1,10,20,30,1,2,0.1,2)
         for smoothed in (smooth_laplacian(m; iters=0), smooth_odt(m; iters=0),
                          smooth_optimize(m; iters=0))
             @test smoothed.segs == m.segs && smoothed.seg_tag == m.seg_tag
@@ -71,6 +94,11 @@ end
         invalid_notets=Mesh(Float64[0 0;0 0;0 0];segs=reshape(Int32[1,2],2,1))
         @test_throws ArgumentError mesh_quality(invalid_notets)
         @test_throws ArgumentError smooth_odt(invalid_notets)
+        detached,report=remove_slivers(m;max_rounds=0)
+        @test detached!==m
+        @test all(getfield(detached,field)!==getfield(m,field) for field in
+                  (:coords,:segs,:tris,:tets,:seg_tag,:tri_tag,:tet_tag))
+        @test report.slivers_before==report.slivers_after
     end
 
     @testset "mesh_quality on a single unit tet" begin
@@ -152,6 +180,14 @@ end
         @test _dist(odt_target, cen) > 1e-10              # ODT target ≠ centroid target
         @test _dist(got, cen) > 1e3 * _dist(got, odt_target)  # got is orders closer to ODT than to centroid
         @test validate(ms).ok
+        @test mesh_crc(ms).sha==
+            "31a280b6a063b428a11772b752ca1d9a64f70a8d4728029c23064a78e977ee00"
+        for scale in (1e-100,1e100)
+            scaled=Mesh(m.coords.*scale;tets=m.tets)
+            scaled_result=smooth_odt(scaled;iters=1)
+            scaled_target=ntuple(d->scaled_result.coords[d,v]/scale,3)
+            @test collect(scaled_target)≈collect(got) atol=1e-12 rtol=1e-12
+        end
     end
 
     @testset "ODT preserves volume + validity, lifts mean dihedral (slivery cloud)" begin
@@ -216,5 +252,13 @@ end
         m = tetrahedralize(Mesh(C; tris=ct))
         mo = smooth_optimize(m; iters=5)
         @test mo.coords == m.coords                       # every node on the boundary ⇒ nothing moves
+    end
+
+    @testset "public documentation and deterministic CRC" begin
+        C=Float64[0 1 0 0;0 0 1 0;0 0 0 1]
+        m=Mesh(C;tets=reshape(Int32[1,2,3,4],4,1),tet_tag=Int32[7])
+        @test mesh_crc(smooth_odt(m;iters=0)).sha==mesh_crc(m).sha
+        @test isempty(Base.Docs.undocumented_names(Tessella.Optimize;private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.Optimize;recursive=true))
     end
 end
