@@ -8,6 +8,7 @@
 # Completeness : lifted meshes validate(); size field honored.
 
 using Test
+import Tessella
 using Tessella.MeshSurface
 using Tessella.MeshTypes
 using Tessella.SizeField
@@ -32,19 +33,81 @@ end
 
     @testset "surface input contracts" begin
         sf = ConstantSize(1.0)
+        @test_throws ArgumentError PlaneFrame(
+            (0.0,0.0,0.0),(2.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0))
+        @test_throws ArgumentError PlaneFrame(
+            (0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,-1.0))
+        frame=PlaneFrame((0,0,0),(1,0,0),(0,1,0),(0,0,1))
+        @test project(frame,lift(frame,2.5,-3.0))==(2.5,-3.0)
+        @test_throws ArgumentError project(frame,(Inf,0.0,0.0))
+        @test_throws ArgumentError project(frame,(0.0,0.0,0.0,0.0))
+        @test_throws ArgumentError lift(frame,true,0.0)
+        @test_throws ArgumentError lift(frame,Inf,0.0)
+        r=inv(sqrt(2.0))
+        rotated=PlaneFrame((0.0,0.0,0.0),(r,r,0.0),(-r,r,0.0),(0.0,0.0,1.0))
+        cancellation_point=(nextfloat(1e308),-1e308,0.0)
+        projected=project(rotated,cancellation_point)
+        reference=setprecision(BigFloat,256) do
+            Float64((BigFloat(cancellation_point[1])+BigFloat(cancellation_point[2]))*
+                    BigFloat(r))
+        end
+        @test projected[1]==reference
         @test_throws ArgumentError plane_frame([(0.0,0.0,0.0),(1.0,0.0,0.0),(NaN,1.0,0.0)])
+        @test_throws ArgumentError plane_frame([(0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,0.0,0.0)])
+        @test_throws ArgumentError plane_frame([(0.0,0.0,0.0),(1.0,0.0,0.0),(true,1.0,0.0)])
         @test_throws ArgumentError mesh_planar_face(
             [[(0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,1.0,1.0),(0.0,1.0,0.0)]], sf)
+        @test_throws ArgumentError mesh_planar_face(
+            [[(0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,0.0,0.0)]],sf)
+        @test_throws ArgumentError mesh_planar_face(
+            [[(0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0)]],sf;
+            min_angle_deg=true)
+        @test_throws ArgumentError mesh_planar_face(
+            [[(0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0)]],sf;
+            entity=(big(typemax(Int))+1,1))
         @test_throws ArgumentError mesh_cylinder_face(
             (0.0,0.0,0.0),(0.0,0.0,1.0),1.0,Inf,sf)
         @test_throws ArgumentError mesh_cylinder_face(
             (0.0,0.0,0.0),(0.0,0.0,0.0),1.0,1.0,sf)
+        @test_throws ArgumentError mesh_cylinder_face(
+            (0.0,0.0,0.0),(0.0,0.0,1.0),true,1.0,sf)
+        @test_throws ArgumentError mesh_cylinder_face(
+            (floatmax(Float64),0.0,0.0),(0.0,0.0,1.0),floatmax(Float64),1.0,sf)
         @test_throws ArgumentError mesh_parametric_face(
             (u,v)->(u,v,0.0),1.0,0.0,0.0,1.0,sf)
+        @test_throws ArgumentError mesh_parametric_face(
+            (u,v)->(u,v,0.0),false,1.0,0.0,1.0,sf)
+        @test_throws ArgumentError mesh_parametric_face(
+            7,0.0,1.0,0.0,1.0,sf)
         @test_throws ArgumentError mesh_parametric_face(
             (u,v)->(NaN,v,0.0),0.0,1.0,0.0,1.0,sf)
         @test_throws ArgumentError mesh_parametric_face(
             (u,v)->(u,0.0,0.0),0.0,1.0,0.0,1.0,sf)
+        @test_throws ErrorException mesh_parametric_face(
+            (u,v)->(u,(2v-1)^2,0.0),0.0,1.0,0.0,1.0,ConstantSize(0.4))
+        @test_throws ArgumentError mesh_parametric_face(
+            (u,v)->(u,v,0.0),0.0,1.0,0.0,1.0,sf;max_area=true)
+        @test_throws ArgumentError mesh_parametric_face(
+            (u,v)->(u,v,0.0),0.0,1.0,0.0,1.0,sf;min_angle_deg=true)
+
+        # Scale-relative coplanarity must not carry a unit-scale absolute floor.
+        delta=1e-15
+        outer=[(0.0,0.0,0.0),(delta,0.0,0.0),(delta,delta,0.0),(0.0,delta,0.0)]
+        off_plane=[(0.2delta,0.2delta,0.2delta),(0.4delta,0.2delta,0.2delta),
+                   (0.4delta,0.4delta,0.2delta),(0.2delta,0.4delta,0.2delta)]
+        @test_throws ArgumentError mesh_planar_face([outer,off_plane],ConstantSize(delta))
+
+        # Normalized Newell evaluation covers subnormal scales; exact fallback
+        # covers a representable plane whose large products round to equality.
+        tiny=1e-300
+        tiny_frame=plane_frame([(0.0,0.0,0.0),(tiny,0.0,0.0),
+                                (tiny,tiny,0.0),(0.0,tiny,0.0)])
+        @test project(tiny_frame,(tiny,tiny,0.0))==(-tiny,tiny)
+        extent=Float64(Int64(1)<<27)
+        u=(0.0,extent,extent+1.0);v=(0.0,extent+1.0,extent+2.0)
+        opposite=ntuple(d->u[d]+v[d],3)
+        cancellation_frame=plane_frame([(0.0,0.0,0.0),u,opposite,v])
+        @test abs(cancellation_frame.n[1])==1.0
     end
 
     @testset "tilted planar rectangle: exact area + quality" begin
@@ -102,6 +165,18 @@ end
         m=mesh_parametric_face(s, 0.0, 4.0, 0.0, 3.0, ConstantSize(0.5); min_angle_deg=25.0)
         @test surf_area(m) ≈ 12.0 atol=1e-8        # 4×3, isometric
         @test validate(m).ok
+
+        # `max_area` is a physical-space contract, independent of parameter scale.
+        for scale in (1e-150,4.0,1e150)
+            area=scale^2/16
+            scaled=mesh_parametric_face((u,v)->(scale*u,scale*v,0.0),
+                0.0,1.0,0.0,1.0,ConstantSize(scale/2);
+                min_angle_deg=0.0,max_area=area)
+            @test maximum(triangle_area(node(scaled,scaled.tris[1,t]),
+                                        node(scaled,scaled.tris[2,t]),
+                                        node(scaled,scaled.tris[3,t]))
+                          for t in 1:ntris(scaled))<=area*(1+4096eps(Float64))
+        end
     end
 
     @testset "parametric curved patch: valid + area convergence" begin
@@ -119,5 +194,15 @@ end
         @test surf_area(mc) < analytic + 1e-6      # chordal ≤ analytic (convex-ish)
         @test abs(surf_area(mf)-analytic) < abs(surf_area(mc)-analytic)  # converges
         @test surf_area(mf) ≈ analytic rtol=0.01
+    end
+
+    @testset "public documentation and deterministic CRC" begin
+        square=mesh_planar_face([[(0.0,0.0,0.0),(1.0,0.0,0.0),
+                                  (1.0,1.0,0.0),(0.0,1.0,0.0)]],
+                                ConstantSize(2.0);min_angle_deg=0.0)
+        @test mesh_crc(square).sha==
+            "a0cfb73fe65d6814802e2df6d534a985c0bbb8d7e69a35eb860029f9d14a48ee"
+        @test isempty(Base.Docs.undocumented_names(Tessella.MeshSurface;private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.MeshSurface;recursive=true))
     end
 end
