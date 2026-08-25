@@ -94,6 +94,33 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening Gmsh-style curve
+integration and grading:
+
+- `curve_length`, `metric_length`, `mesh_curve`, and `mesh_segment` now reject
+  Boolean coordinates and numeric controls, normalize entity contexts, bound
+  integration and edge allocations, and validate every static control before
+  invoking a caller-supplied curve.
+- Uniform/adaptive parameter interpolation, primitive inversion, close-point
+  sampling, and straight-segment coordinates use overflow- and cancellation-safe
+  convex combinations. Straight segments preserve both supplied endpoints even
+  when their magnitudes differ by hundreds of orders, and closed-curve tolerance
+  is relative to sampled curve extent instead of a unit-scale floor.
+- A 99,906-case finite interpolation audit had maximum error
+  `3.769410006981428e-16` relative to the larger weighted term against a 256-bit
+  oracle. Segment grading from scales `1e-300` through `1e300` differed after
+  normalization by at most `8.881784197001252e-16`; closed-circle parameters at
+  scales `1e-200`, `1`, and `1e200` differed by at most
+  `2.220446049250313e-16`.
+- The focused `Mesh1D` suite passed 104/104 assertions under Julia 1.12.7 and
+  Julia 1.11.9. Its fixed graded-chain SHA-256 is
+  `c88590e849684b244044860b05a509139b97e422d6a2d65074b19fd73b3f9048`.
+- The bounds-checked package gate passed 164,031/164,031 assertions in 12m06.5s,
+  and the aggregate bounds-checked validation exited 0 in 10m28.2s against Gmsh
+  4.15.2, including all five mesh-observed size-field cases. The public `Mesh1D`
+  documentation scan returned no missing names; recursive ambiguity detection
+  returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening tetrahedral quality
 reporting and mesh optimization:
 

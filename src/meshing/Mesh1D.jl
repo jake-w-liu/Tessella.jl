@@ -35,8 +35,16 @@ const _DEFAULT_MAX_EDGES = 10_000_000
         throw(ArgumentError("$caller: a point must be an indexable coordinate collection"))
     end
     n >= 2 || throw(ArgumentError("$caller: a point needs at least two coordinates"))
+    raw = try
+        (p[1], p[2], n >= 3 ? p[3] : 0.0)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: coordinates must be indexable: $(sprint(showerror, err))"))
+    end
+    any(value -> value isa Bool, raw) && throw(ArgumentError(
+        "$caller: coordinates must not be Bool"))
     q = try
-        (Float64(p[1]), Float64(p[2]), n >= 3 ? Float64(p[3]) : 0.0)
+        (Float64(raw[1]), Float64(raw[2]), Float64(raw[3]))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: coordinates must be real and Float64-convertible: $(sprint(showerror, err))"))
@@ -50,6 +58,8 @@ end
 
 function _optional_positive_int(value, caller::AbstractString, name::AbstractString)
     value === nothing && return nothing
+    value isa Bool && throw(ArgumentError(
+        "$caller: $name must not be Bool"))
     value isa Integer || throw(ArgumentError(
         "$caller: $name must be nothing or a positive integer"))
     value > 0 || throw(ArgumentError("$caller: $name must be positive (got $value)"))
@@ -65,6 +75,7 @@ function _positive_int(value, caller::AbstractString, name::AbstractString)
 end
 
 function _finite_positive(value::Real, caller::AbstractString, name::AbstractString)
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
     result = try
         Float64(value)
     catch err
@@ -77,6 +88,8 @@ function _finite_positive(value::Real, caller::AbstractString, name::AbstractStr
 end
 
 function _curve_args(t0::Real, t1::Real, nsample, caller::AbstractString)
+    (t0 isa Bool || t1 isa Bool) && throw(ArgumentError(
+        "$caller: t0 and t1 must not be Bool"))
     a = try
         Float64(t0)
     catch err
@@ -122,6 +135,8 @@ function _endpoint_vertex_entity(value, caller::AbstractString, which::AbstractS
     (value isa Tuple && length(value) == 2 &&
      value[1] isa Integer && value[2] isa Integer) || throw(ArgumentError(
         "$caller: $which endpoint entity must be nothing or a (0, tag) integer tuple"))
+    (value[1] isa Bool || value[2] isa Bool) && throw(ArgumentError(
+        "$caller: $which endpoint entity values must not be Bool"))
     dim = try
         Int(value[1])
     catch err
@@ -143,6 +158,32 @@ function _endpoint_vertex_entity(value, caller::AbstractString, which::AbstractS
     return (dim, tag)
 end
 
+function _curve_entity(value, caller::AbstractString)
+    value === nothing && return nothing
+    (value isa Tuple && length(value) == 2 &&
+     value[1] isa Integer && value[2] isa Integer) || throw(ArgumentError(
+        "$caller: entity must be nothing or a (dimension, tag) integer tuple"))
+    (value[1] isa Bool || value[2] isa Bool) && throw(ArgumentError(
+        "$caller: entity values must not be Bool"))
+    dimension = try
+        Int(value[1])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: entity dimension is outside the platform Int range"))
+    end
+    tag = try
+        Int(value[2])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: entity tag is outside the platform Int range"))
+    end
+    dimension in 0:3 || throw(ArgumentError(
+        "$caller: entity dimension must be in 0:3 (got $dimension)"))
+    tag > 0 || throw(ArgumentError(
+        "$caller: entity tag must be positive (got $tag)"))
+    return (dimension, tag)
+end
+
 function _endpoint_vertex_entities(value, caller::AbstractString)
     value === nothing && return (nothing, nothing)
     (value isa Tuple && length(value) == 2) || throw(ArgumentError(
@@ -155,6 +196,32 @@ end
     d = _dist3(a, b)
     isfinite(d) || throw(ArgumentError("$caller: sampled segment length is not finite"))
     return d
+end
+
+# Finite convex combinations can overflow in `x + t*(y-x)`, while
+# `(1-t)*x + t*y` can lose the endpoint or a near-cancelling result. The fallback
+# evaluates the exact Float64 inputs at high precision before the final Float64
+# conversion.
+@inline function _convex_coordinate(x::Float64, y::Float64, t::Float64)
+    t == 0.0 && return x
+    t == 1.0 && return y
+    first = (1.0 - t) * x
+    second = t * y
+    value = first + second
+    permanent = abs(first) + abs(second)
+    if isfinite(value) && isfinite(permanent) &&
+       (permanent == 0 || abs(value) > 32eps(Float64) * permanent)
+        return value
+    end
+    return setprecision(BigFloat, 128) do
+        Float64((1 - BigFloat(t)) * BigFloat(x) + BigFloat(t) * BigFloat(y))
+    end
+end
+
+@inline function _parameter_at(t0::Float64, t1::Float64, index::Int, count::Int)
+    index == 0 && return t0
+    index == count && return t1
+    return _convex_coordinate(t0, t1, index / count)
 end
 
 @inline function _half_product(a::Float64, b::Float64, caller::AbstractString)
@@ -314,7 +381,7 @@ function _recursive_integration!(points::Vector{_IntegrationPoint}, from,
                                  to, evaluate, precision::Float64,
                                  mindepth::Int, maxdepth::Int, maxpoints::Int,
                                  depth::Int, caller::AbstractString)
-    midpoint_t = from.t / 2 + to.t / 2
+    midpoint_t = _convex_coordinate(from.t, to.t, 0.5)
     (from.t < midpoint_t < to.t) || throw(ArgumentError(
         "$caller: adaptive integration cannot refine the Float64 parameter interval further"))
     midpoint = evaluate(midpoint_t, false, false)
@@ -370,7 +437,7 @@ function _uniform_points(evaluate, t0::Float64, t1::Float64, nsample::Int,
     points = Vector{_IntegrationPoint}(undef, nsample + 1)
     points[1] = evaluate(t0, true, false)
     @inbounds for i in 1:nsample
-        t = t0 + (t1 - t0) * i / nsample
+        t = _parameter_at(t0, t1, i, nsample)
         current = evaluate(t, false, i == nsample)
         increment = _trapezoidal(points[i], current, caller)
         primitive = points[i].p + increment
@@ -385,14 +452,25 @@ function _integration_points(evaluate, t0::Float64, t1::Float64, nsample,
                              precision::Float64, maxpoints::Int,
                              mindepth::Int, maxdepth::Int,
                              caller::AbstractString)
+    _check_integration_capacity(nsample, maxpoints, caller)
     nsample === nothing && return _adaptive_points(
         evaluate, t0, t1, precision, maxpoints, mindepth, maxdepth, caller)
+    return _uniform_points(evaluate, t0, t1, nsample, caller)
+end
+
+function _check_integration_capacity(nsample, maxpoints::Int,
+                                     caller::AbstractString)
+    if nsample === nothing
+        maxpoints >= 3 || throw(ArgumentError(
+            "$caller: max_integration_points must be at least 3"))
+        return nothing
+    end
     nsample <= typemax(Int) - 1 || throw(ArgumentError(
         "$caller: nsample exceeds the allocatable vector length"))
     required = nsample + 1
     required <= maxpoints || throw(ArgumentError(
         "$caller: nsample=$nsample requires $required integration points, exceeding max_integration_points=$maxpoints"))
-    return _uniform_points(evaluate, t0, t1, nsample, caller)
+    return nothing
 end
 
 @inline function _point_size(point::_IntegrationPoint)
@@ -415,12 +493,8 @@ function _recompute_primitive!(points::Vector{_IntegrationPoint},
     return points[end].p
 end
 
-function _smooth_primitive!(points::Vector{_IntegrationPoint}, smooth_ratio::Real,
-                            max_iterations, caller::AbstractString)
-    ratio = _finite_positive(smooth_ratio, caller, "smooth_ratio")
-    ratio >= 1 || throw(ArgumentError(
-        "$caller: smooth_ratio must be at least 1 (got $smooth_ratio)"))
-    iterations = _positive_int(max_iterations, caller, "max_smoothing_iterations")
+function _smooth_primitive!(points::Vector{_IntegrationPoint}, ratio::Float64,
+                            iterations::Int, caller::AbstractString)
     alpha_minus_one = sqrt(ratio) - 1
 
     for _ in 1:iterations
@@ -467,23 +541,32 @@ function _smooth_primitive!(points::Vector{_IntegrationPoint}, smooth_ratio::Rea
     return _recompute_primitive!(points, caller)
 end
 
+function _smoothing_args(smooth_ratio, max_iterations,
+                         anisotropic_metric::Bool, caller::AbstractString)
+    (anisotropic_metric || smooth_ratio === nothing) && return nothing, nothing
+    smooth_ratio isa Real || throw(ArgumentError(
+        "$caller: smooth_ratio must be nothing or a real number"))
+    ratio = _finite_positive(smooth_ratio, caller, "smooth_ratio")
+    ratio >= 1 || throw(ArgumentError(
+        "$caller: smooth_ratio must be at least 1 (got $smooth_ratio)"))
+    iterations = _positive_int(max_iterations, caller, "max_smoothing_iterations")
+    return ratio, iterations
+end
+
 function _metric_points(γ, field::AbstractSizeField, derivative,
                         t0::Float64, t1::Float64, nsample, curve_entity,
                         begin_entity, end_entity, anisotropic_metric::Bool,
-                        integration_precision::Real, max_integration_points,
-                        min_integration_depth, max_integration_depth,
-                        smooth_ratio, max_smoothing_iterations,
+                        precision::Float64, maxpoints::Int,
+                        mindepth::Int, maxdepth::Int,
+                        smooth_ratio, smoothing_iterations,
                         caller::AbstractString)
-    precision, maxpoints, mindepth, maxdepth = _integration_args(
-        integration_precision, max_integration_points, min_integration_depth,
-        max_integration_depth, caller)
     evaluate(t, at_begin, at_end) = _metric_point(
         γ, derivative, field, t, t0, t1, curve_entity, begin_entity,
         end_entity, at_begin, at_end, anisotropic_metric, caller)
     points = _integration_points(evaluate, t0, t1, nsample, precision,
                                  maxpoints, mindepth, maxdepth, caller)
-    if !anisotropic_metric && smooth_ratio !== nothing
-        _smooth_primitive!(points, smooth_ratio, max_smoothing_iterations, caller)
+    if smooth_ratio !== nothing
+        _smooth_primitive!(points, smooth_ratio, smoothing_iterations, caller)
     end
     return points
 end
@@ -518,7 +601,7 @@ function curve_length(γ; t0::Real=0.0, t1::Real=1.0, nsample=nothing,
         previous = _pt3(γ(t0), "curve_length curve")
         total = 0.0
         @inbounds for i in 1:nsample
-            t = t0 + (t1 - t0) * i / nsample
+            t = _parameter_at(t0, t1, i, nsample)
             point = _pt3(γ(t), "curve_length curve")
             total += _checked_distance(previous, point, "curve_length")
             isfinite(total) || throw(ArgumentError(
@@ -560,24 +643,36 @@ function metric_length(γ, field::AbstractSizeField; t0::Real=0.0,
                        smooth_ratio=_GMSH_SMOOTH_RATIO,
                        max_smoothing_iterations=_GMSH_SMOOTH_ITERATIONS)
     t0, t1, nsample = _curve_args(t0, t1, nsample, "metric_length")
+    curve_entity = _curve_entity(entity, "metric_length")
     begin_entity, end_entity =
         _endpoint_vertex_entities(endpoint_entities, "metric_length")
+    precision, maxpoints, mindepth, maxdepth = _integration_args(
+        integration_precision, max_integration_points, min_integration_depth,
+        max_integration_depth, "metric_length")
+    _check_integration_capacity(nsample, maxpoints, "metric_length")
+    ratio, smoothing_iterations = _smoothing_args(
+        smooth_ratio, max_smoothing_iterations, anisotropic_metric,
+        "metric_length")
     points = _metric_points(
-        γ, field, derivative, t0, t1, nsample, entity, begin_entity,
-        end_entity, anisotropic_metric, integration_precision,
-        max_integration_points, min_integration_depth,
-        max_integration_depth, smooth_ratio, max_smoothing_iterations,
+        γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
+        end_entity, anisotropic_metric, precision, maxpoints, mindepth,
+        maxdepth, ratio, smoothing_iterations,
         "metric_length")
     return points[end].p
 end
 
-function _gmsh_edge_count(metric_total::Float64, minimum_segments,
-                          max_edges, closed::Bool, caller::AbstractString)
+function _edge_limits(minimum_segments, max_edges, closed::Bool,
+                      caller::AbstractString)
     minimum = minimum_segments === nothing ? (closed ? 3 : 1) :
               _positive_int(minimum_segments, caller, "minimum_segments")
     maximum = _positive_int(max_edges, caller, "max_edges")
     minimum <= maximum || throw(ArgumentError(
         "$caller: minimum_segments=$minimum exceeds max_edges=$maximum"))
+    return minimum, maximum
+end
+
+function _gmsh_edge_count(metric_total::Float64, minimum::Int,
+                          maximum::Int, caller::AbstractString)
     metric_total >= 0 || throw(ArgumentError(
         "$caller: integrated metric length is negative"))
     count_value = metric_total + 1.99
@@ -590,7 +685,7 @@ function _gmsh_edge_count(metric_total::Float64, minimum_segments,
     nedge = max(minimum, candidate)
     nedge <= maximum || throw(ArgumentError(
         "$caller: requested $nedge edges exceeds max_edges=$maximum"))
-    return nedge, minimum
+    return nedge
 end
 
 @inline function _invert_primitive(points::Vector{_IntegrationPoint},
@@ -605,15 +700,21 @@ end
     end
     p0 = points[lo].p
     p1 = points[hi].p
-    weight = p1 == p0 ? 0.0 : (target - p0) / (p1 - p0)
-    return points[lo].t + weight * (points[hi].t - points[lo].t)
+    weight = p1 == p0 ? 0.0 : clamp((target - p0) / (p1 - p0), 0.0, 1.0)
+    return _convex_coordinate(points[lo].t, points[hi].t, weight)
 end
 
 function _check_closed_curve(γ, t0::Float64, t1::Float64)
     first_point = _pt3(γ(t0), "mesh_curve curve")
     last_point = _pt3(γ(t1), "mesh_curve curve")
     closure = _checked_distance(first_point, last_point, "mesh_curve")
-    scale = max(maximum(abs, first_point), maximum(abs, last_point), 1.0)
+    closure == 0 && return nothing
+    scale = closure
+    for fraction in (0.25, 0.5, 0.75)
+        parameter = _convex_coordinate(t0, t1, fraction)
+        sample = _pt3(γ(parameter), "mesh_curve curve")
+        scale = max(scale, _checked_distance(first_point, sample, "mesh_curve"))
+    end
     closure <= 64eps(Float64) * scale || throw(ArgumentError(
         "mesh_curve: closed=true requires γ(t0) == γ(t1) within floating-point tolerance (gap $closure)"))
     return nothing
@@ -639,7 +740,8 @@ function _filter_close_points!(points::Vector{NTuple{3,Float64}},
         distance = _checked_distance(points[index], points[previous_retained], caller)
         parameter = parameters[index]
         if index != 2
-            parameter = parameter / 2 + parameters[previous_retained] / 2
+            parameter = _convex_coordinate(
+                parameters[previous_retained], parameter, 0.5)
         end
         sample = _pt3(γ(parameter), caller)
         size = size_at(field, sample[1], sample[2], sample[3], curve_entity)
@@ -703,20 +805,29 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                     minimum_segments=nothing,
                     max_edges=_DEFAULT_MAX_EDGES)
     t0, t1, nsample = _curve_args(t0, t1, nsample, "mesh_curve")
-    closed && _check_closed_curve(γ, t0, t1)
+    curve_entity = _curve_entity(entity, "mesh_curve")
     begin_entity, end_entity =
         _endpoint_vertex_entities(endpoint_entities, "mesh_curve")
+    precision, maxpoints, mindepth, maxdepth = _integration_args(
+        integration_precision, max_integration_points, min_integration_depth,
+        max_integration_depth, "mesh_curve")
+    _check_integration_capacity(nsample, maxpoints, "mesh_curve")
+    ratio, smoothing_iterations = _smoothing_args(
+        smooth_ratio, max_smoothing_iterations, anisotropic_metric,
+        "mesh_curve")
+    effective_minimum, maximum_edges = _edge_limits(
+        minimum_segments, max_edges, closed, "mesh_curve")
+    closed && _check_closed_curve(γ, t0, t1)
     integration = _metric_points(
-        γ, field, derivative, t0, t1, nsample, entity, begin_entity,
-        end_entity, anisotropic_metric, integration_precision,
-        max_integration_points, min_integration_depth,
-        max_integration_depth, smooth_ratio, max_smoothing_iterations,
+        γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
+        end_entity, anisotropic_metric, precision, maxpoints, mindepth,
+        maxdepth, ratio, smoothing_iterations,
         "mesh_curve")
     total = integration[end].p
     total > 0 || throw(ArgumentError(
         "mesh_curve: curve has zero sampled metric length"))
-    nedge, effective_minimum = _gmsh_edge_count(
-        total, minimum_segments, max_edges, closed, "mesh_curve")
+    nedge = _gmsh_edge_count(total, effective_minimum, maximum_edges,
+                             "mesh_curve")
     !closed && nedge == typemax(Int) && throw(ArgumentError(
         "mesh_curve: open-curve node count exceeds the platform Int limit"))
     nnode = closed ? nedge : nedge + 1
@@ -729,7 +840,7 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
         points[k + 1] = _pt3(γ(parameter), "mesh_curve curve")
     end
     if !anisotropic_metric
-        _filter_close_points!(points, parameters, γ, field, entity,
+        _filter_close_points!(points, parameters, γ, field, curve_entity,
                               effective_minimum, closed, "mesh_curve")
     end
     return points, parameters
@@ -749,9 +860,9 @@ function mesh_segment(a, b, field::AbstractSizeField; kwargs...)
                last_point[3] - first_point[3])
     all(isfinite, tangent) || throw(ArgumentError(
         "mesh_segment: segment displacement is not finite"))
-    γ(t) = (first_point[1] + t * tangent[1],
-            first_point[2] + t * tangent[2],
-            first_point[3] + t * tangent[3])
+    γ(t) = (_convex_coordinate(first_point[1], last_point[1], t),
+            _convex_coordinate(first_point[2], last_point[2], t),
+            _convex_coordinate(first_point[3], last_point[3], t))
     derivative(_) = tangent
     return mesh_curve(γ, field; t0=0.0, t1=1.0, derivative=derivative,
                       kwargs...)

@@ -9,6 +9,7 @@ using Test
 import Tessella
 using Tessella.SizeField
 using Tessella.Mesh1D
+using Tessella.MeshTypes
 using Tessella.IO: GeoParams, GeoFieldSpec
 
 dist(a,b) = sqrt(sum((a[i]-b[i])^2 for i in 1:3))
@@ -52,13 +53,35 @@ end
     @testset "curve contract and resource bounds" begin
         seg(t) = (t, 0.0, 0.0)
         @test_throws ArgumentError curve_length(seg; nsample=0)
+        @test_throws ArgumentError curve_length(seg; nsample=true)
         @test_throws ArgumentError curve_length(seg; nsample=big(typemax(Int))+1)
         @test curve_length(seg; nsample=big(2)) == 1.0
         @test_throws ArgumentError curve_length(seg; t0=1, t1=0)
+        @test_throws ArgumentError curve_length(seg; t0=false, t1=true)
+        @test_throws ArgumentError curve_length(seg; integration_precision=true)
+        @test_throws ArgumentError curve_length(seg; min_integration_depth=true)
         @test_throws ArgumentError curve_length(t->(NaN,0.0,0.0); nsample=2)
+        @test_throws ArgumentError curve_length(t->(true,0.0,0.0); nsample=2)
         @test_throws ArgumentError metric_length(seg, ConstantSize(1.0); nsample=-1)
+        @test_throws ArgumentError metric_length(seg, ConstantSize(1.0);
+                                                 smooth_ratio=true, nsample=1)
+        @test_throws ArgumentError metric_length(seg, ConstantSize(1.0);
+                                                 max_smoothing_iterations=true,
+                                                 nsample=1)
+        @test_throws ArgumentError metric_length(seg, ConstantSize(1.0);
+                                                 entity=(false,true), nsample=1)
+        @test_throws ArgumentError metric_length(seg, ConstantSize(1.0);
+                                                 entity=(4,1), nsample=1)
         @test_throws ArgumentError mesh_curve(t->(0.0,0.0,0.0), ConstantSize(1.0))
         @test_throws ArgumentError mesh_curve(seg, ConstantSize(1.0); closed=true)
+        @test_throws ArgumentError mesh_curve(t->(1e-20*t,0.0,0.0),
+            ConstantSize(3e-21); closed=true, nsample=8)
+        @test_throws ArgumentError mesh_curve(seg, ConstantSize(1.0);
+                                              minimum_segments=true, nsample=1)
+        @test_throws ArgumentError mesh_curve(seg, ConstantSize(1.0);
+                                              max_edges=true, nsample=1)
+        @test_throws ArgumentError mesh_segment((false,0,0), (1,0,0),
+                                                ConstantSize(1.0); nsample=1)
         @test_throws ArgumentError mesh_segment((0.0,0.0,0.0), (1.0,0.0,0.0),
                                                 ConstantSize(1e-300); nsample=1)
         tiny(t)=(1e-320*t,0.0,0.0)
@@ -75,6 +98,54 @@ end
             max_integration_points=100)
         @test_throws ArgumentError metric_length(seg,ConstantSize(1.0);
             derivative=t->(Inf,0,0))
+        @test_throws ArgumentError metric_length(seg,ConstantSize(1.0);
+            derivative=t->(true,0,0))
+
+        calls=Ref(0)
+        tracked(t)=(calls[]+=1;(t,0.0,0.0))
+        @test_throws ArgumentError mesh_curve(tracked,ConstantSize(1.0);
+            closed=true,max_edges=true)
+        @test calls[]==0
+        @test_throws ArgumentError mesh_curve(tracked,ConstantSize(1.0);
+            closed=true,max_integration_points=1)
+        @test calls[]==0
+        @test_throws ArgumentError metric_length(tracked,ConstantSize(1.0);
+            smooth_ratio=true)
+        @test calls[]==0
+    end
+
+    @testset "scale-safe interpolation and closure" begin
+        a=(-1e200,0.0,0.0); b=(1e100,0.0,0.0)
+        segment_points,segment_parameters=mesh_segment(
+            a,b,ConstantSize(1e199);nsample=4)
+        @test first(segment_points)==a && last(segment_points)==b
+        @test first(segment_parameters)==0.0 && last(segment_parameters)==1.0
+
+        identity_curve(t)=(t,0.0,0.0)
+        curve_points,curve_parameters=mesh_curve(identity_curve,ConstantSize(1e199);
+            t0=-1e200,t1=1e100,nsample=4,derivative=_ -> (1.0,0.0,0.0))
+        @test first(curve_parameters)==-1e200 && last(curve_parameters)==1e100
+        @test first(curve_points)==a && last(curve_points)==b
+
+        cancellation=Tessella.Mesh1D._convex_coordinate(
+            nextfloat(-1e308),1e308,0.5)
+        reference=setprecision(BigFloat,256) do
+            Float64((BigFloat(nextfloat(-1e308))+BigFloat(1e308))/2)
+        end
+        @test cancellation==reference
+
+        normalized_parameters=nothing
+        for scale in (1e-200,1.0,1e200)
+            circle(t)=(scale*cos(2pi*t),scale*sin(2pi*t),0.0)
+            tangent(t)=(-2pi*scale*sin(2pi*t),2pi*scale*cos(2pi*t),0.0)
+            _,parameters=mesh_curve(circle,ConstantSize(scale/4);
+                closed=true,nsample=128,derivative=tangent)
+            if normalized_parameters===nothing
+                normalized_parameters=parameters
+            else
+                @test parameters≈normalized_parameters atol=2e-15 rtol=2e-15
+            end
+        end
     end
 
     @testset "constant size → uniform spacing, correct count" begin
@@ -260,5 +331,22 @@ end
         pts, _ = mesh_curve(helix, ConstantSize(0.2))
         gaps = [dist(pts[i],pts[i+1]) for i in 1:length(pts)-1]
         @test isapprox(sum(gaps)/length(gaps), 0.2; atol=0.02)
+    end
+
+    @testset "public documentation and deterministic CRC" begin
+        points,_=mesh_segment((0,0,0),(1,0,0),
+            FunctionSize((x,y,z)->0.05+0.8x))
+        coords=Matrix{Float64}(undef,3,length(points))
+        segments=Matrix{Int32}(undef,2,length(points)-1)
+        for i in eachindex(points)
+            coords[:,i]=collect(points[i])
+        end
+        for i in 1:length(points)-1
+            segments[:,i]=Int32[i,i+1]
+        end
+        @test mesh_crc(Mesh(coords;segs=segments)).sha==
+            "c88590e849684b244044860b05a509139b97e422d6a2d65074b19fd73b3f9048"
+        @test isempty(Base.Docs.undocumented_names(Tessella.Mesh1D;private=false))
+        @test isempty(Test.detect_ambiguities(Tessella.Mesh1D;recursive=true))
     end
 end
