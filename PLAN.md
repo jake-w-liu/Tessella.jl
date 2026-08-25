@@ -113,7 +113,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | Track | Exit condition | State |
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O, and a tagged point/curve/surface/volume kernel |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, and a tagged point/curve/surface/volume kernel |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
@@ -129,7 +129,7 @@ recombination beyond P4's first-order surface pairing, integration of mixed bloc
 into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, curved
 high-order Jacobian certification beyond P2 tetrahedra, preservation of
 ancillary/unknown MSH sections (binary readers reject unsupported sections
-explicitly), repeated `$Nodes` sections, non-8-byte binary data, internal indexing
+explicitly), non-8-byte binary data, internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
 Variable-connectivity types 34/35/69 and parent/domain links are lossless in MSH2
 ASCII. Binary MSH2 has fixed widths and supports only fixed special records and parent

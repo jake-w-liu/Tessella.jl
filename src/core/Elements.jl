@@ -1783,9 +1783,9 @@ physical membership (or zero), while [`MixedEntityData`](@ref) retains every
 membership, signed boundary, classification, parametric coordinate, and
 external node/element tag. Node, element, connectivity, block, entity,
 physical-name and file-size limits are checked before bulk allocation. Repeated
-physical-name, entity and element sections are merged;
-repeated node sections are rejected explicitly. Gmsh treats backslashes in
-physical names literally. Set
+physical-name, entity, pre-element node and element sections are merged, with
+cumulative resource limits and global external-tag uniqueness. Gmsh treats
+backslashes in physical names literally. Set
 `tessella_extensions=true` only when reading Tessella's escaped name extension
 produced by `write_mixed_msh(...; gmsh_compatible=false)`.
 
@@ -2218,8 +2218,6 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
         elseif header=="\$Nodes"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Nodes appeared before \$MeshFormat"))
-            seen_nodes && throw(ArgumentError(
-                "read_mixed_msh: repeated \$Nodes sections are not supported"))
             seen_elements && throw(ArgumentError(
                 "read_mixed_msh: \$Nodes must precede \$Elements"))
             seen_nodes=true

@@ -60,7 +60,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
-  MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding;
+  MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
+  repeated pre-element node sections;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
 - oriented-normal extrusion of coherently directed planar polylines into
