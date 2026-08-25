@@ -74,8 +74,9 @@ corner-Jacobian certification. Affine eight-corner blocks use Gmsh's unrecombine
 six-tetrahedron transfinite volume subdivision; canonical affine triangular prisms
 use its legacy collapsed-grid five-face tetrahedral path. Surface recombination now
 includes Edmonds blossom matching and a `full_quad` perfect-matching gate.
-Planar constant-`z` polylines extrude to type-3 quadrangles along left-normals,
-with optional convex-corner fans. Closed manifold walls can use
+Planar polylines with an explicit oriented plane normal extrude to type-3
+quadrangles along left-normals, with optional convex-corner fans and exact
+projected corner-Jacobian checks. Closed manifold walls can use
 `mesh_boundary_layer_filled` for certified prism shells, cavity walls, and a
 conforming remaining-core tetrahedral fill. Explicit one-to-one translated node
 pairs can be certified and snapped exactly without changing connectivity or tags;
@@ -93,6 +94,33 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-25 with Julia 1.12.7 after extending 2-D boundary-layer
+strips to arbitrary oriented planes:
+
+- `mesh_boundary_layer_2d` now accepts a finite nonzero `plane_normal`, with
+  overflow-safe normalization, a deterministic orthonormal frame, scale-aware
+  input/output planarity checks, and preserved positive-`z` default behavior.
+  Reversing the normal reverses the selected side. The historical flat-strip CRC
+  remains `bb9e1fb9a0f0e56de42287ff3f85dd93ea3c7115cc9e51d05a6845d97ce8122b`;
+  the exact vertical-plane CRC is
+  `49e70bbffb8fd2121a526c35a5ca51ab87ea19790bd715d52a147a21535b3e19`.
+- Every emitted triangle and all four corners of every quadrangle are certified
+  with exact predicates in the projected plane. The suite rejects nonplanar
+  inputs, unrepresentable offsets, and a sharp-turn fixture whose positive total
+  shoelace area hides a reversed corner Jacobian.
+- A tilted corner-fan oracle matched every rigidly transformed coordinate within
+  `2.220446049250313e-16`, and a seeded audit repeated the topology/coordinate
+  comparison for 128 random plane orientations and translations. The aggregate
+  Gmsh 4.15.2 child retained `tessella_area=0.15960000000000005`,
+  `gmsh_quads=10`, and `gmsh_tris=24`, while its added tilted straight-strip
+  oracle had zero measured coordinate error.
+- The bounds-checked focused suite passed 92/92 assertions under Julia 1.12.7
+  and Julia 1.11.9. The full package gate passed 164,769/164,769 assertions in
+  12m42.8s, and aggregate bounds-checked validation exited 0 against Gmsh
+  4.15.2-git. All tracked Julia files remain organized in categorized subfolders,
+  with only the package/test/validation entry points at their respective top
+  levels.
 
 Re-measured on 2026-08-25 with Julia 1.12.7 after adding Gmsh-compatible
 recombined three-sided transfinite patches:

@@ -3,7 +3,7 @@
 
 First-order boundary-layer element topology: prismatic extrusion of a
 triangle surface along area-weighted vertex normals (type-6 prisms), planar
-polyline extrusion to type-3 quads with optional convex-corner fans
+planar-polyline extrusion to type-3 quads with optional convex-corner fans
 (type-2 triangles in the first layer, type-3 quads in subsequent layers),
 and filled extrusion where the remaining core after a layer extrusion is
 tetrahedralized behind a certified conforming prism/tetrahedron interface.
@@ -14,7 +14,7 @@ module BoundaryLayer
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, triangle_area, tet_volume,
                    boundary_faces
 using ..Elements: ElementBlock, MixedMesh, validate
-using ..Predicates: orient3
+using ..Predicates: orient2, orient3
 using ..Mesh3D: delaunay3d, to_mesh3, recover_segment3, recover_triangle3,
                 _raygrid, _inside_grid
 using ..RecoverCDT: recover_boundary_cdt
@@ -216,9 +216,106 @@ end
 
 function _left_unit(ax, ay, bx, by, caller, seg)
     tx,ty=bx-ax,by-ay
+    (isfinite(tx) && isfinite(ty)) || throw(ArgumentError(
+        "$caller: segment $seg coordinate span overflows Float64"))
     L=hypot(tx,ty)
-    L>0 || throw(ArgumentError("$caller: segment $seg has zero length"))
+    (isfinite(L) && L>0) || throw(ArgumentError(
+        "$caller: segment $seg has zero or non-finite length"))
     return (-ty/L, tx/L)
+end
+
+function _plane_unit_normal(raw, caller)
+    (raw isa Tuple || raw isa AbstractVector) || throw(ArgumentError(
+        "$caller: plane_normal must be a three-component tuple or vector"))
+    component_count=try
+        length(raw)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: plane_normal must have a finite declared length"))
+    end
+    component_count==3 || throw(ArgumentError(
+        "$caller: plane_normal must have exactly three components"))
+    values=try
+        ntuple(i->raw[i],3)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: plane_normal components must be indexable"))
+    end
+    normal=ntuple(i->_finite(values[i],caller,"plane_normal[$i]"),3)
+    normal_scale=max(abs(normal[1]),abs(normal[2]),abs(normal[3]))
+    normal_scale>0 || throw(ArgumentError(
+        "$caller: plane_normal must have finite positive length"))
+    scaled=ntuple(i->normal[i]/normal_scale,3)
+    length_scaled=hypot(scaled...)
+    (isfinite(length_scaled) && length_scaled>0) || throw(ArgumentError(
+        "$caller: plane_normal cannot be normalized"))
+    unit=ntuple(i->scaled[i]/length_scaled,3)
+    all(isfinite,unit) || throw(ArgumentError(
+        "$caller: normalized plane_normal is not finite"))
+    return unit
+end
+
+function _plane_basis(normal,caller)
+    ax,ay,az=abs(normal[1]),abs(normal[2]),abs(normal[3])
+    # Prefer y on ties so the default +z normal retains the historical x/y
+    # coordinate frame and therefore its deterministic output bytes.
+    reference=ay<=ax && ay<=az ? (0.0,1.0,0.0) :
+              ax<=az ? (1.0,0.0,0.0) : (0.0,0.0,1.0)
+    raw_u=_cross3(reference,normal)
+    length_u=hypot(raw_u...)
+    (isfinite(length_u) && length_u>0) || throw(ArgumentError(
+        "$caller: could not construct a stable plane frame"))
+    u=ntuple(i->raw_u[i]/length_u,3)
+    raw_v=_cross3(normal,u)
+    length_v=hypot(raw_v...)
+    (isfinite(length_v) && length_v>0) || throw(ArgumentError(
+        "$caller: could not complete a stable plane frame"))
+    v=ntuple(i->raw_v[i]/length_v,3)
+    all(isfinite,u) && all(isfinite,v) || throw(ArgumentError(
+        "$caller: plane frame is not finite"))
+    return u,v
+end
+
+function _validate_plane(points,normal,caller)
+    origin=points[1]
+    scale=0.0
+    maximum_distance=0.0
+    maximum_node=1
+    @inbounds for (index,point) in pairs(points)
+        delta=(point[1]-origin[1],point[2]-origin[2],point[3]-origin[3])
+        all(isfinite,delta) || throw(ArgumentError(
+            "$caller: coordinate span overflows Float64 at node $index"))
+        span=hypot(delta...)
+        isfinite(span) || throw(ArgumentError(
+            "$caller: coordinate span is not finite at node $index"))
+        scale=max(scale,span)
+        distance=abs(_dot3(delta,normal))
+        isfinite(distance) || throw(ArgumentError(
+            "$caller: plane distance is not finite at node $index"))
+        if distance>maximum_distance
+            maximum_distance=distance
+            maximum_node=index
+        end
+    end
+    tolerance=8192eps(Float64)*max(scale,1.0)
+    maximum_distance<=tolerance || throw(ArgumentError(
+        "$caller: node $maximum_node is outside plane_normal's plane "*
+        "(distance $maximum_distance exceeds $tolerance)"))
+    return origin
+end
+
+@inline function _plane_point(point,origin,u,v)
+    delta=(point[1]-origin[1],point[2]-origin[2],point[3]-origin[3])
+    return (_dot3(delta,u),_dot3(delta,v))
+end
+
+@inline function _offset_point(point,u,v,dx,dy,offset)
+    direction=(dx*u[1]+dy*v[1],dx*u[2]+dy*v[2],dx*u[3]+dy*v[3])
+    return (point[1]+offset*direction[1],
+            point[2]+offset*direction[2],
+            point[3]+offset*direction[3])
 end
 
 function _polyline_vertices(curve::Mesh, caller)
@@ -282,8 +379,9 @@ function _polyline_vertices(curve::Mesh, caller)
     return verts, closed
 end
 
-function _signed_quad(ax,ay,bx,by,cx,cy,dx,dy)
-    return ax*by-ay*bx + bx*cy-by*cx + cx*dy-cy*dx + dx*ay-dy*ax
+@inline function _positive_quad(a,b,c,d)
+    return orient2(a,b,c)>0 && orient2(b,c,d)>0 &&
+           orient2(c,d,a)>0 && orient2(d,a,b)>0
 end
 
 function _id_layer(id_of, v, layer, ray, fan)
@@ -292,17 +390,24 @@ end
 
 """
     mesh_boundary_layer_2d(curve; hwall, ratio, nlayers, fans=(),
-                           fan_elements=5, max_cells=10_000_000) -> MixedMesh
+                           fan_elements=5, plane_normal=(0.0,0.0,1.0),
+                           max_cells=10_000_000) -> MixedMesh
 
-Extrude a valid, coherently directed, constant-`z` polyline along its left
-normals into first-order type-3 quadrangles. `fans` lists convex interior vertex
-indices that receive `fan_elements` first-layer triangles and matching ring
-quadrangles instead of a single averaged-normal column. Every curve node must
-belong to the chain, `fan_elements` must be at least two, and `max_cells` is a
-nonnegative allocation bound. The input is left unchanged.
+Extrude a valid, coherently directed planar polyline along its left normals into
+first-order type-3 quadrangles. `plane_normal` gives the oriented normal
+direction used to define "left"; it defaults to positive `z` for backward
+compatibility. The curve must lie in the plane through its first node orthogonal
+to that normal, within a scale-aware floating tolerance.
+
+`fans` lists convex interior vertex indices that receive `fan_elements`
+first-layer triangles and matching ring quadrangles instead of a single
+averaged-normal column. Every curve node must belong to the chain,
+`fan_elements` must be at least two, and `max_cells` is a nonnegative allocation
+bound. The input is left unchanged.
 """
 function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::Integer,
                                 fans=(), fan_elements::Integer=5,
+                                plane_normal=(0.0,0.0,1.0),
                                 max_cells::Integer=10_000_000)
     caller="mesh_boundary_layer_2d"
     nsegs(curve)>0 || throw(ArgumentError("$caller: curve has no segments"))
@@ -313,14 +418,10 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
     ra=_finite(ratio,caller,"ratio"); ra>1 || throw(ArgumentError("$caller: ratio must be > 1"))
     nl=_bounded_int(nlayers,caller,"nlayers";minimum=1)
     nfan=_bounded_int(fan_elements,caller,"fan_elements";minimum=2)
+    normal=_plane_unit_normal(plane_normal,caller)
     cell_limit=_bounded_int(max_cells,caller,"max_cells")
     nv=nnodes(curve)
     nv>=2 || throw(ArgumentError("$caller: curve has too few nodes"))
-    z0=curve.coords[3,1]
-    @inbounds for i in 1:nv
-        abs(curve.coords[3,i]-z0)<=1e-12 || throw(ArgumentError(
-            "$caller: curve is not constant-z; general-plane extrusion is not implemented"))
-    end
     verts, closed=_polyline_vertices(curve,caller)
     nchain=length(verts)
     nchain_segs=closed ? nchain : nchain-1
@@ -352,12 +453,22 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
 
     points=Vector{NTuple{3,Float64}}(undef,nv)
     @inbounds for i in 1:nv
-        points[i]=(curve.coords[1,i],curve.coords[2,i],z0)
+        points[i]=(curve.coords[1,i],curve.coords[2,i],curve.coords[3,i])
+    end
+    plane_origin=_validate_plane(points,normal,caller)
+    basis_u,basis_v=_plane_basis(normal,caller)
+    plane_points=Vector{NTuple{2,Float64}}(undef,nv)
+    @inbounds for i in 1:nv
+        plane_points[i]=_plane_point(points[i],plane_origin,basis_u,basis_v)
+        all(isfinite,plane_points[i]) || throw(ArgumentError(
+            "$caller: projected node $i is not finite"))
     end
     seg_left=Vector{NTuple{2,Float64}}(undef,nchain_segs)
     @inbounds for i in 1:nchain_segs
         a=verts[i]; b=verts[i==nchain ? 1 : i+1]
-        seg_left[i]=_left_unit(points[a][1],points[a][2],points[b][1],points[b][2],caller,i)
+        seg_left[i]=_left_unit(
+            plane_points[a][1],plane_points[a][2],
+            plane_points[b][1],plane_points[b][2],caller,i)
     end
     n_in=Vector{NTuple{2,Float64}}(undef,nchain)
     n_out=Vector{NTuple{2,Float64}}(undef,nchain)
@@ -395,7 +506,6 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
         id_of[(v,0,0)]=v
     end
     @inbounds for k in 1:nl, (idx,v) in enumerate(verts)
-        px,py,_=points[v]
         if v in fan_set
             nin=n_in[idx]; nout=n_out[idx]
             θ=atan(nin[1]*nout[2]-nin[2]*nout[1], nin[1]*nout[1]+nin[2]*nout[2])
@@ -404,18 +514,37 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
                 c,s=cos(α),sin(α)
                 dx=nin[1]*c-nin[2]*s
                 dy=nin[1]*s+nin[2]*c
-                push!(points,(px+offsets[k]*dx, py+offsets[k]*dy, z0))
-                all(isfinite, points[end]) || throw(ArgumentError("$caller: extruded node is non-finite"))
+                new_point=_offset_point(
+                    points[v],basis_u,basis_v,dx,dy,offsets[k])
+                all(isfinite,new_point) || throw(ArgumentError(
+                    "$caller: extruded node is non-finite"))
+                new_plane_point=_plane_point(
+                    new_point,plane_origin,basis_u,basis_v)
+                all(isfinite,new_plane_point) || throw(ArgumentError(
+                    "$caller: projected extruded node is non-finite"))
+                push!(points,new_point)
+                push!(plane_points,new_plane_point)
                 id_of[(v,k,ray)]=length(points)
             end
         else
             nx,ny=n_avg[idx]
-            push!(points,(px+offsets[k]*nx, py+offsets[k]*ny, z0))
-            all(isfinite, points[end]) || throw(ArgumentError("$caller: extruded node is non-finite"))
+            new_point=_offset_point(
+                points[v],basis_u,basis_v,nx,ny,offsets[k])
+            all(isfinite,new_point) || throw(ArgumentError(
+                "$caller: extruded node is non-finite"))
+            new_plane_point=_plane_point(
+                new_point,plane_origin,basis_u,basis_v)
+            all(isfinite,new_plane_point) || throw(ArgumentError(
+                "$caller: projected extruded node is non-finite"))
+            push!(points,new_point)
+            push!(plane_points,new_plane_point)
             id_of[(v,k,0)]=length(points)
         end
     end
     length(points)==npoints || throw(ErrorException("$caller: node count mismatch"))
+    length(plane_points)==npoints || throw(ErrorException(
+        "$caller: projected node count mismatch"))
+    _validate_plane(points,normal,caller)
 
     quads=Matrix{Int32}(undef,4,nquads)
     tris=ntris_out==0 ? Matrix{Int32}(undef,3,0) : Matrix{Int32}(undef,3,ntris_out)
@@ -430,9 +559,11 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
             b2=_id_layer(id_of,b,k-1,ray_b,b_fan)
             t2=_id_layer(id_of,b,k,ray_b,b_fan)
             t1=_id_layer(id_of,a,k,ray_a,a_fan)
-            p1=points[b1]; p2=points[b2]; p3=points[t2]; p4=points[t1]
-            _signed_quad(p1[1],p1[2],p2[1],p2[2],p3[1],p3[2],p4[1],p4[2])>0 ||
-                throw(ArgumentError("$caller: inverted quadrangle on segment $i layer $k"))
+            p1=plane_points[b1]; p2=plane_points[b2]
+            p3=plane_points[t2]; p4=plane_points[t1]
+            _positive_quad(p1,p2,p3,p4) || throw(ArgumentError(
+                "$caller: quadrangle on segment $i layer $k has a zero or "*
+                "reversed corner Jacobian"))
             qcursor+=1
             quads[:,qcursor].=(Int32(b1),Int32(b2),Int32(t2),Int32(t1))
         end
@@ -442,8 +573,8 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
         origin=id_of[(v,0,0)]
         for ray in 0:nfan-1
             i1=id_of[(v,1,ray)]; i2=id_of[(v,1,ray+1)]
-            p0=points[origin]; p1=points[i1]; p2=points[i2]
-            (p1[1]-p0[1])*(p2[2]-p0[2])-(p1[2]-p0[2])*(p2[1]-p0[1])>0 ||
+            p0=plane_points[origin]; p1=plane_points[i1]; p2=plane_points[i2]
+            orient2(p0,p1,p2)>0 ||
                 throw(ArgumentError("$caller: inverted fan triangle at vertex $v"))
             tcursor+=1
             tris[:,tcursor].=(Int32(origin),Int32(i1),Int32(i2))
@@ -451,9 +582,11 @@ function mesh_boundary_layer_2d(curve::Mesh; hwall::Real, ratio::Real, nlayers::
         for k in 2:nl, ray in 0:nfan-1
             b1=id_of[(v,k-1,ray)]; b2=id_of[(v,k-1,ray+1)]
             t2=id_of[(v,k,ray+1)]; t1=id_of[(v,k,ray)]
-            p1=points[b1]; p2=points[t1]; p3=points[t2]; p4=points[b2]
-            _signed_quad(p1[1],p1[2],p2[1],p2[2],p3[1],p3[2],p4[1],p4[2])>0 ||
-                throw(ArgumentError("$caller: inverted fan quadrangle at vertex $v layer $k"))
+            p1=plane_points[b1]; p2=plane_points[t1]
+            p3=plane_points[t2]; p4=plane_points[b2]
+            _positive_quad(p1,p2,p3,p4) || throw(ArgumentError(
+                "$caller: fan quadrangle at vertex $v layer $k has a zero or "*
+                "reversed corner Jacobian"))
             qcursor+=1
             quads[:,qcursor].=(Int32(b1),Int32(t1),Int32(t2),Int32(b2))
         end
