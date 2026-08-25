@@ -72,7 +72,9 @@ function _checked_mul(a::Int,b::Int,what::AbstractString)
     end
 end
 
-function _limit(value::Integer,name::AbstractString)
+function _limit(value,name::AbstractString)
+    value isa Integer || throw(ArgumentError(
+        "mesh_transfinite_patch: $name must be an integer"))
     value isa Bool && throw(ArgumentError(
         "mesh_transfinite_patch: $name must not be Bool"))
     value>=0 || throw(ArgumentError(
@@ -113,8 +115,18 @@ function _point3(raw,side::Int,index::Int)
     end
     count==3 || throw(ArgumentError(
         "mesh_transfinite_patch: side $side point $index must have exactly three coordinates"))
+    values=try
+        (raw[1],raw[2],raw[3])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_patch: side $side point $index coordinates must " *
+            "be Float64-representable: $(sprint(showerror,err))"))
+    end
+    any(value -> value isa Bool,values) && throw(ArgumentError(
+        "mesh_transfinite_patch: side $side point $index coordinates must not be Bool"))
     point=try
-        (Float64(raw[1]),Float64(raw[2]),Float64(raw[3]))
+        (Float64(values[1]),Float64(values[2]),Float64(values[3]))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError(
@@ -581,10 +593,10 @@ candidate budget is rejected instead of risking unbounded work.
 """
 function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
                                 side3::AbstractVector,side4::AbstractVector;
-                                arrangement=:left,face_tag::Integer=0,
+                                arrangement=:left,face_tag=0,
                                 side_tags=(0,0,0,0),
-                                max_nodes::Integer=_DEFAULT_MAX_NODES,
-                                max_triangles::Integer=_DEFAULT_MAX_TRIANGLES)::Mesh
+                                max_nodes=_DEFAULT_MAX_NODES,
+                                max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
     mode=_arrangement(arrangement)
     node_limit=_limit(max_nodes,"max_nodes")
     triangle_limit=_limit(max_triangles,"max_triangles")

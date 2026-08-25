@@ -9,12 +9,17 @@ six transfinite boundary faces are unrecombined.
 This module deliberately does not claim support for five-faced/prismatic
 volumes, curved or independently discretized faces, non-affine hexahedra,
 recombined hexahedra/prisms, QuadTri, holes, multiple blocks, periodic seams,
-or high-order elements.
+or high-order elements. As required by the finalized `Mesh` contract,
+represented boundary areas and tetrahedron volumes must remain finite Float64
+values; finite input coordinates alone do not imply finite derived measures.
 """
 module TransfiniteVolume
 
 using ..MeshTypes: Mesh, boundary_faces, nnodes, ntris, ntets, validate
 using ..Predicates: orient3
+using ..StructuredNumerics: _needs_exact_affine, _affine_basis3,
+                            _affine_point3, _uses_exact_affine,
+                            _certify_tet_volume, _throw_simplex_validation
 
 export mesh_transfinite_volume
 
@@ -47,7 +52,9 @@ function _checked_mul(what::AbstractString, values::Int...)
     return result
 end
 
-function _limit(value::Integer, name::AbstractString)
+function _limit(value, name::AbstractString)
+    value isa Integer || throw(ArgumentError(
+        "mesh_transfinite_volume: $name must be an integer"))
     value isa Bool && throw(ArgumentError(
         "mesh_transfinite_volume: $name must not be Bool"))
     value >= 0 || throw(ArgumentError(
@@ -149,8 +156,18 @@ function _point3(raw, index::Int)
     end
     count == 3 || throw(ArgumentError(
         "mesh_transfinite_volume: corner $index must have exactly three coordinates"))
+    values = try
+        (raw[1], raw[2], raw[3])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: corner $index coordinates must be " *
+            "Float64-representable: $(sprint(showerror, err))"))
+    end
+    any(value -> value isa Bool, values) && throw(ArgumentError(
+        "mesh_transfinite_volume: corner $index coordinates must not be Bool"))
     point = try
-        (Float64(raw[1]), Float64(raw[2]), Float64(raw[3]))
+        (Float64(values[1]), Float64(values[2]), Float64(values[3]))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError(
@@ -361,19 +378,24 @@ positive logical-cell counts; curve laws are uniformly spaced (`Progression 1`).
 
 The returned simplex mesh uses the exact six-tetrahedron connectivity pattern
 from Gmsh's `CREATE_SIM_1` through `CREATE_SIM_6`. Boundary triangles are the
-induced conforming face arrangements. `face_tags` follow Gmsh's canonical face
-order `(vmin, umax, vmax, umin, wmin, wmax)`; `volume_tag` labels every tet.
+induced conforming face arrangements. Exact dyadic affine interpolation protects
+remote, narrow blocks whose nested Float64 interpolation would lose material, and
+a compensated exponent-scaled determinant audit certifies conservation of the
+corner-defined volume. `face_tags` follow Gmsh's canonical face order
+`(vmin, umax, vmax, umin, wmin, wmax)`; `volume_tag` labels every tet.
 
 Unsupported here: five-face degeneracies, curved/warped or independently
 discretized faces, nonuniform curve laws, recombination into hexahedra/prisms,
-QuadTri, holes, multiple blocks, periodic seams, and high-order elements.
+QuadTri, holes, multiple blocks, periodic seams, high-order elements, and
+coordinate scales whose derived boundary areas or tetrahedron volumes are not
+finite Float64 values.
 """
 function mesh_transfinite_volume(corners, cells=(1, 1, 1);
                                  volume_tag=0,
                                  face_tags=(0, 0, 0, 0, 0, 0),
-                                 max_nodes::Integer=_DEFAULT_MAX_NODES,
-                                 max_tets::Integer=_DEFAULT_MAX_TETS,
-                                 max_boundary_triangles::Integer=
+                                 max_nodes=_DEFAULT_MAX_NODES,
+                                 max_tets=_DEFAULT_MAX_TETS,
+                                 max_boundary_triangles=
                                      _DEFAULT_MAX_BOUNDARY_TRIANGLES)
     node_limit = _limit(max_nodes, "max_nodes")
     tet_limit = _limit(max_tets, "max_tets")
@@ -411,11 +433,21 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
     _certify_affine(converted_corners)
     converted_face_tags = _face_tags(face_tags)
     converted_volume_tag = _tag(volume_tag, "volume_tag")
+    affine_points = (converted_corners[1], converted_corners[2],
+                     converted_corners[4], converted_corners[5])
+    exact_interpolation = _needs_exact_affine(
+        affine_points..., (nu, nv, nw)) &&
+        _exact_affine_corners(converted_corners)
+    affine_basis = _affine_basis3(affine_points..., exact_interpolation)
 
     node_id(i::Int, j::Int, k::Int) = Int32(i + 1 + npu * (j + npv * k))
     coords = Matrix{Float64}(undef, 3, node_count)
     @inbounds for k in 0:nw, j in 0:nv, i in 0:nu
-        point = _trilinear(converted_corners, i / nu, j / nv, k / nw)
+        u = i / nu; v = j / nv; w = k / nw
+        point = _uses_exact_affine(affine_basis) ?
+            _affine_point3(affine_basis, u, v, w,
+                           "mesh_transfinite_volume", (i, j, k)) :
+            _trilinear(converted_corners, u, v, w)
         all(isfinite, point) || throw(ArgumentError(
             "mesh_transfinite_volume: interpolation produced a non-finite " *
             "coordinate at logical node ($i,$j,$k)"))
@@ -508,7 +540,7 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
             sign = orient3(_node(coords, tris[1, triangle]),
                            _node(coords, tris[2, triangle]),
                            _node(coords, tris[3, triangle]), opposite)
-            sign > 0 || throw(ErrorException(
+            sign > 0 || throw(ArgumentError(
                 "mesh_transfinite_volume: boundary triangle $triangle is not " *
                 "strictly outward-oriented"))
         end
@@ -522,13 +554,17 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
     sort!(extracted_boundary)
     extracted_boundary == _canonical_triangles(tris) || throw(ErrorException(
         "mesh_transfinite_volume: emitted boundary triangles do not match the tet boundary"))
+    _certify_tet_volume(
+        coords, tets,
+        (converted_corners[1], converted_corners[2],
+         converted_corners[4], converted_corners[5]),
+        6, "mesh_transfinite_volume", "affine block")
 
     mesh = Mesh(coords; tris=tris, tets=tets, tri_tag=tri_tags,
                 tet_tag=fill(converted_volume_tag, tet_count))
     diagnostic = validate(mesh)
-    diagnostic.ok || throw(ErrorException(
-        "mesh_transfinite_volume: constructed mesh failed validation: " *
-        join(diagnostic.messages, "; ")))
+    diagnostic.ok || _throw_simplex_validation(
+        "mesh_transfinite_volume", diagnostic.messages)
     (nnodes(mesh), ntris(mesh), ntets(mesh)) ==
         (node_count, triangle_count, tet_count) || throw(ErrorException(
         "mesh_transfinite_volume: finalized mesh count invariant failed"))

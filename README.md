@@ -77,7 +77,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
   physical tags, and exact projected corner-Jacobian certification;
 - affine six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron
-  subdivision, with boundary tags and exact topology/orientation postconditions;
+  subdivision, with boundary tags, exact topology/orientation postconditions,
+  exact-dyadic remote-grid interpolation, and represented-volume certification;
 - affine five-face triangular prisms using Gmsh's legacy collapsed-grid tetrahedron
   templates, with exact orientation, boundary, and represented-volume certification.
 

@@ -18,6 +18,7 @@ module TransfinitePrism
 
 using ..MeshTypes: Mesh, boundary_faces, nnodes, ntris, ntets, validate
 using ..Predicates: orient3
+using ..StructuredNumerics: _certify_tet_volume, _throw_simplex_validation
 
 export mesh_transfinite_prism
 
@@ -26,8 +27,6 @@ const _DEFAULT_MAX_NODES = 10_000_000
 const _DEFAULT_MAX_TETS = 60_000_000
 const _DEFAULT_MAX_BOUNDARY_TRIANGLES = 20_000_000
 const _AFFINE_TOLERANCE = 4096eps(Float64)
-const _VOLUME_ULPS = 65_536
-const _VOLUME_FAST_CONDITION = 2.0^-12
 
 function _checked_add(a::Int, b::Int, what::AbstractString)
     try
@@ -53,7 +52,9 @@ function _checked_mul(what::AbstractString, values::Int...)
     return result
 end
 
-function _limit(value::Integer, name::AbstractString)
+function _limit(value, name::AbstractString)
+    value isa Integer || throw(ArgumentError(
+        "$_CALLER: $name must be an integer"))
     value isa Bool && throw(ArgumentError(
         "$_CALLER: $name must not be Bool"))
     value >= 0 || throw(ArgumentError(
@@ -154,8 +155,18 @@ function _point3(raw, index::Int)
     end
     count == 3 || throw(ArgumentError(
         "$_CALLER: corner $index must have exactly three coordinates"))
+    values = try
+        (raw[1], raw[2], raw[3])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$_CALLER: corner $index coordinates must be Float64-representable: " *
+            sprint(showerror, err)))
+    end
+    any(value -> value isa Bool, values) && throw(ArgumentError(
+        "$_CALLER: corner $index coordinates must not be Bool"))
     point = try
-        (Float64(raw[1]), Float64(raw[2]), Float64(raw[3]))
+        (Float64(values[1]), Float64(values[2]), Float64(values[3]))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError(
@@ -339,114 +350,10 @@ function _canonical_triangles(tris)
     return result
 end
 
-function _exact_determinant_measure(a, b, c, d)
-    rational = Rational{BigInt}
-    points = ntuple(4) do index
-        point = (a, b, c, d)[index]
-        ntuple(dimension -> rational(point[dimension]), 3)
-    end
-    edge1 = ntuple(dimension -> points[2][dimension] - points[1][dimension], 3)
-    edge2 = ntuple(dimension -> points[3][dimension] - points[1][dimension], 3)
-    edge3 = ntuple(dimension -> points[4][dimension] - points[1][dimension], 3)
-    determinant = abs(
-        edge1[1] * (edge2[2] * edge3[3] - edge2[3] * edge3[2]) -
-        edge1[2] * (edge2[1] * edge3[3] - edge2[3] * edge3[1]) +
-        edge1[3] * (edge2[1] * edge3[2] - edge2[2] * edge3[1]))
-    iszero(determinant) && throw(ArgumentError(
-        "$_CALLER: exact determinant vanished during volume certification"))
-    numerator_value = numerator(determinant)
-    denominator_value = denominator(determinant)
-    denominator_exponent = trailing_zeros(denominator_value)
-    denominator_value == (big(1) << denominator_exponent) || throw(ErrorException(
-        "$_CALLER: internal dyadic determinant invariant failed"))
-    numerator_bits = ndigits(numerator_value; base=2)
-    # At most 53 bits: every retained integer is then exactly representable as
-    # Float64 and cannot round upward from 2^53-1 to the next binade.
-    retained_bits = min(numerator_bits, 53)
-    shift = numerator_bits - retained_bits
-    leading = numerator_value >> shift
-    mantissa = ldexp(Float64(leading), -retained_bits)
-    (isfinite(mantissa) && 0.5 <= mantissa < 1.0) || throw(ErrorException(
-        "$_CALLER: internal exact determinant scaling invariant failed"))
-    return mantissa, numerator_bits - denominator_exponent
-end
-
-function _determinant_measure(a, b, c, d)
-    edge1 = _sub3(b, a)
-    edge2 = _sub3(c, a)
-    edge3 = _sub3(d, a)
-    scale1 = _maxabs3(edge1)
-    scale2 = _maxabs3(edge2)
-    scale3 = _maxabs3(edge3)
-    if !(isfinite(scale1) && isfinite(scale2) && isfinite(scale3) &&
-         scale1 > 0 && scale2 > 0 && scale3 > 0)
-        return _exact_determinant_measure(a, b, c, d)
-    end
-    first = (edge1[1] / scale1, edge1[2] / scale1, edge1[3] / scale1)
-    second = (edge2[1] / scale2, edge2[2] / scale2, edge2[3] / scale2)
-    third = (edge3[1] / scale3, edge3[2] / scale3, edge3[3] / scale3)
-    determinant =
-        first[1] * (second[2] * third[3] - second[3] * third[2]) -
-        first[2] * (second[1] * third[3] - second[3] * third[1]) +
-        first[3] * (second[1] * third[2] - second[2] * third[1])
-    permanent =
-        abs(first[1]) * (abs(second[2] * third[3]) +
-                         abs(second[3] * third[2])) +
-        abs(first[2]) * (abs(second[1] * third[3]) +
-                         abs(second[3] * third[1])) +
-        abs(first[3]) * (abs(second[1] * third[2]) +
-                         abs(second[2] * third[1]))
-    # Independent column scaling avoids exponent under/overflow. A stronger
-    # angular-conditioning floor than the sign predicate is intentional:
-    # this value feeds a relative conservation audit, so an otherwise correct
-    # determinant sign is insufficient when cancellation has already consumed
-    # enough bits to fabricate material volume.
-    if !(isfinite(determinant) && isfinite(permanent) &&
-         abs(determinant) > _VOLUME_FAST_CONDITION * permanent)
-        return _exact_determinant_measure(a, b, c, d)
-    end
-    mantissa, exponent = frexp(abs(determinant))
-    for scale in (scale1, scale2, scale3)
-        scale_mantissa, scale_exponent = frexp(scale)
-        mantissa *= scale_mantissa
-        exponent += scale_exponent
-    end
-    adjustment_mantissa, adjustment_exponent = frexp(mantissa)
-    return adjustment_mantissa, exponent + adjustment_exponent
-end
-
 function _certify_volume(coords, tets, corners)
-    expected_mantissa, expected_exponent = _determinant_measure(
-        corners[1], corners[2], corners[3], corners[4])
-    expected = 3expected_mantissa
-    total = 0.0
-    compensation = 0.0
-    @inbounds for tet in axes(tets, 2)
-        mantissa, exponent = _determinant_measure(
-            _node(coords, tets[1, tet]), _node(coords, tets[2, tet]),
-            _node(coords, tets[3, tet]), _node(coords, tets[4, tet]))
-        exponent_delta = exponent - expected_exponent
-        exponent_delta <= 1023 || throw(ArgumentError(
-            "$_CALLER: represented tetrahedron $tet is too large relative " *
-            "to the affine prism volume"))
-        relative = exponent_delta < -1074 ? 0.0 : ldexp(mantissa, exponent_delta)
-        isfinite(relative) || throw(ArgumentError(
-            "$_CALLER: represented tetrahedron $tet has a non-finite " *
-            "relative volume"))
-        corrected = relative - compensation
-        next_total = total + corrected
-        compensation = (next_total - total) - corrected
-        total = next_total
-    end
-    isfinite(total) || throw(ArgumentError(
-        "$_CALLER: represented tetrahedron volume sum is not finite"))
-    tolerance = _VOLUME_ULPS * eps(max(expected, total))
-    error = abs(total - expected)
-    (isfinite(error) && error <= tolerance) || throw(ArgumentError(
-        "$_CALLER: represented tetrahedra do not conserve the affine prism " *
-        "volume (sum $total, expected $expected, error $error exceeds " *
-        "tolerance $tolerance)"))
-    return nothing
+    return _certify_tet_volume(
+        coords, tets, (corners[1], corners[2], corners[3], corners[4]),
+        3, _CALLER, "affine prism")
 end
 
 """
@@ -487,9 +394,9 @@ values.
 function mesh_transfinite_prism(corners, cells=(1, 1, 1);
                                 volume_tag=0,
                                 face_tags=(0, 0, 0, 0, 0),
-                                max_nodes::Integer=_DEFAULT_MAX_NODES,
-                                max_tets::Integer=_DEFAULT_MAX_TETS,
-                                max_boundary_triangles::Integer=
+                                max_nodes=_DEFAULT_MAX_NODES,
+                                max_tets=_DEFAULT_MAX_TETS,
+                                max_boundary_triangles=
                                     _DEFAULT_MAX_BOUNDARY_TRIANGLES)
     node_limit = _limit(max_nodes, "max_nodes")
     tet_limit = _limit(max_tets, "max_tets")
@@ -681,9 +588,7 @@ function mesh_transfinite_prism(corners, cells=(1, 1, 1);
     mesh = Mesh(coords; tris=tris, tets=tets, tri_tag=tri_tags,
                 tet_tag=fill(converted_volume_tag, tet_count))
     diagnostic = validate(mesh)
-    diagnostic.ok || throw(ErrorException(
-        "$_CALLER: constructed mesh failed validation: " *
-        join(diagnostic.messages, "; ")))
+    diagnostic.ok || _throw_simplex_validation(_CALLER, diagnostic.messages)
     (nnodes(mesh), ntris(mesh), ntets(mesh)) ==
         (node_count, triangle_count, tet_count) || throw(ErrorException(
         "$_CALLER: finalized mesh count invariant failed"))

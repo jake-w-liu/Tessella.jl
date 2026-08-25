@@ -181,7 +181,8 @@ patches implement Gmsh's specific triangular and average-chord Coons interpolati
 for already-discretized, count-matched boundary chains. Four-sided grids can also be
 emitted as Gmsh-compatible first-order quadrangles with exact projected
 corner-Jacobian certification. Positively ordered affine eight-corner blocks
-implement Gmsh's unrecombined six-tetrahedron transfinite volume subdivision;
+implement Gmsh's unrecombined six-tetrahedron transfinite volume subdivision with
+exact-dyadic remote-grid interpolation and a represented-volume conservation audit;
 canonical affine triangular prisms implement Gmsh's legacy collapsed-grid five-face
 tetrahedral path; positively ordered affine eight-corner blocks can also be emitted
 as first-order recombined hexahedra with type-3 boundary quadrangles. Planar

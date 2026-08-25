@@ -498,6 +498,8 @@ end
             corners; max_hexahedra=1.0)
         @test_throws ArgumentError mesh_transfinite_hex(
             corners; max_boundary_quadrangles=false)
+        boolean_corner = Any[corners...]; boolean_corner[2] = (true, 0.0, 0.0)
+        @test_throws ArgumentError mesh_transfinite_hex(boolean_corner)
         bounded = mesh_transfinite_hex(
             corners, (2, 2, 1); max_nodes=18, max_hexahedra=4,
             max_boundary_quadrangles=16)

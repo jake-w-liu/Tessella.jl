@@ -154,6 +154,52 @@ end
         center_mesh = mesh_transfinite_volume(center_cancellation)
         @test validate(center_mesh).ok
         @test ntets(center_mesh) == 6
+
+        # Nested Float64 interpolation lost about 2% of this represented affine
+        # volume near a large translation. Exact dyadic interpolation must
+        # preserve the corner-defined material measure.
+        base = 1e100
+        ulp = eps(base)
+        point(offset) = ntuple(d -> base + offset[d] * ulp, 3)
+        add_offsets(a, b) = ntuple(d -> a[d] + b[d], 3)
+        ru = (14, 4, -1); rv = (1, 30, 2); rw = (4, 2, 14)
+        zero_offset = (0, 0, 0)
+        remote = point.((zero_offset, ru, add_offsets(ru, rv), rv, rw,
+                         add_offsets(ru, rw),
+                         add_offsets(add_offsets(ru, rv), rw),
+                         add_offsets(rv, rw)))
+        remote_mesh = mesh_transfinite_volume(remote, (4, 4, 4))
+        R = Rational{BigInt}
+        exact_u = R.(remote[2]) .- R.(remote[1])
+        exact_v = R.(remote[4]) .- R.(remote[1])
+        exact_w = R.(remote[5]) .- R.(remote[1])
+        exact_cross = (exact_v[2] * exact_w[3] - exact_v[3] * exact_w[2],
+                       exact_v[3] * exact_w[1] - exact_v[1] * exact_w[3],
+                       exact_v[1] * exact_w[2] - exact_v[2] * exact_w[1])
+        exact_volume = Float64(abs(sum(exact_u .* exact_cross)))
+        @test validate(remote_mesh).ok
+        @test _transfinite_mesh_volume(remote_mesh) ≈ exact_volume rtol=8eps(Float64)
+        remote_corner_nodes = (1, 5, 25, 21, 101, 105, 125, 121)
+        @test all(node(remote_mesh, remote_corner_nodes[index]) == remote[index]
+                  for index in 1:8)
+        @test mesh_crc(remote_mesh).sha ==
+              "cfdebd9e1af30eb255ed966e95bc3999f89d8062872d5cdb370647aa1737dfa8"
+
+        # The exact interpolation path is reserved for exactly affine input.
+        # A tolerated one-ULP corner residual must not be silently discarded.
+        wide_offset = Int64(4_000_000_000_000)
+        remote_origin = (base, base, base)
+        remote_u = (wide_offset * ulp, 0.0, 0.0)
+        remote_v = (0.0, wide_offset * ulp, 0.0)
+        remote_w = (0.0, 0.0, wide_offset * ulp)
+        almost_affine = _affine_corners(
+            remote_origin, remote_u, remote_v, remote_w)
+        almost_affine[3] = (nextfloat(almost_affine[3][1]),
+                            almost_affine[3][2], almost_affine[3][3])
+        almost_mesh = mesh_transfinite_volume(almost_affine, (4, 4, 4))
+        almost_node_id(i, j, k) = i + 1 + 5 * (j + 5k)
+        @test node(almost_mesh, almost_node_id(4, 4, 0)) == almost_affine[3]
+        @test validate(almost_mesh).ok
     end
 
     @testset "validated blockers and pre-allocation resource limits" begin
@@ -169,6 +215,8 @@ end
         @test_throws ArgumentError mesh_transfinite_volume(nonfinite, (1, 1, 1))
         nonrepresentable = Any[corners...]; nonrepresentable[2] = (big(10)^1000, 0, 0)
         @test_throws ArgumentError mesh_transfinite_volume(nonrepresentable, (1, 1, 1))
+        boolean_corner = Any[corners...]; boolean_corner[2] = (true, 0.0, 0.0)
+        @test_throws ArgumentError mesh_transfinite_volume(boolean_corner, (1, 1, 1))
 
         warped = copy(corners); warped[7] = (2.0, 1.0, 1.001)
         @test_throws ArgumentError mesh_transfinite_volume(warped, (1, 1, 1))
@@ -211,7 +259,7 @@ end
         @test_throws ArgumentError mesh_transfinite_volume(corners; max_nodes=-1)
         @test_throws ArgumentError mesh_transfinite_volume(
             corners; max_nodes=big(typemax(Int32)) + 1)
-        @test_throws TypeError mesh_transfinite_volume(corners; max_nodes=18.0)
+        @test_throws ArgumentError mesh_transfinite_volume(corners; max_nodes=18.0)
 
         @test_throws ArgumentError mesh_transfinite_volume(corners; volume_tag=true)
         @test_throws ArgumentError mesh_transfinite_volume(corners; volume_tag=-1)
@@ -228,6 +276,54 @@ end
         thin = _affine_corners((1., 0., 0.), (eps(1.), 0., 0.),
                                (0., 1., 0.), (0., 0., 1.))
         @test_throws ArgumentError mesh_transfinite_volume(thin, (2, 1, 1))
+
+        # Nonzero exact predicates are insufficient when rounded grid nodes
+        # fabricate material. The global determinant certificate must block it.
+        remote_base = 1e100
+        remote_ulp = eps(remote_base)
+        remote_point(offset) = ntuple(
+            dimension -> remote_base + offset[dimension] * remote_ulp, 3)
+        add_offsets(a, b) = ntuple(dimension -> a[dimension] + b[dimension], 3)
+        loss_u = (-24, 20, -5)
+        loss_v = (69, 66, 34)
+        loss_w = (-63, 70, -46)
+        zero_offset = (0, 0, 0)
+        material_loss = remote_point.((
+            zero_offset, loss_u, add_offsets(loss_u, loss_v), loss_v, loss_w,
+            add_offsets(loss_u, loss_w),
+            add_offsets(add_offsets(loss_u, loss_v), loss_w),
+            add_offsets(loss_v, loss_w)))
+        material_error = try
+            mesh_transfinite_volume(material_loss, (3, 4, 2))
+            nothing
+        catch err
+            err
+        end
+        @test material_error isa ArgumentError
+        @test occursin("do not conserve the affine block volume",
+                       sprint(showerror, material_error))
+
+        measure_base = ldexp(1.5, 570)
+        measure_ulp = eps(measure_base)
+        measure_point(offset) = ntuple(
+            dimension -> measure_base + offset[dimension] * measure_ulp, 3)
+        measure_u = (40, 30, 23)
+        measure_v = (94, -95, -13)
+        measure_w = (64, 93, -67)
+        measure_overflow = measure_point.((
+            zero_offset, measure_u, add_offsets(measure_u, measure_v), measure_v,
+            measure_w, add_offsets(measure_u, measure_w),
+            add_offsets(add_offsets(measure_u, measure_v), measure_w),
+            add_offsets(measure_v, measure_w)))
+        measure_error = try
+            mesh_transfinite_volume(measure_overflow, (3, 1, 5))
+            nothing
+        catch err
+            err
+        end
+        @test measure_error isa ArgumentError
+        @test occursin("must remain finite Float64 values",
+                       sprint(showerror, measure_error))
         @test isempty(Test.detect_ambiguities(
             Tessella.TransfiniteVolume; recursive=true))
         @test isempty(Docs.undocumented_names(
