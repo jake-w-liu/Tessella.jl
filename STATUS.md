@@ -94,6 +94,43 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening simplex/mixed MSH
+I/O, STL ingestion, and the straight-curve/recombined-quad public boundaries:
+
+- ASCII MSH v2.2/v4.1 input is resource-bounded and validated before return.
+  MSH4 accepts Gmsh-compatible implicit entities, empty blocks, and repeated
+  entity/element sections; repeated physical-name records must agree. A fixed
+  repeated-section mesh has SHA-256
+  `4c4f930b531f67093077abbde261fe1e48b4e163ce4885b89cd2bca83581bf26`.
+  Writers validate mutable connectivity before indexing and replace targets
+  atomically. Standard names preserve literal backslashes and tabs, while
+  Gmsh-unsafe quotes/line breaks and its measured 128-byte name overflow are
+  explicit blockers.
+- **VERIFIED (Gmsh 4.15.2 rewrite oracle):** simplex and mixed MSH4 writers now
+  classify nodes on an element-owning entity. Gmsh rewrites ASCII and binary
+  sources without the former doubled node count, and Tessella rereads the
+  rewritten files with identical connectivity/physical-tag CRCs. The same
+  oracle preserved literal backslashes and tabs. The aggregate enclosure probe
+  now records Gmsh's partial file as structurally invalid because it contains
+  duplicate surface cells, while independently confirming zero volume cells.
+- Exact STL welding now handles opposite finite Float64 extrema at zero or
+  positive tolerance, checks facet/node/file ceilings before corresponding
+  growth, and converts malformed text failures to controlled diagnostics. A
+  seeded 5,000-case byte-mutation audit of each MSH and STL reader produced only
+  valid results or `ArgumentError` (MSH: 65/4,935; STL: 48/4,952); the `.geo`
+  scanner likewise returned 850 valid parses and 4,150 controlled blockers.
+  The small end-oriented HWall regression has parameter SHA-256
+  `757122bf5807435f676f31ffe748f46bc1577a80d13735f9d8f862180bb341b8`;
+  its subtraction tolerance is scaled by the represented endpoint.
+- Bounds-checked focused suites passed under Julia 1.12.7 and Julia 1.11.9:
+  IO 383/383, Elements 2,870/2,870, straight curves 514/514, and recombined
+  quads 130/130. The final full package gate passed 164,607/164,607 assertions
+  in 13m15.6s, and aggregate validation exited 0 against Gmsh 4.15.2-git.
+  Recursive ambiguity detection and the public documentation scan returned
+  zero. The organization gate still finds only `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl` at their respective top
+  levels; all other Julia files remain in categorized subfolders.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after bounding exact 3-D
 tetrahedralization, PLC recovery, and conforming size refinement:
 

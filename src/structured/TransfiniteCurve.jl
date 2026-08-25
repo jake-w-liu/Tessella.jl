@@ -539,11 +539,17 @@ function transfinite_curve_hwall(num_nodes;
     if law === :progression
         wall_parameter = orientation === :start ?
             parameters[2] - parameters[1] : parameters[end] - parameters[end-1]
-        tolerance = max(256eps(Float64) * expected_wall, 8eps(expected_wall))
+        # At the start, the wall parameter is represented next to zero. At the
+        # end it is recovered by subtracting a node next to one from the endpoint,
+        # so its unavoidable absolute rounding error is scaled by `eps(1.0)`.
+        subtraction_scale=orientation===:start ? expected_wall : 1.0
+        tolerance = max(256eps(Float64) * expected_wall,
+                        8eps(expected_wall),eps(subtraction_scale))
         abs(wall_parameter - expected_wall) <= tolerance ||
-            throw(ErrorException(
+            throw(ArgumentError(
                 "$caller: solved distribution's wall segment measures " *
-                "$wall_parameter but the requested wall height implies $expected_wall"))
+                "$wall_parameter but the requested wall height implies " *
+                "$expected_wall; choose a wall_height resolvable at this orientation"))
     end
 
     return parameters

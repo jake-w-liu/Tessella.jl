@@ -18,6 +18,7 @@ evaluator: global mesh sizing, physical groups, and the raw background-field gra
 module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
+using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names
 using Printf: @printf, @sprintf
 
 export read_msh, write_msh, MshFile
@@ -31,6 +32,38 @@ const MSH_TET   = 4
 const MSH_TET2  = 11    # 10-node (quadratic) tet — read as its 4 corner vertices
 const _NN = Dict(MSH_POINT => 1, MSH_LINE => 2, MSH_TRI => 3, MSH_TET => 4, MSH_TET2 => 10)
 const _EDIM = Dict(MSH_POINT => 0, MSH_LINE => 1, MSH_TRI => 2, MSH_TET => 3, MSH_TET2 => 3)
+const _DEFAULT_MAX_IO_NAME_BYTES = 1 << 20
+
+@inline function _io_limit(value, caller::AbstractString,
+                           name::AbstractString; ceiling::Int=typemax(Int))
+    value isa Integer || throw(ArgumentError(
+        "$caller: $name must be an integer"))
+    value isa Bool && throw(ArgumentError(
+        "$caller: $name must not be Bool"))
+    converted = try
+        Int(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name is outside Int bounds"))
+    end
+    0 <= converted <= ceiling || throw(ArgumentError(
+        "$caller: $name must lie in 0:$ceiling (got $value)"))
+    return converted
+end
+
+struct _MshReadLimits
+    nodes::Int
+    elements::Int
+    entities::Int
+    blocks::Int
+    physical_names::Int
+    name_bytes::Int
+end
+
+const _DEFAULT_MSH_READ_LIMITS = _MshReadLimits(
+    Int(typemax(Int32)), Int(typemax(Int32)),
+    Int(typemax(Int32)), Int(typemax(Int32)),
+    Int(typemax(Int32)), _DEFAULT_MAX_IO_NAME_BYTES)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # Reading
@@ -62,10 +95,12 @@ mutable struct _Accum
     pnames::Dict{Tuple{Int,Int},String}
     ep::Dict{Tuple{Int,Int},Int}    # (entityDim, entityTag) → physical tag (v4)
     element_tags::Set{Int}
+    physical_name_records::Int
+    element_blocks::Int
     _Accum() = new(Float64[], Float64[], Float64[], Dict{Int,Int}(),
                    NTuple{2,Int32}[], NTuple{3,Int32}[], NTuple{4,Int32}[],
                    Int32[], Int32[], Int32[], Dict{Tuple{Int,Int},String}(),
-                   Dict{Tuple{Int,Int},Int}(),Set{Int}())
+                   Dict{Tuple{Int,Int},Int}(),Set{Int}(),0,0)
 end
 
 @inline function _nodeidx!(acc::_Accum, tag::Int)
@@ -73,27 +108,69 @@ end
 end
 
 """
-    read_msh(path) -> MshFile
+    read_msh(path; tessella_extensions=false,
+             max_nodes=typemax(Int32), max_elements=typemax(Int32),
+             max_entities=typemax(Int32),
+             max_blocks=typemax(Int32),
+             max_physical_names=typemax(Int32),
+             max_name_bytes=1_048_576,
+             max_file_bytes=typemax(Int)) -> MshFile
 
 Read a gmsh ASCII `.msh` file (format 2.2 or 4.1). Node/element tags are
-relabelled to a compact `1:N`; per-element physical tags are preserved.
+relabelled to a compact `1:N`; per-element physical tags are preserved. Resource
+limits are checked against section headers before record-sized allocation, and the
+parsed simplex mesh is validated before it is returned. MSH4 files without the
+optional `\$Entities` section receive neutral implicit entities. Repeated
+`\$Entities` and `\$Elements` sections are accumulated; repeated physical names
+must agree. Backslashes in physical names are literal. Set
+`tessella_extensions=true` only when reading the escaped-name extension produced by
+`write_msh(...; gmsh_compatible=false)`.
 """
-function read_msh(path::AbstractString)
+function read_msh(path;
+                  tessella_extensions=false,
+                  max_nodes=typemax(Int32),
+                  max_elements=typemax(Int32),
+                  max_entities=typemax(Int32),
+                  max_blocks=typemax(Int32),
+                  max_physical_names=typemax(Int32),
+                  max_name_bytes=_DEFAULT_MAX_IO_NAME_BYTES,
+                  max_file_bytes=typemax(Int))
+    caller="read_msh"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    tessella_extensions isa Bool || throw(ArgumentError(
+        "$caller: tessella_extensions must be Bool"))
+    limits=_MshReadLimits(
+        _io_limit(max_nodes,caller,"max_nodes";ceiling=Int(typemax(Int32))),
+        _io_limit(max_elements,caller,"max_elements";ceiling=Int(typemax(Int32))),
+        _io_limit(max_entities,caller,"max_entities";ceiling=Int(typemax(Int32))),
+        _io_limit(max_blocks,caller,"max_blocks";ceiling=Int(typemax(Int32))),
+        _io_limit(max_physical_names,caller,"max_physical_names";
+                  ceiling=Int(typemax(Int32))),
+        _io_limit(max_name_bytes,caller,"max_name_bytes"))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
     open(path, "r") do io
         try
-            return _read_msh(io)
+            return _read_msh(io,limits,tessella_extensions)
         catch err
             err isa InterruptException && rethrow()
-            err isa EOFError && throw(ArgumentError("IO: truncated .msh file"))
+            err isa EOFError && throw(ArgumentError("read_msh: truncated .msh file"))
             rethrow()
         end
     end
 end
 
-function _read_msh(io::Base.IO)
+_read_msh(io::Base.IO)=_read_msh(io,_DEFAULT_MSH_READ_LIMITS,false)
+_read_msh(io::Base.IO,limits::_MshReadLimits)=_read_msh(io,limits,false)
+
+function _read_msh(io::Base.IO,limits::_MshReadLimits,
+                   tessella_extensions::Bool)
     acc = _Accum()
     version = 0.0
-    seen_format=false;seen_names=false;seen_nodes=false;seen_elements=false;seen_entities=false
+    seen_format=false;seen_nodes=false;seen_elements=false
     while !eof(io)
         line = strip(readline(io))
         isempty(line) && continue
@@ -111,38 +188,39 @@ function _read_msh(io::Base.IO)
             _expect_end(io, "\$EndMeshFormat")
         elseif line == "\$PhysicalNames"
             seen_format || throw(ArgumentError("IO: \$PhysicalNames appeared before \$MeshFormat"))
-            seen_names && throw(ArgumentError("IO: duplicate \$PhysicalNames section"))
-            seen_names=true
-            _read_physical_names!(acc, io)
+            _read_physical_names!(acc, io, limits, tessella_extensions)
         elseif line == "\$Nodes"
             seen_nodes && throw(ArgumentError("IO: duplicate \$Nodes section"))
             seen_elements && throw(ArgumentError("IO: \$Nodes must precede \$Elements"))
             seen_nodes=true
             version != 0 || throw(ArgumentError("IO: \$Nodes appeared before \$MeshFormat"))
-            version==4.1 && !seen_entities &&
-                throw(ArgumentError("IO: v4 \$Entities must precede \$Nodes"))
-            version < 3 ? _read_nodes_v2!(acc, io) : _read_nodes_v4!(acc, io)
+            version < 3 ? _read_nodes_v2!(acc, io, limits) :
+                          _read_nodes_v4!(acc, io, limits)
         elseif line == "\$Elements"
-            seen_elements && throw(ArgumentError("IO: duplicate \$Elements section"))
             seen_nodes || throw(ArgumentError("IO: \$Elements appeared before \$Nodes"))
+            seen_elements && version<3 && throw(ArgumentError(
+                "IO: repeated \$Elements sections require MSH v4.1"))
             seen_elements=true
             version != 0 || throw(ArgumentError("IO: \$Elements appeared before \$MeshFormat"))
-            version < 3 ? _read_elements_v2!(acc, io) : _read_elements_v4!(acc, io)
+            version < 3 ? _read_elements_v2!(acc, io, limits) :
+                          _read_elements_v4!(acc, io, limits)
         elseif line == "\$Entities"
             seen_format || throw(ArgumentError("IO: \$Entities appeared before \$MeshFormat"))
-            seen_entities && throw(ArgumentError("IO: duplicate \$Entities section"))
             (seen_nodes || seen_elements) &&
                 throw(ArgumentError("IO: \$Entities must precede \$Nodes and \$Elements"))
-            seen_entities=true
             version == 4.1 || throw(ArgumentError("IO: \$Entities is only valid in MSH v4.1"))
-            _read_entities_v4!(acc, io)
+            _read_entities_v4!(acc, io, limits)
         elseif startswith(line, "\$") && !startswith(line, "\$End")
             _skip_section(io, "\$End" * line[2:end])   # ignore unknown sections
         end
     end
     version != 0 || throw(ArgumentError("IO: missing \$MeshFormat section"))
     seen_nodes || throw(ArgumentError("IO: missing \$Nodes section"))
-    return MshFile(_to_mesh(acc), acc.pnames)
+    mesh=_to_mesh(acc)
+    diagnostic=validate(mesh)
+    diagnostic.ok || throw(ArgumentError(
+        "read_msh: parsed mesh is invalid — " * join(diagnostic.messages,"; ")))
+    return MshFile(mesh, acc.pnames)
 end
 
 function _expect_end(io, tok)
@@ -158,24 +236,44 @@ function _skip_section(io, endtok)
     throw(ArgumentError("IO: unterminated section (missing $endtok)"))
 end
 
-function _read_physical_names!(acc, io)
+function _read_physical_names!(acc, io, limits::_MshReadLimits,
+                               tessella_extensions::Bool)
     n = parse(Int, strip(readline(io)))
     n >= 0 || throw(ArgumentError("IO: negative physical-name count $n"))
     n<=typemax(Int32) || throw(ArgumentError("IO: physical-name count exceeds Int32"))
+    n<=limits.physical_names-acc.physical_name_records || throw(ArgumentError(
+        "read_msh: physical-name count exceeds max_physical_names=$(limits.physical_names)"))
+    acc.physical_name_records+=n
     for _ in 1:n
         line = strip(readline(io))
         # format: `dim tag "name"`. Take the name between the first and last quote VERBATIM
         # — splitting on whitespace and rejoining collapses runs of interior spaces/tabs and
         # breaks the name-preservation round-trip contract.
-        m = match(r"^([+-]?\d+)\s+([+-]?\d+)\s+\"((?:\\.|[^\"])*)\"\s*$", line)
+        pattern=tessella_extensions ?
+            r"^([+-]?\d+)\s+([+-]?\d+)\s+\"((?:\\.|[^\"])*)\"\s*$" :
+            r"^([+-]?\d+)\s+([+-]?\d+)\s+\"([^\"]*)\"\s*$"
+        m = match(pattern, line)
         m === nothing && throw(ArgumentError("IO: malformed physical-name record '$line'"))
         dim = parse(Int,m.captures[1]); tag = parse(Int,m.captures[2])
         0 <= dim <= 3 || throw(ArgumentError("IO: physical-name dimension $dim is outside 0:3"))
         tag > 0 || throw(ArgumentError("IO: physical-name tag must be positive (got $tag)"))
         _int32_tag(tag,"physical-name")
-        haskey(acc.pnames,(dim,tag)) &&
-            throw(ArgumentError("IO: duplicate physical name for dimension/tag ($dim,$tag)"))
-        acc.pnames[(dim, tag)] = _unescape_name(m.captures[3])
+        name=tessella_extensions ? _unescape_name(m.captures[3]) :
+                                   String(m.captures[3])
+        ncodeunits(name)<=limits.name_bytes || throw(ArgumentError(
+            "read_msh: physical name for ($dim,$tag) exceeds " *
+            "max_name_bytes=$(limits.name_bytes)"))
+        isvalid(name) || throw(ArgumentError(
+            "read_msh: physical name for ($dim,$tag) is not valid UTF-8"))
+        occursin('\0',name) && throw(ArgumentError(
+            "read_msh: physical name for ($dim,$tag) contains a NUL byte"))
+        key=(dim,tag)
+        if haskey(acc.pnames,key)
+            acc.pnames[key]==name || throw(ArgumentError(
+                "IO: conflicting physical names for dimension/tag ($dim,$tag)"))
+        else
+            acc.pnames[key]=name
+        end
     end
     _expect_end(io, "\$EndPhysicalNames")
 end
@@ -198,11 +296,13 @@ function _unescape_name(s::AbstractString)
 end
 
 # ── v2 ──────────────────────────────────────────────────────────────────────────
-function _read_nodes_v2!(acc, io)
+function _read_nodes_v2!(acc, io, limits::_MshReadLimits)
     n = parse(Int, strip(readline(io)))
     n >= 0 || throw(ArgumentError("IO: negative v2 node count $n"))
     n <= typemax(Int32)-length(acc.node_x) ||
         throw(ArgumentError("IO: v2 node count exceeds Int32 indexing"))
+    n <= limits.nodes-length(acc.node_x) || throw(ArgumentError(
+        "read_msh: v2 node count exceeds max_nodes=$(limits.nodes)"))
     for _ in 1:n
         p = split(strip(readline(io)))
         length(p) == 4 || throw(ArgumentError("IO: malformed v2 node record (expected 4 fields)"))
@@ -217,22 +317,26 @@ function _read_nodes_v2!(acc, io)
     _expect_end(io, "\$EndNodes")
 end
 
-function _read_elements_v2!(acc, io)
+function _read_elements_v2!(acc, io, limits::_MshReadLimits)
     n = parse(Int, strip(readline(io)))
     n >= 0 || throw(ArgumentError("IO: negative v2 element count $n"))
     n<=typemax(Int32) || throw(ArgumentError("IO: v2 element count exceeds Int32"))
+    n<=limits.elements-length(acc.element_tags) || throw(ArgumentError(
+        "read_msh: v2 element count exceeds max_elements=$(limits.elements)"))
     for _ in 1:n
         p = split(strip(readline(io)))
         length(p) >= 3 || throw(ArgumentError("IO: malformed v2 element record"))
         _record_element_tag!(acc,parse(Int,p[1]))
         etype = parse(Int, p[2])
+        haskey(_NN,etype) || throw(ArgumentError(
+            "IO: unsupported gmsh element type $etype; refusing to silently discard cells"))
         ntags = parse(Int, p[3])
         ntags >= 0 || throw(ArgumentError("IO: negative element tag count $ntags"))
-        length(p) >= 3+ntags || throw(ArgumentError("IO: truncated v2 element tags"))
+        ntags <= length(p)-3 || throw(ArgumentError("IO: truncated v2 element tags"))
         phys = ntags >= 1 ? parse(Int, p[4]) : 0
         nodestart = 3 + ntags + 1
-        needed = get(_NN,etype,0)
-        needed == 0 || length(p) == nodestart+needed-1 ||
+        needed = _NN[etype]
+        length(p) == nodestart+needed-1 ||
             throw(ArgumentError("IO: element type $etype expects $needed node tags"))
         _push_element!(acc, etype, phys, @view p[nodestart:end])
     end
@@ -240,7 +344,7 @@ function _read_elements_v2!(acc, io)
 end
 
 # ── v4.1 ────────────────────────────────────────────────────────────────────────
-function _read_entities_v4!(acc, io)
+function _read_entities_v4!(acc, io, limits::_MshReadLimits)
     hdr = split(strip(readline(io)))
     length(hdr)==4 || throw(ArgumentError("IO: malformed v4 entity header"))
     nP, nC, nS, nV = parse.(Int, hdr[1:4])
@@ -250,6 +354,8 @@ function _read_entities_v4!(acc, io)
         throw(ArgumentError("IO: v4 entity count overflows Int"))
     end
     total<=typemax(Int32) || throw(ArgumentError("IO: v4 entity count exceeds Int32"))
+    total<=limits.entities-length(acc.ep) || throw(ArgumentError(
+        "read_msh: v4 entity count exceeds max_entities=$(limits.entities)"))
     _read_entity_block!(acc.ep, io, nP, 0)   # points
     _read_entity_block!(acc.ep, io, nC, 1)   # curves
     _read_entity_block!(acc.ep, io, nS, 2)   # surfaces
@@ -310,16 +416,17 @@ function _read_entity_block!(ep, io, count, dim)
     end
 end
 
-function _read_nodes_v4!(acc, io)
+function _read_nodes_v4!(acc, io, limits::_MshReadLimits)
     hdr = split(strip(readline(io)))
     length(hdr) == 4 || throw(ArgumentError("IO: malformed v4 node header"))
     numBlocks = parse(Int, hdr[1]); numNodes = parse(Int, hdr[2])
     declared_min=parse(Int,hdr[3]);declared_max=parse(Int,hdr[4])
     (numBlocks >= 0 && numNodes >= 0) || throw(ArgumentError("IO: negative v4 node count"))
     numNodes<=typemax(Int32) || throw(ArgumentError("IO: $numNodes nodes exceed Int32 indexing"))
-    numBlocks<=numNodes || throw(ArgumentError("IO: v4 node-block count exceeds node count"))
-    (numNodes==0)==(numBlocks==0) ||
-        throw(ArgumentError("IO: v4 node and node-block counts must both be zero or both be positive"))
+    numNodes<=limits.nodes-length(acc.node_x) || throw(ArgumentError(
+        "read_msh: v4 node count exceeds max_nodes=$(limits.nodes)"))
+    numBlocks<=limits.blocks || throw(ArgumentError(
+        "read_msh: v4 node-block count exceeds max_blocks=$(limits.blocks)"))
     if numNodes==0
         (declared_min==0&&declared_max==0) ||
             throw(ArgumentError("IO: empty v4 node section must declare tag range 0 0"))
@@ -334,11 +441,10 @@ function _read_nodes_v4!(acc, io)
         edim=parse(Int,bh[1]);etag=parse(Int,bh[2]);parametric=parse(Int,bh[3])
         0<=edim<=3 || throw(ArgumentError("IO: v4 node-block dimension $edim is outside 0:3"))
         etag>0 || throw(ArgumentError("IO: v4 node-block entity tag must be positive"))
-        haskey(acc.ep,(edim,etag)) ||
-            throw(ArgumentError("IO: v4 node block references undeclared entity ($edim,$etag)"))
+        _ensure_io_entity!(acc,edim,etag,limits,"node block")
         parametric in (0,1) || throw(ArgumentError("IO: v4 node-block parametric flag must be 0 or 1"))
         nInBlock = parse(Int, bh[4])
-        nInBlock > 0 || throw(ArgumentError("IO: v4 node blocks must be nonempty"))
+        nInBlock >= 0 || throw(ArgumentError("IO: negative v4 node-block size"))
         nInBlock <= numNodes-nread || throw(ArgumentError("IO: v4 node blocks exceed declared node count $numNodes"))
         tags = Int[]
         blocktags=Set{Int}()
@@ -372,7 +478,7 @@ function _read_nodes_v4!(acc, io)
     _expect_end(io, "\$EndNodes")
 end
 
-function _read_elements_v4!(acc, io)
+function _read_elements_v4!(acc, io, limits::_MshReadLimits)
     ep = acc.ep
     hdr = split(strip(readline(io)))
     length(hdr) == 4 || throw(ArgumentError("IO: malformed v4 element header"))
@@ -381,9 +487,11 @@ function _read_elements_v4!(acc, io)
     declared_min=parse(Int,hdr[3]);declared_max=parse(Int,hdr[4])
     (numBlocks >= 0 && numElements >= 0) || throw(ArgumentError("IO: negative v4 element count"))
     numElements<=typemax(Int32) || throw(ArgumentError("IO: v4 element count exceeds Int32"))
-    numBlocks<=numElements || throw(ArgumentError("IO: v4 element-block count exceeds element count"))
-    (numElements==0)==(numBlocks==0) || throw(ArgumentError(
-        "IO: v4 element and element-block counts must both be zero or both be positive"))
+    numElements<=limits.elements-length(acc.element_tags) || throw(ArgumentError(
+        "read_msh: v4 element count exceeds max_elements=$(limits.elements)"))
+    numBlocks<=limits.blocks-acc.element_blocks || throw(ArgumentError(
+        "read_msh: v4 element-block count exceeds max_blocks=$(limits.blocks)"))
+    acc.element_blocks+=numBlocks
     if numElements==0
         (declared_min==0&&declared_max==0) ||
             throw(ArgumentError("IO: empty v4 element section must declare tag range 0 0"))
@@ -399,11 +507,10 @@ function _read_elements_v4!(acc, io)
         etype = parse(Int, bh[3]); nInBlock = parse(Int, bh[4])
         0<=edim<=3 || throw(ArgumentError("IO: v4 element-block dimension $edim is outside 0:3"))
         etag>0 || throw(ArgumentError("IO: v4 element-block entity tag must be positive"))
-        haskey(ep,(edim,etag)) ||
-            throw(ArgumentError("IO: v4 element block references undeclared entity ($edim,$etag)"))
+        _ensure_io_entity!(acc,edim,etag,limits,"element block")
         haskey(_EDIM,etype) && _EDIM[etype]!=edim &&
             throw(ArgumentError("IO: element type $etype is incompatible with entity dimension $edim"))
-        nInBlock > 0 || throw(ArgumentError("IO: v4 element blocks must be nonempty"))
+        nInBlock >= 0 || throw(ArgumentError("IO: negative v4 element-block size"))
         nInBlock <= numElements-nread || throw(ArgumentError("IO: v4 element blocks exceed declared element count $numElements"))
         phys = get(ep, (edim, etag), 0)
         for _ in 1:nInBlock
@@ -422,6 +529,17 @@ function _read_elements_v4!(acc, io)
     numElements==0 || (actual_min==declared_min&&actual_max==declared_max) ||
         throw(ArgumentError("IO: v4 element-tag range does not match the element records"))
     _expect_end(io, "\$EndElements")
+end
+
+function _ensure_io_entity!(acc::_Accum,dim::Int,tag::Int,
+                            limits::_MshReadLimits,context::AbstractString)
+    key=(dim,tag)
+    haskey(acc.ep,key) && return nothing
+    length(acc.ep)<limits.entities || throw(ArgumentError(
+        "read_msh: implicit v4 entity count exceeds " *
+        "max_entities=$(limits.entities) while reading $context"))
+    acc.ep[key]=0
+    return nothing
 end
 
 @inline function _record_element_tag!(acc::_Accum,tag::Int)
@@ -495,14 +613,30 @@ end
 # ════════════════════════════════════════════════════════════════════════════════
 
 """
-    write_msh(path, mesh; version=2.2, physical_names=Dict())
+    write_msh(path, mesh; version=2.2, physical_names=Dict(),
+              gmsh_compatible=true)
 
 Write `mesh` to a gmsh ASCII `.msh` file. `version` is `2.2` or `4.1`.
 `physical_names` maps `(dim, tag) => name`. Per-cell physical tags come from the
 mesh's `*_tag` vectors; cells are grouped into entity blocks by `(dim, tag)`.
+Gmsh 4.15.2 treats backslashes and tabs literally but cannot preserve quoted or
+line-breaking physical names, and truncates serialized names beyond 128 bytes.
+Unsafe or oversized names are rejected. Set
+`gmsh_compatible=false`
+only for a Tessella-to-Tessella escaped-name round trip, and read that file with
+`read_msh(...; tessella_extensions=true)`.
 """
-function write_msh(path::AbstractString, mesh::Mesh; version::Real=2.2,
-                   physical_names::AbstractDict=Dict{Tuple{Int,Int},String}())
+function write_msh(path, mesh; version=2.2,
+                   physical_names=Dict{Tuple{Int,Int},String}(),
+                   gmsh_compatible=true)
+    path isa AbstractString || throw(ArgumentError(
+        "write_msh: path must be a string"))
+    mesh isa Mesh || throw(ArgumentError(
+        "write_msh: mesh must be a Mesh"))
+    version isa Real || throw(ArgumentError(
+        "write_msh: version must be real"))
+    version isa Bool && throw(ArgumentError(
+        "write_msh: version must not be Bool"))
     ver = try
         Float64(version)
     catch err
@@ -511,16 +645,32 @@ function write_msh(path::AbstractString, mesh::Mesh; version::Real=2.2,
     end
     ver in (2.2,4.1) ||
         throw(ArgumentError("write_msh: version must be 2.2 or 4.1 (got $version)"))
+    gmsh_compatible isa Bool || throw(ArgumentError(
+        "write_msh: gmsh_compatible must be Bool"))
     _validate_write_mesh(mesh)
+    names=_copy_physical_names(physical_names,"write_msh")
+    if gmsh_compatible
+        unsafe=Tuple{Int,Int}[]
+        for (key,name) in names
+            any(character -> character in ('\"','\n','\r'),name) &&
+                push!(unsafe,key)
+        end
+        isempty(unsafe) || throw(ArgumentError(
+            "write_msh: Gmsh 4.15.2 cannot preserve quoted or " *
+            "line-breaking physical name(s) " * join(sort!(unsafe),",") *
+            "; use gmsh_compatible=false only for a Tessella-only round trip"))
+    end
     target = abspath(path); parent = dirname(target)
     isdir(parent) || throw(ArgumentError("write_msh: parent directory does not exist: $parent"))
+    isdir(target) && throw(ArgumentError(
+        "write_msh: destination is a directory: $target"))
     # Build beside the destination and atomically rename only after a complete,
     # flushed write. A formatter/error cannot truncate a previously valid mesh.
     mktemp(parent) do tmp, io
         if ver == 2.2
-            _write_msh_v2(io, mesh, physical_names)
+            _write_msh_v2(io, mesh, names, gmsh_compatible)
         else
-            _write_msh_v4(io, mesh, physical_names)
+            _write_msh_v4(io, mesh, names, gmsh_compatible)
         end
         flush(io); close(io)
         mv(tmp,target;force=true)
@@ -529,6 +679,9 @@ function write_msh(path::AbstractString, mesh::Mesh; version::Real=2.2,
 end
 
 function _validate_write_mesh(m::Mesh)
+    diagnostic=validate(m)
+    diagnostic.ok || throw(ArgumentError(
+        "write_msh: mesh is invalid — " * join(diagnostic.messages,"; ")))
     @inbounds for i in 1:nnodes(m),d in 1:3
         isfinite(m.coords[d,i]) || throw(ArgumentError("write_msh: node $i has a non-finite coordinate"))
     end
@@ -541,27 +694,27 @@ function _validate_write_mesh(m::Mesh)
 end
 
 _escape_name(s::AbstractString) = replace(s, "\\"=>"\\\\", "\""=>"\\\"",
-                                           "\n"=>"\\n", "\r"=>"\\r")
+                                           "\n"=>"\\n", "\r"=>"\\r", "\t"=>"\\t")
 
-function _write_physical_names(io, physical_names)
+function _write_physical_names(io, physical_names, gmsh_compatible::Bool)
     isempty(physical_names) && return
+    length(physical_names)<=typemax(Int32) || throw(ArgumentError(
+        "write_msh: physical-name count exceeds Int32"))
     println(io, "\$PhysicalNames")
     println(io, length(physical_names))
     for ((dim, tag), name) in sort(collect(physical_names); by=x->x[1])
-        (dim isa Integer && 0 <= dim <= 3 && tag isa Integer) ||
-            throw(ArgumentError("write_msh: invalid physical-name key ($dim,$tag)"))
-        tag > 0 || throw(ArgumentError("write_msh: physical-name tag must be positive (got $tag)"))
-        _int32_tag(tag,"physical-name")
-        name isa AbstractString ||
-            throw(ArgumentError("write_msh: physical name for ($dim,$tag) must be a string"))
-        println(io, dim, " ", tag, " \"", _escape_name(name), "\"")
+        encoded=gmsh_compatible ? name : _escape_name(name)
+        ncodeunits(encoded)<=MSH_PHYSICAL_NAME_MAX_BYTES || throw(ArgumentError(
+            "write_msh: serialized physical name for ($dim,$tag) exceeds " *
+            "$MSH_PHYSICAL_NAME_MAX_BYTES bytes"))
+        println(io, dim, " ", tag, " \"", encoded, "\"")
     end
     println(io, "\$EndPhysicalNames")
 end
 
-function _write_msh_v2(io, m::Mesh, physical_names)
+function _write_msh_v2(io, m::Mesh, physical_names, gmsh_compatible::Bool)
     println(io, "\$MeshFormat"); println(io, "2.2 0 8"); println(io, "\$EndMeshFormat")
-    _write_physical_names(io, physical_names)
+    _write_physical_names(io, physical_names, gmsh_compatible)
     # nodes
     println(io, "\$Nodes"); println(io, nnodes(m))
     @inbounds for i in 1:nnodes(m)
@@ -588,9 +741,9 @@ function _write_msh_v2(io, m::Mesh, physical_names)
     println(io, "\$EndElements")
 end
 
-function _write_msh_v4(io, m::Mesh, physical_names)
+function _write_msh_v4(io, m::Mesh, physical_names, gmsh_compatible::Bool)
     println(io, "\$MeshFormat"); println(io, "4.1 0 8"); println(io, "\$EndMeshFormat")
-    _write_physical_names(io, physical_names)
+    _write_physical_names(io, physical_names, gmsh_compatible)
 
     # Group cells into (dim, tag) entity blocks so physical tags survive.
     segblocks = _group_cells(m.segs, m.seg_tag, 2)
@@ -598,21 +751,26 @@ function _write_msh_v4(io, m::Mesh, physical_names)
     tetblocks = _group_cells(m.tets, m.tet_tag, 4)
 
     # Entity tags are positive geometric identifiers, distinct from physical
-    # tags (where zero means "unclassified").  Number them independently per
-    # dimension and reserve one volume entity to classify the node block.
+    # tags (where zero means "unclassified"). Number them independently per
+    # dimension. Classify nodes on an entity that owns elements whenever one
+    # exists: Gmsh 4.15.2 corrupts the declared node count when it rewrites a
+    # mesh whose nodes live on an unrelated synthetic entity.
     segblocks = [(phys,i,cols) for (i,(phys,cols)) in enumerate(segblocks)]
     triblocks = [(phys,i,cols) for (i,(phys,cols)) in enumerate(triblocks)]
     tetblocks = [(phys,i,cols) for (i,(phys,cols)) in enumerate(tetblocks)]
-    node_entity = length(tetblocks)+1
+    node_dim,node_entity,synthetic_node_entity =
+        _msh_v4_node_owner(m,segblocks,triblocks,tetblocks)
 
     # Entities: one entity per (dim, physical tag) block, declaring its physical group.
-    _write_entities_v4(io, m, segblocks, triblocks, tetblocks, node_entity)
+    _write_entities_v4(
+        io,m,segblocks,triblocks,tetblocks,node_entity,synthetic_node_entity)
 
-    # Nodes: a single block on the synthetic volume entity when nonempty.
+    # Nodes use one deterministic owner. Other element entities can legitimately
+    # acquire empty node blocks when Gmsh rewrites the file.
     println(io, "\$Nodes")
     println(io, nnodes(m)==0 ? 0 : 1, " ", nnodes(m), " ", nnodes(m) == 0 ? 0 : 1, " ", nnodes(m))
     if nnodes(m)>0
-        println(io, 3, " ", node_entity, " ", 0, " ", nnodes(m))
+        println(io, node_dim, " ", node_entity, " ", 0, " ", nnodes(m))
         @inbounds for i in 1:nnodes(m); println(io, i); end
         @inbounds for i in 1:nnodes(m)
             p = node(m, i); @printf(io, "%.17g %.17g %.17g\n", p[1], p[2], p[3])
@@ -632,6 +790,14 @@ function _write_msh_v4(io, m::Mesh, physical_names)
     println(io, "\$EndElements")
 end
 
+function _msh_v4_node_owner(m,segblocks,triblocks,tetblocks)
+    nnodes(m)==0 && return (3,0,false)
+    !isempty(tetblocks) && return (3,tetblocks[1][2],false)
+    !isempty(triblocks) && return (2,triblocks[1][2],false)
+    !isempty(segblocks) && return (1,segblocks[1][2],false)
+    return (3,1,true)
+end
+
 # group cell columns by tag → Dict(tag => Vector{col index})
 function _group_cells(cells::Matrix{Int32}, tags::Vector{Int32}, k::Int)
     g = Dict{Int32,Vector{Int}}()
@@ -641,9 +807,11 @@ function _group_cells(cells::Matrix{Int32}, tags::Vector{Int32}, k::Int)
     return sort(collect(g); by=x->x[1])
 end
 
-function _write_entities_v4(io, m, segblocks, triblocks, tetblocks, node_entity)
+function _write_entities_v4(io,m,segblocks,triblocks,tetblocks,node_entity,
+                            synthetic_node_entity::Bool)
     println(io, "\$Entities")
-    println(io, 0, " ", length(segblocks), " ", length(triblocks), " ", length(tetblocks)+1)
+    println(io,0," ",length(segblocks)," ",length(triblocks)," ",
+            length(tetblocks)+(synthetic_node_entity ? 1 : 0))
     for (phys, entity, cols) in segblocks
         # curve: tag minx miny minz maxx maxy maxz numPhys phys... numBounding
         _write_entity_record(io,entity,phys,_cell_bounds(m,m.segs,cols))
@@ -654,7 +822,8 @@ function _write_entities_v4(io, m, segblocks, triblocks, tetblocks, node_entity)
     for (phys, entity, cols) in tetblocks
         _write_entity_record(io,entity,phys,_cell_bounds(m,m.tets,cols))
     end
-    _write_entity_record(io,node_entity,0,_all_node_bounds(m))
+    synthetic_node_entity &&
+        _write_entity_record(io,node_entity,0,_all_node_bounds(m))
     println(io, "\$EndEntities")
 end
 
@@ -705,13 +874,25 @@ end
 # ════════════════════════════════════════════════════════════════════════════════
 
 """
-    read_stl(path; merge_tol=1e-9) -> Mesh
+    read_stl(path; merge_tol=1e-9, max_nodes=typemax(Int32),
+             max_facets=typemax(Int32), max_file_bytes=typemax(Int)) -> Mesh
 
 Read an ASCII or binary STL. Coincident vertices within `merge_tol` (relative to
 the bounding-box diagonal) are merged so the result is a connected triangle
-surface, not a triangle soup.
+surface, not a triangle soup. File, facet, and unique-node ceilings are checked
+before their corresponding bulk allocations.
 """
-function read_stl(path::AbstractString; merge_tol::Real=1e-9)
+function read_stl(path; merge_tol=1e-9,
+                  max_nodes=typemax(Int32),max_facets=typemax(Int32),
+                  max_file_bytes=typemax(Int))
+    caller="read_stl"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    merge_tol isa Real || throw(ArgumentError(
+        "$caller: merge_tol must be real"))
+    merge_tol isa Bool && throw(ArgumentError(
+        "$caller: merge_tol must not be Bool"))
     mtol=try
         Float64(merge_tol)
     catch err
@@ -720,12 +901,30 @@ function read_stl(path::AbstractString; merge_tol::Real=1e-9)
     end
     (isfinite(mtol) && mtol >= 0) ||
         throw(ArgumentError("read_stl: merge_tol must be finite and non-negative (got $merge_tol)"))
-    isbin = _stl_is_binary(path)
-    tris_xyz = isbin ? _read_stl_binary(path) : _read_stl_ascii(path)
-    out=_weld_triangles(tris_xyz, mtol)
-    d=validate(out)
-    d.ok || throw(ArgumentError("read_stl: welded surface is invalid — "*join(d.messages,"; ")))
-    return out
+    node_limit=_io_limit(max_nodes,caller,"max_nodes";
+                         ceiling=Int(typemax(Int32)))
+    facet_limit=_io_limit(max_facets,caller,"max_facets";
+                          ceiling=Int(typemax(Int32)))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
+    try
+        isbin = _stl_is_binary(path)
+        tris_xyz = isbin ? _read_stl_binary(path,facet_limit) :
+                           _read_stl_ascii(path,facet_limit)
+        out=_weld_triangles(tris_xyz, mtol, node_limit)
+        d=validate(out)
+        d.ok || throw(ArgumentError(
+            "read_stl: welded surface is invalid — "*join(d.messages,"; ")))
+        return out
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OutOfMemoryError && rethrow()
+        err isa ArgumentError && rethrow()
+        err isa Base.InvalidCharError && throw(ArgumentError(
+            "read_stl: malformed STL text — "*sprint(showerror,err)))
+        rethrow()
+    end
 end
 
 function _stl_is_binary(path)
@@ -751,7 +950,7 @@ function _stl_is_binary(path)
     end
 end
 
-function _read_stl_ascii(path)
+function _read_stl_ascii(path,facet_limit::Int=Int(typemax(Int32)))
     tris = NTuple{9,Float64}[]
     verts = NTuple{3,Float64}[]
     infacet=false;inloop=false
@@ -784,6 +983,8 @@ function _read_stl_ascii(path)
         elseif tok=="endfacet"
             (infacet&&!inloop&&length(s)==1&&length(verts)==3) || throw(ArgumentError("read_stl: malformed ASCII endfacet"))
             length(tris)<typemax(Int32) || throw(ArgumentError("read_stl: facet count exceeds Int32"))
+            length(tris)<facet_limit || throw(ArgumentError(
+                "read_stl: facet count exceeds max_facets=$facet_limit"))
             push!(tris,(verts[1]...,verts[2]...,verts[3]...));empty!(verts);infacet=false
         elseif tok=="solid" || tok=="endsolid"
             (!infacet&&!inloop) || throw(ArgumentError("read_stl: $tok appeared inside a facet"))
@@ -796,13 +997,15 @@ function _read_stl_ascii(path)
     return tris
 end
 
-function _read_stl_binary(path)
+function _read_stl_binary(path,facet_limit::Int=Int(typemax(Int32)))
     open(path, "r") do io
         filesize(path) >= 84 || throw(ArgumentError("read_stl: truncated binary STL header"))
         skip(io, 80)
         ntri = Int(ltoh(read(io, UInt32)))
         ntri>0 || throw(ArgumentError("read_stl: binary STL contains no facets"))
         ntri<=typemax(Int32) || throw(ArgumentError("read_stl: binary facet count exceeds Int32"))
+        ntri<=facet_limit || throw(ArgumentError(
+            "read_stl: binary facet count $ntri exceeds max_facets=$facet_limit"))
         expected = try Base.checked_add(84,Base.checked_mul(50,ntri)) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("read_stl: binary triangle count overflows file-size arithmetic"))
@@ -828,7 +1031,8 @@ function _read_stl_binary(path)
     end
 end
 
-function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
+function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real,
+                         node_limit::Int=Int(typemax(Int32)))
     isempty(tris_xyz) && return Mesh(Matrix{Float64}(undef, 3, 0))
     length(tris_xyz)<=typemax(Int32) || throw(ArgumentError("read_stl: facet count exceeds Int32"))
     # bbox diagonal → absolute tolerance for quantization
@@ -839,10 +1043,31 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
         lo = (min(lo[1],p[1]),min(lo[2],p[2]),min(lo[3],p[3]))
         hi = (max(hi[1],p[1]),max(hi[2],p[2]),max(hi[3],p[3]))
     end
-    diag = hypot(hi[1]-lo[1],hi[2]-lo[2],hi[3]-lo[3])
-    isfinite(diag) || throw(ArgumentError("read_stl: bounding-box diagonal is non-finite"))
-    tol = diag * reltol
-    isfinite(tol) || throw(ArgumentError("read_stl: absolute welding tolerance is non-finite"))
+    # Exact welding (`merge_tol=0`) depends only on represented coordinate
+    # equality. Do not reject it merely because subtracting opposite finite
+    # Float64 extrema would overflow while computing an unused diagonal.
+    diag=0.0;tol=0.0;robust_diagonal=nothing
+    if reltol>0
+        diag = hypot(hi[1]-lo[1],hi[2]-lo[2],hi[3]-lo[3])
+        if isfinite(diag)
+            tol = diag * reltol
+        else
+            # All coordinates are finite, but an opposite-sign span can exceed
+            # Float64. Compute only this exceptional scale in high precision;
+            # the resulting represented tolerance can still be finite.
+            robust_diagonal=setprecision(BigFloat,256) do
+                dx=BigFloat(hi[1])-BigFloat(lo[1])
+                dy=BigFloat(hi[2])-BigFloat(lo[2])
+                dz=BigFloat(hi[3])-BigFloat(lo[3])
+                sqrt(dx*dx+dy*dy+dz*dz)
+            end
+            tol=setprecision(BigFloat,256) do
+                Float64(robust_diagonal*BigFloat(reltol))
+            end
+        end
+        isfinite(tol) || throw(ArgumentError(
+            "read_stl: absolute welding tolerance is non-finite"))
+    end
     # Quantize relative to the bbox min corner `lo`, not the absolute coordinate:
     # a constant per-axis bucket shift (does not change which vertices merge) that
     # bounds every key to [0, diag/tol] so far-from-origin coords can't overflow
@@ -851,17 +1076,44 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
     exactmap=Dict{NTuple{3,Float64},Int32}()
     buckets=Dict{NTuple{3,Int},Vector{Int32}}()
     inv = tol == 0 ? 0.0 : 1/tol
+    exact_bucket=false
     if tol > 0
-        cells = diag*inv
-        (isfinite(cells) && cells <= typemax(Int)-2) ||
-            throw(ArgumentError("read_stl: merge_tol is too small for Int bucket indices at this extent"))
+        cells=if robust_diagonal===nothing
+            diag/tol
+        else
+            setprecision(BigFloat,256) do
+                ratio=robust_diagonal/BigFloat(tol)
+                ratio<=BigFloat(typemax(Int)-2) || throw(ArgumentError(
+                    "read_stl: merge_tol is too small for Int bucket indices at this extent"))
+                Float64(ratio)
+            end
+        end
+        # Near typemax(Int), adjacent integers share one Float64 image. Leave
+        # more than one ULP of headroom before adding neighbour offsets.
+        safe_cell_limit=prevfloat(Float64(typemax(Int)))
+        (isfinite(cells) && cells<=safe_cell_limit) || throw(ArgumentError(
+            "read_stl: merge_tol is too small for Int bucket indices at this extent"))
+        # Above 2^52, Float64 no longer distinguishes every integer bucket.
+        # Exact represented-coordinate division also handles an overflowing
+        # `value-origin` on the rare extreme-span path.
+        exact_bucket=robust_diagonal!==nothing || cells>2.0^52 || !isfinite(inv)
     end
-    keyof(p) = (floor(Int,(p[1]-lo[1])*inv),floor(Int,(p[2]-lo[2])*inv),floor(Int,(p[3]-lo[3])*inv))
+    function bucket_component(value::Float64,origin::Float64)
+        if exact_bucket
+            ratio=(Rational{BigInt}(value)-Rational{BigInt}(origin)) /
+                  Rational{BigInt}(tol)
+            return floor(Int,ratio)
+        end
+        return floor(Int,(value-origin)*inv)
+    end
+    keyof(p)=(bucket_component(p[1],lo[1]),bucket_component(p[2],lo[2]),
+              bucket_component(p[3],lo[3]))
     function getid(p)
         if tol == 0
             key=(p[1]==0 ? 0.0 : p[1],p[2]==0 ? 0.0 : p[2],p[3]==0 ? 0.0 : p[3])
             return get!(exactmap,key) do
-                length(xs)<typemax(Int32) || throw(ArgumentError("read_stl: unique vertex count exceeds Int32"))
+                length(xs)<node_limit || throw(ArgumentError(
+                    "read_stl: unique vertex count exceeds max_nodes=$node_limit"))
                 push!(xs,p[1]);push!(ys,p[2]);push!(zs,p[3]);Int32(length(xs))
             end
         end
@@ -873,7 +1125,8 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real)
                 hypot(p[1]-xs[id],p[2]-ys[id],p[3]-zs[id]) <= tol && return id
             end
         end
-        length(xs)<typemax(Int32) || throw(ArgumentError("read_stl: unique vertex count exceeds Int32"))
+        length(xs)<node_limit || throw(ArgumentError(
+            "read_stl: unique vertex count exceeds max_nodes=$node_limit"))
         push!(xs,p[1]);push!(ys,p[2]);push!(zs,p[3]);id=Int32(length(xs))
         push!(get!(() -> Int32[],buckets,key),id)
         return id
@@ -920,7 +1173,7 @@ end
 
 # Programmatic specifications cannot recover source assignment order from a
 # plain dictionary. Use a stable lexical order there; the parser-populated
-# parser-populated five-argument form below preserves exact statement order for
+# five-argument form below preserves exact statement order for
 # Gmsh aliases and construction-time globals.
 GeoFieldSpec(tag::Integer,kind::AbstractString,options::Dict{String,String})=
     GeoFieldSpec(Int(tag),String(kind),options,sort!(collect(keys(options))),0)
@@ -1891,7 +2144,7 @@ function _scan_geo_statements(consume,path::AbstractString)
 end
 
 """
-    read_geo_params(path) -> GeoParams
+    read_geo_params(path; max_file_bytes=typemax(Int)) -> GeoParams
 
 Scan a gmsh `.geo`/`.geo_unrolled` for mesh-sizing options, Physical group
 declarations, and `Field[...]`/`Background Field` statements. Deterministic,
@@ -1906,7 +2159,14 @@ Boolean geometry are deliberately not evaluated. Numeric field options are
 normalized to literals; geometric references and string or point-dependent
 field expressions remain source strings.
 """
-function read_geo_params(path::AbstractString)
+function read_geo_params(path;max_file_bytes=typemax(Int))
+    caller="read_geo_params"
+    path isa AbstractString || throw(ArgumentError(
+        "$caller: path must be a string"))
+    isfile(path) || throw(ArgumentError("$caller: missing regular file $path"))
+    file_limit=_io_limit(max_file_bytes,caller,"max_file_bytes")
+    filesize(path)<=file_limit || throw(ArgumentError(
+        "$caller: file exceeds max_file_bytes=$file_limit"))
     smin = NaN; smax = NaN; sfactor = 1.0; seed = 0; background = 0
     geometry_tolerance=NaN
     mesh_size_from_curvature=0;boundary_layer_fan_elements=5

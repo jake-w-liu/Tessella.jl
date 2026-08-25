@@ -1168,7 +1168,7 @@ end
         (2,5,2)=>1,
         (3,7,4)=>1,
     )
-    entities,groups,node_entity=ElementsUnderTest._mixed_v4_layout(mesh)
+    entities,groups,node_owner=ElementsUnderTest._mixed_v4_layout(mesh)
     entity_bounds=Dict((entity.dim,Int(entity.physical))=>entity.bounds
                        for entity in entities)
     @test entity_bounds[(0,9)][1:3]==(-2.0,0.0,0.0)
@@ -1176,8 +1176,8 @@ end
     @test entity_bounds[(1,8)]==(2.0,0.0,0.0,3.0,0.0,0.0)
     @test entity_bounds[(2,5)]==(5.0,0.0,0.0,6.0,1.0,0.0)
     @test entity_bounds[(3,7)]==(8.0,0.0,0.0,9.0,1.0,1.0)
-    @test entity_bounds[(3,0)]==(-2.0,0.0,0.0,9.0,1.0,1.0)
-    @test node_entity>0
+    @test !haskey(entity_bounds,(3,0))
+    @test node_owner==(3,1)
     @test length(groups)==5
     for version in (2.2,4.1), binary in (false,true)
         mode=binary ? "binary" : "ascii"
@@ -1205,6 +1205,15 @@ end
         oracle_version,counts=gmsh_physical_element_counts(path)
         @test oracle_version=="4.15.2"
         @test counts==expected_counts
+        if version==4.1
+            rewritten=joinpath(directory,"mixed-rewritten-$mode.msh")
+            @test gmsh_rewrite(
+                path,rewritten;version=4.1,binary=binary)=="4.15.2"
+            rewritten_mesh=ElementsUnderTest.read_mixed_msh(rewritten)
+            @test ElementsUnderTest.validate(rewritten_mesh).ok
+            @test legacy_crc(rewritten_mesh).sha==expected_crc
+            @test rewritten_mesh.physical_names==mesh.physical_names
+        end
     end
 
     escaped=mixed_io_fixture()
@@ -1219,6 +1228,29 @@ end
         back=ElementsUnderTest.read_mixed_msh(path;tessella_extensions=true)
         @test back.physical_names==escaped.physical_names
         @test legacy_crc(back).sha==escaped_crc
+    end
+
+    literal_names=copy(mesh.physical_names)
+    literal_names[(2,5)]=raw"C:\new\tab\mesh"
+    literal_names[(1,6)]="wire\tA"
+    literal=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;physical_names=literal_names)
+    for version in (2.2,4.1), binary in (false,true)
+        path=joinpath(directory,"literal-backslash-$version-$binary.msh")
+        ElementsUnderTest.write_mixed_msh(
+            path,literal;version,binary)
+        @test ElementsUnderTest.read_mixed_msh(path).physical_names==
+              literal_names
+        @test gmsh_physical_name(path,2,5)==
+              ("4.15.2",raw"C:\new\tab\mesh")
+        @test gmsh_physical_name(path,1,6)==("4.15.2","wire\tA")
+    end
+    for bad_name in ("line\nbreak","line\rbreak")
+        bad_names=copy(mesh.physical_names);bad_names[(2,5)]=bad_name
+        bad=ElementsUnderTest.MixedMesh(
+            mesh.coords,mesh.blocks;physical_names=bad_names)
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            joinpath(directory,"line-breaking-name.msh"),bad)
     end
 
     # Cross-format conversion does not depend on the writer's block grouping.
@@ -2588,7 +2620,7 @@ end
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_nodes=11)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_elements=4)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_blocks=0)
-    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_entities=5)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_entities=4)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_physical_names=4)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(valid;max_name_bytes=3)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
@@ -2613,7 +2645,7 @@ end
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid_binary;max_blocks=0)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
-        valid_binary;max_entities=5)
+        valid_binary;max_entities=4)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         valid_binary;max_physical_names=4)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
