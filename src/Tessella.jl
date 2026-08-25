@@ -28,6 +28,7 @@ include("core/Transform.jl")      # P3: validated affine mesh transformations
 include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
 include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination
 include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex refinement
+include("structured/StructuredNumerics.jl") # P4: shared affine-grid numerical certificates
 include("structured/Transfinite.jl") # P4: validated four-sided planar transfinite patches
 include("structured/TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
 include("structured/TransfiniteTriangle.jl") # P4: three-sided structured triangle patches

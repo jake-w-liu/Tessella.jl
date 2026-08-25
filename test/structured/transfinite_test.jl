@@ -235,7 +235,10 @@ end
         @test_throws ArgumentError mesh_transfinite_patch(sides...;max_nodes=-1)
         @test_throws ArgumentError mesh_transfinite_patch(
             sides...;max_nodes=big(typemax(Int32))+1)
-        @test_throws TypeError mesh_transfinite_patch(sides...;max_nodes=12.0)
+        @test_throws ArgumentError mesh_transfinite_patch(sides...;max_nodes=12.0)
+        boolean_side = Any[(true,0.,0.),(1.,0.,0.),(2.,0.,0.),(3.,0.,0.)]
+        @test_throws ArgumentError mesh_transfinite_patch(
+            boolean_side,sides[2],sides[3],sides[4])
         @test_throws ArgumentError mesh_transfinite_patch(sides...;max_nodes=11)
         @test_throws ArgumentError mesh_transfinite_patch(sides...;max_triangles=11)
         bounded=mesh_transfinite_patch(sides...;max_nodes=12,max_triangles=12)

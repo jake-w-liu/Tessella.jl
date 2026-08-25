@@ -122,8 +122,18 @@ function _point3(raw, side::Int, index::Int)
     end
     count == 3 || throw(ArgumentError(
         "$_CALLER: side $side point $index must have exactly three coordinates"))
+    values = try
+        (raw[1], raw[2], raw[3])
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$_CALLER: side $side point $index coordinates must be " *
+            "Float64-representable: $(sprint(showerror, err))"))
+    end
+    any(value -> value isa Bool, values) && throw(ArgumentError(
+        "$_CALLER: side $side point $index coordinates must not be Bool"))
     point = try
-        (Float64(raw[1]), Float64(raw[2]), Float64(raw[3]))
+        (Float64(values[1]), Float64(values[2]), Float64(values[3]))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError(

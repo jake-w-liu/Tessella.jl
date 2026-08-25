@@ -313,6 +313,9 @@ end
             sides...; max_nodes=-1)
         @test_throws ArgumentError mesh_transfinite_triangle(
             sides...; max_nodes=10.0)
+        boolean_side = Any[(true, 0.0, 0.0), sides[1][2:end]...]
+        @test_throws ArgumentError mesh_transfinite_triangle(
+            boolean_side, sides[2], sides[3])
         @test_throws ArgumentError mesh_transfinite_triangle(
             sides...; max_nodes=big(typemax(Int32)) + 1)
         @test_throws ArgumentError mesh_transfinite_triangle(

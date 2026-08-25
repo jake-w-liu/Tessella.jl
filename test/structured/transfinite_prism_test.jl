@@ -202,6 +202,29 @@ end
                        (-maximum, 0., 1.), (-maximum, 1., 1.)]
         @test_throws ArgumentError mesh_transfinite_prism(overflowing)
 
+        measure_base = ldexp(1.5, 551)
+        measure_ulp = eps(measure_base)
+        measure_point(offset) = ntuple(
+            dimension -> measure_base + offset[dimension] * measure_ulp, 3)
+        measure_u = (-2, -25, 58)
+        measure_v = (39, -70, 43)
+        measure_w = (-49, 98, -5)
+        measure_add(a, b) = ntuple(
+            dimension -> a[dimension] + b[dimension], 3)
+        measure_overflow = measure_point.((
+            (0, 0, 0), measure_u, measure_v, measure_w,
+            measure_add(measure_u, measure_w),
+            measure_add(measure_v, measure_w)))
+        measure_error = try
+            mesh_transfinite_prism(measure_overflow)
+            nothing
+        catch err
+            err
+        end
+        @test measure_error isa ArgumentError
+        @test occursin("must remain finite Float64 values",
+                       sprint(showerror, measure_error))
+
         @test_throws ArgumentError mesh_transfinite_prism(corners, (1, 1))
         @test_throws ArgumentError mesh_transfinite_prism(corners, (1, 1, 1, 1))
         @test_throws ArgumentError mesh_transfinite_prism(corners, (0, 1, 1))
@@ -231,7 +254,9 @@ end
         @test_throws ArgumentError mesh_transfinite_prism(corners; max_nodes=-1)
         @test_throws ArgumentError mesh_transfinite_prism(
             corners; max_nodes=big(typemax(Int32)) + 1)
-        @test_throws TypeError mesh_transfinite_prism(corners; max_nodes=6.0)
+        @test_throws ArgumentError mesh_transfinite_prism(corners; max_nodes=6.0)
+        boolean_corner = Any[corners...]; boolean_corner[2] = (true, 0.0, 0.0)
+        @test_throws ArgumentError mesh_transfinite_prism(boolean_corner)
 
         @test_throws ArgumentError mesh_transfinite_prism(corners; volume_tag=true)
         @test_throws ArgumentError mesh_transfinite_prism(corners; volume_tag=-1)

@@ -94,6 +94,47 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening affine
+transfinite-volume interpolation and structured-input diagnostics:
+
+- **VERIFIED (exact dyadic oracle):** nested Float64 interpolation of a
+  `(4,4,4)` block translated to `1e100` produced represented tetrahedron volume
+  `4.251693490531567e256` for a corner determinant of
+  `4.3388168547720914e256` (ratio `0.979920018024107`). The guarded exact
+  affine path now produces `4.3388168547720954e256` (relative error
+  `9.22096689867788e-16`) and a valid mesh. Its fixed connectivity SHA-256 is
+  `cfdebd9e1af30eb255ed966e95bc3999f89d8062872d5cdb370647aa1737dfa8`.
+- The exact path activates only when all eight represented corners satisfy the
+  affine identities exactly; a separately accepted one-ULP residual therefore
+  remains present at its output corner. Every unrecombined affine block now
+  receives the same compensated exponent-scaled determinant audit, with exact
+  fallback, previously used by the prism path. The shared implementation lives
+  in `src/structured/StructuredNumerics.jl`. A separate noncollapsed remote
+  lattice whose normalized determinant sum was `4.829750061035156` instead of
+  `4.83782958984375` is now an explicit material-conservation blocker.
+- Derived area/volume overflow is now an input `ArgumentError`, not an internal
+  validation exception. Across 10,000 seeded remote-lattice candidates per
+  generator, all 5,001 canonically oriented block cases and 5,012 prism cases
+  either returned a valid mesh (1,359 blocks and 51 prisms) or a documented
+  `ArgumentError`; no other exception type escaped.
+- Structured patch, triangle, prism, volume, and hexahedron coordinates now
+  reject inappropriate `Bool` values explicitly. Patch, volume, and prism
+  allocation limits diagnose non-integers with `ArgumentError` instead of a
+  keyword-dispatch `TypeError`.
+- The seven focused structured suites passed 1,196/1,196 assertions under both
+  Julia 1.12.7 and Julia 1.11.9. Under Julia 1.12.7, the volume allocation
+  fixtures used 386,016 and 774,160 bytes; the prism fixtures retained 1,997,088
+  and 4,008,288 bytes.
+- The bounds-checked package gate passed 164,339/164,339 assertions in
+  19m08.2s. Aggregate bounds-checked validation exited 0 in 17m20.0s against
+  Gmsh 4.15.2, including the unchanged 72-node/144-tetrahedron affine-volume
+  differential. Recursive package ambiguity detection and the public
+  documentation scan both returned zero.
+- The organized source layout remains enforced: the only top-level Julia files
+  under `src`, `test`, and `validation` are `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl`; all implementation and
+  supporting Julia files remain categorized in subfolders.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening scalar and
 anisotropic metric-length evaluation:
 
