@@ -874,13 +874,16 @@ function _throw_simplex_validation(caller::AbstractString,
         "$caller: constructed mesh failed validation: " * join(messages, "; ")))
 end
 
-function _mesh_structure_messages!(messages::Vector{String},m::Mesh)
+function _mesh_structure_messages!(messages::Vector{String},m::Mesh;
+                                   require_finite_coords::Bool=true)
     valid=true
-    @inbounds for i in 1:nnodes(m),dimension in 1:3
-        if !isfinite(m.coords[dimension,i])
-            push!(messages,"node $i has a non-finite coordinate")
-            valid=false
-            break
+    if require_finite_coords
+        @inbounds for i in 1:nnodes(m),dimension in 1:3
+            if !isfinite(m.coords[dimension,i])
+                push!(messages,"node $i has a non-finite coordinate")
+                valid=false
+                break
+            end
         end
     end
     for (what,cells,tags) in (("segment",m.segs,m.seg_tag),
@@ -913,10 +916,13 @@ function _mesh_structure_messages!(messages::Vector{String},m::Mesh)
     return valid
 end
 
-function _assert_mesh_structure(m::Mesh,caller::AbstractString)
+function _assert_mesh_structure(m::Mesh,caller::AbstractString;
+                                require_finite_coords::Bool=true)
     messages=String[]
-    _mesh_structure_messages!(messages,m) || throw(ArgumentError(
-        "$caller: invalid mutable mesh structure — "*join(messages,"; ")))
+    _mesh_structure_messages!(messages,m;
+                              require_finite_coords=require_finite_coords) ||
+        throw(ArgumentError(
+            "$caller: invalid mutable mesh structure — "*join(messages,"; ")))
     return nothing
 end
 

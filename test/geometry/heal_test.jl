@@ -103,7 +103,7 @@ end
         @test !ok && !r.closed
         @test any(occursin("no triangles", s) for s in r.messages)
 
-        for badtol in (-1.0, Inf, NaN)
+        for badtol in (-1.0, Inf, NaN, true, "bad")
             @test_throws ArgumentError surface_diagnostics(empty_surface; tol=badtol)
         end
 
@@ -116,6 +116,22 @@ end
         far_dup = Mesh(hcat(far.coords, far.coords[:,1]); tris=far.tris)
         @test surface_diagnostics(far_dup).n_coincident_pairs == 1
 
+        # An extreme positive tolerance uses exact BigInt grid coordinates.
+        # Thousands of equal x coordinates remain a linear spatial-grid case,
+        # and subnormal separations retain the strict `< tol` contract.
+        planar_coordinates=zeros(3,1000)
+        planar_coordinates[2,:]=range(0.0,1.0;length=1000)
+        planar=Mesh(planar_coordinates)
+        @test surface_diagnostics(planar;tol=1.0e-320).n_coincident_pairs==0
+        @test surface_diagnostics(planar;tol=2.0).n_coincident_pairs==499_500
+        subnormal=nextfloat(0.0)
+        tiny=Mesh(Float64[0 subnormal 1;0 0 0;0 0 0])
+        @test surface_diagnostics(tiny;tol=1.0e-320).n_coincident_pairs==1
+        threshold=Float64(1.0e-320)
+        exact_boundary=Mesh(Float64[0 threshold 1;0 0 0;0 0 0])
+        @test surface_diagnostics(
+            exact_boundary;tol=threshold).n_coincident_pairs==0
+
         C = copy(cube.coords); C[1,1] = NaN
         nanmesh=Mesh(cube.coords;tris=cube.tris);nanmesh.coords[1,1]=NaN
         oknan, rnan = is_meshable(nanmesh)
@@ -126,5 +142,16 @@ end
         okinf, rinf = is_meshable(infmesh)
         @test !okinf
         @test any(occursin("non-finite coordinates", s) for s in rinf.messages)
+
+        corrupt=clean_cube()
+        corrupt.tris[1,1]=0
+        @test_throws ArgumentError surface_diagnostics(corrupt)
+        @test_throws ArgumentError is_meshable(corrupt)
+
+        cube_with_tet=Mesh(cube.coords;tris=cube.tris,
+                           tets=reshape(Int32[1,2,3,5],4,1))
+        oktet,rtet=is_meshable(cube_with_tet)
+        @test !oktet
+        @test any(occursin("tetrahedra",message) for message in rtet.messages)
     end
 end

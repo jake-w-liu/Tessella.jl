@@ -14,14 +14,15 @@ is the go/no-go gate used by the volume mesher.
 """
 module Heal
 
-using ..MeshTypes: Mesh, nnodes, ntris, node, triangle_area, boundary_edges, _tri_topology
+using ..MeshTypes: Mesh, nnodes, ntris, ntets, node, triangle_area,
+                   boundary_edges, _tri_topology, _assert_mesh_structure
 
 export SurfaceReport, surface_diagnostics, is_meshable
 
 struct SurfaceReport
     closed::Bool                    # no open (boundary) edges
     manifold::Bool                  # every edge shared by ≤ 2 triangles
-    oriented::Bool                  # consistent outward orientation (shared edges reversed)
+    oriented::Bool                  # consistent winding (shared edges reversed)
     n_open_edges::Int
     n_nonmanifold_edges::Int
     n_degenerate_tris::Int          # zero-area
@@ -51,7 +52,11 @@ end
 Analyse a triangle surface mesh for the defects that break volume meshing.
 `tol` is the coincident-vertex distance relative to the bounding-box diagonal.
 """
-function surface_diagnostics(m::Mesh; tol::Real=1e-9)
+function surface_diagnostics(m::Mesh; tol=1e-9)
+    tol isa Real || throw(ArgumentError(
+        "surface_diagnostics: tol must be a finite non-negative real number"))
+    tol isa Bool && throw(ArgumentError(
+        "surface_diagnostics: tol must not be Bool"))
     reltol = try
         Float64(tol)
     catch err
@@ -60,9 +65,11 @@ function surface_diagnostics(m::Mesh; tol::Real=1e-9)
     end
     (isfinite(reltol) && reltol >= 0.0) ||
         throw(ArgumentError("surface_diagnostics: tol must be finite and non-negative (got $tol)"))
+    _assert_mesh_structure(m,"surface_diagnostics";require_finite_coords=false)
 
     msgs = String[]
     nt = ntris(m)
+    ntets(m)==0 || push!(msgs,"surface contains $(ntets(m)) tetrahedra")
     nnonfinite = 0
     @inbounds for i in 1:nnodes(m)
         p = node(m, i)
@@ -157,6 +164,7 @@ function _count_coincident(m::Mesh, reltol::Float64)
     end
     diag = hypot(hi[1]-lo[1], hi[2]-lo[2], hi[3]-lo[3])
     cellsize = diag*reltol
+    cellsize>diag && return nn*(nn-1)÷2
     if cellsize==0
         counts=Dict{NTuple{3,Float64},Int}()
         pairs=0
@@ -168,19 +176,7 @@ function _count_coincident(m::Mesh, reltol::Float64)
     end
     inv = 1.0/cellsize
     if !isfinite(inv) || diag*inv>typemax(Int)-2
-        order=sortperm(1:nn;by=i->node(m,i)[1]/scale)
-        cnt=0
-        @inbounds for ii in eachindex(order)
-            i=order[ii];qi=(node(m,i)[1]/scale,node(m,i)[2]/scale,node(m,i)[3]/scale)
-            jj=ii-1
-            while jj>=1
-                j=order[jj];qj=(node(m,j)[1]/scale,node(m,j)[2]/scale,node(m,j)[3]/scale)
-                qi[1]-qj[1] < cellsize || break
-                hypot(qi[1]-qj[1],qi[2]-qj[2],qi[3]-qj[3]) < cellsize && (cnt+=1)
-                jj-=1
-            end
-        end
-        return cnt
+        return _count_coincident_exact_grid(m,scale,lo,cellsize)
     end
     cell = Dict{NTuple{3,Int}, Vector{Int}}()
     sizehint!(cell, nn)
@@ -203,17 +199,71 @@ function _count_coincident(m::Mesh, reltol::Float64)
     return cnt
 end
 
+@inline function _exact_cell_index(value::Float64,cellsize::Float64)
+    ratio=Rational{BigInt}(value)/Rational{BigInt}(cellsize)
+    return fld(numerator(ratio),denominator(ratio))
+end
+
+@inline function _exact_distance_below(a::NTuple{3,Float64},
+                                       b::NTuple{3,Float64},
+                                       threshold::Float64)
+    a==b && return true
+    dx=Rational{BigInt}(a[1])-Rational{BigInt}(b[1])
+    dy=Rational{BigInt}(a[2])-Rational{BigInt}(b[2])
+    dz=Rational{BigInt}(a[3])-Rational{BigInt}(b[3])
+    limit=Rational{BigInt}(threshold)
+    return dx^2+dy^2+dz^2<limit^2
+end
+
+
+# When `1/cellsize` cannot fit Float64 or an Int cell index, use exact BigInt
+# grid coordinates. This retains the spatial partition; the former x-only
+# sweep became quadratic for common planar point sets whose x coordinates tied.
+function _count_coincident_exact_grid(m::Mesh,scale::Float64,
+                                      lo::NTuple{3,Float64},
+                                      cellsize::Float64)
+    cells=Dict{NTuple{3,BigInt},
+               Vector{Tuple{NTuple{3,Float64},Int}}}()
+    sizehint!(cells,nnodes(m))
+    count=0
+    @inbounds for index in 1:nnodes(m)
+        point=node(m,index)
+        q=(point[1]/scale-lo[1],point[2]/scale-lo[2],
+           point[3]/scale-lo[3])
+        key=(_exact_cell_index(q[1],cellsize),
+             _exact_cell_index(q[2],cellsize),
+             _exact_cell_index(q[3],cellsize))
+        for dx in -1:1,dy in -1:1,dz in -1:1
+            neighbour=(key[1]+dx,key[2]+dy,key[3]+dz)
+            entries=get(cells,neighbour,nothing)
+            entries===nothing && continue
+            for (other,multiplicity) in entries
+                _exact_distance_below(q,other,cellsize) &&
+                    (count+=multiplicity)
+            end
+        end
+        entries=get!(cells,key,Tuple{NTuple{3,Float64},Int}[])
+        duplicate=findfirst(entry->entry[1]==q,entries)
+        if duplicate===nothing
+            push!(entries,(q,1))
+        else
+            entries[duplicate]=(q,entries[duplicate][2]+1)
+        end
+    end
+    return count
+end
+
 """
     is_meshable(m; tol=1e-9) -> (ok::Bool, report::SurfaceReport)
 
 Go/no-go gate for volume meshing: the surface must be closed, manifold, oriented,
 and free of degenerate/duplicate/coincident defects.
 """
-function is_meshable(m::Mesh; tol::Real=1e-9)
+function is_meshable(m::Mesh; tol=1e-9)
     r = surface_diagnostics(m; tol=tol)
     ok = r.closed && r.manifold && r.oriented && r.n_degenerate_tris == 0 &&
          r.n_duplicate_tris == 0 && r.n_coincident_pairs == 0 &&
-         all(isfinite, m.coords)
+         ntets(m)==0 && all(isfinite, m.coords)
     return ok, r
 end
 

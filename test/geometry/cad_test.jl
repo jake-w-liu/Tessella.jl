@@ -24,6 +24,13 @@ using Tessella.Mesh3D: recover_boundary, tetrahedralize_conforming_exact
         @test_throws ArgumentError SphereS((0,0,0),Inf)
         @test_throws ArgumentError DiskS((0,0,0),(0,0,0),1)
         @test_throws ArgumentError on_surface(SphereS((0,0,0),1),(1,0,0);tol=-1)
+        @test_throws ArgumentError SphereS((0,0,0),true)
+        @test_throws ArgumentError CylinderS((0,0,0),(0,0,1),true)
+        @test_throws ArgumentError PlaneS((0,0,false),(0,0,1))
+        @test_throws ArgumentError on_surface(
+            SphereS((0,0,0),1),(1,0,0);tol=true)
+        @test_throws ArgumentError SphereS((0,0),1)
+        @test_throws ArgumentError SphereS("bad",1)
 
         disk = DiskS((1.,2.,3.),(0.,0.,1.),2.)
         @test on_surface(disk,(1.,2.,3.))
@@ -38,8 +45,69 @@ using Tessella.Mesh3D: recover_boundary, tetrahedralize_conforming_exact
         pln = PlaneS((0.,0.,0.),(0.,0.,1.))
         @test_throws ArgumentError imprint_circle(cyl,pln;nseg=0)
         @test_throws ArgumentError imprint_ellipse(cyl,pln;nseg=typemax(Int))
+        @test_throws ArgumentError imprint_circle(cyl,pln;nseg=true)
+        @test_throws ArgumentError imprint_circle(cyl,pln;nseg=3.0)
+        @test_throws ArgumentError imprint_circle(cyl,pln;nseg=8,max_points=7)
+        @test_throws ArgumentError imprint_circle(cyl,pln;nseg=8,max_points=true)
         almost=PlaneS((0.,0.,0.),(1e-13,0.,1.))
         @test_throws ArgumentError imprint_circle(cyl,almost)
+    end
+
+    @testset "extreme finite projection remains geometric or blocks" begin
+        fm=floatmax(Float64)
+        diagonal=inv(sqrt(2.0))
+        query=(fm,fm,0.0)
+        sphere=SphereS((0.,0.,0.),1.)
+        cylinder=CylinderS((0.,0.,0.),(0.,0.,1.),1.)
+        disk=DiskS((0.,0.,0.),(0.,0.,1.),1.)
+        for projected in (project_to(sphere,query),project_to(cylinder,query),
+                          project_to(disk,query))
+            @test projected[1] ≈ diagonal atol=2eps(Float64) rtol=0
+            @test projected[2] ≈ diagonal atol=2eps(Float64) rtol=0
+            @test projected[3] == 0.0
+        end
+        @test abs(surface_residual(sphere,project_to(sphere,query))) <=
+              2eps(Float64)
+        @test abs(surface_residual(cylinder,project_to(cylinder,query))) <=
+              2eps(Float64)
+        huge_axis=CylinderS((0.,0.,0.),(fm,fm,0.),1.)
+        @test huge_axis.axis[1] ≈ diagonal atol=eps(Float64) rtol=0
+        @test huge_axis.axis[2] ≈ diagonal atol=eps(Float64) rtol=0
+
+        # A huge axial coordinate must not make a genuine radial displacement
+        # look like an on-axis query. The nearest point preserves its direction.
+        remote_axial=CylinderS((0.,0.,0.),(0.,0.,1.),0.7)
+        @test project_to(remote_axial,(1.,0.,1.0e308)) ==
+              (0.7,0.0,1.0e308)
+
+        diagonal_plane=PlaneS((0.,0.,0.),(1.,1.,0.))
+        diagonal_disk=DiskS((0.,0.,0.),(1.,1.,0.),1.)
+        @test project_to(diagonal_plane,(fm,fm,0.)) == (0.,0.,0.)
+        @test project_to(diagonal_disk,(fm,fm,0.)) == (0.,0.,0.)
+
+        # Opposite finite endpoints have an overflowing Float64 difference, but
+        # their exact projection can still be finite and representable.
+        @test project_to(PlaneS((-fm,0.,0.),(1.,0.,0.)),(fm,0.,0.)) ==
+              (-fm,0.0,0.0)
+        @test project_to(DiskS((-fm,0.,0.),(0.,0.,1.),fm),(fm,0.,0.)) ==
+              (0.0,0.0,0.0)
+        @test project_to(SphereS((-fm,0.,0.),fm),(fm,0.,0.)) ==
+              (0.0,0.0,0.0)
+        @test project_to(
+            CylinderS((-fm,0.,0.),(1.,0.,0.),1.),(fm,0.,0.)) ==
+              (fm,0.0,1.0)
+        remote_circle_center,remote_circle=imprint_circle(
+            CylinderS((fm,0.,0.),(1.,0.,0.),1.),
+            PlaneS((-fm,0.,0.),(1.,0.,0.));nseg=8)
+        @test remote_circle_center == (-fm,0.0,0.0)
+        @test all(point->iszero(surface_residual(
+            PlaneS((-fm,0.,0.),(1.,0.,0.)),point)),remote_circle)
+
+        # A unit-radius sphere cannot be represented about this center: one
+        # axis endpoint collapses onto the center. Projection must diagnose the
+        # representability limit instead of silently returning an off-surface point.
+        remote=SphereS((1.0e16,0.,0.),1.)
+        @test_throws ArgumentError project_to(remote,(1.0e16,0.,0.))
     end
 
     @testset "exact surface membership + projection" begin
