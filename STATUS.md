@@ -94,6 +94,30 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening surface
+triangle-to-quadrangle recombination:
+
+- The Edmonds alternating-tree search now distinguishes an even-tree blossom
+  edge from an undiscovered odd vertex. A five-vertex regression that previously
+  indexed parent vertex zero now returns a consistent maximum matching.
+- An independent subset-search oracle exhaustively checked all 33,868 simple
+  undirected graphs through six vertices and a further 24,000 seeded graphs
+  through eleven vertices, with zero cardinality or mate-consistency mismatches.
+- Recombination now diagnoses non-Symbol algorithms and non-Boolean full-quad
+  controls explicitly and rejects the incompatible greedy/full-quad combination
+  before candidate construction. Returned coordinates, blocks, tags, and physical
+  names are detached from caller storage.
+- Strict square pairing retained identical ordered quadrangle connectivity at
+  scales `1e-300`, `1e-150`, `1`, and `1e150`, and under three large-translation
+  cases whose widths were only 16 coordinate ulps.
+- The focused `Recombine` suite passed 92/92 assertions under Julia 1.12.7 and
+  Julia 1.11.9. Its fixed 12-by-12 quadrangulation SHA-256 is
+  `dbb1bf17965d4e011e7f51a452c6a03e4018a628ffc7e7d9b33d9fc6b922439f`.
+- The bounds-checked package gate passed 164,058/164,058 assertions in 12m05.0s,
+  and the aggregate bounds-checked validation exited 0 in 10m27.8s against Gmsh
+  4.15.2. The public `Recombine` documentation scan returned no missing names;
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening Gmsh-style curve
 integration and grading:
 
