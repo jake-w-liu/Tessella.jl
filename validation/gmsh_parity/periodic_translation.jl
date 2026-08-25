@@ -157,11 +157,66 @@ try
             "Tessella rotational periodic pair $i was not snapped exactly")
     end
 
+    # Exercise the real MSH4 $Periodic payload emitted by Gmsh in both modes,
+    # then require Gmsh to recover the same relation from Tessella's rewrite.
+    io_crcs=Set{String}()
+    mktempdir() do directory
+        raw_paths=String[]
+        gmsh.option.setNumber("Mesh.MshFileVersion",4.1)
+        for binary in (false,true)
+            gmsh.option.setNumber("Mesh.Binary",binary ? 1 : 0)
+            raw=joinpath(directory,"gmsh-periodic-$binary.msh")
+            gmsh.write(raw);push!(raw_paths,raw)
+        end
+        for (index,raw) in pairs(raw_paths)
+            mixed=read_mixed_msh(raw)
+            Tessella.Elements.validate(mixed).ok || error(
+                "Tessella rejected Gmsh periodic MSH4 metadata")
+            length(mixed.periodic_links)==3 || error(
+                "Tessella read $(length(mixed.periodic_links)) periodic links, expected 3")
+            curve_link=only(filter(link->link.dim==1,mixed.periodic_links))
+            curve_link.slave_entity==slave_curve || error(
+                "Tessella changed the periodic slave curve tag")
+            curve_link.master_entity==master_curve || error(
+                "Tessella changed the periodic master curve tag")
+            length(curve_link.slave_nodes)==5 || error(
+                "Tessella changed the periodic curve pair count")
+            curve_link.affine==Tuple(rotation) || error(
+                "Tessella changed the periodic affine transform")
+            for i in eachindex(curve_link.slave_nodes)
+                slave=mixed.coords[:,curve_link.slave_nodes[i]]
+                master=mixed.coords[:,curve_link.master_nodes[i]]
+                hypot(slave[1]+master[2],slave[2]-master[1],
+                      slave[3]-master[3])<=1e-11 || error(
+                    "Tessella read an invalid periodic node pair")
+            end
+            push!(io_crcs,mixed_crc(mixed).sha)
+            rewritten=joinpath(directory,"tessella-periodic-$index.msh")
+            write_mixed_msh(rewritten,mixed;version=4.1,binary=isodd(index))
+            reread=read_mixed_msh(rewritten)
+            mixed_crc(reread).sha==mixed_crc(mixed).sha || error(
+                "Tessella periodic MSH4 rewrite changed its CRC")
+
+            gmsh.clear();gmsh.open(rewritten)
+            checked_master,checked_slaves,checked_masters,checked_affine=
+                gmsh.model.mesh.getPeriodicNodes(1,slave_curve)
+            checked_master==master_curve || error(
+                "Gmsh lost Tessella's periodic master curve")
+            length(checked_slaves)==length(checked_masters)==5 || error(
+                "Gmsh lost Tessella's periodic node pairs")
+            checked_affine==rotation || error(
+                "Gmsh changed Tessella's periodic affine transform")
+        end
+    end
+    length(io_crcs)==1 || error(
+        "Gmsh ASCII/binary periodic MSH4 inputs produced different Tessella CRCs")
+
     println("GMSH_PARITY_PERIODIC_OK gmsh=$(gmsh.GMSH_API_VERSION) "*
             "translation_pairs=$n translation_error=$max_gmsh_error "*
             "translation_sha=$(mesh_crc(translation_output).sha) "*
             "rotation_pairs=$nr rotation_error=$max_rotation_error "*
-            "rotation_sha=$(mesh_crc(rotation_output).sha)")
+            "rotation_sha=$(mesh_crc(rotation_output).sha) "*
+            "msh4_links=3 msh4_crc=$(only(io_crcs))")
 finally
     gmsh.finalize()
 end

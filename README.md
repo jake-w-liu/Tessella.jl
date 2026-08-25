@@ -61,7 +61,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
   MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
-  repeated pre-element node sections;
+  repeated pre-element node sections, plus owned ASCII/binary MSH4 periodic
+  entity transforms and node correspondences;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
 - oriented-normal extrusion of coherently directed planar polylines into
@@ -69,7 +70,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   corner-Jacobian checks, resource bounds, and rigid-motion certification;
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
-  connectivity, and physical tags preserved;
+  connectivity, and physical tags preserved; mixed meshes can retain the pair maps
+  and entity transforms through MSH4 I/O;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -107,8 +109,9 @@ format for variable connectivity and parent/domain links; binary MSH2 and MSH4 h
 explicitly narrower special-record contracts. Type 69 and some registered fixed tags
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
-Gmsh-safe rewrite. Periodic pair maps/transforms remain caller-owned rather than
-persistent model/MSH entity metadata. Complete CAD/BREP, broad file/API compatibility,
+Gmsh-safe rewrite. Periodic constraints are not yet persistent in the geometry
+model or lossless through MSH2, although MSH4 mixed-mesh metadata is preserved.
+Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
 completeness. ASCENT remains Tessella's primary solver consumer.

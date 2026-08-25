@@ -51,6 +51,45 @@ function _transform_matrix(value,caller::AbstractString)
     end
 end
 
+function _transform_homogeneous(value,caller::AbstractString;
+                                name::AbstractString="affine")
+    entries=Matrix{Float64}(undef,4,4)
+    if value isa AbstractMatrix
+        size(value)==(4,4) || throw(ArgumentError(
+            "$caller: $name matrix must be 4×4"))
+        for (row,row_index) in enumerate(axes(value,1)),
+            (column,column_index) in enumerate(axes(value,2))
+            entries[row,column]=_transform_float(
+                value[row_index,column_index],caller,"$name[$row,$column]")
+        end
+    elseif value isa Tuple || value isa AbstractVector
+        length(value)==16 || throw(ArgumentError(
+            "$caller: $name must contain 16 entries by row"))
+        values=collect(value)
+        for row in 1:4,column in 1:4
+            flat=4(row-1)+column
+            entries[row,column]=_transform_float(
+                values[flat],caller,"$name[$row,$column]")
+        end
+    else
+        throw(ArgumentError(
+            "$caller: $name must be a 4×4 matrix or 16-entry tuple/vector"))
+    end
+    entries[4,1]==0 && entries[4,2]==0 && entries[4,3]==0 && entries[4,4]==1 ||
+        throw(ArgumentError(
+            "$caller: $name homogeneous row must be (0, 0, 0, 1)"))
+    coefficients=(entries[1,1],entries[2,1],entries[3,1],
+                  entries[1,2],entries[2,2],entries[3,2],
+                  entries[1,3],entries[2,3],entries[3,3])
+    _determinant_sign(coefficients,caller)
+    translation=(entries[1,4],entries[2,4],entries[3,4])
+    row_major=ntuple(16) do flat
+        row=(flat-1)÷4+1;column=mod(flat-1,4)+1
+        entries[row,column]
+    end
+    return coefficients,translation,row_major
+end
+
 @inline _matrix_entry(matrix,index)=matrix[index]
 
 function _determinant_sign(matrix::NTuple{9,Float64},caller::AbstractString)
