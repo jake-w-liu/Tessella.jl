@@ -194,7 +194,7 @@ esheet_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --pro
 println("  command: ", esheet_command)
 run(esheet_command)
 
-println("\n── gmsh_parity periodic translation ──  Tessella vs Gmsh node correspondence")
+println("\n── gmsh_parity periodic affine ──  Tessella vs Gmsh node correspondence")
 periodic_script = joinpath(HERE, "gmsh_parity", "periodic_translation.jl")
 periodic_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $periodic_script`
 println("  command: ", periodic_command)

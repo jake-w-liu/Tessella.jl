@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# P6: Tessella translation-periodic node correspondence vs Gmsh 4.15.2.
+# P6: Tessella translation/rotation-periodic node correspondence vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
@@ -72,16 +72,96 @@ try
         segments[:,n-1+i].=(Int32(n+i),Int32(n+i+1))
     end
     input=Mesh(tessella_coordinates;segs=segments)
-    output=periodic_identify(input,(1.0,0.0,0.0),collect(1:n),collect(n+1:2n);
-                             atol=1e-11)
-    validate(output).ok || error("Tessella periodic output is invalid")
-    output.segs==input.segs || error("Tessella periodic operation changed connectivity")
+    translation_output=periodic_identify(
+        input,(1.0,0.0,0.0),collect(1:n),collect(n+1:2n);atol=1e-11)
+    validate(translation_output).ok || error("Tessella periodic output is invalid")
+    translation_output.segs==input.segs || error(
+        "Tessella periodic operation changed connectivity")
     for i in 1:n
-        output.coords[:,n+i]==output.coords[:,i].+[1.0,0.0,0.0] || error(
+        translation_output.coords[:,n+i]==translation_output.coords[:,i].+
+                                              [1.0,0.0,0.0] || error(
             "Tessella periodic pair $i was not snapped exactly")
     end
-    println("GMSH_PARITY_PERIODIC_OK gmsh=$(gmsh.GMSH_API_VERSION) pairs=$n "*
-            "gmsh_max_error=$max_gmsh_error sha=$(mesh_crc(output).sha)")
+
+    # A separate pair of transfinite curves exercises Gmsh's documented
+    # row-major 4×4 convention with a +90° rotation about the z axis.
+    gmsh.model.add("periodic_rotation")
+    p1=gmsh.model.geo.addPoint(1.0,0.0,0.0,0.2)
+    p2=gmsh.model.geo.addPoint(2.0,0.0,0.0,0.2)
+    p3=gmsh.model.geo.addPoint(0.0,1.0,0.0,0.2)
+    p4=gmsh.model.geo.addPoint(0.0,2.0,0.0,0.2)
+    master_curve=gmsh.model.geo.addLine(p1,p2)
+    slave_curve=gmsh.model.geo.addLine(p3,p4)
+    gmsh.model.geo.synchronize()
+    gmsh.model.mesh.setTransfiniteCurve(master_curve,5)
+    gmsh.model.mesh.setTransfiniteCurve(slave_curve,5)
+    rotation=[0.0,-1.0,0.0,0.0,
+              1.0, 0.0,0.0,0.0,
+              0.0, 0.0,1.0,0.0,
+              0.0, 0.0,0.0,1.0]
+    gmsh.model.mesh.setPeriodic(1,[slave_curve],[master_curve],rotation)
+    gmsh.model.mesh.generate(1)
+    rotation_master,rotation_slave_tags,rotation_master_tags,gmsh_rotation=
+        gmsh.model.mesh.getPeriodicNodes(1,slave_curve)
+    rotation_master==master_curve || error(
+        "Gmsh rotational periodic master curve is $rotation_master, expected $master_curve")
+    length(rotation_slave_tags)==length(rotation_master_tags)==5 || error(
+        "Gmsh rotational periodic pair count is $(length(rotation_slave_tags)), expected 5")
+    length(gmsh_rotation)==16 || error(
+        "Gmsh rotational periodic affine transform is not 4×4")
+    maximum(abs.(gmsh_rotation.-rotation))<=1e-14 || error(
+        "Gmsh rotational periodic affine transform is $gmsh_rotation")
+
+    rotation_node_tags,rotation_node_coordinates,_=gmsh.model.mesh.getNodes()
+    rotation_coordinates=Dict{Int,NTuple{3,Float64}}()
+    for (i,tag) in enumerate(rotation_node_tags)
+        rotation_coordinates[Int(tag)]=(
+            rotation_node_coordinates[3i-2],rotation_node_coordinates[3i-1],
+            rotation_node_coordinates[3i])
+    end
+    all(tag->haskey(rotation_coordinates,Int(tag)),rotation_master_tags) || error(
+        "Gmsh omitted a rotational periodic master node from getNodes")
+    all(tag->haskey(rotation_coordinates,Int(tag)),rotation_slave_tags) || error(
+        "Gmsh omitted a rotational periodic slave node from getNodes")
+    rotation_order=sortperm(eachindex(rotation_master_tags);
+                           by=i->rotation_coordinates[Int(rotation_master_tags[i])][1])
+    nr=length(rotation_order)
+    tessella_rotation_coordinates=Matrix{Float64}(undef,3,2nr)
+    max_rotation_error=0.0
+    for (column,pair_index) in enumerate(rotation_order)
+        master=rotation_coordinates[Int(rotation_master_tags[pair_index])]
+        slave=rotation_coordinates[Int(rotation_slave_tags[pair_index])]
+        expected=(-master[2],master[1],master[3])
+        max_rotation_error=max(max_rotation_error,
+            hypot(slave[1]-expected[1],slave[2]-expected[2],slave[3]-expected[3]))
+        tessella_rotation_coordinates[:,column].=master
+        tessella_rotation_coordinates[:,nr+column].=slave
+    end
+    max_rotation_error<=1e-11 || error(
+        "Gmsh rotational periodic node correspondence error is $max_rotation_error")
+    rotation_segments=Matrix{Int32}(undef,2,2(nr-1))
+    for i in 1:nr-1
+        rotation_segments[:,i].=(Int32(i),Int32(i+1))
+        rotation_segments[:,nr-1+i].=(Int32(nr+i),Int32(nr+i+1))
+    end
+    rotation_input=Mesh(tessella_rotation_coordinates;segs=rotation_segments)
+    rotation_output=periodic_identify_affine(
+        rotation_input,gmsh_rotation,collect(1:nr),collect(nr+1:2nr);atol=1e-11)
+    validate(rotation_output).ok || error(
+        "Tessella affine-periodic output is invalid")
+    rotation_output.segs==rotation_input.segs || error(
+        "Tessella affine-periodic operation changed connectivity")
+    for i in 1:nr
+        master=rotation_output.coords[:,i]
+        rotation_output.coords[:,nr+i]==[-master[2],master[1],master[3]] || error(
+            "Tessella rotational periodic pair $i was not snapped exactly")
+    end
+
+    println("GMSH_PARITY_PERIODIC_OK gmsh=$(gmsh.GMSH_API_VERSION) "*
+            "translation_pairs=$n translation_error=$max_gmsh_error "*
+            "translation_sha=$(mesh_crc(translation_output).sha) "*
+            "rotation_pairs=$nr rotation_error=$max_rotation_error "*
+            "rotation_sha=$(mesh_crc(rotation_output).sha)")
 finally
     gmsh.finalize()
 end
