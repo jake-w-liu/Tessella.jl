@@ -2469,6 +2469,148 @@ end
     @test !occursin("Error",output)
 end
 
+function write_repeated_node_sections(path,version::Float64,binary::Bool;
+                                      third_tag::Int=30)
+    open(path,"w") do io
+        println(io,"\$MeshFormat")
+        println(io,version," ",binary ? 1 : 0," 8")
+        if binary
+            write(io,Int32(1));write(io,UInt8('\n'))
+        end
+        println(io,"\$EndMeshFormat")
+        if version==2.2
+            if binary
+                println(io,"\$Nodes\n2")
+                for (tag,x) in ((10,0.0),(20,1.0))
+                    write(io,Int32(tag))
+                    for coordinate in (x,0.0,0.0);write(io,coordinate);end
+                end
+                write(io,UInt8('\n'));println(io,"\$EndNodes")
+                println(io,"\$Nodes\n1")
+                write(io,Int32(third_tag))
+                for coordinate in (2.0,0.0,0.0);write(io,coordinate);end
+                write(io,UInt8('\n'));println(io,"\$EndNodes")
+                println(io,"\$Elements\n2")
+                for value in Int32[1,2,0];write(io,value);end
+                for value in Int32[101,10,20,102,20,third_tag];write(io,value);end
+                write(io,UInt8('\n'));println(io,"\$EndElements")
+            else
+                println(io,"\$Nodes\n2\n10 0 0 0\n20 1 0 0\n\$EndNodes")
+                println(io,"\$Nodes\n1\n$third_tag 2 0 0\n\$EndNodes")
+                println(io,"\$Elements\n2\n101 1 0 10 20\n102 1 0 20 $third_tag\n\$EndElements")
+            end
+        else
+            if binary
+                println(io,"\$Nodes")
+                for value in UInt64[1,2,10,20];write(io,value);end
+                for value in Int32[1,11,0];write(io,value);end
+                write(io,UInt64(2))
+                for value in UInt64[10,20];write(io,value);end
+                for value in (0.0,0.0,0.0,1.0,0.0,0.0);write(io,value);end
+                write(io,UInt8('\n'));println(io,"\$EndNodes")
+                println(io,"\$Nodes")
+                for value in UInt64[1,1,third_tag,third_tag];write(io,value);end
+                for value in Int32[1,11,0];write(io,value);end
+                write(io,UInt64(1));write(io,UInt64(third_tag))
+                for value in (2.0,0.0,0.0);write(io,value);end
+                write(io,UInt8('\n'));println(io,"\$EndNodes")
+                println(io,"\$Elements")
+                for value in UInt64[1,2,101,102];write(io,value);end
+                for value in Int32[1,11,1];write(io,value);end
+                write(io,UInt64(2))
+                for value in UInt64[101,10,20,102,20,third_tag];write(io,value);end
+                write(io,UInt8('\n'));println(io,"\$EndElements")
+            else
+                println(io,"\$Nodes\n1 2 10 20")
+                println(io,"1 11 0 2\n10 20\n0 0 0\n1 0 0\n\$EndNodes")
+                println(io,"\$Nodes\n1 1 $third_tag $third_tag")
+                println(io,"1 11 0 1\n$third_tag\n2 0 0\n\$EndNodes")
+                println(io,"\$Elements\n1 2 101 102")
+                println(io,"1 11 1 2\n101 10 20\n102 20 $third_tag\n\$EndElements")
+            end
+        end
+    end
+    return path
+end
+
+@testset "repeated node sections in ASCII and binary MSH" begin
+    directory=mktempdir()
+    expected_coords=Float64[0 1 2;0 0 0;0 0 0]
+    expected_nodes=Int32[1 2;2 3]
+    crcs=Dict{Tuple{Float64,Bool},String}()
+    for version in (2.2,4.1),binary in (false,true)
+        path=write_repeated_node_sections(
+            joinpath(directory,"repeated-nodes-$version-$binary.msh"),
+            version,binary)
+        mesh=ElementsUnderTest.read_mixed_msh(path)
+        @test ElementsUnderTest.validate(mesh).ok
+        @test mesh.coords==expected_coords
+        @test length(mesh.blocks)==1
+        @test mesh.blocks[1].msh==1
+        @test mesh.blocks[1].nodes==expected_nodes
+        @test mesh.blocks[1].tags==zeros(Int32,2)
+        if version==4.1
+            @test mesh.entity_data!==nothing
+            @test mesh.entity_data.external_node_tags==UInt64[10,20,30]
+            @test mesh.entity_data.node_entities==fill((1,Int32(11)),3)
+            @test mesh.entity_data.external_element_tags==[UInt64[101,102]]
+        else
+            @test mesh.entity_data===nothing
+        end
+        crcs[(version,binary)]=ElementsUnderTest.mixed_crc(mesh).sha
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(path;max_nodes=2)
+        if version==4.1
+            @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+                path;max_blocks=1)
+        end
+        ok,output=gmsh_check(path)
+        # Pinned Gmsh reports the earlier tag 10 as unknown after reading the
+        # second Nodes section. Tessella merges safely, then emits one canonical
+        # section that Gmsh can consume.
+        @test !ok
+        @test occursin("Error",output)
+        @test occursin(version==2.2 ? "Wrong node index 10" : "Unknown node 10",
+                       output)
+
+        canonical=joinpath(directory,"canonical-nodes-$version-$binary.msh")
+        ElementsUnderTest.write_mixed_msh(canonical,mesh;version,binary=false)
+        @test count(==("\$Nodes"),readlines(canonical))==1
+        @test ElementsUnderTest.mixed_crc(
+            ElementsUnderTest.read_mixed_msh(canonical)).sha==crcs[(version,binary)]
+        canonical_ok,canonical_output=gmsh_check(canonical)
+        @test canonical_ok
+        @test !occursin("Error",canonical_output)
+        duplicate_path=write_repeated_node_sections(
+            joinpath(directory,"repeated-duplicate-$version-$binary.msh"),
+            version,binary;third_tag=20)
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(duplicate_path)
+    end
+    @test crcs==Dict(
+        (2.2,false)=>
+            "d93f18ff2f3415913e2abd4f31eeb119896dda57755bfd230e616ead6a57c84e",
+        (2.2,true)=>
+            "d93f18ff2f3415913e2abd4f31eeb119896dda57755bfd230e616ead6a57c84e",
+        (4.1,false)=>
+            "24f2fefdad2a699abf29e9007ebc5c78ff7f80cfa59bbb5c15bdc8a815d3406e",
+        (4.1,true)=>
+            "24f2fefdad2a699abf29e9007ebc5c78ff7f80cfa59bbb5c15bdc8a815d3406e")
+
+    empty=joinpath(directory,"repeated-empty-nodes.msh")
+    write(empty,"\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n"*
+                "\$Nodes\n0 0 0 0\n\$EndNodes\n"*
+                "\$Nodes\n0 0 0 0\n\$EndNodes\n")
+    empty_mesh=ElementsUnderTest.read_mixed_msh(empty)
+    @test ElementsUnderTest.validate(empty_mesh).ok
+    @test size(empty_mesh.coords,2)==0
+
+    after_elements=joinpath(directory,"nodes-after-elements.msh")
+    write(after_elements,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n"*
+                         "\$Nodes\n1\n10 0 0 0\n\$EndNodes\n"*
+                         "\$Elements\n0\n\$EndElements\n"*
+                         "\$Nodes\n1\n20 1 0 0\n\$EndNodes\n")
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(after_elements)
+end
+
 @testset "mixed MSH malformed input, resource gates, and atomic output" begin
     directory=mktempdir()
     function malformed(name,text)
@@ -2518,10 +2660,6 @@ end
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Comments\nmissing end\n",
         "huge-truncated-count.msh" =>
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2147483647\n",
-        "repeated-node-sections.msh" =>
-            "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n" *
-            "\$Nodes\n0 0 0 0\n\$EndNodes\n" *
-            "\$Nodes\n0 0 0 0\n\$EndNodes\n",
         "bad-boundary.msh" =>
             "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 1 0 0\n1 0 0 0 1 0 0 0 1 999\n\$EndEntities\n",
         "bad-v4-range.msh" =>

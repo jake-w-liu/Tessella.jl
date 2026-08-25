@@ -24,7 +24,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | Track | State | Verified implementation increment |
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
-| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
+| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node sections |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
 | P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
@@ -37,7 +37,7 @@ not claim general mixed-element generation or recombination beyond P4's first-or
 surface pairing, MINI basis-selector tags 138/139 as mesh records, integration of
 mixed blocks into the simplex meshing kernels, curved high-order
 Jacobian certification beyond P2 tetrahedra, ancillary/unknown-section preservation (binary readers reject
-unsupported sections explicitly), repeated `$Nodes`, non-8-byte binary data, internal
+unsupported sections explicitly), non-8-byte binary data, internal
 indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection. Some
 registered fixed tags and polygon-border type 69 require explicit Tessella-only output
 because Gmsh 4.15.2 cannot consume them safely. MSH2 ASCII preserves variable records
@@ -94,6 +94,31 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-25 with Julia 1.12.7 after adding cumulative repeated
+pre-element `$Nodes` sections:
+
+- `read_mixed_msh` now merges disjoint node sections in ASCII and binary MSH
+  v2.2/v4.1 while enforcing cumulative node/block limits and global external-tag
+  uniqueness. V4 entity classification, sparse external tags, element
+  connectivity, and canonical one-section rewrites are preserved.
+- Fixed three-node/two-line CRCs are
+  `d93f18ff2f3415913e2abd4f31eeb119896dda57755bfd230e616ead6a57c84e`
+  for MSH2 and
+  `24f2fefdad2a699abf29e9007ebc5c78ff7f80cfa59bbb5c15bdc8a815d3406e`
+  for MSH4, identical between ASCII and binary inputs.
+- **VERIFIED (`gmsh <file> -check -parse_and_exit -v 5`):** Gmsh 4.15.2
+  reports tag 10 from the earlier section as unknown for each of the four raw
+  fixtures. Tessella's merged canonical rewrites contain one `$Nodes` section
+  and all four are accepted by the same command without an error. Empty repeated
+  sections are accepted; duplicates across sections and node sections after
+  elements are rejected explicitly.
+- The bounds-checked focused Elements suite passed 2,945/2,945 assertions under
+  Julia 1.12.7 and Julia 1.11.9. The full package gate passed
+  164,844/164,844 assertions in 12m39.6s, and aggregate bounds-checked validation
+  exited 0 against Gmsh 4.15.2-git. The tracked Julia layout remains fully
+  categorized, with only the three entry-point files at their respective top
+  levels.
 
 Re-measured on 2026-08-25 with Julia 1.12.7 after extending 2-D boundary-layer
 strips to arbitrary oriented planes:
