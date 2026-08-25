@@ -26,7 +26,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, and translation-periodic node-pair certification/snapping |
 | P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation-periodic curve, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
@@ -83,7 +83,7 @@ the pair map remains caller-owned rather than persistent model metadata. P4 does
 not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite or holed patches,
-general CAD parameterizations, recombined three-sided patches, curved/warped or
+general CAD parameterizations, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, or persistent model/I/O periodic entity metadata.
@@ -93,6 +93,35 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-25 with Julia 1.12.7 after adding Gmsh-compatible
+recombined three-sided transfinite patches:
+
+- `mesh_transfinite_triangle_patch` emits one first-order triangle per logical
+  row and `d(d-1)/2` first-order quadrangles for `d` divisions while preserving
+  all boundary segments and physical tags. `:left`, `:right`, and the shared
+  alternate layout reproduce Gmsh 4.15.2's ordered connectivity. Fixed
+  four-division mixed CRCs are
+  `09d6619152fe4f42d604c9a95e3805843825a08615d92778ae4e551d85fa2ce3`,
+  `b401b6bc71cac6dc3f7f44b20a4128ddf4bb439acec941253b7598af19800205`,
+  and `5d200b76825ed699e99b125c28cef49158d30bc56a9e090d8469854cc84dabfa`.
+- **VERIFIED (Gmsh 4.15.2 API oracle):** coverage of all four arrangement names,
+  five resolutions, and planar/tilted geometries matched Gmsh node placement and
+  triangle/quadrangle connectivity across 205 nodes per unrecombined/recombined
+  track. Maximum node error was `2.808666774861361e-15`. ASCII/binary MSH
+  v2.2/v4.1 round trips preserved coordinates and canonical mixed cell/tag sets.
+- Every output is certified against the unrecombined atomic lattice, exact
+  projected triangle/quadrangle orientations, and mixed edge incidence. A
+  base-valid fixture whose `Left` pairing creates a concave final quadrangle is
+  rejected explicitly. A separate seeded audit validated 2,000 affine patches
+  across all arrangements with division counts sampled from `1:20`.
+- The bounds-checked focused suite passed 241/241 assertions under Julia 1.12.7
+  and Julia 1.11.9. The final full package gate passed 164,744/164,744
+  assertions in 13m20.3s, and aggregate validation exited 0 against Gmsh
+  4.15.2-git. The organized Julia layout remains enforced: only
+  `src/Tessella.jl`, `test/runtests.jl`, and `validation/run_all.jl` occupy their
+  respective top levels; all other tracked `.jl` files remain in categorized
+  subfolders.
 
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening simplex/mixed MSH
 I/O, STL ingestion, and the straight-curve/recombined-quad public boundaries:

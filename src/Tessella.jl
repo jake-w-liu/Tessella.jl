@@ -31,7 +31,7 @@ include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex 
 include("structured/StructuredNumerics.jl") # P4: shared affine-grid numerical certificates
 include("structured/Transfinite.jl") # P4: validated four-sided planar transfinite patches
 include("structured/TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
-include("structured/TransfiniteTriangle.jl") # P4: three-sided structured triangle patches
+include("structured/TransfiniteTriangle.jl") # P4: three-sided triangle/quad patches
 include("structured/TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
 include("structured/TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
 include("structured/TransfinitePrism.jl") # P4: affine five-face transfinite prisms
@@ -73,7 +73,8 @@ using .Recombine: recombine_triangles
 using .Refine: refine_uniform
 using .Transfinite: mesh_transfinite_patch
 using .TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
-using .TransfiniteTriangle: mesh_transfinite_triangle
+using .TransfiniteTriangle: mesh_transfinite_triangle,
+                           mesh_transfinite_triangle_patch
 using .TransfiniteQuad: mesh_transfinite_quad_patch
 using .TransfiniteVolume: mesh_transfinite_volume
 using .TransfinitePrism: mesh_transfinite_prism
@@ -141,6 +142,7 @@ export refine_uniform
 export mesh_transfinite_patch
 export transfinite_curve_parameters, transfinite_curve_hwall
 export mesh_transfinite_triangle
+export mesh_transfinite_triangle_patch
 export mesh_transfinite_quad_patch
 export mesh_transfinite_volume
 export mesh_transfinite_prism
