@@ -6,8 +6,8 @@ mixed-element mesh container with MSH v2.2/v4.1 round-trip. Simplex
 [`Mesh`](@ref) remains the certified volume kernel. Cut/sub-element records
 with ownership links and simplex-decomposed polygon/polyhedron connectivity
 use a separate block type instead of pretending to be ordinary nodal elements.
-Standard MSH4 periodic entity transforms and node correspondences are retained
-as owned metadata.
+Standard MSH2/MSH4 periodic entity transforms and node correspondences are
+retained as owned metadata.
 """
 module Elements
 
@@ -834,26 +834,31 @@ const _OWNED_MIXED_MESH = _OwnedMixedMesh()
 
 """
 Mixed-element mesh with owned coordinates, homogeneous MSH blocks, names,
-optional entity metadata, and optional periodic links. Construction detaches
-every mutable array supplied by the caller.
+optional MSH4 entity metadata, optional per-cell MSH2 elementary-entity tags,
+and optional periodic links. Construction detaches every mutable array supplied
+by the caller. When present, `elementary_entities` aligns one vector with every
+block and one non-negative tag with every cell.
 """
 struct MixedMesh
     coords::Matrix{Float64}
     blocks::Vector{MixedElementBlock}
     physical_names::Dict{Tuple{Int,Int},String}
     entity_data::Union{Nothing,MixedEntityData}
+    elementary_entities::Union{Nothing,Vector{Vector{Int32}}}
     periodic_links::Vector{MixedPeriodicLink}
     function MixedMesh(::_OwnedMixedMesh,C::Matrix{Float64},
                        B::Vector{MixedElementBlock},
                        names::Dict{Tuple{Int,Int},String},
                        data::Union{Nothing,MixedEntityData},
+                       elementary_entities::Union{Nothing,Vector{Vector{Int32}}},
                        periodic_links::Vector{MixedPeriodicLink})
-        mesh=new(C,B,names,data,periodic_links)
+        mesh=new(C,B,names,data,elementary_entities,periodic_links)
         _assert_mixed_structure(mesh,"MixedMesh")
         return mesh
     end
     function MixedMesh(coords::AbstractMatrix{<:Real}, blocks::AbstractVector;
                        physical_names=Dict{Tuple{Int,Int},String}(),entity_data=nothing,
+                       elementary_entities=nothing,
                        periodic_links=MixedPeriodicLink[])
         size(coords,1)==3 || throw(ArgumentError("MixedMesh: coords must be 3×n"))
         _elements_reject_bool_values(coords,"MixedMesh: coordinates")
@@ -879,6 +884,9 @@ struct MixedMesh
         data=entity_data===nothing ? nothing :
              entity_data isa MixedEntityData ? _copy_mixed_entity_data(entity_data) :
              throw(ArgumentError("MixedMesh: entity_data must be MixedEntityData or nothing"))
+        elementary=elementary_entities===nothing ? nothing :
+                   _copy_mixed_elementary_entities(
+                       elementary_entities,"MixedMesh: elementary_entities")
         periodic_links isa AbstractVector || throw(ArgumentError(
             "MixedMesh: periodic_links must be a vector"))
         links=MixedPeriodicLink[]
@@ -887,7 +895,7 @@ struct MixedMesh
                 "MixedMesh: periodic link $i must be a MixedPeriodicLink"))
             push!(links,_copy_mixed_periodic_link(link))
         end
-        return MixedMesh(_OWNED_MIXED_MESH,C,B,names,data,links)
+        return MixedMesh(_OWNED_MIXED_MESH,C,B,names,data,elementary,links)
     end
 end
 
@@ -936,6 +944,40 @@ function _copy_mixed_entity_data(data::MixedEntityData)
         external_node_tags=data.external_node_tags,
         block_entities=data.block_entities,
         external_element_tags=data.external_element_tags)
+end
+
+function _copy_mixed_elementary_entities(values,context::AbstractString)
+    values isa AbstractVector || throw(ArgumentError(
+        "$context must be a vector of per-block vectors"))
+    out=Vector{Vector{Int32}}()
+    for (block_index,entities) in pairs(values)
+        tags=_mixed_int32_vector(
+            entities,"$context block $block_index entity tag")
+        any(<(0),tags) && throw(ArgumentError(
+            "$context block $block_index entity tags must be non-negative"))
+        push!(out,tags)
+    end
+    return out
+end
+
+function _assert_mixed_elementary_entities(m::MixedMesh,context::AbstractString)
+    elementary=m.elementary_entities
+    elementary===nothing && return nothing
+    length(elementary)==length(m.blocks) || throw(ArgumentError(
+        "$context: elementary-entity block count mismatch"))
+    data=m.entity_data
+    for (block_index,block) in pairs(m.blocks)
+        entities=elementary[block_index]
+        length(entities)==_block_ncells(block) || throw(ArgumentError(
+            "$context: elementary-entity length mismatch in block $block_index"))
+        all(>=(0),entities) || throw(ArgumentError(
+            "$context: block $block_index has a negative elementary-entity tag"))
+        if data!==nothing
+            entities==data.block_entities[block_index] || throw(ArgumentError(
+                "$context: MSH2 and MSH4 cell entity tags differ in block $block_index"))
+        end
+    end
+    return nothing
 end
 
 function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
@@ -1045,7 +1087,9 @@ function add_block!(m::MixedMesh, block::AbstractElementBlock)
     block isa MixedElementBlock || throw(ArgumentError(
         "add_block!: unsupported element block type"))
     m.entity_data===nothing || throw(ArgumentError(
-        "add_block!: cannot append without synchronized v4 entity metadata"))
+        "add_block!: cannot append without synchronized MSH4 entity metadata"))
+    m.elementary_entities===nothing || throw(ArgumentError(
+        "add_block!: cannot append without synchronized MSH2 elementary-entity metadata"))
     owned=_copy_mixed_block(block)
     push!(m.blocks,owned)
     try
@@ -1071,11 +1115,13 @@ end
 
 Fold point/linear-line/linear-triangle/linear-tetrahedron blocks into a simplex
 [`Mesh`](@ref). Any nonempty higher-order or non-simplex block is an explicit
-blocker. Persistent periodic metadata is also blocked because the compact
-simplex container has no field that can retain it.
+blocker. Persistent elementary-entity and periodic metadata are also blocked
+because the compact simplex container has no fields that can retain them.
 """
 function mixed_to_simplex(m::MixedMesh)
     _assert_mixed_structure(m,"mixed_to_simplex")
+    m.elementary_entities===nothing || throw(ArgumentError(
+        "mixed_to_simplex: cannot preserve MSH2 elementary-entity metadata in Mesh"))
     isempty(m.periodic_links) || throw(ArgumentError(
         "mixed_to_simplex: cannot preserve periodic entity metadata in Mesh"))
     ns=0; nf=0; nt=0
@@ -1186,6 +1232,12 @@ function _assert_mixed_periodic_links(m::MixedMesh,context::AbstractString)
             push!(known_entities,(_block_dim(block),Int(entity)))
         end
     end
+    elementary=m.elementary_entities
+    if elementary!==nothing
+        for (block_index,block) in pairs(m.blocks),entity in elementary[block_index]
+            entity==0 || push!(known_entities,(_block_dim(block),Int(entity)))
+        end
+    end
     seen_slaves=Set{Tuple{Int,Int}}()
     total_pairs=0
     for (index,link) in pairs(m.periodic_links)
@@ -1202,7 +1254,7 @@ function _assert_mixed_periodic_links(m::MixedMesh,context::AbstractString)
         slave_key in seen_slaves && throw(ArgumentError(
             "$context: duplicate periodic slave entity $slave_key"))
         push!(seen_slaves,slave_key)
-        if data!==nothing
+        if data!==nothing || elementary!==nothing
             slave_key in known_entities || throw(ArgumentError(
                 "$context: periodic link $index references missing slave entity $slave_key"))
             master_key in known_entities || throw(ArgumentError(
@@ -1315,6 +1367,7 @@ function _assert_mixed_structure(m::MixedMesh, context::AbstractString)
     _assert_acyclic_element_links(m,context)
     _copy_physical_names(m.physical_names,context)
     _assert_mixed_entity_data(m,context)
+    _assert_mixed_elementary_entities(m,context)
     _assert_mixed_periodic_links(m,context)
     return total
 end
@@ -1324,12 +1377,12 @@ end
 
 Validate finite coordinates and connectivity. The check rejects repeated
 indices within each ordinary cell or constituent simplex and, by default,
-duplicate cells independent of their local orientation. Lossless v4 metadata is checked for aligned arrays,
-valid entity references and topology, legacy-tag consistency, finite
-parametrics, globally unique positive external tags, and structurally valid
-periodic entity/node links. Geometry/Jacobian
-validity for curved high-order cells is not inferred from nodal coordinates by
-this structural validator.
+duplicate cells independent of their local orientation. Lossless MSH4 metadata
+is checked for aligned arrays, valid entity references and topology, legacy-tag
+consistency, finite parametrics, globally unique positive external tags,
+aligned non-negative MSH2 elementary-entity tags, and structurally valid
+periodic entity/node links. Geometry/Jacobian validity for curved high-order
+cells is not inferred from nodal coordinates by this structural validator.
 """
 function validate(m::MixedMesh; reject_duplicate_cells=true)
     reject_duplicate_cells isa Bool || throw(ArgumentError(
@@ -1410,6 +1463,12 @@ end
     ta=ba.tags[a.cell]; tb=bb.tags[b.cell]
     ta!=tb && return ta<tb
     data=m.entity_data
+    elementary=m.elementary_entities
+    if elementary!==nothing && data===nothing
+        ea=elementary[a.block][a.cell]
+        eb=elementary[b.block][b.cell]
+        ea!=eb && return ea<eb
+    end
     if data!==nothing
         ea=data.block_entities[a.block][a.cell]
         eb=data.block_entities[b.block][b.cell]
@@ -1426,9 +1485,11 @@ end
 
 Return a deterministic SHA-256 regression record. The digest includes every
 coordinate bit pattern, Gmsh type/dimension/order, oriented local connectivity,
-special parent/domain link, physical tag, and physical name. When present, lossless v4 entity records,
-classification, parametric coordinates, external tags, and periodic entity/node
-relations are also included.
+special parent/domain link, physical tag, and physical name. When present,
+lossless MSH4 entity records, MSH2 elementary-entity tags, classification,
+parametric coordinates, external tags, and periodic entity/node relations are
+also included. An `elementary_entities` copy equal to MSH4 cell classification
+is redundant and does not change the digest.
 Cell and block iteration order do not affect the digest; reversing a cell does.
 Empty meshes have a finite zero bounding box.
 """
@@ -1458,19 +1519,13 @@ function mixed_crc(m::MixedMesh)
     end
     ctx=SHA.SHA2_256_CTX()
     data=m.entity_data
+    elementary=m.elementary_entities
+    has_elementary=elementary!==nothing && data===nothing
     has_special=any(block->block isa SpecialElementBlock,m.blocks)
     has_periodic=!isempty(m.periodic_links)
-    prefix=if has_periodic
-        has_special ? (data===nothing ? "Tessella.MixedMesh.CRC.v7\0" :
-                                       "Tessella.MixedMesh.CRC.v8\0") :
-                      (data===nothing ? "Tessella.MixedMesh.CRC.v5\0" :
-                                       "Tessella.MixedMesh.CRC.v6\0")
-    else
-        has_special ? (data===nothing ? "Tessella.MixedMesh.CRC.v3\0" :
-                                       "Tessella.MixedMesh.CRC.v4\0") :
-                      (data===nothing ? "Tessella.MixedMesh.CRC.v1\0" :
-                                       "Tessella.MixedMesh.CRC.v2\0")
-    end
+    crc_version=1+(data===nothing ? 0 : 1)+(has_special ? 2 : 0)+
+                  (has_periodic ? 4 : 0)+(has_elementary ? 8 : 0)
+    prefix="Tessella.MixedMesh.CRC.v$crc_version\0"
     SHA.update!(ctx,codeunits(prefix))
     buf8=Vector{UInt8}(undef,8); buf4=Vector{UInt8}(undef,4)
     _sha_u64!(ctx,buf8,UInt64(nn))
@@ -1569,6 +1624,8 @@ function mixed_crc(m::MixedMesh)
             _sha_u64!(ctx,buf8,
                 UInt64(data.external_element_tags[ref.block][ref.cell]))
         end
+        has_elementary && _sha_i32!(
+            ctx,buf4,elementary[ref.block][ref.cell])
     end
     return (n_nodes=nn,n_blocks=length(m.blocks),n_cells=ncells,
             bbox=(lo,hi),sha=bytes2hex(SHA.digest!(ctx)))
@@ -1917,6 +1974,7 @@ mutable struct _MixedReadAccum
     entity_physical::Dict{Tuple{Int,Int},Int32}
     entities::Dict{Tuple{Int,Int},MixedEntity}
     implicit_entities::Set{Tuple{Int,Int}}
+    elementary_entity_keys::Set{Tuple{Int,Int}}
     external_node_tags::Vector{UInt64}
     node_entities::Vector{Tuple{Int,Int32}}
     node_parametric::Vector{Union{Nothing,Vector{Float64}}}
@@ -1933,7 +1991,7 @@ _MixedReadAccum() = _MixedReadAccum(
     Float64[],Float64[],Float64[],Dict{UInt64,Int32}(),
     Dict{Int,_MixedReadBucket}(),Dict{Tuple{Int,Int},String}(),
     Dict{Tuple{Int,Int},Int32}(),Dict{Tuple{Int,Int},MixedEntity}(),
-    Set{Tuple{Int,Int}}(),UInt64[],Tuple{Int,Int32}[],
+    Set{Tuple{Int,Int}}(),Set{Tuple{Int,Int}}(),UInt64[],Tuple{Int,Int32}[],
     Union{Nothing,Vector{Float64}}[],Set{UInt64}(),0,0,0,0,
     MixedPeriodicLink[],0)
 
@@ -1967,12 +2025,13 @@ cannot originate in that format.
 [`ElementBlock`](@ref) `tags` remains the legacy projection to the first entity
 physical membership (or zero), while [`MixedEntityData`](@ref) retains every
 membership, signed boundary, classification, parametric coordinate, and external
-node/element tag. [`MixedMesh`](@ref) `periodic_links` retains standard MSH4
-periodic entity transforms and node pairs. Node, element, connectivity, block,
-entity, periodic-link/pair, physical-name and file-size limits are checked before
-bulk allocation. Repeated physical-name, entity, pre-element node, element, and
-disjoint periodic sections are merged, with cumulative resource limits and global
-external-tag uniqueness. Gmsh treats
+node/element tag. [`MixedMesh`](@ref) `elementary_entities` retains the per-cell
+elementary tags needed by MSH2 periodic relations, while `periodic_links` retains
+standard MSH2/MSH4 entity transforms and node pairs. Node, element,
+connectivity, block, entity, periodic-link/pair, physical-name, and file-size
+limits are checked before bulk allocation. Repeated physical-name, entity,
+pre-element node, element, and disjoint periodic sections are merged, with
+cumulative resource limits and global external-tag uniqueness. Gmsh treats
 backslashes in physical names literally. Set
 `tessella_extensions=true` only when reading Tessella's escaped name extension
 produced by `write_mixed_msh(...; gmsh_compatible=false)`.
@@ -1981,10 +2040,10 @@ Binary files are byte-swapped when their 32-bit endianness marker requires it.
 MSH 2.2 binary payloads use 32-bit integer tags and 64-bit coordinates; MSH
 4.1 binary payloads use 32-bit entity/type values, 64-bit `size_t` values and
 64-bit coordinates, including the standard 0-or-16-entry periodic affine
-payload. MSH2 periodic sections are rejected explicitly until their legacy
-elementary-entity tags can be preserved losslessly. Unsupported sections in a
-binary file are rejected explicitly because their payload cannot be skipped
-safely without decoding it.
+payload. The MSH2 periodic section remains ASCII in both file modes and accepts
+the standard optional 16-entry `Affine` record. Unsupported sections in a binary
+file are rejected explicitly because their payload cannot be skipped safely
+without decoding it.
 """
 function read_mixed_msh(path::AbstractString;
                         tessella_extensions=false,
@@ -2437,10 +2496,14 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
         elseif header=="\$Periodic"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Periodic appeared before \$MeshFormat"))
-            version==4.1 || throw(ArgumentError(
-                "read_mixed_msh: periodic metadata is currently supported only in MSH v4.1"))
-            binary ? _read_mixed_periodic_v4_binary!(acc,io,limits,swap) :
-                     _read_mixed_periodic_v4!(acc,io,limits)
+            if version==2.2
+                seen_elements || throw(ArgumentError(
+                    "read_mixed_msh: MSH 2.2 \$Periodic must follow \$Elements"))
+                _read_mixed_periodic_v2!(acc,io,limits)
+            else
+                binary ? _read_mixed_periodic_v4_binary!(acc,io,limits,swap) :
+                         _read_mixed_periodic_v4!(acc,io,limits)
+            end
         elseif startswith(header,"\$End")
             throw(ArgumentError("read_mixed_msh: unexpected section terminator $header"))
         elseif startswith(header,"\$")
@@ -3073,6 +3136,14 @@ function _push_mixed_cell_binary!(acc,etype::Int,physical::Int32,entity::Int32,
     return nothing
 end
 
+function _mixed_elementary_entity!(acc,value::Int,dim::Int,context::AbstractString)
+    0<=value<=typemax(Int32) || throw(ArgumentError(
+        "read_mixed_msh: $context must be non-negative and fit Int32"))
+    entity=Int32(value)
+    entity==0 || push!(acc.elementary_entity_keys,(dim,value))
+    return entity
+end
+
 function _read_mixed_elements_v2!(acc,io,limits)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
@@ -3086,6 +3157,7 @@ function _read_mixed_elements_v2!(acc,io,limits)
         ntags>=0 || throw(ArgumentError(
             "read_mixed_msh: negative v2 element tag count"))
         physical=Int32(0)
+        elementary_value=0
         npart=0
         base_tags=ntags
         first_link=0
@@ -3093,6 +3165,7 @@ function _read_mixed_elements_v2!(acc,io,limits)
         for i in 1:ntags
             value=_msh_record_int!(reader,"v2 element metadata tag")
             i==1 && (physical=_mixed_physical_tag(value,"physical tag"))
+            i==2 && (elementary_value=value)
             if i==3 && ntags>3
                 npart=value
                 npart>0 || throw(ArgumentError(
@@ -3108,6 +3181,8 @@ function _read_mixed_elements_v2!(acc,io,limits)
             i==base_tags+1 && (first_link=value)
             i==base_tags+2 && (second_link=value)
         end
+        elementary=_mixed_elementary_entity!(
+            acc,elementary_value,layout.dim,"elementary entity tag")
         parent_tag=UInt64(0); domain_tags=(UInt64(0),UInt64(0))
         if layout.special
             ntags==3 && throw(ArgumentError(
@@ -3148,7 +3223,7 @@ function _read_mixed_elements_v2!(acc,io,limits)
             push!(bucket.nodes,internal)
         end
         _expect_msh_record_end!(reader,"v2 element record")
-        _append_mixed_cell_metadata!(bucket,layout,physical,Int32(0),element_tag,
+        _append_mixed_cell_metadata!(bucket,layout,physical,elementary,element_tag,
                                      parent_tag,domain_tags)
     end
     _expect_msh_end(io,"\$EndElements")
@@ -3202,6 +3277,9 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool)
                 physical=_mixed_physical_tag(
                     Int(data[offset+1]),"physical tag")
             end
+            elementary_value=ntags>1 ? Int(data[offset+2]) : 0
+            elementary=_mixed_elementary_entity!(
+                acc,elementary_value,layout.dim,"elementary entity tag")
             parent_tag=UInt64(0)
             if layout.special
                 npart=0; base_tags=min(ntags,2)
@@ -3232,7 +3310,7 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool)
             first_node=offset+1+ntags
             last_node=first_node+layout.nnodes-1
             _push_mixed_cell_binary!(
-                acc,etype,physical,Int32(0),element_tag,
+                acc,etype,physical,elementary,element_tag,
                 @view(data[first_node:last_node]),limits;
                 parent_tag=parent_tag,reserve_connectivity=false)
             offset+=width; nread+=1
@@ -3439,7 +3517,8 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool)
 end
 
 function _append_mixed_periodic_link!(acc,limits,dim::Int,slave::Int,
-                                      master::Int,affine,slave_tags,master_tags)
+                                      master::Int,affine,slave_tags,master_tags,
+                                      is_v4::Bool)
     0<=dim<=2 || throw(ArgumentError(
         "read_mixed_msh: periodic entity dimension $dim is outside 0:2"))
     1<=slave<=typemax(Int32) || throw(ArgumentError(
@@ -3449,7 +3528,9 @@ function _append_mixed_periodic_link!(acc,limits,dim::Int,slave::Int,
     slave!=master || throw(ArgumentError(
         "read_mixed_msh: periodic slave and master entity tags must differ"))
     for (name,tag) in (("slave",slave),("master",master))
-        haskey(acc.entity_physical,(dim,tag)) || throw(ArgumentError(
+        declared=is_v4 ? haskey(acc.entity_physical,(dim,tag)) :
+                         (dim,tag) in acc.elementary_entity_keys
+        declared || throw(ArgumentError(
             "read_mixed_msh: periodic $name entity ($dim,$tag) is undeclared"))
     end
     any(link->link.dim==dim && link.slave_entity==slave,acc.periodic_links) &&
@@ -3485,6 +3566,52 @@ function _append_mixed_periodic_link!(acc,limits,dim::Int,slave::Int,
     end
     push!(acc.periodic_links,link)
     acc.periodic_pairs=Base.checked_add(acc.periodic_pairs,pair_count)
+    return nothing
+end
+
+function _read_mixed_periodic_v2!(acc,io,limits)
+    reader=_MshTokenReader(io)
+    remaining=limits.max_periodic_links-length(acc.periodic_links)
+    count=_msh_int(
+        _msh_token!(reader,"Periodic header"),"periodic-link count")
+    0<=count<=remaining || throw(ArgumentError(
+        "read_mixed_msh: cumulative periodic-link count exceeds max_periodic_links"))
+    for _ in 1:count
+        dim=_msh_int(_msh_token!(reader,"periodic entity"),
+                     "periodic entity dimension")
+        slave=_msh_int(_msh_token!(reader,"periodic entity"),
+                       "periodic slave entity tag")
+        master=_msh_int(_msh_token!(reader,"periodic entity"),
+                        "periodic master entity tag")
+
+        payload=_msh_token!(reader,"periodic affine or node-pair count")
+        affine=nothing
+        if payload=="Affine"
+            affine=ntuple(16) do _
+                _msh_float(
+                    _msh_token!(reader,"periodic affine transform"),
+                    "periodic affine transform")
+            end
+            payload=_msh_token!(reader,"periodic node-pair count")
+        end
+        npairs=_msh_int(payload,"periodic node-pair count")
+        remaining_pairs=limits.max_periodic_pairs-acc.periodic_pairs
+        0<=npairs<=remaining_pairs || throw(ArgumentError(
+            "read_mixed_msh: cumulative periodic node-pair count exceeds max_periodic_pairs"))
+        slaves=Vector{UInt64}(undef,npairs)
+        masters=similar(slaves)
+        for index in 1:npairs
+            slaves[index]=_msh_size_t(
+                _msh_token!(reader,"periodic slave node tag"),
+                "periodic slave node tag")
+            masters[index]=_msh_size_t(
+                _msh_token!(reader,"periodic master node tag"),
+                "periodic master node tag")
+        end
+        _append_mixed_periodic_link!(
+            acc,limits,dim,slave,master,affine,slaves,masters,false)
+    end
+    _expect_msh_token_end!(reader,"\$EndPeriodic")
     return nothing
 end
 
@@ -3525,7 +3652,7 @@ function _read_mixed_periodic_v4!(acc,io,limits)
                 "periodic master node tag")
         end
         _append_mixed_periodic_link!(
-            acc,limits,dim,slave,master,affine,slaves,masters)
+            acc,limits,dim,slave,master,affine,slaves,masters,true)
     end
     _expect_msh_token_end!(reader,"\$EndPeriodic")
     return nothing
@@ -3562,7 +3689,7 @@ function _read_mixed_periodic_v4_binary!(acc,io,limits,swap::Bool)
             slaves[i]=tags[2i-1];masters[i]=tags[2i]
         end
         _append_mixed_periodic_link!(
-            acc,limits,dim,slave,master,affine,slaves,masters)
+            acc,limits,dim,slave,master,affine,slaves,masters,true)
     end
     _consume_binary_newline(io,"Periodic section")
     _expect_msh_end(io,"\$EndPeriodic")
@@ -3654,9 +3781,10 @@ function _finish_mixed_read(acc,is_v4::Bool)
         external_node_tags=acc.external_node_tags,
         block_entities=block_entities,
         external_element_tags=external_element_tags) : nothing
+    elementary=!is_v4 && !isempty(acc.periodic_links) ? block_entities : nothing
     return MixedMesh(
         _OWNED_MIXED_MESH,coords,blocks,acc.physical_names,data,
-        acc.periodic_links)
+        elementary,acc.periodic_links)
 end
 
 function _escape_mixed_name(name::AbstractString)
@@ -3689,15 +3817,16 @@ end
     write_mixed_msh(path, mesh; version=4.1, binary=false,
                     gmsh_compatible=true) -> path
 
-Validate and atomically write a mixed mesh as ASCII or binary MSH v2.2 or v4.1. V4
-entity and periodic-link metadata is preserved exactly when present; legacy
-meshes receive a deterministic discrete-entity layout with coordinate-derived
-bounds. MSH v2.2
+Validate and atomically write a mixed mesh as ASCII or binary MSH v2.2 or v4.1.
+MSH4 entity metadata and MSH2/MSH4 periodic links are preserved when present;
+legacy meshes receive a deterministic discrete-entity layout with
+coordinate-derived bounds. MSH v2.2
 ASCII retains supported parent/domain links and variable decompositions; its
 binary form retains parent links but has neither variable record widths nor
 domain-link fields. MSH4 supports only fixed-width, unlinked special records.
-Standard MSH4 periodic links require explicit entity metadata; MSH2 periodic
-output is an explicit blocker.
+MSH4 periodic links require explicit entity metadata. MSH2 periodic links
+require aligned elementary-entity tags or compatible MSH4 cell classification;
+their section is ASCII in both file modes.
 Unsupported combinations are rejected before a temporary file is created.
 MSH v2.2 necessarily writes the legacy first-physical-tag projection. By default,
 element tags that pinned Gmsh 4.15.2 cannot safely consume through its normal
@@ -3788,7 +3917,10 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
             binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible) :
                      _write_mixed_v4(io,m,names,gmsh_compatible)
         end
-        isempty(m.periodic_links) || _write_mixed_periodic_v4(io,m,binary)
+        if !isempty(m.periodic_links)
+            value==4.1 ? _write_mixed_periodic_v4(io,m,binary) :
+                         _write_mixed_periodic_v2(io,m)
+        end
         flush(io); close(io)
         mv(temporary,target;force=true)
     end
@@ -3796,12 +3928,21 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
 end
 
 function _assert_mixed_msh_format(m::MixedMesh,version::Float64,binary::Bool)
+    if m.elementary_entities!==nothing && version==4.1 && m.entity_data===nothing
+        throw(ArgumentError(
+            "write_mixed_msh: MSH 4.1 output cannot preserve MSH2 " *
+            "elementary-entity metadata without compatible MixedEntityData"))
+    end
     if !isempty(m.periodic_links)
-        version==4.1 || throw(ArgumentError(
-            "write_mixed_msh: periodic metadata is currently supported only in MSH v4.1"))
-        m.entity_data!==nothing || throw(ArgumentError(
-            "write_mixed_msh: MSH 4.1 periodic metadata requires explicit " *
-            "MixedEntityData so entity and external node tags remain stable"))
+        if version==4.1
+            m.entity_data!==nothing || throw(ArgumentError(
+                "write_mixed_msh: MSH 4.1 periodic metadata requires explicit " *
+                "MixedEntityData so entity and external node tags remain stable"))
+        else
+            _v2_explicit_entities(m)!==nothing || throw(ArgumentError(
+                "write_mixed_msh: MSH 2.2 periodic metadata requires per-cell " *
+                "elementary-entity tags or compatible MixedEntityData"))
+        end
     end
     for (bi,block) in pairs(m.blocks)
         block isa SpecialElementBlock || continue
@@ -3830,6 +3971,30 @@ function _assert_mixed_msh_format(m::MixedMesh,version::Float64,binary::Bool)
             end
         end
     end
+    return nothing
+end
+
+function _write_mixed_periodic_v2(io,m::MixedMesh)
+    links=sort!(collect(m.periodic_links);
+                by=link->(link.dim,link.slave_entity,link.master_entity))
+    println(io,"\$Periodic")
+    println(io,length(links))
+    for link in links
+        println(io,link.dim," ",link.slave_entity," ",link.master_entity)
+        if link.affine!==nothing
+            print(io,"Affine")
+            for value in link.affine
+                @printf(io," %.17g",value)
+            end
+            println(io)
+        end
+        pairs=sort!(collect(zip(link.slave_nodes,link.master_nodes));by=identity)
+        println(io,length(pairs))
+        for (slave,master) in pairs
+            println(io,slave," ",master)
+        end
+    end
+    println(io,"\$EndPeriodic")
     return nothing
 end
 
@@ -3957,6 +4122,20 @@ function _v2_entity_ids(m::MixedMesh)
     return ids
 end
 
+function _v2_explicit_entities(m::MixedMesh)
+    m.elementary_entities!==nothing && return m.elementary_entities
+    !isempty(m.periodic_links) && m.entity_data!==nothing &&
+        return m.entity_data.block_entities
+    return nothing
+end
+
+@inline function _v2_cell_entity(m::MixedMesh,ids,block_index::Int,cell::Int)
+    explicit=_v2_explicit_entities(m)
+    explicit===nothing || return explicit[block_index][cell]
+    block=m.blocks[block_index]
+    return Int32(ids[(_block_dim(block),block.tags[cell])])
+end
+
 function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool)
     println(io,"\$MeshFormat"); println(io,"2.2 0 8"); println(io,"\$EndMeshFormat")
     _write_mixed_physical_names(io,names,gmsh_compatible)
@@ -3971,7 +4150,7 @@ function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool)
     ids=_v2_entity_ids(m); order,output_tags=_mixed_v2_order(m)
     @inbounds for ref in order
         b=m.blocks[ref.block]; j=ref.cell; physical=b.tags[j]
-        entity=ids[(_block_dim(b),physical)]
+        entity=_v2_cell_entity(m,ids,ref.block,j)
         print(io,output_tags[ref.block][j]," ",b.msh)
         if b isa SpecialElementBlock
             record=MSH_SPECIAL_RECORDS[b.msh]
@@ -4040,7 +4219,7 @@ function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool)
         for index in position:last
             ref=order[index]; block=m.blocks[ref.block]; j=ref.cell
             write(io,output_tags[ref.block][j]); write(io,block.tags[j])
-            write(io,Int32(ids[(_block_dim(block),block.tags[j])]))
+            write(io,_v2_cell_entity(m,ids,ref.block,j))
             if ntags==3
                 write(io,_v2_link_tag(output_tags,block.parent_refs[j]))
             end

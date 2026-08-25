@@ -642,8 +642,11 @@ import sys
 
 gmsh.initialize()
 gmsh.option.setNumber("General.Terminal", 0)
+gmsh.option.setNumber("Mesh.IgnorePeriodicity", 0)
 try:
     gmsh.open(sys.argv[1])
+    if "Periodic" in gmsh.model.getAttributeNames():
+        gmsh.model.removeAttribute("Periodic")
     gmsh.option.setNumber("Mesh.MshFileVersion", float(sys.argv[3]))
     gmsh.option.setNumber("Mesh.Binary", int(sys.argv[4]))
     gmsh.write(sys.argv[2])
@@ -2337,7 +2340,7 @@ end
     @test !occursin("Error",output)
 end
 
-@testset "persistent MSH4 periodic entity metadata" begin
+@testset "persistent MSH periodic entity metadata" begin
     function external_periodic_map(periodic_mesh)
         data=periodic_mesh.entity_data
         data===nothing && error("periodic fixture lost entity metadata")
@@ -2347,6 +2350,23 @@ end
                 pairs=sort!([(data.external_node_tags[link.slave_nodes[i]],
                               data.external_node_tags[link.master_nodes[i]])
                              for i in eachindex(link.slave_nodes)]))
+            for link in periodic_mesh.periodic_links)
+    end
+    function compact_periodic_map(periodic_mesh)
+        return Dict(
+            (link.dim,link.slave_entity,link.master_entity)=>(
+                affine=link.affine,
+                pairs=sort!(collect(zip(link.slave_nodes,link.master_nodes))))
+            for link in periodic_mesh.periodic_links)
+    end
+    function coordinate_periodic_map(periodic_mesh)
+        return Dict(
+            (link.dim,link.slave_entity,link.master_entity)=>(
+                affine=link.affine,
+                pairs=sort!([(
+                    Tuple(periodic_mesh.coords[:,link.slave_nodes[index]]),
+                    Tuple(periodic_mesh.coords[:,link.master_nodes[index]]))
+                    for index in eachindex(link.slave_nodes)]))
             for link in periodic_mesh.periodic_links)
     end
     mesh=periodic_v4_fixture()
@@ -2441,6 +2461,14 @@ end
     no_affine_back=ElementsUnderTest.read_mixed_msh(no_affine_path)
     @test only(no_affine_back.periodic_links).affine===nothing
     @test occursin("\n0 3 1\n0\n1\n30 10\n",read(no_affine_path,String))
+    no_affine_v2_path=joinpath(directory,"periodic-no-affine-v2.msh")
+    ElementsUnderTest.write_mixed_msh(
+        no_affine_v2_path,no_affine_mesh;version=2.2)
+    no_affine_v2_text=read(no_affine_v2_path,String)
+    @test !occursin("Affine",no_affine_v2_text)
+    no_affine_v2_back=ElementsUnderTest.read_mixed_msh(no_affine_v2_path)
+    @test only(no_affine_v2_back.periodic_links).affine===nothing
+    @test only(no_affine_v2_back.periodic_links).slave_nodes==Int32[4]
 
     # Disjoint repeated sections merge under cumulative link/pair limits.
     empty_periodic=periodic_v4_fixture(links=ElementsUnderTest.MixedPeriodicLink[])
@@ -2478,21 +2506,164 @@ end
     write(bad_affine_count,replace(text,"\n16 0 -1"=>"\n15 0 -1";count=1))
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(bad_affine_count)
 
-    v2=joinpath(directory,"periodic-v2.msh")
-    write(v2,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n"*
-             "\$Nodes\n0\n\$EndNodes\n\$Elements\n0\n\$EndElements\n"*
-             "\$Periodic\n0\n\$EndPeriodic\n")
-    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(v2)
-    target=joinpath(directory,"atomic-periodic.msh");write(target,"sentinel")
-    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
-        target,mesh;version=2.2)
-    @test read(target,String)=="sentinel"
+    expected_compact_map=compact_periodic_map(mesh)
+    expected_coordinate_map=coordinate_periodic_map(mesh)
+    expected_elementary=Dict(
+        block.msh=>copy(mesh.entity_data.block_entities[block_index])
+        for (block_index,block) in pairs(mesh.blocks))
+    v2_crcs=Set{String}()
+    for binary in (false,true)
+        v2=joinpath(directory,"periodic-v2-$binary.msh")
+        ElementsUnderTest.write_mixed_msh(v2,mesh;version=2.2,binary)
+        v2_back=ElementsUnderTest.read_mixed_msh(v2)
+        @test ElementsUnderTest.validate(v2_back).ok
+        @test v2_back.entity_data===nothing
+        @test v2_back.elementary_entities!==nothing
+        @test Dict(block.msh=>v2_back.elementary_entities[block_index]
+                   for (block_index,block) in pairs(v2_back.blocks))==
+              expected_elementary
+        @test compact_periodic_map(v2_back)==expected_compact_map
+        @test coordinate_periodic_map(v2_back)==expected_coordinate_map
+        push!(v2_crcs,ElementsUnderTest.mixed_crc(v2_back).sha)
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+            v2;max_periodic_links=2)
+        @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+            v2;max_periodic_pairs=4)
+        ok,output=gmsh_check(v2)
+        @test ok
+        @test !occursin("Error",output)
+        rewritten=joinpath(directory,"periodic-v2-rewritten-$binary.msh")
+        @test startswith(gmsh_rewrite(
+            v2,rewritten;version=2.2,binary=!binary),"4.15.2")
+        rewritten_mesh=ElementsUnderTest.read_mixed_msh(rewritten)
+        @test length(rewritten_mesh.periodic_links)==3
+        @test coordinate_periodic_map(rewritten_mesh)==expected_coordinate_map
+    end
+    @test length(v2_crcs)==1
+    @test only(v2_crcs)==
+          "a914cf9dd0fb8f7f5c01cea90bbb9457009d579f979ef66fdc1bf924420d830f"
+
+    v2_text=read(joinpath(directory,"periodic-v2-false.msh"),String)
+    v2_payload=String(only(match(
+        r"(?s)\$Periodic\s+(.*?)\s+\$EndPeriodic",v2_text).captures))
+    v2_packed=joinpath(directory,"periodic-v2-packed.msh")
+    packed_text=replace(v2_text,
+        "\$Periodic\n"*v2_payload*"\n\$EndPeriodic"=>
+        "\$Periodic\n"*join(split(v2_payload),"\t")*" \$EndPeriodic")
+    @test packed_text!=v2_text
+    write(v2_packed,packed_text)
+    packed_mesh=ElementsUnderTest.read_mixed_msh(v2_packed)
+    @test compact_periodic_map(packed_mesh)==expected_compact_map
+    @test packed_mesh.elementary_entities!==nothing
+
+    function periodic_section_v2(links)
+        part_path=joinpath(
+            directory,"periodic-v2-part-$(length(links))-$(links[1].dim).msh")
+        ElementsUnderTest.write_mixed_msh(
+            part_path,periodic_v4_fixture(links=links);version=2.2)
+        matched=match(r"\$Periodic\n.*?\$EndPeriodic\n"s,read(part_path,String))
+        matched===nothing && error("MSH2 periodic writer omitted a nonempty section")
+        return matched.match
+    end
+    v2_base=replace(v2_text,r"\$Periodic\n.*?\$EndPeriodic\n"s=>"")
+    v2_first_section=periodic_section_v2(mesh.periodic_links[1:1])
+    v2_second_section=periodic_section_v2(mesh.periodic_links[2:3])
+    v2_repeated=joinpath(directory,"periodic-v2-repeated.msh")
+    write(v2_repeated,v2_base*v2_first_section*v2_second_section)
+    v2_repeated_mesh=ElementsUnderTest.read_mixed_msh(v2_repeated)
+    @test compact_periodic_map(v2_repeated_mesh)==expected_compact_map
+    @test v2_repeated_mesh.elementary_entities!==nothing
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        v2_repeated;max_periodic_links=2)
+    v2_repeated_duplicate=joinpath(directory,"periodic-v2-repeated-duplicate.msh")
+    write(v2_repeated_duplicate,
+          v2_base*v2_first_section*v2_first_section)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        v2_repeated_duplicate)
+
+    v2_unknown_entity=joinpath(directory,"periodic-v2-unknown-entity.msh")
+    write(v2_unknown_entity,replace(
+        v2_text,"\n0 3 1\n"=>"\n0 9 1\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(v2_unknown_entity)
+    v2_unknown_node=joinpath(directory,"periodic-v2-unknown-node.msh")
+    write(v2_unknown_node,replace(
+        v2_text,"\n4 1\n"=>"\n999 1\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(v2_unknown_node)
+    v2_bad_affine=joinpath(directory,"periodic-v2-bad-affine.msh")
+    write(v2_bad_affine,replace(v2_text,
+        "Affine 0 -1 0 0 1 0 0 0 0 0 1 0 0 0 0 1"=>
+        "Affine 0 -1 0 0 1 0 0 0 0 0 1 0 0 0 0";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(v2_bad_affine)
+    v2_negative_entity=joinpath(directory,"periodic-v2-negative-entity.msh")
+    write(v2_negative_entity,replace(
+        v2_text,"\n1 15 2 0 1 1\n"=>"\n1 15 2 0 -1 1\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(v2_negative_entity)
+
+    empty_v2=joinpath(directory,"periodic-v2-empty.msh")
+    write(empty_v2,"\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n"*
+                   "\$Nodes\n0\n\$EndNodes\n\$Elements\n0\n\$EndElements\n"*
+                   "\$Periodic\n0\n\$EndPeriodic\n")
+    @test isempty(ElementsUnderTest.read_mixed_msh(empty_v2).periodic_links)
+
+    target=joinpath(directory,"atomic-periodic.msh")
     without_metadata=ElementsUnderTest.MixedMesh(
         mesh.coords,mesh.blocks;periodic_links=mesh.periodic_links)
     @test ElementsUnderTest.validate(without_metadata).ok
-    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
-        target,without_metadata;version=4.1)
-    @test read(target,String)=="sentinel"
+    for version in (2.2,4.1)
+        write(target,"sentinel")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            target,without_metadata;version)
+        @test read(target,String)=="sentinel"
+    end
+
+    source_elementary=deepcopy(mesh.entity_data.block_entities)
+    with_elementary=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;entity_data=mesh.entity_data,
+        elementary_entities=source_elementary,
+        periodic_links=mesh.periodic_links)
+    source_elementary[1][1]=99
+    @test with_elementary.elementary_entities==mesh.entity_data.block_entities
+    @test ElementsUnderTest.validate(with_elementary).ok
+    @test ElementsUnderTest.mixed_crc(with_elementary).sha==periodic_crc
+    redundant_v4=joinpath(directory,"periodic-redundant-elementary-v4.msh")
+    ElementsUnderTest.write_mixed_msh(redundant_v4,with_elementary;version=4.1)
+    redundant_v4_back=ElementsUnderTest.read_mixed_msh(redundant_v4)
+    @test redundant_v4_back.elementary_entities===nothing
+    @test ElementsUnderTest.mixed_crc(redundant_v4_back).sha==periodic_crc
+    elementary_only=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;
+        elementary_entities=mesh.entity_data.block_entities,
+        periodic_links=mesh.periodic_links)
+    @test ElementsUnderTest.validate(elementary_only).ok
+    elementary_projection=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;
+        elementary_entities=mesh.entity_data.block_entities)
+    @test_throws ArgumentError ElementsUnderTest.add_block!(
+        elementary_projection,mesh.blocks[1])
+    @test_throws ArgumentError ElementsUnderTest.mixed_to_simplex(
+        elementary_projection)
+    reordered_elementary=ElementsUnderTest.MixedMesh(
+        mesh.coords,reverse(mesh.blocks);
+        elementary_entities=reverse(mesh.entity_data.block_entities))
+    @test ElementsUnderTest.mixed_crc(reordered_elementary).sha==
+          ElementsUnderTest.mixed_crc(elementary_projection).sha
+    changed_elementary=deepcopy(mesh.entity_data.block_entities)
+    changed_elementary[1][1]=2
+    @test ElementsUnderTest.mixed_crc(ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;elementary_entities=changed_elementary)).sha!=
+          ElementsUnderTest.mixed_crc(elementary_projection).sha
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;entity_data=mesh.entity_data,
+        elementary_entities=[Int32[9,2,3,4],Int32[1,1,2,2]],
+        periodic_links=mesh.periodic_links)
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;
+        elementary_entities=[Int32[1,2,3,4],Int32[1,1,1,1]],
+        periodic_links=mesh.periodic_links)
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;elementary_entities=[Int32[-1]])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;elementary_entities=[Int32[1]])
 
     identity=Matrix{Float64}(I,4,4)
     @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(

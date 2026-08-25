@@ -9,7 +9,7 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 165,385/165,385
+complete**. The last stable bounds-checked package gate passed 165,518/165,518
 assertions; newer isolated increments and their focused gates are recorded in
 [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
@@ -61,8 +61,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
   MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
-  repeated pre-element node sections, plus owned ASCII/binary MSH4 periodic
-  entity transforms and node correspondences;
+  repeated pre-element node sections, plus owned periodic metadata in ASCII and
+  binary MSH2/MSH4 files, including entity transforms, node correspondences, and
+  legacy elementary-entity tags;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
 - oriented-normal extrusion of coherently directed planar polylines into
@@ -71,7 +72,7 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
   connectivity, and physical tags preserved; mixed meshes can retain the pair maps
-  and entity transforms through MSH4 I/O;
+  and entity transforms through MSH2/MSH4 I/O;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -110,7 +111,7 @@ explicitly narrower special-record contracts. Type 69 and some registered fixed 
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. Periodic constraints are not yet persistent in the geometry
-model or lossless through MSH2, although MSH4 mixed-mesh metadata is preserved.
+model, although MSH2/MSH4 mixed-mesh metadata is preserved.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
@@ -128,10 +129,10 @@ volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs t
 Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
-transfinite-volume, five-face-prism, and translation/rotation-periodic curve
-differentials as mandatory bounds-checked
-children. Missing or wrong-version Gmsh and differential failures make the aggregate
-command fail. See
+transfinite-volume, five-face-prism, translation/rotation-periodic curve, and
+MSH2/MSH4 periodic-lifecycle differentials as mandatory bounds-checked children.
+Missing or wrong-version Gmsh and differential failures make the aggregate command
+fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
 rules.
 
