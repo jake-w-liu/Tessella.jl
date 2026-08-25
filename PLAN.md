@@ -192,9 +192,11 @@ exact-dyadic remote-grid interpolation and a represented-volume conservation aud
 canonical affine triangular prisms implement Gmsh's legacy collapsed-grid five-face
 tetrahedral path; positively ordered affine eight-corner blocks can also be emitted
 as first-order recombined hexahedra with type-3 boundary quadrangles. Planar
-constant-`z` polylines extrude to type-3 quadrangles along left-normals, with
-optional convex-corner fans of first-layer triangles and subsequent ring
-quadrangles. `periodic_identify` validates and exactly snaps an explicit
+polylines with an explicit oriented plane normal extrude to type-3 quadrangles
+along left-normals, with optional convex-corner fans of first-layer triangles and
+subsequent ring quadrangles. Their emitted coordinates receive scale-aware
+planarity and exact projected corner-Jacobian certification. `periodic_identify`
+validates and exactly snaps an explicit
 one-to-one translated node pairing while preserving node numbering, connectivity,
 and tags; the caller retains that pair map. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,

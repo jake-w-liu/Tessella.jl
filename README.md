@@ -63,6 +63,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
+- oriented-normal extrusion of coherently directed planar polylines into
+  first-order quadrangle strips with optional convex-corner fans, exact projected
+  corner-Jacobian checks, resource bounds, and rigid-motion certification;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;

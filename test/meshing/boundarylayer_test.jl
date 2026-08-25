@@ -1,4 +1,5 @@
 using Test
+using Random: MersenneTwister, randn
 using Tessella
 using Tessella.MeshTypes: ntris, triangle_area, tet_volume
 using Tessella.Elements: validate, mixed_crc
@@ -129,6 +130,164 @@ end
     isolated=Mesh(Float64[0 1 2;0 0 0;0 0 0];segs=Int32[1;2;;])
     @test_throws ArgumentError mesh_boundary_layer_2d(isolated;hwall=hw,ratio=ra,
                                                       nlayers=1)
+end
+
+@testset "2-D boundary layers on general planes" begin
+    # An exact vertical-plane fixture supplies a stable CRC independent of the
+    # floating rigid-motion oracle below. +x × +z points toward -y.
+    vertical=Mesh(Float64[1 1;2 2;3 5];segs=Int32[1;2;;])
+    vertical_bl=mesh_boundary_layer_2d(
+        vertical;hwall=0.125,ratio=1.5,nlayers=2,plane_normal=(1,0,0))
+    @test validate(vertical_bl).ok
+    @test mixed_crc(vertical_bl).sha==
+          "49e70bbffb8fd2121a526c35a5ca51ab87ea19790bd715d52a147a21535b3e19"
+    @test vertical_bl.coords==Float64[
+        1 1 1 1 1 1;
+        2 2 1.875 1.875 1.6875 1.6875;
+        3 5 3 5 3 5]
+    @test _bl_quad_area(vertical_bl)==0.625
+    @test vertical_bl.coords==mesh_boundary_layer_2d(
+        vertical;hwall=0.125,ratio=1.5,nlayers=2,
+        plane_normal=Float64[2,0,0]).coords
+    @test vertical_bl.coords==mesh_boundary_layer_2d(
+        vertical;hwall=0.125,ratio=1.5,nlayers=2,
+        plane_normal=(floatmax(Float64),0,0)).coords
+    opposite=mesh_boundary_layer_2d(
+        vertical;hwall=0.125,ratio=1.5,nlayers=1,plane_normal=(-1,0,0))
+    @test minimum(opposite.coords[2,:])==2.0
+    @test maximum(opposite.coords[2,:])==2.125
+
+    # Independent rigid-motion oracle: rotate and translate an x/y corner fan,
+    # then require every output node and every connectivity record to transform
+    # identically in a genuinely tilted plane.
+    base_coords=Float64[0 1 1;0 0 1;0 0 0]
+    segments=reshape(Int32[1,2,2,3],2,2)
+    base_curve=Mesh(base_coords;segs=segments)
+    base=mesh_boundary_layer_2d(
+        base_curve;hwall=0.1,ratio=1.5,nlayers=2,
+        fans=(2,),fan_elements=3)
+    ex=(inv(sqrt(2.0)),inv(sqrt(2.0)),0.0)
+    ey=(-inv(sqrt(6.0)),inv(sqrt(6.0)),2inv(sqrt(6.0)))
+    normal=(ex[2]*ey[3]-ex[3]*ey[2],
+            ex[3]*ey[1]-ex[1]*ey[3],
+            ex[1]*ey[2]-ex[2]*ey[1])
+    translation=(1.25,-2.5,3.75)
+    rigid(point)=(translation[1]+point[1]*ex[1]+point[2]*ey[1],
+                  translation[2]+point[1]*ex[2]+point[2]*ey[2],
+                  translation[3]+point[1]*ex[3]+point[2]*ey[3])
+    tilted_coords=Matrix{Float64}(undef,3,size(base_coords,2))
+    for index in axes(base_coords,2)
+        transformed=rigid((base_coords[1,index],base_coords[2,index],
+                           base_coords[3,index]))
+        tilted_coords[:,index].=transformed
+    end
+    tilted_curve=Mesh(tilted_coords;segs=segments)
+    tilted=mesh_boundary_layer_2d(
+        tilted_curve;hwall=0.1,ratio=1.5,nlayers=2,
+        fans=(2,),fan_elements=3,plane_normal=normal)
+    @test validate(tilted).ok
+    @test [block.msh for block in tilted.blocks]==
+          [block.msh for block in base.blocks]
+    @test all(first.nodes==second.nodes
+              for (first,second) in zip(tilted.blocks,base.blocks))
+    @test all(first.tags==second.tags
+              for (first,second) in zip(tilted.blocks,base.blocks))
+    maximum_error=0.0
+    for index in axes(base.coords,2)
+        expected=rigid((base.coords[1,index],base.coords[2,index],
+                        base.coords[3,index]))
+        for coordinate in 1:3
+            maximum_error=max(
+                maximum_error,abs(tilted.coords[coordinate,index]-
+                                  expected[coordinate]))
+        end
+    end
+    @test maximum_error<=2eps(Float64)
+    @test _bl_quad_area(tilted)≈_bl_quad_area(base) atol=64eps(Float64)
+    @test maximum(abs(
+        (tilted.coords[1,index]-translation[1])*normal[1]+
+        (tilted.coords[2,index]-translation[2])*normal[2]+
+        (tilted.coords[3,index]-translation[3])*normal[3])
+        for index in axes(tilted.coords,2))<=64eps(Float64)
+
+    rng=MersenneTwister(0x71a9)
+    worst_scaled_error=0.0
+    for _ in 1:128
+        raw_normal=Tuple(randn(rng,3))
+        raw_length=hypot(raw_normal...)
+        random_normal=ntuple(i->raw_normal[i]/raw_length,3)
+        reference=abs(random_normal[1])<0.8 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
+        raw_ex=(reference[2]*random_normal[3]-reference[3]*random_normal[2],
+                reference[3]*random_normal[1]-reference[1]*random_normal[3],
+                reference[1]*random_normal[2]-reference[2]*random_normal[1])
+        ex_length=hypot(raw_ex...)
+        random_ex=ntuple(i->raw_ex[i]/ex_length,3)
+        random_ey=(random_normal[2]*random_ex[3]-random_normal[3]*random_ex[2],
+                   random_normal[3]*random_ex[1]-random_normal[1]*random_ex[3],
+                   random_normal[1]*random_ex[2]-random_normal[2]*random_ex[1])
+        random_origin=Tuple(10randn(rng,3))
+        random_rigid(point)=(
+            random_origin[1]+point[1]*random_ex[1]+point[2]*random_ey[1],
+            random_origin[2]+point[1]*random_ex[2]+point[2]*random_ey[2],
+            random_origin[3]+point[1]*random_ex[3]+point[2]*random_ey[3])
+        random_coords=Matrix{Float64}(undef,3,size(base_coords,2))
+        for index in axes(base_coords,2)
+            transformed=random_rigid((base_coords[1,index],base_coords[2,index],0.0))
+            random_coords[:,index].=transformed
+        end
+        random_mesh=mesh_boundary_layer_2d(
+            Mesh(random_coords;segs=segments);
+            hwall=0.1,ratio=1.5,nlayers=2,fans=(2,),fan_elements=3,
+            plane_normal=random_normal)
+        validate(random_mesh).ok || error("random general-plane mesh did not validate")
+        all(first.nodes==second.nodes
+            for (first,second) in zip(random_mesh.blocks,base.blocks)) ||
+            error("random general-plane topology differs")
+        for index in axes(base.coords,2)
+            expected=random_rigid((base.coords[1,index],base.coords[2,index],0.0))
+            tolerance=4096eps(Float64)*max(maximum(abs,expected),1.0)
+            for coordinate in 1:3
+                worst_scaled_error=max(
+                    worst_scaled_error,
+                    abs(random_mesh.coords[coordinate,index]-expected[coordinate])/
+                    tolerance)
+            end
+        end
+    end
+    @test worst_scaled_error<=1.0
+
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        vertical;hwall=0.1,ratio=1.2,nlayers=1,plane_normal=nothing)
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        vertical;hwall=0.1,ratio=1.2,nlayers=1,plane_normal=(1,0))
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        vertical;hwall=0.1,ratio=1.2,nlayers=1,plane_normal=(1,true,0))
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        vertical;hwall=0.1,ratio=1.2,nlayers=1,plane_normal=(0,0,0))
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        vertical;hwall=0.1,ratio=1.2,nlayers=1,plane_normal=(Inf,0,0))
+    off_plane=Mesh(Float64[1 1.01;2 2;3 5];segs=Int32[1;2;;])
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        off_plane;hwall=0.1,ratio=1.2,nlayers=1,plane_normal=(1,0,0))
+    unrepresentable_offset=Mesh(
+        Float64[1.0e300 1.0e300;1.0e300 1.0e300;0 1];segs=Int32[1;2;;])
+    @test_throws ArgumentError mesh_boundary_layer_2d(
+        unrepresentable_offset;hwall=0.1,ratio=1.2,nlayers=1,
+        plane_normal=(1,0,0))
+    # This sharp turn has positive total shoelace area in its first strip cell,
+    # but one exact corner Jacobian is reversed; total area alone is insufficient.
+    concave_strip=Mesh(
+        Float64[0 1 -4.198852057097053;0 0 1.2553115770725105;0 0 0];
+        segs=reshape(Int32[1,2,2,3],2,2))
+    concave_error=try
+        mesh_boundary_layer_2d(
+            concave_strip;hwall=1.0,ratio=1.2,nlayers=1)
+        nothing
+    catch err
+        err
+    end
+    @test concave_error isa ArgumentError
+    @test occursin("corner Jacobian",sprint(showerror,concave_error))
 end
 
 @testset "2-D boundary-layer closed square" begin
