@@ -94,6 +94,31 @@ project non-goals.
 
 ## Current worktree verification
 
+Re-measured on 2026-08-25 with Julia 1.12.7 after hardening one-level uniform
+simplex refinement:
+
+- Edge coordinates now use an overflow-safe, correctly rounded midpoint
+  calculation. The previous subtract-then-add expression disagreed with a
+  256-bit oracle in 1,274 of 200,000 seeded finite cases; the replacement had
+  zero disagreements across 2,419,911 random and threshold-focused cases.
+- Resource controls now diagnose every non-integer and Boolean value explicitly.
+  Refined coordinate, connectivity, and tag arrays are detached from both the
+  source mesh and independently repeated results.
+- All 14,632 nondegenerate tetrahedra selected from the `3×3×3` integer lattice
+  produced eight positive one-eighth-volume children, 16 boundary faces, and
+  maximum face incidence two. The maximum relative parent/child volume-sum
+  difference was `1.3322676295501878e-16`.
+- The child topology and tags were invariant at scales from `1e-300` through
+  `1e100` and for a tetrahedron translated to magnitude `1e100` with edges only
+  16 coordinate ulps wide.
+- The focused `Refine` suite passed 118/118 assertions under Julia 1.12.7 and
+  Julia 1.11.9. The Gmsh 4.15.2 differential retained its fixed SHA-256
+  `db9a1713d1174be1035ef3e9d6380a01ed419797a91ded9a2b8508d0b038f031`.
+- The bounds-checked package gate passed 164,098/164,098 assertions in 12m02.3s,
+  and the aggregate bounds-checked validation exited 0 in 10m26.9s against Gmsh
+  4.15.2. The public `Refine` documentation scan returned no missing names;
+  recursive ambiguity detection returned zero.
+
 Re-measured on 2026-08-25 with Julia 1.12.7 after hardening surface
 triangle-to-quadrangle recombination:
 

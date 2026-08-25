@@ -14,9 +14,11 @@ using ..MeshTypes: Mesh
 export refine_uniform
 
 const _INT32_MAX = Int(typemax(Int32))
+const _MIDPOINT_SMALL = 2floatmin(Float64)
+const _MIDPOINT_LARGE = floatmax(Float64) / 2
 
-@inline function _limit(value::Integer, name::AbstractString)
-    value isa Bool && throw(ArgumentError(
+@inline function _limit(value, name::AbstractString)
+    (value isa Integer && !(value isa Bool)) || throw(ArgumentError(
         "refine_uniform: $name must be an integer other than Bool"))
     0 <= value <= typemax(Int32) || throw(ArgumentError(
         "refine_uniform: $name must lie in 0:$(typemax(Int32))"))
@@ -48,9 +50,19 @@ end
 @inline _edge(a::Int32, b::Int32) = a < b ? (a, b) : (b, a)
 
 @inline function _midpoint_coordinate(a::Float64, b::Float64)
-    # Same-sign subtraction cannot overflow. For opposite signs the sum cannot
-    # overflow, and halving after cancellation retains subnormal information.
-    return signbit(a) == signbit(b) ? a + (b - a) / 2 : (a + b) / 2
+    # Arrange the calculation so that no branch overflows and at most one
+    # operation rounds. This avoids the double rounding in `a + (b-a)/2`, while
+    # retaining contributions from subnormal endpoints next to huge endpoints.
+    aa = abs(a)
+    ab = abs(b)
+    if aa <= _MIDPOINT_LARGE && ab <= _MIDPOINT_LARGE
+        return (a + b) / 2
+    elseif aa < _MIDPOINT_SMALL
+        return a + b / 2
+    elseif ab < _MIDPOINT_SMALL
+        return a / 2 + b
+    end
+    return a / 2 + b / 2
 end
 
 @inline function _point(coords::Matrix{Float64}, node::Int32)
@@ -288,8 +300,8 @@ count and `max_cells` bounds the combined segment, triangle and tetrahedron
 count. Both limits must lie in `0:typemax(Int32)` and must not be `Bool`.
 """
 function refine_uniform(mesh::Mesh;
-                        max_nodes::Integer=typemax(Int32),
-                        max_cells::Integer=typemax(Int32))::Mesh
+                        max_nodes=typemax(Int32),
+                        max_cells=typemax(Int32))::Mesh
     node_limit = _limit(max_nodes, "max_nodes")
     cell_limit = _limit(max_cells, "max_cells")
 
