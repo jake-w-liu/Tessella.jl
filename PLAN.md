@@ -48,7 +48,8 @@ Tessella
 │   ├── Model       tagged geometry/entity kernel, solids, Booleans, and embeds
 │   └── GeoExec     bounded `.geo` execution
 ├── meshing/
-│   ├── Mesh1D/Mesh3D dimensional curve and volume meshing kernels
+│   ├── Mesh1D      validated, scale-robust Gmsh-style curve grading
+│   ├── Mesh3D      dimensional volume meshing and recovery workspace
 │   ├── Mesh2D      owned/validated Delaunay, CDT, and refinement topology
 │   ├── MeshSurface validated planar, cylinder, and regular parametric meshing
 │   ├── ExactMesh3D/RecoverCDT exact Delaunay and conforming recovery
