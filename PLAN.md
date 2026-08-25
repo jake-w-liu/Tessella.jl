@@ -34,7 +34,8 @@ Tessella
 │   │               exact rationals, and SoS
 │   ├── MeshTypes   compact simplex storage, topology, scale-robust quality,
 │   │               CRC, and mutation-safe validation
-│   ├── Elements    fixed/special Gmsh catalog, mixed metadata, ASCII/binary MSH I/O
+│   ├── Elements    immutable fixed/special Gmsh catalog, owned mixed metadata,
+│   │               and ASCII/binary MSH I/O
 │   └── Transform   validated affine transforms for finalized simplex meshes
 ├── fields/
 │   ├── SizeField   scalar/anisotropic field graph and context resolvers
