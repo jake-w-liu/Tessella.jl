@@ -111,3 +111,84 @@ const _API=Tessella.API
     @test _API.finalize()===nothing
     @test isempty(Docs.undocumented_names(Tessella.API;private=false))
 end
+
+@testset "periodic API ownership and cache invalidation" begin
+    _API.finalize()
+    @test_throws ArgumentError _API.mesh.set_periodic(
+        1,[2],[4],(1.0,0.0,0.0,0.0,
+                    0.0,1.0,0.0,0.0,
+                    0.0,0.0,1.0,0.0,
+                    0.0,0.0,0.0,1.0))
+    @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,2)
+
+    try
+        _API.initialize()
+        for (tag,(x,y)) in enumerate(((0.0,0.0),(1.0,0.0),
+                                      (1.0,1.0),(0.0,1.0)))
+            @test _API.model.add_point(
+                x,y,0;tag=tag,meshSize=0.5)==tag
+        end
+        for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            @test _API.model.add_line(first,last;tag=tag)==tag
+        end
+        @test _API.model.add_curve_loop([1,2,3,4];tag=1)==1
+        @test _API.model.add_plane_surface([1];tag=1)==1
+
+        translation=Float64[
+            1,0,0,1,
+            0,1,0,0,
+            0,0,1,0,
+            0,0,0,1,
+        ]
+        @test _API.mesh.set_periodic(
+            1,[2],[4],translation)===nothing
+        translation[4]=99
+        @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,2)
+
+        generated=_API.mesh.generate(2)
+        expected=mesh_crc(generated)
+        @test expected.sha==
+              "3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5"
+        mapping=_API.mesh.get_periodic_nodes(1,2)
+        @test mapping.master_entity==4
+        @test mapping.affine[4]==1
+        @test length(mapping.slave_nodes)==length(mapping.master_nodes)==5
+        cached=_API.mesh.get()
+        for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
+            @test Tuple(cached.coords[:,slave])==
+                  (cached.coords[1,master]+1,cached.coords[2,master],
+                   cached.coords[3,master])
+        end
+        mapping.master_nodes[1]=1
+        @test first(_API.mesh.get_periodic_nodes(1,2).master_nodes)!=1
+        generated.coords[1,1]+=10
+        @test mesh_crc(_API.mesh.get())==expected
+
+        identity=(1.0,0.0,0.0,0.0,
+                  0.0,1.0,0.0,0.0,
+                  0.0,0.0,1.0,0.0,
+                  0.0,0.0,0.0,1.0)
+        @test_throws ArgumentError _API.mesh.set_periodic(
+            2,[3],[1],identity)
+        @test mesh_crc(_API.mesh.get())==expected
+        @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,4)
+
+        translate_y=(1.0,0.0,0.0,0.0,
+                     0.0,1.0,0.0,1.0,
+                     0.0,0.0,1.0,0.0,
+                     0.0,0.0,0.0,1.0)
+        @test _API.mesh.set_periodic(
+            1,[3],[1],translate_y)===nothing
+        @test_throws ArgumentError _API.mesh.get()
+        @test_throws ArgumentError _API.mesh.get_periodic_nodes(1,2)
+
+        double_periodic=_API.mesh.generate(2)
+        @test validate(double_periodic).ok
+        @test mesh_crc(double_periodic).sha==
+              "95ef6d0db94505d4f35ff870af09e952d74a32508a338b3994af347b406e9d05"
+        @test length(_API.mesh.get_periodic_nodes(1,2).slave_nodes)==5
+        @test length(_API.mesh.get_periodic_nodes(1,3).slave_nodes)==5
+    finally
+        _API.finalize()
+    end
+end

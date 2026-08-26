@@ -52,10 +52,10 @@ include("geometry/CAD.jl")        # Stage 5: native analytical geometry (surface
 include("geometry/NURBS.jl")      # P3: native B-spline/NURBS evaluation
 include("geometry/BRep.jl")       # P3: ISO-10303-21 STEP / IGES classified-solid and NURBS import
 include("meshing/HighOrder.jl")   # Stage 6: quadratic (P2) tet generation + type-11 I/O
+include("meshing/Periodic.jl")    # P4: periodic identification
 include("geometry/Model.jl")      # P2: tagged geometry/entity kernel
 include("geometry/GeoExec.jl")    # P3: bounded .geo execution
 include("meshing/BoundaryLayer.jl") # P4: prismatic and 2-D quad/fan boundary-layer extrusion
-include("meshing/Periodic.jl")    # P4: periodic identification
 include("interfaces/Post.jl")     # P5: views and plugins
 include("interfaces/API.jl")      # P5: model/mesh/option façade
 include("interfaces/CLI.jl")      # P5: command-line entry
@@ -83,7 +83,9 @@ using .TransfiniteHex: mesh_transfinite_hex
 using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!,
               add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!,
               embed!, translate_volume!, dilate_volume!, rotate_volume!,
-              add_physical_group!, mesh_model_surface, mesh_model_volume
+              ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
+              model_periodic_nodes, add_physical_group!, mesh_model_surface,
+              mesh_model_volume
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
 using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled
@@ -152,6 +154,8 @@ export mesh_transfinite_hex
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!, add_box!
 export add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
+export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
+       model_periodic_nodes
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d,

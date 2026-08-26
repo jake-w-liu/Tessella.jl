@@ -1,6 +1,7 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node, mesh_crc
+using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node,
+                          mesh_crc
 
 @testset "entity model validation and tag semantics" begin
     oriented=GeoModel()
@@ -117,6 +118,194 @@ using Tessella.MeshTypes: ntris, ntets, nnodes, validate, tet_volume, node, mesh
     @test_throws ArgumentError Tessella.Model.model_entity(physical,true,123)
     @test_throws ArgumentError Tessella.Model.model_physical_tags(physical,3,big(2)^100)
     @test_throws ArgumentError Tessella.Model.set_physical_name!(physical,true,1,"bad")
+end
+
+@testset "persistent native straight-curve periodic constraints" begin
+    function periodic_square()
+        model=GeoModel()
+        for (tag,(x,y)) in enumerate(((0.0,0.0),(1.0,0.0),
+                                      (1.0,1.0),(0.0,1.0)))
+            add_point!(model,x,y,0;tag=tag,mesh_size=0.25)
+        end
+        for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            add_line!(model,first,last;tag=tag)
+        end
+        add_curve_loop!(model,[1,2,3,4];tag=1)
+        add_plane_surface!(model,[1];tag=1)
+        return model
+    end
+
+    translation=Float64[
+        1,0,0,1,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1,
+    ]
+    model=periodic_square()
+    @test set_periodic!(model,1,[2],[4],translation)===nothing
+    translation[4]=99
+    constraints=model_periodic_constraints(model)
+    @test length(constraints)==1
+    constraint=only(constraints)
+    @test constraint.slave_entity==2
+    @test constraint.master_entity==4
+    @test constraint.reversed
+    @test constraint.affine[4]==1
+    empty!(constraints)
+    @test length(model_periodic_constraints(model))==1
+    invalid_mesh=Mesh([0.0 1.0 2.0;0.0 0.0 0.0;0.0 0.0 0.0];
+                      tris=reshape(Int32[1,2,3],3,1))
+    @test_throws ArgumentError model_periodic_nodes(model,invalid_mesh,1,2)
+
+    mesh=mesh_model_surface(model,1)
+    @test validate(mesh).ok
+    @test mesh_crc(mesh).sha==
+          "6ea713b4493eeb5b31e7c70ea5312290ef698424fd787bb04f1df4ef55f894cf"
+    mapping=model_periodic_nodes(model,mesh,1,2)
+    @test mapping.master_entity==4
+    @test length(mapping.slave_nodes)==length(mapping.master_nodes)==7
+    for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
+        @test Tuple(mesh.coords[:,slave])==
+              (mesh.coords[1,master]+1,mesh.coords[2,master],mesh.coords[3,master])
+    end
+    unsynchronized=deepcopy(mesh)
+    unsynchronized.coords[3,mapping.slave_nodes[2]]+=1e-6
+    @test validate(unsynchronized).ok
+    @test_throws ArgumentError model_periodic_nodes(
+        model,unsynchronized,1,2)
+    mapping.slave_nodes[1]=1
+    @test first(model_periodic_nodes(model,mesh,1,2).slave_nodes)!=1
+    @test_throws ArgumentError model_periodic_nodes(model,mesh,1,4)
+    @test_throws ArgumentError model_periodic_nodes(model,mesh,2,2)
+    @test_throws ArgumentError mesh_model_surface(
+        model,1;max_periodic_passes=false)
+    @test_throws ArgumentError mesh_model_surface(
+        model,1;max_periodic_passes=0)
+    @test_throws ArgumentError mesh_model_surface(
+        model,1;max_periodic_passes=65)
+    @test_throws ErrorException mesh_model_surface(
+        model,1;max_periodic_passes=1)
+
+    # A surface containing only one entity from a relation is an explicit
+    # blocker: silently meshing it would lose the required correspondence.
+    add_point!(model,2,0,0;tag=5,mesh_size=0.25)
+    add_point!(model,2,1,0;tag=6,mesh_size=0.25)
+    add_line!(model,2,5;tag=5)
+    add_line!(model,5,6;tag=6)
+    add_line!(model,6,3;tag=7)
+    add_curve_loop!(model,[5,6,7,-2];tag=2)
+    add_plane_surface!(model,[2];tag=2)
+    @test_throws ArgumentError mesh_model_surface(model,2)
+
+    rotation_model=GeoModel()
+    for (tag,(x,y)) in enumerate(((1.0,0.0),(2.0,0.0),
+                                  (0.0,1.0),(0.0,2.0)))
+        add_point!(rotation_model,x,y,0;tag=tag,mesh_size=0.5)
+    end
+    add_line!(rotation_model,1,2;tag=1)
+    add_line!(rotation_model,2,4;tag=2)
+    add_line!(rotation_model,3,4;tag=3)
+    add_line!(rotation_model,3,1;tag=4)
+    add_curve_loop!(rotation_model,[1,2,-3,4];tag=1)
+    add_plane_surface!(rotation_model,[1];tag=1)
+    rotation=(0.0,-1.0,0.0,0.0,
+              1.0, 0.0,0.0,0.0,
+              0.0, 0.0,1.0,0.0,
+              0.0, 0.0,0.0,1.0)
+    set_periodic!(rotation_model,1,[3],[1],rotation)
+    @test !only(model_periodic_constraints(rotation_model)).reversed
+    rotation_mesh=mesh_model_surface(rotation_model,1)
+    @test mesh_crc(rotation_mesh).sha==
+          "f6ad616e56d52d7e10a598a4079db2de9b3d5f2a777f492f5a2366946d8ea990"
+    rotation_mapping=model_periodic_nodes(rotation_model,rotation_mesh,1,3)
+    @test length(rotation_mapping.master_nodes)==3
+    for (slave,master) in zip(rotation_mapping.slave_nodes,
+                              rotation_mapping.master_nodes)
+        @test Tuple(rotation_mesh.coords[:,slave])==
+              (-rotation_mesh.coords[2,master],
+                rotation_mesh.coords[1,master],
+                rotation_mesh.coords[3,master])
+    end
+
+    double_periodic=periodic_square()
+    set_periodic!(double_periodic,1,[2],[4],(
+        1.0,0.0,0.0,1.0,
+        0.0,1.0,0.0,0.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    set_periodic!(double_periodic,1,[3],[1],(
+        1.0,0.0,0.0,0.0,
+        0.0,1.0,0.0,1.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    double_mesh=mesh_model_surface(double_periodic,1)
+    @test validate(double_mesh).ok
+    @test mesh_crc(double_mesh).sha==
+          "b82c9f0f4e235e90a754f2ec50b3a373ef0a2d514a79194d9b922873e35f8dd1"
+    @test length(model_periodic_constraints(double_periodic))==2
+    for slave_entity in (2,3)
+        double_mapping=model_periodic_nodes(
+            double_periodic,double_mesh,1,slave_entity)
+        @test length(double_mapping.slave_nodes)==9
+    end
+
+    inconsistent=periodic_square()
+    set_periodic!(inconsistent,1,[2],[4],(
+        1.0,1e-4,0.0,1.0,
+        0.0,1.0, 0.0,0.0,
+        0.0,0.0, 1.0,0.0,
+        0.0,0.0, 0.0,1.0);atol=1e-3)
+    set_periodic!(inconsistent,1,[3],[1],(
+        1.0,0.0,0.0,0.0,
+        0.0,1.0,0.0,1.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    @test_throws ErrorException mesh_model_surface(inconsistent,1)
+
+    identity=(1.0,0.0,0.0,0.0,
+              0.0,1.0,0.0,0.0,
+              0.0,0.0,1.0,0.0,
+              0.0,0.0,0.0,1.0)
+    invalid=periodic_square()
+    @test_throws ArgumentError set_periodic!(invalid,2,[2],[4],identity)
+    @test_throws ArgumentError set_periodic!(invalid,false,[2],[4],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,Int[],Int[],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,[2],[4,1],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,[2,2],[4,1],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,[2],[9],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,[9],[4],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,[1],[2],identity)
+    @test_throws ArgumentError set_periodic!(invalid,1,[2],[4],identity)
+    @test_throws ArgumentError set_periodic!(
+        invalid,1,[2],[4],zeros(4,4))
+    @test_throws ArgumentError set_periodic!(
+        invalid,1,[2],[4],identity;atol=true)
+    @test_throws ArgumentError set_periodic!(
+        invalid,1,[2],[4],identity;atol=-1)
+    @test isempty(model_periodic_constraints(invalid))
+    @test set_periodic!(invalid,1,[2],[4],(
+        1.0,0.0,0.0,1.0,
+        0.0,1.0,0.0,0.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))===nothing
+    @test_throws ArgumentError set_periodic!(invalid,1,[1],[3],(
+        1.0,0.0,0.0,0.0,
+        0.0,1.0,0.0,1.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    @test length(model_periodic_constraints(invalid))==1
+
+    degenerate=GeoModel()
+    for tag in 1:4
+        add_point!(degenerate,0,0,0;tag=tag)
+    end
+    add_line!(degenerate,1,2;tag=1)
+    add_line!(degenerate,3,4;tag=2)
+    @test_throws ArgumentError set_periodic!(
+        degenerate,1,[2],[1],identity)
+    @test isempty(model_periodic_constraints(degenerate))
+    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
+    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end
 
 @testset "entity model and .geo execution" begin
