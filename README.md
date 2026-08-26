@@ -63,7 +63,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
   repeated pre-element node sections, plus owned periodic metadata in ASCII and
   binary MSH2/MSH4 files, including entity transforms, node correspondences, and
-  legacy elementary-entity tags;
+  declared MSH2 elementary-entity tags; positive, physically consistent MSH2
+  entities can be converted to discrete MSH4 entities without changing their
+  entity tags;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
   recombination with convexity, resource-growth, CRC, and Gmsh-load gates;
 - oriented-normal extrusion of coherently directed planar polylines into
@@ -74,10 +76,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   connectivity, and physical tags preserved; the native model/API owns straight-
   curve relations with one relation per curve, synchronizes their planar boundary
   subdivisions, and returns detached node maps, while `model_to_mixed` emits
-  classified point/line/triangle blocks, signed hole boundaries, physical
-  memberships, and periodic curve/endpoint links for unembedded planar surfaces;
-  mixed meshes retain those pair maps and entity transforms through MSH2/MSH4 I/O,
-  and the CLI uses this path for periodic `-2` output;
+  classified point/line/triangle blocks, signed hole boundaries, embedded point
+  and curve cells, physical memberships, and periodic boundary-curve/endpoint
+  links for planar surfaces; mixed meshes retain periodic maps and Gmsh's MSH4
+  curve-in-surface relation, and the CLI uses this path for periodic or embedded
+  `-2` output;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -116,13 +119,19 @@ format for variable connectivity and parent/domain links; binary MSH2 and MSH4 h
 explicitly narrower special-record contracts. Type 69 and some registered fixed tags
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
-Gmsh-safe rewrite. Native model periodicity is currently limited to straight-curve
+Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
+topology record for signed boundaries or surface embeddings. Native model periodicity
+is currently limited to straight-curve
 pairs on one planar triangle-meshed surface, with each curve in at most one relation;
 independent relations may share corner points. The bounded `.geo`
 executor accepts literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
 and 12-entry `Affine` transforms. Curves reused across relations, curved periodic
 entities, periodic surfaces and volumes, variable tags or numeric expressions in
-those statements, and projection of embedded surface entities remain pending.
+those statements, periodic embedded curves, and classified projection of volume
+embeddings remain pending. Gmsh 4.15.2 has no serialized Point-In-Surface relation:
+the classified point node and point element remain available instead. Its ASCII
+MSH4 reader reconstructs curve embeddings, while its binary reader drops that
+relation with a warning; Tessella reads both variants losslessly.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
@@ -142,7 +151,8 @@ straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
 periodic surface differentials, plus low-level translation/rotation-periodic curves
-and the MSH2/MSH4 lifecycle, as mandatory bounds-checked children.
+and the MSH2/MSH4 lifecycle, and classified Point/Line-In-Surface MSH4 round trips,
+as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
 fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness

@@ -1132,6 +1132,83 @@ function _model_projection_external_elements(blocks)
     return output
 end
 
+function _model_projection_triangle_edges(mesh::Mesh)
+    edges=Set{Tuple{Int32,Int32}}()
+    @inbounds for cell in axes(mesh.tris,2),slots in ((1,2),(2,3),(3,1))
+        first_node=mesh.tris[slots[1],cell]
+        second_node=mesh.tris[slots[2],cell]
+        push!(edges,first_node<second_node ? (first_node,second_node) :
+                                             (second_node,first_node))
+    end
+    return edges
+end
+
+function _model_projection_embedded_curve_nodes(
+    m::GeoModel,mesh::Mesh,curve::Int,mesh_edges,
+    atol::Float64,caller::AbstractString)
+    start_point,stop_point=m.curves[curve]
+    first_coordinate=m.points[start_point]
+    last_coordinate=m.points[stop_point]
+    vx=last_coordinate[1]-first_coordinate[1]
+    vy=last_coordinate[2]-first_coordinate[2]
+    length2=muladd(vx,vx,vy*vy)
+    (isfinite(length2) && length2>0) || throw(ArgumentError(
+        "$caller: embedded Curve[$curve] has an unusable planar length"))
+    length1=sqrt(length2)
+    scale=max(1.0,hypot(first_coordinate[1],first_coordinate[2]),
+                    hypot(last_coordinate[1],last_coordinate[2]))
+    geometric_tolerance=max(atol,128eps(Float64)*scale)
+    parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
+    entries=Tuple{Float64,Int}[]
+    @inbounds for node in 1:nnodes(mesh)
+        wx=mesh.coords[1,node]-first_coordinate[1]
+        wy=mesh.coords[2,node]-first_coordinate[2]
+        cross=muladd(vx,wy,-vy*wx)
+        abs(cross)<=geometric_tolerance*length1 || continue
+        parameter=muladd(wx,vx,wy*vy)/length2
+        -parameter_tolerance<=parameter<=1+parameter_tolerance || continue
+        push!(entries,(clamp(parameter,0.0,1.0),node))
+    end
+    sort!(entries;by=entry->(entry[1],entry[2]))
+    length(entries)>=2 || throw(ArgumentError(
+        "$caller: embedded Curve[$curve] is not represented by two mesh nodes"))
+    first(entries)[1]<=parameter_tolerance &&
+        1-last(entries)[1]<=parameter_tolerance || throw(ArgumentError(
+        "$caller: embedded Curve[$curve] mesh chain does not reach both endpoints"))
+    for index in 1:(length(entries)-1)
+        first_parameter,first_raw=entries[index]
+        second_parameter,second_raw=entries[index+1]
+        second_parameter-first_parameter>parameter_tolerance || throw(ArgumentError(
+            "$caller: embedded Curve[$curve] maps multiple mesh nodes to one parameter"))
+        first_node=Int32(first_raw);second_node=Int32(second_raw)
+        edge=first_node<second_node ? (first_node,second_node) :
+                                      (second_node,first_node)
+        edge in mesh_edges || throw(ArgumentError(
+            "$caller: embedded Curve[$curve] nodes do not form a mesh-edge chain"))
+    end
+    return entries
+end
+
+function _model_projection_embedded_point_node(
+    m::GeoModel,mesh::Mesh,point::Int,atol::Float64,caller::AbstractString)
+    coordinate=m.points[point]
+    scale=max(1.0,hypot(coordinate...))
+    tolerance=max(atol,128eps(Float64)*scale)
+    matches=Int[]
+    @inbounds for node in 1:nnodes(mesh)
+        distance=hypot(mesh.coords[1,node]-coordinate[1],
+                       mesh.coords[2,node]-coordinate[2],
+                       mesh.coords[3,node]-coordinate[3])
+        distance<=tolerance && push!(matches,node)
+    end
+    isempty(matches) && throw(ArgumentError(
+        "$caller: embedded Point[$point] is not a mesh node"))
+    length(matches)==1 || throw(ArgumentError(
+        "$caller: embedded Point[$point] matches $(length(matches)) mesh nodes; " *
+        "expected exactly one"))
+    return only(matches)
+end
+
 function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
                                           constraints,caller::AbstractString)
     curve_links=MixedPeriodicLink[]
@@ -1221,19 +1298,23 @@ end
     model_to_mixed(model, mesh, surface_tag) -> MixedMesh
 
 Project a native planar surface mesh and its geometry ownership into an owned
-[`MixedMesh`](@ref). The result contains point, boundary-line, and triangle
-blocks; MSH2 elementary entities; MSH4 point/curve/surface classification; all
-projected physical memberships and names; and the surface's stored periodic
-curve links. It can be written with [`Tessella.Elements.write_mixed_msh`](@ref)
-without dropping periodic metadata. MSH4 retains every physical membership;
+[`MixedMesh`](@ref). The result contains point, boundary/embedded-line, and
+triangle blocks; MSH2 elementary entities; MSH4 point/curve/surface
+classification; all projected physical memberships and names; embedded-curve
+ownership; and the surface's stored boundary-periodic curve links. It can be
+written with [`Tessella.Elements.write_mixed_msh`](@ref) without dropping the
+supported metadata. MSH4 retains every physical membership and Gmsh's
+curve-in-surface relation. Gmsh 4.15.2 does not serialize Point-In-Surface as an
+entity relation, but the classified point node and point element are retained.
 MSH2 retains the lowest physical tag as its single legacy element membership.
 
-`mesh` must be a validated, segment-free triangle mesh whose boundary chains
-represent the selected [`mesh_model_surface`](@ref) geometry. Stored periodic
-curves must already be exactly snapped. Embedded entities are not projected and
-raise an explicit `ArgumentError`. Periodic endpoint relations are emitted as a
-deterministic spanning forest when curve directions share corners, satisfying the
-MSH one-master-per-slave entity constraint while retaining every curve link.
+`mesh` must be a validated, segment-free triangle mesh whose boundary and
+embedded chains represent the selected [`mesh_model_surface`](@ref) geometry.
+Stored boundary-periodic curves must already be exactly snapped. Periodic
+embedded curves are an explicit blocker. Periodic endpoint relations are emitted
+as a deterministic spanning forest when curve directions share corners,
+satisfying the MSH one-master-per-slave entity constraint while retaining every
+boundary-curve link.
 """
 function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     caller="model_to_mixed"
@@ -1251,10 +1332,30 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
         "$caller: input must contain triangle cells"))
     all(iszero,mesh.tri_tag) || throw(ArgumentError(
         "$caller: input triangle tags must be zero; physical ownership comes from the model"))
-    isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || throw(ArgumentError(
-        "$caller: projection does not support embedded surface entities"))
+
+    embedded_points=Int[];embedded_curves=Int[]
+    for (embedded_dim,embedded_tag) in
+            get(m.embeds,(2,surface),NTuple{2,Int}[])
+        if embedded_dim==0
+            push!(embedded_points,embedded_tag)
+        elseif embedded_dim==1
+            push!(embedded_curves,embedded_tag)
+        else
+            throw(ArgumentError(
+                "$caller: unsupported Surface[$surface] embedding dimension $embedded_dim"))
+        end
+    end
+    sort!(unique!(embedded_points));sort!(unique!(embedded_curves))
 
     constraints=_surface_periodic_constraints(m,surface,caller)
+    embedded_curve_set=Set(embedded_curves)
+    for constraint in model_periodic_constraints(m)
+        slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+        (slave in embedded_curve_set || master in embedded_curve_set) &&
+            throw(ArgumentError(
+                "$caller: periodic embedded curves are not supported " *
+                "(Curve[$slave]/Curve[$master])"))
+    end
     geometric_tolerance=max(1e-12,
         isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
     for node in axes(mesh.coords,2)
@@ -1269,9 +1370,16 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     sort!(unique!(curve_tags))
     isempty(curve_tags) && throw(ArgumentError(
         "$caller: Surface[$surface] has no boundary curves"))
-    for curve in curve_tags,point in m.curves[curve]
+    any(curve->curve in curve_tags,embedded_curves) && throw(ArgumentError(
+        "$caller: a surface curve cannot be both bounding and embedded"))
+    all_curve_tags=sort!(unique!(vcat(curve_tags,embedded_curves)))
+    for curve in all_curve_tags,point in m.curves[curve]
         abs(m.points[point][3])<=1e-12 || throw(ArgumentError(
             "$caller: Point[$point] is not planar in z=0"))
+    end
+    for point in embedded_points
+        abs(m.points[point][3])<=1e-12 || throw(ArgumentError(
+            "$caller: embedded Point[$point] is not planar in z=0"))
     end
     boundary,boundary_edges=_surface_boundary_topology(mesh,caller)
     isempty(boundary_edges) && throw(ArgumentError(
@@ -1316,18 +1424,55 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
         "$caller: model curves cover $(length(claimed_edges)) of " *
         "$(length(boundary_edges)) mesh boundary edges"))
 
+    mesh_edges=_model_projection_triangle_edges(mesh)
+    for curve in embedded_curves
+        entries=_model_projection_embedded_curve_nodes(
+            m,mesh,curve,mesh_edges,geometric_tolerance,caller)
+        curve_entries[curve]=entries
+        start_point,stop_point=m.curves[curve]
+        _model_projection_point!(
+            point_nodes,node_points,start_point,entries[1][2],caller)
+        _model_projection_point!(
+            point_nodes,node_points,stop_point,entries[end][2],caller)
+        for index in 1:(length(entries)-1)
+            first_node=Int32(entries[index][2])
+            second_node=Int32(entries[index+1][2])
+            edge=first_node<second_node ? (first_node,second_node) :
+                                          (second_node,first_node)
+            edge in claimed_edges && throw(ArgumentError(
+                "$caller: mesh edge $edge belongs to multiple model curves"))
+            push!(claimed_edges,edge)
+            push!(line_cells,(first_node,second_node))
+            push!(line_entities,Int32(curve))
+        end
+    end
+    for point in embedded_points
+        node=_model_projection_embedded_point_node(
+            m,mesh,point,geometric_tolerance,caller)
+        _model_projection_point!(
+            point_nodes,node_points,point,node,caller)
+    end
+
     node_entities=fill((2,Int32(surface)),nnodes(mesh))
     for (point,node) in point_nodes
         node_entities[node]=(0,Int32(point))
     end
-    for curve in curve_tags
+    for curve in all_curve_tags
         entries=curve_entries[curve]
         if length(entries)>2
             for index in 2:(length(entries)-1)
                 node=entries[index][2]
-                node_entities[node][1]==2 || throw(ArgumentError(
-                    "$caller: mesh node $node belongs to multiple boundary entities"))
-                node_entities[node]=(1,Int32(curve))
+                owner=node_entities[node]
+                if owner[1]==2
+                    node_entities[node]=(1,Int32(curve))
+                elseif owner[1]==0
+                    # A classified embedded point takes precedence over a curve
+                    # that passes through the same mesh node.
+                    continue
+                elseif owner!=(1,Int32(curve))
+                    throw(ArgumentError(
+                        "$caller: mesh node $node belongs to Curves[$(owner[2])] and [$curve]"))
+                end
             end
         end
     end
@@ -1366,7 +1511,7 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     line_matrix=Matrix{Int32}(undef,2,length(line_cells))
     line_physical=Vector{Int32}(undef,length(line_cells))
     curve_physical=Dict{Int,Vector{Int32}}()
-    for curve in curve_tags
+    for curve in all_curve_tags
         tags=_model_projection_physical_tags(m,1,curve)
         curve_physical[curve]=tags
         union!(projected_groups,((1,Int(tag)) for tag in tags))
@@ -1399,7 +1544,8 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     end
     entities[(2,surface)]=MixedEntity(
         2,surface,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
-        physical_tags=surface_physical,boundaries=surface_boundaries)
+        physical_tags=surface_physical,boundaries=surface_boundaries,
+        embedded_curves=embedded_curves)
     triangle_physical=fill(
         _model_projection_legacy_tag(surface_physical),ntris(mesh))
 

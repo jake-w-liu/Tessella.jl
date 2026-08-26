@@ -2,9 +2,9 @@
     CLI
 
 Command-line façade: `tessella file.geo -2|-3` executes the bounded `.geo`
-subset and writes `file.msh`. Supported periodic surface relations are written
-with classified MSH4 curve and endpoint metadata. Unknown flags and OCC-only
-files are blockers.
+subset and writes `file.msh`. Supported periodic and embedded surface entities
+are written with classified MSH4 metadata. Unknown flags and OCC-only files are
+blockers.
 """
 module CLI
 
@@ -58,10 +58,11 @@ end
 
 Execute one `.geo` input with optional `-2` or `-3` meshing and `-o output`.
 Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
-and returns its path. Native periodic surface meshes include their classified
-curve and node relations. Periodic volume output and relations outside the selected
-surface are explicit blockers. Duplicate/conflicting flags, multiple inputs,
-ignored output arguments, and any output that aliases the input are rejected.
+and returns its path. Native periodic or embedded surface meshes include their
+classified point, curve, and node records. Periodic volume output and relations
+outside the selected surface are explicit blockers. Duplicate/conflicting flags,
+multiple inputs, ignored output arguments, and any output that aliases the input
+are rejected.
 """
 function main(args::AbstractVector{<:AbstractString})
     length(args)<=_MAX_ARGUMENTS || throw(ArgumentError(
@@ -104,12 +105,24 @@ function main(args::AbstractVector{<:AbstractString})
     if dim>0
         result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
         constraints=model_periodic_constraints(result.model)
-        if isempty(constraints)
+        if !isempty(constraints) && dim!=2
+            throw(ArgumentError(
+                "tessella: periodic metadata projection is limited to surface meshes"))
+        end
+        surface=nothing
+        embedded=dim==2 && any(
+            pair->pair.first[1]==2 && !isempty(pair.second),
+            pairs(result.model.embeds))
+        if dim==2 && length(result.model.surfaces)==1
+            surface=only(keys(result.model.surfaces))
+            embedded=!isempty(get(
+                result.model.embeds,(2,surface),NTuple{2,Int}[]))
+        end
+        if isempty(constraints) && !embedded
             write_msh(destination,result.mesh;version=4.1)
         else
-            dim==2 || throw(ArgumentError(
-                "tessella: periodic metadata projection is limited to surface meshes"))
-            surface=only(keys(result.model.surfaces))
+            surface===nothing && throw(ArgumentError(
+                "tessella: classified surface projection requires exactly one selected surface"))
             projected=model_to_mixed(result.model,result.mesh,surface)
             projected_slaves=Set(Int(link.slave_entity)
                 for link in projected.periodic_links if link.dim==1)

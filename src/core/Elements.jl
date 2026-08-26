@@ -641,15 +641,22 @@ end
     link.dim,link.slave_entity,link.master_entity,
     link.slave_nodes,link.master_nodes;affine=link.affine)
 
-"""One MSH v4 geometric entity, including all physical memberships and signed boundary tags."""
+"""
+One MSH v4 geometric entity, including all physical memberships, signed boundary
+tags, and any embedded curves owned by a surface. `embedded_curves` records the
+Gmsh 4.15.2 codimension-one surface embedding extension; it is valid only for
+dimension-two entities.
+"""
 struct MixedEntity
     dim::Int
     tag::Int32
     bbox::NTuple{6,Float64}
     physical_tags::Vector{Int32}
     boundaries::Vector{Int32}
+    embedded_curves::Vector{Int32}
     function MixedEntity(dim::Integer,tag::Integer,bounds;
-                         physical_tags=Int32[],boundaries=Int32[])
+                         physical_tags=Int32[],boundaries=Int32[],
+                         embedded_curves=Int32[])
         _elements_reject_bool(dim,"MixedEntity: dimension")
         d=try Int(dim) catch err
             err isa InterruptException && rethrow()
@@ -684,9 +691,18 @@ struct MixedEntity
                                      positive=true)
         boundary=_mixed_int32_vector(boundaries,"MixedEntity: boundary tag";
                                      nonzero=true,absolute_fits=true)
+        embedded=_mixed_int32_vector(
+            embedded_curves,"MixedEntity: embedded curve tag";
+            positive=true,unique_values=true)
         d==0 && !isempty(boundary) && throw(ArgumentError(
             "MixedEntity: point entities cannot have boundaries"))
-        return new(d,t,converted,physical,boundary)
+        d==2 || isempty(embedded) || throw(ArgumentError(
+            "MixedEntity: embedded curves are valid only on surface entities"))
+        boundary_curves=Set(abs.(boundary))
+        any(curve->curve in boundary_curves,embedded) && throw(ArgumentError(
+            "MixedEntity: a curve cannot be both bounding and embedded"))
+        sort!(embedded)
+        return new(d,t,converted,physical,boundary,embedded)
     end
 end
 
@@ -751,7 +767,8 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
             "MixedEntityData: entity key does not match its record"))
         copied_entities[(key_dim,key_tag)]=MixedEntity(
             entity.dim,entity.tag,entity.bbox;
-            physical_tags=entity.physical_tags,boundaries=entity.boundaries)
+            physical_tags=entity.physical_tags,boundaries=entity.boundaries,
+            embedded_curves=entity.embedded_curves)
     end
     copied_node_entities=Tuple{Int,Int32}[]
     for key in node_entities
@@ -1000,6 +1017,8 @@ function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
             all(isequal(entity.bbox[i],entity.bbox[i+3]) for i in 1:3) || throw(ArgumentError(
                 "$context: point entity $key has non-degenerate bounds"))
         end
+        entity.dim==2 || isempty(entity.embedded_curves) || throw(ArgumentError(
+            "$context: non-surface entity $key has embedded curves"))
         for physical in entity.physical_tags
             physical>0 || throw(ArgumentError(
                 "$context: entity $key has a non-positive physical tag"))
@@ -1012,6 +1031,21 @@ function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
             boundary_key=(entity.dim-1,abs(Int(boundary)))
             haskey(data.entities,boundary_key) || throw(ArgumentError(
                 "$context: entity $key references missing boundary entity $boundary_key"))
+        end
+        issorted(entity.embedded_curves) || throw(ArgumentError(
+            "$context: entity $key has unsorted embedded curve tags"))
+        seen_embedded=Set{Int32}()
+        boundary_curves=entity.dim==2 ? Set(abs.(entity.boundaries)) : Set{Int32}()
+        for curve in entity.embedded_curves
+            curve>0 || throw(ArgumentError(
+                "$context: entity $key has a non-positive embedded curve tag"))
+            curve in seen_embedded && throw(ArgumentError(
+                "$context: entity $key repeats embedded Curve[$curve]"))
+            curve in boundary_curves && throw(ArgumentError(
+                "$context: entity $key uses Curve[$curve] as both boundary and embedding"))
+            haskey(data.entities,(1,Int(curve))) || throw(ArgumentError(
+                "$context: entity $key references missing embedded Curve[$curve]"))
+            push!(seen_embedded,curve)
         end
     end
     nn=size(m.coords,2)
@@ -1487,9 +1521,9 @@ Return a deterministic SHA-256 regression record. The digest includes every
 coordinate bit pattern, Gmsh type/dimension/order, oriented local connectivity,
 special parent/domain link, physical tag, and physical name. When present,
 lossless MSH4 entity records, MSH2 elementary-entity tags, classification,
-parametric coordinates, external tags, and periodic entity/node relations are
-also included. An `elementary_entities` copy equal to MSH4 cell classification
-is redundant and does not change the digest.
+parametric coordinates, external tags, surface-embedded curve relations, and
+periodic entity/node relations are also included. An `elementary_entities` copy
+equal to MSH4 cell classification is redundant and does not change the digest.
 Cell and block iteration order do not affect the digest; reversing a cell does.
 Empty meshes have a finite zero bounding box.
 """
@@ -1523,8 +1557,11 @@ function mixed_crc(m::MixedMesh)
     has_elementary=elementary!==nothing && data===nothing
     has_special=any(block->block isa SpecialElementBlock,m.blocks)
     has_periodic=!isempty(m.periodic_links)
+    has_embedded=data!==nothing &&
+        any(entity->!isempty(entity.embedded_curves),values(data.entities))
     crc_version=1+(data===nothing ? 0 : 1)+(has_special ? 2 : 0)+
-                  (has_periodic ? 4 : 0)+(has_elementary ? 8 : 0)
+                  (has_periodic ? 4 : 0)+(has_elementary ? 8 : 0)+
+                  (has_embedded ? 16 : 0)
     prefix="Tessella.MixedMesh.CRC.v$crc_version\0"
     SHA.update!(ctx,codeunits(prefix))
     buf8=Vector{UInt8}(undef,8); buf4=Vector{UInt8}(undef,4)
@@ -1555,6 +1592,12 @@ function mixed_crc(m::MixedMesh)
             _sha_u64!(ctx,buf8,UInt64(length(entity.boundaries)))
             for boundary in entity.boundaries
                 _sha_i32!(ctx,buf4,boundary)
+            end
+            if has_embedded
+                _sha_u64!(ctx,buf8,UInt64(length(entity.embedded_curves)))
+                for curve in entity.embedded_curves
+                    _sha_i32!(ctx,buf4,curve)
+                end
             end
         end
         @inbounds for i in 1:nn
@@ -2024,10 +2067,14 @@ them and are rejected explicitly. MSH2 parent/domain element tags become
 cannot originate in that format.
 [`ElementBlock`](@ref) `tags` remains the legacy projection to the first entity
 physical membership (or zero), while [`MixedEntityData`](@ref) retains every
-membership, signed boundary, classification, parametric coordinate, and external
-node/element tag. [`MixedMesh`](@ref) `elementary_entities` retains the per-cell
-elementary tags needed by MSH2 periodic relations, while `periodic_links` retains
-standard MSH2/MSH4 entity transforms and node pairs. Node, element,
+membership, signed boundary, Gmsh-encoded surface/embedded-curve relation,
+classification, parametric coordinate, and external node/element tag.
+[`MixedMesh`](@ref) `elementary_entities` retains per-cell MSH2 elementary tags
+whenever the file declares a positive entity (and retains all tags needed by
+periodic relations), while
+`periodic_links` retains standard MSH2/MSH4 entity transforms and node pairs.
+Gmsh 4.15.2 does not serialize Point-In-Surface relations; its classified point
+nodes and point elements remain readable. Node, element,
 connectivity, block, entity, periodic-link/pair, physical-name, and file-size
 limits are checked before bulk allocation. Repeated physical-name, entity,
 pre-element node, element, and disjoint periodic sections are merged, with
@@ -2606,6 +2653,41 @@ function _read_mixed_physical_names!(acc,io,limits,tessella_extensions::Bool)
     _expect_msh_end(io,"\$EndPhysicalNames")
 end
 
+function _mixed_v4_entity_link!(boundaries,embedded_curves,entities,
+                                dim::Int,entity_tag::Int,raw_tag::Int,
+                                max_curve_tag::Int)
+    raw_tag!=0 || throw(ArgumentError(
+        "read_mixed_msh: entity boundary tag cannot be zero"))
+    magnitude=try
+        abs(raw_tag)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "read_mixed_msh: entity boundary tag overflows Int"))
+    end
+    magnitude<=typemax(Int32) || throw(ArgumentError(
+        "read_mixed_msh: entity boundary tag does not fit Int32"))
+
+    # Gmsh 4.15.2 appends `maxCurveTag + embeddedCurveTag` to a surface's
+    # signed boundary list. Its ASCII reader decodes this temporary extension;
+    # Tessella also decodes the identical record emitted in binary files.
+    if dim==2 && max_curve_tag>0 && magnitude>max_curve_tag
+        embedded_tag=magnitude-max_curve_tag
+        haskey(entities,(1,embedded_tag)) || throw(ArgumentError(
+            "read_mixed_msh: Surface[$entity_tag] references undeclared " *
+            "Gmsh-encoded embedded Curve[$embedded_tag]"))
+        embedded=Int32(embedded_tag)
+        embedded in embedded_curves && throw(ArgumentError(
+            "read_mixed_msh: Surface[$entity_tag] repeats embedded Curve[$embedded]"))
+        push!(embedded_curves,embedded)
+    else
+        haskey(entities,(dim-1,magnitude)) || throw(ArgumentError(
+            "read_mixed_msh: entity ($dim,$entity_tag) references undeclared boundary entity"))
+        push!(boundaries,Int32(raw_tag))
+    end
+    return nothing
+end
+
 function _read_mixed_entities_v4!(acc,io,limits)
     reader=_MshTokenReader(io)
     counts=ntuple(4) do _
@@ -2660,30 +2742,27 @@ function _read_mixed_entities_v4!(acc,io,limits)
                 push!(physical_tags,Int32(value))
             end
             boundaries=Int32[]
+            embedded_curves=Int32[]
             if dim>0
                 nboundary=_msh_int(
                     _msh_token!(reader,"entity boundary count"),
                     "entity boundary count")
                 nboundary>=0 || throw(ArgumentError(
                     "read_mixed_msh: negative boundary count on entity ($dim,$tag)"))
+                max_curve_tag=dim==2 ? maximum(
+                    (key[2] for key in keys(acc.entities) if key[1]==1);
+                    init=0) : 0
                 for _ in 1:nboundary
                     boundary=_msh_int(
                         _msh_token!(reader,"entity boundary tag"),"entity boundary tag")
-                    boundary!=0 || throw(ArgumentError(
-                        "read_mixed_msh: entity boundary tag cannot be zero"))
-                    boundary_tag=try abs(boundary) catch err
-                        err isa InterruptException && rethrow()
-                        throw(ArgumentError("read_mixed_msh: entity boundary tag overflows Int"))
-                    end
-                    boundary_tag<=typemax(Int32) || throw(ArgumentError(
-                        "read_mixed_msh: entity boundary tag does not fit Int32"))
-                    haskey(acc.entities,(dim-1,boundary_tag)) || throw(ArgumentError(
-                        "read_mixed_msh: entity ($dim,$tag) references undeclared boundary entity"))
-                    push!(boundaries,Int32(boundary))
+                    _mixed_v4_entity_link!(
+                        boundaries,embedded_curves,acc.entities,
+                        dim,tag,boundary,max_curve_tag)
                 end
             end
             record=MixedEntity(dim,tag,box;
-                               physical_tags=physical_tags,boundaries=boundaries)
+                               physical_tags=physical_tags,boundaries=boundaries,
+                               embedded_curves=embedded_curves)
             acc.entities[key]=record
             acc.entity_physical[key]=isempty(physical_tags) ? Int32(0) : first(physical_tags)
         end
@@ -2741,24 +2820,27 @@ function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool)
                     "read_mixed_msh: entity physical tag must be positive and fit Int32"))
             end
             boundaries=Int32[]
+            embedded_curves=Int32[]
             if dim>0
                 nboundary=_binary_count(
                     _binary_u64(io,swap,"entity boundary count"),
                     typemax(Int),"entity boundary")
                 boundaries=_binary_i32_vector(
                     io,nboundary,swap,"entity boundary tags")
-                @inbounds for boundary in boundaries
-                    boundary!=0 || throw(ArgumentError(
-                        "read_mixed_msh: entity boundary tag cannot be zero"))
-                    boundary_tag=abs(Int(boundary))
-                    boundary_tag<=typemax(Int32) || throw(ArgumentError(
-                        "read_mixed_msh: entity boundary tag does not fit Int32"))
-                    haskey(acc.entities,(dim-1,boundary_tag)) || throw(ArgumentError(
-                        "read_mixed_msh: entity ($dim,$tag) references undeclared boundary entity"))
+                encoded_boundaries=boundaries
+                boundaries=Int32[]
+                max_curve_tag=dim==2 ? maximum(
+                    (key[2] for key in keys(acc.entities) if key[1]==1);
+                    init=0) : 0
+                @inbounds for boundary in encoded_boundaries
+                    _mixed_v4_entity_link!(
+                        boundaries,embedded_curves,acc.entities,
+                        dim,tag,Int(boundary),max_curve_tag)
                 end
             end
             record=MixedEntity(dim,tag,box;
-                               physical_tags=physical_tags,boundaries=boundaries)
+                               physical_tags=physical_tags,boundaries=boundaries,
+                               embedded_curves=embedded_curves)
             acc.entities[key]=record
             acc.entity_physical[key]=isempty(physical_tags) ? Int32(0) :
                                      first(physical_tags)
@@ -3781,7 +3863,10 @@ function _finish_mixed_read(acc,is_v4::Bool)
         external_node_tags=acc.external_node_tags,
         block_entities=block_entities,
         external_element_tags=external_element_tags) : nothing
-    elementary=!is_v4 && !isempty(acc.periodic_links) ? block_entities : nothing
+    declared_elementary=!is_v4 && !isempty(acc.elementary_entity_keys)
+    elementary=!is_v4 &&
+        (!isempty(acc.periodic_links) || declared_elementary) ?
+        block_entities : nothing
     return MixedMesh(
         _OWNED_MIXED_MESH,coords,blocks,acc.physical_names,data,
         elementary,acc.periodic_links)
@@ -3818,16 +3903,19 @@ end
                     gmsh_compatible=true) -> path
 
 Validate and atomically write a mixed mesh as ASCII or binary MSH v2.2 or v4.1.
-MSH4 entity metadata and MSH2/MSH4 periodic links are preserved when present;
+MSH4 entity metadata, Gmsh's surface/embedded-curve encoding, and MSH2/MSH4
+periodic links are preserved when present;
 legacy meshes receive a deterministic discrete-entity layout with
-coordinate-derived bounds. MSH v2.2
+coordinate-derived bounds. MSH2 elementary ownership becomes discrete MSH4
+entities when every tag is positive and every entity has one legacy physical
+membership. MSH v2.2
 ASCII retains supported parent/domain links and variable decompositions; its
 binary form retains parent links but has neither variable record widths nor
 domain-link fields. MSH4 supports only fixed-width, unlinked special records.
 MSH4 periodic links require explicit entity metadata. MSH2 periodic links
 require aligned elementary-entity tags or compatible MSH4 cell classification;
 their section is ASCII in both file modes.
-Unsupported combinations are rejected before a temporary file is created.
+Unsupported combinations are rejected before the destination is replaced.
 MSH v2.2 necessarily writes the legacy first-physical-tag projection. By default,
 element tags that pinned Gmsh 4.15.2 cannot safely consume through its normal
 lifecycle, and quoted or line-breaking names that Gmsh cannot preserve, are
@@ -3837,6 +3925,10 @@ records. Legacy MSH4 synthesis is likewise blocked for nonzero-physical special
 records: Gmsh 4.15.2 can parse such a file, but rewrites an invalid node section
 unless compatible node/entity classification metadata is supplied. Read escaped
 names with `read_mixed_msh(...; tessella_extensions=true)`.
+
+Gmsh 4.15.2 reconstructs embedded curves from its temporary `\$Entities`
+extension in ASCII MSH4. Its own binary reader discards that relation with a
+warning; Tessella decodes the same binary record losslessly.
 """
 function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
                          binary=false,gmsh_compatible=true)
@@ -3928,11 +4020,6 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
 end
 
 function _assert_mixed_msh_format(m::MixedMesh,version::Float64,binary::Bool)
-    if m.elementary_entities!==nothing && version==4.1 && m.entity_data===nothing
-        throw(ArgumentError(
-            "write_mixed_msh: MSH 4.1 output cannot preserve MSH2 " *
-            "elementary-entity metadata without compatible MixedEntityData"))
-    end
     if !isempty(m.periodic_links)
         if version==4.1
             m.entity_data!==nothing || throw(ArgumentError(
@@ -4336,6 +4423,76 @@ function _mixed_v4_layout(m::MixedMesh)
     return entities,groups,node_owner
 end
 
+function _mixed_v4_elementary_layout(m::MixedMesh)
+    elementary=m.elementary_entities
+    elementary===nothing && throw(ErrorException(
+        "write_mixed_msh: internal elementary layout requested without metadata"))
+    raw_groups=Dict{Tuple{Int,Int32,Int},Vector{_MixedCellRef}}()
+    entity_bounds=Dict{Tuple{Int,Int32},Vector{Float64}}()
+    entity_physical=Dict{Tuple{Int,Int32},Int32}()
+    @inbounds for (block_index,block) in pairs(m.blocks)
+        dim=_block_dim(block)
+        for cell in 1:_block_ncells(block)
+            entity=elementary[block_index][cell]
+            entity>0 || throw(ArgumentError(
+                "write_mixed_msh: MSH 4.1 conversion requires positive " *
+                "elementary-entity tags; block $block_index cell $cell has $entity"))
+            entity_key=(dim,entity)
+            physical=block.tags[cell]
+            previous=get(entity_physical,entity_key,nothing)
+            (previous===nothing || previous==physical) || throw(ArgumentError(
+                "write_mixed_msh: MSH2 entity ($dim,$entity) has conflicting " *
+                "legacy physical tags $previous and $physical; MSH4 entity-level " *
+                "membership cannot preserve that per-cell difference"))
+            entity_physical[entity_key]=physical
+            bounds=get!(entity_bounds,entity_key) do
+                Float64[Inf,Inf,Inf,-Inf,-Inf,-Inf]
+            end
+            _grow_bounds!(bounds,m,block,cell)
+            cells=get!(raw_groups,(dim,entity,block.msh)) do
+                _MixedCellRef[]
+            end
+            push!(cells,_MixedCellRef(block_index,cell))
+        end
+    end
+
+    entities=_MixedWriteEntity[]
+    for key in sort!(collect(keys(entity_bounds)))
+        dim,entity=key;bounds=entity_bounds[key]
+        if dim==0
+            all(isequal(bounds[index],bounds[index+3]) for index in 1:3) ||
+                throw(ArgumentError(
+                    "write_mixed_msh: MSH2 point entity $entity spans multiple coordinates"))
+        end
+        push!(entities,_MixedWriteEntity(
+            dim,Int(entity),entity_physical[key],Tuple(bounds)))
+    end
+    groups=_MixedWriteGroup[]
+    for (key,cells) in sort!(collect(raw_groups);by=first)
+        dim,entity,msh=key
+        sort!(cells;lt=(a,b)->_mixed_cell_lt(m,a,b),alg=MergeSort)
+        push!(groups,_MixedWriteGroup(dim,Int(entity),msh,cells))
+    end
+
+    node_owner=(3,0)
+    if size(m.coords,2)>0
+        if isempty(groups)
+            node_owner=(3,1)
+            push!(entities,_MixedWriteEntity(
+                3,1,Int32(0),_all_mixed_bounds(m)))
+        else
+            highest=maximum(group.dim for group in groups)
+            candidates=filter(group->group.dim==highest,groups)
+            sort!(candidates;by=group->(group.entity,group.msh))
+            owner=first(candidates)
+            node_owner=(owner.dim,owner.entity)
+        end
+    end
+    sort!(entities;by=entity->(entity.dim,entity.tag))
+    sort!(groups;by=group->(group.dim,group.entity,group.msh))
+    return entities,groups,node_owner
+end
+
 function _write_mixed_entity(io,entity::_MixedWriteEntity)
     if entity.dim==0
         @printf(io,"%d %.17g %.17g %.17g %d",entity.tag,
@@ -4352,7 +4509,24 @@ function _write_mixed_entity(io,entity::_MixedWriteEntity)
     return nothing
 end
 
-function _write_mixed_entity(io,entity::MixedEntity)
+function _mixed_entity_encoded_boundaries(entity::MixedEntity,max_curve_tag::Int)
+    encoded=copy(entity.boundaries)
+    isempty(entity.embedded_curves) && return encoded
+    entity.dim==2 || throw(ArgumentError(
+        "write_mixed_msh: only surface entities can encode embedded curves"))
+    max_curve_tag>0 || throw(ArgumentError(
+        "write_mixed_msh: embedded curves require declared curve entities"))
+    for curve in entity.embedded_curves
+        fake=Int64(max_curve_tag)+Int64(curve)
+        fake<=typemax(Int32) || throw(ArgumentError(
+            "write_mixed_msh: Gmsh's embedded Curve[$curve] encoding for " *
+            "Surface[$(entity.tag)] exceeds the signed 32-bit entity-tag limit"))
+        push!(encoded,Int32(fake))
+    end
+    return encoded
+end
+
+function _write_mixed_entity(io,entity::MixedEntity,max_curve_tag::Int)
     nphysical=length(entity.physical_tags)
     if entity.dim==0
         @printf(io,"%d %.17g %.17g %.17g %d",entity.tag,
@@ -4362,13 +4536,14 @@ function _write_mixed_entity(io,entity::MixedEntity)
         end
         println(io)
     else
+        encoded_boundaries=_mixed_entity_encoded_boundaries(entity,max_curve_tag)
         @printf(io,"%d %.17g %.17g %.17g %.17g %.17g %.17g %d",
                 entity.tag,entity.bbox...,nphysical)
         for physical in entity.physical_tags
             print(io," ",physical)
         end
-        print(io," ",length(entity.boundaries))
-        for boundary in entity.boundaries
+        print(io," ",length(encoded_boundaries))
+        for boundary in encoded_boundaries
             print(io," ",boundary)
         end
         println(io)
@@ -4389,7 +4564,7 @@ function _write_mixed_entity_binary(io,entity::_MixedWriteEntity)
     return nothing
 end
 
-function _write_mixed_entity_binary(io,entity::MixedEntity)
+function _write_mixed_entity_binary(io,entity::MixedEntity,max_curve_tag::Int)
     write(io,Int32(entity.tag))
     ncoordinates=entity.dim==0 ? 3 : 6
     @inbounds for i in 1:ncoordinates
@@ -4400,8 +4575,9 @@ function _write_mixed_entity_binary(io,entity::MixedEntity)
         write(io,physical)
     end
     if entity.dim>0
-        write(io,UInt64(length(entity.boundaries)))
-        for boundary in entity.boundaries
+        encoded_boundaries=_mixed_entity_encoded_boundaries(entity,max_curve_tag)
+        write(io,UInt64(length(encoded_boundaries)))
+        for boundary in encoded_boundaries
             write(io,boundary)
         end
     end
@@ -4457,12 +4633,14 @@ function _write_mixed_v4_binary_metadata(
     for entity in entities
         counts[entity.dim+1]+=1
     end
+    max_curve_tag=maximum(
+        (Int(entity.tag) for entity in entities if entity.dim==1);init=0)
     println(io,"\$Entities")
     for count in counts
         write(io,UInt64(count))
     end
     for entity in entities
-        _write_mixed_entity_binary(io,entity)
+        _write_mixed_entity_binary(io,entity,max_curve_tag)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
 
@@ -4524,7 +4702,8 @@ function _write_mixed_v4_binary(
         io,m,names,m.entity_data,gmsh_compatible)
     _write_mixed_binary_format(io,"4.1")
     _write_mixed_physical_names(io,names,gmsh_compatible)
-    entities,groups,node_owner=_mixed_v4_layout(m)
+    entities,groups,node_owner=m.elementary_entities===nothing ?
+        _mixed_v4_layout(m) : _mixed_v4_elementary_layout(m)
     counts=zeros(Int,4)
     for entity in entities
         counts[entity.dim+1]+=1
@@ -4585,10 +4764,12 @@ function _write_mixed_v4_metadata(
     for entity in entities
         counts[entity.dim+1]+=1
     end
+    max_curve_tag=maximum(
+        (Int(entity.tag) for entity in entities if entity.dim==1);init=0)
     println(io,"\$Entities")
     println(io,counts[1]," ",counts[2]," ",counts[3]," ",counts[4])
     for entity in entities
-        _write_mixed_entity(io,entity)
+        _write_mixed_entity(io,entity,max_curve_tag)
     end
     println(io,"\$EndEntities")
 
@@ -4647,7 +4828,8 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool)
         io,m,names,m.entity_data,gmsh_compatible)
     println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
     _write_mixed_physical_names(io,names,gmsh_compatible)
-    entities,groups,node_owner=_mixed_v4_layout(m)
+    entities,groups,node_owner=m.elementary_entities===nothing ?
+        _mixed_v4_layout(m) : _mixed_v4_elementary_layout(m)
     counts=zeros(Int,4)
     for entity in entities
         counts[entity.dim+1]+=1

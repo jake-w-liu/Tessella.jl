@@ -46,6 +46,27 @@ function _holed_projection_fixture()
     return model,mesh_model_surface(model,1)
 end
 
+function _embedded_projection_fixture()
+    model=GeoModel()
+    coordinates=((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0),
+                 (0.25,0.5),(0.75,0.5),(0.5,0.5))
+    for (tag,(x,y)) in enumerate(coordinates)
+        add_point!(model,x,y,0;tag=tag,mesh_size=0.5)
+    end
+    for (tag,(first_point,last_point)) in enumerate(
+            ((1,2),(2,3),(3,4),(4,1),(5,6)))
+        add_line!(model,first_point,last_point;tag=tag)
+    end
+    add_curve_loop!(model,[1,2,3,4];tag=1)
+    add_plane_surface!(model,[1];tag=1)
+    embed!(model,0,[7],2,1)
+    embed!(model,1,[5],2,1)
+    add_physical_group!(model,0,[5,6,7];tag=31,name="embedded points")
+    add_physical_group!(model,1,[5];tag=32,name="embedded line")
+    add_physical_group!(model,2,[1];tag=33,name="domain")
+    return model,mesh_model_surface(model,1)
+end
+
 @testset "native model periodic projection to mixed MSH metadata" begin
     model,mesh=_periodic_projection_fixture()
     projected=model_to_mixed(model,mesh,1)
@@ -201,6 +222,82 @@ end
 
     @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
+end
+
+@testset "embedded native surface projection" begin
+    model,mesh=_embedded_projection_fixture()
+    projected=model_to_mixed(model,mesh,1)
+    @test validate(projected).ok
+    @test isempty(projected.periodic_links)
+    @test [block.msh for block in projected.blocks]==[15,1,2]
+    @test size(projected.blocks[1].nodes,2)==7
+    @test Set(projected.entity_data.block_entities[1])==Set(Int32.(1:7))
+    @test Set(projected.entity_data.block_entities[2])==Set(Int32.(1:5))
+    @test projected.entity_data.entities[(2,1)].embedded_curves==Int32[5]
+    @test projected.entity_data.entities[(2,1)].boundaries==Int32[1,2,3,4]
+    @test projected.entity_data.entities[(1,5)].boundaries==Int32[5,-6]
+    @test projected.entity_data.entities[(1,5)].physical_tags==Int32[32]
+    @test projected.entity_data.entities[(0,7)].physical_tags==Int32[31]
+    @test projected.physical_names==Dict(
+        (0,31)=>"embedded points",(1,32)=>"embedded line",(2,33)=>"domain")
+
+    point_nodes=Dict(Int(entity[2])=>node for (node,entity) in
+        enumerate(projected.entity_data.node_entities) if entity[1]==0)
+    @test Set(keys(point_nodes))==Set(1:7)
+    @test projected.entity_data.node_entities[point_nodes[7]]==(0,Int32(7))
+    embedded_line_cells=findall(==(Int32(5)),
+        projected.entity_data.block_entities[2])
+    @test length(embedded_line_cells)==2
+    @test all(cell->point_nodes[7] in projected.blocks[2].nodes[:,cell],
+              embedded_line_cells)
+    @test all(cell->all(node->node in Set(values(point_nodes)) ||
+            projected.entity_data.node_entities[node][1]==1,
+            projected.blocks[2].nodes[:,cell]),embedded_line_cells)
+
+    crc=mixed_crc(projected)
+    @test crc.sha==
+          "e762c7c566f1e5768ad1e2849302815dbfd9d19a14c1b3840abcefa4aedcaf43"
+    mktempdir() do directory
+        for version in (2.2,4.1),binary in (false,true)
+            path=joinpath(directory,"embedded-$version-$binary.msh")
+            @test write_mixed_msh(
+                path,projected;version=version,binary=binary)==path
+            reread=read_mixed_msh(path)
+            @test validate(reread).ok
+            if version==4.1
+                @test reread.entity_data.entities[(2,1)].embedded_curves==Int32[5]
+                @test mixed_crc(reread)==crc
+            else
+                @test reread.entity_data===nothing
+                point_block=only(findall(block->block.msh==15,reread.blocks))
+                line_block=only(findall(block->block.msh==1,reread.blocks))
+                @test Set(reread.elementary_entities[point_block])==
+                      Set(Int32.(1:7))
+                @test Set(reread.elementary_entities[line_block])==
+                      Set(Int32.(1:5))
+            end
+        end
+    end
+
+    periodic_embedded=deepcopy(model)
+    add_point!(periodic_embedded,0.25,0.75,0;tag=8,mesh_size=0.5)
+    add_point!(periodic_embedded,0.75,0.75,0;tag=9,mesh_size=0.5)
+    add_line!(periodic_embedded,8,9;tag=6)
+    embed!(periodic_embedded,1,[6],2,1)
+    translate=(1.0,0.0,0.0,0.0,
+               0.0,1.0,0.0,0.25,
+               0.0,0.0,1.0,0.0,
+               0.0,0.0,0.0,1.0)
+    set_periodic!(periodic_embedded,1,[6],[5],translate)
+    periodic_error=try
+        model_to_mixed(periodic_embedded,mesh,1)
+        nothing
+    catch err
+        err
+    end
+    @test periodic_error isa ArgumentError
+    @test occursin("periodic embedded curves are not supported",
+                   sprint(showerror,periodic_error))
 end
 
 @testset "holed native surface projection" begin

@@ -1310,8 +1310,10 @@ end
         v4,ElementsUnderTest.read_mixed_msh(v2);version=4.1,binary=true)
     ElementsUnderTest.write_mixed_msh(
         v2_again,ElementsUnderTest.read_mixed_msh(v4);version=2.2)
-    @test ElementsUnderTest.mixed_crc(
-        ElementsUnderTest.read_mixed_msh(v2_again)).sha==expected_crc
+    v2_again_mesh=ElementsUnderTest.read_mixed_msh(v2_again)
+    @test v2_again_mesh.elementary_entities!==nothing
+    @test legacy_crc(
+        v2_again_mesh).sha==expected_crc
 
     empty=ElementsUnderTest.MixedMesh(zeros(3,0),ElementsUnderTest.ElementBlock[];
                                       physical_names=Dict((3,1)=>"unused"))
@@ -1391,7 +1393,8 @@ end
         ascii,full;version=2.2,binary=false,gmsh_compatible=false)==ascii
     back=ElementsUnderTest.read_mixed_msh(ascii)
     @test ElementsUnderTest.validate(back).ok
-    @test ElementsUnderTest.mixed_crc(back).sha==expected_crc
+    @test back.elementary_entities!==nothing
+    @test legacy_crc(back).sha==expected_crc
     @test Set(block.msh for block in back.blocks)==
           Set([1,2,4,34,35,67,68,69,70,133,134,135,136])
     summary=gmsh_element_summary_without_finalize(
@@ -1413,7 +1416,8 @@ end
     ElementsUnderTest.write_mixed_msh(binary,binary_mesh;version=2.2,binary=true)
     binary_back=ElementsUnderTest.read_mixed_msh(binary)
     @test ElementsUnderTest.validate(binary_back).ok
-    @test ElementsUnderTest.mixed_crc(binary_back).sha==binary_crc
+    @test binary_back.elementary_entities!==nothing
+    @test legacy_crc(binary_back).sha==binary_crc
     @test binary_back.blocks[7].parent_refs==
           [ElementsUnderTest.ElementRef(1,1)]
     ok,output=gmsh_check(binary)
@@ -1479,7 +1483,7 @@ end
         end
         @test Set(Tuple(column) for column in eachcol(rewritten_mesh.coords))==
               Set(Tuple(column) for column in eachcol(mesh.coords))
-        @test ElementsUnderTest.mixed_crc(rewritten_mesh).sha==
+        @test legacy_crc(rewritten_mesh).sha==
               ElementsUnderTest.mixed_crc(mesh).sha
     end
     for binary_output in (false,true)
@@ -1488,7 +1492,7 @@ end
         ElementsUnderTest.write_mixed_msh(source,subelement;version=2.2)
         @test gmsh_rewrite(source,rewritten;
                            version=2.2,binary=binary_output)=="4.15.2"
-        @test ElementsUnderTest.mixed_crc(
+        @test legacy_crc(
             ElementsUnderTest.read_mixed_msh(rewritten)).sha==
               ElementsUnderTest.mixed_crc(subelement).sha
     end
@@ -1882,6 +1886,169 @@ end
     @test_throws ArgumentError ElementsUnderTest.add_block!(
         mesh,ElementsUnderTest.ElementBlock(
             1,reshape(Int32[1,2],2,1),Int32[7]))
+end
+
+@testset "Gmsh MSH4 embedded-curve entity metadata" begin
+    directory=mktempdir()
+    source="""
+    \$MeshFormat
+    4.1 0 8
+    \$EndMeshFormat
+    \$Entities
+    6 5 1 0
+    1 0 0 0 0
+    2 1 0 0 0
+    3 1 1 0 0
+    4 0 1 0 0
+    5 0.25 0.5 0 0
+    6 0.75 0.5 0 0
+    1 0 0 0 1 0 0 0 2 1 -2
+    2 1 0 0 1 1 0 0 2 2 -3
+    3 0 1 0 1 1 0 0 2 3 -4
+    4 0 0 0 0 1 0 0 2 4 -1
+    5 0.25 0.5 0 0.75 0.5 0 0 2 5 -6
+    1 0 0 0 1 1 0 0 5 1 2 3 4 10
+    \$EndEntities
+    \$Nodes
+    0 0 0 0
+    \$EndNodes
+    \$Elements
+    0 0 0 0
+    \$EndElements
+    """
+    input=joinpath(directory,"embedded-entity-input.msh")
+    write(input,source)
+    mesh=ElementsUnderTest.read_mixed_msh(input)
+    @test ElementsUnderTest.validate(mesh).ok
+    @test mesh.entity_data.entities[(2,1)].boundaries==Int32[1,2,3,4]
+    @test mesh.entity_data.entities[(2,1)].embedded_curves==Int32[5]
+    crc=ElementsUnderTest.mixed_crc(mesh)
+
+    for binary in (false,true)
+        output=joinpath(directory,"embedded-entity-$binary.msh")
+        @test ElementsUnderTest.write_mixed_msh(
+            output,mesh;version=4.1,binary=binary)==output
+        reread=ElementsUnderTest.read_mixed_msh(output)
+        @test ElementsUnderTest.validate(reread).ok
+        @test reread.entity_data.entities[(2,1)].boundaries==Int32[1,2,3,4]
+        @test reread.entity_data.entities[(2,1)].embedded_curves==Int32[5]
+        @test ElementsUnderTest.mixed_crc(reread)==crc
+        ok,gmsh_output=gmsh_check(output)
+        @test ok
+        @test !occursin("Error",gmsh_output)
+    end
+    @test occursin(" 5 1 2 3 4 10\n",read(
+        joinpath(directory,"embedded-entity-false.msh"),String))
+
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        1,5,(0.,0.,0.,1.,0.,0.);embedded_curves=[1])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        2,1,(0.,0.,0.,1.,1.,0.);embedded_curves=[5,5])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        2,1,(0.,0.,0.,1.,1.,0.);boundaries=[5],embedded_curves=[5])
+
+    malformed=replace(source,"4 10\n"=>"4 11\n")
+    malformed_path=joinpath(directory,"undeclared-embedded-curve.msh")
+    write(malformed_path,malformed)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(malformed_path)
+
+    damaged=deepcopy(mesh)
+    damaged.entity_data.entities[(2,1)].embedded_curves[1]=Int32(4)
+    @test !ElementsUnderTest.validate(damaged).ok
+
+    unsorted=deepcopy(mesh)
+    unsorted.entity_data.entities[(1,6)]=ElementsUnderTest.MixedEntity(
+        1,6,(0.,0.,0.,1.,0.,0.))
+    pushfirst!(unsorted.entity_data.entities[(2,1)].embedded_curves,Int32(6))
+    @test !ElementsUnderTest.validate(unsorted).ok
+
+    maximum_tag=Int(typemax(Int32))
+    overflow_entities=Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}(
+        (1,maximum_tag)=>ElementsUnderTest.MixedEntity(
+            1,maximum_tag,(0.,0.,0.,1.,0.,0.)),
+        (2,1)=>ElementsUnderTest.MixedEntity(
+            2,1,(0.,0.,0.,1.,1.,0.);embedded_curves=[maximum_tag]),
+    )
+    overflow_data=ElementsUnderTest.MixedEntityData(overflow_entities)
+    overflow_mesh=ElementsUnderTest.MixedMesh(
+        zeros(3,0),ElementsUnderTest.ElementBlock[];entity_data=overflow_data)
+    overflow_path=joinpath(directory,"overflow.msh")
+    write(overflow_path,"sentinel")
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        overflow_path,overflow_mesh;version=4.1)
+    @test read(overflow_path,String)=="sentinel"
+end
+
+@testset "MSH2 elementary entities survive MSH4 conversion" begin
+    directory=mktempdir()
+    source="""
+    \$MeshFormat
+    2.2 0 8
+    \$EndMeshFormat
+    \$PhysicalNames
+    1
+    1 7 "wire"
+    \$EndPhysicalNames
+    \$Nodes
+    3
+    1 0 0 0
+    2 1 0 0
+    3 2 0 0
+    \$EndNodes
+    \$Elements
+    2
+    1 1 2 7 7 1 2
+    2 1 2 7 8 2 3
+    \$EndElements
+    """
+    input=joinpath(directory,"elementary-v2.msh")
+    write(input,source)
+    mesh=ElementsUnderTest.read_mixed_msh(input)
+    @test ElementsUnderTest.validate(mesh).ok
+    @test mesh.blocks[1].tags==Int32[7,7]
+    @test mesh.elementary_entities==[Int32[7,8]]
+    @test ElementsUnderTest.mixed_crc(mesh).sha!=legacy_crc(mesh).sha
+
+    for binary in (false,true)
+        converted=joinpath(directory,"elementary-v4-$binary.msh")
+        ElementsUnderTest.write_mixed_msh(
+            converted,mesh;version=4.1,binary=binary)
+        reread=ElementsUnderTest.read_mixed_msh(converted)
+        @test ElementsUnderTest.validate(reread).ok
+        @test reread.entity_data.block_entities==[Int32[7,8]]
+        @test reread.entity_data.entities[(1,7)].physical_tags==Int32[7]
+        @test reread.entity_data.entities[(1,8)].physical_tags==Int32[7]
+        @test reread.physical_names==Dict((1,7)=>"wire")
+        @test legacy_crc(reread).sha==legacy_crc(mesh).sha
+        ok,output=gmsh_check(converted)
+        @test ok
+        @test !occursin("Error",output)
+    end
+
+    cases=ElementsUnderTest.MixedMesh[
+        ElementsUnderTest.MixedMesh(
+            Float64[0 1 2;0 0 0;0 0 0],
+            [ElementsUnderTest.ElementBlock(
+                1,Int32[1 2;2 3],Int32[7,8])];
+            elementary_entities=[Int32[7,7]]),
+        ElementsUnderTest.MixedMesh(
+            Float64[0 1;0 0;0 0],
+            [ElementsUnderTest.ElementBlock(
+                1,reshape(Int32[1,2],2,1),Int32[0])];
+            elementary_entities=[Int32[0]]),
+        ElementsUnderTest.MixedMesh(
+            Float64[0 1;0 0;0 0],
+            [ElementsUnderTest.ElementBlock(
+                15,reshape(Int32[1,2],1,2),Int32[0,0])];
+            elementary_entities=[Int32[1,1]]),
+    ]
+    for (index,bad) in pairs(cases)
+        destination=joinpath(directory,"bad-elementary-$index.msh")
+        write(destination,"sentinel")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            destination,bad;version=4.1)
+        @test read(destination,String)=="sentinel"
+    end
 end
 
 @testset "repeated v4 entity/element sections and full-width external tags" begin
@@ -2999,8 +3166,10 @@ end
         canonical=joinpath(directory,"canonical-nodes-$version-$binary.msh")
         ElementsUnderTest.write_mixed_msh(canonical,mesh;version,binary=false)
         @test count(==("\$Nodes"),readlines(canonical))==1
-        @test ElementsUnderTest.mixed_crc(
-            ElementsUnderTest.read_mixed_msh(canonical)).sha==crcs[(version,binary)]
+        canonical_mesh=ElementsUnderTest.read_mixed_msh(canonical)
+        canonical_crc=version==2.2 ? legacy_crc(canonical_mesh) :
+                                      ElementsUnderTest.mixed_crc(canonical_mesh)
+        @test canonical_crc.sha==crcs[(version,binary)]
         canonical_ok,canonical_output=gmsh_check(canonical)
         @test canonical_ok
         @test !occursin("Error",canonical_output)
@@ -3227,7 +3396,7 @@ end
         gmsh_compatible=false)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         special_valid;max_connectivity=54)
-    @test ElementsUnderTest.mixed_crc(
+    @test legacy_crc(
         ElementsUnderTest.read_mixed_msh(
             special_valid;max_connectivity=55)).sha==
           "944dbe417200e316bf265d2d6f8a154dfb4c6bec3eb853401f289990a9be4089"
@@ -3236,7 +3405,7 @@ end
         special_binary,special_v2_binary_fixture();version=2.2,binary=true)
     @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
         special_binary;max_connectivity=34)
-    @test ElementsUnderTest.mixed_crc(
+    @test legacy_crc(
         ElementsUnderTest.read_mixed_msh(
             special_binary;max_connectivity=35)).sha==
           "4ef8de3b81b4449aa1b3efc3905f4418e00b5ac96ffd609e6eef2957b1156b68"

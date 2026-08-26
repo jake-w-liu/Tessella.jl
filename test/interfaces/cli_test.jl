@@ -32,6 +32,17 @@ Line(5) = {5, 6};
 Line(6) = {7, 8};
 Periodic Curve {5} = {6} Translate {0, -1, 0};
 """
+const _EMBEDDED_CLI_GEO=_SQUARE_GEO * """
+Point(5) = {0.25, 0.5, 0, 0.5};
+Point(6) = {0.75, 0.5, 0, 0.5};
+Point(7) = {0.5, 0.25, 0, 0.5};
+Line(5) = {5, 6};
+Point{7} In Surface{1};
+Line{5} In Surface{1};
+Physical Point("embedded points", 31) = {5, 6, 7};
+Physical Curve("embedded line", 32) = {5};
+Physical Surface("domain", 33) = {1};
+"""
 
 @testset "bounded non-destructive CLI" begin
     mktempdir() do directory
@@ -100,6 +111,26 @@ Periodic Curve {5} = {6} Translate {0, -1, 0};
         @test periodic_curve.slave_entity==2
         @test periodic_curve.master_entity==4
         @test length(periodic_curve.slave_nodes)==5
+
+        embedded_input=joinpath(directory,"embedded.geo")
+        embedded_output=joinpath(directory,"embedded.msh")
+        write(embedded_input,_EMBEDDED_CLI_GEO)
+        @test main([embedded_input,"-2","-o",embedded_output])==embedded_output
+        @test read(embedded_input,String)==_EMBEDDED_CLI_GEO
+        embedded=read_mixed_msh(embedded_output)
+        @test validate(embedded).ok
+        @test embedded.entity_data!==nothing
+        @test embedded.entity_data.entities[(2,1)].embedded_curves==Int32[5]
+        point_block=only(findall(block->block.msh==15,embedded.blocks))
+        line_block=only(findall(block->block.msh==1,embedded.blocks))
+        @test Set(embedded.entity_data.block_entities[point_block])==
+              Set(Int32.(1:7))
+        @test Set(embedded.entity_data.block_entities[line_block])==
+              Set(Int32.(1:5))
+        @test embedded.physical_names==Dict(
+            (0,31)=>"embedded points",(1,32)=>"embedded line",(2,33)=>"domain")
+        @test mixed_crc(embedded).sha==
+              "6025846e0f58581418401081f092630d2e49999a26e608bf377d1bae4c51dc4b"
 
         periodic_volume_input=joinpath(directory,"periodic-volume.geo")
         periodic_volume_output=joinpath(directory,"periodic-volume.msh")
