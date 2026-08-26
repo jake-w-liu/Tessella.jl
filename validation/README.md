@@ -47,6 +47,7 @@ validation/
     embed_point.jl        # classified Point-In-Surface MSH4 projection lifecycle
     embed_line.jl         # classified Line-In-Surface MSH4 projection lifecycle
     embed_sheet.jl        # Surface-In-Volume plus nested point/curve MSH lifecycle
+    explicit_shell.jl     # planar Surface Loop/Volume MSH2/MSH4 lifecycle
     ...                   # focused API, CAD, and boundary-layer cases
   cases/
     01_box/box.geo               # reference gmsh script (retained)

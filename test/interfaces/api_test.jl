@@ -137,6 +137,45 @@ const _API=Tessella.API
     @test isempty(Docs.undocumented_names(Tessella.API;private=false))
 end
 
+@testset "explicit volume-shell API" begin
+    _API.finalize()
+    try
+        _API.initialize()
+        points=((0.0,0.0,0.0),(1.0,0.0,0.0),
+                (0.0,1.0,0.0),(0.0,0.0,1.0))
+        for (tag,point) in pairs(points)
+            @test _API.model.add_point(point...;tag=tag)==tag
+        end
+        edges=((1,2),(2,3),(3,1),(1,4),(2,4),(3,4))
+        for (tag,(first_point,last_point)) in pairs(edges)
+            @test _API.model.add_line(first_point,last_point;tag=tag)==tag
+        end
+        loops=((1,2,3),(1,5,-4),(2,6,-5),(3,4,-6))
+        for (tag,curves) in pairs(loops)
+            @test _API.model.add_curve_loop(curves;tag=tag)==tag
+            @test _API.model.add_plane_surface([tag];tag=tag)==tag
+        end
+        @test _API.model.add_surface_loop([1,2,3,4];tag=1)==1
+        @test _API.model.add_volume([1];tag=1)==1
+        generated=_API.mesh.generate(3)
+        @test validate(generated).ok
+        @test ntets(generated)>0
+        volume=sum(tet_volume(
+            node(generated,generated.tets[1,cell]),
+            node(generated,generated.tets[2,cell]),
+            node(generated,generated.tets[3,cell]),
+            node(generated,generated.tets[4,cell])) for cell in 1:ntets(generated))
+        @test volume≈1/6 atol=1e-12
+        @test mesh_crc(generated).sha==
+              "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b"
+        expected=mesh_crc(generated)
+        @test_throws ArgumentError _API.model.add_surface_loop([1];tag=2)
+        @test mesh_crc(_API.mesh.get())==expected
+    finally
+        _API.finalize()
+    end
+end
+
 @testset "periodic API ownership and cache invalidation" begin
     _API.finalize()
     @test_throws ArgumentError _API.mesh.set_periodic(

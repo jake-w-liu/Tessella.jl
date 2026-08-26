@@ -194,6 +194,12 @@ esheet_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --pro
 println("  command: ", esheet_command)
 run(esheet_command)
 
+println("\n── gmsh_parity explicit shell ──  Tessella vs Gmsh Surface Loop/Volume")
+explicit_shell_script = joinpath(HERE, "gmsh_parity", "explicit_shell.jl")
+explicit_shell_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $explicit_shell_script`
+println("  command: ", explicit_shell_command)
+run(explicit_shell_command)
+
 println("\n── gmsh_parity periodic affine ──  Tessella vs Gmsh node correspondence")
 periodic_script = joinpath(HERE, "gmsh_parity", "periodic_translation.jl")
 periodic_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $periodic_script`

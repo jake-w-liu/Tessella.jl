@@ -1,17 +1,18 @@
 """
     GeoExec
 
-Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface,
-Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
+Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface/
+Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
 90°-Rotate of those solids, Point/Line-In-Surface and Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, literal
 Translate/Rotate/Affine periodic straight curves, Physical groups, and Mesh 2/3 via
-the native [`Model`](@ref) kernel. Loops, macros,
+the native [`Model`](@ref) kernel. Control-flow loops, macros,
 extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
 module GeoExec
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: add_physical_group!, set_periodic!
@@ -292,6 +293,14 @@ function _exec_line!(m::GeoModel, line::AbstractString)
     elseif (mm=match(r"^Plane\s+Surface\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
         ids=parse.(Int, split(mm.captures[2],','))
         add_plane_surface!(m, ids; tag=parse(Int,mm.captures[1]))
+        return
+    elseif (mm=match(r"^Surface\s+Loop\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
+        ids=parse.(Int,split(mm.captures[2],','))
+        add_surface_loop!(m,ids;tag=parse(Int,mm.captures[1]))
+        return
+    elseif (mm=match(r"^Volume\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
+        ids=parse.(Int,split(mm.captures[2],','))
+        add_volume!(m,ids;tag=parse(Int,mm.captures[1]))
         return
     elseif (mm=match(r"^Box\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
         nums=parse.(Float64, split(mm.captures[2],','))

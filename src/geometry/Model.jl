@@ -1,14 +1,16 @@
 """
     Model
 
-A native geometry/entity kernel: tagged points, curves, loops, surfaces, and
-volumes with physical groups and classified surface/volume mixed-mesh projection.
+A native geometry/entity kernel: tagged points, curves, curve loops, surfaces,
+surface loops, and volumes with physical groups and classified surface/volume
+mixed-mesh projection.
 Meshing dispatches to Tessella's certified simplex and transfinite kernels. This
 is not OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
 module Model
 
-using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets
+using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
+                   triangle_area, tet_signed_volume, tet_volume
 using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
                   MixedPeriodicLink, MixedMesh
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
@@ -19,8 +21,10 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill
 using ..Periodic: periodic_identify_affine
 using ..Transform: _affine_coordinate, _transform_homogeneous
+using ..Predicates: orient2, orient3
 
 export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+export add_surface_loop!, add_volume!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
@@ -48,6 +52,7 @@ mutable struct GeoModel
     curves::Dict{Int,NTuple{2,Int}}
     loops::Dict{Int,Vector{Int}}
     surfaces::Dict{Int,Vector{Int}}
+    surface_loops::Dict{Int,Vector{Int}}
     volumes::Dict{Int,Vector{Int}}
     physical::Dict{Tuple{Int,Int},Vector{Int}}
     physical_names::Dict{Tuple{Int,Int},String}
@@ -74,6 +79,7 @@ dimension. Geometry is added explicitly and can then be meshed with
 GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
+                      Dict{Int,Vector{Int}}(),
                       Dict{Tuple{Int,Int},Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
                       Dict{Int,NTuple{6,Float64}}(),
@@ -104,6 +110,15 @@ function _signed_curve_tag(value, caller)
     return Int(value)
 end
 
+function _signed_surface_tag(value, caller)
+    value isa Integer || throw(ArgumentError("$caller: surface tag must be an integer"))
+    value isa Bool && throw(ArgumentError("$caller: surface tag must not be Bool"))
+    value==0 && throw(ArgumentError("$caller: surface tag must be nonzero"))
+    (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
+        "$caller: surface tag magnitude exceeds Int32"))
+    return Int(value)
+end
+
 function _dimension(value, caller)
     value isa Integer || throw(ArgumentError("$caller: dimension must be an integer"))
     value isa Bool && throw(ArgumentError("$caller: dimension must not be Bool"))
@@ -130,6 +145,14 @@ function _alloc_physical_tag(m::GeoModel, dim::Int, requested::Int, caller)
     end
     current<typemax(Int32) || throw(ArgumentError(
         "$caller: no automatic physical tags remain in dimension $dim"))
+    return current+1
+end
+
+function _alloc_surface_loop_tag(m::GeoModel,requested::Int,caller)
+    requested!=0 && return requested
+    current=isempty(m.surface_loops) ? 0 : maximum(keys(m.surface_loops))
+    current<typemax(Int32) || throw(ArgumentError(
+        "$caller: no automatic Surface Loop tags remain"))
     return current+1
 end
 
@@ -381,6 +404,115 @@ function add_plane_surface!(m::GeoModel, loops; tag::Integer=0)
     t=_alloc_tag!(m,2,_tag(tag,caller,2),caller)
     haskey(m.surfaces,t) && throw(ArgumentError("$caller: Surface[$t] already exists"))
     m.surfaces[t]=ids
+    return t
+end
+
+function _validate_surface_loop(m::GeoModel,surfaces,caller::AbstractString)
+    unsigned=abs.(surfaces)
+    length(unique(unsigned))==length(unsigned) || throw(ArgumentError(
+        "$caller: a surface loop cannot repeat a Surface tag"))
+    curve_owners=Dict{Int,Set{Int}}()
+    curve_incidence=Dict{Int,Int}()
+    for surface in unsigned
+        haskey(m.surfaces,surface) || throw(ArgumentError(
+            "$caller: unknown Surface[$surface]"))
+        for loop in m.surfaces[surface]
+            haskey(m.loops,loop) || throw(ArgumentError(
+                "$caller: Surface[$surface] references unknown Loop[$loop]"))
+            for signed_curve in m.loops[loop]
+                curve=abs(signed_curve)
+                haskey(m.curves,curve) || throw(ArgumentError(
+                    "$caller: Loop[$loop] references unknown Curve[$curve]"))
+                curve_incidence[curve]=get(curve_incidence,curve,0)+1
+                push!(get!(Set{Int},curve_owners,curve),surface)
+            end
+        end
+    end
+    isempty(curve_incidence) && throw(ArgumentError(
+        "$caller: a surface loop must contain boundary curves"))
+    for curve in sort!(collect(keys(curve_incidence)))
+        count=curve_incidence[curve]
+        owners=curve_owners[curve]
+        (count==2 && length(owners)==2) || throw(ArgumentError(
+            "$caller: Curve[$curve] must occur once on each of two distinct " *
+            "surfaces (found $count occurrences on $(length(owners)) surfaces)"))
+    end
+    adjacency=Dict(surface=>Set{Int}() for surface in unsigned)
+    for owners in values(curve_owners)
+        first_surface,second_surface=Tuple(owners)
+        push!(adjacency[first_surface],second_surface)
+        push!(adjacency[second_surface],first_surface)
+    end
+    visited=Set{Int}();stack=Int[first(unsigned)]
+    while !isempty(stack)
+        surface=pop!(stack)
+        surface in visited && continue
+        push!(visited,surface)
+        append!(stack,adjacency[surface])
+    end
+    length(visited)==length(unsigned) || throw(ArgumentError(
+        "$caller: surfaces must form one connected closed shell"))
+    return nothing
+end
+
+"""
+    add_surface_loop!(model, surfaces; tag=0) -> tag
+
+Add one connected closed shell of existing planar surfaces. Signed surface tags
+are retained for entity-boundary metadata. Every shell curve must be shared by
+exactly two distinct surfaces; open, branched, disconnected, or repeated shells
+are rejected before the model is changed.
+"""
+function add_surface_loop!(m::GeoModel,surfaces;tag::Integer=0)
+    caller="add_surface_loop!"
+    ids=Int[_signed_surface_tag(surface,caller) for surface in surfaces]
+    isempty(ids) && throw(ArgumentError("$caller: need at least one Surface"))
+    _validate_surface_loop(m,ids,caller)
+    requested=_tag(tag,caller,2)
+    t=_alloc_surface_loop_tag(m,requested,caller)
+    haskey(m.surface_loops,t) && throw(ArgumentError(
+        "$caller: Surface Loop[$t] already exists"))
+    m.surface_loops[t]=ids
+    return t
+end
+
+"""
+    add_volume!(model, surface_loops; tag=0) -> tag
+
+Add an explicitly modeled volume. The first surface loop is the exterior shell;
+later loops are cavities. Shells must exist, be distinct, and have disjoint
+surface entities. Meshing and classified projection also certify that the cavity
+shells are disjoint and lie inside the exterior. Native primitive and Boolean
+volumes use the same volume tag namespace.
+"""
+function add_volume!(m::GeoModel,surface_loops;tag::Integer=0)
+    caller="add_volume!"
+    shells=Int[_tag(shell,caller,3) for shell in surface_loops]
+    isempty(shells) && throw(ArgumentError(
+        "$caller: need an exterior Surface Loop"))
+    all(shell->shell>0,shells) || throw(ArgumentError(
+        "$caller: Surface Loop tags must be positive"))
+    length(unique(shells))==length(shells) || throw(ArgumentError(
+        "$caller: a volume cannot repeat a Surface Loop tag"))
+    seen_surfaces=Set{Int}()
+    for shell in shells
+        haskey(m.surface_loops,shell) || throw(ArgumentError(
+            "$caller: unknown Surface Loop[$shell]"))
+        _validate_surface_loop(m,m.surface_loops[shell],caller)
+        for signed_surface in m.surface_loops[shell]
+            surface=abs(signed_surface)
+            surface in seen_surfaces && throw(ArgumentError(
+                "$caller: Surface[$surface] belongs to multiple shells"))
+            push!(seen_surfaces,surface)
+        end
+    end
+    requested=_tag(tag,caller,3)
+    requested!=0 && haskey(m.volumes,requested) && throw(ArgumentError(
+        "$caller: Volume[$requested] already exists"))
+    t=_alloc_tag!(m,3,requested,caller)
+    haskey(m.volumes,t) && throw(ArgumentError(
+        "$caller: Volume[$t] already exists"))
+    m.volumes[t]=shells
     return t
 end
 
@@ -1660,43 +1792,330 @@ end
     return (first_node,second_node,third_node)
 end
 
+@inline _model_projection_coordinate_key(value::Float64)=
+    value==0 ? 0.0 : value
+
+function _model_surface_projection(
+    coordinates::Vector{NTuple{3,Float64}},point_tags::Vector{Int},
+    surface::Int,caller::AbstractString)
+    length(coordinates)>=3 || throw(ArgumentError(
+        "$caller: Surface[$surface] needs at least three points"))
+    anchor=coordinates[1]
+    second_index=findfirst(point->point!=anchor,@view coordinates[2:end])
+    second_index===nothing && throw(ArgumentError(
+        "$caller: Surface[$surface] has only one distinct coordinate"))
+    second_index+=1
+    second=coordinates[second_index]
+    projection=nothing
+    plane_third=nothing
+    for candidate in coordinates
+        for axes in ((1,2),(1,3),(2,3))
+            pa=(anchor[axes[1]],anchor[axes[2]])
+            pb=(second[axes[1]],second[axes[2]])
+            pc=(candidate[axes[1]],candidate[axes[2]])
+            if orient2(pa,pb,pc)!=0
+                projection=axes
+                plane_third=candidate
+                break
+            end
+        end
+        projection===nothing || break
+    end
+    projection===nothing && throw(ArgumentError(
+        "$caller: Surface[$surface] points are collinear"))
+    third=plane_third::NTuple{3,Float64}
+    for (index,coordinate) in pairs(coordinates)
+        orient3(anchor,second,third,coordinate)==0 || throw(ArgumentError(
+            "$caller: Point[$(point_tags[index])] is not coplanar with " *
+            "Surface[$surface]"))
+    end
+    return anchor,second,third,projection::Tuple{Int,Int}
+end
+
+function _model_planar_surface_mesh(
+    m::GeoModel,surface::Int,caller::AbstractString;
+    include_embeddings::Bool=true)
+    haskey(m.surfaces,surface) || throw(ArgumentError(
+        "$caller: unknown Surface[$surface]"))
+    point_tags=Int[]
+    point_index=Dict{Int,Int}()
+    function add_point_tag!(point::Int)
+        haskey(m.points,point) || throw(ArgumentError(
+            "$caller: Surface[$surface] references unknown Point[$point]"))
+        return get!(point_index,point) do
+            push!(point_tags,point)
+            length(point_tags)
+        end
+    end
+    segments=Tuple{Int,Int}[]
+    for loop in m.surfaces[surface]
+        haskey(m.loops,loop) || throw(ArgumentError(
+            "$caller: Surface[$surface] references unknown Loop[$loop]"))
+        loop_points=_loop_points(m,loop)
+        length(loop_points)>=3 || throw(ArgumentError(
+            "$caller: Surface[$surface] Loop[$loop] needs at least three points"))
+        indices=Int[add_point_tag!(point) for point in loop_points]
+        for index in eachindex(indices)
+            push!(segments,(indices[index],indices[mod1(index+1,length(indices))]))
+        end
+    end
+    internal_segments=Tuple{Int,Int}[]
+    if include_embeddings
+        embedded_points,embedded_curves=
+            _model_surface_embedding_tags(m,surface,caller)
+        boundary_curves=Set(_model_projection_surface_curves(m,surface))
+        overlap=sort!(collect(intersect(boundary_curves,Set(embedded_curves))))
+        isempty(overlap) || throw(ArgumentError(
+            "$caller: Surface[$surface] Curve tags $overlap cannot be both " *
+            "bounding and embedded"))
+        for point in embedded_points
+            add_point_tag!(point)
+        end
+        for curve in embedded_curves
+            start_point,stop_point=m.curves[curve]
+            first_index=add_point_tag!(start_point)
+            second_index=add_point_tag!(stop_point)
+            push!(internal_segments,(first_index,second_index))
+        end
+    end
+    coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    _,_,_,projection=_model_surface_projection(
+        coordinates,point_tags,surface,caller)
+    first_axis,second_axis=projection
+    xs=Float64[_model_projection_coordinate_key(point[first_axis])
+               for point in coordinates]
+    ys=Float64[_model_projection_coordinate_key(point[second_axis])
+               for point in coordinates]
+    coordinate_map=Dict{Tuple{Float64,Float64},NTuple{3,Float64}}()
+    for (index,coordinate) in pairs(coordinates)
+        key=(xs[index],ys[index])
+        existing=get(coordinate_map,key,nothing)
+        (existing===nothing || existing==coordinate) || throw(ArgumentError(
+            "$caller: Surface[$surface] projection merges distinct coordinates"))
+        coordinate_map[key]=coordinate
+    end
+    triangulation=constrained_delaunay(
+        xs,ys,segments;internal_segments=internal_segments)
+    local_mesh=to_mesh(
+        triangulation;interior=classify_interior(triangulation))
+    ntris(local_mesh)>0 || throw(ArgumentError(
+        "$caller: Surface[$surface] has no meshed interior"))
+    output_coordinates=Matrix{Float64}(undef,3,nnodes(local_mesh))
+    for node in 1:nnodes(local_mesh)
+        key=(_model_projection_coordinate_key(local_mesh.coords[1,node]),
+             _model_projection_coordinate_key(local_mesh.coords[2,node]))
+        coordinate=get(coordinate_map,key,nothing)
+        coordinate===nothing && throw(ErrorException(
+            "$caller: Surface[$surface] triangulation introduced an " *
+            "unmapped coordinate"))
+        output_coordinates[:,node].=coordinate
+    end
+    output=Mesh(output_coordinates;tris=local_mesh.tris)
+    diagnostic=validate(output)
+    diagnostic.ok || throw(ErrorException(
+        "$caller: Surface[$surface] triangulation is invalid — " *
+        join(diagnostic.messages,"; ")))
+    return output
+end
+
+function _model_loop_position2(point,polygon)
+    inside=false
+    previous=last(polygon)
+    for current in polygon
+        orientation=orient2(previous,current,point)
+        if orientation==0 &&
+                min(previous[1],current[1])<=point[1]<=max(previous[1],current[1]) &&
+                min(previous[2],current[2])<=point[2]<=max(previous[2],current[2])
+            return 2
+        end
+        upward=previous[2]<=point[2]<current[2] && orientation>0
+        downward=current[2]<=point[2]<previous[2] && orientation<0
+        (upward || downward) && (inside=!inside)
+        previous=current
+    end
+    return inside ? 1 : 0
+end
+
+function _model_surface_contains2(point,polygons)
+    outer=_model_loop_position2(point,first(polygons))
+    outer==0 && return false
+    outer==2 && return true
+    for hole in Iterators.drop(polygons,1)
+        position=_model_loop_position2(point,hole)
+        position==2 && return true
+        position==1 && return false
+    end
+    return true
+end
+
+@inline function _model_mesh_coordinate(mesh::Mesh,node::Integer)
+    return (mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
+end
+
+@inline function _model_mean3(first::Float64,second::Float64,third::Float64)
+    scale=max(abs(first),abs(second),abs(third))
+    scale==0 && return 0.0
+    value=scale*((first/scale+second/scale+third/scale)/3)
+    return _model_projection_coordinate_key(value)
+end
+
+function _model_projection_boundary_surface_faces!(
+    claimed_faces::Set{NTuple{3,Int32}},mesh_boundary_faces,
+    m::GeoModel,mesh::Mesh,surface::Int,caller::AbstractString)
+    point_tags=Int[]
+    polygons=Vector{NTuple{2,Float64}}[]
+    for loop in m.surfaces[surface]
+        loop_points=_loop_points(m,loop)
+        append!(point_tags,loop_points)
+    end
+    unique!(point_tags)
+    coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    anchor,second,third,projection=_model_surface_projection(
+        coordinates,point_tags,surface,caller)
+    first_axis,second_axis=projection
+    for loop in m.surfaces[surface]
+        polygon=NTuple{2,Float64}[]
+        for point in _loop_points(m,loop)
+            coordinate=m.points[point]
+            push!(polygon,
+                (_model_projection_coordinate_key(coordinate[first_axis]),
+                 _model_projection_coordinate_key(coordinate[second_axis])))
+        end
+        push!(polygons,polygon)
+    end
+    anchor2=(anchor[first_axis],anchor[second_axis])
+    second2=(second[first_axis],second[second_axis])
+    third2=(third[first_axis],third[second_axis])
+    target_orientation=orient2(anchor2,second2,third2)
+    target_orientation!=0 || throw(ErrorException(
+        "$caller: Surface[$surface] projection lost its plane orientation"))
+    surface_mesh=_model_planar_surface_mesh(
+        m,surface,caller;include_embeddings=true)
+    target_area=sum(triangle_area(
+        _model_mesh_coordinate(surface_mesh,surface_mesh.tris[1,cell]),
+        _model_mesh_coordinate(surface_mesh,surface_mesh.tris[2,cell]),
+        _model_mesh_coordinate(surface_mesh,surface_mesh.tris[3,cell]))
+        for cell in 1:ntris(surface_mesh))
+    (isfinite(target_area) && target_area>0) || throw(ArgumentError(
+        "$caller: Surface[$surface] has no finite positive area"))
+
+    output=NTuple{3,Int32}[]
+    covered_area=0.0
+    for face in sort!(collect(mesh_boundary_faces))
+        first_coordinate=_model_mesh_coordinate(mesh,face[1])
+        second_coordinate=_model_mesh_coordinate(mesh,face[2])
+        third_coordinate=_model_mesh_coordinate(mesh,face[3])
+        orient3(anchor,second,third,first_coordinate)==0 || continue
+        orient3(anchor,second,third,second_coordinate)==0 || continue
+        orient3(anchor,second,third,third_coordinate)==0 || continue
+        projected_vertices=ntuple(slot->begin
+            coordinate=slot==1 ? first_coordinate :
+                       slot==2 ? second_coordinate : third_coordinate
+            (_model_projection_coordinate_key(coordinate[first_axis]),
+             _model_projection_coordinate_key(coordinate[second_axis]))
+        end,3)
+        all(vertex->_model_surface_contains2(vertex,polygons),
+            projected_vertices) || continue
+        centroid=(_model_mean3(projected_vertices[1][1],
+                               projected_vertices[2][1],
+                               projected_vertices[3][1]),
+                  _model_mean3(projected_vertices[1][2],
+                               projected_vertices[2][2],
+                               projected_vertices[3][2]))
+        _model_surface_contains2(centroid,polygons) || continue
+        face in claimed_faces && throw(ArgumentError(
+            "$caller: mesh face $face belongs to multiple model surfaces"))
+        face_orientation=orient2(projected_vertices...)
+        face_orientation!=0 || throw(ArgumentError(
+            "$caller: boundary Surface[$surface] contains degenerate projected " *
+            "mesh face $face"))
+        oriented=face_orientation==target_orientation ? face :
+                 (face[1],face[3],face[2])
+        push!(claimed_faces,face)
+        push!(output,oriented)
+        covered_area+=triangle_area(
+            first_coordinate,second_coordinate,third_coordinate)
+    end
+    isempty(output) && throw(ArgumentError(
+        "$caller: boundary Surface[$surface] has no tetrahedron faces"))
+    (isfinite(covered_area) &&
+     abs(covered_area-target_area)<=1e-6*target_area) || throw(ArgumentError(
+        "$caller: boundary Surface[$surface] mesh area $covered_area does not " *
+        "match modeled area $target_area"))
+    return output
+end
+
 function _model_projection_volume_surface_faces!(
     claimed_faces::Set{NTuple{3,Int32}},m::GeoModel,mesh::Mesh,
     surface::Int,caller::AbstractString)
+    targets=NTuple{3,NTuple{3,Float64}}[]
     loops=m.surfaces[surface]
-    length(loops)==1 || throw(ArgumentError(
-        "$caller: holed embedded Surface[$surface] is not supported"))
-    point_tags=_loop_points(m,only(loops))
-    length(point_tags)>=3 || throw(ArgumentError(
-        "$caller: embedded Surface[$surface] needs at least three points"))
-    coordinates=[m.points[point] for point in point_tags]
+    if length(loops)==1
+        point_tags=_loop_points(m,only(loops))
+        length(point_tags)>=3 || throw(ArgumentError(
+            "$caller: Surface[$surface] needs at least three points"))
+        coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+        for index in 2:(length(coordinates)-1)
+            push!(targets,(coordinates[1],coordinates[index],
+                           coordinates[index+1]))
+        end
+    else
+        surface_mesh=_model_planar_surface_mesh(
+            m,surface,caller;include_embeddings=true)
+        for cell in 1:ntris(surface_mesh)
+            push!(targets,ntuple(slot->begin
+                node=surface_mesh.tris[slot,cell]
+                (surface_mesh.coords[1,node],surface_mesh.coords[2,node],
+                 surface_mesh.coords[3,node])
+            end,3))
+        end
+    end
     local_faces=Set{NTuple{3,Int32}}()
     output=NTuple{3,Int32}[]
-    for index in 2:(length(coordinates)-1)
-        first_coordinate=coordinates[1]
-        second_coordinate=coordinates[index]
-        third_coordinate=coordinates[index+1]
+    for (index,(first_coordinate,second_coordinate,third_coordinate)) in
+            pairs(targets)
         faces,target,covered=_mesh_covering_faces3(
             mesh,first_coordinate,second_coordinate,third_coordinate)
         (isfinite(target) && target>0 && isfinite(covered) &&
          abs(covered-target)<=1e-6*target) || throw(ArgumentError(
-            "$caller: embedded Surface[$surface] fan triangle $(index-1) " *
+            "$caller: Surface[$surface] triangle $index " *
             "is not represented by tetrahedron faces"))
         for face in faces
             key=_model_projection_face_key(face)
             key in local_faces && throw(ArgumentError(
-                "$caller: embedded Surface[$surface] fan triangles overlap " *
+                "$caller: Surface[$surface] triangles overlap " *
                 "on mesh face $key"))
             key in claimed_faces && throw(ArgumentError(
-                "$caller: mesh face $key belongs to multiple embedded surfaces"))
+                "$caller: mesh face $key belongs to multiple model surfaces"))
             push!(local_faces,key)
             push!(claimed_faces,key)
             push!(output,face)
         end
     end
     isempty(output) && throw(ArgumentError(
-        "$caller: embedded Surface[$surface] has no tetrahedron faces"))
+        "$caller: Surface[$surface] has no tetrahedron faces"))
     return output
+end
+
+function _model_volume_boundary_surfaces(
+    m::GeoModel,volume::Int,caller::AbstractString)
+    boundaries=Int[]
+    seen=Set{Int}()
+    for (shell_index,shell) in pairs(m.volumes[volume])
+        haskey(m.surface_loops,shell) || throw(ArgumentError(
+            "$caller: Volume[$volume] references unknown Surface Loop[$shell]"))
+        surfaces=m.surface_loops[shell]
+        _validate_surface_loop(m,surfaces,caller)
+        shell_sign=shell_index==1 ? 1 : -1
+        for signed_surface in surfaces
+            surface=abs(signed_surface)
+            surface in seen && throw(ArgumentError(
+                "$caller: Surface[$surface] belongs to multiple Volume[$volume] shells"))
+            push!(seen,surface)
+            push!(boundaries,shell_sign*signed_surface)
+        end
+    end
+    return boundaries
 end
 
 function _model_volume_embedding_inventory(
@@ -1704,6 +2123,29 @@ function _model_volume_embedding_inventory(
     point_tags=Int[];curve_tags=Int[];surface_tags=Int[]
     surface_embedded_points=Dict{Int,Vector{Int}}()
     surface_embedded_curves=Dict{Int,Vector{Int}}()
+    boundary_surfaces=_model_volume_boundary_surfaces(m,volume,caller)
+    boundary_set=Set(abs.(boundary_surfaces))
+    function register_surface!(surface::Int)
+        haskey(m.surfaces,surface) || throw(ArgumentError(
+            "$caller: unknown Surface[$surface]"))
+        nested_points,nested_curves=
+            _model_surface_embedding_tags(m,surface,caller)
+        boundary_curves=_model_projection_surface_curves(m,surface)
+        overlap=sort!(collect(intersect(Set(boundary_curves),Set(nested_curves))))
+        isempty(overlap) || throw(ArgumentError(
+            "$caller: Surface[$surface] Curve tags $overlap cannot be both " *
+            "bounding and embedded"))
+        surface_embedded_points[surface]=nested_points
+        surface_embedded_curves[surface]=nested_curves
+        push!(surface_tags,surface)
+        append!(point_tags,nested_points)
+        append!(curve_tags,boundary_curves)
+        append!(curve_tags,nested_curves)
+        return nothing
+    end
+    for signed_surface in boundary_surfaces
+        register_surface!(abs(signed_surface))
+    end
     for (embedded_dim,embedded_tag) in
             get(m.embeds,(3,volume),NTuple{2,Int}[])
         if embedded_dim==0
@@ -1715,21 +2157,17 @@ function _model_volume_embedding_inventory(
                 "$caller: unknown embedded Curve[$embedded_tag]"))
             push!(curve_tags,embedded_tag)
         elseif embedded_dim==2
+            embedded_tag in boundary_set && throw(ArgumentError(
+                "$caller: boundary Surface[$embedded_tag] cannot also be " *
+                "embedded in Volume[$volume]"))
+            embedded_tag in surface_tags && throw(ArgumentError(
+                "$caller: Volume[$volume] repeats embedded Surface[$embedded_tag]"))
             haskey(m.surfaces,embedded_tag) || throw(ArgumentError(
                 "$caller: unknown embedded Surface[$embedded_tag]"))
-            nested_points,nested_curves=
-                _model_surface_embedding_tags(m,embedded_tag,caller)
-            boundary_curves=_model_projection_surface_curves(m,embedded_tag)
-            overlap=intersect(boundary_curves,nested_curves)
-            isempty(overlap) || throw(ArgumentError(
-                "$caller: embedded Surface[$embedded_tag] Curve tags $overlap cannot " *
-                "be both bounding and embedded"))
-            surface_embedded_points[embedded_tag]=nested_points
-            surface_embedded_curves[embedded_tag]=nested_curves
-            push!(surface_tags,embedded_tag)
-            append!(point_tags,nested_points)
-            append!(curve_tags,boundary_curves)
-            append!(curve_tags,nested_curves)
+            length(m.surfaces[embedded_tag])==1 || throw(ArgumentError(
+                "$caller: embedded Surface[$embedded_tag] has interior loops; " *
+                "holed Surface-In-Volume sheets are not supported"))
+            register_surface!(embedded_tag)
         else
             throw(ArgumentError(
                 "$caller: unsupported Volume[$volume] embedding dimension $embedded_dim"))
@@ -1742,7 +2180,7 @@ function _model_volume_embedding_inventory(
     end
     sort!(unique!(point_tags))
     return point_tags,curve_tags,surface_tags,
-           surface_embedded_points,surface_embedded_curves
+           surface_embedded_points,surface_embedded_curves,boundary_surfaces
 end
 
 function _model_projection_face_topology(faces)
@@ -1786,9 +2224,6 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     caller="model_to_mixed"
     haskey(m.volumes,volume) || throw(ArgumentError(
         "$caller: unknown Volume[$volume]"))
-    isempty(m.volumes[volume]) || throw(ArgumentError(
-        "$caller: explicit boundary-surface projection for Volume[$volume] " *
-        "is not supported"))
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
@@ -1803,14 +2238,26 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     isempty(m.periodic) || throw(ArgumentError(
         "$caller: periodic relations are not supported in classified volume projection"))
 
-    domain_surface=_volume_surface(m,volume,caller)
+    explicit_geometry=isempty(m.volumes[volume]) ? nothing :
+        _model_explicit_volume_geometry(m,volume,caller)
+    domain_surface=explicit_geometry===nothing ?
+        _volume_surface(m,volume,caller) : explicit_geometry.surface
     fills_volume,fill_reason=_certify_surface_fill(domain_surface,mesh)
     fills_volume || throw(ArgumentError(
         "$caller: input tetrahedron mesh does not fill Volume[$volume] — $fill_reason"))
+    explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
+        mesh,volume,explicit_geometry.expected_volume,
+        explicit_geometry.comparison_scale,caller)
 
     point_tags,curve_tags,surface_tags,
-    surface_embedded_points,surface_embedded_curves=
+    surface_embedded_points,surface_embedded_curves,boundary_surfaces=
         _model_volume_embedding_inventory(m,volume,caller)
+    boundary_surface_tags=abs.(boundary_surfaces)
+    boundary_surface_set=Set(boundary_surface_tags)
+    projection_surface_tags=vcat(
+        boundary_surface_tags,
+        Int[surface for surface in surface_tags
+            if !(surface in boundary_surface_set)])
     tet_edges=_tet_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()
     node_points=Dict{Int32,Int}()
@@ -1850,16 +2297,39 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     surface_entities=Int32[]
     surface_nodes=Dict{Int,Set{Int32}}()
     surface_edges=Dict{Int,Set{NTuple{2,Int32}}}()
-    for surface in surface_tags
-        faces=_model_projection_volume_surface_faces!(
-            claimed_faces,m,mesh,surface,caller)
+    mesh_boundary_faces=Set(first(boundary_faces(mesh.tets)))
+    claimed_boundary_faces=Set{NTuple{3,Int32}}()
+    for surface in projection_surface_tags
+        faces=if surface in boundary_surface_set
+            _model_projection_boundary_surface_faces!(
+                claimed_faces,mesh_boundary_faces,m,mesh,surface,caller)
+        else
+            _model_projection_volume_surface_faces!(
+                claimed_faces,m,mesh,surface,caller)
+        end
         nodes,edges=_model_projection_face_topology(faces)
         surface_nodes[surface]=nodes
         surface_edges[surface]=edges
         for face in faces
+            key=_model_projection_face_key(face)
+            if surface in boundary_surface_set
+                key in mesh_boundary_faces || throw(ArgumentError(
+                    "$caller: boundary Surface[$surface] contains internal " *
+                    "tetrahedron face $key"))
+                push!(claimed_boundary_faces,key)
+            end
             push!(surface_cells,face)
             push!(surface_entities,Int32(surface))
         end
+    end
+    if !isempty(boundary_surfaces) && claimed_boundary_faces!=mesh_boundary_faces
+        missing=sort!(collect(setdiff(mesh_boundary_faces,claimed_boundary_faces)))
+        extra=sort!(collect(setdiff(claimed_boundary_faces,mesh_boundary_faces)))
+        detail=!isempty(missing) ? "unclassified boundary face $(first(missing))" :
+                                  "non-boundary face $(first(extra)) was classified"
+        throw(ArgumentError(
+            "$caller: explicit Volume[$volume] shell does not exactly cover " *
+            "the tetrahedron boundary — $detail"))
     end
     for surface in surface_tags
         _model_projection_validate_nested_surface(
@@ -1965,7 +2435,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     union!(projected_groups,((3,Int(tag)) for tag in volume_tags))
     entities[(3,volume)]=MixedEntity(
         3,volume,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
-        physical_tags=volume_tags)
+        physical_tags=volume_tags,boundaries=Int32.(boundary_surfaces))
     tet_physical=fill(_model_projection_legacy_tag(volume_tags),ntets(mesh))
 
     blocks=ElementBlock[]
@@ -2014,11 +2484,12 @@ end
 Project a validated native surface (`entity_dim=2`) or volume (`entity_dim=3`)
 simplex mesh into classified MSH2/MSH4 cells. The three-argument method remains
 the surface convenience form. Volume projection first certifies that the tetrahedron
-boundary fills the selected native solid, then emits Point/Line/Surface-In-Volume
-cells and their entity hierarchy, including nested Point/Line-In-Surface constraints
-on an embedded sheet. Gmsh 4.15.2 has no serialized volume-embedding relation;
-MSH4 classification, its Curve-In-Surface relation, and MSH2 cell ownership remain
-available.
+boundary fills the selected native solid. Explicit volumes additionally require
+their modeled surfaces to classify every tetrahedron boundary face exactly once.
+The result emits boundary and embedded point/curve/surface cells and their entity
+hierarchy, including nested Point/Line-In-Surface constraints. Gmsh 4.15.2 has no
+serialized volume-embedding relation; MSH4 classification, signed volume boundaries,
+its Curve-In-Surface relation, and MSH2 cell ownership remain available.
 """
 function model_to_mixed(
     m::GeoModel,mesh::Mesh,entity_dim::Integer,entity_tag::Integer)
@@ -2157,6 +2628,213 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     return mesh
 end
 
+@inline function _model_compensated_add(
+    total::Float64,correction::Float64,value::Float64)
+    adjusted=value-correction
+    updated=total+adjusted
+    return updated,(updated-total)-adjusted
+end
+
+function _model_oriented_shell_volume(
+    coordinates::Vector{NTuple{3,Float64}},
+    faces::Vector{NTuple{3,Int32}},shell::Int,caller::AbstractString)
+    isempty(faces) && throw(ArgumentError(
+        "$caller: Surface Loop[$shell] has no triangles"))
+    incidence=Dict{NTuple{2,Int32},Vector{Tuple{Int32,Bool}}}()
+    for (cell,(first_node,second_node,third_node)) in pairs(faces)
+        for (start_node,stop_node) in
+                ((first_node,second_node),(second_node,third_node),
+                 (third_node,first_node))
+            edge=start_node<stop_node ? (start_node,stop_node) :
+                                        (stop_node,start_node)
+            push!(get!(Vector{Tuple{Int32,Bool}},incidence,edge),
+                  (Int32(cell),start_node<stop_node))
+        end
+    end
+    adjacency=[Tuple{Int32,Bool}[] for _ in eachindex(faces)]
+    for edge in sort!(collect(keys(incidence)))
+        entries=incidence[edge]
+        length(entries)==2 || throw(ArgumentError(
+            "$caller: Surface Loop[$shell] triangle edge $edge has " *
+            "incidence $(length(entries)); expected 2"))
+        (first_cell,first_direction),(second_cell,second_direction)=entries
+        same_direction=first_direction==second_direction
+        push!(adjacency[first_cell],(second_cell,same_direction))
+        push!(adjacency[second_cell],(first_cell,same_direction))
+    end
+    seen=falses(length(faces));flipped=falses(length(faces))
+    seen[1]=true;stack=Int32[1];visited=0
+    while !isempty(stack)
+        cell=pop!(stack);visited+=1
+        for (neighbor,same_direction) in adjacency[cell]
+            required_flip=xor(flipped[cell],same_direction)
+            if seen[neighbor]
+                flipped[neighbor]==required_flip || throw(ArgumentError(
+                    "$caller: Surface Loop[$shell] triangle winding is " *
+                    "non-orientable"))
+            else
+                seen[neighbor]=true
+                flipped[neighbor]=required_flip
+                push!(stack,neighbor)
+            end
+        end
+    end
+    visited==length(faces) || throw(ArgumentError(
+        "$caller: Surface Loop[$shell] triangle mesh is disconnected"))
+
+    anchor=coordinates[faces[1][1]]
+    signed_total=0.0;signed_correction=0.0
+    magnitude_total=0.0;magnitude_correction=0.0
+    for (cell,(first_node,second_node,third_node)) in pairs(faces)
+        flipped[cell] && ((second_node,third_node)=(third_node,second_node))
+        value=tet_signed_volume(
+            anchor,coordinates[first_node],coordinates[second_node],
+            coordinates[third_node])
+        isfinite(value) || throw(ArgumentError(
+            "$caller: Surface Loop[$shell] volume is not finite"))
+        signed_total,signed_correction=_model_compensated_add(
+            signed_total,signed_correction,value)
+        magnitude_total,magnitude_correction=_model_compensated_add(
+            magnitude_total,magnitude_correction,abs(value))
+    end
+    volume=abs(signed_total)
+    volume>0 || throw(ArgumentError(
+        "$caller: Surface Loop[$shell] encloses zero represented volume"))
+    return volume,magnitude_total
+end
+
+function _model_mesh_volume(mesh::Mesh,caller::AbstractString)
+    total=0.0;correction=0.0
+    for cell in 1:ntets(mesh)
+        value=tet_volume(
+            _model_mesh_coordinate(mesh,mesh.tets[1,cell]),
+            _model_mesh_coordinate(mesh,mesh.tets[2,cell]),
+            _model_mesh_coordinate(mesh,mesh.tets[3,cell]),
+            _model_mesh_coordinate(mesh,mesh.tets[4,cell]))
+        isfinite(value) || throw(ArgumentError(
+            "$caller: tetrahedron $cell has non-finite volume"))
+        total,correction=_model_compensated_add(total,correction,value)
+    end
+    (isfinite(total) && total>0) || throw(ArgumentError(
+        "$caller: tetrahedron mesh has no finite positive volume"))
+    return total
+end
+
+function _model_certify_explicit_volume_semantics(
+    mesh::Mesh,volume::Int,expected_volume::Float64,
+    comparison_scale::Float64,caller::AbstractString)
+    actual_volume=_model_mesh_volume(mesh,caller)
+    tolerance=128eps(Float64)*max(comparison_scale,actual_volume)
+    abs(actual_volume-expected_volume)<=tolerance || throw(ArgumentError(
+        "$caller: Volume[$volume] surface loops do not form disjoint cavity " *
+        "shells inside the exterior (mesh volume $actual_volume; " *
+        "exterior-minus-cavities volume $expected_volume)"))
+    return nothing
+end
+
+function _model_explicit_volume_fill(
+    surface::Mesh,volume::Int,caller::AbstractString;
+    interior_points=nothing)
+    try
+        return interior_points===nothing ? tetrahedralize(surface) :
+               tetrahedralize(surface;interior_points=interior_points)
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        throw(ArgumentError(
+            "$caller: explicit Volume[$volume] shell geometry cannot be " *
+            "tetrahedralized — $(sprint(showerror,err))"))
+    end
+end
+
+function _model_explicit_volume_geometry(
+    m::GeoModel,t::Int,caller::AbstractString)
+    boundaries=_model_volume_boundary_surfaces(m,t,caller)
+    isempty(boundaries) && throw(ArgumentError(
+        "$caller: Volume[$t] has no explicit boundary surfaces"))
+    coordinates=NTuple{3,Float64}[]
+    node_index=Dict{NTuple{3,Float64},Int32}()
+    triangles=NTuple{3,Int32}[]
+    seen_faces=Set{NTuple{3,Int32}}()
+    shell_faces=Vector{NTuple{3,Int32}}[]
+    function global_node(coordinate)
+        key=ntuple(axis->_model_projection_coordinate_key(coordinate[axis]),3)
+        return get!(node_index,key) do
+            length(coordinates)<typemax(Int32) || throw(ArgumentError(
+                "$caller: explicit Volume[$t] boundary exceeds the Int32 node limit"))
+            push!(coordinates,key)
+            Int32(length(coordinates))
+        end
+    end
+    for shell in m.volumes[t]
+        faces=NTuple{3,Int32}[]
+        for signed_surface in m.surface_loops[shell]
+            surface=abs(signed_surface)
+            local_mesh=_model_planar_surface_mesh(
+                m,surface,caller;include_embeddings=true)
+            local_nodes=Vector{Int32}(undef,nnodes(local_mesh))
+            for node in 1:nnodes(local_mesh)
+                coordinate=(local_mesh.coords[1,node],local_mesh.coords[2,node],
+                            local_mesh.coords[3,node])
+                local_nodes[node]=global_node(coordinate)
+            end
+            for cell in 1:ntris(local_mesh)
+                face=(local_nodes[local_mesh.tris[1,cell]],
+                      local_nodes[local_mesh.tris[2,cell]],
+                      local_nodes[local_mesh.tris[3,cell]])
+                key=_model_projection_face_key(face)
+                key in seen_faces && throw(ArgumentError(
+                    "$caller: explicit Volume[$t] surfaces overlap on " *
+                    "triangle $key"))
+                push!(seen_faces,key)
+                push!(triangles,face)
+                push!(faces,face)
+            end
+        end
+        push!(shell_faces,faces)
+    end
+    isempty(triangles) && throw(ArgumentError(
+        "$caller: explicit Volume[$t] boundary has no triangles"))
+    length(triangles)<=typemax(Int32) || throw(ArgumentError(
+        "$caller: explicit Volume[$t] boundary exceeds the Int32 triangle limit"))
+    coordinate_matrix=Matrix{Float64}(undef,3,length(coordinates))
+    for (node,coordinate) in pairs(coordinates)
+        coordinate_matrix[:,node].=coordinate
+    end
+    triangle_matrix=Matrix{Int32}(undef,3,length(triangles))
+    for (cell,face) in pairs(triangles)
+        triangle_matrix[:,cell].=face
+    end
+    output=Mesh(coordinate_matrix;tris=triangle_matrix)
+    diagnostic=validate(output)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: explicit Volume[$t] boundary mesh is invalid — " *
+        join(diagnostic.messages,"; ")))
+    shell_volumes=Float64[]
+    comparison_scale=0.0
+    for (index,faces) in pairs(shell_faces)
+        shell=m.volumes[t][index]
+        volume,scale=_model_oriented_shell_volume(
+            coordinates,faces,shell,caller)
+        push!(shell_volumes,volume)
+        comparison_scale+=scale
+    end
+    isfinite(comparison_scale) || throw(ArgumentError(
+        "$caller: Volume[$t] shell-volume scale is not finite"))
+    cavity_volume=0.0;cavity_correction=0.0
+    for volume in Iterators.drop(shell_volumes,1)
+        cavity_volume,cavity_correction=_model_compensated_add(
+            cavity_volume,cavity_correction,volume)
+    end
+    expected_volume=first(shell_volumes)-cavity_volume
+    expected_volume>0 || throw(ArgumentError(
+        "$caller: Volume[$t] exterior volume $(first(shell_volumes)) is not " *
+        "larger than its total cavity volume " *
+        "$cavity_volume"))
+    return (surface=output,expected_volume=expected_volume,
+            comparison_scale=comparison_scale)
+end
+
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
     if haskey(m.box_extents,t)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
@@ -2174,6 +2852,12 @@ function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_v
         spec=m.booleans[t]
         A=_volume_surface(m,spec.a,caller); B=_volume_surface(m,spec.b,caller)
         return mesh_boolean(A,B,spec.op)
+    elseif !isempty(m.volumes[t])
+        geometry=_model_explicit_volume_geometry(m,t,caller)
+        probe=_model_explicit_volume_fill(geometry.surface,t,caller)
+        _model_certify_explicit_volume_semantics(
+            probe,t,geometry.expected_volume,geometry.comparison_scale,caller)
+        return geometry.surface
     end
     throw(ArgumentError("$caller: Volume[$t] has no native solid encoding"))
 end
@@ -2181,22 +2865,28 @@ end
 """
     mesh_model_volume(model, tag) -> Mesh
 
-Mesh a native primitive or Boolean volume, recovering supported embedded points,
-curves, and unholed planar sheets, including nested points and curves constrained
-to those sheets. The returned tetrahedral mesh is validated before it is returned;
-unsupported solid encodings raise an explicit error.
+Mesh a native primitive, Boolean, or explicitly modeled planar-surface volume,
+recovering supported embedded points, curves, and unholed planar sheets, including
+nested points and curves constrained to those sheets. The returned tetrahedral mesh
+is validated before it is returned; unsupported solid encodings raise an explicit
+error.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer)
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    surface=_volume_surface(m,t)
+    explicit_geometry=isempty(m.volumes[t]) ? nothing :
+        _model_explicit_volume_geometry(m,t,caller)
+    surface=explicit_geometry===nothing ? _volume_surface(m,t) :
+                                         explicit_geometry.surface
     extra=NTuple{3,Float64}[]
     line_tags=Int[]
     sheets=Tuple{Int,NTuple{3,Float64},NTuple{3,Float64},
                        NTuple{3,Float64}}[]
-    _,_,surface_tags,surface_embedded_points,surface_embedded_curves=
+    _,_,surface_tags,surface_embedded_points,surface_embedded_curves,
+    boundary_surfaces=
         _model_volume_embedding_inventory(m,t,caller)
+    boundary_surface_set=Set(abs.(boundary_surfaces))
     for (edim,etag) in get(m.embeds,(3,t),NTuple{2,Int}[])
         if edim==0
             haskey(m.points,etag) || throw(ArgumentError("$caller: unknown embedded Point[$etag]"))
@@ -2207,14 +2897,6 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
             push!(line_tags,etag)
             push!(extra, m.points[a]); push!(extra, m.points[b])
         elseif edim==2
-            haskey(m.surfaces,etag) || throw(ArgumentError("$caller: unknown embedded Surface[$etag]"))
-            loops=m.surfaces[etag]
-            isempty(loops) && throw(ArgumentError("$caller: embedded Surface[$etag] has no loop"))
-            ids=_loop_points(m, loops[1])
-            length(ids)>=3 || throw(ArgumentError(
-                "$caller: embedded Surface[$etag] needs at least three points"))
-            length(loops)==1 || throw(ArgumentError(
-                "$caller: holed sheets In Volume are a blocker"))
             for point in surface_embedded_points[etag]
                 push!(extra,m.points[point])
             end
@@ -2223,15 +2905,26 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
                 a,b=m.curves[curve]
                 push!(extra,m.points[a]);push!(extra,m.points[b])
             end
-            pts=[m.points[pid] for pid in ids]
-            for i in 2:length(pts)-1
-                push!(sheets,(etag,pts[1],pts[i],pts[i+1]))
+            loops=m.surfaces[etag]
+            ids=_loop_points(m,only(loops))
+            length(ids)>=3 || throw(ArgumentError(
+                "$caller: embedded Surface[$etag] needs at least three points"))
+            points=NTuple{3,Float64}[m.points[point] for point in ids]
+            for index in 2:(length(points)-1)
+                push!(sheets,(etag,points[1],points[index],points[index+1]))
             end
         else
             throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
         end
     end
-    mesh=isempty(extra) ? tetrahedralize(surface) : tetrahedralize(surface; interior_points=extra)
+    mesh=if explicit_geometry===nothing
+        isempty(extra) ? tetrahedralize(surface) :
+                         tetrahedralize(surface;interior_points=extra)
+    else
+        _model_explicit_volume_fill(
+            surface,t,caller;
+            interior_points=isempty(extra) ? nothing : extra)
+    end
     sort!(unique!(line_tags))
     for curve in line_tags
         a,b=m.curves[curve];p=m.points[a];q=m.points[b]
@@ -2247,12 +2940,19 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
     tet_edges=_tet_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()
     curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
+    final_boundary_faces=Set(first(boundary_faces(mesh.tets)))
     for surface_tag in surface_tags
         nested_points=surface_embedded_points[surface_tag]
         nested_curves=surface_embedded_curves[surface_tag]
         isempty(nested_points) && isempty(nested_curves) && continue
-        faces=_model_projection_volume_surface_faces!(
-            Set{NTuple{3,Int32}}(),m,mesh,surface_tag,caller)
+        faces=if surface_tag in boundary_surface_set
+            _model_projection_boundary_surface_faces!(
+                Set{NTuple{3,Int32}}(),final_boundary_faces,
+                m,mesh,surface_tag,caller)
+        else
+            _model_projection_volume_surface_faces!(
+                Set{NTuple{3,Int32}}(),m,mesh,surface_tag,caller)
+        end
         nodes,edges=_model_projection_face_topology(faces)
         for point in nested_points
             point_nodes[point]=_model_projection_embedded_point_node(
@@ -2269,6 +2969,9 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntets(mesh)>0 || throw(ErrorException("$caller: Volume[$t] produced no tetrahedra"))
+    explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
+        mesh,t,explicit_geometry.expected_volume,
+        explicit_geometry.comparison_scale,caller)
     return mesh
 end
 
