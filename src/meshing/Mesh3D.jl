@@ -2061,26 +2061,50 @@ function _triangle_area3(a,b,c)
     return 0.5*hypot(n...)
 end
 
-function mesh_covers_triangle3(mesh::Mesh, a, b, c; rtol=1e-6)
+@inline function _sorted_face3(first_node::Int32,second_node::Int32,
+                               third_node::Int32)
+    first_node>second_node &&
+        ((first_node,second_node)=(second_node,first_node))
+    second_node>third_node &&
+        ((second_node,third_node)=(third_node,second_node))
+    first_node>second_node &&
+        ((first_node,second_node)=(second_node,first_node))
+    return (first_node,second_node,third_node)
+end
+
+function _mesh_covering_faces3(mesh::Mesh,a,b,c;collect_faces::Bool=true)
     target=_triangle_area3(a,b,c)
-    target>0 || return false
+    target>0 || return NTuple{3,Int32}[],target,0.0
+    reference_normal=_cross3(_sub3(b,a),_sub3(c,a))
     seen=Set{NTuple{3,Int32}}()
+    faces=NTuple{3,Int32}[]
     covered=0.0
     @inbounds for t in axes(mesh.tets,2)
         ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
         for (i,j,k) in ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
             u,v,w=ids[i],ids[j],ids[k]
-            s1,s2,s3=u,v,w
-            s1>s2 && ((s1,s2)=(s2,s1)); s2>s3 && ((s2,s3)=(s3,s2)); s1>s2 && ((s1,s2)=(s2,s1))
-            key=(s1,s2,s3)
+            key=_sorted_face3(u,v,w)
             key in seen && continue
+            s1,s2,s3=key
             pa=_pt3(mesh,s1); pb=_pt3(mesh,s2); pc=_pt3(mesh,s3)
             (_point_in_triangle3(pa,a,b,c) && _point_in_triangle3(pb,a,b,c) &&
              _point_in_triangle3(pc,a,b,c)) || continue
             push!(seen,key)
             covered+=_triangle_area3(pa,pb,pc)
+            if collect_faces
+                face_normal=_cross3(_sub3(pb,pa),_sub3(pc,pa))
+                push!(faces,_dot3(reference_normal,face_normal)<0 ?
+                            (s1,s3,s2) : key)
+            end
         end
     end
+    collect_faces && sort!(faces;by=face->_sorted_face3(face...))
+    return faces,target,covered
+end
+
+function mesh_covers_triangle3(mesh::Mesh, a, b, c; rtol=1e-6)
+    _,target,covered=_mesh_covering_faces3(mesh,a,b,c;collect_faces=false)
+    target>0 || return false
     return abs(covered-target)<=rtol*target
 end
 
