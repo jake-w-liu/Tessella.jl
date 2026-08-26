@@ -59,6 +59,7 @@ using Tessella
     include("structured/transfinite_prism_test.jl") # affine five-face transfinite prisms
     include("structured/transfinite_hex_test.jl") # affine six-face recombined hexahedra
     include("geometry/model_test.jl")    # entity kernel + .geo execution
+    include("geometry/geo_periodic_test.jl") # literal periodic-curve transforms
     include("geometry/nurbs_test.jl")    # De Boor vs Bernstein/circle oracles
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
     include("meshing/periodic_test.jl")  # periodic identification
