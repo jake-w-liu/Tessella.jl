@@ -9,7 +9,7 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 165,771/165,771
+complete**. The last stable bounds-checked package gate passed 165,949/165,949
 assertions; implementation increments and their focused gates are recorded in
 [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
@@ -80,7 +80,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   and curve cells, physical memberships, and periodic boundary-curve/endpoint
   links for planar surfaces; mixed meshes retain periodic maps and Gmsh's MSH4
   curve-in-surface relation, and the CLI uses this path for periodic or embedded
-  `-2` output;
+  `-2` output; the dimension-explicit form also emits classified
+  Point/Line/Surface-In-Volume cells after certifying the selected solid fill, and
+  the CLI uses it for embedded `-3` output;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -120,18 +122,21 @@ explicitly narrower special-record contracts. Type 69 and some registered fixed 
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
-topology record for signed boundaries or surface embeddings. Native model periodicity
+topology record for signed boundaries or embedding relations. Native model periodicity
 is currently limited to straight-curve
 pairs on one planar triangle-meshed surface, with each curve in at most one relation;
 independent relations may share corner points. The bounded `.geo`
 executor accepts literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
 and 12-entry `Affine` transforms. Curves reused across relations, curved periodic
 entities, periodic surfaces and volumes, variable tags or numeric expressions in
-those statements, periodic embedded curves, and classified projection of volume
-embeddings remain pending. Gmsh 4.15.2 has no serialized Point-In-Surface relation:
-the classified point node and point element remain available instead. Its ASCII
+those statements and periodic embedded curves remain pending. Gmsh 4.15.2 has no
+serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
+the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that
-relation with a warning; Tessella reads both variants losslessly.
+relation with a warning; Tessella reads both variants losslessly. Classified
+volume-embedding entities and cells survive MSH2/MSH4 output, but nested
+Point/Line-In-Surface constraints on an embedded sheet and explicit modeled volume
+shell projection remain blockers.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
@@ -151,8 +156,9 @@ straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
 periodic surface differentials, plus low-level translation/rotation-periodic curves
-and the MSH2/MSH4 lifecycle, and classified Point/Line-In-Surface MSH4 round trips,
-as mandatory bounds-checked children.
+and the MSH2/MSH4 lifecycle, classified Point/Line-In-Surface MSH4 round trips,
+and the classified Surface-In-Volume MSH2/MSH4 lifecycle as mandatory bounds-checked
+children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
 fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness

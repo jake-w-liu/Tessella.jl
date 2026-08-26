@@ -43,6 +43,23 @@ Physical Point("embedded points", 31) = {5, 6, 7};
 Physical Curve("embedded line", 32) = {5};
 Physical Surface("domain", 33) = {1};
 """
+const _EMBEDDED_VOLUME_CLI_GEO="""
+SetFactory("OpenCASCADE");
+Box(1) = {0, 0, 0, 1, 1, 1};
+Point(101) = {0.2, 0.2, 0.5, 0.5};
+Point(102) = {0.8, 0.2, 0.5, 0.5};
+Point(103) = {0.5, 0.8, 0.5, 0.5};
+Line(101) = {101, 102};
+Line(102) = {102, 103};
+Line(103) = {103, 101};
+Line Loop(101) = {101, 102, 103};
+Plane Surface(101) = {101};
+Surface{101} In Volume{1};
+Physical Point("sheet points", 51) = {101, 102, 103};
+Physical Curve("sheet boundary", 52) = {101, 102, 103};
+Physical Surface("sheet", 53) = {101};
+Physical Volume("domain", 54) = {1};
+"""
 
 @testset "bounded non-destructive CLI" begin
     mktempdir() do directory
@@ -131,6 +148,25 @@ Physical Surface("domain", 33) = {1};
             (0,31)=>"embedded points",(1,32)=>"embedded line",(2,33)=>"domain")
         @test mixed_crc(embedded).sha==
               "6025846e0f58581418401081f092630d2e49999a26e608bf377d1bae4c51dc4b"
+
+        embedded_volume_input=joinpath(directory,"embedded-volume.geo")
+        embedded_volume_output=joinpath(directory,"embedded-volume.msh")
+        write(embedded_volume_input,_EMBEDDED_VOLUME_CLI_GEO)
+        @test main([embedded_volume_input,"-3","-o",embedded_volume_output])==
+              embedded_volume_output
+        @test read(embedded_volume_input,String)==_EMBEDDED_VOLUME_CLI_GEO
+        embedded_volume=read_mixed_msh(embedded_volume_output)
+        @test validate(embedded_volume).ok
+        @test embedded_volume.entity_data!==nothing
+        @test haskey(embedded_volume.entity_data.entities,(2,101))
+        @test haskey(embedded_volume.entity_data.entities,(3,1))
+        @test isempty(embedded_volume.entity_data.entities[(3,1)].boundaries)
+        @test Set(block.msh for block in embedded_volume.blocks)==Set([15,1,2,4])
+        @test embedded_volume.physical_names==Dict(
+            (0,51)=>"sheet points",(1,52)=>"sheet boundary",
+            (2,53)=>"sheet",(3,54)=>"domain")
+        @test mixed_crc(embedded_volume).sha==
+              "2fc633ca160054b1c8f86b9981febc79c83ff248afe409aad7fbb8e1e3f27ef4"
 
         periodic_volume_input=joinpath(directory,"periodic-volume.geo")
         periodic_volume_output=joinpath(directory,"periodic-volume.msh")

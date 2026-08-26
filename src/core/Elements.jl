@@ -2073,8 +2073,8 @@ classification, parametric coordinate, and external node/element tag.
 whenever the file declares a positive entity (and retains all tags needed by
 periodic relations), while
 `periodic_links` retains standard MSH2/MSH4 entity transforms and node pairs.
-Gmsh 4.15.2 does not serialize Point-In-Surface relations; its classified point
-nodes and point elements remain readable. Node, element,
+Gmsh 4.15.2 does not serialize Point-In-Surface or Point/Line/Surface-In-Volume
+relations; their classified nodes and elements remain readable. Node, element,
 connectivity, block, entity, periodic-link/pair, physical-name, and file-size
 limits are checked before bulk allocation. Repeated physical-name, entity,
 pre-element node, element, and disjoint periodic sections are merged, with
@@ -3928,7 +3928,9 @@ names with `read_mixed_msh(...; tessella_extensions=true)`.
 
 Gmsh 4.15.2 reconstructs embedded curves from its temporary `\$Entities`
 extension in ASCII MSH4. Its own binary reader discards that relation with a
-warning; Tessella decodes the same binary record losslessly.
+warning; Tessella decodes the same binary record losslessly. The format does not
+write volume-embedding relations, so only their classified entities and elements
+are serialized.
 """
 function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
                          binary=false,gmsh_compatible=true)

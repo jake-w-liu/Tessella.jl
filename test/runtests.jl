@@ -61,6 +61,7 @@ using Tessella
     include("geometry/model_test.jl")    # entity kernel + .geo execution
     include("geometry/geo_periodic_test.jl") # literal periodic-curve transforms
     include("geometry/model_periodic_io_test.jl") # classified periodic/embedded MSH projection
+    include("geometry/model_volume_io_test.jl") # classified volume-embedding MSH projection
     include("geometry/nurbs_test.jl")    # De Boor vs Bernstein/circle oracles
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
     include("meshing/periodic_test.jl")  # periodic identification
