@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# P6: reusable-master and chained periodic curves vs Gmsh 4.15.2.
+# P6: periodic dependency graphs and expression transforms vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
@@ -37,12 +37,34 @@ const CASES=(
      point_links=[(103,101),(104,102),(105,103),(106,104)],
      projected_crc="3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1",
      msh2_crc="7fb21b1038e4d7f21b98ca52cb85951b8a6ed776c445f8151653fb1950878c88"),
+    (name=:expressions,
+     path=joinpath(@__DIR__,"periodic_curve_expressions.geo"),
+     masters=Dict(10=>20,20=>30),offsets=Dict(10=>0.3,20=>0.3),
+     point_links=[(103,101),(104,102),(105,103),(106,104)],
+     projected_crc="3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1",
+     msh2_crc="7fb21b1038e4d7f21b98ca52cb85951b8a6ed776c445f8151653fb1950878c88"),
+)
+const EXPRESSION_TRANSFORMS=(
+    (name=:affine,
+     path=joinpath(@__DIR__,"periodic_curve_affine_expressions.geo"),
+     slave=2,master=4,tessella_pairs=5,gmsh_pairs=3,
+     mesh_crc="3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5"),
+    (name=:rotate,
+     path=joinpath(@__DIR__,"periodic_curve_rotate_expressions.geo"),
+     slave=3,master=1,tessella_pairs=3,gmsh_pairs=3,
+     mesh_crc="f6ad616e56d52d7e10a598a4079db2de9b3d5f2a777f492f5a2366946d8ea990"),
 )
 
 function expected_affine(offset)
     offset==0.3 && return AFFINE_Y03
     offset==0.6 && return AFFINE_Y06
     error("unsupported periodic graph offset $offset")
+end
+
+function expression_transform_point(name::Symbol,point)
+    name==:affine && return (point[1]+1,point[2],point[3])
+    name==:rotate && return (2-point[2],point[1],point[3])
+    error("unsupported periodic expression transform $name")
 end
 
 function validate_graph_links(mixed,case,pair_count)
@@ -112,6 +134,40 @@ for case in CASES
     projected[case.name]=mixed
 end
 
+expression_affines,max_tessella_transform_error=let
+    affines=Dict{Symbol,NTuple{16,Float64}}()
+    max_error=0.0
+    for case in EXPRESSION_TRANSFORMS
+        execution=execute_geo(case.path;mesh_dim=2)
+        mesh=execution.mesh
+        mesh===nothing && error(
+            "$(case.name) expression transform produced no mesh")
+        validate(mesh).ok || error(
+            "$(case.name) expression transform mesh is invalid")
+        mesh_crc(mesh).sha==case.mesh_crc || error(
+            "$(case.name) expression transform CRC changed: $(mesh_crc(mesh).sha)")
+        constraint=only(model_periodic_constraints(execution.model))
+        constraint.slave_entity==case.slave &&
+            constraint.master_entity==case.master || error(
+            "$(case.name) expression transform changed its curve entities")
+        mapping=model_periodic_nodes(execution.model,mesh,1,case.slave)
+        length(mapping.slave_nodes)==length(mapping.master_nodes)==
+            case.tessella_pairs || error(
+            "$(case.name) Tessella expression pair count changed")
+        for (slave_node,master_node) in
+                zip(mapping.slave_nodes,mapping.master_nodes)
+            expected=expression_transform_point(
+                case.name,Tuple(mesh.coords[:,master_node]))
+            got=Tuple(mesh.coords[:,slave_node])
+            max_error=max(max_error,hypot((got.-expected)...))
+        end
+        affines[case.name]=constraint.affine
+    end
+    affines,max_error
+end
+max_tessella_transform_error<=1e-15 || error(
+    "Tessella expression transform error is $max_tessella_transform_error")
+
 function find_gmsh_api()
     explicit=get(ENV,"GMSH_JULIA_API","")
     !isempty(explicit) && isfile(explicit) && return explicit
@@ -126,6 +182,17 @@ function find_gmsh_api()
 end
 
 include(find_gmsh_api())
+
+function gmsh_coordinates()
+    node_tags,node_values,_=gmsh.model.mesh.getNodes()
+    coordinates=Dict{UInt64,NTuple{3,Float64}}()
+    for (index,tag) in pairs(node_tags)
+        coordinates[UInt64(tag)]=(
+            node_values[3index-2],node_values[3index-1],node_values[3index])
+    end
+    return coordinates
+end
+
 gmsh.initialize(["gmsh","-v","0"])
 try
     startswith(gmsh.GMSH_API_VERSION,"4.15.2") || error(
@@ -142,12 +209,7 @@ try
         _,surface_elements,_=gmsh.model.mesh.getElements(2,1)
         sum(length,surface_elements;init=0)==44 || error(
             "Gmsh $(case.name) source triangle count changed")
-        node_tags,node_values,_=gmsh.model.mesh.getNodes()
-        coordinates=Dict{UInt64,NTuple{3,Float64}}()
-        for (index,tag) in pairs(node_tags)
-            coordinates[UInt64(tag)]=(
-                node_values[3index-2],node_values[3index-1],node_values[3index])
-        end
+        coordinates=gmsh_coordinates()
         for slave in (10,20)
             master,slave_nodes,master_nodes,affine=
                 gmsh.model.mesh.getPeriodicNodes(1,slave)
@@ -220,6 +282,36 @@ try
     max_gmsh_error<=1e-12 || error(
         "Gmsh periodic graph coordinate error is $max_gmsh_error")
 
+    max_gmsh_transform_error=0.0
+    max_affine_difference=0.0
+    for case in EXPRESSION_TRANSFORMS
+        gmsh.clear()
+        gmsh.open(case.path)
+        gmsh.model.mesh.generate(2)
+        coordinates=gmsh_coordinates()
+        master,slave_nodes,master_nodes,affine=
+            gmsh.model.mesh.getPeriodicNodes(1,case.slave)
+        master==case.master || error(
+            "Gmsh $(case.name) expression master is $master")
+        length(slave_nodes)==length(master_nodes)==case.gmsh_pairs || error(
+            "Gmsh $(case.name) expression pair count changed")
+        length(affine)==16 || error(
+            "Gmsh $(case.name) expression affine is not 4×4")
+        max_affine_difference=max(max_affine_difference,
+            maximum(abs.(affine.-collect(expression_affines[case.name]))))
+        for (slave_node,master_node) in zip(slave_nodes,master_nodes)
+            expected=expression_transform_point(
+                case.name,coordinates[UInt64(master_node)])
+            got=coordinates[UInt64(slave_node)]
+            max_gmsh_transform_error=max(
+                max_gmsh_transform_error,hypot((got.-expected)...))
+        end
+    end
+    max_gmsh_transform_error<=3e-12 || error(
+        "Gmsh expression transform error is $max_gmsh_transform_error")
+    max_affine_difference<=1e-15 || error(
+        "Tessella/Gmsh expression affine difference is $max_affine_difference")
+
     gmsh.clear()
     gmsh.open(CASES[2].path)
     gmsh.model.mesh.setPeriodic(1,[30],[10],collect(AFFINE_YN06))
@@ -229,10 +321,12 @@ try
         "Gmsh 4.15.2 cyclic periodic-curve probe no longer returns empty maps")
 
     println("GMSH_PARITY_PERIODIC_GRAPH_OK " *
-            "gmsh=$(gmsh.GMSH_API_VERSION) modes=branch,chain " *
-            "tessella_nodes=$(size(projected[:chain].coords,2)) " *
+            "gmsh=$(gmsh.GMSH_API_VERSION) modes=branch,chain,expressions " *
+            "tessella_nodes=$(size(projected[:expressions].coords,2)) " *
             "tessella_pairs=9 gmsh_tris=44 gmsh_pairs=3 " *
-            "gmsh_max_error=$max_gmsh_error cycle_maps=empty " *
+            "gmsh_max_error=$max_gmsh_error transforms=translate,rotate,affine " *
+            "transform_max_error=$(max(max_tessella_transform_error,max_gmsh_transform_error)) " *
+            "affine_difference=$max_affine_difference cycle_maps=empty " *
             "msh2_msh4_ascii_binary=ok")
 finally
     gmsh.finalize()

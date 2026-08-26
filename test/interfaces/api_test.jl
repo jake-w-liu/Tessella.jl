@@ -100,7 +100,12 @@ const _API=Tessella.API
             Line(4) = {4, 1};
             Curve Loop(1) = {1, 2, 3, 4};
             Plane Surface(1) = {1};
-            Periodic Curve {2} = {4} Translate {1, 0, 0};
+            periodicSlave = Sqrt(4);
+            periodicMaster = 8 / 2;
+            periodicShift = Cos(0);
+            periodicZero = Atan2(0, 1);
+            Periodic Curve {periodicSlave} = {periodicMaster}
+              Translate {periodicShift, Sin(0), periodicZero};
             """)
 
         @test_throws ArgumentError _API.open_geo!(valid)

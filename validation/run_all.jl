@@ -218,7 +218,7 @@ periodic_embedded_command = `$(Base.julia_cmd()) --startup-file=no --check-bound
 println("  command: ", periodic_embedded_command)
 run(periodic_embedded_command)
 
-println("\n── gmsh_parity periodic curve graph ──  Tessella vs Gmsh reusable/chained masters")
+println("\n── gmsh_parity periodic curve graph ──  reusable/chained/expression-backed")
 periodic_graph_script = joinpath(HERE, "gmsh_parity", "periodic_curve_graph.jl")
 periodic_graph_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $periodic_graph_script`
 println("  command: ", periodic_graph_command)

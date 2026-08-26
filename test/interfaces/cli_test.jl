@@ -60,8 +60,16 @@ Line(20) = {103, 104};
 Line(10) = {106, 105};
 Point{107} In Surface{1};
 Line{30, 20, 10} In Surface{1};
-Periodic Curve {20} = {30} Translate {0, 0.3, 0};
-Periodic Curve {10} = {20} Translate {0, 0.3, 0};
+graphSlaveBegin = Sqrt(100);
+graphSlaveEnd = 4 * 5;
+graphMasterBegin = graphSlaveEnd;
+graphMasterEnd = 3 * 10;
+graphCurveStep = 20 / 2;
+graphShift = 3 / 10;
+graphZero = Atan2(0, 1);
+Periodic Curve {graphSlaveBegin:graphSlaveEnd:graphCurveStep} =
+  {graphMasterBegin:graphMasterEnd:graphCurveStep}
+  Translate {graphZero, graphShift, Sin(graphZero)};
 Physical Curve("periodic traces", 41) = {30, 20, 10};
 Physical Surface("domain", 42) = {1};
 """

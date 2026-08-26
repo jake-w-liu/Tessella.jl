@@ -260,7 +260,8 @@ end
     open_geo!(path; mesh_dim=0)
 
 Execute a bounded `.geo` file into the initialized API session. Stored model and
-mesh state are detached from the returned execution result.
+mesh state are detached from the returned execution result. Accepted syntax and
+blockers follow [`Tessella.GeoExec.execute_geo`](@ref).
 """
 function open_geo!(path::AbstractString; mesh_dim::Integer=0)
     return lock(STATE_LOCK) do

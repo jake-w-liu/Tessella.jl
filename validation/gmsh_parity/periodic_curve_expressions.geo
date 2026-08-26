@@ -1,0 +1,37 @@
+Point(1) = {0, 0, 0, 0.4};
+Point(2) = {1, 0, 0, 0.4};
+Point(3) = {1, 1, 0, 0.4};
+Point(4) = {0, 1, 0, 0.4};
+Line(1) = {1, 2};
+Line(2) = {2, 3};
+Line(3) = {3, 4};
+Line(4) = {4, 1};
+Curve Loop(1) = {1, 2, 3, 4};
+Plane Surface(1) = {1};
+
+Point(101) = {0.2, 0.2, 0, 0.4};
+Point(102) = {0.8, 0.2, 0, 0.4};
+Point(103) = {0.2, 0.5, 0, 0.4};
+Point(104) = {0.8, 0.5, 0, 0.4};
+Point(105) = {0.2, 0.8, 0, 0.4};
+Point(106) = {0.8, 0.8, 0, 0.4};
+Point(107) = {0.425, 0.8, 0, 0.4};
+Line(30) = {101, 102};
+Line(20) = {103, 104};
+Line(10) = {106, 105};
+Point{107} In Surface{1};
+Line{30, 20, 10} In Surface{1};
+
+tagFraction = 9 / 10;
+slaveBegin = Sqrt(100) + tagFraction;
+slaveEnd = 4 * 5 + tagFraction;
+masterBegin = slaveEnd;
+masterEnd = 3 * 10 + tagFraction;
+curveStep = 20 / 2;
+verticalShift = 3 / 10;
+exactZero = Atan2(0, 1);
+Periodic Curve {slaveBegin:slaveEnd:curveStep} =
+  {masterBegin:masterEnd:curveStep}
+  Translate {exactZero, verticalShift, Sin(exactZero)};
+Physical Curve("periodic traces", 41) = {30, 20, 10};
+Physical Surface("domain", 42) = {1};
