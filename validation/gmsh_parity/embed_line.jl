@@ -5,6 +5,7 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."); io=devnull)
 using Tessella
 using Tessella.MeshTypes: ntris, nnodes, node
+using Tessella.Elements: mixed_crc, read_mixed_msh, write_mixed_msh
 
 const GEO=joinpath(@__DIR__,"embed_line.geo")
 result=execute_geo(GEO; mesh_dim=2)
@@ -17,6 +18,16 @@ area=sum(begin
     abs((b[1]-a[1])*(c[2]-a[2])-(c[1]-a[1])*(b[2]-a[2]))/2
 end for t in 1:ntris(mesh))
 abs(area-1)<=1e-12 || error("Tessella embed-line area $area != 1")
+projected=model_to_mixed(result.model,mesh,1)
+validate(projected).ok || error("Tessella embedded-line projection is invalid")
+projected.entity_data.entities[(2,1)].embedded_curves==Int32[5] ||
+    error("Tessella projection did not attach Curve[5] to Surface[1]")
+line_block=only(findall(block->block.msh==1,projected.blocks))
+Int32(5) in projected.entity_data.block_entities[line_block] ||
+    error("Tessella embedded-line projection has no Curve[5] elements")
+projected_crc=mixed_crc(projected)
+projected_crc.sha=="0655fe3edb4344be584d2fe12b8d57637f65090524542d2bc1b515e148d55ea5" ||
+    error("Tessella embedded-line projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()
     explicit=get(ENV,"GMSH_JULIA_API","")
@@ -47,7 +58,53 @@ try
     types, tags, _ = gmsh.model.mesh.getElements(2)
     gmsh_tris=sum(length, tags; init=0)
     gmsh_tris>0 || error("Gmsh embed-line has no surface elements")
-    println("GMSH_PARITY_EMBED_LINE_OK gmsh=$(gmsh.GMSH_API_VERSION) tessella_area=1 gmsh_tris=$gmsh_tris tessella_tris=$(ntris(mesh)) tessella_nodes=$(nnodes(mesh))")
+    gmsh.model.mesh.getEmbedded(2,1)==Tuple{Int32,Int32}[(1,5)] ||
+        error("Gmsh source model did not retain Curve[5] In Surface[1]")
+
+    mktempdir() do directory
+        gmsh.option.setNumber("Mesh.SaveAll",1)
+        gmsh.option.setNumber("Mesh.MshFileVersion",4.1)
+        for binary in (false,true)
+            gmsh.option.setNumber("Mesh.Binary",binary ? 1 : 0)
+            native_path=joinpath(directory,"gmsh-line-$binary.msh")
+            gmsh.write(native_path)
+            native=read_mixed_msh(native_path)
+            native.entity_data.entities[(2,1)].embedded_curves==Int32[5] ||
+                error("Tessella did not decode Gmsh's embedded-curve $binary record")
+
+            projected_path=joinpath(directory,"tessella-line-$binary.msh")
+            write_mixed_msh(
+                projected_path,projected;version=4.1,binary=binary)
+            reread=read_mixed_msh(projected_path)
+            mixed_crc(reread)==projected_crc ||
+                error("Tessella embedded-line MSH4 $binary CRC mismatch")
+            gmsh.clear()
+            gmsh.open(projected_path)
+            expected_embedding=binary ? Tuple{Int32,Int32}[] :
+                                        Tuple{Int32,Int32}[(1,5)]
+            gmsh.model.mesh.getEmbedded(2,1)==expected_embedding ||
+                error("Gmsh embedded-curve $binary reopen result differs")
+            boundary=gmsh.model.getBoundary([(2,1)],false,true,false)
+            boundary==Tuple{Int32,Int32}[(1,1),(1,2),(1,3),(1,4)] ||
+                error("Gmsh treated Curve[5] as a surface boundary")
+            _,line_elements,_=gmsh.model.mesh.getElements(1,5)
+            sum(length,line_elements;init=0)>0 ||
+                error("Gmsh did not retain projected Curve[5] elements")
+
+            # Reload the source geometry before Gmsh writes the next native
+            # variant; opening an MSH replaces the active model.
+            gmsh.clear()
+            gmsh.open(GEO)
+            gmsh.model.mesh.generate(2)
+            gmsh.option.setNumber("Mesh.SaveAll",1)
+            gmsh.option.setNumber("Mesh.MshFileVersion",4.1)
+        end
+    end
+    println("GMSH_PARITY_EMBED_LINE_OK gmsh=$(gmsh.GMSH_API_VERSION) " *
+            "tessella_area=1 gmsh_tris=$gmsh_tris tessella_tris=$(ntris(mesh)) " *
+            "tessella_nodes=$(nnodes(mesh)) projected_crc=$(projected_crc.sha) " *
+            "gmsh_ascii_relation=retained gmsh_binary_relation=upstream_gap " *
+            "tessella_ascii_binary=lossless")
 finally
     gmsh.finalize()
 end

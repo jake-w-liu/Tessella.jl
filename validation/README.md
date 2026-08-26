@@ -44,7 +44,9 @@ validation/
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
     periodic_native.geo  # bounded native translation-periodic fixture
     periodic_two_direction.geo # shared-corner x/y-periodic fixture
-    ...                   # focused API, CAD, embedding, and boundary-layer cases
+    embed_point.jl        # classified Point-In-Surface MSH4 projection lifecycle
+    embed_line.jl         # classified Line-In-Surface MSH4 projection lifecycle
+    ...                   # focused API, CAD, and boundary-layer cases
   cases/
     01_box/box.geo               # reference gmsh script (retained)
     02_cylinder/cylinder.geo
@@ -69,9 +71,9 @@ four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
-cylinder, Boolean, NURBS/IGES, embedding, native `.geo`, projected MSH2/MSH4
-single-/two-direction periodic surfaces, compact periodic node pairs, and 2-D
-boundary-layer parity cases.
+cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface MSH4 projection,
+native `.geo`, projected MSH2/MSH4 single-/two-direction periodic surfaces,
+compact periodic node pairs, and 2-D boundary-layer parity cases.
 The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
 Tessella-generated type 126/128/144 records. Missing or wrong-version Gmsh,
 failed probes, and parity mismatches make the aggregate command fail. Mesh-case
