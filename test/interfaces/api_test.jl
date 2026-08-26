@@ -256,3 +256,47 @@ end
         _API.finalize()
     end
 end
+
+@testset "embedded periodic-curve API" begin
+    _API.finalize()
+    try
+        _API.initialize()
+        coordinates=((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0),
+                     (0.25,0.25),(0.75,0.25),
+                     (0.25,0.75),(0.75,0.75),(0.5,0.25))
+        for (tag,(x,y)) in pairs(coordinates)
+            @test _API.model.add_point(
+                x,y,0;tag=tag,meshSize=0.5)==tag
+        end
+        endpoints=((1,2),(2,3),(3,4),(4,1),(5,6),(7,8))
+        for (tag,(first_point,last_point)) in pairs(endpoints)
+            @test _API.model.add_line(
+                first_point,last_point;tag=tag)==tag
+        end
+        @test _API.model.add_curve_loop([1,2,3,4];tag=1)==1
+        @test _API.model.add_plane_surface([1];tag=1)==1
+        @test _API.model.embed(0,[9],2,1)==1
+        @test _API.model.embed(1,[5,6],2,1)==1
+        translation=(1.0,0.0,0.0,0.0,
+                     0.0,1.0,0.0,0.5,
+                     0.0,0.0,1.0,0.0,
+                     0.0,0.0,0.0,1.0)
+        @test _API.mesh.set_periodic(
+            1,[6],[5],translation)===nothing
+        generated=_API.mesh.generate(2)
+        @test validate(generated).ok
+        @test mesh_crc(generated).sha==
+              "9794a65ea5402683d0d50612522c2f71f7c98ec2a9f6b9e6b49a61e62cd85cf2"
+        mapping=_API.mesh.get_periodic_nodes(1,6)
+        @test mapping.master_entity==5
+        @test length(mapping.slave_nodes)==3
+        cached=_API.mesh.get()
+        for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
+            @test Tuple(cached.coords[:,slave])==
+                  (cached.coords[1,master],cached.coords[2,master]+0.5,
+                   cached.coords[3,master])
+        end
+    finally
+        _API.finalize()
+    end
+end

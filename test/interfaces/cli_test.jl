@@ -23,6 +23,20 @@ const _PERIODIC_CLI_GEO=replace(
     "Periodic Curve {2} = {4} Translate {1, 0, 0};\n"
 const _PERIODIC_VOLUME_CLI_GEO=
     _PERIODIC_CLI_GEO * "Box(1) = {0, 0, 0, 1, 1, 1};\n"
+const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
+Point(5) = {0.25, 0.25, 0, 1};
+Point(6) = {0.75, 0.25, 0, 1};
+Point(7) = {0.25, 0.75, 0, 1};
+Point(8) = {0.75, 0.75, 0, 1};
+Point(9) = {0.5, 0.25, 0, 1};
+Line(5) = {5, 6};
+Line(6) = {7, 8};
+Point{9} In Surface{1};
+Line{5, 6} In Surface{1};
+Periodic Curve {6} = {5} Translate {0, 0.5, 0};
+Physical Curve("periodic traces", 21) = {5, 6};
+Physical Surface("domain", 22) = {1};
+"""
 const _UNUSED_PERIODIC_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0, 2, 0, 0.5};
 Point(6) = {1, 2, 0, 0.5};
@@ -158,6 +172,32 @@ Physical Volume("domain", 72) = {1};
         @test periodic_curve.slave_entity==2
         @test periodic_curve.master_entity==4
         @test length(periodic_curve.slave_nodes)==5
+
+        periodic_embedded_input=joinpath(
+            directory,"periodic-embedded.geo")
+        periodic_embedded_output=joinpath(
+            directory,"periodic-embedded.msh")
+        write(periodic_embedded_input,_PERIODIC_EMBEDDED_CLI_GEO)
+        @test main([periodic_embedded_input,"-2","-o",
+                    periodic_embedded_output])==periodic_embedded_output
+        @test read(periodic_embedded_input,String)==
+              _PERIODIC_EMBEDDED_CLI_GEO
+        periodic_embedded=read_mixed_msh(periodic_embedded_output)
+        @test validate(periodic_embedded).ok
+        @test periodic_embedded.entity_data.entities[(2,1)].embedded_curves==
+              Int32[5,6]
+        @test periodic_embedded.physical_names==Dict(
+            (1,21)=>"periodic traces",(2,22)=>"domain")
+        @test sort([(Int(link.slave_entity),Int(link.master_entity))
+                    for link in periodic_embedded.periodic_links
+                    if link.dim==0])==[(7,5),(8,6)]
+        embedded_periodic_curve=only(filter(
+            link->link.dim==1,periodic_embedded.periodic_links))
+        @test embedded_periodic_curve.slave_entity==6
+        @test embedded_periodic_curve.master_entity==5
+        @test length(embedded_periodic_curve.slave_nodes)==3
+        @test mixed_crc(periodic_embedded).sha==
+              "b02e4da6aa4910bfb488f6b3eebc4ae0bf22f91867506a973390cc65f450d9ec"
 
         embedded_input=joinpath(directory,"embedded.geo")
         embedded_output=joinpath(directory,"embedded.msh")

@@ -212,6 +212,12 @@ periodic_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --p
 println("  command: ", periodic_command)
 run(periodic_command)
 
+println("\n── gmsh_parity periodic embedded curve ──  Tessella vs Gmsh embedded trace pairs")
+periodic_embedded_script = joinpath(HERE, "gmsh_parity", "periodic_embedded_curve.jl")
+periodic_embedded_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $periodic_embedded_script`
+println("  command: ", periodic_embedded_command)
+run(periodic_embedded_command)
+
 println("\n── gmsh_parity 2-D boundary layer ──  Tessella vs analytic/Gmsh BL quads")
 bl2d_script = joinpath(HERE, "gmsh_parity", "boundary_layer_2d.jl")
 bl2d_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $bl2d_script`

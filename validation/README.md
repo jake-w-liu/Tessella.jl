@@ -42,6 +42,7 @@ validation/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
+    periodic_embedded_curve.jl # embedded periodic-curve MSH2/MSH4 lifecycle
     periodic_native.geo  # bounded native translation-periodic fixture
     periodic_two_direction.geo # shared-corner x/y-periodic fixture
     embed_point.jl        # classified Point-In-Surface MSH4 projection lifecycle
@@ -77,7 +78,7 @@ mandatory bounds-checked children. It also runs focused box, square, cone,
 cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
-pairs, and 2-D boundary-layer parity cases.
+pairs, embedded periodic curves, and 2-D boundary-layer parity cases.
 The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
 Tessella-generated type 126/128/144 records. Missing or wrong-version Gmsh,
 failed probes, and parity mismatches make the aggregate command fail. Mesh-case
