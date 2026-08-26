@@ -51,8 +51,13 @@ function _periodic_geo_rotation()
         Line(4) = {3, 1};
         Curve Loop(1) = {1, 2, -3, 4};
         Plane Surface(1) = {1};
+        axisZ = 2 * 1;
+        centerX = Cos(0);
+        centerY = Sqrt(1);
+        quarterTurn = Pi / 2;
         Periodic Curve {3} = {1}
-          Rotate {{0, 0, 2}, {1, 1, 0}, 1.5707963267948966};
+          Rotate {{Atan2(0, 1), Sin(0), axisZ},
+                  {centerX, centerY, 0}, quarterTurn};
         """
 end
 
@@ -82,11 +87,31 @@ function _periodic_geo_embedded_curves()
 end
 
 function _periodic_geo_curve_graph(mode::Symbol;cycle::Bool=false)
-    leaf_master=mode==:branch ? 30 : mode==:chain ? 20 : throw(
+    leaf_master=mode==:branch ? 30 : mode in (:chain,:expressions) ? 20 : throw(
         ArgumentError("unknown periodic graph mode $mode"))
     leaf_offset=mode==:branch ? 0.6 : 0.3
     cycle_statement=cycle ?
         "Periodic Curve {30} = {10} Translate {0, -0.6, 0};" : ""
+    periodic_statements=if mode==:expressions
+        """
+        tagFraction = 9 / 10;
+        slaveBegin = Sqrt(100) + tagFraction;
+        slaveEnd = 4 * 5 + tagFraction;
+        masterBegin = slaveEnd;
+        masterEnd = 3 * 10 + tagFraction;
+        curveStep = 20 / 2;
+        verticalShift = 3 / 10;
+        exactZero = Atan2(0, 1);
+        Periodic Curve {slaveBegin:slaveEnd:curveStep} =
+          {masterBegin:masterEnd:curveStep}
+          Translate {exactZero, verticalShift, Sin(exactZero)};
+        """
+    else
+        """
+        Periodic Curve {20} = {30} Translate {0, 0.3, 0};
+        Periodic Curve {10} = {$leaf_master} Translate {0, $leaf_offset, 0};
+        """
+    end
     return """
         Point(1) = {0, 0, 0, 0.4};
         Point(2) = {1, 0, 0, 0.4};
@@ -110,8 +135,7 @@ function _periodic_geo_curve_graph(mode::Symbol;cycle::Bool=false)
         Line(10) = {106, 105};
         Point{107} In Surface{1};
         Line{30, 20, 10} In Surface{1};
-        Periodic Curve {20} = {30} Translate {0, 0.3, 0};
-        Periodic Curve {10} = {$leaf_master} Translate {0, $leaf_offset, 0};
+        $periodic_statements
         $cycle_statement
         """
 end
@@ -143,9 +167,15 @@ end
                translated.mesh.coords[3,master])
     end
 
-    affine=_execute_geo_source(_periodic_geo_square(
-        "Periodic Curve {2} = {4} Affine " *
-        "{1,0,0,1, 0,1,0,0, 0,0,1,0};"))
+    affine=_execute_geo_source(_periodic_geo_square("""
+        PeriodicAffineOne = Cos(0);
+        affineZero = Atan2(0, 1);
+        affineDx = Sqrt(4) / 2;
+        Periodic Curve {2} = {4} Affine
+          {PeriodicAffineOne,affineZero,affineZero,affineDx,
+           affineZero,PeriodicAffineOne,affineZero,affineZero,
+           affineZero,affineZero,PeriodicAffineOne,affineZero};
+        """))
     @test only(model_periodic_constraints(affine.model)).affine==
           translation_constraint.affine
 
@@ -185,9 +215,19 @@ end
                embedded.mesh.coords[3,master])
     end
 
+    fractional=_execute_geo_source(_periodic_geo_square(
+        "Periodic Curve {29 / 10} = {41 / 10} " *
+        "Translate {Cos(0), Sin(0), Atan2(0, 1)};");mesh_dim=2)
+    fractional_constraint=only(model_periodic_constraints(fractional.model))
+    @test (fractional_constraint.slave_entity,
+           fractional_constraint.master_entity)==(2,4)
+    @test mesh_crc(fractional.mesh).sha==
+          "3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5"
+
     for (mode,masters,offsets) in (
             (:branch,Dict(10=>30,20=>30),Dict(10=>0.6,20=>0.3)),
-            (:chain,Dict(10=>20,20=>30),Dict(10=>0.3,20=>0.3)))
+            (:chain,Dict(10=>20,20=>30),Dict(10=>0.3,20=>0.3)),
+            (:expressions,Dict(10=>20,20=>30),Dict(10=>0.3,20=>0.3)))
         graph=_execute_geo_source(
             _periodic_geo_curve_graph(mode);mesh_dim=2)
         @test validate(graph.mesh).ok
@@ -219,9 +259,16 @@ end
         "Periodic Surface {1} = {1} Translate {1,0,0};",
         "Periodic Curve {2} = {4} Translate {1,0};",
         "Periodic Curve {2} = {4} Affine {1,0,0,1};",
+        "Periodic Curve {2} = {4} Affine " *
+        "{1,0,0,1, 0,1,0,0, 0,0,1,0, 0,0,0,2};",
         "Periodic Curve {2} = {4} Rotate {{0,0,0},{0,0,0},1};",
-        "Periodic Curve {2} = {4} Rotate {{0,0,1},{0,0,0},Pi/2};",
+        "Periodic Curve {2} = {4} Rotate {{0,0,1},{0,0,0},missingAngle};",
         "Periodic Curve {2} = {4} Translate {NaN,0,0};",
+        "Periodic Curve {2} = {4} Translate {1 / 0,0,0};",
+        "Periodic Curve {unknownTag} = {4} Translate {1,0,0};",
+        "Periodic Curve {2:4:0} = {4} Translate {1,0,0};",
+        "Periodic Curve {1:65537} = {4} Translate {1,0,0};",
+        "Periodic Curve {2} = {4} Translate {Atan2(0),0,0};",
         "Periodic Curve {2} = {4} Mirror {1,0,0};",
         "Periodic Curve {2,} = {4} Translate {1,0,0};",
     )
@@ -229,6 +276,21 @@ end
         @test_throws ArgumentError _execute_geo_source(
             _periodic_geo_square(statement))
     end
+    @test_throws ArgumentError _execute_geo_source(_periodic_geo_square(
+        "dynamicTag = newl; Periodic Curve {dynamicTag} = {4} " *
+        "Translate {1,0,0};"))
+    @test_throws ArgumentError _execute_geo_source(_periodic_geo_square(
+        "newl = 2; Periodic Curve {newl} = {4} Translate {1,0,0};"))
+    pi_error=try
+        _execute_geo_source(_periodic_geo_square(
+            "Pi = 3; Periodic Curve {2} = {4} Translate {1,0,0};"))
+        nothing
+    catch err
+        err
+    end
+    @test pi_error isa ArgumentError
+    @test occursin("Pi is a reserved numeric constant",
+                   sprint(showerror,pi_error))
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end

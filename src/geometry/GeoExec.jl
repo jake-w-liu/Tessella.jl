@@ -4,7 +4,7 @@
 Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface/
 Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
 90°-Rotate of those solids, Point/Line-In-Surface and Point/Line/Surface-In-Volume
-embeddings with nested point/curve sheet constraints, literal
+embeddings with nested point/curve sheet constraints, expression-backed
 Translate/Rotate/Affine periodic straight curves with reusable masters and acyclic
 dependency chains, Physical groups, and Mesh 2/3 via the native [`Model`](@ref)
 kernel. Control-flow loops, macros,
@@ -19,7 +19,9 @@ using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: add_physical_group!, set_periodic!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
-using ..IO: read_geo_params
+using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
+using ..IO: _geo_split_list, _geo_numeric_list_terms, _geo_positive_gmsh_tag
+using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
 using ..Transform: _affine_coordinate
 
 export execute_geo, GeoExecution
@@ -114,10 +116,14 @@ Execute Tessella's documented bounded `.geo` subset into a new [`GeoModel`](@ref
 Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
 `mesh_dim=0` only builds the model. Geometry statements outside the bounded
 subset and malformed input raise `ArgumentError` instead of being partially
-accepted. `Periodic Line` and `Periodic Curve` accept literal `Translate`,
-`Rotate`, and 12-entry `.geo` `Affine` transforms between straight curves;
-multiple statements may reuse a master or form an acyclic master/slave chain.
-Variable tags and numeric expressions are outside this execution subset.
+accepted. `Periodic Line` and `Periodic Curve` accept `Translate`, `Rotate`, and
+12- or 16-entry `.geo` `Affine` transforms between straight curves. Their entity lists
+and transform entries accept finite arithmetic expressions, prior scalar
+bindings, pure numeric functions, and bounded constant ranges in entity lists.
+Entity results follow Gmsh's truncation toward zero into positive signed 32-bit
+tags. Multiple statements may reuse a master or form an acyclic master/slave
+chain. Dynamic tag allocators and list variables remain outside this execution
+subset.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
@@ -131,11 +137,12 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     dim in (0,2,3) || throw(ArgumentError("execute_geo: mesh_dim must be 0, 2, or 3"))
     params=read_geo_params(path)
     model=GeoModel()
+    context=_GeoNumericContext()
     for line in _geo_exec_statements(path)
         occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
                  line) && throw(ArgumentError(
             "execute_geo: unsupported statement $(line) — loops, macros, and advanced OCC features are blockers"))
-        _exec_line!(model,line)
+        _exec_line!(model,line,context)
     end
     mesh=nothing
     if dim==2
@@ -159,47 +166,57 @@ function _boolean_delete_operand(raw::AbstractString)
     return occursin(r"\bDelete\b",suffix)
 end
 
-function _geo_periodic_literal(raw::AbstractString,caller::AbstractString)
-    source=strip(String(raw))
-    isempty(source) && throw(ArgumentError("$caller: numeric literal is empty"))
-    value=try
-        parse(Float64,source)
-    catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError(
-            "$caller: $(repr(source)) is not a Float64 numeric literal"))
-    end
-    isfinite(value) || throw(ArgumentError(
-        "$caller: numeric literals must be finite"))
-    return value
+function _geo_periodic_list_items(raw::AbstractString,caller::AbstractString)
+    return _geo_split_list("{"*String(raw)*"}",caller)
 end
 
-function _geo_periodic_literals(raw::AbstractString,count::Int,
-                                caller::AbstractString)
-    pieces=split(raw,',')
+function _geo_periodic_expressions(raw::AbstractString,count::Int,
+                                   context::_GeoNumericContext,
+                                   caller::AbstractString)
+    pieces=_geo_periodic_list_items(raw,caller)
     length(pieces)==count || throw(ArgumentError(
-        "$caller: expected $count comma-separated numeric literals"))
-    return Float64[_geo_periodic_literal(piece,caller) for piece in pieces]
+        "$caller: expected $count comma-separated numeric expressions"))
+    return Float64[_geo_eval_numeric(piece,context,caller) for piece in pieces]
 end
 
-function _geo_periodic_tags(raw::AbstractString,caller::AbstractString)
-    pieces=split(raw,',')
+function _geo_periodic_affine(raw::AbstractString,context::_GeoNumericContext,
+                              caller::AbstractString)
+    pieces=_geo_periodic_list_items(raw,caller)
+    length(pieces) in (12,16) || throw(ArgumentError(
+        "$caller: expected 12 or 16 comma-separated numeric expressions"))
+    entries=Float64[_geo_eval_numeric(piece,context,caller) for piece in pieces]
+    return length(entries)==12 ?
+        (entries...,0.0,0.0,0.0,1.0) : Tuple(entries)
+end
+
+function _geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
+                            caller::AbstractString)
+    pieces=_geo_periodic_list_items(raw,caller)
     isempty(pieces) && throw(ArgumentError("$caller: entity list is empty"))
-    tags=Int[]
-    for piece in pieces
-        source=strip(String(piece))
-        isempty(source) && throw(ArgumentError(
-            "$caller: entity list contains an empty tag"))
-        tag=try
-            parse(Int,source)
-        catch err
-            err isa InterruptException && rethrow()
-            throw(ArgumentError(
-                "$caller: $(repr(source)) is not an integer entity tag"))
+    terms,total=_geo_numeric_list_terms(pieces,context,caller)
+    tags=Int[];sizehint!(tags,total)
+    for term in terms
+        numeric=term.first
+        for _ in 1:term.count
+            push!(tags,_geo_positive_gmsh_tag(numeric,"$caller entry"))
+            numeric+=term.step
         end
-        push!(tags,tag)
     end
     return tags
+end
+
+function _geo_exec_scalar!(context::_GeoNumericContext,name::AbstractString,
+                           raw::AbstractString)
+    variable=String(name)
+    variable=="Pi" && throw(ArgumentError(
+        "execute_geo: Pi is a reserved numeric constant; use a different scalar name"))
+    variable in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
+        "execute_geo: $variable is a reserved dynamic tag allocator; " *
+        "use a different scalar name"))
+    context.values[variable]=_geo_eval_numeric(
+        raw,context,"execute_geo: scalar variable $variable")
+    delete!(context.unavailable,variable)
+    return nothing
 end
 
 function _geo_periodic_rotation(axis,origin,angle::Float64,
@@ -236,7 +253,8 @@ function _geo_periodic_rotation(axis,origin,angle::Float64,
             0.0,0.0,0.0,1.0)
 end
 
-function _exec_periodic_curve!(m::GeoModel,line::AbstractString)
+function _exec_periodic_curve!(m::GeoModel,line::AbstractString,
+                               context::_GeoNumericContext)
     caller="execute_geo: Periodic Curve"
     entity=match(r"^Periodic\s+([A-Za-z]+)",line)
     entity===nothing && throw(ArgumentError(
@@ -248,36 +266,40 @@ function _exec_periodic_curve!(m::GeoModel,line::AbstractString)
         line)
     statement===nothing && throw(ArgumentError(
         "$caller: malformed periodic statement $line"))
-    slaves=_geo_periodic_tags(statement.captures[1],caller)
-    masters=_geo_periodic_tags(statement.captures[2],caller)
+    slaves=_geo_periodic_tags(statement.captures[1],context,caller)
+    masters=_geo_periodic_tags(statement.captures[2],context,caller)
     transform=strip(statement.captures[3])
     affine=if (matched=match(r"^Translate\s*\{\s*([^}]*)\s*\}$",transform)) !== nothing
-        delta=_geo_periodic_literals(matched.captures[1],3,"$caller Translate")
+        delta=_geo_periodic_expressions(
+            matched.captures[1],3,context,"$caller Translate")
         (1.0,0.0,0.0,delta[1],
          0.0,1.0,0.0,delta[2],
          0.0,0.0,1.0,delta[3],
          0.0,0.0,0.0,1.0)
     elseif (matched=match(r"^Affine\s*\{\s*([^}]*)\s*\}$",transform)) !== nothing
-        entries=_geo_periodic_literals(matched.captures[1],12,"$caller Affine")
-        (entries...,0.0,0.0,0.0,1.0)
+        _geo_periodic_affine(matched.captures[1],context,"$caller Affine")
     elseif (matched=match(
             r"^Rotate\s*\{\s*\{\s*([^}]*)\s*\}\s*,\s*\{\s*([^}]*)\s*\}\s*,\s*([^}]*)\s*\}$",
             transform)) !== nothing
-        axis=_geo_periodic_literals(matched.captures[1],3,"$caller Rotate axis")
-        origin=_geo_periodic_literals(matched.captures[2],3,"$caller Rotate center")
-        angle=_geo_periodic_literal(matched.captures[3],"$caller Rotate angle")
+        axis=_geo_periodic_expressions(
+            matched.captures[1],3,context,"$caller Rotate axis")
+        origin=_geo_periodic_expressions(
+            matched.captures[2],3,context,"$caller Rotate center")
+        angle=_geo_eval_numeric(
+            matched.captures[3],context,"$caller Rotate angle")
         _geo_periodic_rotation(axis,origin,angle,"$caller Rotate")
     else
         throw(ArgumentError(
-            "$caller: expected a literal Translate, Rotate, or Affine transform"))
+            "$caller: expected a Translate, Rotate, or Affine transform"))
     end
     set_periodic!(m,1,slaves,masters,affine)
     return nothing
 end
 
-function _exec_line!(m::GeoModel, line::AbstractString)
-    if startswith(line,"Periodic")
-        _exec_periodic_curve!(m,line)
+function _exec_line!(m::GeoModel,line::AbstractString,
+                     context::_GeoNumericContext)
+    if occursin(r"^Periodic(?:\s|$)",line)
+        _exec_periodic_curve!(m,line,context)
         return
     elseif (mm=match(r"^Point\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*([^,]+),\s*([^,]+),\s*([^,}]+)(?:,\s*([^}]+))?\s*\}\s*;$", line)) !== nothing
         tag=parse(Int,mm.captures[1])
@@ -372,6 +394,10 @@ function _exec_line!(m::GeoModel, line::AbstractString)
         tag=parse(Int,mm.captures[3])
         ids=parse.(Int, split(mm.captures[4],','))
         add_physical_group!(m, dim, ids; tag=tag, name=name)
+        return
+    elseif (mm=match(
+            r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*;$",line)) !== nothing
+        _geo_exec_scalar!(context,mm.captures[1],mm.captures[2])
         return
     elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
            startswith(line,"Field") || startswith(line,"Background") ||

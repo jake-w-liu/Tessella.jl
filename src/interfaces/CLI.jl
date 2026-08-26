@@ -58,6 +58,7 @@ end
     main(args) -> String
 
 Execute one `.geo` input with optional `-2` or `-3` meshing and `-o output`.
+Accepted syntax and blockers follow [`Tessella.GeoExec.execute_geo`](@ref).
 Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
 and returns its path. Native periodic/embedded surface meshes and embedded volume
 meshes include their supported classified entity, cell, and node records, including
