@@ -54,9 +54,15 @@ Line(102) = {102, 103};
 Line(103) = {103, 101};
 Line Loop(101) = {101, 102, 103};
 Plane Surface(101) = {101};
+Point(104) = {0.3, 0.35, 0.5, 0.5};
+Point(105) = {0.7, 0.35, 0.5, 0.5};
+Point(106) = {0.5, 0.35, 0.5, 0.5};
+Line(104) = {104, 105};
+Point{106} In Surface{101};
+Line{104} In Surface{101};
 Surface{101} In Volume{1};
-Physical Point("sheet points", 51) = {101, 102, 103};
-Physical Curve("sheet boundary", 52) = {101, 102, 103};
+Physical Point("sheet points", 51) = {101, 102, 103, 104, 105, 106};
+Physical Curve("sheet curves", 52) = {101, 102, 103, 104};
 Physical Surface("sheet", 53) = {101};
 Physical Volume("domain", 54) = {1};
 """
@@ -160,13 +166,15 @@ Physical Volume("domain", 54) = {1};
         @test embedded_volume.entity_data!==nothing
         @test haskey(embedded_volume.entity_data.entities,(2,101))
         @test haskey(embedded_volume.entity_data.entities,(3,1))
+        @test embedded_volume.entity_data.entities[(2,101)].embedded_curves==
+              Int32[104]
         @test isempty(embedded_volume.entity_data.entities[(3,1)].boundaries)
         @test Set(block.msh for block in embedded_volume.blocks)==Set([15,1,2,4])
         @test embedded_volume.physical_names==Dict(
-            (0,51)=>"sheet points",(1,52)=>"sheet boundary",
+            (0,51)=>"sheet points",(1,52)=>"sheet curves",
             (2,53)=>"sheet",(3,54)=>"domain")
         @test mixed_crc(embedded_volume).sha==
-              "2fc633ca160054b1c8f86b9981febc79c83ff248afe409aad7fbb8e1e3f27ef4"
+              "745bc23ab2aa7c0824006a94ef279514a1c6fa97d3cd95960943797b85c6336c"
 
         periodic_volume_input=joinpath(directory,"periodic-volume.geo")
         periodic_volume_output=joinpath(directory,"periodic-volume.msh")

@@ -3,8 +3,8 @@
 
 Command-line façade: `tessella file.geo -2|-3` executes the bounded `.geo`
 subset and writes `file.msh`. Supported periodic and embedded surface entities
-and embedded volume entities are written with classified MSH4 metadata. Unknown
-flags and OCC-only files are blockers.
+and embedded volume entities, including nested sheet constraints, are written with
+classified MSH4 metadata. Unknown flags and OCC-only files are blockers.
 """
 module CLI
 
@@ -59,10 +59,11 @@ end
 Execute one `.geo` input with optional `-2` or `-3` meshing and `-o output`.
 Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
 and returns its path. Native periodic/embedded surface meshes and embedded volume
-meshes include their supported classified entity, cell, and node records. Periodic
-volume output is blocked; periodic surface output requires exactly one selected
-surface containing every slave curve. Duplicate/conflicting flags, multiple inputs,
-ignored output arguments, and any output that aliases the input are rejected.
+meshes include their supported classified entity, cell, and node records, including
+nested point/curve constraints on an embedded sheet. Periodic volume output is
+blocked; periodic surface output requires exactly one selected surface containing
+every slave curve. Duplicate/conflicting flags, multiple inputs, ignored output
+arguments, and any output that aliases the input are rejected.
 """
 function main(args::AbstractVector{<:AbstractString})
     length(args)<=_MAX_ARGUMENTS || throw(ArgumentError(

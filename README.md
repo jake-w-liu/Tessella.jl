@@ -9,7 +9,7 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 165,949/165,949
+complete**. The last stable bounds-checked package gate passed 165,956/165,956
 assertions; implementation increments and their focused gates are recorded in
 [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
@@ -81,8 +81,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   links for planar surfaces; mixed meshes retain periodic maps and Gmsh's MSH4
   curve-in-surface relation, and the CLI uses this path for periodic or embedded
   `-2` output; the dimension-explicit form also emits classified
-  Point/Line/Surface-In-Volume cells after certifying the selected solid fill, and
-  the CLI uses it for embedded `-3` output;
+  Point/Line/Surface-In-Volume cells after certifying the selected solid fill,
+  including nested Point/Line-In-Surface constraints on an embedded sheet, and the
+  CLI uses it for embedded `-3` output;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -134,9 +135,9 @@ serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that
 relation with a warning; Tessella reads both variants losslessly. Classified
-volume-embedding entities and cells survive MSH2/MSH4 output, but nested
-Point/Line-In-Surface constraints on an embedded sheet and explicit modeled volume
-shell projection remain blockers.
+volume-embedding entities and cells, including nested point/curve/surface
+classification, survive MSH2/MSH4 output. Explicit modeled volume shell projection
+remains a blocker.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
@@ -157,8 +158,8 @@ transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
 periodic surface differentials, plus low-level translation/rotation-periodic curves
 and the MSH2/MSH4 lifecycle, classified Point/Line-In-Surface MSH4 round trips,
-and the classified Surface-In-Volume MSH2/MSH4 lifecycle as mandatory bounds-checked
-children.
+and the classified Surface-In-Volume lifecycle with nested point/curve constraints
+as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
 fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
