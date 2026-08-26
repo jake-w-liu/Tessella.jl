@@ -2164,9 +2164,6 @@ function _model_volume_embedding_inventory(
                 "$caller: Volume[$volume] repeats embedded Surface[$embedded_tag]"))
             haskey(m.surfaces,embedded_tag) || throw(ArgumentError(
                 "$caller: unknown embedded Surface[$embedded_tag]"))
-            length(m.surfaces[embedded_tag])==1 || throw(ArgumentError(
-                "$caller: embedded Surface[$embedded_tag] has interior loops; " *
-                "holed Surface-In-Volume sheets are not supported"))
             register_surface!(embedded_tag)
         else
             throw(ArgumentError(
@@ -2866,10 +2863,10 @@ end
     mesh_model_volume(model, tag) -> Mesh
 
 Mesh a native primitive, Boolean, or explicitly modeled planar-surface volume,
-recovering supported embedded points, curves, and unholed planar sheets, including
-nested points and curves constrained to those sheets. The returned tetrahedral mesh
-is validated before it is returned; unsupported solid encodings raise an explicit
-error.
+recovering supported embedded points, curves, and planar sheets with optional holes,
+including nested points and curves constrained to those sheets. The returned
+tetrahedral mesh is validated before it is returned; unsupported solid encodings
+raise an explicit error.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer)
     caller="mesh_model_volume"
@@ -2906,12 +2903,22 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
                 push!(extra,m.points[a]);push!(extra,m.points[b])
             end
             loops=m.surfaces[etag]
-            ids=_loop_points(m,only(loops))
-            length(ids)>=3 || throw(ArgumentError(
-                "$caller: embedded Surface[$etag] needs at least three points"))
-            points=NTuple{3,Float64}[m.points[point] for point in ids]
-            for index in 2:(length(points)-1)
-                push!(sheets,(etag,points[1],points[index],points[index+1]))
+            if length(loops)==1
+                ids=_loop_points(m,only(loops))
+                length(ids)>=3 || throw(ArgumentError(
+                    "$caller: embedded Surface[$etag] needs at least three points"))
+                points=NTuple{3,Float64}[m.points[point] for point in ids]
+                for index in 2:(length(points)-1)
+                    push!(sheets,(etag,points[1],points[index],points[index+1]))
+                end
+            else
+                sheet_mesh=_model_planar_surface_mesh(
+                    m,etag,caller;include_embeddings=true)
+                for cell in 1:ntris(sheet_mesh)
+                    points=ntuple(slot->_model_mesh_coordinate(
+                        sheet_mesh,sheet_mesh.tris[slot,cell]),3)
+                    push!(sheets,(etag,points...))
+                end
             end
         else
             throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
@@ -2936,6 +2943,19 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
         mesh=recover_triangle3(mesh,a,b,c)
         mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
             "$caller: embedded Surface[$sheet] is not a union of tetrahedron faces"))
+    end
+    for curve in line_tags
+        start_point,stop_point=m.curves[curve]
+        mesh_covers_segment3(
+            mesh,m.points[start_point],m.points[stop_point]) ||
+            throw(ErrorException(
+                "$caller: embedded Curve[$curve] is absent from the final " *
+                "tetrahedron edge complex"))
+    end
+    for (sheet,a,b,c) in sheets
+        mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
+            "$caller: embedded Surface[$sheet] is absent from the final " *
+            "tetrahedron face complex"))
     end
     tet_edges=_tet_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()

@@ -47,6 +47,7 @@ validation/
     embed_point.jl        # classified Point-In-Surface MSH4 projection lifecycle
     embed_line.jl         # classified Line-In-Surface MSH4 projection lifecycle
     embed_sheet.jl        # Surface-In-Volume plus nested point/curve MSH lifecycle
+    embed_sheet_hole.jl   # holed Surface-In-Volume MSH2/MSH4 lifecycle
     explicit_shell.jl     # planar Surface Loop/Volume MSH2/MSH4 lifecycle
     ...                   # focused API, CAD, and boundary-layer cases
   cases/
@@ -74,7 +75,7 @@ curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
 cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface and
-Surface-In-Volume projection with nested sheet constraints, native `.geo`,
+Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
 pairs, and 2-D boundary-layer parity cases.
 The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
