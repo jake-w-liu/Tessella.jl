@@ -4,8 +4,9 @@
 Certification and exact coordinate snapping for equal-count master/slave node
 sets related by a finite translation or nonsingular affine transformation. Node
 numbering, connectivity, and tags are preserved. The caller retains the
-node-pair map and transformation; these compact `Mesh` operations do not claim
-Gmsh model-level periodic entity metadata.
+node-pair map and transformation. These compact `Mesh` operations do not add
+entity metadata; [`Tessella.Model.set_periodic!`](@ref) owns supported native
+straight-curve relations separately.
 """
 module Periodic
 

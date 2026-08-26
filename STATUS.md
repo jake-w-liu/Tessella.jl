@@ -26,8 +26,8 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node and periodic sections |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, and persistent MSH2/MSH4 periodic links |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, translation/rotation-periodic curve and MSH2/MSH4-lifecycle checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations, and persistent MSH2/MSH4 periodic links |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, native-model translation and low-level translation/rotation-periodic curve checks, MSH2/MSH4 lifecycle, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -81,20 +81,52 @@ projected corner-Jacobian checks. Closed manifold walls can use
 conforming remaining-core tetrahedral fill. Explicit one-to-one translated or
 general finite nonsingular affine node pairs can be certified and snapped exactly
 without changing node numbering, connectivity, or tags. `MixedPeriodicLink`
-retains pair maps and transforms in mixed meshes and through MSH2/MSH4 I/O;
-geometry-model persistence remains pending. P4 does not yet claim
+retains pair maps and transforms in mixed meshes and through MSH2/MSH4 I/O.
+`GeoModel` and the session API own disjoint straight-curve relations and expose
+their synchronized planar surface-node maps. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite or holed patches,
 general CAD parameterizations, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
-3-D multi-wall boundary-layer fans or persistent geometry-model periodic constraints.
+3-D multi-wall boundary-layer fans, shared or curved periodic entities, periodic
+surfaces/volumes, `.geo` periodic execution, or model-to-MSH periodic projection.
 
 General OpenCASCADE/unclassified NURBS CAD, remaining algorithms/fields, broad
 formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-26 with Julia 1.12.7 after adding persistent native
+straight-curve periodic constraints:
+
+- `GeoModel` owns atomic, immutable row-major affine curve relations and their
+  endpoint orientation. Planar surface meshing uses bounded remeshing to unify
+  master/slave boundary parameters, certifies each boundary edge chain, snaps
+  every slave node exactly, and rejects incompatible constraints at shared
+  corners. Nonperiodic model CRCs remain unchanged.
+- The direct and session APIs return detached `Int32` node maps. Successful
+  constraint updates invalidate the API mesh cache; rejected updates leave the
+  cache and model unchanged. The translated, rotated, and two-direction model
+  SHA-256 values are
+  `6ea713b4493eeb5b31e7c70ea5312290ef698424fd787bb04f1df4ef55f894cf`,
+  `f6ad616e56d52d7e10a598a4079db2de9b3d5f2a777f492f5a2366946d8ea990`,
+  and `b82c9f0f4e235e90a754f2ec50b3a373ef0a2d514a79194d9b922873e35f8dd1`.
+- The focused Model file passed 207/207 assertions and the API file passed
+  93/93 under both Julia 1.12.7 and Julia 1.11.9. Their periodic test sets
+  passed 61/61 and 35/35, including invalid meshes, unsynchronized maps,
+  nonconvergence, partial-surface relations, multiple directions, and
+  inconsistent shared-corner transforms.
+- The Gmsh 4.15.2 differential matched five native model pairs to the same five
+  Gmsh curve pairs with maximum coordinate difference
+  `2.0594637106796654e-12`; the native mesh SHA-256 is
+  `3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5`.
+- The bounds-checked package gate passed 165,614/165,614 assertions in
+  13m56.2s. Aggregate bounds-checked validation exited 0 in 13m26.6s against
+  Gmsh 4.15.2-git. Recursive ambiguity and public-documentation scans returned
+  zero, `git diff --check` passed, and the repository organization ratchet kept
+  every non-entry-point `.jl` file in a categorized subfolder.
 
 Re-measured on 2026-08-26 with Julia 1.12.7 after adding persistent standard
 MSH2 periodic sections:

@@ -71,8 +71,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   corner-Jacobian checks, resource bounds, and rigid-motion certification;
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
-  connectivity, and physical tags preserved; mixed meshes can retain the pair maps
-  and entity transforms through MSH2/MSH4 I/O;
+  connectivity, and physical tags preserved; the native model/API owns disjoint
+  straight-curve relations, synchronizes their planar boundary subdivisions, and
+  returns detached node maps, while mixed meshes retain pair maps and entity
+  transforms through MSH2/MSH4 I/O;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -110,8 +112,10 @@ format for variable connectivity and parent/domain links; binary MSH2 and MSH4 h
 explicitly narrower special-record contracts. Type 69 and some registered fixed tags
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
-Gmsh-safe rewrite. Periodic constraints are not yet persistent in the geometry
-model, although MSH2/MSH4 mixed-mesh metadata is preserved.
+Gmsh-safe rewrite. Native model periodicity is currently limited to disjoint
+straight-curve pairs on one planar triangle-meshed surface; shared/curved entities,
+surface and volume periodicity, `.geo` periodic statements, and model-to-MSH
+metadata projection remain pending.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
@@ -129,8 +133,9 @@ volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs t
 Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
-transfinite-volume, five-face-prism, translation/rotation-periodic curve, and
-MSH2/MSH4 periodic-lifecycle differentials as mandatory bounds-checked children.
+transfinite-volume, five-face-prism, native-model translation-periodic and
+low-level translation/rotation-periodic curve differentials, plus the MSH2/MSH4
+periodic lifecycle, as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
 fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness

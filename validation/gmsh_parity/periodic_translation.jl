@@ -66,6 +66,53 @@ try
     max_gmsh_error<=1e-11 || error(
         "Gmsh periodic node correspondence error is $max_gmsh_error")
 
+    # Exercise the persistent native model path against the same five physical
+    # node pairs. Tessella's 0.5 characteristic length and Gmsh's explicit
+    # Transfinite count both produce quarter-point subdivisions on these curves.
+    native_model=GeoModel()
+    for (tag,(x,y)) in enumerate(((0.0,0.0),(1.0,0.0),
+                                  (1.0,1.0),(0.0,1.0)))
+        add_point!(native_model,x,y,0;tag=tag,mesh_size=0.5)
+    end
+    for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+        add_line!(native_model,first,last;tag=tag)
+    end
+    add_curve_loop!(native_model,[1,2,3,4];tag=1)
+    add_plane_surface!(native_model,[1];tag=1)
+    set_periodic!(native_model,1,[2],[4],expected_affine)
+    native_mesh=mesh_model_surface(native_model,1)
+    validate(native_mesh).ok || error("Tessella native periodic mesh is invalid")
+    native_crc=mesh_crc(native_mesh).sha
+    native_crc=="3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5" ||
+        error("Tessella native periodic mesh CRC changed to $native_crc")
+    native_constraint=only(model_periodic_constraints(native_model))
+    native_constraint.reversed || error(
+        "Tessella did not retain the reversed native curve orientation")
+    native_mapping=model_periodic_nodes(native_model,native_mesh,1,2)
+    native_mapping.master_entity==4 || error(
+        "Tessella native periodic master curve is $(native_mapping.master_entity), expected 4")
+    native_mapping.affine==Tuple(expected_affine) || error(
+        "Tessella changed the native periodic affine transform")
+    length(native_mapping.slave_nodes)==length(native_mapping.master_nodes)==n ||
+        error("Tessella native periodic curve pair count is not $n")
+    native_order=sortperm(eachindex(native_mapping.master_nodes);
+                          by=i->native_mesh.coords[2,native_mapping.master_nodes[i]])
+    max_native_difference=0.0
+    for (native_index,gmsh_index) in zip(native_order,order)
+        native_master=Tuple(native_mesh.coords[:,native_mapping.master_nodes[native_index]])
+        native_slave=Tuple(native_mesh.coords[:,native_mapping.slave_nodes[native_index]])
+        gmsh_master=coordinates[Int(master_tags[gmsh_index])]
+        gmsh_slave=coordinates[Int(slave_tags[gmsh_index])]
+        max_native_difference=max(
+            max_native_difference,
+            hypot((native_master.-gmsh_master)...),
+            hypot((native_slave.-gmsh_slave)...))
+        native_slave==(native_master[1]+1.0,native_master[2],native_master[3]) ||
+            error("Tessella native periodic pair was not snapped exactly")
+    end
+    max_native_difference<=1e-11 || error(
+        "Tessella/Gmsh native periodic pair difference is $max_native_difference")
+
     segments=Matrix{Int32}(undef,2,2(n-1))
     for i in 1:n-1
         segments[:,i].=(Int32(i),Int32(i+1))
@@ -255,6 +302,8 @@ try
     println("GMSH_PARITY_PERIODIC_OK gmsh=$(gmsh.GMSH_API_VERSION) "*
             "translation_pairs=$n translation_error=$max_gmsh_error "*
             "translation_sha=$(mesh_crc(translation_output).sha) "*
+            "native_pairs=$(length(native_mapping.slave_nodes)) "*
+            "native_difference=$max_native_difference native_sha=$native_crc "*
             "rotation_pairs=$nr rotation_error=$max_rotation_error "*
             "rotation_sha=$(mesh_crc(rotation_output).sha) "*
             "msh2_links=3 msh2_crc=$(only(io_crcs[2.2])) "*

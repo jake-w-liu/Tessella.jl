@@ -1,15 +1,17 @@
 """
     API
 
-Gmsh-style model/mesh/option façade over Tessella's native kernels. Production
-meshing is never delegated to Gmsh.
+Gmsh-style model/mesh/option façade over Tessella's native kernels, including
+persistent affine relations between straight periodic boundary curves.
+Production meshing is never delegated to Gmsh.
 """
 module API
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!
-using ..Model: add_physical_group!, mesh_model_surface, mesh_model_volume
+using ..Model: add_physical_group!, set_periodic!, model_periodic_nodes
+using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..GeoExec: execute_geo
 
@@ -197,11 +199,48 @@ function _get_mesh()
     end
 end
 
-"""Gmsh-style mesh generation and retrieval for the active [`API`](@ref) session."""
+function _set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)
+    return _with_model(invalidate=true) do current
+        set_periodic!(
+            current,dim,slave_entities,master_entities,affine;atol=atol)
+    end
+end
+
+function _get_periodic_nodes(dim,slave_entity)
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        cached=LAST_MESH[]
+        cached===nothing && throw(ArgumentError(
+            "API.mesh.get_periodic_nodes: no mesh"))
+        model_periodic_nodes(current,cached,dim,slave_entity)
+    end
+end
+
+"""Gmsh-style mesh generation, retrieval, and periodic-curve operations."""
 module mesh
-using ..API: _generate,_get_mesh
+using ..API: _generate,_get_mesh,_set_periodic,_get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
 get()=_get_mesh()
+
+"""
+    set_periodic(dim, slave_entities, master_entities, affine; atol=1e-12)
+
+Store validated straight-curve relations in the active model and invalidate any
+cached mesh. `affine` maps each master curve to its corresponding slave curve in
+Gmsh row-major 4×4 order. Each pair must be disjoint and bound the same planar
+surface when meshed.
+"""
+set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
+    _set_periodic(dim,slave_entities,master_entities,affine;atol=atol)
+
+"""
+    get_periodic_nodes(dim, slave_entity)
+
+Return the master entity, detached slave/master node arrays, and affine transform
+for one relation in the cached surface mesh.
+"""
+get_periodic_nodes(dim,slave_entity)=
+    _get_periodic_nodes(dim,slave_entity)
 end
 
 """
