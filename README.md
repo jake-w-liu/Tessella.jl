@@ -82,9 +82,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   curve-in-surface relation, and the CLI uses this path for periodic or embedded
   `-2` output; the dimension-explicit form also emits classified boundary and
   Point/Line/Surface-In-Volume cells after certifying the selected solid fill,
-  including nested Point/Line-In-Surface constraints and explicit planar
-  surface-loop volumes with cavity signs; the CLI uses it for classified `-3`
-  output;
+  including nested Point/Line-In-Surface constraints, holed planar sheets, and
+  explicit planar surface-loop volumes with cavity signs; the CLI uses it for
+  classified `-3` output;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -161,7 +161,7 @@ transfinite-volume, five-face-prism, native `.geo` and projected single-/two-dir
 periodic surface differentials, plus low-level translation/rotation-periodic curves
 and the MSH2/MSH4 lifecycle, classified Point/Line-In-Surface MSH4 round trips,
 and the classified Surface-In-Volume lifecycle with nested point/curve constraints
-as mandatory bounds-checked children.
+and optional holes as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
 fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness

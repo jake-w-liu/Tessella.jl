@@ -116,9 +116,9 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Point/Line/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and literal straight-curve periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested sheet constraints, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations with literal `.geo` transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations with literal `.geo` transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surface, embedded-volume, and explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, classified Point/Line-In-Surface, nested Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -165,7 +165,8 @@ that preserve axis-aligned boxes. Point-In-Surface embeddings force the classifi
 point to appear as a mesh node; Line-In-Surface embeddings recover the curve as an
 interior constrained edge chain without creating a hole; Point-In-Volume embeddings
 insert a Steiner vertex by a tet split; Line-In-Volume and Surface-In-Volume recover
-interior edge chains and open triangular sheets as tet faces without removing volume.
+interior edge chains and open planar triangle sheets, including sheets with holes,
+as tet faces without removing volume.
 It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD of
 unclassified topology, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
@@ -235,8 +236,9 @@ after certifying the selected solid fill, with MSH2 elementary ownership and MSH
 entity classification. Explicit planar shells classify every tetrahedron boundary
 face exactly once and retain signed outer/cavity surface boundaries. Nested
 Point/Line-In-Surface constraints are certified against the sheet face complex, and
-MSH4 retains the nested Curve-In-Surface relation; the CLI uses this path for
-classified `-3` output. Gmsh 4.15.2 serializes those entities and cells but no
+the sheet may contain interior loops. MSH4 retains the nested Curve-In-Surface
+relation; the CLI uses this path for classified `-3` output. Gmsh 4.15.2 serializes
+those entities and cells but no
 Point/Line/Surface-In-Volume relation. P4 does not
 yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
@@ -282,7 +284,7 @@ single-/two-direction periodic surfaces and low-level translation/rotation-perio
 curves with the MSH2/MSH4 lifecycle, plus classified Point/Line-In-Surface MSH4
 projection and embedding-metadata round trips, plus the classified
 Surface-In-Volume MSH2/MSH4 lifecycle with nested point/curve constraints, as
-required bounds-checked children,
+well as the holed-sheet lifecycle, as required bounds-checked children,
 together with the P6 t1-square, OCC-cylinder, OCC-cone, IGES-128 bilinear,
 BooleanDifference box, and 2-D boundary-layer differentials. A missing or
 wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the

@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: Mesh, nnodes, ntets, tet_volume, node
+using Tessella.MeshTypes: Mesh, nnodes, ntets, tet_volume, triangle_area, node
 using Tessella.Mesh3D: insert_steiner3, recover_segment3
 
 function _classified_volume_fixture()
@@ -69,6 +69,36 @@ function _mesh_volume_value(mesh)
         node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
         node(mesh,mesh.tets[3,cell]),node(mesh,mesh.tets[4,cell]))
         for cell in 1:ntets(mesh))
+end
+
+function _holed_sheet_volume_fixture()
+    model=GeoModel()
+    add_box!(model,0,0,0,1,1,1;tag=1)
+    coordinates=((0.15,0.15,0.5),(0.85,0.15,0.5),
+                 (0.85,0.85,0.5),(0.15,0.85,0.5),
+                 (0.4,0.4,0.5),(0.6,0.4,0.5),
+                 (0.6,0.6,0.5),(0.4,0.6,0.5),
+                 (0.25,0.3,0.5),(0.75,0.3,0.5),(0.5,0.3,0.5))
+    for (offset,coordinate) in enumerate(coordinates)
+        add_point!(model,coordinate...;tag=100+offset)
+    end
+    for (tag,start_point,stop_point) in
+            ((101,101,102),(102,102,103),(103,103,104),(104,104,101),
+             (105,105,106),(106,106,107),(107,107,108),(108,108,105),
+             (109,109,110))
+        add_line!(model,start_point,stop_point;tag=tag)
+    end
+    add_curve_loop!(model,collect(101:104);tag=101)
+    add_curve_loop!(model,collect(105:108);tag=102)
+    add_plane_surface!(model,[101,102];tag=101)
+    embed!(model,0,[111],2,101)
+    embed!(model,1,[109],2,101)
+    embed!(model,2,[101],3,1)
+    add_physical_group!(model,0,collect(101:111);tag=71,name="sheet points")
+    add_physical_group!(model,1,collect(101:109);tag=72,name="sheet curves")
+    add_physical_group!(model,2,[101];tag=73,name="holed sheet")
+    add_physical_group!(model,3,[1];tag=74,name="domain")
+    return model
 end
 
 @testset "classified native volume projection" begin
@@ -214,6 +244,48 @@ end
                0.0,0.0,0.0,1.0)
     set_periodic!(periodic,1,[21],[20],translate)
     @test_throws ArgumentError model_to_mixed(periodic,mesh,3,1)
+end
+
+@testset "holed Surface-In-Volume recovery" begin
+    model=_holed_sheet_volume_fixture()
+    mesh=mesh_model_volume(model,1)
+    @test validate(mesh).ok
+    @test ntets(mesh)>0
+    @test _mesh_volume_value(mesh)≈1.0 atol=1e-12
+
+    projected=model_to_mixed(model,mesh,3,1)
+    @test validate(projected).ok
+    @test [block.msh for block in projected.blocks]==[15,1,2,4]
+    surface_index=only(findall(block->block.msh==2,projected.blocks))
+    surface_block=projected.blocks[surface_index]
+    @test all(==(Int32(101)),
+              projected.entity_data.block_entities[surface_index])
+    @test projected.entity_data.entities[(2,101)].boundaries==
+          Int32[101,102,103,104,-108,-107,-106,-105]
+    @test projected.entity_data.entities[(2,101)].embedded_curves==Int32[109]
+    @test projected.physical_names==Dict(
+        (0,71)=>"sheet points",(1,72)=>"sheet curves",
+        (2,73)=>"holed sheet",(3,74)=>"domain")
+
+    sheet_area=0.0
+    hole_centroid_hits=0
+    for cell in axes(surface_block.nodes,2)
+        points=ntuple(slot->begin
+            point=surface_block.nodes[slot,cell]
+            (projected.coords[1,point],projected.coords[2,point],
+             projected.coords[3,point])
+        end,3)
+        sheet_area+=triangle_area(points...)
+        centroid=ntuple(axis->sum(point[axis] for point in points)/3,3)
+        0.4<centroid[1]<0.6 && 0.4<centroid[2]<0.6 &&
+            (hole_centroid_hits+=1)
+    end
+    @test sheet_area≈0.45 atol=1e-12
+    @test hole_centroid_hits==0
+    @test any(entity==(0,Int32(111))
+              for entity in projected.entity_data.node_entities)
+    @test mixed_crc(projected).sha==
+          "8d6d3404cef5985c7ef74c85b26c22894bfd03873182139ab26e9ea766b21400"
 end
 
 @testset "explicit modeled volume shells" begin
