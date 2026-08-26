@@ -25,9 +25,9 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic metadata, structural validation/CRC, and ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node and periodic sections |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations, and persistent MSH2/MSH4 periodic links |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, native-model translation and low-level translation/rotation-periodic curve checks, MSH2/MSH4 lifecycle, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and literal straight-curve periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations with literal `.geo` transforms, and persistent MSH2/MSH4 periodic links |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, Point/Line-In-Surface, Surface-In-Volume sheet, native `.geo` translation and low-level translation/rotation-periodic curve checks, MSH2/MSH4 lifecycle, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -90,13 +90,42 @@ general CAD parameterizations, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, shared or curved periodic entities, periodic
-surfaces/volumes, `.geo` periodic execution, or model-to-MSH periodic projection.
+surfaces/volumes, variable periodic tags or numeric expressions, or model-to-MSH
+periodic projection. Literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
+and 12-entry `Affine` statements are in scope for the bounded `.geo` executor.
 
 General OpenCASCADE/unclassified NURBS CAD, remaining algorithms/fields, broad
 formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Current worktree verification
+
+Re-measured on 2026-08-26 with Julia 1.12.7 after enabling bounded native `.geo`
+periodic-curve execution:
+
+- `execute_geo` accepts legacy `Periodic Line` and current `Periodic Curve`
+  statements between straight curves with finite literal `Translate` triples,
+  `Rotate` axis/center/angle data, or Gmsh's 12-entry `.geo` `Affine` form.
+  Variable entity tags, numeric expressions, curved entities, and periodic
+  surfaces or volumes remain explicit blockers.
+- Parsed constraints persist in `GeoModel`, mesh through the native planar
+  surface path, and survive `API.open_geo!` with detached cached-mesh ownership.
+  The translated and non-origin rotated `.geo` mesh SHA-256 values are
+  `3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5`
+  and `f6ad616e56d52d7e10a598a4079db2de9b3d5f2a777f492f5a2366946d8ea990`.
+- The focused `.geo` periodic suite passed 31/31 assertions and the API file
+  passed 98/98 under both Julia 1.12.7 and Julia 1.11.9. Invalid dimensions,
+  transform arities, nonfinite or nonliteral values, zero rotation axes, and
+  malformed entity lists all block.
+- The Gmsh 4.15.2 differential now builds Tessella's five native pairs by
+  executing a checked-in `.geo` fixture. Their maximum coordinate difference
+  from Gmsh's five pairs is `2.0594637106796654e-12`; the existing translated,
+  rotated, MSH2, and MSH4 CRCs remain unchanged.
+- The bounds-checked package gate passed 165,650/165,650 assertions in 13m12.2s.
+  Aggregate bounds-checked validation exited 0 in 12m39.7s against Gmsh
+  4.15.2-git. Recursive ambiguity and public-documentation scans returned zero,
+  `git diff --check` passed, and the repository organization ratchet kept every
+  non-entry-point `.jl` file in a categorized subfolder.
 
 Re-measured on 2026-08-26 with Julia 1.12.7 after adding persistent native
 straight-curve periodic constraints:

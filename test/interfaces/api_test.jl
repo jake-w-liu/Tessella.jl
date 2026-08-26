@@ -86,8 +86,22 @@ const _API=Tessella.API
     mktempdir() do directory
         valid=joinpath(directory,"box.geo")
         invalid=joinpath(directory,"invalid.geo")
+        periodic=joinpath(directory,"periodic.geo")
         write(valid,"Box(1) = {0, 0, 0, 1, 1, 1};\n")
         write(invalid,"Extrude {0, 0, 1} { Volume{1}; }\n")
+        write(periodic,"""
+            Point(1) = {0, 0, 0, 0.5};
+            Point(2) = {1, 0, 0, 0.5};
+            Point(3) = {1, 1, 0, 0.5};
+            Point(4) = {0, 1, 0, 0.5};
+            Line(1) = {1, 2};
+            Line(2) = {2, 3};
+            Line(3) = {3, 4};
+            Line(4) = {4, 1};
+            Curve Loop(1) = {1, 2, 3, 4};
+            Plane Surface(1) = {1};
+            Periodic Curve {2} = {4} Translate {1, 0, 0};
+            """)
 
         @test_throws ArgumentError _API.open_geo!(valid)
         try
@@ -102,6 +116,17 @@ const _API=Tessella.API
             @test add_box!(result.model,2,0,0,1,1,1;tag=2)==2
             @test _API.model.add_box(2,0,0,1,1,1;tag=2)==2
             @test_throws ArgumentError _API.mesh.get()
+
+            periodic_result=_API.open_geo!(periodic;mesh_dim=2)
+            @test periodic_result.mesh!==nothing
+            periodic_crc=mesh_crc(periodic_result.mesh)
+            @test periodic_crc.sha==
+                  "3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5"
+            periodic_mapping=_API.mesh.get_periodic_nodes(1,2)
+            @test periodic_mapping.master_entity==4
+            @test length(periodic_mapping.slave_nodes)==5
+            periodic_result.mesh.coords[1,1]+=10
+            @test mesh_crc(_API.mesh.get())==periodic_crc
         finally
             _API.finalize()
         end

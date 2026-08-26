@@ -21,6 +21,7 @@ end
 
 include(find_gmsh_api())
 const GEO=joinpath(@__DIR__,"periodic_translation.geo")
+const NATIVE_GEO=joinpath(@__DIR__,"periodic_native.geo")
 gmsh.initialize(["gmsh","-v","0"])
 try
     startswith(gmsh.GMSH_API_VERSION,"4.15.2") || error(
@@ -66,28 +67,21 @@ try
     max_gmsh_error<=1e-11 || error(
         "Gmsh periodic node correspondence error is $max_gmsh_error")
 
-    # Exercise the persistent native model path against the same five physical
-    # node pairs. Tessella's 0.5 characteristic length and Gmsh's explicit
-    # Transfinite count both produce quarter-point subdivisions on these curves.
-    native_model=GeoModel()
-    for (tag,(x,y)) in enumerate(((0.0,0.0),(1.0,0.0),
-                                  (1.0,1.0),(0.0,1.0)))
-        add_point!(native_model,x,y,0;tag=tag,mesh_size=0.5)
-    end
-    for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
-        add_line!(native_model,first,last;tag=tag)
-    end
-    add_curve_loop!(native_model,[1,2,3,4];tag=1)
-    add_plane_surface!(native_model,[1];tag=1)
-    set_periodic!(native_model,1,[2],[4],expected_affine)
-    native_mesh=mesh_model_surface(native_model,1)
-    validate(native_mesh).ok || error("Tessella native periodic mesh is invalid")
+    # Execute the persistent native model path from `.geo` against the same five
+    # physical node pairs. Tessella's 0.5 characteristic length and Gmsh's
+    # explicit Transfinite count both produce quarter-point subdivisions here.
+    native_execution=execute_geo(NATIVE_GEO;mesh_dim=2)
+    native_model=native_execution.model
+    native_mesh=native_execution.mesh
+    native_mesh===nothing && error("Tessella native periodic `.geo` did not mesh")
+    validate(native_mesh).ok || error(
+        "Tessella native periodic `.geo` mesh is invalid")
     native_crc=mesh_crc(native_mesh).sha
     native_crc=="3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5" ||
-        error("Tessella native periodic mesh CRC changed to $native_crc")
+        error("Tessella native periodic `.geo` mesh CRC changed to $native_crc")
     native_constraint=only(model_periodic_constraints(native_model))
     native_constraint.reversed || error(
-        "Tessella did not retain the reversed native curve orientation")
+        "Tessella did not retain the reversed native `.geo` curve orientation")
     native_mapping=model_periodic_nodes(native_model,native_mesh,1,2)
     native_mapping.master_entity==4 || error(
         "Tessella native periodic master curve is $(native_mapping.master_entity), expected 4")

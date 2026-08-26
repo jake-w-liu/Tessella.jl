@@ -41,7 +41,8 @@ validation/
   gmsh_parity/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
-    periodic_translation.jl # native/model and compact periodic pairs vs Gmsh 4.15.2
+    periodic_translation.jl # native `.geo` and compact periodic pairs vs Gmsh 4.15.2
+    periodic_native.geo  # bounded native translation-periodic fixture
     ...                   # focused API, CAD, embedding, and boundary-layer cases
   cases/
     01_box/box.geo               # reference gmsh script (retained)
@@ -67,7 +68,7 @@ four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
-cylinder, Boolean, NURBS/IGES, embedding, native-model and compact periodic
+cylinder, Boolean, NURBS/IGES, embedding, native `.geo` and compact periodic
 node-pair, and 2-D boundary-layer parity cases.
 The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
 Tessella-generated type 126/128/144 records. Missing or wrong-version Gmsh,

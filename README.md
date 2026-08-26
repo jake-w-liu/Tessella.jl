@@ -113,8 +113,10 @@ explicitly narrower special-record contracts. Type 69 and some registered fixed 
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. Native model periodicity is currently limited to disjoint
-straight-curve pairs on one planar triangle-meshed surface; shared/curved entities,
-surface and volume periodicity, `.geo` periodic statements, and model-to-MSH
+straight-curve pairs on one planar triangle-meshed surface. The bounded `.geo`
+executor accepts literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
+and 12-entry `Affine` transforms. Shared or curved entities, periodic surfaces and
+volumes, variable tags or numeric expressions in those statements, and model-to-MSH
 metadata projection remain pending.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
@@ -133,7 +135,7 @@ volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs t
 Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
-transfinite-volume, five-face-prism, native-model translation-periodic and
+transfinite-volume, five-face-prism, native `.geo` translation-periodic and
 low-level translation/rotation-periodic curve differentials, plus the MSH2/MSH4
 periodic lifecycle, as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
