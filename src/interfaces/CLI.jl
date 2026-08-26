@@ -62,10 +62,12 @@ Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
 and returns its path. Native periodic/embedded surface meshes and embedded volume
 meshes include their supported classified entity, cell, and node records, including
 nested point/curve constraints on an embedded sheet and explicit volume boundaries.
-Periodic volume output is
-blocked; periodic surface output requires exactly one selected surface containing
-every slave curve. Duplicate/conflicting flags, multiple inputs, ignored output
-arguments, and any output that aliases the input are rejected.
+Periodic surface output retains periodic-curve graphs with reused masters and
+acyclic chains.
+Periodic volume output is blocked; periodic surface output requires exactly one
+selected surface containing every slave and master curve. Duplicate/conflicting
+flags, multiple inputs, ignored output arguments, and any output that aliases the
+input are rejected.
 """
 function main(args::AbstractVector{<:AbstractString})
     length(args)<=_MAX_ARGUMENTS || throw(ArgumentError(

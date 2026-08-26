@@ -116,9 +116,9 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Point/Line/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and literal straight-curve periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with literal `.geo` transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, literal `.geo` transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surface, embedded-volume, and explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded periodic curves, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded and reusable-master/chained periodic curves, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -216,9 +216,10 @@ retains aligned elementary-entity tags and its standard ASCII periodic section i
 both file modes; MSH4 uses its ASCII or native-endian binary section, with
 opposite-endian binary input decoded under cumulative resource limits. The CRC
 is pair-order independent. `GeoModel` owns validated affine relations with one
-relation per straight curve; independent relations may meet at corners. Planar
-surface meshing synchronizes boundary or embedded curve subdivisions through
-bounded remeshing and exposes the certified node map through
+master per slave, reusable masters, and acyclic master/slave chains; independent
+relations may meet at corners. Planar surface meshing synchronizes boundary or
+embedded curve subdivisions across each dependency graph through bounded remeshing
+and exposes the certified node map through
 the direct and session APIs. Bounded `.geo` execution accepts literal
 `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`, and 12-entry `Affine`
 transforms. `model_to_mixed` projects a native planar triangle mesh into point,
@@ -245,8 +246,8 @@ non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
-high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, a curve
-participating in multiple periodic relations, curved periodic entities, periodic
+high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, cyclic
+periodic-curve dependency graphs, curved periodic entities, periodic
 surfaces/volumes, or variable periodic tags or numeric expressions. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell
 and global fill volume identities and an interface tiling gate; its core engine
@@ -279,9 +280,9 @@ four-sided transfinite, straight transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
 recombined-hexahedron differentials, plus native `.geo` and projected
-single-/two-direction periodic surfaces and low-level translation/rotation-periodic
-curves with the MSH2/MSH4 lifecycle, embedded periodic curves, classified
-Point/Line-In-Surface MSH4
+single-/two-direction periodic surfaces, embedded and reusable-master/chained
+periodic curves, low-level translation/rotation-periodic curves with the MSH2/MSH4
+lifecycle, and classified Point/Line-In-Surface MSH4
 projection and embedding-metadata round trips, plus the classified
 Surface-In-Volume MSH2/MSH4 lifecycle with nested point/curve constraints, as
 well as the holed-sheet lifecycle, as required bounds-checked children,

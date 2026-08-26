@@ -26,8 +26,8 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, and classified surface/explicit-shell/embedded-volume model-to-mixed projection |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES NURBS export, Point/Line/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and literal straight-curve periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with literal `.geo` transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surface, embedded-volume, and explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction and embedded periodic-curve checks, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, literal `.geo` transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surface, embedded-volume, and explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, and reusable-master/chained periodic-curve checks, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -83,9 +83,9 @@ conforming remaining-core tetrahedral fill. Explicit one-to-one translated or
 general finite nonsingular affine node pairs can be certified and snapped exactly
 without changing node numbering, connectivity, or tags. `MixedPeriodicLink`
 retains pair maps and transforms in mixed meshes and through MSH2/MSH4 I/O.
-`GeoModel` and the session API own straight-curve relations with one relation per
-curve, synchronize boundary or embedded subdivisions, and expose their planar
-surface-node maps. `model_to_mixed`
+`GeoModel` and the session API own straight-curve relations with one master per
+slave, reusable masters, and acyclic master/slave chains. They synchronize boundary
+or embedded subdivisions and expose their planar surface-node maps. `model_to_mixed`
 projects planar triangle surfaces, including holes, Point/Line-In-Surface entities,
 and shared periodic corners, into classified point/line/triangle blocks with
 physical ownership, MSH2 elementary ownership, and supported MSH4 embedding and
@@ -104,9 +104,9 @@ quasi-transfinite or holed transfinite patches,
 general CAD parameterizations, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
-3-D multi-wall boundary-layer fans, a curve participating in multiple periodic
-relations, curved periodic entities, periodic surfaces/volumes, variable periodic
-tags or numeric expressions. Literal
+3-D multi-wall boundary-layer fans, cyclic periodic-curve dependencies, curved
+periodic entities, periodic surfaces/volumes, or variable periodic tags or numeric
+expressions. Literal
 `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
 and 12-entry `Affine` statements are in scope for the bounded `.geo` executor.
 
@@ -115,6 +115,34 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-08-26 with Julia 1.12.7 after adding acyclic
+periodic-curve dependency graphs:
+
+- Native boundary or embedded straight curves can reuse a master or form a
+  master/slave chain. Graph validation keeps one master per slave and rejects a
+  cycle before mutating the model. Subdivision parameters propagate across each
+  connected graph, and affine snapping follows dependency order. Modeled points
+  that coincide with reconstructed embedded-curve subdivisions retain one mesh
+  vertex.
+- The native model, model-to-MSH projection, bounded `.geo`, session API, and CLI
+  periodic sets passed 118/118, 93/93, 93/93, 49/49, and 94/94 assertions under
+  Julia 1.12.7 and 1.11.9. Recursive ambiguity and public-documentation scans for
+  the package, Model, API, GeoExec, and CLI returned zero under both versions.
+- The Gmsh 4.15.2 branch and chain differential passed for MSH2/MSH4 ASCII and
+  binary. Tessella produced 77 nodes and nine pairs per curve; Gmsh produced 44
+  triangles and three pairs per curve, with maximum affine error
+  `8.184564212836642e-13`. Gmsh returned empty maps for the measured cyclic
+  graph. The shared native mesh CRC is
+  `dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338`;
+  the branch and chain projected MSH4 CRCs are
+  `6eb5020b186e9abdd8472312791bf375e1e9512066e7cc67b1fd2c1990a6d82f`
+  and `3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1`.
+- The bounds-checked package gate passed 166,308/166,308 assertions in 13m19.5s.
+  Aggregate bounds-checked validation exited 0 in 17m46.6s against Gmsh
+  4.15.2-git. `git diff --check` passed, and all 131 source-managed Julia files
+  remained categorized with only the three designated entry points at their top
+  levels.
 
 Re-measured on 2026-08-26 with Julia 1.12.7 after extending native periodicity
 to straight curves embedded in planar surfaces:

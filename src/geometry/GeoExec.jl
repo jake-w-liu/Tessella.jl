@@ -5,8 +5,9 @@ Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface/
 Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
 90°-Rotate of those solids, Point/Line-In-Surface and Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, literal
-Translate/Rotate/Affine periodic straight curves, Physical groups, and Mesh 2/3 via
-the native [`Model`](@ref) kernel. Control-flow loops, macros,
+Translate/Rotate/Affine periodic straight curves with reusable masters and acyclic
+dependency chains, Physical groups, and Mesh 2/3 via the native [`Model`](@ref)
+kernel. Control-flow loops, macros,
 extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
 module GeoExec
@@ -115,7 +116,8 @@ Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
 subset and malformed input raise `ArgumentError` instead of being partially
 accepted. `Periodic Line` and `Periodic Curve` accept literal `Translate`,
 `Rotate`, and 12-entry `.geo` `Affine` transforms between straight curves;
-variable tags and numeric expressions are outside this execution subset.
+multiple statements may reuse a master or form an acyclic master/slave chain.
+Variable tags and numeric expressions are outside this execution subset.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))

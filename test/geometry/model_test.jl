@@ -135,6 +135,28 @@ end
         return model
     end
 
+    function periodic_curve_graph()
+        model=GeoModel()
+        coordinates=(
+            (1,0.0,0.0),(2,1.0,0.0),(3,1.0,1.0),(4,0.0,1.0),
+            (101,0.2,0.2),(102,0.8,0.2),
+            (103,0.2,0.5),(104,0.8,0.5),
+            (105,0.2,0.8),(106,0.8,0.8),(107,0.425,0.8))
+        for (tag,x,y) in coordinates
+            add_point!(model,x,y,0;tag=tag,mesh_size=0.4)
+        end
+        endpoints=((1,1,2),(2,2,3),(3,3,4),(4,4,1),
+                   (30,101,102),(20,103,104),(10,106,105))
+        for (tag,first,last) in endpoints
+            add_line!(model,first,last;tag=tag)
+        end
+        add_curve_loop!(model,[1,2,3,4];tag=1)
+        add_plane_surface!(model,[1];tag=1)
+        embed!(model,0,[107],2,1)
+        embed!(model,1,[30,20,10],2,1)
+        return model
+    end
+
     translation=Float64[
         1,0,0,1,
         0,1,0,0,
@@ -247,6 +269,79 @@ end
         double_mapping=model_periodic_nodes(
             double_periodic,double_mesh,1,slave_entity)
         @test length(double_mapping.slave_nodes)==9
+    end
+
+    translate_y03=(1.0,0.0,0.0,0.0,
+                   0.0,1.0,0.0,0.3,
+                   0.0,0.0,1.0,0.0,
+                   0.0,0.0,0.0,1.0)
+    translate_y06=(1.0,0.0,0.0,0.0,
+                   0.0,1.0,0.0,0.6,
+                   0.0,0.0,1.0,0.0,
+                   0.0,0.0,0.0,1.0)
+
+    branch=periodic_curve_graph()
+    set_periodic!(branch,1,[20],[30],translate_y03)
+    set_periodic!(branch,1,[10],[30],translate_y06)
+    branch_constraints=model_periodic_constraints(branch)
+    @test Int.(getproperty.(branch_constraints,:slave_entity))==[10,20]
+    @test Int.(getproperty.(branch_constraints,:master_entity))==[30,30]
+    @test branch_constraints[1].reversed
+    branch_mesh=mesh_model_surface(branch,1)
+    @test validate(branch_mesh).ok
+    @test mesh_crc(branch_mesh).sha==
+          "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+    for (slave_entity,offset) in ((10,0.6),(20,0.3))
+        branch_mapping=model_periodic_nodes(
+            branch,branch_mesh,1,slave_entity)
+        @test branch_mapping.master_entity==30
+        @test length(branch_mapping.slave_nodes)==9
+        for (slave,master) in zip(branch_mapping.slave_nodes,
+                                  branch_mapping.master_nodes)
+            @test Tuple(branch_mesh.coords[:,slave])==
+                  (branch_mesh.coords[1,master],
+                   branch_mesh.coords[2,master]+offset,
+                   branch_mesh.coords[3,master])
+        end
+    end
+
+    chain=periodic_curve_graph()
+    @test set_periodic!(
+        chain,1,[20,10],[30,20],translate_y03)===nothing
+    chain_constraints=model_periodic_constraints(chain)
+    @test Int.(getproperty.(chain_constraints,:slave_entity))==[10,20]
+    @test Int.(getproperty.(chain_constraints,:master_entity))==[20,30]
+    cycle_error=try
+        set_periodic!(chain,1,[30],[10],(
+            1.0,0.0,0.0,0.0,
+            0.0,1.0,0.0,-0.6,
+            0.0,0.0,1.0,0.0,
+            0.0,0.0,0.0,1.0))
+        nothing
+    catch err
+        err
+    end
+    @test cycle_error isa ArgumentError
+    @test occursin(
+        "cyclic periodic dependency Curve[10] -> Curve[20] -> Curve[30] -> Curve[10]",
+        sprint(showerror,cycle_error))
+    @test model_periodic_constraints(chain)==chain_constraints
+    chain_mesh=mesh_model_surface(chain,1)
+    @test validate(chain_mesh).ok
+    @test mesh_crc(chain_mesh).sha==
+          "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+    for (slave_entity,master_entity) in ((10,20),(20,30))
+        chain_mapping=model_periodic_nodes(
+            chain,chain_mesh,1,slave_entity)
+        @test chain_mapping.master_entity==master_entity
+        @test length(chain_mapping.slave_nodes)==9
+        for (slave,master) in zip(chain_mapping.slave_nodes,
+                                  chain_mapping.master_nodes)
+            @test Tuple(chain_mesh.coords[:,slave])==
+                  (chain_mesh.coords[1,master],
+                   chain_mesh.coords[2,master]+0.3,
+                   chain_mesh.coords[3,master])
+        end
     end
 
     inconsistent=periodic_square()
