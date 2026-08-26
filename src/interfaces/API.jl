@@ -238,9 +238,10 @@ get()=_get_mesh()
 
 Store validated straight-curve relations in the active model and invalidate any
 cached mesh. `affine` maps each master curve to its corresponding slave curve in
-Gmsh row-major 4×4 order. Their endpoints must be disjoint, and both curves in
-each pair must belong to the same planar surface, as boundary or embedded curves,
-when meshed.
+Gmsh row-major 4×4 order. Each slave has one master; masters may be reused, and a
+slave may become a master in an acyclic dependency chain. Cycles are rejected
+atomically. Pair endpoints must be disjoint, and both curves must belong to the
+same planar surface, as boundary or embedded curves, when meshed.
 """
 set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     _set_periodic(dim,slave_entities,master_entities,affine;atol=atol)

@@ -275,16 +275,78 @@ function _model_curve_length(m::GeoModel,curve::Int,caller::AbstractString)
     return length1
 end
 
+function _model_periodic_dependency_parents(
+    constraints,caller::AbstractString)
+    parents=Dict{Int,Int}()
+    for constraint in constraints
+        slave=Int(constraint.slave_entity)
+        master=Int(constraint.master_entity)
+        haskey(parents,slave) && throw(ArgumentError(
+            "$caller: Curve[$slave] has more than one periodic master"))
+        parents[slave]=master
+    end
+
+    state=Dict{Int,UInt8}()
+    for start in sort!(collect(keys(parents)))
+        get(state,start,0x00)==0x00 || continue
+        path=Int[]
+        positions=Dict{Int,Int}()
+        current=start
+        while haskey(parents,current) && get(state,current,0x00)==0x00
+            state[current]=0x01
+            push!(path,current)
+            positions[current]=length(path)
+            current=parents[current]
+        end
+        if get(state,current,0x00)==0x01
+            first_cycle=get(positions,current,0)
+            first_cycle>0 || throw(ErrorException(
+                "$caller: internal periodic dependency traversal failed"))
+            cycle=vcat(path[first_cycle:end],current)
+            description=join(("Curve[$curve]" for curve in cycle)," -> ")
+            throw(ArgumentError(
+                "$caller: cyclic periodic dependency $description"))
+        end
+        for curve in path
+            state[curve]=0x02
+        end
+    end
+    return parents
+end
+
+function _model_periodic_constraint_order(constraints,caller::AbstractString)
+    parents=_model_periodic_dependency_parents(constraints,caller)
+    depths=Dict{Int,Int}()
+    for start in sort!(collect(keys(parents)))
+        haskey(depths,start) && continue
+        path=Int[]
+        current=start
+        while haskey(parents,current) && !haskey(depths,current)
+            push!(path,current)
+            current=parents[current]
+        end
+        depth=get(depths,current,-1)
+        for curve in Iterators.reverse(path)
+            depth+=1
+            depths[curve]=depth
+        end
+    end
+    return sort!(collect(constraints);by=constraint->(
+        depths[Int(constraint.slave_entity)],constraint.slave_entity))
+end
+
 """
     set_periodic!(model, dim, slave_entities, master_entities, affine;
                   atol=1e-12)
 
-Persist disjoint affine relations between equally sized lists of straight native
-curves. `affine` maps each master curve to its slave in Gmsh row-major 4×4
-order. This slice supports dimension 1; surface and volume periodicity are explicit
-blockers. Both curves in each pair must belong to the same planar surface, as
-boundary or embedded curves, when meshed. Curve endpoints must be disjoint and
-agree with the affine map within `atol`. The update is atomic.
+Persist affine relations between equally sized lists of straight native curves.
+`affine` maps each master curve to its slave in Gmsh row-major 4×4 order. A curve
+may be the master of multiple relations or both a slave and a master in an
+acyclic dependency chain; each slave has exactly one master. Cycles are explicit
+blockers. This slice supports dimension 1; surface and volume periodicity are
+explicit blockers. Both curves in each pair must belong to the same planar
+surface, as boundary or embedded curves, when meshed. Curve endpoints must be
+disjoint and agree with the affine map within `atol`. The update is atomic.
 """
 function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                        atol=1e-12)
@@ -300,17 +362,10 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
         "$caller: need at least one slave/master curve pair"))
     length(unique(slaves))==length(slaves) || throw(ArgumentError(
         "$caller: slave curve tags must be unique"))
-    participants=vcat(slaves,masters)
-    length(unique(participants))==length(participants) || throw(ArgumentError(
-        "$caller: every curve may participate in at most one periodic relation"))
-    used=Set{Int}()
-    for constraint in values(m.periodic)
-        push!(used,Int(constraint.slave_entity))
-        push!(used,Int(constraint.master_entity))
-    end
-    overlap=sort!(collect(intersect(Set(participants),used)))
+    overlap=sort!(Int[slave for slave in slaves
+                      if haskey(m.periodic,(d,slave))])
     isempty(overlap) || throw(ArgumentError(
-        "$caller: Curve[$(first(overlap))] already participates in a periodic relation"))
+        "$caller: Curve[$(first(overlap))] already has a periodic master"))
     tolerance=_model_periodic_tolerance(atol,caller)
     coefficients,translation,row_major=_transform_homogeneous(
         affine,caller;name="affine transform")
@@ -340,6 +395,8 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
         push!(pending,ModelPeriodicConstraint(
             d,Int32(slave),Int32(master),row_major,reversed<forward,tolerance))
     end
+    _model_periodic_dependency_parents(
+        vcat(model_periodic_constraints(m),pending),caller)
     for constraint in pending
         m.periodic[(constraint.dim,Int(constraint.slave_entity))]=constraint
     end
@@ -927,6 +984,31 @@ function _add_surface_point!(xs, ys, index, m::GeoModel, pid::Int, caller)
     return index[pid]
 end
 
+function _add_surface_curve_point!(xs,ys,index,m::GeoModel,point,
+                                   curve::Int,caller::AbstractString)
+    scale=max(1.0,hypot(point[1],point[2]))
+    tolerance=128eps(Float64)*scale
+    matched_vertex=0
+    matched_point=0
+    for point_tag in sort!(collect(keys(index)))
+        candidate=m.points[point_tag]
+        distance=hypot(candidate[1]-point[1],candidate[2]-point[2],
+                       candidate[3]-point[3])
+        distance<=tolerance || continue
+        vertex=index[point_tag]
+        if matched_vertex!=0 && matched_vertex!=vertex
+            throw(ArgumentError(
+                "$caller: Curve[$curve] subdivision coincides with " *
+                "Points[$matched_point] and [$point_tag]"))
+        end
+        matched_vertex=vertex
+        matched_point=point_tag
+    end
+    matched_vertex!=0 && return matched_vertex
+    push!(xs,point[1]);push!(ys,point[2])
+    return length(xs)
+end
+
 function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
                                caller::AbstractString)
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
@@ -980,43 +1062,46 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
     for (edim,etag) in embedded
         if edim==0
             _add_surface_point!(xs,ys,index,m,etag,caller)
-        elseif edim==1
-            haskey(m.curves,etag) || throw(ArgumentError(
-                "$caller: unknown embedded Curve[$etag]"))
-            a,b=m.curves[etag]
-            parameters=get(forced,etag,nothing)
-            curve_nodes=Int[]
-            if parameters===nothing
-                push!(curve_nodes,_add_surface_point!(xs,ys,index,m,a,caller))
-                push!(curve_nodes,_add_surface_point!(xs,ys,index,m,b,caller))
-            else
-                for parameter in parameters
-                    vertex=if parameter==0
-                        _add_surface_point!(xs,ys,index,m,a,caller)
-                    elseif parameter==1
-                        _add_surface_point!(xs,ys,index,m,b,caller)
-                    else
-                        point=_periodic_curve_point(m,etag,parameter,caller)
-                        abs(point[3])<=1e-12 || throw(ArgumentError(
-                            "$caller: embedded Curve[$etag] subdivision is not " *
-                            "planar in z=0"))
-                        push!(xs,point[1]);push!(ys,point[2]);length(xs)
-                    end
-                    push!(curve_nodes,vertex)
-                end
-            end
-            length(curve_nodes)>=2 || throw(ArgumentError(
-                "$caller: embedded Curve[$etag] needs two distinct endpoints"))
-            for segment_index in 1:(length(curve_nodes)-1)
-                first_node=curve_nodes[segment_index]
-                second_node=curve_nodes[segment_index+1]
-                first_node==second_node && throw(ArgumentError(
-                    "$caller: embedded Curve[$etag] has coincident subdivision nodes"))
-                push!(internal,(first_node,second_node))
-            end
-        else
+        elseif edim!=1
             throw(ArgumentError(
                 "$caller: unsupported embedding dimension $edim"))
+        end
+    end
+    for (edim,etag) in embedded
+        edim==1 || continue
+        haskey(m.curves,etag) || throw(ArgumentError(
+            "$caller: unknown embedded Curve[$etag]"))
+        a,b=m.curves[etag]
+        parameters=get(forced,etag,nothing)
+        curve_nodes=Int[]
+        if parameters===nothing
+            push!(curve_nodes,_add_surface_point!(xs,ys,index,m,a,caller))
+            push!(curve_nodes,_add_surface_point!(xs,ys,index,m,b,caller))
+        else
+            for parameter in parameters
+                vertex=if parameter==0
+                    _add_surface_point!(xs,ys,index,m,a,caller)
+                elseif parameter==1
+                    _add_surface_point!(xs,ys,index,m,b,caller)
+                else
+                    point=_periodic_curve_point(m,etag,parameter,caller)
+                    abs(point[3])<=1e-12 || throw(ArgumentError(
+                        "$caller: embedded Curve[$etag] subdivision is not " *
+                        "planar in z=0"))
+                    _add_surface_curve_point!(
+                        xs,ys,index,m,point,etag,caller)
+                end
+                push!(curve_nodes,vertex)
+            end
+        end
+        length(curve_nodes)>=2 || throw(ArgumentError(
+            "$caller: embedded Curve[$etag] needs two distinct endpoints"))
+        for segment_index in 1:(length(curve_nodes)-1)
+            first_node=curve_nodes[segment_index]
+            second_node=curve_nodes[segment_index+1]
+            first_node==second_node && throw(ArgumentError(
+                "$caller: embedded Curve[$etag] has coincident subdivision nodes"))
+            push!(internal,(first_node,second_node))
         end
     end
     return xs,ys,segs,index,embedded,internal
@@ -1116,7 +1201,9 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
                                            constraints)
     mesh_edges=_model_projection_triangle_edges(mesh)
     all_nodes=trues(nnodes(mesh))
-    changed=false
+    raw_parameters=Dict{Int,Vector{Float64}}()
+    curve_tolerances=Dict{Int,Float64}()
+    relations=Tuple{ModelPeriodicConstraint,Float64}[]
     for constraint in constraints
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         master_entries,master_tolerance=_curve_parameter_nodes(
@@ -1126,19 +1213,89 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
             m,mesh,slave,all_nodes,mesh_edges,constraint.atol,
             "mesh_model_surface")
         tolerance=max(master_tolerance,slave_tolerance)
-        common=Float64[first(entry) for entry in master_entries]
-        for (parameter,_) in slave_entries
-            mapped=constraint.reversed ? 1-parameter : parameter
-            _insert_periodic_parameter!(common,mapped,tolerance)
+        for (curve,entries) in ((master,master_entries),(slave,slave_entries))
+            values=get!(()->Float64[],raw_parameters,curve)
+            for (parameter,_) in entries
+                push!(values,parameter)
+            end
+            curve_tolerances[curve]=min(
+                get(curve_tolerances,curve,Inf),tolerance)
         end
-        master_forced=get!(()->Float64[0,1],forced,master)
-        slave_forced=get!(()->Float64[0,1],forced,slave)
-        for parameter in common
+        push!(relations,(constraint,tolerance))
+    end
+
+    adjacency=Dict{Int,Vector{Int}}()
+    for (constraint,_) in relations
+        slave=Int(constraint.slave_entity)
+        master=Int(constraint.master_entity)
+        push!(get!(()->Int[],adjacency,slave),master)
+        push!(get!(()->Int[],adjacency,master),slave)
+    end
+    component_tolerances=Dict{Int,Float64}()
+    visited=Set{Int}()
+    for start in sort!(collect(keys(adjacency)))
+        start in visited && continue
+        component=Int[]
+        stack=Int[start]
+        tolerance=Inf
+        while !isempty(stack)
+            curve=pop!(stack)
+            curve in visited && continue
+            push!(visited,curve)
+            push!(component,curve)
+            tolerance=min(tolerance,curve_tolerances[curve])
+            append!(stack,adjacency[curve])
+        end
+        for curve in component
+            component_tolerances[curve]=tolerance
+        end
+    end
+
+    parameters=Dict{Int,Vector{Float64}}()
+    for curve in sort!(collect(keys(raw_parameters)))
+        values=Float64[]
+        tolerance=component_tolerances[curve]
+        for parameter in raw_parameters[curve]
+            _insert_periodic_parameter!(values,parameter,tolerance)
+        end
+        parameters[curve]=values
+    end
+
+    converged=false
+    for _ in 1:(length(relations)+1)
+        propagated=false
+        for (constraint,_) in relations
+            slave=Int(constraint.slave_entity)
+            master=Int(constraint.master_entity)
+            tolerance=component_tolerances[slave]
+            master_values=copy(parameters[master])
+            slave_values=copy(parameters[slave])
+            for parameter in master_values
+                mapped=constraint.reversed ? 1-parameter : parameter
+                propagated|=_insert_periodic_parameter!(
+                    parameters[slave],mapped,tolerance)
+            end
+            for parameter in slave_values
+                mapped=constraint.reversed ? 1-parameter : parameter
+                propagated|=_insert_periodic_parameter!(
+                    parameters[master],mapped,tolerance)
+            end
+        end
+        if !propagated
+            converged=true
+            break
+        end
+    end
+    converged || throw(ErrorException(
+        "mesh_model_surface: periodic parameter graph did not converge"))
+
+    changed=false
+    for curve in sort!(collect(keys(parameters)))
+        curve_forced=get!(()->Float64[0,1],forced,curve)
+        tolerance=component_tolerances[curve]
+        for parameter in parameters[curve]
             changed|=_insert_periodic_parameter!(
-                master_forced,parameter,tolerance)
-            slave_parameter=constraint.reversed ? 1-parameter : parameter
-            changed|=_insert_periodic_parameter!(
-                slave_forced,slave_parameter,tolerance)
+                curve_forced,parameter,tolerance)
         end
     end
     return changed
@@ -1198,13 +1355,14 @@ end
 function _snap_surface_periodic(m::GeoModel,mesh::Mesh,constraints,
                                 caller::AbstractString)
     output=mesh
-    for constraint in constraints
+    ordered=_model_periodic_constraint_order(constraints,caller)
+    for constraint in ordered
         mapping=_model_periodic_nodes(m,output,constraint)
         output=periodic_identify_affine(
             output,constraint.affine,mapping.master_nodes,mapping.slave_nodes;
             atol=constraint.atol)
     end
-    for constraint in constraints
+    for constraint in ordered
         mapping=_model_periodic_nodes(m,output,constraint)
         _model_mapping_matches(
             output,constraint,mapping,caller;exact=true) || throw(ErrorException(
@@ -2599,10 +2757,11 @@ end
 
 Mesh a native planar surface in `z=0`, including holes and embedded points or
 curves. Point characteristic lengths drive refinement. Stored straight-curve
-periodic relations synchronize boundary or embedded curve subdivisions through
-bounded remeshing passes before slave nodes are certified and snapped. The
-returned triangle mesh is validated before it is returned. Relations meeting at
-a corner must produce the same exact snapped coordinate.
+periodic relations synchronize boundary or embedded curve subdivisions across
+each acyclic dependency graph. Bounded remeshing precedes topology-ordered affine
+snapping, so a curve may be both a slave and a downstream master. The returned
+triangle mesh is validated before it is returned. Relations meeting at a corner
+must produce the same exact snapped coordinate.
 """
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             max_periodic_passes=8)

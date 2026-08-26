@@ -74,8 +74,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
   connectivity, and physical tags preserved; the native model/API owns straight-
-  curve relations with one relation per curve, synchronizes planar subdivisions
-  for boundary or embedded curves, and returns detached node maps, while
+  curve relations with one master per slave, reusable masters, and acyclic
+  master/slave chains; it synchronizes planar subdivisions for boundary or
+  embedded curves and returns detached node maps, while
   `model_to_mixed` emits
   classified point/line/triangle blocks, signed hole boundaries, embedded point
   and curve cells, physical memberships, and periodic curve/endpoint
@@ -127,12 +128,13 @@ nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
 topology record for signed boundaries or embedding relations. Native model periodicity
 is currently limited to straight-curve
-pairs on one planar triangle-meshed surface, with each curve in at most one relation;
-independent relations may share corner points. The bounded `.geo`
+pairs on one planar triangle-meshed surface. Each slave has one master; masters may
+be reused, a slave may become a master in an acyclic chain, and independent
+relations may share corner points. The bounded `.geo`
 executor accepts literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
-and 12-entry `Affine` transforms. Curves reused across relations, curved periodic
-entities, periodic surfaces and volumes, variable tags or numeric expressions in
-those statements remain pending. Gmsh 4.15.2 has no
+and 12-entry `Affine` transforms. Cyclic curve dependencies, curved periodic
+entities, periodic surfaces and volumes, and variable tags or numeric expressions
+in those statements remain pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that
@@ -159,8 +161,9 @@ Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
-periodic surface differentials, embedded periodic curves, low-level
-translation/rotation-periodic curves and the MSH2/MSH4 lifecycle, classified
+periodic surface differentials, embedded periodic curves, reusable-master and
+chained periodic-curve graphs, low-level translation/rotation-periodic curves and
+the MSH2/MSH4 lifecycle, classified
 Point/Line-In-Surface MSH4 round trips,
 and the classified Surface-In-Volume lifecycle with nested point/curve constraints
 and optional holes as mandatory bounds-checked children.

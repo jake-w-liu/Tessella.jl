@@ -300,3 +300,59 @@ end
         _API.finalize()
     end
 end
+
+@testset "periodic-curve dependency graph API" begin
+    _API.finalize()
+    try
+        _API.initialize()
+        coordinates=(
+            (1,0.0,0.0),(2,1.0,0.0),(3,1.0,1.0),(4,0.0,1.0),
+            (101,0.2,0.2),(102,0.8,0.2),
+            (103,0.2,0.5),(104,0.8,0.5),
+            (105,0.2,0.8),(106,0.8,0.8),(107,0.425,0.8))
+        for (tag,x,y) in coordinates
+            @test _API.model.add_point(
+                x,y,0;tag=tag,meshSize=0.4)==tag
+        end
+        endpoints=((1,1,2),(2,2,3),(3,3,4),(4,4,1),
+                   (30,101,102),(20,103,104),(10,106,105))
+        for (tag,first_point,last_point) in endpoints
+            @test _API.model.add_line(
+                first_point,last_point;tag=tag)==tag
+        end
+        @test _API.model.add_curve_loop([1,2,3,4];tag=1)==1
+        @test _API.model.add_plane_surface([1];tag=1)==1
+        @test _API.model.embed(0,[107],2,1)==1
+        @test _API.model.embed(1,[30,20,10],2,1)==1
+        translation=(1.0,0.0,0.0,0.0,
+                     0.0,1.0,0.0,0.3,
+                     0.0,0.0,1.0,0.0,
+                     0.0,0.0,0.0,1.0)
+        @test _API.mesh.set_periodic(
+            1,[20,10],[30,20],translation)===nothing
+        generated=_API.mesh.generate(2)
+        @test validate(generated).ok
+        @test mesh_crc(generated).sha==
+              "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+        cached=_API.mesh.get()
+        for (slave_entity,master_entity) in ((10,20),(20,30))
+            mapping=_API.mesh.get_periodic_nodes(1,slave_entity)
+            @test mapping.master_entity==master_entity
+            @test length(mapping.slave_nodes)==9
+            for (slave,master) in zip(mapping.slave_nodes,
+                                      mapping.master_nodes)
+                @test Tuple(cached.coords[:,slave])==
+                      (cached.coords[1,master],cached.coords[2,master]+0.3,
+                       cached.coords[3,master])
+            end
+        end
+        @test_throws ArgumentError _API.mesh.set_periodic(1,[30],[10],(
+            1.0,0.0,0.0,0.0,
+            0.0,1.0,0.0,-0.6,
+            0.0,0.0,1.0,0.0,
+            0.0,0.0,0.0,1.0))
+        @test mesh_crc(_API.mesh.get())==mesh_crc(cached)
+    finally
+        _API.finalize()
+    end
+end

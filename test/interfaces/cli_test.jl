@@ -37,6 +37,34 @@ Periodic Curve {6} = {5} Translate {0, 0.5, 0};
 Physical Curve("periodic traces", 21) = {5, 6};
 Physical Surface("domain", 22) = {1};
 """
+const _PERIODIC_GRAPH_CLI_GEO="""
+Point(1) = {0, 0, 0, 0.4};
+Point(2) = {1, 0, 0, 0.4};
+Point(3) = {1, 1, 0, 0.4};
+Point(4) = {0, 1, 0, 0.4};
+Line(1) = {1, 2};
+Line(2) = {2, 3};
+Line(3) = {3, 4};
+Line(4) = {4, 1};
+Curve Loop(1) = {1, 2, 3, 4};
+Plane Surface(1) = {1};
+Point(101) = {0.2, 0.2, 0, 0.4};
+Point(102) = {0.8, 0.2, 0, 0.4};
+Point(103) = {0.2, 0.5, 0, 0.4};
+Point(104) = {0.8, 0.5, 0, 0.4};
+Point(105) = {0.2, 0.8, 0, 0.4};
+Point(106) = {0.8, 0.8, 0, 0.4};
+Point(107) = {0.425, 0.8, 0, 0.4};
+Line(30) = {101, 102};
+Line(20) = {103, 104};
+Line(10) = {106, 105};
+Point{107} In Surface{1};
+Line{30, 20, 10} In Surface{1};
+Periodic Curve {20} = {30} Translate {0, 0.3, 0};
+Periodic Curve {10} = {20} Translate {0, 0.3, 0};
+Physical Curve("periodic traces", 41) = {30, 20, 10};
+Physical Surface("domain", 42) = {1};
+"""
 const _UNUSED_PERIODIC_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0, 2, 0, 0.5};
 Point(6) = {1, 2, 0, 0.5};
@@ -198,6 +226,33 @@ Physical Volume("domain", 72) = {1};
         @test length(embedded_periodic_curve.slave_nodes)==3
         @test mixed_crc(periodic_embedded).sha==
               "b02e4da6aa4910bfb488f6b3eebc4ae0bf22f91867506a973390cc65f450d9ec"
+
+        periodic_graph_input=joinpath(directory,"periodic-graph.geo")
+        periodic_graph_output=joinpath(directory,"periodic-graph.msh")
+        write(periodic_graph_input,_PERIODIC_GRAPH_CLI_GEO)
+        @test main([periodic_graph_input,"-2","-o",
+                    periodic_graph_output])==periodic_graph_output
+        @test read(periodic_graph_input,String)==_PERIODIC_GRAPH_CLI_GEO
+        periodic_graph=read_mixed_msh(periodic_graph_output)
+        @test validate(periodic_graph).ok
+        @test periodic_graph.entity_data.entities[(2,1)].embedded_curves==
+              Int32[10,20,30]
+        @test periodic_graph.physical_names==Dict(
+            (1,41)=>"periodic traces",(2,42)=>"domain")
+        @test sort([(Int(link.slave_entity),Int(link.master_entity))
+                    for link in periodic_graph.periodic_links
+                    if link.dim==0])==
+              [(103,101),(104,102),(105,103),(106,104)]
+        graph_curve_links=Dict(
+            Int(link.slave_entity)=>link for link in
+            periodic_graph.periodic_links if link.dim==1)
+        @test Dict(slave=>Int(link.master_entity)
+                   for (slave,link) in graph_curve_links)==
+              Dict(10=>20,20=>30)
+        @test all(link->length(link.slave_nodes)==9,
+                  values(graph_curve_links))
+        @test mixed_crc(periodic_graph).sha==
+              "3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1"
 
         embedded_input=joinpath(directory,"embedded.geo")
         embedded_output=joinpath(directory,"embedded.msh")

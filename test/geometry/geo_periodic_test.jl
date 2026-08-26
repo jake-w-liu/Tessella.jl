@@ -81,6 +81,41 @@ function _periodic_geo_embedded_curves()
         """
 end
 
+function _periodic_geo_curve_graph(mode::Symbol;cycle::Bool=false)
+    leaf_master=mode==:branch ? 30 : mode==:chain ? 20 : throw(
+        ArgumentError("unknown periodic graph mode $mode"))
+    leaf_offset=mode==:branch ? 0.6 : 0.3
+    cycle_statement=cycle ?
+        "Periodic Curve {30} = {10} Translate {0, -0.6, 0};" : ""
+    return """
+        Point(1) = {0, 0, 0, 0.4};
+        Point(2) = {1, 0, 0, 0.4};
+        Point(3) = {1, 1, 0, 0.4};
+        Point(4) = {0, 1, 0, 0.4};
+        Line(1) = {1, 2};
+        Line(2) = {2, 3};
+        Line(3) = {3, 4};
+        Line(4) = {4, 1};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Plane Surface(1) = {1};
+        Point(101) = {0.2, 0.2, 0, 0.4};
+        Point(102) = {0.8, 0.2, 0, 0.4};
+        Point(103) = {0.2, 0.5, 0, 0.4};
+        Point(104) = {0.8, 0.5, 0, 0.4};
+        Point(105) = {0.2, 0.8, 0, 0.4};
+        Point(106) = {0.8, 0.8, 0, 0.4};
+        Point(107) = {0.425, 0.8, 0, 0.4};
+        Line(30) = {101, 102};
+        Line(20) = {103, 104};
+        Line(10) = {106, 105};
+        Point{107} In Surface{1};
+        Line{30, 20, 10} In Surface{1};
+        Periodic Curve {20} = {30} Translate {0, 0.3, 0};
+        Periodic Curve {10} = {$leaf_master} Translate {0, $leaf_offset, 0};
+        $cycle_statement
+        """
+end
+
 @testset "bounded .geo periodic straight-curve execution" begin
     translated=_execute_geo_source(
         _periodic_geo_square(
@@ -149,6 +184,36 @@ end
                embedded.mesh.coords[2,master]+0.5,
                embedded.mesh.coords[3,master])
     end
+
+    for (mode,masters,offsets) in (
+            (:branch,Dict(10=>30,20=>30),Dict(10=>0.6,20=>0.3)),
+            (:chain,Dict(10=>20,20=>30),Dict(10=>0.3,20=>0.3)))
+        graph=_execute_geo_source(
+            _periodic_geo_curve_graph(mode);mesh_dim=2)
+        @test validate(graph.mesh).ok
+        @test mesh_crc(graph.mesh).sha==
+              "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+        graph_constraints=model_periodic_constraints(graph.model)
+        @test Int.(getproperty.(graph_constraints,:slave_entity))==[10,20]
+        @test Int.(getproperty.(graph_constraints,:master_entity))==
+              [masters[10],masters[20]]
+        @test graph_constraints[1].reversed
+        for slave_entity in (10,20)
+            graph_mapping=model_periodic_nodes(
+                graph.model,graph.mesh,1,slave_entity)
+            @test graph_mapping.master_entity==masters[slave_entity]
+            @test length(graph_mapping.slave_nodes)==9
+            for (slave,master) in zip(graph_mapping.slave_nodes,
+                                      graph_mapping.master_nodes)
+                @test Tuple(graph.mesh.coords[:,slave])==
+                      (graph.mesh.coords[1,master],
+                       graph.mesh.coords[2,master]+offsets[slave_entity],
+                       graph.mesh.coords[3,master])
+            end
+        end
+    end
+    @test_throws ArgumentError _execute_geo_source(
+        _periodic_geo_curve_graph(:chain;cycle=true);mesh_dim=2)
 
     invalid_statements=(
         "Periodic Surface {1} = {1} Translate {1,0,0};",
