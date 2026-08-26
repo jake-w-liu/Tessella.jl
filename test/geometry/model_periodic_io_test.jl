@@ -289,15 +289,36 @@ end
                0.0,0.0,1.0,0.0,
                0.0,0.0,0.0,1.0)
     set_periodic!(periodic_embedded,1,[6],[5],translate)
-    periodic_error=try
-        model_to_mixed(periodic_embedded,mesh,1)
-        nothing
-    catch err
-        err
+    @test_throws ArgumentError model_to_mixed(periodic_embedded,mesh,1)
+    @test_throws ErrorException mesh_model_surface(
+        periodic_embedded,1;max_periodic_passes=1)
+    periodic_mesh=mesh_model_surface(periodic_embedded,1)
+    @test validate(periodic_mesh).ok
+    periodic_mapping=model_periodic_nodes(
+        periodic_embedded,periodic_mesh,1,6)
+    @test periodic_mapping.master_entity==5
+    @test length(periodic_mapping.slave_nodes)==3
+    for (slave,master) in zip(periodic_mapping.slave_nodes,
+                              periodic_mapping.master_nodes)
+        @test Tuple(periodic_mesh.coords[:,slave])==
+              (periodic_mesh.coords[1,master],
+               periodic_mesh.coords[2,master]+0.25,
+               periodic_mesh.coords[3,master])
     end
-    @test periodic_error isa ArgumentError
-    @test occursin("periodic embedded curves are not supported",
-                   sprint(showerror,periodic_error))
+    periodic_projection=model_to_mixed(periodic_embedded,periodic_mesh,1)
+    @test validate(periodic_projection).ok
+    @test periodic_projection.entity_data.entities[(2,1)].embedded_curves==
+          Int32[5,6]
+    @test sort([(Int(link.slave_entity),Int(link.master_entity))
+                for link in periodic_projection.periodic_links if link.dim==0])==
+          [(8,5),(9,6)]
+    periodic_link=only(filter(
+        link->link.dim==1,periodic_projection.periodic_links))
+    @test periodic_link.slave_entity==6
+    @test periodic_link.master_entity==5
+    @test periodic_link.slave_nodes==periodic_mapping.slave_nodes
+    @test mixed_crc(periodic_projection).sha==
+          "b02b470325db9d19ffbe498d48a8e86f632b5ea92c67657fd422e9aa05f9cf0b"
 end
 
 @testset "holed native surface projection" begin

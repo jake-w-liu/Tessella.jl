@@ -74,10 +74,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
   connectivity, and physical tags preserved; the native model/API owns straight-
-  curve relations with one relation per curve, synchronizes their planar boundary
-  subdivisions, and returns detached node maps, while `model_to_mixed` emits
+  curve relations with one relation per curve, synchronizes planar subdivisions
+  for boundary or embedded curves, and returns detached node maps, while
+  `model_to_mixed` emits
   classified point/line/triangle blocks, signed hole boundaries, embedded point
-  and curve cells, physical memberships, and periodic boundary-curve/endpoint
+  and curve cells, physical memberships, and periodic curve/endpoint
   links for planar surfaces; mixed meshes retain periodic maps and Gmsh's MSH4
   curve-in-surface relation, and the CLI uses this path for periodic or embedded
   `-2` output; the dimension-explicit form also emits classified boundary and
@@ -131,7 +132,7 @@ independent relations may share corner points. The bounded `.geo`
 executor accepts literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
 and 12-entry `Affine` transforms. Curves reused across relations, curved periodic
 entities, periodic surfaces and volumes, variable tags or numeric expressions in
-those statements and periodic embedded curves remain pending. Gmsh 4.15.2 has no
+those statements remain pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that
@@ -158,8 +159,9 @@ Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
-periodic surface differentials, plus low-level translation/rotation-periodic curves
-and the MSH2/MSH4 lifecycle, classified Point/Line-In-Surface MSH4 round trips,
+periodic surface differentials, embedded periodic curves, low-level
+translation/rotation-periodic curves and the MSH2/MSH4 lifecycle, classified
+Point/Line-In-Surface MSH4 round trips,
 and the classified Surface-In-Volume lifecycle with nested point/curve constraints
 and optional holes as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command

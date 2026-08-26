@@ -281,10 +281,10 @@ end
 
 Persist disjoint affine relations between equally sized lists of straight native
 curves. `affine` maps each master curve to its slave in Gmsh row-major 4×4
-order. This slice supports dimension 1; surface and volume periodicity are
-explicit blockers. Both curves must bound the same planar surface when meshed.
-Curve endpoints must be disjoint and agree with the affine map within `atol`.
-The update is atomic.
+order. This slice supports dimension 1; surface and volume periodicity are explicit
+blockers. Both curves in each pair must belong to the same planar surface, as
+boundary or embedded curves, when meshed. Curve endpoints must be disjoint and
+agree with the affine map within `atol`. The update is atomic.
 """
 function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                        atol=1e-12)
@@ -984,11 +984,36 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
             haskey(m.curves,etag) || throw(ArgumentError(
                 "$caller: unknown embedded Curve[$etag]"))
             a,b=m.curves[etag]
-            ia=_add_surface_point!(xs,ys,index,m,a,caller)
-            ib=_add_surface_point!(xs,ys,index,m,b,caller)
-            ia==ib && throw(ArgumentError(
-                "$caller: embedded Curve[$etag] has coincident endpoints"))
-            push!(internal,(ia,ib))
+            parameters=get(forced,etag,nothing)
+            curve_nodes=Int[]
+            if parameters===nothing
+                push!(curve_nodes,_add_surface_point!(xs,ys,index,m,a,caller))
+                push!(curve_nodes,_add_surface_point!(xs,ys,index,m,b,caller))
+            else
+                for parameter in parameters
+                    vertex=if parameter==0
+                        _add_surface_point!(xs,ys,index,m,a,caller)
+                    elseif parameter==1
+                        _add_surface_point!(xs,ys,index,m,b,caller)
+                    else
+                        point=_periodic_curve_point(m,etag,parameter,caller)
+                        abs(point[3])<=1e-12 || throw(ArgumentError(
+                            "$caller: embedded Curve[$etag] subdivision is not " *
+                            "planar in z=0"))
+                        push!(xs,point[1]);push!(ys,point[2]);length(xs)
+                    end
+                    push!(curve_nodes,vertex)
+                end
+            end
+            length(curve_nodes)>=2 || throw(ArgumentError(
+                "$caller: embedded Curve[$etag] needs two distinct endpoints"))
+            for segment_index in 1:(length(curve_nodes)-1)
+                first_node=curve_nodes[segment_index]
+                second_node=curve_nodes[segment_index+1]
+                first_node==second_node && throw(ArgumentError(
+                    "$caller: embedded Curve[$etag] has coincident subdivision nodes"))
+                push!(internal,(first_node,second_node))
+            end
         else
             throw(ArgumentError(
                 "$caller: unsupported embedding dimension $edim"))
@@ -1016,8 +1041,8 @@ function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
     return boundary,edges
 end
 
-function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,boundary,
-                                boundary_edges,atol::Float64,
+function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes,
+                                eligible_edges,atol::Float64,
                                 caller::AbstractString)
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     vx=q[1]-p[1];vy=q[2]-p[2]
@@ -1029,7 +1054,7 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,boundary,
     geometric_tolerance=max(atol,128eps(Float64)*scale)
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
-        boundary[node] || continue
+        eligible_nodes[node] || continue
         wx=mesh.coords[1,node]-p[1];wy=mesh.coords[2,node]-p[2]
         cross=muladd(vx,wy,-vy*wx)
         abs(cross)<=geometric_tolerance*length1 || continue
@@ -1040,20 +1065,20 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,boundary,
     end
     sort!(entries;by=first)
     length(entries)>=2 || throw(ErrorException(
-        "$caller: Curve[$curve] is not represented by two boundary nodes"))
+        "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
     parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
     first(entries)[1]<=parameter_tolerance &&
         1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
-            "$caller: Curve[$curve] boundary chain does not reach both endpoints"))
+            "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
     for index in 1:(length(entries)-1)
         first_node=Int32(entries[index][2])
         second_node=Int32(entries[index+1][2])
         first_node!=second_node || throw(ErrorException(
-            "$caller: Curve[$curve] repeats a boundary node"))
+            "$caller: Curve[$curve] repeats a mesh node"))
         key=first_node<second_node ? (first_node,second_node) :
                                      (second_node,first_node)
-        key in boundary_edges || throw(ErrorException(
-            "$caller: Curve[$curve] boundary nodes do not form a mesh-edge chain"))
+        key in eligible_edges || throw(ErrorException(
+            "$caller: Curve[$curve] nodes do not form a mesh-edge chain"))
     end
     return entries,parameter_tolerance
 end
@@ -1072,11 +1097,13 @@ function _surface_periodic_constraints(m::GeoModel,t::Int,
     for loop in m.surfaces[t],signed in m.loops[loop]
         push!(boundary_curves,abs(signed))
     end
+    _,embedded_curve_tags=_model_surface_embedding_tags(m,t,caller)
+    surface_curves=union(boundary_curves,Set(embedded_curve_tags))
     constraints=ModelPeriodicConstraint[]
     for constraint in model_periodic_constraints(m)
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
-        slave_present=slave in boundary_curves
-        master_present=master in boundary_curves
+        slave_present=slave in surface_curves
+        master_present=master in surface_curves
         slave_present==master_present || throw(ArgumentError(
             "$caller: periodic Curve[$slave]/Curve[$master] relation " *
             "has only one entity on Surface[$t]"))
@@ -1087,16 +1114,16 @@ end
 
 function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
                                            constraints)
-    boundary,boundary_edges=_surface_boundary_topology(
-        mesh,"mesh_model_surface")
+    mesh_edges=_model_projection_triangle_edges(mesh)
+    all_nodes=trues(nnodes(mesh))
     changed=false
     for constraint in constraints
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         master_entries,master_tolerance=_curve_parameter_nodes(
-            m,mesh,master,boundary,boundary_edges,constraint.atol,
+            m,mesh,master,all_nodes,mesh_edges,constraint.atol,
             "mesh_model_surface")
         slave_entries,slave_tolerance=_curve_parameter_nodes(
-            m,mesh,slave,boundary,boundary_edges,constraint.atol,
+            m,mesh,slave,all_nodes,mesh_edges,constraint.atol,
             "mesh_model_surface")
         tolerance=max(master_tolerance,slave_tolerance)
         common=Float64[first(entry) for entry in master_entries]
@@ -1119,14 +1146,14 @@ end
 
 function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
                                constraint::ModelPeriodicConstraint)
-    boundary,boundary_edges=_surface_boundary_topology(
-        mesh,"model_periodic_nodes")
+    mesh_edges=_model_projection_triangle_edges(mesh)
+    all_nodes=trues(nnodes(mesh))
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
     master_entries,master_tolerance=_curve_parameter_nodes(
-        m,mesh,master,boundary,boundary_edges,constraint.atol,
+        m,mesh,master,all_nodes,mesh_edges,constraint.atol,
         "model_periodic_nodes")
     slave_entries,slave_tolerance=_curve_parameter_nodes(
-        m,mesh,slave,boundary,boundary_edges,constraint.atol,
+        m,mesh,slave,all_nodes,mesh_edges,constraint.atol,
         "model_periodic_nodes")
     ordered_slave=constraint.reversed ? reverse(slave_entries) : slave_entries
     length(master_entries)==length(ordered_slave) || throw(ErrorException(
@@ -1181,7 +1208,7 @@ function _snap_surface_periodic(m::GeoModel,mesh::Mesh,constraints,
         mapping=_model_periodic_nodes(m,output,constraint)
         _model_mapping_matches(
             output,constraint,mapping,caller;exact=true) || throw(ErrorException(
-            "$caller: stored periodic constraints do not share an exact boundary-node solution"))
+            "$caller: stored periodic constraints do not share an exact curve-node solution"))
     end
     return output
 end
@@ -1191,7 +1218,8 @@ end
 
 Return the master entity, compact slave/master node arrays, and affine transform
 for one meshed straight-curve relation as a named tuple. The mesh must contain a
-synchronized boundary discretization produced by [`mesh_model_surface`](@ref).
+synchronized boundary or embedded curve discretization produced by
+[`mesh_model_surface`](@ref).
 """
 function model_periodic_nodes(m::GeoModel,mesh::Mesh,dim,slave_entity)
     caller="model_periodic_nodes"
@@ -1480,7 +1508,7 @@ Project a native planar surface mesh and its geometry ownership into an owned
 [`MixedMesh`](@ref). The result contains point, boundary/embedded-line, and
 triangle blocks; MSH2 elementary entities; MSH4 point/curve/surface
 classification; all projected physical memberships and names; embedded-curve
-ownership; and the surface's stored boundary-periodic curve links. It can be
+ownership; and the surface's stored periodic curve links. It can be
 written with [`Tessella.Elements.write_mixed_msh`](@ref) without dropping the
 supported metadata. MSH4 retains every physical membership and Gmsh's
 curve-in-surface relation. Gmsh 4.15.2 does not serialize Point-In-Surface as an
@@ -1489,11 +1517,10 @@ MSH2 retains the lowest physical tag as its single legacy element membership.
 
 `mesh` must be a validated, segment-free triangle mesh whose boundary and
 embedded chains represent the selected [`mesh_model_surface`](@ref) geometry.
-Stored boundary-periodic curves must already be exactly snapped. Periodic
-embedded curves are an explicit blocker. Periodic endpoint relations are emitted
-as a deterministic spanning forest when curve directions share corners,
-satisfying the MSH one-master-per-slave entity constraint while retaining every
-boundary-curve link.
+Stored periodic curves, whether boundary or embedded, must already be exactly snapped.
+Periodic endpoint relations are emitted as a deterministic spanning forest when
+curve directions share corners, satisfying the MSH one-master-per-slave entity
+constraint while retaining every curve link.
 """
 function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     caller="model_to_mixed"
@@ -1516,14 +1543,6 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
         _model_surface_embedding_tags(m,surface,caller)
 
     constraints=_surface_periodic_constraints(m,surface,caller)
-    embedded_curve_set=Set(embedded_curves)
-    for constraint in model_periodic_constraints(m)
-        slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
-        (slave in embedded_curve_set || master in embedded_curve_set) &&
-            throw(ArgumentError(
-                "$caller: periodic embedded curves are not supported " *
-                "(Curve[$slave]/Curve[$master])"))
-    end
     geometric_tolerance=max(1e-12,
         isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
     for node in axes(mesh.coords,2)
@@ -2580,10 +2599,10 @@ end
 
 Mesh a native planar surface in `z=0`, including holes and embedded points or
 curves. Point characteristic lengths drive refinement. Stored straight-curve
-periodic relations synchronize their boundary subdivisions through bounded
-remeshing passes before slave nodes are certified and snapped. The returned
-triangle mesh is validated before it is returned. Relations meeting at a corner
-must produce the same exact snapped coordinate.
+periodic relations synchronize boundary or embedded curve subdivisions through
+bounded remeshing passes before slave nodes are certified and snapped. The
+returned triangle mesh is validated before it is returned. Relations meeting at
+a corner must produce the same exact snapped coordinate.
 """
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             max_periodic_passes=8)
@@ -2609,7 +2628,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             forced,m,mesh,constraints)
         if changed
             pass<npasses || throw(ErrorException(
-                "$caller: periodic boundary synchronization did not converge " *
+                "$caller: periodic curve synchronization did not converge " *
                 "within $npasses passes"))
             continue
         end

@@ -56,6 +56,31 @@ function _periodic_geo_rotation()
         """
 end
 
+function _periodic_geo_embedded_curves()
+    return """
+        Point(1) = {0, 0, 0, 0.5};
+        Point(2) = {1, 0, 0, 0.5};
+        Point(3) = {1, 1, 0, 0.5};
+        Point(4) = {0, 1, 0, 0.5};
+        Line(1) = {1, 2};
+        Line(2) = {2, 3};
+        Line(3) = {3, 4};
+        Line(4) = {4, 1};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Plane Surface(1) = {1};
+        Point(5) = {0.25, 0.25, 0, 0.5};
+        Point(6) = {0.75, 0.25, 0, 0.5};
+        Point(7) = {0.25, 0.75, 0, 0.5};
+        Point(8) = {0.75, 0.75, 0, 0.5};
+        Point(9) = {0.5, 0.25, 0, 0.5};
+        Line(5) = {5, 6};
+        Line(6) = {7, 8};
+        Point{9} In Surface{1};
+        Line{5, 6} In Surface{1};
+        Periodic Curve {6} = {5} Translate {0, 0.5, 0};
+        """
+end
+
 @testset "bounded .geo periodic straight-curve execution" begin
     translated=_execute_geo_source(
         _periodic_geo_square(
@@ -106,6 +131,23 @@ end
               _geo_periodic_affine_point(
                   rotation_constraint.affine,
                   Tuple(rotated.mesh.coords[:,master]))
+    end
+
+    embedded=_execute_geo_source(
+        _periodic_geo_embedded_curves();mesh_dim=2)
+    @test validate(embedded.mesh).ok
+    @test mesh_crc(embedded.mesh).sha==
+          "9794a65ea5402683d0d50612522c2f71f7c98ec2a9f6b9e6b49a61e62cd85cf2"
+    embedded_mapping=model_periodic_nodes(
+        embedded.model,embedded.mesh,1,6)
+    @test embedded_mapping.master_entity==5
+    @test length(embedded_mapping.slave_nodes)==3
+    for (slave,master) in zip(embedded_mapping.slave_nodes,
+                              embedded_mapping.master_nodes)
+        @test Tuple(embedded.mesh.coords[:,slave])==
+              (embedded.mesh.coords[1,master],
+               embedded.mesh.coords[2,master]+0.5,
+               embedded.mesh.coords[3,master])
     end
 
     invalid_statements=(

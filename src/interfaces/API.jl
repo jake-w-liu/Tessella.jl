@@ -3,7 +3,7 @@
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
 explicit planar surface-loop volumes and persistent affine relations between
-straight periodic boundary curves.
+straight periodic boundary or embedded curves.
 Production meshing is never delegated to Gmsh.
 """
 module API
@@ -238,8 +238,9 @@ get()=_get_mesh()
 
 Store validated straight-curve relations in the active model and invalidate any
 cached mesh. `affine` maps each master curve to its corresponding slave curve in
-Gmsh row-major 4×4 order. Each pair must be disjoint and bound the same planar
-surface when meshed.
+Gmsh row-major 4×4 order. Their endpoints must be disjoint, and both curves in
+each pair must belong to the same planar surface, as boundary or embedded curves,
+when meshed.
 """
 set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     _set_periodic(dim,slave_entities,master_entities,affine;atol=atol)
@@ -248,7 +249,7 @@ set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     get_periodic_nodes(dim, slave_entity)
 
 Return the master entity, detached slave/master node arrays, and affine transform
-for one relation in the cached surface mesh.
+for one boundary or embedded curve relation in the cached surface mesh.
 """
 get_periodic_nodes(dim,slave_entity)=
     _get_periodic_nodes(dim,slave_entity)
