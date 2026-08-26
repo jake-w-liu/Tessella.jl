@@ -2,13 +2,15 @@
     Model
 
 A native geometry/entity kernel: tagged points, curves, loops, surfaces, and
-volumes with physical groups. Meshing dispatches to Tessella's certified
-simplex and transfinite kernels. This is not OpenCASCADE; unsupported CAD
-statements remain explicit blockers.
+volumes with physical groups and classified planar mixed-mesh projection. Meshing
+dispatches to Tessella's certified simplex and transfinite kernels. This is not
+OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
 module Model
 
-using ..MeshTypes: Mesh, validate, nnodes, ntris, ntets
+using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets
+using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
+                  MixedPeriodicLink, MixedMesh
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using ..SizeField: AbstractSizeField, ConstantSize, size_at
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
@@ -21,7 +23,7 @@ export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
-       model_periodic_nodes
+       model_periodic_nodes, model_to_mixed
 export add_physical_group!, set_physical_name!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
@@ -862,7 +864,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
     return xs,ys,segs,index,embedded,internal
 end
 
-function _surface_boundary_topology(mesh::Mesh)
+function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
     edge_counts=Dict{Tuple{Int32,Int32},Int}()
     @inbounds for cell in axes(mesh.tris,2),slots in ((1,2),(2,3),(3,1))
         a=mesh.tris[slots[1],cell];b=mesh.tris[slots[2],cell]
@@ -872,6 +874,8 @@ function _surface_boundary_topology(mesh::Mesh)
     boundary=falses(nnodes(mesh))
     edges=Set{Tuple{Int32,Int32}}()
     for ((a,b),count) in edge_counts
+        count<=2 || throw(ArgumentError(
+            "$caller: mesh edge ($a,$b) has $count incident triangles"))
         count==1 || continue
         push!(edges,(a,b))
         boundary[a]=true;boundary[b]=true
@@ -929,7 +933,8 @@ function _insert_periodic_parameter!(parameters::Vector{Float64},value::Float64,
     return true
 end
 
-function _surface_periodic_constraints(m::GeoModel,t::Int)
+function _surface_periodic_constraints(m::GeoModel,t::Int,
+                                       caller::AbstractString)
     boundary_curves=Set{Int}()
     for loop in m.surfaces[t],signed in m.loops[loop]
         push!(boundary_curves,abs(signed))
@@ -940,7 +945,7 @@ function _surface_periodic_constraints(m::GeoModel,t::Int)
         slave_present=slave in boundary_curves
         master_present=master in boundary_curves
         slave_present==master_present || throw(ArgumentError(
-            "mesh_model_surface: periodic Curve[$slave]/Curve[$master] relation " *
+            "$caller: periodic Curve[$slave]/Curve[$master] relation " *
             "has only one entity on Surface[$t]"))
         slave_present && push!(constraints,constraint)
     end
@@ -949,7 +954,8 @@ end
 
 function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
                                            constraints)
-    boundary,boundary_edges=_surface_boundary_topology(mesh)
+    boundary,boundary_edges=_surface_boundary_topology(
+        mesh,"mesh_model_surface")
     changed=false
     for constraint in constraints
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
@@ -980,7 +986,8 @@ end
 
 function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
                                constraint::ModelPeriodicConstraint)
-    boundary,boundary_edges=_surface_boundary_topology(mesh)
+    boundary,boundary_edges=_surface_boundary_topology(
+        mesh,"model_periodic_nodes")
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
     master_entries,master_tolerance=_curve_parameter_nodes(
         m,mesh,master,boundary,boundary_edges,constraint.atol,
@@ -1065,6 +1072,367 @@ function model_periodic_nodes(m::GeoModel,mesh::Mesh,dim,slave_entity)
     mapping=_model_periodic_nodes(m,mesh,constraint)
     _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
     return mapping
+end
+
+function _model_projection_physical_tags(m::GeoModel,dim::Int,entity::Int)
+    tags=Int32[]
+    for ((group_dim,physical),members) in m.physical
+        group_dim==dim && entity in members && push!(tags,Int32(physical))
+    end
+    sort!(tags)
+    return tags
+end
+
+@inline _model_projection_legacy_tag(tags::Vector{Int32})=
+    isempty(tags) ? Int32(0) : first(tags)
+
+function _model_projection_bbox(mesh::Mesh,nodes,caller::AbstractString)
+    isempty(nodes) && throw(ErrorException(
+        "$caller: internal entity projection has no nodes"))
+    first_node=Int(first(nodes))
+    xlo=xhi=mesh.coords[1,first_node]
+    ylo=yhi=mesh.coords[2,first_node]
+    zlo=zhi=mesh.coords[3,first_node]
+    for raw_node in Iterators.drop(nodes,1)
+        node=Int(raw_node)
+        x=mesh.coords[1,node];y=mesh.coords[2,node];z=mesh.coords[3,node]
+        xlo=min(xlo,x);xhi=max(xhi,x)
+        ylo=min(ylo,y);yhi=max(yhi,y)
+        zlo=min(zlo,z);zhi=max(zhi,z)
+    end
+    return (xlo,ylo,zlo,xhi,yhi,zhi)
+end
+
+function _model_projection_point!(point_nodes,node_points,point::Int,node::Int,
+                                  caller::AbstractString)
+    compact=Int32(node)
+    existing=get(point_nodes,point,Int32(0))
+    (existing==0 || existing==compact) || throw(ArgumentError(
+        "$caller: Point[$point] maps to multiple mesh nodes"))
+    other=get(node_points,compact,0)
+    (other==0 || other==point) || throw(ArgumentError(
+        "$caller: Points[$other] and [$point] map to mesh node $node"))
+    point_nodes[point]=compact
+    node_points[compact]=point
+    return nothing
+end
+
+function _model_projection_external_elements(blocks)
+    output=Vector{Vector{UInt64}}(undef,length(blocks))
+    next_tag=UInt64(1)
+    for (block_index,block) in pairs(blocks)
+        count=length(block.tags)
+        tags=Vector{UInt64}(undef,count)
+        for cell in 1:count
+            tags[cell]=next_tag
+            next_tag+=UInt64(1)
+        end
+        output[block_index]=tags
+    end
+    return output
+end
+
+function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
+                                          constraints,caller::AbstractString)
+    curve_links=MixedPeriodicLink[]
+    outgoing=Dict{Int,Vector{Tuple{Int,NTuple{16,Float64}}}}()
+    indegree=Dict{Int,Int}()
+    periodic_points=Set{Int}()
+    for constraint in constraints
+        mapping=try
+            _model_periodic_nodes(m,mesh,constraint)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            throw(ArgumentError(
+                "$caller: periodic Curve[$(constraint.slave_entity)] mapping " *
+                "is incompatible with the input mesh — " * sprint(showerror,err)))
+        end
+        _model_mapping_matches(mesh,constraint,mapping,caller;exact=true) ||
+            throw(ArgumentError(
+                "$caller: periodic Curve[$(constraint.slave_entity)] nodes are not exactly snapped"))
+        push!(curve_links,MixedPeriodicLink(
+            1,constraint.slave_entity,constraint.master_entity,
+            mapping.slave_nodes,mapping.master_nodes;affine=constraint.affine))
+        slave_start,slave_stop=m.curves[Int(constraint.slave_entity)]
+        master_start,master_stop=m.curves[Int(constraint.master_entity)]
+        endpoint_pairs=constraint.reversed ?
+            ((slave_stop,master_start),(slave_start,master_stop)) :
+            ((slave_start,master_start),(slave_stop,master_stop))
+        for (slave_point,master_point) in endpoint_pairs
+            push!(periodic_points,slave_point);push!(periodic_points,master_point)
+            edges=get!(Vector{Tuple{Int,NTuple{16,Float64}}},
+                       outgoing,master_point)
+            edge=(slave_point,constraint.affine)
+            if !(edge in edges)
+                push!(edges,edge)
+                indegree[slave_point]=get(indegree,slave_point,0)+1
+            end
+            get!(indegree,master_point,0)
+        end
+    end
+    for edges in values(outgoing)
+        sort!(edges;by=edge->(edge[1],edge[2]))
+    end
+
+    # MSH periodic metadata permits only one relation per slave entity. Choose
+    # a deterministic directed spanning forest through shared periodic corners,
+    # matching Gmsh's endpoint-link convention without discarding curve links.
+    visited=Set{Int}()
+    parents=Dict{Int,Tuple{Int,NTuple{16,Float64}}}()
+    roots=sort!(Int[point for point in periodic_points
+                    if get(indegree,point,0)==0])
+    append!(roots,sort!(collect(setdiff(periodic_points,Set(roots)))))
+    for root in roots
+        root in visited && continue
+        push!(visited,root)
+        queue=Int[root];head=1
+        while head<=length(queue)
+            master_point=queue[head];head+=1
+            for (slave_point,affine) in get(
+                    outgoing,master_point,
+                    Tuple{Int,NTuple{16,Float64}}[])
+                slave_point in visited && continue
+                push!(visited,slave_point)
+                parents[slave_point]=(master_point,affine)
+                push!(queue,slave_point)
+            end
+        end
+    end
+    visited==periodic_points || throw(ErrorException(
+        "$caller: internal periodic endpoint traversal was incomplete"))
+
+    links=MixedPeriodicLink[]
+    for slave_point in sort!(collect(keys(parents)))
+        master_point,affine=parents[slave_point]
+        haskey(point_nodes,slave_point) && haskey(point_nodes,master_point) ||
+            throw(ErrorException(
+                "$caller: periodic endpoint is absent from the surface projection"))
+        push!(links,MixedPeriodicLink(
+            0,slave_point,master_point,
+            Int32[point_nodes[slave_point]],Int32[point_nodes[master_point]];
+            affine=affine))
+    end
+    append!(links,curve_links)
+    return links
+end
+
+"""
+    model_to_mixed(model, mesh, surface_tag) -> MixedMesh
+
+Project a native planar surface mesh and its geometry ownership into an owned
+[`MixedMesh`](@ref). The result contains point, boundary-line, and triangle
+blocks; MSH2 elementary entities; MSH4 point/curve/surface classification; all
+projected physical memberships and names; and the surface's stored periodic
+curve links. It can be written with [`Tessella.Elements.write_mixed_msh`](@ref)
+without dropping periodic metadata. MSH4 retains every physical membership;
+MSH2 retains the lowest physical tag as its single legacy element membership.
+
+`mesh` must be a validated, segment-free triangle mesh whose boundary chains
+represent the selected [`mesh_model_surface`](@ref) geometry. Stored periodic
+curves must already be exactly snapped. Embedded entities are not projected and
+raise an explicit `ArgumentError`. Periodic endpoint relations are emitted as a
+deterministic spanning forest when curve directions share corners, satisfying the
+MSH one-master-per-slave entity constraint while retaining every curve link.
+"""
+function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
+    caller="model_to_mixed"
+    surface=_tag(surface_tag,caller,2)
+    haskey(m.surfaces,surface) || throw(ArgumentError(
+        "$caller: unknown Surface[$surface]"))
+    diagnostic=validate(mesh)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+    nsegs(mesh)==0 || throw(ArgumentError(
+        "$caller: input must not contain explicit segment cells"))
+    ntets(mesh)==0 || throw(ArgumentError(
+        "$caller: input must be a surface mesh without tetrahedra"))
+    ntris(mesh)>0 || throw(ArgumentError(
+        "$caller: input must contain triangle cells"))
+    all(iszero,mesh.tri_tag) || throw(ArgumentError(
+        "$caller: input triangle tags must be zero; physical ownership comes from the model"))
+    isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || throw(ArgumentError(
+        "$caller: projection does not support embedded surface entities"))
+
+    constraints=_surface_periodic_constraints(m,surface,caller)
+    geometric_tolerance=max(1e-12,
+        isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
+    for node in axes(mesh.coords,2)
+        abs(mesh.coords[3,node])<=geometric_tolerance || throw(ArgumentError(
+            "$caller: input node $node has z=$(mesh.coords[3,node]), outside " *
+            "the z=0 tolerance $geometric_tolerance"))
+    end
+    curve_tags=Int[]
+    for loop in m.surfaces[surface],signed_curve in m.loops[loop]
+        push!(curve_tags,abs(signed_curve))
+    end
+    sort!(unique!(curve_tags))
+    isempty(curve_tags) && throw(ArgumentError(
+        "$caller: Surface[$surface] has no boundary curves"))
+    for curve in curve_tags,point in m.curves[curve]
+        abs(m.points[point][3])<=1e-12 || throw(ArgumentError(
+            "$caller: Point[$point] is not planar in z=0"))
+    end
+    boundary,boundary_edges=_surface_boundary_topology(mesh,caller)
+    isempty(boundary_edges) && throw(ArgumentError(
+        "$caller: input mesh has no boundary edges"))
+    curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
+    point_nodes=Dict{Int,Int32}()
+    node_points=Dict{Int32,Int}()
+    line_cells=NTuple{2,Int32}[]
+    line_entities=Int32[]
+    claimed_edges=Set{Tuple{Int32,Int32}}()
+    for curve in curve_tags
+        entries=try
+            first(_curve_parameter_nodes(
+                m,mesh,curve,boundary,boundary_edges,
+                geometric_tolerance,caller))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError && rethrow()
+            throw(ArgumentError(
+                "$caller: input mesh does not represent Curve[$curve] — " *
+                sprint(showerror,err)))
+        end
+        curve_entries[curve]=entries
+        start_point,stop_point=m.curves[curve]
+        _model_projection_point!(
+            point_nodes,node_points,start_point,entries[1][2],caller)
+        _model_projection_point!(
+            point_nodes,node_points,stop_point,entries[end][2],caller)
+        for index in 1:(length(entries)-1)
+            first_node=Int32(entries[index][2])
+            second_node=Int32(entries[index+1][2])
+            edge=first_node<second_node ? (first_node,second_node) :
+                                          (second_node,first_node)
+            edge in claimed_edges && throw(ArgumentError(
+                "$caller: boundary edge $edge belongs to multiple model curves"))
+            push!(claimed_edges,edge)
+            push!(line_cells,(first_node,second_node))
+            push!(line_entities,Int32(curve))
+        end
+    end
+    claimed_edges==boundary_edges || throw(ArgumentError(
+        "$caller: model curves cover $(length(claimed_edges)) of " *
+        "$(length(boundary_edges)) mesh boundary edges"))
+
+    node_entities=fill((2,Int32(surface)),nnodes(mesh))
+    for (point,node) in point_nodes
+        node_entities[node]=(0,Int32(point))
+    end
+    for curve in curve_tags
+        entries=curve_entries[curve]
+        if length(entries)>2
+            for index in 2:(length(entries)-1)
+                node=entries[index][2]
+                node_entities[node][1]==2 || throw(ArgumentError(
+                    "$caller: mesh node $node belongs to multiple boundary entities"))
+                node_entities[node]=(1,Int32(curve))
+            end
+        end
+    end
+    for node in eachindex(boundary)
+        boundary[node] && node_entities[node][1]==2 && throw(ArgumentError(
+            "$caller: boundary mesh node $node has no model entity"))
+    end
+
+    links=_model_projection_periodic_links(
+        m,mesh,point_nodes,constraints,caller)
+
+    point_tags=sort!(collect(keys(point_nodes)))
+    total_elements=try
+        subtotal=Base.checked_add(length(point_tags),length(line_cells))
+        Base.checked_add(subtotal,ntris(mesh))
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: projected element count overflows Int"))
+    end
+    total_elements<=typemax(Int32) || throw(ArgumentError(
+        "$caller: projected element count exceeds the Int32 MSH limit"))
+    point_matrix=reshape(Int32[point_nodes[tag] for tag in point_tags],1,:)
+    point_physical=Vector{Int32}(undef,length(point_tags))
+    entities=Dict{Tuple{Int,Int},MixedEntity}()
+    projected_groups=Set{Tuple{Int,Int}}()
+    for (index,point) in pairs(point_tags)
+        tags=_model_projection_physical_tags(m,0,point)
+        point_physical[index]=_model_projection_legacy_tag(tags)
+        union!(projected_groups,((0,Int(tag)) for tag in tags))
+        node=point_nodes[point]
+        coordinate=(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
+        entities[(0,point)]=MixedEntity(
+            0,point,coordinate;physical_tags=tags)
+    end
+
+    line_matrix=Matrix{Int32}(undef,2,length(line_cells))
+    line_physical=Vector{Int32}(undef,length(line_cells))
+    curve_physical=Dict{Int,Vector{Int32}}()
+    for curve in curve_tags
+        tags=_model_projection_physical_tags(m,1,curve)
+        curve_physical[curve]=tags
+        union!(projected_groups,((1,Int(tag)) for tag in tags))
+        nodes=Int32[entry[2] for entry in curve_entries[curve]]
+        start_point,stop_point=m.curves[curve]
+        entities[(1,curve)]=MixedEntity(
+            1,curve,_model_projection_bbox(mesh,nodes,caller);
+            physical_tags=tags,
+            boundaries=Int32[Int32(start_point),-Int32(stop_point)])
+    end
+    for (cell,(first_node,second_node)) in pairs(line_cells)
+        line_matrix[1,cell]=first_node;line_matrix[2,cell]=second_node
+        line_physical[cell]=_model_projection_legacy_tag(
+            curve_physical[Int(line_entities[cell])])
+    end
+
+    surface_physical=_model_projection_physical_tags(m,2,surface)
+    union!(projected_groups,((2,Int(tag)) for tag in surface_physical))
+    surface_boundaries=Int32[]
+    # The selected surface traverses each hole opposite its stored loop direction.
+    for (loop_index,loop) in pairs(m.surfaces[surface])
+        curves=m.loops[loop]
+        if loop_index==1
+            append!(surface_boundaries,Int32.(curves))
+        else
+            for signed_curve in Iterators.reverse(curves)
+                push!(surface_boundaries,-Int32(signed_curve))
+            end
+        end
+    end
+    entities[(2,surface)]=MixedEntity(
+        2,surface,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
+        physical_tags=surface_physical,boundaries=surface_boundaries)
+    triangle_physical=fill(
+        _model_projection_legacy_tag(surface_physical),ntris(mesh))
+
+    blocks=ElementBlock[
+        ElementBlock(15,point_matrix,point_physical),
+        ElementBlock(1,line_matrix,line_physical),
+        ElementBlock(2,mesh.tris,triangle_physical),
+    ]
+    block_entities=Vector{Int32}[
+        Int32.(point_tags),
+        line_entities,
+        fill(Int32(surface),ntris(mesh)),
+    ]
+    external_node_tags=UInt64.(1:nnodes(mesh))
+    external_element_tags=_model_projection_external_elements(blocks)
+    node_parametric=Union{Nothing,Vector{Float64}}[
+        nothing for _ in 1:nnodes(mesh)]
+    data=MixedEntityData(
+        entities;node_entities=node_entities,node_parametric=node_parametric,
+        external_node_tags=external_node_tags,block_entities=block_entities,
+        external_element_tags=external_element_tags)
+    names=Dict{Tuple{Int,Int},String}()
+    for key in sort!(collect(projected_groups))
+        haskey(m.physical_names,key) && (names[key]=m.physical_names[key])
+    end
+    output=MixedMesh(
+        mesh.coords,blocks;physical_names=names,entity_data=data,
+        elementary_entities=block_entities,periodic_links=links)
+    output_diagnostic=validate(output)
+    output_diagnostic.ok || throw(ErrorException(
+        "$caller: invalid projected mixed mesh — " *
+        join(output_diagnostic.messages,"; ")))
+    return output
 end
 
 function _node_at(mesh::Mesh, p; atol=1e-12)
@@ -1166,7 +1534,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     1<=max_periodic_passes<=64 || throw(ArgumentError(
         "$caller: max_periodic_passes must be in 1:64"))
     npasses=Int(max_periodic_passes)
-    constraints=_surface_periodic_constraints(m,t)
+    constraints=_surface_periodic_constraints(m,t,caller)
     forced=Dict{Int,Vector{Float64}}()
     mesh=nothing;embedded=NTuple{2,Int}[]
     for pass in 1:npasses

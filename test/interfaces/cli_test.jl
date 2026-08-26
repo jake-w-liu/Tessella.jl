@@ -2,6 +2,7 @@ using Test
 using Tessella
 using Tessella.CLI: main
 using Tessella.IO: read_msh
+using Tessella.Elements: read_mixed_msh, mixed_crc
 using Tessella.MeshTypes: mesh_crc, ntris, validate
 
 const _SQUARE_GEO="""
@@ -15,6 +16,21 @@ Line(3) = {3, 4};
 Line(4) = {4, 1};
 Curve Loop(1) = {1, 2, 3, 4};
 Plane Surface(1) = {1};
+"""
+
+const _PERIODIC_CLI_GEO=replace(
+    _SQUARE_GEO,"0, 1};"=>"0, 0.5};") *
+    "Periodic Curve {2} = {4} Translate {1, 0, 0};\n"
+const _PERIODIC_VOLUME_CLI_GEO=
+    _PERIODIC_CLI_GEO * "Box(1) = {0, 0, 0, 1, 1, 1};\n"
+const _UNUSED_PERIODIC_CLI_GEO=_SQUARE_GEO * """
+Point(5) = {0, 2, 0, 0.5};
+Point(6) = {1, 2, 0, 0.5};
+Point(7) = {0, 3, 0, 0.5};
+Point(8) = {1, 3, 0, 0.5};
+Line(5) = {5, 6};
+Line(6) = {7, 8};
+Periodic Curve {5} = {6} Translate {0, -1, 0};
 """
 
 @testset "bounded non-destructive CLI" begin
@@ -62,6 +78,62 @@ Plane Surface(1) = {1};
         @test_throws ArgumentError main([input*"\0bad"])
         @test_throws ArgumentError main(fill("x",10_001))
         @test_throws ArgumentError main([repeat("x",1_000_001)])
+
+        periodic_input=joinpath(directory,"periodic.geo")
+        periodic_output=joinpath(directory,"periodic.msh")
+        write(periodic_input,_PERIODIC_CLI_GEO)
+        @test main([periodic_input,"-2","-o",periodic_output])==
+              periodic_output
+        @test read(periodic_input,String)==_PERIODIC_CLI_GEO
+        periodic=read_mixed_msh(periodic_output)
+        @test validate(periodic).ok
+        @test periodic.entity_data!==nothing
+        @test periodic.elementary_entities===nothing
+        @test mixed_crc(periodic).sha==
+              "cf03be1a36427f1ef0fbc4e852996bd65d2630b5ac384fa0267dd14e46ea6280"
+        @test length(periodic.periodic_links)==3
+        @test sort([(Int(link.slave_entity),Int(link.master_entity))
+                    for link in periodic.periodic_links if link.dim==0])==
+              [(2,1),(3,4)]
+        periodic_curve=only(filter(
+            link->link.dim==1,periodic.periodic_links))
+        @test periodic_curve.slave_entity==2
+        @test periodic_curve.master_entity==4
+        @test length(periodic_curve.slave_nodes)==5
+
+        periodic_volume_input=joinpath(directory,"periodic-volume.geo")
+        periodic_volume_output=joinpath(directory,"periodic-volume.msh")
+        write(periodic_volume_input,_PERIODIC_VOLUME_CLI_GEO)
+        write(periodic_volume_output,"unchanged")
+        projection_error=try
+            main([periodic_volume_input,"-3","-o",periodic_volume_output])
+            nothing
+        catch err
+            err
+        end
+        @test projection_error isa ArgumentError
+        @test occursin(
+            "periodic metadata projection is limited to surface meshes",
+            sprint(showerror,projection_error))
+        @test read(periodic_volume_input,String)==_PERIODIC_VOLUME_CLI_GEO
+        @test read(periodic_volume_output,String)=="unchanged"
+
+        unused_input=joinpath(directory,"unused-periodic.geo")
+        unused_output=joinpath(directory,"unused-periodic.msh")
+        write(unused_input,_UNUSED_PERIODIC_CLI_GEO)
+        write(unused_output,"unchanged")
+        unused_error=try
+            main([unused_input,"-2","-o",unused_output])
+            nothing
+        catch err
+            err
+        end
+        @test unused_error isa ArgumentError
+        @test occursin(
+            "selected Surface[1] does not contain periodic slave Curve tags [5]",
+            sprint(showerror,unused_error))
+        @test read(unused_input,String)==_UNUSED_PERIODIC_CLI_GEO
+        @test read(unused_output,String)=="unchanged"
     end
 
     @test isempty(Docs.undocumented_names(Tessella.CLI;private=false))

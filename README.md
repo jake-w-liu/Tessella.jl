@@ -9,8 +9,8 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 165,518/165,518
-assertions; newer isolated increments and their focused gates are recorded in
+complete**. The last stable bounds-checked package gate passed 165,771/165,771
+assertions; implementation increments and their focused gates are recorded in
 [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
 
@@ -71,10 +71,13 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   corner-Jacobian checks, resource bounds, and rigid-motion certification;
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
-  connectivity, and physical tags preserved; the native model/API owns disjoint
-  straight-curve relations, synchronizes their planar boundary subdivisions, and
-  returns detached node maps, while mixed meshes retain pair maps and entity
-  transforms through MSH2/MSH4 I/O;
+  connectivity, and physical tags preserved; the native model/API owns straight-
+  curve relations with one relation per curve, synchronizes their planar boundary
+  subdivisions, and returns detached node maps, while `model_to_mixed` emits
+  classified point/line/triangle blocks, signed hole boundaries, physical
+  memberships, and periodic curve/endpoint links for unembedded planar surfaces;
+  mixed meshes retain those pair maps and entity transforms through MSH2/MSH4 I/O,
+  and the CLI uses this path for periodic `-2` output;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -104,7 +107,8 @@ tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and ful
 dynamic/general ranges, and mixed geometry-derived physical-group RHSs),
 mixed-element generation beyond the listed first-order surface recombination paths,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
-quasi-transfinite or holed patches, curved/warped or compact-TransfiniteTri volumes,
+quasi-transfinite or holed transfinite patches, curved/warped or
+compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
 non-8-byte binary data, and ancillary-section preservation. MSH2 ASCII is the lossless
@@ -112,12 +116,13 @@ format for variable connectivity and parent/domain links; binary MSH2 and MSH4 h
 explicitly narrower special-record contracts. Type 69 and some registered fixed tags
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
-Gmsh-safe rewrite. Native model periodicity is currently limited to disjoint
-straight-curve pairs on one planar triangle-meshed surface. The bounded `.geo`
+Gmsh-safe rewrite. Native model periodicity is currently limited to straight-curve
+pairs on one planar triangle-meshed surface, with each curve in at most one relation;
+independent relations may share corner points. The bounded `.geo`
 executor accepts literal `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`,
-and 12-entry `Affine` transforms. Shared or curved entities, periodic surfaces and
-volumes, variable tags or numeric expressions in those statements, and model-to-MSH
-metadata projection remain pending.
+and 12-entry `Affine` transforms. Curves reused across relations, curved periodic
+entities, periodic surfaces and volumes, variable tags or numeric expressions in
+those statements, and projection of embedded surface entities remain pending.
 Complete CAD/BREP, broad file/API compatibility,
 GUI, and post-processing remain pending. See
 [`PLAN.md`](PLAN.md) rather than treating the completed Stage 0–6 baseline as Gmsh
@@ -135,9 +140,9 @@ volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs t
 Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
-transfinite-volume, five-face-prism, native `.geo` translation-periodic and
-low-level translation/rotation-periodic curve differentials, plus the MSH2/MSH4
-periodic lifecycle, as mandatory bounds-checked children.
+transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
+periodic surface differentials, plus low-level translation/rotation-periodic curves
+and the MSH2/MSH4 lifecycle, as mandatory bounds-checked children.
 Missing or wrong-version Gmsh and differential failures make the aggregate command
 fail. See
 [`DEVELOPMENT.md`](DEVELOPMENT.md) for the correctness, robustness, and completeness
