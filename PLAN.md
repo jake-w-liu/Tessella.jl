@@ -47,7 +47,8 @@ Tessella
 │   ├── NURBS       native B-spline/NURBS curve and surface evaluation
 │   ├── BRep        classified STEP/IGES solid and NURBS import/export
 │   ├── Heal        surface defect and meshability diagnostics
-│   ├── Model       tagged geometry/entity kernel, solids, Booleans, and embeds
+│   ├── Model       tagged geometry/entity kernel, solids, Booleans, embeds,
+│   │               and classified mixed-mesh projection
 │   └── GeoExec     bounded `.geo` execution
 ├── meshing/
 │   ├── PipelineSupport checked top-level input conversion, resource accounting,
@@ -113,11 +114,11 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | Track | Exit condition | State |
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections and persistent MSH2/MSH4 periodic links, and a tagged point/curve/surface/volume kernel |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections and persistent MSH2/MSH4 periodic links, a tagged point/curve/surface/volume kernel, and classified planar model-to-mixed projection |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and literal straight-curve periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
-| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations with literal `.geo` transforms, and persistent MSH2/MSH4 periodic metadata |
-| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, native `.geo` translation-periodic and low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations with literal `.geo` transforms, and classified MSH2/MSH4 periodic projection |
+| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic surface metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, Point/Line-In-Surface, Surface-In-Volume sheet, native and projected single-/two-direction periodic surfaces, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -205,19 +206,27 @@ representation of 0-D/1-D/2-D entity transforms and compact node pairs. MSH2
 retains aligned elementary-entity tags and its standard ASCII periodic section in
 both file modes; MSH4 uses its ASCII or native-endian binary section, with
 opposite-endian binary input decoded under cumulative resource limits. The CRC
-is pair-order independent. `GeoModel` owns validated disjoint affine relations
-between straight curves; planar surface meshing synchronizes the two boundary
+is pair-order independent. `GeoModel` owns validated affine relations with one
+relation per straight curve; independent relations may meet at corners. Planar
+surface meshing synchronizes the two boundary
 subdivisions through bounded remeshing and exposes the certified node map through
 the direct and session APIs. Bounded `.geo` execution accepts literal
 `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`, and 12-entry `Affine`
-transforms. P4 does not yet claim
+transforms. `model_to_mixed` projects an unembedded native planar triangle mesh into
+point, boundary-line, and triangle blocks with MSH2 elementary ownership, MSH4
+point/curve/surface classification, signed outer/hole boundaries, physical
+memberships and names, and periodic curve/node links. When periodic directions meet
+at corners, their point relations use a deterministic one-master-per-slave spanning
+forest; the curve links retain every stored pair. The bounded CLI uses that projection
+for periodic `-2` output. P4 does not yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
-high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, shared or
-curved periodic entities, periodic surfaces/volumes, variable periodic tags or
-numeric expressions, or model-to-MSH periodic projection. The
+high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, a curve
+participating in multiple periodic relations, curved periodic entities, periodic
+surfaces/volumes, variable periodic tags or numeric expressions, or projection of
+embedded entities. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell
 and global fill volume identities and an interface tiling gate; its core engine
 covers Delaunay-friendly caps (planar/primitive walls) directly and smaller
@@ -248,9 +257,9 @@ uniform-refinement, quadratic-tetrahedron,
 four-sided transfinite, straight transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
-recombined-hexahedron differentials, plus native `.geo` translation-periodic and
-low-level translation/rotation-periodic curves with the MSH2/MSH4 periodic
-lifecycle as required bounds-checked children,
+recombined-hexahedron differentials, plus native `.geo` and projected
+single-/two-direction periodic surfaces and low-level translation/rotation-periodic
+curves with the MSH2/MSH4 lifecycle as required bounds-checked children,
 together with the P6 t1-square, OCC-cylinder, OCC-cone, IGES-128 bilinear,
 BooleanDifference box, and 2-D boundary-layer differentials. A missing or
 wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the

@@ -84,7 +84,7 @@ using .Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surfac
               add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!,
               embed!, translate_volume!, dilate_volume!, rotate_volume!,
               ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
-              model_periodic_nodes, add_physical_group!, mesh_model_surface,
+              model_periodic_nodes, model_to_mixed, add_physical_group!, mesh_model_surface,
               mesh_model_volume
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
@@ -155,7 +155,7 @@ export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!, add
 export add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
-       model_periodic_nodes
+       model_periodic_nodes, model_to_mixed
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d,

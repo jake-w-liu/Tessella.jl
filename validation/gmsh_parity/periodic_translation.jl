@@ -22,6 +22,7 @@ end
 include(find_gmsh_api())
 const GEO=joinpath(@__DIR__,"periodic_translation.geo")
 const NATIVE_GEO=joinpath(@__DIR__,"periodic_native.geo")
+const TWO_DIRECTION_GEO=joinpath(@__DIR__,"periodic_two_direction.geo")
 gmsh.initialize(["gmsh","-v","0"])
 try
     startswith(gmsh.GMSH_API_VERSION,"4.15.2") || error(
@@ -106,6 +107,139 @@ try
     end
     max_native_difference<=1e-11 || error(
         "Tessella/Gmsh native periodic pair difference is $max_native_difference")
+
+    # Project the native geometry ownership and all three endpoint/curve links
+    # to each supported MSH mode, then require Gmsh to recover the live curve
+    # relation. MSH2 parsing needs Mesh.IgnorePeriodicity disabled explicitly.
+    native_projection=model_to_mixed(native_model,native_mesh,1)
+    validate(native_projection).ok || error(
+        "Tessella native periodic MSH projection is invalid")
+    projected_crcs=Dict(2.2=>Set{String}(),4.1=>Set{String}())
+    max_projected_error=0.0
+    mktempdir() do directory
+        for version in (2.2,4.1),binary in (false,true)
+            path=joinpath(directory,"native-projected-$version-$binary.msh")
+            write_mixed_msh(
+                path,native_projection;version=version,binary=binary)
+            reread=read_mixed_msh(path)
+            Tessella.Elements.validate(reread).ok || error(
+                "Tessella rejected its native periodic MSH $version projection")
+            length(reread.periodic_links)==3 || error(
+                "Tessella native periodic MSH $version projection lost endpoint or curve links")
+            push!(projected_crcs[version],mixed_crc(reread).sha)
+
+            gmsh.clear()
+            gmsh.option.setNumber("Mesh.IgnorePeriodicity",0)
+            gmsh.open(path)
+            projected_master,projected_slaves,projected_masters,projected_affine=
+                gmsh.model.mesh.getPeriodicNodes(1,2)
+            projected_master==4 || error(
+                "Gmsh recovered projected periodic master $projected_master, expected 4")
+            length(projected_slaves)==length(projected_masters)==5 || error(
+                "Gmsh recovered $(length(projected_slaves)) projected periodic pairs, expected 5")
+            projected_affine==expected_affine || error(
+                "Gmsh changed Tessella's projected periodic affine transform")
+            projected_point_two=gmsh.model.mesh.getPeriodicNodes(0,2)
+            projected_point_three=gmsh.model.mesh.getPeriodicNodes(0,3)
+            projected_point_two[1]==1 && length(projected_point_two[2])==1 ||
+                error("Gmsh lost Tessella's projected Point[2] -> Point[1] link")
+            projected_point_three[1]==4 && length(projected_point_three[2])==1 ||
+                error("Gmsh lost Tessella's projected Point[3] -> Point[4] link")
+            projected_tags,projected_values,_=gmsh.model.mesh.getNodes()
+            projected_coordinates=Dict{Int,NTuple{3,Float64}}()
+            for (index,tag) in enumerate(projected_tags)
+                projected_coordinates[Int(tag)]=(
+                    projected_values[3index-2],projected_values[3index-1],
+                    projected_values[3index])
+            end
+            for (slave_tag,master_tag) in
+                zip(projected_slaves,projected_masters)
+                slave=projected_coordinates[Int(slave_tag)]
+                master=projected_coordinates[Int(master_tag)]
+                max_projected_error=max(max_projected_error,
+                    hypot(slave[1]-master[1]-1.0,
+                          slave[2]-master[2],slave[3]-master[3]))
+            end
+        end
+    end
+    all(length(crcs)==1 for crcs in values(projected_crcs)) || error(
+        "native periodic MSH projection CRC depends on file mode")
+    only(projected_crcs[2.2])==
+        "506ae0fac8562df49231df71f3b12d7259ba44b3fb5618a064a15f97698951a0" ||
+        error("native projected MSH2 CRC changed")
+    only(projected_crcs[4.1])==
+        "cf03be1a36427f1ef0fbc4e852996bd65d2630b5ac384fa0267dd14e46ea6280" ||
+        error("native projected MSH4 CRC changed")
+    max_projected_error<=1e-12 || error(
+        "Gmsh native periodic MSH projection error is $max_projected_error")
+
+    # The shared-corner lattice fixture requires a deterministic point-link
+    # forest: Gmsh's MSH readers permit one master per periodic point even when
+    # two curve transformations meet there.
+    gmsh.clear()
+    gmsh.open(TWO_DIRECTION_GEO)
+    gmsh.model.mesh.generate(2)
+    gmsh_two_x=gmsh.model.mesh.getPeriodicNodes(1,2)
+    gmsh_two_y=gmsh.model.mesh.getPeriodicNodes(1,3)
+    gmsh_two_x[1]==4 && length(gmsh_two_x[2])==3 &&
+        gmsh_two_x[4]==expected_affine || error(
+        "Gmsh two-direction x-periodic relation changed")
+    expected_y_affine=[1.0,0.0,0.0,0.0,
+                       0.0,1.0,0.0,1.0,
+                       0.0,0.0,1.0,0.0,
+                       0.0,0.0,0.0,1.0]
+    gmsh_two_y[1]==1 && length(gmsh_two_y[2])==3 &&
+        gmsh_two_y[4]==expected_y_affine || error(
+        "Gmsh two-direction y-periodic relation changed")
+
+    two_execution=execute_geo(TWO_DIRECTION_GEO;mesh_dim=2)
+    two_mesh=two_execution.mesh
+    two_mesh===nothing && error("Tessella two-direction `.geo` did not mesh")
+    two_crc=mesh_crc(two_mesh).sha
+    two_crc=="95ef6d0db94505d4f35ff870af09e952d74a32508a338b3994af347b406e9d05" ||
+        error("Tessella two-direction periodic mesh CRC changed to $two_crc")
+    two_projection=model_to_mixed(two_execution.model,two_mesh,1)
+    length(two_projection.periodic_links)==5 || error(
+        "Tessella two-direction projection did not emit three point and two curve links")
+    mixed_crc(two_projection).sha==
+        "d5fd8bd6ef46c78772792f0cee0c7b19cdd747f1c2932c2a8992760f19e69b20" ||
+        error("Tessella two-direction projected mixed CRC changed")
+    two_projection_crcs=Dict(2.2=>Set{String}(),4.1=>Set{String}())
+    mktempdir() do directory
+        for version in (2.2,4.1),binary in (false,true)
+            path=joinpath(directory,"two-direction-$version-$binary.msh")
+            write_mixed_msh(
+                path,two_projection;version=version,binary=binary)
+            reread=read_mixed_msh(path)
+            length(reread.periodic_links)==5 || error(
+                "Tessella two-direction MSH $version projection lost a link")
+            push!(two_projection_crcs[version],mixed_crc(reread).sha)
+            gmsh.clear()
+            gmsh.option.setNumber("Mesh.IgnorePeriodicity",0)
+            gmsh.open(path)
+            projected_x=gmsh.model.mesh.getPeriodicNodes(1,2)
+            projected_y=gmsh.model.mesh.getPeriodicNodes(1,3)
+            projected_x[1]==4 && length(projected_x[2])==5 &&
+                projected_x[4]==expected_affine || error(
+                "Gmsh lost Tessella's projected x-periodic curve")
+            projected_y[1]==1 && length(projected_y[2])==5 &&
+                projected_y[4]==expected_y_affine || error(
+                "Gmsh lost Tessella's projected y-periodic curve")
+            projected_points=Dict(
+                point=>gmsh.model.mesh.getPeriodicNodes(0,point)
+                for point in (2,3,4))
+            all(projected_points[point][1]==master &&
+                length(projected_points[point][2])==1
+                for (point,master) in ((2,1),(3,2),(4,1))) || error(
+                "Gmsh lost Tessella's projected shared-corner point-link forest")
+        end
+    end
+    only(two_projection_crcs[2.2])==
+        "bac00f74b86af8d1a6b70de445cdb17a16a9513f0fc4a542bd995d9120923a58" ||
+        error("Tessella two-direction projected MSH2 CRC changed")
+    only(two_projection_crcs[4.1])==
+        "d5fd8bd6ef46c78772792f0cee0c7b19cdd747f1c2932c2a8992760f19e69b20" ||
+        error("Tessella two-direction projected MSH4 CRC changed")
 
     segments=Matrix{Int32}(undef,2,2(n-1))
     for i in 1:n-1
@@ -298,6 +432,12 @@ try
             "translation_sha=$(mesh_crc(translation_output).sha) "*
             "native_pairs=$(length(native_mapping.slave_nodes)) "*
             "native_difference=$max_native_difference native_sha=$native_crc "*
+            "projected_error=$max_projected_error "*
+            "projected_msh2_crc=$(only(projected_crcs[2.2])) "*
+            "projected_msh4_crc=$(only(projected_crcs[4.1])) "*
+            "two_direction_sha=$two_crc "*
+            "two_direction_msh2_crc=$(only(two_projection_crcs[2.2])) "*
+            "two_direction_msh4_crc=$(only(two_projection_crcs[4.1])) "*
             "rotation_pairs=$nr rotation_error=$max_rotation_error "*
             "rotation_sha=$(mesh_crc(rotation_output).sha) "*
             "msh2_links=3 msh2_crc=$(only(io_crcs[2.2])) "*
