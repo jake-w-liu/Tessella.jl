@@ -1128,6 +1128,28 @@ function _model_projection_surface_boundaries(m::GeoModel,surface::Int)
     return boundaries
 end
 
+function _model_surface_embedding_tags(
+    m::GeoModel,surface::Int,caller::AbstractString)
+    point_tags=Int[];curve_tags=Int[]
+    for (embedded_dim,embedded_tag) in
+            get(m.embeds,(2,surface),NTuple{2,Int}[])
+        if embedded_dim==0
+            haskey(m.points,embedded_tag) || throw(ArgumentError(
+                "$caller: unknown embedded Point[$embedded_tag]"))
+            push!(point_tags,embedded_tag)
+        elseif embedded_dim==1
+            haskey(m.curves,embedded_tag) || throw(ArgumentError(
+                "$caller: unknown embedded Curve[$embedded_tag]"))
+            push!(curve_tags,embedded_tag)
+        else
+            throw(ArgumentError(
+                "$caller: unsupported Surface[$surface] embedding dimension " *
+                "$embedded_dim"))
+        end
+    end
+    return sort!(unique!(point_tags)),sort!(unique!(curve_tags))
+end
+
 function _model_projection_point!(point_nodes,node_points,point::Int,node::Int,
                                   caller::AbstractString)
     compact=Int32(node)
@@ -1358,19 +1380,8 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     all(iszero,mesh.tri_tag) || throw(ArgumentError(
         "$caller: input triangle tags must be zero; physical ownership comes from the model"))
 
-    embedded_points=Int[];embedded_curves=Int[]
-    for (embedded_dim,embedded_tag) in
-            get(m.embeds,(2,surface),NTuple{2,Int}[])
-        if embedded_dim==0
-            push!(embedded_points,embedded_tag)
-        elseif embedded_dim==1
-            push!(embedded_curves,embedded_tag)
-        else
-            throw(ArgumentError(
-                "$caller: unsupported Surface[$surface] embedding dimension $embedded_dim"))
-        end
-    end
-    sort!(unique!(embedded_points));sort!(unique!(embedded_curves))
+    embedded_points,embedded_curves=
+        _model_surface_embedding_tags(m,surface,caller)
 
     constraints=_surface_periodic_constraints(m,surface,caller)
     embedded_curve_set=Set(embedded_curves)
@@ -1688,9 +1699,11 @@ function _model_projection_volume_surface_faces!(
     return output
 end
 
-function _model_projection_volume_inventory(
+function _model_volume_embedding_inventory(
     m::GeoModel,volume::Int,caller::AbstractString)
     point_tags=Int[];curve_tags=Int[];surface_tags=Int[]
+    surface_embedded_points=Dict{Int,Vector{Int}}()
+    surface_embedded_curves=Dict{Int,Vector{Int}}()
     for (embedded_dim,embedded_tag) in
             get(m.embeds,(3,volume),NTuple{2,Int}[])
         if embedded_dim==0
@@ -1704,12 +1717,19 @@ function _model_projection_volume_inventory(
         elseif embedded_dim==2
             haskey(m.surfaces,embedded_tag) || throw(ArgumentError(
                 "$caller: unknown embedded Surface[$embedded_tag]"))
-            isempty(get(m.embeds,(2,embedded_tag),NTuple{2,Int}[])) ||
-                throw(ArgumentError(
-                    "$caller: nested Point/Line-In-Surface constraints on embedded " *
-                    "Surface[$embedded_tag] are not supported"))
+            nested_points,nested_curves=
+                _model_surface_embedding_tags(m,embedded_tag,caller)
+            boundary_curves=_model_projection_surface_curves(m,embedded_tag)
+            overlap=intersect(boundary_curves,nested_curves)
+            isempty(overlap) || throw(ArgumentError(
+                "$caller: embedded Surface[$embedded_tag] Curve tags $overlap cannot " *
+                "be both bounding and embedded"))
+            surface_embedded_points[embedded_tag]=nested_points
+            surface_embedded_curves[embedded_tag]=nested_curves
             push!(surface_tags,embedded_tag)
-            append!(curve_tags,_model_projection_surface_curves(m,embedded_tag))
+            append!(point_tags,nested_points)
+            append!(curve_tags,boundary_curves)
+            append!(curve_tags,nested_curves)
         else
             throw(ArgumentError(
                 "$caller: unsupported Volume[$volume] embedding dimension $embedded_dim"))
@@ -1721,7 +1741,45 @@ function _model_projection_volume_inventory(
         push!(point_tags,start_point);push!(point_tags,stop_point)
     end
     sort!(unique!(point_tags))
-    return point_tags,curve_tags,surface_tags
+    return point_tags,curve_tags,surface_tags,
+           surface_embedded_points,surface_embedded_curves
+end
+
+function _model_projection_face_topology(faces)
+    nodes=Set{Int32}()
+    edges=Set{NTuple{2,Int32}}()
+    for (first_node,second_node,third_node) in faces
+        push!(nodes,first_node,second_node,third_node)
+        for (a,b) in ((first_node,second_node),(second_node,third_node),
+                      (third_node,first_node))
+            push!(edges,a<b ? (a,b) : (b,a))
+        end
+    end
+    return nodes,edges
+end
+
+function _model_projection_validate_nested_surface(
+    surface::Int,nodes,edges,point_nodes,curve_entries,
+    nested_points,nested_curves,caller::AbstractString)
+    for point in nested_points
+        node=point_nodes[point]
+        node in nodes || throw(ArgumentError(
+            "$caller: nested Point[$point] is not a node of embedded " *
+            "Surface[$surface]"))
+    end
+    for curve in nested_curves
+        entries=curve_entries[curve]
+        for index in 1:(length(entries)-1)
+            first_node=Int32(entries[index][2])
+            second_node=Int32(entries[index+1][2])
+            edge=first_node<second_node ? (first_node,second_node) :
+                                          (second_node,first_node)
+            edge in edges || throw(ArgumentError(
+                "$caller: nested Curve[$curve] edge $edge is not an edge of " *
+                "embedded Surface[$surface]"))
+        end
+    end
+    return nothing
 end
 
 function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
@@ -1750,8 +1808,9 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     fills_volume || throw(ArgumentError(
         "$caller: input tetrahedron mesh does not fill Volume[$volume] — $fill_reason"))
 
-    point_tags,curve_tags,surface_tags=
-        _model_projection_volume_inventory(m,volume,caller)
+    point_tags,curve_tags,surface_tags,
+    surface_embedded_points,surface_embedded_curves=
+        _model_volume_embedding_inventory(m,volume,caller)
     tet_edges=_tet_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()
     node_points=Dict{Int32,Int}()
@@ -1790,15 +1849,23 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     surface_cells=NTuple{3,Int32}[]
     surface_entities=Int32[]
     surface_nodes=Dict{Int,Set{Int32}}()
+    surface_edges=Dict{Int,Set{NTuple{2,Int32}}}()
     for surface in surface_tags
         faces=_model_projection_volume_surface_faces!(
             claimed_faces,m,mesh,surface,caller)
-        nodes=get!(Set{Int32},surface_nodes,surface)
+        nodes,edges=_model_projection_face_topology(faces)
+        surface_nodes[surface]=nodes
+        surface_edges[surface]=edges
         for face in faces
             push!(surface_cells,face)
             push!(surface_entities,Int32(surface))
-            union!(nodes,face)
         end
+    end
+    for surface in surface_tags
+        _model_projection_validate_nested_surface(
+            surface,surface_nodes[surface],surface_edges[surface],
+            point_nodes,curve_entries,surface_embedded_points[surface],
+            surface_embedded_curves[surface],caller)
     end
 
     node_entities=fill((3,Int32(volume)),nnodes(mesh))
@@ -1885,7 +1952,8 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         entities[(2,surface)]=MixedEntity(
             2,surface,_model_projection_bbox(mesh,nodes,caller);
             physical_tags=tags,
-            boundaries=_model_projection_surface_boundaries(m,surface))
+            boundaries=_model_projection_surface_boundaries(m,surface),
+            embedded_curves=surface_embedded_curves[surface])
     end
     for (cell,face) in pairs(surface_cells)
         surface_matrix[:,cell].=face
@@ -1947,8 +2015,10 @@ Project a validated native surface (`entity_dim=2`) or volume (`entity_dim=3`)
 simplex mesh into classified MSH2/MSH4 cells. The three-argument method remains
 the surface convenience form. Volume projection first certifies that the tetrahedron
 boundary fills the selected native solid, then emits Point/Line/Surface-In-Volume
-cells and their entity hierarchy. Gmsh 4.15.2 has no serialized volume-embedding
-relation; MSH4 classification and MSH2 cell ownership remain available.
+cells and their entity hierarchy, including nested Point/Line-In-Surface constraints
+on an embedded sheet. Gmsh 4.15.2 has no serialized volume-embedding relation;
+MSH4 classification, its Curve-In-Surface relation, and MSH2 cell ownership remain
+available.
 """
 function model_to_mixed(
     m::GeoModel,mesh::Mesh,entity_dim::Integer,entity_tag::Integer)
@@ -2111,10 +2181,10 @@ end
 """
     mesh_model_volume(model, tag) -> Mesh
 
-Mesh a native primitive or Boolean volume, recovering supported embedded
-points, curves, and unholed planar sheets. The returned tetrahedral mesh is
-validated before it is returned; unsupported solid encodings raise an explicit
-error.
+Mesh a native primitive or Boolean volume, recovering supported embedded points,
+curves, and unholed planar sheets, including nested points and curves constrained
+to those sheets. The returned tetrahedral mesh is validated before it is returned;
+unsupported solid encodings raise an explicit error.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer)
     caller="mesh_model_volume"
@@ -2122,8 +2192,11 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
     surface=_volume_surface(m,t)
     extra=NTuple{3,Float64}[]
-    lines=NTuple{2,NTuple{3,Float64}}[]
-    sheets=NTuple{3,NTuple{3,Float64}}[]
+    line_tags=Int[]
+    sheets=Tuple{Int,NTuple{3,Float64},NTuple{3,Float64},
+                       NTuple{3,Float64}}[]
+    _,_,surface_tags,surface_embedded_points,surface_embedded_curves=
+        _model_volume_embedding_inventory(m,t,caller)
     for (edim,etag) in get(m.embeds,(3,t),NTuple{2,Int}[])
         if edim==0
             haskey(m.points,etag) || throw(ArgumentError("$caller: unknown embedded Point[$etag]"))
@@ -2131,7 +2204,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
         elseif edim==1
             haskey(m.curves,etag) || throw(ArgumentError("$caller: unknown embedded Curve[$etag]"))
             a,b=m.curves[etag]
-            push!(lines, (m.points[a], m.points[b]))
+            push!(line_tags,etag)
             push!(extra, m.points[a]); push!(extra, m.points[b])
         elseif edim==2
             haskey(m.surfaces,etag) || throw(ArgumentError("$caller: unknown embedded Surface[$etag]"))
@@ -2142,24 +2215,56 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
                 "$caller: embedded Surface[$etag] needs at least three points"))
             length(loops)==1 || throw(ArgumentError(
                 "$caller: holed sheets In Volume are a blocker"))
+            for point in surface_embedded_points[etag]
+                push!(extra,m.points[point])
+            end
+            for curve in surface_embedded_curves[etag]
+                push!(line_tags,curve)
+                a,b=m.curves[curve]
+                push!(extra,m.points[a]);push!(extra,m.points[b])
+            end
             pts=[m.points[pid] for pid in ids]
             for i in 2:length(pts)-1
-                push!(sheets, (pts[1], pts[i], pts[i+1]))
+                push!(sheets,(etag,pts[1],pts[i],pts[i+1]))
             end
         else
             throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
         end
     end
     mesh=isempty(extra) ? tetrahedralize(surface) : tetrahedralize(surface; interior_points=extra)
-    for (p,q) in lines
+    sort!(unique!(line_tags))
+    for curve in line_tags
+        a,b=m.curves[curve];p=m.points[a];q=m.points[b]
         mesh=recover_segment3(mesh,p,q)
         mesh_covers_segment3(mesh,p,q) || throw(ErrorException(
-            "$caller: embedded curve is not a chain of tetrahedron edges"))
+            "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
     end
-    for (a,b,c) in sheets
+    for (sheet,a,b,c) in sheets
         mesh=recover_triangle3(mesh,a,b,c)
         mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
-            "$caller: embedded sheet is not a union of tetrahedron faces"))
+            "$caller: embedded Surface[$sheet] is not a union of tetrahedron faces"))
+    end
+    tet_edges=_tet_edge_set(mesh)
+    point_nodes=Dict{Int,Int32}()
+    curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
+    for surface_tag in surface_tags
+        nested_points=surface_embedded_points[surface_tag]
+        nested_curves=surface_embedded_curves[surface_tag]
+        isempty(nested_points) && isempty(nested_curves) && continue
+        faces=_model_projection_volume_surface_faces!(
+            Set{NTuple{3,Int32}}(),m,mesh,surface_tag,caller)
+        nodes,edges=_model_projection_face_topology(faces)
+        for point in nested_points
+            point_nodes[point]=_model_projection_embedded_point_node(
+                m,mesh,point,1e-12,caller)
+        end
+        for curve in nested_curves
+            curve_entries[curve]=_model_projection_tet_curve_nodes(
+                m,mesh,curve,tet_edges,caller)
+        end
+        _model_projection_validate_nested_surface(
+            surface_tag,nodes,edges,point_nodes,curve_entries,
+            nested_points,nested_curves,caller)
     end
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))

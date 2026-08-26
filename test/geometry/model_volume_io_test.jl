@@ -1,6 +1,7 @@
 using Test
 using Tessella
 using Tessella.MeshTypes: Mesh, nnodes, ntets
+using Tessella.Mesh3D: insert_steiner3, recover_segment3
 
 function _classified_volume_fixture()
     model=GeoModel()
@@ -20,13 +21,21 @@ function _classified_volume_fixture()
     add_curve_loop!(model,[31,32,33];tag=30)
     add_plane_surface!(model,[30];tag=30)
 
+    add_point!(model,0.3,0.35,0.5;tag=24)
+    add_point!(model,0.7,0.35,0.5;tag=25)
+    add_point!(model,0.5,0.35,0.5;tag=26)
+    add_line!(model,24,25;tag=34)
+    embed!(model,0,[26],2,30)
+    embed!(model,1,[34],2,30)
+
     embed!(model,0,[10],3,1)
     embed!(model,1,[20],3,1)
     embed!(model,2,[30],3,1)
     add_physical_group!(
-        model,0,[10,11,12,21,22,23];tag=41,name="embedded points")
+        model,0,[10,11,12,21,22,23,24,25,26];
+        tag=41,name="embedded points")
     add_physical_group!(
-        model,1,[20,31,32,33];tag=42,name="embedded curves")
+        model,1,[20,31,32,33,34];tag=42,name="embedded curves")
     add_physical_group!(model,2,[30];tag=43,name="embedded sheet")
     add_physical_group!(model,3,[1];tag=44,name="domain")
     return model,mesh_model_volume(model,1)
@@ -43,8 +52,8 @@ end
     line_block=only(findall(block->block.msh==1,projected.blocks))
     surface_block=only(findall(block->block.msh==2,projected.blocks))
     volume_block=only(findall(block->block.msh==4,projected.blocks))
-    expected_points=Set(Int32[10,11,12,21,22,23])
-    expected_curves=Set(Int32[20,31,32,33])
+    expected_points=Set(Int32[10,11,12,21,22,23,24,25,26])
+    expected_curves=Set(Int32[20,31,32,33,34])
     @test Set(projected.entity_data.block_entities[point_block])==expected_points
     @test Set(projected.entity_data.block_entities[line_block])==expected_curves
     @test projected.entity_data.block_entities[surface_block]==
@@ -52,7 +61,7 @@ end
     @test projected.entity_data.block_entities[volume_block]==
           fill(Int32(1),ntets(mesh))
     @test projected.entity_data.entities[(2,30)].boundaries==Int32[31,32,33]
-    @test isempty(projected.entity_data.entities[(2,30)].embedded_curves)
+    @test projected.entity_data.entities[(2,30)].embedded_curves==Int32[34]
     @test isempty(projected.entity_data.entities[(3,1)].boundaries)
     @test projected.physical_names==Dict(
         (0,41)=>"embedded points",(1,42)=>"embedded curves",
@@ -68,6 +77,13 @@ end
     @test size(projected.blocks[surface_block].nodes,2)>0
     @test any(entity->entity==(2,Int32(30)),
               projected.entity_data.node_entities)
+    nested_point=only(node for (node,entity) in
+        enumerate(projected.entity_data.node_entities)
+        if entity==(0,Int32(26)))
+    nested_line_cells=only(block for block in projected.blocks if block.msh==1)
+    @test nested_point in nested_line_cells.nodes
+    @test any(nested_point in projected.blocks[surface_block].nodes[:,cell]
+              for cell in axes(projected.blocks[surface_block].nodes,2))
     @test nnodes(mesh)==size(projected.coords,2)
 
     plain_model=deepcopy(model)
@@ -79,7 +95,7 @@ end
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "d12446ff4f9c24254d02ae3938fc51b1010063399ab1a4d42b8947bd6637c1f8"
+          "e6a1a6de65b65987c543553d6456e4607b43fd3f3127294d926237888c9b5453"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"classified-volume-$version-$binary.msh")
@@ -92,6 +108,8 @@ end
                 @test mixed_crc(reread)==crc
                 @test haskey(reread.entity_data.entities,(2,30))
                 @test haskey(reread.entity_data.entities,(3,1))
+                @test reread.entity_data.entities[(2,30)].embedded_curves==
+                      Int32[34]
                 @test isempty(reread.entity_data.entities[(3,1)].boundaries)
             else
                 @test reread.entity_data===nothing
@@ -126,9 +144,25 @@ end
     explicit_shell.volumes[1]=[30]
     @test_throws ArgumentError model_to_mixed(explicit_shell,mesh,3,1)
 
-    nested=deepcopy(model)
-    embed!(nested,0,[10],2,30)
-    @test_throws ArgumentError model_to_mixed(nested,mesh,3,1)
+    off_sheet=deepcopy(model)
+    add_point!(off_sheet,0.5,0.35,0.6;tag=27)
+    embed!(off_sheet,0,[27],2,30)
+    off_sheet_mesh,_=insert_steiner3(mesh,(0.5,0.35,0.6))
+    @test_throws ArgumentError model_to_mixed(off_sheet,off_sheet_mesh,3,1)
+
+    off_sheet_curve=deepcopy(model)
+    add_point!(off_sheet_curve,0.3,0.35,0.6;tag=28)
+    add_point!(off_sheet_curve,0.7,0.35,0.6;tag=29)
+    add_line!(off_sheet_curve,28,29;tag=35)
+    embed!(off_sheet_curve,1,[35],2,30)
+    off_sheet_curve_mesh=recover_segment3(
+        mesh,(0.3,0.35,0.6),(0.7,0.35,0.6))
+    @test_throws ArgumentError model_to_mixed(
+        off_sheet_curve,off_sheet_curve_mesh,3,1)
+
+    bounding_embed=deepcopy(model)
+    embed!(bounding_embed,1,[31],2,30)
+    @test_throws ArgumentError mesh_model_volume(bounding_embed,1)
 
     overlapping_curve=deepcopy(model)
     add_line!(overlapping_curve,11,12;tag=40)

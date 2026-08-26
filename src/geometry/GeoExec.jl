@@ -4,8 +4,9 @@
 Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface,
 Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
 90°-Rotate of those solids, Point/Line-In-Surface and Point/Line/Surface-In-Volume
-embeddings, literal Translate/Rotate/Affine periodic straight curves, Physical
-groups, and Mesh 2/3 via the native [`Model`](@ref) kernel. Loops, macros,
+embeddings with nested point/curve sheet constraints, literal
+Translate/Rotate/Affine periodic straight curves, Physical groups, and Mesh 2/3 via
+the native [`Model`](@ref) kernel. Loops, macros,
 extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
 module GeoExec
