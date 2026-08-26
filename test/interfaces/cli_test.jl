@@ -66,6 +66,30 @@ Physical Curve("sheet curves", 52) = {101, 102, 103, 104};
 Physical Surface("sheet", 53) = {101};
 Physical Volume("domain", 54) = {1};
 """
+const _EXPLICIT_SHELL_CLI_GEO="""
+Point(1) = {0, 0, 0, 1};
+Point(2) = {1, 0, 0, 1};
+Point(3) = {0, 1, 0, 1};
+Point(4) = {0, 0, 1, 1};
+Line(1) = {1, 2};
+Line(2) = {2, 3};
+Line(3) = {3, 1};
+Line(4) = {1, 4};
+Line(5) = {2, 4};
+Line(6) = {3, 4};
+Curve Loop(1) = {1, 2, 3};
+Curve Loop(2) = {1, 5, -4};
+Curve Loop(3) = {2, 6, -5};
+Curve Loop(4) = {3, 4, -6};
+Plane Surface(1) = {1};
+Plane Surface(2) = {2};
+Plane Surface(3) = {3};
+Plane Surface(4) = {4};
+Surface Loop(1) = {1, 2, 3, 4};
+Volume(1) = {1};
+Physical Surface("boundary", 71) = {1, 2, 3, 4};
+Physical Volume("domain", 72) = {1};
+"""
 
 @testset "bounded non-destructive CLI" begin
     mktempdir() do directory
@@ -175,6 +199,23 @@ Physical Volume("domain", 54) = {1};
             (2,53)=>"sheet",(3,54)=>"domain")
         @test mixed_crc(embedded_volume).sha==
               "745bc23ab2aa7c0824006a94ef279514a1c6fa97d3cd95960943797b85c6336c"
+
+        explicit_shell_input=joinpath(directory,"explicit-shell.geo")
+        explicit_shell_output=joinpath(directory,"explicit-shell.msh")
+        write(explicit_shell_input,_EXPLICIT_SHELL_CLI_GEO)
+        @test main([explicit_shell_input,"-3","-o",explicit_shell_output])==
+              explicit_shell_output
+        @test read(explicit_shell_input,String)==_EXPLICIT_SHELL_CLI_GEO
+        explicit_shell=read_mixed_msh(explicit_shell_output)
+        @test validate(explicit_shell).ok
+        @test explicit_shell.entity_data!==nothing
+        @test explicit_shell.entity_data.entities[(3,1)].boundaries==
+              Int32[1,2,3,4]
+        @test Set(block.msh for block in explicit_shell.blocks)==Set([15,1,2,4])
+        @test explicit_shell.physical_names==Dict(
+            (2,71)=>"boundary",(3,72)=>"domain")
+        @test mixed_crc(explicit_shell).sha==
+              "fe4bc18f3b9156c654c5ee1433b43c87cb9b8d7f372d9fbb72689f500584623a"
 
         periodic_volume_input=joinpath(directory,"periodic-volume.geo")
         periodic_volume_output=joinpath(directory,"periodic-volume.msh")

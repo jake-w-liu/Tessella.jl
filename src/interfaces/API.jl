@@ -2,12 +2,14 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-persistent affine relations between straight periodic boundary curves.
+explicit planar surface-loop volumes and persistent affine relations between
+straight periodic boundary curves.
 Production meshing is never delegated to Gmsh.
 """
 module API
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!
 using ..Model: add_physical_group!, set_periodic!, model_periodic_nodes
@@ -119,6 +121,7 @@ end
 """Gmsh-style geometry-model operations for the active [`API`](@ref) session."""
 module model
 using ..API: _with_model, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+using ..API: add_surface_loop!, add_volume!
 using ..API: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!, embed!, add_physical_group!
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
     add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
@@ -131,6 +134,14 @@ add_curve_loop(curves;tag=0)=_with_model(invalidate=true) do m
 end
 add_plane_surface(loops;tag=0)=_with_model(invalidate=true) do m
     add_plane_surface!(m,loops;tag=tag)
+end
+"""Add a connected closed planar-surface shell to the active model."""
+add_surface_loop(surfaces;tag=0)=_with_model(invalidate=true) do m
+    add_surface_loop!(m,surfaces;tag=tag)
+end
+"""Add a volume from an exterior surface loop and optional cavity loops."""
+add_volume(surface_loops;tag=0)=_with_model(invalidate=true) do m
+    add_volume!(m,surface_loops;tag=tag)
 end
 add_box(x,y,z,dx,dy,dz;tag=0)=_with_model(invalidate=true) do m
     add_box!(m,x,y,z,dx,dy,dz;tag=tag)

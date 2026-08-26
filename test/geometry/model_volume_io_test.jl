@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: Mesh, nnodes, ntets
+using Tessella.MeshTypes: Mesh, nnodes, ntets, tet_volume, node
 using Tessella.Mesh3D: insert_steiner3, recover_segment3
 
 function _classified_volume_fixture()
@@ -39,6 +39,36 @@ function _classified_volume_fixture()
     add_physical_group!(model,2,[30];tag=43,name="embedded sheet")
     add_physical_group!(model,3,[1];tag=44,name="domain")
     return model,mesh_model_volume(model,1)
+end
+
+function _add_explicit_cube_shell!(model,offset::Int,lo::Float64,hi::Float64)
+    coordinates=((lo,lo,lo),(hi,lo,lo),(hi,hi,lo),(lo,hi,lo),
+                 (lo,lo,hi),(hi,lo,hi),(hi,hi,hi),(lo,hi,hi))
+    for (index,coordinate) in pairs(coordinates)
+        add_point!(model,coordinate...;tag=offset+index)
+    end
+    endpoints=((1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+               (1,5),(2,6),(3,7),(4,8))
+    for (index,(first_point,last_point)) in pairs(endpoints)
+        add_line!(model,offset+first_point,offset+last_point;tag=offset+index)
+    end
+    loops=((1,2,3,4),(5,6,7,8),(1,10,-5,-9),(2,11,-6,-10),
+           (3,12,-7,-11),(4,9,-8,-12))
+    signed_tag(tag)=sign(tag)*(offset+abs(tag))
+    for (index,curves) in pairs(loops)
+        tag=offset+index
+        add_curve_loop!(model,signed_tag.(curves);tag=tag)
+        add_plane_surface!(model,[tag];tag=tag)
+    end
+    surfaces=collect((offset+1):(offset+6))
+    return add_surface_loop!(model,surfaces;tag=offset+1)
+end
+
+function _mesh_volume_value(mesh)
+    return sum(tet_volume(
+        node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
+        node(mesh,mesh.tets[3,cell]),node(mesh,mesh.tets[4,cell]))
+        for cell in 1:ntets(mesh))
 end
 
 @testset "classified native volume projection" begin
@@ -184,4 +214,141 @@ end
                0.0,0.0,0.0,1.0)
     set_periodic!(periodic,1,[21],[20],translate)
     @test_throws ArgumentError model_to_mixed(periodic,mesh,3,1)
+end
+
+@testset "explicit modeled volume shells" begin
+    model=GeoModel()
+    @test _add_explicit_cube_shell!(model,0,0.0,1.0)==1
+    @test add_volume!(model,[1];tag=1)==1
+    @test Tessella.Model.model_entity(model,3,1)==[1]
+    add_physical_group!(model,0,collect(1:8);tag=61,name="corners")
+    add_physical_group!(model,1,collect(1:12);tag=62,name="edges")
+    add_physical_group!(model,2,collect(1:6);tag=63,name="boundary")
+    add_physical_group!(model,3,[1];tag=64,name="domain")
+
+    mesh=mesh_model_volume(model,1)
+    @test validate(mesh).ok
+    @test ntets(mesh)>0
+    @test _mesh_volume_value(mesh)≈1.0 atol=1e-12
+    projected=model_to_mixed(model,mesh,3,1)
+    @test validate(projected).ok
+    @test [block.msh for block in projected.blocks]==[15,1,2,4]
+    point_block=only(findall(block->block.msh==15,projected.blocks))
+    curve_block=only(findall(block->block.msh==1,projected.blocks))
+    surface_block=only(findall(block->block.msh==2,projected.blocks))
+    volume_block=only(findall(block->block.msh==4,projected.blocks))
+    @test Set(projected.entity_data.block_entities[point_block])==Set(Int32.(1:8))
+    @test Set(projected.entity_data.block_entities[curve_block])==Set(Int32.(1:12))
+    @test Set(projected.entity_data.block_entities[surface_block])==Set(Int32.(1:6))
+    @test projected.entity_data.block_entities[volume_block]==
+          fill(Int32(1),ntets(mesh))
+    @test projected.entity_data.entities[(3,1)].boundaries==Int32.(1:6)
+    @test projected.entity_data.entities[(2,3)].boundaries==Int32[1,10,-5,-9]
+    @test projected.physical_names==Dict(
+        (0,61)=>"corners",(1,62)=>"edges",(2,63)=>"boundary",(3,64)=>"domain")
+    @test all(==(Int32(61)),projected.blocks[point_block].tags)
+    @test all(==(Int32(62)),projected.blocks[curve_block].tags)
+    @test all(==(Int32(63)),projected.blocks[surface_block].tags)
+    @test all(==(Int32(64)),projected.blocks[volume_block].tags)
+    crc=mixed_crc(projected)
+    @test crc.sha==
+          "9bce88e319c67236317df64b876739a62f80982ed86eca028bd1e7bda022bcb6"
+
+    mktempdir() do directory
+        for version in (2.2,4.1),binary in (false,true)
+            path=joinpath(directory,"explicit-shell-$version-$binary.msh")
+            @test write_mixed_msh(path,projected;version=version,binary=binary)==path
+            reread=read_mixed_msh(path)
+            @test validate(reread).ok
+            @test reread.physical_names==projected.physical_names
+            if version==4.1
+                @test mixed_crc(reread)==crc
+                @test reread.entity_data.entities[(3,1)].boundaries==Int32.(1:6)
+            else
+                @test reread.entity_data===nothing
+                ownership=Dict(block.msh=>Set(reread.elementary_entities[index])
+                    for (index,block) in pairs(reread.blocks))
+                @test ownership[15]==Set(Int32.(1:8))
+                @test ownership[1]==Set(Int32.(1:12))
+                @test ownership[2]==Set(Int32.(1:6))
+                @test ownership[4]==Set(Int32[1])
+            end
+        end
+    end
+
+    hollow=GeoModel()
+    @test _add_explicit_cube_shell!(hollow,0,0.0,2.0)==1
+    @test _add_explicit_cube_shell!(hollow,100,0.5,1.5)==101
+    @test add_volume!(hollow,[1,101];tag=1)==1
+    hollow_mesh=mesh_model_volume(hollow,1)
+    @test validate(hollow_mesh).ok
+    @test _mesh_volume_value(hollow_mesh)≈7.0 atol=1e-12
+    hollow_projected=model_to_mixed(hollow,hollow_mesh,3,1)
+    @test validate(hollow_projected).ok
+    @test hollow_projected.entity_data.entities[(3,1)].boundaries==
+          Int32[1,2,3,4,5,6,-101,-102,-103,-104,-105,-106]
+    @test mixed_crc(hollow_projected).sha==
+          "83721952195b78f4d18b9e5ff862ef7629b9fbe6b642f33d6649d85e83d0c8b2"
+
+    signed=GeoModel()
+    _add_explicit_cube_shell!(signed,0,0.0,1.0)
+    @test add_surface_loop!(signed,[-1,2,3,4,5,6];tag=20)==20
+    add_point!(signed,0.25,0.5,1.0;tag=20)
+    add_point!(signed,0.75,0.5,1.0;tag=21)
+    add_point!(signed,0.5,0.25,1.0;tag=22)
+    add_line!(signed,20,21;tag=20)
+    embed!(signed,0,[22],2,2)
+    embed!(signed,1,[20],2,2)
+    @test add_volume!(signed,[20];tag=1)==1
+    signed_mesh=mesh_model_volume(signed,1)
+    signed_projected=model_to_mixed(signed,signed_mesh,3,1)
+    @test signed_projected.entity_data.entities[(3,1)].boundaries==
+          Int32[-1,2,3,4,5,6]
+    @test signed_projected.entity_data.entities[(2,2)].embedded_curves==Int32[20]
+
+    @test_throws ArgumentError add_surface_loop!(model,[1];tag=20)
+    @test_throws ArgumentError add_surface_loop!(model,[1,1];tag=20)
+    @test_throws ArgumentError add_surface_loop!(model,[1,2,3,4,5,99];tag=20)
+    @test_throws ArgumentError add_volume!(model,[99];tag=2)
+    @test_throws ArgumentError add_volume!(model,[0];tag=2)
+    @test_throws ArgumentError add_volume!(model,[1,1];tag=2)
+    @test_throws ArgumentError add_volume!(model,[1];tag=1)
+    @test_throws ArgumentError add_surface_loop!(model,[true];tag=20)
+    @test_throws ArgumentError add_volume!(model,[true];tag=2)
+
+    duplicate_shell=deepcopy(model)
+    @test add_surface_loop!(duplicate_shell,collect(1:6);tag=20)==20
+    @test add_surface_loop!(duplicate_shell,collect(1:6))==21
+    @test add_plane_surface!(duplicate_shell,[1])==7
+    @test_throws ArgumentError add_volume!(duplicate_shell,[1,20];tag=2)
+
+    disconnected=GeoModel()
+    _add_explicit_cube_shell!(disconnected,0,0.0,1.0)
+    _add_explicit_cube_shell!(disconnected,100,2.0,3.0)
+    @test_throws ArgumentError add_surface_loop!(
+        disconnected,vcat(collect(1:6),collect(101:106));tag=200)
+
+    outside_cavity=GeoModel()
+    _add_explicit_cube_shell!(outside_cavity,0,0.0,2.0)
+    _add_explicit_cube_shell!(outside_cavity,100,3.0,3.5)
+    add_volume!(outside_cavity,[1,101];tag=1)
+    @test_throws ArgumentError mesh_model_volume(outside_cavity,1)
+    @test_throws ArgumentError model_to_mixed(outside_cavity,mesh,3,1)
+
+    overlapping_cavities=GeoModel()
+    _add_explicit_cube_shell!(overlapping_cavities,0,0.0,4.0)
+    _add_explicit_cube_shell!(overlapping_cavities,100,0.5,2.5)
+    _add_explicit_cube_shell!(overlapping_cavities,200,1.5,3.5)
+    add_volume!(overlapping_cavities,[1,101,201];tag=1)
+    @test_throws ArgumentError mesh_model_volume(overlapping_cavities,1)
+
+    nonplanar=deepcopy(model)
+    nonplanar.points[8]=(0.0,1.0,1.1)
+    @test_throws ArgumentError mesh_model_volume(nonplanar,1)
+
+    damaged=Mesh(mesh.coords;tets=mesh.tets[:,1:(end-1)])
+    @test_throws ArgumentError model_to_mixed(model,damaged,3,1)
+    missing_loop=deepcopy(model)
+    missing_loop.volumes[1]=[999]
+    @test_throws ArgumentError model_to_mixed(missing_loop,mesh,3,1)
 end
