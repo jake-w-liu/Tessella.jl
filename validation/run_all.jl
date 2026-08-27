@@ -86,6 +86,13 @@ geo_range_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --
 println("  command: ", geo_range_command)
 run(geo_range_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── gmsh_parity geometry expressions ──  bounded entity/value execution")
+geo_expression_script = joinpath(
+    HERE, "gmsh_parity", "geo_geometry_expressions.jl")
+geo_expression_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_expression_script`
+println("  command: ", geo_expression_command)
+run(geo_expression_command)
+
 println("\n── uniform_refine ──  exact Gmsh 4.15.2 simplex templates")
 uniform_refine_script = joinpath(HERE, "uniform_refine", "differential.jl")
 uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $uniform_refine_script`

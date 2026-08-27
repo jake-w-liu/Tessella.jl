@@ -40,6 +40,7 @@ validation/
     differential.jl      # required Gmsh 4.15.2 recombined-hexahedron differential
   gmsh_parity/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
+    geo_geometry_expressions.jl # bounded geometry-expression execution
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
     periodic_embedded_curve.jl # embedded periodic-curve MSH2/MSH4 lifecycle
@@ -84,6 +85,7 @@ transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
 cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
+bounded expression-backed geometry and entity lists,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
 pairs, embedded periodic curves, reusable-master, chained, and expression-backed
 curve graphs, planar periodic boundaries of an explicit volume, and 2-D

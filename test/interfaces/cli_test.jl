@@ -25,6 +25,8 @@ const _PERIODIC_VOLUME_CLI_GEO=
     _PERIODIC_CLI_GEO * "Box(1) = {0, 0, 0, 1, 1, 1};\n"
 const _PERIODIC_SURFACE_VOLUME_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","periodic_surface_volume.geo")),String)
+const _GEOMETRY_EXPRESSION_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_geometry_expressions.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -321,6 +323,23 @@ Physical Volume("domain", 72) = {1};
             (2,71)=>"boundary",(3,72)=>"domain")
         @test mixed_crc(explicit_shell).sha==
               "fe4bc18f3b9156c654c5ee1433b43c87cb9b8d7f372d9fbb72689f500584623a"
+
+        geometry_expression_input=joinpath(
+            directory,"geometry-expressions.geo")
+        geometry_expression_output=joinpath(
+            directory,"geometry-expressions.msh")
+        write(geometry_expression_input,_GEOMETRY_EXPRESSION_CLI_GEO)
+        @test main([geometry_expression_input,"-3","-o",
+                    geometry_expression_output])==geometry_expression_output
+        @test read(geometry_expression_input,String)==
+              _GEOMETRY_EXPRESSION_CLI_GEO
+        geometry_expression=read_mixed_msh(geometry_expression_output)
+        @test validate(geometry_expression).ok
+        @test geometry_expression.physical_names==Dict(
+            (0,70)=>"corners",(0,71)=>"probe",(1,72)=>"edges",
+            (2,73)=>"boundary",(3,74)=>"domain")
+        @test mixed_crc(geometry_expression).sha==
+              "89ee7d39873b202e264917e98fce2756b038d3e6f2f06d1bdbce9c46f7e628cd"
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")

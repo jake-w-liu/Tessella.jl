@@ -115,10 +115,10 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, Point/Line/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and expression-backed straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-backed Point/Line/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression-backed `.geo` transforms and bounded entity ranges, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression-backed periodic curves, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression-backed geometry/entity lists, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression-backed periodic curves, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -161,24 +161,25 @@ surface-loop volumes with cavity shells. Bounded `.geo` execution covers
 Point/Line/Loop/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone, BooleanDifference/Union/Intersection
 of those solids (with operand `Delete`), Translate of remaining native solids,
 Dilate about a center, and coordinate-axis rotations by integer multiples of π/2
-that preserve axis-aligned boxes. Point-In-Surface embeddings force the classified
-point to appear as a mesh node; Line-In-Surface embeddings recover the curve as an
+of native primitives; boxes remain axis-aligned. Point-In-Surface embeddings force
+the classified point to appear as a mesh node; Line-In-Surface embeddings recover the curve as an
 interior constrained edge chain without creating a hole; Point-In-Volume embeddings
 insert a Steiner vertex by a tet split; Line-In-Volume and Surface-In-Volume recover
 interior edge chains and open planar triangle sheets, including sheets with holes,
-as tet faces without removing volume. Periodic curve and surface entity lists and transform
-entries use the scanner's bounded constant-expression semantics, including prior
-scalar bindings and pure numeric functions; constant entity ranges are expanded
-under the shared list-size limit.
+as tet faces without removing volume. Numeric parameters, entity tags, and entity
+lists in every supported geometry, Boolean, transformation, embedding, physical,
+and periodic statement use the scanner's bounded constant-expression semantics,
+including prior scalar bindings and pure numeric functions. Constant entity ranges
+expand under the shared list-size limit.
 It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD of
 unclassified topology, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
 functions, prior scalar bindings, and explicit field/physical tags with resource
 bounds. Finite constant `start:end[:increment]` lists are expanded in recognized
 numeric field options and field selectors; entirely numeric Physical memberships are
-range-checked but remain geometry data. The scanner deliberately rejects loops,
-macros, dynamic tag allocators, option reads, stateful functions, dynamic/general
-ranges, logical/ternary evaluation, extrusions/fillets/symmetry, and mixed
+range-checked but remain geometry data. The scanner deliberately rejects
+control-flow loops, macros, dynamic tag allocators, option reads, stateful functions,
+dynamic/general ranges, logical/ternary evaluation, extrusions/fillets/symmetry, and mixed
 geometry-derived physical right-hand-side evaluation instead of pretending to be a
 complete interpreter.
 
@@ -285,7 +286,7 @@ julia --project --check-bounds=yes validation/run_all.jl
 ```
 
 The aggregate validation launches the Gmsh 4.15.2 size-field, constant-range,
-uniform-refinement, quadratic-tetrahedron,
+expression-backed geometry, uniform-refinement, quadratic-tetrahedron,
 four-sided transfinite, straight transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
