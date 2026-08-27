@@ -99,6 +99,12 @@ geo_list_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --p
 println("  command: ", geo_list_command)
 run(geo_list_command)
 
+println("\n── gmsh_parity dynamic tags ──  bounded allocator namespaces")
+geo_dynamic_tag_script = joinpath(HERE, "gmsh_parity", "geo_dynamic_tags.jl")
+geo_dynamic_tag_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_dynamic_tag_script`
+println("  command: ", geo_dynamic_tag_command)
+run(geo_dynamic_tag_command)
+
 println("\n── uniform_refine ──  exact Gmsh 4.15.2 simplex templates")
 uniform_refine_script = joinpath(HERE, "uniform_refine", "differential.jl")
 uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $uniform_refine_script`

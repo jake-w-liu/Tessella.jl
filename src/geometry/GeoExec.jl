@@ -29,6 +29,8 @@ using ..IO: _geo_positive_gmsh_tag
 using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
 using ..IO: _geo_context_set_scalar!, _geo_apply_list_assignment!
+using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
+using ..IO: _geo_allocator_observe_statement!
 using ..Transform: _affine_coordinate
 
 export execute_geo, GeoExecution
@@ -134,8 +136,10 @@ Surface Loop entries may instead be nonzero signed 32-bit values. `Periodic Line
 `Periodic Curve`, and `Periodic Surface` accept `Translate`, `Rotate`, and
 12- or 16-entry `.geo` `Affine` transforms. Curves must be straight and surfaces
 must be planar boundaries of one explicit volume. Multiple periodic statements may
-reuse a master or form an acyclic master/slave chain. Dynamic tag allocators remain
-outside this execution subset.
+reuse a master or form an acyclic master/slave chain. Read-only `newp`, the shared
+curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the
+tracked explicit topology and supported full Box/Cylinder/Sphere/Cone primitives.
+An allocator read after a topology-changing or untracked declaration is rejected.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
@@ -150,12 +154,16 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     params=read_geo_params(path)
     model=GeoModel()
     context=_GeoNumericContext()
+    allocator_state=_GeoTagAllocatorState()
     for line in _geo_exec_statements(path)
         occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
                  line) && throw(ArgumentError(
             "execute_geo: unsupported statement $(line) — control-flow loops, " *
             "macros, and advanced OCC features are blockers"))
+        _geo_context_refresh_allocators!(context,allocator_state)
         _exec_line!(model,line,context)
+        _geo_allocator_observe_statement!(
+            allocator_state,line,context,"execute_geo")
     end
     mesh=nothing
     if dim==2
@@ -285,8 +293,7 @@ function _geo_exec_scalar!(context::_GeoNumericContext,name::AbstractString,
     variable=="Pi" && throw(ArgumentError(
         "execute_geo: Pi is a reserved numeric constant; use a different scalar name"))
     variable in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
-        "execute_geo: $variable is a reserved dynamic tag allocator; " *
-        "use a different scalar name"))
+        "execute_geo: dynamic tag allocator $variable is read-only"))
     caller="execute_geo: scalar variable $variable"
     value=_geo_eval_numeric(raw,context,caller)
     _geo_context_set_scalar!(context,variable,value,caller)

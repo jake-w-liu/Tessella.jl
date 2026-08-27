@@ -56,7 +56,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
   functions, prior scalar bindings, sizing options, explicit field/physical tags, and
-  finite constant `start:end[:increment]` lists in recognized numeric contexts; the
+  finite constant `start:end[:increment]` lists in recognized numeric contexts, plus
+  read-only tag allocators over tracked Point, shared-region, and Field namespaces; the
   executor applies the same checked semantics to numeric parameters, entity tags,
   and entity lists in every supported geometry statement;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
@@ -117,9 +118,9 @@ boundary-layer fan topology beyond the certified closed-wall extrusion, the full
 Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
 interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including control-flow loops, macros, dynamic tag allocators,
-option reads, dynamic/general ranges, and mixed geometry-derived physical-group
-RHSs),
+`.geo` execution (including control-flow loops, macros, option reads,
+dynamic/general ranges, allocator reads after topology-changing or untracked
+declarations, and mixed geometry-derived physical-group RHSs),
 mixed-element generation beyond the listed first-order surface recombination paths,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
 quasi-transfinite or holed transfinite patches, curved/warped or
@@ -144,7 +145,8 @@ slave/master sets, can reuse whole or selected list variables.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
-and dynamic tag allocators remain pending. Gmsh 4.15.2 has no
+and allocator reads after topology-changing or untracked declarations remain
+pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that

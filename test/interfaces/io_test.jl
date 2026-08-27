@@ -1125,6 +1125,75 @@ end
             @test read_geo_params(empty_list).mesh_size_min==0.0
         end
 
+        @testset "dynamic tag allocators" begin
+            allocators=joinpath(dir,"dynamic_tag_allocators.geo")
+            write(allocators,raw"""
+                SetFactory("OpenCASCADE");
+                firstVolume = newv;
+                firstVolumeAgain = newv;
+                Box(firstVolume) = {0, 0, 0, 1, 1, 1};
+                secondVolume = newv;
+                Cylinder(secondVolume) = {2, 0, 0, 0, 0, 1, 0.5};
+                thirdVolume = newv;
+                Sphere(thirdVolume) = {4, 0, 0, 0.5};
+                fourthVolume = newv;
+                Cone(fourthVolume) = {6, 0, 0, 0, 0, 1, 0.5, 0.25};
+                firstPoint = newp;
+                Point(firstPoint) = {8, 0, 0, 1};
+                secondPoint = newp;
+                Point(secondPoint) = {9, 0, 0, 1};
+                firstCurve = newl;
+                Line(firstCurve) = {firstPoint, secondPoint};
+                nextRegion = newreg;
+                nextPoint = newp;
+                Mesh.MeshSizeMin = nextRegion / 100;
+                Mesh.MeshSizeMax = nextPoint / 10;
+                firstField = newf;
+                firstFieldAgain = newf;
+                Field[firstField] = Distance;
+                Field[firstField].PointsList = {firstPoint, secondPoint};
+                secondField = newf;
+                Field[secondField] = Min;
+                Field[secondField].FieldsList = {firstField};
+                Background Field = secondField;
+                Physical Volume("first", nextRegion) = {firstVolume};
+                afterPhysical = newreg;
+                Mesh.RandomSeed = afterPhysical;
+                """)
+            params=read_geo_params(allocators)
+            @test params.mesh_size_min==0.23
+            @test params.mesh_size_max==1.7
+            @test params.fields[1].options["PointsList"]=="{15, 16}"
+            @test params.fields[2].options["FieldsList"]=="{1}"
+            @test params.background_field==2
+            @test params.physical_groups[(3,23)]=="first"
+            @test params.random_seed==24
+
+            function allocator_error(source)
+                path=joinpath(dir,"dynamic_tag_allocator_error.geo")
+                write(path,source)
+                try
+                    read_geo_params(path)
+                    return nothing
+                catch err
+                    return err
+                end
+            end
+            for (source,message) in (
+                "newp = 2; Mesh.MeshSizeMin = 1;\n"=>"read-only",
+                "newp[] = {2}; Mesh.MeshSizeMin = 1;\n"=>"read-only",
+                "Mesh.MeshSizeMin = newp[0];\n"=>"scalar and cannot use []",
+                "Rectangle(1) = {0,0,0,1,1}; Mesh.MeshSizeMin = newv;\n"=>
+                    "outside the tracked allocator subset",
+                "Point(2147483647) = {0,0,0,1}; Mesh.MeshSizeMin = newp;\n"=>
+                    "no Point tags remain",
+            )
+                err=allocator_error(source)
+                @test err isa ArgumentError
+                @test occursin(message,sprint(showerror,err))
+            end
+        end
+
         @testset "expression safety and resource limits" begin
             function geo_error(source)
                 path=joinpath(dir,"expression_error.geo")
@@ -1140,7 +1209,6 @@ end
                 "missing"=>"unknown scalar identifier",
                 "sin(1)"=>"unknown numeric function",
                 "Rand(1)"=>"non-constant or externally stateful",
-                "newp"=>"side-effecting Gmsh symbol",
                 "1 < 2"=>"outside the supported arithmetic subset",
                 "1 / 0"=>"non-finite",
                 "1e309"=>"must be finite",
@@ -1153,6 +1221,9 @@ end
                 @test err isa ArgumentError
                 @test occursin(message,sprint(showerror,err))
             end
+            dynamic_params=joinpath(dir,"dynamic_expression.geo")
+            write(dynamic_params,"Mesh.MeshSizeMin = newp;\n")
+            @test read_geo_params(dynamic_params).mesh_size_min==1.0
 
             err=geo_error("a = Rand(1); Mesh.MeshSizeMin = a;\n")
             @test err isa ArgumentError
@@ -1192,7 +1263,6 @@ end
                 "Physical Point(\"bad\", 2147483648) = {1};\n",
                 "Physical Point(\"bad\", 1e100) = {1};\n",
                 "Field[0.9] = Box;\n",
-                "Field[newf] = Box;\n",
                 "Field[2147483648] = Box;\n",
                 "Field[1e100] = Box;\n",
                 "Field[1] = Box; Field[missing].VIn = 1;\n",
