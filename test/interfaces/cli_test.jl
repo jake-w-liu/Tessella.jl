@@ -29,6 +29,8 @@ const _GEOMETRY_EXPRESSION_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_geometry_expressions.geo")),String)
 const _LIST_VARIABLE_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_list_variables.geo")),String)
+const _DYNAMIC_TAG_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_dynamic_tags.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -356,6 +358,24 @@ Physical Volume("domain", 72) = {1};
         @test list_variable_mesh.physical_names==Dict(
             (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
             (2,63)=>"boundary",(3,64)=>"domain")
+
+        dynamic_tag_input=joinpath(directory,"dynamic-tags.geo")
+        dynamic_tag_output=joinpath(directory,"dynamic-tags.msh")
+        write(dynamic_tag_input,_DYNAMIC_TAG_CLI_GEO)
+        @test main([dynamic_tag_input,"-3","-o",dynamic_tag_output])==
+              dynamic_tag_output
+        @test read(dynamic_tag_input,String)==_DYNAMIC_TAG_CLI_GEO
+        dynamic_tag_mesh=read_mixed_msh(dynamic_tag_output)
+        @test validate(dynamic_tag_mesh).ok
+        @test mixed_crc(dynamic_tag_mesh).sha==
+              "99aeefc2e269090b518f5896f2388bd419c8fb44d06e4743579d50d61aaedf81"
+        @test dynamic_tag_mesh.physical_names==Dict(
+            (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
+            (2,63)=>"boundary",(3,64)=>"domain")
+        @test sort([(Int(link.slave_entity),Int(link.master_entity),
+                     length(link.slave_nodes))
+                    for link in dynamic_tag_mesh.periodic_links
+                    if link.dim==2])==[(22,24,5),(23,21,4)]
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")

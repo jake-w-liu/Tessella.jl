@@ -1348,7 +1348,10 @@ end
 
 function _geo_context_list(context::_GeoNumericContext,name::String,
                            caller::AbstractString)
-    if haskey(context.unavailable_lists,name)
+    if name in _GEO_SIDE_EFFECT_SYMBOLS
+        throw(ArgumentError(
+            "$caller: dynamic tag allocator $name is scalar and cannot use []"))
+    elseif haskey(context.unavailable_lists,name)
         throw(ArgumentError(
             "$caller: numeric list $name is unavailable ($(context.unavailable_lists[name]))"))
     elseif haskey(context.lists,name)
@@ -1387,6 +1390,10 @@ end
 
 const _GEO_SIDE_EFFECT_SYMBOLS=Set((
     "newp","newl","newc","newcl","newll","news","newsl","newreg","newv","newf"))
+const _GEO_POINT_TAG_SYMBOLS=("newp",)
+const _GEO_REGION_TAG_SYMBOLS=(
+    "newl","newc","newcl","newll","news","newsl","newreg","newv")
+const _GEO_FIELD_TAG_SYMBOLS=("newf",)
 const _GEO_NONCONSTANT_FUNCTIONS=Set((
     "Rand","DefineNumber","GetNumber","GetValue","Exists","FileExists",
     "StringToName","S2N","Find","StrFind","StrCmp","StrLen","TextAttributes"))
@@ -1394,6 +1401,122 @@ const _GEO_NUMERIC_FUNCTIONS=Set((
     "Acos","Asin","Atan","Ceil","Cos","Cosh","Exp","Fabs","Abs",
     "Floor","Log","Log10","Round","Sqrt","Sin","Sinh","Step","Tan",
     "Tanh","Atan2","Fmod","Modulo","Hypot","Max","Min"))
+
+mutable struct _GeoTagAllocatorState
+    point_max::Int
+    curve_max::Int
+    surface_max::Int
+    volume_max::Int
+    auxiliary_region_max::Int
+    field_max::Int
+    geometry_unavailable::Union{Nothing,String}
+    field_unavailable::Union{Nothing,String}
+end
+
+_GeoTagAllocatorState()=_GeoTagAllocatorState(0,0,0,0,0,0,nothing,nothing)
+
+@inline _geo_allocator_region_max(state::_GeoTagAllocatorState)=max(
+    state.curve_max,state.surface_max,state.volume_max,
+    state.auxiliary_region_max)
+
+function _geo_allocator_invalidate!(state::_GeoTagAllocatorState,
+                                    reason::AbstractString;
+                                    geometry::Bool=true,
+                                    fields::Bool=true)
+    geometry && (state.geometry_unavailable=String(reason))
+    fields && (state.field_unavailable=String(reason))
+    return nothing
+end
+
+function _geo_context_refresh_allocators!(context::_GeoNumericContext,
+                                          state::_GeoTagAllocatorState)
+    function refresh!(names,max_tag::Int,reason::Union{Nothing,String},label::String)
+        unavailable=reason
+        if unavailable===nothing && max_tag>=typemax(Int32)
+            unavailable="no $label tags remain after tag $(typemax(Int32))"
+        end
+        for name in names
+            delete!(context.list_variables,name)
+            delete!(context.unavailable_lists,name)
+            if unavailable===nothing
+                context.values[name]=Float64(max_tag+1)
+                delete!(context.unavailable,name)
+            else
+                delete!(context.values,name)
+                context.unavailable[name]=String(unavailable)
+            end
+        end
+        return nothing
+    end
+    refresh!(_GEO_POINT_TAG_SYMBOLS,state.point_max,
+             state.geometry_unavailable,"Point")
+    refresh!(_GEO_REGION_TAG_SYMBOLS,_geo_allocator_region_max(state),
+             state.geometry_unavailable,"geometric region")
+    refresh!(_GEO_FIELD_TAG_SYMBOLS,state.field_max,
+             state.field_unavailable,"Field")
+    return nothing
+end
+
+function _geo_allocator_record_explicit!(state::_GeoTagAllocatorState,
+                                         kind::Symbol,tag::Int)
+    state.geometry_unavailable===nothing || return nothing
+    if kind==:point
+        state.point_max=max(state.point_max,tag)
+    elseif kind==:curve
+        state.curve_max=max(state.curve_max,tag)
+    elseif kind==:surface
+        state.surface_max=max(state.surface_max,tag)
+    elseif kind==:volume
+        state.volume_max=max(state.volume_max,tag)
+    elseif kind==:auxiliary
+        state.auxiliary_region_max=max(state.auxiliary_region_max,tag)
+    else
+        throw(ArgumentError("unknown dynamic tag namespace $kind"))
+    end
+    return nothing
+end
+
+function _geo_allocator_advance(current::Int,count::Int,
+                                caller::AbstractString,label::AbstractString)
+    count>=0 || throw(ArgumentError("$caller: $label allocation count must be non-negative"))
+    current<=typemax(Int32)-count || throw(ArgumentError(
+        "$caller: $label topology exhausts Gmsh's signed 32-bit tag range"))
+    return current+count
+end
+
+function _geo_allocator_record_primitive!(state::_GeoTagAllocatorState,
+                                          kind::String,tag::Int,
+                                          values::Vector{Float64},
+                                          caller::AbstractString)
+    state.geometry_unavailable===nothing || return nothing
+    point_count,curve_count,surface_count=if kind=="Box"
+        (8,12,6)
+    elseif kind=="Cylinder"
+        (2,3,3)
+    elseif kind=="Sphere"
+        (2,3,1)
+    elseif kind=="Cone"
+        length(values)==8 || throw(ArgumentError(
+            "$caller: Cone requires eight numeric parameters"))
+        (2,3,iszero(values[7]) || iszero(values[8]) ? 2 : 3)
+    else
+        throw(ArgumentError("$caller: unsupported primitive allocator kind $kind"))
+    end
+    state.point_max=_geo_allocator_advance(
+        state.point_max,point_count,caller,"Point")
+    state.curve_max=_geo_allocator_advance(
+        state.curve_max,curve_count,caller,"Curve")
+    state.surface_max=_geo_allocator_advance(
+        state.surface_max,surface_count,caller,"Surface")
+    state.volume_max=max(state.volume_max,tag)
+    return nothing
+end
+
+function _geo_allocator_record_field!(state::_GeoTagAllocatorState,tag::Int)
+    state.field_unavailable===nothing || return nothing
+    state.field_max=max(state.field_max,tag)
+    return nothing
+end
 
 @inline _geo_ascii_letter(c::Char)=('a'<=c<='z') || ('A'<=c<='Z') || c=='_'
 @inline _geo_ascii_digit(c::Char)=('0'<=c<='9')
@@ -1707,14 +1830,16 @@ function _geo_parse_primary!(parser::_GeoExprParser)
         elseif haskey(parser.context.values,name)
             return parser.context.values[name]
         elseif haskey(parser.context.unavailable,name)
+            label=name in _GEO_SIDE_EFFECT_SYMBOLS ?
+                  "dynamic tag allocator $name" : "numeric variable $name"
             _geo_expr_error(parser,
-                "numeric variable $name is unavailable ($(parser.context.unavailable[name]))",
-                token.pos)
+                "$label is unavailable ($(parser.context.unavailable[name]))",token.pos)
         elseif haskey(parser.context.lists,name)
             _geo_expr_error(parser,
                 "numeric list $name is empty and has no scalar value",token.pos)
         elseif name in _GEO_SIDE_EFFECT_SYMBOLS
-            _geo_expr_error(parser,"side-effecting Gmsh symbol $name is not supported",token.pos)
+            _geo_expr_error(parser,
+                "dynamic tag allocator $name requires current allocation state",token.pos)
         else
             _geo_expr_error(parser,"unknown scalar identifier $name",token.pos)
         end
@@ -2124,7 +2249,7 @@ function _geo_apply_list_assignment!(context::_GeoNumericContext,
     name=="Pi" && throw(ArgumentError(
         "$caller: Pi is a reserved numeric constant; use a different list name"))
     name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
-        "$caller: $name is a reserved dynamic tag allocator; use a different list name"))
+        "$caller: dynamic tag allocator $name is read-only and cannot be assigned as a list"))
     selector=String(strip(statement.captures[2]))
     operation=statement.captures[3]
     rhs=String(strip(statement.captures[4]))
@@ -2177,6 +2302,143 @@ function _geo_apply_list_assignment!(context::_GeoNumericContext,
     end
     _geo_context_set_list!(context,name,values,caller)
     return true
+end
+
+function _geo_allocator_statement_values(raw::AbstractString,
+                                         context::_GeoNumericContext,
+                                         caller::AbstractString)
+    pieces=_geo_split_list("{"*String(raw)*"}",caller)
+    terms,total=_geo_numeric_list_terms(pieces,context,caller)
+    values=Float64[];sizehint!(values,total)
+    for term in terms
+        value=term.first
+        for _ in 1:term.count
+            push!(values,value)
+            value+=term.step
+        end
+    end
+    return values
+end
+
+function _geo_allocator_statement_tag(raw::AbstractString,
+                                      context::_GeoNumericContext,
+                                      caller::AbstractString)
+    return _geo_positive_gmsh_tag(_geo_eval_numeric(raw,context,caller),caller)
+end
+
+function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
+                                           raw::AbstractString,
+                                           context::_GeoNumericContext,
+                                           caller::AbstractString;
+                                           conservative::Bool=false)
+    source=String(strip(raw))
+    if endswith(source,";")
+        source=String(strip(source[firstindex(source):prevind(source,lastindex(source))]))
+    end
+    isempty(source) && return nothing
+
+    field=match(r"^Field\s*\[\s*(.*?)\s*\]\s*=\s*[A-Za-z][A-Za-z0-9_]*$",source)
+    if field!==nothing
+        tag=_geo_allocator_statement_tag(
+            field.captures[1],context,"$caller Field declaration tag")
+        _geo_allocator_record_field!(state,tag)
+        return nothing
+    end
+
+    physical=match(
+        r"^Physical\s+(?:Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"[^\"]*\"\s*,\s*)?(.*?)\s*\)\s*=",
+        source)
+    if physical!==nothing
+        state.geometry_unavailable===nothing || return nothing
+        tag=try
+            _geo_allocator_statement_tag(
+                physical.captures[1],context,"$caller Physical group tag")
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative && err isa ArgumentError) || rethrow()
+            _geo_allocator_invalidate!(state,
+                "could not evaluate Physical group tag while tracking allocators: " *
+                _geo_expr_preview(physical.captures[1]);geometry=true,fields=false)
+            return nothing
+        end
+        _geo_allocator_record_explicit!(state,:auxiliary,tag)
+        return nothing
+    end
+
+    declarations=(
+        (r"^Point\s*\(\s*(.*?)\s*\)\s*=",:point,"Point"),
+        (r"^Line\s*\(\s*(.*?)\s*\)\s*=",:curve,"Line"),
+        (r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=",:auxiliary,"Curve Loop"),
+        (r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=",:surface,"Plane Surface"),
+        (r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=",:auxiliary,"Surface Loop"),
+        (r"^Volume\s*\(\s*(.*?)\s*\)\s*=",:volume,"Volume"),
+    )
+    for (pattern,kind,label) in declarations
+        matched=match(pattern,source)
+        matched===nothing && continue
+        state.geometry_unavailable===nothing || return nothing
+        tag=try
+            _geo_allocator_statement_tag(
+                matched.captures[1],context,"$caller $label tag")
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative && err isa ArgumentError) || rethrow()
+            _geo_allocator_invalidate!(state,
+                "could not evaluate $label tag while tracking allocators: " *
+                _geo_expr_preview(matched.captures[1]);geometry=true,fields=false)
+            return nothing
+        end
+        _geo_allocator_record_explicit!(state,kind,tag)
+        return nothing
+    end
+
+    primitive=match(
+        r"^(Box|Cylinder|Sphere|Cone)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}$",
+        source)
+    if primitive!==nothing
+        state.geometry_unavailable===nothing || return nothing
+        kind=String(primitive.captures[1])
+        tag,values=try
+            (_geo_allocator_statement_tag(
+                 primitive.captures[2],context,"$caller $kind tag"),
+             _geo_allocator_statement_values(
+                 primitive.captures[3],context,"$caller $kind parameters"))
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative && err isa ArgumentError) || rethrow()
+            _geo_allocator_invalidate!(state,
+                "could not evaluate $kind while tracking allocators: " *
+                _geo_expr_preview(source);geometry=true,fields=false)
+            return nothing
+        end
+        expected=kind=="Box" ? 6 : kind=="Cylinder" ? 7 :
+                 kind=="Sphere" ? 4 : 8
+        length(values)==expected || throw(ArgumentError(
+            "$caller $kind parameters: expected $expected numeric values; " *
+            "got $(length(values)) after range expansion"))
+        _geo_allocator_record_primitive!(state,kind,tag,values,caller)
+        return nothing
+    end
+
+    topology_change=occursin(
+        r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Coherence|Duplicata|SetMaxTag|Merge)\b",
+        source)
+    if topology_change
+        _geo_allocator_invalidate!(state,
+            "topology-changing statement is outside the tracked allocator subset: " *
+            _geo_expr_preview(source);geometry=true,
+            fields=occursin(r"\bField\b",source))
+        return nothing
+    end
+
+    if conservative && !startswith(source,"Physical ") &&
+       !startswith(source,"Field") &&
+       match(r"^[A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)*\s*\(.*\)\s*=",source)!==nothing
+        _geo_allocator_invalidate!(state,
+            "entity declaration is outside the tracked allocator subset: " *
+            _geo_expr_preview(source);geometry=true,fields=false)
+    end
+    return nothing
 end
 
 const _GEO_FIELD_RAW_OPTIONS=Set((
@@ -2363,6 +2625,8 @@ function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractStrin
     name=String(name_raw)
     # `Pi` is a lexical Gmsh constant, not a mutable scalar binding.
     name=="Pi" && return nothing
+    name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
+        "read_geo_params: dynamic tag allocator $name is read-only"))
     try
         value=_geo_eval_numeric(raw,context,
             "read_geo_params: scalar variable $name")
@@ -2395,6 +2659,8 @@ function _geo_record_list!(context::_GeoNumericContext,raw::AbstractString)
     matched=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[",strip(raw))
     matched===nothing && return false
     name=String(matched.captures[1])
+    name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
+        "read_geo_params: dynamic tag allocator $name is read-only"))
     try
         return _geo_apply_list_assignment!(
             context,raw,"read_geo_params: numeric list assignment")
@@ -2515,7 +2781,10 @@ Finite constant Gmsh list ranges use
 `start:end[:increment]` order and are expanded with a strict resource bound in
 recognized numeric field options and field selectors; known numeric list variables
 are normalized there as well. Entirely numeric Physical memberships containing
-ranges are checked but remain geometry data.
+ranges are checked but remain geometry data. Read-only dynamic tag allocators are
+evaluated while their Point, shared geometric-region, or Field namespace remains
+fully tracked; an unsupported topology change makes the affected allocator
+unavailable.
 Loops, macros, option reads, random/external functions, dynamic ranges, CSG and
 Boolean geometry are deliberately not evaluated. Numeric field options are
 normalized to literals; geometric references and string or point-dependent
@@ -2539,6 +2808,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
     option_order=Dict{Int,Vector{String}}()
     creation_curvature=Dict{Int,Int}()
     context=_GeoNumericContext()
+    allocator_state=_GeoTagAllocatorState()
     control_depth=0
     _scan_geo_statements(path) do line
         endswith(line,";") || throw(ArgumentError(
@@ -2550,7 +2820,9 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         # do not interpret it, so invalidate those bindings instead of using a
         # stale value later.
         if occursin(r"\b(?:For|EndFor|If|ElseIf|Else|EndIf|Macro|Function|Return|Call|Include|DefineConstant|UndefineConstant)\b",raw_code)
-            _geo_invalidate_context!(context,"an unsupported loop, conditional, macro or include may have changed it")
+            reason="an unsupported loop, conditional, macro or include may have changed it"
+            _geo_invalidate_context!(context,reason)
+            _geo_allocator_invalidate!(allocator_state,reason)
         end
         # Gmsh's EndIf/EndFor/Return do not carry semicolons; the streaming
         # scanner consequently receives them as a harmless prefix of the first
@@ -2561,13 +2833,18 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         opened=count(_ -> true,eachmatch(r"\b(?:For|If|Macro|Function)\b",code))
         control_depth+=opened
         if control_depth>0
-            _geo_invalidate_context!(context,
-                "an unsupported loop, conditional or macro may have changed it")
+            reason="an unsupported loop, conditional or macro may have changed it"
+            _geo_invalidate_context!(context,reason)
+            _geo_allocator_invalidate!(allocator_state,reason)
             _geo_relevant_code(code) && throw(ArgumentError(
                 "read_geo_params: malformed relevant statement or unsupported control-flow/macro context: " *
                 _geo_expr_preview(body)))
             return
         end
+
+        _geo_context_refresh_allocators!(context,allocator_state)
+        _geo_allocator_observe_statement!(
+            allocator_state,body,context,"read_geo_params";conservative=true)
 
         mesh=match(r"^(Mesh\.(?:MeshSizeMin|MeshSizeMax|MeshSizeFactor|RandomSeed|MeshSizeFromCurvature|MinimumElementsPerTwoPi|BoundaryLayerFanElements|BoundaryLayerFanPoints)|Geometry\.Tolerance)\s*=\s*(.*)$",body)
         if mesh!==nothing

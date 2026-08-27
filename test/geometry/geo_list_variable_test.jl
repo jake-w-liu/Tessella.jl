@@ -68,7 +68,7 @@ end
         "a[] = {1}; Point(a[-1]) = {0,0,0,1};"=>"zero-based index",
         "a[] = {1,2}; a[{0,1}] = {3};"=>"selects 2 entries",
         "a[] = {1,2}; a[] *= 2;"=>"not available for whole numeric lists",
-        "newp[] = {1};"=>"reserved dynamic tag allocator",
+        "newp[] = {1};"=>"read-only",
         "a[] = {1:65537};"=>"expanded list exceeds 65536 entries",
         "a[] = {}; Point(1)={0,0,0,1}; Line(1)=a[];"=>"entity list is empty",
         "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; Line(1)=1,2;"=>
