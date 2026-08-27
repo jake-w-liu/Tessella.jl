@@ -13,7 +13,8 @@ is invariant under a consistent relabel) while preserving physical-group tags.
 
 Full evaluation of a `.geo` OpenCASCADE CSG script (Booleans → BREP → faces) is
 still pending. `read_geo_params` reads the declarations that do not require a CAD
-evaluator: global mesh sizing, physical groups, and the raw background-field graph.
+evaluator: global mesh sizing, physical groups, numeric list variables, and the raw
+background-field graph.
 """
 module IO
 
@@ -1251,6 +1252,7 @@ const _MAX_GEO_EXPRESSION_BYTES=65_536
 const _MAX_GEO_EXPRESSION_TOKENS=4_096
 const _MAX_GEO_EXPRESSION_DEPTH=128
 const _MAX_GEO_LIST_ITEMS=65_536
+const _MAX_GEO_CONTEXT_LIST_ITEMS=1_000_000
 
 struct _GeoNumericListTerm
     first::Float64
@@ -1270,9 +1272,108 @@ end
 
 mutable struct _GeoNumericContext
     values::Dict{String,Float64}
+    lists::Dict{String,Vector{Float64}}
+    # Gmsh preserves an array payload after `a = value`, but rejects `a[i] = ...`
+    # until a whole-list operation makes `a` a list again.
+    list_variables::Set{String}
     unavailable::Dict{String,String}
+    # Keep an unknown array payload separate from an unknown scalar head.  For
+    # example, `a[] = Surface{:}; a = 1` makes `a` known while `a[]` still
+    # contains the geometry-derived tail retained by Gmsh.
+    unavailable_lists::Dict{String,String}
+    stored_list_items::Int
 end
-_GeoNumericContext()=_GeoNumericContext(Dict{String,Float64}(),Dict{String,String}())
+_GeoNumericContext()=_GeoNumericContext(
+    Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
+    Dict{String,String}(),Dict{String,String}(),0)
+
+@inline _geo_context_has_variable(context::_GeoNumericContext,name::String)=
+    haskey(context.values,name) || haskey(context.lists,name) ||
+    haskey(context.unavailable,name) || haskey(context.unavailable_lists,name)
+
+function _geo_context_forget!(context::_GeoNumericContext,name::AbstractString)
+    key=String(name)
+    if haskey(context.lists,key)
+        context.stored_list_items-=length(context.lists[key])
+        delete!(context.lists,key)
+    end
+    delete!(context.list_variables,key)
+    delete!(context.values,key)
+    return nothing
+end
+
+function _geo_context_set_scalar!(context::_GeoNumericContext,name::String,
+                                  value::Float64,caller::AbstractString)
+    isfinite(value) || throw(ArgumentError("$caller: scalar value must be finite"))
+    if haskey(context.lists,name)
+        values=context.lists[name]
+        if isempty(values)
+            context.stored_list_items<_MAX_GEO_CONTEXT_LIST_ITEMS || throw(ArgumentError(
+                "$caller: stored numeric lists exceed $_MAX_GEO_CONTEXT_LIST_ITEMS entries"))
+            push!(values,value)
+            context.stored_list_items+=1
+        else
+            values[1]=value
+        end
+        delete!(context.unavailable_lists,name)
+    end
+    context.values[name]=value
+    delete!(context.list_variables,name)
+    delete!(context.unavailable,name)
+    return nothing
+end
+
+function _geo_context_set_list!(context::_GeoNumericContext,name::String,
+                                values::Vector{Float64},caller::AbstractString)
+    length(values)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+        "$caller: list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+    all(isfinite,values) || throw(ArgumentError(
+        "$caller: every list value must be finite"))
+    old_length=haskey(context.lists,name) ? length(context.lists[name]) : 0
+    stored=context.stored_list_items-old_length+length(values)
+    stored<=_MAX_GEO_CONTEXT_LIST_ITEMS || throw(ArgumentError(
+        "$caller: stored numeric lists exceed $_MAX_GEO_CONTEXT_LIST_ITEMS entries"))
+    context.lists[name]=copy(values)
+    push!(context.list_variables,name)
+    context.stored_list_items=stored
+    if isempty(values)
+        delete!(context.values,name)
+    else
+        context.values[name]=values[1]
+    end
+    delete!(context.unavailable,name)
+    delete!(context.unavailable_lists,name)
+    return nothing
+end
+
+function _geo_context_list(context::_GeoNumericContext,name::String,
+                           caller::AbstractString)
+    if haskey(context.unavailable_lists,name)
+        throw(ArgumentError(
+            "$caller: numeric list $name is unavailable ($(context.unavailable_lists[name]))"))
+    elseif haskey(context.lists,name)
+        return copy(context.lists[name])
+    elseif haskey(context.values,name)
+        return Float64[context.values[name]]
+    elseif haskey(context.unavailable,name)
+        throw(ArgumentError(
+            "$caller: numeric variable $name is unavailable ($(context.unavailable[name]))"))
+    end
+    throw(ArgumentError("$caller: unknown numeric list variable $name"))
+end
+
+function _geo_context_index(value::Float64,length::Int,caller::AbstractString)
+    index=_geo_int_value(value,"$caller index")
+    0<=index<length || throw(ArgumentError(
+        "$caller: zero-based index $index is outside a list of length $length"))
+    return index+1
+end
+
+function _geo_context_list_value(context::_GeoNumericContext,name::String,
+                                 index_value::Float64,caller::AbstractString)
+    values=_geo_context_list(context,name,caller)
+    return values[_geo_context_index(index_value,length(values),caller)]
+end
 
 mutable struct _GeoExprParser
     source::String
@@ -1289,6 +1390,10 @@ const _GEO_SIDE_EFFECT_SYMBOLS=Set((
 const _GEO_NONCONSTANT_FUNCTIONS=Set((
     "Rand","DefineNumber","GetNumber","GetValue","Exists","FileExists",
     "StringToName","S2N","Find","StrFind","StrCmp","StrLen","TextAttributes"))
+const _GEO_NUMERIC_FUNCTIONS=Set((
+    "Acos","Asin","Atan","Ceil","Cos","Cosh","Exp","Fabs","Abs",
+    "Floor","Log","Log10","Round","Sqrt","Sin","Sinh","Step","Tan",
+    "Tanh","Atan2","Fmod","Modulo","Hypot","Max","Min"))
 
 @inline _geo_ascii_letter(c::Char)=('a'<=c<='z') || ('A'<=c<='Z') || c=='_'
 @inline _geo_ascii_digit(c::Char)=('0'<=c<='9')
@@ -1367,6 +1472,7 @@ function _geo_lex_token!(parser::_GeoExprParser)
         elseif c=='['; :left_bracket
         elseif c==']'; :right_bracket
         elseif c==','; :comma
+        elseif c=='#'; :hash
         elseif c in ('=','!','<','>','&','|','?',':')
             :unsupported_operator
         elseif c in ('"','\'')
@@ -1528,6 +1634,19 @@ function _geo_parse_unary!(parser::_GeoExprParser)
         _geo_leave!(parser)
         kind==:minus && (value=_geo_finite_result(parser,-value,"unary minus",pos))
         return value
+    elseif parser.token.kind==:hash
+        pos=parser.token.pos;_geo_advance!(parser)
+        parser.token.kind==:identifier || _geo_expr_error(
+            parser,"expected a numeric list name after #",pos)
+        name=parser.token.text;_geo_advance!(parser)
+        parser.token.kind==:left_bracket || _geo_expr_error(
+            parser,"expected [] after list name $name",pos)
+        _geo_advance!(parser)
+        parser.token.kind==:right_bracket || _geo_expr_error(
+            parser,"list cardinality uses an empty [] selector",pos)
+        _geo_advance!(parser)
+        return Float64(length(_geo_context_list(
+            parser.context,name,parser.caller)))
     end
     return _geo_parse_power!(parser)
 end
@@ -1573,17 +1692,29 @@ function _geo_parse_primary!(parser::_GeoExprParser)
                 opener==:left_paren ? "expected closing parenthesis" :
                                       "expected closing bracket")
             _geo_advance!(parser);_geo_leave!(parser)
+            if opener==:left_bracket &&
+               (_geo_context_has_variable(parser.context,name) ||
+                !(name in _GEO_NUMERIC_FUNCTIONS) &&
+                !(name in _GEO_NONCONSTANT_FUNCTIONS))
+                length(args)==1 || _geo_expr_error(parser,
+                    "numeric list $name requires exactly one scalar index",token.pos)
+                return _geo_context_list_value(
+                    parser.context,name,args[1],parser.caller)
+            end
             return _geo_apply_function(parser,name,args,token.pos)
         elseif name=="Pi"
             return Float64(pi)
         elseif haskey(parser.context.values,name)
             return parser.context.values[name]
-        elseif name in _GEO_SIDE_EFFECT_SYMBOLS
-            _geo_expr_error(parser,"side-effecting Gmsh symbol $name is not supported",token.pos)
         elseif haskey(parser.context.unavailable,name)
             _geo_expr_error(parser,
-                "scalar variable $name is unavailable ($(parser.context.unavailable[name]))",
+                "numeric variable $name is unavailable ($(parser.context.unavailable[name]))",
                 token.pos)
+        elseif haskey(parser.context.lists,name)
+            _geo_expr_error(parser,
+                "numeric list $name is empty and has no scalar value",token.pos)
+        elseif name in _GEO_SIDE_EFFECT_SYMBOLS
+            _geo_expr_error(parser,"side-effecting Gmsh symbol $name is not supported",token.pos)
         else
             _geo_expr_error(parser,"unknown scalar identifier $name",token.pos)
         end
@@ -1656,7 +1787,7 @@ function _geo_split_list(raw::AbstractString,caller::AbstractString)
     body=String(strip(value[nextind(value,firstindex(value)):prevind(value,lastindex(value))]))
     isempty(body) && return String[]
     items=String[];start=firstindex(body);i=start;last=lastindex(body)
-    parens=0;brackets=0
+    parens=0;brackets=0;selector_braces=0
     while i<=last
         c=body[i]
         if c=='(';parens+=1
@@ -1667,9 +1798,14 @@ function _geo_split_list(raw::AbstractString,caller::AbstractString)
         elseif c==']'
             brackets-=1;brackets>=0 || throw(ArgumentError(
                 "$caller: unmatched closing bracket in list"))
-        elseif c=='{' || c=='}'
-            throw(ArgumentError("$caller: nested brace lists are not supported"))
-        elseif c==',' && parens==0 && brackets==0
+        elseif c=='{'
+            brackets>0 || throw(ArgumentError(
+                "$caller: nested brace lists are only valid in list selectors"))
+            selector_braces+=1
+        elseif c=='}'
+            selector_braces-=1;selector_braces>=0 || throw(ArgumentError(
+                "$caller: unmatched closing selector brace in list"))
+        elseif c==',' && parens==0 && brackets==0 && selector_braces==0
             item=String(strip(body[start:prevind(body,i)]))
             isempty(item) && throw(ArgumentError("$caller: list contains an empty entry"))
             length(items)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
@@ -1680,6 +1816,8 @@ function _geo_split_list(raw::AbstractString,caller::AbstractString)
     end
     parens==0 || throw(ArgumentError("$caller: unmatched opening parenthesis in list"))
     brackets==0 || throw(ArgumentError("$caller: unmatched opening bracket in list"))
+    selector_braces==0 || throw(ArgumentError(
+        "$caller: unmatched opening selector brace in list"))
     item=String(strip(body[start:last]))
     isempty(item) && throw(ArgumentError("$caller: list contains an empty entry"))
     length(items)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
@@ -1873,6 +2011,174 @@ function _geo_braced_list_source(raw::AbstractString,context::_GeoNumericContext
     return list_source,multiplier
 end
 
+function _geo_list_reference_values(raw::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString;depth::Int=0)
+    depth<=_MAX_GEO_EXPRESSION_DEPTH || throw(ArgumentError(
+        "$caller: list selector nesting exceeds $_MAX_GEO_EXPRESSION_DEPTH"))
+    source=String(strip(raw))
+    whole=match(
+        r"^([+-]?)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*$",source)
+    selected=whole===nothing ? match(
+        r"^([+-]?)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\{\s*(.*)\s*\}\s*\]\s*$",
+        source) : nothing
+    whole===nothing && selected===nothing && return nothing
+    matched=whole===nothing ? selected : whole
+    sign=matched.captures[1]=="-" ? -1.0 : 1.0
+    name=String(matched.captures[2])
+    values=_geo_context_list(context,name,caller)
+    result=if selected===nothing
+        values
+    else
+        index_values=_geo_numeric_list_values(
+            "{"*matched.captures[3]*"}",context,"$caller selector";
+            allow_multiplier=true,depth=depth+1)
+        selected_values=Vector{Float64}(undef,length(index_values))
+        for (position,index_value) in pairs(index_values)
+            selected_values[position]=values[_geo_context_index(
+                index_value,length(values),"$caller list $name")]
+        end
+        selected_values
+    end
+    if sign<0
+        for index in eachindex(result)
+            result[index]=-result[index]
+        end
+    end
+    return result
+end
+
+function _geo_numeric_list_values(raw::AbstractString,
+                                  context::_GeoNumericContext,
+                                  caller::AbstractString;
+                                  allow_multiplier::Bool=true,
+                                  depth::Int=0)
+    depth<=_MAX_GEO_EXPRESSION_DEPTH || throw(ArgumentError(
+        "$caller: list expansion nesting exceeds $_MAX_GEO_EXPRESSION_DEPTH"))
+    source=String(strip(raw))
+    isempty(source) && throw(ArgumentError(
+        "$caller: numeric list expression must not be empty"))
+    ncodeunits(source)<=_MAX_GEO_EXPRESSION_BYTES || throw(ArgumentError(
+        "$caller: list expression exceeds $_MAX_GEO_EXPRESSION_BYTES bytes"))
+    referenced=_geo_list_reference_values(
+        source,context,caller;depth=depth+1)
+    referenced!==nothing && return referenced
+    list_source,multiplier=_geo_braced_list_source(
+        source,context,caller;allow_multiplier=allow_multiplier)
+    list_source===nothing && return Float64[
+        _geo_eval_numeric(source,context,"$caller entry")]
+
+    items=_geo_split_list(list_source,caller)
+    values=Float64[]
+    for item in items
+        expanded=_geo_list_reference_values(
+            item,context,caller;depth=depth+1)
+        if expanded!==nothing
+            length(values)+length(expanded)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                "$caller: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+            append!(values,expanded)
+            continue
+        end
+        term=_geo_numeric_list_term(
+            item,context,caller,_MAX_GEO_LIST_ITEMS-length(values))
+        numeric=term.first
+        for _ in 1:term.count
+            push!(values,numeric)
+            numeric+=term.step
+        end
+    end
+    if multiplier!=1.0
+        for index in eachindex(values)
+            scaled=multiplier*values[index]
+            isfinite(scaled) || throw(ArgumentError(
+                "$caller entry: list multiplication produced a non-finite value"))
+            values[index]=scaled
+        end
+    end
+    return values
+end
+
+function _geo_list_mutation_value(operation::AbstractString,a::Float64,b::Float64,
+                                  caller::AbstractString)
+    value=try
+        operation=="=" ? b : operation=="+=" ? a+b :
+        operation=="-=" ? a-b : operation=="*=" ? a*b : a/b
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa OverflowError || err isa DivideError) || rethrow()
+        throw(ArgumentError("$caller: list mutation is outside its finite real domain"))
+    end
+    isfinite(value) || throw(ArgumentError(
+        "$caller: list mutation produced a non-finite value"))
+    return value
+end
+
+function _geo_apply_list_assignment!(context::_GeoNumericContext,
+                                     raw::AbstractString,
+                                     caller::AbstractString)
+    statement=match(
+        r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(.*?)\s*\]\s*(\+=|-=|\*=|/=|=)\s*(.*?)\s*$",
+        strip(raw))
+    statement===nothing && return false
+    name=String(statement.captures[1])
+    name=="Pi" && throw(ArgumentError(
+        "$caller: Pi is a reserved numeric constant; use a different list name"))
+    name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
+        "$caller: $name is a reserved dynamic tag allocator; use a different list name"))
+    selector=String(strip(statement.captures[2]))
+    operation=statement.captures[3]
+    rhs=String(strip(statement.captures[4]))
+    rhs_values=_geo_numeric_list_values(
+        rhs,context,"$caller: numeric list $name";allow_multiplier=true)
+
+    if isempty(selector)
+        if operation=="="
+            _geo_context_set_list!(context,name,rhs_values,caller)
+        elseif operation=="+="
+            values=_geo_context_list(context,name,caller)
+            length(values)+length(rhs_values)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                "$caller: appending to $name exceeds $_MAX_GEO_LIST_ITEMS entries"))
+            append!(values,rhs_values)
+            _geo_context_set_list!(context,name,values,caller)
+        elseif operation=="-="
+            values=_geo_context_list(context,name,caller)
+            for value in rhs_values
+                index=findfirst(==(value),values)
+                index===nothing || deleteat!(values,index)
+            end
+            _geo_context_set_list!(context,name,values,caller)
+        else
+            throw(ArgumentError(
+                "$caller: operators *= and /= are not available for whole numeric lists"))
+        end
+        return true
+    end
+
+    values=_geo_context_list(context,name,caller)
+    name in context.list_variables || throw(ArgumentError(
+        "$caller: numeric variable $name is not a list and cannot use indexed mutation"))
+    index_values=if startswith(selector,"{") && endswith(selector,"}")
+        _geo_numeric_list_values(
+            selector,context,"$caller: numeric list $name selector";
+            allow_multiplier=false)
+    else
+        Float64[_geo_eval_numeric(
+            selector,context,"$caller: numeric list $name index")]
+    end
+    length(index_values)==length(rhs_values) || throw(ArgumentError(
+        "$caller: numeric list $name assignment selects $(length(index_values)) " *
+        "entries but provides $(length(rhs_values)) values"))
+    indices=Int[_geo_context_index(
+        value,length(values),"$caller: numeric list $name") for value in index_values]
+    for position in eachindex(indices)
+        index=indices[position]
+        values[index]=_geo_list_mutation_value(
+            operation,values[index],rhs_values[position],caller)
+    end
+    _geo_context_set_list!(context,name,values,caller)
+    return true
+end
+
 const _GEO_FIELD_RAW_OPTIONS=Set((
     "F","FX","FY","FZ","M11","M22","M33","M12","M13","M23",
     "m11","m22","m33","m12","m13","m23","FileName","CommandLine",
@@ -1920,50 +2226,75 @@ function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractStrin
         list_source===nothing && throw(ArgumentError(
             "$caller_string: expected a brace-delimited list"))
         items=_geo_split_list(list_source,caller_string)
-        entries=Vector{Union{String,_GeoNumericListTerm}}(undef,length(items));total=0
-        for (i,item) in pairs(items)
+        normalized=String[]
+        function append_numeric!(number::Float64)
+            length(normalized)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                "$caller_string: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+            scaled=multiplier*number
+            isfinite(scaled) || throw(ArgumentError(
+                "$caller_string entry: list multiplication produced a non-finite value"))
+            if name in _GEO_FIELD_INTEGER_LIST_OPTIONS
+                integer=name=="FieldsList" ?
+                    _geo_positive_gmsh_tag(scaled,"$caller_string entry") :
+                    _geo_signed_gmsh_int_value(scaled,"$caller_string entry")
+                push!(normalized,string(integer))
+            else
+                push!(normalized,_geo_number_source(scaled))
+            end
+            return nothing
+        end
+        for item in items
+            whole_reference=match(
+                r"^[+-]?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*$",item)
+            reference_name=whole_reference===nothing ? "" :
+                           String(whole_reference.captures[1])
+            if whole_reference!==nothing &&
+               !haskey(context.values,reference_name) &&
+               !haskey(context.lists,reference_name) &&
+               name in _GEO_FIELD_ENTITY_LIST_OPTIONS
+                length(normalized)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                    "$caller_string: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+                opaque=String(strip(item))
+                if multiplier==-1.0
+                    opaque=startswith(opaque,"-") ?
+                        String(strip(opaque[nextind(opaque,firstindex(opaque)):end])) :
+                        startswith(opaque,"+") ?
+                            "-"*String(strip(opaque[nextind(opaque,firstindex(opaque)):end])) :
+                            "-"*opaque
+                end
+                push!(normalized,opaque)
+                continue
+            end
             if name in _GEO_FIELD_ENTITY_LIST_OPTIONS &&
                occursin(r"^[+-]?[A-Za-z_][A-Za-z0-9_]*(?:\[\])?$",item)
                 bare=replace(item,r"^[+-]"=>"");bare=endswith(bare,"[]") ? bare[1:end-2] : bare
-                if !haskey(context.values,bare) && bare!="Pi"
-                    total<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                if !haskey(context.values,bare) &&
+                   !haskey(context.lists,bare) && bare!="Pi"
+                    length(normalized)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
                         "$caller_string: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+                    entry=item
                     if multiplier==-1.0
                         entry=startswith(item,"-") ? String(item[nextind(item,firstindex(item)):end]) :
                               startswith(item,"+") ? "-"*String(item[nextind(item,firstindex(item)):end]) :
                               "-"*item
-                        entries[i]=entry
-                    else
-                        entries[i]=item
                     end
-                    total+=1
+                    push!(normalized,entry)
                     continue
                 end
             end
-            term=_geo_numeric_list_term(item,context,caller_string,
-                                        _MAX_GEO_LIST_ITEMS-total)
-            entries[i]=term;total+=term.count
-        end
-        normalized=Vector{String}(undef,total);output_index=1
-        for entry in entries
-            if entry isa String
-                normalized[output_index]=entry;output_index+=1
+            expanded=_geo_list_reference_values(item,context,caller_string)
+            if expanded!==nothing
+                for number in expanded
+                    append_numeric!(number)
+                end
                 continue
             end
-            term=entry::_GeoNumericListTerm;number=term.first
+            term=_geo_numeric_list_term(item,context,caller_string,
+                                        _MAX_GEO_LIST_ITEMS-length(normalized))
+            number=term.first
             for _ in 1:term.count
-                scaled=multiplier*number
-                isfinite(scaled) || throw(ArgumentError(
-                    "$caller_string entry: list multiplication produced a non-finite value"))
-                if name in _GEO_FIELD_INTEGER_LIST_OPTIONS
-                    integer=name=="FieldsList" ?
-                        _geo_positive_gmsh_tag(scaled,"$caller_string entry") :
-                        _geo_signed_gmsh_int_value(scaled,"$caller_string entry")
-                    normalized[output_index]=string(integer)
-                else
-                    normalized[output_index]=_geo_number_source(scaled)
-                end
-                output_index+=1;number+=term.step
+                append_numeric!(number)
+                number+=term.step
             end
         end
         return "{"*join(normalized,", ")*"}"
@@ -1997,10 +2328,15 @@ function _geo_unquoted_code(source::AbstractString)
 end
 
 function _geo_invalidate_context!(context::_GeoNumericContext,reason::AbstractString)
-    for name in keys(context.values)
+    for name in union(keys(context.values),keys(context.lists),
+                      keys(context.unavailable),keys(context.unavailable_lists))
         context.unavailable[name]=String(reason)
+        context.unavailable_lists[name]=String(reason)
     end
     empty!(context.values)
+    empty!(context.lists)
+    empty!(context.list_variables)
+    context.stored_list_items=0
     return nothing
 end
 
@@ -2028,18 +2364,51 @@ function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractStrin
     # `Pi` is a lexical Gmsh constant, not a mutable scalar binding.
     name=="Pi" && return nothing
     try
-        context.values[name]=_geo_eval_numeric(raw,context,
+        value=_geo_eval_numeric(raw,context,
             "read_geo_params: scalar variable $name")
-        delete!(context.unavailable,name)
+        _geo_context_set_scalar!(context,name,value,
+            "read_geo_params: scalar variable $name")
     catch err
         err isa InterruptException && rethrow()
         err isa ArgumentError || rethrow()
-        delete!(context.values,name)
+        had_list_payload=haskey(context.lists,name) ||
+                         haskey(context.unavailable_lists,name)
+        if haskey(context.lists,name)
+            delete!(context.values,name)
+            delete!(context.list_variables,name)
+        else
+            _geo_context_forget!(context,name)
+        end
         message=sprint(showerror,err)
-        context.unavailable[name]=ncodeunits(message)<=240 ? message :
-            String(first(message,220))*"…"
+        reason=ncodeunits(message)<=240 ? message : String(first(message,220))*"…"
+        context.unavailable[name]=reason
+        if had_list_payload
+            context.unavailable_lists[name]=reason
+        else
+            delete!(context.unavailable_lists,name)
+        end
     end
     return nothing
+end
+
+function _geo_record_list!(context::_GeoNumericContext,raw::AbstractString)
+    matched=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[",strip(raw))
+    matched===nothing && return false
+    name=String(matched.captures[1])
+    try
+        return _geo_apply_list_assignment!(
+            context,raw,"read_geo_params: numeric list assignment")
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_context_forget!(context,name)
+        message=sprint(showerror,err)
+        reason=ncodeunits(message)<=240 ? message : String(first(message,220))*"…"
+        context.unavailable[name]=reason
+        context.unavailable_lists[name]=reason
+        push!(context.list_variables,name)
+        return true
+    end
 end
 
 function _geo_expression_field_tags(raw::AbstractString,context::_GeoNumericContext,
@@ -2047,23 +2416,13 @@ function _geo_expression_field_tags(raw::AbstractString,context::_GeoNumericCont
                                     deduplicate::Bool=true)
     value=String(strip(raw))
     isempty(value) && throw(ArgumentError("$caller: field-tag expression must not be empty"))
-    list_source,multiplier=_geo_braced_list_source(
+    values=_geo_numeric_list_values(
         value,context,caller;allow_multiplier=true)
-    items=list_source===nothing ? String[value] :
-          _geo_split_list(list_source,String(caller))
-    terms,total=_geo_numeric_list_terms(items,context,caller)
-    tags=Int[];sizehint!(tags,total);seen=Set{Int}()
-    for term in terms
-        numeric=term.first
-        for _ in 1:term.count
-            scaled=multiplier*numeric
-            isfinite(scaled) || throw(ArgumentError(
-                "$caller entry: list multiplication produced a non-finite value"))
-            tag=_geo_positive_gmsh_tag(scaled,"$caller entry")
-            if !deduplicate || !(tag in seen)
-                push!(seen,tag);push!(tags,tag)
-            end
-            numeric+=term.step
+    tags=Int[];sizehint!(tags,length(values));seen=Set{Int}()
+    for numeric in values
+        tag=_geo_positive_gmsh_tag(numeric,"$caller entry")
+        if !deduplicate || !(tag in seen)
+            push!(seen,tag);push!(tags,tag)
         end
     end
     return tags
@@ -2150,10 +2509,13 @@ Scan a gmsh `.geo`/`.geo_unrolled` for mesh-sizing options, Physical group
 declarations, and `Field[...]`/`Background Field` statements. Deterministic,
 finite arithmetic expressions can use `Pi`, prior scalar variables and Gmsh's
 pure numeric functions, including in explicit Physical-group tags and
-`Field[...]` tags. Finite constant Gmsh list ranges use
+`Field[...]` tags. Numeric lists support zero-based indexing, cardinality, copies,
+concatenation, bounded selection, and checked assignment or compound mutation.
+Finite constant Gmsh list ranges use
 `start:end[:increment]` order and are expanded with a strict resource bound in
-recognized numeric field options and field selectors; entirely numeric Physical
-memberships containing ranges are checked but remain geometry data.
+recognized numeric field options and field selectors; known numeric list variables
+are normalized there as well. Entirely numeric Physical memberships containing
+ranges are checked but remain geometry data.
 Loops, macros, option reads, random/external functions, dynamic ranges, CSG and
 Boolean geometry are deliberately not evaluated. Numeric field options are
 normalized to literals; geometric references and string or point-dependent
@@ -2226,13 +2588,16 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         end
 
         # Physical Volume("air", 1) = {...}; / Physical Surface("s", 3) = {...};
-        pm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*(.+?)\s*\)\s*=\s*(\{.*\})$",body)
+        pm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*(.+?)\s*\)\s*=\s*(.*)$",body)
         if pm!==nothing
             dim = _PHYS_DIM[pm.captures[1]]
             name = pm.captures[2]
             tag = _geo_positive_tag_value(pm.captures[3],context,
                 "read_geo_params: Physical $(pm.captures[1]) tag")
-            _geo_validate_physical_ranges(pm.captures[4],context,
+            membership=String(strip(pm.captures[4]))
+            isempty(membership) && throw(ArgumentError(
+                "read_geo_params: Physical $(pm.captures[1]) membership must not be empty"))
+            _geo_validate_physical_ranges(membership,context,
                 "read_geo_params: Physical $(pm.captures[1]) membership")
             groups[(dim, tag)] = name
             return
@@ -2284,6 +2649,8 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             return
         end
 
+        _geo_record_list!(context,body) && return
+
         scalar=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$",body)
         if scalar!==nothing
             _geo_record_scalar!(context,scalar.captures[1],scalar.captures[2])
@@ -2291,16 +2658,22 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         end
         mutation=match(r"^(?:\+\+|--)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--|\+=|-=|\*=|/=).*$",body)
         if mutation!==nothing
-            name=mutation.captures[1]
-            delete!(context.values,name)
-            context.unavailable[name]="an unsupported increment or compound assignment changed it"
-            return
-        end
-        array_assignment=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[.*\]\s*(?:=|\+=|-=|\*=|/=).*$",body)
-        if array_assignment!==nothing
-            name=array_assignment.captures[1]
-            delete!(context.values,name)
-            context.unavailable[name]="an unsupported list assignment changed it"
+            name=String(mutation.captures[1])
+            had_list_payload=haskey(context.lists,name) ||
+                             haskey(context.unavailable_lists,name)
+            if haskey(context.lists,name)
+                delete!(context.values,name)
+                delete!(context.list_variables,name)
+            else
+                _geo_context_forget!(context,name)
+            end
+            reason="an unsupported increment or compound assignment changed it"
+            context.unavailable[name]=reason
+            if had_list_payload
+                context.unavailable_lists[name]=reason
+            else
+                delete!(context.unavailable_lists,name)
+            end
             return
         end
 

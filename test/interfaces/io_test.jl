@@ -902,7 +902,8 @@ end
                 "Field[1] = Min; Field[1].FieldsList = {1:};\n"=>"must not be empty",
                 "Field[1] = Min; Field[1].FieldsList = {1:2:3:4};\n"=>"at most two",
                 "Field[1] = Min; Field[1].FieldsList = {missing:5};\n"=>"unknown scalar",
-                "Physical Point(\"dynamic\", 1) = {points[]:5};\n"=>"unknown numeric function",
+                "Physical Point(\"dynamic\", 1) = {points[]:5};\n"=>
+                    "requires exactly one scalar index",
                 "Field[1] = Distance; Field[1].PointsList = {1e20:1e20 + 1};\n"=>
                     "does not advance",
                 "Field[1] = Box; Background Field = 0.4 * {3:4};\n"=>
@@ -1023,6 +1024,107 @@ end
             @test allocation_4k<=2.15*allocation_2k+75_000
         end
 
+        @testset "bounded numeric list variables" begin
+            lists=joinpath(dir,"numeric_list_variables.geo")
+            write(lists,raw"""
+                values[] = {1:3};
+                values[] += {4, 5};
+                values[] -= {2, 5};
+                values[{0, 2}] += {9, 7};
+                values[1] *= 2;
+                values = 12;
+                reversed[] = values[{2:0}];
+                Mesh.MeshSizeMin = values[0] + #values[];
+                Mesh.MeshSizeMax = reversed[0];
+                pointTags[] = {1:3};
+                sizeValues[] = 2 * {0.1, 0.2};
+                fieldTags[] = {1, 2};
+                Field[fieldTags[0]] = Distance;
+                Field[fieldTags[0]].PointsList = {pointTags[]};
+                Field[fieldTags[1]] = BoundaryLayer;
+                Field[fieldTags[1]].SizesList = {sizeValues[]};
+                Physical Point("list points", #pointTags[]) = pointTags[];
+                Background Field = fieldTags[0];
+                """)
+            params=read_geo_params(lists)
+            @test params.mesh_size_min==15.0
+            @test params.mesh_size_max==11.0
+            @test params.physical_groups[(0,3)]=="list points"
+            @test params.fields[1].options["PointsList"]=="{1, 2, 3}"
+            @test params.fields[2].options["SizesList"]=="{0.2, 0.4}"
+            @test params.background_field==1
+
+            function list_error(source)
+                path=joinpath(dir,"numeric_list_error.geo")
+                write(path,source)
+                try
+                    read_geo_params(path)
+                    return nothing
+                catch err
+                    return err
+                end
+            end
+
+            retained_payload=joinpath(dir,"retained_numeric_list_payload.geo")
+            write(retained_payload,raw"""
+                Point(1) = {0, 0, 0, 1};
+                Point(2) = {1, 0, 0, 1};
+                values[] = Point{:};
+                values = 9;
+                Mesh.MeshSizeMin = values;
+                """)
+            @test read_geo_params(retained_payload).mesh_size_min==9.0
+            err=list_error(raw"""
+                Point(1) = {0, 0, 0, 1};
+                Point(2) = {1, 0, 0, 1};
+                values[] = Point{:};
+                values = 9;
+                Field[1] = Distance;
+                Field[1].PointsList = {values[]};
+                """)
+            @test err isa ArgumentError
+            @test occursin("numeric list values is unavailable",sprint(showerror,err))
+
+            recovered_payload=joinpath(dir,"recovered_numeric_list_payload.geo")
+            write(recovered_payload,raw"""
+                values[] = {1, 2};
+                values = Rand(1);
+                values = 9;
+                scalar = Rand(1);
+                scalar = 8;
+                Field[1] = Distance;
+                Field[1].PointsList = {values[]};
+                Field[2] = Distance;
+                Field[2].PointsList = {scalar[]};
+                """)
+            recovered=read_geo_params(recovered_payload)
+            @test recovered.fields[1].options["PointsList"]=="{9, 2}"
+            @test recovered.fields[2].options["PointsList"]=="{8}"
+
+            invalid_lists=(
+                "v[] = {1,2}; Mesh.MeshSizeMin = v[2];\n"=>"zero-based index",
+                "v[] = {1,2}; v[{0,1}] = {3}; Mesh.MeshSizeMin = v[0];\n"=>
+                    "selects 2 entries",
+                "v[] = {1,2}; v = 3; v[1] = 4; Mesh.MeshSizeMin = v[0];\n"=>
+                    "is not a list",
+                "v[] = {1}; v[] *= 2; Mesh.MeshSizeMin = v[0];\n"=>
+                    "not available for whole numeric lists",
+                "v[] = {1:65537}; Mesh.MeshSizeMin = #v[];\n"=>
+                    "expanded list exceeds 65536 entries",
+                "Field[1] = BoundaryLayer; Field[1].SizesList = missing[];\n"=>
+                    "expected a brace-delimited list",
+            )
+            for (source,message) in invalid_lists
+                err=list_error(source)
+                @test err isa ArgumentError
+                @test occursin(message,sprint(showerror,err))
+            end
+
+            empty_list=joinpath(dir,"empty_numeric_list.geo")
+            write(empty_list,"v[] = {}; Mesh.MeshSizeMin = #v[];\n")
+            @test read_geo_params(empty_list).mesh_size_min==0.0
+        end
+
         @testset "expression safety and resource limits" begin
             function geo_error(source)
                 path=joinpath(dir,"expression_error.geo")
@@ -1054,13 +1156,13 @@ end
 
             err=geo_error("a = Rand(1); Mesh.MeshSizeMin = a;\n")
             @test err isa ArgumentError
-            @test occursin("scalar variable a is unavailable",sprint(showerror,err))
+            @test occursin("numeric variable a is unavailable",sprint(showerror,err))
             err=geo_error("a = 1; a += 1; Mesh.MeshSizeMin = a;\n")
             @test err isa ArgumentError
             @test occursin("compound assignment",sprint(showerror,err))
-            err=geo_error("a = 1; a[] = {2}; Mesh.MeshSizeMin = a;\n")
+            err=geo_error("a = 1; a[] = Surface{:}; Mesh.MeshSizeMin = a;\n")
             @test err isa ArgumentError
-            @test occursin("list assignment",sprint(showerror,err))
+            @test occursin("numeric variable a is unavailable",sprint(showerror,err))
             err=geo_error("a = 1; For i In {1:2}\n a += 1; EndFor\n" *
                           "junk = newp; Mesh.MeshSizeMin = a;\n")
             @test err isa ArgumentError
@@ -1079,7 +1181,7 @@ end
             err=geo_error("a = 1; If (0)\n dummy = 1; a = 5; EndIf\n" *
                           "Mesh.MeshSizeMin = a;\n")
             @test err isa ArgumentError
-            @test occursin("scalar variable a is unavailable",sprint(showerror,err))
+            @test occursin("numeric variable a is unavailable",sprint(showerror,err))
 
             @test geo_error("Field[1] = Box; Background Field = 1e100;\n") isa ArgumentError
             @test geo_error("Field[1] = Threshold; Field[1].InField = 1e100;\n") isa ArgumentError

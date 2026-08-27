@@ -138,11 +138,13 @@ affine-equivalent planar boundary surfaces of one explicit surface-loop volume. 
 slave has one master; curve masters may be reused, a curve slave may become a master
 in an acyclic chain, and independent relations may share corner points. The bounded
 `.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
-functions, and bounded constant entity ranges to all supported geometry statements.
+functions, bounded numeric list assignment/indexing/selection/mutation, and constant
+entity ranges to all supported geometry statements. Entity lists, including periodic
+slave/master sets, can reuse whole or selected list variables.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
-dynamic tag allocators, and list variables remain pending. Gmsh 4.15.2 has no
+and dynamic tag allocators remain pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that
@@ -165,13 +167,13 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field, constant-range, expression-backed geometry,
+Gmsh 4.15.2 size-field, constant-range, geometry-expression, and numeric-list,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
 periodic surface differentials, embedded, reusable-master/chained, and
-expression-backed periodic curves, low-level translation/rotation-periodic curves,
+expression/list-backed periodic curves, low-level translation/rotation-periodic curves,
 planar periodic boundaries of an explicit volume, and the MSH2/MSH4 lifecycle, classified
 Point/Line-In-Surface MSH4 round trips,
 and the classified Surface-In-Volume lifecycle with nested point/curve constraints
