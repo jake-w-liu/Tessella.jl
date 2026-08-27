@@ -60,6 +60,7 @@ using Tessella
     include("structured/transfinite_hex_test.jl") # affine six-face recombined hexahedra
     include("geometry/model_test.jl")    # entity kernel + .geo execution
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
+    include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_periodic_test.jl") # expression-backed periodic curves
     include("geometry/model_periodic_io_test.jl") # classified periodic/embedded MSH projection
     include("geometry/model_volume_io_test.jl") # classified volume-embedding MSH projection

@@ -8,9 +8,10 @@ Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
 Translate/Rotate/Affine periodic straight curves or explicit-volume planar boundary
 surfaces with reusable masters and acyclic dependency chains. Numeric parameters,
-entity tags, and entity lists use bounded constant-expression evaluation. Mesh 2/3
-runs through the native [`Model`](@ref)
-kernel. Control-flow loops, macros,
+entity tags, and entity lists use bounded constant-expression evaluation. Numeric
+list variables provide zero-based indexing, cardinality, copying, concatenation,
+selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
+runs through the native [`Model`](@ref) kernel. Control-flow loops, macros,
 extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
 module GeoExec
@@ -23,9 +24,11 @@ using ..Model: add_physical_group!, set_periodic!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
-using ..IO: _geo_split_list, _geo_numeric_list_terms, _geo_positive_gmsh_tag
+using ..IO: _geo_split_list, _geo_numeric_list_terms, _geo_numeric_list_values
+using ..IO: _geo_positive_gmsh_tag
 using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
+using ..IO: _geo_context_set_scalar!, _geo_apply_list_assignment!
 using ..Transform: _affine_coordinate
 
 export execute_geo, GeoExecution
@@ -122,14 +125,17 @@ Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
 subset and malformed input raise `ArgumentError` instead of being partially
 accepted. Every numeric parameter, entity tag, and numeric entity-list entry in a
 supported statement accepts finite arithmetic, prior scalar bindings, and pure
-numeric functions. Entity-list positions also expand bounded constant ranges. Tags
+numeric functions. Numeric lists support zero-based scalar indexing, `#name[]`
+cardinality, bounded ranges, copies, concatenation, whole-list append/removal, and
+indexed or selected mutation. Entity-list positions expand whole or selected list
+variables as well as constant ranges. Tags
 follow Gmsh's truncation toward zero into positive 32-bit values; oriented Curve and
 Surface Loop entries may instead be nonzero signed 32-bit values. `Periodic Line`,
 `Periodic Curve`, and `Periodic Surface` accept `Translate`, `Rotate`, and
 12- or 16-entry `.geo` `Affine` transforms. Curves must be straight and surfaces
 must be planar boundaries of one explicit volume. Multiple periodic statements may
-reuse a master or form an acyclic master/slave chain. Dynamic tag allocators and
-list variables remain outside this execution subset.
+reuse a master or form an acyclic master/slave chain. Dynamic tag allocators remain
+outside this execution subset.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
@@ -173,10 +179,6 @@ function _boolean_delete_operand(raw::AbstractString)
     return occursin(r"\bDelete\b",suffix)
 end
 
-function _geo_periodic_list_items(raw::AbstractString,caller::AbstractString)
-    return _geo_split_list("{"*String(raw)*"}",caller)
-end
-
 function _geo_periodic_expressions(raw::AbstractString,count::Int,
                                    context::_GeoNumericContext,
                                    caller::AbstractString)
@@ -185,26 +187,18 @@ end
 
 function _geo_periodic_affine(raw::AbstractString,context::_GeoNumericContext,
                               caller::AbstractString)
-    pieces=_geo_periodic_list_items(raw,caller)
-    length(pieces) in (12,16) || throw(ArgumentError(
-        "$caller: expected 12 or 16 comma-separated numeric expressions"))
-    entries=Float64[_geo_eval_numeric(piece,context,caller) for piece in pieces]
+    entries=_geo_exec_numeric_values(raw,context,caller)
+    length(entries) in (12,16) || throw(ArgumentError(
+        "$caller: expected 12 or 16 numeric values after list expansion"))
     return length(entries)==12 ?
         (entries...,0.0,0.0,0.0,1.0) : Tuple(entries)
-end
-
-function _geo_exec_numeric_terms(raw::AbstractString,
-                                 context::_GeoNumericContext,
-                                 caller::AbstractString)
-    pieces=_geo_periodic_list_items(raw,caller)
-    terms,total=_geo_numeric_list_terms(pieces,context,caller)
-    return terms,total
 end
 
 function _geo_exec_numeric_values(raw::AbstractString,
                                   context::_GeoNumericContext,
                                   caller::AbstractString)
-    terms,total=_geo_exec_numeric_terms(raw,context,caller)
+    pieces=_geo_split_list("{"*String(raw)*"}",caller)
+    terms,total=_geo_numeric_list_terms(pieces,context,caller)
     values=Float64[];sizehint!(values,total)
     for term in terms
         numeric=term.first
@@ -229,25 +223,24 @@ end
 function _geo_exec_entity_tags(raw::AbstractString,
                                context::_GeoNumericContext,
                                caller::AbstractString;
-                               signed::Bool=false)
-    terms,total=_geo_exec_numeric_terms(raw,context,caller)
-    total==0 && throw(ArgumentError(
+                               signed::Bool=false,
+                               wrap::Bool=true)
+    source=wrap ? "{"*String(raw)*"}" : String(raw)
+    values=_geo_numeric_list_values(
+        source,context,caller;allow_multiplier=true)
+    isempty(values) && throw(ArgumentError(
         "$caller: entity list is empty"))
-    tags=Int[];sizehint!(tags,total)
-    for term in terms
-        numeric=term.first
-        for _ in 1:term.count
-            tag=if signed
-                value=_geo_signed_gmsh_int_value(numeric,"$caller entry")
-                iszero(value) && throw(ArgumentError(
-                    "$caller entry must evaluate to a nonzero signed tag"))
-                value
-            else
-                _geo_positive_gmsh_tag(numeric,"$caller entry")
-            end
-            push!(tags,tag)
-            numeric+=term.step
+    tags=Int[];sizehint!(tags,length(values))
+    for numeric in values
+        tag=if signed
+            value=_geo_signed_gmsh_int_value(numeric,"$caller entry")
+            iszero(value) && throw(ArgumentError(
+                "$caller entry must evaluate to a nonzero signed tag"))
+            value
+        else
+            _geo_positive_gmsh_tag(numeric,"$caller entry")
         end
+        push!(tags,tag)
     end
     return tags
 end
@@ -268,6 +261,20 @@ function _geo_exec_single_entity(raw::AbstractString,
     return only(tags)
 end
 
+function _geo_exec_entity_rhs_tags(raw::AbstractString,
+                                   context::_GeoNumericContext,
+                                   caller::AbstractString;
+                                   signed::Bool=false)
+    source=String(strip(raw))
+    isempty(source) && throw(ArgumentError("$caller: entity list must not be empty"))
+    has_open=startswith(source,"{")
+    has_close=endswith(source,"}")
+    has_open==has_close || throw(ArgumentError(
+        "$caller: malformed brace-delimited entity list"))
+    return _geo_exec_entity_tags(
+        source,context,caller;signed=signed,wrap=false)
+end
+
 _geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
                    caller::AbstractString)=
     _geo_exec_entity_tags(raw,context,caller)
@@ -280,9 +287,9 @@ function _geo_exec_scalar!(context::_GeoNumericContext,name::AbstractString,
     variable in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
         "execute_geo: $variable is a reserved dynamic tag allocator; " *
         "use a different scalar name"))
-    context.values[variable]=_geo_eval_numeric(
-        raw,context,"execute_geo: scalar variable $variable")
-    delete!(context.unavailable,variable)
+    caller="execute_geo: scalar variable $variable"
+    value=_geo_eval_numeric(raw,context,caller)
+    _geo_context_set_scalar!(context,variable,value,caller)
     return nothing
 end
 
@@ -386,49 +393,49 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                    tag=tag,mesh_size=mesh_size)
         return
     elseif (mm=match(
-            r"^Line\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^Line\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Line"
         tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
-        points=_geo_exec_entity_tags(
+        points=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller endpoints")
         length(points)==2 || throw(ArgumentError(
             "$caller: expected two endpoint tags; got $(length(points))"))
         add_line!(m,points[1],points[2];tag=tag)
         return
     elseif (mm=match(
-            r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Curve Loop"
         tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
-        curves=_geo_exec_entity_tags(
+        curves=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller curves";signed=true)
         add_curve_loop!(m,curves;tag=tag)
         return
     elseif (mm=match(
-            r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Plane Surface"
         tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
-        loops=_geo_exec_entity_tags(
+        loops=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller loops")
         add_plane_surface!(m,loops;tag=tag)
         return
     elseif (mm=match(
-            r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Surface Loop"
         tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
-        surfaces=_geo_exec_entity_tags(
+        surfaces=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller surfaces";signed=true)
         add_surface_loop!(m,surfaces;tag=tag)
         return
     elseif (mm=match(
-            r"^Volume\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^Volume\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Volume"
         tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
-        shells=_geo_exec_entity_tags(
+        shells=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller surface loops")
         add_volume!(m,shells;tag=tag)
         return
@@ -539,22 +546,30 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         embed!(m,dim,ids,3,target)
         return
     elseif (mm=match(
-            r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Physical $(mm.captures[1])"
         dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]
         name=mm.captures[2]===nothing ? "" : mm.captures[2]
         tag=_geo_exec_entity_tag(mm.captures[3],context,"$caller tag")
-        ids=_geo_exec_entity_tags(mm.captures[4],context,"$caller entities")
+        ids=_geo_exec_entity_rhs_tags(
+            mm.captures[4],context,"$caller entities")
         add_physical_group!(m,dim,ids;tag=tag,name=name)
+        return
+    elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
+           startswith(line,"Field") || startswith(line,"Background") ||
+           startswith(line,"BoundaryLayer") || startswith(line,"Coherence") ||
+           occursin(r"^Mesh\s+[0-9]\s*;", line)
+        return
+    elseif occursin(r"^[A-Za-z_][A-Za-z0-9_]*\s*\[",line)
+        body=String(strip(line[firstindex(line):prevind(line,lastindex(line))]))
+        _geo_apply_list_assignment!(
+            context,body,"execute_geo: numeric list assignment") || throw(
+                ArgumentError("execute_geo: malformed numeric list assignment: $line"))
         return
     elseif (mm=match(
             r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*;$",line)) !== nothing
         _geo_exec_scalar!(context,mm.captures[1],mm.captures[2])
-        return
-    elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
-           startswith(line,"Field") || startswith(line,"Background") ||
-           startswith(line,"Coherence") || occursin(r"^Mesh\s+[0-9]\s*;", line)
         return
     end
     throw(ArgumentError("execute_geo: unrecognized statement: $line"))

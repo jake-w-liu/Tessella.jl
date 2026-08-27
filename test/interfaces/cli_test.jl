@@ -27,6 +27,8 @@ const _PERIODIC_SURFACE_VOLUME_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","periodic_surface_volume.geo")),String)
 const _GEOMETRY_EXPRESSION_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_geometry_expressions.geo")),String)
+const _LIST_VARIABLE_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_list_variables.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -340,6 +342,20 @@ Physical Volume("domain", 72) = {1};
             (2,73)=>"boundary",(3,74)=>"domain")
         @test mixed_crc(geometry_expression).sha==
               "89ee7d39873b202e264917e98fce2756b038d3e6f2f06d1bdbce9c46f7e628cd"
+
+        list_variable_input=joinpath(directory,"list-variables.geo")
+        list_variable_output=joinpath(directory,"list-variables.msh")
+        write(list_variable_input,_LIST_VARIABLE_CLI_GEO)
+        @test main([list_variable_input,"-3","-o",list_variable_output])==
+              list_variable_output
+        @test read(list_variable_input,String)==_LIST_VARIABLE_CLI_GEO
+        list_variable_mesh=read_mixed_msh(list_variable_output)
+        @test validate(list_variable_mesh).ok
+        @test mixed_crc(list_variable_mesh).sha==
+              "27417f652cf93e0d6aad41c2f1b6c65af3751dfb3cb3166432d2e798f25a6493"
+        @test list_variable_mesh.physical_names==Dict(
+            (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
+            (2,63)=>"boundary",(3,64)=>"domain")
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")
