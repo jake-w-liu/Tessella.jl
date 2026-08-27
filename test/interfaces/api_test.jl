@@ -181,6 +181,58 @@ end
     end
 end
 
+@testset "periodic volume-boundary API" begin
+    fixture=normpath(joinpath(
+        @__DIR__,"..","fixtures","periodic_surface_volume.geo"))
+    source=replace(
+        read(fixture,String),
+        "Periodic Surface {4} = {6} Translate {1, 0, 0};\n"=>"",
+        "Periodic Surface {5} = {3} Translate {0, 1, 0};\n"=>"")
+    mktemp() do path,io
+        write(io,source)
+        close(io)
+        _API.finalize()
+        try
+            _API.initialize()
+            built=_API.open_geo!(path)
+            @test built.mesh===nothing
+            translate_x=(1.0,0.0,0.0,1.0,
+                         0.0,1.0,0.0,0.0,
+                         0.0,0.0,1.0,0.0,
+                         0.0,0.0,0.0,1.0)
+            translate_y=(1.0,0.0,0.0,0.0,
+                         0.0,1.0,0.0,1.0,
+                         0.0,0.0,1.0,0.0,
+                         0.0,0.0,0.0,1.0)
+            @test _API.mesh.set_periodic(
+                2,[4],[6],translate_x)===nothing
+            @test _API.mesh.set_periodic(
+                2,[5],[3],translate_y)===nothing
+            @test_throws ArgumentError _API.mesh.get()
+
+            generated=_API.mesh.generate(3)
+            @test validate(generated).ok
+            expected=mesh_crc(generated)
+            @test expected.sha==
+                  "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
+            for (slave,master,pairs) in ((4,6,5),(5,3,4))
+                mapping=_API.mesh.get_periodic_nodes(2,slave)
+                @test mapping.master_entity==master
+                @test length(mapping.slave_nodes)==
+                      length(mapping.master_nodes)==pairs
+            end
+            first_mapping=_API.mesh.get_periodic_nodes(2,4)
+            first_mapping.master_nodes[1]=0
+            @test _API.mesh.get_periodic_nodes(2,4).master_nodes!=
+                  first_mapping.master_nodes
+            generated.coords[1,1]+=10
+            @test mesh_crc(_API.mesh.get())==expected
+        finally
+            _API.finalize()
+        end
+    end
+end
+
 @testset "periodic API ownership and cache invalidation" begin
     _API.finalize()
     @test_throws ArgumentError _API.mesh.set_periodic(

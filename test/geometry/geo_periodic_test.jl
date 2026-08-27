@@ -140,6 +140,61 @@ function _periodic_geo_curve_graph(mode::Symbol;cycle::Bool=false)
         """
 end
 
+const _PERIODIC_SURFACE_VOLUME_GEO=normpath(joinpath(
+    @__DIR__,"..","fixtures","periodic_surface_volume.geo"))
+
+@testset "bounded .geo periodic planar-surface execution" begin
+    built=execute_geo(_PERIODIC_SURFACE_VOLUME_GEO)
+    @test built.mesh===nothing
+    @test [(constraint.dim,Int(constraint.slave_entity),
+            Int(constraint.master_entity))
+           for constraint in model_periodic_constraints(built.model)]==
+          [(2,4,6),(2,5,3)]
+
+    meshed=execute_geo(_PERIODIC_SURFACE_VOLUME_GEO;mesh_dim=3)
+    @test meshed.mesh!==nothing
+    @test validate(meshed.mesh).ok
+    @test mesh_crc(meshed.mesh).sha==
+          "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
+    @test length(model_periodic_nodes(
+        meshed.model,meshed.mesh,2,4).slave_nodes)==5
+    @test length(model_periodic_nodes(
+        meshed.model,meshed.mesh,2,5).slave_nodes)==4
+
+    source=read(_PERIODIC_SURFACE_VOLUME_GEO,String)
+    rotated=_execute_geo_source(replace(
+        source,
+        "Periodic Surface {4} = {6} Translate {1, 0, 0};"=>
+        "Periodic Surface {4} = {6} " *
+        "Rotate {{0, 0, 1}, {0.5, 0.5, 0}, Pi};");mesh_dim=3)
+    @test validate(rotated.mesh).ok
+    @test mesh_crc(rotated.mesh).sha==mesh_crc(meshed.mesh).sha
+    rotated_mapping=model_periodic_nodes(
+        rotated.model,rotated.mesh,2,4)
+    @test length(rotated_mapping.slave_nodes)==5
+    for (slave,master) in zip(rotated_mapping.slave_nodes,
+                              rotated_mapping.master_nodes)
+        actual=Tuple(rotated.mesh.coords[:,slave])
+        expected=_geo_periodic_affine_point(
+            rotated_mapping.affine,Tuple(rotated.mesh.coords[:,master]))
+        @test hypot((actual.-expected)...)<=1e-15
+    end
+
+    affine_source=replace(
+        source,
+        "Periodic Surface {4} = {6} Translate {1, 0, 0};"=>
+        "Periodic Surface {4} = {6} Affine " *
+        "{1,0,0,1, 0,1,0,0, 0,0,1,0};")
+    affine_built=_execute_geo_source(affine_source)
+    @test first(model_periodic_constraints(affine_built.model)).affine==
+          first(model_periodic_constraints(meshed.model)).affine
+
+    @test_throws ArgumentError _execute_geo_source(replace(
+        source,"Periodic Surface {4}"=>"Periodic Volume {4}"))
+    @test_throws ArgumentError _execute_geo_source(replace(
+        source,"Periodic Surface {4}"=>"Periodic Point {4}"))
+end
+
 @testset "bounded .geo periodic straight-curve execution" begin
     translated=_execute_geo_source(
         _periodic_geo_square(

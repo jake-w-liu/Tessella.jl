@@ -76,7 +76,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   connectivity, and physical tags preserved; the native model/API owns straight-
   curve relations with one master per slave, reusable masters, and acyclic
   master/slave chains; it synchronizes planar subdivisions for boundary or
-  embedded curves and returns detached node maps, while
+  embedded curves and returns detached node maps; it also owns affine-equivalent
+  planar boundary-surface pairs on explicit volume shells, synchronizes each slave
+  triangulation from its master, and certifies the tetrahedron-face map;
   `model_to_mixed` emits
   classified point/line/triangle blocks, signed hole boundaries, embedded point
   and curve cells, physical memberships, and periodic curve/endpoint
@@ -85,8 +87,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   `-2` output; the dimension-explicit form also emits classified boundary and
   Point/Line/Surface-In-Volume cells after certifying the selected solid fill,
   including nested Point/Line-In-Surface constraints, holed planar sheets, and
-  explicit planar surface-loop volumes with cavity signs; the CLI uses it for
-  classified `-3` output;
+  explicit planar surface-loop volumes with cavity signs; periodic explicit volumes
+  retain their derived boundary point/curve forest and surface-node maps through
+  MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -127,16 +130,16 @@ require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
 topology record for signed boundaries or embedding relations. Native model periodicity
-is currently limited to straight-curve
-pairs on one planar triangle-meshed surface. Each slave has one master; masters may
-be reused, a slave may become a master in an acyclic chain, and independent
-relations may share corner points. The bounded `.geo`
-executor accepts `Periodic Line`/`Periodic Curve` `Translate`, `Rotate`, and
-12- or 16-entry `Affine` transforms. Their entity lists and transform entries support
-prior scalar bindings, finite arithmetic and pure numeric functions; entity lists
-also support bounded constant ranges. Cyclic curve dependencies, curved periodic
-entities, periodic surfaces and volumes, dynamic tag allocators, and list variables
-remain pending. Gmsh 4.15.2 has no
+covers straight-curve pairs on one planar triangle-meshed surface and disjoint
+affine-equivalent planar boundary surfaces of one explicit surface-loop volume. Each
+slave has one master; curve masters may be reused, a curve slave may become a master
+in an acyclic chain, and independent relations may share corner points. The bounded
+`.geo` executor accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface`
+with `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Entity lists and
+transform entries support prior scalar bindings, finite arithmetic, and pure numeric
+functions; entity lists also support bounded constant ranges. Cyclic curve
+dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
+dynamic tag allocators, and list variables remain pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
 the classified nodes and elements remain available instead. Its ASCII
 MSH4 reader reconstructs curve embeddings, while its binary reader drops that
@@ -164,8 +167,8 @@ straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
 periodic surface differentials, embedded, reusable-master/chained, and
-expression-backed periodic curves, low-level translation/rotation-periodic curves
-and the MSH2/MSH4 lifecycle, classified
+expression-backed periodic curves, low-level translation/rotation-periodic curves,
+planar periodic boundaries of an explicit volume, and the MSH2/MSH4 lifecycle, classified
 Point/Line-In-Surface MSH4 round trips,
 and the classified Surface-In-Volume lifecycle with nested point/curve constraints
 and optional holes as mandatory bounds-checked children.
