@@ -5,8 +5,9 @@ Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface/
 Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
 90°-Rotate of those solids, Point/Line-In-Surface and Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, expression-backed
-Translate/Rotate/Affine periodic straight curves with reusable masters and acyclic
-dependency chains, Physical groups, and Mesh 2/3 via the native [`Model`](@ref)
+Translate/Rotate/Affine periodic straight curves or explicit-volume planar boundary
+surfaces with reusable masters and acyclic dependency chains, Physical groups, and
+Mesh 2/3 via the native [`Model`](@ref)
 kernel. Control-flow loops, macros,
 extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
@@ -116,9 +117,10 @@ Execute Tessella's documented bounded `.geo` subset into a new [`GeoModel`](@ref
 Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
 `mesh_dim=0` only builds the model. Geometry statements outside the bounded
 subset and malformed input raise `ArgumentError` instead of being partially
-accepted. `Periodic Line` and `Periodic Curve` accept `Translate`, `Rotate`, and
-12- or 16-entry `.geo` `Affine` transforms between straight curves. Their entity lists
-and transform entries accept finite arithmetic expressions, prior scalar
+accepted. `Periodic Line`, `Periodic Curve`, and `Periodic Surface` accept
+`Translate`, `Rotate`, and 12- or 16-entry `.geo` `Affine` transforms. Curves must
+be straight and surfaces must be planar boundaries of one explicit volume. Their
+entity lists and transform entries accept finite arithmetic expressions, prior scalar
 bindings, pure numeric functions, and bounded constant ranges in entity lists.
 Entity results follow Gmsh's truncation toward zero into positive signed 32-bit
 tags. Multiple statements may reuse a master or form an acyclic master/slave
@@ -253,16 +255,19 @@ function _geo_periodic_rotation(axis,origin,angle::Float64,
             0.0,0.0,0.0,1.0)
 end
 
-function _exec_periodic_curve!(m::GeoModel,line::AbstractString,
-                               context::_GeoNumericContext)
-    caller="execute_geo: Periodic Curve"
+function _exec_periodic!(m::GeoModel,line::AbstractString,
+                         context::_GeoNumericContext)
     entity=match(r"^Periodic\s+([A-Za-z]+)",line)
     entity===nothing && throw(ArgumentError(
-        "$caller: malformed periodic statement $line"))
-    entity.captures[1] in ("Line","Curve") || throw(ArgumentError(
-        "$caller: only straight Line/Curve periodicity is implemented"))
+        "execute_geo: malformed periodic statement $line"))
+    entity_name=entity.captures[1]
+    dim=entity_name in ("Line","Curve") ? 1 : entity_name=="Surface" ? 2 :
+        throw(ArgumentError(
+            "execute_geo: only straight Line/Curve and planar Surface " *
+            "periodicity is implemented"))
+    caller="execute_geo: Periodic $(dim==1 ? "Curve" : "Surface")"
     statement=match(
-        r"^Periodic\s+(?:Line|Curve)\s*\{\s*([^}]*)\s*\}\s*=\s*\{\s*([^}]*)\s*\}\s*(.*?)\s*;$",
+        r"^Periodic\s+(?:Line|Curve|Surface)\s*\{\s*([^}]*)\s*\}\s*=\s*\{\s*([^}]*)\s*\}\s*(.*?)\s*;$",
         line)
     statement===nothing && throw(ArgumentError(
         "$caller: malformed periodic statement $line"))
@@ -292,14 +297,14 @@ function _exec_periodic_curve!(m::GeoModel,line::AbstractString,
         throw(ArgumentError(
             "$caller: expected a Translate, Rotate, or Affine transform"))
     end
-    set_periodic!(m,1,slaves,masters,affine)
+    set_periodic!(m,dim,slaves,masters,affine)
     return nothing
 end
 
 function _exec_line!(m::GeoModel,line::AbstractString,
                      context::_GeoNumericContext)
     if occursin(r"^Periodic(?:\s|$)",line)
-        _exec_periodic_curve!(m,line,context)
+        _exec_periodic!(m,line,context)
         return
     elseif (mm=match(r"^Point\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*([^,]+),\s*([^,]+),\s*([^,}]+)(?:,\s*([^}]+))?\s*\}\s*;$", line)) !== nothing
         tag=parse(Int,mm.captures[1])

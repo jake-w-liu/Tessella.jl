@@ -64,6 +64,34 @@ function _add_explicit_cube_shell!(model,offset::Int,lo::Float64,hi::Float64)
     return add_surface_loop!(model,surfaces;tag=offset+1)
 end
 
+function _periodic_cube_volume_fixture(;periodic::Bool=true)
+    model=GeoModel()
+    _add_explicit_cube_shell!(model,0,0.0,1.0)
+    add_point!(model,0.0,0.5,0.5;tag=101)
+    add_point!(model,1.0,0.5,0.5;tag=102)
+    embed!(model,0,[101],2,6)
+    embed!(model,0,[102],2,4)
+    add_volume!(model,[1];tag=1)
+    add_physical_group!(model,0,collect(1:8);tag=61,name="corners")
+    add_physical_group!(model,0,[101,102];tag=65,name="face probes")
+    add_physical_group!(model,1,collect(1:12);tag=62,name="edges")
+    add_physical_group!(model,2,collect(1:6);tag=63,name="boundary")
+    add_physical_group!(model,3,[1];tag=64,name="domain")
+    if periodic
+        set_periodic!(model,2,[4],[6],(
+            1.0,0.0,0.0,1.0,
+            0.0,1.0,0.0,0.0,
+            0.0,0.0,1.0,0.0,
+            0.0,0.0,0.0,1.0))
+        set_periodic!(model,2,[5],[3],(
+            1.0,0.0,0.0,0.0,
+            0.0,1.0,0.0,1.0,
+            0.0,0.0,1.0,0.0,
+            0.0,0.0,0.0,1.0))
+    end
+    return model
+end
+
 function _mesh_volume_value(mesh)
     return sum(tet_volume(
         node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -423,4 +451,126 @@ end
     missing_loop=deepcopy(model)
     missing_loop.volumes[1]=[999]
     @test_throws ArgumentError model_to_mixed(missing_loop,mesh,3,1)
+end
+
+@testset "periodic planar boundaries of explicit volumes" begin
+    model=_periodic_cube_volume_fixture()
+    constraints=model_periodic_constraints(model)
+    @test [(constraint.dim,Int(constraint.slave_entity),
+            Int(constraint.master_entity)) for constraint in constraints]==
+          [(2,4,6),(2,5,3)]
+    @test all(!constraint.reversed for constraint in constraints)
+
+    mesh=mesh_model_volume(model,1)
+    @test validate(mesh).ok
+    @test nnodes(mesh)==11
+    @test ntets(mesh)==16
+    @test mesh_crc(mesh).sha==
+          "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
+    for (slave,master,pairs,offset) in
+            ((4,6,5,(1.0,0.0,0.0)),(5,3,4,(0.0,1.0,0.0)))
+        mapping=model_periodic_nodes(model,mesh,2,slave)
+        @test mapping.master_entity==master
+        @test length(mapping.slave_nodes)==length(mapping.master_nodes)==pairs
+        for (slave_node,master_node) in
+                zip(mapping.slave_nodes,mapping.master_nodes)
+            @test Tuple(mesh.coords[:,slave_node])==
+                  Tuple(mesh.coords[:,master_node]).+offset
+        end
+    end
+
+    projected=model_to_mixed(model,mesh,3,1)
+    @test validate(projected).ok
+    @test projected.physical_names==Dict(
+        (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
+        (2,63)=>"boundary",(3,64)=>"domain")
+    point_links=sort!([(Int(link.slave_entity),Int(link.master_entity))
+                       for link in projected.periodic_links if link.dim==0])
+    curve_links=sort!([(Int(link.slave_entity),Int(link.master_entity))
+                       for link in projected.periodic_links if link.dim==1])
+    surface_links=sort!([(Int(link.slave_entity),Int(link.master_entity),
+                          length(link.slave_nodes))
+                         for link in projected.periodic_links if link.dim==2])
+    @test point_links==[(2,1),(3,2),(4,1),(6,5),(7,6),(8,5)]
+    @test curve_links==
+          [(2,4),(3,1),(6,8),(7,5),(10,9),(11,10),(12,9)]
+    @test surface_links==[(4,6,5),(5,3,4)]
+    @test length(projected.periodic_links)==15
+    projected_crc=mixed_crc(projected)
+    @test projected_crc.sha==
+          "27417f652cf93e0d6aad41c2f1b6c65af3751dfb3cb3166432d2e798f25a6493"
+
+    mktempdir() do directory
+        for version in (2.2,4.1),binary in (false,true)
+            path=joinpath(
+                directory,"periodic-volume-$version-$binary.msh")
+            @test write_mixed_msh(
+                path,projected;version=version,binary=binary)==path
+            reread=read_mixed_msh(path)
+            @test validate(reread).ok
+            @test [(link.dim,Int(link.slave_entity),Int(link.master_entity))
+                   for link in reread.periodic_links]==
+                  [(link.dim,Int(link.slave_entity),Int(link.master_entity))
+                   for link in projected.periodic_links]
+            if version==4.1
+                @test mixed_crc(reread)==projected_crc
+                @test reread.entity_data.entities[(3,1)].boundaries==
+                      Int32.(1:6)
+            else
+                @test reread.entity_data===nothing
+                @test mixed_crc(reread).sha==
+                      "9cc65eb95bbcca5508016ff7cc1340a6d1a7311d0482c2759444c16ce4120502"
+            end
+        end
+    end
+
+    unsynchronized=_periodic_cube_volume_fixture(periodic=false)
+    empty!(unsynchronized.embeds)
+    unsynchronized_mesh=mesh_model_volume(unsynchronized,1)
+    set_periodic!(unsynchronized,2,[4],[6],constraints[1].affine)
+    @test_throws ArgumentError model_periodic_nodes(
+        unsynchronized,unsynchronized_mesh,2,4)
+    @test_throws ArgumentError model_to_mixed(
+        unsynchronized,unsynchronized_mesh,3,1)
+
+    missing_probe=deepcopy(model)
+    filter!(embedding->embedding!=(0,102),missing_probe.embeds[(2,4)])
+    @test_throws ArgumentError mesh_model_volume(missing_probe,1)
+
+    invalid=_periodic_cube_volume_fixture(periodic=false)
+    identity=(1.0,0.0,0.0,0.0,
+              0.0,1.0,0.0,0.0,
+              0.0,0.0,1.0,0.0,
+              0.0,0.0,0.0,1.0)
+    @test_throws ArgumentError set_periodic!(
+        invalid,2,[4,5],[6,3],constraints[1].affine)
+    @test isempty(model_periodic_constraints(invalid))
+    @test_throws ArgumentError set_periodic!(invalid,2,[4],[4],identity)
+    @test_throws ArgumentError set_periodic!(invalid,2,[4],[99],identity)
+    @test_throws ArgumentError set_periodic!(invalid,2,[3],[6],identity)
+    @test_throws ArgumentError set_periodic!(invalid,3,[1],[1],identity)
+    @test_throws ArgumentError set_periodic!(
+        invalid,2,[4],[6],constraints[1].affine;atol=true)
+    @test isempty(model_periodic_constraints(invalid))
+
+    cyclic=_periodic_cube_volume_fixture(periodic=false)
+    set_periodic!(cyclic,2,[4],[6],constraints[1].affine)
+    @test_throws ArgumentError set_periodic!(cyclic,2,[6],[4],(
+        1.0,0.0,0.0,-1.0,
+        0.0,1.0,0.0,0.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    @test length(model_periodic_constraints(cyclic))==1
+
+    cross_volume=GeoModel()
+    _add_explicit_cube_shell!(cross_volume,0,0.0,1.0)
+    _add_explicit_cube_shell!(cross_volume,100,2.0,3.0)
+    add_volume!(cross_volume,[1];tag=1)
+    add_volume!(cross_volume,[101];tag=2)
+    set_periodic!(cross_volume,2,[104],[6],(
+        1.0,0.0,0.0,3.0,
+        0.0,1.0,0.0,2.0,
+        0.0,0.0,1.0,2.0,
+        0.0,0.0,0.0,1.0))
+    @test_throws ArgumentError mesh_model_volume(cross_volume,1)
 end

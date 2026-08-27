@@ -33,9 +33,10 @@ export add_physical_group!, set_physical_name!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
-Owned affine relation between two straight native curves. `affine` maps the
-master curve to the slave curve in Gmsh row-major 4×4 order. `reversed` records
-whether the master start maps to the slave end.
+Owned affine relation between two native entities. `affine` maps the master
+entity to the slave entity in Gmsh row-major 4×4 order. For dimension 1,
+`reversed` records whether the master start maps to the slave end; it is false
+for dimension 2.
 """
 struct ModelPeriodicConstraint
     dim::Int
@@ -231,10 +232,11 @@ function add_line!(m::GeoModel, a, b; tag::Integer=0)
     return t
 end
 
-function _periodic_entity_tags(values,caller::AbstractString,name::AbstractString)
+function _periodic_entity_tags(values,dim::Int,caller::AbstractString,
+                               name::AbstractString)
     (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
         "$caller: $name entities must be a vector or tuple"))
-    return Int[_tag(value,caller,1) for value in values]
+    return Int[_tag(value,caller,dim) for value in values]
 end
 
 function _model_periodic_tolerance(value,caller::AbstractString)
@@ -275,22 +277,155 @@ function _model_curve_length(m::GeoModel,curve::Int,caller::AbstractString)
     return length1
 end
 
+@inline function _model_periodic_entity_label(dim::Int)
+    dim==1 && return "Curve"
+    dim==2 && return "Surface"
+    return "Entity($dim)"
+end
+
+function _model_periodic_surface_points(
+    m::GeoModel,surface::Int,caller::AbstractString;
+    include_embeddings::Bool)
+    haskey(m.surfaces,surface) || throw(ArgumentError(
+        "$caller: unknown Surface[$surface]"))
+    points=Int[]
+    for loop in m.surfaces[surface]
+        haskey(m.loops,loop) || throw(ArgumentError(
+            "$caller: Surface[$surface] references unknown Loop[$loop]"))
+        append!(points,_loop_points(m,loop))
+    end
+    if include_embeddings
+        embedded_points,embedded_curves=
+            _model_surface_embedding_tags(m,surface,caller)
+        append!(points,embedded_points)
+        for curve in embedded_curves
+            append!(points,m.curves[curve])
+        end
+    end
+    sort!(unique!(points))
+    length(points)>=3 || throw(ArgumentError(
+        "$caller: Surface[$surface] needs at least three distinct point tags"))
+    coordinates=NTuple{3,Float64}[m.points[point] for point in points]
+    _model_surface_projection(coordinates,points,surface,caller)
+    return points
+end
+
+function _model_periodic_loop_signature(
+    m::GeoModel,loop::Int,point_map::Dict{Int,Int})
+    points=_loop_points(m,loop)
+    edges=NTuple{2,Int}[]
+    for index in eachindex(points)
+        first_point=point_map[points[index]]
+        second_point=point_map[points[mod1(index+1,length(points))]]
+        push!(edges,first_point<second_point ?
+                    (first_point,second_point) : (second_point,first_point))
+    end
+    sort!(edges)
+    return Tuple(edges)
+end
+
+function _model_periodic_surface_topology(
+    m::GeoModel,slave::Int,master::Int,point_map::Dict{Int,Int},
+    caller::AbstractString;include_embeddings::Bool)
+    slave_identity=Dict(point=>point for point in
+        _model_periodic_surface_points(
+            m,slave,caller;include_embeddings=include_embeddings))
+    slave_loops=m.surfaces[slave];master_loops=m.surfaces[master]
+    length(slave_loops)==length(master_loops) || throw(ArgumentError(
+        "$caller: Surface[$slave] and Surface[$master] loop counts differ"))
+    _model_periodic_loop_signature(m,first(master_loops),point_map)==
+        _model_periodic_loop_signature(m,first(slave_loops),slave_identity) ||
+        throw(ArgumentError(
+            "$caller: affine map does not preserve the outer boundary of " *
+            "Surface[$master] -> Surface[$slave]"))
+    master_holes=sort!([_model_periodic_loop_signature(m,loop,point_map)
+                        for loop in Iterators.drop(master_loops,1)])
+    slave_holes=sort!([_model_periodic_loop_signature(m,loop,slave_identity)
+                       for loop in Iterators.drop(slave_loops,1)])
+    master_holes==slave_holes || throw(ArgumentError(
+        "$caller: affine map does not preserve the holes of " *
+        "Surface[$master] -> Surface[$slave]"))
+    include_embeddings || return nothing
+
+    slave_points,slave_curves=
+        _model_surface_embedding_tags(m,slave,caller)
+    master_points,master_curves=
+        _model_surface_embedding_tags(m,master,caller)
+    sort!(Int[point_map[point] for point in master_points])==
+        sort!(copy(slave_points)) || throw(ArgumentError(
+            "$caller: periodic surfaces have different embedded points"))
+    function curve_signatures(curves,map)
+        signatures=NTuple{2,Int}[]
+        for curve in curves
+            first_point,second_point=m.curves[curve]
+            first_mapped=map[first_point];second_mapped=map[second_point]
+            push!(signatures,first_mapped<second_mapped ?
+                  (first_mapped,second_mapped) :
+                  (second_mapped,first_mapped))
+        end
+        sort!(signatures)
+        return signatures
+    end
+    curve_signatures(master_curves,point_map)==
+        curve_signatures(slave_curves,slave_identity) || throw(ArgumentError(
+            "$caller: periodic surfaces have different embedded curves"))
+    return nothing
+end
+
+function _model_periodic_surface_point_map(
+    m::GeoModel,slave::Int,master::Int,affine,atol::Float64,
+    caller::AbstractString;include_embeddings::Bool)
+    slave_points=_model_periodic_surface_points(
+        m,slave,caller;include_embeddings=include_embeddings)
+    master_points=_model_periodic_surface_points(
+        m,master,caller;include_embeddings=include_embeddings)
+    isempty(intersect(Set(slave_points),Set(master_points))) ||
+        throw(ArgumentError(
+            "$caller: Surface[$slave] and Surface[$master] must have " *
+            "disjoint point tags"))
+    length(slave_points)==length(master_points) || throw(ArgumentError(
+        "$caller: Surface[$slave] and Surface[$master] point counts differ"))
+    coefficients,translation,_=_transform_homogeneous(
+        affine,caller;name="affine transform")
+    available=Set(slave_points)
+    point_map=Dict{Int,Int}()
+    for (index,master_point) in pairs(master_points)
+        expected=_model_affine_point(
+            coefficients,translation,m.points[master_point],caller,index)
+        matches=Int[slave_point for slave_point in available
+                    if _model_point_distance(m.points[slave_point],expected)<=atol]
+        length(matches)==1 || throw(ArgumentError(
+            "$caller: affine image of Point[$master_point] on Surface[$master] " *
+            "matches $(length(matches)) points on Surface[$slave]; expected one"))
+        slave_point=only(matches)
+        point_map[master_point]=slave_point
+        delete!(available,slave_point)
+    end
+    isempty(available) || throw(ErrorException(
+        "$caller: internal periodic surface point matching was incomplete"))
+    _model_periodic_surface_topology(
+        m,slave,master,point_map,caller;
+        include_embeddings=include_embeddings)
+    return point_map
+end
+
 function _model_periodic_dependency_parents(
     constraints,caller::AbstractString)
-    parents=Dict{Int,Int}()
+    parents=Dict{Tuple{Int,Int},Tuple{Int,Int}}()
     for constraint in constraints
-        slave=Int(constraint.slave_entity)
-        master=Int(constraint.master_entity)
+        slave=(constraint.dim,Int(constraint.slave_entity))
+        master=(constraint.dim,Int(constraint.master_entity))
         haskey(parents,slave) && throw(ArgumentError(
-            "$caller: Curve[$slave] has more than one periodic master"))
+            "$caller: $(_model_periodic_entity_label(slave[1]))[$(slave[2])] " *
+            "has more than one periodic master"))
         parents[slave]=master
     end
 
-    state=Dict{Int,UInt8}()
+    state=Dict{Tuple{Int,Int},UInt8}()
     for start in sort!(collect(keys(parents)))
         get(state,start,0x00)==0x00 || continue
-        path=Int[]
-        positions=Dict{Int,Int}()
+        path=Tuple{Int,Int}[]
+        positions=Dict{Tuple{Int,Int},Int}()
         current=start
         while haskey(parents,current) && get(state,current,0x00)==0x00
             state[current]=0x01
@@ -303,12 +438,14 @@ function _model_periodic_dependency_parents(
             first_cycle>0 || throw(ErrorException(
                 "$caller: internal periodic dependency traversal failed"))
             cycle=vcat(path[first_cycle:end],current)
-            description=join(("Curve[$curve]" for curve in cycle)," -> ")
+            description=join((
+                "$(_model_periodic_entity_label(entity[1]))[$(entity[2])]"
+                for entity in cycle)," -> ")
             throw(ArgumentError(
                 "$caller: cyclic periodic dependency $description"))
         end
-        for curve in path
-            state[curve]=0x02
+        for entity in path
+            state[entity]=0x02
         end
     end
     return parents
@@ -316,84 +453,106 @@ end
 
 function _model_periodic_constraint_order(constraints,caller::AbstractString)
     parents=_model_periodic_dependency_parents(constraints,caller)
-    depths=Dict{Int,Int}()
+    depths=Dict{Tuple{Int,Int},Int}()
     for start in sort!(collect(keys(parents)))
         haskey(depths,start) && continue
-        path=Int[]
+        path=Tuple{Int,Int}[]
         current=start
         while haskey(parents,current) && !haskey(depths,current)
             push!(path,current)
             current=parents[current]
         end
         depth=get(depths,current,-1)
-        for curve in Iterators.reverse(path)
+        for entity in Iterators.reverse(path)
             depth+=1
-            depths[curve]=depth
+            depths[entity]=depth
         end
     end
     return sort!(collect(constraints);by=constraint->(
-        depths[Int(constraint.slave_entity)],constraint.slave_entity))
+        constraint.dim,
+        depths[(constraint.dim,Int(constraint.slave_entity))],
+        constraint.slave_entity))
 end
 
 """
     set_periodic!(model, dim, slave_entities, master_entities, affine;
                   atol=1e-12)
 
-Persist affine relations between equally sized lists of straight native curves.
-`affine` maps each master curve to its slave in Gmsh row-major 4×4 order. A curve
-may be the master of multiple relations or both a slave and a master in an
-acyclic dependency chain; each slave has exactly one master. Cycles are explicit
-blockers. This slice supports dimension 1; surface and volume periodicity are
-explicit blockers. Both curves in each pair must belong to the same planar
-surface, as boundary or embedded curves, when meshed. Curve endpoints must be
-disjoint and agree with the affine map within `atol`. The update is atomic.
+Persist affine relations between equally sized lists of straight native curves
+(`dim=1`) or planar native surfaces (`dim=2`). `affine` maps each master entity
+to its slave in Gmsh row-major 4×4 order. An entity may be the master of multiple
+relations or both a slave and a master in an acyclic dependency chain; each
+slave has exactly one master. Cycles are explicit blockers. Periodic curves must
+belong to the same planar surface when meshed. Periodic surfaces require
+disjoint, affine-equivalent boundary point and loop topology; embedded topology
+is rechecked when an explicit planar-shell volume is meshed. Volume periodicity
+remains an explicit blocker. The update is atomic.
 """
 function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                        atol=1e-12)
     caller="set_periodic!"
     d=_dimension(dim,caller)
-    d==1 || throw(ArgumentError(
-        "$caller: only straight Curve periodicity (dimension 1) is implemented"))
-    slaves=_periodic_entity_tags(slave_entities,caller,"slave")
-    masters=_periodic_entity_tags(master_entities,caller,"master")
+    d in (1,2) || throw(ArgumentError(
+        "$caller: only straight Curve and planar Surface periodicity " *
+        "(dimensions 1 and 2) are implemented"))
+    label=_model_periodic_entity_label(d)
+    slaves=_periodic_entity_tags(slave_entities,d,caller,"slave")
+    masters=_periodic_entity_tags(master_entities,d,caller,"master")
     length(slaves)==length(masters) || throw(ArgumentError(
         "$caller: slave and master entity counts differ"))
     isempty(slaves) && throw(ArgumentError(
-        "$caller: need at least one slave/master curve pair"))
+        "$caller: need at least one slave/master $label pair"))
     length(unique(slaves))==length(slaves) || throw(ArgumentError(
-        "$caller: slave curve tags must be unique"))
+        "$caller: slave $label tags must be unique"))
     overlap=sort!(Int[slave for slave in slaves
                       if haskey(m.periodic,(d,slave))])
     isempty(overlap) || throw(ArgumentError(
-        "$caller: Curve[$(first(overlap))] already has a periodic master"))
+        "$caller: $label[$(first(overlap))] already has a periodic master"))
     tolerance=_model_periodic_tolerance(atol,caller)
     coefficients,translation,row_major=_transform_homogeneous(
         affine,caller;name="affine transform")
     pending=ModelPeriodicConstraint[]
     for (pair_index,(slave,master)) in enumerate(zip(slaves,masters))
-        haskey(m.curves,slave) || throw(ArgumentError(
-            "$caller: unknown slave Curve[$slave]"))
-        haskey(m.curves,master) || throw(ArgumentError(
-            "$caller: unknown master Curve[$master]"))
-        _model_curve_length(m,slave,caller)
-        _model_curve_length(m,master,caller)
-        slave_points=m.curves[slave];master_points=m.curves[master]
-        isempty(intersect(Set(slave_points),Set(master_points))) || throw(ArgumentError(
-            "$caller: Curve[$slave] and Curve[$master] must have disjoint endpoints"))
-        slave_start=m.points[slave_points[1]];slave_stop=m.points[slave_points[2]]
-        mapped_start=_model_affine_point(
-            coefficients,translation,m.points[master_points[1]],caller,2pair_index-1)
-        mapped_stop=_model_affine_point(
-            coefficients,translation,m.points[master_points[2]],caller,2pair_index)
-        forward=max(_model_point_distance(mapped_start,slave_start),
-                    _model_point_distance(mapped_stop,slave_stop))
-        reversed=max(_model_point_distance(mapped_start,slave_stop),
-                     _model_point_distance(mapped_stop,slave_start))
-        mismatch=min(forward,reversed)
-        mismatch<=tolerance || throw(ArgumentError(
-            "$caller: affine map misses slave Curve[$slave] endpoints by $mismatch"))
+        entities=d==1 ? m.curves : m.surfaces
+        haskey(entities,slave) || throw(ArgumentError(
+            "$caller: unknown slave $label[$slave]"))
+        haskey(entities,master) || throw(ArgumentError(
+            "$caller: unknown master $label[$master]"))
+        slave!=master || throw(ArgumentError(
+            "$caller: slave and master $label tags must differ"))
+        reversed=false
+        if d==1
+            _model_curve_length(m,slave,caller)
+            _model_curve_length(m,master,caller)
+            slave_points=m.curves[slave];master_points=m.curves[master]
+            isempty(intersect(Set(slave_points),Set(master_points))) ||
+                throw(ArgumentError(
+                    "$caller: Curve[$slave] and Curve[$master] must have " *
+                    "disjoint endpoints"))
+            slave_start=m.points[slave_points[1]]
+            slave_stop=m.points[slave_points[2]]
+            mapped_start=_model_affine_point(
+                coefficients,translation,m.points[master_points[1]],caller,
+                2pair_index-1)
+            mapped_stop=_model_affine_point(
+                coefficients,translation,m.points[master_points[2]],caller,
+                2pair_index)
+            forward=max(_model_point_distance(mapped_start,slave_start),
+                        _model_point_distance(mapped_stop,slave_stop))
+            reverse_error=max(_model_point_distance(mapped_start,slave_stop),
+                              _model_point_distance(mapped_stop,slave_start))
+            mismatch=min(forward,reverse_error)
+            mismatch<=tolerance || throw(ArgumentError(
+                "$caller: affine map misses slave Curve[$slave] endpoints " *
+                "by $mismatch"))
+            reversed=reverse_error<forward
+        else
+            _model_periodic_surface_point_map(
+                m,slave,master,row_major,tolerance,caller;
+                include_embeddings=false)
+        end
         push!(pending,ModelPeriodicConstraint(
-            d,Int32(slave),Int32(master),row_major,reversed<forward,tolerance))
+            d,Int32(slave),Int32(master),row_major,reversed,tolerance))
     end
     _model_periodic_dependency_parents(
         vcat(model_periodic_constraints(m),pending),caller)
@@ -406,7 +565,7 @@ end
 """
     model_periodic_constraints(model) -> Vector{ModelPeriodicConstraint}
 
-Return the model's immutable periodic-curve constraints in deterministic
+Return the model's immutable periodic constraints in deterministic dimension and
 slave-entity order.
 """
 function model_periodic_constraints(m::GeoModel)
@@ -1186,6 +1345,7 @@ function _surface_periodic_constraints(m::GeoModel,t::Int,
     surface_curves=union(boundary_curves,Set(embedded_curve_tags))
     constraints=ModelPeriodicConstraint[]
     for constraint in model_periodic_constraints(m)
+        constraint.dim==1 || continue
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         slave_present=slave in surface_curves
         master_present=master in surface_curves
@@ -1301,8 +1461,8 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
     return changed
 end
 
-function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
-                               constraint::ModelPeriodicConstraint)
+function _model_periodic_curve_nodes(m::GeoModel,mesh::Mesh,
+                                     constraint::ModelPeriodicConstraint)
     mesh_edges=_model_projection_triangle_edges(mesh)
     all_nodes=trues(nnodes(mesh))
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
@@ -1328,6 +1488,16 @@ function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
     end
     return (master_entity=master,slave_nodes=slave_nodes,
             master_nodes=master_nodes,affine=constraint.affine)
+end
+
+function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
+                               constraint::ModelPeriodicConstraint)
+    constraint.dim==1 && return _model_periodic_curve_nodes(
+        m,mesh,constraint)
+    constraint.dim==2 && return _model_periodic_surface_nodes(
+        m,mesh,constraint)
+    throw(ArgumentError(
+        "model_periodic_nodes: unsupported periodic dimension $(constraint.dim)"))
 end
 
 function _model_mapping_matches(mesh::Mesh,constraint::ModelPeriodicConstraint,
@@ -1375,9 +1545,10 @@ end
     model_periodic_nodes(model, mesh, dim, slave_entity)
 
 Return the master entity, compact slave/master node arrays, and affine transform
-for one meshed straight-curve relation as a named tuple. The mesh must contain a
-synchronized boundary or embedded curve discretization produced by
-[`mesh_model_surface`](@ref).
+for one meshed curve or planar boundary-surface relation as a named tuple. Curve
+relations require a synchronized boundary or embedded discretization produced by
+[`mesh_model_surface`](@ref). Surface relations require a tetrahedron mesh of an
+explicit planar-shell volume produced by [`mesh_model_volume`](@ref).
 """
 function model_periodic_nodes(m::GeoModel,mesh::Mesh,dim,slave_entity)
     caller="model_periodic_nodes"
@@ -2095,6 +2266,47 @@ function _model_planar_surface_mesh(
     return output
 end
 
+function _model_periodic_surface_mesh(
+    m::GeoModel,master_mesh::Mesh,constraint::ModelPeriodicConstraint,
+    caller::AbstractString)
+    constraint.dim==2 || throw(ErrorException(
+        "$caller: internal periodic surface mesh received dimension " *
+        "$(constraint.dim)"))
+    slave=Int(constraint.slave_entity)
+    master=Int(constraint.master_entity)
+    point_map=_model_periodic_surface_point_map(
+        m,slave,master,constraint.affine,constraint.atol,caller;
+        include_embeddings=true)
+    master_points=_model_periodic_surface_points(
+        m,master,caller;include_embeddings=true)
+    coordinate_points=Dict{NTuple{3,Float64},Int}()
+    for point in master_points
+        coordinate=m.points[point]
+        key=ntuple(
+            axis->_model_projection_coordinate_key(coordinate[axis]),3)
+        haskey(coordinate_points,key) && throw(ArgumentError(
+            "$caller: Surface[$master] has multiple point tags at $key"))
+        coordinate_points[key]=point
+    end
+    output_coordinates=Matrix{Float64}(undef,3,nnodes(master_mesh))
+    for node in 1:nnodes(master_mesh)
+        key=ntuple(axis->_model_projection_coordinate_key(
+            master_mesh.coords[axis,node]),3)
+        master_point=get(coordinate_points,key,nothing)
+        master_point===nothing && throw(ErrorException(
+            "$caller: periodic master Surface[$master] mesh introduced " *
+            "an unmapped node at $key"))
+        slave_point=point_map[master_point]
+        output_coordinates[:,node].=m.points[slave_point]
+    end
+    output=Mesh(output_coordinates;tris=master_mesh.tris)
+    diagnostic=validate(output)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: synchronized periodic Surface[$slave] mesh is invalid — " *
+        join(diagnostic.messages,"; ")))
+    return output
+end
+
 function _model_loop_position2(point,polygon)
     inside=false
     previous=last(polygon)
@@ -2220,6 +2432,87 @@ function _model_projection_boundary_surface_faces!(
         "$caller: boundary Surface[$surface] mesh area $covered_area does not " *
         "match modeled area $target_area"))
     return output
+end
+
+function _model_affine_node_pairs(
+    mesh::Mesh,constraint::ModelPeriodicConstraint,master_nodes_raw,
+    slave_nodes_raw,caller::AbstractString)
+    master_nodes=sort!(unique!(Int[Int(node) for node in master_nodes_raw]))
+    slave_nodes=sort!(unique!(Int[Int(node) for node in slave_nodes_raw]);
+        by=node->(mesh.coords[1,node],mesh.coords[2,node],
+                  mesh.coords[3,node],node))
+    length(master_nodes)==length(slave_nodes) || throw(ArgumentError(
+        "$caller: periodic $(_model_periodic_entity_label(constraint.dim))" *
+        "[$(constraint.slave_entity)] and " *
+        "$(_model_periodic_entity_label(constraint.dim))" *
+        "[$(constraint.master_entity)] node counts differ"))
+    coefficients,translation,_=_transform_homogeneous(
+        constraint.affine,caller;name="stored affine transform")
+    slave_x=Float64[mesh.coords[1,node] for node in slave_nodes]
+    used=Set{Int}()
+    mapped_slaves=Vector{Int32}(undef,length(master_nodes))
+    mapped_masters=Vector{Int32}(undef,length(master_nodes))
+    for (index,master_node) in pairs(master_nodes)
+        master=_model_mesh_coordinate(mesh,master_node)
+        expected=_model_affine_point(
+            coefficients,translation,master,caller,master_node)
+        first_candidate=searchsortedfirst(
+            slave_x,expected[1]-constraint.atol)
+        last_candidate=searchsortedlast(
+            slave_x,expected[1]+constraint.atol)
+        matches=Int[]
+        for position in first_candidate:last_candidate
+            position in eachindex(slave_nodes) || continue
+            slave_node=slave_nodes[position]
+            slave_node in used && continue
+            _model_point_distance(
+                _model_mesh_coordinate(mesh,slave_node),expected)<=
+                constraint.atol && push!(matches,slave_node)
+        end
+        length(matches)==1 || throw(ArgumentError(
+            "$caller: affine image of master node $master_node matches " *
+            "$(length(matches)) unused slave nodes; expected one"))
+        slave_node=only(matches)
+        push!(used,slave_node)
+        mapped_masters[index]=Int32(master_node)
+        mapped_slaves[index]=Int32(slave_node)
+    end
+    length(used)==length(slave_nodes) || throw(ErrorException(
+        "$caller: internal periodic node matching was incomplete"))
+    return (master_entity=Int(constraint.master_entity),
+            slave_nodes=mapped_slaves,master_nodes=mapped_masters,
+            affine=constraint.affine)
+end
+
+function _model_periodic_surface_nodes(
+    m::GeoModel,mesh::Mesh,constraint::ModelPeriodicConstraint)
+    caller="model_periodic_nodes"
+    ntets(mesh)>0 || throw(ArgumentError(
+        "$caller: periodic Surface mapping requires a tetrahedron mesh"))
+    slave=Int(constraint.slave_entity)
+    master=Int(constraint.master_entity)
+    boundary=Set(first(boundary_faces(mesh.tets)))
+    slave_faces=_model_projection_boundary_surface_faces!(
+        Set{NTuple{3,Int32}}(),boundary,m,mesh,slave,caller)
+    master_faces=_model_projection_boundary_surface_faces!(
+        Set{NTuple{3,Int32}}(),boundary,m,mesh,master,caller)
+    slave_nodes,_=_model_projection_face_topology(slave_faces)
+    master_nodes,_=_model_projection_face_topology(master_faces)
+    mapping=_model_affine_node_pairs(
+        mesh,constraint,master_nodes,slave_nodes,caller)
+    node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
+        zip(mapping.master_nodes,mapping.slave_nodes))
+    mapped_master_faces=Set{NTuple{3,Int32}}()
+    for face in master_faces
+        mapped=ntuple(slot->node_map[face[slot]],3)
+        push!(mapped_master_faces,_model_projection_face_key(mapped))
+    end
+    slave_face_keys=Set(_model_projection_face_key(face)
+                        for face in slave_faces)
+    mapped_master_faces==slave_face_keys || throw(ArgumentError(
+        "$caller: periodic Surface[$slave]/Surface[$master] face topology " *
+        "does not match under the affine node map"))
+    return mapping
 end
 
 function _model_projection_volume_surface_faces!(
@@ -2394,6 +2687,203 @@ function _model_projection_validate_nested_surface(
     return nothing
 end
 
+function _model_periodic_surface_boundary_maps(
+    m::GeoModel,constraint::ModelPeriodicConstraint,caller::AbstractString)
+    slave=Int(constraint.slave_entity)
+    master=Int(constraint.master_entity)
+    point_map=_model_periodic_surface_point_map(
+        m,slave,master,constraint.affine,constraint.atol,caller;
+        include_embeddings=false)
+    slave_curves=_model_projection_surface_curves(m,slave)
+    master_curves=_model_projection_surface_curves(m,master)
+    length(slave_curves)==length(master_curves) || throw(ArgumentError(
+        "$caller: periodic surfaces have different boundary-curve counts"))
+    slave_signatures=Dict{NTuple{2,Int},Int}()
+    for curve in slave_curves
+        first_point,second_point=m.curves[curve]
+        signature=first_point<second_point ?
+            (first_point,second_point) : (second_point,first_point)
+        haskey(slave_signatures,signature) && throw(ArgumentError(
+            "$caller: Surface[$slave] repeats boundary edge $signature"))
+        slave_signatures[signature]=curve
+    end
+    curve_map=Dict{Int,Int}()
+    used=Set{Int}()
+    for master_curve in master_curves
+        first_point,second_point=m.curves[master_curve]
+        first_mapped=point_map[first_point]
+        second_mapped=point_map[second_point]
+        signature=first_mapped<second_mapped ?
+            (first_mapped,second_mapped) :
+            (second_mapped,first_mapped)
+        slave_curve=get(slave_signatures,signature,nothing)
+        slave_curve===nothing && throw(ArgumentError(
+            "$caller: affine image of Curve[$master_curve] has no boundary " *
+            "curve on Surface[$slave]"))
+        slave_curve in used && throw(ArgumentError(
+            "$caller: multiple master curves map to Curve[$slave_curve]"))
+        curve_map[master_curve]=slave_curve
+        push!(used,slave_curve)
+    end
+    length(used)==length(slave_curves) || throw(ErrorException(
+        "$caller: internal periodic boundary-curve matching was incomplete"))
+    return point_map,curve_map
+end
+
+function _model_periodic_add_relation!(
+    relations::Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}},
+    slave::Int,master::Int,constraint::ModelPeriodicConstraint,
+    caller::AbstractString,label::AbstractString)
+    key=(slave,master)
+    existing=get(relations,key,nothing)
+    if existing===nothing
+        relations[key]=(constraint.affine,constraint.atol)
+    else
+        existing[1]==constraint.affine || throw(ArgumentError(
+            "$caller: periodic $label[$slave]/$label[$master] is induced " *
+            "by inconsistent surface transforms"))
+        relations[key]=(existing[1],min(existing[2],constraint.atol))
+    end
+    return nothing
+end
+
+function _model_periodic_spanning_relations(
+    relations::Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}})
+    outgoing=Dict{Int,Vector{Tuple{Int,NTuple{16,Float64},Float64}}}()
+    indegree=Dict{Int,Int}()
+    entities=Set{Int}()
+    for ((slave,master),(affine,atol)) in relations
+        push!(get!(Vector{Tuple{Int,NTuple{16,Float64},Float64}},
+                   outgoing,master),(slave,affine,atol))
+        indegree[slave]=get(indegree,slave,0)+1
+        get!(indegree,master,0)
+        push!(entities,slave,master)
+    end
+    for edges in values(outgoing)
+        sort!(edges;by=edge->(edge[1],edge[2],edge[3]))
+    end
+    roots=sort!(Int[entity for entity in entities
+                    if get(indegree,entity,0)==0])
+    append!(roots,sort!(collect(setdiff(entities,Set(roots)))))
+    visited=Set{Int}()
+    parents=Dict{Int,Tuple{Int,NTuple{16,Float64},Float64}}()
+    for root in roots
+        root in visited && continue
+        push!(visited,root)
+        queue=Int[root];head=1
+        while head<=length(queue)
+            master=queue[head];head+=1
+            for (slave,affine,atol) in get(
+                    outgoing,master,
+                    Tuple{Int,NTuple{16,Float64},Float64}[])
+                slave in visited && continue
+                push!(visited,slave)
+                parents[slave]=(master,affine,atol)
+                push!(queue,slave)
+            end
+        end
+    end
+    visited==entities || throw(ErrorException(
+        "internal periodic entity traversal was incomplete"))
+    return parents
+end
+
+function _model_periodic_curve_entry_mapping(
+    mesh::Mesh,slave::Int,master::Int,affine,atol::Float64,
+    slave_entries,master_entries,caller::AbstractString)
+    constraint=ModelPeriodicConstraint(
+        1,Int32(slave),Int32(master),affine,false,atol)
+    mapping=_model_affine_node_pairs(
+        mesh,constraint,last.(master_entries),last.(slave_entries),caller)
+    node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
+        zip(mapping.master_nodes,mapping.slave_nodes))
+    function edge_set(entries,map)
+        edges=Set{NTuple{2,Int32}}()
+        for index in 1:(length(entries)-1)
+            first_node=map[Int32(entries[index][2])]
+            second_node=map[Int32(entries[index+1][2])]
+            push!(edges,first_node<second_node ?
+                        (first_node,second_node) :
+                        (second_node,first_node))
+        end
+        return edges
+    end
+    identity_map=Dict(Int32(entry[2])=>Int32(entry[2])
+                      for entry in slave_entries)
+    edge_set(master_entries,node_map)==edge_set(slave_entries,identity_map) ||
+        throw(ArgumentError(
+            "$caller: periodic Curve[$slave]/Curve[$master] edge topology " *
+            "does not match under the affine node map"))
+    return mapping
+end
+
+function _model_projection_periodic_surface_links(
+    m::GeoModel,mesh::Mesh,constraints,point_nodes,curve_entries,
+    surface_nodes,caller::AbstractString)
+    point_relations=
+        Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}}()
+    curve_relations=
+        Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}}()
+    for constraint in constraints
+        point_map,curve_map=
+            _model_periodic_surface_boundary_maps(m,constraint,caller)
+        for (master,slave) in point_map
+            _model_periodic_add_relation!(
+                point_relations,slave,master,constraint,caller,"Point")
+        end
+        for (master,slave) in curve_map
+            _model_periodic_add_relation!(
+                curve_relations,slave,master,constraint,caller,"Curve")
+        end
+    end
+
+    links=MixedPeriodicLink[]
+    point_parents=_model_periodic_spanning_relations(point_relations)
+    for slave in sort!(collect(keys(point_parents)))
+        master,affine,atol=point_parents[slave]
+        haskey(point_nodes,slave) && haskey(point_nodes,master) ||
+            throw(ErrorException(
+                "$caller: periodic point entity is absent from projection"))
+        constraint=ModelPeriodicConstraint(
+            0,Int32(slave),Int32(master),affine,false,atol)
+        mapping=(master_entity=master,
+                 slave_nodes=Int32[point_nodes[slave]],
+                 master_nodes=Int32[point_nodes[master]],affine=affine)
+        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        push!(links,MixedPeriodicLink(
+            0,slave,master,mapping.slave_nodes,mapping.master_nodes;
+            affine=affine))
+    end
+    curve_parents=_model_periodic_spanning_relations(curve_relations)
+    for slave in sort!(collect(keys(curve_parents)))
+        master,affine,atol=curve_parents[slave]
+        haskey(curve_entries,slave) && haskey(curve_entries,master) ||
+            throw(ErrorException(
+                "$caller: periodic curve entity is absent from projection"))
+        mapping=_model_periodic_curve_entry_mapping(
+            mesh,slave,master,affine,atol,
+            curve_entries[slave],curve_entries[master],caller)
+        push!(links,MixedPeriodicLink(
+            1,slave,master,mapping.slave_nodes,mapping.master_nodes;
+            affine=affine))
+    end
+    for constraint in constraints
+        slave=Int(constraint.slave_entity)
+        master=Int(constraint.master_entity)
+        mapping=_model_periodic_surface_nodes(m,mesh,constraint)
+        Set(mapping.slave_nodes)==surface_nodes[slave] || throw(ErrorException(
+            "$caller: periodic Surface[$slave] mapping omits classified nodes"))
+        Set(mapping.master_nodes)==surface_nodes[master] || throw(ErrorException(
+            "$caller: periodic Surface[$master] mapping omits classified nodes"))
+        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
+        push!(links,MixedPeriodicLink(
+            2,constraint.slave_entity,constraint.master_entity,
+            mapping.slave_nodes,mapping.master_nodes;
+            affine=constraint.affine))
+    end
+    return links
+end
+
 function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     caller="model_to_mixed"
     haskey(m.volumes,volume) || throw(ArgumentError(
@@ -2409,8 +2899,6 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         "$caller: volume input must contain tetrahedron cells"))
     all(iszero,mesh.tet_tag) || throw(ArgumentError(
         "$caller: input tetrahedron tags must be zero; physical ownership comes from the model"))
-    isempty(m.periodic) || throw(ArgumentError(
-        "$caller: periodic relations are not supported in classified volume projection"))
 
     explicit_geometry=isempty(m.volumes[volume]) ? nothing :
         _model_explicit_volume_geometry(m,volume,caller)
@@ -2426,6 +2914,8 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     point_tags,curve_tags,surface_tags,
     surface_embedded_points,surface_embedded_curves,boundary_surfaces=
         _model_volume_embedding_inventory(m,volume,caller)
+    periodic_surfaces=
+        _model_volume_periodic_surface_constraints(m,volume,caller)
     boundary_surface_tags=abs.(boundary_surfaces)
     boundary_surface_set=Set(boundary_surface_tags)
     projection_surface_tags=vcat(
@@ -2511,6 +3001,9 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
             point_nodes,curve_entries,surface_embedded_points[surface],
             surface_embedded_curves[surface],caller)
     end
+    periodic_links=_model_projection_periodic_surface_links(
+        m,mesh,periodic_surfaces,point_nodes,curve_entries,
+        surface_nodes,caller)
 
     node_entities=fill((3,Int32(volume)),nnodes(mesh))
     for (point,node) in point_nodes
@@ -2644,7 +3137,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     end
     output=MixedMesh(
         mesh.coords,blocks;physical_names=names,entity_data=data,
-        elementary_entities=block_entities)
+        elementary_entities=block_entities,periodic_links=periodic_links)
     output_diagnostic=validate(output)
     output_diagnostic.ok || throw(ErrorException(
         "$caller: invalid projected mixed mesh — " *
@@ -2661,7 +3154,9 @@ the surface convenience form. Volume projection first certifies that the tetrahe
 boundary fills the selected native solid. Explicit volumes additionally require
 their modeled surfaces to classify every tetrahedron boundary face exactly once.
 The result emits boundary and embedded point/curve/surface cells and their entity
-hierarchy, including nested Point/Line-In-Surface constraints. Gmsh 4.15.2 has no
+hierarchy, including nested Point/Line-In-Surface constraints. Periodic explicit
+volume boundaries retain their surface maps and induced boundary point/curve forest.
+Gmsh 4.15.2 has no
 serialized volume-embedding relation; MSH4 classification, signed volume boundaries,
 its Curve-In-Surface relation, and MSH2 cell ownership remain available.
 """
@@ -2922,11 +3417,66 @@ function _model_explicit_volume_fill(
     end
 end
 
+function _model_volume_periodic_surface_constraints(
+    m::GeoModel,volume::Int,caller::AbstractString)
+    _,curve_tags,surface_tags,_,_,boundary_surfaces=
+        _model_volume_embedding_inventory(m,volume,caller)
+    curve_set=Set(curve_tags)
+    surface_set=Set(surface_tags)
+    boundary_set=Set(abs.(boundary_surfaces))
+    constraints=ModelPeriodicConstraint[]
+    for constraint in model_periodic_constraints(m)
+        slave=Int(constraint.slave_entity)
+        master=Int(constraint.master_entity)
+        if constraint.dim==1
+            slave_present=slave in curve_set
+            master_present=master in curve_set
+            (slave_present || master_present) || continue
+            slave_present==master_present || throw(ArgumentError(
+                "$caller: periodic Curve[$slave]/Curve[$master] relation " *
+                "has only one entity on Volume[$volume]"))
+            throw(ArgumentError(
+                "$caller: explicit Volume[$volume] supports planar periodic " *
+                "surfaces but not independent periodic curves"))
+        elseif constraint.dim==2
+            slave_present=slave in surface_set
+            master_present=master in surface_set
+            (slave_present || master_present) || continue
+            slave_present==master_present || throw(ArgumentError(
+                "$caller: periodic Surface[$slave]/Surface[$master] relation " *
+                "has only one entity on Volume[$volume]"))
+            (slave in boundary_set && master in boundary_set) ||
+                throw(ArgumentError(
+                    "$caller: periodic Surface[$slave]/Surface[$master] must " *
+                    "pair boundary surfaces of explicit Volume[$volume]"))
+            push!(constraints,constraint)
+        else
+            throw(ArgumentError(
+                "$caller: unsupported periodic dimension $(constraint.dim)"))
+        end
+    end
+    return _model_periodic_constraint_order(constraints,caller)
+end
+
 function _model_explicit_volume_geometry(
     m::GeoModel,t::Int,caller::AbstractString)
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     isempty(boundaries) && throw(ArgumentError(
         "$caller: Volume[$t] has no explicit boundary surfaces"))
+    local_meshes=Dict{Int,Mesh}()
+    for signed_surface in boundaries
+        surface=abs(signed_surface)
+        get!(local_meshes,surface) do
+            _model_planar_surface_mesh(
+                m,surface,caller;include_embeddings=true)
+        end
+    end
+    for constraint in _model_volume_periodic_surface_constraints(m,t,caller)
+        slave=Int(constraint.slave_entity)
+        master=Int(constraint.master_entity)
+        local_meshes[slave]=_model_periodic_surface_mesh(
+            m,local_meshes[master],constraint,caller)
+    end
     coordinates=NTuple{3,Float64}[]
     node_index=Dict{NTuple{3,Float64},Int32}()
     triangles=NTuple{3,Int32}[]
@@ -2945,8 +3495,7 @@ function _model_explicit_volume_geometry(
         faces=NTuple{3,Int32}[]
         for signed_surface in m.surface_loops[shell]
             surface=abs(signed_surface)
-            local_mesh=_model_planar_surface_mesh(
-                m,surface,caller;include_embeddings=true)
+            local_mesh=local_meshes[surface]
             local_nodes=Vector{Int32}(undef,nnodes(local_mesh))
             for node in 1:nnodes(local_mesh)
                 coordinate=(local_mesh.coords[1,node],local_mesh.coords[2,node],
@@ -3043,7 +3592,9 @@ end
 Mesh a native primitive, Boolean, or explicitly modeled planar-surface volume,
 recovering supported embedded points, curves, and planar sheets with optional holes,
 including nested points and curves constrained to those sheets. The returned
-tetrahedral mesh is validated before it is returned; unsupported solid encodings
+tetrahedral mesh is validated before it is returned. For an explicit volume, stored
+planar boundary-surface relations synchronize the slave facets from their masters and
+certify their affine tetrahedron-boundary node maps. Unsupported solid encodings
 raise an explicit error.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer)
@@ -3052,6 +3603,8 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
     explicit_geometry=isempty(m.volumes[t]) ? nothing :
         _model_explicit_volume_geometry(m,t,caller)
+    periodic_surfaces=explicit_geometry===nothing ? ModelPeriodicConstraint[] :
+        _model_volume_periodic_surface_constraints(m,t,caller)
     surface=explicit_geometry===nothing ? _volume_surface(m,t) :
                                          explicit_geometry.surface
     extra=NTuple{3,Float64}[]
@@ -3134,6 +3687,10 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
         mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
             "$caller: embedded Surface[$sheet] is absent from the final " *
             "tetrahedron face complex"))
+    end
+    for constraint in periodic_surfaces
+        mapping=_model_periodic_surface_nodes(m,mesh,constraint)
+        _model_mapping_matches(mesh,constraint,mapping,caller;exact=false)
     end
     tet_edges=_tet_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()

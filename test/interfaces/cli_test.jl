@@ -23,6 +23,8 @@ const _PERIODIC_CLI_GEO=replace(
     "Periodic Curve {2} = {4} Translate {1, 0, 0};\n"
 const _PERIODIC_VOLUME_CLI_GEO=
     _PERIODIC_CLI_GEO * "Box(1) = {0, 0, 0, 1, 1, 1};\n"
+const _PERIODIC_SURFACE_VOLUME_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","periodic_surface_volume.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -320,6 +322,30 @@ Physical Volume("domain", 72) = {1};
         @test mixed_crc(explicit_shell).sha==
               "fe4bc18f3b9156c654c5ee1433b43c87cb9b8d7f372d9fbb72689f500584623a"
 
+        periodic_surface_volume_input=joinpath(
+            directory,"periodic-surface-volume.geo")
+        periodic_surface_volume_output=joinpath(
+            directory,"periodic-surface-volume.msh")
+        write(periodic_surface_volume_input,_PERIODIC_SURFACE_VOLUME_CLI_GEO)
+        @test main([periodic_surface_volume_input,"-3","-o",
+                    periodic_surface_volume_output])==
+              periodic_surface_volume_output
+        @test read(periodic_surface_volume_input,String)==
+              _PERIODIC_SURFACE_VOLUME_CLI_GEO
+        periodic_surface_volume=read_mixed_msh(
+            periodic_surface_volume_output)
+        @test validate(periodic_surface_volume).ok
+        @test mixed_crc(periodic_surface_volume).sha==
+              "27417f652cf93e0d6aad41c2f1b6c65af3751dfb3cb3166432d2e798f25a6493"
+        @test length(periodic_surface_volume.periodic_links)==15
+        @test sort([(Int(link.slave_entity),Int(link.master_entity),
+                     length(link.slave_nodes))
+                    for link in periodic_surface_volume.periodic_links
+                    if link.dim==2])==[(4,6,5),(5,3,4)]
+        @test periodic_surface_volume.physical_names==Dict(
+            (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
+            (2,63)=>"boundary",(3,64)=>"domain")
+
         periodic_volume_input=joinpath(directory,"periodic-volume.geo")
         periodic_volume_output=joinpath(directory,"periodic-volume.msh")
         write(periodic_volume_input,_PERIODIC_VOLUME_CLI_GEO)
@@ -332,7 +358,7 @@ Physical Volume("domain", 72) = {1};
         end
         @test projection_error isa ArgumentError
         @test occursin(
-            "periodic metadata projection is limited to surface meshes",
+            "selected volume projection omits periodic relations [(1, 2, 4)]",
             sprint(showerror,projection_error))
         @test read(periodic_volume_input,String)==_PERIODIC_VOLUME_CLI_GEO
         @test read(periodic_volume_output,String)=="unchanged"
@@ -349,7 +375,7 @@ Physical Volume("domain", 72) = {1};
         end
         @test unused_error isa ArgumentError
         @test occursin(
-            "selected Surface[1] does not contain periodic slave Curve tags [5]",
+            "selected surface projection omits periodic relations [(1, 5, 6)]",
             sprint(showerror,unused_error))
         @test read(unused_input,String)==_UNUSED_PERIODIC_CLI_GEO
         @test read(unused_output,String)=="unchanged"

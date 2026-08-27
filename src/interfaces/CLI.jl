@@ -3,9 +3,9 @@
 
 Command-line façade: `tessella file.geo -2|-3` executes the bounded `.geo`
 subset and writes `file.msh`. Supported periodic and embedded surface entities
-and embedded volume entities, including nested sheet constraints and explicit
-planar volume shells, are written with classified MSH4 metadata. Unknown flags
-and OCC-only files are blockers.
+and embedded volume entities, including nested sheet constraints and periodic
+planar boundaries of explicit volume shells, are written with classified MSH4
+metadata. Unknown flags and OCC-only files are blockers.
 """
 module CLI
 
@@ -63,12 +63,12 @@ Parsing-only mode returns the input path. Meshing writes an atomic MSH 4.1 file
 and returns its path. Native periodic/embedded surface meshes and embedded volume
 meshes include their supported classified entity, cell, and node records, including
 nested point/curve constraints on an embedded sheet and explicit volume boundaries.
-Periodic surface output retains periodic-curve graphs with reused masters and
-acyclic chains.
-Periodic volume output is blocked; periodic surface output requires exactly one
-selected surface containing every slave and master curve. Duplicate/conflicting
-flags, multiple inputs, ignored output arguments, and any output that aliases the
-input are rejected.
+Periodic `-2` output retains periodic-curve graphs with reused masters and acyclic
+chains. Periodic `-3` output supports planar boundary-surface relations on one
+explicit volume shell and retains their induced point/curve relations. General
+periodic volume entities and independent periodic curves in volumes remain blocked.
+Duplicate or conflicting flags, multiple inputs, ignored output arguments, and any
+output that aliases the input are rejected.
 """
 function main(args::AbstractVector{<:AbstractString})
     length(args)<=_MAX_ARGUMENTS || throw(ArgumentError(
@@ -111,10 +111,6 @@ function main(args::AbstractVector{<:AbstractString})
     if dim>0
         result.mesh===nothing && throw(ErrorException("tessella: no mesh produced"))
         constraints=model_periodic_constraints(result.model)
-        if !isempty(constraints) && dim!=2
-            throw(ArgumentError(
-                "tessella: periodic metadata projection is limited to surface meshes"))
-        end
         target=nothing
         embedded=any(
             pair->pair.first[1]==dim && !isempty(pair.second),
@@ -135,16 +131,18 @@ function main(args::AbstractVector{<:AbstractString})
                 "tessella: classified $entity_name projection requires exactly " *
                 "one selected $entity_name"))
             projected=model_to_mixed(result.model,result.mesh,dim,target)
-            if dim==2
-                projected_slaves=Set(Int(link.slave_entity)
-                    for link in projected.periodic_links if link.dim==1)
-                missing_slaves=sort!(Int[constraint.slave_entity
-                    for constraint in constraints
-                    if !(Int(constraint.slave_entity) in projected_slaves)])
-                isempty(missing_slaves) || throw(ArgumentError(
-                    "tessella: selected Surface[$target] does not contain periodic " *
-                    "slave Curve tags $missing_slaves"))
-            end
+            projected_relations=Set(
+                (link.dim,Int(link.slave_entity),Int(link.master_entity))
+                for link in projected.periodic_links)
+            missing_relations=sort!([
+                (constraint.dim,Int(constraint.slave_entity),
+                 Int(constraint.master_entity))
+                for constraint in constraints
+                if !((constraint.dim,Int(constraint.slave_entity),
+                      Int(constraint.master_entity)) in projected_relations)])
+            isempty(missing_relations) || throw(ArgumentError(
+                "tessella: selected $entity_name projection omits periodic " *
+                "relations $missing_relations"))
             write_mixed_msh(destination,projected;version=4.1)
         end
         return destination

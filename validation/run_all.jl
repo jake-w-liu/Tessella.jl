@@ -224,6 +224,13 @@ periodic_graph_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=y
 println("  command: ", periodic_graph_command)
 run(periodic_graph_command)
 
+println("\n── gmsh_parity periodic volume boundaries ──  planar explicit shell")
+periodic_volume_script = joinpath(
+    HERE, "gmsh_parity", "periodic_surface_volume.jl")
+periodic_volume_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $periodic_volume_script`
+println("  command: ", periodic_volume_command)
+run(periodic_volume_command)
+
 println("\n── gmsh_parity 2-D boundary layer ──  Tessella vs analytic/Gmsh BL quads")
 bl2d_script = joinpath(HERE, "gmsh_parity", "boundary_layer_2d.jl")
 bl2d_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $bl2d_script`

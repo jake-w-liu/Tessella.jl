@@ -44,6 +44,7 @@ validation/
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
     periodic_embedded_curve.jl # embedded periodic-curve MSH2/MSH4 lifecycle
     periodic_curve_graph.jl # dependency-graph/expression periodic lifecycle
+    periodic_surface_volume.jl # planar periodic explicit-volume boundaries
     periodic_curve_branch.geo # one master reused by two embedded curves
     periodic_curve_chain.geo # acyclic master/slave dependency chain
     periodic_curve_expressions.geo # scalar/expression/range periodic chain
@@ -85,7 +86,8 @@ cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
 pairs, embedded periodic curves, reusable-master, chained, and expression-backed
-curve graphs, and 2-D boundary-layer parity cases.
+curve graphs, planar periodic boundaries of an explicit volume, and 2-D
+boundary-layer parity cases.
 The NURBS child both imports Gmsh-generated IGES and has Gmsh import and mesh
 Tessella-generated type 126/128/144 records. Missing or wrong-version Gmsh,
 failed probes, and parity mismatches make the aggregate command fail. Mesh-case

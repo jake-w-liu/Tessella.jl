@@ -3,8 +3,8 @@
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
 explicit planar surface-loop volumes and persistent affine relations between
-straight periodic boundary or embedded curves.
-Production meshing is never delegated to Gmsh.
+straight periodic boundary or embedded curves and planar periodic volume
+boundaries. Production meshing is never delegated to Gmsh.
 """
 module API
 
@@ -227,7 +227,7 @@ function _get_periodic_nodes(dim,slave_entity)
     end
 end
 
-"""Gmsh-style mesh generation, retrieval, and periodic-curve operations."""
+"""Gmsh-style mesh generation, retrieval, and periodic curve/surface operations."""
 module mesh
 using ..API: _generate,_get_mesh,_set_periodic,_get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
@@ -236,12 +236,12 @@ get()=_get_mesh()
 """
     set_periodic(dim, slave_entities, master_entities, affine; atol=1e-12)
 
-Store validated straight-curve relations in the active model and invalidate any
-cached mesh. `affine` maps each master curve to its corresponding slave curve in
-Gmsh row-major 4×4 order. Each slave has one master; masters may be reused, and a
-slave may become a master in an acyclic dependency chain. Cycles are rejected
-atomically. Pair endpoints must be disjoint, and both curves must belong to the
-same planar surface, as boundary or embedded curves, when meshed.
+Store validated straight-curve (`dim=1`) or planar-surface (`dim=2`) relations in
+the active model and invalidate any cached mesh. `affine` maps each master entity
+to its corresponding slave in Gmsh row-major 4×4 order. Each slave has one master;
+masters may be reused, and a slave may become a master in an acyclic dependency
+chain. Curves must share a planar surface when meshed. Surfaces must be
+affine-equivalent boundaries of one explicit planar-shell volume.
 """
 set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     _set_periodic(dim,slave_entities,master_entities,affine;atol=atol)
@@ -250,7 +250,7 @@ set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     get_periodic_nodes(dim, slave_entity)
 
 Return the master entity, detached slave/master node arrays, and affine transform
-for one boundary or embedded curve relation in the cached surface mesh.
+for one curve or planar boundary-surface relation in the cached mesh.
 """
 get_periodic_nodes(dim,slave_entity)=
     _get_periodic_nodes(dim,slave_entity)
