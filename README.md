@@ -56,7 +56,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
   functions, prior scalar bindings, sizing options, explicit field/physical tags, and
-  finite constant `start:end[:increment]` lists in recognized numeric contexts;
+  finite constant `start:end[:increment]` lists in recognized numeric contexts; the
+  executor applies the same checked semantics to numeric parameters, entity tags,
+  and entity lists in every supported geometry statement;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
@@ -115,8 +117,9 @@ boundary-layer fan topology beyond the certified closed-wall extrusion, the full
 Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
 interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including loops, macros, dynamic tag allocators, option reads,
-dynamic/general ranges, and mixed geometry-derived physical-group RHSs),
+`.geo` execution (including control-flow loops, macros, dynamic tag allocators,
+option reads, dynamic/general ranges, and mixed geometry-derived physical-group
+RHSs),
 mixed-element generation beyond the listed first-order surface recombination paths,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
 quasi-transfinite or holed transfinite patches, curved/warped or
@@ -134,10 +137,10 @@ covers straight-curve pairs on one planar triangle-meshed surface and disjoint
 affine-equivalent planar boundary surfaces of one explicit surface-loop volume. Each
 slave has one master; curve masters may be reused, a curve slave may become a master
 in an acyclic chain, and independent relations may share corner points. The bounded
-`.geo` executor accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface`
-with `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Entity lists and
-transform entries support prior scalar bindings, finite arithmetic, and pure numeric
-functions; entity lists also support bounded constant ranges. Cyclic curve
+`.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
+functions, and bounded constant entity ranges to all supported geometry statements.
+It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
+`Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
 dynamic tag allocators, and list variables remain pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:
@@ -162,7 +165,8 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field, constant-range, uniform-refinement, transfinite-patch,
+Gmsh 4.15.2 size-field, constant-range, expression-backed geometry,
+uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction

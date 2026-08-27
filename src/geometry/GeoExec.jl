@@ -2,12 +2,14 @@
     GeoExec
 
 Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface/
-Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection, Translate/Dilate/
-90°-Rotate of those solids, Point/Line-In-Surface and Point/Line/Surface-In-Volume
-embeddings with nested point/curve sheet constraints, expression-backed
+Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection,
+Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
+Point/Line/Surface-In-Volume
+embeddings with nested point/curve sheet constraints, Physical groups, and
 Translate/Rotate/Affine periodic straight curves or explicit-volume planar boundary
-surfaces with reusable masters and acyclic dependency chains, Physical groups, and
-Mesh 2/3 via the native [`Model`](@ref)
+surfaces with reusable masters and acyclic dependency chains. Numeric parameters,
+entity tags, and entity lists use bounded constant-expression evaluation. Mesh 2/3
+runs through the native [`Model`](@ref)
 kernel. Control-flow loops, macros,
 extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
@@ -22,6 +24,7 @@ using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
 using ..IO: _geo_split_list, _geo_numeric_list_terms, _geo_positive_gmsh_tag
+using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
 using ..Transform: _affine_coordinate
 
@@ -117,15 +120,16 @@ Execute Tessella's documented bounded `.geo` subset into a new [`GeoModel`](@ref
 Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
 `mesh_dim=0` only builds the model. Geometry statements outside the bounded
 subset and malformed input raise `ArgumentError` instead of being partially
-accepted. `Periodic Line`, `Periodic Curve`, and `Periodic Surface` accept
-`Translate`, `Rotate`, and 12- or 16-entry `.geo` `Affine` transforms. Curves must
-be straight and surfaces must be planar boundaries of one explicit volume. Their
-entity lists and transform entries accept finite arithmetic expressions, prior scalar
-bindings, pure numeric functions, and bounded constant ranges in entity lists.
-Entity results follow Gmsh's truncation toward zero into positive signed 32-bit
-tags. Multiple statements may reuse a master or form an acyclic master/slave
-chain. Dynamic tag allocators and list variables remain outside this execution
-subset.
+accepted. Every numeric parameter, entity tag, and numeric entity-list entry in a
+supported statement accepts finite arithmetic, prior scalar bindings, and pure
+numeric functions. Entity-list positions also expand bounded constant ranges. Tags
+follow Gmsh's truncation toward zero into positive 32-bit values; oriented Curve and
+Surface Loop entries may instead be nonzero signed 32-bit values. `Periodic Line`,
+`Periodic Curve`, and `Periodic Surface` accept `Translate`, `Rotate`, and
+12- or 16-entry `.geo` `Affine` transforms. Curves must be straight and surfaces
+must be planar boundaries of one explicit volume. Multiple periodic statements may
+reuse a master or form an acyclic master/slave chain. Dynamic tag allocators and
+list variables remain outside this execution subset.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
@@ -143,7 +147,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     for line in _geo_exec_statements(path)
         occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
                  line) && throw(ArgumentError(
-            "execute_geo: unsupported statement $(line) — loops, macros, and advanced OCC features are blockers"))
+            "execute_geo: unsupported statement $(line) — control-flow loops, " *
+            "macros, and advanced OCC features are blockers"))
         _exec_line!(model,line,context)
     end
     mesh=nothing
@@ -175,10 +180,7 @@ end
 function _geo_periodic_expressions(raw::AbstractString,count::Int,
                                    context::_GeoNumericContext,
                                    caller::AbstractString)
-    pieces=_geo_periodic_list_items(raw,caller)
-    length(pieces)==count || throw(ArgumentError(
-        "$caller: expected $count comma-separated numeric expressions"))
-    return Float64[_geo_eval_numeric(piece,context,caller) for piece in pieces]
+    return _geo_exec_numeric_values(raw,count,context,caller)
 end
 
 function _geo_periodic_affine(raw::AbstractString,context::_GeoNumericContext,
@@ -191,21 +193,84 @@ function _geo_periodic_affine(raw::AbstractString,context::_GeoNumericContext,
         (entries...,0.0,0.0,0.0,1.0) : Tuple(entries)
 end
 
-function _geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
-                            caller::AbstractString)
+function _geo_exec_numeric_terms(raw::AbstractString,
+                                 context::_GeoNumericContext,
+                                 caller::AbstractString)
     pieces=_geo_periodic_list_items(raw,caller)
-    isempty(pieces) && throw(ArgumentError("$caller: entity list is empty"))
     terms,total=_geo_numeric_list_terms(pieces,context,caller)
+    return terms,total
+end
+
+function _geo_exec_numeric_values(raw::AbstractString,
+                                  context::_GeoNumericContext,
+                                  caller::AbstractString)
+    terms,total=_geo_exec_numeric_terms(raw,context,caller)
+    values=Float64[];sizehint!(values,total)
+    for term in terms
+        numeric=term.first
+        for _ in 1:term.count
+            push!(values,numeric)
+            numeric+=term.step
+        end
+    end
+    return values
+end
+
+function _geo_exec_numeric_values(raw::AbstractString,count::Int,
+                                  context::_GeoNumericContext,
+                                  caller::AbstractString)
+    values=_geo_exec_numeric_values(raw,context,caller)
+    length(values)==count || throw(ArgumentError(
+        "$caller: expected $count numeric values after range expansion; " *
+        "got $(length(values))"))
+    return values
+end
+
+function _geo_exec_entity_tags(raw::AbstractString,
+                               context::_GeoNumericContext,
+                               caller::AbstractString;
+                               signed::Bool=false)
+    terms,total=_geo_exec_numeric_terms(raw,context,caller)
+    total==0 && throw(ArgumentError(
+        "$caller: entity list is empty"))
     tags=Int[];sizehint!(tags,total)
     for term in terms
         numeric=term.first
         for _ in 1:term.count
-            push!(tags,_geo_positive_gmsh_tag(numeric,"$caller entry"))
+            tag=if signed
+                value=_geo_signed_gmsh_int_value(numeric,"$caller entry")
+                iszero(value) && throw(ArgumentError(
+                    "$caller entry must evaluate to a nonzero signed tag"))
+                value
+            else
+                _geo_positive_gmsh_tag(numeric,"$caller entry")
+            end
+            push!(tags,tag)
             numeric+=term.step
         end
     end
     return tags
 end
+
+function _geo_exec_entity_tag(raw::AbstractString,
+                              context::_GeoNumericContext,
+                              caller::AbstractString)
+    return _geo_positive_gmsh_tag(
+        _geo_eval_numeric(raw,context,caller),caller)
+end
+
+function _geo_exec_single_entity(raw::AbstractString,
+                                 context::_GeoNumericContext,
+                                 caller::AbstractString)
+    tags=_geo_exec_entity_tags(raw,context,caller)
+    length(tags)==1 || throw(ArgumentError(
+        "$caller: expected exactly one entity; got $(length(tags))"))
+    return only(tags)
+end
+
+_geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
+                   caller::AbstractString)=
+    _geo_exec_entity_tags(raw,context,caller)
 
 function _geo_exec_scalar!(context::_GeoNumericContext,name::AbstractString,
                            raw::AbstractString)
@@ -306,99 +371,182 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     if occursin(r"^Periodic(?:\s|$)",line)
         _exec_periodic!(m,line,context)
         return
-    elseif (mm=match(r"^Point\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*([^,]+),\s*([^,]+),\s*([^,}]+)(?:,\s*([^}]+))?\s*\}\s*;$", line)) !== nothing
-        tag=parse(Int,mm.captures[1])
-        x=parse(Float64,mm.captures[2]); y=parse(Float64,mm.captures[3]); z=parse(Float64,mm.captures[4])
-        lc=mm.captures[5]===nothing ? 1.0 : parse(Float64,mm.captures[5])
-        add_point!(m,x,y,z; tag=tag, mesh_size=lc)
+    elseif (mm=match(
+            r"^Point\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Point"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        values=_geo_exec_numeric_values(
+            mm.captures[2],context,"$caller coordinates")
+        length(values) in (3,4) || throw(ArgumentError(
+            "$caller coordinates: expected three coordinates and optional " *
+            "mesh size; got $(length(values)) values after range expansion"))
+        mesh_size=length(values)==4 ? values[4] : 1.0
+        add_point!(m,values[1],values[2],values[3];
+                   tag=tag,mesh_size=mesh_size)
         return
-    elseif (mm=match(r"^Line\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*([0-9]+)\s*,\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
-        add_line!(m, parse(Int,mm.captures[2]), parse(Int,mm.captures[3]); tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Line\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Line"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        points=_geo_exec_entity_tags(
+            mm.captures[2],context,"$caller endpoints")
+        length(points)==2 || throw(ArgumentError(
+            "$caller: expected two endpoint tags; got $(length(points))"))
+        add_line!(m,points[1],points[2];tag=tag)
         return
-    elseif (mm=match(r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        ids=parse.(Int, split(mm.captures[2],','))
-        add_curve_loop!(m, ids; tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Curve Loop"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        curves=_geo_exec_entity_tags(
+            mm.captures[2],context,"$caller curves";signed=true)
+        add_curve_loop!(m,curves;tag=tag)
         return
-    elseif (mm=match(r"^Plane\s+Surface\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        ids=parse.(Int, split(mm.captures[2],','))
-        add_plane_surface!(m, ids; tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Plane Surface"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        loops=_geo_exec_entity_tags(
+            mm.captures[2],context,"$caller loops")
+        add_plane_surface!(m,loops;tag=tag)
         return
-    elseif (mm=match(r"^Surface\s+Loop\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        ids=parse.(Int,split(mm.captures[2],','))
-        add_surface_loop!(m,ids;tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Surface Loop"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        surfaces=_geo_exec_entity_tags(
+            mm.captures[2],context,"$caller surfaces";signed=true)
+        add_surface_loop!(m,surfaces;tag=tag)
         return
-    elseif (mm=match(r"^Volume\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        ids=parse.(Int,split(mm.captures[2],','))
-        add_volume!(m,ids;tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Volume\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Volume"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        shells=_geo_exec_entity_tags(
+            mm.captures[2],context,"$caller surface loops")
+        add_volume!(m,shells;tag=tag)
         return
-    elseif (mm=match(r"^Box\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        nums=parse.(Float64, split(mm.captures[2],','))
-        length(nums)==6 || throw(ArgumentError("execute_geo: Box needs six numbers"))
-        add_box!(m, nums[1],nums[2],nums[3],nums[4],nums[5],nums[6]; tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Box\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Box"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        values=_geo_exec_numeric_values(
+            mm.captures[2],6,context,"$caller parameters")
+        add_box!(m,values...;tag=tag)
         return
-    elseif (mm=match(r"^Cylinder\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        nums=parse.(Float64, split(mm.captures[2],','))
-        length(nums)==7 || throw(ArgumentError("execute_geo: Cylinder needs x,y,z,dx,dy,dz,r"))
-        add_cylinder!(m, nums[1],nums[2],nums[3],nums[4],nums[5],nums[6],nums[7];
-                      tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Cylinder\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Cylinder"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        values=_geo_exec_numeric_values(
+            mm.captures[2],7,context,"$caller parameters")
+        add_cylinder!(m,values...;tag=tag)
         return
-    elseif (mm=match(r"^Sphere\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        nums=parse.(Float64, split(mm.captures[2],','))
-        length(nums)==4 || throw(ArgumentError("execute_geo: Sphere needs x,y,z,r"))
-        add_sphere!(m, nums[1],nums[2],nums[3],nums[4]; tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Sphere\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Sphere"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        values=_geo_exec_numeric_values(
+            mm.captures[2],4,context,"$caller parameters")
+        add_sphere!(m,values...;tag=tag)
         return
-    elseif (mm=match(r"^Cone\s*\(\s*([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
-        nums=parse.(Float64, split(mm.captures[2],','))
-        length(nums)==8 || throw(ArgumentError("execute_geo: Cone needs x,y,z,dx,dy,dz,r1,r2"))
-        add_cone!(m, nums[1],nums[2],nums[3],nums[4],nums[5],nums[6],nums[7],nums[8];
-                  tag=parse(Int,mm.captures[1]))
+    elseif (mm=match(
+            r"^Cone\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Cone"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        values=_geo_exec_numeric_values(
+            mm.captures[2],8,context,"$caller parameters")
+        add_cone!(m,values...;tag=tag)
         return
-    elseif (mm=match(r"^Boolean(Difference|Union|Intersection)\s*\(\s*([0-9]+)\s*\)\s*=\s*\{\s*Volume\{([0-9]+)\}([^}]*)\}\s*\{\s*Volume\{([0-9]+)\}([^}]*)\}\s*;$", line)) !== nothing
+    elseif (mm=match(
+            r"^Boolean(Difference|Union|Intersection)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Boolean$(mm.captures[1])"
         op=Dict("Difference"=>:difference,"Union"=>:union,"Intersection"=>:intersection)[mm.captures[1]]
-        a=parse(Int,mm.captures[3]); b=parse(Int,mm.captures[5])
+        tag=_geo_exec_entity_tag(mm.captures[2],context,"$caller result tag")
+        a=_geo_exec_single_entity(
+            mm.captures[3],context,"$caller first operand")
+        b=_geo_exec_single_entity(
+            mm.captures[5],context,"$caller second operand")
         delete_a=_boolean_delete_operand(mm.captures[4])
         delete_b=_boolean_delete_operand(mm.captures[6])
-        boolean_volumes!(m, op, a, b; tag=parse(Int,mm.captures[2]))
+        boolean_volumes!(m,op,a,b;tag=tag)
         delete_a && delete!(m.volumes,a)
         delete_b && delete!(m.volumes,b)
         return
-    elseif (mm=match(r"^Translate\s*\{\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
-        nums=parse.(Float64, split(mm.captures[1],','))
-        length(nums)==3 || throw(ArgumentError("execute_geo: Translate needs three offsets"))
-        tag=parse(Int,mm.captures[2])
-        translate_volume!(m,tag,(nums[1],nums[2],nums[3]))
+    elseif (mm=match(
+            r"^Translate\s*\{\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Translate"
+        offset=_geo_exec_numeric_values(
+            mm.captures[1],3,context,"$caller offset")
+        tag=_geo_exec_single_entity(
+            mm.captures[2],context,"$caller volume")
+        translate_volume!(m,tag,Tuple(offset))
         return
-    elseif (mm=match(r"^Dilate\s*\{\s*\{\s*([^}]+)\s*\}\s*,\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
-        center=parse.(Float64, split(mm.captures[1],','))
-        length(center)==3 || throw(ArgumentError("execute_geo: Dilate center needs three coordinates"))
-        scale=parse(Float64, mm.captures[2])
-        dilate_volume!(m, parse(Int,mm.captures[3]), (center[1],center[2],center[3]), scale)
+    elseif (mm=match(
+            r"^Dilate\s*\{\s*\{\s*(.*?)\s*\}\s*,\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Dilate"
+        center=_geo_exec_numeric_values(
+            mm.captures[1],3,context,"$caller center")
+        scale=_geo_eval_numeric(mm.captures[2],context,"$caller scale")
+        tag=_geo_exec_single_entity(
+            mm.captures[3],context,"$caller volume")
+        dilate_volume!(m,tag,Tuple(center),scale)
         return
-    elseif (mm=match(r"^Rotate\s*\{\s*\{\s*([^}]+)\s*\}\s*,\s*\{\s*([^}]+)\s*\}\s*,\s*([^}]+)\s*\}\s*\{\s*Volume\{([0-9]+)\}\s*;?\s*\}\s*;$", line)) !== nothing
-        axis=parse.(Float64, split(mm.captures[1],','))
-        origin=parse.(Float64, split(mm.captures[2],','))
-        (length(axis)==3 && length(origin)==3) || throw(ArgumentError(
-            "execute_geo: Rotate needs axis and origin triples"))
-        angle=parse(Float64, mm.captures[3])
-        rotate_volume!(m, parse(Int,mm.captures[4]),
-                       (axis[1],axis[2],axis[3]), (origin[1],origin[2],origin[3]), angle)
+    elseif (mm=match(
+            r"^Rotate\s*\{\s*\{\s*(.*?)\s*\}\s*,\s*\{\s*(.*?)\s*\}\s*,\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Rotate"
+        axis=_geo_exec_numeric_values(
+            mm.captures[1],3,context,"$caller axis")
+        origin=_geo_exec_numeric_values(
+            mm.captures[2],3,context,"$caller origin")
+        angle=_geo_eval_numeric(mm.captures[3],context,"$caller angle")
+        tag=_geo_exec_single_entity(
+            mm.captures[4],context,"$caller volume")
+        rotate_volume!(m,tag,Tuple(axis),Tuple(origin),angle)
         return
-    elseif (mm=match(r"^(Point|Line|Curve)\s*\{\s*([^}]+)\s*\}\s+In\s+Surface\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
+    elseif (mm=match(
+            r"^(Point|Line|Curve)\s*\{\s*(.*?)\s*\}\s+In\s+Surface\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: $(mm.captures[1]) In Surface"
         dim=mm.captures[1]=="Point" ? 0 : 1
-        ids=parse.(Int, split(mm.captures[2],','))
-        embed!(m, dim, ids, 2, parse(Int,mm.captures[3]))
+        ids=_geo_exec_entity_tags(mm.captures[2],context,"$caller entities")
+        target=_geo_exec_single_entity(
+            mm.captures[3],context,"$caller target")
+        embed!(m,dim,ids,2,target)
         return
-    elseif (mm=match(r"^(Point|Line|Curve|Surface)\s*\{\s*([^}]+)\s*\}\s+In\s+Volume\s*\{\s*([0-9]+)\s*\}\s*;$", line)) !== nothing
+    elseif (mm=match(
+            r"^(Point|Line|Curve|Surface)\s*\{\s*(.*?)\s*\}\s+In\s+Volume\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: $(mm.captures[1]) In Volume"
         dim=Dict("Point"=>0,"Line"=>1,"Curve"=>1,"Surface"=>2)[mm.captures[1]]
-        ids=parse.(Int, split(mm.captures[2],','))
-        embed!(m, dim, ids, 3, parse(Int,mm.captures[3]))
+        ids=_geo_exec_entity_tags(mm.captures[2],context,"$caller entities")
+        target=_geo_exec_single_entity(
+            mm.captures[3],context,"$caller target")
+        embed!(m,dim,ids,3,target)
         return
-    elseif (mm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?([0-9]+)\s*\)\s*=\s*\{([^}]+)\}\s*;$", line)) !== nothing
+    elseif (mm=match(
+            r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Physical $(mm.captures[1])"
         dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]
         name=mm.captures[2]===nothing ? "" : mm.captures[2]
-        tag=parse(Int,mm.captures[3])
-        ids=parse.(Int, split(mm.captures[4],','))
-        add_physical_group!(m, dim, ids; tag=tag, name=name)
+        tag=_geo_exec_entity_tag(mm.captures[3],context,"$caller tag")
+        ids=_geo_exec_entity_tags(mm.captures[4],context,"$caller entities")
+        add_physical_group!(m,dim,ids;tag=tag,name=name)
         return
     elseif (mm=match(
             r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*;$",line)) !== nothing
