@@ -171,6 +171,11 @@ The model and session APIs return detached, sorted group, membership, reverse-me
 and name-query results. Names are unique within an entity dimension and can be removed
 independently of their groups. Selective or all-group removal leaves geometry intact
 and does not rewind the global automatic Physical-tag counter.
+They also enumerate explicit entities, report model dimension, and return direct or
+recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
+ordering, orientation, and combined-incidence cancellation. Topology queries preserve
+the session mesh cache and exclude embeddings. Primitive and Boolean volumes are
+enumerated, but their implicit boundary topology remains an explicit blocker.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
@@ -199,7 +204,7 @@ julia --project --check-bounds=yes validation/run_all.jl
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
-spatial Point-size, dynamic-tag/`SetMaxTag`,
+spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

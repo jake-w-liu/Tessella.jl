@@ -2,10 +2,11 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-deterministic Physical-group lifecycle queries and mutations, point-local mesh-size
-constraints, explicit planar surface-loop volumes, and persistent affine relations
-between straight periodic boundary or embedded curves and planar periodic volume
-boundaries. Production meshing is never delegated to Gmsh.
+deterministic entity-topology and Physical-group queries, Physical-group mutations,
+point-local mesh-size constraints, explicit planar surface-loop volumes, and
+persistent affine relations between straight periodic boundary or embedded curves
+and planar periodic volume boundaries. Production meshing is never delegated to
+Gmsh.
 """
 module API
 
@@ -18,6 +19,7 @@ using ..Model: remove_physical_name!, model_physical_groups
 using ..Model: model_physical_groups_entities, model_entities_for_physical_group
 using ..Model: model_entities_for_physical_name, model_physical_groups_for_entity
 using ..Model: model_physical_name
+using ..Model: model_entities, model_dimension, model_boundary, model_adjacencies
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -128,6 +130,24 @@ _get_physical_groups(dim=-1)=_with_model() do current
     model_physical_groups(current,dim)
 end
 
+_get_entities(dim=-1)=_with_model() do current
+    model_entities(current,dim)
+end
+
+_get_dimension()=_with_model() do current
+    model_dimension(current)
+end
+
+_get_boundary(dim_tags,combined=true,oriented=false,recursive=false)=
+    _with_model() do current
+        model_boundary(
+            current,dim_tags,combined,oriented,recursive)
+    end
+
+_get_adjacencies(dim,tag)=_with_model() do current
+    model_adjacencies(current,dim,tag)
+end
+
 _get_physical_groups_entities(dim=-1)=_with_model() do current
     model_physical_groups_entities(current,dim)
 end
@@ -180,7 +200,7 @@ function _remove_physical_groups(dim_tags=())
     end
 end
 
-"""Gmsh-style geometry-model and Physical-group operations for the active [`API`](@ref) session."""
+"""Gmsh-style geometry-model, topology, and Physical-group operations for the active [`API`](@ref) session."""
 module model
 using ..API: _with_model, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..API: add_surface_loop!, add_volume!
@@ -189,6 +209,7 @@ using ..API: _get_physical_groups, _get_physical_groups_entities
 using ..API: _get_entities_for_physical_group, _get_entities_for_physical_name
 using ..API: _get_physical_groups_for_entity, _get_physical_name
 using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
+using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
     add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
 end
@@ -239,6 +260,28 @@ boolean_intersection(a,b; tag=0)=_boolean(:intersection,a,b; tag=tag)
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m
     add_physical_group!(m,dim,tags;tag=tag,name=name)
 end
+
+"""Return detached, sorted native model `(dimension, tag)` pairs."""
+get_entities(dim=-1)=_get_entities(dim)
+
+"""Return the greatest model-entity dimension, or `-1` for an empty model."""
+get_dimension()=_get_dimension()
+
+"""
+Return explicit entity boundaries. `combined` cancels even incidences, `oriented`
+retains signed Curve and Surface tags, and `recursive` returns the Point closure.
+Primitive and Boolean Volume boundaries are unavailable because their Surface Loop
+topology is implicit.
+"""
+get_boundary(dim_tags,combined=true,oriented=false,recursive=false)=
+    _get_boundary(dim_tags,combined,oriented,recursive)
+
+"""
+Return detached upward and downward topology-only adjacency tags. Downward queries
+for primitive and Boolean Volumes are unavailable because their Surface Loop
+topology is implicit.
+"""
+get_adjacencies(dim,tag)=_get_adjacencies(dim,tag)
 
 """Return detached, sorted Physical `(dimension, tag)` pairs; `dim=-1` selects all."""
 get_physical_groups(dim=-1)=_get_physical_groups(dim)

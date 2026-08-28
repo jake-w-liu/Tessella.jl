@@ -35,6 +35,7 @@ export remove_physical_name!, model_physical_groups
 export model_physical_groups_entities, model_entities_for_physical_group
 export model_entities_for_physical_name, model_physical_groups_for_entity
 export model_physical_name
+export model_entities, model_dimension, model_boundary, model_adjacencies
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
@@ -131,6 +132,16 @@ function _dimension(value, caller)
     value isa Integer || throw(ArgumentError("$caller: dimension must be an integer"))
     value isa Bool && throw(ArgumentError("$caller: dimension must not be Bool"))
     (0<=value<=3) || throw(ArgumentError("$caller: dimension must be in 0:3"))
+    return Int(value)
+end
+
+function _query_dimension(value,caller)
+    value isa Integer || throw(ArgumentError(
+        "$caller: dimension must be an integer"))
+    value isa Bool && throw(ArgumentError(
+        "$caller: dimension must not be Bool"))
+    value==-1 || 0<=value<=3 || throw(ArgumentError(
+        "$caller: dimension must be -1 or in 0:3"))
     return Int(value)
 end
 
@@ -1089,16 +1100,6 @@ function _has_entity(m::GeoModel, dim::Int, tag::Int)
     return haskey(m.volumes,tag)
 end
 
-function _physical_query_dimension(value,caller)
-    value isa Integer || throw(ArgumentError(
-        "$caller: dimension must be an integer"))
-    value isa Bool && throw(ArgumentError(
-        "$caller: dimension must not be Bool"))
-    value==-1 || 0<=value<=3 || throw(ArgumentError(
-        "$caller: dimension must be -1 or in 0:3"))
-    return Int(value)
-end
-
 function _physical_group_key(dim,tag,caller)
     d=_dimension(dim,caller)
     t=_tag(tag,caller,d)
@@ -1227,7 +1228,7 @@ Return detached Physical `(dimension, tag)` pairs in deterministic order. `dim=-
 selects every dimension; `dim=0:3` filters the result.
 """
 function model_physical_groups(m::GeoModel,dim=-1)
-    dimension=_physical_query_dimension(dim,"model_physical_groups")
+    dimension=_query_dimension(dim,"model_physical_groups")
     groups=Tuple{Int,Int}[
         key for key in keys(m.physical) if dimension==-1 || key[1]==dimension]
     return sort!(groups)
@@ -1844,19 +1845,8 @@ function _model_projection_surface_curves(m::GeoModel,surface::Int)
 end
 
 function _model_projection_surface_boundaries(m::GeoModel,surface::Int)
-    boundaries=Int32[]
-    # The selected surface traverses each hole opposite its stored loop direction.
-    for (loop_index,loop) in pairs(m.surfaces[surface])
-        curves=m.loops[loop]
-        if loop_index==1
-            append!(boundaries,Int32.(curves))
-        else
-            for signed_curve in Iterators.reverse(curves)
-                push!(boundaries,-Int32(signed_curve))
-            end
-        end
-    end
-    return boundaries
+    return Int32.(_model_surface_boundary_curves(
+        m,surface,"model_to_mixed";orient_holes=true))
 end
 
 function _model_surface_embedding_tags(
@@ -2810,7 +2800,8 @@ function _model_projection_volume_surface_faces!(
 end
 
 function _model_volume_boundary_surfaces(
-    m::GeoModel,volume::Int,caller::AbstractString)
+    m::GeoModel,volume::Int,caller::AbstractString;
+    orient_cavities::Bool=true)
     boundaries=Int[]
     seen=Set{Int}()
     for (shell_index,shell) in pairs(m.volumes[volume])
@@ -2818,7 +2809,7 @@ function _model_volume_boundary_surfaces(
             "$caller: Volume[$volume] references unknown Surface Loop[$shell]"))
         surfaces=m.surface_loops[shell]
         _validate_surface_loop(m,surfaces,caller)
-        shell_sign=shell_index==1 ? 1 : -1
+        shell_sign=orient_cavities && shell_index>1 ? -1 : 1
         for signed_surface in surfaces
             surface=abs(signed_surface)
             surface in seen && throw(ArgumentError(

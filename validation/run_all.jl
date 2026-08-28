@@ -111,6 +111,13 @@ geo_dynamic_tag_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=
 println("  command: ", geo_dynamic_tag_command)
 run(geo_dynamic_tag_command)
 
+println("\n── gmsh_parity model topology ──  entity boundaries and adjacencies")
+model_topology_script = joinpath(
+    HERE, "gmsh_parity", "model_topology_queries.jl")
+model_topology_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $model_topology_script`
+println("  command: ", model_topology_command)
+run(model_topology_command)
+
 println("\n── uniform_refine ──  exact Gmsh 4.15.2 simplex templates")
 uniform_refine_script = joinpath(HERE, "uniform_refine", "differential.jl")
 uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $uniform_refine_script`

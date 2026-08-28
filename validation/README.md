@@ -44,6 +44,7 @@ validation/
     geo_list_variables.jl # bounded numeric-list and entity-reuse execution
     geo_mesh_sizes.jl # Point sizing and topology-derived Physical groups
     geo_dynamic_tags.jl # geometry/Physical allocation and lifecycle, SetMaxTag, OCC
+    model_topology_queries.jl # entity/boundary/adjacency API differential
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
     periodic_embedded_curve.jl # embedded periodic-curve MSH2/MSH4 lifecycle
@@ -91,8 +92,8 @@ Surface-In-Volume projection with nested sheet constraints and a hole, native `.
 bounded expression- and numeric-list-backed geometry and entity lists,
 point-local and explicit-topology `.geo` mesh-size constraints, API updates, and
 spatial surface grading, bounded geometry and global Physical tag allocators,
-Physical-group API lifecycle, and factory-aware `SetMaxTag` for tracked explicit and
-primitive topology,
+the Physical-group API lifecycle, the explicit model-topology API differential, and
+factory-aware `SetMaxTag` for tracked explicit and primitive topology,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
 pairs, embedded periodic curves, reusable-master, chained, and expression-backed
 curve graphs, planar periodic boundaries of an explicit volume, and 2-D
