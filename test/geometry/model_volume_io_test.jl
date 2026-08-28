@@ -380,6 +380,12 @@ end
     @test _add_explicit_cube_shell!(hollow,0,0.0,2.0)==1
     @test _add_explicit_cube_shell!(hollow,100,0.5,1.5)==101
     @test add_volume!(hollow,[1,101];tag=1)==1
+    @test Tessella.Model._model_boundary(
+        hollow,[(3,1)],"cavity Boundary")==
+        vcat(collect(1:6),collect(101:106))
+    @test Tessella.Model._model_boundary(
+        hollow,[(3,1)],"cavity CombinedBoundary";combined=true)==
+        vcat(collect(1:6),collect(101:106))
     hollow_mesh=mesh_model_volume(hollow,1)
     @test validate(hollow_mesh).ok
     @test _mesh_volume_value(hollow_mesh)≈7.0 atol=1e-12

@@ -81,9 +81,15 @@ end
     @test [topology.model.point_size[tag] for tag in 1:5]==
           [0.4,0.5,0.2,0.4,1.0]
     @test topology.model.physical==
-          Dict((0,11)=>collect(1:4),(3,12)=>[1])
+          Dict((0,11)=>collect(1:4),(3,12)=>[1],
+               (0,21)=>[1,3],(1,22)=>[1,2,3],(2,23)=>collect(1:4),
+               (1,25)=>[2,3,4,5],(1,26)=>collect(1:5),
+               (0,27)=>collect(1:4))
     @test topology.model.physical_names==
-          Dict((0,11)=>"vertices",(3,12)=>"domain")
+          Dict((0,11)=>"vertices",(3,12)=>"domain",
+               (0,21)=>"endpoints",(1,22)=>"face boundary",(2,23)=>"skin",
+               (1,25)=>"two face rim",(1,26)=>"two face boundary",
+               (0,27)=>"vertices query")
     for (entities,expected) in (
             ([(0,3)],[3]), ([(1,2)],[2,3]),
             ([(2,1)],[1,2,3]), ([(3,1)],collect(1:4)),
@@ -91,10 +97,34 @@ end
         @test Tessella.Model._model_points_of(
             topology.model,entities,"test PointsOf")==expected
     end
+    for (entities,combined,expected) in (
+            ([(1,1)],false,[1,2]), ([(1,-1)],false,[2,1]),
+            ([(2,1)],false,[1,2,3]),
+            ([(2,1),(2,2)],false,[1,2,3,1,5,4]),
+            ([(2,1),(2,2)],true,[2,3,4,5]),
+            ([(2,1),(2,1)],true,Int[]),
+            ([(3,1)],false,collect(1:4)))
+        @test Tessella.Model._model_boundary(
+            topology.model,entities,"test Boundary";combined=combined)==expected
+    end
     topology_stable=copy(topology.model.point_size)
+    physical_stable=copy(topology.model.physical)
     @test_throws ArgumentError Tessella.Model._model_points_of(
         topology.model,[(2,99)],"test PointsOf")
+    @test_throws ArgumentError Tessella.Model._model_boundary(
+        topology.model,[(2,99)],"test Boundary")
+    @test_throws ArgumentError Tessella.Model._model_boundary(
+        topology.model,[(1,1),(2,1)],"test Boundary")
     @test topology.model.point_size==topology_stable
+    @test topology.model.physical==physical_stable
+
+    unnamed=_execute_point_mesh_size_source(raw"""
+        Point(1)={0,0,0,1};
+        Physical Point(1)={1};
+        """)
+    @test unnamed.model.physical==Dict((0,1)=>[1])
+    @test isempty(unnamed.model.physical_names)
+    @test isempty(unnamed.params.physical_groups)
 
     topology_meshed=execute_geo(
         _GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE;mesh_dim=3)
@@ -103,6 +133,12 @@ end
     @test ntets(topology_meshed.mesh)==6
     @test mesh_crc(topology_meshed.mesh).sha==
           "cf091ac13ba325f5f68650b192598a5159679b40e19dbea744d66c58962357b5"
+    topology_projected=model_to_mixed(
+        topology_meshed.model,topology_meshed.mesh,3,1)
+    @test validate(topology_projected).ok
+    @test topology_projected.physical_names==topology.model.physical_names
+    @test mixed_crc(topology_projected).sha==
+          "608dcd81b4ecab3138fd8da610ec109e1972c799ccb2c9d755917c9901250905"
 
     holed_topology=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
@@ -110,14 +146,18 @@ end
         Point(5)={0.5,0.5,0,1}; Point(6)={1.5,0.5,0,1};
         Point(7)={1.5,1.5,0,1}; Point(8)={0.5,1.5,0,1};
         Point(9)={1,1,0,1};
+        Point(10)={0.25,1,0,1}; Point(11)={0.4,1,0,1};
         Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
         Line(5)={5,6}; Line(6)={6,7}; Line(7)={7,8}; Line(8)={8,5};
+        Line(9)={10,11};
         Curve Loop(1)={1:4}; Curve Loop(2)={5:8};
-        Plane Surface(1)={1,2}; Point{9} In Surface{1};
+        Plane Surface(1)={1,2}; Point{9} In Surface{1}; Line{9} In Surface{1};
         MeshSize{PointsOf{Surface{:};}}=0.25;
+        Physical Curve("edge set",31)=Boundary{Surface{1};};
         """)
-    @test [holed_topology.model.point_size[tag] for tag in 1:9]==
-          vcat(fill(0.25,8),1.0)
+    @test [holed_topology.model.point_size[tag] for tag in 1:11]==
+          vcat(fill(0.25,8),fill(1.0,3))
+    @test holed_topology.model.physical==Dict((1,31)=>collect(1:8))
 
     meshed=execute_geo(_GEO_POINT_MESH_SIZE_FIXTURE;mesh_dim=2)
     @test validate(meshed.mesh).ok
@@ -277,12 +317,52 @@ end
             "supports Point, Curve/Line, Surface, and Volume blocks",
         "Point(1)={0,0,0,1}; MeshSize{Boundary{Point{1};}}=0.5;"=>
             "unsupported topology query",
+        "Physical Curve(\"bad\",1)=Boundary{Surface{99};};"=>
+            "unknown Surface[99]",
+        "Box(1)={0,0,0,1,1,1}; " *
+            "Physical Surface(\"bad\",1)=CombinedBoundary{Volume{1};};"=>
+            "Volume[1] has no explicit surface-loop topology",
+        "Physical Curve(\"bad\",1)=Boundary{Volume{1};};"=>
+            "requires Surface blocks; got Volume",
+        "Physical Volume(\"bad\",1)=Boundary{Volume{1};};"=>
+            "there is no dimension-4 entity boundary",
+        "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; Line(1)={1,2}; " *
+            "Physical Point(\"bad\",1)=CombinedBoundary{Curve{1,1};};"=>
+            "matched no entities after boundary cancellation",
+        "Physical Curve(\"bad\",1)=Boundary{Surface{1}};"=>
+            "every Boundary entity block must end with a semicolon",
+        "Physical Curve(\"bad\",1)=Boundary{};"=>
+            "Boundary must contain at least one entity block",
+        "Physical Curve(\"bad\",1)=Boundary{Surface{-2147483648};};"=>
+            "magnitude exceeds Int32",
+        "Physical Point(\"bad\",1)=Boundary{Curve{1:40000}; Curve{1:40000};};"=>
+            "Boundary expands beyond 65536 entities",
+        "Physical Point(\"bad\",1)=Boundary{Point{1};};"=>
+            "requires Curve/Line blocks",
+        "Physical Surface(\"bad\",1)=Closest{0,0,0}{Surface{1};};"=>
+            "unsupported topology query",
+        "Physical Curve(\"bad\",1)=PointsOf{Surface{1};};"=>
+            "can only populate a Physical Point group",
     )
     for (source,message) in invalid_sources
         err=_point_mesh_size_error(source)
         @test err isa ArgumentError
         @test occursin(message,sprint(showerror,err))
     end
+
+    repeated_surface_tags=join(
+        fill("1",Tessella.IO._MAX_GEO_LIST_ITEMS÷4+1),",")
+    boundary_expansion_error=_point_mesh_size_error("""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+        Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+        Curve Loop(1)={1:4}; Plane Surface(1)={1};
+        Physical Curve("bounded",1)=Boundary{Surface{$repeated_surface_tags};};
+        """)
+    @test boundary_expansion_error isa ArgumentError
+    @test occursin(
+        "Boundary expands beyond 65536 entities",
+        sprint(showerror,boundary_expansion_error))
 
     @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))

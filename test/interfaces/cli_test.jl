@@ -417,9 +417,12 @@ Physical Volume("domain", 72) = {1};
         points_of_mesh=read_mixed_msh(points_of_output)
         @test validate(points_of_mesh).ok
         @test mixed_crc(points_of_mesh).sha==
-              "a03e62cdb5b5049f0c3ac79f829707cab1ce7575ade8a2b246808a7e222e50ca"
+              "608dcd81b4ecab3138fd8da610ec109e1972c799ccb2c9d755917c9901250905"
         @test points_of_mesh.physical_names==
-              Dict((0,11)=>"vertices",(3,12)=>"domain")
+              Dict((0,11)=>"vertices",(3,12)=>"domain",
+                   (0,21)=>"endpoints",(1,22)=>"face boundary",
+                   (2,23)=>"skin",(1,25)=>"two face rim",
+                   (1,26)=>"two face boundary",(0,27)=>"vertices query")
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")

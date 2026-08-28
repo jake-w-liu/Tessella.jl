@@ -1187,8 +1187,10 @@ GeoFieldSpec(tag::Integer,kind::AbstractString,options::Dict{String,String},
 
 What `read_geo_params` can extract from a `.geo` without a geometry kernel:
 `mesh_size_min/max/factor`, `random_seed`, `physical_groups` (a `(dim, tag) =>
-name` map, dim ∈ {0:point,1:curve,2:surface,3:volume}), raw `fields`, and the
-`background_field` tag. Missing numeric mesh options are represented by `NaN`;
+name` map for named groups, dim ∈ {0:point,1:curve,2:surface,3:volume}), raw
+`fields`, and the `background_field` tag. Unnamed Physical declarations are
+checked by the scanner but omitted from the name map. Missing numeric mesh options
+are represented by `NaN`;
 no background field is tag `0`. `boundary_layer_fields` preserves the distinct,
 deduplicated `BoundaryLayer Field = ...` declarations; these are mesher controls,
 not background scalar fields. `geometry_tolerance` stores `Geometry.Tolerance`
@@ -2956,7 +2958,11 @@ Finite constant Gmsh list ranges use
 `start:end[:increment]` order and are expanded with a strict resource bound in
 recognized numeric field options and field selectors; known numeric list variables
 are normalized there as well. Entirely numeric Physical memberships containing
-ranges are checked but remain geometry data. Read-only dynamic tag allocators are
+ranges are checked but remain geometry data. Geometry-derived Physical memberships
+remain opaque to this scanner and are evaluated by `execute_geo`. Named declarations
+populate `physical_groups`; unnamed declarations receive the same scanner checks
+without adding a name.
+Read-only dynamic tag allocators are
 evaluated while their Point, shared geometric-region, or Field namespace remains
 fully tracked. `SetMaxTag Point|Curve|Surface|Volume` updates the associated checked
 counter. Built-in can lower a counter; OpenCASCADE only raises it. An unsupported
@@ -3041,8 +3047,10 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             return
         end
 
-        # Physical Volume("air", 1) = {...}; / Physical Surface("s", 3) = {...};
-        pm=match(r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*,\s*(.+?)\s*\)\s*=\s*(.*)$",body)
+        # Physical Volume("air", 1) = {...}; / Physical Surface(3) = {...};
+        pm=match(
+            r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?(.+?)\s*\)\s*=\s*(.*)$",
+            body)
         if pm!==nothing
             dim = _PHYS_DIM[pm.captures[1]]
             name = pm.captures[2]
@@ -3053,7 +3061,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
                 "read_geo_params: Physical $(pm.captures[1]) membership must not be empty"))
             _geo_validate_physical_ranges(membership,context,
                 "read_geo_params: Physical $(pm.captures[1]) membership")
-            groups[(dim, tag)] = name
+            name===nothing || isempty(name) || (groups[(dim, tag)] = name)
             return
         end
 

@@ -42,7 +42,7 @@ validation/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
     geo_geometry_expressions.jl # bounded geometry-expression execution
     geo_list_variables.jl # bounded numeric-list and entity-reuse execution
-    geo_mesh_sizes.jl # direct/topology Point constraints and spatial grading
+    geo_mesh_sizes.jl # Point sizing and topology-derived Physical groups
     geo_dynamic_tags.jl # tag allocators, SetMaxTag, and OCC primitive namespaces
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2

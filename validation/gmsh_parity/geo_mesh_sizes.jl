@@ -1,10 +1,10 @@
 #!/usr/bin/env julia
-# P6: Direct/topology Point constraints and spatial grading vs Gmsh 4.15.2.
+# P6: Point sizing and topology-derived Physical groups vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
 using Tessella
-using Tessella.MeshTypes: mesh_crc, nnodes, node, ntris, triangle_area
+using Tessella.MeshTypes: mesh_crc, nnodes, node, ntris, ntets, triangle_area
 using Tessella.Elements: mixed_crc
 
 const GEO=normpath(joinpath(
@@ -16,6 +16,14 @@ const EXPECTED_SIZES=[0.8,0.4,3*0.8/4,0.4]
 const EXPECTED_POINTS_OF_SIZES=[0.4,0.5,0.2,0.4,1.0]
 const EXPECTED_PHYSICAL_NAMES=Dict(
     (0,10)=>"corners",(2,20)=>"domain")
+const EXPECTED_TOPOLOGY_PHYSICAL=Dict(
+    (0,11)=>collect(1:4),(3,12)=>[1],(0,21)=>[1,3],
+    (1,22)=>[1,2,3],(2,23)=>collect(1:4),(1,25)=>[2,3,4,5],
+    (1,26)=>collect(1:5),(0,27)=>collect(1:4))
+const EXPECTED_TOPOLOGY_NAMES=Dict(
+    (0,11)=>"vertices",(3,12)=>"domain",(0,21)=>"endpoints",
+    (1,22)=>"face boundary",(2,23)=>"skin",(1,25)=>"two face rim",
+    (1,26)=>"two face boundary",(0,27)=>"vertices query")
 
 execution=execute_geo(GEO;mesh_dim=2)
 mesh=execution.mesh
@@ -46,9 +54,30 @@ points_of_execution=execute_geo(POINTS_OF_GEO)
 points_of_sizes=[points_of_execution.model.point_size[tag] for tag in 1:5]
 points_of_sizes==EXPECTED_POINTS_OF_SIZES || error(
     "Tessella PointsOf constraints changed: $points_of_sizes")
+points_of_execution.model.physical==EXPECTED_TOPOLOGY_PHYSICAL || error(
+    "Tessella topology-derived Physical memberships changed")
+points_of_execution.model.physical_names==EXPECTED_TOPOLOGY_NAMES || error(
+    "Tessella topology-derived Physical names changed")
 Tessella.Model._model_points_of(
     points_of_execution.model,[(3,1)],"PointsOf differential")==collect(1:4) ||
     error("Tessella PointsOf recursive Volume boundary changed")
+Tessella.Model._model_boundary(
+    points_of_execution.model,[(2,1),(2,2)],"Boundary differential")==
+        [1,2,3,1,5,4] || error("Tessella Boundary concatenation changed")
+Tessella.Model._model_boundary(
+    points_of_execution.model,[(2,1),(2,2)],"CombinedBoundary differential";
+    combined=true)==[2,3,4,5] || error(
+        "Tessella CombinedBoundary cancellation changed")
+points_of_meshed=execute_geo(POINTS_OF_GEO;mesh_dim=3)
+nnodes(points_of_meshed.mesh)==6 && ntets(points_of_meshed.mesh)==6 || error(
+    "Tessella topology-derived Physical mesh size changed")
+points_of_projected=model_to_mixed(
+    points_of_meshed.model,points_of_meshed.mesh,3,1)
+validate(points_of_projected).ok || error(
+    "Tessella topology-derived Physical projection is invalid")
+mixed_crc(points_of_projected).sha==
+    "608dcd81b4ecab3138fd8da610ec109e1972c799ccb2c9d755917c9901250905" ||
+    error("Tessella topology-derived Physical projection CRC changed")
 
 function native_spatial_mesh()
     model=GeoModel()
@@ -200,6 +229,15 @@ try
         gmsh.model.getBoundary([(3,1)],false,false,true) if dim==0])
     points_of_boundary==collect(1:4) || error(
         "Gmsh PointsOf recursive Volume boundary changed: $points_of_boundary")
+    for ((dimension,tag),expected) in EXPECTED_TOPOLOGY_PHYSICAL
+        membership=sort!(Int.(
+            gmsh.model.getEntitiesForPhysicalGroup(dimension,tag)))
+        membership==expected || error(
+            "Gmsh Physical($dimension,$tag) membership changed: $membership")
+        gmsh.model.getPhysicalName(dimension,tag)==
+            EXPECTED_TOPOLOGY_NAMES[(dimension,tag)] || error(
+                "Gmsh Physical($dimension,$tag) name changed")
+    end
 
     primitive_points_of=mktempdir() do directory
         path=joinpath(directory,"primitive-points-of.geo")
@@ -228,6 +266,32 @@ try
         all(==(0.15),sizes) || error(
             "Gmsh OCC Box PointsOf sizes changed: $sizes")
         length(point_entities)
+    end
+
+    primitive_boundary=mktempdir() do directory
+        path=joinpath(directory,"primitive-boundary.geo")
+        write(path,"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0,1,1,1};
+            Physical Surface("skin", 31) = CombinedBoundary{Volume{1};};
+            """)
+        tessella_error=try
+            execute_geo(path)
+            nothing
+        catch err
+            err
+        end
+        tessella_error isa ArgumentError || error(
+            "Tessella accepted Boundary on implicit primitive topology")
+        occursin("Volume[1] has no explicit surface-loop topology",
+                 sprint(showerror,tessella_error)) || error(
+            "Tessella primitive Boundary blocker changed")
+        gmsh.clear()
+        gmsh.open(path)
+        surfaces=sort!(Int.(gmsh.model.getEntitiesForPhysicalGroup(2,31)))
+        surfaces==collect(1:6) || error(
+            "Gmsh OCC Box CombinedBoundary changed: $surfaces")
+        length(surfaces)
     end
 
     gmsh.clear()
@@ -312,8 +376,11 @@ try
             "points_of_sizes=$(join(points_of_sizes,",")) " *
             "points_of_boundary=$(join(points_of_boundary,",")) " *
             "primitive_hidden_points=$primitive_points_of " *
+            "physical_boundary=$(join(EXPECTED_TOPOLOGY_PHYSICAL[(2,23)],",")) " *
+            "primitive_hidden_surfaces=$primitive_boundary " *
+            "topology_projected_crc=$(mixed_crc(points_of_projected).sha) " *
             "mesh_crc=$(mesh_crc(mesh).sha) projected_crc=$(mixed_crc(projected).sha) " *
-            "bounded_contract=positive_existing_points_piecewise_linear_surface_explicit_points_of_topology")
+            "bounded_contract=positive_existing_points_piecewise_linear_surface_explicit_topology_queries")
 finally
     gmsh.isInitialized()!=0 && gmsh.finalize()
 end
