@@ -352,6 +352,8 @@ Euler/manifold/link invariants, empty-circle/sphere checks, PLC facet conservati
 quality monotonicity, MSH round trips, and Gmsh cross-validation. The mandatory gates
 are:
 
+Run them with Julia 1.12.x, the sole supported runtime:
+
 ```sh
 julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'
 julia --project --check-bounds=yes validation/run_all.jl

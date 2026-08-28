@@ -868,10 +868,9 @@ end
             reshape(fill(floatmax(Float64),3),3,1))
         @test_throws ArgumentError field_value(overflowing_vector,0,0,0)
         _nearest_point_checksum(pv.tree,(0.2,0.3,0.4),1)
-        # Julia 1.11 can box the single checksum returned through `@allocated`;
-        # the bound remains constant over 10,000 nearest-point queries.
+        # The warm nearest-point query loop must remain allocation-free.
         @test (@allocated _nearest_point_checksum(
-            pv.tree,(0.2,0.3,0.4),10_000))<=256
+            pv.tree,(0.2,0.3,0.4),10_000))==0
         for (postview,point) in ((pv,(0.0,0.0,0.0)),
                                  (pvline,(0.5,0.0,0.0)),
                                  (pvtriangle,(0.25,0.25,0.0)),
