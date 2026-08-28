@@ -12,6 +12,8 @@ ASCENT-relevant meshing capabilities implemented first. That parity target is **
 complete**. Bounds-checked package and focused gates for each implementation
 increment are recorded in [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
+Tessella supports Julia 1.12.x only; [`Project.toml`](Project.toml) is the
+machine-readable runtime contract.
 
 ```julia
 using Tessella
@@ -217,6 +219,8 @@ GUI, and post-processing remain pending. See
 completeness. ASCENT remains Tessella's primary solver consumer.
 
 ## Verification
+
+Run the mandatory gates with Julia 1.12.x:
 
 ```sh
 julia --project --check-bounds=yes -e 'using Pkg; Pkg.test()'

@@ -80,6 +80,8 @@ are git-ignored.
 
 ## Run
 
+Use the supported Julia 1.12.x runtime:
+
 ```sh
 julia --project=. --check-bounds=yes validation/run_all.jl
 ```

@@ -36,12 +36,10 @@ pinned Homebrew build leaves coordinate residuals around `1e-12`. Node matching
 therefore uses `65536eps(Float64) * max(coordinate_scale, 1)`. Connectivity
 comparisons remain exact after mapping.
 
-Run the persistent gate with either supported Julia runtime:
+Run the persistent gate with the supported Julia 1.12 runtime:
 
 ```sh
 julia +1.12 --project=. --startup-file=no --check-bounds=yes \
-  validation/transfinite_hex/differential.jl
-julia +1.11 --project=. --startup-file=no --check-bounds=yes \
   validation/transfinite_hex/differential.jl
 ```
 

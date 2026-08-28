@@ -13,12 +13,10 @@ the `FExpr '%' FExpr` action). The gate requires both the Gmsh 4.15.2 CLI and
 matching Julia API and exits nonzero on a missing runtime, version mismatch, or any
 value mismatch.
 
-Run it with either supported Julia runtime:
+Run it with the supported Julia 1.12 runtime:
 
 ```sh
 julia +1.12 --project=. --startup-file=no --check-bounds=yes \
-  validation/geo_ranges/differential.jl
-julia +1.11 --project=. --startup-file=no --check-bounds=yes \
   validation/geo_ranges/differential.jl
 ```
 

@@ -8,6 +8,9 @@ ASCENT integration and the external HFSS full-wave campaign are tracked separate
 The original Stage 0–6 simplex-mesher roadmap is complete and remains the regression
 baseline. The active roadmap now targets independent Gmsh 4.15.2 parity and is **not
 complete**. Work is ordered by ASCENT meshing value before UI and post-processing.
+The active package and verification contract supports Julia 1.12.x only. Older
+runtime measurements retained in the dated history below are provenance, not current
+support or test requirements.
 
 | Stage | Capability | State |
 |---|---|---|
@@ -178,6 +181,24 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-08-28 after narrowing the runtime contract to Julia 1.12.x:
+
+- `Project.toml` now accepts only the Julia 1.12 minor series. A Julia 1.12.7 Pkg
+  resolve/instantiate completed, and the parsed compatibility range contains 1.12.7
+  while excluding 1.11.9 and 1.13.0. Active user, developer, plan, and validation
+  instructions now name 1.12.x as the sole supported runtime; dated older-runtime
+  measurements remain labeled as historical provenance.
+- The Julia 1.11 allocation allowance was removed from the PostView nearest-point
+  ratchet. Its warmed 10,000-query loop allocated zero bytes on Julia 1.12.7, and the
+  bounds-checked size-field suite passed 6,976/6,976 assertions in 5m16.9s.
+- The complete bounds-checked package gate passed 167,618/167,618 assertions in
+  14m21.0s on Julia 1.12.7. The Gmsh 4.15.2 finite-range differential matched all 58
+  samples bit-exactly, and the transfinite-hexahedron differential matched eight
+  cases, 288 nodes, 96 hexahedra, and 256 boundary quadrangles.
+- Recursive public-documentation and ambiguity scans returned zero. The active
+  repository sweep found no Julia 1.11 runtime command, compatibility entry, or
+  support statement outside the explicitly historical verification record.
 
 Re-measured on 2026-08-28 with Julia 1.12.7 after adding ordered,
 dependency-safe model-entity removal:
