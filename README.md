@@ -95,6 +95,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   explicit planar surface-loop volumes with cavity signs; periodic explicit volumes
   retain their derived boundary point/curve forest and surface-node maps through
   MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
+- model and synchronized session APIs for dimension-scoped entity names and atomic
+  positive-tag changes; retagging moves explicit topology, Physical memberships,
+  embedding sources and targets, periodic relations, native solid encodings, owned
+  Boolean-result geometry, and the entity name while preserving automatic-tag
+  monotonicity;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -176,6 +181,11 @@ recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
 ordering, orientation, and combined-incidence cancellation. Topology queries preserve
 the session mesh cache and exclude embeddings. Primitive and Boolean volumes are
 enumerated, but their implicit boundary topology remains an explicit blocker.
+Entity names belong only to existing entities and need not be unique. Names can be
+replaced, cleared per entity, or removed by value across dimensions. Entity tags are
+positive `Int32` values in dimensions 0 through 3. Unlike Gmsh 4.15.2, Tessella does
+not preload names for missing entities or accept nonpositive retag targets, and a
+name follows its entity when the tag changes.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
@@ -207,7 +217,8 @@ julia --project --check-bounds=yes validation/run_all.jl
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
-spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
+spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology and
+entity-identity,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
