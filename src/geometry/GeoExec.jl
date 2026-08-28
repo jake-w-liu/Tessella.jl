@@ -10,8 +10,9 @@ Translate/Rotate/Affine periodic straight curves or explicit-volume planar bound
 surfaces with reusable masters and acyclic dependency chains. `MeshSize` and
 `Characteristic Length` update existing explicit Point constraints directly or
 through recursive `PointsOf` boundaries of explicit Point/Curve/Surface/Volume
-entities. Explicit-tag Physical declarations may be named or unnamed. Their entity
-lists accept numeric selectors, `PointsOf` for Physical Point, and immediate
+entities. Physical declarations accept an explicit tag, with an optional name, or
+a nonempty name with a tag allocated from the global Physical-group namespace. Their
+entity lists accept numeric selectors, `PointsOf` for Physical Point, and immediate
 `Boundary` or `CombinedBoundary` queries over explicit entities of the next higher
 dimension.
 Numeric parameters, entity tags, and entity lists use bounded
@@ -41,6 +42,7 @@ using ..IO: _MAX_GEO_LIST_ITEMS
 using ..IO: _geo_context_set_scalar!, _geo_apply_list_assignment!
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!
+using ..IO: _geo_physical_declaration
 using ..Transform: _affine_coordinate
 
 export execute_geo, GeoExecution
@@ -159,15 +161,17 @@ explicit Points through `:`, numeric expressions and ranges, numeric-list variab
 or inline `PointsOf` blocks for Point, Curve/Line, Surface, and explicit Volume
 entities. `PointsOf` recursively follows entity boundaries, including hole loops;
 embedded entities are not boundaries. Their values must be finite and positive.
-Explicit-tag Physical declarations may be named or unnamed. Physical Point accepts
-inline `PointsOf`; Physical Point/Curve/Surface accept inline `Boundary` and
-`CombinedBoundary` over Curve/Line, Surface, and explicit Volume entities,
-respectively. `Boundary` joins the selected immediate boundaries and physical-group
-insertion removes duplicate tags. `CombinedBoundary` retains tags with odd
-multiplicity. Hole and cavity boundaries participate; embeddings do not. Unknown
-entities, empty combined boundaries, implicit primitive or Boolean volume topology,
-unsupported geometry-derived selectors, and invalid query dimensions are explicit
-blockers.
+Physical declarations accept an explicit positive tag, with an optional name, or a
+nonempty name with an automatic tag. Automatic Physical tags share one namespace
+across entity dimensions and contribute to later shared-region allocator reads.
+Physical Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline
+`Boundary` and `CombinedBoundary` over Curve/Line, Surface, and explicit Volume
+entities, respectively. `Boundary` joins the selected immediate boundaries and
+physical-group insertion removes duplicate tags. `CombinedBoundary` retains tags
+with odd multiplicity. Hole and cavity boundaries participate; embeddings do not.
+Unknown entities, empty combined boundaries, implicit primitive or Boolean volume
+topology, unsupported geometry-derived selectors, and invalid query dimensions are
+explicit blockers.
 An allocator read after a topology-changing or untracked declaration is rejected.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
@@ -756,14 +760,25 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             mm.captures[3],context,"$caller target")
         embed!(m,dim,ids,3,target)
         return
-    elseif (mm=match(
-            r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?(.*?)\s*\)\s*=\s*(.*?)\s*;$",
-            line)) !== nothing
-        caller="execute_geo: Physical $(mm.captures[1])"
-        dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]
-        name=mm.captures[2]===nothing ? "" : mm.captures[2]
-        tag=_geo_exec_entity_tag(mm.captures[3],context,"$caller tag")
-        membership=String(strip(mm.captures[4]))
+    elseif (physical=_geo_physical_declaration(line)) !== nothing
+        caller="execute_geo: Physical $(physical.kind)"
+        dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,
+                 "Surface"=>2,"Volume"=>3)[physical.kind]
+        name=physical.name===nothing ? "" : physical.name
+        physical.tag_source===nothing && isempty(name) && throw(ArgumentError(
+            "$caller: an automatic group requires a nonempty name"))
+        if !isempty(name)
+            for ((existing_dim,existing_tag),existing_name) in m.physical_names
+                if existing_dim==dim && existing_name==name
+                    throw(ArgumentError(
+                        "$caller: name $(repr(name)) already identifies " *
+                        "Physical $(physical.kind)[$existing_tag]"))
+                end
+            end
+        end
+        tag=physical.tag_source===nothing ? 0 : _geo_exec_entity_tag(
+            physical.tag_source,context,"$caller tag")
+        membership=physical.membership
         ids=if match(
                 r"^(?:Boundary|CombinedBoundary|PointsOf)(?:\s|\{)",
                 membership)!==nothing
@@ -779,6 +794,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         end
         add_physical_group!(m,dim,ids;tag=tag,name=name)
         return
+    elseif occursin(r"^Physical(?:\s|$)",line)
+        throw(ArgumentError(
+            "execute_geo: malformed Physical declaration; use " *
+            "Physical Kind(tag), Physical Kind(\"name\", tag), or " *
+            "Physical Kind(\"name\")"))
     elseif (mm=match(
             r"^(MeshSize|Characteristic\s+Length)\s*\{\s*(.*?)\s*\}\s*=\s*(.*?)\s*;$",
             line)) !== nothing

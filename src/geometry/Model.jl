@@ -58,6 +58,7 @@ mutable struct GeoModel
     volumes::Dict{Int,Vector{Int}}
     physical::Dict{Tuple{Int,Int},Vector{Int}}
     physical_names::Dict{Tuple{Int,Int},String}
+    physical_tag_max::Int
     box_extents::Dict{Int,NTuple{6,Float64}}
     cylinders::Dict{Int,NamedTuple{(:center,:axis,:radius,:height),
                                    Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64}}}
@@ -84,6 +85,7 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,Vector{Int}}(),
                       Dict{Tuple{Int,Int},Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
+                      0,
                       Dict{Int,NTuple{6,Float64}}(),
                       Dict{Int,NamedTuple{(:center,:axis,:radius,:height),
                            Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64}}}(),
@@ -139,15 +141,11 @@ function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller)
     return requested
 end
 
-function _alloc_physical_tag(m::GeoModel, dim::Int, requested::Int, caller)
+function _alloc_physical_tag(m::GeoModel, requested::Int, caller)
     requested!=0 && return requested
-    current=0
-    for (d,t) in keys(m.physical)
-        d==dim && (current=max(current,t))
-    end
-    current<typemax(Int32) || throw(ArgumentError(
-        "$caller: no automatic physical tags remain in dimension $dim"))
-    return current+1
+    m.physical_tag_max<typemax(Int32) || throw(ArgumentError(
+        "$caller: no automatic physical tags remain"))
+    return m.physical_tag_max+1
 end
 
 function _alloc_surface_loop_tag(m::GeoModel,requested::Int,caller)
@@ -1091,8 +1089,9 @@ end
     add_physical_group!(model, dim, tags; tag=0, name="") -> tag
 
 Group one or more existing entities of dimension `dim` under an independent
-physical tag. Automatic physical tags use a namespace separate from entity
-tags. An optional nonempty `name` is recorded with the group.
+physical tag. Automatic physical tags share one global namespace across entity
+dimensions, separate from geometry tags. An optional nonempty `name` is recorded
+with the group.
 """
 function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, name::AbstractString="")
     caller="add_physical_group!"
@@ -1106,10 +1105,11 @@ function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, na
             "$caller: unknown entity ($d,$ent)"))
     end
     group_name=String(name)
-    pt=_alloc_physical_tag(m,d,_tag(tag,caller,d),caller)
+    pt=_alloc_physical_tag(m,_tag(tag,caller,d),caller)
     haskey(m.physical,(d,pt)) && throw(ArgumentError("$caller: Physical($d,$pt) already exists"))
     m.physical[(d,pt)]=ents
     isempty(group_name) || (m.physical_names[(d,pt)]=group_name)
+    m.physical_tag_max=max(m.physical_tag_max,pt)
     return pt
 end
 

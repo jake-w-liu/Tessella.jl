@@ -105,7 +105,7 @@ geo_mesh_size_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=ye
 println("  command: ", geo_mesh_size_command)
 run(geo_mesh_size_command)
 
-println("\n── gmsh_parity dynamic tags ──  bounded allocator namespaces")
+println("\n── gmsh_parity dynamic tags ──  geometry and global Physical allocators")
 geo_dynamic_tag_script = joinpath(HERE, "gmsh_parity", "geo_dynamic_tags.jl")
 geo_dynamic_tag_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_dynamic_tag_script`
 println("  command: ", geo_dynamic_tag_command)

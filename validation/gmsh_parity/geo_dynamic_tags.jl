@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# P6: bounded dynamic `.geo` tag allocators vs Gmsh 4.15.2.
+# P6: bounded geometry/Physical `.geo` tag allocators vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
@@ -21,6 +21,21 @@ const SET_MAX_ENTITIES=Dict(
 const SET_MAX_PHYSICAL_NAMES=Dict(
     (0,603)=>"corners",(1,604)=>"edges",
     (2,605)=>"boundary",(3,606)=>"domain")
+const AUTOMATIC_PHYSICAL_SOURCE=raw"""
+    Point(1) = {0,0,0,1};
+    Point(2) = {1,0,0,1};
+    Line(3) = {1,2};
+    Physical Point("auto point") = {1};
+    Physical Curve("auto curve") = {3};
+    Line(newreg) = {1,2};
+    Physical Point("explicit", 20) = {2};
+    Physical Curve("later") = {3};
+    Physical Point("endpoints") = CombinedBoundary{Line{3};};
+    Line(newreg) = {1,2};
+    """
+const AUTOMATIC_PHYSICAL_NAMES=Dict(
+    (0,1)=>"auto point",(1,2)=>"auto curve",(0,20)=>"explicit",
+    (1,21)=>"later",(0,22)=>"endpoints")
 
 execution=execute_geo(GEO;mesh_dim=3)
 mesh=execution.mesh
@@ -62,6 +77,18 @@ validate(projected).ok || error("Tessella dynamic-tag projection is invalid")
 mixed_crc(projected).sha==
     "99aeefc2e269090b518f5896f2388bd419c8fb44d06e4743579d50d61aaedf81" ||
     error("Tessella dynamic-tag projection CRC changed")
+
+automatic_physical_execution=mktempdir() do directory
+    path=joinpath(directory,"automatic_physical.geo")
+    write(path,AUTOMATIC_PHYSICAL_SOURCE)
+    execute_geo(path)
+end
+automatic_physical_execution.model.physical_names==AUTOMATIC_PHYSICAL_NAMES ||
+    error("Tessella automatic Physical tags changed")
+Set(keys(automatic_physical_execution.model.curves))==Set([3,4,23]) ||
+    error("Tessella automatic Physical newreg interaction changed")
+automatic_physical_execution.params.physical_groups==AUTOMATIC_PHYSICAL_NAMES ||
+    error("Tessella automatic Physical scanner metadata changed")
 
 set_max_execution=execute_geo(SET_MAX_GEO;mesh_dim=3)
 set_max_mesh=set_max_execution.mesh
@@ -190,6 +217,52 @@ function check_primitive_allocators()
             error("Gmsh cone-tip allocator sequence changed")
     end
     return nothing
+end
+
+function check_automatic_physical_tags()
+    mktempdir() do directory
+        path=joinpath(directory,"automatic_physical.geo")
+        write(path,AUTOMATIC_PHYSICAL_SOURCE)
+        gmsh.clear()
+        gmsh.open(path)
+        names=Dict(
+            (Int(dim),Int(tag))=>gmsh.model.getPhysicalName(dim,tag)
+            for (dim,tag) in gmsh.model.getPhysicalGroups())
+        names==AUTOMATIC_PHYSICAL_NAMES || error(
+            "Gmsh automatic Physical tags changed: $names")
+        Set(Int(tag) for (_,tag) in gmsh.model.getEntities(1))==Set([3,4,23]) ||
+            error("Gmsh automatic Physical newreg interaction changed")
+    end
+
+    Tessella.API.finalize()
+    tessella_tags=try
+        Tessella.API.initialize()
+        Tessella.API.model.add_point(0,0,0;tag=1)
+        Tessella.API.model.add_point(1,0,0;tag=2)
+        Tessella.API.model.add_line(1,2;tag=1)
+        [Tessella.API.model.add_physical_group(0,[1];name="first"),
+         Tessella.API.model.add_physical_group(1,[1];name="second"),
+         Tessella.API.model.add_physical_group(0,[2];name="third")]
+    finally
+        Tessella.API.finalize()
+    end
+    tessella_tags==[1,2,3] || error(
+        "Tessella API automatic Physical tags changed: $tessella_tags")
+
+    gmsh.clear()
+    gmsh.model.add("automatic_physical_api")
+    gmsh.model.geo.addPoint(0,0,0,1,1)
+    gmsh.model.geo.addPoint(1,0,0,1,2)
+    gmsh.model.geo.addLine(1,2,1)
+    gmsh.model.geo.synchronize()
+    gmsh_tags=[
+        Int(gmsh.model.addPhysicalGroup(0,[1],-1,"first")),
+        Int(gmsh.model.addPhysicalGroup(1,[1],-1,"second")),
+        Int(gmsh.model.addPhysicalGroup(0,[2],-1,"third")),
+    ]
+    gmsh_tags==tessella_tags || error(
+        "Gmsh API automatic Physical tags changed: $gmsh_tags")
+    return (parser_groups=length(AUTOMATIC_PHYSICAL_NAMES),api_tags=gmsh_tags)
 end
 
 function check_set_max_tags()
@@ -410,6 +483,7 @@ try
     volume_error=max(abs(tessella_volume-1),abs(gmsh_volume-1))
 
     check_primitive_allocators()
+    automatic_physical=check_automatic_physical_tags()
     set_max_gmsh=check_set_max_tags()
     volume_error=max(volume_error,abs(set_max_volume-1/6),
                      set_max_gmsh.volume_error)
@@ -417,6 +491,8 @@ try
             "gmsh=$(gmsh.GMSH_API_VERSION) tessella_nodes=$(nnodes(mesh)) " *
             "tessella_tets=$(ntets(mesh)) gmsh_nodes=$gmsh_nodes " *
             "gmsh_tets=$gmsh_tets variables=$(length(expected_variables)) " *
+            "automatic_physical_groups=$(automatic_physical.parser_groups) " *
+            "automatic_physical_api=$(join(automatic_physical.api_tags,',')) " *
             "setmax_nodes=$(set_max_gmsh.nodes) " *
             "setmax_tets=$(set_max_gmsh.tets) " *
             "volume_error=$volume_error mesh_crc=$(mesh_crc(mesh).sha) " *

@@ -1188,9 +1188,10 @@ GeoFieldSpec(tag::Integer,kind::AbstractString,options::Dict{String,String},
 What `read_geo_params` can extract from a `.geo` without a geometry kernel:
 `mesh_size_min/max/factor`, `random_seed`, `physical_groups` (a `(dim, tag) =>
 name` map for named groups, dim ∈ {0:point,1:curve,2:surface,3:volume}), raw
-`fields`, and the `background_field` tag. Unnamed Physical declarations are
-checked by the scanner but omitted from the name map. Missing numeric mesh options
-are represented by `NaN`;
+`fields`, and the `background_field` tag. Named declarations with no explicit tag
+receive a tag from the global Physical-group namespace. Unnamed Physical declarations
+are checked by the scanner but omitted from the name map. Missing numeric mesh
+options are represented by `NaN`;
 no background field is tag `0`. `boundary_layer_fields` preserves the distinct,
 deduplicated `BoundaryLayer Field = ...` declarations; these are mesher controls,
 not background scalar fields. `geometry_tolerance` stores `Geometry.Tolerance`
@@ -1414,6 +1415,7 @@ mutable struct _GeoTagAllocatorState
     occ_surface_max::Int
     occ_volume_max::Int
     auxiliary_region_max::Int
+    physical_group_max::Int
     field_max::Int
     point_entity_max::Int
     curve_entity_max::Int
@@ -1421,12 +1423,13 @@ mutable struct _GeoTagAllocatorState
     factory::Symbol
     occ_active::Bool
     geometry_unavailable::Union{Nothing,String}
+    physical_unavailable::Union{Nothing,String}
     field_unavailable::Union{Nothing,String}
 end
 
 _GeoTagAllocatorState()=_GeoTagAllocatorState(
-    0,0,0,0,0,0,0,0,0,0,0,0,0,
-    :builtin,false,nothing,nothing)
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    :builtin,false,nothing,nothing,nothing)
 
 @inline function _geo_allocator_point_max(state::_GeoTagAllocatorState)
     return state.occ_active ?
@@ -1448,7 +1451,8 @@ end
 
 @inline function _geo_allocator_region_max(state::_GeoTagAllocatorState)
     builtin=max(state.builtin_curve_max,state.builtin_surface_max,
-                state.builtin_volume_max,state.auxiliary_region_max)
+                state.builtin_volume_max,state.auxiliary_region_max,
+                state.physical_group_max)
     return state.occ_active ?
         max(builtin,state.occ_curve_max,state.occ_surface_max,
             state.occ_volume_max) : builtin
@@ -1457,8 +1461,10 @@ end
 function _geo_allocator_invalidate!(state::_GeoTagAllocatorState,
                                     reason::AbstractString;
                                     geometry::Bool=true,
+                                    physical::Bool=false,
                                     fields::Bool=true)
     geometry && (state.geometry_unavailable=String(reason))
+    physical && (state.physical_unavailable=String(reason))
     fields && (state.field_unavailable=String(reason))
     return nothing
 end
@@ -1485,8 +1491,10 @@ function _geo_context_refresh_allocators!(context::_GeoNumericContext,
     end
     refresh!(_GEO_POINT_TAG_SYMBOLS,_geo_allocator_point_max(state),
              state.geometry_unavailable,"Point")
+    region_unavailable=state.geometry_unavailable===nothing ?
+        state.physical_unavailable : state.geometry_unavailable
     refresh!(_GEO_REGION_TAG_SYMBOLS,_geo_allocator_region_max(state),
-             state.geometry_unavailable,"geometric region")
+             region_unavailable,"geometric region")
     refresh!(_GEO_FIELD_TAG_SYMBOLS,state.field_max,
              state.field_unavailable,"Field")
     return nothing
@@ -1527,6 +1535,12 @@ function _geo_allocator_record_explicit!(state::_GeoTagAllocatorState,
     else
         throw(ArgumentError("unknown dynamic tag namespace $kind"))
     end
+    return nothing
+end
+
+function _geo_allocator_record_physical!(state::_GeoTagAllocatorState,tag::Int)
+    state.physical_unavailable===nothing || return nothing
+    state.physical_group_max=max(state.physical_group_max,tag)
     return nothing
 end
 
@@ -2452,6 +2466,67 @@ function _geo_allocator_statement_tag(raw::AbstractString,
     return _geo_positive_gmsh_tag(_geo_eval_numeric(raw,context,caller),caller)
 end
 
+function _geo_physical_declaration(raw::AbstractString)
+    source=String(strip(raw))
+    if endswith(source,";")
+        source=String(strip(
+            source[firstindex(source):prevind(source,lastindex(source))]))
+    end
+    named=match(
+        r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*\"([^\"]*)\"\s*(?:,\s*(.*?))?\s*\)\s*=\s*(.*)$",
+        source)
+    if named!==nothing
+        raw_tag=named.captures[3]
+        tag_source=raw_tag===nothing ? nothing : String(strip(raw_tag))
+        tag_source!==nothing && isempty(tag_source) && return nothing
+        return (kind=String(named.captures[1]),
+                name=String(named.captures[2]),
+                tag_source=tag_source,
+                membership=String(strip(named.captures[4])))
+    end
+    unnamed=match(
+        r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(.*?)\s*\)\s*=\s*(.*)$",
+        source)
+    unnamed===nothing && return nothing
+    tag_source=String(strip(unnamed.captures[2]))
+    isempty(tag_source) && return nothing
+    return (kind=String(unnamed.captures[1]),name=nothing,
+            tag_source=tag_source,
+            membership=String(strip(unnamed.captures[3])))
+end
+
+function _geo_allocator_physical_tag!(state::_GeoTagAllocatorState,
+                                      tag_source::Union{Nothing,AbstractString},
+                                      context::_GeoNumericContext,
+                                      caller::AbstractString;
+                                      conservative::Bool=false)
+    if tag_source===nothing && state.physical_unavailable!==nothing
+        conservative && return nothing
+        throw(ArgumentError(
+            "$caller: automatic Physical tags are unavailable because " *
+            state.physical_unavailable))
+    end
+    tag=if tag_source===nothing
+        state.physical_group_max<typemax(Int32) || throw(ArgumentError(
+            "$caller: no automatic Physical tags remain"))
+        state.physical_group_max+1
+    else
+        try
+            _geo_allocator_statement_tag(tag_source,context,"$caller tag")
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative && err isa ArgumentError) || rethrow()
+            _geo_allocator_invalidate!(state,
+                "could not evaluate Physical group tag while tracking allocators: " *
+                _geo_expr_preview(tag_source);geometry=false,physical=true,
+                fields=false)
+            return nothing
+        end
+    end
+    _geo_allocator_record_physical!(state,tag)
+    return tag
+end
+
 function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
                                            raw::AbstractString,
                                            context::_GeoNumericContext,
@@ -2499,24 +2574,15 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         return nothing
     end
 
-    physical=match(
-        r"^Physical\s+(?:Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"[^\"]*\"\s*,\s*)?(.*?)\s*\)\s*=",
-        source)
+    physical=_geo_physical_declaration(source)
     if physical!==nothing
-        state.geometry_unavailable===nothing || return nothing
-        tag=try
-            _geo_allocator_statement_tag(
-                physical.captures[1],context,"$caller Physical group tag")
-        catch err
-            err isa InterruptException && rethrow()
-            (conservative && err isa ArgumentError) || rethrow()
-            _geo_allocator_invalidate!(state,
-                "could not evaluate Physical group tag while tracking allocators: " *
-                _geo_expr_preview(physical.captures[1]);geometry=true,fields=false)
-            return nothing
-        end
-        _geo_allocator_record_explicit!(state,:auxiliary,tag)
-        return nothing
+        physical.tag_source===nothing &&
+            (physical.name===nothing || isempty(physical.name)) &&
+            throw(ArgumentError(
+                "$caller: an automatic Physical group requires a nonempty name"))
+        return _geo_allocator_physical_tag!(
+            state,physical.tag_source,context,"$caller Physical $(physical.kind)";
+            conservative=conservative)
     end
 
     declarations=(
@@ -2960,8 +3026,9 @@ recognized numeric field options and field selectors; known numeric list variabl
 are normalized there as well. Entirely numeric Physical memberships containing
 ranges are checked but remain geometry data. Geometry-derived Physical memberships
 remain opaque to this scanner and are evaluated by `execute_geo`. Named declarations
-populate `physical_groups`; unnamed declarations receive the same scanner checks
-without adding a name.
+populate `physical_groups`; a nonempty name without an explicit tag receives the next
+tag from the global Physical namespace. Unnamed declarations receive the same scanner
+checks without adding a name.
 Read-only dynamic tag allocators are
 evaluated while their Point, shared geometric-region, or Field namespace remains
 fully tracked. `SetMaxTag Point|Curve|Surface|Volume` updates the associated checked
@@ -2986,6 +3053,8 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
     mesh_size_from_curvature=0;boundary_layer_fan_elements=5
     boundary_layers=Int[]
     groups = Dict{Tuple{Int,Int},String}()
+    physical_name_tags=Dict{Tuple{Int,String},Int}()
+    seen_physical=Set{Tuple{Int,Int}}()
     kinds = Dict{Int,String}()
     options = Dict{Int,Dict{String,String}}()
     option_order=Dict{Int,Vector{String}}()
@@ -3005,7 +3074,8 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         if occursin(r"\b(?:For|EndFor|If|ElseIf|Else|EndIf|Macro|Function|Return|Call|Include|DefineConstant|UndefineConstant)\b",raw_code)
             reason="an unsupported loop, conditional, macro or include may have changed it"
             _geo_invalidate_context!(context,reason)
-            _geo_allocator_invalidate!(allocator_state,reason)
+            _geo_allocator_invalidate!(
+                allocator_state,reason;physical=true)
         end
         # Gmsh's EndIf/EndFor/Return do not carry semicolons; the streaming
         # scanner consequently receives them as a harmless prefix of the first
@@ -3018,7 +3088,8 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         if control_depth>0
             reason="an unsupported loop, conditional or macro may have changed it"
             _geo_invalidate_context!(context,reason)
-            _geo_allocator_invalidate!(allocator_state,reason)
+            _geo_allocator_invalidate!(
+                allocator_state,reason;physical=true)
             _geo_relevant_code(code) && throw(ArgumentError(
                 "read_geo_params: malformed relevant statement or unsupported control-flow/macro context: " *
                 _geo_expr_preview(body)))
@@ -3026,6 +3097,47 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         end
 
         _geo_context_refresh_allocators!(context,allocator_state)
+        physical=_geo_physical_declaration(body)
+        if physical!==nothing
+            dim=_PHYS_DIM[physical.kind]
+            name=physical.name
+            if physical.tag_source===nothing
+                (name===nothing || isempty(name)) && throw(ArgumentError(
+                    "read_geo_params: an automatic Physical $(physical.kind) " *
+                    "group requires a nonempty name"))
+            end
+            if name!==nothing && !isempty(name)
+                name_key=(dim,name)
+                if haskey(physical_name_tags,name_key)
+                    existing=physical_name_tags[name_key]
+                    throw(ArgumentError(
+                        "read_geo_params: Physical $(physical.kind) name " *
+                        "$(repr(name)) already identifies tag $existing"))
+                end
+            end
+            tag=_geo_allocator_physical_tag!(
+                allocator_state,physical.tag_source,context,
+                "read_geo_params: Physical $(physical.kind)")
+            membership=physical.membership
+            isempty(membership) && throw(ArgumentError(
+                "read_geo_params: Physical $(physical.kind) membership must not be empty"))
+            _geo_validate_physical_ranges(
+                membership,context,
+                "read_geo_params: Physical $(physical.kind) membership")
+            group_key=(dim,tag)
+            group_key in seen_physical && throw(ArgumentError(
+                "read_geo_params: Physical $(physical.kind) tag $tag is declared more than once"))
+            push!(seen_physical,group_key)
+            if name!==nothing && !isempty(name)
+                groups[group_key]=name
+                physical_name_tags[(dim,name)]=tag
+            end
+            return
+        end
+        occursin(r"^Physical(?:\s|$)",body) && throw(ArgumentError(
+            "read_geo_params: malformed Physical declaration; use " *
+            "Physical Kind(tag), Physical Kind(\"name\", tag), or " *
+            "Physical Kind(\"name\")"))
         _geo_allocator_observe_statement!(
             allocator_state,body,context,"read_geo_params";conservative=true)
 
@@ -3044,24 +3156,6 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             else
                 boundary_layer_fan_elements=_gmsh_int_option(value,key)
             end
-            return
-        end
-
-        # Physical Volume("air", 1) = {...}; / Physical Surface(3) = {...};
-        pm=match(
-            r"^Physical\s+(Point|Curve|Line|Surface|Volume)\s*\(\s*(?:\"([^\"]*)\"\s*,\s*)?(.+?)\s*\)\s*=\s*(.*)$",
-            body)
-        if pm!==nothing
-            dim = _PHYS_DIM[pm.captures[1]]
-            name = pm.captures[2]
-            tag = _geo_positive_tag_value(pm.captures[3],context,
-                "read_geo_params: Physical $(pm.captures[1]) tag")
-            membership=String(strip(pm.captures[4]))
-            isempty(membership) && throw(ArgumentError(
-                "read_geo_params: Physical $(pm.captures[1]) membership must not be empty"))
-            _geo_validate_physical_ranges(membership,context,
-                "read_geo_params: Physical $(pm.captures[1]) membership")
-            name===nothing || isempty(name) || (groups[(dim, tag)] = name)
             return
         end
 
