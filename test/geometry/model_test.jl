@@ -628,7 +628,7 @@ end
     emesh=mesh_model_surface(emb,1)
     @test validate(emesh).ok
     @test mesh_crc(emesh).sha==
-          "13917dad18b19e8376640a379a2f1cd338aacca5b01f66e100b5bc372fc91371"
+          "facd37af4b1fc3de41273da4f3c7f1933ae1221512ad9bc09a2a0452f0b7540f"
     @test any(i->hypot(emesh.coords[1,i]-0.5,emesh.coords[2,i]-0.5,emesh.coords[3,i])<=1e-12,
               1:nnodes(emesh))
     earea=sum(abs((node(emesh,emesh.tris[2,t])[1]-node(emesh,emesh.tris[1,t])[1])*

@@ -23,6 +23,31 @@ function _point_mesh_size_error(source::AbstractString)
     end
 end
 
+function _point_mesh_size_square(sizes)
+    model=GeoModel()
+    for (tag,(x,y)) in enumerate(((0.0,0.0),(2.0,0.0),
+                                  (2.0,2.0),(0.0,2.0)))
+        add_point!(model,x,y,0;tag=tag,mesh_size=sizes[tag])
+    end
+    for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+        add_line!(model,first,last;tag=tag)
+    end
+    add_curve_loop!(model,[1,2,3,4];tag=1)
+    add_plane_surface!(model,[1];tag=1)
+    return model
+end
+
+function _point_mesh_size_quadrants(mesh)
+    counts=zeros(Int,4)
+    for triangle in 1:ntris(mesh)
+        nodes=mesh.tris[:,triangle]
+        x=sum(mesh.coords[1,nodes])/3
+        y=sum(mesh.coords[2,nodes])/3
+        counts[(x<1 ? 0 : 1)+(y<1 ? 0 : 2)+1]+=1
+    end
+    return counts
+end
+
 @testset "atomic Point mesh-size constraints" begin
     model=GeoModel()
     @test add_point!(model,0,0,0;tag=1,mesh_size=0.8)==1
@@ -52,10 +77,10 @@ end
 
     meshed=execute_geo(_GEO_POINT_MESH_SIZE_FIXTURE;mesh_dim=2)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==23
-    @test ntris(meshed.mesh)==28
+    @test nnodes(meshed.mesh)==19
+    @test ntris(meshed.mesh)==24
     @test mesh_crc(meshed.mesh).sha==
-          "f1bfa8a1cc61158cc6293540ad6ce6d7ce48054a616a3df57d93597857f1b089"
+          "b3f1bf410e917d050eacceab998b0fdf7b4cd61d1d9f263805b5120c06f1f4df"
     area=sum(triangle_area(
         node(meshed.mesh,meshed.mesh.tris[1,triangle]),
         node(meshed.mesh,meshed.mesh.tris[2,triangle]),
@@ -66,7 +91,109 @@ end
     @test validate(projected).ok
     @test projected.physical_names==parsed.model.physical_names
     @test mixed_crc(projected).sha==
-          "1489fd244841d079350f33439a97b6f33205bcff32e4b99ac672e79a4387eaca"
+          "b7202dfa1cfb7469e7541c34e2b1bfae404c66f2462abc1953fa0b9374e5a010"
+
+    asymmetric=_point_mesh_size_square([0.1,0.8,0.8,0.8])
+    asymmetric_mesh=mesh_model_surface(asymmetric,1;min_angle_deg=20)
+    @test validate(asymmetric_mesh).ok
+    @test nnodes(asymmetric_mesh)==49
+    @test ntris(asymmetric_mesh)==72
+    @test _point_mesh_size_quadrants(asymmetric_mesh)==[45,8,11,8]
+    @test mesh_crc(asymmetric_mesh).sha==
+          "b36070c0c394727d037d35cd0d1944e4807208cc265df4c34ad96c6da82ea1e2"
+    for triangle in 1:ntris(asymmetric_mesh)
+        nodes=asymmetric_mesh.tris[:,triangle]
+        points=ntuple(slot->node(asymmetric_mesh,nodes[slot]),3)
+        centroid=(sum(point[1] for point in points)/3,
+                  sum(point[2] for point in points)/3)
+        target=min(0.8,muladd(0.35,centroid[1]+centroid[2],0.1))
+        longest=maximum(hypot(
+            points[mod1(slot+1,3)][1]-points[slot][1],
+            points[mod1(slot+1,3)][2]-points[slot][2]) for slot in 1:3)
+        @test longest<=target
+    end
+
+    xs=[0.0,2.0,2.0,0.0];ys=[0.0,0.0,2.0,2.0]
+    initial=Tessella.Mesh2D.constrained_delaunay(
+        xs,ys,[(1,2),(2,3),(3,4),(4,1)])
+    interpolated=Tessella.Model._surface_point_size_field(
+        initial,xs,ys,[0.1,0.8,0.8,0.8],1,"mesh_model_surface")
+    @test interpolated(0.0,0.0)≈0.1
+    @test interpolated(1.0,0.0)≈0.45
+    @test interpolated(0.5,0.5)≈0.45
+    @test interpolated(1.0,1.0)≈0.8
+    extreme=Tessella.Model._surface_point_size_field(
+        initial,xs,ys,[nextfloat(0.0),floatmax(Float64),
+                       floatmax(Float64),floatmax(Float64)],1,
+        "mesh_model_surface")
+    @test extreme(0.0,0.0)==nextfloat(0.0)
+    @test extreme(2.0,2.0)==floatmax(Float64)
+    @test isfinite(extreme(1.0,0.0))
+    interpolation_error=try
+        interpolated(3.0,3.0)
+        nothing
+    catch err
+        err
+    end
+    @test interpolation_error isa ErrorException
+    @test occursin(
+        "Point-size query (3.0,3.0) is outside the initial triangulation of Surface[1]",
+        sprint(showerror,interpolation_error))
+
+    generated=_point_mesh_size_square([0.1,0.8,0.8,0.8])
+    generated_data=Tessella.Model._surface_pslg(
+        generated,1,Dict(1=>[0.0,0.5,1.0]),"mesh_model_surface")
+    generated_x,generated_y,generated_sizes=generated_data[1:3]
+    midpoint=only(findall(eachindex(generated_x)) do index
+        generated_x[index]==1.0 && generated_y[index]==0.0
+    end)
+    @test generated_sizes[midpoint]≈0.45
+
+    add_point!(generated,1,1,0;tag=5,mesh_size=0.2)
+    add_line!(generated,1,3;tag=5)
+    embed!(generated,0,[5],2,1)
+    embed!(generated,1,[5],2,1)
+    coincident_data=Tessella.Model._surface_pslg(
+        generated,1,Dict(5=>[0.0,0.5,1.0]),"mesh_model_surface")
+    coincident_x,coincident_y,coincident_sizes=coincident_data[1:3]
+    center=only(findall(eachindex(coincident_x)) do index
+        coincident_x[index]==1.0 && coincident_y[index]==1.0
+    end)
+    @test coincident_sizes[center]==0.2
+
+    merged=_point_mesh_size_square(fill(0.8,4))
+    add_point!(merged,0,0,0;tag=5,mesh_size=0.2)
+    add_point!(merged,1,1,0;tag=6,mesh_size=0.8)
+    add_line!(merged,5,6;tag=5)
+    embed!(merged,1,[5],2,1)
+    merged_mesh=mesh_model_surface(merged,1;min_angle_deg=20)
+    @test validate(merged_mesh).ok
+    @test nnodes(merged_mesh)==39
+    @test ntris(merged_mesh)==56
+    @test mesh_crc(merged_mesh).sha==
+          "0b48fd5481d111e3a2f4eb413b327dd3e31c83d6cb9fa29b7c6d37cd1bb102d5"
+
+    uniform_mesh=mesh_model_surface(
+        _point_mesh_size_square(fill(0.8,4)),1;min_angle_deg=20)
+    @test validate(uniform_mesh).ok
+    @test nnodes(uniform_mesh)==23
+    @test ntris(uniform_mesh)==28
+    @test mesh_crc(uniform_mesh).sha==
+          "f1bfa8a1cc61158cc6293540ad6ce6d7ce48054a616a3df57d93597857f1b089"
+
+    periodic=_point_mesh_size_square([0.4,0.8,0.8,0.4])
+    set_periodic!(periodic,1,[2],[4],(
+        1.0,0.0,0.0,2.0,
+        0.0,1.0,0.0,0.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    periodic_mesh=mesh_model_surface(periodic,1)
+    @test validate(periodic_mesh).ok
+    periodic_nodes=model_periodic_nodes(periodic,periodic_mesh,1,2)
+    @test length(periodic_nodes.slave_nodes)==
+          length(periodic_nodes.master_nodes)==9
+    @test mesh_crc(periodic_mesh).sha==
+          "43aa68464111f6c4c6e47faeed3ff94c503597b6bb5420d2916e3c2660215501"
 
     expressions=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={1,0,0,1};

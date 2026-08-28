@@ -147,10 +147,12 @@ slave/master sets, can reuse whole or selected list variables.
 Point `MeshSize` selectors can likewise use `:`, expressions, constant ranges, and
 whole or selected numeric-list variables. Tessella requires existing explicit Points
 and finite positive sizes; Gmsh's permissive zero/negative and missing-Point behavior
-is outside this bounded contract. The current planar surface path applies the minimum
-constraint over the surface uniformly rather than claiming Gmsh's spatial size
-interpolation, and hidden primitive topology and topology-derived selectors remain
-blockers.
+is outside this bounded contract. The planar surface path extends Point constraints
+piecewise-linearly over its deterministic initial constrained triangulation. Generated
+straight-curve subdivision nodes interpolate their endpoint sizes, while equal Point
+sizes retain the constant-size path and coincident PSLG inputs use the smaller
+constraint. Exact Gmsh mesh topology, hidden primitive
+topology, and topology-derived selectors remain outside this bounded contract.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
@@ -179,7 +181,7 @@ julia --project --check-bounds=yes validation/run_all.jl
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
-point-size, dynamic-tag/`SetMaxTag`,
+spatial Point-size, dynamic-tag/`SetMaxTag`,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

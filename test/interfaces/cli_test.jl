@@ -292,7 +292,7 @@ Physical Volume("domain", 72) = {1};
         @test embedded.physical_names==Dict(
             (0,31)=>"embedded points",(1,32)=>"embedded line",(2,33)=>"domain")
         @test mixed_crc(embedded).sha==
-              "6025846e0f58581418401081f092630d2e49999a26e608bf377d1bae4c51dc4b"
+              "ac8238a9530b41f1cffbb596f304f77e07a047f2f7db0695bc25770af117448e"
 
         embedded_volume_input=joinpath(directory,"embedded-volume.geo")
         embedded_volume_output=joinpath(directory,"embedded-volume.msh")
@@ -404,7 +404,7 @@ Physical Volume("domain", 72) = {1};
         point_mesh_size=read_msh(point_mesh_size_output).mesh
         @test validate(point_mesh_size).ok
         @test mesh_crc(point_mesh_size).sha==
-              "f1bfa8a1cc61158cc6293540ad6ce6d7ce48054a616a3df57d93597857f1b089"
+              "b3f1bf410e917d050eacceab998b0fdf7b4cd61d1d9f263805b5120c06f1f4df"
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")
