@@ -71,6 +71,7 @@ mutable struct GeoModel
     cones::Dict{Int,NamedTuple{(:center,:axis,:r1,:r2,:height),
                                Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64,Float64}}}
     booleans::Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}
+    boolean_operands::Dict{Int,Tuple{Mesh,Mesh}}
     periodic::Dict{Tuple{Int,Int},ModelPeriodicConstraint}
     embeds::Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}
     next_tag::Vector{Int}
@@ -98,6 +99,7 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NamedTuple{(:center,:axis,:r1,:r2,:height),
                            Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64,Float64}}}(),
                       Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}(),
+                      Dict{Int,Tuple{Mesh,Mesh}}(),
                       Dict{Tuple{Int,Int},ModelPeriodicConstraint}(),
                       Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}(),
                       Int[0,0,0,0])
@@ -1077,7 +1079,9 @@ end
     boolean_volumes!(model, op, a, b; tag=0) -> tag
 
 Add a native Boolean volume combining existing volumes `a` and `b`. Supported
-operations are `:union`, `:intersection`, and `:difference` (`a \\ b`).
+operations are `:union`, `:intersection`, and `:difference` (`a \\ b`). The
+result owns operation-time snapshots of both operands, so later operand changes do
+not change the Boolean geometry.
 """
 function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     caller="boolean_volumes!"
@@ -1086,11 +1090,38 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     ta=_tag(a,caller,3); tb=_tag(b,caller,3)
     haskey(m.volumes,ta) || throw(ArgumentError("$caller: unknown Volume[$ta]"))
     haskey(m.volumes,tb) || throw(ArgumentError("$caller: unknown Volume[$tb]"))
-    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
-    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    requested=_tag(tag,caller,3)
+    requested!=0 && haskey(m.volumes,requested) && throw(ArgumentError(
+        "$caller: Volume[$requested] already exists"))
+    operand_a=_volume_surface(m,ta,caller)
+    operand_b=_volume_surface(m,tb,caller)
+    t=_alloc_tag!(m,3,requested,caller)
+    haskey(m.volumes,t) && throw(ArgumentError(
+        "$caller: automatic Volume[$t] already exists"))
     m.volumes[t]=Int[]
     m.booleans[t]=(op=op, a=ta, b=tb)
+    m.boolean_operands[t]=(operand_a,operand_b)
     return t
+end
+
+function _remove_volume_entity!(m::GeoModel,tag::Int)
+    haskey(m.volumes,tag) || return false
+    delete!(m.volumes,tag)
+    for encoding in (m.box_extents,m.cylinders,m.spheres,m.cones,
+                     m.booleans,m.boolean_operands)
+        delete!(encoding,tag)
+    end
+    delete!(m.embeds,(3,tag))
+    for key in collect(keys(m.physical))
+        key[1]==3 || continue
+        entities=m.physical[key]
+        tag in entities || continue
+        filter!(entity->entity!=tag,entities)
+        isempty(entities) || continue
+        delete!(m.physical,key)
+        delete!(m.physical_names,key)
+    end
+    return true
 end
 
 function _has_entity(m::GeoModel, dim::Int, tag::Int)
@@ -3810,7 +3841,10 @@ function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_v
         return cone_surface(c.center,c.axis,c.r1,c.r2,c.height)
     elseif haskey(m.booleans,t)
         spec=m.booleans[t]
-        A=_volume_surface(m,spec.a,caller); B=_volume_surface(m,spec.b,caller)
+        haskey(m.boolean_operands,t) || throw(ArgumentError(
+            "$caller: Boolean Volume[$t] has no owned operand snapshot; " *
+            "recreate the Boolean in a fresh GeoModel"))
+        A,B=m.boolean_operands[t]
         return mesh_boolean(A,B,spec.op)
     elseif !isempty(m.volumes[t])
         geometry=_model_explicit_volume_geometry(m,t,caller)

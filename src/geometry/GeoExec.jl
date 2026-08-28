@@ -19,8 +19,11 @@ Numeric parameters, entity tags, and entity lists use bounded
 constant-expression evaluation. Numeric
 list variables provide zero-based indexing, cardinality, copying, concatenation,
 selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
-runs through the native [`Model`](@ref) kernel. Control-flow loops, macros,
-extrusions, fillets, and general OCC BREP remain explicit blockers.
+runs through the native [`Model`](@ref) kernel. Boolean results own operation-time
+operand geometry. `Delete` also removes the operand's native encoding, target
+embeddings, and Physical memberships; a group and its name are removed when no
+members remain. Control-flow loops, macros, extrusions, fillets, and general OCC
+BREP remain explicit blockers.
 """
 module GeoExec
 
@@ -28,6 +31,7 @@ using ..Model: GeoModel, add_point!, set_point_mesh_size!
 using ..Model: add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
+using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: add_physical_group!, set_periodic!
 using ..Model: _model_boundary, _model_points_of
@@ -703,8 +707,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         delete_a=_boolean_delete_operand(mm.captures[4])
         delete_b=_boolean_delete_operand(mm.captures[6])
         boolean_volumes!(m,op,a,b;tag=tag)
-        delete_a && delete!(m.volumes,a)
-        delete_b && delete!(m.volumes,b)
+        delete_a && _remove_volume_entity!(m,a)
+        delete_b && _remove_volume_entity!(m,b)
         return
     elseif (mm=match(
             r"^Translate\s*\{\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
