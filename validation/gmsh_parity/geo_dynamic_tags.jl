@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# P6: bounded geometry/Physical `.geo` tag allocators vs Gmsh 4.15.2.
+# P6: bounded geometry/Physical allocation and lifecycle vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
@@ -235,19 +235,38 @@ function check_automatic_physical_tags()
     end
 
     Tessella.API.finalize()
-    tessella_tags=try
+    tessella_lifecycle=try
         Tessella.API.initialize()
         Tessella.API.model.add_point(0,0,0;tag=1)
         Tessella.API.model.add_point(1,0,0;tag=2)
         Tessella.API.model.add_line(1,2;tag=1)
-        [Tessella.API.model.add_physical_group(0,[1];name="first"),
-         Tessella.API.model.add_physical_group(1,[1];name="second"),
-         Tessella.API.model.add_physical_group(0,[2];name="third")]
+        tags=[Tessella.API.model.add_physical_group(0,[1];name="first"),
+              Tessella.API.model.add_physical_group(1,[1];name="first"),
+              Tessella.API.model.add_physical_group(0,[2];name="first")]
+        initial_groups=Tessella.API.model.get_physical_groups()
+        group_pairs,entity_pairs=
+            Tessella.API.model.get_physical_groups_entities()
+        members=Tessella.API.model.get_entities_for_physical_group(0,1)
+        reverse=Tessella.API.model.get_physical_groups_for_entity(0,1)
+        initial_names=Dict(
+            key=>Tessella.API.model.get_physical_name(key...) for key in initial_groups)
+        named_entities=Tessella.API.model.get_entities_for_physical_name("first")
+        Tessella.API.model.set_physical_name(0,3,"first")
+        duplicate_name=Tessella.API.model.get_physical_name(0,3)
+        Tessella.API.model.set_physical_name(0,3,"third")
+        assigned_name=Tessella.API.model.get_physical_name(0,3)
+        Tessella.API.model.remove_physical_name("first")
+        removed_name=Tessella.API.model.get_physical_name(0,1)
+        Tessella.API.model.remove_physical_groups([(1,2)])
+        replacement_tag=Tessella.API.model.add_physical_group(
+            1,[1];name="replacement")
+        final_groups=Tessella.API.model.get_physical_groups()
+        (;tags,initial_groups,group_pairs,entity_pairs,members,reverse,
+         initial_names,named_entities,duplicate_name,assigned_name,removed_name,
+         replacement_tag,final_groups)
     finally
         Tessella.API.finalize()
     end
-    tessella_tags==[1,2,3] || error(
-        "Tessella API automatic Physical tags changed: $tessella_tags")
 
     gmsh.clear()
     gmsh.model.add("automatic_physical_api")
@@ -257,12 +276,40 @@ function check_automatic_physical_tags()
     gmsh.model.geo.synchronize()
     gmsh_tags=[
         Int(gmsh.model.addPhysicalGroup(0,[1],-1,"first")),
-        Int(gmsh.model.addPhysicalGroup(1,[1],-1,"second")),
-        Int(gmsh.model.addPhysicalGroup(0,[2],-1,"third")),
+        Int(gmsh.model.addPhysicalGroup(1,[1],-1,"first")),
+        Int(gmsh.model.addPhysicalGroup(0,[2],-1,"first")),
     ]
-    gmsh_tags==tessella_tags || error(
-        "Gmsh API automatic Physical tags changed: $gmsh_tags")
-    return (parser_groups=length(AUTOMATIC_PHYSICAL_NAMES),api_tags=gmsh_tags)
+    initial_groups=Tuple{Int,Int}[
+        (Int(dim),Int(tag)) for (dim,tag) in gmsh.model.getPhysicalGroups()]
+    raw_group_pairs,raw_entity_pairs=gmsh.model.getPhysicalGroupsEntities()
+    group_pairs=Tuple{Int,Int}[
+        (Int(dim),Int(tag)) for (dim,tag) in raw_group_pairs]
+    entity_pairs=[Tuple{Int,Int}[(Int(dim),Int(tag)) for (dim,tag) in entities]
+                  for entities in raw_entity_pairs]
+    members=Int.(gmsh.model.getEntitiesForPhysicalGroup(0,1))
+    reverse=Int.(gmsh.model.getPhysicalGroupsForEntity(0,1))
+    initial_names=Dict(
+        key=>gmsh.model.getPhysicalName(key...) for key in initial_groups)
+    named_entities=Tuple{Int,Int}[
+        (Int(dim),Int(tag)) for (dim,tag) in
+        gmsh.model.getEntitiesForPhysicalName("first")]
+    gmsh.model.setPhysicalName(0,3,"first")
+    duplicate_name=gmsh.model.getPhysicalName(0,3)
+    gmsh.model.setPhysicalName(0,3,"third")
+    assigned_name=gmsh.model.getPhysicalName(0,3)
+    gmsh.model.removePhysicalName("first")
+    removed_name=gmsh.model.getPhysicalName(0,1)
+    gmsh.model.removePhysicalGroups([(1,2)])
+    replacement_tag=Int(gmsh.model.addPhysicalGroup(1,[1],-1,"replacement"))
+    final_groups=Tuple{Int,Int}[
+        (Int(dim),Int(tag)) for (dim,tag) in gmsh.model.getPhysicalGroups()]
+    gmsh_lifecycle=(;tags=gmsh_tags,initial_groups,group_pairs,entity_pairs,
+                     members,reverse,initial_names,named_entities,duplicate_name,
+                     assigned_name,removed_name,replacement_tag,final_groups)
+    gmsh_lifecycle==tessella_lifecycle || error(
+        "Physical lifecycle differs: Tessella=$tessella_lifecycle Gmsh=$gmsh_lifecycle")
+    return (;parser_groups=length(AUTOMATIC_PHYSICAL_NAMES),api_tags=gmsh_tags,
+             lifecycle_groups=length(final_groups),replacement_tag)
 end
 
 function check_set_max_tags()
@@ -493,6 +540,8 @@ try
             "gmsh_tets=$gmsh_tets variables=$(length(expected_variables)) " *
             "automatic_physical_groups=$(automatic_physical.parser_groups) " *
             "automatic_physical_api=$(join(automatic_physical.api_tags,',')) " *
+            "physical_lifecycle_groups=$(automatic_physical.lifecycle_groups) " *
+            "physical_replacement_tag=$(automatic_physical.replacement_tag) " *
             "setmax_nodes=$(set_max_gmsh.nodes) " *
             "setmax_tets=$(set_max_gmsh.tets) " *
             "volume_error=$volume_error mesh_crc=$(mesh_crc(mesh).sha) " *

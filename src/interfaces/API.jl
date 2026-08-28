@@ -2,10 +2,10 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-point-local mesh-size constraints, explicit planar surface-loop volumes, and
-persistent affine relations between straight periodic boundary or embedded curves
-and planar periodic volume boundaries. Production meshing is never delegated to
-Gmsh.
+deterministic Physical-group lifecycle queries and mutations, point-local mesh-size
+constraints, explicit planar surface-loop volumes, and persistent affine relations
+between straight periodic boundary or embedded curves and planar periodic volume
+boundaries. Production meshing is never delegated to Gmsh.
 """
 module API
 
@@ -13,7 +13,12 @@ using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surfa
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!, set_point_mesh_size!
-using ..Model: add_physical_group!, set_periodic!, model_periodic_nodes
+using ..Model: add_physical_group!, set_physical_name!, remove_physical_groups!
+using ..Model: remove_physical_name!, model_physical_groups
+using ..Model: model_physical_groups_entities, model_entities_for_physical_group
+using ..Model: model_entities_for_physical_name, model_physical_groups_for_entity
+using ..Model: model_physical_name
+using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..GeoExec: execute_geo
@@ -119,11 +124,71 @@ function option(name::AbstractString, value::Real)
     end
 end
 
-"""Gmsh-style geometry-model operations for the active [`API`](@ref) session."""
+_get_physical_groups(dim=-1)=_with_model() do current
+    model_physical_groups(current,dim)
+end
+
+_get_physical_groups_entities(dim=-1)=_with_model() do current
+    model_physical_groups_entities(current,dim)
+end
+
+_get_entities_for_physical_group(dim,tag)=_with_model() do current
+    model_entities_for_physical_group(current,dim,tag)
+end
+
+_get_entities_for_physical_name(name)=_with_model() do current
+    name isa AbstractString || throw(ArgumentError(
+        "API.model.get_entities_for_physical_name: name must be a string"))
+    model_entities_for_physical_name(current,name)
+end
+
+_get_physical_groups_for_entity(dim,tag)=_with_model() do current
+    model_physical_groups_for_entity(current,dim,tag)
+end
+
+_get_physical_name(dim,tag)=_with_model() do current
+    model_physical_name(current,dim,tag)
+end
+
+function _set_physical_name(dim,tag,name)
+    name isa AbstractString || throw(ArgumentError(
+        "API.model.set_physical_name: name must be a string"))
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        before=model_physical_name(current,dim,tag)
+        after=set_physical_name!(current,dim,tag,name)
+        after==before || (LAST_MESH[]=nothing)
+        nothing
+    end
+end
+
+function _remove_physical_name(name)
+    name isa AbstractString || throw(ArgumentError(
+        "API.model.remove_physical_name: name must be a string"))
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        remove_physical_name!(current,name)>0 && (LAST_MESH[]=nothing)
+        nothing
+    end
+end
+
+function _remove_physical_groups(dim_tags=())
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        remove_physical_groups!(current,dim_tags)>0 && (LAST_MESH[]=nothing)
+        nothing
+    end
+end
+
+"""Gmsh-style geometry-model and Physical-group operations for the active [`API`](@ref) session."""
 module model
 using ..API: _with_model, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..API: add_surface_loop!, add_volume!
 using ..API: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!, embed!, add_physical_group!
+using ..API: _get_physical_groups, _get_physical_groups_entities
+using ..API: _get_entities_for_physical_group, _get_entities_for_physical_name
+using ..API: _get_physical_groups_for_entity, _get_physical_name
+using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
     add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
 end
@@ -174,6 +239,38 @@ boolean_intersection(a,b; tag=0)=_boolean(:intersection,a,b; tag=tag)
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m
     add_physical_group!(m,dim,tags;tag=tag,name=name)
 end
+
+"""Return detached, sorted Physical `(dimension, tag)` pairs; `dim=-1` selects all."""
+get_physical_groups(dim=-1)=_get_physical_groups(dim)
+
+"""Return sorted Physical groups and detached `(dimension, entity_tag)` memberships."""
+get_physical_groups_entities(dim=-1)=_get_physical_groups_entities(dim)
+
+"""Return detached, sorted entity tags for one existing Physical group."""
+get_entities_for_physical_group(dim,tag)=
+    _get_entities_for_physical_group(dim,tag)
+
+"""Return detached, sorted entities belonging to groups with the given Physical name."""
+get_entities_for_physical_name(name)=_get_entities_for_physical_name(name)
+
+"""Return sorted Physical tags containing one existing geometry entity."""
+get_physical_groups_for_entity(dim,tag)=
+    _get_physical_groups_for_entity(dim,tag)
+
+"""Return a Physical name, or `""` for an unnamed or missing positive group tag."""
+get_physical_name(dim,tag)=_get_physical_name(dim,tag)
+
+"""
+Assign a name to an unnamed Physical group. Existing, empty, duplicate, and missing
+assignments are no-ops; remove the current name before assigning a replacement.
+"""
+set_physical_name(dim,tag,name)=_set_physical_name(dim,tag,name)
+
+"""Remove a Physical name from every dimension without removing its groups."""
+remove_physical_name(name)=_remove_physical_name(name)
+
+"""Remove selected Physical groups, or every group when `dim_tags` is empty."""
+remove_physical_groups(dim_tags=())=_remove_physical_groups(dim_tags)
 end
 
 function _generate(dim::Integer)

@@ -105,15 +105,49 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
 
     physical=GeoModel()
     add_box!(physical,0,0,0,1,1,1; tag=123)
-    @test add_physical_group!(physical,3,[123])==1
+    @test add_physical_group!(physical,3,[123];name="shared")==1
     @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
     @test add_point!(physical,0,0,0;tag=1)==1
     @test add_point!(physical,1,0,0;tag=2)==2
     @test add_line!(physical,1,2;tag=1)==1
-    @test add_physical_group!(physical,0,[1])==2
-    @test add_physical_group!(physical,1,[1];tag=20)==20
-    @test add_physical_group!(physical,0,[2])==21
+    @test add_physical_group!(physical,0,[1];name="shared")==2
+    @test add_physical_group!(physical,1,[1];tag=20,name="edge")==20
+    @test add_physical_group!(physical,0,[2];name="shared")==21
     @test physical.physical_tag_max==21
+    expected_groups=[(0,2),(0,21),(1,20),(3,1)]
+    @test Tessella.Model.model_physical_groups(physical)==expected_groups
+    @test Tessella.Model.model_physical_groups(physical,0)==[(0,2),(0,21)]
+    detached_groups=Tessella.Model.model_physical_groups(physical)
+    push!(detached_groups,(3,99))
+    @test Tessella.Model.model_physical_groups(physical)==expected_groups
+    members=Tessella.Model.model_entities_for_physical_group(physical,3,1)
+    @test members==[123]
+    push!(members,999)
+    @test Tessella.Model.model_entities_for_physical_group(physical,3,1)==[123]
+    @test Tessella.Model.model_physical_groups_for_entity(physical,0,1)==[2]
+    @test Tessella.Model.model_physical_groups_for_entity(physical,0,2)==[21]
+    group_pairs,entity_pairs=
+        Tessella.Model.model_physical_groups_entities(physical)
+    @test group_pairs==expected_groups
+    @test entity_pairs==[[(0,1)],[(0,2)],[(1,1)],[(3,123)]]
+    push!(entity_pairs[1],(0,999))
+    @test Tessella.Model.model_physical_groups_entities(physical)[2][1]==[(0,1)]
+    @test Tessella.Model.model_physical_name(physical,3,1)=="shared"
+    @test Tessella.Model.model_physical_name(physical,0,2)=="shared"
+    @test Tessella.Model.model_physical_name(physical,0,21)==""
+    @test Tessella.Model.model_physical_name(physical,0,999)==""
+    @test Tessella.Model.model_entities_for_physical_name(physical,"shared")==
+          [(0,1),(3,123)]
+    @test Tessella.Model.set_physical_name!(physical,0,21,"shared")==""
+    @test Tessella.Model.set_physical_name!(physical,0,21,"probe")=="probe"
+    @test Tessella.Model.set_physical_name!(physical,0,21,"renamed")=="probe"
+    @test Tessella.Model.set_physical_name!(physical,0,21,"")=="probe"
+    @test Tessella.Model.set_physical_name!(physical,0,999,"ghost")==""
+    @test Tessella.Model.remove_physical_name!(physical,"missing")==0
+    @test Tessella.Model.remove_physical_name!(physical,"shared")==2
+    @test Tessella.Model.model_physical_name(physical,0,2)==""
+    @test Tessella.Model.model_physical_name(physical,3,1)==""
+    @test Tessella.Model.model_physical_name(physical,0,21)=="probe"
     returned=Tessella.Model.model_physical_tags(physical,3,1)
     push!(returned,999)
     @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
@@ -125,6 +159,36 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test_throws ArgumentError Tessella.Model.model_entity(physical,true,123)
     @test_throws ArgumentError Tessella.Model.model_physical_tags(physical,3,big(2)^100)
     @test_throws ArgumentError Tessella.Model.set_physical_name!(physical,true,1,"bad")
+    @test_throws ArgumentError Tessella.Model.model_physical_groups(physical,4)
+    @test_throws ArgumentError Tessella.Model.model_entities_for_physical_group(
+        physical,0,999)
+    @test_throws ArgumentError Tessella.Model.model_physical_groups_for_entity(
+        physical,0,999)
+    @test_throws ArgumentError Tessella.Model.model_entities_for_physical_name(
+        physical,"missing")
+    @test_throws ArgumentError Tessella.Model.model_physical_name(physical,0,0)
+
+    physical_removal=deepcopy(physical)
+    removal_groups=copy(physical_removal.physical)
+    removal_names=copy(physical_removal.physical_names)
+    @test_throws ArgumentError Tessella.Model.remove_physical_groups!(
+        physical_removal,[(0,2),(4,1)])
+    @test physical_removal.physical==removal_groups
+    @test physical_removal.physical_names==removal_names
+    @test Tessella.Model.remove_physical_groups!(physical_removal,[(0,999)])==0
+    @test Tessella.Model.remove_physical_groups!(
+        physical_removal,[(0,2),(0,21),1=>20,(0,21)])==3
+    @test Tessella.Model.model_physical_groups(physical_removal)==[(3,1)]
+    @test physical_removal.physical_tag_max==21
+    @test add_physical_group!(physical_removal,0,[1])==22
+    @test Tessella.Model.remove_physical_groups!(physical_removal)==2
+    @test isempty(Tessella.Model.model_physical_groups(physical_removal))
+    @test isempty(physical_removal.physical_names)
+    @test physical_removal.points==physical.points
+    @test physical_removal.curves==physical.curves
+    @test physical_removal.volumes==physical.volumes
+    @test physical_removal.box_extents==physical.box_extents
+    @test add_physical_group!(physical_removal,0,[2])==23
 
     physical_exhausted=GeoModel()
     add_point!(physical_exhausted,0,0,0;tag=1)

@@ -143,19 +143,94 @@ const _API=Tessella.API
     @test isempty(Docs.undocumented_names(Tessella.API;private=false))
 end
 
-@testset "global automatic Physical tags through API" begin
+@testset "owned Physical-group lifecycle through API" begin
     _API.finalize()
     try
         _API.initialize()
         @test _API.model.add_point(0,0,0;tag=1)==1
         @test _API.model.add_point(1,0,0;tag=2)==2
+        @test _API.model.add_point(0,1,0;tag=3)==3
         @test _API.model.add_line(1,2;tag=1)==1
+        @test _API.model.add_line(2,3;tag=2)==2
+        @test _API.model.add_line(3,1;tag=3)==3
+        @test _API.model.add_curve_loop([1,2,3];tag=10)==10
+        @test _API.model.add_plane_surface([10];tag=1)==1
         @test _API.model.add_physical_group(0,[1];name="first")==1
         @test _API.model.add_physical_group(1,[1];name="second")==2
-        @test _API.model.add_physical_group(0,[2];name="third")==3
+        @test _API.model.add_physical_group(0,[2];name="first")==3
+        @test _API.model.add_physical_group(2,[1];name="first")==4
         @test _API.CURRENT[].physical_names==Dict(
-            (0,1)=>"first",(1,2)=>"second",(0,3)=>"third")
-        @test _API.CURRENT[].physical_tag_max==3
+            (0,1)=>"first",(1,2)=>"second",(2,4)=>"first")
+        @test _API.CURRENT[].physical_tag_max==4
+
+        expected_groups=[(0,1),(0,3),(1,2),(2,4)]
+        @test _API.model.get_physical_groups()==expected_groups
+        @test _API.model.get_physical_groups(0)==[(0,1),(0,3)]
+        @test _API.model.get_entities_for_physical_group(0,1)==[1]
+        @test _API.model.get_physical_groups_for_entity(0,1)==[1]
+        @test _API.model.get_physical_name(0,1)=="first"
+        @test _API.model.get_physical_name(0,3)==""
+        @test _API.model.get_physical_name(0,99)==""
+        @test _API.model.get_entities_for_physical_name("first")==
+              [(0,1),(2,1)]
+        group_pairs,entity_pairs=_API.model.get_physical_groups_entities()
+        @test group_pairs==expected_groups
+        @test entity_pairs==[[(0,1)],[(0,2)],[(1,1)],[(2,1)]]
+
+        detached_groups=_API.model.get_physical_groups()
+        detached_members=_API.model.get_entities_for_physical_group(0,1)
+        detached_pairs=_API.model.get_physical_groups_entities()[2]
+        push!(detached_groups,(3,99))
+        push!(detached_members,99)
+        push!(detached_pairs[1],(0,99))
+        @test _API.model.get_physical_groups()==expected_groups
+        @test _API.model.get_entities_for_physical_group(0,1)==[1]
+        @test _API.model.get_physical_groups_entities()[2][1]==[(0,1)]
+
+        generated=_API.mesh.generate(2)
+        @test validate(generated).ok
+        cached=_API.LAST_MESH[]
+        @test _API.model.get_physical_groups()==expected_groups
+        @test _API.LAST_MESH[]===cached
+        @test _API.model.set_physical_name(0,3,"first")===nothing
+        @test _API.model.set_physical_name(0,99,"ghost")===nothing
+        @test _API.model.remove_physical_name("missing")===nothing
+        @test _API.model.remove_physical_groups([(0,99)])===nothing
+        @test _API.LAST_MESH[]===cached
+
+        stable_groups=_API.model.get_physical_groups()
+        @test_throws ArgumentError _API.model.remove_physical_groups(
+            [(0,1),(4,1)])
+        @test _API.model.get_physical_groups()==stable_groups
+        @test _API.LAST_MESH[]===cached
+        @test_throws ArgumentError _API.model.remove_physical_groups([(0,1),1])
+        @test_throws ArgumentError _API.model.get_physical_groups(4)
+        @test_throws ArgumentError _API.model.get_entities_for_physical_group(0,99)
+        @test_throws ArgumentError _API.model.get_physical_groups_for_entity(0,99)
+        @test_throws ArgumentError _API.model.get_entities_for_physical_name("missing")
+        @test_throws ArgumentError _API.model.set_physical_name(0,1,1)
+        @test_throws ArgumentError _API.model.remove_physical_name(1)
+
+        @test _API.model.set_physical_name(0,3,"third")===nothing
+        @test _API.model.get_physical_name(0,3)=="third"
+        @test _API.LAST_MESH[]===nothing
+        _API.mesh.generate(2)
+        @test _API.model.remove_physical_name("first")===nothing
+        @test _API.model.get_physical_name(0,1)==""
+        @test _API.model.get_physical_name(2,4)==""
+        @test _API.model.get_physical_name(0,3)=="third"
+        @test _API.LAST_MESH[]===nothing
+        _API.mesh.generate(2)
+        @test _API.model.remove_physical_groups([(1,2)])===nothing
+        @test _API.model.get_physical_groups()==[(0,1),(0,3),(2,4)]
+        @test _API.CURRENT[].physical_tag_max==4
+        @test _API.LAST_MESH[]===nothing
+        @test _API.model.add_physical_group(1,[1];name="replacement")==5
+        _API.mesh.generate(2)
+        @test _API.model.remove_physical_groups()===nothing
+        @test isempty(_API.model.get_physical_groups())
+        @test _API.LAST_MESH[]===nothing
+        @test _API.model.add_physical_group(2,[1];name="fresh")==6
     finally
         _API.finalize()
     end
