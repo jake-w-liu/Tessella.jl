@@ -23,7 +23,7 @@ using ..Periodic: periodic_identify_affine
 using ..Transform: _affine_coordinate, _transform_homogeneous
 using ..Predicates: orient2, orient3
 
-export GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_surface_loop!, add_volume!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
@@ -213,6 +213,42 @@ function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0)
     haskey(m.points,t) && throw(ArgumentError("$caller: Point[$t] already exists"))
     m.points[t]=p; m.point_size[t]=h
     return t
+end
+
+"""
+    set_point_mesh_size!(model, points, mesh_size)
+
+Set one finite, positive mesh-size constraint on existing Point tags. The update
+is atomic: every tag and the size are validated before the model is changed.
+"""
+function set_point_mesh_size!(m::GeoModel,points,mesh_size)
+    caller="set_point_mesh_size!"
+    (points isa AbstractVector || points isa Tuple) || throw(ArgumentError(
+        "$caller: points must be a vector or tuple of Point tags"))
+    tags=unique(Int[_tag(point,caller,0) for point in points])
+    isempty(tags) && throw(ArgumentError(
+        "$caller: points must contain at least one Point tag"))
+    mesh_size isa Real || throw(ArgumentError(
+        "$caller: mesh_size must be a real number"))
+    mesh_size isa Bool && throw(ArgumentError(
+        "$caller: mesh_size must not be Bool"))
+    size=try
+        Float64(mesh_size)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: mesh_size must be Float64-representable"))
+    end
+    (isfinite(size) && size>0) || throw(ArgumentError(
+        "$caller: mesh_size must be finite and positive"))
+    for tag in tags
+        haskey(m.points,tag) || throw(ArgumentError(
+            "$caller: unknown Point[$tag]"))
+    end
+    for tag in tags
+        m.point_size[tag]=size
+    end
+    return nothing
 end
 
 """

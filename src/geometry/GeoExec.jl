@@ -7,7 +7,8 @@ Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
 Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
 Translate/Rotate/Affine periodic straight curves or explicit-volume planar boundary
-surfaces with reusable masters and acyclic dependency chains. Numeric parameters,
+surfaces with reusable masters and acyclic dependency chains. `MeshSize` and
+`Characteristic Length` update existing explicit Point constraints. Numeric parameters,
 entity tags, and entity lists use bounded constant-expression evaluation. Numeric
 list variables provide zero-based indexing, cardinality, copying, concatenation,
 selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
@@ -16,7 +17,8 @@ extrusions, fillets, and general OCC BREP remain explicit blockers.
 """
 module GeoExec
 
-using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
+using ..Model: GeoModel, add_point!, set_point_mesh_size!
+using ..Model: add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
@@ -144,6 +146,10 @@ checked counter, while OpenCASCADE only raises it. Reads use the greatest counte
 among activated factories. Later primitive allocation still accounts for occupied
 hidden topology. Primitive boundary entities remain implicit in `GeoModel`, so an
 explicit modeled subentity may reuse one of their numeric tags.
+`MeshSize {points} = value` and its `Characteristic Length` alias update existing
+explicit Points through `:`, numeric expressions and ranges, or numeric-list
+variables. Their values must be finite and positive; unsupported topology queries
+and unknown Points are explicit blockers.
 An allocator read after a topology-changing or untracked declaration is rejected.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
@@ -567,6 +573,26 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         ids=_geo_exec_entity_rhs_tags(
             mm.captures[4],context,"$caller entities")
         add_physical_group!(m,dim,ids;tag=tag,name=name)
+        return
+    elseif (mm=match(
+            r"^(MeshSize|Characteristic\s+Length)\s*\{\s*(.*?)\s*\}\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: $(mm.captures[1])"
+        selector=String(strip(mm.captures[2]))
+        point_tags=if selector==":"
+            sort!(collect(keys(m.points)))
+        else
+            occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",selector) &&
+                throw(ArgumentError(
+                    "$caller: topology queries are not supported; select Points " *
+                    "with `:`, numeric expressions or ranges, or numeric-list variables"))
+            _geo_exec_entity_tags(selector,context,"$caller Point selector")
+        end
+        isempty(point_tags) && throw(ArgumentError(
+            "$caller: Point selector matched no explicit modeled points"))
+        mesh_size=_geo_eval_numeric(
+            mm.captures[3],context,"$caller value")
+        set_point_mesh_size!(m,point_tags,mesh_size)
         return
     elseif match(
             r"^SetMaxTag\s+(?:Point|Curve|Surface|Volume)\s*\(\s*.+\s*\)\s*;$",

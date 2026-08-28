@@ -10,6 +10,7 @@ const _API=Tessella.API
     @test_throws ArgumentError _API.option("Mesh.MeshSizeFactor",2.0)
     @test_throws ArgumentError _API.model.add_box(0,0,0,1,1,1;tag=1)
     @test_throws ArgumentError _API.mesh.get()
+    @test_throws ArgumentError _API.mesh.set_size([(0,1)],0.5)
     @test_throws ArgumentError _API.open_geo!("missing.geo")
 
     try
@@ -140,6 +141,42 @@ const _API=Tessella.API
     @test _API.finalize()===nothing
     @test _API.finalize()===nothing
     @test isempty(Docs.undocumented_names(Tessella.API;private=false))
+end
+
+@testset "owned point mesh-size API" begin
+    _API.finalize()
+    try
+        _API.initialize()
+        @test _API.model.add_box(0,0,0,1,1,1;tag=1)==1
+        @test _API.model.add_point(0.25,0.25,0.25;tag=101)==101
+        @test _API.model.add_point(0.75,0.75,0.75;tag=102)==102
+        initial=_API.mesh.generate(3)
+        @test validate(initial).ok
+        @test mesh_crc(initial).sha==
+              "e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83"
+
+        @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
+        @test _API.CURRENT[].point_size[101]==0.25
+        @test _API.CURRENT[].point_size[102]==0.25
+        @test_throws ArgumentError _API.mesh.get()
+
+        refreshed=_API.mesh.generate(3)
+        @test validate(refreshed).ok
+        refreshed_crc=mesh_crc(refreshed)
+        @test refreshed_crc==mesh_crc(initial)
+        stable_sizes=copy(_API.CURRENT[].point_size)
+        for (dim_tags,size) in (
+                ([(1,101)],0.5),([(false,101)],0.5),
+                ([(0,101),(0,999)],0.5),([(0,101.0)],0.5),
+                ([(0,101)],0.0),((),0.5),([101],0.5),
+                ("(0, 101)",0.5))
+            @test_throws ArgumentError _API.mesh.set_size(dim_tags,size)
+            @test _API.CURRENT[].point_size==stable_sizes
+            @test mesh_crc(_API.mesh.get())==refreshed_crc
+        end
+    finally
+        _API.finalize()
+    end
 end
 
 @testset "explicit volume-shell API" begin
