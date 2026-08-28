@@ -98,10 +98,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   retain their derived boundary point/curve forest and surface-node maps through
   MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
 - model and synchronized session APIs for dimension-scoped entity names, atomic
-  positive-tag changes, and ordered dependency-safe removal; retagging moves every
-  live reference, while removal skips surviving boundary/embedding dependencies,
-  can recurse through explicit boundaries, and cleans owned metadata and encodings
-  without rewinding automatic tags;
+  positive-tag changes, ordered dependency-safe removal, analytical bounding boxes,
+  and containment selection; retagging moves every live reference, while removal
+  skips surviving boundary/embedding dependencies, can recurse through explicit
+  boundaries, and cleans owned metadata and encodings without rewinding automatic
+  tags;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -197,6 +198,13 @@ encodings, and Boolean-result snapshots, and keeps allocator counters monotonic.
 Primitive and Boolean Volume boundaries are implicit, so their recursive removal
 stops at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
 Tessella's owning native model and is not undone by a later synchronization.
+Entity and whole-model bounding boxes are exact for explicit straight-edge topology
+and analytical native primitives. Boolean bounds follow the owned operation-time
+result geometry. Containment queries return only entities whose complete box lies in
+the finite query box, ignore embeddings when bounding their target, and preserve the
+session mesh cache. Tessella omits OpenCASCADE shape-tolerance padding (`1e-7` in
+the pinned fixtures), rejects nonfinite boxes and invalid dimensions, and exposes no
+implicit primitive subentities.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
@@ -231,7 +239,7 @@ The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
 spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
-entity-identity, and dependency-safe entity-removal,
+entity-identity, dependency-safe entity-removal, and analytical spatial queries,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

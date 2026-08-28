@@ -2,8 +2,9 @@
     Model
 
 A native geometry/entity kernel: tagged and named points, curves, curve loops,
-surfaces, surface loops, and volumes with atomic retagging and dependency-safe
-removal, physical groups, and classified surface/volume mixed-mesh projection.
+surfaces, surface loops, and volumes with atomic retagging, dependency-safe
+removal, analytical spatial queries, physical groups, and classified
+surface/volume mixed-mesh projection.
 Meshing dispatches to Tessella's certified simplex and transfinite kernels. This
 is not OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
@@ -36,6 +37,7 @@ export model_physical_groups_entities, model_entities_for_physical_group
 export model_entities_for_physical_name, model_physical_groups_for_entity
 export model_physical_name
 export model_entities, model_dimension, model_boundary, model_adjacencies
+export model_bounding_box, model_entities_in_bounding_box
 export set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 export remove_entities!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
@@ -336,6 +338,7 @@ end
 include("ModelTopologyQueries.jl")
 include("ModelIdentity.jl")
 include("ModelRemoval.jl")
+include("ModelSpatialQueries.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"

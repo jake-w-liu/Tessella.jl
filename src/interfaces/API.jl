@@ -2,11 +2,11 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-deterministic entity-topology and Physical-group queries, entity-name, atomic-tag, and
-dependency-safe removal mutations, Physical-group mutations, point-local mesh-size
-constraints, explicit planar surface-loop volumes, operation-time Boolean operand
-ownership, and persistent affine relations between straight periodic boundary or
-embedded curves and planar periodic volume boundaries.
+deterministic entity-topology, analytical spatial, and Physical-group queries,
+entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
+mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
+operation-time Boolean operand ownership, and persistent affine relations between
+straight periodic boundary or embedded curves and planar periodic volume boundaries.
 Production meshing is never delegated to Gmsh.
 """
 module API
@@ -22,6 +22,7 @@ using ..Model: model_physical_groups_entities, model_entities_for_physical_group
 using ..Model: model_entities_for_physical_name, model_physical_groups_for_entity
 using ..Model: model_physical_name
 using ..Model: model_entities, model_dimension, model_boundary, model_adjacencies
+using ..Model: model_bounding_box, model_entities_in_bounding_box
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
@@ -152,6 +153,16 @@ _get_adjacencies(dim,tag)=_with_model() do current
     model_adjacencies(current,dim,tag)
 end
 
+_get_bounding_box(dim,tag)=_with_model() do current
+    model_bounding_box(current,dim,tag)
+end
+
+_get_entities_in_bounding_box(xmin,ymin,zmin,xmax,ymax,zmax,dim=-1)=
+    _with_model() do current
+        model_entities_in_bounding_box(
+            current,xmin,ymin,zmin,xmax,ymax,zmax,dim)
+    end
+
 _get_entity_name(dim,tag)=_with_model() do current
     model_entity_name(current,dim,tag)
 end
@@ -254,6 +265,7 @@ using ..API: _get_entities_for_physical_group, _get_entities_for_physical_name
 using ..API: _get_physical_groups_for_entity, _get_physical_name
 using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
 using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
+using ..API: _get_bounding_box, _get_entities_in_bounding_box
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 using ..API: _remove_entities
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
@@ -362,6 +374,16 @@ for primitive and Boolean Volumes are unavailable because their Surface Loop
 topology is implicit.
 """
 get_adjacencies(dim,tag)=_get_adjacencies(dim,tag)
+
+"""Return one entity's analytical bounding box; `(-1,-1)` selects the whole model."""
+get_bounding_box(dim,tag)=_get_bounding_box(dim,tag)
+
+"""
+Return detached, sorted entities whose complete analytical bounding box is inside
+the supplied finite box. `dim=-1` selects all dimensions.
+"""
+get_entities_in_bounding_box(xmin,ymin,zmin,xmax,ymax,zmax,dim=-1)=
+    _get_entities_in_bounding_box(xmin,ymin,zmin,xmax,ymax,zmax,dim)
 
 """Return detached, sorted Physical `(dimension, tag)` pairs; `dim=-1` selects all."""
 get_physical_groups(dim=-1)=_get_physical_groups(dim)
