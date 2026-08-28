@@ -30,7 +30,11 @@ export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
        model_periodic_nodes, model_to_mixed
-export add_physical_group!, set_physical_name!
+export add_physical_group!, set_physical_name!, remove_physical_groups!
+export remove_physical_name!, model_physical_groups
+export model_physical_groups_entities, model_entities_for_physical_group
+export model_entities_for_physical_name, model_physical_groups_for_entity
+export model_physical_name
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
@@ -1085,13 +1089,38 @@ function _has_entity(m::GeoModel, dim::Int, tag::Int)
     return haskey(m.volumes,tag)
 end
 
+function _physical_query_dimension(value,caller)
+    value isa Integer || throw(ArgumentError(
+        "$caller: dimension must be an integer"))
+    value isa Bool && throw(ArgumentError(
+        "$caller: dimension must not be Bool"))
+    value==-1 || 0<=value<=3 || throw(ArgumentError(
+        "$caller: dimension must be -1 or in 0:3"))
+    return Int(value)
+end
+
+function _physical_group_key(dim,tag,caller)
+    d=_dimension(dim,caller)
+    t=_tag(tag,caller,d)
+    t>0 || throw(ArgumentError("$caller: physical tag must be positive"))
+    return (d,t)
+end
+
+function _physical_name_is_available(m::GeoModel,dimension::Int,
+                                     name::String)
+    isempty(name) && return false
+    return all(d!=dimension || existing!=name
+               for ((d,_),existing) in m.physical_names)
+end
+
 """
     add_physical_group!(model, dim, tags; tag=0, name="") -> tag
 
 Group one or more existing entities of dimension `dim` under an independent
 physical tag. Automatic physical tags share one global namespace across entity
 dimensions, separate from geometry tags. An optional nonempty `name` is recorded
-with the group.
+when no group in the same dimension already uses it; the group is still added when
+the requested name is unavailable.
 """
 function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, name::AbstractString="")
     caller="add_physical_group!"
@@ -1108,7 +1137,8 @@ function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, na
     pt=_alloc_physical_tag(m,_tag(tag,caller,d),caller)
     haskey(m.physical,(d,pt)) && throw(ArgumentError("$caller: Physical($d,$pt) already exists"))
     m.physical[(d,pt)]=ents
-    isempty(group_name) || (m.physical_names[(d,pt)]=group_name)
+    _physical_name_is_available(m,d,group_name) &&
+        (m.physical_names[(d,pt)]=group_name)
     m.physical_tag_max=max(m.physical_tag_max,pt)
     return pt
 end
@@ -1116,15 +1146,170 @@ end
 """
     set_physical_name!(model, dim, tag, name) -> name
 
-Replace the name of an existing physical group.
+Assign `name` to an unnamed physical group. Names are unique within one entity
+dimension. As in Gmsh 4.15.2, an unknown group, an empty name, an already named
+group, or a name already used in that dimension is a no-op; use
+[`remove_physical_name!`](@ref) before assigning a replacement.
 """
 function set_physical_name!(m::GeoModel, dim::Integer, tag::Integer, name::AbstractString)
     caller="set_physical_name!"
-    d=_dimension(dim,caller); t=_tag(tag,caller,d)
-    key=(d,t)
-    haskey(m.physical,key) || throw(ArgumentError("set_physical_name!: unknown Physical$key"))
-    m.physical_names[key]=String(name)
-    return name
+    key=_physical_group_key(dim,tag,caller)
+    haskey(m.physical,key) || return ""
+    existing=get(m.physical_names,key,"")
+    isempty(existing) || return existing
+    group_name=String(name)
+    _physical_name_is_available(m,key[1],group_name) || return ""
+    m.physical_names[key]=group_name
+    return group_name
+end
+
+function _physical_dim_tags(dim_tags,caller)
+    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
+        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
+    result=Tuple{Int,Int}[]
+    for entry in dim_tags
+        pair=if entry isa Pair
+            (first(entry),last(entry))
+        elseif entry isa Tuple && length(entry)==2
+            entry
+        else
+            throw(ArgumentError(
+                "$caller: each dim_tags entry must be a (dimension, tag) pair"))
+        end
+        push!(result,_physical_group_key(pair[1],pair[2],caller))
+    end
+    return unique!(result)
+end
+
+"""
+    remove_physical_groups!(model, dim_tags=()) -> Int
+
+Remove the selected `(dimension, physical_tag)` groups and their names, returning
+the number removed. An empty selection removes every group. Unknown valid groups
+are ignored, all inputs are checked before mutation, and the global automatic-tag
+counter remains monotonic.
+"""
+function remove_physical_groups!(m::GeoModel,dim_tags=())
+    caller="remove_physical_groups!"
+    selected=_physical_dim_tags(dim_tags,caller)
+    targets=isempty(selected) ? collect(keys(m.physical)) : selected
+    removed=0
+    for key in targets
+        haskey(m.physical,key) || continue
+        delete!(m.physical,key)
+        delete!(m.physical_names,key)
+        removed+=1
+    end
+    return removed
+end
+
+"""
+    remove_physical_name!(model, name) -> Int
+
+Remove `name` from every Physical group carrying it without removing any group or
+geometry. Return the number of names removed; a missing or empty name is a no-op.
+"""
+function remove_physical_name!(m::GeoModel,name::AbstractString)
+    group_name=String(name)
+    isempty(group_name) && return 0
+    targets=Tuple{Int,Int}[
+        key for (key,existing) in m.physical_names if existing==group_name]
+    for key in targets
+        delete!(m.physical_names,key)
+    end
+    return length(targets)
+end
+
+"""
+    model_physical_groups(model, dim=-1) -> Vector{Tuple{Int,Int}}
+
+Return detached Physical `(dimension, tag)` pairs in deterministic order. `dim=-1`
+selects every dimension; `dim=0:3` filters the result.
+"""
+function model_physical_groups(m::GeoModel,dim=-1)
+    dimension=_physical_query_dimension(dim,"model_physical_groups")
+    groups=Tuple{Int,Int}[
+        key for key in keys(m.physical) if dimension==-1 || key[1]==dimension]
+    return sort!(groups)
+end
+
+"""
+    model_entities_for_physical_group(model, dim, tag) -> Vector{Int}
+
+Return detached, sorted entity tags for an existing Physical group.
+"""
+function model_entities_for_physical_group(m::GeoModel,dim,tag)
+    key=_physical_group_key(dim,tag,"model_entities_for_physical_group")
+    haskey(m.physical,key) || throw(ArgumentError(
+        "model_entities_for_physical_group: Physical$(key) does not exist"))
+    return sort!(copy(m.physical[key]))
+end
+
+"""
+    model_physical_groups_for_entity(model, dim, tag) -> Vector{Int}
+
+Return the sorted Physical tags containing an existing geometry entity.
+"""
+function model_physical_groups_for_entity(m::GeoModel,dim,tag)
+    caller="model_physical_groups_for_entity"
+    dimension=_dimension(dim,caller)
+    entity_tag=_tag(tag,caller,dimension)
+    entity_tag>0 || throw(ArgumentError("$caller: entity tag must be positive"))
+    key=(dimension,entity_tag)
+    _has_entity(m,key...) || throw(ArgumentError(
+        "$caller: entity $(key) does not exist"))
+    groups=Int[physical_tag for ((group_dimension,physical_tag),entities) in m.physical
+               if group_dimension==key[1] && key[2] in entities]
+    return sort!(groups)
+end
+
+"""
+    model_physical_name(model, dim, tag) -> String
+
+Return the Physical group name, or an empty string when the group is unnamed or
+does not exist.
+"""
+function model_physical_name(m::GeoModel,dim,tag)
+    key=_physical_group_key(dim,tag,"model_physical_name")
+    return get(m.physical_names,key,"")
+end
+
+"""
+    model_entities_for_physical_name(model, name) -> Vector{Tuple{Int,Int}}
+
+Return detached, sorted geometry `(dimension, tag)` pairs belonging to every group
+named `name`. The same name can identify one group in each dimension. A missing or
+empty name is rejected.
+"""
+function model_entities_for_physical_name(m::GeoModel,name::AbstractString)
+    group_name=String(name)
+    isempty(group_name) && throw(ArgumentError(
+        "model_entities_for_physical_name: Physical name must not be empty"))
+    group_keys=Tuple{Int,Int}[
+        key for (key,existing) in m.physical_names if existing==group_name]
+    isempty(group_keys) && throw(ArgumentError(
+        "model_entities_for_physical_name: Physical name $(repr(group_name)) does not exist"))
+    entities=Tuple{Int,Int}[]
+    for key in group_keys, entity in m.physical[key]
+        push!(entities,(key[1],entity))
+    end
+    return sort!(unique!(entities))
+end
+
+"""
+    model_physical_groups_entities(model, dim=-1)
+
+Return the same ordered groups as [`model_physical_groups`](@ref), together with a
+detached vector of sorted `(dimension, entity_tag)` members for each group.
+"""
+function model_physical_groups_entities(m::GeoModel,dim=-1)
+    groups=model_physical_groups(m,dim)
+    entities=Vector{Vector{Tuple{Int,Int}}}(undef,length(groups))
+    for (index,(dimension,physical_tag)) in pairs(groups)
+        entities[index]=Tuple{Int,Int}[
+            (dimension,tag) for tag in sort!(copy(m.physical[(dimension,physical_tag)]))]
+    end
+    return groups,entities
 end
 
 """

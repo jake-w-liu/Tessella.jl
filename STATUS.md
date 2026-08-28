@@ -27,7 +27,7 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, and classified surface/explicit-shell/embedded-volume model-to-mixed projection |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, and global automatic Physical tags, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, deterministic Physical-group lifecycle, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -90,6 +90,10 @@ membership is deduplicated; `CombinedBoundary` keeps tags with odd multiplicity.
 and cavity boundaries participate, while embeddings do not. Empty combined boundaries,
 unsupported dimensions, and implicit primitive or Boolean topology are explicit
 blockers.
+The model and session APIs return detached, sorted group, membership,
+reverse-membership, and name-query results. Names are dimension-scoped; removing a
+name or selected/all groups leaves geometry intact and keeps automatic Physical tags
+monotonic.
 
 P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
 and tetrahedron child templates while sharing edge midpoints, compacting unused nodes,
@@ -150,6 +154,43 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-08-28 with Julia 1.12.7 after completing the native
+Physical-group lifecycle:
+
+- The model and synchronized session API now query sorted, detached Physical groups,
+  memberships, reverse memberships, names, and name-selected entities. Names are
+  unique within a dimension and reusable across dimensions. Gmsh 4.15.2-compatible
+  name assignment, cross-dimensional name removal, selective/all-group removal, and
+  monotonic automatic tags are covered. Group removal leaves geometry intact; failed
+  or no-op mutations are atomic and preserve the session mesh cache.
+- The exact Tessella/Gmsh API differential matched automatic tags `1,2,3`,
+  cross-dimensional names, same-dimension duplicate-name omission, all query results,
+  name mutation/removal, selective removal, three final groups, and replacement tag
+  `4`. It retained dynamic mesh CRC
+  `2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808`,
+  projected CRC
+  `99aeefc2e269090b518f5896f2388bd419c8fb44d06e4743579d50d61aaedf81`,
+  and `SetMaxTag` CRC
+  `aa3127e5c1a302ebdb98890a4d7a62d5cb385e3cf73aa024372f809a7542a45d`.
+- Bounds-checked focused sets passed under Julia 1.12.7 and Julia 1.11.9: model
+  lifecycle/entity behavior 119/119, native periodic relations 118/118, model/`.geo`
+  execution 84/84, `.geo` dynamic tags 67/67, topology/Point sizing 240/240,
+  API session/option behavior 64/64, API lifecycle 62/62, API Point sizing 35/35,
+  explicit volumes 26/26, periodic volume boundaries 12/12, periodic ownership
+  35/35, embedded periodic curves 27/27, periodic dependency graphs 49/49, IO
+  426/426, CLI 131/131, periodic projection 93/93, 51/51, and 9/9, and volume
+  projection 72/72, 13/13, 80/80, and 60/60.
+  Public-documentation and recursive ambiguity scans for `Tessella.Model` and
+  `Tessella.API`, plus direct documentation checks for the nine `API.model` lifecycle
+  functions, returned zero under both versions.
+- The bounds-checked package gate passed 167,123/167,123 assertions in 14m02.6s.
+  The aggregate bounds-checked validation exited 0 in 34m54.0s against Gmsh
+  4.15.2-git, including the lifecycle differential and unchanged CRCs above.
+- The organization ratchet covers 143 tracked `.jl` files with no repository-root
+  `.jl` files. Source, test, and validation code remain divided among their existing
+  domain subfolders; the only top-level Julia entrypoints are `src/Tessella.jl`,
+  `test/runtests.jl`, and `validation/run_all.jl`.
 
 Re-measured on 2026-08-28 with Julia 1.12.7 after adding global automatic
 Physical-group tags:

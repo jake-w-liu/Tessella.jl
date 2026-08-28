@@ -167,6 +167,10 @@ deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole and cavi
 boundaries participate, while embeddings do not. Empty combined boundaries,
 unsupported dimensions, and implicit primitive or Boolean topology are explicit
 blockers.
+The model and session APIs return detached, sorted group, membership, reverse-membership,
+and name-query results. Names are unique within an entity dimension and can be removed
+independently of their groups. Selective or all-group removal leaves geometry intact
+and does not rewind the global automatic Physical-tag counter.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
