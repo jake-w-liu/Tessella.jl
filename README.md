@@ -176,6 +176,9 @@ recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
 ordering, orientation, and combined-incidence cancellation. Topology queries preserve
 the session mesh cache and exclude embeddings. Primitive and Boolean volumes are
 enumerated, but their implicit boundary topology remains an explicit blocker.
+Boolean volumes own operation-time operand geometry. API Boolean operations and
+`.geo` `Delete` clauses make deleted volume tags reusable without changing an
+existing Boolean result.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,

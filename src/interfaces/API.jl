@@ -4,15 +4,16 @@
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
 deterministic entity-topology and Physical-group queries, Physical-group mutations,
 point-local mesh-size constraints, explicit planar surface-loop volumes, and
-persistent affine relations between straight periodic boundary or embedded curves
-and planar periodic volume boundaries. Production meshing is never delegated to
-Gmsh.
+operation-time Boolean operand ownership, plus persistent affine relations between
+straight periodic boundary or embedded curves and planar periodic volume boundaries.
+Production meshing is never delegated to Gmsh.
 """
 module API
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
+using ..Model: _remove_volume_entity!
 using ..Model: embed!, set_point_mesh_size!
 using ..Model: add_physical_group!, set_physical_name!, remove_physical_groups!
 using ..Model: remove_physical_name!, model_physical_groups
@@ -205,6 +206,7 @@ module model
 using ..API: _with_model, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..API: add_surface_loop!, add_volume!
 using ..API: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!, embed!, add_physical_group!
+using ..API: _remove_volume_entity!
 using ..API: _get_physical_groups, _get_physical_groups_entities
 using ..API: _get_entities_for_physical_group, _get_entities_for_physical_name
 using ..API: _get_physical_groups_for_entity, _get_physical_name
@@ -249,7 +251,8 @@ function _boolean(op,a,b; tag=0)
     return _with_model(invalidate=true) do m
         t=boolean_volumes!(m,op,a,b;tag=tag)
         # OCC cut/fuse/common remove object and tool by default.
-        delete!(m.volumes,Int(a));delete!(m.volumes,Int(b))
+        _remove_volume_entity!(m,Int(a))
+        _remove_volume_entity!(m,Int(b))
         t
     end
 end

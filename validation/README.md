@@ -45,6 +45,7 @@ validation/
     geo_mesh_sizes.jl # Point sizing and topology-derived Physical groups
     geo_dynamic_tags.jl # geometry/Physical allocation and lifecycle, SetMaxTag, OCC
     model_topology_queries.jl # entity/boundary/adjacency API differential
+    boolean_boxes.jl      # Boolean snapshot ownership and Delete lifecycle
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
     periodic_embedded_curve.jl # embedded periodic-curve MSH2/MSH4 lifecycle
@@ -87,7 +88,7 @@ four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
-cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface and
+cylinder, Boolean snapshot/Delete lifecycle, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
 bounded expression- and numeric-list-backed geometry and entity lists,
 point-local and explicit-topology `.geo` mesh-size constraints, API updates, and

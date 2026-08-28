@@ -116,10 +116,10 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel with explicit entity, boundary, and adjacency queries |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, and global automatic Physical tags, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, deterministic entity-topology and Physical-group queries, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology queries, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and BooleanDifference box corpus |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology queries, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and Boolean snapshot/Delete lifecycle corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -160,7 +160,7 @@ an explicit blocker listing the seen entity types. The entity kernel records nat
 boxes, cylinders, spheres, cones, mesh-Boolean volumes, and connected planar
 surface-loop volumes with cavity shells. Bounded `.geo` execution covers
 Point/Line/Loop/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone, BooleanDifference/Union/Intersection
-of those solids (with operand `Delete`), Translate of remaining native solids,
+of those solids, Translate of remaining native solids,
 Dilate about a center, and coordinate-axis rotations by integer multiples of π/2
 of native primitives; boxes remain axis-aligned. Point-In-Surface embeddings force
 the classified point to appear as a mesh node; Line-In-Surface embeddings recover the curve as an
@@ -175,6 +175,11 @@ support zero-based indexing, cardinality, copying, concatenation, selection,
 whole-list append/removal, and indexed or selected mutation. Known lists expand in
 field options, geometry/entity memberships, embeddings, Physical groups, and
 periodic slave/master sets; constant entity ranges share the list-size limit.
+Boolean results own operation-time operand surface snapshots. An operand `Delete`
+removes its visible volume, every native solid encoding for that tag, target volume
+embeddings, and dimension-3 Physical memberships; empty groups and their names are
+removed, while automatic tag counters remain monotonic. Deleted tags can therefore
+be reused without changing an earlier Boolean result.
 `SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in can set
 or lower a geometric allocation counter, while OpenCASCADE only raises it. Allocator
 reads use the greatest counter among activated factories, and primitive
@@ -344,7 +349,7 @@ projection and embedding-metadata round trips, plus the classified
 Surface-In-Volume MSH2/MSH4 lifecycle with nested point/curve constraints, as
 well as the holed-sheet lifecycle, as required bounds-checked children,
 together with the P6 t1-square, OCC-cylinder, OCC-cone, IGES-128 bilinear,
-BooleanDifference box, and 2-D boundary-layer differentials. A missing or
+Boolean snapshot/Delete lifecycle, and 2-D boundary-layer differentials. A missing or
 wrong-version Gmsh runtime, a failed probe, or a parity mismatch makes the
 aggregate command fail.
 
