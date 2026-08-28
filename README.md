@@ -95,11 +95,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   explicit planar surface-loop volumes with cavity signs; periodic explicit volumes
   retain their derived boundary point/curve forest and surface-node maps through
   MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
-- model and synchronized session APIs for dimension-scoped entity names and atomic
-  positive-tag changes; retagging moves explicit topology, Physical memberships,
-  embedding sources and targets, periodic relations, native solid encodings, owned
-  Boolean-result geometry, and the entity name while preserving automatic-tag
-  monotonicity;
+- model and synchronized session APIs for dimension-scoped entity names, atomic
+  positive-tag changes, and ordered dependency-safe removal; retagging moves every
+  live reference, while removal skips surviving boundary/embedding dependencies,
+  can recurse through explicit boundaries, and cleans owned metadata and encodings
+  without rewinding automatic tags;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
   bounds, and output validation;
@@ -186,6 +186,15 @@ replaced, cleared per entity, or removed by value across dimensions. Entity tags
 positive `Int32` values in dimensions 0 through 3. Unlike Gmsh 4.15.2, Tessella does
 not preload names for missing entities or accept nonpositive retag targets, and a
 name follows its entity when the tag changes.
+Ordered entity removal matches Gmsh's dependency behavior for explicit topology:
+entities used by surviving boundaries or embedding targets are skipped, and recursive
+removal walks boundary entities down to Points without treating embeddings as
+boundaries. Tessella validates the whole request before committing, removes names,
+empty Physical groups, affected periodic relations, target embeddings, native solid
+encodings, and Boolean-result snapshots, and keeps allocator counters monotonic.
+Primitive and Boolean Volume boundaries are implicit, so their recursive removal
+stops at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
+Tessella's owning native model and is not undone by a later synchronization.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
@@ -217,8 +226,8 @@ julia --project --check-bounds=yes validation/run_all.jl
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
-spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology and
-entity-identity,
+spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
+entity-identity, and dependency-safe entity-removal,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

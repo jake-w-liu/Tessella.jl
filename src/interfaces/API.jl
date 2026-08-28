@@ -2,11 +2,11 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-deterministic entity-topology and Physical-group queries, entity-name and atomic-tag
-mutations, Physical-group mutations, point-local mesh-size constraints, explicit
-planar surface-loop volumes, operation-time Boolean operand ownership, and persistent
-affine relations between straight periodic boundary or embedded curves and planar
-periodic volume boundaries.
+deterministic entity-topology and Physical-group queries, entity-name, atomic-tag, and
+dependency-safe removal mutations, Physical-group mutations, point-local mesh-size
+constraints, explicit planar surface-loop volumes, operation-time Boolean operand
+ownership, and persistent affine relations between straight periodic boundary or
+embedded curves and planar periodic volume boundaries.
 Production meshing is never delegated to Gmsh.
 """
 module API
@@ -23,6 +23,7 @@ using ..Model: model_entities_for_physical_name, model_physical_groups_for_entit
 using ..Model: model_physical_name
 using ..Model: model_entities, model_dimension, model_boundary, model_adjacencies
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
+using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -182,6 +183,14 @@ _set_tag(dim,tag,new_tag)=_with_model(invalidate=true) do current
     nothing
 end
 
+function _remove_entities(dim_tags,recursive=false)
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        remove_entities!(current,dim_tags,recursive)>0 && (LAST_MESH[]=nothing)
+        nothing
+    end
+end
+
 _get_physical_groups_entities(dim=-1)=_with_model() do current
     model_physical_groups_entities(current,dim)
 end
@@ -246,6 +255,7 @@ using ..API: _get_physical_groups_for_entity, _get_physical_name
 using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
 using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
+using ..API: _remove_entities
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
     add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
 end
@@ -315,6 +325,16 @@ Atomically move an existing entity to an unused positive tag in the same dimensi
 including all live model references and its name.
 """
 set_tag(dim,tag,new_tag)=_set_tag(dim,tag,new_tag)
+
+"""
+    remove_entities(dim_tags, recursive=false)
+
+Remove ordered positive `(dimension, entity_tag)` pairs when they are not used by a
+surviving boundary or embedding owner. With `recursive=true`, also process explicit
+boundary entities down to Points. Missing and still-owned entities are unchanged.
+"""
+remove_entities(dim_tags,recursive=false)=
+    _remove_entities(dim_tags,recursive)
 
 """Add a Physical group; `tag=0` allocates globally across entity dimensions."""
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m

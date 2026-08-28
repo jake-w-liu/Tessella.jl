@@ -2,8 +2,8 @@
     Model
 
 A native geometry/entity kernel: tagged and named points, curves, curve loops,
-surfaces, surface loops, and volumes with atomic entity retagging, physical groups,
-and classified surface/volume mixed-mesh projection.
+surfaces, surface loops, and volumes with atomic retagging and dependency-safe
+removal, physical groups, and classified surface/volume mixed-mesh projection.
 Meshing dispatches to Tessella's certified simplex and transfinite kernels. This
 is not OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
@@ -37,6 +37,7 @@ export model_entities_for_physical_name, model_physical_groups_for_entity
 export model_physical_name
 export model_entities, model_dimension, model_boundary, model_adjacencies
 export set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
+export remove_entities!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
@@ -334,6 +335,7 @@ end
 
 include("ModelTopologyQueries.jl")
 include("ModelIdentity.jl")
+include("ModelRemoval.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -1106,26 +1108,6 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     m.booleans[t]=(op=op, a=ta, b=tb)
     m.boolean_operands[t]=(operand_a,operand_b)
     return t
-end
-
-function _remove_volume_entity!(m::GeoModel,tag::Int)
-    haskey(m.volumes,tag) || return false
-    delete!(m.volumes,tag)
-    for encoding in (m.box_extents,m.cylinders,m.spheres,m.cones,
-                     m.booleans,m.boolean_operands)
-        delete!(encoding,tag)
-    end
-    delete!(m.embeds,(3,tag))
-    for key in collect(keys(m.physical))
-        key[1]==3 || continue
-        entities=m.physical[key]
-        tag in entities || continue
-        filter!(entity->entity!=tag,entities)
-        isempty(entities) || continue
-        delete!(m.physical,key)
-        delete!(m.physical_names,key)
-    end
-    return true
 end
 
 function _has_entity(m::GeoModel, dim::Int, tag::Int)
