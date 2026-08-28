@@ -59,6 +59,7 @@ using Tessella
     include("structured/transfinite_prism_test.jl") # affine five-face transfinite prisms
     include("structured/transfinite_hex_test.jl") # affine six-face recombined hexahedra
     include("geometry/model_test.jl")    # entity kernel + .geo execution
+    include("geometry/model_topology_query_test.jl") # explicit topology query API
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
@@ -71,6 +72,7 @@ using Tessella
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
+    include("interfaces/api_topology_query_test.jl") # explicit topology queries
     include("interfaces/cli_test.jl") # bounded parser + non-destructive output
     include("interfaces/gui_test.jl") # validated headless command/state machine
     include("interfaces/post_test.jl") # owned scalar views + synchronized plugins
