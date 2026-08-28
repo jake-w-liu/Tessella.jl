@@ -35,6 +35,8 @@ const _SET_MAX_TAG_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_set_max_tags.geo")),String)
 const _POINT_MESH_SIZE_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_point_mesh_sizes.geo")),String)
+const _POINT_MESH_SIZE_POINTS_OF_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_point_mesh_size_points_of.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -405,6 +407,19 @@ Physical Volume("domain", 72) = {1};
         @test validate(point_mesh_size).ok
         @test mesh_crc(point_mesh_size).sha==
               "b3f1bf410e917d050eacceab998b0fdf7b4cd61d1d9f263805b5120c06f1f4df"
+
+        points_of_input=joinpath(directory,"point-mesh-size-points-of.geo")
+        points_of_output=joinpath(directory,"point-mesh-size-points-of.msh")
+        write(points_of_input,_POINT_MESH_SIZE_POINTS_OF_CLI_GEO)
+        @test main([points_of_input,"-3","-o",points_of_output])==
+              points_of_output
+        @test read(points_of_input,String)==_POINT_MESH_SIZE_POINTS_OF_CLI_GEO
+        points_of_mesh=read_mixed_msh(points_of_output)
+        @test validate(points_of_mesh).ok
+        @test mixed_crc(points_of_mesh).sha==
+              "a03e62cdb5b5049f0c3ac79f829707cab1ce7575ade8a2b246808a7e222e50ca"
+        @test points_of_mesh.physical_names==
+              Dict((0,11)=>"vertices",(3,12)=>"domain")
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")

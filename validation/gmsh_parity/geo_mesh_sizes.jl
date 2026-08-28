@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# P6: Point constraints and spatial surface grading vs Gmsh 4.15.2.
+# P6: Direct/topology Point constraints and spatial grading vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
@@ -9,7 +9,11 @@ using Tessella.Elements: mixed_crc
 
 const GEO=normpath(joinpath(
     @__DIR__,"..","..","test","fixtures","geo_point_mesh_sizes.geo"))
+const POINTS_OF_GEO=normpath(joinpath(
+    @__DIR__,"..","..","test","fixtures",
+    "geo_point_mesh_size_points_of.geo"))
 const EXPECTED_SIZES=[0.8,0.4,3*0.8/4,0.4]
+const EXPECTED_POINTS_OF_SIZES=[0.4,0.5,0.2,0.4,1.0]
 const EXPECTED_PHYSICAL_NAMES=Dict(
     (0,10)=>"corners",(2,20)=>"domain")
 
@@ -37,6 +41,14 @@ validate(projected).ok || error("Tessella point-size projection is invalid")
 mixed_crc(projected).sha==
     "b7202dfa1cfb7469e7541c34e2b1bfae404c66f2462abc1953fa0b9374e5a010" ||
     error("Tessella point-size projection CRC changed")
+
+points_of_execution=execute_geo(POINTS_OF_GEO)
+points_of_sizes=[points_of_execution.model.point_size[tag] for tag in 1:5]
+points_of_sizes==EXPECTED_POINTS_OF_SIZES || error(
+    "Tessella PointsOf constraints changed: $points_of_sizes")
+Tessella.Model._model_points_of(
+    points_of_execution.model,[(3,1)],"PointsOf differential")==collect(1:4) ||
+    error("Tessella PointsOf recursive Volume boundary changed")
 
 function native_spatial_mesh()
     model=GeoModel()
@@ -178,6 +190,47 @@ try
         "Gmsh point-size area is $gmsh_area, expected 1")
 
     gmsh.clear()
+    gmsh.open(POINTS_OF_GEO)
+    points_of_gmsh_sizes=gmsh.model.mesh.getSizes([(0,tag) for tag in 1:5])
+    points_of_gmsh_sizes==EXPECTED_POINTS_OF_SIZES || error(
+        "Gmsh PointsOf constraints changed: $points_of_gmsh_sizes")
+    gmsh.parser.getNumber("selectedSurfaces")==[-1.0,4.0] || error(
+        "Gmsh PointsOf selector list changed")
+    points_of_boundary=sort!([Int(tag) for (dim,tag) in
+        gmsh.model.getBoundary([(3,1)],false,false,true) if dim==0])
+    points_of_boundary==collect(1:4) || error(
+        "Gmsh PointsOf recursive Volume boundary changed: $points_of_boundary")
+
+    primitive_points_of=mktempdir() do directory
+        path=joinpath(directory,"primitive-points-of.geo")
+        write(path,"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0,1,1,1};
+            MeshSize {PointsOf{Volume{1};}} = 0.15;
+            """)
+        tessella_error=try
+            execute_geo(path)
+            nothing
+        catch err
+            err
+        end
+        tessella_error isa ArgumentError || error(
+            "Tessella accepted PointsOf on implicit primitive topology")
+        occursin("Volume[1] has no explicit surface-loop topology",
+                 sprint(showerror,tessella_error)) || error(
+            "Tessella primitive PointsOf blocker changed")
+        gmsh.clear()
+        gmsh.open(path)
+        point_entities=gmsh.model.getEntities(0)
+        length(point_entities)==8 || error(
+            "Gmsh OCC Box PointsOf point count changed")
+        sizes=gmsh.model.mesh.getSizes(point_entities)
+        all(==(0.15),sizes) || error(
+            "Gmsh OCC Box PointsOf sizes changed: $sizes")
+        length(point_entities)
+    end
+
+    gmsh.clear()
     gmsh.model.add("point_size_spatial")
     spatial_sizes=(0.1,0.8,0.8,0.8)
     for (tag,(x,y)) in enumerate(((0.0,0.0),(2.0,0.0),
@@ -256,8 +309,11 @@ try
             "spatial_gmsh_tris=$(length(spatial_connectivity)÷3) " *
             "spatial_tessella_quadrants=$(join(spatial_native_counts,",")) " *
             "spatial_gmsh_quadrants=$(join(spatial_gmsh_counts,",")) " *
+            "points_of_sizes=$(join(points_of_sizes,",")) " *
+            "points_of_boundary=$(join(points_of_boundary,",")) " *
+            "primitive_hidden_points=$primitive_points_of " *
             "mesh_crc=$(mesh_crc(mesh).sha) projected_crc=$(mixed_crc(projected).sha) " *
-            "bounded_contract=positive_existing_points_piecewise_linear_surface")
+            "bounded_contract=positive_existing_points_piecewise_linear_surface_explicit_points_of_topology")
 finally
     gmsh.isInitialized()!=0 && gmsh.finalize()
 end

@@ -61,7 +61,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   factory-aware, checked `SetMaxTag` control of geometric counters; the
   executor applies the same checked semantics to numeric parameters, entity tags,
   and entity lists in every supported geometry statement, and stores positive
-  `MeshSize`/`Characteristic Length` constraints on existing explicit Points;
+  `MeshSize`/`Characteristic Length` constraints on existing explicit Points,
+  including recursive explicit-topology `PointsOf` selection;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
@@ -145,14 +146,17 @@ functions, bounded numeric list assignment/indexing/selection/mutation, and cons
 entity ranges to all supported geometry statements. Entity lists, including periodic
 slave/master sets, can reuse whole or selected list variables.
 Point `MeshSize` selectors can likewise use `:`, expressions, constant ranges, and
-whole or selected numeric-list variables. Tessella requires existing explicit Points
-and finite positive sizes; Gmsh's permissive zero/negative and missing-Point behavior
-is outside this bounded contract. The planar surface path extends Point constraints
+whole or selected numeric-list variables. Inline `PointsOf` blocks additionally
+select the recursive boundary Points of explicit Point, Curve/Line, Surface, and
+Volume entities; signed entity tags are normalized, hole boundaries participate,
+and embeddings do not. Tessella requires existing explicit Points and finite positive
+sizes; Gmsh's permissive zero/negative and missing-Point behavior is outside this
+bounded contract. The planar surface path extends Point constraints
 piecewise-linearly over its deterministic initial constrained triangulation. Generated
 straight-curve subdivision nodes interpolate their endpoint sizes, while equal Point
 sizes retain the constant-size path and coincident PSLG inputs use the smaller
-constraint. Exact Gmsh mesh topology, hidden primitive
-topology, and topology-derived selectors remain outside this bounded contract.
+constraint. Exact Gmsh mesh topology, implicit primitive or Boolean subentities, and
+topology-query forms other than inline `PointsOf` remain outside this bounded contract.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
