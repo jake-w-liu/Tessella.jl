@@ -32,3 +32,12 @@ Characteristic Length {PointsOf{Point{3};}} = 0.2;
 
 Physical Point("vertices", 11) = {1:4};
 Physical Volume("domain", 12) = {1};
+faceTags[] = {-1, 2};
+Physical Point("endpoints", 21) = CombinedBoundary{Line{1:2};};
+Physical Curve("face boundary", 22) = Boundary{Surface{-1};};
+Physical Surface("skin", 23) = CombinedBoundary{Volume{:};};
+Physical Curve("two face rim", 25) =
+    CombinedBoundary{Surface{faceTags[]};};
+Physical Curve("two face boundary", 26) =
+    Boundary{Surface{faceTags[]};};
+Physical Point("vertices query", 27) = PointsOf{Volume{1};};

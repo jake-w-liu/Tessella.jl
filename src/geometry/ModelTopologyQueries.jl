@@ -72,3 +72,104 @@ function _model_points_of(m::GeoModel,entities,caller::AbstractString)
     end
     return sort!(collect(points))
 end
+
+function _model_boundary(m::GeoModel,entities,caller::AbstractString;
+                         combined::Bool=false,
+                         max_entities::Int=typemax(Int))
+    query=combined ? "CombinedBoundary" : "Boundary"
+    (entities isa AbstractVector || entities isa Tuple) || throw(ArgumentError(
+        "$caller: $query entities must be a vector or tuple of " *
+        "(dimension, signed tag) pairs"))
+    isempty(entities) && throw(ArgumentError(
+        "$caller: $query must contain at least one entity"))
+
+    normalized=NTuple{2,Int}[]
+    sizehint!(normalized,length(entities))
+    source_dimension=nothing
+    for entry in entities
+        entry isa Tuple && length(entry)==2 || throw(ArgumentError(
+            "$caller: each $query entity must be a (dimension, signed tag) pair"))
+        dimension=_dimension(entry[1],caller)
+        dimension>0 || throw(ArgumentError(
+            "$caller: $query input entities must have dimension 1, 2, or 3"))
+        value=entry[2]
+        value isa Integer || throw(ArgumentError(
+            "$caller: $query entity tag must be an integer"))
+        value isa Bool && throw(ArgumentError(
+            "$caller: $query entity tag must not be Bool"))
+        value!=0 || throw(ArgumentError(
+            "$caller: $query entity tags must be nonzero"))
+        (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
+            "$caller: $query entity tag magnitude exceeds Int32"))
+        source_dimension===nothing || source_dimension==dimension ||
+            throw(ArgumentError(
+                "$caller: $query input entities must share one dimension"))
+        source_dimension=dimension
+        push!(normalized,(dimension,Int(value)))
+    end
+
+    boundary=Int[]
+    function add_boundary!(tag::Int)
+        length(boundary)<max_entities || throw(ArgumentError(
+            "$caller: $query expands beyond $max_entities entities"))
+        push!(boundary,tag)
+        return nothing
+    end
+    for (dimension,signed_tag) in normalized
+        tag=abs(signed_tag)
+        if dimension==1
+            haskey(m.curves,tag) || throw(ArgumentError(
+                "$caller: unknown Curve[$tag]"))
+            endpoints=m.curves[tag]
+            for point in endpoints
+                haskey(m.points,point) || throw(ArgumentError(
+                    "$caller: Curve[$tag] references unknown Point[$point]"))
+            end
+            first_point,last_point=endpoints
+            if signed_tag>0
+                add_boundary!(first_point)
+                add_boundary!(last_point)
+            else
+                add_boundary!(last_point)
+                add_boundary!(first_point)
+            end
+        elseif dimension==2
+            haskey(m.surfaces,tag) || throw(ArgumentError(
+                "$caller: unknown Surface[$tag]"))
+            for loop in m.surfaces[tag]
+                haskey(m.loops,loop) || throw(ArgumentError(
+                    "$caller: Surface[$tag] references unknown Loop[$loop]"))
+                for signed_curve in m.loops[loop]
+                    curve=abs(signed_curve)
+                    haskey(m.curves,curve) || throw(ArgumentError(
+                        "$caller: Loop[$loop] references unknown Curve[$curve]"))
+                    add_boundary!(curve)
+                end
+            end
+        else
+            haskey(m.volumes,tag) || throw(ArgumentError(
+                "$caller: unknown Volume[$tag]"))
+            shells=m.volumes[tag]
+            isempty(shells) && throw(ArgumentError(
+                "$caller: Volume[$tag] has no explicit surface-loop topology; " *
+                "define it from Surface Loop entities before querying its boundary"))
+            for shell in shells
+                haskey(m.surface_loops,shell) || throw(ArgumentError(
+                    "$caller: Volume[$tag] references unknown Surface Loop[$shell]"))
+                for signed_surface in m.surface_loops[shell]
+                    surface=abs(signed_surface)
+                    haskey(m.surfaces,surface) || throw(ArgumentError(
+                        "$caller: Surface Loop[$shell] references unknown Surface[$surface]"))
+                    add_boundary!(surface)
+                end
+            end
+        end
+    end
+    combined || return boundary
+
+    odd=Set{Int}()
+    for tag in boundary
+        tag in odd ? delete!(odd,tag) : push!(odd,tag)
+    end
+    return sort!(collect(odd))
+end

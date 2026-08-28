@@ -880,11 +880,17 @@ end
                 Physical Volume("mixed", 12) = {
                     Volume In BoundingBox{0,0,0,1,1,1}, 1:2};
                 Physical Point("ternary", 13) = {1 ? 1 : 2};
+                Physical Surface(14) = CombinedBoundary{Volume{:};};
+                Physical Point("topology", 15) = PointsOf{Surface{1};};
+                Physical Curve("", 16) = Boundary{Surface{1};};
                 """)
             opaque_params=read_geo_params(opaque_physical)
             @test opaque_params.physical_groups[(2,11)]=="all"
             @test opaque_params.physical_groups[(3,12)]=="mixed"
             @test opaque_params.physical_groups[(0,13)]=="ternary"
+            @test opaque_params.physical_groups[(0,15)]=="topology"
+            @test !haskey(opaque_params.physical_groups,(2,14))
+            @test !haskey(opaque_params.physical_groups,(1,16))
 
             function range_error(source)
                 path=joinpath(dir,"list_range_error.geo")

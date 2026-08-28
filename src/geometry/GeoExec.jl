@@ -10,7 +10,11 @@ Translate/Rotate/Affine periodic straight curves or explicit-volume planar bound
 surfaces with reusable masters and acyclic dependency chains. `MeshSize` and
 `Characteristic Length` update existing explicit Point constraints directly or
 through recursive `PointsOf` boundaries of explicit Point/Curve/Surface/Volume
-entities. Numeric parameters, entity tags, and entity lists use bounded
+entities. Explicit-tag Physical declarations may be named or unnamed. Their entity
+lists accept numeric selectors, `PointsOf` for Physical Point, and immediate
+`Boundary` or `CombinedBoundary` queries over explicit entities of the next higher
+dimension.
+Numeric parameters, entity tags, and entity lists use bounded
 constant-expression evaluation. Numeric
 list variables provide zero-based indexing, cardinality, copying, concatenation,
 selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
@@ -25,7 +29,7 @@ using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: add_physical_group!, set_periodic!
-using ..Model: _model_points_of
+using ..Model: _model_boundary, _model_points_of
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
@@ -155,8 +159,15 @@ explicit Points through `:`, numeric expressions and ranges, numeric-list variab
 or inline `PointsOf` blocks for Point, Curve/Line, Surface, and explicit Volume
 entities. `PointsOf` recursively follows entity boundaries, including hole loops;
 embedded entities are not boundaries. Their values must be finite and positive.
-Unknown entities, implicit primitive or Boolean volume topology, and other topology
-queries are explicit blockers.
+Explicit-tag Physical declarations may be named or unnamed. Physical Point accepts
+inline `PointsOf`; Physical Point/Curve/Surface accept inline `Boundary` and
+`CombinedBoundary` over Curve/Line, Surface, and explicit Volume entities,
+respectively. `Boundary` joins the selected immediate boundaries and physical-group
+insertion removes duplicate tags. `CombinedBoundary` retains tags with odd
+multiplicity. Hole and cavity boundaries participate; embeddings do not. Unknown
+entities, empty combined boundaries, implicit primitive or Boolean volume topology,
+unsupported geometry-derived selectors, and invalid query dimensions are explicit
+blockers.
 An allocator read after a topology-changing or untracked declaration is rejected.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
@@ -271,14 +282,16 @@ function _geo_exec_entity_tags(raw::AbstractString,
     return tags
 end
 
-function _geo_exec_points_of_payload(selector::AbstractString,
-                                     caller::AbstractString)
+function _geo_exec_topology_query_payload(selector::AbstractString,
+                                          query::AbstractString,
+                                          caller::AbstractString)
     source=String(strip(selector))
-    match(r"^PointsOf\s*\{",source)!==nothing || throw(ArgumentError(
-        "$caller: malformed PointsOf selector"))
+    matched=match(r"^([A-Za-z][A-Za-z0-9]*)\s*\{",source)
+    (matched!==nothing && matched.captures[1]==query) || throw(ArgumentError(
+        "$caller: malformed $query selector"))
     opening=findfirst(==('{'),source)
     opening===nothing && throw(ArgumentError(
-        "$caller: malformed PointsOf selector"))
+        "$caller: malformed $query selector"))
     depth=0;closing=nothing;i=opening
     while i<=lastindex(source)
         character=source[i]
@@ -287,7 +300,7 @@ function _geo_exec_points_of_payload(selector::AbstractString,
         elseif character=='}'
             depth-=1
             depth>=0 || throw(ArgumentError(
-                "$caller: PointsOf selector has an unmatched closing brace"))
+                "$caller: $query selector has an unmatched closing brace"))
             if depth==0
                 closing=i
                 break
@@ -296,19 +309,20 @@ function _geo_exec_points_of_payload(selector::AbstractString,
         i=nextind(source,i)
     end
     closing===nothing && throw(ArgumentError(
-        "$caller: PointsOf selector has an unmatched opening brace"))
+        "$caller: $query selector has an unmatched opening brace"))
     after=nextind(source,closing)
     trailing=after>lastindex(source) ? "" : String(strip(source[after:end]))
     isempty(trailing) || throw(ArgumentError(
-        "$caller: unexpected text after the PointsOf selector"))
+        "$caller: unexpected text after the $query selector"))
     first_payload=nextind(source,opening)
     payload=first_payload==closing ? "" :
         String(source[first_payload:prevind(source,closing)])
     return payload
 end
 
-function _geo_exec_points_of_blocks(payload::AbstractString,
-                                    caller::AbstractString)
+function _geo_exec_topology_query_blocks(payload::AbstractString,
+                                         query::AbstractString,
+                                         caller::AbstractString)
     blocks=String[];buffer=IOBuffer();depth=0
     for character in payload
         if character=='{'
@@ -317,40 +331,44 @@ function _geo_exec_points_of_blocks(payload::AbstractString,
         elseif character=='}'
             depth-=1
             depth>=0 || throw(ArgumentError(
-                "$caller: PointsOf entity blocks have an unmatched closing brace"))
+                "$caller: $query entity blocks have an unmatched closing brace"))
             write(buffer,character)
         elseif character==';' && depth==0
             block=String(strip(String(take!(buffer))))
             isempty(block) && throw(ArgumentError(
-                "$caller: PointsOf contains an empty entity block"))
+                "$caller: $query contains an empty entity block"))
             length(blocks)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
-                "$caller: PointsOf exceeds $_MAX_GEO_LIST_ITEMS entity blocks"))
+                "$caller: $query exceeds $_MAX_GEO_LIST_ITEMS entity blocks"))
             push!(blocks,block)
         else
             write(buffer,character)
         end
     end
     depth==0 || throw(ArgumentError(
-        "$caller: PointsOf entity blocks have an unmatched opening brace"))
+        "$caller: $query entity blocks have an unmatched opening brace"))
     tail=String(strip(String(take!(buffer))))
     isempty(tail) || throw(ArgumentError(
-        "$caller: every PointsOf entity block must end with a semicolon"))
+        "$caller: every $query entity block must end with a semicolon"))
     isempty(blocks) && throw(ArgumentError(
-        "$caller: PointsOf must contain at least one entity block"))
+        "$caller: $query must contain at least one entity block"))
     return blocks
 end
 
-function _geo_exec_all_entity_tags(m::GeoModel,dimension::Int)
+function _geo_exec_all_entity_tags(m::GeoModel,dimension::Int,
+                                   caller::AbstractString)
     entities=dimension==0 ? m.points : dimension==1 ? m.curves :
              dimension==2 ? m.surfaces : m.volumes
+    length(entities)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+        "$caller: entity wildcard expands beyond $_MAX_GEO_LIST_ITEMS entities"))
     return sort!(collect(keys(entities)))
 end
 
 function _geo_exec_points_of(m::GeoModel,selector::AbstractString,
                              context::_GeoNumericContext,
                              caller::AbstractString)
-    payload=_geo_exec_points_of_payload(selector,caller)
-    blocks=_geo_exec_points_of_blocks(payload,caller)
+    query="PointsOf"
+    payload=_geo_exec_topology_query_payload(selector,query,caller)
+    blocks=_geo_exec_topology_query_blocks(payload,query,caller)
     entities=NTuple{2,Int}[]
     for block in blocks
         matched=match(
@@ -362,7 +380,7 @@ function _geo_exec_points_of(m::GeoModel,selector::AbstractString,
                   kind=="Surface" ? 2 : 3
         raw_tags=String(strip(matched.captures[2]))
         tags=if raw_tags==":"
-            _geo_exec_all_entity_tags(m,dimension)
+            _geo_exec_all_entity_tags(m,dimension,"$caller PointsOf $kind selector")
         else
             signed_tags=_geo_exec_entity_tags(
                 raw_tags,context,"$caller PointsOf $kind selector";signed=true)
@@ -379,6 +397,64 @@ function _geo_exec_points_of(m::GeoModel,selector::AbstractString,
         append!(entities,((dimension,tag) for tag in tags))
     end
     return _model_points_of(m,entities,caller)
+end
+
+function _geo_exec_physical_topology(m::GeoModel,selector::AbstractString,
+                                     context::_GeoNumericContext,
+                                     caller::AbstractString,
+                                     physical_dimension::Int)
+    source=String(strip(selector))
+    if match(r"^PointsOf(?:\s|\{)",source)!==nothing
+        physical_dimension==0 || throw(ArgumentError(
+            "$caller: PointsOf produces Point entities and can only populate " *
+            "a Physical Point group"))
+        return _geo_exec_points_of(m,source,context,caller)
+    end
+
+    matched=match(r"^(Boundary|CombinedBoundary)(?:\s|\{)",source)
+    matched===nothing && throw(ArgumentError(
+        "$caller: unsupported topology query; use inline Boundary, " *
+        "CombinedBoundary, or PointsOf for Physical Point"))
+    query=String(matched.captures[1])
+    physical_dimension<3 || throw(ArgumentError(
+        "$caller: $query cannot populate a Physical Volume group because " *
+        "there is no dimension-4 entity boundary"))
+    source_dimension=physical_dimension+1
+    source_kind=source_dimension==1 ? "Curve/Line" :
+                source_dimension==2 ? "Surface" : "Volume"
+    payload=_geo_exec_topology_query_payload(source,query,caller)
+    blocks=_geo_exec_topology_query_blocks(payload,query,caller)
+    entities=NTuple{2,Int}[]
+    for block in blocks
+        entity_match=match(
+            r"^(Curve|Line|Surface|Volume)\s*\{\s*(.*)\s*\}$",block)
+        entity_match===nothing && throw(ArgumentError(
+            "$caller: $query for this Physical group requires $source_kind blocks"))
+        kind=String(entity_match.captures[1])
+        dimension=kind in ("Curve","Line") ? 1 : kind=="Surface" ? 2 : 3
+        dimension==source_dimension || throw(ArgumentError(
+            "$caller: $query for this Physical group requires $source_kind blocks; " *
+            "got $kind"))
+        raw_tags=String(strip(entity_match.captures[2]))
+        tags=raw_tags==":" ? _geo_exec_all_entity_tags(
+            m,dimension,"$caller $query $kind selector") :
+            _geo_exec_entity_tags(
+                raw_tags,context,"$caller $query $kind selector";signed=true)
+        for tag in tags
+            tag==typemin(Int32) && throw(ArgumentError(
+                "$caller $query $kind selector entry magnitude exceeds Int32"))
+        end
+        length(entities)<=_MAX_GEO_LIST_ITEMS-length(tags) || throw(ArgumentError(
+            "$caller: $query expands beyond $_MAX_GEO_LIST_ITEMS entities"))
+        append!(entities,((dimension,tag) for tag in tags))
+    end
+    tags=_model_boundary(
+        m,entities,caller;combined=query=="CombinedBoundary",
+        max_entities=_MAX_GEO_LIST_ITEMS)
+    isempty(tags) && throw(ArgumentError(
+        "$caller: $query matched no entities after boundary cancellation; " *
+        "select topology with a nonempty boundary"))
+    return sort!(unique!(tags))
 end
 
 function _geo_exec_entity_tag(raw::AbstractString,
@@ -687,8 +763,20 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         dim=Dict("Point"=>0,"Curve"=>1,"Line"=>1,"Surface"=>2,"Volume"=>3)[mm.captures[1]]
         name=mm.captures[2]===nothing ? "" : mm.captures[2]
         tag=_geo_exec_entity_tag(mm.captures[3],context,"$caller tag")
-        ids=_geo_exec_entity_rhs_tags(
-            mm.captures[4],context,"$caller entities")
+        membership=String(strip(mm.captures[4]))
+        ids=if match(
+                r"^(?:Boundary|CombinedBoundary|PointsOf)(?:\s|\{)",
+                membership)!==nothing
+            _geo_exec_physical_topology(
+                m,membership,context,"$caller entities",dim)
+        else
+            occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",membership) &&
+                throw(ArgumentError(
+                    "$caller entities: unsupported topology query; use inline " *
+                    "Boundary, CombinedBoundary, or PointsOf for Physical Point"))
+            _geo_exec_entity_rhs_tags(
+                membership,context,"$caller entities")
+        end
         add_physical_group!(m,dim,ids;tag=tag,name=name)
         return
     elseif (mm=match(

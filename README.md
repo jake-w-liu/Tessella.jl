@@ -9,9 +9,8 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 166,803/166,803
-assertions; implementation increments and their focused gates are recorded in
-[`STATUS.md`](STATUS.md).
+complete**. Bounds-checked package and focused gates for each implementation
+increment are recorded in [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
 
 ```julia
@@ -123,7 +122,8 @@ interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
 `.geo` execution (including control-flow loops, macros, option reads,
 dynamic/general ranges, allocator reads after topology-changing or untracked
-declarations, and mixed geometry-derived physical-group RHSs),
+declarations, and geometry-derived physical-group RHSs beyond the documented inline
+topology queries),
 mixed-element generation beyond the listed first-order surface recombination paths,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
 quasi-transfinite or holed transfinite patches, curved/warped or
@@ -156,7 +156,15 @@ piecewise-linearly over its deterministic initial constrained triangulation. Gen
 straight-curve subdivision nodes interpolate their endpoint sizes, while equal Point
 sizes retain the constant-size path and coincident PSLG inputs use the smaller
 constraint. Exact Gmsh mesh topology, implicit primitive or Boolean subentities, and
-topology-query forms other than inline `PointsOf` remain outside this bounded contract.
+mesh-size selectors other than inline `PointsOf` remain outside this bounded contract.
+Explicit-tag Physical declarations may be named or unnamed. Physical Point accepts inline
+`PointsOf`; Physical Point/Curve/Surface accept inline `Boundary` and
+`CombinedBoundary` over Curve/Line, Surface, and explicit Volume entities,
+respectively. `Boundary` collects immediate boundaries before physical membership is
+deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole and cavity
+boundaries participate, while embeddings do not. Empty combined boundaries,
+unsupported dimensions, and implicit primitive or Boolean topology are explicit
+blockers.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
