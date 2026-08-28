@@ -31,6 +31,8 @@ const _LIST_VARIABLE_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_list_variables.geo")),String)
 const _DYNAMIC_TAG_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_dynamic_tags.geo")),String)
+const _SET_MAX_TAG_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_set_max_tags.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -376,6 +378,20 @@ Physical Volume("domain", 72) = {1};
                      length(link.slave_nodes))
                     for link in dynamic_tag_mesh.periodic_links
                     if link.dim==2])==[(22,24,5),(23,21,4)]
+
+        set_max_tag_input=joinpath(directory,"set-max-tags.geo")
+        set_max_tag_output=joinpath(directory,"set-max-tags.msh")
+        write(set_max_tag_input,_SET_MAX_TAG_CLI_GEO)
+        @test main([set_max_tag_input,"-3","-o",set_max_tag_output])==
+              set_max_tag_output
+        @test read(set_max_tag_input,String)==_SET_MAX_TAG_CLI_GEO
+        set_max_tag_mesh=read_mixed_msh(set_max_tag_output)
+        @test validate(set_max_tag_mesh).ok
+        @test mixed_crc(set_max_tag_mesh).sha==
+              "aa3127e5c1a302ebdb98890a4d7a62d5cb385e3cf73aa024372f809a7542a45d"
+        @test set_max_tag_mesh.physical_names==Dict(
+            (0,603)=>"corners",(1,604)=>"edges",
+            (2,605)=>"boundary",(3,606)=>"domain")
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")

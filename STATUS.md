@@ -25,9 +25,9 @@ complete**. Work is ordered by ASCENT meshing value before UI and post-processin
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, and classified surface/explicit-shell/embedded-volume model-to-mixed projection |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression-, numeric-list-, and tracked-tag-allocator-backed geometry/entity lists, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression-, numeric-list-, and tracked-tag-allocator/`SetMaxTag`-backed geometry/entity lists, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and BooleanDifference box Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -64,6 +64,11 @@ loops, macros, option reads, stateful functions, dynamic/general ranges,
 logical/ternary evaluation, extrusions/fillets/symmetry, allocator reads after
 topology-changing or untracked declarations, and mixed geometry-derived
 physical-group right-hand-side evaluation.
+`SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in can set
+or lower a geometric counter, while OpenCASCADE only raises it. Allocator reads use
+the greatest counter among activated factories; later primitive allocation still
+accounts for occupied hidden topology. Primitive boundary entities remain implicit
+in the native model, so explicit modeled subentities can reuse those tags.
 
 P4's uniform-refinement slice applies the exact Gmsh 4.15.2 linear segment, triangle,
 and tetrahedron child templates while sharing edge midpoints, compacting unused nodes,
@@ -124,6 +129,38 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-08-28 with Julia 1.12.7 after adding bounded,
+factory-aware `.geo` `SetMaxTag` execution:
+
+- `SetMaxTag Point|Curve|Surface|Volume` now uses independent Built-in and
+  OpenCASCADE counters. Built-in can lower its counter, OpenCASCADE only raises
+  its counter, and allocator reads use the greatest counter among activated
+  factories. Fractional conversion, allocator-backed expressions, negative
+  counters, factory activation, signed-32-bit exhaustion, explicit topology,
+  Physical groups, Fields, and full primitive allocation are checked. Primitive
+  boundary tags remain implicit, preserving existing modeled-subentity tag reuse.
+- Bounds-checked focused sets passed under Julia 1.12.7 and Julia 1.11.9:
+  `SetMaxTag` 49/49, dynamic tags 50/50, model sets 62/62, 118/118, and 84/84,
+  IO 422/422, and CLI 122/122. Public-documentation and recursive ambiguity scans
+  returned zero under both versions.
+- The required Gmsh 4.15.2 differential covered all four `SetMaxTag` categories,
+  Built-in lowering, OpenCASCADE raise-only behavior, cross-factory maxima,
+  fractional and allocator-expression values, negative factory activation, and
+  occupied primitive allocation. The new tetrahedron fixture produced 5 nodes and
+  4 tetrahedra in Tessella and 17 nodes and 23 tetrahedra in Gmsh. Its native CRC is
+  `71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b`; its
+  classified projection CRC is
+  `aa3127e5c1a302ebdb98890a4d7a62d5cb385e3cf73aa024372f809a7542a45d`.
+  The combined dynamic-tag maximum volume error was
+  `8.881784197001252e-16`.
+- The bounds-checked package gate passed 166,696/166,696 assertions in 22m36.3s.
+  The bounds-checked aggregate validation gate passed in 2,171.35s against Gmsh
+  4.15.2-git, including the new `SetMaxTag` differential.
+- The organization ratchet passed with 139 managed `.jl` files and no
+  repository-root `.jl` files. The only top-level Julia entrypoints remain
+  `src/Tessella.jl`, `test/runtests.jl`, and `validation/run_all.jl`; every other
+  Julia file is in a domain or workflow subfolder.
 
 Re-measured on 2026-08-28 with Julia 1.12.7 after adding bounded dynamic `.geo`
 tag allocators:

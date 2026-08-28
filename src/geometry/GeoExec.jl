@@ -139,6 +139,11 @@ must be planar boundaries of one explicit volume. Multiple periodic statements m
 reuse a master or form an acyclic master/slave chain. Read-only `newp`, the shared
 curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the
 tracked explicit topology and supported full Box/Cylinder/Sphere/Cone primitives.
+`SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in sets the
+checked counter, while OpenCASCADE only raises it. Reads use the greatest counter
+among activated factories. Later primitive allocation still accounts for occupied
+hidden topology. Primitive boundary entities remain implicit in `GeoModel`, so an
+explicit modeled subentity may reuse one of their numeric tags.
 An allocator read after a topology-changing or untracked declaration is rejected.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
@@ -562,6 +567,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         ids=_geo_exec_entity_rhs_tags(
             mm.captures[4],context,"$caller entities")
         add_physical_group!(m,dim,ids;tag=tag,name=name)
+        return
+    elseif match(
+            r"^SetMaxTag\s+(?:Point|Curve|Surface|Volume)\s*\(\s*.+\s*\)\s*;$",
+            line) !== nothing
         return
     elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
            startswith(line,"Field") || startswith(line,"Background") ||

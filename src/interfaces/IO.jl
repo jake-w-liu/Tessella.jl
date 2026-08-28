@@ -1403,21 +1403,54 @@ const _GEO_NUMERIC_FUNCTIONS=Set((
     "Tanh","Atan2","Fmod","Modulo","Hypot","Max","Min"))
 
 mutable struct _GeoTagAllocatorState
-    point_max::Int
-    curve_max::Int
-    surface_max::Int
-    volume_max::Int
+    builtin_point_max::Int
+    builtin_curve_max::Int
+    builtin_surface_max::Int
+    builtin_volume_max::Int
+    occ_point_max::Int
+    occ_curve_max::Int
+    occ_surface_max::Int
+    occ_volume_max::Int
     auxiliary_region_max::Int
     field_max::Int
+    point_entity_max::Int
+    curve_entity_max::Int
+    surface_entity_max::Int
+    factory::Symbol
+    occ_active::Bool
     geometry_unavailable::Union{Nothing,String}
     field_unavailable::Union{Nothing,String}
 end
 
-_GeoTagAllocatorState()=_GeoTagAllocatorState(0,0,0,0,0,0,nothing,nothing)
+_GeoTagAllocatorState()=_GeoTagAllocatorState(
+    0,0,0,0,0,0,0,0,0,0,0,0,0,
+    :builtin,false,nothing,nothing)
 
-@inline _geo_allocator_region_max(state::_GeoTagAllocatorState)=max(
-    state.curve_max,state.surface_max,state.volume_max,
-    state.auxiliary_region_max)
+@inline function _geo_allocator_point_max(state::_GeoTagAllocatorState)
+    return state.occ_active ?
+        max(state.builtin_point_max,state.occ_point_max) :
+        state.builtin_point_max
+end
+
+@inline function _geo_allocator_curve_max(state::_GeoTagAllocatorState)
+    return state.occ_active ?
+        max(state.builtin_curve_max,state.occ_curve_max) :
+        state.builtin_curve_max
+end
+
+@inline function _geo_allocator_surface_max(state::_GeoTagAllocatorState)
+    return state.occ_active ?
+        max(state.builtin_surface_max,state.occ_surface_max) :
+        state.builtin_surface_max
+end
+
+@inline function _geo_allocator_region_max(state::_GeoTagAllocatorState)
+    builtin=max(state.builtin_curve_max,state.builtin_surface_max,
+                state.builtin_volume_max,state.auxiliary_region_max)
+    return state.occ_active ?
+        max(builtin,state.occ_curve_max,state.occ_surface_max,
+            state.occ_volume_max) : builtin
+end
 
 function _geo_allocator_invalidate!(state::_GeoTagAllocatorState,
                                     reason::AbstractString;
@@ -1448,7 +1481,7 @@ function _geo_context_refresh_allocators!(context::_GeoNumericContext,
         end
         return nothing
     end
-    refresh!(_GEO_POINT_TAG_SYMBOLS,state.point_max,
+    refresh!(_GEO_POINT_TAG_SYMBOLS,_geo_allocator_point_max(state),
              state.geometry_unavailable,"Point")
     refresh!(_GEO_REGION_TAG_SYMBOLS,_geo_allocator_region_max(state),
              state.geometry_unavailable,"geometric region")
@@ -1461,13 +1494,32 @@ function _geo_allocator_record_explicit!(state::_GeoTagAllocatorState,
                                          kind::Symbol,tag::Int)
     state.geometry_unavailable===nothing || return nothing
     if kind==:point
-        state.point_max=max(state.point_max,tag)
+        if state.factory==:opencascade
+            state.occ_point_max=max(state.occ_point_max,tag)
+        else
+            state.builtin_point_max=max(state.builtin_point_max,tag)
+        end
+        state.point_entity_max=max(state.point_entity_max,tag)
     elseif kind==:curve
-        state.curve_max=max(state.curve_max,tag)
+        if state.factory==:opencascade
+            state.occ_curve_max=max(state.occ_curve_max,tag)
+        else
+            state.builtin_curve_max=max(state.builtin_curve_max,tag)
+        end
+        state.curve_entity_max=max(state.curve_entity_max,tag)
     elseif kind==:surface
-        state.surface_max=max(state.surface_max,tag)
+        if state.factory==:opencascade
+            state.occ_surface_max=max(state.occ_surface_max,tag)
+        else
+            state.builtin_surface_max=max(state.builtin_surface_max,tag)
+        end
+        state.surface_entity_max=max(state.surface_entity_max,tag)
     elseif kind==:volume
-        state.volume_max=max(state.volume_max,tag)
+        if state.factory==:opencascade
+            state.occ_volume_max=max(state.occ_volume_max,tag)
+        else
+            state.builtin_volume_max=max(state.builtin_volume_max,tag)
+        end
     elseif kind==:auxiliary
         state.auxiliary_region_max=max(state.auxiliary_region_max,tag)
     else
@@ -1482,6 +1534,81 @@ function _geo_allocator_advance(current::Int,count::Int,
     current<=typemax(Int32)-count || throw(ArgumentError(
         "$caller: $label topology exhausts Gmsh's signed 32-bit tag range"))
     return current+count
+end
+
+function _geo_allocator_record_hidden!(state::_GeoTagAllocatorState,
+                                       kind::Symbol,count::Int,
+                                       caller::AbstractString)
+    current,entity_max,label=if kind==:point
+        (_geo_allocator_point_max(state),state.point_entity_max,
+         "Point")
+    elseif kind==:curve
+        (_geo_allocator_curve_max(state),state.curve_entity_max,
+         "Curve")
+    elseif kind==:surface
+        (_geo_allocator_surface_max(state),state.surface_entity_max,
+         "Surface")
+    else
+        throw(ArgumentError("unknown hidden dynamic tag namespace $kind"))
+    end
+    base=max(current,entity_max)
+    final=_geo_allocator_advance(base,count,caller,label)
+    if kind==:point
+        if state.factory==:opencascade
+            state.occ_point_max=final
+        else
+            state.builtin_point_max=final
+        end
+        state.point_entity_max=final
+    elseif kind==:curve
+        if state.factory==:opencascade
+            state.occ_curve_max=final
+        else
+            state.builtin_curve_max=final
+        end
+        state.curve_entity_max=final
+    else
+        if state.factory==:opencascade
+            state.occ_surface_max=final
+        else
+            state.builtin_surface_max=final
+        end
+        state.surface_entity_max=final
+    end
+    return nothing
+end
+
+function _geo_allocator_set_max!(state::_GeoTagAllocatorState,
+                                 kind::String,value::Int)
+    state.geometry_unavailable===nothing || return nothing
+    if kind=="Point"
+        if state.factory==:opencascade
+            state.occ_point_max=max(state.occ_point_max,value)
+        else
+            state.builtin_point_max=value
+        end
+    elseif kind=="Curve"
+        if state.factory==:opencascade
+            state.occ_curve_max=max(state.occ_curve_max,value)
+        else
+            state.builtin_curve_max=value
+        end
+    elseif kind=="Surface"
+        if state.factory==:opencascade
+            state.occ_surface_max=max(state.occ_surface_max,value)
+        else
+            state.builtin_surface_max=value
+        end
+    elseif kind=="Volume"
+        if state.factory==:opencascade
+            state.occ_volume_max=max(state.occ_volume_max,value)
+        else
+            state.builtin_volume_max=value
+        end
+    else
+        throw(ArgumentError("unknown SetMaxTag namespace $kind"))
+    end
+    return nothing
 end
 
 function _geo_allocator_record_primitive!(state::_GeoTagAllocatorState,
@@ -1502,13 +1629,10 @@ function _geo_allocator_record_primitive!(state::_GeoTagAllocatorState,
     else
         throw(ArgumentError("$caller: unsupported primitive allocator kind $kind"))
     end
-    state.point_max=_geo_allocator_advance(
-        state.point_max,point_count,caller,"Point")
-    state.curve_max=_geo_allocator_advance(
-        state.curve_max,curve_count,caller,"Curve")
-    state.surface_max=_geo_allocator_advance(
-        state.surface_max,surface_count,caller,"Surface")
-    state.volume_max=max(state.volume_max,tag)
+    _geo_allocator_record_hidden!(state,:point,point_count,caller)
+    _geo_allocator_record_hidden!(state,:curve,curve_count,caller)
+    _geo_allocator_record_hidden!(state,:surface,surface_count,caller)
+    _geo_allocator_record_explicit!(state,:volume,tag)
     return nothing
 end
 
@@ -2337,6 +2461,34 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
     isempty(source) && return nothing
 
+    factory=match(r"^SetFactory\s*\(\s*\"([^\"]*)\"\s*\)$",source)
+    if factory!==nothing
+        name=String(factory.captures[1])
+        if name=="Built-in"
+            state.factory=:builtin
+        elseif name=="OpenCASCADE"
+            state.factory=:opencascade
+            state.occ_active=true
+        else
+            reason="SetFactory accepts only \"Built-in\" or \"OpenCASCADE\"; got " *
+                   repr(name)
+            if conservative
+                _geo_allocator_invalidate!(
+                    state,reason;geometry=true,fields=false)
+                return nothing
+            end
+            throw(ArgumentError("$caller: $reason"))
+        end
+        return nothing
+    elseif startswith(source,"SetFactory")
+        reason="SetFactory requires a literal \"Built-in\" or \"OpenCASCADE\" name"
+        if conservative
+            _geo_allocator_invalidate!(state,reason;geometry=true,fields=false)
+            return nothing
+        end
+        throw(ArgumentError("$caller: $reason"))
+    end
+
     field=match(r"^Field\s*\[\s*(.*?)\s*\]\s*=\s*[A-Za-z][A-Za-z0-9_]*$",source)
     if field!==nothing
         tag=_geo_allocator_statement_tag(
@@ -2417,6 +2569,29 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
             "$caller $kind parameters: expected $expected numeric values; " *
             "got $(length(values)) after range expansion"))
         _geo_allocator_record_primitive!(state,kind,tag,values,caller)
+        return nothing
+    end
+
+    set_max=match(
+        r"^SetMaxTag\s+(Point|Curve|Surface|Volume)\s*\(\s*(.*?)\s*\)$",
+        source)
+    if set_max!==nothing
+        state.geometry_unavailable===nothing || return nothing
+        kind=String(set_max.captures[1])
+        value=try
+            _geo_signed_gmsh_int_value(
+                _geo_eval_numeric(set_max.captures[2],context,
+                                  "$caller SetMaxTag $kind"),
+                "$caller SetMaxTag $kind")
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative && err isa ArgumentError) || rethrow()
+            _geo_allocator_invalidate!(state,
+                "could not evaluate SetMaxTag $kind while tracking allocators: " *
+                _geo_expr_preview(set_max.captures[2]);geometry=true,fields=false)
+            return nothing
+        end
+        _geo_allocator_set_max!(state,kind,value)
         return nothing
     end
 
@@ -2783,8 +2958,10 @@ recognized numeric field options and field selectors; known numeric list variabl
 are normalized there as well. Entirely numeric Physical memberships containing
 ranges are checked but remain geometry data. Read-only dynamic tag allocators are
 evaluated while their Point, shared geometric-region, or Field namespace remains
-fully tracked; an unsupported topology change makes the affected allocator
-unavailable.
+fully tracked. `SetMaxTag Point|Curve|Surface|Volume` updates the associated checked
+counter. Built-in can lower a counter; OpenCASCADE only raises it. An unsupported
+topology change makes the affected allocator unavailable. Reads use the greatest
+counter among activated factories.
 Loops, macros, option reads, random/external functions, dynamic ranges, CSG and
 Boolean geometry are deliberately not evaluated. Numeric field options are
 normalized to literals; geometric references and string or point-dependent
