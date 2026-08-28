@@ -157,8 +157,10 @@ straight-curve subdivision nodes interpolate their endpoint sizes, while equal P
 sizes retain the constant-size path and coincident PSLG inputs use the smaller
 constraint. Exact Gmsh mesh topology, implicit primitive or Boolean subentities, and
 mesh-size selectors other than inline `PointsOf` remain outside this bounded contract.
-Explicit-tag Physical declarations may be named or unnamed. Physical Point accepts inline
-`PointsOf`; Physical Point/Curve/Surface accept inline `Boundary` and
+Physical declarations accept an explicit positive tag, with an optional name, or a
+nonempty name with an automatic tag. Automatic Physical tags share one namespace
+across entity dimensions and advance later shared-region allocator reads. Physical
+Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline `Boundary` and
 `CombinedBoundary` over Curve/Line, Surface, and explicit Volume entities,
 respectively. `Boundary` collects immediate boundaries before physical membership is
 deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole and cavity

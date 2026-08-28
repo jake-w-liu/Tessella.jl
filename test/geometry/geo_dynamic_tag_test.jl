@@ -23,7 +23,7 @@ function _dynamic_tag_error(source::AbstractString)
     end
 end
 
-@testset "bounded .geo dynamic tag allocators" begin
+@testset "bounded .geo geometry and Physical tag allocators" begin
     parsed=execute_geo(_GEO_DYNAMIC_TAG_FIXTURE)
     model=parsed.model
     @test sort!(collect(keys(model.points)))==collect(1:10)
@@ -99,6 +99,29 @@ end
     physical=_execute_dynamic_tag_source(physical_source)
     @test sort!(collect(keys(physical.model.curves)))==[66]
 
+    automatic_physical_source=raw"""
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Line(3) = {1,2};
+        Physical Point("auto point") = {1};
+        Physical Curve("auto curve") = {3};
+        Line(newreg) = {1,2};
+        Physical Point("explicit", 20) = {2};
+        Physical Curve("later") = {3};
+        Physical Point("endpoints") = CombinedBoundary{Line{3};};
+        Line(newreg) = {1,2};
+        """
+    automatic_physical=_execute_dynamic_tag_source(automatic_physical_source)
+    @test sort!(collect(keys(automatic_physical.model.curves)))==[3,4,23]
+    @test automatic_physical.model.physical==Dict(
+        (0,1)=>[1],(1,2)=>[3],(0,20)=>[2],(1,21)=>[3],(0,22)=>[1,2])
+    @test automatic_physical.model.physical_names==Dict(
+        (0,1)=>"auto point",(1,2)=>"auto curve",(0,20)=>"explicit",
+        (1,21)=>"later",(0,22)=>"endpoints")
+    @test automatic_physical.params.physical_groups==
+          automatic_physical.model.physical_names
+    @test automatic_physical.model.physical_tag_max==22
+
     field_source=raw"""
         Field[newf] = Distance;
         Field[newf] = Min;
@@ -136,6 +159,21 @@ end
             "no geometric region tags remain",
         "Field[2147483647]=Box; Field[newf]=Box;"=>
             "no Field tags remain",
+        "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; " *
+        "Physical Point(\"same\")={1}; Physical Point(\"same\")={2};"=>
+            "name \"same\" already identifies",
+        "Point(1)={0,0,0,1}; Physical Point(\"\")={1};"=>
+            "automatic Physical Point group requires a nonempty name",
+        "Point(1)={0,0,0,1}; Physical Point={1};"=>
+            "malformed Physical declaration",
+        "Point(1)={0,0,0,1}; Physical Point()={1};"=>
+            "malformed Physical declaration",
+        "Point(1)={0,0,0,1}; Physical Point(\"bad\",)={1};"=>
+            "malformed Physical declaration",
+        "Point(1)={0,0,0,1}; " *
+        "Physical Point(\"last\",2147483647)={1}; " *
+        "Physical Point(\"overflow\")={1};"=>
+            "no automatic Physical tags remain",
         "Box(1)={0,0,0,1,1,1}; Box(13)={2,0,0,1,1,1}; " *
         "BooleanUnion(25)={Volume{1};Delete;}{Volume{13};Delete;}; " *
         "next = newv;"=>"topology-changing statement",

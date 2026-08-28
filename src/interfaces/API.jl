@@ -170,6 +170,7 @@ end
 boolean_difference(a,b; tag=0)=_boolean(:difference,a,b; tag=tag)
 boolean_union(a,b; tag=0)=_boolean(:union,a,b; tag=tag)
 boolean_intersection(a,b; tag=0)=_boolean(:intersection,a,b; tag=tag)
+"""Add a Physical group; `tag=0` allocates globally across entity dimensions."""
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m
     add_physical_group!(m,dim,tags;tag=tag,name=name)
 end

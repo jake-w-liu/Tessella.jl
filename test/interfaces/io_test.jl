@@ -883,12 +883,14 @@ end
                 Physical Surface(14) = CombinedBoundary{Volume{:};};
                 Physical Point("topology", 15) = PointsOf{Surface{1};};
                 Physical Curve("", 16) = Boundary{Surface{1};};
+                Physical Volume("automatic") = {1};
                 """)
             opaque_params=read_geo_params(opaque_physical)
             @test opaque_params.physical_groups[(2,11)]=="all"
             @test opaque_params.physical_groups[(3,12)]=="mixed"
             @test opaque_params.physical_groups[(0,13)]=="ternary"
             @test opaque_params.physical_groups[(0,15)]=="topology"
+            @test opaque_params.physical_groups[(3,17)]=="automatic"
             @test !haskey(opaque_params.physical_groups,(2,14))
             @test !haskey(opaque_params.physical_groups,(1,16))
 

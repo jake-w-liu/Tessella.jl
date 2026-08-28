@@ -107,6 +107,13 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     add_box!(physical,0,0,0,1,1,1; tag=123)
     @test add_physical_group!(physical,3,[123])==1
     @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
+    @test add_point!(physical,0,0,0;tag=1)==1
+    @test add_point!(physical,1,0,0;tag=2)==2
+    @test add_line!(physical,1,2;tag=1)==1
+    @test add_physical_group!(physical,0,[1])==2
+    @test add_physical_group!(physical,1,[1];tag=20)==20
+    @test add_physical_group!(physical,0,[2])==21
+    @test physical.physical_tag_max==21
     returned=Tessella.Model.model_physical_tags(physical,3,1)
     push!(returned,999)
     @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
@@ -118,6 +125,15 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test_throws ArgumentError Tessella.Model.model_entity(physical,true,123)
     @test_throws ArgumentError Tessella.Model.model_physical_tags(physical,3,big(2)^100)
     @test_throws ArgumentError Tessella.Model.set_physical_name!(physical,true,1,"bad")
+
+    physical_exhausted=GeoModel()
+    add_point!(physical_exhausted,0,0,0;tag=1)
+    @test add_physical_group!(
+        physical_exhausted,0,[1];tag=typemax(Int32))==typemax(Int32)
+    exhausted_groups=copy(physical_exhausted.physical)
+    @test_throws ArgumentError add_physical_group!(physical_exhausted,0,[1])
+    @test physical_exhausted.physical==exhausted_groups
+    @test physical_exhausted.physical_tag_max==typemax(Int32)
 end
 
 @testset "persistent native straight-curve periodic constraints" begin

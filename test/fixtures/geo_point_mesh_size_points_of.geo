@@ -35,7 +35,7 @@ Physical Volume("domain", 12) = {1};
 faceTags[] = {-1, 2};
 Physical Point("endpoints", 21) = CombinedBoundary{Line{1:2};};
 Physical Curve("face boundary", 22) = Boundary{Surface{-1};};
-Physical Surface("skin", 23) = CombinedBoundary{Volume{:};};
+Physical Surface("skin") = CombinedBoundary{Volume{:};};
 Physical Curve("two face rim", 25) =
     CombinedBoundary{Surface{faceTags[]};};
 Physical Curve("two face boundary", 26) =

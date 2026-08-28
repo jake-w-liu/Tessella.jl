@@ -61,7 +61,7 @@ using Tessella
     include("geometry/model_test.jl")    # entity kernel + .geo execution
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
-    include("geometry/geo_dynamic_tag_test.jl") # bounded dynamic tag allocators
+    include("geometry/geo_dynamic_tag_test.jl") # geometry and global Physical allocators
     include("geometry/geo_set_max_tag_test.jl") # factory-aware max-tag counters
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
     include("geometry/geo_periodic_test.jl") # expression-backed periodic curves

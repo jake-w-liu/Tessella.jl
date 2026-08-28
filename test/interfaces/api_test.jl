@@ -143,6 +143,24 @@ const _API=Tessella.API
     @test isempty(Docs.undocumented_names(Tessella.API;private=false))
 end
 
+@testset "global automatic Physical tags through API" begin
+    _API.finalize()
+    try
+        _API.initialize()
+        @test _API.model.add_point(0,0,0;tag=1)==1
+        @test _API.model.add_point(1,0,0;tag=2)==2
+        @test _API.model.add_line(1,2;tag=1)==1
+        @test _API.model.add_physical_group(0,[1];name="first")==1
+        @test _API.model.add_physical_group(1,[1];name="second")==2
+        @test _API.model.add_physical_group(0,[2];name="third")==3
+        @test _API.CURRENT[].physical_names==Dict(
+            (0,1)=>"first",(1,2)=>"second",(0,3)=>"third")
+        @test _API.CURRENT[].physical_tag_max==3
+    finally
+        _API.finalize()
+    end
+end
+
 @testset "owned point mesh-size API" begin
     _API.finalize()
     try
