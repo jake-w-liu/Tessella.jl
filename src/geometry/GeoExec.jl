@@ -8,8 +8,10 @@ Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
 Translate/Rotate/Affine periodic straight curves or explicit-volume planar boundary
 surfaces with reusable masters and acyclic dependency chains. `MeshSize` and
-`Characteristic Length` update existing explicit Point constraints. Numeric parameters,
-entity tags, and entity lists use bounded constant-expression evaluation. Numeric
+`Characteristic Length` update existing explicit Point constraints directly or
+through recursive `PointsOf` boundaries of explicit Point/Curve/Surface/Volume
+entities. Numeric parameters, entity tags, and entity lists use bounded
+constant-expression evaluation. Numeric
 list variables provide zero-based indexing, cardinality, copying, concatenation,
 selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
 runs through the native [`Model`](@ref) kernel. Control-flow loops, macros,
@@ -23,6 +25,7 @@ using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: add_physical_group!, set_periodic!
+using ..Model: _model_points_of
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
@@ -30,6 +33,7 @@ using ..IO: _geo_split_list, _geo_numeric_list_terms, _geo_numeric_list_values
 using ..IO: _geo_positive_gmsh_tag
 using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
+using ..IO: _MAX_GEO_LIST_ITEMS
 using ..IO: _geo_context_set_scalar!, _geo_apply_list_assignment!
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!
@@ -147,9 +151,12 @@ among activated factories. Later primitive allocation still accounts for occupie
 hidden topology. Primitive boundary entities remain implicit in `GeoModel`, so an
 explicit modeled subentity may reuse one of their numeric tags.
 `MeshSize {points} = value` and its `Characteristic Length` alias update existing
-explicit Points through `:`, numeric expressions and ranges, or numeric-list
-variables. Their values must be finite and positive; unsupported topology queries
-and unknown Points are explicit blockers.
+explicit Points through `:`, numeric expressions and ranges, numeric-list variables,
+or inline `PointsOf` blocks for Point, Curve/Line, Surface, and explicit Volume
+entities. `PointsOf` recursively follows entity boundaries, including hole loops;
+embedded entities are not boundaries. Their values must be finite and positive.
+Unknown entities, implicit primitive or Boolean volume topology, and other topology
+queries are explicit blockers.
 An allocator read after a topology-changing or untracked declaration is rejected.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
@@ -262,6 +269,116 @@ function _geo_exec_entity_tags(raw::AbstractString,
         push!(tags,tag)
     end
     return tags
+end
+
+function _geo_exec_points_of_payload(selector::AbstractString,
+                                     caller::AbstractString)
+    source=String(strip(selector))
+    match(r"^PointsOf\s*\{",source)!==nothing || throw(ArgumentError(
+        "$caller: malformed PointsOf selector"))
+    opening=findfirst(==('{'),source)
+    opening===nothing && throw(ArgumentError(
+        "$caller: malformed PointsOf selector"))
+    depth=0;closing=nothing;i=opening
+    while i<=lastindex(source)
+        character=source[i]
+        if character=='{'
+            depth+=1
+        elseif character=='}'
+            depth-=1
+            depth>=0 || throw(ArgumentError(
+                "$caller: PointsOf selector has an unmatched closing brace"))
+            if depth==0
+                closing=i
+                break
+            end
+        end
+        i=nextind(source,i)
+    end
+    closing===nothing && throw(ArgumentError(
+        "$caller: PointsOf selector has an unmatched opening brace"))
+    after=nextind(source,closing)
+    trailing=after>lastindex(source) ? "" : String(strip(source[after:end]))
+    isempty(trailing) || throw(ArgumentError(
+        "$caller: unexpected text after the PointsOf selector"))
+    first_payload=nextind(source,opening)
+    payload=first_payload==closing ? "" :
+        String(source[first_payload:prevind(source,closing)])
+    return payload
+end
+
+function _geo_exec_points_of_blocks(payload::AbstractString,
+                                    caller::AbstractString)
+    blocks=String[];buffer=IOBuffer();depth=0
+    for character in payload
+        if character=='{'
+            depth+=1
+            write(buffer,character)
+        elseif character=='}'
+            depth-=1
+            depth>=0 || throw(ArgumentError(
+                "$caller: PointsOf entity blocks have an unmatched closing brace"))
+            write(buffer,character)
+        elseif character==';' && depth==0
+            block=String(strip(String(take!(buffer))))
+            isempty(block) && throw(ArgumentError(
+                "$caller: PointsOf contains an empty entity block"))
+            length(blocks)<_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+                "$caller: PointsOf exceeds $_MAX_GEO_LIST_ITEMS entity blocks"))
+            push!(blocks,block)
+        else
+            write(buffer,character)
+        end
+    end
+    depth==0 || throw(ArgumentError(
+        "$caller: PointsOf entity blocks have an unmatched opening brace"))
+    tail=String(strip(String(take!(buffer))))
+    isempty(tail) || throw(ArgumentError(
+        "$caller: every PointsOf entity block must end with a semicolon"))
+    isempty(blocks) && throw(ArgumentError(
+        "$caller: PointsOf must contain at least one entity block"))
+    return blocks
+end
+
+function _geo_exec_all_entity_tags(m::GeoModel,dimension::Int)
+    entities=dimension==0 ? m.points : dimension==1 ? m.curves :
+             dimension==2 ? m.surfaces : m.volumes
+    return sort!(collect(keys(entities)))
+end
+
+function _geo_exec_points_of(m::GeoModel,selector::AbstractString,
+                             context::_GeoNumericContext,
+                             caller::AbstractString)
+    payload=_geo_exec_points_of_payload(selector,caller)
+    blocks=_geo_exec_points_of_blocks(payload,caller)
+    entities=NTuple{2,Int}[]
+    for block in blocks
+        matched=match(
+            r"^(Point|Curve|Line|Surface|Volume)\s*\{\s*(.*)\s*\}$",block)
+        matched===nothing && throw(ArgumentError(
+            "$caller: PointsOf supports Point, Curve/Line, Surface, and Volume blocks"))
+        kind=String(matched.captures[1])
+        dimension=kind=="Point" ? 0 : kind in ("Curve","Line") ? 1 :
+                  kind=="Surface" ? 2 : 3
+        raw_tags=String(strip(matched.captures[2]))
+        tags=if raw_tags==":"
+            _geo_exec_all_entity_tags(m,dimension)
+        else
+            signed_tags=_geo_exec_entity_tags(
+                raw_tags,context,"$caller PointsOf $kind selector";signed=true)
+            normalized_tags=Int[];sizehint!(normalized_tags,length(signed_tags))
+            for tag in signed_tags
+                tag==typemin(Int32) && throw(ArgumentError(
+                    "$caller PointsOf $kind selector entry magnitude exceeds Int32"))
+                push!(normalized_tags,abs(tag))
+            end
+            normalized_tags
+        end
+        length(entities)<=_MAX_GEO_LIST_ITEMS-length(tags) || throw(ArgumentError(
+            "$caller: PointsOf expands beyond $_MAX_GEO_LIST_ITEMS entities"))
+        append!(entities,((dimension,tag) for tag in tags))
+    end
+    return _model_points_of(m,entities,caller)
 end
 
 function _geo_exec_entity_tag(raw::AbstractString,
@@ -581,11 +698,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         selector=String(strip(mm.captures[2]))
         point_tags=if selector==":"
             sort!(collect(keys(m.points)))
+        elseif match(r"^PointsOf(?:\s|\{)",selector)!==nothing
+            _geo_exec_points_of(m,selector,context,caller)
         else
             occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",selector) &&
                 throw(ArgumentError(
-                    "$caller: topology queries are not supported; select Points " *
-                    "with `:`, numeric expressions or ranges, or numeric-list variables"))
+                    "$caller: unsupported topology query; use inline PointsOf " *
+                    "with Point, Curve/Line, Surface, or explicit Volume blocks"))
             _geo_exec_entity_tags(selector,context,"$caller Point selector")
         end
         isempty(point_tags) && throw(ArgumentError(

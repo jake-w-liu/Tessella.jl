@@ -314,6 +314,8 @@ function _model_curve_length(m::GeoModel,curve::Int,caller::AbstractString)
     return length1
 end
 
+include("ModelTopologyQueries.jl")
+
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
     dim==2 && return "Surface"
@@ -323,14 +325,7 @@ end
 function _model_periodic_surface_points(
     m::GeoModel,surface::Int,caller::AbstractString;
     include_embeddings::Bool)
-    haskey(m.surfaces,surface) || throw(ArgumentError(
-        "$caller: unknown Surface[$surface]"))
-    points=Int[]
-    for loop in m.surfaces[surface]
-        haskey(m.loops,loop) || throw(ArgumentError(
-            "$caller: Surface[$surface] references unknown Loop[$loop]"))
-        append!(points,_loop_points(m,loop))
-    end
+    points=_model_points_of(m,[(2,surface)],caller)
     if include_embeddings
         embedded_points,embedded_curves=
             _model_surface_embedding_tags(m,surface,caller)

@@ -1,10 +1,12 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: mesh_crc, nnodes, node, ntris, triangle_area
+using Tessella.MeshTypes: mesh_crc, nnodes, node, ntris, ntets, triangle_area
 using Tessella.Elements: mixed_crc
 
 const _GEO_POINT_MESH_SIZE_FIXTURE=normpath(joinpath(
     @__DIR__,"..","fixtures","geo_point_mesh_sizes.geo"))
+const _GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE=normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_point_mesh_size_points_of.geo"))
 
 function _execute_point_mesh_size_source(source::AbstractString;mesh_dim=0)
     return mktemp() do path,io
@@ -74,6 +76,48 @@ end
     @test parsed.model.physical==Dict((0,10)=>collect(1:4),(2,20)=>[1])
     @test parsed.model.physical_names==Dict(
         (0,10)=>"corners",(2,20)=>"domain")
+
+    topology=execute_geo(_GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE)
+    @test [topology.model.point_size[tag] for tag in 1:5]==
+          [0.4,0.5,0.2,0.4,1.0]
+    @test topology.model.physical==
+          Dict((0,11)=>collect(1:4),(3,12)=>[1])
+    @test topology.model.physical_names==
+          Dict((0,11)=>"vertices",(3,12)=>"domain")
+    for (entities,expected) in (
+            ([(0,3)],[3]), ([(1,2)],[2,3]),
+            ([(2,1)],[1,2,3]), ([(3,1)],collect(1:4)),
+            ([(0,3),(1,4),(2,1),(3,1)],collect(1:4)))
+        @test Tessella.Model._model_points_of(
+            topology.model,entities,"test PointsOf")==expected
+    end
+    topology_stable=copy(topology.model.point_size)
+    @test_throws ArgumentError Tessella.Model._model_points_of(
+        topology.model,[(2,99)],"test PointsOf")
+    @test topology.model.point_size==topology_stable
+
+    topology_meshed=execute_geo(
+        _GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE;mesh_dim=3)
+    @test validate(topology_meshed.mesh).ok
+    @test nnodes(topology_meshed.mesh)==6
+    @test ntets(topology_meshed.mesh)==6
+    @test mesh_crc(topology_meshed.mesh).sha==
+          "cf091ac13ba325f5f68650b192598a5159679b40e19dbea744d66c58962357b5"
+
+    holed_topology=_execute_point_mesh_size_source(raw"""
+        Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
+        Point(3)={2,2,0,1}; Point(4)={0,2,0,1};
+        Point(5)={0.5,0.5,0,1}; Point(6)={1.5,0.5,0,1};
+        Point(7)={1.5,1.5,0,1}; Point(8)={0.5,1.5,0,1};
+        Point(9)={1,1,0,1};
+        Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+        Line(5)={5,6}; Line(6)={6,7}; Line(7)={7,8}; Line(8)={8,5};
+        Curve Loop(1)={1:4}; Curve Loop(2)={5:8};
+        Plane Surface(1)={1,2}; Point{9} In Surface{1};
+        MeshSize{PointsOf{Surface{:};}}=0.25;
+        """)
+    @test [holed_topology.model.point_size[tag] for tag in 1:9]==
+          vcat(fill(0.25,8),1.0)
 
     meshed=execute_geo(_GEO_POINT_MESH_SIZE_FIXTURE;mesh_dim=2)
     @test validate(meshed.mesh).ok
@@ -215,8 +259,24 @@ end
         "Point(1)={0,0,0,1}; MeshSize {1}=-0.1;"=>"finite and positive",
         "Point(1)={0,0,0,1}; MeshSize {}=0.5;"=>"entity list is empty",
         "MeshSize {:}=0.5;"=>"matched no explicit modeled points",
-        "Point(1)={0,0,0,1}; MeshSize {PointsOf{Surface{1};}}=0.5;"=>
-            "topology queries are not supported",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{99};}}=0.5;"=>
+            "unknown Surface[99]",
+        "Box(1)={0,0,0,1,1,1}; MeshSize{PointsOf{Volume{1};}}=0.5;"=>
+            "Volume[1] has no explicit surface-loop topology",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{1}}}=0.5;"=>
+            "every PointsOf entity block must end with a semicolon",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{};}}=0.5;"=>
+            "entity list is empty",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{}}=0.5;"=>
+            "PointsOf must contain at least one entity block",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{-2147483648};}}=0.5;"=>
+            "magnitude exceeds Int32",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{Point{1:40000}; Point{1:40000};}}=0.5;"=>
+            "PointsOf expands beyond 65536 entities",
+        "Point(1)={0,0,0,1}; MeshSize{PointsOf{Curve Loop{1};}}=0.5;"=>
+            "supports Point, Curve/Line, Surface, and Volume blocks",
+        "Point(1)={0,0,0,1}; MeshSize{Boundary{Point{1};}}=0.5;"=>
+            "unsupported topology query",
     )
     for (source,message) in invalid_sources
         err=_point_mesh_size_error(source)
