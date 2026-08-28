@@ -57,7 +57,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
   functions, prior scalar bindings, sizing options, explicit field/physical tags, and
   finite constant `start:end[:increment]` lists in recognized numeric contexts, plus
-  read-only tag allocators over tracked Point, shared-region, and Field namespaces; the
+  read-only tag allocators over tracked Point, shared-region, and Field namespaces and
+  factory-aware, checked `SetMaxTag` control of geometric counters; the
   executor applies the same checked semantics to numeric parameters, entity tags,
   and entity lists in every supported geometry statement;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
@@ -169,7 +170,8 @@ julia --project --check-bounds=yes validation/run_all.jl
 
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
-Gmsh 4.15.2 size-field, constant-range, geometry-expression, and numeric-list,
+Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
+dynamic-tag/`SetMaxTag`,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

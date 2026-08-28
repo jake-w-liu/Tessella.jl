@@ -9,11 +9,18 @@ using Tessella.Elements: mixed_crc
 
 const GEO=normpath(joinpath(
     @__DIR__,"..","..","test","fixtures","geo_dynamic_tags.geo"))
+const SET_MAX_GEO=normpath(joinpath(
+    @__DIR__,"..","..","test","fixtures","geo_set_max_tags.geo"))
 const EXPECTED_ENTITIES=Dict(
     0=>Set(1:10),1=>Set(1:12),2=>Set(19:24),3=>Set([26]))
 const EXPECTED_PHYSICAL_NAMES=Dict(
     (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
     (2,63)=>"boundary",(3,64)=>"domain")
+const SET_MAX_ENTITIES=Dict(
+    0=>Set(101:104),1=>Set(201:206),2=>Set(401:404),3=>Set([601]))
+const SET_MAX_PHYSICAL_NAMES=Dict(
+    (0,603)=>"corners",(1,604)=>"edges",
+    (2,605)=>"boundary",(3,606)=>"domain")
 
 execution=execute_geo(GEO;mesh_dim=3)
 mesh=execution.mesh
@@ -55,6 +62,41 @@ validate(projected).ok || error("Tessella dynamic-tag projection is invalid")
 mixed_crc(projected).sha==
     "99aeefc2e269090b518f5896f2388bd419c8fb44d06e4743579d50d61aaedf81" ||
     error("Tessella dynamic-tag projection CRC changed")
+
+set_max_execution=execute_geo(SET_MAX_GEO;mesh_dim=3)
+set_max_mesh=set_max_execution.mesh
+set_max_mesh===nothing && error("Tessella SetMaxTag fixture produced no mesh")
+validate(set_max_mesh).ok || error("Tessella SetMaxTag mesh is invalid")
+nnodes(set_max_mesh)==5 && ntets(set_max_mesh)==4 || error(
+    "Tessella SetMaxTag mesh size changed")
+mesh_crc(set_max_mesh).sha==
+    "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b" ||
+    error("Tessella SetMaxTag mesh CRC changed")
+for (dim,tags) in SET_MAX_ENTITIES
+    entities=dim==0 ? keys(set_max_execution.model.points) :
+             dim==1 ? keys(set_max_execution.model.curves) :
+             dim==2 ? keys(set_max_execution.model.surfaces) :
+                      keys(set_max_execution.model.volumes)
+    Set(entities)==tags || error("Tessella SetMaxTag dimension-$dim tags changed")
+end
+set_max_execution.model.physical_names==SET_MAX_PHYSICAL_NAMES || error(
+    "Tessella SetMaxTag physical names changed")
+set_max_execution.params.fields[1].options["PointsList"]==
+    "{101, 102, 103, 104}" || error("Tessella SetMaxTag field option changed")
+set_max_volume=sum(tet_volume(
+    node(set_max_mesh,set_max_mesh.tets[1,cell]),
+    node(set_max_mesh,set_max_mesh.tets[2,cell]),
+    node(set_max_mesh,set_max_mesh.tets[3,cell]),
+    node(set_max_mesh,set_max_mesh.tets[4,cell]))
+    for cell in 1:ntets(set_max_mesh))
+abs(set_max_volume-1/6)<=1e-12 || error(
+    "Tessella SetMaxTag volume is $set_max_volume, expected 1/6")
+set_max_projected=model_to_mixed(
+    set_max_execution.model,set_max_mesh,3,601)
+validate(set_max_projected).ok || error("Tessella SetMaxTag projection is invalid")
+mixed_crc(set_max_projected).sha==
+    "aa3127e5c1a302ebdb98890a4d7a62d5cb385e3cf73aa024372f809a7542a45d" ||
+    error("Tessella SetMaxTag projection CRC changed")
 
 function find_gmsh_api()
     explicit=get(ENV,"GMSH_JULIA_API","")
@@ -135,6 +177,7 @@ function check_primitive_allocators()
             Line(3) = {3,1};
             Curve Loop(4) = {1,2,3};
             Plane Surface(100) = {4};
+            SetMaxTag Surface(5);
             tip = newv;
             Cone(tip) = {2,0,0,0,0,1,0.5,0};
             coneTipOracle[] = {tip, newreg, newp};
@@ -147,6 +190,155 @@ function check_primitive_allocators()
             error("Gmsh cone-tip allocator sequence changed")
     end
     return nothing
+end
+
+function check_set_max_tags()
+    gmsh.clear()
+    gmsh.open(SET_MAX_GEO)
+    gmsh.parser.getNumber("allocatorSnapshot")==
+        [105.0,607.0,607.0,607.0,607.0,607.0,607.0,607.0,607.0,2.0] ||
+        error("Gmsh SetMaxTag allocator snapshot changed")
+    for dim in 0:3
+        tags=Set(Int(tag) for (_,tag) in gmsh.model.getEntities(dim))
+        tags==SET_MAX_ENTITIES[dim] || error(
+            "Gmsh SetMaxTag dimension-$dim tags changed")
+    end
+    names=Dict(
+        (Int(dim),Int(tag))=>gmsh.model.getPhysicalName(dim,tag)
+        for (dim,tag) in gmsh.model.getPhysicalGroups())
+    names==SET_MAX_PHYSICAL_NAMES || error(
+        "Gmsh SetMaxTag physical groups changed")
+    gmsh.model.mesh.field.getNumbers(1,"PointsList")==
+        [101.0,102.0,103.0,104.0] || error(
+            "Gmsh SetMaxTag field option changed")
+    boundary=Set((Int(dim),abs(Int(tag))) for (dim,tag) in
+        gmsh.model.getBoundary([(3,601)],false,true,false))
+    boundary==Set((2,tag) for tag in 401:404) || error(
+        "Gmsh SetMaxTag volume boundary changed")
+
+    gmsh.model.mesh.generate(3)
+    coordinates=gmsh_coordinates()
+    types,_,node_tags=gmsh.model.mesh.getElements(3,601)
+    types==Int32[4] || error("Gmsh SetMaxTag volume changed element type")
+    connectivity=only(node_tags)
+    (!isempty(connectivity) && length(connectivity)%4==0) || error(
+        "Gmsh SetMaxTag tetrahedron connectivity is malformed")
+    volume=0.0
+    for offset in 1:4:length(connectivity)
+        volume+=abs(signed_tet_volume(
+            coordinates[Int(connectivity[offset])],
+            coordinates[Int(connectivity[offset+1])],
+            coordinates[Int(connectivity[offset+2])],
+            coordinates[Int(connectivity[offset+3])]))
+    end
+    abs(volume-1/6)<=2e-14 || error(
+        "Gmsh SetMaxTag volume is $volume, expected 1/6")
+
+    mktempdir() do directory
+        lowering=raw"""
+            SetFactory("Built-in");
+            Point(10) = {0,0,0,1};
+            SetMaxTag Point(20);
+            SetMaxTag Point(5);
+            lower = newp;
+            Point(lower) = {1,0,0,1};
+            lowerNext = newp;
+            SetFactory("OpenCASCADE");
+            occValue = newp;
+            SetMaxTag Point(20);
+            occRaised = newp;
+            SetMaxTag Point(5);
+            occPreserved = newp;
+            SetFactory("Built-in");
+            builtinRaised = newp;
+            SetMaxTag Point(4);
+            builtinLoweredAgain = newp;
+            loweringOracle[] = {
+              lower, lowerNext, occValue, occRaised, occPreserved,
+              builtinRaised, builtinLoweredAgain
+            };
+            """
+        lowering_path=joinpath(directory,"set_max_tag_lowering.geo")
+        write(lowering_path,lowering)
+        gmsh.clear()
+        gmsh.open(lowering_path)
+        lowering_actual=gmsh.parser.getNumber("loweringOracle")
+        lowering_expected=[6.0,7.0,7.0,21.0,21.0,21.0,21.0]
+        lowering_actual==lowering_expected || error(
+            "Gmsh SetMaxTag lowering or factory sharing changed: expected " *
+            "$lowering_expected, got $lowering_actual")
+
+        negative=raw"""
+            SetFactory("Built-in");
+            SetMaxTag Point(-1);
+            beforeFactoryActivation = newp;
+            SetFactory("OpenCASCADE");
+            afterFactoryActivation = newp;
+            negativeOracle[] = {
+              beforeFactoryActivation, afterFactoryActivation
+            };
+            """
+        negative_path=joinpath(directory,"set_max_tag_negative.geo")
+        write(negative_path,negative)
+        gmsh.clear()
+        gmsh.open(negative_path)
+        negative_actual=gmsh.parser.getNumber("negativeOracle")
+        negative_actual==[0.0,1.0] || error(
+            "Gmsh SetMaxTag factory activation changed: expected [0.0, 1.0], " *
+            "got $negative_actual")
+
+        allocator_expression=raw"""
+            SetFactory("Built-in");
+            SetMaxTag Point(10);
+            SetMaxTag Point(newp + 4);
+            allocatorExpressionOracle[] = {newp};
+            """
+        allocator_expression_path=joinpath(
+            directory,"set_max_tag_allocator_expression.geo")
+        write(allocator_expression_path,allocator_expression)
+        gmsh.clear()
+        gmsh.open(allocator_expression_path)
+        allocator_expression_actual=
+            gmsh.parser.getNumber("allocatorExpressionOracle")
+        allocator_expression_actual==[16.0] || error(
+            "Gmsh SetMaxTag allocator expression changed: expected [16.0], " *
+            "got $allocator_expression_actual")
+
+        for (kind,allocator) in (("Curve","newreg"),("Surface","newreg"),
+                                 ("Volume","newreg"))
+            category_source="""
+                SetFactory("OpenCASCADE");
+                SetMaxTag $kind(20);
+                SetMaxTag $kind(5);
+                categoryOracle[] = {$allocator};
+                """
+            category_path=joinpath(
+                directory,"set_max_tag_" * lowercase(kind) * ".geo")
+            write(category_path,category_source)
+            gmsh.clear()
+            gmsh.open(category_path)
+            category_actual=gmsh.parser.getNumber("categoryOracle")
+            category_actual==[21.0] || error(
+                "Gmsh OpenCASCADE SetMaxTag $kind lowering behavior changed: " *
+                "expected [21.0], got $category_actual")
+        end
+
+        primitive_gap=raw"""
+            SetFactory("OpenCASCADE");
+            Point(7) = {9,9,9,1};
+            SetMaxTag Point(5);
+            Box(1) = {0,0,0,1,1,1};
+            primitiveGapOracle[] = {newp, newreg};
+            """
+        primitive_gap_path=joinpath(directory,"set_max_tag_primitive_gap.geo")
+        write(primitive_gap_path,primitive_gap)
+        gmsh.clear()
+        gmsh.open(primitive_gap_path)
+        gmsh.parser.getNumber("primitiveGapOracle")==[16.0,13.0] || error(
+            "Gmsh SetMaxTag primitive occupied-tag handling changed")
+    end
+    return (nodes=length(coordinates),tets=length(connectivity)÷4,
+            volume_error=abs(volume-1/6))
 end
 
 gmsh.initialize(["gmsh","-v","0"])
@@ -218,12 +410,18 @@ try
     volume_error=max(abs(tessella_volume-1),abs(gmsh_volume-1))
 
     check_primitive_allocators()
+    set_max_gmsh=check_set_max_tags()
+    volume_error=max(volume_error,abs(set_max_volume-1/6),
+                     set_max_gmsh.volume_error)
     println("GMSH_PARITY_GEO_DYNAMIC_TAGS_OK " *
             "gmsh=$(gmsh.GMSH_API_VERSION) tessella_nodes=$(nnodes(mesh)) " *
             "tessella_tets=$(ntets(mesh)) gmsh_nodes=$gmsh_nodes " *
             "gmsh_tets=$gmsh_tets variables=$(length(expected_variables)) " *
+            "setmax_nodes=$(set_max_gmsh.nodes) " *
+            "setmax_tets=$(set_max_gmsh.tets) " *
             "volume_error=$volume_error mesh_crc=$(mesh_crc(mesh).sha) " *
-            "projected_crc=$(mixed_crc(projected).sha)")
+            "projected_crc=$(mixed_crc(projected).sha) " *
+            "setmax_crc=$(mixed_crc(set_max_projected).sha)")
 finally
     gmsh.finalize()
 end

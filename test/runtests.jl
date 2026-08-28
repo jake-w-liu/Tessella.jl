@@ -62,6 +62,7 @@ using Tessella
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # bounded dynamic tag allocators
+    include("geometry/geo_set_max_tag_test.jl") # factory-aware max-tag counters
     include("geometry/geo_periodic_test.jl") # expression-backed periodic curves
     include("geometry/model_periodic_io_test.jl") # classified periodic/embedded MSH projection
     include("geometry/model_volume_io_test.jl") # classified volume-embedding MSH projection
