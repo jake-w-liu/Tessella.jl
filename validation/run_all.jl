@@ -99,6 +99,12 @@ geo_list_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --p
 println("  command: ", geo_list_command)
 run(geo_list_command)
 
+println("\n── gmsh_parity point mesh sizes ──  bounded local Point constraints")
+geo_mesh_size_script = joinpath(HERE, "gmsh_parity", "geo_mesh_sizes.jl")
+geo_mesh_size_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_mesh_size_script`
+println("  command: ", geo_mesh_size_command)
+run(geo_mesh_size_command)
+
 println("\n── gmsh_parity dynamic tags ──  bounded allocator namespaces")
 geo_dynamic_tag_script = joinpath(HERE, "gmsh_parity", "geo_dynamic_tags.jl")
 geo_dynamic_tag_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_dynamic_tag_script`

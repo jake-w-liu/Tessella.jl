@@ -33,6 +33,8 @@ const _DYNAMIC_TAG_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_dynamic_tags.geo")),String)
 const _SET_MAX_TAG_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","geo_set_max_tags.geo")),String)
+const _POINT_MESH_SIZE_CLI_GEO=read(normpath(joinpath(
+    @__DIR__,"..","fixtures","geo_point_mesh_sizes.geo")),String)
 const _PERIODIC_EMBEDDED_CLI_GEO=_SQUARE_GEO * """
 Point(5) = {0.25, 0.25, 0, 1};
 Point(6) = {0.75, 0.25, 0, 1};
@@ -392,6 +394,17 @@ Physical Volume("domain", 72) = {1};
         @test set_max_tag_mesh.physical_names==Dict(
             (0,603)=>"corners",(1,604)=>"edges",
             (2,605)=>"boundary",(3,606)=>"domain")
+
+        point_mesh_size_input=joinpath(directory,"point-mesh-sizes.geo")
+        point_mesh_size_output=joinpath(directory,"point-mesh-sizes.msh")
+        write(point_mesh_size_input,_POINT_MESH_SIZE_CLI_GEO)
+        @test main([point_mesh_size_input,"-2","-o",point_mesh_size_output])==
+              point_mesh_size_output
+        @test read(point_mesh_size_input,String)==_POINT_MESH_SIZE_CLI_GEO
+        point_mesh_size=read_msh(point_mesh_size_output).mesh
+        @test validate(point_mesh_size).ok
+        @test mesh_crc(point_mesh_size).sha==
+              "f1bfa8a1cc61158cc6293540ad6ce6d7ce48054a616a3df57d93597857f1b089"
 
         periodic_surface_volume_input=joinpath(
             directory,"periodic-surface-volume.geo")

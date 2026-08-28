@@ -9,7 +9,7 @@ elements.
 The original simplex-mesher roadmap is complete through Stage 6. Development has now
 expanded toward independent Gmsh 4.15.2 feature and behavioral parity, with
 ASCENT-relevant meshing capabilities implemented first. That parity target is **not
-complete**. The last stable bounds-checked package gate passed 166,068/166,068
+complete**. The last stable bounds-checked package gate passed 166,803/166,803
 assertions; implementation increments and their focused gates are recorded in
 [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
@@ -60,7 +60,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   read-only tag allocators over tracked Point, shared-region, and Field namespaces and
   factory-aware, checked `SetMaxTag` control of geometric counters; the
   executor applies the same checked semantics to numeric parameters, entity tags,
-  and entity lists in every supported geometry statement;
+  and entity lists in every supported geometry statement, and stores positive
+  `MeshSize`/`Characteristic Length` constraints on existing explicit Points;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
   sub-element records, compact variable connectivity and parent/domain references,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
@@ -143,6 +144,13 @@ in an acyclic chain, and independent relations may share corner points. The boun
 functions, bounded numeric list assignment/indexing/selection/mutation, and constant
 entity ranges to all supported geometry statements. Entity lists, including periodic
 slave/master sets, can reuse whole or selected list variables.
+Point `MeshSize` selectors can likewise use `:`, expressions, constant ranges, and
+whole or selected numeric-list variables. Tessella requires existing explicit Points
+and finite positive sizes; Gmsh's permissive zero/negative and missing-Point behavior
+is outside this bounded contract. The current planar surface path applies the minimum
+constraint over the surface uniformly rather than claiming Gmsh's spatial size
+interpolation, and hidden primitive topology and topology-derived selectors remain
+blockers.
 It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
 `Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
 dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
@@ -171,7 +179,7 @@ julia --project --check-bounds=yes validation/run_all.jl
 The first command runs the full package/CRC suite. The second compares analytic
 volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs the
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
-dynamic-tag/`SetMaxTag`,
+point-size, dynamic-tag/`SetMaxTag`,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

@@ -2,16 +2,17 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-explicit planar surface-loop volumes and persistent affine relations between
-straight periodic boundary or embedded curves and planar periodic volume
-boundaries. Production meshing is never delegated to Gmsh.
+point-local mesh-size constraints, explicit planar surface-loop volumes, and
+persistent affine relations between straight periodic boundary or embedded curves
+and planar periodic volume boundaries. Production meshing is never delegated to
+Gmsh.
 """
 module API
 
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
-using ..Model: embed!
+using ..Model: embed!, set_point_mesh_size!
 using ..Model: add_physical_group!, set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -210,6 +211,34 @@ function _get_mesh()
     end
 end
 
+function _set_size(dim_tags,size)
+    caller="API.mesh.set_size"
+    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
+        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
+    point_tags=Any[]
+    for entry in dim_tags
+        pair=if entry isa Pair
+            (first(entry),last(entry))
+        elseif entry isa Tuple && length(entry)==2
+            entry
+        else
+            throw(ArgumentError(
+                "$caller: each dim_tags entry must be a (dimension, tag) pair"))
+        end
+        dimension=pair[1]
+        dimension isa Integer || throw(ArgumentError(
+            "$caller: entity dimensions must be integers"))
+        dimension isa Bool && throw(ArgumentError(
+            "$caller: entity dimensions must not be Bool"))
+        dimension==0 || throw(ArgumentError(
+            "$caller: only dimension-0 Point entities are supported"))
+        push!(point_tags,pair[2])
+    end
+    return _with_model(invalidate=true) do current
+        set_point_mesh_size!(current,point_tags,size)
+    end
+end
+
 function _set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)
     return _with_model(invalidate=true) do current
         set_periodic!(
@@ -229,9 +258,17 @@ end
 
 """Gmsh-style mesh generation, retrieval, and periodic curve/surface operations."""
 module mesh
-using ..API: _generate,_get_mesh,_set_periodic,_get_periodic_nodes
+using ..API: _generate,_get_mesh,_set_size,_set_periodic,_get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
 get()=_get_mesh()
+
+"""
+    set_size(dim_tags, size)
+
+Set a finite, positive mesh-size constraint on the dimension-0 Point entities in
+`dim_tags`. Every pair is validated before the active model or cached mesh changes.
+"""
+set_size(dim_tags,size)=_set_size(dim_tags,size)
 
 """
     set_periodic(dim, slave_entities, master_entities, affine; atol=1e-12)
