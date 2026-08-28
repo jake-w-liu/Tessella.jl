@@ -61,6 +61,7 @@ using Tessella
     include("geometry/model_test.jl")    # entity kernel + .geo execution
     include("geometry/model_boolean_snapshot_test.jl") # owned Boolean operands and Delete cleanup
     include("geometry/model_topology_query_test.jl") # explicit topology query API
+    include("geometry/model_entity_identity_test.jl") # entity names and atomic retagging
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
@@ -75,6 +76,7 @@ using Tessella
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
     include("interfaces/api_boolean_lifecycle_test.jl") # synchronized Boolean ownership
     include("interfaces/api_topology_query_test.jl") # explicit topology queries
+    include("interfaces/api_entity_identity_test.jl") # synchronized entity identity
     include("interfaces/cli_test.jl") # bounded parser + non-destructive output
     include("interfaces/gui_test.jl") # validated headless command/state machine
     include("interfaces/post_test.jl") # owned scalar views + synchronized plugins

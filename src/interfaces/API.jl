@@ -2,10 +2,11 @@
     API
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
-deterministic entity-topology and Physical-group queries, Physical-group mutations,
-point-local mesh-size constraints, explicit planar surface-loop volumes, and
-operation-time Boolean operand ownership, plus persistent affine relations between
-straight periodic boundary or embedded curves and planar periodic volume boundaries.
+deterministic entity-topology and Physical-group queries, entity-name and atomic-tag
+mutations, Physical-group mutations, point-local mesh-size constraints, explicit
+planar surface-loop volumes, operation-time Boolean operand ownership, and persistent
+affine relations between straight periodic boundary or embedded curves and planar
+periodic volume boundaries.
 Production meshing is never delegated to Gmsh.
 """
 module API
@@ -21,6 +22,7 @@ using ..Model: model_physical_groups_entities, model_entities_for_physical_group
 using ..Model: model_entities_for_physical_name, model_physical_groups_for_entity
 using ..Model: model_physical_name
 using ..Model: model_entities, model_dimension, model_boundary, model_adjacencies
+using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -149,6 +151,37 @@ _get_adjacencies(dim,tag)=_with_model() do current
     model_adjacencies(current,dim,tag)
 end
 
+_get_entity_name(dim,tag)=_with_model() do current
+    model_entity_name(current,dim,tag)
+end
+
+function _set_entity_name(dim,tag,name)
+    name isa AbstractString || throw(ArgumentError(
+        "API.model.set_entity_name: name must be a string"))
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        before=model_entity_name(current,dim,tag)
+        after=set_entity_name!(current,dim,tag,name)
+        after==before || (LAST_MESH[]=nothing)
+        nothing
+    end
+end
+
+function _remove_entity_name(name)
+    name isa AbstractString || throw(ArgumentError(
+        "API.model.remove_entity_name: name must be a string"))
+    return lock(STATE_LOCK) do
+        current=_model_locked()
+        remove_entity_name!(current,name)>0 && (LAST_MESH[]=nothing)
+        nothing
+    end
+end
+
+_set_tag(dim,tag,new_tag)=_with_model(invalidate=true) do current
+    model_set_tag!(current,dim,tag,new_tag)
+    nothing
+end
+
 _get_physical_groups_entities(dim=-1)=_with_model() do current
     model_physical_groups_entities(current,dim)
 end
@@ -212,6 +245,7 @@ using ..API: _get_entities_for_physical_group, _get_entities_for_physical_name
 using ..API: _get_physical_groups_for_entity, _get_physical_name
 using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
 using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
+using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
     add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
 end
@@ -259,6 +293,29 @@ end
 boolean_difference(a,b; tag=0)=_boolean(:difference,a,b; tag=tag)
 boolean_union(a,b; tag=0)=_boolean(:union,a,b; tag=tag)
 boolean_intersection(a,b; tag=0)=_boolean(:intersection,a,b; tag=tag)
+
+"""Return an existing entity's name, or an empty string when it is unnamed or missing."""
+get_entity_name(dim,tag)=_get_entity_name(dim,tag)
+
+"""
+    set_entity_name(dim, tag, name)
+
+Set or replace the name of an existing positive-tag entity. An empty name removes
+the current name; a missing entity is unchanged.
+"""
+set_entity_name(dim,tag,name)=_set_entity_name(dim,tag,name)
+
+"""Remove `name` from every model entity carrying it."""
+remove_entity_name(name)=_remove_entity_name(name)
+
+"""
+    set_tag(dim, tag, new_tag)
+
+Atomically move an existing entity to an unused positive tag in the same dimension,
+including all live model references and its name.
+"""
+set_tag(dim,tag,new_tag)=_set_tag(dim,tag,new_tag)
+
 """Add a Physical group; `tag=0` allocates globally across entity dimensions."""
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m
     add_physical_group!(m,dim,tags;tag=tag,name=name)

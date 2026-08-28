@@ -1,9 +1,9 @@
 """
     Model
 
-A native geometry/entity kernel: tagged points, curves, curve loops, surfaces,
-surface loops, and volumes with physical groups and classified surface/volume
-mixed-mesh projection.
+A native geometry/entity kernel: tagged and named points, curves, curve loops,
+surfaces, surface loops, and volumes with atomic entity retagging, physical groups,
+and classified surface/volume mixed-mesh projection.
 Meshing dispatches to Tessella's certified simplex and transfinite kernels. This
 is not OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
@@ -36,6 +36,7 @@ export model_physical_groups_entities, model_entities_for_physical_group
 export model_entities_for_physical_name, model_physical_groups_for_entity
 export model_physical_name
 export model_entities, model_dimension, model_boundary, model_adjacencies
+export set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
@@ -61,6 +62,7 @@ mutable struct GeoModel
     surfaces::Dict{Int,Vector{Int}}
     surface_loops::Dict{Int,Vector{Int}}
     volumes::Dict{Int,Vector{Int}}
+    entity_names::Dict{Tuple{Int,Int},String}
     physical::Dict{Tuple{Int,Int},Vector{Int}}
     physical_names::Dict{Tuple{Int,Int},String}
     physical_tag_max::Int
@@ -89,6 +91,7 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Vector{Int}}(),
+                      Dict{Tuple{Int,Int},String}(),
                       Dict{Tuple{Int,Int},Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
                       0,
@@ -330,6 +333,7 @@ function _model_curve_length(m::GeoModel,curve::Int,caller::AbstractString)
 end
 
 include("ModelTopologyQueries.jl")
+include("ModelIdentity.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
