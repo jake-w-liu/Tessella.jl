@@ -14,7 +14,8 @@ using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
 using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
                   MixedPeriodicLink, MixedMesh
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
-using ..SizeField: AbstractSizeField, ConstantSize, size_at
+using ..SizeField: AbstractSizeField, ConstantSize, PostViewField, field_value,
+                   size_at
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
@@ -1168,19 +1169,21 @@ function _loop_points(m::GeoModel, loop_id::Int)
     return pts
 end
 
-function _add_surface_point!(xs, ys, index, m::GeoModel, pid::Int, caller)
+function _add_surface_point!(xs,ys,mesh_sizes,index,m::GeoModel,pid::Int,caller)
     haskey(index, pid) && return index[pid]
     haskey(m.points,pid) || throw(ArgumentError("$caller: unknown Point[$pid]"))
     p=m.points[pid]
     abs(p[3])<=1e-12 || throw(ArgumentError(
         "$caller: Point[$pid] is not planar in z=0 (got z=$(p[3]))"))
     push!(xs,p[1]); push!(ys,p[2])
+    push!(mesh_sizes,m.point_size[pid])
     index[pid]=length(xs)
     return index[pid]
 end
 
-function _add_surface_curve_point!(xs,ys,index,m::GeoModel,point,
-                                   curve::Int,caller::AbstractString)
+function _add_surface_curve_point!(xs,ys,mesh_sizes,index,m::GeoModel,point,
+                                   mesh_size::Float64,curve::Int,
+                                   caller::AbstractString)
     scale=max(1.0,hypot(point[1],point[2]))
     tolerance=128eps(Float64)*scale
     matched_vertex=0
@@ -1199,9 +1202,24 @@ function _add_surface_curve_point!(xs,ys,index,m::GeoModel,point,
         matched_vertex=vertex
         matched_point=point_tag
     end
-    matched_vertex!=0 && return matched_vertex
+    if matched_vertex!=0
+        mesh_sizes[matched_vertex]=min(mesh_sizes[matched_vertex],mesh_size)
+        return matched_vertex
+    end
     push!(xs,point[1]);push!(ys,point[2])
+    push!(mesh_sizes,mesh_size)
     return length(xs)
+end
+
+@inline function _surface_curve_mesh_size(m::GeoModel,curve::Int,
+                                          parameter::Float64,
+                                          caller::AbstractString)
+    a,b=m.curves[curve]
+    first_size=m.point_size[a];last_size=m.point_size[b]
+    mesh_size=muladd(parameter,last_size-first_size,first_size)
+    (isfinite(mesh_size) && mesh_size>0) || throw(ErrorException(
+        "$caller: Curve[$curve] has an unrepresentable interpolated Point size"))
+    return mesh_size
 end
 
 function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
@@ -1225,7 +1243,8 @@ function _surface_curve_parameters(forced,curve::Int,signed::Int)
 end
 
 function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
-    xs=Float64[];ys=Float64[];segs=Tuple{Int,Int}[]
+    xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
+    segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
     for loop_id in m.surfaces[t]
         loop_idx=Int[]
@@ -1233,14 +1252,17 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
             curve=abs(signed);a,b=m.curves[curve]
             for parameter in _surface_curve_parameters(forced,curve,signed)
                 vertex=if parameter==0
-                    _add_surface_point!(xs,ys,index,m,a,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller)
                 elseif parameter==1
-                    _add_surface_point!(xs,ys,index,m,b,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller)
                 else
                     point=_periodic_curve_point(m,curve,parameter,caller)
                     abs(point[3])<=1e-12 || throw(ArgumentError(
                         "$caller: Curve[$curve] subdivision is not planar in z=0"))
-                    push!(xs,point[1]);push!(ys,point[2]);length(xs)
+                    _add_surface_curve_point!(
+                        xs,ys,mesh_sizes,index,m,point,
+                        _surface_curve_mesh_size(m,curve,parameter,caller),
+                        curve,caller)
                 end
                 push!(loop_idx,vertex)
             end
@@ -1256,7 +1278,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
     internal=Tuple{Int,Int}[]
     for (edim,etag) in embedded
         if edim==0
-            _add_surface_point!(xs,ys,index,m,etag,caller)
+            _add_surface_point!(xs,ys,mesh_sizes,index,m,etag,caller)
         elseif edim!=1
             throw(ArgumentError(
                 "$caller: unsupported embedding dimension $edim"))
@@ -1270,21 +1292,25 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
         parameters=get(forced,etag,nothing)
         curve_nodes=Int[]
         if parameters===nothing
-            push!(curve_nodes,_add_surface_point!(xs,ys,index,m,a,caller))
-            push!(curve_nodes,_add_surface_point!(xs,ys,index,m,b,caller))
+            push!(curve_nodes,_add_surface_point!(
+                xs,ys,mesh_sizes,index,m,a,caller))
+            push!(curve_nodes,_add_surface_point!(
+                xs,ys,mesh_sizes,index,m,b,caller))
         else
             for parameter in parameters
                 vertex=if parameter==0
-                    _add_surface_point!(xs,ys,index,m,a,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller)
                 elseif parameter==1
-                    _add_surface_point!(xs,ys,index,m,b,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller)
                 else
                     point=_periodic_curve_point(m,etag,parameter,caller)
                     abs(point[3])<=1e-12 || throw(ArgumentError(
                         "$caller: embedded Curve[$etag] subdivision is not " *
                         "planar in z=0"))
                     _add_surface_curve_point!(
-                        xs,ys,index,m,point,etag,caller)
+                        xs,ys,mesh_sizes,index,m,point,
+                        _surface_curve_mesh_size(m,etag,parameter,caller),
+                        etag,caller)
                 end
                 push!(curve_nodes,vertex)
             end
@@ -1299,7 +1325,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
             push!(internal,(first_node,second_node))
         end
     end
-    return xs,ys,segs,index,embedded,internal
+    return xs,ys,mesh_sizes,segs,embedded,internal
 end
 
 function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
@@ -3250,13 +3276,14 @@ function _mesh_covers_segment(mesh::Mesh, p, q; atol=1e-12)
     return false
 end
 
+include("SurfacePointSizing.jl")
+
 function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
                                   caller::AbstractString)
-    xs,ys,segs,index,embedded,internal=
+    xs,ys,mesh_sizes,segs,embedded,internal=
         _surface_pslg(m,t,forced,caller)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
-    hmin=minimum(m.point_size[pid] for pid in keys(index))
-    sizefn=(x,y)->hmin
+    sizefn=_surface_point_size_field(T,xs,ys,mesh_sizes,t,caller)
     interior=refine!(T; min_angle_deg=min_angle_deg, size=sizefn)
     mesh=to_mesh(T; interior=interior)
     diag=validate(mesh)
@@ -3287,9 +3314,11 @@ end
                        max_periodic_passes=8) -> Mesh
 
 Mesh a native planar surface in `z=0`, including holes and embedded points or
-curves. Point characteristic lengths drive refinement. Stored straight-curve
-periodic relations synchronize boundary or embedded curve subdivisions across
-each acyclic dependency graph. Bounded remeshing precedes topology-ordered affine
+curves. Point characteristic lengths are linearly interpolated over the
+deterministic initial constrained triangulation and drive refinement. Coincident
+PSLG inputs use the smaller constraint. Stored
+straight-curve periodic relations synchronize boundary or embedded curve subdivisions
+across each acyclic dependency graph. Bounded remeshing precedes topology-ordered affine
 snapping, so a curve may be both a slave and a downstream master. The returned
 triangle mesh is validated before it is returned. Relations meeting at a corner
 must produce the same exact snapped coordinate.

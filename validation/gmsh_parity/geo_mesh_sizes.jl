@@ -1,5 +1,5 @@
 #!/usr/bin/env julia
-# P6: point-local .geo/API mesh-size constraints vs Gmsh 4.15.2.
+# P6: Point constraints and spatial surface grading vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
@@ -22,10 +22,10 @@ native_sizes==EXPECTED_SIZES || error(
     "Tessella point-size constraints changed: $native_sizes")
 execution.model.physical_names==EXPECTED_PHYSICAL_NAMES || error(
     "Tessella point-size physical names changed")
-nnodes(mesh)==23 && ntris(mesh)==28 || error(
+nnodes(mesh)==19 && ntris(mesh)==24 || error(
     "Tessella point-size mesh size changed")
 mesh_crc(mesh).sha==
-    "f1bfa8a1cc61158cc6293540ad6ce6d7ce48054a616a3df57d93597857f1b089" ||
+    "b3f1bf410e917d050eacceab998b0fdf7b4cd61d1d9f263805b5120c06f1f4df" ||
     error("Tessella point-size mesh CRC changed")
 native_area=sum(triangle_area(
     node(mesh,mesh.tris[1,triangle]),node(mesh,mesh.tris[2,triangle]),
@@ -35,8 +35,52 @@ abs(native_area-1)<=32eps(Float64) || error(
 projected=model_to_mixed(execution.model,mesh,2,1)
 validate(projected).ok || error("Tessella point-size projection is invalid")
 mixed_crc(projected).sha==
-    "1489fd244841d079350f33439a97b6f33205bcff32e4b99ac672e79a4387eaca" ||
+    "b7202dfa1cfb7469e7541c34e2b1bfae404c66f2462abc1953fa0b9374e5a010" ||
     error("Tessella point-size projection CRC changed")
+
+function native_spatial_mesh()
+    model=GeoModel()
+    sizes=(0.1,0.8,0.8,0.8)
+    for (tag,(x,y)) in enumerate(((0.0,0.0),(2.0,0.0),
+                                  (2.0,2.0),(0.0,2.0)))
+        add_point!(model,x,y,0;tag=tag,mesh_size=sizes[tag])
+    end
+    for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+        add_line!(model,first,last;tag=tag)
+    end
+    add_curve_loop!(model,[1,2,3,4];tag=1)
+    add_plane_surface!(model,[1];tag=1)
+    return mesh_model_surface(model,1;min_angle_deg=20)
+end
+
+function native_quadrant_counts(mesh)
+    counts=zeros(Int,4)
+    for triangle in 1:ntris(mesh)
+        nodes=mesh.tris[:,triangle]
+        x=sum(mesh.coords[1,nodes])/3
+        y=sum(mesh.coords[2,nodes])/3
+        counts[(x<1 ? 0 : 1)+(y<1 ? 0 : 2)+1]+=1
+    end
+    return counts
+end
+
+spatial_mesh=native_spatial_mesh()
+validate(spatial_mesh).ok || error("Tessella spatial Point-size mesh is invalid")
+spatial_native_counts=native_quadrant_counts(spatial_mesh)
+nnodes(spatial_mesh)==49 && ntris(spatial_mesh)==72 || error(
+    "Tessella spatial Point-size mesh size changed")
+spatial_native_counts==[45,8,11,8] || error(
+    "Tessella spatial Point-size quadrant counts changed: $spatial_native_counts")
+mesh_crc(spatial_mesh).sha==
+    "b36070c0c394727d037d35cd0d1944e4807208cc265df4c34ad96c6da82ea1e2" ||
+    error("Tessella spatial Point-size mesh CRC changed")
+spatial_native_area=sum(triangle_area(
+    node(spatial_mesh,spatial_mesh.tris[1,triangle]),
+    node(spatial_mesh,spatial_mesh.tris[2,triangle]),
+    node(spatial_mesh,spatial_mesh.tris[3,triangle]))
+    for triangle in 1:ntris(spatial_mesh))
+abs(spatial_native_area-4)<=128eps(Float64) || error(
+    "Tessella spatial Point-size area is $spatial_native_area, expected 4")
 
 Tessella.API.finalize()
 try
@@ -85,6 +129,18 @@ function gmsh_surface_area(coordinates,connectivity)
     return area
 end
 
+function gmsh_quadrant_counts(coordinates,connectivity)
+    counts=zeros(Int,4)
+    for offset in 1:3:length(connectivity)
+        points=ntuple(
+            slot->coordinates[Int(connectivity[offset+slot-1])],3)
+        x=sum(point[1] for point in points)/3
+        y=sum(point[2] for point in points)/3
+        counts[(x<1 ? 0 : 1)+(y<1 ? 0 : 2)+1]+=1
+    end
+    return counts
+end
+
 gmsh.initialize(["gmsh","-v","0"])
 try
     startswith(gmsh.GMSH_API_VERSION,"4.15.2") || error(
@@ -122,6 +178,47 @@ try
         "Gmsh point-size area is $gmsh_area, expected 1")
 
     gmsh.clear()
+    gmsh.model.add("point_size_spatial")
+    spatial_sizes=(0.1,0.8,0.8,0.8)
+    for (tag,(x,y)) in enumerate(((0.0,0.0),(2.0,0.0),
+                                  (2.0,2.0),(0.0,2.0)))
+        gmsh.model.geo.addPoint(x,y,0,spatial_sizes[tag],tag)==tag ||
+            error("Gmsh spatial Point tag changed")
+    end
+    for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+        gmsh.model.geo.addLine(first,last,tag)==tag ||
+            error("Gmsh spatial Curve tag changed")
+    end
+    gmsh.model.geo.addCurveLoop([1,2,3,4],1)==1 ||
+        error("Gmsh spatial Curve Loop tag changed")
+    gmsh.model.geo.addPlaneSurface([1],1)==1 ||
+        error("Gmsh spatial Surface tag changed")
+    gmsh.model.geo.synchronize()
+    gmsh.option.setNumber("Mesh.RandomSeed",1)
+    gmsh.model.mesh.generate(2)
+    spatial_coordinates=gmsh_coordinates()
+    spatial_types,_,spatial_node_tags=gmsh.model.mesh.getElements(2,1)
+    spatial_types==Int32[2] || error(
+        "Gmsh spatial Point-size surface changed element type")
+    spatial_connectivity=only(spatial_node_tags)
+    spatial_gmsh_counts=gmsh_quadrant_counts(
+        spatial_coordinates,spatial_connectivity)
+    length(spatial_coordinates)==45 && length(spatial_connectivity)÷3==68 ||
+        error("Gmsh spatial Point-size mesh size changed")
+    spatial_gmsh_counts==[41,11,8,8] || error(
+        "Gmsh spatial Point-size quadrant counts changed: $spatial_gmsh_counts")
+    spatial_gmsh_area=gmsh_surface_area(
+        spatial_coordinates,spatial_connectivity)
+    abs(spatial_gmsh_area-4)<=128eps(Float64) || error(
+        "Gmsh spatial Point-size area is $spatial_gmsh_area, expected 4")
+    spatial_native_counts[1]>3*maximum(spatial_native_counts[2:4]) || error(
+        "Tessella did not localize the fine Point constraint")
+    spatial_gmsh_counts[1]>3*maximum(spatial_gmsh_counts[2:4]) || error(
+        "Gmsh did not localize the fine Point constraint")
+    abs(ntris(spatial_mesh)-length(spatial_connectivity)÷3)<=4 || error(
+        "Tessella and Gmsh spatial Point-size element counts diverged")
+
+    gmsh.clear()
     gmsh.model.add("point_size_api")
     gmsh.model.geo.addPoint(0,0,0,1.0,1)==1 || error(
         "Gmsh API Point tag changed")
@@ -155,8 +252,12 @@ try
             "tessella_tris=$(ntris(mesh)) gmsh_nodes=$(length(coordinates)) " *
             "gmsh_tris=$(length(connectivity)÷3) area_error=" *
             "$(max(abs(native_area-1),abs(gmsh_area-1))) " *
+            "spatial_tessella_tris=$(ntris(spatial_mesh)) " *
+            "spatial_gmsh_tris=$(length(spatial_connectivity)÷3) " *
+            "spatial_tessella_quadrants=$(join(spatial_native_counts,",")) " *
+            "spatial_gmsh_quadrants=$(join(spatial_gmsh_counts,",")) " *
             "mesh_crc=$(mesh_crc(mesh).sha) projected_crc=$(mixed_crc(projected).sha) " *
-            "bounded_contract=positive_existing_points")
+            "bounded_contract=positive_existing_points_piecewise_linear_surface")
 finally
     gmsh.isInitialized()!=0 && gmsh.finalize()
 end

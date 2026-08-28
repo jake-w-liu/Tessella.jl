@@ -42,7 +42,7 @@ validation/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
     geo_geometry_expressions.jl # bounded geometry-expression execution
     geo_list_variables.jl # bounded numeric-list and entity-reuse execution
-    geo_mesh_sizes.jl # point-local .geo/API mesh-size constraints
+    geo_mesh_sizes.jl # Point constraints and spatial surface grading
     geo_dynamic_tags.jl # tag allocators, SetMaxTag, and OCC primitive namespaces
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
@@ -89,7 +89,7 @@ mandatory bounds-checked children. It also runs focused box, square, cone,
 cylinder, Boolean, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,
 bounded expression- and numeric-list-backed geometry and entity lists,
-point-local `.geo` and API mesh-size constraints on explicit Points,
+point-local `.geo` and API mesh-size constraints plus spatial surface grading,
 bounded dynamic tag allocators and factory-aware `SetMaxTag` for tracked explicit
 and primitive topology,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
