@@ -48,6 +48,7 @@ validation/
     model_entity_identity.jl # entity names and live-reference retagging
     model_entity_removal.jl # ordered dependency-safe recursive removal
     model_spatial_queries.jl # analytical bounds and containment queries
+    model_entity_metadata.jl # native entity types and partition ownership
     boolean_boxes.jl      # Boolean snapshot ownership and Delete lifecycle
     nurbs_surface.jl      # OCC patch plus two-way IGES 126/128/144 interoperability
     periodic_translation.jl # native/projected periodic pairs vs Gmsh 4.15.2
@@ -99,7 +100,7 @@ bounded expression- and numeric-list-backed geometry and entity lists,
 point-local and explicit-topology `.geo` mesh-size constraints, API updates, and
 spatial surface grading, bounded geometry and global Physical tag allocators,
 the Physical-group API lifecycle, explicit model-topology, entity-identity,
-entity-removal, and spatial-query API differentials, and
+entity-removal, spatial-query, and native entity-metadata API differentials, and
 factory-aware `SetMaxTag` for tracked explicit and primitive topology,
 projected MSH2/MSH4 single-/two-direction periodic surfaces, compact periodic node
 pairs, embedded periodic curves, reusable-master, chained, and expression-backed
