@@ -26,6 +26,10 @@ using ..Model: model_entities, model_dimension, model_boundary, model_adjacencie
 using ..Model: model_bounding_box, model_entities_in_bounding_box
 using ..Model: model_entity_type, model_entity_properties, model_parent,
                model_number_of_partitions, model_partitions
+using ..Model: model_value, model_derivative, model_second_derivative,
+               model_curvature, model_principal_curvatures, model_normal
+using ..Model: model_parametrization, model_parametrization_bounds,
+               model_is_inside, model_closest_point
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
@@ -174,6 +178,46 @@ _get_entity_properties(dim,tag)=_with_model() do current
     model_entity_properties(current,dim,tag)
 end
 
+_get_value(dim,tag,parametric_coord)=_with_model() do current
+    model_value(current,dim,tag,parametric_coord)
+end
+
+_get_derivative(dim,tag,parametric_coord)=_with_model() do current
+    model_derivative(current,dim,tag,parametric_coord)
+end
+
+_get_second_derivative(dim,tag,parametric_coord)=_with_model() do current
+    model_second_derivative(current,dim,tag,parametric_coord)
+end
+
+_get_curvature(dim,tag,parametric_coord)=_with_model() do current
+    model_curvature(current,dim,tag,parametric_coord)
+end
+
+_get_principal_curvatures(tag,parametric_coord)=_with_model() do current
+    model_principal_curvatures(current,tag,parametric_coord)
+end
+
+_get_normal(tag,parametric_coord)=_with_model() do current
+    model_normal(current,tag,parametric_coord)
+end
+
+_get_parametrization(dim,tag,coord)=_with_model() do current
+    model_parametrization(current,dim,tag,coord)
+end
+
+_get_parametrization_bounds(dim,tag)=_with_model() do current
+    model_parametrization_bounds(current,dim,tag)
+end
+
+_is_inside(dim,tag,coord,parametric=false)=_with_model() do current
+    model_is_inside(current,dim,tag,coord,parametric)
+end
+
+_get_closest_point(dim,tag,coord)=_with_model() do current
+    model_closest_point(current,dim,tag,coord)
+end
+
 _get_parent(dim,tag)=_with_model() do current
     model_parent(current,dim,tag)
 end
@@ -291,6 +335,9 @@ using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
 using ..API: _get_bounding_box, _get_entities_in_bounding_box
 using ..API: _get_entity_type, _get_entity_properties, _get_parent,
              _get_number_of_partitions, _get_partitions
+using ..API: _get_value, _get_derivative, _get_second_derivative, _get_curvature
+using ..API: _get_principal_curvatures, _get_normal, _get_parametrization,
+             _get_parametrization_bounds, _is_inside, _get_closest_point
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 using ..API: _remove_entities
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
@@ -422,6 +469,42 @@ the unit-normal equation `a*x+b*y+c*z=d`; other visible native types return empt
 vectors.
 """
 get_entity_properties(dim,tag)=_get_entity_properties(dim,tag)
+
+"""Evaluate an explicit Point, straight Line, or Plane parametrization."""
+get_value(dim,tag,parametric_coord)=_get_value(dim,tag,parametric_coord)
+
+"""Evaluate first derivatives for an explicit straight Line or Plane."""
+get_derivative(dim,tag,parametric_coord)=
+    _get_derivative(dim,tag,parametric_coord)
+
+"""Evaluate second derivatives for an explicit straight Line or Plane."""
+get_second_derivative(dim,tag,parametric_coord)=
+    _get_second_derivative(dim,tag,parametric_coord)
+
+"""Return zero curvature values for an explicit straight Line or Plane."""
+get_curvature(dim,tag,parametric_coord)=
+    _get_curvature(dim,tag,parametric_coord)
+
+"""Return zero principal curvatures and tangent directions for an explicit Plane."""
+get_principal_curvatures(tag,parametric_coord)=
+    _get_principal_curvatures(tag,parametric_coord)
+
+"""Return exterior-loop-oriented unit normals for an explicit Plane."""
+get_normal(tag,parametric_coord)=_get_normal(tag,parametric_coord)
+
+"""Return orthogonal native parameters for concatenated 3-D coordinates."""
+get_parametrization(dim,tag,coord)=_get_parametrization(dim,tag,coord)
+
+"""Return detached native parametric lower and upper bounds."""
+get_parametrization_bounds(dim,tag)=
+    _get_parametrization_bounds(dim,tag)
+
+"""Count physical or parametric points inside an explicit native entity."""
+is_inside(dim,tag,coord,parametric=false)=
+    _is_inside(dim,tag,coord,parametric)
+
+"""Project concatenated 3-D coordinates onto an explicit Line or Plane."""
+get_closest_point(dim,tag,coord)=_get_closest_point(dim,tag,coord)
 
 """Return `(-1,-1)`, the partition-parent sentinel, for an existing native entity."""
 get_parent(dim,tag)=_get_parent(dim,tag)

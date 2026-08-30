@@ -146,6 +146,13 @@ model_metadata_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=y
 println("  command: ", model_metadata_command)
 run(model_metadata_command)
 
+println("\n── gmsh_parity model evaluation ──  explicit Point, Line, and Plane geometry")
+model_evaluation_script = joinpath(
+    HERE, "gmsh_parity", "model_entity_evaluation.jl")
+model_evaluation_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $model_evaluation_script`
+println("  command: ", model_evaluation_command)
+run(model_evaluation_command)
+
 println("\n── uniform_refine ──  exact Gmsh 4.15.2 simplex templates")
 uniform_refine_script = joinpath(HERE, "uniform_refine", "differential.jl")
 uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $uniform_refine_script`
