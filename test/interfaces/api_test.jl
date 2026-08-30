@@ -47,6 +47,19 @@ const _API=Tessella.API
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
               "e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83"
+        node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
+        @test node_tags==UInt64.(1:9)
+        @test reshape(node_coordinates,3,:)==generated.coords
+        @test isempty(node_parameters)
+        element_types,element_tags,element_nodes=_API.mesh.get_elements()
+        @test element_types==Int32[4]
+        @test element_tags==[UInt64.(1:12)]
+        @test element_nodes==[UInt64.(vec(generated.tets))]
+        @test _API.mesh.get_element_types()==Int32[4]
+        @test _API.mesh.get_elements_by_type(4)==
+              (UInt64.(1:12),UInt64.(vec(generated.tets)))
+        @test _API.mesh.get_max_node_tag()==UInt64(9)
+        @test _API.mesh.get_max_element_tag()==UInt64(12)
 
         cached=_API.mesh.get()
         @test cached!==generated && cached.coords!==generated.coords
