@@ -357,6 +357,16 @@ end
                   first_mapping.master_nodes
             generated.coords[1,1]+=10
             @test mesh_crc(_API.mesh.get())==expected
+
+            refined=_API.mesh.refine()
+            @test mesh_crc(refined).sha==
+                  "5db960c919e54384ecf25fe27144a8636d9b8557d2afe052c77c7c545ffe8722"
+            for (slave,master,pairs) in ((4,6,13),(5,3,9))
+                mapping=_API.mesh.get_periodic_nodes(2,slave)
+                @test mapping.master_entity==master
+                @test length(mapping.slave_nodes)==
+                      length(mapping.master_nodes)==pairs
+            end
         finally
             _API.finalize()
         end

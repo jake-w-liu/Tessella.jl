@@ -109,7 +109,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   cleans owned metadata and encodings without rewinding automatic tags;
 - one-level uniform linear-simplex refinement using Gmsh 4.15.2's ordered 2/4/8
   child templates, shared deterministic edge midpoints, tag preservation, resource
-  bounds, and output validation;
+  bounds, and output validation, available directly or as an atomic operation on the
+  synchronized session mesh cache;
 - validated four-sided planar transfinite triangle patches using average-chord Coons
   interpolation, all four Gmsh diagonal arrangements, physical tags, bounded
   intersection auditing, and exact orientation postconditions;
@@ -236,6 +237,11 @@ detached NUL-free string vectors under sorted names. Finite Point-coordinate upd
 preserve tag-owned state and invalidate a synchronized mesh after success; dependent
 native geometry queries immediately use the new coordinates. Per-window visibility
 and implicit primitive boundary presentation remain unfinished.
+`API.mesh.refine` replaces the complete cached linear-simplex mesh only after the
+canonical uniform-refinement kernel succeeds and returns independent caller-owned
+storage. `API.mesh.clear` discards the complete cache without changing model geometry;
+entity-selective clearing is an explicit blocker until the cache owns entity
+classification metadata.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
@@ -273,7 +279,7 @@ spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
 entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
 entity presentation, Point-coordinate, and model-attribute state,
-uniform-refinement, transfinite-patch,
+uniform-refinement and session-cache lifecycle, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
