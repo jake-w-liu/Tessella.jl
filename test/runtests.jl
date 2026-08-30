@@ -65,6 +65,7 @@ using Tessella
     include("geometry/model_entity_removal_test.jl") # dependency-safe recursive removal
     include("geometry/model_spatial_query_test.jl") # analytical bounding boxes
     include("geometry/model_entity_metadata_test.jl") # native type/property/partition metadata
+    include("geometry/model_entity_evaluation_test.jl") # native geometry evaluation
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
@@ -83,6 +84,7 @@ using Tessella
     include("interfaces/api_entity_removal_test.jl") # synchronized entity removal
     include("interfaces/api_spatial_query_test.jl") # synchronized bounding boxes
     include("interfaces/api_entity_metadata_test.jl") # synchronized entity metadata
+    include("interfaces/api_entity_evaluation_test.jl") # synchronized geometry evaluation
     include("interfaces/cli_test.jl") # bounded parser + non-destructive output
     include("interfaces/gui_test.jl") # validated headless command/state machine
     include("interfaces/post_test.jl") # owned scalar views + synchronized plugins

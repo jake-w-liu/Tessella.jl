@@ -54,6 +54,7 @@ Tessella
 │   ├── ModelRemoval ordered dependency-safe recursive removal
 │   ├── ModelSpatialQueries analytical bounding boxes and containment selection
 │   ├── ModelEntityMetadata native types, plane equations, and nonpartition ownership
+│   ├── ModelEntityEvaluation exact Point/Line/Plane evaluation and projection
 │   └── GeoExec     bounded `.geo` execution
 ├── meshing/
 │   ├── PipelineSupport checked top-level input conversion, resource accounting,
@@ -119,11 +120,11 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | Track | Exit condition | State |
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, atomic live-reference retagging, dependency-safe recursive removal, and explicit topology, spatial, type, plane-property, and nonpartition metadata queries |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/straight-Line/explicit-Plane evaluation |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, deterministic topology/spatial/type/plane-property/nonpartition queries, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, and native-metadata lifecycle including plane properties, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and Boolean snapshot/Delete lifecycle corpus |
+| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, deterministic topology/spatial/type/plane-property/nonpartition queries and Point/straight-Line/explicit-Plane evaluation, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata lifecycle including plane properties, and native Point/Line/Plane evaluation, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and Boolean snapshot/Delete lifecycle corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -239,6 +240,18 @@ entities, so every existing entity has parent `(-1,-1)`, no partition membership
 and a model partition count of zero. These metadata queries are read-only and keep
 the session mesh cache intact. Imported or generated `MixedMesh` partition metadata
 remains a separate P2/P5 concern.
+Native geometry evaluation covers Points, straight Lines, and explicit Planes.
+It provides values, first and second derivatives, curvature, plane principal
+curvatures and normals, physical-to-parametric conversion, parameter bounds,
+containment counts, and closest-point projection through direct and synchronized
+session APIs. Lines use `[0,1]`; Planes use the deterministic Gmsh-compatible
+orthonormal frame derived from their exterior loop. Physical Plane containment uses
+the exact trimmed interior and excludes outer and hole boundaries, while parametric
+containment uses the inclusive rectangular parameter bounds. Line closest points are
+clamped to the segment; Plane projections are untrimmed. Queries are read-only and
+reject malformed, nonfinite, implicit, degenerate, or unrepresentable geometry
+instead of returning approximate fallback data. Curved entities, implicit primitive
+subentities, and general CAD parametrization remain outside this increment.
 Entity names are dimension-scoped metadata owned only by existing positive-tag
 entities; names need not be unique, can be replaced or cleared per entity, and can be
 removed by exact value across dimensions. Atomic retagging moves every live reference:
@@ -385,6 +398,7 @@ The aggregate validation launches the Gmsh 4.15.2 size-field, constant-range,
 geometry-expression, numeric-list, spatial and explicit-topology Point-mesh-size,
 dynamic-tag/`SetMaxTag`, model-topology, model-entity-identity,
 model-entity-removal, model-spatial-query, model-entity-metadata,
+model-entity-evaluation,
 uniform-refinement,
 four-sided transfinite, straight transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,

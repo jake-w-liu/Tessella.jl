@@ -26,7 +26,7 @@ function model_entity_type(m::GeoModel,dim,tag)
     return _MODEL_ENTITY_TYPES[dimension+1]
 end
 
-function _model_plane_properties(
+function _model_plane_geometry(
     m::GeoModel,tag::Int,caller::AbstractString)
     loops=m.surfaces[tag]
     isempty(loops) && throw(ErrorException(
@@ -41,7 +41,7 @@ function _model_plane_properties(
         push!(seen,point)
     end
     coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
-    anchor,second,third,_=_model_surface_projection(
+    anchor,second,third,projection=_model_surface_projection(
         coordinates,point_tags,tag,caller)
 
     R=Rational{BigInt}
@@ -58,19 +58,30 @@ function _model_plane_properties(
     squared=sum(component->component^2,normal)
     squared>0 || throw(ErrorException(
         "$caller: Plane[$tag] has a degenerate boundary; rebuild the model"))
+    rhs_exact=sum(index->normal[index]*R(anchor[index]),1:3)
     properties=setprecision(BigFloat,256) do
         magnitude=sqrt(BigFloat(squared))
         coefficients=ntuple(
             index->Float64(BigFloat(normal[index])/magnitude),3)
-        rhs=Float64(sum(index->
-            BigFloat(normal[index])*BigFloat(R(anchor[index])),1:3)/magnitude)
+        rhs=Float64(BigFloat(rhs_exact)/magnitude)
         (coefficients...,rhs)
     end
     all(isfinite,properties) || throw(ErrorException(
         "$caller: Plane[$tag] equation is not Float64-representable; " *
         "rebuild the model"))
-    return properties
+    return (
+        point_tags=point_tags,
+        coordinates=coordinates,
+        anchor=anchor,
+        second=second,
+        third=third,
+        projection=projection,
+        properties=properties,
+    )
 end
+
+_model_plane_properties(m::GeoModel,tag::Int,caller::AbstractString)=
+    _model_plane_geometry(m,tag,caller).properties
 
 """
     model_entity_properties(model, dim, tag) -> (Vector{Int}, Vector{Float64})
