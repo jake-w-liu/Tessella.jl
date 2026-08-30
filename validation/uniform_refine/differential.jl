@@ -102,12 +102,43 @@ try
         all(==(Int32(physical)), tags) || error("Tessella physical tag was not preserved")
     end
 
+    gmsh.model.mesh.clear()
+    isempty(gmsh.model.mesh.getNodes()[1]) ||
+        error("Gmsh whole-mesh clear retained nodes")
+    all(isempty,gmsh.model.mesh.getElements()[2]) ||
+        error("Gmsh whole-mesh clear retained elements")
+
     crc = Tessella.MeshTypes.mesh_crc(tessella)
     crc.sha == "db9a1713d1174be1035ef3e9d6380a01ed419797a91ded9a2b8508d0b038f031" ||
         error("unexpected uniform-refine checksum $(crc.sha)")
+
+    Tessella.API.initialize()
+    api_crc = try
+        Tessella.API.model.add_box(0,0,0,1,1,1;tag=1)
+        source = Tessella.API.mesh.generate(3)
+        expected = Tessella.Refine.refine_uniform(source)
+        refined = Tessella.API.mesh.refine()
+        Tessella.MeshTypes.mesh_crc(refined) ==
+            Tessella.MeshTypes.mesh_crc(expected) ||
+            error("session refinement differs from the canonical kernel")
+        Tessella.API.mesh.clear()
+        cleared = try
+            Tessella.API.mesh.get()
+            false
+        catch err
+            err isa ArgumentError || rethrow()
+            true
+        end
+        cleared || error("session whole-mesh clear retained the cached mesh")
+        Tessella.API.model.get_entities() == [(3,1)] ||
+            error("session whole-mesh clear changed model geometry")
+        Tessella.MeshTypes.mesh_crc(refined)
+    finally
+        Tessella.API.finalize()
+    end
     println("uniform-refine differential: Gmsh $(gmsh.GMSH_API_VERSION), ",
             "nodes=$(crc.n_nodes) segs=$(crc.n_segs) tris=$(crc.n_tris) ",
-            "tets=$(crc.n_tets) sha=$(crc.sha)")
+            "tets=$(crc.n_tets) sha=$(crc.sha) api_sha=$(api_crc.sha)")
 finally
     gmsh.isInitialized() != 0 && gmsh.finalize()
 end

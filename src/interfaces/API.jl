@@ -9,7 +9,8 @@ entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
 mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
 operation-time Boolean operand ownership, and persistent affine relations between
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
-Production meshing is never delegated to Gmsh.
+The session owns atomic uniform refinement and complete clearing of its detached
+linear-simplex mesh cache. Production meshing is never delegated to Gmsh.
 """
 module API
 
@@ -41,6 +42,7 @@ using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
+using ..Refine: refine_uniform
 using ..GeoExec: execute_geo
 
 export initialize, finalize, option, model, mesh, open_geo!
@@ -671,6 +673,35 @@ function _get_mesh()
     end
 end
 
+function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=LAST_MESH[]
+        cached===nothing && throw(ArgumentError(
+            "API.mesh.refine: no mesh; call API.mesh.generate first"))
+        refined=refine_uniform(
+            cached;max_nodes=max_nodes,max_cells=max_cells)
+        LAST_MESH[]=_copy_mesh(refined)
+        refined
+    end
+end
+
+function _clear_mesh(dim_tags=())
+    return lock(STATE_LOCK) do
+        _model_locked()
+        (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(
+            ArgumentError(
+                "API.mesh.clear: dim_tags must be a vector or tuple of " *
+                "(dimension, tag) pairs"))
+        isempty(dim_tags) || throw(ArgumentError(
+            "API.mesh.clear: entity-selective clearing requires mesh " *
+            "classification metadata; pass an empty collection to clear the " *
+            "complete cached mesh"))
+        LAST_MESH[]=nothing
+        nothing
+    end
+end
+
 function _set_size(dim_tags,size)
     caller="API.mesh.set_size"
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
@@ -716,11 +747,31 @@ function _get_periodic_nodes(dim,slave_entity)
     end
 end
 
-"""Gmsh-style mesh generation, retrieval, and periodic curve/surface operations."""
+"""Gmsh-style mesh generation, refinement, clearing, retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_set_size,_set_periodic,_get_periodic_nodes
+using ..API: _generate,_get_mesh,_refine,_clear_mesh,_set_size,_set_periodic,
+             _get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
 get()=_get_mesh()
+
+"""
+    refine(; max_nodes=typemax(Int32), max_cells=typemax(Int32)) -> Mesh
+
+Uniformly refine the complete cached linear-simplex mesh once. The cache changes
+only after successful validation and resource preflight; the returned mesh owns
+storage independently of the cache.
+"""
+refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))=
+    _refine(;max_nodes=max_nodes,max_cells=max_cells)
+
+"""
+    clear(dim_tags=())
+
+Clear the complete cached mesh without changing model geometry. An empty vector
+or tuple selects the complete cache. Entity-selective clearing is unavailable
+until the simplex cache owns entity-classification metadata.
+"""
+clear(dim_tags=())=_clear_mesh(dim_tags)
 
 """
     set_size(dim_tags, size)

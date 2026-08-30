@@ -79,6 +79,7 @@ using Tessella
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
+    include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
     include("interfaces/api_boolean_lifecycle_test.jl") # synchronized Boolean ownership
     include("interfaces/api_topology_query_test.jl") # explicit topology queries
     include("interfaces/api_entity_identity_test.jl") # synchronized entity identity
