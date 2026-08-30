@@ -5,7 +5,8 @@ A native geometry/entity kernel: tagged and named points, curves, curve loops,
 surfaces, surface loops, and volumes with atomic retagging, dependency-safe
 removal, analytical spatial queries, physical groups, and classified
 surface/volume mixed-mesh projection. Native entity type and partition-ownership
-metadata and explicit Point/Line/Plane evaluation are available without meshing.
+metadata, explicit Point/Line/Plane evaluation, presentation state, Point-coordinate
+updates, and model attributes are available without meshing.
 Meshing dispatches to Tessella's certified simplex and transfinite kernels. This
 is not OpenCASCADE; unsupported CAD statements remain explicit blockers.
 """
@@ -47,6 +48,10 @@ export model_parametrization_bounds, model_is_inside, model_closest_point
 export model_reparametrize_on_surface
 export set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 export remove_entities!
+export set_entity_visibility!, model_entity_visibility
+export set_entity_color!, model_entity_color, set_point_coordinates!
+export set_model_attribute!, model_attribute, model_attribute_names
+export remove_model_attribute!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
@@ -73,6 +78,9 @@ mutable struct GeoModel
     surface_loops::Dict{Int,Vector{Int}}
     volumes::Dict{Int,Vector{Int}}
     entity_names::Dict{Tuple{Int,Int},String}
+    entity_visibility::Dict{Tuple{Int,Int},Int}
+    entity_colors::Dict{Tuple{Int,Int},NTuple{4,Int}}
+    attributes::Dict{String,Vector{String}}
     physical::Dict{Tuple{Int,Int},Vector{Int}}
     physical_names::Dict{Tuple{Int,Int},String}
     physical_tag_max::Int
@@ -102,6 +110,9 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
+                      Dict{Tuple{Int,Int},Int}(),
+                      Dict{Tuple{Int,Int},NTuple{4,Int}}(),
+                      Dict{String,Vector{String}}(),
                       Dict{Tuple{Int,Int},Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
                       0,
@@ -345,6 +356,7 @@ end
 include("ModelTopologyQueries.jl")
 include("ModelIdentity.jl")
 include("ModelRemoval.jl")
+include("ModelEntityState.jl")
 include("ModelSpatialQueries.jl")
 include("ModelEntityMetadata.jl")
 include("ModelEntityEvaluation.jl")

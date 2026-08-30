@@ -97,6 +97,19 @@ function _model_identity_names(
     return result
 end
 
+function _model_identity_entity_state(
+    dictionary::Dict{Tuple{Int,Int},T},dimension::Int,
+    old_tag::Int,new_tag::Int,caller::AbstractString,what::AbstractString) where T
+    result=copy(dictionary)
+    old_key=(dimension,old_tag);new_key=(dimension,new_tag)
+    haskey(result,new_key) && throw(ArgumentError(
+        "$caller: the target $what slot $(new_key) is already occupied"))
+    if haskey(result,old_key)
+        result[new_key]=pop!(result,old_key)
+    end
+    return result
+end
+
 function _model_identity_physical(
     m::GeoModel,dimension::Int,old_tag::Int,new_tag::Int,
     caller::AbstractString)
@@ -241,9 +254,9 @@ end
 
 Atomically move an existing positive entity tag to an unused positive tag in the
 same dimension. Topology, Physical memberships, embeddings, periodic relations,
-entity names, native solid encodings, and owned Boolean-result snapshots follow the
-entity. Automatic tag allocation remains monotonic. Boolean operand provenance
-retains the tags recorded when the operation was created.
+entity names, visibility, colors, native solid encodings, and owned Boolean-result
+snapshots follow the entity. Automatic tag allocation remains monotonic. Boolean
+operand provenance retains the tags recorded when the operation was created.
 """
 function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     caller="model_set_tag!"
@@ -272,6 +285,12 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     end
     entity_names=_model_identity_names(
         m,dimension,old_entity_tag,new_entity_tag,caller)
+    entity_visibility=_model_identity_entity_state(
+        m.entity_visibility,dimension,old_entity_tag,new_entity_tag,
+        caller,"visibility")
+    entity_colors=_model_identity_entity_state(
+        m.entity_colors,dimension,old_entity_tag,new_entity_tag,
+        caller,"color")
     physical=_model_identity_physical(
         m,dimension,old_entity_tag,new_entity_tag,caller)
     embeds=_model_identity_embeds(
@@ -301,6 +320,8 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m.boolean_operands=dimension_state.boolean_operands
     end
     m.entity_names=entity_names
+    m.entity_visibility=entity_visibility
+    m.entity_colors=entity_colors
     m.physical=physical
     m.embeds=embeds
     m.periodic=periodic
