@@ -24,8 +24,8 @@ using ..Model: model_entities_for_physical_name, model_physical_groups_for_entit
 using ..Model: model_physical_name
 using ..Model: model_entities, model_dimension, model_boundary, model_adjacencies
 using ..Model: model_bounding_box, model_entities_in_bounding_box
-using ..Model: model_entity_type, model_parent, model_number_of_partitions,
-               model_partitions
+using ..Model: model_entity_type, model_entity_properties, model_parent,
+               model_number_of_partitions, model_partitions
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
@@ -170,6 +170,10 @@ _get_entity_type(dim,tag)=_with_model() do current
     model_entity_type(current,dim,tag)
 end
 
+_get_entity_properties(dim,tag)=_with_model() do current
+    model_entity_properties(current,dim,tag)
+end
+
 _get_parent(dim,tag)=_with_model() do current
     model_parent(current,dim,tag)
 end
@@ -285,8 +289,8 @@ using ..API: _get_physical_groups_for_entity, _get_physical_name
 using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
 using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
 using ..API: _get_bounding_box, _get_entities_in_bounding_box
-using ..API: _get_entity_type, _get_parent, _get_number_of_partitions,
-             _get_partitions
+using ..API: _get_entity_type, _get_entity_properties, _get_parent,
+             _get_number_of_partitions, _get_partitions
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 using ..API: _remove_entities
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
@@ -411,6 +415,13 @@ get_entity_type(dim,tag)=_get_entity_type(dim,tag)
 
 """Gmsh-compatible synonym for [`get_entity_type`](@ref)."""
 get_type(dim,tag)=_get_entity_type(dim,tag)
+
+"""
+Return detached native entity-property vectors. Plane reals are `[a,b,c,d]` for
+the unit-normal equation `a*x+b*y+c*z=d`; other visible native types return empty
+vectors.
+"""
+get_entity_properties(dim,tag)=_get_entity_properties(dim,tag)
 
 """Return `(-1,-1)`, the partition-parent sentinel, for an existing native entity."""
 get_parent(dim,tag)=_get_parent(dim,tag)

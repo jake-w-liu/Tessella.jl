@@ -139,7 +139,7 @@ model_spatial_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=ye
 println("  command: ", model_spatial_command)
 run(model_spatial_command)
 
-println("\n── gmsh_parity model metadata ──  native types and partition ownership")
+println("\n── gmsh_parity model metadata ──  native types, plane properties, and partition ownership")
 model_metadata_script = joinpath(
     HERE, "gmsh_parity", "model_entity_metadata.jl")
 model_metadata_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $model_metadata_script`

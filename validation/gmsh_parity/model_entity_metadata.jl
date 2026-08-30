@@ -1,11 +1,11 @@
 #!/usr/bin/env julia
-# P6: native entity type and nonpartition metadata vs Gmsh 4.15.2.
+# P6: native entity type, plane-property, and nonpartition metadata vs Gmsh 4.15.2.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
 using Tessella
-using Tessella.Model: model_entities, model_entity_type, model_parent,
-                      model_number_of_partitions, model_partitions,
+using Tessella.Model: model_entities, model_entity_type, model_entity_properties,
+                      model_parent, model_number_of_partitions, model_partitions,
                       model_set_tag!
 
 function find_gmsh_api()
@@ -92,6 +92,28 @@ function compare_metadata(model,entity,label)
         "$label type differs for $entity: Tessella=$entity_type Gmsh=$reference_type")
     entity_type==gmsh.model.getType(entity...) || error(
         "$label deprecated type alias differs for $entity")
+    integers,reals=model_entity_properties(model,entity...)
+    reference_integers,reference_reals=gmsh.model.getEntityProperties(entity...)
+    integers==Int.(reference_integers) || error(
+        "$label integer properties differ for $entity")
+    if entity[1]==2
+        length(reals)==4 && length(reference_reals)==4 || error(
+            "$label Plane properties have the wrong length for $entity")
+        reference_scale=hypot(reference_reals[1:3]...)
+        reference_scale>0 || error(
+            "$label Gmsh Plane normal is degenerate for $entity")
+        reference=Float64[
+            reference_reals[index]/reference_scale for index in 1:4]
+        if sum(reals[index]*reference[index] for index in 1:3)<0
+            reference .*= -1
+        end
+        all(isapprox.(reals,reference;rtol=64eps(Float64),atol=64eps(Float64))) ||
+            error("$label Plane properties differ for $entity: " *
+                  "Tessella=$reals normalized_Gmsh=$reference")
+    else
+        isempty(reals) && isempty(reference_reals) || error(
+            "$label real properties differ for $entity")
+    end
     parent=model_parent(model,entity...)
     reference_parent=Tuple(Int.(gmsh.model.getParent(entity...)))
     parent==reference_parent || error(
@@ -136,6 +158,7 @@ try
     cases=length(entities)+1+4
     println("GMSH_PARITY_MODEL_METADATA_OK gmsh=",gmsh.GMSH_API_VERSION,
             " cases=",cases," type_queries=",2*cases,
+            " property_queries=",cases,
             " parent_queries=",cases," partition_queries=",cases,
             " partition_counts=2",
             " bounded_divergences=implicit_primitive_subentities_no_partitions")

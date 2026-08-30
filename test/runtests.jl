@@ -64,7 +64,7 @@ using Tessella
     include("geometry/model_entity_identity_test.jl") # entity names and atomic retagging
     include("geometry/model_entity_removal_test.jl") # dependency-safe recursive removal
     include("geometry/model_spatial_query_test.jl") # analytical bounding boxes
-    include("geometry/model_entity_metadata_test.jl") # native type/partition metadata
+    include("geometry/model_entity_metadata_test.jl") # native type/property/partition metadata
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle

@@ -39,7 +39,8 @@ export model_entities_for_physical_name, model_physical_groups_for_entity
 export model_physical_name
 export model_entities, model_dimension, model_boundary, model_adjacencies
 export model_bounding_box, model_entities_in_bounding_box
-export model_entity_type, model_parent, model_number_of_partitions, model_partitions
+export model_entity_type, model_entity_properties, model_parent,
+       model_number_of_partitions, model_partitions
 export set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 export remove_entities!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags

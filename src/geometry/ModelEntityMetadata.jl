@@ -26,6 +26,69 @@ function model_entity_type(m::GeoModel,dim,tag)
     return _MODEL_ENTITY_TYPES[dimension+1]
 end
 
+function _model_plane_properties(
+    m::GeoModel,tag::Int,caller::AbstractString)
+    loops=m.surfaces[tag]
+    isempty(loops) && throw(ErrorException(
+        "$caller: Plane[$tag] has no boundary loops; rebuild the model"))
+    all_points=_model_points_of(m,[(2,tag)],caller)
+    outer_points=unique!(_loop_points(m,first(loops)))
+    point_tags=copy(outer_points)
+    seen=Set(point_tags)
+    for point in all_points
+        point in seen && continue
+        push!(point_tags,point)
+        push!(seen,point)
+    end
+    coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    anchor,second,third,_=_model_surface_projection(
+        coordinates,point_tags,tag,caller)
+
+    R=Rational{BigInt}
+    first_offset=ntuple(index->R(second[index])-R(anchor[index]),3)
+    second_offset=ntuple(index->R(third[index])-R(anchor[index]),3)
+    normal=(
+        first_offset[2]*second_offset[3]-
+            first_offset[3]*second_offset[2],
+        first_offset[3]*second_offset[1]-
+            first_offset[1]*second_offset[3],
+        first_offset[1]*second_offset[2]-
+            first_offset[2]*second_offset[1],
+    )
+    squared=sum(component->component^2,normal)
+    squared>0 || throw(ErrorException(
+        "$caller: Plane[$tag] has a degenerate boundary; rebuild the model"))
+    properties=setprecision(BigFloat,256) do
+        magnitude=sqrt(BigFloat(squared))
+        coefficients=ntuple(
+            index->Float64(BigFloat(normal[index])/magnitude),3)
+        rhs=Float64(sum(index->
+            BigFloat(normal[index])*BigFloat(R(anchor[index])),1:3)/magnitude)
+        (coefficients...,rhs)
+    end
+    all(isfinite,properties) || throw(ErrorException(
+        "$caller: Plane[$tag] equation is not Float64-representable; " *
+        "rebuild the model"))
+    return properties
+end
+
+"""
+    model_entity_properties(model, dim, tag) -> (Vector{Int}, Vector{Float64})
+
+Return detached native geometry properties for an existing entity. For a `Plane`,
+the real vector is `[a,b,c,d]` with a unit normal and equation
+`a*x+b*y+c*z=d`, oriented by the exterior boundary loop. Visible `Point`, `Line`,
+and `Volume` entities have empty property vectors.
+"""
+function model_entity_properties(m::GeoModel,dim,tag)
+    dimension,entity_tag=_model_metadata_entity(
+        m,dim,tag,"model_entity_properties")
+    dimension==2 || return Int[],Float64[]
+    properties=_model_plane_properties(
+        m,entity_tag,"model_entity_properties")
+    return Int[],collect(properties)
+end
+
 """
     model_parent(model, dim, tag) -> Tuple{Int,Int}
 
