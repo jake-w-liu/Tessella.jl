@@ -9,8 +9,9 @@ entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
 mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
 operation-time Boolean operand ownership, and persistent affine relations between
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
-The session owns atomic uniform refinement and complete clearing of its detached
-linear-simplex mesh cache. Production meshing is never delegated to Gmsh.
+The session owns atomic uniform refinement, affine coordinate transformation, and
+complete clearing of its detached linear-simplex mesh cache. Production meshing is
+never delegated to Gmsh.
 """
 module API
 
@@ -43,6 +44,7 @@ using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..Refine: refine_uniform
+using ..Transform: affine_transform, _transform_gmsh_affine
 using ..GeoExec: execute_geo
 
 export initialize, finalize, option, model, mesh, open_geo!
@@ -702,6 +704,30 @@ function _clear_mesh(dim_tags=())
     end
 end
 
+function _affine_transform_mesh(affine,dim_tags=())
+    caller="API.mesh.affine_transform"
+    return lock(STATE_LOCK) do
+        _model_locked()
+        (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(
+            ArgumentError(
+                "$caller: dim_tags must be a vector or tuple of " *
+                "(dimension, tag) pairs"))
+        isempty(dim_tags) || throw(ArgumentError(
+            "$caller: entity-selective transformation requires mesh " *
+            "classification metadata; pass an empty collection to transform " *
+            "the complete cached mesh"))
+        cached=LAST_MESH[]
+        cached===nothing && throw(ArgumentError(
+            "$caller: no mesh; call API.mesh.generate first"))
+        coefficients,translation,_=_transform_gmsh_affine(affine,caller)
+        matrix=reshape(collect(coefficients),3,3)
+        transformed=affine_transform(
+            cached,matrix;translation=translation)
+        LAST_MESH[]=_copy_mesh(transformed)
+        transformed
+    end
+end
+
 function _set_size(dim_tags,size)
     caller="API.mesh.set_size"
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
@@ -749,8 +775,8 @@ end
 
 """Gmsh-style mesh generation, refinement, clearing, retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_refine,_clear_mesh,_set_size,_set_periodic,
-             _get_periodic_nodes
+using ..API: _generate,_get_mesh,_refine,_clear_mesh,_affine_transform_mesh,
+             _set_size,_set_periodic,_get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
 get()=_get_mesh()
 
@@ -772,6 +798,19 @@ or tuple selects the complete cache. Entity-selective clearing is unavailable
 until the simplex cache owns entity-classification metadata.
 """
 clear(dim_tags=())=_clear_mesh(dim_tags)
+
+"""
+    affine_transform(affine, dim_tags=()) -> Mesh
+
+Apply a finite nonsingular affine transform to every node in the complete cached
+mesh. `affine` is a 4×4 matrix or exactly 12 or 16 entries in Gmsh row-major
+order; 12 entries imply the homogeneous row `(0, 0, 0, 1)`. The cache changes
+only after the transformed mesh validates, and the returned mesh owns independent
+storage. Entity-selective transforms are unavailable until the simplex cache owns
+classification metadata. Model geometry and periodic relations are unchanged.
+"""
+affine_transform(affine,dim_tags=())=
+    _affine_transform_mesh(affine,dim_tags)
 
 """
     set_size(dim_tags, size)

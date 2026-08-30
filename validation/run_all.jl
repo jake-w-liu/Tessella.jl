@@ -166,6 +166,12 @@ uniform_refine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=y
 println("  command: ", uniform_refine_command)
 run(uniform_refine_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── mesh_affine_transform ──  Gmsh 4.15.2 row-major node transforms")
+mesh_affine_script = joinpath(HERE, "mesh_affine_transform", "differential.jl")
+mesh_affine_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mesh_affine_script`
+println("  command: ", mesh_affine_command)
+run(mesh_affine_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 println("\n── high_order ──  exact Gmsh 4.15.2 type-11 tetrahedron ordering")
 high_order_script = joinpath(HERE, "high_order", "differential.jl")
 high_order_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $high_order_script`
