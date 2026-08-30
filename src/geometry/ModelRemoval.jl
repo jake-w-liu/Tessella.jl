@@ -200,8 +200,12 @@ function _model_removal_state(
     end
 
     entity_names=copy(m.entity_names)
+    entity_visibility=copy(m.entity_visibility)
+    entity_colors=copy(m.entity_colors)
     for entity in removed
         delete!(entity_names,entity)
+        delete!(entity_visibility,entity)
+        delete!(entity_colors,entity)
     end
 
     physical=Dict{Tuple{Int,Int},Vector{Int}}()
@@ -246,8 +250,9 @@ function _model_removal_state(
     end
 
     return (;points,point_size,curves,loops,surfaces,surface_loops,volumes,
-            entity_names,physical,physical_names,box_extents,cylinders,
-            spheres,cones,booleans,boolean_operands,periodic,embeds)
+            entity_names,entity_visibility,entity_colors,physical,physical_names,
+            box_extents,cylinders,spheres,cones,booleans,boolean_operands,
+            periodic,embeds)
 end
 
 """
@@ -258,12 +263,12 @@ the number removed. Missing entities and entities still used as an explicit boun
 or embedding source are skipped. With `recursive=true`, each removed entity's
 explicit boundary is processed down to Points; embedded entities are not boundaries.
 
-Entity names, Physical memberships, embedding targets, periodic relations, native
-solid encodings, and Boolean-result snapshots owned by removed entities are cleaned
-up. Empty Physical groups and their names are removed, construction loops that would
-dangle are discarded, and automatic tag counters remain monotonic. Primitive and
-Boolean Volumes have no visible boundary entities, so recursive removal stops at the
-Volume.
+Entity names, visibility, colors, Physical memberships, embedding targets, periodic
+relations, native solid encodings, and Boolean-result snapshots owned by removed
+entities are cleaned up. Empty Physical groups and their names are removed,
+construction loops that would dangle are discarded, and automatic tag counters
+remain monotonic. Primitive and Boolean Volumes have no visible boundary entities,
+so recursive removal stops at the Volume.
 """
 function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     caller="remove_entities!"
@@ -282,6 +287,8 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.surface_loops=state.surface_loops
     m.volumes=state.volumes
     m.entity_names=state.entity_names
+    m.entity_visibility=state.entity_visibility
+    m.entity_colors=state.entity_colors
     m.physical=state.physical
     m.physical_names=state.physical_names
     m.box_extents=state.box_extents

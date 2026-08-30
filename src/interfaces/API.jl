@@ -3,7 +3,8 @@
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
 deterministic entity-topology, analytical spatial, native type/partition metadata,
-native Point/Line/Plane evaluation and reparametrization, and Physical-group queries,
+native Point/Line/Plane evaluation and reparametrization, entity presentation and
+attribute state, finite Point-coordinate updates, and Physical-group queries,
 entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
 mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
 operation-time Boolean operand ownership, and persistent affine relations between
@@ -31,6 +32,10 @@ using ..Model: model_value, model_derivative, model_second_derivative,
 using ..Model: model_parametrization, model_parametrization_bounds,
                model_is_inside, model_closest_point,
                model_reparametrize_on_surface
+using ..Model: set_entity_visibility!, model_entity_visibility
+using ..Model: set_entity_color!, model_entity_color, set_point_coordinates!
+using ..Model: set_model_attribute!, model_attribute, model_attribute_names,
+               remove_model_attribute!
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
@@ -225,6 +230,43 @@ _reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
             current,dim,tag,parametric_coord,surface_tag,which)
     end
 
+_set_visibility(dim_tags,value,recursive=false)=_with_model() do current
+    set_entity_visibility!(current,dim_tags,value,recursive)
+end
+
+_get_visibility(dim,tag)=_with_model() do current
+    model_entity_visibility(current,dim,tag)
+end
+
+_set_color(dim_tags,r,g,b,a=255,recursive=false)=_with_model() do current
+    set_entity_color!(current,dim_tags,r,g,b,a,recursive)
+end
+
+_get_color(dim,tag)=_with_model() do current
+    model_entity_color(current,dim,tag)
+end
+
+_set_coordinates(tag,x,y,z)=_with_model(invalidate=true) do current
+    set_point_coordinates!(current,tag,x,y,z)
+end
+
+_set_attribute(name,values)=_with_model() do current
+    set_model_attribute!(current,name,values)
+end
+
+_get_attribute(name)=_with_model() do current
+    model_attribute(current,name)
+end
+
+_get_attribute_names()=_with_model() do current
+    model_attribute_names(current)
+end
+
+_remove_attribute(name)=_with_model() do current
+    remove_model_attribute!(current,name)
+    nothing
+end
+
 _get_parent(dim,tag)=_with_model() do current
     model_parent(current,dim,tag)
 end
@@ -346,6 +388,9 @@ using ..API: _get_value, _get_derivative, _get_second_derivative, _get_curvature
 using ..API: _get_principal_curvatures, _get_normal, _get_parametrization,
              _get_parametrization_bounds, _is_inside, _get_closest_point
 using ..API: _reparametrize_on_surface
+using ..API: _set_visibility, _get_visibility, _set_color, _get_color
+using ..API: _set_coordinates, _set_attribute, _get_attribute,
+             _get_attribute_names, _remove_attribute
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 using ..API: _remove_entities
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
@@ -414,7 +459,7 @@ remove_entity_name(name)=_remove_entity_name(name)
     set_tag(dim, tag, new_tag)
 
 Atomically move an existing entity to an unused positive tag in the same dimension,
-including all live model references and its name.
+including all live model references, its name, visibility, and color.
 """
 set_tag(dim,tag,new_tag)=_set_tag(dim,tag,new_tag)
 
@@ -423,7 +468,8 @@ set_tag(dim,tag,new_tag)=_set_tag(dim,tag,new_tag)
 
 Remove ordered positive `(dimension, entity_tag)` pairs when they are not used by a
 surviving boundary or embedding owner. With `recursive=true`, also process explicit
-boundary entities down to Points. Missing and still-owned entities are unchanged.
+boundary entities down to Points. Missing and still-owned entities are unchanged;
+removed presentation state is cleaned.
 """
 remove_entities(dim_tags,recursive=false)=
     _remove_entities(dim_tags,recursive)
@@ -517,6 +563,35 @@ get_closest_point(dim,tag,coord)=_get_closest_point(dim,tag,coord)
 """Map Point or straight-Line parameters into an explicit Plane's parameters."""
 reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
     _reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which)
+
+"""Set an `Int32` visibility value on existing native entities."""
+set_visibility(dim_tags,value,recursive=false)=
+    _set_visibility(dim_tags,value,recursive)
+
+"""Return an existing native entity's visibility, which defaults to `1`."""
+get_visibility(dim,tag)=_get_visibility(dim,tag)
+
+"""Set an RGBA color on existing entities, optionally including their boundaries."""
+set_color(dim_tags,r,g,b,a=255,recursive=false)=
+    _set_color(dim_tags,r,g,b,a,recursive)
+
+"""Return an existing entity's RGBA color, defaulting to `(0,0,255,0)`."""
+get_color(dim,tag)=_get_color(dim,tag)
+
+"""Replace one existing explicit Point's finite coordinates and invalidate the mesh."""
+set_coordinates(tag,x,y,z)=_set_coordinates(tag,x,y,z)
+
+"""Set detached string values for a global model attribute."""
+set_attribute(name,values)=_set_attribute(name,values)
+
+"""Return a detached model-attribute value list, or an empty list if absent."""
+get_attribute(name)=_get_attribute(name)
+
+"""Return model-attribute names in deterministic lexical order."""
+get_attribute_names()=_get_attribute_names()
+
+"""Remove a model attribute; a missing name is unchanged."""
+remove_attribute(name)=_remove_attribute(name)
 
 """Return `(-1,-1)`, the partition-parent sentinel, for an existing native entity."""
 get_parent(dim,tag)=_get_parent(dim,tag)

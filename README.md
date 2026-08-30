@@ -102,7 +102,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   containment selection, native entity types and plane equations, and explicit
   nonpartition metadata, plus native Point/straight-Line/explicit-Plane values,
   derivatives, curvature, normals, parametrization, containment, projection, and
-  Point/Line-to-Plane reparametrization;
+  Point/Line-to-Plane reparametrization; owned entity visibility and RGBA colors,
+  model string attributes, and finite Point-coordinate updates;
   retagging moves every live reference, while removal skips surviving
   boundary/embedding dependencies, can recurse through explicit boundaries, and
   cleans owned metadata and encodings without rewinding automatic tags;
@@ -196,8 +197,9 @@ Ordered entity removal matches Gmsh's dependency behavior for explicit topology:
 entities used by surviving boundaries or embedding targets are skipped, and recursive
 removal walks boundary entities down to Points without treating embeddings as
 boundaries. Tessella validates the whole request before committing, removes names,
-empty Physical groups, affected periodic relations, target embeddings, native solid
-encodings, and Boolean-result snapshots, and keeps allocator counters monotonic.
+visibility, colors, empty Physical groups, affected periodic relations, target
+embeddings, native solid encodings, and Boolean-result snapshots, and keeps allocator
+counters monotonic.
 Primitive and Boolean Volume boundaries are implicit, so their recursive removal
 stops at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
 Tessella's owning native model and is not undone by a later synchronization.
@@ -227,6 +229,13 @@ Point and straight-Line parameters can be reparametrized on any explicit Plane,
 including off-plane sources; the result is the orthogonal Plane parametrization.
 The `which` selector is accepted for API compatibility but has no effect because
 native Planes are not periodic.
+Entity visibility defaults to `1` and RGBA color to `(0,0,255,0)`. Recursive setters
+walk explicit boundaries down to Points; both states follow entity retagging and are
+cleaned on removal without invalidating the mesh cache. Global attributes store
+detached NUL-free string vectors under sorted names. Finite Point-coordinate updates
+preserve tag-owned state and invalidate a synchronized mesh after success; dependent
+native geometry queries immediately use the new coordinates. Per-window visibility
+and implicit primitive boundary presentation remain unfinished.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
@@ -263,6 +272,7 @@ Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
 spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
 entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
+entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
