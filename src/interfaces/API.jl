@@ -3,11 +3,11 @@
 
 Gmsh-style model/mesh/option façade over Tessella's native kernels, including
 deterministic entity-topology, analytical spatial, native type/partition metadata,
-and Physical-group queries, entity-name, atomic-tag, and dependency-safe removal
-mutations, Physical-group mutations, point-local mesh-size constraints, explicit
-planar surface-loop volumes, operation-time Boolean operand ownership, and persistent
-affine relations between straight periodic boundary or embedded curves and planar
-periodic volume boundaries.
+native Point/Line/Plane evaluation and reparametrization, and Physical-group queries,
+entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
+mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
+operation-time Boolean operand ownership, and persistent affine relations between
+straight periodic boundary or embedded curves and planar periodic volume boundaries.
 Production meshing is never delegated to Gmsh.
 """
 module API
@@ -29,7 +29,8 @@ using ..Model: model_entity_type, model_entity_properties, model_parent,
 using ..Model: model_value, model_derivative, model_second_derivative,
                model_curvature, model_principal_curvatures, model_normal
 using ..Model: model_parametrization, model_parametrization_bounds,
-               model_is_inside, model_closest_point
+               model_is_inside, model_closest_point,
+               model_reparametrize_on_surface
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
@@ -218,6 +219,12 @@ _get_closest_point(dim,tag,coord)=_with_model() do current
     model_closest_point(current,dim,tag,coord)
 end
 
+_reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
+    _with_model() do current
+        model_reparametrize_on_surface(
+            current,dim,tag,parametric_coord,surface_tag,which)
+    end
+
 _get_parent(dim,tag)=_with_model() do current
     model_parent(current,dim,tag)
 end
@@ -338,6 +345,7 @@ using ..API: _get_entity_type, _get_entity_properties, _get_parent,
 using ..API: _get_value, _get_derivative, _get_second_derivative, _get_curvature
 using ..API: _get_principal_curvatures, _get_normal, _get_parametrization,
              _get_parametrization_bounds, _is_inside, _get_closest_point
+using ..API: _reparametrize_on_surface
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 using ..API: _remove_entities
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
@@ -505,6 +513,10 @@ is_inside(dim,tag,coord,parametric=false)=
 
 """Project concatenated 3-D coordinates onto an explicit Line or Plane."""
 get_closest_point(dim,tag,coord)=_get_closest_point(dim,tag,coord)
+
+"""Map Point or straight-Line parameters into an explicit Plane's parameters."""
+reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
+    _reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which)
 
 """Return `(-1,-1)`, the partition-parent sentinel, for an existing native entity."""
 get_parent(dim,tag)=_get_parent(dim,tag)

@@ -475,3 +475,51 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
     end
     return closest,parameters
 end
+
+function _model_reparametrization_selector(which,caller::AbstractString)
+    which isa Integer || throw(ArgumentError(
+        "$caller: which must be an integer"))
+    which isa Bool && throw(ArgumentError(
+        "$caller: which must not be Bool"))
+    typemin(Int32)<=which<=typemax(Int32) || throw(ArgumentError(
+        "$caller: which exceeds the Int32 range"))
+    return Int(which)
+end
+
+"""
+    model_reparametrize_on_surface(
+        model, dim, tag, parametric_coordinates, surface_tag, which=0)
+
+Map an explicit Point or straight-Line parametrization into the deterministic
+parameters of an explicit Plane. The source need not belong to the Plane and is
+orthogonally projected when it is not coplanar. `which` is validated but has no
+effect because native Planes are not periodic.
+"""
+function model_reparametrize_on_surface(
+    m::GeoModel,dim,tag,parametric_coordinates,surface_tag,which=0)
+    caller="model_reparametrize_on_surface"
+    dimension,entity_tag=_model_evaluation_entity(
+        m,dim,tag,(0,1),caller)
+    _,plane_tag=_model_metadata_entity(m,2,surface_tag,caller)
+    _model_reparametrization_selector(which,caller)
+    values=_model_evaluation_values(
+        parametric_coordinates,1,caller,"parametric coordinates")
+    if dimension==0
+        isempty(values) || throw(ArgumentError(
+            "$caller: Point parametric coordinates must be empty"))
+        plane=_model_plane_frame(m,plane_tag,caller)
+        return collect(_model_plane_parameters(
+            plane,m.points[entity_tag],caller,1))
+    end
+
+    line=_model_line_geometry(m,entity_tag,caller)
+    plane=_model_plane_frame(m,plane_tag,caller)
+    output=Float64[]
+    sizehint!(output,2length(values))
+    for (index,parameter) in pairs(values)
+        coordinate=_model_line_point(line,parameter,caller,index)
+        append!(output,_model_plane_parameters(
+            plane,coordinate,caller,index))
+    end
+    return output
+end

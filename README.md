@@ -101,7 +101,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   positive-tag changes, ordered dependency-safe removal, analytical bounding boxes,
   containment selection, native entity types and plane equations, and explicit
   nonpartition metadata, plus native Point/straight-Line/explicit-Plane values,
-  derivatives, curvature, normals, parametrization, containment, and projection;
+  derivatives, curvature, normals, parametrization, containment, projection, and
+  Point/Line-to-Plane reparametrization;
   retagging moves every live reference, while removal skips surviving
   boundary/embedding dependencies, can recurse through explicit boundaries, and
   cleans owned metadata and encodings without rewinding automatic tags;
@@ -222,6 +223,10 @@ tests the inclusive rectangular bounds. Closest Line points are clamped to the
 segment; Plane projection is untrimmed. Malformed, nonfinite, implicit, degenerate,
 and unrepresentable inputs fail explicitly. Curved entities and general CAD
 parametrization remain unfinished.
+Point and straight-Line parameters can be reparametrized on any explicit Plane,
+including off-plane sources; the result is the orthogonal Plane parametrization.
+The `which` selector is accepted for API compatibility but has no effect because
+native Planes are not periodic.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.

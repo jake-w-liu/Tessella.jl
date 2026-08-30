@@ -49,6 +49,11 @@ const _EVALUATION_API=Tessella.API
             2,1,[4.0,3.0,9.0,9.0],true)==1
         @test _EVALUATION_API.model.get_closest_point(
             2,1,[3.0,4.0,8.0])==([3.0,4.0,0.0],[4.0,3.0])
+        @test _EVALUATION_API.model.reparametrize_on_surface(
+            0,1,[],1)==[2.0,1.0]
+        @test _EVALUATION_API.model.reparametrize_on_surface(
+            1,1,[-1.0,0.5,2.0],1,-1)==
+            [2.0,-3.0,2.0,3.0,2.0,9.0]
         @test _EVALUATION_API.LAST_MESH[]===cached
 
         for call in (
@@ -57,6 +62,8 @@ const _EVALUATION_API=Tessella.API
             ()->_EVALUATION_API.model.get_normal(99,[0.0,0.0]),
             ()->_EVALUATION_API.model.is_inside(2,1,[NaN,0.0,0.0]),
             ()->_EVALUATION_API.model.get_closest_point(0,1,[1.0,2.0,3.0]),
+            ()->_EVALUATION_API.model.reparametrize_on_surface(
+                1,1,[0.5],99),
         )
             @test_throws ArgumentError call()
             @test _EVALUATION_API.LAST_MESH[]===cached
@@ -72,6 +79,7 @@ const _EVALUATION_API=Tessella.API
         @test (@doc _EVALUATION_API.model.get_parametrization_bounds)!==nothing
         @test (@doc _EVALUATION_API.model.is_inside)!==nothing
         @test (@doc _EVALUATION_API.model.get_closest_point)!==nothing
+        @test (@doc _EVALUATION_API.model.reparametrize_on_surface)!==nothing
         @test isempty(Docs.undocumented_names(Tessella.API;private=false))
         @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
