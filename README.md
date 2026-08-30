@@ -249,6 +249,14 @@ unchanged. Consequently, moving cached nodes away from their modeled entities ca
 make classification-dependent queries fail explicitly until the cache is cleared and
 regenerated. Entity-selective transforms have the same classification blocker as
 selective clearing.
+`API.mesh.get_nodes`, `get_elements`, `get_element_types`,
+`get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
+detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element
+tags are dense identifiers derived for that cache; segments, triangles, and
+tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence. Whole-
+dimension element filters are supported. Entity-specific filters, classified node
+queries, and parametric coordinates remain explicit blockers until `Mesh` owns that
+metadata.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.

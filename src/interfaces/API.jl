@@ -9,9 +9,9 @@ entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
 mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
 operation-time Boolean operand ownership, and persistent affine relations between
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
-The session owns atomic uniform refinement, affine coordinate transformation, and
-complete clearing of its detached linear-simplex mesh cache. Production meshing is
-never delegated to Gmsh.
+The session owns atomic uniform refinement, affine coordinate transformation,
+complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
+linear-simplex mesh cache. Production meshing is never delegated to Gmsh.
 """
 module API
 
@@ -42,7 +42,8 @@ using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_s
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
-using ..MeshTypes: Mesh
+using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
+using ..Elements: msh_spec
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
 using ..GeoExec: execute_geo
@@ -667,11 +668,178 @@ function _generate(dim::Integer)
     end
 end
 
+function _cached_mesh_locked(caller::AbstractString)
+    _model_locked()
+    cached=LAST_MESH[]
+    cached===nothing && throw(ArgumentError(
+        "$caller: no mesh; call API.mesh.generate first"))
+    return cached
+end
+
 function _get_mesh()
     return lock(STATE_LOCK) do
-        _model_locked()
-        LAST_MESH[]===nothing && throw(ArgumentError("API.mesh.get: no mesh"))
-        _copy_mesh(LAST_MESH[])
+        _copy_mesh(_cached_mesh_locked("API.mesh.get"))
+    end
+end
+
+function _mesh_query_integer(value,caller::AbstractString,name::AbstractString)
+    value isa Integer || throw(ArgumentError("$caller: $name must be an integer"))
+    value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
+    return try
+        Int(value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $name exceeds the platform Int range"))
+    end
+end
+
+function _mesh_query_dimension(value,caller::AbstractString)
+    dimension=_mesh_query_integer(value,caller,"dim")
+    dimension in -1:3 || throw(ArgumentError(
+        "$caller: dim must be -1 or in 0:3"))
+    return dimension
+end
+
+@inline function _mesh_query_bool(value,caller::AbstractString,
+                                  name::AbstractString)
+    value isa Bool || throw(ArgumentError("$caller: $name must be Bool"))
+    return value
+end
+
+function _mesh_element_offsets(mesh::Mesh)
+    triangle_offset=nsegs(mesh)
+    tetrahedron_offset=Base.checked_add(triangle_offset,ntris(mesh))
+    total=Base.checked_add(tetrahedron_offset,ntets(mesh))
+    return triangle_offset,tetrahedron_offset,total
+end
+
+function _mesh_dense_tags(offset::Int,count::Int)
+    count==0 && return UInt64[]
+    stop=Base.checked_add(offset,count)
+    return UInt64.(offset+1:stop)
+end
+
+function _mesh_element_block(mesh::Mesh,element_type::Int)
+    triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(mesh)
+    if element_type==1
+        return 0,mesh.segs
+    elseif element_type==2
+        return triangle_offset,mesh.tris
+    elseif element_type==4
+        return tetrahedron_offset,mesh.tets
+    end
+    return nothing
+end
+
+function _mesh_element_data(mesh::Mesh,dimension::Int)
+    triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(mesh)
+    blocks=((Int32(1),1,0,mesh.segs),
+            (Int32(2),2,triangle_offset,mesh.tris),
+            (Int32(4),3,tetrahedron_offset,mesh.tets))
+    element_types=Int32[]
+    element_tags=Vector{Vector{UInt64}}()
+    node_tags=Vector{Vector{UInt64}}()
+    for (element_type,block_dimension,offset,cells) in blocks
+        (dimension<0 || dimension==block_dimension) || continue
+        count=size(cells,2)
+        count==0 && continue
+        push!(element_types,element_type)
+        push!(element_tags,_mesh_dense_tags(offset,count))
+        push!(node_tags,UInt64.(vec(cells)))
+    end
+    return element_types,element_tags,node_tags
+end
+
+function _mesh_element_types(mesh::Mesh,dimension::Int)
+    result=Int32[]
+    (dimension<0 || dimension==1) && nsegs(mesh)>0 && push!(result,Int32(1))
+    (dimension<0 || dimension==2) && ntris(mesh)>0 && push!(result,Int32(2))
+    (dimension<0 || dimension==3) && ntets(mesh)>0 && push!(result,Int32(4))
+    return result
+end
+
+function _get_nodes(dim=-1,tag=-1,include_boundary=false,
+                    return_parametric_coord=true)
+    caller="API.mesh.get_nodes"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_dimension(dim,caller)
+        entity=_mesh_query_integer(tag,caller,"tag")
+        _mesh_query_bool(include_boundary,caller,"include_boundary")
+        _mesh_query_bool(
+            return_parametric_coord,caller,"return_parametric_coord")
+        (dimension<0 && entity<0) || throw(ArgumentError(
+            "$caller: entity- or dimension-specific nodes require mesh " *
+            "classification metadata; use dim=-1 and a negative tag for all " *
+            "cached nodes"))
+        return UInt64.(1:nnodes(cached)),vec(copy(cached.coords)),Float64[]
+    end
+end
+
+function _get_elements(dim=-1,tag=-1)
+    caller="API.mesh.get_elements"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_dimension(dim,caller)
+        entity=_mesh_query_integer(tag,caller,"tag")
+        entity<0 || throw(ArgumentError(
+            "$caller: entity-specific elements require mesh classification " *
+            "metadata; use a negative tag to query a complete dimension"))
+        _mesh_element_data(cached,dimension)
+    end
+end
+
+function _get_element_types(dim=-1,tag=-1)
+    caller="API.mesh.get_element_types"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_dimension(dim,caller)
+        entity=_mesh_query_integer(tag,caller,"tag")
+        entity<0 || throw(ArgumentError(
+            "$caller: entity-specific element types require mesh " *
+            "classification metadata; use a negative tag to query a complete " *
+            "dimension"))
+        _mesh_element_types(cached,dimension)
+    end
+end
+
+function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
+    caller="API.mesh.get_elements_by_type"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        msh=_mesh_query_integer(element_type,caller,"element_type")
+        msh_spec(msh)
+        entity=_mesh_query_integer(tag,caller,"tag")
+        entity<0 || throw(ArgumentError(
+            "$caller: entity-specific elements require mesh classification " *
+            "metadata; use a negative tag to query the complete cache"))
+        task_index=_mesh_query_integer(task,caller,"task")
+        task_count=_mesh_query_integer(num_tasks,caller,"num_tasks")
+        task_index>=0 || throw(ArgumentError(
+            "$caller: task must be nonnegative"))
+        task_count>=1 || throw(ArgumentError(
+            "$caller: num_tasks must be positive"))
+        (task_index==0 && task_count==1) || throw(ArgumentError(
+            "$caller: only task=0 with num_tasks=1 is supported by the " *
+            "detached Julia return arrays"))
+        block=_mesh_element_block(cached,msh)
+        block===nothing && return UInt64[],UInt64[]
+        offset,cells=block
+        return _mesh_dense_tags(offset,size(cells,2)),UInt64.(vec(cells))
+    end
+end
+
+function _get_max_node_tag()
+    return lock(STATE_LOCK) do
+        UInt64(nnodes(_cached_mesh_locked("API.mesh.get_max_node_tag")))
+    end
+end
+
+function _get_max_element_tag()
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked("API.mesh.get_max_element_tag")
+        _,_,total=_mesh_element_offsets(cached)
+        UInt64(total)
     end
 end
 
@@ -773,12 +941,59 @@ function _get_periodic_nodes(dim,slave_entity)
     end
 end
 
-"""Gmsh-style mesh generation, refinement, clearing, retrieval, and periodic operations."""
+"""Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_refine,_clear_mesh,_affine_transform_mesh,
-             _set_size,_set_periodic,_get_periodic_nodes
+using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
+             _get_elements_by_type,_get_max_node_tag,_get_max_element_tag,
+             _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
+             _get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
 get()=_get_mesh()
+
+"""
+    get_nodes(dim=-1, tag=-1, include_boundary=false,
+              return_parametric_coord=true)
+
+Return detached dense `UInt64` node tags, flattened `Float64` coordinates, and an
+empty parametric-coordinate vector for the complete cached mesh. The simplex cache
+does not own entity classification or parametric coordinates, so only negative
+`tag` with `dim=-1` is supported; the Boolean flags are validated but do not
+change a global result.
+"""
+get_nodes(dim=-1,tag=-1,include_boundary=false,return_parametric_coord=true)=
+    _get_nodes(dim,tag,include_boundary,return_parametric_coord)
+
+"""
+    get_elements(dim=-1, tag=-1)
+
+Return detached Gmsh-shaped `(element_types, element_tags, node_tags)` arrays for
+linear segments (type 1), triangles (type 2), and tetrahedra (type 4) in the
+cached mesh. A dimension in `0:3` with negative `tag` filters whole type blocks.
+Element tags are dense identifiers derived for the current cache across blocks in
+that order. Global queries use `dim=-1`; values outside `-1` or `0:3` are
+rejected. Entity-specific queries require unavailable classification metadata.
+"""
+get_elements(dim=-1,tag=-1)=_get_elements(dim,tag)
+
+"""Return the detached linear-simplex MSH types present in a whole cache/dimension."""
+get_element_types(dim=-1,tag=-1)=_get_element_types(dim,tag)
+
+"""
+    get_elements_by_type(element_type, tag=-1, task=0, num_tasks=1)
+
+Return detached dense element tags and flattened node tags for one fixed-node Gmsh
+element type. The simplex cache can contain only types 1, 2, and 4; another known
+fixed-node type returns empty arrays. Entity filtering and nondefault task
+partitioning are explicit blockers.
+"""
+get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)=
+    _get_elements_by_type(element_type,tag,task,num_tasks)
+
+"""Return the greatest dense node tag, or zero when the cached mesh has no nodes."""
+get_max_node_tag()=_get_max_node_tag()
+
+"""Return the greatest dense element tag, or zero when the cached mesh has no cells."""
+get_max_element_tag()=_get_max_element_tag()
 
 """
     refine(; max_nodes=typemax(Int32), max_cells=typemax(Int32)) -> Mesh
