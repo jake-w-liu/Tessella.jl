@@ -99,7 +99,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
 - model and synchronized session APIs for dimension-scoped entity names, atomic
   positive-tag changes, ordered dependency-safe removal, analytical bounding boxes,
-  containment selection, native entity types, and explicit nonpartition metadata;
+  containment selection, native entity types and plane equations, and explicit
+  nonpartition metadata;
   retagging moves every live reference, while removal skips surviving
   boundary/embedding dependencies, can recurse through explicit boundaries, and
   cleans owned metadata and encodings without rewinding automatic tags;
@@ -207,6 +208,8 @@ the pinned fixtures), rejects nonfinite boxes and invalid dimensions, and expose
 implicit primitive subentities.
 Entity metadata identifies every explicit entity as `Point`, `Line`, `Plane`, or
 `Volume`; primitive and Boolean solids expose only `Volume`. Native `GeoModel`
+plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
+`a*x+b*y+c*z=d`; other visible native types have empty property vectors. Native
 entities are not partition entities, so their parent is `(-1,-1)`, the model's
 partition count is zero, and per-entity partition membership is empty. These direct
 and session queries are read-only and preserve the mesh cache.
@@ -245,7 +248,7 @@ volumes and quality with Gmsh, reproduces the enclosure/coax failure, and runs t
 Gmsh 4.15.2 size-field, constant-range, geometry-expression, numeric-list,
 spatial Point-size, dynamic-tag/`SetMaxTag`, explicit model-topology,
 entity-identity, dependency-safe entity-removal, analytical spatial queries, and
-native entity metadata,
+native entity metadata including plane properties,
 uniform-refinement, transfinite-patch,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

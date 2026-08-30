@@ -27,10 +27,10 @@ support or test requirements.
 | Track | State | Verified implementation increment |
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
-| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, atomic live-reference retagging, dependency-safe recursive removal, and explicit topology, spatial, type, and nonpartition metadata queries |
+| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, atomic live-reference retagging, dependency-safe recursive removal, and explicit topology, spatial, type, plane-property, and nonpartition metadata queries |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, deterministic topology/spatial/type/nonpartition queries, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, and native-metadata lifecycle checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and Boolean snapshot/Delete Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, deterministic topology/spatial/type/plane-property/nonpartition queries, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, and native-metadata lifecycle checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, and Boolean snapshot/Delete Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -111,10 +111,13 @@ rejects nonfinite coordinates and invalid filter dimensions, and does not synthe
 implicit primitive subentities.
 Native metadata classifies visible entities as `Point`, `Line`, `Plane`, or `Volume`;
 primitive and Boolean boundaries stay implicit. `get_type` is a compatibility synonym
-for `get_entity_type`. Because `GeoModel` does not own partition entities, existing
-entities report parent `(-1,-1)`, empty partition membership, and a model partition
-count of zero. Direct and session metadata queries are read-only and preserve the
-mesh cache; `MixedMesh` partition support remains unfinished.
+for `get_entity_type`. Plane-property queries return detached unit-normal
+coefficients `[a,b,c,d]` for `a*x+b*y+c*z=d`, oriented by the exterior loop; other
+visible native types have empty property vectors. Because `GeoModel` does not own
+partition entities, existing entities report parent `(-1,-1)`, empty partition
+membership, and a model partition count of zero. Direct and session metadata queries
+are read-only and preserve the mesh cache; `MixedMesh` partition support remains
+unfinished.
 Entity names belong only to existing positive-tag entities and need not be unique.
 Atomic retagging moves topology, Point sizes, Physical memberships, embedding sources
 and targets, periodic relations, primitive encodings, Boolean-result snapshots, and
@@ -194,6 +197,33 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-08-30 with Julia 1.12.7 after adding native entity-property
+queries:
+
+- `Tessella.Model.model_entity_properties` and synchronized
+  `API.model.get_entity_properties` return detached property vectors for every
+  visible native entity. Explicit planes return unit-normal coefficients
+  `[a,b,c,d]` for `a*x+b*y+c*z=d`, oriented by their exterior loop; Points, Lines,
+  Volumes, and visible primitive or Boolean Volumes return empty vectors.
+- Plane equations use exact-predicate coplanarity and exact-rational normal
+  construction before the final `Float64` normalization. Queries reject missing
+  topology, collinear or
+  noncoplanar boundaries, and unrepresentable results; retagging preserves the
+  equation and session queries preserve the mesh cache.
+- The direct metadata suite passed 109/109 bounds-checked assertions and the session
+  API suite passed 36/36. The complete bounds-checked package gate passed
+  167,850/167,850 assertions in 46m04.0s. Public-documentation and recursive
+  ambiguity scans returned zero.
+- The Gmsh 4.15.2 differential matched 20 explicit, retagged, and primitive-volume
+  cases through 20 property queries, alongside the existing type, parent,
+  partition-membership, and partition-count checks.
+- Aggregate bounds-checked validation exited 0 in 102m12.94s against Gmsh
+  4.15.2-git, including the property differential and enclosure/coax probe. The
+  unusually long wall time includes simultaneous user-owned Julia workloads; no
+  such processes were stopped. The organization ratchet covers 164 Julia source,
+  test, and validation files with zero repository-root `.jl` files; all 55
+  `*_test.jl` files are included by the subfolder-organized test entrypoint.
 
 Re-measured on 2026-08-28 with Julia 1.12.7 after adding native entity metadata
 queries:
