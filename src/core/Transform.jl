@@ -90,6 +90,22 @@ function _transform_homogeneous(value,caller::AbstractString;
     return coefficients,translation,row_major
 end
 
+function _transform_gmsh_affine(value,caller::AbstractString)
+    normalized=if value isa Tuple || value isa AbstractVector
+        count=length(value)
+        count in (12,16) || throw(ArgumentError(
+            "$caller: affine must contain exactly 12 or 16 entries by row"))
+        entries=collect(value)
+        count==12 ? (entries...,0.0,0.0,0.0,1.0) : entries
+    elseif value isa AbstractMatrix
+        value
+    else
+        throw(ArgumentError(
+            "$caller: affine must be a 4×4 matrix or a 12- or 16-entry tuple/vector"))
+    end
+    return _transform_homogeneous(normalized,caller)
+end
+
 @inline _matrix_entry(matrix,index)=matrix[index]
 
 function _determinant_sign(matrix::NTuple{9,Float64},caller::AbstractString)

@@ -241,7 +241,14 @@ and implicit primitive boundary presentation remain unfinished.
 canonical uniform-refinement kernel succeeds and returns independent caller-owned
 storage. `API.mesh.clear` discards the complete cache without changing model geometry;
 entity-selective clearing is an explicit blocker until the cache owns entity
-classification metadata.
+classification metadata. `API.mesh.affine_transform` applies a finite nonsingular
+4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete cache.
+It commits only a validated, independently owned result and rewinds reflected simplex
+connectivity to keep the mesh valid. Model geometry and periodic relations remain
+unchanged. Consequently, moving cached nodes away from their modeled entities can
+make classification-dependent queries fail explicitly until the cache is cleared and
+regenerated. Entity-selective transforms have the same classification blocker as
+selective clearing.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
