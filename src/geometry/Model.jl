@@ -44,6 +44,7 @@ export model_entity_type, model_entity_properties, model_parent,
 export model_value, model_derivative, model_second_derivative, model_curvature
 export model_principal_curvatures, model_normal, model_parametrization
 export model_parametrization_bounds, model_is_inside, model_closest_point
+export model_reparametrize_on_surface
 export set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 export remove_entities!
 export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags

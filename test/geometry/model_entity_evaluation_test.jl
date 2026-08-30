@@ -3,7 +3,8 @@ using Tessella
 using Tessella.Model: model_value, model_derivative, model_second_derivative,
                       model_curvature, model_principal_curvatures, model_normal,
                       model_parametrization, model_parametrization_bounds,
-                      model_is_inside, model_closest_point, model_set_tag!
+                      model_is_inside, model_closest_point,
+                      model_reparametrize_on_surface, model_set_tag!
 
 function _evaluation_plane_with_hole()
     model=GeoModel()
@@ -88,9 +89,20 @@ end
         model,2,1,[2,1,4,3,3.5,2.5,9,9],true)==3
     @test model_closest_point(model,2,1,[3,4,8,9,9,8])==
           ([3.0,4.0,3.0,9.0,9.0,3.0],[4.0,3.0,9.0,9.0])
+    @test model_reparametrize_on_surface(model,0,1,[],1)==[2.0,1.0]
+    @test model_reparametrize_on_surface(
+        model,1,1,[-1.0,0.0,0.5,1.0,2.0],1,-2)==
+        [2.0,-3.0,2.0,1.0,2.0,3.0,2.0,5.0,2.0,9.0]
+
+    add_point!(model,0,0,4;tag=8)
+    add_point!(model,1,0,4;tag=9)
+    add_line!(model,8,9;tag=8)
+    @test model_reparametrize_on_surface(model,1,8,[0.0,0.5,1.0],1)==
+          [0.0,0.0,0.0,0.5,0.0,1.0]
 
     model_set_tag!(model,2,1,10)
     @test model_normal(model,10,[4.0,3.0])==[0.0,0.0,1.0]
+    @test model_reparametrize_on_surface(model,1,1,[0.5],10)==[2.0,3.0]
     @test_throws ArgumentError model_value(model,2,1,[4.0,3.0])
 
     tilted=GeoModel()
@@ -127,6 +139,13 @@ end
         ()->model_is_inside(model,2,1,[0.0,0.0],false),
         ()->model_is_inside(model,2,1,[],1),
         ()->model_closest_point(model,0,1,[0.0,0.0,0.0]),
+        ()->model_reparametrize_on_surface(model,2,1,[],1),
+        ()->model_reparametrize_on_surface(model,0,1,[0.0],1),
+        ()->model_reparametrize_on_surface(model,1,1,[0.5],99),
+        ()->model_reparametrize_on_surface(model,1,1,[0.5],1,true),
+        ()->model_reparametrize_on_surface(
+            model,1,1,[0.5],1,big(typemax(Int32))+1),
+        ()->model_reparametrize_on_surface(model,1,1,[NaN],1),
     )
     for call in invalid_calls
         @test_throws ArgumentError call()

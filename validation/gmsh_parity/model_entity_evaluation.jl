@@ -7,7 +7,8 @@ using Tessella
 using Tessella.Model: model_value, model_derivative, model_second_derivative,
                       model_curvature, model_principal_curvatures, model_normal,
                       model_parametrization, model_parametrization_bounds,
-                      model_is_inside, model_closest_point, model_set_tag!
+                      model_is_inside, model_closest_point,
+                      model_reparametrize_on_surface, model_set_tag!
 
 function find_gmsh_api()
     explicit=get(ENV,"GMSH_JULIA_API","")
@@ -48,6 +49,9 @@ function tessella_plane_with_hole()
     add_curve_loop!(model,[1,2,3,4];tag=1)
     add_curve_loop!(model,[5,6,7];tag=2)
     add_plane_surface!(model,[1,2];tag=1)
+    add_point!(model,0,0,4;tag=8)
+    add_point!(model,1,0,4;tag=9)
+    add_line!(model,8,9;tag=8)
     return model
 end
 
@@ -68,6 +72,9 @@ function gmsh_plane_with_hole!()
     gmsh.model.geo.addCurveLoop([1,2,3,4],1)
     gmsh.model.geo.addCurveLoop([5,6,7],2)
     gmsh.model.geo.addPlaneSurface([1,2],1)
+    gmsh.model.geo.addPoint(0,0,4,1.0,8)
+    gmsh.model.geo.addPoint(1,0,4,1.0,9)
+    gmsh.model.geo.addLine(8,9,8)
     gmsh.model.geo.synchronize()
     return nothing
 end
@@ -120,6 +127,12 @@ try
     model_is_inside(tessella,0,1,[1.0,2.0,3.0])==
         gmsh.model.isInside(0,1,[1.0,2.0,3.0],false) ||
         error("Point containment differs")
+    assert_close("Point surface reparametrization",
+                 model_reparametrize_on_surface(tessella,0,1,[],1),
+                 gmsh.model.reparametrizeOnSurface(0,1,Float64[],1))
+    assert_close("off-Plane Point surface reparametrization",
+                 model_reparametrize_on_surface(tessella,0,8,[],1),
+                 gmsh.model.reparametrizeOnSurface(0,8,Float64[],1))
 
     line_parameters=[-1.0,0.0,0.5,1.0,2.0]
     assert_close("Line value",model_value(tessella,1,1,line_parameters),
@@ -158,6 +171,17 @@ try
                  rtol=1e-6,atol=1e-6)
     assert_close("Line closest parameters",native_closest_parameters,
                  reference_closest_parameters;rtol=1e-6,atol=1e-6)
+    assert_close("Line surface reparametrization",
+                 model_reparametrize_on_surface(
+                     tessella,1,1,line_parameters,1,-2),
+                 gmsh.model.reparametrizeOnSurface(
+                     1,1,line_parameters,1,-2);atol=1e-12)
+    off_plane_parameters=[0.0,0.5,1.0]
+    assert_close("off-Plane Line surface reparametrization",
+                 model_reparametrize_on_surface(
+                     tessella,1,8,off_plane_parameters,1),
+                 gmsh.model.reparametrizeOnSurface(
+                     1,8,off_plane_parameters,1);atol=1e-12)
 
     plane_parameters=[0.0,0.0,1.0,2.0,-1.0,4.0,7.0,8.0]
     assert_close("Plane value",model_value(tessella,2,1,plane_parameters),
@@ -240,9 +264,10 @@ try
                  gmsh.model.getNormal(10,[0.0,0.0]);atol=2e-12)
 
     println("GMSH_PARITY_MODEL_EVALUATION_OK gmsh=",gmsh.GMSH_API_VERSION,
-            " point_queries=4 line_query_families=10 ",
+            " point_queries=6 line_query_families=12 ",
             "plane_query_families=12 tilted_query_families=5 ",
-            "bounded_divergences=exact_membership_line_second_derivative_noise")
+            "bounded_divergences=strict_finite_shapes_exact_membership_" *
+            "line_second_derivative_noise")
 finally
     gmsh.finalize()
 end
