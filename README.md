@@ -53,6 +53,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   diagnostics, native box/cylinder/cone/geodesic-sphere primitives, analytical
   surfaces, imprints, mesh Boolean CSG, and validated affine transformations of
   finalized simplex meshes with orientation and physical-tag preservation;
+- Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
+  arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
@@ -274,6 +276,14 @@ unused coordinates set to zero. The locator is discarded whenever the mesh cache
 changes. Degenerate cells and Float64-unrepresentable local coordinates fail
 explicitly. A standalone `get_element` query remains unavailable because its
 required model-entity classification tag is not present in `Mesh`.
+`get_element_qualities` returns detached values in dense-tag request order for the
+13 documented Gmsh 4.15.2 measures. It preserves signed tetrahedron Jacobian,
+volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
+degenerate shape measures return zero and undefined circumradii return `Inf`.
+Gmsh 4.15.2 has no reliable linear-segment implementation for `minDetJac`,
+`maxDetJac`, `minSIGE`, or `minIsotropy`; Tessella rejects those combinations
+explicitly. Nondefault task partitioning remains unavailable for detached Julia
+arrays.
 `msh_type` and `msh_properties`, with session-independent
 `API.mesh.get_element_type` and `get_element_properties` wrappers, query the native
 Gmsh 4.15.2 catalog. Family names in the API are case-insensitive, and requested
