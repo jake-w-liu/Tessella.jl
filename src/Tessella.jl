@@ -24,6 +24,7 @@ const TESSELLA_STAGE = 6  # see STATUS.md stage board
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
+include("core/MeshPointLocation.jl") # P5: robust finalized-simplex reference inversion and AABB lookup
 include("core/Transform.jl")      # P3: validated affine mesh transformations
 include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
 include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination

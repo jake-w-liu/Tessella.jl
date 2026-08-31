@@ -263,6 +263,17 @@ metadata.
 arrays. Type-node results repeat shared nodes in element order, and edge/face results
 use Gmsh's local linear-simplex ordering. High-order nodes and nondefault Julia task
 partitioning are not represented.
+`get_element_by_coordinates`, `get_elements_by_coordinates`, and
+`get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
+cache. Matches are deterministic: greatest dimension first, then smallest dense tag.
+Strict search uses the pinned Gmsh 4.15.2 `1e-6` reference tolerance; relaxed search
+widens it by decades through `1.0` and stops at the first nonempty level. Scaled
+affine inversion falls back to exact rational arithmetic for ill-conditioned cases.
+Off-span segment and triangle coordinates are stable orthogonal projections with
+unused coordinates set to zero. The locator is discarded whenever the mesh cache
+changes. Degenerate cells and Float64-unrepresentable local coordinates fail
+explicitly. A standalone `get_element` query remains unavailable because its
+required model-entity classification tag is not present in `Mesh`.
 `msh_type` and `msh_properties`, with session-independent
 `API.mesh.get_element_type` and `get_element_properties` wrappers, query the native
 Gmsh 4.15.2 catalog. Family names in the API are case-insensitive, and requested
