@@ -55,6 +55,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   finalized simplex meshes with orientation and physical-tag preservation;
 - Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
   arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
+- explicit deterministic global edge and triangular-face catalogs for cached
+  simplex meshes, with orientation-stable edge lookup and detached tag/node arrays;
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
@@ -265,6 +267,13 @@ metadata.
 arrays. Type-node results repeat shared nodes in element order, and edge/face results
 use Gmsh's local linear-simplex ordering. High-order nodes and nondefault Julia task
 partitioning are not represented.
+`create_edges` and `create_faces` build idempotent whole-cache catalogs that are
+discarded with every mesh replacement. `get_edges` returns one global tag per node
+pair and orientation `+1` or `-1` from ascending tag order; `get_faces` returns the
+pinned Gmsh 4.15.2 zero orientation for triangular faces. `get_all_edges` and
+`get_all_faces` return detached arrays in ascending global-tag order. Tessella rejects
+incomplete node groups instead of truncating them. Entity-selective creation remains
+blocked until the cache owns classification metadata.
 `get_element_by_coordinates`, `get_elements_by_coordinates`, and
 `get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
 cache. Matches are deterministic: greatest dimension first, then smallest dense tag.
@@ -338,7 +347,7 @@ entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
 entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement and session-cache lifecycle, transfinite-patch,
-fixed element type/property lookup,
+fixed element type/property lookup, global simplex edge/face topology,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction

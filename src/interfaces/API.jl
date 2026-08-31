@@ -11,7 +11,8 @@ operation-time Boolean operand ownership, and persistent affine relations betwee
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
-linear-simplex mesh cache. It also owns a reusable robust AABB locator for dense
+linear-simplex mesh cache, plus explicit deterministic global edge and
+triangular-face catalogs. It also owns a reusable robust AABB locator for dense
 element-by-coordinate and reference-coordinate queries, plus scale-robust named
 quality queries and Gmsh-shaped forward maps/Jacobians over dense cached elements.
 Element type and property lookup is
@@ -48,6 +49,11 @@ using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
+using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
+                            _mesh_edge_topology, _mesh_face_topology,
+                            _mesh_edges, _mesh_faces,
+                            _mesh_all_edges, _mesh_all_faces,
+                            _simplex_edge_patterns, _simplex_face_patterns
 using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
                            mesh_element_block, mesh_element_record,
                            _local_coordinates, _locate_elements,
@@ -69,11 +75,15 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
 const OPTIONS = copy(DEFAULT_OPTIONS)
 const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
 const LAST_MESH_LOCATOR = Ref{Union{Nothing,SimplexLocator}}(nothing)
+const LAST_MESH_EDGES = Ref{Union{Nothing,MeshEdgeTopology}}(nothing)
+const LAST_MESH_FACES = Ref{Union{Nothing,MeshFaceTopology}}(nothing)
 const STATE_LOCK = ReentrantLock()
 
 function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh})
     LAST_MESH[]=mesh
     LAST_MESH_LOCATOR[]=nothing
+    LAST_MESH_EDGES[]=nothing
+    LAST_MESH_FACES[]=nothing
     return mesh
 end
 
@@ -926,6 +936,72 @@ function _get_jacobian(element_tag,local_coord)
     end
 end
 
+function _mesh_global_topology_selection(dim_tags,caller::AbstractString)
+    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
+        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
+    isempty(dim_tags) || throw(ArgumentError(
+        "$caller: entity-selective topology creation requires mesh " *
+        "classification metadata; pass an empty collection for the complete cache"))
+    return nothing
+end
+
+function _create_edges(dim_tags=())
+    caller="API.mesh.create_edges"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _mesh_global_topology_selection(dim_tags,caller)
+        if LAST_MESH_EDGES[]===nothing
+            replacement=_mesh_edge_topology(cached)
+            LAST_MESH_EDGES[]=replacement
+        end
+        nothing
+    end
+end
+
+function _create_faces(dim_tags=())
+    caller="API.mesh.create_faces"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _mesh_global_topology_selection(dim_tags,caller)
+        if LAST_MESH_FACES[]===nothing
+            replacement=_mesh_face_topology(cached)
+            LAST_MESH_FACES[]=replacement
+        end
+        nothing
+    end
+end
+
+function _get_edges(node_tags)
+    caller="API.mesh.get_edges"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _mesh_edges(LAST_MESH_EDGES[],cached,node_tags,caller)
+    end
+end
+
+function _get_faces(face_type,node_tags)
+    caller="API.mesh.get_faces"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _mesh_faces(LAST_MESH_FACES[],cached,face_type,node_tags,caller)
+    end
+end
+
+function _get_all_edges()
+    return lock(STATE_LOCK) do
+        _cached_mesh_locked("API.mesh.get_all_edges")
+        _mesh_all_edges(LAST_MESH_EDGES[])
+    end
+end
+
+function _get_all_faces(face_type)
+    return lock(STATE_LOCK) do
+        _cached_mesh_locked("API.mesh.get_all_faces")
+        _mesh_all_faces(
+            LAST_MESH_FACES[],face_type,"API.mesh.get_all_faces")
+    end
+end
+
 function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
     count=length(cells)
     coordinate_count=Base.checked_mul(3,count)
@@ -961,26 +1037,6 @@ function _mesh_barycenters(mesh::Mesh,cells::Matrix{Int32},fast::Bool,
         result[3cell-3+axis]=value
     end
     return result
-end
-
-const _MESH_SEGMENT_EDGES=((1,2),)
-const _MESH_TRIANGLE_EDGES=((1,2),(2,3),(3,1))
-const _MESH_TETRAHEDRON_EDGES=((1,2),(2,3),(3,1),(4,1),(4,3),(4,2))
-const _MESH_TRIANGLE_FACES=((1,2,3),)
-const _MESH_TETRAHEDRON_FACES=((1,3,2),(1,2,4),(1,4,3),(4,2,3))
-
-function _mesh_local_edges(element_type::Int)
-    element_type==1 && return _MESH_SEGMENT_EDGES
-    element_type==2 && return _MESH_TRIANGLE_EDGES
-    element_type==4 && return _MESH_TETRAHEDRON_EDGES
-    return ()
-end
-
-function _mesh_local_faces(element_type::Int,face_type::Int)
-    face_type==3 || return ()
-    element_type==2 && return _MESH_TRIANGLE_FACES
-    element_type==4 && return _MESH_TETRAHEDRON_FACES
-    return ()
 end
 
 function _mesh_pattern_nodes(cells::Matrix{Int32},patterns)
@@ -1121,7 +1177,7 @@ function _get_element_edge_nodes(element_type,tag=-1,primary=false,
         _mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[]
         _,cells=block
-        _mesh_pattern_nodes(cells,_mesh_local_edges(msh))
+        _mesh_pattern_nodes(cells,_simplex_edge_patterns(msh))
     end
 end
 
@@ -1138,7 +1194,7 @@ function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
         _mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[]
         _,cells=block
-        _mesh_pattern_nodes(cells,_mesh_local_faces(msh,face))
+        _mesh_pattern_nodes(cells,_simplex_face_patterns(msh,face))
     end
 end
 
@@ -1263,6 +1319,8 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_element_by_coordinates,_get_elements_by_coordinates,
              _get_local_coordinates_in_element,_get_element_qualities,
              _get_jacobians,_get_jacobian,
+             _create_edges,_create_faces,_get_edges,_get_faces,
+             _get_all_edges,_get_all_faces,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
@@ -1389,6 +1447,62 @@ contracts, and error behavior match [`get_jacobians`](@ref).
 """
 get_jacobian(element_tag,local_coord)=
     _get_jacobian(element_tag,local_coord)
+
+"""
+    create_edges(dim_tags=())
+
+Create deterministic global identifiers for every unique edge in the cached
+linear-simplex mesh. Repeated calls are idempotent. Only whole-cache creation is
+available because the cache does not own model-entity classification metadata.
+Replacing, refining, transforming, or clearing the cache invalidates the catalog.
+"""
+create_edges(dim_tags=())=_create_edges(dim_tags)
+
+"""
+    create_faces(dim_tags=())
+
+Create deterministic global identifiers for every unique triangular face in the
+cached linear-simplex mesh. Lifecycle and entity-selection behavior match
+[`create_edges`](@ref). The cache contains no quadrangular faces.
+"""
+create_faces(dim_tags=())=_create_faces(dim_tags)
+
+"""
+    get_edges(node_tags)
+
+Return detached global edge tags and `Int32` orientations for concatenated node
+pairs. Positive orientation follows ascending node tags; reversing a pair returns
+the same edge tag and orientation `-1`. The edge catalog must first be created with
+[`create_edges`](@ref). Incomplete pairs and unknown nodes or edges fail explicitly.
+"""
+get_edges(node_tags)=_get_edges(node_tags)
+
+"""
+    get_faces(face_type, node_tags)
+
+Return detached global face tags and orientations for concatenated triangular or
+quadrangular node groups. Cached simplex meshes contain only triangular faces.
+Triangular orientations are zero, matching Gmsh 4.15.2's public face-topology
+behavior. A nonempty quadrangular lookup therefore fails as unknown. The face
+catalog must first be created with [`create_faces`](@ref).
+"""
+get_faces(face_type,node_tags)=_get_faces(face_type,node_tags)
+
+"""
+    get_all_edges()
+
+Return detached global edge tags and first-encounter node pairs in ascending tag
+order. Before [`create_edges`](@ref), both arrays are empty.
+"""
+get_all_edges()=_get_all_edges()
+
+"""
+    get_all_faces(face_type)
+
+Return detached global face tags and first-encounter face nodes in ascending tag
+order. Before [`create_faces`](@ref), or for quadrangles, both arrays are empty.
+"""
+get_all_faces(face_type)=_get_all_faces(face_type)
 
 """
     get_elements_by_type(element_type, tag=-1, task=0, num_tasks=1)
