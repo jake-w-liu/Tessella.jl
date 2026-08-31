@@ -13,7 +13,8 @@ The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache. It also owns a reusable robust AABB locator for dense
 element-by-coordinate and reference-coordinate queries, plus scale-robust named
-quality queries over dense cached elements. Element type and property lookup is
+quality queries and Gmsh-shaped forward maps/Jacobians over dense cached elements.
+Element type and property lookup is
 available without a session and delegates to the immutable native catalog. Production
 meshing is never delegated to Gmsh.
 """
@@ -52,6 +53,7 @@ using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
                            _local_coordinates, _locate_elements,
                            _require_local_coordinates
 using ..MeshElementQuality: mesh_element_qualities
+using ..MeshReferenceGeometry: mesh_jacobian, mesh_jacobians
 using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
@@ -905,6 +907,25 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
     end
 end
 
+function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
+    caller="API.mesh.get_jacobians"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        msh,_=_mesh_query_type_block(cached,element_type,tag,caller)
+        _mesh_query_tasks(task,num_tasks,caller)
+        mesh_jacobians(cached,msh,local_coord)
+    end
+end
+
+function _get_jacobian(element_tag,local_coord)
+    caller="API.mesh.get_jacobian"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_element_tag(cached,element_tag,caller)
+        mesh_jacobian(cached,tag,local_coord)
+    end
+end
+
 function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
     count=length(cells)
     coordinate_count=Base.checked_mul(3,count)
@@ -1241,6 +1262,7 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_element_type,_get_element_properties,
              _get_element_by_coordinates,_get_elements_by_coordinates,
              _get_local_coordinates_in_element,_get_element_qualities,
+             _get_jacobians,_get_jacobian,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
@@ -1343,6 +1365,30 @@ Nondefault task partitioning is unavailable for detached Julia return arrays.
 """
 get_element_qualities(element_tags,quality_name="minSICN",task=0,num_tasks=1)=
     _get_element_qualities(element_tags,quality_name,task,num_tasks)
+
+"""
+    get_jacobians(element_type, local_coord, tag=-1, task=0, num_tasks=1)
+
+Return detached `(jacobians, determinants, coordinates)` for every cached element
+of one linear-simplex Gmsh type at concatenated `(u,v,w)` points. Results are
+ordered by element and then point; each 3×3 Jacobian is flattened by column.
+Segment determinants are positive lengths, triangle determinants are positive
+area scales, and tetrahedron determinants retain orientation. The cache supports
+types 1, 2, and 4. Entity filtering and nondefault task partitioning require
+metadata or caller-owned output storage that this Julia cache does not have.
+"""
+get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)=
+    _get_jacobians(element_type,local_coord,tag,task,num_tasks)
+
+"""
+    get_jacobian(element_tag, local_coord)
+
+Return detached Jacobians, determinants, and mapped physical coordinates for one
+dense cached linear-simplex element tag. Layout, reference coordinates, numerical
+contracts, and error behavior match [`get_jacobians`](@ref).
+"""
+get_jacobian(element_tag,local_coord)=
+    _get_jacobian(element_tag,local_coord)
 
 """
     get_elements_by_type(element_type, tag=-1, task=0, num_tasks=1)

@@ -28,6 +28,7 @@ include("core/MeshPointLocation.jl") # P5: robust finalized-simplex reference in
 include("core/MeshElementQuality.jl") # P5: robust Gmsh-shaped linear-simplex quality queries
 include("core/Transform.jl")      # P3: validated affine mesh transformations
 include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
+include("core/MeshReferenceGeometry.jl") # P5: robust Gmsh-shaped linear-simplex Jacobians
 include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination
 include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex refinement
 include("structured/StructuredNumerics.jl") # P4: shared affine-grid numerical certificates

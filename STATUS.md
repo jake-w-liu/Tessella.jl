@@ -30,7 +30,7 @@ support or test requirements.
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types with canonical family/order lookup and detached property metadata plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, visibility/color state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/straight-Line/explicit-Plane evaluation and surface reparametrization |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property lookup, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data plus robust cached simplex point-location, local-coordinate, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property lookup, bulk/derived mesh-data, point-location, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-point-location, and mesh-element-quality Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property lookup, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data plus robust cached simplex point-location, local-coordinate, forward-map/Jacobian, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property lookup, bulk/derived mesh-data, point-location, Jacobian/reference-map, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-point-location, mesh-Jacobian, and mesh-element-quality Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -267,6 +267,44 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-08-31 with Julia 1.12.7 after adding cached linear-simplex
+forward-map and Jacobian queries:
+
+- `MeshReferenceGeometry`, `API.mesh.get_jacobians`, and
+  `API.mesh.get_jacobian` now return detached, element-then-point Jacobians,
+  determinants, and physical coordinates for cached type-1 segments, type-2
+  triangles, and type-4 tetrahedra. Matrices use Gmsh's column layout;
+  low-dimensional frames use compatible regularization, and tetrahedron
+  determinants retain orientation. Exact-rational/`BigFloat` fallbacks reject
+  degenerate, nonfinite, overflowed, and under-resolved results explicitly.
+- The fixed-seed affine, focused robustness, and synchronized API sets passed
+  416/416, 68/68, and 50/50 bounds-checked assertions. The neighboring point,
+  quality, mesh-data, lifecycle, transform, and public-API sets passed all 1,180
+  assertions. Malformed partial triples, cache mutation, output aliasing,
+  out-of-order results, inverted orientation, extreme scales, and allocation
+  growth are covered.
+- The required Gmsh 4.15.2 differential matched six elements across all three
+  simplex types, three bulk evaluation points, and four single-element requests.
+  Its fixed SHA-256 is
+  `85803b9ce40eed41e887957e73a58a1a3a1c1251a72ef3c1e5315b165772d631`.
+  Tessella deliberately rejects incomplete/nonfinite coordinate triples and
+  degenerate maps that Gmsh silently truncates or returns as zero maps.
+- Warmed 10,000-, 20,000-, and 100,000-tetrahedron single-point batch queries
+  allocated 1,048,848, 2,097,424, and 10,420,496 bytes. The 100,000-element
+  five-run median was 0.019878541 seconds, confirming output-size-proportional
+  allocation and linear work.
+- The full bounds-checked package gate passed 170,775/170,775 assertions in
+  15m28.6s. Aggregate bounds-checked validation completed through its final report
+  after the new Jacobian child, every existing mandatory Gmsh child, and the
+  enclosure/coax acceptance probe passed. The tree contains 191 managed Julia
+  files and no repository-root `.jl`; the only subtree entrypoints outside domain
+  folders are `src/Tessella.jl`, `test/runtests.jl`, and `validation/run_all.jl`.
+  All 69 organized `*_test.jl` files are matched by 69 runner includes; all 50
+  source-include edges resolve and reach all 51 source files. Julia compatibility is exactly `1.12 - 1.12`, with
+  no active Julia 1.11 target. Public-documentation, recursive ambiguity,
+  source-include, tracked local Markdown-link, placeholder, layout, and
+  `git diff --check` gates passed.
 
 Re-measured on 2026-08-31 with Julia 1.12.7 after adding cached linear-simplex
 element-quality queries:

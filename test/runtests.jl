@@ -47,6 +47,7 @@ using Tessella
     include("core/predicates_test.jl")   # exact predicates vs exact-rational oracle
     include("core/meshtypes_test.jl")    # mesh container, topology, quality, checksum
     include("core/mesh_point_location_test.jl") # robust simplex inversion and AABB lookup
+    include("core/mesh_reference_geometry_test.jl") # robust simplex forward maps and Jacobians
     include("core/mesh_element_quality_test.jl") # Gmsh-shaped simplex quality measures
     include("core/transform_test.jl")    # validated affine transforms + orientation preservation
     include("interfaces/io_test.jl")     # .msh v2/v4 round-trip, STL, .geo scan
@@ -85,6 +86,7 @@ using Tessella
     include("interfaces/api_mesh_transform_test.jl") # atomic whole-cache affine transforms
     include("interfaces/api_mesh_data_test.jl") # detached node/element block queries
     include("interfaces/api_mesh_point_location_test.jl") # cached simplex point location
+    include("interfaces/api_mesh_jacobian_test.jl") # cached simplex Jacobian maps
     include("interfaces/api_mesh_element_quality_test.jl") # cached simplex quality queries
     include("interfaces/api_element_catalog_test.jl") # fixed-element type and property queries
     include("interfaces/api_boolean_lifecycle_test.jl") # synchronized Boolean ownership
