@@ -66,6 +66,7 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   including recursive explicit-topology `PointsOf` selection;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
   sub-element records, compact variable connectivity and parent/domain references,
+  canonical family/order-to-type lookup and detached local-node property metadata,
   mixed entity/classification metadata, structural validation/CRC, and ASCII/binary
   MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
   repeated pre-element node sections, plus owned periodic metadata in ASCII and
@@ -262,6 +263,14 @@ metadata.
 arrays. Type-node results repeat shared nodes in element order, and edge/face results
 use Gmsh's local linear-simplex ordering. High-order nodes and nondefault Julia task
 partitioning are not represented.
+`msh_type` and `msh_properties`, with session-independent
+`API.mesh.get_element_type` and `get_element_properties` wrappers, query the native
+Gmsh 4.15.2 catalog. Family names in the API are case-insensitive, and requested
+serendipity types use Gmsh's complete-type fallback when no distinct incomplete type
+exists. Property results cover all 125 fixed types and return detached local-node
+coordinates. Tessella retains verified high-order-prism and trihedron properties where
+Gmsh 4.15.2's property call fails; compatible zero-node special metadata is returned,
+while special records without nodal properties fail explicitly.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
@@ -300,6 +309,7 @@ entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
 entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement and session-cache lifecycle, transfinite-patch,
+fixed element type/property lookup,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction

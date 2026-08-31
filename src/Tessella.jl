@@ -65,7 +65,8 @@ using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces,
                   _throw_simplex_validation
 using .Transform: affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension,
-                 msh_order, msh_family, ElementBlock, ElementRef,
+                 msh_order, msh_family, msh_type, msh_properties,
+                 ElementBlock, ElementRef,
                  SpecialElementBlock, MixedEntity, MixedEntityData,
                  MixedPeriodicLink, MixedMesh,
                  mixed_crc, simplex_to_mixed, mixed_to_simplex, write_mixed_msh,
@@ -138,7 +139,8 @@ export mesh_volume, mesh_planar, mesh_sized_extrude, mesh_sized, refine_to_size,
 export Mesh, validate, mesh_crc, mesh_quality, is_meshable
 export affine_transform, translate_mesh, rotate_mesh, dilate_mesh, mirror_mesh
 export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
-       msh_family, ElementBlock, ElementRef, SpecialElementBlock, MixedEntity,
+       msh_family, msh_type, msh_properties,
+       ElementBlock, ElementRef, SpecialElementBlock, MixedEntity,
        MixedEntityData, MixedPeriodicLink, MixedMesh, mixed_crc,
        simplex_to_mixed, mixed_to_simplex,
        write_mixed_msh, read_mixed_msh, lagrange_nodes, add_block!

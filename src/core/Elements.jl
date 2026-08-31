@@ -1,8 +1,9 @@
 """
     Elements
 
-Gmsh 4.15.2 fixed-node element families and orders in memory, plus a
-mixed-element mesh container with MSH v2.2/v4.1 round-trip. Simplex
+Gmsh 4.15.2 fixed-node element families, orders, type lookup, and detached
+property metadata in memory, plus a mixed-element mesh container with MSH
+v2.2/v4.1 round-trip. Simplex
 [`Mesh`](@ref) remains the certified volume kernel. Cut/sub-element records
 with ownership links and simplex-decomposed polygon/polyhedron connectivity
 use a separate block type instead of pretending to be ordinary nodal elements.
@@ -17,7 +18,8 @@ using ..Transform: _transform_homogeneous
 using SHA
 using Printf: @printf, @sprintf
 
-export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order, msh_family
+export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
+       msh_family, msh_type, msh_properties
 export ElementBlock, ElementRef, SpecialElementBlock, MixedEntity, MixedEntityData,
        MixedPeriodicLink, MixedMesh
 export mixed_crc, simplex_to_mixed, mixed_to_simplex
@@ -206,15 +208,19 @@ const MSH_SPECIAL_RECORDS = Dict{Int,NamedTuple}(
     136 => (unit=4, variable=false, links=:parent),
 )
 
-"""Return the fixed-node [`ElementSpec`](@ref) for a Gmsh numeric type."""
-function msh_spec(msh::Integer)
-    _elements_reject_bool(msh,"Elements: Gmsh element type")
-    tag = try
+function _msh_tag(msh::Integer,caller::AbstractString)
+    _elements_reject_bool(msh,"$caller: Gmsh element type")
+    return try
         Int(msh)
     catch err
         err isa InexactError || rethrow()
-        throw(ArgumentError("Elements: Gmsh element type is outside Int bounds"))
+        throw(ArgumentError("$caller: Gmsh element type is outside Int bounds"))
     end
+end
+
+"""Return the fixed-node [`ElementSpec`](@ref) for a Gmsh numeric type."""
+function msh_spec(msh::Integer)
+    tag=_msh_tag(msh,"msh_spec")
     s=get(_MSH_CATALOG_LOOKUP, tag, nothing)
     if s === nothing
         haskey(MSH_SPECIAL_TYPES, tag) && throw(ArgumentError(
@@ -1866,6 +1872,119 @@ const _MSH_BY_SHAPE = let by_shape = Dict{Tuple{Symbol,Int,Bool},Int}()
     by_shape
 end
 
+function _msh_shape_order(order::Integer,caller::AbstractString)
+    _elements_reject_bool(order,"$caller: order")
+    value=try
+        Int(order)
+    catch err
+        err isa InexactError || rethrow()
+        throw(ArgumentError("$caller: order is outside Int bounds"))
+    end
+    typemin(Int32)<=value<=typemax(Int32) || throw(ArgumentError(
+        "$caller: order must fit the Gmsh Int32 range"))
+    return value
+end
+
+function _msh_type_exact(family::Symbol,order::Int,serendipity::Bool,
+                         caller::AbstractString)
+    tag=get(_MSH_BY_SHAPE,(family,order,serendipity),nothing)
+    tag===nothing && throw(ArgumentError(
+        "$caller: no Gmsh 4.15.2 element for family $family, order $order, " *
+        "serendipity=$serendipity"))
+    return tag
+end
+
+"""
+    msh_type(family, order; serendipity=false) -> Int
+
+Return the Gmsh 4.15.2 numeric type for a catalog family and order. A requested
+serendipity type falls back to the complete type when Gmsh defines no distinct
+incomplete element at that order. Point and trihedron lookups follow Gmsh and
+ignore the order and serendipity selector.
+"""
+function msh_type(family::Symbol,order::Integer;serendipity=false)
+    caller="msh_type"
+    serendipity isa Bool || throw(ArgumentError(
+        "$caller: serendipity must be Bool"))
+    p=_msh_shape_order(order,caller)
+    family===:pnt && return 15
+    family===:trih && return 140
+    tag=get(_MSH_BY_SHAPE,(family,p,serendipity),nothing)
+    tag===nothing && serendipity &&
+        (tag=get(_MSH_BY_SHAPE,(family,p,false),nothing))
+    tag===nothing && throw(ArgumentError(
+        "$caller: no Gmsh 4.15.2 element for family $family, order $p, " *
+        "serendipity=$serendipity"))
+    return tag
+end
+
+const _MSH_PROPERTY_NAMES=(
+    pnt="Point",lin="Line",tri="Triangle",qua="Quadrilateral",
+    tet="Tetrahedron",hex="Hexahedron",pri="Prism",pyr="Pyramid",
+    trih="Trihedron")
+
+function _msh_property_name(spec::ElementSpec)
+    prefix=getproperty(_MSH_PROPERTY_NAMES,spec.family)
+    spec.family in (:pnt,:trih) && return prefix
+    ambiguous_incomplete_name=spec.serendipity && any(
+        candidate.family===spec.family && !candidate.serendipity &&
+        candidate.nnodes==spec.nnodes for candidate in values(MSH_CATALOG))
+    return string(prefix,' ',spec.nnodes,ambiguous_incomplete_name ? "I" : "")
+end
+
+function _msh_primary_nodes(family::Symbol)
+    family===:pnt && return 1
+    family===:lin && return 2
+    family===:tri && return 3
+    family===:qua && return 4
+    family===:tet && return 4
+    family===:hex && return 8
+    family===:pri && return 6
+    family===:pyr && return 5
+    family===:trih && return 4
+    throw(ErrorException("msh_properties: unsupported catalog family $family"))
+end
+
+const _MSH_SPECIAL_API_PROPERTIES=Base.ImmutableDict(
+    34=>(name="Polygon",dim=2),
+    35=>(name="Polyhedron",dim=3),
+    69=>(name="Polygon Border",dim=2),
+    133=>(name="Point Xfem",dim=0),
+    134=>(name="Line Xfem",dim=1),
+    135=>(name="Triangle Xfem",dim=2),
+    136=>(name="Tetrahedron Xfem",dim=3))
+
+"""
+    msh_properties(msh) -> NamedTuple
+
+Return the Gmsh-shaped name, dimension, order, node count, detached local-node
+coordinates and primary-node count for a fixed catalog type. Tessella also returns
+its verified layouts for high-order prisms and trihedra where Gmsh 4.15.2's
+property call fails. Gmsh-compatible zero-node metadata is returned for the special
+types whose upstream property call succeeds; other special types fail explicitly.
+"""
+function msh_properties(msh::Integer)
+    tag=_msh_tag(msh,"msh_properties")
+    special=get(_MSH_SPECIAL_API_PROPERTIES,tag,nothing)
+    special===nothing || return (
+        name=special.name,dim=special.dim,order=1,num_nodes=0,
+        local_node_coordinates=Float64[],num_primary_nodes=0)
+    if haskey(MSH_SPECIAL_TYPES,tag)
+        throw(ArgumentError(
+            "msh_properties: Gmsh 4.15.2 exposes no nodal properties for " *
+            "special element type $tag"))
+    end
+    spec=msh_spec(tag)
+    coordinates=lagrange_nodes(tag)
+    coordinate_dimension=max(spec.dim,1)
+    return (
+        name=_msh_property_name(spec),dim=spec.dim,order=spec.order,
+        num_nodes=spec.nnodes,
+        local_node_coordinates=vec(copy(
+            coordinates[1:coordinate_dimension,:])),
+        num_primary_nodes=_msh_primary_nodes(spec.family))
+end
+
 function _scaled_nodes(spec::ElementSpec)
     p, family = spec.order, spec.family
     family === :trih && return Float64[-1 1 1 -1; -1 -1 1 1; 0 0 0 0]
@@ -1935,20 +2054,11 @@ Return local nodes for the unique catalogued Gmsh type with this shape. The
 lookup bounds accepted orders to those defined by Gmsh 4.15.2.
 """
 function lagrange_nodes(family::Symbol, order::Integer; serendipity=false)
-    _elements_reject_bool(order,"lagrange_nodes: order")
     serendipity isa Bool || throw(ArgumentError(
         "lagrange_nodes: serendipity must be Bool"))
-    p = try
-        Int(order)
-    catch err
-        err isa InexactError || rethrow()
-        throw(ArgumentError("lagrange_nodes: order is outside Int bounds"))
-    end
+    p=_msh_shape_order(order,"lagrange_nodes")
     p >= 0 || throw(ArgumentError("lagrange_nodes: order must be non-negative"))
-    tag = get(_MSH_BY_SHAPE, (family, p, serendipity), nothing)
-    tag === nothing && throw(ArgumentError(
-        "lagrange_nodes: no Gmsh 4.15.2 element for family $family, order $p, " *
-        "serendipity=$serendipity"))
+    tag=_msh_type_exact(family,p,serendipity,"lagrange_nodes")
     return lagrange_nodes(tag)
 end
 
