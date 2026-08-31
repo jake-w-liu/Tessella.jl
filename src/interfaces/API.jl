@@ -731,6 +731,102 @@ function _mesh_element_block(mesh::Mesh,element_type::Int)
     return nothing
 end
 
+function _mesh_query_type_block(mesh::Mesh,element_type,tag,
+                                caller::AbstractString)
+    msh=_mesh_query_integer(element_type,caller,"element_type")
+    msh_spec(msh)
+    entity=_mesh_query_integer(tag,caller,"tag")
+    entity<0 || throw(ArgumentError(
+        "$caller: entity-specific data require mesh classification metadata; " *
+        "use a negative tag to query the complete cache"))
+    return msh,_mesh_element_block(mesh,msh)
+end
+
+function _mesh_query_tasks(task,num_tasks,caller::AbstractString)
+    task_index=_mesh_query_integer(task,caller,"task")
+    task_count=_mesh_query_integer(num_tasks,caller,"num_tasks")
+    task_index>=0 || throw(ArgumentError(
+        "$caller: task must be nonnegative"))
+    task_count>=1 || throw(ArgumentError(
+        "$caller: num_tasks must be positive"))
+    (task_index==0 && task_count==1) || throw(ArgumentError(
+        "$caller: only task=0 with num_tasks=1 is supported by the " *
+        "detached Julia return arrays"))
+    return nothing
+end
+
+function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
+    count=length(cells)
+    coordinate_count=Base.checked_mul(3,count)
+    node_tags=Vector{UInt64}(undef,count)
+    coordinates=Vector{Float64}(undef,coordinate_count)
+    cursor=0
+    @inbounds for cell in axes(cells,2),local_node in axes(cells,1)
+        cursor+=1
+        node_index=Int(cells[local_node,cell])
+        node_tags[cursor]=UInt64(node_index)
+        offset=3cursor-3
+        coordinates[offset+1]=mesh.coords[1,node_index]
+        coordinates[offset+2]=mesh.coords[2,node_index]
+        coordinates[offset+3]=mesh.coords[3,node_index]
+    end
+    return node_tags,coordinates
+end
+
+function _mesh_barycenters(mesh::Mesh,cells::Matrix{Int32},fast::Bool,
+                           caller::AbstractString)
+    nodes_per_element=size(cells,1)
+    count=size(cells,2)
+    result=Vector{Float64}(undef,Base.checked_mul(3,count))
+    weight=fast ? 1.0 : inv(Float64(nodes_per_element))
+    @inbounds for cell in 1:count,axis in 1:3
+        value=0.0
+        for local_node in 1:nodes_per_element
+            value=muladd(weight,
+                         mesh.coords[axis,Int(cells[local_node,cell])],value)
+        end
+        isfinite(value) || throw(ArgumentError(
+            "$caller: element $cell coordinate sum is not Float64-representable"))
+        result[3cell-3+axis]=value
+    end
+    return result
+end
+
+const _MESH_SEGMENT_EDGES=((1,2),)
+const _MESH_TRIANGLE_EDGES=((1,2),(2,3),(3,1))
+const _MESH_TETRAHEDRON_EDGES=((1,2),(2,3),(3,1),(4,1),(4,3),(4,2))
+const _MESH_TRIANGLE_FACES=((1,2,3),)
+const _MESH_TETRAHEDRON_FACES=((1,3,2),(1,2,4),(1,4,3),(4,2,3))
+
+function _mesh_local_edges(element_type::Int)
+    element_type==1 && return _MESH_SEGMENT_EDGES
+    element_type==2 && return _MESH_TRIANGLE_EDGES
+    element_type==4 && return _MESH_TETRAHEDRON_EDGES
+    return ()
+end
+
+function _mesh_local_faces(element_type::Int,face_type::Int)
+    face_type==3 || return ()
+    element_type==2 && return _MESH_TRIANGLE_FACES
+    element_type==4 && return _MESH_TETRAHEDRON_FACES
+    return ()
+end
+
+function _mesh_pattern_nodes(cells::Matrix{Int32},patterns)
+    isempty(patterns) && return UInt64[]
+    pattern_width=length(first(patterns))
+    per_element=Base.checked_mul(length(patterns),pattern_width)
+    count=Base.checked_mul(size(cells,2),per_element)
+    result=Vector{UInt64}(undef,count)
+    cursor=0
+    @inbounds for cell in axes(cells,2),pattern in patterns,
+                  local_node in pattern
+        cursor+=1
+        result[cursor]=UInt64(cells[local_node,cell])
+    end
+    return result
+end
+
 function _mesh_element_data(mesh::Mesh,dimension::Int)
     triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(mesh)
     blocks=((Int32(1),1,0,mesh.segs),
@@ -807,25 +903,71 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_elements_by_type"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh=_mesh_query_integer(element_type,caller,"element_type")
-        msh_spec(msh)
-        entity=_mesh_query_integer(tag,caller,"tag")
-        entity<0 || throw(ArgumentError(
-            "$caller: entity-specific elements require mesh classification " *
-            "metadata; use a negative tag to query the complete cache"))
-        task_index=_mesh_query_integer(task,caller,"task")
-        task_count=_mesh_query_integer(num_tasks,caller,"num_tasks")
-        task_index>=0 || throw(ArgumentError(
-            "$caller: task must be nonnegative"))
-        task_count>=1 || throw(ArgumentError(
-            "$caller: num_tasks must be positive"))
-        (task_index==0 && task_count==1) || throw(ArgumentError(
-            "$caller: only task=0 with num_tasks=1 is supported by the " *
-            "detached Julia return arrays"))
-        block=_mesh_element_block(cached,msh)
+        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        _mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[],UInt64[]
         offset,cells=block
         return _mesh_dense_tags(offset,size(cells,2)),UInt64.(vec(cells))
+    end
+end
+
+function _get_nodes_by_element_type(element_type,tag=-1,
+                                    return_parametric_coord=true)
+    caller="API.mesh.get_nodes_by_element_type"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        _mesh_query_bool(
+            return_parametric_coord,caller,"return_parametric_coord")
+        block===nothing && return UInt64[],Float64[],Float64[]
+        _,cells=block
+        node_tags,coordinates=_mesh_nodes_for_cells(cached,cells)
+        return node_tags,coordinates,Float64[]
+    end
+end
+
+function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
+    caller="API.mesh.get_barycenters"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        fast_mode=_mesh_query_bool(fast,caller,"fast")
+        _mesh_query_bool(primary,caller,"primary")
+        _mesh_query_tasks(task,num_tasks,caller)
+        block===nothing && return Float64[]
+        _,cells=block
+        _mesh_barycenters(cached,cells,fast_mode,caller)
+    end
+end
+
+function _get_element_edge_nodes(element_type,tag=-1,primary=false,
+                                 task=0,num_tasks=1)
+    caller="API.mesh.get_element_edge_nodes"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        _mesh_query_bool(primary,caller,"primary")
+        _mesh_query_tasks(task,num_tasks,caller)
+        block===nothing && return UInt64[]
+        _,cells=block
+        _mesh_pattern_nodes(cells,_mesh_local_edges(msh))
+    end
+end
+
+function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
+                                 task=0,num_tasks=1)
+    caller="API.mesh.get_element_face_nodes"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        face=_mesh_query_integer(face_type,caller,"face_type")
+        face in (3,4) || throw(ArgumentError(
+            "$caller: face_type must be 3 (triangle) or 4 (quadrangle)"))
+        _mesh_query_bool(primary,caller,"primary")
+        _mesh_query_tasks(task,num_tasks,caller)
+        block===nothing && return UInt64[]
+        _,cells=block
+        _mesh_pattern_nodes(cells,_mesh_local_faces(msh,face))
     end
 end
 
@@ -944,7 +1086,9 @@ end
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 module mesh
 using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
-             _get_elements_by_type,_get_max_node_tag,_get_max_element_tag,
+             _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
+             _get_element_edge_nodes,_get_element_face_nodes,
+             _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
 generate(dim::Integer)=_generate(dim)
@@ -988,6 +1132,55 @@ partitioning are explicit blockers.
 """
 get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)=
     _get_elements_by_type(element_type,tag,task,num_tasks)
+
+"""
+    get_nodes_by_element_type(element_type, tag=-1,
+                              return_parametric_coord=true)
+
+Return detached node tags and coordinates in per-element connectivity order for
+one fixed-node Gmsh element type. Shared nodes consequently appear once per element
+use. The linear-simplex cache has no parametric or entity-classification metadata,
+so the parametric result is empty and `tag` must be negative.
+"""
+get_nodes_by_element_type(element_type,tag=-1,return_parametric_coord=true)=
+    _get_nodes_by_element_type(element_type,tag,return_parametric_coord)
+
+"""
+    get_barycenters(element_type, tag, fast, primary,
+                    task=0, num_tasks=1)
+
+Return detached `x,y,z` barycenters in element order for a cached linear-simplex
+type. With `fast=true`, return unnormalized primary-node coordinate sums. All nodes
+are primary for types 1, 2, and 4. Entity filtering and nondefault task partitioning
+are explicit blockers.
+"""
+get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)=
+    _get_barycenters(element_type,tag,fast,primary,task,num_tasks)
+
+"""
+    get_element_edge_nodes(element_type, tag=-1, primary=false,
+                           task=0, num_tasks=1)
+
+Return detached edge-node tags in Gmsh local-edge order for every cached element of
+one type. The `primary` flag is validated but does not change linear-simplex output.
+Entity filtering and nondefault task partitioning are explicit blockers.
+"""
+get_element_edge_nodes(element_type,tag=-1,primary=false,task=0,num_tasks=1)=
+    _get_element_edge_nodes(element_type,tag,primary,task,num_tasks)
+
+"""
+    get_element_face_nodes(element_type, face_type, tag=-1, primary=false,
+                           task=0, num_tasks=1)
+
+Return detached face-node tags in Gmsh local-face order for every cached element of
+one type. `face_type` is 3 for triangles or 4 for quadrangles. The `primary` flag is
+validated but does not change linear-simplex output. Entity filtering and nondefault
+task partitioning are explicit blockers.
+"""
+get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
+                       task=0,num_tasks=1)=
+    _get_element_face_nodes(
+        element_type,face_type,tag,primary,task,num_tasks)
 
 """Return the greatest dense node tag, or zero when the cached mesh has no nodes."""
 get_max_node_tag()=_get_max_node_tag()

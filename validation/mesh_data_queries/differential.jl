@@ -1,6 +1,7 @@
 # Differential oracle for read-only bulk node and element access. This uses the
 # locally installed Gmsh 4.15.2 Julia API and never starts the GUI.
 using Tessella
+using SHA
 
 function _gmsh_binding()
     configured=get(ENV,"GMSH_JULIA_API","")
@@ -55,6 +56,20 @@ function _normalized_nodes(values::Vector{UInt64})
     return UInt64[mapping[tag] for tag in values]
 end
 
+function _query_sha(groups)
+    stream=IOBuffer()
+    for values in groups
+        marker=eltype(values)===UInt64 ? UInt8(1) : UInt8(2)
+        write(stream,marker)
+        write(stream,htol(UInt64(length(values))))
+        for value in values
+            bits=value isa Float64 ? reinterpret(UInt64,value) : UInt64(value)
+            write(stream,htol(bits))
+        end
+    end
+    return bytes2hex(SHA.sha256(take!(stream)))
+end
+
 try
     gmsh.initialize(String[],false)
     gmsh.option.setNumber("General.Terminal",0)
@@ -99,11 +114,17 @@ try
         "Gmsh did not preserve the explicit element tags")
 
     Tessella.API.initialize()
-    refined_crc=try
+    refined_crc,derived_sha=try
         _rejects_argument(()->Tessella.API.mesh.get_nodes()) || error(
             "Tessella returned bulk nodes without a cached mesh")
         _rejects_argument(()->Tessella.API.mesh.get_elements()) || error(
             "Tessella returned bulk elements without a cached mesh")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_nodes_by_element_type(4)) || error(
+            "Tessella returned type nodes without a cached mesh")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_barycenters(4,-1,false,false)) || error(
+            "Tessella returned barycenters without a cached mesh")
 
         # Exact differential setup: install the same validated simplex fixture in
         # the session cache. The public API intentionally has no add-nodes mutation
@@ -131,6 +152,100 @@ try
             "Tessella/Gmsh normalized element connectivity differs")
         tessella_element_tags==[UInt64[1],UInt64[2],UInt64[3]] || error(
             "Tessella dense element tags are not globally consecutive")
+
+        tessella_type_nodes=Dict{Int,Tuple}()
+        gmsh_type_nodes=Dict{Int,Tuple}()
+        for element_type in (1,2,4)
+            tessella_nodes=Tessella.API.mesh.get_nodes_by_element_type(
+                element_type)
+            gmsh_nodes=gmsh.model.mesh.getNodesByElementType(element_type)
+            tessella_nodes[1]==_normalized_nodes(gmsh_nodes[1]) || error(
+                "type-$element_type per-element node tags differ")
+            tessella_nodes[2]==gmsh_nodes[2] || error(
+                "type-$element_type per-element node coordinates differ")
+            isempty(tessella_nodes[3]) && isempty(gmsh_nodes[3]) || error(
+                "type-$element_type parametric-coordinate behavior differs")
+            tessella_type_nodes[element_type]=tessella_nodes
+            gmsh_type_nodes[element_type]=gmsh_nodes
+        end
+        Tessella.API.mesh.get_nodes_by_element_type(3)==
+            (UInt64[],Float64[],Float64[]) || error(
+            "Tessella returned nodes for absent quadrangles")
+        gmsh.model.mesh.getNodesByElementType(3)==
+            (UInt64[],Float64[],Float64[]) || error(
+            "Gmsh returned nodes for absent quadrangles")
+
+        tessella_barycenters=Dict{Tuple{Int,Bool,Bool},Vector{Float64}}()
+        gmsh_barycenters=Dict{Tuple{Int,Bool,Bool},Vector{Float64}}()
+        for element_type in (1,2,4),fast in (false,true),
+            primary in (false,true)
+            key=(element_type,fast,primary)
+            tessella_values=Tessella.API.mesh.get_barycenters(
+                element_type,-1,fast,primary)
+            gmsh_values=gmsh.model.mesh.getBarycenters(
+                element_type,-1,fast,primary)
+            tessella_values==gmsh_values || error(
+                "type-$element_type fast=$fast primary=$primary " *
+                "barycenters differ")
+            tessella_barycenters[key]=tessella_values
+            gmsh_barycenters[key]=gmsh_values
+        end
+
+        tessella_edges=Dict{Tuple{Int,Bool},Vector{UInt64}}()
+        gmsh_edges=Dict{Tuple{Int,Bool},Vector{UInt64}}()
+        for element_type in (1,2,4),primary in (false,true)
+            key=(element_type,primary)
+            tessella_values=Tessella.API.mesh.get_element_edge_nodes(
+                element_type,-1,primary)
+            gmsh_values=gmsh.model.mesh.getElementEdgeNodes(
+                element_type,-1,primary)
+            tessella_values==_normalized_nodes(gmsh_values) || error(
+                "type-$element_type primary=$primary edge nodes differ")
+            tessella_edges[key]=tessella_values
+            gmsh_edges[key]=gmsh_values
+        end
+
+        tessella_faces=Dict{Tuple{Int,Int,Bool},Vector{UInt64}}()
+        gmsh_faces=Dict{Tuple{Int,Int,Bool},Vector{UInt64}}()
+        for element_type in (1,2,4),face_type in (3,4),
+            primary in (false,true)
+            key=(element_type,face_type,primary)
+            tessella_values=Tessella.API.mesh.get_element_face_nodes(
+                element_type,face_type,-1,primary)
+            gmsh_values=gmsh.model.mesh.getElementFaceNodes(
+                element_type,face_type,-1,primary)
+            tessella_values==_normalized_nodes(gmsh_values) || error(
+                "type-$element_type face-$face_type primary=$primary " *
+                "face nodes differ")
+            tessella_faces[key]=tessella_values
+            gmsh_faces[key]=gmsh_values
+        end
+
+        tessella_derived_sha=_query_sha((
+            tessella_type_nodes[1][1],tessella_type_nodes[1][2],
+            tessella_type_nodes[2][1],tessella_type_nodes[2][2],
+            tessella_type_nodes[4][1],tessella_type_nodes[4][2],
+            tessella_barycenters[(1,false,false)],
+            tessella_barycenters[(2,false,true)],
+            tessella_barycenters[(4,false,false)],
+            tessella_edges[(1,false)],tessella_edges[(2,true)],
+            tessella_edges[(4,false)],tessella_faces[(2,3,false)],
+            tessella_faces[(4,3,true)]))
+        gmsh_derived_sha=_query_sha((
+            _normalized_nodes(gmsh_type_nodes[1][1]),gmsh_type_nodes[1][2],
+            _normalized_nodes(gmsh_type_nodes[2][1]),gmsh_type_nodes[2][2],
+            _normalized_nodes(gmsh_type_nodes[4][1]),gmsh_type_nodes[4][2],
+            gmsh_barycenters[(1,false,false)],
+            gmsh_barycenters[(2,false,true)],
+            gmsh_barycenters[(4,false,false)],
+            _normalized_nodes(gmsh_edges[(1,false)]),
+            _normalized_nodes(gmsh_edges[(2,true)]),
+            _normalized_nodes(gmsh_edges[(4,false)]),
+            _normalized_nodes(gmsh_faces[(2,3,false)]),
+            _normalized_nodes(gmsh_faces[(4,3,true)])))
+        tessella_derived_sha==gmsh_derived_sha==
+            "04e09b72ebf17bdc7ab2f9f96da2927c5a6e892e5c2d98c9ddbb8313dc4cab13" ||
+            error("derived query checksum mismatch")
 
         for (dimension,expected_type) in ((0,Int32[]),(1,Int32[1]),
                                           (2,Int32[2]),(3,Int32[4]))
@@ -178,17 +293,55 @@ try
         _rejects_argument(()->Tessella.API.mesh.get_elements(3,301)) || error(
             "Tessella fabricated element classification")
         _rejects_argument(
+            ()->Tessella.API.mesh.get_nodes_by_element_type(4,301)) || error(
+            "Tessella fabricated type-node classification")
+        _rejects_argument(
             ()->Tessella.API.mesh.get_elements_by_type(4,-1,1,2)) || error(
-                "Tessella accepted nondefault Julia task partitioning")
+            "Tessella accepted nondefault Julia task partitioning")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_element_edge_nodes(4,-1,false,1,2)) ||
+            error("Tessella accepted nondefault edge-node task partitioning")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_element_face_nodes(4,2)) || error(
+            "Tessella accepted a non-face node count")
+        isempty(gmsh.model.mesh.getElementFaceNodes(4,2)) || error(
+            "Gmsh returned nodes for face type 2")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_nodes_by_element_type(34)) || error(
+            "Tessella treated special MSH type 34 as fixed-node data")
+        gmsh.model.mesh.getNodesByElementType(34)==
+            (UInt64[],Float64[],Float64[]) || error(
+            "Gmsh returned nodes for absent special MSH type 34")
 
         returned_nodes=Tessella.API.mesh.get_nodes()
         returned_elements=Tessella.API.mesh.get_elements()
+        returned_edges=Tessella.API.mesh.get_element_edge_nodes(4)
         returned_nodes[2][1]=99
         returned_elements[2][1][1]=99
+        returned_edges[1]=99
         Tessella.API.mesh.get_nodes()[2]==collect(vec(_QUERY_COORDS)) || error(
             "bulk node output aliases the cache")
         Tessella.API.mesh.get_elements()[2][1]==UInt64[1] || error(
             "bulk element output aliases the cache")
+        Tessella.API.mesh.get_element_edge_nodes(4)[1]==UInt64(1) || error(
+            "edge-node output aliases the cache")
+
+        maximum=floatmax(Float64)
+        overflow_fixture=Mesh(
+            Float64[maximum maximum;0 0;0 0];
+            segs=reshape(Int32[1,2],2,1))
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH[]=Tessella.API._copy_mesh(overflow_fixture)
+        end
+        Tessella.API.mesh.get_barycenters(1,-1,false,false)==
+            Float64[maximum,0,0] || error(
+            "Tessella overflow-safe barycenter changed")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_barycenters(1,-1,true,false)) || error(
+            "Tessella returned a nonfinite fast barycenter")
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH[]=Tessella.API._copy_mesh(fixture)
+        end
 
         refined=Tessella.API.mesh.refine()
         Tessella.API.mesh.get_max_node_tag()==UInt64(10) || error(
@@ -204,16 +357,30 @@ try
         Tessella.API.mesh.clear()
         _rejects_argument(()->Tessella.API.mesh.get_nodes()) || error(
             "cleared cache retained bulk nodes")
-        crc
+        crc,tessella_derived_sha
     finally
         Tessella.API.finalize()
     end
 
+    gmsh.model.add("mesh-data-query-overflow")
+    gmsh.model.addDiscreteEntity(1,901)
+    maximum=floatmax(Float64)
+    gmsh.model.mesh.addNodes(
+        1,901,UInt64[501,502],Float64[maximum,0,0,maximum,0,0])
+    gmsh.model.mesh.addElementsByType(
+        901,1,UInt64[601],UInt64[501,502])
+    gmsh_normal=gmsh.model.mesh.getBarycenters(1,-1,false,false)
+    gmsh_fast=gmsh.model.mesh.getBarycenters(1,-1,true,false)
+    isinf(gmsh_normal[1]) && isinf(gmsh_fast[1]) || error(
+        "Gmsh overflow barycenter behavior changed")
+
     println("mesh-data-query differential: Gmsh ",gmsh.GMSH_API_VERSION,
             ", types=1,2,4 nodes=4 elements=3 connectivity_entries=9 ",
             "dense_max_tags=4/3 explicit_max_tags=40/300 ",
+            "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
-            " bounded=no-mesh-and-classification-blockers")
+            " bounded=no-mesh/classification/task/special-type/face-count ",
+            "blockers and finite-barycenter contract")
 finally
     gmsh.isInitialized()!=0 && gmsh.finalize()
 end

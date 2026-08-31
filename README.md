@@ -253,10 +253,15 @@ selective clearing.
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
 detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element
 tags are dense identifiers derived for that cache; segments, triangles, and
-tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence. Whole-
-dimension element filters are supported. Entity-specific filters, classified node
+tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence.
+Whole-dimension element filters are supported. Entity-specific filters, classified node
 queries, and parametric coordinates remain explicit blockers until `Mesh` owns that
 metadata.
+`get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
+`get_element_face_nodes` provide the corresponding detached, connectivity-derived
+arrays. Type-node results repeat shared nodes in element order, and edge/face results
+use Gmsh's local linear-simplex ordering. High-order nodes and nondefault Julia task
+partitioning are not represented.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.

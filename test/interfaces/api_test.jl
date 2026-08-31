@@ -58,6 +58,15 @@ const _API=Tessella.API
         @test _API.mesh.get_element_types()==Int32[4]
         @test _API.mesh.get_elements_by_type(4)==
               (UInt64.(1:12),UInt64.(vec(generated.tets)))
+        type_node_tags,type_node_coordinates,type_node_parameters=
+            _API.mesh.get_nodes_by_element_type(4)
+        @test type_node_tags==UInt64.(vec(generated.tets))
+        @test reshape(type_node_coordinates,3,:)==
+              generated.coords[:,Int.(type_node_tags)]
+        @test isempty(type_node_parameters)
+        @test length(_API.mesh.get_barycenters(4,-1,false,false))==36
+        @test length(_API.mesh.get_element_edge_nodes(4))==144
+        @test length(_API.mesh.get_element_face_nodes(4,3))==144
         @test _API.mesh.get_max_node_tag()==UInt64(9)
         @test _API.mesh.get_max_element_tag()==UInt64(12)
 
