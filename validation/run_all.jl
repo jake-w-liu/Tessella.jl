@@ -178,6 +178,13 @@ mesh_data_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --
 println("  command: ", mesh_data_command)
 run(mesh_data_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── element_catalog_queries ──  Gmsh 4.15.2 fixed type and property lookup")
+element_catalog_script = joinpath(
+    HERE, "element_catalog_queries", "differential.jl")
+element_catalog_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $element_catalog_script`
+println("  command: ", element_catalog_command)
+run(element_catalog_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 println("\n── high_order ──  exact Gmsh 4.15.2 type-11 tetrahedron ordering")
 high_order_script = joinpath(HERE, "high_order", "differential.jl")
 high_order_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $high_order_script`

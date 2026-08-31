@@ -11,7 +11,9 @@ operation-time Boolean operand ownership, and persistent affine relations betwee
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
-linear-simplex mesh cache. Production meshing is never delegated to Gmsh.
+linear-simplex mesh cache. Element type and property lookup is available without
+a session and delegates to the immutable native catalog. Production meshing is
+never delegated to Gmsh.
 """
 module API
 
@@ -43,7 +45,7 @@ using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
-using ..Elements: msh_spec
+using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
 using ..GeoExec: execute_geo
@@ -755,6 +757,46 @@ function _mesh_query_tasks(task,num_tasks,caller::AbstractString)
     return nothing
 end
 
+function _mesh_element_family(value,caller::AbstractString)
+    value isa AbstractString || throw(ArgumentError(
+        "$caller: family_name must be a string"))
+    name=String(value)
+    occursin('\0',name) && throw(ArgumentError(
+        "$caller: family_name must not contain NUL"))
+    normalized=lowercase(name)
+    normalized=="point" && return :pnt
+    normalized=="line" && return :lin
+    normalized=="triangle" && return :tri
+    normalized=="quadrangle" && return :qua
+    normalized=="tetrahedron" && return :tet
+    normalized=="hexahedron" && return :hex
+    normalized=="prism" && return :pri
+    normalized=="pyramid" && return :pyr
+    normalized=="trihedron" && return :trih
+    throw(ArgumentError(
+        "$caller: unknown family_name $(repr(name)); expected Point, Line, " *
+        "Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, Pyramid, or " *
+        "Trihedron"))
+end
+
+function _get_element_type(family_name,order,serendip=false)
+    caller="API.mesh.get_element_type"
+    family=_mesh_element_family(family_name,caller)
+    polynomial_order=_mesh_query_integer(order,caller,"order")
+    incomplete=_mesh_query_bool(serendip,caller,"serendip")
+    return Int32(msh_type(
+        family,polynomial_order;serendipity=incomplete))
+end
+
+function _get_element_properties(element_type)
+    caller="API.mesh.get_element_properties"
+    msh=_mesh_query_integer(element_type,caller,"element_type")
+    properties=msh_properties(msh)
+    return properties.name,Int32(properties.dim),Int32(properties.order),
+           Int32(properties.num_nodes),properties.local_node_coordinates,
+           Int32(properties.num_primary_nodes)
+end
+
 function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
     count=length(cells)
     coordinate_count=Base.checked_mul(3,count)
@@ -1088,6 +1130,7 @@ module mesh
 using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
              _get_element_edge_nodes,_get_element_face_nodes,
+             _get_element_type,_get_element_properties,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
@@ -1121,6 +1164,27 @@ get_elements(dim=-1,tag=-1)=_get_elements(dim,tag)
 
 """Return the detached linear-simplex MSH types present in a whole cache/dimension."""
 get_element_types(dim=-1,tag=-1)=_get_element_types(dim,tag)
+
+"""
+    get_element_type(family_name, order, serendip=false)
+
+Return the Gmsh 4.15.2 numeric type for a canonical element family and polynomial
+order. Family names are case-insensitive. A requested serendipity type falls back
+to the complete type when no distinct incomplete element exists at that order.
+Unknown families and unsupported orders fail explicitly instead of returning zero.
+"""
+get_element_type(family_name,order,serendip=false)=
+    _get_element_type(family_name,order,serendip)
+
+"""
+    get_element_properties(element_type)
+
+Return `(name, dim, order, num_nodes, local_node_coordinates,
+num_primary_nodes)` for one Gmsh element type. Local coordinates are detached and
+follow Gmsh node ordering. Verified high-order-prism and trihedron layouts remain
+available even where Gmsh 4.15.2's own property call fails.
+"""
+get_element_properties(element_type)=_get_element_properties(element_type)
 
 """
     get_elements_by_type(element_type, tag=-1, task=0, num_tasks=1)

@@ -73,11 +73,11 @@ const GMSH_FAMILY_NAME = Dict(
 const GMSH_NAME_PREFIX = Dict(
     :pnt => "Point", :lin => "Line", :tri => "Triangle",
     :qua => "Quadrilateral", :tet => "Tetrahedron", :hex => "Hexahedron",
-    :pri => "Prism", :pyr => "Pyramid",
+    :pri => "Prism", :pyr => "Pyramid", :trih => "Trihedron",
 )
 const PRIMARY_NODES = Dict(
     :pnt => 1, :lin => 2, :tri => 3, :qua => 4, :tet => 4,
-    :hex => 8, :pri => 6, :pyr => 5,
+    :hex => 8, :pri => 6, :pyr => 5, :trih => 4,
 )
 const PROPERTY_API_GAPS = Set([90,91,106,107,108,109,110,
                                111,112,113,114,115,116,117,140])
@@ -265,6 +265,9 @@ end
         @test ElementsUnderTest.msh_dimension(tag) == expected.dim
         @test ElementsUnderTest.msh_order(tag) == expected.order
         @test ElementsUnderTest.msh_family(tag) == expected.family
+        @test ElementsUnderTest.msh_type(
+            expected.family,expected.order;
+            serendipity=expected.serendipity)==tag
 
         coordinates = ElementsUnderTest.lagrange_nodes(tag)
         @test size(coordinates) == (3, expected.nnodes)
@@ -274,11 +277,43 @@ end
         @test ElementsUnderTest.lagrange_nodes(
             expected.family, expected.order;
             serendipity=expected.serendipity) == coordinates
+
+        properties=ElementsUnderTest.msh_properties(tag)
+        prefix=GMSH_NAME_PREFIX[expected.family]
+        ambiguous_incomplete_name=expected.serendipity && any(
+            candidate.family===expected.family && !candidate.serendipity &&
+            candidate.nnodes==expected.nnodes for candidate in
+            values(EXPECTED_SPECS))
+        expected_name=expected.family in (:pnt,:trih) ? prefix :
+            "$prefix $(expected.nnodes)$(ambiguous_incomplete_name ? "I" : "")"
+        @test properties.name==expected_name
+        @test (properties.dim,properties.order,properties.num_nodes,
+               properties.num_primary_nodes)==
+              (expected.dim,expected.order,expected.nnodes,
+               PRIMARY_NODES[expected.family])
+        @test properties.local_node_coordinates==
+              vec(coordinates[1:max(expected.dim,1),:])
     end
 
     # MTrihedron.h::getNode is the sole local-node authority for type 140.
     @test ElementsUnderTest.lagrange_nodes(140) ==
           Float64[-1 1 1 -1; -1 -1 1 1; 0 0 0 0]
+    @test ElementsUnderTest.msh_type(:tri,2;serendipity=true)==9
+    @test ElementsUnderTest.msh_type(:lin,10;serendipity=true)==66
+    @test ElementsUnderTest.msh_type(:pyr,1;serendipity=true)==7
+    @test ElementsUnderTest.msh_type(:pnt,-1;serendipity=true)==15
+    @test ElementsUnderTest.msh_type(:trih,typemax(Int32))==140
+
+    detached=ElementsUnderTest.msh_properties(4)
+    detached.local_node_coordinates[1]=99
+    @test ElementsUnderTest.msh_properties(4).local_node_coordinates[1]==0
+    @test_throws ArgumentError ElementsUnderTest.msh_type(:tri,true)
+    @test_throws ArgumentError ElementsUnderTest.msh_type(
+        :tri,1;serendipity=1)
+    @test_throws ArgumentError ElementsUnderTest.msh_type(:unknown,1)
+    @test_throws ArgumentError ElementsUnderTest.msh_type(:tri,-1)
+    @test_throws ArgumentError ElementsUnderTest.msh_type(
+        :tri,big(typemax(Int32))+1)
 end
 
 @testset "special tags and integer bounds" begin
@@ -296,6 +331,25 @@ end
     @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(:tri, 11)
     @test_throws ArgumentError ElementsUnderTest.lagrange_nodes(
         :tri, 2; serendipity=true)
+
+    expected_properties=Dict(
+        34=>("Polygon",2),35=>("Polyhedron",3),
+        69=>("Polygon Border",2),133=>("Point Xfem",0),
+        134=>("Line Xfem",1),135=>("Triangle Xfem",2),
+        136=>("Tetrahedron Xfem",3))
+    for (tag,(name,dimension)) in expected_properties
+        properties=ElementsUnderTest.msh_properties(tag)
+        @test (properties.name,properties.dim,properties.order,
+               properties.num_nodes,properties.num_primary_nodes)==
+              (name,dimension,1,0,0)
+        @test isempty(properties.local_node_coordinates)
+    end
+    for tag in (67,68,70,138,139)
+        @test_throws ArgumentError ElementsUnderTest.msh_properties(tag)
+    end
+    @test_throws ArgumentError ElementsUnderTest.msh_properties(true)
+    @test_throws ArgumentError ElementsUnderTest.msh_properties(0)
+    @test_throws ArgumentError ElementsUnderTest.msh_properties(999)
 end
 
 let source_root = get(ENV, "TESSELLA_GMSH_SOURCE", "")
@@ -397,7 +451,14 @@ end
                                      PROPERTY_API_GAPS)))
         expected = EXPECTED_SPECS[tag]
         actual = oracle.properties[tag]
-        @test startswith(actual.name, GMSH_NAME_PREFIX[expected.family])
+        ambiguous_incomplete_name=expected.serendipity && any(
+            candidate.family===expected.family && !candidate.serendipity &&
+            candidate.nnodes==expected.nnodes for candidate in
+            values(EXPECTED_SPECS))
+        expected_name=expected.family===:pnt ? "Point" :
+            "$(GMSH_NAME_PREFIX[expected.family]) $(expected.nnodes)" *
+            (ambiguous_incomplete_name ? "I" : "")
+        @test actual.name==expected_name
         @test actual.dim == expected.dim
         @test actual.order == expected.order
         @test actual.nnodes == expected.nnodes
@@ -409,6 +470,13 @@ end
         @test length(actual.coordinates) == length(wanted)
         @test isapprox(actual.coordinates, wanted; atol=8eps(Float64),
                        rtol=8eps(Float64))
+
+        tessella=ElementsUnderTest.msh_properties(tag)
+        @test (tessella.name,tessella.dim,tessella.order,tessella.num_nodes,
+               tessella.num_primary_nodes)==
+              (actual.name,actual.dim,actual.order,actual.nnodes,actual.nprimary)
+        @test isapprox(tessella.local_node_coordinates,actual.coordinates;
+                       atol=8eps(Float64),rtol=8eps(Float64))
     end
 
     @test Set(keys(oracle.prism_nodes)) == PRISM_PROPERTY_GAPS
@@ -420,6 +488,19 @@ end
         coordinates[3, :] .= (coordinates[3, :] .+ 1) ./ 2
         @test length(global_coordinates) == length(coordinates)
         @test isapprox(global_coordinates, vec(coordinates); atol=2e-8, rtol=2e-8)
+        properties=ElementsUnderTest.msh_properties(tag)
+        @test properties.num_nodes==nnodes
+        @test properties.local_node_coordinates==vec(
+            ElementsUnderTest.lagrange_nodes(tag))
+    end
+
+    @test ElementsUnderTest.msh_properties(140).name=="Trihedron"
+
+    for (tag,(name,dimension)) in expected_special_properties
+        tessella=ElementsUnderTest.msh_properties(tag)
+        @test (tessella.name,tessella.dim,tessella.order,tessella.num_nodes,
+               tessella.num_primary_nodes)==(name,dimension,1,0,0)
+        @test isempty(tessella.local_node_coordinates)
     end
 end
 
