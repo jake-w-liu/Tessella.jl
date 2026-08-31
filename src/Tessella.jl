@@ -24,6 +24,7 @@ const TESSELLA_STAGE = 6  # see STATUS.md stage board
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
 include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
+include("core/MeshEntityTopology.jl") # P5: deterministic global simplex edges and faces
 include("core/MeshPointLocation.jl") # P5: robust finalized-simplex reference inversion and AABB lookup
 include("core/MeshElementQuality.jl") # P5: robust Gmsh-shaped linear-simplex quality queries
 include("core/Transform.jl")      # P3: validated affine mesh transformations

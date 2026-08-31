@@ -46,6 +46,7 @@ using Tessella
     # Stage 0 — Foundations (CRC-gated, DEVELOPMENT.md discipline).
     include("core/predicates_test.jl")   # exact predicates vs exact-rational oracle
     include("core/meshtypes_test.jl")    # mesh container, topology, quality, checksum
+    include("core/mesh_entity_topology_test.jl") # deterministic global edge/face ids
     include("core/mesh_point_location_test.jl") # robust simplex inversion and AABB lookup
     include("core/mesh_reference_geometry_test.jl") # robust simplex forward maps and Jacobians
     include("core/mesh_element_quality_test.jl") # Gmsh-shaped simplex quality measures
@@ -85,6 +86,7 @@ using Tessella
     include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
     include("interfaces/api_mesh_transform_test.jl") # atomic whole-cache affine transforms
     include("interfaces/api_mesh_data_test.jl") # detached node/element block queries
+    include("interfaces/api_mesh_entity_topology_test.jl") # global edge/face topology
     include("interfaces/api_mesh_point_location_test.jl") # cached simplex point location
     include("interfaces/api_mesh_jacobian_test.jl") # cached simplex Jacobian maps
     include("interfaces/api_mesh_element_quality_test.jl") # cached simplex quality queries

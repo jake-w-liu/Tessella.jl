@@ -26,6 +26,8 @@ validation/
     differential.jl      # required whole-cache affine-transform differential
   mesh_data_queries/
     differential.jl      # required bulk and connectivity-derived query differential
+  mesh_entity_topology/
+    differential.jl      # required global simplex edge/face topology differential
   mesh_point_location/
     differential.jl      # required simplex location/reference-coordinate differential
   mesh_jacobians/
@@ -104,8 +106,8 @@ julia --project=. --check-bounds=yes validation/run_all.jl
 
 The aggregate gate requires the Gmsh 4.15.2 CLI and matching Julia API. It launches
 the size-field, constant-range, uniform-refinement, whole-cache affine,
-bulk/derived mesh-query, simplex point-location, linear-simplex Jacobian/reference-map,
-fixed-element catalog,
+bulk/derived mesh-query, global simplex edge/face topology, simplex point-location,
+linear-simplex Jacobian/reference-map, fixed-element catalog,
 quadratic-tetrahedron, four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
