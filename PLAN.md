@@ -38,6 +38,8 @@ Tessella
 │   │                    and exact-rational numerical fallbacks
 │   ├── MeshElementQuality Gmsh-shaped simplex measures with scaled and
 │   │                     exact/BigFloat-certified numerical fallbacks
+│   ├── MeshReferenceGeometry forward simplex maps and Gmsh-shaped
+│   │                        Jacobians with certified numerical fallbacks
 │   ├── Elements    immutable fixed/special Gmsh catalog, owned mixed metadata,
 │   │               periodic links, and ASCII/binary MSH I/O
 │   └── Transform   validated affine transforms for finalized simplex meshes

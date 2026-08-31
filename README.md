@@ -276,6 +276,14 @@ unused coordinates set to zero. The locator is discarded whenever the mesh cache
 changes. Degenerate cells and Float64-unrepresentable local coordinates fail
 explicitly. A standalone `get_element` query remains unavailable because its
 required model-entity classification tag is not present in `Mesh`.
+`get_jacobians` and `get_jacobian` return detached forward-map data for cached
+linear segments, triangles, and tetrahedra. Evaluation points are concatenated
+`(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and
+column-flattened 3×3 matrices. Segment and triangle frames use Gmsh-compatible
+low-dimensional regularization, while tetrahedron determinants retain orientation.
+Malformed or nonfinite evaluation coordinates, degenerate maps, and
+Float64-unrepresentable results fail explicitly. Entity filtering and nondefault
+task partitioning retain the cache-metadata blockers described above.
 `get_element_qualities` returns detached values in dense-tag request order for the
 13 documented Gmsh 4.15.2 measures. It preserves signed tetrahedron Jacobian,
 volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
