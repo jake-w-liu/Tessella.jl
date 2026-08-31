@@ -11,9 +11,10 @@ operation-time Boolean operand ownership, and persistent affine relations betwee
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
-linear-simplex mesh cache. Element type and property lookup is available without
-a session and delegates to the immutable native catalog. Production meshing is
-never delegated to Gmsh.
+linear-simplex mesh cache. It also owns a reusable robust AABB locator for dense
+element-by-coordinate and reference-coordinate queries. Element type and property
+lookup is available without a session and delegates to the immutable native catalog.
+Production meshing is never delegated to Gmsh.
 """
 module API
 
@@ -45,6 +46,10 @@ using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
+using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
+                           mesh_element_block, mesh_element_record,
+                           _local_coordinates, _locate_elements,
+                           _require_local_coordinates
 using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
@@ -59,7 +64,14 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshSizeFactor"=>1.0)
 const OPTIONS = copy(DEFAULT_OPTIONS)
 const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
+const LAST_MESH_LOCATOR = Ref{Union{Nothing,SimplexLocator}}(nothing)
 const STATE_LOCK = ReentrantLock()
+
+function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh})
+    LAST_MESH[]=mesh
+    LAST_MESH_LOCATOR[]=nothing
+    return mesh
+end
 
 """
     initialize()
@@ -70,7 +82,7 @@ mesh and restoring supported options to their defaults.
 function initialize()
     lock(STATE_LOCK) do
         CURRENT[]=GeoModel()
-        LAST_MESH[]=nothing
+        _replace_mesh_cache_locked!(nothing)
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
     end
     return nothing
@@ -80,7 +92,7 @@ end
 function finalize()
     lock(STATE_LOCK) do
         CURRENT[]=nothing
-        LAST_MESH[]=nothing
+        _replace_mesh_cache_locked!(nothing)
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
     end
     return nothing
@@ -95,7 +107,7 @@ function _with_model(f::Function;invalidate::Bool=false)
     return lock(STATE_LOCK) do
         current=_model_locked()
         result=f(current)
-        invalidate && (LAST_MESH[]=nothing)
+        invalidate && _replace_mesh_cache_locked!(nothing)
         result
     end
 end
@@ -297,7 +309,7 @@ function _set_entity_name(dim,tag,name)
         current=_model_locked()
         before=model_entity_name(current,dim,tag)
         after=set_entity_name!(current,dim,tag,name)
-        after==before || (LAST_MESH[]=nothing)
+        after==before || _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -307,7 +319,7 @@ function _remove_entity_name(name)
         "API.model.remove_entity_name: name must be a string"))
     return lock(STATE_LOCK) do
         current=_model_locked()
-        remove_entity_name!(current,name)>0 && (LAST_MESH[]=nothing)
+        remove_entity_name!(current,name)>0 && _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -320,7 +332,8 @@ end
 function _remove_entities(dim_tags,recursive=false)
     return lock(STATE_LOCK) do
         current=_model_locked()
-        remove_entities!(current,dim_tags,recursive)>0 && (LAST_MESH[]=nothing)
+        remove_entities!(current,dim_tags,recursive)>0 &&
+            _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -354,7 +367,7 @@ function _set_physical_name(dim,tag,name)
         current=_model_locked()
         before=model_physical_name(current,dim,tag)
         after=set_physical_name!(current,dim,tag,name)
-        after==before || (LAST_MESH[]=nothing)
+        after==before || _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -364,7 +377,8 @@ function _remove_physical_name(name)
         "API.model.remove_physical_name: name must be a string"))
     return lock(STATE_LOCK) do
         current=_model_locked()
-        remove_physical_name!(current,name)>0 && (LAST_MESH[]=nothing)
+        remove_physical_name!(current,name)>0 &&
+            _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -372,7 +386,8 @@ end
 function _remove_physical_groups(dim_tags=())
     return lock(STATE_LOCK) do
         current=_model_locked()
-        remove_physical_groups!(current,dim_tags)>0 && (LAST_MESH[]=nothing)
+        remove_physical_groups!(current,dim_tags)>0 &&
+            _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -665,7 +680,7 @@ function _generate(dim::Integer)
         else
             throw(ArgumentError("API.mesh.generate: dim must be 2 or 3"))
         end
-        LAST_MESH[]=_copy_mesh(generated)
+        _replace_mesh_cache_locked!(_copy_mesh(generated))
         generated
     end
 end
@@ -676,6 +691,16 @@ function _cached_mesh_locked(caller::AbstractString)
     cached===nothing && throw(ArgumentError(
         "$caller: no mesh; call API.mesh.generate first"))
     return cached
+end
+
+function _cached_mesh_locator_locked(mesh::Mesh)
+    locator=LAST_MESH_LOCATOR[]
+    if locator===nothing || locator.mesh!==mesh
+        replacement=SimplexLocator(mesh)
+        LAST_MESH_LOCATOR[]=replacement
+        return replacement
+    end
+    return locator
 end
 
 function _get_mesh()
@@ -709,10 +734,7 @@ end
 end
 
 function _mesh_element_offsets(mesh::Mesh)
-    triangle_offset=nsegs(mesh)
-    tetrahedron_offset=Base.checked_add(triangle_offset,ntris(mesh))
-    total=Base.checked_add(tetrahedron_offset,ntets(mesh))
-    return triangle_offset,tetrahedron_offset,total
+    return mesh_element_offsets(mesh)
 end
 
 function _mesh_dense_tags(offset::Int,count::Int)
@@ -722,15 +744,7 @@ function _mesh_dense_tags(offset::Int,count::Int)
 end
 
 function _mesh_element_block(mesh::Mesh,element_type::Int)
-    triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(mesh)
-    if element_type==1
-        return 0,mesh.segs
-    elseif element_type==2
-        return triangle_offset,mesh.tris
-    elseif element_type==4
-        return tetrahedron_offset,mesh.tets
-    end
-    return nothing
+    return mesh_element_block(mesh,element_type)
 end
 
 function _mesh_query_type_block(mesh::Mesh,element_type,tag,
@@ -795,6 +809,88 @@ function _get_element_properties(element_type)
     return properties.name,Int32(properties.dim),Int32(properties.order),
            Int32(properties.num_nodes),properties.local_node_coordinates,
            Int32(properties.num_primary_nodes)
+end
+
+function _mesh_query_coordinate(value,caller::AbstractString,
+                                name::AbstractString)
+    value isa Real || throw(ArgumentError(
+        "$caller: $name must be a real number"))
+    value isa Bool && throw(ArgumentError(
+        "$caller: $name must not be Bool"))
+    converted=try
+        Float64(value)
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa InexactError || err isa OverflowError || err isa MethodError) ||
+            rethrow()
+        throw(ArgumentError(
+            "$caller: $name must be Float64-representable"))
+    end
+    isfinite(converted) || throw(ArgumentError(
+        "$caller: $name must be finite"))
+    return converted
+end
+
+function _mesh_query_point(x,y,z,caller::AbstractString)
+    return (_mesh_query_coordinate(x,caller,"x"),
+            _mesh_query_coordinate(y,caller,"y"),
+            _mesh_query_coordinate(z,caller,"z"))
+end
+
+function _mesh_query_element_tag(mesh::Mesh,value,caller::AbstractString)
+    tag=_mesh_query_integer(value,caller,"element_tag")
+    _,_,total=_mesh_element_offsets(mesh)
+    1<=tag<=total || throw(ArgumentError(
+        "$caller: unknown element tag $value; expected a dense tag in 1:$total"))
+    return tag
+end
+
+function _no_element_at_coordinates(caller::AbstractString,p)
+    throw(ArgumentError(
+        "$caller: no element found at ($(p[1]), $(p[2]), $(p[3]))"))
+end
+
+function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
+    caller="API.mesh.get_element_by_coordinates"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        p=_mesh_query_point(x,y,z,caller)
+        dimension=_mesh_query_dimension(dim,caller)
+        strict_mode=_mesh_query_bool(strict,caller,"strict")
+        locator=_cached_mesh_locator_locked(cached)
+        tags=_locate_elements(locator,p,dimension,strict_mode,caller)
+        isempty(tags) && _no_element_at_coordinates(caller,p)
+        element_tag=first(tags)
+        record=mesh_element_record(cached,element_tag)
+        coordinates,_,_=
+            _local_coordinates(cached,Int(element_tag),p,caller)
+        return element_tag,record.element_type,record.node_tags,coordinates...
+    end
+end
+
+function _get_elements_by_coordinates(x,y,z,dim=-1,strict=false)
+    caller="API.mesh.get_elements_by_coordinates"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        p=_mesh_query_point(x,y,z,caller)
+        dimension=_mesh_query_dimension(dim,caller)
+        strict_mode=_mesh_query_bool(strict,caller,"strict")
+        locator=_cached_mesh_locator_locked(cached)
+        tags=_locate_elements(locator,p,dimension,strict_mode,caller)
+        isempty(tags) && _no_element_at_coordinates(caller,p)
+        return tags
+    end
+end
+
+function _get_local_coordinates_in_element(element_tag,x,y,z)
+    caller="API.mesh.get_local_coordinates_in_element"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_element_tag(cached,element_tag,caller)
+        p=_mesh_query_point(x,y,z,caller)
+        coordinates,_,_=_local_coordinates(cached,tag,p,caller)
+        return _require_local_coordinates(coordinates,caller,tag)
+    end
 end
 
 function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
@@ -1035,7 +1131,7 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
             "API.mesh.refine: no mesh; call API.mesh.generate first"))
         refined=refine_uniform(
             cached;max_nodes=max_nodes,max_cells=max_cells)
-        LAST_MESH[]=_copy_mesh(refined)
+        _replace_mesh_cache_locked!(_copy_mesh(refined))
         refined
     end
 end
@@ -1051,7 +1147,7 @@ function _clear_mesh(dim_tags=())
             "API.mesh.clear: entity-selective clearing requires mesh " *
             "classification metadata; pass an empty collection to clear the " *
             "complete cached mesh"))
-        LAST_MESH[]=nothing
+        _replace_mesh_cache_locked!(nothing)
         nothing
     end
 end
@@ -1075,7 +1171,7 @@ function _affine_transform_mesh(affine,dim_tags=())
         matrix=reshape(collect(coefficients),3,3)
         transformed=affine_transform(
             cached,matrix;translation=translation)
-        LAST_MESH[]=_copy_mesh(transformed)
+        _replace_mesh_cache_locked!(_copy_mesh(transformed))
         transformed
     end
 end
@@ -1131,6 +1227,8 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
              _get_element_edge_nodes,_get_element_face_nodes,
              _get_element_type,_get_element_properties,
+             _get_element_by_coordinates,_get_elements_by_coordinates,
+             _get_local_coordinates_in_element,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
@@ -1185,6 +1283,41 @@ follow Gmsh node ordering. Verified high-order-prism and trihedron layouts remai
 available even where Gmsh 4.15.2's own property call fails.
 """
 get_element_properties(element_type)=_get_element_properties(element_type)
+
+"""
+    get_element_by_coordinates(x, y, z, dim=-1, strict=false)
+
+Return `(element_tag, element_type, node_tags, u, v, w)` for the first cached
+linear-simplex element at a finite point. With `dim=-1`, the deterministic first
+match has the greatest dimension and then the smallest dense tag. `strict=true`
+uses the pinned Gmsh 4.15.2 reference tolerance of `1e-6`; relaxed search widens
+that tolerance by decades through `1.0` and stops at the first nonempty level.
+No match is an error.
+"""
+get_element_by_coordinates(x,y,z,dim=-1,strict=false)=
+    _get_element_by_coordinates(x,y,z,dim,strict)
+
+"""
+    get_elements_by_coordinates(x, y, z, dim=-1, strict=false)
+
+Return all matching dense element tags, ordered by decreasing dimension and then
+increasing tag. Search tolerance and no-match behavior are identical to
+[`get_element_by_coordinates`](@ref).
+"""
+get_elements_by_coordinates(x,y,z,dim=-1,strict=false)=
+    _get_elements_by_coordinates(x,y,z,dim,strict)
+
+"""
+    get_local_coordinates_in_element(element_tag, x, y, z)
+
+Return `(u,v,w)` reference coordinates for one dense cached element tag. Segment
+coordinates use `u ∈ [-1,1]`; triangle and tetrahedron coordinates use the standard
+unit simplex. Segment and triangle points are orthogonally projected onto the
+element span, with unused coordinates returned as exact zeros. The point need not
+lie inside the element. A Float64-unrepresentable result fails explicitly.
+"""
+get_local_coordinates_in_element(element_tag,x,y,z)=
+    _get_local_coordinates_in_element(element_tag,x,y,z)
 
 """
     get_elements_by_type(element_type, tag=-1, task=0, num_tasks=1)
@@ -1329,7 +1462,7 @@ function open_geo!(path::AbstractString; mesh_dim::Integer=0)
         stored_model=deepcopy(result.model)
         stored_mesh=result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
         CURRENT[]=stored_model
-        LAST_MESH[]=stored_mesh
+        _replace_mesh_cache_locked!(stored_mesh)
         result
     end
 end
