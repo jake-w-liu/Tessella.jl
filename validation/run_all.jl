@@ -185,6 +185,13 @@ mesh_location_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=ye
 println("  command: ", mesh_location_command)
 run(mesh_location_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── mesh_element_qualities ──  Gmsh 4.15.2 linear-simplex quality measures")
+mesh_quality_script = joinpath(
+    HERE, "mesh_element_qualities", "differential.jl")
+mesh_quality_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mesh_quality_script`
+println("  command: ", mesh_quality_command)
+run(mesh_quality_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 println("\n── element_catalog_queries ──  Gmsh 4.15.2 fixed type and property lookup")
 element_catalog_script = joinpath(
     HERE, "element_catalog_queries", "differential.jl")

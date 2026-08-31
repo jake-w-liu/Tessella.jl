@@ -28,6 +28,8 @@ validation/
     differential.jl      # required bulk and connectivity-derived query differential
   mesh_point_location/
     differential.jl      # required simplex location/reference-coordinate differential
+  mesh_element_qualities/
+    differential.jl      # required linear-simplex quality-measure differential
   element_catalog_queries/
     differential.jl      # required fixed type/property catalog differential
   high_order/

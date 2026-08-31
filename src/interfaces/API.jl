@@ -12,9 +12,10 @@ straight periodic boundary or embedded curves and planar periodic volume boundar
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache. It also owns a reusable robust AABB locator for dense
-element-by-coordinate and reference-coordinate queries. Element type and property
-lookup is available without a session and delegates to the immutable native catalog.
-Production meshing is never delegated to Gmsh.
+element-by-coordinate and reference-coordinate queries, plus scale-robust named
+quality queries over dense cached elements. Element type and property lookup is
+available without a session and delegates to the immutable native catalog. Production
+meshing is never delegated to Gmsh.
 """
 module API
 
@@ -50,6 +51,7 @@ using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
                            mesh_element_block, mesh_element_record,
                            _local_coordinates, _locate_elements,
                            _require_local_coordinates
+using ..MeshElementQuality: mesh_element_qualities
 using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
@@ -893,6 +895,16 @@ function _get_local_coordinates_in_element(element_tag,x,y,z)
     end
 end
 
+function _get_element_qualities(element_tags,quality_name="minSICN",
+                                task=0,num_tasks=1)
+    caller="API.mesh.get_element_qualities"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        _mesh_query_tasks(task,num_tasks,caller)
+        mesh_element_qualities(cached,element_tags,quality_name)
+    end
+end
+
 function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
     count=length(cells)
     coordinate_count=Base.checked_mul(3,count)
@@ -1228,7 +1240,7 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_element_edge_nodes,_get_element_face_nodes,
              _get_element_type,_get_element_properties,
              _get_element_by_coordinates,_get_elements_by_coordinates,
-             _get_local_coordinates_in_element,
+             _get_local_coordinates_in_element,_get_element_qualities,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
@@ -1318,6 +1330,19 @@ lie inside the element. A Float64-unrepresentable result fails explicitly.
 """
 get_local_coordinates_in_element(element_tag,x,y,z)=
     _get_local_coordinates_in_element(element_tag,x,y,z)
+
+"""
+    get_element_qualities(element_tags, quality_name="minSICN",
+                          task=0, num_tasks=1)
+
+Return detached `Float64` qualities for dense cached linear-simplex element tags,
+in request order. Names follow the documented Gmsh 4.15.2 list. Segment tags are
+explicitly unsupported for `minDetJac`, `maxDetJac`, `minSIGE`, and
+`minIsotropy`, whose 1-D Gmsh implementations are absent or unreliable.
+Nondefault task partitioning is unavailable for detached Julia return arrays.
+"""
+get_element_qualities(element_tags,quality_name="minSICN",task=0,num_tasks=1)=
+    _get_element_qualities(element_tags,quality_name,task,num_tasks)
 
 """
     get_elements_by_type(element_type, tag=-1, task=0, num_tasks=1)
