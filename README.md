@@ -55,8 +55,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   finalized simplex meshes with orientation and physical-tag preservation;
 - Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
   arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
-- explicit deterministic global edge and triangular-face catalogs for cached
-  simplex meshes, with orientation-stable edge lookup and detached tag/node arrays;
+- deterministic global edge and triangular/quadrangular-face catalogs for cached
+  simplex meshes, with atomic explicit insertion, orientation-stable lookup, and
+  detached tag/node arrays;
 - globally certified quadratic tetrahedra, plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
@@ -267,13 +268,23 @@ metadata.
 arrays. Type-node results repeat shared nodes in element order, and edge/face results
 use Gmsh's local linear-simplex ordering. High-order nodes and nondefault Julia task
 partitioning are not represented.
-`create_edges` and `create_faces` build idempotent whole-cache catalogs that are
-discarded with every mesh replacement. `get_edges` returns one global tag per node
-pair and orientation `+1` or `-1` from ascending tag order; `get_faces` returns the
-pinned Gmsh 4.15.2 zero orientation for triangular faces. `get_all_edges` and
-`get_all_faces` return detached arrays in ascending global-tag order. Tessella rejects
-incomplete node groups instead of truncating them. Entity-selective creation remains
-blocked until the cache owns classification metadata.
+`create_edges` and `create_faces` idempotently fill missing whole-cache simplex
+topology and preserve entries attached with `add_edges` or `add_faces`.
+`add_edges` accepts node pairs; `add_faces` accepts triangles or quadrangles. Both
+operations require positive identifiers, enforce one edge or face per identifier,
+and commit the complete batch only after every tag and node group is valid. Face
+identifiers share one namespace across triangle and quadrangle catalogs. Exact
+edge/tag or face/tag repeats are idempotent. Automatic candidates start at the
+current catalog size plus one and advance past explicit identifiers already in use.
+`get_edges` returns one global tag per node pair and orientation `+1` or `-1` from
+ascending node-tag order; `get_faces` returns the pinned Gmsh 4.15.2 zero
+orientation for both face types.
+`get_all_edges` and `get_all_faces` return detached arrays in ascending global-tag
+order. Unlike Gmsh 4.15.2, Tessella rejects zero identifiers, duplicate identifiers
+on different entities, conflicting identifiers for the same entity, repeated nodes,
+and malformed or partly invalid batches without changing the catalog. Every mesh
+replacement discards both catalogs. Entity-selective creation remains blocked until
+the cache owns classification metadata.
 `get_element_by_coordinates`, `get_elements_by_coordinates`, and
 `get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
 cache. Matches are deterministic: greatest dimension first, then smallest dense tag.
@@ -347,7 +358,7 @@ entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
 entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement and session-cache lifecycle, transfinite-patch,
-fixed element type/property lookup, global simplex edge/face topology,
+fixed element type/property lookup, automatic/manual global edge/face topology,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
