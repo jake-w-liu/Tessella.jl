@@ -34,7 +34,7 @@ Tessella
 │   │               exact rationals, and SoS
 │   ├── MeshTypes   compact simplex storage, topology, scale-robust quality,
 │   │               CRC, and mutation-safe validation
-│   ├── MeshEntityTopology deterministic global simplex edge/face identifiers
+│   ├── MeshEntityTopology deterministic global edge/face identifiers and insertion
 │   │                     and orientation-stable lookup
 │   ├── MeshPointLocation deterministic AABB lookup, scaled affine inversion,
 │   │                    and exact-rational numerical fallbacks
@@ -132,8 +132,8 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types with canonical family/order lookup and detached property metadata plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, and Gmsh-compatible MSH4 surface/embedded-curve metadata, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, presentation state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/straight-Line/explicit-Plane evaluation and surface reparametrization |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, session-independent fixed element type/property lookup, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data, explicit global edge/triangular-face catalogs, plus robust cached linear-simplex point location, local coordinates, and named element qualities, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
-| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata lifecycle including plane properties, Point/Line/Plane evaluation and surface reparametrization, presentation/coordinate/attribute state, cached-refinement/clearing/affine-transform lifecycle, fixed element type/property lookup, bulk/connectivity-derived mesh-data and global edge/face topology queries, cached simplex point-location/local-coordinate queries, and linear-simplex quality queries, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and Boolean snapshot/Delete lifecycle corpus |
+| P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, session-independent fixed element type/property lookup, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data, automatic and manual global edge/triangular/quadrangular-face catalogs, plus robust cached linear-simplex point location, local coordinates, and named element qualities, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
+| P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata lifecycle including plane properties, Point/Line/Plane evaluation and surface reparametrization, presentation/coordinate/attribute state, cached-refinement/clearing/affine-transform lifecycle, fixed element type/property lookup, bulk/connectivity-derived mesh-data and automatic/manual global edge/face topology queries, cached simplex point-location/local-coordinate queries, and linear-simplex quality queries, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, and Boolean snapshot/Delete lifecycle corpus |
 
 P1 does not yet claim 3-D multi-wall boundary-layer fans, Gmsh's global
 `AutomaticMeshSizeField` pipeline, high-order/custom-interpolation,
@@ -299,15 +299,22 @@ normalized or fast-sum barycenters, and edge/face nodes in Gmsh's local ordering
 The `primary` selector is accepted but has no effect because the cache owns only
 first-order elements. Coordinate sums that cannot be represented as finite
 `Float64` values fail explicitly.
-Explicit whole-cache edge and face creation assigns positive global identifiers in
-first-encounter segment, triangle, then tetrahedron order. Edge lookup returns the
-same tag for either direction and orientation `+1` for ascending node tags or `-1`
-for descending tags. Triangular-face lookup preserves Gmsh 4.15.2's zero orientation
-result. All-entity results are tag-sorted instead of exposing Gmsh's hash iteration;
-their tag-to-node maps match. Creation is idempotent, query results are detached, and
-every cache replacement invalidates both catalogs. Entity-selective creation remains
-a classification blocker, and malformed partial node groups are rejected instead of
-silently truncated.
+Whole-cache edge and face creation assigns positive global identifiers to missing
+simplex topology in first-encounter segment, triangle, then tetrahedron order.
+Manual insertion atomically attaches explicit positive identifiers to node pairs,
+triangles, or quadrangles; face identifiers share one namespace across both face
+types. Exact association repeats are idempotent, and later creation preserves manual
+entries while filling missing simplex edges and triangles. Automatic candidates
+start at the relevant catalog size plus one and skip identifiers already in use.
+Edge lookup returns the same tag for either direction and orientation `+1` for
+ascending node tags or `-1` for descending tags. Both face types preserve Gmsh
+4.15.2's zero orientation result.
+All-entity results are tag-sorted instead of exposing Gmsh's hash iteration; their
+tag-to-node maps match. Query results are detached, and every cache replacement
+invalidates both catalogs. Tessella deliberately rejects zero or conflicting
+identifiers, repeated or unknown nodes, and malformed or partly invalid batches
+atomically; Gmsh 4.15.2 accepts or partially applies those cases. Entity-selective
+creation remains a classification blocker.
 Point-location queries use a lazily cached deterministic AABB hierarchy over the
 current linear-simplex cache. They return all dense matches in decreasing dimension
 and increasing tag order, or the first such match with detached type, connectivity,
@@ -479,7 +486,7 @@ model-entity-evaluation,
 model-entity-state,
 uniform-refinement and session-cache lifecycle, whole-mesh affine transformation,
 bulk and connectivity-derived node/element data queries,
-cached global simplex edge/face topology creation and lookup,
+cached automatic/manual global edge/face topology creation, insertion, and lookup,
 cached simplex point-location and local-coordinate queries,
 cached linear-simplex element-quality queries,
 fixed element type/property lookup,

@@ -11,8 +11,8 @@ operation-time Boolean operand ownership, and persistent affine relations betwee
 straight periodic boundary or embedded curves and planar periodic volume boundaries.
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
-linear-simplex mesh cache, plus explicit deterministic global edge and
-triangular-face catalogs. It also owns a reusable robust AABB locator for dense
+linear-simplex mesh cache, plus deterministic global edge and triangular or
+quadrangular face catalogs. It also owns a reusable robust AABB locator for dense
 element-by-coordinate and reference-coordinate queries, plus scale-robust named
 quality queries and Gmsh-shaped forward maps/Jacobians over dense cached elements.
 Element type and property lookup is
@@ -51,6 +51,7 @@ using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
+                            _mesh_add_edges, _mesh_add_faces,
                             _mesh_edges, _mesh_faces,
                             _mesh_all_edges, _mesh_all_faces,
                             _simplex_edge_patterns, _simplex_face_patterns
@@ -950,10 +951,8 @@ function _create_edges(dim_tags=())
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         _mesh_global_topology_selection(dim_tags,caller)
-        if LAST_MESH_EDGES[]===nothing
-            replacement=_mesh_edge_topology(cached)
-            LAST_MESH_EDGES[]=replacement
-        end
+        replacement=_mesh_edge_topology(cached,LAST_MESH_EDGES[])
+        LAST_MESH_EDGES[]=replacement
         nothing
     end
 end
@@ -963,10 +962,30 @@ function _create_faces(dim_tags=())
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         _mesh_global_topology_selection(dim_tags,caller)
-        if LAST_MESH_FACES[]===nothing
-            replacement=_mesh_face_topology(cached)
-            LAST_MESH_FACES[]=replacement
-        end
+        replacement=_mesh_face_topology(cached,LAST_MESH_FACES[])
+        LAST_MESH_FACES[]=replacement
+        nothing
+    end
+end
+
+function _add_edges(edge_tags,edge_nodes)
+    caller="API.mesh.add_edges"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        replacement=_mesh_add_edges(
+            LAST_MESH_EDGES[],cached,edge_tags,edge_nodes,caller)
+        LAST_MESH_EDGES[]=replacement
+        nothing
+    end
+end
+
+function _add_faces(face_type,face_tags,face_nodes)
+    caller="API.mesh.add_faces"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        replacement=_mesh_add_faces(
+            LAST_MESH_FACES[],cached,face_type,face_tags,face_nodes,caller)
+        LAST_MESH_FACES[]=replacement
         nothing
     end
 end
@@ -1320,7 +1339,7 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_local_coordinates_in_element,_get_element_qualities,
              _get_jacobians,_get_jacobian,
              _create_edges,_create_faces,_get_edges,_get_faces,
-             _get_all_edges,_get_all_faces,
+             _get_all_edges,_get_all_faces,_add_edges,_add_faces,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
              _get_periodic_nodes
@@ -1454,26 +1473,56 @@ get_jacobian(element_tag,local_coord)=
 Create deterministic global identifiers for every unique edge in the cached
 linear-simplex mesh. Repeated calls are idempotent. Only whole-cache creation is
 available because the cache does not own model-entity classification metadata.
-Replacing, refining, transforming, or clearing the cache invalidates the catalog.
+Edges previously attached with [`add_edges`](@ref) are preserved. Replacing,
+refining, transforming, or clearing the cache invalidates the catalog. Automatic
+identifiers begin at the current edge count plus one and skip identifiers already
+in use.
 """
 create_edges(dim_tags=())=_create_edges(dim_tags)
 
 """
     create_faces(dim_tags=())
 
-Create deterministic global identifiers for every unique triangular face in the
-cached linear-simplex mesh. Lifecycle and entity-selection behavior match
-[`create_edges`](@ref). The cache contains no quadrangular faces.
+Create deterministic global identifiers for every missing triangular face in the
+cached linear-simplex mesh while preserving faces attached with
+[`add_faces`](@ref), including quadrangles. Lifecycle and entity-selection behavior
+match [`create_edges`](@ref). Automatic identifiers use the combined triangle and
+quadrangle count and skip identifiers already in use.
 """
 create_faces(dim_tags=())=_create_faces(dim_tags)
+
+"""
+    add_edges(edge_tags, edge_nodes)
+
+Atomically attach global edges to explicit positive identifiers. `edge_nodes`
+contains one node pair per identifier, and each identifier belongs to one edge.
+Repeating the same edge/tag association is idempotent; zero or conflicting tags,
+repeated or unknown nodes, and malformed batches leave the catalog unchanged. A
+later [`create_edges`](@ref) preserves these edges and adds missing simplex edges.
+"""
+add_edges(edge_tags,edge_nodes)=_add_edges(edge_tags,edge_nodes)
+
+"""
+    add_faces(face_type, face_tags, face_nodes)
+
+Atomically attach triangular (`face_type=3`) or quadrangular (`face_type=4`) faces
+to explicit positive identifiers shared by both face types. `face_nodes` contains
+one complete node group per identifier. Repeating the same face/tag association is
+idempotent; zero or conflicting tags, repeated or unknown nodes, and malformed
+batches leave the catalog unchanged. A later [`create_faces`](@ref) preserves these
+faces and adds missing simplex triangles.
+"""
+add_faces(face_type,face_tags,face_nodes)=
+    _add_faces(face_type,face_tags,face_nodes)
 
 """
     get_edges(node_tags)
 
 Return detached global edge tags and `Int32` orientations for concatenated node
 pairs. Positive orientation follows ascending node tags; reversing a pair returns
-the same edge tag and orientation `-1`. The edge catalog must first be created with
-[`create_edges`](@ref). Incomplete pairs and unknown nodes or edges fail explicitly.
+the same edge tag and orientation `-1`. The edge catalog must first be populated
+with [`add_edges`](@ref) or [`create_edges`](@ref). Incomplete pairs and unknown
+nodes or edges fail explicitly.
 """
 get_edges(node_tags)=_get_edges(node_tags)
 
@@ -1481,10 +1530,10 @@ get_edges(node_tags)=_get_edges(node_tags)
     get_faces(face_type, node_tags)
 
 Return detached global face tags and orientations for concatenated triangular or
-quadrangular node groups. Cached simplex meshes contain only triangular faces.
-Triangular orientations are zero, matching Gmsh 4.15.2's public face-topology
-behavior. A nonempty quadrangular lookup therefore fails as unknown. The face
-catalog must first be created with [`create_faces`](@ref).
+quadrangular node groups. Face orientations are zero, matching Gmsh 4.15.2's
+public face-topology behavior. The face catalog must first be populated with
+[`add_faces`](@ref) or [`create_faces`](@ref); automatic creation adds only
+triangles because the cached mesh is linear-simplex.
 """
 get_faces(face_type,node_tags)=_get_faces(face_type,node_tags)
 
@@ -1492,7 +1541,8 @@ get_faces(face_type,node_tags)=_get_faces(face_type,node_tags)
     get_all_edges()
 
 Return detached global edge tags and first-encounter node pairs in ascending tag
-order. Before [`create_edges`](@ref), both arrays are empty.
+order. Before either [`add_edges`](@ref) or [`create_edges`](@ref), both arrays are
+empty.
 """
 get_all_edges()=_get_all_edges()
 
@@ -1500,7 +1550,8 @@ get_all_edges()=_get_all_edges()
     get_all_faces(face_type)
 
 Return detached global face tags and first-encounter face nodes in ascending tag
-order. Before [`create_faces`](@ref), or for quadrangles, both arrays are empty.
+order. Before either [`add_faces`](@ref) or [`create_faces`](@ref), both arrays are
+empty. Quadrangular results contain only explicitly attached faces.
 """
 get_all_faces(face_type)=_get_all_faces(face_type)
 

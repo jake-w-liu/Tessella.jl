@@ -178,7 +178,7 @@ mesh_data_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --
 println("  command: ", mesh_data_command)
 run(mesh_data_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
-println("\n── mesh_entity_topology ──  Gmsh 4.15.2 global simplex edges and faces")
+println("\n── mesh_entity_topology ──  Gmsh 4.15.2 automatic/manual edges and faces")
 mesh_entity_topology_script = joinpath(
     HERE, "mesh_entity_topology", "differential.jl")
 mesh_entity_topology_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mesh_entity_topology_script`
