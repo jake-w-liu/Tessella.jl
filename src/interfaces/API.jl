@@ -16,9 +16,9 @@ quadrangular face catalogs and first-order Lagrange/H1/lowest-order H(curl) base
 orientations, and node/edge keys. It also owns a reusable robust AABB locator for
 dense element-by-coordinate and reference-coordinate queries, plus scale-robust
 named quality queries and Gmsh-shaped forward maps/Jacobians over dense cached
-elements. Element type and property lookup is available without a session and
-delegates to the immutable native catalog. Production meshing is never delegated
-to Gmsh.
+elements. Element type/property lookup and bounded Point/Line/Triangle/Tetrahedron
+reference quadrature are available without a session. Production meshing is never
+delegated to Gmsh.
 """
 module API
 
@@ -62,6 +62,7 @@ using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
                            _local_coordinates, _locate_elements,
                            _require_local_coordinates
 using ..MeshElementQuality: mesh_element_qualities
+using ..MeshQuadrature: mesh_integration_points
 using ..MeshReferenceGeometry: mesh_jacobian, mesh_jacobians
 using ..MeshFunctionSpaces: mesh_basis_functions, mesh_basis_orientation,
                             mesh_basis_orientations, mesh_key_dimension,
@@ -833,6 +834,12 @@ function _get_element_properties(element_type)
            Int32(properties.num_primary_nodes)
 end
 
+function _get_integration_points(element_type,integration_type)
+    return mesh_integration_points(
+        element_type,integration_type;
+        caller="API.mesh.get_integration_points")
+end
+
 function _mesh_query_coordinate(value,caller::AbstractString,
                                 name::AbstractString)
     value isa Real || throw(ArgumentError(
@@ -1437,6 +1444,7 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
              _get_element_edge_nodes,_get_element_face_nodes,
              _get_element_type,_get_element_properties,
+             _get_integration_points,
              _get_element_by_coordinates,_get_elements_by_coordinates,
              _get_local_coordinates_in_element,_get_element_qualities,
              _get_jacobians,_get_jacobian,
@@ -1500,6 +1508,18 @@ follow Gmsh node ordering. Verified high-order-prism and trihedron layouts remai
 available even where Gmsh 4.15.2's own property call fails.
 """
 get_element_properties(element_type)=_get_element_properties(element_type)
+
+"""
+    get_integration_points(element_type, integration_type)
+
+Return detached reference coordinates and weights for a fixed-node Point, Line,
+Triangle, or Tetrahedron type. Coordinates are flattened `(u,v,w)` triples.
+`GaussN` preserves Gmsh 4.15.2's economical simplex rules through order five;
+`CompositeGaussN` provides bounded higher-order rules. An omitted `N` means
+order zero. This reference-element query does not require a model or mesh.
+"""
+get_integration_points(element_type,integration_type)=
+    _get_integration_points(element_type,integration_type)
 
 """
     get_element_by_coordinates(x, y, z, dim=-1, strict=false)
