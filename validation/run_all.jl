@@ -198,7 +198,7 @@ mesh_jacobian_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=ye
 println("  command: ", mesh_jacobian_command)
 run(mesh_jacobian_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
-println("\n── mesh_quadrature ──  Gmsh 4.15.2 simplex reference rules")
+println("\n── mesh_quadrature ──  Gmsh 4.15.2 fixed-family reference rules")
 mesh_quadrature_script = joinpath(HERE, "mesh_quadrature", "differential.jl")
 mesh_quadrature_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mesh_quadrature_script`
 println("  command: ", mesh_quadrature_command)

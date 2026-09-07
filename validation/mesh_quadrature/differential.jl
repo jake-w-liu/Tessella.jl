@@ -1,4 +1,5 @@
-# Differential oracle for Point/Line/Triangle/Tetrahedron reference quadrature.
+# Differential oracle for every Gmsh 4.15.2 fixed-node reference family with
+# defined quadrature. Trihedra are rejected by both implementations.
 # This uses the locally installed Gmsh 4.15.2 Julia API and never starts the GUI.
 using Tessella
 using SHA
@@ -72,6 +73,14 @@ end
 #   every higher-order and serendipity catalog entry.
 # - Silently treating malformed suffixes as order zero is rejected locally; Gmsh
 #   is deliberately not called with those unsafe inputs.
+# - Reversing a Cartesian tensor loop or the prism triangle/line nesting is
+#   rejected by sequential flattened-coordinate comparisons.
+# - Omitting the pyramid's Gauss--Jacobi measure or Duffy scale is rejected by
+#   every pyramid weight and noncentral coordinate comparison.
+# - Reusing the line point-count law for odd-order prisms is rejected at Gauss1
+#   and CompositeGauss1, 5, and 29.
+# - Allocating before total-point preflight is rejected by all four first-invalid
+#   non-simplex resource-bound requests.
 
 try
     gmsh.initialize(String[],false)
@@ -97,7 +106,8 @@ try
     supported=sort!([
         (Int(element_type),spec.family)
         for (element_type,spec) in MSH_CATALOG
-        if spec.family in (:pnt,:lin,:tri,:tet)];by=first)
+        if spec.family in
+           (:pnt,:lin,:tri,:qua,:tet,:hex,:pri,:pyr)];by=first)
     for (element_type,_) in supported
         compare_case(element_type,"Gauss2")
         compare_case(element_type,"CompositeGauss5")
@@ -108,18 +118,25 @@ try
                  "CompositeGauss","CompositeGauss0","CompositeGauss1",
                  "CompositeGauss2","CompositeGauss5",
                  "CompositeGauss12","CompositeGauss29")
-        for element_type in (15,1,2,4)
+        for element_type in (15,1,2,3,4,5,6,7)
             compare_case(element_type,rule)
         end
+    end
+    for rule in ("Gauss6","Gauss12","Gauss29"),
+        element_type in (3,5,7)
+        compare_case(element_type,rule)
     end
 
     length(Tessella.API.mesh.get_integration_points(
         1,"CompositeGauss255")[2])==128 || error(
         "bounded 128-point line rule is unavailable")
     for (element_type,rule) in (
-        (2,"Gauss6"),(4,"Gauss6"),(1,"CompositeGauss256"),
-        (2,"CompositeGauss255"),(4,"CompositeGauss198"),
-        (3,"Gauss2"),(34,"Gauss2"),(999,"Gauss2"),
+        (2,"Gauss6"),(4,"Gauss6"),(6,"Gauss6"),
+        (1,"CompositeGauss256"),(2,"CompositeGauss255"),
+        (3,"CompositeGauss256"),(4,"CompositeGauss198"),
+        (5,"CompositeGauss200"),(6,"CompositeGauss199"),
+        (7,"CompositeGauss200"),(34,"Gauss2"),(140,"Gauss2"),
+        (999,"Gauss2"),
         (2,"Gauss-1"),(2,"Gauss 2"),(2,"gauss2"),
         (2,"Gauss999999999999999999999999999999"))
         _rejects_argument(()->Tessella.API.mesh.get_integration_points(
@@ -129,7 +146,7 @@ try
     end
 
     digest=bytes2hex(SHA.sha256(take!(stream)))
-    digest=="a7e167c24bde2a871b1c9e4e4e5ae6c6bbbec0675ca2c56eda0602760e2888c2" || error(
+    digest=="0ff395a225821835fad550c4388545faf45637f9485d5511e1ebc5c80e837562" || error(
         "mesh quadrature checksum changed to $digest")
     println("mesh-quadrature differential: Gmsh ",
             gmsh.GMSH_API_VERSION," fixed_types=",length(supported),
