@@ -307,6 +307,15 @@ low-dimensional regularization, while tetrahedron determinants retain orientatio
 Malformed or nonfinite evaluation coordinates, degenerate maps, and
 Float64-unrepresentable results fail explicitly. Entity filtering and nondefault
 task partitioning retain the cache-metadata blockers described above.
+`get_integration_points` returns detached `(u,v,w)` reference coordinates and
+weights for every fixed-node Point, Line, Triangle, and Tetrahedron type, independent
+of element interpolation order and session state. `Gauss0` through `Gauss5` match
+Gmsh 4.15.2's economical simplex rules; line rules and bounded
+`CompositeGaussN` rules are generated natively with at most 128 Gauss--Legendre
+points per axis and one million output points. Bare rule names mean order zero,
+and malformed or excessive requests fail before output allocation. Economical
+simplex rules above order five and non-simplex-family quadrature remain explicit
+blockers.
 `get_basis_functions` evaluates `Lagrange`/`IsoParametric`/`Lagrange1`, their
 `Grad` forms, `H1Legendre1`/`GradH1Legendre1`, and
 `HcurlLegendre0`/`CurlHcurlLegendre0` for types 1, 2, and 4. Results use Gmsh's
@@ -317,9 +326,9 @@ single-element orientation queries return those indices directly.
 global edge keys for H(curl). Edge-key queries lazily create only edges visited by
 the requested type or element, reuse explicit or previously created identifiers,
 and return stable midpoint coordinates. Number-of-key/orientation and key-information
-queries share the same checked reference contract. Higher-order function spaces,
-non-simplex families, quadrature rules, entity filtering, and nondefault task
-partitioning remain explicit blockers.
+queries share the same checked reference contract. Higher-order and non-simplex
+function spaces, entity filtering, and nondefault task partitioning remain explicit
+blockers.
 `get_element_qualities` returns detached values in dense-tag request order for the
 13 documented Gmsh 4.15.2 measures. It preserves signed tetrahedron Jacobian,
 volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
@@ -374,7 +383,8 @@ entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
 entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement and session-cache lifecycle, transfinite-patch,
-fixed element type/property lookup, automatic/manual global edge/face topology,
+fixed element type/property lookup, simplex reference quadrature,
+automatic/manual global edge/face topology,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
