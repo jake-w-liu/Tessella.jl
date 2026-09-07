@@ -12,12 +12,13 @@ straight periodic boundary or embedded curves and planar periodic volume boundar
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache, plus deterministic global edge and triangular or
-quadrangular face catalogs. It also owns a reusable robust AABB locator for dense
-element-by-coordinate and reference-coordinate queries, plus scale-robust named
-quality queries and Gmsh-shaped forward maps/Jacobians over dense cached elements.
-Element type and property lookup is
-available without a session and delegates to the immutable native catalog. Production
-meshing is never delegated to Gmsh.
+quadrangular face catalogs and first-order Lagrange/H1/lowest-order H(curl) bases,
+orientations, and node/edge keys. It also owns a reusable robust AABB locator for
+dense element-by-coordinate and reference-coordinate queries, plus scale-robust
+named quality queries and Gmsh-shaped forward maps/Jacobians over dense cached
+elements. Element type and property lookup is available without a session and
+delegates to the immutable native catalog. Production meshing is never delegated
+to Gmsh.
 """
 module API
 
@@ -51,6 +52,7 @@ using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
+                            _mesh_edge_topology_for_cells,
                             _mesh_add_edges, _mesh_add_faces,
                             _mesh_edges, _mesh_faces,
                             _mesh_all_edges, _mesh_all_faces,
@@ -61,6 +63,11 @@ using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
                            _require_local_coordinates
 using ..MeshElementQuality: mesh_element_qualities
 using ..MeshReferenceGeometry: mesh_jacobian, mesh_jacobians
+using ..MeshFunctionSpaces: mesh_basis_functions, mesh_basis_orientation,
+                            mesh_basis_orientations, mesh_key_dimension,
+                            mesh_keys, mesh_keys_for_element,
+                            mesh_keys_information, mesh_number_of_keys,
+                            mesh_number_of_orientations
 using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
@@ -937,6 +944,101 @@ function _get_jacobian(element_tag,local_coord)
     end
 end
 
+function _get_basis_functions(element_type,local_coord,function_space_type,
+                              wanted_orientations=Int32[])
+    return mesh_basis_functions(
+        element_type,local_coord,function_space_type,wanted_orientations;
+        caller="API.mesh.get_basis_functions")
+end
+
+function _get_number_of_orientations(element_type,function_space_type)
+    return mesh_number_of_orientations(
+        element_type,function_space_type;
+        caller="API.mesh.get_number_of_orientations")
+end
+
+function _get_basis_functions_orientation(element_type,function_space_type,
+                                          tag=-1,task=0,num_tasks=1)
+    caller="API.mesh.get_basis_functions_orientation"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        msh,_=_mesh_query_type_block(cached,element_type,tag,caller)
+        _mesh_query_tasks(task,num_tasks,caller)
+        mesh_basis_orientations(
+            cached,msh,function_space_type;caller=caller)
+    end
+end
+
+function _get_basis_functions_orientation_for_element(
+    element_tag,function_space_type)
+    caller="API.mesh.get_basis_functions_orientation_for_element"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_element_tag(cached,element_tag,caller)
+        mesh_basis_orientation(
+            cached,tag,function_space_type;caller=caller)
+    end
+end
+
+function _get_number_of_keys(element_type,function_space_type)
+    return mesh_number_of_keys(
+        element_type,function_space_type;
+        caller="API.mesh.get_number_of_keys")
+end
+
+function _get_keys(element_type,function_space_type,tag=-1,
+                   return_coord=true)
+    caller="API.mesh.get_keys"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        key_dimension=mesh_key_dimension(
+            msh,function_space_type;caller=caller)
+        replacement=LAST_MESH_EDGES[]
+        if key_dimension==1 && block!==nothing
+            _,cells=block
+            replacement=_mesh_edge_topology_for_cells(
+                cached,replacement,cells,msh)
+        end
+        result=mesh_keys(
+            cached,msh,function_space_type,replacement;
+            return_coord=return_coord,caller=caller)
+        key_dimension==1 && block!==nothing &&
+            (LAST_MESH_EDGES[]=replacement)
+        return result
+    end
+end
+
+function _get_keys_for_element(element_tag,function_space_type,
+                               return_coord=true)
+    caller="API.mesh.get_keys_for_element"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_element_tag(cached,element_tag,caller)
+        record=mesh_element_record(cached,tag)
+        key_dimension=mesh_key_dimension(
+            record.element_type,function_space_type;caller=caller)
+        replacement=LAST_MESH_EDGES[]
+        if key_dimension==1
+            cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
+            replacement=_mesh_edge_topology_for_cells(
+                cached,replacement,cells,Int(record.element_type))
+        end
+        result=mesh_keys_for_element(
+            cached,tag,function_space_type,replacement;
+            return_coord=return_coord,caller=caller)
+        key_dimension==1 && (LAST_MESH_EDGES[]=replacement)
+        return result
+    end
+end
+
+function _get_keys_information(type_keys,entity_keys,element_type,
+                               function_space_type)
+    return mesh_keys_information(
+        type_keys,entity_keys,element_type,function_space_type;
+        caller="API.mesh.get_keys_information")
+end
+
 function _mesh_global_topology_selection(dim_tags,caller::AbstractString)
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
         "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
@@ -1338,6 +1440,10 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
              _get_element_by_coordinates,_get_elements_by_coordinates,
              _get_local_coordinates_in_element,_get_element_qualities,
              _get_jacobians,_get_jacobian,
+             _get_basis_functions,_get_basis_functions_orientation,
+             _get_basis_functions_orientation_for_element,
+             _get_number_of_orientations,_get_keys,_get_keys_for_element,
+             _get_number_of_keys,_get_keys_information,
              _create_edges,_create_faces,_get_edges,_get_faces,
              _get_all_edges,_get_all_faces,_add_edges,_add_faces,
              _get_max_node_tag,_get_max_element_tag,
@@ -1466,6 +1572,99 @@ contracts, and error behavior match [`get_jacobians`](@ref).
 """
 get_jacobian(element_tag,local_coord)=
     _get_jacobian(element_tag,local_coord)
+
+"""
+    get_basis_functions(element_type, local_coord, function_space_type,
+                        wanted_orientations=Int32[])
+
+Return `(num_components, basis_functions, num_orientations)` for a linear segment,
+triangle, or tetrahedron at concatenated `(u,v,w)` evaluation points. Supported
+spaces are isoparametric or explicit-order-one Lagrange functions and gradients,
+order-one hierarchical H1 functions and gradients, and lowest-order H(curl)
+functions and curls. Values use Gmsh's orientation-then-point-then-function-then-
+component layout. An empty orientation selection returns every orientation for a
+hierarchical space and the sole orientation for Lagrange spaces. This
+reference-element query does not require a cached mesh.
+"""
+get_basis_functions(element_type,local_coord,function_space_type,
+                    wanted_orientations=Int32[])=
+    _get_basis_functions(
+        element_type,local_coord,function_space_type,wanted_orientations)
+
+"""
+    get_number_of_orientations(element_type, function_space_type)
+
+Return one for Lagrange spaces or the factorial primary-vertex orientation count
+for a supported first-order hierarchical space. This reference-element query does
+not require a cached mesh.
+"""
+get_number_of_orientations(element_type,function_space_type)=
+    _get_number_of_orientations(element_type,function_space_type)
+
+"""
+    get_basis_functions_orientation(element_type, function_space_type,
+                                    tag=-1, task=0, num_tasks=1)
+
+Return one lexicographic orientation index per cached element of the requested
+linear-simplex type. Lagrange spaces return zeros. Entity filtering and nondefault
+task partitioning require metadata or caller-owned output storage not present in
+the detached cache API.
+"""
+get_basis_functions_orientation(element_type,function_space_type,
+                                tag=-1,task=0,num_tasks=1)=
+    _get_basis_functions_orientation(
+        element_type,function_space_type,tag,task,num_tasks)
+
+"""
+    get_basis_functions_orientation_for_element(element_tag, function_space_type)
+
+Return the lexicographic orientation index for one dense cached element tag.
+"""
+get_basis_functions_orientation_for_element(element_tag,function_space_type)=
+    _get_basis_functions_orientation_for_element(
+        element_tag,function_space_type)
+
+"""
+    get_keys(element_type, function_space_type, tag=-1, return_coord=true)
+
+Return detached `(type_keys, entity_keys, coordinates)` for every cached element
+of one linear-simplex type. Lagrange and order-one H1 keys use dense node tags;
+lowest-order H(curl) keys use stable global edge tags and lazily add only the edges
+visited by the requested type. Coordinates locate node or edge-midpoint keys and
+are omitted when `return_coord=false`. Entity filtering remains unavailable.
+"""
+get_keys(element_type,function_space_type,tag=-1,return_coord=true)=
+    _get_keys(element_type,function_space_type,tag,return_coord)
+
+"""
+    get_keys_for_element(element_tag, function_space_type, return_coord=true)
+
+Return detached node or edge keys for one dense cached element. Lowest-order
+H(curl) calls lazily add only that element's missing edges to the shared catalog.
+"""
+get_keys_for_element(element_tag,function_space_type,return_coord=true)=
+    _get_keys_for_element(element_tag,function_space_type,return_coord)
+
+"""
+    get_number_of_keys(element_type, function_space_type)
+
+Return the number of node or edge keys owned by one supported linear-simplex
+element. This reference-element query does not require a cached mesh.
+"""
+get_number_of_keys(element_type,function_space_type)=
+    _get_number_of_keys(element_type,function_space_type)
+
+"""
+    get_keys_information(type_keys, entity_keys, element_type,
+                         function_space_type)
+
+Return `(entity_dimension, polynomial_order)` for complete element-sized groups
+of supported node or edge keys. Key arrays must have equal lengths and the expected
+type-key value for the selected space.
+"""
+get_keys_information(type_keys,entity_keys,element_type,function_space_type)=
+    _get_keys_information(
+        type_keys,entity_keys,element_type,function_space_type)
 
 """
     create_edges(dim_tags=())
