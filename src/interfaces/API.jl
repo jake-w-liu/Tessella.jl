@@ -16,9 +16,9 @@ quadrangular face catalogs and first-order Lagrange/H1/lowest-order H(curl) base
 orientations, and node/edge keys. It also owns a reusable robust AABB locator for
 dense element-by-coordinate and reference-coordinate queries, plus scale-robust
 named quality queries and Gmsh-shaped forward maps/Jacobians over dense cached
-elements. Element type/property lookup and bounded Point/Line/Triangle/Tetrahedron
-reference quadrature are available without a session. Production meshing is never
-delegated to Gmsh.
+elements. Element type/property lookup and bounded fixed-family reference
+quadrature are available without a session. Production meshing is never delegated
+to Gmsh.
 """
 module API
 
@@ -1513,10 +1513,12 @@ get_element_properties(element_type)=_get_element_properties(element_type)
     get_integration_points(element_type, integration_type)
 
 Return detached reference coordinates and weights for a fixed-node Point, Line,
-Triangle, or Tetrahedron type. Coordinates are flattened `(u,v,w)` triples.
-`GaussN` preserves Gmsh 4.15.2's economical simplex rules through order five;
-`CompositeGaussN` provides bounded higher-order rules. An omitted `N` means
-order zero. This reference-element query does not require a model or mesh.
+Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, or Pyramid type.
+Coordinates are flattened `(u,v,w)` triples. `GaussN` preserves Gmsh 4.15.2's
+available economical rules; `CompositeGaussN` selects bounded tensor/Duffy rules.
+Economical Triangle, Tetrahedron, and Prism rules above order five remain
+unavailable. Trihedra have no integration rule in the pinned Gmsh release. An
+omitted `N` means order zero. This query does not require a model or mesh.
 """
 get_integration_points(element_type,integration_type)=
     _get_integration_points(element_type,integration_type)

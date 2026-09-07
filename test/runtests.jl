@@ -49,7 +49,7 @@ using Tessella
     include("core/mesh_entity_topology_test.jl") # automatic/manual global edge/face ids
     include("core/mesh_point_location_test.jl") # robust simplex inversion and AABB lookup
     include("core/mesh_reference_geometry_test.jl") # robust simplex forward maps and Jacobians
-    include("core/mesh_quadrature_test.jl") # bounded reference rules and analytic moments
+    include("core/mesh_quadrature_test.jl") # bounded fixed-family rules and analytic moments
     include("core/mesh_function_spaces_test.jl") # P1/H1/Whitney bases, orientations, and keys
     include("core/mesh_element_quality_test.jl") # Gmsh-shaped simplex quality measures
     include("core/transform_test.jl")    # validated affine transforms + orientation preservation

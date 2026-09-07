@@ -308,14 +308,15 @@ Malformed or nonfinite evaluation coordinates, degenerate maps, and
 Float64-unrepresentable results fail explicitly. Entity filtering and nondefault
 task partitioning retain the cache-metadata blockers described above.
 `get_integration_points` returns detached `(u,v,w)` reference coordinates and
-weights for every fixed-node Point, Line, Triangle, and Tetrahedron type, independent
-of element interpolation order and session state. `Gauss0` through `Gauss5` match
-Gmsh 4.15.2's economical simplex rules; line rules and bounded
-`CompositeGaussN` rules are generated natively with at most 128 Gauss--Legendre
-points per axis and one million output points. Bare rule names mean order zero,
-and malformed or excessive requests fail before output allocation. Economical
-simplex rules above order five and non-simplex-family quadrature remain explicit
-blockers.
+weights for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron,
+Hexahedron, Prism, and Pyramid type, independent of interpolation order and session
+state. `Gauss0` through `Gauss5` preserve Gmsh 4.15.2's available economical
+tables; bounded `CompositeGaussN` rules use native Gauss--Legendre, Duffy, and
+Gauss--Jacobi construction with at most 128 points per axis and one million output
+points. Bare rule names mean order zero, and malformed or excessive requests fail
+before output allocation. Economical Triangle, Tetrahedron, and Prism rules above
+order five remain explicit blockers. Trihedra have no integration rule in Gmsh
+4.15.2 and fail explicitly.
 `get_basis_functions` evaluates `Lagrange`/`IsoParametric`/`Lagrange1`, their
 `Grad` forms, `H1Legendre1`/`GradH1Legendre1`, and
 `HcurlLegendre0`/`CurlHcurlLegendre0` for types 1, 2, and 4. Results use Gmsh's
@@ -383,7 +384,7 @@ entity-identity, dependency-safe entity-removal, analytical spatial queries, and
 native entity metadata including plane properties and Point/Line/Plane evaluation,
 entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement and session-cache lifecycle, transfinite-patch,
-fixed element type/property lookup, simplex reference quadrature,
+fixed element type/property lookup, fixed-family reference quadrature,
 automatic/manual global edge/face topology,
 straight transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine

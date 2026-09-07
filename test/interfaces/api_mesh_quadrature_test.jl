@@ -20,6 +20,9 @@ end
     @test length(expected[1])==9
     @test length(expected[2])==3
     @test isapprox(sum(expected[2]),0.5;atol=2e-15,rtol=0)
+    quadrangle=_QUADRATURE_API.mesh.get_integration_points(3,"Gauss2")
+    @test length(quadrangle[2])==7
+    @test isapprox(sum(quadrangle[2]),4.0;atol=2e-14,rtol=0)
 
     try
         _QUADRATURE_API.initialize()
@@ -37,6 +40,10 @@ end
         tetrahedron[2][1]=99
         @test _QUADRATURE_API.mesh.get_integration_points(
             11,"CompositeGauss8")[1][1]!=99
+        pyramid=_QUADRATURE_API.mesh.get_integration_points(
+            14,"CompositeGauss8")
+        @test length(pyramid[2])==125
+        @test isapprox(sum(pyramid[2]),4/3;atol=2e-14,rtol=0)
         @test mesh_crc(_QUADRATURE_API.mesh.get())==baseline
     finally
         _QUADRATURE_API.finalize()
@@ -47,10 +54,11 @@ end
     @test_throws ArgumentError _QUADRATURE_API.mesh.get_integration_points(
         2,"Gauss6")
     message=try
-        _QUADRATURE_API.mesh.get_integration_points(3,"Gauss2")
+        _QUADRATURE_API.mesh.get_integration_points(140,"Gauss2")
         ""
     catch err
         sprint(showerror,err)
     end
     @test occursin("API.mesh.get_integration_points",message)
+    @test occursin("no integration rules",message)
 end

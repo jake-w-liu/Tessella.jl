@@ -1,7 +1,7 @@
 using Test
 using Tessella
 using Tessella.MeshQuadrature
-using Tessella.Elements: MSH_CATALOG
+using Tessella.Elements: MSH_CATALOG, msh_spec
 
 function _line_moment(power::Int)
     return isodd(power) ? 0.0 : 2.0/(power+1)
@@ -10,6 +10,19 @@ end
 function _simplex_moment(exponents::Tuple)
     numerator=prod(factorial(big(exponent)) for exponent in exponents)
     denominator=factorial(big(sum(exponents)+length(exponents)))
+    return Float64(numerator//denominator)
+end
+
+function _cartesian_moment(exponents::Tuple)
+    return prod(_line_moment(exponent) for exponent in exponents)
+end
+
+function _pyramid_moment(exponents::NTuple{3,Int})
+    first,second,vertical=exponents
+    (isodd(first) || isodd(second)) && return 0.0
+    numerator=4factorial(big(vertical))*factorial(big(first+second+2))
+    denominator=(first+1)*(second+1)*
+                factorial(big(first+second+vertical+3))
     return Float64(numerator//denominator)
 end
 
@@ -25,23 +38,42 @@ function _quadrature_moment(coordinates,weights,exponents::Tuple)
     end
 end
 
+function _expect_quadrature_argument_error(f::Function)
+    try
+        f()
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        return nothing
+    end
+    error("quadrature request unexpectedly succeeded")
+end
+
 function _check_rule_moments(element_type::Int,name::String,order::Int;
                              atol::Float64)
     coordinates,weights=mesh_integration_points(element_type,name)
-    if element_type==1
+    family=msh_spec(element_type).family
+    if family===:lin
         for power in 0:order
             @test isapprox(
                 _quadrature_moment(coordinates,weights,(power,)),
                 _line_moment(power);atol=atol,rtol=atol)
         end
-    elseif element_type==2
+    elseif family===:tri
         for first in 0:order,second in 0:(order-first)
             exponents=(first,second)
             @test isapprox(
                 _quadrature_moment(coordinates,weights,exponents),
                 _simplex_moment(exponents);atol=atol,rtol=atol)
         end
-    else
+    elseif family===:qua
+        for first in 0:order,second in 0:(order-first)
+            exponents=(first,second)
+            @test isapprox(
+                _quadrature_moment(coordinates,weights,exponents),
+                _cartesian_moment(exponents);atol=atol,rtol=atol)
+        end
+    elseif family===:tet
         for first in 0:order,second in 0:(order-first),
             third in 0:(order-first-second)
             exponents=(first,second,third)
@@ -49,11 +81,38 @@ function _check_rule_moments(element_type::Int,name::String,order::Int;
                 _quadrature_moment(coordinates,weights,exponents),
                 _simplex_moment(exponents);atol=atol,rtol=atol)
         end
+    elseif family===:hex
+        for first in 0:order,second in 0:(order-first),
+            third in 0:(order-first-second)
+            exponents=(first,second,third)
+            @test isapprox(
+                _quadrature_moment(coordinates,weights,exponents),
+                _cartesian_moment(exponents);atol=atol,rtol=atol)
+        end
+    elseif family===:pri
+        for first in 0:order,second in 0:(order-first),
+            third in 0:(order-first-second)
+            exponents=(first,second,third)
+            expected=_simplex_moment((first,second))*
+                     _line_moment(third)
+            @test isapprox(
+                _quadrature_moment(coordinates,weights,exponents),
+                expected;atol=atol,rtol=atol)
+        end
+    else
+        @assert family===:pyr
+        for first in 0:order,second in 0:(order-first),
+            third in 0:(order-first-second)
+            exponents=(first,second,third)
+            @test isapprox(
+                _quadrature_moment(coordinates,weights,exponents),
+                _pyramid_moment(exponents);atol=atol,rtol=atol)
+        end
     end
     return coordinates,weights
 end
 
-@testset "Gmsh-shaped simplex reference quadrature" begin
+@testset "Gmsh-shaped reference quadrature" begin
     @test mesh_integration_points(15,"Gauss5")==
           (Float64[0,0,0],Float64[1])
     @test mesh_integration_points(1,"Gauss0")==
@@ -72,14 +131,54 @@ end
             0.166666666667,0.5,0.166666666667,
             0.5,0.166666666667,0.166666666667],
         Float64[-0.133333333333333,0.075,0.075,0.075,0.075])
+    @test mesh_integration_points(3,"Gauss1")==(
+        Float64[
+            0.816496580928,0,0,
+            -0.408248290464,0.840896415255,0,
+            -0.408248290464,-0.840896415255,0],
+        fill(1.3333333333333,3))
+    @test mesh_integration_points(3,"Gauss2")==(
+        Float64[
+            0,0,0,
+            0,0.9660917830792959,0,
+            0,-0.9660917830792959,0,
+            0.7745966692414834,0.7745966692414834,0,
+            0.7745966692414834,-0.7745966692414834,0,
+            -0.7745966692414834,0.7745966692414834,0,
+            -0.7745966692414834,-0.7745966692414834,0],
+        Float64[1.1428571428571428,
+                0.31746031746031744,0.31746031746031744,
+                0.5555555555555556,0.5555555555555556,
+                0.5555555555555556,0.5555555555555556])
+    @test mesh_integration_points(5,"Gauss1")==(
+        Float64[
+            0.40824826,0.70710678,-0.57735027,
+            0.40824826,-0.70710678,-0.57735027,
+            -0.40824826,0.70710678,0.57735027,
+            -0.40824826,-0.70710678,0.57735027,
+            -0.81649658,0,-0.57735027,
+            0.81649658,0,0.57735027],
+        fill(1.3333333333,6))
+    pyramid_zero=mesh_integration_points(7,"Gauss0")
+    @test pyramid_zero[1]==Float64[0,0,0.25]
+    @test isapprox(only(pyramid_zero[2]),4/3;atol=4eps(Float64),rtol=0)
 
     economical_counts=Dict(
         1=>[1,1,2,2,3,3],
         2=>[1,1,3,4,6,7],
-        4=>[1,1,4,5,11,14])
-    for element_type in (1,2,4),order in 0:5
+        3=>[1,3,7,4,9,9],
+        4=>[1,1,4,5,11,14],
+        5=>[1,6,8,8,27,27],
+        6=>[1,2,6,12,18,28],
+        7=>[1,1,8,8,27,27])
+    for element_type in (1,2,3,4,5,6,7),order in 0:5
+        moment_tolerance=element_type==5 && order==1 ? 3e-10 : 8e-13
+        # Gmsh's pinned economical quadrangle Gauss2 table is anisotropic:
+        # it integrates constants and linears, but not the y^2 moment. Exact
+        # table coverage above preserves that externally observable contract.
+        checked_order=element_type==3 && order==2 ? 1 : order
         coordinates,weights=_check_rule_moments(
-            element_type,"Gauss$order",order;atol=8e-13)
+            element_type,"Gauss$order",checked_order;atol=moment_tolerance)
         @test length(weights)==economical_counts[element_type][order+1]
         @test length(coordinates)==3length(weights)
         @test all(isfinite,coordinates)
@@ -87,7 +186,7 @@ end
     end
 
     for order in (0,1,2,3,4,5,6,12,20)
-        for element_type in (1,2,4)
+        for element_type in (1,2,3,4,5,6,7)
             coordinates,weights=_check_rule_moments(
                 element_type,"CompositeGauss$order",order;atol=8e-13)
             @test length(coordinates)==3length(weights)
@@ -104,7 +203,7 @@ end
                 @test all(v .>= 0)
                 @test all(index->u[index]+v[index]<=1,eachindex(u,v))
                 @test all(iszero,coordinates[3:3:end])
-            else
+            elseif element_type==4
                 u=coordinates[1:3:end]
                 v=coordinates[2:3:end]
                 w=coordinates[3:3:end]
@@ -114,6 +213,26 @@ end
                 @test all(
                     index->u[index]+v[index]+w[index]<=1,
                     eachindex(u,v,w))
+            elseif element_type==3
+                @test all(value->-1<=value<=1,coordinates[1:3:end])
+                @test all(value->-1<=value<=1,coordinates[2:3:end])
+                @test all(iszero,coordinates[3:3:end])
+            elseif element_type==5
+                @test all(value->-1<=value<=1,coordinates)
+            elseif element_type==6
+                u=coordinates[1:3:end]
+                v=coordinates[2:3:end]
+                @test all(u .>= 0)
+                @test all(v .>= 0)
+                @test all(index->u[index]+v[index]<=1,eachindex(u,v))
+                @test all(value->-1<=value<=1,coordinates[3:3:end])
+            else
+                u=coordinates[1:3:end]
+                v=coordinates[2:3:end]
+                w=coordinates[3:3:end]
+                @test all(value->0<=value<=1,w)
+                @test all(index->abs(u[index])<=1-w[index],eachindex(u,w))
+                @test all(index->abs(v[index])<=1-w[index],eachindex(v,w))
             end
         end
     end
@@ -130,7 +249,8 @@ end
 
     family_reference=Dict(
         family=>mesh_integration_points(type,"CompositeGauss4")
-        for (family,type) in ((:pnt,15),(:lin,1),(:tri,2),(:tet,4)))
+        for (family,type) in ((:pnt,15),(:lin,1),(:tri,2),(:qua,3),
+                              (:tet,4),(:hex,5),(:pri,6),(:pyr,7)))
     for (element_type,spec) in MSH_CATALOG
         spec.family in keys(family_reference) || continue
         @test mesh_integration_points(element_type,"CompositeGauss4")==
@@ -169,6 +289,39 @@ end
         @test isapprox(
             sum(largest_tetrahedron[2]),1/6;atol=8e-15,rtol=0)
     end
+    let largest_quadrangle=
+            mesh_integration_points(3,"CompositeGauss255")
+        @test length(largest_quadrangle[2])==128^2
+        @test isapprox(
+            sum(largest_quadrangle[2]),4.0;atol=8e-14,rtol=0)
+        @test isapprox(
+            _quadrature_moment(largest_quadrangle...,(254,0)),4/255;
+            atol=2e-15,rtol=3e-13)
+    end
+    let largest_hexahedron=
+            mesh_integration_points(5,"CompositeGauss199")
+        @test length(largest_hexahedron[2])==1_000_000
+        @test isapprox(
+            sum(largest_hexahedron[2]),8.0;atol=8e-13,rtol=0)
+        @test isapprox(
+            _quadrature_moment(largest_hexahedron...,(198,0,0)),8/199;
+            atol=2e-15,rtol=3e-13)
+    end
+    let largest_prism=mesh_integration_points(6,"CompositeGauss198")
+        @test length(largest_prism[2])==1_000_000
+        @test isapprox(sum(largest_prism[2]),1.0;atol=8e-14,rtol=0)
+        @test isapprox(
+            _quadrature_moment(largest_prism...,(198,0,0)),
+            2*_simplex_moment((198,0));atol=2e-17,rtol=3e-13)
+    end
+    let largest_pyramid=mesh_integration_points(7,"CompositeGauss199")
+        @test length(largest_pyramid[2])==1_000_000
+        @test isapprox(
+            sum(largest_pyramid[2]),4/3;atol=8e-14,rtol=0)
+        @test isapprox(
+            _quadrature_moment(largest_pyramid...,(0,0,199)),
+            _pyramid_moment((0,0,199));atol=2e-17,rtol=3e-13)
+    end
 
     mesh_integration_points(4,"CompositeGauss40")
     @test @allocated(mesh_integration_points(
@@ -177,7 +330,7 @@ end
     for value in (true,1.0,"1",typemax(UInt128))
         @test_throws ArgumentError mesh_integration_points(value,"Gauss2")
     end
-    for element_type in (999,34,3,5,6,7,140)
+    for element_type in (999,34,140)
         @test_throws ArgumentError mesh_integration_points(
             element_type,"Gauss2")
     end
@@ -188,10 +341,22 @@ end
         @test_throws ArgumentError mesh_integration_points(2,value)
     end
     for (element_type,name) in (
-        (2,"Gauss6"),(4,"Gauss6"),
+        (2,"Gauss6"),(4,"Gauss6"),(6,"Gauss6"),
         (1,"CompositeGauss256"),(2,"CompositeGauss255"),
-        (4,"CompositeGauss198"))
+        (3,"CompositeGauss256"),(4,"CompositeGauss198"),
+        (5,"CompositeGauss200"),(6,"CompositeGauss199"),
+        (7,"CompositeGauss200"))
         @test_throws ArgumentError mesh_integration_points(element_type,name)
+    end
+    oversized_callbacks=Function[
+        ()->mesh_integration_points(3,"CompositeGauss256"),
+        ()->mesh_integration_points(5,"CompositeGauss200"),
+        ()->mesh_integration_points(6,"CompositeGauss199"),
+        ()->mesh_integration_points(7,"CompositeGauss200"),
+    ]
+    foreach(_expect_quadrature_argument_error,oversized_callbacks)
+    for callback in oversized_callbacks
+        @test @allocated(_expect_quadrature_argument_error(callback))<=50_000
     end
     error_message=try
         mesh_integration_points(4,"Gauss6")
@@ -200,6 +365,13 @@ end
         sprint(showerror,err)
     end
     @test occursin("use CompositeGauss6",error_message)
+    trihedron_message=try
+        mesh_integration_points(140,"Gauss2")
+        ""
+    catch err
+        sprint(showerror,err)
+    end
+    @test occursin("no integration rules in Gmsh 4.15.2",trihedron_message)
 end
 
 # Mutant analysis:
@@ -212,3 +384,13 @@ end
 # - Returning shared table storage is rejected by the detached-result mutation.
 # - Parsing signs, whitespace, Unicode digits, or overflowing decimal suffixes is
 #   rejected by the malformed-rule cases before any quadrature allocation.
+# - Reversing tensor loop order is rejected by exact non-simplex Gmsh arrays and
+#   asymmetric Cartesian, prism, and pyramid moments.
+# - Omitting the pyramid's `(1-w)^2` Gauss--Jacobi measure or one Duffy scale is
+#   rejected by its constant, mixed, and vertical analytic moments.
+# - Reusing the ordinary line point count in the prism is rejected by Gauss1 and
+#   every odd-order composite point count.
+# - Dispatching by interpolation order is rejected by catalog-wide comparisons
+#   across complete, serendipity, and order-zero family types.
+# - Allocating before the family-specific total-point preflight is rejected by
+#   the first over-limit quadrangle, hexahedron, prism, and pyramid requests.
