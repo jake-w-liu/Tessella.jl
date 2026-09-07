@@ -49,6 +49,7 @@ using Tessella
     include("core/mesh_entity_topology_test.jl") # automatic/manual global edge/face ids
     include("core/mesh_point_location_test.jl") # robust simplex inversion and AABB lookup
     include("core/mesh_reference_geometry_test.jl") # robust simplex forward maps and Jacobians
+    include("core/mesh_function_spaces_test.jl") # P1/H1/Whitney bases, orientations, and keys
     include("core/mesh_element_quality_test.jl") # Gmsh-shaped simplex quality measures
     include("core/transform_test.jl")    # validated affine transforms + orientation preservation
     include("interfaces/io_test.jl")     # .msh v2/v4 round-trip, STL, .geo scan
@@ -89,6 +90,7 @@ using Tessella
     include("interfaces/api_mesh_entity_topology_test.jl") # cached edge/face topology lifecycle
     include("interfaces/api_mesh_point_location_test.jl") # cached simplex point location
     include("interfaces/api_mesh_jacobian_test.jl") # cached simplex Jacobian maps
+    include("interfaces/api_mesh_function_spaces_test.jl") # first-order basis/key API lifecycle
     include("interfaces/api_mesh_element_quality_test.jl") # cached simplex quality queries
     include("interfaces/api_element_catalog_test.jl") # fixed-element type and property queries
     include("interfaces/api_boolean_lifecycle_test.jl") # synchronized Boolean ownership

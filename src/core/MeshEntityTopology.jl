@@ -207,6 +207,66 @@ function _checked_topology_capacity(base::Int,additional::Int,
     end
 end
 
+function _checked_edge_candidate_count(cells::AbstractMatrix,
+                                       patterns,
+                                       caller::AbstractString)
+    try
+        return Base.checked_mul(size(cells,2),length(patterns))
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OverflowError || rethrow()
+        throw(ArgumentError(
+            "$caller: candidate count exceeds the platform Int range"))
+    end
+end
+
+function _append_generated_edges!(replacement::MeshEdgeTopology,
+                                  cells::AbstractMatrix{Int32},patterns,
+                                  element_type::Int)
+    @inbounds for cell in axes(cells,2),pattern in patterns
+        _add_generated_edge!(
+            replacement.nodes,replacement.identifiers,replacement.tags,
+            replacement.used_tags,cells[pattern[1],cell],
+            cells[pattern[2],cell],element_type,Int(cell))
+    end
+    return replacement
+end
+
+function _mesh_edge_topology_for_cells(
+    mesh::Mesh,topology::Union{Nothing,MeshEdgeTopology},
+    cells::AbstractMatrix{Int32},element_type::Int)
+    caller="mesh_edge_topology_for_cells"
+    patterns=_simplex_edge_patterns(element_type)
+    isempty(patterns) && throw(ArgumentError(
+        "$caller: unsupported linear-simplex element type $element_type"))
+    size(cells,1)==maximum(maximum,patterns) || throw(ArgumentError(
+        "$caller: type-$element_type connectivity has $(size(cells,1)) rows"))
+    if topology!==nothing
+        topology.node_count==nnodes(mesh) || error(
+            "mesh_edge_topology: internal topology does not match the mesh")
+        missing=false
+        @inbounds for cell in axes(cells,2),pattern in patterns
+            first_node=cells[pattern[1],cell]
+            second_node=cells[pattern[2],cell]
+            first_node!=second_node || throw(ArgumentError(
+                "mesh_edge_topology: type-$element_type cell $(Int(cell)) " *
+                "has a repeated edge node $first_node"))
+            missing |= !haskey(topology.tags,_edge_key(first_node,second_node))
+        end
+        missing || return topology
+    end
+    candidate_count=_checked_edge_candidate_count(cells,patterns,caller)
+    replacement=_edge_topology_copy(topology,nnodes(mesh))
+    capacity=_checked_topology_capacity(
+        length(replacement.nodes),candidate_count,caller)
+    sizehint!(replacement.nodes,capacity)
+    sizehint!(replacement.identifiers,capacity)
+    sizehint!(replacement.tags,capacity)
+    sizehint!(replacement.used_tags,capacity)
+    return _append_generated_edges!(
+        replacement,cells,patterns,element_type)
+end
+
 function _mesh_edge_topology(
     mesh::Mesh,topology::Union{Nothing,MeshEdgeTopology}=nothing)
     candidate_count=_checked_edge_candidate_count(mesh)
@@ -220,12 +280,7 @@ function _mesh_edge_topology(
     for (element_type,cells) in
         ((1,mesh.segs),(2,mesh.tris),(4,mesh.tets))
         patterns=_simplex_edge_patterns(element_type)
-        @inbounds for cell in axes(cells,2),pattern in patterns
-            _add_generated_edge!(
-                replacement.nodes,replacement.identifiers,replacement.tags,
-                replacement.used_tags,cells[pattern[1],cell],
-                cells[pattern[2],cell],element_type,cell)
-        end
+        _append_generated_edges!(replacement,cells,patterns,element_type)
     end
     return replacement
 end
