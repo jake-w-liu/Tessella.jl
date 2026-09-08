@@ -1,8 +1,10 @@
-# Differential oracle for first-order simplex bases, orientations, and keys.
+# Differential oracle for fixed-family first-order nodal bases plus simplex
+# hierarchical bases, orientations, and keys.
 # This uses the locally installed Gmsh 4.15.2 Julia API and never starts the GUI.
 using Tessella
 using Random
 using SHA
+using Tessella.Elements: MSH_CATALOG
 using Tessella.MeshTypes: mesh_crc
 
 function _gmsh_binding()
@@ -42,6 +44,15 @@ const _FUNCTION_SPACES=(
 const _HIERARCHICAL_SPACES=Set((
     "H1Legendre1","GradH1Legendre1",
     "HcurlLegendre0","CurlHcurlLegendre0"))
+const _FIXED_NODAL_SPACES=("Lagrange1","GradLagrange1")
+const _FIXED_NODAL_TYPES=sort!([
+    Int(element_type)
+    for (element_type,spec) in MSH_CATALOG
+    if spec.family in (:pnt,:lin,:tri,:qua,:tet,:hex,:pri,:pyr)])
+const _LINEAR_FAMILY_TYPES=(15,3,5,6,7)
+const _LINEAR_FAMILY_SPACES=(
+    "Lagrange","IsoParametric","GradLagrange","GradIsoParametric")
+const _MAX_ABS_DIFFERENCE=Ref(0.0)
 
 function _function_mesh()
     return Mesh(
@@ -117,10 +128,12 @@ function _compare_float(label,gmsh_values,tessella_values)
         "$label lengths differ: Gmsh=$(length(gmsh_values)), " *
         "Tessella=$(length(tessella_values))")
     for index in eachindex(gmsh_values,tessella_values)
+        difference=abs(tessella_values[index]-gmsh_values[index])
         isapprox(tessella_values[index],gmsh_values[index];
                  atol=8e-14,rtol=8e-14) || error(
             "$label differs at $index: Gmsh=$(gmsh_values[index]), " *
             "Tessella=$(tessella_values[index])")
+        _MAX_ABS_DIFFERENCE[]=max(_MAX_ABS_DIFFERENCE[],difference)
     end
     return nothing
 end
@@ -165,13 +178,23 @@ end
 #   all-orientation full-array comparison against Gmsh.
 # - Completing the whole edge cache during a type-specific key query is rejected
 #   by the intermediate one-edge and four-edge catalog checks.
+# - Dispatching explicit order-one nodal functions by interpolation order is
+#   rejected across every higher-order, serendipity, and order-zero fixed type.
+# - Permuting quadrangle, hexahedron, prism, or pyramid vertices is rejected by
+#   sequential full-array comparisons at asymmetric evaluation points.
+# - Replacing the pyramid's rational basis by a polynomial tensor basis is
+#   rejected at interior, near-apex, and exact-apex points and by its gradients.
+# - Rounding the pyramid height before a cancelling or overflowing factor is
+#   rejected by the exact-rational extreme-coordinate oracle.
+# - Omitting a prism line factor or a tensor derivative factor is rejected by
+#   every non-simplex gradient comparison.
 
 try
     gmsh.initialize(String[],false)
     gmsh.option.setNumber("General.Terminal",0)
     _build_gmsh_function_model("mesh-function-spaces")
     Tessella.API.initialize()
-    digest=try
+    digest,nodal_point_count=try
         fixture=_function_mesh()
         baseline=mesh_crc(fixture)
         _install_function_mesh!(fixture)
@@ -230,6 +253,102 @@ try
             _write_floats!(
                 stream,"type-$element_type:$space:selected",
                 tessella_selected[2])
+        end
+
+        nodal_coordinates=Float64[
+            0.13,-0.21,0.37,
+            -0.4,0.7,-0.2,
+            0.0,0.0,1.0,
+            0.0,0.0,prevfloat(1.0)]
+        append!(nodal_coordinates,2rand(rng,Float64,48).-1)
+        for element_type in _FIXED_NODAL_TYPES,
+            space in _FIXED_NODAL_SPACES
+            gmsh_basis=gmsh.model.mesh.getBasisFunctions(
+                element_type,nodal_coordinates,space)
+            tessella_basis=Tessella.API.mesh.get_basis_functions(
+                element_type,nodal_coordinates,space)
+            label="type-$element_type $space fixed-family"
+            _compare_exact(
+                "$label components",gmsh_basis[1],tessella_basis[1])
+            _compare_float(
+                "$label basis",gmsh_basis[2],tessella_basis[2])
+            _compare_exact(
+                "$label orientation count",gmsh_basis[3],tessella_basis[3])
+            _compare_float(
+                "$label selected basis",
+                gmsh.model.mesh.getBasisFunctions(
+                    element_type,nodal_coordinates,space,Int32[0])[2],
+                Tessella.API.mesh.get_basis_functions(
+                    element_type,nodal_coordinates,space,Int32[0])[2])
+            gmsh_orientations=
+                gmsh.model.mesh.getNumberOfOrientations(element_type,space)
+            tessella_orientations=
+                Tessella.API.mesh.get_number_of_orientations(
+                    element_type,space)
+            _compare_exact(
+                "$label number of orientations",
+                gmsh_orientations,tessella_orientations)
+            gmsh_key_count=gmsh.model.mesh.getNumberOfKeys(
+                element_type,space)
+            tessella_key_count=Tessella.API.mesh.get_number_of_keys(
+                element_type,space)
+            _compare_exact(
+                "$label number of keys",gmsh_key_count,tessella_key_count)
+            type_keys=zeros(Int32,gmsh_key_count)
+            entity_keys=UInt64.(1:gmsh_key_count)
+            _compare_exact(
+                "$label key information",
+                gmsh.model.mesh.getKeysInformation(
+                    type_keys,entity_keys,element_type,space),
+                Tessella.API.mesh.get_keys_information(
+                    type_keys,entity_keys,element_type,space))
+            _write_ints!(
+                stream,"$label:meta",
+                (tessella_basis[1],tessella_basis[3],
+                 tessella_orientations,tessella_key_count))
+            _write_floats!(stream,"$label:basis",tessella_basis[2])
+        end
+
+        for element_type in _LINEAR_FAMILY_TYPES,
+            space in _LINEAR_FAMILY_SPACES
+            gmsh_basis=gmsh.model.mesh.getBasisFunctions(
+                element_type,nodal_coordinates,space)
+            tessella_basis=Tessella.API.mesh.get_basis_functions(
+                element_type,nodal_coordinates,space)
+            label="type-$element_type $space linear-family"
+            _compare_exact(
+                "$label components",gmsh_basis[1],tessella_basis[1])
+            _compare_float(
+                "$label basis",gmsh_basis[2],tessella_basis[2])
+            _compare_exact(
+                "$label orientation count",gmsh_basis[3],tessella_basis[3])
+            gmsh_orientations=
+                gmsh.model.mesh.getNumberOfOrientations(element_type,space)
+            tessella_orientations=
+                Tessella.API.mesh.get_number_of_orientations(
+                    element_type,space)
+            _compare_exact(
+                "$label number of orientations",
+                gmsh_orientations,tessella_orientations)
+            gmsh_key_count=gmsh.model.mesh.getNumberOfKeys(
+                element_type,space)
+            tessella_key_count=Tessella.API.mesh.get_number_of_keys(
+                element_type,space)
+            _compare_exact(
+                "$label number of keys",gmsh_key_count,tessella_key_count)
+            type_keys=zeros(Int32,gmsh_key_count)
+            entity_keys=UInt64.(1:gmsh_key_count)
+            _compare_exact(
+                "$label key information",
+                gmsh.model.mesh.getKeysInformation(
+                    type_keys,entity_keys,element_type,space),
+                Tessella.API.mesh.get_keys_information(
+                    type_keys,entity_keys,element_type,space))
+            _write_ints!(
+                stream,"$label:meta",
+                (tessella_basis[1],tessella_basis[3],
+                 tessella_orientations,tessella_key_count))
+            _write_floats!(stream,"$label:basis",tessella_basis[2])
         end
 
         gmsh_element_tags=Dict(1=>UInt64(101),2=>UInt64(102),4=>UInt64(103))
@@ -356,6 +475,12 @@ try
                 4,"HcurlLegendre0",-1,1,2),
             ()->Tessella.API.mesh.get_keys_information(
                 Int32[1],UInt64[1],4,"HcurlLegendre0"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                10,Float64[0,0,0],"Lagrange"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                3,Float64[0,0,0],"H1Legendre1"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                140,Float64[0,0,0],"Lagrange1"),
         )
             _rejects_argument(invalid) || error(
                 "Tessella accepted an invalid function-space query")
@@ -366,16 +491,24 @@ try
         end
 
         result=bytes2hex(SHA.sha256(take!(stream)))
-        result=="faa6db6b9191fd1722bfa46768d9959ba4d1a237b1e2670d547a08e6abad7c91" ||
+        result=="26d28400c434fa81836b6c0e83cf8afeabc8f812c86f6176d464ac7520816612" ||
             error("mesh function-space checksum changed to $result")
-        result
+        result,length(nodal_coordinates)÷3
     finally
         Tessella.API.finalize()
     end
     println("mesh-function-space differential: Gmsh ",
             gmsh.GMSH_API_VERSION,
             " basis_cases=30 orientation_cases=30 key_cases=30 " *
-            "all_orientations=32 lazy_edge_catalog=true sha=",digest)
+            "fixed_nodal_types=",length(_FIXED_NODAL_TYPES),
+            " fixed_nodal_cases=",
+            length(_FIXED_NODAL_TYPES)*length(_FIXED_NODAL_SPACES),
+            " fixed_nodal_points=",nodal_point_count,
+            " linear_family_alias_cases=",
+            length(_LINEAR_FAMILY_TYPES)*length(_LINEAR_FAMILY_SPACES),
+            " all_orientations=32 max_abs_difference=",
+            _MAX_ABS_DIFFERENCE[],
+            " lazy_edge_catalog=true sha=",digest)
 finally
     gmsh.finalize()
 end

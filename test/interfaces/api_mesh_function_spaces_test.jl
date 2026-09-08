@@ -28,9 +28,22 @@ end
         4,"HcurlLegendre0")==24
     @test _MESH_FUNCTION_API.mesh.get_number_of_keys(
         4,"HcurlLegendre0")==6
+    @test _MESH_FUNCTION_API.mesh.get_number_of_orientations(
+        14,"Lagrange1")==1
+    @test _MESH_FUNCTION_API.mesh.get_number_of_keys(
+        12,"GradLagrange1")==8
     @test _MESH_FUNCTION_API.mesh.get_basis_functions(
         2,[0.2,0.3,0.1],"Lagrange")==
         (Int32(1),[0.5,0.2,0.3],Int32(1))
+    quadrangle=_MESH_FUNCTION_API.mesh.get_basis_functions(
+        3,[0.1,0.2,0.3],"Lagrange")
+    @test quadrangle[1]==1
+    @test quadrangle[3]==1
+    @test isapprox(
+        quadrangle[2],[0.18,0.22,0.33,0.27];atol=eps(Float64),rtol=0)
+    @test _MESH_FUNCTION_API.mesh.get_basis_functions(
+        14,[0,0,1],"Lagrange1")==
+        (Int32(1),Float64[0,0,0,0,1],Int32(1))
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
         2,"Lagrange")
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_keys(
@@ -46,6 +59,21 @@ end
         fixture=_mesh_function_api_fixture()
         baseline=mesh_crc(fixture)
         _install_mesh_function_fixture!(fixture)
+
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions(
+            12,[0.1,0.2,0.3],"GradLagrange1")[1:2:end]==
+            (Int32(3),Int32(1))
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            12,"Lagrange1")==Int32[]
+        @test _MESH_FUNCTION_API.mesh.get_keys(
+            12,"Lagrange1")==
+            (Int32[],UInt64[],Float64[])
+        @test _MESH_FUNCTION_API.mesh.get_keys_information(
+            zeros(Int32,5),UInt64.(1:5),14,"Lagrange1")==
+            fill((Int32(0),Int32(1)),5)
+        @test _MESH_FUNCTION_API.mesh.get_all_edges()==
+            (UInt64[],UInt64[])
+        @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
 
         nodal=_MESH_FUNCTION_API.mesh.get_keys(2,"Lagrange")
         @test nodal==(
@@ -122,6 +150,10 @@ end
                 4,"HcurlLegendre0",-1,true,1),
             ()->_MESH_FUNCTION_API.mesh.get_keys_information(
                 Int32[1],UInt64[1],4,"HcurlLegendre0"),
+            ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
+                10,[0,0,0],"Lagrange"),
+            ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
+                140,[0,0,0],"Lagrange1"),
         )
             @test_throws ArgumentError invalid()
             @test _MESH_FUNCTION_API.mesh.get_all_edges()==before

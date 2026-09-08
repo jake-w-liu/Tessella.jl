@@ -1,6 +1,7 @@
 using Test
 using Tessella
 using Tessella.MeshFunctionSpaces
+using Tessella.Elements: MSH_CATALOG, msh_spec
 using Tessella.MeshEntityTopology: _mesh_edge_topology_for_cells
 
 function _function_space_fixture()
@@ -38,6 +39,48 @@ function _orientation_fixture(element_type)
     element_type==1 && return Mesh(coordinates;segs=cells)
     element_type==2 && return Mesh(coordinates;tris=cells)
     return Mesh(coordinates;tets=cells)
+end
+
+function _first_order_reference_points(element_type)
+    _,dimension,_,_,coordinates,primary_nodes=
+        Tessella.API.mesh.get_element_properties(element_type)
+    result=zeros(Float64,3primary_nodes)
+    if dimension>0
+        for node in 1:primary_nodes,axis in 1:dimension
+            result[3node-3+axis]=coordinates[dimension*(node-1)+axis]
+        end
+    end
+    return result,Int(primary_nodes)
+end
+
+function _exact_pyramid_reference(point,gradient::Bool)
+    u,v,w=Rational{BigInt}.(point)
+    q=1-w
+    q==0 && return gradient ? Rational{BigInt}[
+        -1//4,-1//4,-1//4, 1//4,-1//4,-1//4,
+         1//4,1//4,-1//4, -1//4,1//4,-1//4, 0,0,1] :
+        Rational{BigInt}[0,0,0,0,1]
+    signs=((-1,-1),(1,-1),(1,1),(-1,1))
+    exact=Rational{BigInt}[]
+    if gradient
+        for (sign_u,sign_v) in signs
+            push!(exact,
+                  sign_u*(q+sign_v*v)/(4q),
+                  sign_v*(q+sign_u*u)/(4q),
+                  (sign_u*sign_v*u*v-q^2)/(4q^2))
+        end
+        append!(exact,(0,0,1))
+    else
+        for (sign_u,sign_v) in signs
+            push!(exact,(q+sign_u*u)*(q+sign_v*v)/(4q))
+        end
+        push!(exact,w)
+    end
+    return map(exact) do value
+        setprecision(BigFloat,256) do
+            Float64(BigFloat(value))
+        end
+    end
 end
 
 @testset "first-order linear-simplex reference function spaces" begin
@@ -122,7 +165,7 @@ end
     end
     for invalid in (
         ()->mesh_basis_functions(true,[0,0,0],"Lagrange"),
-        ()->mesh_basis_functions(3,[0,0,0],"Lagrange"),
+        ()->mesh_basis_functions(10,[0,0,0],"Lagrange"),
         ()->mesh_basis_functions(999,[0,0,0],"Lagrange"),
         ()->mesh_basis_functions(2,[0,0,0],:Lagrange),
         ()->mesh_basis_functions(2,[0,0,0],"Lagrange2"),
@@ -132,6 +175,173 @@ end
         ()->mesh_basis_functions(2,[0,0,0],"HcurlLegendre0",Int32[6]),
         ()->mesh_basis_functions(2,[0,0,0],"HcurlLegendre0",Int32[1,1]),
         ()->mesh_basis_functions(2,[0,0,0],"HcurlLegendre0",[true]),
+    )
+        @test_throws ArgumentError invalid()
+    end
+
+    @test isempty(Docs.undocumented_names(
+        Tessella.MeshFunctionSpaces;private=false))
+    @test isempty(Test.detect_ambiguities(
+        Tessella.MeshFunctionSpaces;recursive=true))
+end
+
+@testset "fixed-family order-one nodal reference functions" begin
+    representatives=(15,1,2,3,4,5,6,7)
+    interior=Dict(
+        15=>Float64[0,0,0],1=>Float64[0.17,0,0],
+        2=>Float64[0.17,0.23,0],3=>Float64[0.17,-0.23,0],
+        4=>Float64[0.17,0.23,0.11],5=>Float64[0.17,-0.23,0.11],
+        6=>Float64[0.17,0.23,-0.11],7=>Float64[0.1,-0.2,0.3])
+
+    for element_type in representatives
+        reference_points,node_count=
+            _first_order_reference_points(element_type)
+        components,values,orientations=mesh_basis_functions(
+            element_type,reference_points,"Lagrange1")
+        @test components==1
+        @test orientations==1
+        @test length(values)==node_count^2
+        for point in 1:node_count,node in 1:node_count
+            @test isapprox(
+                values[(point-1)*node_count+node],point==node ? 1.0 : 0.0;
+                atol=8e-15,rtol=0)
+        end
+
+        point=interior[element_type]
+        nodal=mesh_basis_functions(
+            element_type,point,"Lagrange1")[2]
+        gradients=mesh_basis_functions(
+            element_type,point,"GradLagrange1")[2]
+        @test isapprox(sum(nodal),1.0;atol=8e-15,rtol=0)
+        @test length(gradients)==3node_count
+        for axis in 1:3
+            @test isapprox(
+                sum(gradients[axis:3:end]),0.0;atol=8e-15,rtol=0)
+        end
+        @test all(isfinite,nodal)
+        @test all(isfinite,gradients)
+
+        if element_type!=15
+            step=1e-6
+            tolerance=element_type==7 ? 4e-8 : 2e-9
+            for axis in 1:3
+                plus=copy(point);minus=copy(point)
+                plus[axis]+=step;minus[axis]-=step
+                plus_values=mesh_basis_functions(
+                    element_type,plus,"Lagrange1")[2]
+                minus_values=mesh_basis_functions(
+                    element_type,minus,"Lagrange1")[2]
+                for node in 1:node_count
+                    finite_difference=(plus_values[node]-minus_values[node])/
+                                      (2step)
+                    @test isapprox(
+                        gradients[3node-3+axis],finite_difference;
+                        atol=tolerance,rtol=tolerance)
+                end
+            end
+        end
+    end
+
+    for element_type in representatives,
+        (plain,explicit) in (("Lagrange","Lagrange1"),
+                             ("IsoParametric","Lagrange1"),
+                             ("GradLagrange","GradLagrange1"),
+                             ("GradIsoParametric","GradLagrange1"))
+        point=interior[element_type]
+        @test mesh_basis_functions(element_type,point,plain)==
+              mesh_basis_functions(element_type,point,explicit)
+    end
+
+    catalog_points=Float64[
+        0.13,-0.21,0.37,
+        -0.4,0.7,-0.2,
+        0.0,0.0,1.0]
+    family_representative=Dict(
+        msh_spec(element_type).family=>element_type
+        for element_type in representatives)
+    family_reference=Dict(
+        family=>mesh_basis_functions(
+            element_type,catalog_points,"Lagrange1")
+        for (family,element_type) in family_representative)
+    family_gradient_reference=Dict(
+        family=>mesh_basis_functions(
+            element_type,catalog_points,"GradLagrange1")
+        for (family,element_type) in family_representative)
+    family_counts=Dict(
+        family=>Int(length(reference[2])÷(length(catalog_points)÷3))
+        for (family,reference) in family_reference)
+    for (element_type,spec) in MSH_CATALOG
+        spec.family===:trih && continue
+        expected=family_reference[spec.family]
+        @test mesh_basis_functions(
+            element_type,catalog_points,"Lagrange1")==expected
+        @test mesh_basis_functions(
+            element_type,catalog_points,"GradLagrange1")==
+            family_gradient_reference[spec.family]
+        @test mesh_number_of_orientations(
+            element_type,"Lagrange1")==1
+        @test mesh_number_of_keys(
+            element_type,"Lagrange1")==family_counts[spec.family]
+        @test mesh_key_dimension(element_type,"Lagrange1")==0
+        key_count=family_counts[spec.family]
+        @test mesh_keys_information(
+            zeros(Int32,key_count),UInt64.(1:key_count),
+            element_type,"Lagrange1")==
+            fill((Int32(0),Int32(1)),key_count)
+    end
+
+    @test mesh_basis_functions(7,[0,0,1],"Lagrange1")[2]==
+          Float64[0,0,0,0,1]
+    apex_gradient=Float64[
+        -0.25,-0.25,-0.25,
+         0.25,-0.25,-0.25,
+         0.25,0.25,-0.25,
+        -0.25,0.25,-0.25,
+         0,0,1]
+    @test mesh_basis_functions(7,[0,0,1],"GradLagrange1")[2]==
+          apex_gradient
+    @test mesh_basis_functions(
+        7,[1e-8,-1e-8,1],"GradLagrange1")[2]==apex_gradient
+    for height in (prevfloat(1.0),nextfloat(1.0))
+        q=1-height
+        @test mesh_basis_functions(
+            7,[0,0,height],"Lagrange1")[2]==
+            Float64[q/4,q/4,q/4,q/4,height]
+        @test mesh_basis_functions(
+            7,[0,0,height],"GradLagrange1")[2]==apex_gradient
+    end
+    maximum=floatmax(Float64)
+    for extreme_pyramid in (
+            Float64[maximum,maximum,maximum],
+            Float64[-maximum,maximum,maximum],
+            Float64[maximum,-maximum,-maximum],
+            Float64[-maximum,-maximum,-maximum]),
+        (space,gradient) in (("Lagrange1",false),
+                             ("GradLagrange1",true))
+        expected=_exact_pyramid_reference(extreme_pyramid,gradient)
+        values=mesh_basis_functions(7,extreme_pyramid,space)[2]
+        @test all(isfinite,expected)
+        @test values==expected
+        @test all(isfinite,values)
+    end
+
+    empty_basis=mesh_basis_functions(14,Float64[],"Lagrange1")
+    @test empty_basis==(Int32(1),Float64[],Int32(1))
+    detached=mesh_basis_functions(12,catalog_points,"Lagrange1")
+    original=copy(detached[2])
+    detached[2][1]=99
+    @test mesh_basis_functions(
+        12,catalog_points,"Lagrange1")[2]==original
+
+    for invalid in (
+        ()->mesh_basis_functions(10,[0,0,0],"Lagrange"),
+        ()->mesh_basis_functions(12,[0,0,0],"GradIsoParametric"),
+        ()->mesh_basis_functions(3,[0,0,0],"H1Legendre1"),
+        ()->mesh_basis_functions(5,[0,0,0],"HcurlLegendre0"),
+        ()->mesh_basis_functions(140,[0,0,0],"Lagrange1"),
+        ()->mesh_basis_functions(
+            5,[floatmax(Float64),floatmax(Float64),floatmax(Float64)],
+            "Lagrange1"),
     )
         @test_throws ArgumentError invalid()
     end

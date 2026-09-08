@@ -12,8 +12,9 @@ straight periodic boundary or embedded curves and planar periodic volume boundar
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache, plus deterministic global edge and triangular or
-quadrangular face catalogs and first-order Lagrange/H1/lowest-order H(curl) bases,
-orientations, and node/edge keys. It also owns a reusable robust AABB locator for
+quadrangular face catalogs, fixed-family order-one nodal reference functions, and
+simplex H1/lowest-order H(curl) bases, orientations, and node/edge keys. It also
+owns a reusable robust AABB locator for
 dense element-by-coordinate and reference-coordinate queries, plus scale-robust
 named quality queries and Gmsh-shaped forward maps/Jacobians over dense cached
 elements. Element type/property lookup and bounded fixed-family reference
@@ -1599,14 +1600,15 @@ get_jacobian(element_tag,local_coord)=
     get_basis_functions(element_type, local_coord, function_space_type,
                         wanted_orientations=Int32[])
 
-Return `(num_components, basis_functions, num_orientations)` for a linear segment,
-triangle, or tetrahedron at concatenated `(u,v,w)` evaluation points. Supported
-spaces are isoparametric or explicit-order-one Lagrange functions and gradients,
-order-one hierarchical H1 functions and gradients, and lowest-order H(curl)
-functions and curls. Values use Gmsh's orientation-then-point-then-function-then-
-component layout. An empty orientation selection returns every orientation for a
-hierarchical space and the sole orientation for Lagrange spaces. This
-reference-element query does not require a cached mesh.
+Return `(num_components, basis_functions, num_orientations)` at concatenated
+`(u,v,w)` evaluation points. `Lagrange1` and `GradLagrange1` cover every fixed-node
+Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid
+type. Unqualified Lagrange and isoparametric aliases cover Point and the first-order
+types 1--7. Order-one hierarchical H1 functions and gradients and lowest-order
+H(curl) functions and curls cover types 1, 2, and 4. Values use Gmsh's orientation-
+then-point-then-function-then-component layout. An empty orientation selection
+returns every hierarchical orientation or the sole nodal orientation. This query
+does not require a cached mesh.
 """
 get_basis_functions(element_type,local_coord,function_space_type,
                     wanted_orientations=Int32[])=
@@ -1628,9 +1630,10 @@ get_number_of_orientations(element_type,function_space_type)=
                                     tag=-1, task=0, num_tasks=1)
 
 Return one lexicographic orientation index per cached element of the requested
-linear-simplex type. Lagrange spaces return zeros. Entity filtering and nondefault
-task partitioning require metadata or caller-owned output storage not present in
-the detached cache API.
+supported type. Nodal spaces return zeros. Known fixed types absent from the
+linear-simplex cache return an empty vector. Entity filtering and nondefault task
+partitioning require metadata or caller-owned output storage not present in the
+detached cache API.
 """
 get_basis_functions_orientation(element_type,function_space_type,
                                 tag=-1,task=0,num_tasks=1)=
@@ -1670,8 +1673,9 @@ get_keys_for_element(element_tag,function_space_type,return_coord=true)=
 """
     get_number_of_keys(element_type, function_space_type)
 
-Return the number of node or edge keys owned by one supported linear-simplex
-element. This reference-element query does not require a cached mesh.
+Return the number of node or edge keys owned by one supported reference element.
+Explicit order-one nodal counts cover every fixed family except Trihedron;
+hierarchical counts cover linear simplexes. This query does not require a cache.
 """
 get_number_of_keys(element_type,function_space_type)=
     _get_number_of_keys(element_type,function_space_type)
@@ -1681,8 +1685,10 @@ get_number_of_keys(element_type,function_space_type)=
                          function_space_type)
 
 Return `(entity_dimension, polynomial_order)` for complete element-sized groups
-of supported node or edge keys. Key arrays must have equal lengths and the expected
-type-key value for the selected space.
+of supported node or edge keys. Explicit order-one nodal metadata covers every
+fixed family except Trihedron; hierarchical metadata covers linear simplexes. Key
+arrays must have equal lengths and the expected type-key value for the selected
+space.
 """
 get_keys_information(type_keys,entity_keys,element_type,function_space_type)=
     _get_keys_information(
