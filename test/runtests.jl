@@ -50,7 +50,7 @@ using Tessella
     include("core/mesh_point_location_test.jl") # robust simplex inversion and AABB lookup
     include("core/mesh_reference_geometry_test.jl") # robust simplex forward maps and Jacobians
     include("core/mesh_quadrature_test.jl") # bounded fixed-family rules and analytic moments
-    include("core/mesh_function_spaces_test.jl") # fixed-family P1 plus simplex H1/Whitney bases
+    include("core/mesh_function_spaces_test.jl") # arbitrary-order nodal plus simplex H1/Whitney bases
     include("core/mesh_element_quality_test.jl") # Gmsh-shaped simplex quality measures
     include("core/transform_test.jl")    # validated affine transforms + orientation preservation
     include("interfaces/io_test.jl")     # .msh v2/v4 round-trip, STL, .geo scan

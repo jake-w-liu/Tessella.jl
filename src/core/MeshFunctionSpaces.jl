@@ -2,18 +2,21 @@
     MeshFunctionSpaces
 
 Reference finite-element function spaces and global degree-of-freedom keys.
-Explicit order-one nodal functions cover every fixed Point, Line, Triangle,
-Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type. Hierarchical H1 and
-lowest-order H(curl) functions, cached orientations, and populated keys cover the
-finalized linear-simplex [`Mesh`](@ref). The implementation follows Gmsh 4.15.2's
-reference coordinates, output layout, lexicographic orientation indices, nodal
-keys, and edge keys. Unimplemented interpolation orders and trihedron bases fail
-explicitly.
+Actual- and explicit-order nodal functions cover every fixed Point, Line,
+Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type.
+Hierarchical H1 and lowest-order H(curl) functions, cached orientations, and
+populated keys cover the finalized linear-simplex [`Mesh`](@ref). The
+implementation follows Gmsh 4.15.2's reference coordinates, output layout,
+lexicographic orientation indices, nodal keys, and edge keys. Trihedron bases
+fail explicitly.
 """
 module MeshFunctionSpaces
 
 using ..MeshTypes: Mesh
-using ..Elements: msh_spec
+using ..Elements: lagrange_nodes, msh_spec, _hex_monomials,
+                  _line_monomials, _msh_type_exact, _pri_monomials,
+                  _PYR_EDGES, _qua_monomials, _tet_monomials,
+                  _tri_monomials
 using ..MeshEntityTopology: MeshEdgeTopology, _mesh_edges,
                             _simplex_edge_patterns
 using ..MeshPointLocation: mesh_element_block, mesh_element_record
@@ -36,9 +39,7 @@ struct _FunctionSpace
 end
 
 const _LAGRANGE=_FunctionSpace(:lagrange,1,false,0,-1)
-const _LAGRANGE_1=_FunctionSpace(:lagrange,1,false,0,1)
 const _GRAD_LAGRANGE=_FunctionSpace(:grad_lagrange,3,false,0,-1)
-const _GRAD_LAGRANGE_1=_FunctionSpace(:grad_lagrange,3,false,0,1)
 const _H1_1=_FunctionSpace(:lagrange,1,true,0,1)
 const _GRAD_H1_1=_FunctionSpace(:grad_lagrange,3,true,0,1)
 const _HCURL_0=_FunctionSpace(:hcurl,3,true,1,0)
@@ -51,6 +52,30 @@ const _HEXAHEDRON_SIGNS=((-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),
                          (-1.0,-1.0,1.0),(1.0,-1.0,1.0),
                          (1.0,1.0,1.0),(-1.0,1.0,1.0))
 
+function _explicit_nodal_space(name::String,prefix::String,kind::Symbol,
+                               caller::AbstractString)
+    startswith(name,prefix) || return nothing
+    suffix=SubString(name,nextind(name,lastindex(prefix)))
+    isempty(suffix) && return nothing
+    order=0
+    digits=0
+    for character in suffix
+        '0'<=character<='9' || throw(ArgumentError(
+            "$caller: unsupported function_space_type $(repr(name)); " *
+            "explicit Lagrange orders must use decimal digits"))
+        digits+=1
+        digits<=2 || throw(ArgumentError(
+            "$caller: explicit interpolation order is outside the supported " *
+            "Gmsh 4.15.2 range 0:10"))
+        order=10order+(Int(character)-Int('0'))
+        order<=10 || throw(ArgumentError(
+            "$caller: interpolation order $order is outside the supported " *
+            "Gmsh 4.15.2 range 0:10"))
+    end
+    components=kind===:lagrange ? 1 : 3
+    return _FunctionSpace(kind,components,false,0,order)
+end
+
 function _function_space(value,caller::AbstractString)
     value isa AbstractString || throw(ArgumentError(
         "$caller: function_space_type must be a string"))
@@ -58,31 +83,24 @@ function _function_space(value,caller::AbstractString)
     occursin('\0',name) && throw(ArgumentError(
         "$caller: function_space_type must not contain NUL"))
     (name=="Lagrange" || name=="IsoParametric") && return _LAGRANGE
-    name=="Lagrange1" && return _LAGRANGE_1
     (name=="GradLagrange" || name=="GradIsoParametric") &&
         return _GRAD_LAGRANGE
-    name=="GradLagrange1" && return _GRAD_LAGRANGE_1
+    explicit=_explicit_nodal_space(
+        name,"GradLagrange",:grad_lagrange,caller)
+    explicit===nothing || return explicit
+    explicit=_explicit_nodal_space(name,"Lagrange",:lagrange,caller)
+    explicit===nothing || return explicit
     name=="H1Legendre1" && return _H1_1
     name=="GradH1Legendre1" && return _GRAD_H1_1
     name=="HcurlLegendre0" && return _HCURL_0
     name=="CurlHcurlLegendre0" && return _CURL_HCURL_0
     throw(ArgumentError(
         "$caller: unsupported function_space_type $(repr(name)); supported " *
-        "first-order spaces are Lagrange, IsoParametric, Lagrange1, " *
-        "GradLagrange, GradIsoParametric, GradLagrange1, H1Legendre1, " *
-        "GradH1Legendre1, HcurlLegendre0, and CurlHcurlLegendre0"))
-end
-
-@inline function _first_order_node_count(family::Symbol)
-    family===:pnt && return 1
-    family===:lin && return 2
-    family===:tri && return 3
-    family===:qua && return 4
-    family===:tet && return 4
-    family===:hex && return 8
-    family===:pri && return 6
-    family===:pyr && return 5
-    error("MeshFunctionSpaces: unsupported internal nodal family $family")
+        "nodal spaces are Lagrange, IsoParametric, Lagrange0 through " *
+        "Lagrange10, GradLagrange, GradIsoParametric, and GradLagrange0 " *
+        "through GradLagrange10; supported hierarchical spaces are " *
+        "H1Legendre1, GradH1Legendre1, HcurlLegendre0, and " *
+        "CurlHcurlLegendre0"))
 end
 
 function _basis_element_contract(element_type_value,space::_FunctionSpace,
@@ -93,7 +111,7 @@ function _basis_element_contract(element_type_value,space::_FunctionSpace,
             "$caller: element type $element_type is not a supported linear " *
             "segment, triangle, or tetrahedron for hierarchical spaces"))
         return element_type,msh_spec(element_type).family,
-               _vertex_count(element_type)
+               _vertex_count(element_type),element_type
     end
 
     spec=msh_spec(element_type)
@@ -103,17 +121,15 @@ function _basis_element_contract(element_type_value,space::_FunctionSpace,
     spec.family in _FIXED_NODAL_FAMILIES || throw(ArgumentError(
         "$caller: element type $element_type belongs to unsupported " *
         "$(spec.family) family"))
-    node_count=_first_order_node_count(spec.family)
-    if space.key_order==1 || spec.family===:pnt ||
-       (spec.order==1 && spec.nnodes==node_count)
-        return element_type,spec.family,node_count
+    basis_type=if space.key_order==-1
+        element_type
+    elseif spec.family===:pnt
+        15
+    else
+        _msh_type_exact(spec.family,space.key_order,false,caller)
     end
-    throw(ArgumentError(
-        "$caller: $(space.kind===:lagrange ? "Lagrange" : "GradLagrange") " *
-        "for element type $element_type requires its unavailable order-" *
-        "$(spec.order) nodal basis; use " *
-        "$(space.kind===:lagrange ? "Lagrange1" : "GradLagrange1") for " *
-        "the supported first-order family basis"))
+    basis_spec=msh_spec(basis_type)
+    return element_type,spec.family,basis_spec.nnodes,basis_type
 end
 
 @inline function _vertex_count(element_type::Int)
@@ -498,6 +514,8 @@ function _write_nodal_basis!(result,coordinates,point_count::Int,
     error("MeshFunctionSpaces: unsupported internal nodal family $family")
 end
 
+include("HigherOrderNodal.jl")
+
 function _barycentric_coordinates(element_type::Int,u::Float64,v::Float64,
                                   w::Float64,caller::AbstractString,point::Int)
     if element_type==1
@@ -596,7 +614,7 @@ function mesh_basis_functions(element_type_value,local_coord,
                               caller::AbstractString="mesh_basis_functions")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,family,nodal_count=
+    element_type,_,nodal_count,basis_type=
         _basis_element_contract(element_type,space,caller)
     coordinates,point_count=_checked_local_coordinates(local_coord,caller)
     total_orientations=space.hierarchical ?
@@ -611,8 +629,8 @@ function mesh_basis_functions(element_type_value,local_coord,
         caller=caller)
     result=Vector{Float64}(undef,result_length)
     if !space.hierarchical
-        _write_nodal_basis!(
-            result,coordinates,point_count,family,
+        _write_higher_order_nodal!(
+            result,coordinates,point_count,basis_type,
             space.kind===:grad_lagrange,caller)
         return Int32(space.components),result,Int32(1)
     end
@@ -672,7 +690,7 @@ function mesh_number_of_orientations(element_type_value,function_space_type;
                                          "mesh_number_of_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
     return Int32(space.hierarchical ? _orientation_count(element_type) : 1)
 end
 
@@ -702,7 +720,7 @@ function mesh_basis_orientations(mesh::Mesh,element_type_value,
                                      "mesh_basis_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[]
     _,cells=block
@@ -739,7 +757,7 @@ function mesh_number_of_keys(element_type_value,function_space_type;
                              caller::AbstractString="mesh_number_of_keys")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,nodal_count=
+    element_type,_,nodal_count,_=
         _basis_element_contract(element_type,space,caller)
     return Int32(space.hierarchical ?
                  (space.key_dimension==0 ? _vertex_count(element_type) :
@@ -816,8 +834,15 @@ end
 
 function _keys_for_cells(mesh::Mesh,cells::AbstractMatrix{Int32},
                          element_type::Int,space::_FunctionSpace,
+                         nodal_count::Int,
                          topology::Union{Nothing,MeshEdgeTopology},
                          return_coord::Bool,caller::AbstractString)
+    if !space.hierarchical && size(cells,1)!=nodal_count
+        throw(ArgumentError(
+            "$caller: element type $element_type stores $(size(cells,1)) " *
+            "nodal keys, but the requested basis requires $nodal_count; " *
+            "the cached mesh owns only its stored interpolation nodes"))
+    end
     return space.key_dimension==0 ?
         _node_keys(mesh,cells,return_coord,caller) :
         _edge_keys(
@@ -830,14 +855,16 @@ function mesh_keys(mesh::Mesh,element_type_value,function_space_type,
                    return_coord=true,caller::AbstractString="mesh_keys")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,_,nodal_count,_=
+        _basis_element_contract(element_type,space,caller)
     coordinates_requested=_checked_bool(
         return_coord,caller,"return_coord")
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[],UInt64[],Float64[]
     _,cells=block
     return _keys_for_cells(
-        mesh,cells,element_type,space,topology,coordinates_requested,caller)
+        mesh,cells,element_type,space,nodal_count,topology,
+        coordinates_requested,caller)
 end
 
 """Return detached keys for one dense cached element tag."""
@@ -850,11 +877,12 @@ function mesh_keys_for_element(
     coordinates_requested=_checked_bool(
         return_coord,caller,"return_coord")
     record=mesh_element_record(mesh,tag)
-    element_type,_,_=
+    element_type,_,nodal_count,_=
         _basis_element_contract(record.element_type,space,caller)
     cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
     return _keys_for_cells(
-        mesh,cells,element_type,space,topology,coordinates_requested,caller)
+        mesh,cells,element_type,space,nodal_count,topology,
+        coordinates_requested,caller)
 end
 
 function _checked_type_keys(values,expected::Int,caller::AbstractString)
@@ -911,7 +939,7 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
                                caller::AbstractString="mesh_keys_information")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,nodal_count=
+    element_type,_,nodal_count,basis_type=
         _basis_element_contract(element_type,space,caller)
     expected_type=space.key_dimension
     types=_checked_type_keys(type_keys,expected_type,caller)
@@ -924,8 +952,25 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
     length(types)%keys_per_element==0 || throw(ArgumentError(
         "$caller: key count $(length(types)) must be divisible by " *
         "$keys_per_element for element type $element_type"))
-    return fill(
-        (Int32(space.key_dimension),Int32(space.key_order)),length(types))
+    if space.hierarchical
+        return fill(
+            (Int32(space.key_dimension),Int32(space.key_order)),length(types))
+    end
+    bubble_count=_nodal_bubble_count(basis_type)
+    nonbubble_count=nodal_count-bubble_count
+    dimension=Int32(msh_spec(basis_type).dim)
+    result=Vector{Tuple{Int32,Int32}}(undef,length(types))
+    order=Int32(space.key_order)
+    for group_start in 1:nodal_count:length(result)
+        fill!(@view(result[group_start:group_start+nonbubble_count-1]),
+              (Int32(0),order))
+        if bubble_count>0
+            first_bubble=group_start+nonbubble_count
+            last_bubble=group_start+nodal_count-1
+            fill!(@view(result[first_bubble:last_bubble]),(dimension,order))
+        end
+    end
+    return result
 end
 
 end # module MeshFunctionSpaces
