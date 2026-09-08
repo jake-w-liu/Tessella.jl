@@ -1,15 +1,19 @@
 """
     MeshFunctionSpaces
 
-First-order reference finite-element function spaces and global degree-of-freedom
-keys for finalized linear-simplex [`Mesh`](@ref) values. The implementation follows
-Gmsh 4.15.2's reference coordinates, output layout, lexicographic orientation
-indices, nodal keys, and lowest-order edge keys. Unsupported higher-order and mixed
-families fail explicitly.
+Reference finite-element function spaces and global degree-of-freedom keys.
+Explicit order-one nodal functions cover every fixed Point, Line, Triangle,
+Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type. Hierarchical H1 and
+lowest-order H(curl) functions, cached orientations, and populated keys cover the
+finalized linear-simplex [`Mesh`](@ref). The implementation follows Gmsh 4.15.2's
+reference coordinates, output layout, lexicographic orientation indices, nodal
+keys, and edge keys. Unimplemented interpolation orders and trihedron bases fail
+explicitly.
 """
 module MeshFunctionSpaces
 
 using ..MeshTypes: Mesh
+using ..Elements: msh_spec
 using ..MeshEntityTopology: MeshEdgeTopology, _mesh_edges,
                             _simplex_edge_patterns
 using ..MeshPointLocation: mesh_element_block, mesh_element_record
@@ -39,6 +43,13 @@ const _H1_1=_FunctionSpace(:lagrange,1,true,0,1)
 const _GRAD_H1_1=_FunctionSpace(:grad_lagrange,3,true,0,1)
 const _HCURL_0=_FunctionSpace(:hcurl,3,true,1,0)
 const _CURL_HCURL_0=_FunctionSpace(:curl_hcurl,3,true,1,0)
+const _FIXED_NODAL_FAMILIES=(:pnt,:lin,:tri,:qua,:tet,:hex,:pri,:pyr)
+const _QUADRANGLE_SIGNS=((-1.0,-1.0),(1.0,-1.0),
+                         (1.0,1.0),(-1.0,1.0))
+const _HEXAHEDRON_SIGNS=((-1.0,-1.0,-1.0),(1.0,-1.0,-1.0),
+                         (1.0,1.0,-1.0),(-1.0,1.0,-1.0),
+                         (-1.0,-1.0,1.0),(1.0,-1.0,1.0),
+                         (1.0,1.0,1.0),(-1.0,1.0,1.0))
 
 function _function_space(value,caller::AbstractString)
     value isa AbstractString || throw(ArgumentError(
@@ -62,12 +73,47 @@ function _function_space(value,caller::AbstractString)
         "GradH1Legendre1, HcurlLegendre0, and CurlHcurlLegendre0"))
 end
 
-function _linear_simplex_type(value,caller::AbstractString)
-    element_type=_checked_element_type(value,caller)
-    element_type in (1,2,4) || throw(ArgumentError(
-        "$caller: element type $element_type is not a supported linear segment, " *
-        "triangle, or tetrahedron"))
-    return element_type
+@inline function _first_order_node_count(family::Symbol)
+    family===:pnt && return 1
+    family===:lin && return 2
+    family===:tri && return 3
+    family===:qua && return 4
+    family===:tet && return 4
+    family===:hex && return 8
+    family===:pri && return 6
+    family===:pyr && return 5
+    error("MeshFunctionSpaces: unsupported internal nodal family $family")
+end
+
+function _basis_element_contract(element_type_value,space::_FunctionSpace,
+                                 caller::AbstractString)
+    element_type=_checked_element_type(element_type_value,caller)
+    if space.hierarchical
+        element_type in (1,2,4) || throw(ArgumentError(
+            "$caller: element type $element_type is not a supported linear " *
+            "segment, triangle, or tetrahedron for hierarchical spaces"))
+        return element_type,msh_spec(element_type).family,
+               _vertex_count(element_type)
+    end
+
+    spec=msh_spec(element_type)
+    spec.family===:trih && throw(ArgumentError(
+        "$caller: Trihedron element type $element_type has no nodal basis " *
+        "in Gmsh 4.15.2"))
+    spec.family in _FIXED_NODAL_FAMILIES || throw(ArgumentError(
+        "$caller: element type $element_type belongs to unsupported " *
+        "$(spec.family) family"))
+    node_count=_first_order_node_count(spec.family)
+    if space.key_order==1 || spec.family===:pnt ||
+       (spec.order==1 && spec.nnodes==node_count)
+        return element_type,spec.family,node_count
+    end
+    throw(ArgumentError(
+        "$caller: $(space.kind===:lagrange ? "Lagrange" : "GradLagrange") " *
+        "for element type $element_type requires its unavailable order-" *
+        "$(spec.order) nodal basis; use " *
+        "$(space.kind===:lagrange ? "Lagrange1" : "GradLagrange1") for " *
+        "the supported first-order family basis"))
 end
 
 @inline function _vertex_count(element_type::Int)
@@ -156,6 +202,300 @@ function _origin_barycentric(values,caller::AbstractString,point::Int)
         "$caller: evaluation point $point origin barycentric coordinate is " *
         "nonzero but below Float64 resolution"))
     return result
+end
+
+function _exact_basis_result(value::_Exact,caller::AbstractString,
+                             point::Int,node::Int,component::Int)
+    description=component==0 ?
+        "evaluation point $point node $node basis value" :
+        "evaluation point $point node $node gradient component $component"
+    result=_exact_to_float(value,caller,description)
+    result==0.0 && value!=0 && throw(ArgumentError(
+        "$caller: $description is nonzero but below Float64 resolution"))
+    return result
+end
+
+function _basis_product(scale::Float64,factors::Tuple,
+                        caller::AbstractString,point::Int,node::Int,
+                        component::Int)
+    value=scale
+    zero=scale==0.0
+    for factor in factors
+        zero|=factor==0.0
+        value*=factor
+    end
+    isfinite(value) && (value!=0.0 || zero) && return value
+    exact=_Exact(scale)
+    for factor in factors
+        exact*=_Exact(factor)
+    end
+    return _exact_basis_result(exact,caller,point,node,component)
+end
+
+function _basis_quotient(scale::Float64,numerators::Tuple,
+                         denominators::Tuple,caller::AbstractString,
+                         point::Int,node::Int,component::Int)
+    value=scale
+    zero=scale==0.0
+    for factor in numerators
+        zero|=factor==0.0
+        value*=factor
+    end
+    for factor in denominators
+        factor!=0.0 || error(
+            "MeshFunctionSpaces: internal zero nodal-basis denominator")
+        value/=factor
+    end
+    isfinite(value) && (value!=0.0 || zero) && return value
+    exact=_Exact(scale)
+    for factor in numerators
+        exact*=_Exact(factor)
+    end
+    for factor in denominators
+        exact/=_Exact(factor)
+    end
+    return _exact_basis_result(exact,caller,point,node,component)
+end
+
+@inline function _pyramid_factor(q::Float64,w::Float64,sign::Float64,
+                                 coordinate::Float64)
+    value=q+sign*coordinate
+    scale=max(1.0,abs(w),abs(coordinate))
+    return value,isfinite(value) && abs(value)>64eps(Float64)*scale
+end
+
+function _pyramid_basis_value(sign_u::Float64,sign_v::Float64,
+                              u::Float64,v::Float64,w::Float64,q::Float64,
+                              caller::AbstractString,point::Int,node::Int)
+    first,first_stable=_pyramid_factor(q,w,sign_u,u)
+    second,second_stable=_pyramid_factor(q,w,sign_v,v)
+    if first_stable && second_stable
+        return _basis_quotient(
+            0.25,(first,second),(q,),caller,point,node,0)
+    end
+    exact_q=_Exact(1)-_Exact(w)
+    exact_first=exact_q+_Exact(sign_u)*_Exact(u)
+    exact_second=exact_q+_Exact(sign_v)*_Exact(v)
+    return _exact_basis_result(
+        exact_first*exact_second/(4exact_q),caller,point,node,0)
+end
+
+function _pyramid_horizontal_gradient(sign::Float64,factor_sign::Float64,
+                                      coordinate::Float64,w::Float64,
+                                      q::Float64,caller::AbstractString,
+                                      point::Int,node::Int,component::Int)
+    factor,stable=_pyramid_factor(q,w,factor_sign,coordinate)
+    stable && return _basis_quotient(
+        0.25sign,(factor,),(q,),caller,point,node,component)
+    exact_q=_Exact(1)-_Exact(w)
+    exact_factor=exact_q+_Exact(factor_sign)*_Exact(coordinate)
+    return _exact_basis_result(
+        _Exact(sign)*exact_factor/(4exact_q),
+        caller,point,node,component)
+end
+
+function _pyramid_vertical_gradient(sign_u::Float64,sign_v::Float64,
+                                    u::Float64,v::Float64,w::Float64,
+                                    q::Float64,
+                                    caller::AbstractString,point::Int,
+                                    node::Int)
+    first=sign_u*sign_v*u*v
+    second=q*q
+    numerator=first-second
+    denominator=4second
+    scale=abs(first)+abs(second)
+    if isfinite(numerator) && isfinite(denominator) && denominator!=0.0 &&
+       isfinite(scale) &&
+       (scale==0.0 || abs(numerator)>64eps(Float64)*scale)
+        value=numerator/denominator
+        isfinite(value) && value!=0.0 && return value
+    end
+    exact_q=_Exact(1)-_Exact(w)
+    exact=(_Exact(sign_u*sign_v)*_Exact(u)*_Exact(v)-exact_q^2)/
+          (4exact_q^2)
+    return _exact_basis_result(exact,caller,point,node,3)
+end
+
+@inline _first_order_values(::Val{:pnt},u,v,w,caller,point)=(1.0,)
+@inline _first_order_gradients(::Val{:pnt},u,v,w,caller,point)=
+    ((0.0,0.0,0.0),)
+
+@inline function _first_order_values(::Val{:lin},u,v,w,caller,point)
+    return ((1.0-u)/2,(1.0+u)/2)
+end
+
+@inline _first_order_gradients(::Val{:lin},u,v,w,caller,point)=
+    ((-0.5,0.0,0.0),(0.5,0.0,0.0))
+
+@inline function _first_order_values(::Val{:tri},u,v,w,caller,point)
+    return (_origin_barycentric((u,v),caller,point),u,v)
+end
+
+@inline _first_order_gradients(::Val{:tri},u,v,w,caller,point)=
+    ((-1.0,-1.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0))
+
+@inline function _first_order_values(::Val{:tet},u,v,w,caller,point)
+    return (_origin_barycentric((u,v,w),caller,point),u,v,w)
+end
+
+@inline _first_order_gradients(::Val{:tet},u,v,w,caller,point)=
+    ((-1.0,-1.0,-1.0),(1.0,0.0,0.0),
+     (0.0,1.0,0.0),(0.0,0.0,1.0))
+
+function _first_order_values(::Val{:qua},u,v,w,caller,point)
+    return ntuple(4) do node
+        sign_u,sign_v=_QUADRANGLE_SIGNS[node]
+        _basis_product(
+            0.25,(1.0+sign_u*u,1.0+sign_v*v),
+            caller,point,node,0)
+    end
+end
+
+function _first_order_gradients(::Val{:qua},u,v,w,caller,point)
+    return ntuple(4) do node
+        sign_u,sign_v=_QUADRANGLE_SIGNS[node]
+        (_basis_product(
+             0.25sign_u,(1.0+sign_v*v,),caller,point,node,1),
+         _basis_product(
+             0.25sign_v,(1.0+sign_u*u,),caller,point,node,2),
+         0.0)
+    end
+end
+
+function _first_order_values(::Val{:hex},u,v,w,caller,point)
+    return ntuple(8) do node
+        sign_u,sign_v,sign_w=_HEXAHEDRON_SIGNS[node]
+        _basis_product(
+            0.125,(1.0+sign_u*u,1.0+sign_v*v,1.0+sign_w*w),
+            caller,point,node,0)
+    end
+end
+
+function _first_order_gradients(::Val{:hex},u,v,w,caller,point)
+    return ntuple(8) do node
+        sign_u,sign_v,sign_w=_HEXAHEDRON_SIGNS[node]
+        first=1.0+sign_u*u
+        second=1.0+sign_v*v
+        third=1.0+sign_w*w
+        (_basis_product(
+             0.125sign_u,(second,third),caller,point,node,1),
+         _basis_product(
+             0.125sign_v,(first,third),caller,point,node,2),
+         _basis_product(
+             0.125sign_w,(first,second),caller,point,node,3))
+    end
+end
+
+function _first_order_values(::Val{:pri},u,v,w,caller,point)
+    triangle=(_origin_barycentric((u,v),caller,point),u,v)
+    return ntuple(6) do node
+        triangle_node=(node-1)%3+1
+        sign_w=node<=3 ? -1.0 : 1.0
+        _basis_product(
+            0.5,(triangle[triangle_node],1.0+sign_w*w),
+            caller,point,node,0)
+    end
+end
+
+function _first_order_gradients(::Val{:pri},u,v,w,caller,point)
+    triangle=(_origin_barycentric((u,v),caller,point),u,v)
+    triangle_gradients=((-1.0,-1.0),(1.0,0.0),(0.0,1.0))
+    return ntuple(6) do node
+        triangle_node=(node-1)%3+1
+        sign_w=node<=3 ? -1.0 : 1.0
+        factor=1.0+sign_w*w
+        gradient=triangle_gradients[triangle_node]
+        (_basis_product(
+             0.5,(gradient[1],factor),caller,point,node,1),
+         _basis_product(
+             0.5,(gradient[2],factor),caller,point,node,2),
+         _basis_product(
+             0.5sign_w,(triangle[triangle_node],),caller,point,node,3))
+    end
+end
+
+function _first_order_values(::Val{:pyr},u,v,w,caller,point)
+    q=1.0-w
+    q==0.0 && return (0.0,0.0,0.0,0.0,1.0)
+    base=ntuple(4) do node
+        sign_u,sign_v=_QUADRANGLE_SIGNS[node]
+        _pyramid_basis_value(
+            sign_u,sign_v,u,v,w,q,caller,point,node)
+    end
+    return (base...,w)
+end
+
+function _first_order_gradients(::Val{:pyr},u,v,w,caller,point)
+    q=1.0-w
+    if q==0.0
+        return ((-0.25,-0.25,-0.25),(0.25,-0.25,-0.25),
+                (0.25,0.25,-0.25),(-0.25,0.25,-0.25),
+                (0.0,0.0,1.0))
+    end
+    base=ntuple(4) do node
+        sign_u,sign_v=_QUADRANGLE_SIGNS[node]
+        (_pyramid_horizontal_gradient(
+             sign_u,sign_v,v,w,q,caller,point,node,1),
+         _pyramid_horizontal_gradient(
+             sign_v,sign_u,u,w,q,caller,point,node,2),
+         _pyramid_vertical_gradient(
+             sign_u,sign_v,u,v,w,q,caller,point,node))
+    end
+    return (base...,(0.0,0.0,1.0))
+end
+
+function _write_nodal_family!(result,coordinates,point_count::Int,
+                              family::Val,gradient::Bool,
+                              caller::AbstractString)
+    cursor=0
+    if gradient
+        @inbounds for point in 1:point_count
+            offset=3point-2
+            gradients=_first_order_gradients(
+                family,coordinates[offset],coordinates[offset+1],
+                coordinates[offset+2],caller,point)
+            for value in gradients,component in 1:3
+                cursor+=1
+                result[cursor]=value[component]
+            end
+        end
+    else
+        @inbounds for point in 1:point_count
+            offset=3point-2
+            values=_first_order_values(
+                family,coordinates[offset],coordinates[offset+1],
+                coordinates[offset+2],caller,point)
+            for value in values
+                cursor+=1
+                result[cursor]=value
+            end
+        end
+    end
+    cursor==length(result) || error(
+        "MeshFunctionSpaces: internal nodal-basis result length mismatch")
+    return result
+end
+
+function _write_nodal_basis!(result,coordinates,point_count::Int,
+                             family::Symbol,gradient::Bool,
+                             caller::AbstractString)
+    family===:pnt && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:pnt),gradient,caller)
+    family===:lin && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:lin),gradient,caller)
+    family===:tri && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:tri),gradient,caller)
+    family===:qua && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:qua),gradient,caller)
+    family===:tet && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:tet),gradient,caller)
+    family===:hex && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:hex),gradient,caller)
+    family===:pri && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:pri),gradient,caller)
+    family===:pyr && return _write_nodal_family!(
+        result,coordinates,point_count,Val(:pyr),gradient,caller)
+    error("MeshFunctionSpaces: unsupported internal nodal family $family")
 end
 
 function _barycentric_coordinates(element_type::Int,u::Float64,v::Float64,
@@ -250,23 +590,32 @@ end
                 gradient_i[2]*gradient_j[1])
 end
 
-"""Return first-order Gmsh-shaped reference basis values and orientation count."""
+"""Return supported Gmsh-shaped reference basis values and orientation count."""
 function mesh_basis_functions(element_type_value,local_coord,
                               function_space_type,wanted_orientations=Int32[];
                               caller::AbstractString="mesh_basis_functions")
-    element_type=_linear_simplex_type(element_type_value,caller)
+    element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
+    element_type,family,nodal_count=
+        _basis_element_contract(element_type,space,caller)
     coordinates,point_count=_checked_local_coordinates(local_coord,caller)
     total_orientations=space.hierarchical ?
         _orientation_count(element_type) : 1
     orientations=_checked_orientation_sequence(
         wanted_orientations,total_orientations,space.hierarchical,caller)
-    function_count=space.key_dimension==0 ?
-        _vertex_count(element_type) : _edge_count(element_type)
+    function_count=space.hierarchical ?
+        (space.key_dimension==0 ? _vertex_count(element_type) :
+                                  _edge_count(element_type)) : nodal_count
     result_length=_checked_result_length(
         length(orientations),point_count,function_count,space.components;
         caller=caller)
     result=Vector{Float64}(undef,result_length)
+    if !space.hierarchical
+        _write_nodal_basis!(
+            result,coordinates,point_count,family,
+            space.kind===:grad_lagrange,caller)
+        return Int32(space.components),result,Int32(1)
+    end
     gradients=_reference_gradients(element_type)
     pairs=_canonical_edge_pairs(element_type)
     cursor=0
@@ -321,8 +670,9 @@ end
 function mesh_number_of_orientations(element_type_value,function_space_type;
                                      caller::AbstractString=
                                          "mesh_number_of_orientations")
-    element_type=_linear_simplex_type(element_type_value,caller)
+    element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
+    element_type,_,_=_basis_element_contract(element_type,space,caller)
     return Int32(space.hierarchical ? _orientation_count(element_type) : 1)
 end
 
@@ -345,13 +695,14 @@ function _cell_orientation(cells::AbstractMatrix{Int32},cell::Int,
     return _orientation_rank(@view cells[:,cell])
 end
 
-"""Return one orientation index per cached element of a linear-simplex type."""
+"""Return one orientation index per cached element of a supported type."""
 function mesh_basis_orientations(mesh::Mesh,element_type_value,
                                  function_space_type;
                                  caller::AbstractString=
                                      "mesh_basis_orientations")
-    element_type=_linear_simplex_type(element_type_value,caller)
+    element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
+    element_type,_,_=_basis_element_contract(element_type,space,caller)
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[]
     _,cells=block
@@ -370,24 +721,30 @@ function mesh_basis_orientation(mesh::Mesh,element_tag_value,
     tag=_checked_element_tag(mesh,element_tag_value,caller)
     space=_function_space(function_space_type,caller)
     record=mesh_element_record(mesh,tag)
-    _linear_simplex_type(record.element_type,caller)
+    _basis_element_contract(record.element_type,space,caller)
     return space.hierarchical ? _orientation_rank(record.node_tags) : Int32(0)
 end
 
 """Return the node (0) or edge (1) dimension that owns keys for a space."""
 function mesh_key_dimension(element_type_value,function_space_type;
                             caller::AbstractString="mesh_key_dimension")
-    _linear_simplex_type(element_type_value,caller)
-    return _function_space(function_space_type,caller).key_dimension
+    element_type=_checked_element_type(element_type_value,caller)
+    space=_function_space(function_space_type,caller)
+    _basis_element_contract(element_type,space,caller)
+    return space.key_dimension
 end
 
-"""Return the number of keys per supported linear-simplex element."""
+"""Return the number of keys per supported reference element."""
 function mesh_number_of_keys(element_type_value,function_space_type;
                              caller::AbstractString="mesh_number_of_keys")
-    element_type=_linear_simplex_type(element_type_value,caller)
+    element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    return Int32(space.key_dimension==0 ?
-                 _vertex_count(element_type) : _edge_count(element_type))
+    element_type,_,nodal_count=
+        _basis_element_contract(element_type,space,caller)
+    return Int32(space.hierarchical ?
+                 (space.key_dimension==0 ? _vertex_count(element_type) :
+                                           _edge_count(element_type)) :
+                 nodal_count)
 end
 
 function _checked_bool(value,caller::AbstractString,name::AbstractString)
@@ -471,8 +828,9 @@ end
 function mesh_keys(mesh::Mesh,element_type_value,function_space_type,
                    topology::Union{Nothing,MeshEdgeTopology}=nothing;
                    return_coord=true,caller::AbstractString="mesh_keys")
-    element_type=_linear_simplex_type(element_type_value,caller)
+    element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
+    element_type,_,_=_basis_element_contract(element_type,space,caller)
     coordinates_requested=_checked_bool(
         return_coord,caller,"return_coord")
     block=mesh_element_block(mesh,element_type)
@@ -492,7 +850,8 @@ function mesh_keys_for_element(
     coordinates_requested=_checked_bool(
         return_coord,caller,"return_coord")
     record=mesh_element_record(mesh,tag)
-    element_type=_linear_simplex_type(record.element_type,caller)
+    element_type,_,_=
+        _basis_element_contract(record.element_type,space,caller)
     cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
     return _keys_for_cells(
         mesh,cells,element_type,space,topology,coordinates_requested,caller)
@@ -550,15 +909,18 @@ end
 function mesh_keys_information(type_keys,entity_keys,element_type_value,
                                function_space_type;
                                caller::AbstractString="mesh_keys_information")
-    element_type=_linear_simplex_type(element_type_value,caller)
+    element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
+    element_type,_,nodal_count=
+        _basis_element_contract(element_type,space,caller)
     expected_type=space.key_dimension
     types=_checked_type_keys(type_keys,expected_type,caller)
     entities=_checked_entity_keys(entity_keys,caller)
     length(types)==length(entities) || throw(ArgumentError(
         "$caller: type_keys and entity_keys must have equal lengths"))
-    keys_per_element=space.key_dimension==0 ?
-        _vertex_count(element_type) : _edge_count(element_type)
+    keys_per_element=space.hierarchical ?
+        (space.key_dimension==0 ? _vertex_count(element_type) :
+                                  _edge_count(element_type)) : nodal_count
     length(types)%keys_per_element==0 || throw(ArgumentError(
         "$caller: key count $(length(types)) must be divisible by " *
         "$keys_per_element for element type $element_type"))

@@ -55,9 +55,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   finalized simplex meshes with orientation and physical-tag preservation;
 - Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
   arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
-- first-order segment/triangle/tetrahedron Lagrange, hierarchical H1, and lowest-
-  order H(curl) reference bases, lexicographic orientations, and global node/edge
-  degree-of-freedom keys;
+- fixed-family order-one nodal reference functions and gradients, plus linear-
+  simplex hierarchical H1 and lowest-order H(curl) bases, lexicographic
+  orientations, and global node/edge degree-of-freedom keys;
 - deterministic global edge and triangular/quadrangular-face catalogs for cached
   simplex meshes, with atomic explicit insertion, orientation-stable lookup, and
   detached tag/node arrays;
@@ -317,19 +317,21 @@ points. Bare rule names mean order zero, and malformed or excessive requests fai
 before output allocation. Economical Triangle, Tetrahedron, and Prism rules above
 order five remain explicit blockers. Trihedra have no integration rule in Gmsh
 4.15.2 and fail explicitly.
-`get_basis_functions` evaluates `Lagrange`/`IsoParametric`/`Lagrange1`, their
-`Grad` forms, `H1Legendre1`/`GradH1Legendre1`, and
-`HcurlLegendre0`/`CurlHcurlLegendre0` for types 1, 2, and 4. Results use Gmsh's
-orientation-then-point-then-function-then-component layout. Hierarchical
-orientations use the lexicographic rank of the primary node tags; bulk and
-single-element orientation queries return those indices directly.
+`get_basis_functions` evaluates explicit `Lagrange1` and `GradLagrange1` functions
+for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron,
+Prism, and Pyramid type. Unqualified Lagrange/isoparametric aliases cover Point and
+the first-order types 1--7. `H1Legendre1`/`GradH1Legendre1` and
+`HcurlLegendre0`/`CurlHcurlLegendre0` remain linear-simplex spaces for types 1, 2,
+and 4. Results use Gmsh's orientation-then-point-then-function-then-component
+layout. Hierarchical orientations use the lexicographic rank of the primary node
+tags; bulk and single-element orientation queries return those indices directly.
 `get_keys` and `get_keys_for_element` return node keys for Lagrange/H1 spaces and
 global edge keys for H(curl). Edge-key queries lazily create only edges visited by
 the requested type or element, reuse explicit or previously created identifiers,
 and return stable midpoint coordinates. Number-of-key/orientation and key-information
-queries share the same checked reference contract. Higher-order and non-simplex
-function spaces, entity filtering, and nondefault task partitioning remain explicit
-blockers.
+queries share the same checked reference contract. Arbitrary interpolation orders,
+non-simplex hierarchical spaces, Trihedron bases, entity filtering, and nondefault
+task partitioning remain explicit blockers.
 `get_element_qualities` returns detached values in dense-tag request order for the
 13 documented Gmsh 4.15.2 measures. It preserves signed tetrahedron Jacobian,
 volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
