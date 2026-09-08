@@ -55,9 +55,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   finalized simplex meshes with orientation and physical-tag preservation;
 - Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
   arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
-- fixed-family order-one nodal reference functions and gradients, plus linear-
-  simplex hierarchical H1 and lowest-order H(curl) bases, lexicographic
-  orientations, and global node/edge degree-of-freedom keys;
+- actual- and explicit-order nodal reference functions and gradients for every
+  fixed family, plus linear-simplex hierarchical H1 and lowest-order H(curl)
+  bases, lexicographic orientations, and global node/edge degree-of-freedom keys;
 - deterministic global edge and triangular/quadrangular-face catalogs for cached
   simplex meshes, with atomic explicit insertion, orientation-stable lookup, and
   detached tag/node arrays;
@@ -317,10 +317,13 @@ points. Bare rule names mean order zero, and malformed or excessive requests fai
 before output allocation. Economical Triangle, Tetrahedron, and Prism rules above
 order five remain explicit blockers. Trihedra have no integration rule in Gmsh
 4.15.2 and fail explicitly.
-`get_basis_functions` evaluates explicit `Lagrange1` and `GradLagrange1` functions
-for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron,
-Prism, and Pyramid type. Unqualified Lagrange/isoparametric aliases cover Point and
-the first-order types 1--7. `H1Legendre1`/`GradH1Legendre1` and
+`get_basis_functions` evaluates each fixed type's actual nodal basis through
+`Lagrange`, `IsoParametric`, `GradLagrange`, and `GradIsoParametric`. Explicit
+`LagrangeN` and `GradLagrangeN` names select the complete order-`N` basis of the
+input family. Point accepts each supported numeric name from 0 through 10; the
+other families use the same range, subject to the catalog limit of order 9 for
+Hexahedron, Prism, and Pyramid.
+`H1Legendre1`/`GradH1Legendre1` and
 `HcurlLegendre0`/`CurlHcurlLegendre0` remain linear-simplex spaces for types 1, 2,
 and 4. Results use Gmsh's orientation-then-point-then-function-then-component
 layout. Hierarchical orientations use the lexicographic rank of the primary node
@@ -328,10 +331,14 @@ tags; bulk and single-element orientation queries return those indices directly.
 `get_keys` and `get_keys_for_element` return node keys for Lagrange/H1 spaces and
 global edge keys for H(curl). Edge-key queries lazily create only edges visited by
 the requested type or element, reuse explicit or previously created identifiers,
-and return stable midpoint coordinates. Number-of-key/orientation and key-information
-queries share the same checked reference contract. Arbitrary interpolation orders,
-non-simplex hierarchical spaces, Trihedron bases, entity filtering, and nondefault
-task partitioning remain explicit blockers.
+and return stable midpoint coordinates. The linear-simplex cache owns no synthetic
+higher-order nodes, so a numeric Lagrange key query whose order differs from the
+stored element fails explicitly. Number-of-key/orientation and key-information
+queries remain session-independent. Non-simplex hierarchical
+spaces, Trihedron bases, entity filtering, and nondefault task partitioning remain
+explicit blockers. Tessella evaluates the catalogued
+higher-order Prism and incomplete Pyramid spaces that Gmsh 4.15.2 cannot construct
+reliably; those paths are certified by nodality, partition, and gradient invariants.
 `get_element_qualities` returns detached values in dense-tag request order for the
 13 documented Gmsh 4.15.2 measures. It preserves signed tetrahedron Jacobian,
 volume, inverse-condition, inverse-gradient-error, and inradius behavior, while

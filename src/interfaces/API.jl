@@ -12,8 +12,9 @@ straight periodic boundary or embedded curves and planar periodic volume boundar
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache, plus deterministic global edge and triangular or
-quadrangular face catalogs, fixed-family order-one nodal reference functions, and
-simplex H1/lowest-order H(curl) bases, orientations, and node/edge keys. It also
+quadrangular face catalogs, fixed-family actual- and explicit-order nodal
+reference functions, and simplex H1/lowest-order H(curl) bases, orientations,
+and node/edge keys. It also
 owns a reusable robust AABB locator for
 dense element-by-coordinate and reference-coordinate queries, plus scale-robust
 named quality queries and Gmsh-shaped forward maps/Jacobians over dense cached
@@ -1601,10 +1602,11 @@ get_jacobian(element_tag,local_coord)=
                         wanted_orientations=Int32[])
 
 Return `(num_components, basis_functions, num_orientations)` at concatenated
-`(u,v,w)` evaluation points. `Lagrange1` and `GradLagrange1` cover every fixed-node
-Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid
-type. Unqualified Lagrange and isoparametric aliases cover Point and the first-order
-types 1--7. Order-one hierarchical H1 functions and gradients and lowest-order
+`(u,v,w)` evaluation points. Unqualified Lagrange and isoparametric aliases use the
+input fixed type's actual nodal order and completeness. `LagrangeN` and
+`GradLagrangeN` select the complete family basis at order `N`; the catalog covers
+orders 0--10, with Hexahedron, Prism, and Pyramid ending at order 9. Order-one
+hierarchical H1 functions and gradients and lowest-order
 H(curl) functions and curls cover types 1, 2, and 4. Values use Gmsh's orientation-
 then-point-then-function-then-component layout. An empty orientation selection
 returns every hierarchical orientation or the sole nodal orientation. This query
@@ -1656,7 +1658,9 @@ Return detached `(type_keys, entity_keys, coordinates)` for every cached element
 of one linear-simplex type. Lagrange and order-one H1 keys use dense node tags;
 lowest-order H(curl) keys use stable global edge tags and lazily add only the edges
 visited by the requested type. Coordinates locate node or edge-midpoint keys and
-are omitted when `return_coord=false`. Entity filtering remains unavailable.
+are omitted when `return_coord=false`. A numeric Lagrange space must match the
+stored interpolation-node count; the cache does not synthesize higher-order keys.
+Entity filtering remains unavailable.
 """
 get_keys(element_type,function_space_type,tag=-1,return_coord=true)=
     _get_keys(element_type,function_space_type,tag,return_coord)
@@ -1666,6 +1670,7 @@ get_keys(element_type,function_space_type,tag=-1,return_coord=true)=
 
 Return detached node or edge keys for one dense cached element. Lowest-order
 H(curl) calls lazily add only that element's missing edges to the shared catalog.
+A numeric Lagrange space must match the stored interpolation-node count.
 """
 get_keys_for_element(element_tag,function_space_type,return_coord=true)=
     _get_keys_for_element(element_tag,function_space_type,return_coord)
@@ -1674,7 +1679,7 @@ get_keys_for_element(element_tag,function_space_type,return_coord=true)=
     get_number_of_keys(element_type, function_space_type)
 
 Return the number of node or edge keys owned by one supported reference element.
-Explicit order-one nodal counts cover every fixed family except Trihedron;
+Actual- and explicit-order nodal counts cover every fixed family except Trihedron;
 hierarchical counts cover linear simplexes. This query does not require a cache.
 """
 get_number_of_keys(element_type,function_space_type)=
@@ -1685,10 +1690,10 @@ get_number_of_keys(element_type,function_space_type)=
                          function_space_type)
 
 Return `(entity_dimension, polynomial_order)` for complete element-sized groups
-of supported node or edge keys. Explicit order-one nodal metadata covers every
-fixed family except Trihedron; hierarchical metadata covers linear simplexes. Key
-arrays must have equal lengths and the expected type-key value for the selected
-space.
+of supported node or edge keys. Actual- and explicit-order nodal metadata covers
+every fixed family except Trihedron; hierarchical metadata covers linear
+simplexes. Key arrays must have equal lengths and the expected type-key value for
+the selected space.
 """
 get_keys_information(type_keys,entity_keys,element_type,function_space_type)=
     _get_keys_information(

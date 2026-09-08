@@ -22,7 +22,7 @@ function _install_mesh_function_fixture!(mesh)
     return nothing
 end
 
-@testset "first-order function spaces and keys through API" begin
+@testset "function spaces and keys through API" begin
     _MESH_FUNCTION_API.finalize()
     @test _MESH_FUNCTION_API.mesh.get_number_of_orientations(
         4,"HcurlLegendre0")==24
@@ -44,6 +44,14 @@ end
     @test _MESH_FUNCTION_API.mesh.get_basis_functions(
         14,[0,0,1],"Lagrange1")==
         (Int32(1),Float64[0,0,0,0,1],Int32(1))
+    quadratic=_MESH_FUNCTION_API.mesh.get_basis_functions(
+        10,[0.1,0.2,0.0],"Lagrange")
+    @test quadratic[1:2:end]==(Int32(1),Int32(1))
+    @test length(quadratic[2])==9
+    @test isapprox(sum(quadratic[2]),1.0;atol=8eps(),rtol=0)
+    @test _MESH_FUNCTION_API.mesh.get_basis_functions(
+        3,[0.1,0.2,0.0],"Lagrange2")==quadratic
+    @test _MESH_FUNCTION_API.mesh.get_number_of_keys(20,"Lagrange")==9
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
         2,"Lagrange")
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_keys(
@@ -135,6 +143,10 @@ end
             ()->_MESH_FUNCTION_API.mesh.get_keys(
                 4,"HcurlLegendre1"),
             ()->_MESH_FUNCTION_API.mesh.get_keys(
+                2,"Lagrange2"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys_for_element(
+                2,"GradLagrange2"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys(
                 4,"HcurlLegendre0",-1,1),
             ()->_MESH_FUNCTION_API.mesh.get_keys(
                 4,"HcurlLegendre0",0),
@@ -151,7 +163,7 @@ end
             ()->_MESH_FUNCTION_API.mesh.get_keys_information(
                 Int32[1],UInt64[1],4,"HcurlLegendre0"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
-                10,[0,0,0],"Lagrange"),
+                10,[0,0,0],"Lagrange11"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
                 140,[0,0,0],"Lagrange1"),
         )
