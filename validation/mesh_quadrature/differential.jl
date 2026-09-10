@@ -66,7 +66,8 @@ end
 # - Replacing Duffy rules with Cartesian tensor points is rejected by every
 #   triangle/tetrahedron coordinate and weight comparison.
 # - Using the line point-count law for a simplex is rejected by exact array
-#   lengths at CompositeGauss0, CompositeGauss5, and CompositeGauss29.
+#   lengths across every safely callable Gauss order and representative
+#   CompositeGauss orders.
 # - Transposing the nested integration loops is rejected by sequential flattened
 #   coordinate comparisons at asymmetric points.
 # - Dispatching by interpolation order instead of parent family is rejected by
@@ -78,7 +79,10 @@ end
 # - Omitting the pyramid's Gauss--Jacobi measure or Duffy scale is rejected by
 #   every pyramid weight and noncentral coordinate comparison.
 # - Reusing the line point-count law for odd-order prisms is rejected at Gauss1
-#   and CompositeGauss1, 5, and 29.
+#   through Gauss30 and CompositeGauss1, 5, and 29.
+# - Omitting an economical table or moving either tensor transition is rejected
+#   by sequential Triangle/Prism Gauss6--30 and Tetrahedron Gauss6--29
+#   comparisons, including all published static orders.
 # - Allocating before total-point preflight is rejected by all four first-invalid
 #   non-simplex resource-bound requests.
 
@@ -122,8 +126,14 @@ try
             compare_case(element_type,rule)
         end
     end
+    for order in 6:30,element_type in (2,6)
+        compare_case(element_type,"Gauss$order")
+    end
+    for order in 6:29
+        compare_case(4,"Gauss$order")
+    end
     for rule in ("Gauss6","Gauss12","Gauss29"),
-        element_type in (3,5,7)
+        element_type in (15,1,3,5,7)
         compare_case(element_type,rule)
     end
 
@@ -131,7 +141,7 @@ try
         1,"CompositeGauss255")[2])==128 || error(
         "bounded 128-point line rule is unavailable")
     for (element_type,rule) in (
-        (2,"Gauss6"),(4,"Gauss6"),(6,"Gauss6"),
+        (2,"Gauss255"),(4,"Gauss198"),(6,"Gauss199"),
         (1,"CompositeGauss256"),(2,"CompositeGauss255"),
         (3,"CompositeGauss256"),(4,"CompositeGauss198"),
         (5,"CompositeGauss200"),(6,"CompositeGauss199"),
@@ -146,7 +156,7 @@ try
     end
 
     digest=bytes2hex(SHA.sha256(take!(stream)))
-    digest=="0ff395a225821835fad550c4388545faf45637f9485d5511e1ebc5c80e837562" || error(
+    digest=="eed6c09d0cc9af974b030cb12ff9eba5892fa148dcc447f4ca8439fe04cbfeb1" || error(
         "mesh quadrature checksum changed to $digest")
     println("mesh-quadrature differential: Gmsh ",
             gmsh.GMSH_API_VERSION," fixed_types=",length(supported),

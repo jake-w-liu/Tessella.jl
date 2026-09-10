@@ -166,11 +166,12 @@ fail explicitly.
 Reference quadrature covers all fixed-node Point, Line, Triangle, Quadrangle,
 Tetrahedron, Hexahedron, Prism, and Pyramid types without requiring session state.
 Detached coordinate triples and weights preserve Gmsh 4.15.2's available economical
-`Gauss0` through `Gauss5` rules and its composite construction. Native
-Gauss--Legendre, Duffy, and Gauss--Jacobi generation is limited to 128 points per
-axis and one million output points. Economical Triangle, Tetrahedron, and Prism
-rules above order five remain explicit blockers; pinned Gmsh defines no Trihedron
-integration rule.
+rules, including Triangle tables through order 20 and Tetrahedron tables through
+order 21. Higher `GaussN` orders use Gmsh's tensor transitions, Prism composes the
+matching Triangle and Line rules, and `CompositeGaussN` selects tensor rules
+directly. Native Gauss--Legendre, Duffy, and Gauss--Jacobi generation is limited
+to 128 points per axis and one million output points. Pinned Gmsh defines no
+Trihedron integration rule.
 Actual-order Lagrange/isoparametric queries cover every fixed-node Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type. Explicit
 numeric names select complete family bases across the catalogued orders.
@@ -304,6 +305,42 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-09-10 with Julia 1.12.7 after completing bounded `GaussN`
+coverage for the Triangle, Tetrahedron, and Prism families:
+
+- `MeshQuadrature` preserves every Gmsh 4.15.2 economical table: Triangle
+  through order 20 and Tetrahedron through order 21. Higher `GaussN` orders use
+  Gmsh's tensor transitions, and Prism composes the matching Triangle and Line
+  rules. The simplex tables moved to `src/core/MeshQuadratureSimplex.jl` with
+  symmetry-orbit expansion; `CompositeGaussN` still selects bounded
+  tensor/Duffy/Gauss--Jacobi rules directly. Limits remain 128 points per axis
+  and one million output points. Trihedra still fail explicitly.
+- The quadrature-focused bounds-checked gate passed 36,914/36,914 assertions:
+  analytic moments through Triangle/Prism order 20 and Tetrahedron order 21
+  (2e-10 tolerance only at Triangle order 20 and Tetrahedron orders 10 and
+  above, where the published decimals accumulate), exact point counts per order,
+  even-order lattice aliasing, Gauss21/Gauss22-to-composite tensor-transition
+  equality, detached lattice results, first-rejected-order bounds
+  (`Gauss255`/`Gauss198`/`Gauss199`), and recursive ambiguity checks.
+  Neighboring element-catalog, reference-geometry, function-space, and API
+  quadrature sets passed 7,724/7,724.
+- The complete bounds-checked package gate passed 211,536/211,536 assertions in
+  15m14.8s. The mandatory Gmsh 4.15.2 differential matched 457
+  coordinate/weight cases (Triangle/Prism `Gauss6` through `Gauss30`,
+  Tetrahedron `Gauss6` through `Gauss29`, plus every fixed type and
+  representative composite orders) with SHA-256
+  `eed6c09d0cc9af974b030cb12ff9eba5892fa148dcc447f4ca8439fe04cbfeb1`.
+- The organized tree contains 205 tracked Julia files and no repository-root
+  `.jl`; all 75 organized `*_test.jl` files match 75 runner includes, and all 55
+  source-include edges resolve and reach all 56 source files. Compatibility is
+  exactly `1.12 - 1.12`; active configuration has no Julia 1.11 support or test
+  target, and no Julia 1.11 test was run for this increment. `git diff --check`
+  is clean.
+- Residual: the aggregate `validation/run_all.jl` driver finished rewriting
+  `validation/REPORT.md` on 2026-09-09 during the pre-shutdown session, but its
+  exit status could not be re-verified after the PC shutdown; re-running the
+  aggregate gate is the remaining step before the next increment.
 
 Re-measured on 2026-09-09 with Julia 1.12.7 after implementing actual- and
 explicit-order nodal reference functions:

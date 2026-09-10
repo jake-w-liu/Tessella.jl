@@ -1517,10 +1517,12 @@ get_element_properties(element_type)=_get_element_properties(element_type)
 Return detached reference coordinates and weights for a fixed-node Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, or Pyramid type.
 Coordinates are flattened `(u,v,w)` triples. `GaussN` preserves Gmsh 4.15.2's
-available economical rules; `CompositeGaussN` selects bounded tensor/Duffy rules.
-Economical Triangle, Tetrahedron, and Prism rules above order five remain
-unavailable. Trihedra have no integration rule in the pinned Gmsh release. An
-omitted `N` means order zero. This query does not require a model or mesh.
+economical rules, including Triangle through order 20 and Tetrahedron through
+order 21, then uses the same tensor transitions as Gmsh. Prism rules combine
+the corresponding Triangle and Line rules. `CompositeGaussN` selects bounded
+tensor and Duffy rules directly. Trihedra have no integration rule in the pinned
+Gmsh release. An omitted `N` means order zero. This query does not require a
+model or mesh.
 """
 get_integration_points(element_type,integration_type)=
     _get_integration_points(element_type,integration_type)
