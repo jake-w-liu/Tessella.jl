@@ -51,8 +51,11 @@ end
 
     @test _QUADRATURE_API.mesh.get_integration_points(15,"Gauss99")==
           (Float64[0,0,0],Float64[1])
+    high_triangle=_QUADRATURE_API.mesh.get_integration_points(2,"Gauss20")
+    @test length(high_triangle[2])==79
+    @test isapprox(sum(high_triangle[2]),0.5;atol=5e-13,rtol=0)
     @test_throws ArgumentError _QUADRATURE_API.mesh.get_integration_points(
-        2,"Gauss6")
+        2,"Gauss255")
     message=try
         _QUADRATURE_API.mesh.get_integration_points(140,"Gauss2")
         ""

@@ -317,11 +317,13 @@ global edge identifiers, created lazily only for the requested type or element a
 located at stable edge midpoints. Key metadata reports owning entity dimension and
 order for complete element-sized groups. Session-independent reference quadrature
 covers every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron,
-Prism, and Pyramid type. Economical `Gauss0` through `Gauss5` rules preserve Gmsh
-4.15.2's available tables; bounded `CompositeGaussN` rules use native
-Gauss--Legendre, Duffy, and Gauss--Jacobi construction with checked point counts.
-Economical Triangle, Tetrahedron, and Prism rules above order five remain pending;
-Gmsh 4.15.2 defines no Trihedron integration rule. Non-simplex hierarchical spaces,
+Prism, and Pyramid type. `GaussN` preserves every Gmsh 4.15.2 economical table,
+including Triangle through order 20 and Tetrahedron through order 21; higher
+orders use Gmsh's tensor transitions, and Prism composes the matching Triangle
+and Line rules.
+Bounded `CompositeGaussN` rules use native Gauss--Legendre, Duffy, and
+Gauss--Jacobi construction with checked point counts. Gmsh 4.15.2 defines no
+Trihedron integration rule. Non-simplex hierarchical spaces,
 Trihedron bases, entity-filtered orientation/key
 results, and nondefault task partitioning also remain pending.
 Whole-cache edge and face creation assigns positive global identifiers to missing

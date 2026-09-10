@@ -185,6 +185,47 @@ end
         @test all(isfinite,weights)
     end
 
+    triangle_counts=(1,1,3,4,6,7,12,13,16,19,25,27,33,37,42,
+                     48,52,61,70,73,79)
+    tetrahedron_counts=(1,1,4,5,11,14,24,31,43,53,126,126,210,
+                        210,330,330,495,495,715,715,1001,1001)
+    for order in 6:20
+        # The pinned decimal Gauss20 table has a 1.15e-10 analytic moment
+        # residual; the exact-array differential separately guards every entry.
+        triangle_tolerance=order==20 ? 2e-10 : 8e-13
+        triangle=_check_rule_moments(
+            2,"Gauss$order",order;atol=triangle_tolerance)
+        prism=_check_rule_moments(
+            6,"Gauss$order",order;atol=2triangle_tolerance)
+        @test length(triangle[2])==triangle_counts[order+1]
+        @test length(prism[2])==
+              triangle_counts[order+1]*((order+3)÷2)
+        @test all(isfinite,triangle[1])
+        @test all(isfinite,triangle[2])
+        @test all(isfinite,prism[1])
+        @test all(isfinite,prism[2])
+    end
+    for order in 6:21
+        # Gmsh's published lattice decimals accumulate up to an 8.8e-11
+        # residual; exact ordering and values are covered by the differential.
+        tolerance=order>=10 ? 2e-10 : 8e-13
+        tetrahedron=_check_rule_moments(
+            4,"Gauss$order",order;atol=tolerance)
+        @test length(tetrahedron[2])==tetrahedron_counts[order+1]
+        @test all(isfinite,tetrahedron[1])
+        @test all(isfinite,tetrahedron[2])
+    end
+    for even_order in 10:2:20
+        @test mesh_integration_points(4,"Gauss$even_order")==
+              mesh_integration_points(4,"Gauss$(even_order+1)")
+    end
+    @test mesh_integration_points(2,"Gauss21")==
+          mesh_integration_points(2,"CompositeGauss21")
+    @test mesh_integration_points(4,"Gauss22")==
+          mesh_integration_points(4,"CompositeGauss22")
+    @test mesh_integration_points(6,"Gauss21")==
+          mesh_integration_points(6,"CompositeGauss21")
+
     for order in (0,1,2,3,4,5,6,12,20)
         for element_type in (1,2,3,4,5,6,7)
             coordinates,weights=_check_rule_moments(
@@ -262,6 +303,12 @@ end
     detached[1][1]=99
     detached[2][1]=99
     @test mesh_integration_points(2,"Gauss5")==original
+
+    lattice_detached=mesh_integration_points(4,"Gauss21")
+    lattice_original=deepcopy(lattice_detached)
+    lattice_detached[1][1]=99
+    lattice_detached[2][1]=99
+    @test mesh_integration_points(4,"Gauss21")==lattice_original
 
     largest_line=mesh_integration_points(1,"CompositeGauss255")
     @test length(largest_line[2])==128
@@ -341,7 +388,7 @@ end
         @test_throws ArgumentError mesh_integration_points(2,value)
     end
     for (element_type,name) in (
-        (2,"Gauss6"),(4,"Gauss6"),(6,"Gauss6"),
+        (2,"Gauss255"),(4,"Gauss198"),(6,"Gauss199"),
         (1,"CompositeGauss256"),(2,"CompositeGauss255"),
         (3,"CompositeGauss256"),(4,"CompositeGauss198"),
         (5,"CompositeGauss200"),(6,"CompositeGauss199"),
@@ -349,6 +396,9 @@ end
         @test_throws ArgumentError mesh_integration_points(element_type,name)
     end
     oversized_callbacks=Function[
+        ()->mesh_integration_points(2,"Gauss255"),
+        ()->mesh_integration_points(4,"Gauss198"),
+        ()->mesh_integration_points(6,"Gauss199"),
         ()->mesh_integration_points(3,"CompositeGauss256"),
         ()->mesh_integration_points(5,"CompositeGauss200"),
         ()->mesh_integration_points(6,"CompositeGauss199"),
@@ -359,12 +409,13 @@ end
         @test @allocated(_expect_quadrature_argument_error(callback))<=50_000
     end
     error_message=try
-        mesh_integration_points(4,"Gauss6")
+        mesh_integration_points(2,"Gauss255")
         ""
     catch err
         sprint(showerror,err)
     end
-    @test occursin("use CompositeGauss6",error_message)
+    @test occursin("requires 129 Gauss--Legendre points per axis",error_message)
+    @test occursin("the limit is 128",error_message)
     trihedron_message=try
         mesh_integration_points(140,"Gauss2")
         ""
@@ -372,6 +423,8 @@ end
         sprint(showerror,err)
     end
     @test occursin("no integration rules in Gmsh 4.15.2",trihedron_message)
+    @test isempty(Test.detect_ambiguities(
+        Tessella.MeshQuadrature;recursive=true))
 end
 
 # Mutant analysis:
@@ -389,7 +442,10 @@ end
 # - Omitting the pyramid's `(1-w)^2` Gauss--Jacobi measure or one Duffy scale is
 #   rejected by its constant, mixed, and vertical analytic moments.
 # - Reusing the ordinary line point count in the prism is rejected by Gauss1 and
-#   every odd-order composite point count.
+#   every odd-order composite and high-order Gauss point count.
+# - Truncating economical simplex tables at order five is rejected by analytic
+#   moments and exact counts through Triangle/Prism order 20 and Tetrahedron
+#   order 21; off-by-one tensor transitions are rejected by equality checks.
 # - Dispatching by interpolation order is rejected by catalog-wide comparisons
 #   across complete, serendipity, and order-zero family types.
 # - Allocating before the family-specific total-point preflight is rejected by

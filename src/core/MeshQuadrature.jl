@@ -4,9 +4,9 @@
 Session-independent reference quadrature for every fixed-node Gmsh family with
 defined rules: Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron,
 Prism, and Pyramid. Results use Gmsh's flattened `(u,v,w)` layout. Low-degree
-`Gauss` rules preserve Gmsh 4.15.2's economical tables, while bounded
-`CompositeGauss` rules are generated natively from Gauss--Legendre points,
-Duffy maps, and the pyramid's Gauss--Jacobi rule.
+`Gauss` rules preserve Gmsh 4.15.2's economical tables and tensor-rule
+transitions, while bounded `CompositeGauss` rules are generated natively from
+Gauss--Legendre points, Duffy maps, and the pyramid's Gauss--Jacobi rule.
 """
 module MeshQuadrature
 
@@ -17,7 +17,8 @@ export mesh_integration_points
 
 const _MAX_GAUSS_LEGENDRE_POINTS=128
 const _MAX_QUADRATURE_POINTS=1_000_000
-const _MAX_ECONOMICAL_SIMPLEX_ORDER=5
+const _MAX_TRIANGLE_ECONOMICAL_ORDER=20
+const _MAX_TETRAHEDRON_ECONOMICAL_ORDER=21
 
 function _quadrature_element_spec(value,caller::AbstractString)
     value isa Integer || throw(ArgumentError(
@@ -81,7 +82,7 @@ function _integration_rule(value,caller::AbstractString)
             "$caller: integration order exceeds the platform Int range"))
         order=10order+digit
     end
-    return composite,order,name
+    return composite,order
 end
 
 @inline function _legendre_pair(degree::Int,x::Float64)
@@ -200,101 +201,7 @@ function _flatten_rule(points,weights)
 end
 
 # Authority: the economical Solin tables used by pinned Gmsh 4.15.2.
-function _triangle_gauss(order::Int)
-    order<=1 && return _flatten_rule(
-        ((0.333333333333333,0.333333333333333,0.0),),
-        (0.500000000000000,))
-    order==2 && return _flatten_rule(
-        ((0.166666666666667,0.166666666666667,0.0),
-         (0.166666666666667,0.666666666666667,0.0),
-         (0.666666666666667,0.166666666666667,0.0)),
-        (0.166666666666667,0.166666666666667,0.166666666666667))
-    order==3 && return _flatten_rule(
-        ((0.333333333333333,0.333333333333333,0.0),
-         (0.200000000000000,0.200000000000000,0.0),
-         (0.200000000000000,0.600000000000000,0.0),
-         (0.600000000000000,0.200000000000000,0.0)),
-        (-0.281250000000000,0.260416666666667,
-         0.260416666666667,0.260416666666667))
-    order==4 && return _flatten_rule(
-        ((0.445948490915965,0.445948490915965,0.0),
-         (0.445948490915965,0.108103018168070,0.0),
-         (0.108103018168070,0.445948490915965,0.0),
-         (0.091576213509771,0.091576213509771,0.0),
-         (0.091576213509771,0.816847572980459,0.0),
-         (0.816847572980459,0.091576213509771,0.0)),
-        (0.111690794839005,0.111690794839005,0.111690794839005,
-         0.054975871827661,0.054975871827661,0.054975871827661))
-    return _flatten_rule(
-        ((0.333333333333333,0.333333333333333,0.0),
-         (0.470142064105115,0.470142064105115,0.0),
-         (0.470142064105115,0.059715871789770,0.0),
-         (0.059715871789770,0.470142064105115,0.0),
-         (0.101286507323456,0.101286507323456,0.0),
-         (0.101286507323456,0.797426985353087,0.0),
-         (0.797426985353087,0.101286507323456,0.0)),
-        (0.112500000000000,
-         0.066197076394253,0.066197076394253,0.066197076394253,
-         0.062969590272414,0.062969590272414,0.062969590272414))
-end
-
-function _tetrahedron_gauss(order::Int)
-    order<=1 && return _flatten_rule(
-        ((0.25,0.25,0.25),),(0.166666666666667,))
-    order==2 && return _flatten_rule(
-        ((0.138196601125,0.138196601125,0.138196601125),
-         (0.585410196625,0.138196601125,0.138196601125),
-         (0.138196601125,0.585410196625,0.138196601125),
-         (0.138196601125,0.138196601125,0.585410196625)),
-        (0.0416666666666667,0.0416666666666667,
-         0.0416666666666667,0.0416666666666667))
-    order==3 && return _flatten_rule(
-        ((0.25,0.25,0.25),
-         (0.166666666667,0.166666666667,0.166666666667),
-         (0.166666666667,0.166666666667,0.500000000000),
-         (0.166666666667,0.500000000000,0.166666666667),
-         (0.500000000000,0.166666666667,0.166666666667)),
-        (-0.133333333333333,0.075000000000000,0.075000000000000,
-         0.075000000000000,0.075000000000000))
-    order==4 && return _flatten_rule(
-        ((0.2500000000000,0.2500000000000,0.2500000000000),
-         (0.0714285714286,0.0714285714286,0.0714285714286),
-         (0.0714285714286,0.0714285714286,0.7857142857140),
-         (0.0714285714286,0.7857142857140,0.0714285714286),
-         (0.7857142857140,0.0714285714286,0.0714285714286),
-         (0.3994035761670,0.3994035761670,0.1005964238330),
-         (0.3994035761670,0.1005964238330,0.3994035761670),
-         (0.1005964238330,0.3994035761670,0.3994035761670),
-         (0.3994035761670,0.1005964238330,0.1005964238330),
-         (0.1005964238330,0.3994035761670,0.1005964238330),
-         (0.1005964238330,0.1005964238330,0.3994035761670)),
-        (-0.0131555555555,
-         0.0076222222222,0.0076222222222,0.0076222222222,
-         0.0076222222222,
-         0.0248888888888,0.0248888888888,0.0248888888888,
-         0.0248888888888,0.0248888888888,0.0248888888888))
-    return _flatten_rule(
-        ((0.0927352503109,0.0927352503109,0.0927352503109),
-         (0.7217942490670,0.0927352503109,0.0927352503109),
-         (0.0927352503109,0.7217942490670,0.0927352503109),
-         (0.0927352503109,0.0927352503109,0.7217942490670),
-         (0.3108859192630,0.3108859192630,0.3108859192630),
-         (0.0673422422101,0.3108859192630,0.3108859192630),
-         (0.3108859192630,0.0673422422101,0.3108859192630),
-         (0.3108859192630,0.3108859192630,0.0673422422101),
-         (0.4544962958740,0.4544962958740,0.0455037041256),
-         (0.4544962958740,0.0455037041256,0.4544962958740),
-         (0.0455037041256,0.4544962958740,0.4544962958740),
-         (0.4544962958740,0.0455037041256,0.0455037041256),
-         (0.0455037041256,0.4544962958740,0.0455037041256),
-         (0.0455037041256,0.0455037041256,0.4544962958740)),
-        (0.01224884051940,0.01224884051940,
-         0.01224884051940,0.01224884051940,
-         0.01878132095300,0.01878132095300,
-         0.01878132095300,0.01878132095300,
-         0.00709100346285,0.00709100346285,0.00709100346285,
-         0.00709100346285,0.00709100346285,0.00709100346285))
-end
+include("MeshQuadratureSimplex.jl")
 
 # Authority: the low-order economical tables in Gmsh 4.15.2's
 # GaussQuadratureQuad.cpp and GaussQuadratureHex.cpp. Higher orders use the
@@ -388,6 +295,19 @@ function _tetrahedron_composite(order::Int,caller::AbstractString)
     return coordinates,weights
 end
 
+function _triangle_gauss(order::Int,caller::AbstractString)
+    order<=_MAX_TRIANGLE_ECONOMICAL_ORDER &&
+        return _triangle_economical_rule(order)
+    return _triangle_composite(order,caller)
+end
+
+function _tetrahedron_gauss(order::Int,caller::AbstractString)
+    order<=9 && return _tetrahedron_economical_rule(order)
+    order<=_MAX_TETRAHEDRON_ECONOMICAL_ORDER &&
+        return _tetrahedron_lattice_rule(order)
+    return _tetrahedron_composite(order,caller)
+end
+
 function _cartesian_tensor_rule(family::Symbol,order::Int,
                                 caller::AbstractString)
     axis_count,total=_tensor_axis_count(family,order,caller)
@@ -422,7 +342,7 @@ end
 function _prism_rule(order::Int,composite::Bool,caller::AbstractString)
     axis_count,composite_total=_tensor_axis_count(:pri,order,caller)
     triangle_coordinates,triangle_weights=composite ?
-        _triangle_composite(order,caller) : _triangle_gauss(order)
+        _triangle_composite(order,caller) : _triangle_gauss(order,caller)
     total=Base.checked_mul(length(triangle_weights),axis_count)
     total<=_MAX_QUADRATURE_POINTS || throw(ArgumentError(
         "$caller: integration order $order requires $total quadrature " *
@@ -498,30 +418,26 @@ end
 
 Return detached `(local_coordinates, weights)` for any fixed-node family with a
 Gmsh 4.15.2 integration rule. `integration_type` is `GaussN` or
-`CompositeGaussN`, with an omitted `N` meaning zero. Economical triangle,
-tetrahedron, and prism `Gauss` tables cover orders zero through five; use
-`CompositeGaussN` for a higher bounded order. Trihedra have no rule in the
-pinned Gmsh release.
+`CompositeGaussN`, with an omitted `N` meaning zero. Triangle `Gauss` rules use
+economical tables through order 20, while Tetrahedron rules use economical
+tables through order 21; higher orders and `CompositeGaussN` use bounded tensor
+constructions. Prism rules combine the corresponding Triangle and Line rules.
+Trihedra have no rule in the pinned Gmsh release.
 """
 function mesh_integration_points(element_type,integration_type;
                                  caller::AbstractString=
                                      "mesh_integration_points")
     spec=_quadrature_element_spec(element_type,caller)
-    composite,order,name=_integration_rule(integration_type,caller)
+    composite,order=_integration_rule(integration_type,caller)
     family=spec.family
     family===:pnt && return Float64[0.0,0.0,0.0],Float64[1.0]
     family===:lin && return _line_rule(order,caller)
     if family in (:tri,:tet)
-        if !composite
-            order<=_MAX_ECONOMICAL_SIMPLEX_ORDER || throw(ArgumentError(
-                "$caller: economical $(repr(name)) is not implemented for " *
-                "$(family===:tri ? "Triangle" : "Tetrahedron") elements; " *
-                "use CompositeGauss$order"))
-            return family===:tri ? _triangle_gauss(order) :
-                   _tetrahedron_gauss(order)
-        end
-        return family===:tri ? _triangle_composite(order,caller) :
-               _tetrahedron_composite(order,caller)
+        return family===:tri ?
+               (composite ? _triangle_composite(order,caller) :
+                            _triangle_gauss(order,caller)) :
+               (composite ? _tetrahedron_composite(order,caller) :
+                            _tetrahedron_gauss(order,caller))
     elseif family===:qua
         !composite && order in (1,2) && return _quadrangle_gauss(order)
         return _cartesian_tensor_rule(:qua,order,caller)
@@ -529,11 +445,6 @@ function mesh_integration_points(element_type,integration_type;
         !composite && order==1 && return _hexahedron_gauss_one()
         return _cartesian_tensor_rule(:hex,order,caller)
     elseif family===:pri
-        if !composite
-            order<=_MAX_ECONOMICAL_SIMPLEX_ORDER || throw(ArgumentError(
-                "$caller: economical $(repr(name)) is not implemented for " *
-                "Prism elements; use CompositeGauss$order"))
-        end
         return _prism_rule(order,composite,caller)
     else
         return _pyramid_rule(order,caller)

@@ -310,13 +310,13 @@ task partitioning retain the cache-metadata blockers described above.
 `get_integration_points` returns detached `(u,v,w)` reference coordinates and
 weights for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron,
 Hexahedron, Prism, and Pyramid type, independent of interpolation order and session
-state. `Gauss0` through `Gauss5` preserve Gmsh 4.15.2's available economical
-tables; bounded `CompositeGaussN` rules use native Gauss--Legendre, Duffy, and
-Gauss--Jacobi construction with at most 128 points per axis and one million output
-points. Bare rule names mean order zero, and malformed or excessive requests fail
-before output allocation. Economical Triangle, Tetrahedron, and Prism rules above
-order five remain explicit blockers. Trihedra have no integration rule in Gmsh
-4.15.2 and fail explicitly.
+state. `GaussN` preserves every Gmsh 4.15.2 economical table, including Triangle
+through order 20 and Tetrahedron through order 21. Higher orders use Gmsh's tensor
+rules, and Prism combines the matching Triangle and Line rules. Bounded
+`CompositeGaussN` rules use native Gauss--Legendre, Duffy, and Gauss--Jacobi
+construction with at most 128 points per axis and one million output points. Bare
+rule names mean order zero, and malformed or excessive requests fail before output
+allocation. Trihedra have no integration rule in Gmsh 4.15.2 and fail explicitly.
 `get_basis_functions` evaluates each fixed type's actual nodal basis through
 `Lagrange`, `IsoParametric`, `GradLagrange`, and `GradIsoParametric`. Explicit
 `LagrangeN` and `GradLagrangeN` names select the complete order-`N` basis of the
