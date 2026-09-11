@@ -3419,12 +3419,18 @@ end
         binary_format(io,"2.2")
         println(io,"\$Nodes\n0"); write(io,UInt8('x')); println(io,"\$EndNodes")
     end
-    for path in (invalid_marker,unknown_binary,truncated_v2_nodes,
+    for path in (invalid_marker,truncated_v2_nodes,
                  huge_v2_element,binary_v2_variable,truncated_v2_special,
                  binary_v2_domain_link,huge_v4_entities,huge_v4_nodes,
                  bad_binary_newline)
         @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(path)
     end
+    # Unknown sections in a binary file are preserved verbatim rather than
+    # rejected once their ASCII terminator has been located.
+    unknown_binary_mesh=ElementsUnderTest.read_mixed_msh(unknown_binary)
+    @test [(s.name,s.binary,String(copy(s.payload))) for s in
+           unknown_binary_mesh.ancillary_sections]==
+        [("Comments",true,"not safely skippable")]
 
     valid=joinpath(directory,"valid.msh")
     ElementsUnderTest.write_mixed_msh(
@@ -3613,6 +3619,321 @@ end
     GC.gc(); allocated_small=@allocated ElementsUnderTest.read_mixed_msh(small)
     GC.gc(); allocated_large=@allocated ElementsUnderTest.read_mixed_msh(large)
     @test allocated_large<=2.8allocated_small+131_072
+end
+
+@testset "MSH ancillary and view-data section preservation" begin
+    directory=mktempdir()
+    line_block()=ElementsUnderTest.ElementBlock(1,Int32[1 2]')
+    source="""
+    \$MeshFormat
+    2.2 0 8
+    \$EndMeshFormat
+    \$Comments
+    verbatim payload
+      indented line
+    \$EndComments
+    \$Nodes
+    3
+    10 0 0 0
+    20 1 0 0
+    30 0 1 0
+    \$EndNodes
+    \$Elements
+    2
+    100 1 2 5 9 10 20
+    200 1 2 5 9 20 30
+    \$EndElements
+    \$NodeData
+    1
+    "nodal view"
+    1
+    0.5
+    4
+    0
+    1
+    3
+    0
+    10 1.5
+    20 2.5
+    30 3.5
+    \$EndNodeData
+    \$ElementData
+    0
+    0
+    4
+    0
+    1
+    2
+    0
+    100 0.1
+    200 0.2
+    \$EndElementData
+    \$ElementNodeData
+    1
+    "end view"
+    0
+    4
+    2
+    1
+    2
+    0
+    100 2 10 20 5.0 6.0
+    200 2 20 30 7.0 8.0
+    \$EndElementNodeData
+    \$ElementNodeData
+    1
+    "implicit view"
+    0
+    4
+    2
+    1
+    2
+    0
+    100 2 9.0 10.0
+    200 2 11.0 12.0
+    \$EndElementNodeData
+    """
+    input=joinpath(directory,"ancillary-v2.msh")
+    write(input,source)
+    mesh=ElementsUnderTest.read_mixed_msh(input)
+    @test ElementsUnderTest.validate(mesh).ok
+    @test [(s.name,s.anchor) for s in mesh.ancillary_sections]==[("Comments",0)]
+    @test String(copy(mesh.ancillary_sections[1].payload))==
+        "verbatim payload\n  indented line\n"
+    @test [(s.name) for s in mesh.data_sections]==
+        ["NodeData","ElementData","ElementNodeData","ElementNodeData"]
+    node_view,elem_view,end_view,implicit_view=mesh.data_sections
+    @test node_view.nodes==Int32[1,2,3] && node_view.values==[1.5,2.5,3.5]
+    @test node_view.header==Int64[0,1,3,0] && node_view.strings==["\"nodal view\""]
+    @test elem_view.elements==Int32[1,2] && elem_view.values==[0.1,0.2]
+    @test end_view.elements==Int32[1,2] && end_view.row_nodes==Int32[2,2]
+    @test end_view.nodes==Int32[1,2,2,3] && end_view.values==[5.0,6.0,7.0,8.0]
+    @test !end_view.implicit_nodes
+    # Gmsh's model-data ElementNodeData dialect omits the node-tag column; the
+    # per-node values bind to the element's own connectivity.
+    @test implicit_view.implicit_nodes && isempty(implicit_view.nodes)
+    @test implicit_view.elements==Int32[1,2] &&
+        implicit_view.row_nodes==Int32[2,2] &&
+        implicit_view.values==[9.0,10.0,11.0,12.0]
+
+    # MSH2 output rewrites compact tags, so data sections must be remapped.
+    v2_out=joinpath(directory,"ancillary-v2-out.msh")
+    ElementsUnderTest.write_mixed_msh(v2_out,mesh;version=2.2)
+    v2_text=read(v2_out,String)
+    @test occursin("\$Comments\nverbatim payload\n  indented line\n\$EndComments",v2_text)
+    @test occursin("\$NodeData\n1\n\"nodal view\"\n1\n0.5\n4\n0\n1\n3\n0\n"*
+        "1 1.5\n2 2.5\n3 3.5\n\$EndNodeData",v2_text)
+    @test occursin("1 0.10000000000000001\n2 0.20000000000000001\n"*
+        "\$EndElementData",v2_text)
+    # Standard output converts the explicit-tag dialect to Gmsh's
+    # connectivity-implied record: the stored node column happened to equal
+    # the connectivity, so the rows carry values only.
+    @test occursin("1 2 5 6\n2 2 7 8\n\$EndElementNodeData",v2_text)
+    @test occursin("\$ElementNodeData\n1\n\"implicit view\"\n0\n4\n2\n1\n2\n0\n"*
+        "1 2 9 10\n2 2 11 12\n\$EndElementNodeData",v2_text)
+    v2_back=ElementsUnderTest.read_mixed_msh(v2_out)
+    expected=[(s.name,s.nodes,s.elements,s.row_nodes,s.implicit_nodes,s.values)
+              for s in mesh.data_sections]
+    expected[3]=("ElementNodeData",Int32[],Int32[1,2],Int32[2,2],true,
+                 [5.0,6.0,7.0,8.0])
+    @test [(s.name,s.nodes,s.elements,s.row_nodes,s.implicit_nodes,s.values)
+           for s in v2_back.data_sections]==expected
+    @test [(s.name,String(copy(s.payload))) for s in v2_back.ancillary_sections]==
+        [(s.name,String(copy(s.payload))) for s in mesh.ancillary_sections]
+
+    # MSH4 output without entity metadata also emits compact tags; the data
+    # rows are remapped into that tag space.
+    v4_out=joinpath(directory,"ancillary-v4-out.msh")
+    ElementsUnderTest.write_mixed_msh(v4_out,mesh;version=4.1)
+    v4_text=read(v4_out,String)
+    @test occursin("1 1.5\n2 2.5\n3 3.5\n\$EndNodeData",v4_text)
+    @test occursin("1 0.10000000000000001\n2 0.20000000000000001\n"*
+        "\$EndElementData",v4_text)
+    v4_back=ElementsUnderTest.read_mixed_msh(v4_out)
+    @test [(s.name,s.nodes,s.elements,s.row_nodes,s.implicit_nodes,s.values)
+           for s in v4_back.data_sections]==expected
+
+    # MSH4 files with entity metadata retain external tags, so a non-dense
+    # v4 source round-trips its original tags through the data sections.
+    v4_source=replace(source,"\$MeshFormat\n2.2 0 8"=>
+        "\$MeshFormat\n4.1 0 8") |>
+        s->replace(s,"\$Nodes\n3\n10 0 0 0\n20 1 0 0\n30 0 1 0"=>
+        "\$Entities\n0 1 0 0\n9 0 0 0 1 1 0 0 0\n\$EndEntities\n"*
+        "\$Nodes\n1 3 10 30\n1 9 0 3\n10\n20\n30\n0 0 0\n1 0 0\n0 1 0") |>
+        s->replace(s,"\$Elements\n2\n100 1 2 5 9 10 20\n200 1 2 5 9 20 30"=>
+        "\$Elements\n1 2 100 200\n1 9 1 2\n100 10 20\n200 20 30")
+    v4_dense_in=joinpath(directory,"ancillary-v4-in.msh")
+    write(v4_dense_in,v4_source)
+    v4_mesh=ElementsUnderTest.read_mixed_msh(v4_dense_in)
+    v4_dense_out=joinpath(directory,"ancillary-v4-rt.msh")
+    ElementsUnderTest.write_mixed_msh(v4_dense_out,v4_mesh;version=4.1)
+    v4_dense_text=read(v4_dense_out,String)
+    @test occursin("10 1.5\n20 2.5\n30 3.5\n\$EndNodeData",v4_dense_text)
+    @test occursin("100 0.10000000000000001\n200 0.20000000000000001\n"*
+        "\$EndElementData",v4_dense_text)
+
+    # Binary v4 output stores view-data rows in Gmsh's binary record layout;
+    # the explicit-tag section re-emerges in the connectivity-implied dialect
+    # because its node column coincides with the connectivity.
+    v4_bin=joinpath(directory,"ancillary-v4-bin.msh")
+    ElementsUnderTest.write_mixed_msh(v4_bin,mesh;version=4.1,binary=true)
+    bin_back=ElementsUnderTest.read_mixed_msh(v4_bin)
+    @test [(s.name,s.nodes,s.elements,s.row_nodes,s.implicit_nodes,s.values)
+           for s in bin_back.data_sections]==expected
+
+    # gmsh_compatible=false keeps the explicit-tag dialect on ASCII output for
+    # Tessella-to-Tessella round trips.
+    v2x_out=joinpath(directory,"ancillary-v2x.msh")
+    ElementsUnderTest.write_mixed_msh(v2x_out,mesh;
+        version=2.2,gmsh_compatible=false)
+    v2x_back=ElementsUnderTest.read_mixed_msh(v2x_out)
+    @test v2x_back.data_sections[3].implicit_nodes==false &&
+        v2x_back.data_sections[3].nodes==Int32[1,2,2,3]
+
+    # An explicit-tag section that disagrees with connectivity cannot be
+    # expressed in Gmsh's record and is an explicit blocker.
+    mismatch_view=ElementsUnderTest.MshDataSection(
+        "ElementNodeData",["\"v\""],Float64[],Int64[0,1,1,0],
+        Int32[1],Int32[1,3],Int32[2],false,Float64[1.0,2.0],Int32(4))
+    mismatch=ElementsUnderTest.MixedMesh(
+        [0.0 1.0 1.0;0.0 0.0 1.0;0.0 0.0 0.0],[line_block()];
+        data_sections=[mismatch_view])
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"mismatch.msh"),mismatch)
+    nocheck=joinpath(directory,"mismatch-x.msh")
+    ElementsUnderTest.write_mixed_msh(nocheck,mismatch;
+        version=2.2,gmsh_compatible=false)
+    @test ElementsUnderTest.read_mixed_msh(
+        nocheck).data_sections[1].nodes==Int32[1,3]
+
+    # A data section that cannot be parsed or resolved falls back to verbatim
+    # preservation rather than failing the read.
+    broken=joinpath(directory,"dangling-view.msh")
+    write(broken,"""
+    \$MeshFormat
+    2.2 0 8
+    \$EndMeshFormat
+    \$Nodes
+    2
+    1 0 0 0
+    2 1 0 0
+    \$EndNodes
+    \$Elements
+    1
+    1 1 2 5 9 1 2
+    \$EndElements
+    \$NodeData
+    0
+    0
+    4
+    0
+    1
+    1
+    0
+    999 1.0
+    \$EndNodeData
+    \$InterpolationScheme
+    "scheme" 0
+    \$EndInterpolationScheme
+    """)
+    dangling=ElementsUnderTest.read_mixed_msh(broken)
+    @test isempty(dangling.data_sections)
+    @test [s.name for s in dangling.ancillary_sections]==
+        ["NodeData","InterpolationScheme"]
+    dangling_out=joinpath(directory,"dangling-out.msh")
+    ElementsUnderTest.write_mixed_msh(dangling_out,dangling;version=2.2)
+    @test occursin("999 1.0\n\$EndNodeData",read(dangling_out,String))
+
+    # An unrecognized binary-mode section is captured byte-exactly and can be
+    # re-emitted into binary output but not into ASCII output.
+    binary_source=joinpath(directory,"binary-ancillary.msh")
+    open(binary_source,"w") do io
+        write(io,"\$MeshFormat\n4.1 1 8\n")
+        write(io,Int32(1),UInt8('\n'))
+        write(io,"\$EndMeshFormat\n")
+        write(io,"\$Entities\n")
+        write(io,UInt64.((0,1,0,0))...)
+        write(io,Int32(1),Float64.((0,0,0,1,1,1))...,UInt64(0),UInt64(0))
+        write(io,UInt8('\n'),"\$EndEntities\n")
+        write(io,"\$Nodes\n")
+        write(io,UInt64(1),UInt64(3),UInt64(1),UInt64(3))
+        write(io,Int32(2),Int32(1),Int32(0),UInt64(3))
+        write(io,UInt64.((1,2,3))...)
+        write(io,Float64.((0,0,0,1,0,0,0,1,0))...)
+        write(io,UInt8('\n'),"\$EndNodes\n")
+        write(io,"\$Elements\n")
+        write(io,UInt64(1),UInt64(1),UInt64(1),UInt64(1))
+        write(io,Int32(2),Int32(1),Int32(2),UInt64(1))
+        write(io,UInt64(1),UInt64.((1,2,3))...)
+        write(io,UInt8('\n'),"\$EndElements\n")
+        write(io,"\$PartitionedEntities\n")
+        write(io,UInt8[0x00,0x01,0xff,0x24,0x61])
+        write(io,UInt8('\n'),"\$EndPartitionedEntities\n")
+    end
+    bin_mesh=ElementsUnderTest.read_mixed_msh(binary_source)
+    @test length(bin_mesh.ancillary_sections)==1
+    @test bin_mesh.ancillary_sections[1].binary
+    @test bin_mesh.ancillary_sections[1].payload==UInt8[0x00,0x01,0xff,0x24,0x61]
+    bin_out=joinpath(directory,"binary-ancillary-out.msh")
+    ElementsUnderTest.write_mixed_msh(bin_out,bin_mesh;version=4.1,binary=true)
+    bin_back=ElementsUnderTest.read_mixed_msh(bin_out)
+    @test bin_back.ancillary_sections[1].payload==UInt8[0x00,0x01,0xff,0x24,0x61]
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"binary-to-ascii.msh"),bin_mesh;version=4.1)
+
+    # A binary-captured section whose payload is plain text may be re-emitted
+    # into ASCII output; the safety check must not consume the payload bytes.
+    text_binary_source=joinpath(directory,"binary-text-ancillary.msh")
+    open(text_binary_source,"w") do io
+        write(io,"\$MeshFormat\n4.1 1 8\n")
+        write(io,Int32(1),UInt8('\n'))
+        write(io,"\$EndMeshFormat\n")
+        write(io,"\$Entities\n")
+        write(io,UInt64.((0,1,0,0))...)
+        write(io,Int32(1),Float64.((0,0,0,1,1,1))...,UInt64(0),UInt64(0))
+        write(io,UInt8('\n'),"\$EndEntities\n")
+        write(io,"\$Nodes\n")
+        write(io,UInt64(1),UInt64(3),UInt64(1),UInt64(3))
+        write(io,Int32(2),Int32(1),Int32(0),UInt64(3))
+        write(io,UInt64.((1,2,3))...)
+        write(io,Float64.((0,0,0,1,0,0,0,1,0))...)
+        write(io,UInt8('\n'),"\$EndNodes\n")
+        write(io,"\$Elements\n")
+        write(io,UInt64(1),UInt64(1),UInt64(1),UInt64(1))
+        write(io,Int32(2),Int32(1),Int32(2),UInt64(1))
+        write(io,UInt64(1),UInt64.((1,2,3))...)
+        write(io,UInt8('\n'),"\$EndElements\n")
+        write(io,"\$Comments\nkept bytes\n\$EndComments\n")
+    end
+    text_bin_mesh=ElementsUnderTest.read_mixed_msh(text_binary_source)
+    @test text_bin_mesh.ancillary_sections[1].binary
+    @test text_bin_mesh.ancillary_sections[1].payload==codeunits("kept bytes")
+    text_ascii_out=joinpath(directory,"binary-text-ascii.msh")
+    ElementsUnderTest.write_mixed_msh(text_ascii_out,text_bin_mesh;
+        version=4.1,binary=false)
+    @test text_bin_mesh.ancillary_sections[1].payload==codeunits("kept bytes")
+    @test occursin("kept bytes",read(text_ascii_out,String))
+
+    # Public-construction validation rejects malformed sections.
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        [0.0 1.0;0.0 0.0;0.0 0.0],[line_block()];
+        ancillary_sections=[ElementsUnderTest.MshAncillarySection(
+            "Bad Name",false,UInt8[],Int32(0))])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        [0.0 1.0;0.0 0.0;0.0 0.0],[line_block()];
+        data_sections=[ElementsUnderTest.MshDataSection(
+            "NodeData",String[],Float64[],Int64[0,1,1,0],
+            Int32[],Int32[7],Int32[],false,Float64[1.0],Int32(4))])
+    @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+        [0.0 1.0;0.0 0.0;0.0 0.0],[line_block()];
+        data_sections=[ElementsUnderTest.MshDataSection(
+            "ElementNodeData",String[],Float64[],Int64[0,1,1,0],
+            Int32[1],Int32[2],Int32[2],true,Float64[1.0,2.0],Int32(4))])
+    @test ElementsUnderTest.validate(ElementsUnderTest.MixedMesh(
+        [0.0 1.0;0.0 0.0;0.0 0.0],[line_block()];
+        data_sections=[ElementsUnderTest.MshDataSection(
+            "NodeData",["\"v\""],Float64[],Int64[0,1,1,0],
+            Int32[],Int32[2],Int32[],false,Float64[9.0],Int32(4))])).ok
 end
 
 @testset "Elements public documentation" begin
