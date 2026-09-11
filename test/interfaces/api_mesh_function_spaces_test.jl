@@ -52,6 +52,31 @@ end
     @test _MESH_FUNCTION_API.mesh.get_basis_functions(
         3,[0.1,0.2,0.0],"Lagrange2")==quadratic
     @test _MESH_FUNCTION_API.mesh.get_number_of_keys(20,"Lagrange")==9
+    @test _MESH_FUNCTION_API.mesh.get_number_of_orientations(
+        3,"H1Legendre1")==24
+    @test _MESH_FUNCTION_API.mesh.get_number_of_orientations(
+        5,"H1Legendre1")==40320
+    @test _MESH_FUNCTION_API.mesh.get_number_of_orientations(
+        6,"GradH1Legendre1")==720
+    @test _MESH_FUNCTION_API.mesh.get_number_of_orientations(
+        15,"H1Legendre1")==1
+    @test _MESH_FUNCTION_API.mesh.get_number_of_keys(
+        5,"H1Legendre1")==8
+    @test _MESH_FUNCTION_API.mesh.get_number_of_keys(
+        6,"GradH1Legendre1")==6
+    nonsimplex_h1=_MESH_FUNCTION_API.mesh.get_basis_functions(
+        3,[0.1,0.2,0.3],"H1Legendre1",Int32[0])
+    @test nonsimplex_h1[1]==1
+    @test nonsimplex_h1[3]==24
+    @test nonsimplex_h1[2]==quadrangle[2]
+    @test _MESH_FUNCTION_API.mesh.get_basis_functions(
+        3,[0.1,0.2,0.0],"GradH1Legendre1",Int32[0])[2]==
+        _MESH_FUNCTION_API.mesh.get_basis_functions(
+            3,[0.1,0.2,0.0],"GradLagrange1",Int32[0])[2]
+    @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions(
+        7,[0.1,0.2,0.0],"H1Legendre1")
+    @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions(
+        3,[0.1,0.2,0.0],"HcurlLegendre0",Int32[0])
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
         2,"Lagrange")
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_keys(
@@ -76,6 +101,17 @@ end
         @test _MESH_FUNCTION_API.mesh.get_keys(
             12,"Lagrange1")==
             (Int32[],UInt64[],Float64[])
+        # Non-simplex H1 spaces are reference-only: absent type blocks stay
+        # empty and never synthesize cached topology.
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            3,"H1Legendre1")==Int32[]
+        @test _MESH_FUNCTION_API.mesh.get_keys(
+            5,"H1Legendre1")==
+            (Int32[],UInt64[],Float64[])
+        @test _MESH_FUNCTION_API.mesh.get_keys_information(
+            zeros(Int32,4),UInt64.(1:4),3,"H1Legendre1")==
+            fill((Int32(0),Int32(1)),4)
+        @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
         @test _MESH_FUNCTION_API.mesh.get_keys_information(
             zeros(Int32,5),UInt64.(1:5),14,"Lagrange1")==
             fill((Int32(0),Int32(1)),5)
@@ -166,6 +202,10 @@ end
                 Int32[1],UInt64[1],4,"HcurlLegendre0"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
                 10,[0,0,0],"Lagrange11"),
+            ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
+                7,[0,0,0],"H1Legendre1"),
+            ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+                3,"HcurlLegendre0"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
                 140,[0,0,0],"Lagrange1"),
         )

@@ -56,7 +56,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - Gmsh-shaped cached segment/triangle/tetrahedron quality queries with scaled
   arithmetic and exact/BigFloat fallbacks for extreme or ill-conditioned geometry;
 - actual- and explicit-order nodal reference functions and gradients for every
-  fixed family, plus linear-simplex hierarchical H1 and lowest-order H(curl)
+  fixed family, plus order-one H1 bases over simplex, Point, Quadrangle,
+  Hexahedron, and Prism reference families with linear-simplex lowest-order
+  H(curl)
   bases, lexicographic orientations, and global node/edge degree-of-freedom keys;
 - deterministic global edge and triangular/quadrangular-face catalogs for cached
   simplex meshes, with atomic explicit insertion, orientation-stable lookup, and
@@ -328,7 +330,15 @@ allocation. Trihedra have no integration rule in Gmsh 4.15.2 and fail explicitly
 input family. Point accepts each supported numeric name from 0 through 10; the
 other families use the same range, subject to the catalog limit of order 9 for
 Hexahedron, Prism, and Pyramid.
-`H1Legendre1`/`GradH1Legendre1` and
+`H1Legendre1`/`GradH1Legendre1` cover types 1, 2, and 4, every fixed
+Quadrangle, Hexahedron, and Prism type at any Lagrange order, and Point type 15;
+their values repeat the reference family's vertex functions once per orientation.
+Point H1 key metadata reports order 0 and the Point H1 gradient is the verified
+zero vector (the pinned release answers `[1,0,0]` there instead). Hexahedron H1
+orientation counts use 8!, matching the pinned release's basis count rather than
+its uninitialized-memory metadata read, which returns different values across
+processes. Pyramid and Trihedron hierarchical spaces stay rejected: the pinned
+release defines no Pyramid hierarchical family and no Trihedron basis.
 `HcurlLegendre0`/`CurlHcurlLegendre0` remain linear-simplex spaces for types 1, 2,
 and 4. Results use Gmsh's orientation-then-point-then-function-then-component
 layout. Hierarchical orientations use the lexicographic rank of the primary node
@@ -341,9 +351,9 @@ higher-order nodes, so a numeric Lagrange key query whose order differs from the
 stored element fails explicitly. Number-of-key/orientation and key-information
 queries remain session-independent. `get_basis_functions_orientation` accepts
 nondefault `task`/`num_tasks` and returns the contiguous Gmsh block slice
-(`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Non-simplex
-hierarchical
-spaces, Trihedron bases, and entity filtering remain
+(`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Non-simplex H(curl)
+spaces, higher-order hierarchical spaces,
+Trihedron bases, and entity filtering remain
 explicit blockers. Tessella evaluates the catalogued
 higher-order Prism and incomplete Pyramid spaces that Gmsh 4.15.2 cannot construct
 reliably; those paths are certified by nodality, partition, and gradient invariants.
