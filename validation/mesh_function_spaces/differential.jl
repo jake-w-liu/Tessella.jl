@@ -553,6 +553,65 @@ try
             _write_ints!(
                 stream,"type-$element_type:$space:orientations",
                 tessella_orientations)
+            # Partitioning slices the orientation vector into contiguous
+            # Gmsh blocks. Gmsh returns full-size zero-padded vectors, so
+            # each Tessella slice must equal the padded block section. Zero
+            # is a valid orientation, so only section equality (plus the
+            # tag-pinned boundaries in the mesh-data differential) applies.
+            # These checks stay out of the checksum stream.
+            pairs=count==2 ? ((0,2),(1,2)) :
+                count==6 ? ((0,2),(1,2),(1,3),(2,3),(5,6)) :
+                ((0,3),(1,3),(2,3),(7,8),(23,24))
+            # Gmsh is cross-checked only for task<num_tasks: its
+            # hierarchical orientation loop indexes per-entity elements
+            # unguarded, so task>=num_tasks segfaults the pinned release
+            # instead of returning an empty range. Tessella deterministically
+            # returns the empty slice; the package suite pins those cases.
+            empty_task=count
+            tessella_empty=
+                Tessella.API.mesh.get_basis_functions_orientation(
+                    element_type,space,-1,empty_task,count)
+            isempty(tessella_empty) || error(
+                "type-$element_type $space task=$empty_task/$count " *
+                "orientation slice is not empty")
+            for (task,num_tasks) in pairs
+                first_orientation=(task*count)÷num_tasks+1
+                last_orientation=min(((task+1)*count)÷num_tasks,count)
+                block=first_orientation:last_orientation
+                tessella_slice=
+                    Tessella.API.mesh.get_basis_functions_orientation(
+                        element_type,space,-1,task,num_tasks)
+                gmsh_padded=gmsh.model.mesh.getBasisFunctionsOrientation(
+                    element_type,space,-1,task,num_tasks)
+                length(gmsh_padded)==count || error(
+                    "type-$element_type $space task=$task/$num_tasks " *
+                    "Gmsh layout changed")
+                if isempty(block)
+                    isempty(tessella_slice) || error(
+                        "type-$element_type $space task=$task/$num_tasks " *
+                        "orientation slice is not empty")
+                    all(iszero,gmsh_padded) || error(
+                        "type-$element_type $space task=$task/$num_tasks " *
+                        "Gmsh output is not zero")
+                else
+                    _compare_exact(
+                        "type-$element_type $space " *
+                        "task=$task/$num_tasks orientations",
+                        gmsh_padded[block],tessella_slice)
+                    tessella_slice==expected[block] || error(
+                        "type-$element_type $space task=$task/$num_tasks " *
+                        "slice differs from the expected block")
+                end
+            end
+            unioned=Int32[]
+            for task in 0:2
+                append!(unioned,
+                        Tessella.API.mesh.get_basis_functions_orientation(
+                            element_type,space,-1,task,3))
+            end
+            _compare_exact(
+                "type-$element_type $space orientation task union",
+                expected,unioned)
         end
 
         gmsh.clear()
@@ -593,7 +652,9 @@ try
             ()->Tessella.API.mesh.get_keys(
                 4,"HcurlLegendre0",3,true),
             ()->Tessella.API.mesh.get_basis_functions_orientation(
-                4,"HcurlLegendre0",-1,1,2),
+                4,"HcurlLegendre0",-1,-1,1),
+            ()->Tessella.API.mesh.get_basis_functions_orientation(
+                4,"HcurlLegendre0",-1,0,0),
             ()->Tessella.API.mesh.get_keys_information(
                 Int32[1],UInt64[1],4,"HcurlLegendre0"),
             ()->Tessella.API.mesh.get_basis_functions(

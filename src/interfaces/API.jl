@@ -790,10 +790,39 @@ function _mesh_query_tasks(task,num_tasks,caller::AbstractString)
         "$caller: task must be nonnegative"))
     task_count>=1 || throw(ArgumentError(
         "$caller: num_tasks must be positive"))
-    (task_index==0 && task_count==1) || throw(ArgumentError(
-        "$caller: only task=0 with num_tasks=1 is supported by the " *
-        "detached Julia return arrays"))
-    return nothing
+    return task_index,task_count
+end
+
+# Gmsh 4.15.2 contiguous-block partition
+# (src/common/gmsh.cpp: `begin=(task*count)/numTasks`,
+# `end=((task+1)*count)/numTasks` with truncating division). Positions are
+# 0-based element slots; the returned 1-based `UnitRange` is already
+# intersected with the populated prefix, so `task>=num_tasks` yields `1:0`
+# exactly as Gmsh's empty `[begin,end)` range does. Products use `Int128` so
+# adversarial task counts cannot wrap before the truncating division.
+function _mesh_task_range(count::Int,task_index::Int,task_count::Int)
+    (count<=0 || task_index>=task_count) && return 1:0
+    first_element=
+        Int(div(Int128(task_index)*Int128(count),Int128(task_count)))+1
+    last_element=
+        Int(div(Int128(task_index+1)*Int128(count),Int128(task_count)))
+    last_element=min(last_element,count)
+    first_element>last_element && return 1:0
+    return first_element:last_element
+end
+
+# Select the caller-visible input-tag slice for quality queries, which Gmsh
+# partitions over the requested tag vector rather than over cached positions.
+# The container contract is checked here with the core message so invalid
+# containers fail identically; tag contents are validated by
+# `mesh_element_qualities` on the selected slice only, matching Gmsh, which
+# leaves entries outside `[begin,end)` untouched.
+function _mesh_task_tags(values,task_index::Int,task_count::Int,
+                         caller::AbstractString)
+    (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
+        "$caller: element_tags must be a vector or tuple of integers"))
+    values isa AbstractArray && Base.require_one_based_indexing(values)
+    return values[_mesh_task_range(length(values),task_index,task_count)]
 end
 
 function _mesh_element_family(value,caller::AbstractString)
@@ -929,8 +958,9 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
     caller="API.mesh.get_element_qualities"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        _mesh_query_tasks(task,num_tasks,caller)
-        mesh_element_qualities(cached,element_tags,quality_name)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+        selected=_mesh_task_tags(element_tags,task_index,task_count,caller)
+        mesh_element_qualities(cached,selected,quality_name)
     end
 end
 
@@ -938,9 +968,12 @@ function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_jacobians"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,_=_mesh_query_type_block(cached,element_type,tag,caller)
-        _mesh_query_tasks(task,num_tasks,caller)
-        mesh_jacobians(cached,msh,local_coord)
+        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+        count=block===nothing ? 0 : size(block[2],2)
+        mesh_jacobians(
+            cached,msh,local_coord,
+            _mesh_task_range(count,task_index,task_count))
     end
 end
 
@@ -971,10 +1004,12 @@ function _get_basis_functions_orientation(element_type,function_space_type,
     caller="API.mesh.get_basis_functions_orientation"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,_=_mesh_query_type_block(cached,element_type,tag,caller)
-        _mesh_query_tasks(task,num_tasks,caller)
+        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+        count=block===nothing ? 0 : size(block[2],2)
         mesh_basis_orientations(
-            cached,msh,function_space_type;caller=caller)
+            cached,msh,function_space_type,
+            _mesh_task_range(count,task_index,task_count);caller=caller)
     end
 end
 
@@ -1150,7 +1185,7 @@ function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
     return node_tags,coordinates
 end
 
-function _mesh_barycenters(mesh::Mesh,cells::Matrix{Int32},fast::Bool,
+function _mesh_barycenters(mesh::Mesh,cells::AbstractMatrix{Int32},fast::Bool,
                            caller::AbstractString)
     nodes_per_element=size(cells,1)
     count=size(cells,2)
@@ -1169,7 +1204,7 @@ function _mesh_barycenters(mesh::Mesh,cells::Matrix{Int32},fast::Bool,
     return result
 end
 
-function _mesh_pattern_nodes(cells::Matrix{Int32},patterns)
+function _mesh_pattern_nodes(cells::AbstractMatrix{Int32},patterns)
     isempty(patterns) && return UInt64[]
     pattern_width=length(first(patterns))
     per_element=Base.checked_mul(length(patterns),pattern_width)
@@ -1261,10 +1296,15 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
-        _mesh_query_tasks(task,num_tasks,caller)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[],UInt64[]
         offset,cells=block
-        return _mesh_dense_tags(offset,size(cells,2)),UInt64.(vec(cells))
+        selected=_mesh_task_range(size(cells,2),task_index,task_count)
+        isempty(selected) && return UInt64[],UInt64[]
+        first_element,last_element=first(selected),last(selected)
+        tags=UInt64.(Base.checked_add(offset,first_element):
+                     Base.checked_add(offset,last_element))
+        return tags,UInt64.(vec(@view cells[:,selected]))
     end
 end
 
@@ -1290,10 +1330,11 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
         _,block=_mesh_query_type_block(cached,element_type,tag,caller)
         fast_mode=_mesh_query_bool(fast,caller,"fast")
         _mesh_query_bool(primary,caller,"primary")
-        _mesh_query_tasks(task,num_tasks,caller)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return Float64[]
         _,cells=block
-        _mesh_barycenters(cached,cells,fast_mode,caller)
+        selected=_mesh_task_range(size(cells,2),task_index,task_count)
+        _mesh_barycenters(cached,@view(cells[:,selected]),fast_mode,caller)
     end
 end
 
@@ -1304,10 +1345,11 @@ function _get_element_edge_nodes(element_type,tag=-1,primary=false,
         cached=_cached_mesh_locked(caller)
         msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
         _mesh_query_bool(primary,caller,"primary")
-        _mesh_query_tasks(task,num_tasks,caller)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[]
         _,cells=block
-        _mesh_pattern_nodes(cells,_simplex_edge_patterns(msh))
+        selected=_mesh_task_range(size(cells,2),task_index,task_count)
+        _mesh_pattern_nodes(@view(cells[:,selected]),_simplex_edge_patterns(msh))
     end
 end
 
@@ -1321,10 +1363,12 @@ function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
         face in (3,4) || throw(ArgumentError(
             "$caller: face_type must be 3 (triangle) or 4 (quadrangle)"))
         _mesh_query_bool(primary,caller,"primary")
-        _mesh_query_tasks(task,num_tasks,caller)
+        task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[]
         _,cells=block
-        _mesh_pattern_nodes(cells,_simplex_face_patterns(msh,face))
+        selected=_mesh_task_range(size(cells,2),task_index,task_count)
+        _mesh_pattern_nodes(
+            @view(cells[:,selected]),_simplex_face_patterns(msh,face))
     end
 end
 
@@ -1570,7 +1614,19 @@ Return detached `Float64` qualities for dense cached linear-simplex element tags
 in request order. Names follow the documented Gmsh 4.15.2 list. Segment tags are
 explicitly unsupported for `minDetJac`, `maxDetJac`, `minSIGE`, and
 `minIsotropy`, whose 1-D Gmsh implementations are absent or unreliable.
-Nondefault task partitioning is unavailable for detached Julia return arrays.
+With `num_tasks > 1`, only the contiguous Gmsh block of requested tags with
+0-based positions `begin = (task*count) ÷ num_tasks` through
+`end = ((task+1)*count) ÷ num_tasks` is evaluated and returned; unlike Gmsh's
+preallocated C++ output, the detached result contains exactly that slice and no
+zero padding. Tag validation is slice-scoped, matching Gmsh, which leaves
+entries outside the block untouched. `task >= num_tasks` returns an empty
+vector without error; a negative `task`, `num_tasks < 1`, or a non-integer
+task count fails explicitly. Gmsh 4.15.2 cannot be cross-checked for
+`task >= num_tasks` here: its quality loop indexes the request vector
+unguarded, so that case reads out of bounds (observed `Unknown element 0`)
+where the other six partitioned queries use a guarded range and stay empty.
+Tessella deterministically returns the empty slice instead of replicating
+that out-of-bounds read.
 """
 get_element_qualities(element_tags,quality_name="minSICN",task=0,num_tasks=1)=
     _get_element_qualities(element_tags,quality_name,task,num_tasks)
@@ -1583,8 +1639,14 @@ of one linear-simplex Gmsh type at concatenated `(u,v,w)` points. Results are
 ordered by element and then point; each 3×3 Jacobian is flattened by column.
 Segment determinants are positive lengths, triangle determinants are positive
 area scales, and tetrahedron determinants retain orientation. The cache supports
-types 1, 2, and 4. Entity filtering and nondefault task partitioning require
-metadata or caller-owned output storage that this Julia cache does not have.
+types 1, 2, and 4. Entity filtering requires metadata this Julia cache does not
+have. With `num_tasks > 1`, only the contiguous Gmsh block of cached elements
+with 0-based positions `begin = (task*count) ÷ num_tasks` through
+`end = ((task+1)*count) ÷ num_tasks` is evaluated and returned; unlike Gmsh's
+preallocated C++ output, the detached result contains exactly that slice and no
+zero padding. `task >= num_tasks` returns three empty vectors without error;
+a negative `task`, `num_tasks < 1`, or a non-integer task count fails
+explicitly.
 """
 get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)=
     _get_jacobians(element_type,local_coord,tag,task,num_tasks)
@@ -1635,9 +1697,18 @@ get_number_of_orientations(element_type,function_space_type)=
 
 Return one lexicographic orientation index per cached element of the requested
 supported type. Nodal spaces return zeros. Known fixed types absent from the
-linear-simplex cache return an empty vector. Entity filtering and nondefault task
-partitioning require metadata or caller-owned output storage not present in the
-detached cache API.
+linear-simplex cache return an empty vector. Entity filtering requires metadata
+not present in the detached cache API. With `num_tasks > 1`, only the
+contiguous Gmsh block of cached elements with 0-based positions
+`begin = (task*count) ÷ num_tasks` through `end = ((task+1)*count) ÷ num_tasks`
+is evaluated and returned; unlike Gmsh's preallocated C++ output, the detached
+result contains exactly that slice and no zero padding. `task >= num_tasks`
+returns an empty vector without error; a negative `task`, `num_tasks < 1`, or a
+non-integer task count fails explicitly. Gmsh 4.15.2 cannot be cross-checked
+for `task >= num_tasks` here: its hierarchical orientation loop indexes
+per-entity elements unguarded, so that case segfaults the pinned release
+where the guarded queries stay empty. Tessella deterministically returns the
+empty slice instead.
 """
 get_basis_functions_orientation(element_type,function_space_type,
                                 tag=-1,task=0,num_tasks=1)=
@@ -1794,8 +1865,13 @@ get_all_faces(face_type)=_get_all_faces(face_type)
 
 Return detached dense element tags and flattened node tags for one fixed-node Gmsh
 element type. The simplex cache can contain only types 1, 2, and 4; another known
-fixed-node type returns empty arrays. Entity filtering and nondefault task
-partitioning are explicit blockers.
+fixed-node type returns empty arrays. Entity filtering is an explicit blocker.
+With `num_tasks > 1`, only the contiguous Gmsh block of cached elements with
+0-based positions `begin = (task*count) ÷ num_tasks` through
+`end = ((task+1)*count) ÷ num_tasks` is returned; unlike Gmsh's preallocated
+C++ output, the detached result contains exactly that slice and no zero
+padding. `task >= num_tasks` returns two empty vectors without error; a
+negative `task`, `num_tasks < 1`, or a non-integer task count fails explicitly.
 """
 get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)=
     _get_elements_by_type(element_type,tag,task,num_tasks)
@@ -1818,8 +1894,13 @@ get_nodes_by_element_type(element_type,tag=-1,return_parametric_coord=true)=
 
 Return detached `x,y,z` barycenters in element order for a cached linear-simplex
 type. With `fast=true`, return unnormalized primary-node coordinate sums. All nodes
-are primary for types 1, 2, and 4. Entity filtering and nondefault task partitioning
-are explicit blockers.
+are primary for types 1, 2, and 4. Entity filtering is an explicit blocker.
+With `num_tasks > 1`, only the contiguous Gmsh block of cached elements with
+0-based positions `begin = (task*count) ÷ num_tasks` through
+`end = ((task+1)*count) ÷ num_tasks` is returned; unlike Gmsh's preallocated
+C++ output, the detached result contains exactly that slice and no zero
+padding. `task >= num_tasks` returns an empty vector without error; a negative
+`task`, `num_tasks < 1`, or a non-integer task count fails explicitly.
 """
 get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)=
     _get_barycenters(element_type,tag,fast,primary,task,num_tasks)
@@ -1830,7 +1911,13 @@ get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)=
 
 Return detached edge-node tags in Gmsh local-edge order for every cached element of
 one type. The `primary` flag is validated but does not change linear-simplex output.
-Entity filtering and nondefault task partitioning are explicit blockers.
+Entity filtering is an explicit blocker. With `num_tasks > 1`, only the
+contiguous Gmsh block of cached elements with 0-based positions
+`begin = (task*count) ÷ num_tasks` through `end = ((task+1)*count) ÷ num_tasks`
+is returned; unlike Gmsh's preallocated C++ output, the detached result contains
+exactly that slice and no zero padding. `task >= num_tasks` returns an empty
+vector without error; a negative `task`, `num_tasks < 1`, or a non-integer task
+count fails explicitly.
 """
 get_element_edge_nodes(element_type,tag=-1,primary=false,task=0,num_tasks=1)=
     _get_element_edge_nodes(element_type,tag,primary,task,num_tasks)
@@ -1841,8 +1928,13 @@ get_element_edge_nodes(element_type,tag=-1,primary=false,task=0,num_tasks=1)=
 
 Return detached face-node tags in Gmsh local-face order for every cached element of
 one type. `face_type` is 3 for triangles or 4 for quadrangles. The `primary` flag is
-validated but does not change linear-simplex output. Entity filtering and nondefault
-task partitioning are explicit blockers.
+validated but does not change linear-simplex output. Entity filtering is an
+explicit blocker. With `num_tasks > 1`, only the contiguous Gmsh block of cached
+elements with 0-based positions `begin = (task*count) ÷ num_tasks` through
+`end = ((task+1)*count) ÷ num_tasks` is returned; unlike Gmsh's preallocated
+C++ output, the detached result contains exactly that slice and no zero padding.
+`task >= num_tasks` returns an empty vector without error; a negative `task`,
+`num_tasks < 1`, or a non-integer task count fails explicitly.
 """
 get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
                        task=0,num_tasks=1)=

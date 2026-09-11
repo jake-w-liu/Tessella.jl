@@ -295,12 +295,134 @@ try
         _rejects_argument(
             ()->Tessella.API.mesh.get_nodes_by_element_type(4,301)) || error(
             "Tessella fabricated type-node classification")
-        _rejects_argument(
-            ()->Tessella.API.mesh.get_elements_by_type(4,-1,1,2)) || error(
-            "Tessella accepted nondefault Julia task partitioning")
-        _rejects_argument(
-            ()->Tessella.API.mesh.get_element_edge_nodes(4,-1,false,1,2)) ||
-            error("Tessella accepted nondefault edge-node task partitioning")
+        for (task,num_tasks) in ((-1,1),(0,0),(0,-1))
+            _rejects_argument(()->Tessella.API.mesh.get_elements_by_type(
+                4,-1,task,num_tasks)) || error(
+                "Tessella accepted task=$task num_tasks=$num_tasks")
+            _rejects_argument(()->Tessella.API.mesh.get_element_edge_nodes(
+                4,-1,false,task,num_tasks)) || error(
+                "Tessella accepted edge task=$task num_tasks=$num_tasks")
+            _rejects_argument(()->Tessella.API.mesh.get_barycenters(
+                4,-1,false,false,task,num_tasks)) || error(
+                "Tessella accepted barycenter task=$task num_tasks=$num_tasks")
+        end
+        _rejects_argument(()->Tessella.API.mesh.get_elements_by_type(
+            4,-1,true,1)) || error(
+            "Tessella accepted a Bool task")
+        # With one cached element per type, task 1 of 2 owns the whole
+        # 0-based block [0,1) while task 0 of 2 is the silently-empty range.
+        Tessella.API.mesh.get_barycenters(4,-1,false,false,1,2)==
+            tessella_barycenters[(4,false,false)] || error(
+            "single-tet task-1-of-2 barycenters differ")
+        gmsh.model.mesh.getBarycenters(4,-1,false,false,1,2)==
+            gmsh_barycenters[(4,false,false)] || error(
+            "Gmsh single-tet task-1-of-2 barycenters differ")
+        isempty(Tessella.API.mesh.get_barycenters(
+            4,-1,false,false,0,2)) || error(
+            "single-tet task-0-of-2 barycenters are not empty")
+        all(iszero,gmsh.model.mesh.getBarycenters(4,-1,false,false,0,2)) ||
+            error("Gmsh single-tet task-0-of-2 barycenters are not zero")
+
+        # Five-segment chain: differential cross-check of the contiguous
+        # Gmsh block formula begin=(task*count)÷numTasks,
+        # end=((task+1)*count)÷numTasks against the pinned implementation.
+        # Gmsh returns full-size zero-padded vectors; Tessella returns the
+        # computed slice, so the slice must equal the padded block section
+        # with zeros exactly outside it (checked on strictly-positive tags).
+        chain_model="mesh-data-query-partitions"
+        gmsh.model.add(chain_model)
+        gmsh.model.addDiscreteEntity(1,701)
+        chain_coordinates=Float64[0 1 2 3 4 5;0 0 0 0 0 0;0 0 0 0 0 0]
+        gmsh.model.mesh.addNodes(
+            1,701,UInt64[11,12,13,14,15,16],collect(vec(chain_coordinates)))
+        gmsh.model.mesh.addElementsByType(
+            701,1,UInt64[71,72,73,74,75],
+            UInt64[11,12,12,13,13,14,14,15,15,16])
+        chain=Mesh(chain_coordinates;
+                    segs=Int32[1 2 3 4 5;2 3 4 5 6])
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH[]=Tessella.API._copy_mesh(chain)
+        end
+        chain_block(task,num_tasks)=let
+            first_element=(task*5)÷num_tasks+1
+            last_element=min(((task+1)*5)÷num_tasks,5)
+            first_element:last_element
+        end
+        _chain_nodes(values)=UInt64[value-UInt64(10) for value in values]
+        for (task,num_tasks) in
+            ((0,1),(0,2),(1,2),(0,3),(1,3),(2,3),(2,2),(0,5),(4,5),(5,5))
+            block=chain_block(task,num_tasks)
+            tessella_tags,tessella_nodes=
+                Tessella.API.mesh.get_elements_by_type(1,-1,task,num_tasks)
+            gmsh_tags,gmsh_nodes=
+                gmsh.model.mesh.getElementsByType(1,-1,task,num_tasks)
+            tessella_bary=Tessella.API.mesh.get_barycenters(
+                1,-1,false,false,task,num_tasks)
+            gmsh_bary=gmsh.model.mesh.getBarycenters(
+                1,-1,false,false,task,num_tasks)
+            tessella_edge=Tessella.API.mesh.get_element_edge_nodes(
+                1,-1,false,task,num_tasks)
+            gmsh_edge=gmsh.model.mesh.getElementEdgeNodes(
+                1,-1,false,task,num_tasks)
+            length(gmsh_tags)==5 && length(gmsh_nodes)==10 || error(
+                "Gmsh task=$task/$num_tasks tag layout changed")
+            length(gmsh_bary)==15 && length(gmsh_edge)==10 || error(
+                "Gmsh task=$task/$num_tasks value layout changed")
+            if isempty(block)
+                isempty(tessella_tags) && isempty(tessella_nodes) || error(
+                    "task=$task/$num_tasks element slice is not empty")
+                isempty(tessella_bary) && isempty(tessella_edge) || error(
+                    "task=$task/$num_tasks value slice is not empty")
+                all(iszero,gmsh_tags) && all(iszero,gmsh_nodes) || error(
+                    "Gmsh task=$task/$num_tasks tags are not zero")
+                all(iszero,gmsh_bary) && all(iszero,gmsh_edge) || error(
+                    "Gmsh task=$task/$num_tasks values are not zero")
+            else
+                first_element,last_element=first(block),last(block)
+                node_range=(first_element-1)*2+1:last_element*2
+                bary_range=(first_element-1)*3+1:last_element*3
+                before_tags=first_element>1 ?
+                    gmsh_tags[1:first_element-1] : UInt64[]
+                after_tags=last_element<5 ?
+                    gmsh_tags[last_element+1:5] : UInt64[]
+                all(iszero,before_tags) && all(iszero,after_tags) || error(
+                    "Gmsh task=$task/$num_tasks tag padding moved")
+                gmsh_tags[block] .- UInt64(70)==tessella_tags || error(
+                    "task=$task/$num_tasks element tags differ")
+                _chain_nodes(gmsh_nodes[node_range])==
+                    tessella_nodes || error(
+                    "task=$task/$num_tasks element nodes differ")
+                gmsh_bary[bary_range]==tessella_bary || error(
+                    "task=$task/$num_tasks barycenters differ")
+                before_edge=first_element>1 ?
+                    gmsh_edge[1:(first_element-1)*2] : UInt64[]
+                after_edge=last_element<5 ?
+                    gmsh_edge[last_element*2+1:10] : UInt64[]
+                all(iszero,before_edge) && all(iszero,after_edge) || error(
+                    "Gmsh task=$task/$num_tasks edge padding moved")
+                _chain_nodes(gmsh_edge[node_range])==
+                    tessella_edge || error(
+                    "task=$task/$num_tasks edge nodes differ")
+            end
+        end
+        for num_tasks in (2,3)
+            union_tags=UInt64[]
+            union_nodes=UInt64[]
+            for task in 0:num_tasks-1
+                slice_tags,slice_nodes=
+                    Tessella.API.mesh.get_elements_by_type(
+                        1,-1,task,num_tasks)
+                append!(union_tags,slice_tags)
+                append!(union_nodes,slice_nodes)
+            end
+            union_tags==UInt64[1,2,3,4,5] || error(
+                "five-segment task union tags differ")
+            union_nodes==UInt64[1,2,2,3,3,4,4,5,5,6] || error(
+                "five-segment task union nodes differ")
+        end
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH[]=Tessella.API._copy_mesh(fixture)
+        end
         _rejects_argument(
             ()->Tessella.API.mesh.get_element_face_nodes(4,2)) || error(
             "Tessella accepted a non-face node count")
@@ -379,8 +501,8 @@ try
             "dense_max_tags=4/3 explicit_max_tags=40/300 ",
             "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
-            " bounded=no-mesh/classification/task/special-type/face-count ",
-            "blockers and finite-barycenter contract")
+            " bounded=no-mesh/classification/special-type/face-count ",
+            "blockers and finite-barycenter contract with partitioned slices")
 finally
     gmsh.isInitialized()!=0 && gmsh.finalize()
 end

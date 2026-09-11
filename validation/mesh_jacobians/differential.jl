@@ -160,8 +160,51 @@ try
             1,Float64[0,0,0],101)) || error(
             "Tessella accepted entity filtering without classification")
         _rejects_argument(()->Tessella.API.mesh.get_jacobians(
-            1,Float64[0,0,0],-1,1,2)) || error(
-            "Tessella accepted detached-array task partitioning")
+            1,Float64[0,0,0],-1,-1,1)) || error(
+            "Tessella accepted a negative Jacobian task")
+        _rejects_argument(()->Tessella.API.mesh.get_jacobians(
+            1,Float64[0,0,0],-1,0,0)) || error(
+            "Tessella accepted zero Jacobian tasks")
+        _rejects_argument(()->Tessella.API.mesh.get_jacobians(
+            1,Float64[0,0],-1,1,2)) || error(
+            "partitioned Jacobians skipped coordinate validation")
+        # Two cached elements per block: task 0 of 2 is the first element,
+        # task 1 of 2 the second, and task 2 of 2 the silently-empty range.
+        # Gmsh returns full-size zero-padded vectors, so each Tessella slice
+        # must equal the padded block section exactly.
+        for (element_type,entity,local_coordinates) in
+            ((1,101,Float64[-1,0,0,0,0,0,1,0,0]),
+             (2,201,Float64[0,0,0,0.2,0.3,0,1,0,0]),
+             (4,301,Float64[0,0,0,0.2,0.3,0.1,1,0,0]))
+            complete=Tessella.API.mesh.get_jacobians(
+                element_type,local_coordinates)
+            per_element=length.(complete) .÷ 2
+            for (task,num_tasks) in ((0,1),(0,2),(1,2),(0,3),(2,3),(2,2))
+                first_element=(task*2)÷num_tasks+1
+                last_element=min(((task+1)*2)÷num_tasks,2)
+                block=first_element:last_element
+                tessella_slice=Tessella.API.mesh.get_jacobians(
+                    element_type,local_coordinates,-1,task,num_tasks)
+                gmsh_padded=gmsh.model.mesh.getJacobians(
+                    element_type,local_coordinates,entity,task,num_tasks)
+                if isempty(block)
+                    any(!isempty,tessella_slice) && error(
+                        "type-$element_type task=$task/$num_tasks " *
+                        "Jacobian slice is not empty")
+                else
+                    for (name,section,gmsh_values,tessella_values) in zip(
+                        ("jacobians","determinants","coordinates"),
+                        per_element,gmsh_padded,tessella_slice)
+                        lo=(first_element-1)*section+1
+                        hi=last_element*section
+                        _compare_values(
+                            "type-$element_type:$name:" *
+                            "task=$task/$num_tasks",
+                            gmsh_values[lo:hi],tessella_values)
+                    end
+                end
+            end
+        end
         mesh_crc(Tessella.API.mesh.get())==baseline || error(
             "Jacobian queries mutated the cached mesh")
 

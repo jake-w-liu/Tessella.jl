@@ -115,6 +115,51 @@ try
             _write_quality_result!(stream,quality,tessella_values)
         end
 
+        # Partitioning slices the five-tag request vector: each Tessella
+        # slice must equal the corresponding Gmsh padded block section, and
+        # the task union must reproduce the complete request in order. These
+        # checks stay out of the checksum stream, which pins full queries.
+        # Gmsh is cross-checked only for task<num_tasks: its quality loop
+        # indexes the request vector unguarded, so task>=num_tasks reads out
+        # of bounds (observed "Unknown element 0") instead of returning an
+        # empty range. Tessella deterministically returns the empty slice;
+        # the package suite pins those cases without Gmsh.
+        for (task,num_tasks) in ((0,2),(1,2),(0,3),(1,3),(2,3),(4,5))
+            first_request=(task*5)÷num_tasks+1
+            last_request=min(((task+1)*5)÷num_tasks,5)
+            block=first_request:last_request
+            tessella_slice=Tessella.API.mesh.get_element_qualities(
+                dense_tags,"minSICN",task,num_tasks)
+            gmsh_padded=gmsh.model.mesh.getElementQualities(
+                gmsh_tags,"minSICN",task,num_tasks)
+            length(gmsh_padded)==5 || error(
+                "Gmsh task=$task/$num_tasks quality layout changed")
+            if isempty(block)
+                isempty(tessella_slice) || error(
+                    "task=$task/$num_tasks quality slice is not empty")
+            else
+                length(tessella_slice)==length(block) || error(
+                    "task=$task/$num_tasks quality slice length differs")
+                for (position,index) in enumerate(block)
+                    isapprox(tessella_slice[position],gmsh_padded[index];
+                             atol=2.0e-13,rtol=2.0e-13) || error(
+                        "task=$task/$num_tasks quality differs at " *
+                        "request index $index")
+                end
+            end
+        end
+        isempty(Tessella.API.mesh.get_element_qualities(
+            dense_tags,"minSICN",5,5)) || error(
+            "task-5-of-5 quality slice is not empty")
+        unioned=Float64[]
+        for task in 0:2
+            append!(unioned,Tessella.API.mesh.get_element_qualities(
+                dense_tags,"minSICN",task,3))
+        end
+        unioned==Tessella.API.mesh.get_element_qualities(
+            dense_tags,"minSICN") || error(
+            "quality task union differs from the complete request")
+
         for quality in _SEGMENT_QUALITY_NAMES
             gmsh_values=gmsh.model.mesh.getElementQualities(
                 UInt64[101,101],quality)
