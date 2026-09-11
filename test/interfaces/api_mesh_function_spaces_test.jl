@@ -75,8 +75,6 @@ end
             3,[0.1,0.2,0.0],"GradLagrange1",Int32[0])[2]
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions(
         7,[0.1,0.2,0.0],"H1Legendre1")
-    @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions(
-        3,[0.1,0.2,0.0],"HcurlLegendre0",Int32[0])
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
         2,"Lagrange")
     @test_throws ArgumentError _MESH_FUNCTION_API.mesh.get_keys(
@@ -177,8 +175,6 @@ end
         before=_MESH_FUNCTION_API.mesh.get_all_edges()
         for invalid in (
             ()->_MESH_FUNCTION_API.mesh.get_keys(
-                4,"HcurlLegendre1"),
-            ()->_MESH_FUNCTION_API.mesh.get_keys(
                 2,"Lagrange2"),
             ()->_MESH_FUNCTION_API.mesh.get_keys_for_element(
                 2,"GradLagrange2"),
@@ -204,8 +200,6 @@ end
                 10,[0,0,0],"Lagrange11"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
                 7,[0,0,0],"H1Legendre1"),
-            ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
-                3,"HcurlLegendre0"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
                 140,[0,0,0],"Lagrange1"),
         )

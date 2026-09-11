@@ -57,6 +57,7 @@ using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
                             _mesh_edge_topology_for_cells,
+                            _mesh_face_topology_for_cells,
                             _mesh_add_edges, _mesh_add_faces,
                             _mesh_edges, _mesh_faces,
                             _mesh_all_edges, _mesh_all_faces,
@@ -68,7 +69,8 @@ using ..MeshPointLocation: SimplexLocator, mesh_element_offsets,
 using ..MeshElementQuality: mesh_element_qualities
 using ..MeshQuadrature: mesh_integration_points
 using ..MeshReferenceGeometry: mesh_jacobian, mesh_jacobians
-using ..MeshFunctionSpaces: mesh_basis_functions, mesh_basis_orientation,
+using ..MeshFunctionSpaces: MeshFunctionSpaces, mesh_basis_functions,
+                            mesh_basis_orientation,
                             mesh_basis_orientations, mesh_key_dimension,
                             mesh_keys, mesh_keys_for_element,
                             mesh_keys_information, mesh_number_of_keys,
@@ -1032,25 +1034,48 @@ function _get_number_of_keys(element_type,function_space_type)
         caller="API.mesh.get_number_of_keys")
 end
 
+# Hierarchical key queries need the edge catalog whenever the basis owns edge
+# functions and the face catalog whenever it owns face functions; both are
+# populated incrementally exactly like Gmsh's addMEdge/addMFace calls inside
+# getKeys.
+function _hierarchical_key_catalog_needs(function_space_type,family::Symbol)
+    space=MeshFunctionSpaces._function_space(
+        function_space_type,"API.mesh key query")
+    space.hierarchical || return false,false
+    counts=space.key_dimension==0 ?
+        MeshFunctionSpaces._h1_counts(family,space.key_order) :
+        MeshFunctionSpaces._hcurl_counts(family,space.key_order)
+    return counts.edge>0,counts.face>0
+end
+
 function _get_keys(element_type,function_space_type,tag=-1,
                    return_coord=true)
     caller="API.mesh.get_keys"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
-        key_dimension=mesh_key_dimension(
-            msh,function_space_type;caller=caller)
-        replacement=LAST_MESH_EDGES[]
-        if key_dimension==1 && block!==nothing
+        needs_edges,needs_faces=_hierarchical_key_catalog_needs(
+            function_space_type,msh_spec(msh).family)
+        edge_replacement=LAST_MESH_EDGES[]
+        face_replacement=LAST_MESH_FACES[]
+        if block!==nothing
             _,cells=block
-            replacement=_mesh_edge_topology_for_cells(
-                cached,replacement,cells,msh)
+            if needs_edges
+                edge_replacement=_mesh_edge_topology_for_cells(
+                    cached,edge_replacement,cells,msh)
+            end
+            if needs_faces
+                face_replacement=_mesh_face_topology_for_cells(
+                    cached,face_replacement,cells,msh)
+            end
         end
         result=mesh_keys(
-            cached,msh,function_space_type,replacement;
+            cached,msh,function_space_type,edge_replacement,
+            face_replacement;
             return_coord=return_coord,caller=caller)
-        key_dimension==1 && block!==nothing &&
-            (LAST_MESH_EDGES[]=replacement)
+        block!==nothing || return result
+        needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
+        needs_faces && (LAST_MESH_FACES[]=face_replacement)
         return result
     end
 end
@@ -1062,18 +1087,24 @@ function _get_keys_for_element(element_tag,function_space_type,
         cached=_cached_mesh_locked(caller)
         tag=_mesh_query_element_tag(cached,element_tag,caller)
         record=mesh_element_record(cached,tag)
-        key_dimension=mesh_key_dimension(
-            record.element_type,function_space_type;caller=caller)
-        replacement=LAST_MESH_EDGES[]
-        if key_dimension==1
-            cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
-            replacement=_mesh_edge_topology_for_cells(
-                cached,replacement,cells,Int(record.element_type))
+        needs_edges,needs_faces=_hierarchical_key_catalog_needs(
+            function_space_type,msh_spec(Int(record.element_type)).family)
+        edge_replacement=LAST_MESH_EDGES[]
+        face_replacement=LAST_MESH_FACES[]
+        cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
+        if needs_edges
+            edge_replacement=_mesh_edge_topology_for_cells(
+                cached,edge_replacement,cells,Int(record.element_type))
+        end
+        if needs_faces
+            face_replacement=_mesh_face_topology_for_cells(
+                cached,face_replacement,cells,Int(record.element_type))
         end
         result=mesh_keys_for_element(
-            cached,tag,function_space_type,replacement;
+            cached,tag,function_space_type,edge_replacement,face_replacement;
             return_coord=return_coord,caller=caller)
-        key_dimension==1 && (LAST_MESH_EDGES[]=replacement)
+        needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
+        needs_faces && (LAST_MESH_FACES[]=face_replacement)
         return result
     end
 end

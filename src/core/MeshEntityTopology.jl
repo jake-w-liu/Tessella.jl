@@ -267,6 +267,51 @@ function _mesh_edge_topology_for_cells(
         replacement,cells,patterns,element_type)
 end
 
+# Face-topology counterpart of `_mesh_edge_topology_for_cells`: extend the
+# face catalog with the Solin-ordered triangular faces of the requested
+# cells, preserving every already-registered tag.
+function _mesh_face_topology_for_cells(
+    mesh::Mesh,topology::Union{Nothing,MeshFaceTopology},
+    cells::AbstractMatrix{Int32},element_type::Int)
+    caller="mesh_face_topology_for_cells"
+    patterns=_simplex_face_patterns(element_type,3)
+    isempty(patterns) && throw(ArgumentError(
+        "$caller: element type $element_type has no triangular faces"))
+    if topology!==nothing
+        topology.node_count==nnodes(mesh) || error(
+            "mesh_face_topology: internal topology does not match the mesh")
+        missing=false
+        @inbounds for cell in axes(cells,2),pattern in patterns
+            first_node=cells[pattern[1],cell]
+            second_node=cells[pattern[2],cell]
+            third_node=cells[pattern[3],cell]
+            _distinct_triangle(first_node,second_node,third_node) ||
+                throw(ArgumentError(
+                    "mesh_face_topology: type-$element_type cell " *
+                    "$(Int(cell)) has repeated face nodes"))
+            missing |= !haskey(topology.triangle_tags,
+                _triangle_key(first_node,second_node,third_node))
+        end
+        missing || return topology
+    end
+    candidate_count=_checked_edge_candidate_count(cells,patterns,caller)
+    replacement=_face_topology_copy(topology,nnodes(mesh))
+    capacity=_checked_topology_capacity(
+        length(replacement.triangle_nodes),candidate_count,caller)
+    sizehint!(replacement.triangle_nodes,capacity)
+    sizehint!(replacement.triangle_identifiers,capacity)
+    sizehint!(replacement.triangle_tags,capacity)
+    sizehint!(replacement.used_tags,capacity)
+    @inbounds for cell in axes(cells,2),pattern in patterns
+        _add_generated_face!(
+            replacement.triangle_nodes,replacement.triangle_identifiers,
+            replacement.triangle_tags,replacement.used_tags,
+            cells[pattern[1],cell],cells[pattern[2],cell],
+            cells[pattern[3],cell],element_type,Int(cell))
+    end
+    return replacement
+end
+
 function _mesh_edge_topology(
     mesh::Mesh,topology::Union{Nothing,MeshEdgeTopology}=nothing)
     candidate_count=_checked_edge_candidate_count(mesh)

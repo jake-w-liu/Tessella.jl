@@ -205,7 +205,6 @@ end
         ()->mesh_basis_functions(2,[0,0,0],:Lagrange),
         ()->mesh_basis_functions(2,[0,0,0],"Lagrange11"),
         ()->mesh_basis_functions(2,[0,0,0],"Lagrange-1"),
-        ()->mesh_basis_functions(2,[0,0,0],"HcurlLegendre1"),
         ()->mesh_basis_functions(2,[0,0,0],"Lagrange",Int32[1]),
         ()->mesh_basis_functions(2,[0,0,0],"HcurlLegendre0",Int32[-1]),
         ()->mesh_basis_functions(2,[0,0,0],"HcurlLegendre0",Int32[6]),
@@ -301,11 +300,7 @@ end
         ()->mesh_basis_functions(7,[0,0,0],"GradH1Legendre1"),
         ()->mesh_basis_functions(19,[0,0,0],"H1Legendre1"),
         ()->mesh_basis_functions(140,[0,0,0],"H1Legendre1"),
-        ()->mesh_basis_functions(3,[0,0,0],"HcurlLegendre0"),
-        ()->mesh_basis_functions(5,[0,0,0],"HcurlLegendre0"),
-        ()->mesh_basis_functions(6,[0,0,0],"CurlHcurlLegendre0"),
         ()->mesh_basis_functions(15,[0,0,0],"HcurlLegendre0"),
-        ()->mesh_basis_functions(3,[0,0,0],"H1Legendre2"),
         ()->mesh_basis_functions(3,[0,0,0],"H1Legendre1",Int32[24]),
         ()->mesh_basis_functions(5,[0,0,0],"H1Legendre1",Int32[-1]),
         ()->mesh_basis_functions(6,[0,0,0],"H1Legendre1",Int32[0,0]),
@@ -313,6 +308,69 @@ end
             3,[0,0,0],"H1Legendre1",Int32[0,1,2,3,4,5,6,7,8,9,
                                             10,11,12,13,14,15,16,17,18,19,
                                             20,21,22,23,24]),
+    )
+        @test_throws ArgumentError invalid()
+    end
+end
+
+@testset "higher-order hierarchical H1 and H(curl) contracts" begin
+    points=Float64[0.2,-0.3,0.4, -0.6,0.1,-0.2]
+    # Gmsh 4.15.2-verified key counts and orientation totals.
+    @test mesh_number_of_keys(1,"H1Legendre3")==4
+    @test mesh_number_of_keys(2,"HcurlLegendre2")==12
+    @test mesh_number_of_keys(3,"HcurlLegendre2")==24
+    @test mesh_number_of_keys(4,"H1Legendre4")==35
+    @test mesh_number_of_keys(5,"HcurlLegendre2")==144
+    @test mesh_number_of_keys(6,"GradH1Legendre3")==40
+    @test mesh_number_of_keys(15,"H1Legendre9")==1
+    @test mesh_number_of_keys(15,"H1Legendre0")==1
+    @test mesh_number_of_orientations(1,"H1Legendre3")==2
+    @test mesh_number_of_orientations(2,"HcurlLegendre2")==6
+    @test mesh_number_of_orientations(3,"HcurlLegendre2")==24
+    @test mesh_number_of_orientations(5,"HcurlLegendre2")==40320
+    @test mesh_number_of_orientations(6,"GradH1Legendre3")==720
+    @test mesh_number_of_orientations(15,"H1Legendre9")==1
+    @test mesh_key_dimension(6,"GradH1Legendre3")==0
+    @test mesh_key_dimension(4,"CurlHcurlLegendre2")==1
+
+    # Selected orientations slice the same orientation-major blocks.
+    full=mesh_basis_functions(2,points,"H1Legendre3")
+    @test full[1]==1 && full[3]==6
+    nfuncs=Int(mesh_number_of_keys(2,"H1Legendre3"))
+    @test length(full[2])==6*2*nfuncs
+    selected=mesh_basis_functions(2,points,"H1Legendre3",Int32[2,0])
+    @test selected[2]==vcat(
+        full[2][2*2*nfuncs+1:3*2*nfuncs],full[2][1:2*nfuncs])
+    selected[2][1]=99
+    @test mesh_basis_functions(2,points,"H1Legendre3",Int32[2,0])[2][1]!=99
+    gradient=mesh_basis_functions(4,points,"GradH1Legendre2",Int32[0])
+    @test gradient[1]==3 &&
+          length(gradient[2])==2*Int(mesh_number_of_keys(4,"H1Legendre2"))*3
+    curl=mesh_basis_functions(4,points,"CurlHcurlLegendre1",Int32[0])
+    @test curl[1]==3 &&
+          length(curl[2])==2*Int(mesh_number_of_keys(4,"HcurlLegendre1"))*3
+
+    # Key metadata repeats the basis's per-element (dimension, order) pattern.
+    info=mesh_keys_information(
+        zeros(Int32,10),UInt64.(1:10),4,"H1Legendre2")
+    @test info==vcat(fill((Int32(0),Int32(1)),4),fill((Int32(1),Int32(2)),6))
+    info_hcurl=mesh_keys_information(
+        zeros(Int32,12),UInt64.(1:12),4,"HcurlLegendre1")
+    @test info_hcurl==repeat(
+        Tuple{Int32,Int32}[(1,0),(1,1)],6)
+
+    for invalid in (
+        ()->mesh_basis_functions(4,[0,0,0],"H1Legendre16"),
+        ()->mesh_basis_functions(2,[0,0,0],"H1Legendre0"),
+        ()->mesh_basis_functions(4,[0,0,0],"H1LegendreX"),
+        ()->mesh_basis_functions(1,[0,0,0],"HcurlLegendre12"),
+        ()->mesh_basis_functions(5,[0,0,0],"HcurlLegendre11"),
+        ()->mesh_basis_functions(4,[0,0,0],"CurlHcurlLegendre12"),
+        ()->mesh_basis_functions(15,[0,0,0],"HcurlLegendre0"),
+        ()->mesh_basis_functions(7,[0,0,0],"GradH1Legendre2"),
+        ()->mesh_basis_functions(4,[0,0,0],"H1Legendre2",Int32[24]),
+        ()->mesh_number_of_keys(4,"H1Legendre99"),
+        ()->mesh_number_of_keys(4,"H1Legendre100"),
     )
         @test_throws ArgumentError invalid()
     end
@@ -769,7 +827,6 @@ end
         ()->mesh_basis_functions(98,[0,0,0],"Lagrange10"),
         ()->mesh_basis_functions(130,[0,0,0],"GradLagrange10"),
         ()->mesh_basis_functions(7,[0,0,0],"H1Legendre1"),
-        ()->mesh_basis_functions(5,[0,0,0],"HcurlLegendre0"),
         ()->mesh_basis_functions(140,[0,0,0],"Lagrange1"),
         ()->mesh_basis_functions(
             5,[floatmax(Float64),floatmax(Float64),floatmax(Float64)],
@@ -864,8 +921,6 @@ end
         ()->mesh_keys_information(Int32[0,0,0],UInt64[1,2],2,"Lagrange"),
         ()->mesh_keys_information(
             Int32[0,0,0],UInt64[1,2,3],3,"H1Legendre1"),
-        ()->mesh_keys_information(Int32[1,1,0],UInt64[1,2,3],2,
-                                  "HcurlLegendre0"),
         ()->mesh_keys_information(Int32[1,1,1],UInt64[1,0,3],2,
                                   "HcurlLegendre0"),
     )
