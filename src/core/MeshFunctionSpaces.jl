@@ -4,14 +4,17 @@
 Reference finite-element function spaces and global degree-of-freedom keys.
 Actual- and explicit-order nodal functions cover every fixed Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type.
-Order-one hierarchical H1 functions and gradients cover every fixed Point,
-Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism type.
-Lowest-order H(curl) functions and curls, cached orientations, and
-populated keys cover the finalized linear-simplex [`Mesh`](@ref). The
-implementation follows Gmsh 4.15.2's reference coordinates, output layout,
-lexicographic orientation indices, nodal keys, and edge keys. Pyramid and
-Trihedron hierarchical bases fail explicitly: Gmsh 4.15.2 defines no Pyramid
-hierarchical family and no Trihedron basis.
+Hierarchical H1 functions and gradients at orders 1:15 cover every fixed
+Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism type
+(the Point basis is order-independent, matching Gmsh 4.15.2). Hierarchical
+H(curl) functions and curls cover Line, Triangle, and Tetrahedron at orders
+0:11 and Quadrangle, Hexahedron, and Prism at orders 0:10. Cached
+orientations and populated keys cover the finalized linear-simplex
+[`Mesh`](@ref), with vertex, edge, face, and bubble keys laid out like Gmsh
+4.15.2's `getKeys`. The implementation follows Gmsh 4.15.2's reference
+coordinates, output layout, lexicographic orientation indices, and key
+catalogs. Pyramid and Trihedron hierarchical bases fail explicitly: Gmsh
+4.15.2 defines no Pyramid hierarchical family and no Trihedron basis.
 """
 module MeshFunctionSpaces
 
@@ -20,9 +23,11 @@ using ..Elements: lagrange_nodes, msh_spec, _hex_monomials,
                   _line_monomials, _msh_type_exact, _pri_monomials,
                   _PYR_EDGES, _qua_monomials, _tet_monomials,
                   _tri_monomials
-using ..MeshEntityTopology: MeshEdgeTopology, _mesh_edges,
-                            _simplex_edge_patterns
-using ..MeshPointLocation: mesh_element_block, mesh_element_record
+using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
+                            _edge_key, _mesh_edges, _triangle_key,
+                            _simplex_edge_patterns, _simplex_face_patterns
+using ..MeshPointLocation: mesh_element_block, mesh_element_offsets,
+                            mesh_element_record
 using ..MeshReferenceGeometry: _Exact, _checked_element_tag,
                                _checked_element_type,
                                _checked_local_coordinates, _exact_to_float,
@@ -79,6 +84,24 @@ function _explicit_nodal_space(name::String,prefix::String,kind::Symbol,
     return _FunctionSpace(kind,components,false,0,order)
 end
 
+function _hierarchical_space(name::String,prefix::String,kind::Symbol,
+                             caller::AbstractString)
+    startswith(name,prefix) || return nothing
+    suffix=SubString(name,nextind(name,lastindex(prefix)))
+    order=0
+    for character in suffix
+        '0'<=character<='9' || throw(ArgumentError(
+            "$caller: unsupported function_space_type $(repr(name)); " *
+            "hierarchical orders must use decimal digits"))
+        order=10order+(Int(character)-Int('0'))
+        order>99 && throw(ArgumentError(
+            "$caller: hierarchical order exceeds the supported range"))
+    end
+    key_dimension=kind===:hcurl || kind===:curl_hcurl ? 1 : 0
+    components=kind===:lagrange ? 1 : 3
+    return _FunctionSpace(kind,components,true,key_dimension,order)
+end
+
 function _function_space(value,caller::AbstractString)
     value isa AbstractString || throw(ArgumentError(
         "$caller: function_space_type must be a string"))
@@ -93,17 +116,24 @@ function _function_space(value,caller::AbstractString)
     explicit===nothing || return explicit
     explicit=_explicit_nodal_space(name,"Lagrange",:lagrange,caller)
     explicit===nothing || return explicit
-    name=="H1Legendre1" && return _H1_1
-    name=="GradH1Legendre1" && return _GRAD_H1_1
-    name=="HcurlLegendre0" && return _HCURL_0
-    name=="CurlHcurlLegendre0" && return _CURL_HCURL_0
+    hierarchical=_hierarchical_space(
+        name,"GradH1Legendre",:grad_lagrange,caller)
+    hierarchical===nothing || return hierarchical
+    hierarchical=_hierarchical_space(
+        name,"CurlHcurlLegendre",:curl_hcurl,caller)
+    hierarchical===nothing || return hierarchical
+    hierarchical=_hierarchical_space(name,"H1Legendre",:lagrange,caller)
+    hierarchical===nothing || return hierarchical
+    hierarchical=_hierarchical_space(name,"HcurlLegendre",:hcurl,caller)
+    hierarchical===nothing || return hierarchical
     throw(ArgumentError(
         "$caller: unsupported function_space_type $(repr(name)); supported " *
         "nodal spaces are Lagrange, IsoParametric, Lagrange0 through " *
         "Lagrange10, GradLagrange, GradIsoParametric, and GradLagrange0 " *
         "through GradLagrange10; supported hierarchical spaces are " *
-        "H1Legendre1, GradH1Legendre1, HcurlLegendre0, and " *
-        "CurlHcurlLegendre0"))
+        "H1Legendre1 through H1Legendre15, GradH1Legendre1 through " *
+        "GradH1Legendre15, HcurlLegendre0 through HcurlLegendre11, and " *
+        "CurlHcurlLegendre0 through CurlHcurlLegendre11"))
 end
 
 function _basis_element_contract(element_type_value,space::_FunctionSpace,
@@ -111,26 +141,44 @@ function _basis_element_contract(element_type_value,space::_FunctionSpace,
     element_type=_checked_element_type(element_type_value,caller)
     if space.hierarchical
         spec=msh_spec(element_type)
+        family=spec.family
         if space.key_dimension==0
-            # Order-one H1 spaces are vertex-based on each supported
-            # reference family, independent of the input type's Lagrange
-            # order. Gmsh 4.15.2 defines no Pyramid hierarchical family
-            # and no Trihedron basis, so those families stay rejected.
-            family=spec.family
+            # H1 hierarchical families: Gmsh 4.15.2 defines no Pyramid
+            # family and no Trihedron basis, so those stay rejected. The
+            # Point basis ignores the requested order; every other family
+            # requires order 1:15 (the pinned orthogonal-polynomial tables
+            # bound Lobatto kernels at degree 15 and triangle/tetrahedron
+            # kernel polynomials at 13).
             (family===:pnt || family===:lin || family===:tri ||
              family===:tet || family===:qua || family===:hex ||
              family===:pri) || throw(ArgumentError(
                 "$caller: element type $element_type family $family has " *
-                "no order-one hierarchical H1 basis in Gmsh 4.15.2; " *
-                "supported families are Point, Line, Triangle, " *
-                "Tetrahedron, Quadrangle, Hexahedron, and Prism"))
-            return element_type,family,_h1_vertex_count(family),element_type
+                "no hierarchical H1 basis in Gmsh 4.15.2; supported " *
+                "families are Point, Line, Triangle, Tetrahedron, " *
+                "Quadrangle, Hexahedron, and Prism"))
+            family!==:pnt && (1<=space.key_order<=15 || throw(ArgumentError(
+                "$caller: H1Legendre order $(space.key_order) is outside " *
+                "the supported Gmsh 4.15.2 range 1:15 for family $family")))
+            return element_type,family,
+                   _h1_function_count(family,space.key_order),element_type
         end
-        element_type in (1,2,4) || throw(ArgumentError(
-            "$caller: element type $element_type is not a supported linear " *
-            "segment, triangle, or tetrahedron for hierarchical spaces"))
-        return element_type,msh_spec(element_type).family,
-               _vertex_count(element_type),element_type
+        # H(curl) hierarchical families exist for every family with edges.
+        # The pinned release evaluates Line, Triangle, and Tetrahedron at
+        # orders 0:11 and Quadrangle, Hexahedron, and Prism at 0:10.
+        (family===:lin || family===:tri || family===:tet ||
+         family===:qua || family===:hex || family===:pri) ||
+            throw(ArgumentError(
+                "$caller: element type $element_type family $family has " *
+                "no hierarchical H(curl) basis in Gmsh 4.15.2; supported " *
+                "families are Line, Triangle, Quadrangle, Tetrahedron, " *
+                "Hexahedron, and Prism"))
+        max_order=family===:lin || family===:tri || family===:tet ? 11 : 10
+        0<=space.key_order<=max_order || throw(ArgumentError(
+            "$caller: HcurlLegendre order $(space.key_order) is outside " *
+            "the supported Gmsh 4.15.2 range 0:$max_order for family " *
+            "$family"))
+        return element_type,family,
+               _hcurl_function_count(family,space.key_order),element_type
     end
 
     spec=msh_spec(element_type)
@@ -600,6 +648,17 @@ function _write_first_order_family!(result,coordinates,point_count::Int,
 end
 
 include("HigherOrderNodal.jl")
+include("HierarchicalBases.jl")
+
+@inline function _h1_function_count(family::Symbol,order::Int)
+    counts=_h1_counts(family,order)
+    return counts.vertex+counts.edge+counts.face+counts.bubble
+end
+
+@inline function _hcurl_function_count(family::Symbol,order::Int)
+    counts=_hcurl_counts(family,order)
+    return counts.edge+counts.face+counts.bubble
+end
 
 function _barycentric_coordinates(element_type::Int,u::Float64,v::Float64,
                                   w::Float64,caller::AbstractString,point::Int)
@@ -706,9 +765,7 @@ function mesh_basis_functions(element_type_value,local_coord,
         _orientation_count(family) : 1
     orientations=_checked_orientation_sequence(
         wanted_orientations,total_orientations,space.hierarchical,caller)
-    function_count=space.hierarchical ?
-        (space.key_dimension==0 ? nodal_count :
-                                  _edge_count(element_type)) : nodal_count
+    function_count=nodal_count
     result_length=_checked_result_length(
         length(orientations),point_count,function_count,space.components;
         caller=caller)
@@ -719,11 +776,28 @@ function mesh_basis_functions(element_type_value,local_coord,
             space.kind===:grad_lagrange,caller)
         return Int32(space.components),result,Int32(1)
     end
-    if family===:pnt || family===:qua || family===:hex || family===:pri
+    order=space.key_order
+    if space.key_dimension==0 && (family===:pnt || order!=1)
+        # Point H1 ignores the requested order entirely; every other
+        # hierarchical H1 order dispatches to the full hierarchy engine.
+        _h1_basis_eval(
+            family,order,space.kind===:grad_lagrange,coordinates,
+            point_count,orientations,result)
+        return Int32(space.components),result,Int32(total_orientations)
+    end
+    if space.key_dimension==1 &&
+       (order!=0 || !(family===:lin || family===:tri || family===:tet))
+        _hcurl_basis_eval(
+            family,order,space.kind===:curl_hcurl,coordinates,
+            point_count,orientations,result)
+        return Int32(space.components),result,Int32(total_orientations)
+    end
+    if family===:qua || family===:hex || family===:pri
         # Order-one H1 vertex functions on non-simplex reference families.
-        # The contract admits only H1 spaces here, so every orientation
-        # repeats the same vertex-function block exactly as the pinned
-        # release does; no vertex permutation is evaluated or allocated.
+        # The contract admits only order-one H1 spaces here, so every
+        # orientation repeats the same vertex-function block exactly as the
+        # pinned release does; no vertex permutation is evaluated or
+        # allocated.
         _write_first_order_family!(
             result,coordinates,point_count,Val(family),
             length(orientations),space.kind===:grad_lagrange,caller)
@@ -903,10 +977,7 @@ function mesh_number_of_keys(element_type_value,function_space_type;
     space=_function_space(function_space_type,caller)
     element_type,_,nodal_count,_=
         _basis_element_contract(element_type,space,caller)
-    return Int32(space.hierarchical ?
-                 (space.key_dimension==0 ? nodal_count :
-                                           _edge_count(element_type)) :
-                 nodal_count)
+    return Int32(nodal_count)
 end
 
 function _checked_bool(value,caller::AbstractString,name::AbstractString)
@@ -976,16 +1047,180 @@ function _edge_keys(mesh::Mesh,cells::AbstractMatrix{Int32},
     return type_keys,entity_keys,coordinates
 end
 
+# Per-cell hierarchical key table: vertex funcs own node tags, edge funcs own
+# edge-catalog tags (getEdge order, which agrees with the Solin order on every
+# supported family), face funcs own face-catalog tags in Solin face order, and
+# bubble funcs own the element's dense global tag — matching Gmsh 4.15.2's
+# getKeys layout.
+function _hierarchical_keys_for_cells(
+    mesh::Mesh,cells::AbstractMatrix{Int32},element_type::Int,
+    family::Symbol,order::Int,hcurl::Bool,
+    edge_topology::Union{Nothing,MeshEdgeTopology},
+    face_topology::Union{Nothing,MeshFaceTopology},
+    return_coord::Bool,element_tags::Union{Nothing,Vector{UInt64}},
+    caller::AbstractString)
+    counts=hcurl ? _hcurl_counts(family,order) : _h1_counts(family,order)
+    type_pattern=hcurl ? _hcurl_type_keys(family,order) :
+                         _h1_type_keys(family,order)
+    nfuncs=length(type_pattern)
+    ncells=size(cells,2)
+    key_count=_checked_result_length(ncells,nfuncs;caller=caller)
+    type_keys=Vector{Int32}(undef,key_count)
+    entity_keys=Vector{UInt64}(undef,key_count)
+    coordinates=Vector{Float64}(
+        undef,_coordinate_result_length(key_count,return_coord,caller))
+    edge_patterns=_simplex_edge_patterns(element_type)
+    face_patterns=_simplex_face_patterns(element_type,3)
+    per_edge=hcurl ? order+1 : max(order-1,0)
+    per_face=ncells>0 && counts.face>0 ?
+        counts.face÷length(face_patterns) : 0
+    cursor=0
+    @inbounds for cell in 1:ncells
+        # vertex keys
+        for vertex in 1:counts.vertex
+            cursor+=1
+            type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+            node=Int(cells[vertex,cell])
+            entity_keys[cursor]=UInt64(node)
+            if return_coord
+                offset=3cursor-3
+                for component in 1:3
+                    coordinates[offset+component]=mesh.coords[component,node]
+                end
+            end
+        end
+        # edge keys
+        for (edge,pattern) in enumerate(edge_patterns)
+            first_node=Int(cells[pattern[1],cell])
+            second_node=Int(cells[pattern[2],cell])
+            (edge_topology!==nothing && per_edge>0) || throw(ArgumentError(
+                "$caller: hierarchical keys require a populated mesh edge " *
+                "catalog covering type-$element_type edges"))
+            edge_tag=get(edge_topology.tags,
+                _edge_key(Int32(first_node),Int32(second_node)),nothing)
+            edge_tag===nothing && throw(ArgumentError(
+                "$caller: unknown mesh edge ($first_node, $second_node)"))
+            if return_coord
+                midpoint=ntuple(
+                    c->_stable_midpoint(mesh.coords[c,first_node],
+                                        mesh.coords[c,second_node]),3)
+                for _ in 1:per_edge
+                    cursor+=1
+                    type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+                    entity_keys[cursor]=edge_tag
+                    offset=3cursor-3
+                    for component in 1:3
+                        coordinates[offset+component]=midpoint[component]
+                    end
+                end
+            else
+                for _ in 1:per_edge
+                    cursor+=1
+                    type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+                    entity_keys[cursor]=edge_tag
+                end
+            end
+        end
+        # face keys
+        if counts.face>0
+            face_topology!==nothing || throw(ArgumentError(
+                "$caller: hierarchical keys require a populated mesh face " *
+                "catalog covering type-$element_type faces"))
+        end
+        for pattern in face_patterns
+            counts.face>0 || break
+            face_tag=get(face_topology.triangle_tags,
+                _triangle_key(Int32(cells[pattern[1],cell]),
+                              Int32(cells[pattern[2],cell]),
+                              Int32(cells[pattern[3],cell])),nothing)
+            face_tag===nothing && throw(ArgumentError(
+                "$caller: unknown triangular mesh face (" *
+                "$(cells[pattern[1],cell]), $(cells[pattern[2],cell]), " *
+                "$(cells[pattern[3],cell]))"))
+            if return_coord
+                centroid=ntuple(3) do component
+                    (mesh.coords[component,cells[pattern[1],cell]]+
+                     mesh.coords[component,cells[pattern[2],cell]]+
+                     mesh.coords[component,cells[pattern[3],cell]])/3.0
+                end
+                for _ in 1:per_face
+                    cursor+=1
+                    type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+                    entity_keys[cursor]=face_tag
+                    offset=3cursor-3
+                    for component in 1:3
+                        coordinates[offset+component]=centroid[component]
+                    end
+                end
+            else
+                for _ in 1:per_face
+                    cursor+=1
+                    type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+                    entity_keys[cursor]=face_tag
+                end
+            end
+        end
+        # bubble keys
+        if counts.bubble>0
+            element_tag=element_tags===nothing ? UInt64(0) :
+                element_tags[cell]
+            element_tag==0 && error(
+                "MeshFunctionSpaces: internal missing element tag")
+            if return_coord
+                centroid=ntuple(3) do component
+                    total=0.0
+                    for vertex in axes(cells,1)
+                        total+=mesh.coords[component,cells[vertex,cell]]
+                    end
+                    total/size(cells,1)
+                end
+                for _ in 1:counts.bubble
+                    cursor+=1
+                    type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+                    entity_keys[cursor]=element_tag
+                    offset=3cursor-3
+                    for component in 1:3
+                        coordinates[offset+component]=centroid[component]
+                    end
+                end
+            else
+                for _ in 1:counts.bubble
+                    cursor+=1
+                    type_keys[cursor]=type_pattern[cursor-(cell-1)*nfuncs]
+                    entity_keys[cursor]=element_tag
+                end
+            end
+        end
+    end
+    cursor==key_count || error(
+        "MeshFunctionSpaces: internal hierarchical key count mismatch")
+    return type_keys,entity_keys,coordinates
+end
+
 function _keys_for_cells(mesh::Mesh,cells::AbstractMatrix{Int32},
                          element_type::Int,space::_FunctionSpace,
                          nodal_count::Int,
                          topology::Union{Nothing,MeshEdgeTopology},
+                         face_topology::Union{Nothing,MeshFaceTopology},
+                         element_tags::Union{Nothing,Vector{UInt64}},
                          return_coord::Bool,caller::AbstractString)
     if !space.hierarchical && size(cells,1)!=nodal_count
         throw(ArgumentError(
             "$caller: element type $element_type stores $(size(cells,1)) " *
             "nodal keys, but the requested basis requires $nodal_count; " *
             "the cached mesh owns only its stored interpolation nodes"))
+    end
+    if space.hierarchical
+        family=msh_spec(element_type).family
+        order=space.key_order
+        simple_order=(space.key_dimension==0 && order==1) ||
+                     (space.key_dimension==1 && order==0)
+        if !simple_order || family===:pnt
+            return _hierarchical_keys_for_cells(
+                mesh,cells,element_type,family,order,
+                space.key_dimension==1,topology,face_topology,
+                return_coord,element_tags,caller)
+        end
     end
     return space.key_dimension==0 ?
         _node_keys(mesh,cells,return_coord,caller) :
@@ -995,7 +1230,8 @@ end
 
 """Return detached keys for all cached elements of one supported type."""
 function mesh_keys(mesh::Mesh,element_type_value,function_space_type,
-                   topology::Union{Nothing,MeshEdgeTopology}=nothing;
+                   topology::Union{Nothing,MeshEdgeTopology}=nothing,
+                   face_topology::Union{Nothing,MeshFaceTopology}=nothing;
                    return_coord=true,caller::AbstractString="mesh_keys")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
@@ -1006,15 +1242,23 @@ function mesh_keys(mesh::Mesh,element_type_value,function_space_type,
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[],UInt64[],Float64[]
     _,cells=block
+    element_tags=nothing
+    if space.hierarchical
+        triangle_offset,tetrahedron_offset,_=mesh_element_offsets(mesh)
+        base=element_type==1 ? 0 :
+             element_type==2 ? triangle_offset : tetrahedron_offset
+        element_tags=UInt64.(base .+ collect(1:size(cells,2)))
+    end
     return _keys_for_cells(
-        mesh,cells,element_type,space,nodal_count,topology,
-        coordinates_requested,caller)
+        mesh,cells,element_type,space,nodal_count,topology,face_topology,
+        element_tags,coordinates_requested,caller)
 end
 
 """Return detached keys for one dense cached element tag."""
 function mesh_keys_for_element(
     mesh::Mesh,element_tag_value,function_space_type,
-    topology::Union{Nothing,MeshEdgeTopology}=nothing;
+    topology::Union{Nothing,MeshEdgeTopology}=nothing,
+    face_topology::Union{Nothing,MeshFaceTopology}=nothing;
     return_coord=true,caller::AbstractString="mesh_keys_for_element")
     tag=_checked_element_tag(mesh,element_tag_value,caller)
     space=_function_space(function_space_type,caller)
@@ -1024,12 +1268,13 @@ function mesh_keys_for_element(
     element_type,_,nodal_count,_=
         _basis_element_contract(record.element_type,space,caller)
     cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
+    element_tags=space.hierarchical ? UInt64[tag] : nothing
     return _keys_for_cells(
-        mesh,cells,element_type,space,nodal_count,topology,
-        coordinates_requested,caller)
+        mesh,cells,element_type,space,nodal_count,topology,face_topology,
+        element_tags,coordinates_requested,caller)
 end
 
-function _checked_type_keys(values,expected::Int,caller::AbstractString)
+function _checked_key_ints(values,caller::AbstractString)
     (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
         "$caller: type_keys must be a vector or tuple of integers"))
     values isa AbstractArray && Base.require_one_based_indexing(values)
@@ -1046,9 +1291,16 @@ function _checked_type_keys(values,expected::Int,caller::AbstractString)
             throw(ArgumentError(
                 "$caller: type_keys[$index] exceeds Int bounds"))
         end
-        converted==expected || throw(ArgumentError(
-            "$caller: type_keys[$index] must be $expected for this function space"))
         result[index]=Int32(converted)
+    end
+    return result
+end
+
+function _checked_type_keys(values,expected::Int,caller::AbstractString)
+    result=_checked_key_ints(values,caller)
+    for (index,value) in enumerate(result)
+        value==expected || throw(ArgumentError(
+            "$caller: type_keys[$index] must be $expected for this function space"))
     end
     return result
 end
@@ -1085,26 +1337,32 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
     space=_function_space(function_space_type,caller)
     element_type,family,nodal_count,basis_type=
         _basis_element_contract(element_type,space,caller)
-    expected_type=space.key_dimension
-    types=_checked_type_keys(type_keys,expected_type,caller)
+    types_raw=space.hierarchical ?
+        _checked_key_ints(type_keys,caller) :
+        _checked_type_keys(type_keys,space.key_dimension,caller)
     entities=_checked_entity_keys(entity_keys,caller)
-    length(types)==length(entities) || throw(ArgumentError(
+    length(types_raw)==length(entities) || throw(ArgumentError(
         "$caller: type_keys and entity_keys must have equal lengths"))
-    keys_per_element=space.hierarchical ?
-        (space.key_dimension==0 ? nodal_count :
-                                  _edge_count(element_type)) : nodal_count
-    length(types)%keys_per_element==0 || throw(ArgumentError(
-        "$caller: key count $(length(types)) must be divisible by " *
+    keys_per_element=nodal_count
+    length(types_raw)%keys_per_element==0 || throw(ArgumentError(
+        "$caller: key count $(length(types_raw)) must be divisible by " *
         "$keys_per_element for element type $element_type"))
     if space.hierarchical
-        # The Point order-one H1 function is the constant 1, so Gmsh 4.15.2
-        # reports polynomial order 0 for Point H1 keys and order 1 for every
-        # other supported H1 family.
-        order=(space.key_dimension==0 && family===:pnt) ? Int32(0) :
-            Int32(space.key_order)
-        return fill(
-            (Int32(space.key_dimension),order),length(types))
+        # Per-element (dimension, order) metadata repeats the basis's
+        # getKeysInfo sequence; Gmsh 4.15.2 answers it regardless of the
+        # submitted type keys.
+        pattern=space.key_dimension==0 ?
+            _h1_keys_info(family,space.key_order) :
+            _hcurl_keys_info(family,space.key_order)
+        result=Vector{Tuple{Int32,Int32}}(undef,length(types_raw))
+        for group_start in 1:keys_per_element:length(result)
+            for index in 1:keys_per_element
+                result[group_start+index-1]=pattern[index]
+            end
+        end
+        return result
     end
+    types=types_raw
     bubble_count=_nodal_bubble_count(basis_type)
     nonbubble_count=nodal_count-bubble_count
     dimension=Int32(msh_spec(basis_type).dim)

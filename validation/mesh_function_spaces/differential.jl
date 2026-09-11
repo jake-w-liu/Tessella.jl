@@ -599,6 +599,149 @@ try
             explicit_order_case_count+=1
         end
 
+        # Higher-order hierarchical H1 and H(curl) families across every
+        # reference type Gmsh 4.15.2 supports: Line, Triangle, Quadrangle,
+        # Tetrahedron, Hexahedron, Prism (and the order-independent Point
+        # H1). Basis blocks are compared on the full orientation set for
+        # small families and on a selected spread for Quadrangle (24),
+        # Prism (720), and Hexahedron (40320) to keep the run bounded.
+        high_h1_spaces=("H1Legendre2","H1Legendre4","GradH1Legendre3")
+        high_hcurl_spaces=("HcurlLegendre1","HcurlLegendre3",
+                           "CurlHcurlLegendre2")
+        high_order_case_count=0
+        high_order_key_case_count=0
+        for element_type in (1,2,3,4,5,6,15),
+            space in (high_h1_spaces...,high_hcurl_spaces...)
+            family=MSH_CATALOG[element_type].family
+            # Gmsh's Point H(curl) family does not exist and its Point
+            # gradient answer is the known divergent [1,0,0] block.
+            family===:pnt &&
+                (startswith(space,"GradH1") ||
+                 occursin("Hcurl",space)) && continue
+            local gmsh_basis
+            try
+                gmsh_basis=gmsh.model.mesh.getBasisFunctions(
+                    element_type,nodal_coordinates,space)
+            catch
+                _rejects_argument(()->Tessella.API.mesh.get_basis_functions(
+                    element_type,nodal_coordinates,space)) || error(
+                    "type-$element_type $space: Gmsh rejected but Tessella " *
+                    "accepted")
+                continue
+            end
+            tessella_basis=Tessella.API.mesh.get_basis_functions(
+                element_type,nodal_coordinates,space)
+            label="type-$element_type $space high-order"
+            _compare_exact("$label components",gmsh_basis[1],tessella_basis[1])
+            _compare_float("$label basis",gmsh_basis[2],tessella_basis[2])
+            _compare_exact(
+                "$label orientation count",gmsh_basis[3],tessella_basis[3])
+            tessella_orientations=
+                Tessella.API.mesh.get_number_of_orientations(
+                    element_type,space)
+            if family===:hex
+                # The pinned release's Hexahedron metadata query reads
+                # uninitialized memory; follow the verified basis count.
+                _compare_exact(
+                    "$label Tessella orientations",gmsh_basis[3],
+                    tessella_orientations)
+            else
+                _compare_exact(
+                    "$label number of orientations",
+                    gmsh.model.mesh.getNumberOfOrientations(
+                        element_type,space),tessella_orientations)
+            end
+            gmsh_key_count=gmsh.model.mesh.getNumberOfKeys(
+                element_type,space)
+            _compare_exact(
+                "$label number of keys",gmsh_key_count,
+                Tessella.API.mesh.get_number_of_keys(element_type,space))
+            type_keys=zeros(Int32,gmsh_key_count)
+            entity_keys=UInt64.(1:gmsh_key_count)
+            _compare_exact(
+                "$label key information",
+                gmsh.model.mesh.getKeysInformation(
+                    type_keys,entity_keys,element_type,space),
+                Tessella.API.mesh.get_keys_information(
+                    type_keys,entity_keys,element_type,space))
+            orientation_count=Int(gmsh_basis[3])
+            wanted=Int32.(filter(
+                <(orientation_count),
+                unique([orientation_count-1,0,orientation_count÷2,1])))
+            _compare_float(
+                "$label selected basis",
+                gmsh.model.mesh.getBasisFunctions(
+                    element_type,nodal_coordinates,space,wanted)[2],
+                Tessella.API.mesh.get_basis_functions(
+                    element_type,nodal_coordinates,space,wanted)[2])
+            _write_ints!(
+                stream,"$label:meta",
+                (tessella_basis[1],tessella_basis[3],gmsh_key_count))
+            _write_floats!(stream,"$label:selected",tessella_basis[2])
+            high_order_case_count+=1
+        end
+
+        # End-to-end key catalogs on a dense-tagged model so Gmsh's
+        # e->getNum() bubble keys equal Tessella's dense element tags.
+        gmsh.clear()
+        gmsh.model.add("mesh-function-dense-keys")
+        for (dimension,tag) in ((1,1),(2,2),(3,3))
+            gmsh.model.addDiscreteEntity(dimension,tag)
+        end
+        gmsh.model.mesh.addNodes(
+            3,3,UInt64[1,2,3,4],collect(vec(_FUNCTION_COORDINATES)))
+        gmsh.model.mesh.addElementsByType(
+            1,1,UInt64[1],UInt64.(vec(_FUNCTION_SEGMENTS)))
+        gmsh.model.mesh.addElementsByType(
+            2,2,UInt64[2],UInt64.(vec(_FUNCTION_TRIANGLES)))
+        gmsh.model.mesh.addElementsByType(
+            3,4,UInt64[3],UInt64.(vec(_FUNCTION_TETRAHEDRA)))
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH_EDGES[]=nothing
+            Tessella.API.LAST_MESH_FACES[]=nothing
+        end
+        _install_function_mesh!(fixture)
+        for element_type in (1,2,4),
+            space in ("H1Legendre2","H1Legendre4",
+                      "HcurlLegendre1","HcurlLegendre3")
+            gmsh_keys=gmsh.model.mesh.getKeys(
+                element_type,space,-1,true)
+            tessella_keys=Tessella.API.mesh.get_keys(
+                element_type,space,-1,true)
+            label="type-$element_type $space high-order"
+            _compare_exact("$label type keys",gmsh_keys[1],tessella_keys[1])
+            _compare_exact(
+                "$label entity keys",gmsh_keys[2],tessella_keys[2])
+            _compare_float(
+                "$label key coordinates",gmsh_keys[3],tessella_keys[3])
+            _compare_exact(
+                "$label key information",
+                gmsh.model.mesh.getKeysInformation(
+                    gmsh_keys[1],gmsh_keys[2],element_type,space),
+                Tessella.API.mesh.get_keys_information(
+                    tessella_keys[1],tessella_keys[2],element_type,space))
+            element_tag=element_type==1 ? UInt64(1) :
+                        element_type==2 ? UInt64(2) : UInt64(3)
+            _compare_exact(
+                "$label per-element keys",
+                gmsh.model.mesh.getKeysForElement(element_tag,space,true),
+                Tessella.API.mesh.get_keys_for_element(
+                    element_tag,space,true))
+            _write_ints!(
+                stream,"$label:type-keys",tessella_keys[1])
+            _write_ints!(
+                stream,"$label:entity-keys",tessella_keys[2])
+            high_order_key_case_count+=1
+        end
+
+        gmsh.clear()
+        _build_gmsh_function_model("mesh-function-spaces")
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH_EDGES[]=nothing
+            Tessella.API.LAST_MESH_FACES[]=nothing
+        end
+        _install_function_mesh!(fixture)
+
         gmsh_element_tags=Dict(1=>UInt64(101),2=>UInt64(102),4=>UInt64(103))
         dense_element_tags=Dict(1=>UInt64(1),2=>UInt64(2),4=>UInt64(3))
         for element_type in (1,2,4),space in _FUNCTION_SPACES
@@ -771,7 +914,9 @@ try
             ()->Tessella.API.mesh.get_basis_functions(
                 4,Float64[0,0],"Lagrange"),
             ()->Tessella.API.mesh.get_basis_functions(
-                4,Float64[0,0,0],"HcurlLegendre1"),
+                4,Float64[0,0,0],"H1Legendre16"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                2,Float64[0,0,0],"H1Legendre0"),
             ()->Tessella.API.mesh.get_basis_functions(
                 4,Float64[0,0,0],"HcurlLegendre0",Int32[24]),
             ()->Tessella.API.mesh.get_keys(
@@ -789,7 +934,13 @@ try
             ()->Tessella.API.mesh.get_basis_functions(
                 7,Float64[0,0,0],"H1Legendre1"),
             ()->Tessella.API.mesh.get_basis_functions(
-                3,Float64[0,0,0],"HcurlLegendre0",Int32[0]),
+                7,Float64[0,0,0],"HcurlLegendre0"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                15,Float64[0,0,0],"HcurlLegendre0"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                1,Float64[0,0,0],"HcurlLegendre12"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                5,Float64[0,0,0],"HcurlLegendre11"),
             ()->Tessella.API.mesh.get_basis_functions(
                 140,Float64[0,0,0],"Lagrange1"),
         )
@@ -802,7 +953,7 @@ try
         end
 
         result=bytes2hex(SHA.sha256(take!(stream)))
-        result=="86d2308f75da9d99ea76f8479d264f85ceaade9fcd46e36b0d34211e15fad0c5" ||
+        result=="45af63358fafcbc3b914260d66b0b1ba61d198560f5fa7a4ddc707ae3ef19076" ||
             error("mesh function-space checksum changed to $result")
         result,length(nodal_coordinates)÷3,actual_order_case_count,
             explicit_order_case_count,nonsimplex_h1_case_count

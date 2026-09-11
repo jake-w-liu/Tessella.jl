@@ -30,7 +30,7 @@ support or test requirements.
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types with canonical family/order lookup and detached property metadata plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, visibility/color state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/straight-Line/explicit-Plane evaluation and surface reparametrization |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data and automatic/manual global edge/triangular/quadrangular-face catalogs, linear-simplex hierarchical H1/lowest-order H(curl) bases, lexicographic orientations, and node/edge keys, plus robust cached simplex point-location, local-coordinate, forward-map/Jacobian, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, deterministic contiguous-block task partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, actual- and explicit-order nodal lookup, bulk/derived mesh-data, automatic/manual global edge/face topology, hierarchical simplex basis/orientation/key queries, point-location, Jacobian/reference-map, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-entity-topology, mesh-point-location, mesh-Jacobian, mesh-quadrature, mesh-function-space, and mesh-element-quality Gmsh 4.15.2 differentials |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data and automatic/manual global edge/triangular/quadrangular-face catalogs, hierarchical H1 bases at orders 1:15 over Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism families and hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron and 0:10 on Quadrangle/Hexahedron/Prism, lexicographic orientations, and vertex/edge/face/bubble keys, plus robust cached simplex point-location, local-coordinate, forward-map/Jacobian, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, deterministic contiguous-block task partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, actual- and explicit-order nodal lookup, bulk/derived mesh-data, automatic/manual global edge/face topology, all-family hierarchical basis/orientation/key queries, point-location, Jacobian/reference-map, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-entity-topology, mesh-point-location, mesh-Jacobian, mesh-quadrature, mesh-function-space, and mesh-element-quality Gmsh 4.15.2 differentials |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -177,16 +177,21 @@ Trihedron integration rule.
 Actual-order Lagrange/isoparametric queries cover every fixed-node Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type. Explicit
 numeric names select complete family bases across the catalogued orders.
-Order-one hierarchical H1 functions and gradients and lowest-order H(curl)
-functions and curls cover
-types 1, 2, and 4. They preserve Gmsh's orientation-major layout and lexicographic
+Hierarchical H1 functions and gradients cover orders 1 through 15 on Line,
+Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism families plus the
+order-independent Point basis; hierarchical H(curl) functions and curls cover
+orders 0 through 11 on Line, Triangle, and Tetrahedron and orders 0 through 10
+on Quadrangle, Hexahedron, and Prism. They preserve Gmsh's orientation-major
+layout and lexicographic
 primary-node orientation rank. Node-based keys use dense node tags; explicit-order
 queries that require nodes absent from the linear cache fail instead of inventing
-keys. Edge-based keys reuse the global topology catalog and lazily add only
-requested edges. Key coordinates and all returned arrays are detached. Higher-order
+keys. Hierarchical key catalogs lay out vertex, edge, face, and bubble keys like
+Gmsh 4.15.2's `getKeys`; edge- and face-based keys reuse the global topology
+catalogs and lazily add only
+requested edges or faces. Key coordinates and all returned arrays are detached. Higher-order
 Prism and incomplete
 Pyramid paths that Gmsh 4.15.2 cannot construct are native, invariant-certified
-extensions. Non-simplex hierarchical spaces, Trihedron bases, and entity-filtered
+extensions. Pyramid/Trihedron hierarchical spaces and entity-filtered
 results remain explicit blockers. `get_basis_functions_orientation` accepts nondefault
 `task`/`num_tasks` and returns the contiguous Gmsh block slice; `task>=num_tasks`
 is empty, where the pinned release segfaults in its unguarded per-entity loop.
@@ -313,6 +318,54 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-09-11 with Julia 1.12.7 after extending hierarchical
+function spaces from order-one H1 plus linear-simplex lowest-order H(curl) to
+the full Gmsh 4.15.2 hierarchical contract: `H1LegendreN`/`GradH1LegendreN`
+orders 1:15 on Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism
+reference families (Point stays order-independent), and
+`HcurlLegendreN`/`CurlHcurlLegendreN` orders 0:11 on Line/Triangle/Tetrahedron
+and 0:10 on Quadrangle/Hexahedron/Prism:
+
+- The new `src/core/HierarchicalBases.jl` ports the pinned release's
+  `HierarchicalBasisH1*`/`HierarchicalBasisHcurl*` generators verbatim,
+  including Horner-form `OrthogonalPoly` polynomials, Solin edge/face
+  conventions, all orientation sign tables, and Gmsh's Float32 recurrence
+  coefficients in the H(curl) non-simplex paths. `MeshFunctionSpaces` routes
+  hierarchical names through them for counts, orientation-major evaluation,
+  orientation indices, key dimensions, key information, and vertex/edge/face/
+  bubble key catalogs laid out like `getKeys`; `get_keys` and
+  `get_keys_for_element` lazily populate the global edge and face catalogs only
+  for spaces whose basis owns those entities.
+- The mesh-function-space differential now checks every supported
+  family/order/space combination through the public API against Gmsh 4.15.2:
+  basis values, gradients, and curls at asymmetric and seeded random reference
+  points, all orientations for orientations ≤ 720 and a spread beyond,
+  orientation counts and indices, actual- and explicit-order key counts, key
+  information on fabricated keys, and the type-4 dense-key catalog layout.
+  Every hierarchical comparison is strict (8e-14); the reported
+  max_abs_difference=1.19e-6 comes from the pre-existing high-order nodal
+  comparator covering Gmsh's measured 8.5e-7 P9-hexahedron Vandermonde
+  artifact, not the hierarchical paths. Stream checksum
+  `45af63358fafcbc3b914260d66b0b1ba61d198560f5fa7a4ddc707ae3ef19076`
+  reproduced identically across two runs and inside the aggregate gate.
+- Fixes applied during verification: prism quadrilateral-face H1 orientation
+  used Lobatto indexing on kernel polynomials (kernel functions index 0:pf-2,
+  not degrees 2:pf); the public key path referenced an undefined mesh variable
+  for element-level queries; and hierarchical key-information queries now
+  ignore submitted type-key values like the pinned release does. Test
+  expectations asserting rejection of the now-supported spaces were updated
+  and a new contract testset pins Gmsh-verified key counts, orientation
+  counts, slice consistency, and order boundaries.
+- Focused bounds-checked suites: core function-space 3,434/3,434 and
+  session-API function-space 126/126. The complete bounds-checked package gate
+  passed 211,822/211,822 assertions in 48m14.7s and the aggregate
+  bounds-checked validation exited zero with every mandatory child, analytic
+  case, and the enclosure/coax acceptance probe completed, regenerating the
+  untracked `validation/REPORT.md`. `git diff --check` passed.
+- Residual: Pyramid/Trihedron hierarchical spaces (undefined in the pinned
+  release) and entity-filtered orientation/key results remain pending per
+  PLAN.md.
 
 Re-measured on 2026-09-11 with Julia 1.12.7 after extending order-one
 `H1Legendre1`/`GradH1Legendre1` reference evaluation, counts, and key metadata
