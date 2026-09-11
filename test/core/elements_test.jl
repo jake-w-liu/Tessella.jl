@@ -3226,6 +3226,322 @@ end
     @test isempty(mesh.ancillary_sections)
 end
 
+# Two-partition line mesh: global points 1,2 and curve 11; partitioned points
+# 21,22 (parents 1,2) and shared curve 21 (parent 11, partitions 1 and 2).
+# Curve 21 is a ghost entity of partition 2; element 102 is a ghost in
+# partition 2 owned by partition 1.
+function write_partitioned_v4(path;binary::Bool=false,wide::Bool=true,
+                              partitioned_entities::Bool=true,
+                              ghost_elements::Bool=true)
+    size_t=wide ? UInt64 : UInt32
+    function wsize(io,value)
+        write(io,size_t(value))
+    end
+    open(path,"w") do io
+        println(io,"\$MeshFormat")
+        println(io,"4.1 ",binary ? 1 : 0," ",wide ? 8 : 4)
+        binary && (write(io,Int32(1)); write(io,UInt8('\n')))
+        println(io,"\$EndMeshFormat")
+        println(io,"\$Entities")
+        if !partitioned_entities
+            # Without a \$PartitionedEntities section the partitioned tags must
+            # exist as ordinary global entities for the mesh to stay valid.
+            if binary
+                for count in size_t[2,1,0,0]; write(io,count); end
+                write(io,Int32(21))
+                for value in (0.0,0.0,0.0); write(io,value); end
+                wsize(io,0)
+                write(io,Int32(22))
+                for value in (1.0,0.0,0.0); write(io,value); end
+                wsize(io,0)
+                write(io,Int32(21))
+                for value in (0.0,0.0,0.0,1.0,0.0,0.0); write(io,value); end
+                wsize(io,1); write(io,Int32(5))
+                wsize(io,2); write(io,Int32(21)); write(io,Int32(-22))
+                write(io,UInt8('\n')); println(io,"\$EndEntities")
+            else
+                println(io,"2 1 0 0")
+                println(io,"21 0 0 0 0")
+                println(io,"22 1 0 0 0")
+                println(io,"21 0 0 0 1 0 0 1 5 2 21 -22")
+                println(io,"\$EndEntities")
+            end
+        elseif binary
+            for count in size_t[2,1,0,0]; write(io,count); end
+            write(io,Int32(1))
+            for value in (0.0,0.0,0.0); write(io,value); end
+            wsize(io,0)
+            write(io,Int32(2))
+            for value in (1.0,0.0,0.0); write(io,value); end
+            wsize(io,0)
+            write(io,Int32(11))
+            for value in (0.0,0.0,0.0,1.0,0.0,0.0); write(io,value); end
+            wsize(io,1); write(io,Int32(5))
+            wsize(io,2); write(io,Int32(1)); write(io,Int32(-2))
+            write(io,UInt8('\n')); println(io,"\$EndEntities")
+        else
+            println(io,"2 1 0 0")
+            println(io,"1 0 0 0 0")
+            println(io,"2 1 0 0 0")
+            println(io,"11 0 0 0 1 0 0 1 5 2 1 -2")
+            println(io,"\$EndEntities")
+        end
+        if partitioned_entities
+            println(io,"\$PartitionedEntities")
+            if binary
+                wsize(io,2); wsize(io,1)
+                write(io,Int32(21)); write(io,Int32(2))
+                for count in size_t[2,1,0,0]; write(io,count); end
+                write(io,Int32(21)); write(io,Int32(0)); write(io,Int32(1))
+                wsize(io,1); write(io,Int32(1))
+                for value in (0.0,0.0,0.0); write(io,value); end
+                wsize(io,0)
+                write(io,Int32(22)); write(io,Int32(0)); write(io,Int32(2))
+                wsize(io,1); write(io,Int32(2))
+                for value in (1.0,0.0,0.0); write(io,value); end
+                wsize(io,0)
+                write(io,Int32(21)); write(io,Int32(1)); write(io,Int32(11))
+                wsize(io,2); write(io,Int32(1)); write(io,Int32(2))
+                for value in (0.0,0.0,0.0,1.0,0.0,0.0); write(io,value); end
+                wsize(io,1); write(io,Int32(5))
+                wsize(io,2); write(io,Int32(21)); write(io,Int32(-22))
+                write(io,UInt8('\n')); println(io,"\$EndPartitionedEntities")
+            else
+                println(io,"2")
+                println(io,"1")
+                println(io,"21 2")
+                println(io,"2 1 0 0")
+                println(io,"21 0 1 1 1 0 0 0 0")
+                println(io,"22 0 2 1 2 1 0 0 0")
+                println(io,"21 1 11 2 1 2 0 0 0 1 0 0 1 5 2 21 -22")
+                println(io,"\$EndPartitionedEntities")
+            end
+        end
+        println(io,"\$Nodes")
+        if binary
+            for value in size_t[3,3,10,30]; write(io,value); end
+            for value in Int32[0,21,0]; write(io,value); end
+            wsize(io,1); wsize(io,10)
+            for value in (0.0,0.0,0.0); write(io,value); end
+            for value in Int32[0,22,0]; write(io,value); end
+            wsize(io,1); wsize(io,20)
+            for value in (1.0,0.0,0.0); write(io,value); end
+            for value in Int32[1,21,0]; write(io,value); end
+            wsize(io,1); wsize(io,30)
+            for value in (0.5,0.0,0.0); write(io,value); end
+            write(io,UInt8('\n')); println(io,"\$EndNodes")
+        else
+            println(io,"3 3 10 30")
+            println(io,"0 21 0 1")
+            println(io,"10")
+            println(io,"0 0 0")
+            println(io,"0 22 0 1")
+            println(io,"20")
+            println(io,"1 0 0")
+            println(io,"1 21 0 1")
+            println(io,"30")
+            println(io,"0.5 0 0")
+            println(io,"\$EndNodes")
+        end
+        println(io,"\$Elements")
+        if binary
+            for value in size_t[1,2,101,102]; write(io,value); end
+            for value in Int32[1,21,1]; write(io,value); end
+            wsize(io,2)
+            for value in size_t[101,10,30,102,30,20]; write(io,value); end
+            write(io,UInt8('\n')); println(io,"\$EndElements")
+        else
+            println(io,"1 2 101 102")
+            println(io,"1 21 1 2")
+            println(io,"101 10 30")
+            println(io,"102 30 20")
+            println(io,"\$EndElements")
+        end
+        if ghost_elements
+            println(io,"\$GhostElements")
+            if binary
+                wsize(io,1)
+                wsize(io,102); write(io,Int32(2))
+                wsize(io,1); write(io,Int32(1))
+                write(io,UInt8('\n')); println(io,"\$EndGhostElements")
+            else
+                println(io,"1")
+                println(io,"102 2 1 1")
+                println(io,"\$EndGhostElements")
+            end
+        end
+    end
+    return path
+end
+
+@testset "MSH4 partition metadata round trips" begin
+    directory=mktempdir()
+    for binary in (false,true),wide in (true,false)
+        (binary || wide) || continue
+        path=write_partitioned_v4(
+            joinpath(directory,"partitioned-$binary-$wide.msh");
+            binary=binary,wide=wide)
+        mesh=ElementsUnderTest.read_mixed_msh(path)
+        @test ElementsUnderTest.validate(mesh).ok
+        partition=mesh.partition_data
+        @test partition!==nothing
+        @test partition.num_partitions==2
+        @test partition.ghost_entities==[(Int32(21),Int32(2))]
+        @test length(partition.ghost_elements)==1
+        ghost=partition.ghost_elements[1]
+        @test ghost.partition==2
+        @test ghost.ghost_partitions==Int32[1]
+        @test mesh.entity_data.external_element_tags[1][ghost.element]==102
+        @test length(partition.entities)==3
+        point=partition.entities[(0,21)]
+        @test point.parent==(0,1)
+        @test point.partitions==Int32[1]
+        @test point.bbox[1:3]==(0.0,0.0,0.0)
+        curve=partition.entities[(1,21)]
+        @test curve.parent==(1,11)
+        @test curve.partitions==Int32[1,2]
+        @test curve.physical_tags==Int32[5]
+        @test curve.boundaries==Int32[21,-22]
+        @test mesh.entity_data.block_entities==[Int32[21,21]]
+        @test mesh.blocks[1].tags==Int32[5,5]
+        @test mesh.entity_data.entities[(1,11)].boundaries==Int32[1,-2]
+        for out_binary in (false,true)
+            out=joinpath(directory,"rt-$binary-$wide-$out_binary.msh")
+            ElementsUnderTest.write_mixed_msh(out,mesh;binary=out_binary)
+            reread=ElementsUnderTest.read_mixed_msh(out)
+            @test ElementsUnderTest.validate(reread).ok
+            repartition=reread.partition_data
+            @test repartition!==nothing
+            @test repartition.num_partitions==2
+            @test repartition.ghost_entities==partition.ghost_entities
+            @test keys(repartition.entities)==keys(partition.entities)
+            @test all(
+                all(getfield(repartition.entities[key],f)==
+                    getfield(partition.entities[key],f)
+                    for f in fieldnames(ElementsUnderTest.MixedEntity))
+                for key in keys(partition.entities))
+            @test length(repartition.ghost_elements)==1
+            reghost=repartition.ghost_elements[1]
+            @test reghost.partition==ghost.partition
+            @test reghost.ghost_partitions==ghost.ghost_partitions
+            @test reread.entity_data.external_element_tags[1][
+                reghost.element]==102
+            @test reread.entity_data.external_element_tags==
+                mesh.entity_data.external_element_tags
+            @test reread.entity_data.external_node_tags==
+                mesh.entity_data.external_node_tags
+        end
+    end
+    ghostless=ElementsUnderTest.read_mixed_msh(write_partitioned_v4(
+        joinpath(directory,"ghostless.msh");ghost_elements=false))
+    @test ghostless.partition_data!==nothing
+    @test isempty(ghostless.partition_data.ghost_elements)
+    out=joinpath(directory,"ghostless-rt.msh")
+    ElementsUnderTest.write_mixed_msh(out,ghostless)
+    text=read(out,String)
+    @test occursin("\$PartitionedEntities",text)
+    @test !occursin("\$GhostElements",text)
+    plain=ElementsUnderTest.read_mixed_msh(write_partitioned_v4(
+        joinpath(directory,"plain.msh");partitioned_entities=false,
+        ghost_elements=false))
+    @test plain.partition_data===nothing
+    @test ElementsUnderTest.validate(plain).ok
+end
+
+@testset "MSH4 partition metadata rejects malformed input" begin
+    directory=mktempdir()
+    path=joinpath(directory,"ghost-without-partitions.msh")
+    write_partitioned_v4(path;partitioned_entities=false)
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(path)
+    text=read(write_partitioned_v4(
+        joinpath(directory,"base.msh")),String)
+    lines=collect(eachline(IOBuffer(text)))
+    first_partition=findfirst(==("\$PartitionedEntities"),lines)
+    last_partition=findfirst(==("\$EndPartitionedEntities"),lines)
+    block=lines[first_partition:last_partition]
+    duplicate=vcat(lines[1:last_partition],block,lines[last_partition+1:end])
+    open(joinpath(directory,"duplicate.msh"),"w") do io
+        foreach(line->println(io,line),duplicate)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"duplicate.msh"))
+    rest=vcat(lines[1:first_partition-1],lines[last_partition+1:end])
+    end_nodes=findfirst(==("\$EndNodes"),rest)
+    after_nodes=vcat(rest[1:end_nodes],block,rest[end_nodes+1:end])
+    open(joinpath(directory,"after-nodes.msh"),"w") do io
+        foreach(line->println(io,line),after_nodes)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"after-nodes.msh"))
+    bad_partition=replace(text,"21 0 1 1 1 0 0 0 0"=>"21 0 1 1 9 0 0 0 0")
+    open(joinpath(directory,"bad-partition.msh"),"w") do io
+        print(io,bad_partition)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"bad-partition.msh"))
+    bad_parent=replace(text,"21 0 1 1 1 0 0 0 0"=>"21 0 99 1 1 0 0 0 0")
+    open(joinpath(directory,"bad-parent.msh"),"w") do io
+        print(io,bad_parent)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"bad-parent.msh"))
+    bad_ghost=replace(text,"102 2 1 1"=>"999 2 1 1")
+    open(joinpath(directory,"bad-ghost.msh"),"w") do io
+        print(io,bad_ghost)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"bad-ghost.msh"))
+    bad_ghost_part=replace(text,"102 2 1 1"=>"102 9 1 1")
+    open(joinpath(directory,"bad-ghost-part.msh"),"w") do io
+        print(io,bad_ghost_part)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"bad-ghost-part.msh"))
+    dup_entity=replace(text,"22 0 2 1 2 1 0 0 0"=>"1 0 2 1 2 1 0 0 0")
+    open(joinpath(directory,"dup-entity.msh"),"w") do io
+        print(io,dup_entity)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"dup-entity.msh"))
+    v2=replace(text,"4.1 0 8"=>"2.2 0 8";count=1)
+    open(joinpath(directory,"v2-partition.msh"),"w") do io
+        print(io,v2)
+    end
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(
+        joinpath(directory,"v2-partition.msh"))
+end
+
+@testset "MSH4 partition metadata construction and write guards" begin
+    directory=mktempdir()
+    mesh=ElementsUnderTest.read_mixed_msh(write_partitioned_v4(
+        joinpath(directory,"source.msh")))
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"v2-out.msh"),mesh;version=2.2)
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        0,9,(0.0,0.0,0.0);partitions=Int32[1])
+    @test_throws ArgumentError ElementsUnderTest.MixedEntity(
+        0,9,(0.0,0.0,0.0);parent=(0,1))
+    @test_throws ArgumentError ElementsUnderTest.MixedGhostElement(0,1,[1])
+    @test_throws ArgumentError ElementsUnderTest.MixedGhostElement(1,0,[1])
+    @test_throws ArgumentError ElementsUnderTest.MixedPartitionData(
+        2;ghost_entities=[(Int32(0),Int32(1))])
+    @test_throws ArgumentError ElementsUnderTest.MixedPartitionData(
+        -1)
+    plain=ElementsUnderTest.MixedMesh(mesh.coords,mesh.blocks)
+    @test plain.partition_data===nothing
+    @test ElementsUnderTest.validate(plain).ok
+    alt=ElementsUnderTest.MixedPartitionData(
+        3;entities=mesh.partition_data.entities,
+        ghost_entities=mesh.partition_data.ghost_entities,
+        ghost_elements=mesh.partition_data.ghost_elements)
+    mesh_alt=ElementsUnderTest.MixedMesh(
+        mesh.coords,mesh.blocks;entity_data=mesh.entity_data,
+        partition_data=alt)
+    @test mesh_alt.partition_data.num_partitions==3
+    @test ElementsUnderTest.mixed_crc(mesh).sha!=
+        ElementsUnderTest.mixed_crc(mesh_alt).sha
+end
+
 function write_repeated_node_sections(path,version::Float64,binary::Bool;
                                       third_tag::Int=30)
     open(path,"w") do io
@@ -3951,9 +4267,9 @@ end
         write(io,Int32(2),Int32(1),Int32(2),UInt64(1))
         write(io,UInt64(1),UInt64.((1,2,3))...)
         write(io,UInt8('\n'),"\$EndElements\n")
-        write(io,"\$PartitionedEntities\n")
+        write(io,"\$CustomBlob\n")
         write(io,UInt8[0x00,0x01,0xff,0x24,0x61])
-        write(io,UInt8('\n'),"\$EndPartitionedEntities\n")
+        write(io,UInt8('\n'),"\$EndCustomBlob\n")
     end
     bin_mesh=ElementsUnderTest.read_mixed_msh(binary_source)
     @test length(bin_mesh.ancillary_sections)==1

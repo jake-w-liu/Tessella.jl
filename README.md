@@ -83,7 +83,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   MSH v2.2/v4.1 mixed-element I/O with opposite-endian decoding and cumulative
   repeated pre-element node sections, plus owned periodic metadata in ASCII and
   binary MSH2/MSH4 files, including entity transforms, node correspondences, and
-  declared MSH2 elementary-entity tags; positive, physically consistent MSH2
+  declared MSH2 elementary-entity tags; MSH4 partition metadata
+  (`$PartitionedEntities` and `$GhostElements`) is carried structurally on
+  `MixedMesh` and re-emitted through ASCII and binary output; positive,
+  physically consistent MSH2
   entities can be converted to discrete MSH4 entities without changing their
   entity tags;
 - deterministic, physical-tag-preserving surface triangle-to-quadrangle
