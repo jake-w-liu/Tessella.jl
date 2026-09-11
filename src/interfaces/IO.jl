@@ -31,8 +31,11 @@ const MSH_LINE  = 1
 const MSH_TRI   = 2
 const MSH_TET   = 4
 const MSH_TET2  = 11    # 10-node (quadratic) tet — read as its 4 corner vertices
-const _NN = Dict(MSH_POINT => 1, MSH_LINE => 2, MSH_TRI => 3, MSH_TET => 4, MSH_TET2 => 10)
-const _EDIM = Dict(MSH_POINT => 0, MSH_LINE => 1, MSH_TRI => 2, MSH_TET => 3, MSH_TET2 => 3)
+const MSH_TRI2  = 9     # 6-node (quadratic) tri — read as its 3 corner vertices
+const _NN = Dict(MSH_POINT => 1, MSH_LINE => 2, MSH_TRI => 3, MSH_TET => 4,
+                 MSH_TET2 => 10, MSH_TRI2 => 6)
+const _EDIM = Dict(MSH_POINT => 0, MSH_LINE => 1, MSH_TRI => 2, MSH_TET => 3,
+                   MSH_TET2 => 3, MSH_TRI2 => 2)
 const _DEFAULT_MAX_IO_NAME_BYTES = 1 << 20
 
 @inline function _io_limit(value, caller::AbstractString,
@@ -573,8 +576,12 @@ function _push_element!(acc, etype::Int, phys::Int, nodetoks)
     if etype == MSH_LINE
         a = idx(nodetoks[1]); b = idx(nodetoks[2])
         push!(acc.segs, (Int32(a), Int32(b))); push!(acc.seg_tag, ptag)
-    elseif etype == MSH_TRI
+    elseif etype == MSH_TRI || etype == MSH_TRI2
+        # linear tri, or quadratic tri read as its 3 corner vertices (first 3 nodes)
         a = idx(nodetoks[1]); b = idx(nodetoks[2]); c = idx(nodetoks[3])
+        if etype == MSH_TRI2
+            for k in 4:6; idx(nodetoks[k]); end
+        end
         push!(acc.tris, (Int32(a), Int32(b), Int32(c))); push!(acc.tri_tag, ptag)
     elseif etype == MSH_TET || etype == MSH_TET2
         # linear tet, or quadratic tet read as its 4 corner vertices (first 4 nodes)

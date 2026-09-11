@@ -147,7 +147,7 @@ direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exac
 distance queries. P2 does not yet claim general mixed-element generation or
 recombination beyond P4's first-order surface pairing, integration of mixed blocks
 into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, curved
-high-order Jacobian certification beyond P2 tetrahedra, non-8-byte binary output,
+high-order Jacobian certification beyond P2 tetrahedra and triangles, non-8-byte binary output,
 internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
 Ancillary and unknown MSH sections now round trip verbatim — payload bytes,

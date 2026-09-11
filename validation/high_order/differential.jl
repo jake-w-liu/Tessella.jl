@@ -46,9 +46,35 @@ function _type11_coordinates()
     return Tuple(points[tag] for tag in connectivity)
 end
 
+function _type9_coordinates()
+    types, element_tags, node_blocks = gmsh.model.mesh.getElements(2)
+    index = findfirst(==(Int32(9)), types)
+    index === nothing && error("Gmsh returned no type-9 triangle")
+    length(element_tags[index]) == 1 || error(
+        "Gmsh returned $(length(element_tags[index])) type-9 elements instead of one")
+    connectivity = node_blocks[index]
+    length(connectivity) == 6 || error(
+        "Gmsh returned malformed type-9 connectivity")
+    node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
+    length(coordinates) == 3length(node_tags) || error(
+        "Gmsh returned malformed node coordinates")
+    points = Dict{UInt64,NTuple{3,Float64}}()
+    for index in eachindex(node_tags)
+        points[node_tags[index]] = (coordinates[3index - 2],
+                                    coordinates[3index - 1],
+                                    coordinates[3index])
+    end
+    return Tuple(points[tag] for tag in connectivity)
+end
+
 function _tessella_fixture()
     return Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
                 tets=reshape(Int32[1,2,3,4], 4, 1), tet_tag=Int32[23])
+end
+
+function _tessella_tri_fixture()
+    return Mesh(Float64[0 1 0; 0 0 1; 0 0 0];
+                tris=reshape(Int32[1,2,3], 3, 1), tri_tag=Int32[17])
 end
 
 try
@@ -91,8 +117,46 @@ try
             "Gmsh did not recover physical volume 23 from Tessella's P2 file")
     end
 
+    gmsh.clear()
+    gmsh.model.add("high-order-tri-differential")
+    gmsh.model.addDiscreteEntity(2, 201)
+    gmsh.model.mesh.addNodes(
+        2, 201, UInt64[1, 2, 3],
+        Float64[0, 0, 0, 1, 0, 0, 0, 1, 0])
+    gmsh.model.mesh.addElementsByType(201, 2, UInt64[1], UInt64[1, 2, 3])
+    gmsh.model.addPhysicalGroup(2, [201], 17)
+    gmsh.model.mesh.setOrder(2)
+    gmsh_tri_coordinates = _type9_coordinates()
+
+    tri_quadratic = p2_trimesh(_tessella_tri_fixture())
+    tessella_tri_coordinates = Tuple(
+        (tri_quadratic.coords[1, tri_quadratic.tri6[slot, 1]],
+         tri_quadratic.coords[2, tri_quadratic.tri6[slot, 1]],
+         tri_quadratic.coords[3, tri_quadratic.tri6[slot, 1]]) for slot in 1:6)
+    gmsh_tri_coordinates == tessella_tri_coordinates || error(
+        "Gmsh and Tessella disagree on type-9 local node coordinates: " *
+        "Gmsh=$gmsh_tri_coordinates Tessella=$tessella_tri_coordinates")
+    tri_quadratic.tri_tag == Int32[17] || error(
+        "Tessella did not preserve the input triangle tag")
+    validate(tri_quadratic).ok || error(
+        "Tessella quadratic triangle fixture is invalid")
+    p2_tri_min_jacobian(tri_quadratic) == 1.0 || error(
+        "Tessella certified an unexpected flat unit-triangle Gram bound")
+
+    mktempdir() do directory
+        path = joinpath(directory, "tessella-p2tri.msh")
+        write_msh_p2(path, tri_quadratic)
+        gmsh.clear()
+        gmsh.open(path)
+        _type9_coordinates() == tessella_tri_coordinates || error(
+            "Gmsh changed Tessella's written type-9 local node coordinates")
+        (Int32(2), Int32(17)) in gmsh.model.getPhysicalGroups() || error(
+            "Gmsh did not recover physical surface 17 from Tessella's P2 file")
+    end
+
     println("HIGH_ORDER_DIFFERENTIAL_OK gmsh=$(gmsh.GMSH_API_VERSION) ",
             "nodes=$(nnodes(quadratic)) tets=$(ntets(quadratic)) ",
+            "tris=$(length(tri_quadratic.tri_tag)) ",
             "sha=5a83ebe0386bda71c6761148ed3fe2f964f16c2da2f0b66b6951ef558f4927ab")
 finally
     gmsh.isInitialized() != 0 && gmsh.finalize()
