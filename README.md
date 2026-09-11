@@ -156,7 +156,9 @@ quasi-transfinite or holed transfinite patches, curved/warped or
 compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
-non-8-byte binary data, and ancillary-section preservation. MSH2 ASCII is the lossless
+non-8-byte binary data, and explicit-tag `$ElementNodeData` output that the
+connectivity-implied record cannot express under `gmsh_compatible=true`. MSH2
+ASCII is the lossless
 format for variable connectivity and parent/domain links; binary MSH2 and MSH4 have
 explicitly narrower special-record contracts. Type 69 and some registered fixed tags
 require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and

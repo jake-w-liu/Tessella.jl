@@ -21,6 +21,7 @@ using Printf: @printf, @sprintf
 export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
        msh_family, msh_type, msh_properties
 export ElementBlock, ElementRef, SpecialElementBlock, MixedEntity, MixedEntityData,
+       MshAncillarySection, MshDataSection,
        MixedPeriodicLink, MixedMesh
 export mixed_crc, simplex_to_mixed, mixed_to_simplex
 export write_mixed_msh, read_mixed_msh
@@ -853,6 +854,57 @@ end
 # Internal readers may transfer freshly allocated storage without a second
 # full copy; public construction always takes the detached path.
 struct _OwnedMixedMesh end
+"""
+    MshAncillarySection
+
+A verbatim MSH section `read_mixed_msh` does not structurally model
+(`\$Comments`, `\$InterpolationScheme`, `\$Parametrizations`,
+`\$PartitionedEntities`, `\$GhostElements`, or any unrecognized section).
+`payload` holds the raw bytes between the `\$Name` and `\$EndName` lines;
+`binary` records whether the payload came from a binary-mode section.
+`anchor` is the index of the canonical section it followed on input
+(0=`MeshFormat`, 1=`PhysicalNames`, 2=`Entities`, 3=`Nodes`, 4=`Elements`,
+5=`Periodic`); `write_mixed_msh` re-emits preserved sections after the
+corresponding emitted section, or at the end when the anchor section is not
+written.
+"""
+struct MshAncillarySection
+    name::String
+    binary::Bool
+    payload::Vector{UInt8}
+    anchor::Int32
+end
+
+"""
+    MshDataSection
+
+A parsed MSH view-data section (`\$NodeData`, `\$ElementData`, or
+`\$ElementNodeData`). Header strings, reals, and integers are kept verbatim;
+tag columns are stored as internal indices — `nodes` holds one internal node
+index per `\$NodeData` row or the flattened per-row node lists of an
+explicit-tag `\$ElementNodeData`, `elements` holds the flat internal element
+index per `\$ElementData`/`\$ElementNodeData` row (cells numbered 1:N in
+`blocks` order), `row_nodes` holds each `\$ElementNodeData` row's node count,
+and `values` holds the flattened row values. `implicit_nodes` records Gmsh's
+model-data `\$ElementNodeData` dialect, where rows carry `numNodes` values per
+node without a node-tag column (the tags are the element's own connectivity);
+`nodes` is empty in that dialect and `implicit_nodes` is `false` for every
+other section. `write_mixed_msh` re-externalizes the indices into whichever
+tag space the output format emits.
+"""
+struct MshDataSection
+    name::String
+    strings::Vector{String}
+    reals::Vector{Float64}
+    header::Vector{Int64}
+    elements::Vector{Int32}
+    nodes::Vector{Int32}
+    row_nodes::Vector{Int32}
+    implicit_nodes::Bool
+    values::Vector{Float64}
+    anchor::Int32
+end
+
 const _OWNED_MIXED_MESH = _OwnedMixedMesh()
 
 """
@@ -869,20 +921,27 @@ struct MixedMesh
     entity_data::Union{Nothing,MixedEntityData}
     elementary_entities::Union{Nothing,Vector{Vector{Int32}}}
     periodic_links::Vector{MixedPeriodicLink}
+    ancillary_sections::Vector{MshAncillarySection}
+    data_sections::Vector{MshDataSection}
     function MixedMesh(::_OwnedMixedMesh,C::Matrix{Float64},
                        B::Vector{MixedElementBlock},
                        names::Dict{Tuple{Int,Int},String},
                        data::Union{Nothing,MixedEntityData},
                        elementary_entities::Union{Nothing,Vector{Vector{Int32}}},
-                       periodic_links::Vector{MixedPeriodicLink})
-        mesh=new(C,B,names,data,elementary_entities,periodic_links)
+                       periodic_links::Vector{MixedPeriodicLink},
+                       ancillary_sections::Vector{MshAncillarySection},
+                       data_sections::Vector{MshDataSection})
+        mesh=new(C,B,names,data,elementary_entities,periodic_links,
+                 ancillary_sections,data_sections)
         _assert_mixed_structure(mesh,"MixedMesh")
         return mesh
     end
     function MixedMesh(coords::AbstractMatrix{<:Real}, blocks::AbstractVector;
                        physical_names=Dict{Tuple{Int,Int},String}(),entity_data=nothing,
                        elementary_entities=nothing,
-                       periodic_links=MixedPeriodicLink[])
+                       periodic_links=MixedPeriodicLink[],
+                       ancillary_sections=MshAncillarySection[],
+                       data_sections=MshDataSection[])
         size(coords,1)==3 || throw(ArgumentError("MixedMesh: coords must be 3×n"))
         _elements_reject_bool_values(coords,"MixedMesh: coordinates")
         size(coords,2) <= typemax(Int32) || throw(ArgumentError(
@@ -918,7 +977,29 @@ struct MixedMesh
                 "MixedMesh: periodic link $i must be a MixedPeriodicLink"))
             push!(links,_copy_mixed_periodic_link(link))
         end
-        return MixedMesh(_OWNED_MIXED_MESH,C,B,names,data,elementary,links)
+        ancillary_sections isa AbstractVector || throw(ArgumentError(
+            "MixedMesh: ancillary_sections must be a vector"))
+        ancillary=MshAncillarySection[]
+        for (i,section) in pairs(ancillary_sections)
+            section isa MshAncillarySection || throw(ArgumentError(
+                "MixedMesh: ancillary section $i must be an MshAncillarySection"))
+            push!(ancillary,MshAncillarySection(
+                section.name,section.binary,copy(section.payload),section.anchor))
+        end
+        data_sections isa AbstractVector || throw(ArgumentError(
+            "MixedMesh: data_sections must be a vector"))
+        sections=MshDataSection[]
+        for (i,section) in pairs(data_sections)
+            section isa MshDataSection || throw(ArgumentError(
+                "MixedMesh: data section $i must be an MshDataSection"))
+            push!(sections,MshDataSection(
+                section.name,copy(section.strings),copy(section.reals),
+                copy(section.header),copy(section.elements),copy(section.nodes),
+                copy(section.row_nodes),section.implicit_nodes,
+                copy(section.values),section.anchor))
+        end
+        return MixedMesh(_OWNED_MIXED_MESH,C,B,names,data,elementary,links,
+                         ancillary,sections)
     end
 end
 
@@ -1326,6 +1407,107 @@ function _assert_mixed_periodic_links(m::MixedMesh,context::AbstractString)
     return nothing
 end
 
+function _assert_mixed_ancillary(m::MixedMesh,nel::Int,nn::Int,
+                                 context::AbstractString)
+    for (index,section) in pairs(m.ancillary_sections)
+        section isa MshAncillarySection || throw(ArgumentError(
+            "$context: ancillary section $index is not an MshAncillarySection"))
+        _assert_ancillary_name(section.name,"$context: ancillary section $index")
+        section.binary isa Bool || throw(ArgumentError(
+            "$context: ancillary section $index binary flag must be Bool"))
+        section.payload isa Vector{UInt8} || throw(ArgumentError(
+            "$context: ancillary section $index payload must be UInt8 bytes"))
+        0<=section.anchor<=5 || throw(ArgumentError(
+            "$context: ancillary section $index anchor $(section.anchor) is outside 0:5"))
+    end
+    for (index,section) in pairs(m.data_sections)
+        section isa MshDataSection || throw(ArgumentError(
+            "$context: data section $index is not an MshDataSection"))
+        section.name in ("NodeData","ElementData","ElementNodeData") ||
+            throw(ArgumentError(
+                "$context: data section $index has unsupported name $(section.name)"))
+        0<=section.anchor<=5 || throw(ArgumentError(
+            "$context: data section $index anchor $(section.anchor) is outside 0:5"))
+        for (i,value) in pairs(section.reals)
+            isfinite(value) || throw(ArgumentError(
+                "$context: data section $index real header $i is non-finite"))
+        end
+        for (i,value) in pairs(section.values)
+            isfinite(value) || throw(ArgumentError(
+                "$context: data section $index value $i is non-finite"))
+        end
+        section.implicit_nodes isa Bool || throw(ArgumentError(
+            "$context: data section $index implicit_nodes must be Bool"))
+        section.implicit_nodes && section.name!="ElementNodeData" && throw(
+            ArgumentError(
+                "$context: data section $index sets implicit_nodes on " *
+                "$(section.name)"))
+        nentries=length(section.name=="NodeData" ? section.nodes :
+                        section.elements)
+        if section.name=="NodeData"
+            isempty(section.elements) && isempty(section.row_nodes) ||
+                throw(ArgumentError(
+                    "$context: NodeData section $index carries element fields"))
+        elseif section.name=="ElementData"
+            isempty(section.nodes) && isempty(section.row_nodes) ||
+                throw(ArgumentError(
+                    "$context: ElementData section $index carries node fields"))
+        else
+            length(section.elements)==length(section.row_nodes) || throw(
+                ArgumentError(
+                    "$context: ElementNodeData section $index row count mismatch"))
+            all(k->k>=1,section.row_nodes) || throw(ArgumentError(
+                "$context: ElementNodeData section $index has a row with no " *
+                "nodes"))
+            if section.implicit_nodes
+                isempty(section.nodes) || throw(ArgumentError(
+                    "$context: implicit ElementNodeData section $index carries " *
+                    "a node-tag column"))
+            else
+                sum(section.row_nodes;init=0)==length(section.nodes) || throw(
+                    ArgumentError(
+                        "$context: ElementNodeData section $index node count mismatch"))
+            end
+        end
+        for (i,line) in pairs(section.strings)
+            !occursin('\n',line) && !occursin('\r',line) || throw(ArgumentError(
+                "$context: data section $index string $i contains a line break"))
+        end
+        for tag in section.nodes
+            1<=tag<=nn || throw(ArgumentError(
+                "$context: data section $index references node $tag outside 1:$nn"))
+        end
+        for tag in section.elements
+            1<=tag<=nel || throw(ArgumentError(
+                "$context: data section $index references element $tag outside 1:$nel"))
+        end
+        length(section.header)>=3 || throw(ArgumentError(
+            "$context: data section $index has fewer than 3 header integers"))
+        # Gmsh's integer-tag layout is [time step, components, entries,
+        # partition...]; components and entries are at fixed positions.
+        section.header[3]==nentries || throw(ArgumentError(
+            "$context: data section $index entry count does not match its header"))
+        ncomp=section.header[2]
+        ncomp>=1 || throw(ArgumentError(
+            "$context: data section $index has a non-positive component count"))
+        denominator=section.name=="ElementNodeData" ?
+            sum(section.row_nodes;init=0) : nentries
+        length(section.values)==denominator*ncomp || throw(ArgumentError(
+            "$context: data section $index value count does not match its " *
+            "component count"))
+    end
+    return nothing
+end
+
+function _assert_ancillary_name(name::AbstractString,context::AbstractString)
+    isempty(name) && throw(ArgumentError("$context: empty section name"))
+    startswith(name,"End") && throw(ArgumentError(
+        "$context: reserved section name $name"))
+    all(c->isletter(c) || isdigit(c) || c=='_',name) || throw(ArgumentError(
+        "$context: invalid section name $(repr(name))"))
+    return nothing
+end
+
 function _assert_mixed_structure(m::MixedMesh, context::AbstractString)
     size(m.coords,1)==3 || throw(ArgumentError("$context: coords must be 3×n"))
     nn=size(m.coords,2)
@@ -1409,6 +1591,7 @@ function _assert_mixed_structure(m::MixedMesh, context::AbstractString)
     _assert_mixed_entity_data(m,context)
     _assert_mixed_elementary_entities(m,context)
     _assert_mixed_periodic_links(m,context)
+    _assert_mixed_ancillary(m,total,nn,context)
     return total
 end
 
@@ -2117,6 +2300,19 @@ function _MixedReadBucket(etype::Int)
                             UInt64[],NTuple{2,UInt64}[])
 end
 
+# A view-data section deferred until the mesh is fully parsed: `lines` holds
+# the ASCII section content (binary sources keep only the ASCII header here),
+# `rows` the raw binary row payload when the source file is binary, and
+# `binary`/`swap` the source file's mode for verbatim fallback and decoding.
+struct _PendingDataSection
+    name::String
+    lines::Vector{String}
+    rows::Union{Nothing,Vector{UInt8}}
+    swap::Bool
+    binary::Bool
+    anchor::Int32
+end
+
 mutable struct _MixedReadAccum
     x::Vector{Float64}
     y::Vector{Float64}
@@ -2138,6 +2334,10 @@ mutable struct _MixedReadAccum
     element_blocks::Int
     periodic_links::Vector{MixedPeriodicLink}
     periodic_pairs::Int
+    # Ancillary captures and deferred view-data sections in source order, so a
+    # section that fails to parse keeps its position among the preserved
+    # sections that share its anchor.
+    preserved::Vector{Union{MshAncillarySection,_PendingDataSection}}
 end
 
 _MixedReadAccum() = _MixedReadAccum(
@@ -2146,7 +2346,8 @@ _MixedReadAccum() = _MixedReadAccum(
     Dict{Tuple{Int,Int},Int32}(),Dict{Tuple{Int,Int},MixedEntity}(),
     Set{Tuple{Int,Int}}(),Set{Tuple{Int,Int}}(),UInt64[],Tuple{Int,Int32}[],
     Union{Nothing,Vector{Float64}}[],Set{UInt64}(),0,0,0,0,
-    MixedPeriodicLink[],0)
+    MixedPeriodicLink[],0,
+    Union{MshAncillarySection,_PendingDataSection}[])
 
 function _read_limit(value,name::AbstractString;ceiling=typemax(Int))
     value isa Integer || throw(ArgumentError("read_mixed_msh: $name must be an integer"))
@@ -2183,6 +2384,13 @@ classification, parametric coordinate, and external node/element tag.
 whenever the file declares a positive entity (and retains all tags needed by
 periodic relations), while
 `periodic_links` retains standard MSH2/MSH4 entity transforms and node pairs.
+`data_sections` retains parsed `\$NodeData`/`\$ElementData`/`\$ElementNodeData`
+views with tag columns resolved to internal indices (both Gmsh
+`\$ElementNodeData` dialects — the explicit node-tag column and the
+connectivity-implied model-data form), and
+`ancillary_sections` retains every other unrecognized section verbatim —
+payload bytes, binary flag, and the position at which it appeared — so
+`write_mixed_msh` re-emits them losslessly.
 Gmsh 4.15.2 does not serialize Point-In-Surface or Point/Line/Surface-In-Volume
 relations; their classified nodes and elements remain readable. Node, element,
 connectivity, block, entity, periodic-link/pair, physical-name, and file-size
@@ -2195,12 +2403,12 @@ produced by `write_mixed_msh(...; gmsh_compatible=false)`.
 
 Binary files are byte-swapped when their 32-bit endianness marker requires it.
 MSH 2.2 binary payloads use 32-bit integer tags and 64-bit coordinates; MSH
-4.1 binary payloads use 32-bit entity/type values, 64-bit `size_t` values and
-64-bit coordinates, including the standard 0-or-16-entry periodic affine
-payload. The MSH2 periodic section remains ASCII in both file modes and accepts
-the standard optional 16-entry `Affine` record. Unsupported sections in a binary
-file are rejected explicitly because their payload cannot be skipped safely
-without decoding it.
+4.1 binary payloads use 32-bit entity/type values, `size_t` values at the
+declared 4- or 8-byte data size, and 64-bit coordinates, including the
+standard 0-or-16-entry periodic affine payload. The MSH2 periodic section remains ASCII in both file modes and accepts
+the standard optional 16-entry `Affine` record. Unknown sections in a binary
+file are preserved by scanning their payload for the ASCII `\$End` terminator;
+a section whose terminator never appears is rejected explicitly.
 """
 function read_mixed_msh(path::AbstractString;
                         tessella_extensions=false,
@@ -2333,6 +2541,15 @@ end
     return swap ? bswap(value) : value
 end
 
+# MSH binary `size_t` fields follow the MeshFormat data-size word: 8 bytes on
+# 64-bit writers, 4 bytes on 32-bit writers. `wide` selects the width.
+@inline function _binary_size_t(io,swap::Bool,wide::Bool,context::AbstractString)
+    wide && return _binary_u64(io,swap,context)
+    _binary_available(io,sizeof(UInt32),context)
+    value=read(io,UInt32)
+    return UInt64(swap ? bswap(value) : value)
+end
+
 @inline function _binary_f64(io,swap::Bool,context::AbstractString)
     value=reinterpret(Float64,_binary_u64(io,swap,context))
     isfinite(value) || throw(ArgumentError(
@@ -2369,6 +2586,26 @@ function _binary_u64_vector(io,count::Int,swap::Bool,context::AbstractString)
     if swap
         @inbounds for i in eachindex(values)
             values[i]=bswap(values[i])
+        end
+    end
+    return values
+end
+
+function _binary_size_t_vector(io,count::Int,swap::Bool,wide::Bool,
+                               context::AbstractString)
+    wide && return _binary_u64_vector(io,count,swap,context)
+    bytes=_binary_bytes(count,sizeof(UInt32),context)
+    _binary_available(io,bytes,context)
+    raw=Vector{UInt32}(undef,count)
+    read!(io,raw)
+    values=Vector{UInt64}(undef,count)
+    if swap
+        @inbounds for i in eachindex(raw)
+            values[i]=UInt64(bswap(raw[i]))
+        end
+    else
+        @inbounds for i in eachindex(raw)
+            values[i]=UInt64(raw[i])
         end
     end
     return values
@@ -2562,6 +2799,202 @@ function _skip_msh_section(io,endtoken::AbstractString)
     throw(ArgumentError("read_mixed_msh: unterminated section; missing $endtoken"))
 end
 
+# Capture the content lines of an ASCII section, excluding its "$End" marker.
+function _capture_ascii_section(io,name::AbstractString)
+    endtoken="\$End"*name
+    lines=String[]
+    while !eof(io)
+        line=readline(io)
+        strip(line)==endtoken && return lines
+        push!(lines,line)
+    end
+    throw(ArgumentError(
+        "read_mixed_msh: unterminated section; missing $endtoken"))
+end
+
+function _capture_ascii_section_bytes(io,name::AbstractString)
+    lines=_capture_ascii_section(io,name)
+    out=IOBuffer()
+    for line in lines
+        print(out,line,'\n')
+    end
+    return take!(out)
+end
+
+# Capture a binary-mode unknown section's raw payload: the bytes between the
+# header line's newline and the newline that precedes "$End<name>". Gmsh binary
+# sections are delimited by the same ASCII markers, so scanning for the
+# terminator at a line boundary is unambiguous. The terminator also counts at
+# the very start of the payload, where the header line's newline was already
+# consumed.
+function _capture_binary_section(io,name::AbstractString)
+    needle=codeunits("\$End"*name)
+    n=length(needle); buffer=UInt8[]
+    while !eof(io)
+        push!(buffer,read(io,UInt8))
+        length(buffer)<n && continue
+        buffer[end-n+1:end]==needle || continue
+        # The marker must sit at a line start: either the payload is empty
+        # (the header newline was consumed) or a newline precedes it.
+        length(buffer)>n && buffer[end-n]!=UInt8('\n') && continue
+        payload=length(buffer)==n ? UInt8[] : buffer[1:end-n-1]
+        if eof(io)
+            return payload
+        end
+        nextbyte=read(io,UInt8)
+        if nextbyte==UInt8('\r')
+            eof(io) || read(io,UInt8)==UInt8('\n') || throw(ArgumentError(
+                "read_mixed_msh: malformed binary terminator for \$End$name"))
+        elseif nextbyte!=UInt8('\n')
+            throw(ArgumentError(
+                "read_mixed_msh: malformed binary terminator for \$End$name"))
+        end
+        return payload
+    end
+    throw(ArgumentError(
+        "read_mixed_msh: unterminated section; missing \$End$name"))
+end
+
+# Parse the ASCII header of a view-data section inside a binary file, pushing
+# every consumed line into `lines`. Returns (components, entries) or nothing.
+function _binary_data_header(io,name::AbstractString,lines::Vector{String})
+    try
+        push!(lines,readline(io))
+        nstr=_msh_int(strip(lines[end]),"$name string-tag count")
+        nstr>=0 || return nothing
+        for _ in 1:nstr
+            push!(lines,readline(io))
+        end
+        push!(lines,readline(io))
+        nreal=_msh_int(strip(lines[end]),"$name real-tag count")
+        nreal>=0 || return nothing
+        for _ in 1:nreal
+            push!(lines,readline(io))
+            _msh_float(strip(lines[end]),"$name real tag")
+        end
+        push!(lines,readline(io))
+        nint=_msh_int(strip(lines[end]),"$name integer-tag count")
+        nint>=3 || return nothing
+        ncomp=0; nentries=0
+        for i in 1:nint
+            push!(lines,readline(io))
+            value=_msh_int(strip(lines[end]),"$name integer tag")
+            i==2 && (ncomp=value)
+            i==3 && (nentries=value)
+        end
+        (ncomp>=1 && nentries>=0) || return nothing
+        return (ncomp,nentries)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
+end
+
+# Rebuild a verbatim payload for a view-data section whose binary framing did
+# not hold: the consumed ASCII header lines, the bytes captured so far, and
+# the remainder scanned up to the terminator.
+function _verbatim_binary_rest(io,name::AbstractString,lines::Vector{String},
+                               buffer::Vector{UInt8})
+    rest=_capture_binary_section(io,name)
+    out=IOBuffer()
+    for line in lines
+        print(out,line,'\n')
+    end
+    write(out,buffer); write(out,rest)
+    return take!(out)
+end
+
+function _binary_remaining(io)
+    return try
+        Base.checked_sub(filesize(io),position(io))
+    catch err
+        err isa InterruptException && rethrow()
+        -1
+    end
+end
+
+# Capture the binary row payload of a view-data section into `buffer`. Row
+# payloads use 32-bit integer tags/counts and 64-bit values regardless of the
+# file's `size_t` width. Returns false when the framing is implausible, leaving
+# every consumed byte in `buffer` so the caller can finish verbatim.
+function _capture_binary_data_rows!(io,buffer::Vector{UInt8},
+                                    name::AbstractString,swap::Bool,
+                                    ncomp::Int64,nentries::Int64)
+    if name=="ElementNodeData"
+        for _ in 1:nentries
+            remaining=_binary_remaining(io)
+            remaining<8 && return false
+            entry=read(io,8); append!(buffer,entry)
+            k=reinterpret(Int32,
+                swap ? bswap(reinterpret(UInt32,entry[5:8])[1]) :
+                       reinterpret(UInt32,entry[5:8])[1])
+            k<0 && return false
+            rowbytes=try
+                Base.checked_mul(Int64(k),Base.checked_mul(ncomp,Int64(8)))
+            catch err
+                err isa InterruptException && rethrow()
+                return false
+            end
+            _binary_remaining(io)<rowbytes && return false
+            append!(buffer,read(io,rowbytes))
+        end
+        return true
+    end
+    rowbytes=try
+        Base.checked_mul(Int64(nentries),
+            Base.checked_add(Int64(4),Base.checked_mul(ncomp,Int64(8))))
+    catch err
+        err isa InterruptException && rethrow()
+        return false
+    end
+    _binary_remaining(io)<rowbytes && return false
+    append!(buffer,read(io,rowbytes))
+    return true
+end
+
+# Verify the "\n$End<name>" terminator after a binary row payload, appending
+# the consumed bytes to `buffer` so a failed check still permits verbatim
+# rebuild. On success the terminator bytes are dropped from `buffer` and the
+# stream is positioned after the terminator's newline.
+function _verify_binary_terminator(io,buffer::Vector{UInt8},name::AbstractString)
+    needle=codeunits("\$End"*name); mark=length(buffer)
+    _binary_remaining(io)<1 && return false
+    push!(buffer,read(io,UInt8))
+    buffer[end]!=UInt8('\n') && return false
+    for i in 1:length(needle)
+        _binary_remaining(io)<1 && return false
+        push!(buffer,read(io,UInt8))
+        buffer[end]!=needle[i] && return false
+    end
+    if _binary_remaining(io)>=1
+        push!(buffer,read(io,UInt8))
+        buffer[end]==UInt8('\r') && _binary_remaining(io)>=1 &&
+            push!(buffer,read(io,UInt8))
+        buffer[end]!=UInt8('\n') && return false
+    end
+    resize!(buffer,mark)
+    return true
+end
+
+# Capture a view-data section inside a binary file. Gmsh keeps the header
+# lines ASCII and stores rows as binary records, so a well-framed section is
+# parsed later once node/element tag maps exist; anything else degrades to
+# verbatim preservation.
+function _capture_binary_data_section(io,name::AbstractString,swap::Bool,
+                                      anchor::Int32)
+    lines=String[]
+    header=_binary_data_header(io,name,lines)
+    header===nothing && return MshAncillarySection(
+        name,true,_verbatim_binary_rest(io,name,lines,UInt8[]),anchor)
+    ncomp,nentries=header
+    buffer=UInt8[]
+    framed=_capture_binary_data_rows!(io,buffer,name,swap,ncomp,nentries) &&
+           _verify_binary_terminator(io,buffer,name)
+    framed || return MshAncillarySection(
+        name,true,_verbatim_binary_rest(io,name,lines,buffer),anchor)
+    return _PendingDataSection(name,lines,buffer,swap,true,anchor)
+end
+
 function _section_count(io,context::AbstractString,maximum::Int)
     fields=_msh_fields(io,context)
     length(fields)==1 || throw(ArgumentError(
@@ -2575,9 +3008,10 @@ end
 function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Bool)
     acc=_MixedReadAccum()
     version=0.0
-    binary=false; swap=false
+    binary=false; swap=false; wide=true
     seen_format=false; seen_names=false; seen_entities=false
     seen_nodes=false; seen_elements=false
+    phase=Int32(0)  # canonical-section anchor for preserved sections
     while !eof(io)
         header=strip(readline(io)); isempty(header) && continue
         if header=="\$MeshFormat"
@@ -2595,9 +3029,15 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             file_type in (0,1) || throw(ArgumentError(
                 "read_mixed_msh: MeshFormat file type must be 0 or 1"))
             data_size=_msh_int(fields[3],"MeshFormat data size")
-            data_size==8 || throw(ArgumentError(
-                "read_mixed_msh: only an 8-byte MeshFormat data size is supported"))
             binary=file_type==1
+            if binary
+                data_size in (4,8) || throw(ArgumentError(
+                    "read_mixed_msh: binary MeshFormat data size must be 4 or 8"))
+            else
+                data_size==8 || throw(ArgumentError(
+                    "read_mixed_msh: only an 8-byte MeshFormat data size is supported"))
+            end
+            wide=data_size==8
             if binary
                 raw_marker=_binary_u32(io,false,"MeshFormat endianness marker")
                 if raw_marker==UInt32(1)
@@ -2611,11 +3051,13 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                 _consume_binary_newline(io,"MeshFormat endianness marker")
             end
             _expect_msh_end(io,"\$EndMeshFormat")
+            phase=Int32(0)
         elseif header=="\$PhysicalNames"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$PhysicalNames appeared before \$MeshFormat"))
             seen_names=true
             _read_mixed_physical_names!(acc,io,limits,tessella_extensions)
+            phase=Int32(1)
         elseif header=="\$Entities"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Entities appeared before \$MeshFormat"))
@@ -2624,8 +3066,9 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             (seen_nodes||seen_elements) && throw(ArgumentError(
                 "read_mixed_msh: \$Entities must precede nodes and elements"))
             seen_entities=true
-            binary ? _read_mixed_entities_v4_binary!(acc,io,limits,swap) :
+            binary ? _read_mixed_entities_v4_binary!(acc,io,limits,swap,wide) :
                      _read_mixed_entities_v4!(acc,io,limits)
+            phase=Int32(2)
         elseif header=="\$Nodes"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Nodes appeared before \$MeshFormat"))
@@ -2636,9 +3079,10 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                 binary ? _read_mixed_nodes_v2_binary!(acc,io,limits,swap) :
                          _read_mixed_nodes_v2!(acc,io,limits)
             else
-                binary ? _read_mixed_nodes_v4_binary!(acc,io,limits,swap) :
+                binary ? _read_mixed_nodes_v4_binary!(acc,io,limits,swap,wide) :
                          _read_mixed_nodes_v4!(acc,io,limits)
             end
+            phase=Int32(3)
         elseif header=="\$Elements"
             seen_nodes || throw(ArgumentError(
                 "read_mixed_msh: \$Elements appeared before \$Nodes"))
@@ -2647,9 +3091,10 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                 binary ? _read_mixed_elements_v2_binary!(acc,io,limits,swap) :
                          _read_mixed_elements_v2!(acc,io,limits)
             else
-                binary ? _read_mixed_elements_v4_binary!(acc,io,limits,swap) :
+                binary ? _read_mixed_elements_v4_binary!(acc,io,limits,swap,wide) :
                          _read_mixed_elements_v4!(acc,io,limits)
             end
+            phase=Int32(4)
         elseif header=="\$Periodic"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Periodic appeared before \$MeshFormat"))
@@ -2658,17 +3103,35 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                     "read_mixed_msh: MSH 2.2 \$Periodic must follow \$Elements"))
                 _read_mixed_periodic_v2!(acc,io,limits)
             else
-                binary ? _read_mixed_periodic_v4_binary!(acc,io,limits,swap) :
+                binary ? _read_mixed_periodic_v4_binary!(acc,io,limits,swap,wide) :
                          _read_mixed_periodic_v4!(acc,io,limits)
             end
+            phase=Int32(5)
         elseif startswith(header,"\$End")
             throw(ArgumentError("read_mixed_msh: unexpected section terminator $header"))
         elseif startswith(header,"\$")
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: section $header appeared before \$MeshFormat"))
-            binary && throw(ArgumentError(
-                "read_mixed_msh: unsupported section $header in binary MSH"))
-            _skip_msh_section(io,"\$End"*header[2:end])
+            name=header[2:end]
+            _assert_ancillary_name(name,"read_mixed_msh")
+            if name in ("NodeData","ElementData","ElementNodeData")
+                if binary
+                    # View-data sections keep an ASCII header inside binary
+                    # files but store their rows in binary.
+                    push!(acc.preserved,
+                          _capture_binary_data_section(io,name,swap,phase))
+                else
+                    push!(acc.preserved,_PendingDataSection(
+                        name,_capture_ascii_section(io,name),nothing,
+                        false,false,phase))
+                end
+            elseif binary
+                push!(acc.preserved,MshAncillarySection(
+                    name,true,_capture_binary_section(io,name),phase))
+            else
+                push!(acc.preserved,MshAncillarySection(
+                    name,false,_capture_ascii_section_bytes(io,name),phase))
+            end
         else
             throw(ArgumentError("read_mixed_msh: unexpected content outside a section"))
         end
@@ -2880,9 +3343,9 @@ function _read_mixed_entities_v4!(acc,io,limits)
     _expect_msh_token_end!(reader,"\$EndEntities")
 end
 
-function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool)
+function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     counts=ntuple(4) do dim
-        raw=_binary_u64(io,swap,"v4 binary Entities header")
+        raw=_binary_size_t(io,swap,wide,"v4 binary Entities header")
         _binary_count(raw,limits.max_entities,"dimension-$(dim-1) entity")
     end
     total=0
@@ -2921,7 +3384,7 @@ function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool)
                     "read_mixed_msh: entity ($dim,$tag) has reversed bounds"))
             end
             nphysical=_binary_count(
-                _binary_u64(io,swap,"entity physical-tag count"),
+                _binary_size_t(io,swap,wide,"entity physical-tag count"),
                 typemax(Int),"entity physical-tag")
             physical_tags=_binary_i32_vector(
                 io,nphysical,swap,"entity physical tags")
@@ -2933,7 +3396,7 @@ function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool)
             embedded_curves=Int32[]
             if dim>0
                 nboundary=_binary_count(
-                    _binary_u64(io,swap,"entity boundary count"),
+                    _binary_size_t(io,swap,wide,"entity boundary count"),
                     typemax(Int),"entity boundary")
                 boundaries=_binary_i32_vector(
                     io,nboundary,swap,"entity boundary tags")
@@ -3104,16 +3567,16 @@ function _read_mixed_nodes_v4!(acc,io,limits)
     acc.node_blocks=cumulative_blocks
 end
 
-function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool)
+function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     nblocks=_binary_count(
-        _binary_u64(io,swap,"v4 binary Nodes header"),
+        _binary_size_t(io,swap,wide,"v4 binary Nodes header"),
         limits.max_blocks,"v4 node-block")
     remaining_nodes=limits.max_nodes-length(acc.x)
     count=_binary_count(
-        _binary_u64(io,swap,"v4 binary Nodes header"),
+        _binary_size_t(io,swap,wide,"v4 binary Nodes header"),
         remaining_nodes,"v4 node")
-    declared_min=_binary_u64(io,swap,"v4 binary node tag range")
-    declared_max=_binary_u64(io,swap,"v4 binary node tag range")
+    declared_min=_binary_size_t(io,swap,wide,"v4 binary node tag range")
+    declared_max=_binary_size_t(io,swap,wide,"v4 binary node tag range")
     cumulative_blocks=try Base.checked_add(acc.node_blocks,nblocks) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError(
@@ -3144,7 +3607,7 @@ function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool)
         entity=Int(_binary_i32(io,swap,"v4 binary node-block entity"))
         parametric=Int(_binary_i32(io,swap,"v4 binary node-block parametric flag"))
         nlocal=_binary_count(
-            _binary_u64(io,swap,"v4 binary node-block count"),
+            _binary_size_t(io,swap,wide,"v4 binary node-block count"),
             count-nread,"v4 node-block")
         0<=dim<=3 || throw(ArgumentError(
             "read_mixed_msh: node-block dimension $dim is outside 0:3"))
@@ -3169,7 +3632,7 @@ function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool)
                 "read_mixed_msh: v4 node-block byte count overflows Int"))
         end
         _binary_available(io,block_bytes,"v4 node block")
-        tags=_binary_u64_vector(io,nlocal,swap,"v4 node tags")
+        tags=_binary_size_t_vector(io,nlocal,swap,wide,"v4 node tags")
         @inbounds for tag in tags
             tag>0 || throw(ArgumentError(
                 "read_mixed_msh: node tags must be positive"))
@@ -3604,16 +4067,16 @@ function _read_mixed_elements_v4!(acc,io,limits)
     acc.element_blocks=cumulative_blocks
 end
 
-function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool)
+function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     nblocks=_binary_count(
-        _binary_u64(io,swap,"v4 binary Elements header"),
+        _binary_size_t(io,swap,wide,"v4 binary Elements header"),
         limits.max_blocks,"v4 element-block")
     remaining_elements=limits.max_elements-length(acc.element_tags)
     count=_binary_count(
-        _binary_u64(io,swap,"v4 binary Elements header"),
+        _binary_size_t(io,swap,wide,"v4 binary Elements header"),
         remaining_elements,"v4 element")
-    declared_min=_binary_u64(io,swap,"v4 binary element tag range")
-    declared_max=_binary_u64(io,swap,"v4 binary element tag range")
+    declared_min=_binary_size_t(io,swap,wide,"v4 binary element tag range")
+    declared_max=_binary_size_t(io,swap,wide,"v4 binary element tag range")
     cumulative_blocks=try Base.checked_add(acc.element_blocks,nblocks) catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError(
@@ -3635,7 +4098,7 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool)
         entity=Int(_binary_i32(io,swap,"v4 binary element-block entity"))
         etype=Int(_binary_i32(io,swap,"v4 binary element-block type"))
         nlocal=_binary_count(
-            _binary_u64(io,swap,"v4 binary element-block count"),
+            _binary_size_t(io,swap,wide,"v4 binary element-block count"),
             count-nread,"v4 element-block")
         0<=dim<=3 || throw(ArgumentError(
             "read_mixed_msh: element-block dimension $dim is outside 0:3"))
@@ -3662,7 +4125,7 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool)
         end
         _reserve_mixed_connectivity!(acc,limits,connectivity_count,
                                      "v4 binary element block")
-        data=_binary_u64_vector(io,words,swap,"v4 element block")
+        data=_binary_size_t_vector(io,words,swap,wide,"v4 element block")
         physical=acc.entity_physical[(dim,entity)]
         bucket=get!(acc.buckets,etype) do
             _MixedReadBucket(etype)
@@ -3850,17 +4313,17 @@ function _read_mixed_periodic_v4!(acc,io,limits)
     return nothing
 end
 
-function _read_mixed_periodic_v4_binary!(acc,io,limits,swap::Bool)
+function _read_mixed_periodic_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     remaining=limits.max_periodic_links-length(acc.periodic_links)
     count=_binary_count(
-        _binary_u64(io,swap,"v4 binary Periodic header"),remaining,
+        _binary_size_t(io,swap,wide,"v4 binary Periodic header"),remaining,
         "periodic link")
     for _ in 1:count
         dim=Int(_binary_i32(io,swap,"periodic entity dimension"))
         slave=Int(_binary_i32(io,swap,"periodic slave entity tag"))
         master=Int(_binary_i32(io,swap,"periodic master entity tag"))
         naffine=_binary_count(
-            _binary_u64(io,swap,"periodic affine count"),16,
+            _binary_size_t(io,swap,wide,"periodic affine count"),16,
             "periodic affine coefficient")
         naffine in (0,16) || throw(ArgumentError(
             "read_mixed_msh: periodic affine count must be 0 or 16"))
@@ -3868,14 +4331,14 @@ function _read_mixed_periodic_v4_binary!(acc,io,limits,swap::Bool)
             io,16,swap,"periodic affine transform"))
         remaining_pairs=limits.max_periodic_pairs-acc.periodic_pairs
         npairs=_binary_count(
-            _binary_u64(io,swap,"periodic node-pair count"),remaining_pairs,
+            _binary_size_t(io,swap,wide,"periodic node-pair count"),remaining_pairs,
             "periodic node pair")
         words=try Base.checked_mul(2,npairs) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError(
                 "read_mixed_msh: periodic node-pair payload size overflows Int"))
         end
-        tags=_binary_u64_vector(io,words,swap,"periodic node pairs")
+        tags=_binary_size_t_vector(io,words,swap,wide,"periodic node pairs")
         slaves=Vector{UInt64}(undef,npairs);masters=similar(slaves)
         for i in 1:npairs
             slaves[i]=tags[2i-1];masters[i]=tags[2i]
@@ -3977,9 +4440,201 @@ function _finish_mixed_read(acc,is_v4::Bool)
     elementary=!is_v4 &&
         (!isempty(acc.periodic_links) || declared_elementary) ?
         block_entities : nothing
+    data_sections,ancillary=_resolve_pending_data_sections(
+        acc,tag_to_ref,ordered)
     return MixedMesh(
         _OWNED_MIXED_MESH,coords,blocks,acc.physical_names,data,
-        elementary,acc.periodic_links)
+        elementary,acc.periodic_links,ancillary,data_sections)
+end
+
+# View-data sections carry node/element tags in the source file's external tag
+# space. Resolve them to internal indices so write_mixed_msh can re-emit them
+# in whichever tag space the output format uses; anything that fails to parse
+# or resolve is preserved verbatim instead.
+function _resolve_pending_data_sections(acc,tag_to_ref,ordered)
+    sections=MshDataSection[]
+    fallback=MshAncillarySection[]
+    isempty(acc.preserved) && return sections,fallback
+    starts=Vector{Int}(undef,length(ordered)+1); starts[1]=1
+    for (bi,(_,bucket)) in pairs(ordered)
+        starts[bi+1]=starts[bi]+length(bucket.external_tags)
+    end
+    for entry in acc.preserved
+        entry isa _PendingDataSection ||
+            (push!(fallback,entry); continue)
+        section=_parse_data_section(entry,acc.node_map,tag_to_ref,starts)
+        if section===nothing
+            out=IOBuffer()
+            for line in entry.lines
+                print(out,line,'\n')
+            end
+            entry.rows===nothing || write(out,entry.rows)
+            push!(fallback,MshAncillarySection(
+                entry.name,entry.binary,take!(out),entry.anchor))
+        else
+            push!(sections,section)
+        end
+    end
+    return sections,fallback
+end
+
+function _parse_data_section(pending::_PendingDataSection,node_map,tag_to_ref,
+                             starts)
+    function fail()
+        return nothing
+    end
+    name=pending.name; lines=pending.lines
+    try
+        nlines=length(lines)
+        pos=1
+        pos<=nlines || return fail()
+        nstr=_msh_int(strip(lines[pos]),"$name string-tag count")
+        nstr>=0 && pos+nstr<=nlines || return fail()
+        pos+=1
+        strings=lines[pos:pos+nstr-1]; pos+=nstr
+        pos<=nlines || return fail()
+        nreal=_msh_int(strip(lines[pos]),"$name real-tag count")
+        nreal>=0 && pos+nreal<=nlines || return fail()
+        pos+=1
+        reals=Float64[]
+        for _ in 1:nreal
+            push!(reals,_msh_float(strip(lines[pos]),"$name real tag"))
+            pos+=1
+        end
+        pos<=nlines || return fail()
+        nint=_msh_int(strip(lines[pos]),"$name integer-tag count")
+        nint>=3 && pos+nint<=nlines || return fail()
+        pos+=1
+        header=Int64[]
+        for _ in 1:nint
+            push!(header,Int64(_msh_int(
+                strip(lines[pos]),"$name integer tag")))
+            pos+=1
+        end
+        # Gmsh's integer-tag layout is [time step, components, entries,
+        # partition...]; components and entries are at fixed positions.
+        ncomp=header[2]
+        ncomp>=1 || return fail()
+        elements=Int32[]; nodes=Int32[]; row_nodes=Int32[]; values=Float64[]
+        implicit_nodes=false
+        if pending.rows===nothing
+            rows=lines[pos:end]
+            nrows=length(rows)
+            header[3]==nrows || return fail()
+            dialect_seen=false
+            for row in rows
+                tokens=split(strip(row))
+                isempty(tokens) && return fail()
+                if name=="NodeData"
+                    tag=UInt64(_msh_int(tokens[1],"NodeData node tag"))
+                    internal=get(node_map,tag,nothing)
+                    internal===nothing && return fail()
+                    push!(nodes,internal)
+                    length(tokens)-1==ncomp || return fail()
+                    first_value=2
+                elseif name=="ElementData"
+                    tag=UInt64(_msh_int(tokens[1],"ElementData element tag"))
+                    ref=get(tag_to_ref,tag,nothing)
+                    ref===nothing && return fail()
+                    push!(elements,Int32(starts[ref.block]+ref.cell-1))
+                    length(tokens)-1==ncomp || return fail()
+                    first_value=2
+                else
+                    length(tokens)>=2 || return fail()
+                    tag=UInt64(_msh_int(tokens[1],"ElementNodeData element tag"))
+                    ref=get(tag_to_ref,tag,nothing)
+                    ref===nothing && return fail()
+                    push!(elements,Int32(starts[ref.block]+ref.cell-1))
+                    k=_msh_int(tokens[2],"ElementNodeData nodes per element")
+                    k>=1 || return fail()
+                    rest=length(tokens)-2
+                    if rest==k*ncomp
+                        # Gmsh's model-data dialect: the node tags are the
+                        # element's own connectivity, so rows carry values only.
+                        (!dialect_seen || implicit_nodes) || return fail()
+                        dialect_seen=true; implicit_nodes=true
+                        first_value=3
+                    elseif rest==k*(ncomp+1)
+                        (!dialect_seen || !implicit_nodes) || return fail()
+                        dialect_seen=true
+                        for i in 1:k
+                            ntag=UInt64(_msh_int(
+                                tokens[2+i],"ElementNodeData node tag"))
+                            internal=get(node_map,ntag,nothing)
+                            internal===nothing && return fail()
+                            push!(nodes,internal)
+                        end
+                        first_value=k+3
+                    else
+                        return fail()
+                    end
+                    push!(row_nodes,Int32(k))
+                end
+                for i in first_value:length(tokens)
+                    push!(values,_msh_float(tokens[i],"$name value"))
+                end
+            end
+        else
+            _parse_binary_data_rows!(pending.rows,pending.swap,name,ncomp,
+                header[3],elements,nodes,row_nodes,values,
+                node_map,tag_to_ref,starts) || return fail()
+            implicit_nodes=name=="ElementNodeData"
+        end
+        return MshDataSection(name,strings,reals,header,
+                              elements,nodes,row_nodes,implicit_nodes,
+                              values,pending.anchor)
+    catch err
+        err isa InterruptException && rethrow()
+        return fail()
+    end
+end
+
+# Decode the binary row payload of a view-data section: int32 tags/counts and
+# float64 values. Gmsh writes ElementNodeData rows in binary files in the
+# connectivity-implied dialect (element tag, node count, values).
+function _parse_binary_data_rows!(rows::Vector{UInt8},swap::Bool,
+                                  name::AbstractString,ncomp::Int64,
+                                  nentries::Int64,elements,nodes,row_nodes,
+                                  values,node_map,tag_to_ref,starts)
+    io=IOBuffer(rows)
+    sizehint!(values,name=="ElementNodeData" ? 0 : nentries*ncomp)
+    for _ in 1:nentries
+        bytesavailable(io)<4 && return false
+        bits=read(io,UInt32)
+        swap && (bits=bswap(bits))
+        raw=reinterpret(Int32,bits)
+        raw<0 && return false
+        tag=UInt64(raw)
+        if name=="NodeData"
+            internal=get(node_map,tag,nothing)
+            internal===nothing && return false
+            push!(nodes,internal)
+            nvalues=ncomp
+        else
+            ref=get(tag_to_ref,tag,nothing)
+            ref===nothing && return false
+            push!(elements,Int32(starts[ref.block]+ref.cell-1))
+            if name=="ElementNodeData"
+                bytesavailable(io)<4 && return false
+                kbits=read(io,UInt32)
+                swap && (kbits=bswap(kbits))
+                raw=reinterpret(Int32,kbits)
+                1<=raw || return false
+                push!(row_nodes,Int32(raw))
+                nvalues=Int64(raw)*ncomp
+            else
+                nvalues=ncomp
+            end
+        end
+        bytesavailable(io)<8nvalues && return false
+        for _ in 1:nvalues
+            bits=read(io,UInt64); swap && (bits=bswap(bits))
+            value=reinterpret(Float64,bits)
+            isfinite(value) || return false
+            push!(values,value)
+        end
+    end
+    return eof(io)
 end
 
 function _escape_mixed_name(name::AbstractString)
@@ -3992,6 +4647,254 @@ function _escape_mixed_name(name::AbstractString)
         c=='\t' ? write(out,"\\t") : write(out,c)
     end
     return String(take!(out))
+end
+
+# Preserved-section emission state. `sections`/`data` are sorted by anchor in
+# input order; `node_tags[i]` is the tag the writer will emit for internal node
+# i and `element_tags[k]` the tag emitted for the cell whose flat index is k
+# (cells numbered 1:N over `m.blocks` in order).
+mutable struct _PreservedEmit
+    sections::Vector{MshAncillarySection}
+    data::Vector{MshDataSection}
+    node_tags::Vector{UInt64}
+    element_tags::Vector{UInt64}
+    index::Int
+    didx::Int
+    binary::Bool
+    gmsh_compatible::Bool
+    mesh::MixedMesh
+    starts::Vector{Int}
+end
+
+function _block_cell_starts(m::MixedMesh)
+    starts=Vector{Int}(undef,length(m.blocks)+1); starts[1]=1
+    for (bi,block) in pairs(m.blocks)
+        starts[bi+1]=starts[bi]+_block_ncells(block)
+    end
+    return starts
+end
+
+function _preserved_emit(m::MixedMesh,version::Float64,binary::Bool,
+                         gmsh_compatible::Bool)
+    isempty(m.ancillary_sections) && isempty(m.data_sections) &&
+        return nothing
+    nn=size(m.coords,2); starts=_block_cell_starts(m); nel=starts[end]-1
+    data=m.entity_data
+    node_tags=Vector{UInt64}(undef,nn)
+    if version==4.1 && data!==nothing
+        copyto!(node_tags,data.external_node_tags)
+    else
+        @inbounds for i in 1:nn; node_tags[i]=UInt64(i); end
+    end
+    element_tags=Vector{UInt64}(undef,nel)
+    if version==4.1 && data!==nothing
+        k=0
+        @inbounds for bi in eachindex(m.blocks)
+            tags=data.external_element_tags[bi]
+            for j in eachindex(tags)
+                k+=1; element_tags[k]=tags[j]
+            end
+        end
+    elseif version==2.2
+        order,_=_mixed_v2_order(m)
+        @inbounds for (k,ref) in pairs(order)
+            element_tags[starts[ref.block]+ref.cell-1]=UInt64(k)
+        end
+    else
+        _,groups,_=m.elementary_entities===nothing ?
+            _mixed_v4_layout(m) : _mixed_v4_elementary_layout(m)
+        k=0
+        @inbounds for group in groups, ref in group.cells
+            k+=1; element_tags[starts[ref.block]+ref.cell-1]=UInt64(k)
+        end
+        k==nel || throw(ErrorException(
+            "write_mixed_msh: internal preserved-element tag count mismatch"))
+    end
+    sections=sort!(copy(m.ancillary_sections);by=s->s.anchor,alg=MergeSort)
+    datasections=sort!(copy(m.data_sections);by=s->s.anchor,alg=MergeSort)
+    if !binary
+        for section in sections
+            section.binary || continue
+            _binary_payload_ascii_safe(section) || throw(ArgumentError(
+                "write_mixed_msh: binary-captured section \$$(section.name) " *
+                "holds non-text payload bytes and cannot be emitted into an " *
+                "ASCII output file"))
+        end
+    end
+    pw=_PreservedEmit(sections,datasections,node_tags,element_tags,
+                      1,1,binary,gmsh_compatible,m,starts)
+    if binary || gmsh_compatible
+        for section in datasections
+            (section.name=="ElementNodeData" && !section.implicit_nodes) ||
+                continue
+            _data_nodes_match_connectivity(section,pw) || throw(ArgumentError(
+                "write_mixed_msh: \$ElementNodeData section binds values to " *
+                "non-connectivity nodes, which Gmsh's record cannot express"))
+        end
+    end
+    return pw
+end
+
+# A binary-captured payload may be re-emitted into ASCII output only when it
+# is text: valid UTF-8 without control characters other than tab/newline/
+# carriage return, and without a line that would read as the section's own
+# terminator. Gmsh itself keeps sections such as \$InterpolationScheme textual
+# inside binary files.
+function _binary_payload_ascii_safe(section::MshAncillarySection)
+    payload=section.payload
+    all(b->b==0x09 || b==0x0A || b==0x0D || b>=0x20,payload) || return false
+    # String(::Vector{UInt8}) takes ownership of the vector, so validate a
+    # copy — the payload itself must stay intact for the emit pass.
+    text=String(copy(payload))
+    isvalid(text) || return false
+    endtoken="\$End"*section.name
+    for line in eachsplit(text,'\n')
+        strip(line)==endtoken && return false
+    end
+    return true
+end
+
+# Emit preserved sections anchored at or before `anchor`, in input order.
+function _emit_preserved!(io,pw::_PreservedEmit,anchor::Int)
+    while pw.index<=length(pw.sections) &&
+          pw.sections[pw.index].anchor<=anchor
+        section=pw.sections[pw.index]; pw.index+=1
+        println(io,"\$"*section.name)
+        write(io,section.payload)
+        # Binary captures exclude the newline that separates the payload from
+        # "$End<name>"; ASCII captures carry their line endings, so only an
+        # unterminated ASCII payload needs the separator emitted.
+        (section.binary ||
+         (!isempty(section.payload) &&
+          section.payload[end]!=UInt8('\n'))) && write(io,UInt8('\n'))
+        println(io,"\$End"*section.name)
+    end
+    while pw.didx<=length(pw.data) && pw.data[pw.didx].anchor<=anchor
+        _write_mixed_data_section(io,pw.data[pw.didx],pw)
+        pw.didx+=1
+    end
+    return nothing
+end
+_emit_preserved!(io,::Nothing,anchor::Int)=nothing
+
+# Gmsh's ElementNodeData record carries no node-tag column — the values bind
+# to the element's own connectivity — so an explicit-tag section can only be
+# emitted in that dialect when its stored nodes coincide with the
+# connectivity. `gmsh_compatible=false` ASCII output keeps the explicit
+# dialect for Tessella-to-Tessella round trips.
+function _data_nodes_match_connectivity(section::MshDataSection,
+                                        pw::_PreservedEmit)
+    npos=1
+    @inbounds for row in eachindex(section.elements)
+        flat=Int(section.elements[row])
+        bi=searchsortedlast(pw.starts,flat)
+        (1<=bi<=length(pw.mesh.blocks) &&
+         pw.starts[bi]<=flat<pw.starts[bi+1]) || return false
+        block=pw.mesh.blocks[bi]; cell=flat-pw.starts[bi]+1
+        k=Int(section.row_nodes[row])
+        _cell_arity(block,cell)==k || return false
+        for slot in 1:k
+            section.nodes[npos]==_cell_node(block,cell,slot) || return false
+            npos+=1
+        end
+    end
+    return true
+end
+
+function _binary_data_tag(value::UInt64,context::AbstractString)
+    value<=UInt64(typemax(Int32)) || throw(ArgumentError(
+        "write_mixed_msh: $context tag $value exceeds the 32-bit binary " *
+        "data-section tag width"))
+    return Int32(value)
+end
+
+function _write_mixed_data_section(io,section::MshDataSection,pw::_PreservedEmit)
+    println(io,"\$"*section.name)
+    println(io,length(section.strings))
+    for line in section.strings
+        println(io,line)
+    end
+    println(io,length(section.reals))
+    for value in section.reals
+        @printf(io,"%.17g\n",value)
+    end
+    println(io,length(section.header))
+    for value in section.header
+        println(io,value)
+    end
+    ncomp=section.header[2]
+    # _preserved_emit already verified that an explicit-tag section coincides
+    # with connectivity whenever the output needs Gmsh's implicit dialect.
+    implicit=section.implicit_nodes || pw.binary || pw.gmsh_compatible
+    if pw.binary
+        # Binary data sections keep the ASCII header but store rows as
+        # int32 tags/counts followed by float64 values.
+        if section.name=="NodeData"
+            position=1
+            @inbounds for node in section.nodes
+                write(io,_binary_data_tag(pw.node_tags[node],"node"))
+                for _ in 1:ncomp
+                    write(io,section.values[position]); position+=1
+                end
+            end
+        elseif section.name=="ElementData"
+            position=1
+            @inbounds for element in section.elements
+                write(io,_binary_data_tag(
+                    pw.element_tags[element],"element"))
+                for _ in 1:ncomp
+                    write(io,section.values[position]); position+=1
+                end
+            end
+        else
+            position=1
+            @inbounds for row in eachindex(section.elements)
+                write(io,_binary_data_tag(
+                    pw.element_tags[section.elements[row]],"element"))
+                write(io,section.row_nodes[row])
+                for _ in 1:Int(section.row_nodes[row])*ncomp
+                    write(io,section.values[position]); position+=1
+                end
+            end
+        end
+        write(io,UInt8('\n'))
+    elseif section.name=="NodeData"
+        position=1
+        @inbounds for node in section.nodes
+            print(io,pw.node_tags[node])
+            for _ in 1:ncomp
+                @printf(io," %.17g",section.values[position]); position+=1
+            end
+            println(io)
+        end
+    elseif section.name=="ElementData"
+        position=1
+        @inbounds for element in section.elements
+            print(io,pw.element_tags[element])
+            for _ in 1:ncomp
+                @printf(io," %.17g",section.values[position]); position+=1
+            end
+            println(io)
+        end
+    else
+        position=1; nposition=1
+        @inbounds for row in eachindex(section.elements)
+            k=section.row_nodes[row]
+            print(io,pw.element_tags[section.elements[row]]," ",k)
+            if !implicit
+                for _ in 1:k
+                    print(io," ",pw.node_tags[section.nodes[nposition]])
+                    nposition+=1
+                end
+            end
+            for _ in 1:k*ncomp
+                @printf(io," %.17g",section.values[position]); position+=1
+            end
+            println(io)
+        end
+    end
+    println(io,"\$End"*section.name)
+    return nothing
 end
 
 function _write_mixed_physical_names(io,names,gmsh_compatible::Bool)
@@ -4025,6 +4928,14 @@ domain-link fields. MSH4 supports only fixed-width, unlinked special records.
 MSH4 periodic links require explicit entity metadata. MSH2 periodic links
 require aligned elementary-entity tags or compatible MSH4 cell classification;
 their section is ASCII in both file modes.
+Preserved [`MshAncillarySection`](@ref) and [`MshDataSection`](@ref) records
+are re-emitted at their captured anchor positions; view-data tag columns are
+re-externalized into the output's node/element tag space. Binary output emits
+view-data rows in Gmsh's binary record layout (int32 tags/counts, float64
+values); binary-captured sections with non-text payload bytes are an explicit
+blocker for ASCII output, and an `\$ElementNodeData` section whose explicit
+node column disagrees with the element connectivity is an explicit blocker for
+Gmsh-compatible and binary output.
 Unsupported combinations are rejected before the destination is replaced.
 MSH v2.2 necessarily writes the legacy first-physical-tag projection. By default,
 element tags that pinned Gmsh 4.15.2 cannot safely consume through its normal
@@ -4108,6 +5019,7 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
     end
     _assert_mixed_msh_format(m,value,binary)
     names=_copy_physical_names(m.physical_names,"write_mixed_msh")
+    preserved=_preserved_emit(m,value,binary,gmsh_compatible)
     target=abspath(path); parent=dirname(target)
     isdir(parent) || throw(ArgumentError(
         "write_mixed_msh: parent directory does not exist: $parent"))
@@ -4115,16 +5027,17 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
         "write_mixed_msh: destination is a directory: $target"))
     mktemp(parent) do temporary,io
         if value==2.2
-            binary ? _write_mixed_v2_binary(io,m,names,gmsh_compatible) :
-                     _write_mixed_v2(io,m,names,gmsh_compatible)
+            binary ? _write_mixed_v2_binary(io,m,names,gmsh_compatible,preserved) :
+                     _write_mixed_v2(io,m,names,gmsh_compatible,preserved)
         else
-            binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible) :
-                     _write_mixed_v4(io,m,names,gmsh_compatible)
+            binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible,preserved) :
+                     _write_mixed_v4(io,m,names,gmsh_compatible,preserved)
         end
         if !isempty(m.periodic_links)
             value==4.1 ? _write_mixed_periodic_v4(io,m,binary) :
                          _write_mixed_periodic_v2(io,m)
         end
+        _emit_preserved!(io,preserved,5)
         flush(io); close(io)
         mv(temporary,target;force=true)
     end
@@ -4335,15 +5248,18 @@ end
     return Int32(ids[(_block_dim(block),block.tags[cell])])
 end
 
-function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool)
+function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     println(io,"\$MeshFormat"); println(io,"2.2 0 8"); println(io,"\$EndMeshFormat")
+    _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
+    _emit_preserved!(io,preserved,1)
     nn=size(m.coords,2)
     println(io,"\$Nodes"); println(io,nn)
     @inbounds for i in 1:nn
         @printf(io,"%d %.17g %.17g %.17g\n",i,m.coords[1,i],m.coords[2,i],m.coords[3,i])
     end
     println(io,"\$EndNodes")
+    _emit_preserved!(io,preserved,3)
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements"); println(io,nel)
     ids=_v2_entity_ids(m); order,output_tags=_mixed_v2_order(m)
@@ -4373,6 +5289,7 @@ function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool)
         println(io)
     end
     println(io,"\$EndElements")
+    _emit_preserved!(io,preserved,4)
     return nothing
 end
 
@@ -4384,9 +5301,11 @@ function _write_mixed_binary_format(io,version::AbstractString)
     return nothing
 end
 
-function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool)
+function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     _write_mixed_binary_format(io,"2.2")
+    _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
+    _emit_preserved!(io,preserved,1)
     nn=size(m.coords,2)
     println(io,"\$Nodes"); println(io,nn)
     @inbounds for i in 1:nn
@@ -4394,6 +5313,7 @@ function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool)
         write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
     end
     write(io,UInt8('\n')); println(io,"\$EndNodes")
+    _emit_preserved!(io,preserved,3)
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements"); println(io,nel)
     ids=_v2_entity_ids(m); order,output_tags=_mixed_v2_order(m)
@@ -4431,6 +5351,7 @@ function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool)
     length(order)==nel || throw(ErrorException(
         "write_mixed_msh: internal v2 binary element count mismatch"))
     write(io,UInt8('\n')); println(io,"\$EndElements")
+    _emit_preserved!(io,preserved,4)
     return nothing
 end
 
@@ -4737,9 +5658,11 @@ function _mixed_metadata_element_runs(m::MixedMesh,data::MixedEntityData)
 end
 
 function _write_mixed_v4_binary_metadata(
-    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool)
+    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool,preserved)
     _write_mixed_binary_format(io,"4.1")
+    _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
+    _emit_preserved!(io,preserved,1)
     entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
     counts=zeros(Int,4)
     for entity in entities
@@ -4755,6 +5678,7 @@ function _write_mixed_v4_binary_metadata(
         _write_mixed_entity_binary(io,entity,max_curve_tag)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
+    _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
     minimum_node=nn==0 ? UInt64(0) : minimum(data.external_node_tags)
@@ -4781,6 +5705,7 @@ function _write_mixed_v4_binary_metadata(
         end
     end
     write(io,UInt8('\n')); println(io,"\$EndNodes")
+    _emit_preserved!(io,preserved,3)
 
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     element_runs=_mixed_metadata_element_runs(m,data)
@@ -4805,15 +5730,18 @@ function _write_mixed_v4_binary_metadata(
         end
     end
     write(io,UInt8('\n')); println(io,"\$EndElements")
+    _emit_preserved!(io,preserved,4)
     return nothing
 end
 
 function _write_mixed_v4_binary(
-    io,m::MixedMesh,names,gmsh_compatible::Bool)
+    io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     m.entity_data===nothing || return _write_mixed_v4_binary_metadata(
-        io,m,names,m.entity_data,gmsh_compatible)
+        io,m,names,m.entity_data,gmsh_compatible,preserved)
     _write_mixed_binary_format(io,"4.1")
+    _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
+    _emit_preserved!(io,preserved,1)
     entities,groups,node_owner=m.elementary_entities===nothing ?
         _mixed_v4_layout(m) : _mixed_v4_elementary_layout(m)
     counts=zeros(Int,4)
@@ -4828,6 +5756,7 @@ function _write_mixed_v4_binary(
         _write_mixed_entity_binary(io,entity)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
+    _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2)
     println(io,"\$Nodes")
@@ -4845,6 +5774,7 @@ function _write_mixed_v4_binary(
         end
     end
     write(io,UInt8('\n')); println(io,"\$EndNodes")
+    _emit_preserved!(io,preserved,3)
 
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements")
@@ -4864,13 +5794,16 @@ function _write_mixed_v4_binary(
     eid==nel || throw(ErrorException(
         "write_mixed_msh: internal v4 binary element count mismatch"))
     write(io,UInt8('\n')); println(io,"\$EndElements")
+    _emit_preserved!(io,preserved,4)
     return nothing
 end
 
 function _write_mixed_v4_metadata(
-    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool)
+    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool,preserved)
     println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
+    _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
+    _emit_preserved!(io,preserved,1)
     entities=sort!(collect(values(data.entities));by=e->(e.dim,e.tag))
     counts=zeros(Int,4)
     for entity in entities
@@ -4884,6 +5817,7 @@ function _write_mixed_v4_metadata(
         _write_mixed_entity(io,entity,max_curve_tag)
     end
     println(io,"\$EndEntities")
+    _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
     minimum_node=nn==0 ? 0 : minimum(data.external_node_tags)
@@ -4910,6 +5844,7 @@ function _write_mixed_v4_metadata(
         end
     end
     println(io,"\$EndNodes")
+    _emit_preserved!(io,preserved,3)
 
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     element_runs=_mixed_metadata_element_runs(m,data)
@@ -4932,14 +5867,17 @@ function _write_mixed_v4_metadata(
         end
     end
     println(io,"\$EndElements")
+    _emit_preserved!(io,preserved,4)
     return nothing
 end
 
-function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool)
+function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     m.entity_data===nothing || return _write_mixed_v4_metadata(
-        io,m,names,m.entity_data,gmsh_compatible)
+        io,m,names,m.entity_data,gmsh_compatible,preserved)
     println(io,"\$MeshFormat"); println(io,"4.1 0 8"); println(io,"\$EndMeshFormat")
+    _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
+    _emit_preserved!(io,preserved,1)
     entities,groups,node_owner=m.elementary_entities===nothing ?
         _mixed_v4_layout(m) : _mixed_v4_elementary_layout(m)
     counts=zeros(Int,4)
@@ -4952,6 +5890,7 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool)
         _write_mixed_entity(io,entity)
     end
     println(io,"\$EndEntities")
+    _emit_preserved!(io,preserved,2)
     nn=size(m.coords,2)
     println(io,"\$Nodes")
     println(io,nn==0 ? 0 : 1," ",nn," ",nn==0 ? 0 : 1," ",nn)
@@ -4965,6 +5904,7 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool)
         end
     end
     println(io,"\$EndNodes")
+    _emit_preserved!(io,preserved,3)
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements")
     println(io,length(groups)," ",nel," ",nel==0 ? 0 : 1," ",nel)
@@ -4980,6 +5920,7 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool)
         end
     end
     println(io,"\$EndElements")
+    _emit_preserved!(io,preserved,4)
     return nothing
 end
 

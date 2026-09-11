@@ -74,6 +74,7 @@ using .Elements: ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimensio
                  msh_order, msh_family, msh_type, msh_properties,
                  ElementBlock, ElementRef,
                  SpecialElementBlock, MixedEntity, MixedEntityData,
+                 MshAncillarySection, MshDataSection,
                  MixedPeriodicLink, MixedMesh,
                  mixed_crc, simplex_to_mixed, mixed_to_simplex, write_mixed_msh,
                  read_mixed_msh, lagrange_nodes, add_block!
