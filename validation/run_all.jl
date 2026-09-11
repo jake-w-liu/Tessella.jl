@@ -383,6 +383,13 @@ msh_sections_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes
 println("  command: ", msh_sections_command)
 run(msh_sections_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── gmsh_parity msh partition metadata ──  partitioned-entity and ghost round trips")
+msh_partition_script = joinpath(
+    HERE, "gmsh_parity", "msh_partition_metadata.jl")
+msh_partition_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $msh_partition_script`
+println("  command: ", msh_partition_command)
+run(msh_partition_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),

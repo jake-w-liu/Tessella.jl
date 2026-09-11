@@ -652,7 +652,9 @@ end
 One MSH v4 geometric entity, including all physical memberships, signed boundary
 tags, and any embedded curves owned by a surface. `embedded_curves` records the
 Gmsh 4.15.2 codimension-one surface embedding extension; it is valid only for
-dimension-two entities.
+dimension-two entities. `partitions` and `parent` carry `\$PartitionedEntities`
+memberships and the parent link — both are empty/`(-1,-1)` for an ordinary
+entity and both are required together for a partitioned entity.
 """
 struct MixedEntity
     dim::Int
@@ -661,9 +663,12 @@ struct MixedEntity
     physical_tags::Vector{Int32}
     boundaries::Vector{Int32}
     embedded_curves::Vector{Int32}
+    partitions::Vector{Int32}
+    parent::Tuple{Int,Int32}
     function MixedEntity(dim::Integer,tag::Integer,bounds;
                          physical_tags=Int32[],boundaries=Int32[],
-                         embedded_curves=Int32[])
+                         embedded_curves=Int32[],partitions=Int32[],
+                         parent=(-1,-1))
         _elements_reject_bool(dim,"MixedEntity: dimension")
         d=try Int(dim) catch err
             err isa InterruptException && rethrow()
@@ -709,7 +714,29 @@ struct MixedEntity
         any(curve->curve in boundary_curves,embedded) && throw(ArgumentError(
             "MixedEntity: a curve cannot be both bounding and embedded"))
         sort!(embedded)
-        return new(d,t,converted,physical,boundary,embedded)
+        parts=_mixed_int32_vector(partitions,"MixedEntity: partition tag";
+                                  positive=true)
+        parent isa Tuple && length(parent)==2 || throw(ArgumentError(
+            "MixedEntity: parent must be a (dimension, tag) tuple"))
+        (parent[1] isa Integer && parent[2] isa Integer) || throw(
+            ArgumentError("MixedEntity: parent must contain integers"))
+        _elements_reject_bool(parent[1],"MixedEntity: parent dimension")
+        _elements_reject_bool(parent[2],"MixedEntity: parent tag")
+        pdim=try Int(parent[1]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedEntity: parent dimension is outside Int bounds"))
+        end
+        -1<=pdim<=3 || throw(ArgumentError(
+            "MixedEntity: parent dimension $pdim is outside -1:3"))
+        ptag=pdim<0 ? -1 :
+             _mixed_positive_int32(parent[2],"MixedEntity: parent entity tag")
+        pdim<0 && parent[2]!=-1 && throw(ArgumentError(
+            "MixedEntity: an absent parent must be (-1,-1)"))
+        isempty(parts)!=(pdim<0) && throw(ArgumentError(
+            "MixedEntity: partition memberships and a parent link must be " *
+            "present together"))
+        return new(d,t,converted,physical,boundary,embedded,parts,
+                   (pdim,Int32(ptag)))
     end
 end
 
@@ -775,7 +802,8 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
         copied_entities[(key_dim,key_tag)]=MixedEntity(
             entity.dim,entity.tag,entity.bbox;
             physical_tags=entity.physical_tags,boundaries=entity.boundaries,
-            embedded_curves=entity.embedded_curves)
+            embedded_curves=entity.embedded_curves,partitions=entity.partitions,
+            parent=entity.parent)
     end
     copied_node_entities=Tuple{Int,Int32}[]
     for key in node_entities
@@ -851,6 +879,148 @@ function MixedEntityData(entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}
         copied_parametric,node_tags,copied_block_entities,copied_element_tags)
 end
 
+"""
+    MixedGhostElement
+
+One `\$GhostElements` record: `element` is the flat internal element index
+(1:N in `blocks` order, matching `MshDataSection.elements`), `partition` is
+the partition the record's element is a ghost of, and `ghost_partitions`
+lists the partitions that own a copy.
+"""
+struct MixedGhostElement
+    element::Int32
+    partition::Int32
+    ghost_partitions::Vector{Int32}
+    function MixedGhostElement(element::Integer,partition::Integer,
+                               ghost_partitions)
+        _elements_reject_bool(element,"MixedGhostElement: element index")
+        _elements_reject_bool(partition,"MixedGhostElement: partition tag")
+        index=try Int32(element) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "MixedGhostElement: element index is outside Int32 bounds"))
+        end
+        index>=1 || throw(ArgumentError(
+            "MixedGhostElement: element index must be positive"))
+        part=_mixed_positive_int32(partition,"MixedGhostElement: partition tag")
+        ghosts=_mixed_int32_vector(
+            ghost_partitions,"MixedGhostElement: ghost partition tag";
+            positive=true)
+        return new(index,part,ghosts)
+    end
+end
+
+@inline _copy_mixed_ghost_element(record::MixedGhostElement)=MixedGhostElement(
+    record.element,record.partition,record.ghost_partitions)
+
+# Suppress the autogenerated positional constructor: all public metadata
+# construction must pass through the copying and validation path below.
+struct _OwnedMixedPartitionData end
+const _OWNED_MIXED_PARTITION_DATA = _OwnedMixedPartitionData()
+
+"""
+    MixedPartitionData(num_partitions; entities, ghost_entities, ghost_elements)
+
+Optional MSH 4.1 partition metadata parsed from `\$PartitionedEntities` and
+`\$GhostElements`. `entities` holds the partitioned entity records keyed by
+`(dimension, tag)` — each carries its `partitions` memberships and `parent`
+link into the global entities. `ghost_entities` holds the `(tag, partition)`
+pairs of ghost entities, which live at the model dimension. `ghost_elements`
+holds the per-element ghost records. Construction detaches every mutable
+array supplied by the caller.
+"""
+struct MixedPartitionData
+    num_partitions::Int32
+    entities::Dict{Tuple{Int,Int},MixedEntity}
+    ghost_entities::Vector{Tuple{Int32,Int32}}
+    ghost_elements::Vector{MixedGhostElement}
+    function MixedPartitionData(::_OwnedMixedPartitionData,
+                                num_partitions::Int32,
+                                entities::Dict{Tuple{Int,Int},MixedEntity},
+                                ghost_entities::Vector{Tuple{Int32,Int32}},
+                                ghost_elements::Vector{MixedGhostElement})
+        return new(num_partitions,entities,ghost_entities,ghost_elements)
+    end
+end
+
+function MixedPartitionData(num_partitions::Integer;
+                            entities::AbstractDict=Dict{Tuple{Int,Int},MixedEntity}(),
+                            ghost_entities=Tuple{Int32,Int32}[],
+                            ghost_elements=MixedGhostElement[])
+    _elements_reject_bool(num_partitions,"MixedPartitionData: partition count")
+    count=try Int32(num_partitions) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "MixedPartitionData: partition count is outside Int32 bounds"))
+    end
+    count>=0 || throw(ArgumentError(
+        "MixedPartitionData: partition count must be non-negative"))
+    copied_entities=Dict{Tuple{Int,Int},MixedEntity}()
+    for (key,entity) in pairs(entities)
+        entity isa MixedEntity || throw(ArgumentError(
+            "MixedPartitionData: entity values must be MixedEntity objects"))
+        key isa Tuple && length(key)==2 || throw(ArgumentError(
+            "MixedPartitionData: entity keys must be (dimension, tag) tuples"))
+        (key[1] isa Integer && key[2] isa Integer) || throw(ArgumentError(
+            "MixedPartitionData: entity keys must contain integers"))
+        _elements_reject_bool(key[1],"MixedPartitionData: entity-key dimension")
+        _elements_reject_bool(key[2],"MixedPartitionData: entity-key tag")
+        key_dim=try Int(key[1]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "MixedPartitionData: entity-key dimension is outside Int bounds"))
+        end
+        key_tag=try Int(key[2]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "MixedPartitionData: entity-key tag is outside Int bounds"))
+        end
+        (key_dim,key_tag)==(entity.dim,Int(entity.tag)) || throw(ArgumentError(
+            "MixedPartitionData: entity key does not match its record"))
+        isempty(entity.partitions) && throw(ArgumentError(
+            "MixedPartitionData: entity $key carries no partition memberships"))
+        entity.parent[1]<0 && throw(ArgumentError(
+            "MixedPartitionData: entity $key carries no parent link"))
+        copied_entities[(key_dim,key_tag)]=MixedEntity(
+            entity.dim,entity.tag,entity.bbox;
+            physical_tags=entity.physical_tags,boundaries=entity.boundaries,
+            embedded_curves=entity.embedded_curves,partitions=entity.partitions,
+            parent=entity.parent)
+    end
+    ghost_entities isa AbstractVector || throw(ArgumentError(
+        "MixedPartitionData: ghost_entities must be a vector"))
+    copied_ghost_entities=Tuple{Int32,Int32}[]
+    for (index,record) in pairs(ghost_entities)
+        record isa Tuple && length(record)==2 || throw(ArgumentError(
+            "MixedPartitionData: ghost entity $index must be a " *
+            "(tag, partition) tuple"))
+        (record[1] isa Integer && record[2] isa Integer) || throw(ArgumentError(
+            "MixedPartitionData: ghost entity $index must contain integers"))
+        _elements_reject_bool(record[1],"MixedPartitionData: ghost entity tag")
+        _elements_reject_bool(record[2],"MixedPartitionData: ghost partition")
+        tag=_mixed_positive_int32(record[1],"MixedPartitionData: ghost entity tag")
+        partition=_mixed_positive_int32(
+            record[2],"MixedPartitionData: ghost partition")
+        push!(copied_ghost_entities,(tag,partition))
+    end
+    ghost_elements isa AbstractVector || throw(ArgumentError(
+        "MixedPartitionData: ghost_elements must be a vector"))
+    copied_ghost_elements=MixedGhostElement[]
+    for (index,record) in pairs(ghost_elements)
+        record isa MixedGhostElement || throw(ArgumentError(
+            "MixedPartitionData: ghost element $index must be a " *
+            "MixedGhostElement"))
+        push!(copied_ghost_elements,_copy_mixed_ghost_element(record))
+    end
+    return MixedPartitionData(
+        _OWNED_MIXED_PARTITION_DATA,count,copied_entities,
+        copied_ghost_entities,copied_ghost_elements)
+end
+
+@inline _copy_mixed_partition_data(data::MixedPartitionData)=MixedPartitionData(
+    data.num_partitions;entities=data.entities,
+    ghost_entities=data.ghost_entities,ghost_elements=data.ghost_elements)
+
 # Internal readers may transfer freshly allocated storage without a second
 # full copy; public construction always takes the detached path.
 struct _OwnedMixedMesh end
@@ -858,8 +1028,8 @@ struct _OwnedMixedMesh end
     MshAncillarySection
 
 A verbatim MSH section `read_mixed_msh` does not structurally model
-(`\$Comments`, `\$InterpolationScheme`, `\$Parametrizations`,
-`\$PartitionedEntities`, `\$GhostElements`, or any unrecognized section).
+(`\$Comments`, `\$InterpolationScheme`, `\$Parametrizations`, or any
+unrecognized section).
 `payload` holds the raw bytes between the `\$Name` and `\$EndName` lines;
 `binary` records whether the payload came from a binary-mode section.
 `anchor` is the index of the canonical section it followed on input
@@ -923,6 +1093,7 @@ struct MixedMesh
     periodic_links::Vector{MixedPeriodicLink}
     ancillary_sections::Vector{MshAncillarySection}
     data_sections::Vector{MshDataSection}
+    partition_data::Union{Nothing,MixedPartitionData}
     function MixedMesh(::_OwnedMixedMesh,C::Matrix{Float64},
                        B::Vector{MixedElementBlock},
                        names::Dict{Tuple{Int,Int},String},
@@ -930,9 +1101,10 @@ struct MixedMesh
                        elementary_entities::Union{Nothing,Vector{Vector{Int32}}},
                        periodic_links::Vector{MixedPeriodicLink},
                        ancillary_sections::Vector{MshAncillarySection},
-                       data_sections::Vector{MshDataSection})
+                       data_sections::Vector{MshDataSection},
+                       partition_data::Union{Nothing,MixedPartitionData})
         mesh=new(C,B,names,data,elementary_entities,periodic_links,
-                 ancillary_sections,data_sections)
+                 ancillary_sections,data_sections,partition_data)
         _assert_mixed_structure(mesh,"MixedMesh")
         return mesh
     end
@@ -941,7 +1113,7 @@ struct MixedMesh
                        elementary_entities=nothing,
                        periodic_links=MixedPeriodicLink[],
                        ancillary_sections=MshAncillarySection[],
-                       data_sections=MshDataSection[])
+                       data_sections=MshDataSection[],partition_data=nothing)
         size(coords,1)==3 || throw(ArgumentError("MixedMesh: coords must be 3×n"))
         _elements_reject_bool_values(coords,"MixedMesh: coordinates")
         size(coords,2) <= typemax(Int32) || throw(ArgumentError(
@@ -998,8 +1170,13 @@ struct MixedMesh
                 copy(section.row_nodes),section.implicit_nodes,
                 copy(section.values),section.anchor))
         end
+        partition=partition_data===nothing ? nothing :
+             partition_data isa MixedPartitionData ?
+             _copy_mixed_partition_data(partition_data) :
+             throw(ArgumentError(
+                 "MixedMesh: partition_data must be MixedPartitionData or nothing"))
         return MixedMesh(_OWNED_MIXED_MESH,C,B,names,data,elementary,links,
-                         ancillary,sections)
+                         ancillary,sections,partition)
     end
 end
 
@@ -1185,6 +1362,9 @@ function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
                 "$context: block $bi cell $j has a non-positive entity tag"))
             key=(dim,Int(entity_tag))
             entity=get(data.entities,key,nothing)
+            if entity===nothing && m.partition_data!==nothing
+                entity=get(m.partition_data.entities,key,nothing)
+            end
             entity===nothing && !(key in classified_entities) && throw(ArgumentError(
                 "$context: block $bi cell $j references an entity not declared or created by nodes: $key"))
             projected=entity===nothing || isempty(entity.physical_tags) ? Int32(0) :
@@ -1245,6 +1425,8 @@ function mixed_to_simplex(m::MixedMesh)
         "mixed_to_simplex: cannot preserve MSH2 elementary-entity metadata in Mesh"))
     isempty(m.periodic_links) || throw(ArgumentError(
         "mixed_to_simplex: cannot preserve periodic entity metadata in Mesh"))
+    m.partition_data===nothing || throw(ArgumentError(
+        "mixed_to_simplex: cannot preserve partition metadata in Mesh"))
     ns=0; nf=0; nt=0
     for b in m.blocks
         isempty(b.tags) && continue
@@ -1592,7 +1774,73 @@ function _assert_mixed_structure(m::MixedMesh, context::AbstractString)
     _assert_mixed_elementary_entities(m,context)
     _assert_mixed_periodic_links(m,context)
     _assert_mixed_ancillary(m,total,nn,context)
+    _assert_mixed_partition_data(m,total,context)
     return total
+end
+
+function _assert_mixed_partition_data(m::MixedMesh,nel::Int,
+                                      context::AbstractString)
+    data=m.partition_data
+    data===nothing && return nothing
+    data.num_partitions>=0 || throw(ArgumentError(
+        "$context: negative partition count"))
+    global_entities=m.entity_data===nothing ?
+        Dict{Tuple{Int,Int},MixedEntity}() : m.entity_data.entities
+    for (key,entity) in data.entities
+        key==(entity.dim,Int(entity.tag)) || throw(ArgumentError(
+            "$context: partitioned entity key $key does not match its record"))
+        haskey(global_entities,key) && throw(ArgumentError(
+            "$context: partitioned entity $key duplicates a global entity"))
+        isempty(entity.partitions) && throw(ArgumentError(
+            "$context: partitioned entity $key carries no partition memberships"))
+        entity.parent[1]<0 && throw(ArgumentError(
+            "$context: partitioned entity $key carries no parent link"))
+        for partition in entity.partitions
+            1<=partition<=data.num_partitions || throw(ArgumentError(
+                "$context: partitioned entity $key partition $partition is " *
+                "outside 1:$(data.num_partitions)"))
+        end
+        for boundary in entity.boundaries
+            boundary_key=(entity.dim-1,abs(Int(boundary)))
+            haskey(data.entities,boundary_key) ||
+                haskey(global_entities,boundary_key) || throw(ArgumentError(
+                    "$context: partitioned entity $key references missing " *
+                    "boundary entity $boundary_key"))
+        end
+        for curve in entity.embedded_curves
+            haskey(data.entities,(1,Int(curve))) ||
+                haskey(global_entities,(1,Int(curve))) || throw(ArgumentError(
+                    "$context: partitioned entity $key references missing " *
+                    "embedded Curve[$curve]"))
+        end
+        isempty(global_entities) ||
+            haskey(global_entities,entity.parent) || throw(ArgumentError(
+                "$context: partitioned entity $key references missing parent " *
+                "entity $(entity.parent)"))
+    end
+    for (index,(tag,partition)) in pairs(data.ghost_entities)
+        tag>=1 || throw(ArgumentError(
+            "$context: ghost entity $index has a non-positive tag"))
+        1<=partition<=data.num_partitions || throw(ArgumentError(
+            "$context: ghost entity $index partition $partition is outside " *
+            "1:$(data.num_partitions)"))
+    end
+    for (index,record) in pairs(data.ghost_elements)
+        1<=record.element<=nel || throw(ArgumentError(
+            "$context: ghost element $index references element " *
+            "$(record.element) outside 1:$nel"))
+        1<=record.partition<=data.num_partitions || throw(ArgumentError(
+            "$context: ghost element $index partition $(record.partition) " *
+            "is outside 1:$(data.num_partitions)"))
+        isempty(record.ghost_partitions) && throw(ArgumentError(
+            "$context: ghost element $index lists no owner partitions"))
+        for owner in record.ghost_partitions
+            1<=owner<=data.num_partitions || throw(ArgumentError(
+                "$context: ghost element $index owner partition $owner is " *
+                "outside 1:$(data.num_partitions)"))
+        end
+    end
+    return nothing
 end
 
 """
@@ -1748,9 +1996,10 @@ function mixed_crc(m::MixedMesh)
     has_periodic=!isempty(m.periodic_links)
     has_embedded=data!==nothing &&
         any(entity->!isempty(entity.embedded_curves),values(data.entities))
+    partition=m.partition_data
     crc_version=1+(data===nothing ? 0 : 1)+(has_special ? 2 : 0)+
                   (has_periodic ? 4 : 0)+(has_elementary ? 8 : 0)+
-                  (has_embedded ? 16 : 0)
+                  (has_embedded ? 16 : 0)+(partition===nothing ? 0 : 32)
     prefix="Tessella.MixedMesh.CRC.v$crc_version\0"
     SHA.update!(ctx,codeunits(prefix))
     buf8=Vector{UInt8}(undef,8); buf4=Vector{UInt8}(undef,4)
@@ -1822,6 +2071,60 @@ function mixed_crc(m::MixedMesh)
             _sha_u64!(ctx,buf8,UInt64(length(pairs)))
             for (slave,master) in pairs
                 _sha_i32!(ctx,buf4,slave);_sha_i32!(ctx,buf4,master)
+            end
+        end
+    end
+    if partition!==nothing
+        starts=_block_cell_starts(m)
+        rank_of_flat=Vector{Int}(undef,ncells)
+        @inbounds for ref in refs
+            rank_of_flat[starts[ref.block]+ref.cell-1]=
+                canonical[(ref.block,ref.cell)]
+        end
+        _sha_i32!(ctx,buf4,partition.num_partitions)
+        entities=sort!(collect(values(partition.entities));
+                       by=e->(e.dim,e.tag))
+        _sha_u64!(ctx,buf8,UInt64(length(entities)))
+        for entity in entities
+            _sha_i32!(ctx,buf4,Int32(entity.dim))
+            _sha_i32!(ctx,buf4,entity.tag)
+            _sha_i32!(ctx,buf4,Int32(entity.parent[1]))
+            _sha_i32!(ctx,buf4,entity.parent[2])
+            _sha_u64!(ctx,buf8,UInt64(length(entity.partitions)))
+            for part in entity.partitions
+                _sha_i32!(ctx,buf4,part)
+            end
+            for value in entity.bbox
+                _sha_u64!(ctx,buf8,reinterpret(UInt64,value))
+            end
+            _sha_u64!(ctx,buf8,UInt64(length(entity.physical_tags)))
+            for physical in entity.physical_tags
+                _sha_i32!(ctx,buf4,physical)
+            end
+            _sha_u64!(ctx,buf8,UInt64(length(entity.boundaries)))
+            for boundary in entity.boundaries
+                _sha_i32!(ctx,buf4,boundary)
+            end
+            _sha_u64!(ctx,buf8,UInt64(length(entity.embedded_curves)))
+            for curve in entity.embedded_curves
+                _sha_i32!(ctx,buf4,curve)
+            end
+        end
+        ghost_entities=sort!(collect(partition.ghost_entities))
+        _sha_u64!(ctx,buf8,UInt64(length(ghost_entities)))
+        for (tag,part) in ghost_entities
+            _sha_i32!(ctx,buf4,tag); _sha_i32!(ctx,buf4,part)
+        end
+        ghosts=sort!(copy(partition.ghost_elements);
+                     by=g->(rank_of_flat[g.element],g.partition,
+                            Tuple(g.ghost_partitions)))
+        _sha_u64!(ctx,buf8,UInt64(length(ghosts)))
+        for record in ghosts
+            _sha_u64!(ctx,buf8,UInt64(rank_of_flat[record.element]))
+            _sha_i32!(ctx,buf4,record.partition)
+            _sha_u64!(ctx,buf8,UInt64(length(record.ghost_partitions)))
+            for owner in record.ghost_partitions
+                _sha_i32!(ctx,buf4,owner)
             end
         end
     end
@@ -2338,6 +2641,12 @@ mutable struct _MixedReadAccum
     # section that fails to parse keeps its position among the preserved
     # sections that share its anchor.
     preserved::Vector{Union{MshAncillarySection,_PendingDataSection}}
+    # `num_partitions` is -1 until a $PartitionedEntities section is read.
+    num_partitions::Int
+    partitioned_entities::Dict{Tuple{Int,Int},MixedEntity}
+    ghost_entities::Vector{Tuple{Int32,Int32}}
+    ghost_elements::Vector{Tuple{UInt64,Int32,Vector{Int32}}}
+    seen_ghost_elements::Bool
 end
 
 _MixedReadAccum() = _MixedReadAccum(
@@ -2347,7 +2656,9 @@ _MixedReadAccum() = _MixedReadAccum(
     Set{Tuple{Int,Int}}(),Set{Tuple{Int,Int}}(),UInt64[],Tuple{Int,Int32}[],
     Union{Nothing,Vector{Float64}}[],Set{UInt64}(),0,0,0,0,
     MixedPeriodicLink[],0,
-    Union{MshAncillarySection,_PendingDataSection}[])
+    Union{MshAncillarySection,_PendingDataSection}[],-1,
+    Dict{Tuple{Int,Int},MixedEntity}(),Tuple{Int32,Int32}[],
+    Tuple{UInt64,Int32,Vector{Int32}}[],false)
 
 function _read_limit(value,name::AbstractString;ceiling=typemax(Int))
     value isa Integer || throw(ArgumentError("read_mixed_msh: $name must be an integer"))
@@ -2387,7 +2698,11 @@ periodic relations), while
 `data_sections` retains parsed `\$NodeData`/`\$ElementData`/`\$ElementNodeData`
 views with tag columns resolved to internal indices (both Gmsh
 `\$ElementNodeData` dialects — the explicit node-tag column and the
-connectivity-implied model-data form), and
+connectivity-implied model-data form),
+`partition_data` retains MSH4 `\$PartitionedEntities` records and
+`\$GhostElements` ownership lists — partitioned entities carry their
+memberships and parent links, and ghost element tags resolve to flat internal
+element indices — and
 `ancillary_sections` retains every other unrecognized section verbatim —
 payload bytes, binary flag, and the position at which it appeared — so
 `write_mixed_msh` re-emits them losslessly.
@@ -3069,6 +3384,18 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             binary ? _read_mixed_entities_v4_binary!(acc,io,limits,swap,wide) :
                      _read_mixed_entities_v4!(acc,io,limits)
             phase=Int32(2)
+        elseif header=="\$PartitionedEntities"
+            version==4.1 || throw(ArgumentError(
+                "read_mixed_msh: \$PartitionedEntities requires MSH v4.1"))
+            seen_entities || throw(ArgumentError(
+                "read_mixed_msh: \$PartitionedEntities must follow \$Entities"))
+            seen_nodes && throw(ArgumentError(
+                "read_mixed_msh: \$PartitionedEntities must precede \$Nodes"))
+            acc.num_partitions>=0 && throw(ArgumentError(
+                "read_mixed_msh: duplicate \$PartitionedEntities section"))
+            binary ? _read_mixed_partitioned_entities_v4_binary!(
+                         acc,io,limits,swap,wide) :
+                     _read_mixed_partitioned_entities_v4!(acc,io,limits)
         elseif header=="\$Nodes"
             seen_format || throw(ArgumentError(
                 "read_mixed_msh: \$Nodes appeared before \$MeshFormat"))
@@ -3107,6 +3434,17 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                          _read_mixed_periodic_v4!(acc,io,limits)
             end
             phase=Int32(5)
+        elseif header=="\$GhostElements"
+            version==4.1 || throw(ArgumentError(
+                "read_mixed_msh: \$GhostElements requires MSH v4.1"))
+            seen_elements || throw(ArgumentError(
+                "read_mixed_msh: \$GhostElements must follow \$Elements"))
+            acc.seen_ghost_elements && throw(ArgumentError(
+                "read_mixed_msh: duplicate \$GhostElements section"))
+            acc.seen_ghost_elements=true
+            binary ? _read_mixed_ghost_elements_v4_binary!(
+                         acc,io,limits,swap,wide) :
+                     _read_mixed_ghost_elements_v4!(acc,io,limits)
         elseif startswith(header,"\$End")
             throw(ArgumentError("read_mixed_msh: unexpected section terminator $header"))
         elseif startswith(header,"\$")
@@ -3424,6 +3762,356 @@ function _read_mixed_entities_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     return nothing
 end
 
+# $PartitionedEntities entity records carry the same fields as $Entities
+# records plus a (parentDim, parentTag) link and a partition-membership list
+# between the tag and the coordinates.
+function _read_mixed_partitioned_entities_v4!(acc,io,limits)
+    reader=_MshTokenReader(io)
+    num_partitions=_msh_int(
+        _msh_token!(reader,"PartitionedEntities header"),
+        "partitioned-entities partition count")
+    num_partitions>=0 || throw(ArgumentError(
+        "read_mixed_msh: negative partition count"))
+    num_partitions<=typemax(Int32) || throw(ArgumentError(
+        "read_mixed_msh: partition count exceeds Int32"))
+    acc.num_partitions=Int(num_partitions)
+    nghost=_msh_int(_msh_token!(reader,"ghost-entity count"),
+                    "ghost-entity count")
+    nghost>=0 || throw(ArgumentError(
+        "read_mixed_msh: negative ghost-entity count"))
+    nghost<=limits.max_entities || throw(ArgumentError(
+        "read_mixed_msh: ghost-entity count exceeds max_entities"))
+    for _ in 1:nghost
+        tag=_msh_int(_msh_token!(reader,"ghost entity"),"ghost entity tag")
+        partition=_msh_int(_msh_token!(reader,"ghost entity"),
+                           "ghost entity partition")
+        1<=tag<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: ghost entity tags must be positive and fit Int32"))
+        1<=partition<=num_partitions || throw(ArgumentError(
+            "read_mixed_msh: ghost entity partition $partition is outside " *
+            "1:$num_partitions"))
+        push!(acc.ghost_entities,(Int32(tag),Int32(partition)))
+    end
+    counts=ntuple(4) do _
+        _msh_int(_msh_token!(reader,"PartitionedEntities header"),
+                 "partitioned-entity count")
+    end
+    all(>=(0),counts) || throw(ArgumentError(
+        "read_mixed_msh: negative partitioned-entity count"))
+    total=0
+    for count in counts
+        total=try Base.checked_add(total,count) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: partitioned-entity count overflows Int"))
+        end
+    end
+    existing=try Base.checked_add(
+        length(acc.entities),length(acc.partitioned_entities)) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative=try Base.checked_add(existing,total) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative<=limits.max_entities || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 entity count $cumulative exceeds " *
+        "max_entities=$(limits.max_entities)"))
+    for dim in 0:3
+        for _ in 1:counts[dim+1]
+            _read_partitioned_entity_ascii!(acc,reader,dim,num_partitions)
+        end
+    end
+    _expect_msh_token_end!(reader,"\$EndPartitionedEntities")
+    return nothing
+end
+
+function _read_partitioned_entity_ascii!(acc,reader,dim::Int,num_partitions::Int)
+    tag=_msh_int(_msh_token!(reader,"dimension-$dim partitioned entity"),
+                 "partitioned entity tag")
+    1<=tag<=typemax(Int32) || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity tags must be positive and fit Int32"))
+    key=(dim,tag)
+    (haskey(acc.partitioned_entities,key) || haskey(acc.entities,key)) &&
+        throw(ArgumentError(
+            "read_mixed_msh: duplicate partitioned entity ($dim,$tag)"))
+    parent_dim=_msh_int(_msh_token!(reader,"partitioned entity parent"),
+                        "partitioned entity parent dimension")
+    0<=parent_dim<=3 || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity ($dim,$tag) has parent " *
+        "dimension $parent_dim outside 0:3"))
+    parent_tag=_msh_int(_msh_token!(reader,"partitioned entity parent"),
+                        "partitioned entity parent tag")
+    1<=parent_tag<=typemax(Int32) || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity parent tags must be positive " *
+        "and fit Int32"))
+    npartitions=_msh_int(
+        _msh_token!(reader,"partitioned entity partition count"),
+        "partitioned entity partition count")
+    1<=npartitions<=num_partitions || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity ($dim,$tag) partition count " *
+        "$npartitions is outside 1:$num_partitions"))
+    partitions=Vector{Int32}(undef,npartitions)
+    for i in 1:npartitions
+        partition=_msh_int(_msh_token!(reader,"partitioned entity partition"),
+                           "partitioned entity partition")
+        1<=partition<=num_partitions || throw(ArgumentError(
+            "read_mixed_msh: partitioned entity ($dim,$tag) partition " *
+            "$partition is outside 1:$num_partitions"))
+        partitions[i]=Int32(partition)
+    end
+    ncoordinates=dim==0 ? 3 : 6
+    box=ntuple(ncoordinates) do _
+        _msh_float(_msh_token!(reader,"partitioned entity bounds"),
+                   "partitioned entity bounds")
+    end
+    if dim>0
+        all(box[i]<=box[i+3] for i in 1:3) || throw(ArgumentError(
+            "read_mixed_msh: partitioned entity ($dim,$tag) has reversed bounds"))
+    end
+    nphysical=_msh_int(
+        _msh_token!(reader,"partitioned entity physical-tag count"),
+        "partitioned entity physical-tag count")
+    nphysical>=0 || throw(ArgumentError(
+        "read_mixed_msh: negative physical-tag count on partitioned entity " *
+        "($dim,$tag)"))
+    physical_tags=Int32[]
+    for _ in 1:nphysical
+        value=_msh_int(_msh_token!(reader,"partitioned entity physical tag"),
+                       "partitioned entity physical tag")
+        1<=value<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: partitioned entity physical tags must be " *
+            "positive and fit Int32"))
+        push!(physical_tags,Int32(value))
+    end
+    boundaries=Int32[]
+    embedded_curves=Int32[]
+    if dim>0
+        nboundary=_msh_int(
+            _msh_token!(reader,"partitioned entity boundary count"),
+            "partitioned entity boundary count")
+        nboundary>=0 || throw(ArgumentError(
+            "read_mixed_msh: negative boundary count on partitioned entity " *
+            "($dim,$tag)"))
+        max_curve_tag=dim==2 ? maximum(
+            (entity_key[2] for entity_key in keys(acc.partitioned_entities)
+             if entity_key[1]==1);init=0) : 0
+        for _ in 1:nboundary
+            boundary=_msh_int(
+                _msh_token!(reader,"partitioned entity boundary tag"),
+                "partitioned entity boundary tag")
+            _mixed_v4_entity_link!(
+                boundaries,embedded_curves,acc.partitioned_entities,
+                dim,tag,boundary,max_curve_tag)
+        end
+    end
+    acc.partitioned_entities[key]=MixedEntity(
+        dim,tag,box;physical_tags=physical_tags,boundaries=boundaries,
+        embedded_curves=embedded_curves,partitions=partitions,
+        parent=(parent_dim,parent_tag))
+    acc.entity_physical[key]=isempty(physical_tags) ? Int32(0) :
+                             first(physical_tags)
+    return nothing
+end
+
+function _read_mixed_partitioned_entities_v4_binary!(acc,io,limits,
+                                                   swap::Bool,wide::Bool)
+    num_partitions=_binary_count(
+        _binary_size_t(io,swap,wide,"binary PartitionedEntities header"),
+        Int(typemax(Int32)),"partitioned-entities partition count")
+    acc.num_partitions=num_partitions
+    nghost=_binary_count(
+        _binary_size_t(io,swap,wide,"binary ghost-entity count"),
+        limits.max_entities,"ghost entity")
+    for _ in 1:nghost
+        tag=Int(_binary_i32(io,swap,"ghost entity tag"))
+        partition=Int(_binary_i32(io,swap,"ghost entity partition"))
+        tag>=1 || throw(ArgumentError(
+            "read_mixed_msh: ghost entity tags must be positive"))
+        1<=partition<=num_partitions || throw(ArgumentError(
+            "read_mixed_msh: ghost entity partition $partition is outside " *
+            "1:$num_partitions"))
+        push!(acc.ghost_entities,(Int32(tag),Int32(partition)))
+    end
+    counts=ntuple(4) do dim
+        _binary_count(
+            _binary_size_t(io,swap,wide,"binary PartitionedEntities header"),
+            limits.max_entities,"dimension-$(dim-1) partitioned entity")
+    end
+    total=0
+    for count in counts
+        total=try Base.checked_add(total,count) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError(
+                "read_mixed_msh: partitioned-entity count overflows Int"))
+        end
+    end
+    existing=try Base.checked_add(
+        length(acc.entities),length(acc.partitioned_entities)) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative=try Base.checked_add(existing,total) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("read_mixed_msh: cumulative v4 entity count overflows Int"))
+    end
+    cumulative<=limits.max_entities || throw(ArgumentError(
+        "read_mixed_msh: cumulative v4 entity count $cumulative exceeds " *
+        "max_entities=$(limits.max_entities)"))
+    for dim in 0:3
+        for _ in 1:counts[dim+1]
+            _read_partitioned_entity_binary!(acc,io,dim,num_partitions,swap,wide)
+        end
+    end
+    _consume_binary_newline(io,"PartitionedEntities section")
+    _expect_msh_end(io,"\$EndPartitionedEntities")
+    return nothing
+end
+
+function _read_partitioned_entity_binary!(acc,io,dim::Int,num_partitions::Int,
+                                          swap::Bool,wide::Bool)
+    tag=Int(_binary_i32(io,swap,"dimension-$dim partitioned entity tag"))
+    tag>=1 || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity tags must be positive"))
+    key=(dim,tag)
+    (haskey(acc.partitioned_entities,key) || haskey(acc.entities,key)) &&
+        throw(ArgumentError(
+            "read_mixed_msh: duplicate partitioned entity ($dim,$tag)"))
+    parent_dim=Int(_binary_i32(io,swap,"partitioned entity parent dimension"))
+    0<=parent_dim<=3 || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity ($dim,$tag) has parent " *
+        "dimension $parent_dim outside 0:3"))
+    parent_tag=Int(_binary_i32(io,swap,"partitioned entity parent tag"))
+    parent_tag>=1 || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity parent tags must be positive"))
+    npartitions=_binary_count(
+        _binary_size_t(io,swap,wide,"partitioned entity partition count"),
+        num_partitions,"partitioned entity partition")
+    npartitions>=1 || throw(ArgumentError(
+        "read_mixed_msh: partitioned entity ($dim,$tag) carries no " *
+        "partition memberships"))
+    partitions=_binary_i32_vector(io,npartitions,swap,
+                                  "partitioned entity partitions")
+    @inbounds for partition in partitions
+        1<=partition<=num_partitions || throw(ArgumentError(
+            "read_mixed_msh: partitioned entity ($dim,$tag) partition " *
+            "$partition is outside 1:$num_partitions"))
+    end
+    ncoordinates=dim==0 ? 3 : 6
+    coordinates=_binary_f64_vector(
+        io,ncoordinates,swap,"dimension-$dim partitioned entity bounds")
+    box=Tuple(coordinates)
+    if dim>0
+        all(box[i]<=box[i+3] for i in 1:3) || throw(ArgumentError(
+            "read_mixed_msh: partitioned entity ($dim,$tag) has reversed bounds"))
+    end
+    nphysical=_binary_count(
+        _binary_size_t(io,swap,wide,"partitioned entity physical-tag count"),
+        typemax(Int),"partitioned entity physical-tag")
+    physical_tags=_binary_i32_vector(
+        io,nphysical,swap,"partitioned entity physical tags")
+    @inbounds for value in physical_tags
+        value>=1 || throw(ArgumentError(
+            "read_mixed_msh: partitioned entity physical tags must be " *
+            "positive and fit Int32"))
+    end
+    boundaries=Int32[]
+    embedded_curves=Int32[]
+    if dim>0
+        nboundary=_binary_count(
+            _binary_size_t(io,swap,wide,"partitioned entity boundary count"),
+            typemax(Int),"partitioned entity boundary")
+        encoded=_binary_i32_vector(
+            io,nboundary,swap,"partitioned entity boundary tags")
+        max_curve_tag=dim==2 ? maximum(
+            (entity_key[2] for entity_key in keys(acc.partitioned_entities)
+             if entity_key[1]==1);init=0) : 0
+        @inbounds for boundary in encoded
+            _mixed_v4_entity_link!(
+                boundaries,embedded_curves,acc.partitioned_entities,
+                dim,tag,Int(boundary),max_curve_tag)
+        end
+    end
+    acc.partitioned_entities[key]=MixedEntity(
+        dim,tag,box;physical_tags=physical_tags,boundaries=boundaries,
+        embedded_curves=embedded_curves,partitions=partitions,
+        parent=(parent_dim,parent_tag))
+    acc.entity_physical[key]=isempty(physical_tags) ? Int32(0) :
+                             first(physical_tags)
+    return nothing
+end
+
+# $GhostElements rows carry the element's external tag, the partition where it
+# is a ghost, and the partitions that own it; the external tag resolves to a
+# flat internal element index in _finish_mixed_read.
+function _read_mixed_ghost_elements_v4!(acc,io,limits)
+    reader=_MshTokenReader(io)
+    count=_msh_int(_msh_token!(reader,"GhostElements header"),
+                   "ghost-element count")
+    count>=0 || throw(ArgumentError(
+        "read_mixed_msh: negative ghost-element count"))
+    count<=limits.max_elements || throw(ArgumentError(
+        "read_mixed_msh: ghost-element count exceeds max_elements"))
+    for _ in 1:count
+        tag=_msh_size_t(_msh_token!(reader,"ghost element"),
+                        "ghost element tag")
+        tag>0 || throw(ArgumentError(
+            "read_mixed_msh: ghost element tags must be positive"))
+        partition=_msh_int(_msh_token!(reader,"ghost element"),
+                           "ghost element partition")
+        1<=partition<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: ghost element partitions must be positive and " *
+            "fit Int32"))
+        nghost=_msh_int(_msh_token!(reader,"ghost element owner count"),
+                        "ghost element owner count")
+        1<=nghost<=typemax(Int32) || throw(ArgumentError(
+            "read_mixed_msh: ghost element owner count is outside " *
+            "1:$(typemax(Int32))"))
+        owners=Vector{Int32}(undef,nghost)
+        for i in 1:nghost
+            owner=_msh_int(_msh_token!(reader,"ghost element owner"),
+                           "ghost element owner partition")
+            1<=owner<=typemax(Int32) || throw(ArgumentError(
+                "read_mixed_msh: ghost element owner partitions must be " *
+                "positive and fit Int32"))
+            owners[i]=Int32(owner)
+        end
+        push!(acc.ghost_elements,(tag,Int32(partition),owners))
+    end
+    _expect_msh_token_end!(reader,"\$EndGhostElements")
+    return nothing
+end
+
+function _read_mixed_ghost_elements_v4_binary!(acc,io,limits,
+                                             swap::Bool,wide::Bool)
+    count=_binary_count(
+        _binary_size_t(io,swap,wide,"binary GhostElements header"),
+        limits.max_elements,"ghost element")
+    for _ in 1:count
+        tag=_binary_size_t(io,swap,wide,"ghost element tag")
+        tag>0 || throw(ArgumentError(
+            "read_mixed_msh: ghost element tags must be positive"))
+        partition=_binary_i32(io,swap,"ghost element partition")
+        partition>=1 || throw(ArgumentError(
+            "read_mixed_msh: ghost element partitions must be positive"))
+        nghost=_binary_count(
+            _binary_size_t(io,swap,wide,"ghost element owner count"),
+            Int(typemax(Int32)),"ghost element owner")
+        nghost>=1 || throw(ArgumentError(
+            "read_mixed_msh: ghost element owner count must be positive"))
+        owners=_binary_i32_vector(io,nghost,swap,"ghost element owners")
+        @inbounds for owner in owners
+            owner>=1 || throw(ArgumentError(
+                "read_mixed_msh: ghost element owner partitions must be positive"))
+        end
+        push!(acc.ghost_elements,(tag,partition,owners))
+    end
+    _consume_binary_newline(io,"GhostElements section")
+    _expect_msh_end(io,"\$EndGhostElements")
+    return nothing
+end
+
 function _read_mixed_nodes_v2!(acc,io,limits)
     remaining=limits.max_nodes-length(acc.x)
     count=_section_count(io,"v2 node",remaining)
@@ -3474,7 +4162,8 @@ end
 
 function _ensure_mixed_implicit_entity!(acc,dim::Int,tag::Int,limits)
     key=(dim,tag)
-    (haskey(acc.entities,key) || key in acc.implicit_entities) && return nothing
+    (haskey(acc.entities,key) || haskey(acc.partitioned_entities,key) ||
+     key in acc.implicit_entities) && return nothing
     length(acc.entities)+length(acc.implicit_entities)<limits.max_entities || throw(ArgumentError(
         "read_mixed_msh: implicit entity count exceeds max_entities=$(limits.max_entities)"))
     acc.entity_physical[key]=Int32(0)
@@ -4442,9 +5131,30 @@ function _finish_mixed_read(acc,is_v4::Bool)
         block_entities : nothing
     data_sections,ancillary=_resolve_pending_data_sections(
         acc,tag_to_ref,ordered)
+    !isempty(acc.ghost_elements) && acc.num_partitions<0 && throw(ArgumentError(
+        "read_mixed_msh: \$GhostElements requires a \$PartitionedEntities " *
+        "section"))
+    partition_data=nothing
+    if acc.num_partitions>=0
+        ghosts=MixedGhostElement[]
+        if !isempty(acc.ghost_elements)
+            starts=Vector{Int}(undef,length(ordered)+1); starts[1]=1
+            for (bi,(_,bucket)) in pairs(ordered)
+                starts[bi+1]=starts[bi]+length(bucket.external_tags)
+            end
+            for (tag,partition,owners) in acc.ghost_elements
+                ref=resolve_ref(tag,"ghost element")
+                flat=starts[ref.block]+ref.cell-1
+                push!(ghosts,MixedGhostElement(flat,partition,owners))
+            end
+        end
+        partition_data=MixedPartitionData(
+            _OWNED_MIXED_PARTITION_DATA,Int32(acc.num_partitions),
+            acc.partitioned_entities,acc.ghost_entities,ghosts)
+    end
     return MixedMesh(
         _OWNED_MIXED_MESH,coords,blocks,acc.physical_names,data,
-        elementary,acc.periodic_links,ancillary,data_sections)
+        elementary,acc.periodic_links,ancillary,data_sections,partition_data)
 end
 
 # View-data sections carry node/element tags in the source file's external tag
@@ -4674,18 +5384,12 @@ function _block_cell_starts(m::MixedMesh)
     return starts
 end
 
-function _preserved_emit(m::MixedMesh,version::Float64,binary::Bool,
-                         gmsh_compatible::Bool)
-    isempty(m.ancillary_sections) && isempty(m.data_sections) &&
-        return nothing
-    nn=size(m.coords,2); starts=_block_cell_starts(m); nel=starts[end]-1
-    data=m.entity_data
-    node_tags=Vector{UInt64}(undef,nn)
-    if version==4.1 && data!==nothing
-        copyto!(node_tags,data.external_node_tags)
-    else
-        @inbounds for i in 1:nn; node_tags[i]=UInt64(i); end
-    end
+# The external element tag written for each flat cell index in the output
+# tag space — preserved external tags when v4 metadata is present, otherwise
+# the sequential order the element writer emits.
+function _external_element_tags(m::MixedMesh,version::Float64,data,
+                                starts::Vector{Int})
+    nel=starts[end]-1
     element_tags=Vector{UInt64}(undef,nel)
     if version==4.1 && data!==nothing
         k=0
@@ -4710,6 +5414,22 @@ function _preserved_emit(m::MixedMesh,version::Float64,binary::Bool,
         k==nel || throw(ErrorException(
             "write_mixed_msh: internal preserved-element tag count mismatch"))
     end
+    return element_tags
+end
+
+function _preserved_emit(m::MixedMesh,version::Float64,binary::Bool,
+                         gmsh_compatible::Bool)
+    isempty(m.ancillary_sections) && isempty(m.data_sections) &&
+        return nothing
+    nn=size(m.coords,2); starts=_block_cell_starts(m); nel=starts[end]-1
+    data=m.entity_data
+    node_tags=Vector{UInt64}(undef,nn)
+    if version==4.1 && data!==nothing
+        copyto!(node_tags,data.external_node_tags)
+    else
+        @inbounds for i in 1:nn; node_tags[i]=UInt64(i); end
+    end
+    element_tags=_external_element_tags(m,version,data,starts)
     sections=sort!(copy(m.ancillary_sections);by=s->s.anchor,alg=MergeSort)
     datasections=sort!(copy(m.data_sections);by=s->s.anchor,alg=MergeSort)
     if !binary
@@ -5037,6 +5757,13 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
             value==4.1 ? _write_mixed_periodic_v4(io,m,binary) :
                          _write_mixed_periodic_v2(io,m)
         end
+        if m.partition_data!==nothing &&
+           !isempty(m.partition_data.ghost_elements)
+            _write_mixed_ghost_elements(
+                io,m.partition_data,
+                _external_element_tags(m,value,m.entity_data,
+                                       _block_cell_starts(m)),binary)
+        end
         _emit_preserved!(io,preserved,5)
         flush(io); close(io)
         mv(temporary,target;force=true)
@@ -5045,6 +5772,16 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
 end
 
 function _assert_mixed_msh_format(m::MixedMesh,version::Float64,binary::Bool)
+    if m.partition_data!==nothing
+        version==4.1 || throw(ArgumentError(
+            "write_mixed_msh: MSH $version cannot encode " *
+            "\$PartitionedEntities or \$GhostElements partition metadata; " *
+            "write MSH 4.1"))
+        m.entity_data!==nothing || throw(ArgumentError(
+            "write_mixed_msh: partition metadata requires explicit " *
+            "MixedEntityData so partitioned-entity parent links and ghost " *
+            "element tags remain stable"))
+    end
     if !isempty(m.periodic_links)
         if version==4.1
             m.entity_data!==nothing || throw(ArgumentError(
@@ -5617,6 +6354,129 @@ function _write_mixed_entity_binary(io,entity::MixedEntity,max_curve_tag::Int)
     return nothing
 end
 
+function _write_mixed_partitioned_entity(io,entity::MixedEntity,
+                                         max_curve_tag::Int)
+    print(io,entity.tag," ",entity.parent[1]," ",entity.parent[2]," ",
+          length(entity.partitions))
+    for partition in entity.partitions
+        print(io," ",partition)
+    end
+    ncoordinates=entity.dim==0 ? 3 : 6
+    @inbounds for i in 1:ncoordinates
+        @printf(io," %.17g",entity.bbox[i])
+    end
+    print(io," ",length(entity.physical_tags))
+    for physical in entity.physical_tags
+        print(io," ",physical)
+    end
+    if entity.dim>0
+        encoded_boundaries=_mixed_entity_encoded_boundaries(
+            entity,max_curve_tag)
+        print(io," ",length(encoded_boundaries))
+        for boundary in encoded_boundaries
+            print(io," ",boundary)
+        end
+    end
+    println(io)
+    return nothing
+end
+
+function _write_mixed_partitioned_entity_binary(io,entity::MixedEntity,
+                                                max_curve_tag::Int)
+    write(io,entity.tag)
+    write(io,Int32(entity.parent[1])); write(io,entity.parent[2])
+    write(io,UInt64(length(entity.partitions)))
+    for partition in entity.partitions
+        write(io,partition)
+    end
+    ncoordinates=entity.dim==0 ? 3 : 6
+    @inbounds for i in 1:ncoordinates
+        write(io,entity.bbox[i])
+    end
+    write(io,UInt64(length(entity.physical_tags)))
+    for physical in entity.physical_tags
+        write(io,physical)
+    end
+    if entity.dim>0
+        encoded_boundaries=_mixed_entity_encoded_boundaries(
+            entity,max_curve_tag)
+        write(io,UInt64(length(encoded_boundaries)))
+        for boundary in encoded_boundaries
+            write(io,boundary)
+        end
+    end
+    return nothing
+end
+
+function _write_mixed_partitioned_entities(io,pdata::MixedPartitionData,
+                                           binary::Bool)
+    entities=sort!(collect(values(pdata.entities));by=e->(e.dim,e.tag))
+    counts=zeros(Int,4)
+    for entity in entities
+        counts[entity.dim+1]+=1
+    end
+    max_curve_tag=maximum(
+        (Int(entity.tag) for entity in entities if entity.dim==1);init=0)
+    println(io,"\$PartitionedEntities")
+    if binary
+        write(io,UInt64(pdata.num_partitions))
+        write(io,UInt64(length(pdata.ghost_entities)))
+        for (tag,partition) in pdata.ghost_entities
+            write(io,tag); write(io,partition)
+        end
+        for count in counts
+            write(io,UInt64(count))
+        end
+        for entity in entities
+            _write_mixed_partitioned_entity_binary(io,entity,max_curve_tag)
+        end
+        write(io,UInt8('\n'))
+    else
+        println(io,pdata.num_partitions)
+        println(io,length(pdata.ghost_entities))
+        for (tag,partition) in pdata.ghost_entities
+            println(io,tag," ",partition)
+        end
+        println(io,join(counts," "))
+        for entity in entities
+            _write_mixed_partitioned_entity(io,entity,max_curve_tag)
+        end
+    end
+    println(io,"\$EndPartitionedEntities")
+    return nothing
+end
+
+function _write_mixed_ghost_elements(io,pdata::MixedPartitionData,
+                                     element_tags::Vector{UInt64},
+                                     binary::Bool)
+    isempty(pdata.ghost_elements) && return nothing
+    println(io,"\$GhostElements")
+    if binary
+        write(io,UInt64(length(pdata.ghost_elements)))
+        for record in pdata.ghost_elements
+            write(io,element_tags[record.element])
+            write(io,record.partition)
+            write(io,UInt64(length(record.ghost_partitions)))
+            for owner in record.ghost_partitions
+                write(io,owner)
+            end
+        end
+        write(io,UInt8('\n'))
+    else
+        println(io,length(pdata.ghost_elements))
+        for record in pdata.ghost_elements
+            print(io,element_tags[record.element]," ",record.partition," ",
+                  length(record.ghost_partitions))
+            for owner in record.ghost_partitions
+                print(io," ",owner)
+            end
+            println(io)
+        end
+    end
+    println(io,"\$EndGhostElements")
+    return nothing
+end
+
 function _mixed_metadata_node_runs(data::MixedEntityData)
     runs=UnitRange{Int}[]
     n=length(data.external_node_tags); first_node=1
@@ -5678,6 +6538,8 @@ function _write_mixed_v4_binary_metadata(
         _write_mixed_entity_binary(io,entity,max_curve_tag)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
+    m.partition_data===nothing || _write_mixed_partitioned_entities(
+        io,m.partition_data,true)
     _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
@@ -5756,6 +6618,8 @@ function _write_mixed_v4_binary(
         _write_mixed_entity_binary(io,entity)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
+    m.partition_data===nothing || _write_mixed_partitioned_entities(
+        io,m.partition_data,true)
     _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2)
@@ -5817,6 +6681,8 @@ function _write_mixed_v4_metadata(
         _write_mixed_entity(io,entity,max_curve_tag)
     end
     println(io,"\$EndEntities")
+    m.partition_data===nothing || _write_mixed_partitioned_entities(
+        io,m.partition_data,false)
     _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
@@ -5890,6 +6756,8 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
         _write_mixed_entity(io,entity)
     end
     println(io,"\$EndEntities")
+    m.partition_data===nothing || _write_mixed_partitioned_entities(
+        io,m.partition_data,false)
     _emit_preserved!(io,preserved,2)
     nn=size(m.coords,2)
     println(io,"\$Nodes")
