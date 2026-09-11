@@ -1709,6 +1709,9 @@ for `task >= num_tasks` here: its hierarchical orientation loop indexes
 per-entity elements unguarded, so that case segfaults the pinned release
 where the guarded queries stay empty. Tessella deterministically returns the
 empty slice instead.
+For hierarchical spaces Gmsh partitions each entity separately while this
+entity-free cache partitions the global type block; the two coincide whenever
+each queried type lives on one entity.
 """
 get_basis_functions_orientation(element_type,function_space_type,
                                 tag=-1,task=0,num_tasks=1)=
