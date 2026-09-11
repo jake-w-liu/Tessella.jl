@@ -3141,6 +3141,91 @@ end
     @test !occursin("Error",output)
 end
 
+function write_narrow_binary_v4(path)
+    open(path,"w") do io
+        println(io,"\$MeshFormat"); println(io,"4.1 1 4")
+        write(io,Int32(1)); write(io,UInt8('\n'))
+        println(io,"\$EndMeshFormat")
+        println(io,"\$Entities")
+        for count in UInt32[2,1,0,0]; write(io,count); end
+        write(io,Int32(1))
+        for value in (0.0,0.0,0.0); write(io,value); end
+        write(io,UInt32(0))
+        write(io,Int32(2))
+        for value in (1.0,0.0,0.0); write(io,value); end
+        write(io,UInt32(0))
+        write(io,Int32(11))
+        for value in (0.0,0.0,0.0,1.0,0.0,0.0); write(io,value); end
+        write(io,UInt32(1)); write(io,Int32(6))
+        write(io,UInt32(2)); write(io,Int32(1))
+        write(io,Int32(-2))
+        write(io,UInt8('\n')); println(io,"\$EndEntities")
+        println(io,"\$Nodes")
+        for value in UInt32[1,2,10,20]; write(io,value); end
+        for value in Int32[1,11,1]; write(io,value); end
+        write(io,UInt32(2))
+        for value in UInt32[10,20]; write(io,value); end
+        for value in (0.0,0.0,0.0,0.0,1.0,0.0,0.0,1.0)
+            write(io,value)
+        end
+        write(io,UInt8('\n')); println(io,"\$EndNodes")
+        println(io,"\$Elements")
+        for value in UInt32[1,1,77,77]; write(io,value); end
+        for value in Int32[1,11,1]; write(io,value); end
+        write(io,UInt32(1))
+        for value in UInt32[77,10,20]; write(io,value); end
+        write(io,UInt8('\n')); println(io,"\$EndElements")
+        println(io,"\$Periodic")
+        write(io,UInt32(1))
+        for value in Int32[0,2,1]; write(io,value); end
+        write(io,UInt32(0))
+        write(io,UInt32(1))
+        for value in UInt32[20,10]; write(io,value); end
+        write(io,UInt8('\n')); println(io,"\$EndPeriodic")
+        println(io,"\$NodeData")
+        println(io,"1\n\"narrow\"\n1\n3.5\n3\n0\n1\n2")
+        for (tag,value) in ((10,2.5),(20,3.5))
+            write(io,Int32(tag)); write(io,value)
+        end
+        write(io,UInt8('\n')); println(io,"\$EndNodeData")
+    end
+    return path
+end
+
+@testset "binary MSH 4-byte size_t decoding" begin
+    directory=mktempdir()
+    path=write_narrow_binary_v4(joinpath(directory,"narrow-v4.msh"))
+    open(path,"r") do io
+        @test readline(io)=="\$MeshFormat"
+        @test split(readline(io))==["4.1","1","4"]
+    end
+    mesh=ElementsUnderTest.read_mixed_msh(path)
+    @test ElementsUnderTest.validate(mesh).ok
+    @test mesh.coords==Float64[0 1;0 0;0 0]
+    @test mesh.blocks[1].msh==1
+    @test mesh.blocks[1].nodes==reshape(Int32[1,2],2,1)
+    @test mesh.entity_data.external_node_tags==UInt64[10,20]
+    @test mesh.entity_data.external_element_tags==[UInt64[77]]
+    @test mesh.entity_data.node_parametric==[Float64[0],Float64[1]]
+    @test mesh.entity_data.entities[(1,11)].physical_tags==Int32[6]
+    @test mesh.entity_data.entities[(1,11)].boundaries==Int32[1,-2]
+    @test length(mesh.periodic_links)==1
+    @test mesh.periodic_links[1].dim==0
+    @test mesh.periodic_links[1].slave_entity==2
+    @test mesh.periodic_links[1].master_entity==1
+    @test mesh.periodic_links[1].slave_nodes==Int32[2]
+    @test mesh.periodic_links[1].master_nodes==Int32[1]
+    @test length(mesh.data_sections)==1
+    section=mesh.data_sections[1]
+    @test section.name=="NodeData"
+    @test section.strings==["\"narrow\""]
+    @test section.reals==[3.5]
+    @test section.header==[0,1,2]
+    @test section.nodes==Int32[1,2]
+    @test section.values==[2.5,3.5]
+    @test isempty(mesh.ancillary_sections)
+end
+
 function write_repeated_node_sections(path,version::Float64,binary::Bool;
                                       third_tag::Int=30)
     open(path,"w") do io

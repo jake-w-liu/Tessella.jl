@@ -147,7 +147,7 @@ direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exac
 distance queries. P2 does not yet claim general mixed-element generation or
 recombination beyond P4's first-order surface pairing, integration of mixed blocks
 into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, curved
-high-order Jacobian certification beyond P2 tetrahedra, non-8-byte binary data,
+high-order Jacobian certification beyond P2 tetrahedra, non-8-byte binary output,
 internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
 Ancillary and unknown MSH sections now round trip verbatim — payload bytes,
@@ -161,7 +161,10 @@ node lists differ from the element connectivity are an explicit
 `gmsh_compatible=false` Tessella-to-Tessella round trips. Unparseable view
 sections degrade to verbatim ancillary preservation rather than silent data
 loss, and binary-captured payloads with non-text bytes are an explicit blocker
-for ASCII output.
+for ASCII output. Binary input honours the MeshFormat data-size word, decoding
+4-byte `size_t` entities, nodes, elements, periodic links, and view-data rows as
+well as the usual 8-byte width; output always writes 8 bytes, matching Gmsh's
+own 64-bit writer.
 Variable-connectivity types 34/35/69 and parent/domain links are lossless in MSH2
 ASCII. Binary MSH2 has fixed widths and supports only fixed special records and parent
 links; MSH4 supports fixed unlinked special records. Type 69 and some registered fixed
