@@ -1,5 +1,5 @@
 # Differential oracle for fixed-family actual- and explicit-order nodal bases plus
-# simplex hierarchical bases, orientations, and keys.
+# simplex hierarchical bases, non-simplex order-one H1 bases, orientations, and keys.
 # This uses the locally installed Gmsh 4.15.2 Julia API and never starts the GUI.
 using Tessella
 using Random
@@ -45,6 +45,8 @@ const _HIERARCHICAL_SPACES=Set((
     "H1Legendre1","GradH1Legendre1",
     "HcurlLegendre0","CurlHcurlLegendre0"))
 const _FIXED_NODAL_SPACES=("Lagrange1","GradLagrange1")
+const _NONSIMPLEX_H1_TYPES=(3,5,6,15,16,17,18)
+const _NONSIMPLEX_H1_SPACES=("H1Legendre1","GradH1Legendre1")
 const _FIXED_NODAL_TYPES=sort!([
     Int(element_type)
     for (element_type,spec) in MSH_CATALOG
@@ -236,7 +238,7 @@ try
     _build_gmsh_function_model("mesh-function-spaces")
     Tessella.API.initialize()
     digest,nodal_point_count,actual_order_case_count,
-        explicit_order_case_count=try
+        explicit_order_case_count,nonsimplex_h1_case_count=try
         fixture=_function_mesh()
         baseline=mesh_crc(fixture)
         _install_function_mesh!(fixture)
@@ -394,6 +396,131 @@ try
         end
 
         actual_order_case_count=0
+        nonsimplex_h1_case_count=0
+        for element_type in _NONSIMPLEX_H1_TYPES,
+            space in _NONSIMPLEX_H1_SPACES
+            gmsh_basis=gmsh.model.mesh.getBasisFunctions(
+                element_type,nodal_coordinates,space)
+            tessella_basis=Tessella.API.mesh.get_basis_functions(
+                element_type,nodal_coordinates,space)
+            label="type-$element_type $space nonsimplex-H1"
+            _compare_exact(
+                "$label components",gmsh_basis[1],tessella_basis[1])
+            point_grad_divergence=element_type==15 &&
+                space=="GradH1Legendre1"
+            if point_grad_divergence
+                # Pinned-release divergence: Gmsh 4.15.2 answers the
+                # constant Point function's value block ([1,0,0] per point)
+                # where its own nodal gradient correctly answers zeros.
+                # Tessella returns the verified zero gradient. The divergent
+                # Gmsh pattern is pinned exactly but stays out of the
+                # checksum stream.
+                point_count=length(nodal_coordinates)÷3
+                _compare_exact(
+                    "$label zero gradient",
+                    zeros(point_count*3),tessella_basis[2])
+                _compare_exact(
+                    "$label Gmsh gradient divergence",
+                    repeat(Float64[1,0,0],point_count),gmsh_basis[2])
+            else
+                _compare_float(
+                    "$label basis",gmsh_basis[2],tessella_basis[2])
+            end
+            _compare_exact(
+                "$label orientation count",gmsh_basis[3],tessella_basis[3])
+            tessella_orientations=
+                Tessella.API.mesh.get_number_of_orientations(
+                    element_type,space)
+            if MSH_CATALOG[element_type].family===:hex
+                # Hexahedron hierarchical metadata diverges in the pinned
+                # release: getNumberOfOrientations answers 1833382193 while
+                # getBasisFunctions counts 8! orientations. Tessella follows
+                # the verified basis count.
+                _compare_exact(
+                    "$label Tessella orientations",gmsh_basis[3],
+                    tessella_orientations)
+            else
+                _compare_exact(
+                    "$label number of orientations",
+                    gmsh.model.mesh.getNumberOfOrientations(
+                        element_type,space),
+                    tessella_orientations)
+            end
+            gmsh_key_count=gmsh.model.mesh.getNumberOfKeys(
+                element_type,space)
+            tessella_key_count=Tessella.API.mesh.get_number_of_keys(
+                element_type,space)
+            _compare_exact(
+                "$label number of keys",gmsh_key_count,tessella_key_count)
+            type_keys=zeros(Int32,gmsh_key_count)
+            entity_keys=UInt64.(1:gmsh_key_count)
+            _compare_exact(
+                "$label key information",
+                gmsh.model.mesh.getKeysInformation(
+                    type_keys,entity_keys,element_type,space),
+                Tessella.API.mesh.get_keys_information(
+                    type_keys,entity_keys,element_type,space))
+            orientation_count=Int(gmsh_basis[3])
+            wanted=orientation_count==1 ? Int32[0] :
+                Int32[orientation_count-1,0,orientation_count÷2]
+            tessella_selected=Tessella.API.mesh.get_basis_functions(
+                element_type,nodal_coordinates,space,wanted)[2]
+            if point_grad_divergence
+                _compare_exact(
+                    "$label selected zero gradient",
+                    zeros(length(nodal_coordinates)),tessella_selected)
+                _compare_exact(
+                    "$label selected Gmsh gradient divergence",
+                    repeat(Float64[1,0,0],length(nodal_coordinates)÷3),
+                    gmsh.model.mesh.getBasisFunctions(
+                        element_type,nodal_coordinates,space,wanted)[2])
+            else
+                _compare_float(
+                    "$label selected basis",
+                    gmsh.model.mesh.getBasisFunctions(
+                        element_type,nodal_coordinates,space,wanted)[2],
+                    tessella_selected)
+            end
+            _write_ints!(
+                stream,"$label:meta",
+                (tessella_basis[1],tessella_basis[3],tessella_key_count))
+            _write_floats!(stream,"$label:basis",tessella_basis[2])
+            nonsimplex_h1_case_count+=1
+        end
+
+        # The pinned release's Hexahedron hierarchical metadata query reads
+        # uninitialized memory: it answered 1833382193 across three probe
+        # processes and 1918128693 inside this differential run, while
+        # getBasisFunctions counts 8! every time. Tessella follows the
+        # verified basis count. The inequality below fails loud if a Gmsh
+        # rebuild ever repairs the metadata query; the observed garbage
+        # stays out of the checksum stream because it is not stable.
+        for hex_space in _NONSIMPLEX_H1_SPACES
+            hex_metadata=gmsh.model.mesh.getNumberOfOrientations(
+                5,hex_space)
+            println("hex $hex_space Gmsh metadata observed: ",hex_metadata)
+            hex_metadata==40320 && error(
+                "hex $hex_space Gmsh metadata unexpectedly repaired")
+            _compare_exact(
+                "hex $hex_space Tessella metadata",40320,
+                Tessella.API.mesh.get_number_of_orientations(5,hex_space))
+        end
+
+        # Gmsh 4.15.2 defines no Pyramid hierarchical family: the pinned
+        # release rejects these reference queries itself, so Tessella keeps
+        # them as explicit blockers rather than synthesizing a basis.
+        for pyramid_space in _NONSIMPLEX_H1_SPACES
+            pyramid_rejected=false
+            try
+                gmsh.model.mesh.getBasisFunctions(
+                    7,nodal_coordinates,pyramid_space,Int32[0])
+            catch
+                pyramid_rejected=true
+            end
+            pyramid_rejected || error(
+                "pinned Gmsh unexpectedly accepts pyramid $pyramid_space")
+        end
+
         for element_type in _ACTUAL_ORDER_TYPES,
             space in _ACTUAL_ORDER_SPACES
             spec=MSH_CATALOG[element_type]
@@ -660,7 +787,9 @@ try
             ()->Tessella.API.mesh.get_basis_functions(
                 2,Float64[0,0,0],"Lagrange11"),
             ()->Tessella.API.mesh.get_basis_functions(
-                3,Float64[0,0,0],"H1Legendre1"),
+                7,Float64[0,0,0],"H1Legendre1"),
+            ()->Tessella.API.mesh.get_basis_functions(
+                3,Float64[0,0,0],"HcurlLegendre0",Int32[0]),
             ()->Tessella.API.mesh.get_basis_functions(
                 140,Float64[0,0,0],"Lagrange1"),
         )
@@ -673,10 +802,10 @@ try
         end
 
         result=bytes2hex(SHA.sha256(take!(stream)))
-        result=="32a6443fb95b938d0c32da3840847f2f3fac08f1ecf92a2d2b033f6397ed9fa7" ||
+        result=="86d2308f75da9d99ea76f8479d264f85ceaade9fcd46e36b0d34211e15fad0c5" ||
             error("mesh function-space checksum changed to $result")
         result,length(nodal_coordinates)÷3,actual_order_case_count,
-            explicit_order_case_count
+            explicit_order_case_count,nonsimplex_h1_case_count
     finally
         Tessella.API.finalize()
     end
@@ -691,6 +820,7 @@ try
             length(_LINEAR_FAMILY_TYPES)*length(_LINEAR_FAMILY_SPACES),
             " actual_order_cases=",actual_order_case_count,
             " explicit_order_cases=",explicit_order_case_count,
+            " nonsimplex_h1_cases=",nonsimplex_h1_case_count,
             " all_orientations=32 max_abs_difference=",
             _MAX_ABS_DIFFERENCE[],
             " lazy_edge_catalog=true sha=",digest)

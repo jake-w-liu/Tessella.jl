@@ -204,7 +204,7 @@ mesh_quadrature_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=
 println("  command: ", mesh_quadrature_command)
 run(mesh_quadrature_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
-println("\n── mesh_function_spaces ──  Gmsh 4.15.2 arbitrary-order nodal and simplex hierarchical bases")
+println("\n── mesh_function_spaces ──  Gmsh 4.15.2 arbitrary-order nodal and H1/simplex-H(curl) bases")
 mesh_function_script = joinpath(
     HERE, "mesh_function_spaces", "differential.jl")
 mesh_function_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mesh_function_script`

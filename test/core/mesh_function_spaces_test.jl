@@ -4,6 +4,12 @@ using Tessella.MeshFunctionSpaces
 using Tessella.Elements: MSH_CATALOG, lagrange_nodes, msh_spec, msh_type
 using Tessella.MeshEntityTopology: _mesh_edge_topology_for_cells
 
+@noinline _h1_quad_full_allocated(points)=
+    @allocated mesh_basis_functions(3,points,"H1Legendre1")
+@noinline _h1_quad_selected_allocated(points)=
+    @allocated mesh_basis_functions(
+        3,points,"H1Legendre1",Int32[0])
+
 function _function_space_fixture()
     return Mesh(
         Float64[0 2 0 0;
@@ -213,6 +219,103 @@ end
         Tessella.MeshFunctionSpaces;private=false))
     @test isempty(Test.detect_ambiguities(
         Tessella.MeshFunctionSpaces;recursive=true))
+end
+
+@testset "order-one H1 on non-simplex reference families" begin
+    points=Float64[0.25,-0.5,0.0, 0.1,0.2,-0.3]
+    expected=Dict(3=>(4,24),5=>(8,40320),6=>(6,720),15=>(1,1),
+                  16=>(4,24),17=>(8,40320),18=>(6,720))
+    for (element_type,(vertex_count,orientation_count)) in expected
+        lag=mesh_basis_functions(
+            element_type,points,"Lagrange1",Int32[0])[2]
+        @test length(lag)==2vertex_count
+        h1=mesh_basis_functions(element_type,points,"H1Legendre1")
+        @test h1[1]==1
+        @test h1[3]==orientation_count
+        # Every orientation repeats the vertex-function block, exactly as
+        # Gmsh 4.15.2 orders its orientation-major H1 output.
+        @test h1[2]==repeat(lag,orientation_count)
+        grad=mesh_basis_functions(
+            element_type,points,"GradLagrange1",Int32[0])[2]
+        # Point GradH1Legendre1 is the verified zero gradient even though the
+        # pinned release answers [1,0,0] there; the differential pins that
+        # Gmsh divergence exactly.
+        @test mesh_basis_functions(
+            element_type,points,"GradH1Legendre1",Int32[0])==
+            (Int32(3),grad,Int32(orientation_count))
+        selected=mesh_basis_functions(
+            element_type,points,"H1Legendre1",
+            orientation_count==1 ? Int32[0] : Int32[orientation_count-1,0])[2]
+        @test selected==vcat(
+            orientation_count==1 ? Float64[] :
+                h1[2][end-2vertex_count+1:end],h1[2][1:2vertex_count])
+        @test mesh_number_of_orientations(
+            element_type,"H1Legendre1")==orientation_count
+        @test mesh_number_of_orientations(
+            element_type,"GradH1Legendre1")==orientation_count
+        @test mesh_number_of_keys(
+            element_type,"H1Legendre1")==vertex_count
+        @test mesh_key_dimension(
+            element_type,"GradH1Legendre1")==0
+        @test mesh_keys_information(
+            zeros(Int32,vertex_count),UInt64.(1:vertex_count),
+            element_type,"H1Legendre1")==
+            fill((Int32(0),element_type==15 ? Int32(0) : Int32(1)),
+                 vertex_count)
+    end
+
+    # Vertex interpolation is exact on the quadrangle reference: each vertex
+    # block selects its own hat function.
+    quad_points,quad_count=_first_order_reference_points(3)
+    @test quad_count==4
+    quad_h1=mesh_basis_functions(
+        3,quad_points,"H1Legendre1",Int32[0])[2]
+    for vertex in 1:4
+        block=quad_h1[4vertex-3:4vertex]
+        @test block==Float64[j==vertex for j in 1:4]
+    end
+
+    # Hexahedron orientation metadata uses 8! even though the pinned
+    # release's getNumberOfOrientations metadata query diverges there.
+    @test mesh_basis_functions(
+        5,Float64[0.25,-0.5,0.5],"H1Legendre1")[3]==40320
+    empty_hex=mesh_basis_functions(5,Float64[],"H1Legendre1")
+    @test empty_hex==(Int32(1),Float64[],Int32(40320))
+    detached=mesh_basis_functions(3,points,"H1Legendre1")
+    original=copy(detached[2])
+    detached[2][1]=99
+    @test mesh_basis_functions(3,points,"H1Legendre1")[2]==original
+    repeated=mesh_basis_functions(3,points,"H1Legendre1")[2]
+    @test repeated==original
+
+    # Slice allocation scales with the selected orientations, rejecting a
+    # full-compute-then-slice implementation: one of 24 blocks costs less
+    # than the 24-block payload, and the full block stays near its payload.
+    full_payload=24*2*4*8
+    selected_bytes=_h1_quad_selected_allocated(points)
+    @test selected_bytes<full_payload
+    @test _h1_quad_full_allocated(points)<full_payload+4096
+
+    for invalid in (
+        ()->mesh_basis_functions(7,[0,0,0],"H1Legendre1"),
+        ()->mesh_basis_functions(7,[0,0,0],"GradH1Legendre1"),
+        ()->mesh_basis_functions(19,[0,0,0],"H1Legendre1"),
+        ()->mesh_basis_functions(140,[0,0,0],"H1Legendre1"),
+        ()->mesh_basis_functions(3,[0,0,0],"HcurlLegendre0"),
+        ()->mesh_basis_functions(5,[0,0,0],"HcurlLegendre0"),
+        ()->mesh_basis_functions(6,[0,0,0],"CurlHcurlLegendre0"),
+        ()->mesh_basis_functions(15,[0,0,0],"HcurlLegendre0"),
+        ()->mesh_basis_functions(3,[0,0,0],"H1Legendre2"),
+        ()->mesh_basis_functions(3,[0,0,0],"H1Legendre1",Int32[24]),
+        ()->mesh_basis_functions(5,[0,0,0],"H1Legendre1",Int32[-1]),
+        ()->mesh_basis_functions(6,[0,0,0],"H1Legendre1",Int32[0,0]),
+        ()->mesh_basis_functions(
+            3,[0,0,0],"H1Legendre1",Int32[0,1,2,3,4,5,6,7,8,9,
+                                            10,11,12,13,14,15,16,17,18,19,
+                                            20,21,22,23,24]),
+    )
+        @test_throws ArgumentError invalid()
+    end
 end
 
 @testset "higher-order nodal reference functions" begin
@@ -665,7 +768,7 @@ end
     for invalid in (
         ()->mesh_basis_functions(98,[0,0,0],"Lagrange10"),
         ()->mesh_basis_functions(130,[0,0,0],"GradLagrange10"),
-        ()->mesh_basis_functions(3,[0,0,0],"H1Legendre1"),
+        ()->mesh_basis_functions(7,[0,0,0],"H1Legendre1"),
         ()->mesh_basis_functions(5,[0,0,0],"HcurlLegendre0"),
         ()->mesh_basis_functions(140,[0,0,0],"Lagrange1"),
         ()->mesh_basis_functions(
@@ -679,6 +782,8 @@ end
 @testset "linear-simplex orientations and finite-element keys" begin
     mesh=_function_space_fixture()
     @test mesh_basis_orientations(mesh,1,"Lagrange")==Int32[0]
+    @test mesh_basis_orientations(mesh,3,"H1Legendre1")==Int32[]
+    @test mesh_basis_orientations(mesh,5,"H1Legendre1")==Int32[]
     @test mesh_basis_orientations(mesh,1,"HcurlLegendre0")==Int32[1]
     @test mesh_basis_orientations(mesh,2,"HcurlLegendre0")==Int32[4]
     @test mesh_basis_orientations(mesh,4,"H1Legendre1")==Int32[20]
@@ -700,6 +805,12 @@ end
     @test mesh_number_of_keys(1,"Lagrange")==2
     @test mesh_number_of_keys(2,"H1Legendre1")==3
     @test mesh_number_of_keys(4,"HcurlLegendre0")==6
+    @test mesh_number_of_keys(3,"H1Legendre1")==4
+    @test mesh_number_of_keys(5,"H1Legendre1")==8
+    @test mesh_number_of_keys(6,"H1Legendre1")==6
+    @test mesh_number_of_orientations(3,"H1Legendre1")==24
+    @test mesh_number_of_orientations(5,"H1Legendre1")==40320
+    @test mesh_number_of_orientations(6,"H1Legendre1")==720
     @test mesh_key_dimension(4,"GradLagrange")==0
     @test mesh_key_dimension(4,"CurlHcurlLegendre0")==1
 
@@ -728,6 +839,11 @@ end
     @test mesh_keys_information(
         Int32[0,0,0],UInt64[3,1,2],2,"Lagrange")==
         Tuple{Int32,Int32}[(0,-1),(0,-1),(0,-1)]
+    @test mesh_keys(mesh,5,"H1Legendre1")==
+        (Int32[],UInt64[],Float64[])
+    @test mesh_keys_information(
+        Int32[0,0,0,0],UInt64[1,2,3,4],3,"H1Legendre1")==
+        Tuple{Int32,Int32}[(0,1),(0,1),(0,1),(0,1)]
     @test mesh_keys_information(
         Int32[0,0,0],UInt64[3,1,2],2,"H1Legendre1")==
         Tuple{Int32,Int32}[(0,1),(0,1),(0,1)]
@@ -746,6 +862,8 @@ end
         ()->mesh_keys_for_element(mesh,2,"GradLagrange2"),
         ()->mesh_keys_information(Int32[0],UInt64[1],2,"Lagrange"),
         ()->mesh_keys_information(Int32[0,0,0],UInt64[1,2],2,"Lagrange"),
+        ()->mesh_keys_information(
+            Int32[0,0,0],UInt64[1,2,3],3,"H1Legendre1"),
         ()->mesh_keys_information(Int32[1,1,0],UInt64[1,2,3],2,
                                   "HcurlLegendre0"),
         ()->mesh_keys_information(Int32[1,1,1],UInt64[1,0,3],2,

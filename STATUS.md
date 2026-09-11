@@ -314,6 +314,51 @@ project non-goals.
 
 ## Verification history (newest first)
 
+Re-measured on 2026-09-11 with Julia 1.12.7 after extending order-one
+`H1Legendre1`/`GradH1Legendre1` reference evaluation, counts, and key metadata
+to every fixed Quadrangle, Hexahedron, and Prism type (at any Lagrange order)
+and Point type 15:
+
+- `MeshFunctionSpaces` attaches H1 order 1 to the reference family, not the
+  input type's Lagrange order: values repeat the family's vertex functions once
+  per orientation (24/40320/720 for Quadrangle/Hexahedron/Prism, 1 for Point),
+  keys are the family vertex counts (4/8/6/1), and Point H1 key metadata reports
+  order 0 since the Point vertex function is constant. Lowest-order H(curl)
+  stays linear-simplex-only; Pyramid/Trihedron hierarchical spaces stay
+  rejected. Simplex hierarchical paths are bit-identical: every legacy
+  differential comparison reproduces its prior value.
+- Three pinned-release divergences are documented, not copied. Hexahedron
+  `getNumberOfOrientations` reads uninitialized memory (observed 1833382193
+  across three probe processes, 1918128693 inside the validation process) while
+  `getBasisFunctions` counts 8! every time; Tessella uses 8!. Point
+  `GradH1Legendre1` answers `[1,0,0]` per point where the pinned release's own
+  nodal gradient correctly answers zeros; Tessella returns the verified zero
+  gradient. Pyramid hierarchical queries fail inside Gmsh 4.15.2 itself
+  (`Unknown familyType 6`), so they remain explicit blockers on both sides.
+- Allocation scales with the selected slice on two-point quadrangle blocks
+  (seven-run `@allocated` medians, bit-identical repeats): full 24-orientation
+  block 2,096 bytes against a 1,536-byte payload, single-orientation selection
+  720 bytes. New ratchets require the selection to cost less than the full
+  payload and the full block to stay within payload + 4,096 bytes, rejecting
+  full-compute-then-slice patches.
+- Focused bounds-checked suites: core function-space 3,406/3,406 (101 new
+  non-simplex H1 assertions) and session-API function-space 133/133.
+  Neighboring element-catalog, reference-geometry, Jacobian, and data suites
+  re-run with the full gate below. The Gmsh 4.15.2 mesh-function-space
+  differential passes with 14 new non-simplex H1 cases (full/selected bases,
+  components, orientation counts, key counts, key information, pinned
+  divergences, Gmsh-side pyramid rejection) and SHA-256
+  `86d2308f75da9d99ea76f8479d264f85ceaade9fcd46e36b0d34211e15fad0c5`
+  (stable across two runs; legacy sections byte-identical).
+- The complete bounds-checked package gate passed 211,801/211,801 assertions in
+  29m19.6s and the aggregate bounds-checked validation exited zero with every
+  mandatory child, analytic case, and the enclosure/coax acceptance probe
+  completed, regenerating the untracked `validation/REPORT.md`.
+  `git diff --check`, layout, recursive ambiguity, public-documentation, and
+  Markdown-link gates passed.
+- Residual: non-simplex H(curl) spaces, higher-order hierarchical spaces, and
+  entity-filtered orientation/key results remain pending per PLAN.md.
+
 Re-measured on 2026-09-11 with Julia 1.12.7 after implementing deterministic
 contiguous-block `task`/`num_tasks` partitioning for the seven detached
 read-only mesh-data queries (`get_elements_by_type`, `get_barycenters`,

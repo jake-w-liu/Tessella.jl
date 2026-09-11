@@ -4,11 +4,14 @@
 Reference finite-element function spaces and global degree-of-freedom keys.
 Actual- and explicit-order nodal functions cover every fixed Point, Line,
 Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid type.
-Hierarchical H1 and lowest-order H(curl) functions, cached orientations, and
+Order-one hierarchical H1 functions and gradients cover every fixed Point,
+Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism type.
+Lowest-order H(curl) functions and curls, cached orientations, and
 populated keys cover the finalized linear-simplex [`Mesh`](@ref). The
 implementation follows Gmsh 4.15.2's reference coordinates, output layout,
-lexicographic orientation indices, nodal keys, and edge keys. Trihedron bases
-fail explicitly.
+lexicographic orientation indices, nodal keys, and edge keys. Pyramid and
+Trihedron hierarchical bases fail explicitly: Gmsh 4.15.2 defines no Pyramid
+hierarchical family and no Trihedron basis.
 """
 module MeshFunctionSpaces
 
@@ -107,6 +110,22 @@ function _basis_element_contract(element_type_value,space::_FunctionSpace,
                                  caller::AbstractString)
     element_type=_checked_element_type(element_type_value,caller)
     if space.hierarchical
+        spec=msh_spec(element_type)
+        if space.key_dimension==0
+            # Order-one H1 spaces are vertex-based on each supported
+            # reference family, independent of the input type's Lagrange
+            # order. Gmsh 4.15.2 defines no Pyramid hierarchical family
+            # and no Trihedron basis, so those families stay rejected.
+            family=spec.family
+            (family===:pnt || family===:lin || family===:tri ||
+             family===:tet || family===:qua || family===:hex ||
+             family===:pri) || throw(ArgumentError(
+                "$caller: element type $element_type family $family has " *
+                "no order-one hierarchical H1 basis in Gmsh 4.15.2; " *
+                "supported families are Point, Line, Triangle, " *
+                "Tetrahedron, Quadrangle, Hexahedron, and Prism"))
+            return element_type,family,_h1_vertex_count(family),element_type
+        end
         element_type in (1,2,4) || throw(ArgumentError(
             "$caller: element type $element_type is not a supported linear " *
             "segment, triangle, or tetrahedron for hierarchical spaces"))
@@ -138,14 +157,39 @@ end
     return 4
 end
 
+# Vertex ownership for order-one H1 spaces, which attach to the reference
+# family rather than to the input type's Lagrange order: every fixed
+# Quadrangle type owns 4 vertex functions, every Hexahedron type 8, and every
+# Prism type 6, matching Gmsh 4.15.2's key counts.
+@inline function _h1_vertex_count(family::Symbol)
+    family===:pnt && return 1
+    family===:lin && return 2
+    family===:tri && return 3
+    (family===:tet || family===:qua) && return 4
+    family===:hex && return 8
+    return 6 # :pri
+end
+
 @inline function _edge_count(element_type::Int)
     element_type==1 && return 1
     element_type==2 && return 3
     return 6
 end
 
-@inline _orientation_count(element_type::Int)=
-    element_type==1 ? 2 : element_type==2 ? 6 : 24
+@inline function _orientation_count(family::Symbol)
+    family===:pnt && return 1
+    family===:lin && return 2
+    family===:tri && return 6
+    (family===:tet || family===:qua) && return 24
+    # Hexahedron H1 orientations are the 8! vertex permutations. Gmsh 4.15.2's
+    # `getNumberOfOrientations` metadata query reads uninitialized memory for
+    # Hexahedron hierarchical spaces (observed 1833382193 across probe runs
+    # and a different value inside the validation process) while its
+    # `getBasisFunctions` orientation count agrees with 8!; Tessella follows
+    # the verified basis count, not the metadata divergence.
+    family===:hex && return 40320
+    return 720 # :pri
+end
 
 function _checked_orientation_sequence(values,norientations::Int,
                                        hierarchical::Bool,
@@ -514,6 +558,47 @@ function _write_nodal_basis!(result,coordinates,point_count::Int,
     error("MeshFunctionSpaces: unsupported internal nodal family $family")
 end
 
+# Order-one H1 blocks on non-simplex reference families. Every orientation
+# repeats the vertex-function block: vertex degrees of freedom carry no
+# orientation-dependent sign, and the pinned release returns identical blocks
+# per orientation. The caller guarantees `family` is one of `:pnt`, `:qua`,
+# `:hex`, or `:pri` with a matching preallocated `result`.
+function _write_first_order_family!(result,coordinates,point_count::Int,
+                                    family::Val,orientation_count::Int,
+                                    gradient::Bool,caller::AbstractString)
+    cursor=0
+    if gradient
+        @inbounds for _ in 1:orientation_count
+            for point in 1:point_count
+                offset=3point-2
+                gradients=_first_order_gradients(
+                    family,coordinates[offset],coordinates[offset+1],
+                    coordinates[offset+2],caller,point)
+                for value in gradients,component in 1:3
+                    cursor+=1
+                    result[cursor]=value[component]
+                end
+            end
+        end
+    else
+        @inbounds for _ in 1:orientation_count
+            for point in 1:point_count
+                offset=3point-2
+                values=_first_order_values(
+                    family,coordinates[offset],coordinates[offset+1],
+                    coordinates[offset+2],caller,point)
+                for value in values
+                    cursor+=1
+                    result[cursor]=value
+                end
+            end
+        end
+    end
+    cursor==length(result) || error(
+        "MeshFunctionSpaces: internal H1 result length mismatch")
+    return result
+end
+
 include("HigherOrderNodal.jl")
 
 function _barycentric_coordinates(element_type::Int,u::Float64,v::Float64,
@@ -614,15 +699,15 @@ function mesh_basis_functions(element_type_value,local_coord,
                               caller::AbstractString="mesh_basis_functions")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,nodal_count,basis_type=
+    element_type,family,nodal_count,basis_type=
         _basis_element_contract(element_type,space,caller)
     coordinates,point_count=_checked_local_coordinates(local_coord,caller)
     total_orientations=space.hierarchical ?
-        _orientation_count(element_type) : 1
+        _orientation_count(family) : 1
     orientations=_checked_orientation_sequence(
         wanted_orientations,total_orientations,space.hierarchical,caller)
     function_count=space.hierarchical ?
-        (space.key_dimension==0 ? _vertex_count(element_type) :
+        (space.key_dimension==0 ? nodal_count :
                                   _edge_count(element_type)) : nodal_count
     result_length=_checked_result_length(
         length(orientations),point_count,function_count,space.components;
@@ -633,6 +718,16 @@ function mesh_basis_functions(element_type_value,local_coord,
             result,coordinates,point_count,basis_type,
             space.kind===:grad_lagrange,caller)
         return Int32(space.components),result,Int32(1)
+    end
+    if family===:pnt || family===:qua || family===:hex || family===:pri
+        # Order-one H1 vertex functions on non-simplex reference families.
+        # The contract admits only H1 spaces here, so every orientation
+        # repeats the same vertex-function block exactly as the pinned
+        # release does; no vertex permutation is evaluated or allocated.
+        _write_first_order_family!(
+            result,coordinates,point_count,Val(family),
+            length(orientations),space.kind===:grad_lagrange,caller)
+        return Int32(space.components),result,Int32(total_orientations)
     end
     gradients=_reference_gradients(element_type)
     pairs=_canonical_edge_pairs(element_type)
@@ -690,8 +785,8 @@ function mesh_number_of_orientations(element_type_value,function_space_type;
                                          "mesh_number_of_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
-    return Int32(space.hierarchical ? _orientation_count(element_type) : 1)
+    element_type,family,_,_=_basis_element_contract(element_type,space,caller)
+    return Int32(space.hierarchical ? _orientation_count(family) : 1)
 end
 
 function _orientation_rank(node_tags)
@@ -809,7 +904,7 @@ function mesh_number_of_keys(element_type_value,function_space_type;
     element_type,_,nodal_count,_=
         _basis_element_contract(element_type,space,caller)
     return Int32(space.hierarchical ?
-                 (space.key_dimension==0 ? _vertex_count(element_type) :
+                 (space.key_dimension==0 ? nodal_count :
                                            _edge_count(element_type)) :
                  nodal_count)
 end
@@ -988,7 +1083,7 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
                                caller::AbstractString="mesh_keys_information")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,nodal_count,basis_type=
+    element_type,family,nodal_count,basis_type=
         _basis_element_contract(element_type,space,caller)
     expected_type=space.key_dimension
     types=_checked_type_keys(type_keys,expected_type,caller)
@@ -996,14 +1091,19 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
     length(types)==length(entities) || throw(ArgumentError(
         "$caller: type_keys and entity_keys must have equal lengths"))
     keys_per_element=space.hierarchical ?
-        (space.key_dimension==0 ? _vertex_count(element_type) :
+        (space.key_dimension==0 ? nodal_count :
                                   _edge_count(element_type)) : nodal_count
     length(types)%keys_per_element==0 || throw(ArgumentError(
         "$caller: key count $(length(types)) must be divisible by " *
         "$keys_per_element for element type $element_type"))
     if space.hierarchical
+        # The Point order-one H1 function is the constant 1, so Gmsh 4.15.2
+        # reports polynomial order 0 for Point H1 keys and order 1 for every
+        # other supported H1 family.
+        order=(space.key_dimension==0 && family===:pnt) ? Int32(0) :
+            Int32(space.key_order)
         return fill(
-            (Int32(space.key_dimension),Int32(space.key_order)),length(types))
+            (Int32(space.key_dimension),order),length(types))
     end
     bubble_count=_nodal_bubble_count(basis_type)
     nonbubble_count=nodal_count-bubble_count

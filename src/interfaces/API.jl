@@ -13,7 +13,9 @@ The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache, plus deterministic global edge and triangular or
 quadrangular face catalogs, fixed-family actual- and explicit-order nodal
-reference functions, and simplex H1/lowest-order H(curl) bases, orientations,
+reference functions, order-one H1 bases over simplex, Point, Quadrangle,
+Hexahedron, and Prism reference families with lowest-order H(curl) bases over
+simplexes, orientations,
 and node/edge keys. It also
 owns a reusable robust AABB locator for
 dense element-by-coordinate and reference-coordinate queries, plus scale-robust
@@ -1670,8 +1672,15 @@ Return `(num_components, basis_functions, num_orientations)` at concatenated
 input fixed type's actual nodal order and completeness. `LagrangeN` and
 `GradLagrangeN` select the complete family basis at order `N`; the catalog covers
 orders 0--10, with Hexahedron, Prism, and Pyramid ending at order 9. Order-one
-hierarchical H1 functions and gradients and lowest-order
-H(curl) functions and curls cover types 1, 2, and 4. Values use Gmsh's orientation-
+hierarchical H1 functions and gradients cover types 1, 2, and 4, every fixed
+Quadrangle, Hexahedron, and Prism type at any Lagrange order, and Point type 15;
+their values repeat the reference family's vertex functions once per orientation.
+Lowest-order H(curl) functions and curls cover types 1, 2, and 4. Pyramid and
+Trihedron hierarchical spaces are rejected: Gmsh 4.15.2 defines no Pyramid
+hierarchical family and no Trihedron basis. Hexahedron H1 orientation counts use
+8!, which the pinned release's `getBasisFunctions` count confirms; its
+`getNumberOfOrientations` metadata query reads uninitialized memory there
+(different values across processes) and is not copied. Values use Gmsh's orientation-
 then-point-then-function-then-component layout. An empty orientation selection
 returns every hierarchical orientation or the sole nodal orientation. This query
 does not require a cached mesh.
@@ -1685,7 +1694,12 @@ get_basis_functions(element_type,local_coord,function_space_type,
     get_number_of_orientations(element_type, function_space_type)
 
 Return one for Lagrange spaces or the factorial primary-vertex orientation count
-for a supported first-order hierarchical space. This reference-element query does
+for a supported first-order hierarchical space: 1 for Point H1, 2/6/24 for
+linear simplexes, 24 for Quadrangle H1, 720 for Prism H1, and 8! for Hexahedron
+H1. The Hexahedron count follows the pinned release's verified basis count;
+its `getNumberOfOrientations` metadata query reads uninitialized memory
+(values differ across processes).
+This reference-element query does
 not require a cached mesh.
 """
 get_number_of_orientations(element_type,function_space_type)=
@@ -1756,7 +1770,9 @@ get_keys_for_element(element_tag,function_space_type,return_coord=true)=
 
 Return the number of node or edge keys owned by one supported reference element.
 Actual- and explicit-order nodal counts cover every fixed family except Trihedron;
-hierarchical counts cover linear simplexes. This query does not require a cache.
+hierarchical H1 counts cover linear simplexes, Point type 15, and every fixed
+Quadrangle, Hexahedron, and Prism type with the reference family's vertex count.
+Lowest-order H(curl) counts cover linear simplexes. This query does not require a cache.
 """
 get_number_of_keys(element_type,function_space_type)=
     _get_number_of_keys(element_type,function_space_type)
@@ -1767,8 +1783,10 @@ get_number_of_keys(element_type,function_space_type)=
 
 Return `(entity_dimension, polynomial_order)` for complete element-sized groups
 of supported node or edge keys. Actual- and explicit-order nodal metadata covers
-every fixed family except Trihedron; hierarchical metadata covers linear
-simplexes. Key arrays must have equal lengths and the expected type-key value for
+every fixed family except Trihedron; hierarchical H1 metadata covers linear
+simplexes, Point type 15, and every fixed Quadrangle, Hexahedron, and Prism type.
+Point H1 keys report order 0 since the Point vertex function is constant.
+Lowest-order H(curl) metadata covers linear simplexes. Key arrays must have equal lengths and the expected type-key value for
 the selected space.
 """
 get_keys_information(type_keys,entity_keys,element_type,function_space_type)=

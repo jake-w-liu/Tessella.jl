@@ -31,7 +31,7 @@ include("core/Transform.jl")      # P3: validated affine mesh transformations
 include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
 include("core/MeshQuadrature.jl") # P5: bounded Gmsh-shaped reference quadrature
 include("core/MeshReferenceGeometry.jl") # P5: robust Gmsh-shaped linear-simplex Jacobians
-include("core/MeshFunctionSpaces.jl") # P5: arbitrary-order nodal and simplex hierarchical bases
+include("core/MeshFunctionSpaces.jl") # P5: arbitrary-order nodal and order-one H1/simplex-H(curl) bases
 include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination
 include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex refinement
 include("structured/StructuredNumerics.jl") # P4: shared affine-grid numerical certificates
