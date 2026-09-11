@@ -20,7 +20,7 @@ support or test requirements.
 | 3 | 3-D Delaunay, exact-coordinate kernel, volume fill, conforming recovery | DONE |
 | 4 | uniform sizing, quality metrics, flips, smoothing, sliver reduction | DONE |
 | 5 | healing diagnostics, native primitives, analytical CAD, imprints, mesh CSG | DONE |
-| 6 | globally certified P2 tetrahedra and solver-consumable I/O | DONE |
+| 6 | globally certified P2 tetrahedra and triangles plus solver-consumable I/O | DONE |
 
 ### Active parity increment
 
@@ -39,7 +39,7 @@ metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P
 not claim general mixed-element generation or recombination beyond P4's first-order
 surface pairing, MINI basis-selector tags 138/139 as mesh records, integration of
 mixed blocks into the simplex meshing kernels, curved high-order
-Jacobian certification beyond P2 tetrahedra, non-8-byte binary output, internal
+Jacobian certification beyond P2 tetrahedra and triangles, non-8-byte binary output, internal
 indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection.
 Ancillary/unknown MSH sections round trip verbatim and parsed view sections
 (`$NodeData`/`$ElementData`/`$ElementNodeData`, including Gmsh's

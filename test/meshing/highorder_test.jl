@@ -488,6 +488,183 @@ end
         @test !ispath(corrupt_path)
     end
 
+    @testset "P2TriMesh quadratic surface certification" begin
+        # Independent Gram-determinant oracle: loop-form gradients, distinct from
+        # the module's vertex-coefficient expansion, sampled on a degree-8
+        # barycentric lattice (45 points) finer than the certificate's degree-4
+        # coefficient set.
+        function oracle_grads_tri(r, s)
+            L = (1-r-s, r, s)
+            dL = ((-1.0,-1.0),(1.0,0.0),(0.0,1.0))
+            g = Vector{NTuple{2,Float64}}(undef, 6)
+            for i in 1:3; c = 4L[i]-1; g[i] = (c*dL[i][1], c*dL[i][2]); end
+            for (k,(a,b)) in enumerate(((1,2),(2,3),(3,1)))
+                g[3+k] = (4*(L[a]*dL[b][1]+L[b]*dL[a][1]),
+                          4*(L[a]*dL[b][2]+L[b]*dL[a][2]))
+            end
+            return g
+        end
+        function oracle_gram(p::P2TriMesh, t, r, s)
+            g = oracle_grads_tri(r, s); J = zeros(3,2)
+            for k in 1:6
+                v = p.tri6[k,t]
+                for d in 1:3
+                    J[d,1]+=g[k][1]*p.coords[d,v]; J[d,2]+=g[k][2]*p.coords[d,v]
+                end
+            end
+            cx=J[2,1]*J[3,2]-J[3,1]*J[2,2]
+            cy=J[3,1]*J[1,2]-J[1,1]*J[3,2]
+            cz=J[1,1]*J[2,2]-J[2,1]*J[1,2]
+            return cx*cx+cy*cy+cz*cz
+        end
+        const_pts = NTuple{2,Float64}[]
+        for j in 0:8, k in 0:8-j; push!(const_pts, (j/8, k/8)); end
+        oracle_min_gram(p) = minimum(
+            oracle_gram(p, t, r, s)
+            for t in 1:ntris(p) for (r,s) in const_pts; init=Inf)
+
+        # container contracts
+        @test_throws ArgumentError P2TriMesh(zeros(3), zeros(Int32,6,0))
+        @test_throws ArgumentError P2TriMesh(zeros(3,0), zeros(Int32,6))
+        @test_throws ArgumentError P2TriMesh(zeros(2,6), zeros(Int32,6,0))
+        @test_throws ArgumentError P2TriMesh(zeros(3,6), zeros(Int32,5,0))
+        @test_throws ArgumentError P2TriMesh(trues(3,0), zeros(Int32,6,0))
+        @test_throws ArgumentError P2TriMesh(zeros(3,0), falses(6,0))
+        @test_throws ArgumentError P2TriMesh(
+            zeros(3,0), zeros(Int32,6,0); tri_tag=Bool[])
+        @test_throws ArgumentError P2TriMesh(
+            zeros(3,6), reshape(Int32.(1:6),6,1); tri_tag=Int32[])
+        @test_throws ArgumentError P2TriMesh(
+            fill(NaN,3,6), reshape(Int32.(1:6),6,1))
+        @test_throws ArgumentError P2TriMesh(
+            zeros(3,6), reshape(Int32[1,2,3,4,5,7],6,1))
+        @test_throws ArgumentError P2TriMesh(
+            zeros(3,6), reshape(Int32[1,2,3,4,5,5],6,1))
+        @test_throws ArgumentError p2_trimesh(
+            Mesh(Float64[0 1 0;0 0 1;0 0 0]; tris=reshape(Int32[1,2,3],3,1)),
+            max_nodes=-1)
+        @test_throws ArgumentError p2_trimesh(
+            Mesh(Float64[0 1 0;0 0 1;0 0 0]; tris=reshape(Int32[1,2,3],3,1)),
+            max_nodes=true)
+
+        # single straight tri: corners (0,0),(1,0),(0,1); mids at exact midpoints
+        flat = Mesh(Float64[0 1 0; 0 0 1; 0 0 0];
+                    tris=reshape(Int32[1,2,3],3,1), tri_tag=Int32[9])
+        p = p2_trimesh(flat)
+        @test nnodes(p) == 6 && ntris(p) == 1
+        @test p.tri_tag == Int32[9]
+        @test p.tri6[:,1] == Int32[1,2,3,4,5,6]
+        @test p.coords[:,4] ≈ [0.5,0.0,0.0] && p.coords[:,5] ≈ [0.5,0.5,0.0] &&
+              p.coords[:,6] ≈ [0.0,0.5,0.0]
+        @test p2_tri_min_jacobian(p) == 1.0          # (2·area)² for area 0.5
+        @test p2_tri_area(p) ≈ 0.5
+        @test validate(p).ok
+
+        # two-tri square: shared edge gets ONE shared mid-node
+        sq = Mesh(Float64[0 1 1 0; 0 0 1 1; 0 0 0 0];
+                  tris=Int32[1 2; 2 3; 3 4], tri_tag=Int32[7,8])
+        psq = p2_trimesh(sq)
+        @test nnodes(psq) == 9                        # 4 corners + 5 unique edges
+        @test ntris(psq) == 2
+        @test psq.tri_tag == Int32[7,8]
+        @test psq.tri6[5,1] == psq.tri6[4,2]          # shared (2,3) edge mid
+        @test p2_tri_min_jacobian(psq) == 1.0
+        @test p2_tri_area(psq) ≈ 1.0
+        @test validate(psq).ok
+
+        # certified bound is conservative against the independent sampler, and
+        # equals the true minimum on straight elements
+        @test p2_tri_min_jacobian(psq) <= oracle_min_gram(psq) + 1e-12
+        @test oracle_min_gram(psq) ≈ 1.0
+
+        # closed sphere surface (twice-subdivided snapped octahedron): every
+        # edge curves onto the sphere
+        m = _sphere_surface(1.0)
+        function tri_area(m,t)
+            ax=m.coords[1,m.tris[2,t]]-m.coords[1,m.tris[1,t]]
+            ay=m.coords[2,m.tris[2,t]]-m.coords[2,m.tris[1,t]]
+            az=m.coords[3,m.tris[2,t]]-m.coords[3,m.tris[1,t]]
+            bx=m.coords[1,m.tris[3,t]]-m.coords[1,m.tris[1,t]]
+            by=m.coords[2,m.tris[3,t]]-m.coords[2,m.tris[1,t]]
+            bz=m.coords[3,m.tris[3,t]]-m.coords[3,m.tris[1,t]]
+            return 0.5*hypot(ay*bz-az*by, az*bx-ax*bz, ax*by-ay*bx)
+        end
+        linear_area = sum(tri_area(m,t) for t in 1:ntris(m))
+        pc = p2_trimesh(m)
+        flat_area = p2_tri_area(pc)
+        @test flat_area ≈ linear_area               # straight P2 == linear area
+        nc = curve_to_surface!(pc, (x,y,z)->(x,y,z)./hypot(x,y,z), (x,y,z)->true)
+        @test nc == nnodes(pc) - nnodes(m)            # every mid-node moved
+        @test validate(pc).ok
+        @test p2_tri_min_jacobian(pc) > 0
+        @test p2_tri_min_jacobian(pc) <= oracle_min_gram(pc) + 1e-9
+        @test oracle_min_gram(pc) > 0                 # no between-sample fold
+        for i in nnodes(m)+1:nnodes(pc)
+            @test hypot(pc.coords[1,i],pc.coords[2,i],pc.coords[3,i]) ≈ 1.0 atol=1e-14
+        end
+        curved_area = p2_tri_area(pc)
+        @test flat_area < curved_area
+        @test abs(curved_area - 4π) < 0.1           # approaches the true sphere
+
+        # reverted projection: folding the edge-(1,2) mid to (2,-1) loses the
+        # certificate (verified below), so it is undone and the mesh stays valid
+        pf = p2_trimesh(flat)
+        fold = (x,y,z) -> (x==0.5 && y==0.0 ? (2.0,-1.0,z) : (x,y,z))
+        moved = curve_to_surface!(pf, fold, (x,y,z)->true)
+        @test moved == 0
+        @test validate(pf).ok
+        @test pf.coords[:,4] ≈ [0.5,0.0,0.0]
+        # the same displacement held directly is genuinely uncertified
+        pf.coords[1,4] = 2.0; pf.coords[2,4] = -1.0
+        @test !validate(pf).ok
+        @test p2_tri_min_jacobian(pf) < 0
+        @test_throws ArgumentError p2_tri_area(pf)
+        @test_throws ArgumentError write_msh_p2(
+            joinpath(mktempdir(),"f.msh"), pf)
+
+        # non-finite projections are skipped (not moved), non-Bool on_surface
+        # and bad tolerances are contract failures
+        @test curve_to_surface!(
+            p, (x,y,z)->(NaN,y,z), (x,y,z)->true) == 0
+        @test validate(p).ok
+        @test_throws ArgumentError curve_to_surface!(
+            p, (x,y,z)->(x,y,z), (x,y,z)->1)
+        @test_throws ArgumentError curve_to_surface!(
+            p, (x,y,z)->(x,y,z), (x,y,z)->true; rtol=-1.0)
+
+        # a mid-node reused on the wrong edge is rejected
+        pc2 = p2_trimesh(sq); pc2.tri6[5,1] = pc2.tri6[4,1]
+        @test !validate(pc2).ok
+
+        # gmsh type-9 write + linear read-back
+        dir = mktempdir(); path = joinpath(dir, "p2tri.msh")
+        write_msh_p2(path, p)
+        f = read_msh(path)
+        @test ntris(f.mesh) == 1
+        @test f.mesh.tri_tag == Int32[9]
+        @test mesh_crc(f.mesh).sha == mesh_crc(flat).sha
+        sphere_path = joinpath(dir, "sphere-p2tri.msh")
+        write_msh_p2(sphere_path, pc)
+        sf = read_msh(sphere_path)
+        @test ntris(sf.mesh) == ntris(m)
+        @test mesh_crc(sf.mesh).sha == mesh_crc(m).sha
+        @test_throws ArgumentError write_msh_p2("", p)
+        @test_throws ArgumentError write_msh_p2(nothing, p)
+        @test_throws ArgumentError write_msh_p2(path, p; tri_tag=Int32[-1])
+        @test_throws ArgumentError write_msh_p2(path, p; tri_tag=Bool[true])
+
+        # empty and resource-limited paths
+        ep = p2_trimesh(Mesh(Matrix{Float64}(undef,3,0)))
+        @test ntris(ep) == 0
+        @test p2_tri_min_jacobian(ep) == 0.0
+        @test p2_tri_area(ep) == 0.0
+        @test curve_to_surface!(ep, (x,y,z)->(x,y,z), (x,y,z)->true) == 0
+        @test_throws ArgumentError p2_trimesh(sq; max_nodes=8)
+        @test_throws ArgumentError p2_trimesh(sq; max_tris=1)
+        limited = p2_trimesh(sq; max_nodes=9, max_tris=2)
+        @test nnodes(limited) == 9
+    end
+
     @testset "empty mesh" begin
         e = Mesh(Matrix{Float64}(undef,3,0))
         p = p2_tetmesh(e)

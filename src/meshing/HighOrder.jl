@@ -5,6 +5,10 @@ Stage-6 high-order (curved) elements (PLAN.md §4 Stage 6). This module generate
 **quadratic (10-node, P2) tetrahedra** from a linear tet [`Mesh`](@ref) by adding
 one shared node at the midpoint of every edge, in Gmsh's type-11 node order
 (4 corners, then the 6 edge nodes on edges `(1,2),(2,3),(3,1),(1,4),(3,4),(2,4)`).
+The same construction lifts linear triangles to **quadratic (6-node, P2)
+triangles** in Gmsh's type-9 order (3 corners, then edge nodes on `(1,2)`,
+`(2,3)`, `(3,1)`), certified by the exact degree-4 Bernstein bound of the Gram
+determinant `|∂x/∂r × ∂x/∂s|²`.
 
 Edge nodes use the correctly rounded Float64 midpoint. When the mathematical
 average is representable, straight-sided P2 is geometrically identical to the
@@ -21,12 +25,14 @@ Thus a between-sample fold cannot pass the guard.
 module HighOrder
 
 using ..MeshTypes: Mesh, MeshDiagnostic, node, boundary_faces
+using ..MeshQuadrature: mesh_integration_points
 using ..Refine: _midpoint_coordinate
-import ..MeshTypes: nnodes, ntets, validate     # extended for P2Mesh
+import ..MeshTypes: nnodes, ntris, ntets, validate  # extended for P2 types
 using Printf: @printf
 
-export P2Mesh, p2_tetmesh, p2_volume, write_msh_p2,
-       curve_to_cylinder!, curve_to_surface!, p2_min_jacobian
+export P2Mesh, P2TriMesh, p2_tetmesh, p2_trimesh, p2_volume, p2_tri_area,
+       write_msh_p2, curve_to_cylinder!, curve_to_surface!,
+       p2_min_jacobian, p2_tri_min_jacobian
 
 const _P2_EDGE_SLOTS = ((5, 1, 2), (6, 2, 3), (7, 3, 1),
                         (8, 1, 4), (9, 3, 4), (10, 2, 4))
@@ -192,33 +198,35 @@ end
 nnodes(p::P2Mesh) = size(p.coords, 2)
 ntets(p::P2Mesh) = size(p.tet10, 2)
 
-@inline function _p2_limit(value, name::AbstractString)
+@inline function _p2_limit(value, name::AbstractString, caller::AbstractString)
     (value isa Integer && !(value isa Bool)) || throw(ArgumentError(
-        "p2_tetmesh: $name must be an integer other than Bool"))
+        "$caller: $name must be an integer other than Bool"))
     0 <= value <= typemax(Int32) || throw(ArgumentError(
-        "p2_tetmesh: $name must lie in 0:$(typemax(Int32))"))
+        "$caller: $name must lie in 0:$(typemax(Int32))"))
     return Int(value)
 end
 
-@inline function _p2_checked_mul(x::Int, y::Int, what::AbstractString)
+@inline function _p2_checked_mul(x::Int, y::Int, what::AbstractString,
+                                 caller::AbstractString)
     try
         return Base.checked_mul(x, y)
     catch err
         err isa InterruptException && rethrow()
         err isa OverflowError || rethrow()
         throw(ArgumentError(
-            "p2_tetmesh: $what count overflows the platform Int limit"))
+            "$caller: $what count overflows the platform Int limit"))
     end
 end
 
-@inline function _p2_checked_add(x::Int, y::Int, what::AbstractString)
+@inline function _p2_checked_add(x::Int, y::Int, what::AbstractString,
+                                 caller::AbstractString)
     try
         return Base.checked_add(x, y)
     catch err
         err isa InterruptException && rethrow()
         err isa OverflowError || rethrow()
         throw(ArgumentError(
-            "p2_tetmesh: $what count overflows the platform Int limit"))
+            "$caller: $what count overflows the platform Int limit"))
     end
 end
 
@@ -237,8 +245,8 @@ unique edges). The input tetrahedron tags are preserved. `max_nodes` and
 function p2_tetmesh(m::Mesh;
                     max_nodes=typemax(Int32),
                     max_tets=typemax(Int32))
-    node_limit = _p2_limit(max_nodes, "max_nodes")
-    tet_limit = _p2_limit(max_tets, "max_tets")
+    node_limit = _p2_limit(max_nodes, "max_nodes", "p2_tetmesh")
+    tet_limit = _p2_limit(max_tets, "max_tets", "p2_tetmesh")
     diagnostic = validate(m)
     diagnostic.ok || throw(ArgumentError(
         "p2_tetmesh: input mesh is invalid — " * join(diagnostic.messages, "; ")))
@@ -251,8 +259,8 @@ function p2_tetmesh(m::Mesh;
     nt == 0 && return P2Mesh(
         m.coords, Matrix{Int32}(undef, 10, 0); tet_tag=m.tet_tag)
 
-    edge_records = _p2_checked_mul(6, nt, "edge-record")
-    _p2_checked_mul(edge_records, sizeof(NTuple{2,Int32}), "edge-record byte")
+    edge_records = _p2_checked_mul(6, nt, "edge-record", "p2_tetmesh")
+    _p2_checked_mul(edge_records, sizeof(NTuple{2,Int32}), "edge-record byte", "p2_tetmesh")
     edges = Vector{NTuple{2,Int32}}()
     edge_ids = Dict{NTuple{2,Int32},Int32}()
     available_nodes = node_limit - nn
@@ -271,14 +279,14 @@ function p2_tetmesh(m::Mesh;
         register_edge(m.tets[i, t], m.tets[j, t])
     end
 
-    final_nodes = _p2_checked_add(nn, length(edges), "quadratic node")
+    final_nodes = _p2_checked_add(nn, length(edges), "quadratic node", "p2_tetmesh")
     final_nodes <= typemax(Int32) || throw(ArgumentError(
         "p2_tetmesh: quadratic node count exceeds Int32 indexing"))
-    coordinate_entries = _p2_checked_mul(3, final_nodes, "coordinate entry")
-    connectivity_entries = _p2_checked_mul(10, nt, "connectivity entry")
-    _p2_checked_mul(coordinate_entries, sizeof(Float64), "coordinate byte")
-    _p2_checked_mul(connectivity_entries, sizeof(Int32), "connectivity byte")
-    _p2_checked_mul(nt, sizeof(Int32), "tag byte")
+    coordinate_entries = _p2_checked_mul(3, final_nodes, "coordinate entry", "p2_tetmesh")
+    connectivity_entries = _p2_checked_mul(10, nt, "connectivity entry", "p2_tetmesh")
+    _p2_checked_mul(coordinate_entries, sizeof(Float64), "coordinate byte", "p2_tetmesh")
+    _p2_checked_mul(connectivity_entries, sizeof(Int32), "connectivity byte", "p2_tetmesh")
+    _p2_checked_mul(nt, sizeof(Int32), "tag byte", "p2_tetmesh")
 
     coords = Matrix{Float64}(undef, 3, final_nodes)
     @inbounds for i in 1:nn, d in 1:3
@@ -410,31 +418,32 @@ end
     return m,e
 end
 
-function _integer_element_coords(coords,tet10,t::Integer)
-    C=Matrix{BigInt}(undef,3,10); exps=Vector{Int}(undef,3)
+function _integer_element_coords(coords,conn,t::Integer,label::AbstractString)
+    nnode=size(conn,1)
+    C=Matrix{BigInt}(undef,3,nnode); exps=Vector{Int}(undef,3)
     @inbounds for d in 1:3
-        parts=Vector{Tuple{BigInt,Int}}(undef,10); emin=typemax(Int)
-        for k in 1:10
-            x=coords[d,tet10[k,t]]; isfinite(x) ||
-                throw(ArgumentError("P2 Jacobian: tet $t has a non-finite coordinate"))
+        parts=Vector{Tuple{BigInt,Int}}(undef,nnode); emin=typemax(Int)
+        for k in 1:nnode
+            x=coords[d,conn[k,t]]; isfinite(x) ||
+                throw(ArgumentError("P2 Jacobian: $label $t has a non-finite coordinate"))
             parts[k]=_dyadic_parts(x)
             parts[k][1]!=0 && (emin=min(emin,parts[k][2]))
         end
         emin==typemax(Int) && (emin=0)
         base=parts[1][1]==0 ? BigInt(0) : parts[1][1]<<(parts[1][2]-emin)
         tz=typemax(Int)
-        for k in 1:10
+        for k in 1:nnode
             m,e=parts[k]
             q=(m==0 ? BigInt(0) : m<<(e-emin))-base
             C[d,k]=q; q!=0 && (tz=min(tz,trailing_zeros(q)))
         end
         if tz!=typemax(Int) && tz>0
-            for k in 1:10; C[d,k] >>= tz; end
+            for k in 1:nnode; C[d,k] >>= tz; end
             emin += tz
         end
         exps[d]=emin
     end
-    return C,exps[1]+exps[2]+exps[3]
+    return C,exps
 end
 
 @inline function _mixed_det(J,i,j,k)
@@ -445,7 +454,8 @@ end
 end
 
 function _p2_bernstein_coeffs(coords,tet10,t::Integer)
-    C,scaleexp=_integer_element_coords(coords,tet10,t)
+    C,exps=_integer_element_coords(coords,tet10,t,"tet")
+    scaleexp=exps[1]+exps[2]+exps[3]
     J=Matrix{BigInt}(undef,9,4)
     @inbounds for q in 1:4,c in 1:3,d in 1:3
         s=BigInt(0)
@@ -529,10 +539,10 @@ end
 
 # `factor * bounding-box diagonal`, evaluated without first overflowing the
 # physical diagonal or losing a narrow span at a large translation.
-function _scaled_bbox_diag(p::P2Mesh, factor::Float64)
+function _scaled_bbox_diag(coords::Matrix{Float64}, factor::Float64)
     lo1=lo2=lo3=Inf; hi1=hi2=hi3=-Inf
-    @inbounds for i in 1:nnodes(p)
-        x=p.coords[1,i]; y=p.coords[2,i]; z=p.coords[3,i]
+    @inbounds for i in axes(coords,2)
+        x=coords[1,i]; y=coords[2,i]; z=coords[3,i]
         x<lo1 && (lo1=x); x>hi1 && (hi1=x)
         y<lo2 && (lo2=y); y>hi2 && (hi2=y)
         z<lo3 && (lo3=z); z>hi3 && (hi3=z)
@@ -573,7 +583,7 @@ function _curve_boundary!(p::P2Mesh, qualifies, project; rtol::Float64=1e-6)
     end
     bnd = _boundary_corner_edges(p)
     endp, midtets = _mid_maps(p)
-    movetol = _scaled_bbox_diag(p, rtol)
+    movetol = _scaled_bbox_diag(p.coords, rtol)
     ncurved = 0
     originals = Vector{Tuple{Int32,NTuple{3,Float64}}}()
     try
@@ -770,6 +780,571 @@ function write_msh_p2(path, p::P2Mesh; tet_tag=p.tet_tag)
             tag = tags[t]
             print(io, t, " 11 2 ", tag, " ", tag)
             for k in 1:10; print(io, " ", p.tet10[k,t]); end
+            println(io)
+        end
+        println(io, "\$EndElements")
+        flush(io);close(io);mv(tmp,target;force=true)
+    end
+    return path
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Quadratic (6-node, P2) triangles — gmsh type-9 order: corners 1,2,3 then edge
+# mid-nodes 4=(1,2), 5=(2,3), 6=(3,1).  Coordinates stay 3-D so boundary and
+# interior edge nodes can be curved onto a genuine embedding surface.
+# ════════════════════════════════════════════════════════════════════════════════
+const _P2TRI_EDGE_SLOTS = ((4, 1, 2), (5, 2, 3), (6, 3, 1))
+
+"""
+    P2TriMesh(coords, tri6; tri_tag=zeros)
+
+Quadratic triangle mesh: `coords` is `3 × N` (original corners followed by
+edge-mid nodes); `tri6` is `6 × ntri` in gmsh type-9 order; and `tri_tag` stores
+one nonnegative physical/surface tag per element. Inputs are copied. The arrays
+remain mutable, and public consumers revalidate their structural invariants
+before use.
+"""
+struct P2TriMesh
+    coords::Matrix{Float64}
+    tri6::Matrix{Int32}
+    tri_tag::Vector{Int32}
+    function P2TriMesh(coords, tri6;
+                       tri_tag=zeros(Int32,
+                                     tri6 isa AbstractMatrix ? size(tri6, 2) : 0))
+        coords isa AbstractMatrix || throw(ArgumentError(
+            "P2TriMesh: coords must be a matrix"))
+        tri6 isa AbstractMatrix || throw(ArgumentError(
+            "P2TriMesh: tri6 must be a matrix"))
+        tri_tag isa AbstractVector || throw(ArgumentError(
+            "P2TriMesh: tri_tag must be a vector"))
+        size(coords, 1) == 3 || throw(ArgumentError(
+            "P2TriMesh: coords must be 3 × nnodes"))
+        size(tri6, 1) == 6 || throw(ArgumentError(
+            "P2TriMesh: tri6 must be 6 × ntris"))
+        length(tri_tag) == size(tri6, 2) || throw(ArgumentError(
+            "P2TriMesh: tri_tag length mismatch"))
+        (eltype(coords) <: Bool || any(value -> value isa Bool, coords)) &&
+            throw(ArgumentError("P2TriMesh: coordinates must not be Bool"))
+        (eltype(tri6) <: Bool || any(value -> value isa Bool, tri6)) &&
+            throw(ArgumentError("P2TriMesh: connectivity must not be Bool"))
+        (eltype(tri_tag) <: Bool || any(value -> value isa Bool, tri_tag)) &&
+            throw(ArgumentError("P2TriMesh: tags must not be Bool"))
+        size(coords, 2) <= typemax(Int32) || throw(ArgumentError(
+            "P2TriMesh: $(size(coords,2)) nodes exceed the Int32 indexing limit"))
+        size(tri6, 2) <= typemax(Int32) || throw(ArgumentError(
+            "P2TriMesh: triangle count exceeds the Int32 topology limit"))
+        C = try
+            Matrix{Float64}(coords)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OutOfMemoryError && rethrow()
+            throw(ArgumentError(
+                "P2TriMesh: coordinates must be representable as Float64: " *
+                sprint(showerror, err)))
+        end
+        T = try
+            Matrix{Int32}(tri6)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OutOfMemoryError && rethrow()
+            throw(ArgumentError("P2TriMesh: connectivity must fit Int32: " *
+                                sprint(showerror, err)))
+        end
+        tags = try
+            Vector{Int32}(tri_tag)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OutOfMemoryError && rethrow()
+            throw(ArgumentError("P2TriMesh: tags must fit Int32: " *
+                                sprint(showerror, err)))
+        end
+        _check_p2tri_arrays(C, T, tags, "P2TriMesh")
+        new(C, T, tags)
+    end
+end
+
+function _check_p2tri_arrays(coords::Matrix{Float64}, tri6::Matrix{Int32},
+                             tri_tag::Vector{Int32}, caller::AbstractString)
+    nn = size(coords, 2)
+    ne = size(tri6, 2)
+    nn <= typemax(Int32) || throw(ArgumentError(
+        "$caller: node count exceeds the Int32 indexing limit"))
+    ne <= typemax(Int32) || throw(ArgumentError(
+        "$caller: triangle count exceeds the Int32 topology limit"))
+    length(tri_tag) == ne || throw(ArgumentError(
+        "$caller: tri_tag length does not match the triangle count"))
+    @inbounds for i in axes(coords, 2), d in 1:3
+        isfinite(coords[d, i]) || throw(ArgumentError(
+            "$caller: node $i has a non-finite coordinate"))
+    end
+    @inbounds for t in axes(tri6, 2)
+        tag = tri_tag[t]
+        tag >= 0 || throw(ArgumentError(
+            "$caller: triangle $t has negative tag $tag"))
+        for k in 1:6
+            value = tri6[k, t]
+            1 <= value <= nn || throw(ArgumentError(
+                "$caller: triangle $t references node $value outside 1:$nn"))
+            for j in 1:k-1
+                tri6[j, t] != value || throw(ArgumentError(
+                    "$caller: triangle $t repeats node $value"))
+            end
+        end
+    end
+    ne == 0 && return nothing
+
+    linear = Mesh(coords; tris=Matrix(@view tri6[1:3, :]))
+    diagnostic = validate(linear)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: linear corner complex is invalid — " *
+        join(diagnostic.messages, "; ")))
+    edge_mid = Dict{Tuple{Int32,Int32},Int32}()
+    mid_edge = Dict{Int32,Tuple{Int32,Int32}}()
+    corners = Set{Int32}(@view tri6[1:3, :])
+    @inbounds for t in axes(tri6, 2), (slot, i, j) in _P2TRI_EDGE_SLOTS
+        a = tri6[i, t]
+        b = tri6[j, t]
+        key = minmax(a, b)
+        mid = tri6[slot, t]
+        old = get(edge_mid, key, Int32(0))
+        (old == 0 || old == mid) || throw(ArgumentError(
+            "$caller: edge $key uses inconsistent mid-nodes $old and $mid"))
+        old_edge = get(mid_edge, mid, nothing)
+        (old_edge === nothing || old_edge == key) || throw(ArgumentError(
+            "$caller: mid-node $mid is reused by distinct edges $old_edge and $key"))
+        edge_mid[key] = mid
+        mid_edge[mid] = key
+    end
+    for mid in keys(mid_edge)
+        mid in corners && throw(ArgumentError(
+            "$caller: node $mid is used as both a corner and an edge mid-node"))
+    end
+    return nothing
+end
+
+function _require_p2tri_structure(p::P2TriMesh, caller::AbstractString)
+    _check_p2tri_arrays(p.coords, p.tri6, p.tri_tag, caller)
+    return nothing
+end
+
+nnodes(p::P2TriMesh) = size(p.coords, 2)
+ntris(p::P2TriMesh) = size(p.tri6, 2)
+
+"""
+    p2_trimesh(m::Mesh;
+               max_nodes=typemax(Int32),
+               max_tris=typemax(Int32)) -> P2TriMesh
+
+Convert the linear triangles of `m` to quadratic triangles, sharing one
+correctly rounded Float64 mid-node per unique mesh edge (so the node count
+grows by exactly the number of unique triangle edges). Input triangle tags are
+preserved; segments and tetrahedra are not carried over. `max_nodes` and
+`max_tris` are nonnegative allocation limits bounded by `typemax(Int32)`.
+"""
+function p2_trimesh(m::Mesh;
+                    max_nodes=typemax(Int32),
+                    max_tris=typemax(Int32))
+    node_limit = _p2_limit(max_nodes, "max_nodes", "p2_trimesh")
+    tri_limit = _p2_limit(max_tris, "max_tris", "p2_trimesh")
+    diagnostic = validate(m)
+    diagnostic.ok || throw(ArgumentError(
+        "p2_trimesh: input mesh is invalid — " * join(diagnostic.messages, "; ")))
+    nn = nnodes(m)
+    nt = ntris(m)
+    nn <= node_limit || throw(ArgumentError(
+        "p2_trimesh: $nn input nodes exceed max_nodes=$node_limit"))
+    nt <= tri_limit || throw(ArgumentError(
+        "p2_trimesh: $nt input triangles exceed max_tris=$tri_limit"))
+    nt == 0 && return P2TriMesh(
+        m.coords, Matrix{Int32}(undef, 6, 0); tri_tag=m.tri_tag)
+
+    edge_records = _p2_checked_mul(3, nt, "edge-record", "p2_trimesh")
+    _p2_checked_mul(edge_records, sizeof(NTuple{2,Int32}), "edge-record byte", "p2_trimesh")
+    edges = Vector{NTuple{2,Int32}}()
+    edge_ids = Dict{NTuple{2,Int32},Int32}()
+    available_nodes = node_limit - nn
+    function register_edge(a::Int32, b::Int32)
+        edge = _p2_edge(a, b)
+        old = get(edge_ids, edge, Int32(0))
+        old != 0 && return old
+        length(edges) < available_nodes || throw(ArgumentError(
+            "p2_trimesh: quadratic output requires more than max_nodes=$node_limit"))
+        push!(edges, edge)
+        node_id = Int32(nn + length(edges))
+        edge_ids[edge] = node_id
+        return node_id
+    end
+    @inbounds for t in 1:nt, (_, i, j) in _P2TRI_EDGE_SLOTS
+        register_edge(m.tris[i, t], m.tris[j, t])
+    end
+
+    final_nodes = _p2_checked_add(nn, length(edges), "quadratic node", "p2_trimesh")
+    final_nodes <= typemax(Int32) || throw(ArgumentError(
+        "p2_trimesh: quadratic node count exceeds Int32 indexing"))
+    coordinate_entries = _p2_checked_mul(3, final_nodes, "coordinate entry", "p2_trimesh")
+    connectivity_entries = _p2_checked_mul(6, nt, "connectivity entry", "p2_trimesh")
+    _p2_checked_mul(coordinate_entries, sizeof(Float64), "coordinate byte", "p2_trimesh")
+    _p2_checked_mul(connectivity_entries, sizeof(Int32), "connectivity byte", "p2_trimesh")
+    _p2_checked_mul(nt, sizeof(Int32), "tag byte", "p2_trimesh")
+
+    coords = Matrix{Float64}(undef, 3, final_nodes)
+    @inbounds for i in 1:nn, d in 1:3
+        coords[d, i] = m.coords[d, i]
+    end
+    @inbounds for (index, edge) in pairs(edges)
+        a, b = edge
+        pa = node(m, a)
+        pb = node(m, b)
+        midpoint = (_midpoint_coordinate(pa[1], pb[1]),
+                    _midpoint_coordinate(pa[2], pb[2]),
+                    _midpoint_coordinate(pa[3], pb[3]))
+        all(isfinite, midpoint) || throw(ArgumentError(
+            "p2_trimesh: edge $edge has a non-finite midpoint"))
+        (midpoint != pa && midpoint != pb) || throw(ArgumentError(
+            "p2_trimesh: edge $edge midpoint is below Float64 coordinate resolution"))
+        output_node = nn + index
+        coords[1, output_node] = midpoint[1]
+        coords[2, output_node] = midpoint[2]
+        coords[3, output_node] = midpoint[3]
+    end
+
+    tri6 = Matrix{Int32}(undef, 6, nt)
+    @inbounds for t in 1:nt
+        for corner in 1:3
+            tri6[corner, t] = m.tris[corner, t]
+        end
+        for (slot, i, j) in _P2TRI_EDGE_SLOTS
+            tri6[slot, t] = edge_ids[_p2_edge(m.tris[i, t], m.tris[j, t])]
+        end
+    end
+    return P2TriMesh(coords, tri6; tri_tag=m.tri_tag)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# P2 triangle validity — exact global degree-4 Bernstein certificate of the
+# Gram determinant g(r,s) = |∂x/∂r × ∂x/∂s|² over the reference triangle
+# {r,s ≥ 0, r+s ≤ 1} with barycentric L1=1-r-s, L2=r, L3=s.
+# Type-9 shape functions: corner i: Li(2Li-1); edge(a,b): 4·La·Lb.
+# The isoparametric map is quadratic, so each Jacobian column is a degree-1
+# barycentric vector polynomial Jr = ΣAi·λi, Js = ΣBi·λi.  The cross product
+# w = 2·(Jr × Js) is degree-2 with six vector Bernstein coefficients, and
+# 4·g = |w|² is degree-4 with fifteen scalar Bernstein coefficients.
+# Positivity of every exact coefficient proves g > 0 everywhere on the closed
+# reference triangle by the Bernstein convex-hull property — i.e. the curved
+# surface element is everywhere regular, planar or not.
+# ════════════════════════════════════════════════════════════════════════════════
+const _B2TRI_MULTI = ((2,0,0),(0,2,0),(0,0,2),(1,1,0),(1,0,1),(0,1,1))
+const _B2TRI_WEIGHT = (1,1,1,2,2,2)
+const _B4TRI_MULTI = Tuple((a,b,4-a-b) for a in 0:4 for b in 0:4-a)
+const _B4TRI_WEIGHT = Tuple(24 ÷ (factorial(g[1])*factorial(g[2])*factorial(g[3]))
+                            for g in _B4TRI_MULTI)
+const _B4TRI_PAIRS = Tuple(Tuple((i,j) for i in 1:6 for j in 1:6
+    if _B2TRI_MULTI[i][1]+_B2TRI_MULTI[j][1]==g[1] &&
+       _B2TRI_MULTI[i][2]+_B2TRI_MULTI[j][2]==g[2] &&
+       _B2TRI_MULTI[i][3]+_B2TRI_MULTI[j][3]==g[3])
+    for g in _B4TRI_MULTI)
+
+@inline function _bigint_cross(a, b)
+    return (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
+end
+
+# Vertex-evaluated degree-1 Bernstein coefficient vectors of the two Jacobian
+# columns.  Every combination sums to zero, so the per-dimension translation
+# base of _integer_element_coords cancels.
+function _p2tri_jacobi_vertices(C::Matrix{BigInt})
+    A = Matrix{BigInt}(undef, 3, 3)
+    B = Matrix{BigInt}(undef, 3, 3)
+    @inbounds for d in 1:3
+        x1=C[d,1]; x2=C[d,2]; x3=C[d,3]; x4=C[d,4]; x5=C[d,5]; x6=C[d,6]
+        A[d,1] = -3x1 - x2 + 4x4
+        A[d,2] = x1 + 3x2 - 4x4
+        A[d,3] = x1 - x2 + 4x5 - 4x6
+        B[d,1] = -3x1 - x3 + 4x6
+        B[d,2] = x1 - x3 - 4x4 + 4x5
+        B[d,3] = x1 + 3x3 - 4x6
+    end
+    return A, B
+end
+
+# Degree-2 Bernstein coefficient vectors of w = 2·(Jr × Js).
+function _p2tri_cross_coeffs(A::Matrix{BigInt}, B::Matrix{BigInt})
+    U = Vector{NTuple{3,BigInt}}(undef, 6)
+    @inbounds begin
+        a1=(A[1,1],A[2,1],A[3,1]); a2=(A[1,2],A[2,2],A[3,2]); a3=(A[1,3],A[2,3],A[3,3])
+        b1=(B[1,1],B[2,1],B[3,1]); b2=(B[1,2],B[2,2],B[3,2]); b3=(B[1,3],B[2,3],B[3,3])
+        c11=_bigint_cross(a1,b1); c22=_bigint_cross(a2,b2); c33=_bigint_cross(a3,b3)
+        U[1]=2 .* c11; U[2]=2 .* c22; U[3]=2 .* c33
+        c12=_bigint_cross(a1,b2); c21=_bigint_cross(a2,b1)
+        c13=_bigint_cross(a1,b3); c31=_bigint_cross(a3,b1)
+        c23=_bigint_cross(a2,b3); c32=_bigint_cross(a3,b2)
+        U[4]=c12 .+ c21; U[5]=c13 .+ c31; U[6]=c23 .+ c32
+    end
+    return U
+end
+
+# Fifteen exact degree-4 Bernstein coefficients of |w|² = 4·g, expressed as
+# T_γ·2^fmin where fmin is the shared cross-component scale exponent.  The true
+# coefficient of g in Bernstein form is T_γ·2^(fmin-2)/C(4,γ).
+function _p2tri_bernstein_coeffs(coords, tri6, t::Integer)
+    C, exps = _integer_element_coords(coords, tri6, t, "triangle")
+    A, B = _p2tri_jacobi_vertices(C)
+    U = _p2tri_cross_coeffs(A, B)
+    f = (exps[2]+exps[3], exps[1]+exps[3], exps[1]+exps[2])
+    fmin = 2*min(f[1], f[2], f[3])
+    T = zeros(BigInt, 15)
+    @inbounds for c in 1:3
+        shift = 2*f[c] - fmin
+        for gidx in 1:15
+            s = zero(BigInt)
+            for (i, j) in _B4TRI_PAIRS[gidx]
+                s += _B2TRI_WEIGHT[i]*_B2TRI_WEIGHT[j]*U[i][c]*U[j][c]
+            end
+            T[gidx] += s << shift
+        end
+    end
+    return T, fmin
+end
+
+function _p2tri_bernstein_bound(coords, tri6, t::Integer)
+    T, fmin = _p2tri_bernstein_coeffs(coords, tri6, t)
+    mini = 1
+    @inbounds for i in 2:15
+        T[i]*_B4TRI_WEIGHT[mini] < T[mini]*_B4TRI_WEIGHT[i] && (mini = i)
+    end
+    return all(>(0), T), T[mini], _B4TRI_WEIGHT[mini], fmin-2
+end
+
+"""
+    p2_tri_min_jacobian(p::P2TriMesh) -> Float64
+
+Minimum exact degree-4 Bernstein coefficient of the quadratic-triangle Gram
+determinant `g = |∂x/∂r × ∂x/∂s|²` over all elements, returned as `Float64`. It
+is a conservative global lower bound: `> 0` formally certifies every element is
+a regular surface map over the whole reference triangle; `≤ 0` means the mesh
+is not certified (and may be folded or degenerate). For a straight-sided P2
+triangle this equals `(2·area)² > 0`.
+"""
+function p2_tri_min_jacobian(p::P2TriMesh)
+    _require_p2tri_structure(p, "p2_tri_min_jacobian")
+    ntris(p) == 0 && return 0.0
+    mn = Inf
+    for t in 1:ntris(p)
+        _, n, dn, e = _p2tri_bernstein_bound(p.coords, p.tri6, t)
+        d = _bound_float(n, dn, e)
+        d < mn && (mn = d)
+    end
+    return mn
+end
+
+@inline function _p2tri_grads(r::Float64, s::Float64)
+    L1=1.0-r-s; L2=r; L3=s
+    dr=(1-4L1, 4L2-1, 0.0, 4(L1-L2), 4L3, -4L3)
+    ds=(1-4L1, 0.0, 4L3-1, -4L2, 4L2, 4(L1-L3))
+    return dr, ds
+end
+
+# g(r,s) = |∂x/∂r × ∂x/∂s|² evaluated in Float64 at one reference point.
+function _p2tri_detJ2(coords, tri6, t::Integer, r::Float64, s::Float64)
+    dr, ds = _p2tri_grads(r, s)
+    jrx=jry=jrz=jsx=jsy=jsz=0.0
+    @inbounds for k in 1:6
+        v=tri6[k,t]; x=coords[1,v]; y=coords[2,v]; z=coords[3,v]
+        jrx+=x*dr[k]; jry+=y*dr[k]; jrz+=z*dr[k]
+        jsx+=x*ds[k]; jsy+=y*ds[k]; jsz+=z*ds[k]
+    end
+    cx=jry*jsz-jrz*jsy; cy=jrz*jsx-jrx*jsz; cz=jrx*jsy-jry*jsx
+    return cx*cx+cy*cy+cz*cz
+end
+
+"""
+    p2_tri_area(p::P2TriMesh) -> Float64
+
+Total isoparametric surface area of a quadratic triangle mesh, measured by a
+fixed order-16 Gauss rule on the reference triangle. Every element first has
+to pass the exact global positive Gram-determinant certificate. The integrand
+`|∂x/∂r × ∂x/∂s|` is a square root of a degree-4 polynomial, so the value is a
+high-order quadrature estimate, not an exact integral — use
+[`p2_tri_min_jacobian`](@ref) for the certified bound. For a straight-sided P2
+triangle this reduces to its linear corner-triangle area.
+"""
+function p2_tri_area(p::P2TriMesh)
+    _require_p2tri_structure(p, "p2_tri_area")
+    ntris(p) == 0 && return 0.0
+    points, weights = mesh_integration_points(2, "Gauss16")
+    nq = length(weights)
+    total = 0.0
+    @inbounds for t in 1:ntris(p)
+        _p2tri_bernstein_bound(p.coords, p.tri6, t)[1] || throw(ArgumentError(
+            "p2_tri_area: triangle $t lacks a global positive-Jacobian certificate"))
+        element = 0.0
+        for q in 1:nq
+            g = _p2tri_detJ2(p.coords, p.tri6, t, points[3q-2], points[3q-1])
+            g > 0 || throw(ArgumentError(
+                "p2_tri_area: triangle $t has a nonpositive sampled Gram determinant"))
+            element += weights[q]*sqrt(g)
+        end
+        total += element
+    end
+    (isfinite(total) && total > 0) || throw(ArgumentError(
+        "p2_tri_area: total area is not representable as a positive Float64"))
+    return total
+end
+
+"""
+    validate(p::P2TriMesh) -> MeshDiagnostic
+
+Validate P2 surface storage, shared-edge ownership, the positive linear corner
+complex, and the exact global positive Gram-determinant certificate of every
+quadratic element.
+"""
+function validate(p::P2TriMesh)
+    try
+        _require_p2tri_structure(p, "P2TriMesh validation")
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OutOfMemoryError && rethrow()
+        err isa ArgumentError || rethrow()
+        return MeshDiagnostic(false, [sprint(showerror, err)])
+    end
+    uncertified = 0
+    @inbounds for t in 1:ntris(p)
+        _p2tri_bernstein_bound(p.coords, p.tri6, t)[1] || (uncertified += 1)
+    end
+    messages = uncertified == 0 ? String[] :
+        ["$uncertified quadratic triangles lack a global positive-Jacobian certificate"]
+    return MeshDiagnostic(isempty(messages), messages)
+end
+
+# mid-node → its two corner endpoints, and mid-node → incident triangle list.
+function _p2tri_mid_maps(p::P2TriMesh)
+    endp = Dict{Int32, Tuple{Int32,Int32}}()
+    midtris = Dict{Int32, Vector{Int32}}()
+    @inbounds for t in 1:ntris(p), (sl,i,j) in _P2TRI_EDGE_SLOTS
+        m = p.tri6[sl,t]
+        endp[m] = (p.tri6[i,t], p.tri6[j,t])
+        push!(get!(() -> Int32[], midtris, m), Int32(t))
+    end
+    return endp, midtris
+end
+
+"""
+    curve_to_surface!(p::P2TriMesh, project, on_surface; rtol=1e-6)
+
+Curve quadratic-triangle edge nodes onto a surface: `project(x,y,z)` snaps a
+point and `on_surface(x,y,z)` gates on the two corner endpoints. Every edge of
+a surface triangle lies on the surface, so every qualifying mid-node is moved —
+including interior edges, whose midpoint is off a genuinely curved surface.
+Any projection whose incident elements lose the exact global positive
+Gram-determinant certificate is reverted, so the mesh never gains a folded
+element. Deterministic (mid-nodes processed in ascending id order). Returns the
+number of nodes actually moved by more than `rtol·bbox-diagonal`.
+"""
+function curve_to_surface!(p::P2TriMesh, project, on_surface; rtol=1e-6)
+    tolrel = _input_float(rtol, "curve_to_surface!: rtol")
+    (isfinite(tolrel) && tolrel >= 0) ||
+        throw(ArgumentError("curve_to_surface!: rtol must be finite and non-negative (got $rtol)"))
+    _require_p2tri_structure(p, "curve_to_surface!")
+    ntris(p) == 0 && return 0
+    @inbounds for t in 1:ntris(p)
+        _p2tri_bernstein_bound(p.coords,p.tri6,t)[1] ||
+            throw(ArgumentError("curve_to_surface!: input triangle $t lacks a global positive-Jacobian certificate"))
+    end
+    function onsurf(v::Integer)
+        q = @inbounds on_surface(p.coords[1,v], p.coords[2,v], p.coords[3,v])
+        q isa Bool || throw(ArgumentError("curve_to_surface!: on_surface must return Bool"))
+        return q
+    end
+    endp, midtris = _p2tri_mid_maps(p)
+    movetol = _scaled_bbox_diag(p.coords, tolrel)
+    ncurved = 0
+    originals = Vector{Tuple{Int32,NTuple{3,Float64}}}()
+    try
+        for mid in sort!(collect(keys(endp)))
+            a, b = endp[mid]
+            (onsurf(a) && onsurf(b)) || continue
+            old = @inbounds (p.coords[1,mid], p.coords[2,mid], p.coords[3,mid])
+            raw = project(old...)
+            q = _input_point3(raw, "curve_to_surface!: project result")
+            all(isfinite, q) || continue
+            push!(originals, (mid, old))
+            @inbounds begin
+                p.coords[1,mid]=q[1]
+                p.coords[2,mid]=q[2]
+                p.coords[3,mid]=q[3]
+            end
+            ok = true
+            for t in midtris[mid]
+                certified,_,_,_ = _p2tri_bernstein_bound(p.coords,p.tri6,t)
+                certified || (ok=false;break)
+            end
+            if ok
+                _moved_beyond(q, old, movetol) && (ncurved += 1)
+            else
+                @inbounds begin
+                    p.coords[1,mid]=old[1]
+                    p.coords[2,mid]=old[2]
+                    p.coords[3,mid]=old[3]
+                end
+            end
+        end
+    catch
+        for (mid, old) in Iterators.reverse(originals)
+            @inbounds begin
+                p.coords[1,mid]=old[1]
+                p.coords[2,mid]=old[2]
+                p.coords[3,mid]=old[3]
+            end
+        end
+        rethrow()
+    end
+    return ncurved
+end
+
+"""
+    write_msh_p2(path, p::P2TriMesh; tri_tag=p.tri_tag) -> path
+
+Write a quadratic triangle mesh as Gmsh MSH v2.2 with 6-node (type-9) elements.
+The mesh's preserved tags are written by default. The destination is replaced
+atomically only after all storage, tags, and Gram-determinant certificates have
+been validated.
+"""
+function write_msh_p2(path, p::P2TriMesh; tri_tag=p.tri_tag)
+    path isa AbstractString || throw(ArgumentError(
+        "write_msh_p2: path must be a string"))
+    isempty(path) && throw(ArgumentError("write_msh_p2: path must not be empty"))
+    tri_tag isa AbstractVector || throw(ArgumentError(
+        "write_msh_p2: tri_tag must be a vector"))
+    length(tri_tag) == ntris(p) || throw(ArgumentError("write_msh_p2: tri_tag length mismatch"))
+    tags=Vector{Int32}(undef,ntris(p))
+    @inbounds for t in 1:ntris(p)
+        tag=tri_tag[t]
+        (tag isa Integer && !(tag isa Bool)) || throw(ArgumentError(
+            "write_msh_p2: tri tag $t must be an integer other than Bool"))
+        0<=tag<=typemax(Int32) ||
+            throw(ArgumentError("write_msh_p2: tri tag $tag must be non-negative and fit Int32"))
+        tags[t]=Int32(tag)
+    end
+    _require_p2tri_structure(p, "write_msh_p2")
+    @inbounds for t in 1:ntris(p)
+        ok,_,_,_=_p2tri_bernstein_bound(p.coords,p.tri6,t)
+        ok || throw(ArgumentError("write_msh_p2: triangle $t lacks a global positive-Jacobian certificate"))
+    end
+    target=abspath(path);parent=dirname(target)
+    isdir(parent) || throw(ArgumentError("write_msh_p2: parent directory does not exist: $parent"))
+    isdir(target) && throw(ArgumentError(
+        "write_msh_p2: destination is a directory: $target"))
+    mktemp(parent) do tmp,io
+        println(io, "\$MeshFormat"); println(io, "2.2 0 8"); println(io, "\$EndMeshFormat")
+        println(io, "\$Nodes"); println(io, nnodes(p))
+        @inbounds for i in 1:nnodes(p)
+            @printf(io, "%d %.17g %.17g %.17g\n", i, p.coords[1,i], p.coords[2,i], p.coords[3,i])
+        end
+        println(io, "\$EndNodes")
+        println(io, "\$Elements"); println(io, ntris(p))
+        @inbounds for t in 1:ntris(p)
+            tag = tags[t]
+            print(io, t, " 9 2 ", tag, " ", tag)
+            for k in 1:6; print(io, " ", p.tri6[k,t]); end
             println(io)
         end
         println(io, "\$EndElements")
