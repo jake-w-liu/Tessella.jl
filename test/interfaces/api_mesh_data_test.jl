@@ -48,6 +48,37 @@ function _mesh_data_query_sha(groups)
     return bytes2hex(SHA.sha256(take!(stream)))
 end
 
+function _mesh_data_triangle_strip()
+    coordinates=Float64[0 1 2 0 1 2;
+                        0 0 0 1 1 1;
+                        0 0 0 0 0 0]
+    triangles=Int32[1 2 2 3;
+                    2 5 3 6;
+                    4 4 5 5]
+    return Mesh(coordinates;tris=triangles)
+end
+
+@noinline function _mesh_data_partitioned_elements(mesh,task,num_tasks)
+    _mesh_data_install!(mesh)
+    GC.gc()
+    return @allocated _MESH_DATA_API.mesh.get_elements_by_type(
+        1,-1,task,num_tasks)
+end
+
+@noinline function _mesh_data_partitioned_barycenters(mesh,task,num_tasks)
+    _mesh_data_install!(mesh)
+    GC.gc()
+    return @allocated _MESH_DATA_API.mesh.get_barycenters(
+        1,-1,false,false,task,num_tasks)
+end
+
+@noinline function _mesh_data_partitioned_edge_nodes(mesh,task,num_tasks)
+    _mesh_data_install!(mesh)
+    GC.gc()
+    return @allocated _MESH_DATA_API.mesh.get_element_edge_nodes(
+        1,-1,false,task,num_tasks)
+end
+
 @noinline function _mesh_data_type_query_allocation(mesh)
     _mesh_data_install!(mesh)
     _MESH_DATA_API.mesh.get_element_types()
@@ -242,10 +273,10 @@ end
             ()->_MESH_DATA_API.mesh.get_elements_by_type(34),
             ()->_MESH_DATA_API.mesh.get_elements_by_type(999),
             ()->_MESH_DATA_API.mesh.get_elements_by_type(4,1),
-            ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,1,2),
-            ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,0,2),
             ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,-1,1),
             ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,0,0),
+            ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,0,-1),
+            ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,1,0),
             ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,true,1),
             ()->_MESH_DATA_API.mesh.get_elements_by_type(4,-1,0,false),
             ()->_MESH_DATA_API.mesh.get_nodes_by_element_type(true),
@@ -256,16 +287,19 @@ end
             ()->_MESH_DATA_API.mesh.get_barycenters(4,1,false,false),
             ()->_MESH_DATA_API.mesh.get_barycenters(4,-1,0,false),
             ()->_MESH_DATA_API.mesh.get_barycenters(4,-1,false,0),
-            ()->_MESH_DATA_API.mesh.get_barycenters(4,-1,false,false,1,2),
+            ()->_MESH_DATA_API.mesh.get_barycenters(4,-1,false,false,-1,1),
+            ()->_MESH_DATA_API.mesh.get_barycenters(4,-1,false,false,0,0),
             ()->_MESH_DATA_API.mesh.get_element_edge_nodes(4,1),
             ()->_MESH_DATA_API.mesh.get_element_edge_nodes(4,-1,0),
-            ()->_MESH_DATA_API.mesh.get_element_edge_nodes(4,-1,false,0,2),
+            ()->_MESH_DATA_API.mesh.get_element_edge_nodes(4,-1,false,-1,1),
+            ()->_MESH_DATA_API.mesh.get_element_edge_nodes(4,-1,false,0,0),
             ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,true),
             ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,2),
             ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,5),
             ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,3,1),
             ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,3,-1,0),
-            ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,3,-1,false,1,2),
+            ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,3,-1,false,-1,1),
+            ()->_MESH_DATA_API.mesh.get_element_face_nodes(4,3,-1,false,0,0),
         )
             @test_throws ArgumentError call()
             @test mesh_crc(_MESH_DATA_API.mesh.get())==source_crc
@@ -357,6 +391,166 @@ end
         @test isempty(_MESH_DATA_API.mesh.get_element_face_nodes(4,3))
         @test _MESH_DATA_API.mesh.get_max_node_tag()==UInt64(0)
         @test _MESH_DATA_API.mesh.get_max_element_tag()==UInt64(0)
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end
+
+@testset "deterministic task partitioning of detached queries" begin
+    _MESH_DATA_API.finalize()
+    try
+        _MESH_DATA_API.initialize()
+        chain=_mesh_data_segment_fixture(5)
+        chain_crc=mesh_crc(chain)
+        _mesh_data_install!(chain)
+
+        # Gmsh contiguous blocks for five segments: (0,2)->1:2, (1,2)->3:5,
+        # (0,3)->1:1, (1,3)->2:3, (2,3)->4:5. A strided i%num_tasks==task
+        # scheme would return positions {2,5} for task 1 of 3 instead of
+        # {2,3}, so these exact slices pin the documented formula.
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1,-1,0,2)==
+              (UInt64[1,2],UInt64[1,2,2,3])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1,-1,1,2)==
+              (UInt64[3,4,5],UInt64[3,4,4,5,5,6])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1,-1,0,3)==
+              (UInt64[1],UInt64[1,2])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1,-1,1,3)==
+              (UInt64[2,3],UInt64[2,3,3,4])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1,-1,2,3)==
+              (UInt64[4,5],UInt64[4,5,5,6])
+        # Adversarial task counts must not wrap before the truncating
+        # division: (typemax(Int)-1)*5 overflows Int64, yet the block is 5:5.
+        @test _MESH_DATA_API.mesh.get_elements_by_type(
+            1,-1,typemax(Int)-1,typemax(Int))==
+              (UInt64[5],UInt64[5,6])
+        # task>=num_tasks is the silently-empty Gmsh range, never an error.
+        for (task,num_tasks) in ((2,2),(3,3),(5,5),(0,7),(7,3))
+            @test _MESH_DATA_API.mesh.get_elements_by_type(
+                1,-1,task,num_tasks)==(UInt64[],UInt64[])
+            @test isempty(_MESH_DATA_API.mesh.get_barycenters(
+                1,-1,false,false,task,num_tasks))
+            @test isempty(_MESH_DATA_API.mesh.get_element_edge_nodes(
+                1,-1,false,task,num_tasks))
+            @test isempty(_MESH_DATA_API.mesh.get_element_face_nodes(
+                2,3,-1,false,task,num_tasks))
+        end
+        @test _MESH_DATA_API.mesh.get_elements_by_type(3,-1,1,2)==
+              (UInt64[],UInt64[])
+
+        @test _MESH_DATA_API.mesh.get_barycenters(1,-1,false,false,1,2)==
+              Float64[2.5,0,0,3.5,0,0,4.5,0,0]
+        @test _MESH_DATA_API.mesh.get_barycenters(1,-1,false,false,1,3)==
+              Float64[1.5,0,0,2.5,0,0]
+        @test _MESH_DATA_API.mesh.get_barycenters(1,-1,true,false,2,3)==
+              Float64[7,0,0,9,0,0]
+        @test _MESH_DATA_API.mesh.get_element_edge_nodes(1,-1,false,1,3)==
+              UInt64[2,3,3,4]
+        # Segments own no triangular faces: the slice stays empty, not an
+        # error, exactly like the complete query.
+        @test isempty(
+            _MESH_DATA_API.mesh.get_element_face_nodes(1,3,-1,false,1,2))
+
+        # Union over tasks reproduces every complete result bit-for-bit.
+        full_tags,full_nodes=_MESH_DATA_API.mesh.get_elements_by_type(1)
+        full_barycenters=_MESH_DATA_API.mesh.get_barycenters(
+            1,-1,false,false)
+        full_edges=_MESH_DATA_API.mesh.get_element_edge_nodes(1)
+        for num_tasks in (1,2,3,5,6)
+            union_tags=UInt64[]
+            union_nodes=UInt64[]
+            union_barycenters=Float64[]
+            union_edges=UInt64[]
+            for task in 0:num_tasks-1
+                slice_tags,slice_nodes=
+                    _MESH_DATA_API.mesh.get_elements_by_type(
+                        1,-1,task,num_tasks)
+                append!(union_tags,slice_tags)
+                append!(union_nodes,slice_nodes)
+                append!(union_barycenters,
+                        _MESH_DATA_API.mesh.get_barycenters(
+                            1,-1,false,false,task,num_tasks))
+                append!(union_edges,
+                        _MESH_DATA_API.mesh.get_element_edge_nodes(
+                            1,-1,false,task,num_tasks))
+            end
+            @test union_tags==full_tags
+            @test union_nodes==full_nodes
+            @test union_barycenters==full_barycenters
+            @test union_edges==full_edges
+        end
+
+        # Slices are detached: mutating one never leaks into the cache.
+        slice_tags,slice_nodes=_MESH_DATA_API.mesh.get_elements_by_type(
+            1,-1,1,2)
+        slice_tags[1]=99
+        slice_nodes[1]=99
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1,-1,1,2)==
+              (UInt64[3,4,5],UInt64[3,4,4,5,5,6])
+        @test mesh_crc(_MESH_DATA_API.mesh.get())==chain_crc
+
+        strip=_mesh_data_triangle_strip()
+        strip_crc=mesh_crc(strip)
+        _mesh_data_install!(strip)
+        # Four triangles: (0,3)->1:1, (1,3)->2:2, (2,3)->3:4.
+        @test _MESH_DATA_API.mesh.get_elements_by_type(2,-1,2,3)==
+              (UInt64[3,4],UInt64[2,3,5,3,6,5])
+        @test _MESH_DATA_API.mesh.get_barycenters(2,-1,false,false,1,3)==
+              Float64[2/3,2/3,0]
+        @test _MESH_DATA_API.mesh.get_element_edge_nodes(2,-1,false,2,3)==
+              UInt64[2,3,3,5,5,2,3,6,6,5,5,3]
+        @test _MESH_DATA_API.mesh.get_element_face_nodes(2,3,-1,false,0,3)==
+              UInt64[1,2,4]
+        @test _MESH_DATA_API.mesh.get_element_face_nodes(2,3,-1,false,2,3)==
+              UInt64[2,3,5,3,6,5]
+        strip_tags,strip_nodes=_MESH_DATA_API.mesh.get_elements_by_type(2)
+        strip_faces=_MESH_DATA_API.mesh.get_element_face_nodes(2,3)
+        union_tags=UInt64[]
+        union_nodes=UInt64[]
+        union_faces=UInt64[]
+        for task in 0:2
+            slice_tags,slice_nodes=_MESH_DATA_API.mesh.get_elements_by_type(
+                2,-1,task,3)
+            append!(union_tags,slice_tags)
+            append!(union_nodes,slice_nodes)
+            append!(union_faces,_MESH_DATA_API.mesh.get_element_face_nodes(
+                2,3,-1,false,task,3))
+        end
+        @test union_tags==strip_tags
+        @test union_nodes==strip_nodes
+        @test union_faces==strip_faces
+        @test mesh_crc(_MESH_DATA_API.mesh.get())==strip_crc
+
+        # Partitions of an empty cache stay empty and never allocate the
+        # complete result.
+        _mesh_data_install!(Mesh(zeros(3,0)))
+        @test _MESH_DATA_API.mesh.get_elements_by_type(4,-1,1,2)==
+              (UInt64[],UInt64[])
+        @test isempty(
+            _MESH_DATA_API.mesh.get_barycenters(4,-1,false,false,1,2))
+        @test isempty(
+            _MESH_DATA_API.mesh.get_element_edge_nodes(4,-1,false,1,2))
+        @test isempty(_MESH_DATA_API.mesh.get_element_face_nodes(
+            4,3,-1,false,1,2))
+
+        # Allocation scales with the slice: a half partition must stay well
+        # below the complete query. A full-compute-then-slice patch would
+        # allocate at least the complete result and fail this ratchet.
+        wide=_mesh_data_segment_fixture(10_000)
+        full_elements=_mesh_data_partitioned_elements(wide,0,1)
+        part_elements=_mesh_data_partitioned_elements(wide,1,2)
+        @test full_elements>0
+        @test 0<part_elements<full_elements
+        @test 4part_elements<=3full_elements
+        full_bary=_mesh_data_partitioned_barycenters(wide,0,1)
+        part_bary=_mesh_data_partitioned_barycenters(wide,1,2)
+        @test full_bary>0
+        @test 0<part_bary<full_bary
+        @test 4part_bary<=3full_bary
+        full_edge=_mesh_data_partitioned_edge_nodes(wide,0,1)
+        part_edge=_mesh_data_partitioned_edge_nodes(wide,1,2)
+        @test full_edge>0
+        @test 0<part_edge<full_edge
+        @test 4part_edge<=3full_edge
     finally
         _MESH_DATA_API.finalize()
     end

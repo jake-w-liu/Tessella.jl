@@ -383,7 +383,7 @@ function _write_evaluations!(jacobians,determinants,coordinates,
 end
 
 function _write_cell!(jacobians,determinants,coordinates,
-                      mesh::Mesh,cells::Matrix{Int32},cell::Int,
+                      mesh::Mesh,cells::AbstractMatrix{Int32},cell::Int,
                       element_index::Int,tag::Int,point_count::Int,
                       local_coordinates,caller::AbstractString,
                       dimension::Val{1})
@@ -397,7 +397,7 @@ function _write_cell!(jacobians,determinants,coordinates,
 end
 
 function _write_cell!(jacobians,determinants,coordinates,
-                      mesh::Mesh,cells::Matrix{Int32},cell::Int,
+                      mesh::Mesh,cells::AbstractMatrix{Int32},cell::Int,
                       element_index::Int,tag::Int,point_count::Int,
                       local_coordinates,caller::AbstractString,
                       dimension::Val{2})
@@ -411,7 +411,7 @@ function _write_cell!(jacobians,determinants,coordinates,
 end
 
 function _write_cell!(jacobians,determinants,coordinates,
-                      mesh::Mesh,cells::Matrix{Int32},cell::Int,
+                      mesh::Mesh,cells::AbstractMatrix{Int32},cell::Int,
                       element_index::Int,tag::Int,point_count::Int,
                       local_coordinates,caller::AbstractString,
                       dimension::Val{3})
@@ -424,6 +424,33 @@ function _write_cell!(jacobians,determinants,coordinates,
         jacobians,determinants,coordinates,element_index,point_count,
         local_coordinates,jacobian,determinant,(a,b,c,d),a,edges,
         dimension,caller,tag)
+end
+
+function _checked_element_range(element_range::UnitRange{Int},
+                                element_count::Int,caller::AbstractString)
+    first_element=first(element_range)
+    last_element=last(element_range)
+    (first_element>=1 && last_element<=element_count &&
+     first_element<=last_element+1) || throw(ArgumentError(
+        "$caller: element range $element_range is outside 1:$element_count"))
+    return first_element,last_element
+end
+
+function _write_cells_in_range!(jacobians,determinants,coordinates,
+                                 mesh::Mesh,msh::Int,offset::Int,
+                                 cells::AbstractMatrix{Int32},
+                                 local_coordinates,point_count::Int,
+                                 first_element::Int,last_element::Int,
+                                 caller::AbstractString)
+    slot=0
+    @inbounds for cell in first_element:last_element
+        slot+=1
+        _write_cell!(
+            jacobians,determinants,coordinates,mesh,cells,cell,slot,
+            offset+cell,point_count,local_coordinates,caller,
+            Val(msh==1 ? 1 : msh==2 ? 2 : 3))
+    end
+    return nothing
 end
 
 """
@@ -449,12 +476,44 @@ function mesh_jacobians(mesh::Mesh,element_type,local_coord)
     element_count==0 && return Float64[],Float64[],Float64[]
     jacobians,determinants,coordinates=
         _allocate_results(element_count,point_count,caller)
-    @inbounds for cell in axes(cells,2)
-        _write_cell!(
-            jacobians,determinants,coordinates,mesh,cells,cell,cell,
-            offset+cell,point_count,local_coordinates,caller,
-            Val(msh==1 ? 1 : msh==2 ? 2 : 3))
-    end
+    _write_cells_in_range!(
+        jacobians,determinants,coordinates,mesh,msh,offset,cells,
+        local_coordinates,point_count,1,element_count,caller)
+    return jacobians,determinants,coordinates
+end
+
+"""
+    mesh_jacobians(mesh, element_type, local_coord, element_range)
+
+Return detached `(jacobians, determinants, coordinates)` for the cached elements
+of one Gmsh type whose 1-based block positions fall in `element_range`, ordered
+by element and then point. This is the contiguous-block partition backing the
+`task`/`num_tasks` session query contract: callers select
+`begin=(task*count)÷num_tasks` through `end=((task+1)*count)÷num_tasks`.
+Validation, layout, and numerical contracts match [`mesh_jacobians`](@ref);
+only the selected positions are evaluated, so an empty range returns three
+empty vectors without touching the mesh.
+"""
+function mesh_jacobians(mesh::Mesh,element_type,local_coord,
+                        element_range::UnitRange{Int})
+    caller="mesh_jacobians"
+    msh=_checked_element_type(element_type,caller)
+    local_coordinates,point_count=
+        _checked_local_coordinates(local_coord,caller)
+    block=mesh_element_block(mesh,msh)
+    (block===nothing || point_count==0) &&
+        return Float64[],Float64[],Float64[]
+    offset,cells=block
+    element_count=size(cells,2)
+    first_element,last_element=
+        _checked_element_range(element_range,element_count,caller)
+    selected=max(last_element-first_element+1,0)
+    selected==0 && return Float64[],Float64[],Float64[]
+    jacobians,determinants,coordinates=
+        _allocate_results(selected,point_count,caller)
+    _write_cells_in_range!(
+        jacobians,determinants,coordinates,mesh,msh,offset,cells,
+        local_coordinates,point_count,first_element,last_element,caller)
     return jacobians,determinants,coordinates
 end
 

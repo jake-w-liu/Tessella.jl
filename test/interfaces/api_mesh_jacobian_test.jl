@@ -69,9 +69,35 @@ end
             inverted[3],[0.4,0.3,0.6];
             atol=4eps(Float64),rtol=4eps(Float64))
         @test _MESH_JACOBIAN_API.mesh.get_jacobians(
-            3,[0,0,0])==(Float64[],Float64[],Float64[])
-        @test _MESH_JACOBIAN_API.mesh.get_jacobians(
             4,[])==(Float64[],Float64[],Float64[])
+
+        # Task partitioning selects contiguous Gmsh blocks: with two cached
+        # tetrahedra, task 0 of 2 is the positive tet and task 1 of 2 the
+        # inverted one; task>=num_tasks is the silently-empty Gmsh range.
+        single_point=[0,0,0]
+        @test _MESH_JACOBIAN_API.mesh.get_jacobians(
+            4,single_point,-1,0,2)==(
+            [2.0,0,0,0,3.0,0,0,0,4.0],[24.0],[0.0,0.0,0.0])
+        @test _MESH_JACOBIAN_API.mesh.get_jacobians(
+            4,single_point,-1,1,2)==(
+            [-1.0,0,1.0,-1.0,1.0,0,-1.0,0,4.0],[-3.0],[1.0,0.0,0.0])
+        @test _MESH_JACOBIAN_API.mesh.get_jacobians(
+            4,single_point,-1,2,2)==(Float64[],Float64[],Float64[])
+        @test _MESH_JACOBIAN_API.mesh.get_jacobians(
+            3,single_point,-1,1,2)==(Float64[],Float64[],Float64[])
+        two_point=(
+            _MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0,0.2,0.3,0.1]))
+        second_half=_MESH_JACOBIAN_API.mesh.get_jacobians(
+            4,[0,0,0,0.2,0.3,0.1],-1,1,2)
+        @test second_half[1]==two_point[1][19:36]
+        @test second_half[2]==two_point[2][3:4]
+        @test second_half[3]==two_point[3][7:12]
+        first_half=_MESH_JACOBIAN_API.mesh.get_jacobians(
+            4,[0,0,0,0.2,0.3,0.1],-1,0,2)
+        @test vcat(first_half[1],second_half[1])==two_point[1]
+        @test vcat(first_half[2],second_half[2])==two_point[2]
+        @test vcat(first_half[3],second_half[3])==two_point[3]
+        @test mesh_crc(_MESH_JACOBIAN_API.mesh.get())==fixture_crc
 
         jacobians[1]=99.0;determinants[1]=99.0;coordinates[1]=99.0
         @test _MESH_JACOBIAN_API.mesh.get_jacobian(
@@ -87,7 +113,9 @@ end
             ()->_MESH_JACOBIAN_API.mesh.get_jacobians(
                 4,Any[true,0,0]),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],0),
-            ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],-1,1,2),
+            ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0],-1,1,2),
+            ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],-1,-1,1),
+            ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],-1,0,0),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],-1,true,1),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobian(true,[0,0,0]),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobian(0,[0,0,0]),

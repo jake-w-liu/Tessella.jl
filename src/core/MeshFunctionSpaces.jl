@@ -713,6 +713,29 @@ function _cell_orientation(cells::AbstractMatrix{Int32},cell::Int,
     return _orientation_rank(@view cells[:,cell])
 end
 
+function _checked_orientation_range(element_range::UnitRange{Int},
+                                    element_count::Int,
+                                    caller::AbstractString)
+    first_element=first(element_range)
+    last_element=last(element_range)
+    (first_element>=1 && last_element<=element_count &&
+     first_element<=last_element+1) || throw(ArgumentError(
+        "$caller: element range $element_range is outside 1:$element_count"))
+    return first_element,last_element
+end
+
+function _orientations_in_range!(result::Vector{Int32},
+                                 cells::AbstractMatrix{Int32},
+                                 space::_FunctionSpace,
+                                 first_element::Int,last_element::Int)
+    slot=0
+    @inbounds for cell in first_element:last_element
+        slot+=1
+        result[slot]=_cell_orientation(cells,cell,space)
+    end
+    return nothing
+end
+
 """Return one orientation index per cached element of a supported type."""
 function mesh_basis_orientations(mesh::Mesh,element_type_value,
                                  function_space_type;
@@ -725,9 +748,35 @@ function mesh_basis_orientations(mesh::Mesh,element_type_value,
     block===nothing && return Int32[]
     _,cells=block
     result=Vector{Int32}(undef,size(cells,2))
-    @inbounds for cell in axes(cells,2)
-        result[cell]=_cell_orientation(cells,cell,space)
-    end
+    _orientations_in_range!(result,cells,space,1,size(cells,2))
+    return result
+end
+
+"""Return one orientation index per cached element in a 1-based block range.
+
+This is the contiguous-block partition backing the `task`/`num_tasks` session
+query contract: callers select `begin=(task*count)÷num_tasks` through
+`end=((task+1)*count)÷num_tasks`. Validation and orientation contracts match
+[`mesh_basis_orientations`](@ref); only the selected positions are evaluated,
+so an empty range returns an empty vector without touching the mesh.
+"""
+function mesh_basis_orientations(mesh::Mesh,element_type_value,
+                                 function_space_type,
+                                 element_range::UnitRange{Int};
+                                 caller::AbstractString=
+                                     "mesh_basis_orientations")
+    element_type=_checked_element_type(element_type_value,caller)
+    space=_function_space(function_space_type,caller)
+    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
+    block=mesh_element_block(mesh,element_type)
+    block===nothing && return Int32[]
+    _,cells=block
+    element_count=size(cells,2)
+    first_element,last_element=
+        _checked_orientation_range(element_range,element_count,caller)
+    selected=max(last_element-first_element+1,0)
+    result=Vector{Int32}(undef,selected)
+    _orientations_in_range!(result,cells,space,first_element,last_element)
     return result
 end
 

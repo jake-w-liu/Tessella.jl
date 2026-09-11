@@ -157,7 +157,9 @@ end
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
                 4,"HcurlLegendre0",0),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
-                4,"HcurlLegendre0",-1,1,2),
+                4,"HcurlLegendre0",-1,-1,1),
+            ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+                4,"HcurlLegendre0",-1,0,0),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
                 4,"HcurlLegendre0",-1,true,1),
             ()->_MESH_FUNCTION_API.mesh.get_keys_information(
@@ -208,6 +210,50 @@ end
         @test _MESH_FUNCTION_API.mesh.get_all_edges()==
             (UInt64[],UInt64[])
 
+        # Task partitioning selects contiguous Gmsh blocks. The single cached
+        # tetrahedron falls outside task 0 of 2 (empty, not an error) and
+        # inside task 1 of 2, whose 0-based block is [0,1).
+        _install_mesh_function_fixture!(fixture)
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            4,"CurlHcurlLegendre0",-1,0,1)==Int32[20]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            4,"CurlHcurlLegendre0",-1,0,2)==Int32[]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            4,"CurlHcurlLegendre0",-1,1,2)==Int32[20]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            4,"CurlHcurlLegendre0",-1,2,2)==Int32[]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            12,"Lagrange1",-1,1,2)==Int32[]
+
+        # Five ascending segments give five zero hierarchical ranks; the
+        # uneven 2/3 split pins the contiguous formula and the union
+        # reproduces the complete query.
+        chain_coordinates=zeros(3,6)
+        chain_coordinates[1,:].=0:5
+        chain_segments=Matrix{Int32}(undef,2,5)
+        for segment in 1:5
+            chain_segments[1,segment]=Int32(segment)
+            chain_segments[2,segment]=Int32(segment+1)
+        end
+        _install_mesh_function_fixture!(
+            Mesh(chain_coordinates;segs=chain_segments))
+        chain_full=_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            1,"HcurlLegendre0")
+        @test chain_full==Int32[0,0,0,0,0]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            1,"HcurlLegendre0",-1,0,2)==Int32[0,0]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            1,"HcurlLegendre0",-1,1,2)==Int32[0,0,0]
+        @test _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+            1,"HcurlLegendre0",-1,1,3)==chain_full[2:3]
+        unioned=Int32[]
+        for task in 0:2
+            append!(unioned,
+                    _MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
+                        1,"HcurlLegendre0",-1,task,3))
+        end
+        @test unioned==chain_full
+        @test all(0 .<= chain_full .<= 1)
         _install_mesh_function_fixture!(fixture)
 
         basis=_MESH_FUNCTION_API.mesh.get_basis_functions(

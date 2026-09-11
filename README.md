@@ -265,12 +265,16 @@ tags are dense identifiers derived for that cache; segments, triangles, and
 tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence.
 Whole-dimension element filters are supported. Entity-specific filters, classified node
 queries, and parametric coordinates remain explicit blockers until `Mesh` owns that
-metadata.
+metadata. `get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
+the contiguous Gmsh block slice (`task>=num_tasks` is empty).
 `get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
 `get_element_face_nodes` provide the corresponding detached, connectivity-derived
 arrays. Type-node results repeat shared nodes in element order, and edge/face results
-use Gmsh's local linear-simplex ordering. High-order nodes and nondefault Julia task
-partitioning are not represented.
+use Gmsh's local linear-simplex ordering. High-order nodes are not represented.
+`get_barycenters`, `get_element_edge_nodes`, and `get_element_face_nodes` accept
+nondefault `task`/`num_tasks` and return the contiguous Gmsh block slice
+(`task>=num_tasks` is empty); `get_nodes_by_element_type` takes no task parameters
+in Gmsh 4.15.2 and neither does this query.
 `create_edges` and `create_faces` idempotently fill missing whole-cache simplex
 topology and preserve entries attached with `add_edges` or `add_faces`.
 `add_edges` accepts node pairs; `add_faces` accepts triangles or quadrangles. Both
@@ -305,8 +309,9 @@ linear segments, triangles, and tetrahedra. Evaluation points are concatenated
 column-flattened 3×3 matrices. Segment and triangle frames use Gmsh-compatible
 low-dimensional regularization, while tetrahedron determinants retain orientation.
 Malformed or nonfinite evaluation coordinates, degenerate maps, and
-Float64-unrepresentable results fail explicitly. Entity filtering and nondefault
-task partitioning retain the cache-metadata blockers described above.
+Float64-unrepresentable results fail explicitly. Entity filtering retains the
+cache-metadata blocker described above. Nondefault `task`/`num_tasks` returns the
+contiguous Gmsh block slice of cached elements (`task>=num_tasks` is empty).
 `get_integration_points` returns detached `(u,v,w)` reference coordinates and
 weights for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron,
 Hexahedron, Prism, and Pyramid type, independent of interpolation order and session
@@ -334,8 +339,11 @@ the requested type or element, reuse explicit or previously created identifiers,
 and return stable midpoint coordinates. The linear-simplex cache owns no synthetic
 higher-order nodes, so a numeric Lagrange key query whose order differs from the
 stored element fails explicitly. Number-of-key/orientation and key-information
-queries remain session-independent. Non-simplex hierarchical
-spaces, Trihedron bases, entity filtering, and nondefault task partitioning remain
+queries remain session-independent. `get_basis_functions_orientation` accepts
+nondefault `task`/`num_tasks` and returns the contiguous Gmsh block slice
+(`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Non-simplex
+hierarchical
+spaces, Trihedron bases, and entity filtering remain
 explicit blockers. Tessella evaluates the catalogued
 higher-order Prism and incomplete Pyramid spaces that Gmsh 4.15.2 cannot construct
 reliably; those paths are certified by nodality, partition, and gradient invariants.
@@ -345,8 +353,10 @@ volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
 degenerate shape measures return zero and undefined circumradii return `Inf`.
 Gmsh 4.15.2 has no reliable linear-segment implementation for `minDetJac`,
 `maxDetJac`, `minSIGE`, or `minIsotropy`; Tessella rejects those combinations
-explicitly. Nondefault task partitioning remains unavailable for detached Julia
-arrays.
+explicitly. Nondefault `task`/`num_tasks` partitions the requested-tag positions
+and returns the contiguous Gmsh block slice with slice-scoped validation
+(`task>=num_tasks` is empty, where Gmsh 4.15.2 reads its request vector out of
+bounds).
 `msh_type` and `msh_properties`, with session-independent
 `API.mesh.get_element_type` and `get_element_properties` wrappers, query the native
 Gmsh 4.15.2 catalog. Family names in the API are case-insensitive, and requested
