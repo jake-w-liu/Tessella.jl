@@ -461,6 +461,75 @@ function check_set_max_tags()
             volume_error=abs(volume-1/6))
 end
 
+# Tracked Boolean allocators: operand `Delete` releases the operand volume and
+# its hidden boundary entities; the result's boundary is re-tagged to the
+# lowest free tags and counters shrink to `max(SetMaxTag floor, live maximum)`.
+function check_boolean_allocators()
+    scenarios=[
+        ("both operands deleted",raw"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0,1,1,1};
+            Box(2) = {2,0,0,1,1,1};
+            BooleanDifference(newv) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
+            p3 = newp; v3 = newv; l3 = newl; s3 = news;
+            booleanOracle[] = {p3, v3, l3, s3};
+            """,[9.0,26.0,26.0,26.0],[25]),
+        ("SetMaxTag floor survives deletes",raw"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0,1,1,1};
+            Box(2) = {2,0,0,1,1,1};
+            SetMaxTag Volume(40);
+            BooleanDifference(newv) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
+            p3 = newp; v3 = newv; l3 = newl; s3 = news;
+            booleanOracle[] = {p3, v3, l3, s3};
+            """,[9.0,42.0,42.0,42.0],[41]),
+        ("result boundary uses lowest free tags",raw"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0,1,1,1};
+            Box(2) = {3,0,0,1,1,1};
+            BooleanDifference(newv) = { Volume{2}; Delete; }{ Volume{1}; Delete; };
+            p3 = newp; v3 = newv;
+            booleanOracle[] = {p3, v3};
+            """,[9.0,26.0],[25]),
+    ]
+    mktempdir() do directory
+        for (label,source,expected,volume_tags) in scenarios
+            path=joinpath(directory,"boolean_" * replace(label," "=>"_") * ".geo")
+            write(path,source)
+            gmsh.clear()
+            gmsh.open(path)
+            actual=gmsh.parser.getNumber("booleanOracle")
+            actual==expected || error(
+                "Gmsh Boolean allocator ($label) changed: expected " *
+                "$expected, got $actual")
+            volumes=sort!(Int[tag for (_,tag) in gmsh.model.getEntities(3)])
+            volumes==volume_tags || error(
+                "Gmsh Boolean volume tags ($label) changed: expected " *
+                "$volume_tags, got $volumes")
+
+            tessella=execute_geo(path)
+            sort!(collect(keys(tessella.model.volumes)))==volume_tags ||
+                error("Tessella Boolean volume tags ($label) differ from Gmsh")
+        end
+        # `newv` inside a params read must observe the same live counters.
+        params_source=raw"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0,1,1,1};
+            Box(2) = {2,0,0,1,1,1};
+            BooleanDifference(newv) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
+            Mesh.MeshSizeMax = newv;
+            Mesh.MeshSizeMin = newp / 10;
+            """
+        path=joinpath(directory,"boolean_params.geo")
+        write(path,params_source)
+        params=Tessella.IO.read_geo_params(path)
+        (params.mesh_size_max,params.mesh_size_min)==(26.0,0.9) || error(
+            "Tessella read_geo_params Boolean counters differ: got " *
+            "$(params.mesh_size_max), $(params.mesh_size_min)")
+    end
+    return length(scenarios)
+end
+
 gmsh.initialize(["gmsh","-v","0"])
 try
     startswith(gmsh.GMSH_API_VERSION,"4.15.2") || error(
@@ -531,6 +600,7 @@ try
 
     check_primitive_allocators()
     automatic_physical=check_automatic_physical_tags()
+    boolean_scenarios=check_boolean_allocators()
     set_max_gmsh=check_set_max_tags()
     volume_error=max(volume_error,abs(set_max_volume-1/6),
                      set_max_gmsh.volume_error)
@@ -542,6 +612,7 @@ try
             "automatic_physical_api=$(join(automatic_physical.api_tags,',')) " *
             "physical_lifecycle_groups=$(automatic_physical.lifecycle_groups) " *
             "physical_replacement_tag=$(automatic_physical.replacement_tag) " *
+            "boolean_scenarios=$boolean_scenarios " *
             "setmax_nodes=$(set_max_gmsh.nodes) " *
             "setmax_tets=$(set_max_gmsh.tets) " *
             "volume_error=$volume_error mesh_crc=$(mesh_crc(mesh).sha) " *
