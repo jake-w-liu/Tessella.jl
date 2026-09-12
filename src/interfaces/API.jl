@@ -52,7 +52,7 @@ using ..Model: set_model_attribute!, model_attribute, model_attribute_names,
 using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_set_tag!
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes
-using ..Model: mesh_model_surface, mesh_model_volume
+using ..Model: mesh_model_surface, mesh_model_volume, model_to_mixed
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
@@ -82,6 +82,23 @@ using ..GeoExec: execute_geo
 
 export initialize, finalize, option, model, mesh, open_geo!
 
+# Entity classification snapshot for the session mesh cache, derived from the
+# canonical `model_to_mixed` projection at generation time. `mesh` is the exact
+# cache object the record describes so a cache replaced outside
+# `_replace_mesh_cache_locked!` cannot accidentally reuse a stale record.
+# `node_entities[i]` is the lowest-dimension entity owning node `i`;
+# `seg/tri/tet_entities[c]` is the entity tag owning cell column `c`;
+# `boundaries[(dim,tag)]` lists the entity's boundary tags one dimension down.
+struct _MeshClassification
+    mesh::Mesh
+    entity::Tuple{Int,Int32}
+    node_entities::Vector{Tuple{Int,Int32}}
+    boundaries::Dict{Tuple{Int,Int32},Vector{Int32}}
+    seg_entities::Vector{Int32}
+    tri_entities::Vector{Int32}
+    tet_entities::Vector{Int32}
+end
+
 const CURRENT = Ref{Union{Nothing,GeoModel}}(nothing)
 const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshSizeMin"=>0.0,
@@ -89,17 +106,29 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshSizeFactor"=>1.0)
 const OPTIONS = copy(DEFAULT_OPTIONS)
 const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
+const LAST_MESH_CLASS = Ref{Union{Nothing,_MeshClassification}}(nothing)
 const LAST_MESH_LOCATOR = Ref{Union{Nothing,SimplexLocator}}(nothing)
 const LAST_MESH_EDGES = Ref{Union{Nothing,MeshEdgeTopology}}(nothing)
 const LAST_MESH_FACES = Ref{Union{Nothing,MeshFaceTopology}}(nothing)
 const STATE_LOCK = ReentrantLock()
 
-function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh})
+function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh},
+                                     class::Union{Nothing,_MeshClassification}=
+                                         nothing)
+    class!==nothing && class.mesh!==mesh && throw(ArgumentError(
+        "API: internal classification record does not match the cached mesh"))
     LAST_MESH[]=mesh
+    LAST_MESH_CLASS[]=class
     LAST_MESH_LOCATOR[]=nothing
     LAST_MESH_EDGES[]=nothing
     LAST_MESH_FACES[]=nothing
     return mesh
+end
+
+function _cached_classification_locked(mesh::Mesh)
+    class=LAST_MESH_CLASS[]
+    (class===nothing || class.mesh!==mesh) && return nothing
+    return class
 end
 
 """
@@ -686,6 +715,61 @@ remove_physical_name(name)=_remove_physical_name(name)
 remove_physical_groups(dim_tags=())=_remove_physical_groups(dim_tags)
 end
 
+# Project `mesh` onto `entity` through `model_to_mixed` and invert the emitted
+# block connectivity back into per-cache-cell entity tags. A projection failure
+# never fails generation: the record simply stays absent and entity-filtered
+# queries keep their explicit blocker.
+function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
+                               cache::Mesh)
+    classified=try
+        dim==2 ? model_to_mixed(m,mesh,tag) : model_to_mixed(m,mesh,dim,tag)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
+    data=classified.entity_data
+    data===nothing && return nothing
+    length(data.node_entities)==nnodes(mesh) || return nothing
+    boundaries=Dict{Tuple{Int,Int32},Vector{Int32}}()
+    for (key,entity) in pairs(data.entities)
+        boundaries[(key[1],key[2])]=
+            Int32[abs(boundary) for boundary in entity.boundaries]
+    end
+    owner=Dict{NTuple{4,Int32},Int32}()
+    for (block_index,block) in enumerate(classified.blocks)
+        block_entities=data.block_entities[block_index]
+        for column in axes(block.nodes,2)
+            connectivity=sort!(Int32.(vec(block.nodes[:,column])))
+            padded=ntuple(
+                slot->slot<=length(connectivity) ? connectivity[slot] :
+                    Int32(0),4)
+            haskey(owner,padded) && return nothing
+            owner[padded]=block_entities[column]
+        end
+    end
+    function cell_entities(cells::AbstractMatrix{Int32})
+        result=Vector{Int32}(undef,size(cells,2))
+        for column in axes(cells,2)
+            connectivity=sort!(Int32.(vec(cells[:,column])))
+            padded=ntuple(
+                slot->slot<=length(connectivity) ? connectivity[slot] :
+                    Int32(0),4)
+            value=get(owner,padded,Int32(0))
+            value==0 && return nothing
+            result[column]=value
+        end
+        return result
+    end
+    seg_entities=cell_entities(mesh.segs)
+    tri_entities=cell_entities(mesh.tris)
+    tet_entities=cell_entities(mesh.tets)
+    (seg_entities===nothing || tri_entities===nothing ||
+     tet_entities===nothing) && return nothing
+    return _MeshClassification(
+        cache,(dim,Int32(tag)),copy(data.node_entities),boundaries,
+        seg_entities,tri_entities,tet_entities)
+end
+
 function _generate(dim::Integer)
     dim isa Bool && throw(ArgumentError("API.mesh.generate: dim must not be Bool"))
     dimension=try
@@ -709,7 +793,10 @@ function _generate(dim::Integer)
         else
             throw(ArgumentError("API.mesh.generate: dim must be 2 or 3"))
         end
-        _replace_mesh_cache_locked!(_copy_mesh(generated))
+        entity_tag=Int(only(keys(dimension==2 ? m.surfaces : m.volumes)))
+        cache=_copy_mesh(generated)
+        class=_classify_cached_mesh(m,generated,dimension,entity_tag,cache)
+        _replace_mesh_cache_locked!(cache,class)
         generated
     end
 end
@@ -776,15 +863,60 @@ function _mesh_element_block(mesh::Mesh,element_type::Int)
     return mesh_element_block(mesh,element_type)
 end
 
+const _MESH_ENTITY_LABELS=("Point","Curve","Surface","Volume")
+
+@inline function _mesh_entity_dictionary(m::GeoModel,dim::Int)
+    return dim==0 ? m.points : dim==1 ? m.curves :
+           dim==2 ? m.surfaces : m.volumes
+end
+
+# An entity exists when the model knows it or when the canonical
+# `model_to_mixed` projection classified nodes/elements on it — the projection
+# also enumerates boundary entities the `GeoModel` dictionaries never
+# materialize (e.g. `add_box!` stores only the volume).
+function _mesh_classified_entity(m::GeoModel,class::_MeshClassification,
+                                 dim::Int,tag::Int,caller::AbstractString)
+    tag<=typemax(Int32) || throw(ArgumentError(
+        "$caller: unknown $(_MESH_ENTITY_LABELS[dim+1])[$tag]"))
+    haskey(class.boundaries,(dim,Int32(tag))) ||
+        haskey(_mesh_entity_dictionary(m,dim),tag) || throw(ArgumentError(
+            "$caller: unknown $(_MESH_ENTITY_LABELS[dim+1])[$tag]"))
+    return nothing
+end
+
+# Entity-filtered cell positions, or `Int[]` for cells of `msh` types that
+# cannot exist in the simplex cache.
+function _mesh_entity_cell_positions(class::_MeshClassification,msh::Int,
+                                     entity::Int)
+    cell_entities=msh==1 ? class.seg_entities :
+                  msh==2 ? class.tri_entities :
+                  msh==4 ? class.tet_entities : Int32[]
+    return findall(==(Int32(entity)),cell_entities)
+end
+
+# Returns `(msh_type, (offset, cells) or nothing, positions)`. `positions` is
+# `nothing` for the complete block and otherwise the 1-based column indices of
+# the cells classified on the requested entity.
 function _mesh_query_type_block(mesh::Mesh,element_type,tag,
                                 caller::AbstractString)
     msh=_mesh_query_integer(element_type,caller,"element_type")
-    msh_spec(msh)
+    spec=msh_spec(msh)
     entity=_mesh_query_integer(tag,caller,"tag")
-    entity<0 || throw(ArgumentError(
+    entity<0 && return msh,_mesh_element_block(mesh,msh),nothing
+    class=_cached_classification_locked(mesh)
+    class===nothing && throw(ArgumentError(
         "$caller: entity-specific data require mesh classification metadata; " *
         "use a negative tag to query the complete cache"))
-    return msh,_mesh_element_block(mesh,msh)
+    _mesh_classified_entity(_model_locked(),class,spec.dim,entity,caller)
+    block=_mesh_element_block(mesh,msh)
+    positions=block===nothing ? Int[] :
+        _mesh_entity_cell_positions(class,msh,entity)
+    return msh,block,positions
+end
+
+@inline function _mesh_selected_columns(cells::AbstractMatrix{Int32},
+                                        positions)
+    return positions===nothing ? axes(cells,2) : positions
 end
 
 function _mesh_query_tasks(task,num_tasks,caller::AbstractString)
@@ -972,8 +1104,15 @@ function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_jacobians"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        msh,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+        if positions!==nothing
+            selected=_mesh_task_range(
+                length(positions),task_index,task_count)
+            return mesh_jacobians(
+                cached,msh,local_coord,positions[selected])
+        end
         count=block===nothing ? 0 : size(block[2],2)
         mesh_jacobians(
             cached,msh,local_coord,
@@ -1008,8 +1147,16 @@ function _get_basis_functions_orientation(element_type,function_space_type,
     caller="API.mesh.get_basis_functions_orientation"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        msh,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+        if positions!==nothing
+            selected=_mesh_task_range(
+                length(positions),task_index,task_count)
+            return mesh_basis_orientations(
+                cached,msh,function_space_type,
+                positions[selected];caller=caller)
+        end
         count=block===nothing ? 0 : size(block[2],2)
         mesh_basis_orientations(
             cached,msh,function_space_type,
@@ -1053,26 +1200,35 @@ function _get_keys(element_type,function_space_type,tag=-1,
     caller="API.mesh.get_keys"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        msh,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         needs_edges,needs_faces=_hierarchical_key_catalog_needs(
             function_space_type,msh_spec(msh).family)
         edge_replacement=LAST_MESH_EDGES[]
         face_replacement=LAST_MESH_FACES[]
+        selected_cells=nothing
         if block!==nothing
             _,cells=block
+            selected_cells=positions===nothing ? cells :
+                cells[:,positions]
             if needs_edges
                 edge_replacement=_mesh_edge_topology_for_cells(
-                    cached,edge_replacement,cells,msh)
+                    cached,edge_replacement,selected_cells,msh)
             end
             if needs_faces
                 face_replacement=_mesh_face_topology_for_cells(
-                    cached,face_replacement,cells,msh)
+                    cached,face_replacement,selected_cells,msh)
             end
         end
-        result=mesh_keys(
-            cached,msh,function_space_type,edge_replacement,
-            face_replacement;
-            return_coord=return_coord,caller=caller)
+        result=positions===nothing ?
+            mesh_keys(
+                cached,msh,function_space_type,edge_replacement,
+                face_replacement;
+                return_coord=return_coord,caller=caller) :
+            mesh_keys(
+                cached,msh,function_space_type,positions,edge_replacement,
+                face_replacement;
+                return_coord=return_coord,caller=caller)
         block!==nothing || return result
         needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
         needs_faces && (LAST_MESH_FACES[]=face_replacement)
@@ -1279,6 +1435,56 @@ function _mesh_element_types(mesh::Mesh,dimension::Int)
     return result
 end
 
+# Node indices classified on `(dim, tag)`, in node-tag order.
+function _mesh_entity_node_positions(class::_MeshClassification,
+                                     key::Tuple{Int,Int32})
+    return findall(==(key),class.node_entities)
+end
+
+# Ordered node indices for one entity: its own classified nodes first, then
+# the transitive boundary entities' nodes breadth-first with a visited set,
+# matching Gmsh's `includeBoundary` emission order.
+function _mesh_entity_nodes_with_boundary(class::_MeshClassification,
+                                          dim::Int,tag::Int32)
+    order=Int[]
+    seen=Set{Tuple{Int,Int32}}()
+    queue=Tuple{Int,Int32}[(dim,tag)]
+    while !isempty(queue)
+        key=popfirst!(queue)
+        key in seen && continue
+        push!(seen,key)
+        append!(order,_mesh_entity_node_positions(class,key))
+        key[1]>0 || continue
+        for boundary in get(class.boundaries,key,Int32[])
+            push!(queue,(key[1]-1,boundary))
+        end
+    end
+    return order
+end
+
+# Entities of `dimension` known to the classification: any entity that owns
+# nodes or appears in the boundary map.
+function _mesh_classified_entities(class::_MeshClassification,dimension::Int)
+    tags=Set{Int32}()
+    for (entity_dim,entity_tag) in class.node_entities
+        entity_dim==dimension && push!(tags,entity_tag)
+    end
+    for (entity_dim,entity_tag) in keys(class.boundaries)
+        entity_dim==dimension && push!(tags,entity_tag)
+    end
+    return sort!(collect(tags))
+end
+
+function _mesh_nodes_payload(mesh::Mesh,indices::Vector{Int})
+    count=length(indices)
+    node_tags=UInt64.(indices)
+    coordinates=Vector{Float64}(undef,Base.checked_mul(3,count))
+    @inbounds for position in 1:count,axis in 1:3
+        coordinates[3position-3+axis]=mesh.coords[axis,indices[position]]
+    end
+    return node_tags,coordinates
+end
+
 function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                     return_parametric_coord=true)
     caller="API.mesh.get_nodes"
@@ -1286,14 +1492,36 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
         cached=_cached_mesh_locked(caller)
         dimension=_mesh_query_dimension(dim,caller)
         entity=_mesh_query_integer(tag,caller,"tag")
-        _mesh_query_bool(include_boundary,caller,"include_boundary")
+        boundary=_mesh_query_bool(include_boundary,caller,"include_boundary")
         _mesh_query_bool(
             return_parametric_coord,caller,"return_parametric_coord")
-        (dimension<0 && entity<0) || throw(ArgumentError(
-            "$caller: entity- or dimension-specific nodes require mesh " *
-            "classification metadata; use dim=-1 and a negative tag for all " *
-            "cached nodes"))
-        return UInt64.(1:nnodes(cached)),vec(copy(cached.coords)),Float64[]
+        if dimension<0
+            return UInt64.(1:nnodes(cached)),vec(copy(cached.coords)),
+                Float64[]
+        end
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: dimension-specific nodes require mesh classification " *
+            "metadata; use dim=-1 for all cached nodes"))
+        indices=Int[]
+        if entity>=0
+            _mesh_classified_entity(_model_locked(),class,dimension,entity,caller)
+            append!(indices,boundary ?
+                _mesh_entity_nodes_with_boundary(
+                    class,dimension,Int32(entity)) :
+                _mesh_entity_node_positions(
+                    class,(dimension,Int32(entity))))
+        else
+            for entity_tag in _mesh_classified_entities(class,dimension)
+                append!(indices,boundary ?
+                    _mesh_entity_nodes_with_boundary(
+                        class,dimension,entity_tag) :
+                    _mesh_entity_node_positions(
+                        class,(dimension,entity_tag)))
+            end
+        end
+        node_tags,coordinates=_mesh_nodes_payload(cached,indices)
+        return node_tags,coordinates,Float64[]
     end
 end
 
@@ -1303,10 +1531,30 @@ function _get_elements(dim=-1,tag=-1)
         cached=_cached_mesh_locked(caller)
         dimension=_mesh_query_dimension(dim,caller)
         entity=_mesh_query_integer(tag,caller,"tag")
-        entity<0 || throw(ArgumentError(
+        (dimension<0 || entity<0) &&
+            return _mesh_element_data(cached,dimension)
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
             "$caller: entity-specific elements require mesh classification " *
             "metadata; use a negative tag to query a complete dimension"))
-        _mesh_element_data(cached,dimension)
+        _mesh_classified_entity(_model_locked(),class,dimension,entity,caller)
+        triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(cached)
+        blocks=((Int32(1),1,0,cached.segs,class.seg_entities),
+                (Int32(2),2,triangle_offset,cached.tris,class.tri_entities),
+                (Int32(4),3,tetrahedron_offset,cached.tets,
+                 class.tet_entities))
+        element_types=Int32[]
+        element_tags=Vector{Vector{UInt64}}()
+        node_tags=Vector{Vector{UInt64}}()
+        for (element_type,block_dimension,offset,cells,owners) in blocks
+            block_dimension==dimension || continue
+            positions=findall(==(Int32(entity)),owners)
+            isempty(positions) && continue
+            push!(element_types,element_type)
+            push!(element_tags,UInt64.(offset .+ positions))
+            push!(node_tags,UInt64.(vec(@view cells[:,positions])))
+        end
+        return element_types,element_tags,node_tags
     end
 end
 
@@ -1316,11 +1564,48 @@ function _get_element_types(dim=-1,tag=-1)
         cached=_cached_mesh_locked(caller)
         dimension=_mesh_query_dimension(dim,caller)
         entity=_mesh_query_integer(tag,caller,"tag")
-        entity<0 || throw(ArgumentError(
+        (dimension<0 || entity<0) &&
+            return _mesh_element_types(cached,dimension)
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
             "$caller: entity-specific element types require mesh " *
             "classification metadata; use a negative tag to query a complete " *
             "dimension"))
-        _mesh_element_types(cached,dimension)
+        _mesh_classified_entity(_model_locked(),class,dimension,entity,caller)
+        result=Int32[]
+        dimension==1 && any(==(Int32(entity)),class.seg_entities) &&
+            push!(result,Int32(1))
+        dimension==2 && any(==(Int32(entity)),class.tri_entities) &&
+            push!(result,Int32(2))
+        dimension==3 && any(==(Int32(entity)),class.tet_entities) &&
+            push!(result,Int32(4))
+        return result
+    end
+end
+
+function _get_element(element_tag)
+    caller="API.mesh.get_element"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_integer(element_tag,caller,"element_tag")
+        triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
+        (tag>=1 && tag<=total) || throw(ArgumentError(
+            "$caller: unknown element $tag"))
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: element classification requires mesh classification " *
+            "metadata; generate a mesh so the cache owns entity ownership"))
+        if tag<=triangle_offset
+            return Int32(1),UInt64.(vec(cached.segs[:,tag])),1,
+                Int(class.seg_entities[tag])
+        elseif tag<=tetrahedron_offset
+            position=tag-triangle_offset
+            return Int32(2),UInt64.(vec(cached.tris[:,position])),2,
+                Int(class.tri_entities[position])
+        end
+        position=tag-tetrahedron_offset
+        return Int32(4),UInt64.(vec(cached.tets[:,position])),3,
+            Int(class.tet_entities[position])
     end
 end
 
@@ -1328,16 +1613,17 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_elements_by_type"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        msh,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[],UInt64[]
         offset,cells=block
-        selected=_mesh_task_range(size(cells,2),task_index,task_count)
+        columns=_mesh_selected_columns(cells,positions)
+        selected=_mesh_task_range(length(columns),task_index,task_count)
         isempty(selected) && return UInt64[],UInt64[]
-        first_element,last_element=first(selected),last(selected)
-        tags=UInt64.(Base.checked_add(offset,first_element):
-                     Base.checked_add(offset,last_element))
-        return tags,UInt64.(vec(@view cells[:,selected]))
+        chosen=@view columns[selected]
+        tags=UInt64.(offset .+ chosen)
+        return tags,UInt64.(vec(@view cells[:,chosen]))
     end
 end
 
@@ -1346,12 +1632,14 @@ function _get_nodes_by_element_type(element_type,tag=-1,
     caller="API.mesh.get_nodes_by_element_type"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        _,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        _,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         _mesh_query_bool(
             return_parametric_coord,caller,"return_parametric_coord")
         block===nothing && return UInt64[],Float64[],Float64[]
         _,cells=block
-        node_tags,coordinates=_mesh_nodes_for_cells(cached,cells)
+        node_tags,coordinates=_mesh_nodes_for_cells(
+            cached,cells[:,_mesh_selected_columns(cells,positions)])
         return node_tags,coordinates,Float64[]
     end
 end
@@ -1360,14 +1648,17 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
     caller="API.mesh.get_barycenters"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        _,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        _,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         fast_mode=_mesh_query_bool(fast,caller,"fast")
         _mesh_query_bool(primary,caller,"primary")
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return Float64[]
         _,cells=block
-        selected=_mesh_task_range(size(cells,2),task_index,task_count)
-        _mesh_barycenters(cached,@view(cells[:,selected]),fast_mode,caller)
+        columns=_mesh_selected_columns(cells,positions)
+        selected=_mesh_task_range(length(columns),task_index,task_count)
+        _mesh_barycenters(
+            cached,@view(cells[:,columns[selected]]),fast_mode,caller)
     end
 end
 
@@ -1376,13 +1667,16 @@ function _get_element_edge_nodes(element_type,tag=-1,primary=false,
     caller="API.mesh.get_element_edge_nodes"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        msh,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         _mesh_query_bool(primary,caller,"primary")
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[]
         _,cells=block
-        selected=_mesh_task_range(size(cells,2),task_index,task_count)
-        _mesh_pattern_nodes(@view(cells[:,selected]),_simplex_edge_patterns(msh))
+        columns=_mesh_selected_columns(cells,positions)
+        selected=_mesh_task_range(length(columns),task_index,task_count)
+        _mesh_pattern_nodes(
+            @view(cells[:,columns[selected]]),_simplex_edge_patterns(msh))
     end
 end
 
@@ -1391,7 +1685,8 @@ function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
     caller="API.mesh.get_element_face_nodes"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block=_mesh_query_type_block(cached,element_type,tag,caller)
+        msh,block,positions=_mesh_query_type_block(
+            cached,element_type,tag,caller)
         face=_mesh_query_integer(face_type,caller,"face_type")
         face in (3,4) || throw(ArgumentError(
             "$caller: face_type must be 3 (triangle) or 4 (quadrangle)"))
@@ -1399,9 +1694,10 @@ function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         block===nothing && return UInt64[]
         _,cells=block
-        selected=_mesh_task_range(size(cells,2),task_index,task_count)
+        columns=_mesh_selected_columns(cells,positions)
+        selected=_mesh_task_range(length(columns),task_index,task_count)
         _mesh_pattern_nodes(
-            @view(cells[:,selected]),_simplex_face_patterns(msh,face))
+            @view(cells[:,columns[selected]]),_simplex_face_patterns(msh,face))
     end
 end
 
@@ -1421,13 +1717,17 @@ end
 
 function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
     return lock(STATE_LOCK) do
-        _model_locked()
+        m=_model_locked()
         cached=LAST_MESH[]
         cached===nothing && throw(ArgumentError(
             "API.mesh.refine: no mesh; call API.mesh.generate first"))
         refined=refine_uniform(
             cached;max_nodes=max_nodes,max_cells=max_cells)
-        _replace_mesh_cache_locked!(_copy_mesh(refined))
+        class=_cached_classification_locked(cached)
+        cache=_copy_mesh(refined)
+        new_class=class===nothing ? nothing : _classify_cached_mesh(
+            m,refined,class.entity[1],Int(class.entity[2]),cache)
+        _replace_mesh_cache_locked!(cache,new_class)
         refined
     end
 end
@@ -1440,9 +1740,8 @@ function _clear_mesh(dim_tags=())
                 "API.mesh.clear: dim_tags must be a vector or tuple of " *
                 "(dimension, tag) pairs"))
         isempty(dim_tags) || throw(ArgumentError(
-            "API.mesh.clear: entity-selective clearing requires mesh " *
-            "classification metadata; pass an empty collection to clear the " *
-            "complete cached mesh"))
+            "API.mesh.clear: entity-selective clearing is not supported; " *
+            "pass an empty collection to clear the complete cached mesh"))
         _replace_mesh_cache_locked!(nothing)
         nothing
     end
@@ -1457,9 +1756,8 @@ function _affine_transform_mesh(affine,dim_tags=())
                 "$caller: dim_tags must be a vector or tuple of " *
                 "(dimension, tag) pairs"))
         isempty(dim_tags) || throw(ArgumentError(
-            "$caller: entity-selective transformation requires mesh " *
-            "classification metadata; pass an empty collection to transform " *
-            "the complete cached mesh"))
+            "$caller: entity-selective transformation is not supported; " *
+            "pass an empty collection to transform the complete cached mesh"))
         cached=LAST_MESH[]
         cached===nothing && throw(ArgumentError(
             "$caller: no mesh; call API.mesh.generate first"))
@@ -1467,7 +1765,14 @@ function _affine_transform_mesh(affine,dim_tags=())
         matrix=reshape(collect(coefficients),3,3)
         transformed=affine_transform(
             cached,matrix;translation=translation)
-        _replace_mesh_cache_locked!(_copy_mesh(transformed))
+        # An affine map preserves connectivity, so the classification stays
+        # index-aligned; it is rebound to the transformed cache object.
+        class=_cached_classification_locked(cached)
+        cache=_copy_mesh(transformed)
+        new_class=class===nothing ? nothing : _MeshClassification(
+            cache,class.entity,class.node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(cache,new_class)
         transformed
     end
 end
@@ -1519,7 +1824,8 @@ end
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element_types,
+using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element,
+             _get_element_types,
              _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
              _get_element_edge_nodes,_get_element_face_nodes,
              _get_element_type,_get_element_properties,
@@ -1544,10 +1850,14 @@ get()=_get_mesh()
               return_parametric_coord=true)
 
 Return detached dense `UInt64` node tags, flattened `Float64` coordinates, and an
-empty parametric-coordinate vector for the complete cached mesh. The simplex cache
-does not own entity classification or parametric coordinates, so only negative
-`tag` with `dim=-1` is supported; the Boolean flags are validated but do not
-change a global result.
+empty parametric-coordinate vector for the cached mesh. `dim=-1` returns every
+cached node and ignores `tag`. A nonnegative `dim` selects nodes classified on
+model entities of that dimension — all such entities for a negative `tag`, or the
+single `(dim, tag)` entity otherwise. With `include_boundary=true`, nodes
+classified on the entity's transitive boundary entities are appended after its
+own, matching Gmsh's per-entity emission (boundary nodes can repeat across
+entities). The cache keeps no parametric coordinates, so the third result is
+always empty.
 """
 get_nodes(dim=-1,tag=-1,include_boundary=false,return_parametric_coord=true)=
     _get_nodes(dim,tag,include_boundary,return_parametric_coord)
@@ -1559,12 +1869,25 @@ Return detached Gmsh-shaped `(element_types, element_tags, node_tags)` arrays fo
 linear segments (type 1), triangles (type 2), and tetrahedra (type 4) in the
 cached mesh. A dimension in `0:3` with negative `tag` filters whole type blocks.
 Element tags are dense identifiers derived for the current cache across blocks in
-that order. Global queries use `dim=-1`; values outside `-1` or `0:3` are
-rejected. Entity-specific queries require unavailable classification metadata.
+that order. Global queries use `dim=-1`, which ignores `tag`. A nonnegative `tag`
+selects only the elements classified on the `(dim, tag)` model entity; unknown
+entities fail explicitly. Values outside `-1` or `0:3` are rejected.
 """
 get_elements(dim=-1,tag=-1)=_get_elements(dim,tag)
 
-"""Return the detached linear-simplex MSH types present in a whole cache/dimension."""
+"""
+    get_element(element_tag)
+
+Return `(element_type, node_tags, entity_dimension, entity_tag)` for one dense
+cached element tag, matching Gmsh 4.15.2's `getElement` result order. The cache
+holds only linear-simplex types 1, 2, and 4. The entity fields come from the
+classification snapshot built when the mesh was generated; unknown tags and
+caches without classification fail explicitly.
+"""
+get_element(element_tag)=_get_element(element_tag)
+
+"""Return the detached linear-simplex MSH types present in a whole cache/dimension
+or, for a nonnegative `tag`, on the `(dim, tag)` model entity."""
 get_element_types(dim=-1,tag=-1)=_get_element_types(dim,tag)
 
 """
@@ -1672,8 +1995,9 @@ of one linear-simplex Gmsh type at concatenated `(u,v,w)` points. Results are
 ordered by element and then point; each 3×3 Jacobian is flattened by column.
 Segment determinants are positive lengths, triangle determinants are positive
 area scales, and tetrahedron determinants retain orientation. The cache supports
-types 1, 2, and 4. Entity filtering requires metadata this Julia cache does not
-have. With `num_tasks > 1`, only the contiguous Gmsh block of cached elements
+types 1, 2, and 4. A nonnegative `tag` selects only the elements classified on
+the entity of `tag` in the type's own dimension; unknown entities fail
+explicitly. With `num_tasks > 1`, only the contiguous Gmsh block of cached elements
 with 0-based positions `begin = (task*count) ÷ num_tasks` through
 `end = ((task+1)*count) ÷ num_tasks` is evaluated and returned; unlike Gmsh's
 preallocated C++ output, the detached result contains exactly that slice and no
@@ -1742,8 +2066,9 @@ get_number_of_orientations(element_type,function_space_type)=
 
 Return one lexicographic orientation index per cached element of the requested
 supported type. Nodal spaces return zeros. Known fixed types absent from the
-linear-simplex cache return an empty vector. Entity filtering requires metadata
-not present in the detached cache API. With `num_tasks > 1`, only the
+linear-simplex cache return an empty vector. A nonnegative `tag` selects only
+the elements classified on the entity of `tag` in the type's own dimension;
+unknown entities fail explicitly. With `num_tasks > 1`, only the
 contiguous Gmsh block of cached elements with 0-based positions
 `begin = (task*count) ÷ num_tasks` through `end = ((task+1)*count) ÷ num_tasks`
 is evaluated and returned; unlike Gmsh's preallocated C++ output, the detached
@@ -1781,7 +2106,8 @@ lowest-order H(curl) keys use stable global edge tags and lazily add only the ed
 visited by the requested type. Coordinates locate node or edge-midpoint keys and
 are omitted when `return_coord=false`. A numeric Lagrange space must match the
 stored interpolation-node count; the cache does not synthesize higher-order keys.
-Entity filtering remains unavailable.
+A nonnegative `tag` selects only the elements classified on the entity of `tag`
+in the type's own dimension; unknown entities fail explicitly.
 """
 get_keys(element_type,function_space_type,tag=-1,return_coord=true)=
     _get_keys(element_type,function_space_type,tag,return_coord)
@@ -1829,7 +2155,7 @@ get_keys_information(type_keys,entity_keys,element_type,function_space_type)=
 
 Create deterministic global identifiers for every unique edge in the cached
 linear-simplex mesh. Repeated calls are idempotent. Only whole-cache creation is
-available because the cache does not own model-entity classification metadata.
+available.
 Edges previously attached with [`add_edges`](@ref) are preserved. Replacing,
 refining, transforming, or clearing the cache invalidates the catalog. Automatic
 identifiers begin at the current edge count plus one and skip identifiers already
@@ -1917,7 +2243,9 @@ get_all_faces(face_type)=_get_all_faces(face_type)
 
 Return detached dense element tags and flattened node tags for one fixed-node Gmsh
 element type. The simplex cache can contain only types 1, 2, and 4; another known
-fixed-node type returns empty arrays. Entity filtering is an explicit blocker.
+fixed-node type returns empty arrays. A nonnegative `tag` selects only the
+elements classified on the entity of `tag` in the type's own dimension; unknown
+entities fail explicitly.
 With `num_tasks > 1`, only the contiguous Gmsh block of cached elements with
 0-based positions `begin = (task*count) ÷ num_tasks` through
 `end = ((task+1)*count) ÷ num_tasks` is returned; unlike Gmsh's preallocated
@@ -1934,8 +2262,9 @@ get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)=
 
 Return detached node tags and coordinates in per-element connectivity order for
 one fixed-node Gmsh element type. Shared nodes consequently appear once per element
-use. The linear-simplex cache has no parametric or entity-classification metadata,
-so the parametric result is empty and `tag` must be negative.
+use. A nonnegative `tag` selects only the elements classified on the entity of
+`tag` in the type's own dimension; unknown entities fail explicitly. The cache
+keeps no parametric coordinates, so the parametric result is always empty.
 """
 get_nodes_by_element_type(element_type,tag=-1,return_parametric_coord=true)=
     _get_nodes_by_element_type(element_type,tag,return_parametric_coord)
@@ -1946,7 +2275,9 @@ get_nodes_by_element_type(element_type,tag=-1,return_parametric_coord=true)=
 
 Return detached `x,y,z` barycenters in element order for a cached linear-simplex
 type. With `fast=true`, return unnormalized primary-node coordinate sums. All nodes
-are primary for types 1, 2, and 4. Entity filtering is an explicit blocker.
+are primary for types 1, 2, and 4. A nonnegative `tag` selects only the elements
+classified on the entity of `tag` in the type's own dimension; unknown entities
+fail explicitly.
 With `num_tasks > 1`, only the contiguous Gmsh block of cached elements with
 0-based positions `begin = (task*count) ÷ num_tasks` through
 `end = ((task+1)*count) ÷ num_tasks` is returned; unlike Gmsh's preallocated
@@ -1963,8 +2294,10 @@ get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)=
 
 Return detached edge-node tags in Gmsh local-edge order for every cached element of
 one type. The `primary` flag is validated but does not change linear-simplex output.
-Entity filtering is an explicit blocker. With `num_tasks > 1`, only the
-contiguous Gmsh block of cached elements with 0-based positions
+A nonnegative `tag` selects only the elements classified on the entity of `tag`
+in the type's own dimension; unknown entities fail explicitly. With
+`num_tasks > 1`, only the contiguous Gmsh block of cached elements with 0-based
+positions
 `begin = (task*count) ÷ num_tasks` through `end = ((task+1)*count) ÷ num_tasks`
 is returned; unlike Gmsh's preallocated C++ output, the detached result contains
 exactly that slice and no zero padding. `task >= num_tasks` returns an empty
@@ -1980,8 +2313,9 @@ get_element_edge_nodes(element_type,tag=-1,primary=false,task=0,num_tasks=1)=
 
 Return detached face-node tags in Gmsh local-face order for every cached element of
 one type. `face_type` is 3 for triangles or 4 for quadrangles. The `primary` flag is
-validated but does not change linear-simplex output. Entity filtering is an
-explicit blocker. With `num_tasks > 1`, only the contiguous Gmsh block of cached
+validated but does not change linear-simplex output. A nonnegative `tag` selects
+only the elements classified on the entity of `tag` in the type's own dimension;
+unknown entities fail explicitly. With `num_tasks > 1`, only the contiguous Gmsh block of cached
 elements with 0-based positions `begin = (task*count) ÷ num_tasks` through
 `end = ((task+1)*count) ÷ num_tasks` is returned; unlike Gmsh's preallocated
 C++ output, the detached result contains exactly that slice and no zero padding.
@@ -2013,8 +2347,8 @@ refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))=
     clear(dim_tags=())
 
 Clear the complete cached mesh without changing model geometry. An empty vector
-or tuple selects the complete cache. Entity-selective clearing is unavailable
-until the simplex cache owns entity-classification metadata.
+or tuple selects the complete cache. Entity-selective clearing is not
+supported.
 """
 clear(dim_tags=())=_clear_mesh(dim_tags)
 
@@ -2025,8 +2359,8 @@ Apply a finite nonsingular affine transform to every node in the complete cached
 mesh. `affine` is a 4×4 matrix or exactly 12 or 16 entries in Gmsh row-major
 order; 12 entries imply the homogeneous row `(0, 0, 0, 1)`. The cache changes
 only after the transformed mesh validates, and the returned mesh owns independent
-storage. Entity-selective transforms are unavailable until the simplex cache owns
-classification metadata. Model geometry and periodic relations are unchanged.
+storage. Entity-selective transforms are not supported. Model geometry and
+periodic relations are unchanged.
 """
 affine_transform(affine,dim_tags=())=
     _affine_transform_mesh(affine,dim_tags)

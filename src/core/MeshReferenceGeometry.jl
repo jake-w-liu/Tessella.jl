@@ -453,6 +453,37 @@ function _write_cells_in_range!(jacobians,determinants,coordinates,
     return nothing
 end
 
+function _checked_element_positions(positions,element_count::Int,
+                                    caller::AbstractString)
+    positions isa AbstractVector{<:Integer} || throw(ArgumentError(
+        "$caller: element positions must be an integer vector"))
+    checked=Vector{Int}(undef,length(positions))
+    @inbounds for index in eachindex(positions)
+        position=positions[index]
+        (position>=1 && position<=element_count) || throw(ArgumentError(
+            "$caller: element position $position is outside " *
+            "1:$element_count"))
+        checked[index]=Int(position)
+    end
+    return checked
+end
+
+function _write_cells_at_positions!(jacobians,determinants,coordinates,
+                                    mesh::Mesh,msh::Int,offset::Int,
+                                    cells::AbstractMatrix{Int32},
+                                    local_coordinates,point_count::Int,
+                                    positions::Vector{Int},
+                                    caller::AbstractString)
+    @inbounds for slot in eachindex(positions)
+        cell=positions[slot]
+        _write_cell!(
+            jacobians,determinants,coordinates,mesh,cells,cell,slot,
+            offset+cell,point_count,local_coordinates,caller,
+            Val(msh==1 ? 1 : msh==2 ? 2 : 3))
+    end
+    return nothing
+end
+
 """
     mesh_jacobians(mesh, element_type, local_coord)
 
@@ -514,6 +545,36 @@ function mesh_jacobians(mesh::Mesh,element_type,local_coord,
     _write_cells_in_range!(
         jacobians,determinants,coordinates,mesh,msh,offset,cells,
         local_coordinates,point_count,first_element,last_element,caller)
+    return jacobians,determinants,coordinates
+end
+
+"""
+    mesh_jacobians(mesh, element_type, local_coord, positions::AbstractVector{Int})
+
+Return detached `(jacobians, determinants, coordinates)` for the cached elements
+of one Gmsh type at the given 1-based block positions, ordered by `positions`
+and then evaluation point. This is the entity-filtered selection backing the
+`tag`-filtered session query contract. Validation, layout, and numerical
+contracts match [`mesh_jacobians`](@ref); an empty position vector returns
+three empty vectors without touching the mesh.
+"""
+function mesh_jacobians(mesh::Mesh,element_type,local_coord,
+                        positions::AbstractVector{<:Integer})
+    caller="mesh_jacobians"
+    msh=_checked_element_type(element_type,caller)
+    local_coordinates,point_count=
+        _checked_local_coordinates(local_coord,caller)
+    block=mesh_element_block(mesh,msh)
+    (block===nothing || point_count==0) &&
+        return Float64[],Float64[],Float64[]
+    offset,cells=block
+    selected=_checked_element_positions(positions,size(cells,2),caller)
+    isempty(selected) && return Float64[],Float64[],Float64[]
+    jacobians,determinants,coordinates=
+        _allocate_results(length(selected),point_count,caller)
+    _write_cells_at_positions!(
+        jacobians,determinants,coordinates,mesh,msh,offset,cells,
+        local_coordinates,point_count,selected,caller)
     return jacobians,determinants,coordinates
 end
 

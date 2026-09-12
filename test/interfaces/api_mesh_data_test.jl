@@ -144,13 +144,15 @@ end
         @test _MESH_DATA_API.mesh.get_nodes()==
               (UInt64[1,2,3,4],collect(vec(source.coords)),Float64[])
 
+        # dim=-1 ignores `tag` entirely (verified against Gmsh 4.15.2).
+        @test _MESH_DATA_API.mesh.get_nodes(-1,1)==
+              _MESH_DATA_API.mesh.get_nodes(-1,-1)
         for call in (
             ()->_MESH_DATA_API.mesh.get_nodes(false),
             ()->_MESH_DATA_API.mesh.get_nodes(-1,false),
             ()->_MESH_DATA_API.mesh.get_nodes(-2),
             ()->_MESH_DATA_API.mesh.get_nodes(4),
             ()->_MESH_DATA_API.mesh.get_nodes(3,-1),
-            ()->_MESH_DATA_API.mesh.get_nodes(-1,1),
             ()->_MESH_DATA_API.mesh.get_nodes(-1,-1,0),
             ()->_MESH_DATA_API.mesh.get_nodes(-1,-1,false,missing),
             ()->_MESH_DATA_API.mesh.get_nodes(big(typemax(Int))+1),
@@ -551,6 +553,154 @@ end
         @test full_edge>0
         @test 0<part_edge<full_edge
         @test 4part_edge<=3full_edge
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end
+
+@testset "entity-filtered mesh queries on generated caches" begin
+    _MESH_DATA_API.initialize()
+    try
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            _MESH_DATA_API.model.add_point(x,y,0.0;tag=point)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            _MESH_DATA_API.model.add_line(a,b;tag=curve)
+        end
+        _MESH_DATA_API.model.add_curve_loop([1,2,3,4];tag=1)
+        _MESH_DATA_API.model.add_plane_surface([1];tag=1)
+        _MESH_DATA_API.option("Mesh.MeshSizeMax",0.35)
+        _MESH_DATA_API.mesh.generate(2)
+
+        all_nodes=_MESH_DATA_API.mesh.get_nodes(-1,-1)[1]
+        surface_nodes=_MESH_DATA_API.mesh.get_nodes(2,1)[1]
+        surface_with_boundary=_MESH_DATA_API.mesh.get_nodes(2,1,true)[1]
+        @test issorted(surface_nodes)
+        @test Set(surface_nodes)⊆Set(all_nodes)
+        @test surface_with_boundary[1:length(surface_nodes)]==surface_nodes
+        # The include_boundary closure is the transitive boundary node union.
+        expected=Set(surface_nodes)
+        boundary_entities=_MESH_DATA_API.model.get_boundary(
+            [(2,1)],false,false,false)
+        queue=collect(boundary_entities)
+        seen=Set{Tuple{Int,Int}}()
+        while !isempty(queue)
+            key=popfirst!(queue)
+            key in seen && continue
+            push!(seen,key)
+            union!(expected,
+                   _MESH_DATA_API.mesh.get_nodes(key[1],key[2])[1])
+            append!(queue,_MESH_DATA_API.model.get_boundary(
+                [key],false,false,false))
+        end
+        @test Set(surface_with_boundary)==expected
+        # A curve query covers its own nodes; boundary adds its two points.
+        curve_nodes=_MESH_DATA_API.mesh.get_nodes(1,1)[1]
+        curve_with_boundary=_MESH_DATA_API.mesh.get_nodes(1,1,true)[1]
+        @test curve_with_boundary[1:length(curve_nodes)]==curve_nodes
+        @test Set(curve_with_boundary[length(curve_nodes)+1:end])==
+              Set(_MESH_DATA_API.mesh.get_nodes(0,1)[1])∪
+              Set(_MESH_DATA_API.mesh.get_nodes(0,2)[1])
+        @test length(_MESH_DATA_API.mesh.get_nodes(0,1)[1])==1
+        # Dimension-wide queries concatenate per-entity emissions.
+        dim2=_MESH_DATA_API.mesh.get_nodes(2,-1)[1]
+        @test Set(dim2)==Set(surface_nodes)
+        dim2_with_boundary=_MESH_DATA_API.mesh.get_nodes(2,-1,true)[1]
+        @test Set(dim2_with_boundary)==expected
+        # Element queries filter cells onto the queried entity.
+        types,tags,nodes=_MESH_DATA_API.mesh.get_elements(2,1)
+        @test types==Int32[2]
+        all_types,all_tags,all_nodes=_MESH_DATA_API.mesh.get_elements(2,-1)
+        @test all_types==types && all_tags==tags && all_nodes==nodes
+        @test _MESH_DATA_API.mesh.get_element_types(2,1)==Int32[2]
+        @test _MESH_DATA_API.mesh.get_element_types(1,1)==Int32[]
+        triangle_count=length(tags[1])
+        # Element-by-tag classification resolves block position and owner.
+        for element_tag in tags[1]
+            element_type,element_nodes,entity_dim,entity_tag=
+                _MESH_DATA_API.mesh.get_element(element_tag)
+            @test element_type==Int32(2)
+            @test (entity_dim,entity_tag)==(2,1)
+            @test length(element_nodes)==3
+            @test Set(element_nodes)⊆Set(surface_with_boundary)
+        end
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(0)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(
+            length(tags[1])+1)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(1.5)
+        # Type-funnel queries resolve the tag in the type's own dimension.
+        filtered_tags,filtered_nodes=
+            _MESH_DATA_API.mesh.get_elements_by_type(2,1)
+        @test sort!(filtered_tags)==sort!(tags[1])
+        @test length(filtered_nodes)==3triangle_count
+        @test length(
+            _MESH_DATA_API.mesh.get_nodes_by_element_type(2,1)[1])==
+            3triangle_count
+        @test length(_MESH_DATA_API.mesh.get_barycenters(
+            2,1,false,false))==3triangle_count
+        @test length(_MESH_DATA_API.mesh.get_element_edge_nodes(2,1))==
+            6triangle_count
+        @test length(_MESH_DATA_API.mesh.get_element_face_nodes(2,3,1))==
+            3triangle_count
+        jacobians,determinants,_=_MESH_DATA_API.mesh.get_jacobians(
+            2,[0.25,0.25,0.0],1)
+        @test length(determinants)==triangle_count
+        @test all(>(0),determinants)
+        @test length(jacobians)==9triangle_count
+        @test _MESH_DATA_API.mesh.get_basis_functions_orientation(
+            2,"Lagrange",1)==zeros(Int32,triangle_count)
+        _,key_entities,_=_MESH_DATA_API.mesh.get_keys(2,"Lagrange",1)
+        @test sort!(unique!(key_entities))==
+              sort!(unique!(surface_with_boundary))
+        # Task partitioning subdivides the entity-filtered subset.
+        union_tags=UInt64[]
+        for task in 0:2
+            slice,_=_MESH_DATA_API.mesh.get_elements_by_type(2,1,task,3)
+            append!(union_tags,slice)
+        end
+        @test sort!(union_tags)==sort!(tags[1])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(
+            2,1,triangle_count,triangle_count)==(UInt64[],UInt64[])
+        # Unknown entities and dimension mismatches fail explicitly.
+        for call in (
+            ()->_MESH_DATA_API.mesh.get_nodes(2,77),
+            ()->_MESH_DATA_API.mesh.get_nodes(1,77),
+            ()->_MESH_DATA_API.mesh.get_elements(2,77),
+            ()->_MESH_DATA_API.mesh.get_element_types(2,77),
+            ()->_MESH_DATA_API.mesh.get_elements_by_type(2,77),
+            ()->_MESH_DATA_API.mesh.get_nodes_by_element_type(2,77),
+            ()->_MESH_DATA_API.mesh.get_barycenters(2,77,false,false),
+            ()->_MESH_DATA_API.mesh.get_element_edge_nodes(2,77),
+            ()->_MESH_DATA_API.mesh.get_element_face_nodes(2,3,77),
+            ()->_MESH_DATA_API.mesh.get_jacobians(2,[0.25,0.25,0.0],77),
+            ()->_MESH_DATA_API.mesh.get_basis_functions_orientation(
+                2,"Lagrange",77),
+            ()->_MESH_DATA_API.mesh.get_keys(2,"Lagrange",77),
+            # The triangle type resolves its tag in dimension 2, so a curve
+            # tag is rejected rather than silently returning curve cells.
+            ()->_MESH_DATA_API.mesh.get_elements_by_type(2,1+77),
+            ()->_MESH_DATA_API.mesh.get_nodes(3,1),
+        )
+            @test_throws ArgumentError call()
+        end
+        # A curve tag on a dim-2 query fails even though the entity exists.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes(2,3)
+        # Refinement and affine transforms keep the classification live.
+        _MESH_DATA_API.mesh.refine()
+        refined_surface=_MESH_DATA_API.mesh.get_nodes(2,1)[1]
+        @test length(refined_surface)>length(surface_nodes)
+        refined_types,refined_tags,_=_MESH_DATA_API.mesh.get_elements(2,1)
+        @test refined_types==Int32[2]
+        @test length(refined_tags[1])==4triangle_count
+        _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 1.5; 0 1 0 0; 0 0 1 0; 0 0 0 1])
+        @test _MESH_DATA_API.mesh.get_nodes(2,1)[1]==refined_surface
+        _,shifted,_=_MESH_DATA_API.mesh.get_nodes(2,1)
+        @test all(>=(1.5),shifted[1:3:end])
+        # Clearing drops the cache and its classification together.
+        _MESH_DATA_API.mesh.clear()
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes(2,1)
     finally
         _MESH_DATA_API.finalize()
     end

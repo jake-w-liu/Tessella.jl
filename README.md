@@ -263,22 +263,24 @@ and implicit primitive boundary presentation remain unfinished.
 `API.mesh.refine` replaces the complete cached linear-simplex mesh only after the
 canonical uniform-refinement kernel succeeds and returns independent caller-owned
 storage. `API.mesh.clear` discards the complete cache without changing model geometry;
-entity-selective clearing is an explicit blocker until the cache owns entity
-classification metadata. `API.mesh.affine_transform` applies a finite nonsingular
+entity-selective clearing is an explicit blocker. `API.mesh.affine_transform` applies a finite nonsingular
 4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete cache.
 It commits only a validated, independently owned result and rewinds reflected simplex
 connectivity to keep the mesh valid. Model geometry and periodic relations remain
-unchanged. Consequently, moving cached nodes away from their modeled entities can
-make classification-dependent queries fail explicitly until the cache is cleared and
-regenerated. Entity-selective transforms have the same classification blocker as
+unchanged, and the index-aligned entity-classification snapshot is retained
+through the transform. Entity-selective transforms have the same blocker as
 selective clearing.
 `API.mesh.get_nodes`, `get_elements`, `get_element_types`,
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
 detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element
 tags are dense identifiers derived for that cache; segments, triangles, and
 tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence.
-Whole-dimension element filters are supported. Entity-specific filters, classified node
-queries, and parametric coordinates remain explicit blockers until `Mesh` owns that
+Whole-dimension element filters are supported, and a nonnegative `tag` filters
+node, element, type-funnel, Jacobian, orientation, key, and `get_element` queries
+onto the `(dim, tag)` model entity through the `model_to_mixed` classification
+snapshot stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
+transitive boundary-entity nodes after the entity's own, and unknown entities fail
+explicitly. Parametric coordinates remain explicit blockers until `Mesh` owns that
 metadata. `get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
 the contiguous Gmsh block slice (`task>=num_tasks` is empty).
 `get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
@@ -304,8 +306,8 @@ orientation for both face types.
 order. Unlike Gmsh 4.15.2, Tessella rejects zero identifiers, duplicate identifiers
 on different entities, conflicting identifiers for the same entity, repeated nodes,
 and malformed or partly invalid batches without changing the catalog. Every mesh
-replacement discards both catalogs. Entity-selective creation remains blocked until
-the cache owns classification metadata.
+replacement discards both catalogs. Entity-selective creation remains an explicit
+blocker.
 `get_element_by_coordinates`, `get_elements_by_coordinates`, and
 `get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
 cache. Matches are deterministic: greatest dimension first, then smallest dense tag.
@@ -315,8 +317,8 @@ affine inversion falls back to exact rational arithmetic for ill-conditioned cas
 Off-span segment and triangle coordinates are stable orthogonal projections with
 unused coordinates set to zero. The locator is discarded whenever the mesh cache
 changes. Degenerate cells and Float64-unrepresentable local coordinates fail
-explicitly. A standalone `get_element` query remains unavailable because its
-required model-entity classification tag is not present in `Mesh`.
+explicitly. `API.mesh.get_element` resolves a dense element tag to its type,
+connectivity, and owning entity through the classification snapshot.
 `get_jacobians` and `get_jacobian` return detached forward-map data for cached
 linear segments, triangles, and tetrahedra. Evaluation points are concatenated
 `(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and

@@ -150,21 +150,23 @@ presentation are not represented by the headless native model.
 the canonical uniform-refinement kernel and returns detached storage; rejected
 resource bounds leave the prior cache unchanged. `API.mesh.clear` discards only the
 complete cache and preserves model geometry. Entity-selective clearing remains an
-explicit blocker until the cache owns entity-classification metadata.
+explicit blocker.
 `API.mesh.affine_transform` accepts a native 4×4 matrix or exactly 12/16 Gmsh
 row-major entries, rejects singular and nonfinite maps, and commits only a detached,
 validated whole-cache result. Reflections rewind simplex connectivity instead of
 leaving inverted cells. The operation does not rewrite model geometry or periodic
-relations; classification-dependent queries can therefore reject a moved cache until
-it is cleared and regenerated. Entity-selective transforms remain blocked by the same
-missing classification metadata.
+relations; the index-aligned classification snapshot is retained through the
+transform. Entity-selective transforms remain explicit blockers.
 Bulk session queries expose detached node tags and coordinates, element types, tags,
 and connectivity, type and whole-dimension filters, and maximum tags. Node and
 element tags are dense identifiers rebuilt for the current cache; linear segment,
 triangle, and tetrahedron blocks use MSH types 1, 2, and 4 with one global
-element-tag sequence. The cache owns neither entity classification nor parametric
-coordinates, so those query variants fail explicitly instead of returning invented
-metadata.
+element-tag sequence. A `model_to_mixed` classification snapshot stored with the
+cache supports entity-filtered node, element, type-funnel, Jacobian, orientation,
+key, and `get_element` queries; `include_boundary` emits transitive boundary-entity
+nodes after the entity's own, `dim=-1` ignores `tag`, and unknown entities fail
+explicitly. Parametric coordinates remain absent, so those query variants fail
+explicitly instead of returning invented metadata.
 Connectivity-derived queries expose repeated per-element node coordinates,
 barycenters, and edge/face nodes in Gmsh's local linear-simplex ordering. All cached
 nodes are primary, and nonfinite fast coordinate sums fail explicitly. Nondefault
@@ -197,8 +199,7 @@ catalogs and lazily add only
 requested edges or faces. Key coordinates and all returned arrays are detached. Higher-order
 Prism and incomplete
 Pyramid paths that Gmsh 4.15.2 cannot construct are native, invariant-certified
-extensions. Pyramid/Trihedron hierarchical spaces and entity-filtered
-results remain explicit blockers. `get_basis_functions_orientation` accepts nondefault
+extensions. Pyramid/Trihedron hierarchical spaces remain explicit blockers. `get_basis_functions_orientation` accepts nondefault
 `task`/`num_tasks` and returns the contiguous Gmsh block slice; `task>=num_tasks`
 is empty, where the pinned release segfaults in its unguarded per-entity loop.
 Whole-cache edge and face creation assigns positive global identifiers to missing
@@ -325,6 +326,43 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-09-11 with Julia 1.12.7 after implementing entity-filtered
+session mesh queries through a `model_to_mixed` classification snapshot stored
+with the cache:
+
+- `_MeshClassification` records per-node owning entities, per-cell entity tags
+  for each simplex block, and the entity boundary map, built through canonical
+  `model_to_mixed` at generation, re-derived on `refine`, rebound across
+  `affine_transform` (connectivity is index-invariant), and dropped by every
+  other cache replacement including model-invalidating mutations.
+- `get_nodes`, `get_elements`, `get_element_types`, `get_elements_by_type`,
+  `get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`,
+  `get_element_face_nodes`, `get_jacobians`, `get_basis_functions_orientation`,
+  and `get_keys` now accept nonnegative entity tags: `dim=-1` ignores `tag`,
+  `include_boundary` appends transitive boundary-entity nodes breadth-first
+  after the entity's own (duplicates across the per-entity outer loop match
+  Gmsh), filtered task slices partition the entity subset, and unknown or
+  dimension-mismatched entities fail explicitly. New position-based kernels
+  evaluate only the selected columns and keep hierarchical key element tags
+  global.
+- `get_element` resolves a dense element tag to `(element_type, node_tags,
+  entity_dimension, entity_tag)` in Gmsh's result order; out-of-range tags and
+  caches without classification fail explicitly.
+- Entity-selective `clear`, `affine_transform`, `create_edges`, and
+  `create_faces` remain explicit blockers — the classification is read-only —
+  and primitive `add_box` models expose no boundary entities, so their
+  boundary queries correctly reject.
+- The mesh-data differential now generates the same square in both engines and
+  checks own-node-first ordering, transitive boundary closure against a
+  recursive `getBoundary` walk, filtered type funnels, filtered task unions,
+  `get_element` parity, and unknown/phantom-entity rejection:
+  `entity_filtered=tris(4, 26)`.
+- Focused bounds-checked suites: mesh-data 345/345 (including the new
+  66-assertion entity-filtered testset), Jacobian 64/64, and function-space
+  126/126. The complete bounds-checked package gate passed 212,533/212,533
+  assertions and the aggregate validation exited zero with every mandatory
+  child, analytic case, and the enclosure/coax acceptance probe completed.
 
 Re-measured on 2026-09-11 with Julia 1.12.7 after extending hierarchical
 function spaces from order-one H1 plus linear-simplex lowest-order H(curl) to

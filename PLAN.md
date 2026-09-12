@@ -306,21 +306,25 @@ The synchronized mesh API routes complete cached linear-simplex refinement throu
 the canonical uniform-refinement kernel, commits only after successful validation and
 resource preflight, and returns detached storage. Whole-cache clearing is idempotent
 and leaves model geometry intact. Entity-selective clearing remains an explicit
-blocker because the simplex `Mesh` cache does not own entity classification. It also
+blocker. It also
 routes strict 12-/16-entry Gmsh row-major or native 4×4 affine transforms through the
 canonical transform kernel, atomically caches a detached validated result, and
 rewinds orientation-reversing simplex connectivity. Singular, nonfinite, malformed,
 and entity-selective transforms leave the prior cache unchanged. This is a mesh-only
-operation: geometry and periodic relations remain unchanged, so a transformed cache
-that no longer lies on its modeled entities can block classification-dependent
-queries until clear/regenerate.
+operation: geometry and periodic relations remain unchanged, and the index-aligned
+entity-classification snapshot is retained through the transform.
 Read-only bulk cache queries return detached flat coordinates, MSH type blocks,
 connectivity, and dense node/element tags derived for the current cache. Segment,
 triangle, and tetrahedron blocks use types 1, 2, and 4 with one global dense
 element-tag sequence; whole-dimension element filters preserve those tags. Known
-fixed-node types absent from the simplex cache return empty blocks. Entity-specific
-filters, classified node subsets, and parametric coordinates remain explicit
-blockers rather than fabricated metadata. Detached bulk/connectivity-derived,
+fixed-node types absent from the simplex cache return empty blocks. A nonnegative
+`tag` filters elements, types, nodes, and the type-funnel queries onto the
+`(dim, tag)` model entity through the `model_to_mixed` classification snapshot
+stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
+transitive boundary-entity nodes after the entity's own, and unknown entities
+fail explicitly. `get_element` resolves one dense element tag to its type,
+connectivity, and owning entity. Parametric coordinates remain an explicit
+blocker rather than fabricated metadata. Detached bulk/connectivity-derived,
 Jacobian, orientation, and quality queries accept nondefault `task`/`num_tasks` and
 return the contiguous Gmsh block slice (`begin=(task*count)÷num_tasks` through
 `end=((task+1)*count)÷num_tasks`); quality validation is slice-scoped over the
@@ -366,9 +370,8 @@ orders use Gmsh's tensor transitions, and Prism composes the matching Triangle
 and Line rules.
 Bounded `CompositeGaussN` rules use native Gauss--Legendre, Duffy, and
 Gauss--Jacobi construction with checked point counts. Gmsh 4.15.2 defines no
-Trihedron integration rule. Pyramid/Trihedron hierarchical spaces and
-entity-filtered orientation/key
-results also remain pending. `get_basis_functions_orientation` accepts nondefault
+Trihedron integration rule. Pyramid/Trihedron hierarchical spaces remain
+pending. `get_basis_functions_orientation` accepts nondefault
 `task`/`num_tasks` (contiguous slice; `task>=num_tasks` is empty where Gmsh 4.15.2
 segfaults); reference quadrature, basis-function, and key queries take no task
 parameters in Gmsh 4.15.2 and neither do these.
@@ -398,8 +401,9 @@ stops at the first nonempty level. Scaled affine filters have exact-rational
 fallbacks; segment and triangle off-span queries use stable orthogonal projection
 instead of Gmsh's measured inversion artifacts. Cache replacement, refinement,
 transformation, clearing, and model-invalidating mutations discard the locator.
-Standalone element-by-tag classification remains an explicit blocker because
-`Mesh` does not own the required model-entity tag.
+`get_element` resolves a dense element tag to its type, connectivity, and
+owning entity through the classification snapshot; an unclassifiable cache
+keeps the explicit blocker.
 The immutable element catalog also owns family/order-to-type lookup and detached
 property metadata for all 125 fixed types. The Gmsh-shaped API accepts canonical
 family names case-insensitively and follows the complete-type fallback for an

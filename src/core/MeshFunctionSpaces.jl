@@ -949,6 +949,35 @@ function mesh_basis_orientations(mesh::Mesh,element_type_value,
     return result
 end
 
+"""Return one orientation index per cached element at the given positions.
+
+This is the entity-filtered selection backing the `tag`-filtered session query
+contract. Validation and orientation contracts match
+[`mesh_basis_orientations`](@ref); an empty position vector returns an empty
+vector without touching the mesh.
+"""
+function mesh_basis_orientations(mesh::Mesh,element_type_value,
+                                 function_space_type,
+                                 positions::AbstractVector{<:Integer};
+                                 caller::AbstractString=
+                                     "mesh_basis_orientations")
+    element_type=_checked_element_type(element_type_value,caller)
+    space=_function_space(function_space_type,caller)
+    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
+    block=mesh_element_block(mesh,element_type)
+    block===nothing && return Int32[]
+    _,cells=block
+    element_count=size(cells,2)
+    result=Vector{Int32}(undef,length(positions))
+    @inbounds for slot in eachindex(positions)
+        cell=positions[slot]
+        (cell>=1 && cell<=element_count) || throw(ArgumentError(
+            "$caller: element position $cell is outside 1:$element_count"))
+        result[slot]=_cell_orientation(cells,Int(cell),space)
+    end
+    return result
+end
+
 """Return the orientation index for one dense cached element tag."""
 function mesh_basis_orientation(mesh::Mesh,element_tag_value,
                                 function_space_type;
@@ -1252,6 +1281,51 @@ function mesh_keys(mesh::Mesh,element_type_value,function_space_type,
     return _keys_for_cells(
         mesh,cells,element_type,space,nodal_count,topology,face_topology,
         element_tags,coordinates_requested,caller)
+end
+
+"""Return detached keys for cached elements at the given block positions.
+
+This is the entity-filtered selection backing the `tag`-filtered session key
+query contract. Hierarchical spaces receive the dense element tags of the
+selected positions so entity keys stay global. Validation and key contracts
+match [`mesh_keys`](@ref); an empty position vector returns three empty
+vectors.
+"""
+function mesh_keys(mesh::Mesh,element_type_value,function_space_type,
+                   positions::AbstractVector{<:Integer},
+                   topology::Union{Nothing,MeshEdgeTopology}=nothing,
+                   face_topology::Union{Nothing,MeshFaceTopology}=nothing;
+                   return_coord=true,caller::AbstractString="mesh_keys")
+    element_type=_checked_element_type(element_type_value,caller)
+    space=_function_space(function_space_type,caller)
+    element_type,_,nodal_count,_=
+        _basis_element_contract(element_type,space,caller)
+    coordinates_requested=_checked_bool(
+        return_coord,caller,"return_coord")
+    block=mesh_element_block(mesh,element_type)
+    block===nothing && return Int32[],UInt64[],Float64[]
+    _,cells=block
+    element_count=size(cells,2)
+    selected=Vector{Int}(undef,length(positions))
+    @inbounds for index in eachindex(positions)
+        position=positions[index]
+        (position>=1 && position<=element_count) || throw(ArgumentError(
+            "$caller: element position $position is outside " *
+            "1:$element_count"))
+        selected[index]=Int(position)
+    end
+    isempty(selected) && return Int32[],UInt64[],Float64[]
+    selected_cells=cells[:,selected]
+    element_tags=nothing
+    if space.hierarchical
+        triangle_offset,tetrahedron_offset,_=mesh_element_offsets(mesh)
+        base=element_type==1 ? 0 :
+             element_type==2 ? triangle_offset : tetrahedron_offset
+        element_tags=UInt64.(base .+ selected)
+    end
+    return _keys_for_cells(
+        mesh,selected_cells,element_type,space,nodal_count,topology,
+        face_topology,element_tags,coordinates_requested,caller)
 end
 
 """Return detached keys for one dense cached element tag."""
