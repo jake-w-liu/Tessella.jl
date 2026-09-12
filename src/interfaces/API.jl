@@ -1565,6 +1565,22 @@ function _mesh_nodes_payload(mesh::Mesh,indices::Vector{Int})
     return node_tags,coordinates
 end
 
+# Flat parametric coordinates of the node positions in `indices` on the entity
+# `(dim, tag)`, matching Gmsh's `returnParametricCoord` output: one `u` per node
+# on a Line, `(u, v)` per node on a Plane, and nothing for Points, Volumes, or
+# all-dimension queries since they own no parametrization. Every classified
+# dim-1 entity is a straight Line and every classified dim-2 entity is a
+# loop-bounded Plane, so the exact-rational parametrization covers them all.
+function _mesh_entity_parameters(model::GeoModel,mesh::Mesh,dim::Int,tag::Int,
+                                 indices::Vector{Int})
+    (dim==1 || dim==2) || return Float64[]
+    coordinates=Vector{Float64}(undef,Base.checked_mul(3,length(indices)))
+    @inbounds for position in eachindex(indices),axis in 1:3
+        coordinates[3position-3+axis]=mesh.coords[axis,indices[position]]
+    end
+    return model_parametrization(model,dim,tag,coordinates)
+end
+
 function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                     return_parametric_coord=true)
     caller="API.mesh.get_nodes"
@@ -1573,7 +1589,7 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
         dimension=_mesh_query_dimension(dim,caller)
         entity=_mesh_query_integer(tag,caller,"tag")
         boundary=_mesh_query_bool(include_boundary,caller,"include_boundary")
-        _mesh_query_bool(
+        parametric=_mesh_query_bool(
             return_parametric_coord,caller,"return_parametric_coord")
         if dimension<0
             return UInt64.(1:nnodes(cached)),vec(copy(cached.coords)),
@@ -1583,25 +1599,33 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
         class===nothing && throw(ArgumentError(
             "$caller: dimension-specific nodes require mesh classification " *
             "metadata; use dim=-1 for all cached nodes"))
+        model=_model_locked()
         indices=Int[]
+        parameters=Float64[]
         if entity>=0
-            _mesh_classified_entity(_model_locked(),class,dimension,entity,caller)
-            append!(indices,boundary ?
+            _mesh_classified_entity(model,class,dimension,entity,caller)
+            group=boundary ?
                 _mesh_entity_nodes_with_boundary(
                     class,dimension,Int32(entity)) :
                 _mesh_entity_node_positions(
-                    class,(dimension,Int32(entity))))
+                    class,(dimension,Int32(entity)))
+            append!(indices,group)
+            parametric && append!(parameters,_mesh_entity_parameters(
+                model,cached,dimension,entity,group))
         else
             for entity_tag in _mesh_classified_entities(class,dimension)
-                append!(indices,boundary ?
+                group=boundary ?
                     _mesh_entity_nodes_with_boundary(
                         class,dimension,entity_tag) :
                     _mesh_entity_node_positions(
-                        class,(dimension,entity_tag)))
+                        class,(dimension,entity_tag))
+                append!(indices,group)
+                parametric && append!(parameters,_mesh_entity_parameters(
+                    model,cached,dimension,Int(entity_tag),group))
             end
         end
         node_tags,coordinates=_mesh_nodes_payload(cached,indices)
-        return node_tags,coordinates,Float64[]
+        return node_tags,coordinates,parameters
     end
 end
 
@@ -1714,13 +1738,43 @@ function _get_nodes_by_element_type(element_type,tag=-1,
         cached=_cached_mesh_locked(caller)
         _,block,positions=_mesh_query_type_block(
             cached,element_type,tag,caller)
-        _mesh_query_bool(
+        parametric=_mesh_query_bool(
             return_parametric_coord,caller,"return_parametric_coord")
         block===nothing && return UInt64[],Float64[],Float64[]
         _,cells=block
-        node_tags,coordinates=_mesh_nodes_for_cells(
-            cached,cells[:,_mesh_selected_columns(cells,positions)])
-        return node_tags,coordinates,Float64[]
+        selected=cells[:,_mesh_selected_columns(cells,positions)]
+        node_tags,coordinates=_mesh_nodes_for_cells(cached,selected)
+        parameters=Float64[]
+        if parametric
+            class=_cached_classification_locked(cached)
+            if class!==nothing
+                # Gmsh packs each repeated node's parameters on its owning
+                # entity — one `u` for Line owners, `(u, v)` for Plane owners,
+                # and nothing for Point or Volume owners — in entry order.
+                node_list=Int.(vec(selected))
+                groups=Dict{Tuple{Int,Int32},Vector{Int}}()
+                for node in unique(node_list)
+                    owner=class.node_entities[node]
+                    owner[1] in (1,2) || continue
+                    push!(get!(groups,owner,Int[]),node)
+                end
+                node_parameters=Dict{Int,Vector{Float64}}()
+                model=_model_locked()
+                for ((owner_dim,owner_tag),members) in groups
+                    values=_mesh_entity_parameters(
+                        model,cached,owner_dim,Int(owner_tag),members)
+                    for (index,node) in enumerate(members)
+                        node_parameters[node]=values[
+                            (index-1)*owner_dim+1:index*owner_dim]
+                    end
+                end
+                for node in node_list
+                    append!(parameters,get(
+                        node_parameters,node,Float64[]))
+                end
+            end
+        end
+        return node_tags,coordinates,parameters
     end
 end
 
@@ -2035,15 +2089,18 @@ get()=_get_mesh()
     get_nodes(dim=-1, tag=-1, include_boundary=false,
               return_parametric_coord=true)
 
-Return detached dense `UInt64` node tags, flattened `Float64` coordinates, and an
-empty parametric-coordinate vector for the cached mesh. `dim=-1` returns every
+Return detached dense `UInt64` node tags, flattened `Float64` coordinates, and
+flattened parametric coordinates for the cached mesh. `dim=-1` returns every
 cached node and ignores `tag`. A nonnegative `dim` selects nodes classified on
 model entities of that dimension — all such entities for a negative `tag`, or the
 single `(dim, tag)` entity otherwise. With `include_boundary=true`, nodes
 classified on the entity's transitive boundary entities are appended after its
 own, matching Gmsh's per-entity emission (boundary nodes can repeat across
-entities). The cache keeps no parametric coordinates, so the third result is
-always empty.
+entities). With `return_parametric_coord=true` each returned node is followed by
+its parameters on the queried entity — one `u` per node for a Line and `(u, v)`
+per node for a Plane — matching Gmsh 4.15.2's per-entity parametrization;
+Points, Volumes, and `dim=-1` queries own no parametrization and return an
+empty parametric vector.
 """
 get_nodes(dim=-1,tag=-1,include_boundary=false,return_parametric_coord=true)=
     _get_nodes(dim,tag,include_boundary,return_parametric_coord)
@@ -2452,8 +2509,11 @@ get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)=
 Return detached node tags and coordinates in per-element connectivity order for
 one fixed-node Gmsh element type. Shared nodes consequently appear once per element
 use. A nonnegative `tag` selects only the elements classified on the entity of
-`tag` in the type's own dimension; unknown entities fail explicitly. The cache
-keeps no parametric coordinates, so the parametric result is always empty.
+`tag` in the type's own dimension; unknown entities fail explicitly. With
+`return_parametric_coord=true` the third result packs each entry's parameters
+on its owning entity — one `u` for a Line owner, `(u, v)` for a Plane owner,
+and nothing for Point or Volume owners — matching Gmsh 4.15.2's variable-width
+emission order; an unclassified cache returns an empty parametric vector.
 """
 get_nodes_by_element_type(element_type,tag=-1,return_parametric_coord=true)=
     _get_nodes_by_element_type(element_type,tag,return_parametric_coord)

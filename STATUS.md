@@ -171,8 +171,11 @@ element-tag sequence. A `model_to_mixed` classification snapshot stored with the
 cache supports entity-filtered node, element, type-funnel, Jacobian, orientation,
 key, and `get_element` queries; `include_boundary` emits transitive boundary-entity
 nodes after the entity's own, `dim=-1` ignores `tag`, and unknown entities fail
-explicitly. Parametric coordinates remain absent, so those query variants fail
-explicitly instead of returning invented metadata.
+explicitly. Parametric queries reparametrize every returned node on the queried
+entity — one `u` per node on a Line, `(u, v)` per node on a Plane, empty for
+Points, Volumes, and all-dimension queries — while `get_nodes_by_element_type`
+packs each repeated node's parameters on its owning entity in entry order,
+matching Gmsh 4.15.2's variable-width emission.
 Connectivity-derived queries expose repeated per-element node coordinates,
 barycenters, and edge/face nodes in Gmsh's local linear-simplex ordering. All cached
 nodes are primary, and nonfinite fast coordinate sums fail explicitly. Nondefault

@@ -329,8 +329,11 @@ fixed-node types absent from the simplex cache return empty blocks. A nonnegativ
 stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities
 fail explicitly. `get_element` resolves one dense element tag to its type,
-connectivity, and owning entity. Parametric coordinates remain an explicit
-blocker rather than fabricated metadata. Detached bulk/connectivity-derived,
+connectivity, and owning entity. `get_nodes` reparametrizes every returned node
+on the queried Line or Plane entity — one `u` or `(u, v)` per node — while
+Points, Volumes, and all-dimension queries emit no parameters, matching Gmsh
+4.15.2's unparametrized cases; `get_nodes_by_element_type` packs each repeated
+node's parameters on its owning entity in entry order. Detached bulk/connectivity-derived,
 Jacobian, orientation, and quality queries accept nondefault `task`/`num_tasks` and
 return the contiguous Gmsh block slice (`begin=(task*count)÷num_tasks` through
 `end=((task+1)*count)÷num_tasks`); quality validation is slice-scoped over the

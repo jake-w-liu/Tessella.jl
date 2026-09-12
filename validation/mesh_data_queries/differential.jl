@@ -601,6 +601,104 @@ try
             "Gmsh surface element filter is not exhaustive")
         length(tessella_filtered[2][1])==length(tessella_all[2][1]) ||
             error("Tessella surface element filter is not exhaustive")
+        # Parametric coordinates ride the queried entity's parametrization in
+        # both engines: two entries per node on a Plane, one per node on a
+        # Line, none for Points, Volumes, or all-dimension queries. Each
+        # emitted parameter vector must re-evaluate to the node's physical
+        # coordinates through the entity's forward map.
+        for (engine,tags,coords,par,evaluate) in (
+            ("Gmsh",gmsh.model.mesh.getNodes(2,1,true,true)...,
+             par->gmsh.model.getValue(2,1,collect(par))),
+            ("Tessella",Tessella.API.mesh.get_nodes(2,1,true,true)...,
+             par->Tessella.API.model.get_value(2,1,collect(par))))
+            length(par)==2length(tags) || error(
+                "$engine surface parametric width mismatch")
+            Base.maximum(index->Base.maximum(abs.(
+                evaluate(par[2index-1:2index]).-coords[3index-2:3index])),
+                eachindex(tags))<1e-9 || error(
+                "$engine surface parameters do not re-evaluate to nodes")
+        end
+        for (engine,tags,coords,par,evaluate) in (
+            ("Gmsh",gmsh.model.mesh.getNodes(1,1,true,true)...,
+             par->gmsh.model.getValue(1,1,[par])),
+            ("Tessella",Tessella.API.mesh.get_nodes(1,1,true,true)...,
+             par->Tessella.API.model.get_value(1,1,[par])))
+            length(par)==length(tags) || error(
+                "$engine curve parametric width mismatch")
+            Base.maximum(index->Base.maximum(abs.(
+                evaluate(par[index]).-coords[3index-2:3index])),
+                eachindex(tags))<1e-9 || error(
+                "$engine curve parameters do not re-evaluate to nodes")
+        end
+        for (engine,empty_par) in (
+            ("Gmsh",gmsh.model.mesh.getNodes(0,1,true,true)[3]),
+            ("Tessella",Tessella.API.mesh.get_nodes(0,1,true,true)[3]),
+            ("Gmsh",gmsh.model.mesh.getNodes(-1,-1,false,true)[3]),
+            ("Tessella",Tessella.API.mesh.get_nodes(-1,-1,false,true)[3]),
+            ("Gmsh",gmsh.model.mesh.getNodes(2,1,true,false)[3]),
+            ("Tessella",Tessella.API.mesh.get_nodes(2,1,true,false)[3]))
+            isempty(empty_par) || error(
+                "$engine emitted parameters for an unparametrized query")
+        end
+        # getNodesByElementType packs each repeated node's parameters on its
+        # owning entity: surface owners contribute two, curve owners one,
+        # point owners zero, in entry order.
+        for (engine,tags,coords,par,owners) in (
+            ("Gmsh",gmsh.model.mesh.getNodesByElementType(2,-1,true)...,
+             let owner=Dict{eltype(gmsh.model.mesh.getNodes(-1,-1)[1]),
+                            Tuple{Int,Int}}()
+                 for point in 1:4,
+                     node in gmsh.model.mesh.getNodes(0,point,false)[1]
+                     owner[node]=(0,point)
+                 end
+                 for curve in 1:4,
+                     node in gmsh.model.mesh.getNodes(1,curve,false)[1]
+                     owner[node]=(1,curve)
+                 end
+                 for node in gmsh.model.mesh.getNodes(2,1,false)[1]
+                     owner[node]=(2,1)
+                 end
+                 owner
+             end),
+            ("Tessella",
+             Tessella.API.mesh.get_nodes_by_element_type(2,-1,true)...,
+             let owner=Dict{UInt64,Tuple{Int,Int}}()
+                 for point in 1:4,
+                     node in Tessella.API.mesh.get_nodes(0,point)[1]
+                     owner[node]=(0,point)
+                 end
+                 for curve in 1:4,
+                     node in Tessella.API.mesh.get_nodes(1,curve)[1]
+                     owner[node]=(1,curve)
+                 end
+                 for node in Tessella.API.mesh.get_nodes(2,1)[1]
+                     owner[node]=(2,1)
+                 end
+                 owner
+             end))
+            expected=sum(node->owners[node][1] in (1,2) ?
+                             owners[node][1] : 0,tags)
+            length(par)==expected || error(
+                "$engine by-element-type parametric width mismatch")
+            position=1
+            worst=0.0
+            for (k,node) in enumerate(tags)
+                (dim,entity)=owners[node]
+                width=dim in (1,2) ? dim : 0
+                if width>0
+                    evaluated=engine=="Gmsh" ?
+                        gmsh.model.getValue(dim,entity,
+                            collect(par[position:position+width-1])) :
+                        Tessella.API.model.get_value(dim,entity,
+                            collect(par[position:position+width-1]))
+                    worst=max(worst,Base.maximum(abs.(
+                        evaluated.-coords[3k-2:3k])))
+                end
+                position+=width
+            end
+            worst<1e-9 || error(
+                "$engine by-element-type parameters do not re-evaluate")
+        end
         # Type-level filters resolve the tag in the type's own dimension.
         for (tessella_call,gmsh_call) in (
             (()->Tessella.API.mesh.get_elements_by_type(2,1),
@@ -810,7 +908,7 @@ try
             "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
             " entity_filtered=tris",entity_pairs,
-            " selective=transform/edges/clear",
+            " selective=transform/edges/clear parametric=entity/owner",
             " bounded=no-mesh/classification/special-type/face-count ",
             "blockers and finite-barycenter contract with partitioned slices")
 finally

@@ -608,6 +608,52 @@ end
         @test Set(dim2)==Set(surface_nodes)
         dim2_with_boundary=_MESH_DATA_API.mesh.get_nodes(2,-1,true)[1]
         @test Set(dim2_with_boundary)==expected
+        # Parametric coordinates ride the queried entity's parametrization.
+        surf_tags,surf_coords,surf_par=
+            _MESH_DATA_API.mesh.get_nodes(2,1,true,true)
+        @test length(surf_par)==2length(surf_tags)
+        for index in eachindex(surf_tags)
+            evaluated=_MESH_DATA_API.model.get_value(
+                2,1,surf_par[2index-1:2index])
+            @test evaluated≈surf_coords[3index-2:3index]
+        end
+        curve_tags,curve_coords,curve_par=
+            _MESH_DATA_API.mesh.get_nodes(1,1,true,true)
+        @test length(curve_par)==length(curve_tags)
+        for index in eachindex(curve_tags)
+            evaluated=_MESH_DATA_API.model.get_value(
+                1,1,[curve_par[index]])
+            @test evaluated≈curve_coords[3index-2:3index]
+        end
+        # Points, all-dimension queries, and opt-outs emit no parameters.
+        @test isempty(_MESH_DATA_API.mesh.get_nodes(0,1,true,true)[3])
+        @test isempty(_MESH_DATA_API.mesh.get_nodes(-1,-1,false,true)[3])
+        @test isempty(_MESH_DATA_API.mesh.get_nodes(2,1,true,false)[3])
+        # Per-element queries pack each node's parameters on its owning entity.
+        cell_tags,cell_coords,cell_par=
+            _MESH_DATA_API.mesh.get_nodes_by_element_type(2,-1,true)
+        owners=Dict{UInt64,Tuple{Int,Int}}()
+        for (dim,entity_tags) in
+                (0=>(1,2,3,4),1=>(1,2,3,4),2=>(1,))
+            for entity in entity_tags,
+                node in _MESH_DATA_API.mesh.get_nodes(dim,entity)[1]
+                owners[node]=(dim,entity)
+            end
+        end
+        expected_width=sum(
+            node->owners[node][1] in (1,2) ? owners[node][1] : 0,cell_tags)
+        @test length(cell_par)==expected_width
+        position=1
+        for (k,node) in enumerate(cell_tags)
+            (dim,entity)=owners[node]
+            width=dim in (1,2) ? dim : 0
+            if width>0
+                evaluated=_MESH_DATA_API.model.get_value(
+                    dim,entity,cell_par[position:position+width-1])
+                @test evaluated≈cell_coords[3k-2:3k]
+            end
+            position+=width
+        end
         # Element queries filter cells onto the queried entity.
         types,tags,nodes=_MESH_DATA_API.mesh.get_elements(2,1)
         @test types==Int32[2]
