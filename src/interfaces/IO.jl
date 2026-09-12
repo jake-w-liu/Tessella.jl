@@ -1434,6 +1434,28 @@ mutable struct _GeoTagAllocatorState
     surface_entity_max::Int
     factory::Symbol
     occ_active::Bool
+    # Live entity tags per factory plus the last SetMaxTag floor values let
+    # allocator reads shrink after a Boolean operand `Delete`, matching
+    # Gmsh's `max(SetMaxTag floor, live maximum)` counters. `volume_boundaries`
+    # maps each live volume tag to the hidden point/curve/surface ranges its
+    # declaration consumed so deleting a volume also releases them.
+    live_builtin_points::Set{Int}
+    live_builtin_curves::Set{Int}
+    live_builtin_surfaces::Set{Int}
+    live_builtin_volumes::Set{Int}
+    live_occ_points::Set{Int}
+    live_occ_curves::Set{Int}
+    live_occ_surfaces::Set{Int}
+    live_occ_volumes::Set{Int}
+    builtin_point_floor::Int
+    builtin_curve_floor::Int
+    builtin_surface_floor::Int
+    builtin_volume_floor::Int
+    occ_point_floor::Int
+    occ_curve_floor::Int
+    occ_surface_floor::Int
+    occ_volume_floor::Int
+    volume_boundaries::Dict{Int,NTuple{3,Vector{Int}}}
     geometry_unavailable::Union{Nothing,String}
     physical_unavailable::Union{Nothing,String}
     field_unavailable::Union{Nothing,String}
@@ -1441,7 +1463,11 @@ end
 
 _GeoTagAllocatorState()=_GeoTagAllocatorState(
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    :builtin,false,nothing,nothing,nothing)
+    :builtin,false,
+    Set{Int}(),Set{Int}(),Set{Int}(),Set{Int}(),
+    Set{Int}(),Set{Int}(),Set{Int}(),Set{Int}(),
+    0,0,0,0,0,0,0,0,
+    Dict{Int,NTuple{3,Vector{Int}}}(),nothing,nothing,nothing)
 
 @inline function _geo_allocator_point_max(state::_GeoTagAllocatorState)
     return state.occ_active ?
@@ -1517,29 +1543,37 @@ function _geo_allocator_record_explicit!(state::_GeoTagAllocatorState,
     state.geometry_unavailable===nothing || return nothing
     if kind==:point
         if state.factory==:opencascade
+            push!(state.live_occ_points,tag)
             state.occ_point_max=max(state.occ_point_max,tag)
         else
+            push!(state.live_builtin_points,tag)
             state.builtin_point_max=max(state.builtin_point_max,tag)
         end
         state.point_entity_max=max(state.point_entity_max,tag)
     elseif kind==:curve
         if state.factory==:opencascade
+            push!(state.live_occ_curves,tag)
             state.occ_curve_max=max(state.occ_curve_max,tag)
         else
+            push!(state.live_builtin_curves,tag)
             state.builtin_curve_max=max(state.builtin_curve_max,tag)
         end
         state.curve_entity_max=max(state.curve_entity_max,tag)
     elseif kind==:surface
         if state.factory==:opencascade
+            push!(state.live_occ_surfaces,tag)
             state.occ_surface_max=max(state.occ_surface_max,tag)
         else
+            push!(state.live_builtin_surfaces,tag)
             state.builtin_surface_max=max(state.builtin_surface_max,tag)
         end
         state.surface_entity_max=max(state.surface_entity_max,tag)
     elseif kind==:volume
         if state.factory==:opencascade
+            push!(state.live_occ_volumes,tag)
             state.occ_volume_max=max(state.occ_volume_max,tag)
         else
+            push!(state.live_builtin_volumes,tag)
             state.builtin_volume_max=max(state.builtin_volume_max,tag)
         end
     elseif kind==:auxiliary
@@ -1581,29 +1615,36 @@ function _geo_allocator_record_hidden!(state::_GeoTagAllocatorState,
     end
     base=max(current,entity_max)
     final=_geo_allocator_advance(base,count,caller,label)
+    allocated=(base+1):final
     if kind==:point
         if state.factory==:opencascade
+            union!(state.live_occ_points,allocated)
             state.occ_point_max=final
         else
+            union!(state.live_builtin_points,allocated)
             state.builtin_point_max=final
         end
         state.point_entity_max=final
     elseif kind==:curve
         if state.factory==:opencascade
+            union!(state.live_occ_curves,allocated)
             state.occ_curve_max=final
         else
+            union!(state.live_builtin_curves,allocated)
             state.builtin_curve_max=final
         end
         state.curve_entity_max=final
     else
         if state.factory==:opencascade
+            union!(state.live_occ_surfaces,allocated)
             state.occ_surface_max=final
         else
+            union!(state.live_builtin_surfaces,allocated)
             state.builtin_surface_max=final
         end
         state.surface_entity_max=final
     end
-    return nothing
+    return allocated
 end
 
 function _geo_allocator_set_max!(state::_GeoTagAllocatorState,
@@ -1611,26 +1652,34 @@ function _geo_allocator_set_max!(state::_GeoTagAllocatorState,
     state.geometry_unavailable===nothing || return nothing
     if kind=="Point"
         if state.factory==:opencascade
+            state.occ_point_floor=max(state.occ_point_floor,value)
             state.occ_point_max=max(state.occ_point_max,value)
         else
+            state.builtin_point_floor=value
             state.builtin_point_max=value
         end
     elseif kind=="Curve"
         if state.factory==:opencascade
+            state.occ_curve_floor=max(state.occ_curve_floor,value)
             state.occ_curve_max=max(state.occ_curve_max,value)
         else
+            state.builtin_curve_floor=value
             state.builtin_curve_max=value
         end
     elseif kind=="Surface"
         if state.factory==:opencascade
+            state.occ_surface_floor=max(state.occ_surface_floor,value)
             state.occ_surface_max=max(state.occ_surface_max,value)
         else
+            state.builtin_surface_floor=value
             state.builtin_surface_max=value
         end
     elseif kind=="Volume"
         if state.factory==:opencascade
+            state.occ_volume_floor=max(state.occ_volume_floor,value)
             state.occ_volume_max=max(state.occ_volume_max,value)
         else
+            state.builtin_volume_floor=value
             state.builtin_volume_max=value
         end
     else
@@ -1657,10 +1706,12 @@ function _geo_allocator_record_primitive!(state::_GeoTagAllocatorState,
     else
         throw(ArgumentError("$caller: unsupported primitive allocator kind $kind"))
     end
-    _geo_allocator_record_hidden!(state,:point,point_count,caller)
-    _geo_allocator_record_hidden!(state,:curve,curve_count,caller)
-    _geo_allocator_record_hidden!(state,:surface,surface_count,caller)
+    points=_geo_allocator_record_hidden!(state,:point,point_count,caller)
+    curves=_geo_allocator_record_hidden!(state,:curve,curve_count,caller)
+    surfaces=_geo_allocator_record_hidden!(state,:surface,surface_count,caller)
     _geo_allocator_record_explicit!(state,:volume,tag)
+    state.volume_boundaries[tag]=
+        (collect(points),collect(curves),collect(surfaces))
     return nothing
 end
 
@@ -1668,6 +1719,111 @@ function _geo_allocator_record_field!(state::_GeoTagAllocatorState,tag::Int)
     state.field_unavailable===nothing || return nothing
     state.field_max=max(state.field_max,tag)
     return nothing
+end
+
+@inline _geo_live_max(live::Set{Int})=isempty(live) ? 0 : maximum(live)
+
+# A Boolean operand `Delete` removes the operand volume together with the
+# hidden boundary entities its declaration consumed, shrinking the owning
+# factory's counters to `max(SetMaxTag floor, live maximum)`, matching Gmsh.
+function _geo_allocator_delete_volume!(state::_GeoTagAllocatorState,tag::Int)
+    boundaries=get(state.volume_boundaries,tag,nothing)
+    if tag in state.live_builtin_volumes
+        delete!(state.live_builtin_volumes,tag)
+        if boundaries!==nothing
+            setdiff!(state.live_builtin_points,boundaries[1])
+            setdiff!(state.live_builtin_curves,boundaries[2])
+            setdiff!(state.live_builtin_surfaces,boundaries[3])
+        end
+        state.builtin_point_max=max(state.builtin_point_floor,
+            _geo_live_max(state.live_builtin_points))
+        state.builtin_curve_max=max(state.builtin_curve_floor,
+            _geo_live_max(state.live_builtin_curves))
+        state.builtin_surface_max=max(state.builtin_surface_floor,
+            _geo_live_max(state.live_builtin_surfaces))
+        state.builtin_volume_max=max(state.builtin_volume_floor,
+            _geo_live_max(state.live_builtin_volumes))
+    end
+    if tag in state.live_occ_volumes
+        delete!(state.live_occ_volumes,tag)
+        if boundaries!==nothing
+            setdiff!(state.live_occ_points,boundaries[1])
+            setdiff!(state.live_occ_curves,boundaries[2])
+            setdiff!(state.live_occ_surfaces,boundaries[3])
+        end
+        state.occ_point_max=max(state.occ_point_floor,
+            _geo_live_max(state.live_occ_points))
+        state.occ_curve_max=max(state.occ_curve_floor,
+            _geo_live_max(state.live_occ_curves))
+        state.occ_surface_max=max(state.occ_surface_floor,
+            _geo_live_max(state.live_occ_surfaces))
+        state.occ_volume_max=max(state.occ_volume_floor,
+            _geo_live_max(state.live_occ_volumes))
+    end
+    delete!(state.volume_boundaries,tag)
+    state.point_entity_max=max(
+        _geo_live_max(state.live_builtin_points),
+        _geo_live_max(state.live_occ_points))
+    state.curve_entity_max=max(
+        _geo_live_max(state.live_builtin_curves),
+        _geo_live_max(state.live_occ_curves))
+    state.surface_entity_max=max(
+        _geo_live_max(state.live_builtin_surfaces),
+        _geo_live_max(state.live_occ_surfaces))
+    return nothing
+end
+
+function _geo_allocator_live_entities(state::_GeoTagAllocatorState,
+                                      kind::Symbol)
+    if kind==:point
+        return state.factory==:opencascade ?
+            state.live_occ_points : state.live_builtin_points
+    elseif kind==:curve
+        return state.factory==:opencascade ?
+            state.live_occ_curves : state.live_builtin_curves
+    end
+    return state.factory==:opencascade ?
+        state.live_occ_surfaces : state.live_builtin_surfaces
+end
+
+# Gmsh re-tags a Boolean result's boundary entities to the lowest tags still
+# free in the active factory. Claim `count` such tags for `kind` and raise the
+# owning counters; returns the claimed tags (possibly non-contiguous).
+function _geo_allocator_claim_lowest!(state::_GeoTagAllocatorState,
+                                      kind::Symbol,count::Int)
+    count<=0 && return Int[]
+    live=_geo_allocator_live_entities(state,kind)
+    claimed=Int[];sizehint!(claimed,count)
+    tag=1
+    while length(claimed)<count
+        tag in live || push!(claimed,tag)
+        tag+=1
+    end
+    union!(live,claimed)
+    top=claimed[end]
+    if kind==:point
+        if state.factory==:opencascade
+            state.occ_point_max=max(state.occ_point_max,top)
+        else
+            state.builtin_point_max=max(state.builtin_point_max,top)
+        end
+        state.point_entity_max=max(state.point_entity_max,top)
+    elseif kind==:curve
+        if state.factory==:opencascade
+            state.occ_curve_max=max(state.occ_curve_max,top)
+        else
+            state.builtin_curve_max=max(state.builtin_curve_max,top)
+        end
+        state.curve_entity_max=max(state.curve_entity_max,top)
+    else
+        if state.factory==:opencascade
+            state.occ_surface_max=max(state.occ_surface_max,top)
+        else
+            state.builtin_surface_max=max(state.builtin_surface_max,top)
+        end
+        state.surface_entity_max=max(state.surface_entity_max,top)
+    end
+    return claimed
 end
 
 @inline _geo_ascii_letter(c::Char)=('a'<=c<='z') || ('A'<=c<='Z') || c=='_'
@@ -2675,8 +2831,52 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         return nothing
     end
 
+    boolean=match(
+        r"^Boolean(Difference|Union|Intersection)\s*\(\s*(.*?)\s*\)\s*=\s*" *
+        r"\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*" *
+        r"\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*;?\s*$",
+        source)
+    if boolean!==nothing
+        state.geometry_unavailable===nothing || return nothing
+        parsed=try
+            (_geo_allocator_statement_tag(
+                 boolean.captures[2],context,"$caller Boolean result tag"),
+             _geo_allocator_statement_tag(
+                 boolean.captures[3],context,"$caller Boolean first operand"),
+             _geo_allocator_statement_tag(
+                 boolean.captures[5],context,"$caller Boolean second operand"))
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative && err isa ArgumentError) || rethrow()
+            _geo_allocator_invalidate!(state,
+                "could not evaluate a Boolean statement while tracking " *
+                "allocators: "*_geo_expr_preview(source);
+                geometry=true,fields=false)
+            return nothing
+        end
+        _geo_allocator_record_explicit!(state,:volume,parsed[1])
+        delete_a=occursin(r"\bDelete\b",boolean.captures[4])
+        delete_b=occursin(r"\bDelete\b",boolean.captures[6])
+        # Gmsh re-tags a deleted object operand's boundary onto the result at
+        # the lowest free tags; the counts are exact for boundary-preserving
+        # Booleans and bounded by the object's own boundary otherwise.
+        object_boundary=delete_a ?
+            get(state.volume_boundaries,parsed[2],nothing) : nothing
+        delete_a && _geo_allocator_delete_volume!(state,parsed[2])
+        delete_b && _geo_allocator_delete_volume!(state,parsed[3])
+        if object_boundary!==nothing
+            claimed=ntuple(3) do d
+                _geo_allocator_claim_lowest!(
+                    state,(:point,:curve,:surface)[d],
+                    length(object_boundary[d]))
+            end
+            state.volume_boundaries[parsed[1]]=claimed
+        end
+        return nothing
+    end
+
     topology_change=occursin(
-        r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Coherence|Duplicata|SetMaxTag|Merge)\b",
+        r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Duplicata|SetMaxTag|Merge)\b",
         source)
     if topology_change
         _geo_allocator_invalidate!(state,
@@ -2966,6 +3166,9 @@ end
 
 function _scan_geo_statements(consume,path::AbstractString)
     buffer=IOBuffer();quote_char='\0';block_comment=false
+    # `;` inside `{...}` groups (Boolean operand lists, `Delete` suffixes) is
+    # part of the statement, not a terminator — matching _geo_exec_statements.
+    depth=0
     for raw in eachline(path)
         i=firstindex(raw);lastindex_raw=lastindex(raw)
         while i<=lastindex_raw
@@ -2992,7 +3195,11 @@ function _scan_geo_statements(consume,path::AbstractString)
                 block_comment=true;i=nextind(raw,j);continue
             elseif c=='"' || c=='\''
                 quote_char=c;write(buffer,c)
-            elseif c==';'
+            elseif c=='{'
+                depth+=1;write(buffer,c)
+            elseif c=='}'
+                depth=max(0,depth-1);write(buffer,c)
+            elseif c==';' && depth==0
                 write(buffer,c)
                 statement=strip(String(take!(buffer)))
                 isempty(statement) || consume(statement)
@@ -3012,6 +3219,8 @@ function _scan_geo_statements(consume,path::AbstractString)
     quote_char=='\0' || throw(ArgumentError("read_geo_params: unterminated quoted string"))
     block_comment && throw(ArgumentError("read_geo_params: unterminated block comment"))
     tail=strip(String(take!(buffer)))
+    (depth==0 || isempty(tail)) || throw(ArgumentError(
+        "read_geo_params: unterminated brace-delimited statement"))
     code=_geo_unquoted_code(tail)
     if !isempty(tail) && (occursin(r"Field\s*\[",code) ||
                            occursin(r"(?:Background|BoundaryLayer)\s+Field",code) ||
@@ -3044,8 +3253,10 @@ checks without adding a name.
 Read-only dynamic tag allocators are
 evaluated while their Point, shared geometric-region, or Field namespace remains
 fully tracked. `SetMaxTag Point|Curve|Surface|Volume` updates the associated checked
-counter. Built-in can lower a counter; OpenCASCADE only raises it. An unsupported
-topology change makes the affected allocator unavailable. Reads use the greatest
+counter. Built-in can lower a counter; OpenCASCADE only raises it. Tracked
+`Boolean` operand `Delete` releases the operand and its hidden boundary entities
+and re-tags the result boundary at the lowest free tags; any other topology
+change makes the affected allocator unavailable. Reads use the greatest
 counter among activated factories.
 Loops, macros, option reads, random/external functions, dynamic ranges, CSG and
 Boolean geometry are deliberately not evaluated. Numeric field options are

@@ -390,7 +390,7 @@ tag-to-node maps match. Query results are detached, and every cache replacement
 invalidates both catalogs. Tessella deliberately rejects zero or conflicting
 identifiers, repeated or unknown nodes, and malformed or partly invalid batches
 atomically; Gmsh 4.15.2 accepts or partially applies those cases. Entity-selective
-creation remains a classification blocker.
+creation remains an explicit blocker.
 Point-location queries use a lazily cached deterministic AABB hierarchy over the
 current linear-simplex cache. They return all dense matches in decreasing dimension
 and increasing tag order, or the first such match with detached type, connectivity,
@@ -444,7 +444,8 @@ numeric field options and field selectors; entirely numeric Physical memberships
 range-checked but remain geometry data. The scanner deliberately rejects
 control-flow loops, macros, option reads, stateful functions, dynamic/general ranges,
 logical/ternary evaluation, extrusions/fillets/symmetry, allocator reads after
-topology-changing or untracked declarations, and geometry-derived Physical
+untracked topology-changing declarations (tracked Boolean operand `Delete` and
+`SetMaxTag` counters stay live), and geometry-derived Physical
 right-hand sides beyond the documented inline topology queries instead of pretending
 to be a complete interpreter.
 
@@ -533,8 +534,8 @@ curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, cyclic
 periodic-curve dependency graphs, curved or non-boundary periodic surfaces,
-or allocator reads after topology-changing or untracked
-declarations. The
+or allocator reads after untracked
+topology-changing declarations. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell
 and global fill volume identities and an interface tiling gate; its core engine
 covers Delaunay-friendly caps (planar/primitive walls) directly and smaller

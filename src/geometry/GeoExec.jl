@@ -179,7 +179,8 @@ with odd multiplicity. Hole and cavity boundaries participate; embeddings do not
 Unknown entities, empty combined boundaries, implicit primitive or Boolean volume
 topology, unsupported geometry-derived selectors, and invalid query dimensions are
 explicit blockers.
-An allocator read after a topology-changing or untracked declaration is rejected.
+An allocator read after an untracked topology-changing declaration is rejected;
+tracked `Boolean` operand `Delete` and `SetMaxTag` counters stay live.
 """
 function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))

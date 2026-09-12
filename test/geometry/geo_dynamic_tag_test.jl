@@ -148,6 +148,44 @@ end
     @test sort!(collect(keys(cone_tip.model.volumes)))==[101]
     @test cone_tip.params.mesh_size_min==1.03
 
+    boolean_source=raw"""
+        SetFactory("OpenCASCADE");
+        Box(1) = {0,0,0,1,1,1};
+        Box(2) = {2,0,0,1,1,1};
+        BooleanDifference(newv) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
+        Point(newp) = {5,5,5,1};
+        """
+    boolean_result=_execute_dynamic_tag_source(boolean_source)
+    # Gmsh 4.15.2 parity: result volume 25; operand boundary entities die with
+    # the deletes, so newp shrinks to the result boundary maximum + 1 = 9.
+    @test sort!(collect(keys(boolean_result.model.volumes)))==[25]
+    @test sort!(collect(keys(boolean_result.model.points)))==[9]
+
+    boolean_keep_source=raw"""
+        SetFactory("OpenCASCADE");
+        Box(1) = {0,0,0,1,1,1};
+        Box(2) = {2,0,0,1,1,1};
+        BooleanDifference(newv) = { Volume{1}; }{ Volume{2}; Delete; };
+        Point(newp) = {5,5,5,1};
+        """
+    boolean_keep=_execute_dynamic_tag_source(boolean_keep_source)
+    @test sort!(collect(keys(boolean_keep.model.volumes)))==[1,25]
+    @test sort!(collect(keys(boolean_keep.model.points)))==[9]
+
+    setmax_volume_source=raw"""
+        SetFactory("OpenCASCADE");
+        Box(1) = {0,0,0,1,1,1};
+        Box(2) = {2,0,0,1,1,1};
+        SetMaxTag Volume(40);
+        BooleanDifference(newv) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
+        Point(newp) = {5,5,5,1};
+        """
+    setmax_volume=_execute_dynamic_tag_source(setmax_volume_source)
+    # SetMaxTag floor survives the Boolean operand deletes; newp is unaffected
+    # by the volume floor and reflects the live point maximum + 1.
+    @test sort!(collect(keys(setmax_volume.model.volumes)))==[41]
+    @test sort!(collect(keys(setmax_volume.model.points)))==[9]
+
     invalid_sources=(
         "newp = 2;"=>"read-only",
         "newreg[] = {2};"=>"read-only",
@@ -174,9 +212,8 @@ end
         "Physical Point(\"last\",2147483647)={1}; " *
         "Physical Point(\"overflow\")={1};"=>
             "no automatic Physical tags remain",
-        "Box(1)={0,0,0,1,1,1}; Box(13)={2,0,0,1,1,1}; " *
-        "BooleanUnion(25)={Volume{1};Delete;}{Volume{13};Delete;}; " *
-        "next = newv;"=>"topology-changing statement",
+        "BooleanFragments{Volume{1};}{Volume{1};}; Mesh.MeshSizeMax = newv;"=>
+            "topology-changing statement",
     )
     for (source,message) in invalid_sources
         err=_dynamic_tag_error(source)
