@@ -665,6 +665,166 @@ end
         @test nnodes(limited) == 9
     end
 
+    @testset "P2SegMesh quadratic curve certification" begin
+        # Independent squared-speed oracle: direct ξ∈[-1,1] Lagrange gradients,
+        # distinct from the module's vertex-coefficient expansion, sampled on a
+        # lattice finer than the certificate's degree-2 coefficient set.
+        function oracle_speed(p::P2SegMesh, s, xi)
+            g = (xi - 0.5, xi + 0.5, -2.0*xi)
+            vx=vy=vz=0.0
+            for k in 1:3
+                v = p.seg3[k,s]
+                vx += g[k]*p.coords[1,v]
+                vy += g[k]*p.coords[2,v]
+                vz += g[k]*p.coords[3,v]
+            end
+            return vx*vx + vy*vy + vz*vz
+        end
+        const_xis = NTuple{1,Float64}[(2i/16 - 1.0,) for i in 0:16]
+        oracle_min_speed(p) = minimum(
+            oracle_speed(p, s, xi[1])
+            for s in 1:nsegs(p) for xi in const_xis; init=Inf)
+
+        # container contracts
+        @test_throws ArgumentError P2SegMesh(zeros(3), zeros(Int32,3,0))
+        @test_throws ArgumentError P2SegMesh(zeros(3,0), zeros(Int32,3))
+        @test_throws ArgumentError P2SegMesh(zeros(2,3), zeros(Int32,3,0))
+        @test_throws ArgumentError P2SegMesh(zeros(3,3), zeros(Int32,2,0))
+        @test_throws ArgumentError P2SegMesh(trues(3,0), zeros(Int32,3,0))
+        @test_throws ArgumentError P2SegMesh(zeros(3,0), falses(3,0))
+        @test_throws ArgumentError P2SegMesh(
+            zeros(3,0), zeros(Int32,3,0); seg_tag=Bool[])
+        @test_throws ArgumentError P2SegMesh(
+            zeros(3,3), reshape(Int32.(1:3),3,1); seg_tag=Int32[])
+        @test_throws ArgumentError P2SegMesh(
+            fill(NaN,3,3), reshape(Int32.(1:3),3,1))
+        @test_throws ArgumentError P2SegMesh(
+            zeros(3,3), reshape(Int32[1,2,4],3,1))
+        @test_throws ArgumentError P2SegMesh(
+            zeros(3,3), reshape(Int32[1,2,2],3,1))
+        @test_throws ArgumentError p2_segmesh(
+            Mesh(Float64[0 1;0 0;0 0]; segs=reshape(Int32[1,2],2,1)),
+            max_nodes=-1)
+        @test_throws ArgumentError p2_segmesh(
+            Mesh(Float64[0 1;0 0;0 0]; segs=reshape(Int32[1,2],2,1)),
+            max_nodes=true)
+
+        # single straight seg: endpoints (0,0,0),(1,0,0); mid at 0.5
+        flat = Mesh(Float64[0 1; 0 0; 0 0];
+                    segs=reshape(Int32[1,2],2,1), seg_tag=Int32[5])
+        p = p2_segmesh(flat)
+        @test nnodes(p) == 3 && nsegs(p) == 1
+        @test p.seg_tag == Int32[5]
+        @test p.seg3[:,1] == Int32[1,2,3]
+        @test p.coords[:,3] ≈ [0.5,0.0,0.0]
+        @test p2_seg_min_jacobian(p) == 0.25         # (length/2)² for length 1
+        @test p2_seg_length(p) ≈ 1.0
+        @test validate(p).ok
+
+        # polygon chain: every seg gets its own mid-node
+        nseg = 8
+        chain_coords = zeros(3, nseg+1)
+        for i in 0:nseg; chain_coords[1,i+1] = Float64(i); end
+        chain_segs = Matrix{Int32}(undef, 2, nseg)
+        for s in 1:nseg; chain_segs[1,s] = s; chain_segs[2,s] = s+1; end
+        chain = Mesh(chain_coords; segs=chain_segs, seg_tag=Int32.(1:nseg))
+        pc0 = p2_segmesh(chain)
+        @test nnodes(pc0) == (nseg+1) + nseg
+        @test nsegs(pc0) == nseg
+        @test pc0.seg_tag == Int32.(1:nseg)
+        @test p2_seg_min_jacobian(pc0) == 0.25
+        @test p2_seg_length(pc0) ≈ Float64(nseg)
+        @test validate(pc0).ok
+        # certified bound is conservative against the independent sampler and
+        # equals the true minimum on straight elements
+        @test p2_seg_min_jacobian(pc0) <= oracle_min_speed(pc0) + 1e-12
+        @test oracle_min_speed(pc0) ≈ 0.25
+
+        # semicircle polygon: mids snap exactly onto the unit circle
+        nc = 16
+        circ_coords = zeros(3, nc+1)
+        for i in 0:nc
+            circ_coords[1,i+1] = cos(π*i/nc)
+            circ_coords[2,i+1] = sin(π*i/nc)
+        end
+        circ_segs = Matrix{Int32}(undef, 2, nc)
+        for s in 1:nc; circ_segs[1,s] = s; circ_segs[2,s] = s+1; end
+        mc = Mesh(circ_coords; segs=circ_segs)
+        pc = p2_segmesh(mc)
+        flat_len = p2_seg_length(pc)
+        moved = curve_to_curve!(pc, (x,y,z)->(x,y,z)./hypot(x,y,z),
+                                (x,y,z)->true)
+        @test moved == nnodes(pc) - nnodes(mc)       # every mid-node moved
+        @test validate(pc).ok
+        @test p2_seg_min_jacobian(pc) > 0
+        @test p2_seg_min_jacobian(pc) <= oracle_min_speed(pc) + 1e-9
+        @test oracle_min_speed(pc) > 0               # no between-sample stall
+        for i in nnodes(mc)+1:nnodes(pc)
+            @test hypot(pc.coords[1,i],pc.coords[2,i],pc.coords[3,i]) ≈ 1.0 atol=1e-14
+        end
+        curved_len = p2_seg_length(pc)
+        @test flat_len < curved_len
+        @test abs(curved_len - π) < 0.1              # approaches the true arc
+
+        # reverted projection: pulling the mid past both endpoints loses the
+        # certificate (verified below), so it is undone and the mesh stays valid
+        pf = p2_segmesh(flat)
+        stall = (x,y,z) -> (x==0.5 ? (2.0,y,z) : (x,y,z))
+        moved = curve_to_curve!(pf, stall, (x,y,z)->true)
+        @test moved == 0
+        @test validate(pf).ok
+        @test pf.coords[:,3] ≈ [0.5,0.0,0.0]
+        # the same displacement held directly is genuinely uncertified
+        pf.coords[1,3] = 2.0
+        @test !validate(pf).ok
+        @test p2_seg_min_jacobian(pf) < 0
+        @test_throws ArgumentError p2_seg_length(pf)
+        @test_throws ArgumentError write_msh_p2(
+            joinpath(mktempdir(),"f.msh"), pf)
+
+        # non-finite projections are skipped (not moved), non-Bool on_curve
+        # and bad tolerances are contract failures
+        @test curve_to_curve!(
+            p, (x,y,z)->(NaN,y,z), (x,y,z)->true) == 0
+        @test validate(p).ok
+        @test_throws ArgumentError curve_to_curve!(
+            p, (x,y,z)->(x,y,z), (x,y,z)->1)
+        @test_throws ArgumentError curve_to_curve!(
+            p, (x,y,z)->(x,y,z), (x,y,z)->true; rtol=-1.0)
+
+        # a mid-node that is also an endpoint elsewhere is rejected
+        pc2 = p2_segmesh(chain); pc2.seg3[3,1] = pc2.seg3[2,3]
+        @test !validate(pc2).ok
+
+        # gmsh type-8 write + linear read-back
+        dir = mktempdir(); path = joinpath(dir, "p2seg.msh")
+        write_msh_p2(path, p)
+        f = read_msh(path)
+        @test nsegs(f.mesh) == 1
+        @test f.mesh.seg_tag == Int32[5]
+        @test mesh_crc(f.mesh).sha == mesh_crc(flat).sha
+        circ_path = joinpath(dir, "circ-p2seg.msh")
+        write_msh_p2(circ_path, pc)
+        sf = read_msh(circ_path)
+        @test nsegs(sf.mesh) == nsegs(mc)
+        @test mesh_crc(sf.mesh).sha == mesh_crc(mc).sha
+        @test_throws ArgumentError write_msh_p2("", p)
+        @test_throws ArgumentError write_msh_p2(nothing, p)
+        @test_throws ArgumentError write_msh_p2(path, p; seg_tag=Int32[-1])
+        @test_throws ArgumentError write_msh_p2(path, p; seg_tag=Bool[true])
+
+        # empty and resource-limited paths
+        ep = p2_segmesh(Mesh(Matrix{Float64}(undef,3,0)))
+        @test nsegs(ep) == 0
+        @test p2_seg_min_jacobian(ep) == 0.0
+        @test p2_seg_length(ep) == 0.0
+        @test curve_to_curve!(ep, (x,y,z)->(x,y,z), (x,y,z)->true) == 0
+        @test_throws ArgumentError p2_segmesh(chain; max_nodes=10)
+        @test_throws ArgumentError p2_segmesh(chain; max_segs=2)
+        limited = p2_segmesh(chain; max_nodes=17, max_segs=8)
+        @test nnodes(limited) == 17
+    end
+
     @testset "empty mesh" begin
         e = Mesh(Matrix{Float64}(undef,3,0))
         p = p2_tetmesh(e)

@@ -32,10 +32,11 @@ const MSH_TRI   = 2
 const MSH_TET   = 4
 const MSH_TET2  = 11    # 10-node (quadratic) tet — read as its 4 corner vertices
 const MSH_TRI2  = 9     # 6-node (quadratic) tri — read as its 3 corner vertices
+const MSH_SEG2  = 8     # 3-node (quadratic) line — read as its 2 end vertices
 const _NN = Dict(MSH_POINT => 1, MSH_LINE => 2, MSH_TRI => 3, MSH_TET => 4,
-                 MSH_TET2 => 10, MSH_TRI2 => 6)
+                 MSH_TET2 => 10, MSH_TRI2 => 6, MSH_SEG2 => 3)
 const _EDIM = Dict(MSH_POINT => 0, MSH_LINE => 1, MSH_TRI => 2, MSH_TET => 3,
-                   MSH_TET2 => 3, MSH_TRI2 => 2)
+                   MSH_TET2 => 3, MSH_TRI2 => 2, MSH_SEG2 => 1)
 const _DEFAULT_MAX_IO_NAME_BYTES = 1 << 20
 
 @inline function _io_limit(value, caller::AbstractString,
@@ -573,8 +574,12 @@ function _push_element!(acc, etype::Int, phys::Int, nodetoks)
         i != 0 || throw(ArgumentError("IO: element references unknown node tag $tag"))
         return i
     end
-    if etype == MSH_LINE
+    if etype == MSH_LINE || etype == MSH_SEG2
+        # linear line, or quadratic line read as its 2 end vertices (first 2 nodes)
         a = idx(nodetoks[1]); b = idx(nodetoks[2])
+        if etype == MSH_SEG2
+            idx(nodetoks[3])
+        end
         push!(acc.segs, (Int32(a), Int32(b))); push!(acc.seg_tag, ptag)
     elseif etype == MSH_TRI || etype == MSH_TRI2
         # linear tri, or quadratic tri read as its 3 corner vertices (first 3 nodes)

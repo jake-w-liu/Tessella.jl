@@ -65,9 +65,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - deterministic global edge and triangular/quadrangular-face catalogs for cached
   simplex meshes, with atomic explicit insertion, orientation-stable lookup, and
   detached tag/node arrays;
-- globally certified quadratic tetrahedra and triangles (exact Bernstein
-  Jacobian certificates, surface curving, and Gmsh type-9/11 output), plus
-  strict and atomic simplex MSH
+- globally certified quadratic segments, triangles, and tetrahedra (exact
+  Bernstein Jacobian certificates, curve/surface curving, and Gmsh type-8/9/11
+  output), plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
   functions, prior scalar bindings, sizing options, explicit field/physical tags, and
