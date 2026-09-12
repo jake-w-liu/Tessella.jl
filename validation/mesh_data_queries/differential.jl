@@ -496,11 +496,227 @@ try
     isinf(gmsh_normal[1]) && isinf(gmsh_fast[1]) || error(
         "Gmsh overflow barycenter behavior changed")
 
+    # ── Entity-filtered queries on generated meshes ──────────────────────────
+    # The two engines triangulate differently, so exact node/element sets cannot
+    # be compared. What must agree: entity-existence errors, dim=-1 tag
+    # discarding, the transitive include_boundary closure against
+    # model.getBoundary, entity-first ordering, per-type entity filters, and
+    # task partitioning over the filtered subset.
+    gmsh.model.add("mesh-data-query-entity-surface")
+    for (point,(x,y)) in enumerate(
+            ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+        gmsh.model.geo.addPoint(x,y,0.0,0.35,point)
+    end
+    for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+        gmsh.model.geo.addLine(a,b,curve)
+    end
+    gmsh.model.geo.addCurveLoop([1,2,3,4],1)
+    gmsh.model.geo.addPlaneSurface([1],1)
+    gmsh.model.geo.synchronize()
+    gmsh.model.mesh.generate(2)
+
+    Tessella.API.initialize()
+    entity_pairs=try
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            Tessella.API.model.add_point(x,y,0.0;tag=point)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            Tessella.API.model.add_line(a,b;tag=curve)
+        end
+        Tessella.API.model.add_curve_loop([1,2,3,4];tag=1)
+        Tessella.API.model.add_plane_surface([1];tag=1)
+        Tessella.API.option("Mesh.MeshSizeMax",0.35)
+        Tessella.API.mesh.generate(2)
+
+        gmsh_surface_nodes=Set(gmsh.model.mesh.getNodes(2,1,false)[1])
+        tessella_surface_nodes=Set(
+            Tessella.API.mesh.get_nodes(2,1,false)[1])
+        gmsh_surface_with_boundary=gmsh.model.mesh.getNodes(2,1,true)[1]
+        tessella_surface_with_boundary=
+            Tessella.API.mesh.get_nodes(2,1,true)[1]
+        # include_boundary emits the entity's own nodes first.
+        gmsh_surface_with_boundary[1:length(gmsh_surface_nodes)] ==
+            gmsh.model.mesh.getNodes(2,1,false)[1] || error(
+            "Gmsh surface include_boundary does not emit own nodes first")
+        tessella_surface_with_boundary[1:length(tessella_surface_nodes)] ==
+            Tessella.API.mesh.get_nodes(2,1,false)[1] || error(
+            "Tessella surface include_boundary does not emit own nodes first")
+        # The closure equals the transitive boundary node union in both;
+        # recursive=false walks direct boundaries level by level because Gmsh's
+        # recursive=true reports only the lowest-dimension entities.
+        function transitive_nodes(get_boundary,get_nodes,entity)
+            result=Set(get_nodes(entity...))
+            queue=[entity]
+            seen=Set{Tuple{Int,Int}}()
+            while !isempty(queue)
+                current=popfirst!(queue)
+                for boundary in get_boundary(current)
+                    boundary in seen && continue
+                    push!(seen,boundary)
+                    union!(result,get_nodes(boundary...))
+                    push!(queue,boundary)
+                end
+            end
+            return result
+        end
+        gmsh_expected=transitive_nodes(
+            entity->Tuple{Int,Int}[Tuple{Int,Int}(pair) for pair in
+                gmsh.model.getBoundary([entity],false,false,false)],
+            (dim,tag)->gmsh.model.mesh.getNodes(dim,tag,false)[1],
+            (2,1))
+        tessella_expected=transitive_nodes(
+            entity->Tuple{Int,Int}[Tuple{Int,Int}(pair) for pair in
+                Tessella.API.model.get_boundary([entity],false,false,false)],
+            (dim,tag)->Tessella.API.mesh.get_nodes(dim,tag,false)[1],
+            (2,1))
+        Set(gmsh_surface_with_boundary)==gmsh_expected || error(
+            "Gmsh include_boundary is not the transitive boundary closure")
+        Set(tessella_surface_with_boundary)==tessella_expected || error(
+            "Tessella include_boundary is not the transitive boundary closure")
+        # Point entities classify exactly one node on each corner in both.
+        for point in 1:4
+            length(gmsh.model.mesh.getNodes(0,point,false)[1])==1 || error(
+                "Gmsh point $point does not classify one node")
+            length(Tessella.API.mesh.get_nodes(0,point,false)[1])==1 || error(
+                "Tessella point $point does not classify one node")
+        end
+        # dim=-1 discards the tag in both engines.
+        gmsh.model.mesh.getNodes(-1,999,false)[1]==
+            gmsh.model.mesh.getNodes(-1,-1,false)[1] || error(
+            "Gmsh dim=-1 did not discard the tag")
+        Tessella.API.mesh.get_nodes(-1,999,false)[1]==
+            Tessella.API.mesh.get_nodes(-1,-1,false)[1] || error(
+            "Tessella dim=-1 did not discard the tag")
+        # The single surface owns every cached triangle in both engines.
+        gmsh_all=gmsh.model.mesh.getElements(2,-1)
+        gmsh_filtered=gmsh.model.mesh.getElements(2,1)
+        tessella_all=Tessella.API.mesh.get_elements(2,-1)
+        tessella_filtered=Tessella.API.mesh.get_elements(2,1)
+        gmsh_all[1]==gmsh_filtered[1]==Int32[2] || error(
+            "Gmsh surface element-type filter changed")
+        tessella_all[1]==tessella_filtered[1]==Int32[2] || error(
+            "Tessella surface element-type filter changed")
+        length(gmsh_filtered[2][1])==length(gmsh_all[2][1]) || error(
+            "Gmsh surface element filter is not exhaustive")
+        length(tessella_filtered[2][1])==length(tessella_all[2][1]) ||
+            error("Tessella surface element filter is not exhaustive")
+        # Type-level filters resolve the tag in the type's own dimension.
+        for (tessella_call,gmsh_call) in (
+            (()->Tessella.API.mesh.get_elements_by_type(2,1),
+             ()->gmsh.model.mesh.getElementsByType(2,1)),
+            (()->Tessella.API.mesh.get_nodes_by_element_type(2,1),
+             ()->gmsh.model.mesh.getNodesByElementType(2,1)),
+            (()->Tessella.API.mesh.get_barycenters(2,1,false,false),
+             ()->gmsh.model.mesh.getBarycenters(2,1,false,false)),
+            (()->Tessella.API.mesh.get_element_edge_nodes(2,1,false),
+             ()->gmsh.model.mesh.getElementEdgeNodes(2,1,false)),
+            (()->Tessella.API.mesh.get_element_face_nodes(2,3,1,false),
+             ()->gmsh.model.mesh.getElementFaceNodes(2,3,1,false)),
+            (()->Tessella.API.mesh.get_jacobians(2,[0.25,0.25,0.0],1),
+             ()->gmsh.model.mesh.getJacobians(2,[0.25,0.25,0.0],1)))
+            tessella_value=tessella_call()
+            gmsh_value=gmsh_call()
+            length(tessella_value[1])>0 && length(gmsh_value[1])>0 || error(
+                "an entity-filtered query returned no data")
+        end
+        tessella_tri_count=length(tessella_all[2][1])
+        gmsh_tri_count=length(gmsh_all[2][1])
+        length(Tessella.API.mesh.get_jacobians(
+            2,[0.25,0.25,0.0],1)[2])==tessella_tri_count || error(
+            "Tessella filtered Jacobian count differs")
+        all(>(0),Tessella.API.mesh.get_jacobians(
+            2,[0.25,0.25,0.0],1)[2]) || error(
+            "Tessella filtered Jacobians are not positive")
+        Tessella.API.mesh.get_basis_functions_orientation(
+            2,"Lagrange",1)==zeros(Int32,tessella_tri_count) || error(
+            "Tessella filtered orientations differ")
+        _,tessella_key_entities,_=Tessella.API.mesh.get_keys(
+            2,"Lagrange",1)
+        sort!(unique!(tessella_key_entities))==
+            Tessella.API.mesh.get_nodes(2,1,true)[1] |> sort |> unique ||
+            error("Tessella filtered Lagrange keys do not cover the entity")
+        # Task partitions subdivide the entity-filtered subset.
+        union_tags=UInt64[]
+        for task in 0:2
+            slice,_=Tessella.API.mesh.get_elements_by_type(2,1,task,3)
+            append!(union_tags,slice)
+        end
+        sort!(union_tags)==sort!(tessella_filtered[2][1]) || error(
+            "Tessella filtered task union differs")
+        # Unknown entities fail explicitly in both engines.
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_nodes(2,77)) || error(
+            "Tessella accepted an unknown surface")
+        gmsh_rejected=try
+            gmsh.model.mesh.getNodes(2,77)
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error("Gmsh accepted an unknown surface")
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_elements_by_type(2,77)) || error(
+            "Tessella accepted an unknown surface in a type query")
+        gmsh_rejected=try
+            gmsh.model.mesh.getElementsByType(2,77)
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error(
+            "Gmsh accepted an unknown surface in a type query")
+        # A surface cache owns no dim-3 entity in either engine.
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_elements(3,1)) || error(
+            "Tessella classified a phantom volume")
+        gmsh_rejected=try
+            gmsh.model.mesh.getElements(3,1)
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error("Gmsh classified a phantom volume")
+        # Element-by-tag classification returns type, nodes, and owner entity.
+        for element_tag in tessella_filtered[2][1]
+            element_type,element_nodes,entity_dim,entity_tag=
+                Tessella.API.mesh.get_element(element_tag)
+            (element_type,entity_dim,entity_tag)==(Int32(2),2,1) ||
+                error("Tessella element classification mismatch")
+            length(element_nodes)==3 || error(
+                "Tessella element node count mismatch")
+        end
+        for element_tag in gmsh_filtered[2][1]
+            element_type,element_nodes,entity_dim,entity_tag=
+                gmsh.model.mesh.getElement(element_tag)
+            (element_type,entity_dim,entity_tag)==(Int32(2),2,1) ||
+                error("Gmsh element classification mismatch")
+        end
+        _rejects_argument(
+            ()->Tessella.API.mesh.get_element(0)) || error(
+            "Tessella accepted an unknown element tag")
+        gmsh_rejected=try
+            gmsh.model.mesh.getElement(0)
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error("Gmsh accepted an unknown element tag")
+        (tessella_tri_count,gmsh_tri_count)
+    finally
+        Tessella.API.finalize()
+    end
+
     println("mesh-data-query differential: Gmsh ",gmsh.GMSH_API_VERSION,
             ", types=1,2,4 nodes=4 elements=3 connectivity_entries=9 ",
             "dense_max_tags=4/3 explicit_max_tags=40/300 ",
             "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
+            " entity_filtered=tris",entity_pairs,
             " bounded=no-mesh/classification/special-type/face-count ",
             "blockers and finite-barycenter contract with partitioned slices")
 finally
