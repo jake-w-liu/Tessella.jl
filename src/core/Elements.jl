@@ -2865,6 +2865,16 @@ end
     return UInt64(swap ? bswap(value) : value)
 end
 
+# Binary `size_t` emission mirrors `_binary_size_t`: `wide` selects the field
+# width declared by the MeshFormat data-size word. Narrow output bounds-checks
+# every value instead of silently truncating tags or counts.
+@inline function _write_size_t(io,value::Integer,wide::Bool,context::AbstractString)
+    wide && return write(io,UInt64(value))
+    0<=value<=typemax(UInt32) || throw(ArgumentError(
+        "write_mixed_msh: $context $value exceeds the 4-byte size_t range"))
+    return write(io,UInt32(value))
+end
+
 @inline function _binary_f64(io,swap::Bool,context::AbstractString)
     value=reinterpret(Float64,_binary_u64(io,swap,context))
     isfinite(value) || throw(ArgumentError(
@@ -5633,9 +5643,18 @@ end
 
 """
     write_mixed_msh(path, mesh; version=4.1, binary=false,
-                    gmsh_compatible=true) -> path
+                    gmsh_compatible=true, size_t_bytes=8) -> path
 
 Validate and atomically write a mixed mesh as ASCII or binary MSH v2.2 or v4.1.
+`size_t_bytes` selects the `size_t` field width for binary MSH 4.1 output:
+8 (the default, matching 64-bit Gmsh) or 4 (matching 32-bit writers).
+`size_t_bytes=4` requires `version=4.1`, `binary=true`, and
+`gmsh_compatible=false` — Gmsh 4.15.2 rejects a 4-byte `size_t` data size on
+64-bit builds, so narrow output is Tessella-only serialization — and MSH 2.2
+binary records carry no `size_t` fields. Every emitted `size_t` value is
+bounds-checked against `typemax(UInt32)`, and a binary-captured ancillary
+section is an explicit blocker since an opaque verbatim payload cannot be
+re-encoded into the narrower width.
 MSH4 entity metadata, Gmsh's surface/embedded-curve encoding, and MSH2/MSH4
 periodic links are preserved when present;
 legacy meshes receive a deterministic discrete-entity layout with
@@ -5674,7 +5693,7 @@ write volume-embedding relations, so only their classified entities and elements
 are serialized.
 """
 function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
-                         binary=false,gmsh_compatible=true)
+                         binary=false,gmsh_compatible=true,size_t_bytes=8)
     version isa Real || throw(ArgumentError(
         "write_mixed_msh: version must be real"))
     _elements_reject_bool(version,"write_mixed_msh: version")
@@ -5690,6 +5709,23 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
         "write_mixed_msh: gmsh_compatible must be Bool"))
     binary isa Bool || throw(ArgumentError(
         "write_mixed_msh: binary must be Bool"))
+    _elements_reject_bool(size_t_bytes,"write_mixed_msh: size_t_bytes")
+    size_t_bytes isa Integer || throw(ArgumentError(
+        "write_mixed_msh: size_t_bytes must be 4 or 8"))
+    size_t_bytes in (4,8) || throw(ArgumentError(
+        "write_mixed_msh: size_t_bytes must be 4 or 8"))
+    wide=size_t_bytes==8
+    if !wide
+        (binary && value==4.1) || throw(ArgumentError(
+            "write_mixed_msh: size_t_bytes=4 requires binary MSH 4.1 output"))
+        gmsh_compatible && throw(ArgumentError(
+            "write_mixed_msh: Gmsh 4.15.2 rejects a 4-byte size_t data size " *
+            "on 64-bit builds; use gmsh_compatible=false only for " *
+            "Tessella-only serialization"))
+        any(section->section.binary,m.ancillary_sections) && throw(ArgumentError(
+            "write_mixed_msh: size_t_bytes=4 cannot re-encode a " *
+            "binary-captured ancillary section into the narrower size_t width"))
+    end
     if gmsh_compatible
         reader_gaps=value==2.2 ? GMSH_4_15_2_MSH_READER_GAPS_V2 :
                                 GMSH_4_15_2_MSH_READER_GAPS_V4
@@ -5750,11 +5786,12 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
             binary ? _write_mixed_v2_binary(io,m,names,gmsh_compatible,preserved) :
                      _write_mixed_v2(io,m,names,gmsh_compatible,preserved)
         else
-            binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible,preserved) :
+            binary ? _write_mixed_v4_binary(io,m,names,gmsh_compatible,
+                                            preserved,wide) :
                      _write_mixed_v4(io,m,names,gmsh_compatible,preserved)
         end
         if !isempty(m.periodic_links)
-            value==4.1 ? _write_mixed_periodic_v4(io,m,binary) :
+            value==4.1 ? _write_mixed_periodic_v4(io,m,binary,wide) :
                          _write_mixed_periodic_v2(io,m)
         end
         if m.partition_data!==nothing &&
@@ -5762,7 +5799,7 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
             _write_mixed_ghost_elements(
                 io,m.partition_data,
                 _external_element_tags(m,value,m.entity_data,
-                                       _block_cell_starts(m)),binary)
+                                       _block_cell_starts(m)),binary,wide)
         end
         _emit_preserved!(io,preserved,5)
         flush(io); close(io)
@@ -5847,22 +5884,23 @@ function _write_mixed_periodic_v2(io,m::MixedMesh)
     return nothing
 end
 
-function _write_mixed_periodic_v4(io,m::MixedMesh,binary::Bool)
+function _write_mixed_periodic_v4(io,m::MixedMesh,binary::Bool,wide::Bool)
     data=m.entity_data
     data===nothing && throw(ErrorException(
         "write_mixed_msh: internal periodic metadata preflight mismatch"))
     links=sort!(collect(m.periodic_links);
                 by=link->(link.dim,link.slave_entity,link.master_entity))
     println(io,"\$Periodic")
-    binary ? write(io,UInt64(length(links))) : println(io,length(links))
+    binary ? _write_size_t(io,length(links),wide,"periodic link count") :
+             println(io,length(links))
     for link in links
         if binary
             write(io,Int32(link.dim));write(io,link.slave_entity)
             write(io,link.master_entity)
             if link.affine===nothing
-                write(io,UInt64(0))
+                _write_size_t(io,0,wide,"periodic affine count")
             else
-                write(io,UInt64(16))
+                _write_size_t(io,16,wide,"periodic affine count")
                 for value in link.affine
                     write(io,value)
                 end
@@ -5886,9 +5924,10 @@ function _write_mixed_periodic_v4(io,m::MixedMesh,binary::Bool)
         end
         sort!(pairs)
         if binary
-            write(io,UInt64(length(pairs)))
+            _write_size_t(io,length(pairs),wide,"periodic node-pair count")
             for (slave,master) in pairs
-                write(io,slave);write(io,master)
+                _write_size_t(io,slave,wide,"periodic node tag")
+                _write_size_t(io,master,wide,"periodic node tag")
             end
         else
             println(io,length(pairs))
@@ -6030,16 +6069,16 @@ function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     return nothing
 end
 
-function _write_mixed_binary_format(io,version::AbstractString)
+function _write_mixed_binary_format(io,version::AbstractString,data_size::Int)
     println(io,"\$MeshFormat")
-    println(io,version," 1 8")
+    println(io,version," 1 ",data_size)
     write(io,Int32(1)); write(io,UInt8('\n'))
     println(io,"\$EndMeshFormat")
     return nothing
 end
 
 function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
-    _write_mixed_binary_format(io,"2.2")
+    _write_mixed_binary_format(io,"2.2",8)
     _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
     _emit_preserved!(io,preserved,1)
@@ -6321,32 +6360,34 @@ function _write_mixed_entity(io,entity::MixedEntity,max_curve_tag::Int)
     return nothing
 end
 
-function _write_mixed_entity_binary(io,entity::_MixedWriteEntity)
+function _write_mixed_entity_binary(io,entity::_MixedWriteEntity,wide::Bool)
     write(io,Int32(entity.tag))
     ncoordinates=entity.dim==0 ? 3 : 6
     @inbounds for i in 1:ncoordinates
         write(io,entity.bounds[i])
     end
     nphysical=entity.physical==0 ? 0 : 1
-    write(io,UInt64(nphysical))
+    _write_size_t(io,nphysical,wide,"entity physical-tag count")
     nphysical==0 || write(io,entity.physical)
-    entity.dim==0 || write(io,UInt64(0))
+    entity.dim==0 || _write_size_t(io,0,wide,"entity boundary count")
     return nothing
 end
 
-function _write_mixed_entity_binary(io,entity::MixedEntity,max_curve_tag::Int)
+function _write_mixed_entity_binary(io,entity::MixedEntity,max_curve_tag::Int,
+                                    wide::Bool)
     write(io,Int32(entity.tag))
     ncoordinates=entity.dim==0 ? 3 : 6
     @inbounds for i in 1:ncoordinates
         write(io,entity.bbox[i])
     end
-    write(io,UInt64(length(entity.physical_tags)))
+    _write_size_t(io,length(entity.physical_tags),wide,
+                  "entity physical-tag count")
     for physical in entity.physical_tags
         write(io,physical)
     end
     if entity.dim>0
         encoded_boundaries=_mixed_entity_encoded_boundaries(entity,max_curve_tag)
-        write(io,UInt64(length(encoded_boundaries)))
+        _write_size_t(io,length(encoded_boundaries),wide,"entity boundary count")
         for boundary in encoded_boundaries
             write(io,boundary)
         end
@@ -6382,10 +6423,11 @@ function _write_mixed_partitioned_entity(io,entity::MixedEntity,
 end
 
 function _write_mixed_partitioned_entity_binary(io,entity::MixedEntity,
-                                                max_curve_tag::Int)
+                                                max_curve_tag::Int,wide::Bool)
     write(io,entity.tag)
     write(io,Int32(entity.parent[1])); write(io,entity.parent[2])
-    write(io,UInt64(length(entity.partitions)))
+    _write_size_t(io,length(entity.partitions),wide,
+                  "partitioned-entity partition count")
     for partition in entity.partitions
         write(io,partition)
     end
@@ -6393,14 +6435,16 @@ function _write_mixed_partitioned_entity_binary(io,entity::MixedEntity,
     @inbounds for i in 1:ncoordinates
         write(io,entity.bbox[i])
     end
-    write(io,UInt64(length(entity.physical_tags)))
+    _write_size_t(io,length(entity.physical_tags),wide,
+                  "partitioned-entity physical-tag count")
     for physical in entity.physical_tags
         write(io,physical)
     end
     if entity.dim>0
         encoded_boundaries=_mixed_entity_encoded_boundaries(
             entity,max_curve_tag)
-        write(io,UInt64(length(encoded_boundaries)))
+        _write_size_t(io,length(encoded_boundaries),wide,
+                      "partitioned-entity boundary count")
         for boundary in encoded_boundaries
             write(io,boundary)
         end
@@ -6409,7 +6453,7 @@ function _write_mixed_partitioned_entity_binary(io,entity::MixedEntity,
 end
 
 function _write_mixed_partitioned_entities(io,pdata::MixedPartitionData,
-                                           binary::Bool)
+                                           binary::Bool,wide::Bool)
     entities=sort!(collect(values(pdata.entities));by=e->(e.dim,e.tag))
     counts=zeros(Int,4)
     for entity in entities
@@ -6419,16 +6463,16 @@ function _write_mixed_partitioned_entities(io,pdata::MixedPartitionData,
         (Int(entity.tag) for entity in entities if entity.dim==1);init=0)
     println(io,"\$PartitionedEntities")
     if binary
-        write(io,UInt64(pdata.num_partitions))
-        write(io,UInt64(length(pdata.ghost_entities)))
+        _write_size_t(io,pdata.num_partitions,wide,"partition count")
+        _write_size_t(io,length(pdata.ghost_entities),wide,"ghost-entity count")
         for (tag,partition) in pdata.ghost_entities
             write(io,tag); write(io,partition)
         end
         for count in counts
-            write(io,UInt64(count))
+            _write_size_t(io,count,wide,"partitioned-entity count")
         end
         for entity in entities
-            _write_mixed_partitioned_entity_binary(io,entity,max_curve_tag)
+            _write_mixed_partitioned_entity_binary(io,entity,max_curve_tag,wide)
         end
         write(io,UInt8('\n'))
     else
@@ -6448,15 +6492,17 @@ end
 
 function _write_mixed_ghost_elements(io,pdata::MixedPartitionData,
                                      element_tags::Vector{UInt64},
-                                     binary::Bool)
+                                     binary::Bool,wide::Bool)
     isempty(pdata.ghost_elements) && return nothing
     println(io,"\$GhostElements")
     if binary
-        write(io,UInt64(length(pdata.ghost_elements)))
+        _write_size_t(io,length(pdata.ghost_elements),wide,"ghost-element count")
         for record in pdata.ghost_elements
-            write(io,element_tags[record.element])
+            _write_size_t(io,element_tags[record.element],wide,
+                          "ghost-element tag")
             write(io,record.partition)
-            write(io,UInt64(length(record.ghost_partitions)))
+            _write_size_t(io,length(record.ghost_partitions),wide,
+                          "ghost-element owner count")
             for owner in record.ghost_partitions
                 write(io,owner)
             end
@@ -6518,8 +6564,9 @@ function _mixed_metadata_element_runs(m::MixedMesh,data::MixedEntityData)
 end
 
 function _write_mixed_v4_binary_metadata(
-    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool,preserved)
-    _write_mixed_binary_format(io,"4.1")
+    io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool,preserved,
+    wide::Bool)
+    _write_mixed_binary_format(io,"4.1",wide ? 8 : 4)
     _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
     _emit_preserved!(io,preserved,1)
@@ -6532,29 +6579,31 @@ function _write_mixed_v4_binary_metadata(
         (Int(entity.tag) for entity in entities if entity.dim==1);init=0)
     println(io,"\$Entities")
     for count in counts
-        write(io,UInt64(count))
+        _write_size_t(io,count,wide,"entity count")
     end
     for entity in entities
-        _write_mixed_entity_binary(io,entity,max_curve_tag)
+        _write_mixed_entity_binary(io,entity,max_curve_tag,wide)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
     m.partition_data===nothing || _write_mixed_partitioned_entities(
-        io,m.partition_data,true)
+        io,m.partition_data,true,wide)
     _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
     minimum_node=nn==0 ? UInt64(0) : minimum(data.external_node_tags)
     maximum_node=nn==0 ? UInt64(0) : maximum(data.external_node_tags)
     println(io,"\$Nodes")
-    write(io,UInt64(length(node_runs))); write(io,UInt64(nn))
-    write(io,minimum_node); write(io,maximum_node)
+    _write_size_t(io,length(node_runs),wide,"node block count")
+    _write_size_t(io,nn,wide,"node count")
+    _write_size_t(io,minimum_node,wide,"minimum node tag")
+    _write_size_t(io,maximum_node,wide,"maximum node tag")
     @inbounds for run in node_runs
         first_node=first(run); dim,entity=data.node_entities[first_node]
         parametric=data.node_parametric[first_node]!==nothing
         write(io,Int32(dim)); write(io,entity); write(io,Int32(parametric ? 1 : 0))
-        write(io,UInt64(length(run)))
+        _write_size_t(io,length(run),wide,"node block size")
         for i in run
-            write(io,data.external_node_tags[i])
+            _write_size_t(io,data.external_node_tags[i],wide,"node tag")
         end
         for i in run
             write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
@@ -6576,18 +6625,22 @@ function _write_mixed_v4_binary_metadata(
     maximum_element=nel==0 ? UInt64(0) :
                     maximum(Iterators.flatten(data.external_element_tags))
     println(io,"\$Elements")
-    write(io,UInt64(length(element_runs))); write(io,UInt64(nel))
-    write(io,minimum_element); write(io,maximum_element)
+    _write_size_t(io,length(element_runs),wide,"element block count")
+    _write_size_t(io,nel,wide,"element count")
+    _write_size_t(io,minimum_element,wide,"minimum element tag")
+    _write_size_t(io,maximum_element,wide,"maximum element tag")
     @inbounds for run in element_runs
         block=m.blocks[run.block]
         entity=data.block_entities[run.block][first(run.cells)]
         write(io,Int32(_block_dim(block))); write(io,entity); write(io,Int32(block.msh))
-        write(io,UInt64(length(run.cells)))
+        _write_size_t(io,length(run.cells),wide,"element block size")
         for j in run.cells
-            write(io,data.external_element_tags[run.block][j])
+            _write_size_t(io,data.external_element_tags[run.block][j],wide,
+                          "element tag")
             for i in 1:_cell_arity(block,j)
                 internal=_cell_node(block,j,i)
-                write(io,data.external_node_tags[internal])
+                _write_size_t(io,data.external_node_tags[internal],wide,
+                              "node tag")
             end
         end
     end
@@ -6597,10 +6650,10 @@ function _write_mixed_v4_binary_metadata(
 end
 
 function _write_mixed_v4_binary(
-    io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
+    io,m::MixedMesh,names,gmsh_compatible::Bool,preserved,wide::Bool)
     m.entity_data===nothing || return _write_mixed_v4_binary_metadata(
-        io,m,names,m.entity_data,gmsh_compatible,preserved)
-    _write_mixed_binary_format(io,"4.1")
+        io,m,names,m.entity_data,gmsh_compatible,preserved,wide)
+    _write_mixed_binary_format(io,"4.1",wide ? 8 : 4)
     _emit_preserved!(io,preserved,0)
     _write_mixed_physical_names(io,names,gmsh_compatible)
     _emit_preserved!(io,preserved,1)
@@ -6612,26 +6665,28 @@ function _write_mixed_v4_binary(
     end
     println(io,"\$Entities")
     for count in counts
-        write(io,UInt64(count))
+        _write_size_t(io,count,wide,"entity count")
     end
     for entity in entities
-        _write_mixed_entity_binary(io,entity)
+        _write_mixed_entity_binary(io,entity,wide)
     end
     write(io,UInt8('\n')); println(io,"\$EndEntities")
     m.partition_data===nothing || _write_mixed_partitioned_entities(
-        io,m.partition_data,true)
+        io,m.partition_data,true,wide)
     _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2)
     println(io,"\$Nodes")
-    write(io,UInt64(nn==0 ? 0 : 1)); write(io,UInt64(nn))
-    write(io,UInt64(nn==0 ? 0 : 1)); write(io,UInt64(nn))
+    _write_size_t(io,nn==0 ? 0 : 1,wide,"node block count")
+    _write_size_t(io,nn,wide,"node count")
+    _write_size_t(io,nn==0 ? 0 : 1,wide,"minimum node tag")
+    _write_size_t(io,nn,wide,"maximum node tag")
     if nn>0
         write(io,Int32(node_owner[1])); write(io,Int32(node_owner[2]))
         write(io,Int32(0))
-        write(io,UInt64(nn))
+        _write_size_t(io,nn,wide,"node block size")
         for i in 1:nn
-            write(io,UInt64(i))
+            _write_size_t(io,i,wide,"node tag")
         end
         @inbounds for i in 1:nn
             write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
@@ -6642,16 +6697,20 @@ function _write_mixed_v4_binary(
 
     nel=_assert_mixed_structure(m,"write_mixed_msh")
     println(io,"\$Elements")
-    write(io,UInt64(length(groups))); write(io,UInt64(nel))
-    write(io,UInt64(nel==0 ? 0 : 1)); write(io,UInt64(nel))
+    _write_size_t(io,length(groups),wide,"element block count")
+    _write_size_t(io,nel,wide,"element count")
+    _write_size_t(io,nel==0 ? 0 : 1,wide,"minimum element tag")
+    _write_size_t(io,nel,wide,"maximum element tag")
     eid=0
     @inbounds for group in groups
         write(io,Int32(group.dim)); write(io,Int32(group.entity))
-        write(io,Int32(group.msh)); write(io,UInt64(length(group.cells)))
+        write(io,Int32(group.msh))
+        _write_size_t(io,length(group.cells),wide,"element block size")
         for ref in group.cells
-            block=m.blocks[ref.block]; eid+=1; write(io,UInt64(eid))
+            block=m.blocks[ref.block]; eid+=1
+            _write_size_t(io,eid,wide,"element tag")
             for i in 1:_cell_arity(block,ref.cell)
-                write(io,UInt64(_cell_node(block,ref.cell,i)))
+                _write_size_t(io,_cell_node(block,ref.cell,i),wide,"node tag")
             end
         end
     end
@@ -6682,7 +6741,7 @@ function _write_mixed_v4_metadata(
     end
     println(io,"\$EndEntities")
     m.partition_data===nothing || _write_mixed_partitioned_entities(
-        io,m.partition_data,false)
+        io,m.partition_data,false,true)
     _emit_preserved!(io,preserved,2)
 
     nn=size(m.coords,2); node_runs=_mixed_metadata_node_runs(data)
@@ -6757,7 +6816,7 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     end
     println(io,"\$EndEntities")
     m.partition_data===nothing || _write_mixed_partitioned_entities(
-        io,m.partition_data,false)
+        io,m.partition_data,false,true)
     _emit_preserved!(io,preserved,2)
     nn=size(m.coords,2)
     println(io,"\$Nodes")

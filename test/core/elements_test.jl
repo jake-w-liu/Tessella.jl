@@ -3542,6 +3542,125 @@ end
         ElementsUnderTest.mixed_crc(mesh_alt).sha
 end
 
+@testset "binary MSH 4-byte size_t output" begin
+    directory=mktempdir()
+    simple=ElementsUnderTest.MixedMesh(
+        Float64[0 1 1 0; 0 0 1 0; 0 0 0 0],
+        ElementsUnderTest.MixedElementBlock[ElementsUnderTest.ElementBlock(
+            2,Int32[1 2; 2 3; 4 4],Int32[3,3])])
+    narrow=joinpath(directory,"simple-narrow.msh")
+    ElementsUnderTest.write_mixed_msh(narrow,simple;binary=true,
+        gmsh_compatible=false,size_t_bytes=4)
+    open(narrow,"r") do io
+        @test readline(io)=="\$MeshFormat"
+        @test split(readline(io))==["4.1","1","4"]
+    end
+    roundtrip=ElementsUnderTest.read_mixed_msh(narrow)
+    @test ElementsUnderTest.validate(roundtrip).ok
+    @test roundtrip.coords==simple.coords
+    @test roundtrip.blocks[1].nodes==simple.blocks[1].nodes
+    @test roundtrip.blocks[1].tags==simple.blocks[1].tags
+    wide_path=joinpath(directory,"simple-wide.msh")
+    ElementsUnderTest.write_mixed_msh(wide_path,simple;binary=true)
+    @test filesize(narrow)<filesize(wide_path)
+
+    # The metadata writer path re-encodes entities, node/element blocks,
+    # periodic links, partitioned entities, and ghost elements at the
+    # narrower width; view-data rows stay int32/float64 in both modes.
+    source=ElementsUnderTest.read_mixed_msh(write_narrow_binary_v4(
+        joinpath(directory,"source-narrow.msh")))
+    @test length(source.periodic_links)==1
+    out=joinpath(directory,"meta-narrow.msh")
+    ElementsUnderTest.write_mixed_msh(out,source;binary=true,
+        gmsh_compatible=false,size_t_bytes=4)
+    reread=ElementsUnderTest.read_mixed_msh(out)
+    @test ElementsUnderTest.validate(reread).ok
+    @test reread.entity_data.external_node_tags==
+        source.entity_data.external_node_tags
+    @test reread.entity_data.external_element_tags==
+        source.entity_data.external_element_tags
+    @test length(reread.periodic_links)==1
+    @test reread.periodic_links[1].slave_entity==
+        source.periodic_links[1].slave_entity
+    @test reread.periodic_links[1].slave_nodes==
+        source.periodic_links[1].slave_nodes
+    @test reread.periodic_links[1].master_nodes==
+        source.periodic_links[1].master_nodes
+    @test reread.data_sections[1].values==source.data_sections[1].values
+
+    partitioned=ElementsUnderTest.read_mixed_msh(write_partitioned_v4(
+        joinpath(directory,"partitioned.msh")))
+    out=joinpath(directory,"partitioned-narrow.msh")
+    ElementsUnderTest.write_mixed_msh(out,partitioned;binary=true,
+        gmsh_compatible=false,size_t_bytes=4)
+    re=ElementsUnderTest.read_mixed_msh(out)
+    @test re.partition_data.num_partitions==2
+    @test re.partition_data.ghost_entities==
+        partitioned.partition_data.ghost_entities
+    @test length(re.partition_data.ghost_elements)==1
+    @test re.partition_data.ghost_elements[1].partition==2
+
+    # Narrow output is Tessella-only serialization: Gmsh 4.15.2 rejects a
+    # 4-byte size_t data size on 64-bit builds, and MSH 2.2 binary records
+    # carry no size_t fields at all.
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-ascii.msh"),simple;
+        binary=false,gmsh_compatible=false,size_t_bytes=4)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-v2.msh"),simple;version=2.2,binary=true,
+        gmsh_compatible=false,size_t_bytes=4)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-gmsh.msh"),simple;binary=true,size_t_bytes=4)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-3.msh"),simple;binary=true,
+        gmsh_compatible=false,size_t_bytes=3)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-bool.msh"),simple;binary=true,
+        gmsh_compatible=false,size_t_bytes=true)
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-str.msh"),simple;binary=true,
+        gmsh_compatible=false,size_t_bytes="4")
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-float.msh"),simple;binary=true,
+        gmsh_compatible=false,size_t_bytes=4.5)
+
+    # A binary-captured ancillary payload is opaque: it cannot be re-encoded
+    # into the narrower width, so it is an explicit blocker.
+    ancillary=ElementsUnderTest.MixedMesh(simple.coords,simple.blocks;
+        ancillary_sections=ElementsUnderTest.MshAncillarySection[
+            ElementsUnderTest.MshAncillarySection(
+                "Comments",true,UInt8[0x00,0x01],Int32(4))])
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-ancillary.msh"),ancillary;binary=true,
+        gmsh_compatible=false,size_t_bytes=4)
+
+    # An external tag beyond the 4-byte range is a checked error, not a
+    # truncated write.
+    bigtag=ElementsUnderTest.MixedMesh(
+        Float64[0 1;0 0;0 0],
+        ElementsUnderTest.MixedElementBlock[ElementsUnderTest.ElementBlock(
+            1,reshape(Int32[1,2],2,1),Int32[0])];
+        entity_data=ElementsUnderTest.MixedEntityData(
+            Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}(
+                (0,1)=>ElementsUnderTest.MixedEntity(0,1,(0.0,0.0,0.0)),
+                (0,2)=>ElementsUnderTest.MixedEntity(0,2,(1.0,0.0,0.0)),
+                (1,1)=>ElementsUnderTest.MixedEntity(1,1,(0.0,0.0,0.0,1.0,0.0,0.0);
+                    boundaries=Int32[1,-2]));
+            node_entities=[(0,Int32(1)),(0,Int32(2))],
+            node_parametric=Union{Nothing,Vector{Float64}}[nothing,nothing],
+            external_node_tags=UInt64[1,UInt64(typemax(UInt32))+1],
+            block_entities=[Int32[1]],
+            external_element_tags=[UInt64[7]]))
+    @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+        joinpath(directory,"bad-tag.msh"),bigtag;binary=true,
+        gmsh_compatible=false,size_t_bytes=4)
+    still_wide=joinpath(directory,"still-wide.msh")
+    ElementsUnderTest.write_mixed_msh(still_wide,bigtag;binary=true,
+        gmsh_compatible=false)
+    reread=ElementsUnderTest.read_mixed_msh(still_wide)
+    @test reread.entity_data.external_node_tags[2]==UInt64(typemax(UInt32))+1
+end
+
 function write_repeated_node_sections(path,version::Float64,binary::Bool;
                                       third_tag::Int=30)
     open(path,"w") do io

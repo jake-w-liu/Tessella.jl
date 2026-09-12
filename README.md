@@ -87,7 +87,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   binary MSH2/MSH4 files, including entity transforms, node correspondences, and
   declared MSH2 elementary-entity tags; MSH4 partition metadata
   (`$PartitionedEntities` and `$GhostElements`) is carried structurally on
-  `MixedMesh` and re-emitted through ASCII and binary output; positive,
+  `MixedMesh` and re-emitted through ASCII and binary output; binary MSH4
+  `size_t` fields decode at either declared width and can be emitted at 4
+  bytes with `size_t_bytes=4` for Tessella-only serialization; positive,
   physically consistent MSH2
   entities can be converted to discrete MSH4 entities without changing their
   entity tags;
@@ -161,7 +163,7 @@ quasi-transfinite or holed transfinite patches, curved/warped or
 compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
-non-8-byte binary output, and explicit-tag `$ElementNodeData` output that the
+and explicit-tag `$ElementNodeData` output that the
 connectivity-implied record cannot express under `gmsh_compatible=true`. MSH2
 ASCII is the lossless
 format for variable connectivity and parent/domain links; binary MSH2 and MSH4 have
