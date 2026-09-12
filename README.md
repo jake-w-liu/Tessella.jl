@@ -282,8 +282,11 @@ node, element, type-funnel, Jacobian, orientation, key, and `get_element` querie
 onto the `(dim, tag)` model entity through the `model_to_mixed` classification
 snapshot stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities fail
-explicitly. Parametric coordinates remain explicit blockers until `Mesh` owns that
-metadata. `get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
+explicitly. `get_nodes` reparametrizes each returned node on the queried Line or
+Plane (`u` or `(u, v)` per node; Points, Volumes, and all-dimension queries emit
+none), and `get_nodes_by_element_type` packs each repeated node's parameters on
+its owning entity, both matching Gmsh 4.15.2.
+`get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
 the contiguous Gmsh block slice (`task>=num_tasks` is empty).
 `get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
 `get_element_face_nodes` provide the corresponding detached, connectivity-derived
