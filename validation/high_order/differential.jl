@@ -1,6 +1,7 @@
-# Differential oracle for a straight 10-node tetrahedron. Gmsh elevates the
-# same linear type-4 element; Tessella's in-memory connectivity and its written
-# type-11 record must agree with Gmsh in every local node slot.
+# Differential oracle for straight P2 elements. Gmsh elevates linear type-1/2/4
+# elements with setOrder(2); Tessella's in-memory connectivity and its written
+# type-8/9/11 records must agree with Gmsh in every local node slot, and Gmsh
+# must reload the written files with identical connectivity and physical tags.
 using Tessella
 using Tessella.MeshTypes: nnodes, ntets
 import SHA
@@ -67,6 +68,27 @@ function _type9_coordinates()
     return Tuple(points[tag] for tag in connectivity)
 end
 
+function _type8_coordinates()
+    types, element_tags, node_blocks = gmsh.model.mesh.getElements(1)
+    index = findfirst(==(Int32(8)), types)
+    index === nothing && error("Gmsh returned no type-8 line")
+    length(element_tags[index]) == 1 || error(
+        "Gmsh returned $(length(element_tags[index])) type-8 elements instead of one")
+    connectivity = node_blocks[index]
+    length(connectivity) == 3 || error(
+        "Gmsh returned malformed type-8 connectivity")
+    node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
+    length(coordinates) == 3length(node_tags) || error(
+        "Gmsh returned malformed node coordinates")
+    points = Dict{UInt64,NTuple{3,Float64}}()
+    for index in eachindex(node_tags)
+        points[node_tags[index]] = (coordinates[3index - 2],
+                                    coordinates[3index - 1],
+                                    coordinates[3index])
+    end
+    return Tuple(points[tag] for tag in connectivity)
+end
+
 function _tessella_fixture()
     return Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1];
                 tets=reshape(Int32[1,2,3,4], 4, 1), tet_tag=Int32[23])
@@ -75,6 +97,11 @@ end
 function _tessella_tri_fixture()
     return Mesh(Float64[0 1 0; 0 0 1; 0 0 0];
                 tris=reshape(Int32[1,2,3], 3, 1), tri_tag=Int32[17])
+end
+
+function _tessella_seg_fixture()
+    return Mesh(Float64[0 1; 0 0; 0 0];
+                segs=reshape(Int32[1,2], 2, 1), seg_tag=Int32[11])
 end
 
 try
@@ -154,9 +181,47 @@ try
             "Gmsh did not recover physical surface 17 from Tessella's P2 file")
     end
 
+    gmsh.clear()
+    gmsh.model.add("high-order-seg-differential")
+    gmsh.model.addDiscreteEntity(1, 101)
+    gmsh.model.mesh.addNodes(
+        1, 101, UInt64[1, 2],
+        Float64[0, 0, 0, 1, 0, 0])
+    gmsh.model.mesh.addElementsByType(101, 1, UInt64[1], UInt64[1, 2])
+    gmsh.model.addPhysicalGroup(1, [101], 11)
+    gmsh.model.mesh.setOrder(2)
+    gmsh_seg_coordinates = _type8_coordinates()
+
+    seg_quadratic = p2_segmesh(_tessella_seg_fixture())
+    tessella_seg_coordinates = Tuple(
+        (seg_quadratic.coords[1, seg_quadratic.seg3[slot, 1]],
+         seg_quadratic.coords[2, seg_quadratic.seg3[slot, 1]],
+         seg_quadratic.coords[3, seg_quadratic.seg3[slot, 1]]) for slot in 1:3)
+    gmsh_seg_coordinates == tessella_seg_coordinates || error(
+        "Gmsh and Tessella disagree on type-8 local node coordinates: " *
+        "Gmsh=$gmsh_seg_coordinates Tessella=$tessella_seg_coordinates")
+    seg_quadratic.seg_tag == Int32[11] || error(
+        "Tessella did not preserve the input segment tag")
+    validate(seg_quadratic).ok || error(
+        "Tessella quadratic segment fixture is invalid")
+    p2_seg_min_jacobian(seg_quadratic) == 0.25 || error(
+        "Tessella certified an unexpected flat unit-segment speed bound")
+
+    mktempdir() do directory
+        path = joinpath(directory, "tessella-p2seg.msh")
+        write_msh_p2(path, seg_quadratic)
+        gmsh.clear()
+        gmsh.open(path)
+        _type8_coordinates() == tessella_seg_coordinates || error(
+            "Gmsh changed Tessella's written type-8 local node coordinates")
+        (Int32(1), Int32(11)) in gmsh.model.getPhysicalGroups() || error(
+            "Gmsh did not recover physical curve 11 from Tessella's P2 file")
+    end
+
     println("HIGH_ORDER_DIFFERENTIAL_OK gmsh=$(gmsh.GMSH_API_VERSION) ",
             "nodes=$(nnodes(quadratic)) tets=$(ntets(quadratic)) ",
             "tris=$(length(tri_quadratic.tri_tag)) ",
+            "segs=$(length(seg_quadratic.seg_tag)) ",
             "sha=5a83ebe0386bda71c6761148ed3fe2f964f16c2da2f0b66b6951ef558f4927ab")
 finally
     gmsh.isInitialized() != 0 && gmsh.finalize()

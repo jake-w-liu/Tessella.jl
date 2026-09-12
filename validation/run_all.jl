@@ -225,7 +225,7 @@ element_catalog_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=
 println("  command: ", element_catalog_command)
 run(element_catalog_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
-println("\n── high_order ──  exact Gmsh 4.15.2 type-11 tetrahedron ordering")
+println("\n── high_order ──  exact Gmsh 4.15.2 type-8/9/11 P2 node ordering")
 high_order_script = joinpath(HERE, "high_order", "differential.jl")
 high_order_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $high_order_script`
 println("  command: ", high_order_command)

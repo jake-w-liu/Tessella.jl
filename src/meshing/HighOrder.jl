@@ -8,7 +8,9 @@ one shared node at the midpoint of every edge, in Gmsh's type-11 node order
 The same construction lifts linear triangles to **quadratic (6-node, P2)
 triangles** in Gmsh's type-9 order (3 corners, then edge nodes on `(1,2)`,
 `(2,3)`, `(3,1)`), certified by the exact degree-4 Bernstein bound of the Gram
-determinant `|∂x/∂r × ∂x/∂s|²`.
+determinant `|∂x/∂r × ∂x/∂s|²`, and linear segments to **quadratic (3-node, P2)
+segments** in Gmsh's type-8 order (endpoints, then the mid-node), certified by
+the exact degree-2 Bernstein bound of the squared speed `|∂x/∂ξ|²` on `[-1,1]`.
 
 Edge nodes use the correctly rounded Float64 midpoint. When the mathematical
 average is representable, straight-sided P2 is geometrically identical to the
@@ -27,12 +29,13 @@ module HighOrder
 using ..MeshTypes: Mesh, MeshDiagnostic, node, boundary_faces
 using ..MeshQuadrature: mesh_integration_points
 using ..Refine: _midpoint_coordinate
-import ..MeshTypes: nnodes, ntris, ntets, validate  # extended for P2 types
+import ..MeshTypes: nnodes, nsegs, ntris, ntets, validate  # extended for P2 types
 using Printf: @printf
 
-export P2Mesh, P2TriMesh, p2_tetmesh, p2_trimesh, p2_volume, p2_tri_area,
-       write_msh_p2, curve_to_cylinder!, curve_to_surface!,
-       p2_min_jacobian, p2_tri_min_jacobian
+export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
+       p2_seg_length, p2_volume, p2_tri_area,
+       write_msh_p2, curve_to_curve!, curve_to_cylinder!, curve_to_surface!,
+       p2_min_jacobian, p2_seg_min_jacobian, p2_tri_min_jacobian
 
 const _P2_EDGE_SLOTS = ((5, 1, 2), (6, 2, 3), (7, 3, 1),
                         (8, 1, 4), (9, 3, 4), (10, 2, 4))
@@ -1345,6 +1348,499 @@ function write_msh_p2(path, p::P2TriMesh; tri_tag=p.tri_tag)
             tag = tags[t]
             print(io, t, " 9 2 ", tag, " ", tag)
             for k in 1:6; print(io, " ", p.tri6[k,t]); end
+            println(io)
+        end
+        println(io, "\$EndElements")
+        flush(io);close(io);mv(tmp,target;force=true)
+    end
+    return path
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Quadratic (3-node, P2) segments — gmsh type-8 order: endpoints 1,2 then the
+# edge mid-node 3.  The reference domain is Gmsh's ξ ∈ [-1,1] with Lagrange
+# nodes at -1, +1, 0.  Coordinates stay 3-D so mid-nodes can be curved onto a
+# genuine embedding curve.
+# ════════════════════════════════════════════════════════════════════════════════
+
+"""
+    P2SegMesh(coords, seg3; seg_tag=zeros)
+
+Quadratic segment mesh: `coords` is `3 × N` (original endpoints followed by
+edge-mid nodes); `seg3` is `3 × nseg` in gmsh type-8 order; and `seg_tag`
+stores one nonnegative physical/curve tag per element. Inputs are copied. The
+arrays remain mutable, and public consumers revalidate their structural
+invariants before use.
+"""
+struct P2SegMesh
+    coords::Matrix{Float64}
+    seg3::Matrix{Int32}
+    seg_tag::Vector{Int32}
+    function P2SegMesh(coords, seg3;
+                       seg_tag=zeros(Int32,
+                                     seg3 isa AbstractMatrix ? size(seg3, 2) : 0))
+        coords isa AbstractMatrix || throw(ArgumentError(
+            "P2SegMesh: coords must be a matrix"))
+        seg3 isa AbstractMatrix || throw(ArgumentError(
+            "P2SegMesh: seg3 must be a matrix"))
+        seg_tag isa AbstractVector || throw(ArgumentError(
+            "P2SegMesh: seg_tag must be a vector"))
+        size(coords, 1) == 3 || throw(ArgumentError(
+            "P2SegMesh: coords must be 3 × nnodes"))
+        size(seg3, 1) == 3 || throw(ArgumentError(
+            "P2SegMesh: seg3 must be 3 × nsegs"))
+        length(seg_tag) == size(seg3, 2) || throw(ArgumentError(
+            "P2SegMesh: seg_tag length mismatch"))
+        (eltype(coords) <: Bool || any(value -> value isa Bool, coords)) &&
+            throw(ArgumentError("P2SegMesh: coordinates must not be Bool"))
+        (eltype(seg3) <: Bool || any(value -> value isa Bool, seg3)) &&
+            throw(ArgumentError("P2SegMesh: connectivity must not be Bool"))
+        (eltype(seg_tag) <: Bool || any(value -> value isa Bool, seg_tag)) &&
+            throw(ArgumentError("P2SegMesh: tags must not be Bool"))
+        size(coords, 2) <= typemax(Int32) || throw(ArgumentError(
+            "P2SegMesh: $(size(coords,2)) nodes exceed the Int32 indexing limit"))
+        size(seg3, 2) <= typemax(Int32) || throw(ArgumentError(
+            "P2SegMesh: segment count exceeds the Int32 topology limit"))
+        C = try
+            Matrix{Float64}(coords)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OutOfMemoryError && rethrow()
+            throw(ArgumentError(
+                "P2SegMesh: coordinates must be representable as Float64: " *
+                sprint(showerror, err)))
+        end
+        S = try
+            Matrix{Int32}(seg3)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OutOfMemoryError && rethrow()
+            throw(ArgumentError("P2SegMesh: connectivity must fit Int32: " *
+                                sprint(showerror, err)))
+        end
+        tags = try
+            Vector{Int32}(seg_tag)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa OutOfMemoryError && rethrow()
+            throw(ArgumentError("P2SegMesh: tags must fit Int32: " *
+                                sprint(showerror, err)))
+        end
+        _check_p2seg_arrays(C, S, tags, "P2SegMesh")
+        new(C, S, tags)
+    end
+end
+
+function _check_p2seg_arrays(coords::Matrix{Float64}, seg3::Matrix{Int32},
+                             seg_tag::Vector{Int32}, caller::AbstractString)
+    nn = size(coords, 2)
+    ne = size(seg3, 2)
+    nn <= typemax(Int32) || throw(ArgumentError(
+        "$caller: node count exceeds the Int32 indexing limit"))
+    ne <= typemax(Int32) || throw(ArgumentError(
+        "$caller: segment count exceeds the Int32 topology limit"))
+    length(seg_tag) == ne || throw(ArgumentError(
+        "$caller: seg_tag length does not match the segment count"))
+    @inbounds for i in axes(coords, 2), d in 1:3
+        isfinite(coords[d, i]) || throw(ArgumentError(
+            "$caller: node $i has a non-finite coordinate"))
+    end
+    @inbounds for s in axes(seg3, 2)
+        tag = seg_tag[s]
+        tag >= 0 || throw(ArgumentError(
+            "$caller: segment $s has negative tag $tag"))
+        for k in 1:3
+            value = seg3[k, s]
+            1 <= value <= nn || throw(ArgumentError(
+                "$caller: segment $s references node $value outside 1:$nn"))
+            for j in 1:k-1
+                seg3[j, s] != value || throw(ArgumentError(
+                    "$caller: segment $s repeats node $value"))
+            end
+        end
+    end
+    ne == 0 && return nothing
+
+    linear = Mesh(coords; segs=Matrix(@view seg3[1:2, :]))
+    diagnostic = validate(linear)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: linear corner complex is invalid — " *
+        join(diagnostic.messages, "; ")))
+    edge_mid = Dict{Tuple{Int32,Int32},Int32}()
+    mid_edge = Dict{Int32,Tuple{Int32,Int32}}()
+    endpoints = Set{Int32}(@view seg3[1:2, :])
+    @inbounds for s in axes(seg3, 2)
+        a = seg3[1, s]
+        b = seg3[2, s]
+        key = minmax(a, b)
+        mid = seg3[3, s]
+        old = get(edge_mid, key, Int32(0))
+        (old == 0 || old == mid) || throw(ArgumentError(
+            "$caller: edge $key uses inconsistent mid-nodes $old and $mid"))
+        old_edge = get(mid_edge, mid, nothing)
+        (old_edge === nothing || old_edge == key) || throw(ArgumentError(
+            "$caller: mid-node $mid is reused by distinct edges $old_edge and $key"))
+        edge_mid[key] = mid
+        mid_edge[mid] = key
+    end
+    for mid in keys(mid_edge)
+        mid in endpoints && throw(ArgumentError(
+            "$caller: node $mid is used as both an endpoint and an edge mid-node"))
+    end
+    return nothing
+end
+
+function _require_p2seg_structure(p::P2SegMesh, caller::AbstractString)
+    _check_p2seg_arrays(p.coords, p.seg3, p.seg_tag, caller)
+    return nothing
+end
+
+nnodes(p::P2SegMesh) = size(p.coords, 2)
+nsegs(p::P2SegMesh) = size(p.seg3, 2)
+
+"""
+    p2_segmesh(m::Mesh;
+               max_nodes=typemax(Int32),
+               max_segs=typemax(Int32)) -> P2SegMesh
+
+Convert the linear segments of `m` to quadratic segments, sharing one
+correctly rounded Float64 mid-node per unique endpoint pair. Input segment
+tags are preserved; triangles and tetrahedra are not carried over.
+`max_nodes` and `max_segs` are nonnegative allocation limits bounded by
+`typemax(Int32)`.
+"""
+function p2_segmesh(m::Mesh;
+                    max_nodes=typemax(Int32),
+                    max_segs=typemax(Int32))
+    node_limit = _p2_limit(max_nodes, "max_nodes", "p2_segmesh")
+    seg_limit = _p2_limit(max_segs, "max_segs", "p2_segmesh")
+    diagnostic = validate(m)
+    diagnostic.ok || throw(ArgumentError(
+        "p2_segmesh: input mesh is invalid — " * join(diagnostic.messages, "; ")))
+    nn = nnodes(m)
+    ns = nsegs(m)
+    nn <= node_limit || throw(ArgumentError(
+        "p2_segmesh: $nn input nodes exceed max_nodes=$node_limit"))
+    ns <= seg_limit || throw(ArgumentError(
+        "p2_segmesh: $ns input segments exceed max_segs=$seg_limit"))
+    ns == 0 && return P2SegMesh(
+        m.coords, Matrix{Int32}(undef, 3, 0); seg_tag=m.seg_tag)
+
+    _p2_checked_mul(ns, sizeof(NTuple{2,Int32}), "edge-record byte", "p2_segmesh")
+    edges = Vector{NTuple{2,Int32}}()
+    edge_ids = Dict{NTuple{2,Int32},Int32}()
+    available_nodes = node_limit - nn
+    function register_edge(a::Int32, b::Int32)
+        edge = _p2_edge(a, b)
+        old = get(edge_ids, edge, Int32(0))
+        old != 0 && return old
+        length(edges) < available_nodes || throw(ArgumentError(
+            "p2_segmesh: quadratic output requires more than max_nodes=$node_limit"))
+        push!(edges, edge)
+        node_id = Int32(nn + length(edges))
+        edge_ids[edge] = node_id
+        return node_id
+    end
+    @inbounds for s in 1:ns
+        register_edge(m.segs[1, s], m.segs[2, s])
+    end
+
+    final_nodes = _p2_checked_add(nn, length(edges), "quadratic node", "p2_segmesh")
+    final_nodes <= typemax(Int32) || throw(ArgumentError(
+        "p2_segmesh: quadratic node count exceeds Int32 indexing"))
+    coordinate_entries = _p2_checked_mul(3, final_nodes, "coordinate entry", "p2_segmesh")
+    connectivity_entries = _p2_checked_mul(3, ns, "connectivity entry", "p2_segmesh")
+    _p2_checked_mul(coordinate_entries, sizeof(Float64), "coordinate byte", "p2_segmesh")
+    _p2_checked_mul(connectivity_entries, sizeof(Int32), "connectivity byte", "p2_segmesh")
+    _p2_checked_mul(ns, sizeof(Int32), "tag byte", "p2_segmesh")
+
+    coords = Matrix{Float64}(undef, 3, final_nodes)
+    @inbounds for i in 1:nn, d in 1:3
+        coords[d, i] = m.coords[d, i]
+    end
+    @inbounds for (index, edge) in pairs(edges)
+        a, b = edge
+        pa = node(m, a)
+        pb = node(m, b)
+        midpoint = (_midpoint_coordinate(pa[1], pb[1]),
+                    _midpoint_coordinate(pa[2], pb[2]),
+                    _midpoint_coordinate(pa[3], pb[3]))
+        all(isfinite, midpoint) || throw(ArgumentError(
+            "p2_segmesh: edge $edge has a non-finite midpoint"))
+        (midpoint != pa && midpoint != pb) || throw(ArgumentError(
+            "p2_segmesh: edge $edge midpoint is below Float64 coordinate resolution"))
+        output_node = nn + index
+        coords[1, output_node] = midpoint[1]
+        coords[2, output_node] = midpoint[2]
+        coords[3, output_node] = midpoint[3]
+    end
+
+    seg3 = Matrix{Int32}(undef, 3, ns)
+    @inbounds for s in 1:ns
+        seg3[1, s] = m.segs[1, s]
+        seg3[2, s] = m.segs[2, s]
+        seg3[3, s] = edge_ids[_p2_edge(m.segs[1, s], m.segs[2, s])]
+    end
+    return P2SegMesh(coords, seg3; seg_tag=m.seg_tag)
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# P2 segment validity — exact global degree-2 Bernstein certificate of the
+# squared speed g(ξ) = |∂x/∂ξ|² over ξ ∈ [-1,1] (Gmsh's line reference).
+# Type-8 shape functions: N1=ξ(ξ-1)/2, N2=ξ(ξ+1)/2, N3=1-ξ².  The velocity
+# v = ∂x/∂ξ is a degree-1 barycentric vector polynomial with coefficients
+# A = v(-1) = (-3x1 - x2 + 4x3)/2 and B = v(1) = (x1 + 3x2 - 4x3)/2, so g has
+# the three Bernstein coefficients A·A, A·B, B·B.  Positivity of every exact
+# coefficient proves |v| > 0 everywhere on the closed segment — the curved
+# element is an everywhere-regular parametrization.
+# ════════════════════════════════════════════════════════════════════════════════
+const _B2SEG_WEIGHT = (1, 2, 1)          # C(2,γ) for γ=(2,0),(1,1),(0,2)
+
+function _p2seg_bernstein_coeffs(coords, seg3, s::Integer)
+    C, exps = _integer_element_coords(coords, seg3, s, "segment")
+    A = Vector{BigInt}(undef, 3)
+    B = Vector{BigInt}(undef, 3)
+    @inbounds for d in 1:3
+        x1=C[d,1]; x2=C[d,2]; x3=C[d,3]
+        A[d] = -3x1 - x2 + 4x3          # 2·v(-1); the /2 is folded into fmin
+        B[d] = x1 + 3x2 - 4x3           # 2·v(1)
+    end
+    # With A,B above, |2v|² has Bernstein coefficients Σ_c A_c², 2·Σ_c A_cB_c,
+    # Σ_c B_c² times 2^(2e_c); fmin normalizes the shared exponent.
+    fmin = 2*min(exps[1], exps[2], exps[3])
+    T = zeros(BigInt, 3)
+    @inbounds for c in 1:3
+        shift = 2*exps[c] - fmin
+        T[1] += A[c]*A[c] << shift
+        T[2] += 2*A[c]*B[c] << shift    # ordered pairs (1,2) and (2,1)
+        T[3] += B[c]*B[c] << shift
+    end
+    return T, fmin
+end
+
+function _p2seg_bernstein_bound(coords, seg3, s::Integer)
+    T, fmin = _p2seg_bernstein_coeffs(coords, seg3, s)
+    mini = 1
+    @inbounds for i in 2:3
+        T[i]*_B2SEG_WEIGHT[mini] < T[mini]*_B2SEG_WEIGHT[i] && (mini = i)
+    end
+    # g = |v|² = |2v|²/4 — the Bernstein coefficient is (T/C(2,γ))·2^(fmin-2).
+    return all(>(0), T), T[mini], _B2SEG_WEIGHT[mini], fmin-2
+end
+
+"""
+    p2_seg_min_jacobian(p::P2SegMesh) -> Float64
+
+Minimum exact degree-2 Bernstein coefficient of the quadratic-segment squared
+speed `g = |∂x/∂ξ|²` over all elements, returned as `Float64`. It is a
+conservative global lower bound: `> 0` formally certifies every element is an
+everywhere-regular curve map over `ξ ∈ [-1,1]`; `≤ 0` means the mesh is not
+certified (and may stall or fold). For a straight-sided P2 segment this equals
+`(length/2)² > 0`.
+"""
+function p2_seg_min_jacobian(p::P2SegMesh)
+    _require_p2seg_structure(p, "p2_seg_min_jacobian")
+    nsegs(p) == 0 && return 0.0
+    mn = Inf
+    for s in 1:nsegs(p)
+        _, n, dn, e = _p2seg_bernstein_bound(p.coords, p.seg3, s)
+        d = _bound_float(n, dn, e)
+        d < mn && (mn = d)
+    end
+    return mn
+end
+
+@inline function _p2seg_grad(xi::Float64)
+    # dN/dξ on [-1,1]: N1=ξ(ξ-1)/2, N2=ξ(ξ+1)/2, N3=1-ξ².
+    return (xi - 0.5, xi + 0.5, -2.0*xi)
+end
+
+# g(ξ) = |∂x/∂ξ|² evaluated in Float64 at one reference point.
+function _p2seg_detJ2(coords, seg3, s::Integer, xi::Float64)
+    g = _p2seg_grad(xi)
+    vx=vy=vz=0.0
+    @inbounds for k in 1:3
+        v=seg3[k,s]
+        vx+=coords[1,v]*g[k]; vy+=coords[2,v]*g[k]; vz+=coords[3,v]*g[k]
+    end
+    return vx*vx+vy*vy+vz*vz
+end
+
+"""
+    p2_seg_length(p::P2SegMesh) -> Float64
+
+Total isoparametric length of a quadratic segment mesh, measured by a fixed
+order-16 Gauss rule on `ξ ∈ [-1,1]`. Every element first has to pass the exact
+global positive-speed certificate. The integrand `|∂x/∂ξ|` is a square root of
+a degree-2 polynomial, so the value is a high-order quadrature estimate, not
+an exact integral — use [`p2_seg_min_jacobian`](@ref) for the certified bound.
+For a straight-sided P2 segment this reduces to its linear endpoint-chord
+length.
+"""
+function p2_seg_length(p::P2SegMesh)
+    _require_p2seg_structure(p, "p2_seg_length")
+    nsegs(p) == 0 && return 0.0
+    points, weights = mesh_integration_points(1, "Gauss16")
+    nq = length(weights)
+    total = 0.0
+    @inbounds for s in 1:nsegs(p)
+        _p2seg_bernstein_bound(p.coords, p.seg3, s)[1] || throw(ArgumentError(
+            "p2_seg_length: segment $s lacks a global positive-speed certificate"))
+        element = 0.0
+        for q in 1:nq
+            g = _p2seg_detJ2(p.coords, p.seg3, s, points[3q-2])
+            g > 0 || throw(ArgumentError(
+                "p2_seg_length: segment $s has a nonpositive sampled squared speed"))
+            element += weights[q]*sqrt(g)
+        end
+        total += element
+    end
+    (isfinite(total) && total > 0) || throw(ArgumentError(
+        "p2_seg_length: total length is not representable as a positive Float64"))
+    return total
+end
+
+"""
+    validate(p::P2SegMesh) -> MeshDiagnostic
+
+Validate P2 curve storage, shared-edge ownership, the positive linear corner
+complex, and the exact global positive-speed certificate of every quadratic
+element.
+"""
+function validate(p::P2SegMesh)
+    try
+        _require_p2seg_structure(p, "P2SegMesh validation")
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OutOfMemoryError && rethrow()
+        err isa ArgumentError || rethrow()
+        return MeshDiagnostic(false, [sprint(showerror, err)])
+    end
+    uncertified = 0
+    @inbounds for s in 1:nsegs(p)
+        _p2seg_bernstein_bound(p.coords, p.seg3, s)[1] || (uncertified += 1)
+    end
+    messages = uncertified == 0 ? String[] :
+        ["$uncertified quadratic segments lack a global positive-speed certificate"]
+    return MeshDiagnostic(isempty(messages), messages)
+end
+
+"""
+    curve_to_curve!(p::P2SegMesh, project, on_curve; rtol=1e-6)
+
+Curve quadratic-segment mid-nodes onto a curve: `project(x,y,z)` snaps a point
+and `on_curve(x,y,z)` gates on the two endpoints. Any projection whose element
+loses the exact global positive-speed certificate is reverted, so the mesh
+never gains a folded element. Deterministic (segments processed in ascending
+mid-node id order). Returns the number of nodes actually moved by more than
+`rtol·bbox-diagonal`.
+"""
+function curve_to_curve!(p::P2SegMesh, project, on_curve; rtol=1e-6)
+    tolrel = _input_float(rtol, "curve_to_curve!: rtol")
+    (isfinite(tolrel) && tolrel >= 0) ||
+        throw(ArgumentError("curve_to_curve!: rtol must be finite and non-negative (got $rtol)"))
+    _require_p2seg_structure(p, "curve_to_curve!")
+    nsegs(p) == 0 && return 0
+    @inbounds for s in 1:nsegs(p)
+        _p2seg_bernstein_bound(p.coords,p.seg3,s)[1] ||
+            throw(ArgumentError("curve_to_curve!: input segment $s lacks a global positive-speed certificate"))
+    end
+    function onc(v::Integer)
+        q = @inbounds on_curve(p.coords[1,v], p.coords[2,v], p.coords[3,v])
+        q isa Bool || throw(ArgumentError("curve_to_curve!: on_curve must return Bool"))
+        return q
+    end
+    segs_of = Dict{Int32,Int32}()
+    @inbounds for s in 1:nsegs(p)
+        segs_of[p.seg3[3,s]] = Int32(s)
+    end
+    movetol = _scaled_bbox_diag(p.coords, tolrel)
+    ncurved = 0
+    originals = Vector{Tuple{Int32,NTuple{3,Float64}}}()
+    try
+        for mid in sort!(collect(keys(segs_of)))
+            s = segs_of[mid]
+            a = p.seg3[1,s]; b = p.seg3[2,s]
+            (onc(a) && onc(b)) || continue
+            old = @inbounds (p.coords[1,mid], p.coords[2,mid], p.coords[3,mid])
+            raw = project(old...)
+            q = _input_point3(raw, "curve_to_curve!: project result")
+            all(isfinite, q) || continue
+            push!(originals, (mid, old))
+            @inbounds begin
+                p.coords[1,mid]=q[1]
+                p.coords[2,mid]=q[2]
+                p.coords[3,mid]=q[3]
+            end
+            certified,_,_,_ = _p2seg_bernstein_bound(p.coords,p.seg3,s)
+            if certified
+                _moved_beyond(q, old, movetol) && (ncurved += 1)
+            else
+                @inbounds begin
+                    p.coords[1,mid]=old[1]
+                    p.coords[2,mid]=old[2]
+                    p.coords[3,mid]=old[3]
+                end
+            end
+        end
+    catch
+        for (mid, old) in Iterators.reverse(originals)
+            @inbounds begin
+                p.coords[1,mid]=old[1]
+                p.coords[2,mid]=old[2]
+                p.coords[3,mid]=old[3]
+            end
+        end
+        rethrow()
+    end
+    return ncurved
+end
+
+"""
+    write_msh_p2(path, p::P2SegMesh; seg_tag=p.seg_tag) -> path
+
+Write a quadratic segment mesh as Gmsh MSH v2.2 with 3-node (type-8) elements.
+The mesh's preserved tags are written by default. The destination is replaced
+atomically only after all storage, tags, and speed certificates have been
+validated.
+"""
+function write_msh_p2(path, p::P2SegMesh; seg_tag=p.seg_tag)
+    path isa AbstractString || throw(ArgumentError(
+        "write_msh_p2: path must be a string"))
+    isempty(path) && throw(ArgumentError("write_msh_p2: path must not be empty"))
+    seg_tag isa AbstractVector || throw(ArgumentError(
+        "write_msh_p2: seg_tag must be a vector"))
+    length(seg_tag) == nsegs(p) || throw(ArgumentError("write_msh_p2: seg_tag length mismatch"))
+    tags=Vector{Int32}(undef,nsegs(p))
+    @inbounds for s in 1:nsegs(p)
+        tag=seg_tag[s]
+        (tag isa Integer && !(tag isa Bool)) || throw(ArgumentError(
+            "write_msh_p2: seg tag $s must be an integer other than Bool"))
+        0<=tag<=typemax(Int32) ||
+            throw(ArgumentError("write_msh_p2: seg tag $tag must be non-negative and fit Int32"))
+        tags[s]=Int32(tag)
+    end
+    _require_p2seg_structure(p, "write_msh_p2")
+    @inbounds for s in 1:nsegs(p)
+        ok,_,_,_=_p2seg_bernstein_bound(p.coords,p.seg3,s)
+        ok || throw(ArgumentError("write_msh_p2: segment $s lacks a global positive-speed certificate"))
+    end
+    target=abspath(path);parent=dirname(target)
+    isdir(parent) || throw(ArgumentError("write_msh_p2: parent directory does not exist: $parent"))
+    isdir(target) && throw(ArgumentError(
+        "write_msh_p2: destination is a directory: $target"))
+    mktemp(parent) do tmp,io
+        println(io, "\$MeshFormat"); println(io, "2.2 0 8"); println(io, "\$EndMeshFormat")
+        println(io, "\$Nodes"); println(io, nnodes(p))
+        @inbounds for i in 1:nnodes(p)
+            @printf(io, "%d %.17g %.17g %.17g\n", i, p.coords[1,i], p.coords[2,i], p.coords[3,i])
+        end
+        println(io, "\$EndNodes")
+        println(io, "\$Elements"); println(io, nsegs(p))
+        @inbounds for s in 1:nsegs(p)
+            tag = tags[s]
+            print(io, s, " 8 2 ", tag, " ", tag)
+            for k in 1:3; print(io, " ", p.seg3[k,s]); end
             println(io)
         end
         println(io, "\$EndElements")

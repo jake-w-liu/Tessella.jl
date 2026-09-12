@@ -134,9 +134,11 @@ using .Mesh3D: tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, 
 using .RecoverCDT: recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt
 using .Optimize: smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, mesh_quality
 using .Heal: is_meshable
-using .HighOrder: P2Mesh, P2TriMesh, p2_tetmesh, p2_trimesh, p2_volume,
-                  p2_tri_area, write_msh_p2, curve_to_cylinder!,
-                  curve_to_surface!, p2_min_jacobian, p2_tri_min_jacobian
+using .HighOrder: P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh,
+                  p2_trimesh, p2_seg_length, p2_volume, p2_tri_area,
+                  write_msh_p2, curve_to_curve!, curve_to_cylinder!,
+                  curve_to_surface!, p2_min_jacobian, p2_seg_min_jacobian,
+                  p2_tri_min_jacobian
 
 # Install Mesh3D's exact-recovery extension only after both modules and their
 # public types are available, avoiding a Mesh3D ↔ RecoverCDT include cycle.
@@ -186,9 +188,10 @@ export MathEvalField, MathEvalAnisoField, GradientField, LaplacianField, MeanFie
        AutomaticMeshSizeField, ExternalProcessField
 export build_geo_size_field, build_geo_boundary_layer_fields
 export tetrahedralize, tetrahedralize_multi, tetrahedralize_conforming, tetrahedralize_conforming_exact, tets_per_region, mesh_box, mesh_box_regions, BoxRegion, recover_boundary, recover_boundary_cdt, recover_partition_cdt, mesh_sized_cdt, mesh_boolean, mesh_sized_conforming, mesh_cylinder, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers
-export P2Mesh, P2TriMesh, p2_tetmesh, p2_trimesh, p2_volume, p2_tri_area,
-       write_msh_p2, curve_to_cylinder!, curve_to_surface!,
-       p2_min_jacobian, p2_tri_min_jacobian
+export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
+       p2_seg_length, p2_volume, p2_tri_area,
+       write_msh_p2, curve_to_curve!, curve_to_cylinder!, curve_to_surface!,
+       p2_min_jacobian, p2_seg_min_jacobian, p2_tri_min_jacobian
 
 """
     stage() -> Int
