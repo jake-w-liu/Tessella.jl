@@ -590,8 +590,10 @@ const _OWNED_MIXED_PERIODIC_LINK=_OwnedMixedPeriodicLink()
 Owned periodic-entity metadata for a mixed mesh. `slave_nodes[i]` corresponds to
 `master_nodes[i]`; both arrays contain Tessella's compact internal node indices.
 `affine` is `nothing` or a finite nonsingular 4×4 affine transform supplied as a
-matrix or as 16 entries in Gmsh row-major order. Dimensions 0, 1, and 2 match the
-entity dimensions supported by Gmsh periodic meshes.
+matrix or as 16 entries in Gmsh row-major order. Dimensions 0 through 3 match the
+entity dimensions the MSH periodic grammar carries. Gmsh 4.15.2 itself only emits
+dimensions 0, 1, and 2 — volume links read from other writers round trip
+structurally.
 """
 struct MixedPeriodicLink
     dim::Int
@@ -617,8 +619,8 @@ function MixedPeriodicLink(dim::Integer,slave_entity::Integer,
         err isa InterruptException && rethrow()
         throw(ArgumentError("MixedPeriodicLink: dimension is outside Int bounds"))
     end
-    0<=dimension<=2 || throw(ArgumentError(
-        "MixedPeriodicLink: dimension $dimension is outside 0:2"))
+    0<=dimension<=3 || throw(ArgumentError(
+        "MixedPeriodicLink: dimension $dimension is outside 0:3"))
     slave=_mixed_positive_int32(
         slave_entity,"MixedPeriodicLink: slave entity tag")
     master=_mixed_positive_int32(
@@ -1544,8 +1546,8 @@ function _assert_mixed_periodic_links(m::MixedMesh,context::AbstractString)
     seen_slaves=Set{Tuple{Int,Int}}()
     total_pairs=0
     for (index,link) in pairs(m.periodic_links)
-        0<=link.dim<=2 || throw(ArgumentError(
-            "$context: periodic link $index dimension $(link.dim) is outside 0:2"))
+        0<=link.dim<=3 || throw(ArgumentError(
+            "$context: periodic link $index dimension $(link.dim) is outside 0:3"))
         link.slave_entity>0 || throw(ArgumentError(
             "$context: periodic link $index has a non-positive slave entity"))
         link.master_entity>0 || throw(ArgumentError(
@@ -4873,8 +4875,8 @@ end
 function _append_mixed_periodic_link!(acc,limits,dim::Int,slave::Int,
                                       master::Int,affine,slave_tags,master_tags,
                                       is_v4::Bool)
-    0<=dim<=2 || throw(ArgumentError(
-        "read_mixed_msh: periodic entity dimension $dim is outside 0:2"))
+    0<=dim<=3 || throw(ArgumentError(
+        "read_mixed_msh: periodic entity dimension $dim is outside 0:3"))
     1<=slave<=typemax(Int32) || throw(ArgumentError(
         "read_mixed_msh: periodic slave entity tag must be positive and fit Int32"))
     1<=master<=typemax(Int32) || throw(ArgumentError(

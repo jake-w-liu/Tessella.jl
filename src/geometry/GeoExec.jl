@@ -6,8 +6,9 @@ Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersec
 Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
 Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
-Translate/Rotate/Affine periodic straight curves or explicit-volume planar boundary
-surfaces with reusable masters and acyclic dependency chains. `MeshSize` and
+Translate/Rotate/Affine periodic straight curves, explicit-volume planar boundary
+surfaces, or stored mesh-inert volume relations with reusable masters and acyclic
+dependency chains. `MeshSize` and
 `Characteristic Length` update existing explicit Point constraints directly or
 through recursive `PointsOf` boundaries of explicit Point/Curve/Surface/Volume
 entities. Physical declarations accept an explicit tag, with an optional name, or
@@ -149,9 +150,11 @@ indexed or selected mutation. Entity-list positions expand whole or selected lis
 variables as well as constant ranges. Tags
 follow Gmsh's truncation toward zero into positive 32-bit values; oriented Curve and
 Surface Loop entries may instead be nonzero signed 32-bit values. `Periodic Line`,
-`Periodic Curve`, and `Periodic Surface` accept `Translate`, `Rotate`, and
+`Periodic Curve`, `Periodic Surface`, and `Periodic Volume` accept `Translate`,
+`Rotate`, and
 12- or 16-entry `.geo` `Affine` transforms. Curves must be straight and surfaces
-must be planar boundaries of one explicit volume. Multiple periodic statements may
+must be planar boundaries of one explicit volume; volume relations are stored
+but mesh-inert, as in Gmsh 4.15.2. Multiple periodic statements may
 reuse a master or form an acyclic master/slave chain. Read-only `newp`, the shared
 curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the
 tracked explicit topology and supported full Box/Cylinder/Sphere/Cone primitives.
@@ -553,12 +556,13 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
         "execute_geo: malformed periodic statement $line"))
     entity_name=entity.captures[1]
     dim=entity_name in ("Line","Curve") ? 1 : entity_name=="Surface" ? 2 :
+        entity_name=="Volume" ? 3 :
         throw(ArgumentError(
-            "execute_geo: only straight Line/Curve and planar Surface " *
+            "execute_geo: only Line/Curve, Surface, and Volume " *
             "periodicity is implemented"))
-    caller="execute_geo: Periodic $(dim==1 ? "Curve" : "Surface")"
+    caller="execute_geo: Periodic $(dim==1 ? "Curve" : dim==2 ? "Surface" : "Volume")"
     statement=match(
-        r"^Periodic\s+(?:Line|Curve|Surface)\s*\{\s*([^}]*)\s*\}\s*=\s*\{\s*([^}]*)\s*\}\s*(.*?)\s*;$",
+        r"^Periodic\s+(?:Line|Curve|Surface|Volume)\s*\{\s*([^}]*)\s*\}\s*=\s*\{\s*([^}]*)\s*\}\s*(.*?)\s*;$",
         line)
     statement===nothing && throw(ArgumentError(
         "$caller: malformed periodic statement $line"))

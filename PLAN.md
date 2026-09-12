@@ -477,7 +477,9 @@ validates and exactly snaps an explicit one-to-one translated node pairing;
 certifies any finite nonsingular affine pairing with exact-dyadic cancellation
 fallbacks. Both preserve node numbering, connectivity, and tags; the caller retains
 the pair map and transformation. `MixedPeriodicLink` provides an owned persistent
-representation of 0-D/1-D/2-D entity transforms and compact node pairs. MSH2
+representation of 0-D through 3-D entity transforms and compact node pairs;
+Gmsh 4.15.2 itself only emits dimensions 0, 1, and 2, while dimension-3 records
+from other writers round trip structurally. MSH2
 retains aligned elementary-entity tags and its standard ASCII periodic section in
 both file modes; MSH4 uses its ASCII or native-endian binary section, with
 opposite-endian binary input decoded under cumulative resource limits. The CRC
@@ -487,11 +489,16 @@ relations may meet at corners. Planar surface meshing synchronizes boundary or
 embedded curve subdivisions across each dependency graph through bounded remeshing
 and exposes the certified node map through
 the direct and session APIs. Bounded `.geo` execution accepts expression/list-backed
-`Periodic Line`, `Periodic Curve`, and `Periodic Surface` `Translate`, `Rotate`,
+`Periodic Line`, `Periodic Curve`, `Periodic Surface`, and `Periodic Volume`
+`Translate`, `Rotate`,
 and 12- or 16-entry `Affine` transforms plus constant ranges and numeric list
 variables in entity sets. Planar periodic
 surface pairs require disjoint, affine-equivalent boundary and embedded topology on
-one explicit volume. Volume meshing copies each master's facet topology to its slave
+one explicit volume. Periodic volume relations are stored, reported, and carried
+through retag/removal lifecycle but remain mesh-inert — matching Gmsh 4.15.2,
+which accepts `setPeriodic(3)` yet constrains interiors only through periodic
+boundary entities and never serializes a dimension-3 record. Volume meshing
+copies each master's facet topology to its slave
 and certifies the resulting tetrahedron-boundary node map. `model_to_mixed` projects
 a native planar triangle mesh into point,
 boundary/embedded-line, and triangle blocks with MSH2 elementary ownership and MSH4
@@ -522,7 +529,7 @@ curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, cyclic
 periodic-curve dependency graphs, curved or non-boundary periodic surfaces,
-periodic volume entities, or allocator reads after topology-changing or untracked
+or allocator reads after topology-changing or untracked
 declarations. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell
 and global fill volume identities and an interface tiling gate; its core engine

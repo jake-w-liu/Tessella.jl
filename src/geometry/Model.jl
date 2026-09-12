@@ -364,6 +364,7 @@ include("ModelEntityEvaluation.jl")
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
     dim==2 && return "Surface"
+    dim==3 && return "Volume"
     return "Entity($dim)"
 end
 
@@ -556,22 +557,25 @@ end
                   atol=1e-12)
 
 Persist affine relations between equally sized lists of straight native curves
-(`dim=1`) or planar native surfaces (`dim=2`). `affine` maps each master entity
-to its slave in Gmsh row-major 4×4 order. An entity may be the master of multiple
-relations or both a slave and a master in an acyclic dependency chain; each
-slave has exactly one master. Cycles are explicit blockers. Periodic curves must
-belong to the same planar surface when meshed. Periodic surfaces require
-disjoint, affine-equivalent boundary point and loop topology; embedded topology
-is rechecked when an explicit planar-shell volume is meshed. Volume periodicity
-remains an explicit blocker. The update is atomic.
+(`dim=1`), planar native surfaces (`dim=2`), or native volumes (`dim=3`).
+`affine` maps each master entity to its slave in Gmsh row-major 4×4 order. An
+entity may be the master of multiple relations or both a slave and a master in
+an acyclic dependency chain; each slave has exactly one master. Cycles are
+explicit blockers. Periodic curves must belong to the same planar surface when
+meshed. Periodic surfaces require disjoint, affine-equivalent boundary point and
+loop topology; embedded topology is rechecked when an explicit planar-shell
+volume is meshed. Periodic volumes are stored and reported as in Gmsh 4.15.2,
+where the relation is likewise accepted without constraining the interior mesh
+or adding periodic records — volume correspondence is carried entirely by the
+periodic boundary entities. The update is atomic.
 """
 function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                        atol=1e-12)
     caller="set_periodic!"
     d=_dimension(dim,caller)
-    d in (1,2) || throw(ArgumentError(
-        "$caller: only straight Curve and planar Surface periodicity " *
-        "(dimensions 1 and 2) are implemented"))
+    d in (1,2,3) || throw(ArgumentError(
+        "$caller: only Curve, Surface, and Volume periodicity " *
+        "(dimensions 1, 2, and 3) are implemented"))
     label=_model_periodic_entity_label(d)
     slaves=_periodic_entity_tags(slave_entities,d,caller,"slave")
     masters=_periodic_entity_tags(master_entities,d,caller,"master")
@@ -590,7 +594,7 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
         affine,caller;name="affine transform")
     pending=ModelPeriodicConstraint[]
     for (pair_index,(slave,master)) in enumerate(zip(slaves,masters))
-        entities=d==1 ? m.curves : m.surfaces
+        entities=d==1 ? m.curves : d==2 ? m.surfaces : m.volumes
         haskey(entities,slave) || throw(ArgumentError(
             "$caller: unknown slave $label[$slave]"))
         haskey(entities,master) || throw(ArgumentError(
@@ -623,7 +627,7 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                 "$caller: affine map misses slave Curve[$slave] endpoints " *
                 "by $mismatch"))
             reversed=reverse_error<forward
-        else
+        elseif d==2
             _model_periodic_surface_point_map(
                 m,slave,master,row_major,tolerance,caller;
                 include_embeddings=false)
@@ -1780,6 +1784,9 @@ function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
         m,mesh,constraint)
     constraint.dim==2 && return _model_periodic_surface_nodes(
         m,mesh,constraint)
+    constraint.dim==3 && return (
+        master_entity=Int(constraint.master_entity),
+        slave_nodes=Int32[],master_nodes=Int32[],affine=constraint.affine)
     throw(ArgumentError(
         "model_periodic_nodes: unsupported periodic dimension $(constraint.dim)"))
 end
@@ -1832,7 +1839,10 @@ Return the master entity, compact slave/master node arrays, and affine transform
 for one meshed curve or planar boundary-surface relation as a named tuple. Curve
 relations require a synchronized boundary or embedded discretization produced by
 [`mesh_model_surface`](@ref). Surface relations require a tetrahedron mesh of an
-explicit planar-shell volume produced by [`mesh_model_volume`](@ref).
+explicit planar-shell volume produced by [`mesh_model_volume`](@ref). Volume
+relations return empty node arrays with the stored master and affine: as in
+Gmsh 4.15.2, volume periodicity is mesh-inert and carries no node
+correspondence.
 """
 function model_periodic_nodes(m::GeoModel,mesh::Mesh,dim,slave_entity)
     caller="model_periodic_nodes"
@@ -3727,6 +3737,8 @@ function _model_volume_periodic_surface_constraints(
                     "$caller: periodic Surface[$slave]/Surface[$master] must " *
                     "pair boundary surfaces of explicit Volume[$volume]"))
             push!(constraints,constraint)
+        elseif constraint.dim==3
+            continue
         else
             throw(ArgumentError(
                 "$caller: unsupported periodic dimension $(constraint.dim)"))

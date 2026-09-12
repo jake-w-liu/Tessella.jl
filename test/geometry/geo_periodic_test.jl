@@ -349,3 +349,58 @@ end
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
+
+function _periodic_geo_cube(offset::Int,shift::Float64)
+    return """
+        Point($(offset+1)) = {$shift, 0, 0, 1}; Point($(offset+2)) = {$(shift+1), 0, 0, 1};
+        Point($(offset+3)) = {$(shift+1), 1, 0, 1}; Point($(offset+4)) = {$shift, 1, 0, 1};
+        Point($(offset+5)) = {$shift, 0, 1, 1}; Point($(offset+6)) = {$(shift+1), 0, 1, 1};
+        Point($(offset+7)) = {$(shift+1), 1, 1, 1}; Point($(offset+8)) = {$shift, 1, 1, 1};
+        Line($(offset+1)) = {$(offset+1), $(offset+2)}; Line($(offset+2)) = {$(offset+2), $(offset+3)};
+        Line($(offset+3)) = {$(offset+3), $(offset+4)}; Line($(offset+4)) = {$(offset+4), $(offset+1)};
+        Line($(offset+5)) = {$(offset+5), $(offset+6)}; Line($(offset+6)) = {$(offset+6), $(offset+7)};
+        Line($(offset+7)) = {$(offset+7), $(offset+8)}; Line($(offset+8)) = {$(offset+8), $(offset+5)};
+        Line($(offset+9)) = {$(offset+1), $(offset+5)}; Line($(offset+10)) = {$(offset+2), $(offset+6)};
+        Line($(offset+11)) = {$(offset+3), $(offset+7)}; Line($(offset+12)) = {$(offset+4), $(offset+8)};
+        Curve Loop($(offset+1)) = {$(offset+1), $(offset+2), $(offset+3), $(offset+4)};
+        Curve Loop($(offset+2)) = {$(offset+5), $(offset+6), $(offset+7), $(offset+8)};
+        Curve Loop($(offset+3)) = {$(offset+1), $(offset+10), -$(offset+5), -$(offset+9)};
+        Curve Loop($(offset+4)) = {$(offset+2), $(offset+11), -$(offset+6), -$(offset+10)};
+        Curve Loop($(offset+5)) = {$(offset+3), $(offset+12), -$(offset+7), -$(offset+11)};
+        Curve Loop($(offset+6)) = {$(offset+4), $(offset+9), -$(offset+8), -$(offset+12)};
+        Plane Surface($(offset+1)) = {$(offset+1)}; Plane Surface($(offset+2)) = {$(offset+2)};
+        Plane Surface($(offset+3)) = {$(offset+3)}; Plane Surface($(offset+4)) = {$(offset+4)};
+        Plane Surface($(offset+5)) = {$(offset+5)}; Plane Surface($(offset+6)) = {$(offset+6)};
+        Surface Loop($(offset+7)) = {$(offset+1), $(offset+2), $(offset+3),
+                               $(offset+4), $(offset+5), $(offset+6)};
+        """
+end
+
+@testset "bounded .geo periodic volume storage" begin
+    source=_periodic_geo_cube(0,0.0)*"\n"*_periodic_geo_cube(100,2.0)*"""
+        Volume(1) = {7}; Volume(2) = {107};
+        Periodic Volume {2} = {1} Translate {2, 0, 0};
+        """
+    built=_execute_geo_source(source)
+    constraint=only(model_periodic_constraints(built.model))
+    @test constraint.dim==3
+    @test constraint.slave_entity==2 && constraint.master_entity==1
+    @test constraint.affine[4]==2.0
+
+    affine=_execute_geo_source(
+        replace(source,"Translate {2, 0, 0}"=>
+            "Affine {1,0,0,2, 0,1,0,0, 0,0,1,0, 0,0,0,1}"))
+    @test only(model_periodic_constraints(affine.model)).affine[4]==2.0
+
+    @test_throws ArgumentError _execute_geo_source(
+        replace(source,"{2} = {1}"=>"{2} = {9}"))
+    @test_throws ArgumentError _execute_geo_source(
+        replace(source,"{2} = {1}"=>"{9} = {1}"))
+    @test_throws ArgumentError _execute_geo_source(
+        replace(source,"{2} = {1}"=>"{2} = {2}"))
+    @test_throws ArgumentError _execute_geo_source(
+        _periodic_geo_square("Periodic Volume {1} = {1} Translate {1,0,0};"))
+    @test_throws ArgumentError _execute_geo_source(
+        replace(source,"{2} = {1}"=>"{2} = {1}",count=1)*
+        "Periodic Volume {1} = {2} Translate {-2,0,0};")
+end

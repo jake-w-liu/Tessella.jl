@@ -65,8 +65,9 @@ meshes include their supported classified entity, cell, and node records, includ
 nested point/curve constraints on an embedded sheet and explicit volume boundaries.
 Periodic `-2` output retains periodic-curve graphs with reused masters and acyclic
 chains. Periodic `-3` output supports planar boundary-surface relations on one
-explicit volume shell and retains their induced point/curve relations. General
-periodic volume entities and independent periodic curves in volumes remain blocked.
+explicit volume shell and retains their induced point/curve relations. Stored
+periodic volume relations are mesh-inert and unserialized, matching Gmsh 4.15.2.
+Independent periodic curves in volumes remain blocked.
 Duplicate or conflicting flags, multiple inputs, ignored output arguments, and any
 output that aliases the input are rejected.
 """
@@ -134,11 +135,14 @@ function main(args::AbstractVector{<:AbstractString})
             projected_relations=Set(
                 (link.dim,Int(link.slave_entity),Int(link.master_entity))
                 for link in projected.periodic_links)
+            # Stored volume relations are mesh-inert and never serialize into
+            # $Periodic, matching Gmsh 4.15.2, so they are not projected.
             missing_relations=sort!([
                 (constraint.dim,Int(constraint.slave_entity),
                  Int(constraint.master_entity))
                 for constraint in constraints
-                if !((constraint.dim,Int(constraint.slave_entity),
+                if constraint.dim!=3 &&
+                   !((constraint.dim,Int(constraint.slave_entity),
                       Int(constraint.master_entity)) in projected_relations)])
             isempty(missing_relations) || throw(ArgumentError(
                 "tessella: selected $entity_name projection omits periodic " *
