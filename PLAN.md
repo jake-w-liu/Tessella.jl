@@ -329,7 +329,8 @@ fixed-node types absent from the simplex cache return empty blocks. A nonnegativ
 stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities
 fail explicitly. `get_element` resolves one dense element tag to its type,
-connectivity, and owning entity. `get_nodes` reparametrizes every returned node
+connectivity, and owning entity, and `get_node` resolves one dense node tag to
+its coordinates, owning entity, and owner-parametrized coordinates. `get_nodes` reparametrizes every returned node
 on the queried Line or Plane entity — one `u` or `(u, v)` per node — while
 Points, Volumes, and all-dimension queries emit no parameters, matching Gmsh
 4.15.2's unparametrized cases; `get_nodes_by_element_type` packs each repeated

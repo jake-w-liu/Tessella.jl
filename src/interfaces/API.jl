@@ -1629,6 +1629,24 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
     end
 end
 
+function _get_node(node_tag)
+    caller="API.mesh.get_node"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_integer(node_tag,caller,"node_tag")
+        (tag>=1 && tag<=nnodes(cached)) || throw(ArgumentError(
+            "$caller: unknown node $tag"))
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: node ownership requires mesh classification " *
+            "metadata; generate a mesh so the cache owns entity ownership"))
+        dimension,entity=class.node_entities[tag]
+        parameters=_mesh_entity_parameters(
+            _model_locked(),cached,dimension,Int(entity),[tag])
+        return cached.coords[:,tag],parameters,dimension,Int(entity)
+    end
+end
+
 function _get_elements(dim=-1,tag=-1)
     caller="API.mesh.get_elements"
     return lock(STATE_LOCK) do
@@ -2064,7 +2082,7 @@ end
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_get_nodes,_get_elements,_get_element,
+using ..API: _generate,_get_mesh,_get_nodes,_get_node,_get_elements,_get_element,
              _get_element_types,
              _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
              _get_element_edge_nodes,_get_element_face_nodes,
@@ -2104,6 +2122,19 @@ empty parametric vector.
 """
 get_nodes(dim=-1,tag=-1,include_boundary=false,return_parametric_coord=true)=
     _get_nodes(dim,tag,include_boundary,return_parametric_coord)
+
+"""
+    get_node(node_tag)
+
+Return `(coordinates, parametric_coordinates, entity_dimension, entity_tag)`
+for one dense cached node tag, matching Gmsh 4.15.2's `getNode` result order.
+Coordinates are a detached 3-vector; parametric coordinates are the node's
+parameters on its owning entity — one `u` for a Line owner, `(u, v)` for a
+Plane owner, and none for Point or Volume owners. The entity fields come from
+the classification snapshot built when the mesh was generated; unknown tags
+and caches without classification fail explicitly.
+"""
+get_node(node_tag)=_get_node(node_tag)
 
 """
     get_elements(dim=-1, tag=-1)

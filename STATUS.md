@@ -358,7 +358,9 @@ with the cache:
   global.
 - `get_element` resolves a dense element tag to `(element_type, node_tags,
   entity_dimension, entity_tag)` in Gmsh's result order; out-of-range tags and
-  caches without classification fail explicitly.
+  caches without classification fail explicitly. `get_node` likewise resolves a
+  dense node tag to `(coordinates, parametric_coordinates, entity_dimension,
+  entity_tag)`, reparametrizing the node on its owning entity.
 - Entity-selective `clear`, `affine_transform`, `create_edges`, and
   `create_faces` operate on classified nodes and cells; entities owning no
   cache cells no-op. Primitive `add_box` models expose no boundary entities, so
@@ -366,8 +368,8 @@ with the cache:
 - The mesh-data differential now generates the same square in both engines and
   checks own-node-first ordering, transitive boundary closure against a
   recursive `getBoundary` walk, filtered type funnels, filtered task unions,
-  `get_element` parity, and unknown/phantom-entity rejection:
-  `entity_filtered=tris(4, 26)`.
+  `get_element` parity, `get_node` ownership/parametrization parity, and
+  unknown/phantom-entity rejection: `entity_filtered=tris(4, 26)`.
 - Focused bounds-checked suites: mesh-data 345/345 (including the new
   66-assertion entity-filtered testset), Jacobian 64/64, and function-space
   126/126. The complete bounds-checked package gate passed 212,533/212,533
