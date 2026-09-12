@@ -2042,12 +2042,14 @@ set_size(dim_tags,size)=_set_size(dim_tags,size)
 """
     set_periodic(dim, slave_entities, master_entities, affine; atol=1e-12)
 
-Store validated straight-curve (`dim=1`) or planar-surface (`dim=2`) relations in
+Store validated straight-curve (`dim=1`), planar-surface (`dim=2`), or volume
+(`dim=3`) relations in
 the active model and invalidate any cached mesh. `affine` maps each master entity
 to its corresponding slave in Gmsh row-major 4×4 order. Each slave has one master;
 masters may be reused, and a slave may become a master in an acyclic dependency
 chain. Curves must share a planar surface when meshed. Surfaces must be
-affine-equivalent boundaries of one explicit planar-shell volume.
+affine-equivalent boundaries of one explicit planar-shell volume. Volume
+relations are stored and reported but mesh-inert, as in Gmsh 4.15.2.
 """
 set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     _set_periodic(dim,slave_entities,master_entities,affine;atol=atol)
@@ -2056,7 +2058,8 @@ set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)=
     get_periodic_nodes(dim, slave_entity)
 
 Return the master entity, detached slave/master node arrays, and affine transform
-for one curve or planar boundary-surface relation in the cached mesh.
+for one curve or planar boundary-surface relation in the cached mesh. Stored
+volume relations return the master and affine with empty node arrays.
 """
 get_periodic_nodes(dim,slave_entity)=
     _get_periodic_nodes(dim,slave_entity)

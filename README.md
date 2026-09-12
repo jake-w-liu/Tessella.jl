@@ -172,8 +172,9 @@ require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
 topology record for signed boundaries or embedding relations. Native model periodicity
-covers straight-curve pairs on one planar triangle-meshed surface and disjoint
-affine-equivalent planar boundary surfaces of one explicit surface-loop volume. Each
+covers straight-curve pairs on one planar triangle-meshed surface, disjoint
+affine-equivalent planar boundary surfaces of one explicit surface-loop volume,
+and stored mesh-inert volume relations. Each
 slave has one master; curve masters may be reused, a curve slave may become a master
 in an acyclic chain, and independent relations may share corner points. The bounded
 `.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
@@ -394,9 +395,13 @@ while special records without nodal properties fail explicitly.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
-It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
-`Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Cyclic curve
-dependencies, curved or non-boundary periodic surfaces, periodic volume entities,
+It accepts `Periodic Line`, `Periodic Curve`, `Periodic Surface`, and
+`Periodic Volume` with
+`Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Volume relations
+are stored and reported but mesh-inert — matching Gmsh 4.15.2, which likewise
+constrains interiors only through periodic boundary entities and serializes no
+dimension-3 record. Cyclic curve
+dependencies, curved or non-boundary periodic surfaces,
 and allocator reads after topology-changing or untracked declarations remain
 pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:

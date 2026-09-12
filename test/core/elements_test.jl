@@ -2915,7 +2915,9 @@ end
 
     identity=Matrix{Float64}(I,4,4)
     @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
-        3,2,1,[1],[2];affine=identity)
+        4,2,1,[1],[2];affine=identity)
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        -1,2,1,[1],[2];affine=identity)
     @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
         true,2,1,[1],[2];affine=identity)
     @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
@@ -2944,6 +2946,88 @@ end
         1,2,1,[4],[1];affine=identity)
     out_of_range.slave_nodes[1]=99
     @test_throws ArgumentError periodic_v4_fixture(links=[out_of_range])
+end
+
+function periodic_volume_fixture(;links)
+    coordinates=Float64[0 1 0 0 2 3 2 2;
+                        0 0 1 0 0 0 1 0;
+                        0 0 0 1 0 0 0 1]
+    blocks=Any[
+        ElementsUnderTest.ElementBlock(
+            4,reshape(Int32[1,2,3,4],4,1),zeros(Int32,1)),
+        ElementsUnderTest.ElementBlock(
+            4,reshape(Int32[5,6,7,8],4,1),zeros(Int32,1)),
+    ]
+    entities=Dict{Tuple{Int,Int},ElementsUnderTest.MixedEntity}(
+        (3,1)=>ElementsUnderTest.MixedEntity(
+            3,1,(0.0,0.0,0.0,1.0,1.0,1.0)),
+        (3,2)=>ElementsUnderTest.MixedEntity(
+            3,2,(2.0,0.0,0.0,3.0,1.0,1.0)),
+    )
+    data=ElementsUnderTest.MixedEntityData(entities;
+        node_entities=[(3,Int32(1)),(3,Int32(1)),(3,Int32(1)),(3,Int32(1)),
+                       (3,Int32(2)),(3,Int32(2)),(3,Int32(2)),(3,Int32(2))],
+        node_parametric=fill(nothing,8),
+        external_node_tags=UInt64[11,12,13,14,21,22,23,24],
+        block_entities=[Int32[1],Int32[2]],
+        external_element_tags=[UInt64[101],UInt64[201]])
+    return ElementsUnderTest.MixedMesh(
+        coordinates,blocks;entity_data=data,periodic_links=links)
+end
+
+@testset "periodic volume entity links" begin
+    translation=(1.0,0.0,0.0,2.0,
+                 0.0,1.0,0.0,0.0,
+                 0.0,0.0,1.0,0.0,
+                 0.0,0.0,0.0,1.0)
+    link=ElementsUnderTest.MixedPeriodicLink(
+        3,2,1,Int32[5,6,7,8],Int32[1,2,3,4];affine=translation)
+    @test link.dim==3
+    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
+        3,2,2,Int32[5],Int32[5];affine=translation)
+    mesh=periodic_volume_fixture(links=[link])
+    @test ElementsUnderTest.validate(mesh).ok
+    crc=ElementsUnderTest.mixed_crc(mesh).sha
+
+    directory=mktempdir()
+    for binary in (false,true)
+        path=joinpath(directory,"periodic-volume-$binary.msh")
+        ElementsUnderTest.write_mixed_msh(path,mesh;version=4.1,binary)
+        back=ElementsUnderTest.read_mixed_msh(path)
+        @test ElementsUnderTest.validate(back).ok
+        @test ElementsUnderTest.mixed_crc(back).sha==crc
+        volume_link=only(back.periodic_links)
+        @test volume_link.dim==3
+        @test volume_link.slave_entity==2 && volume_link.master_entity==1
+        @test volume_link.slave_nodes==Int32[5,6,7,8]
+        @test volume_link.affine==link.affine
+        if !binary
+            @test occursin("\n3 2 1\n",read(path,String))
+        end
+        # Gmsh 4.15.2 tolerates dimension-3 periodic records on input even
+        # though it never emits them.
+        ok,output=gmsh_check(path)
+        @test ok
+        @test !occursin("Error",output)
+    end
+
+    empty_link=ElementsUnderTest.MixedPeriodicLink(
+        3,2,1,Int32[],Int32[];affine=translation)
+    empty_mesh=periodic_volume_fixture(links=[empty_link])
+    @test ElementsUnderTest.validate(empty_mesh).ok
+    empty_path=joinpath(directory,"periodic-volume-empty.msh")
+    ElementsUnderTest.write_mixed_msh(empty_path,empty_mesh;version=4.1)
+    empty_back=ElementsUnderTest.read_mixed_msh(empty_path)
+    @test only(empty_back.periodic_links).dim==3
+    @test isempty(only(empty_back.periodic_links).slave_nodes)
+
+    undeclared=joinpath(directory,"periodic-volume-undeclared.msh")
+    text=read(joinpath(directory,"periodic-volume-false.msh"),String)
+    write(undeclared,replace(text,"\n3 2 1\n"=>"\n3 9 1\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(undeclared)
+    out_of_dim=joinpath(directory,"periodic-dim4.msh")
+    write(out_of_dim,replace(text,"\n3 2 1\n"=>"\n4 2 1\n";count=1))
+    @test_throws ArgumentError ElementsUnderTest.read_mixed_msh(out_of_dim)
 end
 
 _write_swapped(io,value::Int32)=write(io,bswap(value))

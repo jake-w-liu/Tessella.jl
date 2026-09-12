@@ -2,6 +2,7 @@ using Test
 using Tessella
 using Tessella.MeshTypes: Mesh, nnodes, ntets, tet_volume, triangle_area, node
 using Tessella.Mesh3D: insert_steiner3, recover_segment3
+using Tessella.Model: model_set_tag!, remove_entities!
 
 function _classified_volume_fixture()
     model=GeoModel()
@@ -555,6 +556,7 @@ end
     @test_throws ArgumentError set_periodic!(invalid,2,[4],[99],identity)
     @test_throws ArgumentError set_periodic!(invalid,2,[3],[6],identity)
     @test_throws ArgumentError set_periodic!(invalid,3,[1],[1],identity)
+    @test_throws ArgumentError set_periodic!(invalid,0,[1],[1],identity)
     @test_throws ArgumentError set_periodic!(
         invalid,2,[4],[6],constraints[1].affine;atol=true)
     @test isempty(model_periodic_constraints(invalid))
@@ -579,4 +581,67 @@ end
         0.0,0.0,1.0,2.0,
         0.0,0.0,0.0,1.0))
     @test_throws ArgumentError mesh_model_volume(cross_volume,1)
+end
+
+@testset "stored periodic volume relations" begin
+    translate=(1.0,0.0,0.0,2.0,
+               0.0,1.0,0.0,0.0,
+               0.0,0.0,1.0,0.0,
+               0.0,0.0,0.0,1.0)
+    model=GeoModel()
+    _add_explicit_cube_shell!(model,0,0.0,1.0)
+    _add_explicit_cube_shell!(model,100,2.0,3.0)
+    add_volume!(model,[1];tag=1)
+    add_volume!(model,[101];tag=2)
+    set_periodic!(model,3,[2],[1],translate)
+    constraint=only(model_periodic_constraints(model))
+    @test constraint.dim==3
+    @test constraint.slave_entity==2 && constraint.master_entity==1
+    @test constraint.affine==translate
+
+    # The relation is mesh-inert, as in Gmsh 4.15.2: both volumes mesh
+    # independently and the volume link carries no node correspondence.
+    master_mesh=mesh_model_volume(model,1)
+    slave_mesh=mesh_model_volume(model,2)
+    @test ntets(master_mesh)>0 && ntets(slave_mesh)>0
+    mapping=model_periodic_nodes(model,slave_mesh,3,2)
+    @test mapping.master_entity==1
+    @test isempty(mapping.slave_nodes) && isempty(mapping.master_nodes)
+    @test mapping.affine==translate
+    mixed=model_to_mixed(model,slave_mesh,3,2)
+    @test all(link->link.dim!=3,mixed.periodic_links)
+
+    @test_throws ArgumentError set_periodic!(model,3,[2],[3],translate)
+    @test_throws ArgumentError set_periodic!(model,3,[3],[1],translate)
+    @test_throws ArgumentError set_periodic!(model,3,[2],[1],translate)
+    @test_throws ArgumentError set_periodic!(model,3,[2],[1],(0.0,0.0,0.0,0.0,
+        0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0))
+    @test_throws ArgumentError set_periodic!(model,3,[2],[1],translate;
+                                           atol=true)
+    @test length(model_periodic_constraints(model))==1
+
+    cyclic=GeoModel()
+    _add_explicit_cube_shell!(cyclic,0,0.0,1.0)
+    _add_explicit_cube_shell!(cyclic,100,2.0,3.0)
+    add_volume!(cyclic,[1];tag=1)
+    add_volume!(cyclic,[101];tag=2)
+    set_periodic!(cyclic,3,[2],[1],translate)
+    @test_throws ArgumentError set_periodic!(cyclic,3,[1],[2],(
+        1.0,0.0,0.0,-2.0,
+        0.0,1.0,0.0,0.0,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))
+    @test length(model_periodic_constraints(cyclic))==1
+
+    retagged=deepcopy(model)
+    @test model_set_tag!(retagged,3,1,9)==9
+    retagged_constraint=only(model_periodic_constraints(retagged))
+    @test retagged_constraint.master_entity==9
+
+    removed=deepcopy(model)
+    remove_entities!(removed,[(3,1)])
+    @test isempty(model_periodic_constraints(removed))
+    removed_slave=deepcopy(model)
+    remove_entities!(removed_slave,[(3,2)])
+    @test isempty(model_periodic_constraints(removed_slave))
 end

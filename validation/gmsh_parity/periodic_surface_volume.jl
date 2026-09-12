@@ -259,13 +259,60 @@ try
     max_roundtrip_error<=1e-12 || error(
         "Gmsh periodic volume round-trip error is $max_roundtrip_error")
 
+    # Gmsh 4.15.2 accepts setPeriodic(3) but drops the relation entirely:
+    # getPeriodic reports the entity itself, getPeriodicNodes returns empty
+    # maps, the interior mesh is unaffected, and no dimension-3 record is
+    # serialized. Tessella stores the relation for reporting while matching
+    # every observable behavior.
+    gmsh.clear()
+    gmsh.model.add("volume_periodic_probe")
+    gmsh_box1=gmsh.model.occ.addBox(0,0,0,1,1,1)
+    gmsh_box2=gmsh.model.occ.addBox(2,0,0,1,1,1)
+    gmsh.model.occ.synchronize()
+    gmsh.model.mesh.setPeriodic(3,[gmsh_box2],[gmsh_box1],collect(AFFINE_X))
+    gmsh.model.mesh.getPeriodic(3,[gmsh_box2])==Int32[gmsh_box2] || error(
+        "Gmsh 4.15.2 retained a dimension-3 periodic master")
+    gmsh.option.setNumber("Mesh.MeshSizeMax",0.4)
+    gmsh.model.mesh.generate(3)
+    _,gmsh_volume_slaves,gmsh_volume_masters,gmsh_volume_affine=
+        gmsh.model.mesh.getPeriodicNodes(3,gmsh_box2)
+    isempty(gmsh_volume_slaves) && isempty(gmsh_volume_masters) ||
+        error("Gmsh 4.15.2 produced dimension-3 periodic node maps")
+    probe_path=joinpath(mktempdir(),"gmsh-volume-periodic.msh")
+    gmsh.write(probe_path)
+    probe_text=read(probe_path,String)
+    probe_periodic=match(r"\$Periodic\n(.*?)\$EndPeriodic"s,probe_text)
+    (probe_periodic===nothing ||
+     !occursin(r"^3 "m,probe_periodic.captures[1])) || error(
+        "Gmsh 4.15.2 serialized a dimension-3 periodic record")
+
+    volume_model=GeoModel()
+    add_box!(volume_model,0,0,0,1,1,1;tag=1)
+    add_box!(volume_model,2,0,0,1,1,1;tag=2)
+    set_periodic!(volume_model,3,[2],[1],AFFINE_X)
+    volume_constraint=only(model_periodic_constraints(volume_model))
+    (volume_constraint.dim==3 && volume_constraint.slave_entity==2 &&
+     volume_constraint.master_entity==1) || error(
+        "Tessella lost the stored periodic volume relation")
+    volume_mesh=mesh_model_volume(volume_model,2)
+    ntets(volume_mesh)>0 || error(
+        "Tessella periodic slave volume produced no tetrahedra")
+    volume_mapping=model_periodic_nodes(volume_model,volume_mesh,3,2)
+    (volume_mapping.master_entity==1 &&
+     isempty(volume_mapping.slave_nodes) &&
+     isempty(volume_mapping.master_nodes)) || error(
+        "Tessella dimension-3 periodic mapping is not empty")
+    volume_mixed=model_to_mixed(volume_model,volume_mesh,3,2)
+    all(link->link.dim!=3,volume_mixed.periodic_links) || error(
+        "Tessella serialized a dimension-3 periodic record")
+
     println("GMSH_PARITY_PERIODIC_SURFACE_VOLUME_OK " *
             "gmsh=$(gmsh.GMSH_API_VERSION) tessella_nodes=$(nnodes(mesh)) " *
             "tessella_tets=$(ntets(mesh)) gmsh_nodes=$(length(native_coordinates)) " *
             "gmsh_tets=$(length(only(element_tags))) relations=$(length(RELATIONS)) " *
             "embedded_surface_pair=ok max_error=" *
             "$(max(max_gmsh_error,max_roundtrip_error)) " *
-            "msh2_msh4_ascii_binary=ok")
+            "msh2_msh4_ascii_binary=ok volume_relation=stored_mesh_inert")
 finally
     gmsh.finalize()
 end
