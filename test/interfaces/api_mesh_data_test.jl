@@ -103,6 +103,7 @@ end
 @testset "detached bulk simplex data through API" begin
     _MESH_DATA_API.finalize()
     @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes()
+    @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(1)
     @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements()
     @test_throws ArgumentError _MESH_DATA_API.mesh.get_element_types()
     @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements_by_type(4)
@@ -116,6 +117,7 @@ end
     try
         _MESH_DATA_API.initialize()
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes()
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(1)
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements()
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_element_types()
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements_by_type(4)
@@ -136,6 +138,8 @@ end
         @test node_tags==UInt64[1,2,3,4]
         @test coordinates==collect(vec(source.coords))
         @test parameters==Float64[]
+        # An unclassified cache cannot report a node's owning entity.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(1)
         @test _MESH_DATA_API.mesh.get_nodes(-1,-2,true,false)==
               (UInt64[1,2,3,4],collect(vec(source.coords)),Float64[])
         node_tags[1]=99
@@ -675,6 +679,24 @@ end
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(
             length(tags[1])+1)
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(1.5)
+        # Single-node queries report coordinates, owner, and owner parameters.
+        dense_nodes=_MESH_DATA_API.mesh.get_nodes(-1,-1)[1]
+        for node in dense_nodes
+            node_coord,node_par,node_dim,node_tag=
+                _MESH_DATA_API.mesh.get_node(node)
+            @test node_coord≈_MESH_DATA_API.mesh.get_nodes()[2][
+                3Int(node)-2:3Int(node)]
+            @test (node_dim,node_tag)==owners[node]
+            width=node_dim in (1,2) ? node_dim : 0
+            @test length(node_par)==width
+            if width>0
+                @test _MESH_DATA_API.model.get_value(
+                    node_dim,node_tag,node_par)≈node_coord
+            end
+        end
+        for bad in (0,length(dense_nodes)+1,1.5,true)
+            @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(bad)
+        end
         # Type-funnel queries resolve the tag in the type's own dimension.
         filtered_tags,filtered_nodes=
             _MESH_DATA_API.mesh.get_elements_by_type(2,1)

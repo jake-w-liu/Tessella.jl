@@ -699,6 +699,43 @@ try
             worst<1e-9 || error(
                 "$engine by-element-type parameters do not re-evaluate")
         end
+        # getNode reports each node's owning entity and reparametrizes the
+        # node on it: one `u` for a Line owner, `(u, v)` for a Plane owner,
+        # none for Point or Volume owners; the owner must be the entity
+        # whose strict (boundary-excluded) node list contains the node.
+        for (engine,all_tags,query,listed,evaluate) in (
+            ("Gmsh",gmsh.model.mesh.getNodes(-1,-1)[1],
+             t->gmsh.model.mesh.getNode(t),
+             (d,t)->Set(gmsh.model.mesh.getNodes(d,t,false)[1]),
+             (d,e,p)->gmsh.model.getValue(d,e,collect(p))),
+            ("Tessella",Tessella.API.mesh.get_nodes(-1,-1)[1],
+             t->Tessella.API.mesh.get_node(t),
+             (d,t)->Set(Tessella.API.mesh.get_nodes(d,t)[1]),
+             (d,e,p)->Tessella.API.model.get_value(d,e,p)))
+            for node in all_tags
+                coord,par,dim,entity=query(node)
+                dim in 0:3 || error(
+                    "$engine getNode returned owner dim $dim")
+                node in listed(dim,entity) || error(
+                    "$engine getNode owner ($dim, $entity) omits the node")
+                length(par)==(dim in (1,2) ? dim : 0) || error(
+                    "$engine getNode parametric width mismatch")
+                if dim in (1,2)
+                    Base.maximum(abs.(
+                        evaluate(dim,entity,par).-coord))<1e-9 || error(
+                        "$engine getNode parameters do not re-evaluate")
+                end
+            end
+        end
+        let thrown=false
+            try
+                Tessella.API.mesh.get_node(
+                    length(Tessella.API.mesh.get_nodes(-1,-1)[1])+1)
+            catch err
+                thrown=err isa ArgumentError
+            end
+            thrown || error("Tessella getNode accepted an unknown tag")
+        end
         # Type-level filters resolve the tag in the type's own dimension.
         for (tessella_call,gmsh_call) in (
             (()->Tessella.API.mesh.get_elements_by_type(2,1),
@@ -908,7 +945,7 @@ try
             "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
             " entity_filtered=tris",entity_pairs,
-            " selective=transform/edges/clear parametric=entity/owner",
+            " selective=transform/edges/clear parametric=entity/owner/node",
             " bounded=no-mesh/classification/special-type/face-count ",
             "blockers and finite-barycenter contract with partitioned slices")
 finally

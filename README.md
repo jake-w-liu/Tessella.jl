@@ -323,7 +323,9 @@ Off-span segment and triangle coordinates are stable orthogonal projections with
 unused coordinates set to zero. The locator is discarded whenever the mesh cache
 changes. Degenerate cells and Float64-unrepresentable local coordinates fail
 explicitly. `API.mesh.get_element` resolves a dense element tag to its type,
-connectivity, and owning entity through the classification snapshot.
+connectivity, and owning entity through the classification snapshot;
+`API.mesh.get_node` resolves a dense node tag to its coordinates, owning
+entity, and parameters reparametrized on that owner.
 `get_jacobians` and `get_jacobian` return detached forward-map data for cached
 linear segments, triangles, and tetrahedra. Evaluation points are concatenated
 `(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and
