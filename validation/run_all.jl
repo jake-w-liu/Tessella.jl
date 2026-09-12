@@ -390,6 +390,13 @@ msh_partition_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=ye
 println("  command: ", msh_partition_command)
 run(msh_partition_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── gmsh_parity msh size_t width ──  4-byte binary output round trip and Gmsh rejection")
+msh_sizet_script = joinpath(
+    HERE, "gmsh_parity", "msh_size_t_width.jl")
+msh_sizet_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $msh_sizet_script`
+println("  command: ", msh_sizet_command)
+run(msh_sizet_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
 function fmtrow(case, tool, m, secs, truevol)
     @sprintf("| %s | %s | %d | %d | %.6g | %s | %.2f | %.2f | %d | %.3f |",
              case, tool, m.nnodes, m.ntets, m.volume, pct(relerr(m.volume, truevol)),
