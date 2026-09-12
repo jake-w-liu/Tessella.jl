@@ -89,7 +89,7 @@ end
             ()->_MESH_TRANSFORM_API.mesh.affine_transform(
                 (positive12...,0.0,0.0,0.0,2.0)),
             ()->_MESH_TRANSFORM_API.mesh.affine_transform("identity"),
-            ()->_MESH_TRANSFORM_API.mesh.affine_transform(positive12,[(3,1)]),
+            ()->_MESH_TRANSFORM_API.mesh.affine_transform(positive12,[(3,99)]),
             ()->_MESH_TRANSFORM_API.mesh.affine_transform(positive12,1),
         )
         for fail in failures

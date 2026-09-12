@@ -706,6 +706,99 @@ try
             true
         end
         gmsh_rejected || error("Gmsh accepted an unknown element tag")
+
+        # ── Entity-selective mutations ──────────────────────────────────────
+        # affineTransform(dimTags) moves only nodes classified on the listed
+        # entities in both engines; unlisted entities keep their coordinates.
+        gmsh_curve=copy(gmsh.model.mesh.getNodes(1,1,false)[2])
+        tessella_curve=copy(Tessella.API.mesh.get_nodes(1,1)[2])
+        gmsh_surface_coords=copy(gmsh.model.mesh.getNodes(2,1,false)[2])
+        tessella_surface_coords=copy(
+            Tessella.API.mesh.get_nodes(2,1)[2])
+        lift=[1.0,0,0,0, 0,1,0,0, 0,0,1,0.5, 0,0,0,1]
+        gmsh.model.mesh.affineTransform(lift,[(1,1)])
+        Tessella.API.mesh.affine_transform(lift,[(1,1)])
+        gmsh.model.mesh.getNodes(1,1,false)[2][3:3:end]==
+            gmsh_curve[3:3:end].+0.5 || error(
+            "Gmsh selective transform did not move the listed curve")
+        Tessella.API.mesh.get_nodes(1,1)[2][3:3:end]==
+            tessella_curve[3:3:end].+0.5 || error(
+            "Tessella selective transform did not move the listed curve")
+        gmsh.model.mesh.getNodes(2,1,false)[2]==gmsh_surface_coords ||
+            error("Gmsh selective transform moved an unlisted surface")
+        Tessella.API.mesh.get_nodes(2,1)[2]==tessella_surface_coords ||
+            error("Tessella selective transform moved an unlisted surface")
+        # Unknown entities fail explicitly in both engines.
+        _rejects_argument(
+            ()->Tessella.API.mesh.affine_transform(lift,[(1,77)])) || error(
+            "Tessella transformed an unknown curve")
+        gmsh_rejected=try
+            gmsh.model.mesh.affineTransform(lift,[(1,77)])
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error("Gmsh transformed an unknown curve")
+        # Selective edge creation tags only the listed entities' cell edges;
+        # a later full creation preserves them.
+        gmsh.model.mesh.createEdges([(2,1)])
+        Tessella.API.mesh.create_edges([(2,1)])
+        gmsh_selective=copy(gmsh.model.mesh.getAllEdges()[1])
+        tessella_selective=copy(Tessella.API.mesh.get_all_edges()[1])
+        isempty(gmsh_selective) && error(
+            "Gmsh selective edge creation produced no edges")
+        isempty(tessella_selective) && error(
+            "Tessella selective edge creation produced no edges")
+        Tessella.API.mesh.create_edges([(2,1)])
+        Tessella.API.mesh.get_all_edges()[1]==tessella_selective || error(
+            "Tessella selective edge creation was not idempotent")
+        gmsh.model.mesh.createEdges()
+        Tessella.API.mesh.create_edges()
+        gmsh_all_edges=gmsh.model.mesh.getAllEdges()[1]
+        tessella_all_edges=Tessella.API.mesh.get_all_edges()[1]
+        issubset(tessella_selective,tessella_all_edges) || error(
+            "Tessella selective edge tags were not preserved")
+        issubset(gmsh_selective,gmsh_all_edges) || error(
+            "Gmsh selective edge tags were not preserved")
+        # Clearing a curve under a meshed surface is a no-op in both engines:
+        # the boundary mesh stays part of the surviving surface mesh.
+        gmsh_counts=Dict(ent=>length(gmsh.model.mesh.getNodes(
+            ent[1],ent[2],false)[1]) for ent in
+            ((0,1),(1,1),(1,2),(2,1)))
+        tessella_counts=Dict(ent=>length(Tessella.API.mesh.get_nodes(
+            ent[1],ent[2])[1]) for ent in ((0,1),(1,1),(1,2),(2,1)))
+        gmsh.model.mesh.clear([(1,1),(0,1)])
+        Tessella.API.mesh.clear([(1,1),(0,1)])
+        for ent in keys(gmsh_counts)
+            length(gmsh.model.mesh.getNodes(ent[1],ent[2],false)[1])==
+                gmsh_counts[ent] || error(
+                "Gmsh boundary clear changed entity $ent")
+            length(Tessella.API.mesh.get_nodes(ent[1],ent[2])[1])==
+                tessella_counts[ent] || error(
+                "Tessella boundary clear changed entity $ent")
+        end
+        # Clearing the generating surface drops its elements and owned nodes;
+        # boundary-owned nodes survive on their entities in both engines.
+        gmsh.model.mesh.clear([(2,1)])
+        Tessella.API.mesh.clear([(2,1)])
+        all(isempty,gmsh.model.mesh.getElements(2,1)[2]) || error(
+            "Gmsh retained surface elements after clear")
+        all(isempty,Tessella.API.mesh.get_elements(2,1)[2]) || error(
+            "Tessella retained surface elements after clear")
+        isempty(gmsh.model.mesh.getNodes(2,1,false)[1]) || error(
+            "Gmsh retained surface nodes after clear")
+        isempty(Tessella.API.mesh.get_nodes(2,1)[1]) || error(
+            "Tessella retained surface nodes after clear")
+        length(gmsh.model.mesh.getNodes(1,2,false)[1])==
+            gmsh_counts[(1,2)] || error(
+            "Gmsh dropped surviving curve nodes")
+        length(Tessella.API.mesh.get_nodes(1,2)[1])==
+            tessella_counts[(1,2)] || error(
+            "Tessella dropped surviving curve nodes")
+        _rejects_argument(
+            ()->Tessella.API.mesh.clear([(2,99)])) || error(
+            "Tessella cleared an unknown surface")
         (tessella_tri_count,gmsh_tri_count)
     finally
         Tessella.API.finalize()
@@ -717,6 +810,7 @@ try
             "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
             " entity_filtered=tris",entity_pairs,
+            " selective=transform/edges/clear",
             " bounded=no-mesh/classification/special-type/face-count ",
             "blockers and finite-barycenter contract with partitioned slices")
 finally

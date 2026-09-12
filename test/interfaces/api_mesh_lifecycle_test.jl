@@ -57,7 +57,15 @@ const _MESH_LIFECYCLE_API=Tessella.API
         @test twice_crc.sha==
               "09fd5ced56aba7a5b1b0380f8f9189dc95d3676793430f61fd01269baca1445c"
 
-        @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.clear([(3,1)])
+        # A primitive box classifies every node and cell on the volume, so
+        # clearing it empties the cache; unknown entities fail explicitly.
+        @test _MESH_LIFECYCLE_API.mesh.clear([(3,1)])===nothing
+        @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.get()
+        _MESH_LIFECYCLE_API.mesh.generate(3)
+        _MESH_LIFECYCLE_API.mesh.refine()
+        _MESH_LIFECYCLE_API.mesh.refine()
+        @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==twice_crc
+        @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.clear([(3,99)])
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==twice_crc
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.clear(1)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==twice_crc

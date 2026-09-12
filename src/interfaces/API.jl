@@ -876,12 +876,57 @@ end
 # materialize (e.g. `add_box!` stores only the volume).
 function _mesh_classified_entity(m::GeoModel,class::_MeshClassification,
                                  dim::Int,tag::Int,caller::AbstractString)
-    tag<=typemax(Int32) || throw(ArgumentError(
+    typemin(Int32)<=tag<=typemax(Int32) || throw(ArgumentError(
         "$caller: unknown $(_MESH_ENTITY_LABELS[dim+1])[$tag]"))
     haskey(class.boundaries,(dim,Int32(tag))) ||
         haskey(_mesh_entity_dictionary(m,dim),tag) || throw(ArgumentError(
             "$caller: unknown $(_MESH_ENTITY_LABELS[dim+1])[$tag]"))
     return nothing
+end
+
+# Parses a Gmsh-style `dimTags` selection into concrete `(dim, tag)` pairs.
+function _mesh_parse_dim_tags(dim_tags,caller::AbstractString)
+    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
+        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
+    parsed=Tuple{Int,Int}[]
+    for entry in dim_tags
+        pair=if entry isa Pair
+            (first(entry),last(entry))
+        elseif entry isa Tuple && length(entry)==2
+            entry
+        else
+            throw(ArgumentError(
+                "$caller: each dim_tags entry must be a (dimension, tag) pair"))
+        end
+        dimension,tag=pair
+        dimension isa Integer || throw(ArgumentError(
+            "$caller: entity dimensions must be integers"))
+        dimension isa Bool && throw(ArgumentError(
+            "$caller: entity dimensions must not be Bool"))
+        0<=dimension<=3 || throw(ArgumentError(
+            "$caller: entity dimension $dimension is out of range"))
+        tag isa Integer || throw(ArgumentError(
+            "$caller: entity tags must be integers"))
+        tag isa Bool && throw(ArgumentError(
+            "$caller: entity tags must not be Bool"))
+        typemin(Int32)<=tag<=typemax(Int32) || throw(ArgumentError(
+            "$caller: entity tag $tag is out of range"))
+        push!(parsed,(Int(dimension),Int(tag)))
+    end
+    return parsed
+end
+
+# Validates a parsed selection against the classified entity set and returns it
+# as a set of `(dim, tag)` pairs. Unknown entities fail explicitly, matching
+# Gmsh's "entity does not exist" error.
+function _mesh_selected_entities(m::GeoModel,class::_MeshClassification,
+                                 pairs,caller::AbstractString)
+    selected=Set{Tuple{Int,Int32}}()
+    for (dim,tag) in pairs
+        _mesh_classified_entity(m,class,dim,tag,caller)
+        push!(selected,(dim,Int32(tag)))
+    end
+    return selected
 end
 
 # Entity-filtered cell positions, or `Int[]` for cells of `msh` types that
@@ -1272,21 +1317,38 @@ function _get_keys_information(type_keys,entity_keys,element_type,
         caller="API.mesh.get_keys_information")
 end
 
-function _mesh_global_topology_selection(dim_tags,caller::AbstractString)
-    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
-        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
-    isempty(dim_tags) || throw(ArgumentError(
-        "$caller: entity-selective topology creation requires mesh " *
-        "classification metadata; pass an empty collection for the complete cache"))
-    return nothing
+# Cell columns classified on any of the selected entities. `owners` carries the
+# entity tag per column and `dim` is the owning entities' dimension.
+function _mesh_selected_cell_columns(owners::Vector{Int32},dim::Int,
+                                     selected::Set{Tuple{Int,Int32}})
+    return findall(owner->(dim,owner) in selected,owners)
 end
 
 function _create_edges(dim_tags=())
     caller="API.mesh.create_edges"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        _mesh_global_topology_selection(dim_tags,caller)
-        replacement=_mesh_edge_topology(cached,LAST_MESH_EDGES[])
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        if isempty(pairs)
+            LAST_MESH_EDGES[]=_mesh_edge_topology(cached,LAST_MESH_EDGES[])
+            return nothing
+        end
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: entity-selective topology creation requires mesh " *
+            "classification metadata; pass an empty collection for the " *
+            "complete cache"))
+        selected=_mesh_selected_entities(
+            _model_locked(),class,pairs,caller)
+        replacement=LAST_MESH_EDGES[]
+        for (dim,msh,cells,owners) in ((1,1,cached.segs,class.seg_entities),
+                                       (2,2,cached.tris,class.tri_entities),
+                                       (3,4,cached.tets,class.tet_entities))
+            columns=_mesh_selected_cell_columns(owners,dim,selected)
+            isempty(columns) && continue
+            replacement=_mesh_edge_topology_for_cells(
+                cached,replacement,cells[:,columns],msh)
+        end
         LAST_MESH_EDGES[]=replacement
         nothing
     end
@@ -1296,8 +1358,26 @@ function _create_faces(dim_tags=())
     caller="API.mesh.create_faces"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        _mesh_global_topology_selection(dim_tags,caller)
-        replacement=_mesh_face_topology(cached,LAST_MESH_FACES[])
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        if isempty(pairs)
+            LAST_MESH_FACES[]=_mesh_face_topology(cached,LAST_MESH_FACES[])
+            return nothing
+        end
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: entity-selective topology creation requires mesh " *
+            "classification metadata; pass an empty collection for the " *
+            "complete cache"))
+        selected=_mesh_selected_entities(
+            _model_locked(),class,pairs,caller)
+        replacement=LAST_MESH_FACES[]
+        for (dim,msh,cells,owners) in ((2,2,cached.tris,class.tri_entities),
+                                       (3,4,cached.tets,class.tet_entities))
+            columns=_mesh_selected_cell_columns(owners,dim,selected)
+            isempty(columns) && continue
+            replacement=_mesh_face_topology_for_cells(
+                cached,replacement,cells[:,columns],msh)
+        end
         LAST_MESH_FACES[]=replacement
         nothing
     end
@@ -1732,17 +1812,114 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
     end
 end
 
+# Selective clear on the flat shared-node cache, mirroring Gmsh's per-entity
+# mesh ownership: cells classified on a cleared entity are removed; nodes owned
+# by such an entity drop when no surviving cell references them and reclassify
+# to the lowest-dimension (then lowest-tag) surviving owner otherwise. Entities
+# that own no cells in the cache — points, or boundary entities of a higher-
+# dimensional generating entity — are no-ops, matching Gmsh 4.15.2's retention
+# of boundary meshes and unmeshable vertices.
+function _clear_classified_mesh(mesh::Mesh,class::_MeshClassification,
+                                cleared::Set{Tuple{Int,Int32}})
+    cell_blocks=((1,mesh.segs,class.seg_entities),
+                 (2,mesh.tris,class.tri_entities),
+                 (3,mesh.tets,class.tet_entities))
+    cleared_with_cells=Set{Tuple{Int,Int32}}()
+    kept_columns=[Vector{Int}() for _ in cell_blocks]
+    for (block,(dim,cells,owners)) in enumerate(cell_blocks)
+        kept=kept_columns[block]
+        sizehint!(kept,size(cells,2))
+        for column in axes(cells,2)
+            if (dim,owners[column]) in cleared
+                push!(cleared_with_cells,(dim,owners[column]))
+            else
+                push!(kept,column)
+            end
+        end
+    end
+    isempty(cleared_with_cells) && return mesh,class
+    count=nnodes(mesh)
+    # Lowest-dimension (then lowest-tag) surviving owner referencing each node.
+    survivors=Vector{Tuple{Int,Int32}}(undef,count)
+    fill!(survivors,(4,Int32(0)))
+    for (block,(dim,cells,owners)) in enumerate(cell_blocks)
+        for column in kept_columns[block]
+            owner=(dim,owners[column])
+            for row in axes(cells,1)
+                node=Int(cells[row,column])
+                owner<survivors[node] && (survivors[node]=owner)
+            end
+        end
+    end
+    referenced=falses(count)
+    for (block,(dim,cells,owners)) in enumerate(cell_blocks)
+        for column in kept_columns[block], row in axes(cells,1)
+            referenced[Int(cells[row,column])]=true
+        end
+    end
+    keep=falses(count)
+    for node in 1:count
+        owner=class.node_entities[node]
+        if owner in cleared_with_cells
+            keep[node]=referenced[node]
+        else
+            keep[node]=true
+        end
+    end
+    old_to_new=Vector{Int32}(undef,count)
+    index=0
+    for node in 1:count
+        keep[node] && (index+=1;old_to_new[node]=index)
+    end
+    index==0 && return nothing,nothing
+    coordinates=mesh.coords[:,keep]
+    node_entities=Vector{Tuple{Int,Int32}}(undef,index)
+    out=0
+    for node in 1:count
+        keep[node] || continue
+        out+=1
+        owner=class.node_entities[node]
+        node_entities[out]=
+            owner in cleared_with_cells ? survivors[node] : owner
+    end
+    remapped=Vector{Matrix{Int32}}(undef,3)
+    cell_entities=Vector{Vector{Int32}}(undef,3)
+    for (block,(dim,cells,owners)) in enumerate(cell_blocks)
+        kept=kept_columns[block]
+        result=Matrix{Int32}(undef,size(cells,1),length(kept))
+        for (target,column) in enumerate(kept), row in axes(cells,1)
+            result[row,target]=old_to_new[cells[row,column]]
+        end
+        remapped[block]=result
+        cell_entities[block]=owners[kept]
+    end
+    replacement=Mesh(coordinates;segs=remapped[1],tris=remapped[2],
+                     tets=remapped[3],
+                     seg_tag=mesh.seg_tag[kept_columns[1]],
+                     tri_tag=mesh.tri_tag[kept_columns[2]],
+                     tet_tag=mesh.tet_tag[kept_columns[3]])
+    record=_MeshClassification(replacement,class.entity,node_entities,
+                               class.boundaries,cell_entities[1],
+                               cell_entities[2],cell_entities[3])
+    return replacement,record
+end
+
 function _clear_mesh(dim_tags=())
+    caller="API.mesh.clear"
     return lock(STATE_LOCK) do
-        _model_locked()
-        (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(
-            ArgumentError(
-                "API.mesh.clear: dim_tags must be a vector or tuple of " *
-                "(dimension, tag) pairs"))
-        isempty(dim_tags) || throw(ArgumentError(
-            "API.mesh.clear: entity-selective clearing is not supported; " *
-            "pass an empty collection to clear the complete cached mesh"))
-        _replace_mesh_cache_locked!(nothing)
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        isempty(pairs) && (_replace_mesh_cache_locked!(nothing);return nothing)
+        cached=LAST_MESH[]
+        cached===nothing && return nothing
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: entity-selective clearing requires mesh classification " *
+            "metadata; pass an empty collection to clear the complete cache"))
+        cleared=_mesh_selected_entities(model,class,pairs,caller)
+        replacement,record=_clear_classified_mesh(cached,class,cleared)
+        replacement===cached ||
+            _replace_mesh_cache_locked!(replacement,record)
         nothing
     end
 end
@@ -1750,21 +1927,30 @@ end
 function _affine_transform_mesh(affine,dim_tags=())
     caller="API.mesh.affine_transform"
     return lock(STATE_LOCK) do
-        _model_locked()
-        (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(
-            ArgumentError(
-                "$caller: dim_tags must be a vector or tuple of " *
-                "(dimension, tag) pairs"))
-        isempty(dim_tags) || throw(ArgumentError(
-            "$caller: entity-selective transformation is not supported; " *
-            "pass an empty collection to transform the complete cached mesh"))
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
         cached===nothing && throw(ArgumentError(
             "$caller: no mesh; call API.mesh.generate first"))
         coefficients,translation,_=_transform_gmsh_affine(affine,caller)
         matrix=reshape(collect(coefficients),3,3)
-        transformed=affine_transform(
-            cached,matrix;translation=translation)
+        if isempty(pairs)
+            transformed=affine_transform(
+                cached,matrix;translation=translation)
+        else
+            class=_cached_classification_locked(cached)
+            class===nothing && throw(ArgumentError(
+                "$caller: entity-selective transformation requires mesh " *
+                "classification metadata; pass an empty collection to " *
+                "transform the complete cached mesh"))
+            selected=_mesh_selected_entities(model,class,pairs,caller)
+            mask=falses(nnodes(cached))
+            for node in eachindex(class.node_entities)
+                class.node_entities[node] in selected && (mask[node]=true)
+            end
+            transformed=affine_transform(
+                cached,matrix;translation=translation,node_mask=mask)
+        end
         # An affine map preserves connectivity, so the classification stays
         # index-aligned; it is rebound to the transformed cache object.
         class=_cached_classification_locked(cached)
@@ -2154,8 +2340,11 @@ get_keys_information(type_keys,entity_keys,element_type,function_space_type)=
     create_edges(dim_tags=())
 
 Create deterministic global identifiers for every unique edge in the cached
-linear-simplex mesh. Repeated calls are idempotent. Only whole-cache creation is
-available.
+linear-simplex mesh, or only for the cells owned by the entities in `dim_tags`.
+An empty vector or tuple selects the complete cache. A nonempty selection
+requires the classified cache built by [`generate`](@ref); unknown entities
+fail explicitly, and listed entities owning no cells contribute nothing, as in
+Gmsh 4.15.2. Repeated calls are idempotent.
 Edges previously attached with [`add_edges`](@ref) are preserved. Replacing,
 refining, transforming, or clearing the cache invalidates the catalog. Automatic
 identifiers begin at the current edge count plus one and skip identifiers already
@@ -2346,9 +2535,17 @@ refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))=
 """
     clear(dim_tags=())
 
-Clear the complete cached mesh without changing model geometry. An empty vector
-or tuple selects the complete cache. Entity-selective clearing is not
-supported.
+Clear the complete cached mesh, or only the mesh data owned by the entities in
+`dim_tags`, without changing model geometry. An empty vector or tuple selects
+the complete cache. A nonempty selection requires the classified cache built by
+[`generate`](@ref): cells classified on each listed entity are removed, nodes
+they owned drop when no surviving cell references them, and nodes still
+referenced reclassify to the lowest-dimension (then lowest-tag) surviving
+owner, mirroring Gmsh 4.15.2's per-entity node storage on the flat shared-node
+cache. Listed entities owning no cells — points, or boundary entities of a
+higher-dimensional generating entity — are no-ops, matching Gmsh's retention
+of boundary meshes and unmeshable vertices. Unknown entities fail explicitly,
+and clearing is a no-op when no mesh is cached.
 """
 clear(dim_tags=())=_clear_mesh(dim_tags)
 
@@ -2356,11 +2553,18 @@ clear(dim_tags=())=_clear_mesh(dim_tags)
     affine_transform(affine, dim_tags=()) -> Mesh
 
 Apply a finite nonsingular affine transform to every node in the complete cached
-mesh. `affine` is a 4×4 matrix or exactly 12 or 16 entries in Gmsh row-major
-order; 12 entries imply the homogeneous row `(0, 0, 0, 1)`. The cache changes
-only after the transformed mesh validates, and the returned mesh owns independent
-storage. Entity-selective transforms are not supported. Model geometry and
-periodic relations are unchanged.
+mesh, or only to the nodes owned by the entities in `dim_tags`. `affine` is a
+4×4 matrix or exactly 12 or 16 entries in Gmsh row-major order; 12 entries imply
+the homogeneous row `(0, 0, 0, 1)`. An empty vector or tuple selects the
+complete cache. A nonempty selection requires the classified cache built by
+[`generate`](@ref) and moves only nodes classified on the listed entities, as in
+Gmsh 4.15.2's per-entity node storage; shared nodes owned by unlisted boundary
+entities stay fixed. Under an orientation-reversing matrix only cells whose
+every node moved are rewound, since the orientation of a partially transformed
+cell is decided by the resulting geometry. The cache changes only after the
+transformed mesh validates — stricter than Gmsh, which applies invalid results
+— and the returned mesh owns independent storage. Unknown entities fail
+explicitly. Model geometry and periodic relations are unchanged.
 """
 affine_transform(affine,dim_tags=())=
     _affine_transform_mesh(affine,dim_tags)

@@ -262,14 +262,16 @@ native geometry queries immediately use the new coordinates. Per-window visibili
 and implicit primitive boundary presentation remain unfinished.
 `API.mesh.refine` replaces the complete cached linear-simplex mesh only after the
 canonical uniform-refinement kernel succeeds and returns independent caller-owned
-storage. `API.mesh.clear` discards the complete cache without changing model geometry;
-entity-selective clearing is an explicit blocker. `API.mesh.affine_transform` applies a finite nonsingular
-4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete cache.
+storage. `API.mesh.clear` discards the complete cache, or only the cells and
+owned nodes classified on the entities passed in `dim_tags`, without changing
+model geometry; entities owning no cache cells are no-ops, matching Gmsh's
+boundary-mesh retention. `API.mesh.affine_transform` applies a finite nonsingular
+4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete
+cache, or only to the nodes owned by the entities in `dim_tags`.
 It commits only a validated, independently owned result and rewinds reflected simplex
 connectivity to keep the mesh valid. Model geometry and periodic relations remain
 unchanged, and the index-aligned entity-classification snapshot is retained
-through the transform. Entity-selective transforms have the same blocker as
-selective clearing.
+through the transform.
 `API.mesh.get_nodes`, `get_elements`, `get_element_types`,
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
 detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element
@@ -306,8 +308,8 @@ orientation for both face types.
 order. Unlike Gmsh 4.15.2, Tessella rejects zero identifiers, duplicate identifiers
 on different entities, conflicting identifiers for the same entity, repeated nodes,
 and malformed or partly invalid batches without changing the catalog. Every mesh
-replacement discards both catalogs. Entity-selective creation remains an explicit
-blocker.
+replacement discards both catalogs. Entity-selective creation adds only the
+cells classified on the listed `dim_tags` entities.
 `get_element_by_coordinates`, `get_elements_by_coordinates`, and
 `get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
 cache. Matches are deterministic: greatest dimension first, then smallest dense tag.
