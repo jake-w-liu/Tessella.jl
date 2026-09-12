@@ -311,10 +311,11 @@ general CAD parameterizations, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, cyclic periodic-curve dependencies, curved
-or non-boundary periodic surfaces, periodic volume entities, or allocator reads after
+or non-boundary periodic surfaces, or allocator reads after
 topology-changing or untracked declarations.
-Expression/list-backed `Periodic Line`, `Periodic Curve`, and
-`Periodic Surface` `Translate`, `Rotate`, and 12- or 16-entry `Affine` statements,
+Expression/list-backed `Periodic Line`, `Periodic Curve`,
+`Periodic Surface`, and `Periodic Volume` `Translate`, `Rotate`, and 12- or
+16-entry `Affine` statements,
 including bounded constant ranges and numeric list variables in entity sets, are in
 scope for the bounded `.geo`
 executor.
