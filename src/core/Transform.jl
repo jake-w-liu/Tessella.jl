@@ -127,16 +127,42 @@ function _determinant_sign(matrix::NTuple{9,Float64},caller::AbstractString)
     return determinant>0 ? 1 : -1
 end
 
-function _copy_oriented_cells(mesh::Mesh,orientation::Int)
+function _copy_oriented_cells(mesh::Mesh,orientation::Int,
+                              node_mask::Union{Nothing,BitVector}=nothing)
     segments=copy(mesh.segs)
     triangles=copy(mesh.tris)
     tetrahedra=copy(mesh.tets)
     if orientation<0
-        @inbounds for cell in axes(triangles,2)
-            triangles[2,cell],triangles[3,cell]=triangles[3,cell],triangles[2,cell]
-        end
-        @inbounds for cell in axes(tetrahedra,2)
-            tetrahedra[1,cell],tetrahedra[2,cell]=tetrahedra[2,cell],tetrahedra[1,cell]
+        if node_mask===nothing
+            @inbounds for cell in axes(triangles,2)
+                triangles[2,cell],triangles[3,cell]=
+                    triangles[3,cell],triangles[2,cell]
+            end
+            @inbounds for cell in axes(tetrahedra,2)
+                tetrahedra[1,cell],tetrahedra[2,cell]=
+                    tetrahedra[2,cell],tetrahedra[1,cell]
+            end
+        else
+            # A subset transform reverses exactly the cells whose every node
+            # moved; partially transformed cells are re-oriented by the
+            # resulting geometry, which the output validation certifies.
+            @inbounds for cell in axes(triangles,2)
+                if node_mask[triangles[1,cell]] &&
+                   node_mask[triangles[2,cell]] &&
+                   node_mask[triangles[3,cell]]
+                    triangles[2,cell],triangles[3,cell]=
+                        triangles[3,cell],triangles[2,cell]
+                end
+            end
+            @inbounds for cell in axes(tetrahedra,2)
+                if node_mask[tetrahedra[1,cell]] &&
+                   node_mask[tetrahedra[2,cell]] &&
+                   node_mask[tetrahedra[3,cell]] &&
+                   node_mask[tetrahedra[4,cell]]
+                    tetrahedra[1,cell],tetrahedra[2,cell]=
+                        tetrahedra[2,cell],tetrahedra[1,cell]
+                end
+            end
         end
     end
     return segments,triangles,tetrahedra
@@ -213,15 +239,20 @@ end
 
 """
     affine_transform(mesh, matrix; origin=(0,0,0), translation=(0,0,0),
-                     check=true) -> Mesh
+                     check=true, node_mask=nothing) -> Mesh
 
-Apply `q = origin + matrix * (p - origin) + translation` to every node. `matrix`
-must be a finite nonsingular 3×3 matrix. The input is validated before use and, by
-default, the result is independently validated. An orientation-reversing matrix
-rewinds triangle and tetrahedron connectivity while retaining cell order and tags.
+Apply `q = origin + matrix * (p - origin) + translation` to every node, or only
+to the positions marked in `node_mask` when a `BitVector` covering every node is
+given. `matrix` must be a finite nonsingular 3×3 matrix. The input is validated
+before use and, by default, the result is independently validated. An
+orientation-reversing matrix rewinds triangle and tetrahedron connectivity
+while retaining cell order and tags; under a `node_mask`, only cells whose every
+node moved are rewound, since the orientation of a partially transformed cell
+is decided by the resulting geometry that the output validation certifies.
 """
 function affine_transform(mesh::Mesh,matrix;origin=(0.,0.,0.),
-                          translation=(0.,0.,0.),check=true)
+                          translation=(0.,0.,0.),check=true,
+                          node_mask::Union{Nothing,BitVector}=nothing)
     caller="affine_transform"
     verify=_transform_bool(check,caller,"check")
     diagnostic=validate(mesh)
@@ -231,23 +262,32 @@ function affine_transform(mesh::Mesh,matrix;origin=(0.,0.,0.),
     orientation=_determinant_sign(coefficients,caller)
     base=_transform_point3(origin,caller,"origin")
     shift=_transform_point3(translation,caller,"translation")
+    node_mask===nothing || length(node_mask)==size(mesh.coords,2) ||
+        throw(ArgumentError(
+            "$caller: node_mask must mark every mesh node position"))
     a11,a21,a31,a12,a22,a32,a13,a23,a33=coefficients
     coordinates=Matrix{Float64}(undef,3,size(mesh.coords,2))
     @inbounds for node in axes(mesh.coords,2)
         point1=mesh.coords[1,node];point2=mesh.coords[2,node]
         point3=mesh.coords[3,node]
-        qx=_affine_coordinate(base[1],shift[1],a11,a12,a13,
-                              point1,point2,point3,base[1],base[2],base[3],
-                              caller,node)
-        qy=_affine_coordinate(base[2],shift[2],a21,a22,a23,
-                              point1,point2,point3,base[1],base[2],base[3],
-                              caller,node)
-        qz=_affine_coordinate(base[3],shift[3],a31,a32,a33,
-                              point1,point2,point3,base[1],base[2],base[3],
-                              caller,node)
-        coordinates[1,node]=qx;coordinates[2,node]=qy;coordinates[3,node]=qz
+        if node_mask===nothing || node_mask[node]
+            qx=_affine_coordinate(base[1],shift[1],a11,a12,a13,
+                                  point1,point2,point3,base[1],base[2],base[3],
+                                  caller,node)
+            qy=_affine_coordinate(base[2],shift[2],a21,a22,a23,
+                                  point1,point2,point3,base[1],base[2],base[3],
+                                  caller,node)
+            qz=_affine_coordinate(base[3],shift[3],a31,a32,a33,
+                                  point1,point2,point3,base[1],base[2],base[3],
+                                  caller,node)
+            coordinates[1,node]=qx;coordinates[2,node]=qy;coordinates[3,node]=qz
+        else
+            coordinates[1,node]=point1;coordinates[2,node]=point2
+            coordinates[3,node]=point3
+        end
     end
-    segments,triangles,tetrahedra=_copy_oriented_cells(mesh,orientation)
+    segments,triangles,tetrahedra=_copy_oriented_cells(mesh,orientation,
+                                                     node_mask)
     result=Mesh(coordinates;segs=segments,tris=triangles,tets=tetrahedra,
                 seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,tet_tag=mesh.tet_tag)
     if verify

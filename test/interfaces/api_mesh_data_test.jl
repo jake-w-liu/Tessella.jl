@@ -705,3 +705,163 @@ end
         _MESH_DATA_API.finalize()
     end
 end
+
+@testset "entity-selective mesh mutations on generated caches" begin
+    _MESH_DATA_API.initialize()
+    try
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            _MESH_DATA_API.model.add_point(x,y,0.0;tag=point)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            _MESH_DATA_API.model.add_line(a,b;tag=curve)
+        end
+        _MESH_DATA_API.model.add_curve_loop([1,2,3,4];tag=1)
+        _MESH_DATA_API.model.add_plane_surface([1];tag=1)
+        _MESH_DATA_API.option("Mesh.MeshSizeMax",0.35)
+        _MESH_DATA_API.mesh.generate(2)
+        _MESH_DATA_API.mesh.refine()
+
+        # --- selective affine_transform moves only entity-owned nodes ---
+        curve_nodes_before=_MESH_DATA_API.mesh.get_nodes(1,1)
+        surface_nodes_before=_MESH_DATA_API.mesh.get_nodes(2,1)
+        point_nodes_before=_MESH_DATA_API.mesh.get_nodes(0,1)
+        _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 3.0; 0 0 0 1],[(1,1)])
+        curve_nodes_after=_MESH_DATA_API.mesh.get_nodes(1,1)
+        @test curve_nodes_after[1]==curve_nodes_before[1]
+        @test all(==(3.0),curve_nodes_after[2][3:3:end])
+        @test all(==(0.0),curve_nodes_before[2][3:3:end])
+        # Unlisted entities keep their coordinates exactly.
+        @test _MESH_DATA_API.mesh.get_nodes(2,1)==surface_nodes_before
+        @test _MESH_DATA_API.mesh.get_nodes(0,1)==point_nodes_before
+        # Multiple entities select their combined owned nodes.
+        _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 -3.0; 0 0 0 1],[(1,1),(1,2)])
+        @test all(==(0.0),_MESH_DATA_API.mesh.get_nodes(1,1)[2][3:3:end])
+        @test all(==(-3.0),_MESH_DATA_API.mesh.get_nodes(1,2)[2][3:3:end])
+        # Selection errors and malformed entries fail explicitly.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1],[(1,99)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1],[(4,1)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1],[(1,true)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1],[1.5])
+
+        # --- selective create_edges / create_faces ---
+        _MESH_DATA_API.mesh.generate(2)
+        _MESH_DATA_API.mesh.refine()
+        _MESH_DATA_API.mesh.create_edges([(2,1)])
+        selective_edges,_=_MESH_DATA_API.mesh.get_all_edges()
+        @test !isempty(selective_edges)
+        # Curves own no cells in the surface cache, so they add nothing.
+        _MESH_DATA_API.mesh.create_edges([(1,1),(1,2),(1,3),(1,4)])
+        @test _MESH_DATA_API.mesh.get_all_edges()[1]==selective_edges
+        _MESH_DATA_API.mesh.create_edges()
+        all_edges,_=_MESH_DATA_API.mesh.get_all_edges()
+        @test length(all_edges)>=length(selective_edges)
+        @test selective_edges⊆all_edges
+        @test_throws ArgumentError _MESH_DATA_API.mesh.create_edges([(1,99)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.create_edges([(2,99)])
+        _MESH_DATA_API.mesh.create_faces([(2,1)])
+        @test !isempty(_MESH_DATA_API.mesh.get_all_faces(3)[1])
+        # Selecting entities whose cells lack triangular faces is a no-op.
+        _MESH_DATA_API.mesh.create_faces([(1,1),(0,1)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.create_faces([(2,99)])
+
+        # --- selective clear ---
+        _MESH_DATA_API.mesh.generate(2)
+        _MESH_DATA_API.mesh.refine()
+        total=_MESH_DATA_API.mesh.get_nodes()[1]
+        # Clearing an entity that owns no cells is a no-op, as in Gmsh.
+        _MESH_DATA_API.mesh.clear([(1,1),(0,1)])
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==total
+        @test _MESH_DATA_API.mesh.get_nodes(1,1)[1] != Int[]
+        # Clearing the generating entity drops its cells and owned nodes while
+        # boundary-owned nodes survive under their own classification.
+        surface_node_count=
+            length(_MESH_DATA_API.mesh.get_nodes(2,1)[1])
+        boundary_count=length(total)-surface_node_count
+        _MESH_DATA_API.mesh.clear([(2,1)])
+        remaining=_MESH_DATA_API.mesh.get_nodes()[1]
+        @test length(remaining)==boundary_count
+        @test _MESH_DATA_API.mesh.get_nodes(2,1)[1]==Int[]
+        @test _MESH_DATA_API.mesh.get_nodes(1,1)[1] != Int[]
+        types,_,_=_MESH_DATA_API.mesh.get_elements(2,1)
+        @test types==Int32[]
+        @test_throws ArgumentError _MESH_DATA_API.mesh.clear([(2,99)])
+        # Empty selection still clears the complete cache.
+        _MESH_DATA_API.mesh.clear()
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes(2,1)
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end
+
+@testset "entity-selective mutations on a classified volume cache" begin
+    _MESH_DATA_API.initialize()
+    try
+        source="""
+Point(1)={0,0,0,0.25};Point(2)={1,0,0,0.25};Point(3)={1,1,0,0.25};Point(4)={0,1,0,0.25};
+Point(5)={0,0,1,0.25};Point(6)={1,0,1,0.25};Point(7)={1,1,1,0.25};Point(8)={0,1,1,0.25};
+Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+Line(5)={5,6};Line(6)={6,7};Line(7)={7,8};Line(8)={8,5};
+Line(9)={1,5};Line(10)={2,6};Line(11)={3,7};Line(12)={4,8};
+Curve Loop(1)={1,2,3,4};Curve Loop(2)={5,6,7,8};
+Curve Loop(3)={1,10,-5,-9};Curve Loop(4)={3,12,-7,-11};
+Curve Loop(5)={2,11,-6,-10};Curve Loop(6)={4,9,-8,-12};
+Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
+Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
+Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
+"""
+        mktemp() do path,io
+            write(io,source)
+            close(io)
+            _MESH_DATA_API.open_geo!(path)
+        end
+        _MESH_DATA_API.mesh.generate(3)
+        _MESH_DATA_API.mesh.refine()
+        total=_MESH_DATA_API.mesh.get_nodes()[1]
+        surface_nodes=_MESH_DATA_API.mesh.get_nodes(2,1)
+        curve_nodes=_MESH_DATA_API.mesh.get_nodes(1,1)
+        @test !isempty(surface_nodes[1]) && !isempty(curve_nodes[1])
+        # A boundary entity owns no cells in the tet-only cache, so clearing it
+        # is a no-op — matching Gmsh 4.15.2's retention of the boundary mesh.
+        _MESH_DATA_API.mesh.clear([(2,1),(1,1),(0,1)])
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==total
+        @test _MESH_DATA_API.mesh.get_nodes(2,1)[1]==surface_nodes[1]
+        # Clearing the volume drops every tet and volume-owned node; boundary
+        # nodes survive under their own entity classification — with fresh
+        # dense tags after compaction, so compare coordinates.
+        _MESH_DATA_API.mesh.clear([(3,1)])
+        remaining=_MESH_DATA_API.mesh.get_nodes()[1]
+        volume_nodes=length(total)-length(remaining)
+        @test volume_nodes>0
+        @test _MESH_DATA_API.mesh.get_elements(3,1)[1]==Int32[]
+        @test sort(_MESH_DATA_API.mesh.get_nodes(2,1)[2][1:3:end])==
+              sort(surface_nodes[2][1:3:end])
+        @test sort(_MESH_DATA_API.mesh.get_nodes(1,1)[2][1:3:end])==
+              sort(curve_nodes[2][1:3:end])
+        @test _MESH_DATA_API.mesh.get_nodes(3,1)[1]==Int[]
+        # A selective transform that inverts tets is rejected atomically.
+        _MESH_DATA_API.mesh.generate(3)
+        _MESH_DATA_API.mesh.refine()
+        before=_MESH_DATA_API.mesh.get_nodes()
+        @test_throws ArgumentError _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 50.0; 0 0 0 1],[(2,1)])
+        @test _MESH_DATA_API.mesh.get_nodes()==before
+        # A gentle selective transform moves only the surface-owned nodes.
+        _,coords_before,_=_MESH_DATA_API.mesh.get_nodes(2,1)
+        _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 0.05; 0 0 0 1],[(2,1)])
+        _,coords_after,_=_MESH_DATA_API.mesh.get_nodes(2,1)
+        @test coords_after[3:3:end]==coords_before[3:3:end].+0.05
+        _,other,_=_MESH_DATA_API.mesh.get_nodes(2,3)
+        @test all(<=(1.0),other[3:3:end])
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==before[1]
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end

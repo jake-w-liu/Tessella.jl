@@ -305,12 +305,18 @@ and implicit primitive boundary presentation remain outside this headless model.
 The synchronized mesh API routes complete cached linear-simplex refinement through
 the canonical uniform-refinement kernel, commits only after successful validation and
 resource preflight, and returns detached storage. Whole-cache clearing is idempotent
-and leaves model geometry intact. Entity-selective clearing remains an explicit
-blocker. It also
+and leaves model geometry intact. Entity-selective clearing removes only the cells
+classified on the listed entities and the nodes they owned, retaining boundary-owned
+nodes under their own classification as Gmsh 4.15.2 does; entities owning no cells —
+points and the boundary entities of a tet-only volume cache — are verified no-ops.
+It also
 routes strict 12-/16-entry Gmsh row-major or native 4×4 affine transforms through the
 canonical transform kernel, atomically caches a detached validated result, and
-rewinds orientation-reversing simplex connectivity. Singular, nonfinite, malformed,
-and entity-selective transforms leave the prior cache unchanged. This is a mesh-only
+rewinds orientation-reversing simplex connectivity. Entity-selective transforms move
+only the nodes classified on the listed entities and rewind only cells whose every
+node moved, matching Gmsh 4.15.2's per-entity node storage on the flat shared-node
+cache. Singular, nonfinite, malformed, unknown-entity, and output-invalid transforms
+leave the prior cache unchanged. This is a mesh-only
 operation: geometry and periodic relations remain unchanged, and the index-aligned
 entity-classification snapshot is retained through the transform.
 Read-only bulk cache queries return detached flat coordinates, MSH type blocks,
@@ -390,7 +396,9 @@ tag-to-node maps match. Query results are detached, and every cache replacement
 invalidates both catalogs. Tessella deliberately rejects zero or conflicting
 identifiers, repeated or unknown nodes, and malformed or partly invalid batches
 atomically; Gmsh 4.15.2 accepts or partially applies those cases. Entity-selective
-creation remains an explicit blocker.
+creation adds only the cells classified on the listed entities in canonical order,
+matching Gmsh 4.15.2's `createEdges`/`createFaces` dimTags selection; entities
+owning no cells contribute nothing.
 Point-location queries use a lazily cached deterministic AABB hierarchy over the
 current linear-simplex cache. They return all dense matches in decreasing dimension
 and increasing tag order, or the first such match with detached type, connectivity,

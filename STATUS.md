@@ -150,14 +150,19 @@ presentation are not represented by the headless native model.
 `API.mesh.refine` atomically replaces the complete cached linear-simplex mesh through
 the canonical uniform-refinement kernel and returns detached storage; rejected
 resource bounds leave the prior cache unchanged. `API.mesh.clear` discards only the
-complete cache and preserves model geometry. Entity-selective clearing remains an
-explicit blocker.
+complete cache and preserves model geometry. Entity-selective clearing removes
+the cells classified on the listed entities and drops their owned nodes;
+entities owning no cache cells — points and volume-boundary entities — are
+verified no-ops, matching Gmsh 4.15.2's boundary-mesh retention.
 `API.mesh.affine_transform` accepts a native 4×4 matrix or exactly 12/16 Gmsh
 row-major entries, rejects singular and nonfinite maps, and commits only a detached,
 validated whole-cache result. Reflections rewind simplex connectivity instead of
 leaving inverted cells. The operation does not rewrite model geometry or periodic
 relations; the index-aligned classification snapshot is retained through the
-transform. Entity-selective transforms remain explicit blockers.
+transform. Entity-selective transforms move only the nodes classified on the
+listed entities and rewind only cells whose every node moved; Gmsh 4.15.2's
+per-entity semantics are mirrored on the flat shared-node cache, and outputs
+failing validation leave the cache unchanged.
 Bulk session queries expose detached node tags and coordinates, element types, tags,
 and connectivity, type and whole-dimension filters, and maximum tags. Node and
 element tags are dense identifiers rebuilt for the current cache; linear segment,
@@ -217,7 +222,8 @@ exposing Gmsh's hash iteration; their tag-to-node maps match. Query results are
 detached, and every cache replacement invalidates both catalogs. Tessella rejects
 zero or conflicting identifiers, repeated or unknown nodes, and malformed or partly
 invalid batches atomically; Gmsh 4.15.2 accepts or partially applies those cases.
-Entity-selective creation remains a classification blocker.
+Entity-selective creation adds only the cells classified on the listed
+entities, matching Gmsh 4.15.2's dimTags selection.
 Cached point-location queries use a deterministic AABB hierarchy, decreasing-dimension
 then increasing-tag result order, scaled affine inversion, and exact-rational
 fallbacks. The strict contract uses Gmsh 4.15.2's default `1e-6` reference tolerance;
@@ -351,9 +357,9 @@ with the cache:
   entity_dimension, entity_tag)` in Gmsh's result order; out-of-range tags and
   caches without classification fail explicitly.
 - Entity-selective `clear`, `affine_transform`, `create_edges`, and
-  `create_faces` remain explicit blockers — the classification is read-only —
-  and primitive `add_box` models expose no boundary entities, so their
-  boundary queries correctly reject.
+  `create_faces` operate on classified nodes and cells; entities owning no
+  cache cells no-op. Primitive `add_box` models expose no boundary entities, so
+  their boundary queries correctly reject.
 - The mesh-data differential now generates the same square in both engines and
   checks own-node-first ordering, transitive boundary closure against a
   recursive `getBoundary` walk, filtered type funnels, filtered task unions,
@@ -801,8 +807,8 @@ edge and face topology:
   unordered all-entity output by tag. Its fixed SHA-256 is
   `7cb14f79831c1fb7f3420e34759c16513f64e4d8a5cad82e89bd4e71507f57d0`.
   Tessella deliberately rejects malformed partial node groups that Gmsh silently
-  truncates. Entity-selective catalog creation remains an explicit blocker until
-  the cache owns classification metadata.
+  truncates. Entity-selective catalog creation adds only the cells classified
+  on the listed entities since the cache owns classification metadata.
 - Combined edge-and-face creation for 10,000, 20,000, and 100,000 disjoint
   tetrahedra allocated 4,588,000, 9,142,752, and 49,447,392 bytes. The
   100,000-tetrahedron five-run median was 0.041943292 seconds, confirming linear
