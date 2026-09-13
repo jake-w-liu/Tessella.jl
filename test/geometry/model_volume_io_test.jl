@@ -353,7 +353,7 @@ end
     @test all(==(Int32(64)),projected.blocks[volume_block].tags)
     crc=mixed_crc(projected)
     @test crc.sha==
-          "9bce88e319c67236317df64b876739a62f80982ed86eca028bd1e7bda022bcb6"
+          "16d18e821aebd6486ad2a45f6dc3fa4a86e250f715e7fa5ec3ad35b4254fbdbb"
 
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
@@ -395,7 +395,7 @@ end
     @test hollow_projected.entity_data.entities[(3,1)].boundaries==
           Int32[1,2,3,4,5,6,-101,-102,-103,-104,-105,-106]
     @test mixed_crc(hollow_projected).sha==
-          "83721952195b78f4d18b9e5ff862ef7629b9fbe6b642f33d6649d85e83d0c8b2"
+          "966c3b9248203d19f24bef8d736b231beda3e6bcacd50ac3007ef6a8f78f8fed"
 
     signed=GeoModel()
     _add_explicit_cube_shell!(signed,0,0.0,1.0)
@@ -470,12 +470,12 @@ end
 
     mesh=mesh_model_volume(model,1)
     @test validate(mesh).ok
-    @test nnodes(mesh)==11
-    @test ntets(mesh)==16
+    @test nnodes(mesh)==15
+    @test ntets(mesh)==24
     @test mesh_crc(mesh).sha==
-          "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
+          "b9c89bf91a0adc809706c89959d706c264e2bbd10b38db7c95166f03ca4ce899"
     for (slave,master,pairs,offset) in
-            ((4,6,5,(1.0,0.0,0.0)),(5,3,4,(0.0,1.0,0.0)))
+            ((4,6,5,(1.0,0.0,0.0)),(5,3,5,(0.0,1.0,0.0)))
         mapping=model_periodic_nodes(model,mesh,2,slave)
         @test mapping.master_entity==master
         @test length(mapping.slave_nodes)==length(mapping.master_nodes)==pairs
@@ -501,11 +501,11 @@ end
     @test point_links==[(2,1),(3,2),(4,1),(6,5),(7,6),(8,5)]
     @test curve_links==
           [(2,4),(3,1),(6,8),(7,5),(10,9),(11,10),(12,9)]
-    @test surface_links==[(4,6,5),(5,3,4)]
+    @test surface_links==[(4,6,5),(5,3,5)]
     @test length(projected.periodic_links)==15
     projected_crc=mixed_crc(projected)
     @test projected_crc.sha==
-          "27417f652cf93e0d6aad41c2f1b6c65af3751dfb3cb3166432d2e798f25a6493"
+          "5bba51b352b63a497ecfc8be0aa2a0ec3d2fafe19af1be4296664aeffdfbfc05"
 
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
@@ -526,13 +526,14 @@ end
             else
                 @test reread.entity_data===nothing
                 @test mixed_crc(reread).sha==
-                      "9cc65eb95bbcca5508016ff7cc1340a6d1a7311d0482c2759444c16ce4120502"
+                      "976abf6aa3b9747bdc2a5213f4eb3cbe8e32bb5f1c0df5379ff5c67a5b84fbb0"
             end
         end
     end
 
     unsynchronized=_periodic_cube_volume_fixture(periodic=false)
     empty!(unsynchronized.embeds)
+    set_point_mesh_size!(unsynchronized,[3],0.8)
     unsynchronized_mesh=mesh_model_volume(unsynchronized,1)
     set_periodic!(unsynchronized,2,[4],[6],constraints[1].affine)
     @test_throws ArgumentError model_periodic_nodes(

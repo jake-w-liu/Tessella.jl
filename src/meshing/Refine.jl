@@ -301,11 +301,13 @@ count. Both limits must lie in `0:typemax(Int32)` and must not be `Bool`.
 """
 function refine_uniform(mesh::Mesh;
                         max_nodes=typemax(Int32),
-                        max_cells=typemax(Int32))::Mesh
+                        max_cells=typemax(Int32),
+                        require_positive_tets::Bool=true)::Mesh
     node_limit = _limit(max_nodes, "max_nodes")
     cell_limit = _limit(max_cells, "max_cells")
 
-    diagnostic = MeshTypes.validate(mesh)
+    diagnostic = MeshTypes.validate(mesh;
+        require_positive_tets=require_positive_tets)
     diagnostic.ok || throw(ArgumentError(
         "refine_uniform: input mesh is invalid — " * join(diagnostic.messages, "; ")))
 
@@ -384,7 +386,8 @@ function refine_uniform(mesh::Mesh;
     result = Mesh(coords; segs=segments, tris=triangles, tets=tetrahedra,
                   seg_tag=segment_tags, tri_tag=triangle_tags,
                   tet_tag=tetrahedron_tags)
-    output_diagnostic = MeshTypes.validate(result)
+    output_diagnostic = MeshTypes.validate(result;
+        require_positive_tets=require_positive_tets)
     output_diagnostic.ok || throw(ArgumentError(
         "refine_uniform: refinement produced an invalid mesh — " *
         join(output_diagnostic.messages, "; ")))

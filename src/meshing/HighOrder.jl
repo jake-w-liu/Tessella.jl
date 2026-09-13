@@ -54,7 +54,8 @@ struct P2Mesh
     tet_tag::Vector{Int32}
     function P2Mesh(coords, tet10;
                     tet_tag=zeros(Int32,
-                                  tet10 isa AbstractMatrix ? size(tet10, 2) : 0))
+                                  tet10 isa AbstractMatrix ? size(tet10, 2) : 0),
+                    require_positive_tets::Bool=true)
         coords isa AbstractMatrix || throw(ArgumentError(
             "P2Mesh: coords must be a matrix"))
         tet10 isa AbstractMatrix || throw(ArgumentError(
@@ -101,13 +102,15 @@ struct P2Mesh
             throw(ArgumentError("P2Mesh: tags must fit Int32: " *
                                 sprint(showerror, err)))
         end
-        _check_p2_arrays(C, T, tags, "P2Mesh")
+        _check_p2_arrays(C, T, tags, "P2Mesh";
+                         require_positive_tets=require_positive_tets)
         new(C, T, tags)
     end
 end
 
 function _check_p2_arrays(coords::Matrix{Float64}, tet10::Matrix{Int32},
-                          tet_tag::Vector{Int32}, caller::AbstractString)
+                          tet_tag::Vector{Int32}, caller::AbstractString;
+                          require_positive_tets::Bool=true)
     size(coords, 1) == 3 || throw(ArgumentError(
         "$caller: coords storage must have three rows"))
     size(tet10, 1) == 10 || throw(ArgumentError(
@@ -141,7 +144,7 @@ function _check_p2_arrays(coords::Matrix{Float64}, tet10::Matrix{Int32},
     ne == 0 && return nothing
 
     linear = Mesh(coords; tets=Matrix(@view tet10[1:4, :]))
-    diagnostic = validate(linear)
+    diagnostic = validate(linear; require_positive_tets=require_positive_tets)
     diagnostic.ok || throw(ArgumentError(
         "$caller: linear corner complex is invalid — " *
         join(diagnostic.messages, "; ")))
@@ -247,10 +250,11 @@ unique edges). The input tetrahedron tags are preserved. `max_nodes` and
 """
 function p2_tetmesh(m::Mesh;
                     max_nodes=typemax(Int32),
-                    max_tets=typemax(Int32))
+                    max_tets=typemax(Int32),
+                    require_positive_tets::Bool=true)
     node_limit = _p2_limit(max_nodes, "max_nodes", "p2_tetmesh")
     tet_limit = _p2_limit(max_tets, "max_tets", "p2_tetmesh")
-    diagnostic = validate(m)
+    diagnostic = validate(m; require_positive_tets=require_positive_tets)
     diagnostic.ok || throw(ArgumentError(
         "p2_tetmesh: input mesh is invalid — " * join(diagnostic.messages, "; ")))
     nn = nnodes(m)
@@ -260,7 +264,8 @@ function p2_tetmesh(m::Mesh;
     nt <= tet_limit || throw(ArgumentError(
         "p2_tetmesh: $nt input tetrahedra exceed max_tets=$tet_limit"))
     nt == 0 && return P2Mesh(
-        m.coords, Matrix{Int32}(undef, 10, 0); tet_tag=m.tet_tag)
+        m.coords, Matrix{Int32}(undef, 10, 0); tet_tag=m.tet_tag,
+        require_positive_tets=require_positive_tets)
 
     edge_records = _p2_checked_mul(6, nt, "edge-record", "p2_tetmesh")
     _p2_checked_mul(edge_records, sizeof(NTuple{2,Int32}), "edge-record byte", "p2_tetmesh")
@@ -321,7 +326,8 @@ function p2_tetmesh(m::Mesh;
             tet10[slot, t] = edge_ids[_p2_edge(m.tets[i, t], m.tets[j, t])]
         end
     end
-    return P2Mesh(coords, tet10; tet_tag=m.tet_tag)
+    return P2Mesh(coords, tet10; tet_tag=m.tet_tag,
+                  require_positive_tets=require_positive_tets)
 end
 
 """

@@ -116,17 +116,20 @@ end
 
     try
         _MESH_DATA_API.initialize()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes()
+        @test _MESH_DATA_API.mesh.get_nodes()==(UInt64[],Float64[],Float64[])
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(1)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element_types()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements_by_type(4)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes_by_element_type(4)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_barycenters(4,-1,false,false)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element_edge_nodes(4)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_element_face_nodes(4,3)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_max_node_tag()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_max_element_tag()
+        @test _MESH_DATA_API.mesh.get_elements()==
+              (Int32[],Vector{UInt64}[],Vector{UInt64}[])
+        @test _MESH_DATA_API.mesh.get_element_types()==Int32[]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(4)==
+              (UInt64[],UInt64[])
+        @test _MESH_DATA_API.mesh.get_nodes_by_element_type(4)==
+              (UInt64[],Float64[],Float64[])
+        @test _MESH_DATA_API.mesh.get_barycenters(4,-1,false,false)==Float64[]
+        @test _MESH_DATA_API.mesh.get_element_edge_nodes(4)==UInt64[]
+        @test _MESH_DATA_API.mesh.get_element_face_nodes(4,3)==UInt64[]
+        @test _MESH_DATA_API.mesh.get_max_node_tag()==0
+        @test _MESH_DATA_API.mesh.get_max_element_tag()==0
 
         source=_mesh_data_fixture()
         source_crc=mesh_crc(source)
@@ -362,9 +365,10 @@ end
         @test length(_MESH_DATA_API.mesh.get_element_face_nodes(4,3))==96
 
         @test _MESH_DATA_API.mesh.clear()===nothing
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_elements()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_max_node_tag()
+        @test _MESH_DATA_API.mesh.get_nodes()==(UInt64[],Float64[],Float64[])
+        @test _MESH_DATA_API.mesh.get_elements()==
+              (Int32[],Vector{UInt64}[],Vector{UInt64}[])
+        @test _MESH_DATA_API.mesh.get_max_node_tag()==0
 
         allocation_small=_mesh_data_segment_fixture(5_000)
         allocation_large=_mesh_data_segment_fixture(10_000)
@@ -766,9 +770,11 @@ end
         @test _MESH_DATA_API.mesh.get_nodes(2,1)[1]==refined_surface
         _,shifted,_=_MESH_DATA_API.mesh.get_nodes(2,1)
         @test all(>=(1.5),shifted[1:3:end])
-        # Clearing drops the cache and its classification together.
+        # Clearing drops the cache and its classification together; queries on
+        # still-existing entities return empty data like Gmsh.
         _MESH_DATA_API.mesh.clear()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes(2,1)
+        @test _MESH_DATA_API.mesh.get_nodes(2,1)==
+              (UInt64[],Float64[],Float64[])
     finally
         _MESH_DATA_API.finalize()
     end
@@ -862,7 +868,8 @@ end
         @test_throws ArgumentError _MESH_DATA_API.mesh.clear([(2,99)])
         # Empty selection still clears the complete cache.
         _MESH_DATA_API.mesh.clear()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes(2,1)
+        @test _MESH_DATA_API.mesh.get_nodes(2,1)==
+              (UInt64[],Float64[],Float64[])
     finally
         _MESH_DATA_API.finalize()
     end
@@ -923,9 +930,9 @@ Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
         # A gentle selective transform moves only the surface-owned nodes.
         _,coords_before,_=_MESH_DATA_API.mesh.get_nodes(2,1)
         _MESH_DATA_API.mesh.affine_transform(
-            [1.0 0 0 0; 0 1 0 0; 0 0 1 0.05; 0 0 0 1],[(2,1)])
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 0.02; 0 0 0 1],[(2,1)])
         _,coords_after,_=_MESH_DATA_API.mesh.get_nodes(2,1)
-        @test coords_after[3:3:end]==coords_before[3:3:end].+0.05
+        @test coords_after[3:3:end]==coords_before[3:3:end].+0.02
         _,other,_=_MESH_DATA_API.mesh.get_nodes(2,3)
         @test all(<=(1.0),other[3:3:end])
         @test _MESH_DATA_API.mesh.get_nodes()[1]==before[1]
@@ -1095,7 +1102,8 @@ end
             _MESH_DATA_API.LAST_MESH[]=_MESH_DATA_API._copy_mesh(dup_mesh)
             _MESH_DATA_API.LAST_MESH_CLASS[]=_MESH_DATA_API._MeshClassification(
                 _MESH_DATA_API.LAST_MESH[],(2,Int32(1)),
-                fill((2,Int32(1)),4),Dict{Tuple{Int,Int32},Vector{Int32}}(),
+                [(2,Int32(1))],fill((2,Int32(1)),4),
+                Dict{Tuple{Int,Int32},Vector{Int32}}(),
                 Int32[7,7],Int32[8,8],Int32[9])
         end
         _MESH_DATA_API.mesh.remove_duplicate_elements()
@@ -1329,8 +1337,9 @@ end
         # Parent-level removal clears all embeddings on the surface.
         _MESH_DATA_API.mesh.remove_embedded([(2,1)])
         @test isempty(_MESH_DATA_API.mesh.get_embedded(2,1))
-        # Model mutations invalidate the mesh cache.
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes()
+        # Model mutations invalidate the mesh cache; queries then return empty
+        # data like Gmsh.
+        @test _MESH_DATA_API.mesh.get_nodes()==(UInt64[],Float64[],Float64[])
         # The dimension filter only drops matching embedded dimensions.
         _MESH_DATA_API.model.embed(0,[5,6],2,1)
         _MESH_DATA_API.mesh.remove_embedded([(2,1)],1)

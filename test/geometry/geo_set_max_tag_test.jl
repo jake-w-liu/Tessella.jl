@@ -40,14 +40,14 @@ end
 
     meshed=execute_geo(_GEO_SET_MAX_TAG_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==5
-    @test ntets(meshed.mesh)==4
+    @test nnodes(meshed.mesh)==30
+    @test ntets(meshed.mesh)==60
     @test mesh_crc(meshed.mesh).sha==
-          "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b"
+          "7a1131a5f09060687059afcdf1918cdc81983f04bb416121a6a2c60423cc6354"
     projected=model_to_mixed(meshed.model,meshed.mesh,3,601)
     @test validate(projected).ok
     @test mixed_crc(projected).sha==
-          "aa3127e5c1a302ebdb98890a4d7a62d5cb385e3cf73aa024372f809a7542a45d"
+          "0f1b2ea4ad06ff62e9e7304a0b91f06c559fe733bbb7c8d3c0ed7f75d5075515"
 
     lowered=_execute_set_max_tag_source(raw"""
         Point(10) = {0,0,0,1};

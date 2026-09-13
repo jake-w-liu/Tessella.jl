@@ -64,11 +64,11 @@ end
 
         generated=_TOPOLOGY_API.mesh.generate(3)
         @test validate(generated).ok
-        @test nnodes(generated)==5
-        @test ntets(generated)==4
+        @test nnodes(generated)==9
+        @test ntets(generated)==12
         generated_crc=mesh_crc(generated)
         @test generated_crc.sha==
-              "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b"
+              "979b12cba32c4e7e8317040d31636eca298b177460adec514374372613ba2f23"
         cached=_TOPOLOGY_API.LAST_MESH[]
 
         detached_entities=_TOPOLOGY_API.model.get_entities()

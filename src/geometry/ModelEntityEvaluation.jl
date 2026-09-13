@@ -224,11 +224,42 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1,2),caller)
     if dimension==0
+        if haskey(m.discrete,(0,entity_tag))
+            values=_model_evaluation_values(
+                parametric_coordinates,1,caller,"parametric coordinates")
+            isempty(values) || throw(ArgumentError(
+                "$caller: Point parametric coordinates must be empty"))
+            record=m.discrete[(0,entity_tag)]
+            isempty(record.node_coords) && throw(ArgumentError(
+                "$caller: discrete point has no node"))
+            return collect(record.node_coords[:,1])
+        end
         values=_model_evaluation_values(
             parametric_coordinates,1,caller,"parametric coordinates")
         isempty(values) || throw(ArgumentError(
             "$caller: Point parametric coordinates must be empty"))
         return collect(m.points[entity_tag])
+    end
+    if haskey(m.discrete,(dimension,entity_tag))
+        values=_model_evaluation_values(
+            parametric_coordinates,dimension,caller,"parametric coordinates")
+        _,frames=_discrete_eval_setup(m,dimension,entity_tag,caller)
+        output=Float64[]
+        sizehint!(output,3*(length(values)÷dimension))
+        if dimension==1
+            for parameter in values
+                _model_append_point!(output,
+                    _discrete_curve_point(frames,parameter,caller))
+            end
+        else
+            for index in 1:2:length(values)
+                weights,points=_discrete_surface_locate(
+                    frames,values[index],values[index+1],caller)
+                _model_append_point!(output,ntuple(axis->sum(
+                    k->weights[k]*points[k][axis],1:3),3))
+            end
+        end
+        return output
     end
     stride=dimension
     values=_model_evaluation_values(
@@ -259,6 +290,23 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
     values=_model_evaluation_values(
         parametric_coordinates,dimension,caller,"parametric coordinates")
     output=Float64[]
+    if haskey(m.discrete,(dimension,entity_tag))
+        _,frames=_discrete_eval_setup(m,dimension,entity_tag,caller)
+        if dimension==1
+            for parameter in values
+                derivative=_discrete_curve_derivative(
+                    frames,parameter,caller)
+                append!(output,derivative)
+            end
+        else
+            for index in 1:2:length(values)
+                du,dv=_discrete_surface_derivative(
+                    frames,values[index],values[index+1],caller)
+                append!(output,du);append!(output,dv)
+            end
+        end
+        return output
+    end
     if dimension==1
         line=_model_line_geometry(m,entity_tag,caller)
         derivative=_model_line_derivative(line,entity_tag,caller)
@@ -284,8 +332,9 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
         m,dim,tag,(1,2),caller)
     values=_model_evaluation_values(
         parametric_coordinates,dimension,caller,"parametric coordinates")
-    dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
-                   _model_plane_frame(m,entity_tag,caller)
+    haskey(m.discrete,(dimension,entity_tag)) ||
+        (dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
+                        _model_plane_frame(m,entity_tag,caller))
     multiplier=dimension==1 ? 3 : 9
     return zeros(Float64,multiplier*(length(values)÷dimension))
 end
@@ -297,8 +346,9 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
         m,dim,tag,(1,2),caller)
     values=_model_evaluation_values(
         parametric_coordinates,dimension,caller,"parametric coordinates")
-    dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
-                   _model_plane_frame(m,entity_tag,caller)
+    haskey(m.discrete,(dimension,entity_tag)) ||
+        (dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
+                        _model_plane_frame(m,entity_tag,caller))
     return zeros(Float64,length(values)÷dimension)
 end
 
@@ -329,6 +379,22 @@ function model_normal(m::GeoModel,tag,parametric_coordinates)
     _,entity_tag=_model_metadata_entity(m,2,tag,caller)
     values=_model_evaluation_values(
         parametric_coordinates,2,caller,"parametric coordinates")
+    if haskey(m.discrete,(2,entity_tag))
+        _,frames=_discrete_eval_setup(m,2,entity_tag,caller)
+        output=Float64[]
+        sizehint!(output,3*(length(values)÷2))
+        for index in 1:2:length(values)
+            _,points=_discrete_surface_locate(
+                frames,values[index],values[index+1],caller)
+            a,b,c=points
+            normal=_model_normalize3(_model_cross3(
+                (b[1]-a[1],b[2]-a[2],b[3]-a[3]),
+                (c[1]-a[1],c[2]-a[2],c[3]-a[3])),caller,
+                "discrete surface normal")
+            append!(output,normal)
+        end
+        return output
+    end
     normal=_model_plane_frame(m,entity_tag,caller).normal
     output=Float64[]
     sizehint!(output,3*(length(values)÷2))
@@ -354,6 +420,20 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
             "$caller: Point parametrization requires exactly one coordinate"))
         return Float64[]
     end
+    if haskey(m.discrete,(dimension,entity_tag))
+        _,frames=_discrete_eval_setup(m,dimension,entity_tag,caller)
+        output=Float64[]
+        sizehint!(output,dimension*(length(values)÷3))
+        for index in 1:3:length(values)
+            point=(values[index],values[index+1],values[index+2])
+            if dimension==1
+                push!(output,_discrete_curve_param(frames,point))
+            else
+                push!(output,_discrete_surface_param(frames,point)...)
+            end
+        end
+        return output
+    end
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
     line=dimension==1 ? _model_line_geometry(m,entity_tag,caller) : nothing
@@ -378,6 +458,24 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1,2),caller)
     dimension==0 && return Float64[],Float64[]
+    if haskey(m.discrete,(dimension,entity_tag))
+        record=m.discrete[(dimension,entity_tag)]
+        coords=_model_record_node_coords(m)
+        frames=_discrete_element_frames(
+            m,record,dimension,coords,caller)
+        isempty(frames) && throw(ArgumentError(
+            "$caller: discrete entity ($dimension,$entity_tag) has no elements"))
+        lower=fill(Inf,dimension);upper=fill(-Inf,dimension)
+        for (params,_) in frames
+            for parameter in params
+                for axis in 1:dimension
+                    lower[axis]=min(lower[axis],parameter[axis])
+                    upper[axis]=max(upper[axis],parameter[axis])
+                end
+            end
+        end
+        return lower,upper
+    end
     dimension==1 && begin
         _model_line_geometry(m,entity_tag,caller)
         return [0.0],[1.0]
@@ -451,6 +549,26 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
     closest=Float64[];parameters=Float64[]
     sizehint!(closest,length(values))
     sizehint!(parameters,dimension*(length(values)÷3))
+    if haskey(m.discrete,(dimension,entity_tag))
+        _,frames=_discrete_eval_setup(m,dimension,entity_tag,caller)
+        for index in 1:3:length(values)
+            point=(values[index],values[index+1],values[index+2])
+            if dimension==1
+                parameter=_discrete_curve_param(frames,point)
+                push!(parameters,parameter)
+                _model_append_point!(closest,
+                    _discrete_curve_point(frames,parameter,caller))
+            else
+                uv=_discrete_surface_param(frames,point)
+                append!(parameters,uv)
+                weights,points=_discrete_surface_locate(
+                    frames,uv[1],uv[2],caller)
+                _model_append_point!(closest,ntuple(axis->sum(
+                    k->weights[k]*points[k][axis],1:3),3))
+            end
+        end
+        return closest,parameters
+    end
     line=dimension==1 ? _model_line_geometry(m,entity_tag,caller) : nothing
     plane=dimension==2 ? _model_plane_frame(m,entity_tag,caller) : nothing
     for index in 1:3:length(values)
@@ -522,4 +640,303 @@ function model_reparametrize_on_surface(
             plane,coordinate,caller,index))
     end
     return output
+end
+
+# ---- discrete entity evaluation ------------------------------------------
+#
+# Parametrized discrete entities (see `create_geometry!`) evaluate through
+# piecewise-linear interpolation: curves interpolate along their segments'
+# stored parameters, surfaces interpolate inside the element whose parametric
+# footprint contains the query point. Every helper resolves a node's
+# parameters from the entity record's `node_params` (owned nodes) or
+# `aux_params` (nodes owned by boundary entities).
+
+# Parametric coordinates of `node` with respect to `record`'s entity.
+function _record_param_of(record::DiscreteEntity,node::Int32,dim::Int)
+    column=findfirst(==(node),record.node_tags)
+    if column!==nothing
+        size(record.node_params,1)>=dim || return nothing
+        return Vector{Float64}(record.node_params[1:dim,column])
+    end
+    value=get(record.aux_params,node,nothing)
+    value===nothing && return nothing
+    length(value)>=dim || return nothing
+    return value[1:dim]
+end
+
+# (corner tags, corner params, corner coords) for one element of `record`.
+function _discrete_element_frame(m::GeoModel,record::DiscreteEntity,
+                                 msh_type::Int,nodes::Vector{Int32},
+                                 coords::Dict{Int32,NTuple{3,Float64}},
+                                 caller::AbstractString)
+    count=msh_family(msh_type)===:qua ? 4 :
+          msh_family(msh_type)===:lin ? 2 : 3
+    corners=nodes[1:min(count,length(nodes))]
+    params=Vector{Vector{Float64}}(undef,length(corners))
+    points=Vector{NTuple{3,Float64}}(undef,length(corners))
+    dim=msh_dimension(msh_type)
+    for (i,node) in enumerate(corners)
+        value=_record_param_of(record,node,dim)
+        value===nothing && throw(ArgumentError(
+            "$caller: discrete entity has no parametrization; " *
+            "run mesh.create_geometry first"))
+        params[i]=value
+        points[i]=get(coords,node,nothing)===nothing ? throw(ArgumentError(
+            "$caller: node $node has no coordinates")) : coords[node]
+    end
+    return corners,params,points
+end
+
+# All (params, coords) corner frames of `record`'s dim-`dim` elements. Quads
+# split into two corner triangles so parametric location is uniform.
+function _discrete_element_frames(m::GeoModel,record::DiscreteEntity,dim::Int,
+                                  coords::Dict{Int32,NTuple{3,Float64}},
+                                  caller::AbstractString)
+    frames=Tuple{Vector{Vector{Float64}},Vector{NTuple{3,Float64}}}[]
+    for (index,msh_type) in enumerate(record.element_types)
+        msh_dimension(msh_type)!=dim && continue
+        _,params,points=_discrete_element_frame(
+            m,record,Int(msh_type),record.element_nodes[index],coords,caller)
+        if msh_family(msh_type)===:qua
+            push!(frames,([params[1],params[2],params[3]],
+                          [points[1],points[2],points[3]]))
+            push!(frames,([params[1],params[3],params[4]],
+                          [points[1],points[3],points[4]]))
+        else
+            push!(frames,(params,points))
+        end
+    end
+    return frames
+end
+
+# Barycentric coordinates of `p` in triangle (a,b,c) — degenerate triangles
+# return nothing.
+function _barycentric3(p,a,b,c)
+    v0=(b[1]-a[1],b[2]-a[2]);v1=(c[1]-a[1],c[2]-a[2])
+    v2=(p[1]-a[1],p[2]-a[2])
+    d00=v0[1]*v0[1]+v0[2]*v0[2];d01=v0[1]*v1[1]+v0[2]*v1[2]
+    d11=v1[1]*v1[1]+v1[2]*v1[2]
+    d20=v2[1]*v0[1]+v2[2]*v0[2];d21=v2[1]*v1[1]+v2[2]*v1[2]
+    denom=d00*d11-d01*d01
+    denom==0 && return nothing
+    v=(d11*d20-d01*d21)/denom
+    w=(d00*d21-d01*d20)/denom
+    return (1-v-w,v,w)
+end
+
+# Closest point of `p` on segment (a,b) → (clamped t, squared distance).
+function _segment_closest(p,a,b)
+    d=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
+    l2=d[1]^2+d[2]^2+d[3]^2
+    if l2==0
+        return 0.0,(p[1]-a[1])^2+(p[2]-a[2])^2+(p[3]-a[3])^2
+    end
+    t=((p[1]-a[1])*d[1]+(p[2]-a[2])*d[2]+(p[3]-a[3])*d[3])/l2
+    t=clamp(t,0.0,1.0)
+    q=(a[1]+t*d[1],a[2]+t*d[2],a[3]+t*d[3])
+    return t,(p[1]-q[1])^2+(p[2]-q[2])^2+(p[3]-q[3])^2
+end
+
+# Closest point of `p` on triangle (a,b,c) → (barycentric, squared distance).
+function _triangle_closest(p,a,b,c)
+    ab=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
+    ac=(c[1]-a[1],c[2]-a[2],c[3]-a[3])
+    ap=(p[1]-a[1],p[2]-a[2],p[3]-a[3])
+    d1=ab[1]*ap[1]+ab[2]*ap[2]+ab[3]*ap[3]
+    d2=ac[1]*ap[1]+ac[2]*ap[2]+ac[3]*ap[3]
+    if d1<=0 && d2<=0
+        return (1.0,0.0,0.0),ap[1]^2+ap[2]^2+ap[3]^2
+    end
+    bp=(p[1]-b[1],p[2]-b[2],p[3]-b[3])
+    d3=ab[1]*bp[1]+ab[2]*bp[2]+ab[3]*bp[3]
+    d4=ac[1]*bp[1]+ac[2]*bp[2]+ac[3]*bp[3]
+    if d3>=0 && d4<=d3
+        return (0.0,1.0,0.0),bp[1]^2+bp[2]^2+bp[3]^2
+    end
+    vc=d1*d4-d3*d2
+    if vc<=0 && d1>=0 && d3<=0
+        v=d1/(d1-d3)
+        q=(a[1]+v*ab[1],a[2]+v*ab[2],a[3]+v*ab[3])
+        return (1-v,v,0.0),(p[1]-q[1])^2+(p[2]-q[2])^2+(p[3]-q[3])^2
+    end
+    cp=(p[1]-c[1],p[2]-c[2],p[3]-c[3])
+    d5=ab[1]*cp[1]+ab[2]*cp[2]+ab[3]*cp[3]
+    d6=ac[1]*cp[1]+ac[2]*cp[2]+ac[3]*cp[3]
+    if d6>=0 && d5<=d6
+        return (0.0,0.0,1.0),cp[1]^2+cp[2]^2+cp[3]^2
+    end
+    vb=d5*d2-d1*d6
+    if vb<=0 && d2>=0 && d6<=0
+        w=d2/(d2-d6)
+        q=(a[1]+w*ac[1],a[2]+w*ac[2],a[3]+w*ac[3])
+        return (1-w,0.0,w),(p[1]-q[1])^2+(p[2]-q[2])^2+(p[3]-q[3])^2
+    end
+    va=d3*d6-d5*d4
+    if va<=0 && (d4-d3)>=0 && (d5-d6)>=0
+        w=(d4-d3)/((d4-d3)+(d5-d6))
+        q=(b[1]+w*(c[1]-b[1]),b[2]+w*(c[2]-b[2]),b[3]+w*(c[3]-b[3]))
+        return (0.0,1-w,w),(p[1]-q[1])^2+(p[2]-q[2])^2+(p[3]-q[3])^2
+    end
+    denom=1/(va+vb+vc)
+    v=vb*denom;w=vc*denom
+    q=(a[1]+ab[1]*v+ac[1]*w,a[2]+ab[2]*v+ac[2]*w,a[3]+ab[3]*v+ac[3]*w)
+    return (1-v-w,v,w),(p[1]-q[1])^2+(p[2]-q[2])^2+(p[3]-q[3])^2
+end
+
+# Locate the param-space footprint containing (u,v); falls back to the
+# barycentric-clamped nearest triangle when the query lies outside.
+function _discrete_surface_locate(frames,u::Float64,v::Float64,
+                                  caller::AbstractString)
+    isempty(frames) && throw(ArgumentError(
+        "$caller: discrete surface has no elements"))
+    best=nothing;best_distance=Inf
+    for (params,points) in frames
+        weights=_barycentric3((u,v),params[1],params[2],params[3])
+        weights===nothing && continue
+        if all(w->w>=-1e-12,weights)
+            return weights,points
+        end
+        clamped=ntuple(k->max(weights[k],0.0),3)
+        total=sum(clamped)
+        total>0 || continue
+        clamped=clamped./total
+        pu=sum(k->clamped[k]*params[k][1],1:3)
+        pv=sum(k->clamped[k]*params[k][2],1:3)
+        distance=(pu-u)^2+(pv-v)^2
+        if distance<best_distance
+            best_distance=distance
+            best=(clamped,points)
+        end
+    end
+    best===nothing && throw(ArgumentError(
+        "$caller: could not locate ($u, $v) on the discrete surface"))
+    return best
+end
+
+# Shared frame lookup for a parametrized discrete entity.
+function _discrete_eval_setup(m::GeoModel,dimension::Int,tag::Int,
+                              caller::AbstractString)
+    record=get(m.discrete,(dimension,tag),nothing)
+    record===nothing && throw(ArgumentError(
+        "$caller: entity ($dimension,$tag) is not discrete"))
+    coords=_model_record_node_coords(m)
+    frames=_discrete_element_frames(m,record,dimension,coords,caller)
+    isempty(frames) && throw(ArgumentError(
+        "$caller: discrete entity ($dimension,$tag) has no elements"))
+    return record,frames
+end
+
+# Evaluate a discrete curve at normalized parameter `t` in [0,1].
+function _discrete_curve_point(frames,t::Float64,caller::AbstractString)
+    best=nothing;best_distance=Inf
+    for (params,points) in frames
+        pa,pb=params[1][1],params[2][1]
+        lo,hi=minmax(pa,pb)
+        if lo-1e-12<=t<=hi+1e-12 && hi>lo
+            local_t=clamp((t-pa)/(pb-pa),0.0,1.0)
+            a,b=points[1],points[2]
+            return (a[1]+local_t*(b[1]-a[1]),
+                    a[2]+local_t*(b[2]-a[2]),
+                    a[3]+local_t*(b[3]-a[3]))
+        end
+        distance=min(abs(t-pa),abs(t-pb))
+        if distance<best_distance
+            best_distance=distance
+            best=(pa<pb ? (points[1],points[2],pa,pb) :
+                         (points[2],points[1],pb,pa))
+        end
+    end
+    best===nothing && throw(ArgumentError(
+        "$caller: parameter $t is outside the curve's range"))
+    a,b,lo,hi=best
+    local_t=clamp((t-lo)/(hi-lo),0.0,1.0)
+    return (a[1]+local_t*(b[1]-a[1]),a[2]+local_t*(b[2]-a[2]),
+            a[3]+local_t*(b[3]-a[3]))
+end
+
+# Inverse map: closest point on the discrete curve → its stored parameter.
+function _discrete_curve_param(frames,point)
+    best=0.0;best_distance=Inf
+    for (params,points) in frames
+        t,dist=_segment_closest(point,points[1],points[2])
+        if dist<best_distance
+            best_distance=dist
+            best=params[1][1]+t*(params[2][1]-params[1][1])
+        end
+    end
+    return best
+end
+
+# Segment direction d(xyz)/dt of the discrete-curve frame containing `t`.
+function _discrete_curve_derivative(frames,t::Float64,caller::AbstractString)
+    best=nothing;best_distance=Inf
+    for (params,points) in frames
+        pa,pb=params[1][1],params[2][1]
+        lo,hi=minmax(pa,pb)
+        if lo-1e-12<=t<=hi+1e-12 && hi>lo
+            a,b=points[1],points[2]
+            scale=(pb-pa)
+            return ((b[1]-a[1])/scale,(b[2]-a[2])/scale,(b[3]-a[3])/scale)
+        end
+        distance=min(abs(t-pa),abs(t-pb))
+        if distance<best_distance
+            best_distance=distance
+            best=(params,points)
+        end
+    end
+    best===nothing && throw(ArgumentError(
+        "$caller: parameter $t is outside the curve's range"))
+    params,points=best
+    pa,pb=params[1][1],params[2][1]
+    pb==pa && throw(ArgumentError("$caller: degenerate curve segment"))
+    a,b=points[1],points[2]
+    scale=pb-pa
+    return ((b[1]-a[1])/scale,(b[2]-a[2])/scale,(b[3]-a[3])/scale)
+end
+
+# d(xyz)/d(u,v) of the discrete-surface element containing (u,v).
+function _discrete_surface_derivative(frames,u::Float64,v::Float64,
+                                      caller::AbstractString)
+    isempty(frames) && throw(ArgumentError(
+        "$caller: discrete surface has no elements"))
+    best=nothing;best_distance=Inf
+    for (params,points) in frames
+        weights=_barycentric3((u,v),params[1],params[2],params[3])
+        weights===nothing && continue
+        distance=weights[1]<0||weights[2]<0||weights[3]<0 ?
+            min(abs.(weights)...) : 0.0
+        pu=params[1];pv=params[2];pw=params[3]
+        du=(pv[1]-pu[1],pw[1]-pu[1]);dv=(pv[2]-pu[2],pw[2]-pu[2])
+        determinant=du[1]*dv[2]-du[2]*dv[1]
+        determinant==0 && continue
+        pa,pb,pc=points
+        ex=(pb[1]-pa[1],pb[2]-pa[2],pb[3]-pa[3])
+        ey=(pc[1]-pa[1],pc[2]-pa[2],pc[3]-pa[3])
+        # Solve [du; dv] * J = [ex; ey] for J rows (dxyz/du, dxyz/dv).
+        det=determinant
+        d_du=ntuple(axis->( dv[2]*ex[axis]-dv[1]*ey[axis])/det,3)
+        d_dv=ntuple(axis->(-du[2]*ex[axis]+du[1]*ey[axis])/det,3)
+        if distance<=best_distance
+            best_distance=distance
+            best=(d_du,d_dv)
+            distance==0 && break
+        end
+    end
+    best===nothing && throw(ArgumentError(
+        "$caller: could not differentiate at ($u, $v)"))
+    return best
+end
+
+# Inverse map on a discrete surface: closest xyz point → stored parameters.
+function _discrete_surface_param(frames,point)
+    best=(0.0,0.0);best_distance=Inf
+    for (params,points) in frames
+        weights,dist=_triangle_closest(point,points[1],points[2],points[3])
+        if dist<best_distance
+            best_distance=dist
+            best=(sum(k->weights[k]*params[k][1],1:3),
+                  sum(k->weights[k]*params[k][2],1:3))
+        end
+    end
+    return best
 end

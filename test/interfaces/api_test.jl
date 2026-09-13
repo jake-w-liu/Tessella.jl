@@ -1,4 +1,5 @@
 using Test
+using LinearAlgebra
 using Tessella
 using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume, validate
 
@@ -86,7 +87,12 @@ const _API=Tessella.API
 
         @test _API.model.add_box(2,0,0,1,1,1;tag=2)==2
         @test_throws ArgumentError _API.mesh.get()
-        @test_throws ArgumentError _API.mesh.generate(3)
+        # Adding a volume invalidates the cache; generating again meshes both
+        # volumes into the merged cache with per-entity classification.
+        _API.mesh.generate(3)
+        @test ntets(_API.mesh.get())==24
+        @test _API.mesh.get_elements(3,1)[1]==Int32[4]
+        @test _API.mesh.get_elements(3,2)[1]==Int32[4]
     finally
         _API.finalize()
     end
@@ -324,7 +330,7 @@ end
             node(generated,generated.tets[4,cell])) for cell in 1:ntets(generated))
         @test volume≈1/6 atol=1e-12
         @test mesh_crc(generated).sha==
-              "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b"
+              "979b12cba32c4e7e8317040d31636eca298b177460adec514374372613ba2f23"
         expected=mesh_crc(generated)
         @test_throws ArgumentError _API.model.add_surface_loop([1];tag=2)
         @test mesh_crc(_API.mesh.get())==expected
@@ -366,8 +372,8 @@ end
             @test validate(generated).ok
             expected=mesh_crc(generated)
             @test expected.sha==
-                  "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
-            for (slave,master,pairs) in ((4,6,5),(5,3,4))
+                  "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
+            for (slave,master,pairs) in ((4,6,25),(5,3,25))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
                 @test length(mapping.slave_nodes)==
@@ -382,8 +388,8 @@ end
 
             refined=_API.mesh.refine()
             @test mesh_crc(refined).sha==
-                  "5db960c919e54384ecf25fe27144a8636d9b8557d2afe052c77c7c545ffe8722"
-            for (slave,master,pairs) in ((4,6,13),(5,3,9))
+                  "8cd1448786ce1f65458c088b1772e565df288ab17627f4f6445c7c4c3855ac23"
+            for (slave,master,pairs) in ((4,6,81),(5,3,81))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
                 @test length(mapping.slave_nodes)==
@@ -584,9 +590,9 @@ end
     @test_throws ArgumentError _API.model.set_file_name("x.msh")
     try
         _API.initialize()
-        @test _API.model.get_current()=="unnamed"
+        @test _API.model.get_current()==""
         @test _API.model.get_file_name()==""
-        @test _API.model.set_current("unnamed")===nothing
+        @test _API.model.set_current("")===nothing
         @test_throws ArgumentError _API.model.set_current("other")
         @test _API.model.set_file_name("fixture.msh")===nothing
         @test _API.model.get_file_name()=="fixture.msh"
@@ -598,7 +604,7 @@ end
         end
         # initialize() resets session model state.
         _API.initialize()
-        @test _API.model.get_current()=="unnamed"
+        @test _API.model.get_current()==""
         @test _API.model.get_file_name()==""
 
         _API.model.add_point(0,0,0;tag=1);_API.model.add_point(1,0,0;tag=2)
@@ -657,14 +663,16 @@ end
             @test_throws ArgumentError call()
         end
         # optimize() runs the boundary-preserving tet optimizer on the cache;
-        # a 2-D cache is unchanged and invalid scopes/methods fail explicitly.
+        # a 2-D cache is unchanged, entity scoping freezes unselected nodes,
+        # and invalid scopes/methods fail explicitly.
         @test _API.mesh.optimize()===nothing
         @test validate(_API.mesh.get()).ok
+        @test _API.mesh.optimize("",false,1,[(2,1)])===nothing
         for call in (()->_API.mesh.optimize("Netgen"),
                      ()->_API.mesh.optimize(3),
                      ()->_API.mesh.optimize("",3,1),
                      ()->_API.mesh.optimize("",false,-1),
-                     ()->_API.mesh.optimize("",false,1,[(2,1)]))
+                     ()->_API.mesh.optimize("",false,1,[(3,99)]))
             @test_throws ArgumentError call()
         end
         # Per-element visibility is raw display state like Gmsh 4.15.2: default
@@ -683,27 +691,52 @@ end
                      ()->_API.mesh.get_visibility(3))
             @test_throws ArgumentError call()
         end
+        # Per-window visibility is validated display state: window indices are
+        # non-negative integers and unknown element tags are dropped silently.
+        @test _API.model.set_visibility_per_window(0)===nothing
+        @test _API.model.set_visibility_per_window(1,2)===nothing
+        @test _API.mesh.set_visibility_per_window(1,0)===nothing
+        @test _API.mesh.set_visibility_per_window(99999,0,3)===nothing
+        for call in (()->_API.model.set_visibility_per_window(1,-1),
+                     ()->_API.model.set_visibility_per_window("x"),
+                     ()->_API.mesh.set_visibility_per_window(1.5,0),
+                     ()->_API.mesh.set_visibility_per_window(1,0,-2),
+                     ()->_API.mesh.set_visibility_per_window(1,"x"))
+            @test_throws ArgumentError call()
+        end
         _API.mesh.clear()
         @test _API.mesh.get_visibility([1])==Int32[0]
+        _API.mesh.generate(2)
         metadata=Docs.meta(Tessella.API.mesh)
         for name in (:get_periodic,:remove_constraints,:compute_renumbering,
-                     :optimize,:set_visibility,:get_visibility)
+                     :optimize,:set_visibility,:get_visibility,
+                     :set_visibility_per_window)
             @test haskey(metadata,Docs.Binding(Tessella.API.mesh,name))
         end
-        # Single-model lifecycle: list reports the session model, remove drops
-        # it, and add re-creates it only while none exists. A single `add` on
-        # the fresh unnamed model names it, matching Gmsh's `model.add`.
-        @test _API.model.list()==["unnamed"]
-        @test_throws ArgumentError _API.model.add("second")
+        # Multi-model lifecycle matches Gmsh 4.15.2: `initialize` creates one
+        # unnamed model (""); `add` always appends a fresh model and selects
+        # it; `set_current` switches between slots, preserving each model's
+        # geometry, mesh, and visibility state; `remove` deletes the current
+        # slot and selects the last remaining one.
+        @test _API.model.list()==[""]
+        @test _API.model.add("second")===nothing
+        @test _API.model.list()==["","second"]
+        @test _API.model.get_current()=="second"
+        # The new model starts empty; the first model keeps its state.
+        @test _API.model.get_entities()==Tuple{Int,Int}[]
+        @test_throws ArgumentError _API.mesh.get()
+        @test _API.model.add_point(9,9,9;tag=8)==8
+        _API.model.set_current("")
+        @test _API.model.get_entities(0)==[(0,1),(0,2),(0,3),(0,4)]
+        @test size(_API.mesh.get().tris,2)>0
+        _API.model.set_current("second")
+        @test _API.model.get_entities()==[(0,8)]
+        @test_throws ArgumentError _API.mesh.get()
+        # `remove` drops the current slot and selects the last remaining model.
         _API.model.remove()
-        @test _API.model.add("named")===nothing
-        @test _API.model.get_current()=="named"
-        @test _API.model.list()==["named"]
-        @test_throws ArgumentError _API.model.add("second")
-        _API.model.remove()
-        _API.initialize()
-        @test _API.model.add("named")===nothing
-        @test _API.model.get_current()=="named"
+        @test _API.model.list()==[""]
+        @test _API.model.get_current()==""
+        @test size(_API.mesh.get().tris,2)>0
         _API.model.remove()
         @test_throws ArgumentError _API.model.remove()
         @test _API.model.list()==String[]
@@ -712,12 +745,18 @@ end
         @test _API.model.list()==["fresh"]
         @test _API.model.get_current()=="fresh"
         @test _API.model.set_current("fresh")===nothing
-        @test_throws ArgumentError _API.model.add("third")
+        @test_throws ArgumentError _API.model.set_current("missing")
+        # Duplicate names are allowed; `set_current` selects the first match.
+        @test _API.model.add("fresh")===nothing
+        @test _API.model.list()==["fresh","fresh"]
+        @test _API.model.set_current("fresh")===nothing
         @test _API.model.add_point(1,1,1;tag=7)==7
         @test _API.model.get_entities()==[(0,7)]
+        _API.model.set_file_name("fresh.msh")
+        @test _API.model.get_file_name()=="fresh.msh"
         metadata_model=Docs.meta(Tessella.API.model)
         for name in (:get_current,:set_current,:get_file_name,:set_file_name,
-                     :add,:remove,:list)
+                     :add,:remove,:list,:set_visibility_per_window)
             @test haskey(metadata_model,
                          Docs.Binding(Tessella.API.model,name))
         end
@@ -725,4 +764,126 @@ end
         _API.finalize()
     end
     @test_throws ArgumentError _API.mesh.compute_renumbering()
+end
+
+@testset "volume attribute consumption and empty-cache parity" begin
+    _API.initialize()
+    try
+        # Transfinite volume: an explicit cube with 12 transfinite edges and 6
+        # transfinite faces fills through mesh_transfinite_volume.
+        m=_API.model
+        for (x,y,z) in [(0,0,0),(1,0,0),(1,1,0),(0,1,0),
+                        (0,0,1),(1,0,1),(1,1,1),(0,1,1)]
+            m.add_point(x,y,z)
+        end
+        for (a,b) in [(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+                      (1,5),(2,6),(3,7),(4,8)]
+            m.add_line(a,b)
+        end
+        faces=[[1,2,3,4],[5,6,7,8],[1,10,-5,-9],
+               [2,11,-6,-10],[3,12,-7,-11],[4,9,-8,-12]]
+        loop_tags=[m.add_curve_loop(f) for f in faces]
+        surf_tags=[m.add_plane_surface([l]) for l in loop_tags]
+        shell=m.add_surface_loop(surf_tags)
+        m.add_volume([shell])
+        for c in 1:12
+            _API.mesh.set_transfinite_curve(c,4)
+        end
+        for s in surf_tags
+            _API.mesh.set_transfinite_surface(s)
+        end
+        _API.mesh.set_transfinite_volume(1)
+        _API.mesh.generate(3)
+        node_tags,_=_API.mesh.get_nodes()
+        element_types,element_tags,_=_API.mesh.get_elements()
+        @test length(node_tags)==64        # 4x4x4 structured grid
+        @test element_types==Int32[4]
+        @test length(element_tags[1])==162 # 3x3x3 cells x 6 tets
+        # A mismatched edge family fails explicitly.
+        _API.mesh.set_transfinite_curve(1,6)
+        @test_throws ArgumentError _API.mesh.generate(3)
+    finally
+        _API.finalize()
+    end
+    _API.initialize()
+    try
+        # set_reverse on a volume flips every tetrahedron; classification and
+        # entity queries keep working on the intentionally inverted complex.
+        _API.model.add_box(0,0,0,1,1,1)
+        _API.mesh.set_reverse(3,1)
+        _API.mesh.generate(3)
+        node_tags,node_coords,_=_API.mesh.get_nodes()
+        index=Dict(t=>i for (i,t) in enumerate(node_tags))
+        coords=reshape(node_coords,3,:)
+        _,_,blocks=_API.mesh.get_elements()
+        flat=blocks[1]
+        negative=count(1:div(length(flat),4)) do cell
+            a,b,c,d=(coords[:,index[flat[4*(cell-1)+slot]]] for slot in 1:4)
+            dot(c-a,cross(b-a,d-a))>0
+        end
+        # dot(c-a, cross(b-a,d-a)) = -det[b-a,c-a,d-a]: >0 means kernel-
+        # negative, so a fully reversed volume reports every tet negative.
+        @test negative==div(length(flat),4)
+        element_types,_,_=_API.mesh.get_elements(3,1)
+        @test element_types==Int32[4]
+        # set_smoothing runs boundary-preserving Laplacian iterations.
+        _API.mesh.clear()
+        _API.mesh.set_reverse(3,1,false)
+        _API.mesh.set_smoothing(3,1,2)
+        _API.mesh.generate(3)
+        @test validate(_API.mesh.get()).ok
+        # A volume size callback densifies the interior.
+        _API.mesh.set_size_callback((dim,tag,x,y,z,lc)->0.15)
+        _API.mesh.generate(3)
+        callback_nodes,_=_API.mesh.get_nodes()
+        @test length(callback_nodes)>100
+        _API.mesh.set_size_callback(nothing)
+        # optimize accepts entity scopes and the 2-D method aliases; unknown
+        # entities and unimplemented methods still fail.
+        _API.mesh.optimize("",false,1,[(3,1)])
+        @test validate(_API.mesh.get()).ok
+        @test_throws ArgumentError _API.mesh.optimize("",false,1,[(3,99)])
+        @test_throws ArgumentError _API.mesh.optimize("Netgen")
+        # After clear(), queries answer empty arrays instead of throwing —
+        # Gmsh parity for an unmeshed-but-known model.
+        _API.mesh.clear()
+        @test _API.mesh.get_nodes()[1]==UInt64[]
+        @test _API.mesh.get_elements()[1]==Int32[]
+        @test _API.mesh.get_element_types()==Int32[]
+        @test _API.mesh.get_max_node_tag()==0
+        @test _API.mesh.get_max_element_tag()==0
+        @test _API.mesh.get_nodes(3,1)[1]==UInt64[]
+        @test_throws ArgumentError _API.mesh.get_nodes(3,99)
+    finally
+        _API.finalize()
+    end
+    _API.initialize()
+    try
+        # Boundary Point sizes propagate into an explicit volume's interior
+        # (Gmsh MeshSizeFromBoundary semantics for dim-3 generation).
+        m=_API.model
+        for (x,y,z) in [(0,0,0),(1,0,0),(1,1,0),(0,1,0),
+                        (0,0,1),(1,0,1),(1,1,1),(0,1,1)]
+            m.add_point(x,y,z)
+        end
+        for (a,b) in [(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+                      (1,5),(2,6),(3,7),(4,8)]
+            m.add_line(a,b)
+        end
+        faces=[[1,2,3,4],[5,6,7,8],[1,10,-5,-9],
+               [2,11,-6,-10],[3,12,-7,-11],[4,9,-8,-12]]
+        loop_tags=[m.add_curve_loop(f) for f in faces]
+        surf_tags=[m.add_plane_surface([l]) for l in loop_tags]
+        shell=m.add_surface_loop(surf_tags)
+        m.add_volume([shell])
+        for i in 1:8
+            _API.mesh.set_size([(0,i)],0.08)
+        end
+        _API.mesh.generate(3)
+        node_tags,_=_API.mesh.get_nodes()
+        @test length(node_tags)>1000
+        @test validate(_API.mesh.get()).ok
+    finally
+        _API.finalize()
+    end
 end
