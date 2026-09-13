@@ -7,7 +7,7 @@ using Tessella
 using Tessella.MeshTypes: mesh_crc, nnodes, ntets, validate
 
 const EXPECTED_MESH_CRC=
-    "71ab10cf31fa64d469e1bc3985bd8c50bb240d1cdefaebbc17101bce22e7008b"
+    "979b12cba32c4e7e8317040d31636eca298b177460adec514374372613ba2f23"
 
 function add_tessella_topology!()
     for (tag,x,y,z) in ((10,0.0,0.0,0.0),(2,1.0,0.0,0.0),
@@ -158,7 +158,7 @@ function tessella_topology_results()
         )
         mesh=Tessella.API.mesh.generate(3)
         validate(mesh).ok || error("Tessella topology-query mesh is invalid")
-        nnodes(mesh)==5 && ntets(mesh)==4 || error(
+        nnodes(mesh)==9 && ntets(mesh)==12 || error(
             "Tessella topology-query mesh size changed")
         crc=mesh_crc(mesh).sha
         crc==EXPECTED_MESH_CRC || error(

@@ -115,20 +115,21 @@ try
 
     Tessella.API.initialize()
     refined_crc,derived_sha=try
-        _rejects_argument(()->Tessella.API.mesh.get_nodes()) || error(
-            "Tessella returned bulk nodes without a cached mesh")
-        _rejects_argument(()->Tessella.API.mesh.get_elements()) || error(
-            "Tessella returned bulk elements without a cached mesh")
-        _rejects_argument(
-            ()->Tessella.API.mesh.get_nodes_by_element_type(4)) || error(
-            "Tessella returned type nodes without a cached mesh")
-        _rejects_argument(
-            ()->Tessella.API.mesh.get_barycenters(4,-1,false,false)) || error(
-            "Tessella returned barycenters without a cached mesh")
+        # Gmsh 4.15.2 returns empty arrays on a model with no mesh; Tessella
+        # matches that contract.
+        Tessella.API.mesh.get_nodes()==(UInt64[],Float64[],Float64[]) ||
+            error("Tessella empty-cache bulk nodes changed")
+        Tessella.API.mesh.get_elements()==
+            (Int32[],Vector{UInt64}[],Vector{UInt64}[]) || error(
+            "Tessella empty-cache bulk elements changed")
+        Tessella.API.mesh.get_nodes_by_element_type(4)==
+            (UInt64[],Float64[],Float64[]) || error(
+            "Tessella empty-cache type nodes changed")
+        Tessella.API.mesh.get_barycenters(4,-1,false,false)==Float64[] ||
+            error("Tessella empty-cache barycenters changed")
 
         # Exact differential setup: install the same validated simplex fixture in
-        # the session cache. The public API intentionally has no add-nodes mutation
-        # yet; all operations under test below are public and read-only.
+        # the session cache; all operations under test below are read-only.
         fixture=_query_mesh()
         lock(Tessella.API.STATE_LOCK) do
             Tessella.API.LAST_MESH[]=Tessella.API._copy_mesh(fixture)
@@ -477,8 +478,8 @@ try
         crc.sha=="db9a1713d1174be1035ef3e9d6380a01ed419797a91ded9a2b8508d0b038f031" ||
             error("refined query fixture checksum changed to $(crc.sha)")
         Tessella.API.mesh.clear()
-        _rejects_argument(()->Tessella.API.mesh.get_nodes()) || error(
-            "cleared cache retained bulk nodes")
+        Tessella.API.mesh.get_nodes()==(UInt64[],Float64[],Float64[]) ||
+            error("cleared cache retained bulk nodes")
         crc,tessella_derived_sha
     finally
         Tessella.API.finalize()
@@ -1247,7 +1248,7 @@ try
             cache=Tessella.API.LAST_MESH[]
             Tessella.API.LAST_MESH_CLASS[]=
                 Tessella.API._MeshClassification(cache,(2,Int32(1)),
-                    fill((2,Int32(1)),3),
+                    [(2,Int32(1))],fill((2,Int32(1)),3),
                     Dict{Tuple{Int,Int32},Vector{Int32}}(),
                     Int32[],Int32[1,1],Int32[])
         end

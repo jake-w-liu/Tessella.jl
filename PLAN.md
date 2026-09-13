@@ -18,7 +18,7 @@ The parity end state includes:
 - compatible model/mesh APIs, options, physical groups, file formats, views, plugins,
   command-line behavior, GUI/post-processing, and parallel workflows;
 - differential conformance against the pinned Gmsh release, in addition to Tessella's
-  stronger exact-predicate and validated-or-explicit-blocker contracts.
+  stronger exact-predicate and validated-or-explicit-failure contracts.
 
 This supersedes the former non-goal boundary around OpenCASCADE/NURBS, mixed elements,
 GUI/post-processing, and long-tail formats. Those capabilities are now pending work,
@@ -106,8 +106,9 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 
 1. Exactness is used for topology-changing geometric decisions. Floating filters are
    permitted only with exact fallback or an exact post-certificate.
-2. A public meshing operation returns a validated result or a precise blocker. It
-   never reports a silent empty region, partial complex, or nonconforming fallback.
+2. A public meshing operation returns a validated result or a precise explicit
+   failure. It never reports a silent empty region, partial complex, or
+   nonconforming fallback.
 3. Boundary recovery is independently certified against the input PLC, including
    manifold vertex links and every required facet/interface.
 4. Size-control operations verify their output bound and preserve lower-dimensional
@@ -134,7 +135,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, and entity-aware mesher integration shipped |
 | P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types with canonical family/order lookup and detached property metadata plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, Gmsh-compatible MSH4 surface/embedded-curve metadata, structural MSH4 partition metadata (`$PartitionedEntities`/`$GhostElements`), and verbatim ancillary/unknown-section plus tag-remapped view-data preservation across ASCII and binary MSH 2.2/4.1 round trips, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, presentation state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/straight-Line/explicit-Plane evaluation and surface reparametrization |
-| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains an explicit blocker |
+| P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, Box/Cylinder/Sphere/Cone/Boolean/Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Booleans/transforms; unrecognized CAD topology remains pending implementation |
 | P4 | structured/unstructured algorithms, recombination, layers, adaptation, periodic/embedded constraints | IN PROGRESS — plus blossom/full-quad surface pairing, recombined three-sided transfinite patches, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, recombined hexahedra, prismatic 3-D layers with certified remaining-core tet fill and cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
 | P5 | complete API/options/formats, partitioning/parallel paths, views/plugins, CLI/GUI/post-processing | IN PROGRESS — synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data, automatic and manual global edge/triangular/quadrangular-face catalogs, hierarchical H1 bases at orders 1:15 over Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism reference families with hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron and 0:10 on Quadrangle/Hexahedron/Prism, orientations, and vertex/edge/face/bubble keys, plus robust cached linear-simplex point location, local coordinates, and named element qualities, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/straight-Line/explicit-Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, deterministic contiguous-block `task`/`num_tasks` partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI state, owned scalar nodal views, and synchronized in-process plugins |
 | P6 | tutorial/API corpus and requirement-by-requirement differential conformance to Gmsh 4.15.2 | IN PROGRESS — size-field/transfinite/range differentials plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata lifecycle including plane properties, Point/Line/Plane evaluation and surface reparametrization, presentation/coordinate/attribute state, cached-refinement/clearing/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, and actual- and explicit-order nodal lookup, bulk/connectivity-derived mesh-data, automatic/manual global edge/face topology, simplex and non-simplex H1 basis/orientation/key queries, higher-order hierarchical H1 and H(curl) basis/orientation/key queries across every Gmsh reference family, cached simplex point-location/local-coordinate queries, and linear-simplex quality queries, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1 square, t4 hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native and projected single-/two-direction periodic surfaces, embedded, reusable-master/chained, and expression/list-backed periodic curves and surfaces, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic curves with MSH2/MSH4 lifecycle, 2-D boundary-layer quads, API box, OCC cylinder/cone, IGES-128 bilinear patch, Boolean snapshot/Delete lifecycle corpus, MSH ancillary/view-data section preservation across ASCII and binary source/output modes, and MSH partition-metadata preservation through ASCII and binary MSH 4.1 round trips |
@@ -156,18 +157,18 @@ binary mode, and source anchor position — while parsed
 columns into the output file's tag space. Gmsh's connectivity-implied
 `$ElementNodeData` dialect is recognised in ASCII and binary input and is the
 only dialect emitted into Gmsh-compatible output; explicit-tag sections whose
-node lists differ from the element connectivity are an explicit
-`ArgumentError` blocker under `gmsh_compatible=true` and are written only for
+node lists differ from the element connectivity raise an explicit
+`ArgumentError` under `gmsh_compatible=true` and are written only for
 `gmsh_compatible=false` Tessella-to-Tessella round trips. Unparseable view
 sections degrade to verbatim ancillary preservation rather than silent data
-loss, and binary-captured payloads with non-text bytes are an explicit blocker
-for ASCII output. Binary input honours the MeshFormat data-size word, decoding
+loss, and binary-captured payloads with non-text bytes fail explicitly for
+ASCII output. Binary input honours the MeshFormat data-size word, decoding
 4-byte `size_t` entities, nodes, elements, periodic links, and view-data rows as
 well as the usual 8-byte width. Output defaults to the 8-byte width of Gmsh's
 own 64-bit writer; `size_t_bytes=4` emits the narrower MSH 4.1 encoding for
 Tessella-to-Tessella serialization only — Gmsh 4.15.2 rejects a 4-byte
-`size_t` data size on 64-bit builds, and binary-captured ancillary payloads are
-an explicit blocker since they cannot be re-encoded.
+`size_t` data size on 64-bit builds, and binary-captured ancillary payloads fail
+explicitly since they cannot be re-encoded.
 Variable-connectivity types 34/35/69 and parent/domain links are lossless in MSH2
 ASCII. Binary MSH2 has fixed widths and supports only fixed special records and parent
 links; MSH4 supports fixed unlinked special records. Type 69 and some registered fixed
@@ -191,7 +192,7 @@ spheres, right circular cylinders, or right circular cones are imported and fill
 STEP `B_SPLINE_CURVE_WITH_KNOTS` / `B_SPLINE_SURFACE_WITH_KNOTS` (including
 complex rational instances) and IGES 126/128 import as native NURBS objects, with
 IGES NURBS export. Any other topology is
-an explicit blocker listing the seen entity types. The entity kernel records native
+an explicit failure listing the seen entity types. The entity kernel records native
 boxes, cylinders, spheres, cones, mesh-Boolean volumes, and connected planar
 surface-loop volumes with cavity shells. Bounded `.geo` execution covers
 Point/Line/Loop/Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone, BooleanDifference/Union/Intersection
@@ -232,8 +233,9 @@ piecewise-linearly over its deterministic initial constrained triangulation;
 generated straight-curve subdivision nodes interpolate their endpoint sizes, and
 uniform constraints retain the exact constant-size path. Coincident PSLG inputs use
 the smaller constraint. Exact Gmsh mesh topology, implicit primitive or Boolean
-subentities, mesh-size selectors other than inline `PointsOf`, nonpositive values,
-and Gmsh's silent missing-Point behavior are not claimed. Physical declarations
+subentities, and mesh-size selectors other than inline `PointsOf` remain pending;
+nonpositive values and Gmsh's silent missing-Point behavior are deliberately not
+claimed. Physical declarations
 accept an explicit positive tag, with an optional name, or a nonempty name with an
 automatic tag from the global Physical namespace. Physical Point accepts inline `PointsOf`;
 Physical Point/Curve/Surface accept inline `Boundary` and `CombinedBoundary` over
@@ -241,7 +243,7 @@ Curve/Line, Surface, and explicit Volume entities, respectively. `Boundary` coll
 immediate boundaries before physical membership is deduplicated; `CombinedBoundary`
 keeps tags with odd multiplicity. Hole and cavity boundaries participate, while
 embeddings do not. Empty combined boundaries, unsupported dimensions, and implicit primitive or
-Boolean topology are explicit blockers.
+Boolean topology fail explicitly.
 Model and session API queries return detached, sorted groups, memberships,
 reverse memberships, names, and name-selected entities. Names are unique within one
 dimension. Name removal and selective/all-group removal leave geometry intact, and
@@ -255,7 +257,7 @@ entity, matching Gmsh 4.15.2's embedding-excluding connectivity; implicit
 primitive or Boolean boundary entities resolve through the classification
 snapshot. These read-only queries preserve the session mesh cache and
 exclude mesh embeddings from topology. Primitive and Boolean volumes remain visible
-as volume entities, but their implicit boundary topology is an explicit blocker.
+as volume entities, but their implicit boundary topology remains pending.
 They also return exact bounding boxes for explicit straight-edge topology and
 analytical native primitives, plus the union over a nonempty model. Boolean boxes
 are derived from the owned operation-time result snapshot. Finite containment queries
@@ -291,7 +293,7 @@ containment uses the inclusive rectangular parameter bounds. Line closest points
 clamped to the segment; Plane projections are untrimmed. Queries are read-only and
 reject malformed, nonfinite, implicit, degenerate, or unrepresentable geometry
 instead of returning approximate fallback data. Curved entities, implicit primitive
-subentities, and general CAD parametrization remain outside this increment.
+subentities, and general CAD parametrization remain pending.
 Point and straight-Line parameters can also be reparametrized on any explicit Plane,
 including sources outside its topology or plane. This composes native evaluation
 with orthogonal Plane parametrization. The `which` selector is validated but has no
@@ -305,7 +307,8 @@ with respect to the mesh cache. Finite Point-coordinate updates preserve all tag
 metadata and invalidate a synchronized mesh only after success; dependent native
 Line and Plane queries immediately observe the new coordinates. Gmsh 4.15.2 retains
 stale Plane parameter bounds in the measured equivalent update. Per-window visibility
-and implicit primitive boundary presentation remain outside this headless model.
+and implicit primitive boundary presentation remain pending in the headless
+model.
 The synchronized mesh API routes complete cached linear-simplex refinement through
 the canonical uniform-refinement kernel, commits only after successful validation and
 resource preflight, and returns detached storage. Whole-cache clearing is idempotent
@@ -335,27 +338,44 @@ sizes are retained), `compute_renumbering` returns a reverse Cuthill-McKee
 node renumbering over the shared-element adjacency graph for all or a selected
 subset of elements, `optimize` runs the validated boundary-preserving
 tetrahedral optimizer, and `set_visibility`/`get_visibility` track raw
-per-element display state with Gmsh's unknown-tag semantics. The session owns
-single-model `get_current`/`set_current`
-and `get_file_name`/`set_file_name` state. This is a mesh-only
+per-element display state with Gmsh's unknown-tag semantics. The session owns a
+multi-model list matching Gmsh 4.15.2: `model.add` always appends a fresh named
+model and selects it (duplicate names allowed), `set_current` selects the first
+slot with a matching name, `remove` deletes the current slot and selects the
+last remaining one, and each slot preserves its geometry, mesh cache, and
+element visibility state across switches. `get_current`/`set_current` and
+`get_file_name`/`set_file_name` operate on the current slot, and
+`model.set_visibility_per_window` plus `mesh.set_visibility_per_window` store
+per-window display state. This is a mesh-only
 operation: geometry and periodic relations remain unchanged, and the index-aligned
 entity-classification snapshot is retained through the transform.
-The remaining Gmsh 4.15.2 `model.mesh` surface stays an explicit blocker by
-category: `add_nodes`/`add_elements`/`add_elements_by_type`,
-`model.add_discrete_entity`, `import_stl`,
-`classify_surfaces`, `create_topology`, `create_geometry`, the homology
-request/compute calls, and `compute_cross_field` all presuppose parametrization-free
-discrete entities and a non-dense tag space the `GeoModel` and simplex cache do
-not store; `set_transfinite_*`, `set_recombine`, `set_algorithm`,
-`set_smoothing`, `set_order`, `set_reverse`, `set_outward_orientation`,
-`set_compound`, `set_size_at_parametric_points`, `set_size_from_boundary`, and
-the size-callback pair are per-entity generation attributes or size channels
-the generator does not read; `recombine` and `split_quadrangles` target
-quadrangle cells outside the simplex cache; `get_periodic_keys` needs periodic
-function-space key pairing; and `optimize` beyond the default tetrahedral
-method (including entity scoping), `model.set_visibility_per_window`, and a
-multi-model `model.add`/`set_current` store are unsupported
-scopes — the session deliberately owns one model.
+The remaining Gmsh 4.15.2 `model.mesh` surface is implemented through
+discrete-entity storage and per-entity meshing attributes.
+`model.add_discrete_entity` registers parametrization-free entities with
+optional boundary dimTags, and `add_nodes`/`add_elements`/
+`add_elements_by_type` attach tag-addressed node and element records that
+share the model's non-dense tag space; `import_stl` loads the model file's
+STL into a discrete surface. `create_topology` rebuilds BRep topology from
+the mesh records, `classify_surfaces` groups discrete faces by dihedral
+angle, `create_geometry` derives chord/PCA parametrizations for discrete
+curves and surfaces, the homology calls emit GF(2) simplicial chain
+generators inside new physical groups, and `compute_cross_field` fills a
+session-owned view with a smoothed element-wise frame field.
+`set_transfinite_*` (curves, surfaces, and volumes), `set_recombine`,
+`set_algorithm`, `set_smoothing`, `set_reverse`, `set_outward_orientation`,
+`set_compound`, `set_size_at_parametric_points`, `set_size_from_boundary`,
+and the size-callback pair are consumed by the generators: transfinite
+curves drive surface and volume grids, surfaces route through TFI,
+smoothing steps run after filling, `reverse`/`outward_orientation` flip
+entity meshes, compounds merge member entities into one classification,
+per-entity sizes and boundary point sizes propagate through composed size
+fields, and `set_order(2)` keeps a validated high-order overlay on the
+cache that survives refinement, transforms, renumbering, and optimization.
+`recombine` pairs flagged entities' triangles into quadrangle records and
+`split_quadrangles` splits them back, both on the entity's discrete record.
+`get_periodic_keys` pairs master/slave periodic nodes into function-space
+key sequences, and `optimize` accepts Gmsh's method names with entity
+scoping through `dimTags`.
 Read-only bulk cache queries return detached flat coordinates, MSH type blocks,
 connectivity, and dense node/element tags derived for the current cache. Segment,
 triangle, and tetrahedron blocks use types 1, 2, and 4 with one global dense
@@ -457,7 +477,7 @@ instead of Gmsh's measured inversion artifacts. Cache replacement, refinement,
 transformation, clearing, and model-invalidating mutations discard the locator.
 `get_element` resolves a dense element tag to its type, connectivity, and
 owning entity through the classification snapshot; an unclassifiable cache
-keeps the explicit blocker.
+fails explicitly.
 The immutable element catalog also owns family/order-to-type lookup and detached
 property metadata for all 125 fixed types. The Gmsh-shaped API accepts canonical
 family names case-insensitively and follows the complete-type fallback for an
@@ -593,8 +613,8 @@ topology-changing declarations. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell
 and global fill volume identities and an interface tiling gate; its core engine
 covers Delaunay-friendly caps (planar/primitive walls) directly and smaller
-smooth caps through bounded exact-rational recovery — larger smooth caps are an
-explicit blocker naming both stages rather than a defective mesh.
+smooth caps through bounded exact-rational recovery — larger smooth caps fail
+explicitly, naming both stages, rather than producing a defective mesh.
 
 The external HFSS solve campaign remains tracked in [`ASCENT.md`](ASCENT.md); it is a
 consumer-side validation track, not a substitute for the parity work above.

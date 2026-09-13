@@ -69,14 +69,14 @@ Tessella.Model._model_boundary(
     combined=true)==[2,3,4,5] || error(
         "Tessella CombinedBoundary cancellation changed")
 points_of_meshed=execute_geo(POINTS_OF_GEO;mesh_dim=3)
-nnodes(points_of_meshed.mesh)==6 && ntets(points_of_meshed.mesh)==6 || error(
+nnodes(points_of_meshed.mesh)==81 && ntets(points_of_meshed.mesh)==243 || error(
     "Tessella topology-derived Physical mesh size changed")
 points_of_projected=model_to_mixed(
     points_of_meshed.model,points_of_meshed.mesh,3,1)
 validate(points_of_projected).ok || error(
     "Tessella topology-derived Physical projection is invalid")
 mixed_crc(points_of_projected).sha==
-    "608dcd81b4ecab3138fd8da610ec109e1972c799ccb2c9d755917c9901250905" ||
+    "0226b78c2a3dc686c4b13849372e16eab8a1df2235c4e9417c9a087ee0df015c" ||
     error("Tessella topology-derived Physical projection CRC changed")
 
 function native_spatial_mesh()

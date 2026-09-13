@@ -1079,11 +1079,15 @@ orientation checks. If it coincides with an existing vertex, a checked represent
 interior point is selected that makes both children nondegenerate in every incident
 tet. Additional ULP offsets are permitted only for an unconstrained, single-region
 interior edge star, whose cavity boundary remains unchanged; boundary, interface, and
-explicit feature edges require an exactly collinear fallback point or return a
-representability blocker. For a constant positive target, every selected point lies
+explicit feature edges require an exactly collinear fallback point or raise an
+unsplittable-edge `ArgumentError`. For a constant positive target, every selected point lies
 strictly inside the edge's coordinate bounds, so repeated subdivision terminates at
 `maxedge ≤ hmax`. A spatial field is evaluated on every new edge and terminates
-whenever its sampled targets remain resolvable in `Float64`.
+whenever its sampled targets remain resolvable in `Float64`. With
+`best_effort=true` an edge that remains unsplittable after its star stops changing
+(constrained representability limit) is left unsplit instead of throwing, matching
+Gmsh's best-effort size propagation; the default `false` keeps the strict
+postcondition.
 Interior edges are refined too (no interior lattice needed). Boundary vertices are
 preserved and boundary edges stay on the boundary to Float64 midpoint resolution.
 **Region tags (`tet_tag`) are propagated** — each child inherits its parent
@@ -1099,13 +1103,14 @@ function refine_to_size(m::Mesh,hmax::Real;entity=nothing,entity_resolver=nothin
                         max_tets=PIPELINE_DEFAULT_MAX_TETS,
                         max_work_tets=_DEFAULT_REFINE_MAX_WORK_TETS,
                         max_segments=_DEFAULT_REFINE_MAX_SEGMENTS,
-                        max_triangles=_DEFAULT_REFINE_MAX_TRIANGLES)
+                        max_triangles=_DEFAULT_REFINE_MAX_TRIANGLES,
+                        best_effort::Bool=false)
     target = _finite3(hmax, "refine_to_size", "hmax")
     target > 0 || throw(ArgumentError("refine_to_size: hmax must be positive (got $hmax)"))
     return _refine_to_size(m,ConstantSize(target);target_description="hmax=$target",
                            entity=entity,entity_resolver=entity_resolver,
                            vertex_entities=vertex_entities,max_nodes,max_tets,
-                           max_work_tets,max_segments,max_triangles)
+                           max_work_tets,max_segments,max_triangles,best_effort)
 end
 
 function refine_to_size(m::Mesh,field::AbstractSizeField;entity=nothing,
@@ -1114,17 +1119,19 @@ function refine_to_size(m::Mesh,field::AbstractSizeField;entity=nothing,
                         max_tets=PIPELINE_DEFAULT_MAX_TETS,
                         max_work_tets=_DEFAULT_REFINE_MAX_WORK_TETS,
                         max_segments=_DEFAULT_REFINE_MAX_SEGMENTS,
-                        max_triangles=_DEFAULT_REFINE_MAX_TRIANGLES)
+                        max_triangles=_DEFAULT_REFINE_MAX_TRIANGLES,
+                        best_effort::Bool=false)
     return _refine_to_size(m,field;target_description=string(nameof(typeof(field))),
                            entity=entity,entity_resolver=entity_resolver,
                            vertex_entities=vertex_entities,max_nodes,max_tets,
-                           max_work_tets,max_segments,max_triangles)
+                           max_work_tets,max_segments,max_triangles,best_effort)
 end
 
 function _refine_to_size(m::Mesh, field::AbstractSizeField;
                          target_description::AbstractString="size field",entity=nothing,
                          entity_resolver=nothing,vertex_entities=nothing,
-                         max_nodes,max_tets,max_work_tets,max_segments,max_triangles)
+                         max_nodes,max_tets,max_work_tets,max_segments,max_triangles,
+                         best_effort::Bool=false)
     node_limit=_refine_limit3(max_nodes,"max_nodes";minimum=1)
     tet_limit=_refine_limit3(max_tets,"max_tets";minimum=1)
     work_tet_limit=_refine_limit3(max_work_tets,"max_work_tets";minimum=1)
@@ -1170,6 +1177,10 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
     queued = Set{Tuple{Int32,Int32}}()
     deferred = Set{Tuple{Int32,Int32}}()
     deferred_signature = Dict{Tuple{Int32,Int32},Tuple}()
+    # Edges that cannot be split to Float64 resolution even after their star
+    # stops changing (constrained representability limits). Only skipped when
+    # `best_effort`; the strict default still throws.
+    unresolvable = Set{Tuple{Int32,Int32}}()
     @inline ek(a,b) = a<=b ? (Int32(a),Int32(b)) : (Int32(b),Int32(a))
     @inline elen(a,b) = hypot(cx[a]-cx[b], cy[a]-cy[b], cz[a]-cz[b])
     # Lower-dimensional cells participate both in conformity updates and in field
@@ -1268,7 +1279,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         (isfinite(len) && len>=0) || throw(ArgumentError(
             "refine_to_size: edge length is not finite"))
         e=ek(u,v)
-        (e in queued || e in deferred) && return nothing
+        (e in queued || e in deferred || e in unresolvable) && return nothing
         score=edge_score(u,v)
         if score>1
             push!(queued,e);_hpush!(heap,(score,e[1],e[2]))
@@ -1686,10 +1697,12 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
                     "$(length(ts)) incident tetrahedra $(Tuple(tv[t] for t in ts)) " *
                     "with tags $(Tuple(ttag[t] for t in ts)); local retriangulation: " *
                     retriangulation_reason[]
-                constrained && throw(ErrorException(reason*"; constrained edge geometry cannot be moved"))
                 signature=Tuple(sort(ts))
                 if get(deferred_signature,e,nothing)==signature
-                    throw(ErrorException(reason*"; neighboring refinement did not change the edge star"))
+                    best_effort && (push!(unresolvable,e);continue)
+                    throw(ErrorException(reason*(constrained ?
+                        "; constrained edge geometry cannot be moved" :
+                        "; neighboring refinement did not change the edge star")))
                 end
                 deferred_signature[e]=signature;push!(deferred,e)
                 continue
@@ -1736,6 +1749,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
             if alive[t];live=true;break;end
         end
         live||continue
+        (u,v) in unresolvable && continue
         score=edge_score(u,v)
         score<=1 || throw(ErrorException(
             "refine_to_size: postcondition failed: an output edge exceeds its local metric target from $target_description"))

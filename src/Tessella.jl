@@ -95,7 +95,16 @@ using .Model: GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_l
               embed!, translate_volume!, dilate_volume!, rotate_volume!,
               ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
               model_periodic_nodes, model_to_mixed, add_physical_group!, mesh_model_surface,
-              mesh_model_volume
+              mesh_model_volume,
+              set_transfinite_curve!, set_transfinite_surface!,
+              set_transfinite_volume!, set_transfinite_automatic!,
+              set_recombine!, set_smoothing!, set_reverse!, set_algorithm!,
+              set_size_at_parametric_points!, set_size_from_boundary!,
+              set_size_callback!, set_compound!, set_outward_orientation!,
+              remove_constraints!, add_discrete_entity!, add_discrete_nodes!,
+              add_discrete_elements!, add_homology_request!,
+              clear_homology_requests!, set_order!, model_discrete_entity,
+              model_discrete_entities, DiscreteEntity
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
 using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled

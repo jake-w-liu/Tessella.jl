@@ -20,7 +20,7 @@ function _model_entity_state_targets(
     function add_entity!(dimension::Int,tag::Int)
         entity=(dimension,tag)
         entity in targets && return nothing
-        haskey(_model_entity_dictionary(m,dimension),tag) || return nothing
+        _model_entity_known(m,dimension,tag) || return nothing
         push!(targets,entity)
         if recursive && dimension>0
             for (boundary_dimension,boundary_tag) in

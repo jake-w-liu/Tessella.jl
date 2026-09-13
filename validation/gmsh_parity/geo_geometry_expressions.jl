@@ -22,10 +22,10 @@ execution=execute_geo(GEO;mesh_dim=3)
 mesh=execution.mesh
 mesh===nothing && error("Tessella geometry-expression fixture produced no mesh")
 validate(mesh).ok || error("Tessella geometry-expression mesh is invalid")
-nnodes(mesh)==9 && ntets(mesh)==12 || error(
+nnodes(mesh)==125 && ntets(mesh)==384 || error(
     "Tessella geometry-expression mesh size changed")
 mesh_crc(mesh).sha==
-    "db4a080cdd8b4cdbd080d3ba42b798475d50a4590e67962c32edb8ac69205f24" ||
+    "5fee5952510417ff0e80c6798b74902b9209fb4e9cdfa0194e67ee7b001a74a2" ||
     error("Tessella geometry-expression mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -47,7 +47,7 @@ projected=model_to_mixed(execution.model,mesh,3,60)
 validate(projected).ok || error(
     "Tessella geometry-expression projection is invalid")
 mixed_crc(projected).sha==
-    "89ee7d39873b202e264917e98fce2756b038d3e6f2f06d1bdbce9c46f7e628cd" ||
+    "2377796a8fa31340ab3aa939b11ab16983ade4e495c63a18ff1b106eaeb499ce" ||
     error("Tessella geometry-expression projection CRC changed")
 
 function find_gmsh_api()

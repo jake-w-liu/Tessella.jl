@@ -6,7 +6,7 @@ function _model_metadata_entity(
     entity_tag=_tag(tag,caller,dimension)
     entity_tag>0 || throw(ArgumentError(
         "$caller: entity tag must be positive"))
-    haskey(_model_entity_dictionary(m,dimension),entity_tag) ||
+    _model_entity_known(m,dimension,entity_tag) ||
         throw(ArgumentError(
             "$caller: unknown entity ($dimension,$entity_tag)"))
     return dimension,entity_tag
@@ -21,8 +21,13 @@ primitive and Boolean solids expose only their `"Volume"` entity because their
 boundary topology is implicit.
 """
 function model_entity_type(m::GeoModel,dim,tag)
-    dimension,_=_model_metadata_entity(
+    dimension,entity_tag=_model_metadata_entity(
         m,dim,tag,"model_entity_type")
+    # Gmsh 4.15.2 names discrete entities "Discrete point", "Discrete curve",
+    # "Discrete surface", "Discrete volume".
+    haskey(m.discrete,(dimension,entity_tag)) &&
+        return ("Discrete point","Discrete curve",
+                "Discrete surface","Discrete volume")[dimension+1]
     return _MODEL_ENTITY_TYPES[dimension+1]
 end
 

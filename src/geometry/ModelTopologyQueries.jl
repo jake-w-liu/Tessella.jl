@@ -139,6 +139,19 @@ function _model_direct_boundary(
     m::GeoModel,dimension::Int,signed_tag::Int,caller::AbstractString;
     canonical_orientation::Bool)
     tag=abs(signed_tag)
+    discrete=get(m.discrete,(dimension,tag),nothing)
+    if discrete!==nothing
+        # A discrete entity's boundary is the declared record; a reversed query
+        # flips the boundary orientation (Curve order) and negates the signed
+        # tags of Curve/Surface boundary entries like the native path.
+        entries=Tuple{Int,Int}[]
+        for (bdim,btag) in discrete.boundary
+            signed=signed_tag>0 ? btag : -btag
+            push!(entries,(bdim,signed))
+        end
+        dimension==1 && signed_tag<0 && reverse!(entries)
+        return entries
+    end
     if dimension==0
         haskey(m.points,tag) || throw(ArgumentError(
             "$caller: unknown Point[$tag]"))
@@ -187,6 +200,32 @@ end
 function _model_recursive_boundary(
     m::GeoModel,dimension::Int,signed_tag::Int,caller::AbstractString)
     tag=abs(signed_tag)
+    if haskey(m.discrete,(dimension,tag))
+        # Descend the declared discrete boundary to its Point closure.
+        result=Tuple{Int,Int}[]
+        seen=Set{Tuple{Int,Int}}()
+        stack=Tuple{Int,Int}[(dimension,tag)]
+        while !isempty(stack)
+            entry=pop!(stack)
+            entry in seen && continue
+            push!(seen,entry)
+            edim,etag=entry
+            if edim==0
+                push!(result,(0,etag))
+                continue
+            end
+            sub=get(m.discrete,(edim,etag),nothing)
+            if sub===nothing
+                for b in _model_direct_boundary(
+                        m,edim,etag,caller;canonical_orientation=true)
+                    push!(stack,b)
+                end
+            else
+                append!(stack,sub.boundary)
+            end
+        end
+        return result
+    end
     if dimension==0
         haskey(m.points,tag) || throw(ArgumentError(
             "$caller: unknown Point[$tag]"))
@@ -214,8 +253,10 @@ function model_entities(m::GeoModel,dim=-1)
         selected==-1 || selected==dimension || continue
         append!(result,((dimension,tag)
                         for tag in keys(_model_entity_dictionary(m,dimension))))
+        append!(result,((dimension,tag) for (d,tag) in keys(m.discrete)
+                        if d==dimension))
     end
-    return sort!(result)
+    return sort!(unique!(result))
 end
 
 """
@@ -226,9 +267,16 @@ model is empty.
 """
 function model_dimension(m::GeoModel)
     for dimension in 3:-1:0
-        isempty(_model_entity_dictionary(m,dimension)) || return dimension
+        (isempty(_model_entity_dictionary(m,dimension)) &&
+         !any(d==dimension for (d,_) in keys(m.discrete))) || return dimension
     end
     return -1
+end
+
+# True when `(dim, tag)` is a native geometry entity or a discrete entity.
+function _model_entity_known(m::GeoModel,dimension::Int,tag::Int)
+    return haskey(_model_entity_dictionary(m,dimension),tag) ||
+           haskey(m.discrete,(dimension,tag))
 end
 
 """
@@ -303,6 +351,13 @@ function model_adjacencies(m::GeoModel,dim,tag)
                 m,volume,caller;orient_cavities=false)
             any(surface->abs(surface)==entity_tag,surfaces) && push!(upward,volume)
         end
+    end
+    # Discrete entities declare their boundary explicitly — any declared
+    # (dim, tag) entry makes the holder an upward parent.
+    for ((bdim,btag),entity) in m.discrete
+        bdim==dimension+1 || continue
+        any(pair->pair[1]==dimension && pair[2]==entity_tag,
+            entity.boundary) && push!(upward,btag)
     end
     return sort!(unique!(upward)),downward
 end

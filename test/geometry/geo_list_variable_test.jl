@@ -51,17 +51,17 @@ end
 
     meshed=execute_geo(_GEO_LIST_VARIABLE_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==11
-    @test ntets(meshed.mesh)==16
+    @test nnodes(meshed.mesh)==125
+    @test ntets(meshed.mesh)==384
     @test mesh_crc(meshed.mesh).sha==
-          "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
-    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,4).slave_nodes)==5
-    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,5).slave_nodes)==4
+          "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
+    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,4).slave_nodes)==25
+    @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,5).slave_nodes)==25
     projected=model_to_mixed(meshed.model,meshed.mesh,3,1)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "27417f652cf93e0d6aad41c2f1b6c65af3751dfb3cb3166432d2e798f25a6493"
+          "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5"
 
     invalid_sources=(
         "a[] = {1}; Point(missing[0]) = {0,0,0,1};"=>"unknown numeric list",

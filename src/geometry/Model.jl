@@ -15,17 +15,21 @@ module Model
 using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
                    triangle_area, tet_signed_volume, tet_volume
 using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
-                  MixedPeriodicLink, MixedMesh
+                  MixedPeriodicLink, MixedMesh, msh_num_nodes, msh_family,
+                  msh_dimension
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
-using ..SizeField: AbstractSizeField, ConstantSize, PostViewField, field_value,
-                   size_at
+using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
+                   PostViewField, field_value, size_at
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
-using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3
+using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
+                refine_to_size
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill
 using ..Periodic: periodic_identify_affine
+using ..TransfiniteVolume: mesh_transfinite_volume
 using ..Transform: _affine_coordinate, _transform_homogeneous
 using ..Predicates: orient2, orient3
+using LinearAlgebra: Symmetric, eigen
 
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_surface_loop!, add_volume!
@@ -69,6 +73,86 @@ struct ModelPeriodicConstraint
     atol::Float64
 end
 
+"""
+Parametrization-free model entity created by `add_discrete_entity!` (Gmsh's
+`model.addDiscreteEntity`). Nodes and elements added through the mesh API are
+recorded here with their caller-assigned — possibly sparse — tags; `boundary`
+stores the declared boundary `(dim, tag)` pairs. The same record also backs the
+per-entity `attached` store holding nodes and elements `addNodes`/`addElements`
+place on a native entity.
+"""
+mutable struct DiscreteEntity
+    boundary::Vector{NTuple{2,Int}}
+    node_tags::Vector{Int32}
+    node_coords::Matrix{Float64}
+    node_params::Matrix{Float64}
+    element_types::Vector{Int32}
+    element_tags::Vector{Int32}
+    element_nodes::Vector{Vector{Int32}}
+    # Parametric coordinates of nodes owned by *other* records with respect to
+    # this entity's parametrization (e.g. a classified surface's boundary nodes
+    # live on curve records but still carry surface (u,v) parameters after
+    # `create_geometry!`).
+    aux_params::Dict{Int32,Vector{Float64}}
+end
+
+DiscreteEntity() = DiscreteEntity(NTuple{2,Int}[], Int32[],
+    Matrix{Float64}(undef,3,0), Matrix{Float64}(undef,0,0),
+    Int32[], Int32[], Vector{Int32}[], Dict{Int32,Vector{Float64}}())
+
+Base.:(==)(a::DiscreteEntity,b::DiscreteEntity)=
+    all(n->getfield(a,n)==getfield(b,n),fieldnames(DiscreteEntity))
+
+"""
+Owned per-entity meshing attributes on a [`GeoModel`](@ref), mirroring the
+Gmsh `model.mesh` generation-attribute surface. Empty containers mean the
+attribute is unset; `remove_constraints!` clears the generation-scoped
+categories (transfinite, recombine, smoothing, reverse, algorithm, compound,
+outward orientation) while periodic relations, embeddings, and Point sizes
+live elsewhere on the model.
+"""
+mutable struct ModelMeshingAttributes
+    transfinite_curves::Dict{Int,NamedTuple{(:num_nodes,:kind,:coef),
+                                           Tuple{Int,Symbol,Float64}}}
+    transfinite_surfaces::Dict{Int,NamedTuple{(:arrangement,:corners),
+                                             Tuple{Symbol,Vector{Int}}}}
+    transfinite_volumes::Dict{Int,Vector{Int}}
+    recombine::Dict{Tuple{Int,Int},Float64}
+    smoothing::Dict{Tuple{Int,Int},Int}
+    reverse::Dict{Tuple{Int,Int},Bool}
+    algorithm::Dict{Tuple{Int,Int},Int}
+    size_at_params::Dict{Tuple{Int,Int},Vector{Tuple{Vector{Float64},Float64}}}
+    size_from_boundary::Dict{Tuple{Int,Int},Bool}
+    size_callback::Any
+    compounds::Vector{Pair{Int,Vector{Int}}}
+    outward_orientation::Set{Int}
+    order::Int
+    attached::Dict{Tuple{Int,Int},DiscreteEntity}
+    homology_requests::Vector{NamedTuple{(:kind,:domain,:subdomain,:dims),
+        Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}}
+end
+
+ModelMeshingAttributes() = ModelMeshingAttributes(
+    Dict{Int,NamedTuple{(:num_nodes,:kind,:coef),Tuple{Int,Symbol,Float64}}}(),
+    Dict{Int,NamedTuple{(:arrangement,:corners),Tuple{Symbol,Vector{Int}}}}(),
+    Dict{Int,Vector{Int}}(),
+    Dict{Tuple{Int,Int},Float64}(),
+    Dict{Tuple{Int,Int},Int}(),
+    Dict{Tuple{Int,Int},Bool}(),
+    Dict{Tuple{Int,Int},Int}(),
+    Dict{Tuple{Int,Int},Vector{Tuple{Vector{Float64},Float64}}}(),
+    Dict{Tuple{Int,Int},Bool}(),
+    nothing,
+    Pair{Int,Vector{Int}}[],
+    Set{Int}(),
+    1,
+    Dict{Tuple{Int,Int},DiscreteEntity}(),
+    NamedTuple{(:kind,:domain,:subdomain,:dims),
+               Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}[])
+
+Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
+    all(n->getfield(a,n)==getfield(b,n),fieldnames(ModelMeshingAttributes))
+
 mutable struct GeoModel
     points::Dict{Int,NTuple{3,Float64}}
     point_size::Dict{Int,Float64}
@@ -94,6 +178,8 @@ mutable struct GeoModel
     boolean_operands::Dict{Int,Tuple{Mesh,Mesh}}
     periodic::Dict{Tuple{Int,Int},ModelPeriodicConstraint}
     embeds::Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}
+    meshing::ModelMeshingAttributes
+    discrete::Dict{Tuple{Int,Int},DiscreteEntity}
     next_tag::Vector{Int}
 end
 
@@ -126,6 +212,8 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,Tuple{Mesh,Mesh}}(),
                       Dict{Tuple{Int,Int},ModelPeriodicConstraint}(),
                       Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}(),
+                      ModelMeshingAttributes(),
+                      Dict{Tuple{Int,Int},DiscreteEntity}(),
                       Int[0,0,0,0])
 
 function _tag(value, caller, dim::Int)
@@ -176,6 +264,11 @@ function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller)
         m.next_tag[dim+1]<typemax(Int32) || throw(ArgumentError(
             "$caller: no automatic tags remain in dimension $dim"))
         m.next_tag[dim+1]+=1
+        while haskey(m.discrete,(dim,m.next_tag[dim+1]))
+            m.next_tag[dim+1]<typemax(Int32) || throw(ArgumentError(
+                "$caller: no automatic tags remain in dimension $dim"))
+            m.next_tag[dim+1]+=1
+        end
         return m.next_tag[dim+1]
     end
     m.next_tag[dim+1]=max(m.next_tag[dim+1], requested)
@@ -250,7 +343,7 @@ function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0)
     end
     (isfinite(h) && h>0) || throw(ArgumentError("$caller: mesh_size must be positive"))
     t=_alloc_tag!(m,0,_tag(tag,caller,0),caller)
-    haskey(m.points,t) && throw(ArgumentError("$caller: Point[$t] already exists"))
+    (haskey(m.points,t) || haskey(m.discrete,(0,t))) && throw(ArgumentError("$caller: Point[$t] already exists"))
     m.points[t]=p; m.point_size[t]=h
     return t
 end
@@ -303,7 +396,7 @@ function add_line!(m::GeoModel, a, b; tag::Integer=0)
     haskey(m.points,ta) || throw(ArgumentError("$caller: unknown Point[$ta]"))
     haskey(m.points,tb) || throw(ArgumentError("$caller: unknown Point[$tb]"))
     t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
-    haskey(m.curves,t) && throw(ArgumentError("$caller: Curve[$t] already exists"))
+    (haskey(m.curves,t) || haskey(m.discrete,(1,t))) && throw(ArgumentError("$caller: Curve[$t] already exists"))
     m.curves[t]=(ta,tb)
     return t
 end
@@ -360,6 +453,7 @@ include("ModelEntityState.jl")
 include("ModelSpatialQueries.jl")
 include("ModelEntityMetadata.jl")
 include("ModelEntityEvaluation.jl")
+include("ModelMeshingAttributes.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -699,7 +793,7 @@ function add_plane_surface!(m::GeoModel, loops; tag::Integer=0)
         haskey(m.loops,id) || throw(ArgumentError("$caller: unknown Loop[$id]"))
     end
     t=_alloc_tag!(m,2,_tag(tag,caller,2),caller)
-    haskey(m.surfaces,t) && throw(ArgumentError("$caller: Surface[$t] already exists"))
+    (haskey(m.surfaces,t) || haskey(m.discrete,(2,t))) && throw(ArgumentError("$caller: Surface[$t] already exists"))
     m.surfaces[t]=ids
     return t
 end
@@ -804,7 +898,7 @@ function add_volume!(m::GeoModel,surface_loops;tag::Integer=0)
         end
     end
     requested=_tag(tag,caller,3)
-    requested!=0 && haskey(m.volumes,requested) && throw(ArgumentError(
+    requested!=0 && (haskey(m.volumes,requested) || haskey(m.discrete,(3,requested))) && throw(ArgumentError(
         "$caller: Volume[$requested] already exists"))
     t=_alloc_tag!(m,3,requested,caller)
     haskey(m.volumes,t) && throw(ArgumentError(
@@ -825,7 +919,7 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
     d=_finite3(dx,dy,dz,caller)
     (d[1]>0 && d[2]>0 && d[3]>0) || throw(ArgumentError("$caller: extents must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
-    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     m.volumes[t]=Int[]
     m.box_extents[t]=(origin[1],origin[2],origin[3],d[1],d[2],d[3])
     return t
@@ -845,7 +939,7 @@ function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
     r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
-    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     m.volumes[t]=Int[]
     m.cylinders[t]=(center=c, axis=a, radius=r, height=h)
     return t
@@ -862,7 +956,7 @@ function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
     r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
-    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     m.volumes[t]=Int[]
     m.spheres[t]=(center=c, radius=r)
     return t
@@ -884,7 +978,7 @@ function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     (ra>=0 && rb>=0 && (ra>0 || rb>0)) || throw(ArgumentError(
         "$caller: radii must be non-negative with at least one positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
-    haskey(m.volumes,t) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     m.volumes[t]=Int[]
     m.cones[t]=(center=c, axis=a, r1=ra, r2=rb, height=h)
     return t
@@ -1166,7 +1260,7 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     haskey(m.volumes,ta) || throw(ArgumentError("$caller: unknown Volume[$ta]"))
     haskey(m.volumes,tb) || throw(ArgumentError("$caller: unknown Volume[$tb]"))
     requested=_tag(tag,caller,3)
-    requested!=0 && haskey(m.volumes,requested) && throw(ArgumentError(
+    requested!=0 && (haskey(m.volumes,requested) || haskey(m.discrete,(3,requested))) && throw(ArgumentError(
         "$caller: Volume[$requested] already exists"))
     operand_a=_volume_surface(m,ta,caller)
     operand_b=_volume_surface(m,tb,caller)
@@ -1180,6 +1274,7 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
 end
 
 function _has_entity(m::GeoModel, dim::Int, tag::Int)
+    haskey(m.discrete,(dim,tag)) && return true
     dim==0 && return haskey(m.points,tag)
     dim==1 && return haskey(m.curves,tag)
     dim==2 && return haskey(m.surfaces,tag)
@@ -1509,7 +1604,9 @@ function _surface_curve_parameters(forced,curve::Int,signed::Int)
                       Iterators.reverse(@view(parameters[2:end]))
 end
 
-function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
+function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
+                       param_sizes::Dict{Tuple{Int,Float64},Float64}=
+                           Dict{Tuple{Int,Float64},Float64}())
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
@@ -1528,7 +1625,9 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
                         "$caller: Curve[$curve] subdivision is not planar in z=0"))
                     _add_surface_curve_point!(
                         xs,ys,mesh_sizes,index,m,point,
-                        _surface_curve_mesh_size(m,curve,parameter,caller),
+                        get(param_sizes,(curve,parameter),
+                            _surface_curve_mesh_size(
+                                m,curve,parameter,caller)),
                         curve,caller)
                 end
                 push!(loop_idx,vertex)
@@ -1576,7 +1675,9 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString)
                         "planar in z=0"))
                     _add_surface_curve_point!(
                         xs,ys,mesh_sizes,index,m,point,
-                        _surface_curve_mesh_size(m,etag,parameter,caller),
+                        get(param_sizes,(etag,parameter),
+                            _surface_curve_mesh_size(
+                                m,etag,parameter,caller)),
                         etag,caller)
                 end
                 push!(curve_nodes,vertex)
@@ -3542,18 +3643,485 @@ end
 include("SurfacePointSizing.jl")
 
 function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
-                                  caller::AbstractString)
+                                  caller::AbstractString;
+                                  size_field::Union{Nothing,AbstractSizeField}=
+                                      nothing,
+                                  param_sizes::Dict{Tuple{Int,Float64},
+                                                   Float64}=
+                                      Dict{Tuple{Int,Float64},Float64}())
+    if haskey(m.meshing.transfinite_surfaces,t)
+        return _transfinite_surface_mesh(
+            m,t,param_sizes,caller;size_field=size_field),NTuple{2,Int}[]
+    end
     xs,ys,mesh_sizes,segs,embedded,internal=
-        _surface_pslg(m,t,forced,caller)
+        _surface_pslg(m,t,forced,caller;param_sizes=param_sizes)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
-    sizefn=_surface_point_size_field(T,xs,ys,mesh_sizes,t,caller)
+    base=if get(m.meshing.size_from_boundary,(2,t),true)
+        _surface_point_size_field(T,xs,ys,mesh_sizes,t,caller)
+    else
+        lc=_pslg_default_size(xs,ys,caller,t)
+        (x,y)->lc
+    end
+    callback=m.meshing.size_callback
+    sizefn=if size_field===nothing && callback===nothing
+        base
+    else
+        function sized(x,y)
+            h=base(x,y)
+            size_field===nothing ||
+                (h=min(h,size_at(size_field,x,y,0.0,(2,t))))
+            callback===nothing ||
+                (h=_apply_size_callback(callback,2,t,x,y,0.0,h,caller))
+            return h
+        end
+    end
     interior=refine!(T; min_angle_deg=min_angle_deg, size=sizefn)
     mesh=to_mesh(T; interior=interior)
+    mesh=_consume_surface_attributes(m,t,mesh,caller)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntris(mesh)>0 || throw(ErrorException(
         "$caller: Surface[$t] produced no triangles"))
     return mesh,embedded
+end
+
+# Uniform fallback size for `size_from_boundary=false`: the surface's PSLG
+# characteristic length, matching the model-scale default Gmsh falls back to.
+function _pslg_default_size(xs,ys,caller::AbstractString,t::Int)
+    isempty(xs) && throw(ArgumentError(
+        "$caller: Surface[$t] has no boundary points"))
+    dx=maximum(xs)-minimum(xs);dy=maximum(ys)-minimum(ys)
+    lc=hypot(dx,dy)
+    (isfinite(lc) && lc>0) || throw(ArgumentError(
+        "$caller: Surface[$t] has a degenerate bounding box"))
+    return lc
+end
+
+# Gmsh's size callback contract: `(dim, tag, x, y, z, lc) -> size`; a
+# non-positive return means "no constraint" and keeps the incoming `lc`.
+function _apply_size_callback(callback,dim::Int,tag::Int,x::Float64,
+                              y::Float64,z::Float64,lc::Float64,
+                              caller::AbstractString)
+    h=try
+        callback(dim,tag,x,y,z,lc)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ErrorException(
+            "$caller: mesh size callback failed for ($dim,$tag) at " *
+            "($x,$y,$z): $(sprint(showerror,err))"))
+    end
+    h isa Real || throw(ErrorException(
+        "$caller: mesh size callback returned a non-numeric value " *
+        "$(repr(h)) for ($dim,$tag)"))
+    h isa Bool && throw(ErrorException(
+        "$caller: mesh size callback returned Bool for ($dim,$tag)"))
+    value=Float64(h)
+    !isfinite(value) && return lc
+    value<=0 && return lc
+    return min(lc,value)
+end
+
+# Post-refinement attribute passes for a surface mesh: `smoothing` runs that
+# many boundary-preserving Laplacian iterations; `reverse` flips triangle
+# orientation, matching Gmsh's `setReverse`/`setSmoothing` semantics.
+function _consume_surface_attributes(m::GeoModel,t::Int,mesh::Mesh,
+                                     caller::AbstractString)
+    iterations=get(m.meshing.smoothing,(2,t),0)
+    iterations>0 && (mesh=_laplacian_smooth_surface(mesh,iterations,caller,t))
+    get(m.meshing.reverse,(2,t),false) &&
+        (mesh=_reversed_surface_mesh(mesh,caller,t))
+    return mesh
+end
+
+function _laplacian_smooth_surface(mesh::Mesh,iterations::Int,
+                                   caller::AbstractString,t::Int)
+    boundary,_=_surface_boundary_topology(mesh,caller)
+    coords=Matrix{Float64}(mesh.coords)
+    neighbors=[Int32[] for _ in 1:nnodes(mesh)]
+    @inbounds for cell in axes(mesh.tris,2),e in ((1,2),(2,3),(3,1))
+        a=mesh.tris[e[1],cell];b=mesh.tris[e[2],cell]
+        push!(neighbors[a],b);push!(neighbors[b],a)
+    end
+    for list in neighbors
+        sort!(unique!(list))
+    end
+    for _ in 1:iterations
+        next=copy(coords)
+        @inbounds for node in axes(coords,2)
+            boundary[node] && continue
+            list=neighbors[node]
+            isempty(list) && continue
+            sx=0.0;sy=0.0
+            for other in list
+                sx+=coords[1,other];sy+=coords[2,other]
+            end
+            next[1,node]=sx/length(list)
+            next[2,node]=sy/length(list)
+        end
+        coords=next
+    end
+    return Mesh(coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
+                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
+                tet_tag=mesh.tet_tag)
+end
+
+function _reversed_surface_mesh(mesh::Mesh,caller::AbstractString,t::Int)
+    tris=Matrix{Int32}(mesh.tris)
+    @inbounds for cell in axes(tris,2)
+        tris[2,cell],tris[3,cell]=tris[3,cell],tris[2,cell]
+    end
+    return Mesh(mesh.coords;segs=mesh.segs,tris=tris,tets=mesh.tets,
+                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
+                tet_tag=mesh.tet_tag)
+end
+
+# Post-generation attribute passes for a volume mesh: `smoothing` runs that
+# many boundary-preserving Laplacian iterations over the tetrahedron edge
+# graph; `reverse` flips tetrahedron orientation, matching Gmsh's
+# `setReverse`/`setSmoothing` semantics on dim-3 entities.
+function _consume_volume_attributes(m::GeoModel,t::Int,mesh::Mesh,
+                                    caller::AbstractString)
+    iterations=get(m.meshing.smoothing,(3,t),0)
+    iterations>0 &&
+        (mesh=_laplacian_smooth_volume(mesh,iterations,caller,t))
+    get(m.meshing.reverse,(3,t),false) &&
+        (mesh=_reversed_volume_mesh(mesh,caller,t))
+    return mesh
+end
+
+function _laplacian_smooth_volume(mesh::Mesh,iterations::Int,
+                                  caller::AbstractString,t::Int)
+    boundary=falses(nnodes(mesh))
+    @inbounds for face in first(boundary_faces(mesh.tets)),node in face
+        boundary[node]=true
+    end
+    neighbors=[Int32[] for _ in 1:nnodes(mesh)]
+    @inbounds for cell in axes(mesh.tets,2),
+            edge in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+        a=mesh.tets[edge[1],cell];b=mesh.tets[edge[2],cell]
+        push!(neighbors[a],b);push!(neighbors[b],a)
+    end
+    for list in neighbors
+        sort!(unique!(list))
+    end
+    coords=Matrix{Float64}(mesh.coords)
+    for _ in 1:iterations
+        next=copy(coords)
+        @inbounds for node in axes(coords,2)
+            boundary[node] && continue
+            list=neighbors[node]
+            isempty(list) && continue
+            sx=0.0;sy=0.0;sz=0.0
+            for other in list
+                sx+=coords[1,other];sy+=coords[2,other];sz+=coords[3,other]
+            end
+            next[1,node]=sx/length(list)
+            next[2,node]=sy/length(list)
+            next[3,node]=sz/length(list)
+        end
+        coords=next
+    end
+    return Mesh(coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
+                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
+                tet_tag=mesh.tet_tag)
+end
+
+function _reversed_volume_mesh(mesh::Mesh,caller::AbstractString,t::Int)
+    tets=Matrix{Int32}(mesh.tets)
+    @inbounds for cell in axes(tets,2)
+        tets[1,cell],tets[2,cell]=tets[2,cell],tets[1,cell]
+    end
+    return Mesh(mesh.coords;segs=mesh.segs,tris=mesh.tris,tets=tets,
+                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
+                tet_tag=mesh.tet_tag)
+end
+
+# Transfinite volume fill for an explicit six-surface volume — Gmsh's
+# `setTransfiniteVolume`. The 12 boundary edges must all carry transfinite
+# curve specs; the 8 corner vertices (points incident to exactly 3 boundary
+# edges) are ordered in Gmsh's canonical (s0..s7) order, either from the
+# stored corner list or automatically from the boundary edge graph.
+function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
+    get(m.embeds,(3,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] cannot carry embedded entities"))
+    boundaries=_model_volume_boundary_surfaces(m,t,caller)
+    length(boundaries)==6 || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] requires exactly 6 boundary " *
+        "surfaces; found $(length(boundaries))"))
+    edge_curve=Dict{NTuple{2,Int},Int}()
+    neighbors=Dict{Int,Set{Int}}()
+    for signed_surface in boundaries
+        for loop in m.surfaces[abs(signed_surface)]
+            for signed in m.loops[loop]
+                curve=abs(signed)
+                a,b=m.curves[curve]
+                key=a<b ? (a,b) : (b,a)
+                if !haskey(edge_curve,key)
+                    edge_curve[key]=curve
+                    push!(get!(neighbors,a,Set{Int}()),b)
+                    push!(get!(neighbors,b,Set{Int}()),a)
+                end
+            end
+        end
+    end
+    corners=sort!(collect(p for (p,adj) in pairs(neighbors) if
+                          length(adj)>=3))
+    length(corners)==8 || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] requires a hexahedral boundary " *
+        "topology (8 corner Points); found $(length(corners))"))
+    length(edge_curve)==12 || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] requires 12 boundary Curves; " *
+        "found $(length(edge_curve))"))
+    stored=m.meshing.transfinite_volumes[t]
+    ordered=if isempty(stored)
+        s0=corners[1]
+        near=sort!(collect(neighbors[s0]))
+        length(near)==3 || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] boundary is not a cube " *
+            "edge graph"))
+        s1,s3,s4=near
+        # The kernel requires orient3(s0,s1,s3,s4) < 0 (positive canonical
+        # Gmsh order); swapping the u/v neighbors flips the orientation.
+        if orient3(m.points[s0],m.points[s1],m.points[s3],
+                   m.points[s4])>0
+            s1,s3=s3,s1
+        end
+        function common(x,y)
+            shared=setdiff(neighbors[x]∩neighbors[y],(s0,))
+            length(shared)==1 || throw(ArgumentError(
+                "$caller: transfinite Volume[$t] boundary is not a cube " *
+                "edge graph"))
+            return only(shared)
+        end
+        s2=common(s1,s3);s5=common(s1,s4);s7=common(s3,s4)
+        remaining=setdiff(corners,(s0,s1,s2,s3,s4,s5,s7))
+        length(remaining)==1 || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] boundary is not a cube " *
+            "edge graph"))
+        (s0,s1,s2,s3,s4,s5,only(remaining),s7)
+    else
+        length(stored)==8 || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] supports only 8-corner blocks"))
+        Set(stored)==Set(corners) || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] corners must be its 8 " *
+            "boundary corner Points"))
+        Tuple(stored)
+    end
+    s=ordered
+    function edge_count(a,b)
+        curve=get(edge_curve,a<b ? (a,b) : (b,a),0)
+        curve==0 && throw(ArgumentError(
+            "$caller: transfinite Volume[$t] corner pair ($a,$b) is not " *
+            "a boundary edge"))
+        spec=get(m.meshing.transfinite_curves,curve,nothing)
+        spec===nothing && throw(ArgumentError(
+            "$caller: transfinite Volume[$t] requires boundary " *
+            "Curve[$curve] to be transfinite"))
+        return spec.num_nodes-1
+    end
+    us=(edge_count(s[1],s[2]),edge_count(s[4],s[3]),
+        edge_count(s[5],s[6]),edge_count(s[8],s[7]))
+    vs=(edge_count(s[1],s[4]),edge_count(s[2],s[3]),
+        edge_count(s[5],s[8]),edge_count(s[6],s[7]))
+    ws=(edge_count(s[1],s[5]),edge_count(s[2],s[6]),
+        edge_count(s[4],s[8]),edge_count(s[3],s[7]))
+    for (direction,family) in (("u",us),("v",vs),("w",ws))
+        allequal(family) || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] $direction-direction edges " *
+            "have mismatched node counts $family"))
+    end
+    return mesh_transfinite_volume(
+        NTuple{3,Float64}[m.points[p] for p in s],
+        (us[1],vs[1],ws[1]);volume_tag=t)
+end
+
+# Boundary-derived size field for a volume — Gmsh MeshSizeFromBoundary
+# semantics: interior sizes extend the sizes prescribed at boundary vertices.
+# Sizes come from sized boundary Points coincident with surface-mesh nodes;
+# unsized boundary nodes inherit their minimum incident edge length. When no
+# sized boundary vertex exists there is nothing to propagate.
+function _volume_boundary_size_field(m::GeoModel,t::Int,surface::Mesh,
+                                     caller::AbstractString)
+    point_size=Dict{NTuple{3,Float64},Float64}()
+    for (tag,coordinate) in m.points
+        value=get(m.point_size,tag,0.0)
+        (isfinite(value) && value>0) || continue
+        key=(_model_projection_coordinate_key(coordinate[1]),
+             _model_projection_coordinate_key(coordinate[2]),
+             _model_projection_coordinate_key(coordinate[3]))
+        point_size[key]=min(get(point_size,key,Inf),value)
+    end
+    isempty(point_size) && return nothing
+    values=fill(Inf,nnodes(surface))
+    matched=falses(nnodes(surface))
+    @inbounds for node in 1:nnodes(surface)
+        key=(_model_projection_coordinate_key(surface.coords[1,node]),
+             _model_projection_coordinate_key(surface.coords[2,node]),
+             _model_projection_coordinate_key(surface.coords[3,node]))
+        value=get(point_size,key,0.0)
+        value>0 && (values[node]=value;matched[node]=true)
+    end
+    any(matched) || return nothing
+    # Boundary vertices that do not carry a Point size take the shortest
+    # incident boundary edge, matching Gmsh's boundary-mesh-derived sizing.
+    # Vertices with an explicit Point size keep it verbatim.
+    @inbounds for cell in axes(surface.tris,2),edge in ((1,2),(2,3),(3,1))
+        a=surface.tris[edge[1],cell];b=surface.tris[edge[2],cell]
+        dx=surface.coords[1,b]-surface.coords[1,a]
+        dy=surface.coords[2,b]-surface.coords[2,a]
+        dz=surface.coords[3,b]-surface.coords[3,a]
+        len=hypot(dx,dy,dz)
+        !matched[a] && len<values[a] && (values[a]=len)
+        !matched[b] && len<values[b] && (values[b]=len)
+    end
+    # An isolated boundary vertex with no sized neighbor and no incident
+    # triangle edge falls back to the surface's bounding scale.
+    scale=hypot(maximum(surface.coords[1,:])-minimum(surface.coords[1,:]),
+                maximum(surface.coords[2,:])-minimum(surface.coords[2,:]),
+                maximum(surface.coords[3,:])-minimum(surface.coords[3,:]))
+    fallback=(isfinite(scale) && scale>0) ? scale : 1.0
+    @inbounds for node in 1:nnodes(surface)
+        isfinite(values[node]) || (values[node]=fallback)
+    end
+    # PostViewField is an AbstractField; the refiner wants an
+    # AbstractSizeField, so adapt through FunctionSize.
+    view=PostViewField(surface.coords,values;crop_negative=false)
+    return FunctionSize(function(x,y,z)
+        field_value(view,x,y,z)
+    end)
+end
+
+# Compose the effective 3-D size source for `mesh_model_volume`: an explicit
+# `size_field`, boundary-derived sizes, and the stored size callback wrap in
+# that order (callback sees the incoming `lc` and may tighten it).
+function _volume_size_field(m::GeoModel,t::Int,surface::Mesh,
+                            size_field::Union{Nothing,AbstractSizeField},
+                            caller::AbstractString)
+    fields=AbstractSizeField[]
+    boundary=_volume_boundary_size_field(m,t,surface,caller)
+    boundary===nothing || push!(fields,boundary)
+    size_field===nothing || push!(fields,size_field)
+    callback=m.meshing.size_callback
+    if callback===nothing
+        isempty(fields) && return nothing
+        return length(fields)==1 ? fields[1] : MinSize(Tuple(fields))
+    end
+    base=if isempty(fields)
+        scale=hypot(maximum(surface.coords[1,:])-minimum(surface.coords[1,:]),
+                    maximum(surface.coords[2,:])-minimum(surface.coords[2,:]),
+                    maximum(surface.coords[3,:])-minimum(surface.coords[3,:]))
+        ConstantSize((isfinite(scale) && scale>0) ? scale : 1.0)
+    elseif length(fields)==1
+        fields[1]
+    else
+        MinSize(Tuple(fields))
+    end
+    return FunctionSize(function(x,y,z)
+        _apply_size_callback(callback,3,t,x,y,z,
+                             size_at(base,x,y,z),caller)
+    end)
+end
+
+# Transfinite interpolation (Coons patch) for a planar 4-sided surface whose
+# boundary curves are all transfinite — Gmsh's `setTransfiniteSurface`.
+# Produces the structured (n1×n2) node grid triangulated per quad cell.
+function _transfinite_surface_mesh(m::GeoModel,t::Int,
+                                   param_sizes::Dict{Tuple{Int,Float64},
+                                                    Float64},
+                                   caller::AbstractString;
+                                   size_field::Union{Nothing,
+                                                     AbstractSizeField}=
+                                       nothing)
+    spec=m.meshing.transfinite_surfaces[t]
+    get(m.embeds,(2,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] cannot carry embedded entities"))
+    loops=m.surfaces[t]
+    length(loops)==1 || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] requires exactly one curve loop"))
+    signed_curves=m.loops[only(loops)]
+    nside=length(signed_curves)
+    nside in (3,4) || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] requires a 3- or 4-curve boundary"))
+    nside==4 || throw(ArgumentError(
+        "$caller: transfinite 3-sided surfaces are not implemented"))
+    curve_points=Vector{Vector{NTuple{3,Float64}}}(undef,4)
+    for (position,signed) in enumerate(signed_curves)
+        curve=abs(signed)
+        cspec=get(m.meshing.transfinite_curves,curve,nothing)
+        cspec===nothing && throw(ArgumentError(
+            "$caller: transfinite Surface[$t] requires boundary Curve[$curve] " *
+            "to be transfinite"))
+        params=_transfinite_parameters(
+            cspec.num_nodes,cspec.kind,cspec.coef,caller,curve)
+        points=[_periodic_curve_point(m,curve,p,caller) for p in params]
+        signed<0 && reverse!(points)
+        curve_points[position]=points
+    end
+    bottom,right,top,left=curve_points
+    n1=length(bottom);n2=length(right)
+    length(top)==n1 || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] has mismatched opposite curve node " *
+        "counts ($n1 vs $(length(top)))"))
+    length(left)==n2 || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] has mismatched opposite curve node " *
+        "counts ($n2 vs $(length(left)))"))
+    for p in Iterators.flatten(curve_points)
+        abs(p[3])<=1e-12 || throw(ArgumentError(
+            "$caller: transfinite Surface[$t] is not planar in z=0"))
+    end
+    # Corner consistency: bottom starts at A, ends at B; right B→C; top C→D;
+    # left D→A.
+    tolerance=1e-9*max(1.0,maximum(
+        p->maximum(abs,p),Iterators.flatten(curve_points)))
+    for (label,first_pair,second_pair) in (
+            ("A",bottom[1],left[end]),("B",bottom[end],right[1]),
+            ("C",right[end],top[1]),("D",top[end],left[1]))
+        _points_close(first_pair,second_pair,tolerance) || throw(ArgumentError(
+            "$caller: transfinite Surface[$t] boundary corner $label is " *
+            "inconsistent"))
+    end
+    grid=Matrix{NTuple{3,Float64}}(undef,n1,n2)
+    @inbounds for j in 1:n2,i in 1:n1
+        u=(i-1)/(n1-1);v=(j-1)/(n2-1)
+        b=bottom[i];tp=top[n1+1-i];l=left[n2+1-j];r=right[j]
+        a=bottom[1];c=top[1]
+        point=ntuple(3) do axis
+            (1-v)*b[axis]+v*tp[axis]+(1-u)*l[axis]+u*r[axis]-
+            (1-u)*(1-v)*a[axis]-u*(1-v)*bottom[end][axis]-
+            u*v*c[axis]-(1-u)*v*top[end][axis]
+        end
+        all(isfinite,point) || throw(ArgumentError(
+            "$caller: transfinite interpolation on Surface[$t] produced a " *
+            "non-finite node"))
+        grid[i,j]=point
+    end
+    coords=Matrix{Float64}(undef,3,n1*n2)
+    @inbounds for j in 1:n2,i in 1:n1
+        point=grid[i,j];node=i+(j-1)*n1
+        coords[1,node]=point[1];coords[2,node]=point[2];coords[3,node]=point[3]
+    end
+    tris=Matrix{Int32}(undef,3,2*(n1-1)*(n2-1))
+    cell=0
+    arrangement=spec.arrangement
+    @inbounds for j in 1:n2-1,i in 1:n1-1
+        a=i+(j-1)*n1;b=a+1;c=b+n1;d=a+n1
+        cell+=1
+        if arrangement===:right || arrangement===:alternate_right
+            tris[1,cell]=a;tris[2,cell]=b;tris[3,cell]=d
+            cell+=1;tris[1,cell]=b;tris[2,cell]=c;tris[3,cell]=d
+        else
+            tris[1,cell]=a;tris[2,cell]=b;tris[3,cell]=c
+            cell+=1;tris[1,cell]=a;tris[2,cell]=c;tris[3,cell]=d
+        end
+    end
+    mesh=Mesh(coords;tris=tris)
+    mesh=_consume_surface_attributes(m,t,mesh,caller)
+    return mesh
+end
+
+@inline function _points_close(p,q,tolerance)
+    return abs(p[1]-q[1])<=tolerance && abs(p[2]-q[2])<=tolerance &&
+           abs(p[3]-q[3])<=tolerance
 end
 
 function _validate_surface_embeddings(m::GeoModel,mesh::Mesh,embedded,
@@ -3587,7 +4155,8 @@ triangle mesh is validated before it is returned. Relations meeting at a corner
 must produce the same exact snapped coordinate.
 """
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
-                            max_periodic_passes=8)
+                            max_periodic_passes=8,
+                            size_field::Union{Nothing,AbstractSizeField}=nothing)
     caller="mesh_model_surface"
     t=_tag(tag,caller,2)
     haskey(m.surfaces,t) || throw(ArgumentError(
@@ -3601,10 +4170,12 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     npasses=Int(max_periodic_passes)
     constraints=_surface_periodic_constraints(m,t,caller)
     forced=Dict{Int,Vector{Float64}}()
+    param_sizes=_attribute_forced_parameters(m,t,forced,caller)
     mesh=nothing;embedded=NTuple{2,Int}[]
     for pass in 1:npasses
         mesh,embedded=_mesh_model_surface_once(
-            m,t,forced,min_angle_deg,caller)
+            m,t,forced,min_angle_deg,caller;size_field=size_field,
+            param_sizes=param_sizes)
         isempty(constraints) && break
         changed=_synchronize_periodic_parameters!(
             forced,m,mesh,constraints)
@@ -3930,10 +4501,27 @@ planar boundary-surface relations synchronize the slave facets from their master
 certify their affine tetrahedron-boundary node maps. Unsupported solid encodings
 raise an explicit error.
 """
-function mesh_model_volume(m::GeoModel, tag::Integer)
+function mesh_model_volume(m::GeoModel, tag::Integer;
+                           size_field::Union{Nothing,AbstractSizeField}=nothing)
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
+    if haskey(m.meshing.transfinite_volumes,t)
+        mesh=_transfinite_volume_mesh(m,t,caller)
+        mesh=_consume_volume_attributes(m,t,mesh,caller)
+        # model_to_mixed expects an untagged pure tetrahedron complex —
+        # boundary faces are re-derived from tet faces downstream and
+        # ownership comes from the model, like `tetrahedralize` output.
+        mesh=Mesh(mesh.coords;tets=mesh.tets)
+        reversed=get(m.meshing.reverse,(3,t),false)
+        diagnostic=validate(mesh;require_positive_tets=!reversed)
+        diagnostic.ok || throw(ErrorException(
+            "$caller: transfinite Volume[$t] produced an invalid mesh — " *
+            join(diagnostic.messages,"; ")))
+        ntets(mesh)>0 || throw(ErrorException(
+            "$caller: Volume[$t] produced no tetrahedra"))
+        return mesh
+    end
     explicit_geometry=isempty(m.volumes[t]) ? nothing :
         _model_explicit_volume_geometry(m,t,caller)
     periodic_surfaces=explicit_geometry===nothing ? ModelPeriodicConstraint[] :
@@ -3996,6 +4584,13 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
             surface,t,caller;
             interior_points=isempty(extra) ? nothing : extra)
     end
+    effective_field=_volume_size_field(m,t,surface,size_field,caller)
+    effective_field===nothing ||
+        (mesh=refine_to_size(mesh,effective_field;entity=(3,t),
+                             best_effort=true))
+    iterations=get(m.meshing.smoothing,(3,t),0)
+    iterations>0 &&
+        (mesh=_laplacian_smooth_volume(mesh,iterations,caller,t))
     sort!(unique!(line_tags))
     for curve in line_tags
         a,b=m.curves[curve];p=m.points[a];q=m.points[b]
@@ -4054,13 +4649,212 @@ function mesh_model_volume(m::GeoModel, tag::Integer)
             surface_tag,nodes,edges,point_nodes,curve_entries,
             nested_points,nested_curves,caller)
     end
+    reversed=get(m.meshing.reverse,(3,t),false)
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntets(mesh)>0 || throw(ErrorException("$caller: Volume[$t] produced no tetrahedra"))
     explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
         mesh,t,explicit_geometry.expected_volume,
         explicit_geometry.comparison_scale,caller)
+    # `setReverse` flips orientation last so all certifications above run on
+    # the positively-oriented complex; structural checks still apply after.
+    reversed || return mesh
+    mesh=_reversed_volume_mesh(mesh,caller,t)
+    post=validate(mesh;require_positive_tets=false)
+    post.ok || throw(ErrorException(
+        "$caller: reversed mesh is structurally invalid — " *
+        join(post.messages,"; ")))
     return mesh
 end
+
+# Mesh a dimension-2 compound as a single patch, Gmsh `setCompound` semantics:
+# curves shared by two member surfaces become internal constraints rather than
+# boundaries, the union is triangulated once, and each resulting triangle is
+# attributed back to its member surface by point-in-polygon on that member's
+# own boundary. Returns `(member_tag, Mesh)` pairs in member order.
+function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
+                                  caller::AbstractString;
+                                  size_field::Union{Nothing,AbstractSizeField}=
+                                      nothing)
+    for tag in members
+        haskey(m.meshing.transfinite_surfaces,tag) && throw(ArgumentError(
+            "$caller: transfinite Surface[$tag] cannot join a compound"))
+    end
+    counts=Dict{Int,Int}()
+    for tag in members,loop_id in m.surfaces[tag],signed in m.loops[loop_id]
+        curve=abs(signed)
+        counts[curve]=get(counts,curve,0)+1
+    end
+    any(>(2),values(counts)) && throw(ArgumentError(
+        "$caller: compound surfaces $members share a curve more than twice"))
+    forced=Dict{Int,Vector{Float64}}()
+    param_sizes=Dict{Tuple{Int,Float64},Float64}()
+    for (key,specs) in m.meshing.size_at_params
+        key[1]==1 || continue
+        for (params,value) in specs
+            for parameter in params
+                param_sizes[(key[2],parameter)]=value
+            end
+        end
+    end
+    xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
+    boundary_segs=Tuple{Int,Int}[]
+    internal_segs=Tuple{Int,Int}[]
+    index=Dict{Int,Int}()
+    member_polygons=Dict{Int,Vector{Vector{Int}}}()
+    for tag in members
+        member_polygons[tag]=Vector{Int}[]
+        for loop_id in m.surfaces[tag]
+            loop_idx=Int[]
+            for signed in m.loops[loop_id]
+                curve=abs(signed);a,b=m.curves[curve]
+                cspec=get(m.meshing.transfinite_curves,curve,nothing)
+                cspec===nothing ||
+                    (forced[curve]=collect(_transfinite_parameters(
+                        cspec.num_nodes,cspec.kind,cspec.coef,
+                        caller,curve)))
+                loop_segment=Int[]
+                for parameter in _surface_curve_parameters(
+                        forced,curve,signed)
+                    vertex=if parameter==0
+                        _add_surface_point!(
+                            xs,ys,mesh_sizes,index,m,a,caller)
+                    elseif parameter==1
+                        _add_surface_point!(
+                            xs,ys,mesh_sizes,index,m,b,caller)
+                    else
+                        point=_periodic_curve_point(
+                            m,curve,parameter,caller)
+                        abs(point[3])<=1e-12 || throw(ArgumentError(
+                            "$caller: compound Curve[$curve] subdivision " *
+                            "is not planar in z=0"))
+                        _add_surface_curve_point!(
+                            xs,ys,mesh_sizes,index,m,point,
+                            get(param_sizes,(curve,parameter),
+                                _surface_curve_mesh_size(
+                                    m,curve,parameter,caller)),
+                            curve,caller)
+                    end
+                    push!(loop_idx,vertex)
+                    push!(loop_segment,vertex)
+                end
+                for k in 1:(length(loop_segment)-1)
+                    pair=(loop_segment[k],loop_segment[k+1])
+                    pair[1]==pair[2] && throw(ArgumentError(
+                        "$caller: compound Loop[$loop_id] has coincident " *
+                        "consecutive vertices"))
+                    if get(counts,curve,0)>1
+                        push!(internal_segs,pair)
+                    else
+                        push!(boundary_segs,pair)
+                    end
+                end
+            end
+            push!(member_polygons[tag],loop_idx)
+        end
+    end
+    T=constrained_delaunay(
+        xs,ys,boundary_segs;internal_segments=internal_segs)
+    base=_surface_point_size_field(
+        T,xs,ys,mesh_sizes,first(members),caller)
+    callback=m.meshing.size_callback
+    sizefn=if size_field===nothing && callback===nothing
+        base
+    else
+        function sized(x,y)
+            h=base(x,y)
+            size_field===nothing ||
+                (h=min(h,size_at(size_field,x,y,0.0,
+                                 (2,first(members)))))
+            callback===nothing ||
+                (h=_apply_size_callback(
+                    callback,2,first(members),x,y,0.0,h,caller))
+            return h
+        end
+    end
+    interior=refine!(T;min_angle_deg=25.0,size=sizefn)
+    mesh=to_mesh(T;interior=interior)
+    diag=validate(mesh)
+    diag.ok || throw(ErrorException(
+        "$caller: invalid compound mesh — "*join(diag.messages,"; ")))
+    ntris(mesh)>0 || throw(ErrorException(
+        "$caller: compound surfaces $members produced no triangles"))
+    # Attribute each triangle to the member surface whose boundary polygon
+    # contains its centroid.
+    member_tris=Dict{Int,Vector{Int}}(tag=>Int[] for tag in members)
+    for cell in axes(mesh.tris,2)
+        cx=(mesh.coords[1,mesh.tris[1,cell]]+mesh.coords[1,mesh.tris[2,cell]]+
+            mesh.coords[1,mesh.tris[3,cell]])/3
+        cy=(mesh.coords[2,mesh.tris[1,cell]]+mesh.coords[2,mesh.tris[2,cell]]+
+            mesh.coords[2,mesh.tris[3,cell]])/3
+        owner=0
+        for tag in members
+            inside=false
+            for polygon in member_polygons[tag]
+                _point_in_polygon(cx,cy,xs,ys,polygon) && (inside=!inside)
+            end
+            inside && (owner=tag;break)
+        end
+        owner==0 && throw(ErrorException(
+            "$caller: compound triangle $cell is outside every member " *
+            "surface polygon"))
+        push!(member_tris[owner],cell)
+    end
+    parts=Tuple{Int,Mesh}[]
+    for tag in members
+        cells=member_tris[tag]
+        isempty(cells) && throw(ErrorException(
+            "$caller: compound member Surface[$tag] received no triangles"))
+        tris=Matrix{Int32}(mesh.tris[:,cells])
+        referenced=falses(nnodes(mesh))
+        @inbounds for column in axes(tris,2),slot in 1:3
+            referenced[tris[slot,column]]=true
+        end
+        remap=zeros(Int32,nnodes(mesh))
+        next=Int32(0)
+        for node in 1:nnodes(mesh)
+            referenced[node] || continue
+            next+=Int32(1);remap[node]=next
+        end
+        @inbounds for column in axes(tris,2),slot in 1:3
+            tris[slot,column]=remap[tris[slot,column]]
+        end
+        coordinates=Matrix{Float64}(undef,3,Int(next))
+        for node in 1:nnodes(mesh)
+            referenced[node] || continue
+            coordinates[:,remap[node]].=@view mesh.coords[:,node]
+        end
+        part=Mesh(coordinates;tris=tris)
+        # The member's boundary — including the shared compound seams — is
+        # recomputed from its own triangles so downstream classification sees
+        # the member's full boundary chain.
+        _,member_edges=_surface_boundary_topology(part,caller)
+        segs=Matrix{Int32}(undef,2,length(member_edges))
+        for (seg,(a,b)) in enumerate(sort!(collect(member_edges)))
+            segs[1,seg]=a;segs[2,seg]=b
+        end
+        part=Mesh(coordinates;segs=segs,tris=part.tris)
+        push!(parts,(tag,part))
+    end
+    return parts
+end
+
+# Ray-cast point-in-polygon over the PSLG vertex list `polygon` (indices into
+# `xs`/`ys`).
+function _point_in_polygon(x,y,xs,ys,polygon)
+    inside=false
+    n=length(polygon)
+    j=n
+    for i in 1:n
+        xi=xs[polygon[i]];yi=ys[polygon[i]]
+        xj=xs[polygon[j]];yj=ys[polygon[j]]
+        if (yi>y)!=(yj>y) && x<(xj-xi)*(y-yi)/(yj-yi)+xi
+            inside=!inside
+        end
+        j=i
+    end
+    return inside
+end
+
 
 end # module

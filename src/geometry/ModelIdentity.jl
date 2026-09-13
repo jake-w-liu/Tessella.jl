@@ -18,7 +18,7 @@ function set_entity_name!(m::GeoModel,dim,tag,name)
     entity_tag=_model_identity_tag(tag,dimension,caller,"entity tag")
     name isa AbstractString || throw(ArgumentError(
         "$caller: name must be a string"))
-    haskey(_model_entity_dictionary(m,dimension),entity_tag) || return ""
+    _model_entity_known(m,dimension,entity_tag) || return ""
     entity_name=String(name)
     key=(dimension,entity_tag)
     if isempty(entity_name)
@@ -39,7 +39,7 @@ function model_entity_name(m::GeoModel,dim,tag)
     caller="model_entity_name"
     dimension=_dimension(dim,caller)
     entity_tag=_model_identity_tag(tag,dimension,caller,"entity tag")
-    haskey(_model_entity_dictionary(m,dimension),entity_tag) || return ""
+    _model_entity_known(m,dimension,entity_tag) || return ""
     return get(m.entity_names,(dimension,entity_tag),"")
 end
 
@@ -265,24 +265,13 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     new_entity_tag=_model_identity_tag(
         new_tag,dimension,caller,"target entity tag")
     entities=_model_entity_dictionary(m,dimension)
-    haskey(entities,old_entity_tag) || throw(ArgumentError(
+    _model_entity_known(m,dimension,old_entity_tag) || throw(ArgumentError(
         "$caller: unknown entity ($dimension,$old_entity_tag)"))
-    haskey(entities,new_entity_tag) && throw(ArgumentError(
+    (haskey(entities,new_entity_tag) ||
+     haskey(m.discrete,(dimension,new_entity_tag))) && throw(ArgumentError(
         "$caller: entity ($dimension,$new_entity_tag) already exists"))
+    old_is_discrete=haskey(m.discrete,(dimension,old_entity_tag))
 
-    dimension_state=if dimension==0
-        _model_identity_point_state(
-            m,old_entity_tag,new_entity_tag,caller)
-    elseif dimension==1
-        _model_identity_curve_state(
-            m,old_entity_tag,new_entity_tag,caller)
-    elseif dimension==2
-        _model_identity_surface_state(
-            m,old_entity_tag,new_entity_tag,caller)
-    else
-        _model_identity_volume_state(
-            m,old_entity_tag,new_entity_tag,caller)
-    end
     entity_names=_model_identity_names(
         m,dimension,old_entity_tag,new_entity_tag,caller)
     entity_visibility=_model_identity_entity_state(
@@ -297,9 +286,39 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m,dimension,old_entity_tag,new_entity_tag,caller)
     periodic=_model_identity_periodic(
         m,dimension,old_entity_tag,new_entity_tag,caller)
+    meshing=_model_identity_meshing(
+        m,dimension,old_entity_tag,new_entity_tag)
+    discrete=_model_identity_discrete(
+        m,dimension,old_entity_tag,new_entity_tag)
     next_tag=copy(m.next_tag)
     next_tag[dimension+1]=max(next_tag[dimension+1],new_entity_tag)
 
+    if old_is_discrete
+        m.entity_names=entity_names
+        m.entity_visibility=entity_visibility
+        m.entity_colors=entity_colors
+        m.physical=physical
+        m.embeds=embeds
+        m.periodic=periodic
+        m.meshing=meshing
+        m.discrete=discrete
+        m.next_tag=next_tag
+        return new_entity_tag
+    end
+
+    dimension_state=if dimension==0
+        _model_identity_point_state(
+            m,old_entity_tag,new_entity_tag,caller)
+    elseif dimension==1
+        _model_identity_curve_state(
+            m,old_entity_tag,new_entity_tag,caller)
+    elseif dimension==2
+        _model_identity_surface_state(
+            m,old_entity_tag,new_entity_tag,caller)
+    else
+        _model_identity_volume_state(
+            m,old_entity_tag,new_entity_tag,caller)
+    end
     if dimension==0
         m.points=dimension_state.points
         m.point_size=dimension_state.point_size
@@ -325,6 +344,112 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     m.physical=physical
     m.embeds=embeds
     m.periodic=periodic
+    m.meshing=meshing
+    m.discrete=discrete
     m.next_tag=next_tag
     return new_entity_tag
+end
+
+# Rekey every per-entity meshing attribute owned by `(dimension, old_tag)` —
+# tag-keyed transfinite dicts first, then the `(dim, tag)`-keyed dicts — and
+# retarget compound tag lists and outward-orientation volume entries.
+function _model_identity_meshing(
+    m::GeoModel,dimension::Int,old_tag::Int,new_tag::Int)
+    attributes=m.meshing
+    transfinite_curves=copy(attributes.transfinite_curves)
+    transfinite_surfaces=copy(attributes.transfinite_surfaces)
+    transfinite_volumes=copy(attributes.transfinite_volumes)
+    if dimension==1 && haskey(transfinite_curves,old_tag)
+        transfinite_curves[new_tag]=pop!(transfinite_curves,old_tag)
+    end
+    if dimension==2 && haskey(transfinite_surfaces,old_tag)
+        transfinite_surfaces[new_tag]=pop!(transfinite_surfaces,old_tag)
+    end
+    if dimension==3 && haskey(transfinite_volumes,old_tag)
+        transfinite_volumes[new_tag]=pop!(transfinite_volumes,old_tag)
+    end
+    recombine=Dict{Tuple{Int,Int},Float64}()
+    smoothing=Dict{Tuple{Int,Int},Int}()
+    reverse=Dict{Tuple{Int,Int},Bool}()
+    algorithm=Dict{Tuple{Int,Int},Int}()
+    size_at_params=
+        Dict{Tuple{Int,Int},Vector{Tuple{Vector{Float64},Float64}}}()
+    size_from_boundary=Dict{Tuple{Int,Int},Bool}()
+    for (key,value) in attributes.recombine
+        recombine[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
+    end
+    for (key,value) in attributes.smoothing
+        smoothing[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
+    end
+    for (key,value) in attributes.reverse
+        reverse[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
+    end
+    for (key,value) in attributes.algorithm
+        algorithm[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
+    end
+    for (key,value) in attributes.size_at_params
+        size_at_params[key==(dimension,old_tag) ?
+                       (dimension,new_tag) : key]=value
+    end
+    for (key,value) in attributes.size_from_boundary
+        size_from_boundary[key==(dimension,old_tag) ?
+                           (dimension,new_tag) : key]=value
+    end
+    outward=Set{Int}(dimension==3 ?
+        (tag==old_tag ? new_tag : tag for tag in attributes.outward_orientation) :
+        attributes.outward_orientation)
+    compounds=Pair{Int,Vector{Int}}[
+        cdim==dimension ? cdim=>[t==old_tag ? new_tag : t for t in ctags] :
+                          cdim=>copy(ctags)
+        for (cdim,ctags) in attributes.compounds]
+    migrated=ModelMeshingAttributes()
+    migrated.transfinite_curves=transfinite_curves
+    migrated.transfinite_surfaces=transfinite_surfaces
+    migrated.transfinite_volumes=transfinite_volumes
+    migrated.recombine=recombine
+    migrated.smoothing=smoothing
+    migrated.reverse=reverse
+    migrated.algorithm=algorithm
+    migrated.size_at_params=size_at_params
+    migrated.size_from_boundary=size_from_boundary
+    migrated.size_callback=attributes.size_callback
+    migrated.compounds=compounds
+    migrated.outward_orientation=outward
+    migrated.order=attributes.order
+    migrated.attached=_model_identity_discrete_map(
+        attributes.attached,m,dimension,old_tag,new_tag)
+    migrated.homology_requests=copy(attributes.homology_requests)
+    return migrated
+end
+
+# Rekey a `(dim, tag) => DiscreteEntity` store and retarget declared boundary
+# references to the retagged entity — shared by `m.discrete` and the
+# meshing-attribute `attached` store.
+function _model_identity_discrete_map(
+    source::Dict{Tuple{Int,Int},DiscreteEntity},
+    m::GeoModel,dimension::Int,old_tag::Int,new_tag::Int)
+    result=Dict{Tuple{Int,Int},DiscreteEntity}()
+    for (key,entity) in source
+        new_key=key==(dimension,old_tag) ? (dimension,new_tag) : key
+        migrated=DiscreteEntity(
+            NTuple{2,Int}[
+                b==(dimension,old_tag) ? (dimension,new_tag) : b
+                for b in entity.boundary],
+            copy(entity.node_tags),copy(entity.node_coords),
+            copy(entity.node_params),copy(entity.element_types),
+            copy(entity.element_tags),
+            Vector{Int32}[copy(nodes) for nodes in entity.element_nodes],
+            Dict{Int32,Vector{Float64}}(k=>copy(v) for (k,v) in
+                                        entity.aux_params))
+        result[new_key]=migrated
+    end
+    return result
+end
+
+# Rekey the discrete-entity store and retarget declared boundary references to
+# the retagged entity, matching how native topology references migrate.
+function _model_identity_discrete(
+    m::GeoModel,dimension::Int,old_tag::Int,new_tag::Int)
+    return _model_identity_discrete_map(
+        m.discrete,m,dimension,old_tag,new_tag)
 end

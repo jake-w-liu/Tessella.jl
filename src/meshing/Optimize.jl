@@ -281,13 +281,19 @@ per-star worst angle is monotone non-worsening. Complements the topological
 [`Mesh3D.optimize_flips!`](@ref) (flips change connectivity; this repositions nodes).
 Returns a new `Mesh`.
 """
-function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
+function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0,
+                         require_positive_tets::Bool=true,
+                         movable::Union{Nothing,BitVector}=nothing)
     niters = _opt_count(iters,"smooth_optimize","iters")
     threshold = _opt_float(sliver_deg,"smooth_optimize","sliver_deg")
     (isfinite(threshold) && 0 <= threshold < 90) ||
         throw(ArgumentError("smooth_optimize: sliver_deg must be finite and in [0, 90) (got $sliver_deg)"))
-    _require_valid_tetmesh(m, "smooth_optimize")
+    _require_valid_tetmesh(m, "smooth_optimize";
+                          require_positive_tets=require_positive_tets)
     nn = nnodes(m)
+    movable===nothing || length(movable)==nn || throw(ArgumentError(
+        "smooth_optimize: movable mask length $(length(movable)) != " *
+        "node count $nn"))
     coords = copy(m.coords)
     isboundary = _boundary_nodes(m)
     inc = _node_tets(m)
@@ -296,6 +302,7 @@ function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0)
     @inbounds for _ in 1:niters
         for v in 1:nn
             (isboundary[v] || isempty(inc[v])) && continue
+            movable===nothing || movable[v] || continue
             tv = inc[v]
             q0 = _star_quality(m, coords, tv)
             q0 >= thr && continue                          # targeted: skip already-good stars
@@ -326,8 +333,9 @@ end
 # tetrahedral manifold.  Validate once at the public boundary so NaNs cannot pass
 # the move guards (`NaN <= 0` is false), and callers never receive an invalid mesh
 # represented as a successful optimization result.
-function _require_valid_tetmesh(m::Mesh, caller::AbstractString)
-    d = validate(m)
+function _require_valid_tetmesh(m::Mesh, caller::AbstractString;
+                                require_positive_tets::Bool=true)
+    d = validate(m; require_positive_tets=require_positive_tets)
     d.ok || throw(ArgumentError("$caller: input mesh is invalid — " * join(d.messages, "; ")))
     return nothing
 end

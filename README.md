@@ -285,11 +285,36 @@ renumbering for all or a selected subset of elements, `optimize` runs the
 boundary-preserving tetrahedral optimizer on the cache, `set_visibility`/
 `get_visibility` track raw per-element display state, and
 `remove_constraints` is a validated no-op matching Gmsh 4.15.2's
-per-entity-attribute scope.
+per-entity-attribute scope. The session owns a Gmsh-parity multi-model list:
+`model.add` appends a fresh named model and selects it, `set_current` restores
+a named model's geometry, mesh, and visibility state, `remove` drops the
+current model and selects the last remaining one, and `model`/`mesh`
+`set_visibility_per_window` store per-window display state.
 It commits only a validated, independently owned result and rewinds reflected simplex
 connectivity to keep the mesh valid. Model geometry and periodic relations remain
 unchanged, and the index-aligned entity-classification snapshot is retained
 through the transform.
+`API.model.add_discrete_entity` registers parametrization-free entities and
+`API.mesh.add_nodes`, `add_elements`, and `add_elements_by_type` attach
+tag-addressed node and element records to them; `import_stl` loads the model
+file's STL as a discrete surface. `create_topology` rebuilds BRep topology
+from the mesh records, `classify_surfaces` regroups discrete faces by
+dihedral angle, `create_geometry` derives chord/PCA parametrizations,
+`compute_homology` emits GF(2) chain generators inside new physical groups,
+and `compute_cross_field` fills a session-owned view with a smoothed
+element-wise frame field. The `API.mesh.field` submodule composes
+MathEval, Distance, and Threshold fields, background and boundary-layer
+assignments, and field removal; the generators consume it together with
+per-entity meshing attributes — `set_transfinite_*` on curves, surfaces,
+and volumes, `set_recombine`, `set_algorithm`, `set_smoothing`,
+`set_order` (a validated order-2 overlay), `set_reverse`,
+`set_outward_orientation`, `set_compound`, `set_size_at_parametric_points`,
+`set_size_from_boundary`, and the size-callback pair. `recombine` and
+`split_quadrangles` move quadrangles between the simplex cache and entity
+records, `get_periodic_keys` pairs periodic nodes into function-space key
+sequences, `optimize` accepts Gmsh's method names with `dim_tags` entity
+scoping, and `generate` meshes multi-entity selections. Queries on a
+present-but-unmeshed model return empty data like Gmsh 4.15.2.
 `API.mesh.get_nodes`, `get_elements`, `get_element_types`,
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
 detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element

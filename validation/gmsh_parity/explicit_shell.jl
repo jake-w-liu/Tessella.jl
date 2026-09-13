@@ -30,7 +30,7 @@ projected.entity_data.entities[(3,1)].boundaries==EXPECTED_BOUNDARIES ||
     error("Tessella explicit-shell projection lost volume boundaries")
 projected_crc=mixed_crc(projected)
 projected_crc.sha==
-    "9bce88e319c67236317df64b876739a62f80982ed86eca028bd1e7bda022bcb6" ||
+    "16d18e821aebd6486ad2a45f6dc3fa4a86e250f715e7fa5ec3ad35b4254fbdbb" ||
     error("Tessella explicit-shell projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()
@@ -137,7 +137,7 @@ try
             "Tessella explicit-shell MSH2 modes produced different CRCs: " *
             "$msh2_crcs")
         only(msh2_crcs)==
-            "2bbf8be73f7f4b3204327f03b1247334e1a141483874b87238bcd783749e7c23" || error(
+            "0ad8a64fe9202407e54b3d9b9b41d6e552efb35a097c72e81f53f2dc57264f1c" || error(
             "Tessella explicit-shell MSH2 CRC changed: $(only(msh2_crcs))")
     end
     println("GMSH_PARITY_EXPLICIT_SHELL_OK gmsh=$(gmsh.GMSH_API_VERSION) " *

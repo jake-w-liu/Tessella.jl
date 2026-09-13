@@ -305,9 +305,66 @@ function gmsh_tag_divergences()
     return (;zero,negative,invalid_dimension,rejects=Tuple(rejects))
 end
 
+# Gmsh 4.15.2 multi-model session: `initialize` creates one unnamed model, `add`
+# appends and selects, `set_current` switches with full per-model state, and
+# `remove` deletes the current model and selects the last remaining one.
+function tessella_model_list()
+    API.finalize()
+    return try
+        API.initialize()
+        sequence=Tuple{Vector{String},String}[]
+        push!(sequence,(API.model.list(),API.model.get_current()))
+        API.model.add("a")
+        API.model.add_point(1,0,0;tag=1)
+        API.model.add("b")
+        API.model.add_point(2,0,0;tag=7)
+        API.model.add_point(3,0,0;tag=8)
+        push!(sequence,(API.model.list(),API.model.get_current()))
+        API.model.set_current("a")
+        entities_a=Tuple{Int,Int}.(API.model.get_entities())
+        API.model.set_current("b")
+        entities_b=Tuple{Int,Int}.(API.model.get_entities())
+        API.model.remove()
+        push!(sequence,(API.model.list(),API.model.get_current()))
+        API.model.add("a")
+        push!(sequence,(API.model.list(),API.model.get_current()))
+        (;sequence,entities_a,entities_b,
+          file_names=(API.model.set_file_name("b.stl"),
+                      API.model.get_file_name()))
+    finally
+        API.finalize()
+    end
+end
+
+function gmsh_model_list()
+    gmsh.clear()
+    sequence=Tuple{Vector{String},String}[]
+    push!(sequence,(String.(gmsh.model.list()),gmsh.model.getCurrent()))
+    gmsh.model.add("a")
+    gmsh.model.geo.addPoint(1,0,0,1.0,1)
+    gmsh.model.geo.synchronize()
+    gmsh.model.add("b")
+    gmsh.model.geo.addPoint(2,0,0,1.0,7)
+    gmsh.model.geo.addPoint(3,0,0,1.0,8)
+    gmsh.model.geo.synchronize()
+    push!(sequence,(String.(gmsh.model.list()),gmsh.model.getCurrent()))
+    gmsh.model.setCurrent("a")
+    entities_a=dim_tags(gmsh.model.getEntities())
+    gmsh.model.setCurrent("b")
+    entities_b=dim_tags(gmsh.model.getEntities())
+    gmsh.model.remove()
+    push!(sequence,(String.(gmsh.model.list()),gmsh.model.getCurrent()))
+    gmsh.model.add("a")
+    push!(sequence,(String.(gmsh.model.list()),gmsh.model.getCurrent()))
+    gmsh.model.setFileName("b.stl")
+    return (;sequence,entities_a,entities_b,
+            file_names=(nothing,gmsh.model.getFileName()))
+end
+
 tessella_surface=tessella_surface_identity()
 tessella_periodic=tessella_periodic_identity()
 tessella_volume=tessella_volume_identity()
+tessella_models=tessella_model_list()
 
 gmsh.initialize(["gmsh","-v","0"])
 try
@@ -318,6 +375,7 @@ try
     gmsh_periodic=gmsh_periodic_identity()
     gmsh_volume=gmsh_volume_identity()
     gmsh_divergences=gmsh_tag_divergences()
+    gmsh_models=gmsh_model_list()
 
     for field in (:entities,:line_boundary,:surface_boundary,:physical,
                   :embedded,:removed_names)
@@ -371,8 +429,22 @@ try
     gmsh_divergences.rejects==(true,true,true) || error(
         "Gmsh source/collision setTag errors changed: $(gmsh_divergences.rejects)")
 
+    tessella_models.sequence==gmsh_models.sequence || error(
+        "model list/current sequence differs: Tessella=$(tessella_models.sequence) " *
+        "Gmsh=$(gmsh_models.sequence)")
+    tessella_models.entities_a==gmsh_models.entities_a || error(
+        "switched model-a entities differ: Tessella=$(tessella_models.entities_a) " *
+        "Gmsh=$(gmsh_models.entities_a)")
+    tessella_models.entities_b==gmsh_models.entities_b || error(
+        "switched model-b entities differ: Tessella=$(tessella_models.entities_b) " *
+        "Gmsh=$(gmsh_models.entities_b)")
+    tessella_models.file_names[2]==gmsh_models.file_names[2]=="b.stl" || error(
+        "per-model file names differ: Tessella=$(tessella_models.file_names) " *
+        "Gmsh=$(gmsh_models.file_names)")
+
     println("GMSH_PARITY_MODEL_IDENTITY_OK " *
             "gmsh=$(gmsh.GMSH_API_VERSION) topology_refs=18 periodic_pairs=2 " *
+            "model_slots=$(length(tessella_models.sequence)) " *
             "volume_crc=$(tessella_volume.crc) " *
             "bounded_divergences=positive_existing_names_migrate")
 finally

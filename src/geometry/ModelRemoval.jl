@@ -23,7 +23,7 @@ end
 
 @inline function _model_removal_exists(
     m::GeoModel,removed::Set{Tuple{Int,Int}},dimension::Int,tag::Int)
-    return haskey(_model_entity_dictionary(m,dimension),tag) &&
+    return _model_entity_known(m,dimension,tag) &&
            !((dimension,tag) in removed)
 end
 
@@ -74,6 +74,12 @@ end
 function _model_removal_has_boundary_owner(
     m::GeoModel,removed::Set{Tuple{Int,Int}},dimension::Int,tag::Int,
     caller::AbstractString)
+    # A discrete entity's declared boundary keeps its boundary entities owned.
+    for ((entity_dimension,entity_tag),entity) in m.discrete
+        _model_removal_exists(m,removed,entity_dimension,entity_tag) ||
+            continue
+        (dimension,tag) in entity.boundary && return true
+    end
     if dimension==0
         return any(tag in endpoints
                    for (curve,endpoints) in m.curves
@@ -107,6 +113,9 @@ end
 
 function _model_removal_boundary(
     m::GeoModel,dimension::Int,tag::Int,caller::AbstractString)
+    discrete=get(m.discrete,(dimension,tag),nothing)
+    discrete!==nothing && return Tuple{Int,Int}[
+        (bdim,btag) for (bdim,btag) in discrete.boundary]
     if dimension==0
         return Tuple{Int,Int}[]
     elseif dimension==1
@@ -249,10 +258,45 @@ function _model_removal_state(
         end
     end
 
+    discrete=Dict{Tuple{Int,Int},DiscreteEntity}()
+    for (key,entity) in m.discrete
+        key in removed && continue
+        retained=DiscreteEntity(
+            NTuple{2,Int}[b for b in entity.boundary if !(b in removed)],
+            copy(entity.node_tags),copy(entity.node_coords),
+            copy(entity.node_params),copy(entity.element_types),
+            copy(entity.element_tags),
+            Vector{Int32}[copy(nodes) for nodes in entity.element_nodes],
+            Dict{Int32,Vector{Float64}}(k=>copy(v) for (k,v) in
+                                        entity.aux_params))
+        discrete[key]=retained
+    end
+
+    meshing=m.meshing
+    for tag in removed_tags[2]
+        delete!(meshing.transfinite_curves,tag)
+    end
+    for tag in removed_tags[3]
+        delete!(meshing.transfinite_surfaces,tag)
+    end
+    for tag in removed_tags[4]
+        delete!(meshing.transfinite_volumes,tag)
+        delete!(meshing.outward_orientation,tag)
+    end
+    for entity in removed
+        for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
+                      meshing.algorithm,meshing.size_at_params,
+                      meshing.size_from_boundary,meshing.attached)
+            delete!(store,entity)
+        end
+    end
+    filter!(compound->!any(member->(compound.first,member) in removed,
+                           compound.second),meshing.compounds)
+
     return (;points,point_size,curves,loops,surfaces,surface_loops,volumes,
             entity_names,entity_visibility,entity_colors,physical,physical_names,
             box_extents,cylinders,spheres,cones,booleans,boolean_operands,
-            periodic,embeds)
+            periodic,embeds,discrete)
 end
 
 """
@@ -299,6 +343,7 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.boolean_operands=state.boolean_operands
     m.periodic=state.periodic
     m.embeds=state.embeds
+    m.discrete=state.discrete
     return length(removed)
 end
 

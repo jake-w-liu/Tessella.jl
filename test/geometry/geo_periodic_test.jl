@@ -155,11 +155,11 @@ const _PERIODIC_SURFACE_VOLUME_GEO=normpath(joinpath(
     @test meshed.mesh!==nothing
     @test validate(meshed.mesh).ok
     @test mesh_crc(meshed.mesh).sha==
-          "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
+          "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
     @test length(model_periodic_nodes(
-        meshed.model,meshed.mesh,2,4).slave_nodes)==5
+        meshed.model,meshed.mesh,2,4).slave_nodes)==25
     @test length(model_periodic_nodes(
-        meshed.model,meshed.mesh,2,5).slave_nodes)==4
+        meshed.model,meshed.mesh,2,5).slave_nodes)==25
 
     source=read(_PERIODIC_SURFACE_VOLUME_GEO,String)
     rotated=_execute_geo_source(replace(
@@ -171,7 +171,7 @@ const _PERIODIC_SURFACE_VOLUME_GEO=normpath(joinpath(
     @test mesh_crc(rotated.mesh).sha==mesh_crc(meshed.mesh).sha
     rotated_mapping=model_periodic_nodes(
         rotated.model,rotated.mesh,2,4)
-    @test length(rotated_mapping.slave_nodes)==5
+    @test length(rotated_mapping.slave_nodes)==25
     for (slave,master) in zip(rotated_mapping.slave_nodes,
                               rotated_mapping.master_nodes)
         actual=Tuple(rotated.mesh.coords[:,slave])
