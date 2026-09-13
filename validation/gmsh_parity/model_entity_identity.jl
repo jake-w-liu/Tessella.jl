@@ -188,8 +188,15 @@ function tessella_periodic_identity()
         API.model.set_tag(1,3,103)
         model=API.CURRENT[]
         model===nothing && error("Tessella API lost its periodic model")
-        [(Int(constraint.slave_entity),Int(constraint.master_entity))
-         for constraint in model_periodic_constraints(model)]
+        masters=Int.(API.mesh.get_periodic(1,[101,102]))
+        api_pairs=collect(zip([101,102],masters))
+        model_pairs=[(Int(constraint.slave_entity),
+                      Int(constraint.master_entity))
+                     for constraint in model_periodic_constraints(model)]
+        api_pairs==model_pairs || error(
+            "Tessella get_periodic disagrees with stored constraints: " *
+            "$api_pairs vs $model_pairs")
+        api_pairs
     finally
         API.finalize()
     end

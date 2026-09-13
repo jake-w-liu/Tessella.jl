@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: mesh_crc, node, ntets, tet_volume, validate
+using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume, validate
 
 const _API=Tessella.API
 
@@ -574,4 +574,155 @@ end
     finally
         _API.finalize()
     end
+end
+
+@testset "model name/file and periodic/renumbering parity" begin
+    _API.finalize()
+    @test_throws ArgumentError _API.model.get_current()
+    @test_throws ArgumentError _API.model.set_current("unnamed")
+    @test_throws ArgumentError _API.model.get_file_name()
+    @test_throws ArgumentError _API.model.set_file_name("x.msh")
+    try
+        _API.initialize()
+        @test _API.model.get_current()=="unnamed"
+        @test _API.model.get_file_name()==""
+        @test _API.model.set_current("unnamed")===nothing
+        @test_throws ArgumentError _API.model.set_current("other")
+        @test _API.model.set_file_name("fixture.msh")===nothing
+        @test _API.model.get_file_name()=="fixture.msh"
+        for call in (()->_API.model.set_current(3),
+                     ()->_API.model.set_current(true),
+                     ()->_API.model.set_file_name(3),
+                     ()->_API.model.set_file_name(nothing))
+            @test_throws ArgumentError call()
+        end
+        # initialize() resets session model state.
+        _API.initialize()
+        @test _API.model.get_current()=="unnamed"
+        @test _API.model.get_file_name()==""
+
+        _API.model.add_point(0,0,0;tag=1);_API.model.add_point(1,0,0;tag=2)
+        _API.model.add_point(0,1,0;tag=3);_API.model.add_point(1,1,0;tag=4)
+        _API.model.add_line(1,2;tag=1);_API.model.add_line(3,4;tag=2)
+        _API.model.add_line(2,4;tag=3);_API.model.add_line(1,3;tag=4)
+        _API.model.add_curve_loop([1,3,-2,-4];tag=1)
+        _API.model.add_plane_surface([1];tag=1)
+        _API.mesh.set_periodic(1,[2],[1],(
+            1.0,0.0,0.0,0.0,
+            0.0,1.0,0.0,1.0,
+            0.0,0.0,1.0,0.0,
+            0.0,0.0,0.0,1.0))
+        # Entities with no periodic master map to themselves, like Gmsh 4.15.2.
+        @test _API.mesh.get_periodic(1,[1,2,3,4])==Int32[1,1,3,4]
+        @test _API.mesh.get_periodic(2,[1])==Int32[1]
+        @test _API.mesh.get_periodic(0,[1])==Int32[1]
+        @test _API.mesh.get_periodic(1,Int[])==Int32[]
+        for call in (()->_API.mesh.get_periodic(1,[99]),
+                     ()->_API.mesh.get_periodic(1,[2.5]),
+                     ()->_API.mesh.get_periodic(1,[true]),
+                     ()->_API.mesh.get_periodic(-1,[1]),
+                     ()->_API.mesh.get_periodic(4,[1]),
+                     ()->_API.mesh.get_periodic(1,3))
+            @test_throws ArgumentError call()
+        end
+        # removeConstraints retains periodic relations, embeddings, and Point
+        # sizes in Gmsh 4.15.2; the native model stores none of the cleared
+        # attribute kinds, so this is a validated no-op.
+        @test _API.mesh.remove_constraints()===nothing
+        @test _API.mesh.remove_constraints([(0,1),(1,2),(2,1)])===nothing
+        @test _API.mesh.get_periodic(1,[2])==Int32[1]
+        for call in (()->_API.mesh.remove_constraints([(1,99)]),
+                     ()->_API.mesh.remove_constraints([(4,1)]),
+                     ()->_API.mesh.remove_constraints([(1,)]),
+                     ()->_API.mesh.remove_constraints(3))
+            @test_throws ArgumentError call()
+        end
+
+        generated=_API.mesh.generate(2)
+        @test validate(generated).ok
+        old_tags,new_tags=_API.mesh.compute_renumbering()
+        @test old_tags==UInt64.(1:nnodes(generated))
+        @test sort(Int.(new_tags))==collect(1:nnodes(generated))
+        triangle_tags,_=_API.mesh.get_elements_by_type(2)
+        restricted_old,restricted_new=_API.mesh.compute_renumbering(
+            "RCMK",triangle_tags[1:2])
+        @test length(restricted_old)==length(restricted_new)
+        @test issorted(restricted_old)
+        @test sort(Int.(restricted_new))==collect(1:length(restricted_new))
+        for call in (()->_API.mesh.compute_renumbering("Hilbert"),
+                     ()->_API.mesh.compute_renumbering(3),
+                     ()->_API.mesh.compute_renumbering("RCMK",[999]),
+                     ()->_API.mesh.compute_renumbering("RCMK",[-1]),
+                     ()->_API.mesh.compute_renumbering("RCMK",3))
+            @test_throws ArgumentError call()
+        end
+        # optimize() runs the boundary-preserving tet optimizer on the cache;
+        # a 2-D cache is unchanged and invalid scopes/methods fail explicitly.
+        @test _API.mesh.optimize()===nothing
+        @test validate(_API.mesh.get()).ok
+        for call in (()->_API.mesh.optimize("Netgen"),
+                     ()->_API.mesh.optimize(3),
+                     ()->_API.mesh.optimize("",3,1),
+                     ()->_API.mesh.optimize("",false,-1),
+                     ()->_API.mesh.optimize("",false,1,[(2,1)]))
+            @test_throws ArgumentError call()
+        end
+        # Per-element visibility is raw display state like Gmsh 4.15.2: default
+        # 1, stored values pass through, unknown tags silently report 0, and
+        # the state resets when the cache is replaced.
+        triangle_tags,_=_API.mesh.get_elements_by_type(2)
+        @test _API.mesh.get_visibility(triangle_tags)==
+              fill(Int32(1),length(triangle_tags))
+        @test _API.mesh.set_visibility(triangle_tags[1:1],0)===nothing
+        @test _API.mesh.get_visibility(triangle_tags[1:2])==Int32[0,1]
+        @test _API.mesh.set_visibility([99999],5)===nothing
+        @test _API.mesh.get_visibility([99999,triangle_tags[1]])==Int32[0,0]
+        for call in (()->_API.mesh.set_visibility([1],"x"),
+                     ()->_API.mesh.set_visibility([1.5],1),
+                     ()->_API.mesh.set_visibility(1,0),
+                     ()->_API.mesh.get_visibility(3))
+            @test_throws ArgumentError call()
+        end
+        _API.mesh.clear()
+        @test _API.mesh.get_visibility([1])==Int32[0]
+        metadata=Docs.meta(Tessella.API.mesh)
+        for name in (:get_periodic,:remove_constraints,:compute_renumbering,
+                     :optimize,:set_visibility,:get_visibility)
+            @test haskey(metadata,Docs.Binding(Tessella.API.mesh,name))
+        end
+        # Single-model lifecycle: list reports the session model, remove drops
+        # it, and add re-creates it only while none exists. A single `add` on
+        # the fresh unnamed model names it, matching Gmsh's `model.add`.
+        @test _API.model.list()==["unnamed"]
+        @test_throws ArgumentError _API.model.add("second")
+        _API.model.remove()
+        @test _API.model.add("named")===nothing
+        @test _API.model.get_current()=="named"
+        @test _API.model.list()==["named"]
+        @test_throws ArgumentError _API.model.add("second")
+        _API.model.remove()
+        _API.initialize()
+        @test _API.model.add("named")===nothing
+        @test _API.model.get_current()=="named"
+        _API.model.remove()
+        @test_throws ArgumentError _API.model.remove()
+        @test _API.model.list()==String[]
+        @test_throws ArgumentError _API.model.get_entities()
+        @test _API.model.add("fresh")===nothing
+        @test _API.model.list()==["fresh"]
+        @test _API.model.get_current()=="fresh"
+        @test _API.model.set_current("fresh")===nothing
+        @test_throws ArgumentError _API.model.add("third")
+        @test _API.model.add_point(1,1,1;tag=7)==7
+        @test _API.model.get_entities()==[(0,7)]
+        metadata_model=Docs.meta(Tessella.API.model)
+        for name in (:get_current,:set_current,:get_file_name,:set_file_name,
+                     :add,:remove,:list)
+            @test haskey(metadata_model,
+                         Docs.Binding(Tessella.API.model,name))
+        end
+    finally
+        _API.finalize()
+    end
+    @test_throws ArgumentError _API.mesh.compute_renumbering()
 end

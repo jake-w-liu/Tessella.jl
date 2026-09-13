@@ -512,20 +512,28 @@ try
     end
     gmsh.model.geo.addCurveLoop([1,2,3,4],1)
     gmsh.model.geo.addPlaneSurface([1],1)
+    gmsh.model.geo.addPoint(0.5,0.5,0.0,0.2,5)
     gmsh.model.geo.synchronize()
+    gmsh.model.mesh.embed(0,[5],2,1)
+    gmsh.model.addPhysicalGroup(2,[1],10)
+    gmsh.model.addPhysicalGroup(1,[3,1],11)
     gmsh.model.mesh.generate(2)
 
     Tessella.API.initialize()
     entity_pairs=try
         for (point,(x,y)) in enumerate(
                 ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
-            Tessella.API.model.add_point(x,y,0.0;tag=point)
+            Tessella.API.model.add_point(x,y,0.0;tag=point,meshSize=0.35)
         end
         for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
             Tessella.API.model.add_line(a,b;tag=curve)
         end
         Tessella.API.model.add_curve_loop([1,2,3,4];tag=1)
         Tessella.API.model.add_plane_surface([1];tag=1)
+        Tessella.API.model.add_point(0.5,0.5,0.0;tag=5,meshSize=0.2)
+        Tessella.API.model.embed(0,[5],2,1)
+        Tessella.API.model.add_physical_group(2,[1];tag=10)
+        Tessella.API.model.add_physical_group(1,[3,1];tag=11)
         Tessella.API.option("Mesh.MeshSizeMax",0.35)
         Tessella.API.mesh.generate(2)
 
@@ -647,7 +655,7 @@ try
             ("Gmsh",gmsh.model.mesh.getNodesByElementType(2,-1,true)...,
              let owner=Dict{eltype(gmsh.model.mesh.getNodes(-1,-1)[1]),
                             Tuple{Int,Int}}()
-                 for point in 1:4,
+                 for point in 1:5,
                      node in gmsh.model.mesh.getNodes(0,point,false)[1]
                      owner[node]=(0,point)
                  end
@@ -663,7 +671,7 @@ try
             ("Tessella",
              Tessella.API.mesh.get_nodes_by_element_type(2,-1,true)...,
              let owner=Dict{UInt64,Tuple{Int,Int}}()
-                 for point in 1:4,
+                 for point in 1:5,
                      node in Tessella.API.mesh.get_nodes(0,point)[1]
                      owner[node]=(0,point)
                  end
@@ -736,6 +744,68 @@ try
             end
             thrown || error("Tessella getNode accepted an unknown tag")
         end
+        # Physical-group queries emit each member entity's nodes plus its
+        # transitive boundary and transitively embedded entities' nodes as one
+        # sorted unique set; unknown or dimension-mismatched groups are empty.
+        function group_expected(get_boundary,get_nodes,get_embedded,members)
+            result=Set{UInt64}()
+            queue=Tuple{Int,Int}[members...]
+            seen=Set{Tuple{Int,Int}}()
+            while !isempty(queue)
+                current=popfirst!(queue)
+                current in seen && continue
+                push!(seen,current)
+                union!(result,get_nodes(current...))
+                append!(queue,get_boundary(current))
+                append!(queue,get_embedded(current...))
+            end
+            return result
+        end
+        for (engine,query,get_boundary,get_nodes,get_embedded) in (
+            ("Gmsh",
+             (d,t)->gmsh.model.mesh.getNodesForPhysicalGroup(d,t),
+             entity->Tuple{Int,Int}[Tuple{Int,Int}(pair) for pair in
+                 gmsh.model.getBoundary([entity],false,false,false)],
+             (d,t)->gmsh.model.mesh.getNodes(d,t,false)[1],
+             (d,t)->Tuple{Int,Int}[Tuple{Int,Int}(pair) for pair in
+                 gmsh.model.mesh.getEmbedded(d,t)]),
+            ("Tessella",
+             (d,t)->Tessella.API.mesh.get_nodes_for_physical_group(d,t),
+             entity->Tuple{Int,Int}[Tuple{Int,Int}(pair) for pair in
+                 Tessella.API.model.get_boundary([entity],false,false,false)],
+             (d,t)->Tessella.API.mesh.get_nodes(d,t)[1],
+             (d,t)->Tuple{Int,Int}[Tuple{Int,Int}(pair) for pair in
+                 Tessella.API.mesh.get_embedded(d,t)]))
+            for (group,members) in (
+                    ((2,10),[(2,1)]),((1,11),[(1,3),(1,1)]))
+                tags,coords=query(group...)
+                Set(UInt64.(tags))==group_expected(
+                    get_boundary,get_nodes,get_embedded,members) || error(
+                    "$engine group $group nodes are not the transitive " *
+                    "boundary+embedded closure")
+                issorted(tags) && allunique(tags) || error(
+                    "$engine group $group nodes are not sorted and unique")
+                length(coords)==3length(tags) || error(
+                    "$engine group $group coordinate width mismatch")
+            end
+            isempty(query(2,99)[1]) || error(
+                "$engine returned nodes for an unknown group")
+            isempty(query(3,10)[1]) || error(
+                "$engine returned nodes for a dimension-mismatched group")
+        end
+        # The two models share embeddings and point sizes exactly.
+        gmsh.model.mesh.getEmbedded(2,1)==[(0,5)] || error(
+            "Gmsh surface embedding record changed")
+        Tessella.API.mesh.get_embedded(2,1)==Tuple{Int32,Int32}[(0,5)] ||
+            error("Tessella surface embedding record differs")
+        (gmsh.model.mesh.getEmbedded(1,1)==Tuple{Int32,Int32}[] &&
+         Tessella.API.mesh.get_embedded(1,1)==Tuple{Int32,Int32}[]) ||
+            error("empty embedding records differ")
+        size_queries=[(0,1),(0,5),(1,1),(2,1),(9,9)]
+        gmsh_sizes=gmsh.model.mesh.getSizes(size_queries)
+        tessella_sizes=Tessella.API.mesh.get_sizes(size_queries)
+        gmsh_sizes==tessella_sizes==[0.35,0.2,0.0,0.0,0.0] || error(
+            "getSizes parity broke: gmsh=$gmsh_sizes tessella=$tessella_sizes")
         # Type-level filters resolve the tag in the type's own dimension.
         for (tessella_call,gmsh_call) in (
             (()->Tessella.API.mesh.get_elements_by_type(2,1),
@@ -768,8 +838,14 @@ try
             "Tessella filtered orientations differ")
         _,tessella_key_entities,_=Tessella.API.mesh.get_keys(
             2,"Lagrange",1)
+        tessella_surface_nodes=Set(
+            Tessella.API.mesh.get_nodes(2,1,true)[1])
+        for (edim,etag) in Tessella.API.mesh.get_embedded(2,1)
+            union!(tessella_surface_nodes,
+                   Tessella.API.mesh.get_nodes(edim,etag,true)[1])
+        end
         sort!(unique!(tessella_key_entities))==
-            Tessella.API.mesh.get_nodes(2,1,true)[1] |> sort |> unique ||
+            sort!(collect(tessella_surface_nodes)) ||
             error("Tessella filtered Lagrange keys do not cover the entity")
         # Task partitions subdivide the entity-filtered subset.
         union_tags=UInt64[]
@@ -896,6 +972,160 @@ try
             "Tessella selective edge tags were not preserved")
         issubset(gmsh_selective,gmsh_all_edges) || error(
             "Gmsh selective edge tags were not preserved")
+        # removeElements drops only the listed cell on the entity and keeps
+        # every node in both engines; dense tags re-index in Tessella, so
+        # compare counts and connectivity sets rather than tags.
+        # `getElementsByType` reports type-local tags in Gmsh that
+        # `removeElements` rejects; entity removal needs `getElements` tags.
+        gmsh_tri_tags=gmsh.model.mesh.getElements(2,1)[2][1]
+        tessella_tri_tags=
+            Tessella.API.mesh.get_elements_by_type(2,1)[1]
+        gmsh_node_count=length(gmsh.model.mesh.getNodes()[1])
+        tessella_node_count=length(Tessella.API.mesh.get_nodes()[1])
+        gmsh.model.mesh.removeElements(2,1,[gmsh_tri_tags[1]])
+        Tessella.API.mesh.remove_elements(2,1,[tessella_tri_tags[1]])
+        length(gmsh.model.mesh.getElements(2,1)[2][1])==
+            length(gmsh_tri_tags)-1 || error(
+            "Gmsh removeElements kept the listed triangle")
+        length(Tessella.API.mesh.get_elements_by_type(2,1)[1])==
+            length(tessella_tri_tags)-1 || error(
+            "Tessella remove_elements kept the listed triangle")
+        length(gmsh.model.mesh.getNodes()[1])==gmsh_node_count || error(
+            "Gmsh removeElements dropped nodes")
+        length(Tessella.API.mesh.get_nodes()[1])==tessella_node_count ||
+            error("Tessella remove_elements dropped nodes")
+        # A tag owned by another block is rejected by both engines.
+        _rejects_argument(()->Tessella.API.mesh.remove_elements(
+            1,1,Tessella.API.mesh.get_elements_by_type(2,1)[1][1:1])) ||
+            error("Tessella removed a triangle through a curve selection")
+        gmsh_rejected=try
+            gmsh.model.mesh.removeElements(
+                1,1,gmsh.model.mesh.getElements(2,1)[2][1][1:1])
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error(
+            "Gmsh removed a triangle through a curve selection")
+        _rejects_argument(()->Tessella.API.mesh.remove_elements(2,77)) ||
+            error("Tessella removed elements on an unknown surface")
+        gmsh_rejected=try
+            gmsh.model.mesh.removeElements(2,77)
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error("Gmsh removed elements on an unknown surface")
+        # Entity-selective reversal uses Gmsh's first-order convention — a
+        # triangle (a,b,c) becomes (a,c,b) — in both engines.
+        gmsh_before=copy(gmsh.model.mesh.getElementsByType(2,1)[2][1:3])
+        tessella_before=copy(
+            Tessella.API.mesh.get_elements_by_type(2,1)[2][1:3])
+        gmsh.model.mesh.reverse([(2,1)])
+        Tessella.API.mesh.reverse([(2,1)])
+        gmsh.model.mesh.getElementsByType(2,1)[2][1:3]==
+            [gmsh_before[1],gmsh_before[3],gmsh_before[2]] || error(
+            "Gmsh reverse did not swap the last two triangle nodes")
+        Tessella.API.mesh.get_elements_by_type(2,1)[2][1:3]==
+            [tessella_before[1],tessella_before[3],tessella_before[2]] ||
+            error("Tessella reverse did not swap the last two triangle nodes")
+        gmsh.model.mesh.reverse([(2,1)])
+        Tessella.API.mesh.reverse([(2,1)])
+        Tessella.API.mesh.get_elements_by_type(2,1)[2][1:3]==
+            tessella_before || error("Tessella double reverse differed")
+        gmsh.model.mesh.getElementsByType(2,1)[2][1:3]==gmsh_before ||
+            error("Gmsh double reverse differed")
+        _rejects_argument(()->Tessella.API.mesh.reverse([(2,77)])) || error(
+            "Tessella reversed an unknown surface")
+        gmsh_rejected=try
+            gmsh.model.mesh.reverse([(2,77)])
+            false
+        catch err
+            err isa ErrorException || rethrow()
+            true
+        end
+        gmsh_rejected || error("Gmsh reversed an unknown surface")
+        # Tag-level reversal matches in both engines.
+        gmsh.model.mesh.reverseElements(
+            [gmsh.model.mesh.getElements(2,1)[2][1][1]])
+        Tessella.API.mesh.reverse_elements(
+            [Tessella.API.mesh.get_elements_by_type(2,1)[1][1]])
+        Tessella.API.mesh.get_elements_by_type(2,1)[2][1:3]==
+            [tessella_before[1],tessella_before[3],tessella_before[2]] ||
+            error("Tessella reverse_elements differed")
+        gmsh.model.mesh.getElementsByType(2,1)[2][1:3]==
+            [gmsh_before[1],gmsh_before[3],gmsh_before[2]] || error(
+            "Gmsh reverseElements differed")
+        Tessella.API.mesh.reverse_elements(
+            [Tessella.API.mesh.get_elements_by_type(2,1)[1][1]])
+        gmsh.model.mesh.reverseElements(
+            [gmsh.model.mesh.getElements(2,1)[2][1][1]])
+        # reorderElements permutes one entity's type block by 0-based source
+        # positions; reversing the surface's triangles must reverse the
+        # per-element vertex-coordinate sequence in both engines.
+        function element_coord_sequence(engine)
+            if engine==:gmsh
+                _,_,conn=gmsh.model.mesh.getElements(2,1)
+                flat=only(conn)
+                coords=Dict{UInt64,NTuple{3,Float64}}(
+                    tag=>Tuple(gmsh.model.mesh.getNode(tag)[1]) for tag in
+                    unique(flat))
+                return [sort!([coords[node] for node in
+                        flat[offset:offset+2]])
+                        for offset in 1:3:length(flat)]
+            else
+                flat=Tessella.API.mesh.get_elements_by_type(2,1)[2]
+                all_tags,all_coords,_=Tessella.API.mesh.get_nodes()
+                nodes=reshape(all_coords,3,:)
+                coordinate=Dict{UInt64,NTuple{3,Float64}}(
+                    all_tags[i]=>Tuple(nodes[:,i]) for i in
+                    eachindex(all_tags))
+                return [sort!([coordinate[node] for node in
+                        flat[offset:offset+2]])
+                        for offset in 1:3:length(flat)]
+            end
+        end
+        gmsh_sequence=element_coord_sequence(:gmsh)
+        tessella_sequence=element_coord_sequence(:tessella)
+        gmsh.model.mesh.reorderElements(2,1,
+            collect(length(gmsh_sequence)-1:-1:0))
+        Tessella.API.mesh.reorder_elements(2,1,
+            collect(length(tessella_sequence)-1:-1:0))
+        element_coord_sequence(:gmsh)==reverse(gmsh_sequence) || error(
+            "Gmsh reorderElements did not reverse the entity block")
+        element_coord_sequence(:tessella)==reverse(tessella_sequence) ||
+            error("Tessella reorder_elements did not reverse the entity block")
+        gmsh.model.mesh.reorderElements(2,1,
+            collect(0:length(gmsh_sequence)-1))
+        Tessella.API.mesh.reorder_elements(2,1,
+            collect(0:length(tessella_sequence)-1))
+        gmsh_rejected=false
+        try
+            gmsh.model.mesh.reorderElements(2,1,[0,1])
+        catch err
+            gmsh_rejected=true
+        end
+        gmsh_rejected || error("Gmsh accepted a short ordering")
+        _rejects_argument(
+            ()->Tessella.API.mesh.reorder_elements(2,1,[0,1])) || error(
+            "Tessella accepted a short ordering")
+        _rejects_argument(
+            ()->Tessella.API.mesh.reorder_elements(1,1,[0])) || error(
+            "Tessella reordered an empty type block")
+        # getDuplicateNodes reports no coincident nodes on either conforming
+        # cache, under whole-mesh and entity-filtered scans alike.
+        isempty(gmsh.model.mesh.getDuplicateNodes()) || error(
+            "Gmsh reported duplicate nodes")
+        isempty(Tessella.API.mesh.get_duplicate_nodes()) || error(
+            "Tessella reported duplicate nodes")
+        for entity in ((2,1),(1,1),(0,1))
+            isempty(gmsh.model.mesh.getDuplicateNodes([entity])) || error(
+                "Gmsh reported duplicates on $entity")
+            isempty(Tessella.API.mesh.get_duplicate_nodes([entity])) ||
+                error("Tessella reported duplicates on $entity")
+        end
         # Clearing a curve under a meshed surface is a no-op in both engines:
         # the boundary mesh stays part of the surviving surface mesh.
         gmsh_counts=Dict(ent=>length(gmsh.model.mesh.getNodes(
@@ -939,13 +1169,250 @@ try
         Tessella.API.finalize()
     end
 
+    # Positive duplicate-node and duplicate-element parity on handcrafted
+    # coincident caches: Gmsh stores them on discrete entities, Tessella on a
+    # directly installed cache. Gmsh merges globally by coordinates, keeps the
+    # lowest tag, compacts numbering, and remaps connectivity.
+    gmsh.model.add("duplicates")
+    gmsh.model.addDiscreteEntity(2,1)
+    gmsh.model.mesh.addNodes(2,1,[1,2,3,4],
+        [0.0,0,0, 1.0,0,0, 0.0,1,0, 0.0,0,0])
+    gmsh.model.mesh.addElementsByType(1,2,[10,11],[1,2,3, 4,2,3])
+    gmsh.model.addDiscreteEntity(0,5)
+    gmsh.model.mesh.addNodes(0,5,[7],[1.0,0,0])
+    gmsh.model.mesh.addElementsByType(5,15,[30],[7])
+    Tessella.API.initialize()
+    try
+        # A real model entity set lets the classified-only parity calls below
+        # resolve entity (2,1) and gives remove_embedded a genuine record.
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            Tessella.API.model.add_point(x,y,0.0;tag=point,meshSize=0.5)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            Tessella.API.model.add_line(a,b;tag=curve)
+        end
+        Tessella.API.model.add_curve_loop([1,2,3,4];tag=1)
+        Tessella.API.model.add_plane_surface([1];tag=1)
+        Tessella.API.model.add_point(0.5,0.5,0.0;tag=5)
+        Tessella.API.model.embed(0,[5],2,1)
+        dup_coordinates=Float64[0 1 0 0 1;
+                                0 0 1 0 0;
+                                0 0 0 0 0]
+        lock(Tessella.API.STATE_LOCK) do
+            Tessella.API.LAST_MESH[]=Mesh(dup_coordinates;
+                tris=Int32[1 4;
+                           2 2;
+                           3 3])
+            Tessella.API.LAST_MESH_CLASS[]=nothing
+        end
+        gmsh_duplicates=sort!(map(tag->Tuple(
+                gmsh.model.mesh.getNode(tag)[1]),
+            gmsh.model.mesh.getDuplicateNodes()))
+        tessella_tags,tessella_coords,_=Tessella.API.mesh.get_nodes()
+        tessella_node_coords=reshape(tessella_coords,3,:)
+        tessella_duplicates=sort!([Tuple(tessella_node_coords[:,tag])
+            for tag in Tessella.API.mesh.get_duplicate_nodes()])
+        tessella_duplicates==gmsh_duplicates || error(
+            "duplicate-node reporting differed: $tessella_duplicates vs " *
+            "$gmsh_duplicates")
+        gmsh.model.mesh.removeDuplicateNodes()
+        Tessella.API.mesh.remove_duplicate_nodes()
+        gmsh_tags,gmsh_coords,_=gmsh.model.mesh.getNodes()
+        sort!(collect(eachcol(reshape(gmsh_coords,3,:))),
+            by=Tuple)==sort!(collect(eachcol(reshape(
+                Tessella.API.mesh.get_nodes()[2],3,:))),by=Tuple) || error(
+            "duplicate-node merge differed")
+        # Gmsh renumbers survivors globally in entity order; compare each
+        # element's vertex-coordinate set rather than raw tags.
+        _,_,gmsh_conn=gmsh.model.mesh.getElements(2,1)
+        gmsh_flat=only(gmsh_conn)
+        gmsh_element_coords=sort!([sort!([Tuple(
+            gmsh.model.mesh.getNode(node)[1])
+            for node in gmsh_flat[offset:offset+2]])
+            for offset in 1:3:length(gmsh_flat)])
+        tessella_conn=reshape(
+            Tessella.API.mesh.get_elements_by_type(2)[2],3,:)
+        merged_coords=reshape(Tessella.API.mesh.get_nodes()[2],3,:)
+        tessella_element_coords=sort!([sort!([Tuple(merged_coords[:,node])
+            for node in column]) for column in eachcol(tessella_conn)])
+        tessella_element_coords==gmsh_element_coords || error(
+            "duplicate-node connectivity remap differed")
+        # Both triangles now share connectivity [1,2,3]; dedup keeps one.
+        gmsh.model.mesh.removeDuplicateElements()
+        _,gmsh_element_tags,_=gmsh.model.mesh.getElements(2,1)
+        only(gmsh_element_tags) |> length==1 || error(
+            "Gmsh kept duplicate elements")
+        lock(Tessella.API.STATE_LOCK) do
+            cache=Tessella.API.LAST_MESH[]
+            Tessella.API.LAST_MESH_CLASS[]=
+                Tessella.API._MeshClassification(cache,(2,Int32(1)),
+                    fill((2,Int32(1)),3),
+                    Dict{Tuple{Int,Int32},Vector{Int32}}(),
+                    Int32[],Int32[1,1],Int32[])
+        end
+        Tessella.API.mesh.remove_duplicate_elements()
+        length(Tessella.API.mesh.get_elements_by_type(2)[1])==1 || error(
+            "Tessella kept duplicate elements")
+        _rejects_argument(
+            ()->Tessella.API.mesh.remove_duplicate_elements([(2,99)])) ||
+            error("Tessella deduplicated an unknown surface")
+        # A tag swap renumbering preserves the coordinate set in both engines;
+        # Gmsh's surviving tags follow global entity order while Tessella keeps
+        # lowest-tag retention, so only the multiset is comparable.
+        gmsh.model.mesh.renumberNodes([1,2],[2,1])
+        Tessella.API.mesh.renumber_nodes([1,2],[2,1])
+        _,gmsh_renum_coords,_=gmsh.model.mesh.getNodes()
+        sort!(collect(eachcol(reshape(gmsh_renum_coords,3,:))),
+            by=Tuple)==sort!(collect(eachcol(reshape(
+                Tessella.API.mesh.get_nodes()[2],3,:))),by=Tuple) || error(
+            "renumber_nodes swap differed")
+        # setNode parity: both engines move node tag 1.
+        gmsh.model.mesh.setNode(1,[9.0,8.0,7.0],[])
+        Tessella.API.mesh.set_node(1,[9.0,8.0,7.0])
+        Tuple(gmsh.model.mesh.getNode(1)[1])==Tuple(reshape(
+            Tessella.API.mesh.get_nodes()[2],3,:)[:,1]) || error(
+            "set_node coordinate update differed")
+        _rejects_argument(()->Tessella.API.mesh.set_node(99,[0,0,0.0])) ||
+            error("Tessella moved an unknown node")
+        gmsh_rejected=false
+        try
+            gmsh.model.mesh.setNode(99,[0,0,0.0],[])
+        catch err
+            gmsh_rejected=true
+        end
+        gmsh_rejected || error("Gmsh moved an unknown node")
+        gmsh.model.mesh.renumberNodes()
+        Tessella.API.mesh.renumber_nodes()
+        gmsh.model.mesh.renumberElements()
+        Tessella.API.mesh.renumber_elements()
+        _rejects_argument(
+            ()->Tessella.API.mesh.renumber_nodes([1],[99])) || error(
+            "Tessella accepted a sparse node renumbering")
+        # Unpartitioned-cache parity calls return empty or no-op in both.
+        isempty(gmsh.model.mesh.getGhostElements(2,1)[1]) || error(
+            "Gmsh reported ghost elements")
+        Tessella.API.mesh.get_ghost_elements(2,1)==
+            (UInt64[],Int32[]) || error(
+            "Tessella reported ghost elements")
+        isempty(gmsh.model.mesh.getLastEntityError()) || error(
+            "Gmsh reported entity errors")
+        isempty(Tessella.API.mesh.get_last_entity_error()) || error(
+            "Tessella reported entity errors")
+        isempty(gmsh.model.mesh.getLastNodeError()) || error(
+            "Gmsh reported node errors")
+        isempty(Tessella.API.mesh.get_last_node_error()) || error(
+            "Tessella reported node errors")
+        gmsh.model.mesh.unpartition()
+        Tessella.API.mesh.unpartition()
+        gmsh.model.mesh.rebuildNodeCache()
+        Tessella.API.mesh.rebuild_node_cache()
+        gmsh.model.mesh.rebuildElementCache()
+        Tessella.API.mesh.rebuild_element_cache()
+        gmsh.model.mesh.reclassifyNodes()
+        Tessella.API.mesh.reclassify_nodes()
+        gmsh.model.mesh.relocateNodes(2,1)
+        Tessella.API.mesh.relocate_nodes(2,1)
+        # removeConstraints clears per-entity meshing attributes only; neither
+        # engine stores cleared attributes here, so both are validated no-ops.
+        gmsh.model.mesh.removeConstraints()
+        Tessella.API.mesh.remove_constraints()
+        gmsh.model.mesh.removeConstraints([(2,1),(0,5)])
+        Tessella.API.mesh.remove_constraints([(2,1),(0,5)])
+        gmsh_rejected=false
+        try
+            gmsh.model.mesh.removeConstraints([(1,99)])
+        catch err
+            gmsh_rejected=true
+        end
+        gmsh_rejected || error("Gmsh accepted an unknown constraint entity")
+        _rejects_argument(
+            ()->Tessella.API.mesh.remove_constraints([(1,99)])) || error(
+            "Tessella accepted an unknown constraint entity")
+        # computeRenumbering returns sorted old node tags and a permutation of
+        # 1:n in both engines; the RCM ordering itself is
+        # implementation-defined. Restricting to the surviving triangle makes
+        # the involved-node counts comparable — Gmsh's point element has no
+        # Tessella simplex counterpart.
+        for (engine,fn) in (
+                ("gmsh",()->gmsh.model.mesh.computeRenumbering()),
+                ("tessella",()->Tessella.API.mesh.compute_renumbering()))
+            old_tags,new_tags=fn()
+            issorted(old_tags) || error("$engine renumbering old tags unsorted")
+            sort(Int.(new_tags))==collect(1:length(new_tags)) || error(
+                "$engine renumbering new tags are not a dense permutation")
+        end
+        _,gmsh_triangle_tags,_=gmsh.model.mesh.getElements(2,1)
+        gmsh_triangle_tag=Int.(only(gmsh_triangle_tags))[1]
+        tessella_triangle_tag=Int(
+            Tessella.API.mesh.get_elements_by_type(2)[1][1])
+        gmsh_old,_=gmsh.model.mesh.computeRenumbering(
+            "RCMK",[gmsh_triangle_tag])
+        tessella_old,_=Tessella.API.mesh.compute_renumbering(
+            "RCMK",[tessella_triangle_tag])
+        length(gmsh_old)==length(tessella_old)==3 || error(
+            "restricted renumbering node counts differ: " *
+            "Gmsh=$(length(gmsh_old)) Tessella=$(length(tessella_old))")
+        gmsh_rejected=false
+        try
+            gmsh.model.mesh.computeRenumbering("bogus")
+        catch err
+            gmsh_rejected=true
+        end
+        gmsh_rejected || error("Gmsh accepted an unknown renumbering method")
+        _rejects_argument(
+            ()->Tessella.API.mesh.compute_renumbering("bogus")) || error(
+            "Tessella accepted an unknown renumbering method")
+        # optimize() preserves connectivity and node counts in both engines.
+        gmsh_counts_before=length(gmsh.model.mesh.getNodes()[1])
+        tessella_counts_before=length(Tessella.API.mesh.get_nodes()[1])
+        gmsh.model.mesh.optimize()
+        Tessella.API.mesh.optimize()
+        length(gmsh.model.mesh.getNodes()[1])==gmsh_counts_before || error(
+            "Gmsh optimize changed the node count")
+        length(Tessella.API.mesh.get_nodes()[1])==tessella_counts_before ||
+            error("Tessella optimize changed the node count")
+        _rejects_argument(
+            ()->Tessella.API.mesh.optimize("NoSuchOptimizer")) || error(
+            "Tessella accepted an unknown optimizer")
+        # Per-element visibility is raw display state: default 1, stored values
+        # pass through, and unknown tags report 0 in both engines.
+        gmsh_triangle_tags,_=gmsh.model.mesh.getElementsByType(2)
+        tessella_triangle_tags,_=Tessella.API.mesh.get_elements_by_type(2)
+        gmsh.model.mesh.setVisibility(gmsh_triangle_tags[1:1],0)
+        Tessella.API.mesh.set_visibility(tessella_triangle_tags[1:1],0)
+        Int.(gmsh.model.mesh.getVisibility(gmsh_triangle_tags[1:1]))==
+            Int.(Tessella.API.mesh.get_visibility(
+                tessella_triangle_tags[1:1]))==[0] || error(
+            "element visibility differed")
+        Int.(gmsh.model.mesh.getVisibility([987654]))==
+            Int.(Tessella.API.mesh.get_visibility([987654]))==[0] || error(
+            "unknown-element visibility differed")
+
+        # removeEmbedded lists the parent entities in both engines.
+        Tessella.API.mesh.get_embedded(2,1)==Tuple{Int32,Int32}[(0,5)] ||
+            error("Tessella lost its embedded-point record")
+        gmsh.model.mesh.embed(0,[5],2,1)
+        gmsh.model.mesh.removeEmbedded([(2,1)])
+        isempty(gmsh.model.mesh.getEmbedded(2,1)) || error(
+            "Gmsh kept the embedding")
+        Tessella.API.mesh.remove_embedded([(2,1)])
+        isempty(Tessella.API.mesh.get_embedded(2,1)) || error(
+            "Tessella kept the embedding")
+    finally
+        Tessella.API.finalize()
+    end
+
     println("mesh-data-query differential: Gmsh ",gmsh.GMSH_API_VERSION,
             ", types=1,2,4 nodes=4 elements=3 connectivity_entries=9 ",
             "dense_max_tags=4/3 explicit_max_tags=40/300 ",
             "derived_sha=",derived_sha," ",
             "refined_sha=",refined_crc.sha,
             " entity_filtered=tris",entity_pairs,
-            " selective=transform/edges/clear parametric=entity/owner/node",
+            " selective=transform/edges/remove/reverse/clear" *
+            " duplicates=detect/merge/drop" *
+            " set_node/renumber/embedded/constraints/rcmk/optimize/visibility" *
+            " parametric=entity/owner/node",
             " bounded=no-mesh/classification/special-type/face-count ",
             "blockers and finite-barycenter contract with partitioned slices")
 finally

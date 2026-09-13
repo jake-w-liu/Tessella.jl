@@ -95,6 +95,16 @@ function tessella_heldout_results()
             Tessella.API.model.get_adjacencies(1,501),
         embedded_surface_adjacencies=
             Tessella.API.model.get_adjacencies(2,21),
+        orphan_volume=Tessella.API.model.is_entity_orphan(3,300),
+        orphan_cavity_surface=Tessella.API.model.is_entity_orphan(2,301),
+        orphan_floating_surface=Tessella.API.model.is_entity_orphan(2,201),
+        orphan_floating_point=Tessella.API.model.is_entity_orphan(0,201),
+        orphan_embedded_point=Tessella.API.model.is_entity_orphan(0,503),
+        orphan_embedded_curve=Tessella.API.model.is_entity_orphan(1,501),
+        orphan_embedded_curve_endpoint=
+            Tessella.API.model.is_entity_orphan(0,501),
+        orphan_tetra_surface=Tessella.API.model.is_entity_orphan(2,21),
+        orphan_tetra_point=Tessella.API.model.is_entity_orphan(0,10),
     )
 end
 
@@ -309,6 +319,15 @@ function gmsh_heldout_results()
         embedded_point_adjacencies=gmsh_adjacencies(0,503),
         embedded_curve_adjacencies=gmsh_adjacencies(1,501),
         embedded_surface_adjacencies=gmsh_adjacencies(2,21),
+        orphan_volume=Bool(gmsh.model.isEntityOrphan(3,300)),
+        orphan_cavity_surface=Bool(gmsh.model.isEntityOrphan(2,301)),
+        orphan_floating_surface=Bool(gmsh.model.isEntityOrphan(2,201)),
+        orphan_floating_point=Bool(gmsh.model.isEntityOrphan(0,201)),
+        orphan_embedded_point=Bool(gmsh.model.isEntityOrphan(0,503)),
+        orphan_embedded_curve=Bool(gmsh.model.isEntityOrphan(1,501)),
+        orphan_embedded_curve_endpoint=Bool(gmsh.model.isEntityOrphan(0,501)),
+        orphan_tetra_surface=Bool(gmsh.model.isEntityOrphan(2,21)),
+        orphan_tetra_point=Bool(gmsh.model.isEntityOrphan(0,10)),
     )
 end
 
@@ -329,7 +348,8 @@ try
         "Tessella=$(tessella.heldout) Gmsh=$heldout")
     println("GMSH_PARITY_MODEL_TOPOLOGY_OK " *
             "gmsh=$(gmsh.GMSH_API_VERSION) entities=$(length(expected.entities)) " *
-            "boundary_cases=20 adjacency_cases=10 mesh_crc=$(tessella.crc)")
+            "boundary_cases=20 adjacency_cases=10 orphan_cases=9 " *
+            "mesh_crc=$(tessella.crc)")
 finally
     gmsh.finalize()
 end

@@ -30,7 +30,7 @@ using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surfa
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: _remove_volume_entity!
-using ..Model: embed!, set_point_mesh_size!
+using ..Model: embed!, remove_embedded!, set_point_mesh_size!
 using ..Model: add_physical_group!, set_physical_name!, remove_physical_groups!
 using ..Model: remove_physical_name!, model_physical_groups
 using ..Model: model_physical_groups_entities, model_entities_for_physical_group
@@ -78,6 +78,7 @@ using ..MeshFunctionSpaces: MeshFunctionSpaces, mesh_basis_functions,
 using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
+using ..Optimize: smooth_optimize
 using ..GeoExec: execute_geo
 
 export initialize, finalize, option, model, mesh, open_geo!
@@ -110,6 +111,9 @@ const LAST_MESH_CLASS = Ref{Union{Nothing,_MeshClassification}}(nothing)
 const LAST_MESH_LOCATOR = Ref{Union{Nothing,SimplexLocator}}(nothing)
 const LAST_MESH_EDGES = Ref{Union{Nothing,MeshEdgeTopology}}(nothing)
 const LAST_MESH_FACES = Ref{Union{Nothing,MeshFaceTopology}}(nothing)
+const MODEL_NAME = Ref{String}("unnamed")
+const MODEL_FILE_NAME = Ref{String}("")
+const ELEMENT_VISIBILITY = Ref{Dict{Int,Int32}}(Dict{Int,Int32}())
 const STATE_LOCK = ReentrantLock()
 
 function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh},
@@ -122,6 +126,7 @@ function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh},
     LAST_MESH_LOCATOR[]=nothing
     LAST_MESH_EDGES[]=nothing
     LAST_MESH_FACES[]=nothing
+    empty!(ELEMENT_VISIBILITY[])
     return mesh
 end
 
@@ -140,6 +145,8 @@ mesh and restoring supported options to their defaults.
 function initialize()
     lock(STATE_LOCK) do
         CURRENT[]=GeoModel()
+        MODEL_NAME[]="unnamed"
+        MODEL_FILE_NAME[]=""
         _replace_mesh_cache_locked!(nothing)
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
     end
@@ -157,7 +164,8 @@ function finalize()
 end
 
 function _model_locked()
-    CURRENT[]===nothing && throw(ArgumentError("API: call initialize() first"))
+    CURRENT[]===nothing && throw(ArgumentError(
+        "API: no current model; call initialize() or model.add(name) first"))
     return CURRENT[]
 end
 
@@ -233,6 +241,90 @@ _get_dimension()=_with_model() do current
     model_dimension(current)
 end
 
+# Single-model session state: `get_current` reports the session model name and
+# `set_current` only accepts that name — there is no second model to switch
+# to. `get_file_name`/`set_file_name` track the model's associated file.
+function _model_add(name)
+    caller="API.model.add"
+    name isa AbstractString || throw(ArgumentError(
+        "$caller: name must be a string"))
+    return lock(STATE_LOCK) do
+        if CURRENT[]!==nothing
+            # `initialize` eagerly creates an unnamed empty model, so the
+            # universal `initialize(); model.add("m")` sequence names that
+            # fresh model. Any existing content — or a second `add` — is a
+            # genuine multi-model request the session cannot serve.
+            fresh=isempty(model_entities(CURRENT[])) &&
+                  isempty(CURRENT[].physical) &&
+                  MODEL_NAME[]=="unnamed"
+            fresh || throw(ArgumentError(
+                "$caller: the session already owns model " *
+                "\"$(MODEL_NAME[])\"; a second model is not supported"))
+        else
+            CURRENT[]=GeoModel()
+        end
+        MODEL_NAME[]=String(name)
+        MODEL_FILE_NAME[]=""
+        _replace_mesh_cache_locked!(nothing)
+        return nothing
+    end
+end
+
+function _model_remove()
+    return lock(STATE_LOCK) do
+        _model_locked()
+        CURRENT[]=nothing
+        MODEL_NAME[]="unnamed"
+        MODEL_FILE_NAME[]=""
+        _replace_mesh_cache_locked!(nothing)
+        return nothing
+    end
+end
+
+function _model_list()
+    return lock(STATE_LOCK) do
+        return CURRENT[]===nothing ? String[] : String[MODEL_NAME[]]
+    end
+end
+
+function _get_current()
+    return lock(STATE_LOCK) do
+        _model_locked()
+        return MODEL_NAME[]
+    end
+end
+
+function _set_current(name)
+    caller="API.model.set_current"
+    name isa AbstractString || throw(ArgumentError(
+        "$caller: name must be a string"))
+    return lock(STATE_LOCK) do
+        _model_locked()
+        String(name)==MODEL_NAME[] || throw(ArgumentError(
+            "$caller: unknown model \"$name\"; the session owns model " *
+            "\"$(MODEL_NAME[])\""))
+        return nothing
+    end
+end
+
+function _get_file_name()
+    return lock(STATE_LOCK) do
+        _model_locked()
+        return MODEL_FILE_NAME[]
+    end
+end
+
+function _set_file_name(name)
+    caller="API.model.set_file_name"
+    name isa AbstractString || throw(ArgumentError(
+        "$caller: name must be a string"))
+    return lock(STATE_LOCK) do
+        _model_locked()
+        MODEL_FILE_NAME[]=String(name)
+        return nothing
+    end
+end
+
 _get_boundary(dim_tags,combined=true,oriented=false,recursive=false)=
     _with_model() do current
         model_boundary(
@@ -241,6 +333,62 @@ _get_boundary(dim_tags,combined=true,oriented=false,recursive=false)=
 
 _get_adjacencies(dim,tag)=_with_model() do current
     model_adjacencies(current,dim,tag)
+end
+
+# `isEntityOrphan` connectivity is the transitive downward boundary closure of
+# every entity at the model's highest dimension; embeddings do not connect.
+# Classified entities (including implicit primitive or Boolean subentities)
+# expand through the classification boundary map; anything else expands through
+# explicit model topology, where primitive volumes contribute no children.
+function _orphan_boundary_children(model,class,key::Tuple{Int,Int32})
+    key[1]==0 && return Int32[]
+    if class!==nothing && haskey(class.boundaries,key)
+        return class.boundaries[key]
+    end
+    dictionary=_mesh_entity_dictionary(model,key[1])
+    haskey(dictionary,Int(key[2])) || return Int32[]
+    (key[1]==3 && isempty(dictionary[Int(key[2])])) && return Int32[]
+    return Int32[abs(boundary) for (_,boundary) in model_boundary(
+        model,[(key[1],Int(key[2]))],false,false,false)]
+end
+
+function _is_entity_orphan(dim,tag)
+    caller="API.model.is_entity_orphan"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        dimension=_mesh_query_integer(dim,caller,"dim")
+        dimension in 0:3 || throw(ArgumentError(
+            "$caller: dim must be in 0:3"))
+        entity=_mesh_query_integer(tag,caller,"tag")
+        1<=entity<=typemax(Int32) || throw(ArgumentError(
+            "$caller: unknown $(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+        cached=LAST_MESH[]
+        class=cached===nothing ? nothing :
+              _cached_classification_locked(cached)
+        known=haskey(_mesh_entity_dictionary(model,dimension),entity) ||
+              (class!==nothing &&
+               haskey(class.boundaries,(dimension,Int32(entity))))
+        known || throw(ArgumentError(
+            "$caller: unknown $(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+        highest=model_dimension(model)
+        connected=Set{Tuple{Int,Int32}}()
+        queue=Tuple{Int,Int32}[(highest,Int32(top)) for top in
+            keys(_mesh_entity_dictionary(model,highest))]
+        if class!==nothing
+            for key in keys(class.boundaries)
+                key[1]==highest && push!(queue,key)
+            end
+        end
+        while !isempty(queue)
+            key=popfirst!(queue)
+            key in connected && continue
+            push!(connected,key)
+            for child in _orphan_boundary_children(model,class,key)
+                push!(queue,(key[1]-1,child))
+            end
+        end
+        return !((dimension,Int32(entity)) in connected)
+    end
 end
 
 _get_bounding_box(dim,tag)=_with_model() do current
@@ -460,7 +608,8 @@ using ..API: _get_physical_groups, _get_physical_groups_entities
 using ..API: _get_entities_for_physical_group, _get_entities_for_physical_name
 using ..API: _get_physical_groups_for_entity, _get_physical_name
 using ..API: _set_physical_name, _remove_physical_name, _remove_physical_groups
-using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies
+using ..API: _get_entities, _get_dimension, _get_boundary, _get_adjacencies,
+             _is_entity_orphan
 using ..API: _get_bounding_box, _get_entities_in_bounding_box
 using ..API: _get_entity_type, _get_entity_properties, _get_parent,
              _get_number_of_partitions, _get_partitions
@@ -473,6 +622,8 @@ using ..API: _set_coordinates, _set_attribute, _get_attribute,
              _get_attribute_names, _remove_attribute
 using ..API: _get_entity_name, _set_entity_name, _remove_entity_name, _set_tag
 using ..API: _remove_entities
+using ..API: _get_current, _set_current, _get_file_name, _set_file_name,
+             _model_add, _model_remove, _model_list
 add_point(x,y,z;tag=0,meshSize=1.0)=_with_model(invalidate=true) do m
     add_point!(m,x,y,z;tag=tag,mesh_size=meshSize)
 end
@@ -565,6 +716,39 @@ get_entities(dim=-1)=_get_entities(dim)
 """Return the greatest model-entity dimension, or `-1` for an empty model."""
 get_dimension()=_get_dimension()
 
+"""Return the name of the session's current model."""
+get_current()=_get_current()
+
+"""
+    add(name)
+
+Name the session's model. `initialize` eagerly creates an unnamed empty model,
+so a single `add` on that fresh model names it — matching Gmsh's
+`model.add(name)` — and `add` after `remove` creates a new model. A second
+model on a populated or already-named model fails explicitly.
+"""
+add(name)=_model_add(name)
+
+"""Remove the session's current model, leaving the session model-less."""
+remove()=_model_remove()
+
+"""Return the session's model names — `[get_current()]`, or `[]` after `remove`."""
+list()=_model_list()
+
+"""
+    set_current(name)
+
+Make `name` the current model. The session owns a single model, so only its own
+name — reported by `get_current` — is accepted; anything else throws.
+"""
+set_current(name)=_set_current(name)
+
+"""Return the file name associated with the current model, or `""` when unset."""
+get_file_name()=_get_file_name()
+
+"""Associate `name` with the current model as its file name."""
+set_file_name(name)=_set_file_name(name)
+
 """
 Return explicit entity boundaries. `combined` cancels even incidences, `oriented`
 retains signed Curve and Surface tags, and `recursive` returns the Point closure.
@@ -580,6 +764,18 @@ for primitive and Boolean Volumes are unavailable because their Surface Loop
 topology is implicit.
 """
 get_adjacencies(dim,tag)=_get_adjacencies(dim,tag)
+
+"""
+    is_entity_orphan(dim, tag) -> Bool
+
+Return `true` when the entity is not connected to any entity of the model's
+highest dimension, matching Gmsh 4.15.2's `isEntityOrphan`: connectivity is the
+transitive downward boundary closure of every highest-dimension entity, and
+mesh embeddings do not connect. Implicit primitive or Boolean boundary entities
+resolve through the mesh classification snapshot. Unknown entities fail
+explicitly.
+"""
+is_entity_orphan(dim,tag)=_is_entity_orphan(dim,tag)
 
 """Return one entity's analytical bounding box; `(-1,-1)` selects the whole model."""
 get_bounding_box(dim,tag)=_get_bounding_box(dim,tag)
@@ -1647,6 +1843,124 @@ function _get_node(node_tag)
     end
 end
 
+# Sorted unique node indices on every member entity of Physical(dim, tag):
+# each entity's own classified nodes, its transitive boundary entities' nodes,
+# and any transitively embedded entities' nodes — matching Gmsh's per-group
+# emission, which is a deduplicated ascending tag set.
+function _mesh_physical_group_nodes(class::_MeshClassification,model::GeoModel,
+                                    dimension::Int,entities)
+    indices=Int[]
+    seen_nodes=Set{Int}()
+    seen_entities=Set{Tuple{Int,Int32}}()
+    for entity_tag in entities
+        queue=Tuple{Int,Int32}[(dimension,Int32(entity_tag))]
+        while !isempty(queue)
+            key=popfirst!(queue)
+            key in seen_entities && continue
+            push!(seen_entities,key)
+            for node in _mesh_entity_node_positions(class,key)
+                node in seen_nodes && continue
+                push!(seen_nodes,node)
+                push!(indices,node)
+            end
+            if key[1]>0
+                for boundary in get(class.boundaries,key,Int32[])
+                    push!(queue,(key[1]-1,boundary))
+                end
+            end
+            for embedded in get(model.embeds,(key[1],Int(key[2])),
+                                NTuple{2,Int}[])
+                push!(queue,(embedded[1],Int32(embedded[2])))
+            end
+        end
+    end
+    return sort!(indices)
+end
+
+function _get_nodes_for_physical_group(dim,tag)
+    caller="API.mesh.get_nodes_for_physical_group"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_integer(dim,caller,"dim")
+        dimension in 0:3 || throw(ArgumentError(
+            "$caller: dim must be in 0:3"))
+        group=_mesh_query_integer(tag,caller,"tag")
+        model=_model_locked()
+        typemin(Int32)<=group<=typemax(Int32) || return UInt64[],Float64[]
+        entities=get(model.physical,(dimension,group),Int[])
+        isempty(entities) && return UInt64[],Float64[]
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: physical-group nodes require mesh classification " *
+            "metadata; generate a mesh so the cache owns entity ownership"))
+        indices=_mesh_physical_group_nodes(class,model,dimension,entities)
+        return _mesh_nodes_payload(cached,indices)
+    end
+end
+
+function _get_embedded(dim,tag)
+    caller="API.mesh.get_embedded"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        dimension=_mesh_query_integer(dim,caller,"dim")
+        dimension in 0:3 || throw(ArgumentError(
+            "$caller: dim must be in 0:3"))
+        entity=_mesh_query_integer(tag,caller,"tag")
+        typemin(Int32)<=entity<=typemax(Int32) || throw(ArgumentError(
+            "$caller: unknown $(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+        # Like _mesh_classified_entity, entities materialized only through the
+        # classification snapshot (implicit primitive boundaries) also resolve.
+        known=haskey(_mesh_entity_dictionary(model,dimension),entity)
+        if !known
+            cached=LAST_MESH[]
+            class=cached===nothing ? nothing :
+                  _cached_classification_locked(cached)
+            known=class!==nothing &&
+                  haskey(class.boundaries,(dimension,Int32(entity)))
+        end
+        known || throw(ArgumentError(
+            "$caller: unknown $(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+        return Tuple{Int32,Int32}[Tuple{Int32,Int32}(embedded)
+            for embedded in get(model.embeds,(dimension,entity),
+                                NTuple{2,Int}[])]
+    end
+end
+
+# `getSizes`-style lenient pair parsing: well-formedness (pair shape, integer,
+# non-Bool members) is still validated, but out-of-range dimensions and tags
+# simply report `0.0`, matching Gmsh 4.15.2's silent zeros.
+function _mesh_parse_dim_tags_lenient(dim_tags,caller::AbstractString)
+    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
+        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
+    parsed=Tuple{Integer,Integer}[]
+    for entry in dim_tags
+        pair=entry isa Pair ? (first(entry),last(entry)) :
+             (entry isa Tuple && length(entry)==2) ? entry :
+             throw(ArgumentError(
+                 "$caller: each dim_tags entry must be a (dimension, tag) pair"))
+        pair[1] isa Integer || throw(ArgumentError(
+            "$caller: entity dimensions must be integers"))
+        pair[1] isa Bool && throw(ArgumentError(
+            "$caller: entity dimensions must not be Bool"))
+        pair[2] isa Integer || throw(ArgumentError(
+            "$caller: entity tags must be integers"))
+        pair[2] isa Bool && throw(ArgumentError(
+            "$caller: entity tags must not be Bool"))
+        push!(parsed,pair)
+    end
+    return parsed
+end
+
+function _get_sizes(dim_tags)
+    caller="API.mesh.get_sizes"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags_lenient(dim_tags,caller)
+        return Float64[pair[1]==0 ? get(model.point_size,pair[2],0.0) : 0.0
+                       for pair in pairs]
+    end
+end
+
 function _get_elements(dim=-1,tag=-1)
     caller="API.mesh.get_elements"
     return lock(STATE_LOCK) do
@@ -2035,6 +2349,868 @@ function _affine_transform_mesh(affine,dim_tags=())
     end
 end
 
+# Rebuild the cache after dropping whole element columns from one block. Nodes
+# and their entity ownership are retained (Gmsh 4.15.2 keeps orphan nodes);
+# only the selected block's connectivity, per-cell owners, and tags shrink.
+function _remove_element_columns(mesh::Mesh,class::_MeshClassification,
+                                 dimension::Int,dropped::AbstractVector{Bool})
+    keep=.!dropped
+    replacement=Mesh(mesh.coords;
+        segs=dimension==1 ? mesh.segs[:,keep] : mesh.segs,
+        tris=dimension==2 ? mesh.tris[:,keep] : mesh.tris,
+        tets=dimension==3 ? mesh.tets[:,keep] : mesh.tets,
+        seg_tag=dimension==1 ? mesh.seg_tag[keep] : mesh.seg_tag,
+        tri_tag=dimension==2 ? mesh.tri_tag[keep] : mesh.tri_tag,
+        tet_tag=dimension==3 ? mesh.tet_tag[keep] : mesh.tet_tag)
+    record=_MeshClassification(replacement,class.entity,class.node_entities,
+        class.boundaries,
+        dimension==1 ? class.seg_entities[keep] : class.seg_entities,
+        dimension==2 ? class.tri_entities[keep] : class.tri_entities,
+        dimension==3 ? class.tet_entities[keep] : class.tet_entities)
+    _replace_mesh_cache_locked!(replacement,record)
+    return nothing
+end
+
+function _remove_elements(dim,tag,element_tags=())
+    caller="API.mesh.remove_elements"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_integer(dim,caller,"dim")
+        dimension in 0:3 || throw(ArgumentError(
+            "$caller: dim must be in 0:3"))
+        entity=_mesh_query_integer(tag,caller,"tag")
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: removing elements requires mesh classification " *
+            "metadata; generate a mesh so the cache owns entity ownership"))
+        _mesh_classified_entity(model,class,dimension,entity,caller)
+        triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
+        # The simplex cache owns no dimension-0 cells; a Point selection can
+        # only no-op on an empty list or reject tags classified elsewhere.
+        cells=dimension==0 ? Matrix{Int32}(undef,2,0) :
+              dimension==1 ? cached.segs :
+              dimension==2 ? cached.tris : cached.tets
+        owners=dimension==0 ? Int32[] :
+               dimension==1 ? class.seg_entities :
+               dimension==2 ? class.tri_entities : class.tet_entities
+        (element_tags isa AbstractVector || element_tags isa Tuple) ||
+            throw(ArgumentError(
+                "$caller: element_tags must be a vector or tuple of " *
+                "dense element tags"))
+        dropped=falses(size(cells,2))
+        if isempty(element_tags)
+            for column in axes(cells,2)
+                owners[column]==Int32(entity) && (dropped[column]=true)
+            end
+        else
+            for value in element_tags
+                dense=_mesh_query_integer(value,caller,"element_tags entry")
+                (1<=dense<=total) || throw(ArgumentError(
+                    "$caller: unknown element $dense; expected a dense tag " *
+                    "in 1:$total"))
+                block_dimension=dense<=triangle_offset ? 1 :
+                                dense<=tetrahedron_offset ? 2 : 3
+                position=dense<=triangle_offset ? dense :
+                         dense<=tetrahedron_offset ? dense-triangle_offset :
+                         dense-tetrahedron_offset
+                block_owners=block_dimension==1 ? class.seg_entities :
+                             block_dimension==2 ? class.tri_entities :
+                             class.tet_entities
+                (block_dimension==dimension &&
+                 block_owners[position]==Int32(entity)) || throw(ArgumentError(
+                    "$caller: element $dense is not classified on " *
+                    "$(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+                dropped[position]=true
+            end
+        end
+        any(dropped) &&
+            _remove_element_columns(cached,class,dimension,dropped)
+        return nothing
+    end
+end
+
+# Gmsh 4.15.2 `reverse` node-order conventions for first-order simplices:
+# segments swap both vertices, triangles swap positions 2 and 3, tetrahedra
+# swap positions 1 and 2.
+function _reverse_simplex_columns!(cells::AbstractMatrix{Int32},positions)
+    for position in positions
+        if size(cells,1)==2
+            cells[1,position],cells[2,position]=
+                cells[2,position],cells[1,position]
+        elseif size(cells,1)==3
+            cells[2,position],cells[3,position]=
+                cells[3,position],cells[2,position]
+        else
+            cells[1,position],cells[2,position]=
+                cells[2,position],cells[1,position]
+        end
+    end
+    return nothing
+end
+
+function _reverse_mesh(dim_tags=())
+    caller="API.mesh.reverse"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        cached=_cached_mesh_locked(caller)
+        class=_cached_classification_locked(cached)
+        isempty(pairs) || class===nothing && throw(ArgumentError(
+            "$caller: entity-selective reversal requires mesh classification " *
+            "metadata; pass an empty collection to reverse the complete cache"))
+        selected=isempty(pairs) ? nothing :
+                 _mesh_selected_entities(model,class,pairs,caller)
+        replacement=_copy_mesh(cached)
+        for (dimension,cells,owners) in (
+                (1,replacement.segs,class===nothing ? Int32[] :
+                    class.seg_entities),
+                (2,replacement.tris,class===nothing ? Int32[] :
+                    class.tri_entities),
+                (3,replacement.tets,class===nothing ? Int32[] :
+                    class.tet_entities))
+            positions=Int[]
+            for column in axes(cells,2)
+                (selected===nothing ||
+                 (dimension,owners[column]) in selected) &&
+                    push!(positions,column)
+            end
+            _reverse_simplex_columns!(cells,positions)
+        end
+        # Connectivity is unchanged as a set, so the classification stays
+        # index-aligned and is rebound to the reversed cache object.
+        new_class=class===nothing ? nothing : _MeshClassification(
+            replacement,class.entity,class.node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(replacement,new_class)
+        return nothing
+    end
+end
+
+function _reverse_elements(element_tags)
+    caller="API.mesh.reverse_elements"
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=_cached_mesh_locked(caller)
+        (element_tags isa AbstractVector || element_tags isa Tuple) ||
+            throw(ArgumentError(
+                "$caller: element_tags must be a vector or tuple of dense " *
+                "element tags"))
+        triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
+        per_block=(Int[],Int[],Int[])
+        for value in element_tags
+            dense=_mesh_query_integer(value,caller,"element_tags entry")
+            (1<=dense<=total) || throw(ArgumentError(
+                "$caller: unknown element $dense; expected a dense tag in " *
+                "1:$total"))
+            push!(per_block[dense<=triangle_offset ? 1 :
+                            dense<=tetrahedron_offset ? 2 : 3],
+                  dense<=triangle_offset ? dense :
+                  dense<=tetrahedron_offset ? dense-triangle_offset :
+                  dense-tetrahedron_offset)
+        end
+        replacement=_copy_mesh(cached)
+        _reverse_simplex_columns!(replacement.segs,per_block[1])
+        _reverse_simplex_columns!(replacement.tris,per_block[2])
+        _reverse_simplex_columns!(replacement.tets,per_block[3])
+        class=_cached_classification_locked(cached)
+        new_class=class===nothing ? nothing : _MeshClassification(
+            replacement,class.entity,class.node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(replacement,new_class)
+        return nothing
+    end
+end
+
+# Merge nodes sharing exact coordinates, keeping the lowest tag, then rebuild
+# the cache with compacted node numbering and remapped connectivity — matching
+# Gmsh 4.15.2's `removeDuplicateNodes`.
+function _remove_duplicate_nodes(dim_tags=())
+    caller="API.mesh.remove_duplicate_nodes"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        cached=_cached_mesh_locked(caller)
+        class=_cached_classification_locked(cached)
+        isempty(pairs) || class===nothing && throw(ArgumentError(
+            "$caller: entity-selective duplicate removal requires mesh " *
+            "classification metadata; pass an empty collection to scan the " *
+            "complete cache"))
+        selected=isempty(pairs) ? nothing :
+                 _mesh_selected_entities(model,class,pairs,caller)
+        count=nnodes(cached)
+        replacement=collect(Int32,1:count)
+        groups=Dict{NTuple{3,Float64},Int32}()
+        for node in 1:count
+            (selected===nothing ||
+             class.node_entities[node] in selected) || continue
+            key=NTuple{3,Float64}((cached.coords[1,node],
+                                   cached.coords[2,node],
+                                   cached.coords[3,node]))
+            replacement[node]=Int32(get!(groups,key,node))
+        end
+        keep=Bool[replacement[node]==node for node in 1:count]
+        all(keep) && return nothing
+        old_to_new=Vector{Int32}(undef,count)
+        index=0
+        for node in 1:count
+            keep[node] && (index+=1;old_to_new[node]=index)
+        end
+        coordinates=cached.coords[:,keep]
+        blocks=Vector{Matrix{Int32}}(undef,3)
+        for (block,cells) in enumerate((
+                cached.segs,cached.tris,cached.tets))
+            result=Matrix{Int32}(undef,size(cells,1),size(cells,2))
+            for column in axes(cells,2),row in axes(cells,1)
+                result[row,column]=
+                    old_to_new[Int(replacement[cells[row,column]])]
+            end
+            blocks[block]=result
+        end
+        node_entities=class===nothing ? nothing :
+            Tuple{Int,Int32}[class.node_entities[node]
+                             for node in 1:count if keep[node]]
+        new_mesh=Mesh(coordinates;segs=blocks[1],tris=blocks[2],
+                      tets=blocks[3],seg_tag=cached.seg_tag,
+                      tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
+        new_class=class===nothing ? nothing : _MeshClassification(
+            new_mesh,class.entity,node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(new_mesh,new_class)
+        return nothing
+    end
+end
+
+# Drop cells whose sorted connectivity repeats an earlier cell owned by the
+# same entity — Gmsh 4.15.2's `removeDuplicateElements` contract.
+function _remove_duplicate_elements(dim_tags=())
+    caller="API.mesh.remove_duplicate_elements"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        cached=_cached_mesh_locked(caller)
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: duplicate-element removal requires mesh classification " *
+            "metadata; generate a mesh so the cache owns entity ownership"))
+        selected=isempty(pairs) ? nothing :
+                 _mesh_selected_entities(model,class,pairs,caller)
+        changed=false
+        new_blocks=Vector{Matrix{Int32}}(undef,3)
+        new_owners=Vector{Vector{Int32}}(undef,3)
+        new_tags=Vector{Vector{Int32}}(undef,3)
+        cell_tags=(cached.seg_tag,cached.tri_tag,cached.tet_tag)
+        for (block,(dimension,cells,owners)) in enumerate((
+                (1,cached.segs,class.seg_entities),
+                (2,cached.tris,class.tri_entities),
+                (3,cached.tets,class.tet_entities)))
+            keep=trues(size(cells,2))
+            seen=Dict{Tuple{Int32,NTuple{4,Int32}},Int}()
+            for column in axes(cells,2)
+                (selected===nothing ||
+                 (dimension,owners[column]) in selected) || continue
+                connectivity=sort!(vec(cells[:,column]))
+                key=(owners[column],ntuple(
+                    slot->slot<=length(connectivity) ? connectivity[slot] :
+                        Int32(0),4))
+                haskey(seen,key) && (keep[column]=false;changed=true)
+                seen[key]=column
+            end
+            new_blocks[block]=cells[:,keep]
+            new_owners[block]=owners[keep]
+            new_tags[block]=cell_tags[block][keep]
+        end
+        changed || return nothing
+        replacement=Mesh(cached.coords;segs=new_blocks[1],
+                         tris=new_blocks[2],tets=new_blocks[3],
+                         seg_tag=new_tags[1],tri_tag=new_tags[2],
+                         tet_tag=new_tags[3])
+        record=_MeshClassification(replacement,class.entity,
+            class.node_entities,class.boundaries,new_owners[1],
+            new_owners[2],new_owners[3])
+        _replace_mesh_cache_locked!(replacement,record)
+        return nothing
+    end
+end
+
+function _get_duplicate_nodes(dim_tags=())
+    caller="API.mesh.get_duplicate_nodes"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        cached=_cached_mesh_locked(caller)
+        class=_cached_classification_locked(cached)
+        selected=nothing
+        if !isempty(pairs)
+            class===nothing && throw(ArgumentError(
+                "$caller: entity-selective duplicate detection requires mesh " *
+                "classification metadata; pass an empty collection to scan " *
+                "the complete cache"))
+            selected=_mesh_selected_entities(model,class,pairs,caller)
+        end
+        groups=Dict{NTuple{3,Float64},Vector{Int}}()
+        for node in axes(cached.coords,2)
+            (selected===nothing ||
+             class.node_entities[node] in selected) || continue
+            push!(get!(groups,Tuple(cached.coords[:,node]),Int[]),node)
+        end
+        duplicates=UInt64[]
+        for members in values(groups)
+            length(members)>1 && append!(duplicates,UInt64.(members))
+        end
+        return sort!(duplicates)
+    end
+end
+
+# Set one node's Cartesian coordinates — Gmsh 4.15.2 `setNode`. Parametric
+# coordinates are not stored: `get_node`/`get_nodes` recompute them from the
+# owning entity's geometry, so a nonempty `parametric_coord` is rejected rather
+# than silently ignored.
+function _set_node(node_tag,coord,parametric_coord=Float64[])
+    caller="API.mesh.set_node"
+    return lock(STATE_LOCK) do
+        cached=_cached_mesh_locked(caller)
+        tag=_mesh_query_integer(node_tag,caller,"node_tag")
+        count=nnodes(cached)
+        (1<=tag<=count) || throw(ArgumentError(
+            "$caller: unknown node $tag; expected a dense tag in 1:$count"))
+        (coord isa AbstractVector || coord isa Tuple) ||
+            throw(ArgumentError(
+                "$caller: coord must be a vector or tuple of 3 coordinates"))
+        length(coord)==3 || throw(ArgumentError(
+            "$caller: coord must hold exactly 3 coordinates"))
+        values=Float64[Float64(c) for c in coord]
+        all(isfinite,values) || throw(ArgumentError(
+            "$caller: node coordinates must be finite"))
+        (parametric_coord isa AbstractVector ||
+         parametric_coord isa Tuple) || throw(ArgumentError(
+            "$caller: parametric_coord must be a vector or tuple"))
+        isempty(parametric_coord) || throw(ArgumentError(
+            "$caller: parametric coordinates are recomputed from the owning " *
+            "entity; pass an empty parametric_coord"))
+        coordinates=copy(cached.coords)
+        coordinates[:,tag]=values
+        replacement=Mesh(coordinates;segs=cached.segs,tris=cached.tris,
+                         tets=cached.tets,seg_tag=cached.seg_tag,
+                         tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
+        class=_cached_classification_locked(cached)
+        new_class=class===nothing ? nothing : _MeshClassification(
+            replacement,class.entity,class.node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(replacement,new_class)
+        return nothing
+    end
+end
+
+# Parses an explicit `old_tags`/`new_tags` renumbering pair list into a dense
+# permutation of `1:count`, or `nothing` when both lists are empty (Gmsh's
+# "renumber continuously" form, already a no-op on the dense cache).
+function _mesh_renumber_permutation(old_tags,new_tags,count,caller,label)
+    (old_tags isa AbstractVector || old_tags isa Tuple) ||
+        throw(ArgumentError(
+            "$caller: old_tags must be a vector or tuple of $label tags"))
+    (new_tags isa AbstractVector || new_tags isa Tuple) ||
+        throw(ArgumentError(
+            "$caller: new_tags must be a vector or tuple of $label tags"))
+    length(old_tags)==length(new_tags) || throw(ArgumentError(
+        "$caller: old_tags and new_tags must have the same length"))
+    isempty(old_tags) && return nothing
+    mapping=collect(Int32,1:count)
+    seen_new=Set{Int}()
+    for (old_value,new_value) in zip(old_tags,new_tags)
+        old=_mesh_query_integer(old_value,caller,"old_tags entry")
+        new=_mesh_query_integer(new_value,caller,"new_tags entry")
+        (1<=old<=count) || throw(ArgumentError(
+            "$caller: unknown $label tag $old; expected a dense tag in " *
+            "1:$count"))
+        new in seen_new && throw(ArgumentError(
+            "$caller: new_tags contains tag $new twice"))
+        push!(seen_new,new)
+        mapping[old]=Int32(new)
+    end
+    # The flat cache only represents the dense tag space 1:count, so the
+    # resulting assignment must stay a permutation of it.
+    sort!(collect(Int,mapping))==collect(1:count) || throw(ArgumentError(
+        "$caller: renumbering must keep $label tags a permutation of " *
+        "1:$count; sparse tags are not representable on the dense cache"))
+    return mapping
+end
+
+function _renumber_nodes(old_tags=(),new_tags=())
+    caller="API.mesh.renumber_nodes"
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=_cached_mesh_locked(caller)
+        mapping=_mesh_renumber_permutation(
+            old_tags,new_tags,nnodes(cached),caller,"node")
+        mapping===nothing && return nothing
+        order=Vector{Int}(undef,nnodes(cached))
+        for node in 1:nnodes(cached)
+            order[mapping[node]]=node
+        end
+        coordinates=cached.coords[:,order]
+        inverse=Vector{Int32}(undef,nnodes(cached))
+        for node in 1:nnodes(cached)
+            inverse[node]=Int32(mapping[node])
+        end
+        blocks=Vector{Matrix{Int32}}(undef,3)
+        for (block,cells) in enumerate((
+                cached.segs,cached.tris,cached.tets))
+            result=Matrix{Int32}(undef,size(cells,1),size(cells,2))
+            for column in axes(cells,2),row in axes(cells,1)
+                result[row,column]=inverse[cells[row,column]]
+            end
+            blocks[block]=result
+        end
+        class=_cached_classification_locked(cached)
+        node_entities=class===nothing ? nothing :
+            Tuple{Int,Int32}[class.node_entities[node] for node in order]
+        new_mesh=Mesh(coordinates;segs=blocks[1],tris=blocks[2],
+                      tets=blocks[3],seg_tag=cached.seg_tag,
+                      tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
+        new_class=class===nothing ? nothing : _MeshClassification(
+            new_mesh,class.entity,node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(new_mesh,new_class)
+        return nothing
+    end
+end
+
+# Element tags are dense across the segment/triangle/tetrahedron blocks, so a
+# renumbering must keep every tag inside its own block range — cross-block
+# assignments would change element types and are rejected explicitly.
+function _renumber_elements(old_tags=(),new_tags=())
+    caller="API.mesh.renumber_elements"
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=_cached_mesh_locked(caller)
+        triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
+        mapping=_mesh_renumber_permutation(
+            old_tags,new_tags,total,caller,"element")
+        mapping===nothing && return nothing
+        for position in 1:total
+            target=Int(mapping[position])
+            block_of=position<=triangle_offset ? 1 :
+                     position<=tetrahedron_offset ? 2 : 3
+            target_block=target<=triangle_offset ? 1 :
+                         target<=tetrahedron_offset ? 2 : 3
+            block_of==target_block || throw(ArgumentError(
+                "$caller: element $position cannot take tag $target; " *
+                "renumbering cannot move elements across element types"))
+        end
+        class=_cached_classification_locked(cached)
+        blocks=Vector{Matrix{Int32}}(undef,3)
+        owners_out=Vector{Vector{Int32}}(undef,3)
+        tags_out=Vector{Vector{Int32}}(undef,3)
+        cell_tags=(cached.seg_tag,cached.tri_tag,cached.tet_tag)
+        owners_in=(class===nothing ? Int32[] : class.seg_entities,
+                   class===nothing ? Int32[] : class.tri_entities,
+                   class===nothing ? Int32[] : class.tet_entities)
+        for (block,(cells,offset)) in enumerate(zip(
+                (cached.segs,cached.tris,cached.tets),
+                (0,triangle_offset,tetrahedron_offset)))
+            width=size(cells,2)
+            order=Vector{Int}(undef,width)
+            for column in 1:width
+                order[Int(mapping[offset+column])-offset]=column
+            end
+            blocks[block]=cells[:,order]
+            owners_out[block]=isempty(owners_in[block]) ? Int32[] :
+                              owners_in[block][order]
+            tags_out[block]=cell_tags[block][order]
+        end
+        replacement=Mesh(cached.coords;segs=blocks[1],tris=blocks[2],
+                         tets=blocks[3],seg_tag=tags_out[1],
+                         tri_tag=tags_out[2],tet_tag=tags_out[3])
+        new_class=class===nothing ? nothing : _MeshClassification(
+            replacement,class.entity,class.node_entities,class.boundaries,
+            owners_out[1],owners_out[2],owners_out[3])
+        _replace_mesh_cache_locked!(replacement,new_class)
+        return nothing
+    end
+end
+
+# Reorder one entity's cells of one element type — Gmsh 4.15.2's
+# `reorderElements`, whose `ordering` holds 0-based source positions:
+# `ordering[new_position]` is the column that moves there. Elements keep their
+# stored tags and entity ownership.
+function _reorder_elements(element_type,tag,ordering)
+    caller="API.mesh.reorder_elements"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        cached=_cached_mesh_locked(caller)
+        msh=_mesh_query_integer(element_type,caller,"element_type")
+        spec=msh_spec(msh)
+        dimension=spec.dim
+        entity=_mesh_query_integer(tag,caller,"tag")
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: reordering requires mesh classification metadata"))
+        _mesh_classified_entity(model,class,dimension,entity,caller)
+        cells=dimension==1 ? cached.segs :
+              dimension==2 ? cached.tris :
+              dimension==3 ? cached.tets :
+              Matrix{Int32}(undef,spec.nnodes,0)
+        owners=dimension==1 ? class.seg_entities :
+               dimension==2 ? class.tri_entities :
+               dimension==3 ? class.tet_entities : Int32[]
+        positions=findall(==(Int32(entity)),owners)
+        (ordering isa AbstractVector || ordering isa Tuple) ||
+            throw(ArgumentError(
+                "$caller: ordering must be a vector or tuple of 0-based " *
+                "source positions"))
+        isempty(positions) && throw(ArgumentError(
+            "$caller: no elements of type $msh classified on " *
+            "$(_MESH_ENTITY_LABELS[dimension+1])[$entity] to reorder"))
+        length(ordering)==length(positions) || throw(ArgumentError(
+            "$caller: ordering must hold $(length(positions)) entries for the " *
+            "elements of type $msh on " *
+            "$(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+        permutation=Int[]
+        for value in ordering
+            source=_mesh_query_integer(value,caller,"ordering entry")
+            (0<=source<length(positions)) || throw(ArgumentError(
+                "$caller: ordering entry $source is out of range; expected " *
+                "0:$(length(positions)-1)"))
+            source in permutation && throw(ArgumentError(
+                "$caller: ordering repeats position $source"))
+            push!(permutation,source)
+        end
+        reordered=positions[permutation .+ 1]
+        blocks=(copy(cached.segs),copy(cached.tris),copy(cached.tets))
+        old_tags=(cached.seg_tag,cached.tri_tag,cached.tet_tag)
+        cell_tags=(copy(old_tags[1]),copy(old_tags[2]),copy(old_tags[3]))
+        replacement_cells=blocks[dimension]
+        for (new_slot,column) in enumerate(reordered)
+            replacement_cells[:,positions[new_slot]]=cells[:,column]
+            cell_tags[dimension][positions[new_slot]]=old_tags[dimension][column]
+        end
+        replacement=Mesh(cached.coords;segs=blocks[1],tris=blocks[2],
+                         tets=blocks[3],seg_tag=cell_tags[1],
+                         tri_tag=cell_tags[2],tet_tag=cell_tags[3])
+        _replace_mesh_cache_locked!(replacement,
+            _MeshClassification(replacement,class.entity,
+                class.node_entities,class.boundaries,class.seg_entities,
+                class.tri_entities,class.tet_entities))
+        return nothing
+    end
+end
+
+function _remove_embedded(dim_tags,dim=-1)
+    caller="API.mesh.remove_embedded"
+    (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
+        "$caller: dim_tags must be a vector or tuple of (dimension, tag) pairs"))
+    return _with_model(invalidate=true) do current
+        remove_embedded!(current,dim_tags,dim)
+    end
+end
+
+# `optimize` maps Gmsh's default tetrahedral mesh optimizer onto the validated
+# boundary-preserving `smooth_optimize` kernel. Connectivity and the
+# index-aligned classification snapshot carry over unchanged because only node
+# coordinates move and boundary nodes are fixed. Other optimizer names and
+# entity-scoped selections are not implemented and fail explicitly.
+function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
+    caller="API.mesh.optimize"
+    method isa AbstractString || throw(ArgumentError(
+        "$caller: method must be a string"))
+    method=="" || throw(ArgumentError(
+        "$caller: unknown or unsupported optimizer \"$method\"; only the " *
+        "default tetrahedral optimizer is implemented"))
+    force isa Bool || throw(ArgumentError("$caller: force must be Bool"))
+    iterations=_mesh_query_integer(niter,caller,"niter")
+    iterations>=0 || throw(ArgumentError("$caller: niter must be nonnegative"))
+    pairs=_mesh_parse_dim_tags(dim_tags,caller)
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=_cached_mesh_locked(caller)
+        isempty(pairs) || throw(ArgumentError(
+            "$caller: entity-scoped optimization is not implemented; pass an " *
+            "empty dim_tags selection"))
+        class=_cached_classification_locked(cached)
+        smoothed=smooth_optimize(cached;iters=iterations)
+        new_class=class===nothing ? nothing : _MeshClassification(
+            smoothed,class.entity,class.node_entities,class.boundaries,
+            class.seg_entities,class.tri_entities,class.tet_entities)
+        _replace_mesh_cache_locked!(smoothed,new_class)
+        return nothing
+    end
+end
+
+# Per-element visibility is display state only: Gmsh 4.15.2 stores the raw
+# value (default 1), accepts unknown tags silently in both directions, and
+# reports 0 for them on read.
+function _set_mesh_visibility(element_tags,value)
+    caller="API.mesh.set_visibility"
+    (element_tags isa AbstractVector || element_tags isa Tuple) ||
+        throw(ArgumentError(
+            "$caller: element_tags must be a vector or tuple of element tags"))
+    flag=_mesh_query_integer(value,caller,"value")
+    typemin(Int32)<=flag<=typemax(Int32) || throw(ArgumentError(
+        "$caller: value $value is out of range"))
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=LAST_MESH[]
+        total=cached===nothing ? 0 : _mesh_element_offsets(cached)[3]
+        for raw in element_tags
+            tag=_mesh_query_integer(raw,caller,"element_tags entry")
+            # Unknown element tags are dropped like Gmsh, so a later
+            # `get_visibility` still reports 0 for them.
+            tag in 1:total && (ELEMENT_VISIBILITY[][tag]=Int32(flag))
+        end
+        return nothing
+    end
+end
+
+function _get_mesh_visibility(element_tags)
+    caller="API.mesh.get_visibility"
+    (element_tags isa AbstractVector || element_tags isa Tuple) ||
+        throw(ArgumentError(
+            "$caller: element_tags must be a vector or tuple of element tags"))
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=LAST_MESH[]
+        total=cached===nothing ? 0 : _mesh_element_offsets(cached)[3]
+        values=Int32[]
+        for raw in element_tags
+            tag=_mesh_query_integer(raw,caller,"element_tags entry")
+            push!(values,get(ELEMENT_VISIBILITY[],tag,
+                             tag in 1:total ? Int32(1) : Int32(0)))
+        end
+        return values
+    end
+end
+
+# `getPeriodic` maps each queried entity to its periodic master tag, or to the
+# entity itself when no periodic relation was registered. Unknown entities fail
+# like Gmsh's "does not exist" error.
+function _get_periodic(dim,tags)
+    caller="API.mesh.get_periodic"
+    dimension=_mesh_query_integer(dim,caller,"dim")
+    dimension in 0:3 || throw(ArgumentError("$caller: dim must be in 0:3"))
+    (tags isa AbstractVector || tags isa Tuple) || throw(ArgumentError(
+        "$caller: tags must be a vector or tuple of entity tags"))
+    return _with_model() do current
+        dictionary=_mesh_entity_dictionary(current,dimension)
+        masters=Int32[]
+        for tag in tags
+            (tag isa Integer && !(tag isa Bool) &&
+             typemin(Int32)<=tag<=typemax(Int32) &&
+             haskey(dictionary,Int(tag))) || throw(ArgumentError(
+                "$caller: unknown " *
+                "$(_MESH_ENTITY_LABELS[dimension+1])[$tag]"))
+            constraint=get(current.periodic,(dimension,Int(tag)),nothing)
+            push!(masters,constraint===nothing ? Int32(tag) :
+                  constraint.master_entity)
+        end
+        return masters
+    end
+end
+
+# Gmsh's `removeConstraints` clears per-entity meshing attributes (transfinite,
+# recombine, smoothing, reverse); periodic relations, embeddings, and Point
+# mesh sizes are retained — verified against 4.15.2. The native model stores
+# none of the cleared attribute kinds, so this is a validated no-op.
+function _remove_constraints(dim_tags=())
+    caller="API.mesh.remove_constraints"
+    pairs=_mesh_parse_dim_tags(dim_tags,caller)
+    return _with_model() do current
+        for (dimension,tag) in pairs
+            haskey(_mesh_entity_dictionary(current,dimension),tag) ||
+                throw(ArgumentError(
+                    "$caller: unknown " *
+                    "$(_MESH_ENTITY_LABELS[dimension+1])[$tag]"))
+        end
+        return nothing
+    end
+end
+
+# Reverse Cuthill-McKee over the graph of nodes sharing a selected element.
+# Components are processed from the minimum-degree unvisited node and each
+# breadth-first frontier enqueues neighbors in increasing degree order; the
+# reversed traversal assigns the new dense tags.
+function _mesh_rcm_node_order(adjacency)
+    count=length(adjacency)
+    degree=[length(neighbors) for neighbors in adjacency]
+    visited=falses(count)
+    order=Int[]
+    queue=Int[]
+    while length(order)<count
+        root=0
+        best=typemax(Int)
+        for node in 1:count
+            if !visited[node] && degree[node]<best
+                best=degree[node];root=node
+            end
+        end
+        visited[root]=true
+        push!(order,root)
+        empty!(queue);push!(queue,root)
+        head=1
+        while head<=length(queue)
+            node=queue[head];head+=1
+            pending=sort!(Int[neighbor for neighbor in adjacency[node]
+                              if !visited[neighbor]];
+                          by=neighbor->degree[neighbor])
+            for neighbor in pending
+                visited[neighbor]=true
+                push!(order,neighbor)
+                push!(queue,neighbor)
+            end
+        end
+    end
+    return reverse!(order)
+end
+
+function _compute_renumbering(method="RCMK",element_tags=())
+    caller="API.mesh.compute_renumbering"
+    method isa AbstractString || throw(ArgumentError(
+        "$caller: method must be a string"))
+    method=="RCMK" || throw(ArgumentError(
+        "$caller: unknown renumbering method \"$method\""))
+    (element_tags isa AbstractVector || element_tags isa Tuple) ||
+        throw(ArgumentError(
+            "$caller: element_tags must be a vector or tuple of element tags"))
+    return lock(STATE_LOCK) do
+        _model_locked()
+        cached=_cached_mesh_locked(caller)
+        _,_,total=_mesh_element_offsets(cached)
+        selected=Set{Int}()
+        for value in element_tags
+            tag=_mesh_query_integer(value,caller,"element_tags entry")
+            (1<=tag<=total) || throw(ArgumentError(
+                "$caller: unknown element $tag"))
+            push!(selected,tag)
+        end
+        triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(cached)
+        isempty(element_tags) &&
+            (selected=Set{Int}(1:total))
+        cells=Tuple{Int,Matrix{Int32}}[]
+        size(cached.segs,2)>0 && push!(cells,(0,cached.segs))
+        size(cached.tris,2)>0 &&
+            push!(cells,(triangle_offset,cached.tris))
+        size(cached.tets,2)>0 &&
+            push!(cells,(tetrahedron_offset,cached.tets))
+        involved=Set{Int32}()
+        for (offset,block) in cells
+            for column in axes(block,2)
+                (offset+column) in selected || continue
+                for row in axes(block,1)
+                    push!(involved,block[row,column])
+                end
+            end
+        end
+        old_tags=sort!(collect(involved))
+        local_index=Dict{Int32,Int}(
+            node=>index for (index,node) in enumerate(old_tags))
+        adjacency=[Set{Int}() for _ in old_tags]
+        for (offset,block) in cells
+            for column in axes(block,2)
+                (offset+column) in selected || continue
+                vertices=[local_index[block[row,column]]
+                          for row in axes(block,1)]
+                for a in vertices,b in vertices
+                    a!=b && push!(adjacency[a],b)
+                end
+            end
+        end
+        order=_mesh_rcm_node_order(adjacency)
+        position=Vector{Int}(undef,length(old_tags))
+        for (rank,node) in enumerate(order)
+            position[node]=rank
+        end
+        return UInt64.(old_tags),
+               UInt64[position[local_index[node]] for node in old_tags]
+    end
+end
+
+# The native model owns no mesh partitions: ghosts and unpartitioning are
+# empty no-ops, and meshing failures surface through the raised error rather
+# than through post-hoc error lists.
+function _get_ghost_elements(dim,tag)
+    caller="API.mesh.get_ghost_elements"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_integer(dim,caller,"dim")
+        dimension in 0:3 || throw(ArgumentError(
+            "$caller: dim must be in 0:3"))
+        entity=_mesh_query_integer(tag,caller,"tag")
+        class=_cached_classification_locked(cached)
+        class===nothing && throw(ArgumentError(
+            "$caller: ghost queries require mesh classification metadata"))
+        _mesh_classified_entity(model,class,dimension,entity,caller)
+        return UInt64[],Int32[]
+    end
+end
+
+_unpartition()=lock(STATE_LOCK) do
+    _model_locked()
+    _cached_mesh_locked("API.mesh.unpartition")
+    return nothing
+end
+
+_get_last_entity_error()=Tuple{Int32,Int32}[]
+_get_last_node_error()=UInt64[]
+
+function _rebuild_node_cache(only_if_necessary=true)
+    caller="API.mesh.rebuild_node_cache"
+    _mesh_query_bool(only_if_necessary,caller,"only_if_necessary")
+    lock(STATE_LOCK) do
+        _model_locked()
+        _cached_mesh_locked(caller)
+    end
+    return nothing
+end
+
+function _rebuild_element_cache(only_if_necessary=true)
+    caller="API.mesh.rebuild_element_cache"
+    _mesh_query_bool(only_if_necessary,caller,"only_if_necessary")
+    lock(STATE_LOCK) do
+        _model_locked()
+        _cached_mesh_locked(caller)
+    end
+    return nothing
+end
+
+# Node ownership is derived from the generating entity at classification time
+# and maintained through every mutation, so geometric relocation and
+# element-based reclassification are identity operations; both validate their
+# arguments and the session state like Gmsh.
+function _relocate_nodes(dim=-1,tag=-1)
+    caller="API.mesh.relocate_nodes"
+    return lock(STATE_LOCK) do
+        model=_model_locked()
+        cached=_cached_mesh_locked(caller)
+        dimension=_mesh_query_integer(dim,caller,"dim")
+        (-1<=dimension<=3) || throw(ArgumentError(
+            "$caller: dim must be -1 or in 0:3"))
+        entity=_mesh_query_integer(tag,caller,"tag")
+        class=_cached_classification_locked(cached)
+        entity>=0 || return nothing
+        if entity>0
+            if dimension<0
+                throw(ArgumentError(
+                    "$caller: a nonnegative tag requires a dimension in 0:3"))
+            end
+            class===nothing && throw(ArgumentError(
+                "$caller: entity-selective relocation requires mesh " *
+                "classification metadata"))
+            _mesh_classified_entity(model,class,dimension,entity,caller)
+        end
+        return nothing
+    end
+end
+
+function _reclassify_nodes()
+    caller="API.mesh.reclassify_nodes"
+    return lock(STATE_LOCK) do
+        _model_locked()
+        _cached_mesh_locked(caller)
+        return nothing
+    end
+end
+
 function _set_size(dim_tags,size)
     caller="API.mesh.set_size"
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
@@ -2082,7 +3258,9 @@ end
 
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 module mesh
-using ..API: _generate,_get_mesh,_get_nodes,_get_node,_get_elements,_get_element,
+using ..API: _generate,_get_mesh,_get_nodes,_get_node,
+             _get_nodes_for_physical_group,_get_embedded,_get_sizes,
+             _get_elements,_get_element,
              _get_element_types,
              _get_elements_by_type,_get_nodes_by_element_type,_get_barycenters,
              _get_element_edge_nodes,_get_element_face_nodes,
@@ -2099,7 +3277,16 @@ using ..API: _generate,_get_mesh,_get_nodes,_get_node,_get_elements,_get_element
              _get_all_edges,_get_all_faces,_add_edges,_add_faces,
              _get_max_node_tag,_get_max_element_tag,
              _refine,_clear_mesh,_affine_transform_mesh,_set_size,_set_periodic,
-             _get_periodic_nodes
+             _get_periodic_nodes,_remove_elements,_reverse_mesh,
+             _reverse_elements,_get_duplicate_nodes,
+             _remove_duplicate_nodes,_remove_duplicate_elements,
+             _set_node,_renumber_nodes,_renumber_elements,_reorder_elements,
+             _remove_embedded,
+             _get_ghost_elements,_unpartition,_get_last_entity_error,
+             _get_last_node_error,_rebuild_node_cache,_rebuild_element_cache,
+             _reclassify_nodes,_relocate_nodes,
+             _get_periodic,_remove_constraints,_compute_renumbering,
+             _optimize_mesh,_set_mesh_visibility,_get_mesh_visibility
 generate(dim::Integer)=_generate(dim)
 get()=_get_mesh()
 
@@ -2135,6 +3322,37 @@ the classification snapshot built when the mesh was generated; unknown tags
 and caches without classification fail explicitly.
 """
 get_node(node_tag)=_get_node(node_tag)
+
+"""
+    get_nodes_for_physical_group(dim, tag)
+
+Return detached dense `UInt64` node tags and flattened `Float64` coordinates
+for every node on the member entities of Physical group `(dim, tag)`, matching
+Gmsh 4.15.2's `getNodesForPhysicalGroup`. Each member contributes its own
+classified nodes plus its transitive boundary and embedded entities' nodes;
+the result is the deduplicated ascending tag set. An unknown or empty group
+returns empty arrays. Caches without classification fail explicitly.
+"""
+get_nodes_for_physical_group(dim,tag)=_get_nodes_for_physical_group(dim,tag)
+
+"""
+    get_embedded(dim, tag)
+
+Return the detached `(dim, tag)` list of entities embedded in entity
+`(dim, tag)`, matching Gmsh 4.15.2's `getEmbedded`. Entities without
+embeddings return an empty list; unknown entities fail explicitly.
+"""
+get_embedded(dim,tag)=_get_embedded(dim,tag)
+
+"""
+    get_sizes(dim_tags)
+
+Return the detached `Float64` mesh size for each `(dim, tag)` pair, matching
+Gmsh 4.15.2's `getSizes`: Points report their assigned mesh size and every
+other entity — known, unknown, or out-of-range alike — reports `0.0`. Malformed
+`dim_tags` entries fail explicitly.
+"""
+get_sizes(dim_tags)=_get_sizes(dim_tags)
 
 """
     get_elements(dim=-1, tag=-1)
@@ -2661,6 +3879,72 @@ affine_transform(affine,dim_tags=())=
     _affine_transform_mesh(affine,dim_tags)
 
 """
+    remove_elements(dim, tag, element_tags=[])
+
+Remove the listed dense element tags — or every element on the entity when
+`element_tags` is empty — classified on `(dim, tag)`, matching Gmsh 4.15.2's
+`removeElements`. Nodes are retained, so dense element tags re-index after
+removal. Every listed tag must resolve to an element owned by the entity;
+unknown entities, unknown tags, and caches without classification metadata
+fail explicitly. A dimension-0 selection is a validated no-op since the
+simplex cache owns no Point cells.
+"""
+remove_elements(dim,tag,element_tags=())=
+    _remove_elements(dim,tag,element_tags)
+
+"""
+    reverse(dim_tags=())
+
+Reverse the orientation of every element classified on the entities in
+`dim_tags` — or the complete cached mesh when empty — using Gmsh 4.15.2's
+first-order simplex conventions: segments swap both vertices, triangles swap
+the last two, tetrahedra swap the first two. A nonempty selection requires the
+classified cache built by [`generate`](@ref); unknown entities fail explicitly.
+"""
+reverse(dim_tags=())=_reverse_mesh(dim_tags)
+
+"""
+    reverse_elements(element_tags)
+
+Reverse the orientation of the listed dense element tags with the same
+first-order simplex conventions as [`reverse`](@ref). Unknown tags fail
+explicitly.
+"""
+reverse_elements(element_tags)=_reverse_elements(element_tags)
+
+"""
+    get_duplicate_nodes(dim_tags=()) -> Vector{UInt64}
+
+Return the sorted detached tags of coincident nodes owned by the entities in
+`dim_tags` — or the complete cache when empty — matching Gmsh 4.15.2's
+`getDuplicateNodes`: every node sharing exact coordinates with another scanned
+node is reported. A nonempty selection requires classification metadata; an
+empty selection scans the cached coordinates directly.
+"""
+get_duplicate_nodes(dim_tags=())=_get_duplicate_nodes(dim_tags)
+
+"""
+    remove_duplicate_nodes(dim_tags=())
+
+Merge nodes sharing exact coordinates, keeping the lowest tag and remapping all
+connectivity, matching Gmsh 4.15.2's `removeDuplicateNodes`. An empty selection
+scans the complete cache; a nonempty selection merges only nodes owned by the
+listed entities and requires classification metadata.
+"""
+remove_duplicate_nodes(dim_tags=())=_remove_duplicate_nodes(dim_tags)
+
+"""
+    remove_duplicate_elements(dim_tags=())
+
+Drop cells whose sorted connectivity repeats an earlier cell owned by the same
+entity, matching Gmsh 4.15.2's `removeDuplicateElements`. An empty selection
+scans every block; a nonempty selection scans only cells classified on the
+listed entities. Requires the classification snapshot built by
+[`generate`](@ref).
+"""
+remove_duplicate_elements(dim_tags=())=_remove_duplicate_elements(dim_tags)
+
+"""
     set_size(dim_tags, size)
 
 Set a finite, positive mesh-size constraint on the dimension-0 Point entities in
@@ -2692,6 +3976,210 @@ volume relations return the master and affine with empty node arrays.
 """
 get_periodic_nodes(dim,slave_entity)=
     _get_periodic_nodes(dim,slave_entity)
+
+"""
+    get_periodic(dim, tags)
+
+Return the periodic master tag for each entity tag in `tags`, or the entity's
+own tag when it has no periodic master — matching Gmsh 4.15.2's `getPeriodic`.
+`dim` must be in 0:3 and every tag must name an existing model entity.
+"""
+get_periodic(dim,tags)=_get_periodic(dim,tags)
+
+"""
+    remove_constraints(dim_tags=())
+
+Validate `dim_tags` and remove per-entity meshing attributes. Gmsh 4.15.2's
+`removeConstraints` clears transfinite, recombine, smoothing, and reverse
+attributes while retaining periodic relations, embeddings, and Point mesh
+sizes; the native model stores none of the cleared kinds, so this is a
+validated no-op. Unknown entities fail explicitly.
+"""
+remove_constraints(dim_tags=())=_remove_constraints(dim_tags)
+
+"""
+    compute_renumbering(method="RCMK", element_tags=())
+
+Compute a node renumbering for the cached mesh without applying it, matching
+Gmsh 4.15.2's `computeRenumbering`. `element_tags` restricts the computation to
+the given dense element tags (all elements when empty). Returns `(old_tags,
+new_tags)`: the sorted involved node tags and, for each, its new dense tag
+under a reverse Cuthill-McKee ordering of the shared-element adjacency graph.
+Only `"RCMK"` is supported; other methods and unknown element tags fail
+explicitly. Element renumbering is not available, as in Gmsh 4.15.2.
+"""
+compute_renumbering(method="RCMK",element_tags=())=
+    _compute_renumbering(method,element_tags)
+
+"""
+    optimize(method="", force=false, niter=1, dim_tags=())
+
+Optimize the cached mesh in place, matching Gmsh 4.15.2's `optimize`. The empty
+default method runs the validated boundary-preserving tetrahedral optimizer
+(`iters` sweeps); meshes without tetrahedra are unchanged. Other optimizer
+names and nonempty `dim_tags` entity scoping are not implemented and fail
+explicitly. Connectivity and entity classification are preserved because only
+interior node coordinates move.
+"""
+optimize(method="",force=false,niter=1,dim_tags=())=
+    _optimize_mesh(method,force,niter,dim_tags)
+
+"""
+    set_visibility(element_tags, value)
+
+Set the display visibility flag of the listed dense element tags to integer
+`value`, matching Gmsh 4.15.2's `mesh.setVisibility`. Unknown tags are dropped
+silently; the state resets whenever the mesh cache is replaced.
+"""
+set_visibility(element_tags,value)=_set_mesh_visibility(element_tags,value)
+
+"""
+    get_visibility(element_tags)
+
+Return the stored visibility flag for each listed dense element tag — 1 for
+known elements never set, 0 for unknown tags — matching Gmsh 4.15.2's
+`mesh.getVisibility`. Without a cached mesh every tag is unknown.
+"""
+get_visibility(element_tags)=_get_mesh_visibility(element_tags)
+
+"""
+    set_node(node_tag, coord, parametric_coord=Float64[])
+
+Set the Cartesian coordinates of the cached node `node_tag`, matching Gmsh
+4.15.2's `setNode`. `coord` must hold exactly three finite coordinates. The
+cache stores no per-node parametric coordinates — they are recomputed from the
+owning entity's geometry — so `parametric_coord` must be empty. Unknown tags
+fail explicitly.
+"""
+set_node(node_tag,coord,parametric_coord=Float64[])=
+    _set_node(node_tag,coord,parametric_coord)
+
+"""
+    renumber_nodes(old_tags=(), new_tags=())
+
+Renumber cached node tags. With no explicit pair lists this is Gmsh 4.15.2's
+"renumber continuously" form — already a no-op on the dense cache. Explicit
+`old_tags`/`new_tags` pairs must together keep the tag set a permutation of
+`1:nnodes` (unlisted tags keep their values); the permutation reorders node
+storage and remaps all connectivity. Sparse target tags are not representable
+on the dense cache and fail explicitly.
+"""
+renumber_nodes(old_tags=(),new_tags=())=
+    _renumber_nodes(old_tags,new_tags)
+
+"""
+    renumber_elements(old_tags=(), new_tags=())
+
+Renumber cached dense element tags. With no explicit pair lists this is a
+no-op, matching Gmsh 4.15.2's continuous form. Explicit pairs must keep the
+tag set a permutation of `1:nelements` and cannot move an element across
+element-type blocks; violations fail explicitly.
+"""
+renumber_elements(old_tags=(),new_tags=())=
+    _renumber_elements(old_tags,new_tags)
+
+"""
+    reorder_elements(element_type, tag, ordering)
+
+Reorder the elements of `element_type` classified on the entity `tag` in that
+type's own dimension, matching Gmsh 4.15.2's `reorderElements`: `ordering` is
+a 0-based source-position permutation — `ordering[new_position]` names the
+element that moves there. Dense tags follow positions after the reorder while
+each element keeps its stored tag metadata and entity ownership. Entities
+owning no elements of the type, malformed orderings, and unclassified caches
+fail explicitly.
+"""
+reorder_elements(element_type,tag,ordering)=
+    _reorder_elements(element_type,tag,ordering)
+
+"""
+    remove_embedded(dim_tags, dim=-1)
+
+Remove the embedded entities recorded on the parent entities in `dim_tags`,
+matching Gmsh 4.15.2's `removeEmbedded`. `dim` below 0 removes every embedded
+dimension; `dim` in 0:2 drops only embedded entities of that dimension.
+Unknown or non-Surface/Volume parents fail explicitly and leave the model and
+cached mesh unchanged; a successful removal invalidates the cached mesh like
+every model mutation.
+"""
+remove_embedded(dim_tags,dim=-1)=_remove_embedded(dim_tags,dim)
+
+"""
+    get_ghost_elements(dim, tag) -> (Vector{UInt64}, Vector{Int32})
+
+Return the ghost element tags and partitions of entity `(dim, tag)`. The
+native model owns no mesh partitions, so both results are always empty for an
+existing entity, matching Gmsh 4.15.2 on an unpartitioned mesh. Requires the
+classified cache built by [`generate`](@ref); unknown entities fail
+explicitly.
+"""
+get_ghost_elements(dim,tag)=_get_ghost_elements(dim,tag)
+
+"""
+    unpartition()
+
+No-op parity with Gmsh 4.15.2's `unpartition` on an unpartitioned mesh: the
+native model owns no mesh partitions, so there is nothing to remove. Requires
+a cached mesh like the Gmsh call.
+"""
+unpartition()=_unpartition()
+
+"""
+    get_last_entity_error() -> Vector{Tuple{Int32,Int32}}
+
+Return the entities where the last meshing error occurred. Meshing failures
+surface through the raised error rather than post-hoc state, so the result is
+always empty — matching Gmsh 4.15.2 after a successful `generate`.
+"""
+get_last_entity_error()=_get_last_entity_error()
+
+"""
+    get_last_node_error() -> Vector{UInt64}
+
+Return the nodes where the last meshing error occurred. Meshing failures
+surface through the raised error rather than post-hoc state, so the result is
+always empty — matching Gmsh 4.15.2 after a successful `generate`.
+"""
+get_last_node_error()=_get_last_node_error()
+
+"""
+    rebuild_node_cache(only_if_necessary=true)
+
+No-op parity with Gmsh 4.15.2's `rebuildNodeCache`: the cached mesh keeps its
+node index coherent through every mutation, so there is nothing to rebuild.
+"""
+rebuild_node_cache(only_if_necessary=true)=
+    _rebuild_node_cache(only_if_necessary)
+
+"""
+    rebuild_element_cache(only_if_necessary=true)
+
+No-op parity with Gmsh 4.15.2's `rebuildElementCache`: the cached mesh keeps
+its element index coherent through every mutation, so there is nothing to
+rebuild.
+"""
+rebuild_element_cache(only_if_necessary=true)=
+    _rebuild_element_cache(only_if_necessary)
+
+"""
+    reclassify_nodes()
+
+No-op parity with Gmsh 4.15.2's `reclassifyNodes`: node ownership is derived
+from the generating entity when the cache is built and maintained through
+every mutation, so element-based reclassification is the identity.
+"""
+reclassify_nodes()=_reclassify_nodes()
+
+"""
+    relocate_nodes(dim=-1, tag=-1)
+
+No-op parity with Gmsh 4.15.2's `relocateNodes`: node ownership derives from
+the generating entity and stays geometry-consistent through every supported
+mutation, so geometric relocation is the identity. `dim=-1, tag=-1` validates
+the whole cache; a nonnegative `tag` additionally requires `dim` in 0:3 and an
+existing classified entity.
+"""
+relocate_nodes(dim=-1,tag=-1)=_relocate_nodes(dim,tag)
 end
 
 """

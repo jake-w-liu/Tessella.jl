@@ -209,7 +209,9 @@ independently of their groups. Selective or all-group removal leaves geometry in
 and does not rewind the global automatic Physical-tag counter.
 They also enumerate explicit entities, report model dimension, and return direct or
 recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
-ordering, orientation, and combined-incidence cancellation. Topology queries preserve
+ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
+reports downward-closure connectivity to the highest-dimension entities,
+excluding embeddings, matching Gmsh 4.15.2. Topology queries preserve
 the session mesh cache and exclude embeddings. Primitive and Boolean volumes are
 enumerated, but their implicit boundary topology remains an explicit blocker.
 Entity names belong only to existing entities and need not be unique. Names can be
@@ -268,6 +270,22 @@ model geometry; entities owning no cache cells are no-ops, matching Gmsh's
 boundary-mesh retention. `API.mesh.affine_transform` applies a finite nonsingular
 4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete
 cache, or only to the nodes owned by the entities in `dim_tags`.
+`API.mesh.remove_elements` drops listed dense element tags — or every element
+on an entity — while retaining nodes; `reverse` and `reverse_elements` flip
+first-order simplex orientation with Gmsh 4.15.2's vertex conventions;
+`reorder_elements` permutes an entity's element block with Gmsh's zero-based
+source-position ordering; `set_node`, `renumber_nodes`, and
+`renumber_elements` update coordinates and dense tags with validated
+permutations; and `get_duplicate_nodes`, `remove_duplicate_nodes`, and
+`remove_duplicate_elements` report and repair exact-coordinate or same-entity
+duplicates with optional entity filters. `remove_embedded` drops embedding
+records from parent surfaces and volumes, `get_periodic` reports each entity's
+periodic master, `compute_renumbering` returns a reverse Cuthill-McKee node
+renumbering for all or a selected subset of elements, `optimize` runs the
+boundary-preserving tetrahedral optimizer on the cache, `set_visibility`/
+`get_visibility` track raw per-element display state, and
+`remove_constraints` is a validated no-op matching Gmsh 4.15.2's
+per-entity-attribute scope.
 It commits only a validated, independently owned result and rewinds reflected simplex
 connectivity to keep the mesh valid. Model geometry and periodic relations remain
 unchanged, and the index-aligned entity-classification snapshot is retained
@@ -326,6 +344,11 @@ explicitly. `API.mesh.get_element` resolves a dense element tag to its type,
 connectivity, and owning entity through the classification snapshot;
 `API.mesh.get_node` resolves a dense node tag to its coordinates, owning
 entity, and parameters reparametrized on that owner.
+`API.mesh.get_nodes_for_physical_group` returns the sorted unique node set
+over a Physical group's member, boundary, and embedded entities;
+`API.mesh.get_embedded` reports an entity's embedded entities and
+`API.mesh.get_sizes` reports Point mesh sizes with Gmsh-compatible zeros for
+other and unknown entities.
 `get_jacobians` and `get_jacobian` return detached forward-map data for cached
 linear segments, triangles, and tetrahedra. Evaluation points are concatenated
 `(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and
