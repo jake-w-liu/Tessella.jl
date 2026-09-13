@@ -249,7 +249,11 @@ the global automatic Physical-tag counter remains monotonic across removals.
 Those APIs also enumerate explicit entities, report the greatest
 entity dimension, return direct or recursive boundaries with Gmsh-compatible
 ordering, orientation, and combined-incidence cancellation, and return direct upward
-and downward adjacencies. These read-only queries preserve the session mesh cache and
+and downward adjacencies. `is_entity_orphan` reports whether an entity lies
+outside the transitive downward boundary closure of every highest-dimension
+entity, matching Gmsh 4.15.2's embedding-excluding connectivity; implicit
+primitive or Boolean boundary entities resolve through the classification
+snapshot. These read-only queries preserve the session mesh cache and
 exclude mesh embeddings from topology. Primitive and Boolean volumes remain visible
 as volume entities, but their implicit boundary topology is an explicit blocker.
 They also return exact bounding boxes for explicit straight-edge topology and
@@ -316,9 +320,42 @@ rewinds orientation-reversing simplex connectivity. Entity-selective transforms 
 only the nodes classified on the listed entities and rewind only cells whose every
 node moved, matching Gmsh 4.15.2's per-entity node storage on the flat shared-node
 cache. Singular, nonfinite, malformed, unknown-entity, and output-invalid transforms
-leave the prior cache unchanged. This is a mesh-only
+leave the prior cache unchanged. `remove_elements` drops listed dense tags or every
+cell on an entity while retaining nodes (dense tags re-index), `reverse` and
+`reverse_elements` flip first-order simplex orientation with Gmsh's vertex
+conventions, `reorder_elements` permutes an entity-local element block with Gmsh's
+zero-based source-position ordering, `set_node`/`renumber_nodes`/`renumber_elements`
+apply validated coordinate and dense-tag updates, `remove_embedded` drops embedding
+records from parent entities, and `get_duplicate_nodes`/`remove_duplicate_nodes`/
+`remove_duplicate_elements` report and repair exact-coordinate or same-entity
+connectivity duplicates. `get_periodic` maps each entity to its periodic master
+(or itself), `remove_constraints` is a validated no-op matching Gmsh 4.15.2's
+per-entity meshing-attribute scope (periodic relations, embeddings, and Point
+sizes are retained), `compute_renumbering` returns a reverse Cuthill-McKee
+node renumbering over the shared-element adjacency graph for all or a selected
+subset of elements, `optimize` runs the validated boundary-preserving
+tetrahedral optimizer, and `set_visibility`/`get_visibility` track raw
+per-element display state with Gmsh's unknown-tag semantics. The session owns
+single-model `get_current`/`set_current`
+and `get_file_name`/`set_file_name` state. This is a mesh-only
 operation: geometry and periodic relations remain unchanged, and the index-aligned
 entity-classification snapshot is retained through the transform.
+The remaining Gmsh 4.15.2 `model.mesh` surface stays an explicit blocker by
+category: `add_nodes`/`add_elements`/`add_elements_by_type`,
+`model.add_discrete_entity`, `import_stl`,
+`classify_surfaces`, `create_topology`, `create_geometry`, the homology
+request/compute calls, and `compute_cross_field` all presuppose parametrization-free
+discrete entities and a non-dense tag space the `GeoModel` and simplex cache do
+not store; `set_transfinite_*`, `set_recombine`, `set_algorithm`,
+`set_smoothing`, `set_order`, `set_reverse`, `set_outward_orientation`,
+`set_compound`, `set_size_at_parametric_points`, `set_size_from_boundary`, and
+the size-callback pair are per-entity generation attributes or size channels
+the generator does not read; `recombine` and `split_quadrangles` target
+quadrangle cells outside the simplex cache; `get_periodic_keys` needs periodic
+function-space key pairing; and `optimize` beyond the default tetrahedral
+method (including entity scoping), `model.set_visibility_per_window`, and a
+multi-model `model.add`/`set_current` store are unsupported
+scopes — the session deliberately owns one model.
 Read-only bulk cache queries return detached flat coordinates, MSH type blocks,
 connectivity, and dense node/element tags derived for the current cache. Segment,
 triangle, and tetrahedron blocks use types 1, 2, and 4 with one global dense
@@ -329,8 +366,13 @@ fixed-node types absent from the simplex cache return empty blocks. A nonnegativ
 stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities
 fail explicitly. `get_element` resolves one dense element tag to its type,
-connectivity, and owning entity, and `get_node` resolves one dense node tag to
-its coordinates, owning entity, and owner-parametrized coordinates. `get_nodes` reparametrizes every returned node
+connectivity, and owning entity, `get_node` resolves one dense node tag to
+its coordinates, owning entity, and owner-parametrized coordinates, and
+`get_nodes_for_physical_group` emits each member entity's own, transitive
+boundary, and transitively embedded nodes as one sorted unique set.
+`get_embedded` reports the model's embedding records for an entity and
+`get_sizes` reports Point mesh sizes (zero elsewhere, matching Gmsh 4.15.2's
+silent zeros). `get_nodes` reparametrizes every returned node
 on the queried Line or Plane entity — one `u` or `(u, v)` per node — while
 Points, Volumes, and all-dimension queries emit no parameters, matching Gmsh
 4.15.2's unparametrized cases; `get_nodes_by_element_type` packs each repeated

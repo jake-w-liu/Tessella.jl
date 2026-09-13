@@ -929,6 +929,47 @@ function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
     return tt
 end
 
+"""
+    remove_embedded!(m::GeoModel, dim_tags, dim=-1)
+
+Remove embedded entities recorded on each listed parent entity. `dim` below 0
+removes every embedded dimension; otherwise only embedded entities of that
+dimension are dropped. Unknown parents fail explicitly.
+"""
+function remove_embedded!(m::GeoModel, dim_tags, dim=-1)
+    caller="remove_embedded!"
+    filter_dim=_query_dimension(dim,caller)
+    filter_dim in (-1,0,1,2) || throw(ArgumentError(
+        "$caller: embedded dimension filter must be -1 or in 0:2"))
+    for entry in dim_tags
+        pair=if entry isa Pair
+            (first(entry),last(entry))
+        elseif entry isa Tuple && length(entry)==2
+            entry
+        else
+            throw(ArgumentError(
+                "$caller: each dim_tags entry must be a (dimension, tag) pair"))
+        end
+        pd=_dimension(pair[1],caller)
+        pt=_tag(pair[2],caller,pd)
+        pd in (2,3) || throw(ArgumentError(
+            "$caller: embedded parents must be Surfaces or Volumes " *
+            "(got dim=$pd)"))
+        parent_dict=pd==2 ? m.surfaces : m.volumes
+        haskey(parent_dict,pt) || throw(ArgumentError(
+            "$caller: unknown $(pd==2 ? "Surface" : "Volume")[$pt]"))
+        entries=get(m.embeds,(pd,pt),NTuple{2,Int}[])
+        if filter_dim<0
+            delete!(m.embeds,(pd,pt))
+        else
+            kept=[child for child in entries if child[1]!=filter_dim]
+            isempty(kept) ? delete!(m.embeds,(pd,pt)) :
+                            (m.embeds[(pd,pt)]=kept)
+        end
+    end
+    return nothing
+end
+
 function _quarter_turns(angle, caller)
     turns=angle/(π/2)
     (isfinite(turns) && abs(turns)<=typemax(Int)) || throw(ArgumentError(

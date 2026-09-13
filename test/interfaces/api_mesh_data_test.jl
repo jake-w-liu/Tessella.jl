@@ -933,3 +933,416 @@ Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
         _MESH_DATA_API.finalize()
     end
 end
+
+@testset "physical-group, embedded, and size queries on generated caches" begin
+    _MESH_DATA_API.initialize()
+    try
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            _MESH_DATA_API.model.add_point(x,y,0.0;tag=point,meshSize=0.3)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            _MESH_DATA_API.model.add_line(a,b;tag=curve)
+        end
+        _MESH_DATA_API.model.add_curve_loop([1,2,3,4];tag=1)
+        _MESH_DATA_API.model.add_plane_surface([1];tag=1)
+        _MESH_DATA_API.model.add_point(0.5,0.5,0.0;tag=5,meshSize=0.2)
+        _MESH_DATA_API.model.embed(0,[5],2,1)
+        _MESH_DATA_API.model.add_physical_group(2,[1];tag=10)
+        _MESH_DATA_API.model.add_physical_group(1,[3,1];tag=11)
+        _MESH_DATA_API.mesh.generate(2)
+
+        # Physical-group queries return the sorted unique node set covering
+        # each member's own, boundary, and transitively embedded entities.
+        surface_nodes=_MESH_DATA_API.mesh.get_nodes_for_physical_group(
+            2,10)
+        expected=Set{UInt64}()
+        for (dim,tag) in ((2,1),(1,1),(1,2),(1,3),(1,4),
+                          (0,1),(0,2),(0,3),(0,4),(0,5))
+            union!(expected,_MESH_DATA_API.mesh.get_nodes(dim,tag)[1])
+        end
+        @test Set(surface_nodes[1])==expected
+        @test issorted(surface_nodes[1]) && allunique(surface_nodes[1])
+        @test length(surface_nodes[2])==3length(surface_nodes[1])
+        curve_nodes=_MESH_DATA_API.mesh.get_nodes_for_physical_group(1,11)
+        expected_curves=Set{UInt64}()
+        for (dim,tag) in ((1,1),(1,3),(0,1),(0,2),(0,3),(0,4))
+            union!(expected_curves,_MESH_DATA_API.mesh.get_nodes(dim,tag)[1])
+        end
+        @test Set(curve_nodes[1])==expected_curves
+        # Unknown or dimension-mismatched groups are empty, matching Gmsh.
+        @test _MESH_DATA_API.mesh.get_nodes_for_physical_group(2,99)==
+              (UInt64[],Float64[])
+        @test _MESH_DATA_API.mesh.get_nodes_for_physical_group(3,10)==
+              (UInt64[],Float64[])
+        for call in (
+            ()->_MESH_DATA_API.mesh.get_nodes_for_physical_group(-1,10),
+            ()->_MESH_DATA_API.mesh.get_nodes_for_physical_group(4,10),
+            ()->_MESH_DATA_API.mesh.get_nodes_for_physical_group(2,true),
+            ()->_MESH_DATA_API.mesh.get_nodes_for_physical_group(2,1.5),
+        )
+            @test_throws ArgumentError call()
+        end
+
+        # get_embedded mirrors the model's embedding records in Gmsh's shape.
+        @test _MESH_DATA_API.mesh.get_embedded(2,1)==
+              Tuple{Int32,Int32}[(0,5)]
+        @test _MESH_DATA_API.mesh.get_embedded(1,1)==Tuple{Int32,Int32}[]
+        @test _MESH_DATA_API.mesh.get_embedded(0,1)==Tuple{Int32,Int32}[]
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_embedded(2,99)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_embedded(-1,1)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_embedded(2,1.5)
+
+        # get_sizes reports Point mesh sizes and zero elsewhere — including
+        # unknown and out-of-range entities, matching Gmsh 4.15.2's silent
+        # zeros; only malformed pairs fail.
+        @test _MESH_DATA_API.mesh.get_sizes(
+            [(0,1),(0,5),(1,1),(2,1),(9,9),(0,big(typemax(Int32))+1)])==
+            [0.3,0.2,0.0,0.0,0.0,0.0]
+        @test _MESH_DATA_API.mesh.get_sizes([])==Float64[]
+        for call in (
+            ()->_MESH_DATA_API.mesh.get_sizes([(0,)]),
+            ()->_MESH_DATA_API.mesh.get_sizes([(0,true)]),
+            ()->_MESH_DATA_API.mesh.get_sizes([(true,1)]),
+            ()->_MESH_DATA_API.mesh.get_sizes([(0,1.5)]),
+        )
+            @test_throws ArgumentError call()
+        end
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end
+
+@testset "element removal, reversal, and duplicate-node queries" begin
+    _MESH_DATA_API.initialize()
+    try
+        # --- reversal and duplicate scans on an unclassified mixed cache ---
+        _mesh_data_install!(_mesh_data_fixture())
+        _MESH_DATA_API.mesh.reverse_elements([1])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1)[2]==UInt64[2,1]
+        _MESH_DATA_API.mesh.reverse_elements([1])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1)[2]==UInt64[1,2]
+        _MESH_DATA_API.mesh.reverse_elements([2,3])
+        @test _MESH_DATA_API.mesh.get_elements_by_type(2)[2]==UInt64[1,3,2]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(4)[2]==
+              UInt64[2,1,3,4]
+        _MESH_DATA_API.mesh.reverse()
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1)[2]==UInt64[2,1]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(2)[2]==UInt64[1,2,3]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(4)[2]==
+              UInt64[1,2,3,4]
+        for call in (
+            ()->_MESH_DATA_API.mesh.reverse_elements([4]),
+            ()->_MESH_DATA_API.mesh.reverse_elements([true]),
+            ()->_MESH_DATA_API.mesh.reverse_elements(2),
+            # Entity selections require classification metadata.
+            ()->_MESH_DATA_API.mesh.reverse([(2,1)]),
+            ()->_MESH_DATA_API.mesh.remove_elements(2,1),
+            ()->_MESH_DATA_API.mesh.get_duplicate_nodes([(2,1)]),
+        )
+            @test_throws ArgumentError call()
+        end
+        # The unclassified whole-mesh duplicate scan reports coincident nodes.
+        coordinates=Float64[0 1 0 0;
+                            0 0 1 0;
+                            0 0 0 0]
+        _mesh_data_install!(Mesh(
+            coordinates;
+            segs=reshape(Int32[1,2],2,1),
+            tris=reshape(Int32[1,2,3],3,1),
+            tets=reshape(Int32[1,2,3,4],4,1)))
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes()==UInt64[1,4]
+        _mesh_data_install!(_mesh_data_fixture())
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes()==UInt64[]
+
+        # --- duplicate removal on the unclassified mixed cache ---
+        # Node 4 coincides with node 1; merging drops node 4, keeps node 1,
+        # and remaps the tetrahedron's fourth vertex.
+        _mesh_data_install!(Mesh(
+            coordinates;
+            segs=reshape(Int32[1,2],2,1),
+            tris=reshape(Int32[1,2,3],3,1),
+            tets=reshape(Int32[1,2,3,4],4,1)))
+        _MESH_DATA_API.mesh.remove_duplicate_nodes()
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==UInt64[1,2,3]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(4)[2]==
+              UInt64[1,2,3,1]
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes()==UInt64[]
+        # A no-op pass keeps the cache untouched.
+        _MESH_DATA_API.mesh.remove_duplicate_nodes()
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==UInt64[1,2,3]
+        # Duplicate elements: two coincident segs and two coincident tris.
+        dup_coordinates=Float64[0 1 0 0;
+                                0 0 1 0;
+                                0 0 0 1]
+        _mesh_data_install!(Mesh(
+            dup_coordinates;
+            segs=Int32[1 1; 2 2],
+            tris=Int32[1 1; 2 2; 3 3],
+            tets=reshape(Int32[1,2,3,4],4,1)))
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_duplicate_elements()
+        # Element dedup needs classification; nodes dedup does not.
+        _MESH_DATA_API.mesh.remove_duplicate_nodes()
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==UInt64[1,2,3,4]
+        # With classification the repeated same-owner cells drop, keeping the
+        # first occurrence.
+        dup_mesh=Mesh(
+            dup_coordinates;
+            segs=Int32[1 1; 2 2],
+            tris=Int32[1 1; 2 2; 3 3],
+            tets=reshape(Int32[1,2,3,4],4,1))
+        lock(_MESH_DATA_API.STATE_LOCK) do
+            _MESH_DATA_API.LAST_MESH[]=_MESH_DATA_API._copy_mesh(dup_mesh)
+            _MESH_DATA_API.LAST_MESH_CLASS[]=_MESH_DATA_API._MeshClassification(
+                _MESH_DATA_API.LAST_MESH[],(2,Int32(1)),
+                fill((2,Int32(1)),4),Dict{Tuple{Int,Int32},Vector{Int32}}(),
+                Int32[7,7],Int32[8,8],Int32[9])
+        end
+        _MESH_DATA_API.mesh.remove_duplicate_elements()
+        # Dense tags re-index: one seg, one tri, and the tet survive.
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1)[1]==UInt64[1]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(2)[1]==UInt64[2]
+        @test _MESH_DATA_API.mesh.get_elements_by_type(4)[1]==UInt64[3]
+        _MESH_DATA_API.mesh.remove_duplicate_elements()
+        @test _MESH_DATA_API.mesh.get_elements_by_type(1)[1]==UInt64[1]
+
+        # --- entity-selective removal on a classified surface cache ---
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            _MESH_DATA_API.model.add_point(x,y,0.0;tag=point)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            _MESH_DATA_API.model.add_line(a,b;tag=curve)
+        end
+        _MESH_DATA_API.model.add_curve_loop([1,2,3,4];tag=1)
+        _MESH_DATA_API.model.add_plane_surface([1];tag=1)
+        _MESH_DATA_API.option("Mesh.MeshSizeMax",0.35)
+        _MESH_DATA_API.mesh.generate(2)
+        _MESH_DATA_API.mesh.refine()
+
+        tri_tags,_=_MESH_DATA_API.mesh.get_elements_by_type(2,1)
+        node_tags_before=_MESH_DATA_API.mesh.get_nodes()[1]
+        _MESH_DATA_API.mesh.remove_elements(2,1,[tri_tags[1]])
+        remaining=length(_MESH_DATA_API.mesh.get_elements_by_type(2,1)[1])
+        @test remaining==length(tri_tags)-1
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==node_tags_before
+        # Tags classified elsewhere, unknown tags, and unknown entities fail.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(
+            2,1,[0])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(
+            2,99)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(
+            2,1,7)
+        # A tag from another block is rejected through a wrong-dimension or
+        # wrong-owner selection.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(
+            1,1,[tri_tags[2]])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(
+            0,1,[tri_tags[2]])
+        # An empty list removes every element owned by the entity; the nodes
+        # stay, matching Gmsh 4.15.2.
+        _MESH_DATA_API.mesh.remove_elements(2,1)
+        @test isempty(_MESH_DATA_API.mesh.get_elements_by_type(2,1)[1])
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==node_tags_before
+        # Point selections hold no cells and no-op.
+        _MESH_DATA_API.mesh.remove_elements(0,1)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(0,99)
+        # Entity-selective reversal on the classified cache.
+        _MESH_DATA_API.mesh.generate(2)
+        _,tri_before,_,_=_MESH_DATA_API.mesh.get_element(1)
+        _MESH_DATA_API.mesh.reverse([(2,1)])
+        _,tri_after,_,_=_MESH_DATA_API.mesh.get_element(1)
+        @test tri_after==[tri_before[1],tri_before[3],tri_before[2]]
+        # Boundary-owned entities own no cells and no-op.
+        _MESH_DATA_API.mesh.reverse([(1,1),(0,1)])
+        @test _MESH_DATA_API.mesh.get_element(1)[2]==tri_after
+        _MESH_DATA_API.mesh.reverse([(2,1)])
+        @test _MESH_DATA_API.mesh.get_element(1)[2]==tri_before
+        @test_throws ArgumentError _MESH_DATA_API.mesh.reverse([(2,99)])
+        # Ownership-filtered duplicate scans on a conforming cache are empty.
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes()==UInt64[]
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes([(1,1)])==UInt64[]
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes([(2,1)])==UInt64[]
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_duplicate_nodes(
+            [(2,99)])
+        # Classification-dependent calls fail explicitly after clearing.
+        _MESH_DATA_API.mesh.clear()
+        for call in (
+            ()->_MESH_DATA_API.mesh.remove_elements(2,1),
+            ()->_MESH_DATA_API.mesh.reverse([(2,1)]),
+            ()->_MESH_DATA_API.mesh.get_duplicate_nodes([(2,1)]),
+        )
+            @test_throws ArgumentError call()
+        end
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end
+
+@testset "node mutation, renumbering, and cache-parity calls" begin
+    _MESH_DATA_API.initialize()
+    try
+        # --- set_node on the unclassified mixed fixture ---
+        _mesh_data_install!(_mesh_data_fixture())
+        _MESH_DATA_API.mesh.set_node(2,[4.0,5.0,6.0])
+        tags,coords,_=_MESH_DATA_API.mesh.get_nodes()
+        @test tags==UInt64[1,2,3,4]
+        @test reshape(coords,3,:)[:,2]==[4.0,5.0,6.0]
+        @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(5,[0,0,0.0])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(
+            1,[0,0,0.0],[0.5])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(
+            1,[0,0,NaN])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(
+            1,[0.0,0])
+        # --- renumber_nodes permutation on the unclassified fixture ---
+        _MESH_DATA_API.mesh.set_node(2,[1.0,0,0])
+        _MESH_DATA_API.mesh.renumber_nodes()
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==UInt64[1,2,3,4]
+        _MESH_DATA_API.mesh.renumber_nodes([1,3],[3,1])
+        tags,coords,_=_MESH_DATA_API.mesh.get_nodes()
+        @test reshape(coords,3,:)[:,1]==[0.0,1.0,0.0]
+        @test reshape(coords,3,:)[:,3]==[0.0,0.0,0.0]
+        # Connectivity remaps: seg was [1,2], now [3,2].
+        @test reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(1)[2],2,:)==
+            reshape(UInt64[3,2],2,1)
+        # Sparse or duplicate targets fail; the cache stays intact.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.renumber_nodes(
+            [1],[99])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.renumber_nodes(
+            [1,2],[3,3])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.renumber_nodes(
+            [1,2],[2])
+        # --- renumber_elements: block-local permutation only ---
+        _MESH_DATA_API.mesh.renumber_elements()
+        seg_before=copy(reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(1)[2],2,:))
+        # Single seg: permuting its one tag is the identity.
+        _MESH_DATA_API.mesh.renumber_elements([1],[1])
+        @test reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(1)[2],2,:)==seg_before
+        # Tags 2..M live in the tri/tet blocks; moving the seg there crosses
+        # types and must fail.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.renumber_elements(
+            [1],[2])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.renumber_elements(
+            [1,2],[2,1])
+        # --- classified-cache parity calls ---
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            _MESH_DATA_API.model.add_point(x,y,0.0;tag=point,meshSize=0.5)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            _MESH_DATA_API.model.add_line(a,b;tag=curve)
+        end
+        _MESH_DATA_API.model.add_curve_loop([1,2,3,4];tag=1)
+        _MESH_DATA_API.model.add_plane_surface([1];tag=1)
+        _MESH_DATA_API.mesh.generate(2)
+        # set_node on a classified cache keeps ownership and params working.
+        node_tags,node_coords,_=_MESH_DATA_API.mesh.get_nodes()
+        target=last(node_tags)
+        _MESH_DATA_API.mesh.set_node(target,[0.4,0.4,0.0])
+        moved,_,moved_dim,moved_tag=_MESH_DATA_API.mesh.get_node(target)
+        @test moved==[0.4,0.4,0.0]
+        @test moved_dim>=0
+        # A full permutation through renumber_nodes preserves classification.
+        _,_,owner_dim_before,owner_tag_before=
+            _MESH_DATA_API.mesh.get_element(1)
+        _MESH_DATA_API.mesh.renumber_nodes(collect(1:length(node_tags)),
+                                         reverse(collect(1:length(node_tags))))
+        _,_,owner_dim_after,owner_tag_after=
+            _MESH_DATA_API.mesh.get_element(1)
+        @test (owner_dim_after,owner_tag_after)==
+            (owner_dim_before,owner_tag_before)
+        # renumber_elements swaps two triangles inside their block.
+        tri_tags=_MESH_DATA_API.mesh.get_elements_by_type(2)[1]
+        length(tri_tags)>=2 || error("fixture needs >=2 triangles")
+        first_conn=copy(reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(2)[2],3,:)[:,1])
+        _MESH_DATA_API.mesh.renumber_elements(
+            [tri_tags[1],tri_tags[2]],[tri_tags[2],tri_tags[1]])
+        @test reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(2)[2],3,:)[:,2]==
+            first_conn
+        # reorder_elements permutes the entity's block by 0-based source
+        # positions; reversing restores under a second application.
+        tri_count=length(_MESH_DATA_API.mesh.get_elements_by_type(2,1)[1])
+        pre=copy(reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(2,1)[2],3,:))
+        _MESH_DATA_API.mesh.reorder_elements(
+            2,1,collect(tri_count-1:-1:0))
+        @test reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(2,1)[2],3,:)==
+            pre[:,end:-1:1]
+        _MESH_DATA_API.mesh.reorder_elements(
+            2,1,collect(tri_count-1:-1:0))
+        @test reshape(
+            _MESH_DATA_API.mesh.get_elements_by_type(2,1)[2],3,:)==pre
+        @test_throws ArgumentError _MESH_DATA_API.mesh.reorder_elements(
+            2,1,[0,1])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.reorder_elements(
+            2,1,[1,2,3])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.reorder_elements(
+            2,99,collect(0:tri_count-1))
+        @test_throws ArgumentError _MESH_DATA_API.mesh.reorder_elements(
+            1,1,[0])
+        # No-partition parity calls on the classified cache.
+        @test _MESH_DATA_API.mesh.get_ghost_elements(2,1)==
+            (UInt64[],Int32[])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_ghost_elements(2,99)
+        _MESH_DATA_API.mesh.unpartition()
+        @test _MESH_DATA_API.mesh.get_last_entity_error()==
+            Tuple{Int32,Int32}[]
+        @test _MESH_DATA_API.mesh.get_last_node_error()==UInt64[]
+        _MESH_DATA_API.mesh.rebuild_node_cache()
+        _MESH_DATA_API.mesh.rebuild_element_cache()
+        _MESH_DATA_API.mesh.reclassify_nodes()
+        _MESH_DATA_API.mesh.relocate_nodes()
+        _MESH_DATA_API.mesh.relocate_nodes(2,1)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.relocate_nodes(2,99)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.relocate_nodes(-1,3)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.rebuild_node_cache(1)
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end
+
+@testset "remove_embedded entity lifecycle" begin
+    _MESH_DATA_API.initialize()
+    try
+        for (point,(x,y)) in enumerate(
+                ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)))
+            _MESH_DATA_API.model.add_point(x,y,0.0;tag=point,meshSize=0.5)
+        end
+        for (curve,(a,b)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
+            _MESH_DATA_API.model.add_line(a,b;tag=curve)
+        end
+        _MESH_DATA_API.model.add_curve_loop([1,2,3,4];tag=1)
+        _MESH_DATA_API.model.add_plane_surface([1];tag=1)
+        _MESH_DATA_API.model.add_point(0.5,0.5,0.0;tag=5)
+        _MESH_DATA_API.model.add_point(0.25,0.5,0.0;tag=6)
+        _MESH_DATA_API.model.embed(0,[5,6],2,1)
+        _MESH_DATA_API.mesh.generate(2)
+        @test _MESH_DATA_API.mesh.get_embedded(2,1)==
+            Tuple{Int32,Int32}[(0,5),(0,6)]
+        # Parent-level removal clears all embeddings on the surface.
+        _MESH_DATA_API.mesh.remove_embedded([(2,1)])
+        @test isempty(_MESH_DATA_API.mesh.get_embedded(2,1))
+        # Model mutations invalidate the mesh cache.
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_nodes()
+        # The dimension filter only drops matching embedded dimensions.
+        _MESH_DATA_API.model.embed(0,[5,6],2,1)
+        _MESH_DATA_API.mesh.remove_embedded([(2,1)],1)
+        @test _MESH_DATA_API.mesh.get_embedded(2,1)==
+            Tuple{Int32,Int32}[(0,5),(0,6)]
+        _MESH_DATA_API.mesh.remove_embedded([(2,1)],0)
+        @test isempty(_MESH_DATA_API.mesh.get_embedded(2,1))
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_embedded([(1,1)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_embedded([(2,99)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_embedded(
+            [(2,1)],3)
+    finally
+        _MESH_DATA_API.finalize()
+    end
+end

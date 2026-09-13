@@ -105,7 +105,9 @@ name or selected/all groups leaves geometry intact and keeps automatic Physical 
 monotonic.
 They also enumerate explicit entities, report model dimension, and return direct or
 recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
-ordering, orientation, and combined-incidence cancellation. Queries preserve the
+ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
+reports downward-closure connectivity to the highest-dimension entities,
+excluding embeddings, matching Gmsh 4.15.2. Queries preserve the
 session mesh cache and exclude embeddings. Primitive and Boolean volumes are still
 enumerated, but their implicit boundary topology is an explicit blocker.
 Exact bounding boxes cover explicit straight-edge topology, analytical native
@@ -361,15 +363,39 @@ with the cache:
   caches without classification fail explicitly. `get_node` likewise resolves a
   dense node tag to `(coordinates, parametric_coordinates, entity_dimension,
   entity_tag)`, reparametrizing the node on its owning entity.
+  `get_nodes_for_physical_group` emits the sorted unique node set over each
+  member's own, boundary, and transitively embedded entities;
+  `get_embedded` reports stored entity embeddings; `get_sizes` returns Point
+  mesh sizes with Gmsh-compatible zeros for other and unknown entities.
 - Entity-selective `clear`, `affine_transform`, `create_edges`, and
   `create_faces` operate on classified nodes and cells; entities owning no
-  cache cells no-op. Primitive `add_box` models expose no boundary entities, so
-  their boundary queries correctly reject.
+  cache cells no-op. `remove_elements` drops listed or all cells on an entity
+  while retaining nodes; `reverse`/`reverse_elements` flip first-order simplex
+  orientation with Gmsh's vertex conventions; `reorder_elements` permutes an
+  entity's element block with Gmsh's zero-based source-position ordering;
+  `set_node`, `renumber_nodes`, and `renumber_elements` apply validated
+  coordinate and dense-tag updates; `remove_embedded` drops embedding records;
+  `get_duplicate_nodes` scans owned nodes for exact-coordinate duplicates and
+  `remove_duplicate_nodes`/`remove_duplicate_elements` merge or drop them.
+  `get_periodic` reports each entity's periodic master (or itself),
+  `compute_renumbering` returns a reverse Cuthill-McKee node renumbering over
+  the shared-element adjacency graph, `optimize` runs the validated
+  boundary-preserving tetrahedral optimizer on the cache, `remove_constraints`
+  is a validated no-op matching Gmsh 4.15.2's per-entity-attribute scope, and
+  `set_visibility`/`get_visibility` track raw per-element display state.
+  Primitive `add_box`
+  models expose no boundary entities, so their boundary queries correctly
+  reject. The session also owns Gmsh-parity `model.get_current`/`set_current`
+  and `model.get_file_name`/`set_file_name` state.
 - The mesh-data differential now generates the same square in both engines and
   checks own-node-first ordering, transitive boundary closure against a
   recursive `getBoundary` walk, filtered type funnels, filtered task unions,
-  `get_element` parity, `get_node` ownership/parametrization parity, and
-  unknown/phantom-entity rejection: `entity_filtered=tris(4, 26)`.
+  `get_element` parity, `get_node` ownership/parametrization parity,
+  Physical-group closure, embedding, size, `remove_elements`, `reverse`,
+  `reorder_elements`, `set_node`, renumbering, `remove_embedded`,
+  `remove_constraints`, RCMK `compute_renumbering` contract, and
+  duplicate-node/element parity, and unknown/phantom-entity rejection:
+  `entity_filtered=tris(4, 26)`.
 - Focused bounds-checked suites: mesh-data 345/345 (including the new
   66-assertion entity-filtered testset), Jacobian 64/64, and function-space
   126/126. The complete bounds-checked package gate passed 212,533/212,533

@@ -110,3 +110,51 @@ end
     @test_throws ArgumentError _TOPOLOGY_API.model.get_boundary([])
     @test_throws ArgumentError _TOPOLOGY_API.model.get_adjacencies(0,1)
 end
+
+@testset "entity orphan queries through API" begin
+    _TOPOLOGY_API.finalize()
+    @test_throws ArgumentError _TOPOLOGY_API.model.is_entity_orphan(0,1)
+    try
+        _TOPOLOGY_API.initialize()
+        _add_api_topology_tetrahedron()
+        # Volume 40's transitive downward boundary closure is connected.
+        for pair in ((3,40),(2,21),(2,24),(1,8),(1,4),(0,10),(0,5))
+            @test _TOPOLOGY_API.model.is_entity_orphan(pair...)==false
+        end
+        # A floating point, a vertex-sharing curve, and an embedded point all
+        # stay orphan: connectivity is downward-only and embeddings do not
+        # connect, matching Gmsh 4.15.2's `isEntityOrphan`.
+        _TOPOLOGY_API.model.add_point(9.0,9.0,9.0;tag=50)
+        _TOPOLOGY_API.model.add_point(0.25,0.25,0.0;tag=63)
+        _TOPOLOGY_API.model.add_line(10,63;tag=64)
+        _TOPOLOGY_API.model.embed(0,[63],2,21)
+        for pair in ((0,50),(0,63),(1,64))
+            @test _TOPOLOGY_API.model.is_entity_orphan(pair...)==true
+        end
+        for call in (()->_TOPOLOGY_API.model.is_entity_orphan(0,99),
+                     ()->_TOPOLOGY_API.model.is_entity_orphan(2,7),
+                     ()->_TOPOLOGY_API.model.is_entity_orphan(0,-1),
+                     ()->_TOPOLOGY_API.model.is_entity_orphan(0,0),
+                     ()->_TOPOLOGY_API.model.is_entity_orphan(4,1),
+                     ()->_TOPOLOGY_API.model.is_entity_orphan(0,1.5),
+                     ()->_TOPOLOGY_API.model.is_entity_orphan(0,true))
+            @test_throws ArgumentError call()
+        end
+        # Results are stable across mesh generation and its classification.
+        generated=_TOPOLOGY_API.mesh.generate(3)
+        @test validate(generated).ok
+        for pair in ((3,40),(2,21),(0,10))
+            @test _TOPOLOGY_API.model.is_entity_orphan(pair...)==false
+        end
+        for pair in ((0,50),(0,63),(1,64))
+            @test _TOPOLOGY_API.model.is_entity_orphan(pair...)==true
+        end
+        metadata=Docs.meta(Tessella.API.model)
+        @test haskey(
+            metadata,Docs.Binding(Tessella.API.model,:is_entity_orphan))
+        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
+    finally
+        _TOPOLOGY_API.finalize()
+    end
+    @test_throws ArgumentError _TOPOLOGY_API.model.is_entity_orphan(0,1)
+end
