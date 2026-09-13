@@ -1137,7 +1137,11 @@ function _quality_frame2(a,b,c)
         coordinate_scale=max(abs(a[1]),abs(a[2]),abs(b[1]),abs(b[2]),abs(c[1]),abs(c[2]))
         coordinate_scale==0 && return (0.0,(0.0,0.0),0.0,
                                        ((0.0,0.0),(0.0,0.0),(0.0,0.0)))
-        scaled=ntuple(j->ntuple(i->points[j][i]/coordinate_scale,2),3)
+        # Explicit tuple instead of a closure: capturing the reassigned
+        # `coordinate_scale` boxed it and made the whole frame type-unstable.
+        scaled=((a[1]/coordinate_scale,a[2]/coordinate_scale),
+                (b[1]/coordinate_scale,b[2]/coordinate_scale),
+                (c[1]/coordinate_scale,c[2]/coordinate_scale))
     end
     anchor=scaled[1]
     bx=scaled[2][1]-anchor[1];by=scaled[2][2]-anchor[2]

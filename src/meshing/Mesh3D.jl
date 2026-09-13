@@ -3392,6 +3392,9 @@ end
 
 struct RBPlane
     A0::NTuple{3,Rational{BigInt}}; N::NTuple{3,Rational{BigInt}}; drop::Int
+    # Float64 copies of the three defining vertices: `orient3` decides plane sides
+    # exactly through the adaptive predicate without BigInt allocation.
+    a::NTuple{3,Float64}; b::NTuple{3,Float64}; c::NTuple{3,Float64}
 end
 struct RBRegion
     facets::Vector{Int}
@@ -3460,7 +3463,9 @@ function _rb_build_regions(Px,Py,Pz, facets::Vector{NTuple{3,Int32}})
         for (x,y,z) in tris, e in (_rbekey(x,y),_rbekey(y,z),_rbekey(x,z)); inc[e]=get(inc,e,0)+1; end
         bnd=Set{NTuple{2,Int32}}(); intl=Set{NTuple{2,Int32}}()
         for (e,ci) in inc; (ci==1 ? push!(bnd,e) : push!(intl,e)); end
-        push!(regions, RBRegion(fis,tris,RBPlane(A0,N,drop),bnd,intl))
+        plane=RBPlane(A0,N,drop,_rbptP(Px,Py,Pz,a),_rbptP(Px,Py,Pz,b),
+                      _rbptP(Px,Py,Pz,c))
+        push!(regions, RBRegion(fis,tris,plane,bnd,intl))
     end
     return regions
 end
@@ -3471,6 +3476,45 @@ end
 
 @inline function _rbside(pl::RBPlane, x)::Int
     d=_rbdot(pl.N,_rbsub(x,pl.A0)); d>0 ? 1 : (d<0 ? -1 : 0)
+end
+
+# Exact plane side of a Float64 point with the same sign convention as `_rbside`
+# (positive on the side `N` points to): `orient3(a,b,c,x)` is the sign of
+# `det[a-x, b-x, c-x] = -(x-a)·((b-a)×(c-a))`, hence the negation.  Zero
+# allocation in the common case; the adaptive predicate supplies exactness.
+@inline _rb_side_float(pl::RBPlane, x::NTuple{3,Float64})::Int =
+    -orient3(pl.a,pl.b,pl.c,x)
+
+# Exact sign of the projected orientation `orient2(x,y,g)` where `g=(a+b+c)/3` is
+# the centroid of a Float64 triangle and `x,y` are Float64 points, all projected
+# on the region's `drop` axis.  The determinant is affine in its last argument,
+# so `3·orient2(x,y,g) = Σ orient2(x,y,a_i)`.  The Float64 sum is trusted when it
+# exceeds a conservative bound and the exact rational sum decides otherwise:
+# with unit roundoff u, each Shewchuk determinant carries at most (3u+16u²)·perm
+# error and the two additions at most (2u+u²)(1+3u)·Σ|d_i|, so the total error is
+# below 8u·Σperm = 4·eps(Float64)·Σperm; the code uses twice that margin.
+function _rb_centroid_orient2(x::NTuple{2,Float64},y::NTuple{2,Float64},
+                              a::NTuple{2,Float64},b::NTuple{2,Float64},
+                              c::NTuple{2,Float64})::Int
+    ux=y[1]-x[1];uy=y[2]-x[2]
+    d1=ux*(a[2]-x[2])-uy*(a[1]-x[1]);p1=abs(ux*(a[2]-x[2]))+abs(uy*(a[1]-x[1]))
+    d2=ux*(b[2]-x[2])-uy*(b[1]-x[1]);p2=abs(ux*(b[2]-x[2]))+abs(uy*(b[1]-x[1]))
+    d3=ux*(c[2]-x[2])-uy*(c[1]-x[1]);p3=abs(ux*(c[2]-x[2]))+abs(uy*(c[1]-x[1]))
+    total=(d1+d2)+d3;permanent=(p1+p2)+p3
+    if isfinite(total) && isfinite(permanent)
+        bound=8*eps(Float64)*permanent
+        total>bound && return 1
+        total<-bound && return -1
+    end
+    R=Rational{BigInt}
+    rux=R(y[1])-R(x[1]);ruy=R(y[2])-R(x[2])
+    exact=rux*((R(a[2])-R(x[2]))+(R(b[2])-R(x[2]))+(R(c[2])-R(x[2])))-
+          ruy*((R(a[1])-R(x[1]))+(R(b[1])-R(x[1]))+(R(c[1])-R(x[1])))
+    return exact>0 ? 1 : (exact<0 ? -1 : 0)
+end
+
+@inline function _rbproj2f(p::NTuple{3,Float64}, drop::Int)
+    drop == 1 && return (p[2], p[3]); drop == 2 && return (p[1], p[3]); return (p[1], p[2])
 end
 
 # is rational in-plane point y strictly interior to region (sound pierce test)?
@@ -3494,7 +3538,9 @@ function _rb_pierces_region(reg::RBRegion, Px,Py,Pz, y)
     return false
 end
 
-function _rb_edge_pierces(reg::RBRegion, Px,Py,Pz, p::Int32, q::Int32)
+# Rational reference implementation of `_rb_edge_pierces` (kept as the test
+# oracle for the allocation-free predicate form below).
+function _rb_edge_pierces_rational(reg::RBRegion, Px,Py,Pz, p::Int32, q::Int32)
     pp=_rbratP(Px,Py,Pz,p); qq=_rbratP(Px,Py,Pz,q)
     sp=_rbside(reg.plane,pp); sq=_rbside(reg.plane,qq)
     (sp!=0 && sq!=0 && sp!=sq) || return false
@@ -3505,14 +3551,54 @@ function _rb_edge_pierces(reg::RBRegion, Px,Py,Pz, p::Int32, q::Int32)
     return _rb_pierces_region(reg,Px,Py,Pz,y)
 end
 
+# Does tet edge (p,q) pierce the region interior?  Exact through adaptive
+# predicates: once p and q lie strictly on opposite sides, the crossing point y
+# of the segment with the plane satisfies
+# `det[q-p, a-p, b-p] = (q-p)·((a-y)×(b-y))`, i.e. the sign of
+# `orient3(p,q,a,b)` equals the projected in-plane orientation of y against edge
+# (a,b) times one factor shared by all three edges of a triangle, so the
+# equality/zero tests of `_rb_pierces_region` transfer verbatim without forming y.
+function _rb_edge_pierces(reg::RBRegion, Px,Py,Pz, p::Int32, q::Int32)
+    pp=_rbptP(Px,Py,Pz,p); qq=_rbptP(Px,Py,Pz,q)
+    sp=_rb_side_float(reg.plane,pp); sq=_rb_side_float(reg.plane,qq)
+    (sp!=0 && sq!=0 && sp!=sq) || return false
+    for (a,b,c) in reg.tris
+        pa=_rbptP(Px,Py,Pz,a); pb=_rbptP(Px,Py,Pz,b); pc=_rbptP(Px,Py,Pz,c)
+        s1=orient3(pp,qq,pa,pb); s2=orient3(pp,qq,pb,pc); s3=orient3(pp,qq,pc,pa)
+        if s1!=0 && s2!=0 && s3!=0 && s1==s2 && s2==s3
+            return true
+        end
+        zc=(s1==0)+(s2==0)+(s3==0)
+        if zc==1
+            same = s1==0 ? s2==s3 : (s2==0 ? s1==s3 : s1==s2)
+            if same
+                e = s1==0 ? _rbekey(a,b) : (s2==0 ? _rbekey(b,c) : _rbekey(c,a))
+                e in reg.int_edges && return true
+            end
+        end
+    end
+    return false
+end
+
 # on-segment vertices sorted along u->v (exact)
 function _rb_onseg(Px,Py,Pz,u::Int32,v::Int32,nreal::Int)
+    fu=_rbptP(Px,Py,Pz,u); fv=_rbptP(Px,Py,Pz,v)
+    lo=(min(fu[1],fv[1]),min(fu[2],fv[2]),min(fu[3],fv[3]))
+    hi=(max(fu[1],fv[1]),max(fu[2],fv[2]),max(fu[3],fv[3]))
     pu=_rbratP(Px,Py,Pz,u); pv=_rbratP(Px,Py,Pz,v); d=_rbsub(pv,pu); dd=_rbdot(d,d)
     out=Tuple{Rational{BigInt},Int32}[]
     for w in 1:nreal
         (w==u||w==v) && continue
-        pw=_rbratP(Px,Py,Pz,w); cr=_rbcross(_rbsub(pw,pu),d)
-        (cr[1]==0&&cr[2]==0&&cr[3]==0) || continue
+        fw=_rbptP(Px,Py,Pz,w)
+        # A strictly interior segment point lies in the closed endpoint box, and
+        # collinearity with (u,v) means every axis projection of (u,w,v) is
+        # degenerate; both tests are exact in Float64 through the adaptive
+        # `orient2`, so the rational parameter is formed only for true hits.
+        (lo[1]<=fw[1]<=hi[1] && lo[2]<=fw[2]<=hi[2] && lo[3]<=fw[3]<=hi[3]) || continue
+        (orient2((fu[2],fu[3]),(fw[2],fw[3]),(fv[2],fv[3]))==0 &&
+         orient2((fu[1],fu[3]),(fw[1],fw[3]),(fv[1],fv[3]))==0 &&
+         orient2((fu[1],fu[2]),(fw[1],fw[2]),(fv[1],fv[2]))==0) || continue
+        pw=_rbratP(Px,Py,Pz,w)
         s=_rbdot(_rbsub(pw,pu),d); (s>0&&s<dd)||continue
         push!(out,(s//dd,Int32(w)))
     end
@@ -3577,18 +3663,38 @@ function _rb_boundary_in_surface(mid, m::Mesh, regions::Vector{RBRegion}, Px,Py,
     for (f,c) in inc
         c==1 || continue
         a,b,cc=f
-        ratc=((_rbratP(Px,Py,Pz,a)[1]+_rbratP(Px,Py,Pz,b)[1]+_rbratP(Px,Py,Pz,cc)[1])//3,
-              (_rbratP(Px,Py,Pz,a)[2]+_rbratP(Px,Py,Pz,b)[2]+_rbratP(Px,Py,Pz,cc)[2])//3,
-              (_rbratP(Px,Py,Pz,a)[3]+_rbratP(Px,Py,Pz,b)[3]+_rbratP(Px,Py,Pz,cc)[3])//3)
+        fa=_rbptP(Px,Py,Pz,a); fb=_rbptP(Px,Py,Pz,b); fc=_rbptP(Px,Py,Pz,cc)
         found=false
         for r in regions
-            (_rbside(r.plane,_rbratP(Px,Py,Pz,a))==0 && _rbside(r.plane,_rbratP(Px,Py,Pz,b))==0 &&
-             _rbside(r.plane,_rbratP(Px,Py,Pz,cc))==0) || continue
-            _rb_point_in_region_closed(r,Px,Py,Pz,ratc) && (found=true; break)
+            (_rb_side_float(r.plane,fa)==0 && _rb_side_float(r.plane,fb)==0 &&
+             _rb_side_float(r.plane,fc)==0) || continue
+            _rb_face_centroid_in_region_closed(r,Px,Py,Pz,fa,fb,fc) &&
+                (found=true; break)
         end
         found || return (false, f)
     end
     return (true, (Int32(0),Int32(0),Int32(0)))
+end
+
+# Closed point-in-region test for the centroid of the Float64 triangle (fa,fb,fc)
+# lying in the region plane, evaluated through `_rb_centroid_orient2` (Float64
+# filter with exact rational fallback); equivalent to
+# `_rb_point_in_region_closed` on the rational centroid.
+function _rb_face_centroid_in_region_closed(reg::RBRegion, Px,Py,Pz,
+                                            fa::NTuple{3,Float64},
+                                            fb::NTuple{3,Float64},
+                                            fc::NTuple{3,Float64})
+    drop=reg.plane.drop
+    a2=_rbproj2f(fa,drop); b2=_rbproj2f(fb,drop); c2=_rbproj2f(fc,drop)
+    for (x,y,z) in reg.tris
+        px=_rbproj2f(_rbptP(Px,Py,Pz,x),drop); py=_rbproj2f(_rbptP(Px,Py,Pz,y),drop)
+        pz=_rbproj2f(_rbptP(Px,Py,Pz,z),drop)
+        s1=_rb_centroid_orient2(px,py,a2,b2,c2); s2=_rb_centroid_orient2(py,pz,a2,b2,c2)
+        s3=_rb_centroid_orient2(pz,px,a2,b2,c2)
+        haspos = (s1>0)||(s2>0)||(s3>0); hasneg=(s1<0)||(s2<0)||(s3<0)
+        (haspos && hasneg) || return true
+    end
+    return false
 end
 
 # ---- the exact geometric conformity + validity gate ----
