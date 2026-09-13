@@ -1426,3 +1426,131 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test vol6 == 48                                          # exact box volume 8 (×6)
     end
 end
+
+# ── Exact conformity gate: predicate-form helpers vs the rational references ────
+# The recovery gate decides plane sides, edge/region piercing, and boundary-face
+# containment through adaptive-exact predicates (allocation-free in the common
+# case).  Every decision is compared against the retained Rational{BigInt}
+# implementations on random, exactly coplanar, exactly collinear, tiny-scale, and
+# huge-scale configurations; the two forms must agree bit-for-bit.
+@testset "recovery gate: predicate forms agree with rational references" begin
+    using Tessella.Mesh3D: _rb_dedup_surface, _rb_build_regions, _rbside, _rb_side_float,
+                           _rb_edge_pierces, _rb_edge_pierces_rational, _rbratP, _rbptP,
+                           _rb_point_in_region_closed, _rb_face_centroid_in_region_closed,
+                           _rb_onseg, _rb_centroid_orient2, _rbcross, _rbsub, _rbdot
+    using Tessella.Predicates: orient2_rat
+    function rational_onseg(Px,Py,Pz,u,v,nreal)
+        pu=_rbratP(Px,Py,Pz,u); pv=_rbratP(Px,Py,Pz,v); d=_rbsub(pv,pu); dd=_rbdot(d,d)
+        out=Tuple{Rational{BigInt},Int32}[]
+        for w in 1:nreal
+            (w==u||w==v) && continue
+            pw=_rbratP(Px,Py,Pz,w); cr=_rbcross(_rbsub(pw,pu),d)
+            (cr[1]==0&&cr[2]==0&&cr[3]==0) || continue
+            s=_rbdot(_rbsub(pw,pu),d); (s>0&&s<dd)||continue
+            push!(out,(s//dd,Int32(w)))
+        end
+        sort!(out,by=x->x[1]); Int32[w for (_,w) in out]
+    end
+    rng=_R3(0x9e3779b97f4a7c15)
+    for (scale,label) in ((1.0,"unit"),(1e-150,"tiny"),(1e150,"huge"),(3.0,"grid"))
+        for trial in 1:40
+            # A box-shell surface (coplanar regions, crease edges) scaled/shifted;
+            # the "grid" case snaps coordinates to a coarse lattice so exact zeros
+            # (coplanar/collinear/on-edge) occur constantly.
+            shift=(_nf(rng),_nf(rng),_nf(rng)).*scale
+            surf=box_surface(0,2,0,1,0,1)
+            coords=copy(surf.coords)
+            for i in axes(coords,2), k in 1:3
+                value=coords[k,i]*scale+shift[k]
+                coords[k,i]=label=="grid" ? round(value*4)/4 : value
+            end
+            surface=Mesh(coords;tris=surf.tris)
+            Px,Py,Pz,facets=_rb_dedup_surface(surface)
+            regions=_rb_build_regions(Px,Py,Pz,facets)
+            nreal=length(Px)
+            # extra probe points: random, on-plane, on-edge, at vertices
+            probes=NTuple{3,Float64}[]
+            for _ in 1:30
+                push!(probes,(_nf(rng)*3-0.5,_nf(rng)*2-0.5,_nf(rng)*2-0.5).*scale.+shift)
+            end
+            for i in 1:nreal
+                push!(probes,(Px[i],Py[i],Pz[i]))
+                j=mod1(i+1,nreal)
+                push!(probes,((Px[i]+Px[j])/2,(Py[i]+Py[j])/2,(Pz[i]+Pz[j])/2))
+            end
+            for reg in regions, x in probes
+                @test _rb_side_float(reg.plane,x)==_rbside(reg.plane,(Rational{BigInt}(x[1]),Rational{BigInt}(x[2]),Rational{BigInt}(x[3])))
+            end
+            # edge piercing: every probe pair as (p,q) appended to the point table
+            Qx=vcat(Px,[p[1] for p in probes]);Qy=vcat(Py,[p[2] for p in probes])
+            Qz=vcat(Pz,[p[3] for p in probes])
+            total=length(Qx)
+            for reg in regions, _ in 1:60
+                p=Int32(1+floor(Int,_nf(rng)*total));q=Int32(1+floor(Int,_nf(rng)*total))
+                p==q && continue
+                @test _rb_edge_pierces(reg,Qx,Qy,Qz,p,q)==_rb_edge_pierces_rational(reg,Qx,Qy,Qz,p,q)
+            end
+            # boundary-face centroid containment: faces from the surface itself and
+            # random triples of on-plane points
+            for reg in regions
+                for (a,b,c) in reg.tris
+                    fa=_rbptP(Px,Py,Pz,a);fb=_rbptP(Px,Py,Pz,b);fc=_rbptP(Px,Py,Pz,c)
+                    ratc=((Rational{BigInt}(fa[1])+Rational{BigInt}(fb[1])+Rational{BigInt}(fc[1]))//3,
+                          (Rational{BigInt}(fa[2])+Rational{BigInt}(fb[2])+Rational{BigInt}(fc[2]))//3,
+                          (Rational{BigInt}(fa[3])+Rational{BigInt}(fb[3])+Rational{BigInt}(fc[3]))//3)
+                    @test _rb_face_centroid_in_region_closed(reg,Px,Py,Pz,fa,fb,fc)==
+                          _rb_point_in_region_closed(reg,Px,Py,Pz,ratc)
+                end
+                planar=[x for x in probes if _rb_side_float(reg.plane,x)==0]
+                length(planar)>=3 || continue
+                for _ in 1:40
+                    fa=planar[1+floor(Int,_nf(rng)*length(planar))]
+                    fb=planar[1+floor(Int,_nf(rng)*length(planar))]
+                    fc=planar[1+floor(Int,_nf(rng)*length(planar))]
+                    ratc=((Rational{BigInt}(fa[1])+Rational{BigInt}(fb[1])+Rational{BigInt}(fc[1]))//3,
+                          (Rational{BigInt}(fa[2])+Rational{BigInt}(fb[2])+Rational{BigInt}(fc[2]))//3,
+                          (Rational{BigInt}(fa[3])+Rational{BigInt}(fb[3])+Rational{BigInt}(fc[3]))//3)
+                    @test _rb_face_centroid_in_region_closed(reg,Px,Py,Pz,fa,fb,fc)==
+                          _rb_point_in_region_closed(reg,Px,Py,Pz,ratc)
+                end
+            end
+            # on-segment enumeration against the pure rational reference
+            for _ in 1:20
+                u=Int32(1+floor(Int,_nf(rng)*total));v=Int32(1+floor(Int,_nf(rng)*total))
+                u==v && continue
+                @test _rb_onseg(Qx,Qy,Qz,u,v,total)==rational_onseg(Qx,Qy,Qz,u,v,total)
+            end
+        end
+    end
+    # centroid orientation filter: exact sign on near-degenerate sums
+    @testset "centroid orient2 filter vs exact rational sum" begin
+        rng=_R3(0x2545f4914f6cdd1d)
+        for trial in 1:2000
+            e=trial%5==0 ? 1e-9 : 1.0
+            x=(_nf(rng),_nf(rng));y=(_nf(rng),_nf(rng))
+            # points near the line through x,y so the Float64 sum is uncertain
+            t1=_nf(rng);t2=_nf(rng);t3=_nf(rng)
+            a=(x[1]+t1*(y[1]-x[1])+e*(_nf(rng)-0.5)*1e-8,x[2]+t1*(y[2]-x[2]))
+            b=(x[1]+t2*(y[1]-x[1]),x[2]+t2*(y[2]-x[2])+e*(_nf(rng)-0.5)*1e-8)
+            c=(x[1]+t3*(y[1]-x[1]),x[2]+t3*(y[2]-x[2]))
+            R=Rational{BigInt}
+            exact=(R(y[1])-R(x[1]))*((R(a[2])-R(x[2]))+(R(b[2])-R(x[2]))+(R(c[2])-R(x[2])))-
+                  (R(y[2])-R(x[2]))*((R(a[1])-R(x[1]))+(R(b[1])-R(x[1]))+(R(c[1])-R(x[1])))
+            @test _rb_centroid_orient2(x,y,a,b,c)==sign(exact)
+        end
+        # exact zero: centroid on the line
+        @test _rb_centroid_orient2((0.0,0.0),(1.0,1.0),(0.25,0.25),(0.5,0.5),(2.0,2.0))==0
+        @test _rb_centroid_orient2((0.0,0.0),(1.0,1.0),(0.25,0.25),(0.5,0.5),(2.0,2.0+2^-40))==1
+        @test _rb_centroid_orient2((0.0,0.0),(1.0,1.0),(0.25,0.25),(0.5,0.5),(2.0,2.0-2^-40))==-1
+    end
+    # allocation: the common (non-degenerate) decisions do not allocate
+    surf=box_surface(0,2,0,1,0,1)
+    Px,Py,Pz,facets=_rb_dedup_surface(surf);regions=_rb_build_regions(Px,Py,Pz,facets)
+    reg=regions[1];probe=(0.3,0.4,0.6)
+    _rb_side_float(reg.plane,probe)
+    @test @allocated(_rb_side_float(reg.plane,probe))==0
+    Qx=vcat(Px,[0.5,0.7]);Qy=vcat(Py,[0.5,0.2]);Qz=vcat(Pz,[-0.5,0.4])
+    p=Int32(length(Qx)-1);q=Int32(length(Qx))
+    _rb_edge_pierces(reg,Qx,Qy,Qz,p,q)
+    @test @allocated(_rb_edge_pierces(reg,Qx,Qy,Qz,p,q))==0
+end
