@@ -886,4 +886,46 @@ end
     finally
         _API.finalize()
     end
+    _API.initialize()
+    try
+        # A 3-sided transfinite surface routes through the dedicated
+        # Mesh.TransfiniteTri=1 patch: n=4 divisions give (n+1)(n+2)/2 nodes
+        # and n^2 triangles on the triangular lattice.
+        m=_API.model
+        pa=m.add_point(0,0,0);pb=m.add_point(1,0,0);pc=m.add_point(0,1,0)
+        ea=m.add_line(pa,pb);eb=m.add_line(pb,pc);ec=m.add_line(pc,pa)
+        tri_loop=m.add_curve_loop([ea,eb,ec])
+        tri_face=m.add_plane_surface([tri_loop])
+        for e in (ea,eb,ec)
+            _API.mesh.set_transfinite_curve(e,5)
+        end
+        _API.mesh.set_transfinite_surface(tri_face)
+        _API.mesh.generate(2)
+        all_nodes,all_coords,_=_API.mesh.get_nodes()
+        @test length(all_nodes)==15
+        lattice=sort!([(all_coords[3i-2],all_coords[3i-1]) for i in 1:15])
+        @test lattice==sort!([(i/4,j/4) for i in 0:4 for j in 0:4-i])
+        # Boundary nodes classify on the curves/points, so the surface entity
+        # reports only its interior nodes — matching Gmsh getNodes(2,tag).
+        tri_nodes,_=_API.mesh.get_nodes(2,tri_face)
+        @test length(tri_nodes)==3
+        _,_,tri_blocks=_API.mesh.get_elements(2,tri_face)
+        @test div(length(tri_blocks[1]),3)==16
+        @test validate(_API.mesh.get()).ok
+        # Mismatched transfinite curve counts fail explicitly.
+        _API.mesh.set_transfinite_curve(ec,6)
+        @test_throws ArgumentError _API.mesh.generate(2)
+        _API.mesh.set_transfinite_curve(ec,5)
+        # A loop built from reversed curve signs still meshes.
+        _API.mesh.clear()
+        _API.model.remove_entities([(2,tri_face)])
+        rev_loop=m.add_curve_loop([-ec,-eb,-ea])
+        rev_face=m.add_plane_surface([rev_loop])
+        _API.mesh.set_transfinite_surface(rev_face)
+        _API.mesh.generate(2)
+        rev_nodes,_=_API.mesh.get_nodes(2,rev_face)
+        @test length(rev_nodes)==3
+    finally
+        _API.finalize()
+    end
 end

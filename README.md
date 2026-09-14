@@ -161,8 +161,9 @@ declarations, and geometry-derived physical-group RHSs beyond the documented inl
 topology queries),
 mixed-element generation beyond the listed first-order surface recombination paths,
 non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
-quasi-transfinite or holed transfinite patches, curved/warped or
-compact-TransfiniteTri volumes,
+quasi-transfinite or holed transfinite patches, the legacy collapsed-quadrilateral
+`Mesh.TransfiniteTri=0` three-sided layout (the dedicated `TransfiniteTri=1` patch
+is implemented), curved/warped or compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
 MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
 and explicit-tag `$ElementNodeData` output that the
