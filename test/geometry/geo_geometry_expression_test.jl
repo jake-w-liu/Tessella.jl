@@ -79,7 +79,7 @@ end
         Dilate {{0, 0, 0}, 2 / 1} { Volume{tag}; };
         Rotate {{0, 0, 2}, {0, 0, 0}, Pi / 2} { Volume{tag}; };
         """)
-    @test transformed.model.box_extents[1]==(-3.0,1.0,2.0,4.0,2.0,6.0)
+    @test collect(transformed.model.box_extents[1])≈[-3.0,1.0,2.0,4.0,2.0,6.0]
 
     primitives=_execute_geometry_expression_source(raw"""
         base = 1.9;

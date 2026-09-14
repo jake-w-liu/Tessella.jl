@@ -92,6 +92,12 @@ control_flow_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes
 println("  command: ", control_flow_command)
 run(control_flow_command)
 
+println("\n── geo_transforms ──  entity-level Gmsh 4.15.2 .geo transform differential")
+geo_transform_script = joinpath(HERE, "geo_transforms", "differential.jl")
+geo_transform_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_transform_script`
+println("  command: ", geo_transform_command)
+run(geo_transform_command)
+
 println("\n── gmsh_parity geometry expressions ──  bounded entity/value execution")
 geo_expression_script = joinpath(
     HERE, "gmsh_parity", "geo_geometry_expressions.jl")

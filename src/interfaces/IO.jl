@@ -2967,8 +2967,11 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
 
     topology_change=occursin(
-        r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Duplicata|SetMaxTag|Merge)\b",
-        source)
+        r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Duplicata|SetMaxTag|Merge|Coherence)\b",
+        source) || match(
+        # A leading transform can merge coincident entities (lowering
+        # automatic counters) even without a Duplicata.
+        r"^(?:Translate|Rotate|Dilate|Symmetry|Affine)\s*\{",source)!==nothing
     if topology_change
         _geo_allocator_invalidate!(state,
             "topology-changing statement is outside the tracked allocator subset: " *
@@ -3255,10 +3258,44 @@ function _gmsh_random_seed(value::Float64)
     return _geo_int_value(value,"read_geo_params: Mesh.RandomSeed")
 end
 
+# A `.geo` statement is complete at a top-level `}` only when it is a
+# transform or query statement (keyword + the expected number of balanced
+# `{...}` groups and nothing else) — `Translate{…}{…}`, `Duplicata{…}`,
+# `Boundary{…}`, etc. Statements like `bnd[] = Boundary{…}` still end at `;`
+# because they start with an unlisted name.
+function _geo_brace_terminated_statement(text::AbstractString)
+    s=String(strip(text))
+    mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",s)
+    mm===nothing && return false
+    name=mm.captures[1]
+    groups=name in ("Translate","Rotate","Dilate","Symmetry","Affine") ? 2 :
+           name in ("Duplicata","Boundary","CombinedBoundary",
+                    "OrientedBoundary","OrientedCombinedBoundary",
+                    "PointsOf") ? 1 : return false
+    rest=String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end]))
+    for _ in 1:groups
+        startswith(rest,"{") || return false
+        depth=0;done=false;i=firstindex(rest);last=lastindex(rest)
+        while i<=last
+            c=rest[i]
+            c=='{' && (depth+=1)
+            if c=='}'
+                depth-=1
+                depth==0 && (done=true; break)
+            end
+            i=nextind(rest,i)
+        end
+        done || return false
+        rest=String(strip(rest[nextind(rest,i):end]))
+    end
+    return isempty(rest)
+end
+
 function _scan_geo_statements(consume,path::AbstractString)
     buffer=IOBuffer();quote_char='\0';block_comment=false
     # `;` inside `{...}` groups (Boolean operand lists, `Delete` suffixes) is
     # part of the statement, not a terminator — matching _geo_exec_statements.
+    # Transform and query statements may instead end at their final `}`.
     depth=0
     for raw in eachline(path)
         i=firstindex(raw);lastindex_raw=lastindex(raw)
@@ -3290,10 +3327,17 @@ function _scan_geo_statements(consume,path::AbstractString)
                 depth+=1;write(buffer,c)
             elseif c=='}'
                 depth=max(0,depth-1);write(buffer,c)
+                if depth==0 && _geo_brace_terminated_statement(
+                        String(buffer.data[1:position(buffer)]))
+                    statement=strip(String(take!(buffer)))
+                    isempty(statement) || consume(statement)
+                end
             elseif c==';' && depth==0
                 write(buffer,c)
                 statement=strip(String(take!(buffer)))
-                isempty(statement) || consume(statement)
+                # A `;` left after a `}`-terminated transform is an empty
+                # statement, as is a bare `;` between statements.
+                all(==(';'),statement) || consume(statement)
             else
                 write(buffer,c)
             end
@@ -3377,9 +3421,13 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
     allocator_state=_GeoTagAllocatorState()
     control_depth=0
     _scan_geo_statements(path) do line
-        endswith(line,";") || throw(ArgumentError(
-            "read_geo_params: internal statement scanner lost a semicolon"))
-        raw_body=String(strip(line[firstindex(line):prevind(line,lastindex(line))]))
+        raw_body=if endswith(line,";")
+            String(strip(line[firstindex(line):prevind(line,lastindex(line))]))
+        else
+            _geo_brace_terminated_statement(line) || throw(ArgumentError(
+                "read_geo_params: internal statement scanner lost a terminator"))
+            String(strip(line))
+        end
         raw_code=_geo_unquoted_code(raw_body)
 
         # Any control-flow/macro context could mutate prior scalar bindings.  We
@@ -3454,6 +3502,12 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             "Physical Kind(\"name\")"))
         _geo_allocator_observe_statement!(
             allocator_state,body,context,"read_geo_params";conservative=true)
+
+        # Transform and standalone shape-list statements carry no params-scan
+        # data; a `Physical Kind{...}` inside one is a group reference, not a
+        # declaration.
+        match(r"^(?:Translate|Rotate|Dilate|Symmetry|Affine|Duplicata|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",body)!==nothing &&
+            return
 
         mesh=match(r"^(Mesh\.(?:MeshSizeMin|MeshSizeMax|MeshSizeFactor|RandomSeed|MeshSizeFromCurvature|MinimumElementsPerTwoPi|BoundaryLayerFanElements|BoundaryLayerFanPoints)|Geometry\.Tolerance)\s*=\s*(.*)$",body)
         if mesh!==nothing

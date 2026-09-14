@@ -172,6 +172,7 @@ function _model_removal_state(
     points=copy(m.points)
     point_size=copy(m.point_size)
     curves=copy(m.curves)
+    curve_control_points=copy(m.curve_control_points)
     surfaces=copy(m.surfaces)
     volumes=copy(m.volumes)
     for tag in removed_tags[1]
@@ -179,6 +180,7 @@ function _model_removal_state(
     end
     for tag in removed_tags[2]
         delete!(curves,tag)
+        delete!(curve_control_points,tag)
     end
     for tag in removed_tags[3]
         delete!(surfaces,tag)
@@ -293,7 +295,8 @@ function _model_removal_state(
     filter!(compound->!any(member->(compound.first,member) in removed,
                            compound.second),meshing.compounds)
 
-    return (;points,point_size,curves,loops,surfaces,surface_loops,volumes,
+    return (;points,point_size,curves,curve_control_points,loops,surfaces,
+            surface_loops,volumes,
             entity_names,entity_visibility,entity_colors,physical,physical_names,
             box_extents,cylinders,spheres,cones,booleans,boolean_operands,
             periodic,embeds,discrete)
@@ -328,6 +331,7 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.points=state.points
     m.point_size=state.point_size
     m.curves=state.curves
+    m.curve_control_points=state.curve_control_points
     m.loops=state.loops
     m.surfaces=state.surfaces
     m.surface_loops=state.surface_loops
