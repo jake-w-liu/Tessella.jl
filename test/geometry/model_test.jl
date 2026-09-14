@@ -71,7 +71,7 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test_throws ArgumentError dilate_volume!(transformed,1,(0,0,0),Inf)
     @test_throws ArgumentError rotate_volume!(transformed,1,(0,0),(0,0,0),π/2)
     @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0),π/2)
-    @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0,0),1e300)
+    @test_throws ArgumentError rotate_volume!(transformed,1,(0,0,1),(0,0,0),Inf)
     @test transformed.box_extents[1]==box_before
     @test translate_volume!(transformed,1,(2,-1,0.5))==1
     @test transformed.box_extents[1]==(2.0,-1.0,0.5,1.0,2.0,3.0)
@@ -94,7 +94,12 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test translated_primitives.spheres[2].center==(1.0,2.0,3.0)
     @test translated_primitives.cones[3].center==(1.0,2.0,3.0)
     boolean_volumes!(translated_primitives,:union,1,2;tag=4)
-    @test_throws ArgumentError translate_volume!(translated_primitives,4,(1,0,0))
+    # Boolean results transform through their owned operand snapshots, like
+    # the `.geo` Translate path on a BooleanUnion volume.
+    snapshot_before=extrema(translated_primitives.boolean_operands[4][1].coords[1,:])
+    @test translate_volume!(translated_primitives,4,(1,0,0))==4
+    @test extrema(translated_primitives.boolean_operands[4][1].coords[1,:])==
+        (snapshot_before[1]+1.0,snapshot_before[2]+1.0)
     @test translated_primitives.booleans[4]==(op=:union,a=1,b=2)
 
     embedded=GeoModel()

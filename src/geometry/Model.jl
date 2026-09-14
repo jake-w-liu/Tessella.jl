@@ -162,6 +162,11 @@ mutable struct GeoModel
     points::Dict{Int,NTuple{3,Float64}}
     point_size::Dict{Int,Float64}
     curves::Dict{Int,NTuple{2,Int}}
+    # Additional coincident vertices attached to a curve, mirroring the
+    # control-point copies Gmsh's `Duplicata` creates for every duplicated
+    # curve. Ordinary curves have no entry; transforms and coherence passes
+    # treat them as part of the curve.
+    curve_control_points::Dict{Int,Vector{Int}}
     loops::Dict{Int,Vector{Int}}
     surfaces::Dict{Int,Vector{Int}}
     surface_loops::Dict{Int,Vector{Int}}
@@ -199,7 +204,7 @@ dimension. Geometry is added explicitly and can then be meshed with
 GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
-                      Dict{Int,Vector{Int}}(),
+                      Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
                       Dict{Tuple{Int,Int},Int}(),
                       Dict{Tuple{Int,Int},NTuple{4,Int}}(),
@@ -459,6 +464,7 @@ include("ModelSpatialQueries.jl")
 include("ModelEntityMetadata.jl")
 include("ModelEntityEvaluation.jl")
 include("ModelMeshingAttributes.jl")
+include("ModelTransforms.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -1144,54 +1150,6 @@ function remove_embedded!(m::GeoModel, dim_tags, dim=-1)
     return nothing
 end
 
-function _quarter_turns(angle, caller)
-    turns=angle/(π/2)
-    (isfinite(turns) && abs(turns)<=typemax(Int)) || throw(ArgumentError(
-        "$caller: angle is outside the supported integer-turn range"))
-    k=try
-        round(Int,turns)
-    catch err
-        err isa InterruptException && rethrow()
-        throw(ArgumentError("$caller: angle is outside the supported integer-turn range"))
-    end
-    abs(turns-k)<=1e-9 || throw(ArgumentError(
-        "$caller: angle must be an integer multiple of π/2 (got $angle)"))
-    return mod(k,4)
-end
-
-function _axis_kind(axis, caller)
-    L=hypot(axis...)
-    L>0 || throw(ArgumentError("$caller: axis must be nonzero"))
-    u=(axis[1]/L,axis[2]/L,axis[3]/L)
-    if abs(abs(u[1])-1)<=1e-12 && abs(u[2])<=1e-12 && abs(u[3])<=1e-12
-        return (:x, u[1]>0 ? 1 : -1)
-    elseif abs(abs(u[2])-1)<=1e-12 && abs(u[1])<=1e-12 && abs(u[3])<=1e-12
-        return (:y, u[2]>0 ? 1 : -1)
-    elseif abs(abs(u[3])-1)<=1e-12 && abs(u[1])<=1e-12 && abs(u[2])<=1e-12
-        return (:z, u[3]>0 ? 1 : -1)
-    end
-    throw(ArgumentError("$caller: only coordinate-axis rotations are implemented"))
-end
-
-function _rot90(p, origin, kind, sign, k)
-    x,y,z=p[1]-origin[1], p[2]-origin[2], p[3]-origin[3]
-    kk=mod(sign*k,4)
-    if kind===:z
-        q=kk==0 ? (x,y,z) : kk==1 ? (-y,x,z) : kk==2 ? (-x,-y,z) : (y,-x,z)
-    elseif kind===:x
-        q=kk==0 ? (x,y,z) : kk==1 ? (x,-z,y) : kk==2 ? (x,-y,-z) : (x,z,-y)
-    else
-        q=kk==0 ? (x,y,z) : kk==1 ? (z,y,-x) : kk==2 ? (-x,y,-z) : (-z,y,x)
-    end
-    return (q[1]+origin[1], q[2]+origin[2], q[3]+origin[3])
-end
-
-function _dilate_point(p, center, s)
-    return (center[1]+s*(p[1]-center[1]),
-            center[2]+s*(p[2]-center[2]),
-            center[3]+s*(p[3]-center[3]))
-end
-
 # Every Point owned through the volume's surface loops — used to keep a
 # materialized primitive's boundary entities (add_box!) synchronized with its
 # compact encoding under the native transforms below.
@@ -1208,149 +1166,51 @@ end
 """
     translate_volume!(model, tag, offset) -> tag
 
-Translate a native primitive volume by the finite three-component `offset`.
-Materialized boundary Points (from `add_box!`) move with the encoding. The
-model is unchanged if a translated coordinate is not representable as a
-finite `Float64` or the volume has no translatable native encoding.
+Translate a native volume by the finite three-component `offset`. Explicit
+boundary topology and materialized boundary Points (from `add_box!`) move with
+the volume; compact primitive encodings are updated in place. The model is
+unchanged if a translated coordinate is not representable as a finite `Float64`.
 """
 function translate_volume!(m::GeoModel, tag, offset)
     caller="translate_volume!"
     t=_tag(tag,caller,3)
-    haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    delta=_finite_vector3(offset,caller,"offset")
-    if haskey(m.box_extents,t)
-        x0,y0,z0,dx,dy,dz=m.box_extents[t]
-        origin=_finite_result((x0+delta[1],y0+delta[2],z0+delta[3]),caller)
-        moved=[(point,_finite_result(
-                   (m.points[point][1]+delta[1],m.points[point][2]+delta[2],
-                    m.points[point][3]+delta[3]),caller))
-               for point in _model_volume_owned_points(m,t)]
-        for (point,coordinate) in moved
-            m.points[point]=coordinate
-        end
-        m.box_extents[t]=(origin[1],origin[2],origin[3],dx,dy,dz)
-    elseif haskey(m.cylinders,t)
-        cyl=m.cylinders[t]
-        center=_finite_result((cyl.center[1]+delta[1],cyl.center[2]+delta[2],
-                               cyl.center[3]+delta[3]),caller)
-        m.cylinders[t]=(center=center,axis=cyl.axis,radius=cyl.radius,height=cyl.height)
-    elseif haskey(m.spheres,t)
-        sph=m.spheres[t]
-        center=_finite_result((sph.center[1]+delta[1],sph.center[2]+delta[2],
-                               sph.center[3]+delta[3]),caller)
-        m.spheres[t]=(center=center,radius=sph.radius)
-    elseif haskey(m.cones,t)
-        cone=m.cones[t]
-        center=_finite_result((cone.center[1]+delta[1],cone.center[2]+delta[2],
-                               cone.center[3]+delta[3]),caller)
-        m.cones[t]=(center=center,axis=cone.axis,r1=cone.r1,r2=cone.r2,
-                    height=cone.height)
-    else
-        throw(ArgumentError("$caller: Volume[$t] has no translatable native encoding"))
-    end
+    transform_entities!(m,_affine_translation(
+        _finite_vector3(offset,caller,"offset"),caller),[(3,t)];caller=caller)
     return t
 end
 
 """
     dilate_volume!(model, tag, center, scale) -> tag
 
-Dilate a native primitive volume about the three-component finite `center`.
-`scale` must be finite and positive.
+Dilate a native volume about the three-component finite `center`. `scale` must
+be finite and positive. Explicit boundary topology and materialized boundary
+Points move with the volume; compact primitive encodings are updated in place.
 """
 function dilate_volume!(m::GeoModel, tag, center, scale)
     caller="dilate_volume!"
     t=_tag(tag,caller,3)
-    haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    c=_finite_vector3(center,caller,"center")
     s=_finite_scalar(scale,caller,"scale")
     s>0 || throw(ArgumentError("$caller: scale must be positive"))
-    if haskey(m.box_extents,t)
-        x0,y0,z0,dx,dy,dz=m.box_extents[t]
-        p0=_dilate_point((x0,y0,z0),c,s)
-        transformed=_finite_result((p0[1],p0[2],p0[3],dx*s,dy*s,dz*s),caller)
-        moved=[(point,_finite_result(_dilate_point(m.points[point],c,s),
-                                    caller))
-               for point in _model_volume_owned_points(m,t)]
-        for (point,coordinate) in moved
-            m.points[point]=coordinate
-        end
-        m.box_extents[t]=transformed
-    elseif haskey(m.cylinders,t)
-        cyl=m.cylinders[t]
-        center=_dilate_point(cyl.center,c,s)
-        radius,height=cyl.radius*s,cyl.height*s
-        _finite_result((center...,radius,height),caller)
-        m.cylinders[t]=(center=center, axis=cyl.axis, radius=radius, height=height)
-    elseif haskey(m.spheres,t)
-        sph=m.spheres[t]
-        center=_dilate_point(sph.center,c,s); radius=sph.radius*s
-        _finite_result((center...,radius),caller)
-        m.spheres[t]=(center=center, radius=radius)
-    elseif haskey(m.cones,t)
-        cone=m.cones[t]
-        center=_dilate_point(cone.center,c,s)
-        r1,r2,height=cone.r1*s,cone.r2*s,cone.height*s
-        _finite_result((center...,r1,r2,height),caller)
-        m.cones[t]=(center=center, axis=cone.axis, r1=r1, r2=r2, height=height)
-    else
-        throw(ArgumentError("$caller: Volume[$t] has no dilatable native encoding"))
-    end
+    transform_entities!(m,_affine_dilation(center,s,caller),[(3,t)];caller=caller)
     return t
 end
 
 """
     rotate_volume!(model, tag, axis, origin, angle) -> tag
 
-Rotate a native primitive volume about a coordinate-aligned `axis` through
-`origin`. The finite angle must be an integer multiple of `π/2`.
+Rotate a native volume about the finite, nonzero `axis` vector through
+`origin` by the finite `angle` (radians). Explicit boundary topology and
+materialized boundary Points move with the volume; compact primitive encodings
+are updated in place. A materialized `add_box!` volume keeps its
+`box_extents` encoding only while the rotated corners still form an
+axis-aligned box — otherwise the shell topology survives and the encoding is
+dropped.
 """
 function rotate_volume!(m::GeoModel, tag, axis, origin, angle)
     caller="rotate_volume!"
     t=_tag(tag,caller,3)
-    haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
-    ax=_finite_vector3(axis,caller,"axis")
-    o=_finite_vector3(origin,caller,"origin")
-    θ=_finite_scalar(angle,caller,"angle")
-    k=_quarter_turns(θ,caller)
-    kind,sgn=_axis_kind(ax,caller)
-    rot(p)=_rot90(p,o,kind,sgn,k)
-    if haskey(m.box_extents,t)
-        x0,y0,z0,dx,dy,dz=m.box_extents[t]
-        corners=[rot((x0+ix*dx,y0+iy*dy,z0+iz*dz)) for ix in (0,1), iy in (0,1), iz in (0,1)]
-        _finite_result(Iterators.flatten(corners),caller)
-        xs=sort!(unique([p[1] for p in corners]))
-        ys=sort!(unique([p[2] for p in corners]))
-        zs=sort!(unique([p[3] for p in corners]))
-        (length(xs)==2 && length(ys)==2 && length(zs)==2) || throw(ArgumentError(
-            "$caller: rotated box is no longer axis-aligned"))
-        for point in _model_volume_owned_points(m,t)
-            m.points[point]=rot(m.points[point])
-        end
-        m.box_extents[t]=(xs[1],ys[1],zs[1],xs[2]-xs[1],ys[2]-ys[1],zs[2]-zs[1])
-    elseif haskey(m.cylinders,t)
-        cyl=m.cylinders[t]
-        endp=(cyl.center[1]+cyl.axis[1],cyl.center[2]+cyl.axis[2],cyl.center[3]+cyl.axis[3])
-        c2=rot(cyl.center); e2=rot(endp)
-        axis=(e2[1]-c2[1],e2[2]-c2[2],e2[3]-c2[3])
-        _finite_result((c2...,axis...),caller)
-        m.cylinders[t]=(center=c2, axis=axis,
-                        radius=cyl.radius, height=cyl.height)
-    elseif haskey(m.spheres,t)
-        sph=m.spheres[t]
-        center=rot(sph.center)
-        _finite_result(center,caller)
-        m.spheres[t]=(center=center, radius=sph.radius)
-    elseif haskey(m.cones,t)
-        cone=m.cones[t]
-        endp=(cone.center[1]+cone.axis[1],cone.center[2]+cone.axis[2],cone.center[3]+cone.axis[3])
-        c2=rot(cone.center); e2=rot(endp)
-        axis=(e2[1]-c2[1],e2[2]-c2[2],e2[3]-c2[3])
-        _finite_result((c2...,axis...),caller)
-        m.cones[t]=(center=c2, axis=axis,
-                    r1=cone.r1, r2=cone.r2, height=cone.height)
-    else
-        throw(ArgumentError("$caller: Volume[$t] has no rotatable native encoding"))
-    end
+    transform_entities!(m,_affine_rotation(axis,origin,angle,caller),
+                        [(3,t)];caller=caller)
     return t
 end
 

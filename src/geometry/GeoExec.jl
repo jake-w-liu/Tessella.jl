@@ -39,8 +39,12 @@ using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
+using ..Model: transform_entities!, duplicate_entities!, coherence!
+using ..Model: merge_vertices!
+using ..Model: _affine_translation, _affine_dilation
+using ..Model: _affine_rotation, _affine_symmetry, _entity_label
 using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!
-using ..Model: _model_boundary, _model_points_of
+using ..Model: _model_boundary, _model_points_of, _model_direct_boundary
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
@@ -51,6 +55,7 @@ using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
 using ..IO: _MAX_GEO_LIST_ITEMS
 using ..IO: _geo_context_set_scalar!, _geo_apply_list_assignment!
+using ..IO: _geo_brace_terminated_statement
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!
 using ..IO: _geo_physical_declaration
@@ -167,7 +172,8 @@ end
 # is one statement. Quoted strings and line/block comments are respected.
 # Control constructs (If/ElseIf/Else/EndIf, For/EndFor, While/EndWhile) carry no
 # `;`; each is emitted as its own statement whenever it starts at a statement
-# boundary.
+# boundary. Transform and query statements may end at their final `}` (the Gmsh
+# grammar needs no `;` there) or at a `;`.
 function _geo_exec_statements(path::AbstractString)
     statements=String[]
     buf=IOBuffer()
@@ -216,10 +222,20 @@ function _geo_exec_statements(path::AbstractString)
                 depth>0 || throw(ArgumentError(
                     "execute_geo: unmatched closing brace"))
                 depth-=1; write(buf,c); buf_has_content=true
+                if depth==0 && _geo_brace_terminated_statement(
+                        String(buf.data[1:position(buf)]))
+                    statement=strip(String(take!(buf)))
+                    length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                        "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+                    push!(statements,statement)
+                    buf_has_content=false
+                end
             elseif c==';' && depth==0
                 write(buf,c)
                 statement=strip(String(take!(buf)))
-                if !isempty(statement)
+                # A `;` left after a `}`-terminated transform, or a bare `;`
+                # between statements, is an empty statement.
+                if !all(==(';'),statement)
                     length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
                         "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
                     push!(statements,statement)
@@ -503,7 +519,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 "execute_geo: control flow exceeds $_MAX_GEO_EXEC_STATEMENTS " *
                 "executed statements"))
             occursin(
-                r"\b(Macro|Function|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
+                r"\b(Macro|Function|Extrude|Torus|Fillet|Chamfer)\b",
                 line) && throw(ArgumentError(
                 "execute_geo: unsupported statement $(line) — macros, " *
                 "extrusions, and advanced OCC features are blockers"))
@@ -781,6 +797,335 @@ function _geo_exec_physical_topology(m::GeoModel,selector::AbstractString,
     return sort!(unique!(tags))
 end
 
+# Extract one balanced `{...}` group from the front of `raw`; returns
+# `(content, rest)`.
+function _geo_balanced_group(raw::AbstractString, caller::AbstractString)
+    s=String(strip(raw))
+    startswith(s,"{") || throw(ArgumentError(
+        "$caller: expected a `{...}` group; got $(repr(s))"))
+    depth=0;closing=0;i=firstindex(s);last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if c=='{'
+            depth+=1
+        elseif c=='}'
+            depth-=1
+            depth==0 && (closing=i; break)
+            depth<0 && throw(ArgumentError(
+                "$caller: unmatched closing brace"))
+        end
+        i=nextind(s,i)
+    end
+    closing==0 && throw(ArgumentError("$caller: unmatched opening brace"))
+    content=closing>2 ? String(s[2:prevind(s,closing)]) : ""
+    rest=closing<last ? String(strip(s[nextind(s,closing):end])) : ""
+    return (content,rest)
+end
+
+# Split `raw` on commas outside every `{}`, `()`, and `[]` pair.
+function _geo_split_top_commas(raw::AbstractString, caller::AbstractString)
+    s=String(raw);parts=String[];depth=0;parens=0;brackets=0
+    start=firstindex(s);i=start;last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if c=='{';depth+=1
+        elseif c=='}';depth-=1;depth>=0 || throw(ArgumentError(
+            "$caller: unmatched closing brace"))
+        elseif c=='(';parens+=1
+        elseif c==')';parens-=1;parens>=0 || throw(ArgumentError(
+            "$caller: unmatched closing parenthesis"))
+        elseif c=='[';brackets+=1
+        elseif c==']';brackets-=1;brackets>=0 || throw(ArgumentError(
+            "$caller: unmatched closing bracket"))
+        elseif c==',' && depth==0 && parens==0 && brackets==0
+            push!(parts,String(strip(s[start:prevind(s,i)])))
+            start=nextind(s,i)
+        end
+        i=nextind(s,i)
+    end
+    (depth==0 && parens==0 && brackets==0) || throw(ArgumentError(
+        "$caller: unmatched opening delimiter"))
+    push!(parts,String(strip(s[start:last])))
+    return parts
+end
+
+_geo_shape_kind_dim(name::AbstractString) =
+    name=="Point" ? 0 : name in ("Curve","Line") ? 1 :
+    name=="Surface" ? 2 : 3
+
+# Entity-block tag entries: a `:` wildcard or an unsigned tag list.
+function _geo_shape_tags(m::GeoModel, dim::Int, raw::AbstractString,
+                         context::_GeoNumericContext, caller::AbstractString)
+    r=String(strip(raw))
+    r==":" && return _geo_exec_all_entity_tags(m,dim,"$caller wildcard")
+    return _geo_exec_entity_tags(r,context,caller)
+end
+
+function _geo_shape_physical_tags(m::GeoModel, dim::Int, raw::AbstractString,
+                                  context::_GeoNumericContext,
+                                  caller::AbstractString)
+    r=String(strip(raw))
+    r==":" && return sort!([gt for (d,gt) in keys(m.physical) if d==dim])
+    return _geo_exec_entity_tags(r,context,caller)
+end
+
+function _geo_require_list_semicolon(s::AbstractString, caller, name)
+    rest=String(strip(s))
+    startswith(rest,";") || throw(ArgumentError(
+        "$caller: $name{...} entries in a transform list must end with `;`"))
+    return String(strip(rest[nextind(rest,1):end]))
+end
+
+# Evaluate a `.geo` MultipleShape, mirroring the Gmsh grammar
+# (`MultipleShape : ListOfShapes | Transform`). A ListOfShapes is a sequence
+# of `;`-terminated entries: entity blocks (`Point{...}`, `Curve{...}`,
+# `Surface{...}`, `Volume{...}`), `Kind{:}` wildcards, `Physical Kind{...}`
+# and `Parent Kind{...}` selectors, and inline Shape definitions
+# (`Point(7) = {..};`). A Transform — a named transform or an action string
+# like `Duplicata`/`Boundary`/`PointsOf` applied to a nested MultipleShape —
+# is valid only as the whole list, so nested transforms and actions cannot be
+# mixed with other entries. Copies and nested transforms execute as side
+# effects; the resulting entity list is returned for the enclosing transform.
+function _geo_shape_list_entities!(m::GeoModel, raw::AbstractString,
+                                   context::_GeoNumericContext,
+                                   caller::AbstractString)
+    entities=NTuple{2,Int}[]
+    s=String(strip(raw))
+    while !isempty(s)
+        (entries,rest,transform)=
+            _geo_multiple_shape_element!(m,s,context,caller)
+        if transform && (!isempty(entities) || !isempty(rest))
+            throw(ArgumentError(
+                "$caller: a transform or shape action cannot be combined " *
+                "with other transform-list entries"))
+        end
+        append!(entities,entries)
+        s=rest
+        length(entities)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+            "$caller: shape list expands beyond $_MAX_GEO_LIST_ITEMS entities"))
+    end
+    return entities
+end
+
+# One MultipleShape element. Returns (entities, remaining_text, is_transform).
+function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
+                                      context::_GeoNumericContext,
+                                      caller::AbstractString)
+    mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",s0)
+    mm===nothing && throw(ArgumentError(
+        "$caller: malformed shape list element near $(repr(s0))"))
+    name=mm.captures[1]
+    s=String(strip(s0[nextind(s0,firstindex(s0),ncodeunits(mm.match)):end]))
+    if name in ("Translate","Rotate","Dilate","Symmetry","Affine","Closest")
+        (params,s)=_geo_balanced_group(s,caller)
+        (inner_list,s)=_geo_balanced_group(s,caller)
+        (name=="Affine" || name=="Closest") && throw(ArgumentError(
+            "$caller: $name transforms require the OpenCASCADE geometry " *
+            "kernel, which Tessella does not implement"))
+        nested="$caller: $name"
+        t=_geo_transform_params(kind=name,params=params,
+                                context=context,caller=nested)
+        inner=_geo_shape_list_entities!(m,inner_list,context,caller)
+        transform_entities!(m,t,inner;caller=nested)
+        # Gmsh returns the input shape list (`$$ = $MultipleShape`).
+        return (inner,s,true)
+    end
+    if name=="Physical" || name=="Parent"
+        km=match(r"^(Point|Curve|Line|Surface|Volume)\b",s)
+        km===nothing && throw(ArgumentError(
+            "$caller: $name requires Point, Curve/Line, Surface, or Volume " *
+            "inside a transform list"))
+        dim=_geo_shape_kind_dim(km.captures[1])
+        s=String(strip(s[nextind(s,firstindex(s),ncodeunits(km.match)):end]))
+        (group,s)=_geo_balanced_group(s,caller)
+        s=_geo_require_list_semicolon(s,caller,name)
+        # Tessella entities have no parent entities; the selector is empty.
+        name=="Parent" && return (NTuple{2,Int}[],s,false)
+        entries=NTuple{2,Int}[]
+        for gtag in _geo_shape_physical_tags(m,dim,group,context,caller)
+            haskey(m.physical,(dim,gtag)) || throw(ArgumentError(
+                "$caller: unknown Physical $(_entity_label(dim))[$gtag]"))
+            for tag in m.physical[(dim,gtag)]
+                push!(entries,(dim,tag))
+            end
+        end
+        return (entries,s,false)
+    end
+    if name in ("Point","Curve","Line","Surface","Volume")
+        dim=_geo_shape_kind_dim(name)
+        if startswith(s,"{")
+            (group,s)=_geo_balanced_group(s,caller)
+            s=_geo_require_list_semicolon(s,caller,name)
+            return (NTuple{2,Int}[(dim,t) for t in _geo_shape_tags(
+                        m,dim,group,context,caller)],s,false)
+        end
+        # `Kind(tag) = rhs;` — an inline Shape definition.
+        return _geo_shape_definition_element!(m,s0,context,caller)
+    end
+    if startswith(s,"{")
+        # tSTRING '{' MultipleShape '}' — Duplicata, a boundary query, or an
+        # unknown action.
+        (group,s)=_geo_balanced_group(s,caller)
+        inner=_geo_shape_list_entities!(m,group,context,caller)
+        return (_geo_shape_action!(m,name,inner,caller),s,true)
+    end
+    (name=="Split" || name=="Intersect") && throw(ArgumentError(
+        "$caller: $name requires built-in kernel curve splitting, which " *
+        "Tessella does not implement"))
+    (startswith(s,"(") || match(r"^[A-Za-z_]",s)!==nothing) &&
+        return _geo_shape_definition_element!(m,s0,context,caller)
+    throw(ArgumentError("$caller: unsupported shape list element '$name'"))
+end
+
+# A `Name(tag) = rhs;` definition (possibly multi-word, e.g. `Plane Surface`)
+# inside a shape list executes through the normal statement executor and adds
+# the created entity to the list, as in the Gmsh `Shape` production. Loop
+# records and non-entity definitions are not transformable.
+const _GEO_SHAPE_DEFINITION_DIMS=Dict(
+    "Point"=>0,
+    "Line"=>1,"Curve"=>1,"Spline"=>1,"BSpline"=>1,"Bezier"=>1,"Nurbs"=>1,
+    "Circle"=>1,"Ellipse"=>1,"Wire"=>1,"Compound Spline"=>1,
+    "Compound BSpline"=>1,"Compound Curve"=>1,
+    "Surface"=>2,"Plane Surface"=>2,"Ruled Surface"=>2,"BSpline Surface"=>2,
+    "Bezier Surface"=>2,"Parametric Surface"=>2,"Rectangle"=>2,"Disk"=>2,
+    "Compound Surface"=>2,
+    "Volume"=>3,"Sphere"=>3,"PolarSphere"=>3,"Box"=>3,"Torus"=>3,
+    "Cylinder"=>3,"Cone"=>3,"Wedge"=>3,"ThickSolid"=>3,"Compound Volume"=>3)
+
+function _geo_shape_definition_element!(m::GeoModel, s0::AbstractString,
+                                        context::_GeoNumericContext,
+                                        caller::AbstractString)
+    depth=0;parens=0;i=firstindex(s0);last=lastindex(s0);cut=0
+    while i<=last
+        c=s0[i]
+        c=='{' && (depth+=1)
+        c=='}' && (depth-=1)
+        c=='(' && (parens+=1)
+        c==')' && (parens-=1)
+        (c==';' && depth==0 && parens==0) && (cut=i; break)
+        i=nextind(s0,i)
+    end
+    cut==0 && throw(ArgumentError(
+        "$caller: shape list definition entries must end with `;`"))
+    stmt=String(s0[firstindex(s0):cut])
+    rest=String(strip(s0[nextind(s0,cut):end]))
+    head=match(r"^((?:[A-Za-z_][A-Za-z0-9_]*\s+)*[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+               stmt)
+    head===nothing && throw(ArgumentError(
+        "$caller: malformed shape list element near $(repr(stmt))"))
+    kind=String(strip(replace(head.captures[1],r"\s+"=>" ")))
+    dim=get(_GEO_SHAPE_DEFINITION_DIMS,kind,-1)
+    dim<0 && throw(ArgumentError(
+        "$caller: '$kind' entries in a transform list do not produce " *
+        "transformable entities"))
+    tm=match(r"\(([^()]*)\)",stmt)
+    tag=_geo_exec_entity_tag(tm.captures[1],context,"$caller $kind tag")
+    _exec_line!(m,stmt,context)
+    return (NTuple{2,Int}[(dim,tag)],rest,false)
+end
+
+# A `Name{ MultipleShape }` action element: Duplicata copies, boundary
+# queries, and PointsOf. Returns the action's output entities.
+function _geo_shape_action!(m::GeoModel, name::AbstractString,
+                            inner::Vector{NTuple{2,Int}},
+                            caller::AbstractString)
+    if name=="Duplicata"
+        return duplicate_entities!(m,inner;caller="$caller: Duplicata")
+    elseif name in ("Boundary","CombinedBoundary","OrientedBoundary",
+                    "OrientedCombinedBoundary")
+        combined=occursin("Combined",name)
+        oriented=occursin("Oriented",name)
+        entries=NTuple{2,Int}[]
+        for d in sort!(unique!(first.(inner));rev=true)
+            d==0 && continue   # Points have no boundary (Gmsh returns none)
+            group=[e for e in inner if e[1]==d]
+            if oriented
+                for (_,signed_tag) in Iterators.flatten(
+                        _model_direct_boundary(
+                            m,d,t,caller;canonical_orientation=false)
+                        for (_,t) in group)
+                    push!(entries,(d-1,abs(signed_tag)))
+                end
+            else
+                for tag in _model_boundary(
+                        m,group,caller;
+                        combined=combined,max_entities=_MAX_GEO_LIST_ITEMS)
+                    push!(entries,(d-1,tag))
+                end
+            end
+        end
+        return entries
+    elseif name=="PointsOf"
+        return NTuple{2,Int}[(0,t) for t in _model_points_of(
+            m,inner,"$caller: PointsOf")]
+    end
+    throw(ArgumentError(
+        "$caller: unknown action on multiple shapes '$name'"))
+end
+
+function _geo_transform_params(;kind::AbstractString,params::AbstractString,
+                               context::_GeoNumericContext,
+                               caller::AbstractString)
+    if kind=="Translate"
+        return _affine_translation(Tuple(_geo_exec_numeric_values(
+            params,3,context,"$caller delta")),caller)
+    elseif kind=="Symmetry"
+        return _affine_symmetry(_geo_exec_numeric_values(
+            params,4,context,"$caller plane coefficients")...,caller)
+    elseif kind=="Dilate"
+        parts=_geo_split_top_commas(params,caller)
+        length(parts)==2 || throw(ArgumentError(
+            "$caller: Dilate requires `{center, scale}` parameters"))
+        (cinner,crest)=_geo_balanced_group(parts[1],caller)
+        isempty(crest) || throw(ArgumentError(
+            "$caller: Dilate center must be a single `{...}` group"))
+        center=Tuple(_geo_exec_numeric_values(
+            cinner,3,context,"$caller center"))
+        scale_raw=String(strip(parts[2]))
+        scale=if startswith(scale_raw,"{")
+            (sinner,srest)=_geo_balanced_group(scale_raw,caller)
+            isempty(srest) || throw(ArgumentError(
+                "$caller: Dilate scales must be a single `{...}` group"))
+            Tuple(_geo_exec_numeric_values(
+                sinner,3,context,"$caller scales"))
+        else
+            _geo_eval_numeric(scale_raw,context,"$caller scale")
+        end
+        return _affine_dilation(center,scale,caller)
+    else
+        parts=_geo_split_top_commas(params,caller)
+        length(parts)==3 || throw(ArgumentError(
+            "$caller: Rotate requires `{{axis}, {origin}, angle}` parameters"))
+        (ainner,arest)=_geo_balanced_group(parts[1],caller)
+        (oinner,orest)=_geo_balanced_group(parts[2],caller)
+        (isempty(arest) && isempty(orest)) || throw(ArgumentError(
+            "$caller: Rotate axis and origin must be single `{...}` groups"))
+        axis=Tuple(_geo_exec_numeric_values(ainner,3,context,"$caller axis"))
+        origin=Tuple(_geo_exec_numeric_values(oinner,3,context,"$caller origin"))
+        angle=_geo_eval_numeric(parts[3],context,"$caller angle")
+        return _affine_rotation(axis,origin,angle,caller)
+    end
+end
+
+function _geo_exec_transform_statement!(m::GeoModel,line::AbstractString,
+                                        context::_GeoNumericContext)
+    source=String(strip(line))
+    endswith(source,";") && (source=String(strip(source[1:prevind(source,end)])))
+    mm=match(r"^(Translate|Rotate|Dilate|Symmetry)\s*",source)
+    kind=String(mm.captures[1])
+    caller="execute_geo: $kind"
+    rest=String(strip(source[nextind(source,firstindex(source),
+                                   ncodeunits(kind)):end]))
+    (params,rest)=_geo_balanced_group(rest,caller)
+    (shape_list,rest)=_geo_balanced_group(rest,caller)
+    isempty(rest) || throw(ArgumentError(
+        "$caller: unexpected text after the shape list"))
+    t=_geo_transform_params(kind=kind,params=params,context=context,caller=caller)
+    entities=_geo_shape_list_entities!(m,shape_list,context,caller)
+    transform_entities!(m,t,entities;caller=caller)
+    return nothing
+end
+
 function _geo_exec_entity_tag(raw::AbstractString,
                               context::_GeoNumericContext,
                               caller::AbstractString)
@@ -1027,39 +1372,22 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         delete_a && _remove_volume_entity!(m,a)
         delete_b && _remove_volume_entity!(m,b)
         return
-    elseif (mm=match(
-            r"^Translate\s*\{\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
-            line)) !== nothing
-        caller="execute_geo: Translate"
-        offset=_geo_exec_numeric_values(
-            mm.captures[1],3,context,"$caller offset")
-        tag=_geo_exec_single_entity(
-            mm.captures[2],context,"$caller volume")
-        translate_volume!(m,tag,Tuple(offset))
+    elseif match(r"^(Translate|Rotate|Dilate|Symmetry)\s*\{",line)!==nothing
+        _geo_exec_transform_statement!(m,line,context)
         return
-    elseif (mm=match(
-            r"^Dilate\s*\{\s*\{\s*(.*?)\s*\}\s*,\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
-            line)) !== nothing
-        caller="execute_geo: Dilate"
-        center=_geo_exec_numeric_values(
-            mm.captures[1],3,context,"$caller center")
-        scale=_geo_eval_numeric(mm.captures[2],context,"$caller scale")
-        tag=_geo_exec_single_entity(
-            mm.captures[3],context,"$caller volume")
-        dilate_volume!(m,tag,Tuple(center),scale)
-        return
-    elseif (mm=match(
-            r"^Rotate\s*\{\s*\{\s*(.*?)\s*\}\s*,\s*\{\s*(.*?)\s*\}\s*,\s*(.*?)\s*\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}\s*;?\s*\}\s*;$",
-            line)) !== nothing
-        caller="execute_geo: Rotate"
-        axis=_geo_exec_numeric_values(
-            mm.captures[1],3,context,"$caller axis")
-        origin=_geo_exec_numeric_values(
-            mm.captures[2],3,context,"$caller origin")
-        angle=_geo_eval_numeric(mm.captures[3],context,"$caller angle")
-        tag=_geo_exec_single_entity(
-            mm.captures[4],context,"$caller volume")
-        rotate_volume!(m,tag,Tuple(axis),Tuple(origin),angle)
+    elseif match(r"^Affine\s*\{",line)!==nothing
+        throw(ArgumentError(
+            "execute_geo: Affine transforms require the OpenCASCADE geometry " *
+            "kernel, which Tessella does not implement"))
+    elseif match(
+            r"^(Duplicata|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",
+            line)!==nothing
+        # Standalone MultipleShape statements are legal in the Gmsh grammar;
+        # Duplicata copies are the observable side effect.
+        s=String(strip(line))
+        endswith(s,";") &&
+            (s=String(strip(s[firstindex(s):prevind(s,end)])))
+        _geo_shape_list_entities!(m,s,context,"execute_geo")
         return
     elseif (mm=match(
             r"^(Point|Line|Curve)\s*\{\s*(.*?)\s*\}\s+In\s+Surface\s*\{\s*(.*?)\s*\}\s*;$",
@@ -1147,6 +1475,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             line) !== nothing
         return
     elseif (mm=match(
+            r"^Coherence(?:\s+(Geometry|Mesh)|\s+Point\s*\{\s*(.*?)\s*\})?\s*;$",
+            line)) !== nothing
+        if mm.captures[2] !== nothing
+            merge_vertices!(m,_geo_exec_entity_tags(
+                mm.captures[2],context,"execute_geo: Coherence Point");
+                caller="execute_geo: Coherence Point")
+        elseif mm.captures[1] != "Mesh"
+            coherence!(m)
+        end
+        # `Coherence Mesh` deduplicates mesh vertices; no mesh exists during
+        # .geo execution, so there is nothing to merge.
+        return
+    elseif (mm=match(
             r"^Mesh\.TransfiniteTri\s*=\s*(.*?)\s*;$",line)) !== nothing
         value=_geo_eval_numeric(mm.captures[1],context,
                                 "execute_geo: Mesh.TransfiniteTri")
@@ -1154,9 +1495,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "execute_geo: Mesh.TransfiniteTri must be 0 or 1 (got $value)"))
         set_transfinite_tri!(m,Int(value))
         return Int(value)
+    elseif startswith(line,"Coherence")
+        throw(ArgumentError(
+            "execute_geo: unknown coherence command: $line"))
     elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
            startswith(line,"Field") || startswith(line,"Background") ||
-           startswith(line,"BoundaryLayer") || startswith(line,"Coherence") ||
+           startswith(line,"BoundaryLayer") ||
            occursin(r"^Mesh\s+[0-9]\s*;", line)
         return
     elseif occursin(r"^[A-Za-z_][A-Za-z0-9_]*\s*\[",line)

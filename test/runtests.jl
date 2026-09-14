@@ -76,6 +76,7 @@ using Tessella
     include("geometry/model_entity_state_test.jl") # visibility/color/coordinates/attributes
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_control_flow_test.jl") # If/For/While control flow + conditional operators
+    include("geometry/geo_transform_test.jl") # Translate/Dilate/Rotate/Symmetry + Duplicata + coherence
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
     include("geometry/geo_set_max_tag_test.jl") # factory-aware max-tag counters
