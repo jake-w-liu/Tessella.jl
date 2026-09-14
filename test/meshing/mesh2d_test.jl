@@ -484,6 +484,61 @@ mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2
     end
 end
 
+@testset "Mesh2D refinement scan cache reproduces the full scan" begin
+    # `_find_bad` resumes from `bad_scan_from`; at every step of a manual
+    # Ruppert loop its answer must equal an independent full scan over all
+    # slots, and the cached sorted-constraint list must equal a fresh sort.
+    using Tessella.Mesh2D: Triangulation, constrained_delaunay, classify_interior
+    using Tessella.Mesh2D: _find_bad, _find_encroached, _split_subsegment!
+    using Tessella.Mesh2D: _needs_refine, _is_ghost_tri, _circumcenter2
+    using Tessella.Mesh2D: _encroached_by_point, _insert_steiner!, _pt, _vert
+    using Tessella.Mesh2D: _sorted_segs, _setflag!
+    function full_scan(T,interior,B,area)
+        for t in eachindex(T.alive)
+            (T.alive[t] && t<=length(interior) && interior[t] &&
+             !_is_ghost_tri(T,t)) || continue
+            _needs_refine(T,t,B,area,nothing,nothing) && return Int32(t)
+        end
+        return Int32(0)
+    end
+    xs=[0.0,1.0,1.0,0.5,0.0];ys=[0.0,0.0,1.0,0.4,1.0]
+    T=constrained_delaunay(xs,ys,[(1,2),(2,3),(3,4),(4,5),(5,1)])
+    interior=Vector{Bool}(collect(classify_interior(T)))
+    pointids=Dict{NTuple{2,Float64},Int32}()
+    for i in 1:T.nreal
+        pointids[(T.x[i],T.y[i])]=Int32(i)
+    end
+    B=1/(2*sind(25.0));area=0.002
+    T.bad_scan_from=Int32(1)
+    steps=0
+    while steps<2000
+        steps+=1
+        @test _sorted_segs(T)==sort!(vcat(collect(T.seg),collect(T.internal)))
+        enc=_find_encroached(T)
+        if enc!==nothing
+            _split_subsegment!(T,enc[1],enc[2],interior,pointids)
+            continue
+        end
+        expected=full_scan(T,interior,B,area)
+        cached=_find_bad(T,interior,B,area,nothing,nothing)
+        @test cached==expected
+        cached==0 && break
+        a=_vert(T,cached,1);b=_vert(T,cached,2);c=_vert(T,cached,3)
+        cc=_circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
+        sp=_encroached_by_point(T,cc)
+        if sp!==nothing
+            _split_subsegment!(T,sp[1],sp[2],interior,pointids)
+            continue
+        end
+        pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+        fallback=(pa[1]/3+pb[1]/3+pc[1]/3,pa[2]/3+pb[2]/3+pc[2]/3)
+        _insert_steiner!(T,cc,interior,pointids;fallback=fallback)
+    end
+    @test steps<2000
+    @test full_scan(T,interior,B,area)==0
+    @test ntriangles_live(T)>100
+end
+
 @testset "Mesh2D public documentation and deterministic CRC" begin
     square=triangulate(Float64[0,1,1,0],Float64[0,0,1,1];rng_seed=9)
     @test mesh_crc(square).sha=="850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4"

@@ -1088,8 +1088,10 @@ function _float_fill(cap)
             m.coords[3,m.tets[3,t]]+m.coords[3,m.tets[4,t]])/4
         keep[t]=_inside_grid((cx,cy,cz),g)
     end
-    used=collect(Set{Int32}(v for t in findall(keep) for v in view(m.tets,:,t)))
-    sort!(used; by=v->(m.coords[1,v],m.coords[2,v],m.coords[3,v]))
+    # single-assignment copies: closures over the reassigned `m` box it
+    final_tets=m.tets;final_coords=m.coords
+    used=collect(Set{Int32}(v for t in findall(keep) for v in view(final_tets,:,t)))
+    sort!(used; by=v->(final_coords[1,v],final_coords[2,v],final_coords[3,v]))
     nid=Dict{Int32,Int32}()
     coords=Matrix{Float64}(undef,3,length(used))
     @inbounds for (k,v) in enumerate(used)

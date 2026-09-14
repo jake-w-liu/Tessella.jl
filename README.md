@@ -30,8 +30,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 
 ## Implemented scope
 
-- adaptive exact 2-D/3-D predicates with one consistent Simulation-of-Simplicity
-  convention and exact-rational test oracles;
+- adaptive exact 2-D/3-D predicates — allocation-free Float64 expansion stages
+  with a guarded exact-dyadic fallback — an exact diametral test, one
+  consistent Simulation-of-Simplicity convention, and exact-rational test
+  oracles;
 - compact simplex meshes with finite-input, cell, tag, manifold-link, and quality
   validation;
 - 2-D Delaunay/CDT and quality refinement, graded curves, and planar, cylindrical,

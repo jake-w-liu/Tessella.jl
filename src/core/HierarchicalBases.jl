@@ -2418,7 +2418,8 @@ function _curl_orient_tri_face(lam::NTuple{3,Float64},dlam::NTuple{3,_V3},
     dlsub_ac=[_gmsh_dlegendre(k,subAC) for k in 0:max(pf-3,0)]
     lsub_ba=[_gmsh_legendre(k,subBA) for k in 0:max(pf-3,0)]
     dlsub_ba=[_gmsh_dlegendre(k,subBA) for k in 0:max(pf-3,0)]
-    dprod=preperm ?
+    # distinct name from the edge-loop `dprod`: reusing it boxed the capture
+    dproduct=preperm ?
         (0.5*lam[3]*(lam[1]-lam[2]),0.5*lam[2]*(lam[1]-lam[3]),0.0) :
         ntuple(3) do i
             d[1][i]*l[2]*l[3]+d[2][i]*l[1]*l[3]+d[3][i]*l[2]*l[1]
@@ -2428,7 +2429,7 @@ function _curl_orient_tri_face(lam::NTuple{3,Float64},dlam::NTuple{3,_V3},
     for n1_ in 0:pf-3
         for n2_ in 0:pf-3-n1_
             gface=ntuple(3) do i
-                dprod[i]*lsub_ac[n2_+1]*lsub_ba[n1_+1]+
+                dproduct[i]*lsub_ac[n2_+1]*lsub_ba[n1_+1]+
                 product*dsubBA[i]*lsub_ac[n2_+1]*dlsub_ba[n1_+1]+
                 product*dsubAC[i]*dlsub_ac[n2_+1]*lsub_ba[n1_+1]
             end
@@ -2672,21 +2673,14 @@ function _hcurl_pri_orient_quad_face(p::Int,face::Int,u::Float64,
     l1=v
     l2=1.0-u-v
     l3=u
-    if face==1
-        prod=l2*l3
-        sub=l3-l2
-        psie0=(l3+l2,l3)
-        psie1=(l3-l2,l3)
+    # one destructuring assignment: per-branch reassignment of `prod`/`sub`
+    # captured by the comprehensions below would box them
+    prod,sub,psie0,psie1=if face==1
+        (l2*l3,l3-l2,(l3+l2,l3),(l3-l2,l3))
     elseif face==2
-        prod=l1*l2
-        sub=l1-l2
-        psie0=(l1,l1+l2)
-        psie1=(l1,l1-l2)
+        (l1*l2,l1-l2,(l1,l1+l2),(l1,l1-l2))
     else
-        prod=l1*l3
-        sub=l1-l3
-        psie0=(-l1,l3)
-        psie1=(-l1,-l3)
+        (l1*l3,l1-l3,(-l1,l3),(-l1,-l3))
     end
     jacob=2.0
     lsub=[_gmsh_legendre(k,sub) for k in 0:max(p-1,0)]
@@ -2731,30 +2725,14 @@ function _curl_pri_orient_quad_face(p::Int,face::Int,u::Float64,
     l3=u
     detjacob=2.0
     det=4.0
-    if face==1
-        prod=l2*l3
-        sub=l3-l2
-        psie0=(l3+l2,l3)
-        psie1=(l3-l2,l3)
-        dprod=(0.5*(l2-l3),-0.5*l3)
-        dsub=(1.0,0.5)
-        cpsie0=1.0
+    # one destructuring assignment: per-branch reassignment of `sub` captured
+    # by the comprehensions below would box it
+    prod,sub,psie0,psie1,dprod,dsub,cpsie0=if face==1
+        (l2*l3,l3-l2,(l3+l2,l3),(l3-l2,l3),(0.5*(l2-l3),-0.5*l3),(1.0,0.5),1.0)
     elseif face==2
-        prod=l1*l2
-        sub=l1-l2
-        psie0=(l1,l1+l2)
-        psie1=(l1,l1-l2)
-        dprod=(-0.5*l1,0.5*(l2-l1))
-        dsub=(0.5,1.0)
-        cpsie0=-1.0
+        (l1*l2,l1-l2,(l1,l1+l2),(l1,l1-l2),(-0.5*l1,0.5*(l2-l1)),(0.5,1.0),-1.0)
     else
-        prod=l1*l3
-        sub=l1-l3
-        psie0=(-l1,l3)
-        psie1=(-l1,-l3)
-        dprod=(0.5*l1,0.5*l3)
-        dsub=(-0.5,0.5)
-        cpsie0=1.0
+        (l1*l3,l1-l3,(-l1,l3),(-l1,-l3),(0.5*l1,0.5*l3),(-0.5,0.5),1.0)
     end
     lsub=[_gmsh_legendre(k,sub) for k in 0:max(p-1,0)]
     dlsub=[_gmsh_dlegendre(k,sub) for k in 0:max(p-1,0)]

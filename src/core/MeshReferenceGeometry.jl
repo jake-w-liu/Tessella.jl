@@ -183,14 +183,18 @@ function _segment_frame(a,b,caller::AbstractString,tag::Int)
     transverse_norm=hypot(transverse...)
     transverse_norm>0 || error(
         "$caller: internal segment regularization failure for element $tag")
-    transverse=ntuple(i->transverse[i]/transverse_norm,3)
-    tangent=ntuple(i->derivative[i]/determinant,3)
-    normal=_cross3(tangent,transverse)
+    # single-assignment names: closures over reassigned `transverse`/`normal`
+    # boxed them and allocated on every segment Jacobian
+    unit_transverse=(transverse[1]/transverse_norm,transverse[2]/transverse_norm,
+                     transverse[3]/transverse_norm)
+    tangent=(derivative[1]/determinant,derivative[2]/determinant,
+             derivative[3]/determinant)
+    normal=_cross3(tangent,unit_transverse)
     normal_norm=hypot(normal...)
     normal_norm>0 || error(
         "$caller: internal segment normal failure for element $tag")
-    normal=ntuple(i->normal[i]/normal_norm,3)
-    jacobian=(derivative...,transverse...,normal...)
+    unit_normal=(normal[1]/normal_norm,normal[2]/normal_norm,normal[3]/normal_norm)
+    jacobian=(derivative...,unit_transverse...,unit_normal...)
     all(isfinite,jacobian) || error(
         "$caller: internal non-finite segment frame for element $tag")
     return jacobian,determinant,derivative

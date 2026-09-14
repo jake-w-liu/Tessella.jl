@@ -34,7 +34,9 @@ end
     @inbounds for i in 2:4
         nodes[i]<nodes[position] && (position=i)
     end
-    return ntuple(i->nodes[mod1(position+i-1,4)],4)
+    # explicit rotation: a closure over the reassigned `position` would box it
+    @inbounds return (nodes[position],nodes[mod1(position+1,4)],
+                      nodes[mod1(position+2,4)],nodes[mod1(position+3,4)])
 end
 
 @inline function _projected_point(coords,node::Int32,axes::NTuple{2,Int})
@@ -76,10 +78,12 @@ function _quad_quality(coords,nodes::NTuple{4,Int32})
         scale=max(scale,abs(coords[d,Int(node)]))
     end
     scale>0 || return 0.0
-    points=ntuple(4) do i
-        node=Int(nodes[i])
-        (coords[1,node]/scale,coords[2,node]/scale,coords[3,node]/scale)
-    end
+    # explicit points: a closure over the reassigned `scale` would box it
+    n1=Int(nodes[1]);n2=Int(nodes[2]);n3=Int(nodes[3]);n4=Int(nodes[4])
+    points=((coords[1,n1]/scale,coords[2,n1]/scale,coords[3,n1]/scale),
+            (coords[1,n2]/scale,coords[2,n2]/scale,coords[3,n2]/scale),
+            (coords[1,n3]/scale,coords[2,n3]/scale,coords[3,n3]/scale),
+            (coords[1,n4]/scale,coords[2,n4]/scale,coords[3,n4]/scale))
     edges=ntuple(i->_sub3(points[mod1(i+1,4)],points[i]),4)
     lengths=ntuple(i->_norm3(edges[i]),4)
     minimum_length=minimum(lengths);maximum_length=maximum(lengths)

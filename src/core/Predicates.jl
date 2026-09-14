@@ -33,13 +33,15 @@ export orient2, orient3, incircle, insphere
 export orient2_sos, orient3_sos, incircle_sos, insphere_sos
 export incircle3_sos
 export orient2_rat, orient3_rat, incircle_rat, insphere_rat
+export diametral_sign
 
 # ── Shewchuk static error bounds for IEEE-754 double ────────────────────────────
 # ε is the unit roundoff (half an ulp at 1.0). The A-bounds are the first-stage
 # static filters from Shewchuk, "Adaptive Precision Floating-Point Arithmetic and
-# Fast Robust Geometric Predicates" (1997), §4. We use the A-stage filter only,
-# then jump straight to exact arithmetic — correctness is identical to the full
-# adaptive scheme; only near-degenerate speed differs (a Stage-4 optimization).
+# Fast Robust Geometric Predicates" (1997), §4. orient2/orient3 run the A-stage
+# filter, then the exact expansion stages B–D (PredicatesAdaptive.jl), and only
+# fall back to exact dyadic BigInt arithmetic outside the expansion magnitude
+# guard; incircle/insphere use the A-stage filter and the BigInt path.
 const EPS = 2.0^-53
 const CCWERRBOUND_A  = (3.0  + 16.0  * EPS) * EPS
 const O3DERRBOUND_A  = (7.0  + 56.0  * EPS) * EPS
@@ -48,6 +50,8 @@ const ISPERRBOUND_A  = (16.0 + 224.0 * EPS) * EPS
 
 @inline _isign(x)::Int = x > 0 ? 1 : (x < 0 ? -1 : 0)
 @inline _normal_errbound(x::Float64) = isfinite(x)&&x>=floatmin(Float64)
+
+include("PredicatesAdaptive.jl") # stages B–D: exact expansions for orient2/orient3
 
 # Points are accepted either as tuples/vectors of coordinates.  Predicates are public
 # numerical contracts, so a non-finite or non-representable coordinate is an explicit
@@ -160,6 +164,10 @@ function orient2(a, b, c)::Int
     errbound = CCWERRBOUND_A * detsum
     (_normal_errbound(errbound)&&(det>=errbound||-det>=errbound)) && return _isign(det)
 
+    # Stages B–D: exact Float64 expansions (no allocation); the BigInt path
+    # remains for inputs outside the expansion magnitude guard.
+    adaptive = _orient2_adaptive(ax, ay, bx, by, cx, cy, detsum)
+    adaptive === nothing || return adaptive
     return _orient2_exact(ax, ay, bx, by, cx, cy)
 end
 
@@ -222,6 +230,11 @@ function orient3(a, b, c, d)::Int
     errbound = O3DERRBOUND_A * permanent
     (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
+    # Stages B–D: exact Float64 expansions (no allocation); the BigInt path
+    # remains for inputs outside the expansion magnitude guard.
+    adaptive = _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
+                                 permanent)
+    adaptive === nothing || return adaptive
     return _orient3_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz)
 end
 
@@ -803,6 +816,106 @@ function incircle_rat(a, b, c, d, ia::Integer, ib::Integer, ic::Integer, id::Int
     lp(p) = (p[1], p[2], lift(p))
     return _orient_nd_sos_exact((lp(a), lp(b), lp(c), lp(d)),
                                 idx, 3)
+end
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Exact diametral test — sign of (a-p)·(b-p) for 2-D Float64 points.
+# Error-free transformations expand every difference and product into exact
+# Float64 term pairs (Shewchuk 1997, TWO-DIFF / TWO-PRODUCT via fma); the sign of
+# the resulting 16-term sum is read from a nonoverlapping expansion built by
+# GROW-EXPANSION, whose most significant nonzero component carries the sign of
+# the whole.  No heap allocation on this path; a Rational{BigInt} evaluation
+# remains the fallback for non-finite intermediates (overflow).
+# ════════════════════════════════════════════════════════════════════════════════
+@inline function _two_sum(a::Float64,b::Float64)
+    x=a+b; bvirt=x-a; avirt=x-bvirt
+    return x,(a-avirt)+(b-bvirt)
+end
+@inline _two_diff(a::Float64,b::Float64)=_two_sum(a,-b)
+@inline function _two_product(a::Float64,b::Float64)
+    x=a*b
+    return x,fma(a,b,-x)
+end
+
+# Up to 16 products feed the expansion; each GROW step adds one component.
+const _DIAMETRAL_EXPANSION_CAPACITY=20
+# Smallest product magnitude whose fma error term is still exactly
+# representable: floatmin(Float64)·2^53.
+const _DIAMETRAL_PRODUCT_FLOOR=ldexp(floatmin(Float64),53)
+const _DIAMETRAL_SCRATCH=Vector{Vector{Float64}}()
+const _DIAMETRAL_SCRATCH_LOCK=ReentrantLock()
+
+@inline function _diametral_scratch()
+    tid=Threads.threadid()
+    scratch=_DIAMETRAL_SCRATCH
+    if tid>length(scratch)
+        lock(_DIAMETRAL_SCRATCH_LOCK) do
+            while length(scratch)<tid
+                push!(scratch,Vector{Float64}(undef,_DIAMETRAL_EXPANSION_CAPACITY))
+            end
+        end
+    end
+    @inbounds return scratch[tid]
+end
+
+# GROW-EXPANSION(h[1:n], b) in place; returns the new component count.
+@inline function _grow_expansion!(h::Vector{Float64},n::Int,b::Float64)
+    q=b
+    @inbounds for i in 1:n
+        q,h[i]=_two_sum(q,h[i])
+    end
+    @inbounds h[n+1]=q
+    return n+1
+end
+
+function _diametral_sign_rational(pa,pb,p)::Int
+    R=Rational{BigInt}
+    ax=R(pa[1])-R(p[1]);ay=R(pa[2])-R(p[2])
+    bx=R(pb[1])-R(p[1]);by=R(pb[2])-R(p[2])
+    value=ax*bx+ay*by
+    return value>0 ? 1 : (value<0 ? -1 : 0)
+end
+
+"""
+    diametral_sign(a, b, p) -> Int
+
+Exact sign of `(a-p)·(b-p)` for finite 2-D `Float64` points: `-1` when `p` lies
+strictly inside the diametral disk of segment `(a,b)`, `0` exactly on its
+circle, `+1` outside. Evaluated with error-free Float64 expansions (no heap
+allocation) and an exact rational fallback for overflowing intermediates.
+"""
+function diametral_sign(pa,pb,p)::Int
+    ax=Float64(pa[1]);ay=Float64(pa[2]);bx=Float64(pb[1]);by=Float64(pb[2])
+    px=Float64(p[1]);py=Float64(p[2])
+    (isfinite(ax)&&isfinite(ay)&&isfinite(bx)&&isfinite(by)&&isfinite(px)&&
+     isfinite(py)) || throw(ArgumentError("diametral_sign: points must be finite"))
+    dax,eax=_two_diff(ax,px);dbx,ebx=_two_diff(bx,px)
+    day,eay=_two_diff(ay,py);dby,eby=_two_diff(by,py)
+    (isfinite(dax)&&isfinite(dbx)&&isfinite(day)&&isfinite(dby)) ||
+        return _diametral_sign_rational(pa,pb,p)
+    h=_diametral_scratch();n=0
+    factors=((dax,dbx),(dax,ebx),(eax,dbx),(eax,ebx),
+             (day,dby),(day,eby),(eay,dby),(eay,eby))
+    @inbounds for k in 1:8
+        u,v=factors[k]
+        (u==0||v==0) && continue
+        hi,lo=_two_product(u,v)
+        # TWO-PRODUCT is exact only without overflow and without underflow of
+        # the error term: a product below 2^-969 (or one that vanished) may
+        # have lost bits to the subnormal range, so the rational path decides.
+        (isfinite(hi) && abs(hi)>=_DIAMETRAL_PRODUCT_FLOOR) ||
+            return _diametral_sign_rational(pa,pb,p)
+        n=_grow_expansion!(h,n,hi)
+        lo==0 || (n=_grow_expansion!(h,n,lo))
+    end
+    @inbounds for i in n:-1:1
+        component=h[i]
+        isfinite(component) || return _diametral_sign_rational(pa,pb,p)
+        component>0 && return 1
+        component<0 && return -1
+    end
+    return 0
 end
 
 end # module Predicates

@@ -648,7 +648,7 @@ function _write_polynomial_interpolant!(result,coordinates,point_count,
                 derivative_terms[axis,index]=
                     _monomial_derivative(u,v,w,exponent,axis)
             end
-            point_start=cursor
+            gradient_start=cursor
             empty!(fallback_indices)
             for node in 1:count,axis in 1:3
                 local_index=3node-3+axis
@@ -673,7 +673,7 @@ function _write_polynomial_interpolant!(result,coordinates,point_count,
                 for local_index in fallback_indices
                     node=(local_index-1)÷3+1
                     axis=(local_index-1)%3+1
-                    result[point_start+local_index]=_big_interpolant_dot(
+                    result[gradient_start+local_index]=_big_interpolant_dot(
                         data.high_precision_coefficients,node,
                         @view(big_terms[axis,:]),caller,point,node,axis)
                 end
@@ -682,7 +682,7 @@ function _write_polynomial_interpolant!(result,coordinates,point_count,
             for (index,exponent) in enumerate(data.exponents)
                 terms[index]=_monomial_value(u,v,w,exponent)
             end
-            point_start=cursor
+            value_start=cursor
             empty!(fallback_nodes)
             for node in 1:count
                 cursor+=1
@@ -701,7 +701,7 @@ function _write_polynomial_interpolant!(result,coordinates,point_count,
                     _monomial_value(ub,vb,wb,exponent)
                     for exponent in data.exponents]
                 for node in fallback_nodes
-                    result[point_start+node]=_big_interpolant_dot(
+                    result[value_start+node]=_big_interpolant_dot(
                         data.high_precision_coefficients,node,big_terms,
                         caller,point,node,0)
                 end
@@ -887,7 +887,7 @@ function _write_pyramid_interpolant!(result,coordinates,point_count,
         values,gradients=_pyramid_mode_data(
             spec.order,spec.serendipity,u,v,w,data.modes,gradient)
         if gradient
-            point_start=cursor
+            gradient_start=cursor
             empty!(fallback_indices)
             for node in 1:count,axis in 1:3
                 terms=@view gradients[axis,:]
@@ -909,13 +909,13 @@ function _write_pyramid_interpolant!(result,coordinates,point_count,
                 for local_index in fallback_indices
                     node=(local_index-1)÷3+1
                     axis=(local_index-1)%3+1
-                    result[point_start+local_index]=_big_interpolant_dot(
+                    result[gradient_start+local_index]=_big_interpolant_dot(
                         data.extended_coefficients,node,
                         @view(big_gradients[axis,:]),caller,point,node,axis)
                 end
             end
         else
-            point_start=cursor
+            value_start=cursor
             empty!(fallback_nodes)
             for node in 1:count
                 cursor+=1
@@ -933,7 +933,7 @@ function _write_pyramid_interpolant!(result,coordinates,point_count,
                     spec.order,spec.serendipity,BigFloat(u),BigFloat(v),
                     BigFloat(w),data.modes,false)
                 for node in fallback_nodes
-                    result[point_start+node]=_big_interpolant_dot(
+                    result[value_start+node]=_big_interpolant_dot(
                         data.extended_coefficients,node,big_values,
                         caller,point,node,0)
                 end

@@ -6610,16 +6610,19 @@ function _crossfield_transport(direction,normal,reference)
                                        direction[3]*normal[3]))
     magnitude=sqrt(projected[1]^2+projected[2]^2+projected[3]^2)
     magnitude>0 || return copy(reference)
-    projected=projected./magnitude
-    best=collect(projected)
-    best_dot=abs(sum(k->projected[k]*reference[k],1:3))
-    current=collect(projected)
+    # explicit arithmetic: closures over the reassigned `projected`/`current`
+    # boxed both and allocated on every transported direction
+    unit=(projected[1]/magnitude,projected[2]/magnitude,projected[3]/magnitude)
+    best=[unit[1],unit[2],unit[3]]
+    best_dot=abs(unit[1]*reference[1]+unit[2]*reference[2]+unit[3]*reference[3])
+    current=[unit[1],unit[2],unit[3]]
     for _ in 1:3
         rotated=_model_cross3(normal,current)
         rmag=sqrt(rotated[1]^2+rotated[2]^2+rotated[3]^2)
         rmag>0 || break
         current=[rotated[1]/rmag,rotated[2]/rmag,rotated[3]/rmag]
-        dot=abs(sum(k->current[k]*reference[k],1:3))
+        dot=abs(current[1]*reference[1]+current[2]*reference[2]+
+                current[3]*reference[3])
         dot>best_dot && (best=copy(current);best_dot=dot)
     end
     return best

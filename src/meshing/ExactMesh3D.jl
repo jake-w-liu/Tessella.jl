@@ -83,19 +83,20 @@ function _exact_points(raw,point_limit::Int,caller::AbstractString)
         length(point) == 3 || throw(ArgumentError(
             "$caller: point $cursor must have exactly 3 coordinates"))
         values = Tuple(point)
+        index = cursor # single-assignment copy: the closure over `cursor` boxed it
         out[cursor] = ntuple(3) do coordinate
             value = values[coordinate]
             value isa Bool && throw(ArgumentError(
-                "$caller: point $cursor coordinate $coordinate must not be Bool"))
+                "$caller: point $index coordinate $coordinate must not be Bool"))
             (value isa Integer || value isa Rational) || throw(ArgumentError(
-                "$caller: point $cursor coordinate $coordinate must be an " *
+                "$caller: point $index coordinate $coordinate must be an " *
                 "integer or Rational"))
             try
                 RB(value)
             catch err
                 err isa InterruptException && rethrow()
                 throw(ArgumentError(
-                    "$caller: point $cursor coordinate $coordinate cannot be " *
+                    "$caller: point $index coordinate $coordinate cannot be " *
                     "represented as Rational{BigInt}: $(sprint(showerror, err))"))
             end
         end

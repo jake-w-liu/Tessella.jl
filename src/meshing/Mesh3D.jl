@@ -231,6 +231,16 @@ mutable struct Triangulation3
     nreal::Int
     last::Int32
     vtet::Vector{Int32}        # per real vertex: an incident tet (hint)
+    # Reusable Bowyer–Watson scratch owned by the triangulation (see
+    # `insert_point3!`): cavity tets, per-slot cavity marks stamped with the
+    # current epoch, cavity boundary faces, the search stack, and the spoke
+    # matching table.  Fresh per-insertion containers cost ~4.6 KB per point.
+    cavity::Vector{Int32}
+    mark::Vector{Int32}
+    epoch::Int32
+    boundary::Vector{NTuple{4,Int32}}
+    stack::Vector{Int32}
+    spoke::Dict{NTuple{2,Int32},Tuple{Int32,Int32}}
 end
 
 @inline _pt(T::Triangulation3, i) = @inbounds (T.x[i], T.y[i], T.z[i])
@@ -380,7 +390,9 @@ function Triangulation3(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Flo
         (isfinite(xs[i]) && isfinite(ys[i]) && isfinite(zs[i])) ||
             throw(ArgumentError("Triangulation3: point $i has a non-finite coordinate"))
     end
-    return Triangulation3(xs, ys, zs, Int32[], Int32[], Bool[], Int32[], n, Int32(0), zeros(Int32,n))
+    return Triangulation3(xs, ys, zs, Int32[], Int32[], Bool[], Int32[], n, Int32(0), zeros(Int32,n),
+                          Int32[], Int32[], Int32(0), NTuple{4,Int32}[], Int32[],
+                          Dict{NTuple{2,Int32},Tuple{Int32,Int32}}())
 end
 
 # first non-coplanar 4 real vertices → 1 real tet + 4 ghost tets; returns placed set
@@ -578,17 +590,31 @@ function insert_point3!(T::Triangulation3, vid::Integer; newtets::Union{Nothing,
     T.vtet[vid] == 0 || throw(ArgumentError("insert_point3!: vertex $vid is already inserted"))
     px,py,pz = _pt(T, vid)
     t0 = locate3(T, px, py, pz, vid)
-    cavity = Int32[t0]; incav = Set{Int32}(); push!(incav, t0)
-    boundary = Tuple{Int32,Int32,Int32,Int32}[]   # (f1,f2,f3, outside neighbour)
-    stack = Int32[t0]
+    # Epoch-stamped marks replace a per-insertion Set: a slot is in the cavity
+    # iff its mark equals the current epoch.  Marks grow with tet storage and
+    # are cleared only when the epoch counter wraps.
+    nslots = length(T.alive)
+    if length(T.mark) < nslots
+        previous = length(T.mark)
+        resize!(T.mark, nslots)
+        @inbounds fill!(@view(T.mark[previous+1:nslots]), Int32(0))
+    end
+    if T.epoch == typemax(Int32)
+        fill!(T.mark, Int32(0)); T.epoch = Int32(0)
+    end
+    T.epoch += Int32(1); epoch = T.epoch
+    cavity = T.cavity; boundary = T.boundary; stack = T.stack; mark = T.mark
+    empty!(cavity); empty!(boundary); empty!(stack)
+    push!(cavity, t0); push!(stack, t0)
+    @inbounds mark[t0] = epoch
     @inbounds while !isempty(stack)
         t = pop!(stack)
         for k in 1:4
             nb = _nbr(T, t, k)
-            (nb != 0 && (nb in incav)) && continue
+            (nb != 0 && mark[nb] == epoch) && continue
             inside = nb != 0 && _in_sphere(T, nb, vid)
             if inside
-                push!(incav, nb); push!(cavity, nb); push!(stack, nb)
+                mark[nb] = epoch; push!(cavity, nb); push!(stack, nb)
             else
                 f = _face(T, t, k)
                 push!(boundary, (f[1], f[2], f[3], nb))
@@ -607,7 +633,7 @@ function _retriangulate3!(T::Triangulation3, boundary, vid::Int32, newtets)
     # face containing vid is a "spoke" shared with a sibling new tet; siblings are
     # matched by their non-vid edge (which may include GHOST). Uniform handling ⇒
     # correct hull extension when vid lands outside the current hull.
-    spoke = Dict{NTuple{2,Int32}, Tuple{Int32,Int32}}()
+    spoke = T.spoke; empty!(spoke)
     anyt = Int32(0)
     for (f1,f2,f3,nb) in boundary
         hasG = _is_ghost_v(f1) || _is_ghost_v(f2) || _is_ghost_v(f3)
@@ -700,8 +726,14 @@ function _perturb3!(x::Vector{Float64}, y::Vector{Float64}, z::Vector{Float64})
     eps = 1e-8 * diag
     @inbounds for i in 1:n
         s = UInt64(i)*0x9E3779B97F4A7C15 + 0xD1B54A32D192ED03
-        r() = (s ⊻= s<<13; s ⊻= s>>7; s ⊻= s<<17; (Float64(s >> 11)/Float64(1<<53)) - 0.5)
-        x[i] += eps*r(); y[i] += eps*r(); z[i] += eps*r()
+        # xorshift64 steps written out: a closure mutating `s` boxed it and
+        # allocated on every draw.
+        s ⊻= s<<13; s ⊻= s>>7; s ⊻= s<<17
+        x[i] += eps*((Float64(s >> 11)/Float64(1<<53)) - 0.5)
+        s ⊻= s<<13; s ⊻= s>>7; s ⊻= s<<17
+        y[i] += eps*((Float64(s >> 11)/Float64(1<<53)) - 0.5)
+        s ⊻= s<<13; s ⊻= s>>7; s ⊻= s<<17
+        z[i] += eps*((Float64(s >> 11)/Float64(1<<53)) - 0.5)
         (isfinite(x[i]) && isfinite(y[i]) && isfinite(z[i])) ||
             throw(ArgumentError("delaunay3d: deterministic perturbation overflowed at point $i"))
     end
@@ -3585,7 +3617,10 @@ function _rb_onseg(Px,Py,Pz,u::Int32,v::Int32,nreal::Int)
     fu=_rbptP(Px,Py,Pz,u); fv=_rbptP(Px,Py,Pz,v)
     lo=(min(fu[1],fv[1]),min(fu[2],fv[2]),min(fu[3],fv[3]))
     hi=(max(fu[1],fv[1]),max(fu[2],fv[2]),max(fu[3],fv[3]))
-    pu=_rbratP(Px,Py,Pz,u); pv=_rbratP(Px,Py,Pz,v); d=_rbsub(pv,pu); dd=_rbdot(d,d)
+    # Rational endpoint data is formed lazily: most segments have no interior
+    # vertex and never need it.
+    R=Rational{BigInt}
+    pu=(zero(R),zero(R),zero(R));d=pu;dd=zero(R);have_rational=false
     out=Tuple{Rational{BigInt},Int32}[]
     for w in 1:nreal
         (w==u||w==v) && continue
@@ -3598,6 +3633,10 @@ function _rb_onseg(Px,Py,Pz,u::Int32,v::Int32,nreal::Int)
         (orient2((fu[2],fu[3]),(fw[2],fw[3]),(fv[2],fv[3]))==0 &&
          orient2((fu[1],fu[3]),(fw[1],fw[3]),(fv[1],fv[3]))==0 &&
          orient2((fu[1],fu[2]),(fw[1],fw[2]),(fv[1],fv[2]))==0) || continue
+        if !have_rational
+            pu=_rbratP(Px,Py,Pz,u); pv=_rbratP(Px,Py,Pz,v)
+            d=_rbsub(pv,pu); dd=_rbdot(d,d); have_rational=true
+        end
         pw=_rbratP(Px,Py,Pz,w)
         s=_rbdot(_rbsub(pw,pu),d); (s>0&&s<dd)||continue
         push!(out,(s//dd,Int32(w)))

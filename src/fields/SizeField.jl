@@ -249,47 +249,79 @@ function _build_distance_bvh(points,segments,triangles)
             centroid[k,id]=signbit(lo)==signbit(hi) ? lo+(hi-lo)/2 : lo/2+hi/2
         end
     end
-    order=collect(1:n)
-    lows=NTuple{3,Float64}[];highs=NTuple{3,Float64}[]
-    left=Int[];right=Int[];firsts=Int[];counts=Int[]
-    function range_bounds(first,last)
-        lo=(Inf,Inf,Inf);hi=(-Inf,-Inf,-Inf)
-        @inbounds for pos in first:last
-            id=order[pos]
-            lo=ntuple(k -> min(lo[k],primitive_lo[k,id]),3)
-            hi=ntuple(k -> max(hi[k],primitive_hi[k,id]),3)
-        end
-        return lo,hi
+    return _aabb_hierarchy(n,primitive_lo,primitive_hi,centroid,
+                           _DISTANCE_BVH_LEAF_SIZE)
+end
+
+# Shared deterministic AABB hierarchy builder over 3×n primitive boxes and
+# centroids.  A top-level recursive function with an explicit builder record:
+# the former recursive local closure was boxed together with its accumulated
+# bound tuples, allocating on every tree node.
+struct _AABBBuilder
+    order::Vector{Int}
+    lows::Vector{NTuple{3,Float64}}
+    highs::Vector{NTuple{3,Float64}}
+    left::Vector{Int}
+    right::Vector{Int}
+    firsts::Vector{Int}
+    counts::Vector{Int}
+    primitive_lo::Matrix{Float64}
+    primitive_hi::Matrix{Float64}
+    centroid::Matrix{Float64}
+    leaf_size::Int
+end
+
+function _aabb_hierarchy(n::Int,primitive_lo::Matrix{Float64},
+                         primitive_hi::Matrix{Float64},centroid::Matrix{Float64},
+                         leaf_size::Int)
+    builder=_AABBBuilder(collect(1:n),NTuple{3,Float64}[],NTuple{3,Float64}[],
+                         Int[],Int[],Int[],Int[],primitive_lo,primitive_hi,
+                         centroid,leaf_size)
+    _aabb_build!(builder,1,n)
+    return builder.order,builder.lows,builder.highs,builder.left,builder.right,
+           builder.firsts,builder.counts
+end
+
+function _aabb_range_bounds(b::_AABBBuilder,first::Int,last::Int)
+    lo1=Inf;lo2=Inf;lo3=Inf;hi1=-Inf;hi2=-Inf;hi3=-Inf
+    order=b.order;primitive_lo=b.primitive_lo;primitive_hi=b.primitive_hi
+    @inbounds for pos in first:last
+        id=order[pos]
+        lo1=min(lo1,primitive_lo[1,id]);lo2=min(lo2,primitive_lo[2,id])
+        lo3=min(lo3,primitive_lo[3,id]);hi1=max(hi1,primitive_hi[1,id])
+        hi2=max(hi2,primitive_hi[2,id]);hi3=max(hi3,primitive_hi[3,id])
     end
-    function build!(first,last)
-        node=length(left)+1
-        push!(lows,(0.0,0.0,0.0));push!(highs,(0.0,0.0,0.0))
-        push!(left,0);push!(right,0);push!(firsts,0);push!(counts,0)
-        count=last-first+1
-        if count<=_DISTANCE_BVH_LEAF_SIZE
-            lows[node],highs[node]=range_bounds(first,last)
-            firsts[node]=first;counts[node]=count
-            return node
-        end
-        clo=(Inf,Inf,Inf);chi=(-Inf,-Inf,-Inf)
-        @inbounds for pos in first:last
-            id=order[pos]
-            clo=ntuple(k -> min(clo[k],centroid[k,id]),3)
-            chi=ntuple(k -> max(chi[k],centroid[k,id]),3)
-        end
-        ext=ntuple(k -> chi[k]-clo[k],3)
-        axis=ext[1]>=ext[2] ? (ext[1]>=ext[3] ? 1 : 3) :
-             (ext[2]>=ext[3] ? 2 : 3)
-        sort!(view(order,first:last);by=id -> centroid[axis,id],alg=QuickSort)
-        mid=(first+last)>>>1
-        l=build!(first,mid);r=build!(mid+1,last)
-        left[node]=l;right[node]=r
-        lows[node]=ntuple(k -> min(lows[l][k],lows[r][k]),3)
-        highs[node]=ntuple(k -> max(highs[l][k],highs[r][k]),3)
+    return (lo1,lo2,lo3),(hi1,hi2,hi3)
+end
+
+function _aabb_build!(b::_AABBBuilder,first::Int,last::Int)
+    node=length(b.left)+1
+    push!(b.lows,(0.0,0.0,0.0));push!(b.highs,(0.0,0.0,0.0))
+    push!(b.left,0);push!(b.right,0);push!(b.firsts,0);push!(b.counts,0)
+    count=last-first+1
+    if count<=b.leaf_size
+        b.lows[node],b.highs[node]=_aabb_range_bounds(b,first,last)
+        b.firsts[node]=first;b.counts[node]=count
         return node
     end
-    build!(1,n)
-    return order,lows,highs,left,right,firsts,counts
+    clo1=Inf;clo2=Inf;clo3=Inf;chi1=-Inf;chi2=-Inf;chi3=-Inf
+    order=b.order;centroid=b.centroid
+    @inbounds for pos in first:last
+        id=order[pos]
+        clo1=min(clo1,centroid[1,id]);clo2=min(clo2,centroid[2,id])
+        clo3=min(clo3,centroid[3,id]);chi1=max(chi1,centroid[1,id])
+        chi2=max(chi2,centroid[2,id]);chi3=max(chi3,centroid[3,id])
+    end
+    ext1=chi1-clo1;ext2=chi2-clo2;ext3=chi3-clo3
+    axis=ext1>=ext2 ? (ext1>=ext3 ? 1 : 3) : (ext2>=ext3 ? 2 : 3)
+    sort!(view(order,first:last);by=id -> centroid[axis,id],alg=QuickSort)
+    mid=(first+last)>>>1
+    l=_aabb_build!(b,first,mid);r=_aabb_build!(b,mid+1,last)
+    b.left[node]=l;b.right[node]=r
+    ll=b.lows[l];lr=b.lows[r];hl=b.highs[l];hr=b.highs[r]
+    b.lows[node]=(min(ll[1],lr[1]),min(ll[2],lr[2]),min(ll[3],lr[3]))
+    b.highs[node]=(max(hl[1],hr[1]),max(hl[2],hr[2]),max(hl[3],hr[3]))
+    return node
 end
 
 function DistanceField(mesh::Mesh; include_points::Bool=true,

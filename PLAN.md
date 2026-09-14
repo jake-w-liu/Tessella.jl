@@ -30,8 +30,10 @@ meshing backend would not resolve the ASCENT failure that motivated Tessella.
 ```text
 Tessella
 ├── core/
-│   ├── Predicates  adaptive exact, subnormal-safe orient/incircle/insphere,
-│   │               exact rationals, and SoS
+│   ├── Predicates  adaptive exact orient2/orient3 (Shewchuk stages A–D in
+│   │               allocation-free Float64 expansions with a guarded exact-dyadic
+│   │               fallback), filtered incircle/insphere with exact-dyadic
+│   │               fallback, exact diametral test, exact rationals, and SoS
 │   ├── MeshTypes   compact simplex storage, topology, scale-robust quality,
 │   │               CRC, and mutation-safe validation
 │   ├── MeshEntityTopology deterministic global edge/face identifiers and insertion
@@ -114,7 +116,13 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 4. Size-control operations verify their output bound and preserve lower-dimensional
    cells, physical tags, conformity, and region volume.
 5. Resource counts are checked before conversion/allocation; connectivity uses Int32,
-   compact flat records, reusable scratch, and bounded retry loops.
+   compact flat records, reusable scratch, and bounded retry loops. Hot kernels are
+   allocation-audited: no closure-boxed locals (`Core.Box` in lowered code is
+   treated as a defect), per-element decisions use adaptive predicates rather than
+   `Rational{BigInt}`, and exact rational or `BigFloat` arithmetic is reserved for
+   guarded fallbacks and certificates. The 2-D Ruppert loop resumes its quality
+   scan from the lowest slot that may have changed and caches the sorted
+   constraint list, reproducing the full-scan insertion order exactly.
 6. File output is validated before an atomic replacement of the destination.
 
 ## Completed baseline stages

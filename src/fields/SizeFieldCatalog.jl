@@ -778,9 +778,11 @@ function _metric_boundary_optimize(a,b,initial,shift,lo,hi,fixed,forced)
         (isfinite(ascent) && ascent>16eps(Float64)) || return y
         alpha=1.0; accepted=false
         for _ in 1:40
-            trial=ntuple(k->y[k]+alpha*step[k],3)
-            trial=_metric_boundary_clamp(trial,lo,hi,fixed,forced)
-            displacement=ntuple(k->trial[k]-y[k],3)
+            # explicit tuples: closures over the reassigned `y`, `alpha`, and
+            # `trial` boxed all three
+            raw_trial=(y[1]+alpha*step[1],y[2]+alpha*step[2],y[3]+alpha*step[3])
+            trial=_metric_boundary_clamp(raw_trial,lo,hi,fixed,forced)
+            displacement=(trial[1]-y[1],trial[2]-y[2],trial[3]-y[3])
             directional=gradient[1]*displacement[1]+gradient[2]*displacement[2]+
                         gradient[3]*displacement[3]
             if directional>0
@@ -814,15 +816,17 @@ function _metric_fixed_diagonal_search(a::Metric3,b::Metric3)
     for k in 1:3
         _metric_boundary_interval_disjoint(a,b,k) && return nothing,:impossible
     end
-    lo,hi=_metric_boundary_box(a,b)
-    any(k->lo[k]>hi[k],1:3) && return nothing,:search
+    box_lo,box_hi=_metric_boundary_box(a,b)
+    (box_lo[1]>box_hi[1] || box_lo[2]>box_hi[2] || box_lo[3]>box_hi[3]) &&
+        return nothing,:search
     fixed=ntuple(k->_metric_boundary_forces(a,k)||_metric_boundary_forces(b,k),3)
     forced=ntuple(3) do k
         source=_metric_boundary_forces(a,k) ? a : b
         _metric_boundary_scaled(_metric_offdiagonal(source,k))
     end
-    lo=ntuple(k->fixed[k] ? forced[k] : lo[k],3)
-    hi=ntuple(k->fixed[k] ? forced[k] : hi[k],3)
+    # distinct names: reassigning `lo`/`hi` captured by the closures boxed them
+    lo=ntuple(k->fixed[k] ? forced[k] : box_lo[k],3)
+    hi=ntuple(k->fixed[k] ? forced[k] : box_hi[k],3)
     offa=ntuple(k->_metric_boundary_scaled(_metric_offdiagonal(a,k)),3)
     offb=ntuple(k->_metric_boundary_scaled(_metric_offdiagonal(b,k)),3)
     starts=(ntuple(k->_metric_midpoint(lo[k],hi[k]),3),
@@ -2680,47 +2684,8 @@ function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
             centroid[k,id]=signbit(lo)==signbit(hi) ? lo+(hi-lo)/2 : lo/2+hi/2
         end
     end
-    order=collect(1:ncells)
-    lows=NTuple{3,Float64}[];highs=NTuple{3,Float64}[]
-    left=Int[];right=Int[];firsts=Int[];counts=Int[]
-    function range_bounds(first,last)
-        lo=(Inf,Inf,Inf);hi=(-Inf,-Inf,-Inf)
-        @inbounds for pos in first:last
-            id=order[pos]
-            lo=ntuple(k->min(lo[k],primitive_lo[k,id]),3)
-            hi=ntuple(k->max(hi[k],primitive_hi[k,id]),3)
-        end
-        return lo,hi
-    end
-    function build!(first,last)
-        node=length(left)+1
-        push!(lows,(0.0,0.0,0.0));push!(highs,(0.0,0.0,0.0))
-        push!(left,0);push!(right,0);push!(firsts,0);push!(counts,0)
-        count=last-first+1
-        if count<=_POSTVIEW_BVH_LEAF_SIZE
-            lows[node],highs[node]=range_bounds(first,last)
-            firsts[node]=first;counts[node]=count
-            return node
-        end
-        clo=(Inf,Inf,Inf);chi=(-Inf,-Inf,-Inf)
-        @inbounds for pos in first:last
-            id=order[pos]
-            clo=ntuple(k->min(clo[k],centroid[k,id]),3)
-            chi=ntuple(k->max(chi[k],centroid[k,id]),3)
-        end
-        ext=ntuple(k->chi[k]-clo[k],3)
-        axis=ext[1]>=ext[2] ? (ext[1]>=ext[3] ? 1 : 3) :
-             (ext[2]>=ext[3] ? 2 : 3)
-        sort!(view(order,first:last);by=id->centroid[axis,id],alg=QuickSort)
-        mid=(first+last)>>>1
-        l=build!(first,mid);r=build!(mid+1,last)
-        left[node]=l;right[node]=r
-        lows[node]=ntuple(k->min(lows[l][k],lows[r][k]),3)
-        highs[node]=ntuple(k->max(highs[l][k],highs[r][k]),3)
-        return node
-    end
-    build!(1,ncells)
-    return order,lows,highs,left,right,firsts,counts
+    return _aabb_hierarchy(ncells,primitive_lo,primitive_hi,centroid,
+                           _POSTVIEW_BVH_LEAF_SIZE)
 end
 
 function _postview_values(values,n::Int,time::Int)

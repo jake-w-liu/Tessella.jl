@@ -45,6 +45,7 @@ using Tessella
 
     # Stage 0 — Foundations (CRC-gated, DEVELOPMENT.md discipline).
     include("core/predicates_test.jl")   # exact predicates vs exact-rational oracle
+    include("core/allocation_audit_test.jl") # closure-boxing scan + hot-kernel allocation bounds
     include("core/meshtypes_test.jl")    # mesh container, topology, quality, checksum
     include("core/mesh_entity_topology_test.jl") # automatic/manual global edge/face ids
     include("core/mesh_point_location_test.jl") # robust simplex inversion and AABB lookup

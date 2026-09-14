@@ -619,12 +619,14 @@ function _certify_positive_jacobian!(coefficients, coords, nodes, cell::Int)
     (isfinite(scale) && scale > 0) || throw(ArgumentError(
         "$_CALLER: hexahedron $cell has no representable extent"))
 
+    # single-assignment copy: the closure over the accumulated `scale` boxed it
+    extent = scale
     interval_points = ntuple(8) do slot
         point = _node(coords, nodes[slot])
         ntuple(3) do dimension
             numerator = _isub(_Interval(point[dimension], point[dimension]),
                               _Interval(origin[dimension], origin[dimension]))
-            _idiv_positive(numerator, scale)
+            _idiv_positive(numerator, extent)
         end
     end
     u = interval_points[2]

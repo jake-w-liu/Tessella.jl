@@ -1111,18 +1111,21 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real,
         # `value-origin` on the rare extreme-span path.
         exact_bucket=robust_diagonal!==nothing || cells>2.0^52 || !isfinite(inv)
     end
+    # single-assignment copies: closures over the accumulated `lo`, `tol`, and
+    # `exact_bucket` boxed them and allocated on every welded vertex
+    corner=lo; weld_tol=tol; exact_buckets=exact_bucket
     function bucket_component(value::Float64,origin::Float64)
-        if exact_bucket
+        if exact_buckets
             ratio=(Rational{BigInt}(value)-Rational{BigInt}(origin)) /
-                  Rational{BigInt}(tol)
+                  Rational{BigInt}(weld_tol)
             return floor(Int,ratio)
         end
         return floor(Int,(value-origin)*inv)
     end
-    keyof(p)=(bucket_component(p[1],lo[1]),bucket_component(p[2],lo[2]),
-              bucket_component(p[3],lo[3]))
+    keyof(p)=(bucket_component(p[1],corner[1]),bucket_component(p[2],corner[2]),
+              bucket_component(p[3],corner[3]))
     function getid(p)
-        if tol == 0
+        if weld_tol == 0
             key=(p[1]==0 ? 0.0 : p[1],p[2]==0 ? 0.0 : p[2],p[3]==0 ? 0.0 : p[3])
             return get!(exactmap,key) do
                 length(xs)<node_limit || throw(ArgumentError(
@@ -1135,7 +1138,7 @@ function _weld_triangles(tris_xyz::Vector{NTuple{9,Float64}}, reltol::Real,
             ids=get(buckets,(key[1]+dx,key[2]+dy,key[3]+dz),nothing)
             ids === nothing && continue
             for id in ids
-                hypot(p[1]-xs[id],p[2]-ys[id],p[3]-zs[id]) <= tol && return id
+                hypot(p[1]-xs[id],p[2]-ys[id],p[3]-zs[id]) <= weld_tol && return id
             end
         end
         length(xs)<node_limit || throw(ArgumentError(
