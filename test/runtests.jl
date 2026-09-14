@@ -79,6 +79,7 @@ using Tessella
     include("geometry/geo_transform_test.jl") # Translate/Dilate/Rotate/Symmetry + Duplicata + coherence
     include("geometry/geo_extrude_test.jl")  # translational Extrude + params + lateral merge
     include("geometry/geo_curved_test.jl")   # circle/ellipse arcs, ruled surfaces, .geo curved statements
+    include("geometry/occ_primitives_test.jl") # materialized Cylinder/Sphere/Cone OCC boundaries
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
     include("geometry/geo_set_max_tag_test.jl") # factory-aware max-tag counters

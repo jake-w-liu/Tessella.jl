@@ -863,15 +863,32 @@ function _validate_surface_loop(m::GeoModel,surfaces,caller::AbstractString)
     end
     isempty(curve_incidence) && throw(ArgumentError(
         "$caller: a surface loop must contain boundary curves"))
+    # Two incidence patterns extend the planar-manifold rule for OCC-style
+    # solids: a periodic face's seam curve occurs twice on its own surface in
+    # opposite directions, and a degenerate pole/apex edge occurs once. Both
+    # curve kinds only arise from materialized primitive construction.
     for curve in sort!(collect(keys(curve_incidence)))
         count=curve_incidence[curve]
         owners=curve_owners[curve]
-        (count==2 && length(owners)==2) || throw(ArgumentError(
+        count==2 && length(owners)==2 && continue
+        a,b=m.curves[curve]
+        _curve_type(m,curve)==:degenerate && a==b && continue
+        if count==2 && length(owners)==1 &&
+                _surface_type(m,only(owners))!=:plane
+            surface=only(owners)
+            signs=Int[]
+            for loop in m.surfaces[surface], signed in m.loops[loop]
+                abs(signed)==curve && push!(signs,sign(signed))
+            end
+            sort!(signs)==[-1,1] && continue
+        end
+        throw(ArgumentError(
             "$caller: Curve[$curve] must occur once on each of two distinct " *
             "surfaces (found $count occurrences on $(length(owners)) surfaces)"))
     end
     adjacency=Dict(surface=>Set{Int}() for surface in unsigned)
     for owners in values(curve_owners)
+        length(owners)==2 || continue
         first_surface,second_surface=Tuple(owners)
         push!(adjacency[first_surface],second_surface)
         push!(adjacency[second_surface],first_surface)
@@ -894,7 +911,10 @@ end
 Add one connected closed shell of existing planar surfaces. Signed surface tags
 are retained for entity-boundary metadata. Every shell curve must be shared by
 exactly two distinct surfaces; open, branched, disconnected, or repeated shells
-are rejected before the model is changed.
+are rejected before the model is changed. Two OCC-style exceptions are allowed:
+a periodic (non-plane) face may carry a seam curve twice in opposite
+directions, and a degenerate pole/apex edge may occur once — both patterns only
+arise from materialized primitive construction.
 """
 function add_surface_loop!(m::GeoModel,surfaces;tag::Integer=0)
     caller="add_surface_loop!"
@@ -1047,6 +1067,16 @@ end
 
 Add a cylinder whose base center is `(x,y,z)` and whose finite, nonzero axis
 vector is `(dx,dy,dz)`. `radius` must be finite and positive.
+
+Like Gmsh's OpenCASCADE `addCylinder`, the solid is a real boundary
+representation: two rim Points, two closed-circle edges and a seam Line, a
+`Cylinder` lateral face plus `Plane` caps, and one Surface Loop, all allocated
+from the shared per-dimension tag namespaces and queryable through the entity,
+boundary, and adjacency APIs. Entity order, wire signs `[-top,-seam,bottom,
+seam]`, and shell signs `[lateral,+top,-bottom]` match Gmsh 4.15.2's OCC
+layout. The compact `cylinders` encoding is retained alongside the topology;
+volume meshing keeps flowing through the native analytic tessellation rather
+than the planar-shell path.
 """
 function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
     caller="add_cylinder!"
@@ -1057,7 +1087,8 @@ function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
-    m.volumes[t]=Int[]
+    shell=_materialize_cylinder!(m,c,a,r,h)
+    m.volumes[t]=[shell]
     m.cylinders[t]=(center=c, axis=a, radius=r, height=h)
     return t
 end
@@ -1066,6 +1097,12 @@ end
     add_sphere!(model, x, y, z, radius; tag=0) -> tag
 
 Add a sphere with a finite center and finite positive radius.
+
+Like Gmsh's OpenCASCADE `addSphere`, the solid materializes two pole Points,
+a degenerate edge on each pole, a meridian Circle edge, and one `Sphere` face
+bounded by `[-degN,-meridian,degS,meridian]` — queryable through the entity,
+boundary, and adjacency APIs. The compact `spheres` encoding is retained for
+native meshing and bounds.
 """
 function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
     caller="add_sphere!"
@@ -1074,7 +1111,8 @@ function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
-    m.volumes[t]=Int[]
+    shell=_materialize_sphere!(m,c,r)
+    m.volumes[t]=[shell]
     m.spheres[t]=(center=c, radius=r)
     return t
 end
@@ -1084,6 +1122,12 @@ end
 
 Add a cone or conical frustum along the finite, nonzero axis `(dx,dy,dz)`.
 Both radii must be finite and non-negative, and at least one must be positive.
+
+Like Gmsh's OpenCASCADE `addCone`, the boundary representation matches the
+cylinder layout except that a zero-radius end collapses to a degenerate apex
+edge and loses its Plane cap: a frustum gets `[lateral,+top,-bottom]`, `r1=0`
+gets `[lateral,+top]`, and `r2=0` gets `[lateral,-bottom]`. The compact `cones`
+encoding is retained for native meshing and bounds.
 """
 function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     caller="add_cone!"
@@ -1096,7 +1140,8 @@ function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
         "$caller: radii must be non-negative with at least one positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
-    m.volumes[t]=Int[]
+    shell=_materialize_cone!(m,c,a,ra,rb,h)
+    m.volumes[t]=[shell]
     m.cones[t]=(center=c, axis=a, r1=ra, r2=rb, height=h)
     return t
 end
@@ -2664,6 +2709,8 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
         _model_require_plane_surface(m,surface,caller,"plane geometry")
     end
     point_tags=Int[]
+    occ_samples=NTuple{3,Float64}[]
+    occ_sample_tags=Int[]
     for loop in m.surfaces[surface]
         haskey(m.loops,loop) || throw(ArgumentError(
             "$caller: Surface[$surface] references unknown Loop[$loop]"))
@@ -2680,10 +2727,23 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
                     "$caller: Curve[$curve] references unknown Point[$point]"))
                 push!(point_tags,point)
             end
+            # An OCC circle edge collapses to a single endpoint; evaluated rim
+            # samples stand in for the missing vertices so a cap bounded by one
+            # closed circle still yields three non-collinear plane points.
+            occ=_occ_geometry(m,curve)
+            if occ!==nothing && occ.occ===:circle
+                for k in 0:2
+                    push!(occ_samples,_occ_circle_point(
+                        occ,occ.t0+(occ.t1-occ.t0)*(k/3)))
+                    push!(occ_sample_tags,a)
+                end
+            end
         end
     end
     unique!(point_tags)
     coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    append!(point_tags,occ_sample_tags)
+    append!(coordinates,occ_samples)
     anchor,second,third,axes=_model_surface_projection(
         coordinates,point_tags,surface,caller)
     u=(second[1]-anchor[1],second[2]-anchor[2],second[3]-anchor[3])
@@ -3164,8 +3224,26 @@ function _model_volume_embedding_inventory(
     point_tags=Int[];curve_tags=Int[];surface_tags=Int[]
     surface_embedded_points=Dict{Int,Vector{Int}}()
     surface_embedded_curves=Dict{Int,Vector{Int}}()
-    boundary_surfaces=_model_volume_boundary_surfaces(m,volume,caller)
-    boundary_set=Set(abs.(boundary_surfaces))
+    real_boundaries=_model_volume_boundary_surfaces(m,volume,caller)
+    boundary_set=Set(abs.(real_boundaries))
+    # A materialized curved primitive keeps its boundary entities for queries
+    # but meshes through the analytic encoding: the boundary's curves and
+    # surfaces are not classified into the tetrahedron mesh. Embedded entities
+    # on those surfaces need curved-surface meshing — fail rather than drop.
+    boundary_surfaces=if _implicit_volume_surface(m,volume)
+        for surface in boundary_set
+            nested_points,nested_curves=
+                _model_surface_embedding_tags(m,surface,caller)
+            (isempty(nested_points) && isempty(nested_curves)) ||
+                throw(ArgumentError(
+                    "$caller: Surface[$surface] bounds primitive " *
+                    "Volume[$volume] and carries embedded entities; curved " *
+                    "surface meshing is unsupported"))
+        end
+        Int[]
+    else
+        real_boundaries
+    end
     function register_surface!(surface::Int)
         haskey(m.surfaces,surface) || throw(ArgumentError(
             "$caller: unknown Surface[$surface]"))
@@ -3475,7 +3553,8 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     all(iszero,mesh.tet_tag) || throw(ArgumentError(
         "$caller: input tetrahedron tags must be zero; physical ownership comes from the model"))
 
-    explicit_geometry=isempty(m.volumes[volume]) ? nothing :
+    explicit_geometry=(isempty(m.volumes[volume]) ||
+        _implicit_volume_surface(m,volume)) ? nothing :
         _model_explicit_volume_geometry(m,volume,caller)
     domain_surface=explicit_geometry===nothing ?
         _volume_surface(m,volume,caller) : explicit_geometry.surface
@@ -4651,6 +4730,13 @@ function _model_explicit_volume_geometry(
             comparison_scale=comparison_scale)
 end
 
+# A volume carrying a native curved-solid encoding meshes through the analytic
+# tessellation even though its OCC boundary topology is materialized — the
+# planar explicit-shell path cannot represent Cylinder/Sphere/Cone faces. Box
+# volumes deliberately stay explicit: their faces are planar.
+_implicit_volume_surface(m::GeoModel,t::Int) =
+    haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t)
+
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
     if haskey(m.box_extents,t)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
@@ -4713,7 +4799,8 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
             "$caller: Volume[$t] produced no tetrahedra"))
         return mesh
     end
-    explicit_geometry=isempty(m.volumes[t]) ? nothing :
+    explicit_geometry=(isempty(m.volumes[t]) ||
+        _implicit_volume_surface(m,t)) ? nothing :
         _model_explicit_volume_geometry(m,t,caller)
     periodic_surfaces=explicit_geometry===nothing ? ModelPeriodicConstraint[] :
         _model_volume_periodic_surface_constraints(m,t,caller)

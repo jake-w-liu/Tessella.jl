@@ -213,6 +213,7 @@ function transform_entities!(m::GeoModel, t::_AffineTransform,
         d==3 && push!(volumes,tg)
     end
     plans=[_plan_volume_transform(m,tg,t,caller) for tg in volumes]
+    geometry_plans=_plan_occ_geometry_transforms(m,normalized,t,caller)
     coords=[(tag,_finite_result(_affine_apply_steps(t,m.points[tag]),caller))
             for tag in move]
     for (tag,p) in coords
@@ -221,9 +222,150 @@ function transform_entities!(m::GeoModel, t::_AffineTransform,
     for plan in plans
         _apply_volume_plan!(m,plan)
     end
+    _apply_occ_geometry_plans!(m,geometry_plans)
     _reconcile_box_encodings!(m,seen)
+    _reconcile_curved_encodings!(m,seen)
     coherence!(m)
     return normalized
+end
+
+# Curves and surfaces owned by one entity — the closure that carries OCC
+# geometry records under a transform.
+function _entity_closure_geometry(m::GeoModel, d::Int, tag::Int)
+    curves=Int[]; surfaces=Int[]
+    if d==1
+        push!(curves,tag)
+    elseif d==2
+        push!(surfaces,tag)
+        for l in m.surfaces[tag], c in m.loops[l]
+            push!(curves,abs(c))
+        end
+    elseif d==3
+        for shell in m.volumes[tag], signed_surface in m.surface_loops[shell]
+            surface=abs(signed_surface)
+            push!(surfaces,surface)
+            for l in m.surfaces[surface], c in m.loops[l]
+                push!(curves,abs(c))
+            end
+        end
+    end
+    return curves,surfaces
+end
+
+# Stage OCC curve/surface geometry record updates for the transformed entities.
+# An OCC circle can only stay circular under an in-plane similarity; anything
+# else is rejected atomically like the compact volume encodings.
+function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
+                                       caller::AbstractString)
+    curve_plans=Tuple{Int,NamedTuple}[]
+    surface_plans=Tuple{Int,NamedTuple}[]
+    seen_curves=Set{Int}(); seen_surfaces=Set{Int}()
+    for (d,tag) in normalized
+        curves,surfaces=_entity_closure_geometry(m,d,tag)
+        for curve in curves
+            curve in seen_curves && continue
+            push!(seen_curves,curve)
+            g=_occ_geometry(m,curve)
+            g===nothing && continue
+            what="Curve[$curve]"
+            if g.occ===:circle
+                push!(curve_plans,(curve,
+                    _transform_occ_circle(g,t,caller,what)))
+            elseif g.occ===:line
+                a,b=m.curves[curve]
+                chord=_arc_sub(m.points[b],m.points[a])
+                len=sqrt(_arc_dot(chord,chord))
+                len>0 || throw(ArgumentError(
+                    "$caller: $what has a zero chord"))
+                dir=chord ./ len
+                moved=_linear_apply(t,dir)
+                scale=sqrt(_dot(moved,moved))
+                push!(curve_plans,(curve,
+                    (occ=:line,t0=g.t0,t1=g.t0+(g.t1-g.t0)*scale)))
+            end
+        end
+        for surface in surfaces
+            surface in seen_surfaces && continue
+            push!(seen_surfaces,surface)
+            g=get(m.surface_geometry,surface,nothing)
+            (g===nothing || !hasproperty(g,:occ)) && continue
+            what="Surface[$surface]"
+            if g.occ===:sphere
+                s2=_linear_isotropy(t.linear)
+                s2===nothing && throw(ArgumentError(
+                    "$caller: transform is not representable on $what — " *
+                    "it requires an isotropic linear part"))
+                push!(surface_plans,(surface,
+                    (occ=:sphere,
+                     center=_finite_result(
+                         _affine_apply_steps(t,g.center),caller),
+                     radius=g.radius*sqrt(s2))))
+            elseif g.occ in (:cylinder,:cone)
+                axis_vector=g.axis .* g.height
+                tr=_transform_axis_encoding(
+                    t,g.center,axis_vector,caller,what)
+                n=(tr.axis[1]/tr.height,tr.axis[2]/tr.height,
+                   tr.axis[3]/tr.height)
+                push!(surface_plans,(surface,
+                    g.occ===:cylinder ?
+                    (occ=:cylinder,center=tr.center,axis=n,
+                     radius=g.radius*tr.perp,height=tr.height) :
+                    (occ=:cone,center=tr.center,axis=n,
+                     r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height)))
+            end
+        end
+    end
+    return (curve_plans,surface_plans)
+end
+
+function _apply_occ_geometry_plans!(m::GeoModel, plans)
+    curve_plans,surface_plans=plans
+    for (tag,record) in curve_plans
+        m.curve_geometry[tag]=record
+    end
+    for (tag,record) in surface_plans
+        m.surface_geometry[tag]=record
+    end
+    return nothing
+end
+
+# Transform an OCC circle record: the frame must remain orthonormal, which is
+# exactly the condition that the transformed curve is still a circle.
+function _transform_occ_circle(g, t::_AffineTransform, caller, what)
+    center=_finite_result(_affine_apply_steps(t,g.center),caller)
+    X=_linear_apply(t,g.X)
+    Y=_linear_apply(t,_occ_circle_y(g))
+    sx=sqrt(_dot(X,X)); sy=sqrt(_dot(Y,Y))
+    (sx>0 && sy>0) || throw(ArgumentError(
+        "$caller: transform collapses $what"))
+    tol=1e-12*max(1.0,sx*sx,sy*sy)
+    (abs(sx*sx-sy*sy)<=tol && abs(_dot(X,Y))<=tol) || throw(ArgumentError(
+        "$caller: transform is not representable on $what — " *
+        "it would warp the circle into an ellipse"))
+    n=_linear_apply(t,g.n)
+    nl=sqrt(_dot(n,n))
+    nl>0 || throw(ArgumentError("$caller: transform collapses $what"))
+    return (occ=:circle,center=center,
+            n=(n[1]/nl,n[2]/nl,n[3]/nl),
+            X=(X[1]/sx,X[2]/sx,X[3]/sx),r=g.r*sx,
+            t0=g.t0,t1=g.t1)
+end
+
+# After independent sub-entity moves, keep a materialized curved primitive's
+# encoding only while its boundary entities still satisfy it — the same
+# reconcile-or-drop contract as `_reconcile_box_encodings!`.
+function _reconcile_curved_encodings!(m::GeoModel, moved::Set{Int})
+    for dict in (:cylinders,:spheres,:cones)
+        store=getfield(m,dict)
+        for tag in collect(keys(store))
+            isempty(m.volumes[tag]) && continue
+            owned=_model_volume_owned_points(m,tag)
+            any(p->p in moved,owned) || continue
+            _materialized_curved_consistent(m,tag) && continue
+            delete!(store,tag)
+        end
+    end
+    return nothing
 end
 
 # Point tags owned by one entity — the transform's atomic unit. Parent entities
@@ -495,7 +637,7 @@ function _merge_curves!(m::GeoModel)
     # the reversed direction therefore merges into the surviving *reversed*
     # record, so the dropped tag maps to `-keep`. Group by the canonical
     # undirected key, then resolve each drop's sign from its direction.
-    seen=Dict{Tuple{Symbol,Int,Vector{Int}},Int}()
+    seen=Dict{Tuple{Symbol,Int,Vector{Int},Any},Int}()
     dir=Dict{Int,Vector{Int}}()
     mapping=Dict{Int,Int}()
     for tag in sort!(collect(keys(m.curves)))
@@ -506,8 +648,15 @@ function _merge_curves!(m::GeoModel)
         # — Gmsh's CIRC and CIRC_INV records are equivalent, which Tessella's
         # unsigned types already express) and control-point count first, so
         # both are part of the undirected key; the directed vector is
-        # canonicalized against its own reversal.
-        ukey=(_curve_type(m,tag),length(cps),min(dkey,reverse(dkey)))
+        # canonicalized against its own reversal. OCC curves fold their stored
+        # geometry in too: two coincident closed circles sharing a seam vertex
+        # only describe the same edge when center, axis, and radius agree.
+        occ=_occ_geometry(m,tag)
+        signature=occ===nothing ? nothing :
+                  occ.occ===:circle ? (occ.center,occ.n,occ.r) :
+                  occ.occ===:line ? (occ.t0,occ.t1) : nothing
+        ukey=(_curve_type(m,tag),length(cps),min(dkey,reverse(dkey)),
+              signature)
         if haskey(seen,ukey)
             keep=seen[ukey]
             mapping[tag]=dkey==dir[keep] ? keep : -keep
@@ -698,33 +847,56 @@ function duplicate_entities!(m::GeoModel,
                              entities::AbstractVector{<:Tuple{Integer,Integer}};
                              caller::AbstractString="duplicate_entities!")
     out=NTuple{2,Int}[]
+    # One copy map per call, consulted only by OCC-geometry entities: like
+    # `OCC_Internals.copy`, a duplicated edge/vertex is shared by every copied
+    # face that references it, keeping periodic wires consistent.
+    memo=(Dict{Int,Int}(),Dict{Int,Int}(),Dict{Int,Int}())
     for (dim,tag) in entities
         d=_dimension(dim,caller); tg=_tag(tag,caller,d)
         haskey(m.discrete,(d,tg)) && throw(ArgumentError(
             "$caller: discrete $(_entity_label(d))[$tg] cannot be duplicated"))
-        push!(out,(d,_duplicate_entity!(m,d,tg,caller)))
+        push!(out,(d,_duplicate_entity!(m,d,tg,caller,memo)))
     end
     return out
 end
 
-function _duplicate_entity!(m::GeoModel, d::Int, tag::Int, caller)
+function _duplicate_entity!(m::GeoModel, d::Int, tag::Int, caller, memo)
     if d==0
         haskey(m.points,tag) || throw(ArgumentError("$caller: unknown Point[$tag]"))
         return _fresh_point_copy!(m,tag,caller)
     elseif d==1
-        return _duplicate_curve!(m,tag,caller)
+        return _duplicate_curve!(m,tag,caller;memo=memo)
     elseif d==2
-        return _duplicate_surface!(m,tag,caller)
+        return _duplicate_surface!(m,tag,caller,memo)
     else
-        return _duplicate_volume!(m,tag,caller)
+        return _duplicate_volume!(m,tag,caller,memo)
     end
 end
 
-function _fresh_point_copy!(m::GeoModel, src::Int, caller)
+function _fresh_point_copy!(m::GeoModel, src::Int, caller, pmemo=nothing)
+    pmemo!==nothing && haskey(pmemo,src) && return pmemo[src]
     t=_alloc_tag!(m,0,0,caller)
     m.points[t]=m.points[src]
     haskey(m.point_size,src) && (m.point_size[t]=m.point_size[src])
+    pmemo!==nothing && (pmemo[src]=t)
     return t
+end
+
+# True when the surface's own geometry or any boundary curve is an OCC record —
+# such copies must share edge/vertex copies across the whole operation.
+function _occ_surface_entity(m::GeoModel, src::Int)
+    haskey(m.surface_geometry,src) && return true
+    for l in m.surfaces[src], c in m.loops[l]
+        _occ_geometry(m,abs(c))!==nothing && return true
+    end
+    return false
+end
+
+function _occ_volume_entity(m::GeoModel, src::Int)
+    for sl in m.volumes[src], s in m.surface_loops[sl]
+        _occ_surface_entity(m,abs(s)) && return true
+    end
+    return false
 end
 
 # Gmsh's `DuplicateCurve` allocates the curve tag first (shared `NEWREG`
@@ -735,36 +907,56 @@ end
 # `reversed=true` mirrors `DuplicateCurve` applied to Gmsh's reversed-curve
 # record: control points copy in reversed order and the copy is wired
 # end-to-begin (beg copy = copy of the source's end vertex).
-function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false)
+function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false,
+                           memo=nothing)
     haskey(m.curves,src) || throw(ArgumentError("$caller: unknown Curve[$src]"))
     a,b=m.curves[src]
-    source_cps=get(m.curve_control_points,src,Int[a,b])
+    occ=_occ_geometry(m,src)
+    # OCC copies share through `memo`; a reversed copy is a distinct edge.
+    !reversed && occ!==nothing && memo!==nothing && haskey(memo[2],src) &&
+        return memo[2][src]
+    # OCC curves carry their parametrization in `curve_geometry`, not control
+    # points — duplicating must not invent any.
+    source_cps=occ===nothing ? get(m.curve_control_points,src,Int[a,b]) : Int[]
+    geometry=haskey(m.curve_geometry,src) ? m.curve_geometry[src] : nothing
     if reversed
         (a,b)=(b,a)
         # Gmsh's `CreateReversedCurve` inverts the control list except for
         # ellipses, where the center and major-axis points keep their
         # positions: [end, center, major, start].
-        source_cps=_curve_type(m,src)==:ellipse ?
+        source_cps=_curve_type(m,src)==:ellipse && !isempty(source_cps) ?
             Int[source_cps[4],source_cps[2],source_cps[3],source_cps[1]] :
             reverse(source_cps)
+        # A reversed OCC circle traverses its forward image at -t.
+        occ!==nothing && occ.occ===:circle &&
+            (geometry=(occ=:circle,center=occ.center,
+                       n=(-occ.n[1],-occ.n[2],-occ.n[3]),X=occ.X,r=occ.r,
+                       t0=-occ.t1,t1=-occ.t0))
     end
     t=_geo_newreg_alloc!(m,1,caller)
-    m.curve_control_points[t]=
-        [_fresh_point_copy!(m,c,caller) for c in source_cps]
-    pa=_fresh_point_copy!(m,a,caller)
-    pb=_fresh_point_copy!(m,b,caller)
+    isempty(source_cps) || (m.curve_control_points[t]=
+        [_fresh_point_copy!(m,c,caller) for c in source_cps])
+    pmemo=occ===nothing || memo===nothing ? nothing : memo[1]
+    pa=_fresh_point_copy!(m,a,caller,pmemo)
+    # A closed OCC edge's endpoints are one shared vertex, not two copies.
+    pb=a==b ? pa : _fresh_point_copy!(m,b,caller,pmemo)
     m.curves[t]=(pa,pb)
     haskey(m.curve_types,src) && (m.curve_types[t]=m.curve_types[src])
-    haskey(m.curve_geometry,src) && (m.curve_geometry[t]=m.curve_geometry[src])
+    geometry===nothing || (m.curve_geometry[t]=geometry)
+    !reversed && occ!==nothing && memo!==nothing && (memo[2][src]=t)
     return t
 end
 
-function _duplicate_surface!(m::GeoModel, src::Int, caller)
+function _duplicate_surface!(m::GeoModel, src::Int, caller, memo=nothing)
     haskey(m.surfaces,src) || throw(ArgumentError("$caller: unknown Surface[$src]"))
+    occ=_occ_surface_entity(m,src)
+    occ && memo!==nothing && haskey(memo[3],src) && return memo[3][src]
     t=_geo_newreg_alloc!(m,2,caller)
     loops=Int[]
     for (i,l) in enumerate(m.surfaces[src])
-        curves=[sign(c)*_duplicate_curve!(m,abs(c),caller) for c in m.loops[l]]
+        curves=[sign(c)*_duplicate_curve!(m,abs(c),caller;
+                                         memo=occ ? memo : nothing)
+                for c in m.loops[l]]
         lt=(i==1 && !haskey(m.loops,t)) ? t :
            ((isempty(m.loops) ? 0 : maximum(keys(m.loops)))+1)
         m.loops[lt]=curves
@@ -774,16 +966,19 @@ function _duplicate_surface!(m::GeoModel, src::Int, caller)
     haskey(m.surface_types,src) && (m.surface_types[t]=m.surface_types[src])
     haskey(m.surface_geometry,src) &&
         (m.surface_geometry[t]=m.surface_geometry[src])
+    occ && memo!==nothing && (memo[3][src]=t)
     return t
 end
 
-function _duplicate_volume!(m::GeoModel, src::Int, caller)
+function _duplicate_volume!(m::GeoModel, src::Int, caller, memo=nothing)
     haskey(m.volumes,src) || throw(ArgumentError("$caller: unknown Volume[$src]"))
+    occ=_occ_volume_entity(m,src)
     t=_geo_newreg_alloc!(m,3,caller)
     if !isempty(m.volumes[src])
         shells=Int[]
         for (i,sl) in enumerate(m.volumes[src])
-            surfs=[sign(s)*_duplicate_surface!(m,abs(s),caller)
+            surfs=[sign(s)*_duplicate_surface!(m,abs(s),caller,
+                                               occ ? memo : nothing)
                    for s in m.surface_loops[sl]]
             slt=(i==1 && !haskey(m.surface_loops,t)) ? t :
                 ((isempty(m.surface_loops) ? 0 : maximum(keys(m.surface_loops)))+1)

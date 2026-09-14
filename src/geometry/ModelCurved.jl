@@ -17,7 +17,8 @@ _curve_type(m::GeoModel, tag::Int) = get(m.curve_types, tag, :line)
 _surface_type(m::GeoModel, tag::Int) = get(m.surface_types, tag, :plane)
 
 const _CURVE_TYPE_NAMES = Dict{Symbol,String}(
-    :line=>"Line", :circle=>"Circle", :ellipse=>"Ellipse")
+    :line=>"Line", :circle=>"Circle", :ellipse=>"Ellipse",
+    :degenerate=>"Unknown")
 const _SURFACE_TYPE_NAMES = Dict{Symbol,String}(
     :plane=>"Plane", :ruled=>"Surface", :tric=>"Surface",
     :cylinder=>"Cylinder", :sphere=>"Sphere", :cone=>"Cone",
@@ -419,4 +420,476 @@ function _verify_loop_closed(m::GeoModel, loop::Int,
     starts==ends || throw(ArgumentError(
         "$caller: Loop[$loop] is not closed on $owner"))
     return nothing
+end
+
+# ── OCC-style primitive entities ─────────────────────────────────────────────
+#
+# Gmsh's solid primitives live in its OpenCASCADE kernel, which materializes an
+# explicit boundary representation: closed-circle edges sharing a single seam
+# vertex, arc-length-parametrized seam lines, degenerate point edges at poles
+# and apices, and typed Cylinder/Sphere/Cone surfaces. Tessella materializes
+# the same entity layout for `add_cylinder!`/`add_sphere!`/`add_cone!` while
+# keeping the analytic encodings that drive native meshing.
+#
+# OCC curves carry their parametrization in `curve_geometry` (distinct from the
+# `(n=,)` records of built-in arcs):
+#   (occ=:circle,      center, n, X, r, t0, t1) — p(t)=center+r(cos t·X+sin t·Y),
+#                                               Y=n×X; t0..t1 = 0..2π for closed
+#                                               edges, the OCC trim for meridians
+#   (occ=:line,        t0, t1)                  — arc-length parameter range
+#   (occ=:degenerate,  t0, t1)                  — collapsed pole/apex edge
+# The circle center is stored as coordinates, not a Point entity: OCC exposes
+# only the rim vertices, so centers must not appear in the dim-0 entity list.
+# Stored geometry is authoritative; transforms rewrite it, and the
+# `_reconcile_curved_encodings!` pass drops a volume's compact encoding when
+# independently moved rim vertices no longer satisfy the encoded circles.
+#
+# OCC surfaces carry matching analytic records in `surface_geometry`:
+#   (occ=:cylinder, center, axis, radius, height)
+#   (occ=:sphere,   center, radius)
+#   (occ=:cone,     center, axis, r1, r2, height)
+
+const _OCC_TWO_PI = 2π
+
+# The XDirection OCC assigns to `gp_Ax2(origin, axis)` (same heuristic as
+# `gp_Pln(P,V)`): the in-plane direction lying in the coordinate plane of the
+# axis's smallest component, signed by the other two components so the frame
+# stays continuous across quadrant changes.
+function _occ_reference_direction(axis::NTuple{3,Float64})
+    a,b,c=axis
+    aa,bb,cc=abs(a),abs(b),abs(c)
+    x=if bb<=aa && bb<=cc
+        aa>cc ? (-c,0.0,a) : (c,0.0,-a)
+    elseif aa<=bb && aa<=cc
+        bb>cc ? (0.0,-c,b) : (0.0,c,-b)
+    else
+        aa>bb ? (-b,a,0.0) : (b,-a,0.0)
+    end
+    l=sqrt(x[1]*x[1]+x[2]*x[2]+x[3]*x[3])
+    l>0 || throw(ErrorException(
+        "_occ_reference_direction: degenerate axis $axis"))
+    return (x[1]/l,x[2]/l,x[3]/l)
+end
+
+# Second in-plane direction of an OCC circle record.
+@inline _occ_circle_y(g) = _arc_cross(g.n,g.X)
+
+function _occ_circle_point(g,t::Float64)
+    Y=_occ_circle_y(g)
+    c,s=cos(t),sin(t)
+    C,X=g.center,g.X
+    return (C[1]+g.r*(c*X[1]+s*Y[1]),
+            C[2]+g.r*(c*X[2]+s*Y[2]),
+            C[3]+g.r*(c*X[3]+s*Y[3]))
+end
+
+function _occ_circle_derivative(g,t::Float64)
+    Y=_occ_circle_y(g)
+    c,s=cos(t),sin(t)
+    X=g.X
+    return (g.r*(-s*X[1]+c*Y[1]),
+            g.r*(-s*X[2]+c*Y[2]),
+            g.r*(-s*X[3]+c*Y[3]))
+end
+
+function _occ_circle_second_derivative(g,t::Float64)
+    Y=_occ_circle_y(g)
+    c,s=cos(t),sin(t)
+    X=g.X
+    return (-g.r*(c*X[1]+s*Y[1]),
+            -g.r*(c*X[2]+s*Y[2]),
+            -g.r*(c*X[3]+s*Y[3]))
+end
+
+# Exact OCC-circle bounding box. A full circle's extent along axis i is
+# r·sqrt(1−nᵢ²); a trimmed range adds its in-range axis extrema to the
+# endpoint box.
+function _occ_circle_bounding_box(g)
+    if g.t1-g.t0>=_OCC_TWO_PI-1e-12
+        C=g.center
+        return (ntuple(i->C[i]-g.r*sqrt(max(0.0,1.0-g.n[i]*g.n[i])),3)...,
+                ntuple(i->C[i]+g.r*sqrt(max(0.0,1.0-g.n[i]*g.n[i])),3)...)
+    end
+    p0=_occ_circle_point(g,g.t0); p1=_occ_circle_point(g,g.t1)
+    lo=[min(p0[i],p1[i]) for i in 1:3]
+    hi=[max(p0[i],p1[i]) for i in 1:3]
+    Y=_occ_circle_y(g)
+    for axis in 1:3
+        (g.X[axis]==0.0 && Y[axis]==0.0) && continue
+        base=atan(Y[axis],g.X[axis])
+        for k in -4:4
+            t=base+k*π
+            (g.t0-1e-12<=t<=g.t1+1e-12) || continue
+            p=_occ_circle_point(g,clamp(t,g.t0,g.t1))
+            for i in 1:3
+                lo[i]=min(lo[i],p[i]); hi[i]=max(hi[i],p[i])
+            end
+        end
+    end
+    return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
+end
+
+# Inverse parametrization: the curve parameter of the closest point, mapped
+# into the stored [t0,t1] interval.
+function _occ_circle_parameter(g,point::NTuple{3,Float64})
+    Y=_occ_circle_y(g)
+    rel=_arc_sub(point,g.center)
+    θ=atan(_arc_dot(rel,Y),_arc_dot(rel,g.X))
+    span=_OCC_TWO_PI
+    θ=θ-floor((θ-g.t0)/span)*span
+    return θ
+end
+
+# The OCC record of a curve, or `nothing` for built-in entities.
+_occ_geometry(m::GeoModel,tag::Int) =
+    _occ_geometry(get(m.curve_geometry,tag,nothing))
+_occ_geometry(g::NamedTuple) = hasproperty(g,:occ) ? g : nothing
+_occ_geometry(::Nothing) = nothing
+
+# ── OCC entity construction ──────────────────────────────────────────────────
+
+# A closed circle edge (`[rim,rim]` endpoints) or OCC-trimmed circle. No public
+# equivalent exists: callers materialize whole solids and roll back as a unit.
+function _add_occ_circle!(m::GeoModel, p1::Int, p2::Int,
+                         center::NTuple{3,Float64}, n::NTuple{3,Float64},
+                         X::NTuple{3,Float64}, r::Float64,
+                         t0::Float64, t1::Float64)
+    t=_alloc_tag!(m,1,0,"_add_occ_circle!")
+    m.curves[t]=(p1,p2)
+    m.curve_types[t]=:circle
+    m.curve_geometry[t]=(occ=:circle,center=center,n=n,X=X,r=r,t0=t0,t1=t1)
+    return t
+end
+
+# A seam line with an OCC arc-length parameter range [0,length].
+function _add_occ_line!(m::GeoModel, p1::Int, p2::Int)
+    t=_alloc_tag!(m,1,0,"_add_occ_line!")
+    a,b=m.points[p1],m.points[p2]
+    len=sqrt((b[1]-a[1])^2+(b[2]-a[2])^2+(b[3]-a[3])^2)
+    m.curves[t]=(p1,p2)
+    m.curve_geometry[t]=(occ=:line,t0=0.0,t1=len)
+    return t
+end
+
+# A degenerate OCC edge: a zero-length edge collapsed on a pole or apex vertex.
+function _add_occ_degenerate!(m::GeoModel, p::Int)
+    t=_alloc_tag!(m,1,0,"_add_occ_degenerate!")
+    m.curves[t]=(p,p)
+    m.curve_types[t]=:degenerate
+    m.curve_geometry[t]=(occ=:degenerate,t0=0.0,t1=_OCC_TWO_PI)
+    return t
+end
+
+# A typed OCC face: `loops` are existing curve-loop tags, `kind` one of
+# :cylinder/:sphere/:cone/:torus, `geometry` the analytic record.
+function _add_occ_surface!(m::GeoModel, kind::Symbol, loops::Vector{Int},
+                           geometry)
+    t=_alloc_tag!(m,2,0,"_add_occ_surface!")
+    m.surfaces[t]=loops
+    m.surface_types[t]=kind
+    m.surface_geometry[t]=geometry
+    return t
+end
+
+# ── Materialization consistency ──────────────────────────────────────────────
+#
+# A materialized primitive's compact encoding is only valid while its boundary
+# entities still describe the encoded solid. These predicates re-derive that
+# satisfaction from the OCC geometry records and rim/pole vertices — shared by
+# `_reconcile_curved_encodings!` (drops a stale encoding after independent
+# sub-entity moves) and `_model_volume_bounds` (rejects corrupted models).
+
+# The volume's boundary curves classified by OCC role, deduplicated — seam and
+# meridian edges occur twice in their periodic face's wire.
+function _materialized_boundary_records(m::GeoModel, tag::Int)
+    circles=Tuple{Int,NamedTuple}[]
+    seams=Int[]
+    degenerates=Int[]
+    seen=Set{Int}()
+    for shell in m.volumes[tag], ssurf in m.surface_loops[shell],
+            loop in m.surfaces[abs(ssurf)], signed in m.loops[loop]
+        curve=abs(signed)
+        curve in seen && continue
+        push!(seen,curve)
+        occ=_occ_geometry(m,curve)
+        occ===nothing && continue
+        if occ.occ===:circle
+            push!(circles,(curve,occ))
+        elseif occ.occ===:line
+            push!(seams,curve)
+        else
+            a,_=m.curves[curve]
+            push!(degenerates,a)
+        end
+    end
+    return circles,seams,degenerates
+end
+
+# A circle edge satisfies its expected (center, n, r) when the stored record
+# matches and its rim vertex still lies on the circle.
+function _occ_circle_consistent(m::GeoModel, curve::Int, g, center, n,
+                                r::Float64, tol::Float64)
+    _points_close(g.center,center,tol) || return false
+    _points_close(g.n,n,tol) || return false
+    abs(g.r-r)>tol && return false
+    a,_=m.curves[curve]
+    rim=_arc_sub(m.points[a],g.center)
+    radial=sqrt(_arc_dot(rim,rim))
+    abs(radial-r)>tol && return false
+    abs(_arc_dot(rim,n))>tol && return false
+    return true
+end
+
+function _materialized_cylinder_consistent(m::GeoModel, tag::Int, rec)
+    h=rec.height
+    n=(rec.axis[1]/h,rec.axis[2]/h,rec.axis[3]/h)
+    top=rec.center .+ rec.axis
+    scale=max(1.0,rec.radius,
+              maximum(abs,rec.center),maximum(abs,rec.axis))
+    tol=1e-9*scale
+    circles,seams,degenerates=_materialized_boundary_records(m,tag)
+    (length(circles)==2 && length(seams)==1 && isempty(degenerates)) ||
+        return false
+    ends_found=falses(2)
+    for (curve,g) in circles
+        if _points_close(g.center,rec.center,tol)
+            ends_found[1] && return false
+            ends_found[1]=true
+            _occ_circle_consistent(m,curve,g,rec.center,n,rec.radius,tol) ||
+                return false
+        elseif _points_close(g.center,top,tol)
+            ends_found[2] && return false
+            ends_found[2]=true
+            _occ_circle_consistent(m,curve,g,top,n,rec.radius,tol) ||
+                return false
+        else
+            return false
+        end
+    end
+    return all(ends_found)
+end
+
+function _materialized_sphere_consistent(m::GeoModel, tag::Int, rec)
+    scale=max(1.0,rec.radius,maximum(abs,rec.center))
+    tol=1e-9*scale
+    circles,seams,degenerates=_materialized_boundary_records(m,tag)
+    (length(circles)==1 && isempty(seams) && length(degenerates)==2) ||
+        return false
+    curve,g=first(circles)
+    _points_close(g.center,rec.center,tol) || return false
+    abs(g.r-rec.radius)>tol && return false
+    north=(rec.center[1],rec.center[2],rec.center[3]+rec.radius)
+    south=(rec.center[1],rec.center[2],rec.center[3]-rec.radius)
+    found_north=found_south=false
+    for p in degenerates
+        point=m.points[p]
+        if _points_close(point,north,tol)
+            found_north && return false
+            found_north=true
+        elseif _points_close(point,south,tol)
+            found_south && return false
+            found_south=true
+        else
+            return false
+        end
+    end
+    return found_north && found_south
+end
+
+function _materialized_cone_consistent(m::GeoModel, tag::Int, rec)
+    h=rec.height
+    n=(rec.axis[1]/h,rec.axis[2]/h,rec.axis[3]/h)
+    top=rec.center .+ rec.axis
+    scale=max(1.0,rec.r1,rec.r2,
+              maximum(abs,rec.center),maximum(abs,rec.axis))
+    tol=1e-9*scale
+    circles,seams,degenerates=_materialized_boundary_records(m,tag)
+    (length(seams)==1 &&
+     length(circles)==(rec.r1>0)+(rec.r2>0) &&
+     length(degenerates)==(rec.r1==0)+(rec.r2==0)) || return false
+    top_found=bottom_found=false
+    for (curve,g) in circles
+        if rec.r2>0 && _points_close(g.center,top,tol)
+            top_found && return false
+            top_found=true
+            _occ_circle_consistent(m,curve,g,top,n,rec.r2,tol) || return false
+        elseif rec.r1>0 && _points_close(g.center,rec.center,tol)
+            bottom_found && return false
+            bottom_found=true
+            _occ_circle_consistent(m,curve,g,rec.center,n,rec.r1,tol) ||
+                return false
+        else
+            return false
+        end
+    end
+    apex_found=falses(2)
+    for p in degenerates
+        point=m.points[p]
+        if rec.r2==0 && _points_close(point,top,tol)
+            apex_found[1] && return false
+            apex_found[1]=true
+        elseif rec.r1==0 && _points_close(point,rec.center,tol)
+            apex_found[2] && return false
+            apex_found[2]=true
+        else
+            return false
+        end
+    end
+    return top_found==(rec.r2>0) && bottom_found==(rec.r1>0) &&
+           apex_found[1]==(rec.r2==0) && apex_found[2]==(rec.r1==0)
+end
+
+# Whether a materialized primitive volume's compact encoding still describes
+# its boundary entities.
+function _materialized_curved_consistent(m::GeoModel, tag::Int)
+    haskey(m.cylinders,tag) &&
+        return _materialized_cylinder_consistent(m,tag,m.cylinders[tag])
+    haskey(m.spheres,tag) &&
+        return _materialized_sphere_consistent(m,tag,m.spheres[tag])
+    haskey(m.cones,tag) &&
+        return _materialized_cone_consistent(m,tag,m.cones[tag])
+    return false
+end
+
+# Roll back the partially materialized entity set on a mid-build failure,
+# mirroring `add_box!`'s transactional construction.
+function _occ_materialize_rollback!(m::GeoModel, points, curves, loops,
+                                    surfaces, shell)
+    shell!=0 && delete!(m.surface_loops,shell)
+    for surface in surfaces
+        delete!(m.surfaces,surface)
+        delete!(m.surface_types,surface)
+        delete!(m.surface_geometry,surface)
+    end
+    for loop in loops
+        delete!(m.loops,loop)
+    end
+    for curve in curves
+        delete!(m.curves,curve)
+        delete!(m.curve_types,curve)
+        delete!(m.curve_geometry,curve)
+        delete!(m.curve_control_points,curve)
+    end
+    for point in points
+        delete!(m.points,point)
+        delete!(m.point_size,point)
+    end
+    return nothing
+end
+
+# OCC's cylinder layout: top rim Point, bottom rim Point; top Circle, seam
+# Line, bottom Circle; Cylinder face ([-top,-seam,bottom,seam]), Plane caps;
+# shell [lateral, +top, -bottom]. Both circles wind CCW about +axis from the
+# OCC reference direction X = normalize(ŷ×axis).
+function _materialize_cylinder!(m::GeoModel, base::NTuple{3,Float64},
+                                axis::NTuple{3,Float64}, r::Float64,
+                                h::Float64)
+    n=(axis[1]/h,axis[2]/h,axis[3]/h)
+    X=_occ_reference_direction(n)
+    top=(base[1]+axis[1],base[2]+axis[2],base[3]+axis[3])
+    points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
+    try
+        push!(points,add_point!(m,top[1]+r*X[1],top[2]+r*X[2],top[3]+r*X[3]))
+        push!(points,add_point!(m,base[1]+r*X[1],base[2]+r*X[2],base[3]+r*X[3]))
+        for p in points
+            delete!(m.point_size,p)
+        end
+        p_top,p_bot=points
+        push!(curves,_add_occ_circle!(m,p_top,p_top,top,n,X,r,0.0,_OCC_TWO_PI))
+        push!(curves,_add_occ_line!(m,p_bot,p_top))
+        push!(curves,_add_occ_circle!(m,p_bot,p_bot,base,n,X,r,0.0,_OCC_TWO_PI))
+        c_top,c_seam,c_bot=curves
+        push!(loops,add_curve_loop!(m,[-c_top,-c_seam,c_bot,c_seam]))
+        push!(surfaces,_add_occ_surface!(m,:cylinder,[last(loops)],
+              (occ=:cylinder,center=base,axis=n,radius=r,height=h)))
+        push!(loops,add_curve_loop!(m,[c_top]))
+        push!(surfaces,add_plane_surface!(m,[last(loops)]))
+        push!(loops,add_curve_loop!(m,[c_bot]))
+        push!(surfaces,add_plane_surface!(m,[last(loops)]))
+        s_lat,s_top,s_bot=surfaces
+        shell=add_surface_loop!(m,[s_lat,s_top,-s_bot])
+    catch
+        _occ_materialize_rollback!(m,points,curves,loops,surfaces,shell)
+        rethrow()
+    end
+    return shell
+end
+
+# OCC's sphere layout: north/south pole Points; a degenerate edge on each pole
+# and a meridian Circle trimmed to [3π/2,5π/2] in the xz-plane through +x̂;
+# one Sphere face ([-degN,-meridian,degS,meridian]); shell [face].
+function _materialize_sphere!(m::GeoModel, center::NTuple{3,Float64},
+                              r::Float64)
+    points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
+    try
+        push!(points,add_point!(m,center[1],center[2],center[3]+r))
+        push!(points,add_point!(m,center[1],center[2],center[3]-r))
+        for p in points
+            delete!(m.point_size,p)
+        end
+        p_n,p_s=points
+        push!(curves,_add_occ_degenerate!(m,p_n))
+        # The OCC meridian frame is X=+x̂, Y=+ẑ (n=X×Y=-ŷ).
+        push!(curves,_add_occ_circle!(m,p_s,p_n,center,(0.0,-1.0,0.0),
+              (1.0,0.0,0.0),r,1.5π,2.5π))
+        push!(curves,_add_occ_degenerate!(m,p_s))
+        c_n,c_mer,c_s=curves
+        push!(loops,add_curve_loop!(m,[-c_n,-c_mer,c_s,c_mer]))
+        push!(surfaces,_add_occ_surface!(m,:sphere,[last(loops)],
+              (occ=:sphere,center=center,radius=r)))
+        shell=add_surface_loop!(m,[last(surfaces)])
+    catch
+        _occ_materialize_rollback!(m,points,curves,loops,surfaces,shell)
+        rethrow()
+    end
+    return shell
+end
+
+# OCC's cone layout mirrors the cylinder's, with a degenerate edge replacing
+# whichever end has zero radius and only the non-degenerate end receiving a
+# Plane cap. Shells: [lateral,+top,-bottom] / [lateral,+top] (r1=0) /
+# [lateral,-bottom] (r2=0).
+function _materialize_cone!(m::GeoModel, base::NTuple{3,Float64},
+                          axis::NTuple{3,Float64}, r1::Float64, r2::Float64,
+                          h::Float64)
+    n=(axis[1]/h,axis[2]/h,axis[3]/h)
+    X=_occ_reference_direction(n)
+    top=(base[1]+axis[1],base[2]+axis[2],base[3]+axis[3])
+    points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
+    try
+        push!(points,add_point!(m,top[1]+r2*X[1],top[2]+r2*X[2],top[3]+r2*X[3]))
+        push!(points,add_point!(m,base[1]+r1*X[1],base[2]+r1*X[2],base[3]+r1*X[3]))
+        for p in points
+            delete!(m.point_size,p)
+        end
+        p_top,p_bot=points
+        push!(curves,r2>0 ?
+              _add_occ_circle!(m,p_top,p_top,top,n,X,r2,0.0,_OCC_TWO_PI) :
+              _add_occ_degenerate!(m,p_top))
+        push!(curves,_add_occ_line!(m,p_bot,p_top))
+        push!(curves,r1>0 ?
+              _add_occ_circle!(m,p_bot,p_bot,base,n,X,r1,0.0,_OCC_TWO_PI) :
+              _add_occ_degenerate!(m,p_bot))
+        c_top,c_seam,c_bot=curves
+        push!(loops,add_curve_loop!(m,[-c_top,-c_seam,c_bot,c_seam]))
+        push!(surfaces,_add_occ_surface!(m,:cone,[last(loops)],
+              (occ=:cone,center=base,axis=n,r1=r1,r2=r2,height=h)))
+        s_lat=last(surfaces)
+        shell_signs=Int[s_lat]
+        if r2>0
+            push!(loops,add_curve_loop!(m,[c_top]))
+            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            push!(shell_signs,last(surfaces))
+        end
+        if r1>0
+            push!(loops,add_curve_loop!(m,[c_bot]))
+            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            push!(shell_signs,-last(surfaces))
+        end
+        shell=add_surface_loop!(m,shell_signs)
+    catch
+        _occ_materialize_rollback!(m,points,curves,loops,surfaces,shell)
+        rethrow()
+    end
+    return shell
 end
