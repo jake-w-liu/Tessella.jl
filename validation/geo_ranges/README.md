@@ -21,8 +21,9 @@ julia +1.12 --project=. --startup-file=no --check-bounds=yes \
 ```
 
 This bounded scanner is not a general `.geo` interpreter. It expands finite constant
-ranges only in recognized numeric field options and field selectors. Entirely numeric
+ranges only in recognized numeric field options and field selectors, including
+comparison, logical, and ternary conditional subexpressions. Entirely numeric
 Physical memberships are checked for bounded range expansion but remain opaque
-geometry data. Dynamic lists, loops, macros, geometry-derived or mixed Physical
-right-hand sides, option reads, logical/ternary evaluation, and CSG statements remain
+geometry data. Dynamic lists, loop bodies, macros, geometry-derived or mixed Physical
+right-hand sides, option reads, and CSG statements remain
 explicit non-claims.

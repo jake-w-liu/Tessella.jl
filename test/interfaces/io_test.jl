@@ -1217,7 +1217,7 @@ end
                 "missing"=>"unknown scalar identifier",
                 "sin(1)"=>"unknown numeric function",
                 "Rand(1)"=>"non-constant or externally stateful",
-                "1 < 2"=>"outside the supported arithmetic subset",
+                "1 & 2"=>"outside the supported arithmetic subset",
                 "1 / 0"=>"non-finite",
                 "1e309"=>"must be finite",
                 "Hypot(1e154, 1e154)"=>"non-finite",

@@ -1907,14 +1907,27 @@ function _geo_lex_token!(parser::_GeoExprParser)
         elseif c==']'; :right_bracket
         elseif c==','; :comma
         elseif c=='#'; :hash
-        elseif c in ('=','!','<','>','&','|','?',':')
-            :unsupported_operator
+        elseif c=='<'
+            i<=last && source[i]=='=' ? :less_equal : :less
+        elseif c=='>'
+            i<=last && source[i]=='=' ? :greater_equal : :greater
+        elseif c=='='
+            i<=last && source[i]=='=' ? :equal : :unsupported_operator
+        elseif c=='!'
+            i<=last && source[i]=='=' ? :not_equal : :not
+        elseif c=='&'
+            i<=last && source[i]=='&' ? :and : :unsupported_operator
+        elseif c=='|'
+            i<=last && source[i]=='|' ? :or : :unsupported_operator
+        elseif c=='?'; :question
+        elseif c==':'; :colon
         elseif c in ('"','\'')
             :quoted
         else
             :invalid
         end
-        if kind==:side_effect
+        if kind in (:side_effect,:less_equal,:greater_equal,:equal,:not_equal,
+                    :and,:or)
             i=nextind(source,i)
         end
         _GeoExprToken(kind,String(source[start:prevind(source,i)]),0.0,start)
@@ -2041,6 +2054,66 @@ function _geo_apply_function(parser::_GeoExprParser,name::String,
     _geo_expr_error(parser,"unknown numeric function $name",pos)
 end
 
+# Gmsh's conditional operators, lowest to highest precedence:
+# ?: (right-associative), ||, &&, ==/!=, </<=/>/>=, then additive arithmetic.
+# Comparisons and logic produce 1.0/0.0, matching FExpr boolean evaluation.
+function _geo_parse_ternary!(parser::_GeoExprParser)
+    condition=_geo_parse_or!(parser)
+    if parser.token.kind==:question
+        pos=parser.token.pos;_geo_advance!(parser);_geo_enter!(parser)
+        if_true=_geo_parse_ternary!(parser)
+        parser.token.kind==:colon || _geo_expr_error(
+            parser,"expected ':' in a ternary expression",pos)
+        _geo_advance!(parser)
+        if_false=_geo_parse_ternary!(parser)
+        _geo_leave!(parser)
+        return condition!=0 ? if_true : if_false
+    end
+    return condition
+end
+
+function _geo_parse_or!(parser::_GeoExprParser)
+    value=_geo_parse_and!(parser)
+    while parser.token.kind==:or
+        _geo_advance!(parser)
+        other=_geo_parse_and!(parser)
+        value=Float64(value!=0 || other!=0)
+    end
+    return value
+end
+
+function _geo_parse_and!(parser::_GeoExprParser)
+    value=_geo_parse_equality!(parser)
+    while parser.token.kind==:and
+        _geo_advance!(parser)
+        other=_geo_parse_equality!(parser)
+        value=Float64(value!=0 && other!=0)
+    end
+    return value
+end
+
+function _geo_parse_equality!(parser::_GeoExprParser)
+    value=_geo_parse_relational!(parser)
+    while parser.token.kind in (:equal,:not_equal)
+        kind=parser.token.kind;_geo_advance!(parser)
+        other=_geo_parse_relational!(parser)
+        value=Float64(kind==:equal ? value==other : value!=other)
+    end
+    return value
+end
+
+function _geo_parse_relational!(parser::_GeoExprParser)
+    value=_geo_parse_additive!(parser)
+    while parser.token.kind in (:less,:less_equal,:greater,:greater_equal)
+        kind=parser.token.kind;_geo_advance!(parser)
+        other=_geo_parse_additive!(parser)
+        value=Float64(
+            kind==:less ? value<other : kind==:less_equal ? value<=other :
+            kind==:greater ? value>other : value>=other)
+    end
+    return value
+end
+
 function _geo_parse_additive!(parser::_GeoExprParser)
     value=_geo_parse_multiplicative!(parser)
     while parser.token.kind==:plus || parser.token.kind==:minus
@@ -2068,6 +2141,12 @@ function _geo_parse_unary!(parser::_GeoExprParser)
         _geo_leave!(parser)
         kind==:minus && (value=_geo_finite_result(parser,-value,"unary minus",pos))
         return value
+    elseif parser.token.kind==:not
+        pos=parser.token.pos;_geo_advance!(parser)
+        _geo_enter!(parser)
+        value=_geo_parse_unary!(parser)
+        _geo_leave!(parser)
+        return Float64(value==0)
     elseif parser.token.kind==:hash
         pos=parser.token.pos;_geo_advance!(parser)
         parser.token.kind==:identifier || _geo_expr_error(
@@ -2103,7 +2182,7 @@ function _geo_parse_primary!(parser::_GeoExprParser)
         return token.value
     elseif token.kind==:left_paren
         _geo_advance!(parser);_geo_enter!(parser)
-        value=_geo_parse_additive!(parser)
+        value=_geo_parse_ternary!(parser)
         parser.token.kind==:right_paren ||
             _geo_expr_error(parser,"expected closing parenthesis")
         _geo_advance!(parser);_geo_leave!(parser)
@@ -2117,7 +2196,7 @@ function _geo_parse_primary!(parser::_GeoExprParser)
             args=Float64[]
             if parser.token.kind!=closer
                 while true
-                    push!(args,_geo_parse_additive!(parser))
+                    push!(args,_geo_parse_ternary!(parser))
                     parser.token.kind==:comma || break
                     _geo_advance!(parser)
                 end
@@ -2176,7 +2255,7 @@ function _geo_eval_numeric(raw::AbstractString,context::_GeoNumericContext,
     parser=_GeoExprParser(source,firstindex(source),_GeoExprToken(:eof,"",0.0,1),
                           0,0,context,String(caller))
     _geo_advance!(parser)
-    value=_geo_parse_additive!(parser)
+    value=_geo_parse_ternary!(parser)
     parser.token.kind==:eof || begin
         token=parser.token
         if token.kind==:side_effect
@@ -2266,7 +2345,7 @@ function _geo_split_range(raw::AbstractString,caller::AbstractString)
     source=String(strip(raw))
     isempty(source) && throw(ArgumentError("$caller: range term must not be empty"))
     pieces=String[];start=firstindex(source);i=start;last=lastindex(source)
-    parens=0;brackets=0
+    parens=0;brackets=0;pending_ternary=0
     while i<=last
         c=source[i]
         if c=='(';parens+=1
@@ -2277,14 +2356,23 @@ function _geo_split_range(raw::AbstractString,caller::AbstractString)
         elseif c==']'
             brackets-=1;brackets>=0 || throw(ArgumentError(
                 "$caller: unmatched closing bracket in range term"))
+        elseif c=='?' && parens==0 && brackets==0
+            pending_ternary+=1
         elseif c==':' && parens==0 && brackets==0
-            length(pieces)<2 || throw(ArgumentError(
-                "$caller: a Gmsh range has at most two ':' separators"))
-            piece=i==start ? "" : String(strip(source[start:prevind(source,i)]))
-            isempty(piece) && throw(ArgumentError(
-                "$caller: Gmsh range endpoints and increments must not be empty"))
-            push!(pieces,piece)
-            start=nextind(source,i)
+            if pending_ternary>0
+                # A ':' that answers a pending '?' belongs to the ternary, not
+                # the range — matching Gmsh's grammar where the conditional
+                # expression consumes its ':' greedily.
+                pending_ternary-=1
+            else
+                length(pieces)<2 || throw(ArgumentError(
+                    "$caller: a Gmsh range has at most two ':' separators"))
+                piece=i==start ? "" : String(strip(source[start:prevind(source,i)]))
+                isempty(piece) && throw(ArgumentError(
+                    "$caller: Gmsh range endpoints and increments must not be empty"))
+                push!(pieces,piece)
+                start=nextind(source,i)
+            end
         end
         i=nextind(source,i)
     end

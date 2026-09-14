@@ -86,6 +86,12 @@ geo_range_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --
 println("  command: ", geo_range_command)
 run(geo_range_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+println("\n── geo_control_flow ──  entity-level Gmsh 4.15.2 .geo control-flow differential")
+control_flow_script = joinpath(HERE, "geo_control_flow", "differential.jl")
+control_flow_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $control_flow_script`
+println("  command: ", control_flow_command)
+run(control_flow_command)
+
 println("\n── gmsh_parity geometry expressions ──  bounded entity/value execution")
 geo_expression_script = joinpath(
     HERE, "gmsh_parity", "geo_geometry_expressions.jl")
