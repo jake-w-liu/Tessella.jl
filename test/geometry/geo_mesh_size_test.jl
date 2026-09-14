@@ -301,8 +301,8 @@ end
         "MeshSize {:}=0.5;"=>"matched no explicit modeled points",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{99};}}=0.5;"=>
             "unknown Surface[99]",
-        "Cylinder(1)={0,0,0,0,0,1,0.5}; MeshSize{PointsOf{Volume{1};}}=0.5;"=>
-            "Volume[1] has no explicit surface-loop topology",
+        "Sphere(1)={0,0,0,0.5}; MeshSize{PointsOf{Volume{99};}}=0.5;"=>
+            "unknown Volume[99]",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{1}}}=0.5;"=>
             "every PointsOf entity block must end with a semicolon",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{};}}=0.5;"=>
@@ -319,9 +319,9 @@ end
             "unsupported topology query",
         "Physical Curve(\"bad\",1)=Boundary{Surface{99};};"=>
             "unknown Surface[99]",
-        "Cylinder(1)={0,0,0,0,0,1,0.5}; " *
-            "Physical Surface(\"bad\",1)=CombinedBoundary{Volume{1};};"=>
-            "Volume[1] has no explicit surface-loop topology",
+        "Cone(1)={0,0,0,0,0,1,0.5,0.2}; " *
+            "Physical Surface(\"bad\",1)=CombinedBoundary{Volume{99};};"=>
+            "unknown Volume[99]",
         "Physical Curve(\"bad\",1)=Boundary{Volume{1};};"=>
             "requires Surface blocks; got Volume",
         "Physical Volume(\"bad\",1)=Boundary{Volume{1};};"=>
@@ -362,6 +362,17 @@ end
     box_points_of=_execute_point_mesh_size_source(
         "Box(1)={0,0,0,1,1,1}; MeshSize{PointsOf{Volume{1};}}=0.5;")
     @test box_points_of.model.point_size==Dict(tag=>0.5 for tag in 1:8)
+
+    # The same holds for materialized OCC primitives: a Cylinder's two rim
+    # Points take the size and `CombinedBoundary` yields its three faces.
+    cylinder_points_of=_execute_point_mesh_size_source(
+        "Cylinder(1)={0,0,0,0,0,1,0.5}; " *
+        "MeshSize{PointsOf{Volume{1};}}=0.5;")
+    @test cylinder_points_of.model.point_size==Dict(1=>0.5,2=>0.5)
+    cylinder_boundary=_execute_point_mesh_size_source(
+        "Cylinder(1)={0,0,0,0,0,1,0.5}; " *
+        "Physical Surface(\"shell\",1)=CombinedBoundary{Volume{1};};")
+    @test cylinder_boundary.model.physical[(2,1)]==[1,2,3]
 
     repeated_surface_tags=join(
         fill("1",Tessella.IO._MAX_GEO_LIST_ITEMS÷4+1),",")

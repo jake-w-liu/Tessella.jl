@@ -110,14 +110,15 @@ function _model_volume_bounds(
     encodings=(haskey(m.box_extents,tag),haskey(m.cylinders,tag),
                haskey(m.spheres,tag),haskey(m.cones,tag),
                haskey(m.booleans,tag))
-    # A materialized box keeps its `box_extents` encoding alongside its shell
-    # topology — legal only when the shell's owned Points are exactly the eight
-    # encoded corners; every other encoding is exclusive with explicit shells.
-    materialized=encodings[1] && !isempty(m.volumes[tag])
+    # Materialized primitives keep their compact encoding alongside the shell
+    # topology — legal only while the materialized entities still satisfy it
+    # (corners for a box, rim/pole satisfaction for curved solids). A Boolean
+    # encoding is exclusive with explicit shells.
+    materialized=any(encodings[1:4]) && !isempty(m.volumes[tag])
     explicit=!isempty(m.volumes[tag]) && !materialized
     count(identity,(explicit,encodings...))<=1 || throw(ErrorException(
         "$caller: $entity has multiple native encodings; rebuild the model"))
-    if materialized
+    if materialized && encodings[1]
         x0,y0,z0,dx,dy,dz=m.box_extents[tag]
         scale=max(1.0,abs(x0),abs(y0),abs(z0),abs(dx),abs(dy),abs(dz))
         corners=NTuple{3,Float64}[
@@ -128,6 +129,10 @@ function _model_volume_bounds(
             corners)) || throw(ErrorException(
                 "$caller: $entity has inconsistent box encoding and shell " *
                 "topology; rebuild the model"))
+    elseif materialized
+        _materialized_curved_consistent(m,tag) || throw(ErrorException(
+            "$caller: $entity has inconsistent primitive encoding and shell " *
+            "topology; rebuild the model"))
     end
     haskey(m.booleans,tag)==haskey(m.boolean_operands,tag) ||
         throw(ErrorException(
@@ -175,6 +180,15 @@ end
 # bounding box (endpoints plus axis-aligned extrema) for curved kinds.
 function _model_curve_bounding_box(
     m::GeoModel,curve::Int,caller::AbstractString)
+    occ=_occ_geometry(m,curve)
+    occ===nothing || return _model_bounds_checked(
+        occ.occ===:circle ? _occ_circle_bounding_box(occ) :
+        occ.occ===:line ? _model_bounds_from_points(
+            m,m.curves[curve],caller,"Curve[$curve]") :
+        begin
+            point=m.points[m.curves[curve][1]]
+            (point[1],point[2],point[3],point[1],point[2],point[3])
+        end,caller,"Curve[$curve]")
     if _curve_type(m,curve)==:line
         return _model_bounds_from_points(
             m,m.curves[curve],caller,"Curve[$curve]")
@@ -228,6 +242,17 @@ function _model_entity_bounding_box(
     elseif dimension==1
         return _model_curve_bounding_box(m,tag,caller)
     elseif dimension==2
+        surface_geometry=get(m.surface_geometry,tag,nothing)
+        # A sphere's wire only spans a single meridian; its face bbox is the
+        # analytic ball box. Cylinder/cone faces reduce to their end circles,
+        # which the boundary-curve union already covers exactly.
+        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
+                surface_geometry.occ===:sphere
+            C=surface_geometry.center; r=surface_geometry.radius
+            return _model_bounds_checked(
+                (C[1]-r,C[2]-r,C[3]-r,C[1]+r,C[2]+r,C[3]+r),
+                caller,"Surface[$tag]")
+        end
         bounds=_MODEL_EMPTY_BOUNDS
         for curve in _model_boundary_curves(
             m,2,tag,caller,"Surface[$tag]")

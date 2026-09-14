@@ -85,10 +85,12 @@ end
         """
     primitives=_execute_dynamic_tag_source(primitive_source)
     @test sort!(collect(keys(primitives.model.volumes)))==[1,13,16,19]
-    # Box materializes its eight corner Points and twelve edge Curves like
-    # Gmsh's OCC addBox; the curved primitives remain implicit encodings.
-    @test sort!(collect(keys(primitives.model.points)))==[1:8;15:16]
-    @test sort!(collect(keys(primitives.model.curves)))==[1:12;22]
+    # Box materializes its eight corner Points and twelve edge Curves, and
+    # the curved primitives materialize their OCC layouts the same way —
+    # two rim/pole Points and three Curves each, exactly the child counts
+    # the allocator reserves.
+    @test sort!(collect(keys(primitives.model.points)))==[1:16;]
+    @test sort!(collect(keys(primitives.model.curves)))==[1:22;]
     @test primitives.params.mesh_size_min==0.23
     @test primitives.params.mesh_size_max==1.7
 

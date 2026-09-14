@@ -203,7 +203,7 @@ bounded contract. The planar surface path extends Point constraints
 piecewise-linearly over its deterministic initial constrained triangulation. Generated
 straight-curve subdivision nodes interpolate their endpoint sizes, while equal Point
 sizes retain the constant-size path and coincident PSLG inputs use the smaller
-constraint. Exact Gmsh mesh topology, implicit Cylinder/Sphere/Cone or Boolean
+constraint. Exact Gmsh mesh topology, Boolean
 subentities, and mesh-size selectors other than inline `PointsOf` remain
 outside this bounded contract.
 Physical declarations accept an explicit positive tag, with an optional name, or a
@@ -214,7 +214,7 @@ Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline `Bou
 respectively. `Boundary` collects immediate boundaries before physical membership is
 deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole and cavity
 boundaries participate, while embeddings do not. Empty combined boundaries,
-unsupported dimensions, and implicit Cylinder/Sphere/Cone or Boolean topology
+unsupported dimensions, and implicit Boolean topology
 are explicit blockers.
 The model and session APIs return detached, sorted group, membership, reverse-membership,
 and name-query results. Names are unique within an entity dimension and can be removed
@@ -225,8 +225,8 @@ recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
 ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
 reports downward-closure connectivity to the highest-dimension entities,
 excluding embeddings, matching Gmsh 4.15.2. Topology queries preserve
-the session mesh cache and exclude embeddings. Box volumes expose their
-materialized boundary topology; Cylinder/Sphere/Cone and Boolean volumes are
+the session mesh cache and exclude embeddings. Box and Cylinder/Sphere/Cone volumes expose their
+materialized OCC boundary topology; Boolean volumes are
 enumerated, but their implicit boundary topology remains an explicit blocker.
 Entity names belong only to existing entities and need not be unique. Names can be
 replaced, cleared per entity, or removed by value across dimensions. Entity tags are
@@ -240,9 +240,9 @@ boundaries. Tessella validates the whole request before committing, removes name
 visibility, colors, empty Physical groups, affected periodic relations, target
 embeddings, native solid encodings, and Boolean-result snapshots, and keeps allocator
 counters monotonic.
-Box boundaries recurse through the materialized shell; Cylinder/Sphere/Cone
-and Boolean Volume boundaries are implicit, so their recursive removal stops
-at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
+Box and Cylinder/Sphere/Cone boundaries recurse through the materialized
+shell; Boolean Volume boundaries are implicit, so their recursive removal
+stops at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
 Tessella's owning native model and is not undone by a later synchronization.
 Entity and whole-model bounding boxes are exact for explicit straight-edge topology
 and analytical native primitives. Boolean bounds follow the owned operation-time
@@ -250,11 +250,13 @@ result geometry. Containment queries return only entities whose complete box lie
 the finite query box, ignore embeddings when bounding their target, and preserve the
 session mesh cache. Tessella omits OpenCASCADE shape-tolerance padding (`1e-7` in
 the pinned fixtures), rejects nonfinite boxes and invalid dimensions, and exposes no
-implicit Cylinder/Sphere/Cone subentities.
+implicit Boolean subentities.
 Entity metadata identifies every explicit entity as `Point`, `Line`, `Circle`,
-`Ellipse`, `Plane`, `Surface`, or
-`Volume`; Box solids expose their materialized Point/Line/Plane children while
-Cylinder/Sphere/Cone and Boolean solids expose only `Volume`. Native `GeoModel`
+`Ellipse`, `Plane`, `Surface`, `Cylinder`, `Sphere`, `Cone`, `Unknown`
+(degenerate edges), or
+`Volume`; Box and Cylinder/Sphere/Cone solids expose their materialized
+Point/Line/Plane/Circle/Cylinder/Sphere/Cone children while
+Boolean solids expose only `Volume`. Native `GeoModel`
 plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
 `a*x+b*y+c*z=d`; other visible native types have empty property vectors. Per-window
 visibility is stored display state. Native
@@ -262,9 +264,11 @@ entities are not partition entities, so their parent is `(-1,-1)`, the model's
 partition count is zero, and per-entity partition membership is empty. These direct
 and session queries are read-only and preserve the mesh cache.
 Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
-arcs, and explicit Planes through
+arcs, OCC circle/line/degenerate edges, and explicit Planes through
 matching direct and session APIs. Lines and arcs use parameters `[0,1]`, with
-arcs evaluated through Gmsh's `InterpolateCurve` frame; Planes use a
+arcs evaluated through Gmsh's `InterpolateCurve` frame; OCC edges report
+their stored ranges (full circles `[0,2π]`, arc-length seam lines, the
+sphere meridian `[3π/2,5π/2]`). Planes use a
 deterministic Gmsh-compatible orthonormal frame. Physical Plane containment tests the
 exact trimmed interior and excludes boundary loops, while parametric containment
 tests the inclusive rectangular bounds. Closest Line points are clamped to the

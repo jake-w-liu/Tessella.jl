@@ -279,7 +279,26 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     output=Float64[]
     sizehint!(output,3*(length(values)÷stride))
     if dimension==1
-        if _curve_type(m,entity_tag)==:line
+        occ=_occ_geometry(m,entity_tag)
+        if occ!==nothing && occ.occ===:circle
+            for parameter in values
+                _model_append_point!(output,
+                    _occ_circle_point(occ,parameter))
+            end
+        elseif occ!==nothing && occ.occ===:degenerate
+            point=m.points[m.curves[entity_tag][1]]
+            for _ in values
+                _model_append_point!(output,point)
+            end
+        elseif occ!==nothing && occ.occ===:line
+            line=_model_line_geometry(m,entity_tag,caller)
+            span=occ.t1-occ.t0
+            for (index,parameter) in pairs(values)
+                u=occ.t0==occ.t1 ? 0.0 : (parameter-occ.t0)/span
+                _model_append_point!(output,
+                    _model_line_point(line,u,caller,index))
+            end
+        elseif _curve_type(m,entity_tag)==:line
             line=_model_line_geometry(m,entity_tag,caller)
             for (index,parameter) in pairs(values)
                 _model_append_point!(output,
@@ -331,7 +350,27 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
         return output
     end
     if dimension==1
-        if _curve_type(m,entity_tag)==:line
+        occ=_occ_geometry(m,entity_tag)
+        if occ!==nothing && occ.occ===:circle
+            sizehint!(output,3length(values))
+            for parameter in values
+                append!(output,_occ_circle_derivative(occ,parameter))
+            end
+        elseif occ!==nothing && occ.occ===:degenerate
+            sizehint!(output,3length(values))
+            for _ in values
+                append!(output,(0.0,0.0,0.0))
+            end
+        elseif occ!==nothing && occ.occ===:line
+            line=_model_line_geometry(m,entity_tag,caller)
+            derivative=_model_line_derivative(line,entity_tag,caller)
+            span=occ.t1-occ.t0
+            span==0.0 || (derivative=ntuple(i->derivative[i]/span,3))
+            sizehint!(output,3length(values))
+            for _ in values
+                append!(output,derivative)
+            end
+        elseif _curve_type(m,entity_tag)==:line
             line=_model_line_geometry(m,entity_tag,caller)
             derivative=_model_line_derivative(line,entity_tag,caller)
             sizehint!(output,3length(values))
@@ -370,14 +409,27 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
         multiplier=dimension==1 ? 3 : 9
         return zeros(Float64,multiplier*(length(values)÷dimension))
     end
-    if dimension==1 && _curve_type(m,entity_tag)!=:line
-        arc=_arc_geometry(m,entity_tag,caller)
-        output=Float64[]
-        sizehint!(output,3*length(values))
-        for parameter in values
-            append!(output,_arc_second_derivative(arc,parameter))
+    if dimension==1
+        occ=_occ_geometry(m,entity_tag)
+        if occ!==nothing && occ.occ===:circle
+            output=Float64[]
+            sizehint!(output,3*length(values))
+            for parameter in values
+                append!(output,_occ_circle_second_derivative(occ,parameter))
+            end
+            return output
+        elseif occ!==nothing && occ.occ in (:line,:degenerate)
+            return zeros(Float64,3*length(values))
         end
-        return output
+        _curve_type(m,entity_tag)!=:line && begin
+            arc=_arc_geometry(m,entity_tag,caller)
+            output=Float64[]
+            sizehint!(output,3*length(values))
+            for parameter in values
+                append!(output,_arc_second_derivative(arc,parameter))
+            end
+            return output
+        end
     end
     dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
                    _model_plane_frame(m,entity_tag,caller)
@@ -398,9 +450,17 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
     if haskey(m.discrete,(dimension,entity_tag))
         return zeros(Float64,length(values)÷dimension)
     end
-    if dimension==1 && _curve_type(m,entity_tag)!=:line
-        arc=_arc_geometry(m,entity_tag,caller)
-        return Float64[_arc_curvature(arc,parameter) for parameter in values]
+    if dimension==1
+        occ=_occ_geometry(m,entity_tag)
+        if occ!==nothing && occ.occ===:circle
+            return fill(1.0/occ.r,length(values))
+        elseif occ!==nothing && occ.occ in (:line,:degenerate)
+            return zeros(Float64,length(values))
+        end
+        _curve_type(m,entity_tag)!=:line &&
+            return Float64[
+                _arc_curvature(_arc_geometry(m,entity_tag,caller),parameter)
+                for parameter in values]
     end
     dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
                    _model_plane_frame(m,entity_tag,caller)
@@ -491,14 +551,29 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
     end
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
-    line=dimension==1 ? _model_line_geometry(m,entity_tag,caller) : nothing
+    occ=dimension==1 ? _occ_geometry(m,entity_tag) : nothing
+    line=dimension==1 && occ===nothing ?
+        _model_line_geometry(m,entity_tag,caller) : nothing
+    occ!==nothing && occ.occ===:line &&
+        (line=_model_line_geometry(m,entity_tag,caller))
     plane=dimension==2 ? _model_plane_frame(m,entity_tag,caller) : nothing
     for index in 1:3:length(values)
         coordinate=(values[index],values[index+1],values[index+2])
         if dimension==1
-            parameter,_=_model_line_parameter_exact(line,coordinate)
-            push!(output,_model_rational_float(
-                parameter,caller,"Line parameter for point $((index+2)÷3)"))
+            if occ===nothing
+                parameter,_=_model_line_parameter_exact(line,coordinate)
+                push!(output,_model_rational_float(
+                    parameter,caller,"Line parameter for point $((index+2)÷3)"))
+            elseif occ.occ===:circle
+                push!(output,_occ_circle_parameter(occ,coordinate))
+            elseif occ.occ===:line
+                parameter,_=_model_line_parameter_exact(line,coordinate)
+                push!(output,occ.t0+_model_rational_float(
+                    parameter,caller,"Line parameter for point $((index+2)÷3)")*
+                    (occ.t1-occ.t0))
+            else
+                push!(output,occ.t0)
+            end
         else
             append!(output,_model_plane_parameters(
                 plane,coordinate,caller,(index+2)÷3))
@@ -532,8 +607,11 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
         return lower,upper
     end
     dimension==1 && begin
-        # Gmsh reports the stored parameter interval, which is [0,1] for both
-        # straight lines and arcs.
+        # Gmsh reports the stored parameter interval: [0,1] for built-in lines
+        # and arcs, the OCC range (arc-length, angle, or degenerate) for
+        # materialized primitive edges.
+        occ=_occ_geometry(m,entity_tag)
+        occ===nothing || return [occ.t0],[occ.t1]
         _curve_type(m,entity_tag)==:line &&
             _model_line_geometry(m,entity_tag,caller)
         return [0.0],[1.0]
