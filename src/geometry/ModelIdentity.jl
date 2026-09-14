@@ -188,13 +188,42 @@ function _model_identity_point_state(
                            last_point==old_tag ? new_tag : last_point)
         end
     end
-    return (points=points,point_size=point_size,curves=curves)
+    # Arc control points are point references too — a center or major-axis
+    # point follows the retag exactly like an endpoint does.
+    curve_control_points=copy(m.curve_control_points)
+    for (curve,cps) in m.curve_control_points
+        any(p->p==new_tag,cps) && throw(ArgumentError(
+            "$caller: Curve[$curve] already references missing target " *
+            "Point[$new_tag] in its control points"))
+        any(p->p==old_tag,cps) || continue
+        curve_control_points[curve]=
+            Int[p==old_tag ? new_tag : p for p in cps]
+    end
+    # The `In Sphere`/`Using Point` surface constraint references a Point.
+    surface_geometry=copy(m.surface_geometry)
+    for (surf,geom) in m.surface_geometry
+        hasproperty(geom,:sphere_center) || continue
+        geom.sphere_center==new_tag && throw(ArgumentError(
+            "$caller: Surface[$surf] already references missing target " *
+            "Point[$new_tag] as its sphere center"))
+        geom.sphere_center==old_tag || continue
+        surface_geometry[surf]=(sphere_center=new_tag,)
+    end
+    return (points=points,point_size=point_size,curves=curves,
+            curve_control_points=curve_control_points,
+            surface_geometry=surface_geometry)
 end
 
 function _model_identity_curve_state(
     m::GeoModel,old_tag::Int,new_tag::Int,caller::AbstractString)
     curves=_model_identity_rekey(
         m.curves,old_tag,new_tag,caller,"Curve";required=true)
+    curve_control_points=_model_identity_rekey(
+        m.curve_control_points,old_tag,new_tag,caller,"Curve control points")
+    curve_types=_model_identity_rekey(
+        m.curve_types,old_tag,new_tag,caller,"Curve type")
+    curve_geometry=_model_identity_rekey(
+        m.curve_geometry,old_tag,new_tag,caller,"Curve geometry")
     loops=copy(m.loops)
     for (loop,signed_curves) in m.loops
         any(value->abs(value)==new_tag,signed_curves) && throw(ArgumentError(
@@ -204,13 +233,19 @@ function _model_identity_curve_state(
             _model_identity_signed_tag(value,old_tag,new_tag)
             for value in signed_curves]
     end
-    return (curves=curves,loops=loops)
+    return (curves=curves,loops=loops,
+            curve_control_points=curve_control_points,
+            curve_types=curve_types,curve_geometry=curve_geometry)
 end
 
 function _model_identity_surface_state(
     m::GeoModel,old_tag::Int,new_tag::Int,caller::AbstractString)
     surfaces=_model_identity_rekey(
         m.surfaces,old_tag,new_tag,caller,"Surface";required=true)
+    surface_types=_model_identity_rekey(
+        m.surface_types,old_tag,new_tag,caller,"Surface type")
+    surface_geometry=_model_identity_rekey(
+        m.surface_geometry,old_tag,new_tag,caller,"Surface geometry")
     surface_loops=copy(m.surface_loops)
     for (loop,signed_surfaces) in m.surface_loops
         any(value->abs(value)==new_tag,signed_surfaces) && throw(ArgumentError(
@@ -221,7 +256,8 @@ function _model_identity_surface_state(
             _model_identity_signed_tag(value,old_tag,new_tag)
             for value in signed_surfaces]
     end
-    return (surfaces=surfaces,surface_loops=surface_loops)
+    return (surfaces=surfaces,surface_loops=surface_loops,
+            surface_types=surface_types,surface_geometry=surface_geometry)
 end
 
 function _model_identity_volume_state(
@@ -324,12 +360,19 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m.points=dimension_state.points
         m.point_size=dimension_state.point_size
         m.curves=dimension_state.curves
+        m.curve_control_points=dimension_state.curve_control_points
+        m.surface_geometry=dimension_state.surface_geometry
     elseif dimension==1
         m.curves=dimension_state.curves
         m.loops=dimension_state.loops
+        m.curve_control_points=dimension_state.curve_control_points
+        m.curve_types=dimension_state.curve_types
+        m.curve_geometry=dimension_state.curve_geometry
     elseif dimension==2
         m.surfaces=dimension_state.surfaces
         m.surface_loops=dimension_state.surface_loops
+        m.surface_types=dimension_state.surface_types
+        m.surface_geometry=dimension_state.surface_geometry
     else
         m.volumes=dimension_state.volumes
         m.box_extents=dimension_state.box_extents

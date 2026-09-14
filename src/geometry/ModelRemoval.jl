@@ -81,9 +81,20 @@ function _model_removal_has_boundary_owner(
         (dimension,tag) in entity.boundary && return true
     end
     if dimension==0
-        return any(tag in endpoints
-                   for (curve,endpoints) in m.curves
-                   if _model_removal_exists(m,removed,1,curve))
+        # A point is owned by every live curve that wires it — as an endpoint
+        # or as an arc control point (center, major-axis point) — and by every
+        # surviving `In Sphere`/`Using Point` surface constraint.
+        for (curve,endpoints) in m.curves
+            _model_removal_exists(m,removed,1,curve) || continue
+            tag in endpoints && return true
+            tag in get(m.curve_control_points,curve,Int[]) && return true
+        end
+        for (surface,geom) in m.surface_geometry
+            _model_removal_exists(m,removed,2,surface) || continue
+            hasproperty(geom,:sphere_center) && geom.sphere_center==tag &&
+                return true
+        end
+        return false
     elseif dimension==1
         for surface in keys(m.surfaces)
             _model_removal_exists(m,removed,2,surface) || continue
@@ -122,12 +133,15 @@ function _model_removal_boundary(
         endpoints=get(m.curves,tag,nothing)
         endpoints===nothing && throw(ErrorException(
             "$caller: Curve[$tag] disappeared during removal planning"))
-        for point in endpoints
+        # The boundary is every vertex the curve wires — endpoints plus arc
+        # control points (center, major-axis point).
+        owned=unique!(Int[endpoints...,get(m.curve_control_points,tag,Int[])...])
+        for point in owned
             haskey(m.points,point) || throw(ErrorException(
                 "$caller: Curve[$tag] references missing Point[$point]; " *
                 "rebuild the model"))
         end
-        return Tuple{Int,Int}[(0,endpoints[1]),(0,endpoints[2])]
+        return Tuple{Int,Int}[(0,point) for point in owned]
     elseif dimension==2
         return Tuple{Int,Int}[
             (1,curve) for curve in
@@ -173,7 +187,11 @@ function _model_removal_state(
     point_size=copy(m.point_size)
     curves=copy(m.curves)
     curve_control_points=copy(m.curve_control_points)
+    curve_types=copy(m.curve_types)
+    curve_geometry=copy(m.curve_geometry)
     surfaces=copy(m.surfaces)
+    surface_types=copy(m.surface_types)
+    surface_geometry=copy(m.surface_geometry)
     volumes=copy(m.volumes)
     for tag in removed_tags[1]
         delete!(points,tag);delete!(point_size,tag)
@@ -181,9 +199,13 @@ function _model_removal_state(
     for tag in removed_tags[2]
         delete!(curves,tag)
         delete!(curve_control_points,tag)
+        delete!(curve_types,tag)
+        delete!(curve_geometry,tag)
     end
     for tag in removed_tags[3]
         delete!(surfaces,tag)
+        delete!(surface_types,tag)
+        delete!(surface_geometry,tag)
     end
     for tag in removed_tags[4]
         delete!(volumes,tag)
@@ -296,7 +318,8 @@ function _model_removal_state(
     filter!(compound->!any(member->(compound.first,member) in removed,
                            compound.second),meshing.compounds)
 
-    return (;points,point_size,curves,curve_control_points,loops,surfaces,
+    return (;points,point_size,curves,curve_control_points,curve_types,
+            curve_geometry,loops,surfaces,surface_types,surface_geometry,
             surface_loops,volumes,
             entity_names,entity_visibility,entity_colors,physical,physical_names,
             box_extents,cylinders,spheres,cones,booleans,boolean_operands,
@@ -333,8 +356,12 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.point_size=state.point_size
     m.curves=state.curves
     m.curve_control_points=state.curve_control_points
+    m.curve_types=state.curve_types
+    m.curve_geometry=state.curve_geometry
     m.loops=state.loops
     m.surfaces=state.surfaces
+    m.surface_types=state.surface_types
+    m.surface_geometry=state.surface_geometry
     m.surface_loops=state.surface_loops
     m.volumes=state.volumes
     m.entity_names=state.entity_names

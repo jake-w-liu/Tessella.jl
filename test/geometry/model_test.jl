@@ -31,11 +31,19 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
           "d88d6244f73026b3450f9a4be9a0402160cf86ef41ddc047586c0f889b0955b0"
 
     loops_before=copy(oriented.loops)
-    @test_throws ArgumentError add_curve_loop!(oriented,[1,3,2,4]; tag=8)
-    @test_throws ArgumentError add_curve_loop!(oriented,[1,2,3]; tag=8)
-    @test_throws ArgumentError add_curve_loop!(oriented,[0,2,3,4]; tag=8)
-    @test_throws ArgumentError add_curve_loop!(oriented,(true,2,3,4); tag=8)
-    @test_throws ArgumentError add_curve_loop!(oriented,[-(big(2)^100),2,3,4]; tag=8)
+    # Scrambled but chainable members sort into connectivity order like
+    # Gmsh's SortEdgesInLoop, and an open chain is accepted (closure is
+    # verified at mesh time); only dead-end chains and bad tags fail.
+    @test add_curve_loop!(oriented,[1,3,2,4]; tag=8)==8
+    @test oriented.loops[8]==[1,2,3,4]
+    @test add_curve_loop!(oriented,[1,2,3]; tag=9)==9
+    @test oriented.loops[9]==[1,2,3]
+    @test_throws ArgumentError add_curve_loop!(oriented,[1,2,4]; tag=10)
+    @test_throws ArgumentError add_curve_loop!(oriented,[0,2,3,4]; tag=10)
+    @test_throws ArgumentError add_curve_loop!(oriented,(true,2,3,4); tag=10)
+    @test_throws ArgumentError add_curve_loop!(oriented,[-(big(2)^100),2,3,4]; tag=10)
+    delete!(oriented.loops,8)
+    delete!(oriented.loops,9)
     @test oriented.loops==loops_before
 
     exhausted=GeoModel()

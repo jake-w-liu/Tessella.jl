@@ -1,8 +1,9 @@
 """
     GeoExec
 
-Execute a bounded subset of Gmsh `.geo`: Point/Line/Line Loop/Plane Surface/
-Surface Loop/Volume, Box/Cylinder/Sphere/Cone, Boolean union/difference/intersection,
+Execute a bounded subset of Gmsh `.geo`: Point/Line/Circle/Ellipse/Line Loop/
+Plane Surface/Surface/Ruled Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone,
+Boolean union/difference/intersection,
 Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
 Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
@@ -35,6 +36,7 @@ module GeoExec
 
 using ..Model: GeoModel, add_point!, set_point_mesh_size!
 using ..Model: add_line!, add_curve_loop!, add_plane_surface!
+using ..Model: add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: _remove_volume_entity!
@@ -1461,6 +1463,111 @@ _geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
                    caller::AbstractString)=
     _geo_exec_entity_tags(raw,context,caller)
 
+# Evaluate a Gmsh `VExpr` — `{a,b,c[,d[,e]]}` or `(a,b,c)` groups composed by
+# unary/binary `+`/`-` — returning the first three components (all consumers
+# here read only 0..2, matching `addCircleArc`'s use of `CircleOptions`).
+function _geo_exec_vexpr3(raw::AbstractString,context::_GeoNumericContext,
+                          caller::AbstractString)
+    s=String(strip(raw))
+    isempty(s) && throw(ArgumentError(
+        "$caller: expected a vector expression"))
+    acc=(0.0,0.0,0.0);sign=1.0;expect_term=true
+    while !isempty(s)
+        if expect_term
+            while startswith(s,"+") || startswith(s,"-")
+                s[1]=='-' && (sign=-sign)
+                s=String(strip(s[nextind(s,firstindex(s)):end]))
+            end
+            isempty(s) && throw(ArgumentError(
+                "$caller: malformed vector expression $(repr(raw))"))
+            group,rest=if s[1]=='{'
+                _geo_balanced_group(s,caller)
+            elseif s[1]=='('
+                _geo_balanced_paren(s,caller)
+            else
+                throw(ArgumentError(
+                    "$caller: expected a `{...}` or `(...)` vector group; " *
+                    "got $(repr(s))"))
+            end
+            parts=_geo_split_top_commas(group,caller)
+            length(parts) in 3:5 || throw(ArgumentError(
+                "$caller: a vector expression needs 3 to 5 components; got " *
+                "$(length(parts))"))
+            acc=acc .+ sign .* ntuple(
+                i->_geo_eval_numeric(parts[i],context,caller),3)
+            s=String(strip(rest));sign=1.0;expect_term=false
+        else
+            (s[1]=='+' || s[1]=='-') || throw(ArgumentError(
+                "$caller: expected `+` or `-` in vector expression; got " *
+                "$(repr(s))"))
+            sign=s[1]=='+' ? 1.0 : -1.0
+            s=String(strip(s[nextind(s,firstindex(s)):end]))
+            expect_term=true
+        end
+    end
+    expect_term && throw(ArgumentError(
+        "$caller: vector expression ends with an operator"))
+    return acc
+end
+
+# Parse the shared `Circle`/`Ellipse` RHS: `{point tags}` plus the optional
+# `Plane VExpr` normal override (`CircleOptions` in the Gmsh grammar).
+function _geo_circle_rhs(raw::AbstractString,context::_GeoNumericContext,
+                         caller::AbstractString)
+    (group,rest)=_geo_balanced_group(String(strip(raw)),caller)
+    points=_geo_exec_entity_tags(group,context,"$caller points")
+    isempty(rest) && return (points,nothing)
+    match(r"^Plane\b",rest)===nothing && throw(ArgumentError(
+        "$caller: expected a `Plane` option after the point list; got " *
+        "$(repr(rest))"))
+    normal=_geo_exec_vexpr3(
+        String(strip(rest[nextind(rest,firstindex(rest),5):end])),
+        context,"$caller Plane")
+    return (points,normal)
+end
+
+# Parse the optional `Surface`/`Ruled Surface` trailing constraint
+# (`SurfaceConstraints`): `In Sphere{p}` or a single-element `Using Point{p}`
+# supply the sphere-center point tag; `Using GeoEntity{..}` and multi-point
+# lists are ignored by Gmsh's built-in kernel. Returns the center tag or
+# `nothing` (a nonpositive value is ignored exactly like Gmsh's
+# `sphereCenterTag >= 0` guard).
+function _geo_surface_constraint(rest::AbstractString,
+                                 context::_GeoNumericContext,
+                                 caller::AbstractString)
+    s=String(strip(rest))
+    isempty(s) && return nothing
+    if (mm=match(r"^In\s+Sphere\b",s)) !== nothing
+        (group,r2)=_geo_balanced_group(
+            String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end])),
+            caller)
+        isempty(r2) || throw(ArgumentError(
+            "$caller: unexpected text after In Sphere constraint"))
+        parts=_geo_split_top_commas(group,caller)
+        length(parts)==1 || throw(ArgumentError(
+            "$caller: In Sphere takes a single expression"))
+        raw=_geo_signed_gmsh_int_value(
+            _geo_eval_numeric(parts[1],context,"$caller In Sphere"),
+            "$caller In Sphere")
+        return raw>=0 ? raw : nothing
+    elseif (mm=match(r"^Using\s+(Point|GeoEntity)\b",s)) !== nothing
+        (group,r2)=_geo_balanced_group(
+            String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end])),
+            caller)
+        isempty(r2) || throw(ArgumentError(
+            "$caller: unexpected text after Using $(mm.captures[1]) constraint"))
+        isempty(strip(group)) && return nothing
+        values=_geo_numeric_list_values(
+            "{"*group*"}",context,"$caller Using $(mm.captures[1])")
+        mm.captures[1]=="Point" && length(values)==1 || return nothing
+        raw=_geo_signed_gmsh_int_value(values[1],"$caller Using Point")
+        return raw>=0 ? raw : nothing
+    end
+    throw(ArgumentError(
+        "$caller: unsupported surface constraint $(repr(s)); expected " *
+        "`In Sphere{..}` or `Using Point{..}`"))
+end
+
 function _geo_exec_scalar!(context::_GeoNumericContext,name::AbstractString,
                            raw::AbstractString)
     variable=String(name)
@@ -1586,6 +1693,33 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         add_line!(m,points[1],points[2];tag=tag)
         return
     elseif (mm=match(
+            r"^Circle\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Circle"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        (points,normal)=_geo_circle_rhs(mm.captures[2],context,caller)
+        length(points)==3 || throw(ArgumentError(
+            "$caller: Circle requires 3 points"))
+        add_circle_arc!(m,points[1],points[2],points[3];
+                        tag=tag,plane_normal=normal)
+        return
+    elseif (mm=match(
+            r"^Ellipse\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Ellipse"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        (points,normal)=_geo_circle_rhs(mm.captures[2],context,caller)
+        length(points) in (3,4) || throw(ArgumentError(
+            "$caller: Ellipse requires 4 points"))
+        # The built-in 3-tag form mirrors the OCC backward-compatibility
+        # record: the start point doubles as the major-axis point
+        # (`addEllipseArc(num, tags[0], tags[1], tags[0], tags[2], ..)`).
+        length(points)==3 &&
+            (points=[points[1],points[2],points[1],points[3]])
+        add_ellipse_arc!(m,points[1],points[2],points[3],points[4];
+                         tag=tag,plane_normal=normal)
+        return
+    elseif (mm=match(
             r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Curve Loop"
@@ -1602,6 +1736,20 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         loops=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller loops")
         add_plane_surface!(m,loops;tag=tag)
+        return
+    elseif (mm=match(
+            r"^(Ruled\s+)?Surface\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        # `Surface` and the deprecated `Ruled Surface` alias both execute
+        # Gmsh's `addSurfaceFilling`: the first wire's curve count selects the
+        # patch kind (4 -> ruled, 3 -> triangular).
+        caller="execute_geo: $(mm.captures[1]===nothing ? "" : "Ruled ")Surface"
+        tag=_geo_exec_entity_tag(mm.captures[2],context,"$caller tag")
+        (group,rest)=_geo_balanced_group(
+            String(strip(mm.captures[3])),caller)
+        wires=_geo_exec_entity_tags(group,context,"$caller loops")
+        sphere_center=_geo_surface_constraint(rest,context,caller)
+        add_ruled_surface!(m,wires;tag=tag,sphere_center=sphere_center)
         return
     elseif (mm=match(
             r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
