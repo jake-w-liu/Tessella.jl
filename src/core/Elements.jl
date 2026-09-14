@@ -174,10 +174,14 @@ empty!(_MSH_CATALOG_BUILD)
 # These are real Gmsh numeric tags, but not ordinary fixed-connectivity nodal
 # elements. In Gmsh 4.15.2, MSH 34/35/69 records contain packed triangle/tet
 # decompositions, 67/68/69 carry two domain-element links, and 34/35/70/133:136
-# can carry a parent-element link. Tags 138/139 only select MINI bases:
-# `MElement::getInfoMSH()` and `MElementFactory::create()` have no mesh-record
-# cases for them. Keeping the classification here makes every rejection
-# deliberate instead of conflating these tags with unknown/reserved IDs.
+# can carry a parent-element link. Tags 138/139 only select MINI bases in the
+# pinned release: `MElement::getInfoMSH()` and `MElementFactory::create()` have
+# no mesh-record cases for them, so Gmsh cannot consume such records (verified:
+# `Unknown type of element 138`). Tessella still defines a fixed-width link-free
+# record for them — emitted only under `gmsh_compatible=false` — so
+# Tessella-to-Tessella serialization of MINI-annotated meshes is lossless.
+# Keeping the classification here makes every rejection deliberate instead of
+# conflating these tags with unknown/reserved IDs.
 const MSH_SPECIAL_TYPES = Dict{Int,NamedTuple}(
     34 => (family=:polygon, dim=2, order=1, nnodes=nothing, kind=:decomposed),
     35 => (family=:polyhedron, dim=3, order=1, nnodes=nothing, kind=:decomposed),
@@ -189,8 +193,8 @@ const MSH_SPECIAL_TYPES = Dict{Int,NamedTuple}(
     134 => (family=:line_xfem, dim=1, order=1, nnodes=2, kind=:subelement),
     135 => (family=:triangle_xfem, dim=2, order=1, nnodes=3, kind=:subelement),
     136 => (family=:tetrahedron_xfem, dim=3, order=1, nnodes=4, kind=:subelement),
-    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis_only),
-    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis_only),
+    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis_record),
+    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis_record),
 )
 
 # Record widths and link semantics are from `MElementCut.h`, `MSubElement.h`
@@ -207,6 +211,11 @@ const MSH_SPECIAL_RECORDS = Dict{Int,NamedTuple}(
     134 => (unit=2, variable=false, links=:parent),
     135 => (unit=3, variable=false, links=:parent),
     136 => (unit=4, variable=false, links=:parent),
+    # MINI basis selectors are serializable mesh records in Tessella only:
+    # pinned Gmsh has no mesh-record case for them (verified above), so the
+    # fixed-width link-free encoding is rejected for gmsh_compatible output.
+    138 => (unit=4, variable=false, links=:none),
+    139 => (unit=5, variable=false, links=:none),
 )
 
 function _msh_tag(msh::Integer,caller::AbstractString)
@@ -366,7 +375,10 @@ multiples of 3, 4 and 3 respectively. `parent_refs` and `domain_refs` retain
 the MSH2 ownership links as mesh-cell references; an [`ElementRef`](@ref) of
 `(0,0)` denotes a missing link.
 
-MINI basis selectors 138/139 cannot be constructed as mesh records.
+MINI basis selectors 138/139 construct link-free fixed-width records (4 nodes
+for the triangle, 5 for the tetrahedron). Pinned Gmsh 4.15.2 has no mesh-record
+case for them, so writers reject them under `gmsh_compatible=true`; they are
+for Tessella-to-Tessella serialization only.
 """
 struct SpecialElementBlock <: AbstractElementBlock
     msh::Int
@@ -430,12 +442,16 @@ struct SpecialElementBlock <: AbstractElementBlock
                 (domains[1,j]==ElementRef()&&domains[2,j]==ElementRef()) ||
                     throw(ArgumentError(
                         "SpecialElementBlock: type $tag does not carry domain_refs"))
-            else
+            elseif record.links===:domains
                 parents[j]==ElementRef() || throw(ArgumentError(
                     "SpecialElementBlock: type $tag does not carry parent_refs"))
                 domains[1,j]==ElementRef() && domains[2,j]!=ElementRef() &&
                     throw(ArgumentError(
                         "SpecialElementBlock: a second domain requires a first domain"))
+            else
+                (parents[j]==ElementRef() && domains[1,j]==ElementRef() &&
+                 domains[2,j]==ElementRef()) || throw(ArgumentError(
+                    "SpecialElementBlock: type $tag does not carry links"))
             end
         end
         @inbounds for node in C
@@ -1487,9 +1503,11 @@ end
     record=MSH_SPECIAL_RECORDS[block.msh]
     if record.links===:parent
         return slot==1 ? block.parent_refs[cell] : nothing
+    elseif record.links===:domains
+        return slot==1 ? block.domain_refs[1,cell] :
+               slot==2 ? block.domain_refs[2,cell] : nothing
     end
-    return slot==1 ? block.domain_refs[1,cell] :
-           slot==2 ? block.domain_refs[2,cell] : nothing
+    return nothing
 end
 
 function _assert_acyclic_element_links(m::MixedMesh,context::AbstractString)
@@ -1737,12 +1755,17 @@ function _assert_mixed_structure(m::MixedMesh, context::AbstractString)
                     _missing_ref(b.domain_refs[1,j]) &&
                         _missing_ref(b.domain_refs[2,j]) || throw(ArgumentError(
                             "$context: block $bi type $(b.msh) cannot carry domain links"))
-                else
+                elseif record.links===:domains
                     _missing_ref(b.parent_refs[j]) || throw(ArgumentError(
                         "$context: block $bi type $(b.msh) cannot carry a parent link"))
                     _missing_ref(b.domain_refs[1,j]) &&
                         !_missing_ref(b.domain_refs[2,j]) && throw(ArgumentError(
                             "$context: block $bi cell $j has a second domain without a first"))
+                else
+                    (_missing_ref(b.parent_refs[j]) &&
+                     _missing_ref(b.domain_refs[1,j]) &&
+                     _missing_ref(b.domain_refs[2,j])) || throw(ArgumentError(
+                        "$context: block $bi type $(b.msh) cannot carry links"))
                 end
             end
         end
@@ -2147,7 +2170,8 @@ function mixed_crc(m::MixedMesh)
             record=MSH_SPECIAL_RECORDS[b.msh]
             _sha_i32!(ctx,buf4,Int32(record.variable ? 1 : 0))
             _sha_i32!(ctx,buf4,Int32(record.unit))
-            _sha_i32!(ctx,buf4,Int32(record.links===:parent ? 1 : 2))
+            _sha_i32!(ctx,buf4,Int32(record.links===:parent ? 1 :
+                                       record.links===:domains ? 2 : 0))
             parent=b.parent_refs[ref.cell]
             first_domain=b.domain_refs[1,ref.cell]
             second_domain=b.domain_refs[2,ref.cell]
@@ -2570,6 +2594,7 @@ const GMSH_4_15_2_MSH_READER_GAPS_V4 = (
     100,101,102,103,104,105,    # incomplete hex P4:P9
     125,126,127,128,129,130,131,# incomplete pyramid P3:P9
     132,                         # P0 pyramid
+    138,139,                     # MINI basis selectors: no Gmsh mesh-record case
 )
 const GMSH_4_15_2_MSH_READER_GAPS_V2 = (
     GMSH_4_15_2_MSH_READER_GAPS_V4...,
@@ -4429,7 +4454,8 @@ function _append_mixed_cell_metadata!(bucket::_MixedReadBucket,layout,
     push!(bucket.external_tags,element_tag)
     if layout.special
         layout.links===:parent ? push!(bucket.parent_tags,parent_tag) :
-                                push!(bucket.domain_tags,domain_tags)
+            layout.links===:domains ? push!(bucket.domain_tags,domain_tags) :
+                                      nothing
         layout.variable && push!(bucket.offsets,Int32(length(bucket.nodes)+1))
     end
     return nothing
@@ -4545,7 +4571,8 @@ function _read_mixed_elements_v2!(acc,io,limits)
                 "read_mixed_msh: ambiguous third metadata tag on special type $etype"))
             extra_tags=ntags-base_tags
             allowed=layout.links===:parent ? (extra_tags in (0,1)) :
-                                            (extra_tags in (0,2))
+                    layout.links===:domains ? (extra_tags in (0,2)) :
+                                              (extra_tags==0)
             allowed || throw(ArgumentError(
                 "read_mixed_msh: unsupported special-element metadata layout for type $etype"))
             if layout.links===:parent && extra_tags==1
@@ -5104,7 +5131,7 @@ function _finish_mixed_read(acc,is_v4::Bool)
                     parents[j]=resolve_ref(bucket.parent_tags[j],
                                            "special-element parent")
                 end
-            else
+            elseif layout.links===:domains
                 length(bucket.domain_tags)==count || throw(ErrorException(
                     "read_mixed_msh: internal domain-link accumulation mismatch"))
                 @inbounds for j in 1:count
@@ -5113,6 +5140,10 @@ function _finish_mixed_read(acc,is_v4::Bool)
                     domains[2,j]=resolve_ref(bucket.domain_tags[j][2],
                                              "special-element second domain")
                 end
+            else
+                isempty(bucket.parent_tags) && isempty(bucket.domain_tags) ||
+                    throw(ErrorException(
+                        "read_mixed_msh: internal link accumulation mismatch"))
             end
             push!(blocks,SpecialElementBlock(
                 etype,bucket.nodes,offsets,bucket.tags;

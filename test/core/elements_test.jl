@@ -61,8 +61,8 @@ const EXPECTED_SPECIAL = Dict(
     134 => (family=:line_xfem, dim=1, order=1, nnodes=2, kind=:subelement),
     135 => (family=:triangle_xfem, dim=2, order=1, nnodes=3, kind=:subelement),
     136 => (family=:tetrahedron_xfem, dim=3, order=1, nnodes=4, kind=:subelement),
-    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis_only),
-    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis_only),
+    138 => (family=:triangle_mini, dim=2, order=3, nnodes=4, kind=:basis_record),
+    139 => (family=:tetrahedron_mini, dim=3, order=3, nnodes=5, kind=:basis_record),
 )
 
 const GMSH_FAMILY_NAME = Dict(
@@ -1196,10 +1196,21 @@ end
     line_border=ElementsUnderTest.SpecialElementBlock(
         67,reshape(Int32[1,2],2,1),Int32[9])
     @test line_border.offsets==Int32[1,3]
-    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+    # MINI basis selectors 138/139 are link-free fixed-width records in
+    # Tessella; pinned Gmsh 4.15.2 has no mesh-record case for them.
+    mini_tri=ElementsUnderTest.SpecialElementBlock(
         138,reshape(Int32[1,2,3,4],4,1))
-    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+    @test mini_tri.offsets==Int32[1,5]
+    @test mini_tri.connectivity==Int32[1,2,3,4]
+    @test all(ElementsUnderTest._missing_ref,mini_tri.parent_refs)
+    @test all(ElementsUnderTest._missing_ref,mini_tri.domain_refs)
+    mini_tet=ElementsUnderTest.SpecialElementBlock(
         139,reshape(Int32[1,2,3,4,5],5,1))
+    @test mini_tet.offsets==Int32[1,6]
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        138,reshape(Int32[1,2,3,4,5],5,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        139,reshape(Int32[1,2,3,4],4,1))
     @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
         34,[Int32[1,2,3,4]])
     @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
@@ -1714,6 +1725,65 @@ end
     @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
         atomic,border;version=2.2,binary=true)
     @test read(atomic,String)=="sentinel"
+end
+
+@testset "MINI basis-selector mesh records (MSH 138/139)" begin
+    directory=mktempdir()
+    # Pinned Gmsh 4.15.2 has no mesh-record case for either tag, so the
+    # records are Tessella-only output; construction is fixed-width and
+    # link-free.
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        138,reshape(Int32[1,2,3],3,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        139,reshape(Int32[1,2,3,4],4,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        138,reshape(Int32[1,2,3,4],4,1);parent_refs=[(1,1)])
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        139,reshape(Int32[1,2,3,4,5],5,1);
+        domain_refs=reshape(
+            Any[(1,1),ElementsUnderTest.ElementRef()],2,1))
+    @test_throws ArgumentError ElementsUnderTest.SpecialElementBlock(
+        138,reshape(Int32[1,2,3,0],4,1))
+
+    coordinates=Float64[
+        0 1 0 0.25 0 0 0 0.25;
+        0 0 1 0.25 0 0 1 0.25;
+        0 0 0 0    0 1 1 0.5]
+    mini=ElementsUnderTest.MixedMesh(coordinates,Any[
+        ElementsUnderTest.ElementBlock(
+            2,reshape(Int32[1,2,3],3,1),Int32[4]),
+        ElementsUnderTest.SpecialElementBlock(
+            138,reshape(Int32[1,2,3,4],4,1),Int32[5]),
+        ElementsUnderTest.ElementBlock(
+            4,reshape(Int32[1,5,6,7],4,1),Int32[6]),
+        ElementsUnderTest.SpecialElementBlock(
+            139,reshape(Int32[1,5,6,7,8],5,1),Int32[7])])
+    @test ElementsUnderTest.validate(mini).ok
+    mini_crc=ElementsUnderTest.mixed_crc(mini).sha
+
+    for version in (2.2,4.1), binary_output in (false,true)
+        mode=binary_output ? "binary" : "ascii"
+        path=joinpath(directory,"mini-v$version-$mode.msh")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(
+            path,mini;version=version,binary=binary_output)
+        @test !isfile(path)
+        ElementsUnderTest.write_mixed_msh(
+            path,mini;version=version,binary=binary_output,
+            gmsh_compatible=false)
+        back=ElementsUnderTest.read_mixed_msh(path)
+        @test ElementsUnderTest.validate(back).ok
+        @test legacy_crc(back).sha==mini_crc
+        specials=sort([block.msh for block in back.blocks
+                       if block isa ElementsUnderTest.SpecialElementBlock])
+        @test specials==[138,139]
+        tri=only(filter(block->block.msh==138,back.blocks))
+        @test tri.connectivity==Int32[1,2,3,4]
+        @test tri.offsets==Int32[1,5]
+        @test all(ElementsUnderTest._missing_ref,tri.parent_refs)
+        ok,output=gmsh_check(path)
+        @test !ok
+        @test occursin("Unknown type of element",output)
+    end
 end
 
 @testset "lossless v4 entity metadata and multiple physical memberships" begin
@@ -2319,7 +2389,7 @@ end
     @test expected=="17f74d0e0185e18bf87eb4d987fe820af43d0ca28c66d29ce7989892aecd3933"
     @test Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4)==Set([
         84,85,86,87,88,100,101,102,103,104,105,
-        125,126,127,128,129,130,131,132,
+        125,126,127,128,129,130,131,132,138,139,
     ])
     @test Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V2)==union(
         Set(ElementsUnderTest.GMSH_4_15_2_MSH_READER_GAPS_V4),Set([69,89,140]))
@@ -3930,8 +4000,10 @@ end
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 134 4 0 1 2 0 1 2\n\$EndElements\n",
         "one-domain-special-metadata.msh" =>
             "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n2\n1 0 0 0\n2 1 0 0\n\$EndNodes\n\$Elements\n1\n1 67 5 0 1 1 0 9 1 2\n\$EndElements\n",
-        "basis-only-element.msh" =>
-            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 0 1 0\n4 0.25 0.25 0\n\$EndNodes\n\$Elements\n1\n1 138 0 1 2 3 4\n\$EndElements\n",
+        "basis-record-wrong-arity.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 0 1 0\n4 0.25 0.25 0\n\$EndNodes\n\$Elements\n1\n1 138 0 1 2 3\n\$EndElements\n",
+        "basis-record-extra-tag.msh" =>
+            "\$MeshFormat\n2.2 0 8\n\$EndMeshFormat\n\$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 0 1 0\n4 0.25 0.25 0\n\$EndNodes\n\$Elements\n1\n1 138 3 7 1 9 1 2 3 4\n\$EndElements\n",
         "v4-variable-element.msh" =>
             "\$MeshFormat\n4.1 0 8\n\$EndMeshFormat\n\$Entities\n0 0 1 0\n1 0 0 0 1 1 0 0 0\n\$EndEntities\n\$Nodes\n1 3 1 3\n2 1 0 3\n1 2 3\n0 0 0\n1 0 0\n0 1 0\n\$EndNodes\n\$Elements\n1 1 1 1\n2 1 34 1\n1 1 2 3\n\$EndElements\n",
         "truncated-section.msh" =>

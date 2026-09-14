@@ -166,7 +166,7 @@ non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
 quasi-transfinite or holed transfinite patches,
 curved/warped or compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,
-MINI basis-selector tags 138/139 as mesh records, curved-cell Jacobian certification,
+curved-cell Jacobian certification,
 and explicit-tag `$ElementNodeData` output that the
 connectivity-implied record cannot express under `gmsh_compatible=true`. MSH2
 ASCII is the lossless
