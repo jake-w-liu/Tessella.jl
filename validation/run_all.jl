@@ -98,6 +98,12 @@ geo_transform_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=ye
 println("  command: ", geo_transform_command)
 run(geo_transform_command)
 
+println("\n── geo_extrude ──  entity-level Gmsh 4.15.2 .geo translational-Extrude differential")
+geo_extrude_script = joinpath(HERE, "geo_extrude", "differential.jl")
+geo_extrude_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_extrude_script`
+println("  command: ", geo_extrude_command)
+run(geo_extrude_command)
+
 println("\n── gmsh_parity geometry expressions ──  bounded entity/value execution")
 geo_expression_script = joinpath(
     HERE, "gmsh_parity", "geo_geometry_expressions.jl")

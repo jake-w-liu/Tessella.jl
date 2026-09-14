@@ -370,6 +370,7 @@ function _model_identity_meshing(
         transfinite_volumes[new_tag]=pop!(transfinite_volumes,old_tag)
     end
     recombine=Dict{Tuple{Int,Int},Float64}()
+    extrude=Dict{Tuple{Int,Int},_GeoExtrudeParams}()
     smoothing=Dict{Tuple{Int,Int},Int}()
     reverse=Dict{Tuple{Int,Int},Bool}()
     algorithm=Dict{Tuple{Int,Int},Int}()
@@ -378,6 +379,9 @@ function _model_identity_meshing(
     size_from_boundary=Dict{Tuple{Int,Int},Bool}()
     for (key,value) in attributes.recombine
         recombine[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
+    end
+    for (key,value) in attributes.extrude
+        extrude[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
     end
     for (key,value) in attributes.smoothing
         smoothing[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
@@ -408,6 +412,7 @@ function _model_identity_meshing(
     migrated.transfinite_surfaces=transfinite_surfaces
     migrated.transfinite_volumes=transfinite_volumes
     migrated.recombine=recombine
+    migrated.extrude=extrude
     migrated.smoothing=smoothing
     migrated.reverse=reverse
     migrated.algorithm=algorithm

@@ -74,9 +74,15 @@ and entity lists. `If`/`ElseIf`/`Else`/`EndIf` and `For name In
 pinned Gmsh's entity state over 4 differential cases), with a bounded
 `While`/`EndWhile` extension Gmsh lacks. Executed geometry parameters, tags, and
 numeric entity memberships
-use those same bounded semantics. It rejects
+use those same bounded semantics. Translational `Extrude {dx,dy,dz} {..}`
+runs for points, curves, and planar surfaces as both a statement and a
+side-effecting value term, reproducing Gmsh's tag allocation, output lists,
+signed-generatrix topology, and post-extrusion merge behavior bit-for-bit
+(13 differential cases), with `Layers`/`Recombine`/`ScaleLast`/`QuadTri*`/
+`Using` parameters stored per created entity and
+`Geometry.ExtrudeReturnLateralEntities` support. It rejects
 macros, option reads, stateful functions, dynamic/general ranges,
-extrusions/fillets/symmetry, allocator reads after
+rotational/twist/boundary-layer/pipe extrusions and fillets, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete` and
 `SetMaxTag` counters stay live), and geometry-derived Physical
 right-hand sides beyond the documented inline topology queries.

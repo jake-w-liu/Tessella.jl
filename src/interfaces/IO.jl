@@ -1276,6 +1276,22 @@ struct _GeoNumericListTerm
     first::Float64
     step::Float64
     count::Int
+    # Non-arithmetic expansion produced by a side-effecting term (for example
+    # an `Extrude{...}{...}` entity-list result); empty for plain values and
+    # ranges.
+    values::Vector{Float64}
+end
+_GeoNumericListTerm(first,step,count)=
+    _GeoNumericListTerm(first,step,count,Float64[])
+
+function _geo_list_term_values(term::_GeoNumericListTerm)
+    isempty(term.values) || return term.values
+    values=Vector{Float64}(undef,term.count)
+    numeric=term.first
+    for index in eachindex(values)
+        values[index]=numeric;numeric+=term.step
+    end
+    return values
 end
 
 # This is deliberately a constant-expression evaluator, not a Julia evaluator
@@ -1300,10 +1316,17 @@ mutable struct _GeoNumericContext
     # contains the geometry-derived tail retained by Gmsh.
     unavailable_lists::Dict{String,String}
     stored_list_items::Int
+    # Optional `execute_geo` hook for side-effecting list terms such as
+    # `Extrude{...}{...}`; `(term_source) -> Vector{Float64}` or `nothing`
+    # when the term is not an exec term. `nothing` in pure contexts.
+    exec_hook::Any
+    # `Geometry.ExtrudeReturnLateralEntities` (defaults on): controls whether
+    # extrude result lists append the lateral entities.
+    extrude_return_lateral::Bool
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
-    Dict{String,String}(),Dict{String,String}(),0)
+    Dict{String,String}(),Dict{String,String}(),0,nothing,true)
 
 @inline _geo_context_has_variable(context::_GeoNumericContext,name::String)=
     haskey(context.values,name) || haskey(context.lists,name) ||
@@ -2411,6 +2434,14 @@ end
 
 function _geo_numeric_list_term(raw::AbstractString,context::_GeoNumericContext,
                                 caller::AbstractString,limit::Int)
+    if context.exec_hook!==nothing
+        hooked=context.exec_hook(raw)
+        if hooked!==nothing
+            length(hooked)<=limit || throw(ArgumentError(
+                "$caller: expanded list exceeds $_MAX_GEO_LIST_ITEMS entries"))
+            return _GeoNumericListTerm(0.0,0.0,length(hooked),hooked)
+        end
+    end
     pieces=_geo_split_range(raw,caller)
     if pieces===nothing
         limit>0 || throw(ArgumentError(
@@ -2587,10 +2618,17 @@ function _geo_numeric_list_values(raw::AbstractString,
     referenced=_geo_list_reference_values(
         source,context,caller;depth=depth+1)
     referenced!==nothing && return referenced
+    # Side-effecting list terms (translational `Extrude`) can form a whole
+    # RHS, not only a `{...}` member — try the hook before the brace grammar.
+    if context.exec_hook!==nothing
+        hooked=context.exec_hook(source)
+        hooked!==nothing && return hooked
+    end
     list_source,multiplier=_geo_braced_list_source(
         source,context,caller;allow_multiplier=allow_multiplier)
-    list_source===nothing && return Float64[
-        _geo_eval_numeric(source,context,"$caller entry")]
+    if list_source===nothing
+        return Float64[_geo_eval_numeric(source,context,"$caller entry")]
+    end
 
     items=_geo_split_list(list_source,caller)
     values=Float64[]
@@ -2605,11 +2643,7 @@ function _geo_numeric_list_values(raw::AbstractString,
         end
         term=_geo_numeric_list_term(
             item,context,caller,_MAX_GEO_LIST_ITEMS-length(values))
-        numeric=term.first
-        for _ in 1:term.count
-            push!(values,numeric)
-            numeric+=term.step
-        end
+        append!(values,_geo_list_term_values(term))
     end
     if multiplier!=1.0
         for index in eachindex(values)
@@ -3102,10 +3136,8 @@ function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractStrin
             end
             term=_geo_numeric_list_term(item,context,caller_string,
                                         _MAX_GEO_LIST_ITEMS-length(normalized))
-            number=term.first
-            for _ in 1:term.count
+            for number in _geo_list_term_values(term)
                 append_numeric!(number)
-                number+=term.step
             end
         end
         return "{"*join(normalized,", ")*"}"
@@ -3268,6 +3300,7 @@ function _geo_brace_terminated_statement(text::AbstractString)
     mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",s)
     mm===nothing && return false
     name=mm.captures[1]
+    name=="Extrude" && return _geo_brace_terminated_extrude(s)
     groups=name in ("Translate","Rotate","Dilate","Symmetry","Affine") ? 2 :
            name in ("Duplicata","Boundary","CombinedBoundary",
                     "OrientedBoundary","OrientedCombinedBoundary",
@@ -3289,6 +3322,47 @@ function _geo_brace_terminated_statement(text::AbstractString)
         rest=String(strip(rest[nextind(rest,i):end]))
     end
     return isempty(rest)
+end
+
+# `Extrude {dx,dy,dz} { ... }` needs two brace groups while the boundary-layer
+# form `Extrude { ... }` needs one — a `{...}` group closes the statement only
+# when its body is a shape list (contains `;`, a `Kind{`/`Physical`/`Parent`
+# entry, an `Extrude` parameter keyword, or is empty) rather than a bare
+# numeric vector.
+function _geo_brace_terminated_extrude(text::AbstractString)
+    rest=String(strip(text[nextind(text,firstindex(text),7):end]))
+    while true
+        startswith(rest,"{") || return false
+        depth=0;done=false;i=firstindex(rest);last=lastindex(rest)
+        while i<=last
+            c=rest[i]
+            c=='{' && (depth+=1)
+            if c=='}'
+                depth-=1
+                depth==0 && (done=true; break)
+            end
+            i=nextind(rest,i)
+        end
+        done || return false
+        body=String(rest[2:prevind(rest,i)])
+        tail=String(strip(rest[nextind(rest,i):end]))
+        # A shape-list group completes the statement only when nothing
+        # follows it; a numeric vector group must be followed by the shape
+        # list, so the statement is still incomplete.
+        _geo_extrude_shape_group(body) && return isempty(tail)
+        rest=tail
+    end
+end
+
+# `body` is the content of one `{...}` group inside an `Extrude` statement.
+function _geo_extrude_shape_group(body::AbstractString)
+    b=String(strip(body))
+    isempty(b) && return true
+    occursin(';',b) && return true
+    return match(
+        Regex("^\\s*(Point|Line|Curve|Surface|Volume|Physical|Parent|" *
+              "GeoEntity|Layers|Recombine|ScaleLast|QuadTriAddVerts|" *
+              "QuadTriNoNewVerts|RecombLaterals|Using|Hole)\\b"),b)!==nothing
 end
 
 function _scan_geo_statements(consume,path::AbstractString)
@@ -3506,7 +3580,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         # Transform and standalone shape-list statements carry no params-scan
         # data; a `Physical Kind{...}` inside one is a group reference, not a
         # declaration.
-        match(r"^(?:Translate|Rotate|Dilate|Symmetry|Affine|Duplicata|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",body)!==nothing &&
+        match(r"^(?:Translate|Rotate|Dilate|Symmetry|Affine|Duplicata|Extrude|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",body)!==nothing &&
             return
 
         mesh=match(r"^(Mesh\.(?:MeshSizeMin|MeshSizeMax|MeshSizeFactor|RandomSeed|MeshSizeFromCurvature|MinimumElementsPerTwoPi|BoundaryLayerFanElements|BoundaryLayerFanPoints)|Geometry\.Tolerance)\s*=\s*(.*)$",body)
