@@ -163,8 +163,56 @@ function _model_volume_bounds(
 
     explicit || throw(ArgumentError(
         "$caller: $entity has no native solid encoding"))
-    points=_model_points_of(m,[(3,tag)],caller)
-    return _model_bounds_from_points(m,points,caller,entity)
+    bounds=_MODEL_EMPTY_BOUNDS
+    for curve in _model_boundary_curves(m,3,tag,caller,entity)
+        bounds=_model_bounds_union(
+            bounds,_model_curve_bounding_box(m,curve,caller))
+    end
+    return _model_bounds_checked(bounds,caller,entity)
+end
+
+# Exact bounds for one explicit curve: endpoint bounds for a Line, the true arc
+# bounding box (endpoints plus axis-aligned extrema) for curved kinds.
+function _model_curve_bounding_box(
+    m::GeoModel,curve::Int,caller::AbstractString)
+    if _curve_type(m,curve)==:line
+        return _model_bounds_from_points(
+            m,m.curves[curve],caller,"Curve[$curve]")
+    end
+    return _model_bounds_checked(
+        _arc_bounding_box(_arc_geometry(m,curve,caller)),
+        caller,"Curve[$curve]")
+end
+
+# Boundary curves of an explicit surface or volume, unsigned, deduplicated.
+function _model_boundary_curves(m::GeoModel,dimension::Int,tag::Int,
+                                caller::AbstractString,entity::AbstractString)
+    curves=Set{Int}()
+    if dimension==2
+        for curve in _model_surface_curves(m,tag)
+            push!(curves,curve)
+        end
+    else
+        shells=m.volumes[tag]
+        isempty(shells) && throw(ArgumentError(
+            "$caller: $entity has no explicit surface-loop topology; " *
+            "define it from Surface Loop entities or select explicit Points"))
+        for shell in shells
+            haskey(m.surface_loops,shell) || throw(ArgumentError(
+                "$caller: $entity references unknown Surface Loop[$shell]"))
+            for signed_surface in m.surface_loops[shell]
+                surface=abs(signed_surface)
+                haskey(m.surfaces,surface) || throw(ArgumentError(
+                    "$caller: $entity references unknown Surface[$surface]"))
+                for curve in _model_surface_curves(m,surface)
+                    push!(curves,curve)
+                end
+            end
+        end
+    end
+    isempty(curves) && throw(ErrorException(
+        "$caller: $entity has no boundary curves; rebuild the model"))
+    return curves
 end
 
 function _model_entity_bounding_box(
@@ -178,11 +226,15 @@ function _model_entity_bounding_box(
             (point[1],point[2],point[3],point[1],point[2],point[3]),
             caller,"Point[$tag]")
     elseif dimension==1
-        return _model_bounds_from_points(
-            m,m.curves[tag],caller,"Curve[$tag]")
+        return _model_curve_bounding_box(m,tag,caller)
     elseif dimension==2
-        points=_model_points_of(m,[(2,tag)],caller)
-        return _model_bounds_from_points(m,points,caller,"Surface[$tag]")
+        bounds=_MODEL_EMPTY_BOUNDS
+        for curve in _model_boundary_curves(
+            m,2,tag,caller,"Surface[$tag]")
+            bounds=_model_bounds_union(
+                bounds,_model_curve_bounding_box(m,curve,caller))
+        end
+        return _model_bounds_checked(bounds,caller,"Surface[$tag]")
     end
     return _model_volume_bounds(m,tag,caller)
 end

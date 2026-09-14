@@ -1,5 +1,12 @@
 const _MODEL_ENTITY_TYPES=("Point","Line","Plane","Volume")
 
+# Gmsh `getTypeString` names for the native curve/surface kinds.
+function _model_entity_type_name(m::GeoModel,dimension::Int,tag::Int)
+    dimension==1 && return _curve_type_name(_curve_type(m,tag))
+    dimension==2 && return _surface_type_name(_surface_type(m,tag))
+    return _MODEL_ENTITY_TYPES[dimension+1]
+end
+
 function _model_metadata_entity(
     m::GeoModel,dim,tag,caller::AbstractString)
     dimension=_dimension(dim,caller)
@@ -15,10 +22,11 @@ end
 """
     model_entity_type(model, dim, tag) -> String
 
-Return the native geometry type of an existing positive-tag entity. Tessella's
-explicit entities are `"Point"`, `"Line"`, `"Plane"`, or `"Volume"`; native
-primitive and Boolean solids expose only their `"Volume"` entity because their
-boundary topology is implicit.
+Return the native geometry type of an existing positive-tag entity. Explicit
+curves report `"Line"`, `"Circle"`, or `"Ellipse"`; explicit surfaces report
+`"Plane"` or the ruled-filling `"Surface"`; points and volumes report
+`"Point"`/`"Volume"`. Native primitive and Boolean solids expose only their
+`"Volume"` entity because their boundary topology is implicit.
 """
 function model_entity_type(m::GeoModel,dim,tag)
     dimension,entity_tag=_model_metadata_entity(
@@ -28,11 +36,12 @@ function model_entity_type(m::GeoModel,dim,tag)
     haskey(m.discrete,(dimension,entity_tag)) &&
         return ("Discrete point","Discrete curve",
                 "Discrete surface","Discrete volume")[dimension+1]
-    return _MODEL_ENTITY_TYPES[dimension+1]
+    return _model_entity_type_name(m,dimension,entity_tag)
 end
 
 function _model_plane_geometry(
     m::GeoModel,tag::Int,caller::AbstractString)
+    _model_require_plane_surface(m,tag,caller,"plane properties")
     loops=m.surfaces[tag]
     isempty(loops) && throw(ErrorException(
         "$caller: Plane[$tag] has no boundary loops; rebuild the model"))
@@ -40,6 +49,14 @@ function _model_plane_geometry(
     outer_points=unique!(_loop_points(m,first(loops)))
     point_tags=copy(outer_points)
     seen=Set(point_tags)
+    # Arc control points join the fit so the coplanarity certificate covers
+    # every arc on the boundary.
+    for loop in loops, signed_curve in m.loops[loop],
+        point in get(m.curve_control_points,abs(signed_curve),Int[])
+        point in seen && continue
+        push!(point_tags,point)
+        push!(seen,point)
+    end
     for point in all_points
         point in seen && continue
         push!(point_tags,point)

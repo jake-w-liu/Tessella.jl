@@ -2881,8 +2881,11 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     declarations=(
         (r"^Point\s*\(\s*(.*?)\s*\)\s*=",:point,"Point"),
         (r"^Line\s*\(\s*(.*?)\s*\)\s*=",:curve,"Line"),
+        (r"^Circle\s*\(\s*(.*?)\s*\)\s*=",:curve,"Circle"),
+        (r"^Ellipse\s*\(\s*(.*?)\s*\)\s*=",:curve,"Ellipse"),
         (r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=",:auxiliary,"Curve Loop"),
         (r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=",:surface,"Plane Surface"),
+        (r"^(?:Ruled\s+)?Surface\s*\(\s*(.*?)\s*\)\s*=",:surface,"Surface"),
         (r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=",:auxiliary,"Surface Loop"),
         (r"^Volume\s*\(\s*(.*?)\s*\)\s*=",:volume,"Volume"),
     )

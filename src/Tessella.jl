@@ -91,6 +91,7 @@ using .TransfiniteVolume: mesh_transfinite_volume
 using .TransfinitePrism: mesh_transfinite_prism
 using .TransfiniteHex: mesh_transfinite_hex
 using .Model: GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!,
+              add_circle_arc!, add_ellipse_arc!, add_ruled_surface!,
               add_surface_loop!, add_volume!,
               add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!,
               embed!, translate_volume!, dilate_volume!, rotate_volume!,
@@ -178,6 +179,7 @@ export mesh_transfinite_volume
 export mesh_transfinite_prism
 export mesh_transfinite_hex
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!, add_box!
+export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_surface_loop!, add_volume!
 export add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!

@@ -35,6 +35,7 @@ using ..Predicates: orient2, orient3
 using LinearAlgebra: Symmetric, eigen
 
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
+export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_surface_loop!, add_volume!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
@@ -178,8 +179,19 @@ mutable struct GeoModel
     # curve. Ordinary curves have no entry; transforms and coherence passes
     # treat them as part of the curve.
     curve_control_points::Dict{Int,Vector{Int}}
+    # Native geometry kind per curve — :line (default), :circle, or :ellipse.
+    # Arcs carry their ordered control points in `curve_control_points`
+    # ([start, center, end] or [start, center, major, end]) and the `Plane{..}`
+    # hint normal in `curve_geometry`, mirroring Gmsh's `Curve` records.
+    curve_types::Dict{Int,Symbol}
+    curve_geometry::Dict{Int,NamedTuple}
     loops::Dict{Int,Vector{Int}}
     surfaces::Dict{Int,Vector{Int}}
+    # Native geometry kind per surface — :plane (default), :ruled, or :tric.
+    # `surface_geometry` carries auxiliary parameters such as the `In Sphere`
+    # center point Gmsh stores on surface-filling records.
+    surface_types::Dict{Int,Symbol}
+    surface_geometry::Dict{Int,NamedTuple}
     surface_loops::Dict{Int,Vector{Int}}
     volumes::Dict{Int,Vector{Int}}
     entity_names::Dict{Tuple{Int,Int},String}
@@ -214,7 +226,9 @@ dimension. Geometry is added explicitly and can then be meshed with
 """
 GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
+                      Dict{Int,Symbol}(), Dict{Int,NamedTuple}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
+                      Dict{Int,Symbol}(), Dict{Int,NamedTuple}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
                       Dict{Tuple{Int,Int},Int}(),
@@ -308,6 +322,16 @@ function _alloc_surface_loop_tag(m::GeoModel,requested::Int,caller)
     current=isempty(m.surface_loops) ? 0 : maximum(keys(m.surface_loops))
     current<typemax(Int32) || throw(ArgumentError(
         "$caller: no automatic Surface Loop tags remain"))
+    return current+1
+end
+
+# Curve-loop tags live in their own Gmsh namespace (`_maxLineLoopNum`), not the
+# curve counter — `Curve Loop() = {1}` after `Circle(7)` still yields loop 1.
+function _alloc_curve_loop_tag(m::GeoModel,requested::Int,caller)
+    requested!=0 && return requested
+    current=isempty(m.loops) ? 0 : maximum(keys(m.loops))
+    current<typemax(Int32) || throw(ArgumentError(
+        "$caller: no automatic Curve Loop tags remain"))
     return current+1
 end
 
@@ -460,6 +484,7 @@ end
     hypot(a[1]-b[1],a[2]-b[2],a[3]-b[3])
 
 function _model_curve_length(m::GeoModel,curve::Int,caller::AbstractString)
+    _model_require_line_curve(m,curve,caller,"curve length")
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     length1=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
     (isfinite(length1) && length1>0) || throw(ArgumentError(
@@ -476,6 +501,7 @@ include("ModelEntityMetadata.jl")
 include("ModelEntityEvaluation.jl")
 include("ModelMeshingAttributes.jl")
 include("ModelTransforms.jl")
+include("ModelCurved.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -551,6 +577,8 @@ function _model_periodic_surface_topology(
     function curve_signatures(curves,map)
         signatures=NTuple{2,Int}[]
         for curve in curves
+            _model_require_line_curve(m,curve,caller,
+                                      "periodic surface correspondence")
             first_point,second_point=m.curves[curve]
             first_mapped=map[first_point];second_mapped=map[second_point]
             push!(signatures,first_mapped<second_mapped ?
@@ -773,31 +801,23 @@ end
 """
     add_curve_loop!(model, curves; tag=0) -> tag
 
-Add an ordered, closed loop of at least three existing curves. A negative curve
-tag traverses that curve in reverse orientation. Consecutive oriented curves
-must share endpoints.
+Add a curve loop from signed curve tags. Mirroring Gmsh's `Curve Loop`, the
+tags are reordered into connectivity order — each curve's oriented end must
+match the next curve's oriented start — so input order is irrelevant. A chain
+that dead-ends before consuming every curve fails; closed single-curve loops
+(periodic curves) and multi-subloop lists are accepted like Gmsh. Closure of
+each boundary chain is certified at mesh time.
 """
 function add_curve_loop!(m::GeoModel, curves; tag::Integer=0)
     caller="add_curve_loop!"
     ids=Int[_signed_curve_tag(c,caller) for c in curves]
-    length(ids)>=3 || throw(ArgumentError("$caller: a loop needs at least three curves"))
     for id in ids
         haskey(m.curves,abs(id)) || throw(ArgumentError("$caller: unknown Curve[$(abs(id))]"))
     end
-    oriented=map(ids) do id
-        a,b=m.curves[abs(id)]
-        id>0 ? (a,b) : (b,a)
-    end
-    for i in eachindex(oriented)
-        current=oriented[i]
-        following=oriented[mod1(i+1,length(oriented))]
-        current[2]==following[1] || throw(ArgumentError(
-            "$caller: oriented Curve[$(ids[i])] ends at Point[$(current[2])], " *
-            "but Curve[$(ids[mod1(i+1,length(ids))])] starts at Point[$(following[1])]"))
-    end
-    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
+    ordered=_sort_curve_loop(m,ids,caller)
+    t=_alloc_curve_loop_tag(m,_tag(tag,caller,1),caller)
     haskey(m.loops,t) && throw(ArgumentError("$caller: Loop[$t] already exists"))
-    m.loops[t]=ids
+    m.loops[t]=ordered
     return t
 end
 
@@ -1580,6 +1600,7 @@ end
 
 function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
                                caller::AbstractString)
+    _model_require_line_curve(m,curve,caller,"curve subdivision")
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     point=ntuple(3) do axis
         _affine_coordinate(
@@ -1601,14 +1622,18 @@ end
 function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                        param_sizes::Dict{Tuple{Int,Float64},Float64}=
                            Dict{Tuple{Int,Float64},Float64}(),
-                       plane=_model_surface_plane(m,t,caller))
+                       plane=_model_surface_plane(m,t,caller;
+                                                  allow_ruled=true))
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
     for loop_id in m.surfaces[t]
+        _verify_loop_closed(m,loop_id,caller,"Surface[$t]")
         loop_idx=Int[]
         for signed in m.loops[loop_id]
-            curve=abs(signed);a,b=m.curves[curve]
+            curve=abs(signed)
+            _model_require_line_curve(m,curve,caller,"surface meshing")
+            a,b=m.curves[curve]
             for parameter in _surface_curve_parameters(forced,curve,signed)
                 vertex=if parameter==0
                     _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller,plane)
@@ -1652,6 +1677,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         edim==1 || continue
         haskey(m.curves,etag) || throw(ArgumentError(
             "$caller: unknown embedded Curve[$etag]"))
+        _model_require_line_curve(m,etag,caller,"embedded-curve meshing")
         a,b=m.curves[etag]
         parameters=get(forced,etag,nothing)
         curve_nodes=Int[]
@@ -1750,6 +1776,7 @@ end
 function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes,
                                 eligible_edges,atol::Float64,
                                 caller::AbstractString)
+    _model_require_line_curve(m,curve,caller,"curve mesh classification")
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     vx=q[1]-p[1];vy=q[2]-p[2];vz=q[3]-p[3]
     length2=muladd(vx,vx,muladd(vy,vy,vz*vz))
@@ -2141,6 +2168,7 @@ end
 function _model_projection_embedded_curve_nodes(
     m::GeoModel,mesh::Mesh,curve::Int,mesh_edges,
     atol::Float64,caller::AbstractString)
+    _model_require_line_curve(m,curve,caller,"embedded-curve classification")
     start_point,stop_point=m.curves[curve]
     first_coordinate=m.points[start_point]
     last_coordinate=m.points[stop_point]
@@ -2332,7 +2360,7 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     embedded_points,embedded_curves=
         _model_surface_embedding_tags(m,surface,caller)
 
-    plane=_model_surface_plane(m,surface,caller)
+    plane=_model_surface_plane(m,surface,caller;allow_ruled=true)
     constraints=_surface_periodic_constraints(m,surface,caller)
     geometric_tolerance=max(1e-12,
         isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
@@ -2350,7 +2378,9 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     any(curve->curve in curve_tags,embedded_curves) && throw(ArgumentError(
         "$caller: a surface curve cannot be both bounding and embedded"))
     all_curve_tags=sort!(unique!(vcat(curve_tags,embedded_curves)))
-    for curve in all_curve_tags,point in m.curves[curve]
+    for curve in all_curve_tags,
+        point in Iterators.flatten(
+            (m.curves[curve],get(m.curve_control_points,curve,Int[])))
         p=m.points[point]
         scale=max(1.0,hypot(p...))
         abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
@@ -2555,6 +2585,7 @@ end
 function _model_projection_tet_curve_nodes(
     m::GeoModel,mesh::Mesh,curve::Int,tet_edges,
     caller::AbstractString)
+    _model_require_line_curve(m,curve,caller,"embedded-curve classification")
     start_point,stop_point=m.curves[curve]
     first_coordinate=m.points[start_point]
     last_coordinate=m.points[stop_point]
@@ -2619,9 +2650,19 @@ end
 # `normal` the unnormalized plane normal (its `k` component is nonzero because
 # the projected anchor triangle is nondegenerate). `norm` is |normal|, used to
 # turn dot products into absolute signed distances.
-function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString)
+# `allow_ruled` admits `:ruled`/`:tric` surface-filling records for meshing
+# paths: Gmsh's translational `Extrude` types every lateral `Surface`, and a
+# ruled patch whose boundary certifies planar is planar in fact. Every
+# boundary point is offset-checked while the PSLG is built, so a genuinely
+# non-planar ruled boundary still fails explicitly there.
+function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
+                              allow_ruled::Bool=false)
     haskey(m.surfaces,surface) || throw(ArgumentError(
         "$caller: unknown Surface[$surface]"))
+    kind=_surface_type(m,surface)
+    if kind!=:plane && !(allow_ruled && kind in (:ruled,:tric))
+        _model_require_plane_surface(m,surface,caller,"plane geometry")
+    end
     point_tags=Int[]
     for loop in m.surfaces[surface]
         haskey(m.loops,loop) || throw(ArgumentError(
@@ -2631,7 +2672,10 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString)
             haskey(m.curves,curve) || throw(ArgumentError(
                 "$caller: Loop[$loop] references unknown Curve[$curve]"))
             a,b=m.curves[curve]
-            for point in (a,b)
+            # Arc control points join the fit: the exact coplanarity check then
+            # certifies the whole arc lies in the surface's plane.
+            for point in Iterators.flatten(
+                    ((a,b),get(m.curve_control_points,curve,Int[])))
                 haskey(m.points,point) || throw(ArgumentError(
                     "$caller: Curve[$curve] references unknown Point[$point]"))
                 push!(point_tags,point)
@@ -2744,6 +2788,8 @@ function _model_planar_surface_mesh(
             add_point_tag!(point)
         end
         for curve in embedded_curves
+            _model_require_line_curve(m,curve,caller,
+                                      "embedded-curve meshing")
             start_point,stop_point=m.curves[curve]
             first_index=add_point_tag!(start_point)
             second_index=add_point_tag!(stop_point)
@@ -3225,6 +3271,8 @@ function _model_periodic_surface_boundary_maps(
         "$caller: periodic surfaces have different boundary-curve counts"))
     slave_signatures=Dict{NTuple{2,Int},Int}()
     for curve in slave_curves
+        _model_require_line_curve(m,curve,caller,
+                                  "periodic surface correspondence")
         first_point,second_point=m.curves[curve]
         signature=first_point<second_point ?
             (first_point,second_point) : (second_point,first_point)
@@ -3235,6 +3283,8 @@ function _model_periodic_surface_boundary_maps(
     curve_map=Dict{Int,Int}()
     used=Set{Int}()
     for master_curve in master_curves
+        _model_require_line_curve(m,master_curve,caller,
+                                  "periodic surface correspondence")
         first_point,second_point=m.curves[master_curve]
         first_mapped=point_map[first_point]
         second_mapped=point_map[second_point]
@@ -3756,7 +3806,7 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         return _transfinite_surface_mesh(
             m,t,param_sizes,caller;size_field=size_field),NTuple{2,Int}[]
     end
-    plane=_model_surface_plane(m,t,caller)
+    plane=_model_surface_plane(m,t,caller;allow_ruled=true)
     xs,ys,mesh_sizes,segs,embedded,internal=
         _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
@@ -4271,6 +4321,8 @@ function _validate_surface_embeddings(m::GeoModel,mesh::Mesh,embedded,
             _node_at(mesh,p)==0 && throw(ErrorException(
                 "$caller: embedded Point[$etag] at $p is not a mesh node"))
         elseif edim==1
+            _model_require_line_curve(m,etag,caller,
+                                      "embedded-curve verification")
             a,b=m.curves[etag]
             _mesh_covers_segment(mesh, m.points[a], m.points[b]) || throw(ErrorException(
                 "$caller: embedded Curve[$etag] is not a chain of mesh edges"))
@@ -4732,6 +4784,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
         (mesh=_laplacian_smooth_volume(mesh,iterations,caller,t))
     sort!(unique!(line_tags))
     for curve in line_tags
+        _model_require_line_curve(m,curve,caller,"embedded-curve recovery")
         a,b=m.curves[curve];p=m.points[a];q=m.points[b]
         mesh=recover_segment3(mesh,p,q)
         mesh_covers_segment3(mesh,p,q) || throw(ErrorException(
@@ -4843,13 +4896,19 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
     member_polygons=Dict{Int,Vector{Vector{Int}}}()
     # Compound members must share one plane; the first member's plane is the
     # reference every other point is checked against.
-    plane=_model_surface_plane(m,first(members),caller)
+    plane=_model_surface_plane(m,first(members),caller;allow_ruled=true)
     for tag in members
         member_polygons[tag]=Vector{Int}[]
+        _surface_type(m,tag) in (:plane,:ruled,:tric) ||
+            _model_require_plane_surface(m,tag,caller,
+                                         "compound surface meshing")
         for loop_id in m.surfaces[tag]
+            _verify_loop_closed(m,loop_id,caller,"Surface[$tag]")
             loop_idx=Int[]
             for signed in m.loops[loop_id]
                 curve=abs(signed);a,b=m.curves[curve]
+                _model_require_line_curve(m,curve,caller,
+                                          "compound surface meshing")
                 cspec=get(m.meshing.transfinite_curves,curve,nothing)
                 cspec===nothing ||
                     (forced[curve]=collect(_transfinite_parameters(

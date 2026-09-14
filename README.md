@@ -128,7 +128,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   containment selection, native entity types and plane equations, and explicit
   nonpartition metadata, plus native Point/straight-Line/explicit-Plane values,
   derivatives, curvature, normals, parametrization, containment, projection, and
-  Point/Line-to-Plane reparametrization; owned entity visibility and RGBA colors,
+  Point/Line-to-Plane reparametrization, and Circle/Ellipse-arc values,
+  derivatives, and curvature; owned entity visibility and RGBA colors,
   model string attributes, and finite Point-coordinate updates;
   retagging moves every live reference, while removal skips surviving
   boundary/embedding dependencies, can recurse through explicit boundaries, and
@@ -250,7 +251,8 @@ the finite query box, ignore embeddings when bounding their target, and preserve
 session mesh cache. Tessella omits OpenCASCADE shape-tolerance padding (`1e-7` in
 the pinned fixtures), rejects nonfinite boxes and invalid dimensions, and exposes no
 implicit Cylinder/Sphere/Cone subentities.
-Entity metadata identifies every explicit entity as `Point`, `Line`, `Plane`, or
+Entity metadata identifies every explicit entity as `Point`, `Line`, `Circle`,
+`Ellipse`, `Plane`, `Surface`, or
 `Volume`; Box solids expose their materialized Point/Line/Plane children while
 Cylinder/Sphere/Cone and Boolean solids expose only `Volume`. Native `GeoModel`
 plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
@@ -259,13 +261,16 @@ visibility is stored display state. Native
 entities are not partition entities, so their parent is `(-1,-1)`, the model's
 partition count is zero, and per-entity partition membership is empty. These direct
 and session queries are read-only and preserve the mesh cache.
-Native geometry evaluation covers Points, straight Lines, and explicit Planes through
-matching direct and session APIs. Lines use parameters `[0,1]`; Planes use a
+Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
+arcs, and explicit Planes through
+matching direct and session APIs. Lines and arcs use parameters `[0,1]`, with
+arcs evaluated through Gmsh's `InterpolateCurve` frame; Planes use a
 deterministic Gmsh-compatible orthonormal frame. Physical Plane containment tests the
 exact trimmed interior and excludes boundary loops, while parametric containment
 tests the inclusive rectangular bounds. Closest Line points are clamped to the
 segment; Plane projection is untrimmed. Malformed, nonfinite, implicit, degenerate,
-and unrepresentable inputs fail explicitly. Curved entities and general CAD
+and unrepresentable inputs fail explicitly. Arc parametrization/projection,
+other curved entities, and general CAD
 parametrization remain unfinished.
 Point and straight-Line parameters can be reparametrized on any explicit Plane,
 including off-plane sources; the result is the orthogonal Plane parametrization.

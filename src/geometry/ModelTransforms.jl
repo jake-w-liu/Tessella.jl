@@ -495,17 +495,19 @@ function _merge_curves!(m::GeoModel)
     # the reversed direction therefore merges into the surviving *reversed*
     # record, so the dropped tag maps to `-keep`. Group by the canonical
     # undirected key, then resolve each drop's sign from its direction.
-    seen=Dict{Tuple{Int,Vector{Int}},Int}()
+    seen=Dict{Tuple{Symbol,Int,Vector{Int}},Int}()
     dir=Dict{Int,Vector{Int}}()
     mapping=Dict{Int,Int}()
     for tag in sort!(collect(keys(m.curves)))
         cps=get(m.curve_control_points,tag,Int[])
         a,b=m.curves[tag]
         dkey=isempty(cps) ? Int[a,b] : copy(cps)
-        # `CompareTwoCurves` distinguishes by control-point count first, so
-        # the count is part of the undirected key; the directed vector is
+        # `CompareTwoCurves` distinguishes by record type (Line/Circle/Ellipse
+        # — Gmsh's CIRC and CIRC_INV records are equivalent, which Tessella's
+        # unsigned types already express) and control-point count first, so
+        # both are part of the undirected key; the directed vector is
         # canonicalized against its own reversal.
-        ukey=(length(cps),min(dkey,reverse(dkey)))
+        ukey=(_curve_type(m,tag),length(cps),min(dkey,reverse(dkey)))
         if haskey(seen,ukey)
             keep=seen[ukey]
             mapping[tag]=dkey==dir[keep] ? keep : -keep
@@ -653,8 +655,12 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     if dim==1
         delete!(m.meshing.transfinite_curves,tag)
         delete!(m.curve_control_points,tag)
+        delete!(m.curve_types,tag)
+        delete!(m.curve_geometry,tag)
     elseif dim==2
         delete!(m.meshing.transfinite_surfaces,tag)
+        delete!(m.surface_types,tag)
+        delete!(m.surface_geometry,tag)
     elseif dim==3
         delete!(m.meshing.transfinite_volumes,tag)
         delete!(m.meshing.outward_orientation,tag)
@@ -734,7 +740,13 @@ function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false)
     a,b=m.curves[src]
     source_cps=get(m.curve_control_points,src,Int[a,b])
     if reversed
-        (a,b)=(b,a); source_cps=reverse(source_cps)
+        (a,b)=(b,a)
+        # Gmsh's `CreateReversedCurve` inverts the control list except for
+        # ellipses, where the center and major-axis points keep their
+        # positions: [end, center, major, start].
+        source_cps=_curve_type(m,src)==:ellipse ?
+            Int[source_cps[4],source_cps[2],source_cps[3],source_cps[1]] :
+            reverse(source_cps)
     end
     t=_geo_newreg_alloc!(m,1,caller)
     m.curve_control_points[t]=
@@ -742,6 +754,8 @@ function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false)
     pa=_fresh_point_copy!(m,a,caller)
     pb=_fresh_point_copy!(m,b,caller)
     m.curves[t]=(pa,pb)
+    haskey(m.curve_types,src) && (m.curve_types[t]=m.curve_types[src])
+    haskey(m.curve_geometry,src) && (m.curve_geometry[t]=m.curve_geometry[src])
     return t
 end
 
@@ -757,6 +771,9 @@ function _duplicate_surface!(m::GeoModel, src::Int, caller)
         push!(loops,lt)
     end
     m.surfaces[t]=loops
+    haskey(m.surface_types,src) && (m.surface_types[t]=m.surface_types[src])
+    haskey(m.surface_geometry,src) &&
+        (m.surface_geometry[t]=m.surface_geometry[src])
     return t
 end
 
@@ -957,6 +974,9 @@ function _extrude_lateral_surface!(m::GeoModel, src::Int, chapeau::Int,
     lt=_geo_derived_loop_tag(m,surf)
     m.loops[lt]=generatrices
     m.surfaces[surf]=Int[lt]
+    # `ExtrudeCurve`: a collapsed side gives a three-edge `MSH_SURF_TRIC`
+    # patch, otherwise the four-generatrix `MSH_SURF_REGL` ruled surface.
+    m.surface_types[surf]=length(generatrices)==4 ? :ruled : :tric
     params!==nothing && (m.meshing.extrude[(2,surf)]=params)
     return surf
 end
@@ -996,6 +1016,11 @@ function _extrude_surface!(m::GeoModel, is::Int, delta::NTuple{3,Float64},
         push!(loop_tags,lt)
     end
     m.surfaces[top]=loop_tags
+    # The top is `DuplicateSurface` output: it inherits the source's record
+    # type (`Plane Surface` extrudes to a `Plane` cap) and geometry metadata.
+    haskey(m.surface_types,tag) && (m.surface_types[top]=m.surface_types[tag])
+    haskey(m.surface_geometry,tag) &&
+        (m.surface_geometry[top]=m.surface_geometry[tag])
     params!==nothing && (m.meshing.extrude[(2,top)]=params)
     slt=haskey(m.surface_loops,vol) ? _geo_next_surface_loop_tag(m) : vol
     m.surface_loops[slt]=vcat(-tag,top,laterals)

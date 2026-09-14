@@ -187,12 +187,11 @@ end
     add_box!(primitive,0,0,0,1,1,1;tag=1)
     add_box!(primitive,2,0,0,1,1,1;tag=2)
     boolean_volumes!(primitive,:union,1,2;tag=3)
-    # Box face loops allocate from the shared dim-1 counter, so the second
-    # box's curves start at 19 (loops 13-18 sit in the Curve namespace).
+    # Box face loops allocate from the dedicated curve-loop namespace
+    # (Gmsh's _maxLineLoopNum), so the second box's curves continue at 13.
     @test Tessella.Model.model_entities(primitive)==
           [Tuple{Int,Int}[(0,point) for point in 1:16];
-           Tuple{Int,Int}[(1,curve) for curve in 1:12];
-           Tuple{Int,Int}[(1,curve) for curve in 19:30];
+           Tuple{Int,Int}[(1,curve) for curve in 1:24];
            Tuple{Int,Int}[(2,surface) for surface in 1:12];
            [(3,1),(3,2),(3,3)]]
     @test Tessella.Model.model_dimension(primitive)==3

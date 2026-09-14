@@ -104,6 +104,12 @@ geo_extrude_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes 
 println("  command: ", geo_extrude_command)
 run(geo_extrude_command)
 
+println("\n── geo_curved ──  entity-level Gmsh 4.15.2 .geo arc/surface-filling differential")
+geo_curved_script = joinpath(HERE, "geo_curved", "differential.jl")
+geo_curved_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_curved_script`
+println("  command: ", geo_curved_command)
+run(geo_curved_command)
+
 println("\n── gmsh_parity geometry expressions ──  bounded entity/value execution")
 geo_expression_script = joinpath(
     HERE, "gmsh_parity", "geo_geometry_expressions.jl")

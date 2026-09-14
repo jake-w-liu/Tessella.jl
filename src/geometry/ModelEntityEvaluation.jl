@@ -30,6 +30,7 @@ end
 
 function _model_line_geometry(
     m::GeoModel,tag::Int,caller::AbstractString)
+    _model_require_line_curve(m,tag,caller,"curve evaluation")
     first_point,last_point=m.curves[tag]
     haskey(m.points,first_point) || throw(ArgumentError(
         "$caller: Line[$tag] references unknown Point[$first_point]"))
@@ -182,6 +183,16 @@ function _model_plane_polygons(m::GeoModel,tag::Int,plane)
         for point in _loop_points(m,loop)] for loop in m.surfaces[tag]]
 end
 
+# A contains/projection query flattens the boundary to a chord polygon; curved
+# boundary curves would silently lose their bulge, so they fail explicitly.
+function _model_plane_boundary_polygons(m::GeoModel,tag::Int,plane,
+                                        caller::AbstractString)
+    for curve in _model_surface_curves(m,tag)
+        _model_require_line_curve(m,curve,caller,"plane boundary queries")
+    end
+    return _model_plane_polygons(m,tag,plane)
+end
+
 function _model_plane_contains(
     polygons,plane,coordinate::NTuple{3,Float64})
     if orient3(plane.anchor,plane.second,plane.third,coordinate)!=0
@@ -215,9 +226,10 @@ end
 """
     model_value(model, dim, tag, parametric_coordinates) -> Vector{Float64}
 
-Evaluate an explicit Point, straight Line, or Plane parametrization. Line
+Evaluate an explicit Point, Line, arc, or Plane parametrization. Curve
 parameters use `[0,1]`; Plane parameters use the deterministic native orthonormal
-frame returned by [`model_parametrization_bounds`](@ref).
+frame returned by [`model_parametrization_bounds`](@ref). `Circle`/`Ellipse`
+arcs evaluate with Gmsh's angle parametrization.
 """
 function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     caller="model_value"
@@ -267,10 +279,17 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     output=Float64[]
     sizehint!(output,3*(length(values)÷stride))
     if dimension==1
-        line=_model_line_geometry(m,entity_tag,caller)
-        for (index,parameter) in pairs(values)
-            _model_append_point!(output,
-                _model_line_point(line,parameter,caller,index))
+        if _curve_type(m,entity_tag)==:line
+            line=_model_line_geometry(m,entity_tag,caller)
+            for (index,parameter) in pairs(values)
+                _model_append_point!(output,
+                    _model_line_point(line,parameter,caller,index))
+            end
+        else
+            arc=_arc_geometry(m,entity_tag,caller)
+            for parameter in values
+                _model_append_point!(output,_arc_point(arc,parameter))
+            end
         end
     else
         plane=_model_plane_frame(m,entity_tag,caller)
@@ -282,7 +301,11 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     return output
 end
 
-"""Evaluate first derivatives for an explicit straight Line or Plane."""
+"""
+Evaluate first derivatives for an explicit Line, arc, or Plane. Arc derivatives
+are analytic; Gmsh's `getDerivative` uses a finite difference of the same
+evaluation, so values agree within that error.
+"""
 function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
     caller="model_derivative"
     dimension,entity_tag=_model_evaluation_entity(
@@ -308,11 +331,19 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
         return output
     end
     if dimension==1
-        line=_model_line_geometry(m,entity_tag,caller)
-        derivative=_model_line_derivative(line,entity_tag,caller)
-        sizehint!(output,3length(values))
-        for _ in values
-            append!(output,derivative)
+        if _curve_type(m,entity_tag)==:line
+            line=_model_line_geometry(m,entity_tag,caller)
+            derivative=_model_line_derivative(line,entity_tag,caller)
+            sizehint!(output,3length(values))
+            for _ in values
+                append!(output,derivative)
+            end
+        else
+            arc=_arc_geometry(m,entity_tag,caller)
+            sizehint!(output,3length(values))
+            for parameter in values
+                append!(output,_arc_first_derivative(arc,parameter))
+            end
         end
     else
         plane=_model_plane_frame(m,entity_tag,caller)
@@ -325,30 +356,54 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
     return output
 end
 
-"""Evaluate second derivatives for an explicit straight Line or Plane."""
+"""
+Evaluate second derivatives for an explicit Line, arc, or Plane. Line and Plane
+derivatives are zero; arc derivatives are analytic.
+"""
 function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
     caller="model_second_derivative"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(1,2),caller)
     values=_model_evaluation_values(
         parametric_coordinates,dimension,caller,"parametric coordinates")
-    haskey(m.discrete,(dimension,entity_tag)) ||
-        (dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
-                        _model_plane_frame(m,entity_tag,caller))
+    if haskey(m.discrete,(dimension,entity_tag))
+        multiplier=dimension==1 ? 3 : 9
+        return zeros(Float64,multiplier*(length(values)÷dimension))
+    end
+    if dimension==1 && _curve_type(m,entity_tag)!=:line
+        arc=_arc_geometry(m,entity_tag,caller)
+        output=Float64[]
+        sizehint!(output,3*length(values))
+        for parameter in values
+            append!(output,_arc_second_derivative(arc,parameter))
+        end
+        return output
+    end
+    dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
+                   _model_plane_frame(m,entity_tag,caller)
     multiplier=dimension==1 ? 3 : 9
     return zeros(Float64,multiplier*(length(values)÷dimension))
 end
 
-"""Return zero curvature for an explicit straight Line or Plane."""
+"""
+Return the curvature of an explicit Line (zero) or arc (`|P' × P''| / |P'|³`,
+matching Gmsh's `getCurvature` formula).
+"""
 function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
     caller="model_curvature"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(1,2),caller)
     values=_model_evaluation_values(
         parametric_coordinates,dimension,caller,"parametric coordinates")
-    haskey(m.discrete,(dimension,entity_tag)) ||
-        (dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
-                        _model_plane_frame(m,entity_tag,caller))
+    if haskey(m.discrete,(dimension,entity_tag))
+        return zeros(Float64,length(values)÷dimension)
+    end
+    if dimension==1 && _curve_type(m,entity_tag)!=:line
+        arc=_arc_geometry(m,entity_tag,caller)
+        return Float64[_arc_curvature(arc,parameter) for parameter in values]
+    end
+    dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
+                   _model_plane_frame(m,entity_tag,caller)
     return zeros(Float64,length(values)÷dimension)
 end
 
@@ -477,7 +532,10 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
         return lower,upper
     end
     dimension==1 && begin
-        _model_line_geometry(m,entity_tag,caller)
+        # Gmsh reports the stored parameter interval, which is [0,1] for both
+        # straight lines and arcs.
+        _curve_type(m,entity_tag)==:line &&
+            _model_line_geometry(m,entity_tag,caller)
         return [0.0],[1.0]
     end
     plane=_model_plane_frame(m,entity_tag,caller)
@@ -527,7 +585,7 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
             lower[1]<=values[index]<=upper[1] &&
             lower[2]<=values[index+1]<=upper[2],1:2:length(values))
     end
-    polygons=_model_plane_polygons(m,entity_tag,plane)
+    polygons=_model_plane_boundary_polygons(m,entity_tag,plane,caller)
     return count(index->_model_plane_contains(
         polygons,plane,
         (values[index],values[index+1],values[index+2])),
