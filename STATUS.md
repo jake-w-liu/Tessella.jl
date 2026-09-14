@@ -37,10 +37,12 @@ pipeline, high-order/custom-interpolation, or mixed-component
 `PostView`, materially warped quadrangles, `PostView` tensor-to-metric evaluation, direct tensor or
 metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD distance. P2 does
 not claim general mixed-element generation or recombination beyond P4's first-order
-surface pairing, MINI basis-selector tags 138/139 as mesh records, integration of
+surface pairing, integration of
 mixed blocks into the simplex meshing kernels, curved high-order
 Jacobian certification beyond P2 segments, triangles, and tetrahedra, internal
 indices beyond `Int32`, or lossless multi-physical-group MSH v2.2 projection.
+MINI basis-selector tags 138/139 serialize as fixed-width link-free records for
+Tessella-only output; pinned Gmsh 4.15.2 has no mesh-record case for them.
 Ancillary/unknown MSH sections round trip verbatim and parsed view sections
 (`$NodeData`/`$ElementData`/`$ElementNodeData`, including Gmsh's
 connectivity-implied dialect) remap tag columns into the output tag space;

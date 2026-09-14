@@ -155,7 +155,7 @@ quadrangles, `PostView` tensor-to-metric evaluation,
 direct tensor or metric-meshing parity, full `.geo`/CAD-model execution, or exact CAD
 distance queries. P2 does not yet claim general mixed-element generation or
 recombination beyond P4's first-order surface pairing, integration of mixed blocks
-into the simplex meshing kernels, basis-selector tags 138/139 as mesh records, curved
+into the simplex meshing kernels, curved
 high-order Jacobian certification beyond P2 segments, triangles, and tetrahedra,
 internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
@@ -179,7 +179,10 @@ Tessella-to-Tessella serialization only — Gmsh 4.15.2 rejects a 4-byte
 explicitly since they cannot be re-encoded.
 Variable-connectivity types 34/35/69 and parent/domain links are lossless in MSH2
 ASCII. Binary MSH2 has fixed widths and supports only fixed special records and parent
-links; MSH4 supports fixed unlinked special records. Type 69 and some registered fixed
+links; MSH4 supports fixed unlinked special records. MINI basis-selector types
+138/139 serialize as fixed-width link-free records — a Tessella-only extension,
+because pinned Gmsh has no mesh-record case for them (`Unknown type of element
+138`). Type 69, the MINI selectors, and some registered fixed
 tags require explicit Tessella-only output because Gmsh 4.15.2 cannot consume them
 safely. Pinned Gmsh 4.15.2 also corrupts distinct parent links when it rewrites MSH2
 binary, while Tessella's binary round trip and Gmsh's ASCII rewrite preserve them.
