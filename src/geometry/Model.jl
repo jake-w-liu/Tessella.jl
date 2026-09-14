@@ -106,6 +106,15 @@ DiscreteEntity() = DiscreteEntity(NTuple{2,Int}[], Int32[],
 Base.:(==)(a::DiscreteEntity,b::DiscreteEntity)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(DiscreteEntity))
 
+# `Layers`/`Recombine`/`ScaleLast`/`QuadTri*` parameters of a built-in
+# `Extrude` shape list, mirrored from Gmsh's `ExtrudeParams::mesh` record and
+# attached to every entity the extrusion creates. `layers`/`heights` are empty
+# unless a `Layers` parameter ran; `quad_to_tri` is `:none`, `:add_verts`, or
+# `:no_new_verts`.
+const _GeoExtrudeParams=NamedTuple{
+    (:layers,:heights,:scale_last,:recombine,:quad_to_tri,:recomb_laterals),
+    Tuple{Vector{Int},Vector{Float64},Bool,Bool,Symbol,Bool}}
+
 """
 Owned per-entity meshing attributes on a [`GeoModel`](@ref), mirroring the
 Gmsh `model.mesh` generation-attribute surface. Empty containers mean the
@@ -121,6 +130,7 @@ mutable struct ModelMeshingAttributes
                                              Tuple{Symbol,Vector{Int}}}}
     transfinite_volumes::Dict{Int,Vector{Int}}
     recombine::Dict{Tuple{Int,Int},Float64}
+    extrude::Dict{Tuple{Int,Int},_GeoExtrudeParams}
     smoothing::Dict{Tuple{Int,Int},Int}
     reverse::Dict{Tuple{Int,Int},Bool}
     algorithm::Dict{Tuple{Int,Int},Int}
@@ -141,6 +151,7 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Int,NamedTuple{(:arrangement,:corners),Tuple{Symbol,Vector{Int}}}}(),
     Dict{Int,Vector{Int}}(),
     Dict{Tuple{Int,Int},Float64}(),
+    Dict{Tuple{Int,Int},_GeoExtrudeParams}(),
     Dict{Tuple{Int,Int},Int}(),
     Dict{Tuple{Int,Int},Bool}(),
     Dict{Tuple{Int,Int},Int}(),

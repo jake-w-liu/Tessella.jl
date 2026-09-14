@@ -288,7 +288,8 @@ function _model_removal_state(
     for entity in removed
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
-                      meshing.size_from_boundary,meshing.attached)
+                      meshing.size_from_boundary,meshing.attached,
+                      meshing.extrude)
             delete!(store,entity)
         end
     end

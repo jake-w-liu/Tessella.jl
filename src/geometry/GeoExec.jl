@@ -40,7 +40,8 @@ using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: transform_entities!, duplicate_entities!, coherence!
-using ..Model: merge_vertices!
+using ..Model: merge_vertices!, extrude_entities!
+using ..Model: _GeoExtrudeParams
 using ..Model: _affine_translation, _affine_dilation
 using ..Model: _affine_rotation, _affine_symmetry, _entity_label
 using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!
@@ -54,8 +55,9 @@ using ..IO: _geo_positive_gmsh_tag
 using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
 using ..IO: _MAX_GEO_LIST_ITEMS
-using ..IO: _geo_context_set_scalar!, _geo_apply_list_assignment!
-using ..IO: _geo_brace_terminated_statement
+using ..IO: _geo_context_set_scalar!, _geo_context_set_list!
+using ..IO: _geo_apply_list_assignment!, _geo_list_term_values
+using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!
 using ..IO: _geo_physical_declaration
@@ -75,6 +77,9 @@ struct GeoExecution
     mesh::Union{Nothing,Mesh}
     params
     transfinite_tri::Union{Nothing,Int}
+    # Final scalar/list variables from the `.geo` program (`out[]`,
+    # `x[]`, ...), for inspection and differential validation.
+    lists::Dict{String,Vector{Float64}}
 end
 
 const _MAX_GEO_EXEC_STATEMENT_BYTES=1_000_000
@@ -335,6 +340,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     params=read_geo_params(path)
     model=GeoModel()
     context=_GeoNumericContext()
+    # `Extrude{...}{...}` is a side-effecting value term in the `.geo`
+    # grammar; the numeric evaluator calls back through this hook.
+    context.exec_hook=src->_geo_exec_extrude_term(model,src,context)
     allocator_state=_GeoTagAllocatorState()
     statements=_geo_exec_statements(path)
     executed=Ref(0)
@@ -353,7 +361,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
             "execute_geo: Mesh 3 with multiple remaining volumes $(sort(collect(keys(model.volumes)))) is a blocker — Boolean Delete the operands or mesh a single volume"))
         mesh=mesh_model_volume(model, only(keys(model.volumes)))
     end
-    return GeoExecution(model,mesh,params,transfinite_tri)
+    return GeoExecution(model,mesh,params,transfinite_tri,context.lists)
 end
 
 const _GEO_CONTROL_CLOSE=Dict(:if=>:endif,:for=>:endfor,:while=>:endwhile)
@@ -519,10 +527,19 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 "execute_geo: control flow exceeds $_MAX_GEO_EXEC_STATEMENTS " *
                 "executed statements"))
             occursin(
-                r"\b(Macro|Function|Extrude|Torus|Fillet|Chamfer)\b",
+                r"\b(Macro|Function|Torus|Fillet|Chamfer)\b",
                 line) && throw(ArgumentError(
-                "execute_geo: unsupported statement $(line) — macros, " *
-                "extrusions, and advanced OCC features are blockers"))
+                "execute_geo: unsupported statement $(line) — macros and " *
+                "advanced OCC features are blockers"))
+            # `Extrude {shapes} Using Wire {n}` splits at the shape-list
+            # brace; reject the OCC pipe continuation before the extrusion
+            # itself executes.
+            if match(r"^Extrude\b",line)!==nothing && i+1<=hi &&
+               match(r"^Using\b",statements[i+1])!==nothing
+                throw(ArgumentError(
+                    "execute_geo: pipe extrusion `Extrude {..} Using Wire " *
+                    "{..}` is OpenCASCADE-only and not implemented"))
+            end
             _geo_context_refresh_allocators!(context,allocator_state)
             assigned=_exec_line!(m,line,context)
             assigned===nothing || (transfinite_tri=assigned)
@@ -578,11 +595,7 @@ function _geo_exec_numeric_values(raw::AbstractString,
     terms,total=_geo_numeric_list_terms(pieces,context,caller)
     values=Float64[];sizehint!(values,total)
     for term in terms
-        numeric=term.first
-        for _ in 1:term.count
-            push!(values,numeric)
-            numeric+=term.step
-        end
+        append!(values,_geo_list_term_values(term))
     end
     return values
 end
@@ -853,12 +866,14 @@ _geo_shape_kind_dim(name::AbstractString) =
     name=="Point" ? 0 : name in ("Curve","Line") ? 1 :
     name=="Surface" ? 2 : 3
 
-# Entity-block tag entries: a `:` wildcard or an unsigned tag list.
+# Entity-block tag entries: a `:` wildcard or a tag list (signed when the
+# enclosing construct allows it — `Extrude` curves carry orientation).
 function _geo_shape_tags(m::GeoModel, dim::Int, raw::AbstractString,
-                         context::_GeoNumericContext, caller::AbstractString)
+                         context::_GeoNumericContext, caller::AbstractString;
+                         signed_tags::Bool=false)
     r=String(strip(raw))
     r==":" && return _geo_exec_all_entity_tags(m,dim,"$caller wildcard")
-    return _geo_exec_entity_tags(r,context,caller)
+    return _geo_exec_entity_tags(r,context,caller;signed=signed_tags)
 end
 
 function _geo_shape_physical_tags(m::GeoModel, dim::Int, raw::AbstractString,
@@ -908,9 +923,13 @@ function _geo_shape_list_entities!(m::GeoModel, raw::AbstractString,
 end
 
 # One MultipleShape element. Returns (entities, remaining_text, is_transform).
+# `signed_tags` allows negative entity tags (`Curve{-1}`) — Gmsh's
+# `RecursiveListOfDouble` permits them and `Extrude` reads the sign as the
+# reversed-record orientation.
 function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                                       context::_GeoNumericContext,
-                                      caller::AbstractString)
+                                      caller::AbstractString;
+                                      signed_tags::Bool=false)
     mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",s0)
     mm===nothing && throw(ArgumentError(
         "$caller: malformed shape list element near $(repr(s0))"))
@@ -932,11 +951,21 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
     end
     if name=="Physical" || name=="Parent"
         km=match(r"^(Point|Curve|Line|Surface|Volume)\b",s)
-        km===nothing && throw(ArgumentError(
-            "$caller: $name requires Point, Curve/Line, Surface, or Volume " *
-            "inside a transform list"))
-        dim=_geo_shape_kind_dim(km.captures[1])
-        s=String(strip(s[nextind(s,firstindex(s),ncodeunits(km.match)):end]))
+        if km===nothing && (em=match(r"^GeoEntity\b",s))!==nothing
+            s=String(strip(s[nextind(s,firstindex(s),ncodeunits(em.match)):end]))
+            (dgroup,s)=_geo_balanced_group(s,caller)
+            dim_raw=_geo_eval_numeric(dgroup,context,
+                                      "$caller $name GeoEntity dimension")
+            isinteger(dim_raw) || throw(ArgumentError(
+                "$caller: $name GeoEntity dimension must be an integer"))
+            dim=Int(dim_raw)
+        else
+            km===nothing && throw(ArgumentError(
+                "$caller: $name requires Point, Curve/Line, Surface, " *
+                "Volume, or GeoEntity{d} inside a shape list"))
+            dim=_geo_shape_kind_dim(km.captures[1])
+            s=String(strip(s[nextind(s,firstindex(s),ncodeunits(km.match)):end]))
+        end
         (group,s)=_geo_balanced_group(s,caller)
         s=_geo_require_list_semicolon(s,caller,name)
         # Tessella entities have no parent entities; the selector is empty.
@@ -951,13 +980,29 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         end
         return (entries,s,false)
     end
+    if name=="GeoEntity"
+        # `GeoEntity{dim}{tags};` — the generic `tGeoEntity` selector.
+        (dgroup,s)=_geo_balanced_group(s,caller)
+        dim_raw=_geo_eval_numeric(dgroup,context,"$caller GeoEntity dimension")
+        isinteger(dim_raw) || throw(ArgumentError(
+            "$caller: GeoEntity dimension must be an integer; got $dim_raw"))
+        dim=Int(dim_raw)
+        0<=dim<=3 || throw(ArgumentError(
+            "$caller: GeoEntity dim out of range [0,3]"))
+        (group,s)=_geo_balanced_group(s,caller)
+        s=_geo_require_list_semicolon(s,caller,name)
+        return (NTuple{2,Int}[(dim,t) for t in _geo_shape_tags(
+                    m,dim,group,context,caller;signed_tags=signed_tags)],
+                s,false)
+    end
     if name in ("Point","Curve","Line","Surface","Volume")
         dim=_geo_shape_kind_dim(name)
         if startswith(s,"{")
             (group,s)=_geo_balanced_group(s,caller)
             s=_geo_require_list_semicolon(s,caller,name)
             return (NTuple{2,Int}[(dim,t) for t in _geo_shape_tags(
-                        m,dim,group,context,caller)],s,false)
+                        m,dim,group,context,caller;signed_tags=signed_tags)],
+                    s,false)
         end
         # `Kind(tag) = rhs;` — an inline Shape definition.
         return _geo_shape_definition_element!(m,s0,context,caller)
@@ -1061,6 +1106,262 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
     end
     throw(ArgumentError(
         "$caller: unknown action on multiple shapes '$name'"))
+end
+
+# ── Extrude ──────────────────────────────────────────────────────────────
+#
+# `.geo` translational `Extrude {dx,dy,dz} { ...; }`, mirroring the Gmsh
+# grammar (`tExtrude VExpr '{' ListOfShapes ExtrudeParameters '}'`) and the
+# `GEO_Internals::extrude` → `ExtrudeShapes` semantics: the expression value
+# is the flat `[top, body, laterals...]` tag list (laterals only under
+# `Geometry.ExtrudeReturnLateralEntities`, which defaults on). Rotational
+# (`{{axis}, {point}, angle}`), twist (`{{axis}, {point}, {delta}, angle}`),
+# boundary-layer (`Extrude {shapes; params}`), and `Using Wire` pipe forms are
+# recognized and rejected with explicit errors.
+
+# Scan a balanced `(...)` group — the VExpr grammar also allows parenthesized
+# vectors — returning `(content, rest)`.
+function _geo_balanced_paren(raw::AbstractString, caller::AbstractString)
+    s=String(strip(raw))
+    startswith(s,"(") || throw(ArgumentError(
+        "$caller: expected a `(...)` group; got $(repr(s))"))
+    depth=0;closing=0;i=firstindex(s);last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if c=='('
+            depth+=1
+        elseif c==')'
+            depth-=1
+            depth==0 && (closing=i; break)
+            depth<0 && throw(ArgumentError(
+                "$caller: unmatched closing parenthesis"))
+        end
+        i=nextind(s,i)
+    end
+    closing==0 && throw(ArgumentError("$caller: unmatched opening parenthesis"))
+    content=closing>2 ? String(s[2:prevind(s,closing)]) : ""
+    rest=closing<last ? String(strip(s[nextind(s,closing):end])) : ""
+    return (content,rest)
+end
+
+# Accumulate one VExpr group into `delta` (`sign` folds `VExpr '+' VExpr` and
+# leading `tMINUS VExpr`). Nested `{...}`/`(...)` members make the group the
+# rotational or twist form instead.
+function _geo_extrude_vector!(delta::NTuple{3,Float64}, sign::Float64,
+                              body::AbstractString,
+                              context::_GeoNumericContext,
+                              caller::AbstractString)
+    parts=_geo_split_top_commas(body,caller)
+    if any(p->startswith(strip(p),"{") || startswith(strip(p),"("),parts)
+        length(parts)==3 && throw(ArgumentError(
+            "$caller: rotational extrusion `Extrude {{axis}, {point}, angle}`" *
+            " is not implemented (only translational `Extrude {dx,dy,dz}`)"))
+        length(parts)==4 && throw(ArgumentError(
+            "$caller: twist extrusion `Extrude {{axis}, {point}, {delta}, " *
+            "angle}` is not implemented"))
+        throw(ArgumentError(
+            "$caller: malformed displacement expression $(repr(body))"))
+    end
+    length(parts)==3 || throw(ArgumentError(
+        "$caller: displacement requires exactly three components; got " *
+        "$(length(parts)) in $(repr(body))"))
+    return delta .+ sign .* ntuple(
+        i->_geo_eval_numeric(parts[i],context,"$caller displacement"),3)
+end
+
+const _GEO_EXTRUDE_PARAMS=(layers=Int[],heights=Float64[],scale_last=false,
+                           recombine=false,quad_to_tri=:none,
+                           recomb_laterals=false)
+
+# Parse one `;`-stripped element of an `Extrude` shape list. Returns
+# `entities` for shape elements (a `Vector{NTuple{2,Int}}`) or `nothing` for
+# `ExtrudeParameter` elements, which update `params` in place.
+function _geo_extrude_element!(m::GeoModel, element::AbstractString,
+                               context::_GeoNumericContext,
+                               params::_GeoExtrudeParams,
+                               caller::AbstractString)
+    mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",element)
+    mm===nothing && throw(ArgumentError(
+        "$caller: malformed shape list element near $(repr(element))"))
+    name=mm.captures[1]
+    s=String(strip(element[nextind(element,firstindex(element),
+                             ncodeunits(mm.match)):end]))
+    if name=="Layers"
+        (group,s)=_geo_balanced_group(s,caller)
+        isempty(s) || throw(ArgumentError(
+            "$caller: unexpected text after Layers parameter"))
+        # `Layers{n}` | `Layers{counts, heights}` | `Layers{{c..},{h..}}`:
+        # the grammar is `tLayers '{' (FExpr | ListOfDouble ',' ListOfDouble)
+        # '}'`, so the group's top-level items split after the first item —
+        # `Layers{3,5}` is one layer of 3 elements at height 5, while
+        # `Layers{{2,4},{0.2,0.8}}` is the documented two-layer form.
+        items=_geo_split_top_commas(group,caller)
+        expand(item)=_geo_exec_numeric_values(
+            startswith(strip(item),"{") ?
+            String(strip(item)[2:prevind(strip(item),end)]) : item,
+            context,"$caller Layers")
+        if length(items)==1
+            item=String(strip(only(items)))
+            startswith(item,"{") && throw(ArgumentError(
+                "$caller: Layers requires `{counts, heights}` or a single " *
+                "element count"))
+            # `Layers{n}`: a single layer of unit height; `n==0` leaves the
+            # parameters untouched (Gmsh accepts it to make disabling easy).
+            n=abs(_geo_signed_gmsh_int_value(
+                _geo_eval_numeric(item,context,"$caller Layers"),
+                "$caller Layers"))
+            n==0 && return (nothing,params)
+            layers=Int[n];heights=Float64[1.0]
+        else
+            counts=expand(items[1])
+            heights=Float64[]
+            for item in items[2:end]
+                append!(heights,expand(item))
+            end
+            length(heights)==length(counts) || throw(ArgumentError(
+                "$caller: wrong layer definition {$(length(counts)), " *
+                "$(length(heights))}"))
+            layers=Int[]
+            for value in counts
+                layer=_geo_signed_gmsh_int_value(value,"$caller Layers entry")
+                push!(layers,layer>0 ? layer : 1)
+            end
+        end
+        return (nothing,(layers=layers,heights=heights,
+            scale_last=params.scale_last,recombine=params.recombine,
+            quad_to_tri=params.quad_to_tri,
+            recomb_laterals=params.recomb_laterals))
+    elseif name=="ScaleLast"
+        isempty(s) || throw(ArgumentError(
+            "$caller: ScaleLast takes no value"))
+        return (nothing,(layers=params.layers,heights=params.heights,
+            scale_last=true,recombine=params.recombine,
+            quad_to_tri=params.quad_to_tri,
+            recomb_laterals=params.recomb_laterals))
+    elseif name=="Recombine"
+        value=isempty(s) ? true :
+            _geo_eval_numeric(s,context,"$caller Recombine")!=0
+        return (nothing,(layers=params.layers,heights=params.heights,
+            scale_last=params.scale_last,recombine=value,
+            quad_to_tri=params.quad_to_tri,
+            recomb_laterals=params.recomb_laterals))
+    elseif name in ("QuadTriAddVerts","QuadTriNoNewVerts")
+        recomb=startswith(s,"RecombLaterals")
+        (recomb || isempty(s)) || throw(ArgumentError(
+            "$caller: unexpected text after $name parameter"))
+        recomb && !isempty(strip(s[nextind(s,firstindex(s),14):end])) &&
+            throw(ArgumentError(
+                "$caller: unexpected text after $name RecombLaterals"))
+        kind=name=="QuadTriAddVerts" ? :add_verts : :no_new_verts
+        return (nothing,(layers=params.layers,heights=params.heights,
+            scale_last=params.scale_last,recombine=params.recombine,
+            quad_to_tri=kind,recomb_laterals=recomb))
+    elseif name=="Using"
+        # `Using name[i]` is a legal ExtrudeParameter; Gmsh only acts on
+        # `Index`/`View` (boundary-layer mesh metadata) and silently drops
+        # every other name — inert either way for translational extrusion.
+        um=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[",s)
+        um===nothing && throw(ArgumentError(
+            "$caller: expected `Using name[i]`"))
+        rest=String(strip(s[nextind(s,firstindex(s),ncodeunits(um.match)):end]))
+        endswith(rest,"]") || throw(ArgumentError(
+            "$caller: malformed Using $(um.captures[1]) parameter"))
+        _geo_eval_numeric(rest[firstindex(rest):prevind(rest,end)],
+                          context,"$caller Using $(um.captures[1])")
+        return (nothing,params)
+    elseif name=="Hole"
+        throw(ArgumentError(
+            "$caller: Hole extrusion parameters apply to boundary-layer " *
+            "extrusion, which is not implemented"))
+    elseif name=="Extrude"
+        throw(ArgumentError(
+            "$caller: Extrude terms cannot be nested inside an Extrude " *
+            "shape list"))
+    elseif name in ("Translate","Rotate","Dilate","Symmetry","Affine",
+                    "Duplicata","Boundary","CombinedBoundary",
+                    "OrientedBoundary","OrientedCombinedBoundary",
+                    "PointsOf","Split","Intersect","Closest")
+        throw(ArgumentError(
+            "$caller: $name cannot appear inside an Extrude shape list"))
+    end
+    # A `Shape` element: `Kind{...}`, `Entity{d}{...}`, `Physical`/`Parent`
+    # selectors, or an inline `Kind(tag) = rhs` definition. Feed the element
+    # its stripped semicolon so the shared parsers see the full form.
+    entries,rest,transform=_geo_multiple_shape_element!(
+        m,element*";",context,caller;signed_tags=true)
+    transform && throw(ArgumentError(
+        "$caller: transforms cannot appear inside an Extrude shape list"))
+    isempty(strip(rest)) || throw(ArgumentError(
+        "$caller: unexpected text in Extrude shape list near $(repr(rest))"))
+    return (entries,params)
+end
+
+function _geo_extrude_shape_list!(m::GeoModel, body::AbstractString,
+                                  context::_GeoNumericContext,
+                                  caller::AbstractString)
+    params=_GEO_EXTRUDE_PARAMS
+    entities=NTuple{2,Int}[]
+    isempty(strip(body)) && return (entities,params)
+    for element in _geo_exec_topology_query_blocks(
+            body,"Extrude shape list",caller)
+        entries,params=_geo_extrude_element!(
+            m,element,context,params,caller)
+        entries===nothing || append!(entities,entries)
+        length(entities)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+            "$caller: shape list expands beyond $_MAX_GEO_LIST_ITEMS entities"))
+    end
+    return (entities,params)
+end
+
+# The `Extrude` value term: `nothing` when `raw` is not an extrusion (the
+# numeric-list evaluator then treats it as an ordinary term), else the flat
+# `[top, body, laterals...]` list as Float64. Statement-level `Extrude`
+# statements route here through `_exec_line!` and discard the value.
+function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
+                                context::_GeoNumericContext)
+    source=String(strip(raw))
+    match(r"^Extrude\b",source)===nothing && return nothing
+    caller="execute_geo: Extrude"
+    endswith(source,";") &&
+        (source=String(strip(source[firstindex(source):prevind(source,end)])))
+    rest=String(strip(source[nextind(source,firstindex(source),7):end]))
+    delta=(0.0,0.0,0.0);sign=1.0;shapes=nothing;nvec=0
+    while !isempty(rest)
+        c=rest[firstindex(rest)]
+        if c=='+' || c=='-'
+            c=='-' && (sign=-sign)
+            rest=String(strip(rest[nextind(rest,firstindex(rest)):end]))
+            continue
+        elseif c=='{'
+            (group,rest)=_geo_balanced_group(rest,caller)
+            if _geo_extrude_shape_group(group)
+                shapes=group
+                break
+            end
+            delta=_geo_extrude_vector!(delta,sign,group,context,caller)
+            sign=1.0;nvec+=1
+        elseif c=='('
+            (group,rest)=_geo_balanced_paren(rest,caller)
+            delta=_geo_extrude_vector!(delta,sign,group,context,caller)
+            sign=1.0;nvec+=1
+        else
+            break
+        end
+    end
+    match(r"^Using\b",rest)!==nothing && throw(ArgumentError(
+        "$caller: pipe extrusion `Extrude {..} Using Wire {..}` is " *
+        "OpenCASCADE-only and not implemented"))
+    isempty(rest) || throw(ArgumentError(
+        "$caller: unexpected text after the shape list"))
+    shapes===nothing && throw(ArgumentError(
+        "$caller: expected a `{shape list}` group"))
+    nvec==0 && throw(ArgumentError(
+        "$caller: boundary-layer extrusion `Extrude {shapes; params}` is " *
+        "not implemented (only translational `Extrude {dx,dy,dz} {..}`)"))
+    entities,params=_geo_extrude_shape_list!(m,shapes,context,caller)
+    return Float64.(extrude_entities!(
+        m,entities,delta;params=params,
+        return_lateral=context.extrude_return_lateral,caller=caller))
 end
 
 function _geo_transform_params(;kind::AbstractString,params::AbstractString,
@@ -1379,6 +1680,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         throw(ArgumentError(
             "execute_geo: Affine transforms require the OpenCASCADE geometry " *
             "kernel, which Tessella does not implement"))
+    elseif match(r"^Extrude\b",line)!==nothing
+        _geo_exec_extrude_term(m,line,context)
+        return
     elseif match(
             r"^(Duplicata|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",
             line)!==nothing
@@ -1498,6 +1802,17 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif startswith(line,"Coherence")
         throw(ArgumentError(
             "execute_geo: unknown coherence command: $line"))
+    elseif startswith(line,"Geometry.ExtrudeReturnLateralEntities")
+        m2=match(r"^Geometry\.ExtrudeReturnLateralEntities\s*=\s*(.*?)\s*;?\s*$",
+                 line)
+        m2===nothing && throw(ArgumentError(
+            "unrecognized statement: $line"))
+        vals=_geo_numeric_list_values(strip(m2[1]),context,
+                                      "Geometry.ExtrudeReturnLateralEntities")
+        length(vals)==1 || throw(ArgumentError(
+            "Geometry.ExtrudeReturnLateralEntities expects a scalar value"))
+        context.extrude_return_lateral=!iszero(vals[1])
+        return
     elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
            startswith(line,"Field") || startswith(line,"Background") ||
            startswith(line,"BoundaryLayer") ||
@@ -1511,6 +1826,17 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif (mm=match(
             r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*;$",line)) !== nothing
+        if match(r"^Extrude\b",strip(mm.captures[2]))!==nothing
+            # `x = Extrude{..}{..}` stores the flat result list (Gmsh keeps a
+            # ListOfDouble), so the name becomes a list variable.
+            values=_geo_numeric_list_values(
+                mm.captures[2],context,
+                "execute_geo: variable $(mm.captures[1])";
+                allow_multiplier=false)
+            _geo_context_set_list!(context,String(mm.captures[1]),values,
+                "execute_geo: variable $(mm.captures[1])")
+            return
+        end
         _geo_exec_scalar!(context,mm.captures[1],mm.captures[2])
         return
     end

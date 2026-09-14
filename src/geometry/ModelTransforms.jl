@@ -402,13 +402,26 @@ members, and transfinite corner lists. Automatic tag counters reset to the
 largest surviving tag per merged dimension, matching `Geometry.OldNewReg`.
 """
 function coherence!(m::GeoModel; tol::Real=_COHERENCE_RTOL)
+    maps=_coherence_merge!(m,tol)
+    return !isempty(maps.points) || !isempty(maps.curves) ||
+           !isempty(maps.surfaces)
+end
+
+# The coordinate-scaled tolerance Gmsh's `ComparePosition`-style coincidence
+# checks share with the merge passes.
+function _coherence_eps(m::GeoModel, tol::Real=_COHERENCE_RTOL)
     scale=isempty(m.points) ? 1.0 :
           max(1.0,maximum(p->maximum(abs.(p)),values(m.points)))
-    eps=Float64(tol)*scale
-    merged=_merge_points!(m,eps)
-    merged |= _merge_curves!(m)
-    merged |= _merge_surfaces!(m)
-    return merged
+    return Float64(tol)*scale
+end
+
+# Run the three merge passes and return each dimension's dropped=>survivor
+# tag map so callers can resolve post-merge entity tags.
+function _coherence_merge!(m::GeoModel, tol::Real=_COHERENCE_RTOL)
+    eps=_coherence_eps(m,tol)
+    return (points=_merge_points!(m,eps),
+            curves=_merge_curves!(m),
+            surfaces=_merge_surfaces!(m))
 end
 
 """
@@ -434,10 +447,11 @@ function merge_vertices!(m::GeoModel, tags;
     return nothing
 end
 
+# Returns the dropped=>survivor tag map; empty when nothing merged.
 function _merge_points!(m::GeoModel,eps)
-    isempty(m.points) && return false
-    grid=Dict{NTuple{3,Int},Vector{Int}}()
     mapping=Dict{Int,Int}()
+    isempty(m.points) && return mapping
+    grid=Dict{NTuple{3,Int},Vector{Int}}()
     for tag in sort!(collect(keys(m.points)))
         p=m.points[tag]
         cell=ntuple(i->floor(Int,p[i]/eps),3)
@@ -456,7 +470,7 @@ function _merge_points!(m::GeoModel,eps)
             mapping[tag]=keep
         end
     end
-    isempty(mapping) && return false
+    isempty(mapping) && return mapping
     for (drop,keep) in sort!(collect(mapping))
         _rewire_entity_refs!(m,0,drop,keep)
         for (c,(a,b)) in collect(m.curves)
@@ -471,19 +485,38 @@ function _merge_points!(m::GeoModel,eps)
         _drop_entity_state!(m,0,drop)
     end
     m.next_tag[1]=isempty(m.points) ? 0 : maximum(keys(m.points))
-    return true
+    return mapping
 end
 
 function _merge_curves!(m::GeoModel)
-    seen=Dict{NTuple{2,Int},Int}()
+    # Gmsh keeps signed records: `+c` and its reversed record `-c` are
+    # distinct entries, and `CompareTwoCurves` compares them directed
+    # (beg/end, or the control-point list when present). A copy created in
+    # the reversed direction therefore merges into the surviving *reversed*
+    # record, so the dropped tag maps to `-keep`. Group by the canonical
+    # undirected key, then resolve each drop's sign from its direction.
+    seen=Dict{Tuple{Int,Vector{Int}},Int}()
+    dir=Dict{Int,Vector{Int}}()
     mapping=Dict{Int,Int}()
     for tag in sort!(collect(keys(m.curves)))
-        key=m.curves[tag]
-        haskey(seen,key) ? (mapping[tag]=seen[key]) : (seen[key]=tag)
+        cps=get(m.curve_control_points,tag,Int[])
+        a,b=m.curves[tag]
+        dkey=isempty(cps) ? Int[a,b] : copy(cps)
+        # `CompareTwoCurves` distinguishes by control-point count first, so
+        # the count is part of the undirected key; the directed vector is
+        # canonicalized against its own reversal.
+        ukey=(length(cps),min(dkey,reverse(dkey)))
+        if haskey(seen,ukey)
+            keep=seen[ukey]
+            mapping[tag]=dkey==dir[keep] ? keep : -keep
+        else
+            seen[ukey]=tag
+            dir[tag]=dkey
+        end
     end
-    isempty(mapping) && return false
+    isempty(mapping) && return mapping
     for (drop,keep) in sort!(collect(mapping))
-        _rewire_entity_refs!(m,1,drop,keep)
+        _rewire_entity_refs!(m,1,drop,abs(keep))
         for l in keys(m.loops)
             m.loops[l]=[v==drop ? keep : (v==-drop ? -keep : v)
                         for v in m.loops[l]]
@@ -495,18 +528,23 @@ function _merge_curves!(m::GeoModel)
         _drop_entity_state!(m,1,drop)
     end
     m.next_tag[2]=isempty(m.curves) ? 0 : maximum(keys(m.curves))
-    return true
+    return mapping
 end
 
 function _merge_surfaces!(m::GeoModel)
+    # `CompareTwoSurfaces` runs `Compare2Lists` over the generatrices with
+    # `CompareAbsCurve`: both lists are sorted first and compared by
+    # `abs(num)`, so equality is a multiset of absolute curve tags —
+    # insensitive to loop order, starting edge, and orientation.
     seen=Dict{Vector{Int},Int}()
     mapping=Dict{Int,Int}()
     for tag in sort!(collect(keys(m.surfaces)))
         flat=Int[]
         for l in m.surfaces[tag]; append!(flat,abs.(m.loops[l])); end
+        sort!(flat)
         haskey(seen,flat) ? (mapping[tag]=seen[flat]) : (seen[flat]=tag)
     end
-    isempty(mapping) && return false
+    isempty(mapping) && return mapping
     for (drop,keep) in sort!(collect(mapping))
         _rewire_entity_refs!(m,2,drop,keep)
         for sl in keys(m.surface_loops)
@@ -523,7 +561,7 @@ function _merge_surfaces!(m::GeoModel)
         end
     end
     m.next_tag[3]=isempty(m.surfaces) ? 0 : maximum(keys(m.surfaces))
-    return true
+    return mapping
 end
 
 # Replace references to the dropped entity in every `(dim, tag)`-indexed or
@@ -605,6 +643,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     delete!(m.entity_visibility,key)
     delete!(m.entity_colors,key)
     delete!(m.meshing.recombine,key)
+    delete!(m.meshing.extrude,key)
     delete!(m.meshing.smoothing,key)
     delete!(m.meshing.reverse,key)
     delete!(m.meshing.algorithm,key)
@@ -687,11 +726,17 @@ end
 # its `curve_control_points` — and finally the wired beg/end vertex copies.
 # For a plain line the source control list is its endpoint pair, so each
 # curve copy burns four point tags: two orphans, then the wired pair.
-function _duplicate_curve!(m::GeoModel, src::Int, caller)
+# `reversed=true` mirrors `DuplicateCurve` applied to Gmsh's reversed-curve
+# record: control points copy in reversed order and the copy is wired
+# end-to-begin (beg copy = copy of the source's end vertex).
+function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false)
     haskey(m.curves,src) || throw(ArgumentError("$caller: unknown Curve[$src]"))
     a,b=m.curves[src]
-    t=_geo_newreg_alloc!(m,1,caller)
     source_cps=get(m.curve_control_points,src,Int[a,b])
+    if reversed
+        (a,b)=(b,a); source_cps=reverse(source_cps)
+    end
+    t=_geo_newreg_alloc!(m,1,caller)
     m.curve_control_points[t]=
         [_fresh_point_copy!(m,c,caller) for c in source_cps]
     pa=_fresh_point_copy!(m,a,caller)
@@ -741,4 +786,257 @@ function _duplicate_volume!(m::GeoModel, src::Int, caller)
         m.boolean_operands[t]=m.boolean_operands[src]
     end
     return t
+end
+
+# ── Extrude ────────────────────────────────────────────────────────────────
+#
+# Gmsh built-in translational `Extrude {dx,dy,dz} { ... }` (`ExtrudeShapes`
+# plus `ExtrudePoint`/`ExtrudeCurve`/`ExtrudeSurface` in Geo.cpp). Every
+# listed entity is deep-copied and translated; the copy is the "top" and the
+# swept topology is the "body": a point yields a connecting curve, a curve a
+# ruled lateral surface, and a surface a volume bounded by the source
+# (orientation -1), the top (+1), and one lateral surface per generatrix
+# (signed by the generatrix's sign). The flat result list holds `[top, body]`
+# per input entity.
+#
+# Tag allocation follows Gmsh's counter order exactly. A curve copy burns one
+# shared `NEWREG` tag plus four point tags (two control-point orphans, then
+# the wired pair); a generatrix extrusion burns its own curve copy, the two
+# endpoint copies, the connecting curves, and the lateral surface; a surface
+# extrusion additionally burns one transient surface tag (Gmsh's
+# backward-compatible re-tag of the top surface) and allocates the volume
+# from the dedicated volume counter (the `oldNewreg=0` hack). Coincident
+# copies collapse in a single `ReplaceAllDuplicates` pass at the end of each
+# top-level entity's extrusion; a fully coincident point or curve extrusion
+# returns the source tag and leaves the unmerged copies behind, exactly like
+# Gmsh.
+
+"""
+    extrude_entities!(model, entities, delta; params=nothing, caller) -> tags
+
+Translate-extrude every listed `(dim, tag)` entity — Points, Curves, and
+Surfaces only — returning the flat `[top, body]` tag list Gmsh's built-in
+`Extrude` produces. `params` is a `_GeoExtrudeParams` record (or `nothing`)
+attached to every created entity. All inputs are validated before any entity
+is created, so unknown or unsupported entities leave the model unchanged.
+"""
+function extrude_entities!(m::GeoModel,
+                           entities::AbstractVector{<:Tuple{Integer,Integer}},
+                           delta::NTuple{3,Float64};
+                           params::Union{Nothing,_GeoExtrudeParams}=nothing,
+                           return_lateral::Bool=true,
+                           caller::AbstractString="extrude_entities!")
+    all(isfinite,delta) || throw(ArgumentError(
+        "$caller: extrusion delta must be finite"))
+    normalized=NTuple{2,Int}[]
+    for (dim,tag) in entities
+        d=_dimension(dim,caller)
+        t=Int(tag)
+        t==0 && throw(ArgumentError(
+            "$caller: $(_entity_label(d)) tags must be nonzero"))
+        tg=_tag(abs(t),caller,d)
+        haskey(m.discrete,(d,tg)) && throw(ArgumentError(
+            "$caller: discrete $(_entity_label(d))[$tg] cannot be extruded"))
+        d==3 && throw(ArgumentError(
+            "$caller: impossible to extrude Volume[$tg]"))
+        store=d==0 ? m.points : d==1 ? m.curves : m.surfaces
+        haskey(store,tg) || throw(ArgumentError(
+            "$caller: unknown $(_entity_label(d))[$tg]"))
+        # Gmsh keys the signed curve/surface records on the absolute tag; the
+        # sign selects the reversed record for curves and feeds extrusion
+        # metadata for surfaces. Point signs resolve to the absolute tag.
+        push!(normalized,(d,d==0 ? tg : t))
+    end
+    out=Int[]
+    for (d,tg) in normalized
+        if d==0
+            _extrude_point!(m,tg,delta,out,params,caller)
+        elseif d==1
+            _extrude_curve!(m,tg,delta,out,params,return_lateral,caller)
+        else
+            _extrude_surface!(m,tg,delta,out,params,return_lateral,caller)
+        end
+    end
+    return out
+end
+
+# `ExtrudePoint`: copy the vertex, translate the copy, and wire a connecting
+# curve — unless the copy still coincides with the source, in which case the
+# source tag is returned and the orphan copy stays unmerged (the coherence
+# pass is skipped entirely). `final=false` suppresses the merge for the
+# nested endpoint extrusions inside `ExtrudeCurve`.
+function _extrude_point_copy!(m::GeoModel, src::Int, delta::NTuple{3,Float64},
+                              params, caller)
+    chapeau=_fresh_point_copy!(m,src,caller)
+    m.points[chapeau]=_finite_result(m.points[chapeau] .+ delta,caller)
+    _points_close(m.points[chapeau],m.points[src],_coherence_eps(m)) &&
+        return (nothing,chapeau)
+    curve=_geo_newreg_alloc!(m,1,caller)
+    m.curves[curve]=(src,chapeau)
+    params!==nothing && (m.meshing.extrude[(1,curve)]=params)
+    return (curve,chapeau)
+end
+
+function _extrude_point!(m::GeoModel, src::Int, delta::NTuple{3,Float64},
+                         out::Vector{Int}, params, caller)
+    (curve,chapeau)=_extrude_point_copy!(m,src,delta,params,caller)
+    if curve===nothing
+        push!(out,src)
+        return nothing
+    end
+    maps=_coherence_merge!(m)
+    push!(out,get(maps.points,chapeau,chapeau))
+    haskey(m.curves,curve) && push!(out,curve)
+    return nothing
+end
+
+# `ExtrudeCurve`: duplicate the curve, translate the copy's point set, extrude
+# the (possibly signed) endpoints into connecting curves, and wire the lateral
+# surface. Returns `(surf, chapeau)` or `nothing` when both connecting curves
+# collapsed — Gmsh's `if(!CurveBeg && !CurveEnd) return ic` path.
+function _extrude_curve_lateral!(m::GeoModel, c::Int, delta::NTuple{3,Float64},
+                                 params, caller)
+    src=abs(c)
+    a,b=m.curves[src]
+    # For a negative generatrix Gmsh extrudes the reversed-curve record:
+    # begin/end swap and the copy is wired end-to-begin.
+    sbeg,send=c>0 ? (a,b) : (b,a)
+    chapeau=_duplicate_curve!(m,src,caller;reversed=c<0)
+    params!==nothing && (m.meshing.extrude[(1,chapeau)]=params)
+    _translate_curve_points!(m,chapeau,delta,caller)
+    (cbeg,_)=_extrude_point_copy!(m,sbeg,delta,params,caller)
+    (cend,_)=_extrude_point_copy!(m,send,delta,params,caller)
+    (cbeg===nothing && cend===nothing) && return nothing
+    return (_extrude_lateral_surface!(m,c,chapeau,cbeg,cend,params,caller),
+            chapeau)
+end
+
+function _extrude_curve!(m::GeoModel, c::Int, delta::NTuple{3,Float64},
+                         out::Vector{Int}, params, return_lateral::Bool,
+                         caller)
+    result=_extrude_curve_lateral!(m,c,delta,params,caller)
+    if result===nothing
+        # `if(!CurveBeg && !CurveEnd) return ic` — Gmsh returns the signed
+        # input tag and leaves the unmerged copy behind.
+        push!(out,c)
+        return nothing
+    end
+    (surf,chapeau)=result
+    maps=_coherence_merge!(m)
+    top=get(maps.curves,chapeau,chapeau)
+    push!(out,top)
+    if haskey(m.surfaces,surf)
+        push!(out,surf)
+        # `Geometry.ExtrudeReturnLateralEntities` (default on) appends the
+        # lateral generatrices besides the source and top curves. Gmsh's
+        # filter compares `abs(record tag)` against the *signed* input, so a
+        # negative generatrix keeps its own `-tag` in the result list.
+        return_lateral || return nothing
+        for g in m.loops[only(m.surfaces[surf])]
+            (abs(g)==c || abs(g)==abs(top)) || push!(out,g)
+        end
+    end
+    return nothing
+end
+
+# The lateral surface of a curve extrusion — generatrices `pc, CurveEnd,
+# -chapeau, -CurveBeg`, or Gmsh's triangular three-edge variants when one
+# connecting curve collapsed (`MSH_SURF_TRIC`).
+function _extrude_lateral_surface!(m::GeoModel, src::Int, chapeau::Int,
+                                   cbeg, cend, params, caller)
+    surf=_geo_newreg_alloc!(m,2,caller)
+    # `src` is the signed generatrix record: `pc` for `ic>0`, the reversed
+    # record for `ic<0` — the loop carries the source with its sign.
+    generatrices=if cbeg===nothing
+        Int[src,cend,-chapeau]
+    elseif cend===nothing
+        Int[-chapeau,-cbeg,src]
+    else
+        Int[src,cend,-chapeau,-cbeg]
+    end
+    lt=_geo_derived_loop_tag(m,surf)
+    m.loops[lt]=generatrices
+    m.surfaces[surf]=Int[lt]
+    params!==nothing && (m.meshing.extrude[(2,surf)]=params)
+    return surf
+end
+
+# `ExtrudeSurface`: burn the transient duplicate-surface tag, duplicate every
+# generatrix into the top copy, allocate the volume on the dedicated volume
+# counter, sweep each generatrix into a lateral surface, translate the top,
+# re-tag it through a fresh `NEWSURFACE`, and wire the shell.
+function _extrude_surface!(m::GeoModel, is::Int, delta::NTuple{3,Float64},
+                           out::Vector{Int}, params, return_lateral::Bool,
+                           caller)
+    tag=abs(is)   # `ps = FindSurface(std::abs(is))`; the sign is metadata-only
+    _geo_newreg_alloc!(m,2,caller)   # transient chapeau tag — burned
+    top_loops=[Int[_duplicate_curve!(m,abs(c),caller;reversed=c<0)
+                   for c in m.loops[l]] for l in m.surfaces[tag]]
+    if params!==nothing
+        for copies in top_loops, c in copies
+            m.meshing.extrude[(1,c)]=params
+        end
+    end
+    vol=_alloc_tag!(m,3,0,caller)
+    params!==nothing && (m.meshing.extrude[(3,vol)]=params)
+    laterals=Int[]
+    for l in m.surfaces[tag], c in m.loops[l]
+        result=_extrude_curve_lateral!(m,c,delta,params,caller)
+        result===nothing && continue
+        push!(laterals,c<0 ? -result[1] : result[1])
+    end
+    for copies in top_loops, c in copies
+        _translate_curve_points!(m,c,delta,caller)
+    end
+    top=_geo_newreg_alloc!(m,2,caller)
+    loop_tags=Int[]
+    for (i,copies) in enumerate(top_loops)
+        lt=i==1 ? _geo_derived_loop_tag(m,top) : _geo_next_loop_tag(m)
+        m.loops[lt]=copies
+        push!(loop_tags,lt)
+    end
+    m.surfaces[top]=loop_tags
+    params!==nothing && (m.meshing.extrude[(2,top)]=params)
+    slt=haskey(m.surface_loops,vol) ? _geo_next_surface_loop_tag(m) : vol
+    m.surface_loops[slt]=vcat(-tag,top,laterals)
+    m.volumes[vol]=Int[slt]
+    maps=_coherence_merge!(m)
+    top_out=get(maps.surfaces,top,top)
+    push!(out,top_out)
+    push!(out,vol)
+    # `Geometry.ExtrudeReturnLateralEntities` (default on) appends the
+    # volume's boundary surfaces besides the source and top — the same
+    # signed comparison Gmsh applies, so `is<0` keeps the `+tag` source
+    # record in the result list. Boundary entries carry orientation signs;
+    # the appended record tags are positive.
+    return_lateral || return nothing
+    for s in m.surface_loops[slt]
+        side=get(maps.surfaces,abs(s),abs(s))
+        (side==is || side==top_out) || push!(out,side)
+    end
+    return nothing
+end
+
+# Derived curve loops are keyed by the owning surface's tag when it is free,
+# else the next unused loop tag — matching the `Curve Loop(N)` numbering in
+# Gmsh's unrolled `.geo` output.
+_geo_derived_loop_tag(m::GeoModel, surface_tag::Int) =
+    haskey(m.loops,surface_tag) ? _geo_next_loop_tag(m) : surface_tag
+_geo_next_loop_tag(m::GeoModel) =
+    (isempty(m.loops) ? 0 : maximum(keys(m.loops)))+1
+_geo_next_surface_loop_tag(m::GeoModel) =
+    (isempty(m.surface_loops) ? 0 : maximum(keys(m.surface_loops)))+1
+
+# Translate every vertex a curve owns — the wired endpoints plus its
+# `curve_control_points` copies (Gmsh's `ApplyTransformationToCurve` reaches
+# both).
+function _translate_curve_points!(m::GeoModel, curve::Int,
+                                  delta::NTuple{3,Float64}, caller)
+    a,b=m.curves[curve]
+    pts=Int[a,b]
+    append!(pts,get(m.curve_control_points,curve,Int[]))
+    for p in unique!(pts)
+        m.points[p]=_finite_result(m.points[p] .+ delta,caller)
+    end
+    return nothing
 end

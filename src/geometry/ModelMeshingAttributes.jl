@@ -367,6 +367,7 @@ function remove_constraints!(m::GeoModel,dim_tags=NTuple{2,Int}[])
         empty!(meshing.transfinite_surfaces)
         empty!(meshing.transfinite_volumes)
         empty!(meshing.recombine)
+        empty!(meshing.extrude)
         empty!(meshing.smoothing)
         empty!(meshing.reverse)
         empty!(meshing.algorithm)
@@ -400,7 +401,7 @@ function remove_constraints!(m::GeoModel,dim_tags=NTuple{2,Int}[])
         end
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
-                      meshing.size_from_boundary)
+                      meshing.size_from_boundary,meshing.extrude)
             delete!(store,(dimension,tag))
         end
         filter!(compound->!(compound.first==dimension && tag in compound.second),
