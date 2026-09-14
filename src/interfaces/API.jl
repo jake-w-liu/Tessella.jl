@@ -7850,11 +7850,13 @@ compute_renumbering(method="RCMK",element_tags=())=
     optimize(method="", force=false, niter=1, dim_tags=())
 
 Optimize the cached mesh in place, matching Gmsh 4.15.2's `optimize`. The empty
-default method runs the validated boundary-preserving tetrahedral optimizer
-(`iters` sweeps); meshes without tetrahedra are unchanged. Other optimizer
-names and nonempty `dim_tags` entity scoping are not implemented and fail
-explicitly. Connectivity and entity classification are preserved because only
-interior node coordinates move.
+default method (and `"Gmsh"`/`"Relocate3D"`) runs the validated
+boundary-preserving tetrahedral optimizer (`niter` sweeps);
+`"Laplace2D"`/`"Relocate2D"` run isotropic Laplacian smoothing on a triangle
+cache. A nonempty `dim_tags` selection freezes every node incident to
+unselected elements. Other optimizer names fail explicitly. Connectivity and
+entity classification are preserved because only interior node coordinates
+move.
 """
 optimize(method="",force=false,niter=1,dim_tags=())=
     _optimize_mesh(method,force,niter,dim_tags)

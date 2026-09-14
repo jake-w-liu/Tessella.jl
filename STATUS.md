@@ -339,6 +339,21 @@ project non-goals.
 
 ## Verification history (newest first)
 
+Re-measured on 2026-09-14 with Julia 1.12.7 after wiring 3-sided transfinite
+surfaces into the model attribute path:
+
+- `set_transfinite_surface` on a 3-curve loop now routes through
+  `mesh_transfinite_triangle` — the dedicated `Mesh.TransfiniteTri=1` patch —
+  instead of failing; the legacy collapsed-quadrilateral `TransfiniteTri=0`
+  algorithm remains a documented non-claim. The entity cache keeps the
+  untagged simplex contract used by the four-sided Coons path.
+- Verified against Gmsh 4.15.2 (`Mesh.TransfiniteTri=1`, three 5-point
+  transfinite edges): identical 15-node triangular lattice including interior
+  node placement; mismatched side counts and non-planar loops still fail
+  explicitly, and reversed-sign loops mesh.
+- Full suite `421,474/421,474` passed under bounds checking;
+  `validation/run_all.jl` re-run after the change.
+
 Re-measured on 2026-09-14 with Julia 1.12.7 after the hot-kernel allocation
 audit:
 

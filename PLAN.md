@@ -314,8 +314,8 @@ NUL-free string vectors under lexically ordered string names and are also read-o
 with respect to the mesh cache. Finite Point-coordinate updates preserve all tag-owned
 metadata and invalidate a synchronized mesh only after success; dependent native
 Line and Plane queries immediately observe the new coordinates. Gmsh 4.15.2 retains
-stale Plane parameter bounds in the measured equivalent update. Per-window visibility
-and implicit primitive boundary presentation remain pending in the headless
+stale Plane parameter bounds in the measured equivalent update. Implicit
+primitive boundary presentation remains pending in the headless
 model.
 The synchronized mesh API routes complete cached linear-simplex refinement through
 the canonical uniform-refinement kernel, commits only after successful validation and
@@ -373,7 +373,9 @@ session-owned view with a smoothed element-wise frame field.
 `set_algorithm`, `set_smoothing`, `set_reverse`, `set_outward_orientation`,
 `set_compound`, `set_size_at_parametric_points`, `set_size_from_boundary`,
 and the size-callback pair are consumed by the generators: transfinite
-curves drive surface and volume grids, surfaces route through TFI,
+curves drive surface and volume grids, surfaces route through TFI —
+four-sided loops through the Coons grid and three-sided loops through the
+dedicated `Mesh.TransfiniteTri=1` patch —
 smoothing steps run after filling, `reverse`/`outward_orientation` flip
 entity meshes, compounds merge member entities into one classification,
 per-entity sizes and boundary point sizes propagate through composed size
@@ -611,7 +613,8 @@ those entities and cells but no
 Point/Line/Surface-In-Volume relation. P4 does not
 yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
-quasi-transfinite patches, general CAD parameterizations,
+quasi-transfinite patches, the legacy collapsed-quadrilateral
+`Mesh.TransfiniteTri=0` three-sided algorithm, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, cyclic

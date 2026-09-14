@@ -27,6 +27,7 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
+using ..TransfiniteTriangle: mesh_transfinite_triangle
 using ..Transform: _affine_coordinate, _transform_homogeneous
 using ..Predicates: orient2, orient3
 using LinearAlgebra: Symmetric, eigen
@@ -4022,9 +4023,12 @@ function _volume_size_field(m::GeoModel,t::Int,surface::Mesh,
     end)
 end
 
-# Transfinite interpolation (Coons patch) for a planar 4-sided surface whose
-# boundary curves are all transfinite — Gmsh's `setTransfiniteSurface`.
-# Produces the structured (n1×n2) node grid triangulated per quad cell.
+# Transfinite interpolation for a planar surface whose boundary curves are all
+# transfinite — Gmsh's `setTransfiniteSurface`. A 4-sided loop produces the
+# structured (n1×n2) Coons grid triangulated per quad cell; a 3-sided loop
+# routes through `mesh_transfinite_triangle`, the dedicated `Mesh.TransfiniteTri=1`
+# patch (the legacy collapsed-quadrilateral `TransfiniteTri=0` algorithm is not
+# implemented).
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    param_sizes::Dict{Tuple{Int,Float64},
                                                     Float64},
@@ -4042,9 +4046,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     nside=length(signed_curves)
     nside in (3,4) || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires a 3- or 4-curve boundary"))
-    nside==4 || throw(ArgumentError(
-        "$caller: transfinite 3-sided surfaces are not implemented"))
-    curve_points=Vector{Vector{NTuple{3,Float64}}}(undef,4)
+    curve_points=Vector{Vector{NTuple{3,Float64}}}(undef,nside)
     for (position,signed) in enumerate(signed_curves)
         curve=abs(signed)
         cspec=get(m.meshing.transfinite_curves,curve,nothing)
@@ -4056,6 +4058,35 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         points=[_periodic_curve_point(m,curve,p,caller) for p in params]
         signed<0 && reverse!(points)
         curve_points[position]=points
+    end
+    if nside==3
+        s1,s2,s3=curve_points
+        n=length(s1)
+        (length(s2)==n && length(s3)==n) || throw(ArgumentError(
+            "$caller: transfinite Surface[$t] has mismatched boundary curve " *
+            "node counts ($(length(s1)), $(length(s2)), $(length(s3)))"))
+        for p in Iterators.flatten(curve_points)
+            abs(p[3])<=1e-12 || throw(ArgumentError(
+                "$caller: transfinite Surface[$t] is not planar in z=0"))
+        end
+        tolerance=1e-9*max(1.0,maximum(
+            p->maximum(abs,p),Iterators.flatten(curve_points)))
+        for (label,first_pair,second_pair) in (
+                ("A",s1[1],s3[end]),("B",s1[end],s2[1]),
+                ("C",s2[end],s3[1]))
+            _points_close(first_pair,second_pair,tolerance) || throw(ArgumentError(
+                "$caller: transfinite Surface[$t] boundary corner $label is " *
+                "inconsistent"))
+        end
+        # The simplex kernel requires bitwise-identical shared corners, while
+        # `_periodic_curve_point` may differ from the vertex coordinate by an
+        # ulp at parameter 1 (`p + (q - p)` need not equal `q` exactly).
+        s1[end]=s2[1];s2[end]=s3[1];s3[end]=s1[1]
+        kernel=mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement)
+        # Match the four-sided path: the entity cache stores the untagged
+        # simplex complex; boundary curves are not meshed by generate(2).
+        mesh=Mesh(kernel.coords;tris=kernel.tris)
+        return _consume_surface_attributes(m,t,mesh,caller)
     end
     bottom,right,top,left=curve_points
     n1=length(bottom);n2=length(right)
