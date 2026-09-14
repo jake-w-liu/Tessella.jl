@@ -47,7 +47,7 @@ const _API=Tessella.API
         @test validate(generated).ok
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
-              "e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83"
+              "eae8751b0dad3b89f2d7a4416ea079a352a3bd6b8eff31ef7eb7d8bb78d8509a"
         node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
         @test node_tags==UInt64.(1:9)
         @test reshape(node_coordinates,3,:)==generated.coords
@@ -274,7 +274,7 @@ end
         initial=_API.mesh.generate(3)
         @test validate(initial).ok
         @test mesh_crc(initial).sha==
-              "e9f6cd048ad689d1566e9c6664824543863983b8df79d9c0fa50f1f35d31cf83"
+              "eae8751b0dad3b89f2d7a4416ea079a352a3bd6b8eff31ef7eb7d8bb78d8509a"
 
         @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
         @test _API.CURRENT[].point_size[101]==0.25
@@ -888,9 +888,9 @@ end
     end
     _API.initialize()
     try
-        # A 3-sided transfinite surface routes through the dedicated
-        # Mesh.TransfiniteTri=1 patch: n=4 divisions give (n+1)(n+2)/2 nodes
-        # and n^2 triangles on the triangular lattice.
+        # A 3-sided transfinite surface defaults to Gmsh's legacy
+        # Mesh.TransfiniteTri=0 collapsed-quadrilateral algorithm: n=4
+        # divisions give 1+n(n+1)=21 nodes and n(2n-1)=28 triangles.
         m=_API.model
         pa=m.add_point(0,0,0);pb=m.add_point(1,0,0);pc=m.add_point(0,1,0)
         ea=m.add_line(pa,pb);eb=m.add_line(pb,pc);ec=m.add_line(pc,pa)
@@ -902,17 +902,45 @@ end
         _API.mesh.set_transfinite_surface(tri_face)
         _API.mesh.generate(2)
         all_nodes,all_coords,_=_API.mesh.get_nodes()
+        @test length(all_nodes)==21
+        lattice=sort!([(all_coords[3i-2],all_coords[3i-1]) for i in 1:21])
+        @test lattice==sort!(vcat([(0.0,0.0)],
+            [(i*(4-j)/16,i*j/16) for i in 1:4 for j in 0:4]))
+        # Boundary nodes classify on the curves/points, so the surface entity
+        # reports only its interior nodes — matching Gmsh getNodes(2,tag).
+        tri_nodes,_=_API.mesh.get_nodes(2,tri_face)
+        @test length(tri_nodes)==9
+        _,_,tri_blocks=_API.mesh.get_elements(2,tri_face)
+        @test div(length(tri_blocks[1]),3)==28
+        @test validate(_API.mesh.get()).ok
+        # The collapsed algorithm accepts unequal counts when the two sides
+        # incident to the rotated collapsed corner match: (5,5,6) succeeds.
+        _API.mesh.set_transfinite_curve(ec,6)
+        _API.mesh.generate(2)
+        un_nodes,_=_API.mesh.get_nodes()
+        @test length(un_nodes)==25
+        # (5,6,7) has no valid collapsed corner and still fails explicitly.
+        _API.mesh.set_transfinite_curve(eb,7)
+        @test_throws ArgumentError _API.mesh.generate(2)
+        _API.mesh.set_transfinite_curve(eb,5)
+        _API.mesh.set_transfinite_curve(ec,5)
+        # Mesh.TransfiniteTri=1 selects the compact triangular-lattice
+        # algorithm: n=4 divisions give (n+1)(n+2)/2 nodes and n^2 triangles.
+        @test _API.option("Mesh.TransfiniteTri")==0.0
+        _API.option("Mesh.TransfiniteTri",1)
+        @test _API.option("Mesh.TransfiniteTri")==1.0
+        @test_throws ArgumentError _API.option("Mesh.TransfiniteTri",2)
+        _API.mesh.generate(2)
+        all_nodes,all_coords,_=_API.mesh.get_nodes()
         @test length(all_nodes)==15
         lattice=sort!([(all_coords[3i-2],all_coords[3i-1]) for i in 1:15])
         @test lattice==sort!([(i/4,j/4) for i in 0:4 for j in 0:4-i])
-        # Boundary nodes classify on the curves/points, so the surface entity
-        # reports only its interior nodes — matching Gmsh getNodes(2,tag).
         tri_nodes,_=_API.mesh.get_nodes(2,tri_face)
         @test length(tri_nodes)==3
         _,_,tri_blocks=_API.mesh.get_elements(2,tri_face)
         @test div(length(tri_blocks[1]),3)==16
         @test validate(_API.mesh.get()).ok
-        # Mismatched transfinite curve counts fail explicitly.
+        # Mismatched transfinite curve counts fail explicitly under Tri=1.
         _API.mesh.set_transfinite_curve(ec,6)
         @test_throws ArgumentError _API.mesh.generate(2)
         _API.mesh.set_transfinite_curve(ec,5)
@@ -925,6 +953,26 @@ end
         _API.mesh.generate(2)
         rev_nodes,_=_API.mesh.get_nodes(2,rev_face)
         @test length(rev_nodes)==3
+        # Explicitly pinned corners select the collapsed corner under the
+        # default Tri=0 algorithm: pinning (pc,pa,pb) collapses at
+        # pc=(0,1,0), unreachable by auto-detection.
+        _API.option("Mesh.TransfiniteTri",0)
+        _API.mesh.clear()
+        _API.model.remove_entities([(2,rev_face)])
+        pin_loop=m.add_curve_loop([ea,eb,ec])
+        pin_face=m.add_plane_surface([pin_loop])
+        _API.mesh.set_transfinite_surface(pin_face,"Left",[pc,pa,pb])
+        _API.mesh.generate(2)
+        pin_nodes,pin_coords,_=_API.mesh.get_nodes()
+        @test length(pin_nodes)==21
+        pin_lattice=sort!([(pin_coords[3i-2],pin_coords[3i-1]) for i in 1:21])
+        @test pin_lattice==sort!(vcat([(0.0,1.0)],
+            [(i*j/16,(4-i)/4) for i in 1:4 for j in 0:4]))
+        @test validate(_API.mesh.get()).ok
+        # Corner tags that are not the surface junctions fail explicitly.
+        free_point=m.add_point(0.25,0.25,0)
+        _API.mesh.set_transfinite_surface(pin_face,"Left",[pa,pb,free_point])
+        @test_throws ArgumentError _API.mesh.generate(2)
     finally
         _API.finalize()
     end

@@ -76,8 +76,9 @@ right-hand sides beyond the documented inline topology queries.
 `SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in can set
 or lower a geometric counter, while OpenCASCADE only raises it. Allocator reads use
 the greatest counter among activated factories; later primitive allocation still
-accounts for occupied hidden topology. Primitive boundary entities remain implicit
-in the native model, so explicit modeled subentities can reuse those tags.
+accounts for occupied hidden topology. `Box` boundary entities are materialized
+in the native model like Gmsh's; Cylinder/Sphere/Cone and Boolean boundary
+entities remain implicit, so explicit modeled subentities can reuse those tags.
 `MeshSize` and `Characteristic Length` store finite positive constraints on existing
 explicit Points selected by `:`, bounded expressions/ranges, or whole and selected
 numeric-list variables. Inline `PointsOf` blocks select recursive boundary Points of
@@ -87,9 +88,9 @@ and the session API invalidates its cached mesh only after success. Planar surfa
 refinement extends Point constraints piecewise-linearly over the deterministic initial
 constrained triangulation, including linearly sized generated straight-curve
 subdivision nodes and an exact constant-size path for uniform constraints. Exact Gmsh
-mesh topology, implicit primitive or Boolean subentities, mesh-size selectors other
-than inline `PointsOf`, nonpositive values, and Gmsh's silent missing-Point behavior
-are explicit non-claims. Physical declarations accept an explicit positive tag, with
+mesh topology, implicit Cylinder/Sphere/Cone or Boolean subentities, mesh-size
+selectors other than inline `PointsOf`, nonpositive values, and Gmsh's silent
+missing-Point behavior are explicit non-claims. Physical declarations accept an explicit positive tag, with
 an optional name, or a nonempty name with an automatic tag from the global Physical
 namespace.
 Physical Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline
@@ -97,8 +98,8 @@ Physical Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept in
 entities, respectively. `Boundary` collects immediate boundaries before group
 membership is deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole
 and cavity boundaries participate, while embeddings do not. Empty combined boundaries,
-unsupported dimensions, and implicit primitive or Boolean topology are explicit
-blockers.
+unsupported dimensions, and implicit Cylinder/Sphere/Cone or Boolean topology
+are explicit blockers.
 The model and session APIs return detached, sorted group, membership,
 reverse-membership, and name-query results. Names are dimension-scoped; removing a
 name or selected/all groups leaves geometry intact and keeps automatic Physical tags
@@ -108,17 +109,18 @@ recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
 ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
 reports downward-closure connectivity to the highest-dimension entities,
 excluding embeddings, matching Gmsh 4.15.2. Queries preserve the
-session mesh cache and exclude embeddings. Primitive and Boolean volumes are still
-enumerated, but their implicit boundary topology is an explicit blocker.
+session mesh cache and exclude embeddings. Box volumes expose their materialized boundary
+topology; Cylinder/Sphere/Cone and Boolean volumes are still enumerated, but
+their implicit boundary topology is an explicit blocker.
 Exact bounding boxes cover explicit straight-edge topology, analytical native
 primitives, Boolean operation-time result snapshots, and the union over a nonempty
 model. Finite containment queries select complete entity boxes and ignore embeddings
 when bounding their target; both direct and session queries are read-only. Tessella
 does not add OpenCASCADE shape-tolerance padding (`1e-7` in the pinned fixtures),
-rejects nonfinite coordinates and invalid filter dimensions, and does not synthesize
-implicit primitive subentities.
+rejects nonfinite coordinates and invalid filter dimensions, and does not
+synthesize implicit Cylinder/Sphere/Cone subentities.
 Native metadata classifies visible entities as `Point`, `Line`, `Plane`, or `Volume`;
-primitive and Boolean boundaries stay implicit. `get_type` is a compatibility synonym
+Cylinder/Sphere/Cone and Boolean boundaries stay implicit. `get_type` is a compatibility synonym
 for `get_entity_type`. Plane-property queries return detached unit-normal
 coefficients `[a,b,c,d]` for `a*x+b*y+c*z=d`, oriented by the exterior loop; other
 visible native types have empty property vectors. Because `GeoModel` does not own
@@ -147,8 +149,9 @@ model attributes own detached NUL-free string vectors and return names in lexica
 order. Finite Point-coordinate updates preserve tag-owned metadata and invalidate a
 session mesh only after success. Dependent native Line and Plane queries immediately
 use the new coordinates; measured Gmsh 4.15.2 Plane parameter bounds remain stale
-after the equivalent update. Per-window visibility and implicit primitive boundary
-presentation are not represented by the headless native model.
+after the equivalent update. Per-window visibility is stored display state, Box
+volumes present their materialized boundary entities, and Cylinder/Sphere/Cone
+and Boolean boundary presentation remains implicit in the headless native model.
 `API.mesh.refine` atomically replaces the complete cached linear-simplex mesh through
 the canonical uniform-refinement kernel and returns detached storage; rejected
 resource bounds leave the prior cache unchanged. `API.mesh.clear` discards only the
@@ -270,8 +273,8 @@ removal follows explicit boundaries down to Points but leaves embedded entities.
 validates every input before committing, cleans names, visibility, colors, Physical
 memberships and empty groups, target embeddings, affected periodic relations,
 primitive encodings, Boolean-result snapshots, and newly dangling construction loops,
-and keeps allocation monotonic. Primitive and Boolean boundaries remain implicit, so recursion stops at
-those Volumes. Tessella owns the native mutation rather than exposing Gmsh's separate
+and keeps allocation monotonic. Box boundaries recurse through the materialized shell; Cylinder/Sphere/Cone
+and Boolean boundaries remain implicit, so recursion stops at those Volumes. Tessella owns the native mutation rather than exposing Gmsh's separate
 model/CAD synchronization layers, and it does not retain Gmsh's independent names or
 stale periodic-master state after deletion.
 Boolean volumes own operation-time operand geometry, and API or `.geo` operand
@@ -338,6 +341,53 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-09-14 with Julia 1.12.7 after implementing the legacy
+`Mesh.TransfiniteTri=0` three-sided algorithm:
+
+- `set_transfinite_surface` on a 3-curve loop now defaults to
+  `mesh_transfinite_triangle_collapsed` — Gmsh's collapsed-quadrilateral
+  `TransfiniteTri=0` path — with auto-rotated or explicitly pinned collapsed
+  corners; `Mesh.TransfiniteTri=1` (via `set_transfinite_tri!`,
+  `option("Mesh.TransfiniteTri", 1)`, or `.geo` `Mesh.TransfiniteTri = 1;`)
+  selects the compact triangular lattice.
+- Verified against Gmsh 4.15.2 (`Mesh.TransfiniteTri=0`): identical collapsed
+  grids including the corner-rotation rule, chord-averaged interior placement
+  (max node error ≈2.5e-15), fan-plus-cell element order, and all four
+  diagonal arrangements; unequal-side boundaries like (5,5,8) rotate to the
+  matching corner exactly as Gmsh's `findTransfiniteCorners` does.
+- Four-sided transfinite surfaces now route through `mesh_transfinite_patch`,
+  fixing a `Left`/`Right` diagonal inversion in the previous inline grid and
+  adding the `AlternateLeft`/`AlternateRight` parity Gmsh emits.
+- The `.geo` executor accepts `Mesh.TransfiniteTri = 0|1;` and reports it on
+  `GeoExecution.transfinite_tri`; `open_geo!` propagates it into the session
+  option like Gmsh's global option store.
+- `api_test.jl`, `cli_test.jl`, and `transfinite_triangle_test.jl` updated and
+  passing; `validation/transfinite_triangle/differential.jl` extended with a
+  collapsed-algorithm section.
+
+Re-measured on 2026-09-14 with Julia 1.12.7 after materializing `add_box!`
+boundary topology and generalizing planar surface meshing off z=0:
+
+- `add_box!` now owns Gmsh `addBox`'s exact boundary representation: 8 corner
+  Points, 12 edge Curves, 6 planar Surfaces, and one Surface Loop with Gmsh's
+  oriented shell signs `[-1,2,-3,4,-5,6]` and entity numbering. Box volumes
+  answer boundary, adjacency, spatial-query, and MSH-entity-classification
+  queries like explicit shells; recursive removal descends through them;
+  transforms resynchronize the stored corner Points; and the retained
+  `box_extents` encoding is validated geometrically against the shell. Corner
+  Points carry no explicit size so box meshes stay bit-identical to the former
+  primitive path, matching Gmsh OCC corner sizing.
+- Planar surface meshing, embedded-entity checks, projection classification,
+  and `model_to_mixed` now derive each surface's coordinate-axis plane instead
+  of assuming z=0: a box's six faces mesh standalone, and full-3D
+  point-to-segment tests replace projected 2-D checks so out-of-plane nodes
+  are rejected rather than silently flattened.
+- Verified against Gmsh 4.15.2: identical `addBox` entity counts, shell signs,
+  tag-allocation side effects (`newp`/`newl`/`news`/`newv` advance through the
+  shared counter exactly as the `.geo` simulator reserves), `Point(1)`
+  collision errors, `CombinedBoundary`/`PointsOf`/`MeshSize` resolution on box
+  volumes, and non-recursive `removeEntities` retaining the 26 subentities.
 
 Re-measured on 2026-09-14 with Julia 1.12.7 after wiring 3-sided transfinite
 surfaces into the model attribute path:

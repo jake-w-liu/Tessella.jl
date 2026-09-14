@@ -176,8 +176,9 @@ function _model_identity_point_state(
     m::GeoModel,old_tag::Int,new_tag::Int,caller::AbstractString)
     points=_model_identity_rekey(
         m.points,old_tag,new_tag,caller,"Point";required=true)
+    # Point sizes are optional: materialized primitive corners carry none.
     point_size=_model_identity_rekey(
-        m.point_size,old_tag,new_tag,caller,"Point size";required=true)
+        m.point_size,old_tag,new_tag,caller,"Point size")
     curves=copy(m.curves)
     for (curve,(first_point,last_point)) in m.curves
         (first_point==new_tag || last_point==new_tag) && throw(ArgumentError(
@@ -416,6 +417,7 @@ function _model_identity_meshing(
     migrated.compounds=compounds
     migrated.outward_orientation=outward
     migrated.order=attributes.order
+    migrated.transfinite_tri=attributes.transfinite_tri
     migrated.attached=_model_identity_discrete_map(
         attributes.attached,m,dimension,old_tag,new_tag)
     migrated.homology_requests=copy(attributes.homology_requests)

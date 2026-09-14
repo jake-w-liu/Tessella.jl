@@ -105,18 +105,22 @@ end
         Box(1) = {0,0,0,1,1,1};
         Mesh.MeshSizeMax = newp / 10;
         """)
-    @test sort!(collect(keys(primitive.model.points)))==[7]
+    # The Box materializes its eight corner Points on the lowest free tags
+    # (past explicit Point 7), exactly like Gmsh's OCC `addBox`.
+    @test sort!(collect(keys(primitive.model.points)))==[7:15;]
     @test sort!(collect(keys(primitive.model.volumes)))==[1]
     @test primitive.params.mesh_size_max==1.6
 
-    implicit_overlap=_execute_set_max_tag_source(raw"""
+    # Gmsh 4.15.2 errors "OpenCASCADE point with tag 1 already exists" when an
+    # explicit Point collides with a materialized Box corner.
+    overlap_error=_set_max_tag_error(raw"""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0,1,1,1};
         Point(1) = {0.5,0.5,0.5,1};
         Mesh.MeshSizeMin = newp;
         """)
-    @test sort!(collect(keys(implicit_overlap.model.points)))==[1]
-    @test implicit_overlap.params.mesh_size_min==9.0
+    @test overlap_error isa ArgumentError
+    @test occursin("Point[1] already exists",sprint(showerror,overlap_error))
 
     for kind in ("Point","Curve","Surface","Volume")
         allocator=kind=="Point" ? "newp" : "newreg"

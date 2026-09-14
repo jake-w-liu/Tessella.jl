@@ -54,6 +54,14 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test_throws ArgumentError add_cone!(invalid_primitives,0,0,0,0,0,1,1,Inf)
     @test isempty(invalid_primitives.volumes)
 
+    # A mid-construction failure rolls back every materialized subentity.
+    overflow=GeoModel()
+    @test_throws ArgumentError add_box!(overflow,1e308,0,0,1e308,1,1)
+    @test isempty(overflow.points) && isempty(overflow.point_size)
+    @test isempty(overflow.curves) && isempty(overflow.loops)
+    @test isempty(overflow.surfaces) && isempty(overflow.surface_loops)
+    @test isempty(overflow.volumes) && isempty(overflow.box_extents)
+
     transformed=GeoModel()
     add_box!(transformed,0,0,0,1,2,3; tag=1)
     box_before=transformed.box_extents[1]
@@ -91,28 +99,28 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
 
     embedded=GeoModel()
     add_box!(embedded,0,0,0,1,1,1; tag=1)
-    add_point!(embedded,0.2,0.2,0.2; tag=1)
-    add_point!(embedded,0.3,0.3,0.3; tag=2)
-    @test_throws ArgumentError embed!(embedded,true,[1],3,1)
-    @test_throws ArgumentError embed!(embedded,0,[1],true,1)
-    @test_throws ArgumentError embed!(embedded,0,[1,99],3,1)
+    add_point!(embedded,0.2,0.2,0.2; tag=10)
+    add_point!(embedded,0.3,0.3,0.3; tag=11)
+    @test_throws ArgumentError embed!(embedded,true,[10],3,1)
+    @test_throws ArgumentError embed!(embedded,0,[10],true,1)
+    @test_throws ArgumentError embed!(embedded,0,[10,99],3,1)
     @test !haskey(embedded.embeds,(3,1))
-    @test embed!(embedded,0,[1],3,1)==1
+    @test embed!(embedded,0,[10],3,1)==1
     embedded_before=copy(embedded.embeds[(3,1)])
-    @test_throws ArgumentError embed!(embedded,0,[2,2],3,1)
-    @test_throws ArgumentError embed!(embedded,0,[1],3,1)
+    @test_throws ArgumentError embed!(embedded,0,[11,11],3,1)
+    @test_throws ArgumentError embed!(embedded,0,[10],3,1)
     @test embedded.embeds[(3,1)]==embedded_before
 
     physical=GeoModel()
     add_box!(physical,0,0,0,1,1,1; tag=123)
     @test add_physical_group!(physical,3,[123];name="shared")==1
     @test Tessella.Model.model_physical_tags(physical,3,1)==[123]
-    @test add_point!(physical,0,0,0;tag=1)==1
-    @test add_point!(physical,1,0,0;tag=2)==2
-    @test add_line!(physical,1,2;tag=1)==1
-    @test add_physical_group!(physical,0,[1];name="shared")==2
-    @test add_physical_group!(physical,1,[1];tag=20,name="edge")==20
-    @test add_physical_group!(physical,0,[2];name="shared")==21
+    @test add_point!(physical,2,0,0;tag=10)==10
+    @test add_point!(physical,3,0,0;tag=11)==11
+    @test add_line!(physical,10,11;tag=13)==13
+    @test add_physical_group!(physical,0,[10];name="shared")==2
+    @test add_physical_group!(physical,1,[13];tag=20,name="edge")==20
+    @test add_physical_group!(physical,0,[11];name="shared")==21
     @test physical.physical_tag_max==21
     expected_groups=[(0,2),(0,21),(1,20),(3,1)]
     @test Tessella.Model.model_physical_groups(physical)==expected_groups
@@ -124,20 +132,20 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test members==[123]
     push!(members,999)
     @test Tessella.Model.model_entities_for_physical_group(physical,3,1)==[123]
-    @test Tessella.Model.model_physical_groups_for_entity(physical,0,1)==[2]
-    @test Tessella.Model.model_physical_groups_for_entity(physical,0,2)==[21]
+    @test Tessella.Model.model_physical_groups_for_entity(physical,0,10)==[2]
+    @test Tessella.Model.model_physical_groups_for_entity(physical,0,11)==[21]
     group_pairs,entity_pairs=
         Tessella.Model.model_physical_groups_entities(physical)
     @test group_pairs==expected_groups
-    @test entity_pairs==[[(0,1)],[(0,2)],[(1,1)],[(3,123)]]
+    @test entity_pairs==[[(0,10)],[(0,11)],[(1,13)],[(3,123)]]
     push!(entity_pairs[1],(0,999))
-    @test Tessella.Model.model_physical_groups_entities(physical)[2][1]==[(0,1)]
+    @test Tessella.Model.model_physical_groups_entities(physical)[2][1]==[(0,10)]
     @test Tessella.Model.model_physical_name(physical,3,1)=="shared"
     @test Tessella.Model.model_physical_name(physical,0,2)=="shared"
     @test Tessella.Model.model_physical_name(physical,0,21)==""
     @test Tessella.Model.model_physical_name(physical,0,999)==""
     @test Tessella.Model.model_entities_for_physical_name(physical,"shared")==
-          [(0,1),(3,123)]
+          [(0,10),(3,123)]
     @test Tessella.Model.set_physical_name!(physical,0,21,"shared")==""
     @test Tessella.Model.set_physical_name!(physical,0,21,"probe")=="probe"
     @test Tessella.Model.set_physical_name!(physical,0,21,"renamed")=="probe"
@@ -180,7 +188,7 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
         physical_removal,[(0,2),(0,21),1=>20,(0,21)])==3
     @test Tessella.Model.model_physical_groups(physical_removal)==[(3,1)]
     @test physical_removal.physical_tag_max==21
-    @test add_physical_group!(physical_removal,0,[1])==22
+    @test add_physical_group!(physical_removal,0,[10])==22
     @test Tessella.Model.remove_physical_groups!(physical_removal)==2
     @test isempty(Tessella.Model.model_physical_groups(physical_removal))
     @test isempty(physical_removal.physical_names)
@@ -188,7 +196,7 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test physical_removal.curves==physical.curves
     @test physical_removal.volumes==physical.volumes
     @test physical_removal.box_extents==physical.box_extents
-    @test add_physical_group!(physical_removal,0,[2])==23
+    @test add_physical_group!(physical_removal,0,[11])==23
 
     physical_exhausted=GeoModel()
     add_point!(physical_exhausted,0,0,0;tag=1)
@@ -273,7 +281,9 @@ end
     unsynchronized=deepcopy(mesh)
     unsynchronized.coords[3,mapping.slave_nodes[2]]+=1e-6
     @test validate(unsynchronized).ok
-    @test_throws ArgumentError model_periodic_nodes(
+    # The off-line node no longer discretizes Curve[2], so classification fails
+    # inside the chain walk (ErrorException) rather than at affine matching.
+    @test_throws ErrorException model_periodic_nodes(
         model,unsynchronized,1,2)
     mapping.slave_nodes[1]=1
     @test first(model_periodic_nodes(model,mesh,1,2).slave_nodes)!=1
@@ -891,10 +901,10 @@ end
 
     linevol=GeoModel()
     add_box!(linevol,0,0,0,1,1,1; tag=1)
-    add_point!(linevol,0.2,0.3,0.4; tag=1)
-    add_point!(linevol,0.7,0.6,0.5; tag=2)
-    add_line!(linevol,1,2; tag=1)
-    embed!(linevol,1,[1],3,1)
+    add_point!(linevol,0.2,0.3,0.4; tag=10)
+    add_point!(linevol,0.7,0.6,0.5; tag=11)
+    add_line!(linevol,10,11; tag=13)
+    embed!(linevol,1,[13],3,1)
     lv=mesh_model_volume(linevol,1)
     @test validate(lv).ok
     @test ntets(lv)>0
@@ -906,13 +916,13 @@ end
 
     sheet=GeoModel()
     add_box!(sheet,0,0,0,1,1,1; tag=1)
-    add_point!(sheet,0.2,0.2,0.5; tag=1)
-    add_point!(sheet,0.8,0.2,0.5; tag=2)
-    add_point!(sheet,0.5,0.8,0.5; tag=3)
-    add_line!(sheet,1,2; tag=1); add_line!(sheet,2,3; tag=2); add_line!(sheet,3,1; tag=3)
-    add_curve_loop!(sheet,[1,2,3]; tag=1)
-    add_plane_surface!(sheet,[1]; tag=1)
-    embed!(sheet,2,[1],3,1)
+    add_point!(sheet,0.2,0.2,0.5; tag=10)
+    add_point!(sheet,0.8,0.2,0.5; tag=11)
+    add_point!(sheet,0.5,0.8,0.5; tag=12)
+    add_line!(sheet,10,11; tag=13); add_line!(sheet,11,12; tag=14); add_line!(sheet,12,10; tag=15)
+    add_curve_loop!(sheet,[13,14,15]; tag=7)
+    add_plane_surface!(sheet,[7]; tag=7)
+    embed!(sheet,2,[7],3,1)
     sv=mesh_model_volume(sheet,1)
     @test validate(sv).ok
     @test ntets(sv)>0
@@ -926,15 +936,15 @@ end
         write(io, """
             SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 1, 1, 1};
-            Point(1) = {0.2, 0.2, 0.5, 0.5};
-            Point(2) = {0.8, 0.2, 0.5, 0.5};
-            Point(3) = {0.5, 0.8, 0.5, 0.5};
-            Line(1) = {1, 2};
-            Line(2) = {2, 3};
-            Line(3) = {3, 1};
-            Line Loop(1) = {1, 2, 3};
-            Plane Surface(1) = {1};
-            Surface{1} In Volume{1};
+            Point(10) = {0.2, 0.2, 0.5, 0.5};
+            Point(11) = {0.8, 0.2, 0.5, 0.5};
+            Point(12) = {0.5, 0.8, 0.5, 0.5};
+            Line(13) = {10, 11};
+            Line(14) = {11, 12};
+            Line(15) = {12, 10};
+            Line Loop(7) = {13, 14, 15};
+            Plane Surface(7) = {7};
+            Surface{7} In Volume{1};
             """)
         close(io)
         execute_geo(path; mesh_dim=3)

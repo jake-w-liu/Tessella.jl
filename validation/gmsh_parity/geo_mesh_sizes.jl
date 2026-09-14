@@ -246,17 +246,15 @@ try
             Box(1) = {0,0,0,1,1,1};
             MeshSize {PointsOf{Volume{1};}} = 0.15;
             """)
-        tessella_error=try
-            execute_geo(path)
-            nothing
-        catch err
-            err
-        end
-        tessella_error isa ArgumentError || error(
-            "Tessella accepted PointsOf on implicit primitive topology")
-        occursin("Volume[1] has no explicit surface-loop topology",
-                 sprint(showerror,tessella_error)) || error(
-            "Tessella primitive PointsOf blocker changed")
+        # Box materializes its boundary entities like Gmsh's OCC kernel, so
+        # PointsOf{Volume{1}} legitimately resolves to its eight corners.
+        tessella_result=execute_geo(path)
+        tessella_corners=sort!(collect(keys(tessella_result.model.point_size)))
+        tessella_corners==collect(1:8) || error(
+            "Tessella Box PointsOf resolved to $tessella_corners")
+        all(==(0.15),values(tessella_result.model.point_size)) || error(
+            "Tessella Box PointsOf sizes changed: " *
+            "$(tessella_result.model.point_size)")
         gmsh.clear()
         gmsh.open(path)
         point_entities=gmsh.model.getEntities(0)
@@ -275,17 +273,12 @@ try
             Box(1) = {0,0,0,1,1,1};
             Physical Surface("skin", 31) = CombinedBoundary{Volume{1};};
             """)
-        tessella_error=try
-            execute_geo(path)
-            nothing
-        catch err
-            err
-        end
-        tessella_error isa ArgumentError || error(
-            "Tessella accepted Boundary on implicit primitive topology")
-        occursin("Volume[1] has no explicit surface-loop topology",
-                 sprint(showerror,tessella_error)) || error(
-            "Tessella primitive Boundary blocker changed")
+        # The materialized shell makes CombinedBoundary{Volume{1}} resolve to
+        # the six box faces — the same entities Gmsh's OCC model exposes.
+        tessella_result=execute_geo(path)
+        tessella_surfaces=sort!(tessella_result.model.physical[2,31])
+        tessella_surfaces==collect(1:6) || error(
+            "Tessella Box CombinedBoundary resolved to $tessella_surfaces")
         gmsh.clear()
         gmsh.open(path)
         surfaces=sort!(Int.(gmsh.model.getEntitiesForPhysicalGroup(2,31)))

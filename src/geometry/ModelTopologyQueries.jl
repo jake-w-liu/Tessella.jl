@@ -287,8 +287,9 @@ Return the explicit topological boundary of the selected signed entities. With
 `combined=false`, individual boundaries retain input and incidence order. With
 `combined=true`, even incidences cancel and the remaining entries are sorted.
 `oriented=true` retains signed Curve and Surface tags. `recursive=true` returns
-the dimension-0 closure, including input Points. Queries that require implicit
-primitive or Boolean subentities raise an error.
+the dimension-0 closure, including input Points. Materialized primitive Volumes
+(`add_box!`) expose their stored surface-loop boundary; queries that require
+Boolean subentities or encodings without stored topology raise an error.
 """
 function model_boundary(
     m::GeoModel,dim_tags,combined=true,oriented=false,recursive=false)
@@ -320,8 +321,9 @@ end
 Return detached topology-only adjacency tags for an existing positive entity.
 `upward` is sorted and contains entities of dimension `dim + 1`; `downward`
 retains direct boundary order and contains dimension `dim - 1`. Mesh embeddings
-do not create topological adjacencies. Downward queries for primitive and Boolean
-Volumes raise an error because they have no explicit Surface Loop topology.
+do not create topological adjacencies. Materialized `add_box!` Volumes answer
+downward queries from their stored Surface Loop; downward queries for Boolean
+Volumes and primitives without stored topology raise an error.
 """
 function model_adjacencies(m::GeoModel,dim,tag)
     caller="model_adjacencies"

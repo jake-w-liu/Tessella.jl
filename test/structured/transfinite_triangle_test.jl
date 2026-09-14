@@ -9,7 +9,8 @@ if !isdefined(Tessella, :TransfiniteTriangle)
                           "TransfiniteTriangle.jl"))
 end
 using Tessella.TransfiniteTriangle: mesh_transfinite_triangle,
-                                    mesh_transfinite_triangle_patch
+                                    mesh_transfinite_triangle_patch,
+                                    mesh_transfinite_triangle_collapsed
 
 @inline _triangle_node(i::Int, j::Int) = Int32((i * (i + 1)) ÷ 2 + j + 1)
 
@@ -605,5 +606,109 @@ end
         @test patch_large > patch_small
         @test patch_large <= 4.35patch_small + 1_048_576
         @info "recombined transfinite triangle allocation ratchet" small_bytes=patch_small large_bytes=patch_large
+    end
+
+    @testset "collapsed-quadrilateral legacy TransfiniteTri=0 algorithm" begin
+        # Exact Gmsh 4.15.2 oracle (right triangle, 3 divisions per side,
+        # collapsed corner at the origin vertex): 13 nodes, 9 boundary
+        # segments, 15 triangles — a collapsed grid, not a triangular lattice.
+        unit = _straight_triangle(3; corners=((0.0, 0.0, 0.0),
+                                            (1.0, 0.0, 0.0),
+                                            (0.0, 1.0, 0.0)))
+        mesh = mesh_transfinite_triangle_collapsed(unit...)
+        @test validate(mesh).ok
+        @test (nnodes(mesh), nsegs(mesh), ntris(mesh)) == (13, 9, 15)
+        @test mesh_crc(mesh).bbox == ((0.0, 0.0, 0.0), (1.0, 1.0, 0.0))
+        # Gmsh collapsed-grid numbering: node 1 is the collapsed corner; row
+        # i in 1:L owns the (H+1)-node block 2+(i-1)(H+1) .. 2+i(H+1)-1.
+        expected_coords = [
+            (0.0, 0.0, 0.0),
+            (1 / 3, 0.0, 0.0), (2 / 9, 1 / 9, 0.0),
+            (1 / 9, 2 / 9, 0.0), (0.0, 1 / 3, 0.0),
+            (2 / 3, 0.0, 0.0), (4 / 9, 2 / 9, 0.0),
+            (2 / 9, 4 / 9, 0.0), (0.0, 2 / 3, 0.0),
+            (1.0, 0.0, 0.0), (2 / 3, 1 / 3, 0.0),
+            (1 / 3, 2 / 3, 0.0), (0.0, 1.0, 0.0)]
+        @test size(mesh.coords, 2) == length(expected_coords)
+        for column in 1:length(expected_coords)
+            @test collect(mesh.coords[:, column]) ≈
+                  collect(expected_coords[column])
+        end
+        # Gmsh's exact emission order for `Left`: the collapsed-column fan
+        # first, then one cell column per remaining row with the v2-v4
+        # diagonal.
+        @test mesh.tris == Int32[
+            1 1 1 2 3 3 4 4 5 6 7 7 8 8 9
+            2 3 4 6 6 7 7 8 8 10 10 11 11 12 12
+            3 4 5 3 7 4 8 5 9 7 11 8 12 9 13]
+        boundary, max_incidence = boundary_edges(mesh.tris)
+        @test max_incidence == 2
+        @test Set(boundary) == _triangle_edge_set(mesh.segs)
+        @test _triangle_surface_area(mesh) ≈ 0.5
+        # `Right` selects the v1-v3 cell diagonal; the fan is unchanged.
+        right = mesh_transfinite_triangle_collapsed(unit...;
+                                                  arrangement=:right)
+        @test validate(right).ok
+        @test right.tris[:, 1:3] == mesh.tris[:, 1:3]
+        @test right.tris[:, 4:5] == Int32[2 7; 6 3; 7 2]
+        @test Set(Tuple(sort(collect(
+            right.tris[:, t]))) for t in 1:ntris(right)) !=
+              Set(Tuple(sort(collect(
+            mesh.tris[:, t]))) for t in 1:ntris(mesh))
+        # Tags follow the original side order even after corner rotation.
+        tagged = mesh_transfinite_triangle_collapsed(
+            unit...; face_tag=7, side_tags=(11, 12, 13))
+        @test tagged.tri_tag == fill(Int32(7), 15)
+        @test tagged.seg_tag == Int32[fill(11, 3); fill(12, 3); fill(13, 3)]
+
+        # Unequal counts: sides (4,4,6) nodes rotate the collapsed corner
+        # from the first to the second junction (Gmsh findTransfiniteCorners).
+        s1 = [(i / 3, 0.0, 0.0) for i in 0:3]
+        s2 = [_triangle_lerp3((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), i / 3)
+              for i in 0:3]
+        s3 = [_triangle_lerp3((0.0, 1.0, 0.0), (0.0, 0.0, 0.0), i / 5)
+              for i in 0:5]
+        rotated = mesh_transfinite_triangle_collapsed(s1, s2, s3;
+                                                      side_tags=(11, 12, 13))
+        @test validate(rotated).ok
+        @test (nnodes(rotated), nsegs(rotated), ntris(rotated)) ==
+              (19, 11, 25)
+        @test Tuple(rotated.coords[:, 1]) == (1.0, 0.0, 0.0)
+        @test rotated.seg_tag == Int32[fill(12, 3); fill(13, 5); fill(11, 3)]
+        @test _triangle_surface_area(rotated) ≈ 0.5
+
+        # No valid collapsed corner (4,6,6) or all-different (4,5,6) counts
+        # raise ArgumentError; disabling rotation forces the first corner.
+        bad_a = [(i / 3, 0.0, 0.0) for i in 0:3]
+        bad_b = [_triangle_lerp3((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), i / 5)
+                 for i in 0:5]
+        bad_c = [_triangle_lerp3((0.0, 1.0, 0.0), (0.0, 0.0, 0.0), i / 5)
+                 for i in 0:5]
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            bad_a, bad_b, bad_c)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            unit[1], s3, bad_c)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            s1, bad_b, bad_c; allow_corner_rotation=false)
+        # Rotated input order pins the collapse at the second junction
+        # (1,0,0): incident sides s2 and s1 match at 4 nodes each.
+        pinned = mesh_transfinite_triangle_collapsed(
+            s2, s3, s1; allow_corner_rotation=false)
+        @test validate(pinned).ok
+        @test (nnodes(pinned), ntris(pinned)) == (19, 25)
+        @test Tuple(pinned.coords[:, 1]) == (1.0, 0.0, 0.0)
+
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            unit...; arrangement=:diagonal)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            unit...; side_tags=(1, 2))
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            unit...; allow_corner_rotation=1)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            unit...; max_nodes=12)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            unit...; max_triangles=14)
+        @test mesh_crc(mesh) == mesh_crc(mesh_transfinite_triangle_collapsed(
+            unit...))
     end
 end

@@ -187,11 +187,27 @@ end
     add_box!(primitive,0,0,0,1,1,1;tag=1)
     add_box!(primitive,2,0,0,1,1,1;tag=2)
     boolean_volumes!(primitive,:union,1,2;tag=3)
-    @test Tessella.Model.model_entities(primitive)==[(3,1),(3,2),(3,3)]
+    # Box face loops allocate from the shared dim-1 counter, so the second
+    # box's curves start at 19 (loops 13-18 sit in the Curve namespace).
+    @test Tessella.Model.model_entities(primitive)==
+          [Tuple{Int,Int}[(0,point) for point in 1:16];
+           Tuple{Int,Int}[(1,curve) for curve in 1:12];
+           Tuple{Int,Int}[(1,curve) for curve in 19:30];
+           Tuple{Int,Int}[(2,surface) for surface in 1:12];
+           [(3,1),(3,2),(3,3)]]
     @test Tessella.Model.model_dimension(primitive)==3
-    @test_throws ArgumentError Tessella.Model.model_boundary(primitive,[(3,1)])
+    # Materialized boxes expose their oriented surface-loop boundary like
+    # Gmsh's addBox; Boolean results still carry no explicit topology.
+    @test Tessella.Model.model_boundary(primitive,[(3,1)],false,true,false)==
+          [(2,-1),(2,2),(2,-3),(2,4),(2,-5),(2,6)]
+    @test Tessella.Model.model_boundary(primitive,[(3,2)],false,true,false)==
+          [(2,-7),(2,8),(2,-9),(2,10),(2,-11),(2,12)]
+    @test Tessella.Model.model_boundary(primitive,[(3,1)],false,false,true)==
+          Tuple{Int,Int}[(0,point) for point in 1:8]
+    @test Tessella.Model.model_adjacencies(primitive,3,1)==
+          (Int[],[1,2,3,4,5,6])
     @test_throws ArgumentError Tessella.Model.model_boundary(primitive,[(3,3)])
-    @test_throws ArgumentError Tessella.Model.model_adjacencies(primitive,3,1)
+    @test_throws ArgumentError Tessella.Model.model_adjacencies(primitive,3,3)
 
     @test_throws ArgumentError Tessella.Model.model_entities(model,true)
     @test_throws ArgumentError Tessella.Model.model_entities(model,4)

@@ -18,17 +18,23 @@ const _SPATIAL_API=Tessella.API
               (-2.0,1.0,3.0,2.0,6.0,9.0)
         @test _SPATIAL_API.model.get_bounding_box(-1,-1)==
               (-2.0,1.0,3.0,2.0,6.0,9.0)
+        all_box_entities=[(0,i) for i in 1:8]
+        append!(all_box_entities,[(1,i) for i in 1:12])
+        append!(all_box_entities,[(2,i) for i in 1:6])
+        push!(all_box_entities,(3,1))
         @test _SPATIAL_API.model.get_entities_in_bounding_box(
-            -2,1,3,2,6,9)==[(3,1)]
-        @test isempty(_SPATIAL_API.model.get_entities_in_bounding_box(
-            -2,1,3,2,6,8.9))
+            -2,1,3,2,6,9)==all_box_entities
+        @test _SPATIAL_API.model.get_entities_in_bounding_box(
+            -2,1,3,2,6,8.9)==
+              [(0,2),(0,4),(0,6),(0,8),
+               (1,4),(1,8),(1,9),(1,11),(2,5)]
         @test _SPATIAL_API.LAST_MESH[]===cached
 
         detached=_SPATIAL_API.model.get_entities_in_bounding_box(
             -2,1,3,2,6,9)
         empty!(detached)
         @test _SPATIAL_API.model.get_entities_in_bounding_box(
-            -2,1,3,2,6,9)==[(3,1)]
+            -2,1,3,2,6,9)==all_box_entities
         @test _SPATIAL_API.LAST_MESH[]===cached
 
         for call in (
@@ -49,7 +55,8 @@ const _SPATIAL_API=Tessella.API
               (-2.0,1.0,3.0,2.0,6.0,9.0)
         @test_throws ArgumentError _SPATIAL_API.model.get_bounding_box(3,1)
         @test _SPATIAL_API.model.remove_entities([(3,10)])===nothing
-        @test_throws ArgumentError _SPATIAL_API.model.get_bounding_box(-1,-1)
+        @test _SPATIAL_API.model.get_bounding_box(-1,-1)==
+              (-2.0,1.0,3.0,2.0,6.0,9.0)
 
         @test (@doc _SPATIAL_API.model.get_bounding_box)!==nothing
         @test (@doc _SPATIAL_API.model.get_entities_in_bounding_box)!==nothing

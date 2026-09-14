@@ -10,9 +10,9 @@ using Tessella.Elements: mixed_crc, read_mixed_msh, write_mixed_msh
 const GEO=joinpath(@__DIR__,"embed_sheet_hole.geo")
 const SURFACE_BOUNDARIES=Int32[101,102,103,104,-108,-107,-106,-105]
 const PROJECTED_CRC=
-    "0e92af2702054065d564461a691f4035ab5bace358bd5f37821c9dcb5f54730d"
+    "2b1f9b682ceb7bfd94e1ee6651801215e7279a807e31daa2769af170dae48a11"
 const MSH2_CRC=
-    "250f6627ef3712e881a363b0e6d8999a6e77ea263503a0d813c6a0d42169a400"
+    "35c40759cf9bbe7f3b9a9305e17d40fd7741a66e027ecf4d984c08fa820a17d3"
 
 function triangle_stats(coordinate,connectivity)
     area=0.0
@@ -42,13 +42,20 @@ projected=model_to_mixed(result.model,mesh,3,1)
 validate(projected).ok || error("Tessella holed-sheet projection is invalid")
 surface_index=only(findall(block->block.msh==2,projected.blocks))
 surface_block=projected.blocks[surface_index]
-all(==(Int32(101)),projected.entity_data.block_entities[surface_index]) ||
-    error("Tessella holed-sheet triangles lost Surface[101] ownership")
+# The materialized Box classifies its skin onto Surfaces 1-6 alongside the
+# embedded sheet; the sheet statistics below run on the Surface[101]-owned
+# columns only, matching Gmsh's getElements(2,101) selection.
+sheet_entities=projected.entity_data.block_entities[surface_index]
+sort!(unique(Int.(sheet_entities)))==[1:6;101] || error(
+    "Tessella holed-sheet surface classification changed: " *
+    "$(sort!(unique(Int.(sheet_entities))))")
+projected.entity_data.entities[(3,1)].boundaries==Int32[-1,2,-3,4,-5,6] ||
+    error("Tessella holed-sheet lost the box's oriented shell")
 coordinate(node_tag)=(projected.coords[1,node_tag],
                       projected.coords[2,node_tag],
                       projected.coords[3,node_tag])
 projected_area,projected_hole_hits=
-    triangle_stats(coordinate,surface_block.nodes)
+    triangle_stats(coordinate,surface_block.nodes[:,sheet_entities.==101])
 abs(projected_area-0.45)<=1e-12 ||
     error("Tessella holed-sheet projected area $projected_area != 0.45")
 projected_hole_hits==0 || error(

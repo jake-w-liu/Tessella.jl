@@ -85,8 +85,10 @@ end
         """
     primitives=_execute_dynamic_tag_source(primitive_source)
     @test sort!(collect(keys(primitives.model.volumes)))==[1,13,16,19]
-    @test sort!(collect(keys(primitives.model.points)))==[15,16]
-    @test sort!(collect(keys(primitives.model.curves)))==[22]
+    # Box materializes its eight corner Points and twelve edge Curves like
+    # Gmsh's OCC addBox; the curved primitives remain implicit encodings.
+    @test sort!(collect(keys(primitives.model.points)))==[1:8;15:16]
+    @test sort!(collect(keys(primitives.model.curves)))==[1:12;22]
     @test primitives.params.mesh_size_min==0.23
     @test primitives.params.mesh_size_max==1.7
 
@@ -170,7 +172,8 @@ end
         """
     boolean_keep=_execute_dynamic_tag_source(boolean_keep_source)
     @test sort!(collect(keys(boolean_keep.model.volumes)))==[1,25]
-    @test sort!(collect(keys(boolean_keep.model.points)))==[9]
+    # The kept operand retains its materialized corner Points 1-8.
+    @test sort!(collect(keys(boolean_keep.model.points)))==[1:9;]
 
     setmax_volume_source=raw"""
         SetFactory("OpenCASCADE");

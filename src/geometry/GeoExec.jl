@@ -34,7 +34,7 @@ using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
-using ..Model: add_physical_group!, set_periodic!
+using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!
 using ..Model: _model_boundary, _model_points_of
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -63,6 +63,7 @@ struct GeoExecution
     model::GeoModel
     mesh::Union{Nothing,Mesh}
     params
+    transfinite_tri::Union{Nothing,Int}
 end
 
 const _MAX_GEO_EXEC_STATEMENT_BYTES=1_000_000
@@ -161,8 +162,11 @@ tracked explicit topology and supported full Box/Cylinder/Sphere/Cone primitives
 `SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in sets the
 checked counter, while OpenCASCADE only raises it. Reads use the greatest counter
 among activated factories. Later primitive allocation still accounts for occupied
-hidden topology. Primitive boundary entities remain implicit in `GeoModel`, so an
-explicit modeled subentity may reuse one of their numeric tags.
+hidden topology. `Box` materializes Gmsh's exact boundary entities (eight
+points, twelve curves, six surfaces) on the model; Cylinder/Sphere/Cone
+boundary entities remain implicit, so an explicit modeled subentity may reuse
+one of their numeric tags. `Mesh.TransfiniteTri = 0|1` sets the model's
+three-sided transfinite surface algorithm like Gmsh's option of the same name.
 `MeshSize {points} = value` and its `Characteristic Length` alias update existing
 explicit Points through `:`, numeric expressions and ranges, numeric-list variables,
 or inline `PointsOf` blocks for Point, Curve/Line, Surface, and explicit Volume
@@ -196,13 +200,15 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     model=GeoModel()
     context=_GeoNumericContext()
     allocator_state=_GeoTagAllocatorState()
+    transfinite_tri=nothing
     for line in _geo_exec_statements(path)
         occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
                  line) && throw(ArgumentError(
             "execute_geo: unsupported statement $(line) — control-flow loops, " *
             "macros, and advanced OCC features are blockers"))
         _geo_context_refresh_allocators!(context,allocator_state)
-        _exec_line!(model,line,context)
+        assigned=_exec_line!(model,line,context)
+        assigned===nothing || (transfinite_tri=assigned)
         _geo_allocator_observe_statement!(
             allocator_state,line,context,"execute_geo")
     end
@@ -218,7 +224,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
             "execute_geo: Mesh 3 with multiple remaining volumes $(sort(collect(keys(model.volumes)))) is a blocker — Boolean Delete the operands or mesh a single volume"))
         mesh=mesh_model_volume(model, only(keys(model.volumes)))
     end
-    return GeoExecution(model,mesh,params)
+    return GeoExecution(model,mesh,params,transfinite_tri)
 end
 
 function _boolean_delete_operand(raw::AbstractString)
@@ -834,6 +840,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             r"^SetMaxTag\s+(?:Point|Curve|Surface|Volume)\s*\(\s*.+\s*\)\s*;$",
             line) !== nothing
         return
+    elseif (mm=match(
+            r"^Mesh\.TransfiniteTri\s*=\s*(.*?)\s*;$",line)) !== nothing
+        value=_geo_eval_numeric(mm.captures[1],context,
+                                "execute_geo: Mesh.TransfiniteTri")
+        isinteger(value) || throw(ArgumentError(
+            "execute_geo: Mesh.TransfiniteTri must be 0 or 1 (got $value)"))
+        set_transfinite_tri!(m,Int(value))
+        return Int(value)
     elseif startswith(line,"Mesh.") || startswith(line,"SetFactory") ||
            startswith(line,"Field") || startswith(line,"Background") ||
            startswith(line,"BoundaryLayer") || startswith(line,"Coherence") ||

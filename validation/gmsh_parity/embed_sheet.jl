@@ -29,7 +29,16 @@ haskey(projected.entity_data.entities,(3,1)) ||
 projected_crc=mixed_crc(projected)
 projected.entity_data.entities[(2,101)].embedded_curves==Int32[104] ||
     error("Tessella embedded-sheet projection lost nested Curve[104]")
-projected_crc.sha=="785bdb610878978e19cbcf3cfb2402417b9646d3ffc8f23042f922dc9c0b5930" ||
+# The materialized Box contributes its real boundary entities to the
+# classified projection: corner nodes on Points 1-8, skin edges on Curves
+# 1-12, skin triangles on Surfaces 1-6, and the oriented shell on Volume[1] —
+# matching what Gmsh's OCC `addBox` writes.
+sort!(unique(Int.(projected.entity_data.block_entities[surface_block])))==
+    [1:6;101] || error(
+        "Tessella embedded-sheet surface classification changed")
+projected.entity_data.entities[(3,1)].boundaries==Int32[-1,2,-3,4,-5,6] ||
+    error("Tessella embedded-sheet lost the box's oriented shell")
+projected_crc.sha=="a4bfac9d0d5c5fbe7c9973ece307e27b5d3530989421abd03ed48854fcfc404e" ||
     error("Tessella embedded-sheet projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()
@@ -138,7 +147,7 @@ try
         length(msh2_crcs)==1 || error(
             "Tessella embedded-sheet MSH2 modes produced different CRCs: $msh2_crcs")
         only(msh2_crcs)==
-            "7a0b70ac205dd985adfa6d2b0a789b791f7bdaab2ce4061c3b08e7eef1df99e4" ||
+            "b11efb24e4e955e8f630de8f90e565cbede2b97ae9741407065eae60817f94e1" ||
             error("Tessella embedded-sheet MSH2 CRC changed: $(only(msh2_crcs))")
     end
     println("GMSH_PARITY_EMBED_SHEET_OK gmsh=$(gmsh.GMSH_API_VERSION) " *

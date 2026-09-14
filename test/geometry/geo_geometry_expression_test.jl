@@ -136,3 +136,22 @@ end
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
+
+@testset "bounded .geo Mesh.TransfiniteTri option" begin
+    unset=_execute_geometry_expression_source("Point(1) = {0,0,0};")
+    @test unset.model.meshing.transfinite_tri==0
+    @test unset.transfinite_tri===nothing
+    on=_execute_geometry_expression_source(
+        "Mesh.TransfiniteTri = 1; Point(1) = {0,0,0};")
+    @test on.model.meshing.transfinite_tri==1
+    @test on.transfinite_tri==1
+    expr=_execute_geometry_expression_source(
+        "k = 0; Mesh.TransfiniteTri = k + 0;")
+    @test expr.model.meshing.transfinite_tri==0
+    @test expr.transfinite_tri==0
+    for source in ("Mesh.TransfiniteTri = 2;",
+                   "Mesh.TransfiniteTri = 0.5;",
+                   "Mesh.TransfiniteTri = -1;")
+        @test _geometry_expression_error(source) isa ArgumentError
+    end
+end

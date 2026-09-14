@@ -6,6 +6,7 @@ export set_transfinite_curve!, set_transfinite_surface!, set_transfinite_volume!
        set_transfinite_automatic!, set_recombine!, set_smoothing!, set_reverse!,
        set_algorithm!, set_size_at_parametric_points!, set_size_from_boundary!,
        set_size_callback!, set_compound!, set_outward_orientation!, set_order!,
+       set_transfinite_tri!,
        remove_constraints!, add_discrete_entity!, add_discrete_nodes!,
        add_discrete_elements!, add_homology_request!, clear_homology_requests!,
        classify_surfaces!, compute_homology!, create_geometry!,
@@ -484,6 +485,26 @@ function set_order!(m::GeoModel,order)
     value>=1 || throw(ArgumentError(
         "$caller: order must be at least 1 (got $order)"))
     m.meshing.order=value
+    return nothing
+end
+
+"""
+    set_transfinite_tri!(model, value)
+
+Record the three-sided transfinite surface algorithm for generation, matching
+Gmsh's `Mesh.TransfiniteTri` mesh option. `0` (the default) selects the legacy
+collapsed-quadrilateral algorithm, which accepts any boundary whose two sides
+incident to the collapsed corner carry equal node counts; `1` selects the
+compact triangular-lattice algorithm, which requires equal node counts on all
+three sides. Other values are rejected.
+"""
+function set_transfinite_tri!(m::GeoModel,value)
+    caller="set_transfinite_tri!"
+    value isa Integer || throw(ArgumentError(
+        "$caller: transfinite triangle mode must be 0 or 1 (got $value)"))
+    value in (0,1) || throw(ArgumentError(
+        "$caller: transfinite triangle mode must be 0 or 1 (got $value)"))
+    m.meshing.transfinite_tri=Int(value)
     return nothing
 end
 

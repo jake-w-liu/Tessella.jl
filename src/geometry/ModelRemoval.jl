@@ -311,8 +311,10 @@ Entity names, visibility, colors, Physical memberships, embedding targets, perio
 relations, native solid encodings, and Boolean-result snapshots owned by removed
 entities are cleaned up. Empty Physical groups and their names are removed,
 construction loops that would dangle are discarded, and automatic tag counters
-remain monotonic. Primitive and Boolean Volumes have no visible boundary entities,
-so recursive removal stops at the Volume.
+remain monotonic. A materialized `add_box!` Volume carries its boundary entities
+like any explicit shell Volume, so recursive removal descends through it; Boolean
+Volumes and unmaterialized primitives have no boundary entities, so recursive
+removal stops at the Volume.
 """
 function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     caller="remove_entities!"
@@ -347,6 +349,9 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     return length(removed)
 end
 
+# Volume removal for consumed operands (Boolean `Delete`, API cut/fuse/common):
+# recursive so a materialized primitive's boundary entities go with it, while
+# the ownership guards keep children still referenced by surviving parents.
 function _remove_volume_entity!(m::GeoModel,tag::Int)
-    return remove_entities!(m,[(3,tag)],false)>0
+    return remove_entities!(m,[(3,tag)],true)>0
 end

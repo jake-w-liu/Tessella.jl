@@ -130,7 +130,10 @@ try
             true
         end
         cleared || error("session whole-mesh clear retained the cached mesh")
-        Tessella.API.model.get_entities() == [(3,1)] ||
+        Tessella.API.model.get_entities() == vcat(
+            Tuple{Int,Int}[(0,i) for i in 1:8],
+            Tuple{Int,Int}[(1,i) for i in 1:12],
+            Tuple{Int,Int}[(2,i) for i in 1:6],[(3,1)]) ||
             error("session whole-mesh clear changed model geometry")
         Tessella.MeshTypes.mesh_crc(refined)
     finally

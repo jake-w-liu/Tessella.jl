@@ -301,7 +301,7 @@ end
         "MeshSize {:}=0.5;"=>"matched no explicit modeled points",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{99};}}=0.5;"=>
             "unknown Surface[99]",
-        "Box(1)={0,0,0,1,1,1}; MeshSize{PointsOf{Volume{1};}}=0.5;"=>
+        "Cylinder(1)={0,0,0,0,0,1,0.5}; MeshSize{PointsOf{Volume{1};}}=0.5;"=>
             "Volume[1] has no explicit surface-loop topology",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{1}}}=0.5;"=>
             "every PointsOf entity block must end with a semicolon",
@@ -319,7 +319,7 @@ end
             "unsupported topology query",
         "Physical Curve(\"bad\",1)=Boundary{Surface{99};};"=>
             "unknown Surface[99]",
-        "Box(1)={0,0,0,1,1,1}; " *
+        "Cylinder(1)={0,0,0,0,0,1,0.5}; " *
             "Physical Surface(\"bad\",1)=CombinedBoundary{Volume{1};};"=>
             "Volume[1] has no explicit surface-loop topology",
         "Physical Curve(\"bad\",1)=Boundary{Volume{1};};"=>
@@ -349,6 +349,19 @@ end
         @test err isa ArgumentError
         @test occursin(message,sprint(showerror,err))
     end
+
+    # A materialized Box has explicit shell topology, so CombinedBoundary
+    # resolves to its six faces exactly as Gmsh's OCC `addBox` does.
+    box_boundary=_execute_point_mesh_size_source(
+        "Box(1)={0,0,0,1,1,1}; " *
+        "Physical Surface(\"shell\",1)=CombinedBoundary{Volume{1};};")
+    @test box_boundary.model.physical[(2,1)]==collect(1:6)
+
+    # `PointsOf{Volume{1}}` resolves to the eight materialized corners, which
+    # accept explicit mesh-size constraints like any other Point.
+    box_points_of=_execute_point_mesh_size_source(
+        "Box(1)={0,0,0,1,1,1}; MeshSize{PointsOf{Volume{1};}}=0.5;")
+    @test box_points_of.model.point_size==Dict(tag=>0.5 for tag in 1:8)
 
     repeated_surface_tags=join(
         fill("1",Tessella.IO._MAX_GEO_LIST_ITEMS÷4+1),",")

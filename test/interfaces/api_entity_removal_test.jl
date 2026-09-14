@@ -42,7 +42,10 @@ end
 
         @test _REMOVAL_API.model.remove_entities([(3,1)])===nothing
         @test _REMOVAL_API.LAST_MESH[]===nothing
-        @test isempty(_REMOVAL_API.model.get_entities())
+        # Non-recursive removal deletes only the Volume; its materialized Box
+        # boundary entities stay, matching Gmsh `removeEntities` semantics.
+        @test sort!(_REMOVAL_API.model.get_entities())==vcat(
+            [(0,i) for i in 1:8],[(1,i) for i in 1:12],[(2,i) for i in 1:6])
         @test _REMOVAL_API.model.get_entity_name(3,1)==""
         @test _REMOVAL_API.CURRENT[].next_tag[4]==1
         @test _REMOVAL_API.model.add_box(2,0,0,1,1,1;tag=0)==2

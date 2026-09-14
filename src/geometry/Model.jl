@@ -27,7 +27,9 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
-using ..TransfiniteTriangle: mesh_transfinite_triangle
+using ..TransfiniteTriangle: mesh_transfinite_triangle,
+                             mesh_transfinite_triangle_collapsed
+using ..Transfinite: mesh_transfinite_patch
 using ..Transform: _affine_coordinate, _transform_homogeneous
 using ..Predicates: orient2, orient3
 using LinearAlgebra: Symmetric, eigen
@@ -128,6 +130,7 @@ mutable struct ModelMeshingAttributes
     compounds::Vector{Pair{Int,Vector{Int}}}
     outward_orientation::Set{Int}
     order::Int
+    transfinite_tri::Int
     attached::Dict{Tuple{Int,Int},DiscreteEntity}
     homology_requests::Vector{NamedTuple{(:kind,:domain,:subdomain,:dims),
         Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}}
@@ -147,6 +150,7 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Pair{Int,Vector{Int}}[],
     Set{Int}(),
     1,
+    0,
     Dict{Tuple{Int,Int},DiscreteEntity}(),
     NamedTuple{(:kind,:domain,:subdomain,:dims),
                Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}[])
@@ -912,7 +916,21 @@ end
     add_box!(model, x, y, z, dx, dy, dz; tag=0) -> tag
 
 Add an axis-aligned box volume with finite origin `(x,y,z)` and positive
-extents `(dx,dy,dz)`.
+extents `(dx,dy,dz)`. Like Gmsh's `addBox`, the box is a real boundary
+representation: it owns 8 corner Points, 12 edge Curves, 6 planar Surfaces and
+one Surface Loop, all allocated from the shared per-dimension tag namespaces
+and queryable through the entity, boundary, and adjacency APIs. Entity order
+matches Gmsh 4.15.2's `addBox` numbering, and the shell stores Gmsh's
+oriented-boundary signs `[-1, 2, -3, 4, -5, 6]` (each face's stored loop
+normal points along its positive coordinate axis). The `box_extents` encoding
+is retained alongside the topology for primitive transforms, bounds, and
+Boolean operand snapshots; volume meshing itself flows through the explicit
+planar-shell path.
+
+Like Gmsh's OCC `addBox` corners, the materialized corner Points carry no
+explicit mesh-size constraint; the boundary size field derives their sizes
+from incident edges. Assign explicit sizes with `set_point_mesh_size!` or
+`setSize` to refine.
 """
 function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
     caller="add_box!"
@@ -921,7 +939,68 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
     (d[1]>0 && d[2]>0 && d[3]>0) || throw(ArgumentError("$caller: extents must be positive"))
     t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
-    m.volumes[t]=Int[]
+    x0,y0,z0=origin
+    x1=x0+d[1]; y1=y0+d[2]; z1=z0+d[3]
+    created_points=Int[];created_curves=Int[]
+    created_loops=Int[];created_surfaces=Int[]
+    shell=0
+    try
+        # Gmsh addBox corner order: x outermost, z innermost with zmax first.
+        # Each entity is registered for rollback before the next call so a
+        # mid-construction failure cannot leak partially built state.
+        for corner in ((x0,y0,z1),(x0,y0,z0),(x0,y1,z1),(x0,y1,z0),
+                       (x1,y0,z1),(x1,y0,z0),(x1,y1,z1),(x1,y1,z0))
+            push!(created_points,add_point!(m,corner...))
+        end
+        p=created_points
+        # Like Gmsh's OCC `addBox` corners, materialized corners carry no
+        # explicit mesh-size constraint: `_volume_boundary_size_field` then
+        # derives their sizes from incident edges, so a plain box meshes
+        # identically to the encoding-only primitive it replaces.
+        for corner in p
+            delete!(m.point_size,corner)
+        end
+        # Gmsh addBox edge order and directions.
+        for edge in ((p[2],p[1]),(p[1],p[3]),(p[4],p[3]),(p[2],p[4]),
+                     (p[6],p[5]),(p[5],p[7]),(p[8],p[7]),(p[6],p[8]),
+                     (p[2],p[6]),(p[1],p[5]),(p[4],p[8]),(p[3],p[7]))
+            push!(created_curves,add_line!(m,edge...))
+        end
+        c=created_curves
+        # Face loops, each oriented so its stored normal points along the
+        # positive coordinate axis (xmin/ymin/zmin faces read inward, matching
+        # the natural orientation of Gmsh's OCC faces).
+        loop_curve_signs=([c[4],c[3],-c[2],-c[1]],
+                          [c[8],c[7],-c[6],-c[5]],
+                          [c[1],c[10],-c[5],-c[9]],
+                          [c[3],c[12],-c[7],-c[11]],
+                          [c[9],c[8],-c[11],-c[4]],
+                          [c[10],c[6],-c[12],-c[2]])
+        for signed_curves in loop_curve_signs
+            push!(created_loops,add_curve_loop!(m,signed_curves))
+            push!(created_surfaces,
+                  add_plane_surface!(m,[last(created_loops)]))
+        end
+        shell=add_surface_loop!(m,[-created_surfaces[1],created_surfaces[2],
+                                   -created_surfaces[3],created_surfaces[4],
+                                   -created_surfaces[5],created_surfaces[6]])
+    catch
+        shell!=0 && delete!(m.surface_loops,shell)
+        for surface in created_surfaces
+            delete!(m.surfaces,surface)
+        end
+        for loop in created_loops
+            delete!(m.loops,loop)
+        end
+        for curve in created_curves
+            delete!(m.curves,curve)
+        end
+        for point in created_points
+            delete!(m.points,point);delete!(m.point_size,point)
+        end
+        rethrow()
+    end
+    m.volumes[t]=[shell]
     m.box_extents[t]=(origin[1],origin[2],origin[3],d[1],d[2],d[3])
     return t
 end
@@ -1113,11 +1192,25 @@ function _dilate_point(p, center, s)
             center[3]+s*(p[3]-center[3]))
 end
 
+# Every Point owned through the volume's surface loops — used to keep a
+# materialized primitive's boundary entities (add_box!) synchronized with its
+# compact encoding under the native transforms below.
+function _model_volume_owned_points(m::GeoModel,t::Int)
+    points=Set{Int}()
+    for shell in m.volumes[t], signed_surface in m.surface_loops[shell],
+        loop in m.surfaces[abs(signed_surface)], signed_curve in m.loops[loop]
+        a,b=m.curves[abs(signed_curve)]
+        push!(points,a);push!(points,b)
+    end
+    return points
+end
+
 """
     translate_volume!(model, tag, offset) -> tag
 
 Translate a native primitive volume by the finite three-component `offset`.
-The model is unchanged if a translated coordinate is not representable as a
+Materialized boundary Points (from `add_box!`) move with the encoding. The
+model is unchanged if a translated coordinate is not representable as a
 finite `Float64` or the volume has no translatable native encoding.
 """
 function translate_volume!(m::GeoModel, tag, offset)
@@ -1128,6 +1221,13 @@ function translate_volume!(m::GeoModel, tag, offset)
     if haskey(m.box_extents,t)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
         origin=_finite_result((x0+delta[1],y0+delta[2],z0+delta[3]),caller)
+        moved=[(point,_finite_result(
+                   (m.points[point][1]+delta[1],m.points[point][2]+delta[2],
+                    m.points[point][3]+delta[3]),caller))
+               for point in _model_volume_owned_points(m,t)]
+        for (point,coordinate) in moved
+            m.points[point]=coordinate
+        end
         m.box_extents[t]=(origin[1],origin[2],origin[3],dx,dy,dz)
     elseif haskey(m.cylinders,t)
         cyl=m.cylinders[t]
@@ -1168,6 +1268,12 @@ function dilate_volume!(m::GeoModel, tag, center, scale)
         x0,y0,z0,dx,dy,dz=m.box_extents[t]
         p0=_dilate_point((x0,y0,z0),c,s)
         transformed=_finite_result((p0[1],p0[2],p0[3],dx*s,dy*s,dz*s),caller)
+        moved=[(point,_finite_result(_dilate_point(m.points[point],c,s),
+                                    caller))
+               for point in _model_volume_owned_points(m,t)]
+        for (point,coordinate) in moved
+            m.points[point]=coordinate
+        end
         m.box_extents[t]=transformed
     elseif haskey(m.cylinders,t)
         cyl=m.cylinders[t]
@@ -1217,6 +1323,9 @@ function rotate_volume!(m::GeoModel, tag, axis, origin, angle)
         zs=sort!(unique([p[3] for p in corners]))
         (length(xs)==2 && length(ys)==2 && length(zs)==2) || throw(ArgumentError(
             "$caller: rotated box is no longer axis-aligned"))
+        for point in _model_volume_owned_points(m,t)
+            m.points[point]=rot(m.points[point])
+        end
         m.box_extents[t]=(xs[1],ys[1],zs[1],xs[2]-xs[1],ys[2]-ys[1],zs[2]-zs[1])
     elseif haskey(m.cylinders,t)
         cyl=m.cylinders[t]
@@ -1532,22 +1641,28 @@ function _loop_points(m::GeoModel, loop_id::Int)
     return pts
 end
 
-function _add_surface_point!(xs,ys,mesh_sizes,index,m::GeoModel,pid::Int,caller)
+function _add_surface_point!(xs,ys,mesh_sizes,index,m::GeoModel,pid::Int,caller,
+                             plane)
     haskey(index, pid) && return index[pid]
     haskey(m.points,pid) || throw(ArgumentError("$caller: unknown Point[$pid]"))
     p=m.points[pid]
-    abs(p[3])<=1e-12 || throw(ArgumentError(
-        "$caller: Point[$pid] is not planar in z=0 (got z=$(p[3]))"))
-    push!(xs,p[1]); push!(ys,p[2])
-    push!(mesh_sizes,m.point_size[pid])
+    scale=max(1.0,hypot(p...))
+    abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+        "$caller: Point[$pid] is not coplanar with the surface " *
+        "(off-plane distance $(_plane_offset(plane,p)))"))
+    ax=plane.axes
+    push!(xs,p[ax[1]]); push!(ys,p[ax[2]])
+    # 0.0 marks an unconstrained point; `_surface_pslg` replaces it with the
+    # shortest incident boundary edge once the segment table exists.
+    push!(mesh_sizes,get(m.point_size,pid,0.0))
     index[pid]=length(xs)
     return index[pid]
 end
 
 function _add_surface_curve_point!(xs,ys,mesh_sizes,index,m::GeoModel,point,
                                    mesh_size::Float64,curve::Int,
-                                   caller::AbstractString)
-    scale=max(1.0,hypot(point[1],point[2]))
+                                   caller::AbstractString,plane)
+    scale=max(1.0,hypot(point...))
     tolerance=128eps(Float64)*scale
     matched_vertex=0
     matched_point=0
@@ -1566,10 +1681,12 @@ function _add_surface_curve_point!(xs,ys,mesh_sizes,index,m::GeoModel,point,
         matched_point=point_tag
     end
     if matched_vertex!=0
-        mesh_sizes[matched_vertex]=min(mesh_sizes[matched_vertex],mesh_size)
+        existing=mesh_sizes[matched_vertex]
+        mesh_sizes[matched_vertex]=existing>0 ? min(existing,mesh_size) : mesh_size
         return matched_vertex
     end
-    push!(xs,point[1]);push!(ys,point[2])
+    ax=plane.axes
+    push!(xs,point[ax[1]]);push!(ys,point[ax[2]])
     push!(mesh_sizes,mesh_size)
     return length(xs)
 end
@@ -1578,7 +1695,12 @@ end
                                           parameter::Float64,
                                           caller::AbstractString)
     a,b=m.curves[curve]
-    first_size=m.point_size[a];last_size=m.point_size[b]
+    # A point without an explicit size contributes the curve length, matching
+    # the boundary-mesh-derived sizing used for unconstrained vertices.
+    p,q=m.points[a],m.points[b]
+    edge_length=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+    first_size=get(m.point_size,a,edge_length)
+    last_size=get(m.point_size,b,edge_length)
     mesh_size=muladd(parameter,last_size-first_size,first_size)
     (isfinite(mesh_size) && mesh_size>0) || throw(ErrorException(
         "$caller: Curve[$curve] has an unrepresentable interpolated Point size"))
@@ -1607,7 +1729,8 @@ end
 
 function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                        param_sizes::Dict{Tuple{Int,Float64},Float64}=
-                           Dict{Tuple{Int,Float64},Float64}())
+                           Dict{Tuple{Int,Float64},Float64}(),
+                       plane=_model_surface_plane(m,t,caller))
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
@@ -1617,19 +1740,22 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             curve=abs(signed);a,b=m.curves[curve]
             for parameter in _surface_curve_parameters(forced,curve,signed)
                 vertex=if parameter==0
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller,plane)
                 elseif parameter==1
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller,plane)
                 else
                     point=_periodic_curve_point(m,curve,parameter,caller)
-                    abs(point[3])<=1e-12 || throw(ArgumentError(
-                        "$caller: Curve[$curve] subdivision is not planar in z=0"))
+                    scale=max(1.0,hypot(point...))
+                    abs(_plane_offset(plane,point))<=1e-12*scale ||
+                        throw(ArgumentError(
+                            "$caller: Curve[$curve] subdivision is not " *
+                            "coplanar with Surface[$t]"))
                     _add_surface_curve_point!(
                         xs,ys,mesh_sizes,index,m,point,
                         get(param_sizes,(curve,parameter),
                             _surface_curve_mesh_size(
                                 m,curve,parameter,caller)),
-                        curve,caller)
+                        curve,caller,plane)
                 end
                 push!(loop_idx,vertex)
             end
@@ -1645,7 +1771,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
     internal=Tuple{Int,Int}[]
     for (edim,etag) in embedded
         if edim==0
-            _add_surface_point!(xs,ys,mesh_sizes,index,m,etag,caller)
+            _add_surface_point!(xs,ys,mesh_sizes,index,m,etag,caller,plane)
         elseif edim!=1
             throw(ArgumentError(
                 "$caller: unsupported embedding dimension $edim"))
@@ -1660,26 +1786,28 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         curve_nodes=Int[]
         if parameters===nothing
             push!(curve_nodes,_add_surface_point!(
-                xs,ys,mesh_sizes,index,m,a,caller))
+                xs,ys,mesh_sizes,index,m,a,caller,plane))
             push!(curve_nodes,_add_surface_point!(
-                xs,ys,mesh_sizes,index,m,b,caller))
+                xs,ys,mesh_sizes,index,m,b,caller,plane))
         else
             for parameter in parameters
                 vertex=if parameter==0
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller,plane)
                 elseif parameter==1
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller,plane)
                 else
                     point=_periodic_curve_point(m,etag,parameter,caller)
-                    abs(point[3])<=1e-12 || throw(ArgumentError(
-                        "$caller: embedded Curve[$etag] subdivision is not " *
-                        "planar in z=0"))
+                    scale=max(1.0,hypot(point...))
+                    abs(_plane_offset(plane,point))<=1e-12*scale ||
+                        throw(ArgumentError(
+                            "$caller: embedded Curve[$etag] subdivision is " *
+                            "not coplanar with Surface[$t]"))
                     _add_surface_curve_point!(
                         xs,ys,mesh_sizes,index,m,point,
                         get(param_sizes,(etag,parameter),
                             _surface_curve_mesh_size(
                                 m,etag,parameter,caller)),
-                        etag,caller)
+                        etag,caller,plane)
                 end
                 push!(curve_nodes,vertex)
             end
@@ -1694,7 +1822,39 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             push!(internal,(first_node,second_node))
         end
     end
+    _fill_unsized_surface_vertices!(mesh_sizes,xs,ys,segs,internal)
     return xs,ys,mesh_sizes,segs,embedded,internal
+end
+
+# Vertices without an explicit Point size take the shortest incident edge,
+# matching `_volume_boundary_size_field`'s boundary-mesh-derived sizing.
+# A vertex with no incident edge falls back to the surface bounding scale.
+function _fill_unsized_surface_vertices!(
+        mesh_sizes::Vector{Float64},xs::Vector{Float64},
+        ys::Vector{Float64},segs,internal)
+    any(<=(0.0),mesh_sizes) || return nothing
+    unsized=falses(length(mesh_sizes))
+    for vertex in eachindex(mesh_sizes)
+        if mesh_sizes[vertex]<=0.0
+            unsized[vertex]=true
+            mesh_sizes[vertex]=Inf
+        end
+    end
+    # Vertices with an explicit size keep it verbatim, as in
+    # `_volume_boundary_size_field`.
+    for (a,b) in Iterators.flatten((segs,internal))
+        len=hypot(xs[b]-xs[a],ys[b]-ys[a])
+        unsized[a] && len<mesh_sizes[a] && (mesh_sizes[a]=len)
+        unsized[b] && len<mesh_sizes[b] && (mesh_sizes[b]=len)
+    end
+    if any(isinf,mesh_sizes)
+        scale=hypot(maximum(xs)-minimum(xs),maximum(ys)-minimum(ys))
+        fallback=(isfinite(scale) && scale>0) ? scale : 1.0
+        for vertex in eachindex(mesh_sizes)
+            isinf(mesh_sizes[vertex]) && (mesh_sizes[vertex]=fallback)
+        end
+    end
+    return nothing
 end
 
 function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
@@ -1720,20 +1880,22 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes
                                 eligible_edges,atol::Float64,
                                 caller::AbstractString)
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
-    vx=q[1]-p[1];vy=q[2]-p[2]
-    length2=muladd(vx,vx,vy*vy)
+    vx=q[1]-p[1];vy=q[2]-p[2];vz=q[3]-p[3]
+    length2=muladd(vx,vx,muladd(vy,vy,vz*vz))
     (isfinite(length2) && length2>0) || throw(ArgumentError(
         "$caller: Curve[$curve] has an unusable planar length"))
     length1=sqrt(length2)
-    scale=max(1.0,hypot(p[1],p[2]),hypot(q[1],q[2]))
+    scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
     geometric_tolerance=max(atol,128eps(Float64)*scale)
+    cross_bound=(geometric_tolerance*length1)^2
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
         eligible_nodes[node] || continue
         wx=mesh.coords[1,node]-p[1];wy=mesh.coords[2,node]-p[2]
-        cross=muladd(vx,wy,-vy*wx)
-        abs(cross)<=geometric_tolerance*length1 || continue
-        parameter=muladd(wx,vx,wy*vy)/length2
+        wz=mesh.coords[3,node]-p[3]
+        cx=vy*wz-vz*wy;cy=vz*wx-vx*wz;cz=vx*wy-vy*wx
+        muladd(cx,cx,muladd(cy,cy,cz*cz))<=cross_bound || continue
+        parameter=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
         -geometric_tolerance/length1<=parameter<=
             1+geometric_tolerance/length1 || continue
         push!(entries,(clamp(parameter,0.0,1.0),node))
@@ -2113,21 +2275,23 @@ function _model_projection_embedded_curve_nodes(
     last_coordinate=m.points[stop_point]
     vx=last_coordinate[1]-first_coordinate[1]
     vy=last_coordinate[2]-first_coordinate[2]
-    length2=muladd(vx,vx,vy*vy)
+    vz=last_coordinate[3]-first_coordinate[3]
+    length2=muladd(vx,vx,muladd(vy,vy,vz*vz))
     (isfinite(length2) && length2>0) || throw(ArgumentError(
         "$caller: embedded Curve[$curve] has an unusable planar length"))
     length1=sqrt(length2)
-    scale=max(1.0,hypot(first_coordinate[1],first_coordinate[2]),
-                    hypot(last_coordinate[1],last_coordinate[2]))
+    scale=max(1.0,hypot(first_coordinate...),hypot(last_coordinate...))
     geometric_tolerance=max(atol,128eps(Float64)*scale)
+    cross_bound=(geometric_tolerance*length1)^2
     parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
         wx=mesh.coords[1,node]-first_coordinate[1]
         wy=mesh.coords[2,node]-first_coordinate[2]
-        cross=muladd(vx,wy,-vy*wx)
-        abs(cross)<=geometric_tolerance*length1 || continue
-        parameter=muladd(wx,vx,wy*vy)/length2
+        wz=mesh.coords[3,node]-first_coordinate[3]
+        cx=vy*wz-vz*wy;cy=vz*wx-vx*wz;cz=vx*wy-vy*wx
+        muladd(cx,cx,muladd(cy,cy,cz*cz))<=cross_bound || continue
+        parameter=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
         -parameter_tolerance<=parameter<=1+parameter_tolerance || continue
         push!(entries,(clamp(parameter,0.0,1.0),node))
     end
@@ -2297,13 +2461,17 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     embedded_points,embedded_curves=
         _model_surface_embedding_tags(m,surface,caller)
 
+    plane=_model_surface_plane(m,surface,caller)
     constraints=_surface_periodic_constraints(m,surface,caller)
     geometric_tolerance=max(1e-12,
         isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
     for node in axes(mesh.coords,2)
-        abs(mesh.coords[3,node])<=geometric_tolerance || throw(ArgumentError(
-            "$caller: input node $node has z=$(mesh.coords[3,node]), outside " *
-            "the z=0 tolerance $geometric_tolerance"))
+        coordinate=(mesh.coords[1,node],mesh.coords[2,node],
+                    mesh.coords[3,node])
+        offset=_plane_offset(plane,coordinate)
+        abs(offset)<=geometric_tolerance || throw(ArgumentError(
+            "$caller: input node $node is $offset off the Surface[$surface] " *
+            "plane, outside the tolerance $geometric_tolerance"))
     end
     curve_tags=_model_projection_surface_curves(m,surface)
     isempty(curve_tags) && throw(ArgumentError(
@@ -2312,12 +2480,17 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
         "$caller: a surface curve cannot be both bounding and embedded"))
     all_curve_tags=sort!(unique!(vcat(curve_tags,embedded_curves)))
     for curve in all_curve_tags,point in m.curves[curve]
-        abs(m.points[point][3])<=1e-12 || throw(ArgumentError(
-            "$caller: Point[$point] is not planar in z=0"))
+        p=m.points[point]
+        scale=max(1.0,hypot(p...))
+        abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+            "$caller: Point[$point] is not coplanar with Surface[$surface]"))
     end
     for point in embedded_points
-        abs(m.points[point][3])<=1e-12 || throw(ArgumentError(
-            "$caller: embedded Point[$point] is not planar in z=0"))
+        p=m.points[point]
+        scale=max(1.0,hypot(p...))
+        abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+            "$caller: embedded Point[$point] is not coplanar with " *
+            "Surface[$surface]"))
     end
     boundary,boundary_edges=_surface_boundary_topology(mesh,caller)
     isempty(boundary_edges) && throw(ArgumentError(
@@ -2568,6 +2741,60 @@ end
 
 @inline _model_projection_coordinate_key(value::Float64)=
     value==0 ? 0.0 : value
+
+# The coordinate-axis plane record for one planar surface: `axes` are the two
+# kept coordinates of the nondegenerate projection `_model_surface_projection`
+# selects, `k` is the dropped axis, `anchor` a boundary point on the plane and
+# `normal` the unnormalized plane normal (its `k` component is nonzero because
+# the projected anchor triangle is nondegenerate). `norm` is |normal|, used to
+# turn dot products into absolute signed distances.
+function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString)
+    haskey(m.surfaces,surface) || throw(ArgumentError(
+        "$caller: unknown Surface[$surface]"))
+    point_tags=Int[]
+    for loop in m.surfaces[surface]
+        haskey(m.loops,loop) || throw(ArgumentError(
+            "$caller: Surface[$surface] references unknown Loop[$loop]"))
+        for signed_curve in m.loops[loop]
+            curve=abs(signed_curve)
+            haskey(m.curves,curve) || throw(ArgumentError(
+                "$caller: Loop[$loop] references unknown Curve[$curve]"))
+            a,b=m.curves[curve]
+            for point in (a,b)
+                haskey(m.points,point) || throw(ArgumentError(
+                    "$caller: Curve[$curve] references unknown Point[$point]"))
+                push!(point_tags,point)
+            end
+        end
+    end
+    unique!(point_tags)
+    coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    anchor,second,third,axes=_model_surface_projection(
+        coordinates,point_tags,surface,caller)
+    u=(second[1]-anchor[1],second[2]-anchor[2],second[3]-anchor[3])
+    v=(third[1]-anchor[1],third[2]-anchor[2],third[3]-anchor[3])
+    normal=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+    k=axes==(1,2) ? 3 : axes==(1,3) ? 2 : 1
+    return (axes=axes,k=k,anchor=anchor,normal=normal,
+            norm=sqrt(normal[1]^2+normal[2]^2+normal[3]^2))
+end
+
+# Signed distance from `point` to `plane`, in absolute units. On an axis plane
+# this reduces to the single dropped-coordinate difference the historical z=0
+# checks measured.
+@inline function _plane_offset(plane,point::NTuple{3,Float64})
+    n=plane.normal;a=plane.anchor
+    return (n[1]*(point[1]-a[1])+n[2]*(point[2]-a[2])+
+            n[3]*(point[3]-a[3]))/plane.norm
+end
+
+# The dropped-axis coordinate of the on-plane point whose kept coordinates are
+# `(u, v)` — the exact plane-equation solve. For axis planes the normal's kept
+# components vanish and this returns `anchor[k]` bitwise.
+@inline function _plane_dropped_coordinate(plane,u::Float64,v::Float64)
+    n=plane.normal;a=plane.anchor;ax=plane.axes
+    return a[plane.k]-(n[ax[1]]*(u-a[ax[1]])+n[ax[2]]*(v-a[ax[2]]))/n[plane.k]
+end
 
 function _model_surface_projection(
     coordinates::Vector{NTuple{3,Float64}},point_tags::Vector{Int},
@@ -3605,14 +3832,17 @@ function _node_at(mesh::Mesh, p; atol=1e-12)
     return 0
 end
 
+# Full-3D point-to-segment test: the squared cross-product magnitude measures
+# the off-line distance, so no projection-axis choice is needed and the check is
+# correct on any coordinate plane or embedded chord.
 function _on_segment(x, p, q; atol=1e-12)
-    vx,vy=q[1]-p[1], q[2]-p[2]
-    wx,wy=x[1]-p[1], x[2]-p[2]
-    L2=vx*vx+vy*vy
-    L2>0 || return hypot(wx,wy)<=atol
-    cross=vx*wy-vy*wx
-    abs(cross)<=atol*sqrt(L2) || return false
-    t=(wx*vx+wy*vy)/L2
+    vx=q[1]-p[1];vy=q[2]-p[2];vz=q[3]-p[3]
+    wx=x[1]-p[1];wy=x[2]-p[2];wz=x[3]-p[3]
+    L2=muladd(vx,vx,muladd(vy,vy,vz*vz))
+    L2>0 || return hypot(wx,wy,wz)<=atol
+    cx=vy*wz-vz*wy;cy=vz*wx-vx*wz;cz=vx*wy-vy*wx
+    muladd(cx,cx,muladd(cy,cy,cz*cz))<=(atol*sqrt(L2))^2 || return false
+    t=muladd(wx,vx,muladd(wy,vy,wz*vz))/L2
     return -atol<=t<=1+atol
 end
 
@@ -3625,7 +3855,8 @@ function _mesh_covers_segment(mesh::Mesh, p, q; atol=1e-12)
         i=Int(mesh.tris[e[1],t]); j=Int(mesh.tris[e[2],t])
         pi=(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
         pj=(mesh.coords[1,j],mesh.coords[2,j],mesh.coords[3,j])
-        (_on_segment(pi,p,q; atol=atol) && _on_segment(pj,p,q; atol=atol)) || continue
+        (_on_segment(pi,p,q; atol=atol) &&
+         _on_segment(pj,p,q; atol=atol)) || continue
         push!(get!(Vector{Int}, adj, i), j)
         push!(get!(Vector{Int}, adj, j), i)
     end
@@ -3654,8 +3885,9 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         return _transfinite_surface_mesh(
             m,t,param_sizes,caller;size_field=size_field),NTuple{2,Int}[]
     end
+    plane=_model_surface_plane(m,t,caller)
     xs,ys,mesh_sizes,segs,embedded,internal=
-        _surface_pslg(m,t,forced,caller;param_sizes=param_sizes)
+        _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
     base=if get(m.meshing.size_from_boundary,(2,t),true)
         _surface_point_size_field(T,xs,ys,mesh_sizes,t,caller)
@@ -3664,21 +3896,38 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
         (x,y)->lc
     end
     callback=m.meshing.size_callback
+    ax=plane.axes;k=plane.k
     sizefn=if size_field===nothing && callback===nothing
         base
     else
         function sized(x,y)
             h=base(x,y)
-            size_field===nothing ||
-                (h=min(h,size_at(size_field,x,y,0.0,(2,t))))
-            callback===nothing ||
-                (h=_apply_size_callback(callback,2,t,x,y,0.0,h,caller))
+            if size_field!==nothing || callback!==nothing
+                point=ntuple(3) do axis
+                    axis==k ? _plane_dropped_coordinate(plane,x,y) :
+                              axis==ax[1] ? x : y
+                end
+                size_field===nothing ||
+                    (h=min(h,size_at(size_field,point[1],point[2],point[3],
+                                     (2,t))))
+                callback===nothing ||
+                    (h=_apply_size_callback(callback,2,t,point[1],point[2],
+                                            point[3],h,caller))
+            end
             return h
         end
     end
     interior=refine!(T; min_angle_deg=min_angle_deg, size=sizefn)
     mesh=to_mesh(T; interior=interior)
     mesh=_consume_surface_attributes(m,t,mesh,caller)
+    # `to_mesh` packs the projected (u,v) coordinates into rows 1,2; scatter
+    # them onto the kept axes and solve the dropped coordinate on the plane.
+    @inbounds for node in axes(mesh.coords,2)
+        u=mesh.coords[1,node];v=mesh.coords[2,node]
+        mesh.coords[ax[1],node]=u
+        mesh.coords[ax[2],node]=v
+        mesh.coords[k,node]=_plane_dropped_coordinate(plane,u,v)
+    end
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     ntris(mesh)>0 || throw(ErrorException(
@@ -4023,12 +4272,41 @@ function _volume_size_field(m::GeoModel,t::Int,surface::Mesh,
     end)
 end
 
+# Rotate/reverse a transfinite surface's discretized side chains so the first
+# pinned corner leads the boundary walk — the model-level half of Gmsh's
+# `findTransfiniteCorners` explicit-corner branch. `corners` must contain
+# exactly the loop's junction Point tags in forward or reversed cyclic order;
+# a reversed order flips the walk as Gmsh's m_vertices reversal does.
+function _apply_pinned_surface_corners(m::GeoModel,t::Int,
+                                       signed_curves,curve_points,
+                                       corners,nside,caller)
+    length(corners)==nside || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] corner list has $(length(corners)) " *
+        "entries for a $nside-curve boundary"))
+    junctions=Int[signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+                  for signed in signed_curves]
+    sort(corners)==sort(junctions) || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] corner list must be the boundary " *
+        "junction Points $junctions (got $corners)"))
+    start=findfirst(==(corners[1]),junctions)::Int
+    if all(i->corners[i]==junctions[mod1(start+i-1,nside)],1:nside)
+        return [curve_points[mod1(start+i-1,nside)] for i in 1:nside]
+    end
+    all(i->corners[i]==junctions[mod1(start-i+1,nside)],1:nside) ||
+        throw(ArgumentError(
+            "$caller: transfinite Surface[$t] corner list order is " *
+            "inconsistent with the curve loop orientation"))
+    return [reverse(curve_points[mod1(start-i,nside)]) for i in 1:nside]
+end
+
 # Transfinite interpolation for a planar surface whose boundary curves are all
-# transfinite — Gmsh's `setTransfiniteSurface`. A 4-sided loop produces the
-# structured (n1×n2) Coons grid triangulated per quad cell; a 3-sided loop
-# routes through `mesh_transfinite_triangle`, the dedicated `Mesh.TransfiniteTri=1`
-# patch (the legacy collapsed-quadrilateral `TransfiniteTri=0` algorithm is not
-# implemented).
+# transfinite — Gmsh's `setTransfiniteSurface`. A 4-sided loop routes through
+# `mesh_transfinite_patch`, the structured Coons grid triangulated per quad
+# cell with Gmsh's arrangement parity; a 3-sided loop routes through
+# `mesh_transfinite_triangle_collapsed` (the legacy `Mesh.TransfiniteTri=0`
+# collapsed-quadrilateral algorithm, the default) or `mesh_transfinite_triangle`
+# (the compact `TransfiniteTri=1` algorithm, selected by `set_transfinite_tri!`
+# and requiring equal node counts on all three sides).
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    param_sizes::Dict{Tuple{Int,Float64},
                                                     Float64},
@@ -4059,95 +4337,54 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         signed<0 && reverse!(points)
         curve_points[position]=points
     end
+    isempty(spec.corners) || (curve_points=_apply_pinned_surface_corners(
+        m,t,signed_curves,curve_points,spec.corners,nside,caller))
+    plane=_model_surface_plane(m,t,caller)
+    for p in Iterators.flatten(curve_points)
+        scale=max(1.0,hypot(p...))
+        abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+            "$caller: transfinite Surface[$t] boundary is not coplanar"))
+    end
+    # Corner consistency: each side ends where the next begins. The kernels
+    # require bitwise-identical shared corners, while `_periodic_curve_point`
+    # may differ from the vertex coordinate by an ulp at parameter 1
+    # (`p + (q - p)` need not equal `q` exactly) — weld after auditing.
+    tolerance=1e-9*max(1.0,maximum(
+        p->maximum(abs,p),Iterators.flatten(curve_points)))
+    for position in 1:nside
+        _points_close(curve_points[position][end],
+                      curve_points[mod1(position+1,nside)][1],
+                      tolerance) || throw(ArgumentError(
+            "$caller: transfinite Surface[$t] boundary corner $position is " *
+            "inconsistent"))
+    end
+    for position in 1:nside
+        curve_points[position][end]=curve_points[mod1(position+1,nside)][1]
+    end
     if nside==3
         s1,s2,s3=curve_points
-        n=length(s1)
-        (length(s2)==n && length(s3)==n) || throw(ArgumentError(
-            "$caller: transfinite Surface[$t] has mismatched boundary curve " *
-            "node counts ($(length(s1)), $(length(s2)), $(length(s3)))"))
-        for p in Iterators.flatten(curve_points)
-            abs(p[3])<=1e-12 || throw(ArgumentError(
-                "$caller: transfinite Surface[$t] is not planar in z=0"))
+        kernel=if m.meshing.transfinite_tri==1
+            (length(s1)==length(s2) && length(s1)==length(s3)) ||
+                throw(ArgumentError(
+                    "$caller: transfinite Surface[$t] has mismatched " *
+                    "boundary curve node counts ($(length(s1)), " *
+                    "$(length(s2)), $(length(s3)))"))
+            mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement)
+        else
+            mesh_transfinite_triangle_collapsed(
+                s1,s2,s3;arrangement=spec.arrangement,
+                allow_corner_rotation=isempty(spec.corners))
         end
-        tolerance=1e-9*max(1.0,maximum(
-            p->maximum(abs,p),Iterators.flatten(curve_points)))
-        for (label,first_pair,second_pair) in (
-                ("A",s1[1],s3[end]),("B",s1[end],s2[1]),
-                ("C",s2[end],s3[1]))
-            _points_close(first_pair,second_pair,tolerance) || throw(ArgumentError(
-                "$caller: transfinite Surface[$t] boundary corner $label is " *
-                "inconsistent"))
-        end
-        # The simplex kernel requires bitwise-identical shared corners, while
-        # `_periodic_curve_point` may differ from the vertex coordinate by an
-        # ulp at parameter 1 (`p + (q - p)` need not equal `q` exactly).
-        s1[end]=s2[1];s2[end]=s3[1];s3[end]=s1[1]
-        kernel=mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement)
-        # Match the four-sided path: the entity cache stores the untagged
-        # simplex complex; boundary curves are not meshed by generate(2).
+        # The entity cache stores the untagged simplex complex; boundary
+        # curves are not meshed by generate(2).
         mesh=Mesh(kernel.coords;tris=kernel.tris)
         return _consume_surface_attributes(m,t,mesh,caller)
     end
     bottom,right,top,left=curve_points
-    n1=length(bottom);n2=length(right)
-    length(top)==n1 || throw(ArgumentError(
-        "$caller: transfinite Surface[$t] has mismatched opposite curve node " *
-        "counts ($n1 vs $(length(top)))"))
-    length(left)==n2 || throw(ArgumentError(
-        "$caller: transfinite Surface[$t] has mismatched opposite curve node " *
-        "counts ($n2 vs $(length(left)))"))
-    for p in Iterators.flatten(curve_points)
-        abs(p[3])<=1e-12 || throw(ArgumentError(
-            "$caller: transfinite Surface[$t] is not planar in z=0"))
-    end
-    # Corner consistency: bottom starts at A, ends at B; right B→C; top C→D;
-    # left D→A.
-    tolerance=1e-9*max(1.0,maximum(
-        p->maximum(abs,p),Iterators.flatten(curve_points)))
-    for (label,first_pair,second_pair) in (
-            ("A",bottom[1],left[end]),("B",bottom[end],right[1]),
-            ("C",right[end],top[1]),("D",top[end],left[1]))
-        _points_close(first_pair,second_pair,tolerance) || throw(ArgumentError(
-            "$caller: transfinite Surface[$t] boundary corner $label is " *
-            "inconsistent"))
-    end
-    grid=Matrix{NTuple{3,Float64}}(undef,n1,n2)
-    @inbounds for j in 1:n2,i in 1:n1
-        u=(i-1)/(n1-1);v=(j-1)/(n2-1)
-        b=bottom[i];tp=top[n1+1-i];l=left[n2+1-j];r=right[j]
-        a=bottom[1];c=top[1]
-        point=ntuple(3) do axis
-            (1-v)*b[axis]+v*tp[axis]+(1-u)*l[axis]+u*r[axis]-
-            (1-u)*(1-v)*a[axis]-u*(1-v)*bottom[end][axis]-
-            u*v*c[axis]-(1-u)*v*top[end][axis]
-        end
-        all(isfinite,point) || throw(ArgumentError(
-            "$caller: transfinite interpolation on Surface[$t] produced a " *
-            "non-finite node"))
-        grid[i,j]=point
-    end
-    coords=Matrix{Float64}(undef,3,n1*n2)
-    @inbounds for j in 1:n2,i in 1:n1
-        point=grid[i,j];node=i+(j-1)*n1
-        coords[1,node]=point[1];coords[2,node]=point[2];coords[3,node]=point[3]
-    end
-    tris=Matrix{Int32}(undef,3,2*(n1-1)*(n2-1))
-    cell=0
-    arrangement=spec.arrangement
-    @inbounds for j in 1:n2-1,i in 1:n1-1
-        a=i+(j-1)*n1;b=a+1;c=b+n1;d=a+n1
-        cell+=1
-        if arrangement===:right || arrangement===:alternate_right
-            tris[1,cell]=a;tris[2,cell]=b;tris[3,cell]=d
-            cell+=1;tris[1,cell]=b;tris[2,cell]=c;tris[3,cell]=d
-        else
-            tris[1,cell]=a;tris[2,cell]=b;tris[3,cell]=c
-            cell+=1;tris[1,cell]=a;tris[2,cell]=c;tris[3,cell]=d
-        end
-    end
-    mesh=Mesh(coords;tris=tris)
-    mesh=_consume_surface_attributes(m,t,mesh,caller)
-    return mesh
+    kernel=mesh_transfinite_patch(bottom,right,top,left;
+                                  arrangement=spec.arrangement)
+    mesh=Mesh(kernel.coords;tris=kernel.tris)
+    return _consume_surface_attributes(m,t,mesh,caller)
 end
 
 @inline function _points_close(p,q,tolerance)
@@ -4733,6 +4970,9 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
     internal_segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
     member_polygons=Dict{Int,Vector{Vector{Int}}}()
+    # Compound members must share one plane; the first member's plane is the
+    # reference every other point is checked against.
+    plane=_model_surface_plane(m,first(members),caller)
     for tag in members
         member_polygons[tag]=Vector{Int}[]
         for loop_id in m.surfaces[tag]
@@ -4749,22 +4989,25 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
                         forced,curve,signed)
                     vertex=if parameter==0
                         _add_surface_point!(
-                            xs,ys,mesh_sizes,index,m,a,caller)
+                            xs,ys,mesh_sizes,index,m,a,caller,plane)
                     elseif parameter==1
                         _add_surface_point!(
-                            xs,ys,mesh_sizes,index,m,b,caller)
+                            xs,ys,mesh_sizes,index,m,b,caller,plane)
                     else
                         point=_periodic_curve_point(
                             m,curve,parameter,caller)
-                        abs(point[3])<=1e-12 || throw(ArgumentError(
-                            "$caller: compound Curve[$curve] subdivision " *
-                            "is not planar in z=0"))
+                        scale=max(1.0,hypot(point...))
+                        abs(_plane_offset(plane,point))<=1e-12*scale ||
+                            throw(ArgumentError(
+                                "$caller: compound Curve[$curve] subdivision " *
+                                "is not coplanar with Surface[" *
+                                "$(first(members))]"))
                         _add_surface_curve_point!(
                             xs,ys,mesh_sizes,index,m,point,
                             get(param_sizes,(curve,parameter),
                                 _surface_curve_mesh_size(
                                     m,curve,parameter,caller)),
-                            curve,caller)
+                            curve,caller,plane)
                     end
                     push!(loop_idx,vertex)
                     push!(loop_segment,vertex)
@@ -4784,6 +5027,8 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
             push!(member_polygons[tag],loop_idx)
         end
     end
+    _fill_unsized_surface_vertices!(
+        mesh_sizes,xs,ys,boundary_segs,internal_segs)
     T=constrained_delaunay(
         xs,ys,boundary_segs;internal_segments=internal_segs)
     base=_surface_point_size_field(

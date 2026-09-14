@@ -14,7 +14,8 @@ if !isdefined(Tessella, :TransfiniteTriangle)
                           "TransfiniteTriangle.jl"))
 end
 using Tessella.TransfiniteTriangle: mesh_transfinite_triangle,
-                                    mesh_transfinite_triangle_patch
+                                    mesh_transfinite_triangle_patch,
+                                    mesh_transfinite_triangle_collapsed
 
 const TARGET_GMSH_VERSION = "4.15.2"
 
@@ -121,7 +122,8 @@ function canonical_quadrangles(connectivity)
 end
 
 function add_curved_triangle(arrangement, count;
-                             tilted=false, recombine=false)
+                             tilted=false, recombine=false,
+                             counts=nothing, corners=nothing)
     gmsh.clear()
     gmsh.model.add("transfinite_triangle_" * arrangement *
                    (tilted ? "_tilted" : ""))
@@ -147,11 +149,13 @@ function add_curved_triangle(arrangement, count;
               gmsh.model.geo.addSpline([p3, p31a, p31b, p1]))
     loop = gmsh.model.geo.addCurveLoop(collect(curves))
     surface = gmsh.model.geo.addPlaneSurface([loop])
-    for curve in curves
-        gmsh.model.geo.mesh.setTransfiniteCurve(curve, count)
+    per_curve = counts === nothing ? (count, count, count) : counts
+    for (curve, nodes) in zip(curves, per_curve)
+        gmsh.model.geo.mesh.setTransfiniteCurve(curve, nodes)
     end
     gmsh.model.geo.mesh.setTransfiniteSurface(
-        surface, arrangement, [p1, p2, p3])
+        surface, arrangement,
+        corners === nothing ? [p1, p2, p3] : corners)
     recombine && gmsh.model.geo.mesh.setRecombine(2, surface)
     gmsh.model.geo.synchronize()
     gmsh.model.mesh.generate(2)
@@ -298,6 +302,48 @@ function check_recombined_arrangement(
            Tessella.Elements.mixed_crc(mesh).sha
 end
 
+# Differential for Gmsh's legacy `Mesh.TransfiniteTri = 0` collapsed-grid
+# algorithm: `mesh_transfinite_triangle_collapsed` against the same Gmsh
+# geometry, with equal counts, an auto-rotated unequal-count boundary, and an
+# explicitly pinned collapsed corner.
+function check_collapsed(arrangement, symbol, count=6; tilted=false,
+                         counts=nothing, corners=nothing, rotate=0)
+    curves, surface = add_curved_triangle(
+        arrangement, count; tilted=tilted, counts=counts, corners=corners)
+    sides = map(curve_points, curves)
+    rotate > 0 && (sides = Tuple(sides[mod1(index + rotate, 3)]
+                               for index in 1:3))
+    mesh = mesh_transfinite_triangle_collapsed(
+        sides...; arrangement=symbol, face_tag=21, side_tags=(11, 12, 13),
+        allow_corner_rotation=corners isa AbstractVector && isempty(corners))
+    validate(mesh).ok || error(
+        "Tessella collapsed $arrangement patch did not validate")
+    mapping, maximum_error = gmsh_to_tessella_node_map(mesh, surface)
+
+    types, _, element_nodes = gmsh.model.mesh.getElements(2, surface)
+    types == Int32[2] || error(
+        "Gmsh collapsed $arrangement emitted element types $types")
+    mapped_triangles = Int32[
+        mapping[tag] for tag in element_nodes[1]]
+    canonical_triangles(mapped_triangles) ==
+        canonical_triangles(vec(mesh.tris)) || error(
+            "collapsed $arrangement triangle connectivity differs from Gmsh")
+
+    mapped_segments = Int32[]
+    for curve in curves
+        line_types, _, line_nodes = gmsh.model.mesh.getElements(1, curve)
+        line_position = findfirst(==(Int32(1)), line_types)
+        line_position === nothing && error(
+            "Gmsh curve $curve emitted no first-order lines")
+        append!(mapped_segments,
+                (mapping[tag] for tag in line_nodes[line_position]))
+    end
+    canonical_segments(mapped_segments) ==
+        canonical_segments(vec(mesh.segs)) || error(
+            "collapsed $arrangement boundary connectivity differs from Gmsh")
+    return maximum_error
+end
+
 gmsh.initialize([GMSH_EXECUTABLE, "-nopopup"], false, false)
 try
     gmsh.option.setNumber("General.Terminal", 0)
@@ -363,6 +409,56 @@ try
         "Left", :left, 6; tilted=true)
     push!(recombined_errors, maximum_error)
     recombined_coordinate_samples += 21
+
+    # Legacy collapsed-quadrilateral algorithm (Gmsh default
+    # Mesh.TransfiniteTri=0): same curved geometries, all four arrangements,
+    # several resolutions, one tilted plane, the auto-rotated unequal-count
+    # boundary (5,5,8), and an explicitly pinned second collapsed corner.
+    gmsh.option.setNumber("Mesh.TransfiniteTri", 0)
+    collapsed_errors = Float64[]
+    collapsed_topologies = Vector{NTuple{3,Int32}}[]
+    collapsed_samples = 0
+    for (arrangement, symbol) in cases
+        curves, surface = add_curved_triangle(
+            arrangement, 6; counts=(6, 6, 6), corners=Int[])
+        sides = map(curve_points, curves)
+        mesh = mesh_transfinite_triangle_collapsed(
+            sides...; arrangement=symbol, face_tag=21,
+            side_tags=(11, 12, 13))
+        validate(mesh).ok || error(
+            "Tessella collapsed $arrangement patch did not validate")
+        mapping, maximum_error = gmsh_to_tessella_node_map(mesh, surface)
+        types, _, element_nodes = gmsh.model.mesh.getElements(2, surface)
+        types == Int32[2] || error(
+            "Gmsh collapsed $arrangement emitted element types $types")
+        topology = canonical_triangles(
+            Int32[mapping[tag] for tag in element_nodes[1]])
+        topology == canonical_triangles(vec(mesh.tris)) || error(
+            "collapsed $arrangement triangle connectivity differs from Gmsh")
+        push!(collapsed_errors, maximum_error)
+        push!(collapsed_topologies, topology)
+        collapsed_samples += nnodes(mesh)
+    end
+    for count in (2, 4, 7)
+        maximum_error = check_collapsed("Left", :left, count)
+        push!(collapsed_errors, maximum_error)
+        collapsed_samples += 1 + (count - 1) * count
+    end
+    push!(collapsed_errors,
+          check_collapsed("Left", :left, 6; tilted=true))
+    collapsed_samples += 31
+    # (5,5,8) node counts: Gmsh auto-rotates the collapsed corner to the
+    # second junction — the kernel does the same.
+    push!(collapsed_errors, check_collapsed(
+        "Left", :left, 0; counts=(5, 5, 8), corners=Int[]))
+    collapsed_samples += 33
+    # Pin the collapsed corner at the third vertex: Gmsh gets corner list
+    # (p3,p1,p2) on counts (6,8,8); the kernel gets the same boundary rotated
+    # so the pinned junction leads, with rotation disabled.
+    push!(collapsed_errors, check_collapsed(
+        "Left", :left, 0; counts=(6, 8, 8), rotate=2,
+        corners=[7, 1, 4]))
+    collapsed_samples += 43
     println("TRANSFINITE_TRIANGLE_DIFFERENTIAL_OK gmsh=$api_version " *
             "arrangements=$(length(cases)) resolutions=5 geometries=2 " *
             "coordinate_samples=$coordinate_samples " *
@@ -375,7 +471,10 @@ try
             "recombined_reference_triangles=5 " *
             "recombined_reference_quadrangles=10 " *
             "recombined_alternate_topologies=1 " *
-            "recombined_crcs=$(join(recombined_crcs, ','))")
+            "recombined_crcs=$(join(recombined_crcs, ',')) " *
+            "collapsed_arrangements=$(length(cases)) " *
+            "collapsed_coordinate_samples=$collapsed_samples " *
+            "collapsed_max_node_error=$(maximum(collapsed_errors))")
 finally
     gmsh.finalize()
 end

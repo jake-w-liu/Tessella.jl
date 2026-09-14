@@ -128,7 +128,8 @@ const CURRENT = Ref{Union{Nothing,GeoModel}}(nothing)
 const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,
-    "Mesh.MeshSizeFactor"=>1.0)
+    "Mesh.MeshSizeFactor"=>1.0,
+    "Mesh.TransfiniteTri"=>0.0)
 const OPTIONS = copy(DEFAULT_OPTIONS)
 const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
 const LAST_MESH_CLASS = Ref{Union{Nothing,_MeshClassification}}(nothing)
@@ -199,7 +200,9 @@ end
 const MODEL_SLOTS = _ModelSlot[]
 
 function _new_slot(name::AbstractString)
-    return _ModelSlot(String(name),"",GeoModel(),nothing,nothing,nothing,
+    model=GeoModel()
+    model.meshing.transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"])
+    return _ModelSlot(String(name),"",model,nothing,nothing,nothing,
                       nothing,nothing,Dict{Int,Int32}(),Dict{Int,Int32}(),
                       Dict{Int,Dict{Int,Int32}}(),nothing,nothing,
                       Tuple{Int,Int32}[],
@@ -381,8 +384,9 @@ end
 
 Get or set one supported process-global mesh option in an initialized session.
 `MeshSizeMin` is nonnegative; `MeshSizeMax` and `MeshSizeFactor` are positive;
-the minimum may not exceed the maximum. Boolean and nonfinite values are
-rejected, and a failed update leaves all options unchanged.
+the minimum may not exceed the maximum. `Mesh.TransfiniteTri` is 0 or 1 and
+selects the three-sided transfinite surface algorithm. Boolean and nonfinite
+values are rejected, and a failed update leaves all options unchanged.
 """
 function option(name::AbstractString)
     key=String(name)
@@ -413,10 +417,17 @@ function option(name::AbstractString, value::Real)
             v>0 || throw(ArgumentError("API.option: MeshSizeMax must be positive"))
             v>=OPTIONS["Mesh.MeshSizeMin"] || throw(ArgumentError(
                 "API.option: MeshSizeMax must not be below MeshSizeMin"))
+        elseif key=="Mesh.TransfiniteTri"
+            (v==0.0 || v==1.0) || throw(ArgumentError(
+                "API.option: TransfiniteTri must be 0 or 1"))
         else
             v>0 || throw(ArgumentError("API.option: MeshSizeFactor must be positive"))
         end
         OPTIONS[key]=v
+        if key=="Mesh.TransfiniteTri"
+            model=CURRENT[]
+            model===nothing || (model.meshing.transfinite_tri=Int(v))
+        end
         v
     end
 end
@@ -8289,6 +8300,14 @@ function open_geo!(path::AbstractString; mesh_dim::Integer=0)
         stored_model=deepcopy(result.model)
         stored_mesh=result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
         index=_current_slot_index_locked()
+        # `Mesh.TransfiniteTri = v` in the file updates the process-global
+        # option as Gmsh does; otherwise the file inherits the current option.
+        if result.transfinite_tri===nothing
+            stored_model.meshing.transfinite_tri=Int(
+                OPTIONS["Mesh.TransfiniteTri"])
+        else
+            OPTIONS["Mesh.TransfiniteTri"]=Float64(result.transfinite_tri)
+        end
         CURRENT[]=stored_model
         MODEL_FILE_NAME[]=String(path)
         if index!=0
