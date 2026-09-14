@@ -107,12 +107,28 @@ end
 function _model_volume_bounds(
     m::GeoModel,tag::Int,caller::AbstractString)
     entity="Volume[$tag]"
-    explicit=!isempty(m.volumes[tag])
     encodings=(haskey(m.box_extents,tag),haskey(m.cylinders,tag),
                haskey(m.spheres,tag),haskey(m.cones,tag),
                haskey(m.booleans,tag))
+    # A materialized box keeps its `box_extents` encoding alongside its shell
+    # topology — legal only when the shell's owned Points are exactly the eight
+    # encoded corners; every other encoding is exclusive with explicit shells.
+    materialized=encodings[1] && !isempty(m.volumes[tag])
+    explicit=!isempty(m.volumes[tag]) && !materialized
     count(identity,(explicit,encodings...))<=1 || throw(ErrorException(
         "$caller: $entity has multiple native encodings; rebuild the model"))
+    if materialized
+        x0,y0,z0,dx,dy,dz=m.box_extents[tag]
+        scale=max(1.0,abs(x0),abs(y0),abs(z0),abs(dx),abs(dy),abs(dz))
+        corners=NTuple{3,Float64}[
+            (x0+ix*dx,y0+iy*dy,z0+iz*dz) for ix in (0,1),iy in (0,1),iz in (0,1)]
+        owned=[m.points[point] for point in _model_volume_owned_points(m,tag)]
+        (length(owned)==8 && all(
+            corner->any(p->_points_close(p,corner,1e-9*scale),owned),
+            corners)) || throw(ErrorException(
+                "$caller: $entity has inconsistent box encoding and shell " *
+                "topology; rebuild the model"))
+    end
     haskey(m.booleans,tag)==haskey(m.boolean_operands,tag) ||
         throw(ErrorException(
             "$caller: $entity has inconsistent Boolean snapshot ownership; " *

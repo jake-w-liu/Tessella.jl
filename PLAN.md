@@ -227,8 +227,10 @@ be reused without changing an earlier Boolean result.
 `SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in can set
 or lower a geometric allocation counter, while OpenCASCADE only raises it. Allocator
 reads use the greatest counter among activated factories, and primitive
-allocation still accounts for occupied tags. Primitive boundary entities remain
-implicit in the native model, so explicit modeled subentities can reuse those tags.
+allocation still accounts for occupied tags. `Box` boundary entities are
+materialized in the native model like Gmsh's; Cylinder/Sphere/Cone and Boolean
+boundary entities remain implicit, so explicit modeled subentities can reuse
+those tags.
 `MeshSize {points} = value` and `Characteristic Length` store finite positive
 constraints on existing explicit Points selected by `:`, bounded numeric expressions
 and ranges, whole/selected numeric-list variables, or inline `PointsOf` blocks.
@@ -240,7 +242,7 @@ update. The planar surface path extends the positive constraints
 piecewise-linearly over its deterministic initial constrained triangulation;
 generated straight-curve subdivision nodes interpolate their endpoint sizes, and
 uniform constraints retain the exact constant-size path. Coincident PSLG inputs use
-the smaller constraint. Exact Gmsh mesh topology, implicit primitive or Boolean
+the smaller constraint. Exact Gmsh mesh topology, implicit Cylinder/Sphere/Cone or Boolean
 subentities, and mesh-size selectors other than inline `PointsOf` remain pending;
 nonpositive values and Gmsh's silent missing-Point behavior are deliberately not
 claimed. Physical declarations
@@ -250,8 +252,8 @@ Physical Point/Curve/Surface accept inline `Boundary` and `CombinedBoundary` ove
 Curve/Line, Surface, and explicit Volume entities, respectively. `Boundary` collects
 immediate boundaries before physical membership is deduplicated; `CombinedBoundary`
 keeps tags with odd multiplicity. Hole and cavity boundaries participate, while
-embeddings do not. Empty combined boundaries, unsupported dimensions, and implicit primitive or
-Boolean topology fail explicitly.
+embeddings do not. Empty combined boundaries, unsupported dimensions, and implicit
+Cylinder/Sphere/Cone or Boolean topology fail explicitly.
 Model and session API queries return detached, sorted groups, memberships,
 reverse memberships, names, and name-selected entities. Names are unique within one
 dimension. Name removal and selective/all-group removal leave geometry intact, and
@@ -262,10 +264,11 @@ ordering, orientation, and combined-incidence cancellation, and return direct up
 and downward adjacencies. `is_entity_orphan` reports whether an entity lies
 outside the transitive downward boundary closure of every highest-dimension
 entity, matching Gmsh 4.15.2's embedding-excluding connectivity; implicit
-primitive or Boolean boundary entities resolve through the classification
-snapshot. These read-only queries preserve the session mesh cache and
-exclude mesh embeddings from topology. Primitive and Boolean volumes remain visible
-as volume entities, but their implicit boundary topology remains pending.
+Cylinder/Sphere/Cone or Boolean boundary entities resolve through the
+classification snapshot. These read-only queries preserve the session mesh cache and
+exclude mesh embeddings from topology. Box volumes expose their materialized Gmsh-exact boundary topology;
+Cylinder/Sphere/Cone and Boolean volumes remain visible as volume entities
+whose boundary topology is implicit.
 They also return exact bounding boxes for explicit straight-edge topology and
 analytical native primitives, plus the union over a nonempty model. Boolean boxes
 are derived from the owned operation-time result snapshot. Finite containment queries
@@ -273,8 +276,9 @@ select entities whose complete box lies inside the query box, do not enlarge a t
 for its embeddings, and preserve the session mesh cache. Unlike Gmsh's OpenCASCADE
 model, Tessella adds no shape-tolerance padding (`1e-7` in the pinned fixtures). It
 rejects nonfinite boxes and dimensions outside `-1` or `0:3`, while Gmsh treats other
-filter dimensions as an all-entity query. Implicit primitive subentities remain
-unavailable.
+filter dimensions as an all-entity query. Materialized Box subentities
+participate like other explicit entities; implicit Cylinder/Sphere/Cone or
+Boolean subentities remain unavailable.
 Type queries classify the native entity families as `Point`, `Line`, `Plane`, and
 `Volume`; the compatibility `get_type` call shares the same implementation. Native
 plane-property queries return detached unit-normal coefficients `[a,b,c,d]` for
@@ -300,8 +304,8 @@ the exact trimmed interior and excludes outer and hole boundaries, while paramet
 containment uses the inclusive rectangular parameter bounds. Line closest points are
 clamped to the segment; Plane projections are untrimmed. Queries are read-only and
 reject malformed, nonfinite, implicit, degenerate, or unrepresentable geometry
-instead of returning approximate fallback data. Curved entities, implicit primitive
-subentities, and general CAD parametrization remain pending.
+instead of returning approximate fallback data. Curved entities, implicit
+Cylinder/Sphere/Cone subentities, and general CAD parametrization remain pending.
 Point and straight-Line parameters can also be reparametrized on any explicit Plane,
 including sources outside its topology or plane. This composes native evaluation
 with orthogonal Plane parametrization. The `which` selector is validated but has no
@@ -314,9 +318,9 @@ NUL-free string vectors under lexically ordered string names and are also read-o
 with respect to the mesh cache. Finite Point-coordinate updates preserve all tag-owned
 metadata and invalidate a synchronized mesh only after success; dependent native
 Line and Plane queries immediately observe the new coordinates. Gmsh 4.15.2 retains
-stale Plane parameter bounds in the measured equivalent update. Implicit
-primitive boundary presentation remains pending in the headless
-model.
+stale Plane parameter bounds in the measured equivalent update. Box volumes
+present their materialized boundary entities; Cylinder/Sphere/Cone and Boolean
+boundary presentation remains implicit in the headless model.
 The synchronized mesh API routes complete cached linear-simplex refinement through
 the canonical uniform-refinement kernel, commits only after successful validation and
 resource preflight, and returns detached storage. Whole-cache clearing is idempotent
@@ -375,7 +379,8 @@ session-owned view with a smoothed element-wise frame field.
 and the size-callback pair are consumed by the generators: transfinite
 curves drive surface and volume grids, surfaces route through TFI —
 four-sided loops through the Coons grid and three-sided loops through the
-dedicated `Mesh.TransfiniteTri=1` patch —
+`Mesh.TransfiniteTri` option — the legacy collapsed-quadrilateral `0`
+algorithm by default, or the compact `1` patch —
 smoothing steps run after filling, `reverse`/`outward_orientation` flip
 entity meshes, compounds merge member entities into one classification,
 per-entity sizes and boundary point sizes propagate through composed size
@@ -516,8 +521,8 @@ Boolean-result snapshots, and construction loops made invalid by boundary recurs
 are cleaned.
 Counters remain monotonic. Tessella deliberately owns this mutation in its native
 kernel; unlike Gmsh's model-only removal, a later CAD synchronization cannot recreate
-the entity. Primitive and Boolean boundaries remain implicit, so recursion stops at
-those Volumes. Gmsh's independent entity/Physical name maps and stale periodic-master
+the entity. Box boundaries recurse through the materialized shell; Cylinder/Sphere/Cone
+and Boolean boundaries remain implicit, so recursion stops at those Volumes. Gmsh's independent entity/Physical name maps and stale periodic-master
 state after removal are not copied.
 It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD of
 unclassified topology, transformations of arbitrary CAD entities, or complete `.geo`
@@ -613,8 +618,7 @@ those entities and cells but no
 Point/Line/Surface-In-Volume relation. P4 does not
 yet claim
 non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
-quasi-transfinite patches, the legacy collapsed-quadrilateral
-`Mesh.TransfiniteTri=0` three-sided algorithm, general CAD parameterizations,
+quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, cyclic

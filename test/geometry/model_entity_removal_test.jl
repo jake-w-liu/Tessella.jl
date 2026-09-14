@@ -218,7 +218,9 @@ end
     set_entity_name!(model,3,1,"object")
     set_entity_name!(model,3,3,"cut")
 
-    @test remove_entities!(model,[(3,1)],true)==1
+    # A materialized box cascades to its boundary closure: the volume plus its
+    # six surfaces, twelve curves and eight points (loops are not entities).
+    @test remove_entities!(model,[(3,1)],true)==27
     @test !haskey(model.box_extents,1)
     @test !haskey(model.embeds,(3,1))
     @test model_entities_for_physical_group(model,3,10)==[3]

@@ -309,13 +309,14 @@ Physical Volume("domain", 72) = {1};
         @test haskey(embedded_volume.entity_data.entities,(3,1))
         @test embedded_volume.entity_data.entities[(2,101)].embedded_curves==
               Int32[104]
-        @test isempty(embedded_volume.entity_data.entities[(3,1)].boundaries)
+        @test embedded_volume.entity_data.entities[(3,1)].boundaries==
+              Int32[-1,2,-3,4,-5,6]
         @test Set(block.msh for block in embedded_volume.blocks)==Set([15,1,2,4])
         @test embedded_volume.physical_names==Dict(
             (0,51)=>"sheet points",(1,52)=>"sheet curves",
             (2,53)=>"sheet",(3,54)=>"domain")
         @test mixed_crc(embedded_volume).sha==
-              "745bc23ab2aa7c0824006a94ef279514a1c6fa97d3cd95960943797b85c6336c"
+              "0bcf38f7c2143402709a91c62da03b0977e2c0cecd18518937e99c036d8abe1f"
 
         explicit_shell_input=joinpath(directory,"explicit-shell.geo")
         explicit_shell_output=joinpath(directory,"explicit-shell.msh")

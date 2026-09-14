@@ -84,7 +84,8 @@ using .Refine: refine_uniform
 using .Transfinite: mesh_transfinite_patch
 using .TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using .TransfiniteTriangle: mesh_transfinite_triangle,
-                           mesh_transfinite_triangle_patch
+                           mesh_transfinite_triangle_patch,
+                           mesh_transfinite_triangle_collapsed
 using .TransfiniteQuad: mesh_transfinite_quad_patch
 using .TransfiniteVolume: mesh_transfinite_volume
 using .TransfinitePrism: mesh_transfinite_prism
@@ -103,7 +104,8 @@ using .Model: GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_l
               set_size_callback!, set_compound!, set_outward_orientation!,
               remove_constraints!, add_discrete_entity!, add_discrete_nodes!,
               add_discrete_elements!, add_homology_request!,
-              clear_homology_requests!, set_order!, model_discrete_entity,
+              clear_homology_requests!, set_order!, set_transfinite_tri!,
+              model_discrete_entity,
               model_discrete_entities, DiscreteEntity
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
 using .GeoExec: execute_geo
@@ -170,6 +172,7 @@ export mesh_transfinite_patch
 export transfinite_curve_parameters, transfinite_curve_hwall
 export mesh_transfinite_triangle
 export mesh_transfinite_triangle_patch
+export mesh_transfinite_triangle_collapsed
 export mesh_transfinite_quad_patch
 export mesh_transfinite_volume
 export mesh_transfinite_prism

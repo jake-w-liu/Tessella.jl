@@ -1,15 +1,18 @@
 """
     TransfiniteTriangle
 
-Validated planar, three-sided transfinite patches matching the specific
-`Mesh.TransfiniteTri = 1` path in Gmsh 4.15.2. Boundary chains are supplied
-already discretized, cyclically oriented, and must have the same node count.
-Gmsh's triangular interpolation, chord parameters, compact triangular
-connectivity, and arrangement-dependent recombined triangle/quadrangle layouts
-are reproduced for an affine planar surface.
+Validated planar, three-sided transfinite patches matching both
+`Mesh.TransfiniteTri` paths in Gmsh 4.15.2: the compact triangular lattice
+(`= 1`, [`mesh_transfinite_triangle`](@ref)) and the legacy
+collapsed-quadrilateral grid (`= 0`,
+[`mesh_transfinite_triangle_collapsed`](@ref), Gmsh's default). Boundary chains
+are supplied already discretized and cyclically oriented; the `= 1` kernel
+requires equal node counts on all three sides while the `= 0` kernel requires
+matching counts on the two sides incident to the (auto-rotated or pinned)
+collapsed corner. Gmsh's interpolation, chord parameters, connectivity, and
+arrangement-dependent layouts are reproduced for an affine planar surface.
 
-This module does not discretize curves, implement Gmsh's legacy
-`Mesh.TransfiniteTri = 0` collapsed-grid algorithm, quasi-transfinite repair,
+This module does not discretize curves, perform quasi-transfinite repair,
 CAD/ruled/spherical parameterizations, smoothing, holes, periodic seams,
 embedded entities, size/quality fields, or transfinite volumes.
 """
@@ -20,7 +23,8 @@ using ..Predicates: orient2
 import ..Elements
 using ..Elements: ElementBlock, MixedMesh
 
-export mesh_transfinite_triangle, mesh_transfinite_triangle_patch
+export mesh_transfinite_triangle, mesh_transfinite_triangle_patch,
+       mesh_transfinite_triangle_collapsed
 
 const _CALLER = "mesh_transfinite_triangle"
 const _RECOMBINED_CALLER = "mesh_transfinite_triangle_patch"
@@ -1153,6 +1157,292 @@ function mesh_transfinite_triangle_patch(
       size(result.blocks[3].nodes, 2) == quadrangles)) || throw(ErrorException(
         "$_RECOMBINED_CALLER: output count postcondition failed"))
     return result
+end
+
+const _COLLAPSED_CALLER = "mesh_transfinite_triangle_collapsed"
+
+# Gmsh 4.15.2 meshGFaceTransfinite.cpp collapsed-grid node numbering: node 1 is
+# the collapsed corner; row i in 1:L owns the (H+1)-node block starting at
+# 2 + (i - 1) * (H + 1), indexed by j in 0:H.
+@inline _collapsed_node(i::Int, j::Int, height::Int) =
+    Int32(i == 0 ? 1 : 2 + (i - 1) * (height + 1) + j)
+
+# Unrecombined cell split from the same source: `:right` takes the v1-v3
+# diagonal, `:left` takes v2-v4, and the alternates select the `:right`
+# diagonal by zero-based cell parity (odd i+j for `:alternate_right`, even for
+# `:alternate_left`).
+@inline function _collapsed_right_diagonal(arrangement::Symbol, i::Int, j::Int)
+    arrangement === :right && return true
+    arrangement === :alternate_right && return isodd(i + j)
+    arrangement === :alternate_left && return iseven(i + j)
+    return false
+end
+
+function _fill_collapsed_segments!(segments, tags, width::Int, height::Int,
+                                   side_tags)
+    cursor = 0
+    @inbounds for i in 0:width-1
+        cursor += 1
+        segments[1, cursor] = _collapsed_node(i, 0, height)
+        segments[2, cursor] = _collapsed_node(i + 1, 0, height)
+        tags[cursor] = side_tags[1]
+    end
+    @inbounds for j in 0:height-1
+        cursor += 1
+        segments[1, cursor] = _collapsed_node(width, j, height)
+        segments[2, cursor] = _collapsed_node(width, j + 1, height)
+        tags[cursor] = side_tags[2]
+    end
+    @inbounds for i in width:-1:1
+        cursor += 1
+        segments[1, cursor] = _collapsed_node(i, height, height)
+        segments[2, cursor] = _collapsed_node(i - 1, height, height)
+        tags[cursor] = side_tags[3]
+    end
+    cursor == size(segments, 2) || throw(ErrorException(
+        "$_COLLAPSED_CALLER: internal segment count invariant failed"))
+    return nothing
+end
+
+function _fill_collapsed_triangles!(triangles, width::Int, height::Int,
+                                    arrangement::Symbol)
+    cursor = 0
+    @inbounds for j in 0:height-1
+        v1 = _collapsed_node(0, 0, height)
+        v2 = _collapsed_node(1, j, height)
+        v3 = _collapsed_node(1, j + 1, height)
+        cursor += 1
+        triangles[1, cursor] = v1
+        triangles[2, cursor] = v2
+        triangles[3, cursor] = v3
+    end
+    @inbounds for i in 1:width-1, j in 0:height-1
+        v1 = _collapsed_node(i, j, height)
+        v2 = _collapsed_node(i + 1, j, height)
+        v3 = _collapsed_node(i + 1, j + 1, height)
+        v4 = _collapsed_node(i, j + 1, height)
+        if _collapsed_right_diagonal(arrangement, i, j)
+            cursor += 1
+            triangles[1, cursor] = v1
+            triangles[2, cursor] = v2
+            triangles[3, cursor] = v3
+            cursor += 1
+            triangles[1, cursor] = v3
+            triangles[2, cursor] = v4
+            triangles[3, cursor] = v1
+        else
+            cursor += 1
+            triangles[1, cursor] = v1
+            triangles[2, cursor] = v2
+            triangles[3, cursor] = v4
+            cursor += 1
+            triangles[1, cursor] = v4
+            triangles[2, cursor] = v2
+            triangles[3, cursor] = v3
+        end
+    end
+    cursor == size(triangles, 2) || throw(ErrorException(
+        "$_COLLAPSED_CALLER: internal triangle count invariant failed"))
+    return nothing
+end
+
+"""
+    mesh_transfinite_triangle_collapsed(side1, side2, side3;
+        arrangement=:left, face_tag=0, side_tags=(0,0,0),
+        max_nodes=10_000_000, max_triangles=20_000_000) -> Mesh
+
+Construct a planar three-sided structured patch using Gmsh 4.15.2's legacy
+`Mesh.TransfiniteTri = 0` collapsed-quadrilateral algorithm. Each side is an
+already-discretized vector of finite 3-D points, cyclically oriented as
+`c1→c2`, `c2→c3`, and `c3→c1`. Adjacent endpoints must match exactly after
+conversion to `Float64`.
+
+The collapsed corner is the vertex shared by sides 3 and 1 when sides 1 and 3
+have equal node counts; otherwise the corner order rotates once so the corner
+shared by sides 1 and 2 collapses — matching Gmsh's `findTransfiniteCorners`
+rule — and sides 1 and 2 must then have equal node counts. The side opposite
+the collapsed corner may carry any node count. A boundary with no valid
+collapsed corner throws `ArgumentError`; it never falls back to unstructured
+meshing.
+
+Interior node placement follows `TRAN_TRI`: degenerate-quadrilateral
+transfinite interpolation with symmetric chord-averaged parameters across the
+two incident sides and chord parameters along the opposite side. Element order
+is Gmsh's: a fan of triangles from the collapsed corner along the opposite
+side, then one quadrilateral cell column per remaining row. `arrangement`
+selects the cell diagonal with Gmsh's semantics: `:right` takes the v1–v3
+diagonal, `:left` (default) takes v2–v4, and `:alternate_left`/
+`:alternate_right` select `:right` on even/odd zero-based cell parities.
+
+The returned mesh contains all three boundary segment chains. `face_tag` is
+copied to every triangle and each entry of `side_tags` to the chain of the
+corresponding *original* side, following rotation. Counts, Int32 topology
+bounds, and caller limits are checked before output allocation. The completed
+output is checked for finite coordinates, consistent nonzero orientation,
+manifold topology, and exact boundary conservation; invalid or folded inputs
+are rejected without an unstructured fallback.
+
+This operation does not discretize curves, apply curve laws, implement the
+specific `Mesh.TransfiniteTri = 1` compact algorithm
+([`mesh_transfinite_triangle`](@ref)), quasi-transfinite repair, recombination
+into quadrangles, smoothing, holes/periodic seams/embedded entities,
+size/quality fields, non-planar CAD parameterizations, or volumes. Explicitly
+pinned Gmsh surface corners are honored by the model layer, not this function;
+pass the sides already rotated so the first junction is the collapsed corner.
+"""
+function mesh_transfinite_triangle_collapsed(side1,
+                                             side2,
+                                             side3;
+                                             arrangement=:left,
+                                             face_tag=0,
+                                             side_tags=(0, 0, 0),
+                                             allow_corner_rotation=true,
+                                             max_nodes=_DEFAULT_MAX_NODES,
+                                             max_triangles=
+                                                 _DEFAULT_MAX_TRIANGLES)::Mesh
+    for (index, side) in enumerate((side1, side2, side3))
+        side isa AbstractVector || throw(ArgumentError(
+            "$_COLLAPSED_CALLER: side $index must be an AbstractVector"))
+    end
+    layout = _arrangement(arrangement, _COLLAPSED_CALLER)
+    node_limit = _limit(max_nodes, "max_nodes", _COLLAPSED_CALLER)
+    triangle_limit = _limit(
+        max_triangles, "max_triangles", _COLLAPSED_CALLER)
+    side_tags isa Tuple && length(side_tags) == 3 || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: side_tags must be a three-integer tuple"))
+    physical_side_tags = ntuple(
+        index -> _tag(side_tags[index], "side_tags[$index]",
+                      _COLLAPSED_CALLER), 3)
+    physical_face_tag = _tag(face_tag, "face_tag", _COLLAPSED_CALLER)
+
+    lengths = (length(side1), length(side2), length(side3))
+    @inbounds for side in 1:3
+        lengths[side] >= 2 || throw(ArgumentError(
+            "$_COLLAPSED_CALLER: side $side needs at least two points"))
+    end
+
+    # Gmsh `findTransfiniteCorners`: when the two sides incident to the first
+    # corner have different node counts, the corner list rotates once so the
+    # collapsed corner moves from c1 to c2 — corner c3 is never selected.
+    allow_corner_rotation isa Bool || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: allow_corner_rotation must be a Bool"))
+    sides = (_convert_side(side1, 1), _convert_side(side2, 2),
+             _convert_side(side3, 3))
+    rotated_tags = physical_side_tags
+    if allow_corner_rotation && lengths[1] != lengths[3]
+        sides = (sides[2], sides[3], sides[1])
+        rotated_tags = (physical_side_tags[2], physical_side_tags[3],
+                        physical_side_tags[1])
+    end
+    length(sides[1]) == length(sides[3]) || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: non-matching number of nodes on opposite sides " *
+        "$(length(sides[3])) != $(length(sides[1]))"))
+
+    @inbounds for side in 1:3
+        _validate_side_edges(sides[side], side)
+        next = mod1(side + 1, 3)
+        sides[side][end] == sides[next][1] || throw(ArgumentError(
+            "$_COLLAPSED_CALLER: side $side endpoint does not exactly match " *
+            "side $next start point"))
+    end
+    corners = (sides[1][1], sides[2][1], sides[3][1])
+    length(Set(corners)) == 3 || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: the three corners must be distinct"))
+
+    width = length(sides[1]) - 1
+    height = length(sides[2]) - 1
+    nodes = _checked_add(
+        _checked_mul(width, height + 1, "node", _COLLAPSED_CALLER), 1,
+        "node", _COLLAPSED_CALLER)
+    # height fan triangles plus two per collapsed-grid cell.
+    triangles = _checked_mul(
+        height, _checked_add(_checked_mul(2, width, "cell row",
+            _COLLAPSED_CALLER), -1, "fan column", _COLLAPSED_CALLER),
+        "triangle", _COLLAPSED_CALLER)
+    segments = _checked_add(
+        _checked_mul(2, width, "segment", _COLLAPSED_CALLER), height,
+        "segment", _COLLAPSED_CALLER)
+    nodes <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: $nodes nodes exceed the Int32 indexing limit"))
+    triangles <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: $triangles triangles exceed the Int32 topology limit"))
+    segments <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: $segments segments exceed the Int32 topology limit"))
+    nodes <= node_limit || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: $nodes nodes exceed max_nodes=$node_limit"))
+    triangles <= triangle_limit || throw(ArgumentError(
+        "$_COLLAPSED_CALLER: $triangles triangles exceed " *
+        "max_triangles=$triangle_limit"))
+
+    ring = _boundary_ring(sides)
+    origin, scale = _normalization(ring)
+    frame = _plane_frame(ring, origin, scale)
+    projected_ring = NTuple{2,Float64}[
+        _project(frame, _normalize(point, origin, scale)) for point in ring]
+    _validate_simple_boundary(projected_ring)
+
+    first = _normalized_side(sides[1], origin, scale)
+    second = _normalized_side(sides[2], origin, scale)
+    third = reverse(_normalized_side(sides[3], origin, scale))
+    radial_chords, radial_total = _averaged_chords(first, third)
+    second_chords, second_total = _side_chords(second)
+    corner2 = first[end]
+    corner3 = second[end]
+
+    coordinates = Matrix{Float64}(undef, 3, nodes)
+    collapsed = sides[1][1]
+    coordinates[1, 1] = collapsed[1]
+    coordinates[2, 1] = collapsed[2]
+    coordinates[3, 1] = collapsed[3]
+    @inbounds for i in 1:width, j in 0:height
+        point = if j == 0
+            sides[1][i + 1]
+        elseif i == width
+            sides[2][j + 1]
+        elseif j == height
+            sides[3][width - i + 1]
+        else
+            u = radial_chords[i + 1] / radial_total
+            v = second_chords[j + 1] / second_total
+            normalized = _transfinite_point(
+                first[i + 1], second[j + 1], third[i + 1],
+                corner2, corner3, u, v)
+            all(isfinite, normalized) || throw(ArgumentError(
+                "$_COLLAPSED_CALLER: transfinite interpolation generated a " *
+                "non-finite coordinate"))
+            _physical_point(normalized, origin, scale)
+        end
+        node = Int(_collapsed_node(i, j, height))
+        coordinates[1, node] = point[1]
+        coordinates[2, node] = point[2]
+        coordinates[3, node] = point[3]
+    end
+
+    segment_topology = Matrix{Int32}(undef, 2, segments)
+    segment_tags = Vector{Int32}(undef, segments)
+    _fill_collapsed_segments!(
+        segment_topology, segment_tags, width, height, rotated_tags)
+    triangle_topology = Matrix{Int32}(undef, 3, triangles)
+    _fill_collapsed_triangles!(
+        triangle_topology, width, height, layout)
+    _validate_triangle_orientation(
+        coordinates, triangle_topology, origin, scale, frame)
+    triangle_tags = fill(physical_face_tag, triangles)
+
+    mesh = Mesh(coordinates;
+                segs=segment_topology,
+                tris=triangle_topology,
+                seg_tag=segment_tags,
+                tri_tag=triangle_tags)
+    diagnostic = validate(mesh)
+    diagnostic.ok || throw(ErrorException(
+        "$_COLLAPSED_CALLER: internal output validation failed — " *
+        join(diagnostic.messages, "; ")))
+    (nnodes(mesh) == nodes && nsegs(mesh) == segments &&
+     ntris(mesh) == triangles) || throw(ErrorException(
+        "$_COLLAPSED_CALLER: internal output count postcondition failed"))
+    _validate_boundary_postcondition(mesh)
+    return mesh
 end
 
 end # module TransfiniteTriangle

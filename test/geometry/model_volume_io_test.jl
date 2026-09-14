@@ -141,17 +141,25 @@ end
     line_block=only(findall(block->block.msh==1,projected.blocks))
     surface_block=only(findall(block->block.msh==2,projected.blocks))
     volume_block=only(findall(block->block.msh==4,projected.blocks))
-    expected_points=Set(Int32[10,11,12,21,22,23,24,25,26])
-    expected_curves=Set(Int32[20,31,32,33,34])
-    @test Set(projected.entity_data.block_entities[point_block])==expected_points
-    @test Set(projected.entity_data.block_entities[line_block])==expected_curves
-    @test projected.entity_data.block_entities[surface_block]==
-          fill(Int32(30),length(projected.blocks[surface_block].tags))
+    # The materialized Box presents its real boundary: corner nodes classify to
+    # Points 1-8, skin edges to Curves 1-12, and skin triangles to Surfaces
+    # 1-6, exactly like Gmsh's OCC `addBox` output.
+    box_points=Set(Int32.(1:8));box_curves=Set(Int32.(1:12))
+    box_faces=Set(Int32.(1:6))
+    expected_points=union(box_points,Set(Int32[10,11,12,21,22,23,24,25,26]))
+    expected_curves=union(box_curves,Set(Int32[20,31,32,33,34]))
+    expected_surfaces=union(box_faces,Set(Int32[30]))
+    point_entities=projected.entity_data.block_entities[point_block]
+    line_entities=projected.entity_data.block_entities[line_block]
+    surface_entities=projected.entity_data.block_entities[surface_block]
+    @test Set(point_entities)==expected_points
+    @test Set(line_entities)==expected_curves
+    @test Set(surface_entities)==expected_surfaces
     @test projected.entity_data.block_entities[volume_block]==
           fill(Int32(1),ntets(mesh))
     @test projected.entity_data.entities[(2,30)].boundaries==Int32[31,32,33]
     @test projected.entity_data.entities[(2,30)].embedded_curves==Int32[34]
-    @test isempty(projected.entity_data.entities[(3,1)].boundaries)
+    @test projected.entity_data.entities[(3,1)].boundaries==Int32[-1,2,-3,4,-5,6]
     @test projected.physical_names==Dict(
         (0,41)=>"embedded points",(1,42)=>"embedded curves",
         (2,43)=>"embedded sheet",(3,44)=>"domain")
@@ -159,9 +167,17 @@ end
     classified_points=Dict(Int(entity[2])=>Int32(node) for (node,entity) in
         enumerate(projected.entity_data.node_entities) if entity[1]==0)
     @test Set(keys(classified_points))==Set(Int.(expected_points))
-    @test all(==(Int32(41)),projected.blocks[point_block].tags)
-    @test all(==(Int32(42)),projected.blocks[line_block].tags)
-    @test all(==(Int32(43)),projected.blocks[surface_block].tags)
+    # Box boundary entities carry no Physical group, so their elements write
+    # tag 0 while grouped embedded entities keep their group tags.
+    @test all(i->projected.blocks[point_block].tags[i]==
+              (point_entities[i] in box_points ? Int32(0) : Int32(41)),
+              eachindex(point_entities))
+    @test all(i->projected.blocks[line_block].tags[i]==
+              (line_entities[i] in box_curves ? Int32(0) : Int32(42)),
+              eachindex(line_entities))
+    @test all(i->projected.blocks[surface_block].tags[i]==
+              (surface_entities[i] in box_faces ? Int32(0) : Int32(43)),
+              eachindex(surface_entities))
     @test all(==(Int32(44)),projected.blocks[volume_block].tags)
     @test size(projected.blocks[surface_block].nodes,2)>0
     @test any(entity->entity==(2,Int32(30)),
@@ -178,13 +194,15 @@ end
     plain_model=deepcopy(model)
     empty!(plain_model.embeds)
     plain=model_to_mixed(plain_model,mesh,3,1)
-    @test [block.msh for block in plain.blocks]==[4]
-    @test Set(keys(plain.entity_data.entities))==Set([(3,1)])
+    @test [block.msh for block in plain.blocks]==[15,1,2,4]
+    @test Set(keys(plain.entity_data.entities))==Set(vcat(
+        [(0,i) for i in 1:8],[(1,i) for i in 1:12],
+        [(2,i) for i in 1:6],[(3,1)]))
     @test plain.physical_names==Dict((3,44)=>"domain")
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "e6a1a6de65b65987c543553d6456e4607b43fd3f3127294d926237888c9b5453"
+          "0ca2c8229560813a2a7162db515be4b80088ff90b77f4cef8391bd7b45d545b9"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"classified-volume-$version-$binary.msh")
@@ -199,14 +217,15 @@ end
                 @test haskey(reread.entity_data.entities,(3,1))
                 @test reread.entity_data.entities[(2,30)].embedded_curves==
                       Int32[34]
-                @test isempty(reread.entity_data.entities[(3,1)].boundaries)
+                @test reread.entity_data.entities[(3,1)].boundaries==
+                      Int32[-1,2,-3,4,-5,6]
             else
                 @test reread.entity_data===nothing
                 ownership=Dict(block.msh=>Set(reread.elementary_entities[index])
                     for (index,block) in pairs(reread.blocks))
                 @test ownership[15]==expected_points
                 @test ownership[1]==expected_curves
-                @test ownership[2]==Set(Int32[30])
+                @test ownership[2]==expected_surfaces
                 @test ownership[4]==Set(Int32[1])
             end
         end
@@ -287,8 +306,10 @@ end
     @test [block.msh for block in projected.blocks]==[15,1,2,4]
     surface_index=only(findall(block->block.msh==2,projected.blocks))
     surface_block=projected.blocks[surface_index]
-    @test all(==(Int32(101)),
-              projected.entity_data.block_entities[surface_index])
+    surface_entities=projected.entity_data.block_entities[surface_index]
+    # The Box skin classifies onto its six materialized faces; the embedded
+    # holed sheet keeps Surface 101.
+    @test Set(surface_entities)==Set(Int32[1:6;101])
     @test projected.entity_data.entities[(2,101)].boundaries==
           Int32[101,102,103,104,-108,-107,-106,-105]
     @test projected.entity_data.entities[(2,101)].embedded_curves==Int32[109]
@@ -299,6 +320,7 @@ end
     sheet_area=0.0
     hole_centroid_hits=0
     for cell in axes(surface_block.nodes,2)
+        surface_entities[cell]==Int32(101) || continue
         points=ntuple(slot->begin
             point=surface_block.nodes[slot,cell]
             (projected.coords[1,point],projected.coords[2,point],
@@ -314,7 +336,7 @@ end
     @test any(entity==(0,Int32(111))
               for entity in projected.entity_data.node_entities)
     @test mixed_crc(projected).sha==
-          "8d6d3404cef5985c7ef74c85b26c22894bfd03873182139ab26e9ea766b21400"
+          "2ebe244a7bdbdab8a44c1c95899a1a7238e56bbfc5fff03fbddd5484312d1a49"
 end
 
 @testset "explicit modeled volume shells" begin

@@ -178,8 +178,12 @@ end
     corrupt.points[1]=(NaN,0.0,0.0)
     @test_throws ArgumentError model_bounding_box(corrupt,0,1)
     overflow=GeoModel()
-    add_box!(overflow,floatmax(Float64),0,0,floatmax(Float64),1,1;tag=1)
-    @test_throws ArgumentError model_bounding_box(overflow,3,1)
+    # Corners at floatmax+floatmax overflow to Inf — a materialized B-rep cannot
+    # carry non-finite points, so construction itself fails (Gmsh's addBox
+    # rejects degenerate boxes the same way).
+    @test_throws ArgumentError add_box!(
+        overflow,floatmax(Float64),0,0,floatmax(Float64),1,1;tag=1)
+    @test isempty(overflow.volumes)
     multiply_encoded=GeoModel()
     add_box!(multiply_encoded,0,0,0,1,1,1;tag=1)
     multiply_encoded.spheres[1]=(center=(0.0,0.0,0.0),radius=1.0)

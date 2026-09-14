@@ -228,8 +228,8 @@ end
     add_box!(model,0,0,0,2,1,1;tag=1)
     add_box!(model,0,0,0,1,1,1;tag=2)
     boolean_volumes!(model,:difference,1,2;tag=3)
-    add_point!(model,1.5,0.5,0.5;tag=10)
-    embed!(model,0,[10],3,1)
+    add_point!(model,1.5,0.5,0.5;tag=20)
+    embed!(model,0,[20],3,1)
     add_physical_group!(model,3,[1,3];tag=10,name="solids")
     set_entity_name!(model,3,1,"object")
     set_entity_name!(model,3,2,"tool")
@@ -239,7 +239,7 @@ end
 
     model_set_tag!(model,3,1,101)
     @test haskey(model.box_extents,101) && !haskey(model.box_extents,1)
-    @test model.embeds[(3,101)]==[(0,10)]
+    @test model.embeds[(3,101)]==[(0,20)]
     @test model.booleans[3]==(op=:difference,a=1,b=2)
     @test model_entity_name(model,3,101)=="object"
     @test mesh_crc(mesh_model_volume(model,101))==mesh_crc(primitive_before)
