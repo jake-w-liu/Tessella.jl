@@ -72,12 +72,16 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   output), plus strict and atomic simplex MSH
   v2.2/v4.1 and STL I/O;
 - a resource-bounded `.geo` scanner for finite arithmetic constants, pure numeric
-  functions, prior scalar bindings, sizing options, explicit field/physical tags, and
+  functions, comparison/logical/ternary operators, prior scalar bindings, sizing
+  options, explicit field/physical tags, and
   finite constant `start:end[:increment]` lists in recognized numeric contexts, plus
   read-only tag allocators over tracked Point, shared-region, and Field namespaces and
   factory-aware, checked `SetMaxTag` control of geometric counters; the
   executor applies the same checked semantics to numeric parameters, entity tags,
-  and entity lists in every supported geometry statement, and stores positive
+  and entity lists in every supported geometry statement, executes
+  `If`/`ElseIf`/`Else`/`EndIf` and `For name In {start:end[:increment]}`/`EndFor`
+  with the built-in kernel's semantics plus a bounded `While`/`EndWhile`
+  extension, and stores positive
   `MeshSize`/`Characteristic Length` constraints on existing explicit Points,
   including recursive explicit-topology `PointsOf` selection;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
@@ -157,7 +161,7 @@ boundary-layer fan topology beyond the certified closed-wall extrusion, the full
 Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
 interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including control-flow loops, macros, option reads,
+`.geo` execution (including macros, option reads,
 dynamic/general ranges, allocator reads after topology-changing or untracked
 declarations, and geometry-derived physical-group RHSs beyond the documented inline
 topology queries),
@@ -182,8 +186,11 @@ and stored mesh-inert volume relations. Each
 slave has one master; curve masters may be reused, a curve slave may become a master
 in an acyclic chain, and independent relations may share corner points. The bounded
 `.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
-functions, bounded numeric list assignment/indexing/selection/mutation, and constant
-entity ranges to all supported geometry statements. Entity lists, including periodic
+functions, comparison/logical/ternary operators, bounded numeric list
+assignment/indexing/selection/mutation, constant
+entity ranges, and `If`/`ElseIf`/`Else`/`EndIf`, `For name In
+{start:end[:increment]}`/`EndFor`, and bounded `While`/`EndWhile` control flow to
+all supported geometry statements. Entity lists, including periodic
 slave/master sets, can reuse whole or selected list variables.
 Point `MeshSize` selectors can likewise use `:`, expressions, constant ranges, and
 whole or selected numeric-list variables. Inline `PointsOf` blocks additionally

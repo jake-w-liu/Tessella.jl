@@ -17,13 +17,18 @@ entity lists accept numeric selectors, `PointsOf` for Physical Point, and immedi
 `Boundary` or `CombinedBoundary` queries over explicit entities of the next higher
 dimension.
 Numeric parameters, entity tags, and entity lists use bounded
-constant-expression evaluation. Numeric
+constant-expression evaluation with Gmsh's comparison, logical, and ternary
+operators. `If`/`ElseIf`/`Else`/`EndIf` and `For name In {a:b[:c]}` follow the
+built-in kernel (the For range is evaluated once at loop entry and the loop
+variable is left at its first out-of-range value); a bounded
+`While (expr) ... EndWhile` is a Tessella extension — pinned Gmsh has no While
+keyword. Control headers must complete on one line. Numeric
 list variables provide zero-based indexing, cardinality, copying, concatenation,
 selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
 runs through the native [`Model`](@ref) kernel. Boolean results own operation-time
 operand geometry. `Delete` also removes the operand's native encoding, target
 embeddings, and Physical memberships; a group and its name are removed when no
-members remain. Control-flow loops, macros, extrusions, fillets, and general OCC
+members remain. Macros, extrusions, fillets, and general OCC
 BREP remain explicit blockers.
 """
 module GeoExec
@@ -39,7 +44,8 @@ using ..Model: _model_boundary, _model_points_of
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
-using ..IO: _geo_split_list, _geo_numeric_list_terms, _geo_numeric_list_values
+using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
+using ..IO: _geo_numeric_list_terms, _geo_numeric_list_values
 using ..IO: _geo_positive_gmsh_tag
 using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
@@ -68,18 +74,121 @@ end
 
 const _MAX_GEO_EXEC_STATEMENT_BYTES=1_000_000
 const _MAX_GEO_EXEC_STATEMENTS=1_000_000
+const _MAX_GEO_LOOP_ITERATIONS=1_000_000
+
+const _GEO_CONTROL_BARE=Dict(
+    "Else"=>:else,"EndIf"=>:endif,"EndWhile"=>:endwhile,"EndFor"=>:endfor)
+
+# Scan a balanced open/close group starting at raw[i] (the opener). Returns the
+# index of the matching close on the same line; control headers that spill to a
+# second line are a bounded-subset blocker.
+function _geo_scan_balanced(raw::AbstractString,i::Int,last::Int,
+                            open::Char,close::Char)
+    depth=0;qc='\0';k=i
+    while k<=last
+        c=raw[k]
+        if qc!='\0'
+            c==qc && (qc='\0')
+        elseif c=='"' || c=='\''
+            qc=c
+        elseif c==open
+            depth+=1
+        elseif c==close
+            depth-=1
+            depth==0 && return k
+        end
+        k=nextind(raw,k)
+    end
+    throw(ArgumentError(
+        "execute_geo: control statement must complete on a single line"))
+end
+
+# If raw[i:last] begins a control construct (If/ElseIf/While headers with a
+# parenthesized expression, `For name In {a:b[:c]}`, or the bare Else/EndIf/
+# EndWhile/EndFor markers), return (statement_text, last_consumed_index).
+# Gmsh 4.15.2's built-in kernel accepts only `For name In {a:b[:c]}` — comma
+# lists, single values, and C-style `For (init; cond; incr)` are rejected —
+# and has no While keyword; `While (expr) ... EndWhile` is a bounded
+# Tessella extension.
+function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
+    rest=SubString(raw,i,last)
+    matched=match(
+        r"^(If|ElseIf|While|Else|EndIf|EndWhile|For|EndFor)\b",rest)
+    matched===nothing && return nothing
+    word=matched.captures[1]
+    haskey(_GEO_CONTROL_BARE,word) && return (word,i+sizeof(word)-1)
+    j=firstindex(rest)+sizeof(word)
+    jlast=lastindex(rest)
+    while j<=jlast && isspace(rest[j])
+        j=nextind(rest,j)
+    end
+    if word=="For"
+        name_match=match(r"^[A-Za-z_][A-Za-z0-9_]*",SubString(rest,j))
+        name_match===nothing && throw(ArgumentError(
+            "execute_geo: malformed For header; use `For name In {a:b[:c]}`"))
+        j+=sizeof(name_match.match)
+        while j<=jlast && isspace(rest[j])
+            j=nextind(rest,j)
+        end
+        match(r"^In\b",SubString(rest,j))===nothing && throw(ArgumentError(
+            "execute_geo: malformed For header; use `For name In {a:b[:c]}`"))
+        j+=2
+        while j<=jlast && isspace(rest[j])
+            j=nextind(rest,j)
+        end
+        (j<=jlast && rest[j]=='{') || throw(ArgumentError(
+            "execute_geo: malformed For header; use `For name In {a:b[:c]}`"))
+        close=_geo_scan_balanced(rest,j,jlast,'{','}')
+        return (String(rest[1:close]),i+close-1)
+    end
+    (j<=jlast && rest[j]=='(') || throw(ArgumentError(
+        "execute_geo: malformed $word header; use `$word (expression)`"))
+    close=_geo_scan_balanced(rest,j,jlast,'(',')')
+    return (String(rest[1:close]),i+close-1)
+end
+
+# Classify a standalone control statement; returns nothing for ordinary
+# `;`-terminated statements.
+function _geo_control_parse(line::AbstractString)
+    if (matched=match(r"^(If|ElseIf|While)\s*\((.*)\)$",line))!==nothing
+        kind=Dict("If"=>:if,"ElseIf"=>:elseif,"While"=>:while)[matched.captures[1]]
+        return (kind=kind,cond=String(matched.captures[2]))
+    elseif (matched=match(
+            r"^For\s+([A-Za-z_][A-Za-z0-9_]*)\s+In\s*\{(.*)\}$",line))!==nothing
+        return (kind=:for,var=String(matched.captures[1]),
+                range=String(matched.captures[2]))
+    elseif haskey(_GEO_CONTROL_BARE,line)
+        return (kind=_GEO_CONTROL_BARE[line],)
+    end
+    return nothing
+end
 
 # Brace-aware statement split so BooleanDifference `{ Volume{1}; Delete; }{...};`
 # is one statement. Quoted strings and line/block comments are respected.
+# Control constructs (If/ElseIf/Else/EndIf, For/EndFor, While/EndWhile) carry no
+# `;`; each is emitted as its own statement whenever it starts at a statement
+# boundary.
 function _geo_exec_statements(path::AbstractString)
     statements=String[]
     buf=IOBuffer()
     depth=0
     quote_char='\0'
     block_comment=false
+    buf_has_content=false
     for raw in eachline(path)
         i=firstindex(raw); last=lastindex(raw)
         while i<=last
+            if !block_comment && quote_char=='\0' && !buf_has_content
+                control=_geo_control_statement(raw,i,last)
+                if control!==nothing
+                    take!(buf)
+                    length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                        "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+                    push!(statements,control[1])
+                    i=nextind(raw,control[2])
+                    continue
+                end
+            end
             c=raw[i]
             nxt=nextind(raw,i)
             nextc=nxt<=last ? raw[nxt] : '\0'
@@ -100,13 +209,13 @@ function _geo_exec_statements(path::AbstractString)
                 write(buf,c)
                 c==quote_char && (quote_char='\0')
             elseif c=='"' || c=='\''
-                quote_char=c; write(buf,c)
+                quote_char=c; write(buf,c); buf_has_content=true
             elseif c=='{'
-                depth+=1; write(buf,c)
+                depth+=1; write(buf,c); buf_has_content=true
             elseif c=='}'
                 depth>0 || throw(ArgumentError(
                     "execute_geo: unmatched closing brace"))
-                depth-=1; write(buf,c)
+                depth-=1; write(buf,c); buf_has_content=true
             elseif c==';' && depth==0
                 write(buf,c)
                 statement=strip(String(take!(buf)))
@@ -115,8 +224,10 @@ function _geo_exec_statements(path::AbstractString)
                         "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
                     push!(statements,statement)
                 end
+                buf_has_content=false
             else
                 write(buf,c)
+                isspace(c) || (buf_has_content=true)
             end
             position(buf)<=_MAX_GEO_EXEC_STATEMENT_BYTES || throw(ArgumentError(
                 "execute_geo: statement exceeds $_MAX_GEO_EXEC_STATEMENT_BYTES bytes"))
@@ -144,8 +255,17 @@ Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
 `mesh_dim=0` only builds the model. Geometry statements outside the bounded
 subset and malformed input raise `ArgumentError` instead of being partially
 accepted. Every numeric parameter, entity tag, and numeric entity-list entry in a
-supported statement accepts finite arithmetic, prior scalar bindings, and pure
-numeric functions. Numeric lists support zero-based scalar indexing, `#name[]`
+supported statement accepts finite arithmetic, prior scalar bindings, pure
+numeric functions, and Gmsh's comparison, logical, and ternary operators.
+`If (expr) ... ElseIf (expr) ... Else ... EndIf` and
+`For name In {start:end[:increment]} ... EndFor` follow the built-in kernel: the
+For range is a single colon term evaluated once at loop entry (the implicit
+two-term increment is +1, so `{5:0}` iterates zero times), the loop variable is
+assigned per iteration and remains at its first out-of-range value, and control
+headers must complete on one line. `While (expr) ... EndWhile` is a bounded
+Tessella extension — pinned Gmsh has no While keyword — capped at
+$_MAX_GEO_LOOP_ITERATIONS iterations; total executed statements stay within
+$_MAX_GEO_EXEC_STATEMENTS. Numeric lists support zero-based scalar indexing, `#name[]`
 cardinality, bounded ranges, copies, concatenation, whole-list append/removal, and
 indexed or selected mutation. Entity-list positions expand whole or selected list
 variables as well as constant ranges. Tags
@@ -200,18 +320,11 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     model=GeoModel()
     context=_GeoNumericContext()
     allocator_state=_GeoTagAllocatorState()
-    transfinite_tri=nothing
-    for line in _geo_exec_statements(path)
-        occursin(r"\b(For|While|Macro|Function|If|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
-                 line) && throw(ArgumentError(
-            "execute_geo: unsupported statement $(line) — control-flow loops, " *
-            "macros, and advanced OCC features are blockers"))
-        _geo_context_refresh_allocators!(context,allocator_state)
-        assigned=_exec_line!(model,line,context)
-        assigned===nothing || (transfinite_tri=assigned)
-        _geo_allocator_observe_statement!(
-            allocator_state,line,context,"execute_geo")
-    end
+    statements=_geo_exec_statements(path)
+    executed=Ref(0)
+    transfinite_tri=_exec_geo_statements!(
+        model,statements,firstindex(statements),lastindex(statements),
+        context,allocator_state,executed)
     mesh=nothing
     if dim==2
         isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
@@ -225,6 +338,199 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
         mesh=mesh_model_volume(model, only(keys(model.volumes)))
     end
     return GeoExecution(model,mesh,params,transfinite_tri)
+end
+
+const _GEO_CONTROL_CLOSE=Dict(:if=>:endif,:for=>:endfor,:while=>:endwhile)
+const _GEO_CONTROL_CLOSE_NAME=Dict(
+    :endif=>"EndIf",:endfor=>"EndFor",:endwhile=>"EndWhile")
+const _GEO_CONTROL_OPEN_NAME=Dict(
+    :if=>"If",:for=>"For",:while=>"While")
+
+# Locate the closer matching the opener statements[i] within
+# statements[i+1:hi], honoring nested blocks of any family. For an If block the
+# collected depth-1 ElseIf/Else midpoints are returned as well.
+function _geo_exec_find_block_end(statements::Vector{String},i::Int,hi::Int)
+    opener=_geo_control_parse(statements[i])
+    closer=_GEO_CONTROL_CLOSE[opener.kind]
+    depth=1;mids=Int[];mid_kinds=Symbol[]
+    j=i+1
+    while j<=hi
+        control=_geo_control_parse(statements[j])
+        if control!==nothing
+            if haskey(_GEO_CONTROL_CLOSE,control.kind)
+                depth+=1
+            elseif haskey(_GEO_CONTROL_CLOSE_NAME,control.kind)
+                depth-=1
+                if depth==0
+                    control.kind==closer || throw(ArgumentError(
+                        "execute_geo: $(statements[j]) cannot close a " *
+                        "$(_GEO_CONTROL_OPEN_NAME[opener.kind]) block"))
+                    return j,mids,mid_kinds
+                end
+            elseif depth==1 && control.kind in (:elseif,:else)
+                opener.kind===:if || throw(ArgumentError(
+                    "execute_geo: $(statements[j]) cannot appear inside a " *
+                    "$(_GEO_CONTROL_OPEN_NAME[opener.kind]) block"))
+                push!(mids,j);push!(mid_kinds,control.kind)
+            end
+        end
+        j+=1
+    end
+    throw(ArgumentError(
+        "execute_geo: $(statements[i]) has no matching " *
+        "$(_GEO_CONTROL_CLOSE_NAME[closer])"))
+end
+
+function _geo_exec_if!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
+                       context::_GeoNumericContext,
+                       allocator_state::_GeoTagAllocatorState,
+                       executed::Base.RefValue{Int})
+    opener=_geo_control_parse(statements[i])
+    close,mids,mid_kinds=_geo_exec_find_block_end(statements,i,hi)
+    caller="execute_geo: If"
+    # Validate the whole branch structure up front, as Gmsh's parser does: a
+    # malformed trailing branch is an error even when an earlier branch ran.
+    seen_else=false
+    for kind in mid_kinds
+        if kind===:else
+            seen_else && throw(ArgumentError(
+                "execute_geo: If block has more than one Else"))
+            seen_else=true
+        else
+            seen_else && throw(ArgumentError(
+                "execute_geo: ElseIf cannot follow Else in an If block"))
+        end
+    end
+    branch_lo=i+1
+    pending_cond=opener.cond
+    for k in eachindex(mids)
+        if pending_cond!==nothing &&
+           _geo_eval_numeric(pending_cond,context,caller)!=0
+            return _exec_geo_statements!(
+                m,statements,branch_lo,mids[k]-1,context,allocator_state,executed),
+                close+1
+        end
+        pending_cond=mid_kinds[k]===:else ? nothing :
+            _geo_control_parse(statements[mids[k]]).cond
+        branch_lo=mids[k]+1
+    end
+    if seen_else || (pending_cond!==nothing &&
+                     _geo_eval_numeric(pending_cond,context,caller)!=0)
+        return _exec_geo_statements!(
+            m,statements,branch_lo,close-1,context,allocator_state,executed),
+            close+1
+    end
+    return nothing,close+1
+end
+
+function _geo_exec_for!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
+                        context::_GeoNumericContext,
+                        allocator_state::_GeoTagAllocatorState,
+                        executed::Base.RefValue{Int})
+    opener=_geo_control_parse(statements[i])
+    close,=_geo_exec_find_block_end(statements,i,hi)
+    caller="execute_geo: For"
+    variable=opener.var
+    (variable=="Pi" || variable in _GEO_SIDE_EFFECT_SYMBOLS) && throw(ArgumentError(
+        "$caller: loop variable $variable is reserved"))
+    pieces=_geo_split_list("{$(opener.range)}",caller)
+    range_pieces=length(pieces)==1 ?
+        _geo_split_range(pieces[1],caller) : nothing
+    range_pieces===nothing && throw(ArgumentError(
+        "$caller: Gmsh For ranges require a single `start:end[:increment]` " *
+        "term — comma lists and single values are rejected"))
+    # The For range is evaluated once at loop entry. Unlike a `a:b` list
+    # expression, the implicit two-term increment is always +1, so `{5:0}` is
+    # an empty loop (verified against pinned Gmsh 4.15.2's unrolled output).
+    first=_geo_eval_numeric(range_pieces[1],context,"$caller range start")
+    last=_geo_eval_numeric(range_pieces[2],context,"$caller range end")
+    step=length(range_pieces)==2 ? 1.0 :
+         _geo_eval_numeric(range_pieces[3],context,"$caller range increment")
+    count=_geo_range_count(first,last,step,_MAX_GEO_LIST_ITEMS,caller)
+    transfinite_tri=nothing
+    value=first
+    for _ in 1:count
+        _geo_context_set_scalar!(context,variable,value,caller)
+        assigned=_exec_geo_statements!(
+            m,statements,i+1,close-1,context,allocator_state,executed)
+        assigned===nothing || (transfinite_tri=assigned)
+        value+=step
+    end
+    # Gmsh's unroller leaves the loop variable at the first out-of-range value
+    # (i = start + count*step), and at the start value for an empty range.
+    _geo_context_set_scalar!(context,variable,value,caller)
+    return transfinite_tri,close+1
+end
+
+function _geo_exec_while!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
+                          context::_GeoNumericContext,
+                          allocator_state::_GeoTagAllocatorState,
+                          executed::Base.RefValue{Int})
+    opener=_geo_control_parse(statements[i])
+    close,=_geo_exec_find_block_end(statements,i,hi)
+    caller="execute_geo: While"
+    transfinite_tri=nothing
+    iterations=0
+    while _geo_eval_numeric(opener.cond,context,caller)!=0
+        iterations+=1
+        iterations<=_MAX_GEO_LOOP_ITERATIONS || throw(ArgumentError(
+            "$caller: loop exceeds $_MAX_GEO_LOOP_ITERATIONS iterations"))
+        assigned=_exec_geo_statements!(
+            m,statements,i+1,close-1,context,allocator_state,executed)
+        assigned===nothing || (transfinite_tri=assigned)
+    end
+    return transfinite_tri,close+1
+end
+
+# Execute statements[lo:hi]; returns the last Mesh.TransfiniteTri assignment, if
+# any. Control constructs recurse into their block ranges; If evaluates
+# constant-expression conditions, For iterates `name In {a:b[:c]}` evaluated
+# once at loop entry, and While (a bounded Tessella extension) re-evaluates its
+# condition each iteration.
+function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
+                               lo::Int,hi::Int,
+                               context::_GeoNumericContext,
+                               allocator_state::_GeoTagAllocatorState,
+                               executed::Base.RefValue{Int})
+    transfinite_tri=nothing
+    i=lo
+    while i<=hi
+        line=statements[i]
+        control=_geo_control_parse(line)
+        if control===nothing
+            executed[]+=1
+            executed[]<=_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                "execute_geo: control flow exceeds $_MAX_GEO_EXEC_STATEMENTS " *
+                "executed statements"))
+            occursin(
+                r"\b(Macro|Function|Extrude|Torus|Fillet|Chamfer|Symmetry)\b",
+                line) && throw(ArgumentError(
+                "execute_geo: unsupported statement $(line) — macros, " *
+                "extrusions, and advanced OCC features are blockers"))
+            _geo_context_refresh_allocators!(context,allocator_state)
+            assigned=_exec_line!(m,line,context)
+            assigned===nothing || (transfinite_tri=assigned)
+            _geo_allocator_observe_statement!(
+                allocator_state,line,context,"execute_geo")
+            i+=1
+        elseif control.kind===:if
+            assigned,i=_geo_exec_if!(
+                m,statements,i,hi,context,allocator_state,executed)
+            assigned===nothing || (transfinite_tri=assigned)
+        elseif control.kind===:for
+            assigned,i=_geo_exec_for!(
+                m,statements,i,hi,context,allocator_state,executed)
+            assigned===nothing || (transfinite_tri=assigned)
+        elseif control.kind===:while
+            assigned,i=_geo_exec_while!(
+                m,statements,i,hi,context,allocator_state,executed)
+            assigned===nothing || (transfinite_tri=assigned)
+        else
+            throw(ArgumentError(
+                "execute_geo: $line without a matching opener"))
+        end
+    end
+    return transfinite_tri
 end
 
 function _boolean_delete_operand(raw::AbstractString)

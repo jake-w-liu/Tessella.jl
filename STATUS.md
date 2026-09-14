@@ -66,12 +66,17 @@ BooleanDifference/Union/Intersection of those solids, Translate of remaining
 native solids, Dilate, and coordinate-axis π/2 rotations of native primitives,
 Point/Line-In-Surface embeddings, and Point/Line/Surface-In-Volume recovery. Its
 scanner and executor handle finite arithmetic constants, pure numeric functions,
-prior scalar bindings, bounded numeric list assignment/indexing/selection/mutation,
+comparison/logical/ternary operators, prior scalar bindings, bounded numeric list
+assignment/indexing/selection/mutation,
 explicit field/physical tags, and finite constant ranges in recognized numeric field
-and entity lists. Executed geometry parameters, tags, and numeric entity memberships
-use those same bounded semantics. It rejects control-flow
-loops, macros, option reads, stateful functions, dynamic/general ranges,
-logical/ternary evaluation, extrusions/fillets/symmetry, allocator reads after
+and entity lists. `If`/`ElseIf`/`Else`/`EndIf` and `For name In
+{start:end[:increment]}`/`EndFor` match the built-in kernel (bit-exact against the
+pinned Gmsh's entity state over 4 differential cases), with a bounded
+`While`/`EndWhile` extension Gmsh lacks. Executed geometry parameters, tags, and
+numeric entity memberships
+use those same bounded semantics. It rejects
+macros, option reads, stateful functions, dynamic/general ranges,
+extrusions/fillets/symmetry, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete` and
 `SetMaxTag` counters stay live), and geometry-derived Physical
 right-hand sides beyond the documented inline topology queries.

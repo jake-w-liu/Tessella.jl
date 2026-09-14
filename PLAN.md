@@ -530,12 +530,17 @@ state after removal are not copied.
 It does not yet claim a general OpenCASCADE BREP kernel, NURBS CAD of
 unclassified topology, transformations of arbitrary CAD entities, or complete `.geo`
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
-functions, prior scalar bindings, and explicit field/physical tags with resource
+functions, comparison/logical/ternary operators, prior scalar bindings, and explicit
+field/physical tags with resource
 bounds. Finite constant `start:end[:increment]` lists are expanded in recognized
 numeric field options and field selectors; entirely numeric Physical memberships are
-range-checked but remain geometry data. The scanner deliberately rejects
-control-flow loops, macros, option reads, stateful functions, dynamic/general ranges,
-logical/ternary evaluation, extrusions/fillets/symmetry, allocator reads after
+range-checked but remain geometry data. The executor runs
+`If`/`ElseIf`/`Else`/`EndIf` and `For name In {start:end[:increment]}`/`EndFor`
+with the built-in kernel's semantics (ranges evaluated once at entry, the loop
+variable left at its first out-of-range value), plus a bounded `While`/`EndWhile`
+extension that pinned Gmsh lacks. The scanner deliberately rejects
+macros, option reads, stateful functions, dynamic/general ranges,
+extrusions/fillets/symmetry, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete` and
 `SetMaxTag` counters stay live), and geometry-derived Physical
 right-hand sides beyond the documented inline topology queries instead of pretending
