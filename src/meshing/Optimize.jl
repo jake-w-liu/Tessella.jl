@@ -467,21 +467,28 @@ function _odt_candidate(a,b,c,d)
             finite_edges=false
         end
     end
+    # Explicit tuples throughout: ntuple closures over the reassigned
+    # `coordinate_scale`, `scaled`, and `edge_scale` boxed them and allocated on
+    # every smoothing candidate.
     coordinate_scale=1.0;scaled=points
     if !(finite_edges&&(edge_scale==0||isfinite(inv(edge_scale))))
         coordinate_scale=maximum(abs,(a...,b...,c...,d...))
         coordinate_scale>0 || return nothing
-        scaled=ntuple(i->ntuple(j->points[i][j]/coordinate_scale,3),4)
+        scaled=((a[1]/coordinate_scale,a[2]/coordinate_scale,a[3]/coordinate_scale),
+                (b[1]/coordinate_scale,b[2]/coordinate_scale,b[3]/coordinate_scale),
+                (c[1]/coordinate_scale,c[2]/coordinate_scale,c[3]/coordinate_scale),
+                (d[1]/coordinate_scale,d[2]/coordinate_scale,d[3]/coordinate_scale))
     end
     anchor=scaled[1];edge_scale=0.0
     @inbounds for i in 2:4,dimension in 1:3
         edge_scale=max(edge_scale,abs(scaled[i][dimension]-anchor[dimension]))
     end
     edge_scale>0 || return nothing
+    s2=scaled[2];s3=scaled[3];s4=scaled[4]
     P=((0.0,0.0,0.0),
-       ntuple(j->(scaled[2][j]-anchor[j])/edge_scale,3),
-       ntuple(j->(scaled[3][j]-anchor[j])/edge_scale,3),
-       ntuple(j->(scaled[4][j]-anchor[j])/edge_scale,3))
+       ((s2[1]-anchor[1])/edge_scale,(s2[2]-anchor[2])/edge_scale,(s2[3]-anchor[3])/edge_scale),
+       ((s3[1]-anchor[1])/edge_scale,(s3[2]-anchor[2])/edge_scale,(s3[3]-anchor[3])/edge_scale),
+       ((s4[1]-anchor[1])/edge_scale,(s4[2]-anchor[2])/edge_scale,(s4[3]-anchor[3])/edge_scale))
     A=P[2];B=P[3];C=P[4]
     BC=_cross3(B,C);CA=_cross3(C,A);AB=_cross3(A,B)
     determinant=_dot3(A,BC);normalized_volume=abs(determinant)/6
@@ -497,8 +504,9 @@ function _odt_candidate(a,b,c,d)
             (la*BC[2]+lb*CA[2]+lc*AB[2])/denominator,
             (la*BC[3]+lb*CA[3]+lc*AB[3])/denominator)
     all(isfinite,offset) || return nothing
-    center=ntuple(dimension->_scaled_odt_coordinate(
-        coordinate_scale,anchor[dimension],edge_scale,offset[dimension]),3)
+    center=(_scaled_odt_coordinate(coordinate_scale,anchor[1],edge_scale,offset[1]),
+            _scaled_odt_coordinate(coordinate_scale,anchor[2],edge_scale,offset[2]),
+            _scaled_odt_coordinate(coordinate_scale,anchor[3],edge_scale,offset[3]))
     all(isfinite,center) || return nothing
     logweight=log(normalized_volume)+3log(coordinate_scale)+3log(edge_scale)
     isfinite(logweight) || return nothing

@@ -339,6 +339,42 @@ project non-goals.
 
 ## Verification history (newest first)
 
+Re-measured on 2026-09-14 with Julia 1.12.7 after the hot-kernel allocation
+audit:
+
+- `orient2`/`orient3` now run Shewchuk expansion stages B–D
+  (`PredicatesAdaptive.jl`): exact Float64 error-free transformations in
+  per-thread scratch decide every case inside a conservative magnitude band
+  with zero allocation; the exact dyadic BigInt path remains only for inputs
+  outside the band. A new exact `diametral_sign` predicate replaces the
+  `Rational{BigInt}` encroachment test in 2-D refinement, and the 3-D
+  conformity gate's region side/pierce decisions use adaptive `orient3`/
+  `orient2` instead of exact rationals, with the rational reference retained
+  as the test oracle.
+- `insert_point3!` reuses triangulation-owned cavity, epoch-stamped mark,
+  boundary, stack, and spoke scratch instead of fresh containers per point.
+  Measured on a 20,000-point `delaunay3d`: 24,687,168 bytes and 0.243 s versus
+  111,840,800 bytes and 0.389 s before the change (−77.9% allocation, −37.5%
+  time), bit-identical output.
+- The 2-D Ruppert loop resumes its quality scan from the lowest slot that may
+  have changed (`_newtri!` slot reuse and interior reclassification lower the
+  bound) and caches the sorted constraint list, reproducing the full-scan
+  insertion order exactly; a dedicated testset checks slot-for-slot parity
+  with the uncached scan.
+- Closure-boxing sweep across `MeshSurface`, `Optimize`, `Recombine`,
+  `Mesh3D`, `Mesh2D`, `SizeField`, `SizeFieldCatalog`, `MeshPointLocation`,
+  `HierarchicalBases`, `HigherOrderNodal`, `CAD`, `Heal`, `IO`,
+  `BoundaryLayer`, `ExactMesh3D`, `TransfiniteHex`, `API`, and
+  `ModelEntityEvaluation`: reassigned captures were rewritten as single
+  assignments or explicit tuples, and the recursive local BVH builders were
+  lifted to top-level builder records shared by the distance- and
+  view-hierarchy paths.
+- `test/core/allocation_audit_test.jl` gates the result: a lowered-code scan
+  rejects any new `Core.Box` outside a documented cold-path allowlist, and
+  per-call `@allocated` checks confirm the predicates, quality kernels, and
+  conformity-gate decisions allocate nothing after warm-up at ordinary,
+  exactly degenerate, tiny, and huge scales.
+
 Re-measured on 2026-09-11 with Julia 1.12.7 after implementing entity-filtered
 session mesh queries through a `model_to_mixed` classification snapshot stored
 with the cache:

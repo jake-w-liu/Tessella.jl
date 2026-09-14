@@ -180,7 +180,10 @@ function _count_coincident(m::Mesh, reltol::Float64)
     end
     cell = Dict{NTuple{3,Int}, Vector{Int}}()
     sizehint!(cell, nn)
-    qcoord(p) = (p[1]/scale-lo[1], p[2]/scale-lo[2], p[3]/scale-lo[3])
+    # single-assignment copies: closures over the accumulated `scale`/`lo`
+    # boxed them and allocated on every vertex visit
+    unit=scale; origin=lo
+    qcoord(p) = (p[1]/unit-origin[1], p[2]/unit-origin[2], p[3]/unit-origin[3])
     key(q) = (floor(Int,q[1]*inv), floor(Int,q[2]*inv), floor(Int,q[3]*inv))
     cnt = 0
     @inbounds for i in 1:nn

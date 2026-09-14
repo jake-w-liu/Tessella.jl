@@ -27,7 +27,7 @@ after operations in the test suite.
 """
 module Mesh2D
 
-using ..Predicates: orient2, orient2_sos, incircle_sos
+using ..Predicates: orient2, orient2_sos, incircle_sos, diametral_sign
 using ..MeshTypes: Mesh, triangle_area
 
 export Triangulation, triangulate, delaunay2d, dedup_points
@@ -61,11 +61,19 @@ mutable struct Triangulation
     vtri::Vector{Int32}         # per real vertex: one incident triangle (O(1) lookup hint)
     seg::Set{NTuple{2,Int32}}   # boundary constrained edges (toggle interior/exterior)
     internal::Set{NTuple{2,Int32}}  # embedded constrained edges (recovered, no toggle)
+    # Refinement scan caches (order-preserving accelerators, see `refine!`):
+    # the deterministic sorted constraint list, rebuilt only after the sets
+    # change, and the lowest triangle slot that may have become bad since the
+    # last quality scan (every slot below it was verified good and untouched).
+    sorted_segs::Vector{NTuple{2,Int32}}
+    sorted_segs_valid::Bool
+    bad_scan_from::Int32
 
     function Triangulation(xs::Vector{Float64},ys::Vector{Float64})
         n=_validate_points(xs,ys,"Triangulation")
         new(copy(xs),copy(ys),Int32[],Int32[],Bool[],Int32[],n,Int32(0),
-            zeros(Int32,n),Set{NTuple{2,Int32}}(),Set{NTuple{2,Int32}}())
+            zeros(Int32,n),Set{NTuple{2,Int32}}(),Set{NTuple{2,Int32}}(),
+            NTuple{2,Int32}[],false,Int32(1))
     end
 end
 
@@ -100,6 +108,7 @@ end
         @inbounds T.tn[base+1]=0; T.tn[base+2]=0; T.tn[base+3]=0
         @inbounds T.alive[t]=true
         _touch_vtri!(T, Int32(t), a, b, c)
+        t<T.bad_scan_from && (T.bad_scan_from=Int32(t))
         return Int32(t)
     else
         length(T.alive)<typemax(Int32) ||
@@ -109,6 +118,7 @@ end
         push!(T.alive, true)
         t = Int32(length(T.alive))
         _touch_vtri!(T, t, a, b, c)
+        t<T.bad_scan_from && (T.bad_scan_from=t)
         return t
     end
 end
@@ -789,6 +799,7 @@ end
 
 function _mark_constraint!(T::Triangulation, vi::Int32, vj::Int32, internal::Bool)
     key=_skey(vi, vj)
+    T.sorted_segs_valid=false
     if internal
         key in T.seg || push!(T.internal, key)
     else
@@ -1208,10 +1219,9 @@ function _encroaches(pa,pb,p)
         dot=ax*bx+ay*by;perm=abs(ax*bx)+abs(ay*by)
         abs(dot)>16eps(Float64)*perm && return dot<0
     end
-    R=Rational{BigInt}
-    axb=R(pa[1])-R(p[1]);ayb=R(pa[2])-R(p[2])
-    bxb=R(pb[1])-R(p[1]);byb=R(pb[2])-R(p[2])
-    return axb*bxb+ayb*byb<0
+    # Near-zero dot products (right angles are routine on structured input):
+    # exact expansion arithmetic instead of the former Rational{BigInt} path.
+    return diametral_sign(pa,pb,p)<0
 end
 
 # encroached by an adjacent apex? (in a CDT this suffices to detect any encroachment)
@@ -1244,6 +1254,7 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
     mid = _add_vertex!(T,mp[1],mp[2])
     pointids[mp]=mid
     key=_skey(a,b)
+    T.sorted_segs_valid=false
     if key in T.internal
         delete!(T.internal, key)
         push!(T.internal, _skey(a,mid)); push!(T.internal, _skey(mid,b))
@@ -1254,6 +1265,15 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
     _insert_point!(T, mid; constrained=true)
     # constraints changed → recompute interior (segment splits are comparatively rare)
     ni = classify_interior(T)
+    # Any existing slot whose interior flag changes must be rescanned; new slots
+    # already lowered `bad_scan_from` through `_newtri!`.
+    shared=min(length(interior),length(ni))
+    @inbounds for i in 1:shared
+        if interior[i]!=ni[i]
+            i<T.bad_scan_from && (T.bad_scan_from=Int32(i))
+            break
+        end
+    end
     resize!(interior, length(ni)); @inbounds for i in eachindex(ni); interior[i]=ni[i]; end
     return mid
 end
@@ -1294,6 +1314,9 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         haskey(pointids,key) && throw(ArgumentError("refine!: triangulation contains duplicate point coordinates"))
         pointids[key]=Int32(i)
     end
+    # The quality scan resumes from `bad_scan_from`; every call starts with a
+    # complete scan because the criteria may differ from an earlier call.
+    T.bad_scan_from=Int32(1)
     for _ in 1:nsteps
         # (1) split an encroached subsegment, if any
         enc = _find_encroached(T)
@@ -1321,6 +1344,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         _insert_steiner!(T, cc, interior,pointids;fallback=fallback)
     end
     enc = _find_encroached(T)
+    T.bad_scan_from=Int32(1)
     bad = _find_bad(T, interior, B, area, size,edge_metric)
     if enc===nothing&&bad==0
         _assert_operable(T,"refine! result")
@@ -1333,7 +1357,24 @@ end
 
 # Deterministic iteration order over the constraint set (a Set has none), so the
 # refinement sequence — hence the output mesh — is reproducible across runs.
-_sorted_segs(T::Triangulation) = sort!(vcat(collect(T.seg), collect(T.internal)))
+# The list is cached on the triangulation and rebuilt only after a constraint
+# mutation; callers iterate it read-only.
+function _sorted_segs(T::Triangulation)
+    if !T.sorted_segs_valid
+        cache=T.sorted_segs
+        resize!(cache,length(T.seg)+length(T.internal))
+        position=0
+        for key in T.seg
+            position+=1; @inbounds cache[position]=key
+        end
+        for key in T.internal
+            position+=1; @inbounds cache[position]=key
+        end
+        sort!(cache)
+        T.sorted_segs_valid=true
+    end
+    return T.sorted_segs
+end
 
 function _find_encroached(T::Triangulation)
     for (a, b) in _sorted_segs(T)
@@ -1342,11 +1383,23 @@ function _find_encroached(T::Triangulation)
     return nothing
 end
 
+# First bad triangle in slot order.  Slots below `bad_scan_from` were verified
+# good by an earlier scan and have not been reallocated or reclassified since,
+# and `_needs_refine` depends only on a triangle's own (immutable) vertex
+# coordinates, so resuming the scan there returns exactly the slot a full scan
+# would; the result is identical to scanning from slot 1 while the total cost
+# drops from quadratic to linear in the number of insertions.
 function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn,edgefn)
-    @inbounds for t in eachindex(T.alive)
+    start=max(Int(T.bad_scan_from),1)
+    nslots=length(T.alive)
+    @inbounds for t in start:nslots
         (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) || continue
-        _needs_refine(T, t, B, maxarea, sizefn,edgefn) && return Int32(t)
+        if _needs_refine(T, t, B, maxarea, sizefn,edgefn)
+            T.bad_scan_from=Int32(t)
+            return Int32(t)
+        end
     end
+    T.bad_scan_from=Int32(nslots+1)
     return Int32(0)
 end
 

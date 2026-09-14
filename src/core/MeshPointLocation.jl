@@ -444,73 +444,100 @@ struct SimplexLocator
         left=Int[];right=Int[];firsts=Int[];counts=Int[]
         total==0 && return new(
             mesh,order,lower,upper,left,right,firsts,counts)
-
-        function range_bounds(first::Int,last::Int)
-            lo1=Inf;lo2=Inf;lo3=Inf
-            hi1=-Inf;hi2=-Inf;hi3=-Inf
-            @inbounds for position in first:last
-                tag=order[position]
-                primitive_lo=primitive_lower[tag]
-                primitive_hi=primitive_upper[tag]
-                lo1=min(lo1,primitive_lo[1]);lo2=min(lo2,primitive_lo[2])
-                lo3=min(lo3,primitive_lo[3]);hi1=max(hi1,primitive_hi[1])
-                hi2=max(hi2,primitive_hi[2]);hi3=max(hi3,primitive_hi[3])
-            end
-            return (lo1,lo2,lo3),(hi1,hi2,hi3)
-        end
-
-        function build!(first::Int,last::Int)
-            tree_node=length(left)+1
-            push!(lower,(0.0,0.0,0.0));push!(upper,(0.0,0.0,0.0))
-            push!(left,0);push!(right,0);push!(firsts,0);push!(counts,0)
-            range_count=last-first+1
-            if range_count<=_LOCATOR_LEAF_SIZE
-                lower[tree_node],upper[tree_node]=range_bounds(first,last)
-                firsts[tree_node]=first;counts[tree_node]=range_count
-                return tree_node
-            end
-            centroid_lo1=Inf;centroid_lo2=Inf;centroid_lo3=Inf
-            centroid_hi1=-Inf;centroid_hi2=-Inf;centroid_hi3=-Inf
-            @inbounds for position in first:last
-                center=centroids[order[position]]
-                centroid_lo1=min(centroid_lo1,center[1])
-                centroid_lo2=min(centroid_lo2,center[2])
-                centroid_lo3=min(centroid_lo3,center[3])
-                centroid_hi1=max(centroid_hi1,center[1])
-                centroid_hi2=max(centroid_hi2,center[2])
-                centroid_hi3=max(centroid_hi3,center[3])
-            end
-            extent1=centroid_hi1-centroid_lo1
-            extent2=centroid_hi2-centroid_lo2
-            extent3=centroid_hi3-centroid_lo3
-            axis=extent1>=extent2 ?
-                 (extent1>=extent3 ? 1 : 3) :
-                 (extent2>=extent3 ? 2 : 3)
-            sort!(view(order,first:last);alg=QuickSort,
-                  lt=(left_tag,right_tag)->begin
-                      left_value=centroids[left_tag][axis]
-                      right_value=centroids[right_tag][axis]
-                      left_value<right_value ||
-                          (left_value==right_value && left_tag<right_tag)
-                  end)
-            middle=(first+last)>>>1
-            left_node=build!(first,middle)
-            right_node=build!(middle+1,last)
-            left[tree_node]=left_node;right[tree_node]=right_node
-            left_lower=lower[left_node];right_lower=lower[right_node]
-            left_upper=upper[left_node];right_upper=upper[right_node]
-            lower[tree_node]=(min(left_lower[1],right_lower[1]),
-                              min(left_lower[2],right_lower[2]),
-                              min(left_lower[3],right_lower[3]))
-            upper[tree_node]=(max(left_upper[1],right_upper[1]),
-                              max(left_upper[2],right_upper[2]),
-                              max(left_upper[3],right_upper[3]))
-            return tree_node
-        end
-
-        build!(1,total)==1 || error("SimplexLocator: invalid hierarchy root")
+        builder=_LocatorBuilder(order,lower,upper,left,right,firsts,counts,
+                                primitive_lower,primitive_upper,centroids)
+        _locator_build!(builder,1,total)==1 ||
+            error("SimplexLocator: invalid hierarchy root")
         return new(mesh,order,lower,upper,left,right,firsts,counts)
     end
+end
+
+# Explicit builder record for the top-level recursive constructor: the former
+# recursive local closure was boxed and allocated on every tree node.
+struct _LocatorBuilder
+    order::Vector{Int}
+    lower::Vector{NTuple{3,Float64}}
+    upper::Vector{NTuple{3,Float64}}
+    left::Vector{Int}
+    right::Vector{Int}
+    firsts::Vector{Int}
+    counts::Vector{Int}
+    primitive_lower::Vector{NTuple{3,Float64}}
+    primitive_upper::Vector{NTuple{3,Float64}}
+    centroids::Vector{NTuple{3,Float64}}
+end
+
+function _locator_range_bounds(b::_LocatorBuilder,first::Int,last::Int)
+    lo1=Inf;lo2=Inf;lo3=Inf
+    hi1=-Inf;hi2=-Inf;hi3=-Inf
+    order=b.order;primitive_lower=b.primitive_lower;primitive_upper=b.primitive_upper
+    @inbounds for position in first:last
+        tag=order[position]
+        primitive_lo=primitive_lower[tag]
+        primitive_hi=primitive_upper[tag]
+        lo1=min(lo1,primitive_lo[1]);lo2=min(lo2,primitive_lo[2])
+        lo3=min(lo3,primitive_lo[3]);hi1=max(hi1,primitive_hi[1])
+        hi2=max(hi2,primitive_hi[2]);hi3=max(hi3,primitive_hi[3])
+    end
+    return (lo1,lo2,lo3),(hi1,hi2,hi3)
+end
+
+struct _LocatorCentroidOrder
+    centroids::Vector{NTuple{3,Float64}}
+    axis::Int
+end
+
+# Deterministic split ordering: ascending centroid coordinate, then tag.
+@inline function (order::_LocatorCentroidOrder)(left_tag::Int,right_tag::Int)
+    @inbounds left_value=order.centroids[left_tag][order.axis]
+    @inbounds right_value=order.centroids[right_tag][order.axis]
+    return left_value<right_value ||
+        (left_value==right_value && left_tag<right_tag)
+end
+
+function _locator_build!(b::_LocatorBuilder,first::Int,last::Int)
+    tree_node=length(b.left)+1
+    push!(b.lower,(0.0,0.0,0.0));push!(b.upper,(0.0,0.0,0.0))
+    push!(b.left,0);push!(b.right,0);push!(b.firsts,0);push!(b.counts,0)
+    range_count=last-first+1
+    if range_count<=_LOCATOR_LEAF_SIZE
+        b.lower[tree_node],b.upper[tree_node]=_locator_range_bounds(b,first,last)
+        b.firsts[tree_node]=first;b.counts[tree_node]=range_count
+        return tree_node
+    end
+    centroid_lo1=Inf;centroid_lo2=Inf;centroid_lo3=Inf
+    centroid_hi1=-Inf;centroid_hi2=-Inf;centroid_hi3=-Inf
+    order=b.order;centroids=b.centroids
+    @inbounds for position in first:last
+        center=centroids[order[position]]
+        centroid_lo1=min(centroid_lo1,center[1])
+        centroid_lo2=min(centroid_lo2,center[2])
+        centroid_lo3=min(centroid_lo3,center[3])
+        centroid_hi1=max(centroid_hi1,center[1])
+        centroid_hi2=max(centroid_hi2,center[2])
+        centroid_hi3=max(centroid_hi3,center[3])
+    end
+    extent1=centroid_hi1-centroid_lo1
+    extent2=centroid_hi2-centroid_lo2
+    extent3=centroid_hi3-centroid_lo3
+    axis=extent1>=extent2 ?
+         (extent1>=extent3 ? 1 : 3) :
+         (extent2>=extent3 ? 2 : 3)
+    sort!(view(order,first:last);alg=QuickSort,
+          lt=_LocatorCentroidOrder(centroids,axis))
+    middle=(first+last)>>>1
+    left_node=_locator_build!(b,first,middle)
+    right_node=_locator_build!(b,middle+1,last)
+    b.left[tree_node]=left_node;b.right[tree_node]=right_node
+    left_lower=b.lower[left_node];right_lower=b.lower[right_node]
+    left_upper=b.upper[left_node];right_upper=b.upper[right_node]
+    b.lower[tree_node]=(min(left_lower[1],right_lower[1]),
+                        min(left_lower[2],right_lower[2]),
+                        min(left_lower[3],right_lower[3]))
+    b.upper[tree_node]=(max(left_upper[1],right_upper[1]),
+                        max(left_upper[2],right_upper[2]),
+                        max(left_upper[3],right_upper[3]))
+    return tree_node
 end
 
 @inline function _bounds_contain(lower,upper,p)

@@ -150,12 +150,12 @@ function _exact_sphere_distance(surface,point)
 end
 
 function _project_sphere_exact(surface,point,caller)::NTuple{3,Float64}
-    direction=ntuple(index->_exact_float(point[index])-
-                           _exact_float(surface.center[index]),3)
-    if all(iszero,direction)
-        direction=(Rational{BigInt}(1),Rational{BigInt}(0),
-                   Rational{BigInt}(0))
-    end
+    displacement=ntuple(index->_exact_float(point[index])-
+                              _exact_float(surface.center[index]),3)
+    # single assignment: a reassigned `direction` captured below would be boxed
+    direction=all(iszero,displacement) ?
+        (Rational{BigInt}(1),Rational{BigInt}(0),Rational{BigInt}(0)) :
+        displacement
     squared=sum(component^2 for component in direction)
     projected=setprecision(BigFloat,_FALLBACK_PRECISION) do
         magnitude=sqrt(BigFloat(squared))
@@ -196,16 +196,18 @@ end
 
 function _project_cylinder_exact(surface,point,caller)::NTuple{3,Float64}
     axis,axial,radial=_exact_cylinder_components(surface,point)
-    direction=radial
-    if all(iszero,direction)
+    # single assignment: a reassigned `direction` captured below would be boxed
+    direction=if all(iszero,radial)
         a1=abs(surface.axis[1]);a2=abs(surface.axis[2]);a3=abs(surface.axis[3])
         reference=a1<=a2 ?
             (a1<=a3 ? (1,0,0) : (0,0,1)) :
             (a2<=a3 ? (0,1,0) : (0,0,1))
         reference_exact=ntuple(index->Rational{BigInt}(reference[index]),3)
-        direction=(axis[2]*reference_exact[3]-axis[3]*reference_exact[2],
-                   axis[3]*reference_exact[1]-axis[1]*reference_exact[3],
-                   axis[1]*reference_exact[2]-axis[2]*reference_exact[1])
+        (axis[2]*reference_exact[3]-axis[3]*reference_exact[2],
+         axis[3]*reference_exact[1]-axis[1]*reference_exact[3],
+         axis[1]*reference_exact[2]-axis[2]*reference_exact[1])
+    else
+        radial
     end
     squared=sum(component^2 for component in direction)
     squared>0 || throw(ErrorException(

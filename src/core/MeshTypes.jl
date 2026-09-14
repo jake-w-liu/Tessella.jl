@@ -177,11 +177,14 @@ function triangle_area(a, b, c)
     all(isfinite,(a...,b...,c...)) || return NaN
     A=_sub(b,a);B=_sub(c,a);C=_cross(A,B)
     fast=0.5*_norm(C)
-    safe=isfinite(fast)&&fast>0
-    @inbounds for (ci,i,j,k,l) in ((1,2,3,3,2),(2,3,1,1,3),(3,1,2,2,1))
-        perm=abs(A[i]*B[j])+abs(A[k]*B[l])
-        safe &= isfinite(perm)&&(perm==0 || abs(C[ci])>16eps(Float64)*perm)
-    end
+    # Each cross component carries at most 16·eps·perm_i rounding error, so the
+    # norm is off by at most 16·eps·Σperm_i.  Certify the norm rather than each
+    # component: a component that is exactly zero with a nonzero permanent
+    # (triangles in diagonal planes) does not need the exact fallback.
+    permanent=(abs(A[2]*B[3])+abs(A[3]*B[2]))+(abs(A[3]*B[1])+abs(A[1]*B[3]))+
+              (abs(A[1]*B[2])+abs(A[2]*B[1]))
+    safe=isfinite(fast)&&fast>0&&isfinite(permanent)&&
+         (permanent==0 || _norm(C)>16eps(Float64)*permanent)
     safe && return fast
     return _triangle_area_big(a,b,c)
 end
@@ -316,10 +319,16 @@ function _relative_quality_tet(points)
     end
     edge_scale==0 && return (0.0,points)
     anchor=points[1]
+    # Explicit tuples: an ntuple closure over the reassigned `edge_scale` boxed
+    # it and made every downstream quality kernel allocate per tetrahedron.
+    b=points[2];c=points[3];d=points[4]
     relative=((0.0,0.0,0.0),
-              ntuple(i->(points[2][i]-anchor[i])/edge_scale,3),
-              ntuple(i->(points[3][i]-anchor[i])/edge_scale,3),
-              ntuple(i->(points[4][i]-anchor[i])/edge_scale,3))
+              ((b[1]-anchor[1])/edge_scale,(b[2]-anchor[2])/edge_scale,
+               (b[3]-anchor[3])/edge_scale),
+              ((c[1]-anchor[1])/edge_scale,(c[2]-anchor[2])/edge_scale,
+               (c[3]-anchor[3])/edge_scale),
+              ((d[1]-anchor[1])/edge_scale,(d[2]-anchor[2])/edge_scale,
+               (d[3]-anchor[3])/edge_scale))
     return edge_scale,relative
 end
 

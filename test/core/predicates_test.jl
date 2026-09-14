@@ -457,3 +457,48 @@ using .Oracles
         @test orient3_rat((Q(2),Q(1),Q(0)),(Q(2),Q(-2),Q(1)),(Q(2),Q(-2),Q(2)),(Q(2),Q(-2),Q(-2)), 2,4,6,8) == 1
     end
 end
+
+# ── diametral_sign: exact (a-p)·(b-p) sign through Float64 expansions ────────
+# Oracle: the Rational{BigInt} evaluation.  Cases: random scales from 1e-300 to
+# 1e300 (product underflow forces the rational fallback), points jittered by
+# 1e-15·scale around the diametral circle, on-segment and endpoint points (exact
+# zero), lattice right angles, and mixed-scale coordinates.
+@testset "diametral_sign vs exact rational oracle" begin
+    using Tessella.Predicates: diametral_sign, _diametral_sign_rational
+    rng=MersenneTwister(0x5eed)
+    checked=0
+    for trial in 1:60000
+        scale=exp10(rand(rng,-300:300))
+        pa=(rand(rng)*scale,rand(rng)*scale);pb=(rand(rng)*scale,rand(rng)*scale)
+        center=((pa[1]+pb[1])/2,(pa[2]+pb[2])/2)
+        radius=hypot(pa[1]-pb[1],pa[2]-pb[2])/2
+        angle=rand(rng)*2pi;jitter=(rand(rng)-0.5)*1e-15*scale
+        p=(center[1]+(radius+jitter)*cos(angle),center[2]+(radius+jitter)*sin(angle))
+        if trial%4==0
+            p=(pa[1]+(pb[1]-pa[1])*rand(rng),pa[2]+(pb[2]-pa[2])*rand(rng))
+        elseif trial%4==1
+            p=pa
+        elseif trial%8==2
+            p=(p[1]*1e-200,p[2])
+        end
+        all(isfinite,(p...,pa...,pb...)) || continue
+        checked+=1
+        @test diametral_sign(pa,pb,p)==_diametral_sign_rational(pa,pb,p)
+    end
+    @test checked>50000
+    for i in 0:40, j in 0:40
+        pa=(i*0.025,0.0);pb=(i*0.025,1.0);p=(j*0.025,0.5)
+        @test diametral_sign(pa,pb,p)==_diametral_sign_rational(pa,pb,p)
+    end
+    @test diametral_sign((1.0,0.0),(0.0,1.0),(0.0,0.0))==0
+    @test diametral_sign((1.0,0.0),(0.0,1.0),(0.1,0.1))==-1
+    @test diametral_sign((1.0,0.0),(0.0,1.0),(-0.1,-0.1))==1
+    @test diametral_sign((1.0,0.0),(0.0,1.0),(0.0,nextfloat(0.0)))==-1
+    @test diametral_sign((1.0,0.0),(0.0,1.0),(0.0,prevfloat(0.0)))==1
+    @test_throws ArgumentError diametral_sign((Inf,0.0),(0.0,1.0),(0.0,0.0))
+    @test_throws ArgumentError diametral_sign((1.0,0.0),(0.0,1.0),(NaN,0.0))
+    pa=(0.3,0.7);pb=(0.9,0.1);p=(0.6,0.4)
+    diametral_sign(pa,pb,p)
+    @test @allocated(diametral_sign(pa,pb,p))==0
+    @test @allocated(diametral_sign(pa,pb,(0.6,0.4+2^-60)))==0
+end

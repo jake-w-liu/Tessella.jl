@@ -209,7 +209,8 @@ function _normalized_points(points,caller::AbstractString)
     end
     (isfinite(span)&&span>0) || throw(ArgumentError(
         "$caller: loop has no representable coordinate span"))
-    normalized=map(point->ntuple(d->(point[d]-origin[d])/span,3),scaled)
+    final_span=span # single-assignment copy: closures over `span` would box it
+    normalized=map(point->ntuple(d->(point[d]-origin[d])/final_span,3),scaled)
     all(point->all(isfinite,point),normalized) || throw(ArgumentError(
         "$caller: normalized loop coordinates are not finite"))
     return normalized
@@ -262,15 +263,15 @@ function _plane_frame(points,caller::AbstractString)
              abs(ny)>64eps(Float64)*permanent_y||
              abs(nz)>64eps(Float64)*permanent_z
     if reliable&&isfinite(length_normal)&&length_normal>0
-        normal=(nx/length_normal,ny/length_normal,nz/length_normal)
-        if all(point->abs(_dot(point,normal))<=256eps(Float64),normalized)
-            return _frame_from_normal(points[1],normal)
+        fast_normal=(nx/length_normal,ny/length_normal,nz/length_normal)
+        if all(point->abs(_dot(point,fast_normal))<=256eps(Float64),normalized)
+            return _frame_from_normal(points[1],fast_normal)
         end
     end
-    normal=_exact_plane_normal(points)
-    normal===nothing && throw(ArgumentError(
+    exact_normal=_exact_plane_normal(points)
+    exact_normal===nothing && throw(ArgumentError(
         "$caller: loop is degenerate or is not coplanar"))
-    return _frame_from_normal(points[1],normal)
+    return _frame_from_normal(points[1],exact_normal)
 end
 
 function _validate_coplanar_loops(loops,fr::PlaneFrame)
@@ -285,8 +286,9 @@ function _validate_coplanar_loops(loops,fr::PlaneFrame)
     (isfinite(span)&&span>0) || throw(ArgumentError(
         "mesh_planar_face: boundary has no representable coordinate span"))
     tolerance=256eps(Float64)
+    final_span=span # single-assignment copy: a closure over `span` would box it
     @inbounds for (loop_index,loop) in pairs(loops),(point_index,point) in pairs(loop)
-        offset=ntuple(d->(point[d]/coordinate_scale-scaled_origin[d])/span,3)
+        offset=ntuple(d->(point[d]/coordinate_scale-scaled_origin[d])/final_span,3)
         distance=abs(_dot(offset,fr.n))
         (isfinite(distance)&&distance<=tolerance) || throw(ArgumentError(
             "mesh_planar_face: loop $loop_index point $point_index is not coplanar " *
@@ -553,7 +555,8 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
         hmin = min(hmin, directional_size(sf,on(θ,z),tangent;
                                           entity=ring_entity))
     end
-    mindz=minimum(zlev[i+1]-zlev[i] for i in 1:length(zlev)-1)
+    levels=zlev # single-assignment copy: the generator over the refined `zlev` boxed it
+    mindz=minimum(levels[i+1]-levels[i] for i in 1:length(levels)-1)
     (isfinite(mindz)&&mindz>0) ||
         throw(ArgumentError("mesh_cylinder_face: axial grading produced a non-positive interval"))
     tana=tand(angle)
@@ -617,7 +620,8 @@ function mesh_cylinder_face(center, axis, radius::Real, height::Real,
         throw(ArgumentError("mesh_cylinder_face: $ntout triangles exceed the Int32 topology limit"))
     # structured nodes: level j (1..nz) × sector i (0..ntheta-1)
     coords = Matrix{Float64}(undef, 3, nnout)
-    idx(j, i) = (j-1)*ntheta + (mod(i, ntheta)) + 1
+    sectors_final = ntheta # single-assignment copy: `idx` over the refined `ntheta` boxed it
+    idx(j, i) = (j-1)*sectors_final + (mod(i, sectors_final)) + 1
     @inbounds for j in 1:nz, i in 0:ntheta-1
         p = on(2π*i/ntheta, zlev[j]); n = idx(j, i)
         coords[1,n]=p[1]; coords[2,n]=p[2]; coords[3,n]=p[3]
@@ -795,14 +799,18 @@ function _normalized_triangle(a,b,c)
     if !(finite_edges&&(edge_scale==0||isfinite(inv(edge_scale))))
         coordinate_scale=maximum(abs,(a...,b...,c...))
         coordinate_scale==0 && return nothing
-        scaled=ntuple(j->ntuple(d->points[j][d]/coordinate_scale,3),3)
+        scaled=((a[1]/coordinate_scale,a[2]/coordinate_scale,a[3]/coordinate_scale),
+                (b[1]/coordinate_scale,b[2]/coordinate_scale,b[3]/coordinate_scale),
+                (c[1]/coordinate_scale,c[2]/coordinate_scale,c[3]/coordinate_scale))
     end
-    anchor=scaled[1]
-    edge_scale=maximum(abs,(_sub(scaled[j],anchor)[d] for j in 2:3 for d in 1:3))
-    edge_scale==0 && return nothing
+    # explicit tuples throughout: closures over the reassigned `scaled` and
+    # `edge_scale` boxed both and allocated per triangle
+    anchor=scaled[1];second=scaled[2];third=scaled[3]
+    span=maximum(abs,(_sub(second,anchor)...,_sub(third,anchor)...))
+    span==0 && return nothing
     return ((0.0,0.0,0.0),
-        ntuple(d->(scaled[2][d]-anchor[d])/edge_scale,3),
-        ntuple(d->(scaled[3][d]-anchor[d])/edge_scale,3))
+        ((second[1]-anchor[1])/span,(second[2]-anchor[2])/span,(second[3]-anchor[3])/span),
+        ((third[1]-anchor[1])/span,(third[2]-anchor[2])/span,(third[3]-anchor[3])/span))
 end
 
 function _triangle_min_angle_deg(a,b,c)
@@ -871,8 +879,10 @@ function mesh_parametric_face(s, umin::Real, umax::Real, vmin::Real, vmax::Real,
     uspan=umax-umin;vspan=vmax-vmin
     (isfinite(uspan)&&isfinite(vspan)&&uspan>0&&vspan>0) || throw(ArgumentError(
         "mesh_parametric_face: parameter spans are not representable"))
-    du=1e-6uspan;dv=1e-6vspan
-    du>0 || (du=uspan);dv>0 || (dv=vspan)
+    # single assignments: `surface_jacobian` below captures both steps, and a
+    # conditional reassignment would box them for every callback call
+    du=1e-6uspan>0 ? 1e-6uspan : uspan
+    dv=1e-6vspan>0 ? 1e-6vspan : vspan
     applicable(s,umin,vmin) || throw(ArgumentError(
         "mesh_parametric_face: s must be callable as s(u,v)"))
     area=_surface_float(max_area,"mesh_parametric_face","max_area")

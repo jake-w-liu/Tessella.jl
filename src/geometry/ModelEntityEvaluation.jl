@@ -796,12 +796,13 @@ function _discrete_surface_locate(frames,u::Float64,v::Float64,
         if all(w->w>=-1e-12,weights)
             return weights,points
         end
-        clamped=ntuple(k->max(weights[k],0.0),3)
-        total=sum(clamped)
+        positive=(max(weights[1],0.0),max(weights[2],0.0),max(weights[3],0.0))
+        total=positive[1]+positive[2]+positive[3]
         total>0 || continue
-        clamped=clamped./total
-        pu=sum(k->clamped[k]*params[k][1],1:3)
-        pv=sum(k->clamped[k]*params[k][2],1:3)
+        # single assignment (a reassigned `clamped` captured below would be boxed)
+        clamped=(positive[1]/total,positive[2]/total,positive[3]/total)
+        pu=clamped[1]*params[1][1]+clamped[2]*params[2][1]+clamped[3]*params[3][1]
+        pv=clamped[1]*params[1][2]+clamped[2]*params[2][2]+clamped[3]*params[3][2]
         distance=(pu-u)^2+(pv-v)^2
         if distance<best_distance
             best_distance=distance
