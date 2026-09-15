@@ -295,23 +295,51 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
                 s2===nothing && throw(ArgumentError(
                     "$caller: transform is not representable on $what — " *
                     "it requires an isotropic linear part"))
+                axis=_linear_apply(t,g.axis)
+                X=_linear_apply(t,g.X)
                 push!(surface_plans,(surface,
                     (occ=:sphere,
                      center=_finite_result(
                          _affine_apply_steps(t,g.center),caller),
-                     radius=g.radius*sqrt(s2))))
+                     radius=g.radius*sqrt(s2),
+                     axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
+                     X=_finite_result(X./sqrt(_dot(X,X)),caller))))
             elseif g.occ in (:cylinder,:cone)
                 axis_vector=g.axis .* g.height
                 tr=_transform_axis_encoding(
                     t,g.center,axis_vector,caller,what)
                 n=(tr.axis[1]/tr.height,tr.axis[2]/tr.height,
                    tr.axis[3]/tr.height)
+                X=_linear_apply(t,g.X)
+                X=_finite_result(X./sqrt(_dot(X,X)),caller)
                 push!(surface_plans,(surface,
                     g.occ===:cylinder ?
-                    (occ=:cylinder,center=tr.center,axis=n,
+                    (occ=:cylinder,center=tr.center,axis=n,X=X,
                      radius=g.radius*tr.perp,height=tr.height) :
-                    (occ=:cone,center=tr.center,axis=n,
+                    (occ=:cone,center=tr.center,axis=n,X=X,
                      r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height)))
+            elseif g.occ===:torus
+                # A torus only survives a similarity: the equator and the tube
+                # must stay circular, which needs an isotropic linear part.
+                s2=_linear_isotropy(t.linear)
+                s2===nothing && throw(ArgumentError(
+                    "$caller: transform is not representable on $what — " *
+                    "it requires an isotropic linear part"))
+                axis=_linear_apply(t,g.axis)
+                # Under a reflection the derived in-plane direction flips
+                # handedness; storing −T·axis keeps Y′ = T·Y so
+                # p′(u,v) = T·p(u,−v) — the [0,angle] sweep still runs from
+                # the start radial to the end radial (v traverses the closed
+                # tube, so negating it describes the same surface).
+                _linear_det(t.linear)<0 && (axis=.-axis)
+                X=_linear_apply(t,g.X)
+                push!(surface_plans,(surface,
+                    (occ=:torus,
+                     center=_finite_result(
+                         _affine_apply_steps(t,g.center),caller),
+                     axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
+                     X=_finite_result(X./sqrt(_dot(X,X)),caller),
+                     r1=g.r1*sqrt(s2),r2=g.r2*sqrt(s2),angle=g.angle)))
             end
         end
     end
@@ -345,10 +373,23 @@ function _transform_occ_circle(g, t::_AffineTransform, caller, what)
     n=_linear_apply(t,g.n)
     nl=sqrt(_dot(n,n))
     nl>0 || throw(ArgumentError("$caller: transform collapses $what"))
+    # Under a reflection the circle's derived Y = n×X flips handedness. A
+    # closed circle keeps +T·n (its endpoints coincide and cap normals must
+    # still match the solid axis), the negated range carrying the reversed
+    # traversal; a trimmed arc must keep t0 on its start vertex, so it stores
+    # −T·n and keeps its range — p'(t) = T·p(t) in the flipped frame.
+    t0,t1=g.t0,g.t1
+    if _linear_det(t.linear)<0
+        if g.t1-g.t0<_OCC_TWO_PI
+            n=.-n
+        else
+            t0,t1=-g.t1,-g.t0
+        end
+    end
     return (occ=:circle,center=center,
             n=(n[1]/nl,n[2]/nl,n[3]/nl),
             X=(X[1]/sx,X[2]/sx,X[3]/sx),r=g.r*sx,
-            t0=g.t0,t1=g.t1)
+            t0=t0,t1=t1)
 end
 
 # After independent sub-entity moves, keep a materialized curved primitive's
@@ -455,6 +496,11 @@ function _transform_mesh_snapshot(mesh::Mesh, t::_AffineTransform, caller)
     end
     return Mesh(coords; segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
                 seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,tet_tag=mesh.tet_tag)
+end
+
+function _linear_det(L::NTuple{9,Float64})
+    return L[1]*(L[5]*L[9]-L[6]*L[8])-L[2]*(L[4]*L[9]-L[6]*L[7])+
+           L[3]*(L[4]*L[8]-L[5]*L[7])
 end
 
 # Squared isotropic scale of the linear part, or `nothing` when its Gram matrix

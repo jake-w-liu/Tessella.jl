@@ -73,6 +73,22 @@ const CASES = (
     # r1 == 0: degenerate apex edge at the base, top cap only.
     (source="Cone(1) = {0,0,0,0,0,2,0,2};",
      occ=()->gmsh.model.occ.addCone(0,0,0,0,0,2,0,2,1)),
+    (source="Torus(1) = {0,0,0,3,1};",
+     occ=()->gmsh.model.occ.addTorus(0,0,0,3,1,1)),
+    (source="Torus(1) = {1,-2,0.5,5,1.5};",
+     occ=()->gmsh.model.occ.addTorus(1,-2,0.5,5,1.5,1)),
+    # Spindle torus (r1 < r2): self-intersecting tube, same OCC layout.
+    (source="Torus(1) = {0,0,0,2,3};",
+     occ=()->gmsh.model.occ.addTorus(0,0,0,2,3,1)),
+    # angle == 2π spelled out still materializes the full-torus layout.
+    (source="Torus(1) = {0,0,0,3,1,6.283185307179586};",
+     occ=()->gmsh.model.occ.addTorus(0,0,0,3,1,1,2*pi)),
+    # Partial torus: two rim vertices, trimmed equator, closed meridians,
+    # Plane caps under shell [torus,+start,-end].
+    (source="Torus(1) = {0,0,0,3,1,1.5707963267948966};",
+     occ=()->gmsh.model.occ.addTorus(0,0,0,3,1,1,pi/2)),
+    (source="Torus(1) = {1,2,3,4,0.75,4.2};",
+     occ=()->gmsh.model.occ.addTorus(1,2,3,4,0.75,1,4.2)),
 )
 
 const GMSH_EXECUTABLE = find_gmsh_executable()
@@ -168,23 +184,50 @@ try
                     "case $case_index Surface($tag) boundary differs: " *
                     "Tessella=$actual Gmsh=$expected")
                 samples[] += 1
+                # Analytic OCC faces share parametrization; Plane fits are
+                # basis-dependent and stay unchecked.
+                expected_type in ("Cylinder", "Cone", "Sphere", "Torus") ||
+                    continue
+                expected_bounds = gmsh.model.getParametrizationBounds(2, tag)
+                actual_bounds = model_parametrization_bounds(model, 2, tag)
+                (all(actual_bounds[1] .≈ expected_bounds[1]) &&
+                 all(actual_bounds[2] .≈ expected_bounds[2])) || error(
+                    "case $case_index Surface($tag) bounds differ: " *
+                    "Tessella=$actual_bounds Gmsh=$expected_bounds")
+                u0, u1 = actual_bounds[1][1], actual_bounds[2][1]
+                v0, v1 = actual_bounds[1][2], actual_bounds[2][2]
+                for (fu, fv) in ((0.0, 0.5), (0.5, 0.0), (1 / 3, 2 / 3),
+                                 (1.0, 0.5))
+                    uv = [u0 + (u1 - u0) * fu, v0 + (v1 - v0) * fv]
+                    expected = gmsh.model.getValue(2, tag, uv)
+                    actual = model_value(model, 2, tag, uv)
+                    all(abs.(actual .- expected) .< 1e-12) || error(
+                        "case $case_index Surface($tag) eval($uv) differs: " *
+                        "Tessella=$actual Gmsh=$expected")
+                    samples[] += 1
+                end
             end
             for tag in sort!(collect(keys(model.volumes)))
-                expected = last.(gmsh.model.getBoundary(
+                expected_shell = last.(gmsh.model.getBoundary(
                     [(3, tag)], false, true, false))
                 actual = last.(model_boundary(
                     model, [(3, tag)], true, true, false))
-                actual == expected || error(
+                actual == expected_shell || error(
                     "case $case_index Volume($tag) shell differs: " *
-                    "Tessella=$actual Gmsh=$expected")
+                    "Tessella=$actual Gmsh=$expected_shell")
                 # `getBoundingBox` reports OCC's padded box (1e-7 absolute
                 # tolerance); Tessella's analytic box must sit inside it
-                # while staying tight itself.
+                # while staying tight itself. Torus faces fall back to a
+                # coarse polyhedral bound in OCC, so torus-shelled volumes
+                # are checked for containment only.
                 expected = collect(gmsh.model.getBoundingBox(3, tag))
                 actual = collect(model_bounding_box(model, 3, tag))
-                (all(actual[1:3] .>= expected[1:3]) &&
-                 all(actual[4:6] .<= expected[4:6]) &&
-                 all(abs.(actual .- expected) .< 1e-6)) || error(
+                polyhedral = any(gmsh.model.getType(2, s) == "Torus"
+                                 for s in abs.(expected_shell))
+                (all(actual[1:3] .>= expected[1:3] .- 1e-12) &&
+                 all(actual[4:6] .<= expected[4:6] .+ 1e-12) &&
+                 (polyhedral ||
+                  all(abs.(actual .- expected) .< 1e-6))) || error(
                     "case $case_index Volume($tag) bbox differs: " *
                     "Tessella=$actual Gmsh=$expected")
                 samples[] += 1

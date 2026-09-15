@@ -1729,6 +1729,11 @@ function _geo_allocator_record_primitive!(state::_GeoTagAllocatorState,
         length(values)==8 || throw(ArgumentError(
             "$caller: Cone requires eight numeric parameters"))
         (2,3,iszero(values[7]) || iszero(values[8]) ? 2 : 3)
+    elseif kind=="Torus"
+        # A partial torus adds the second rim vertex, the third (start
+        # meridian) edge, and the two Plane caps.
+        partial=length(values)==6 && values[6]<2π
+        partial ? (2,3,3) : (1,2,1)
     else
         throw(ArgumentError("$caller: unsupported primitive allocator kind $kind"))
     end
@@ -2909,7 +2914,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
 
     primitive=match(
-        r"^(Box|Cylinder|Sphere|Cone)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}$",
+        r"^(Box|Cylinder|Sphere|Cone|Torus)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}$",
         source)
     if primitive!==nothing
         state.geometry_unavailable===nothing || return nothing
@@ -2927,11 +2932,11 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
                 _geo_expr_preview(source);geometry=true,fields=false)
             return nothing
         end
-        expected=kind=="Box" ? 6 : kind=="Cylinder" ? 7 :
-                 kind=="Sphere" ? 4 : 8
-        length(values)==expected || throw(ArgumentError(
-            "$caller $kind parameters: expected $expected numeric values; " *
-            "got $(length(values)) after range expansion"))
+        expected=kind=="Box" ? (6,) : kind=="Cylinder" ? (7,) :
+                 kind=="Sphere" ? (4,) : kind=="Torus" ? (5,6) : (8,)
+        length(values) in expected || throw(ArgumentError(
+            "$caller $kind parameters: expected $(join(expected," or ")) " *
+            "numeric values; got $(length(values)) after range expansion"))
         _geo_allocator_record_primitive!(state,kind,tag,values,caller)
         return nothing
     end

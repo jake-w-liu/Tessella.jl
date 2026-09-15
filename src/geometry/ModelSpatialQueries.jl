@@ -180,7 +180,7 @@ end
 # bounding box (endpoints plus axis-aligned extrema) for curved kinds.
 function _model_curve_bounding_box(
     m::GeoModel,curve::Int,caller::AbstractString)
-    occ=_occ_geometry(m,curve)
+    occ=_occ_geometry_checked(m,curve,caller)
     occ===nothing || return _model_bounds_checked(
         occ.occ===:circle ? _occ_circle_bounding_box(occ) :
         occ.occ===:line ? _model_bounds_from_points(
@@ -251,6 +251,14 @@ function _model_entity_bounding_box(
             C=surface_geometry.center; r=surface_geometry.radius
             return _model_bounds_checked(
                 (C[1]-r,C[2]-r,C[3]-r,C[1]+r,C[2]+r,C[3]+r),
+                caller,"Surface[$tag]")
+        end
+        # A partial torus's extrema can sit on interior meridians no wire
+        # covers; the face box is the exact one-variable sweep maximization.
+        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
+                surface_geometry.occ===:torus
+            return _model_bounds_checked(
+                _occ_torus_bounding_box(surface_geometry),
                 caller,"Surface[$tag]")
         end
         bounds=_MODEL_EMPTY_BOUNDS
