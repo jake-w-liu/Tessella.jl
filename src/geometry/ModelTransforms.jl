@@ -52,7 +52,7 @@ end
 function _occ_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
     mod=sqrt(fma(axis[3],axis[3],fma(axis[1],axis[1],axis[2]*axis[2])))
     A,B,C=axis[1]/mod,axis[2]/mod,axis[3]/mod
-    s,c=_gm_sin(angle),_gm_cos(angle)
+    s,c=_gm_sincos(angle)
     K=((0.0,-C,B),(C,0.0,-A),(-B,A,0.0))
     K2=((-fma(C,C,B*B),A*B,A*C),
         (A*B,-fma(A,A,C*C),B*C),
@@ -171,7 +171,7 @@ function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
     t1=_gmsh_norme!(_gmsh_prodve(t2,axe))
     t2=_gmsh_norme!(_gmsh_prodve(axe,t1))
     plan=(axe,t1,t2)   # rows
-    c,s=_gm_cos(angle),_gm_sin(angle)
+    s,c=_gm_sincos(angle)
     rot=((1.0,0.0,0.0),(0.0,c,-s),(0.0,s,c))
     interm=ntuple(3) do i
         ntuple(3) do j

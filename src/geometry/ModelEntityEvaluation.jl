@@ -808,21 +808,17 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
     end
     surface_geometry=get(m.surface_geometry,entity_tag,nothing)
     if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+        # `OCCFace::containsParam`/`containsPoint` — the
+        # `BRepClass_FaceClassifier` wire classifier at
+        # `BRep_Tool::Tolerance` (= `Precision::Confusion()`); IN and ON both
+        # report inside.
         if parametric
-            surface_geometry.occ===:plane && throw(ArgumentError(
-                "$caller: trimmed-plane parametric containment requires " *
-                "the BRepClass 2-D wire classifier"))
-            lower,upper=_occ_surface_bounds(surface_geometry)
-            return count(index->
-                lower[1]<=values[index]<=upper[1] &&
-                lower[2]<=values[index+1]<=upper[2],1:2:length(values))
+            return count(index->_occ_surface_contains_param(m,
+                entity_tag,surface_geometry,
+                (values[index],values[index+1])),1:2:length(values))
         end
-        # `BRepClass_FaceClassifier`'s 3-D `Perform` classifies the nearest
-        # `Extrema_ExtPS` parameter — there is no 3-D distance check, so any
-        # accepted extremum reports IN/ON while a fully rejected extremum set
-        # (every projection outside the trimmed bounds) leaves the state
-        # UNKNOWN, counted as outside.
-        return count(index->_occ_surface_contains(surface_geometry,
+        return count(index->_occ_surface_contains(m,entity_tag,
+            surface_geometry,
             (values[index],values[index+1],values[index+2])),
             1:3:length(values))
     end

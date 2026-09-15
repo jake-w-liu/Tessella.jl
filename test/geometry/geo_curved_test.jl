@@ -44,13 +44,13 @@ end
     @test model_value(m,1,c,[0.0])≈[1.0,0.0,0.0]
     @test model_value(m,1,c,[1.0])≈[0.0,1.0,0.0] atol=1e-15
     @test model_value(m,1,c,[0.5])≈[sqrt(0.5),sqrt(0.5),0.0]
-    # |dP/du| for a unit quarter arc is the swept angle π/2.
-    @test model_derivative(m,1,c,[0.5])≈[-π/2*sqrt(0.5),π/2*sqrt(0.5),0.0]
-    @test model_curvature(m,1,c,[0.3])≈[1.0]
-    @test model_curvature(m,1,c,[0.9])≈[1.0]
-    # Second derivative points at the center with magnitude (π/2)^2.
+    # Gmsh's `InterpolateCurve` derivatives are 1e-8-step finite differences,
+    # not the analytic arc derivatives — these are the 4.15.2 binary's values.
+    @test model_derivative(m,1,c,[0.5])==[-1.1107207320559809,1.110720737607096,0.0]
+    @test model_curvature(m,1,c,[0.3])==[0.9805697128486208]
+    @test model_curvature(m,1,c,[0.9])==[1.137437577809078]
     d2=model_second_derivative(m,1,c,[0.5])
-    @test d2≈[-(π/2)^2*sqrt(0.5),-(π/2)^2*sqrt(0.5),0.0]
+    @test d2==[-2.220446049250313,-1.1102230246251565,0.0]
     @test collect(model_bounding_box(m,1,c))≈[0.0,0.0,0.0,1.0,1.0,0.0]
 end
 
