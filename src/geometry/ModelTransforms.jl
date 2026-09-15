@@ -25,7 +25,9 @@ struct _AffineTransform
 end
 
 # `vecmat4x4` from Geo.cpp: res[i] = Σ_j mat[i][j]·vec[j] with vec=(x,y,z,1),
-# accumulated in order.
+# accumulated in order. The shipped Gmsh binary rounds each product-add
+# separately here (the `+=` loop does not fuse), while `SetRotationMatrix`'s
+# matrix products do fuse — verified against the 4.15.2 binary.
 @inline function _gmsh_matvec4x4(mat::NTuple{16,Float64}, p::NTuple{3,Float64})
     v=(p[1],p[2],p[3],1.0)
     return ntuple(3) do i
@@ -46,18 +48,20 @@ end
 
 @inline function _affine_apply(t::_AffineTransform, p::NTuple{3,Float64})
     (a,b,c,d,e,f,g,h,i)=t.linear
-    return (a*p[1]+b*p[2]+c*p[3]+t.offset[1],
-            d*p[1]+e*p[2]+f*p[3]+t.offset[2],
-            g*p[1]+h*p[2]+i*p[3]+t.offset[3])
+    return (fma(c,p[3],fma(a,p[1],b*p[2]))+t.offset[1],
+            fma(f,p[3],fma(d,p[1],e*p[2]))+t.offset[2],
+            fma(i,p[3],fma(g,p[1],h*p[2]))+t.offset[3])
 end
 
 @inline function _linear_apply(t::_AffineTransform, v::NTuple{3,Float64})
     (a,b,c,d,e,f,g,h,i)=t.linear
-    return (a*v[1]+b*v[2]+c*v[3], d*v[1]+e*v[2]+f*v[3], g*v[1]+h*v[2]+i*v[3])
+    return (fma(c,v[3],fma(a,v[1],b*v[2])),
+            fma(f,v[3],fma(d,v[1],e*v[2])),
+            fma(i,v[3],fma(g,v[1],h*v[2])))
 end
 
 @inline _dot(a::NTuple{3,Float64},b::NTuple{3,Float64}) =
-    a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+    fma(a[3],b[3],fma(a[1],b[1],a[2]*b[2]))
 
 @inline function _entity_label(dim::Int)
     dim==0 && return "Point"
@@ -89,9 +93,12 @@ function _affine_dilation(center, scale, caller)
 end
 
 # `norme`/`prodve` from Gmsh's Numeric.h: normalization multiplies by the
-# reciprocal; the cross product uses Gmsh's component order.
+# reciprocal; the cross product uses Gmsh's component order. `fma` replicates
+# the fused multiply-add the compiled sum-of-products expressions produce
+# (`norm3`/`prosca`: `fma(c,c,fma(a,a,b*b))`; `prodve`: the first product of
+# each component fused, the second rounded).
 @inline function _gmsh_norme!(v::Vector{Float64})
-    mod=sqrt(v[1]*v[1]+v[2]*v[2]+v[3]*v[3])
+    mod=sqrt(fma(v[1],v[1],fma(v[2],v[2],v[3]*v[3])))
     if mod!=0.0
         inv=1.0/mod
         v[1]*=inv;v[2]*=inv;v[3]*=inv
@@ -100,7 +107,8 @@ end
 end
 
 @inline _gmsh_prodve(a::Vector{Float64},b::Vector{Float64}) =
-    [a[2]*b[3]-a[3]*b[2], -a[1]*b[3]+a[3]*b[1], a[1]*b[2]-a[2]*b[1]]
+    [fma(a[2],b[3],-(a[3]*b[2])), fma(-a[1],b[3],a[3]*b[1]),
+     fma(a[1],b[2],-(a[2]*b[1]))]
 
 # SetRotationMatrix from Geo.cpp: orthonormal basis (axis, t1, t2) built by
 # Gmsh's GramSchmidt, an in-basis rotation about the axis, then
@@ -125,7 +133,7 @@ function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
         ntuple(3) do j
             acc=0.0
             for k in 1:3
-                acc+=plan[k][i]*rot[k][j]   # invplan[i][k] = plan[k][i]
+                acc=fma(plan[k][i],rot[k][j],acc)   # invplan[i][k] = plan[k][i]
             end
             acc
         end
@@ -134,7 +142,7 @@ function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
         ntuple(3) do j
             acc=0.0
             for k in 1:3
-                acc+=interm[i][k]*plan[k][j]
+                acc=fma(interm[i][k],plan[k][j],acc)
             end
             acc
         end
@@ -168,12 +176,12 @@ function _affine_symmetry(a, b, c, d, caller)
     B=_finite_scalar(b,caller,"symmetry plane coefficient B")
     C=_finite_scalar(c,caller,"symmetry plane coefficient C")
     D=_finite_scalar(d,caller,"symmetry plane coefficient D")
-    p=A*A+B*B+C*C
+    p=fma(C,C,fma(A,A,B*B))
     p==0.0 && (p=1e-12)
     F=-2.0/p
-    step=(1.0+A*A*F, A*B*F, A*C*F, A*D*F,
-          A*B*F, 1.0+B*B*F, B*C*F, B*D*F,
-          A*C*F, B*C*F, 1.0+C*C*F, C*D*F,
+    step=(fma(A*A,F,1.0), A*B*F, A*C*F, A*D*F,
+          A*B*F, fma(B*B,F,1.0), B*C*F, B*D*F,
+          A*C*F, B*C*F, fma(C*C,F,1.0), C*D*F,
           0.0,0.0,0.0,1.0)
     L=(step[1],step[2],step[3],step[5],step[6],step[7],step[9],step[10],step[11])
     return _AffineTransform(L,(step[4],step[8],step[12]),[step])
@@ -268,82 +276,92 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
             g=_occ_geometry(m,curve)
             g===nothing && continue
             what="Curve[$curve]"
-            if g.occ===:circle
-                push!(curve_plans,(curve,
-                    _transform_occ_circle(g,t,caller,what)))
-            elseif g.occ===:line
-                a,b=m.curves[curve]
-                chord=_arc_sub(m.points[b],m.points[a])
-                len=sqrt(_arc_dot(chord,chord))
-                len>0 || throw(ArgumentError(
-                    "$caller: $what has a zero chord"))
-                dir=chord ./ len
-                moved=_linear_apply(t,dir)
-                scale=sqrt(_dot(moved,moved))
-                push!(curve_plans,(curve,
-                    (occ=:line,t0=g.t0,t1=g.t0+(g.t1-g.t0)*scale)))
-            end
+            push!(curve_plans,(curve,
+                _transform_occ_curve_record(m,curve,g,t,caller,what)))
         end
         for surface in surfaces
             surface in seen_surfaces && continue
             push!(seen_surfaces,surface)
             g=get(m.surface_geometry,surface,nothing)
             (g===nothing || !hasproperty(g,:occ)) && continue
-            what="Surface[$surface]"
-            if g.occ===:sphere
-                s2=_linear_isotropy(t.linear)
-                s2===nothing && throw(ArgumentError(
-                    "$caller: transform is not representable on $what — " *
-                    "it requires an isotropic linear part"))
-                axis=_linear_apply(t,g.axis)
-                X=_linear_apply(t,g.X)
-                push!(surface_plans,(surface,
-                    (occ=:sphere,
-                     center=_finite_result(
-                         _affine_apply_steps(t,g.center),caller),
-                     radius=g.radius*sqrt(s2),
-                     axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
-                     X=_finite_result(X./sqrt(_dot(X,X)),caller))))
-            elseif g.occ in (:cylinder,:cone)
-                axis_vector=g.axis .* g.height
-                tr=_transform_axis_encoding(
-                    t,g.center,axis_vector,caller,what)
-                n=(tr.axis[1]/tr.height,tr.axis[2]/tr.height,
-                   tr.axis[3]/tr.height)
-                X=_linear_apply(t,g.X)
-                X=_finite_result(X./sqrt(_dot(X,X)),caller)
-                push!(surface_plans,(surface,
-                    g.occ===:cylinder ?
-                    (occ=:cylinder,center=tr.center,axis=n,X=X,
-                     radius=g.radius*tr.perp,height=tr.height) :
-                    (occ=:cone,center=tr.center,axis=n,X=X,
-                     r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height)))
-            elseif g.occ===:torus
-                # A torus only survives a similarity: the equator and the tube
-                # must stay circular, which needs an isotropic linear part.
-                s2=_linear_isotropy(t.linear)
-                s2===nothing && throw(ArgumentError(
-                    "$caller: transform is not representable on $what — " *
-                    "it requires an isotropic linear part"))
-                axis=_linear_apply(t,g.axis)
-                # Under a reflection the derived in-plane direction flips
-                # handedness; storing −T·axis keeps Y′ = T·Y so
-                # p′(u,v) = T·p(u,−v) — the [0,angle] sweep still runs from
-                # the start radial to the end radial (v traverses the closed
-                # tube, so negating it describes the same surface).
-                _linear_det(t.linear)<0 && (axis=.-axis)
-                X=_linear_apply(t,g.X)
-                push!(surface_plans,(surface,
-                    (occ=:torus,
-                     center=_finite_result(
-                         _affine_apply_steps(t,g.center),caller),
-                     axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
-                     X=_finite_result(X./sqrt(_dot(X,X)),caller),
-                     r1=g.r1*sqrt(s2),r2=g.r2*sqrt(s2),angle=g.angle)))
-            end
+            push!(surface_plans,(surface,
+                _transform_occ_surface_record(g,t,caller,"Surface[$surface]")))
         end
     end
     return (curve_plans,surface_plans)
+end
+
+# The transformed OCC curve record for `curve`, or `g` unchanged when the
+# record carries no coordinates (`:degenerate` stores only its parameter
+# range).
+function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
+                                     t::_AffineTransform, caller, what)
+    if g.occ===:circle
+        return _transform_occ_circle(g,t,caller,what)
+    elseif g.occ===:line
+        a,b=m.curves[curve]
+        chord=_arc_sub(m.points[b],m.points[a])
+        len=sqrt(_arc_dot(chord,chord))
+        len>0 || throw(ArgumentError(
+            "$caller: $what has a zero chord"))
+        dir=chord ./ len
+        moved=_linear_apply(t,dir)
+        scale=sqrt(_dot(moved,moved))
+        return (occ=:line,t0=g.t0,t1=g.t0+(g.t1-g.t0)*scale)
+    end
+    return g
+end
+
+function _transform_occ_surface_record(g, t::_AffineTransform, caller, what)
+    if g.occ===:sphere
+        s2=_linear_isotropy(t.linear)
+        s2===nothing && throw(ArgumentError(
+            "$caller: transform is not representable on $what — " *
+            "it requires an isotropic linear part"))
+        axis=_linear_apply(t,g.axis)
+        X=_linear_apply(t,g.X)
+        return (occ=:sphere,
+                center=_finite_result(
+                    _affine_apply_steps(t,g.center),caller),
+                radius=g.radius*sqrt(s2),
+                axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
+                X=_finite_result(X./sqrt(_dot(X,X)),caller))
+    elseif g.occ in (:cylinder,:cone)
+        axis_vector=g.axis .* g.height
+        tr=_transform_axis_encoding(
+            t,g.center,axis_vector,caller,what)
+        n=(tr.axis[1]/tr.height,tr.axis[2]/tr.height,
+           tr.axis[3]/tr.height)
+        X=_linear_apply(t,g.X)
+        X=_finite_result(X./sqrt(_dot(X,X)),caller)
+        return g.occ===:cylinder ?
+            (occ=:cylinder,center=tr.center,axis=n,X=X,
+             radius=g.radius*tr.perp,height=tr.height) :
+            (occ=:cone,center=tr.center,axis=n,X=X,
+             r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height)
+    elseif g.occ===:torus
+        # A torus only survives a similarity: the equator and the tube
+        # must stay circular, which needs an isotropic linear part.
+        s2=_linear_isotropy(t.linear)
+        s2===nothing && throw(ArgumentError(
+            "$caller: transform is not representable on $what — " *
+            "it requires an isotropic linear part"))
+        axis=_linear_apply(t,g.axis)
+        # Under a reflection the derived in-plane direction flips
+        # handedness; storing −T·axis keeps Y′ = T·Y so
+        # p′(u,v) = T·p(u,−v) — the [0,angle] sweep still runs from
+        # the start radial to the end radial (v traverses the closed
+        # tube, so negating it describes the same surface).
+        _linear_det(t.linear)<0 && (axis=.-axis)
+        X=_linear_apply(t,g.X)
+        return (occ=:torus,
+                center=_finite_result(
+                    _affine_apply_steps(t,g.center),caller),
+                axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
+                X=_finite_result(X./sqrt(_dot(X,X)),caller),
+                r1=g.r1*sqrt(s2),r2=g.r2*sqrt(s2),angle=g.angle)
+    end
+    return g
 end
 
 function _apply_occ_geometry_plans!(m::GeoModel, plans)
@@ -1069,6 +1087,24 @@ end
 # returns the source tag and leaves the unmerged copies behind, exactly like
 # Gmsh.
 
+# Gmsh's `ExtrudeParams::geo`: the kernel `type` plus its operands. `:translate`
+# carries the displacement `T`; `:rotate` carries the revolved `axis`/`origin`/
+# `angle` and `rot`, the precomputed Gmsh rotation transform (three sequential
+# 4×4 applications, bit-identical to `ApplyTransformationToPoint`).
+_extrude_spec_translate(delta::NTuple{3,Float64}) = (type=:translate,T=delta)
+function _extrude_spec_rotate(axis, origin, angle, caller)
+    a=_finite_vector3(axis,caller,"rotation axis")
+    o=_finite_vector3(origin,caller,"rotation origin")
+    θ=_finite_scalar(angle,caller,"rotation angle")
+    return (type=:rotate,rot=_affine_rotation(a,o,θ,caller),
+            axis=a,origin=o,angle=θ)
+end
+
+# The copy transform applied to chapeau points: the displacement for
+# `:translate`, the translate/rotate/translate matrix sequence for `:rotate`.
+_extrude_move(spec,p) = spec.type===:rotate ?
+    _affine_apply_steps(spec.rot,p) : p .+ spec.T
+
 """
     extrude_entities!(model, entities, delta; params=nothing, caller) -> tags
 
@@ -1086,6 +1122,40 @@ function extrude_entities!(m::GeoModel,
                            caller::AbstractString="extrude_entities!")
     all(isfinite,delta) || throw(ArgumentError(
         "$caller: extrusion delta must be finite"))
+    return _extrude_entities!(m,entities,_extrude_spec_translate(delta);
+                             params=params,return_lateral=return_lateral,
+                             caller=caller)
+end
+
+"""
+    revolve_entities!(model, entities, axis, origin, angle; ...) -> tags
+
+Rotate-extrude every listed `(dim, tag)` entity by `angle` radians about the
+axis through `origin` with direction `axis` — Gmsh's `revolve` (`Extrude
+{{axis}, {point}, angle}`) with built-in-kernel semantics: swept vertices
+produce `Circle` arcs wired `[start, axis-center, end]`, curve extrusions
+produce ruled (or triangular) lateral surfaces, and surface extrusions
+produce volumes. Tag allocation, signed-generatrix rules, `out` list layout,
+and merge semantics match `ExtrudeShapes(ROTATE, ...)`.
+"""
+function revolve_entities!(m::GeoModel,
+                           entities::AbstractVector{<:Tuple{Integer,Integer}},
+                           axis, origin, angle;
+                           params::Union{Nothing,_GeoExtrudeParams}=nothing,
+                           return_lateral::Bool=true,
+                           caller::AbstractString="revolve_entities!")
+    spec=_extrude_spec_rotate(axis,origin,angle,caller)
+    return _extrude_entities!(m,entities,spec;
+                             params=params,return_lateral=return_lateral,
+                             caller=caller)
+end
+
+function _extrude_entities!(m::GeoModel,
+                            entities::AbstractVector{<:Tuple{Integer,Integer}},
+                            spec;
+                            params::Union{Nothing,_GeoExtrudeParams}=nothing,
+                            return_lateral::Bool=true,
+                            caller::AbstractString="extrude_entities!")
     normalized=NTuple{2,Int}[]
     for (dim,tag) in entities
         d=_dimension(dim,caller)
@@ -1108,36 +1178,53 @@ function extrude_entities!(m::GeoModel,
     out=Int[]
     for (d,tg) in normalized
         if d==0
-            _extrude_point!(m,tg,delta,out,params,caller)
+            _extrude_point!(m,tg,spec,out,params,caller)
         elseif d==1
-            _extrude_curve!(m,tg,delta,out,params,return_lateral,caller)
+            _extrude_curve!(m,tg,spec,out,params,return_lateral,caller)
         else
-            _extrude_surface!(m,tg,delta,out,params,return_lateral,caller)
+            _extrude_surface!(m,tg,spec,out,params,return_lateral,caller)
         end
     end
     return out
 end
 
-# `ExtrudePoint`: copy the vertex, translate the copy, and wire a connecting
+# `ExtrudePoint`: copy the vertex, transform the copy, and wire a connecting
 # curve — unless the copy still coincides with the source, in which case the
 # source tag is returned and the orphan copy stays unmerged (the coherence
 # pass is skipped entirely). `final=false` suppresses the merge for the
 # nested endpoint extrusions inside `ExtrudeCurve`.
-function _extrude_point_copy!(m::GeoModel, src::Int, delta::NTuple{3,Float64},
+function _extrude_point_copy!(m::GeoModel, src::Int, spec,
                               params, caller)
     chapeau=_fresh_point_copy!(m,src,caller)
-    m.points[chapeau]=_finite_result(m.points[chapeau] .+ delta,caller)
+    m.points[chapeau]=_finite_result(
+        _extrude_move(spec,m.points[chapeau]),caller)
     _points_close(m.points[chapeau],m.points[src],_coherence_eps(m)) &&
         return (nothing,chapeau)
     curve=_geo_newreg_alloc!(m,1,caller)
     m.curves[curve]=(src,chapeau)
+    if spec.type===:rotate
+        # `MSH_SEGM_CIRC`: the swept arc is a three-point circle
+        # [start, axis-center, end]; the center is the source's orthogonal
+        # projection onto the axis, allocated *after* the curve tag exactly
+        # like `DuplicateVertex` inside `ExtrudePoint`. `CreateCurve` seeds
+        # `Circle.n=(0,0,1)` — the `EndCurve` fallback normal for degenerate
+        # (half-turn) arcs.
+        m.curve_types[curve]=:circle
+        ax=_arc_norme(spec.axis)
+        o=spec.origin;p=m.points[src]
+        d=_arc_dot((p[1]-o[1],p[2]-o[2],p[3]-o[3]),ax)
+        center=_alloc_tag!(m,0,0,caller)
+        m.points[center]=(fma(d,ax[1],o[1]),fma(d,ax[2],o[2]),fma(d,ax[3],o[3]))
+        m.curve_control_points[curve]=Int[src,center,chapeau]
+        m.curve_geometry[curve]=(n=(0.0,0.0,1.0),)
+    end
     params!==nothing && (m.meshing.extrude[(1,curve)]=params)
     return (curve,chapeau)
 end
 
-function _extrude_point!(m::GeoModel, src::Int, delta::NTuple{3,Float64},
+function _extrude_point!(m::GeoModel, src::Int, spec,
                          out::Vector{Int}, params, caller)
-    (curve,chapeau)=_extrude_point_copy!(m,src,delta,params,caller)
+    (curve,chapeau)=_extrude_point_copy!(m,src,spec,params,caller)
     if curve===nothing
         push!(out,src)
         return nothing
@@ -1148,11 +1235,11 @@ function _extrude_point!(m::GeoModel, src::Int, delta::NTuple{3,Float64},
     return nothing
 end
 
-# `ExtrudeCurve`: duplicate the curve, translate the copy's point set, extrude
+# `ExtrudeCurve`: duplicate the curve, transform the copy's point set, extrude
 # the (possibly signed) endpoints into connecting curves, and wire the lateral
 # surface. Returns `(surf, chapeau)` or `nothing` when both connecting curves
 # collapsed — Gmsh's `if(!CurveBeg && !CurveEnd) return ic` path.
-function _extrude_curve_lateral!(m::GeoModel, c::Int, delta::NTuple{3,Float64},
+function _extrude_curve_lateral!(m::GeoModel, c::Int, spec,
                                  params, caller)
     src=abs(c)
     a,b=m.curves[src]
@@ -1161,18 +1248,19 @@ function _extrude_curve_lateral!(m::GeoModel, c::Int, delta::NTuple{3,Float64},
     sbeg,send=c>0 ? (a,b) : (b,a)
     chapeau=_duplicate_curve!(m,src,caller;reversed=c<0)
     params!==nothing && (m.meshing.extrude[(1,chapeau)]=params)
-    _translate_curve_points!(m,chapeau,delta,caller)
-    (cbeg,_)=_extrude_point_copy!(m,sbeg,delta,params,caller)
-    (cend,_)=_extrude_point_copy!(m,send,delta,params,caller)
+    _transform_curve_points!(m,chapeau,spec,caller)
+    _extrude_occ_transform!(m,1,chapeau,spec,caller)
+    (cbeg,_)=_extrude_point_copy!(m,sbeg,spec,params,caller)
+    (cend,_)=_extrude_point_copy!(m,send,spec,params,caller)
     (cbeg===nothing && cend===nothing) && return nothing
     return (_extrude_lateral_surface!(m,c,chapeau,cbeg,cend,params,caller),
             chapeau)
 end
 
-function _extrude_curve!(m::GeoModel, c::Int, delta::NTuple{3,Float64},
+function _extrude_curve!(m::GeoModel, c::Int, spec,
                          out::Vector{Int}, params, return_lateral::Bool,
                          caller)
-    result=_extrude_curve_lateral!(m,c,delta,params,caller)
+    result=_extrude_curve_lateral!(m,c,spec,params,caller)
     if result===nothing
         # `if(!CurveBeg && !CurveEnd) return ic` — Gmsh returns the signed
         # input tag and leaves the unmerged copy behind.
@@ -1224,9 +1312,9 @@ end
 
 # `ExtrudeSurface`: burn the transient duplicate-surface tag, duplicate every
 # generatrix into the top copy, allocate the volume on the dedicated volume
-# counter, sweep each generatrix into a lateral surface, translate the top,
+# counter, sweep each generatrix into a lateral surface, transform the top,
 # re-tag it through a fresh `NEWSURFACE`, and wire the shell.
-function _extrude_surface!(m::GeoModel, is::Int, delta::NTuple{3,Float64},
+function _extrude_surface!(m::GeoModel, is::Int, spec,
                            out::Vector{Int}, params, return_lateral::Bool,
                            caller)
     tag=abs(is)   # `ps = FindSurface(std::abs(is))`; the sign is metadata-only
@@ -1242,12 +1330,13 @@ function _extrude_surface!(m::GeoModel, is::Int, delta::NTuple{3,Float64},
     params!==nothing && (m.meshing.extrude[(3,vol)]=params)
     laterals=Int[]
     for l in m.surfaces[tag], c in m.loops[l]
-        result=_extrude_curve_lateral!(m,c,delta,params,caller)
+        result=_extrude_curve_lateral!(m,c,spec,params,caller)
         result===nothing && continue
         push!(laterals,c<0 ? -result[1] : result[1])
     end
     for copies in top_loops, c in copies
-        _translate_curve_points!(m,c,delta,caller)
+        _transform_curve_points!(m,c,spec,caller)
+        _extrude_occ_transform!(m,1,c,spec,caller)
     end
     top=_geo_newreg_alloc!(m,2,caller)
     loop_tags=Int[]
@@ -1259,9 +1348,12 @@ function _extrude_surface!(m::GeoModel, is::Int, delta::NTuple{3,Float64},
     m.surfaces[top]=loop_tags
     # The top is `DuplicateSurface` output: it inherits the source's record
     # type (`Plane Surface` extrudes to a `Plane` cap) and geometry metadata.
+    # OCC geometry records move with the copy — an unmodified record would
+    # answer queries at the source's coordinates.
     haskey(m.surface_types,tag) && (m.surface_types[top]=m.surface_types[tag])
     haskey(m.surface_geometry,tag) &&
-        (m.surface_geometry[top]=m.surface_geometry[tag])
+        (m.surface_geometry[top]=_extrude_occ_surface_transform(
+            m.surface_geometry[tag],spec,caller,"Surface[$top]"))
     params!==nothing && (m.meshing.extrude[(2,top)]=params)
     slt=haskey(m.surface_loops,vol) ? _geo_next_surface_loop_tag(m) : vol
     m.surface_loops[slt]=vcat(-tag,top,laterals)
@@ -1293,16 +1385,42 @@ _geo_next_loop_tag(m::GeoModel) =
 _geo_next_surface_loop_tag(m::GeoModel) =
     (isempty(m.surface_loops) ? 0 : maximum(keys(m.surface_loops)))+1
 
-# Translate every vertex a curve owns — the wired endpoints plus its
+# Transform every vertex a curve owns — the wired endpoints plus its
 # `curve_control_points` copies (Gmsh's `ApplyTransformationToCurve` reaches
 # both).
-function _translate_curve_points!(m::GeoModel, curve::Int,
-                                  delta::NTuple{3,Float64}, caller)
+function _transform_curve_points!(m::GeoModel, curve::Int, spec, caller)
     a,b=m.curves[curve]
     pts=Int[a,b]
     append!(pts,get(m.curve_control_points,curve,Int[]))
     for p in unique!(pts)
-        m.points[p]=_finite_result(m.points[p] .+ delta,caller)
+        m.points[p]=_finite_result(_extrude_move(spec,m.points[p]),caller)
     end
     return nothing
 end
+
+# A duplicated OCC curve record moves with its copy: a translate/rotate
+# extrusion is always rigid, so the transform stays representable. Built-in
+# arc records carry only a fallback normal and need no update.
+function _extrude_occ_transform!(m::GeoModel, dim::Int, tag::Int, spec, caller)
+    if dim==1
+        g=_occ_geometry(m,tag)
+        g===nothing && return nothing
+        m.curve_geometry[tag]=_transform_occ_curve_record(
+            m,tag,g,_extrude_affine(spec),caller,"Curve[$tag]")
+    else
+        g=get(m.surface_geometry,tag,nothing)
+        (g===nothing || !hasproperty(g,:occ)) && return nothing
+        m.surface_geometry[tag]=_transform_occ_surface_record(
+            g,_extrude_affine(spec),caller,"Surface[$tag]")
+    end
+    return nothing
+end
+
+# The `_AffineTransform` equivalent of the extrusion's copy transform —
+# only OCC geometry records read it (chapeau points use `_extrude_move`).
+_extrude_affine(spec) = spec.type===:rotate ? spec.rot :
+    _affine_translation(spec.T)
+
+_extrude_occ_surface_transform(g, spec, caller, what) =
+    (g===nothing || !hasproperty(g,:occ)) ? g :
+    _transform_occ_surface_record(g,_extrude_affine(spec),caller,what)

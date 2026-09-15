@@ -75,10 +75,11 @@ pinned Gmsh's entity state over 4 differential cases), with a bounded
 `While`/`EndWhile` extension Gmsh lacks. Executed geometry parameters, tags, and
 numeric entity memberships
 use those same bounded semantics. Translational `Extrude {dx,dy,dz} {..}`
-runs for points, curves, and planar surfaces as both a statement and a
+and rotational `Extrude {{axis}, {point}, angle} {..}`
+run for points, curves, and planar surfaces as both a statement and a
 side-effecting value term, reproducing Gmsh's tag allocation, output lists,
 signed-generatrix topology, and post-extrusion merge behavior bit-for-bit
-(13 differential cases), with `Layers`/`Recombine`/`ScaleLast`/`QuadTri*`/
+(26 differential cases), with `Layers`/`Recombine`/`ScaleLast`/`QuadTri*`/
 `Using` parameters stored per created entity and
 `Geometry.ExtrudeReturnLateralEntities` support. `Circle`/`Ellipse`
 records reproduce Gmsh's `EndCurve` control-point layout, `Plane{..}`
@@ -375,6 +376,51 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-09-15 with Julia 1.12.7 after implementing rotational
+`Extrude` (Gmsh's built-in-kernel `revolve`) for `.geo` and the model API:
+
+- `revolve_entities!` and the `.geo` motion group `Extrude {{axis},
+  {point}, angle} {..}` rotate-extrude points, curves, and planar surfaces
+  with `ExtrudeShapes(ROTATE, ...)` semantics: swept vertices produce
+  `Circle` arcs wired `[start, axis-center, end]` (the center is the
+  source's orthogonal axis projection, allocated after the arc tag like
+  `DuplicateVertex` inside `ExtrudePoint`, with the `Circle.n=(0,0,1)`
+  `EndCurve` fallback seed), curve generatrices produce ruled/triangular
+  laterals, surface generatrices produce volumes, and signed generatrices
+  follow the reversed-record rules. On-axis, zero-angle, and full-turn
+  collapses return the source tag with the unmerged copies left behind —
+  `[src]` in `out` — matching Gmsh's skip-coherence path; `out` otherwise
+  appends the top/body pair plus laterals under
+  `Geometry.ExtrudeReturnLateralEntities`. OCC generatrix records transform
+  with their copies through the shared rigid-transform helpers.
+- The motion group is decoded by evaluated element shape (`[3,3,1]` revolve,
+  `[3,3,3,1]` twist, `[1,1,1]`/single length-3 list translate) like the
+  grammar's `VExpr`/`FExpr` alternatives; the twist form and mixed
+  revolve+translate groups raise explicit `ArgumentError`s.
+- Bit parity against the shipped 4.15.2 binary required per-site contraction
+  matching: `SetRotationMatrix`'s Gram-Schmidt/`norme`/`prodve`/`prosca` and
+  matrix products fuse (`fma`), while `vecmat4x4` application rounds each
+  product-add separately — verified by extracting Gmsh's effective affine
+  maps on probe points. `EndCurve`-equivalent arc helpers and the OCC record
+  evaluators were brought to the same contract, including `ElSLib`
+  `A1·X+A2·Y+A3·Z+P` associations, `semiAngle = atan((r2-r1)/h)` cone
+  evaluation, and the OCC620 torus epsilon clamp.
+- Volume meshing through revolved non-planar laterals now fails explicitly
+  via the straight-curve gate in `_model_planar_surface_mesh` instead of
+  reaching CDT internals.
+- Verified in `geo_extrude/differential.jl` (26 cases/350 samples) against
+  Gmsh 4.15.2: entity tags per dimension, point coordinates, curve/surface/
+  volume boundary wiring, and `out[]` result lists match bit-for-bit across
+  point/curve/surface revolves on and off the axis origin, negative
+  generatrices and angles, endpoint-on-axis collapses, arc generatrices,
+  signed surfaces, on-axis/zero-angle/full-turn collapses, >π arcs,
+  `ExtrudeReturnLateralEntities=0`, non-axis-aligned axes, and mixed
+  translate+revolve allocation interleaving.
+  `geo_extrude_test.jl` covers the API surface, OCC-generatrix records,
+  closed-curve generatrices, degenerate paths, and allocator plumbing
+  (142 tests); `geo_transform_test.jl`, `geo_curved_test.jl`, and
+  `occ_primitives_test.jl` all pass.
 
 Re-measured on 2026-09-14 with Julia 1.12.7 after materializing the Torus
 primitive and its analytic OCC records:

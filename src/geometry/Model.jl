@@ -2854,6 +2854,10 @@ function _model_planar_surface_mesh(
     for loop in m.surfaces[surface]
         haskey(m.loops,loop) || throw(ArgumentError(
             "$caller: Surface[$surface] references unknown Loop[$loop]"))
+        for signed_curve in m.loops[loop]
+            _model_require_line_curve(m,abs(signed_curve),caller,
+                                      "surface meshing")
+        end
         loop_points=_loop_points(m,loop)
         length(loop_points)>=3 || throw(ArgumentError(
             "$caller: Surface[$surface] Loop[$loop] needs at least three points"))

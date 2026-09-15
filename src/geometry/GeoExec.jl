@@ -43,7 +43,7 @@ using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, bool
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: transform_entities!, duplicate_entities!, coherence!
-using ..Model: merge_vertices!, extrude_entities!
+using ..Model: merge_vertices!, extrude_entities!, revolve_entities!
 using ..Model: _GeoExtrudeParams
 using ..Model: _affine_translation, _affine_dilation
 using ..Model: _affine_rotation, _affine_symmetry, _entity_label
@@ -1149,29 +1149,78 @@ function _geo_balanced_paren(raw::AbstractString, caller::AbstractString)
     return (content,rest)
 end
 
+# One `VExpr` member of a revolve/twist motion group evaluated to a flat
+# numeric vector; a braced member loses its braces, a bare term evaluates as
+# a list term (list variables expand).
+function _geo_extrude_vector_values(part::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString)
+    s=String(strip(part))
+    if startswith(s,"{") || startswith(s,"(")
+        content,rest=s[1]=='{' ? _geo_balanced_group(s,caller) :
+                                 _geo_balanced_paren(s,caller)
+        isempty(strip(rest)) || throw(ArgumentError(
+            "$caller: malformed displacement expression $(repr(s))"))
+        return _geo_exec_numeric_values(content,context,caller)
+    end
+    return _geo_exec_numeric_values(s,context,caller)
+end
+
+# The revolve/twist `{{A}, {X}, alpha}` / `{{A}, {X}, {T}, alpha}` motion
+# group, decoded from the group's evaluated element lengths: the grammar's
+# VExpr members are length-3 vectors and the trailing FExpr a scalar.
+function _geo_extrude_revolve(values::Vector{Vector{Float64}},
+                              caller::AbstractString)
+    lengths=length.(values)
+    if length(lengths)==4 && lengths[1:3]==[3,3,3] && lengths[4]==1
+        throw(ArgumentError(
+            "$caller: twist extrusion `Extrude {{axis}, {point}, {delta}, " *
+            "angle}` is not implemented"))
+    end
+    if !(length(lengths)==3 && lengths==[3,3,1])
+        throw(ArgumentError(
+            "$caller: rotational extrusion requires `{{axis}, {point}, " *
+            "angle}`"))
+    end
+    a,x,α=values
+    return (axis=(a[1],a[2],a[3]),origin=(x[1],x[2],x[3]),angle=α[1])
+end
+
 # Accumulate one VExpr group into `delta` (`sign` folds `VExpr '+' VExpr` and
-# leading `tMINUS VExpr`). Nested `{...}`/`(...)` members make the group the
-# rotational or twist form instead.
+# leading `tMINUS VExpr`), or decode the revolve `{{axis}, {point}, angle}` /
+# twist `{{axis}, {point}, {delta}, angle}` motion group. The group's
+# evaluated element lengths decide: `[1,1,1]` (or a single list variable
+# evaluating to three numbers) is the translational displacement, `[3,3,1]`
+# is revolve and `[3,3,3,1]` is twist — the same shapes the grammar's
+# `VExpr, VExpr, FExpr` / `VExpr, VExpr, VExpr, FExpr` alternatives produce.
+# Returns `(delta, revolve)`: `revolve` is `nothing` for translation.
 function _geo_extrude_vector!(delta::NTuple{3,Float64}, sign::Float64,
                               body::AbstractString,
                               context::_GeoNumericContext,
                               caller::AbstractString)
     parts=_geo_split_top_commas(body,caller)
-    if any(p->startswith(strip(p),"{") || startswith(strip(p),"("),parts)
-        length(parts)==3 && throw(ArgumentError(
-            "$caller: rotational extrusion `Extrude {{axis}, {point}, angle}`" *
-            " is not implemented (only translational `Extrude {dx,dy,dz}`)"))
-        length(parts)==4 && throw(ArgumentError(
-            "$caller: twist extrusion `Extrude {{axis}, {point}, {delta}, " *
-            "angle}` is not implemented"))
-        throw(ArgumentError(
-            "$caller: malformed displacement expression $(repr(body))"))
+    if length(parts)<=4
+        values=[_geo_extrude_vector_values(p,context,caller) for p in parts]
+        lengths=length.(values)
+        revolve_shape=length(lengths)==3 ? lengths==[3,3,1] :
+            length(lengths)==4 && lengths==[3,3,3,1]
+        if revolve_shape || (length(parts) in (3,4) &&
+                             any(v->length(v)!=1,values))
+            (sign==1.0 && delta==(0.0,0.0,0.0)) || throw(ArgumentError(
+                "$caller: malformed displacement expression $(repr(body))"))
+            return (delta,_geo_extrude_revolve(values,caller))
+        elseif length(lengths)==3 && all(v->length(v)==1,values)
+            return (delta .+ sign .* ntuple(i->values[i][1],3),nothing)
+        elseif length(lengths)==1 && length(values[1])==3
+            return (delta .+ sign .* Tuple(values[1]),nothing)
+        end
     end
     length(parts)==3 || throw(ArgumentError(
         "$caller: displacement requires exactly three components; got " *
         "$(length(parts)) in $(repr(body))"))
-    return delta .+ sign .* ntuple(
-        i->_geo_eval_numeric(parts[i],context,"$caller displacement"),3)
+    return (delta .+ sign .* ntuple(
+        i->_geo_eval_numeric(parts[i],context,"$caller displacement"),3),
+        nothing)
 end
 
 const _GEO_EXTRUDE_PARAMS=(layers=Int[],heights=Float64[],scale_last=false,
@@ -1330,7 +1379,7 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     endswith(source,";") &&
         (source=String(strip(source[firstindex(source):prevind(source,end)])))
     rest=String(strip(source[nextind(source,firstindex(source),7):end]))
-    delta=(0.0,0.0,0.0);sign=1.0;shapes=nothing;nvec=0
+    delta=(0.0,0.0,0.0);sign=1.0;shapes=nothing;nvec=0;revolve=nothing
     while !isempty(rest)
         c=rest[firstindex(rest)]
         if c=='+' || c=='-'
@@ -1343,11 +1392,21 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
                 shapes=group
                 break
             end
-            delta=_geo_extrude_vector!(delta,sign,group,context,caller)
+            delta,motion=_geo_extrude_vector!(delta,sign,group,context,caller)
+            if motion!==nothing
+                revolve===nothing || throw(ArgumentError(
+                    "$caller: multiple extrusion motion groups"))
+                revolve=motion
+            end
             sign=1.0;nvec+=1
         elseif c=='('
             (group,rest)=_geo_balanced_paren(rest,caller)
-            delta=_geo_extrude_vector!(delta,sign,group,context,caller)
+            delta,motion=_geo_extrude_vector!(delta,sign,group,context,caller)
+            if motion!==nothing
+                revolve===nothing || throw(ArgumentError(
+                    "$caller: multiple extrusion motion groups"))
+                revolve=motion
+            end
             sign=1.0;nvec+=1
         else
             break
@@ -1362,11 +1421,17 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
         "$caller: expected a `{shape list}` group"))
     nvec==0 && throw(ArgumentError(
         "$caller: boundary-layer extrusion `Extrude {shapes; params}` is " *
-        "not implemented (only translational `Extrude {dx,dy,dz} {..}`)"))
+        "not implemented"))
+    (revolve===nothing || delta==(0.0,0.0,0.0)) || throw(ArgumentError(
+        "$caller: malformed displacement expression"))
     entities,params=_geo_extrude_shape_list!(m,shapes,context,caller)
-    return Float64.(extrude_entities!(
-        m,entities,delta;params=params,
-        return_lateral=context.extrude_return_lateral,caller=caller))
+    tags=revolve===nothing ?
+        extrude_entities!(m,entities,delta;params=params,
+            return_lateral=context.extrude_return_lateral,caller=caller) :
+        revolve_entities!(m,entities,revolve.axis,revolve.origin,
+            revolve.angle;params=params,
+            return_lateral=context.extrude_return_lateral,caller=caller)
+    return Float64.(tags)
 end
 
 function _geo_transform_params(;kind::AbstractString,params::AbstractString,
