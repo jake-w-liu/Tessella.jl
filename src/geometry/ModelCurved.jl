@@ -79,18 +79,28 @@ _myasin(a::Float64) = a<=-1.0 ? -π/2 : a>=1.0 ? π/2 : asin(a)
 _myatan2(y::Float64,x::Float64) = (y==0.0 && x==0.0) ? 0.0 : atan(y,x)
 
 # `norme`: normalize by the `norm3` magnitude (sqrt of the summed squares,
-# not hypot); a zero vector stays zero.
+# not hypot); a zero vector stays zero. `fma` replicates the fused
+# multiply-add that the compiled Gmsh `norm3`/`prodve`/`prosca` expressions
+# produce (`x²+y²+z²` → `fma(z,z,fma(x,x,y*y))`; the first product of each
+# cross/dot component fused, later products rounded).
 @inline function _arc_norme(v::NTuple{3,Float64})
-    n=sqrt(v[1]*v[1]+v[2]*v[2]+v[3]*v[3])
+    n=sqrt(fma(v[1],v[1],fma(v[2],v[2],v[3]*v[3])))
     n==0.0 && return v
     inv=1.0/n
     return (v[1]*inv, v[2]*inv, v[3]*inv)
 end
 
+# `prodve` (Gmsh) writes its y component as `-a[0]*b[2] + a[2]*b[0]` while
+# OCCT `gp_XYZ::Crossed` writes `z*b.x - x*b.z`; the fused multiply-add lands
+# on a different operand, so the two ports stay distinct.
 @inline _arc_cross(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
-    (a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1])
+    (fma(a[2],b[3],-(a[3]*b[2])), fma(-a[1],b[3],a[3]*b[1]),
+     fma(a[1],b[2],-(a[2]*b[1])))
+@inline _occ_cross(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
+    (fma(a[2],b[3],-(a[3]*b[2])), fma(a[3],b[1],-(a[1]*b[3])),
+     fma(a[1],b[2],-(a[2]*b[1])))
 @inline _arc_dot(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
-    a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+    fma(a[3],b[3],fma(a[1],b[1],a[2]*b[2]))
 @inline _arc_sub(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
     (a[1]-b[1], a[2]-b[2], a[3]-b[3])
 
@@ -114,7 +124,7 @@ function _arc_geometry(cps::Vector{NTuple{3,Float64}}, kind::Symbol,
     raw0=_arc_sub(P0,C); raw2=_arc_sub(P2,C)
     u=_arc_norme(raw0); e=_arc_norme(raw2)
     n=_arc_cross(u,e)
-    if sqrt(n[1]*n[1]+n[2]*n[2]+n[3]*n[3])<1e-15
+    if sqrt(fma(n[1],n[1],fma(n[2],n[2],n[3]*n[3])))<1e-15
         n=_arc_norme(stored_n)
     else
         n=_arc_norme(n)
@@ -127,7 +137,7 @@ function _arc_geometry(cps::Vector{NTuple{3,Float64}}, kind::Symbol,
     v=_arc_norme(_arc_cross(n,u))
     x0=_arc_dot(raw0,u); y0=_arc_dot(raw0,v)
     x2=_arc_dot(raw2,u); y2=_arc_dot(raw2,v)
-    R=sqrt(x0*x0+y0*y0); R2=sqrt(x2*x2+y2*y2)
+    R=sqrt(fma(x0,x0,y0*y0)); R2=sqrt(fma(x2,x2,y2*y2))
     (R==0.0 || R2==0.0) && throw(ArgumentError(
         "$caller: zero radius in circle or ellipse with tag $tag"))
     if !has_major && abs((R-R2)/(R+R2))>0.1
@@ -141,18 +151,20 @@ function _arc_geometry(cps::Vector{NTuple{3,Float64}}, kind::Symbol,
         x3=_arc_dot(raw3,u); y3=_arc_dot(raw3,v)
         A4=_angle_02pi(_myatan2(y3,x3))
         s,c=sin(A4),cos(A4)
-        x1=x0*c+y0*s; y1=-x0*s+y0*c
-        xe=x2*c+y2*s; ye=-x2*s+y2*c
+        x1=fma(x0,c,y0*s); y1=fma(-x0,s,y0*c)
+        xe=fma(x2,c,y2*s); ye=fma(-x2,s,y2*c)
         # sys2x2 [x1² y1²; xe² ye²]·sol = (1,1) → sol = (1/f1², 1/f2²),
         # evaluated in Gmsh's exact association: pre-rounded squared
-        # products and a multiply-by-reciprocal solve.
-        det=(x1*x1)*(ye*ye) - (xe*xe)*(y1*y1)
+        # products and a multiply-by-reciprocal solve. `det`/`res` contract
+        # `a*b - c*d` to `fma(a,b,-(c*d))`; `pow(x,2)` in `matnorm` is not
+        # contracted (the call lowers to `x*x` after the contraction pass).
+        det=fma(x1*x1,ye*ye,-((xe*xe)*(y1*y1)))
         matnorm=(x1*x1)^2+(ye*ye)^2+(y1*y1)^2+(xe*xe)^2
         s0=s1=0.0
         if !(matnorm==0.0 || abs(det)/matnorm<1e-16)
             ud=1.0/det
-            s0=(1.0*(ye*ye)-(y1*y1)*1.0)*ud
-            s1=((x1*x1)*1.0-(xe*xe)*1.0)*ud
+            s0=fma(1.0,ye*ye,-((y1*y1)*1.0))*ud
+            s1=fma(x1*x1,1.0,-((xe*xe)*1.0))*ud
         end
         (s0<=0.0 || s1<=0.0) && throw(ArgumentError(
             "$caller: ellipse with tag $tag is wrong"))
@@ -192,15 +204,17 @@ end
 # evaluated in the local frame as an inclined ellipse, then mapped back to
 # world coordinates through invmat (whose columns are u, v, n).
 function _arc_point(g, u::Float64)
-    θ=g.t1-(g.t1-g.t2)*u-g.incl
-    lx=g.f1*cos(θ)*cos(g.incl)-g.f2*sin(θ)*sin(g.incl)
-    ly=g.f1*cos(θ)*sin(g.incl)+g.f2*sin(θ)*cos(g.incl)
-    C,U,V=g.center,g.u,g.v
-    # Association order follows `Projette` + the center add so values agree
-    # bit-for-bit with `InterpolateCurve`.
-    return ((lx*U[1]+ly*V[1])+C[1],
-            (lx*U[2]+ly*V[2])+C[2],
-            (lx*U[3]+ly*V[3])+C[3])
+    θ=fma(-(g.t1-g.t2),u,g.t1)-g.incl
+    lx=fma(g.f1*cos(θ),cos(g.incl),-(g.f2*sin(θ)*sin(g.incl)))
+    ly=fma(g.f1*cos(θ),sin(g.incl),g.f2*sin(θ)*cos(g.incl))
+    C,U,V,N=g.center,g.u,g.v,g.n
+    # `fma` reproduces the compiled contractions: `theta` fuses the sweep
+    # product, the local frame fuses the first product of each `f·trig·trig`
+    # term, and `Projette` is a three-product sum (V.Pos.Z is exactly 0.0)
+    # followed by the separate center add — bit-for-bit `InterpolateCurve`.
+    return (fma(0.0,N[1],fma(lx,U[1],ly*V[1]))+C[1],
+            fma(0.0,N[2],fma(lx,U[2],ly*V[2]))+C[2],
+            fma(0.0,N[3],fma(lx,U[3],ly*V[3]))+C[3])
 end
 
 # Analytic first derivative dP/du. Gmsh's getDerivative uses a finite
@@ -477,33 +491,36 @@ function _occ_reference_direction(axis::NTuple{3,Float64})
 end
 
 # Second in-plane direction of an OCC circle record.
-@inline _occ_circle_y(g) = _arc_cross(g.n,g.X)
+@inline _occ_circle_y(g) = _occ_cross(g.n,g.X)
 
+# `ElCLib::CircleValue`: A1·X + A2·Y + PLoc with A1 = R·cos, A2 = R·sin;
+# `CircleD1`/`CircleD2` use the same `SetLinearForm` association — the first
+# product of each component fused, the second rounded.
 function _occ_circle_point(g,t::Float64)
     Y=_occ_circle_y(g)
-    c,s=cos(t),sin(t)
+    A1,A2=g.r*cos(t),g.r*sin(t)
     C,X=g.center,g.X
-    return (C[1]+g.r*(c*X[1]+s*Y[1]),
-            C[2]+g.r*(c*X[2]+s*Y[2]),
-            C[3]+g.r*(c*X[3]+s*Y[3]))
+    return (fma(A1,X[1],A2*Y[1])+C[1],
+            fma(A1,X[2],A2*Y[2])+C[2],
+            fma(A1,X[3],A2*Y[3])+C[3])
 end
 
 function _occ_circle_derivative(g,t::Float64)
     Y=_occ_circle_y(g)
-    c,s=cos(t),sin(t)
+    Xc,Yc=g.r*cos(t),g.r*sin(t)
     X=g.X
-    return (g.r*(-s*X[1]+c*Y[1]),
-            g.r*(-s*X[2]+c*Y[2]),
-            g.r*(-s*X[3]+c*Y[3]))
+    return (fma(-Yc,X[1],Xc*Y[1]),
+            fma(-Yc,X[2],Xc*Y[2]),
+            fma(-Yc,X[3],Xc*Y[3]))
 end
 
 function _occ_circle_second_derivative(g,t::Float64)
     Y=_occ_circle_y(g)
-    c,s=cos(t),sin(t)
+    Xc,Yc=g.r*cos(t),g.r*sin(t)
     X=g.X
-    return (-g.r*(c*X[1]+s*Y[1]),
-            -g.r*(c*X[2]+s*Y[2]),
-            -g.r*(c*X[3]+s*Y[3]))
+    return (fma(-Xc,X[1],(-Yc)*Y[1]),
+            fma(-Xc,X[2],(-Yc)*Y[2]),
+            fma(-Xc,X[3],(-Yc)*Y[3]))
 end
 
 # Exact OCC-circle bounding box. A full circle's extent along axis i is
@@ -972,7 +989,7 @@ function _materialize_torus!(m::GeoModel, center::NTuple{3,Float64},
     Xe=(ca*X[1]+sa*Y[1],ca*X[2]+sa*Y[2],ca*X[3]+sa*Y[3])
     # A meridian's plane contains the axis: X_dir = R(u)·X, Y_dir = axis, so
     # its normal is R(u)·X × axis.
-    meridian_normal=(dir)->_arc_cross(dir,n)
+    meridian_normal=(dir)->_occ_cross(dir,n)
     full=angle>=_OCC_TWO_PI
     points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
     try
@@ -1043,36 +1060,43 @@ end
 # parameter (arc length along the axis for Cylinder, slant length for Cone,
 # latitude for Sphere, tube angle for Torus).
 
-@inline _occ_frame_y(g) = _arc_cross(g.axis,g.X)
+@inline _occ_frame_y(g) = _occ_cross(g.axis,g.X)
 
+# `ElSLib::*Value`: A1·X + A2·Y + A3·Z + PLoc with the coefficient products
+# pre-rounded — `(A1·X + A2·Y) + A3·Z` chains the fused multiply-adds in
+# written order before the location add. `TorusValue` additionally zeroes
+# coefficients below `10·(r_minor+r_major)·eps` (the OCC620 clamp).
 function _occ_surface_point(g, u::Float64, v::Float64)
     Y=_occ_frame_y(g)
     c,s=cos(u),sin(u)
+    C,X,Z=g.center,g.X,g.axis
     if g.occ===:cylinder
-        return (g.center[1]+g.radius*(c*g.X[1]+s*Y[1])+v*g.axis[1],
-                g.center[2]+g.radius*(c*g.X[2]+s*Y[2])+v*g.axis[2],
-                g.center[3]+g.radius*(c*g.X[3]+s*Y[3])+v*g.axis[3])
+        A1,A2,A3=g.radius*c,g.radius*s,v
     elseif g.occ===:sphere
-        cv,sv=cos(v),sin(v)
-        return (g.center[1]+g.radius*(cv*(c*g.X[1]+s*Y[1])+sv*g.axis[1]),
-                g.center[2]+g.radius*(cv*(c*g.X[2]+s*Y[2])+sv*g.axis[2]),
-                g.center[3]+g.radius*(cv*(c*g.X[3]+s*Y[3])+sv*g.axis[3]))
+        R,A3=g.radius*cos(v),g.radius*sin(v)
+        A1,A2=R*c,R*s
     elseif g.occ===:cone
-        slant=sqrt(g.height*g.height+(g.r1-g.r2)*(g.r1-g.r2))
-        r=g.r1-v*(g.r1-g.r2)/slant
-        z=v*g.height/slant
-        return (g.center[1]+r*(c*g.X[1]+s*Y[1])+z*g.axis[1],
-                g.center[2]+r*(c*g.X[2]+s*Y[2])+z*g.axis[2],
-                g.center[3]+r*(c*g.X[3]+s*Y[3])+z*g.axis[3])
+        # OCCT stores the half-angle atan((R2−R1)/H) (BRepPrim_Cone::
+        # SetParameters) and ConeValue calls sin/cos on it per eval; the
+        # slant-ratio forms differ by ~1ulp from the libm trig values.
+        sa=atan((g.r2-g.r1)/g.height)
+        R,A3=fma(v,sin(sa),g.r1),v*cos(sa)
+        A1,A2=R*c,R*s
     elseif g.occ===:torus
         cv,sv=cos(v),sin(v)
-        w=g.r1+g.r2*cv
-        return (g.center[1]+w*(c*g.X[1]+s*Y[1])+g.r2*sv*g.axis[1],
-                g.center[2]+w*(c*g.X[2]+s*Y[2])+g.r2*sv*g.axis[2],
-                g.center[3]+w*(c*g.X[3]+s*Y[3])+g.r2*sv*g.axis[3])
+        R,A3=fma(g.r2,cv,g.r1),g.r2*sv
+        A1,A2=R*c,R*s
+        clamp_eps=10.0*(g.r2+g.r1)*eps()
+        abs(A1)<=clamp_eps && (A1=0.0)
+        abs(A2)<=clamp_eps && (A2=0.0)
+        abs(A3)<=clamp_eps && (A3=0.0)
+    else
+        throw(ArgumentError(
+            "_occ_surface_point: unsupported OCC surface kind $(g.occ)"))
     end
-    throw(ArgumentError(
-        "_occ_surface_point: unsupported OCC surface kind $(g.occ)"))
+    return (fma(A3,Z[1],fma(A1,X[1],A2*Y[1]))+C[1],
+            fma(A3,Z[2],fma(A1,X[2],A2*Y[2]))+C[2],
+            fma(A3,Z[3],fma(A1,X[3],A2*Y[3]))+C[3])
 end
 
 # OCC-reported parametrization bounds per surface kind.

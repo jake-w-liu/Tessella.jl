@@ -144,6 +144,111 @@ const CASES = (
     Point(1) = {0,0,0,1};
     x = Extrude {0,0,1} { GeoEntity{0}{1}; };
     """,
+    # Rotational point extrusion: a Circle arc [start, axis-center, end].
+    """
+    Point(1) = {1,0,0,1};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Point{1}; };
+    """,
+    # The rotation axis is a line — an off-origin point moves it.
+    """
+    Point(1) = {1,0,0,1};
+    out[] = Extrude {{0,0,1},{1,1,0},Pi/2} { Point{1}; };
+    """,
+    # Curve revolve: shared axis-center point, out=[2,5,4,-3].
+    """
+    Point(1) = {1,0,0,1};
+    Point(2) = {1,1,0,1};
+    Line(1) = {1,2};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Curve{1}; };
+    """,
+    # Negative generatrix and negative angle.
+    """
+    Point(1) = {1,0,0,1};
+    Point(2) = {1,1,0,1};
+    Line(1) = {1,2};
+    out[] = Extrude {{0,0,1},{0,0,0},-Pi/3} { Curve{-1}; };
+    """,
+    # An endpoint on the axis collapses: TRIC lateral, out=[3,5,4].
+    """
+    Point(1) = {2,0,0,1};
+    Point(2) = {1,0,0,1};
+    Point(3) = {0,0,0,1};
+    Circle(1) = {1,2,3};
+    Line(2) = {3,1};
+    Curve Loop(1) = {1,2};
+    Plane Surface(1) = {1};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Curve{2}; };
+    """,
+    # Arc generatrix: the circle's control points rotate with the copy.
+    """
+    Point(1) = {2,0,0,1};
+    Point(2) = {1,0,0,1};
+    Point(3) = {0,0,0,1};
+    Circle(1) = {1,2,3};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Curve{1}; };
+    """,
+    # Surface revolve: volume shell, laterals 13/17/21/25, top 26.
+    """
+    Point(1) = {1,0,0,1};
+    Point(2) = {1,1,0,1};
+    Point(3) = {1,1,1,1};
+    Point(4) = {1,0,1,1};
+    Line(1) = {1,2};
+    Line(2) = {2,3};
+    Line(3) = {3,4};
+    Line(4) = {4,1};
+    Curve Loop(1) = {1,2,3,4};
+    Plane Surface(1) = {1};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Surface{1}; };
+    """,
+    # Signed surface generatrix.
+    """
+    Point(1) = {1,0,0,1};
+    Point(2) = {1,1,0,1};
+    Point(3) = {1,1,1,1};
+    Point(4) = {1,0,1,1};
+    Line(1) = {1,2};
+    Line(2) = {2,3};
+    Line(3) = {3,4};
+    Line(4) = {4,1};
+    Curve Loop(1) = {1,2,3,4};
+    Plane Surface(1) = {1};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/3} { Surface{-1}; };
+    """,
+    # Collapsed revolves: on-axis point, zero angle, full turn.
+    """
+    Point(1) = {0,0,0,1};
+    Point(2) = {1,0,0,1};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Point{1}; };
+    out2[] = Extrude {{0,0,1},{0,0,0},0} { Point{2}; };
+    x[] = Extrude {{0,0,1},{0,0,0},2*Pi} { Point{2}; };
+    """,
+    # An arc spanning more than Pi stays a single Circle entity.
+    """
+    Point(1) = {1,0,0,1};
+    out[] = Extrude {{0,0,1},{0,0,0},3*Pi/2} { Point{1}; };
+    """,
+    # ExtrudeReturnLateralEntities = 0 on a revolved curve.
+    """
+    Geometry.ExtrudeReturnLateralEntities = 0;
+    Point(1) = {1,0,0,1};
+    Point(2) = {1,1,0,1};
+    Line(1) = {1,2};
+    out[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Curve{1}; };
+    """,
+    # Non-axis-aligned revolve: Gmsh's Gram-Schmidt rotation frame.
+    """
+    Point(1) = {1,2,3,1};
+    Point(2) = {0,1,0,1};
+    Line(1) = {1,2};
+    out[] = Extrude {{1,1,1},{-1,0.5,2},Pi/3} { Curve{1}; };
+    """,
+    # A revolve after a translate: allocator interleaving across forms.
+    """
+    Point(1) = {1,0,0,1};
+    out[] = Extrude {0,0,1} { Point{1}; };
+    out2[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Point{2}; };
+    """,
 )
 
 const GMSH_EXECUTABLE = find_gmsh_executable()
