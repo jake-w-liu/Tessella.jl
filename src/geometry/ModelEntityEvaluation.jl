@@ -218,9 +218,64 @@ function _model_plane_parameter_bounds(plane,caller::AbstractString)
     )
 end
 
+# `CTX::instance()->lc` — the diagonal of the model's point bounding box after
+# `FinishUpBoundingBox`'s degenerate-axis padding (`tol = max(1e-6,
+# Geometry.Tolerance)`). Feeds the `tol·lc` convergence bound of `XYZToU`.
+function _model_lc(m::GeoModel)
+    isempty(m.points) && return 1.0
+    lo=reduce((a,b)->min.(a,b),values(m.points))
+    hi=reduce((a,b)->max.(a,b),values(m.points))
+    range=(hi[1]-lo[1],hi[2]-lo[2],hi[3]-lo[3])
+    tol=1e-6
+    pad=(0.0,0.0,0.0)
+    if range[1]<tol && range[2]<tol && range[3]<tol
+        pad=(1.0,1.0,0.0)
+    elseif range[1]<tol && range[2]<tol
+        pad=(range[3],range[3],0.0)
+    elseif range[1]<tol && range[3]<tol
+        pad=(range[2],0.0,0.0)
+    elseif range[2]<tol && range[3]<tol
+        pad=(0.0,range[1],0.0)
+    elseif range[1]<tol
+        pad=(sqrt(fma(range[2],range[2],range[3]*range[3])),0.0,0.0)
+    elseif range[2]<tol
+        pad=(0.0,sqrt(fma(range[1],range[1],range[3]*range[3])),0.0)
+    end
+    return sqrt(fma(range[1]+2.0*pad[1],range[1]+2.0*pad[1],
+        fma(range[2]+2.0*pad[2],range[2]+2.0*pad[2],
+            (range[3]+2.0*pad[3])*(range[3]+2.0*pad[3]))))
+end
+
 function _model_append_point!(output::Vector{Float64},point)
     append!(output,point)
     return output
+end
+
+# Single-parameter curve evaluation shared by `model_value` and
+# `model_reparametrize_on_surface`: OCC records evaluate on their own
+# parameter range (`:circle`/`:degenerate`/`:line`), built-in lines on the
+# chord ratio, arcs on the `InterpolateCurve` sweep.
+function _model_curve_point(
+    m::GeoModel,
+    tag::Int,
+    parameter::Float64,
+    caller::AbstractString,
+    index::Int=1
+)
+    occ=_occ_geometry_checked(m,tag,caller)
+    if occ!==nothing && occ.occ===:circle
+        return _occ_circle_point(occ,parameter)
+    elseif occ!==nothing && occ.occ===:degenerate
+        # `_trimmed->point(_curve2d->Value(par))` — the pcurve-backed pole
+        # eval, not the collapsed vertex.
+        return _occ_degenerate_point(occ,tag,parameter)
+    elseif occ!==nothing && occ.occ===:line
+        return _occ_line_point(occ,parameter)
+    elseif _curve_type(m,tag)==:line
+        line=_model_line_geometry(m,tag,caller)
+        return _model_line_point(line,parameter,caller,index)
+    end
+    return _arc_point(_arc_geometry(m,tag,caller),parameter)
 end
 
 """
@@ -279,36 +334,9 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     output=Float64[]
     sizehint!(output,3*(length(values)÷stride))
     if dimension==1
-        occ=_occ_geometry_checked(m,entity_tag,caller)
-        if occ!==nothing && occ.occ===:circle
-            for parameter in values
-                _model_append_point!(output,
-                    _occ_circle_point(occ,parameter))
-            end
-        elseif occ!==nothing && occ.occ===:degenerate
-            point=m.points[m.curves[entity_tag][1]]
-            for _ in values
-                _model_append_point!(output,point)
-            end
-        elseif occ!==nothing && occ.occ===:line
-            line=_model_line_geometry(m,entity_tag,caller)
-            span=occ.t1-occ.t0
-            for (index,parameter) in pairs(values)
-                u=occ.t0==occ.t1 ? 0.0 : (parameter-occ.t0)/span
-                _model_append_point!(output,
-                    _model_line_point(line,u,caller,index))
-            end
-        elseif _curve_type(m,entity_tag)==:line
-            line=_model_line_geometry(m,entity_tag,caller)
-            for (index,parameter) in pairs(values)
-                _model_append_point!(output,
-                    _model_line_point(line,parameter,caller,index))
-            end
-        else
-            arc=_arc_geometry(m,entity_tag,caller)
-            for parameter in values
-                _model_append_point!(output,_arc_point(arc,parameter))
-            end
+        for (index,parameter) in pairs(values)
+            _model_append_point!(output,_model_curve_point(
+                m,entity_tag,parameter,caller,index))
         end
     else
         surface_geometry=get(m.surface_geometry,entity_tag,nothing)
@@ -366,19 +394,13 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
             end
         elseif occ!==nothing && occ.occ===:degenerate
             sizehint!(output,3length(values))
-            for _ in values
-                append!(output,(0.0,0.0,0.0))
+            for parameter in values
+                append!(output,_occ_degenerate_d1(occ,entity_tag,parameter))
             end
         elseif occ!==nothing && occ.occ===:line
-            line=_model_line_geometry(m,entity_tag,caller)
-            derivative=_model_line_derivative(line,entity_tag,caller)
-            span=occ.t1-occ.t0
-            span==0.0 || (derivative=(derivative[1]/span,
-                                      derivative[2]/span,
-                                      derivative[3]/span))
             sizehint!(output,3length(values))
             for _ in values
-                append!(output,derivative)
+                append!(output,occ.dir)
             end
         elseif _curve_type(m,entity_tag)==:line
             line=_model_line_geometry(m,entity_tag,caller)
@@ -391,10 +413,20 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
             arc=_arc_geometry(m,entity_tag,caller)
             sizehint!(output,3length(values))
             for parameter in values
-                append!(output,_arc_first_derivative(arc,parameter))
+                append!(output,_arc_first_derivative_fd(arc,parameter))
             end
         end
     else
+        surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+            sizehint!(output,3length(values))
+            for index in 1:2:length(values)
+                _,du,dv=_occ_surface_d1(
+                    surface_geometry,values[index],values[index+1])
+                append!(output,du);append!(output,dv)
+            end
+            return output
+        end
         plane=_model_plane_frame(m,entity_tag,caller)
         sizehint!(output,3length(values))
         for _ in 1:2:length(values)
@@ -421,22 +453,34 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
     end
     if dimension==1
         occ=_occ_geometry_checked(m,entity_tag,caller)
-        if occ!==nothing && occ.occ===:circle
+        if occ!==nothing
             output=Float64[]
             sizehint!(output,3*length(values))
             for parameter in values
-                append!(output,_occ_circle_second_derivative(occ,parameter))
+                append!(output,_occ_curve_second_der(
+                    m,occ,entity_tag,parameter,caller))
             end
             return output
-        elseif occ!==nothing && occ.occ in (:line,:degenerate)
-            return zeros(Float64,3*length(values))
         end
         _curve_type(m,entity_tag)!=:line && begin
             arc=_arc_geometry(m,entity_tag,caller)
             output=Float64[]
             sizehint!(output,3*length(values))
             for parameter in values
-                append!(output,_arc_second_derivative(arc,parameter))
+                append!(output,_arc_second_derivative_fd(arc,parameter))
+            end
+            return output
+        end
+    end
+    if dimension==2
+        surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+            output=Float64[]
+            sizehint!(output,9*(length(values)÷2))
+            for index in 1:2:length(values)
+                _,_,_,duu,dvv,duv=_occ_surface_d2(
+                    surface_geometry,values[index],values[index+1])
+                append!(output,duu);append!(output,dvv);append!(output,duv)
             end
             return output
         end
@@ -462,15 +506,30 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
     end
     if dimension==1
         occ=_occ_geometry_checked(m,entity_tag,caller)
-        if occ!==nothing && occ.occ===:circle
-            return fill(1.0/occ.r,length(values))
-        elseif occ!==nothing && occ.occ in (:line,:degenerate)
-            return zeros(Float64,length(values))
+        if occ!==nothing
+            return Float64[
+                _occ_curve_curvature(m,occ,entity_tag,parameter,caller)
+                for parameter in values]
         end
         _curve_type(m,entity_tag)!=:line &&
             return Float64[
                 _arc_curvature(_arc_geometry(m,entity_tag,caller),parameter)
                 for parameter in values]
+    end
+    if dimension==2
+        surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+            # `OCCFace::curvatureMax` — `BRepLProp_SLProps` max absolute
+            # principal curvature, `1e-12` when undefined (singular points).
+            output=Float64[]
+            sizehint!(output,length(values)÷2)
+            for index in 1:2:length(values)
+                defined,cmax,cmin,_,_=_occ_surface_curvatures(
+                    surface_geometry,values[index],values[index+1])
+                push!(output,defined ? max(abs(cmax),abs(cmin)) : 1e-12)
+            end
+            return output
+        end
     end
     dimension==1 ? _model_line_geometry(m,entity_tag,caller) :
                    _model_plane_frame(m,entity_tag,caller)
@@ -486,8 +545,27 @@ function model_principal_curvatures(m::GeoModel,tag,parametric_coordinates)
     _,entity_tag=_model_metadata_entity(m,2,tag,caller)
     values=_model_evaluation_values(
         parametric_coordinates,2,caller,"parametric coordinates")
-    plane=_model_plane_frame(m,entity_tag,caller)
     count=length(values)÷2
+    surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+    if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+        curvatures_max=Float64[];curvatures_min=Float64[]
+        directions_max=Float64[];directions_min=Float64[]
+        sizehint!(curvatures_max,count);sizehint!(curvatures_min,count)
+        sizehint!(directions_max,3count);sizehint!(directions_min,3count)
+        for index in 1:2:length(values)
+            # `OCCFace::curvatures` — Gmsh discards the `IsCurvatureDefined`
+            # result and pushes uninitialized outputs at singular points;
+            # Tessella returns zeros instead.
+            defined,cmax,cmin,dirmax,dirmin=_occ_surface_curvatures(
+                surface_geometry,values[index],values[index+1])
+            push!(curvatures_max,defined ? cmax : 0.0)
+            push!(curvatures_min,defined ? cmin : 0.0)
+            append!(directions_max,defined ? dirmax : (0.0,0.0,0.0))
+            append!(directions_min,defined ? dirmin : (0.0,0.0,0.0))
+        end
+        return curvatures_max,curvatures_min,directions_max,directions_min
+    end
+    plane=_model_plane_frame(m,entity_tag,caller)
     first_directions=Float64[];second_directions=Float64[]
     sizehint!(first_directions,3count);sizehint!(second_directions,3count)
     for _ in 1:count
@@ -517,6 +595,18 @@ function model_normal(m::GeoModel,tag,parametric_coordinates)
                 (c[1]-a[1],c[2]-a[2],c[3]-a[3])),caller,
                 "discrete surface normal")
             append!(output,normal)
+        end
+        return output
+    end
+    surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+    if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+        # `OCCFace::normal` — the normalized `SVector3` cross of the D1
+        # tangents (zero stays zero at singular parameters).
+        output=Float64[]
+        sizehint!(output,3*(length(values)÷2))
+        for index in 1:2:length(values)
+            append!(output,_occ_surface_normal(
+                surface_geometry,values[index],values[index+1]))
         end
         return output
     end
@@ -562,28 +652,47 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
     occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
-    line=dimension==1 && occ===nothing ?
-        _model_line_geometry(m,entity_tag,caller) : nothing
-    occ!==nothing && occ.occ===:line &&
-        (line=_model_line_geometry(m,entity_tag,caller))
-    plane=dimension==2 ? _model_plane_frame(m,entity_tag,caller) : nothing
+    line=nothing;arc=nothing
+    if dimension==1 && occ===nothing
+        _curve_type(m,entity_tag)==:line ?
+            (line=_model_line_geometry(m,entity_tag,caller)) :
+            (arc=_arc_geometry(m,entity_tag,caller))
+    end
+    surface_geometry=dimension==2 ?
+        get(m.surface_geometry,entity_tag,nothing) : nothing
+    occ_surface=surface_geometry!==nothing &&
+        hasproperty(surface_geometry,:occ)
+    plane=dimension==2 && !occ_surface ?
+        _model_plane_frame(m,entity_tag,caller) : nothing
+    lc=(arc!==nothing || occ!==nothing || occ_surface) ?
+        _model_lc(m) : 0.0
     for index in 1:3:length(values)
         coordinate=(values[index],values[index+1],values[index+2])
         if dimension==1
-            if occ===nothing
+            if occ!==nothing
+                # `OCCEdge::parFromPoint` — the OCC projector's unclamped
+                # parameter, or `GEdge::parFromPoint`'s `XYZToU` when the
+                # projector finds no in-bounds extremum.
+                proj=_occ_curve_project(
+                    m,occ,entity_tag,coordinate,caller)
+                proj===nothing ? push!(output,_occ_curve_xyz_to_u(
+                    m,occ,entity_tag,coordinate,lc,caller)[2]) :
+                    push!(output,proj[1])
+            elseif line!==nothing
                 parameter,_=_model_line_parameter_exact(line,coordinate)
                 push!(output,_model_rational_float(
                     parameter,caller,"Line parameter for point $((index+2)÷3)"))
-            elseif occ.occ===:circle
-                push!(output,_occ_circle_parameter(occ,coordinate))
-            elseif occ.occ===:line
-                parameter,_=_model_line_parameter_exact(line,coordinate)
-                push!(output,occ.t0+_model_rational_float(
-                    parameter,caller,"Line parameter for point $((index+2)÷3)")*
-                    (occ.t1-occ.t0))
             else
-                push!(output,occ.t0)
+                # `GEdge::parFromPoint` → `XYZToU` — multi-seed damped
+                # Newton on the `InterpolateCurve` finite difference.
+                _,u=_arc_xyz_to_u(arc,coordinate,lc)
+                push!(output,u)
             end
+        elseif occ_surface
+            # `OCCFace::parFromPoint` — the OCC surface projector's (u,v),
+            # or `GFace::XYZtoUV`'s multi-seed Newton on failure.
+            append!(output,_occ_surface_parameter_on_face(
+                surface_geometry,coordinate,lc))
         else
             append!(output,_model_plane_parameters(
                 plane,coordinate,caller,(index+2)÷3))
@@ -664,12 +773,57 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
                                     parametric ? "parametric coordinates" :
                                                  "coordinates")
     if dimension==1
+        occ=_occ_geometry_checked(m,entity_tag,caller)
         if parametric
+            occ!==nothing &&
+                return count(p->occ.t0<=p<=occ.t1,values)
             return count(parameter->0<=parameter<=1,values)
+        end
+        if occ!==nothing
+            # `OCCEdge::containsPoint` — the OCC projector must accept an
+            # extremum and land within the edge tolerance
+            # (`BRep_Tool::Tolerance` = `Precision::Confusion` = 1e-7);
+            # projector failure reports outside.
+            return count(1:3:length(values)) do index
+                q=(values[index],values[index+1],values[index+2])
+                proj=_occ_curve_project(m,occ,entity_tag,q,caller)
+                proj!==nothing && sqrt(_sqdist(q,proj[2]))<=1e-7
+            end
+        end
+        _curve_type(m,entity_tag)!=:line && begin
+            # `GEdge::containsPoint` — `XYZToU(relax=1)` convergence plus the
+            # `[0,1]` parameter check.
+            arc=_arc_geometry(m,entity_tag,caller)
+            lc=_model_lc(m)
+            return count(1:3:length(values)) do index
+                ok,u=_arc_xyz_to_u(arc,
+                    (values[index],values[index+1],values[index+2]),lc)
+                ok && 0.0<=u<=1.0
+            end
         end
         line=_model_line_geometry(m,entity_tag,caller)
         return count(index->_model_line_contains(
             line,(values[index],values[index+1],values[index+2])),
+            1:3:length(values))
+    end
+    surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+    if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+        if parametric
+            surface_geometry.occ===:plane && throw(ArgumentError(
+                "$caller: trimmed-plane parametric containment requires " *
+                "the BRepClass 2-D wire classifier"))
+            lower,upper=_occ_surface_bounds(surface_geometry)
+            return count(index->
+                lower[1]<=values[index]<=upper[1] &&
+                lower[2]<=values[index+1]<=upper[2],1:2:length(values))
+        end
+        # `BRepClass_FaceClassifier`'s 3-D `Perform` classifies the nearest
+        # `Extrema_ExtPS` parameter — there is no 3-D distance check, so any
+        # accepted extremum reports IN/ON while a fully rejected extremum set
+        # (every projection outside the trimmed bounds) leaves the state
+        # UNKNOWN, counted as outside.
+        return count(index->_occ_surface_contains(surface_geometry,
+            (values[index],values[index+1],values[index+2])),
             1:3:length(values))
     end
     plane=_model_plane_frame(m,entity_tag,caller)
@@ -721,19 +875,56 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
         end
         return closest,parameters
     end
-    line=dimension==1 ? _model_line_geometry(m,entity_tag,caller) : nothing
-    plane=dimension==2 ? _model_plane_frame(m,entity_tag,caller) : nothing
+    occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
+    line=nothing;arc=nothing
+    if dimension==1 && occ===nothing
+        _curve_type(m,entity_tag)==:line ?
+            (line=_model_line_geometry(m,entity_tag,caller)) :
+            (arc=_arc_geometry(m,entity_tag,caller))
+    end
+    surface_geometry=dimension==2 ?
+        get(m.surface_geometry,entity_tag,nothing) : nothing
+    occ_surface=surface_geometry!==nothing &&
+        hasproperty(surface_geometry,:occ)
+    plane=dimension==2 && !occ_surface ?
+        _model_plane_frame(m,entity_tag,caller) : nothing
+    lc=occ_surface ? _model_lc(m) : 0.0
     for index in 1:3:length(values)
         point_index=(index+2)÷3
         coordinate=(values[index],values[index+1],values[index+2])
         if dimension==1
-            exact,_=_model_line_parameter_exact(line,coordinate)
-            exact=clamp(exact,zero(exact),one(exact))
-            parameter=_model_rational_float(
-                exact,caller,"Line parameter for point $point_index")
-            push!(parameters,parameter)
-            _model_append_point!(closest,
-                _model_line_point(line,exact,caller,point_index))
+            if occ!==nothing
+                # `OCCEdge::closestPoint` — the OCC projector's extremum, or
+                # `GEdge::closestPoint`'s scan + golden-section search when
+                # the projector finds no in-bounds extremum.
+                proj=_occ_curve_project(
+                    m,occ,entity_tag,coordinate,caller)
+                t,pt=proj===nothing ?
+                    _occ_curve_closest(m,occ,entity_tag,coordinate,caller) :
+                    proj
+                push!(parameters,t)
+                _model_append_point!(closest,pt)
+            elseif line!==nothing
+                exact,_=_model_line_parameter_exact(line,coordinate)
+                exact=clamp(exact,zero(exact),one(exact))
+                parameter=_model_rational_float(
+                    exact,caller,"Line parameter for point $point_index")
+                push!(parameters,parameter)
+                _model_append_point!(closest,
+                    _model_line_point(line,exact,caller,point_index))
+            else
+                # `GEdge::closestPoint` — 100-sample scan plus the recursive
+                # golden-section search.
+                t,pt=_arc_closest(arc,coordinate)
+                push!(parameters,t)
+                _model_append_point!(closest,pt)
+            end
+        elseif occ_surface
+            # `OCCFace::closestPoint` — the OCC surface projector's
+            # extremum, or the unrestricted-surface minimization fallback.
+            u,v,xyz=_occ_surface_closest(surface_geometry,coordinate,lc)
+            append!(parameters,(u,v))
+            _model_append_point!(closest,xyz)
         else
             exact=_model_plane_parameters_exact(plane,coordinate)
             parameter=ntuple(axis->_model_rational_float(
@@ -771,25 +962,41 @@ function model_reparametrize_on_surface(
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1),caller)
     _,plane_tag=_model_metadata_entity(m,2,surface_tag,caller)
-    _model_reparametrization_selector(which,caller)
+    which_dir=_model_reparametrization_selector(which,caller)
     values=_model_evaluation_values(
         parametric_coordinates,1,caller,"parametric coordinates")
+    surface_geometry=get(m.surface_geometry,plane_tag,nothing)
+    occ_surface=surface_geometry!==nothing &&
+        hasproperty(surface_geometry,:occ)
+    plane=occ_surface ? nothing : _model_plane_frame(m,plane_tag,caller)
+    lc=occ_surface ? _model_lc(m) : 0.0
+    if occ_surface
+        if dimension==0
+            isempty(values) || throw(ArgumentError(
+                "$caller: Point parametric coordinates must be empty"))
+            return collect(_occ_vertex_reparam_on_face(
+                m,plane_tag,surface_geometry,entity_tag,which_dir,lc))
+        end
+        output=Float64[]
+        sizehint!(output,2length(values))
+        for parameter in values
+            append!(output,_occ_edge_reparam_on_face(
+                m,surface_geometry,entity_tag,parameter,which_dir,lc,caller))
+        end
+        return output
+    end
     if dimension==0
         isempty(values) || throw(ArgumentError(
             "$caller: Point parametric coordinates must be empty"))
-        plane=_model_plane_frame(m,plane_tag,caller)
-        return collect(_model_plane_parameters(
-            plane,m.points[entity_tag],caller,1))
+        coordinate=m.points[entity_tag]
+        return collect(_model_plane_parameters(plane,coordinate,caller,1))
     end
 
-    line=_model_line_geometry(m,entity_tag,caller)
-    plane=_model_plane_frame(m,plane_tag,caller)
     output=Float64[]
     sizehint!(output,2length(values))
     for (index,parameter) in pairs(values)
-        coordinate=_model_line_point(line,parameter,caller,index)
-        append!(output,_model_plane_parameters(
-            plane,coordinate,caller,index))
+        coordinate=_model_curve_point(m,entity_tag,parameter,caller,index)
+        append!(output,_model_plane_parameters(plane,coordinate,caller,index))
     end
     return output
 end

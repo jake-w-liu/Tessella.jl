@@ -25,7 +25,8 @@ using Tessella.MeshTypes: ntets, validate
     # top circle, seam line, bottom circle; lateral [-top,-seam,bottom,seam];
     # caps Plane{top}, Plane{bottom}; shell [lateral,+top,-bottom].
     @test sort!(collect(keys(m.points)))==[1,2]
-    @test m.points[1]==(1.0,0.0,2.0) && m.points[2]==(1.0,0.0,0.0)
+    @test m.points[1]==(1.0,-2.4492935982947064e-16,2.0) &&
+          m.points[2]==(1.0,-2.4492935982947064e-16,0.0)
     @test sort!(collect(keys(m.curves)))==[1,2,3]
     @test m.curves[1]==(1,1) && m.curves[2]==(2,1) && m.curves[3]==(2,2)
     @test sort!(collect(keys(m.surfaces)))==[1,2,3]
@@ -75,7 +76,8 @@ end
     # `addSphere(0,0,0,1)`: north then south pole; degenerate north edge,
     # meridian circle, degenerate south edge; one Sphere face; shell [face].
     @test sort!(collect(keys(m.points)))==[1,2]
-    @test m.points[1]==(0.0,0.0,1.0) && m.points[2]==(0.0,0.0,-1.0)
+    @test m.points[1]==(6.123233995736766e-17,-1.4997597826618576e-32,1.0) &&
+          m.points[2]==(6.123233995736766e-17,-1.4997597826618576e-32,-1.0)
     @test sort!(collect(keys(m.curves)))==[1,2,3]
     @test m.curves[1]==(1,1) && m.curves[2]==(2,1) && m.curves[3]==(2,2)
     @test sort!(collect(keys(m.surfaces)))==[1]
@@ -87,11 +89,14 @@ end
     @test model_entity_type(m,1,3)=="Unknown"
     @test last.(model_boundary(m,[(3,1)],true,true,false))==[1]
     @test last.(model_boundary(m,[(2,1)],false,true,false))==[-1,-2,3,2]
-    # Degenerate edges evaluate to their pole with zero derivatives.
-    @test model_value(m,1,1,[0.0])≈[0.0,0.0,1.0]
-    @test model_value(m,1,1,[2.0])≈[0.0,0.0,1.0]
-    @test model_derivative(m,1,1,[1.0])==[0.0,0.0,0.0]
-    @test model_curvature(m,1,1,[0.0])≈[0.0]
+    # Degenerate edges evaluate through their pole pcurve on the face; the
+    # derivative is the surface chain-rule D1 and the curvature floors at
+    # OCCEdge's degenerate 1e-15 (Gmsh 4.15.2 ground truth).
+    @test model_value(m,1,1,[0.0])==[6.123233995736766e-17,0.0,1.0]
+    @test model_value(m,1,1,[2.0])==[-2.5481644567637737e-17,5.567840916174979e-17,1.0]
+    @test model_derivative(m,1,1,[1.0])==
+          [-5.152523740601808e-17,3.308397447266758e-17,0.0]
+    @test model_curvature(m,1,1,[0.0])==[1.0e-15]
     # Meridian: OCC trims to [3π/2,5π/2], sweeping through +x̂.
     t0,t1=model_parametrization_bounds(m,1,2)
     @test t0==[1.5π] && t1==[2.5π]
@@ -114,7 +119,8 @@ end
     m=GeoModel()
     @test add_cone!(m,0,0,0,0,0,2,2,1)==1
     @test sort!(collect(keys(m.points)))==[1,2]
-    @test m.points[1]==(1.0,0.0,2.0) && m.points[2]==(2.0,0.0,0.0)
+    @test m.points[1]==(0.9999999999999999,-2.449293598294706e-16,2.0) &&
+          m.points[2]==(2.0,-4.898587196589413e-16,0.0)
     @test sort!(collect(keys(m.curves)))==[1,2,3]
     @test sort!(collect(keys(m.surfaces)))==[1,2,3]
     @test m.surface_loops[1]==[1,2,-3]
@@ -129,7 +135,8 @@ end
     # r2 == 0: degenerate apex edge replaces the top circle; no top cap.
     m=GeoModel()
     @test add_cone!(m,0,0,0,0,0,2,2,0)==1
-    @test m.points[1]==(0.0,0.0,2.0) && m.points[2]==(2.0,0.0,0.0)
+    @test m.points[1]==(4.0586145430278105e-17,-9.940738618183812e-33,2.0000000000000004) &&
+          m.points[2]==(2.0,-4.898587196589413e-16,0.0)
     @test sort!(collect(keys(m.curves)))==[1,2,3]
     @test sort!(collect(keys(m.surfaces)))==[1,2]
     @test m.surface_loops[1]==[1,-2]
@@ -143,7 +150,8 @@ end
     # r1 == 0: apex at the base; only the top cap.
     m=GeoModel()
     @test add_cone!(m,0,0,0,0,0,2,0,2)==1
-    @test m.points[1]==(2.0,0.0,2.0) && m.points[2]==(0.0,0.0,0.0)
+    @test m.points[1]==(2.0,-4.898587196589413e-16,2.0000000000000004) &&
+          m.points[2]==(0.0,0.0,0.0)
     @test sort!(collect(keys(m.surfaces)))==[1,2]
     @test m.surface_loops[1]==[1,2]
     @test model_entity_type(m,1,1)=="Circle"
@@ -246,7 +254,7 @@ end
     # and meridian circles closed on it, one Torus face, shell [face].
     @test add_torus!(m,0,0,0,3,1)==1
     @test sort!(collect(keys(m.points)))==[1]
-    @test m.points[1]==(4.0,0.0,0.0)
+    @test m.points[1]==(4.0,-9.797174393178826e-16,-2.4492935982947064e-16)
     @test sort!(collect(keys(m.curves)))==[1,2]
     @test m.curves[1]==(1,1) && m.curves[2]==(1,1)
     @test sort!(collect(keys(m.surfaces)))==[1]
@@ -283,8 +291,8 @@ end
     m=GeoModel()
     @test add_torus!(m,0,0,0,3,1;angle=π/2)==1
     @test sort!(collect(keys(m.points)))==[1,2]
-    @test collect(m.points[1])≈[0.0,4.0,0.0] atol=1e-15   # end vertex
-    @test m.points[2]==(4.0,0.0,0.0)                      # start vertex
+    @test m.points[1]==(4.440892098500626e-16,4.0,-2.4492935982947064e-16) # end
+    @test m.points[2]==(4.0,0.0,-2.4492935982947064e-16)                   # start
     @test sort!(collect(keys(m.curves)))==[1,2,3]
     @test m.curves[1]==(2,1) && m.curves[2]==(1,1) && m.curves[3]==(2,2)
     @test sort!(collect(keys(m.surfaces)))==[1,2,3]
@@ -331,12 +339,14 @@ end
     transform_entities!(m,_affine_rotation((0.0,0.0,1.0),(0.0,0.0,0.0),π/2,"test"),[(3,1)])
     @test collect(m.surface_geometry[1].axis)≈[0.0,0.0,1.0] atol=1e-15
     @test collect(m.surface_geometry[1].X)≈[0.0,1.0,0.0] atol=1e-15
-    @test collect(m.points[1])≈[0.0,4.0,0.0] atol=1e-15
+    # gp_Trsf's Rodrigues matrix leaves M11 = 1.1102230246251565e-16 (not
+    # cos(π/2) = 0), so the rotated vertex keeps OCCT's exact residue.
+    @test collect(m.points[1])==[1.4238066491679452e-15,4.0,-2.4492935982947064e-16]
     @test collect(model_bounding_box(m,3,1))≈[-4.0,-4.0,-1.0,4.0,4.0,1.0] atol=1e-15
     # Non-similarity transforms are rejected atomically.
     @test_throws ArgumentError transform_entities!(
         m,_affine_dilation((0.0,0.0,0.0),(1.0,1.0,2.0),"test"),[(3,1)])
-    @test collect(m.points[1])≈[0.0,4.0,0.0] atol=1e-15
+    @test collect(m.points[1])==[1.4238066491679452e-15,4.0,-2.4492935982947064e-16]
 
     # Reflection flips the stored axis: the frame keeps Y′ = T·Y so both the
     # face record and the trimmed equator arc evaluate the reflected patch
