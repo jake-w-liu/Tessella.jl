@@ -17,11 +17,51 @@ const _COHERENCE_RTOL = 1e-8
 # (encoding representability checks); `steps` are the per-pass matrices Gmsh
 # applies to each owned vertex, in order — `Rotate` is three passes
 # (translate by -origin, rotate, translate by +origin), so coordinates match
-# Gmsh's rounding bit-for-bit.
+# Gmsh's rounding bit-for-bit. `occ` carries the gp_Trsf/gp_GTrsf equivalent —
+# (linear, loc) applied as M·p + loc — used for OCC-geometry records and
+# OCC-owned vertices, where `occ.rotate`'s Rodrigues matrix rounds
+# differently from Gmsh's SetRotationMatrix.
 struct _AffineTransform
     linear::NTuple{9,Float64}   # row-major 3×3
     offset::NTuple{3,Float64}
     steps::Vector{NTuple{16,Float64}}  # row-major 4×4, homogeneous last column
+    occ::@NamedTuple{linear::NTuple{9,Float64},loc::NTuple{3,Float64}}
+end
+
+# `gp_XYZ::Multiplied(gp_Mat)` row — x·M(i,1) unrounded into the rounded
+# y·M(i,2), then z·M(i,3) unrounded into the partial (verified against the
+# compiled libTKMath `fmadd` chain).
+@inline _occ_matvec(L::NTuple{9,Float64}, v::NTuple{3,Float64}) =
+    (fma(L[3],v[3],fma(L[1],v[1],L[2]*v[2])),
+     fma(L[6],v[3],fma(L[4],v[1],L[5]*v[2])),
+     fma(L[9],v[3],fma(L[7],v[1],L[8]*v[2])))
+
+# `gp_Trsf::Transforms`: (M·p)·scale + loc. The uniform-scale factor is
+# already folded into `occ.linear` for gp_GTrsf paths (dilate/affine), so the
+# application is one M·p followed by the componentwise loc add.
+@inline _occ_trsf_apply(t::_AffineTransform, p::NTuple{3,Float64}) =
+    _occ_matvec(t.occ.linear,p) .+ t.occ.loc
+
+@inline _occ_linear_apply(t::_AffineTransform, v::NTuple{3,Float64}) =
+    _occ_matvec(t.occ.linear,v)
+
+# `gp_Mat::SetRotation` — Rodrigues form I + sin·K + (1−cos)·K² with K the
+# cross matrix of the normalized axis, built through OCCT's own pass order
+# (K·s, += I, += K²·(1−cos)). The diagonal of K² contracts as
+# −fma(X,X,Y·Y), and the libm calls go through the platform libm shims.
+function _occ_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
+    mod=sqrt(fma(axis[3],axis[3],fma(axis[1],axis[1],axis[2]*axis[2])))
+    A,B,C=axis[1]/mod,axis[2]/mod,axis[3]/mod
+    s,c=_gm_sin(angle),_gm_cos(angle)
+    K=((0.0,-C,B),(C,0.0,-A),(-B,A,0.0))
+    K2=((-fma(C,C,B*B),A*B,A*C),
+        (A*B,-fma(A,A,C*C),B*C),
+        (A*C,B*C,-fma(A,A,B*B)))
+    omc=1.0-c
+    return ntuple(9) do k
+        i=(k-1)÷3+1; j=(k-1)%3+1
+        (K[i][j]*s + (i==j ? 1.0 : 0.0)) + K2[i][j]*omc
+    end
 end
 
 # `vecmat4x4` from Geo.cpp: res[i] = Σ_j mat[i][j]·vec[j] with vec=(x,y,z,1),
@@ -74,7 +114,9 @@ end
 function _affine_translation(delta, caller)
     d=_finite_vector3(delta,caller,"translation delta")
     return _AffineTransform((1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0),d,
-                            [_gmsh_translation_step(d)])
+                            [_gmsh_translation_step(d)],
+                            (linear=(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0),
+                             loc=d))
 end
 
 function _affine_dilation(center, scale, caller)
@@ -89,7 +131,9 @@ function _affine_dilation(center, scale, caller)
           0.0,0.0,sz,c[3]*(1.0-sz),
           0.0,0.0,0.0,1.0)
     return _AffineTransform((sx,0.0,0.0,0.0,sy,0.0,0.0,0.0,sz),
-                            (c[1]*(1-sx),c[2]*(1-sy),c[3]*(1-sz)),[step])
+                            (c[1]*(1-sx),c[2]*(1-sy),c[3]*(1-sz)),[step],
+                            (linear=(sx,0.0,0.0,0.0,sy,0.0,0.0,0.0,sz),
+                             loc=(c[1]*(1-sx),c[2]*(1-sy),c[3]*(1-sz))))
 end
 
 # `norme`/`prodve` from Gmsh's Numeric.h: normalization multiplies by the
@@ -127,7 +171,7 @@ function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
     t1=_gmsh_norme!(_gmsh_prodve(t2,axe))
     t2=_gmsh_norme!(_gmsh_prodve(axe,t1))
     plan=(axe,t1,t2)   # rows
-    c,s=cos(angle),sin(angle)
+    c,s=_gm_cos(angle),_gm_sin(angle)
     rot=((1.0,0.0,0.0),(0.0,c,-s),(0.0,s,c))
     interm=ntuple(3) do i
         ntuple(3) do j
@@ -163,10 +207,16 @@ function _affine_rotation(axis, origin, angle, caller)
     L=(rstep[1],rstep[2],rstep[3],rstep[5],rstep[6],rstep[7],
        rstep[9],rstep[10],rstep[11])
     Ro=_gmsh_matvec4x4(rstep,o)
+    # gp_Trsf::SetRotation: loc = A1.Location − M·A1.Location with the
+    # Rodrigues-built M.
+    Mo=_occ_rotation_matrix(a,θ)
+    Mo_o=_occ_matvec(Mo,o)
     return _AffineTransform(L,(o[1]-Ro[1],o[2]-Ro[2],o[3]-Ro[3]),
                             [_gmsh_translation_step((-o[1],-o[2],-o[3])),
                              rstep,
-                             _gmsh_translation_step(o)])
+                             _gmsh_translation_step(o)],
+                            (linear=Mo,
+                             loc=(o[1]-Mo_o[1],o[2]-Mo_o[2],o[3]-Mo_o[3])))
 end
 
 # Reflection across the plane `A*x + B*y + C*z + D = 0` (Gmsh `Symmetry`). A
@@ -184,7 +234,10 @@ function _affine_symmetry(a, b, c, d, caller)
           A*C*F, B*C*F, fma(C*C,F,1.0), C*D*F,
           0.0,0.0,0.0,1.0)
     L=(step[1],step[2],step[3],step[5],step[6],step[7],step[9],step[10],step[11])
-    return _AffineTransform(L,(step[4],step[8],step[12]),[step])
+    # occ.symmetrize routes through gp_GTrsf with the identical vectorial
+    # part and translation column.
+    return _AffineTransform(L,(step[4],step[8],step[12]),[step],
+                            (linear=L,loc=(step[4],step[8],step[12])))
 end
 
 """
@@ -222,7 +275,17 @@ function transform_entities!(m::GeoModel, t::_AffineTransform,
     end
     plans=[_plan_volume_transform(m,tg,t,caller) for tg in volumes]
     geometry_plans=_plan_occ_geometry_transforms(m,normalized,t,caller)
-    coords=[(tag,_finite_result(_affine_apply_steps(t,m.points[tag]),caller))
+    # Vertices on OCC-geometried edges transform through the gp_Trsf path
+    # (one M·p + loc pass) rather than Gmsh's ApplicationOnShapes steps.
+    occ_pts=Set{Int}()
+    for (ct,g) in m.curve_geometry
+        hasproperty(g,:occ) || continue
+        a,b=m.curves[ct]
+        push!(occ_pts,a); push!(occ_pts,b)
+    end
+    coords=[(tag,_finite_result(
+                tag in occ_pts ? _occ_trsf_apply(t,m.points[tag]) :
+                                 _affine_apply_steps(t,m.points[tag]),caller))
             for tag in move]
     for (tag,p) in coords
         m.points[tag]=p
@@ -299,15 +362,13 @@ function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
     if g.occ===:circle
         return _transform_occ_circle(g,t,caller,what)
     elseif g.occ===:line
-        a,b=m.curves[curve]
-        chord=_arc_sub(m.points[b],m.points[a])
-        len=sqrt(_arc_dot(chord,chord))
-        len>0 || throw(ArgumentError(
-            "$caller: $what has a zero chord"))
-        dir=chord ./ len
-        moved=_linear_apply(t,dir)
-        scale=sqrt(_dot(moved,moved))
-        return (occ=:line,t0=g.t0,t1=g.t0+(g.t1-g.t0)*scale)
+        # Geom_TrimmedCurve::Transformed keeps its [t0,t1] bounds; the basis
+        # gp_Lin moves as Location' = M·P + loc, Direction' = M·D — the
+        # direction is not renormalized, so arc-length parameters stay
+        # consistent under the same stretch as the endpoints.
+        dir=_finite_result(_occ_linear_apply(t,g.dir),caller)
+        return (occ=:line,origin=_occ_trsf_apply(t,g.origin),dir=dir,
+                t0=g.t0,t1=g.t1)
     end
     return g
 end
@@ -318,27 +379,34 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what)
         s2===nothing && throw(ArgumentError(
             "$caller: transform is not representable on $what — " *
             "it requires an isotropic linear part"))
-        axis=_linear_apply(t,g.axis)
-        X=_linear_apply(t,g.X)
+        axis=_occ_linear_apply(t,g.axis)
+        X=_occ_linear_apply(t,g.X)
+        Y=_occ_linear_apply(t,g.Y)
         return (occ=:sphere,
                 center=_finite_result(
-                    _affine_apply_steps(t,g.center),caller),
+                    _occ_trsf_apply(t,g.center),caller),
                 radius=g.radius*sqrt(s2),
                 axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
-                X=_finite_result(X./sqrt(_dot(X,X)),caller))
+                X=_finite_result(X./sqrt(_dot(X,X)),caller),
+                Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller),
+                pcurves=g.pcurves)
     elseif g.occ in (:cylinder,:cone)
         axis_vector=g.axis .* g.height
         tr=_transform_axis_encoding(
             t,g.center,axis_vector,caller,what)
         n=(tr.axis[1]/tr.height,tr.axis[2]/tr.height,
            tr.axis[3]/tr.height)
-        X=_linear_apply(t,g.X)
+        X=_occ_linear_apply(t,g.X)
         X=_finite_result(X./sqrt(_dot(X,X)),caller)
+        Y=_occ_linear_apply(t,g.Y)
+        Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller)
         return g.occ===:cylinder ?
-            (occ=:cylinder,center=tr.center,axis=n,X=X,
-             radius=g.radius*tr.perp,height=tr.height) :
-            (occ=:cone,center=tr.center,axis=n,X=X,
-             r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height)
+            (occ=:cylinder,center=tr.center,axis=n,X=X,Y=Y,
+             radius=g.radius*tr.perp,height=tr.height,
+             pcurves=g.pcurves) :
+            (occ=:cone,center=tr.center,axis=n,X=X,Y=Y,
+             r1=g.r1*tr.perp,r2=g.r2*tr.perp,height=tr.height,
+             pcurves=g.pcurves)
     elseif g.occ===:torus
         # A torus only survives a similarity: the equator and the tube
         # must stay circular, which needs an isotropic linear part.
@@ -346,20 +414,35 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what)
         s2===nothing && throw(ArgumentError(
             "$caller: transform is not representable on $what — " *
             "it requires an isotropic linear part"))
-        axis=_linear_apply(t,g.axis)
+        axis=_occ_linear_apply(t,g.axis)
         # Under a reflection the derived in-plane direction flips
         # handedness; storing −T·axis keeps Y′ = T·Y so
         # p′(u,v) = T·p(u,−v) — the [0,angle] sweep still runs from
         # the start radial to the end radial (v traverses the closed
         # tube, so negating it describes the same surface).
         _linear_det(t.linear)<0 && (axis=.-axis)
-        X=_linear_apply(t,g.X)
+        X=_occ_linear_apply(t,g.X)
+        Y=_occ_linear_apply(t,g.Y)
         return (occ=:torus,
                 center=_finite_result(
-                    _affine_apply_steps(t,g.center),caller),
+                    _occ_trsf_apply(t,g.center),caller),
                 axis=_finite_result(axis./sqrt(_dot(axis,axis)),caller),
                 X=_finite_result(X./sqrt(_dot(X,X)),caller),
-                r1=g.r1*sqrt(s2),r2=g.r2*sqrt(s2),angle=g.angle)
+                Y=_finite_result(Y./sqrt(_dot(Y,Y)),caller),
+                r1=g.r1*sqrt(s2),r2=g.r2*sqrt(s2),angle=g.angle,
+                pcurves=g.pcurves)
+    elseif g.occ===:plane
+        # `gp_Ax3::Transformed` — every direction takes the raw vectorial
+        # part (unrenormalized: a `gp_GTrsf` scale stretches the frame and
+        # the parametrization absorbs it, so the pcurves — and therefore
+        # `uvb` — carry over verbatim).
+        return (occ=:plane,
+                center=_finite_result(
+                    _occ_trsf_apply(t,g.center),caller),
+                axis=_occ_linear_apply(t,g.axis),
+                X=_occ_linear_apply(t,g.X),
+                Y=_occ_linear_apply(t,g.Y),
+                reversed=g.reversed,pcurves=g.pcurves,uvb=g.uvb)
     end
     return g
 end
@@ -378,9 +461,9 @@ end
 # Transform an OCC circle record: the frame must remain orthonormal, which is
 # exactly the condition that the transformed curve is still a circle.
 function _transform_occ_circle(g, t::_AffineTransform, caller, what)
-    center=_finite_result(_affine_apply_steps(t,g.center),caller)
-    X=_linear_apply(t,g.X)
-    Y=_linear_apply(t,_occ_circle_y(g))
+    center=_finite_result(_occ_trsf_apply(t,g.center),caller)
+    X=_occ_linear_apply(t,g.X)
+    Y=_occ_linear_apply(t,_occ_circle_y(g))
     sx=sqrt(_dot(X,X)); sy=sqrt(_dot(Y,Y))
     (sx>0 && sy>0) || throw(ArgumentError(
         "$caller: transform collapses $what"))
@@ -388,25 +471,28 @@ function _transform_occ_circle(g, t::_AffineTransform, caller, what)
     (abs(sx*sx-sy*sy)<=tol && abs(_dot(X,Y))<=tol) || throw(ArgumentError(
         "$caller: transform is not representable on $what — " *
         "it would warp the circle into an ellipse"))
-    n=_linear_apply(t,g.n)
+    n=_occ_linear_apply(t,g.n)
     nl=sqrt(_dot(n,n))
     nl>0 || throw(ArgumentError("$caller: transform collapses $what"))
     # Under a reflection the circle's derived Y = n×X flips handedness. A
     # closed circle keeps +T·n (its endpoints coincide and cap normals must
     # still match the solid axis), the negated range carrying the reversed
-    # traversal; a trimmed arc must keep t0 on its start vertex, so it stores
-    # −T·n and keeps its range — p'(t) = T·p(t) in the flipped frame.
+    # traversal p'(t) = T·p(−t) — hence −T·Y; a trimmed arc must keep t0 on
+    # its start vertex, so it stores −T·n and keeps its range — p'(t) =
+    # T·p(t) in the flipped frame, hence +T·Y.
     t0,t1=g.t0,g.t1
     if _linear_det(t.linear)<0
         if g.t1-g.t0<_OCC_TWO_PI
             n=.-n
         else
             t0,t1=-g.t1,-g.t0
+            Y=.-Y
         end
     end
     return (occ=:circle,center=center,
             n=(n[1]/nl,n[2]/nl,n[3]/nl),
-            X=(X[1]/sx,X[2]/sx,X[3]/sx),r=g.r*sx,
+            X=(X[1]/sx,X[2]/sx,X[3]/sx),
+            Y=(Y[1]/sy,Y[2]/sy,Y[3]/sy),r=g.r*sx,
             t0=t0,t1=t1)
 end
 
@@ -480,7 +566,7 @@ function _plan_volume_transform(m::GeoModel, tag::Int, t::_AffineTransform,
             "it requires an isotropic linear part"))
         return (dict=:spheres,tag=tag,
                 record=(center=_finite_result(
-                            _affine_apply_steps(t,rec.center),caller),
+                            _occ_trsf_apply(t,rec.center),caller),
                         radius=rec.radius*sqrt(s2)))
     elseif haskey(m.cones,tag)
         rec=m.cones[tag]
@@ -508,7 +594,7 @@ function _transform_mesh_snapshot(mesh::Mesh, t::_AffineTransform, caller)
     coords=Matrix{Float64}(undef,3,size(mesh.coords,2))
     for i in axes(mesh.coords,2)
         coords[:,i].=_finite_result(
-            _affine_apply_steps(
+            _occ_trsf_apply(
                 t,(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])),
             caller)
     end
@@ -540,18 +626,18 @@ end
 # stretch perpendicular to it — representable only when that stretch is
 # isotropic.
 function _transform_axis_encoding(t::_AffineTransform, center, axis, caller, what)
-    a=_linear_apply(t,axis)
+    a=_occ_linear_apply(t,axis)
     n=sqrt(_dot(a,a))
     n>0 || throw(ArgumentError("$caller: transform collapses the axis of $what"))
     (u,v)=_perp_basis(a ./ n)
-    uL=_linear_apply(t,u); vL=_linear_apply(t,v)
+    uL=_occ_linear_apply(t,u); vL=_occ_linear_apply(t,v)
     g=(_dot(uL,uL),_dot(uL,vL),_dot(vL,vL))
     s2=(g[1]+g[3])/2
     s2>0 || throw(ArgumentError("$caller: transform collapses $what"))
     tol=1e-12*max(1.0,s2)
     (abs(g[1]-s2)<=tol && abs(g[3]-s2)<=tol && abs(g[2])<=tol) || throw(ArgumentError(
         "$caller: transform is not representable on $what — it would warp the cross-section"))
-    return (center=_finite_result(_affine_apply_steps(t,center),caller),
+    return (center=_finite_result(_occ_trsf_apply(t,center),caller),
             axis=_finite_result(a,caller),perp=sqrt(s2),height=n)
 end
 
@@ -991,10 +1077,13 @@ function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false,
         source_cps=_curve_type(m,src)==:ellipse && !isempty(source_cps) ?
             Int[source_cps[4],source_cps[2],source_cps[3],source_cps[1]] :
             reverse(source_cps)
-        # A reversed OCC circle traverses its forward image at -t.
+        # A reversed OCC circle traverses its forward image at -t, so the
+        # second in-plane direction flips sign: p_rev(t) = p_fwd(-t) =
+        # center + r(cos t·X - sin t·Y).
         occ!==nothing && occ.occ===:circle &&
             (geometry=(occ=:circle,center=occ.center,
-                       n=(-occ.n[1],-occ.n[2],-occ.n[3]),X=occ.X,r=occ.r,
+                       n=(-occ.n[1],-occ.n[2],-occ.n[3]),X=occ.X,
+                       Y=(-occ.Y[1],-occ.Y[2],-occ.Y[3]),r=occ.r,
                        t0=-occ.t1,t1=-occ.t0))
     end
     t=_geo_newreg_alloc!(m,1,caller)

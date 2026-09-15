@@ -32,6 +32,8 @@ using ..TransfiniteTriangle: mesh_transfinite_triangle,
 using ..Transfinite: mesh_transfinite_patch
 using ..Transform: _affine_coordinate, _transform_homogeneous
 using ..Predicates: orient2, orient3
+using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
+                  _gm_atan2, _gm_pow
 using LinearAlgebra: Symmetric, eigen
 
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
@@ -1081,7 +1083,7 @@ than the planar-shell path.
 function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
     caller="add_cylinder!"
     c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
-    h=hypot(a...)
+    h=_occ_modulus(a)
     (isfinite(h) && h>0) || throw(ArgumentError("$caller: axis must have finite positive length"))
     r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
@@ -1132,7 +1134,7 @@ encoding is retained for native meshing and bounds.
 function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     caller="add_cone!"
     c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
-    h=hypot(a...)
+    h=_occ_modulus(a)
     (isfinite(h) && h>0) || throw(ArgumentError("$caller: axis must have finite positive length"))
     ra=_finite_scalar(r1,caller,"r1")
     rb=_finite_scalar(r2,caller,"r2")

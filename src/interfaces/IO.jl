@@ -20,6 +20,9 @@ module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
 using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names
+using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
+                  _gm_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm_exp, _gm_log,
+                  _gm_log10, _gm_pow
 using Printf: @printf, @sprintf
 
 export read_msh, write_msh, MshFile
@@ -2013,7 +2016,7 @@ function _geo_apply_binary(parser::_GeoExprParser,kind::Symbol,a::Float64,
             rem(ia,ib)
         else
             kind==:plus ? a+b : kind==:minus ? a-b : kind==:star ? a*b :
-            kind==:slash ? a/b : a^b
+            kind==:slash ? a/b : _gm_pow(a,b)
         end
     catch err
         err isa InterruptException && rethrow()
@@ -2027,27 +2030,27 @@ function _geo_apply_function(parser::_GeoExprParser,name::String,
                              args::Vector{Float64},pos::Int)
     name in _GEO_NONCONSTANT_FUNCTIONS && _geo_expr_error(parser,
         "non-constant or externally stateful function $name is not supported",pos)
-    unary=if name=="Acos"; acos
-    elseif name=="Asin"; asin
-    elseif name=="Atan"; atan
+    unary=if name=="Acos"; _gm_acos
+    elseif name=="Asin"; _gm_asin
+    elseif name=="Atan"; _gm_atan
     elseif name=="Ceil"; ceil
-    elseif name=="Cos"; cos
-    elseif name=="Cosh"; cosh
-    elseif name=="Exp"; exp
+    elseif name=="Cos"; _gm_cos
+    elseif name=="Cosh"; _gm_cosh
+    elseif name=="Exp"; _gm_exp
     elseif name=="Fabs" || name=="Abs"; abs
     elseif name=="Floor"; floor
-    elseif name=="Log"; log
-    elseif name=="Log10"; log10
+    elseif name=="Log"; _gm_log
+    elseif name=="Log10"; _gm_log10
     elseif name=="Round"; x->round(x,RoundNearestTiesUp)
     elseif name=="Sqrt"; sqrt
-    elseif name=="Sin"; sin
-    elseif name=="Sinh"; sinh
+    elseif name=="Sin"; _gm_sin
+    elseif name=="Sinh"; _gm_sinh
     elseif name=="Step"; x->x<0 ? 0.0 : 1.0
-    elseif name=="Tan"; tan
-    elseif name=="Tanh"; tanh
+    elseif name=="Tan"; _gm_tan
+    elseif name=="Tanh"; _gm_tanh
     else; nothing
     end
-    binary=if name=="Atan2"; (y,x)->atan(y,x)
+    binary=if name=="Atan2"; _gm_atan2
     elseif name=="Fmod" || name=="Modulo"; rem
     # Gmsh 4.15.2 spells this as sqrt(a*a + b*b); preserve its overflow and
     # underflow behavior, then let the finite-result contract reject Inf/NaN.

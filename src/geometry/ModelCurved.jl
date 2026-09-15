@@ -73,10 +73,10 @@ function _angle_02pi(a::Float64)
 end
 
 # Gmsh's `myasin`: clamp outside [-1,1] to ±π/2.
-_myasin(a::Float64) = a<=-1.0 ? -π/2 : a>=1.0 ? π/2 : asin(a)
+_myasin(a::Float64) = a<=-1.0 ? -π/2 : a>=1.0 ? π/2 : _gm_asin(a)
 
 # Gmsh's `myatan2`: (0,0) maps to +0.0 rather than atan2's signed zero.
-_myatan2(y::Float64,x::Float64) = (y==0.0 && x==0.0) ? 0.0 : atan(y,x)
+_myatan2(y::Float64,x::Float64) = (y==0.0 && x==0.0) ? 0.0 : _gm_atan2(y,x)
 
 # `norme`: normalize by the `norm3` magnitude (sqrt of the summed squares,
 # not hypot); a zero vector stays zero. `fma` replicates the fused
@@ -95,9 +95,6 @@ end
 # on a different operand, so the two ports stay distinct.
 @inline _arc_cross(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
     (fma(a[2],b[3],-(a[3]*b[2])), fma(-a[1],b[3],a[3]*b[1]),
-     fma(a[1],b[2],-(a[2]*b[1])))
-@inline _occ_cross(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
-    (fma(a[2],b[3],-(a[3]*b[2])), fma(a[3],b[1],-(a[1]*b[3])),
      fma(a[1],b[2],-(a[2]*b[1])))
 @inline _arc_dot(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
     fma(a[3],b[3],fma(a[1],b[1],a[2]*b[2]))
@@ -150,7 +147,7 @@ function _arc_geometry(cps::Vector{NTuple{3,Float64}}, kind::Symbol,
         raw3=_arc_sub(cps[3],C)
         x3=_arc_dot(raw3,u); y3=_arc_dot(raw3,v)
         A4=_angle_02pi(_myatan2(y3,x3))
-        s,c=sin(A4),cos(A4)
+        s,c=_gm_sin(A4),_gm_cos(A4)
         x1=fma(x0,c,y0*s); y1=fma(-x0,s,y0*c)
         xe=fma(x2,c,y2*s); ye=fma(-x2,s,y2*c)
         # sys2x2 [x1² y1²; xe² ye²]·sol = (1,1) → sol = (1/f1², 1/f2²),
@@ -205,8 +202,8 @@ end
 # world coordinates through invmat (whose columns are u, v, n).
 function _arc_point(g, u::Float64)
     θ=fma(-(g.t1-g.t2),u,g.t1)-g.incl
-    lx=fma(g.f1*cos(θ),cos(g.incl),-(g.f2*sin(θ)*sin(g.incl)))
-    ly=fma(g.f1*cos(θ),sin(g.incl),g.f2*sin(θ)*cos(g.incl))
+    lx=fma(g.f1*_gm_cos(θ),_gm_cos(g.incl),-(g.f2*_gm_sin(θ)*_gm_sin(g.incl)))
+    ly=fma(g.f1*_gm_cos(θ),_gm_sin(g.incl),g.f2*_gm_sin(θ)*_gm_cos(g.incl))
     C,U,V,N=g.center,g.u,g.v,g.n
     # `fma` reproduces the compiled contractions: `theta` fuses the sweep
     # product, the local frame fuses the first product of each `f·trig·trig`
@@ -221,8 +218,8 @@ end
 # difference; the analytic form agrees within that finite-difference error.
 function _arc_first_derivative(g, u::Float64)
     θp=g.t1-(g.t1-g.t2)*u
-    s,c=sin(θp),cos(θp)
-    si,ci=sin(g.incl),cos(g.incl)
+    s,c=_gm_sin(θp),_gm_cos(θp)
+    si,ci=_gm_sin(g.incl),_gm_cos(g.incl)
     dlx=-g.f1*s*ci-g.f2*c*si
     dly=-g.f1*s*si+g.f2*c*ci
     k=g.t2-g.t1
@@ -235,8 +232,8 @@ end
 # d²P/du² = -(t2-t1)²·(P(u) - center) — the local-frame position vector.
 function _arc_second_derivative(g, u::Float64)
     θp=g.t1-(g.t1-g.t2)*u
-    s,c=sin(θp),cos(θp)
-    si,ci=sin(g.incl),cos(g.incl)
+    s,c=_gm_sin(θp),_gm_cos(θp)
+    si,ci=_gm_sin(g.incl),_gm_cos(g.incl)
     lx=g.f1*c*ci-g.f2*s*si
     ly=g.f1*c*si+g.f2*s*ci
     k2=-(g.t2-g.t1)^2
@@ -246,13 +243,26 @@ function _arc_second_derivative(g, u::Float64)
             k2*(lx*U[3]+ly*V[3]))
 end
 
-# Gmsh's `GEdge::curvature`: |d1 × d2| / |d1|³ (unsigned).
+# `InterpolateCurve(der=2)` — a finite difference of the der=1 finite
+# difference (`gmshEdge::secondDer`), same 1e-8 step and one-sided bounds.
+function _arc_second_derivative_fd(g,u::Float64)
+    eps=1e-8
+    eps1=u<eps ? 0.0 : eps
+    eps2=u>1.0-eps ? 0.0 : eps
+    d0=_arc_first_derivative_fd(g,u-eps1)
+    d1=_arc_first_derivative_fd(g,u+eps2)
+    inv=1.0/(eps1+eps2)
+    return ((d1[1]-d0[1])*inv,(d1[2]-d0[2])*inv,(d1[3]-d0[3])*inv)
+end
+
+# `GEdge::curvature`: norm(d1 × secondDer)·pow(1/norm(d1),3) on the
+# InterpolateCurve finite differences (`norm` = sqrt of the summed squares,
+# `crossprod` the SVector3 contraction — same association as `gp_XYZ::Cross`).
 function _arc_curvature(g, u::Float64)
-    d1=_arc_first_derivative(g,u)
-    d2=_arc_second_derivative(g,u)
-    cr=_arc_cross(d1,d2)
-    n1=hypot(d1[1],d1[2],d1[3])
-    return hypot(cr[1],cr[2],cr[3])/n1^3
+    d1=_arc_first_derivative_fd(g,u)
+    d2=_arc_second_derivative_fd(g,u)
+    cr=_occ_cross(d1,d2)
+    return sqrt(_sqlen(cr))*_gm_pow(1.0/sqrt(_sqlen(d1)),3.0)
 end
 
 # Exact arc bounding box: endpoints plus each coordinate-axis extremum, where
@@ -264,7 +274,7 @@ function _arc_bounding_box(g)
     for axis in 1:3
         a1=g.f1*g.u[axis]; a2=g.f2*g.v[axis]
         (a1==0.0 && a2==0.0) && continue
-        base=atan(a2,a1)
+        base=_gm_atan2(a2,a1)
         for k in -2:4
             θp=base+k*π
             (g.t2-1e-13<=θp<=g.t1+1e-13) || continue
@@ -447,11 +457,14 @@ end
 #
 # OCC curves carry their parametrization in `curve_geometry` (distinct from the
 # `(n=,)` records of built-in arcs):
-#   (occ=:circle,      center, n, X, r, t0, t1) — p(t)=center+r(cos t·X+sin t·Y),
-#                                               Y=n×X; t0..t1 = 0..2π for closed
-#                                               edges, the OCC trim for meridians
-#   (occ=:line,        t0, t1)                  — arc-length parameter range
-#   (occ=:degenerate,  t0, t1)                  — collapsed pole/apex edge
+#   (occ=:circle,      center, n, X, Y, r, t0, t1) — p(t)=center+r(cos t·X+sin t·Y);
+#                                               Y stored explicitly (transformed
+#                                               frames need not satisfy Y=n×X)
+#   (occ=:line,        origin, dir, t0, t1)     — p(t)=origin+t·dir, the stored
+#                                               gp_Lin parametrization
+#   (occ=:degenerate,  t0, t1)                  — collapsed pole/apex edge, no 3-D
+#                                               curve; evaluates through the
+#                                               pcurve stored on its face
 # The circle center is stored as coordinates, not a Point entity: OCC exposes
 # only the rim vertices, so centers must not appear in the dim-0 entity list.
 # Stored geometry is authoritative; transforms rewrite it, and the
@@ -459,46 +472,171 @@ end
 # independently moved rim vertices no longer satisfy the encoded circles.
 #
 # OCC surfaces carry matching analytic records in `surface_geometry`:
-#   (occ=:cylinder, center, axis, X, radius, height)
-#   (occ=:sphere,   center, radius, axis, X)
-#   (occ=:cone,     center, axis, X, r1, r2, height)
-#   (occ=:torus,    center, axis, X, r1, r2, angle)
-# `axis`/`X` are the OCC construction frame; the second in-plane direction is
-# always axis×X. They parametrize `model_value`/`model_parametrization_bounds`
-# for the face: u sweeps around `axis`, v is the profile direction (arc length
-# for Cylinder/Cone, latitude for Sphere, tube angle for Torus).
+#   (occ=:plane,    center, axis, X, Y, reversed, pcurves)
+#   (occ=:cylinder, center, axis, X, Y, radius, height, pcurves)
+#   (occ=:sphere,   center, radius, axis, X, Y, pcurves)
+#   (occ=:cone,     center, axis, X, Y, r1, r2, height, pcurves)
+#   (occ=:torus,    center, axis, X, Y, r1, r2, angle, pcurves)
+# `axis`/`X`/`Y` are the OCC construction frame (a `gp_Ax3`; transforms keep
+# the stored directions verbatim — under a reflection they go left-handed, so
+# Y is stored, not derived). `reversed` mirrors the `TopAbs_REVERSED`
+# orientation flag that `OCCFace::normal` flips for. `pcurves` maps each
+# boundary edge tag to `(fwd=, rev=)` — the `Geom2d_Curve` equivalents OCC
+# stores for the edge's FORWARD and (for periodic seams) REVERSED
+# orientations: `(lin2d=(o,d),)` or `(circ2d=(o,x,r),)` records evaluated by
+# `_occ_pcurve_value`/`_occ_surface_bounds`. They drive
+# `model_reparametrize_on_surface` (OCC's native pcurve path) and the trimmed
+# evaluation of degenerate edges.
+# The records parametrize `model_value`/`model_parametrization_bounds` for the
+# face: u sweeps around `axis`, v is the profile direction (arc length for
+# Cylinder/Cone, latitude for Sphere, tube angle for Torus).
 
 const _OCC_TWO_PI = 2π
 
-# The XDirection OCC assigns to `gp_Ax2(origin, axis)` (same heuristic as
-# `gp_Pln(P,V)`): the in-plane direction lying in the coordinate plane of the
-# axis's smallest component, signed by the other two components so the frame
-# stays continuous across quadrant changes.
-function _occ_reference_direction(axis::NTuple{3,Float64})
-    a,b,c=axis
-    aa,bb,cc=abs(a),abs(b),abs(c)
-    x=if bb<=aa && bb<=cc
+# ── OCCT arithmetic kernel ─────────────────────────────────────────────────
+#
+# Bit-exact ports of the `gp_*` operations that build and transform OCC
+# primitive geometry (verified against the installed OCCT 7.9.3 headers and
+# compiled output). Every helper reproduces the C++ expression's floating-
+# point contraction: `gp_XYZ` products fuse the first product of each
+# `a·b − c·d` pair, `gp_XYZ::Multiply(gp_Mat)` contracts
+# `m3·z + (m1·x + m2·y)`, and `gp_Dir`'s cross/normalize operations are
+# componentwise `x/|x|`.
+
+@inline _occ_modulus(v::NTuple{3,Float64}) =
+    sqrt(fma(v[3],v[3],fma(v[1],v[1],v[2]*v[2])))
+@inline _occ_dir(v::NTuple{3,Float64}) =
+    (m=_occ_modulus(v); (v[1]/m,v[2]/m,v[3]/m))
+
+# `gp_XYZ::Cross` — compiled as fma(a2,b3, −(a3·b2)) per component.
+@inline _occ_cross(a::NTuple{3,Float64}, b::NTuple{3,Float64}) =
+    (fma(a[2],b[3],-(a[3]*b[2])), fma(a[3],b[1],-(a[1]*b[3])),
+     fma(a[1],b[2],-(a[2]*b[1])))
+# `gp_Dir::Crossed`/`CrossCrossed` normalize after the product.
+@inline _occ_crossed(a,b) = _occ_dir(_occ_cross(a,b))
+
+# `gp_XYZ::CrossCross`: a × (b × c) written as the direct triple-product
+# expansion — t12/t23/t31 are the (b×c) components.
+@inline function _occ_crosscross(a,b,c)
+    t12=fma(b[1],c[2],-(b[2]*c[1]))
+    t23=fma(b[2],c[3],-(b[3]*c[2]))
+    t31=fma(b[3],c[1],-(b[1]*c[3]))
+    (fma(a[2],t12,-(a[3]*t31)), fma(a[3],t23,-(a[1]*t12)),
+     fma(a[1],t31,-(a[2]*t23)))
+end
+@inline _occ_crosscrossed(a,b,c) = _occ_dir(_occ_crosscross(a,b,c))
+
+# `gp_XYZ::Multiply(gp_Mat)` — per-row `m1·x + m2·y + m3·z` contracted as
+# fma(m3,z, fma(m1,x, m2·y)).
+@inline _occ_matvec(m,v) =
+    (fma(m[1][3],v[3],fma(m[1][1],v[1],m[1][2]*v[2])),
+     fma(m[2][3],v[3],fma(m[2][1],v[1],m[2][2]*v[2])),
+     fma(m[3][3],v[3],fma(m[3][1],v[1],m[3][2]*v[2])))
+@inline _occ_mul(v::NTuple{3,Float64},s::Float64) = (v[1]*s,v[2]*s,v[3]*s)
+@inline _add3(a::NTuple{3,Float64},b::NTuple{3,Float64}) =
+    (a[1]+b[1],a[2]+b[2],a[3]+b[3])
+# `gp_Dir2d` normalization (`gp_XY::Modulus`).
+@inline _occ_dir2(v) =
+    (m=sqrt(fma(v[1],v[1],v[2]*v[2])); (v[1]/m,v[2]/m))
+
+# `gp_Trsf::SetRotation(Ax1(c,axis), ang)` — M = sin·K + I + (1−cos)·(aaᵀ−I)
+# on the renormalized axis, translation c − M·c. Returns (M rows, loc).
+function _occ_trsf_rot(c,axis,ang)
+    aV=_occ_dir(axis); A,B,C=aV
+    s=_gm_sin(ang); om=1.0-_gm_cos(ang)
+    M=((0.0*s+1.0+(-C*C-B*B)*om, -C*s+(A*B)*om,      B*s+(A*C)*om),
+       (    C*s+(A*B)*om,      0.0*s+1.0+(-A*A-C*C)*om, -A*s+(B*C)*om),
+       (   -B*s+(A*C)*om,          A*s+(B*C)*om,    0.0*s+1.0+(-A*A-B*B)*om))
+    mc=_occ_matvec(M,c)
+    loc=(c[1]-mc[1],c[2]-mc[2],c[3]-mc[3])
+    return M,loc
+end
+
+# `gp_Pnt::Transform`/`gp_Dir::Transform` on a rotation/reflection Trsf —
+# `gp_Dir` renormalizes after the multiply (`gp_Lin`/`gp_Ax1` transforms).
+_occ_xform_pnt(M,loc,p) = _add3(_occ_matvec(M,p),loc)
+_occ_xform_dir(M,d) = _occ_dir(_occ_matvec(M,d))
+# `gp_Dir::Rotate` — the matvec only, no renormalization.
+_occ_rot_dir(M,d) = _occ_matvec(M,d)
+
+# `gp_Ax2(P,N,Vx)` 3-arg ctor and `SetXDirection`: vx = n ^ (Vx ^ n)
+# normalized, vy = n ^ vx normalized. `gp_Ax3` uses the same rule.
+function _occ_ax2_setx(n,vx0)
+    X=_occ_crosscrossed(n,vx0,n)
+    Y=_occ_crossed(n,X)
+    return X,Y
+end
+
+# `gp_Ax2(P,V)` 2-arg ctor: the reference direction lies in the coordinate
+# plane of the axis's smallest component, `gp_Dir::SetCoord`-normalized,
+# then `SetXDirection`.
+function _occ_ax2_frame(n)
+    a,b,c=n; aa,bb,cc=abs(a),abs(b),abs(c)
+    d=if bb<=aa && bb<=cc
         aa>cc ? (-c,0.0,a) : (c,0.0,-a)
     elseif aa<=bb && aa<=cc
         bb>cc ? (0.0,-c,b) : (0.0,c,-b)
     else
         aa>bb ? (-b,a,0.0) : (b,-a,0.0)
     end
-    l=sqrt(x[1]*x[1]+x[2]*x[2]+x[3]*x[3])
-    l>0 || throw(ErrorException(
-        "_occ_reference_direction: degenerate axis $axis"))
-    return (x[1]/l,x[2]/l,x[3]/l)
+    D=_occ_dir(d)
+    return _occ_ax2_setx(n,D)
 end
 
-# Second in-plane direction of an OCC circle record.
-@inline _occ_circle_y(g) = _occ_cross(g.n,g.X)
+# `gp_Ax2::Transform` — loc and both directions transform (dirs
+# renormalized), then axis = X′ × Y′ recomputed (unlike `gp_Ax3`, which
+# keeps its axis). `occ_adapt_ax2` is the BRepAdaptor identity-transform
+# view: only the axis recompute is observable.
+function _occ_xform_ax2(M,loc,ax2)
+    l=_occ_xform_pnt(M,loc,ax2.loc)
+    X=_occ_xform_dir(M,ax2.X); Y=_occ_xform_dir(M,ax2.Y)
+    n=_occ_crossed(X,Y)
+    return (loc=l,axis=n,X=X,Y=Y)
+end
+_occ_adapt_ax2(ax2) = _occ_xform_ax2(
+    ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0)),(0.0,0.0,0.0),ax2)
+
+# `gp_Ax2::Rotate(Ax1, ang)` — the location rotates like `gp_Pnt::Rotate`
+# (matvec + translation, same arithmetic as `Transform`), but X/Y use
+# `gp_Dir::Rotate`: the raw matvec, no renormalization. The axis is then
+# recomputed as `dir(X′ × Y′)`. Used by `EndFace` for sweep-end caps.
+function _occ_rotate_ax2(M,loc,ax2)
+    l=_occ_xform_pnt(M,loc,ax2.loc)
+    X=_occ_rot_dir(M,ax2.X); Y=_occ_rot_dir(M,ax2.Y)
+    n=_occ_crossed(X,Y)
+    return (loc=l,axis=n,X=X,Y=Y)
+end
+
+# `BRepPrim_OneAxis` end-vertex construction: w = Loc + n·mp.Y + X·mp.X in
+# the build frame, then `Transformed(rotation)` — `Added`/`Multiplied` are
+# plain per-component operations.
+function _occ_vertex(c,n,X,mp,M,loc)
+    w=ntuple(i->(c[i]+n[i]*mp[2])+X[i]*mp[1],3)
+    return _occ_xform_pnt(M,loc,w)
+end
+
+# `ElCLib2d::LineValue`/`CircleValue` — the 2-D meridian pcurve evals.
+@inline _occ_lin2d_eval(o,d,t) = (fma(t,d[1],o[1]),fma(t,d[2],o[2]))
+@inline function _occ_circ2d_eval(o,x,r,t)
+    # gp_Circ2d XDirection x and derived YDirection (−x.y, x.x).
+    A1,A2=r*_gm_cos(t),r*_gm_sin(t)
+    return (fma(A1,x[1],-(A2*x[2]))+o[1],fma(A1,x[2],A2*x[1])+o[2])
+end
+
+# The reference direction OCC assigns to `gp_Ax2(origin, axis)` — the
+# XDirection of `_occ_ax2_frame`.
+_occ_reference_direction(axis) = _occ_ax2_frame(axis)[1]
+
+# Second in-plane direction of an OCC circle record — stored explicitly
+# (`gp_Ax2` frames need not satisfy Y = n×X after transforms).
+@inline _occ_circle_y(g) = g.Y
 
 # `ElCLib::CircleValue`: A1·X + A2·Y + PLoc with A1 = R·cos, A2 = R·sin;
 # `CircleD1`/`CircleD2` use the same `SetLinearForm` association — the first
 # product of each component fused, the second rounded.
 function _occ_circle_point(g,t::Float64)
     Y=_occ_circle_y(g)
-    A1,A2=g.r*cos(t),g.r*sin(t)
+    A1,A2=g.r*_gm_cos(t),g.r*_gm_sin(t)
     C,X=g.center,g.X
     return (fma(A1,X[1],A2*Y[1])+C[1],
             fma(A1,X[2],A2*Y[2])+C[2],
@@ -507,7 +645,7 @@ end
 
 function _occ_circle_derivative(g,t::Float64)
     Y=_occ_circle_y(g)
-    Xc,Yc=g.r*cos(t),g.r*sin(t)
+    Xc,Yc=g.r*_gm_cos(t),g.r*_gm_sin(t)
     X=g.X
     return (fma(-Yc,X[1],Xc*Y[1]),
             fma(-Yc,X[2],Xc*Y[2]),
@@ -516,11 +654,214 @@ end
 
 function _occ_circle_second_derivative(g,t::Float64)
     Y=_occ_circle_y(g)
-    Xc,Yc=g.r*cos(t),g.r*sin(t)
+    Xc,Yc=g.r*_gm_cos(t),g.r*_gm_sin(t)
     X=g.X
     return (fma(-Xc,X[1],(-Yc)*Y[1]),
             fma(-Xc,X[2],(-Yc)*Y[2]),
             fma(-Xc,X[3],(-Yc)*Y[3]))
+end
+
+# `ElCLib::LineValue`/`LineD1` — `U·dir + loc` on the stored `gp_Lin`
+# parametrization (not the endpoint chord).
+@inline _occ_line_point(g,t::Float64) =
+    (fma(t,g.dir[1],g.origin[1]), fma(t,g.dir[2],g.origin[2]),
+     fma(t,g.dir[3],g.origin[3]))
+
+# `ElCLib2d` pcurve eval — the `Geom2d_Line`/`Geom2d_Circle` `D0`/`D1`
+# bodies used by `Adaptor2d_Curve2d` on a stored face pcurve.
+function _occ_pcurve_d0(pc,t::Float64)
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        return _occ_lin2d_eval(o,d,t)
+    else
+        o,x,r=pc.circ2d
+        return _occ_circ2d_eval(o,x,r,t)
+    end
+end
+function _occ_pcurve_d1(pc,t::Float64)
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        return _occ_lin2d_eval(o,d,t), d
+    else
+        o,x,r=pc.circ2d
+        # `Geom2d_Circle::D1` — SetLinearForm(−Yc, X, Xc, Y) with the derived
+        # YDirection (−x.y, x.x).
+        A1,A2=r*_gm_cos(t),r*_gm_sin(t)
+        uv=_occ_circ2d_eval(o,x,r,t)
+        duv=(fma(-A2,x[1],-(A1*x[2])), fma(-A2,x[2],A1*x[1]))
+        return uv,duv
+    end
+end
+
+# `ElCLib2d::CircleD2`/`LineD2` on the stored pcurve kinds — returns
+# (point, d1, d2). The circle's D2 negates the point's linear form before
+# the location add, exactly as `CircleD2` builds `V2` then `P`.
+function _occ_pcurve_d2(pc,t::Float64)
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        return _occ_lin2d_eval(o,d,t), d, (0.0,0.0)
+    end
+    o,x,r=pc.circ2d
+    Xc,Yc=r*_gm_cos(t),r*_gm_sin(t)
+    # YDirection is the derived (−x.y, x.x); `V2 = −(Xc·X + Yc·Y)`.
+    p=_occ_circ2d_eval(o,x,r,t)
+    d1=(fma(-Yc,x[1],-(Xc*x[2])), fma(-Yc,x[2],Xc*x[1]))
+    d2=(-fma(Xc,x[1],-(Yc*x[2])), -fma(Xc,x[2],Yc*x[1]))
+    return p,d1,d2
+end
+
+# `SearchForExtremum` — the Newton step `t -= (D1·dir)/(D2·dir)`, at most 10
+# iterations; converges when |D2·dir| < 1e-10 or |Δt| < Precision::PConfusion
+# (1e-9), fails after a third excursion outside [f, l] or a repeated clamp.
+# On convergence `res` is the D0 evaluated at the parameter used in the last
+# `D2` call (the pre-step parameter on the |Δt| exit).
+function _occ_pcurve_extremum(pc,f,l,dir,par)
+    nbOut=0; res=(0.0,0.0)
+    for _ in 1:10
+        prev=par
+        res,d1,d2=_occ_pcurve_d2(pc,par)
+        det=fma(d2[1],dir[1],d2[2]*dir[2])
+        abs(det)<1e-10 && return res
+        par=prev-(fma(d1[1],dir[1],d1[2]*dir[2]))/det
+        abs(par-prev)<1e-9 && return res
+        if par<f
+            nbOut+=1
+            (nbOut>2 || prev==f) && return nothing
+            par=f
+        end
+        if par>l
+            nbOut+=1
+            (nbOut>2 || prev==l) && return nothing
+            par=l
+        end
+    end
+    return res
+end
+
+# `ShapeAnalysis_Curve::FillBndBox(c2d, f, l, 20, Exact=true)` — elementary
+# pcurves are a single C2 interval, so nbSamples = 19: twenty sample points
+# `f + i·(l−f)/19` are boxed, then a Newton extremum along x̂ and ŷ is seeded
+# at each interval midpoint. Returns ((umin,vmin),(umax,vmax)).
+function _occ_pcurve_fillbndbox(pc,f::Float64,l::Float64)
+    step=(l-f)/19
+    umin=vmin=Inf; umax=vmax=-Inf
+    for i in 0:19
+        p=_occ_pcurve_d0(pc,fma(Float64(i),step,f))
+        umin=min(umin,p[1]); vmin=min(vmin,p[2])
+        umax=max(umax,p[1]); vmax=max(vmax,p[2])
+    end
+    for i in 0:18
+        a1=fma(Float64(i),step,f); a2=fma(Float64(i+1),step,f)
+        mid=(a1+a2)*0.5
+        for dir in ((1.0,0.0),(0.0,1.0))
+            e=_occ_pcurve_extremum(pc,a1,a2,dir,mid)
+            e===nothing && continue
+            umin=min(umin,e[1]); vmin=min(vmin,e[2])
+            umax=max(umax,e[1]); vmax=max(vmax,e[2])
+        end
+    end
+    return (umin,vmin),(umax,vmax)
+end
+
+# `ShapeAnalysis::GetFaceUVBounds` — the union of `FillBndBox` boxes over
+# every wire pcurve. Each dict entry carries the forward pcurve and, for a
+# seam occurrence on a closed surface, the reverse one (`PCurve2`); both are
+# boxed since `TopExp_Explorer` yields the seam twice. `f,l` are the edge
+# parameter ranges (`BRep_Tool::CurveOnSurface` out-parameters).
+function _occ_face_uv_bounds(m::GeoModel,g)
+    umin=vmin=Inf; umax=vmax=-Inf; found=false
+    for (ct,e) in g.pcurves
+        rec=m.curve_geometry[ct]
+        for pc in (e.fwd,e.rev)
+            pc===nothing && continue
+            found=true
+            lo,hi=_occ_pcurve_fillbndbox(pc,rec.t0,rec.t1)
+            umin=min(umin,lo[1]); vmin=min(vmin,lo[2])
+            umax=max(umax,hi[1]); vmax=max(vmax,hi[2])
+        end
+    end
+    found || throw(ArgumentError(
+        "_occ_face_uv_bounds: face carries no pcurves"))
+    return [umin,vmin],[umax,vmax]
+end
+
+# `BRep_Tool::CurveOnSurface(E, F)` as stored on `face_g`: `which=1` reads the
+# FORWARD-orientation pcurve (`PCurve`), `which=0` the REVERSED one
+# (`PCurve2` on a closed-surface record, otherwise the same single pcurve).
+# `nothing` when the edge carries no pcurve on this face.
+function _occ_edge_pcurve_on_face(face_g, edge_tag::Int, which::Int)
+    e=get(face_g.pcurves,edge_tag,nothing)
+    e===nothing && return nothing
+    return which==1 ? e.fwd : (e.rev===nothing ? e.fwd : e.rev)
+end
+
+# `OCCEdge::reparamOnFace`: the edge's face pcurve evaluated at the edge
+# parameter directly — no 3-D evaluation, no robustness recheck
+# (`reparamOnFaceRobust` defaults to 0). Edges without a pcurve on the face
+# take the `closestPoint(sp, {0,0})` fallback.
+function _occ_edge_reparam_on_face(m::GeoModel, face_g, edge_tag::Int,
+                                   epar::Float64, which::Int,
+                                   lc::Float64, caller::AbstractString)
+    pc=_occ_edge_pcurve_on_face(face_g,edge_tag,which)
+    pc!==nothing && return _occ_pcurve_d0(pc,epar)
+    pt=_model_curve_point(m,edge_tag,epar,caller,0)
+    u,v,_=_occ_surface_closest(face_g,pt,lc)
+    return (u,v)
+end
+
+# `OCCVertex::reparamOnFace`: the first `l_edges` edge that also bounds the
+# face supplies its pcurve range (`s0` at the begin vertex, `s1` at the end);
+# the vertex then delegates to the edge's `reparamOnFace`. Incident-edge
+# order is curve-creation order, matching the `TopExp_Explorer` order in
+# which OCC edges adopt their vertices. Falls back to
+# `OCCFace::parFromPoint` when no shared OCC edge exists.
+function _occ_vertex_reparam_on_face(m::GeoModel, surface_tag::Int,
+                                     face_g, vtag::Int, which::Int,
+                                     lc::Float64)
+    incident=Int[]
+    for (ct,(a,b)) in m.curves
+        (a==vtag || b==vtag) && push!(incident,ct)
+    end
+    sort!(incident)
+    for ct in incident
+        onface=false
+        for loop in m.surfaces[surface_tag], signed in m.loops[loop]
+            abs(signed)==ct && (onface=true; break)
+        end
+        onface || continue
+        rec=get(m.curve_geometry,ct,nothing)
+        pc=rec!==nothing && hasproperty(rec,:occ) ?
+            _occ_edge_pcurve_on_face(face_g,ct,which) : nothing
+        pc===nothing && break   # non-OCC shared edge → parFromPoint below
+        a,_=m.curves[ct]
+        return _occ_pcurve_d0(pc, a==vtag ? rec.t0 : rec.t1)
+    end
+    return _occ_surface_parameter_on_face(face_g,m.points[vtag],lc)
+end
+
+# `BRepAdaptor_Curve`'s pcurve path for a degenerate edge: the edge's stored
+# pcurve on `g.face` (`_trimmed`/`_curve2d` bound by `_occ_bind_degenerate!`).
+# `OCCEdge::point` returns `_trimmed->point(u,v)`;
+# `Adaptor3d_CurveOnSurface::D1` applies `D1 = du·S_u + dv·S_v` (the
+# `EvalKPart` `GeomAbs_OtherCurve` branch — pole pcurves are VIsos at the
+# singular latitude, which EvalKPart refuses to re-recognize).
+function _occ_degenerate_pcurve(g,tag::Int)
+    hasproperty(g,:face) || throw(ArgumentError(
+        "_occ_degenerate_pcurve: degenerate edge has no trimmed face"))
+    pc=get(g.face.pcurves,tag,nothing)
+    pc!==nothing && pc.fwd!==nothing ||
+        throw(ArgumentError(
+            "_occ_degenerate_pcurve: degenerate edge has no pcurve on its face"))
+    return pc.fwd
+end
+function _occ_degenerate_point(g,tag::Int,t::Float64)
+    u,v=_occ_pcurve_d0(_occ_degenerate_pcurve(g,tag),t)
+    return _occ_surface_point(g.face,u,v)
+end
+function _occ_degenerate_d1(g,tag::Int,t::Float64)
+    (u,v),duv=_occ_pcurve_d1(_occ_degenerate_pcurve(g,tag),t)
+    _,su,sv=_occ_surface_d1(g.face,u,v)
+    return ntuple(i->fma(duv[1],su[i],duv[2]*sv[i]),3)
 end
 
 # Exact OCC-circle bounding box. A full circle's extent along axis i is
@@ -538,7 +879,7 @@ function _occ_circle_bounding_box(g)
     Y=_occ_circle_y(g)
     for axis in 1:3
         (g.X[axis]==0.0 && Y[axis]==0.0) && continue
-        base=atan(Y[axis],g.X[axis])
+        base=_gm_atan2(Y[axis],g.X[axis])
         for k in -4:4
             t=base+k*π
             (g.t0-1e-12<=t<=g.t1+1e-12) || continue
@@ -549,17 +890,6 @@ function _occ_circle_bounding_box(g)
         end
     end
     return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
-end
-
-# Inverse parametrization: the curve parameter of the closest point, mapped
-# into the stored [t0,t1] interval.
-function _occ_circle_parameter(g,point::NTuple{3,Float64})
-    Y=_occ_circle_y(g)
-    rel=_arc_sub(point,g.center)
-    θ=atan(_arc_dot(rel,Y),_arc_dot(rel,g.X))
-    span=_OCC_TWO_PI
-    θ=θ-floor((θ-g.t0)/span)*span
-    return θ
 end
 
 # The OCC record of a curve, or `nothing` for built-in entities.
@@ -585,8 +915,10 @@ function _occ_endpoints_satisfied(m::GeoModel, tag::Int, g)
         return _points_close(_occ_circle_point(g,g.t0),pa,tol) &&
                _points_close(_occ_circle_point(g,g.t1),pb,tol)
     elseif g.occ===:line
-        chord=_arc_sub(pb,pa)
-        return abs(sqrt(_arc_dot(chord,chord))-(g.t1-g.t0))<=tol
+        return _points_close(
+                   _add3(g.origin,_occ_mul(g.dir,g.t0)),pa,tol) &&
+               _points_close(
+                   _add3(g.origin,_occ_mul(g.dir,g.t1)),pb,tol)
     end
     return true
 end
@@ -629,26 +961,31 @@ end
 # equivalent exists: callers materialize whole solids and roll back as a unit.
 function _add_occ_circle!(m::GeoModel, p1::Int, p2::Int,
                          center::NTuple{3,Float64}, n::NTuple{3,Float64},
-                         X::NTuple{3,Float64}, r::Float64,
-                         t0::Float64, t1::Float64)
+                         X::NTuple{3,Float64}, Y::NTuple{3,Float64},
+                         r::Float64, t0::Float64, t1::Float64)
     t=_alloc_tag!(m,1,0,"_add_occ_circle!")
     m.curves[t]=(p1,p2)
     m.curve_types[t]=:circle
-    m.curve_geometry[t]=(occ=:circle,center=center,n=n,X=X,r=r,t0=t0,t1=t1)
+    m.curve_geometry[t]=(occ=:circle,center=center,n=n,X=X,Y=Y,r=r,
+                         t0=t0,t1=t1)
     return t
 end
 
-# A seam line with an OCC arc-length parameter range [0,length].
-function _add_occ_line!(m::GeoModel, p1::Int, p2::Int)
+# A seam line: `origin`/`dir` are the stored `gp_Lin` parametrization (with
+# the R(2π) transform residues OCC bakes in); the range is [0,length].
+function _add_occ_line!(m::GeoModel, p1::Int, p2::Int,
+                        origin::NTuple{3,Float64}, dir::NTuple{3,Float64},
+                        t1::Float64)
     t=_alloc_tag!(m,1,0,"_add_occ_line!")
-    a,b=m.points[p1],m.points[p2]
-    len=sqrt((b[1]-a[1])^2+(b[2]-a[2])^2+(b[3]-a[3])^2)
     m.curves[t]=(p1,p2)
-    m.curve_geometry[t]=(occ=:line,t0=0.0,t1=len)
+    m.curve_geometry[t]=(occ=:line,origin=origin,dir=dir,t0=0.0,t1=t1)
     return t
 end
 
-# A degenerate OCC edge: a zero-length edge collapsed on a pole or apex vertex.
+# A degenerate OCC edge: a zero-length edge collapsed on a pole or apex
+# vertex. `face` binds the surface record OCC's `setTrimmed` attaches (the
+# first face adopting the edge); the edge's pcurve is looked up in
+# `face.pcurves` at evaluation time.
 function _add_occ_degenerate!(m::GeoModel, p::Int)
     t=_alloc_tag!(m,1,0,"_add_occ_degenerate!")
     m.curves[t]=(p,p)
@@ -657,10 +994,25 @@ function _add_occ_degenerate!(m::GeoModel, p::Int)
     return t
 end
 
+# `OCCFace` ctor `setTrimmed`: the first face adopting a non-3D edge binds it
+# (`_trimmed` + `_curve2d`). Called by the materializers once the surface
+# record exists.
+function _occ_bind_degenerate!(m::GeoModel, edge::Int, face)
+    m.curve_geometry[edge]=merge(m.curve_geometry[edge],(face=face,))
+    return edge
+end
+
 # A typed OCC face: `loops` are existing curve-loop tags, `kind` one of
-# :cylinder/:sphere/:cone/:torus, `geometry` the analytic record.
+# :cylinder/:sphere/:cone/:torus/:plane, `geometry` the analytic record.
+# A `:plane` record additionally caches `uvb` — the `GetFaceUVBounds` result
+# `OCCFace`'s constructor stores as `_umin.._vmax` (the face bounds are fixed
+# once the pcurves exist; transforms leave them invariant).
 function _add_occ_surface!(m::GeoModel, kind::Symbol, loops::Vector{Int},
                            geometry)
+    if geometry.occ===:plane
+        lo,hi=_occ_face_uv_bounds(m,geometry)
+        geometry=merge(geometry,(uvb=(lo,hi),))
+    end
     t=_alloc_tag!(m,2,0,"_add_occ_surface!")
     m.surfaces[t]=loops
     m.surface_types[t]=kind
@@ -854,35 +1206,74 @@ function _occ_materialize_rollback!(m::GeoModel, points, curves, loops,
     return nothing
 end
 
-# OCC's cylinder layout: top rim Point, bottom rim Point; top Circle, seam
-# Line, bottom Circle; Cylinder face ([-top,-seam,bottom,seam]), Plane caps;
-# shell [lateral, +top, -bottom]. Both circles wind CCW about +axis from the
-# OCC `gp_Ax2` reference direction X (`_occ_reference_direction`).
+# A full-rotation `gp_Trsf` residue: OCCT's `EndEdge`/`TopEndVertex` chain
+# transforms the unrotated construction by R(2π) about the build axis, so
+# seam origins and rim vertices carry `sin(2π)` residuals.
+_occ_end_trsf(base, n) = _occ_trsf_rot(base, n, _OCC_TWO_PI)
+
+# `gp_Pnt::Translated` — plain componentwise add of a scaled direction.
+@inline _occ_translated(p,d,s) =
+    (p[1]+d[1]*s, p[2]+d[2]*s, p[3]+d[3]*s)
+
+# OCC's cylinder layout, built in `BRepPrim_OneAxis` order: top rim Point
+# (TopEndVertex), bottom rim Point (BottomEndVertex); top Circle (ETOP),
+# seam Line (ESTART/EEND shared), bottom Circle (EBOTTOM); the Cylinder
+# lateral face ([-top,-seam,bottom,seam]), Plane caps, shell
+# [lateral,+top,-bottom]. Rim frames come from the `gp_Ax2(P,N,X)` 3-arg
+# ctor; the seam line carries the `Geom_Line::Transform(R(2π))` origin/dir.
 function _materialize_cylinder!(m::GeoModel, base::NTuple{3,Float64},
                                 axis::NTuple{3,Float64}, r::Float64,
                                 h::Float64)
-    n=(axis[1]/h,axis[2]/h,axis[3]/h)
-    X=_occ_reference_direction(n)
-    top=(base[1]+axis[1],base[2]+axis[2],base[3]+axis[3])
+    n=_occ_dir(axis)
+    X,Y=_occ_ax2_frame(n)
+    M,loc=_occ_end_trsf(base,n)
+    # Rim/cap frames: `gp_Ax2(Loc + n·mp.Y, n, X)` 3-arg ctor; the stored
+    # circle axis is the adaptor view X×Y.
+    Xc,Yc=_occ_ax2_setx(n,X)
+    nc=_occ_crossed(Xc,Yc)
+    # Meridian profile `Lin2d((r,0),(0,1))`: mp(v) = (r, v).
+    w_top=_occ_vertex(base,n,X,(r,h),M,loc)
+    w_bot=_occ_vertex(base,n,X,(r,0.0),M,loc)
     points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
     try
-        push!(points,add_point!(m,top[1]+r*X[1],top[2]+r*X[2],top[3]+r*X[3]))
-        push!(points,add_point!(m,base[1]+r*X[1],base[2]+r*X[2],base[3]+r*X[3]))
+        push!(points,add_point!(m,w_top...))
+        push!(points,add_point!(m,w_bot...))
         for p in points
             delete!(m.point_size,p)
         end
         p_top,p_bot=points
-        push!(curves,_add_occ_circle!(m,p_top,p_top,top,n,X,r,0.0,_OCC_TWO_PI))
-        push!(curves,_add_occ_line!(m,p_bot,p_top))
-        push!(curves,_add_occ_circle!(m,p_bot,p_bot,base,n,X,r,0.0,_OCC_TWO_PI))
+        top_center=_occ_translated(base,n,h)
+        push!(curves,_add_occ_circle!(m,p_top,p_top,top_center,nc,Xc,Yc,r,
+                                      0.0,_OCC_TWO_PI))
+        # `Geom_Line(Ax1(base + X·r, n)).Transform(R(2π))`, range [0,h].
+        seam_origin=_occ_xform_pnt(M,loc,_occ_translated(base,X,r))
+        seam_dir=_occ_xform_dir(M,n)
+        push!(curves,_add_occ_line!(m,p_bot,p_top,seam_origin,seam_dir,h))
+        push!(curves,_add_occ_circle!(m,p_bot,p_bot,base,nc,Xc,Yc,r,
+                                      0.0,_OCC_TWO_PI))
         c_top,c_seam,c_bot=curves
         push!(loops,add_curve_loop!(m,[-c_top,-c_seam,c_bot,c_seam]))
         push!(surfaces,_add_occ_surface!(m,:cylinder,[last(loops)],
-              (occ=:cylinder,center=base,axis=n,X=X,radius=r,height=h)))
+              (occ=:cylinder,center=base,axis=n,X=X,Y=Y,radius=r,height=h,
+               pcurves=Dict{Int,NamedTuple}(
+                   c_top=>(fwd=(lin2d=((0.0,h),(1.0,0.0)),),rev=nothing),
+                   c_bot=>(fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),rev=nothing),
+                   c_seam=>(fwd=(lin2d=((_OCC_TWO_PI,0.0),(0.0,1.0)),),
+                            rev=(lin2d=((0.0,0.0),(0.0,1.0)),))))))
+        # Cap planes: `gp_Pln(gp_Ax3(Loc + n·mp.Y, n, X))` top FORWARD and
+        # bottom REVERSED; each rim edge's pcurve is `Circ2d((0,0),x̂,r)`.
         push!(loops,add_curve_loop!(m,[c_top]))
-        push!(surfaces,add_plane_surface!(m,[last(loops)]))
+        push!(surfaces,_add_occ_surface!(m,:plane,[last(loops)],
+              (occ=:plane,center=top_center,axis=n,X=Xc,Y=Yc,reversed=false,
+               pcurves=Dict{Int,NamedTuple}(
+                   c_top=>(fwd=(circ2d=((0.0,0.0),(1.0,0.0),r),),
+                           rev=nothing)))))
         push!(loops,add_curve_loop!(m,[c_bot]))
-        push!(surfaces,add_plane_surface!(m,[last(loops)]))
+        push!(surfaces,_add_occ_surface!(m,:plane,[last(loops)],
+              (occ=:plane,center=base,axis=n,X=Xc,Y=Yc,reversed=true,
+               pcurves=Dict{Int,NamedTuple}(
+                   c_bot=>(fwd=(circ2d=((0.0,0.0),(1.0,0.0),r),),
+                           rev=nothing)))))
         s_lat,s_top,s_bot=surfaces
         shell=add_surface_loop!(m,[s_lat,s_top,-s_bot])
     catch
@@ -892,30 +1283,53 @@ function _materialize_cylinder!(m::GeoModel, base::NTuple{3,Float64},
     return shell
 end
 
-# OCC's sphere layout: north/south pole Points; a degenerate edge on each pole
-# and a meridian Circle trimmed to [3π/2,5π/2] in the xz-plane through +x̂;
-# one Sphere face ([-degN,-meridian,degS,meridian]); shell [face].
+# OCC's sphere layout: north/south pole Points (`TopEndVertex`/`BottomEndVertex`
+# — the `Circ2d` profile eval at ±π/2 rotated by R(2π)); a degenerate edge on
+# each pole and a meridian Circle — `gp_Ax2(Loc, -Y, X)` transformed by
+# R(2π), trimmed to [3π/2,5π/2] running south→north; one Sphere face
+# ([-degN,-meridian,degS,meridian]); shell [face]. The surface frame is the
+# `gp_Ax2(Loc, ẑ, x̂)` 3-arg ctor output.
 function _materialize_sphere!(m::GeoModel, center::NTuple{3,Float64},
                               r::Float64)
+    n=(0.0,0.0,1.0)
+    X,Y=_occ_ax2_setx(n,(1.0,0.0,0.0))
+    M,loc=_occ_end_trsf(center,n)
+    # Profile `Circ2d((0,0),x̂,r)`: mp(v) = (r·cos v, r·sin v); pole vertices
+    # evaluate at the raw profile extrema ±π/2.
+    mp(v)=_occ_circ2d_eval((0.0,0.0),(1.0,0.0),r,v)
+    w_n=_occ_vertex(center,n,X,mp(π/2),M,loc)
+    w_s=_occ_vertex(center,n,X,mp(-π/2),M,loc)
+    # Meridian ctor `gp_Ax2(Loc, -Y, X)`, then `gp_Circ::Transform(R(2π))`.
+    Dm=(-Y[1],-Y[2],-Y[3])
+    Xm,Ym=_occ_ax2_setx(Dm,X)
+    mer=_occ_xform_ax2(M,loc,(loc=center,axis=Dm,X=Xm,Y=Ym))
     points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
     try
-        push!(points,add_point!(m,center[1],center[2],center[3]+r))
-        push!(points,add_point!(m,center[1],center[2],center[3]-r))
+        push!(points,add_point!(m,w_n...))
+        push!(points,add_point!(m,w_s...))
         for p in points
             delete!(m.point_size,p)
         end
         p_n,p_s=points
         push!(curves,_add_occ_degenerate!(m,p_n))
-        # The OCC meridian frame is X=+x̂, Y=+ẑ (n=X×Y=-ŷ).
-        push!(curves,_add_occ_circle!(m,p_s,p_n,center,(0.0,-1.0,0.0),
-              (1.0,0.0,0.0),r,1.5π,2.5π))
+        push!(curves,_add_occ_circle!(m,p_s,p_n,mer.loc,mer.axis,mer.X,mer.Y,
+                                      r,1.5π,2.5π))
         push!(curves,_add_occ_degenerate!(m,p_s))
         c_n,c_mer,c_s=curves
         push!(loops,add_curve_loop!(m,[-c_n,-c_mer,c_s,c_mer]))
         push!(surfaces,_add_occ_surface!(m,:sphere,[last(loops)],
               (occ=:sphere,center=center,radius=r,
-               axis=(0.0,0.0,1.0),X=(1.0,0.0,0.0))))
+               axis=n,X=X,Y=Y,
+               pcurves=Dict{Int,NamedTuple}(
+                   c_n=>(fwd=(lin2d=((0.0,π/2),(1.0,0.0)),),rev=nothing),
+                   c_s=>(fwd=(lin2d=((0.0,-π/2),(1.0,0.0)),),rev=nothing),
+                   c_mer=>(fwd=(lin2d=((_OCC_TWO_PI,-_OCC_TWO_PI),
+                                       (0.0,1.0)),),
+                           rev=(lin2d=((0.0,-_OCC_TWO_PI),(0.0,1.0)),))))))
         shell=add_surface_loop!(m,[last(surfaces)])
+        face=m.surface_geometry[last(surfaces)]
+        _occ_bind_degenerate!(m,c_n,face)
+        _occ_bind_degenerate!(m,c_s,face)
     catch
         _occ_materialize_rollback!(m,points,curves,loops,surfaces,shell)
         rethrow()
@@ -930,38 +1344,80 @@ end
 function _materialize_cone!(m::GeoModel, base::NTuple{3,Float64},
                           axis::NTuple{3,Float64}, r1::Float64, r2::Float64,
                           h::Float64)
-    n=(axis[1]/h,axis[2]/h,axis[3]/h)
-    X=_occ_reference_direction(n)
-    top=(base[1]+axis[1],base[2]+axis[2],base[3]+axis[3])
+    n=_occ_dir(axis)
+    X,Y=_occ_ax2_frame(n)
+    M,loc=_occ_end_trsf(base,n)
+    dr=r2-r1
+    sa=_gm_atan(dr/h)
+    len=sqrt(fma(h,h,dr*dr))
+    # Meridian profile `Lin2d((r1,0),Dir2d(sin sa,cos sa))`; `gp_Dir2d`
+    # renormalizes, so mp.x differs from r2 by ~1ulp — the rim circle stores
+    # the evaluated mp.x, which is why OCC's cone curvature can read
+    # 1/0.9999999999999998.
+    dir2d=_occ_dir2((_gm_sin(sa),_gm_cos(sa)))
+    mp(v)=_occ_lin2d_eval((r1,0.0),dir2d,v)
+    mpT=mp(len); mpB=mp(0.0)
+    Xc,Yc=_occ_ax2_setx(n,X)
+    nc=_occ_crossed(Xc,Yc)
+    # `A.Rotate(Ax1(Loc,Y),sa)` — `gp_Dir::Rotate`, matvec only, no
+    # renormalization.
+    MY,_=_occ_trsf_rot(base,Y,sa)
+    d0=_occ_rot_dir(MY,n)
+    w_top=_occ_vertex(base,n,X,mpT,M,loc)
+    w_bot=_occ_vertex(base,n,X,mpB,M,loc)
     points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
     try
-        push!(points,add_point!(m,top[1]+r2*X[1],top[2]+r2*X[2],top[3]+r2*X[3]))
-        push!(points,add_point!(m,base[1]+r1*X[1],base[2]+r1*X[2],base[3]+r1*X[3]))
+        push!(points,add_point!(m,w_top...))
+        push!(points,add_point!(m,w_bot...))
         for p in points
             delete!(m.point_size,p)
         end
         p_top,p_bot=points
+        top_center=_occ_translated(base,n,mpT[2])
         push!(curves,r2>0 ?
-              _add_occ_circle!(m,p_top,p_top,top,n,X,r2,0.0,_OCC_TWO_PI) :
+              _add_occ_circle!(m,p_top,p_top,top_center,nc,Xc,Yc,mpT[1],
+                               0.0,_OCC_TWO_PI) :
               _add_occ_degenerate!(m,p_top))
-        push!(curves,_add_occ_line!(m,p_bot,p_top))
+        # `Geom_Line(Ax1(base + X·r1, d0)).Transform(R(2π))`.
+        seam_origin=_occ_xform_pnt(M,loc,_occ_translated(base,X,r1))
+        seam_dir=_occ_xform_dir(M,d0)
+        push!(curves,_add_occ_line!(m,p_bot,p_top,seam_origin,seam_dir,len))
         push!(curves,r1>0 ?
-              _add_occ_circle!(m,p_bot,p_bot,base,n,X,r1,0.0,_OCC_TWO_PI) :
+              _add_occ_circle!(m,p_bot,p_bot,base,nc,Xc,Yc,mpB[1],
+                               0.0,_OCC_TWO_PI) :
               _add_occ_degenerate!(m,p_bot))
         c_top,c_seam,c_bot=curves
         push!(loops,add_curve_loop!(m,[-c_top,-c_seam,c_bot,c_seam]))
         push!(surfaces,_add_occ_surface!(m,:cone,[last(loops)],
-              (occ=:cone,center=base,axis=n,X=X,r1=r1,r2=r2,height=h)))
+              (occ=:cone,center=base,axis=n,X=Xc,Y=Yc,r1=r1,r2=r2,height=h,
+               pcurves=Dict{Int,NamedTuple}(
+                   c_top=>(fwd=(lin2d=((0.0,len),(1.0,0.0)),),rev=nothing),
+                   c_bot=>(fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),rev=nothing),
+                   c_seam=>(fwd=(lin2d=((_OCC_TWO_PI,-0.0),(0.0,1.0)),),
+                            rev=(lin2d=((0.0,-0.0),(0.0,1.0)),))))))
         s_lat=last(surfaces)
+        lat_face=m.surface_geometry[s_lat]
+        r2==0 && _occ_bind_degenerate!(m,c_top,lat_face)
+        r1==0 && _occ_bind_degenerate!(m,c_bot,lat_face)
         shell_signs=Int[s_lat]
         if r2>0
             push!(loops,add_curve_loop!(m,[c_top]))
-            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            push!(surfaces,_add_occ_surface!(m,:plane,[last(loops)],
+                  (occ=:plane,center=top_center,axis=n,X=Xc,Y=Yc,
+                   reversed=false,
+                   pcurves=Dict{Int,NamedTuple}(
+                       c_top=>(fwd=(circ2d=((0.0,0.0),(1.0,0.0),mpT[1]),),
+                               rev=nothing)))))
             push!(shell_signs,last(surfaces))
         end
         if r1>0
             push!(loops,add_curve_loop!(m,[c_bot]))
-            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            push!(surfaces,_add_occ_surface!(m,:plane,[last(loops)],
+                  (occ=:plane,center=base,axis=n,X=Xc,Y=Yc,
+                   reversed=true,
+                   pcurves=Dict{Int,NamedTuple}(
+                       c_bot=>(fwd=(circ2d=((0.0,0.0),(1.0,0.0),mpB[1]),),
+                               rev=nothing)))))
             push!(shell_signs,-last(surfaces))
         end
         shell=add_surface_loop!(m,shell_signs)
@@ -984,64 +1440,109 @@ end
 # shell [torus, +start_cap, -end_cap].
 function _materialize_torus!(m::GeoModel, center::NTuple{3,Float64},
                              r1::Float64, r2::Float64, angle::Float64)
-    n=(0.0,0.0,1.0); X=(1.0,0.0,0.0); Y=(0.0,1.0,0.0)
-    ca,sa=cos(angle),sin(angle)
-    Xe=(ca*X[1]+sa*Y[1],ca*X[2]+sa*Y[2],ca*X[3]+sa*Y[3])
-    # A meridian's plane contains the axis: X_dir = R(u)·X, Y_dir = axis, so
-    # its normal is R(u)·X × axis.
-    meridian_normal=(dir)->_occ_cross(dir,n)
+    n=(0.0,0.0,1.0)
+    X,Y=_occ_ax2_setx(n,(1.0,0.0,0.0))
+    M,loc=_occ_end_trsf(center,n)
+    # Profile `Circ2d((r1,0),x̂,r2)`: mp(v) = (r1 + r2·cos v, r2·sin v). The
+    # rim vertex is `TopEndVertex`/`BottomStartVertex` — `mp(VMax)` carries
+    # the `r2·sin(2π)` residue.
+    mp(v)=_occ_circ2d_eval((r1,0.0),(1.0,0.0),r2,v)
+    mpE=mp(_OCC_TWO_PI)
+    w_rim=_occ_vertex(center,n,X,mpE,M,loc)
+    # Meridian ctor `gp_Ax2(Loc + X·r1, -Y, X)`; the stored circle is
+    # `gp_Circ::Transform`'d by R(2π) (full) or R(angle)/R(0) (partial).
+    Dm=(-Y[1],-Y[2],-Y[3])
+    Xm,Ym=_occ_ax2_setx(Dm,X)
+    locm=_occ_translated(center,X,r1)
+    # Equator `gp_Circ(Ax2(Loc + n·mpE.y, n, X), mpE.x)` — the
+    # `r2·sin(2π)`-offset center.
+    Xe,Ye=_occ_ax2_setx(n,X)
+    ne=_occ_crossed(Xe,Ye)
+    ce=_occ_translated(center,n,mpE[2])
     full=angle>=_OCC_TWO_PI
     points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
     try
         if full
-            push!(points,add_point!(m,
-                center[1]+(r1+r2)*X[1],center[2]+(r1+r2)*X[2],
-                center[3]+(r1+r2)*X[3]))
+            push!(points,add_point!(m,w_rim...))
         else
+            # VTOPEND (`mp(VMax)` rotated by the sweep angle), then
+            # VTOPSTART — the `MeridianClosed` deduction makes it the
+            # unrotated `mp(VMax)` vertex, carrying the `r2·sin(2π)`
+            # residue on n.
+            Ma,loca=_occ_trsf_rot(center,n,angle)
             push!(points,add_point!(m,
-                center[1]+(r1+r2)*Xe[1],center[2]+(r1+r2)*Xe[2],
-                center[3]+(r1+r2)*Xe[3]))
+                _occ_vertex(center,n,X,mpE,Ma,loca)...))
             push!(points,add_point!(m,
-                center[1]+(r1+r2)*X[1],center[2]+(r1+r2)*X[2],
-                center[3]+(r1+r2)*X[3]))
+                ntuple(i->(center[i]+n[i]*mpE[2])+X[i]*mpE[1],3)...))
         end
         for p in points
             delete!(m.point_size,p)
         end
         if full
             p_rim=points[1]
-            push!(curves,_add_occ_circle!(m,p_rim,p_rim,center,n,X,r1+r2,
+            mer=_occ_xform_ax2(M,loc,(loc=locm,axis=Dm,X=Xm,Y=Ym))
+            push!(curves,_add_occ_circle!(m,p_rim,p_rim,ce,ne,Xe,Ye,mpE[1],
                   0.0,_OCC_TWO_PI))
-            push!(curves,_add_occ_circle!(m,p_rim,p_rim,
-                  (center[1]+r1*X[1],center[2]+r1*X[2],center[3]+r1*X[3]),
-                  meridian_normal(X),X,r2,0.0,_OCC_TWO_PI))
+            push!(curves,_add_occ_circle!(m,p_rim,p_rim,mer.loc,mer.axis,
+                  mer.X,mer.Y,r2,0.0,_OCC_TWO_PI))
             c_eq,c_mer=curves
             push!(loops,add_curve_loop!(m,[-c_eq,c_mer,c_eq,-c_mer]))
             push!(surfaces,_add_occ_surface!(m,:torus,[last(loops)],
-                  (occ=:torus,center=center,axis=n,X=X,r1=r1,r2=r2,
-                   angle=angle)))
+                  (occ=:torus,center=center,axis=n,X=X,Y=Y,r1=r1,r2=r2,
+                   angle=angle,
+                   pcurves=Dict{Int,NamedTuple}(
+                       c_eq=>(fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),
+                              rev=(lin2d=((0.0,_OCC_TWO_PI),(1.0,0.0)),)),
+                       c_mer=>(fwd=(lin2d=((_OCC_TWO_PI,-0.0),(0.0,1.0)),),
+                               rev=(lin2d=((0.0,-0.0),(0.0,1.0)),))))))
             shell=add_surface_loop!(m,[last(surfaces)])
         else
             p_end,p_start=points
-            push!(curves,_add_occ_circle!(m,p_start,p_end,center,n,X,r1+r2,
+            Ma,loca=_occ_trsf_rot(center,n,angle)
+            mer_e=_occ_xform_ax2(Ma,loca,(loc=locm,axis=Dm,X=Xm,Y=Ym))
+            # The start meridian goes through `gp_Ax2::Transform` with the
+            # angle-0 rotation Trsf (M=I, loc=0): directions normalize to
+            # themselves, only the axis is recomputed as X×Y.
+            mer_s=_occ_xform_ax2(
+                ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0)),(0.0,0.0,0.0),
+                (loc=locm,axis=Dm,X=Xm,Y=Ym))
+            push!(curves,_add_occ_circle!(m,p_start,p_end,ce,ne,Xe,Ye,mpE[1],
                   0.0,angle))
-            push!(curves,_add_occ_circle!(m,p_end,p_end,
-                  (center[1]+r1*Xe[1],center[2]+r1*Xe[2],center[3]+r1*Xe[3]),
-                  meridian_normal(Xe),Xe,r2,0.0,_OCC_TWO_PI))
-            push!(curves,_add_occ_circle!(m,p_start,p_start,
-                  (center[1]+r1*X[1],center[2]+r1*X[2],center[3]+r1*X[3]),
-                  meridian_normal(X),X,r2,0.0,_OCC_TWO_PI))
+            push!(curves,_add_occ_circle!(m,p_end,p_end,mer_e.loc,mer_e.axis,
+                  mer_e.X,mer_e.Y,r2,0.0,_OCC_TWO_PI))
+            push!(curves,_add_occ_circle!(m,p_start,p_start,mer_s.loc,
+                  mer_s.axis,mer_s.X,mer_s.Y,r2,0.0,_OCC_TWO_PI))
             c_arc,c_end,c_start=curves
             push!(loops,add_curve_loop!(m,[-c_arc,-c_start,c_arc,c_end]))
             push!(surfaces,_add_occ_surface!(m,:torus,[last(loops)],
-                  (occ=:torus,center=center,axis=n,X=X,r1=r1,r2=r2,
-                   angle=angle)))
+                  (occ=:torus,center=center,axis=n,X=X,Y=Y,r1=r1,r2=r2,
+                   angle=angle,
+                   pcurves=Dict{Int,NamedTuple}(
+                       c_arc=>(fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),
+                               rev=(lin2d=((0.0,_OCC_TWO_PI),(1.0,0.0)),)),
+                       c_start=>(fwd=(lin2d=((0.0,-0.0),(0.0,1.0)),),
+                                  rev=nothing),
+                       c_end=>(fwd=(lin2d=((angle,-0.0),(0.0,1.0)),),
+                                rev=nothing)))))
             s_torus=last(surfaces)
+            # Caps: `gp_Pln(Ax2(Loc,-Y,X))` forward on the start side, the
+            # `gp_Ax2::Rotate`d plane + `ReverseFace` on the end side; each
+            # meridian's cap pcurve is the profile `Circ2d((r1,0),x̂,r2)`.
             push!(loops,add_curve_loop!(m,[c_start]))
-            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            push!(surfaces,_add_occ_surface!(m,:plane,[last(loops)],
+                  (occ=:plane,center=center,axis=Dm,X=Xm,Y=Ym,reversed=false,
+                   pcurves=Dict{Int,NamedTuple}(
+                       c_start=>(fwd=(circ2d=((r1,0.0),(1.0,0.0),r2),),
+                                 rev=nothing)))))
             s_start=last(surfaces)
+            cap_e=_occ_rotate_ax2(Ma,loca,(loc=center,axis=Dm,X=Xm,Y=Ym))
             push!(loops,add_curve_loop!(m,[c_end]))
-            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            push!(surfaces,_add_occ_surface!(m,:plane,[last(loops)],
+                  (occ=:plane,center=cap_e.loc,axis=cap_e.axis,X=cap_e.X,
+                   Y=cap_e.Y,reversed=true,
+                   pcurves=Dict{Int,NamedTuple}(
+                       c_end=>(fwd=(circ2d=((r1,0.0),(1.0,0.0),r2),),
+                               rev=nothing)))))
             s_end=last(surfaces)
             shell=add_surface_loop!(m,[s_torus,s_start,-s_end])
         end
@@ -1060,7 +1561,9 @@ end
 # parameter (arc length along the axis for Cylinder, slant length for Cone,
 # latitude for Sphere, tube angle for Torus).
 
-@inline _occ_frame_y(g) = _occ_cross(g.axis,g.X)
+# Stored surface YDirection — `gp_Ax3` keeps all three directions verbatim
+# through transforms (a reflection makes the frame left-handed).
+@inline _occ_frame_y(g) = g.Y
 
 # `ElSLib::*Value`: A1·X + A2·Y + A3·Z + PLoc with the coefficient products
 # pre-rounded — `(A1·X + A2·Y) + A3·Z` chains the fused multiply-adds in
@@ -1068,22 +1571,28 @@ end
 # coefficients below `10·(r_minor+r_major)·eps` (the OCC620 clamp).
 function _occ_surface_point(g, u::Float64, v::Float64)
     Y=_occ_frame_y(g)
-    c,s=cos(u),sin(u)
     C,X,Z=g.center,g.X,g.axis
+    if g.occ===:plane
+        # `ElSLib::PlaneValue` — U·X + V·Y + Loc.
+        return (fma(u,X[1],v*Y[1])+C[1],
+                fma(u,X[2],v*Y[2])+C[2],
+                fma(u,X[3],v*Y[3])+C[3])
+    end
+    c,s=_gm_cos(u),_gm_sin(u)
     if g.occ===:cylinder
         A1,A2,A3=g.radius*c,g.radius*s,v
     elseif g.occ===:sphere
-        R,A3=g.radius*cos(v),g.radius*sin(v)
+        R,A3=g.radius*_gm_cos(v),g.radius*_gm_sin(v)
         A1,A2=R*c,R*s
     elseif g.occ===:cone
         # OCCT stores the half-angle atan((R2−R1)/H) (BRepPrim_Cone::
         # SetParameters) and ConeValue calls sin/cos on it per eval; the
         # slant-ratio forms differ by ~1ulp from the libm trig values.
-        sa=atan((g.r2-g.r1)/g.height)
-        R,A3=fma(v,sin(sa),g.r1),v*cos(sa)
+        sa=_gm_atan((g.r2-g.r1)/g.height)
+        R,A3=fma(v,_gm_sin(sa),g.r1),v*_gm_cos(sa)
         A1,A2=R*c,R*s
     elseif g.occ===:torus
-        cv,sv=cos(v),sin(v)
+        cv,sv=_gm_cos(v),_gm_sin(v)
         R,A3=fma(g.r2,cv,g.r1),g.r2*sv
         A1,A2=R*c,R*s
         clamp_eps=10.0*(g.r2+g.r1)*eps()
@@ -1110,9 +1619,943 @@ function _occ_surface_bounds(g)
                [2π,sqrt(g.height*g.height+(g.r1-g.r2)*(g.r1-g.r2))]
     elseif g.occ===:torus
         return [0.0,0.0],[g.angle,2π]
+    elseif g.occ===:plane
+        return g.uvb
     end
     throw(ArgumentError(
         "_occ_surface_bounds: unsupported OCC surface kind $(g.occ)"))
+end
+
+# `ElSLib::*D1` ports — `mySurface->D1` behind `BRepAdaptor_Surface::D1` /
+# `OCCFace::firstDer`, with each function's own coefficient contractions and
+# the OCC620 torus clamp. Returns (point, ∂P/∂u, ∂P/∂v).
+function _occ_surface_d1(g,u::Float64,v::Float64)
+    Y=_occ_frame_y(g)
+    X,Z=g.X,g.axis
+    p=_occ_surface_point(g,u,v)
+    if g.occ===:plane
+        # `ElSLib::PlaneD1` — Vu = XDirection, Vv = YDirection.
+        return p,X,Y
+    end
+    c,s=_gm_cos(u),_gm_sin(u)
+    if g.occ===:cylinder
+        A1,A2=g.radius*c,g.radius*s
+        dv=Z
+    elseif g.occ===:sphere
+        R1,R2=g.radius*_gm_cos(v),g.radius*_gm_sin(v)
+        A1,A2,A3,A4=R1*c,R1*s,R2*c,R2*s
+        dv=ntuple(i->fma(R1,Z[i],fma(-A3,X[i],-(A4*Y[i]))),3)
+    elseif g.occ===:cone
+        sa=_gm_atan((g.r2-g.r1)/g.height)
+        CosA,SinA=_gm_cos(sa),_gm_sin(sa)
+        R=fma(v,SinA,g.r1)
+        A1,A2=R*c,R*s
+        R1,R2=SinA*c,SinA*s
+        dv=ntuple(i->fma(CosA,Z[i],fma(R1,X[i],R2*Y[i])),3)
+    elseif g.occ===:torus
+        cv,sv=_gm_cos(v),_gm_sin(v)
+        R1,R2=g.r2*cv,g.r2*sv
+        R=fma(g.r2,cv,g.r1)
+        A1,A2,A3,A4=R*c,R*s,R2*c,R2*s
+        clamp_eps=10.0*(g.r2+g.r1)*eps()
+        abs(A1)<=clamp_eps && (A1=0.0)
+        abs(A2)<=clamp_eps && (A2=0.0)
+        abs(A3)<=clamp_eps && (A3=0.0)
+        abs(A4)<=clamp_eps && (A4=0.0)
+        dv=ntuple(i->fma(R1,Z[i],fma(-A3,X[i],-(A4*Y[i]))),3)
+    else
+        throw(ArgumentError(
+            "_occ_surface_d1: unsupported OCC surface kind $(g.occ)"))
+    end
+    du=ntuple(i->fma(-A2,X[i],A1*Y[i]),3)
+    return p,du,dv
+end
+
+# `ElSLib::*D2` ports — returns (point, du, dv, duu, dvv, duv). `Som1` is the
+# shared `A1·X + A2·Y` term; `Vuu` is its negation.
+function _occ_surface_d2(g,u::Float64,v::Float64)
+    Y=_occ_frame_y(g)
+    X,Z=g.X,g.axis
+    p,du,dv=_occ_surface_d1(g,u,v)
+    if g.occ===:plane
+        # `ElSLib::PlaneDN` — all second-order partials vanish.
+        z=(0.0,0.0,0.0)
+        return p,du,dv,z,z,z
+    end
+    c,s=_gm_cos(u),_gm_sin(u)
+    if g.occ===:cylinder
+        A1,A2=g.radius*c,g.radius*s
+        som1=ntuple(i->fma(A1,X[i],A2*Y[i]),3)
+        return p,du,dv,.-som1,(0.0,0.0,0.0),(0.0,0.0,0.0)
+    elseif g.occ===:sphere
+        R1,R2=g.radius*_gm_cos(v),g.radius*_gm_sin(v)
+        A1,A2,A3,A4=R1*c,R1*s,R2*c,R2*s
+        som1=ntuple(i->fma(A1,X[i],A2*Y[i]),3)
+        duu=.-som1
+        dvv=ntuple(i->-som1[i]-R2*Z[i],3)
+        duv=ntuple(i->fma(A4,X[i],-(A3*Y[i])),3)
+        return p,du,dv,duu,dvv,duv
+    elseif g.occ===:cone
+        sa=_gm_atan((g.r2-g.r1)/g.height)
+        CosA,SinA=_gm_cos(sa),_gm_sin(sa)
+        R=fma(v,SinA,g.r1)
+        A1,A2=R*c,R*s
+        R1,R2=SinA*c,SinA*s
+        som1=ntuple(i->fma(A1,X[i],A2*Y[i]),3)
+        duu=.-som1
+        duv=ntuple(i->fma(-R2,X[i],R1*Y[i]),3)
+        return p,du,dv,duu,(0.0,0.0,0.0),duv
+    elseif g.occ===:torus
+        cv,sv=_gm_cos(v),_gm_sin(v)
+        R1,R2=g.r2*cv,g.r2*sv
+        R=fma(g.r2,cv,g.r1)
+        A1,A2,A3,A4,A5,A6=R*c,R*s,R2*c,R2*s,R1*c,R1*s
+        clamp_eps=10.0*(g.r2+g.r1)*eps()
+        abs(A1)<=clamp_eps && (A1=0.0)
+        abs(A2)<=clamp_eps && (A2=0.0)
+        abs(A3)<=clamp_eps && (A3=0.0)
+        abs(A4)<=clamp_eps && (A4=0.0)
+        abs(A5)<=clamp_eps && (A5=0.0)
+        abs(A6)<=clamp_eps && (A6=0.0)
+        som1=ntuple(i->fma(A1,X[i],A2*Y[i]),3)
+        duu=.-som1
+        dvv=ntuple(i->fma(-A5,X[i],-(A6*Y[i]))-R2*Z[i],3)
+        duv=ntuple(i->fma(A4,X[i],-(A3*Y[i])),3)
+        return p,du,dv,duu,dvv,duv
+    end
+    throw(ArgumentError(
+        "_occ_surface_d2: unsupported OCC surface kind $(g.occ)"))
+end
+
+# `gp_XYZ::SquareModulus` — compiles to fma(z,z, fma(x,x, y·y)).
+@inline _sqlen(v) = fma(v[3],v[3],fma(v[1],v[1],v[2]*v[2]))
+@inline _dot3(a,b) = fma(a[3],b[3],fma(a[1],b[1],a[2]*b[2]))
+
+# `OCCFace::normal`: the `SVector3` cross product of the D1 tangents,
+# multiplied by the reciprocal (a zero cross stays zero, like Gmsh's
+# `SVector3::normalize`), then negated on a `TopAbs_REVERSED` face.
+function _occ_surface_normal(g,u::Float64,v::Float64)
+    _,du,dv=_occ_surface_d1(g,u,v)
+    # `SVector3::crossprod` — a.y·b.z − a.z·b.y, a.z·b.x − a.x·b.z,
+    # a.x·b.y − a.y·b.x (each second product rounded, the first fused).
+    n=(fma(du[2],dv[3],-(dv[2]*du[3])),
+       fma(du[3],dv[1],-(du[1]*dv[3])),
+       fma(du[1],dv[2],-(dv[1]*du[2])))
+    len=sqrt(_sqlen(n))
+    len==0.0 && return (0.0,0.0,0.0)
+    inv=1.0/len
+    out=(n[1]*inv,n[2]*inv,n[3]*inv)
+    (hasproperty(g,:reversed) && g.reversed) && (out=(.-out))
+    return out
+end
+
+# `math_DirectPolynomialRoots`'s quadratic `Solve(A,B,C)` with the `Improve`
+# Newton polish. Returns the (root1, root2) pair when `NbSolutions() == 2`,
+# `nothing` otherwise.
+function _occ_quadratic_roots(a::Float64,b::Float64,c::Float64)
+    abs(a)<=1e-30 && return nothing   # Solve(b,c): at most one root
+    epsd=3.0*eps()*fma(b,b,abs(4.0*a*c))
+    disc=fma(b,b,-((4.0*a)*c))
+    abs(disc)<=epsd && (disc=0.0)
+    disc<0.0 && return nothing
+    if disc==0.0
+        r=_occ_improve_root(a,b,c,-0.5*b/a)
+        return (r,r)
+    end
+    r0=b>0.0 ? -(b+sqrt(disc))/(2.0*a) : -(b-sqrt(disc))/(2.0*a)
+    r0=_occ_improve_root(a,b,c,r0)
+    r1=_occ_improve_root(a,b,c,c/(a*r0))
+    return (r0,r1)
+end
+
+# `Improve(3, {A,B,C}, ini)`: up to nine Newton steps on `A·x² + B·x + C`
+# evaluated by OCCT's Horner `Values`, keeping the better of polished/start.
+function _occ_improve_root(a::Float64,b::Float64,c::Float64,ini::Float64)
+    ini_val=fma(fma(a,ini,b),ini,c)
+    sol=ini; val=ini_val
+    for _ in 1:9
+        val=fma(fma(a,sol,b),sol,c)
+        der=fma(a,sol,fma(a,sol,b))
+        abs(der)<=1e-30 && break
+        delta=-val/der
+        abs(delta)<=eps()*abs(sol) && break
+        sol+=delta
+    end
+    return abs(val)<=abs(ini_val) ? sol : ini
+end
+
+# `BRepLProp_SLProps` (myCN=4, LinTol=eps) curvature block on the D2
+# derivatives: `CSLib::Normal` gate, the ombilic shortcut, and the two
+# `math_DirectPolynomialRoots` branches. Returns
+# (defined, cmax, cmin, dirmax, dirmin); `defined=false` mirrors
+# `IsCurvatureDefined()` failing (singular or parallel tangents).
+function _occ_surface_curvatures(g,u::Float64,v::Float64)
+    linTol=1e-12
+    _,du,dv,duu,dvv,duv=_occ_surface_d2(g,u,v)
+    # `CSLib::Normal(D1U, D1V, SinTol, status, Normal)` — `D1UW2` (the cross
+    # square magnitude) has its own `gp::Resolution()` gate ahead of the
+    # sin² ratio, and the ratio test is `<=`.
+    d1u_mag=_sqlen(du); d1v_mag=_sqlen(dv)
+    cross=_occ_cross(du,dv)
+    (d1u_mag<=floatmin(Float64) || d1v_mag<=floatmin(Float64)) &&
+        return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+    cross_sq=_sqlen(cross)
+    cross_sq<=floatmin(Float64) &&
+        return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+    cross_sq/(d1u_mag*d1v_mag)<=linTol*linTol &&
+        return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+    normal=cross./sqrt(cross_sq)          # gp_Dir(gp_Vec): divide by modulus
+    # `IsTangentUDefined`/`IsTangentVDefined` at orders 1 then 2
+    tol2=linTol*linTol
+    (d1u_mag>tol2 || _sqlen(duu)>tol2) ||
+        return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+    (d1v_mag>tol2 || _sqlen(dvv)>tol2) ||
+        return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+    E,F,G=d1u_mag,_dot3(du,dv),d1v_mag
+    L,M,N=_dot3(normal,duu),_dot3(normal,duv),_dot3(normal,dvv)
+    A=fma(E,M,-(F*L)); B=fma(E,N,-(G*L)); C=fma(F,N,-(G*M))
+    max_abc=max(abs(A),abs(B),abs(C))
+    dir(v)=v./sqrt(_sqlen(v))
+    if max_abc<eps()                      # ombilic
+        c=N/G
+        return (true,c,c,dir(_occ_cross(du,normal)),dir(du))
+    end
+    A/=max_abc; B/=max_abc; C/=max_abc
+    if abs(A)>eps()
+        roots=_occ_quadratic_roots(A,B,C)
+        roots===nothing &&
+            return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+        r1,r2=roots
+        curv1=fma(fma(L,r1,2.0*M),r1,N)/fma(fma(E,r1,2.0*F),r1,G)
+        curv2=fma(fma(L,r2,2.0*M),r2,N)/fma(fma(E,r2,2.0*F),r2,G)
+        v1=ntuple(i->fma(r1,du[i],dv[i]),3)
+        v2=ntuple(i->fma(r2,du[i],dv[i]),3)
+    elseif abs(C)>eps()
+        roots=_occ_quadratic_roots(C,B,A)
+        roots===nothing &&
+            return (false,0.0,0.0,(0.0,0.0,0.0),(0.0,0.0,0.0))
+        r1,r2=roots
+        curv1=fma(fma(N,r1,2.0*M),r1,L)/fma(fma(G,r1,2.0*F),r1,E)
+        curv2=fma(fma(N,r2,2.0*M),r2,L)/fma(fma(G,r2,2.0*F),r2,E)
+        v1=ntuple(i->fma(r1,dv[i],du[i]),3)
+        v2=ntuple(i->fma(r2,dv[i],du[i]),3)
+    else
+        curv1,curv2=L/E,N/G
+        v1,v2=du,dv
+    end
+    if curv1<curv2
+        return (true,curv2,curv1,dir(v2),dir(v1))
+    end
+    return (true,curv1,curv2,dir(v1),dir(v2))
+end
+
+# ── OCCT extrema/projection ports ──────────────────────────────────────────
+#
+# `OCCFace::_project`/`OCCEdge::_project` wrap `GeomAPI_ProjectPointOnSurf`/
+# `ProjectPointOnCurve`. For the analytic surface/curve kinds these run
+# `Extrema_ExtPElS`/`ExtPElC`'s closed-form extremum solvers, then keep only
+# candidates whose (period-mapped) parameters fall inside the projector's
+# bounds (`Extrema_ExtPS::TreatSolution`, `Extrema_GExtPC`'s post-check).
+# The projector bounds are the face/edge parameter ranges padded by
+# `max(range·1e-8, 1e-12)` on non-periodic directions; the accepted
+# parameter is returned unclamped. Empty candidate lists fall back to the
+# generic `GFace::XYZtoUV`/`GEdge::XYZToU` Newton scans, ported below.
+
+const _OCC_CONFUSION=1e-7           # Precision::Confusion
+const _OCC_EXT_EPS=eps(2π)          # ExtPElS_MyEps = Epsilon(2·π)
+const _OCC_ANGULAR=1e-12            # Precision::Angular
+
+@inline _sqdist(a::NTuple{3,Float64},b::NTuple{3,Float64}) =
+    _sqlen(_arc_sub(a,b))
+
+# `gp_Dir::AngleWithRef` — `acos` between ±45°, `asin` outside; the sign
+# comes from `(self × other)·vref`. All three vectors normalize first (the
+# `gp_Dir` conversions).
+function _occ_angle_with_ref(a,b,vref)
+    da,db,dv=_occ_dir(a),_occ_dir(b),_occ_dir(vref)
+    xyz=_occ_cross(da,db)
+    cosinus=_dot3(da,db)
+    sinus=_occ_modulus(xyz)
+    ang=(cosinus > -0.70710678118655 && cosinus < 0.70710678118655) ?
+        _gm_acos(cosinus) : cosinus<0.0 ? π-_gm_asin(sinus) : _gm_asin(sinus)
+    return _dot3(xyz,dv)>=0.0 ? ang : -ang
+end
+
+# `gp_Dir::Angle` — the unsigned angle in [0,π].
+function _occ_dir_angle(a,b)
+    da,db=_occ_dir(a),_occ_dir(b)
+    cosinus=_dot3(da,db)
+    (cosinus > -0.70710678118655 && cosinus < 0.70710678118655) &&
+        return _gm_acos(cosinus)
+    sinus=_occ_modulus(_occ_cross(da,db))
+    return cosinus<0.0 ? π-_gm_asin(sinus) : _gm_asin(sinus)
+end
+
+# `ElCLib::InPeriod(u, a, b)` — maps u into [a, a+(b−a)] by `ceil`.
+function _occ_in_period(u::Float64,a::Float64,b::Float64)
+    period=b-a
+    period<eps(b) && return u
+    return max(a,u+period*ceil((a-u)/period))
+end
+
+# `ElCLib::AdjustPeriodic(ufirst, ulast, preci, u1, u2)` — shifts u1 into
+# [ufirst, ufirst+p) (or one period below ulast when within `preci`), then
+# u2 into [u1, u1+p] keeping `u2-u1 >= preci`.
+function _occ_adjust_periodic(ufirst,ulast,preci,u1,u2)
+    period=ulast-ufirst
+    period<eps(ulast) && return u1,u2
+    u1-=floor((u1-ufirst)/period)*period
+    ulast-u1<preci && (u1-=period)
+    u2-=floor((u2-u1)/period)*period
+    u2-u1<preci && (u2+=period)
+    return u1,u2
+end
+
+# `Extrema_ExtPElS::Perform(P, gp_Cylinder, Tol)` — the two angular extrema
+# at the query's axial coordinate; `nothing` on the axis (continuum).
+function _occ_extpe_cylinder(g,P)
+    O,X,Z=g.center,g.X,g.axis
+    myZ=_occ_cross(X,_occ_frame_y(g))
+    V=_dot3(_arc_sub(P,O),Z)
+    Pp=_arc_sub(P,_occ_mul(Z,V))
+    OPp=_arc_sub(Pp,O)
+    _occ_modulus(OPp)<_OCC_CONFUSION && return nothing
+    U1=_occ_angle_with_ref(X,OPp,myZ)
+    (-_OCC_EXT_EPS < U1 < _OCC_EXT_EPS) && (U1=0.0)
+    U2=U1+π
+    U1<0.0 && (U1+=2π)
+    ps1=_occ_surface_point(g,U1,V); ps2=_occ_surface_point(g,U2,V)
+    return [(U1,V,ps1,_sqdist(ps1,P)),(U2,V,ps2,_sqdist(ps2,P))]
+end
+
+# `Extrema_ExtPElS::Perform(P, gp_Sphere, Tol)` — (U1,V) minimum and
+# (U2,−V) maximum; `nothing` at the center.
+function _occ_extpe_sphere(g,P)
+    O,X,Z=g.center,g.X,g.axis
+    OP=_arc_sub(P,O)
+    _sqlen(OP)<_OCC_CONFUSION*_OCC_CONFUSION && return nothing
+    Zp=_dot3(OP,Z)
+    Pp=_arc_sub(P,_occ_mul(Z,Zp))
+    OPp=_arc_sub(Pp,O)
+    if _sqlen(OPp)<_OCC_CONFUSION*_OCC_CONFUSION
+        U1=U2=0.0
+        V=Zp<0.0 ? -π/2 : π/2
+    else
+        myZ=_occ_cross(X,_occ_frame_y(g))
+        U1=_occ_angle_with_ref(X,OPp,myZ)
+        (-_OCC_EXT_EPS < U1 < _OCC_EXT_EPS) && (U1=0.0)
+        U2=U1+π
+        U1<0.0 && (U1+=2π)
+        V=_occ_dir_angle(OP,OPp)
+        Zp<0.0 && (V=-V)
+    end
+    ps1=_occ_surface_point(g,U1,V); ps2=_occ_surface_point(g,U2,-V)
+    return [(U1,V,ps1,_sqdist(ps1,P)),(U2,-V,ps2,_sqdist(ps2,P))]
+end
+
+# `Extrema_ExtPElS::Perform(P, gp_Cone, Tol)` — the apex-shortcut and the
+# two meridian extrema; `nothing` on the axis below the apex side.
+function _occ_extpe_cone(g,P)
+    O,X,Z=g.center,g.X,g.axis
+    A=_gm_atan((g.r2-g.r1)/g.height)
+    M=_add3(O,_occ_mul(Z,-g.r1/_gm_tan(A)))     # gp_Cone::Apex
+    myZ=_occ_cross(X,_occ_frame_y(g))
+    MP=_arc_sub(P,M)
+    L2=_sqlen(MP)
+    Vm=-g.r1/_gm_sin(A)
+    L2<_OCC_CONFUSION*_OCC_CONFUSION && return [(0.0,Vm,M,L2)]
+    DirZ=_sqdist(M,O)<_OCC_CONFUSION*_OCC_CONFUSION ?
+        (A<0.0 ? _occ_mul(Z,-1.0) : Z) : _arc_sub(O,M)
+    Zp=_dot3(_arc_sub(P,O),Z)
+    Pp=_add3(P,_occ_mul(Z,-Zp))
+    OPp=_arc_sub(Pp,O)
+    _sqlen(OPp)<_OCC_CONFUSION*_OCC_CONFUSION && return nothing
+    Same=_dot3(DirZ,MP)>=0.0
+    U1=_occ_angle_with_ref(X,OPp,myZ)
+    (-_OCC_EXT_EPS < U1 < _OCC_EXT_EPS) && (U1=0.0)
+    Same || (U1+=π)
+    U2=U1+π
+    U1<0.0 && (U1+=2π)
+    U2>2π && (U2-=2π)
+    B=_occ_dir_angle(MP,DirZ)
+    Aa=abs(A)
+    L=sqrt(L2)
+    if Same
+        V1=L*_gm_cos(B-Aa); V2=L*_gm_cos(B+Aa)
+    else
+        B=π-B
+        V1=-L*_gm_cos(B-Aa); V2=-L*_gm_cos(B+Aa)
+    end
+    Sense=_dot3(Z,_occ_dir(DirZ))
+    V1=V1*Sense+Vm; V2=V2*Sense+Vm
+    ps1=_occ_surface_point(g,U1,V1); ps2=_occ_surface_point(g,U2,V2)
+    return [(U1,V1,ps1,_sqdist(ps1,P)),(U2,V2,ps2,_sqdist(ps2,P))]
+end
+
+# `Extrema_ExtPElS::Perform(P, gp_Torus, Tol)` — the four meridian-circle
+# extrema; `nothing` on the axis or on a tube-center circle.
+function _occ_extpe_torus(g,P)
+    O,X,Z=g.center,g.X,g.axis
+    myZ=_occ_cross(X,_occ_frame_y(g))
+    tol2=_OCC_CONFUSION*_OCC_CONFUSION
+    Pp=_add3(P,_occ_mul(Z,-_dot3(_arc_sub(P,O),Z)))
+    OPp=_arc_sub(Pp,O)
+    R2=_sqlen(OPp)
+    R2<tol2 && return nothing
+    U1=_occ_angle_with_ref(X,OPp,myZ)
+    (-_OCC_EXT_EPS < U1 < _OCC_EXT_EPS) && (U1=0.0)
+    U2=U1+π
+    U1<0.0 && (U1+=2π)
+    R=sqrt(R2)
+    # `OPp.Divided(R)` is componentwise division, not a reciprocal multiply.
+    OO1=_occ_mul(ntuple(i->OPp[i]/R,3),g.r1)
+    O1=_add3(O,OO1); O2=_add3(O,_occ_mul(OO1,-1.0))
+    _sqdist(O1,P)<tol2 && return nothing
+    _sqdist(O2,P)<tol2 && return nothing
+    V1=_occ_angle_with_ref(OPp,_arc_sub(P,O1),_occ_cross(OPp,Z))
+    (-_OCC_EXT_EPS < V1 < _OCC_EXT_EPS) && (V1=0.0)
+    OPp=_occ_mul(OPp,-1.0)
+    V2=_occ_angle_with_ref(OPp,_arc_sub(O2,P),_occ_cross(OPp,Z))
+    (-_OCC_EXT_EPS < V2 < _OCC_EXT_EPS) && (V2=0.0)
+    V1<0.0 && (V1+=2π)
+    V2<0.0 && (V2+=2π)
+    V1p=V1+π; V2p=V2+π
+    ps1=_occ_surface_point(g,U1,V1); ps2=_occ_surface_point(g,U1,V1p)
+    ps3=_occ_surface_point(g,U2,V2); ps4=_occ_surface_point(g,U2,V2p)
+    return [(U1,V1,ps1,_sqdist(ps1,P)),(U1,V1p,ps2,_sqdist(ps2,P)),
+            (U2,V2,ps3,_sqdist(ps3,P)),(U2,V2p,ps4,_sqdist(ps4,P))]
+end
+
+# `ElSLib::PlaneParameters` — `gp_Trsf::SetTransformation(Ax3)` maps P into
+# the face frame: rows of M are the X/Y/Z directions, `loc = −(M·Loc)`, and
+# `Transformed` applies `M·P + loc` (`gp_XYZ::Multiply` + `Add`).
+function _occ_plane_uv(g,P)
+    M=(g.X,_occ_frame_y(g),g.axis)
+    loc=_occ_mul(_occ_matvec(M,g.center),-1.0)
+    ploc=_add3(_occ_matvec(M,P),loc)
+    return ploc[1],ploc[2]
+end
+
+# `Extrema_ExtPElS::Perform(P, gp_Pln, Tol)` — always done with a single
+# extremum: the orthogonal projection `Pp = P − (OP·Z)·Z` and the
+# `ElSLib::Parameters` frame uv.
+function _occ_extpe_plane(g,P)
+    O,Z=g.center,g.axis
+    v0=_dot3(_arc_sub(P,O),Z)
+    Pp=_add3(P,_occ_mul(Z,-v0))
+    u,v=_occ_plane_uv(g,P)
+    return [(u,v,Pp,_sqdist(Pp,P))]
+end
+
+# `Extrema_ExtPS::TreatSolution` per candidate — period-map into
+# [inf, inf+period), pull back one period when still outside
+# [inf−tol, sup+tol], then the bounds acceptance test. `u` is periodic on
+# the four revolution kinds (`UPeriod` = 2π); `v` is periodic on the torus;
+# the plane is periodic in neither.
+function _occ_treat_solutions(g,cands,umin,umax,vmin,vmax,tolu,tolv)
+    accepted=Tuple{Float64,Float64,NTuple{3,Float64},Float64}[]
+    for (U,V,xyz,sqd) in cands
+        if g.occ!==:plane
+            U=_occ_in_period(U,umin,umin+2π)
+            U>umax+tolu && (U-=2π)
+            U<umin-tolu && (U+=2π)
+        end
+        if g.occ===:torus
+            V=_occ_in_period(V,vmin,vmin+2π)
+            V>vmax+tolv && (V-=2π)
+            V<vmin-tolv && (V+=2π)
+        end
+        if (umin-U)<=tolu && (U-umax)<=tolu &&
+           (vmin-V)<=tolv && (V-vmax)<=tolv
+            push!(accepted,(U,V,xyz,sqd))
+        end
+    end
+    return accepted
+end
+
+# The `Extrema_ExtPElS` candidates after `TreatSolution` filtering against
+# the caller's bounds, or `nothing` when the solver is not done (degenerate
+# query points).
+function _occ_surface_extrema(
+    g,P,umin,umax,vmin,vmax,tolu,tolv)
+    cands=g.occ===:cylinder ? _occ_extpe_cylinder(g,P) :
+          g.occ===:sphere   ? _occ_extpe_sphere(g,P) :
+          g.occ===:cone     ? _occ_extpe_cone(g,P) :
+          g.occ===:torus    ? _occ_extpe_torus(g,P) :
+          g.occ===:plane    ? _occ_extpe_plane(g,P) :
+          throw(ArgumentError(
+              "_occ_surface_extrema: unsupported OCC surface kind $(g.occ)"))
+    cands===nothing && return nothing
+    return _occ_treat_solutions(g,cands,umin,umax,vmin,vmax,tolu,tolv)
+end
+
+# `OCCFace::_project` — padded face bounds, `Precision::Confusion`
+# tolerances, first-minimum selection. Returns (u, v, xyz) or `nothing`.
+function _occ_surface_project(g,P)
+    lo,hi=_occ_surface_bounds(g)
+    umin,vmin=lo[1],lo[2]; umax,vmax=hi[1],hi[2]
+    # `OCCFace`'s constructor pads each non-periodic direction of the
+    # projector bounds by max(|range|·1e-8, 1e-12): u is padded only on the
+    # plane, v on everything but the torus.
+    if g.occ===:plane
+        du=umax-umin
+        ut=max(abs(du)*1e-8,1e-12)
+        umin-=ut; umax+=ut
+    end
+    if g.occ!==:torus
+        dv=vmax-vmin
+        vt=max(abs(dv)*1e-8,1e-12)
+        vmin-=vt; vmax+=vt
+    end
+    acc=_occ_surface_extrema(
+        g,P,umin,umax,vmin,vmax,_OCC_CONFUSION,_OCC_CONFUSION)
+    (acc===nothing || isempty(acc)) && return nothing
+    best=acc[1]
+    for cand in Iterators.drop(acc,1)
+        cand[4]<best[4] && (best=cand)
+    end
+    return (best[1],best[2],best[3])
+end
+
+# `BRepClass_FaceClassifier`'s 3-D `Perform` on a rectangular face: bare
+# face bounds, `theTol` = 1e-7, then the 2-D classifier — an accepted
+# extremum is always in-domain, an empty extremum set leaves the state
+# UNKNOWN (outside). There is no 3-D distance check (verified against the
+# OCCT 7.9.3 source and Gmsh's `isInside`).
+function _occ_surface_contains(g,P)
+    g.occ===:plane && throw(ArgumentError(
+        "_occ_surface_contains: trimmed-plane containment requires the " *
+        "BRepClass 2-D wire classifier"))
+    lo,hi=_occ_surface_bounds(g)
+    acc=_occ_surface_extrema(
+        g,P,lo[1],hi[1],lo[2],hi[2],_OCC_CONFUSION,_OCC_CONFUSION)
+    return acc!==nothing && !isempty(acc)
+end
+
+# `Extrema_ExtPElC::Perform(P, gp_Lin, Tol, Uinf, Usup)` — the single chord
+# extremum, accepted inside [Uinf−Tol, Usup+Tol] (Tol = `Precision::Confusion`,
+# a length for the unit-direction line parameter), then `Extrema_GExtPC`'s
+# `mytolu` post-check (line resolution = Tol again, non-periodic).
+function _occ_extpe_line(g,P,uinf,usup)
+    # gp_Vec(OR, P)·gp_Vec(L.Direction()) — the stored `gp_Dir`, no
+    # renormalization.
+    u=_dot3(g.dir,_arc_sub(P,g.origin))
+    if u>=uinf-_OCC_CONFUSION && u<=usup+_OCC_CONFUSION
+        # `OR.Translated(u·dir)` — scalar product rounded before the add.
+        xyz=_add3(g.origin,_occ_mul(g.dir,u))
+        return [(u,xyz,_sqdist(xyz,P))]
+    end
+    return Tuple{Float64,NTuple{3,Float64},Float64}[]
+end
+
+# `Extrema_ExtPElC::Perform(P, gp_Circ, Tol, Uinf, Usup)` plus the
+# `Extrema_GExtPC` post-check: project P into the circle's plane, take the
+# `AngleWithRef` extrema pair, `AdjustPeriodic` into [Uinf, Uinf+2π), the
+# boundary snap, then `TolU = Tol/R` acceptance and the `mytolu` re-check.
+# `nothing` when the projected point sits on the axis (continuum).
+function _occ_extpe_circle(g,P,uinf,usup)
+    O,Axe,X,R=g.center,g.n,g.X,g.r
+    tolU=R>floatmin(Float64) ? _OCC_CONFUSION/R : Inf
+    Pp=_add3(P,_occ_mul(Axe,-_dot3(_arc_sub(P,O),Axe)))
+    OPp=_arc_sub(Pp,O)
+    _occ_modulus(OPp)<_OCC_CONFUSION && return nothing
+    usol1=_occ_angle_with_ref(X,OPp,Axe)
+    usol1+π<_OCC_ANGULAR && (usol1=-π)
+    usol1-π>-_OCC_ANGULAR && (usol1=π)
+    usol2=usol1+π
+    _,usol1=_occ_adjust_periodic(uinf,uinf+2π,tolU,uinf,usol1)
+    _,usol2=_occ_adjust_periodic(uinf,uinf+2π,tolU,uinf,usol2)
+    (usol1-2π-uinf)<tolU && (usol1-2π-uinf)>-tolU && (usol1=uinf)
+    (usol2-2π-uinf)<tolU && (usol2-2π-uinf)>-tolU && (usol2=uinf)
+    mytolu=R>_OCC_CONFUSION/2 ? 2.0*_gm_asin(_OCC_CONFUSION/(2.0*R)) : 2π
+    out=Tuple{Float64,NTuple{3,Float64},Float64}[]
+    for us in (usol1,usol2)
+        if (uinf-us)<tolU && (us-usup)<tolU
+            U=_occ_in_period(us,uinf,uinf+2π)
+            if U>=uinf-mytolu && U<=usup+mytolu
+                xyz=_occ_circle_point(g,U)
+                push!(out,(U,xyz,_sqdist(xyz,P)))
+            end
+        end
+    end
+    return out
+end
+
+# `OCCEdge::_project` — the `GeomAPI_ProjectPointOnCurve` answer on the
+# materialized edge kinds: padded parameter bounds (skipped when the edge
+# is closed), the ExtPElC candidates, first-minimum selection. Returns
+# (u, xyz) or `nothing` when no extremum is accepted (→ generic fallbacks).
+function _occ_curve_project(m::GeoModel,g,tag::Int,P,caller::AbstractString)
+    if g.occ===:degenerate
+        return nothing                    # null `_curve` → projector fails
+    end
+    uinf,usup=g.t0,g.t1
+    first_point,last_point=m.curves[tag]
+    if first_point!=last_point            # _v0 != _v1 → pad the bounds
+        du=usup-uinf
+        ut=max(abs(du)*1e-8,1e-12)
+        uinf-=ut; usup+=ut
+    end
+    if g.occ===:line
+        acc=_occ_extpe_line(g,P,uinf,usup)
+    elseif g.occ===:circle
+        acc=_occ_extpe_circle(g,P,uinf,usup)
+    else
+        throw(ArgumentError(
+            "_occ_curve_project: unsupported OCC curve kind $(g.occ)"))
+    end
+    (acc===nothing || isempty(acc)) && return nothing
+    best=acc[1]
+    for cand in Iterators.drop(acc,1)
+        cand[3]<best[3] && (best=cand)
+    end
+    return (best[1],best[2])
+end
+
+# `OCCEdge::firstDer` — `BRepLProp_CLProps(prop, 1, 1e-5).D1()`: the analytic
+# derivative — `ElCLib::CircleD1`, `Geom_Line::D1` (the stored `gp_Dir`, no
+# renormalization), or the pcurve-on-surface chain rule for degenerate edges.
+function _occ_curve_first_der(m::GeoModel,g,tag::Int,u::Float64,
+                              caller::AbstractString)
+    if g.occ===:circle
+        return _occ_circle_derivative(g,u)
+    elseif g.occ===:line
+        return g.dir
+    elseif g.occ===:degenerate
+        return _occ_degenerate_d1(g,tag,u)
+    end
+    throw(ArgumentError(
+        "_occ_curve_first_der: unsupported OCC curve kind $(g.occ)"))
+end
+
+# `GEdge::secondDer` — a central difference of `firstDer` at eps = 1e-3,
+# one-sided at the parameter bounds (OCCEdge does not override it).
+function _occ_curve_second_der(m::GeoModel,g,tag::Int,u::Float64,
+                               caller::AbstractString)
+    eps=1e-3
+    if u-eps<=g.t0
+        x1=_occ_curve_first_der(m,g,tag,u,caller)
+        x2=_occ_curve_first_der(m,g,tag,u+eps,caller)
+        return ntuple(i->1000.0*(x2[i]-x1[i]),3)
+    elseif u+eps>=g.t1
+        x1=_occ_curve_first_der(m,g,tag,u-eps,caller)
+        x2=_occ_curve_first_der(m,g,tag,u,caller)
+        return ntuple(i->1000.0*(x2[i]-x1[i]),3)
+    end
+    x1=_occ_curve_first_der(m,g,tag,u-eps,caller)
+    x2=_occ_curve_first_der(m,g,tag,u+eps,caller)
+    return ntuple(i->500.0*(x2[i]-x1[i]),3)
+end
+
+# `OCCEdge::curvature` — degenerate returns eps = 1e-15 directly; otherwise
+# `BRepLProp_CLProps(prop, 2, eps).Curvature()` — the LProp formula
+# sqrt(N)/DD1/sqrt(DD1) on the analytic D1/D2 pair, DD2 ≤ Tol → 0, floored
+# to eps on exit.
+function _occ_curve_curvature(m::GeoModel,g,tag::Int,u::Float64,
+                              caller::AbstractString)
+    eps=1e-15
+    g.occ===:degenerate && return eps
+    d1=_occ_curve_first_der(m,g,tag,u,caller)
+    d2=if g.occ===:circle
+        _occ_circle_second_derivative(g,u)
+    elseif g.occ===:line
+        (0.0,0.0,0.0)
+    else
+        throw(ArgumentError(
+            "_occ_curve_curvature: unsupported OCC curve kind $(g.occ)"))
+    end
+    tol=eps*eps
+    dd1=_sqlen(d1); dd2=_sqlen(d2)
+    crv=if dd2<=tol
+        0.0
+    else
+        n=_sqlen(_occ_cross(d1,d2))
+        t=n/dd1/dd2
+        t<=tol ? 0.0 : sqrt(n)/dd1/sqrt(dd1)
+    end
+    return crv<=eps ? eps : crv
+end
+
+# `GEdge::refineProjection` on an OCC curve — same damped Newton as the
+# built-in arc port but on the edge's `[t0,t1]` range and OCC derivatives.
+function _occ_curve_refine(m::GeoModel,g,tag::Int,q::NTuple{3,Float64},
+                           u::Float64,relax::Float64,tol::Float64,
+                           lc::Float64,caller::AbstractString)
+    maxDist=tol*lc
+    dPQ=_arc_sub(_model_curve_point(m,tag,u,caller),q)
+    err=_occ_modulus(dPQ)
+    iter=0
+    while (iter+=1)<=25 && err>maxDist
+        der=_occ_curve_first_der(m,g,tag,u,caller)
+        du=_dot3(dPQ,der)/_dot3(der,der)
+        du<tol && _occ_modulus(dPQ)>maxDist && (du=1.0)
+        unew=fma(-relax,du,u)
+        # `std::min/max` on a NaN step returns the lower bound (C++ ordering).
+        u=isnan(unew) ? g.t0 : clamp(unew,g.t0,g.t1)
+        dPQ=_arc_sub(_model_curve_point(m,tag,u,caller),q)
+        err=_occ_modulus(dPQ)
+    end
+    return err<=maxDist,u,err
+end
+
+# `GEdge::XYZToU` on an OCC curve: 21 seeds across `[t0,t1]`, relaxed retry,
+# lowest-error parameter on failure.
+function _occ_curve_xyz_to_u(m::GeoModel,g,tag::Int,q::NTuple{3,Float64},
+                             lc::Float64,caller::AbstractString;
+                             relax::Float64=1.0)
+    errors=Dict{Float64,Float64}()
+    step=(g.t1-g.t0)/20.0
+    u_try=g.t0; err=Inf
+    for i in 0:20
+        u_try=fma(step,Float64(i),g.t0)
+        ok,u_try,err=_occ_curve_refine(
+            m,g,tag,q,u_try,relax,1e-8,lc,caller)
+        ok && return true,u_try
+        errors[err]=u_try
+    end
+    if relax>0.1
+        ok,u_try=_occ_curve_xyz_to_u(
+            m,g,tag,q,lc,caller;relax=0.75*relax)
+        ok && return true,u_try
+        errors[_occ_modulus(_arc_sub(
+            _model_curve_point(m,tag,u_try,caller),q))]=u_try
+    end
+    return false,errors[minimum(keys(errors))]
+end
+
+# `goldenSectionSearch`/`GEdge::closestPoint` on an OCC curve — the
+# 100-sample scan plus recursive golden-section minimization on `[t0,t1]`.
+function _occ_curve_golden(m::GeoModel,g,tag::Int,q::NTuple{3,Float64},
+                           x1::Float64,x2::Float64,x3::Float64,
+                           caller::AbstractString)
+    golden2=2.0-(1.0+sqrt(5.0))/2.0
+    x4=fma(golden2,x3-x2,x2)
+    abs(x3-x1)<1e-9*(abs(x2)+abs(x4)) && return (x3+x1)/2
+    d4=_occ_modulus(_arc_sub(q,_model_curve_point(m,tag,x4,caller)))
+    d2=_occ_modulus(_arc_sub(q,_model_curve_point(m,tag,x2,caller)))
+    return d4<d2 ? _occ_curve_golden(m,g,tag,q,x2,x4,x3,caller) :
+                   _occ_curve_golden(m,g,tag,q,x4,x2,x1,caller)
+end
+
+function _occ_curve_closest(m::GeoModel,g,tag::Int,q::NTuple{3,Float64},
+                            caller::AbstractString)
+    tmin,tmax=minmax(g.t0,g.t1)
+    dt=(tmax-tmin)/99.0
+    dmin=1e22; topt=tmin
+    for i in 0:99
+        t=fma(Float64(i),dt,tmin)
+        d=_occ_modulus(_arc_sub(q,_model_curve_point(m,tag,t,caller)))
+        d<dmin && (topt=t; dmin=d)
+    end
+    t=topt==tmin ?
+        _occ_curve_golden(m,g,tag,q,topt,topt+dt/2.0,topt+dt,caller) :
+        topt==tmax ?
+        _occ_curve_golden(m,g,tag,q,topt-dt,topt-dt/2.0,topt,caller) :
+        _occ_curve_golden(m,g,tag,q,topt-dt,topt,topt+dt,caller)
+    return t,_model_curve_point(m,tag,t,caller)
+end
+
+# The Moore–Penrose inverse of the 3×3 `[du; dv; 0]` Jacobian that
+# `GFace::XYZtoUV` builds (`invert_singular_matrix3x3` — a 1e-16-cutoff SVD
+# pinv; the pinv is mathematically unique). Returns (jac[:,1], jac[:,2]).
+function _occ_jac_cols(du::NTuple{3,Float64},dv::NTuple{3,Float64})
+    a=_dot3(du,du); b=_dot3(du,dv); c=_dot3(dv,dv)
+    disc=sqrt(fma(a-c,a-c,4.0*b*b))
+    eig2=(a+c-disc)/2.0
+    if eig2>1e-32
+        det=fma(a,c,-(b*b))
+        j0=ntuple(i->(c*du[i]-b*dv[i])/det,3)
+        j1=ntuple(i->(a*dv[i]-b*du[i])/det,3)
+        return j0,j1
+    elseif a+c>0.0
+        inv=1.0/(a+c)
+        return _occ_mul(du,inv),_occ_mul(dv,inv)
+    end
+    return (0.0,0.0,0.0),(0.0,0.0,0.0)
+end
+
+# `GFace::XYZtoUV` — the 9×9-seed pseudo-inverse Newton used as the OCC
+# fallback (`parFromPoint` with `onSurface`, `convTestXYZ` as passed) and,
+# with `onSurface=false`, the `GFace::closestPoint` catch path. Returns
+# (converged, u, v); on failure the last iterate values are returned,
+# matching the C++ out-parameters.
+function _occ_xyz_to_uv(g,P::NTuple{3,Float64},lc::Float64,
+                        onSurface::Bool,testXYZ::Bool;relax::Float64=1.0)
+    precision=onSurface ? 1e-8 : 1e-3
+    maxiter=onSurface ? 25 : 10
+    lo,hi=_occ_surface_bounds(g)
+    umin,umax,vmin,vmax=lo[1],hi[1],lo[2],hi[2]
+    tol=precision*((umax-umin)^2+(vmax-vmin)^2)
+    initf=(0.5,0.6,0.4,0.7,0.3,0.8,0.2,1.0,0.0)
+    initu=ntuple(i->fma(initf[i],umax-umin,umin),9)
+    initv=ntuple(i->fma(initf[i],vmax-vmin,vmin),9)
+    U=V=Unew=Vnew=0.0
+    err=1.0; err2=Inf; iter=0
+    for i in 1:9, j in 1:9
+        U=initu[i]; V=initv[j]
+        err=1.0; iter=1
+        p=_occ_surface_point(g,U,V)
+        err2=_occ_modulus(_arc_sub(P,p))
+        err2<1e-8*lc && return true,U,V
+        while err>tol && iter<maxiter
+            p,du,dv=_occ_surface_d1(g,U,V)
+            j0,j1=_occ_jac_cols(du,dv)
+            r=_arc_sub(P,p)
+            Unew=fma(relax,fma(j0[1],r[1],fma(j0[2],r[2],j0[3]*r[3])),U)
+            Vnew=fma(relax,fma(j1[1],r[1],fma(j1[2],r[2],j1[3]*r[3])),V)
+            ((Unew>umax+tol || Unew<umin-tol) &&
+             (Vnew>vmax+tol || Vnew<vmin-tol)) && break
+            du2=Unew-U; dv2=Vnew-V
+            err=du2*du2+dv2*dv2
+            err2=_occ_modulus(_arc_sub(P,p))
+            iter+=1; U=Unew; V=Vnew
+        end
+        if iter<maxiter && err<=tol && Unew<=umax && Vnew<=vmax &&
+           Unew>=umin && Vnew>=vmin
+            if onSurface && err2>1e-4*lc && testXYZ
+                continue
+            else
+                return true,U,V
+            end
+        end
+    end
+    onSurface || return false,U,V
+    relax<1e-3 && return false,U,V
+    return _occ_xyz_to_uv(g,P,lc,onSurface,testXYZ;relax=0.75*relax)
+end
+
+# `OCCFace::closestPoint` with the `GFace::closestPoint` fallback: when the
+# projector finds no accepted extremum, Gmsh minimizes the distance over the
+# unrestricted surface (ALGLIB L-BFGS from the best of a 10×10 grid plus the
+# initial guess). For the analytic kinds the global minimum is a raw
+# `ExtPElS` candidate, so the fallback returns the period-mapped argmin over
+# the unfiltered candidates; with no candidates at all (degenerate query)
+# it falls back to `parFromPoint(p, false)` + evaluation like Gmsh's catch.
+function _occ_surface_closest(g,P,lc::Float64)
+    proj=_occ_surface_project(g,P)
+    proj!==nothing && return proj
+    lo,hi=_occ_surface_bounds(g)
+    cands=g.occ===:cylinder ? _occ_extpe_cylinder(g,P) :
+          g.occ===:sphere   ? _occ_extpe_sphere(g,P) :
+          g.occ===:cone     ? _occ_extpe_cone(g,P) :
+          g.occ===:torus    ? _occ_extpe_torus(g,P) :
+          g.occ===:plane    ? _occ_extpe_plane(g,P) :
+          throw(ArgumentError(
+              "_occ_surface_closest: unsupported OCC surface kind $(g.occ)"))
+    if cands!==nothing && !isempty(cands)
+        best=cands[1]
+        for cand in Iterators.drop(cands,1)
+            cand[4]<best[4] && (best=cand)
+        end
+        u,v,xyz,_=best
+        g.occ!==:plane && (u=_occ_in_period(u,lo[1],lo[1]+2π))
+        g.occ===:torus && (v=_occ_in_period(v,lo[2],lo[2]+2π))
+        return (u,v,xyz)
+    end
+    _,u,v=_occ_xyz_to_uv(g,P,lc,false,false)
+    return (u,v,_occ_surface_point(g,u,v))
+end
+
+# `OCCFace::parFromPoint` — `_project` first; on failure
+# `GFace::parFromPoint(qp, onSurface=true, convTestXYZ=true)` supplies the
+# parameter even when the iteration does not converge (the forced XYZ test
+# only skips candidates that converged in uv but not in space).
+function _occ_surface_parameter_on_face(g,P,lc::Float64)
+    proj=_occ_surface_project(g,P)
+    proj!==nothing && return (proj[1],proj[2])
+    # `OCCFace::parFromPoint`'s fallback forces the XYZ convergence test:
+    # `GFace::parFromPoint(qp, onSurface=true, convTestXYZ=true)`.
+    _,u,v=_occ_xyz_to_uv(g,P,lc,true,true)
+    return (u,v)
+end
+
+# `InterpolateCurve(der=1)` on a built-in arc — `gmshEdge::firstDer`: a finite
+# difference with `fd_eps=1e-8`, collapsing to a one-sided difference at the
+# `[0,1]` bounds (`eps1`/`eps2` zero out at the queried end).
+function _arc_first_derivative_fd(g,u::Float64)
+    eps=1e-8
+    eps1=u<eps ? 0.0 : eps
+    eps2=u>1.0-eps ? 0.0 : eps
+    p0=_arc_point(g,u-eps1); p1=_arc_point(g,u+eps2)
+    inv=1.0/(eps1+eps2)
+    return ((p1[1]-p0[1])*inv,(p1[2]-p0[2])*inv,(p1[3]-p0[3])*inv)
+end
+
+# `GEdge::refineProjection` on a built-in arc: damped Newton on the finite-
+# difference derivative, parameter clamped to `[0,1]`, convergence when the
+# residual drops under `tol·lc`. The `du < tol` comparison is signed, exactly
+# like the C++ source. Returns (converged, u, err).
+function _arc_refine_projection(
+    g,q::NTuple{3,Float64},u::Float64,relax::Float64,tol::Float64,lc::Float64)
+    maxDist=tol*lc
+    dPQ=_arc_sub(_arc_point(g,u),q)
+    err=sqrt(_sqlen(dPQ))
+    iter=0
+    while (iter+=1)<=25 && err>maxDist
+        der=_arc_first_derivative_fd(g,u)
+        du=_dot3(dPQ,der)/_dot3(der,der)
+        du<tol && sqrt(_sqlen(dPQ))>maxDist && (du=1.0)
+        u=clamp(fma(-relax,du,u),0.0,1.0)
+        dPQ=_arc_sub(_arc_point(g,u),q)
+        err=sqrt(_sqlen(dPQ))
+    end
+    return err<=maxDist,u,err
+end
+
+@inline _arc_dist(g,q::NTuple{3,Float64},t::Float64) =
+    sqrt(_sqlen(_arc_sub(q,_arc_point(g,t))))
+
+# `GEdge::XYZToU` on a built-in arc: 21 evenly spaced seeds through
+# `refineProjection`, then a relaxed retry starting from the last seed's
+# refined value. Returns (converged, u) — on failure `u` is the lowest-error
+# parameter, matching `errorVsParameter.begin()->second`.
+function _arc_xyz_to_u(
+    g,q::NTuple{3,Float64},lc::Float64;relax::Float64=1.0)
+    errors=Dict{Float64,Float64}()
+    u_try=0.0; err=Inf
+    for i in 0:20
+        u_try=fma(0.05,Float64(i),0.0)
+        ok,u_try,err=_arc_refine_projection(g,q,u_try,relax,1e-8,lc)
+        ok && return true,u_try
+        errors[err]=u_try
+    end
+    if relax>0.1
+        ok,u_try=_arc_xyz_to_u(g,q,lc;relax=0.75*relax)
+        ok && return true,u_try
+        errors[_arc_dist(g,q,u_try)]=u_try
+    end
+    return false,errors[minimum(keys(errors))]
+end
+
+# `goldenSectionSearch` — Gmsh's recursive golden-section minimizer of
+# `|x(t)−q|` on `[0,1]` (`GOLDEN2 = 2−φ`, `tau=1e-9` at the call sites).
+function _arc_golden_section(
+    g,q::NTuple{3,Float64},x1::Float64,x2::Float64,x3::Float64,tau::Float64)
+    golden2=2.0-(1.0+sqrt(5.0))/2.0
+    x4=fma(golden2,x3-x2,x2)
+    abs(x3-x1)<tau*(abs(x2)+abs(x4)) && return (x3+x1)/2
+    return _arc_dist(g,q,x4)<_arc_dist(g,q,x2) ?
+        _arc_golden_section(g,q,x2,x4,x3,tau) :
+        _arc_golden_section(g,q,x4,x2,x1,tau)
+end
+
+# `GEdge::closestPoint` on a built-in arc: a 100-sample scan for the bracket,
+# then the recursive golden-section search. Returns (t, point).
+function _arc_closest(g,q::NTuple{3,Float64})
+    tmin,tmax=0.0,1.0
+    dt=(tmax-tmin)/99.0
+    dmin=1e22; topt=tmin
+    for i in 0:99
+        t=fma(Float64(i),dt,tmin)
+        d=_arc_dist(g,q,t)
+        d<dmin && (topt=t; dmin=d)
+    end
+    t=topt==tmin ?
+        _arc_golden_section(g,q,topt,topt+dt/2.0,topt+dt,1e-9) :
+        topt==tmax ?
+        _arc_golden_section(g,q,topt-dt,topt-dt/2.0,topt,1e-9) :
+        _arc_golden_section(g,q,topt-dt,topt,topt+dt,1e-9)
+    return t,_arc_point(g,t)
 end
 
 # Exact axis-aligned box of a (possibly partial) torus face. Along coordinate
@@ -1136,7 +2579,7 @@ function _occ_torus_bounding_box(g)
             hi[i]=g.center[i]+g.r2*abs(n_i)
             continue
         end
-        phi=atan(Y[i],g.X[i])
+        phi=_gm_atan2(Y[i],g.X[i])
         fmax=_occ_torus_axis_max(g.r1,g.r2,rho,-phi,g.angle-phi)
         fmin=_occ_torus_axis_max(g.r1,g.r2,rho,-phi+π,g.angle-phi+π)
         lo[i]=g.center[i]-fmin
@@ -1152,7 +2595,7 @@ end
 # only exist for self-intersecting spindles (r1 < r2, ρ ≤ r1/r2).
 function _occ_torus_axis_max(r1::Float64, r2::Float64, rho::Float64,
                              a::Float64, b::Float64)
-    f(θ)=r1*rho*cos(θ)+r2*sqrt(max(0.0,1.0-rho*rho*sin(θ)*sin(θ)))
+    f(θ)=r1*rho*_gm_cos(θ)+r2*sqrt(max(0.0,1.0-rho*rho*_gm_sin(θ)*_gm_sin(θ)))
     best=max(f(a),f(b))
     lo_k=ceil(Int,a/π-1e-12); hi_k=floor(Int,b/π+1e-12)
     for k in lo_k:hi_k
@@ -1161,7 +2604,7 @@ function _occ_torus_axis_max(r1::Float64, r2::Float64, rho::Float64,
     if r1!=r2
         s=(r1*r1-r2*r2*rho*rho)/(rho*rho*(r1*r1-r2*r2))
         if 0.0<=s<1.0
-            root=acos(-sqrt(1.0-s))
+            root=_gm_acos(-sqrt(1.0-s))
             for base in (root,-root), k in -1:1
                 θ=base+2k*π
                 a-1e-12<=θ<=b+1e-12 || continue

@@ -22,6 +22,7 @@ module Tessella
 const TESSELLA_STAGE = 6  # see STATUS.md stage board
 
 # ── Submodules (PLAN.md §3) ────────────────────────────────────────────────────
+include("core/GmshLibm.jl")       # platform-libm shims for Gmsh/OCCT bit parity
 include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
 include("core/MeshEntityTopology.jl") # P5: deterministic global edge and face catalogs
