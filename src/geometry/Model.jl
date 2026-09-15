@@ -37,7 +37,7 @@ using LinearAlgebra: Symmetric, eigen
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_surface_loop!, add_volume!
-export add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
+export add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
        model_periodic_nodes, model_to_mixed
@@ -1143,6 +1143,42 @@ function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     shell=_materialize_cone!(m,c,a,ra,rb,h)
     m.volumes[t]=[shell]
     m.cones[t]=(center=c, axis=a, r1=ra, r2=rb, height=h)
+    return t
+end
+
+"""
+    add_torus!(model, x, y, z, r1, r2; tag=0, angle=2π) -> tag
+
+Add a torus of major radius `r1` and minor radius `r2` centered at `(x,y,z)`,
+revolved about the z axis through `angle` radians (`2π` for a full torus).
+Both radii must be finite and positive and `angle` finite in `(0, 2π]` —
+matching `gmsh.model.occ.addTorus` and the `.geo` `Torus` statement, which
+build every torus about the z axis (apply `Rotate` for other axes).
+
+Like Gmsh's OpenCASCADE result, the solid materializes real boundary topology:
+a full torus is one rim Point, an outer-equator Circle and a meridian Circle
+closed on it, and a single `Torus` face wired `[-equator,+meridian,+equator,
+-meridian]`; a partial torus adds a second rim vertex, trims the equator to
+`[0,angle]`, closes the two end meridians, and caps the ends with `Plane`
+faces under shell `[torus,+start_cap,-end_cap]`. There is no compact encoding:
+entity, boundary, evaluation, and bounds queries read the materialized
+entities, while volume meshing rejects the non-planar face explicitly.
+"""
+function add_torus!(m::GeoModel, x, y, z, r1, r2;
+                    tag::Integer=0, angle::Real=2π)
+    caller="add_torus!"
+    c=_finite3(x,y,z,caller)
+    ra=_finite_scalar(r1,caller,"r1")
+    rb=_finite_scalar(r2,caller,"r2")
+    a=_finite_scalar(angle,caller,"angle")
+    (ra>0 && rb>0) || throw(ArgumentError(
+        "$caller: radii must be positive"))
+    (a>0 && a<=2π) || throw(ArgumentError(
+        "$caller: angle must lie in (0, 2π]"))
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
+    shell=_materialize_torus!(m,c,ra,rb,a)
+    m.volumes[t]=[shell]
     return t
 end
 
@@ -2709,8 +2745,6 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
         _model_require_plane_surface(m,surface,caller,"plane geometry")
     end
     point_tags=Int[]
-    occ_samples=NTuple{3,Float64}[]
-    occ_sample_tags=Int[]
     for loop in m.surfaces[surface]
         haskey(m.loops,loop) || throw(ArgumentError(
             "$caller: Surface[$surface] references unknown Loop[$loop]"))
@@ -2727,21 +2761,14 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
                     "$caller: Curve[$curve] references unknown Point[$point]"))
                 push!(point_tags,point)
             end
-            # An OCC circle edge collapses to a single endpoint; evaluated rim
-            # samples stand in for the missing vertices so a cap bounded by one
-            # closed circle still yields three non-collinear plane points.
-            occ=_occ_geometry(m,curve)
-            if occ!==nothing && occ.occ===:circle
-                for k in 0:2
-                    push!(occ_samples,_occ_circle_point(
-                        occ,occ.t0+(occ.t1-occ.t0)*(k/3)))
-                    push!(occ_sample_tags,a)
-                end
-            end
         end
     end
     unique!(point_tags)
     coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    # An OCC circle edge collapses to a single endpoint; evaluated rim samples
+    # stand in for the missing vertices so a cap bounded by one closed circle
+    # still yields three non-collinear plane points.
+    occ_samples,occ_sample_tags=_occ_surface_samples(m,surface,caller)
     append!(point_tags,occ_sample_tags)
     append!(coordinates,occ_samples)
     anchor,second,third,axes=_model_surface_projection(

@@ -279,7 +279,7 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     output=Float64[]
     sizehint!(output,3*(length(values)÷stride))
     if dimension==1
-        occ=_occ_geometry(m,entity_tag)
+        occ=_occ_geometry_checked(m,entity_tag,caller)
         if occ!==nothing && occ.occ===:circle
             for parameter in values
                 _model_append_point!(output,
@@ -311,6 +311,14 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
             end
         end
     else
+        surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+            for index in 1:2:length(values)
+                _model_append_point!(output,_occ_surface_point(
+                    surface_geometry,values[index],values[index+1]))
+            end
+            return output
+        end
         plane=_model_plane_frame(m,entity_tag,caller)
         for index in 1:2:length(values)
             _model_append_point!(output,_model_plane_point(
@@ -350,7 +358,7 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
         return output
     end
     if dimension==1
-        occ=_occ_geometry(m,entity_tag)
+        occ=_occ_geometry_checked(m,entity_tag,caller)
         if occ!==nothing && occ.occ===:circle
             sizehint!(output,3length(values))
             for parameter in values
@@ -365,7 +373,9 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
             line=_model_line_geometry(m,entity_tag,caller)
             derivative=_model_line_derivative(line,entity_tag,caller)
             span=occ.t1-occ.t0
-            span==0.0 || (derivative=ntuple(i->derivative[i]/span,3))
+            span==0.0 || (derivative=(derivative[1]/span,
+                                      derivative[2]/span,
+                                      derivative[3]/span))
             sizehint!(output,3length(values))
             for _ in values
                 append!(output,derivative)
@@ -410,7 +420,7 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
         return zeros(Float64,multiplier*(length(values)÷dimension))
     end
     if dimension==1
-        occ=_occ_geometry(m,entity_tag)
+        occ=_occ_geometry_checked(m,entity_tag,caller)
         if occ!==nothing && occ.occ===:circle
             output=Float64[]
             sizehint!(output,3*length(values))
@@ -451,7 +461,7 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
         return zeros(Float64,length(values)÷dimension)
     end
     if dimension==1
-        occ=_occ_geometry(m,entity_tag)
+        occ=_occ_geometry_checked(m,entity_tag,caller)
         if occ!==nothing && occ.occ===:circle
             return fill(1.0/occ.r,length(values))
         elseif occ!==nothing && occ.occ in (:line,:degenerate)
@@ -551,7 +561,7 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
     end
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
-    occ=dimension==1 ? _occ_geometry(m,entity_tag) : nothing
+    occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
     line=dimension==1 && occ===nothing ?
         _model_line_geometry(m,entity_tag,caller) : nothing
     occ!==nothing && occ.occ===:line &&
@@ -610,11 +620,17 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
         # Gmsh reports the stored parameter interval: [0,1] for built-in lines
         # and arcs, the OCC range (arc-length, angle, or degenerate) for
         # materialized primitive edges.
-        occ=_occ_geometry(m,entity_tag)
+        occ=_occ_geometry_checked(m,entity_tag,caller)
         occ===nothing || return [occ.t0],[occ.t1]
         _curve_type(m,entity_tag)==:line &&
             _model_line_geometry(m,entity_tag,caller)
         return [0.0],[1.0]
+    end
+    surface_geometry=get(m.surface_geometry,entity_tag,nothing)
+    if surface_geometry!==nothing && hasproperty(surface_geometry,:occ)
+        # OCC faces report their analytic parameter intervals — azimuth and
+        # profile (axis/slant length, latitude, or tube angle).
+        return _occ_surface_bounds(surface_geometry)
     end
     plane=_model_plane_frame(m,entity_tag,caller)
     lower,upper=_model_plane_parameter_bounds(plane,caller)

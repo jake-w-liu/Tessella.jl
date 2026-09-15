@@ -2,7 +2,8 @@
     GeoExec
 
 Execute a bounded subset of Gmsh `.geo`: Point/Line/Circle/Ellipse/Line Loop/
-Plane Surface/Surface/Ruled Surface/Surface Loop/Volume, Box/Cylinder/Sphere/Cone,
+Plane Surface/Surface/Ruled Surface/Surface Loop/Volume,
+Box/Cylinder/Sphere/Cone/Torus,
 Boolean union/difference/intersection,
 Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
 Point/Line/Surface-In-Volume
@@ -38,7 +39,7 @@ using ..Model: GeoModel, add_point!, set_point_mesh_size!
 using ..Model: add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 using ..Model: add_surface_loop!, add_volume!
-using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
+using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: transform_entities!, duplicate_entities!, coherence!
@@ -301,14 +302,16 @@ must be planar boundaries of one explicit volume; volume relations are stored
 but mesh-inert, as in Gmsh 4.15.2. Multiple periodic statements may
 reuse a master or form an acyclic master/slave chain. Read-only `newp`, the shared
 curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the
-tracked explicit topology and supported full Box/Cylinder/Sphere/Cone primitives.
+tracked explicit topology and supported full Box/Cylinder/Sphere/Cone/Torus
+primitives.
 `SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in sets the
 checked counter, while OpenCASCADE only raises it. Reads use the greatest counter
 among activated factories. Later primitive allocation still accounts for occupied
 hidden topology. `Box` materializes Gmsh's exact boundary entities (eight
-points, twelve curves, six surfaces) on the model; Cylinder/Sphere/Cone
-boundary entities remain implicit, so an explicit modeled subentity may reuse
-one of their numeric tags. `Mesh.TransfiniteTri = 0|1` sets the model's
+points, twelve curves, six surfaces) on the model; Cylinder/Sphere/Cone/Torus
+materialize the matching OCC layouts — analytic records on every face and
+edge, Plane caps, degenerate apex and seam edges, and signed shells.
+`Mesh.TransfiniteTri = 0|1` sets the model's
 three-sided transfinite surface algorithm like Gmsh's option of the same name.
 `MeshSize {points} = value` and its `Characteristic Length` alias update existing
 explicit Points through `:`, numeric expressions and ranges, numeric-list variables,
@@ -529,7 +532,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 "execute_geo: control flow exceeds $_MAX_GEO_EXEC_STATEMENTS " *
                 "executed statements"))
             occursin(
-                r"\b(Macro|Function|Torus|Fillet|Chamfer)\b",
+                r"\b(Macro|Function|Fillet|Chamfer)\b",
                 line) && throw(ArgumentError(
                 "execute_geo: unsupported statement $(line) — macros and " *
                 "advanced OCC features are blockers"))
@@ -1804,6 +1807,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         values=_geo_exec_numeric_values(
             mm.captures[2],8,context,"$caller parameters")
         add_cone!(m,values...;tag=tag)
+        return
+    elseif (mm=match(
+            r"^Torus\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Torus"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        values=_geo_exec_numeric_values(
+            mm.captures[2],context,"$caller parameters")
+        (length(values)==5 || length(values)==6) || throw(ArgumentError(
+            "$caller: Torus requires 5 or 6 numeric parameters; " *
+            "got $(length(values)) after range expansion"))
+        add_torus!(m,values[1:5]...;tag=tag,
+                   angle=length(values)==6 ? values[6] : 2π)
         return
     elseif (mm=match(
             r"^Boolean(Difference|Union|Intersection)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*;$",

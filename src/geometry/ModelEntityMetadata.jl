@@ -63,6 +63,12 @@ function _model_plane_geometry(
         push!(seen,point)
     end
     coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
+    # An OCC circle edge collapses to a single endpoint; evaluated rim samples
+    # stand in for the missing vertices so a cap bounded by one closed circle
+    # still yields three non-collinear plane points.
+    occ_samples,occ_sample_tags=_occ_surface_samples(m,tag,caller)
+    append!(point_tags,occ_sample_tags)
+    append!(coordinates,occ_samples)
     anchor,second,third,projection=_model_surface_projection(
         coordinates,point_tags,tag,caller)
 

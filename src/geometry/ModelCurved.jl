@@ -445,9 +445,14 @@ end
 # independently moved rim vertices no longer satisfy the encoded circles.
 #
 # OCC surfaces carry matching analytic records in `surface_geometry`:
-#   (occ=:cylinder, center, axis, radius, height)
-#   (occ=:sphere,   center, radius)
-#   (occ=:cone,     center, axis, r1, r2, height)
+#   (occ=:cylinder, center, axis, X, radius, height)
+#   (occ=:sphere,   center, radius, axis, X)
+#   (occ=:cone,     center, axis, X, r1, r2, height)
+#   (occ=:torus,    center, axis, X, r1, r2, angle)
+# `axis`/`X` are the OCC construction frame; the second in-plane direction is
+# always axis×X. They parametrize `model_value`/`model_parametrization_bounds`
+# for the face: u sweeps around `axis`, v is the profile direction (arc length
+# for Cylinder/Cone, latitude for Sphere, tube angle for Torus).
 
 const _OCC_TWO_PI = 2π
 
@@ -545,6 +550,61 @@ _occ_geometry(m::GeoModel,tag::Int) =
     _occ_geometry(get(m.curve_geometry,tag,nothing))
 _occ_geometry(g::NamedTuple) = hasproperty(g,:occ) ? g : nothing
 _occ_geometry(::Nothing) = nothing
+
+# Whether the curve's endpoints still satisfy its OCC record. Materialized
+# geometry is authoritative: a vertex moved independently of its edge leaves a
+# stale record that must fail queries rather than answer with old geometry.
+function _occ_endpoints_satisfied(m::GeoModel, tag::Int, g)
+    a,b=m.curves[tag]
+    pa,pb=m.points[a],m.points[b]
+    scale=max(1.0,maximum(abs,pa),maximum(abs,pb))
+    tol=1e-9*scale
+    if g.occ===:circle
+        a==b && begin
+            rel=_arc_sub(pa,g.center)
+            return abs(sqrt(_arc_dot(rel,rel))-g.r)<=tol &&
+                   abs(_arc_dot(rel,g.n))<=tol
+        end
+        return _points_close(_occ_circle_point(g,g.t0),pa,tol) &&
+               _points_close(_occ_circle_point(g,g.t1),pb,tol)
+    elseif g.occ===:line
+        chord=_arc_sub(pb,pa)
+        return abs(sqrt(_arc_dot(chord,chord))-(g.t1-g.t0))<=tol
+    end
+    return true
+end
+
+# The OCC record of a curve for query paths — `nothing` for built-in entities,
+# an explicit failure when the record no longer matches its endpoints.
+function _occ_geometry_checked(m::GeoModel, tag::Int, caller::AbstractString)
+    g=_occ_geometry(m,tag)
+    g===nothing && return nothing
+    _occ_endpoints_satisfied(m,tag,g) || throw(ErrorException(
+        "$caller: Curve[$tag] geometry is inconsistent with its endpoints; " *
+        "rebuild the model"))
+    return g
+end
+
+# Rim samples standing in for the vertices an OCC circle collapses: a plane
+# bounded by a single closed circle still yields three non-collinear points
+# for the exact fit. Returns (coordinates, stand-in point tags) pairs.
+function _occ_surface_samples(m::GeoModel, surface::Int,
+                              caller::AbstractString)
+    samples=NTuple{3,Float64}[]
+    tags=Int[]
+    for loop in m.surfaces[surface], signed in m.loops[loop]
+        curve=abs(signed)
+        occ=_occ_geometry_checked(m,curve,caller)
+        (occ===nothing || occ.occ!==:circle) && continue
+        a,_=m.curves[curve]
+        for k in 0:2
+            push!(samples,_occ_circle_point(
+                occ,occ.t0+(occ.t1-occ.t0)*(k/3)))
+            push!(tags,a)
+        end
+    end
+    return samples,tags
+end
 
 # ── OCC entity construction ──────────────────────────────────────────────────
 
@@ -780,7 +840,7 @@ end
 # OCC's cylinder layout: top rim Point, bottom rim Point; top Circle, seam
 # Line, bottom Circle; Cylinder face ([-top,-seam,bottom,seam]), Plane caps;
 # shell [lateral, +top, -bottom]. Both circles wind CCW about +axis from the
-# OCC reference direction X = normalize(ŷ×axis).
+# OCC `gp_Ax2` reference direction X (`_occ_reference_direction`).
 function _materialize_cylinder!(m::GeoModel, base::NTuple{3,Float64},
                                 axis::NTuple{3,Float64}, r::Float64,
                                 h::Float64)
@@ -801,7 +861,7 @@ function _materialize_cylinder!(m::GeoModel, base::NTuple{3,Float64},
         c_top,c_seam,c_bot=curves
         push!(loops,add_curve_loop!(m,[-c_top,-c_seam,c_bot,c_seam]))
         push!(surfaces,_add_occ_surface!(m,:cylinder,[last(loops)],
-              (occ=:cylinder,center=base,axis=n,radius=r,height=h)))
+              (occ=:cylinder,center=base,axis=n,X=X,radius=r,height=h)))
         push!(loops,add_curve_loop!(m,[c_top]))
         push!(surfaces,add_plane_surface!(m,[last(loops)]))
         push!(loops,add_curve_loop!(m,[c_bot]))
@@ -836,7 +896,8 @@ function _materialize_sphere!(m::GeoModel, center::NTuple{3,Float64},
         c_n,c_mer,c_s=curves
         push!(loops,add_curve_loop!(m,[-c_n,-c_mer,c_s,c_mer]))
         push!(surfaces,_add_occ_surface!(m,:sphere,[last(loops)],
-              (occ=:sphere,center=center,radius=r)))
+              (occ=:sphere,center=center,radius=r,
+               axis=(0.0,0.0,1.0),X=(1.0,0.0,0.0))))
         shell=add_surface_loop!(m,[last(surfaces)])
     catch
         _occ_materialize_rollback!(m,points,curves,loops,surfaces,shell)
@@ -873,7 +934,7 @@ function _materialize_cone!(m::GeoModel, base::NTuple{3,Float64},
         c_top,c_seam,c_bot=curves
         push!(loops,add_curve_loop!(m,[-c_top,-c_seam,c_bot,c_seam]))
         push!(surfaces,_add_occ_surface!(m,:cone,[last(loops)],
-              (occ=:cone,center=base,axis=n,r1=r1,r2=r2,height=h)))
+              (occ=:cone,center=base,axis=n,X=X,r1=r1,r2=r2,height=h)))
         s_lat=last(surfaces)
         shell_signs=Int[s_lat]
         if r2>0
@@ -892,4 +953,197 @@ function _materialize_cone!(m::GeoModel, base::NTuple{3,Float64},
         rethrow()
     end
     return shell
+end
+
+# OCC's torus layout (always the z axis — `gmsh.model.occ.addTorus` and the
+# `.geo` `Torus` statement share `BRepPrimAPI_MakeTorus`). A full torus
+# (angle == 2π) is a single rim Point at `center + (r1+r2)·x̂`, an outer-equator
+# Circle of radius r1+r2 and a meridian Circle of radius r2 both closed on it,
+# and one Torus face wired `[-equator, +meridian, +equator, -meridian]`;
+# shell [face]. A partial torus materializes the sweep's end vertex first,
+# then the start vertex, a trimmed equator arc `start→end` over `[0,angle]`,
+# the closed end and start meridian circles, the Torus face
+# `[-arc, -start_meridian, +arc, +end_meridian]`, and Plane caps on each end;
+# shell [torus, +start_cap, -end_cap].
+function _materialize_torus!(m::GeoModel, center::NTuple{3,Float64},
+                             r1::Float64, r2::Float64, angle::Float64)
+    n=(0.0,0.0,1.0); X=(1.0,0.0,0.0); Y=(0.0,1.0,0.0)
+    ca,sa=cos(angle),sin(angle)
+    Xe=(ca*X[1]+sa*Y[1],ca*X[2]+sa*Y[2],ca*X[3]+sa*Y[3])
+    # A meridian's plane contains the axis: X_dir = R(u)·X, Y_dir = axis, so
+    # its normal is R(u)·X × axis.
+    meridian_normal=(dir)->_arc_cross(dir,n)
+    full=angle>=_OCC_TWO_PI
+    points=Int[]; curves=Int[]; loops=Int[]; surfaces=Int[]; shell=0
+    try
+        if full
+            push!(points,add_point!(m,
+                center[1]+(r1+r2)*X[1],center[2]+(r1+r2)*X[2],
+                center[3]+(r1+r2)*X[3]))
+        else
+            push!(points,add_point!(m,
+                center[1]+(r1+r2)*Xe[1],center[2]+(r1+r2)*Xe[2],
+                center[3]+(r1+r2)*Xe[3]))
+            push!(points,add_point!(m,
+                center[1]+(r1+r2)*X[1],center[2]+(r1+r2)*X[2],
+                center[3]+(r1+r2)*X[3]))
+        end
+        for p in points
+            delete!(m.point_size,p)
+        end
+        if full
+            p_rim=points[1]
+            push!(curves,_add_occ_circle!(m,p_rim,p_rim,center,n,X,r1+r2,
+                  0.0,_OCC_TWO_PI))
+            push!(curves,_add_occ_circle!(m,p_rim,p_rim,
+                  (center[1]+r1*X[1],center[2]+r1*X[2],center[3]+r1*X[3]),
+                  meridian_normal(X),X,r2,0.0,_OCC_TWO_PI))
+            c_eq,c_mer=curves
+            push!(loops,add_curve_loop!(m,[-c_eq,c_mer,c_eq,-c_mer]))
+            push!(surfaces,_add_occ_surface!(m,:torus,[last(loops)],
+                  (occ=:torus,center=center,axis=n,X=X,r1=r1,r2=r2,
+                   angle=angle)))
+            shell=add_surface_loop!(m,[last(surfaces)])
+        else
+            p_end,p_start=points
+            push!(curves,_add_occ_circle!(m,p_start,p_end,center,n,X,r1+r2,
+                  0.0,angle))
+            push!(curves,_add_occ_circle!(m,p_end,p_end,
+                  (center[1]+r1*Xe[1],center[2]+r1*Xe[2],center[3]+r1*Xe[3]),
+                  meridian_normal(Xe),Xe,r2,0.0,_OCC_TWO_PI))
+            push!(curves,_add_occ_circle!(m,p_start,p_start,
+                  (center[1]+r1*X[1],center[2]+r1*X[2],center[3]+r1*X[3]),
+                  meridian_normal(X),X,r2,0.0,_OCC_TWO_PI))
+            c_arc,c_end,c_start=curves
+            push!(loops,add_curve_loop!(m,[-c_arc,-c_start,c_arc,c_end]))
+            push!(surfaces,_add_occ_surface!(m,:torus,[last(loops)],
+                  (occ=:torus,center=center,axis=n,X=X,r1=r1,r2=r2,
+                   angle=angle)))
+            s_torus=last(surfaces)
+            push!(loops,add_curve_loop!(m,[c_start]))
+            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            s_start=last(surfaces)
+            push!(loops,add_curve_loop!(m,[c_end]))
+            push!(surfaces,add_plane_surface!(m,[last(loops)]))
+            s_end=last(surfaces)
+            shell=add_surface_loop!(m,[s_torus,s_start,-s_end])
+        end
+    catch
+        _occ_materialize_rollback!(m,points,curves,loops,surfaces,shell)
+        rethrow()
+    end
+    return shell
+end
+
+# ── OCC surface evaluation ───────────────────────────────────────────────────
+#
+# `model_value`/`model_parametrization_bounds` on an OCC face read the stored
+# analytic record, matching the parametrizations OCC reports for
+# BRepPrimAPI-made primitives: u is the azimuth about `axis` and v the profile
+# parameter (arc length along the axis for Cylinder, slant length for Cone,
+# latitude for Sphere, tube angle for Torus).
+
+@inline _occ_frame_y(g) = _arc_cross(g.axis,g.X)
+
+function _occ_surface_point(g, u::Float64, v::Float64)
+    Y=_occ_frame_y(g)
+    c,s=cos(u),sin(u)
+    if g.occ===:cylinder
+        return (g.center[1]+g.radius*(c*g.X[1]+s*Y[1])+v*g.axis[1],
+                g.center[2]+g.radius*(c*g.X[2]+s*Y[2])+v*g.axis[2],
+                g.center[3]+g.radius*(c*g.X[3]+s*Y[3])+v*g.axis[3])
+    elseif g.occ===:sphere
+        cv,sv=cos(v),sin(v)
+        return (g.center[1]+g.radius*(cv*(c*g.X[1]+s*Y[1])+sv*g.axis[1]),
+                g.center[2]+g.radius*(cv*(c*g.X[2]+s*Y[2])+sv*g.axis[2]),
+                g.center[3]+g.radius*(cv*(c*g.X[3]+s*Y[3])+sv*g.axis[3]))
+    elseif g.occ===:cone
+        slant=sqrt(g.height*g.height+(g.r1-g.r2)*(g.r1-g.r2))
+        r=g.r1-v*(g.r1-g.r2)/slant
+        z=v*g.height/slant
+        return (g.center[1]+r*(c*g.X[1]+s*Y[1])+z*g.axis[1],
+                g.center[2]+r*(c*g.X[2]+s*Y[2])+z*g.axis[2],
+                g.center[3]+r*(c*g.X[3]+s*Y[3])+z*g.axis[3])
+    elseif g.occ===:torus
+        cv,sv=cos(v),sin(v)
+        w=g.r1+g.r2*cv
+        return (g.center[1]+w*(c*g.X[1]+s*Y[1])+g.r2*sv*g.axis[1],
+                g.center[2]+w*(c*g.X[2]+s*Y[2])+g.r2*sv*g.axis[2],
+                g.center[3]+w*(c*g.X[3]+s*Y[3])+g.r2*sv*g.axis[3])
+    end
+    throw(ArgumentError(
+        "_occ_surface_point: unsupported OCC surface kind $(g.occ)"))
+end
+
+# OCC-reported parametrization bounds per surface kind.
+function _occ_surface_bounds(g)
+    if g.occ===:cylinder
+        return [0.0,0.0],[2π,g.height]
+    elseif g.occ===:sphere
+        return [0.0,-π/2],[2π,π/2]
+    elseif g.occ===:cone
+        return [0.0,0.0],
+               [2π,sqrt(g.height*g.height+(g.r1-g.r2)*(g.r1-g.r2))]
+    elseif g.occ===:torus
+        return [0.0,0.0],[g.angle,2π]
+    end
+    throw(ArgumentError(
+        "_occ_surface_bounds: unsupported OCC surface kind $(g.occ)"))
+end
+
+# Exact axis-aligned box of a (possibly partial) torus face. Along coordinate
+# axis i the surface coordinate is
+#   C_i + r1·w_i(u) + r2·(w_i(u)·cos v + n_i·sin v),  w_i(u) = ρ_i·cos(u−φ_i)
+# with ρ_i = √(1−n_i²) the in-plane projection of axis i and φ_i the azimuth
+# that aligns R(u)·X with axis i. Maximizing over v at fixed u leaves the
+# one-variable function f(θ) = r1·ρ·cosθ + r2·√(1−ρ²·sin²θ) on
+# θ ∈ [−φ_i, angle−φ_i]; the lower box side is the same maximization shifted
+# by π. Interior extrema sit at θ = kπ or at the spindle-torus stationary
+# points given by the closed-form root below.
+function _occ_torus_bounding_box(g)
+    Y=_occ_frame_y(g)
+    lo=Vector{Float64}(undef,3); hi=Vector{Float64}(undef,3)
+    for i in 1:3
+        n_i=g.axis[i]
+        rho2=max(0.0,1.0-n_i*n_i)
+        rho=sqrt(rho2)
+        if rho<=1e-15
+            lo[i]=g.center[i]-g.r2*abs(n_i)
+            hi[i]=g.center[i]+g.r2*abs(n_i)
+            continue
+        end
+        phi=atan(Y[i],g.X[i])
+        fmax=_occ_torus_axis_max(g.r1,g.r2,rho,-phi,g.angle-phi)
+        fmin=_occ_torus_axis_max(g.r1,g.r2,rho,-phi+π,g.angle-phi+π)
+        lo[i]=g.center[i]-fmin
+        hi[i]=g.center[i]+fmax
+    end
+    return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
+end
+
+# max over θ∈[a,b] of r1·ρ·cosθ + r2·√(1−ρ²·sin²θ). The candidate set is
+# exact: interval endpoints, every kπ in the range (θ=0 is the outer-equator
+# maximum, θ=π the opposite-side extremum), and the stationary roots
+# cosθ = −r1·√(1−ρ²·s)/(r2·ρ), sin²θ = s = (r1²−r2²ρ²)/(ρ²(r1²−r2²)), which
+# only exist for self-intersecting spindles (r1 < r2, ρ ≤ r1/r2).
+function _occ_torus_axis_max(r1::Float64, r2::Float64, rho::Float64,
+                             a::Float64, b::Float64)
+    f(θ)=r1*rho*cos(θ)+r2*sqrt(max(0.0,1.0-rho*rho*sin(θ)*sin(θ)))
+    best=max(f(a),f(b))
+    lo_k=ceil(Int,a/π-1e-12); hi_k=floor(Int,b/π+1e-12)
+    for k in lo_k:hi_k
+        best=max(best,f(k*π))
+    end
+    if r1!=r2
+        s=(r1*r1-r2*r2*rho*rho)/(rho*rho*(r1*r1-r2*r2))
+        if 0.0<=s<1.0
+            root=acos(-sqrt(1.0-s))
+            for base in (root,-root), k in -1:1
+                θ=base+2k*π
+                a-1e-12<=θ<=b+1e-12 || continue
+                best=max(best,f(clamp(θ,a,b)))
+            end
+        end
+    end
+    return best
 end

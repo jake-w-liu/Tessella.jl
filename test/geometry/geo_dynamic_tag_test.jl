@@ -152,6 +152,40 @@ end
     @test sort!(collect(keys(cone_tip.model.volumes)))==[101]
     @test cone_tip.params.mesh_size_min==1.03
 
+    # A partial torus consumes two rim Points, three Curves, and three
+    # Surfaces of hidden topology; the full torus consumes one, two, and one.
+    torus_partial_source=raw"""
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Point(3) = {0,1,0,1};
+        Line(1) = {1,2};
+        Line(2) = {2,3};
+        Line(3) = {3,1};
+        Curve Loop(4) = {1,2,3};
+        Plane Surface(100) = {4};
+        Torus(newv) = {2,0,0,3,1,1.5707963267948966};
+        Mesh.MeshSizeMin = newreg / 100;
+        """
+    torus_partial=_execute_dynamic_tag_source(torus_partial_source)
+    @test sort!(collect(keys(torus_partial.model.volumes)))==[101]
+    @test torus_partial.params.mesh_size_min==1.04
+
+    torus_full_source=raw"""
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Point(3) = {0,1,0,1};
+        Line(1) = {1,2};
+        Line(2) = {2,3};
+        Line(3) = {3,1};
+        Curve Loop(4) = {1,2,3};
+        Plane Surface(100) = {4};
+        Torus(newv) = {2,0,0,3,1};
+        Mesh.MeshSizeMin = newreg / 100;
+        """
+    torus_full=_execute_dynamic_tag_source(torus_full_source)
+    @test sort!(collect(keys(torus_full.model.volumes)))==[101]
+    @test torus_full.params.mesh_size_min==1.02
+
     boolean_source=raw"""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0,1,1,1};

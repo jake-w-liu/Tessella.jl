@@ -225,7 +225,7 @@ recursive boundaries and direct adjacencies with deterministic Gmsh-compatible
 ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
 reports downward-closure connectivity to the highest-dimension entities,
 excluding embeddings, matching Gmsh 4.15.2. Topology queries preserve
-the session mesh cache and exclude embeddings. Box and Cylinder/Sphere/Cone volumes expose their
+the session mesh cache and exclude embeddings. Box and Cylinder/Sphere/Cone/Torus volumes expose their
 materialized OCC boundary topology; Boolean volumes are
 enumerated, but their implicit boundary topology remains an explicit blocker.
 Entity names belong only to existing entities and need not be unique. Names can be
@@ -240,7 +240,7 @@ boundaries. Tessella validates the whole request before committing, removes name
 visibility, colors, empty Physical groups, affected periodic relations, target
 embeddings, native solid encodings, and Boolean-result snapshots, and keeps allocator
 counters monotonic.
-Box and Cylinder/Sphere/Cone boundaries recurse through the materialized
+Box and Cylinder/Sphere/Cone/Torus boundaries recurse through the materialized
 shell; Boolean Volume boundaries are implicit, so their recursive removal
 stops at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
 Tessella's owning native model and is not undone by a later synchronization.
@@ -252,10 +252,10 @@ session mesh cache. Tessella omits OpenCASCADE shape-tolerance padding (`1e-7` i
 the pinned fixtures), rejects nonfinite boxes and invalid dimensions, and exposes no
 implicit Boolean subentities.
 Entity metadata identifies every explicit entity as `Point`, `Line`, `Circle`,
-`Ellipse`, `Plane`, `Surface`, `Cylinder`, `Sphere`, `Cone`, `Unknown`
-(degenerate edges), or
-`Volume`; Box and Cylinder/Sphere/Cone solids expose their materialized
-Point/Line/Plane/Circle/Cylinder/Sphere/Cone children while
+`Ellipse`, `Plane`, `Surface`, `Cylinder`, `Sphere`, `Cone`, `Torus`,
+`Unknown` (degenerate edges), or
+`Volume`; Box and Cylinder/Sphere/Cone/Torus solids expose their materialized
+Point/Line/Plane/Circle/Cylinder/Sphere/Cone/Torus children while
 Boolean solids expose only `Volume`. Native `GeoModel`
 plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
 `a*x+b*y+c*z=d`; other visible native types have empty property vectors. Per-window
@@ -286,7 +286,7 @@ cleaned on removal without invalidating the mesh cache. Global attributes store
 detached NUL-free string vectors under sorted names. Finite Point-coordinate updates
 preserve tag-owned state and invalidate a synchronized mesh after success; dependent
 native geometry queries immediately use the new coordinates. Implicit
-Cylinder/Sphere/Cone boundary presentation remains unfinished.
+Boolean-result boundary presentation remains unfinished.
 `API.mesh.refine` replaces the complete cached linear-simplex mesh only after the
 canonical uniform-refinement kernel succeeds and returns independent caller-owned
 storage. `API.mesh.clear` discards the complete cache, or only the cells and
