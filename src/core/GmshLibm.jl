@@ -21,7 +21,8 @@ module GmshLibm
 using Libdl
 
 export _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan, _gm_atan2,
-       _gm_sinh, _gm_cosh, _gm_tanh, _gm_exp, _gm_log, _gm_log10, _gm_pow
+       _gm_sinh, _gm_cosh, _gm_tanh, _gm_exp, _gm_log, _gm_log10, _gm_pow,
+       _gm_sincos
 
 function _gm_mathlib_handle()
     candidates = Sys.isapple()    ? ("libSystem.B.dylib", "libm.dylib") :
@@ -43,6 +44,21 @@ const _GM_LIBM = let handle = _gm_mathlib_handle()
             something(Libdl.dlsym(handle, String(_GM_LIBM_FUNS[i]);
                                   throw_error=false), Ptr{Cvoid}(0))
     end)
+end
+
+# `sin`+`cos` of one operand fused by the C++ toolchain: clang emits
+# `__sincos_stret` (macOS) and gcc emits `sincos` (glibc) when a translation
+# unit calls both on the same argument. The fused sin can differ one ulp from
+# standalone `sin`, so paired evaluations need the combined entry point.
+const _GM_SINCOS_STRET = let handle = _gm_mathlib_handle()
+    (!Sys.isapple() || handle === nothing) ? Ptr{Cvoid}(0) :
+        something(Libdl.dlsym(handle, "__sincos_stret"; throw_error=false),
+                  Ptr{Cvoid}(0))
+end
+const _GM_SINCOS = let handle = _gm_mathlib_handle()
+    (Sys.isapple() || Sys.iswindows() || handle === nothing) ? Ptr{Cvoid}(0) :
+        something(Libdl.dlsym(handle, "sincos"; throw_error=false),
+                  Ptr{Cvoid}(0))
 end
 
 # Whether the platform C math library resolved (bit-parity available).
@@ -79,5 +95,20 @@ _gm_libm_available() = _GM_LIBM.sin != C_NULL
 @inline _gm_pow(x::Float64, y::Float64) =
     _GM_LIBM.pow == C_NULL ? x^y :
     ccall(_GM_LIBM.pow, Float64, (Float64, Float64), x, y)
+
+# Returns `(sin(x), cos(x))` through the toolchain's fused entry point —
+# `__sincos_stret` on macOS (two-double register struct return), `sincos` on
+# Linux (out-param form). Falls back to the separate shims, which in turn fall
+# back to Julia's builtins when no system library resolves.
+@inline function _gm_sincos(x::Float64)
+    if _GM_SINCOS_STRET != C_NULL
+        return ccall(_GM_SINCOS_STRET, NTuple{2,Float64}, (Float64,), x)
+    elseif _GM_SINCOS != C_NULL
+        s = Ref{Float64}(); c = Ref{Float64}()
+        ccall(_GM_SINCOS, Cvoid, (Float64, Ptr{Float64}, Ptr{Float64}), x, s, c)
+        return (s[], c[])
+    end
+    return (_gm_sin(x), _gm_cos(x))
+end
 
 end # module GmshLibm
