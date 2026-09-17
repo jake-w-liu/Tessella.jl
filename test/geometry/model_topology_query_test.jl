@@ -189,14 +189,15 @@ end
     boolean_volumes!(primitive,:union,1,2;tag=3)
     # Box face loops allocate from the dedicated curve-loop namespace
     # (Gmsh's _maxLineLoopNum), so the second box's curves continue at 13.
+    # Boolean results materialize explicit OCC-style topology: this disjoint
+    # union yields one Volume per solid — 3 (operand A) and 4 (operand B) —
+    # each a six-face box whose boundary entities are fresh result entities.
     @test Tessella.Model.model_entities(primitive)==
-          [Tuple{Int,Int}[(0,point) for point in 1:16];
-           Tuple{Int,Int}[(1,curve) for curve in 1:24];
-           Tuple{Int,Int}[(2,surface) for surface in 1:12];
-           [(3,1),(3,2),(3,3)]]
+          [Tuple{Int,Int}[(0,point) for point in 1:32];
+           Tuple{Int,Int}[(1,curve) for curve in 1:48];
+           Tuple{Int,Int}[(2,surface) for surface in 1:24];
+           [(3,1),(3,2),(3,3),(3,4)]]
     @test Tessella.Model.model_dimension(primitive)==3
-    # Materialized boxes expose their oriented surface-loop boundary like
-    # Gmsh's addBox; Boolean results still carry no explicit topology.
     @test Tessella.Model.model_boundary(primitive,[(3,1)],false,true,false)==
           [(2,-1),(2,2),(2,-3),(2,4),(2,-5),(2,6)]
     @test Tessella.Model.model_boundary(primitive,[(3,2)],false,true,false)==
@@ -205,8 +206,16 @@ end
           Tuple{Int,Int}[(0,point) for point in 1:8]
     @test Tessella.Model.model_adjacencies(primitive,3,1)==
           (Int[],[1,2,3,4,5,6])
-    @test_throws ArgumentError Tessella.Model.model_boundary(primitive,[(3,3)])
-    @test_throws ArgumentError Tessella.Model.model_adjacencies(primitive,3,3)
+    @test Tessella.Model.model_boundary(primitive,[(3,3)],false,true,false)==
+          [(2,-13),(2,14),(2,-15),(2,16),(2,-17),(2,18)]
+    @test Tessella.Model.model_boundary(primitive,[(3,4)],false,true,false)==
+          [(2,-19),(2,20),(2,-21),(2,22),(2,-23),(2,24)]
+    @test Tessella.Model.model_boundary(primitive,[(3,3)],false,false,true)==
+          Tuple{Int,Int}[(0,point) for point in 17:24]
+    @test Tessella.Model.model_adjacencies(primitive,3,3)==
+          (Int[],[13,14,15,16,17,18])
+    @test Tessella.Model.model_adjacencies(primitive,3,4)==
+          (Int[],[19,20,21,22,23,24])
 
     @test_throws ArgumentError Tessella.Model.model_entities(model,true)
     @test_throws ArgumentError Tessella.Model.model_entities(model,4)
@@ -235,4 +244,152 @@ end
 
     @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
+end
+
+# Every materialized Boolean face must store pcurves whose parameter-range
+# endpoints evaluate to the uv of the curve's endpoint vertices on that face
+# — a reparametrization slip here breaks nested Booleans and CurveOnSurface
+# queries while leaving 3-D counts intact.
+function _check_materialized_pcurves(model,first_surface)
+    for (s,loops) in model.surfaces
+        s<first_surface && continue
+        sg=model.surface_geometry[s]
+        uper=sg.occ in (:cylinder,:cone,:sphere) ? 2π : 0.0
+        function uvdist(p,q)
+            du=p[1]-q[1]
+            uper>0 && (du=mod(du+π,2π)-π)
+            hypot(du,p[2]-q[2])
+        end
+        for lt in loops, sc in model.loops[lt]
+            c=abs(sc)
+            haskey(sg.pcurves,c) || continue   # degenerate (pole) edges bind
+                                               # their 2-D trace separately
+            ent=sg.pcurves[c]
+            pc=sc>0 ? ent.fwd : ent.rev
+            @test pc!==nothing
+            pc===nothing && continue
+            cg=model.curve_geometry[c]
+            a,b=model.curves[c]
+            pa=Tessella.Model._brep_surface_uv(sg,model.points[a])
+            pb=Tessella.Model._brep_surface_uv(sg,model.points[b])
+            # stored pcurves are edge-parametrized: t0/t1 must land on the
+            # uv of the edge's endpoint vertices — the nested-Boolean
+            # reparametrization regression check
+            @test uvdist(Tessella.Model._brep_pc_eval(pc,cg.t0),pa)<1e-9
+            @test uvdist(Tessella.Model._brep_pc_eval(pc,cg.t1),pb)<1e-9
+            # the mid-parameter must agree with the curve's 3-D midpoint —
+            # endpoints alone cannot catch an interior warp
+            crv,=Tessella.Model._brep_edge_curve(model,c)
+            crv.kind===:degenerate && continue
+            tm=(cg.t0+cg.t1)/2
+            qm=Tessella.Model._brep_surface_uv(sg,
+                Tessella.Model._brep_curve_eval(crv,tm))
+            @test uvdist(Tessella.Model._brep_pc_eval(pc,tm),qm)<1e-9
+        end
+    end
+end
+
+function _result_curve_incidence(model,first_surface)
+    incidence=Dict{Int,Int}()
+    for (s,loops) in model.surfaces
+        s<first_surface && continue
+        for lt in loops, c in model.loops[lt]
+            incidence[abs(c)]=get(incidence,abs(c),0)+1
+        end
+    end
+    return incidence
+end
+
+@testset "materialized Boolean result topology" begin
+    # overlapping fuse: OCC same-domain gluing yields a clean box boundary
+    fuse=GeoModel()
+    add_box!(fuse,0,0,0,1,1,1;tag=1)
+    add_box!(fuse,0.5,0,0,1,1,1;tag=2)
+    @test boolean_volumes!(fuse,:union,1,2;tag=3)==3
+    @test sort(collect(keys(fuse.volumes)))==[1,2,3]
+    # totals include both operand boxes (16/24/12); the materialized
+    # result adds 8/12/6 — the same boundary OCC reports for the fuse
+    @test length(fuse.points)==24
+    @test length(fuse.curves)==36
+    @test length(fuse.surfaces)==18
+    @test length(fuse.volumes[3])==1
+    @test all(==(2),values(_result_curve_incidence(fuse,13)))
+    _check_materialized_pcurves(fuse,13)
+
+    # corner fuse: an L-shaped region, two T-split merged faces, and the
+    # internal coincident wall — matching Gmsh 4.15.2's 14/21/9 result
+    corner=GeoModel()
+    add_box!(corner,0,0,0,1,1,1;tag=1)
+    add_box!(corner,1,0.5,0.5,0.5,0.5,0.5;tag=2)
+    @test boolean_volumes!(corner,:union,1,2;tag=3)==3
+    @test length(corner.points)==30
+    @test length(corner.curves)==45
+    @test length(corner.surfaces)==21
+    @test all(==(2),values(_result_curve_incidence(corner,13)))
+    _check_materialized_pcurves(corner,13)
+
+    # corner cut keeps the imprint splits: 11/16/7 like Gmsh
+    cut=GeoModel()
+    add_box!(cut,0,0,0,1,1,1;tag=1)
+    add_box!(cut,1,0.5,0.5,0.5,0.5,0.5;tag=2)
+    @test boolean_volumes!(cut,:difference,1,2;tag=3)==3
+    @test length(cut.points)==27
+    @test length(cut.curves)==40
+    @test length(cut.surfaces)==19
+    @test all(==(2),values(_result_curve_incidence(cut,13)))
+    _check_materialized_pcurves(cut,13)
+
+    # zero-volume face contact intersects to nothing: OCC binds no output,
+    # so the preallocated tag is rolled back and the call returns 0
+    empty=GeoModel()
+    add_box!(empty,0,0,0,1,1,1;tag=1)
+    add_box!(empty,1,0.5,0.5,0.5,0.5,0.5;tag=2)
+    @test boolean_volumes!(empty,:intersection,1,2;tag=3)==0
+    @test sort(collect(keys(empty.volumes)))==[1,2]
+    @test !haskey(empty.booleans,3)
+    @test !haskey(empty.boolean_operands,3)
+    @test !haskey(empty.boolean_components,3)
+
+    # a slab cut splits the box into two disjoint solids: OCC returns one
+    # volume per solid, linked through the component table
+    multi=GeoModel()
+    add_box!(multi,0,0,0,1,1,1;tag=1)
+    add_box!(multi,0.4,-0.5,-0.5,0.2,2,2;tag=2)
+    @test boolean_volumes!(multi,:difference,1,2;tag=3)==3
+    @test sort(collect(keys(multi.volumes)))==[1,2,3,4]
+    @test multi.boolean_components[3]==3
+    @test multi.boolean_components[4]==3
+    @test multi.booleans[4]==(op=:difference,a=1,b=2)
+    @test all(==(2),values(_result_curve_incidence(multi,13)))
+
+    # nested Booleans read the materialized boundary of the earlier result
+    nested=GeoModel()
+    add_box!(nested,0,0,0,1,1,1;tag=1)
+    add_box!(nested,0.5,0,0,1,1,1;tag=2)
+    @test boolean_volumes!(nested,:union,1,2;tag=3)==3
+    add_box!(nested,0.25,0.25,-0.5,0.5,0.5,2;tag=4)
+    @test boolean_volumes!(nested,:difference,3,4;tag=5)==5
+    @test nested.booleans[5]==(op=:difference,a=3,b=4)
+    @test all(==(2),values(_result_curve_incidence(nested,25)))
+    _check_materialized_pcurves(nested,25)
+
+    # curved sections: box minus a through-hole cylinder — Gmsh 4.15.2
+    # produces 10 points, 15 curves, and 7 surfaces for the result
+    curved=GeoModel()
+    add_box!(curved,0,0,0,1,1,1;tag=1)
+    add_cylinder!(curved,0.5,0.5,-0.5,0,0,2,0.3;tag=2)
+    np=length(curved.points);nc=length(curved.curves);ns=length(curved.surfaces)
+    @test boolean_volumes!(curved,:difference,1,2;tag=3)==3
+    @test (length(curved.points)-np,length(curved.curves)-nc,
+           length(curved.surfaces)-ns)==(10,15,7)
+    @test all(==(2),values(_result_curve_incidence(curved,ns+1)))
+    _check_materialized_pcurves(curved,ns+1)
+
+    # unsupported intersections fail explicitly rather than approximating
+    unsupported=GeoModel()
+    add_cylinder!(unsupported,0,0,0,0,0,1,0.3;tag=1)
+    add_cylinder!(unsupported,0.2,0,0,0,1,0,0.3;tag=2)
+    @test_throws ArgumentError boolean_volumes!(unsupported,:union,1,2;tag=3)
+    @test !haskey(unsupported.volumes,3)
+    @test !haskey(unsupported.booleans,3)
 end

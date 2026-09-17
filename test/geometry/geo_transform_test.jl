@@ -330,7 +330,7 @@ end
         Translate {10,0,0} { Volume{3}; }
         Translate {100,0,0} { Volume{1}; }
         """)
-    A,B=r.model.boolean_operands[3]
+    A,B=r.model.boolean_operands[3].meshes
     @test minimum(A.coords[1,:])≈10.0     # snapshot moved with the result
     @test maximum(B.coords[1,:])≈11.5
     @test r.model.box_extents[1][1]≈100.0  # operand transform independent

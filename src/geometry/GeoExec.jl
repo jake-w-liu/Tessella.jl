@@ -39,7 +39,7 @@ using ..Model: GeoModel, add_point!, set_point_mesh_size!
 using ..Model: add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 using ..Model: add_surface_loop!, add_volume!
-using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!
+using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!, boolean_volumes_multi!
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: transform_entities!, duplicate_entities!, coherence!
@@ -62,7 +62,7 @@ using ..IO: _geo_context_set_scalar!, _geo_context_set_list!
 using ..IO: _geo_apply_list_assignment!, _geo_list_term_values
 using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
-using ..IO: _geo_allocator_observe_statement!
+using ..IO: _geo_allocator_observe_statement!,_geo_allocator_resync_model!
 using ..IO: _geo_physical_declaration
 using ..Transform: _affine_coordinate
 
@@ -88,9 +88,11 @@ end
 const _MAX_GEO_EXEC_STATEMENT_BYTES=1_000_000
 const _MAX_GEO_EXEC_STATEMENTS=1_000_000
 const _MAX_GEO_LOOP_ITERATIONS=1_000_000
+const _MAX_GEO_CALL_DEPTH=128
 
 const _GEO_CONTROL_BARE=Dict(
-    "Else"=>:else,"EndIf"=>:endif,"EndWhile"=>:endwhile,"EndFor"=>:endfor)
+    "Else"=>:else,"EndIf"=>:endif,"EndWhile"=>:endwhile,"EndFor"=>:endfor,
+    "Return"=>:return)
 
 # Scan a balanced open/close group starting at raw[i] (the opener). Returns the
 # index of the matching close on the same line; control headers that spill to a
@@ -126,7 +128,8 @@ end
 function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
     rest=SubString(raw,i,last)
     matched=match(
-        r"^(If|ElseIf|While|Else|EndIf|EndWhile|For|EndFor)\b",rest)
+        r"^(If|ElseIf|While|Else|EndIf|EndWhile|For|EndFor|Function|Return)\b",
+        rest)
     matched===nothing && return nothing
     word=matched.captures[1]
     haskey(_GEO_CONTROL_BARE,word) && return (word,i+sizeof(word)-1)
@@ -134,6 +137,16 @@ function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
     jlast=lastindex(rest)
     while j<=jlast && isspace(rest[j])
         j=nextind(rest,j)
+    end
+    if word=="Function"
+        # Gmsh's `Function name` header carries an identifier or quoted
+        # string-expression name on the same line and no `;`.
+        name_match=match(
+            r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\"|'[^']*')",SubString(rest,j))
+        name_match===nothing && throw(ArgumentError(
+            "execute_geo: malformed Function header; use `Function name`"))
+        consumed=j-1+sizeof(name_match.match)
+        return (String(rest[firstindex(rest):consumed]),i+consumed-1)
     end
     if word=="For"
         name_match=match(r"^[A-Za-z_][A-Za-z0-9_]*",SubString(rest,j))
@@ -170,6 +183,8 @@ function _geo_control_parse(line::AbstractString)
             r"^For\s+([A-Za-z_][A-Za-z0-9_]*)\s+In\s*\{(.*)\}$",line))!==nothing
         return (kind=:for,var=String(matched.captures[1]),
                 range=String(matched.captures[2]))
+    elseif (matched=match(r"^Function\s+(.+)$",line))!==nothing
+        return (kind=:function,name=String(matched.captures[1]))
     elseif haskey(_GEO_CONTROL_BARE,line)
         return (kind=_GEO_CONTROL_BARE[line],)
     end
@@ -289,7 +304,12 @@ assigned per iteration and remains at its first out-of-range value, and control
 headers must complete on one line. `While (expr) ... EndWhile` is a bounded
 Tessella extension — pinned Gmsh has no While keyword — capped at
 $_MAX_GEO_LOOP_ITERATIONS iterations; total executed statements stay within
-$_MAX_GEO_EXEC_STATEMENTS. Numeric lists support zero-based scalar indexing, `#name[]`
+$_MAX_GEO_EXEC_STATEMENTS. `Function name ... Return` registers a zero-argument
+body — the statements up to the first `Return` marker, matching Gmsh's
+token-level capture — and `Call name;` re-executes it in the shared variable
+scope with recursion bounded by $_MAX_GEO_CALL_DEPTH; names are identifiers or
+quoted string literals, redefinition and call-before-definition fail like Gmsh.
+Numeric lists support zero-based scalar indexing, `#name[]`
 cardinality, bounded ranges, copies, concatenation, whole-list append/removal, and
 indexed or selected mutation. Entity-list positions expand whole or selected list
 variables as well as constant ranges. Tags
@@ -326,8 +346,8 @@ Physical Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept in
 entities, respectively. `Boundary` joins the selected immediate boundaries and
 physical-group insertion removes duplicate tags. `CombinedBoundary` retains tags
 with odd multiplicity. Hole and cavity boundaries participate; embeddings do not.
-Unknown entities, empty combined boundaries, implicit primitive or Boolean volume
-topology, unsupported geometry-derived selectors, and invalid query dimensions are
+Unknown entities, empty combined boundaries, unmaterialized volume topology,
+unsupported geometry-derived selectors, and invalid query dimensions are
 explicit blockers.
 An allocator read after an untracked topology-changing declaration is rejected;
 tracked `Boolean` operand `Delete` and `SetMaxTag` counters stay live.
@@ -345,9 +365,10 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     params=read_geo_params(path)
     model=GeoModel()
     context=_GeoNumericContext()
-    # `Extrude{...}{...}` is a side-effecting value term in the `.geo`
-    # grammar; the numeric evaluator calls back through this hook.
-    context.exec_hook=src->_geo_exec_extrude_term(model,src,context)
+    # `Extrude{...}{...}` and `BooleanX{...}{...}` are side-effecting value
+    # terms in the `.geo` grammar; the numeric evaluator calls back through
+    # this hook.
+    context.exec_hook=src->_geo_exec_value_term(model,src,context)
     allocator_state=_GeoTagAllocatorState()
     statements=_geo_exec_statements(path)
     executed=Ref(0)
@@ -531,8 +552,15 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             executed[]<=_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
                 "execute_geo: control flow exceeds $_MAX_GEO_EXEC_STATEMENTS " *
                 "executed statements"))
+            if match(r"^Call\b",line)!==nothing
+                assigned=_geo_exec_call!(
+                    m,statements,line,context,allocator_state,executed)
+                assigned===nothing || (transfinite_tri=assigned)
+                i+=1
+                continue
+            end
             occursin(
-                r"\b(Macro|Function|Fillet|Chamfer)\b",
+                r"\b(Macro|Fillet|Chamfer)\b",
                 line) && throw(ArgumentError(
                 "execute_geo: unsupported statement $(line) — macros and " *
                 "advanced OCC features are blockers"))
@@ -550,6 +578,9 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             assigned===nothing || (transfinite_tri=assigned)
             _geo_allocator_observe_statement!(
                 allocator_state,line,context,"execute_geo")
+            occursin(r"\bBoolean(?:Difference|Union|Intersection|Fragments)?\b",
+                     line) &&
+                _geo_allocator_resync_model!(allocator_state,m)
             i+=1
         elseif control.kind===:if
             assigned,i=_geo_exec_if!(
@@ -563,6 +594,11 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             assigned,i=_geo_exec_while!(
                 m,statements,i,hi,context,allocator_state,executed)
             assigned===nothing || (transfinite_tri=assigned)
+        elseif control.kind===:function
+            i=_geo_exec_function_def!(statements,i,hi,context)
+        elseif control.kind===:return
+            throw(ArgumentError(
+                "execute_geo: Return without an enclosing Function"))
         else
             throw(ArgumentError(
                 "execute_geo: $line without a matching opener"))
@@ -571,11 +607,158 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
     return transfinite_tri
 end
 
+# A `.geo` Function/Call name is a bare identifier or a quoted string literal
+# in the bounded subset (Gmsh accepts general string expressions; Tessella
+# has no string variables, so anything else is an explicit blocker).
+function _geo_function_name(raw::AbstractString)
+    name=strip(raw)
+    match(r"^[A-Za-z_][A-Za-z0-9_]*$",name)!==nothing && return String(name)
+    quoted=match(r"^\"(.*)\"$",name)
+    quoted===nothing && (quoted=match(r"^'(.*)'$",name))
+    quoted!==nothing && return String(quoted.captures[1])
+    throw(ArgumentError(
+        "execute_geo: Function/Call name must be an identifier or a " *
+        "quoted string literal"))
+end
+
+# `Function name` registers its body — the statements up to the first `Return`
+# marker, matching Gmsh's token-level capture — without executing it. The body
+# may itself contain a `Function` statement, which registers when the outer
+# body runs (Gmsh's `Call` semantics resolve names at call time).
+function _geo_exec_function_def!(statements::Vector{String},i::Int,hi::Int,
+                                 context::_GeoNumericContext)
+    control=_geo_control_parse(statements[i])
+    name=_geo_function_name(control.name)
+    haskey(context.functions,name) && throw(ArgumentError(
+        "execute_geo: Redefinition of function $name"))
+    j=i+1
+    while j<=hi
+        inner=_geo_control_parse(statements[j])
+        (inner!==nothing && inner.kind===:return) && break
+        j+=1
+    end
+    j<=hi || throw(ArgumentError(
+        "execute_geo: Function $name has no matching Return"))
+    context.functions[name]=(i+1):(j-1)
+    return j+1
+end
+
+# `Call name;` re-executes the registered body in the caller's scope with a
+# bounded recursion depth (Gmsh recurses by re-parsing the body text; an
+# unbounded call stack is a resource-bound violation here).
+function _geo_exec_call!(m::GeoModel,statements::Vector{String},
+                         line::AbstractString,
+                         context::_GeoNumericContext,
+                         allocator_state::_GeoTagAllocatorState,
+                         executed::Base.RefValue{Int})
+    matched=match(r"^Call\s+(.+?)\s*;?\s*$",line)
+    matched===nothing && throw(ArgumentError(
+        "execute_geo: malformed Call statement; use `Call name;`"))
+    name=_geo_function_name(matched.captures[1])
+    body=get(context.functions,name,nothing)
+    body===nothing && throw(ArgumentError(
+        "execute_geo: Unknown function '$name'"))
+    context.call_depth+=1
+    try
+        context.call_depth<=_MAX_GEO_CALL_DEPTH || throw(ArgumentError(
+            "execute_geo: Call depth exceeds $_MAX_GEO_CALL_DEPTH"))
+        return _exec_geo_statements!(
+            m,statements,first(body),last(body),
+            context,allocator_state,executed)
+    finally
+        context.call_depth-=1
+    end
+end
+
 function _boolean_delete_operand(raw::AbstractString)
     suffix=String(strip(raw))
     match(r"^;?\s*(?:Delete\s*;?)?$",suffix)===nothing && throw(ArgumentError(
         "execute_geo: Boolean operand suffix must contain only optional Delete; got $(repr(suffix))"))
     return occursin(r"\bDelete\b",suffix)
+end
+
+const _GEO_BOOLEAN_OPS=Dict("Difference"=>:difference,"Union"=>:union,
+                            "Intersection"=>:intersection,
+                            "Fragments"=>:fragments)
+
+# Consecutive `{ ... }` operand groups of a `BooleanX ...` term: each group's
+# content is returned without its braces. The statement splitter already
+# keeps the whole form together; anything that is not a group is malformed.
+function _geo_boolean_groups(raw::AbstractString,caller::AbstractString)
+    s=String(strip(raw))
+    endswith(s,";") &&
+        (s=String(strip(s[firstindex(s):prevind(s,lastindex(s))])))
+    groups=String[]
+    while !isempty(s)
+        startswith(s,"{") || throw(ArgumentError(
+            "$caller: expected a `{ ... }` operand group; got $(repr(s))"))
+        (content,s)=_geo_balanced_group(s,caller)
+        push!(groups,content)
+    end
+    return groups
+end
+
+# One operand group `{ Volume{tags}; Delete; }` — `;`-separated clauses of
+# `Kind{...}` entity lists and `Delete` markers. Only Volume operands are
+# supported; other dimension clauses fail explicitly.
+function _geo_boolean_operand_group(raw::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString)
+    tags=Int[];del=false
+    for clause in split(raw,';')
+        text=strip(String(clause))
+        isempty(text) && continue
+        text=="Delete" && (del=true;continue)
+        mm=match(r"^([A-Za-z]+)\s*\{(.*)\}$",text)
+        mm===nothing && throw(ArgumentError(
+            "$caller: malformed operand clause $(repr(text))"))
+        mm.captures[1]=="Volume" || throw(ArgumentError(
+            "$caller: only Volume Boolean operands are supported; " *
+            "got $(mm.captures[1]){$(mm.captures[2])}"))
+        append!(tags,_geo_exec_entity_tags(
+            mm.captures[2],context,"$caller Volume operands"))
+    end
+    return (tags=tags,delete=del)
+end
+
+function _geo_boolean_operands(groups::Vector{String},
+                               context::_GeoNumericContext,
+                               caller::AbstractString)
+    length(groups)==2 || throw(ArgumentError(
+        "$caller: expected `{ objects }{ tools }` operand groups; " *
+        "got $(length(groups)) group$(length(groups)==1 ? "" : "s")"))
+    objects=_geo_boolean_operand_group(groups[1],context,caller)
+    tools=_geo_boolean_operand_group(groups[2],context,caller)
+    isempty(objects.tags) && throw(ArgumentError(
+        "$caller: the object operand group is empty"))
+    return (objects=objects,tools=tools)
+end
+
+# A `BooleanX{...}{...}` value term — the form allowed inside `v() =` /
+# `name[] =` captures and entity lists. Returns nothing when `raw` is not a
+# Boolean term (the `(t) =` tagged form is a statement, not a term).
+function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
+                                context::_GeoNumericContext)
+    source=String(strip(raw))
+    mm=match(r"^Boolean(Difference|Union|Intersection|Fragments)\b(.*)$",source)
+    mm===nothing && return nothing
+    caller="execute_geo: Boolean$(mm.captures[1])"
+    rest=String(strip(mm.captures[2]))
+    startswith(rest,"(") && return nothing
+    groups=_geo_boolean_groups(rest,caller)
+    operands=_geo_boolean_operands(groups,context,caller)
+    out=boolean_volumes_multi!(m,_GEO_BOOLEAN_OPS[mm.captures[1]],
+        operands.objects.tags,operands.tools.tags;
+        remove_object=operands.objects.delete,
+        remove_tool=operands.tools.delete,caller=caller)
+    return Float64.(out)
+end
+
+function _geo_exec_value_term(m::GeoModel,raw::AbstractString,
+                              context::_GeoNumericContext)
+    extruded=_geo_exec_extrude_term(m,raw,context)
+    extruded!==nothing && return extruded
+    return _geo_exec_boolean_term(m,raw,context)
 end
 
 function _geo_periodic_expressions(raw::AbstractString,count::Int,
@@ -1887,20 +2070,16 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                    angle=length(values)==6 ? values[6] : 2π)
         return
     elseif (mm=match(
-            r"^Boolean(Difference|Union|Intersection)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*;$",
+            r"^Boolean(Difference|Union|Intersection|Fragments)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Boolean$(mm.captures[1])"
-        op=Dict("Difference"=>:difference,"Union"=>:union,"Intersection"=>:intersection)[mm.captures[1]]
         tag=_geo_exec_entity_tag(mm.captures[2],context,"$caller result tag")
-        a=_geo_exec_single_entity(
-            mm.captures[3],context,"$caller first operand")
-        b=_geo_exec_single_entity(
-            mm.captures[5],context,"$caller second operand")
-        delete_a=_boolean_delete_operand(mm.captures[4])
-        delete_b=_boolean_delete_operand(mm.captures[6])
-        boolean_volumes!(m,op,a,b;tag=tag)
-        delete_a && _remove_volume_entity!(m,a)
-        delete_b && _remove_volume_entity!(m,b)
+        groups=_geo_boolean_groups(mm.captures[3],caller)
+        operands=_geo_boolean_operands(groups,context,caller)
+        boolean_volumes_multi!(m,_GEO_BOOLEAN_OPS[mm.captures[1]],
+            operands.objects.tags,operands.tools.tags;tag=tag,
+            remove_object=operands.objects.delete,
+            remove_tool=operands.tools.delete,caller=caller)
         return
     elseif match(r"^(Translate|Rotate|Dilate|Symmetry)\s*\{",line)!==nothing
         _geo_exec_transform_statement!(m,line,context)
@@ -2046,6 +2225,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
            startswith(line,"Field") || startswith(line,"Background") ||
            startswith(line,"BoundaryLayer") ||
            occursin(r"^Mesh\s+[0-9]\s*;", line)
+        return
+    elseif (mm=match(
+            r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*=\s*(.*?)\s*;$",line)) !== nothing
+        # `v() =` is Gmsh's ListOfDouble affectation — equivalent to `v[] =`;
+        # it is the capture form for side-effecting terms such as
+        # `BooleanX{...}{...}` and `Extrude`.
+        name=String(mm.captures[1])
+        (name=="Pi" || name in _GEO_SIDE_EFFECT_SYMBOLS) && throw(ArgumentError(
+            "execute_geo: $name is read-only and cannot be assigned as a list"))
+        values=_geo_numeric_list_values(mm.captures[2],context,
+            "execute_geo: list variable $name";allow_multiplier=false)
+        _geo_context_set_list!(context,name,values,
+            "execute_geo: list variable $name")
         return
     elseif occursin(r"^[A-Za-z_][A-Za-z0-9_]*\s*\[",line)
         body=String(strip(line[firstindex(line):prevind(line,lastindex(line))]))

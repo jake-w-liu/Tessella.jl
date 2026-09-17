@@ -95,6 +95,7 @@ using .Model: GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_l
               add_circle_arc!, add_ellipse_arc!, add_ruled_surface!,
               add_surface_loop!, add_volume!,
               add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!,
+              boolean_volumes_multi!,
               embed!, translate_volume!, dilate_volume!, rotate_volume!,
               ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
               model_periodic_nodes, model_to_mixed, add_physical_group!, mesh_model_surface,
@@ -182,7 +183,7 @@ export mesh_transfinite_hex
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!, add_box!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_surface_loop!, add_volume!
-export add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!
+export add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!, boolean_volumes_multi!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
        model_periodic_nodes, model_to_mixed

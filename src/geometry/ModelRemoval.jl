@@ -275,11 +275,17 @@ function _model_removal_state(
     cones=copy(m.cones)
     booleans=copy(m.booleans)
     boolean_operands=copy(m.boolean_operands)
+    boolean_components=copy(m.boolean_components)
     for tag in removed_tags[4]
         for encoding in (box_extents,cylinders,spheres,cones,
-                         booleans,boolean_operands)
+                         booleans,boolean_operands,boolean_components)
             delete!(encoding,tag)
         end
+    end
+    # a removed primary's component volumes become self-linked — their own
+    # shells and operand snapshots carry everything the link needs
+    for (k,v) in collect(boolean_components)
+        v in removed_tags[4] && (boolean_components[k]=k)
     end
 
     discrete=Dict{Tuple{Int,Int},DiscreteEntity}()
@@ -323,7 +329,7 @@ function _model_removal_state(
             surface_loops,volumes,
             entity_names,entity_visibility,entity_colors,physical,physical_names,
             box_extents,cylinders,spheres,cones,booleans,boolean_operands,
-            periodic,embeds,discrete)
+            boolean_components,periodic,embeds,discrete)
 end
 
 """
@@ -338,10 +344,10 @@ Entity names, visibility, colors, Physical memberships, embedding targets, perio
 relations, native solid encodings, and Boolean-result snapshots owned by removed
 entities are cleaned up. Empty Physical groups and their names are removed,
 construction loops that would dangle are discarded, and automatic tag counters
-remain monotonic. A materialized `add_box!` Volume carries its boundary entities
-like any explicit shell Volume, so recursive removal descends through it; Boolean
-Volumes and unmaterialized primitives have no boundary entities, so recursive
-removal stops at the Volume.
+remain monotonic. Materialized Volumes — `add_box!` shells and OCC Boolean
+results alike — carry their boundary entities like any explicit shell Volume,
+so recursive removal descends through them; unmaterialized primitives have no
+boundary entities, so recursive removal stops at the Volume.
 """
 function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     caller="remove_entities!"
@@ -375,6 +381,7 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.cones=state.cones
     m.booleans=state.booleans
     m.boolean_operands=state.boolean_operands
+    m.boolean_components=state.boolean_components
     m.periodic=state.periodic
     m.embeds=state.embeds
     m.discrete=state.discrete

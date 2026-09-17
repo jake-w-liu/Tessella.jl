@@ -39,7 +39,7 @@ using LinearAlgebra: Symmetric, eigen
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_surface_loop!, add_volume!
-export add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!
+export add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!, boolean_volumes_multi!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
 export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
        model_periodic_nodes, model_to_mixed
@@ -209,8 +209,15 @@ mutable struct GeoModel
     spheres::Dict{Int,NamedTuple{(:center,:radius),Tuple{NTuple{3,Float64},Float64}}}
     cones::Dict{Int,NamedTuple{(:center,:axis,:r1,:r2,:height),
                                Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64,Float64}}}
-    booleans::Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}
-    boolean_operands::Dict{Int,Tuple{Mesh,Mesh}}
+    # binary Booleans store (op,a,b); multi-operand results store
+    # (op,operands::Vector{Int})
+    booleans::Dict{Int,NamedTuple}
+    # binary Booleans store (A,B) snapshots; multi-operand results store
+    # (meshes::Vector{Mesh}, cell::Union{UInt64,Nothing}) — see
+    # `_boolean_result_surface`
+    boolean_operands::Dict{Int,Any}
+    # extra volume tag → primary tag of a multi-component Boolean result
+    boolean_components::Dict{Int,Int}
     periodic::Dict{Tuple{Int,Int},ModelPeriodicConstraint}
     embeds::Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}
     meshing::ModelMeshingAttributes
@@ -247,6 +254,7 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                            Tuple{NTuple{3,Float64},NTuple{3,Float64},Float64,Float64,Float64}}}(),
                       Dict{Int,NamedTuple{(:op,:a,:b),Tuple{Symbol,Int,Int}}}(),
                       Dict{Int,Tuple{Mesh,Mesh}}(),
+                      Dict{Int,Int}(),
                       Dict{Tuple{Int,Int},ModelPeriodicConstraint}(),
                       Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}(),
                       ModelMeshingAttributes(),
@@ -504,6 +512,7 @@ include("ModelEntityEvaluation.jl")
 include("ModelMeshingAttributes.jl")
 include("ModelTransforms.jl")
 include("ModelCurved.jl")
+include("ModelBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)
     dim==1 && return "Curve"
@@ -1334,7 +1343,9 @@ end
 Add a native Boolean volume combining existing volumes `a` and `b`. Supported
 operations are `:union`, `:intersection`, and `:difference` (`a \\ b`). The
 result owns operation-time snapshots of both operands, so later operand changes do
-not change the Boolean geometry.
+not change the Boolean geometry. A geometrically empty result (for example a
+zero-volume face-touching intersection) binds nothing and returns `0`, matching
+Gmsh's OCC kernel which reports an empty output list.
 """
 function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     caller="boolean_volumes!"
@@ -1354,6 +1365,234 @@ function boolean_volumes!(m::GeoModel, op::Symbol, a, b; tag::Integer=0)
     m.volumes[t]=Int[]
     m.booleans[t]=(op=op, a=ta, b=tb)
     m.boolean_operands[t]=(operand_a,operand_b)
+    try
+        _brep_materialize_boolean!(m,t,op,ta,tb,caller)
+    catch
+        delete!(m.volumes,t)
+        delete!(m.booleans,t)
+        delete!(m.boolean_operands,t)
+        delete!(m.boolean_components,t)
+        rethrow()
+    end
+    if isempty(m.volumes[t])
+        # geometrically empty result (zero-volume contact) — OCC/Gmsh bind
+        # nothing for it; drop the pre-allocated records. An automatic tag
+        # was never claimed by any entity, so the watermark steps back.
+        delete!(m.volumes,t)
+        delete!(m.booleans,t)
+        delete!(m.boolean_operands,t)
+        delete!(m.boolean_components,t)
+        requested==0 && m.next_tag[4]==t && (m.next_tag[4]-=1)
+        return 0
+    end
+    return t
+end
+
+"""
+    boolean_volumes_multi!(model, op, objects, tools; tag=0,
+                           remove_object=true, remove_tool=true) -> out tags
+
+Multi-operand Boolean over volume lists — the `.geo` `BooleanX{..}{..}` form
+mirroring Gmsh's OCC `booleanOperator`. `objects` and `tools` are volume tag
+lists (`tools` may be empty); `op` is `:union`, `:intersection`,
+`:difference`, or `:fragments`. The arrangement decomposes into cells labeled
+by operand membership; each kept cell materializes into its own result
+volume — one volume per disconnected piece for a fuse, one per object/tool
+membership cell for the other ops — with partition faces shared between
+adjacent cells.
+
+Tag/delete semantics follow `occBooleanPreserveNumbering`: an operand whose
+only image is itself (no geometric interaction) keeps its tag and stays in
+`out`; an operand whose image is a single piece is rebound to its tag when
+the operand is removed; all other pieces get fresh tags after the surviving
+maximum. `remove_object`/`remove_tool` are the `Delete;` markers of each
+operand group. With an explicit `tag`, a multi-piece result is an error (one
+tag cannot bind several volumes — OCC reports the same). Returns the output
+volume tags in piece order, matching Gmsh's `outDimTags`.
+"""
+function boolean_volumes_multi!(m::GeoModel,op::Symbol,
+        objects::AbstractVector{<:Integer},tools::AbstractVector{<:Integer};
+        tag::Integer=0,remove_object::Bool=true,remove_tool::Bool=true,
+        caller::AbstractString="boolean_volumes_multi!")
+    op in (:union,:intersection,:difference,:fragments) || throw(ArgumentError(
+        "$caller: op must be :union, :intersection, :difference, or :fragments"))
+    remove_object isa Bool && remove_tool isa Bool || throw(ArgumentError(
+        "$caller: remove flags must be Bool"))
+    nobj=length(objects)
+    nobj>=1 || throw(ArgumentError("$caller: at least one object operand"))
+    tags=Int[_tag(t,caller,3) for t in objects]
+    append!(tags,Int[_tag(t,caller,3) for t in tools])
+    N=length(tags)
+    length(unique(tags))==N || throw(ArgumentError(
+        "$caller: Boolean operands must be distinct volumes"))
+    for t in tags
+        haskey(m.volumes,t) || throw(ArgumentError(
+            "$caller: unknown Volume[$t]"))
+    end
+    requested=_tag(tag,caller,3)
+    requested!=0 && (haskey(m.volumes,requested) ||
+        haskey(m.discrete,(3,requested))) && throw(ArgumentError(
+            "$caller: Volume[$requested] already exists"))
+    # operand snapshots are operation-time — take them before any mutation
+    meshes=[_volume_surface(m,t,caller) for t in tags]
+    kept,touched=_brep_collect_faces_n(m,op,tags,nobj,caller)
+    if isempty(kept)
+        # empty result — OCC binds nothing; operands still get removed per
+        # their group's Delete flag (nothing of them remains in the result)
+        for i in 1:N
+            rem=i<=nobj ? remove_object : remove_tool
+            rem && _remove_volume_entity!(m,tags[i])
+        end
+        return Int[]
+    end
+    pieces,image,created=_brep_materialize_multi!(
+        m,op,tags,kept,touched,N,nobj,caller)
+    # operand dispositions (OCC preserve-numbering):
+    #   image empty → the operand is deleted from the result — removed when
+    #   its group carries Delete
+    #   single materialized image + remove → the piece rebinds the tag
+    #   unmodified (pseudo) → preserved in place
+    try
+        unbind=falses(N)
+        piece_tag=zeros(Int,length(pieces))
+        if requested==0
+            for i in 1:N
+                rem=i<=nobj ? remove_object : remove_tool
+                imgs=image[i]
+                if length(imgs)==1 && pieces[imgs[1]].pseudo==i
+                    continue                       # Extent 0 — preserved
+                elseif isempty(imgs)
+                    unbind[i]=rem                  # IsDeleted
+                elseif length(imgs)==1 && rem &&
+                        count(j->image[j]==imgs &&
+                            pieces[imgs[1]].pseudo!=j,1:N)==1
+                    # the operand is the unique source whose entire image is
+                    # this piece — a 1:1 modification that rebinds the tag
+                    # (OCC preserve-numbering); a piece shared by several
+                    # sole-image operands (a fuse) is not a bijection
+                    unbind[i]=true
+                    piece_tag[imgs[1]]=tags[i]
+                else
+                    unbind[i]=rem
+                end
+            end
+        else
+            length(pieces)>1 && throw(ArgumentError(
+                "$caller: cannot bind $(length(pieces)) result volumes to " *
+                "Volume[$requested]"))
+            for i in 1:N
+                rem=i<=nobj ? remove_object : remove_tool
+                imgs=image[i]
+                # an unmodified operand under an explicit tag is re-bound to
+                # the result tag, not deleted
+                if length(imgs)==1 && pieces[imgs[1]].pseudo==i && !rem
+                    continue
+                end
+                unbind[i]=rem
+            end
+        end
+        if requested!=0
+            p=only(pieces)
+            for i in 1:N
+                (unbind[i] && i!=p.pseudo) || continue
+                _remove_volume_entity!(m,tags[i])
+            end
+            if p.pseudo!=0
+                # the sole result is an unmodified operand — it moves to the
+                # requested tag when removed; when kept, OCC returns the
+                # requested tag in outDimTags but the model keeps the operand
+                # in place (no copy is materialized)
+                rem_i=p.pseudo<=nobj ? remove_object : remove_tool
+                rem_i && model_set_tag!(m,3,tags[p.pseudo],requested)
+            else
+                _bind_boolean_piece!(m,requested,op,tags,meshes,p,caller)
+            end
+            return [requested]
+        end
+        for i in 1:N
+            unbind[i] || continue
+            _remove_volume_entity!(m,tags[i])
+        end
+        # rebound pieces bind during the operand pass; fresh pieces take
+        # sequential tags after the surviving maximum (OCC _multiBind order)
+        for (pi,p) in enumerate(pieces)
+            p.pseudo!=0 && continue
+            piece_tag[pi]==0 && continue
+            _bind_boolean_piece!(m,piece_tag[pi],op,tags,meshes,p,caller)
+        end
+        fresh=isempty(m.volumes) ? 0 : maximum(keys(m.volumes))
+        out=Int[]
+        for (pi,p) in enumerate(pieces)
+            if p.pseudo!=0
+                push!(out,tags[p.pseudo]);continue
+            end
+            if piece_tag[pi]==0
+                fresh+=1
+                while haskey(m.volumes,fresh)
+                    fresh+=1
+                end
+                piece_tag[pi]=fresh
+                _bind_boolean_piece!(m,fresh,op,tags,meshes,p,caller)
+            end
+            push!(out,piece_tag[pi])
+        end
+        # a multi-piece fuse extracts each volume's own component from the
+        # shared fused snapshot mesh — link them like the binary path does
+        # (preserved operands mesh through their own records)
+        bound=[piece_tag[pi] for (pi,p) in enumerate(pieces)
+               if p.pseudo==0]
+        # pieces sharing one snapshot mesh — all fuse pieces share the fused
+        # mesh; cell-op pieces with equal membership masks share a cell mesh —
+        # each extracts its own connected components via the link marker
+        # (preserved operands mesh through their own records)
+        if op===:union
+            if length(pieces)>1 && !isempty(bound)
+                primary=bound[1]
+                m.boolean_components[primary]=primary
+                for t in bound[2:end]
+                    m.boolean_components[t]=primary
+                end
+            end
+        else
+            cell_tags=Dict{UInt64,Vector{Int}}()
+            for (pi,p) in enumerate(pieces)
+                p.pseudo==0 || continue
+                push!(get!(cell_tags,p.srcs,Int[]),piece_tag[pi])
+            end
+            for shared in values(cell_tags)
+                length(shared)>1 || continue
+                primary=shared[1]
+                m.boolean_components[primary]=primary
+                for t in shared[2:end]
+                    m.boolean_components[t]=primary
+                end
+            end
+        end
+        return out
+    catch
+        for sh in created.shells
+            delete!(m.surface_loops,sh)
+        end
+        _occ_materialize_rollback!(
+            m,created.points,created.curves,created.loops,created.surfaces,0)
+        rethrow()
+    end
+end
+
+# Materialize one result piece's volume records at `t`. `meshes` are the
+# operand snapshots; the piece's mesh cell is its membership mask — nothing
+# for a fuse piece, whose boundary is the fused mesh's own component.
+function _bind_boolean_piece!(m::GeoModel,t::Int,op::Symbol,
+        tags::Vector{Int},meshes,p,caller)
+    haskey(m.volumes,t) && throw(ArgumentError(
+        "$caller: Volume[$t] already exists"))
+    _alloc_tag!(m,3,t,caller)
+    isempty(p.shells) && throw(ErrorException(
+        "$caller: Boolean result piece has no boundary shells"))
+    m.volumes[t]=p.shells
+    m.booleans[t]=(op=op,operands=copy(tags))
+    m.boolean_operands[t]=(meshes=meshes,
+                           cell=op===:union ? nothing : p.srcs)
     return t
 end
 
@@ -4766,9 +5005,12 @@ end
 # A volume carrying a native curved-solid encoding meshes through the analytic
 # tessellation even though its OCC boundary topology is materialized — the
 # planar explicit-shell path cannot represent Cylinder/Sphere/Cone faces. Box
-# volumes deliberately stay explicit: their faces are planar.
+# volumes deliberately stay explicit: their faces are planar. Boolean results
+# likewise keep their materialized boundary for queries but mesh through the
+# operand snapshot (`m.booleans`/`m.boolean_operands`).
 _implicit_volume_surface(m::GeoModel,t::Int) =
-    haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t)
+    haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t) ||
+    haskey(m.booleans,t)
 
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
     if haskey(m.box_extents,t)
@@ -4784,12 +5026,10 @@ function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_v
         c=m.cones[t]
         return cone_surface(c.center,c.axis,c.r1,c.r2,c.height)
     elseif haskey(m.booleans,t)
-        spec=m.booleans[t]
         haskey(m.boolean_operands,t) || throw(ArgumentError(
             "$caller: Boolean Volume[$t] has no owned operand snapshot; " *
             "recreate the Boolean in a fresh GeoModel"))
-        A,B=m.boolean_operands[t]
-        return mesh_boolean(A,B,spec.op)
+        return _boolean_result_surface(m,t,caller)
     elseif !isempty(m.volumes[t])
         geometry=_model_explicit_volume_geometry(m,t,caller)
         probe=_model_explicit_volume_fill(geometry.surface,t,caller)

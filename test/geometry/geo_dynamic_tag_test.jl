@@ -194,10 +194,11 @@ end
         Point(newp) = {5,5,5,1};
         """
     boolean_result=_execute_dynamic_tag_source(boolean_source)
-    # Gmsh 4.15.2 parity: result volume 25; operand boundary entities die with
-    # the deletes, so newp shrinks to the result boundary maximum + 1 = 9.
+    # Gmsh 4.15.2 parity: result volume 25; the disjoint tool leaves operand 1
+    # unmodified so its corner Points 1-8 persist on the preserved result and
+    # newp = 9.
     @test sort!(collect(keys(boolean_result.model.volumes)))==[25]
-    @test sort!(collect(keys(boolean_result.model.points)))==[9]
+    @test sort!(collect(keys(boolean_result.model.points)))==[1:9;]
 
     boolean_keep_source=raw"""
         SetFactory("OpenCASCADE");
@@ -207,8 +208,9 @@ end
         Point(newp) = {5,5,5,1};
         """
     boolean_keep=_execute_dynamic_tag_source(boolean_keep_source)
-    @test sort!(collect(keys(boolean_keep.model.volumes)))==[1,25]
-    # The kept operand retains its materialized corner Points 1-8.
+    # Gmsh 4.15.2: the result IsSame the kept operand, so the model keeps
+    # volume 1 only (outDimTags still reports the requested tag).
+    @test sort!(collect(keys(boolean_keep.model.volumes)))==[1]
     @test sort!(collect(keys(boolean_keep.model.points)))==[1:9;]
 
     setmax_volume_source=raw"""
@@ -223,7 +225,7 @@ end
     # SetMaxTag floor survives the Boolean operand deletes; newp is unaffected
     # by the volume floor and reflects the live point maximum + 1.
     @test sort!(collect(keys(setmax_volume.model.volumes)))==[41]
-    @test sort!(collect(keys(setmax_volume.model.points)))==[9]
+    @test sort!(collect(keys(setmax_volume.model.points)))==[1:9;]
 
     invalid_sources=(
         "newp = 2;"=>"read-only",

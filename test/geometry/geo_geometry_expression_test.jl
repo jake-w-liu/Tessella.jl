@@ -99,7 +99,7 @@ end
           { Volume{first}; Delete; }{ Volume{first + 1}; Delete; };
         """)
     @test sort!(collect(keys(boolean.model.volumes)))==[3]
-    @test boolean.model.booleans[3]==(op=:difference,a=1,b=2)
+    @test boolean.model.booleans[3]==(op=:difference,operands=[1,2])
 
     invalid_sources=(
         "Point(missing) = {0, 0, 0, 1};",
@@ -123,10 +123,12 @@ end
     point_count_error=_geometry_expression_error("Point(1) = {0, 0};")
     @test occursin("expected three coordinates and optional mesh size",
                    sprint(showerror,point_count_error))
+    # multi-operand lists are legal; a tag appearing in both operand groups
+    # is the rejected case
     boolean_count_error=_geometry_expression_error(
         "Box(1)={0,0,0,1,1,1}; Box(2)={2,0,0,1,1,1}; " *
         "BooleanUnion(3)={Volume{1,2};}{Volume{2};};")
-    @test occursin("first operand: expected exactly one entity",
+    @test occursin("Boolean operands must be distinct volumes",
                    sprint(showerror,boolean_count_error))
     range_error=_geometry_expression_error(
         "Point(1)={0,0,0,1}; Line(1)={1:65537};")
