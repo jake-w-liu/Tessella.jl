@@ -274,6 +274,8 @@ function _model_curve_point(
     elseif _curve_type(m,tag)==:line
         line=_model_line_geometry(m,tag,caller)
         return _model_line_point(line,parameter,caller,index)
+    elseif _curve_type(m,tag) in _SPLINE_CURVE_TYPES
+        return _spline_point(_spline_geometry(m,tag,caller),parameter)
     end
     return _arc_point(_arc_geometry(m,tag,caller),parameter)
 end
@@ -281,10 +283,13 @@ end
 """
     model_value(model, dim, tag, parametric_coordinates) -> Vector{Float64}
 
-Evaluate an explicit Point, Line, arc, or Plane parametrization. Curve
-parameters use `[0,1]`; Plane parameters use the deterministic native orthonormal
-frame returned by [`model_parametrization_bounds`](@ref). `Circle`/`Ellipse`
-arcs evaluate with Gmsh's angle parametrization.
+Evaluate an explicit Point, Line, arc, spline-family curve, or Plane
+parametrization. Curve parameters use `[0,1]` — an explicit `Nurbs` uses its
+stored knot interval `[ubeg,uend]` instead; Plane parameters use the
+deterministic native orthonormal frame returned by
+[`model_parametrization_bounds`](@ref). `Circle`/`Ellipse` arcs evaluate with
+Gmsh's angle parametrization; `Spline`/`BSpline`/`Bezier`/`Nurbs` evaluate
+with Gmsh's `InterpolateCurve` ports.
 """
 function model_value(m::GeoModel,dim,tag,parametric_coordinates)
     caller="model_value"
@@ -409,6 +414,12 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
             for _ in values
                 append!(output,derivative)
             end
+        elseif _curve_type(m,entity_tag) in _SPLINE_CURVE_TYPES
+            spline=_spline_geometry(m,entity_tag,caller)
+            sizehint!(output,3length(values))
+            for parameter in values
+                append!(output,_spline_first_derivative_fd(spline,parameter))
+            end
         else
             arc=_arc_geometry(m,entity_tag,caller)
             sizehint!(output,3length(values))
@@ -462,6 +473,15 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
             end
             return output
         end
+        _curve_type(m,entity_tag) in _SPLINE_CURVE_TYPES && begin
+            spline=_spline_geometry(m,entity_tag,caller)
+            output=Float64[]
+            sizehint!(output,3*length(values))
+            for parameter in values
+                append!(output,_spline_second_derivative_fd(spline,parameter))
+            end
+            return output
+        end
         _curve_type(m,entity_tag)!=:line && begin
             arc=_arc_geometry(m,entity_tag,caller)
             output=Float64[]
@@ -511,6 +531,10 @@ function model_curvature(m::GeoModel,dim,tag,parametric_coordinates)
                 _occ_curve_curvature(m,occ,entity_tag,parameter,caller)
                 for parameter in values]
         end
+        _curve_type(m,entity_tag) in _SPLINE_CURVE_TYPES &&
+            return Float64[
+                _spline_curvature(_spline_geometry(m,entity_tag,caller),parameter)
+                for parameter in values]
         _curve_type(m,entity_tag)!=:line &&
             return Float64[
                 _arc_curvature(_arc_geometry(m,entity_tag,caller),parameter)
@@ -652,11 +676,16 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
     occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
-    line=nothing;arc=nothing
+    line=nothing;arc=nothing;spline=nothing
     if dimension==1 && occ===nothing
-        _curve_type(m,entity_tag)==:line ?
-            (line=_model_line_geometry(m,entity_tag,caller)) :
-            (arc=_arc_geometry(m,entity_tag,caller))
+        kind=_curve_type(m,entity_tag)
+        if kind==:line
+            line=_model_line_geometry(m,entity_tag,caller)
+        elseif kind in _SPLINE_CURVE_TYPES
+            spline=_spline_geometry(m,entity_tag,caller)
+        else
+            arc=_arc_geometry(m,entity_tag,caller)
+        end
     end
     surface_geometry=dimension==2 ?
         get(m.surface_geometry,entity_tag,nothing) : nothing
@@ -664,7 +693,7 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
         hasproperty(surface_geometry,:occ)
     plane=dimension==2 && !occ_surface ?
         _model_plane_frame(m,entity_tag,caller) : nothing
-    lc=(arc!==nothing || occ!==nothing || occ_surface) ?
+    lc=(arc!==nothing || spline!==nothing || occ!==nothing || occ_surface) ?
         _model_lc(m) : 0.0
     for index in 1:3:length(values)
         coordinate=(values[index],values[index+1],values[index+2])
@@ -682,6 +711,12 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
                 parameter,_=_model_line_parameter_exact(line,coordinate)
                 push!(output,_model_rational_float(
                     parameter,caller,"Line parameter for point $((index+2)÷3)"))
+            elseif spline!==nothing
+                # `GEdge::parFromPoint` → `XYZToU` — multi-seed damped
+                # Newton on the `InterpolateCurve` finite difference over
+                # `parBounds`.
+                _,u=_spline_xyz_to_u(spline,coordinate,lc)
+                push!(output,u)
             else
                 # `GEdge::parFromPoint` → `XYZToU` — multi-seed damped
                 # Newton on the `InterpolateCurve` finite difference.
@@ -731,8 +766,12 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
         # materialized primitive edges.
         occ=_occ_geometry_checked(m,entity_tag,caller)
         occ===nothing || return [occ.t0],[occ.t1]
-        _curve_type(m,entity_tag)==:line &&
-            _model_line_geometry(m,entity_tag,caller)
+        kind=_curve_type(m,entity_tag)
+        if kind in _SPLINE_CURVE_TYPES
+            spline=_spline_geometry(m,entity_tag,caller)
+            return [spline.ubeg],[spline.uend]
+        end
+        kind==:line && _model_line_geometry(m,entity_tag,caller)
         return [0.0],[1.0]
     end
     surface_geometry=get(m.surface_geometry,entity_tag,nothing)
@@ -759,13 +798,13 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
         m,dim,tag,(0,1,2),caller)
     if dimension==0
         if parametric
-            values=_model_evaluation_values(
+            point_values=_model_evaluation_values(
                 coordinates,1,caller,"parametric coordinates")
-            isempty(values) || throw(ArgumentError(
+            isempty(point_values) || throw(ArgumentError(
                 "$caller: Point parametric coordinates must be empty"))
             return 0
         end
-        values=_model_evaluation_values(coordinates,3,caller,"coordinates")
+        _model_evaluation_values(coordinates,3,caller,"coordinates")
         return 0
     end
     stride=parametric ? dimension : 3
@@ -777,6 +816,16 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
         if parametric
             occ!==nothing &&
                 return count(p->occ.t0<=p<=occ.t1,values)
+            _curve_type(m,entity_tag)===:nurbs && begin
+                # `containsParam` — the stored `[ubeg,uend]` knot interval.
+                bounds=get(m.curve_geometry,entity_tag,nothing)
+                (bounds===nothing || !hasproperty(bounds,:ubeg)) && throw(
+                    ErrorException(
+                        "$caller: Curve[$entity_tag] has no Nurbs knot " *
+                        "record; rebuild the model"))
+                return count(
+                    p->bounds.ubeg<=p<=bounds.uend,values)
+            end
             return count(parameter->0<=parameter<=1,values)
         end
         if occ!==nothing
@@ -790,14 +839,25 @@ function model_is_inside(m::GeoModel,dim,tag,coordinates,parametric=false)
                 proj!==nothing && sqrt(_sqdist(q,proj[2]))<=1e-7
             end
         end
+        _curve_type(m,entity_tag) in _SPLINE_CURVE_TYPES && begin
+            # `GEdge::containsPoint` — `XYZToU(relax=1)` convergence plus the
+            # `parBounds` parameter check.
+            spline=_spline_geometry(m,entity_tag,caller)
+            spline_lc=_model_lc(m)
+            return count(1:3:length(values)) do index
+                ok,u=_spline_xyz_to_u(spline,
+                    (values[index],values[index+1],values[index+2]),spline_lc)
+                ok && spline.ubeg<=u<=spline.uend
+            end
+        end
         _curve_type(m,entity_tag)!=:line && begin
             # `GEdge::containsPoint` — `XYZToU(relax=1)` convergence plus the
             # `[0,1]` parameter check.
             arc=_arc_geometry(m,entity_tag,caller)
-            lc=_model_lc(m)
+            arc_lc=_model_lc(m)
             return count(1:3:length(values)) do index
                 ok,u=_arc_xyz_to_u(arc,
-                    (values[index],values[index+1],values[index+2]),lc)
+                    (values[index],values[index+1],values[index+2]),arc_lc)
                 ok && 0.0<=u<=1.0
             end
         end
@@ -872,11 +932,16 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
         return closest,parameters
     end
     occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
-    line=nothing;arc=nothing
+    line=nothing;arc=nothing;spline=nothing
     if dimension==1 && occ===nothing
-        _curve_type(m,entity_tag)==:line ?
-            (line=_model_line_geometry(m,entity_tag,caller)) :
-            (arc=_arc_geometry(m,entity_tag,caller))
+        kind=_curve_type(m,entity_tag)
+        if kind==:line
+            line=_model_line_geometry(m,entity_tag,caller)
+        elseif kind in _SPLINE_CURVE_TYPES
+            spline=_spline_geometry(m,entity_tag,caller)
+        else
+            arc=_arc_geometry(m,entity_tag,caller)
+        end
     end
     surface_geometry=dimension==2 ?
         get(m.surface_geometry,entity_tag,nothing) : nothing
@@ -908,6 +973,12 @@ function model_closest_point(m::GeoModel,dim,tag,coordinates)
                 push!(parameters,parameter)
                 _model_append_point!(closest,
                     _model_line_point(line,exact,caller,point_index))
+            elseif spline!==nothing
+                # `GEdge::closestPoint` — 100-sample scan plus the recursive
+                # golden-section search over `parBounds`.
+                t,pt=_spline_closest(spline,coordinate)
+                push!(parameters,t)
+                _model_append_point!(closest,pt)
             else
                 # `GEdge::closestPoint` — 100-sample scan plus the recursive
                 # golden-section search.

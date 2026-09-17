@@ -133,7 +133,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   nonpartition metadata, plus native Point/straight-Line/explicit-Plane values,
   derivatives, curvature, normals, parametrization, containment, projection, and
   Point/Line-to-Plane reparametrization, and Circle/Ellipse-arc values,
-  derivatives, and curvature; owned entity visibility and RGBA colors,
+  derivatives, and curvature; built-in Spline/BSpline/Bezier/Nurbs curves
+  (the `Nurb` entity type) additionally evaluate, differentiate, measure
+  curvature, bound, parametrize, project, and contain bit-for-bit against
+  Gmsh 4.15.2's `InterpolateCurve` family; owned entity visibility and RGBA colors,
   model string attributes, and finite Point-coordinate updates;
   retagging moves every live reference, while removal skips surviving
   boundary/embedding dependencies, can recurse through explicit boundaries, and
@@ -270,18 +273,26 @@ entities are not partition entities, so their parent is `(-1,-1)`, the model's
 partition count is zero, and per-entity partition membership is empty. These direct
 and session queries are read-only and preserve the mesh cache.
 Native geometry evaluation covers Points, straight Lines, Circle and Ellipse
-arcs, OCC circle/line/degenerate edges, and explicit Planes through
-matching direct and session APIs. Lines and arcs use parameters `[0,1]`, with
-arcs evaluated through Gmsh's `InterpolateCurve` frame; OCC edges report
+arcs, the built-in Spline/BSpline/Bezier/Nurbs family (reported as `Nurb`),
+OCC circle/line/degenerate edges, and explicit Planes through
+matching direct and session APIs. Lines, arcs, and the non-Nurbs splines use
+parameters `[0,1]`, with
+arcs evaluated through Gmsh's `InterpolateCurve` frame and the spline family
+through bit-exact `InterpolateCurve` ports — Catmull–Rom ghost endpoints,
+piecewise UBS matrices, De Casteljau, and float32-rounded knot vectors;
+Nurbs curves report their raw knot interval and OCC edges report
 their stored ranges (full circles `[0,2π]`, arc-length seam lines, the
-sphere meridian `[3π/2,5π/2]`). Planes use a
+sphere meridian `[3π/2,5π/2]`). Spline-family derivatives, second
+derivatives, and curvature reproduce Gmsh's finite differences, bounds and
+bounding boxes follow the stored intervals and 10-sample scan, and
+parametrization, closest point, and containment run Gmsh's `XYZToU`/
+golden-section/`containsPoint` pipeline. Planes use a
 deterministic Gmsh-compatible orthonormal frame. Physical Plane containment tests the
 exact trimmed interior and excludes boundary loops, while parametric containment
 tests the inclusive rectangular bounds. Closest Line points are clamped to the
 segment; Plane projection is untrimmed. Malformed, nonfinite, implicit, degenerate,
-and unrepresentable inputs fail explicitly. Arc parametrization/projection,
-other curved entities, and general CAD
-parametrization remain unfinished.
+and unrepresentable inputs fail explicitly. Non-planar surface and general
+CAD parametrization remain unfinished.
 Point and straight-Line parameters can be reparametrized on any explicit Plane,
 including off-plane sources; the result is the orthogonal Plane parametrization.
 The `which` selector is accepted for API compatibility but has no effect because

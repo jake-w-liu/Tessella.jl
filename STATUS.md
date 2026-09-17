@@ -27,10 +27,10 @@ support or test requirements.
 | Track | State | Verified implementation increment |
 |---|---|---|
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, and field/entity-aware 2-D, surface, and 3-D refinement |
-| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types with canonical family/order lookup and detached property metadata plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/dimension-0:3 periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, verbatim ancillary/unknown-section and tag-remapped view-data preservation, structural `$PartitionedEntities`/`$GhostElements` metadata on `MixedMesh`, 4- and 8-byte binary `size_t` decoding plus `size_t_bytes=4` Tessella-only MSH4 binary output, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, visibility/color state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/Line/Circle/Ellipse-arc/Plane evaluation and surface reparametrization |
-| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Circle/Ellipse/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, N-way multi-operand BooleanDifference/Union/Intersection/Fragments with OCC membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder/Sphere/Cone/Torus/Boolean `.geo` solids materializing their Gmsh 4.15.2 OCC boundary layouts (Cylinder/Sphere/Cone behind retained compact encodings for the analytic mesher), Translate/Dilate/90°-Rotate and straight-curve, planar-surface, or stored-volume periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
+| P2 | **IN PROGRESS** | 125 fixed-node Gmsh types with canonical family/order lookup and detached property metadata plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/dimension-0:3 periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, verbatim ancillary/unknown-section and tag-remapped view-data preservation, structural `$PartitionedEntities`/`$GhostElements` metadata on `MixedMesh`, 4- and 8-byte binary `size_t` decoding plus `size_t_bytes=4` Tessella-only MSH4 binary output, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, visibility/color state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization |
+| P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Circle/Ellipse/Spline/BSpline/Bezier/Nurbs/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, N-way multi-operand BooleanDifference/Union/Intersection/Fragments with OCC membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder/Sphere/Cone/Torus/Boolean `.geo` solids materializing their Gmsh 4.15.2 OCC boundary layouts (Cylinder/Sphere/Cone behind retained compact encodings for the analytic mesher), Translate/Dilate/90°-Rotate and straight-curve, planar-surface, or stored-volume periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
 | P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and acyclic chains, synchronized planar periodic boundary surfaces on explicit volumes, stored mesh-inert periodic volume relations matching Gmsh's accepted-but-unserialized `setPeriodic(3)`, expression/list-backed `.geo` periodic entities and transforms, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
-| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data and automatic/manual global edge/triangular/quadrangular-face catalogs, hierarchical H1 bases at orders 1:15 over Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism families and hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron and 0:10 on Quadrangle/Hexahedron/Prism, lexicographic orientations, and vertex/edge/face/bubble keys, plus robust cached simplex point-location, local-coordinate, forward-map/Jacobian, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/Line/Circle/Ellipse-arc/Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, deterministic contiguous-block task partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, actual- and explicit-order nodal lookup, bulk/derived mesh-data, automatic/manual global edge/face topology, all-family hierarchical basis/orientation/key queries, point-location, Jacobian/reference-map, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-entity-topology, mesh-point-location, mesh-Jacobian, mesh-quadrature, mesh-function-space, mesh-element-quality, MSH-section-preservation, MSH-partition-metadata, and MSH-size_t-width Gmsh 4.15.2 differentials, plus discrete-entity storage with `add_discrete_entity`, tag-addressed `add_nodes`/`add_elements`/`add_elements_by_type` records, model-file `import_stl`, mesh-record `create_topology`, dihedral-angle `classify_surfaces`, chord/PCA `create_geometry` with discrete evaluation, GF(2) simplicial `compute_homology` chain generators in new physical groups, element-wise `compute_cross_field` on a session view store, the `mesh.field` submodule (MathEval/Distance/Threshold composition, background and boundary-layer fields, removal semantics) consumed by 2-D/3-D generators, generator consumption of per-entity meshing attributes (transfinite curves/surfaces/volumes, recombine flags, algorithms, smoothing steps, order-2 high-order overlay, reverse and outward orientation, compound entity merging, parametric-point sizes, boundary point-size propagation, and size callbacks), record-based `recombine`/`split_quadrangles` quadrangle round trips, `get_periodic_keys` function-space pairing, entity-scoped `optimize` with Gmsh method names, multi-entity `generate`, and Gmsh-parity empty-cache query semantics |
+| P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data and automatic/manual global edge/triangular/quadrangular-face catalogs, hierarchical H1 bases at orders 1:15 over Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism families and hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron and 0:10 on Quadrangle/Hexahedron/Prism, lexicographic orientations, and vertex/edge/face/bubble keys, plus robust cached simplex point-location, local-coordinate, forward-map/Jacobian, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, deterministic contiguous-block task partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, actual- and explicit-order nodal lookup, bulk/derived mesh-data, automatic/manual global edge/face topology, all-family hierarchical basis/orientation/key queries, point-location, Jacobian/reference-map, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-entity-topology, mesh-point-location, mesh-Jacobian, mesh-quadrature, mesh-function-space, mesh-element-quality, MSH-section-preservation, MSH-partition-metadata, and MSH-size_t-width Gmsh 4.15.2 differentials, plus discrete-entity storage with `add_discrete_entity`, tag-addressed `add_nodes`/`add_elements`/`add_elements_by_type` records, model-file `import_stl`, mesh-record `create_topology`, dihedral-angle `classify_surfaces`, chord/PCA `create_geometry` with discrete evaluation, GF(2) simplicial `compute_homology` chain generators in new physical groups, element-wise `compute_cross_field` on a session view store, the `mesh.field` submodule (MathEval/Distance/Threshold composition, background and boundary-layer fields, removal semantics) consumed by 2-D/3-D generators, generator consumption of per-entity meshing attributes (transfinite curves/surfaces/volumes, recombine flags, algorithms, smoothing steps, order-2 high-order overlay, reverse and outward orientation, compound entity merging, parametric-point sizes, boundary point-size propagation, and size callbacks), record-based `recombine`/`split_quadrangles` quadrangle round trips, `get_periodic_keys` function-space pairing, entity-scoped `optimize` with Gmsh method names, multi-entity `generate`, and Gmsh-parity empty-cache query semantics |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
 pipeline, high-order/custom-interpolation, or mixed-component
@@ -60,7 +60,7 @@ Classified STEP/IGES solids that are axis-aligned blocks, spheres, right circula
 cylinders, or right circular cones are imported and filled; STEP B-spline and
 IGES 126/128 NURBS import as native curves/surfaces with IGES NURBS export;
 other topology is an explicit blocker. Bounded
-`.geo` execution covers Point/Line/Circle/Ellipse/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume,
+`.geo` execution covers Point/Line/Circle/Ellipse/Spline/BSpline/Bezier/Nurbs/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume,
 Box/Cylinder/Sphere/Cone/Torus,
 BooleanDifference/Union/Intersection/Fragments of those solids — operand
 groups take multi-entity `Volume{a,b,…}` lists with per-group `Delete;`, N-way
@@ -98,11 +98,22 @@ and `Plane` faces, signed surface loops — behind the retained compact
 encodings that still drive native volume tessellation (9 OCC differential
 cases covering entity tags, point coordinates, type strings, signed
 boundaries, parametrization bounds, curve evaluations, and bounding boxes).
-Curve-loop tags use their own
-allocator namespace and chain-sort by endpoint connectivity. Arc metadata
-follows transforms, Duplicata, coherence merges, retagging, and removal;
+`Spline`/`BSpline`/`Bezier`/`Nurbs` records reproduce Gmsh's built-in-kernel
+control-point lists bit-for-bit — Catmull–Rom with extrapolated or cyclic
+ghost endpoints, the piecewise `mat` matrices with right-extremity
+reflection, full-list De Casteljau, and float32-rounded knot vectors with
+inferred degree — including empty `Knots {}` falling back to the BSpline
+record, evaluated-but-ignored `Order`, and `[0,1]` bounds versus the raw
+Nurbs knot interval (19 differential cases covering entity tags, point
+coordinates, type strings, endpoint wiring, parametrization bounds,
+evaluations, derivatives, second derivatives, curvature, bounding boxes,
+`parFromPoint`, `getClosestPoint`, `isInside`, and oriented surface
+boundaries, all bit-for-bit). Curve-loop tags use their own
+allocator namespace and chain-sort by endpoint connectivity. Arc and
+spline-family metadata follows transforms, Duplicata, coherence merges,
+retagging, and removal;
 meshing paths that cannot honor the geometry fail explicitly instead of
-treating arcs as chords. `Function name ... Return`/`Call name;` run Gmsh's
+treating curved records as chords. `Function name ... Return`/`Call name;` run Gmsh's
 zero-argument function semantics with token-level body capture and bounded
 recursion. It rejects
 `Macro` blocks, option reads, stateful functions, dynamic/general ranges,
@@ -165,7 +176,8 @@ does not add OpenCASCADE shape-tolerance padding (`1e-7` in the pinned fixtures)
 rejects nonfinite coordinates and invalid filter dimensions.
 Native metadata classifies visible entities as `Point`, `Line`, `Plane`,
 or `Volume` plus the curved `Circle`/`Ellipse`/`Surface`/`Cylinder`/`Sphere`/
-`Cone`/`Unknown` OCC types; Boolean result boundaries classify like any
+`Cone`/`Unknown` OCC types and `Nurb` for the whole built-in spline family;
+Boolean result boundaries classify like any
 materialized topology. `get_type` is a compatibility synonym
 for `get_entity_type`. Plane-property queries return detached unit-normal
 coefficients `[a,b,c,d]` for `a*x+b*y+c*z=d`, oriented by the exterior loop; other
@@ -179,11 +191,23 @@ Native Point, straight-Line, and explicit-Plane evaluation provides values,
 derivatives, zero curvature, Plane normals and principal directions, parametrization
 and bounds, containment counts, and closest-point projection. Lines use `[0,1]`;
 Planes use the deterministic Gmsh-compatible orthonormal frame derived from the
-exterior loop. Physical Plane containment uses exact coplanarity and the strict
+exterior loop. Built-in Spline/BSpline/Bezier/Nurbs curves evaluate through
+bit-exact ports of Gmsh's `InterpolateCurve` family — Catmull–Rom with
+extrapolated or cyclic ghost endpoints, the piecewise UBS matrices with
+right-extremity reflection, full-list De Casteljau, and `findSpan`/
+`basisFuns` over the float32-rounded knot vector — and differentiate by
+Gmsh's 1e-8 finite differences for derivatives, second derivatives, and
+curvature. Their parameter bounds are `[0,1]` except Nurbs, which reports
+its raw first/last knot interval; bounding boxes use Gmsh's 10-sample scan,
+parametrization runs the multi-seed damped-Newton `XYZToU`, closest point
+runs the 100-sample scan plus golden-section search, and physical
+containment chains `XYZToU(relax=1)` with the `parBounds` check — all
+matching the pinned binary bit-for-bit.
+Physical Plane containment uses exact coplanarity and the strict
 trimmed interior, while parametric containment uses inclusive rectangular bounds.
 Line projection clamps to the segment and Plane projection is untrimmed. The direct
 and session APIs are read-only, preserve the mesh cache, and reject unsupported
-implicit, curved, degenerate, nonfinite, malformed, or unrepresentable cases.
+implicit, degenerate, nonfinite, malformed, or unrepresentable cases.
 Point and straight-Line parameters can be reparametrized on any explicit Plane,
 including sources outside that Plane's topology or geometric support. The operation
 uses orthogonal Plane parametrization and preserves the session cache. Its `which`
@@ -390,6 +414,69 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-measured on 2026-09-17 with Julia 1.12.7 after completing the built-in-kernel
+spline family (`Spline`/`BSpline`/`Bezier`/`Nurbs`):
+
+- `src/geometry/ModelSplines.jl` adds all four curve kinds, every one
+  reporting `getType` `"Nurb"` like Gmsh. `Spline` ports `InterpolateCurve`'s
+  Catmull–Rom branch (ghost-endpoint extrapolation, cyclic first==last
+  handling); `BSpline` ports the uniform `InterpolateUBS` matrix branches;
+  `Bezier` ports De Casteljau; `Nurbs` ports `findSpan`/`basisFuns`/
+  `InterpolateNurbs` with Float32-rounded knots, degree inferred as
+  `nknots − npts − 1`, and the raw first/last knot values as the parameter
+  interval. `Order` is parsed and ignored, and empty `Knots {}` records
+  convert to `BSpline` — all matching `GEO_Internals::addBSpline`.
+- The evaluators are bit-exact against the pinned Gmsh 4.15.2 binary:
+  the compiled-C++ FMA contraction patterns were recovered by disassembling
+  `libgmsh.dylib` (Catmull–Rom coefficients and accumulation, UBS `vec[i]`
+  fma chains with plain mul+add `T·vec` reduction, De Casteljau
+  `fma(w,c1,u*c2)`, `basisFuns` `fmadd`, NURBS fused `fmla` accumulation)
+  and reproduced in Julia.
+- Derivatives, curvature, bounds, bounding boxes, projection, and
+  containment port the Gmsh code paths: `getDerivative`/`getSecondDerivative`
+  use the same 1e-8 forward/central finite differences (`point(u±eps)`),
+  `getCurvature` the `‖d1×d2‖·‖d1‖^-3` formula, `parFromPoint` the
+  coarse-scan + `XYZToU` Newton refine (with `std::min(uMax,std::max(uMin,·))`
+  NaN clamp semantics), `getClosestPoint` the golden-section search,
+  `getBoundingBox` the 10-sample scan with `SBoundingBox3d`'s
+  skip-non-finite comparison semantics, and `isInside` physical/parametric
+  modes (parametric uses the raw knot interval for Nurbs).
+- `.geo` execution handles `Spline`/`BSpline`/`Bezier`/`Nurbs` including
+  the full `ListOfDouble` grammar at both list positions: literal `{...}`,
+  list variables `pts[]`/`kk[]`, indexed lists, `-{...}`, `expr*{...}`,
+  and scalar expressions, via a new top-level keyword splitter
+  (`_geo_split_at_keyword`). `Order <expr>` is evaluated for validity and
+  ignored semantically.
+- Deliberate divergences where Gmsh itself is undefined: inferred NURBS
+  degrees above `npts−1` are rejected at construction (Gmsh's `findSpan`
+  then indexes control points out of bounds through `List_Read`), and a
+  reversed Nurbs in a surface loop is record-only — Gmsh 4.15.2 segfaults
+  inside `findSpan` on that path, so there is no upstream parity target.
+- Duplication semantics: GEO `Duplicata` on a negative loop member
+  materializes a positive-tag copy of the `CreateReversedCurve` record
+  (knots index-mirrored, bounds `1−uend`/`1−ubeg`), while OCC
+  `BRepBuilderAPI_Copy` preserves signed members and shares memoized
+  copied edges — `_duplicate_surface!` now branches on the caller.
+- Focused differential `validation/geo_splines/differential.jl` compares
+  Tessella against the pinned binary on 20 cases (open/closed
+  Spline/BSpline/Bezier/Nurbs, variable-list grammar, negated/multiplied
+  entity lists, `Duplicata` reversal) across `getType`, `getValue`,
+  `getDerivative`, `getSecondDerivative`, `getCurvature`, bounds, bounding
+  boxes, `getParametrization`, `getClosestPoint`, `isInside`, and oriented
+  surface boundaries — `GEO_SPLINES_DIFFERENTIAL_OK gmsh=4.15.2-git
+  cases=20 samples=1130`, bit-for-bit (NaN positions compared
+  positionally).
+- Closing gates on the final tree (Julia 1.12.7): `Pkg.test()`
+  423161 passed / 0 failed / 0 errored (65m45s); `validation/run_all.jl`
+  re-verified end-to-end with every section reporting OK against the
+  pinned Gmsh 4.15.2 and `validation/REPORT.md` byte-identical. An earlier
+  full-suite run on the same milestone tree caught a
+  `_duplicate_surface!` regression where the GEO reversal convention had
+  been applied to the OCC copy path (423156/4/1, all five non-passes in
+  OCC primitive lifecycle); the caller-split fix re-passed
+  `occ_primitives_test.jl` 219/219 standalone before the closing run.
+  `git diff --check` clean.
 
 Re-measured on 2026-09-16 with Julia 1.12.7 after completing the N-way
 Boolean milestone and adding `.geo` `Function`/`Call` execution:

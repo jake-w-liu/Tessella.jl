@@ -193,6 +193,9 @@ function _model_curve_bounding_box(
         return _model_bounds_from_points(
             m,m.curves[curve],caller,"Curve[$curve]")
     end
+    _curve_type(m,curve) in _SPLINE_CURVE_TYPES && return _model_bounds_checked(
+        _spline_bounding_box(_spline_geometry(m,curve,caller)),
+        caller,"Curve[$curve]")
     return _model_bounds_checked(
         _arc_bounding_box(_arc_geometry(m,curve,caller)),
         caller,"Curve[$curve]")

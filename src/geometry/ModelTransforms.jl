@@ -1090,6 +1090,11 @@ function _duplicate_curve!(m::GeoModel, src::Int, caller; reversed::Bool=false,
                        n=(-occ.n[1],-occ.n[2],-occ.n[3]),X=occ.X,
                        Y=(-occ.Y[1],-occ.Y[2],-occ.Y[3]),r=occ.r,
                        t0=-occ.t1,t1=-occ.t0))
+        # `CreateReversedCurve` mirrors the Nurbs knot vector in place
+        # (k'[deg+N-i] = k[i]) and stores `ubeg' = 1-uend`, `uend' = 1-ubeg`.
+        geometry!==nothing && hasproperty(geometry,:knots) &&
+            (geometry=(knots=reverse(geometry.knots),deg=geometry.deg,
+                       ubeg=1.0-geometry.uend,uend=1.0-geometry.ubeg))
     end
     t=_geo_newreg_alloc!(m,1,caller)
     isempty(source_cps) || (m.curve_control_points[t]=
@@ -1112,9 +1117,17 @@ function _duplicate_surface!(m::GeoModel, src::Int, caller, memo=nothing)
     t=_geo_newreg_alloc!(m,2,caller)
     loops=Int[]
     for (i,l) in enumerate(m.surfaces[src])
-        curves=[sign(c)*_duplicate_curve!(m,abs(c),caller;
-                                         memo=occ ? memo : nothing)
-                for c in m.loops[l]]
+        # OCC copies share each memoized edge and keep the orientation sign in
+        # the loop (`BRepBuilderAPI_Copy` preserves the wire's orientation
+        # flags). The built-in `DuplicateSurface` instead resolves each
+        # generatrix record first: a `-c` member duplicates the reversed
+        # record (reversed data — mirrored Nurbs knots, `[1-uend,1-ubeg]`)
+        # and the copy enters the new loop under a positive tag.
+        curves=occ ?
+            [sign(c)*_duplicate_curve!(m,abs(c),caller;memo=memo)
+             for c in m.loops[l]] :
+            [_duplicate_curve!(m,abs(c),caller;reversed=c<0)
+             for c in m.loops[l]]
         lt=(i==1 && !haskey(m.loops,t)) ? t :
            ((isempty(m.loops) ? 0 : maximum(keys(m.loops)))+1)
         m.loops[lt]=curves

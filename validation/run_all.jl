@@ -110,6 +110,12 @@ geo_curved_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes -
 println("  command: ", geo_curved_command)
 run(geo_curved_command)
 
+println("\n── geo_splines ──  entity-level Gmsh 4.15.2 .geo spline-family differential")
+geo_splines_script = joinpath(HERE, "geo_splines", "differential.jl")
+geo_splines_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_splines_script`
+println("  command: ", geo_splines_command)
+run(geo_splines_command)
+
 println("\n── geo_primitives ──  entity-level Gmsh 4.15.2 OCC primitive-layout differential")
 geo_primitives_script = joinpath(HERE, "geo_primitives", "differential.jl")
 geo_primitives_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_primitives_script`

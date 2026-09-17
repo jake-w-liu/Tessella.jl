@@ -20,6 +20,18 @@ validation/
     STATUS.md            # exact coverage and explicit non-claims
   geo_ranges/
     differential.jl      # required bit-exact Gmsh 4.15.2 constant-range differential
+  geo_control_flow/
+    differential.jl      # required bit-exact Gmsh 4.15.2 .geo control-flow differential
+  geo_transforms/
+    differential.jl      # required Gmsh 4.15.2 .geo transform/Duplicata differential
+  geo_extrude/
+    differential.jl      # required Gmsh 4.15.2 .geo Extrude differential
+  geo_curved/
+    differential.jl      # required bit-exact Gmsh 4.15.2 arc/surface-filling differential
+  geo_splines/
+    differential.jl      # required bit-exact Gmsh 4.15.2 spline-family differential
+  geo_primitives/
+    differential.jl      # required Gmsh 4.15.2 OCC primitive-layout differential
   uniform_refine/
     differential.jl      # required Gmsh 4.15.2 linear-simplex template differential
   mesh_affine_transform/
