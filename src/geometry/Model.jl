@@ -38,6 +38,7 @@ using LinearAlgebra: Symmetric, eigen
 
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
+export add_spline!, add_bspline!, add_bezier!, add_nurbs!
 export add_surface_loop!, add_volume!
 export add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!, boolean_volumes_multi!
 export embed!, translate_volume!, dilate_volume!, rotate_volume!
@@ -181,10 +182,13 @@ mutable struct GeoModel
     # curve. Ordinary curves have no entry; transforms and coherence passes
     # treat them as part of the curve.
     curve_control_points::Dict{Int,Vector{Int}}
-    # Native geometry kind per curve — :line (default), :circle, or :ellipse.
-    # Arcs carry their ordered control points in `curve_control_points`
-    # ([start, center, end] or [start, center, major, end]) and the `Plane{..}`
-    # hint normal in `curve_geometry`, mirroring Gmsh's `Curve` records.
+    # Native geometry kind per curve — :line (default), :circle, :ellipse, or
+    # the spline family :spline/:bspline/:bezier/:nurbs. Arcs and splines carry
+    # their ordered control points in `curve_control_points` ([start, center,
+    # end] or [start, center, major, end] for arcs; the interpolation list for
+    # splines); `curve_geometry` stores the `Plane{..}` hint normal on arcs and
+    # the float32-rounded knot vector/degree/parameter interval on Nurbs,
+    # mirroring Gmsh's `Curve` records.
     curve_types::Dict{Int,Symbol}
     curve_geometry::Dict{Int,NamedTuple}
     loops::Dict{Int,Vector{Int}}
@@ -512,6 +516,7 @@ include("ModelEntityEvaluation.jl")
 include("ModelMeshingAttributes.jl")
 include("ModelTransforms.jl")
 include("ModelCurved.jl")
+include("ModelSplines.jl")
 include("ModelBoolean.jl")
 
 @inline function _model_periodic_entity_label(dim::Int)

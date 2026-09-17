@@ -1,7 +1,8 @@
 """
     GeoExec
 
-Execute a bounded subset of Gmsh `.geo`: Point/Line/Circle/Ellipse/Line Loop/
+Execute a bounded subset of Gmsh `.geo`: Point/Line/Circle/Ellipse/
+Spline/BSpline/Bezier/Nurbs (with `Knots`/`Order`)/Line Loop/
 Plane Surface/Surface/Ruled Surface/Surface Loop/Volume,
 Box/Cylinder/Sphere/Cone/Torus,
 Boolean union/difference/intersection,
@@ -38,6 +39,7 @@ module GeoExec
 using ..Model: GeoModel, add_point!, set_point_mesh_size!
 using ..Model: add_line!, add_curve_loop!, add_plane_surface!
 using ..Model: add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
+using ..Model: add_spline!, add_bspline!, add_bezier!, add_nurbs!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, boolean_volumes!, boolean_volumes_multi!
 using ..Model: _remove_volume_entity!
@@ -1023,6 +1025,50 @@ function _geo_balanced_group(raw::AbstractString, caller::AbstractString)
     return (content,rest)
 end
 
+_geo_word_char(c::AbstractChar) = isletter(c) || isdigit(c) || c=='_'
+
+# Split `raw` at the first top-level occurrence of `keyword` — a word-boundary
+# identifier outside every `{}`, `()`, and `[]` pair — returning the stripped
+# text before and after it, or `nothing` when the keyword never appears at top
+# level (an empty `after` then still distinguishes a trailing keyword).
+function _geo_split_at_keyword(raw::AbstractString, keyword::AbstractString,
+                               caller::AbstractString)
+    s=String(raw);depth=0;parens=0;brackets=0
+    i=firstindex(s);last=lastindex(s);klen=ncodeunits(keyword)
+    while i<=last
+        c=s[i]
+        if c=='{'
+            depth+=1
+        elseif c=='}'
+            depth-=1
+            depth<0 && throw(ArgumentError(
+                "$caller: unmatched closing brace"))
+        elseif c=='('
+            parens+=1
+        elseif c==')'
+            parens-=1
+            parens<0 && throw(ArgumentError(
+                "$caller: unmatched closing parenthesis"))
+        elseif c=='['
+            brackets+=1
+        elseif c==']'
+            brackets-=1
+            brackets<0 && throw(ArgumentError(
+                "$caller: unmatched closing bracket"))
+        elseif depth==0 && parens==0 && brackets==0
+            j=i+klen
+            if j-1<=last && isvalid(s,j-1) && s[i:j-1]==keyword &&
+               (i==firstindex(s) || !_geo_word_char(s[prevind(s,i)])) &&
+               (j>last || (isvalid(s,j) && !_geo_word_char(s[j])))
+                return (String(strip(s[firstindex(s):prevind(s,i)])),
+                        String(strip(s[j:last])))
+            end
+        end
+        i=nextind(s,i)
+    end
+    return nothing
+end
+
 # Split `raw` on commas outside every `{}`, `()`, and `[]` pair.
 function _geo_split_top_commas(raw::AbstractString, caller::AbstractString)
     s=String(raw);parts=String[];depth=0;parens=0;brackets=0
@@ -1700,12 +1746,12 @@ function _geo_exec_entity_rhs_tags(raw::AbstractString,
                                    context::_GeoNumericContext,
                                    caller::AbstractString;
                                    signed::Bool=false)
+    # Gmsh parses every entity RHS as `ListOfDouble`: `{...}` groups, bare
+    # `name[]`/`name[{..}]` references, `-{...}` negation, `expr * {...}`
+    # multipliers and plain scalars — `_geo_numeric_list_values` covers the
+    # whole grammar and reports malformed brace forms itself.
     source=String(strip(raw))
     isempty(source) && throw(ArgumentError("$caller: entity list must not be empty"))
-    has_open=startswith(source,"{")
-    has_close=endswith(source,"}")
-    has_open==has_close || throw(ArgumentError(
-        "$caller: malformed brace-delimited entity list"))
     return _geo_exec_entity_tags(
         source,context,caller;signed=signed,wrap=false)
 end
@@ -1969,6 +2015,59 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             (points=[points[1],points[2],points[1],points[3]])
         add_ellipse_arc!(m,points[1],points[2],points[3],points[4];
                          tag=tag,plane_normal=normal)
+        return
+    elseif (mm=match(
+            r"^Spline\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Spline"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        points=_geo_exec_entity_rhs_tags(
+            mm.captures[2],context,"$caller control points")
+        add_spline!(m,points;tag=tag)
+        return
+    elseif (mm=match(
+            r"^BSpline\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: BSpline"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        points=_geo_exec_entity_rhs_tags(
+            mm.captures[2],context,"$caller control points")
+        add_bspline!(m,points;tag=tag)
+        return
+    elseif (mm=match(
+            r"^Bezier\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: Bezier"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        points=_geo_exec_entity_rhs_tags(
+            mm.captures[2],context,"$caller control points")
+        add_bezier!(m,points;tag=tag)
+        return
+    elseif (mm=match(
+            r"^Nurbs\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        # `tNurbs (FExpr) = ListOfDouble tNurbsKnots ListOfDouble tNurbsOrder
+        # FExpr` — the built-in kernel routes through `addBSpline(num, tags,
+        # seqknots)` and never reads the parsed `Order` expression.
+        caller="execute_geo: Nurbs"
+        tag=_geo_exec_entity_tag(mm.captures[1],context,"$caller tag")
+        split_knots=_geo_split_at_keyword(mm.captures[2],"Knots",caller)
+        split_knots===nothing && throw(ArgumentError(
+            "$caller: expected `Knots <list>` after the control-point list; " *
+            "got $(repr(strip(mm.captures[2])))"))
+        (points_raw,knots_tail)=split_knots
+        points=_geo_exec_entity_rhs_tags(
+            points_raw,context,"$caller control points")
+        split_order=_geo_split_at_keyword(knots_tail,"Order",caller)
+        split_order===nothing && throw(ArgumentError(
+            "$caller: expected `Order <expr>` after the knot list; got " *
+            "$(repr(knots_tail))"))
+        (knots_raw,order_raw)=split_order
+        isempty(order_raw) && throw(ArgumentError(
+            "$caller: Nurbs requires an `Order` expression"))
+        knots=_geo_numeric_list_values(knots_raw,context,"$caller knots")
+        _geo_eval_numeric(order_raw,context,"$caller Order")
+        add_nurbs!(m,points,knots;tag=tag)
         return
     elseif (mm=match(
             r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",

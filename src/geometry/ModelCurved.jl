@@ -16,8 +16,10 @@
 _curve_type(m::GeoModel, tag::Int) = get(m.curve_types, tag, :line)
 _surface_type(m::GeoModel, tag::Int) = get(m.surface_types, tag, :plane)
 
+# `gmshEdge::geomType()` — all four spline-family records report `Nurb`.
 const _CURVE_TYPE_NAMES = Dict{Symbol,String}(
     :line=>"Line", :circle=>"Circle", :ellipse=>"Ellipse",
+    :spline=>"Nurb", :bspline=>"Nurb", :bezier=>"Nurb", :nurbs=>"Nurb",
     :degenerate=>"Unknown")
 const _SURFACE_TYPE_NAMES = Dict{Symbol,String}(
     :plane=>"Plane", :ruled=>"Surface", :tric=>"Surface",
