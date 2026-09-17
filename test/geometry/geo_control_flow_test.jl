@@ -203,6 +203,118 @@ end
     end
 end
 
+@testset "bounded .geo Function/Call/Return" begin
+    # Gmsh 4.15.2: `Function name ... Return` registers a zero-argument body
+    # executed by `Call name;` in the shared variable scope; each call
+    # re-executes the body.
+    parsed=_execute_control_source(raw"""
+        Function makeLine
+          p = newp;
+          Point(p) = {0, 0, 0};
+          Point(p+1) = {1, 0, 0};
+          Line(newl) = {p, p+1};
+        Return
+        Call makeLine;
+        x = 42;
+        Call makeLine;
+        Point(99) = {x, 0, 0};
+        """)
+    @test sort!(collect(keys(parsed.model.points)))==[1,2,3,4,99]
+    @test sort!(collect(keys(parsed.model.curves)))==[1,2]
+    @test parsed.model.points[99]==(42.0,0.0,0.0)
+
+    # `Call` is legal inside If/For blocks and re-runs per iteration.
+    loop=_execute_control_source(raw"""
+        Function mark
+          Point(newp) = {0, 0, 0};
+        Return
+        If (1)
+          Call mark;
+        EndIf
+        For i In {0:2}
+          Call mark;
+        EndFor
+        """)
+    @test sort!(collect(keys(loop.model.points)))==[1,2,3,4]
+
+    # Quoted string-literal names match Gmsh's string-expression header.
+    quoted=_execute_control_source(raw"""
+        Function "quoted name"
+          Point(7) = {0, 0, 0};
+        Return
+        Call "quoted name";
+        """)
+    @test sort!(collect(keys(quoted.model.points)))==[7]
+
+    # Functions compose: a body may `Call` an already-registered function.
+    # (Gmsh's token-level capture ends a `Function` body at the first `Return`,
+    # so a `Function` inside another body always steals the outer body's
+    # terminator — a nested definition is not a useful form.)
+    nested=_execute_control_source(raw"""
+        Function inner
+          Point(1) = {0, 0, 0};
+        Return
+        Function outer
+          Call inner;
+          Point(2) = {1, 0, 0};
+        Return
+        Call outer;
+        """)
+    @test sort!(collect(keys(nested.model.points)))==[1,2]
+
+    # A `Function` inside an If block registers only when the branch runs.
+    branch=_execute_control_source(raw"""
+        If (1)
+          Function g
+            Point(5) = {0, 0, 0};
+          Return
+        EndIf
+        Call g;
+        """)
+    @test sort!(collect(keys(branch.model.points)))==[5]
+
+    cond=_execute_control_source(raw"""
+        If (0)
+          Function hidden
+            Point(1) = {0, 0, 0};
+          Return
+        EndIf
+        """)
+    @test isempty(cond.model.points)
+    @test _control_error(raw"""
+        If (0)
+          Function hidden
+            Point(1) = {0, 0, 0};
+          Return
+        EndIf
+        Call hidden;
+        """) isa ArgumentError
+
+    err=_control_error("Call makePoint;\nFunction makePoint\n  Point(1)={0,0,0};\nReturn\n")
+    @test err isa ArgumentError
+    @test occursin("Unknown function 'makePoint'",sprint(showerror,err))
+    err=_control_error("Function f\nReturn\nFunction f\nReturn\n")
+    @test err isa ArgumentError
+    @test occursin("Redefinition of function f",sprint(showerror,err))
+    err=_control_error("Function r\n  Call r;\nReturn\nCall r;\n")
+    @test err isa ArgumentError
+    @test occursin("Call depth",sprint(showerror,err))
+    err=_control_error("Point(1)={0,0,0};\nReturn\n")
+    @test err isa ArgumentError
+    @test occursin("Return without an enclosing Function",sprint(showerror,err))
+    err=_control_error("Function f\n  Point(1)={0,0,0};\n")
+    @test err isa ArgumentError
+    @test occursin("no matching Return",sprint(showerror,err))
+    for source in ("Function f\nReturn\nCall f(1,2);",
+                   "Function\nReturn",
+                   "Call;",
+                   "Call f;",
+                   "Function 7f\nReturn",
+                   "Function f\n  If (1)\n    Return;\n  EndIf\nReturn\nCall f;")
+        @test _control_error(source) isa ArgumentError
+    end
+end
+
 @testset "bounded .geo comparison, logical, and ternary operators" begin
     parsed=_execute_control_source(raw"""
         x = 1;

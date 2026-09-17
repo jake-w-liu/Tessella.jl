@@ -212,8 +212,10 @@ end
     add_box!(model,0,0,0,1,1,1;tag=2)
     boolean_volumes!(model,:difference,1,2;tag=3)
     result_crc=mesh_crc(mesh_model_volume(model,3))
-    add_point!(model,1.5,0.5,0.5;tag=20)
-    embed!(model,0,[20],3,1)
+    # the Boolean result's materialized boundary owns the tags after the two
+    # boxes' sixteen points
+    add_point!(model,1.5,0.5,0.5;tag=40)
+    embed!(model,0,[40],3,1)
     add_physical_group!(model,3,[1,3];tag=10,name="solids")
     set_entity_name!(model,3,1,"object")
     set_entity_name!(model,3,3,"cut")

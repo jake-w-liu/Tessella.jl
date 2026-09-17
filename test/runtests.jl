@@ -67,6 +67,7 @@ using Tessella
     include("structured/transfinite_hex_test.jl") # affine six-face recombined hexahedra
     include("geometry/model_test.jl")    # entity kernel + .geo execution
     include("geometry/model_boolean_snapshot_test.jl") # owned Boolean operands and Delete cleanup
+    include("geometry/model_boolean_multi_test.jl") # N-way OCC-cell Boolean operands
     include("geometry/model_topology_query_test.jl") # explicit topology query API
     include("geometry/model_entity_identity_test.jl") # entity names and atomic retagging
     include("geometry/model_entity_removal_test.jl") # dependency-safe recursive removal
@@ -75,7 +76,7 @@ using Tessella
     include("geometry/model_entity_evaluation_test.jl") # native geometry evaluation
     include("geometry/model_entity_state_test.jl") # visibility/color/coordinates/attributes
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
-    include("geometry/geo_control_flow_test.jl") # If/For/While control flow + conditional operators
+    include("geometry/geo_control_flow_test.jl") # If/For/While/Function control flow + conditional operators
     include("geometry/geo_transform_test.jl") # Translate/Dilate/Rotate/Symmetry + Duplicata + coherence
     include("geometry/geo_extrude_test.jl")  # translational Extrude + params + lateral merge
     include("geometry/geo_curved_test.jl")   # circle/ellipse arcs, ruled surfaces, .geo curved statements

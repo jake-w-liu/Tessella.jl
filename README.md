@@ -81,7 +81,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   and entity lists in every supported geometry statement, executes
   `If`/`ElseIf`/`Else`/`EndIf` and `For name In {start:end[:increment]}`/`EndFor`
   with the built-in kernel's semantics plus a bounded `While`/`EndWhile`
-  extension, and stores positive
+  extension, runs `Function name ... Return` bodies re-executed by `Call name;`
+  in shared scope with bounded recursion, executes N-way multi-operand
+  `BooleanDifference`/`Union`/`Intersection`/`Fragments` with per-group
+  `Delete;` markers, OCC membership-cell decomposition, preserve-numbering tag
+  rebinding, and `v[]`/`v()` result-list capture, and stores positive
   `MeshSize`/`Characteristic Length` constraints on existing explicit Points,
   including recursive explicit-topology `PointsOf` selection;
 - a 125-type fixed-node Gmsh catalog plus ten serializable cut/border/child/
@@ -189,8 +193,9 @@ in an acyclic chain, and independent relations may share corner points. The boun
 `.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
 functions, comparison/logical/ternary operators, bounded numeric list
 assignment/indexing/selection/mutation, constant
-entity ranges, and `If`/`ElseIf`/`Else`/`EndIf`, `For name In
-{start:end[:increment]}`/`EndFor`, and bounded `While`/`EndWhile` control flow to
+entity ranges, `If`/`ElseIf`/`Else`/`EndIf`, `For name In
+{start:end[:increment]}`/`EndFor`, bounded `While`/`EndWhile`, and
+`Function`/`Call`/`Return` control flow to
 all supported geometry statements. Entity lists, including periodic
 slave/master sets, can reuse whole or selected list variables.
 Point `MeshSize` selectors can likewise use `:`, expressions, constant ranges, and
@@ -203,8 +208,8 @@ bounded contract. The planar surface path extends Point constraints
 piecewise-linearly over its deterministic initial constrained triangulation. Generated
 straight-curve subdivision nodes interpolate their endpoint sizes, while equal Point
 sizes retain the constant-size path and coincident PSLG inputs use the smaller
-constraint. Exact Gmsh mesh topology, Boolean
-subentities, and mesh-size selectors other than inline `PointsOf` remain
+constraint. Exact Gmsh mesh topology and mesh-size selectors other than
+inline `PointsOf` remain
 outside this bounded contract.
 Physical declarations accept an explicit positive tag, with an optional name, or a
 nonempty name with an automatic tag. Automatic Physical tags share one namespace
@@ -213,8 +218,9 @@ Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline `Bou
 `CombinedBoundary` over Curve/Line, Surface, and explicit Volume entities,
 respectively. `Boundary` collects immediate boundaries before physical membership is
 deduplicated; `CombinedBoundary` keeps tags with odd multiplicity. Hole and cavity
-boundaries participate, while embeddings do not. Empty combined boundaries,
-unsupported dimensions, and implicit Boolean topology
+boundaries participate, while embeddings do not; Boolean volumes
+answer boundary queries through their materialized result shells. Empty
+combined boundaries and unsupported dimensions
 are explicit blockers.
 The model and session APIs return detached, sorted group, membership, reverse-membership,
 and name-query results. Names are unique within an entity dimension and can be removed
@@ -226,8 +232,8 @@ ordering, orientation, and combined-incidence cancellation. `is_entity_orphan`
 reports downward-closure connectivity to the highest-dimension entities,
 excluding embeddings, matching Gmsh 4.15.2. Topology queries preserve
 the session mesh cache and exclude embeddings. Box and Cylinder/Sphere/Cone/Torus volumes expose their
-materialized OCC boundary topology; Boolean volumes are
-enumerated, but their implicit boundary topology remains an explicit blocker.
+materialized OCC boundary topology, and Boolean volumes expose their
+materialized result boundary the same way.
 Entity names belong only to existing entities and need not be unique. Names can be
 replaced, cleared per entity, or removed by value across dimensions. Entity tags are
 positive `Int32` values in dimensions 0 through 3. Unlike Gmsh 4.15.2, Tessella does
@@ -241,22 +247,22 @@ visibility, colors, empty Physical groups, affected periodic relations, target
 embeddings, native solid encodings, and Boolean-result snapshots, and keeps allocator
 counters monotonic.
 Box and Cylinder/Sphere/Cone/Torus boundaries recurse through the materialized
-shell; Boolean Volume boundaries are implicit, so their recursive removal
-stops at the Volume. Unlike Gmsh's separate model/CAD layers, removal changes
+shell, and Boolean result boundaries recurse through their materialized shells
+the same way — the operation-time operand snapshots and component links are
+cleaned with the volume. Unlike Gmsh's separate model/CAD layers, removal changes
 Tessella's owning native model and is not undone by a later synchronization.
 Entity and whole-model bounding boxes are exact for explicit straight-edge topology
 and analytical native primitives. Boolean bounds follow the owned operation-time
 result geometry. Containment queries return only entities whose complete box lies in
 the finite query box, ignore embeddings when bounding their target, and preserve the
 session mesh cache. Tessella omits OpenCASCADE shape-tolerance padding (`1e-7` in
-the pinned fixtures), rejects nonfinite boxes and invalid dimensions, and exposes no
-implicit Boolean subentities.
+the pinned fixtures) and rejects nonfinite boxes and invalid dimensions.
 Entity metadata identifies every explicit entity as `Point`, `Line`, `Circle`,
 `Ellipse`, `Plane`, `Surface`, `Cylinder`, `Sphere`, `Cone`, `Torus`,
 `Unknown` (degenerate edges), or
 `Volume`; Box and Cylinder/Sphere/Cone/Torus solids expose their materialized
-Point/Line/Plane/Circle/Cylinder/Sphere/Cone/Torus children while
-Boolean solids expose only `Volume`. Native `GeoModel`
+Point/Line/Plane/Circle/Cylinder/Sphere/Cone/Torus children, and
+Boolean result boundaries classify like any materialized topology. Native `GeoModel`
 plane properties are the detached unit-normal coefficients `[a,b,c,d]` for
 `a*x+b*y+c*z=d`; other visible native types have empty property vectors. Per-window
 visibility is stored display state. Native
@@ -285,8 +291,10 @@ walk explicit boundaries down to Points; both states follow entity retagging and
 cleaned on removal without invalidating the mesh cache. Global attributes store
 detached NUL-free string vectors under sorted names. Finite Point-coordinate updates
 preserve tag-owned state and invalidate a synchronized mesh after success; dependent
-native geometry queries immediately use the new coordinates. Implicit
-Boolean-result boundary presentation remains unfinished.
+native geometry queries immediately use the new coordinates. Box and
+Cylinder/Sphere/Cone/Torus volumes present their materialized boundary
+entities, and Boolean volumes present their materialized result boundary the
+same way.
 `API.mesh.refine` replaces the complete cached linear-simplex mesh only after the
 canonical uniform-refinement kernel succeeds and returns independent caller-owned
 storage. `API.mesh.clear` discards the complete cache, or only the cells and

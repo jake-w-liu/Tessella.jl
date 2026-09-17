@@ -113,11 +113,13 @@ function _model_volume_bounds(
     # Materialized primitives keep their compact encoding alongside the shell
     # topology — legal only while the materialized entities still satisfy it
     # (corners for a box, rim/pole satisfaction for curved solids). A Boolean
-    # encoding is exclusive with explicit shells.
-    materialized=any(encodings[1:4]) && !isempty(m.volumes[tag])
-    explicit=!isempty(m.volumes[tag]) && !materialized
-    count(identity,(explicit,encodings...))<=1 || throw(ErrorException(
-        "$caller: $entity has multiple native encodings; rebuild the model"))
+    # encoding likewise coexists with its materialized result shell: the
+    # encoding drives the mesh path while the entities serve topology queries.
+    shelled=!isempty(m.volumes[tag])
+    materialized=any(encodings[1:4]) && shelled
+    count(identity,encodings)+Int(shelled && !any(encodings))<=1 ||
+        throw(ErrorException(
+            "$caller: $entity has multiple native encodings; rebuild the model"))
     if materialized && encodings[1]
         x0,y0,z0,dx,dy,dz=m.box_extents[tag]
         scale=max(1.0,abs(x0),abs(y0),abs(z0),abs(dx),abs(dy),abs(dz))
@@ -160,13 +162,11 @@ function _model_volume_bounds(
     elseif encodings[4]
         return _model_cone_bounds(m.cones[tag],caller,entity)
     elseif encodings[5]
-        spec=m.booleans[tag]
-        first_operand,second_operand=m.boolean_operands[tag]
-        surface=mesh_boolean(first_operand,second_operand,spec.op)
+        surface=_boolean_result_surface(m,tag,caller)
         return _model_bounds_from_surface_mesh(surface,caller,entity)
     end
 
-    explicit || throw(ArgumentError(
+    shelled || throw(ArgumentError(
         "$caller: $entity has no native solid encoding"))
     bounds=_MODEL_EMPTY_BOUNDS
     for curve in _model_boundary_curves(m,3,tag,caller,entity)

@@ -93,13 +93,15 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
 
     translated_primitives=GeoModel()
     add_cylinder!(translated_primitives,0,0,0,0,0,2,1;tag=1)
-    add_sphere!(translated_primitives,0,0,0,1;tag=2)
+    # a sphere inside the cylinder (no face contact — tangent contact is
+    # unsupported) keeps the union materializable for the snapshot check
+    add_sphere!(translated_primitives,0,0,1,0.5;tag=2)
     add_cone!(translated_primitives,0,0,0,0,0,2,1,0.5;tag=3)
     for tag in 1:3
         @test translate_volume!(translated_primitives,tag,(1,2,3))==tag
     end
     @test translated_primitives.cylinders[1].center==(1.0,2.0,3.0)
-    @test translated_primitives.spheres[2].center==(1.0,2.0,3.0)
+    @test translated_primitives.spheres[2].center==(1.0,2.0,4.0)
     @test translated_primitives.cones[3].center==(1.0,2.0,3.0)
     boolean_volumes!(translated_primitives,:union,1,2;tag=4)
     # Boolean results transform through their owned operand snapshots, like

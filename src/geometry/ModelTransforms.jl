@@ -575,10 +575,15 @@ function _plan_volume_transform(m::GeoModel, tag::Int, t::_AffineTransform,
                 record=(center=tr.center,axis=tr.axis,r1=rec.r1*tr.perp,
                         r2=rec.r2*tr.perp,height=tr.height))
     elseif haskey(m.booleans,tag)
-        A,B=m.boolean_operands[tag]
-        return (dict=:boolean_operands,tag=tag,
-                record=(_transform_mesh_snapshot(A,t,caller),
-                        _transform_mesh_snapshot(B,t,caller)))
+        rec=m.boolean_operands[tag]
+        record=if rec isa Tuple{Mesh,Mesh}
+            (_transform_mesh_snapshot(rec[1],t,caller),
+             _transform_mesh_snapshot(rec[2],t,caller))
+        else
+            merge(rec,(meshes=[_transform_mesh_snapshot(snap,t,caller)
+                               for snap in rec.meshes],))
+        end
+        return (dict=:boolean_operands,tag=tag,record=record)
     else
         return (dict=nothing,tag=tag,record=nothing)
     end
@@ -1149,6 +1154,9 @@ function _duplicate_volume!(m::GeoModel, src::Int, caller, memo=nothing)
     if haskey(m.booleans,src)
         m.booleans[t]=m.booleans[src]
         m.boolean_operands[t]=m.boolean_operands[src]
+        # the copy owns its own shells — a component-linked source copies as a
+        # self-linked component volume, not a second reference to src's link
+        haskey(m.boolean_components,src) && (m.boolean_components[t]=t)
     end
     return t
 end

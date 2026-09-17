@@ -1326,10 +1326,16 @@ mutable struct _GeoNumericContext
     # `Geometry.ExtrudeReturnLateralEntities` (defaults on): controls whether
     # extrude result lists append the lateral entities.
     extrude_return_lateral::Bool
+    # `.geo` `Function`/`Call` support: each name maps to its body statement
+    # range inside the executing file's statement array, and call_depth bounds
+    # recursion.
+    functions::Dict{String,UnitRange{Int}}
+    call_depth::Int
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
-    Dict{String,String}(),Dict{String,String}(),0,nothing,true)
+    Dict{String,String}(),Dict{String,String}(),0,nothing,true,
+    Dict{String,UnitRange{Int}}(),0)
 
 @inline _geo_context_has_variable(context::_GeoNumericContext,name::String)=
     haskey(context.values,name) || haskey(context.lists,name) ||
@@ -1858,6 +1864,75 @@ function _geo_allocator_claim_lowest!(state::_GeoTagAllocatorState,
         state.surface_entity_max=max(state.surface_entity_max,top)
     end
     return claimed
+end
+
+# Materialized Boolean results own real entities whose tags predictive claim
+# bookkeeping cannot model exactly (splits, imprints, pseudo-preserved operand
+# reuse). After such a statement executes, the live sets and per-volume
+# boundary records resync to the model: tags that vanished drop from both
+# factories, and untracked tags join the active factory's live set.
+function _geo_allocator_resync_model!(state::_GeoTagAllocatorState,m)
+    mtags=(Set{Int}(keys(m.points)),Set{Int}(keys(m.curves)),
+           Set{Int}(keys(m.surfaces)))
+    live_b=(state.live_builtin_points,state.live_builtin_curves,
+            state.live_builtin_surfaces)
+    live_o=(state.live_occ_points,state.live_occ_curves,
+            state.live_occ_surfaces)
+    occ=state.factory==:opencascade
+    for k in 1:3
+        intersect!(live_b[k],mtags[k]);intersect!(live_o[k],mtags[k])
+        union!(occ ? live_o[k] : live_b[k],
+               setdiff(mtags[k],live_b[k],live_o[k]))
+    end
+    vtags=Set{Int}(keys(m.volumes))
+    intersect!(state.live_builtin_volumes,vtags)
+    intersect!(state.live_occ_volumes,vtags)
+    union!(occ ? state.live_occ_volumes : state.live_builtin_volumes,
+           setdiff(vtags,state.live_builtin_volumes,state.live_occ_volumes))
+    empty!(state.volume_boundaries)
+    for (t,shells) in m.volumes
+        isempty(shells) && continue
+        surfs=Set{Int}();curvs=Set{Int}();pts=Set{Int}()
+        for sh in shells,sc in get(m.surface_loops,sh,Int[])
+            s=abs(sc);push!(surfs,s)
+            for lp in get(m.surfaces,s,Int[]),cc in get(m.loops,lp,Int[])
+                c=abs(cc);push!(curvs,c)
+                union!(pts,get(m.curves,c,Int[]))
+            end
+        end
+        state.volume_boundaries[t]=(collect(pts),collect(curvs),
+                                    collect(surfs))
+    end
+    state.builtin_point_max=max(state.builtin_point_floor,
+        _geo_live_max(state.live_builtin_points))
+    state.builtin_curve_max=max(state.builtin_curve_floor,
+        _geo_live_max(state.live_builtin_curves))
+    state.builtin_surface_max=max(state.builtin_surface_floor,
+        _geo_live_max(state.live_builtin_surfaces))
+    state.builtin_volume_max=max(state.builtin_volume_floor,
+        _geo_live_max(state.live_builtin_volumes))
+    state.occ_point_max=max(state.occ_point_floor,
+        _geo_live_max(state.live_occ_points))
+    state.occ_curve_max=max(state.occ_curve_floor,
+        _geo_live_max(state.live_occ_curves))
+    state.occ_surface_max=max(state.occ_surface_floor,
+        _geo_live_max(state.live_occ_surfaces))
+    state.occ_volume_max=max(state.occ_volume_floor,
+        _geo_live_max(state.live_occ_volumes))
+    state.point_entity_max=max(
+        _geo_live_max(state.live_builtin_points),
+        _geo_live_max(state.live_occ_points))
+    state.curve_entity_max=max(
+        _geo_live_max(state.live_builtin_curves),
+        _geo_live_max(state.live_occ_curves))
+    state.surface_entity_max=max(
+        _geo_live_max(state.live_builtin_surfaces),
+        _geo_live_max(state.live_occ_surfaces))
+    # the resynced sets are exact — allocator reads are live again even if a
+    # statement the tracker cannot model (multi-operand Boolean groups)
+    # invalidated them
+    state.geometry_unavailable=nothing
+    return nothing
 end
 
 @inline _geo_ascii_letter(c::Char)=('a'<=c<='z') || ('A'<=c<='Z') || c=='_'
@@ -2969,8 +3044,8 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
 
     boolean=match(
         r"^Boolean(Difference|Union|Intersection)\s*\(\s*(.*?)\s*\)\s*=\s*" *
-        r"\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*" *
-        r"\{\s*Volume\s*\{\s*(.*?)\s*\}([^}]*)\}\s*;?\s*$",
+        r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*" *
+        r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*;?\s*$",
         source)
     if boolean!==nothing
         state.geometry_unavailable===nothing || return nothing

@@ -281,9 +281,16 @@ function _model_identity_volume_state(
         m.booleans,old_tag,new_tag,caller,"Boolean encoding")
     boolean_operands=_model_identity_rekey(
         m.boolean_operands,old_tag,new_tag,caller,"Boolean operand snapshot")
+    boolean_components=_model_identity_rekey(
+        m.boolean_components,old_tag,new_tag,caller,"Boolean component link")
+    # component links reference the primary result volume's tag — follow it
+    for (k,v) in collect(boolean_components)
+        v==old_tag && (boolean_components[k]=new_tag)
+    end
     return (volumes=volumes,box_extents=box_extents,cylinders=cylinders,
             spheres=spheres,cones=cones,booleans=booleans,
-            boolean_operands=boolean_operands)
+            boolean_operands=boolean_operands,
+            boolean_components=boolean_components)
 end
 
 """
@@ -381,6 +388,7 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m.cones=dimension_state.cones
         m.booleans=dimension_state.booleans
         m.boolean_operands=dimension_state.boolean_operands
+        m.boolean_components=dimension_state.boolean_components
     end
     m.entity_names=entity_names
     m.entity_visibility=entity_visibility
