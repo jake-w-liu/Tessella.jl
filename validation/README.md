@@ -32,6 +32,8 @@ validation/
     differential.jl      # required bit-exact Gmsh 4.15.2 spline-family differential
   geo_primitives/
     differential.jl      # required Gmsh 4.15.2 OCC primitive-layout differential
+  geo_constraints/
+    differential.jl      # required Gmsh 4.15.2 .geo meshing-constraint/Delete differential
   uniform_refine/
     differential.jl      # required Gmsh 4.15.2 linear-simplex template differential
   mesh_affine_transform/
@@ -128,7 +130,8 @@ actual- and explicit-order nodal and simplex hierarchical basis/orientation/key,
 fixed-element catalog,
 quadratic-tetrahedron, four-sided transfinite, straight transfinite
 curve-law, three-sided transfinite, recombined-quadrangle, affine
-transfinite-volume, five-face-prism, and recombined-hexahedron differentials as
+transfinite-volume, five-face-prism, recombined-hexahedron, and `.geo`
+meshing-constraint/Delete-lifecycle differentials as
 mandatory bounds-checked children. It also runs focused box, square, cone,
 cylinder, Boolean snapshot/Delete lifecycle, NURBS/IGES, classified Point/Line-In-Surface and
 Surface-In-Volume projection with nested sheet constraints and a hole, native `.geo`,

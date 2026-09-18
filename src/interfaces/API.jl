@@ -1577,19 +1577,17 @@ end
 # of `(tags, mesh_parts)` work units in first-member-tag order, where
 # `mesh_parts` is the list of `(member_tag, Mesh)` pairs the unit produces.
 function _generate_units(m::GeoModel,dimension::Int,entities::Vector{Int})
-    members_of=Dict{Int,Int}()
-    compounds=Tuple{Int,Vector{Int}}[]
+    live=Set(entities)
+    members_of=Dict{Int,Vector{Int}}()
     for (compound_dimension,tags) in m.meshing.compounds
         compound_dimension==dimension || continue
-        members=sort!(Int.(collect(tags)))
+        # Gmsh's synchronize resolves each compound member independently:
+        # members that don't resolve (including the negative `MeshAlgorithm`
+        # suffix marker) are skipped with a warning, and an entity listed by
+        # several specs ends up in the last one that claims it.
+        members=sort!(Int[tag for tag in tags
+                          if tag>0 && Int(tag) in live])
         for tag in members
-            tag in entities || throw(ArgumentError(
-                "API.mesh.generate: compound member " *
-                "$(_MESH_ENTITY_LABELS[dimension+1])[$tag] is not a " *
-                "remaining entity"))
-            haskey(members_of,tag) && throw(ArgumentError(
-                "API.mesh.generate: entity $tag appears in multiple " *
-                "dimension-$dimension compounds"))
             members_of[tag]=members
         end
     end

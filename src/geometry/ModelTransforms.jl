@@ -958,6 +958,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     delete!(m.meshing.attached,key)
     if dim==1
         delete!(m.meshing.transfinite_curves,tag)
+        delete!(m.meshing.degenerated,tag)
         delete!(m.curve_control_points,tag)
         delete!(m.curve_types,tag)
         delete!(m.curve_geometry,tag)
@@ -968,6 +969,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     elseif dim==3
         delete!(m.meshing.transfinite_volumes,tag)
         delete!(m.meshing.outward_orientation,tag)
+        delete!(m.meshing.quad_tri,tag)
     end
     return nothing
 end

@@ -122,6 +122,12 @@ geo_primitives_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=y
 println("  command: ", geo_primitives_command)
 run(geo_primitives_command)
 
+println("\n── geo_constraints ──  entity-level Gmsh 4.15.2 .geo constraint/Delete differential")
+geo_constraints_script = joinpath(HERE, "geo_constraints", "differential.jl")
+geo_constraints_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_constraints_script`
+println("  command: ", geo_constraints_command)
+run(geo_constraints_command)
+
 println("\n── gmsh_parity geometry expressions ──  bounded entity/value execution")
 geo_expression_script = joinpath(
     HERE, "gmsh_parity", "geo_geometry_expressions.jl")

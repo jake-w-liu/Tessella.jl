@@ -47,18 +47,34 @@ function _mesh_attr_finite(value,caller::AbstractString,name::AbstractString)
     return result
 end
 
+# Gmsh's meshType table (gmsh.cpp `setTransfiniteCurve`): `Power` aliases
+# `Progression`, and the `_HWall` kinds interpret `coef` as a signed first-layer
+# wall height instead of a distribution coefficient.
 const _TRANSFINITE_CURVE_KINDS = Dict{String,Symbol}(
-    "progression"=>:progression, "bump"=>:bump, "beta"=>:beta)
+    "progression"=>:progression, "power"=>:progression,
+    "bump"=>:bump, "beta"=>:beta,
+    "progression_hwall"=>:progression_hwall,
+    "bump_hwall"=>:bump_hwall, "beta_hwall"=>:beta_hwall,
+    # Grammar-level types 8/9 — Gmsh's `F_Transfinite` has no case for them, so
+    # they hit the unknown-type warning and produce a uniform distribution.
+    "beta_symmetrical"=>:beta_symmetrical,
+    "beta_symmetrical_hwall"=>:beta_symmetrical_hwall)
+const _TRANSFINITE_HWALL_KINDS = (:progression_hwall,:bump_hwall,:beta_hwall)
 const _TRANSFINITE_ARRANGEMENTS = Dict{String,Symbol}(
     "left"=>:left, "right"=>:right,
+    # Gmsh's TransfiniteArrangement maps bare `Alternate` to AlternateRight.
+    "alternate"=>:alternate_right,
     "alternateleft"=>:alternate_left, "alternateright"=>:alternate_right)
 
 """
     set_transfinite_curve!(model, tag, num_nodes, mesh_type="Progression", coef=1.0)
 
 Record a transfinite meshing constraint on `Curve[tag]` — `num_nodes` nodes
-distributed by `mesh_type` (`"Progression"`, `"Bump"`, `"Beta"`,
-case-insensitive) with `coef`, matching Gmsh's `setTransfiniteCurve`.
+distributed by `mesh_type` (`"Progression"`/`"Power"`, `"Bump"`, `"Beta"`, or
+the `"Progression_HWall"`/`"Bump_HWall"`/`"Beta_HWall"` wall-height variants,
+case-insensitive) with `coef`, matching Gmsh's `setTransfiniteCurve`. For the
+ordinary kinds a negative `coef` flips the distribution direction, as upstream;
+for the HWall kinds `coef` is the signed first-layer wall height.
 """
 function set_transfinite_curve!(m::GeoModel,tag,num_nodes,mesh_type="Progression",
                                 coef=1.0)
@@ -72,12 +88,19 @@ function set_transfinite_curve!(m::GeoModel,tag,num_nodes,mesh_type="Progression
         "$caller: mesh_type must be a string"))
     kind=get(_TRANSFINITE_CURVE_KINDS,lowercase(String(mesh_type)),nothing)
     kind===nothing && throw(ArgumentError(
-        "$caller: mesh_type must be Progression, Bump, or Beta (got " *
-        "\"$mesh_type\")"))
+        "$caller: mesh_type must be Progression/Power, Bump, Beta, or a " *
+        "*_HWall variant (got \"$mesh_type\")"))
     coefficient=_mesh_attr_finite(coef,caller,"coef")
-    coefficient>0 || throw(ArgumentError(
-        "$caller: coef must be positive (got $coef)"))
-    m.meshing.transfinite_curves[t]=(num_nodes=count,kind=kind,coef=coefficient)
+    # Gmsh's API stores `abs(coef)` for the ordinary types and negates the
+    # (signed) type when `coef < 0` — a negative coefficient means a reversed
+    # distribution. HWall records keep the signed wall height.
+    reversed=false
+    if !(kind in _TRANSFINITE_HWALL_KINDS)
+        reversed=coefficient<0
+        coefficient=abs(coefficient)
+    end
+    m.meshing.transfinite_curves[t]=(num_nodes=count,kind=kind,coef=coefficient,
+                                     reversed=reversed)
     return nothing
 end
 
@@ -376,6 +399,8 @@ function remove_constraints!(m::GeoModel,dim_tags=NTuple{2,Int}[])
         meshing.size_callback=nothing
         empty!(meshing.compounds)
         empty!(meshing.outward_orientation)
+        empty!(meshing.degenerated)
+        empty!(meshing.quad_tri)
         return nothing
     end
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
@@ -394,10 +419,12 @@ function remove_constraints!(m::GeoModel,dim_tags=NTuple{2,Int}[])
         _model_entity_known(m,dimension,tag) || throw(ArgumentError(
             "$caller: unknown entity ($dimension,$tag)"))
         dimension==1 && delete!(meshing.transfinite_curves,tag)
+        dimension==1 && delete!(meshing.degenerated,tag)
         dimension==2 && delete!(meshing.transfinite_surfaces,tag)
         if dimension==3
             delete!(meshing.transfinite_volumes,tag)
             delete!(meshing.outward_orientation,tag)
+            delete!(meshing.quad_tri,tag)
         end
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
@@ -703,7 +730,7 @@ function _transfinite_automatic_surface!(
         for signed_curve in curves_on_edge
             curve=abs(signed_curve)
             m.meshing.transfinite_curves[curve]=
-                (num_nodes=share,kind=:progression,coef=1.0)
+                (num_nodes=share,kind=:progression,coef=1.0,reversed=false)
         end
     end
     m.meshing.transfinite_surfaces[surface]=
@@ -2162,49 +2189,54 @@ end
 # The attribute setters above record state; the functions below are the
 # canonical paths the generators consume them through.
 
-# Normalized parameters of the `num_nodes` boundary nodes a transfinite curve
-# produces: Progression spaces geometrically with ratio `coef`, Bump clusters
-# at both ends (tanh distribution), Beta applies a power law.
-function _transfinite_parameters(num_nodes::Int,kind::Symbol,coef::Float64,
-                                 caller::AbstractString,curve::Int)
+# Uniform parameter spacing — the distribution Gmsh's `F_Transfinite` emits
+# when the density collapses to a constant (`coef <= 0`, `coef == 1`, Beta with
+# `coef < 1`, or an unknown signed type falling through to `val = 1.`).
+function _transfinite_uniform_parameters(num_nodes::Int)
     parameters=Vector{Float64}(undef,num_nodes)
-    if kind===:progression
-        if coef==1.0
-            for i in 0:num_nodes-1
-                parameters[i+1]=i/(num_nodes-1)
-            end
-        else
-            for i in 0:num_nodes-1
-                parameters[i+1]=
-                    (coef^(i/(num_nodes-1))-1)/(coef-1)
-            end
-        end
-    elseif kind===:bump
-        scale=tanh(coef)
-        scale>0 || throw(ArgumentError(
-            "$caller: Bump coef $coef produces a degenerate distribution " *
-            "on Curve[$curve]"))
-        for i in 0:num_nodes-1
-            u=i/(num_nodes-1)
-            parameters[i+1]=0.5*(1+tanh(coef*(2u-1))/scale)
-        end
-    else # :beta
-        for i in 0:num_nodes-1
-            u=i/(num_nodes-1)
-            parameters[i+1]=u==0 ? 0.0 : u^coef
-        end
-    end
-    parameters[1]=0.0;parameters[end]=1.0
-    for i in 2:num_nodes-1
-        p=parameters[i]
-        (isfinite(p) && 0<p<1) || throw(ArgumentError(
-            "$caller: transfinite parameters on Curve[$curve] are not " *
-            "strictly increasing in (0,1)"))
-        p>parameters[i-1] || throw(ArgumentError(
-            "$caller: transfinite parameters on Curve[$curve] are not " *
-            "strictly increasing"))
+    for i in 0:num_nodes-1
+        parameters[i+1]=i/(num_nodes-1)
     end
     return parameters
+end
+
+# Normalized parameters of the `num_nodes` boundary nodes a transfinite curve
+# produces, delegated to the differentially validated `TransfiniteCurve` laws.
+#
+# Gmsh stores a *signed* transfinite type (negative when the `.geo` tag was
+# negative — `reversed` here) and a raw coefficient on the GEO record, and
+# `F_Transfinite` maps them to a density: Progression/Power spaces
+# geometrically with ratio `coef` (sign flips the ratio to `1/coef`), Bump
+# clusters at both ends (type sign ignored), Beta applies the beta law
+# (negative type mirrors the argument), and the uniform fallbacks above apply
+# to the raw `coef`. The HWall kinds (types 5-7) first transform `coef` — a
+# signed first-layer wall height — into an ordinary coefficient through Gmsh's
+# `newton_get_r`/`bissection_get_*` solves; that transform reads the signed
+# type, so a reversed HWall record (negative type) never reaches it and falls
+# to the unknown-type warning path — a uniform distribution — like the
+# grammar-only `Beta_Symmetrical`/`Beta_Symmetrical_HWall` kinds (types 8/9).
+# HWall needs the curve's geometric length, so only straight curves support it.
+function _transfinite_parameters(m::GeoModel,num_nodes::Int,kind::Symbol,
+                                 coef::Float64,caller::AbstractString,curve::Int;
+                                 reversed::Bool=false)
+    if !reversed && kind in _TRANSFINITE_HWALL_KINDS
+        law=kind===:progression_hwall ? :progression :
+            kind===:bump_hwall ? :bump : :beta
+        # `F_Transfinite` reads `fabs(coef)` as the wall height and uses the
+        # coefficient's sign as the wall side (Bump is symmetric regardless).
+        return transfinite_curve_hwall(num_nodes;mesh_type=law,
+            wall_height=abs(coef),
+            curve_length=_model_curve_length(m,curve,caller),
+            orientation=(coef<0 && law!==:bump) ? :end : :start)
+    end
+    if kind in (:progression,:bump,:beta) &&
+       !(coef<=0.0 || coef==1.0 || (kind===:beta && coef<1.0))
+        # The module maps a negative coefficient to the reversed distribution,
+        # which is exactly what a negative signed type does in `F_Transfinite`.
+        return transfinite_curve_parameters(num_nodes;mesh_type=kind,
+            coefficient=reversed ? -coef : coef)
+    end
+    return _transfinite_uniform_parameters(num_nodes)
 end
 
 # Seed `forced` curve-parameter lists and the `(curve, parameter) => size`
@@ -2226,15 +2258,21 @@ function _attribute_forced_parameters(m::GeoModel,t::Int,
     param_sizes=Dict{Tuple{Int,Float64},Float64}()
     for (curve,spec) in m.meshing.transfinite_curves
         curve in boundary_curves || continue
+        # A `Degenerated` curve collapses to a single edge before the
+        # transfinite branch is considered (Gmsh `meshGEdge` checks
+        # `degenerate(0)` first), so it overrides every other attribute.
+        curve in m.meshing.degenerated && continue
         haskey(forced,curve) && throw(ArgumentError(
             "$caller: Curve[$curve] has both periodic and transfinite " *
             "constraints"))
         forced[curve]=_transfinite_parameters(
-            spec.num_nodes,spec.kind,spec.coef,caller,curve)
+            m,spec.num_nodes,spec.kind,spec.coef,caller,curve;
+            reversed=spec.reversed)
     end
     for ((edim,etag),entries) in m.meshing.size_at_params
         edim==1 || continue
         etag in boundary_curves || continue
+        etag in m.meshing.degenerated && continue
         list=get!(forced,etag,Float64[])
         for (param,size) in entries
             p=only(param)

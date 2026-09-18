@@ -1813,6 +1813,83 @@ function _geo_allocator_delete_volume!(state::_GeoTagAllocatorState,tag::Int)
     return nothing
 end
 
+# `.geo` `Delete`/`Recursive Delete` entity accounting. Gmsh's
+# `GEO_Internals::remove` decrements the owning factory's dimension counter
+# only when the deleted tag was its current maximum (`setMaxTag(dim,
+# tmax-1)` in `DeletePoint`/`DeleteCurve`/`DeleteSurface`/`DeleteVolume`) —
+# it does NOT recompute the counter from the surviving entities, so a sparse
+# delete leaves the counter above the live maximum. `deleted` lists the
+# entities actually removed, in execution order.
+function _geo_allocator_delete_entities!(state::_GeoTagAllocatorState,
+                                         deleted)
+    dim_state=Dict(0=>(state.live_builtin_points,state.live_occ_points,
+                       :builtin_point_max,:occ_point_max),
+                   1=>(state.live_builtin_curves,state.live_occ_curves,
+                       :builtin_curve_max,:occ_curve_max),
+                   2=>(state.live_builtin_surfaces,state.live_occ_surfaces,
+                       :builtin_surface_max,:occ_surface_max),
+                   3=>(state.live_builtin_volumes,state.live_occ_volumes,
+                       :builtin_volume_max,:occ_volume_max))
+    for entry in deleted
+        (dim,tag)=entry
+        haskey(dim_state,dim) || continue
+        (live_b,live_o,field_b,field_o)=dim_state[dim]
+        if tag in live_b
+            delete!(live_b,tag)
+            getfield(state,field_b)==tag &&
+                setfield!(state,field_b,tag-1)
+        elseif tag in live_o
+            delete!(live_o,tag)
+            getfield(state,field_o)==tag &&
+                setfield!(state,field_o,tag-1)
+        else
+            # Untracked tags are built-in-kernel records — decrement the
+            # built-in counter when the tag was its maximum.
+            getfield(state,field_b)==tag &&
+                setfield!(state,field_b,tag-1)
+        end
+        dim==3 && delete!(state.volume_boundaries,tag)
+    end
+    state.point_entity_max=max(
+        _geo_live_max(state.live_builtin_points),
+        _geo_live_max(state.live_occ_points))
+    state.curve_entity_max=max(
+        _geo_live_max(state.live_builtin_curves),
+        _geo_live_max(state.live_occ_curves))
+    state.surface_entity_max=max(
+        _geo_live_max(state.live_builtin_surfaces),
+        _geo_live_max(state.live_occ_surfaces))
+    return nothing
+end
+
+# `Delete Model`/`Delete All` destroy the geometry internals: every entity,
+# physical group, mesh attribute, and tag counter resets while user variables
+# survive (`Delete All` additionally clears them — handled at the exec layer).
+function _geo_allocator_reset_model!(state::_GeoTagAllocatorState)
+    for field in (:builtin_point_max,:builtin_curve_max,:builtin_surface_max,
+                  :builtin_volume_max,:occ_point_max,:occ_curve_max,
+                  :occ_surface_max,:occ_volume_max,:auxiliary_region_max,
+                  :physical_group_max,:field_max,:point_entity_max,
+                  :curve_entity_max,:surface_entity_max)
+        setfield!(state,field,0)
+    end
+    for live in (state.live_builtin_points,state.live_builtin_curves,
+                 state.live_builtin_surfaces,state.live_builtin_volumes,
+                 state.live_occ_points,state.live_occ_curves,
+                 state.live_occ_surfaces,state.live_occ_volumes)
+        empty!(live)
+    end
+    for floor in (:builtin_point_floor,:builtin_curve_floor,
+                  :builtin_surface_floor,:builtin_volume_floor,
+                  :occ_point_floor,:occ_curve_floor,:occ_surface_floor,
+                  :occ_volume_floor)
+        setfield!(state,floor,0)
+    end
+    empty!(state.volume_boundaries)
+    state.occ_active=false
+    return nothing
+end
+
 function _geo_allocator_live_entities(state::_GeoTagAllocatorState,
                                       kind::Symbol)
     if kind==:point
@@ -3020,14 +3097,33 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
 
     set_max=match(
-        r"^SetMaxTag\s+(Point|Curve|Surface|Volume)\s*\(\s*(.*?)\s*\)$",
+        r"^SetMaxTag\s+(?:(Point|Curve|Line|Surface|Volume)|GeoEntity\s*\{\s*(.*?)\s*\})\s*\(\s*(.*?)\s*\)$",
         source)
     if set_max!==nothing
         state.geometry_unavailable===nothing || return nothing
-        kind=String(set_max.captures[1])
+        kind=if set_max.captures[1]!==nothing
+            set_max.captures[1]=="Line" ? "Curve" : String(set_max.captures[1])
+        else
+            dim=try
+                _geo_signed_gmsh_int_value(
+                    _geo_eval_numeric(set_max.captures[2],context,
+                                      "$caller SetMaxTag dimension"),
+                    "$caller SetMaxTag dimension")
+            catch err
+                err isa InterruptException && rethrow()
+                (conservative && err isa ArgumentError) || rethrow()
+                _geo_allocator_invalidate!(state,
+                    "could not evaluate SetMaxTag dimension while tracking " *
+                    "allocators: "*_geo_expr_preview(set_max.captures[2]);
+                    geometry=true,fields=false)
+                return nothing
+            end
+            dim in (0,1,2,3) || return nothing
+            ("Point","Curve","Surface","Volume")[dim+1]
+        end
         value=try
             _geo_signed_gmsh_int_value(
-                _geo_eval_numeric(set_max.captures[2],context,
+                _geo_eval_numeric(set_max.captures[3],context,
                                   "$caller SetMaxTag $kind"),
                 "$caller SetMaxTag $kind")
         catch err
@@ -3035,7 +3131,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
             (conservative && err isa ArgumentError) || rethrow()
             _geo_allocator_invalidate!(state,
                 "could not evaluate SetMaxTag $kind while tracking allocators: " *
-                _geo_expr_preview(set_max.captures[2]);geometry=true,fields=false)
+                _geo_expr_preview(set_max.captures[3]);geometry=true,fields=false)
             return nothing
         end
         _geo_allocator_set_max!(state,kind,value)
@@ -3085,6 +3181,12 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         end
         return nothing
     end
+
+    # `.geo` lifecycle statements executed through `_geo_exec_delete!` update
+    # the allocator directly (per-entity counter decrement or full reset), so
+    # the observer leaves them alone.
+    match(r"^(?:Recursive\s+Delete|Delete)\b",source)!==nothing &&
+        return nothing
 
     topology_change=occursin(
         r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Duplicata|SetMaxTag|Merge|Coherence)\b",
@@ -3387,11 +3489,31 @@ function _geo_brace_terminated_statement(text::AbstractString)
     mm===nothing && return false
     name=mm.captures[1]
     name=="Extrude" && return _geo_brace_terminated_extrude(s)
-    groups=name in ("Translate","Rotate","Dilate","Symmetry","Affine") ? 2 :
-           name in ("Duplicata","Boundary","CombinedBoundary",
-                    "OrientedBoundary","OrientedCombinedBoundary",
-                    "PointsOf") ? 1 : return false
-    rest=String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end]))
+    # `Delete { ListOfShapes }` ends at the closing brace with no `;`, as do
+    # `Recursive Delete { ... }` and `Delete Embedded { ... }`.
+    if name in ("Delete","Recursive")
+        rest0=String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end]))
+        if name=="Recursive"
+            dm=match(r"^Delete\b",rest0)
+            dm===nothing && return false
+            rest0=String(strip(rest0[nextind(rest0,firstindex(rest0),
+                                           ncodeunits(dm.match)):end]))
+        elseif (em=match(r"^([A-Za-z_][A-Za-z0-9_]*)\b",rest0))!==nothing
+            # `Delete Embedded { ... }` (and any `Delete <word> { ... }` —
+            # unknown words error later during execution, not at scan time).
+            rest0=String(strip(rest0[nextind(rest0,firstindex(rest0),
+                                           ncodeunits(em.match)):end]))
+        end
+        groups=startswith(rest0,"{") ? 1 : return false
+        s=rest0
+    else
+        groups=name in ("Translate","Rotate","Dilate","Symmetry","Affine") ? 2 :
+               name in ("Duplicata","Boundary","CombinedBoundary",
+                        "OrientedBoundary","OrientedCombinedBoundary",
+                        "PointsOf") ? 1 : return false
+        s=String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end]))
+    end
+    rest=String(strip(s))
     for _ in 1:groups
         startswith(rest,"{") || return false
         depth=0;done=false;i=firstindex(rest);last=lastindex(rest)
@@ -3662,6 +3784,116 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             "Physical Kind(\"name\")"))
         _geo_allocator_observe_statement!(
             allocator_state,body,context,"read_geo_params";conservative=true)
+
+        # `Delete`/`Recursive Delete` statements mutate allocator and variable
+        # state the scan mirrors. An entity list's removed set depends on live
+        # ownership the scan does not track, so its counter effects make later
+        # allocator reads unavailable rather than stale — the same convention
+        # other untrackable topology changes use.
+        if (dl=match(r"^(?:(Recursive)\s+)?Delete\b(.*)$",body))!==nothing
+            tail=String(strip(dl.captures[2]))
+            if startswith(tail,"{")
+                # Only geometric counters can change — field and physical
+                # tags survive entity deletion, so `newf`/`newreg` stay live.
+                _geo_allocator_invalidate!(allocator_state,
+                    "an entity `Delete` list may have decremented dynamic tag counters";
+                    geometry=true,fields=false)
+                return
+            end
+            dl.captures[1]===nothing || throw(ArgumentError(
+                "read_geo_params: `Recursive Delete` requires a `{ ListOfShapes }` body"))
+            if (em=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\{",tail))!==nothing
+                word=strip(em.captures[1],'"')
+                word=="Embedded" || throw(ArgumentError(
+                    "read_geo_params: unknown command 'Delete $word { ... }'"))
+                return  # `Delete Embedded` clears embeddings — no params state
+            end
+            if (vm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?$",
+                         tail))!==nothing
+                vm.captures[1]=="Empty" && vm.captures[2]=="Views" && return
+                throw(ArgumentError("read_geo_params: unknown command " *
+                    "'Delete $(vm.captures[1]) $(vm.captures[2])'"))
+            end
+            if (fm=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\[\s*(.*?)\s*\]\s*;?$",
+                         tail))!==nothing
+                base=String(strip(fm.captures[1],'"'))
+                base=="Field" || throw(ArgumentError(
+                    "read_geo_params: unknown command 'Delete $base[...]'"))
+                tag=_geo_positive_tag_value(fm.captures[2],context,
+                    "read_geo_params: Delete Field")
+                haskey(kinds,tag) || throw(ArgumentError(
+                    "read_geo_params: cannot delete Field[$tag], it does not exist"))
+                delete!(kinds,tag);delete!(options,tag)
+                delete!(option_order,tag);delete!(creation_curvature,tag)
+                filter!(!=(tag),boundary_layers)
+                return
+            end
+            nm=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*;?$",tail)
+            nsm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*~\s*\{\s*(.*?)\s*\}\s*;?$",tail)
+            name=if nm!==nothing
+                String(strip(nm.captures[1],'"'))
+            elseif nsm!==nothing
+                idx=_geo_int_value(_geo_eval_numeric(
+                        nsm.captures[2],context,
+                        "read_geo_params: Delete namespace index"),
+                    "read_geo_params: Delete namespace index")
+                String(nsm.captures[1])*"_"*string(idx)
+            else
+                throw(ArgumentError("read_geo_params: malformed Delete statement"))
+            end
+            if name=="All"
+                # `ClearProject` — model, fields, physical names and parser
+                # variables all go away; the factory reverts to built-in.
+                _geo_allocator_reset_model!(allocator_state)
+                allocator_state.factory=:builtin
+                empty!(context.values);empty!(context.lists)
+                empty!(context.list_variables)
+                empty!(context.unavailable);empty!(context.unavailable_lists)
+                context.stored_list_items=0
+                empty!(kinds);empty!(options);empty!(option_order)
+                empty!(creation_curvature);empty!(boundary_layers)
+                empty!(seen_physical);empty!(groups);empty!(physical_name_tags)
+                background=0
+                return
+            elseif name=="Model"
+                # `GModel::destroy` + internals destroy — fields die with the
+                # model; physical names and variables survive.
+                _geo_allocator_reset_model!(allocator_state)
+                empty!(kinds);empty!(options);empty!(option_order)
+                empty!(creation_curvature);empty!(boundary_layers)
+                empty!(seen_physical)
+                background=0
+                return
+            elseif name=="Physicals"
+                # `resetPhysicalGroups` drops the groups but keeps names and
+                # the physical tag counter.
+                empty!(seen_physical)
+                return
+            elseif name=="Variables"
+                empty!(context.values);empty!(context.lists)
+                empty!(context.list_variables)
+                empty!(context.unavailable);empty!(context.unavailable_lists)
+                context.stored_list_items=0
+                return
+            elseif name=="Options"
+                # `ReInitOptions` — restore the option-valued state the scan
+                # tracks (fields and the background field are not options).
+                smin=NaN;smax=NaN;sfactor=1.0;seed=0
+                geometry_tolerance=NaN
+                mesh_size_from_curvature=0;boundary_layer_fan_elements=5
+                return
+            elseif name in ("Meshes","Struct")
+                return  # no mesh or struct namespaces during `.geo` scanning
+            end
+            known=haskey(context.values,name)||haskey(context.lists,name)||
+                  haskey(context.unavailable,name)||
+                  haskey(context.unavailable_lists,name)
+            known || throw(ArgumentError(
+                "read_geo_params: unknown object or expression to delete $(repr(name))"))
+            _geo_context_forget!(context,name)
+            delete!(context.unavailable,name);delete!(context.unavailable_lists,name)
+            return
+        end
 
         # Transform and standalone shape-list statements carry no params-scan
         # data; a `Physical Kind{...}` inside one is a group reference, not a

@@ -178,7 +178,9 @@ function _model_removal_plan(
 end
 
 function _model_removal_state(
-    m::GeoModel,removed::Set{Tuple{Int,Int}})
+    m::GeoModel,removed::Set{Tuple{Int,Int}};
+    keep_dangling_loops::Bool=false,
+    keep_stale_physical::Bool=false)
     removed_tags=ntuple(dimension->Set(
         tag for (entity_dimension,tag) in removed
         if entity_dimension==dimension-1),4)
@@ -212,24 +214,28 @@ function _model_removal_state(
     end
 
     loops=copy(m.loops)
-    for (loop,signed_curves) in m.loops
-        any(curve->abs(curve) in removed_tags[2],signed_curves) &&
-            delete!(loops,loop)
+    if !keep_dangling_loops
+        for (loop,signed_curves) in m.loops
+            any(curve->abs(curve) in removed_tags[2],signed_curves) &&
+                delete!(loops,loop)
+        end
     end
     surface_loops=copy(m.surface_loops)
-    for (loop,signed_surfaces) in m.surface_loops
-        any(surface->abs(surface) in removed_tags[3],signed_surfaces) &&
-            delete!(surface_loops,loop)
-    end
-    for (surface,surface_loops_used) in surfaces
-        all(loop->haskey(loops,loop),surface_loops_used) || throw(ErrorException(
-            "remove_entities!: surviving Surface[$surface] lost a Curve Loop; " *
-            "rebuild the model"))
-    end
-    for (volume,shells) in volumes
-        all(shell->haskey(surface_loops,shell),shells) || throw(ErrorException(
-            "remove_entities!: surviving Volume[$volume] lost a Surface Loop; " *
-            "rebuild the model"))
+    if !keep_dangling_loops
+        for (loop,signed_surfaces) in m.surface_loops
+            any(surface->abs(surface) in removed_tags[3],signed_surfaces) &&
+                delete!(surface_loops,loop)
+        end
+        for (surface,surface_loops_used) in surfaces
+            all(loop->haskey(loops,loop),surface_loops_used) || throw(ErrorException(
+                "remove_entities!: surviving Surface[$surface] lost a Curve Loop; " *
+                "rebuild the model"))
+        end
+        for (volume,shells) in volumes
+            all(shell->haskey(surface_loops,shell),shells) || throw(ErrorException(
+                "remove_entities!: surviving Volume[$volume] lost a Surface Loop; " *
+                "rebuild the model"))
+        end
     end
 
     entity_names=copy(m.entity_names)
@@ -243,13 +249,23 @@ function _model_removal_state(
 
     physical=Dict{Tuple{Int,Int},Vector{Int}}()
     physical_names=copy(m.physical_names)
-    for (key,members) in m.physical
-        retained=Int[member for member in members
-                     if !((key[1],member) in removed)]
-        if isempty(retained)
-            delete!(physical_names,key)
-        else
-            physical[key]=retained
+    if keep_stale_physical
+        # `.geo` Delete keeps the physical-group records verbatim: Gmsh's
+        # internals retain the stale member integers, so a member tag that is
+        # deleted and later re-created resurrects its membership. Query paths
+        # filter to live entities; emptied groups stay (with their names).
+        for (key,members) in m.physical
+            physical[key]=copy(members)
+        end
+    else
+        for (key,members) in m.physical
+            retained=Int[member for member in members
+                         if !((key[1],member) in removed)]
+            if isempty(retained)
+                delete!(physical_names,key)
+            else
+                physical[key]=retained
+            end
         end
     end
 
@@ -305,6 +321,7 @@ function _model_removal_state(
     meshing=m.meshing
     for tag in removed_tags[2]
         delete!(meshing.transfinite_curves,tag)
+        delete!(meshing.degenerated,tag)
     end
     for tag in removed_tags[3]
         delete!(meshing.transfinite_surfaces,tag)
@@ -312,6 +329,7 @@ function _model_removal_state(
     for tag in removed_tags[4]
         delete!(meshing.transfinite_volumes,tag)
         delete!(meshing.outward_orientation,tag)
+        delete!(meshing.quad_tri,tag)
     end
     for entity in removed
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
@@ -393,4 +411,254 @@ end
 # the ownership guards keep children still referenced by surviving parents.
 function _remove_volume_entity!(m::GeoModel,tag::Int)
     return remove_entities!(m,[(3,tag)],true)>0
+end
+
+# ---------------------------------------------------------------------------
+# `.geo` `Delete { ListOfShapes }` / `Recursive Delete { ... }` — the Gmsh
+# `GEO_Internals::remove` semantics, which differ from `remove_entities!`:
+#
+#  * sign handling — vertices compare by `abs(tag)` (`CompareVertex`) and a
+#    curve deletion always tries both signs (`DeleteCurve(tag)` +
+#    `DeleteCurve(-tag)` for the stored reversed mirror), so `Point{-7}` and
+#    `Curve{-9}` still delete their entities; surfaces and volumes compare
+#    signed, so `Surface{-1}`/`Volume{-1}` silently match nothing.
+#  * refusal is boundary ownership only — a point wired into a live curve
+#    (endpoint or arc control point), a curve on a live surface's loops, a
+#    surface on a live volume's shells. Embedding sources and sphere-center
+#    references do NOT block deletion (the embed record dies with the point;
+#    a sphere keeps its resolved center coordinates).
+#  * `Recursive` pre-collects the whole transitive boundary into sorted sets
+#    per dimension and then deletes top-down (surfaces, curves, points), each
+#    child still subject to the ownership refusal against remaining entities.
+#  * each successful deletion decrements that dimension's tag counter by one
+#    when the deleted tag was the counter (`if(tag == max) max--`), applied in
+#    deletion order — it never recomputes the counter from live entities.
+#  * curve/surface loop records survive dangling (there is no `Delete Loop`
+#    syntax; a later `Plane Surface` on such a loop errors), and physical
+#    groups keep their stale member integers, so a re-created tag resurrects
+#    its membership. Physical names are never dropped by entity deletion.
+#
+# Each requested entry is attempted independently in list order; there is no
+# atomicity and no error for missing or refused entities.
+
+@inline function _geo_removal_lookup(
+    m::GeoModel,removed::Set{Tuple{Int,Int}},dimension::Int,tag::Int)
+    if dimension<=1
+        tag=abs(tag)
+    elseif tag<=0
+        return false
+    end
+    tag==0 && return false
+    (dimension,tag) in removed && return false
+    return haskey(_model_entity_dictionary(m,dimension),tag)
+end
+
+function _geo_removal_owned(m::GeoModel,removed::Set{Tuple{Int,Int}},
+                            dimension::Int,tag::Int)
+    if dimension==0
+        for (curve,endpoints) in m.curves
+            _geo_removal_lookup(m,removed,1,curve) || continue
+            tag in endpoints && return true
+            tag in get(m.curve_control_points,curve,Int[]) && return true
+        end
+    elseif dimension==1
+        for (surface,loops) in m.surfaces
+            _geo_removal_lookup(m,removed,2,surface) || continue
+            for loop in loops
+                signed_curves=get(m.loops,loop,nothing)
+                signed_curves===nothing && continue
+                any(curve->abs(curve)==tag,signed_curves) && return true
+            end
+        end
+    elseif dimension==2
+        for (volume,shells) in m.volumes
+            _geo_removal_lookup(m,removed,3,volume) || continue
+            for shell in shells
+                signed_surfaces=get(m.surface_loops,shell,nothing)
+                signed_surfaces===nothing && continue
+                any(surface->abs(surface)==tag,signed_surfaces) && return true
+            end
+        end
+    end
+    return false
+end
+
+function _geo_cascade_collect_surface!(m::GeoModel,surface_tag::Int,
+                                       curves::Vector{Int},points::Vector{Int})
+    loops=get(m.surfaces,surface_tag,nothing)
+    loops===nothing && return nothing
+    for loop in loops
+        signed_curves=get(m.loops,loop,nothing)
+        signed_curves===nothing && continue
+        for signed_curve in signed_curves
+            curve=abs(signed_curve)
+            push!(curves,curve)
+            endpoints=get(m.curves,curve,nothing)
+            endpoints===nothing && continue
+            append!(points,endpoints)
+            append!(points,get(m.curve_control_points,curve,Int[]))
+        end
+    end
+    return nothing
+end
+
+# Pre-collected recursive boundary, matching Gmsh's `DeleteCurve`/
+# `DeleteSurface`/`DeleteVolume`: all boundary entities of the removed entity,
+# gathered transitively into per-dimension sorted sets and attempted
+# descending-dimension first (surfaces, then curves, then points).
+function _geo_removal_cascade(m::GeoModel,dimension::Int,tag::Int)
+    dimension==0 && return Tuple{Int,Int}[]
+    if dimension==1
+        endpoints=get(m.curves,tag,nothing)
+        endpoints===nothing && return Tuple{Int,Int}[]
+        points=unique!(Int[endpoints...,
+                           get(m.curve_control_points,tag,Int[])...])
+        sort!(points)
+        return Tuple{Int,Int}[(0,point) for point in points]
+    end
+    surfaces=Int[];curves=Int[];points=Int[]
+    if dimension==2
+        _geo_cascade_collect_surface!(m,tag,curves,points)
+    else
+        shells=get(m.volumes,tag,nothing)
+        shells===nothing && return Tuple{Int,Int}[]
+        for shell in shells
+            signed_surfaces=get(m.surface_loops,shell,nothing)
+            signed_surfaces===nothing && continue
+            for signed_surface in signed_surfaces
+                surface=abs(signed_surface)
+                push!(surfaces,surface)
+                _geo_cascade_collect_surface!(m,surface,curves,points)
+            end
+        end
+        sort!(unique!(surfaces))
+    end
+    sort!(unique!(curves));sort!(unique!(points))
+    result=Tuple{Int,Int}[]
+    for surface in surfaces
+        push!(result,(2,surface))
+    end
+    for curve in curves
+        push!(result,(1,curve))
+    end
+    for point in points
+        push!(result,(0,point))
+    end
+    return result
+end
+
+"""
+    _geo_delete_entities!(model, dim_tags; recursive=false) -> removed
+
+`.geo` `Delete`/`Recursive Delete` — per-entity best-effort removal under
+Gmsh's `GEO_Internals::remove` contract (see the module notes above).
+`dim_tags` may carry signed tags. Returns the removed `(dim, tag)` pairs in
+deletion order so the caller can update tag-allocator counters.
+"""
+function _geo_delete_entities!(m::GeoModel,dim_tags;recursive::Bool=false)
+    removed=Tuple{Int,Int}[]
+    inset=Set{Tuple{Int,Int}}()
+    function attempt!(dimension::Int,tag::Int)
+        _geo_removal_lookup(m,inset,dimension,tag) || return nothing
+        key=(dimension,abs(tag))
+        _geo_removal_owned(m,inset,dimension,key[2]) && return nothing
+        push!(removed,key);push!(inset,key)
+        if recursive
+            # Gmsh calls the non-recursive deleters on the pre-collected
+            # transitive boundary — children are attempted flat.
+            for (child_dimension,child_tag) in
+                _geo_removal_cascade(m,dimension,key[2])
+                _geo_removal_lookup(m,inset,child_dimension,child_tag) ||
+                    continue
+                _geo_removal_owned(m,inset,child_dimension,child_tag) &&
+                    continue
+                child_key=(child_dimension,child_tag)
+                push!(removed,child_key);push!(inset,child_key)
+            end
+        end
+        return nothing
+    end
+    for entry in dim_tags
+        (dimension,tag)=entry
+        attempt!(Int(dimension),Int(tag))
+    end
+    isempty(removed) && return removed
+    state=_model_removal_state(m,inset;keep_dangling_loops=true,
+                               keep_stale_physical=true)
+
+    m.points=state.points
+    m.point_size=state.point_size
+    m.curves=state.curves
+    m.curve_control_points=state.curve_control_points
+    m.curve_types=state.curve_types
+    m.curve_geometry=state.curve_geometry
+    m.surfaces=state.surfaces
+    m.surface_types=state.surface_types
+    m.surface_geometry=state.surface_geometry
+    m.volumes=state.volumes
+    m.entity_names=state.entity_names
+    m.entity_visibility=state.entity_visibility
+    m.entity_colors=state.entity_colors
+    m.physical=state.physical
+    m.physical_names=state.physical_names
+    m.box_extents=state.box_extents
+    m.cylinders=state.cylinders
+    m.spheres=state.spheres
+    m.cones=state.cones
+    m.booleans=state.booleans
+    m.boolean_operands=state.boolean_operands
+    m.boolean_components=state.boolean_components
+    m.periodic=state.periodic
+    m.embeds=state.embeds
+    m.discrete=state.discrete
+    # loops/surface_loops intentionally untouched — records survive dangling.
+    # Counter decrement happens per removal, in order (`if(tag==max) max--`).
+    for (dimension,tag) in removed
+        tag==m.next_tag[dimension+1] && (m.next_tag[dimension+1]-=1)
+    end
+    return removed
+end
+
+"""
+    _geo_reset_model_geometry!(model)
+
+`.geo` `Delete Model` — `GEO_Internals::destroy()` plus `GModel::destroy`:
+every entity, loop, physical group, and per-entity meshing attribute is
+destroyed and all tag counters reset. Like Gmsh, the compound-mesh multimap
+(`m.meshing.compounds`) and the physical-group NAME table
+(`m.physical_names`) survive — they live outside the freed entity records.
+User variables and the current factory are exec-layer state and are untouched
+here.
+"""
+function _geo_reset_model_geometry!(m::GeoModel)
+    empty!(m.points);empty!(m.point_size)
+    empty!(m.curves);empty!(m.curve_control_points);empty!(m.curve_types)
+    empty!(m.curve_geometry)
+    empty!(m.loops)
+    empty!(m.surfaces);empty!(m.surface_types);empty!(m.surface_geometry)
+    empty!(m.surface_loops)
+    empty!(m.volumes)
+    empty!(m.entity_names);empty!(m.entity_visibility);empty!(m.entity_colors)
+    empty!(m.physical)
+    empty!(m.box_extents);empty!(m.cylinders);empty!(m.spheres);empty!(m.cones)
+    empty!(m.booleans);empty!(m.boolean_operands);empty!(m.boolean_components)
+    empty!(m.periodic);empty!(m.embeds);empty!(m.discrete)
+    meshing=m.meshing
+    for store in (meshing.transfinite_curves,meshing.degenerated)
+        empty!(store)
+    end
+    empty!(meshing.transfinite_surfaces)
+    for store in (meshing.transfinite_volumes,meshing.outward_orientation,
+                  meshing.quad_tri)
+        empty!(store)
+    end
+    for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
+                  meshing.algorithm,meshing.size_at_params,
+                  meshing.size_from_boundary,meshing.attached,meshing.extrude)
+        empty!(store)
+    end
+    empty!(meshing.homology_requests)
+    m.next_tag .= 0
+    m.physical_tag_max=0
+    return nothing
 end
