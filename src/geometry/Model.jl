@@ -27,6 +27,7 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
+using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_collapsed
 using ..Transfinite: mesh_transfinite_patch
@@ -128,8 +129,8 @@ outward orientation) while periodic relations, embeddings, and Point sizes
 live elsewhere on the model.
 """
 mutable struct ModelMeshingAttributes
-    transfinite_curves::Dict{Int,NamedTuple{(:num_nodes,:kind,:coef),
-                                           Tuple{Int,Symbol,Float64}}}
+    transfinite_curves::Dict{Int,NamedTuple{(:num_nodes,:kind,:coef,:reversed),
+                                           Tuple{Int,Symbol,Float64,Bool}}}
     transfinite_surfaces::Dict{Int,NamedTuple{(:arrangement,:corners),
                                              Tuple{Symbol,Vector{Int}}}}
     transfinite_volumes::Dict{Int,Vector{Int}}
@@ -143,6 +144,8 @@ mutable struct ModelMeshingAttributes
     size_callback::Any
     compounds::Vector{Pair{Int,Vector{Int}}}
     outward_orientation::Set{Int}
+    degenerated::Set{Int}
+    quad_tri::Set{Int}
     order::Int
     transfinite_tri::Int
     attached::Dict{Tuple{Int,Int},DiscreteEntity}
@@ -151,7 +154,8 @@ mutable struct ModelMeshingAttributes
 end
 
 ModelMeshingAttributes() = ModelMeshingAttributes(
-    Dict{Int,NamedTuple{(:num_nodes,:kind,:coef),Tuple{Int,Symbol,Float64}}}(),
+    Dict{Int,NamedTuple{(:num_nodes,:kind,:coef,:reversed),
+                        Tuple{Int,Symbol,Float64,Bool}}}(),
     Dict{Int,NamedTuple{(:arrangement,:corners),Tuple{Symbol,Vector{Int}}}}(),
     Dict{Int,Vector{Int}}(),
     Dict{Tuple{Int,Int},Float64}(),
@@ -163,6 +167,8 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Tuple{Int,Int},Bool}(),
     nothing,
     Pair{Int,Vector{Int}}[],
+    Set{Int}(),
+    Set{Int}(),
     Set{Int}(),
     1,
     0,
@@ -1730,6 +1736,15 @@ function remove_physical_name!(m::GeoModel,name::AbstractString)
     return length(targets)
 end
 
+# Live members of a stored Physical group. `.geo` `Delete` leaves the stale
+# member integers in the record (Gmsh's internals keep them and resurrect the
+# membership if the tag is re-created), so resolution filters to entities that
+# currently exist — the same view `GModel::getPhysicalGroups` produces.
+function _physical_live_members(m::GeoModel,dimension::Int,members)
+    return Int[tag for tag in members
+               if _model_entity_known(m,dimension,tag)]
+end
+
 """
     model_physical_groups(model, dim=-1) -> Vector{Tuple{Int,Int}}
 
@@ -1738,8 +1753,12 @@ selects every dimension; `dim=0:3` filters the result.
 """
 function model_physical_groups(m::GeoModel,dim=-1)
     dimension=_query_dimension(dim,"model_physical_groups")
+    # A group whose members all resolve to nothing is not listed, matching
+    # `GModel::getPhysicalGroups`, which builds the map from live entities.
     groups=Tuple{Int,Int}[
-        key for key in keys(m.physical) if dimension==-1 || key[1]==dimension]
+        key for (key,members) in m.physical
+        if (dimension==-1 || key[1]==dimension) &&
+           !isempty(_physical_live_members(m,key[1],members))]
     return sort!(groups)
 end
 
@@ -1750,9 +1769,12 @@ Return detached, sorted entity tags for an existing Physical group.
 """
 function model_entities_for_physical_group(m::GeoModel,dim,tag)
     key=_physical_group_key(dim,tag,"model_entities_for_physical_group")
-    haskey(m.physical,key) || throw(ArgumentError(
+    members=get(m.physical,key,nothing)
+    live=members===nothing ? Int[] :
+         _physical_live_members(m,key[1],members)
+    isempty(live) && throw(ArgumentError(
         "model_entities_for_physical_group: Physical$(key) does not exist"))
-    return sort!(copy(m.physical[key]))
+    return sort!(live)
 end
 
 """
@@ -1800,8 +1822,11 @@ function model_entities_for_physical_name(m::GeoModel,name::AbstractString)
     isempty(group_keys) && throw(ArgumentError(
         "model_entities_for_physical_name: Physical name $(repr(group_name)) does not exist"))
     entities=Tuple{Int,Int}[]
-    for key in group_keys, entity in m.physical[key]
-        push!(entities,(key[1],entity))
+    for key in group_keys
+        for entity in _physical_live_members(
+                m,key[1],get(m.physical,key,Int[]))
+            push!(entities,(key[1],entity))
+        end
     end
     return sort!(unique!(entities))
 end
@@ -1817,7 +1842,8 @@ function model_physical_groups_entities(m::GeoModel,dim=-1)
     entities=Vector{Vector{Tuple{Int,Int}}}(undef,length(groups))
     for (index,(dimension,physical_tag)) in pairs(groups)
         entities[index]=Tuple{Int,Int}[
-            (dimension,tag) for tag in sort!(copy(m.physical[(dimension,physical_tag)]))]
+            (dimension,tag) for tag in sort!(_physical_live_members(
+                m,dimension,m.physical[(dimension,physical_tag)]))]
     end
     return groups,entities
 end
@@ -1846,7 +1872,9 @@ the group does not exist.
 function model_physical_tags(m::GeoModel, dim::Integer, tag::Integer)
     caller="model_physical_tags"
     d=_dimension(dim,caller); t=_tag(tag,caller,d)
-    return copy(get(m.physical,(d,t),Int[]))
+    members=get(m.physical,(d,t),nothing)
+    members===nothing && return Int[]
+    return _physical_live_members(m,d,members)
 end
 
 function _loop_points(m::GeoModel, loop_id::Int)
@@ -1939,7 +1967,11 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
     return point
 end
 
-function _surface_curve_parameters(forced,curve::Int,signed::Int)
+function _surface_curve_parameters(m::GeoModel,forced,curve::Int,signed::Int)
+    # A `Degenerated` curve meshes to a single edge: it contributes only its
+    # first endpoint, regardless of any stored parameter source (transfinite,
+    # periodic, or size-at-params).
+    curve in m.meshing.degenerated && return signed>0 ? (0.0,) : (1.0,)
     parameters=get(forced,curve,nothing)
     parameters===nothing && return signed>0 ? (0.0,) : (1.0,)
     return signed>0 ? @view(parameters[1:end-1]) :
@@ -1961,7 +1993,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             curve=abs(signed)
             _model_require_line_curve(m,curve,caller,"surface meshing")
             a,b=m.curves[curve]
-            for parameter in _surface_curve_parameters(forced,curve,signed)
+            for parameter in _surface_curve_parameters(m,forced,curve,signed)
                 vertex=if parameter==0
                     _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller,plane)
                 elseif parameter==1
@@ -2006,7 +2038,8 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             "$caller: unknown embedded Curve[$etag]"))
         _model_require_line_curve(m,etag,caller,"embedded-curve meshing")
         a,b=m.curves[etag]
-        parameters=get(forced,etag,nothing)
+        parameters=etag in m.meshing.degenerated ? nothing :
+                   get(forced,etag,nothing)
         curve_nodes=Int[]
         if parameters===nothing
             push!(curve_nodes,_add_surface_point!(
@@ -4371,6 +4404,12 @@ end
 function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     get(m.embeds,(3,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
         "$caller: transfinite Volume[$t] cannot carry embedded entities"))
+    # `TransfQuadTri` selects Gmsh's HAVE_QUADTRI path — hexa/prism elements
+    # with boundary-diagonal subdivision at unrecombined faces. The native
+    # kernel emits tetrahedra only, so the flag is an explicit blocker here.
+    t in m.meshing.quad_tri && throw(ArgumentError(
+        "$caller: TransfQuadTri Volume[$t] requires the QuadTri hexahedral " *
+        "transfinite algorithm, which Tessella does not implement"))
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     length(boundaries)==6 || throw(ArgumentError(
         "$caller: transfinite Volume[$t] requires exactly 6 boundary " *
@@ -4597,10 +4636,15 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     loops=m.surfaces[t]
     length(loops)==1 || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires exactly one curve loop"))
-    signed_curves=m.loops[only(loops)]
+    # `findVertices` skips `degenerate(0)` curves entirely — a `Degenerated`
+    # boundary curve drops out of the side chain, so the surface meshes as
+    # `nboundary - ndegenerated`-sided.
+    signed_curves=[s for s in m.loops[only(loops)]
+                   if !(abs(s) in m.meshing.degenerated)]
     nside=length(signed_curves)
     nside in (3,4) || throw(ArgumentError(
-        "$caller: transfinite Surface[$t] requires a 3- or 4-curve boundary"))
+        "$caller: transfinite Surface[$t] requires a 3- or 4-curve boundary " *
+        "after skipping degenerated curves (got $nside)"))
     curve_points=Vector{Vector{NTuple{3,Float64}}}(undef,nside)
     for (position,signed) in enumerate(signed_curves)
         curve=abs(signed)
@@ -4609,7 +4653,8 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             "$caller: transfinite Surface[$t] requires boundary Curve[$curve] " *
             "to be transfinite"))
         params=_transfinite_parameters(
-            cspec.num_nodes,cspec.kind,cspec.coef,caller,curve)
+            m,cspec.num_nodes,cspec.kind,cspec.coef,caller,curve;
+            reversed=cspec.reversed)
         points=[_periodic_curve_point(m,curve,p,caller) for p in params]
         signed<0 && reverse!(points)
         curve_points[position]=points
@@ -5275,13 +5320,13 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
                 _model_require_line_curve(m,curve,caller,
                                           "compound surface meshing")
                 cspec=get(m.meshing.transfinite_curves,curve,nothing)
-                cspec===nothing ||
+                (cspec===nothing || curve in m.meshing.degenerated) ||
                     (forced[curve]=collect(_transfinite_parameters(
-                        cspec.num_nodes,cspec.kind,cspec.coef,
-                        caller,curve)))
+                        m,cspec.num_nodes,cspec.kind,cspec.coef,
+                        caller,curve;reversed=cspec.reversed)))
                 loop_segment=Int[]
                 for parameter in _surface_curve_parameters(
-                        forced,curve,signed)
+                        m,forced,curve,signed)
                     vertex=if parameter==0
                         _add_surface_point!(
                             xs,ys,mesh_sizes,index,m,a,caller,plane)

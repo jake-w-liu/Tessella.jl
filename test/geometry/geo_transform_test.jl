@@ -367,8 +367,13 @@ end
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Frobnicate{1}; }") isa ArgumentError
     @test occursin("unknown action on multiple shapes",_transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Frobnicate{Point{1};} }").msg)
-    @test occursin("unknown Physical",_transform_error(
-        "Point(1)={0,0,0,1}; Translate {1,0,0} { Physical Point{99}; }").msg)
+    # A missing Physical group silently expands to nothing — Gmsh resolves the
+    # selector through the synchronized group map, which has no entry for 99.
+    r=_execute_transform_source("""
+        Point(1) = {0,0,0,1};
+        Translate {1,0,0} { Physical Point{99}; }
+        """)
+    @test r.model.points[1]==(0.0,0.0,0.0)
     # Boundary of a Point returns nothing (Gmsh behavior, no error).
     r=_execute_transform_source("""
         Point(1) = {0,0,0,1};

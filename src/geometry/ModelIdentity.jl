@@ -454,6 +454,12 @@ function _model_identity_meshing(
     outward=Set{Int}(dimension==3 ?
         (tag==old_tag ? new_tag : tag for tag in attributes.outward_orientation) :
         attributes.outward_orientation)
+    degenerated=Set{Int}(dimension==1 ?
+        (tag==old_tag ? new_tag : tag for tag in attributes.degenerated) :
+        attributes.degenerated)
+    quad_tri=Set{Int}(dimension==3 ?
+        (tag==old_tag ? new_tag : tag for tag in attributes.quad_tri) :
+        attributes.quad_tri)
     compounds=Pair{Int,Vector{Int}}[
         cdim==dimension ? cdim=>[t==old_tag ? new_tag : t for t in ctags] :
                           cdim=>copy(ctags)
@@ -472,6 +478,8 @@ function _model_identity_meshing(
     migrated.size_callback=attributes.size_callback
     migrated.compounds=compounds
     migrated.outward_orientation=outward
+    migrated.degenerated=degenerated
+    migrated.quad_tri=quad_tri
     migrated.order=attributes.order
     migrated.transfinite_tri=attributes.transfinite_tri
     migrated.attached=_model_identity_discrete_map(

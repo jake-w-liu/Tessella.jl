@@ -51,6 +51,8 @@ using ..Model: _affine_translation, _affine_dilation
 using ..Model: _affine_rotation, _affine_symmetry, _entity_label
 using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!
 using ..Model: _model_boundary, _model_points_of, _model_direct_boundary
+using ..Model: _model_entity_dictionary, _model_entity_known, remove_embedded!
+using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
@@ -65,6 +67,8 @@ using ..IO: _geo_apply_list_assignment!, _geo_list_term_values
 using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!,_geo_allocator_resync_model!
+using ..IO: _geo_allocator_delete_entities!, _geo_allocator_reset_model!
+using ..IO: _geo_context_forget!
 using ..IO: _geo_physical_declaration
 using ..Transform: _affine_coordinate
 
@@ -576,8 +580,10 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                     "{..}` is OpenCASCADE-only and not implemented"))
             end
             _geo_context_refresh_allocators!(context,allocator_state)
-            assigned=_exec_line!(m,line,context)
+            assigned=_exec_line!(m,line,context,allocator_state)
             assigned===nothing || (transfinite_tri=assigned)
+            # `Delete`-family statements already drove the allocator update
+            # inside `_geo_exec_delete!`; the observer skips them.
             _geo_allocator_observe_statement!(
                 allocator_state,line,context,"execute_geo")
             occursin(r"\bBoolean(?:Difference|Union|Intersection|Fragments)?\b",
@@ -1137,12 +1143,14 @@ end
 # effects; the resulting entity list is returned for the enclosing transform.
 function _geo_shape_list_entities!(m::GeoModel, raw::AbstractString,
                                    context::_GeoNumericContext,
-                                   caller::AbstractString)
+                                   caller::AbstractString;
+                                   signed_tags::Bool=false)
     entities=NTuple{2,Int}[]
     s=String(strip(raw))
     while !isempty(s)
         (entries,rest,transform)=
-            _geo_multiple_shape_element!(m,s,context,caller)
+            _geo_multiple_shape_element!(m,s,context,caller;
+                                         signed_tags=signed_tags)
         if transform && (!isempty(entities) || !isempty(rest))
             throw(ArgumentError(
                 "$caller: a transform or shape action cannot be combined " *
@@ -1206,9 +1214,13 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         name=="Parent" && return (NTuple{2,Int}[],s,false)
         entries=NTuple{2,Int}[]
         for gtag in _geo_shape_physical_tags(m,dim,group,context,caller)
-            haskey(m.physical,(dim,gtag)) || throw(ArgumentError(
-                "$caller: unknown Physical $(_entity_label(dim))[$gtag]"))
-            for tag in m.physical[(dim,gtag)]
+            members=get(m.physical,(dim,gtag),nothing)
+            # Gmsh resolves the group through the model: an unknown tag (or a
+            # group whose members were all `Delete`d) silently contributes
+            # nothing, and stale member integers resolve to live entities only.
+            members===nothing && continue
+            for tag in members
+                _model_entity_known(m,dim,tag) || continue
                 push!(entries,(dim,tag))
             end
         end
@@ -1959,8 +1971,421 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# `.geo` meshing-constraint statements (the Gmsh `Constraints` grammar family)
+# and the `Delete`/`SetTag`/`SetMaxTag` lifecycle statements.
+#
+# These handlers reproduce the `GEO_Internals` setter contracts directly:
+# statements record on entities that exist at execution time and silently skip
+# the rest; entity lists accept Gmsh's `ListOfDouble` forms (`{...}`, bare
+# `FExpr`/`FExpr_Multi`, `-{...}`, `expr*{...}`, list-variable references), and
+# `ListOfDoubleOrAll` additionally accepts the `{:}`/`"*"`/`"all"` wildcards —
+# expanded over the entities that exist *when the statement runs* (a wildcard
+# does not reach entities created later). Tag values truncate like C `(int)`;
+# where a setter maps tag 0 to the whole dimension, a |value| < 1 entry does
+# the same.
+
+# `.geo` `ListOfDoubleOrAll`/`ListOfDouble` evaluation. Returns `nothing` for
+# the wildcard forms (only legal where the grammar allows them). Bare
+# scalars/ranges/variables are wrapped in braces; anything already carrying
+# braces (`{...}`, `-{...}`, `expr*{...}`, selector forms) goes to the list
+# evaluator directly, matching the `ListOfDouble` grammar productions.
+function _geo_constraint_list(raw::AbstractString,context::_GeoNumericContext,
+                              caller::AbstractString;allow_all::Bool)
+    s=String(strip(raw))
+    isempty(s) && throw(ArgumentError("$caller: entity list must not be empty"))
+    if allow_all && (s=="\"*\"" || s=="\"all\"" ||
+                     match(r"^\{\s*:\s*\}$",s)!==nothing)
+        return nothing
+    end
+    source=occursin(r"[{}]",s) ? s : "{$s}"
+    return _geo_numeric_list_values(source,context,caller)
+end
+
+# C-style `(int)` truncation for `.geo` tag/count/affect values.
+function _geo_constraint_int(value::Float64,caller::AbstractString,what::String)
+    isfinite(value) || throw(ArgumentError("$caller: $what must be finite"))
+    tag=try
+        trunc(Int32,value)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: $what $value is outside Gmsh's signed 32-bit integer range"))
+    end
+    return Int(tag)
+end
+
+# Case-sensitive `.geo` `Using` law names — Gmsh matches them with `strcmp`.
+const _GEO_TRANSFINITE_CURVE_LAWS=Dict{String,Symbol}(
+    "Progression"=>:progression,"Power"=>:progression,
+    "Bump"=>:bump,"Beta"=>:beta,
+    "Progression_HWall"=>:progression_hwall,"Bump_HWall"=>:bump_hwall,
+    "Beta_HWall"=>:beta_hwall,"Beta_Symmetrical"=>:beta_symmetrical,
+    "Beta_Symmetrical_HWall"=>:beta_symmetrical_hwall)
+
+# `Transfinite Curve{list} = n [Using Law coef];` — records the raw signed
+# semantics of `setTransfiniteLine`: the list entry's sign negates the stored
+# transfinite type (`reversed` on the record) while `coef` is stored verbatim;
+# an entry truncating to 0 expands to every current curve.
+function _geo_exec_transfinite_curve!(m::GeoModel,list_raw::AbstractString,
+                                      tail::AbstractString,
+                                      context::_GeoNumericContext)
+    caller="execute_geo: Transfinite Curve"
+    nsource=String(strip(tail));kind=:progression;coef=1.0
+    split=_geo_split_at_keyword(nsource,"Using",caller)
+    if split!==nothing
+        (nsource,using_tail)=split
+        um=match(r"^\"?([A-Za-z_][A-Za-z0-9_]*)\"?\s+(.+?)\s*$",
+                 String(strip(using_tail)))
+        um===nothing && throw(ArgumentError(
+            "$caller: expected `Using <law> <coefficient>`"))
+        kind=get(_GEO_TRANSFINITE_CURVE_LAWS,um.captures[1],nothing)
+        kind===nothing && throw(ArgumentError(
+            "$caller: unknown transfinite mesh type $(repr(um.captures[1]))"))
+        coef=_geo_eval_numeric(um.captures[2],context,"$caller coefficient")
+    end
+    isfinite(coef) || throw(ArgumentError(
+        "$caller: coefficient must be finite"))
+    nraw=_geo_eval_numeric(nsource,context,"$caller node count")
+    ncount=max(2,_geo_constraint_int(nraw,caller,"node count"))
+    list=_geo_constraint_list(list_raw,context,caller;allow_all=true)
+    targets=list===nothing ? sort!(collect(keys(m.curves))) : nothing
+    if targets!==nothing
+        for curve in targets
+            m.meshing.transfinite_curves[curve]=(
+                num_nodes=ncount,kind=kind,coef=coef,reversed=false)
+        end
+        return nothing
+    end
+    for value in list
+        sd=_geo_constraint_int(value,caller,"Curve tag")
+        j=abs(sd)
+        if j==0
+            # `setTransfiniteLine(±0, ...)` is the wildcard call — the stored
+            # type is `type * gmsh_sign(value)`, so an exact-zero entry zeroes
+            # the type and `F_Transfinite` falls through to a uniform
+            # distribution, while ±subinteger entries keep the law ±reversed.
+            effective=iszero(value) ? :uniform : kind
+            for curve in sort!(collect(keys(m.curves)))
+                m.meshing.transfinite_curves[curve]=(
+                    num_nodes=ncount,kind=effective,coef=coef,
+                    reversed=value<0)
+            end
+            continue
+        end
+        haskey(m.curves,j) || continue
+        m.meshing.transfinite_curves[j]=(
+            num_nodes=ncount,kind=kind,coef=coef,reversed=sd<0)
+    end
+    return nothing
+end
+
+# A trailing `TransfiniteArrangement`/`Using`-style bare or quoted word. Returns
+# `(head, word)` when the statement ends with such a token and the head is
+# nonempty — a lone word is the list itself, not an arrangement.
+function _geo_constraint_trailing_word(body::AbstractString)
+    s=String(strip(body))
+    mm=match(r"^(.*?)\s+([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*$",s)
+    mm===nothing && return (s,nothing)
+    head=String(strip(mm.captures[1]))
+    isempty(head) && return (s,nothing)
+    return (head,String(strip(mm.captures[2])))
+end
+
+# `TransfiniteArrangement` — Gmsh maps `Left`→-1, `Right`→1,
+# `AlternateRight`→2, `AlternateLeft`→-2, and every other word (including bare
+# `Alternate`) to 2 without an error.
+function _geo_transfinite_arrangement(word::Union{String,Nothing})
+    word===nothing && return :left
+    w=strip(word,'"')
+    w=="Left" && return :left
+    w=="Right" && return :right
+    w=="AlternateLeft" && return :alternate_left
+    return :alternate_right
+end
+
+# `Transfinite Surface{list} [= {corners}] [arrangement];` — `FindSurface` is a
+# signed lookup, so negative entries silently skip while a zero entry (and the
+# `{:}`/`"all"` wildcards) applies the method and arrangement to every current
+# surface with the corner list reset. On a live surface a nonempty corner list
+# must hold 3 or 4 existing points; other counts and unknown points are Gmsh
+# errors, while a missing surface skips the whole check silently.
+function _geo_exec_transfinite_surface!(m::GeoModel,body::AbstractString,
+                                        context::_GeoNumericContext)
+    caller="execute_geo: Transfinite Surface"
+    head,word=_geo_constraint_trailing_word(body)
+    mode=_geo_transfinite_arrangement(word)
+    list_raw=head;corners=Int[]
+    eq=findfirst(==('='),head)
+    if eq!==nothing
+        list_raw=String(strip(head[firstindex(head):prevind(head,eq)]))
+        corner_source=String(strip(head[nextind(head,eq):end]))
+        isempty(corner_source) && throw(ArgumentError(
+            "$caller: `=` must be followed by the corner Point list"))
+        values=_geo_constraint_list(corner_source,context,"$caller corners";
+                                    allow_all=false)
+        corners=Int[abs(_geo_constraint_int(v,caller,"corner Point tag"))
+                    for v in values]
+    end
+    list=_geo_constraint_list(list_raw,context,caller;allow_all=true)
+    function apply(tag::Int,corner_tags::Vector{Int})
+        if !isempty(corner_tags)
+            length(corner_tags) in (3,4) || throw(ArgumentError(
+                "$caller: Transfinite surface requires 3 or 4 corner points"))
+            for point_tag in corner_tags
+                haskey(m.points,point_tag) || throw(ArgumentError(
+                    "$caller: unknown corner Point[$point_tag]"))
+            end
+        end
+        m.meshing.transfinite_surfaces[tag]=(
+            arrangement=mode,corners=copy(corner_tags))
+        return nothing
+    end
+    list===nothing && return (foreach(
+        tag->apply(tag,Int[]),sort!(collect(keys(m.surfaces)))); nothing)
+    for value in list
+        sd=_geo_constraint_int(value,caller,"Surface tag")
+        sd==0 && (foreach(
+            tag->apply(tag,Int[]),sort!(collect(keys(m.surfaces)))); continue)
+        sd<0 && continue
+        haskey(m.surfaces,sd) || continue
+        apply(sd,corners)
+    end
+    return nothing
+end
+
+# `Transfinite Volume{list} [= {corners}];` — same shape as the surface form
+# minus the arrangement word. Gmsh applies the corner list only when it holds 6
+# or 8 points; other counts are silently dropped (the volume still gets the
+# transfinite method with automatic corners).
+function _geo_exec_transfinite_volume!(m::GeoModel,body::AbstractString,
+                                       context::_GeoNumericContext)
+    caller="execute_geo: Transfinite Volume"
+    s=String(strip(body))
+    list_raw=s;corners=Int[]
+    eq=findfirst(==('='),s)
+    if eq!==nothing
+        list_raw=String(strip(s[firstindex(s):prevind(s,eq)]))
+        corner_source=String(strip(s[nextind(s,eq):end]))
+        isempty(corner_source) && throw(ArgumentError(
+            "$caller: `=` must be followed by the corner Point list"))
+        values=_geo_constraint_list(corner_source,context,"$caller corners";
+                                    allow_all=false)
+        corner_tags=Int[abs(_geo_constraint_int(v,caller,"corner Point tag"))
+                        for v in values]
+        length(corner_tags) in (6,8) && (corners=corner_tags)
+    end
+    list=_geo_constraint_list(list_raw,context,caller;allow_all=true)
+    function apply(tag::Int,corner_tags::Vector{Int})
+        for point_tag in corner_tags
+            haskey(m.points,point_tag) || throw(ArgumentError(
+                "$caller: unknown corner Point[$point_tag]"))
+        end
+        m.meshing.transfinite_volumes[tag]=copy(corner_tags)
+        return nothing
+    end
+    list===nothing && return (foreach(
+        tag->apply(tag,Int[]),sort!(collect(keys(m.volumes)))); nothing)
+    for value in list
+        sd=_geo_constraint_int(value,caller,"Volume tag")
+        sd==0 && (foreach(
+            tag->apply(tag,Int[]),sort!(collect(keys(m.volumes)))); continue)
+        sd<0 && continue
+        haskey(m.volumes,sd) || continue
+        apply(sd,corners)
+    end
+    return nothing
+end
+
+# Statements whose setter maps tag 0 to every entity of the dimension and a
+# signed lookup to the rest: `Transfinite Surface/Volume`, `TransfQuadTri`,
+# `Recombine`, `Smoother`, `ReverseMesh`. `apply` receives each target tag;
+# unknown and negative entries silently skip.
+function _geo_constraint_apply(m::GeoModel,dimension::Int,
+                               list::Union{Vector{Float64},Nothing},
+                               caller::AbstractString,apply)
+    all_tags()=sort!(collect(keys(_model_entity_dictionary(m,dimension))))
+    list===nothing && return (foreach(apply,all_tags()); nothing)
+    for value in list
+        sd=_geo_constraint_int(value,caller,"entity tag")
+        sd==0 && (foreach(apply,all_tags()); continue)
+        sd<0 && continue
+        haskey(_model_entity_dictionary(m,dimension),sd) || continue
+        apply(sd)
+    end
+    return nothing
+end
+
+# `Compound Curve|Surface|Volume{list} [MeshAlgorithm n];` — the constraint
+# form stores the raw member list on the internals multimap; a `MeshAlgorithm`
+# suffix appends `-(int)value` to that list (resolved, and silently dropped for
+# missing members, at sync time).
+function _geo_exec_compound!(m::GeoModel,dimension::Int,body::AbstractString,
+                             context::_GeoNumericContext)
+    caller="execute_geo: Compound $(_entity_label(dimension))"
+    s=String(strip(body))
+    split=_geo_split_at_keyword(s,"MeshAlgorithm",caller)
+    list_raw=s;algorithm=nothing
+    if split!==nothing
+        (list_raw,algorithm_raw)=split
+        algorithm=_geo_constraint_int(
+            _geo_eval_numeric(algorithm_raw,context,
+                              "$caller MeshAlgorithm"),
+            caller,"MeshAlgorithm")
+    end
+    values=_geo_numeric_list_values(
+        startswith(list_raw,"{") ? list_raw : "{$list_raw}",context,
+        "$caller entity list")
+    tags=Int[_geo_constraint_int(v,caller,"entity tag") for v in values]
+    algorithm===nothing || push!(tags,-algorithm)
+    push!(m.meshing.compounds,dimension=>tags)
+    return nothing
+end
+
+# `.geo` `Delete`/`Recursive Delete`/`Delete Embedded` and the named `Delete X`
+# forms. `tail` is everything after the `Delete` keyword(s).
+function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
+                           context::_GeoNumericContext,
+                           allocator_state)
+    caller="execute_geo: $(recursive ? "Recursive " : "")Delete"
+    s=String(strip(tail))
+    if startswith(s,"{")
+        (inner,rest)=_geo_balanced_group(s,caller)
+        isempty(strip(rest)) || throw(ArgumentError(
+            "$caller: unexpected text after the entity list"))
+        entities=_geo_shape_list_entities!(
+            m,inner,context,caller;signed_tags=true)
+        removed=_geo_delete_entities!(m,entities;recursive=recursive)
+        allocator_state===nothing ||
+            _geo_allocator_delete_entities!(allocator_state,removed)
+        return nothing
+    end
+    recursive && throw(ArgumentError(
+        "$caller: expected `{ ListOfShapes }` after `Recursive Delete`"))
+    # `Delete Embedded { Surface{...}; Volume{...}; }` clears every embedding
+    # on the listed parents (dims 2 and 3 only — lower-dim entries are ignored
+    # and a missing parent is an error), matching `removeEmbedded`.
+    if (em=match(r"^(?:Embedded|\"Embedded\")\s*(.*)$",s))!==nothing
+        rest=String(strip(em.captures[1]))
+        startswith(rest,"{") || throw(ArgumentError(
+            "$caller: `Delete Embedded` requires a `{...}` entity list"))
+        (inner,rest)=_geo_balanced_group(rest,caller)
+        isempty(strip(rest)) || throw(ArgumentError(
+            "$caller: unexpected text after the entity list"))
+        entities=_geo_shape_list_entities!(
+            m,inner,context,caller;signed_tags=true)
+        dim_tags=NTuple{2,Int}[]
+        for (dim,tag) in entities
+            dim in (2,3) || continue
+            haskey(_model_entity_dictionary(m,dim),tag) || throw(ArgumentError(
+                "$caller: unknown model $(_entity_label(dim)) with tag $tag"))
+            push!(dim_tags,(dim,tag))
+        end
+        remove_embedded!(m,dim_tags)
+        return nothing
+    end
+    # `Delete Field[i]` drops a mesh field — field lifecycle lives in the
+    # parameter pre-pass, so it is a no-op here. `Delete View[i]` reports an
+    # unknown view and any other indexed name an unknown command in Gmsh.
+    if (fm=match(
+            r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\[\s*(.*?)\s*\]\s*;?$",
+            s))!==nothing
+        base=String(strip(fm.captures[1],'"'))
+        base=="Field" && return nothing
+        base=="View" && throw(ArgumentError(
+            "$caller: unknown view $(strip(fm.captures[2]))"))
+        throw(ArgumentError("$caller: unknown command 'Delete $base'"))
+    end
+    # `Delete Empty Views` clears empty post-processing views — none exist
+    # during `.geo` execution; any other two-word form is an unknown command.
+    if (tm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?$",
+                 s))!==nothing
+        tm.captures[1]=="Empty" && tm.captures[2]=="Views" && return nothing
+        throw(ArgumentError(
+            "$caller: unknown command 'Delete $(tm.captures[1]) $(tm.captures[2])'"))
+    end
+    # Named forms: `Delete All|Model|Physicals|Variables|Options|Meshes|Struct;`,
+    # `Delete <variable>;`, and the `Delete <name>~{expr};` namespaced symbol
+    # form (`name_<int(expr)>`).
+    name=begin
+        if (nm=match(
+                r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*;?$",
+                s)) !== nothing
+            String(strip(nm.captures[1],'"'))
+        elseif (nm=match(
+                r"^([A-Za-z_][A-Za-z0-9_]*)\s*~\s*\{\s*(.*?)\s*\}\s*;?$",
+                s)) !== nothing
+            idx=_geo_constraint_int(
+                _geo_eval_numeric(nm.captures[2],context,
+                                  "$caller namespace index"),
+                caller,"namespace index")
+            String(nm.captures[1])*"_"*string(idx)
+        else
+            throw(ArgumentError("$caller: malformed Delete statement"))
+        end
+    end
+    if name=="All"
+        # `ClearProject` — the whole model goes away (including the physical
+        # name table and compound specs, which live on the destroyed objects),
+        # the factory choice reverts to the built-in kernel, and every parser
+        # variable is cleared. Function definitions survive.
+        _geo_reset_model_geometry!(m)
+        empty!(m.physical_names)
+        empty!(m.meshing.compounds)
+        empty!(context.values);empty!(context.lists)
+        empty!(context.list_variables)
+        empty!(context.unavailable);empty!(context.unavailable_lists)
+        context.stored_list_items=0
+        if allocator_state!==nothing
+            _geo_allocator_reset_model!(allocator_state)
+            allocator_state.factory=:builtin
+        end
+        return nothing
+    elseif name=="Model"
+        _geo_reset_model_geometry!(m)
+        allocator_state===nothing ||
+            _geo_allocator_reset_model!(allocator_state)
+        return nothing
+    elseif name=="Physicals"
+        # `resetPhysicalGroups` drops the group records but neither the names
+        # nor the physical tag counter.
+        empty!(m.physical)
+        return nothing
+    elseif name=="Variables"
+        empty!(context.values);empty!(context.lists)
+        empty!(context.list_variables)
+        empty!(context.unavailable);empty!(context.unavailable_lists)
+        context.stored_list_items=0
+        return nothing
+    elseif name=="Options"
+        # `ReInitOptions` — restore the option-valued state `.geo` execution
+        # tracks: mesh order, the transfinite-triangle flag, and the extrude
+        # result-list behavior.
+        m.meshing.order=1
+        m.meshing.transfinite_tri=0
+        context.extrude_return_lateral=true
+        return 0
+    elseif name=="Meshes"
+        # `GModel::deleteMesh` — no mesh exists during `.geo` execution.
+        return nothing
+    elseif name=="Struct"
+        # `gmsh_yynamespaces.clear()` — `Struct` definitions are unsupported,
+        # so clearing them is a no-op.
+        return nothing
+    end
+    known=haskey(context.values,name) || haskey(context.lists,name) ||
+          haskey(context.unavailable,name) ||
+          haskey(context.unavailable_lists,name)
+    known || throw(ArgumentError(
+        "$caller: unknown object or expression to delete $(repr(name))"))
+    _geo_context_forget!(context,name)
+    delete!(context.unavailable,name);delete!(context.unavailable_lists,name)
+    return nothing
+end
+
 function _exec_line!(m::GeoModel,line::AbstractString,
-                     context::_GeoNumericContext)
+                     context::_GeoNumericContext,
+                     allocator_state=nothing)
     if occursin(r"^Periodic(?:\s|$)",line)
         _exec_periodic!(m,line,context)
         return
@@ -2281,9 +2706,171 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             mm.captures[3],context,"$caller value")
         set_point_mesh_size!(m,point_tags,mesh_size)
         return
-    elseif match(
-            r"^SetMaxTag\s+(?:Point|Curve|Surface|Volume)\s*\(\s*.+\s*\)\s*;$",
-            line) !== nothing
+    elseif (mm=match(
+            r"^Transfinite\s+(?:Curve|Line)\s*(.*?)\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        _geo_exec_transfinite_curve!(m,mm.captures[1],mm.captures[2],context)
+        return
+    elseif (mm=match(
+            r"^Transfinite\s+Surface\s*(.*?)\s*;$",line)) !== nothing
+        _geo_exec_transfinite_surface!(m,mm.captures[1],context)
+        return
+    elseif (mm=match(
+            r"^Transfinite\s+Volume\s*(.*?)\s*;$",line)) !== nothing
+        _geo_exec_transfinite_volume!(m,mm.captures[1],context)
+        return
+    elseif (mm=match(
+            r"^TransfQuadTri\s*(.*?)\s*;$",line)) !== nothing
+        # `TransfQuadTri` records the QuadTri flag on volumes; the QuadTri
+        # hexahedral algorithm itself is a native-kernel blocker that surfaces
+        # when a flagged volume is meshed.
+        list=_geo_constraint_list(mm.captures[1],context,
+                                  "execute_geo: TransfQuadTri";allow_all=true)
+        _geo_constraint_apply(m,3,list,"execute_geo: TransfQuadTri",
+                              tag->push!(m.meshing.quad_tri,tag))
+        return
+    elseif (mm=match(
+            r"^Recombine\s+Surface\s*(.*?)\s*(?:=\s*(.*?)\s*)?;$",
+            line)) !== nothing
+        caller="execute_geo: Recombine Surface"
+        # `RecombineAngle` is `(int)FExpr`, default 45.
+        angle=mm.captures[2]===nothing ? 45.0 :
+            Float64(_geo_constraint_int(
+                _geo_eval_numeric(mm.captures[2],context,"$caller angle"),
+                caller,"angle"))
+        list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=true)
+        let angle=angle
+            _geo_constraint_apply(m,2,list,caller,
+                tag->(m.meshing.recombine[(2,tag)]=angle;nothing))
+        end
+        return
+    elseif (mm=match(
+            r"^Recombine\s+Volume\s*(.*?)\s*;$",line)) !== nothing
+        list=_geo_constraint_list(mm.captures[1],context,
+                                  "execute_geo: Recombine Volume";
+                                  allow_all=true)
+        _geo_constraint_apply(m,3,list,"execute_geo: Recombine Volume",
+            tag->(m.meshing.recombine[(3,tag)]=0.0;nothing))
+        return
+    elseif (mm=match(
+            r"^Smoother\s+Surface\s*(.*?)\s*=\s*(.*?)\s*;$",line)) !== nothing
+        caller="execute_geo: Smoother Surface"
+        count=_geo_constraint_int(
+            _geo_eval_numeric(mm.captures[2],context,"$caller iteration count"),
+            caller,"iteration count")
+        list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=true)
+        _geo_constraint_apply(m,2,list,caller,
+            tag->(m.meshing.smoothing[(2,tag)]=count;nothing))
+        return
+    elseif (mm=match(
+            r"^MeshAlgorithm\s+Surface\s*(\{.*\})\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: MeshAlgorithm Surface"
+        number=_geo_constraint_int(
+            _geo_eval_numeric(mm.captures[2],context,"$caller algorithm"),
+            caller,"algorithm")
+        list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=false)
+        for value in list
+            sd=_geo_constraint_int(value,caller,"Surface tag")
+            haskey(m.surfaces,sd) || continue
+            m.meshing.algorithm[(2,sd)]=number
+        end
+        return
+    elseif (mm=match(
+            r"^MeshSizeFromBoundary\s+Surface\s*(\{.*\})\s*=\s*(.*?)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: MeshSizeFromBoundary Surface"
+        number=_geo_constraint_int(
+            _geo_eval_numeric(mm.captures[2],context,"$caller value"),
+            caller,"value")
+        list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=false)
+        for value in list
+            sd=_geo_constraint_int(value,caller,"Surface tag")
+            haskey(m.surfaces,sd) || continue
+            number==0 ? delete!(m.meshing.size_from_boundary,(2,sd)) :
+                        (m.meshing.size_from_boundary[(2,sd)]=true)
+        end
+        return
+    elseif (mm=match(
+            r"^(?:Reverse|ReverseMesh)\s+(Curve|Line|Surface)\s*(.*?)\s*;$",
+            line)) !== nothing
+        dim=mm.captures[1]=="Surface" ? 2 : 1
+        caller="execute_geo: ReverseMesh $(_entity_label(dim))"
+        list=_geo_constraint_list(mm.captures[2],context,caller;allow_all=true)
+        let dim=dim
+            _geo_constraint_apply(m,dim,list,caller,
+                tag->(m.meshing.reverse[(dim,tag)]=true;nothing))
+        end
+        return
+    elseif (mm=match(
+            r"^RelocateMesh\s+(Point|Curve|Line|Surface)\s*(.*?)\s*;$",
+            line)) !== nothing
+        # `RelocateMesh` retargets existing mesh vertices onto other entities;
+        # no mesh exists during .geo execution, so only the list is validated.
+        _geo_constraint_list(mm.captures[2],context,
+                             "execute_geo: RelocateMesh";allow_all=true)
+        return
+    elseif (mm=match(
+            r"^ReorientMesh\s+Volume\s*(.*?)\s*;$",line)) !== nothing
+        # `ReorientMesh` flips boundary-face mesh orientations on an existing
+        # volume mesh via a solid-angle parity walk; with no mesh during .geo
+        # execution it changes nothing and stores no state.
+        _geo_constraint_list(mm.captures[1],context,
+                             "execute_geo: ReorientMesh Volume";allow_all=false)
+        return
+    elseif (mm=match(
+            r"^Degenerated\s+(?:Curve|Line)\s*(.*?)\s*;$",line)) !== nothing
+        caller="execute_geo: Degenerated Curve"
+        list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=false)
+        for value in list
+            sd=_geo_constraint_int(value,caller,"Curve tag")
+            haskey(m.curves,sd) || continue
+            push!(m.meshing.degenerated,sd)
+        end
+        return
+    elseif (mm=match(
+            r"^Compound\s+(Curve|Line|Surface|Volume)\s*(.*?)\s*;$",
+            line)) !== nothing
+        dim=mm.captures[1]=="Surface" ? 2 : mm.captures[1]=="Volume" ? 3 : 1
+        _geo_exec_compound!(m,dim,mm.captures[2],context)
+        return
+    elseif match(r"^RecombineMesh\s*;$",line) !== nothing
+        # `RecombineMesh;` recombines an existing mesh — a no-op while no mesh
+        # exists during .geo execution.
+        return
+    elseif (mm=match(r"^(Recursive\s+)?Delete\b(.*)$",line)) !== nothing
+        return _geo_exec_delete!(m,mm.captures[1]!==nothing,
+                                 String(mm.captures[2]),context,
+                                 allocator_state)
+    elseif match(r"^SetTag\b",line) !== nothing
+        throw(ArgumentError(
+            "execute_geo: SetTag cannot retag entities during .geo parsing — " *
+            "Gmsh applies it to the synchronized model, which is still empty " *
+            "at that point, so it reports the entity as unknown"))
+    elseif (mm=match(
+            r"^SetMaxTag\s+(?:(Point|Curve|Line|Surface|Volume)|GeoEntity\s*\{\s*(.*?)\s*\})\s*\(\s*(.*?)\s*\)\s*;$",
+            line)) !== nothing
+        caller="execute_geo: SetMaxTag"
+        dim=if mm.captures[1]!==nothing
+            mm.captures[1]=="Point" ? 0 : mm.captures[1] in ("Curve","Line") ? 1 :
+                mm.captures[1]=="Surface" ? 2 : 3
+        else
+            d=_geo_eval_numeric(mm.captures[2],context,"$caller dimension")
+            d in (0,1,2,3) || throw(ArgumentError(
+                "$caller: dimension must be 0..3 (got $d)"))
+            Int(d)
+        end
+        value=_geo_constraint_int(
+            _geo_eval_numeric(mm.captures[3],context,"$caller tag"),
+            caller,"tag")
+        # `GEO_Internals::setMaxTag` is an unconditional assignment while
+        # `OCC_Internals::setMaxTag` keeps `max(current, value)`; the allocator
+        # observer applies the same split to its own namespaces.
+        if allocator_state===nothing || allocator_state.factory!==:opencascade
+            m.next_tag[dim+1]=value
+        else
+            m.next_tag[dim+1]=max(m.next_tag[dim+1],value)
+        end
         return
     elseif (mm=match(
             r"^Coherence(?:\s+(Geometry|Mesh)|\s+Point\s*\{\s*(.*?)\s*\})?\s*;$",

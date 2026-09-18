@@ -115,11 +115,33 @@ retagging, and removal;
 meshing paths that cannot honor the geometry fail explicitly instead of
 treating curved records as chords. `Function name ... Return`/`Call name;` run Gmsh's
 zero-argument function semantics with token-level body capture and bounded
-recursion. It rejects
+recursion. The meshing-constraint statements reproduce the `GEO_Internals`
+setters — `Transfinite Curve` (Progression/Power/Bump/Beta, the `_HWall`
+wall-height variants, and the grammar-only `Beta_Symmetrical` forms, with
+signed-tag distribution reversal and tag-0 wildcards), `Transfinite Surface`
+with `Left`/`Right`/`Alternate*` arrangements and live-target corner
+validation, `Transfinite Volume` with 6/8-corner acceptance, `TransfQuadTri`
+flag recording (the QuadTri algorithm itself is a native-kernel blocker at
+mesh time), `Recombine`/`Smoother`/`MeshAlgorithm`/`MeshSizeFromBoundary`,
+`Reverse`/`ReverseMesh`, `Degenerated`, and `Compound` with the
+`MeshAlgorithm` suffix marker — while `RelocateMesh`, `ReorientMesh`, and
+`RecombineMesh` validate but store nothing, matching Gmsh's no-mesh state.
+`Delete{…}`/`Recursive Delete{…}` follow `GEO_Internals::remove` exactly:
+per-entity list-order attempts, absolute matching for points and curves,
+signed matching for surfaces and volumes, boundary-ownership refusal,
+pre-collected recursive boundaries, and counter decrement only at the
+dimension maximum. Physical groups keep stale member integers that
+resurrect on tag re-creation, and queries filter them out like
+`GModel::getPhysicalGroups`. The named `Delete` forms cover `Embedded`,
+`All`, `Model`, `Physicals`, `Variables`, `Options`, `Meshes`, `Struct`,
+`Field[i]`, variables, and `name~{expr}` namespaces. `SetTag` fails
+explicitly like Gmsh's mid-parse model retag (28 differential cases over
+entity inventory, physical state, mesh node sets, and error paths). It rejects
 `Macro` blocks, option reads, stateful functions, dynamic/general ranges,
 rotational/twist/boundary-layer/pipe extrusions and fillets, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete` and
-`SetMaxTag` counters stay live), and geometry-derived Physical
+`SetMaxTag` counters stay live, while entity-list `Delete`/`Recursive Delete`
+joins the untracked set), and geometry-derived Physical
 right-hand sides beyond the documented inline topology queries.
 `SetMaxTag Point|Curve|Surface|Volume` follows the active factory: Built-in can set
 or lower a geometric counter, while OpenCASCADE only raises it. Allocator reads use
