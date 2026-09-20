@@ -53,7 +53,7 @@ end
     @test nnodes(meshed.mesh)==125
     @test ntets(meshed.mesh)==384
     @test mesh_crc(meshed.mesh).sha==
-          "5fee5952510417ff0e80c6798b74902b9209fb4e9cdfa0194e67ee7b001a74a2"
+          "e59cb4912df62d2927553d4cd5cffbdba2e5d6616db319558ed7a0c24d031cc3"
     volume=sum(tet_volume(
         node(meshed.mesh,meshed.mesh.tets[1,cell]),
         node(meshed.mesh,meshed.mesh.tets[2,cell]),
@@ -65,14 +65,16 @@ end
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "2377796a8fa31340ab3aa939b11ab16983ade4e495c63a18ff1b106eaeb499ce"
+          "fb81cf837080eb18dbdffcd092f3e4efb4c344f5ec16c0287d6356899064f3bd"
 
     optional_size=_execute_geometry_expression_source(
-        "Point(1 + 0.9) = {0:2};")
+        "Point(1 + 0.9) = {0, 1, 2};")
     @test optional_size.model.points[1]==(0.0,1.0,2.0)
-    @test optional_size.model.point_size[1]==1.0
+    # `VExpr_Single`'s 4th component defaults to 0 — the "unset" mesh size.
+    @test optional_size.model.point_size[1]==0.0
 
     transformed=_execute_geometry_expression_source(raw"""
+        SetFactory("OpenCASCADE");
         tag = 1.9;
         Box(Max(1, tag)) = {0, 0, 0, Sqrt(1), 2, 3};
         Translate {1 / 2, -1 / 2, 1} { Volume{tag}; };
@@ -82,6 +84,7 @@ end
     @test collect(transformed.model.box_extents[1])≈[-3.0,1.0,2.0,4.0,2.0,6.0]
 
     primitives=_execute_geometry_expression_source(raw"""
+        SetFactory("OpenCASCADE");
         base = 1.9;
         Cylinder(base) = {0, 0, 0, 0, 0, 2, Sqrt(1) / 2};
         Sphere(base + 1) = {1 / 2, 1 / 2, 1 / 2, 1 / 4};
@@ -92,6 +95,7 @@ end
     @test primitives.model.cones[3].axis==(0.0,2.0,0.0)
 
     boolean=_execute_geometry_expression_source(raw"""
+        SetFactory("OpenCASCADE");
         first = 1.9;
         Box(first) = {0, 0, 0, 2, 1, 1};
         Box(first + 1) = {0, 0, 0, 1, 1, 1};
@@ -108,14 +112,14 @@ end
     invalid_sources=(
         "Point(missing) = {0, 0, 0, 1};",
         "Point(1) = {0, 0};",
-        "Point(1) = {0, 0, 0, 1, 2};",
+        "Point(1) = {0, 0, 0, 1, 2, 3};",
         "Point(1) = {0, 0, 0, 1}; Line(1) = {1:65537};",
         "Point(1) = {0, 0, 0, 1}; Line(1) = {1, 1, 1};",
         "Curve Loop(1) = {0, 1, 2};",
         "Box(1) = {0, 0, 0, 1, 1};",
-        "Box(1) = {0, 0, 0, 1, 1, 1}; " *
+        "SetFactory(\"OpenCASCADE\"); Box(1) = {0, 0, 0, 1, 1, 1}; " *
             "Translate {1, 2} { Volume{1}; };",
-        "Box(1) = {0, 0, 0, 1, 1, 1}; " *
+        "SetFactory(\"OpenCASCADE\"); Box(1) = {0, 0, 0, 1, 1, 1}; " *
             "Box(2) = {2, 0, 0, 1, 1, 1}; " *
             "BooleanUnion(3) = {Volume{1, 2};}{Volume{2};};",
         "Physical Point(1) = {missing};",
@@ -124,12 +128,13 @@ end
         @test _geometry_expression_error(source) isa ArgumentError
     end
     point_count_error=_geometry_expression_error("Point(1) = {0, 0};")
-    @test occursin("expected three coordinates and optional mesh size",
-                   sprint(showerror,point_count_error))
+    # Upstream's `VExpr_Single` needs 3–5 components — `{a,b}` is a syntax
+    # error at the closing `}`.
+    @test occursin("syntax error",sprint(showerror,point_count_error))
     # multi-operand lists are legal; a tag appearing in both operand groups
     # is the rejected case
     boolean_count_error=_geometry_expression_error(
-        "Box(1)={0,0,0,1,1,1}; Box(2)={2,0,0,1,1,1}; " *
+        "SetFactory(\"OpenCASCADE\"); Box(1)={0,0,0,1,1,1}; Box(2)={2,0,0,1,1,1}; " *
         "BooleanUnion(3)={Volume{1,2};}{Volume{2};};")
     @test occursin("Boolean operands must be distinct volumes",
                    sprint(showerror,boolean_count_error))

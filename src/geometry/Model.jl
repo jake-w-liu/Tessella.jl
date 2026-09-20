@@ -35,7 +35,9 @@ using ..Transform: _affine_coordinate, _transform_homogeneous
 using ..Predicates: orient2, orient3
 using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm_atan2, _gm_pow, _gm_sincos
+import LinearAlgebra
 using LinearAlgebra: Symmetric, eigen
+using Printf: @sprintf
 
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
@@ -328,15 +330,16 @@ end
 function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller;
                      literal_zero::Bool=false)
     if requested==0 && !literal_zero
-        m.next_tag[dim+1]<typemax(Int32) || throw(ArgumentError(
-            "$caller: no automatic tags remain in dimension $dim"))
-        m.next_tag[dim+1]+=1
-        while haskey(m.discrete,(dim,m.next_tag[dim+1]))
-            m.next_tag[dim+1]<typemax(Int32) || throw(ArgumentError(
-                "$caller: no automatic tags remain in dimension $dim"))
-            m.next_tag[dim+1]+=1
+        # `getMaxTag(dim) + 1` is a C++ `int` increment — a bump past
+        # INT32_MAX wraps to INT32_MIN, and `setMaxTag(dim, max(cur, num))`
+        # then keeps the larger previous maximum (a wrapped counter stays
+        # pinned at INT32_MAX).
+        candidate=Int(reinterpret(Int32,(Int64(m.next_tag[dim+1])+1) % UInt32))
+        while haskey(m.discrete,(dim,candidate))
+            candidate=Int(reinterpret(Int32,(Int64(candidate)+1) % UInt32))
         end
-        return m.next_tag[dim+1]
+        m.next_tag[dim+1]=max(m.next_tag[dim+1],candidate)
+        return candidate
     end
     m.next_tag[dim+1]=max(m.next_tag[dim+1], requested)
     return requested

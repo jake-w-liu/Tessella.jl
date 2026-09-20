@@ -116,7 +116,7 @@ const _API=Tessella.API
         valid=joinpath(directory,"box.geo")
         invalid=joinpath(directory,"invalid.geo")
         periodic=joinpath(directory,"periodic.geo")
-        write(valid,"Box(1) = {0, 0, 0, 1, 1, 1};\n")
+        write(valid,"SetFactory(\"OpenCASCADE\");\nBox(1) = {0, 0, 0, 1, 1, 1};\n")
         write(invalid,"Extrude {0, 0, 1} { Volume{1}; }\n")
         write(periodic,"""
             Point(1) = {0, 0, 0, 0.5};
@@ -337,7 +337,7 @@ end
             node(generated,generated.tets[4,cell])) for cell in 1:ntets(generated))
         @test volume≈1/6 atol=1e-12
         @test mesh_crc(generated).sha==
-              "979b12cba32c4e7e8317040d31636eca298b177460adec514374372613ba2f23"
+              "03cfdc7130ae46c251a59237671e3bb37dcba83b690accde3770ac4a78d4cbb4"
         expected=mesh_crc(generated)
         @test_throws ArgumentError _API.model.add_surface_loop([1];tag=2)
         @test mesh_crc(_API.mesh.get())==expected
@@ -379,7 +379,7 @@ end
             @test validate(generated).ok
             expected=mesh_crc(generated)
             @test expected.sha==
-                  "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
+                  "a58374071a4c485a339e1c5b48b8b0f3e69bf362ff0e41f57ca1a665139e81df"
             for (slave,master,pairs) in ((4,6,25),(5,3,25))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
@@ -395,7 +395,7 @@ end
 
             refined=_API.mesh.refine()
             @test mesh_crc(refined).sha==
-                  "8cd1448786ce1f65458c088b1772e565df288ab17627f4f6445c7c4c3855ac23"
+                  "97cc7537053d447ca2c9bff1be0be82812c6ce1b7b384d54af3f50c5ee038408"
             for (slave,master,pairs) in ((4,6,81),(5,3,81))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master

@@ -22,7 +22,7 @@ const _PERIODIC_CLI_GEO=replace(
     _SQUARE_GEO,"0, 1};"=>"0, 0.5};") *
     "Periodic Curve {2} = {4} Translate {1, 0, 0};\n"
 const _PERIODIC_VOLUME_CLI_GEO=
-    _PERIODIC_CLI_GEO * "Box(1) = {0, 0, 0, 1, 1, 1};\n"
+    _PERIODIC_CLI_GEO * "SetFactory(\"OpenCASCADE\");\nBox(1) = {0, 0, 0, 1, 1, 1};\n"
 const _PERIODIC_SURFACE_VOLUME_CLI_GEO=read(normpath(joinpath(
     @__DIR__,"..","fixtures","periodic_surface_volume.geo")),String)
 const _GEOMETRY_EXPRESSION_CLI_GEO=read(normpath(joinpath(
@@ -333,7 +333,7 @@ Physical Volume("domain", 72) = {1};
         @test explicit_shell.physical_names==Dict(
             (2,71)=>"boundary",(3,72)=>"domain")
         @test mixed_crc(explicit_shell).sha==
-              "43a1fe0465e78f1466a52de702a2a945a9e2aea3e14145a5a36808d37c26550d"
+              "2157013155e903d8973be1c683ac3ad0f24f5fcb016a9f8bdc98e842cf9a6603"
 
         geometry_expression_input=joinpath(
             directory,"geometry-expressions.geo")
@@ -350,7 +350,7 @@ Physical Volume("domain", 72) = {1};
             (0,70)=>"corners",(0,71)=>"probe",(1,72)=>"edges",
             (2,73)=>"boundary",(3,74)=>"domain")
         @test mixed_crc(geometry_expression).sha==
-              "2377796a8fa31340ab3aa939b11ab16983ade4e495c63a18ff1b106eaeb499ce"
+              "fb81cf837080eb18dbdffcd092f3e4efb4c344f5ec16c0287d6356899064f3bd"
 
         list_variable_input=joinpath(directory,"list-variables.geo")
         list_variable_output=joinpath(directory,"list-variables.msh")
@@ -361,7 +361,7 @@ Physical Volume("domain", 72) = {1};
         list_variable_mesh=read_mixed_msh(list_variable_output)
         @test validate(list_variable_mesh).ok
         @test mixed_crc(list_variable_mesh).sha==
-              "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5"
+              "9a608febd598ab7090d3fb64cb9ff7c7b90c26dc4cc8442e7f54fa121a8fa9ad"
         @test list_variable_mesh.physical_names==Dict(
             (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
             (2,63)=>"boundary",(3,64)=>"domain")
@@ -375,7 +375,7 @@ Physical Volume("domain", 72) = {1};
         dynamic_tag_mesh=read_mixed_msh(dynamic_tag_output)
         @test validate(dynamic_tag_mesh).ok
         @test mixed_crc(dynamic_tag_mesh).sha==
-              "2c0749f8ff2bab314e2efafad8c349e33a1fb17ce481e3344e168f8969b40ece"
+              "8a7d8009ce298b69e9f15cad9927d24446854ac5bb527ed81f5ec0125ee2a713"
         @test dynamic_tag_mesh.physical_names==Dict(
             (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
             (2,63)=>"boundary",(3,64)=>"domain")
@@ -393,7 +393,7 @@ Physical Volume("domain", 72) = {1};
         set_max_tag_mesh=read_mixed_msh(set_max_tag_output)
         @test validate(set_max_tag_mesh).ok
         @test mixed_crc(set_max_tag_mesh).sha==
-              "0f1b2ea4ad06ff62e9e7304a0b91f06c559fe733bbb7c8d3c0ed7f75d5075515"
+              "99234299a71ee9bd717638b770377e900973a6f0527ad554ecf8896178e04be6"
         @test set_max_tag_mesh.physical_names==Dict(
             (0,603)=>"corners",(1,604)=>"edges",
             (2,605)=>"boundary",(3,606)=>"domain")
@@ -418,7 +418,7 @@ Physical Volume("domain", 72) = {1};
         points_of_mesh=read_mixed_msh(points_of_output)
         @test validate(points_of_mesh).ok
         @test mixed_crc(points_of_mesh).sha==
-              "0226b78c2a3dc686c4b13849372e16eab8a1df2235c4e9417c9a087ee0df015c"
+              "c8c177821f3be94440ae0b754cfc26125d6d59620941191b852aeb0beb7a096c"
         @test points_of_mesh.physical_names==
               Dict((0,11)=>"vertices",(3,12)=>"domain",
                    (0,21)=>"endpoints",(1,22)=>"face boundary",
@@ -439,7 +439,7 @@ Physical Volume("domain", 72) = {1};
             periodic_surface_volume_output)
         @test validate(periodic_surface_volume).ok
         @test mixed_crc(periodic_surface_volume).sha==
-              "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5"
+              "9a608febd598ab7090d3fb64cb9ff7c7b90c26dc4cc8442e7f54fa121a8fa9ad"
         @test length(periodic_surface_volume.periodic_links)==15
         @test sort([(Int(link.slave_entity),Int(link.master_entity),
                      length(link.slave_nodes))

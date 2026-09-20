@@ -53,6 +53,11 @@ using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!, _has_en
     _max_entity_physical_number
 using ..Model: _model_boundary, _model_points_of, _model_direct_boundary
 using ..Model: _model_entity_dictionary, _model_entity_known, remove_embedded!
+using ..Model: model_entity, model_entities, model_entities_in_bounding_box
+using ..Model: model_physical_groups, _physical_live_members
+using ..Model: model_entity_color, model_parametrization_bounds, model_normal
+using ..Model: model_reparametrize_on_surface
+using ..Model: _model_entity_bounding_box, _model_bounds_union
 using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
@@ -73,13 +78,15 @@ using ..IO: _geo_allocator_set_factory!
 using ..IO: _geo_context_forget!
 using ..IO: _geo_physical_declaration
 using ..IO: _geo_exec_assignment!, _geo_eval_string, _geo_symbol_name
-using ..IO: _geo_split_args, _geo_yyerror!, _geo_yywarn!, _geo_int_value
+using ..IO: _geo_split_args, _geo_yyerror!, _geo_yywarn!, _geo_yyinfo!,
+            _geo_int_value
 using ..IO: _geo_fix_relative_path, _geo_print_list_of_double
 using ..IO: _geo_vsnprintf_expand
 using ..IO: _geo_string_rhs, _geo_eval_string_list
 using ..IO: _geo_matching_delim, _GEO_COLOR_NAMES
 using ..IO: _geo_option_number
 using ..IO: _geo_msg_error!, _geo_context_has_variable
+using ..IO: _GeoSyntaxAbort, _geo_syntax_abort, _geo_first_token
 using ..IO: GeoFieldSpec, _GEO_FIELD_KINDS, _geo_expression_field_tags
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
@@ -412,11 +419,13 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     context.entity_name_lookup=(dim,tag,kind)->
         kind===:physical ? get(model.physical_names,(dim,tag),"") :
             get(model.entity_names,(dim,tag),"")
-    # `Extrude{...}{...}` and `BooleanX{...}{...}` are side-effecting value
-    # terms in the `.geo` grammar; the numeric evaluator calls back through
-    # this hook.
-    context.exec_hook=src->_geo_exec_value_term(model,src,context)
+    # `Extrude{...}{...}`, `BooleanX{...}{...}`, transform blocks and the
+    # entity-selector expressions (`Point{t}`, `Physical X{...}`, `BoundingBox
+    # X{...}`, ...) are side-effecting or model-reading value terms in the
+    # `.geo` grammar; the numeric evaluator calls back through this hook.
     allocator_state=_GeoTagAllocatorState()
+    context.exec_hook=src->_geo_exec_value_term(
+        model,src,context,allocator_state)
     statements=_geo_exec_statements(path)
     executed=Ref(0)
     transfinite_tri=_exec_geo_statements!(
@@ -610,6 +619,43 @@ function _geo_exec_while!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
     return transfinite_tri,close+1
 end
 
+# `_GeoSyntaxAbort` in a control header: upstream error recovery drops the
+# whole construct — the body never executes and the block closer then parses
+# standalone, reporting `Invalid For/EndFor loop` (error) or `Orphan EndIf`
+# (warning). Skips to the matching closer, emits that diagnostic, and
+# returns the index after it.
+function _geo_skip_aborted_block(statements::Vector{String},i::Int,hi::Int,
+                                 context::_GeoNumericContext)
+    depth=1;j=i+1
+    while j<=hi
+        inner=_geo_control_parse(statements[j])
+        if inner!==nothing
+            if inner.kind===:function
+                # Function bodies run to the first `Return`.
+                while j<=hi
+                    stop=_geo_control_parse(statements[j])
+                    (stop!==nothing && stop.kind===:return) && break
+                    j+=1
+                end
+            elseif inner.kind in (:if,:for,:while)
+                depth+=1
+            elseif inner.kind in (:endif,:endfor,:endwhile)
+                depth-=1
+                if depth==0
+                    if inner.kind===:endif
+                        _geo_yywarn!(context,"Orphan EndIf")
+                    else
+                        _geo_yyerror!(context,"Invalid For/EndFor loop")
+                    end
+                    return j+1
+                end
+            end
+        end
+        j+=1
+    end
+    return hi+1
+end
+
 # Execute statements[lo:hi]; returns the last Mesh.TransfiniteTri assignment, if
 # any. Control constructs recurse into their block ranges; If evaluates
 # constant-expression conditions, For iterates `name In {a:b[:c]}` evaluated
@@ -661,27 +707,60 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                     "{..}` is OpenCASCADE-only and not implemented"))
             end
             _geo_context_refresh_allocators!(context,allocator_state)
-            assigned=_exec_line!(m,line,context,allocator_state)
+            # `_GeoSyntaxAbort` marks an upstream *syntax error* — the bison
+            # parser records it, drops the statement and resumes at the next
+            # one. The allocator observer is skipped: the statement did not
+            # execute.
+            syntax_aborted=false
+            assigned=try
+                _exec_line!(m,line,context,allocator_state)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort || rethrow()
+                _geo_yyerror!(context,"syntax error ($(err.token))")
+                syntax_aborted=true;nothing
+            end
             assigned===nothing || (transfinite_tri=assigned)
             # `Delete`-family statements already drove the allocator update
             # inside `_geo_exec_delete!`; the observer skips them.
-            _geo_allocator_observe_statement!(
+            syntax_aborted || _geo_allocator_observe_statement!(
                 allocator_state,line,context,"execute_geo")
             occursin(r"\bBoolean(?:Difference|Union|Intersection|Fragments)?\b",
                      line) &&
                 _geo_allocator_resync_model!(allocator_state,m)
             i+=1
         elseif control.kind===:if
-            assigned,i=_geo_exec_if!(
-                m,statements,i,hi,context,allocator_state,executed)
+            assigned,i=try
+                _geo_exec_if!(
+                    m,statements,i,hi,context,allocator_state,executed)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort || rethrow()
+                _geo_yyerror!(context,"syntax error ($(err.token))")
+                (nothing,_geo_skip_aborted_block(statements,i,hi,context))
+            end
             assigned===nothing || (transfinite_tri=assigned)
         elseif control.kind===:for
-            assigned,i=_geo_exec_for!(
-                m,statements,i,hi,context,allocator_state,executed)
+            assigned,i=try
+                _geo_exec_for!(
+                    m,statements,i,hi,context,allocator_state,executed)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort || rethrow()
+                _geo_yyerror!(context,"syntax error ($(err.token))")
+                (nothing,_geo_skip_aborted_block(statements,i,hi,context))
+            end
             assigned===nothing || (transfinite_tri=assigned)
         elseif control.kind===:while
-            assigned,i=_geo_exec_while!(
-                m,statements,i,hi,context,allocator_state,executed)
+            assigned,i=try
+                _geo_exec_while!(
+                    m,statements,i,hi,context,allocator_state,executed)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort || rethrow()
+                _geo_yyerror!(context,"syntax error ($(err.token))")
+                (nothing,_geo_skip_aborted_block(statements,i,hi,context))
+            end
             assigned===nothing || (transfinite_tri=assigned)
         elseif control.kind===:function
             i=_geo_exec_function_def!(statements,i,hi,context)
@@ -827,7 +906,8 @@ end
 # `name[] =` captures and entity lists. Returns nothing when `raw` is not a
 # Boolean term (the `(t) =` tagged form is a statement, not a term).
 function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
-                                context::_GeoNumericContext)
+                                context::_GeoNumericContext,
+                                allocator_state=nothing)
     source=String(strip(raw))
     mm=match(r"^Boolean(Difference|Union|Intersection|Fragments)\b(.*)$",source)
     mm===nothing && return nothing
@@ -835,6 +915,14 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     rest=String(strip(mm.captures[2]))
     startswith(rest,"(") && return nothing
     groups=_geo_boolean_groups(rest,caller)
+    # Gmsh.y: upstream only resolves operands and applies the operator when
+    # the OCC kernel is active; under built-in the term is a recoverable
+    # diagnostic and evaluates to an empty shape list.
+    if allocator_state===nothing || allocator_state.factory!==:opencascade
+        _geo_yyerror!(context,
+            "Boolean operators only available with OpenCASCADE geometry kernel")
+        return Float64[]
+    end
     operands=_geo_boolean_operands(groups,context,caller)
     out=boolean_volumes_multi!(m,_GEO_BOOLEAN_OPS[mm.captures[1]],
         operands.objects.tags,operands.tools.tags;
@@ -844,11 +932,596 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     return Float64.(out)
 end
 
+# ======== `FExpr_Multi` entity-selector and transform terms ========
+#
+# The `.geo` grammar puts model-reading and geometry-mutating terms inside
+# list expressions: `Point{t}` coordinates, `X{:}`/`X "name"` wildcard tag
+# lists, `Physical`/`Parent`/`BoundingBox`/`In BoundingBox` queries,
+# `Mass`/`CenterOfMass`/`MatrixOfInertia` (OpenCASCADE-gated upstream),
+# `Parametric`/`Normal`/`Color` reads, and `Translate`-family transform
+# blocks. `MultipleShape` actions (`Boundary`, `PointsOf`, `Duplicata`, ...)
+# are *not* `FExpr_Multi` and stay statement-level — `x[] = Boundary{...}` is
+# a syntax error upstream.
+
+const _GEO_SELECTOR_ENTITY_WORDS=(
+    ("Point",0),("Curve",1),("Line",1),("Surface",2),("Volume",3))
+
+# Parse an entity head — `Point`/`Curve`/`Line`/`Surface`/`Volume` literals or
+# `GeoEntity{d}` — returning `(dim, rest, literal)` or `nothing`.
+function _geo_selector_entity_head(source::AbstractString,
+                                   context::_GeoNumericContext,
+                                   caller::AbstractString)
+    for (word,dim) in _GEO_SELECTOR_ENTITY_WORDS
+        startswith(source,word) || continue
+        rest=String(source[nextind(source,firstindex(source),
+                                   ncodeunits(word)):end])
+        # `CurveLoop`/`Pointwise`-style names are not the entity keyword.
+        (isempty(rest) || _geo_word_char(first(rest))) && continue
+        return (dim,String(strip(rest)),true)
+    end
+    startswith(source,"GeoEntity") || return nothing
+    rest=String(source[nextind(source,firstindex(source),9):end])
+    isempty(rest) && return nothing
+    _geo_word_char(first(rest)) && return nothing
+    rest=String(strip(rest))
+    startswith(rest,"{") || return nothing
+    (body,rest)=_geo_balanced_group(rest,caller)
+    dim=_geo_int_value(
+        _geo_eval_numeric(body,context,"$caller GeoEntity dim"),
+        "$caller GeoEntity dim")
+    return (dim,rest,false)
+end
+
+# `GeoEntity`/`GeoEntity123`/`GeoEntity12` dim checks: a literal word outside
+# the production's dims is simply not that production (`Mass Point{1}` is a
+# syntax error upstream); a dynamic `GeoEntity{d}` outside them emits the
+# diagnostic yet still evaluates with the out-of-range dim.
+function _geo_selector_dim_check(dim::Int,literal::Bool,lo::Int,hi::Int,
+                                 context::_GeoNumericContext)
+    lo<=dim<=hi && return true
+    literal && return false
+    _geo_yyerror!(context,"GeoEntity dim out of range [$lo,$hi]")
+    return true
+end
+
+# `getEntities(dim)` equivalent for a (possibly out-of-range) selector dim —
+# upstream falls through to the `default:` branch for any dim outside [0,3]
+# and returns every entity.
+function _geo_selector_all_tags(m::GeoModel,dim::Int)
+    0<=dim<=3 ||
+        return Float64[Float64(tag) for (_,tag) in model_entities(m)]
+    return Float64[Float64(tag) for (_,tag) in model_entities(m,dim)]
+end
+
+# `getElementaryTagsForPhysicalGroups` / `getAllPhysicalTags` — groups are
+# keyed by abs(tag) upstream and members arrive sorted and deduplicated.
+function _geo_selector_physical(m::GeoModel,dim::Int,tail::String,
+                                context::_GeoNumericContext,
+                                caller::AbstractString)
+    if startswith(tail,"\"")
+        # `Physical X "name"` — deprecated wildcard: only `"*"`/`"all"` mean
+        # all tags; anything else is a `yyerror` with an empty result.
+        sm=match(r"^\"([^\"]*)\"\s*(.*)$",tail)
+        sm===nothing && return nothing
+        isempty(sm.captures[2]) || return nothing
+        sm.captures[1] in ("*","all") ||
+            (_geo_yyerror!(context,
+                 "Unknown special string for list replacement");
+             return Float64[])
+        return _geo_selector_all_physical(m,dim)
+    end
+    inlist=if startswith(tail,"{")
+        (body,rest)=_geo_balanced_group(tail,caller)
+        isempty(rest) || return nothing
+        inner=String(strip(body))
+        inner==":" && return _geo_selector_all_physical(m,dim)
+        _geo_numeric_list_values(
+            "{"*inner*"}",context,"$caller Physical";depth=1)
+    else
+        # `ListOfDoubleOrAll` accepts unbraced list forms (`Physical Line a[]`,
+        # `Physical Line 5`, `Physical Line 1:3`).
+        _geo_numeric_list_values(tail,context,"$caller Physical";depth=1)
+    end
+    out=Float64[]
+    if 0<=dim<=3
+        live_groups=Set(model_physical_groups(m,dim))
+        for raw_tag in inlist
+            tag=_geo_int_value(raw_tag,"$caller Physical tag")
+            # `getElementaryTagsForPhysicalGroups` does `groups.find(num)`
+            # with the *raw* tag — the map keys are `abs()`'d member-side, so
+            # `Physical Curve{-7}` misses group 7 and appends nothing.
+            (dim,tag) in live_groups || continue
+            members=get(m.physical,(dim,tag),Int[])
+            append!(out,Float64.(sort!(unique!(
+                _physical_live_members(m,dim,members)))))
+        end
+    end
+    return out
+end
+
+_geo_selector_all_physical(m::GeoModel,dim::Int)=
+    0<=dim<=3 ?
+        Float64[Float64(tag) for (_,tag) in model_physical_groups(m,dim)] :
+        Float64[]
+
+# `X In BoundingBox{...}` — entities whose complete bbox is inside the box.
+function _geo_selector_in_box(m::GeoModel,dim::Int,tail::String,
+                              context::_GeoNumericContext,
+                              caller::AbstractString)
+    box=_geo_numeric_list_values(tail,context,"$caller In BoundingBox";
+                                 depth=1)
+    length(box)<6 && begin
+        _geo_yyerror!(context,
+            "Bounding box should be {xmin, ymin, zmin, xmax, ymax, zmax}")
+        return Float64[]
+    end
+    # Out-of-range dims take upstream `getEntities`'s default branch — every
+    # entity is box-filtered.
+    query_dim=0<=dim<=3 ? dim : -1
+    return Float64[Float64(tag) for (_,tag) in
+        model_entities_in_bounding_box(
+            m,box[1],box[2],box[3],box[4],box[5],box[6],query_dim)]
+end
+
+# `BoundingBox X{list}` — the union of the found entities' bounds; nothing is
+# appended when every listed entity is missing.
+function _geo_selector_bounding_box(m::GeoModel,dim::Int,tail::String,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString)
+    startswith(tail,"{") || _geo_selector_abort(tail)
+    (body,rest)=_geo_balanced_group(tail,caller)
+    isempty(rest) || _geo_selector_abort(rest)
+    tags=_geo_numeric_list_values(
+        "{"*body*"}",context,"$caller BoundingBox";depth=1)
+    bounds=nothing
+    if 0<=dim<=3
+        for raw_tag in tags
+            tag=_geo_int_value(raw_tag,"$caller BoundingBox tag")
+            model_entity(m,dim,tag)===nothing && continue
+            entity_bounds=_model_entity_bounding_box(m,dim,tag,caller)
+            bounds=bounds===nothing ? entity_bounds :
+                _model_bounds_union(bounds,entity_bounds)
+        end
+    end
+    return bounds===nothing ? Float64[] : collect(Float64,bounds)
+end
+
+# `Mass`/`CenterOfMass`/`MatrixOfInertia X{t}` — upstream these only run under
+# the OpenCASCADE factory; otherwise a recoverable diagnostic plus a zeroed
+# result (`MatrixOfInertia` adds nothing at all).
+function _geo_selector_mass(m::GeoModel,name::String,dim::Int,tail::String,
+                            context::_GeoNumericContext,
+                            caller::AbstractString,allocator_state)
+    startswith(tail,"{") || _geo_selector_abort(tail)
+    (body,rest)=_geo_balanced_group(tail,caller)
+    isempty(rest) || _geo_selector_abort(rest)
+    _geo_eval_numeric(body,context,"$caller $name tag")
+    if allocator_state!==nothing && allocator_state.factory==:opencascade &&
+            allocator_state.occ_active
+        # Upstream would call `getOCCInternals()->getMass` here — real mass
+        # data Tessella cannot produce, so it is a hard error rather than a
+        # zeroed placeholder.
+        throw(ArgumentError(
+            "$caller: $name requires OpenCASCADE mass properties, which " *
+            "Tessella does not implement"))
+    end
+    _geo_yyerror!(context,
+        "$name only available with OpenCASCADE geometry kernel")
+    return name=="Mass" ? [0.0] : name=="CenterOfMass" ? [0.0,0.0,0.0] :
+        Float64[]
+end
+
+# The unexpected-token text for a committed-but-incomplete selector: the
+# next word/character of `rest`, or `;` when the term simply ran out.
+function _geo_selector_abort(rest::AbstractString)
+    r=String(strip(rest))
+    isempty(r) && _geo_syntax_abort(";")
+    m=match(r"^[A-Za-z_][A-Za-z0-9_]*|^.",r)
+    _geo_syntax_abort(m===nothing ? ";" : String(m.match))
+end
+
+# `Normal Surface{t} Parametric{u,v}` — `tSurface` is a literal keyword here.
+function _geo_selector_normal(m::GeoModel,tail::String,
+                              context::_GeoNumericContext,
+                              caller::AbstractString)
+    head=_geo_selector_entity_head(tail,context,caller)
+    head===nothing && _geo_selector_abort(tail)
+    dim,rest,literal=head
+    # `tNormal` expects `tSurface` upstream — anything else is a syntax error.
+    (literal && dim==2) || _geo_selector_abort(tail)
+    # `tNormal tSurface` commits the production upstream — a missing `{` or
+    # `Parametric` is a syntax error, not a different term.
+    startswith(rest,"{") || _geo_selector_abort(rest)
+    (body,rest)=_geo_balanced_group(rest,caller)
+    rest=String(strip(rest))
+    startswith(rest,"Parametric") || _geo_selector_abort(rest)
+    rest=String(strip(rest[nextind(rest,firstindex(rest),10):end]))
+    startswith(rest,"{") || _geo_selector_abort(rest)
+    (pbody,rest)=_geo_balanced_group(rest,caller)
+    isempty(rest) || _geo_selector_abort(rest)
+    tag=_geo_int_value(
+        _geo_eval_numeric(body,context,"$caller Normal tag"),
+        "$caller Normal tag")
+    # `tParametric '{' FExpr ',' FExpr '}'` — two scalar args, not an RLD:
+    # `a[]` splices and `:` ranges are syntax errors upstream.
+    pparts=_geo_split_top_commas(pbody,caller)
+    length(pparts)==2 || _geo_syntax_abort(length(pparts)<2 ? "}" : ",",
+        "$caller: Normal Parametric expects {u,v}")
+    params=Float64[
+        _geo_eval_numeric(pparts[1],context,"$caller Normal Parametric"),
+        _geo_eval_numeric(pparts[2],context,"$caller Normal Parametric")]
+    haskey(m.surfaces,tag) ||
+        haskey(m.discrete,(2,tag)) ||
+        get(m.surface_geometry,tag,nothing)!==nothing ||
+        (_geo_yyerror!(context,"Surface $tag does not exist");
+         return Float64[])
+    return collect(Float64,model_normal(m,tag,params;
+        old_ruled_surface=_geo_exec_old_ruled(context)))
+end
+
+# `Geometry.OldRuledSurface` / `Mesh.NewtonConvergenceTestXYZ` — the two
+# number options that reach ruled-surface evaluation.
+_geo_exec_old_ruled(context::_GeoNumericContext)=
+    !iszero(something(_geo_option_number(
+        context,"Geometry",0,"OldRuledSurface"),0.0))
+_geo_exec_newton_xyz(context::_GeoNumericContext)=
+    !iszero(something(_geo_option_number(
+        context,"Mesh",0,"NewtonConvergenceTestXYZ"),0.0))
+
+# `AddToTemporaryBoundingBox` — the running `Point`-statement bbox.
+function _geo_exec_temp_bbox_add!(context::_GeoNumericContext,
+                                  x::Float64,y::Float64,z::Float64)
+    box=context.temp_bbox
+    context.temp_bbox=box===nothing ?
+        ((x,y,z),(x,y,z)) :
+        (min.(box[1],(x,y,z)),max.(box[2],(x,y,z)))
+    return nothing
+end
+
+# `CTX::instance()->lc` during `.geo` execution — the raw diagonal of the
+# `Point`-statement cloud (`lc == 0` maps to 1 upstream).
+function _geo_exec_lc(context::_GeoNumericContext)
+    box=context.temp_bbox
+    box===nothing && return 1.0
+    range=box[2].-box[1]
+    lc=sqrt(range[1]*range[1]+range[2]*range[2]+range[3]*range[3])
+    return lc==0.0 ? 1.0 : lc
+end
+
+# `Parametric BoundingBox X{t}` (dims 1-2) and
+# `Parametric Point{t} In Surface{s}`.
+function _geo_selector_parametric(m::GeoModel,tail::String,
+                                  context::_GeoNumericContext,
+                                  caller::AbstractString)
+    if (pm=match(r"^Point\b(.*)$",tail))!==nothing
+        rest=String(strip(pm.captures[1]))
+        startswith(rest,"{") || _geo_selector_abort(rest)
+        (body,rest)=_geo_balanced_group(rest,caller)
+        rest=String(strip(rest))
+        sm=match(r"^In\s+Surface\s*(.*)$",rest)
+        sm===nothing && _geo_selector_abort(rest)
+        srest=String(strip(sm.captures[1]))
+        startswith(srest,"{") || _geo_selector_abort(srest)
+        (sbody,srest)=_geo_balanced_group(srest,caller)
+        isempty(srest) || _geo_selector_abort(srest)
+        ptag=_geo_int_value(
+            _geo_eval_numeric(body,context,"$caller Parametric Point"),
+            "$caller Parametric Point")
+        stag=_geo_int_value(
+            _geo_eval_numeric(sbody,context,"$caller Parametric Surface"),
+            "$caller Parametric Surface")
+        point_known=haskey(m.points,ptag) || haskey(m.discrete,(0,ptag))
+        surface_known=haskey(m.surfaces,stag) ||
+            haskey(m.discrete,(2,stag)) ||
+            get(m.surface_geometry,stag,nothing)!==nothing
+        (point_known && surface_known) ||
+            (_geo_yyerror!(context,
+                 "Point $ptag or surface $stag does not exist");
+             return Float64[])
+        return collect(Float64,model_reparametrize_on_surface(
+            m,0,ptag,Float64[],stag;
+            old_ruled_surface=_geo_exec_old_ruled(context),
+            newton_convergence_xyz=_geo_exec_newton_xyz(context),
+            lc=_geo_exec_lc(context),
+            warn=msg->_geo_yywarn!(context,msg),
+            info=msg->_geo_yyinfo!(context,msg)))
+    end
+    # `tParametric` expects `tBoundingBox` or `tPoint` upstream.
+    match(r"^BoundingBox\b",tail)===nothing && _geo_selector_abort(tail)
+    tail=String(strip(tail[nextind(tail,firstindex(tail),11):end]))
+    head=_geo_selector_entity_head(tail,context,caller)
+    head===nothing && _geo_selector_abort(tail)
+    dim,rest,literal=head
+    _geo_selector_dim_check(dim,literal,1,2,context) ||
+        _geo_selector_abort(tail)
+    startswith(rest,"{") || _geo_selector_abort(rest)
+    (body,rest)=_geo_balanced_group(rest,caller)
+    isempty(rest) || _geo_selector_abort(rest)
+    tag=_geo_int_value(
+        _geo_eval_numeric(body,context,"$caller Parametric BoundingBox"),
+        "$caller Parametric BoundingBox")
+    exists=(dim==1 && (haskey(m.curves,tag) ||
+                       haskey(m.discrete,(1,tag)) ||
+                       get(m.curve_geometry,tag,nothing)!==nothing)) ||
+           (dim==2 && (haskey(m.surfaces,tag) ||
+                       haskey(m.discrete,(2,tag)) ||
+                       get(m.surface_geometry,tag,nothing)!==nothing))
+    label=dim==1 ? "Curve" : "Surface"
+    exists || (_geo_yyerror!(context,"$label $tag does not exist");
+               return Float64[])
+    lower,upper=model_parametrization_bounds(m,dim,tag)
+    if dim==1
+        return Float64[lower[1],upper[1]]
+    end
+    return Float64[lower[1],lower[2],upper[1],upper[2]]
+end
+
+# `Color X{t}` — existing entities report their RGBA; a missing entity is a
+# silent empty list (no diagnostic upstream).
+function _geo_selector_color(m::GeoModel,tail::String,
+                             context::_GeoNumericContext,
+                             caller::AbstractString)
+    head=_geo_selector_entity_head(tail,context,caller)
+    head===nothing && _geo_selector_abort(tail)
+    dim,rest,literal=head
+    _geo_selector_dim_check(dim,literal,1,3,context) ||
+        _geo_selector_abort(tail)
+    startswith(rest,"{") || _geo_selector_abort(rest)
+    (body,rest)=_geo_balanced_group(rest,caller)
+    isempty(rest) || _geo_selector_abort(rest)
+    tag=_geo_int_value(
+        _geo_eval_numeric(body,context,"$caller Color tag"),
+        "$caller Color tag")
+    0<=dim<=3 || return Float64[]
+    model_entity(m,dim,tag)===nothing &&
+        !haskey(m.discrete,(dim,tag)) && return Float64[]
+    return collect(Float64,model_entity_color(m,dim,tag))
+end
+
+# Bare entity selectors: `Point{t}` coordinates, `X{:}`/`X "name"` tag
+# wildcards and `X In BoundingBox{...}`.
+function _geo_selector_entity_term(m::GeoModel,dim::Int,rest::String,
+                                   literal::Bool,
+                                   context::_GeoNumericContext,
+                                   caller::AbstractString)
+    if (im=match(r"^In\s+BoundingBox\b(.*)$",rest))!==nothing
+        # `GeoEntity` variant — dynamic dims outside [0,3] diagnose but
+        # still evaluate.
+        literal ||
+            _geo_selector_dim_check(dim,false,0,3,context) || return nothing
+        return _geo_selector_in_box(
+            m,dim,String(strip(im.captures[1])),context,caller)
+    end
+    if match(r"^\"[^\"]*\"\s*$",rest)!==nothing
+        # `X "name"` — deprecated `{:}` wildcard through the same
+        # `tPoint tBIGSTR` / `GeoEntity123 tBIGSTR` productions; the string
+        # value is ignored upstream.
+        literal ||
+            _geo_selector_dim_check(dim,false,1,3,context) || return nothing
+        return _geo_selector_all_tags(m,dim)
+    end
+    # The entity keyword commits the production upstream — anything but
+    # `In BoundingBox`, a quoted name, or `{` here is a syntax error.
+    startswith(rest,"{") || _geo_selector_abort(rest)
+    (body,tail)=_geo_balanced_group(rest,caller)
+    isempty(tail) || _geo_selector_abort(tail)
+    inner=String(strip(body))
+    if inner==":"
+        # `Point{:}` is its own production; `Curve`/`Surface`/`Volume{:}` and
+        # `GeoEntity{d}{:}` go through the GeoEntity123 one — a `GeoEntity`
+        # dim outside [1,3] emits the range error but still lists.
+        literal ||
+            _geo_selector_dim_check(dim,false,1,3,context) || return nothing
+        return _geo_selector_all_tags(m,dim)
+    end
+    # `Point{expr}` reports coordinates; `Curve{expr}`/`Surface{expr}`/
+    # `Volume{expr}`/`GeoEntity{d}{expr}` reduce to `GeoEntity123 '{'`, which
+    # expects `tDOTS` upstream — a syntax error at the inner expression.
+    if !(literal && dim==0)
+        literal || _geo_selector_dim_check(dim,false,1,3,context)
+        _geo_selector_abort(isempty(inner) ? "}" : inner)
+    end
+    tag=_geo_int_value(
+        _geo_eval_numeric(inner,context,"$caller Point tag"),
+        "$caller Point tag")
+    # `getGEOInternals()->getVertex` compares `abs(Num)` — `Point{-1}` finds
+    # point 1 — then the model-level `getVertexByTag` fallback matches the
+    # exact tag (including discrete vertices).
+    point=get(m.points,tag,get(m.points,abs(tag),nothing))
+    point===nothing && haskey(m.discrete,(0,tag)) && begin
+        record=m.discrete[(0,tag)]
+        isempty(record.node_coords) ||
+            (point=Tuple(record.node_coords[1:3,1]))
+    end
+    if point===nothing
+        _geo_yyerror!(context,"Unknown model point with tag $tag")
+        return [0.0,0.0,0.0]
+    end
+    return Float64[point[1],point[2],point[3]]
+end
+
+# Reserved tokens upstream — a `name{` term headed by one of these is *not*
+# the `tSTRING '{' MultipleShape '}'` action production; it either has its
+# own selector production (handled after this) or is a syntax error.
+const _GEO_SELECTOR_KEYWORDS=(
+    "Point","Curve","Line","Surface","Volume","GeoEntity","Physical","Parent",
+    "BoundingBox","Mass","CenterOfMass","MatrixOfInertia","Normal",
+    "Parametric","Color","List","LinSpace","LogSpace","Catenary","Unique",
+    "Abs","ListFromFile","Extrude","BooleanUnion","BooleanDifference",
+    "BooleanIntersection","BooleanFragments","Boolean","Periodic","Kernel",
+    "Factory","Mesh","General","Geometry","Field","Delete","Hide","Show",
+    "SetNumber","GetNumber","SetString","GetString","Exists","Printf",
+    "Error","Warning","Info","Debug","Call","If","ElseIf","Else","EndIf",
+    "For","EndFor","While","EndWhile","Function","Return","Macro","Merge",
+    "Save","Print","Exit","Abort","Include","SetFactory","SetOrder",
+    "Optimize","Recombine","Transfinite","Reverse","Coherence")
+
+# `Transform` terms in `FExpr_Multi` position — `Translate{params}{shapes;}`,
+# `Rotate`/`Dilate`/`Symmetry`/`Affine`/`Closest` likewise, and the
+# `tSTRING '{' MultipleShape '}'` action forms (`Duplicata`, `Boundary`,
+# `CombinedBoundary`, `PointsOf`). The transform is applied to the resolved
+# shape list (a nested `Duplicata` produces the new tags) and the resolved
+# tags are the term's value. A name that lexes as a reserved keyword upstream
+# (`Point{1}`, `Physical Curve{...}`, `Mass ...`, ...) is *not* a shape action
+# and is left for the selector machinery.
+function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
+                                  context::_GeoNumericContext,
+                                  allocator_state)
+    s=String(strip(raw))
+    nm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\b",s)
+    nm===nothing && return nothing
+    name=nm.captures[1]
+    caller="execute_geo: $name"
+    if name=="Intersect" || name=="Split"
+        # `tIntersect tCurve '{' RLD '}' tSurface '{' FExpr '}'` and
+        # `tSplit tCurve '{' FExpr '}' tPoint '{' RLD '}'` — real built-in
+        # kernel curve operations upstream; a hard blocker here.
+        throw(ArgumentError(
+            "$caller: $name requires built-in kernel curve splitting, " *
+            "which Tessella does not implement"))
+    end
+    rest=String(strip(s[nextind(s,firstindex(s),
+                              ncodeunits(name)):end]))
+    if name in ("Translate","Rotate","Dilate","Symmetry")
+        # `tTranslate VExpr '{' MultipleShape '}'` etc. — keyword transforms
+        # commit at the name; a missing VExpr or shape group is a syntax
+        # error, not an unknown-variable fallthrough.
+        (t,rest)=_geo_transform_params_rest(
+            kind=name,source=rest,context=context,caller=caller)
+        r2=String(strip(rest))
+        startswith(r2,"{") || _geo_selector_abort(r2)
+        (shape_list,rest)=_geo_balanced_group(r2,caller)
+        isempty(rest) || _geo_selector_abort(rest)
+        entities=_geo_shape_list_entities!(m,shape_list,context,caller;
+                                           allocator_state=allocator_state)
+        transform_entities!(m,t,entities;caller=caller)
+        context.geo_changed=true
+        return Float64[Float64(tag) for (_,tag) in entities]
+    end
+    if !startswith(rest,"{")
+        # `Affine`/`Closest` are keywords upstream — `Affine` without its
+        # `{...}` parameters is a syntax error. Any other name may still be a
+        # `tSTRING` action or a selector handled elsewhere.
+        name in ("Affine","Closest") || return nothing
+        _geo_selector_abort(rest)
+    end
+    (params,rest)=_geo_balanced_group(rest,caller)
+    if name=="Affine" || name=="Closest"
+        r2=String(strip(rest))
+        startswith(r2,"{") || _geo_selector_abort(r2)
+        (shape_list,rest)=_geo_balanced_group(r2,caller)
+        isempty(rest) || _geo_selector_abort(rest)
+        _geo_numeric_list_values(
+            "{"*params*"}",context,"$caller parameters";depth=1)
+        if name=="Affine"
+            _geo_yyerror!(context,
+                "Affine transform only available with OpenCASCADE " *
+                "geometry kernel")
+            entities=_geo_shape_list_entities!(m,shape_list,context,caller;
+                                               allocator_state=allocator_state)
+            return Float64[Float64(tag) for (_,tag) in entities]
+        end
+        _geo_yyerror!(context,
+            "Closest entity only available with OpenCASCADE geometry kernel")
+        _geo_shape_list_entities!(m,shape_list,context,caller;
+                                  allocator_state=allocator_state)
+        return Float64[]
+    end
+    name in _GEO_SELECTOR_KEYWORDS && return nothing
+    # `tSTRING '{' MultipleShape '}'` — Duplicata/boundary/PointsOf/unknown
+    # actions; `params` is the shape-list body here.
+    entities=_geo_shape_list_entities!(m,params,context,caller;
+                                       allocator_state=allocator_state)
+    isempty(rest) || _geo_selector_abort(rest)
+    if name=="Duplicata"
+        context.geo_changed=true
+    else
+        _geo_sync_physical_view_if_changed!(m,context)
+    end
+    out=_geo_shape_action!(m,name,entities,context,caller)
+    return Float64[Float64(tag) for (_,tag) in out]
+end
+
+# Dispatch the keyword-headed selector forms.
+function _geo_selector_keyword_term(m::GeoModel,name::String,tail::String,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString,allocator_state)
+    if name=="Physical"
+        head=_geo_selector_entity_head(tail,context,caller)
+        head===nothing && _geo_selector_abort(tail)
+        dim,rest,literal=head
+        _geo_selector_dim_check(dim,literal,0,3,context) ||
+            _geo_selector_abort(tail)
+        return _geo_selector_physical(m,dim,rest,context,caller)
+    elseif name=="Parent"
+        head=_geo_selector_entity_head(tail,context,caller)
+        head===nothing && _geo_selector_abort(tail)
+        dim,rest,literal=head
+        _geo_selector_dim_check(dim,literal,0,3,context) ||
+            _geo_selector_abort(tail)
+        # `ListOfDouble` — brace list or unbraced list expression.
+        _geo_numeric_list_values(rest,context,"$caller Parent";depth=1)
+        # Native entities carry no `getParentEntity` provenance — the built-in
+        # kernel result is empty like upstream.
+        return Float64[]
+    elseif name=="BoundingBox"
+        head=_geo_selector_entity_head(tail,context,caller)
+        head===nothing && _geo_selector_abort(tail)
+        dim,rest,literal=head
+        _geo_selector_dim_check(dim,literal,0,3,context) || return nothing
+        return _geo_selector_bounding_box(m,dim,rest,context,caller)
+    elseif name in ("Mass","CenterOfMass","MatrixOfInertia")
+        head=_geo_selector_entity_head(tail,context,caller)
+        head===nothing && _geo_selector_abort(tail)
+        dim,rest,literal=head
+        # `tMass GeoEntity123` — the keyword class is Curve/Surface/Volume;
+        # a keyword `Point` is a syntax error at `Point`, not a miss.
+        literal && dim==0 && _geo_selector_abort(tail)
+        _geo_selector_dim_check(dim,literal,1,3,context) || return nothing
+        return _geo_selector_mass(
+            m,name,dim,rest,context,caller,allocator_state)
+    elseif name=="Normal"
+        return _geo_selector_normal(m,tail,context,caller)
+    elseif name=="Parametric"
+        return _geo_selector_parametric(m,tail,context,caller)
+    elseif name=="Color"
+        return _geo_selector_color(m,tail,context,caller)
+    end
+    return nothing
+end
+
+# `FExpr_Multi` selector/transform terms — returns a Float64 vector when `raw`
+# is one, or `nothing` when it is not.
+function _geo_exec_selector_term(m::GeoModel,raw::AbstractString,
+                                 context::_GeoNumericContext,allocator_state)
+    s=String(strip(raw))
+    isempty(s) && return nothing
+    caller="execute_geo"
+    # Every upstream selector synchronizes the internals before reading —
+    # `if(getGEOInternals()->getChanged()) synchronize` — which here
+    # materializes the derived physical-group view when declarations or
+    # geometry changed since the last sync.
+    _geo_sync_physical_view_if_changed!(m,context)
+    transform=_geo_exec_transform_term(m,s,context,allocator_state)
+    transform!==nothing && return transform
+    kw=match(r"^(Physical|Parent|BoundingBox|Mass|CenterOfMass|MatrixOfInertia|Normal|Parametric|Color)\b(.*)$",s)
+    kw!==nothing && return _geo_selector_keyword_term(
+        m,String(kw.captures[1]),String(strip(kw.captures[2])),context,caller,
+        allocator_state)
+    head=_geo_selector_entity_head(s,context,caller)
+    head===nothing && return nothing
+    return _geo_selector_entity_term(
+        m,head[1],head[2],head[3],context,caller)
+end
+
 function _geo_exec_value_term(m::GeoModel,raw::AbstractString,
-                              context::_GeoNumericContext)
-    extruded=_geo_exec_extrude_term(m,raw,context)
+                              context::_GeoNumericContext,
+                              allocator_state=nothing)
+    extruded=_geo_exec_extrude_term(m,raw,context,allocator_state)
     extruded!==nothing && return extruded
-    return _geo_exec_boolean_term(m,raw,context)
+    boolean=_geo_exec_boolean_term(m,raw,context,allocator_state)
+    boolean!==nothing && return boolean
+    return _geo_exec_selector_term(m,raw,context,allocator_state)
 end
 
 function _geo_periodic_expressions(raw::AbstractString,count::Int,
@@ -1354,8 +2027,13 @@ end
 # `(content, rest)`.
 function _geo_balanced_group(raw::AbstractString, caller::AbstractString)
     s=String(strip(raw))
-    startswith(s,"{") || throw(ArgumentError(
-        "$caller: expected a `{...}` group; got $(repr(s))"))
+    # A missing or unbalanced group is a `syntax error` upstream — the
+    # reported token is the unexpected lookahead, matching bison.
+    if !startswith(s,"{")
+        isempty(s) && _geo_syntax_abort(";")
+        m=match(r"^[A-Za-z_][A-Za-z0-9_]*|^.",s)
+        _geo_syntax_abort(m===nothing ? ";" : String(m.match))
+    end
     depth=0;closing=0;i=firstindex(s);last=lastindex(s)
     while i<=last
         c=s[i]
@@ -1364,12 +2042,11 @@ function _geo_balanced_group(raw::AbstractString, caller::AbstractString)
         elseif c=='}'
             depth-=1
             depth==0 && (closing=i; break)
-            depth<0 && throw(ArgumentError(
-                "$caller: unmatched closing brace"))
+            depth<0 && _geo_syntax_abort("}")
         end
         i=nextind(s,i)
     end
-    closing==0 && throw(ArgumentError("$caller: unmatched opening brace"))
+    closing==0 && _geo_syntax_abort("}")
     content=closing>2 ? String(s[2:prevind(s,closing)]) : ""
     rest=closing<last ? String(strip(s[nextind(s,closing):end])) : ""
     return (content,rest)
@@ -1471,9 +2148,17 @@ end
 
 function _geo_require_list_semicolon(s::AbstractString, caller, name)
     rest=String(strip(s))
-    startswith(rest,";") || throw(ArgumentError(
-        "$caller: $name{...} entries in a transform list must end with `;`"))
-    return String(strip(rest[nextind(rest,1):end]))
+    startswith(rest,";") &&
+        return String(strip(rest[nextind(rest,1):end]))
+    # `ListOfShapes` members are `tEND`-terminated upstream — anything else is
+    # a syntax error. The reported token is the unexpected lookahead: the
+    # closing `}` when the list ran out, else the next token's text.
+    _geo_syntax_abort(if isempty(rest)
+        "}"
+    else
+        m=match(r"^[A-Za-z_][A-Za-z0-9_]*|^.",rest)
+        m===nothing ? "}" : String(m.match)
+    end)
 end
 
 # Evaluate a `.geo` MultipleShape, mirroring the Gmsh grammar
@@ -1521,39 +2206,75 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                                       signed_tags::Bool=false,
                                       allocator_state=nothing)
     mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",s0)
-    mm===nothing && throw(ArgumentError(
-        "$caller: malformed shape list element near $(repr(s0))"))
+    # A member that does not start with an identifier (`{1}`, `1`, `;`) is a
+    # syntax error upstream — `MultipleShape` members are `GeoEntity{...}`,
+    # `Shape` definitions, or nested transforms.
+    mm===nothing && _geo_syntax_abort(String(s0[1:1]))
     name=mm.captures[1]
     s=String(strip(s0[nextind(s0,firstindex(s0),ncodeunits(mm.match)):end]))
     if name in ("Translate","Rotate","Dilate","Symmetry","Affine","Closest")
-        (params,s)=_geo_balanced_group(s,caller)
-        (inner_list,s)=_geo_balanced_group(s,caller)
-        (name=="Affine" || name=="Closest") && throw(ArgumentError(
-            "$caller: $name transforms require the OpenCASCADE geometry " *
-            "kernel, which Tessella does not implement"))
         nested="$caller: $name"
-        t=_geo_transform_params(kind=name,params=params,
-                                context=context,caller=nested)
+        if name=="Affine" || name=="Closest"
+            # `tAffine '{' RLD '}' '{' MultipleShape '}'` — the parameters are
+            # a brace-delimited numeric list, then the shape group.
+            (params,s)=_geo_balanced_group(s,nested)
+            _geo_numeric_list_values(
+                "{"*params*"}",context,"$caller $name";depth=1)
+            s=String(strip(s))
+            startswith(s,"{") || _geo_selector_abort(s)
+            (inner_list,s)=_geo_balanced_group(s,nested)
+            # OCC-only transforms report a recoverable error upstream and
+            # leave the shapes untouched: `Affine` still yields its input
+            # list, while `Closest` contributes nothing.
+            if name=="Affine"
+                _geo_yyerror!(context,
+                    "Affine transform only available with OpenCASCADE " *
+                    "geometry kernel")
+                inner=_geo_shape_list_entities!(m,inner_list,context,caller;
+                                                allocator_state=allocator_state)
+                return (inner,s,true)
+            end
+            _geo_yyerror!(context,
+                "Closest entity only available with OpenCASCADE " *
+                "geometry kernel")
+            _geo_shape_list_entities!(m,inner_list,context,caller;
+                                      allocator_state=allocator_state)
+            return (NTuple{2,Int}[],s,true)
+        end
+        (t,s)=_geo_transform_params_rest(
+            kind=name,source=s,context=context,caller=nested)
+        s=String(strip(s))
+        startswith(s,"{") || _geo_selector_abort(s)
+        (inner_list,s)=_geo_balanced_group(s,nested)
         inner=_geo_shape_list_entities!(m,inner_list,context,caller;
                                         allocator_state=allocator_state)
         transform_entities!(m,t,inner;caller=nested)
         # Gmsh returns the input shape list (`$$ = $MultipleShape`).
         return (inner,s,true)
     end
+    if name=="Split" || name=="Intersect"
+        # `tSplit tCurve ...` / `tIntersect tCurve ...` — real built-in kernel
+        # curve operations upstream; a hard blocker here. Any other head is a
+        # syntax error (the keyword expects `Curve`).
+        match(r"^Curve\b",s)===nothing && _geo_selector_abort(s)
+        throw(ArgumentError(
+            "$caller: $name requires built-in kernel curve splitting, " *
+            "which Tessella does not implement"))
+    end
     if name=="Physical" || name=="Parent"
         km=match(r"^(Point|Curve|Line|Surface|Volume)\b",s)
         if km===nothing && (em=match(r"^GeoEntity\b",s))!==nothing
             s=String(strip(s[nextind(s,firstindex(s),ncodeunits(em.match)):end]))
             (dgroup,s)=_geo_balanced_group(s,caller)
-            dim_raw=_geo_eval_numeric(dgroup,context,
-                                      "$caller $name GeoEntity dimension")
-            isinteger(dim_raw) || throw(ArgumentError(
-                "$caller: $name GeoEntity dimension must be an integer"))
-            dim=Int(dim_raw)
+            dim=_geo_int_value(_geo_eval_numeric(dgroup,context,
+                "$caller $name GeoEntity dimension"),
+                "$caller $name GeoEntity dimension")
+            # The `GeoEntity` rule reports the out-of-range dim but still
+            # evaluates with it — the lookups below then simply find nothing.
+            0<=dim<=3 || _geo_yyerror!(context,
+                "GeoEntity dim out of range [0,3]")
         else
-            km===nothing && throw(ArgumentError(
-                "$caller: $name requires Point, Curve/Line, Surface, " *
-                "Volume, or GeoEntity{d} inside a shape list"))
+            km===nothing && _geo_selector_abort(s)
             dim=_geo_shape_kind_dim(km.captures[1])
             s=String(strip(s[nextind(s,firstindex(s),ncodeunits(km.match)):end]))
         end
@@ -1581,14 +2302,20 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
     if name=="GeoEntity"
         # `GeoEntity{dim}{tags};` — the generic `tGeoEntity` selector.
         (dgroup,s)=_geo_balanced_group(s,caller)
-        dim_raw=_geo_eval_numeric(dgroup,context,"$caller GeoEntity dimension")
-        isinteger(dim_raw) || throw(ArgumentError(
-            "$caller: GeoEntity dimension must be an integer; got $dim_raw"))
-        dim=Int(dim_raw)
-        0<=dim<=3 || throw(ArgumentError(
-            "$caller: GeoEntity dim out of range [0,3]"))
+        dim=_geo_int_value(_geo_eval_numeric(
+            dgroup,context,"$caller GeoEntity dimension"),
+            "$caller GeoEntity dimension")
         (group,s)=_geo_balanced_group(s,caller)
         s=_geo_require_list_semicolon(s,caller,name)
+        # Upstream reports the dim error yet still stores the shapes under an
+        # out-of-range type — nothing resolves them later, so the group
+        # contributes no entities (its tag list is still evaluated).
+        if !(0<=dim<=3)
+            _geo_yyerror!(context,"GeoEntity dim out of range [0,3]")
+            _geo_shape_tags(m,dim,group,context,caller;
+                            signed_tags=signed_tags)
+            return (NTuple{2,Int}[],s,false)
+        end
         return (NTuple{2,Int}[(dim,t) for t in _geo_shape_tags(
                     m,dim,group,context,caller;signed_tags=signed_tags)],
                 s,false)
@@ -1602,7 +2329,10 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                         m,dim,group,context,caller;signed_tags=signed_tags)],
                     s,false)
         end
-        # `Kind(tag) = rhs;` — an inline Shape definition.
+        # `Kind(tag) = rhs;` — an inline Shape definition. Upstream `tCurve`
+        # in a shape list is followed by `'{'` or `'('`; anything else is a
+        # syntax error.
+        startswith(s,"(") || _geo_selector_abort(s)
         return _geo_shape_definition_element!(m,s0,context,caller,
                                               allocator_state)
     end
@@ -1621,14 +2351,11 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         else
             _geo_sync_physical_view_if_changed!(m,context)
         end
-        return (_geo_shape_action!(m,name,inner,caller),s,true)
+        return (_geo_shape_action!(m,name,inner,context,caller),s,true)
     end
-    (name=="Split" || name=="Intersect") && throw(ArgumentError(
-        "$caller: $name requires built-in kernel curve splitting, which " *
-        "Tessella does not implement"))
     (startswith(s,"(") || match(r"^[A-Za-z_]",s)!==nothing) &&
         return _geo_shape_definition_element!(m,s0,context,caller)
-    throw(ArgumentError("$caller: unsupported shape list element '$name'"))
+    _geo_selector_abort(s)
 end
 
 # A `Name(tag) = rhs;` definition (possibly multi-word, e.g. `Plane Surface`)
@@ -1649,14 +2376,17 @@ function _geo_shape_definition_element!(m::GeoModel, s0::AbstractString,
         (c==';' && depth==0 && parens==0) && (cut=i; break)
         i=nextind(s0,i)
     end
-    cut==0 && throw(ArgumentError(
-        "$caller: shape list definition entries must end with `;`"))
+    cut==0 && _geo_syntax_abort("}")
     stmt=String(s0[firstindex(s0):cut])
     rest=String(strip(s0[nextind(s0,cut):end]))
     head=match(r"^((?:[A-Za-z_][A-Za-z0-9_]*\s+)*[A-Za-z_][A-Za-z0-9_]*)\s*\(",
                stmt)
-    head===nothing && throw(ArgumentError(
-        "$caller: malformed shape list element near $(repr(stmt))"))
+    if head===nothing
+        nm=match(r"^[A-Za-z_][A-Za-z0-9_]*",stmt)
+        _geo_selector_abort(nm===nothing ? stmt :
+            String(strip(stmt[nextind(stmt,firstindex(stmt),
+                                     ncodeunits(nm.match)):end])))
+    end
     kind=String(strip(replace(head.captures[1],r"\s+"=>" ")))
     dim=get(_GEO_SHAPE_DEFINITION_DIMS,kind,-1)
     dim<0 && throw(ArgumentError(
@@ -1690,6 +2420,7 @@ end
 # queries, and PointsOf. Returns the action's output entities.
 function _geo_shape_action!(m::GeoModel, name::AbstractString,
                             inner::Vector{NTuple{2,Int}},
+                            context::_GeoNumericContext,
                             caller::AbstractString)
     if name=="Duplicata"
         return duplicate_entities!(m,inner;caller="$caller: Duplicata")
@@ -1721,8 +2452,10 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
         return NTuple{2,Int}[(0,t) for t in _model_points_of(
             m,inner,"$caller: PointsOf")]
     end
-    throw(ArgumentError(
-        "$caller: unknown action on multiple shapes '$name'"))
+    # `yymsg(0, "Unknown action on multiple shapes '%s'")` — recoverable, the
+    # action contributes nothing.
+    _geo_yyerror!(context,"Unknown action on multiple shapes '$name'")
+    return NTuple{2,Int}[]
 end
 
 # ── Extrude ──────────────────────────────────────────────────────────────
@@ -1740,8 +2473,11 @@ end
 # vectors — returning `(content, rest)`.
 function _geo_balanced_paren(raw::AbstractString, caller::AbstractString)
     s=String(strip(raw))
-    startswith(s,"(") || throw(ArgumentError(
-        "$caller: expected a `(...)` group; got $(repr(s))"))
+    if !startswith(s,"(")
+        isempty(s) && _geo_syntax_abort(";")
+        m=match(r"^[A-Za-z_][A-Za-z0-9_]*|^.",s)
+        _geo_syntax_abort(m===nothing ? ";" : String(m.match))
+    end
     depth=0;closing=0;i=firstindex(s);last=lastindex(s)
     while i<=last
         c=s[i]
@@ -1750,12 +2486,11 @@ function _geo_balanced_paren(raw::AbstractString, caller::AbstractString)
         elseif c==')'
             depth-=1
             depth==0 && (closing=i; break)
-            depth<0 && throw(ArgumentError(
-                "$caller: unmatched closing parenthesis"))
+            depth<0 && _geo_syntax_abort(")")
         end
         i=nextind(s,i)
     end
-    closing==0 && throw(ArgumentError("$caller: unmatched opening parenthesis"))
+    closing==0 && _geo_syntax_abort(")")
     content=closing>2 ? String(s[2:prevind(s,closing)]) : ""
     rest=closing<last ? String(strip(s[nextind(s,closing):end])) : ""
     return (content,rest)
@@ -2052,47 +2787,40 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     return Float64.(tags)
 end
 
-function _geo_transform_params(;kind::AbstractString,params::AbstractString,
-                               context::_GeoNumericContext,
-                               caller::AbstractString)
+# Evaluate a transform's parameter portion and return `(transform, rest)` —
+# `rest` continues at the `{shapes}` group. `Translate`/`Symmetry` take a bare
+# `VExpr` upstream (`{a,b,c}`, `(a,b,c)`, `±`-composed); `Rotate`/`Dilate`
+# take a literal `{ VExpr, ... }` group.
+function _geo_transform_params_rest(;kind::AbstractString,
+                                    source::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString)
+    s=String(strip(source))
     if kind=="Translate"
-        return _affine_translation(Tuple(_geo_exec_numeric_values(
-            params,3,context,"$caller delta")),caller)
+        (v,rest)=_geo_exec_vexpr5_rest(s,context,"$caller delta")
+        return (_affine_translation((v[1],v[2],v[3]),caller),rest)
     elseif kind=="Symmetry"
-        return _affine_symmetry(_geo_exec_numeric_values(
-            params,4,context,"$caller plane coefficients")...,caller)
-    elseif kind=="Dilate"
-        parts=_geo_split_top_commas(params,caller)
+        (v,rest)=_geo_exec_vexpr5_rest(s,context,"$caller plane coefficients")
+        return (_affine_symmetry(v[1],v[2],v[3],v[4],caller),rest)
+    end
+    (params,rest)=_geo_balanced_group(s,caller)
+    parts=_geo_split_top_commas(params,caller)
+    if kind=="Dilate"
         length(parts)==2 || throw(ArgumentError(
             "$caller: Dilate requires `{center, scale}` parameters"))
-        (cinner,crest)=_geo_balanced_group(parts[1],caller)
-        isempty(crest) || throw(ArgumentError(
-            "$caller: Dilate center must be a single `{...}` group"))
-        center=Tuple(_geo_exec_numeric_values(
-            cinner,3,context,"$caller center"))
+        center=_geo_exec_vexpr(parts[1],3,context,"$caller center")
         scale_raw=String(strip(parts[2]))
-        scale=if startswith(scale_raw,"{")
-            (sinner,srest)=_geo_balanced_group(scale_raw,caller)
-            isempty(srest) || throw(ArgumentError(
-                "$caller: Dilate scales must be a single `{...}` group"))
-            Tuple(_geo_exec_numeric_values(
-                sinner,3,context,"$caller scales"))
-        else
+        scale=_geo_is_vexpr(scale_raw) ?
+            _geo_exec_vexpr(scale_raw,3,context,"$caller scales") :
             _geo_eval_numeric(scale_raw,context,"$caller scale")
-        end
-        return _affine_dilation(center,scale,caller)
+        return (_affine_dilation(center,scale,caller),rest)
     else
-        parts=_geo_split_top_commas(params,caller)
         length(parts)==3 || throw(ArgumentError(
             "$caller: Rotate requires `{{axis}, {origin}, angle}` parameters"))
-        (ainner,arest)=_geo_balanced_group(parts[1],caller)
-        (oinner,orest)=_geo_balanced_group(parts[2],caller)
-        (isempty(arest) && isempty(orest)) || throw(ArgumentError(
-            "$caller: Rotate axis and origin must be single `{...}` groups"))
-        axis=Tuple(_geo_exec_numeric_values(ainner,3,context,"$caller axis"))
-        origin=Tuple(_geo_exec_numeric_values(oinner,3,context,"$caller origin"))
+        axis=_geo_exec_vexpr(parts[1],3,context,"$caller axis")
+        origin=_geo_exec_vexpr(parts[2],3,context,"$caller origin")
         angle=_geo_eval_numeric(parts[3],context,"$caller angle")
-        return _affine_rotation(axis,origin,angle,caller)
+        return (_affine_rotation(axis,origin,angle,caller),rest)
     end
 end
 
@@ -2106,11 +2834,11 @@ function _geo_exec_transform_statement!(m::GeoModel,line::AbstractString,
     caller="execute_geo: $kind"
     rest=String(strip(source[nextind(source,firstindex(source),
                                    ncodeunits(kind)):end]))
-    (params,rest)=_geo_balanced_group(rest,caller)
+    (t,rest)=_geo_transform_params_rest(
+        kind=kind,source=rest,context=context,caller=caller)
     (shape_list,rest)=_geo_balanced_group(rest,caller)
     isempty(rest) || throw(ArgumentError(
         "$caller: unexpected text after the shape list"))
-    t=_geo_transform_params(kind=kind,params=params,context=context,caller=caller)
     entities=_geo_shape_list_entities!(m,shape_list,context,caller;
                                        allocator_state=allocator_state)
     transform_entities!(m,t,entities;caller=caller)
@@ -2150,50 +2878,79 @@ _geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
     _geo_exec_entity_tags(raw,context,caller;abs_refs=true)
 
 # Evaluate a Gmsh `VExpr` — `{a,b,c[,d[,e]]}` or `(a,b,c)` groups composed by
-# unary/binary `+`/`-` — returning the first three components (all consumers
-# here read only 0..2, matching `addCircleArc`'s use of `CircleOptions`).
-function _geo_exec_vexpr3(raw::AbstractString,context::_GeoNumericContext,
-                          caller::AbstractString)
+# unary/binary `+`/`-` (`VExpr_Single` defaults components 4 and 5 to 0 and 1;
+# the `(...)` form accepts exactly three). Returns `(components, rest)` — the
+# VExpr ends at the first non-`±` token, which is how a transform's trailing
+# `{shapes}` group is found.
+function _geo_exec_vexpr5_rest(raw::AbstractString,
+                               context::_GeoNumericContext,
+                               caller::AbstractString)
     s=String(strip(raw))
-    isempty(s) && throw(ArgumentError(
-        "$caller: expected a vector expression"))
-    acc=(0.0,0.0,0.0);sign=1.0;expect_term=true
+    isempty(s) && _geo_syntax_abort(";")
+    acc=ntuple(_->0.0,5);sign=1.0;expect_term=true
     while !isempty(s)
         if expect_term
             while startswith(s,"+") || startswith(s,"-")
                 s[1]=='-' && (sign=-sign)
                 s=String(strip(s[nextind(s,firstindex(s)):end]))
             end
-            isempty(s) && throw(ArgumentError(
-                "$caller: malformed vector expression $(repr(raw))"))
-            group,rest=if s[1]=='{'
-                _geo_balanced_group(s,caller)
-            elseif s[1]=='('
-                _geo_balanced_paren(s,caller)
-            else
-                throw(ArgumentError(
-                    "$caller: expected a `{...}` or `(...)` vector group; " *
-                    "got $(repr(s))"))
-            end
+            (isempty(s) || (s[1]!='{' && s[1]!='(')) &&
+                _geo_selector_abort(s)
+            paren=s[1]=='('
+            group,rest=paren ? _geo_balanced_paren(s,caller) :
+                               _geo_balanced_group(s,caller)
             parts=_geo_split_top_commas(group,caller)
-            length(parts) in 3:5 || throw(ArgumentError(
-                "$caller: a vector expression needs 3 to 5 components; got " *
-                "$(length(parts))"))
-            acc=acc .+ sign .* ntuple(
-                i->_geo_eval_numeric(parts[i],context,caller),3)
+            np=length(parts)
+            # `VExpr_Single` needs 3 (paren) or 3–5 (braces) FExpr components —
+            # upstream the next token after the last legal component is the
+            # error (`{a,b}` → `}`, `(a,b)` → `)`, a 4th/6th `,` → `,`).
+            if paren ? np!=3 : !(np in 3:5)
+                _geo_syntax_abort(np<3 ? (paren ? ")" : "}") : ",",
+                    "$caller: a vector expression needs " *
+                    (paren ? "exactly 3 components" : "3 to 5 components") *
+                    "; got $np")
+            end
+            acc=acc .+ sign .* ntuple(5) do i
+                i<=np ? _geo_eval_numeric(parts[i],context,caller) :
+                        i==4 ? 0.0 : 1.0
+            end
             s=String(strip(rest));sign=1.0;expect_term=false
         else
-            (s[1]=='+' || s[1]=='-') || throw(ArgumentError(
-                "$caller: expected `+` or `-` in vector expression; got " *
-                "$(repr(s))"))
-            sign=s[1]=='+' ? 1.0 : -1.0
-            s=String(strip(s[nextind(s,firstindex(s)):end]))
-            expect_term=true
+            if s[1]=='+' || s[1]=='-'
+                sign=s[1]=='+' ? 1.0 : -1.0
+                s=String(strip(s[nextind(s,firstindex(s)):end]))
+                expect_term=true
+            else
+                break
+            end
         end
     end
-    expect_term && throw(ArgumentError(
-        "$caller: vector expression ends with an operator"))
-    return acc
+    expect_term && _geo_syntax_abort(";",
+        "$caller: vector expression ends with an operator")
+    return acc,s
+end
+
+# A `VExpr` that must consume its whole input (`Plane` normals, `Dilate`
+# scale, ...); returns the first `n` components.
+function _geo_exec_vexpr(raw::AbstractString,n::Int,
+                         context::_GeoNumericContext,caller::AbstractString)
+    (v,rest)=_geo_exec_vexpr5_rest(raw,context,caller)
+    isempty(rest) || _geo_syntax_abort(_geo_first_token(rest),
+        "$caller: unexpected text after vector expression $(repr(rest))")
+    return ntuple(i->v[i],n)
+end
+
+_geo_exec_vexpr3(raw::AbstractString,context::_GeoNumericContext,
+                 caller::AbstractString)=_geo_exec_vexpr(raw,3,context,caller)
+
+# `{`- or `(`-headed (after any unary `+`/`-` signs) — the VExpr form, as
+# opposed to a bare `FExpr` scalar.
+function _geo_is_vexpr(raw::AbstractString)
+    s=String(strip(raw))
+    while startswith(s,"+") || startswith(s,"-")
+        s=String(strip(s[nextind(s,firstindex(s)):end]))
+    end
+    return startswith(s,"{") || startswith(s,"(")
 end
 
 # Parse the shared `Circle`/`Ellipse` RHS: `{point tags}` plus the optional
@@ -2620,6 +3377,26 @@ function _geo_exec_compound!(m::GeoModel,dimension::Int,body::AbstractString,
     return nothing
 end
 
+# `GEO_Internals::_allocateAll`/`_freeAll` initialize every entity counter
+# from `Geometry.FirstEntityTag - 1` and `_maxPhysicalNum` from
+# `Geometry.FirstPhysicalTag - 1`, re-reading the options on each fresh or
+# destroyed internals — so `NewModel`/`Delete Model`/`Delete All` all re-init
+# the model counters from the *current* option values.
+function _geo_reset_geometry_counters!(m::GeoModel,
+                                       context::_GeoNumericContext)
+    entity_base=max(_geo_signed_gmsh_int_value(
+        something(_geo_option_number(
+            context,"Geometry",0,"FirstEntityTag"),1.0),
+        "Geometry.FirstEntityTag"),1)-1
+    physical_base=max(_geo_signed_gmsh_int_value(
+        something(_geo_option_number(
+            context,"Geometry",0,"FirstPhysicalTag"),1.0),
+        "Geometry.FirstPhysicalTag"),1)-1
+    m.next_tag .= entity_base
+    m.physical_tag_max=physical_base
+    return nothing
+end
+
 # `.geo` `Delete`/`Recursive Delete`/`Delete Embedded` and the named `Delete X`
 # forms. `tail` is everything after the `Delete` keyword(s).
 function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
@@ -2717,6 +3494,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         # parser symbol tables are cleared, and `FunctionManager` is cleared.
         # Options and the accumulated error flag survive.
         _geo_reset_model_geometry!(m)
+        _geo_reset_geometry_counters!(m,context)
         empty!(m.physical_names);empty!(m.entity_names)
         empty!(m.meshing.compounds)
         m.name=""
@@ -2730,7 +3508,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.geo_changed=true
         if allocator_state!==nothing
-            _geo_allocator_reset_model!(allocator_state)
+            _geo_allocator_reset_model!(allocator_state,context;fresh=true)
             allocator_state.factory=:builtin
         end
         return nothing
@@ -2738,12 +3516,13 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         # `destroy(/*keepName=*/true)` + `GEO_Internals::destroy` — the model
         # name and file name survive; entity mesh data dies with the model.
         _geo_reset_model_geometry!(m)
+        _geo_reset_geometry_counters!(m,context)
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         empty!(context.raw_physicals)
         context.geo_changed=true
         allocator_state===nothing ||
-            _geo_allocator_reset_model!(allocator_state)
+            _geo_allocator_reset_model!(allocator_state,context)
         return nothing
     elseif name=="Physicals"
         # `resetPhysicalGroups` + `removePhysicalGroups` drop the raw group
@@ -2802,19 +3581,25 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _exec_periodic!(m,line,context)
         return
     elseif (mm=match(
-            r"^Point\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
+            r"^Point\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Point"
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
-        values=_geo_exec_numeric_values(
-            mm.captures[2],context,"$caller coordinates")
-        length(values) in (3,4) || throw(ArgumentError(
-            "$caller coordinates: expected three coordinates and optional " *
-            "mesh size; got $(length(values)) values after range expansion"))
-        mesh_size=length(values)==4 ? values[4] : 1.0
-        add_point!(m,values[1],values[2],values[3];
-                   tag=tag,mesh_size=mesh_size,_zero_literal=zero_literal)
+        # `tPoint '(' FExpr ')' tAFFECT VExpr` — the coordinate braces are
+        # FExpr-comma components, not a RecursiveListOfDouble: `a[]` splices
+        # and `:` ranges are syntax errors upstream.
+        values=_geo_exec_vexpr(mm.captures[2],4,context,"$caller coordinates")
+        lc=values[4]
+        # `AddToTemporaryBoundingBox` — every `Point` statement feeds the
+        # parse-time `CTX::instance()->lc` (also on a failed add upstream).
+        _geo_exec_temp_bbox_add!(context,values[1],values[2],values[3])
+        t=add_point!(m,values[1],values[2],values[3];
+                   tag=tag,mesh_size=lc>0 ? lc : 1.0,
+                   _zero_literal=zero_literal)
+        # `gmshVertex` keeps the `lc` component verbatim — `lc <= 0` is the
+        # unset default (`point_size` reads fall back to 0).
+        lc<=0 && (m.point_size[t]=lc)
         return
     elseif (mm=match(
             r"^Line\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -2987,7 +3772,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         values=_geo_exec_numeric_values(
-            mm.captures[2],6,context,"$caller parameters")
+            mm.captures[2],context,"$caller parameters")
+        if allocator_state===nothing ||
+                allocator_state.factory!==:opencascade
+            # `tBox` is OCC-gated upstream — the tag and parameters evaluate
+            # first, then the recoverable diagnostic replaces creation.
+            _geo_yyerror!(context,
+                "Box only available with OpenCASCADE geometry kernel")
+            return
+        end
+        if length(values)!=6
+            _geo_yyerror!(context,"Box requires 6 parameters")
+            return
+        end
         add_box!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -2997,7 +3794,17 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         values=_geo_exec_numeric_values(
-            mm.captures[2],7,context,"$caller parameters")
+            mm.captures[2],context,"$caller parameters")
+        if allocator_state===nothing ||
+                allocator_state.factory!==:opencascade
+            _geo_yyerror!(context,
+                "Cylinder only available with OpenCASCADE geometry kernel")
+            return
+        end
+        if length(values)!=7
+            _geo_yyerror!(context,"Cylinder requires 7 parameters")
+            return
+        end
         add_cylinder!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -3016,6 +3823,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         elseif 4<=length(values)<=7
             # `{x,y,z,r[,a1,a2,a3]}` — Gmsh gates this on OpenCASCADE;
             # Tessella's native primitive supports the full-sphere form.
+            if allocator_state===nothing ||
+                    allocator_state.factory!==:opencascade
+                _geo_yyerror!(context,
+                    "Sphere only available with OpenCASCADE geometry kernel")
+                return
+            end
             length(values)==4 || throw(ArgumentError(
                 "$caller: Sphere angle bounds (a1,a2,a3) are not supported"))
             add_sphere!(m,values[1],values[2],values[3],values[4];
@@ -3050,7 +3863,17 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         values=_geo_exec_numeric_values(
-            mm.captures[2],8,context,"$caller parameters")
+            mm.captures[2],context,"$caller parameters")
+        if allocator_state===nothing ||
+                allocator_state.factory!==:opencascade
+            _geo_yyerror!(context,
+                "Cone only available with OpenCASCADE geometry kernel")
+            return
+        end
+        if length(values)!=8
+            _geo_yyerror!(context,"Cone requires 8 parameters")
+            return
+        end
         add_cone!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -3061,9 +3884,16 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             mm.captures[1],context,"$caller tag")
         values=_geo_exec_numeric_values(
             mm.captures[2],context,"$caller parameters")
-        (length(values)==5 || length(values)==6) || throw(ArgumentError(
-            "$caller: Torus requires 5 or 6 numeric parameters; " *
-            "got $(length(values)) after range expansion"))
+        if allocator_state===nothing ||
+                allocator_state.factory!==:opencascade
+            _geo_yyerror!(context,
+                "Torus only available with OpenCASCADE geometry kernel")
+            return
+        end
+        if !(length(values)==5 || length(values)==6)
+            _geo_yyerror!(context,"Torus requires 5 or 6 parameters")
+            return
+        end
         add_torus!(m,values[1:5]...;tag=tag,_zero_literal=zero_literal,
                    angle=length(values)==6 ? values[6] : 2π)
         return
@@ -3213,7 +4043,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         body=String(strip(line))
         endswith(body,";") &&
             (body=String(strip(body[firstindex(body):prevind(body,lastindex(body))])))
-        _geo_exec_boolean_term(m,body,context)
+        _geo_exec_boolean_term(m,body,context,allocator_state)
         return
     elseif (mm=match(r"^OnelabRun\s*\(\s*(.*?)\s*\)\s*;?\s*$",line)) !== nothing
         nargs=_geo_eval_string_list(mm.captures[1],context,
@@ -3233,6 +4063,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_eval_numeric(mm.captures[2],context,"$caller result tag"),
             "$caller result tag"))
         groups=_geo_boolean_groups(mm.captures[3],caller)
+        # Upstream `BooleanShape` skips both the diagnostic and operand
+        # resolution when the OCC kernel is inactive — a silent no-op.
+        if allocator_state===nothing || allocator_state.factory!==:opencascade
+            return
+        end
         operands=_geo_boolean_operands(groups,context,caller)
         boolean_volumes_multi!(m,_GEO_BOOLEAN_OPS[mm.captures[1]],
             operands.objects.tags,operands.tools.tags;tag=tag,
@@ -3518,14 +4353,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             mm.captures[1]=="Point" ? 0 : mm.captures[1] in ("Curve","Line") ? 1 :
                 mm.captures[1]=="Surface" ? 2 : 3
         else
-            d=_geo_eval_numeric(mm.captures[2],context,"$caller dimension")
-            d in (0,1,2,3) || throw(ArgumentError(
-                "$caller: dimension must be 0..3 (got $d)"))
-            Int(d)
+            _geo_constraint_int(
+                _geo_eval_numeric(mm.captures[2],context,"$caller dimension"),
+                caller,"dimension")
         end
+        # The tag expression evaluates regardless of the dim's validity —
+        # upstream parses the FExpr before the `setMaxTag` action runs.
         value=_geo_constraint_int(
             _geo_eval_numeric(mm.captures[3],context,"$caller tag"),
             caller,"tag")
+        # A `GeoEntity{d}` outside 0..3 is a recoverable diagnostic upstream —
+        # the statement still applies whenever the internals switch covers the
+        # dim (`-2..3`). The observer emits "GeoEntity dim out of range [0,3]"
+        # and updates the loop counters for `-1`/`-2`; `next_tag` only tracks
+        # entity dims.
+        0<=dim<=3 || return
         # `GEO_Internals::setMaxTag` is an unconditional assignment while
         # `OCC_Internals::setMaxTag` keeps `max(current, value)`; the allocator
         # observer applies the same split to its own namespaces.
@@ -3669,14 +4511,19 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # entity names, fresh GEO internals) becomes current; parser symbols
         # are left alone.
         _geo_reset_model_geometry!(m)
+        _geo_reset_geometry_counters!(m,context)
         empty!(m.physical_names);empty!(m.entity_names)
         empty!(context.raw_physicals)
         empty!(m.meshing.compounds);context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         m.name=""
         context.geo_changed=true
-        allocator_state===nothing ||
-            _geo_allocator_reset_model!(allocator_state)
+        if allocator_state!==nothing
+            _geo_allocator_reset_model!(allocator_state,context;fresh=true)
+            # The fresh `GModel` has no OCC internals — every factory-gated
+            # dispatch falls through to the built-in path upstream.
+            allocator_state.factory=:builtin
+        end
         return
     elseif (mm=match(r"^(?:Recursive\s+)?(?:Show|Hide)\b",line)) !== nothing
         _geo_exec_visibility!(m,line,context,allocator_state)

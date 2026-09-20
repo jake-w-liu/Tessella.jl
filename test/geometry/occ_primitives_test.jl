@@ -218,6 +218,7 @@ end
 @testset ".geo primitive materialization" begin
     r=mktemp() do path,io
         write(io,raw"""
+            SetFactory("OpenCASCADE");
             Cylinder(1) = {0,0,0,0,0,2,1};
             Sphere(2) = {5,0,0,1};
             Cone(3) = {0,5,0,0,0,1,1,0.5};
