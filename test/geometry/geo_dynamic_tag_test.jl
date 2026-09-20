@@ -72,14 +72,14 @@ end
     @test nnodes(meshed.mesh)==125
     @test ntets(meshed.mesh)==384
     @test mesh_crc(meshed.mesh).sha==
-          "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
+          "a58374071a4c485a339e1c5b48b8b0f3e69bf362ff0e41f57ca1a665139e81df"
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,22).slave_nodes)==25
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,23).slave_nodes)==25
     projected=model_to_mixed(meshed.model,meshed.mesh,3,26)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "2c0749f8ff2bab314e2efafad8c349e33a1fb17ce481e3344e168f8969b40ece"
+          "8a7d8009ce298b69e9f15cad9927d24446854ac5bb527ed81f5ec0125ee2a713"
 
     primitive_source=raw"""
         SetFactory("OpenCASCADE");
@@ -173,6 +173,7 @@ end
     # A partial torus consumes two rim Points, three Curves, and three
     # Surfaces of hidden topology; the full torus consumes one, two, and one.
     torus_partial_source=raw"""
+        SetFactory("OpenCASCADE");
         Point(1) = {0,0,0,1};
         Point(2) = {1,0,0,1};
         Point(3) = {0,1,0,1};
@@ -189,6 +190,7 @@ end
     @test torus_partial.params.mesh_size_min==1.04
 
     torus_full_source=raw"""
+        SetFactory("OpenCASCADE");
         Point(1) = {0,0,0,1};
         Point(2) = {1,0,0,1};
         Point(3) = {0,1,0,1};
@@ -446,13 +448,6 @@ end
         "newp = 2;"=>"read-only",
         "newreg[] = {2};"=>"read-only",
         "Point(newp[0]) = {0,0,0,1};"=>"scalar and cannot use []",
-        "Point(2147483647)={0,0,0,1}; Point(newp)={1,0,0,1};"=>
-            "no Point tags remain",
-        "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; " *
-        "Line(2147483647)={1,2}; Line(newreg)={1,2};"=>
-            "no geometric region tags remain",
-        "Field[2147483647]=Box; Field[newf]=Box;"=>
-            "no Field tags remain",
         "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; " *
         "Physical Point(\"same\")={1}; Physical Point(\"same\")={2};"=>
             "Could not modify physical point",
@@ -472,6 +467,24 @@ end
         @test err isa ArgumentError
         @test occursin(message,sprint(showerror,err))
     end
+
+    # `newp`/`newf` are C++ `int` increments — past INT32_MAX they wrap to
+    # INT32_MIN — while `newreg` (`NEWREG()`) is the max over the *non-point*
+    # dimensions plus physical, so a wrapped dimension loses to the other
+    # counters and yields 1 (verified against Gmsh 4.15.2).
+    wrapped_alloc=_execute_dynamic_tag_source(raw"""
+        Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+        Point(2147483647)={2,0,0,1};
+        Point(newp)={3,0,0,1};
+        Line(2147483647)={1,2};
+        Line(newreg)={1,2};
+        Field[2147483647]=Box; Field[newf]=Box;
+        """)
+    @test sort!(collect(keys(wrapped_alloc.model.points)))==
+        [-2147483648,1,2,2147483647]
+    @test sort!(collect(keys(wrapped_alloc.model.curves)))==[1,2147483647]
+    @test haskey(wrapped_alloc.params.fields,2147483647)
+    @test haskey(wrapped_alloc.params.fields,-2147483648)
 
     # `setMaxPhysicalTag(t + 1)` runs on a raw `int` — at `typemax(Int32)` the
     # name-only counter bump wraps to `typemin(Int32)` rather than erroring,

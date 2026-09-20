@@ -132,13 +132,13 @@ end
     @test nnodes(topology_meshed.mesh)==81
     @test ntets(topology_meshed.mesh)==243
     @test mesh_crc(topology_meshed.mesh).sha==
-          "8e96c10809b9a826ca167d924216ca15cc779bd50107e9aee50e03d29e53c035"
+          "555471bac403a465e41575f64021556ef551ad7453688b23177f759c5c773806"
     topology_projected=model_to_mixed(
         topology_meshed.model,topology_meshed.mesh,3,1)
     @test validate(topology_projected).ok
     @test topology_projected.physical_names==topology.model.physical_names
     @test mixed_crc(topology_projected).sha==
-          "0226b78c2a3dc686c4b13849372e16eab8a1df2235c4e9417c9a087ee0df015c"
+          "c8c177821f3be94440ae0b754cfc26125d6d59620941191b852aeb0beb7a096c"
 
     holed_topology=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
@@ -301,8 +301,8 @@ end
         "MeshSize {:}=0.5;"=>"matched no explicit modeled points",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{99};}}=0.5;"=>
             "unknown Surface[99]",
-        "Sphere(1)={0,0,0,0.5}; MeshSize{PointsOf{Volume{99};}}=0.5;"=>
-            "unknown Volume[99]",
+        "SetFactory(\"OpenCASCADE\"); Sphere(1)={0,0,0,0.5}; " *
+            "MeshSize{PointsOf{Volume{99};}}=0.5;"=>"unknown Volume[99]",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{1}}}=0.5;"=>
             "every PointsOf entity block must end with a semicolon",
         "Point(1)={0,0,0,1}; MeshSize{PointsOf{Surface{};}}=0.5;"=>
@@ -319,7 +319,7 @@ end
             "unsupported topology query",
         "Physical Curve(\"bad\",1)=Boundary{Surface{99};};"=>
             "unknown Surface[99]",
-        "Cone(1)={0,0,0,0,0,1,0.5,0.2}; " *
+        "SetFactory(\"OpenCASCADE\"); Cone(1)={0,0,0,0,0,1,0.5,0.2}; " *
             "Physical Surface(\"bad\",1)=CombinedBoundary{Volume{99};};"=>
             "unknown Volume[99]",
         "Physical Curve(\"bad\",1)=Boundary{Volume{1};};"=>
@@ -353,24 +353,25 @@ end
     # A materialized Box has explicit shell topology, so CombinedBoundary
     # resolves to its six faces exactly as Gmsh's OCC `addBox` does.
     box_boundary=_execute_point_mesh_size_source(
-        "Box(1)={0,0,0,1,1,1}; " *
+        "SetFactory(\"OpenCASCADE\"); Box(1)={0,0,0,1,1,1}; " *
         "Physical Surface(\"shell\",1)=CombinedBoundary{Volume{1};};")
     @test box_boundary.model.physical[(2,1)]==collect(1:6)
 
     # `PointsOf{Volume{1}}` resolves to the eight materialized corners, which
     # accept explicit mesh-size constraints like any other Point.
     box_points_of=_execute_point_mesh_size_source(
-        "Box(1)={0,0,0,1,1,1}; MeshSize{PointsOf{Volume{1};}}=0.5;")
+        "SetFactory(\"OpenCASCADE\"); Box(1)={0,0,0,1,1,1}; " *
+        "MeshSize{PointsOf{Volume{1};}}=0.5;")
     @test box_points_of.model.point_size==Dict(tag=>0.5 for tag in 1:8)
 
     # The same holds for materialized OCC primitives: a Cylinder's two rim
     # Points take the size and `CombinedBoundary` yields its three faces.
     cylinder_points_of=_execute_point_mesh_size_source(
-        "Cylinder(1)={0,0,0,0,0,1,0.5}; " *
+        "SetFactory(\"OpenCASCADE\"); Cylinder(1)={0,0,0,0,0,1,0.5}; " *
         "MeshSize{PointsOf{Volume{1};}}=0.5;")
     @test cylinder_points_of.model.point_size==Dict(1=>0.5,2=>0.5)
     cylinder_boundary=_execute_point_mesh_size_source(
-        "Cylinder(1)={0,0,0,0,0,1,0.5}; " *
+        "SetFactory(\"OpenCASCADE\"); Cylinder(1)={0,0,0,0,0,1,0.5}; " *
         "Physical Surface(\"shell\",1)=CombinedBoundary{Volume{1};};")
     @test cylinder_boundary.model.physical[(2,1)]==[1,2,3]
 

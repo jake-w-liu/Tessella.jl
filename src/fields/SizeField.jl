@@ -13,7 +13,7 @@ strictly-positive mesh size before a meshing kernel can consume it.
 module SizeField
 
 using ..MeshTypes: Mesh, validate
-using ..IO: GeoParams, GeoFieldSpec, _geo_split_list
+using ..IO: GeoParams, GeoFieldSpec, _geo_split_list_or_argerr
 
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize
 export DistanceField, ThresholdField, BoxField, BallField, CylinderField, FrustumField
@@ -1044,7 +1044,7 @@ function _geo_list(spec::GeoFieldSpec,name::String; required::Bool=false)
         return String[]
     end
     caller="build_geo_size_field: Field[$(spec.tag)].$name"
-    return _geo_split_list(spec.options[name],caller)
+    return _geo_split_list_or_argerr(spec.options[name],caller)
 end
 
 function _geo_infield(spec::GeoFieldSpec;default::Int=1)

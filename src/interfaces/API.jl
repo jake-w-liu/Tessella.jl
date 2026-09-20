@@ -73,7 +73,7 @@ using ..Model: _model_entity_known, _model_fresh_element_tag,
               create_topology!
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, validate,
                    boundary_edges
-using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list
+using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr
 using ..SizeField: AbstractSizeField, build_geo_size_field, PostViewField
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
@@ -6930,7 +6930,7 @@ function _field_get_numbers(tag,name)
         _model_locked()
         raw=get(_session_field(tag,caller).options,String(name),nothing)
         raw===nothing && return Float64[]
-        items=_geo_split_list(raw,caller)
+        items=_geo_split_list_or_argerr(raw,caller)
         result=Float64[]
         for item in items
             value=tryparse(Float64,String(strip(item)))

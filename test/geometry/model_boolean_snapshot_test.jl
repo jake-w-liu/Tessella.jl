@@ -146,6 +146,7 @@ end
 
     nested=mktemp() do path,io
         write(io,"""
+            SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 2, 1, 1};
             Box(2) = {0, 0, 0, 1, 1, 1};
             Box(4) = {1, 0, 0, 0.5, 1, 1};

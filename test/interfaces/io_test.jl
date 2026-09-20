@@ -1213,13 +1213,17 @@ end
                 "Mesh.MeshSizeMin = newp[0];\n"=>"scalar and cannot use []",
                 "Rectangle(1) = {0,0,0,1,1}; Mesh.MeshSizeMin = newv;\n"=>
                     "outside the tracked allocator subset",
-                "Point(2147483647) = {0,0,0,1}; Mesh.MeshSizeMin = newp;\n"=>
-                    "no Point tags remain",
             )
                 err=allocator_error(source)
                 @test err isa ArgumentError
                 @test occursin(message,sprint(showerror,err))
             end
+            # Upstream `newp` is `(int)(getMaxTag(0)+1)` — the increment wraps
+            # signed Int32, so a max tag of 2147483647 yields -2147483648.
+            wrap_path=joinpath(dir,"allocator_wrap.geo")
+            write(wrap_path,
+                "Point(2147483647) = {0,0,0,1}; Mesh.MeshSizeMin = newp;\n")
+            @test read_geo_params(wrap_path).mesh_size_min==-2147483648.0
         end
 
         @testset "expression safety and resource limits" begin

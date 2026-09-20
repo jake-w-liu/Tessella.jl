@@ -231,6 +231,7 @@ end
 @testset ".geo N-way Boolean statements" begin
     # v() capture + multi-operand object list + disjoint tool
     parsed=_exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     Box(3) = {2,0,0, 1,1,1};
@@ -242,6 +243,7 @@ end
 
     # name[] capture of BooleanFragments over a two-brace form
     parsed=_exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1.5,1,1};
     Box(2) = {1,0,0, 1.5,1,1};
     w[] = BooleanFragments{ Volume{1}; Delete; }{ Volume{2}; Delete; };
@@ -252,6 +254,7 @@ end
 
     # tagged form with a multi-operand list — single fused piece
     parsed=_exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     BooleanUnion(7) = { Volume{1,2}; Delete; }{ };
@@ -261,6 +264,7 @@ end
 
     # an empty tool group is legal for fragments/union (union of the objects)
     parsed=_exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     v() = BooleanFragments{ Volume{1,2}; Delete; }{ };
@@ -269,6 +273,7 @@ end
 
     # single-brace form is a syntax error in Gmsh too — rejected
     @test_throws ArgumentError _exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     v() = BooleanUnion{ Volume{1,2}; Delete; };
@@ -277,6 +282,7 @@ end
     # explicit tag on a multi-piece result errors inside .geo as well
     err=try
         _exec_geo("""
+        SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Box(2) = {0.4,-0.5,-0.5, 0.2,2,2};
         BooleanDifference(9) = { Volume{1}; Delete; }{ Volume{2}; Delete; };
@@ -293,6 +299,7 @@ end
     # materialized boundary (the tracker cannot model the statement, so the
     # allocator resyncs to the model)
     parsed=_exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     Box(3) = {0.75,0,0, 1,1,1};
@@ -307,6 +314,7 @@ end
     # a disjoint tool under a multi-object difference leaves three cells —
     # v() capture then Physical Volume consumes the out list
     parsed=_exec_geo("""
+    SetFactory("OpenCASCADE");
     Box(1) = {0,0,0, 1,1,1};
     Box(2) = {0.5,0,0, 1,1,1};
     Box(3) = {5,0,0, 1,1,1};

@@ -442,6 +442,68 @@ project non-goals.
 
 ## Verification history (newest first)
 
+Re-verified on 2026-09-21 with Julia 1.13.0 against the pinned Gmsh 4.15.2
+binary and vendored 4.15.2 source after completing the `.geo` dynamic-allocator
+and option-expression parity increment:
+
+- `NumberOption` expression reads and writes now cover the whole `x[i].y`
+  grammar in both the scanner and the executor, including `Field[i].x`,
+  `View[i].x`, and indexed members. Storage-kind transforms were generated
+  mechanically from the vendored option callbacks (252 entries): `(int)val`
+  truncation, `(unsigned)` clamps, `val ? 1 : 0` bool stores, and
+  `max(trunc(val),1)` floors all apply at write time, so
+  `Geometry.OldNewReg = 0.7` reads back as per-dim mode exactly like upstream.
+- `Geometry.OldNewReg` (default 1) selects the shared `NEWREG()` counter for
+  `news`/`newl`/`newll`/`newsl`/`newv`; `= 0` reads each symbol's own
+  dimension counter, matching the lexer bindings at `Gmsh.l`. `newreg`
+  always reads the shared allocator. Per-dimension reads take the
+  cross-kernel maximum when OCC internals exist, incrementing each kernel
+  separately before the max so the Int32 wrap order matches
+  `NEWCURVE()`/`NEWPOINT()`/`NEWVOLUME()` in `Gmsh.y`.
+- `SetMaxTag` applies to the active factory kernel for dims -2..3
+  (`GeoEntity{-1}`/`{-2}` are the curve-loop and surface-loop counters),
+  emits the non-aborting "out of range" `yymsg` diagnostic for those loop
+  dims while still applying — verified against the binary — and genuinely
+  out-of-range dims error without applying. `SetFactory` synchronizes all
+  counters across dims -2..3 in both directions, matching `Gmsh.y:302-315`.
+- Model-lifecycle counters: `NewModel` (`new GModel`) and
+  `Delete Model`/`Delete All` (`destroy` → `_freeAll`+`_allocateAll`)
+  re-initialize every entity counter from `Geometry.FirstEntityTag - 1` and
+  the physical counter from `Geometry.FirstPhysicalTag - 1`, reading the
+  options at reset time — `Geometry.FirstEntityTag = 5; NewModel` yields
+  `newp == 5` on both sides. `Delete Model` keeps the OCC internals object
+  alive (`Box` still works, verified against the binary); `NewModel` and
+  `Delete All` create a fresh `GModel` with null OCC internals, so
+  OCC-gated statements fall back to the built-in diagnostic.
+  `Delete Physicals` matches `resetPhysicalGroups`: memberships and raw
+  groups clear while the physical counter and name bindings survive.
+- Factory gating parity: `Box`/`Cylinder`/`Cone`/`Torus` and the 4-7
+  parameter `Sphere` forms are OCC-only upstream; under the built-in
+  factory they emit "… only available with OpenCASCADE geometry kernel",
+  create nothing, and consume no allocator counters (the scan-side
+  observer mirrors the same gate). The two-point `Sphere`
+  (`newGeometrySphere`) and `PolarSphere` stay built-in under either
+  factory. Booleans reproduce the grammar's asymmetry: tagged
+  `BooleanUnion(3) = …` statements silently no-op under built-in while
+  standalone `BooleanUnion{…}` terms report the diagnostic and yield an
+  empty list, skipping operand resolution entirely.
+- `Normal Surface {tag} Parametric {u,v}` and
+  `Parametric Point {point} In Surface {surface}` evaluation cover ruled
+  and triangular surface kinds with upstream's forward/backward finite
+  differences; remaining digits-level residuals are fd noise and the
+  LAPACK-vendor `uv error` bound already documented.
+- Test fixtures previously encoding pre-parity permissive behavior were
+  corrected to Gmsh-faithful sources: `.geo` `Box`/`Sphere`/Boolean cases
+  now open with `SetFactory("OpenCASCADE")`, a five-component `Point`
+  `VExpr` and three-component `Symmetry` plane are accepted as legal, and
+  diagnostics match upstream's exact text ("Unknown action", "syntax
+  error"). Eighteen CRC pins across `api_test.jl`/`cli_test.jl`/
+  `geo_dynamic_tag_test.jl`/`geo_geometry_expression_test.jl`/
+  `geo_mesh_size_test.jl`/`geo_set_max_tag_test.jl` were re-measured and
+  proven stale by re-running every fixture on the pre-change commit
+  (`2f1b16a`), which produced bit-identical SHAs — the drift predates this
+  increment.
+
 Re-verified on 2026-09-19 with Julia 1.12.7 against the pinned Gmsh 4.15.2
 binary and vendored 4.15.2 source after a physical-group/allocator parity audit
 of the `.geo` scanner and executor:

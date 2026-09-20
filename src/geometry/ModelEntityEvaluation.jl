@@ -251,6 +251,420 @@ function _model_append_point!(output::Vector{Float64},point)
     return output
 end
 
+# ── Ruled-surface evaluation ─────────────────────────────────────────────
+#
+# `InterpolateRuledSurface` (GeoInterpolation.cpp): the first boundary loop's
+# signed curves are the generatrices — a negative tag evaluates the forward
+# curve at `1-t` — blended by `TransfiniteQua` (4 borders), `TransfiniteTriB`
+# (3 borders, the default) or `TransfiniteTri` (3 borders, `Geometry.
+# OldRuledSurface`). A shared `In Sphere` center — or circle-arc generatrices
+# sharing a center with at least two distinct arc-plane normals — marks a
+# sphere patch, whose blend is reprojected by `TransfiniteSph`.
+
+# Signed generatrix evaluation: `InterpolateCurve` on a reversed `Curve`
+# delegates to the forward record at `1-u` (built-in `[0,1]` parameter range).
+# `MSH_SEGM_LINE` evaluates `v1 + t*(v2-v1)` in plain doubles — the exact-
+# rational `_model_line_point` path would shift these evals by an ulp.
+@inline function _ruled_curve_point(m::GeoModel,signed::Int,t::Float64,
+                                    caller::AbstractString)
+    tag=abs(signed)
+    parameter=signed>0 ? t : 1.0-t
+    if _curve_type(m,tag)===:line
+        endpoints=m.curves[tag]
+        first=m.points[endpoints[1]];last=m.points[endpoints[2]]
+        return (first[1]+parameter*(last[1]-first[1]),
+                first[2]+parameter*(last[2]-first[2]),
+                first[3]+parameter*(last[3]-first[3]))
+    end
+    return _model_curve_point(m,tag,parameter,caller)
+end
+
+# The arc frame (`EndCurve`) of a signed generatrix — negative tags rebuild the
+# frame on the reversed control list (`List_Invert`; ellipse arcs keep their
+# center/major pair interior: `[e4,e2,e3,e1]`).
+function _ruled_arc_frame(m::GeoModel,signed::Int,caller::AbstractString)
+    tag=abs(signed)
+    cps=m.curve_control_points[tag]
+    kind=_curve_type(m,tag)
+    ordered=signed>0 ? cps :
+        kind===:ellipse ? [cps[4],cps[2],cps[3],cps[1]] : reverse(cps)
+    stored=get(m.curve_geometry,tag,nothing)
+    n=stored===nothing || !hasproperty(stored,:n) ? (0.0,0.0,1.0) : stored.n
+    coords=NTuple{3,Float64}[]
+    for p in ordered
+        haskey(m.points,p) || throw(ArgumentError(
+            "$caller: Curve[$tag] references unknown Point[$p]"))
+        push!(coords,m.points[p])
+    end
+    return _arc_geometry(coords,kind,n,tag,caller)
+end
+
+# Sphere-patch detection: `s->InSphereCenter` wins outright; otherwise every
+# generatrix (up to four) must be a circle arc sharing the same center
+# position (`CompareVertex` compares coordinates), and the arcs must not all
+# share a single plane normal — coplanar circles bound a flat patch.
+function _ruled_sphere_center(m::GeoModel,tag::Int,gens::Vector{Int},
+                              caller::AbstractString)
+    geometry=get(m.surface_geometry,tag,nothing)
+    if geometry!==nothing && hasproperty(geometry,:sphere_center)
+        sc=geometry.sphere_center
+        haskey(m.points,sc) || throw(ArgumentError(
+            "$caller: Surface[$tag] references unknown sphere center " *
+            "Point[$sc]"))
+        return m.points[sc]
+    end
+    O=nothing; normals=NTuple{3,Float64}[]
+    for (index,signed) in enumerate(Iterators.take(gens,4))
+        _curve_type(m,abs(signed))===:circle || return nothing
+        frame=_ruled_arc_frame(m,signed,caller)
+        if index==1
+            O=frame.center
+        elseif frame.center!=O
+            return nothing
+        end
+        push!(normals,frame.n)
+    end
+    O===nothing && return nothing
+    all(normal->normal==first(normals),normals) && return nothing
+    return O
+end
+
+# `TransfiniteSph` — reproject the blend onto the sphere through `center`
+# whose radius is `|S0 - O|` (the first corner vertex).
+function _ruled_sphere_project(corner,center,point)
+    r=sqrt((corner[1]-center[1])*(corner[1]-center[1])+
+           (corner[2]-center[2])*(corner[2]-center[2])+
+           (corner[3]-center[3])*(corner[3]-center[3]))
+    s=sqrt((point[1]-center[1])*(point[1]-center[1])+
+           (point[2]-center[2])*(point[2]-center[2])+
+           (point[3]-center[3])*(point[3]-center[3]))
+    return (center[1]+r*(point[1]-center[1])/s,
+            center[2]+r*(point[2]-center[2])/s,
+            center[3]+r*(point[3]-center[3])/s)
+end
+
+# `TransfiniteQua` — bilinear blend of the four generatrices minus the
+# bilinear corner patch (the TRAN_QUA macro, evaluated axis-wise).
+function _ruled_qua_blend(u::Float64,v::Float64,c1,c2,c3,c4,S)
+    return ntuple(3) do axis
+        (1.0-u)*c4[axis]+u*c2[axis]+(1.0-v)*c1[axis]+v*c3[axis]-
+        ((1.0-u)*(1.0-v)*S[1][axis]+u*(1.0-v)*S[2][axis]+
+         u*v*S[3][axis]+(1.0-u)*v*S[4][axis])
+    end
+end
+
+# `TransfiniteTri` (the `!` old flag form) — the TRAN_TRI macro.
+function _ruled_tri_blend_old(u::Float64,v::Float64,c1,c2,c3,S)
+    return ntuple(3) do axis
+        u*c2[axis]+(1.0-v)*c1[axis]+v*c3[axis]-
+        (u*(1.0-v)*S[2][axis]+u*v*S[3][axis])
+    end
+end
+
+# `TransfiniteTriB` (default) — the TRAN_TRIB macro: opposite-vertex
+# extrapolation along each edge (`C0@u-v`, `C2@1-u+v`, `C1@1-v`).
+function _ruled_trib_blend(u::Float64,v::Float64,c1,c1b,c2,c2b,c3,c3b,S)
+    return ntuple(3) do axis
+        (1.0-u)*(c1[axis]+c3b[axis]-S[1][axis])+
+        (u-v)*(c2[axis]+c1b[axis]-S[2][axis])+
+        v*(c3[axis]+c2b[axis]-S[3][axis])
+    end
+end
+
+function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
+                              caller::AbstractString,old_ruled::Bool=false)
+    gens=m.loops[first(m.surfaces[tag])]
+    isempty(gens) && throw(ArgumentError(
+        "$caller: no curves on boundary of ruled surface $tag"))
+    corner(i)=begin
+        signed=gens[i]
+        endpoints=m.curves[abs(signed)]
+        m.points[signed>0 ? endpoints[1] : endpoints[2]]
+    end
+    center=_ruled_sphere_center(m,tag,gens,caller)
+    if length(gens)>=4
+        S=(corner(1),corner(2),corner(3),corner(4))
+        point=_ruled_qua_blend(u,v,
+            _ruled_curve_point(m,gens[1],u,caller),
+            _ruled_curve_point(m,gens[2],v,caller),
+            _ruled_curve_point(m,gens[3],1.0-u,caller),
+            _ruled_curve_point(m,gens[4],1.0-v,caller),S)
+        center!==nothing &&
+            (point=_ruled_sphere_project(S[1],center,point))
+        return point
+    end
+    S=(corner(1),corner(2),corner(3))
+    point=if old_ruled
+        _ruled_tri_blend_old(u,v,
+            _ruled_curve_point(m,gens[1],u,caller),
+            _ruled_curve_point(m,gens[2],v,caller),
+            _ruled_curve_point(m,gens[3],1.0-u,caller),S)
+    else
+        _ruled_trib_blend(u,v,
+            _ruled_curve_point(m,gens[1],u-v,caller),
+            _ruled_curve_point(m,gens[1],u,caller),
+            _ruled_curve_point(m,gens[2],v,caller),
+            _ruled_curve_point(m,gens[2],1.0-u+v,caller),
+            _ruled_curve_point(m,gens[3],1.0-u,caller),
+            _ruled_curve_point(m,gens[3],1.0-v,caller),S)
+    end
+    center!==nothing && (point=_ruled_sphere_project(S[1],center,point))
+    return point
+end
+
+const _RU_SURF_FD_EPS=1.0e-8
+# `inv_fd_eps` — upstream multiplies by the precomputed reciprocal
+# (`1/1e-8` rounds to `1e8` exactly); `x/1e-8` differs by an ulp.
+const _RU_SURF_INV_FD_EPS=1.0/1.0e-8
+
+# `InterpolateSurface(der=1)` — forward difference at the lower boundary
+# (`u-eps < 0`), backward difference elsewhere, hardcoded `fd_eps = 1e-8`.
+function _ruled_surface_d1(m::GeoModel,tag::Int,u::Float64,v::Float64,
+                           dir::Int,caller::AbstractString,
+                           old_ruled::Bool=false)
+    eps=_RU_SURF_FD_EPS
+    if dir==1
+        if u-eps<0.0
+            a=_ruled_surface_point(m,tag,u,v,caller,old_ruled)
+            b=_ruled_surface_point(m,tag,u+eps,v,caller,old_ruled)
+        else
+            a=_ruled_surface_point(m,tag,u-eps,v,caller,old_ruled)
+            b=_ruled_surface_point(m,tag,u,v,caller,old_ruled)
+        end
+    else
+        if v-eps<0.0
+            a=_ruled_surface_point(m,tag,u,v,caller,old_ruled)
+            b=_ruled_surface_point(m,tag,u,v+eps,caller,old_ruled)
+        else
+            a=_ruled_surface_point(m,tag,u,v-eps,caller,old_ruled)
+            b=_ruled_surface_point(m,tag,u,v,caller,old_ruled)
+        end
+    end
+    return ((b[1]-a[1])*_RU_SURF_INV_FD_EPS,
+            (b[2]-a[2])*_RU_SURF_INV_FD_EPS,
+            (b[3]-a[3])*_RU_SURF_INV_FD_EPS)
+end
+
+# `InterpolateSurface(der=2)` — a finite difference of the der=1 finite
+# difference; the lower-boundary stencils mix a der=0 and a der=1 sample
+# exactly as upstream (`dudv` differences the du-derivative along v).
+function _ruled_surface_d2(m::GeoModel,tag::Int,u::Float64,v::Float64,
+                           which::Int,caller::AbstractString,
+                           old_ruled::Bool=false)
+    eps=_RU_SURF_FD_EPS
+    if which==1
+        if u-eps<0.0
+            a=_ruled_surface_d1(m,tag,u,v,1,caller,old_ruled)
+            b=_ruled_surface_d1(m,tag,u+eps,v,1,caller,old_ruled)
+        else
+            a=_ruled_surface_d1(m,tag,u-eps,v,1,caller,old_ruled)
+            b=_ruled_surface_d1(m,tag,u,v,1,caller,old_ruled)
+        end
+    elseif which==2
+        if v-eps<0.0
+            a=_ruled_surface_d1(m,tag,u,v,2,caller,old_ruled)
+            b=_ruled_surface_d1(m,tag,u,v+eps,2,caller,old_ruled)
+        else
+            a=_ruled_surface_d1(m,tag,u,v-eps,2,caller,old_ruled)
+            b=_ruled_surface_d1(m,tag,u,v,2,caller,old_ruled)
+        end
+    else
+        if v-eps<0.0
+            a=_ruled_surface_d1(m,tag,u,v,1,caller,old_ruled)
+            b=_ruled_surface_d1(m,tag,u,v+eps,1,caller,old_ruled)
+        else
+            a=_ruled_surface_d1(m,tag,u,v-eps,1,caller,old_ruled)
+            b=_ruled_surface_d1(m,tag,u,v,1,caller,old_ruled)
+        end
+    end
+    return ((b[1]-a[1])*_RU_SURF_INV_FD_EPS,
+            (b[2]-a[2])*_RU_SURF_INV_FD_EPS,
+            (b[3]-a[3])*_RU_SURF_INV_FD_EPS)
+end
+
+# `gmshFace::normal` on `MSH_SURF_REGL`/`MSH_SURF_TRIC` — the `Vertex % Vertex`
+# cross of the fd tangents normalized by `Vertex::norme` (plain ops, a zero
+# cross stays zero).
+function _ruled_surface_normal(m::GeoModel,tag::Int,u::Float64,v::Float64,
+                               caller::AbstractString,old_ruled::Bool=false)
+    vu=_ruled_surface_d1(m,tag,u,v,1,caller,old_ruled)
+    vv=_ruled_surface_d1(m,tag,u,v,2,caller,old_ruled)
+    n=(vu[2]*vv[3]-vu[3]*vv[2],
+       -(vu[1]*vv[3]-vu[3]*vv[1]),
+       vu[1]*vv[2]-vu[2]*vv[1])
+    d=sqrt(n[1]*n[1]+n[2]*n[2]+n[3]*n[3])
+    d==0.0 && return n
+    return (n[1]/d,n[2]/d,n[3]/d)
+end
+
+# `invert_singular_matrix3x3` — the SVD pseudo-inverse `V·W⁻¹·Uᵀ` with the
+# 1e-16 singular-value cutoff.
+function _invert_singular3x3(mat::Matrix{Float64})
+    factor=LinearAlgebra.svd(mat;alg=LinearAlgebra.QRIteration())
+    inverse=zeros(Float64,3,3)
+    for i in 1:3
+        w=factor.S[i]
+        abs(w)>1e-16 || continue
+        invw=1.0/w
+        for row in 1:3, column in 1:3
+            inverse[row,column]+=factor.Vt[i,row]*invw*factor.U[column,i]
+        end
+    end
+    return inverse
+end
+
+# `GFace::XYZtoUV` — damped Newton (SVD pseudo-inverse step) restarted over a
+# fixed 9×9 initial-guess grid; failed passes recurse at `relax *= 0.75` until
+# `relax < 1e-3`. `warn`/`info` receive the upstream `Msg::Warning`/`Msg::Info`
+# texts ("Converged at iter. ...", "Point ...: Relaxation factor = ...",
+# "Inverse surface mapping could not converge").
+function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
+                          relax::Float64,lc::Float64,test_xyz::Bool,warn,info,
+                          caller::AbstractString,old_ruled::Bool=false)
+    guesses=(0.5,0.6,0.4,0.7,0.3,0.8,0.2,1.0,0.0)
+    umin=vmin=0.0;umax=vmax=1.0
+    tol=1e-8*((umax-umin)^2+(vmax-vmin)^2)
+    U=V=Unew=Vnew=0.0
+    for (i,initu) in pairs(guesses), (j,initv) in pairs(guesses)
+        U=umin+initu*(umax-umin);V=vmin+initv*(vmax-vmin)
+        err=1.0;iter=1
+        point=_ruled_surface_point(m,tag,U,V,caller,old_ruled)
+        err2=sqrt((target[1]-point[1])^2+(target[2]-point[2])^2+
+                  (target[3]-point[3])^2)
+        err2<1e-8*lc && return (U,V)
+        while err>tol && iter<25
+            point=_ruled_surface_point(m,tag,U,V,caller,old_ruled)
+            du=_ruled_surface_d1(m,tag,U,V,1,caller,old_ruled)
+            dv=_ruled_surface_d1(m,tag,U,V,2,caller,old_ruled)
+            jac=_invert_singular3x3(
+                [du[1] du[2] du[3];dv[1] dv[2] dv[3];0.0 0.0 0.0])
+            rx=target[1]-point[1];ry=target[2]-point[2];rz=target[3]-point[3]
+            Unew=U+relax*(jac[1,1]*rx+jac[2,1]*ry+jac[3,1]*rz)
+            Vnew=V+relax*(jac[1,2]*rx+jac[2,2]*ry+jac[3,2]*rz)
+            ((Unew>umax+tol || Unew<umin-tol) &&
+             (Vnew>vmax+tol || Vnew<vmin-tol)) && break
+            err=(Unew-U)^2+(Vnew-V)^2
+            err2=sqrt((target[1]-point[1])^2+(target[2]-point[2])^2+
+                      (target[3]-point[3])^2)
+            iter+=1;U=Unew;V=Vnew
+        end
+        if iter<25 && err<=tol &&
+            umin<=Unew<=umax && vmin<=Vnew<=vmax
+            if err2>1e-4*lc && test_xyz
+                continue
+            end
+            err2>1e-4*lc && warn(
+                "Converged at iter. $(iter) for initial guess " *
+                "($(i-1),$(j-1)) with uv error = $(@sprintf("%g",err)), " *
+                "but xyz error = $(@sprintf("%g",err2)) in point " *
+                "($(@sprintf("%e",target[1])), $(@sprintf("%e",target[2])), " *
+                "$(@sprintf("%e",target[3]))) on surface $tag")
+            return (Unew,Vnew)
+        end
+    end
+    if relax<1e-3
+        warn("Inverse surface mapping could not converge")
+        return (U,V)
+    end
+    info(@sprintf("Point %g %g %g: Relaxation factor = %g",
+                  target[1],target[2],target[3],0.75*relax))
+    return _ruled_xyz_to_uv(m,tag,target,0.75*relax,lc,test_xyz,warn,
+                            info,caller,old_ruled)
+end
+
+# `gmshVertex::reparamOnFace` — the generatrix-corner map for ruled surfaces;
+# non-corner vertices project through `XYZtoUV` (`GVertex::reparamOnFace` →
+# `parFromPoint`), announced by `Msg::Info`.
+function _ruled_vertex_parameters(m::GeoModel,tag::Int,point_tag::Int,
+                                  lc::Float64,test_xyz::Bool,warn,info,
+                                  caller::AbstractString,old_ruled::Bool)
+    gens=m.loops[first(m.surfaces[tag])]
+    touches(i)=begin
+        endpoints=m.curves[abs(gens[i])]
+        point_tag==endpoints[1] || point_tag==endpoints[2]
+    end
+    if length(gens)>=4
+        if touches(1)&&touches(4)
+            return (0.0,0.0)
+        elseif touches(1)&&touches(2)
+            return (1.0,0.0)
+        elseif touches(2)&&touches(3)
+            return (1.0,1.0)
+        elseif touches(3)&&touches(4)
+            return (0.0,1.0)
+        end
+    else
+        if touches(1)&&touches(3)
+            return (0.0,0.0)
+        elseif touches(1)&&touches(2)
+            return (1.0,0.0)
+        elseif touches(2)&&touches(3)
+            return (1.0,1.0)
+        end
+    end
+    coordinate=get(m.points,point_tag,nothing)
+    if coordinate===nothing
+        record=get(m.discrete,(0,point_tag),nothing)
+        (record===nothing || isempty(record.node_coords)) &&
+            throw(ArgumentError("$caller: unknown Point[$point_tag]"))
+        coordinate=NTuple{3,Float64}(record.node_coords[:,1])
+    end
+    info("Reparameterizing point $point_tag on face $tag")
+    return _ruled_xyz_to_uv(m,tag,coordinate,1.0,lc,test_xyz,
+                            warn,info,caller,old_ruled)
+end
+
+# `gmshEdge::reparamOnFace` — boundary generatrices map directly onto the
+# patch edges (`ubeg=uend=[0,1]` for built-in curves); curves off the
+# boundary project their evaluated point through `XYZtoUV`
+# (`GEdge::reparamOnFace` → `parFromPoint(point(epar))`).
+function _ruled_curve_parameters(m::GeoModel,tag::Int,curve_tag::Int,
+                                 parameter::Float64,lc::Float64,
+                                 test_xyz::Bool,warn,info,
+                                 caller::AbstractString,old_ruled::Bool)
+    gens=m.loops[first(m.surfaces[tag])]
+    if length(gens)>=4
+        if gens[1]==curve_tag
+            return (parameter,0.0)
+        elseif gens[1]==-curve_tag
+            return (1.0-parameter,0.0)
+        elseif gens[2]==curve_tag
+            return (1.0,parameter)
+        elseif gens[2]==-curve_tag
+            return (1.0,1.0-parameter)
+        elseif gens[3]==curve_tag
+            return (1.0-parameter,1.0)
+        elseif gens[3]==-curve_tag
+            return (parameter,1.0)
+        elseif gens[4]==curve_tag
+            return (0.0,1.0-parameter)
+        elseif gens[4]==-curve_tag
+            return (0.0,parameter)
+        end
+    else
+        if gens[1]==curve_tag
+            return (parameter,0.0)
+        elseif gens[1]==-curve_tag
+            return (1.0-parameter,0.0)
+        elseif gens[2]==curve_tag
+            return (1.0,parameter)
+        elseif gens[2]==-curve_tag
+            return (1.0,1.0-parameter)
+        elseif gens[3]==curve_tag
+            u=1.0-parameter
+            # Non-exact-extrusion quirk: `V = hack ? 1 : U`.
+            return (u,old_ruled ? 1.0 : u)
+        elseif gens[3]==-curve_tag
+            u=parameter
+            return (u,old_ruled ? 1.0 : u)
+        end
+    end
+    coordinate=_model_curve_point(m,curve_tag,parameter,caller)
+    info("Reparameterizing curve $curve_tag on surface $tag")
+    return _ruled_xyz_to_uv(m,tag,coordinate,1.0,lc,test_xyz,warn,
+                            info,caller,old_ruled)
+end
+
 # Single-parameter curve evaluation shared by `model_value` and
 # `model_reparametrize_on_surface`: OCC records evaluate on their own
 # parameter range (`:circle`/`:degenerate`/`:line`), built-in lines on the
@@ -291,7 +705,8 @@ deterministic native orthonormal frame returned by
 Gmsh's angle parametrization; `Spline`/`BSpline`/`Bezier`/`Nurbs` evaluate
 with Gmsh's `InterpolateCurve` ports.
 """
-function model_value(m::GeoModel,dim,tag,parametric_coordinates)
+function model_value(m::GeoModel,dim,tag,parametric_coordinates;
+                     old_ruled_surface::Bool=false)
     caller="model_value"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1,2),caller)
@@ -352,6 +767,14 @@ function model_value(m::GeoModel,dim,tag,parametric_coordinates)
             end
             return output
         end
+        if _surface_type(m,entity_tag) in (:ruled,:tric)
+            for index in 1:2:length(values)
+                _model_append_point!(output,_ruled_surface_point(
+                    m,entity_tag,values[index],values[index+1],caller,
+                    old_ruled_surface))
+            end
+            return output
+        end
         plane=_model_plane_frame(m,entity_tag,caller)
         for index in 1:2:length(values)
             _model_append_point!(output,_model_plane_point(
@@ -366,7 +789,8 @@ Evaluate first derivatives for an explicit Line, arc, or Plane. Arc derivatives
 are analytic; Gmsh's `getDerivative` uses a finite difference of the same
 evaluation, so values agree within that error.
 """
-function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
+function model_derivative(m::GeoModel,dim,tag,parametric_coordinates;
+                          old_ruled_surface::Bool=false)
     caller="model_derivative"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(1,2),caller)
@@ -438,6 +862,18 @@ function model_derivative(m::GeoModel,dim,tag,parametric_coordinates)
             end
             return output
         end
+        if _surface_type(m,entity_tag) in (:ruled,:tric)
+            sizehint!(output,3length(values))
+            for index in 1:2:length(values)
+                append!(output,_ruled_surface_d1(
+                    m,entity_tag,values[index],values[index+1],1,caller,
+                    old_ruled_surface))
+                append!(output,_ruled_surface_d1(
+                    m,entity_tag,values[index],values[index+1],2,caller,
+                    old_ruled_surface))
+            end
+            return output
+        end
         plane=_model_plane_frame(m,entity_tag,caller)
         sizehint!(output,3length(values))
         for _ in 1:2:length(values)
@@ -452,7 +888,8 @@ end
 Evaluate second derivatives for an explicit Line, arc, or Plane. Line and Plane
 derivatives are zero; arc derivatives are analytic.
 """
-function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
+function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates;
+                                 old_ruled_surface::Bool=false)
     caller="model_second_derivative"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(1,2),caller)
@@ -501,6 +938,22 @@ function model_second_derivative(m::GeoModel,dim,tag,parametric_coordinates)
                 _,_,_,duu,dvv,duv=_occ_surface_d2(
                     surface_geometry,values[index],values[index+1])
                 append!(output,duu);append!(output,dvv);append!(output,duv)
+            end
+            return output
+        end
+        if _surface_type(m,entity_tag) in (:ruled,:tric)
+            output=Float64[]
+            sizehint!(output,9*(length(values)÷2))
+            for index in 1:2:length(values)
+                append!(output,_ruled_surface_d2(
+                    m,entity_tag,values[index],values[index+1],1,caller,
+                    old_ruled_surface))
+                append!(output,_ruled_surface_d2(
+                    m,entity_tag,values[index],values[index+1],2,caller,
+                    old_ruled_surface))
+                append!(output,_ruled_surface_d2(
+                    m,entity_tag,values[index],values[index+1],3,caller,
+                    old_ruled_surface))
             end
             return output
         end
@@ -600,8 +1053,14 @@ function model_principal_curvatures(m::GeoModel,tag,parametric_coordinates)
            first_directions,second_directions
 end
 
-"""Return the exterior-loop-oriented unit normal of an explicit Plane."""
-function model_normal(m::GeoModel,tag,parametric_coordinates)
+"""
+Return the unit normal of an explicit surface: exterior-loop-oriented for an
+explicit Plane, the `InterpolateSurface` fd cross for a ruled patch, the OCC
+or discrete evaluator otherwise. `old_ruled_surface` selects the legacy
+`Geometry.OldRuledSurface` triangular-blend algorithm.
+"""
+function model_normal(m::GeoModel,tag,parametric_coordinates;
+                      old_ruled_surface::Bool=false)
     caller="model_normal"
     _,entity_tag=_model_metadata_entity(m,2,tag,caller)
     values=_model_evaluation_values(
@@ -631,6 +1090,18 @@ function model_normal(m::GeoModel,tag,parametric_coordinates)
         for index in 1:2:length(values)
             append!(output,_occ_surface_normal(
                 surface_geometry,values[index],values[index+1]))
+        end
+        return output
+    end
+    if _surface_type(m,entity_tag) in (:ruled,:tric)
+        # `gmshFace::normal` — the `Vertex % Vertex` cross of the
+        # `InterpolateSurface` fd tangents, `Vertex::norme` normalized.
+        output=Float64[]
+        sizehint!(output,3*(length(values)÷2))
+        for index in 1:2:length(values)
+            append!(output,_ruled_surface_normal(
+                m,entity_tag,values[index],values[index+1],caller,
+                old_ruled_surface))
         end
         return output
     end
@@ -780,6 +1251,9 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
         # profile (axis/slant length, latitude, or tube angle).
         return _occ_surface_bounds(surface_geometry)
     end
+    # `gmshFace` sets `[0,1]²` bounds on every non-plane patch.
+    _surface_type(m,entity_tag) in (:ruled,:tric) &&
+        return [0.0,0.0],[1.0,1.0]
     plane=_model_plane_frame(m,entity_tag,caller)
     lower,upper=_model_plane_parameter_bounds(plane,caller)
     return collect(lower),collect(upper)
@@ -1024,7 +1498,10 @@ orthogonally projected when it is not coplanar. `which` is validated but has no
 effect because native Planes are not periodic.
 """
 function model_reparametrize_on_surface(
-    m::GeoModel,dim,tag,parametric_coordinates,surface_tag,which=0)
+    m::GeoModel,dim,tag,parametric_coordinates,surface_tag,which=0;
+    old_ruled_surface::Bool=false,newton_convergence_xyz::Bool=false,
+    warn=nothing,info=nothing,
+    lc::Union{Nothing,Float64}=nothing)
     caller="model_reparametrize_on_surface"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1),caller)
@@ -1035,8 +1512,33 @@ function model_reparametrize_on_surface(
     surface_geometry=get(m.surface_geometry,plane_tag,nothing)
     occ_surface=surface_geometry!==nothing &&
         hasproperty(surface_geometry,:occ)
+    surface_kind=occ_surface ? :occ : _surface_type(m,plane_tag)
+    if surface_kind in (:ruled,:tric)
+        # `gmshVertex`/`gmshEdge` `reparamOnFace` — the generatrix boundary
+        # map with `XYZtoUV` (`GFace::parFromPoint`) for off-boundary input.
+        # `lc` overrides `CTX::instance()->lc` (the parse-time temporary
+        # bounding box diagonal); the default is the post-load padded value.
+        lc=something(lc,_model_lc(m))
+        warn===nothing && (warn=_->nothing)
+        info===nothing && (info=_->nothing)
+        if dimension==0
+            isempty(values) || throw(ArgumentError(
+                "$caller: Point parametric coordinates must be empty"))
+            return collect(_ruled_vertex_parameters(
+                m,plane_tag,entity_tag,lc,newton_convergence_xyz,warn,
+                info,caller,old_ruled_surface))
+        end
+        output=Float64[]
+        sizehint!(output,2length(values))
+        for (index,parameter) in pairs(values)
+            append!(output,_ruled_curve_parameters(
+                m,plane_tag,entity_tag,parameter,lc,newton_convergence_xyz,
+                warn,info,caller,old_ruled_surface))
+        end
+        return output
+    end
     plane=occ_surface ? nothing : _model_plane_frame(m,plane_tag,caller)
-    lc=occ_surface ? _model_lc(m) : 0.0
+    lc=occ_surface ? something(lc,_model_lc(m)) : 0.0
     if occ_surface
         if dimension==0
             isempty(values) || throw(ArgumentError(

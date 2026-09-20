@@ -259,6 +259,7 @@ end
     # Materialized Box: a π/2 rotation keeps the encoding; a π/4 rotation
     # drops it while preserving the explicit shell.
     r=_execute_transform_source("""
+        SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,2,1};
         Translate {1,1,1} { Volume{1}; }
         """)
@@ -269,6 +270,7 @@ end
     @test r.model.points[2]==(1.0,1.0,1.0)
 
     r=_execute_transform_source("""
+        SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,2,1};
         Rotate {{0,0,1},{0,0,0}, Pi/2} { Volume{1}; }
         """)
@@ -277,6 +279,7 @@ end
     @test sort!([dx,dy,dz])≈[1.0,1.0,2.0]
 
     r=_execute_transform_source("""
+        SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,2,1};
         Rotate {{0,0,1},{0,0,0}, Pi/4} { Volume{1}; }
         """)
@@ -289,6 +292,7 @@ end
     # Sub-entity transform on a materialized box drops the encoding when the
     # shell no longer matches the encoded corners.
     r=_execute_transform_source("""
+        SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Translate {0,0,1} { Point{1}; }
         """)
@@ -297,6 +301,7 @@ end
 
     # Implicit primitives update their encodings.
     r=_execute_transform_source("""
+        SetFactory("OpenCASCADE");
         Cylinder(1) = {0,0,0, 0,0,2, 0.5};
         Sphere(2) = {1,1,1, 0.25};
         Cone(3) = {0,0,0, 1,0,0, 0.4,0.2};
@@ -315,6 +320,7 @@ end
 
     # Non-representable transforms fail before mutating.
     err=_transform_error("""
+        SetFactory("OpenCASCADE");
         Sphere(1) = {0,0,0,1};
         Dilate {{0,0,0},{2,1,1}} { Volume{1}; }
         """)
@@ -324,6 +330,7 @@ end
     # Boolean operand snapshots follow the Boolean result, not later operand
     # transforms.
     r=_execute_transform_source("""
+        SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Box(2) = {0.5,0,0, 1,1,1};
         BooleanUnion(3) = { Volume{1}; }{ Volume{2}; };
@@ -340,7 +347,7 @@ end
     @test _transform_error("Point(1)={0,0,0,1}; Translate {1,0,0} { Point{9}; }") isa ArgumentError
     @test occursin("unknown Point",_transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Point{9}; }").msg)
-    @test occursin("must end with `;`",_transform_error(
+    @test occursin("syntax error",_transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Point{1} }").msg)
     # An empty shape list is legal and transforms nothing (the global
     # coherence merge still runs).
@@ -365,7 +372,7 @@ end
         "Point(1)={0,0,0,1}; Affine {1,0,0,0, 0,1,0,0, 0,0,1,0} { Point{1}; }").msg)
     @test _transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Frobnicate{1}; }") isa ArgumentError
-    @test occursin("unknown action on multiple shapes",_transform_error(
+    @test occursin("Unknown action on multiple shapes",_transform_error(
         "Point(1)={0,0,0,1}; Translate {1,0,0} { Frobnicate{Point{1};} }").msg)
     # A missing Physical group silently expands to nothing — Gmsh resolves the
     # selector through the synchronized group map, which has no entry for 99.
@@ -383,5 +390,7 @@ end
     @test sort!(collect(keys(r.model.points)))==[1,2]
     # Malformed parameter counts.
     @test _transform_error("Point(1)={0,0,0,1}; Translate {1,0} { Point{1}; }") isa ArgumentError
-    @test _transform_error("Point(1)={0,0,0,1}; Symmetry {1,0,0} { Point{1}; }") isa ArgumentError
+    # `Symmetry {a,b,c}` is legal upstream — a three-component VExpr yields the
+    # plane (a,b,c,0); the malformed case needs fewer than three components.
+    @test _transform_error("Point(1)={0,0,0,1}; Symmetry {1,0} { Point{1}; }") isa ArgumentError
 end

@@ -48,10 +48,11 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
 
     exhausted=GeoModel()
     @test add_point!(exhausted,0,0,0; tag=typemax(Int32))==typemax(Int32)
-    points_before=copy(exhausted.points)
-    @test_throws ArgumentError add_point!(exhausted,1,0,0)
+    # Auto-assignment past INT32_MAX wraps to INT32_MIN — Gmsh's `(int)` cast
+    # on `getMaxTag()+1` (verified against 4.15.2 `Point(newp)` → -2147483648).
+    @test add_point!(exhausted,1,0,0)==typemin(Int32)
     @test_throws ArgumentError add_point!(GeoModel(),0,0,0; tag=big(2)^100)
-    @test exhausted.points==points_before
+    @test exhausted.points[typemin(Int32)]==(1.0,0.0,0.0)
 
     invalid_primitives=GeoModel()
     @test_throws ArgumentError add_box!(invalid_primitives,0,0,0,Inf,1,1)
@@ -643,6 +644,7 @@ end
 
     shifted=mktemp() do path,io
         write(io, """
+            SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 1, 1, 1};
             Translate {2, 0, 0} { Volume{1}; };
             """)
@@ -662,6 +664,7 @@ end
 
     selective=mktemp() do path,io
         write(io, """
+            SetFactory("OpenCASCADE");
             /* A block comment is lexical whitespace. */
             Box(1) = {0, 0, 0, 1, 1, 1};
             Box(2) = {0.5, 0, 0, 1, 1, 1};
@@ -673,6 +676,7 @@ end
     @test sort!(collect(keys(selective.model.volumes)))==[2,3]
     mktemp() do path,io
         write(io,"""
+            SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 1, 1, 1};
             Box(2) = {0.5, 0, 0, 1, 1, 1};
             BooleanUnion(3) = { Volume{1}; Remove; }{ Volume{2}; };
@@ -682,7 +686,7 @@ end
     end
 
     mktemp() do path,io
-        write(io, "Box(1) = {0, 0, 0, 1, 1, 1};\nBox(2) = {2, 0, 0, 1, 1, 1};\n")
+        write(io, "SetFactory(\"OpenCASCADE\");\nBox(1) = {0, 0, 0, 1, 1, 1};\nBox(2) = {2, 0, 0, 1, 1, 1};\n")
         close(io)
         @test_throws ArgumentError execute_geo(path; mesh_dim=3)
         @test_throws ArgumentError execute_geo(path; mesh_dim=false)
