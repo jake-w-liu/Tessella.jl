@@ -90,3 +90,72 @@ end
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
+
+@testset "Gmsh 4.15.2 ++/-- postfix increments" begin
+    # Statement-level scalar postfix mutates in place (Affectation
+    # `String__Index NumericIncrement`); expression-level postfix returns the
+    # OLD value then increments (FExpr `String__Index NumericIncrement`).
+    parsed=_execute_list_variable_source("""
+        x = 5;
+        y = x++;
+        z = x--;
+        w = 0;
+        w++;
+        w++;
+    """)
+    @test parsed.values["x"]==5.0
+    @test parsed.values["y"]==5.0
+    @test parsed.values["z"]==6.0
+    @test parsed.values["w"]==2.0
+
+    # Indexed statement form auto-resizes with zeros (`incrementVariable`);
+    # the expression indexed form returns the old element and mutates it,
+    # with `(int)` truncation on the index.
+    parsed=_execute_list_variable_source("""
+        a[] = {1,2};
+        a[5]++;
+        b() = {9,9};
+        c = b(1)++;
+        u() = {3,4};
+        u(1.9)++;
+    """)
+    @test parsed.lists["a"]==[1.0,2.0,0.0,0.0,0.0,1.0]
+    @test parsed.values["c"]==9.0
+    @test parsed.lists["b"]==[9.0,10.0]
+    @test parsed.lists["u"]==[3.0,5.0]
+
+    # The expression indexed form works on scalars too (`s.value[0]` reads
+    # element zero of the scalar payload) while the statement form requires a
+    # list — Gmsh's `s.list` check inside `incrementVariable`.
+    parsed=_execute_list_variable_source("""
+        s = 7;
+        t = s[0]++;
+    """)
+    @test parsed.values["t"]==7.0
+    @test parsed.values["s"]==8.0
+
+    err=_list_variable_error("d = 1; d[2]++;")
+    @test err isa ArgumentError
+    @test occursin("Variable 'd' is not a list",sprint(showerror,err))
+
+    err=_list_variable_error("v[] = {1}; v++;")
+    @test err isa ArgumentError
+    @test occursin("Variable 'v' is a list",sprint(showerror,err))
+
+    err=_list_variable_error("missing[0]++;")
+    @test err isa ArgumentError
+    @test occursin("Unknown variable 'missing'",sprint(showerror,err))
+
+    err=_list_variable_error("unknownvar++;")
+    @test err isa ArgumentError
+    @test occursin("Unknown variable 'unknownvar'",sprint(showerror,err))
+
+    # Prefix `++`/`--` is a syntax error in Gmsh's grammar too; a negative
+    # index reaches `s.value[-1]` UB upstream, so Tessella fails explicitly.
+    err=_list_variable_error("x = 1; y = ++x;")
+    @test err isa ArgumentError
+    @test occursin("increment and decrement",sprint(showerror,err))
+    err=_list_variable_error("a[] = {1}; a[-1]++;")
+    @test err isa ArgumentError
+    @test occursin("negative index",sprint(showerror,err))
+end
