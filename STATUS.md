@@ -167,9 +167,14 @@ subdivision nodes and an exact constant-size path for uniform constraints. Boole
 boundary like any explicit volume. Exact Gmsh
 mesh topology, mesh-size
 selectors other than inline `PointsOf`, nonpositive values, and Gmsh's silent
-missing-Point behavior are explicit non-claims. Physical declarations accept an explicit positive tag, with
-an optional name, or a nonempty name with an automatic tag from the global Physical
-namespace.
+missing-Point behavior are explicit non-claims. Physical declarations accept an
+explicit literal tag (zero and negatives included, matching Gmsh's raw `(int)`
+cast), with an optional name, or a nonempty name with an automatic tag from the
+global Physical namespace. An already-bound name resolves to its existing tag.
+Compound `+=`/`-=` modify memberships (`+=` appends without dedup; `-=` deletes
+an emptied group and is a silent no-op on a missing group), `*=`/`/=` and `+=` on
+a missing group record errors, and duplicate `=` declarations stay recoverable
+diagnostics.
 Physical Point accepts inline `PointsOf`; Physical Point/Curve/Surface accept inline
 `Boundary` and `CombinedBoundary` over Curve/Line, Surface, and explicit Volume
 entities, respectively. `Boundary` collects immediate boundaries before group
@@ -436,6 +441,80 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-verified on 2026-09-19 with Julia 1.12.7 against the pinned Gmsh 4.15.2
+binary and vendored 4.15.2 source after a physical-group/allocator parity audit
+of the `.geo` scanner and executor:
+
+- Raw physical declarations now live in a parser registry while observable
+  groups derive from signed entity-level memberships at gated synchronization
+  points (`GEO_Internals::_changed` is mirrored by an executor `geo_changed`
+  flag): `SyncModel`, `BoundingBox`, `Mesh`, `Save`/`Print`/`Merge`,
+  `Delete`, `Show`/`Hide`/`Color`, `Boundary`/`PointsOf` actions,
+  `Physical{}` selectors, `SetFactory`, `RelocateMesh`/`ReorientMesh`/
+  `ClassifySurfaces`/`AdaptMesh`/`RefineMesh`, and expression-level reads
+  all match the grammar's sync sites; `Include` does not sync.
+- Compound `+=`/`-=`/`*=`/`/=` semantics verified statement-for-statement
+  against `Gmsh.y`/`GModelIO_GEO.cpp`: `+=` appends without dedup on existing
+  groups and is a recoverable error on missing ones, `-=` deletes emptied raw
+  groups but leaves entity memberships of a negative-tag group intact through
+  Gmsh's `abs(p) != tag` filter (the `-4` quirk reproduced bit-for-bit), and
+  `*=`/`/=` are recoverable errors.
+- Signed and zero tags: literal `Physical Point(0)`/`(-4)` tags, `(int)`
+  truncation for fractional tags and members (`{1.9}`→1, `{-2.9}`→-2 with the
+  negative sign preserved), member `0` resolving entity `0` to a `sign(0)`
+  membership, `("name",0)` resolving `getMaxPhysicalNumber` from entity-level
+  physicals (empty pre-sync state yields tag 1, verified), name-only
+  declarations bumping `setMaxPhysicalTag(maxTag+1)` unconditionally with
+  Int32 wrap to `-2147483648`, and the signed-subtraction `ComparePhysicalGroup`
+  wrap ordering all reproduce Gmsh exactly.
+- Lifecycle parity: `NewModel` clears names/internals but keeps parser
+  symbols, `Delete Model` preserves `_physicalNames`/`_elementaryNames`,
+  `Delete All` additionally clears function/string symbol tables, and
+  `Delete Physicals` clears memberships while keeping name bindings.
+- Recoverable diagnostics: duplicate field declarations, unknown/undeclared
+  field options, multi-value `Background Field`, and unresolvable
+  `BoundaryLayer Field` ids record `scan_errors`/`scan_warnings`/
+  `scan_msg_error_count` on `GeoParams` instead of aborting; range/resource
+  and syntax errors still throw.
+- Two real defects fixed: the ten-field positional `GeoParams` constructor was
+  missing after the diagnostic fields were added (restored), and
+  `remove_physical_groups!` erased groupless-tag name bindings without
+  counting them, so the API mesh cache stayed stale — a selected tag now
+  counts when it carried a group or a name binding, matching
+  `GModel::removePhysicalGroup`'s unconditional `_physicalNames` erase.
+- `model_set_tag!` keeps its deliberate positive-tag contract at the public
+  layer even though `GModel::changeEntityTag` performs no sign validation
+  (probed `setTag(0,1,0)` retags to `(0,0)`): `.geo` reserves nonpositive
+  tags for auto-allocation, so `model.set_tag` rejecting tag 0 is a bounded
+  divergence the `model_entity_identity` differential asserts explicitly.
+  Tag-0 entities themselves remain reachable through `.geo` literals
+  (`Point(0)`). A `.geo`-deleted entity tag resurrected by a later
+  definition regains its physical memberships through tag resolution —
+  verified in Gmsh's own MSH output (`Sphere(1)` inherits physical 10 after
+  `BooleanDifference` deletes box 1).
+- Closing gates on the final tree (Julia 1.12.7): first full-suite run found
+  423268/423281 with 12 failures + 1 error, every one root-caused to a stale
+  pre-parity expectation or the two defects above. The `run_all.jl`
+  `model_entity_identity` differential then caught that the tag-0
+  `set_tag`/`entity_name` relaxations had broken a deliberate divergence —
+  restored to `>0` at the public layer (tag-0 entities still reachable via
+  `.geo` literals, which bypass the public validator). Re-verified
+  file-by-file —
+  `entity model validation` 130/130, `synchronized API entity identity
+  lifecycle` 41/41, `owned Physical-group lifecycle through API` 66/66,
+  `bounded .geo Boolean snapshots` 13/13, `bounded .geo geometry expressions`
+  49/49, `Gmsh-compatible size fields` 6976/6976, `.geo` dynamic-tag 123/123,
+  IO 433/433, removal 105/105, constraints 131/131, OCC primitives 110/110 —
+  and `validation/gmsh_parity/geo_dynamic_tags.jl` passed end-to-end with
+  identical CRCs against the pinned binary. The closing full-suite re-run on
+  the final tree (after the `>0` revert) passed 423358/423358 in 153m30.6s
+  with zero failures and zero errors, and `validation/run_all.jl` completed
+  end-to-end: all 58 differential scripts green against the pinned Gmsh
+  4.15.2 binary (including `GMSH_PARITY_MODEL_IDENTITY_OK` after the
+  revert), all five primitive case volumes exact, the ASCENT enclosure/coax
+  acceptance case reproducing Gmsh's documented empty-volume failure, and
+  `validation/REPORT.md` regenerated.
 
 Re-measured on 2026-09-17 with Julia 1.12.7 after completing the built-in-kernel
 spline family (`Spline`/`BSpline`/`Bezier`/`Nurbs`):

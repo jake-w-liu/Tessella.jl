@@ -8,8 +8,8 @@ function _model_points_of(m::GeoModel,entities,caller::AbstractString)
             "$caller: each PointsOf entity must be a (dimension, tag) pair"))
         dimension=_dimension(entry[1],caller)
         tag=_tag(entry[2],caller,dimension)
-        tag>0 || throw(ArgumentError(
-            "$caller: PointsOf entity tags must be positive"))
+        tag>=0 || throw(ArgumentError(
+            "$caller: PointsOf entity tags must be non-negative"))
         push!(normalized,(dimension,tag))
     end
 
@@ -146,7 +146,7 @@ function _model_direct_boundary(
         # tags of Curve/Surface boundary entries like the native path.
         entries=Tuple{Int,Int}[]
         for (bdim,btag) in discrete.boundary
-            signed=signed_tag>0 ? btag : -btag
+            signed=signed_tag<0 ? -btag : btag
             push!(entries,(bdim,signed))
         end
         dimension==1 && signed_tag<0 && reverse!(entries)
@@ -164,7 +164,7 @@ function _model_direct_boundary(
             haskey(m.points,point) || throw(ArgumentError(
                 "$caller: Curve[$tag] references unknown Point[$point]"))
         end
-        first_point,last_point=signed_tag>0 ? endpoints : reverse(endpoints)
+        first_point,last_point=signed_tag<0 ? reverse(endpoints) : endpoints
         return Tuple{Int,Int}[(0,first_point),(0,last_point)]
     elseif dimension==2
         curves=_model_surface_boundary_curves(
@@ -329,8 +329,8 @@ function model_adjacencies(m::GeoModel,dim,tag)
     caller="model_adjacencies"
     dimension=_dimension(dim,caller)
     entity_tag=_tag(tag,caller,dimension)
-    entity_tag>0 || throw(ArgumentError(
-        "$caller: entity tag must be positive"))
+    entity_tag>=0 || throw(ArgumentError(
+        "$caller: entity tag must be non-negative"))
     downward=Int[abs(boundary_tag) for (_,boundary_tag) in
         _model_direct_boundary(
             m,dimension,entity_tag,caller;canonical_orientation=true)]

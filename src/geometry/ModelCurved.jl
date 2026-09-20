@@ -286,7 +286,7 @@ the three points; `plane_normal` supplies the plane normal Gmsh uses when the
 three points are collinear.
 """
 function add_circle_arc!(m::GeoModel, start, center, stop; tag::Integer=0,
-                         plane_normal=nothing)
+                         plane_normal=nothing, _zero_literal::Bool=false)
     caller="add_circle_arc!"
     p1=_tag(start,caller,1); pc=_tag(center,caller,1); p2=_tag(stop,caller,1)
     for p in (p1,pc,p2)
@@ -294,7 +294,7 @@ function add_circle_arc!(m::GeoModel, start, center, stop; tag::Integer=0,
             "$caller: unknown Point[$p]"))
     end
     n=_arc_stored_normal(plane_normal,caller)
-    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
+    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller;literal_zero=_zero_literal)
     (haskey(m.curves,t) || haskey(m.discrete,(1,t))) && throw(ArgumentError(
         "$caller: Curve[$t] already exists"))
     # Gmsh validates inside `EndCurve` at construction; Tessella rejects the
@@ -317,7 +317,8 @@ stop}`: `major` is a Point on the major axis, and the arc travels
 counterclockwise from `start` to `stop` in the defined plane.
 """
 function add_ellipse_arc!(m::GeoModel, start, center, major, stop;
-                        tag::Integer=0, plane_normal=nothing)
+                        tag::Integer=0, plane_normal=nothing,
+                        _zero_literal::Bool=false)
     caller="add_ellipse_arc!"
     p1=_tag(start,caller,1); pc=_tag(center,caller,1)
     pm=_tag(major,caller,1); p2=_tag(stop,caller,1)
@@ -326,7 +327,7 @@ function add_ellipse_arc!(m::GeoModel, start, center, major, stop;
             "$caller: unknown Point[$p]"))
     end
     n=_arc_stored_normal(plane_normal,caller)
-    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
+    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller;literal_zero=_zero_literal)
     (haskey(m.curves,t) || haskey(m.discrete,(1,t))) && throw(ArgumentError(
         "$caller: Curve[$t] already exists"))
     _arc_geometry([m.points[p1],m.points[pc],m.points[pm],m.points[p2]],
@@ -348,7 +349,7 @@ first boundary loop's curve count selects the kind — four curves give a ruled
 single `Using Point{p}` center constraint.
 """
 function add_ruled_surface!(m::GeoModel, loops; tag::Integer=0,
-                            sphere_center=nothing)
+                            sphere_center=nothing, _zero_literal::Bool=false)
     caller="add_ruled_surface!"
     ids=Int[_tag(ℓ,caller,2) for ℓ in loops]
     isempty(ids) && throw(ArgumentError(
@@ -364,7 +365,7 @@ function add_ruled_surface!(m::GeoModel, loops; tag::Integer=0,
     sc=sphere_center===nothing ? nothing : _tag(sphere_center,caller,0)
     sc!==nothing && (haskey(m.points,sc) || throw(ArgumentError(
         "$caller: unknown sphere center Point[$sc]")))
-    t=_alloc_tag!(m,2,_tag(tag,caller,2),caller)
+    t=_alloc_tag!(m,2,_tag(tag,caller,2),caller;literal_zero=_zero_literal)
     (haskey(m.surfaces,t) || haskey(m.discrete,(2,t))) && throw(ArgumentError(
         "$caller: Surface[$t] already exists"))
     m.surfaces[t]=ids

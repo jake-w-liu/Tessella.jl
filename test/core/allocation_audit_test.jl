@@ -43,7 +43,7 @@ using Tessella.Geometry: box_surface
         "IO._weld_triangles"=>["tol","robust_diagonal","hi","lo"],
         "IO.read_geo_params"=>["control_depth","boundary_layer_fan_elements",
             "mesh_size_from_curvature","geometry_tolerance","background","seed",
-            "sfactor","smax","smin","caller"],
+            "sfactor","smax","smin","caller","_consume_stmt"],
         "BoundaryLayer._float_fill"=>["m"],
         "Transfinite._exact_plane_frame"=>["best_norm","best"],
         "TransfiniteTriangle._exact_plane_frame"=>["best_norm","best"],

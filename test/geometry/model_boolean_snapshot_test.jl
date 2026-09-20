@@ -135,7 +135,10 @@ end
     @test !haskey(execution.model.box_extents,1)
     @test haskey(execution.model.spheres,1)
     @test !haskey(execution.model.embeds,(3,1))
-    @test execution.model.physical[(3,10)]==[2]
+    # Physical members resolve by tag: `Sphere(1)` resurrects entity 1 after
+    # the difference deletes the box, so Gmsh's MSH output carries physical 10
+    # on the new sphere — members stay {1,2}, not [2].
+    @test execution.model.physical[(3,10)]==[1,2]
     @test execution.model.physical_names[(3,10)]=="retained"
     result=mesh_model_volume(execution.model,3)
     @test _snapshot_volume(result)≈1.0 atol=1e-12

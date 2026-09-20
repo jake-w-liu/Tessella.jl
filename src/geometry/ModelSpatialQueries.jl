@@ -299,8 +299,8 @@ function model_bounding_box(m::GeoModel,dim,tag)
     end
     dimension=_dimension(dim,caller)
     entity_tag=_tag(tag,caller,dimension)
-    entity_tag>0 || throw(ArgumentError(
-        "$caller: entity tag must be positive"))
+    entity_tag>=0 || throw(ArgumentError(
+        "$caller: entity tag must be non-negative"))
     return _model_entity_bounding_box(m,dimension,entity_tag,caller)
 end
 

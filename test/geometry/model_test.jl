@@ -165,7 +165,10 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test Tessella.Model.set_physical_name!(physical,0,21,"probe")=="probe"
     @test Tessella.Model.set_physical_name!(physical,0,21,"renamed")=="probe"
     @test Tessella.Model.set_physical_name!(physical,0,21,"")=="probe"
-    @test Tessella.Model.set_physical_name!(physical,0,999,"ghost")==""
+    # `GModel::setPhysicalName` binds the name table unconditionally — a tag
+    # with no group still takes the name.
+    @test Tessella.Model.set_physical_name!(physical,0,999,"ghost")=="ghost"
+    @test Tessella.Model.model_physical_name(physical,0,999)=="ghost"
     @test Tessella.Model.remove_physical_name!(physical,"missing")==0
     @test Tessella.Model.remove_physical_name!(physical,"shared")==2
     @test Tessella.Model.model_physical_name(physical,0,2)==""
@@ -189,7 +192,9 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
         physical,0,999)
     @test_throws ArgumentError Tessella.Model.model_entities_for_physical_name(
         physical,"missing")
-    @test_throws ArgumentError Tessella.Model.model_physical_name(physical,0,0)
+    # Physical tag 0 is a legal literal tag (`.geo` `Physical Point(0)`); a
+    # missing group answers "" rather than throwing.
+    @test Tessella.Model.model_physical_name(physical,0,0)==""
 
     physical_removal=deepcopy(physical)
     removal_groups=copy(physical_removal.physical)
@@ -198,7 +203,10 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
         physical_removal,[(0,2),(4,1)])
     @test physical_removal.physical==removal_groups
     @test physical_removal.physical_names==removal_names
-    @test Tessella.Model.remove_physical_groups!(physical_removal,[(0,999)])==0
+    # Removing a groupless tag erases its name binding — a real removal
+    # (Gmsh's `removePhysicalGroup` clears `_physicalNames` unconditionally).
+    @test Tessella.Model.remove_physical_groups!(physical_removal,[(0,999)])==1
+    @test !haskey(physical_removal.physical_names,(0,999))
     @test Tessella.Model.remove_physical_groups!(
         physical_removal,[(0,2),(0,21),1=>20,(0,21)])==3
     @test Tessella.Model.model_physical_groups(physical_removal)==[(3,1)]

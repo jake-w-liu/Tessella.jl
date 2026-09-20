@@ -63,11 +63,16 @@ end
     @test mixed_crc(projected).sha==
           "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5"
 
+    # Diagnostics match Gmsh 4.15.2's recoverable `yymsg` text: the entity
+    # statements still execute (e.g. `Point(missing[0])` creates `Point(0)`
+    # after the unknown-variable read softens to 0) and the accumulated
+    # errors surface at end of parse.
     invalid_sources=(
-        "a[] = {1}; Point(missing[0]) = {0,0,0,1};"=>"unknown numeric list",
-        "a[] = {1}; Point(a[-1]) = {0,0,0,1};"=>"zero-based index",
-        "a[] = {1,2}; a[{0,1}] = {3};"=>"selects 2 entries",
-        "a[] = {1,2}; a[] *= 2;"=>"not available for whole numeric lists",
+        "a[] = {1}; Point(missing[0]) = {0,0,0,1};"=>"Unknown variable",
+        "a[] = {1}; Point(a[-1]) = {0,0,0,1};"=>"Uninitialized variable",
+        "a[] = {1,2}; a[{0,1}] = {3};"=>
+            "Incompatible array dimensions in affectation",
+        "a[] = {1,2}; a[] *= 2;"=>"Operators *= and /= not available for lists",
         "newp[] = {1};"=>"read-only",
         "a[] = {1:65537};"=>"expanded list exceeds 65536 entries",
         "a[] = {}; Point(1)={0,0,0,1}; Line(1)=a[];"=>"entity list is empty",

@@ -221,16 +221,23 @@ end
         @test _API.model.get_physical_groups()==expected_groups
         @test _API.LAST_MESH[]===cached
         @test _API.model.set_physical_name(0,3,"first")===nothing
-        @test _API.model.set_physical_name(0,99,"ghost")===nothing
         @test _API.model.remove_physical_name("missing")===nothing
-        @test _API.model.remove_physical_groups([(0,99)])===nothing
         @test _API.LAST_MESH[]===cached
+        # `setPhysicalName` binds names to groupless tags unconditionally, and
+        # `removePhysicalGroup` erases name bindings unconditionally — both are
+        # real mutations that invalidate the cached mesh.
+        @test _API.model.set_physical_name(0,99,"ghost")===nothing
+        @test _API.model.get_physical_name(0,99)=="ghost"
+        @test _API.LAST_MESH[]===nothing
+        @test _API.model.remove_physical_groups([(0,99)])===nothing
+        @test _API.model.get_physical_name(0,99)==""
+        @test _API.LAST_MESH[]===nothing
 
         stable_groups=_API.model.get_physical_groups()
         @test_throws ArgumentError _API.model.remove_physical_groups(
             [(0,1),(4,1)])
         @test _API.model.get_physical_groups()==stable_groups
-        @test _API.LAST_MESH[]===cached
+        @test _API.LAST_MESH[]===nothing
         @test_throws ArgumentError _API.model.remove_physical_groups([(0,1),1])
         @test_throws ArgumentError _API.model.get_physical_groups(4)
         @test_throws ArgumentError _API.model.get_entities_for_physical_group(0,99)

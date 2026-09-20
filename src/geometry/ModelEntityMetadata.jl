@@ -11,8 +11,8 @@ function _model_metadata_entity(
     m::GeoModel,dim,tag,caller::AbstractString)
     dimension=_dimension(dim,caller)
     entity_tag=_tag(tag,caller,dimension)
-    entity_tag>0 || throw(ArgumentError(
-        "$caller: entity tag must be positive"))
+    entity_tag>=0 || throw(ArgumentError(
+        "$caller: entity tag must be non-negative"))
     _model_entity_known(m,dimension,entity_tag) ||
         throw(ArgumentError(
             "$caller: unknown entity ($dimension,$entity_tag)"))

@@ -212,6 +212,11 @@ mutable struct GeoModel
     attributes::Dict{String,Vector{String}}
     physical::Dict{Tuple{Int,Int},Vector{Int}}
     physical_names::Dict{Tuple{Int,Int},String}
+    # `GEntity::physicals` — the signed, insertion-ordered physical tags each
+    # entity carries. `.geo` sync rebuilds it (`gmsh_sign(member) * Num`),
+    # `add_physical_group!` appends `(t>0 ? tag : -tag)`, and the observable
+    # `m.physical` group view derives from its `abs` values.
+    entity_physicals::Dict{Tuple{Int,Int},Vector{Int}}
     physical_tag_max::Int
     box_extents::Dict{Int,NTuple{6,Float64}}
     cylinders::Dict{Int,NamedTuple{(:center,:axis,:radius,:height),
@@ -233,6 +238,9 @@ mutable struct GeoModel
     meshing::ModelMeshingAttributes
     discrete::Dict{Tuple{Int,Int},DiscreteEntity}
     next_tag::Vector{Int}
+    # `GModel::getName`/`setName` — set by `.geo` `SetName`, reset by
+    # `Delete All`/`NewModel`.
+    name::String
 end
 
 """
@@ -255,6 +263,7 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{String,Vector{String}}(),
                       Dict{Tuple{Int,Int},Vector{Int}}(),
                       Dict{Tuple{Int,Int},String}(),
+                      Dict{Tuple{Int,Int},Vector{Int}}(),
                       0,
                       Dict{Int,NTuple{6,Float64}}(),
                       Dict{Int,NamedTuple{(:center,:axis,:radius,:height),
@@ -269,7 +278,8 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}(),
                       ModelMeshingAttributes(),
                       Dict{Tuple{Int,Int},DiscreteEntity}(),
-                      Int[0,0,0,0])
+                      Int[0,0,0,0],
+                      "")
 
 function _tag(value, caller, dim::Int)
     value isa Integer || throw(ArgumentError("$caller: tag must be an integer"))
@@ -282,7 +292,6 @@ end
 function _signed_curve_tag(value, caller)
     value isa Integer || throw(ArgumentError("$caller: curve tag must be an integer"))
     value isa Bool && throw(ArgumentError("$caller: curve tag must not be Bool"))
-    value==0 && throw(ArgumentError("$caller: curve tag must be nonzero"))
     (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
         "$caller: curve tag magnitude exceeds Int32"))
     return Int(value)
@@ -291,7 +300,6 @@ end
 function _signed_surface_tag(value, caller)
     value isa Integer || throw(ArgumentError("$caller: surface tag must be an integer"))
     value isa Bool && throw(ArgumentError("$caller: surface tag must not be Bool"))
-    value==0 && throw(ArgumentError("$caller: surface tag must be nonzero"))
     (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
         "$caller: surface tag magnitude exceeds Int32"))
     return Int(value)
@@ -314,8 +322,12 @@ function _query_dimension(value,caller)
     return Int(value)
 end
 
-function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller)
-    if requested==0
+# `requested == 0` is the public auto-allocation sentinel. `.geo` execution
+# additionally needs Gmsh's `addX(int &tag)` convention — `tag < 0` auto-assigns
+# while `tag == 0` stays literal — so `literal_zero` inserts at tag 0.
+function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller;
+                     literal_zero::Bool=false)
+    if requested==0 && !literal_zero
         m.next_tag[dim+1]<typemax(Int32) || throw(ArgumentError(
             "$caller: no automatic tags remain in dimension $dim"))
         m.next_tag[dim+1]+=1
@@ -330,15 +342,43 @@ function _alloc_tag!(m::GeoModel, dim::Int, requested::Int, caller)
     return requested
 end
 
-function _alloc_physical_tag(m::GeoModel, requested::Int, caller)
-    requested!=0 && return requested
-    m.physical_tag_max<typemax(Int32) || throw(ArgumentError(
-        "$caller: no automatic physical tags remain"))
-    return m.physical_tag_max+1
+# `GModel::getMaxPhysicalNumber(dim)` — the largest `abs` physical tag carried
+# by a dimension-`dim` entity (the synchronized view), or 0 when none exists.
+function _max_entity_physical_number(m::GeoModel, dimension::Int)
+    found=0
+    for ((d,_),pnums) in m.entity_physicals
+        d==dimension || continue
+        for pnum in pnums
+            a=abs(pnum)
+            a>found && (found=a)
+        end
+    end
+    return found
 end
 
-function _alloc_surface_loop_tag(m::GeoModel,requested::Int,caller)
+function _alloc_physical_tag(m::GeoModel, requested::Int, caller;
+                             literal_tag::Bool=false, dimension::Int=-1)
+    # `.geo` `Physical X(FExpr)` takes a raw `(int)` tag — 0 and negatives are
+    # literal (`GEO_Internals::modifyPhysicalGroup` auto-assigns only for the
+    # `"name"`-only form, which callers resolve before reaching here).
+    literal_tag && return requested
     requested!=0 && return requested
+    # `gmsh::model::addPhysicalGroup` auto-assigns
+    # `max(getMaxPhysicalNumber(dim), getMaxPhysicalTag()) + 1` — the larger of
+    # the synced per-dimension view and the stored global counter.
+    current=if dimension<0
+        m.physical_tag_max
+    else
+        max(m.physical_tag_max,_max_entity_physical_number(m,dimension))
+    end
+    current<typemax(Int32) || throw(ArgumentError(
+        "$caller: no automatic physical tags remain"))
+    return current+1
+end
+
+function _alloc_surface_loop_tag(m::GeoModel,requested::Int,caller;
+                                 literal_zero::Bool=false)
+    (requested!=0 || literal_zero) && return requested
     current=isempty(m.surface_loops) ? 0 : maximum(keys(m.surface_loops))
     current<typemax(Int32) || throw(ArgumentError(
         "$caller: no automatic Surface Loop tags remain"))
@@ -347,8 +387,9 @@ end
 
 # Curve-loop tags live in their own Gmsh namespace (`_maxLineLoopNum`), not the
 # curve counter — `Curve Loop() = {1}` after `Circle(7)` still yields loop 1.
-function _alloc_curve_loop_tag(m::GeoModel,requested::Int,caller)
-    requested!=0 && return requested
+function _alloc_curve_loop_tag(m::GeoModel,requested::Int,caller;
+                               literal_zero::Bool=false)
+    (requested!=0 || literal_zero) && return requested
     current=isempty(m.loops) ? 0 : maximum(keys(m.loops))
     current<typemax(Int32) || throw(ArgumentError(
         "$caller: no automatic Curve Loop tags remain"))
@@ -399,7 +440,8 @@ end
 Add a point with finite coordinates and a positive characteristic mesh size.
 `tag=0` requests automatic tag allocation.
 """
-function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0)
+function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0,
+                    _zero_literal::Bool=false)
     caller="add_point!"
     p=_finite3(x,y,z,caller)
     h=try Float64(mesh_size) catch err
@@ -407,7 +449,7 @@ function add_point!(m::GeoModel, x, y, z; tag::Integer=0, mesh_size::Real=1.0)
         throw(ArgumentError("$caller: mesh_size must be Float64-representable"))
     end
     (isfinite(h) && h>0) || throw(ArgumentError("$caller: mesh_size must be positive"))
-    t=_alloc_tag!(m,0,_tag(tag,caller,0),caller)
+    t=_alloc_tag!(m,0,_tag(tag,caller,0),caller;literal_zero=_zero_literal)
     (haskey(m.points,t) || haskey(m.discrete,(0,t))) && throw(ArgumentError("$caller: Point[$t] already exists"))
     m.points[t]=p; m.point_size[t]=h
     return t
@@ -454,13 +496,13 @@ end
 
 Add a straight curve between two distinct existing point tags.
 """
-function add_line!(m::GeoModel, a, b; tag::Integer=0)
+function add_line!(m::GeoModel, a, b; tag::Integer=0, _zero_literal::Bool=false)
     caller="add_line!"
     ta=_tag(a,caller,1); tb=_tag(b,caller,1)
     ta==tb && throw(ArgumentError("$caller: line endpoints must be distinct"))
     haskey(m.points,ta) || throw(ArgumentError("$caller: unknown Point[$ta]"))
     haskey(m.points,tb) || throw(ArgumentError("$caller: unknown Point[$tb]"))
-    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
+    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller;literal_zero=_zero_literal)
     (haskey(m.curves,t) || haskey(m.discrete,(1,t))) && throw(ArgumentError("$caller: Curve[$t] already exists"))
     m.curves[t]=(ta,tb)
     return t
@@ -830,14 +872,16 @@ that dead-ends before consuming every curve fails; closed single-curve loops
 (periodic curves) and multi-subloop lists are accepted like Gmsh. Closure of
 each boundary chain is certified at mesh time.
 """
-function add_curve_loop!(m::GeoModel, curves; tag::Integer=0)
+function add_curve_loop!(m::GeoModel, curves; tag::Integer=0,
+                         _zero_literal::Bool=false)
     caller="add_curve_loop!"
     ids=Int[_signed_curve_tag(c,caller) for c in curves]
     for id in ids
         haskey(m.curves,abs(id)) || throw(ArgumentError("$caller: unknown Curve[$(abs(id))]"))
     end
     ordered=_sort_curve_loop(m,ids,caller)
-    t=_alloc_curve_loop_tag(m,_tag(tag,caller,1),caller)
+    t=_alloc_curve_loop_tag(m,_tag(tag,caller,1),caller;
+                            literal_zero=_zero_literal)
     haskey(m.loops,t) && throw(ArgumentError("$caller: Loop[$t] already exists"))
     m.loops[t]=ordered
     return t
@@ -849,14 +893,15 @@ end
 Add a planar surface bounded by existing curve loops. The first loop is the
 outer boundary and subsequent loops are holes.
 """
-function add_plane_surface!(m::GeoModel, loops; tag::Integer=0)
+function add_plane_surface!(m::GeoModel, loops; tag::Integer=0,
+                            _zero_literal::Bool=false)
     caller="add_plane_surface!"
     ids=Int[_tag(ℓ,caller,2) for ℓ in loops]
     isempty(ids) && throw(ArgumentError("$caller: need an outer loop"))
     for id in ids
         haskey(m.loops,id) || throw(ArgumentError("$caller: unknown Loop[$id]"))
     end
-    t=_alloc_tag!(m,2,_tag(tag,caller,2),caller)
+    t=_alloc_tag!(m,2,_tag(tag,caller,2),caller;literal_zero=_zero_literal)
     (haskey(m.surfaces,t) || haskey(m.discrete,(2,t))) && throw(ArgumentError("$caller: Surface[$t] already exists"))
     m.surfaces[t]=ids
     return t
@@ -938,13 +983,18 @@ a periodic (non-plane) face may carry a seam curve twice in opposite
 directions, and a degenerate pole/apex edge may occur once — both patterns only
 arise from materialized primitive construction.
 """
-function add_surface_loop!(m::GeoModel,surfaces;tag::Integer=0)
+function add_surface_loop!(m::GeoModel,surfaces;tag::Integer=0,
+                           _zero_literal::Bool=false,
+                           _skip_validation::Bool=false)
     caller="add_surface_loop!"
     ids=Int[_signed_surface_tag(surface,caller) for surface in surfaces]
     isempty(ids) && throw(ArgumentError("$caller: need at least one Surface"))
-    _validate_surface_loop(m,ids,caller)
+    # Gmsh's `addSurfaceLoop` stores the member list without a closure check —
+    # open shells error later at `Volume` creation. `.geo` execution takes the
+    # same deferred path; the public API keeps eager validation.
+    _skip_validation || _validate_surface_loop(m,ids,caller)
     requested=_tag(tag,caller,2)
-    t=_alloc_surface_loop_tag(m,requested,caller)
+    t=_alloc_surface_loop_tag(m,requested,caller;literal_zero=_zero_literal)
     haskey(m.surface_loops,t) && throw(ArgumentError(
         "$caller: Surface Loop[$t] already exists"))
     m.surface_loops[t]=ids
@@ -960,13 +1010,39 @@ surface entities. Meshing and classified projection also certify that the cavity
 shells are disjoint and lie inside the exterior. Native primitive and Boolean
 volumes use the same volume tag namespace.
 """
-function add_volume!(m::GeoModel,surface_loops;tag::Integer=0)
+function add_volume!(m::GeoModel,surface_loops;tag::Integer=0,
+                     _zero_literal::Bool=false,
+                     _skip_validation::Bool=false)
     caller="add_volume!"
     shells=Int[_tag(shell,caller,3) for shell in surface_loops]
     isempty(shells) && throw(ArgumentError(
         "$caller: need an exterior Surface Loop"))
-    all(shell->shell>0,shells) || throw(ArgumentError(
-        "$caller: Surface Loop tags must be positive"))
+    all(shell->shell>=0,shells) || throw(ArgumentError(
+        "$caller: Surface Loop tags must be non-negative"))
+    # Gmsh's `SetVolumeSurfaces` checks only that each shell and every member
+    # surface exists — closure, disjointness, and shell uniqueness are not
+    # verified until meshing. `.geo` execution takes the same deferred path.
+    if _skip_validation
+        for shell in shells
+            haskey(m.surface_loops,shell) || throw(ArgumentError(
+                "$caller: unknown Surface Loop[$shell]"))
+            for signed_surface in m.surface_loops[shell]
+                surface=abs(signed_surface)
+                (haskey(m.surfaces,surface) ||
+                 haskey(m.discrete,(2,surface))) || throw(ArgumentError(
+                    "$caller: unknown Surface[$surface]"))
+            end
+        end
+        requested=_tag(tag,caller,3)
+        (requested!=0 || _zero_literal) &&
+            (haskey(m.volumes,requested) || haskey(m.discrete,(3,requested))) &&
+            throw(ArgumentError("$caller: Volume[$requested] already exists"))
+        t=_alloc_tag!(m,3,requested,caller;literal_zero=_zero_literal)
+        haskey(m.volumes,t) && throw(ArgumentError(
+            "$caller: Volume[$t] already exists"))
+        m.volumes[t]=shells
+        return t
+    end
     length(unique(shells))==length(shells) || throw(ArgumentError(
         "$caller: a volume cannot repeat a Surface Loop tag"))
     seen_surfaces=Set{Int}()
@@ -982,9 +1058,10 @@ function add_volume!(m::GeoModel,surface_loops;tag::Integer=0)
         end
     end
     requested=_tag(tag,caller,3)
-    requested!=0 && (haskey(m.volumes,requested) || haskey(m.discrete,(3,requested))) && throw(ArgumentError(
-        "$caller: Volume[$requested] already exists"))
-    t=_alloc_tag!(m,3,requested,caller)
+    (requested!=0 || _zero_literal) &&
+        (haskey(m.volumes,requested) || haskey(m.discrete,(3,requested))) &&
+        throw(ArgumentError("$caller: Volume[$requested] already exists"))
+    t=_alloc_tag!(m,3,requested,caller;literal_zero=_zero_literal)
     haskey(m.volumes,t) && throw(ArgumentError(
         "$caller: Volume[$t] already exists"))
     m.volumes[t]=shells
@@ -1011,12 +1088,13 @@ explicit mesh-size constraint; the boundary size field derives their sizes
 from incident edges. Assign explicit sizes with `set_point_mesh_size!` or
 `setSize` to refine.
 """
-function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0)
+function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
+                  _zero_literal::Bool=false)
     caller="add_box!"
     origin=_finite3(xmin,ymin,zmin,caller)
     d=_finite3(dx,dy,dz,caller)
     (d[1]>0 && d[2]>0 && d[3]>0) || throw(ArgumentError("$caller: extents must be positive"))
-    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller;literal_zero=_zero_literal)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     x0,y0,z0=origin
     x1=x0+d[1]; y1=y0+d[2]; z1=z0+d[3]
@@ -1100,14 +1178,15 @@ layout. The compact `cylinders` encoding is retained alongside the topology;
 volume meshing keeps flowing through the native analytic tessellation rather
 than the planar-shell path.
 """
-function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0)
+function add_cylinder!(m::GeoModel, x, y, z, dx, dy, dz, radius; tag::Integer=0,
+                       _zero_literal::Bool=false)
     caller="add_cylinder!"
     c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
     h=_occ_modulus(a)
     (isfinite(h) && h>0) || throw(ArgumentError("$caller: axis must have finite positive length"))
     r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
-    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller;literal_zero=_zero_literal)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     shell=_materialize_cylinder!(m,c,a,r,h)
     m.volumes[t]=[shell]
@@ -1126,12 +1205,13 @@ bounded by `[-degN,-meridian,degS,meridian]` — queryable through the entity,
 boundary, and adjacency APIs. The compact `spheres` encoding is retained for
 native meshing and bounds.
 """
-function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0)
+function add_sphere!(m::GeoModel, x, y, z, radius; tag::Integer=0,
+                     _zero_literal::Bool=false)
     caller="add_sphere!"
     c=_finite3(x,y,z,caller)
     r=_finite_scalar(radius,caller,"radius")
     r>0 || throw(ArgumentError("$caller: radius must be positive"))
-    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller;literal_zero=_zero_literal)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     shell=_materialize_sphere!(m,c,r)
     m.volumes[t]=[shell]
@@ -1151,7 +1231,8 @@ edge and loses its Plane cap: a frustum gets `[lateral,+top,-bottom]`, `r1=0`
 gets `[lateral,+top]`, and `r2=0` gets `[lateral,-bottom]`. The compact `cones`
 encoding is retained for native meshing and bounds.
 """
-function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
+function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0,
+                   _zero_literal::Bool=false)
     caller="add_cone!"
     c=_finite3(x,y,z,caller); a=_finite3(dx,dy,dz,caller)
     h=_occ_modulus(a)
@@ -1160,7 +1241,7 @@ function add_cone!(m::GeoModel, x, y, z, dx, dy, dz, r1, r2; tag::Integer=0)
     rb=_finite_scalar(r2,caller,"r2")
     (ra>=0 && rb>=0 && (ra>0 || rb>0)) || throw(ArgumentError(
         "$caller: radii must be non-negative with at least one positive"))
-    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller;literal_zero=_zero_literal)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     shell=_materialize_cone!(m,c,a,ra,rb,h)
     m.volumes[t]=[shell]
@@ -1187,7 +1268,7 @@ entity, boundary, evaluation, and bounds queries read the materialized
 entities, while volume meshing rejects the non-planar face explicitly.
 """
 function add_torus!(m::GeoModel, x, y, z, r1, r2;
-                    tag::Integer=0, angle::Real=2π)
+                    tag::Integer=0, angle::Real=2π, _zero_literal::Bool=false)
     caller="add_torus!"
     c=_finite3(x,y,z,caller)
     ra=_finite_scalar(r1,caller,"r1")
@@ -1197,7 +1278,7 @@ function add_torus!(m::GeoModel, x, y, z, r1, r2;
         "$caller: radii must be positive"))
     (a>0 && a<=2π) || throw(ArgumentError(
         "$caller: angle must lie in (0, 2π]"))
-    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller)
+    t=_alloc_tag!(m,3,_tag(tag,caller,3),caller;literal_zero=_zero_literal)
     (haskey(m.volumes,t) || haskey(m.discrete,(3,t))) && throw(ArgumentError("$caller: Volume[$t] already exists"))
     shell=_materialize_torus!(m,c,ra,rb,a)
     m.volumes[t]=[shell]
@@ -1617,8 +1698,10 @@ end
 
 function _physical_group_key(dim,tag,caller)
     d=_dimension(dim,caller)
+    # Lookups take the raw tag — `.geo` can bind names to negative physical
+    # tags, and a negative group tag simply resolves to nothing in the
+    # observable (abs-keyed) view.
     t=_tag(tag,caller,d)
-    t>0 || throw(ArgumentError("$caller: physical tag must be positive"))
     return (d,t)
 end
 
@@ -1638,7 +1721,8 @@ dimensions, separate from geometry tags. An optional nonempty `name` is recorded
 when no group in the same dimension already uses it; the group is still added when
 the requested name is unavailable.
 """
-function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, name::AbstractString="")
+function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0,
+                             name::AbstractString="", _literal_tag::Bool=false)
     caller="add_physical_group!"
     d=_dimension(dim,caller)
     ents=Int[_tag(t,caller,d) for t in tags]
@@ -1650,9 +1734,24 @@ function add_physical_group!(m::GeoModel, dim::Integer, tags; tag::Integer=0, na
             "$caller: unknown entity ($d,$ent)"))
     end
     group_name=String(name)
-    pt=_alloc_physical_tag(m,_tag(tag,caller,d),caller)
+    requested=if _literal_tag
+        tag isa Integer || throw(ArgumentError("$caller: tag must be an integer"))
+        tag isa Bool && throw(ArgumentError("$caller: tag must not be Bool"))
+        (-typemax(Int32)<=tag<=typemax(Int32)) || throw(ArgumentError(
+            "$caller: tag magnitude exceeds Int32"))
+        Int(tag)
+    else
+        _tag(tag,caller,d)
+    end
+    pt=_alloc_physical_tag(m,requested,caller;literal_tag=_literal_tag,
+                           dimension=d)
     haskey(m.physical,(d,pt)) && throw(ArgumentError("$caller: Physical($d,$pt) already exists"))
     m.physical[(d,pt)]=ents
+    for ent in ents
+        # `GModel::addPhysicalGroup` stores `t>0 ? tag : -tag` on each entity.
+        push!(get!(() -> Int[],m.entity_physicals,(d,ent)),
+              ent>0 ? pt : -pt)
+    end
     _physical_name_is_available(m,d,group_name) &&
         (m.physical_names[(d,pt)]=group_name)
     m.physical_tag_max=max(m.physical_tag_max,pt)
@@ -1662,20 +1761,36 @@ end
 """
     set_physical_name!(model, dim, tag, name) -> name
 
-Assign `name` to an unnamed physical group. Names are unique within one entity
-dimension. As in Gmsh 4.15.2, an unknown group, an empty name, an already named
-group, or a name already used in that dimension is a no-op; use
-[`remove_physical_name!`](@ref) before assigning a replacement.
+Bind `name` to the physical tag `tag` in dimension `dim`, returning the
+effective name bound at that tag. Names are unique within one entity dimension.
+As in Gmsh 4.15.2 (`GModel::setPhysicalName`), `tag == 0` resolves to
+`maxPhysicalNumber(dim) + 1` and the raw tag is bound whether or not a group
+currently carries it; an empty name binds nothing, a name already used in that
+dimension binds nothing at the requested tag, and an already named tag keeps
+its existing name — use [`remove_physical_name!`](@ref) before assigning a
+replacement.
 """
 function set_physical_name!(m::GeoModel, dim::Integer, tag::Integer, name::AbstractString)
     caller="set_physical_name!"
-    key=_physical_group_key(dim,tag,caller)
-    haskey(m.physical,key) || return ""
+    dimension=_dimension(dim,caller)
+    tag isa Integer || throw(ArgumentError("$caller: tag must be an integer"))
+    tag isa Bool && throw(ArgumentError("$caller: tag must not be Bool"))
+    (-typemax(Int32)<=tag<=typemax(Int32)) || throw(ArgumentError(
+        "$caller: tag magnitude exceeds Int32"))
+    group_name=String(name)
+    # `GModel::setPhysicalName` — a name already bound in this dimension wins
+    # (`getPhysicalNumber` resolves it and the binding stays put, so nothing is
+    # bound at the requested tag); `tag == 0` auto-assigns
+    # `getMaxPhysicalNumber(dim) + 1`; the `(dim, tag)` key keeps its existing
+    # name when already taken (std::map `insert` never overwrites). The raw
+    # tag is bound whether or not a group currently carries it.
+    isempty(group_name) ||
+        (_physical_name_is_available(m,dimension,group_name) || return "")
+    number=tag==0 ? _max_entity_physical_number(m,dimension)+1 : Int(tag)
+    key=(dimension,number)
     existing=get(m.physical_names,key,"")
     isempty(existing) || return existing
-    group_name=String(name)
-    _physical_name_is_available(m,key[1],group_name) || return ""
-    m.physical_names[key]=group_name
+    isempty(group_name) || (m.physical_names[key]=group_name)
     return group_name
 end
 
@@ -1700,21 +1815,45 @@ end
 """
     remove_physical_groups!(model, dim_tags=()) -> Int
 
-Remove the selected `(dimension, physical_tag)` groups and their names, returning
-the number removed. An empty selection removes every group. Unknown valid groups
-are ignored, all inputs are checked before mutation, and the global automatic-tag
-counter remains monotonic.
+Remove the selected `(dimension, physical_tag)` groups and their name bindings,
+returning the number of selected tags that carried a group or name binding.
+An empty selection clears every entity's physical memberships without erasing
+the name table, matching `gmsh::model::removePhysicalGroups`; a targeted
+selection erases each tag's name binding even when no group exists there, and
+such a name-only erasure counts as a removal. Unknown valid groups are ignored,
+all inputs are checked before mutation, and the global automatic-tag counter
+remains monotonic.
 """
 function remove_physical_groups!(m::GeoModel,dim_tags=())
     caller="remove_physical_groups!"
     selected=_physical_dim_tags(dim_tags,caller)
-    targets=isempty(selected) ? collect(keys(m.physical)) : selected
     removed=0
-    for key in targets
-        haskey(m.physical,key) || continue
-        delete!(m.physical,key)
-        delete!(m.physical_names,key)
-        removed+=1
+    if isempty(selected)
+        # `gmsh::model::removePhysicalGroups({})` — `resetPhysicalGroups` +
+        # `GModel::removePhysicalGroups`: every entity's physical list is
+        # cleared but the name table is NOT erased.
+        removed=length(m.physical)
+        empty!(m.physical)
+        for pnums in values(m.entity_physicals)
+            empty!(pnums)
+        end
+        return removed
+    end
+    for key in selected
+        # `GModel::removePhysicalGroup` strips every entity physical whose
+        # `abs` equals the tag and erases the raw name binding — both run
+        # unconditionally, so a name bound to a groupless tag is erased too.
+        # A tag counts as removed when it carried a group or a name binding,
+        # so a name-only erasure reports a removal like Gmsh's mutation does.
+        had_group=haskey(m.physical,key)
+        had_name=haskey(m.physical_names,key)
+        had_group && delete!(m.physical,key)
+        had_name && delete!(m.physical_names,key)
+        (had_group || had_name) && (removed+=1)
+        for ((d,e),pnums) in m.entity_physicals
+            d==key[1] || continue
+            filter!(pnum->abs(pnum)!=key[2],pnums)
+        end
     end
     return removed
 end
@@ -1770,8 +1909,10 @@ Return detached, sorted entity tags for an existing Physical group.
 function model_entities_for_physical_group(m::GeoModel,dim,tag)
     key=_physical_group_key(dim,tag,"model_entities_for_physical_group")
     members=get(m.physical,key,nothing)
-    live=members===nothing ? Int[] :
-         _physical_live_members(m,key[1],members)
+    # `getEntitiesForPhysicalGroup` reads the *derived* map: a raw group with
+    # no live member (empty `={}`, or every member `Delete`d/unresolvable) is
+    # absent there and reports "Physical ... does not exist".
+    live=members===nothing ? Int[] : _physical_live_members(m,key[1],members)
     isempty(live) && throw(ArgumentError(
         "model_entities_for_physical_group: Physical$(key) does not exist"))
     return sort!(live)
@@ -1780,19 +1921,20 @@ end
 """
     model_physical_groups_for_entity(model, dim, tag) -> Vector{Int}
 
-Return the sorted Physical tags containing an existing geometry entity.
+Return the Physical tags an existing geometry entity carries, in stored order.
+Tags are signed like Gmsh's `getPhysicalGroupsForEntity`: an entity added to a
+group through a negative `.geo` member or group tag reports the corresponding
+negative tag.
 """
 function model_physical_groups_for_entity(m::GeoModel,dim,tag)
     caller="model_physical_groups_for_entity"
     dimension=_dimension(dim,caller)
     entity_tag=_tag(tag,caller,dimension)
-    entity_tag>0 || throw(ArgumentError("$caller: entity tag must be positive"))
+    entity_tag>=0 || throw(ArgumentError("$caller: entity tag must be non-negative"))
     key=(dimension,entity_tag)
     _has_entity(m,key...) || throw(ArgumentError(
         "$caller: entity $(key) does not exist"))
-    groups=Int[physical_tag for ((group_dimension,physical_tag),entities) in m.physical
-               if group_dimension==key[1] && key[2] in entities]
-    return sort!(groups)
+    return copy(get(m.entity_physicals,key,Int[]))
 end
 
 """
@@ -1823,11 +1965,19 @@ function model_entities_for_physical_name(m::GeoModel,name::AbstractString)
         "model_entities_for_physical_name: Physical name $(repr(group_name)) does not exist"))
     entities=Tuple{Int,Int}[]
     for key in group_keys
+        # `getEntitiesForPhysicalName` matches `abs(entity->physicals[j])`
+        # against the *raw* bound tag — a name bound to a negative tag never
+        # resolves, and a raw tag of 0 hits the pnum-0 view group.
+        key[2]<0 && continue
         for entity in _physical_live_members(
                 m,key[1],get(m.physical,key,Int[]))
             push!(entities,(key[1],entity))
         end
     end
+    # Gmsh reports "Physical name '...' does not exist" whenever the lookup
+    # yields no entities — including a bound name that resolves to nothing.
+    isempty(entities) && throw(ArgumentError(
+        "model_entities_for_physical_name: Physical name $(repr(group_name)) does not exist"))
     return sort!(unique!(entities))
 end
 

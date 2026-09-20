@@ -530,6 +530,75 @@ function check_boolean_allocators()
     return length(scenarios)
 end
 
+# `Physical X op= {..}` compound membership edits plus `.geo` signed-tag
+# semantics: `tag < 0` auto-assigns, `tag == 0` is literal, references look up
+# `abs`, and explicit Physical tags (0 and negatives included) are literal.
+function check_physical_compound()
+    source=raw"""
+        Point(0) = {0,0,0,1};
+        Point(-3) = {1,0,0,1};
+        Point(2) = {0,1,0,1};
+        Line(-2) = {0,2};
+        Line(3) = {2,1};
+        Line(4) = {-1,0};
+        Curve Loop(0) = {1,3,4};
+        Curve Loop(-5) = {1,3,4};
+        Physical Point(-4) = {-0,1};
+        Physical Curve(7) = {-1,3};
+        Physical Point(6) = {1};
+        Physical Point(6) += {2};
+        Physical Point(6) -= {1};
+        Physical Point(9) -= {1};
+        Physical Point("named") = {1,2};
+        Physical Point("named") += {2};
+        Physical Curve(8) = {1};
+        Physical Curve(8) -= {};
+        """
+    group_count=mktempdir() do directory
+        path=joinpath(directory,"physical_compound.geo")
+        write(path,source)
+
+        gmsh.clear()
+        gmsh.open(path)
+        gmsh_groups=sort!(Tuple{Int,Int}[
+            (Int(dim),Int(tag)) for (dim,tag) in gmsh.model.getPhysicalGroups()])
+        # `+=` appends without dedup — compare the sorted *set* of members so
+        # raw duplicate retention (which Gmsh drops again at sync) is invisible.
+        gmsh_members=Dict(key=>sort!(unique!(Int.(
+            gmsh.model.getEntitiesForPhysicalGroup(key...))))
+            for key in gmsh_groups)
+        # `getEntities` never exposes curve loops — compare dims 0/1 only.
+        gmsh_entities=Dict(dim=>sort!(Int[tag for (_,tag) in
+            gmsh.model.getEntities(dim)]) for dim in (0,1))
+
+        tessella=execute_geo(path)
+        model=tessella.model
+        tessella_groups=sort!(collect(keys(model.physical)))
+        tessella_members=Dict(key=>sort!(unique!(copy(model.physical[key])))
+                              for key in tessella_groups)
+        tessella_entities=Dict(
+            0=>sort!(collect(keys(model.points))),
+            1=>sort!(collect(keys(model.curves))))
+
+        tessella_members==gmsh_members || error(
+            "Physical compound members differ: Tessella=$tessella_members " *
+            "Gmsh=$gmsh_members")
+        tessella_groups==gmsh_groups || error(
+            "Physical compound group tags differ: Tessella=" *
+            "$tessella_groups Gmsh=$gmsh_groups")
+        tessella_entities==gmsh_entities || error(
+            "Signed-tag entity tables differ: Tessella=$tessella_entities " *
+            "Gmsh=$gmsh_entities")
+        sort!(collect(keys(model.loops)))==[0,1] || error(
+            "Tessella Curve Loop namespace changed: " *
+            "$(sort!(collect(keys(model.loops))))")
+        model.physical_tag_max==9 || error(
+            "Tessella physical tag counter changed: $(model.physical_tag_max)")
+        length(gmsh_groups)
+    end
+    return group_count
+end
+
 gmsh.initialize(["gmsh","-v","0"])
 try
     startswith(gmsh.GMSH_API_VERSION,"4.15.2") || error(
@@ -601,6 +670,7 @@ try
     check_primitive_allocators()
     automatic_physical=check_automatic_physical_tags()
     boolean_scenarios=check_boolean_allocators()
+    physical_compound_groups=check_physical_compound()
     set_max_gmsh=check_set_max_tags()
     volume_error=max(volume_error,abs(set_max_volume-1/6),
                      set_max_gmsh.volume_error)
@@ -612,6 +682,7 @@ try
             "automatic_physical_api=$(join(automatic_physical.api_tags,',')) " *
             "physical_lifecycle_groups=$(automatic_physical.lifecycle_groups) " *
             "physical_replacement_tag=$(automatic_physical.replacement_tag) " *
+            "physical_compound_groups=$physical_compound_groups " *
             "boolean_scenarios=$boolean_scenarios " *
             "setmax_nodes=$(set_max_gmsh.nodes) " *
             "setmax_tets=$(set_max_gmsh.tets) " *

@@ -101,9 +101,12 @@ end
     @test sort!(collect(keys(boolean.model.volumes)))==[3]
     @test boolean.model.booleans[3]==(op=:difference,operands=[1,2])
 
+    # `Point(0.9)` truncates to `Point(0)` under Gmsh's `(int)` tag cast — a
+    # legal entity, not an error.
+    @test _execute_geometry_expression_source(
+        "Point(0.9) = {0, 0, 0, 1};").model.points[0]==(0.0,0.0,0.0)
     invalid_sources=(
         "Point(missing) = {0, 0, 0, 1};",
-        "Point(0.9) = {0, 0, 0, 1};",
         "Point(1) = {0, 0};",
         "Point(1) = {0, 0, 0, 1, 2};",
         "Point(1) = {0, 0, 0, 1}; Line(1) = {1:65537};",

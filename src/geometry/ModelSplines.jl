@@ -18,7 +18,8 @@ const _SPLINE_CURVE_TYPES = (:spline, :bspline, :bezier, :nurbs)
 # first/last control-point vertices, and unknown tags are construction errors.
 function _add_spline_family!(m::GeoModel, points, kind::Symbol,
                              tag::Integer, caller::AbstractString,
-                             what::AbstractString)
+                             what::AbstractString;
+                             literal_zero::Bool=false)
     pts=Int[_tag(p,caller,1) for p in points]
     length(pts)>=2 || throw(ArgumentError(
         "$caller: $what curve requires at least 2 control points"))
@@ -26,7 +27,7 @@ function _add_spline_family!(m::GeoModel, points, kind::Symbol,
         haskey(m.points,p) || throw(ArgumentError(
             "$caller: unknown control point $p in Curve $tag"))
     end
-    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
+    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller;literal_zero=literal_zero)
     (haskey(m.curves,t) || haskey(m.discrete,(1,t))) && throw(ArgumentError(
         "$caller: Curve[$t] already exists"))
     m.curves[t]=(first(pts),last(pts))
@@ -42,8 +43,9 @@ Add a Catmull-Rom `Spline` through the ordered control Points, mirroring
 `Spline(tag) = {p1,...,pn}` (`MSH_SEGM_SPLN`, uniform knots, extrapolated
 ghost ends, cyclic when the first and last tags coincide).
 """
-add_spline!(m::GeoModel, points; tag::Integer=0) =
-    _add_spline_family!(m,points,:spline,tag,"add_spline!","Spline")
+add_spline!(m::GeoModel, points; tag::Integer=0, _zero_literal::Bool=false) =
+    _add_spline_family!(m,points,:spline,tag,"add_spline!","Spline";
+                       literal_zero=_zero_literal)
 
 """
     add_bspline!(model, points; tag=0) -> tag
@@ -52,8 +54,9 @@ Add a uniform clamped `BSpline` over the ordered control Points, mirroring
 `BSpline(tag) = {p1,...,pn}` (`MSH_SEGM_BSPLN`, Gmsh's `InterpolateUBS`
 piecewise-cubic construction).
 """
-add_bspline!(m::GeoModel, points; tag::Integer=0) =
-    _add_spline_family!(m,points,:bspline,tag,"add_bspline!","BSpline")
+add_bspline!(m::GeoModel, points; tag::Integer=0, _zero_literal::Bool=false) =
+    _add_spline_family!(m,points,:bspline,tag,"add_bspline!","BSpline";
+                       literal_zero=_zero_literal)
 
 """
     add_bezier!(model, points; tag=0) -> tag
@@ -61,8 +64,9 @@ add_bspline!(m::GeoModel, points; tag::Integer=0) =
 Add a `Bezier` curve over the ordered control Points, mirroring
 `Bezier(tag) = {p1,...,pn}` (`MSH_SEGM_BEZIER`, De Casteljau interpolation).
 """
-add_bezier!(m::GeoModel, points; tag::Integer=0) =
-    _add_spline_family!(m,points,:bezier,tag,"add_bezier!","Bezier")
+add_bezier!(m::GeoModel, points; tag::Integer=0, _zero_literal::Bool=false) =
+    _add_spline_family!(m,points,:bezier,tag,"add_bezier!","Bezier";
+                       literal_zero=_zero_literal)
 
 """
     add_nurbs!(model, points, knots; tag=0) -> tag
@@ -79,7 +83,8 @@ record instead (a degree-zero Nurbs is the piecewise-constant curve
 `[knots[1],knots[end]]` (`Curve::ubeg`/`uend`) and `getValue` evaluates raw
 knot coordinates.
 """
-function add_nurbs!(m::GeoModel, points, knots; tag::Integer=0)
+function add_nurbs!(m::GeoModel, points, knots; tag::Integer=0,
+                    _zero_literal::Bool=false)
     caller="add_nurbs!"
     knots isa Bool && throw(ArgumentError(
         "$caller: knots must not be Bool"))
@@ -101,7 +106,7 @@ function add_nurbs!(m::GeoModel, points, knots; tag::Integer=0)
     # `GEO_Internals::addBSpline` — an empty `Knots {}` builds the plain
     # `MSH_SEGM_BSPLN` record, not a Nurbs.
     isempty(knot_vector) && return _add_spline_family!(
-        m,points,:bspline,tag,caller,"BSpline")
+        m,points,:bspline,tag,caller,"BSpline";literal_zero=_zero_literal)
     pts=Int[_tag(p,caller,1) for p in points]
     length(pts)>=2 || throw(ArgumentError(
         "$caller: Nurbs curve requires at least 2 control points"))
@@ -125,7 +130,7 @@ function add_nurbs!(m::GeoModel, points, knots; tag::Integer=0)
         knot_vector[index]>=knot_vector[index-1] || throw(ArgumentError(
             "$caller: Nurbs knots must be nondecreasing"))
     end
-    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller)
+    t=_alloc_tag!(m,1,_tag(tag,caller,1),caller;literal_zero=_zero_literal)
     (haskey(m.curves,t) || haskey(m.discrete,(1,t))) && throw(ArgumentError(
         "$caller: Curve[$t] already exists"))
     m.curves[t]=(first(pts),last(pts))

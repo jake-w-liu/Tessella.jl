@@ -23,6 +23,24 @@ function _dynamic_tag_error(source::AbstractString)
     end
 end
 
+# Gmsh emits the `Msg::Error` detail on stderr and the `yymsg` caller line as
+# the thrown diagnostic — capture both channels.
+function _dynamic_tag_stderr(source::AbstractString)
+    err=nothing
+    text=mktemp() do path,io
+        redirect_stdio(;stderr=io) do
+            try
+                _execute_dynamic_tag_source(source)
+            catch e
+                err=e
+            end
+        end
+        flush(io)
+        read(path,String)
+    end
+    return (err,text)
+end
+
 @testset "bounded .geo geometry and Physical tag allocators" begin
     parsed=execute_geo(_GEO_DYNAMIC_TAG_FIXTURE)
     model=parsed.model
@@ -227,6 +245,203 @@ end
     @test sort!(collect(keys(setmax_volume.model.volumes)))==[41]
     @test sort!(collect(keys(setmax_volume.model.points)))==[1:9;]
 
+    # `Physical X(n) op= {..}` compound assignment (`modifyPhysicalGroup`
+    # ops 1/2/3). `+=` appends unconditionally (`List_Add` — no dedup);
+    # `-=` removes members and deletes a group left empty; `-=` on a
+    # missing group is a silent no-op; `+=`/`*=`/`/=` on a missing group
+    # and `*=`/`/=` generally are recorded errors.
+    compound=_execute_dynamic_tag_source(raw"""
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Physical Point(6) = {1};
+        Physical Point(6) += {2};
+        Physical Point(6) -= {1};
+        Physical Point(9) -= {1};
+        Physical Point("named") = {1,2};
+        Physical Point("named") += {2};
+        """)
+    # `named` auto-assigns tag 7 (the explicit 6 already raised the
+    # counter); `+= {2}` resolves the name, appends unconditionally, and —
+    # Gmsh parity, verified against `newreg` — still bumps the physical
+    # counter to 8 because `setMaxPhysicalTag` runs before the
+    # `setPhysicalName` name resolution. The raw member list keeps the
+    # duplicate `[1,2,2]`, but the observable view dedups entity memberships
+    # (`std::find` in `GEO_Internals::synchronize`).
+    @test compound.model.physical==Dict((0,6)=>[2],(0,7)=>[1,2])
+    @test compound.model.physical_names==Dict((0,7)=>"named")
+    @test compound.model.physical_tag_max==8
+
+    # `-= {}` (and removing the last member) deletes the group.
+    emptied=_execute_dynamic_tag_source(raw"""
+        Point(1) = {0,0,0,1};
+        Physical Point(4) = {1};
+        Physical Point(4) -= {1};
+        Physical Point(5) = {1};
+        Physical Point(5) -= {};
+        """)
+    @test isempty(emptied.model.physical)
+    @test isempty(emptied.model.physical_names)
+
+    # Gmsh `.geo` definition-site tag semantics: `tag < 0` auto-assigns the
+    # active kernel's per-dimension counter, `tag == 0` is a literal tag,
+    # `tag > 0` is explicit. Curve/Surface Loop counters are independent
+    # namespaces; point references look up `abs(tag)` (`CompareVertex`),
+    # physical member lists look up `abs` too, and explicit physical tags
+    # — including negatives — are literal.
+    signed_tags=_execute_dynamic_tag_source(raw"""
+        Point(0) = {0,0,0,1};
+        Point(-3) = {1,0,0,1};
+        Point(2) = {0,1,0,1};
+        Line(-2) = {0,2};
+        Line(3) = {2,1};
+        Line(4) = {-1,0};
+        Curve Loop(0) = {1,3,4};
+        Curve Loop(-5) = {1,3,4};
+        Surface Loop(-2) = {7};
+        Physical Point(-4) = {-0,1};
+        Physical Curve(7) = {-1,3};
+        """)
+    @test sort!(collect(keys(signed_tags.model.points)))==[0,1,2]
+    @test sort!(collect(keys(signed_tags.model.curves)))==[1,3,4]
+    @test sort!(collect(keys(signed_tags.model.loops)))==[0,1]
+    @test sort!(collect(keys(signed_tags.model.surface_loops)))==[1]
+    # `Physical Point(-4) = {-0,1}` — `orientedPhysicals` distributes the raw
+    # group tag per member: member `-0` resolves entity `abs(0)=0` (which
+    # exists here) and receives `gmsh_sign(0)*(-4)=0` → view group `0`;
+    # member `1` receives `gmsh_sign(1)*(-4)=-4` → view group `abs(-4)=4`.
+    # `Physical Curve(7) = {-1,3}` — member `-1` receives `-7`, member `3`
+    # receives `7` — both land in view group 7.
+    @test signed_tags.model.physical==Dict((0,0)=>[0],(0,4)=>[1],(1,7)=>[1,3])
+
+    # Unknown members are skipped with a warning (Gmsh reports them when
+    # the group is synchronized). The raw group is still created, but the
+    # observable view derives from entity memberships — a group with no
+    # resolvable member leaves no view entry at all.
+    unknown_member=_execute_dynamic_tag_source(raw"""
+        Point(1) = {0,0,0,1};
+        Physical Point(5) = {99};
+        """)
+    @test isempty(unknown_member.model.physical)
+    @test any(occursin("Skipping unknown point 99",w)
+              for w in unknown_member.warnings)
+
+    # A duplicate `=` declaration is a recoverable "already exists" error
+    # in Gmsh — execution continues; `Msg::Error` detail lands on stderr
+    # and the `yymsg` caller line becomes the thrown diagnostic.
+    (dup,dup_stderr)=_dynamic_tag_stderr(raw"""
+        Point(1) = {0,0,0,1};
+        Point(2) = {1,0,0,1};
+        Physical Point(6) = {1};
+        Physical Point(6) = {2};
+        """)
+    @test dup isa ArgumentError
+    @test occursin("Could not modify physical point",sprint(showerror,dup))
+    @test occursin("Physical point 6 already exists",dup_stderr)
+
+    (compound_missing,missing_stderr)=_dynamic_tag_stderr(raw"""
+        Point(1) = {0,0,0,1};
+        Physical Point(6) += {1};
+        """)
+    @test compound_missing isa ArgumentError
+    @test occursin("Could not modify physical point",
+                   sprint(showerror,compound_missing))
+    @test occursin("Physical point 6 does not exist",missing_stderr)
+
+    for op in ("*=","/=")
+        (unsupported,unsupported_stderr)=_dynamic_tag_stderr(
+            "Point(1)={0,0,0,1}; Physical Point(6)={1}; " *
+            "Physical Point(6) $op {1};")
+        @test unsupported isa ArgumentError
+        @test occursin("Could not modify physical point",
+                       sprint(showerror,unsupported))
+        @test occursin("Unsupported operation on physical point 6",
+                       unsupported_stderr)
+    end
+
+    @testset ".geo Field tags are signed literals with a live newf counter" begin
+        # `Field[i] = Kind` takes a raw `(int)` — zero and negatives are
+        # literal ids — and `newf` is `FieldManager::maxId() + 1`, a live
+        # maximum that shrinks when `Delete Field` removes the maximum and can
+        # be nonpositive when every id is.
+        fields_only=_execute_dynamic_tag_source("""
+            Field[0] = Box;
+            Field[-2] = MathEval;
+            Field[newf] = Min;
+            Field[5] = Attractor;
+            Delete Field[5];
+            Field[newf] = Threshold;
+            """)
+        @test sort!(collect(keys(fields_only.params.fields)))==[-2,0,1,2]
+
+        negative=_execute_dynamic_tag_source("""
+            Field[-2] = MathEval;
+            Field[newf] = Box;
+            """)
+        # With every id negative `maxId()` is the maximum key — `newf` is -1.
+        @test sort!(collect(keys(negative.params.fields)))==[-2,-1]
+
+        refilled=_execute_dynamic_tag_source("""
+            Field[3] = Box;
+            Delete Field[3];
+            Field[newf] = Min;
+            """)
+        @test sort!(collect(keys(refilled.params.fields)))==[1]
+        @test refilled.params.fields[1].kind=="Min"
+
+        # Recoverable diagnostics match `FieldManager`/`Gmsh.y` — the run ends
+        # in an error only through the accumulated `yymsg(0)` parse errors;
+        # `Msg::Error`-only statements just mark the run.
+        duplicate=_dynamic_tag_stderr("Field[1]=Box; Field[1]=Min;")
+        @test duplicate[1] isa ArgumentError
+        @test occursin("Cannot create field 1 of type 'Min'",
+                       sprint(showerror,duplicate[1]))
+        @test occursin("Field id 1 is already defined",duplicate[2])
+
+        function _params(source)
+            path,io=mktemp()
+            write(io,source);close(io)
+            return Tessella.IO.read_geo_params(path)
+        end
+        @test _params("Field[1]=Box; Field[1]=Min;").fields[1].kind=="Box"
+
+        unknown_kind=_dynamic_tag_stderr("Field[3]=Bogus;")
+        @test unknown_kind[1] isa ArgumentError
+        @test occursin("Cannot create field 3 of type 'Bogus'",
+                       sprint(showerror,unknown_kind[1]))
+        @test occursin("Unknown field type \"Bogus\"",unknown_kind[2])
+
+        missing_write=_dynamic_tag_stderr("Field[9].VIn=0.1;")
+        @test missing_write[1] isa ArgumentError
+        @test occursin("No field with id 9",sprint(showerror,missing_write[1]))
+
+        # An option write ahead of the declaration is dropped — the later
+        # `Field[9]=Box` starts with no options, like Gmsh.
+        ordering=_params("Field[9].VIn=0.1; Field[9]=Box;")
+        @test ordering.scan_errors==["No field with id 9"]
+        @test isempty(ordering.fields[9].options)
+
+        missing_delete=_dynamic_tag_stderr("Field[1]=Box; Delete Field[9];")
+        @test missing_delete[1]===nothing
+        @test occursin("Cannot delete field id 9, it does not exist",
+                       missing_delete[2])
+
+        background_multi=_dynamic_tag_stderr(
+            "Field[1]=Box; Background Field = {1,1};")
+        @test background_multi[1] isa ArgumentError
+        @test occursin("Only 1 field can be set as a background field.",
+                       sprint(showerror,background_multi[1]))
+
+        unknown_command=_dynamic_tag_stderr("Foo Field = {1};")
+        @test unknown_command[1] isa ArgumentError
+        @test occursin("Unknown command 'Foo Field'",
+                       sprint(showerror,unknown_command[1]))
+
+        # `BoundaryLayer Field` stores raw ids — an undeclared id is not a
+        # parse error (it fails later at field build, like `get(id)`).
+        boundary=_execute_dynamic_tag_source("BoundaryLayer Field = {7};")
+        @test boundary.params.boundary_layer_fields==[7]
+    end
+
     invalid_sources=(
         "newp = 2;"=>"read-only",
         "newreg[] = {2};"=>"read-only",
@@ -240,7 +455,7 @@ end
             "no Field tags remain",
         "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; " *
         "Physical Point(\"same\")={1}; Physical Point(\"same\")={2};"=>
-            "name \"same\" already identifies",
+            "Could not modify physical point",
         "Point(1)={0,0,0,1}; Physical Point(\"\")={1};"=>
             "automatic Physical Point group requires a nonempty name",
         "Point(1)={0,0,0,1}; Physical Point={1};"=>
@@ -249,10 +464,6 @@ end
             "malformed Physical declaration",
         "Point(1)={0,0,0,1}; Physical Point(\"bad\",)={1};"=>
             "malformed Physical declaration",
-        "Point(1)={0,0,0,1}; " *
-        "Physical Point(\"last\",2147483647)={1}; " *
-        "Physical Point(\"overflow\")={1};"=>
-            "no automatic Physical tags remain",
         "BooleanFragments{Volume{1};}{Volume{1};}; Mesh.MeshSizeMax = newv;"=>
             "topology-changing statement",
     )
@@ -261,6 +472,19 @@ end
         @test err isa ArgumentError
         @test occursin(message,sprint(showerror,err))
     end
+
+    # `setMaxPhysicalTag(t + 1)` runs on a raw `int` — at `typemax(Int32)` the
+    # name-only counter bump wraps to `typemin(Int32)` rather than erroring,
+    # and the name binds to the wrapped tag (verified against Gmsh 4.15.2).
+    wrapped=_execute_dynamic_tag_source(raw"""
+        Point(1) = {0,0,0,1};
+        Physical Point("last",2147483647) = {1};
+        Physical Point("overflow") = {1};
+        """)
+    @test wrapped.model.physical_names==Dict(
+        (0,2147483647)=>"last",(0,-2147483648)=>"overflow")
+    @test wrapped.model.entity_physicals==Dict(
+        (0,1)=>[2147483647,-2147483648])
 
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
