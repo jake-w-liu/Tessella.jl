@@ -464,17 +464,20 @@ end
 end
 
 @testset ".geo Delete physical-group staleness" begin
-    # `.geo` deletion keeps stale physical member integers and names; query
-    # surfaces filter to live members.
+    # `.geo` deletion keeps stale physical member integers in the raw parser
+    # registry and keeps names; the synchronized view filters to live members.
     execution=_execute_constraint_source(_GEO_SQUARE * raw"""
         Physical Curve("border",5) = {1,2};
         Delete{Surface{1};}
         Delete{Curve{1,2,3,4};}
         """)
     model=execution.model
-    @test model.physical[(1,5)]==[1,2]          # stale members kept internally
+    # Stale raw member records persist in the parser registry, but the
+    # synchronized view drops unresolvable members — the group vanishes.
+    @test !haskey(model.physical,(1,5))
     @test model_physical_groups(model)==Tuple{Int,Int}[]
-    @test model_entities_for_physical_name(model,"border")==Tuple{Int,Int}[]
+    # `getEntitiesForPhysicalName` errors when the name resolves to nothing.
+    @test_throws ArgumentError model_entities_for_physical_name(model,"border")
     @test model.physical_names[(1,5)]=="border" # the name survives
 
     # Recreating a deleted tag resurrects its physical membership.

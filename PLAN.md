@@ -375,8 +375,14 @@ selectors through their materialized boundary like any explicit volume. Exact Gm
 mesh topology remains pending;
 nonpositive values and Gmsh's silent missing-Point behavior are deliberately not
 claimed. Physical declarations
-accept an explicit positive tag, with an optional name, or a nonempty name with an
-automatic tag from the global Physical namespace. Physical Point accepts inline `PointsOf`;
+accept an explicit literal tag (including zero and negatives, as in Gmsh's raw
+`(int)` cast), with an optional name, or a nonempty name with an
+automatic tag from the global Physical namespace; an already-bound name resolves
+to its existing tag (`setPhysicalName` semantics). Compound `+=`/`-=` modify
+existing memberships (`+=` appends without dedup; `-=` deletes an emptied group
+and is a silent no-op on a missing group), while `*=`/`/=` and `+=` on a missing
+group are recorded errors — duplicate `=` declarations likewise stay recoverable
+diagnostics rather than aborting the run. Physical Point accepts inline `PointsOf`;
 Physical Point/Curve/Surface accept inline `Boundary` and `CombinedBoundary` over
 Curve/Line, Surface, and explicit Volume entities, respectively. `Boundary` collects
 immediate boundaries before physical membership is deduplicated; `CombinedBoundary`

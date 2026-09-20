@@ -248,6 +248,31 @@ end
     @test_throws ArgumentError mesh_model_volume(model,5)
 end
 
+@testset ".geo two-point sphere forms" begin
+    # Gmsh 4.15.2 built-in kernel: `Sphere`/`PolarSphere` take
+    # `{centerTag, pointTag}` — center point plus a point on the sphere.
+    r=mktemp() do path,io
+        write(io,"Point(1)={0,0,0}; Point(2)={3,0,0};\n" *
+                 "Sphere(9) = {1,2};\nPolarSphere(10) = {2,1};\n")
+        close(io)
+        execute_geo(path)
+    end
+    model=r.model
+    @test sort!(collect(keys(model.volumes)))==[9,10]
+    @test model.spheres[9].center==(0.0,0.0,0.0) && model.spheres[9].radius≈3.0
+    @test model.spheres[10].center==(3.0,0.0,0.0) && model.spheres[10].radius≈3.0
+    @test _materialized_curved_consistent(model,9)
+    @test _materialized_curved_consistent(model,10)
+    # Wrong arities fail the params pre-pass arity check.
+    err=mktemp() do path,io
+        write(io,"Point(1)={0,0,0}; PolarSphere(9) = {1,1,1};\n")
+        close(io)
+        try; execute_geo(path); nothing catch e; e end
+    end
+    @test err isa ArgumentError
+    @test occursin("PolarSphere",sprint(showerror,err))
+end
+
 @testset "OCC torus materialization" begin
     m=GeoModel()
     # `addTorus(0,0,0,3,1)`: one rim point at (r1+r2,0,0), the outer-equator

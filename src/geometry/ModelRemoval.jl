@@ -249,6 +249,14 @@ function _model_removal_state(
 
     physical=Dict{Tuple{Int,Int},Vector{Int}}()
     physical_names=copy(m.physical_names)
+    # The destroyed entities' signed physical tags die with them; surviving
+    # entities keep theirs (`.geo` resurrects membership only at a resync of
+    # the raw records, which `context.raw_physicals` retains).
+    entity_physicals=Dict{Tuple{Int,Int},Vector{Int}}()
+    for (entity_key,pnums) in m.entity_physicals
+        entity_key in removed && continue
+        entity_physicals[entity_key]=copy(pnums)
+    end
     if keep_stale_physical
         # `.geo` Delete keeps the physical-group records verbatim: Gmsh's
         # internals retain the stale member integers, so a member tag that is
@@ -346,6 +354,7 @@ function _model_removal_state(
             curve_geometry,loops,surfaces,surface_types,surface_geometry,
             surface_loops,volumes,
             entity_names,entity_visibility,entity_colors,physical,physical_names,
+            entity_physicals,
             box_extents,cylinders,spheres,cones,booleans,boolean_operands,
             boolean_components,periodic,embeds,discrete)
 end
@@ -392,6 +401,7 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.entity_visibility=state.entity_visibility
     m.entity_colors=state.entity_colors
     m.physical=state.physical
+    m.entity_physicals=state.entity_physicals
     m.physical_names=state.physical_names
     m.box_extents=state.box_extents
     m.cylinders=state.cylinders
@@ -600,6 +610,7 @@ function _geo_delete_entities!(m::GeoModel,dim_tags;recursive::Bool=false)
     m.entity_visibility=state.entity_visibility
     m.entity_colors=state.entity_colors
     m.physical=state.physical
+    m.entity_physicals=state.entity_physicals
     m.physical_names=state.physical_names
     m.box_extents=state.box_extents
     m.cylinders=state.cylinders
@@ -638,8 +649,12 @@ function _geo_reset_model_geometry!(m::GeoModel)
     empty!(m.surfaces);empty!(m.surface_types);empty!(m.surface_geometry)
     empty!(m.surface_loops)
     empty!(m.volumes)
-    empty!(m.entity_names);empty!(m.entity_visibility);empty!(m.entity_colors)
-    empty!(m.physical)
+    # `GModel::destroy` frees the entities but does not touch
+    # `_elementaryNames`/`_physicalNames` — the name tables survive
+    # `Delete Model`. `NewModel`/`Delete All` clear them at their call sites
+    # (a fresh `GModel` starts with empty tables).
+    empty!(m.entity_visibility);empty!(m.entity_colors)
+    empty!(m.physical);empty!(m.entity_physicals)
     empty!(m.box_extents);empty!(m.cylinders);empty!(m.spheres);empty!(m.cones)
     empty!(m.booleans);empty!(m.boolean_operands);empty!(m.boolean_components)
     empty!(m.periodic);empty!(m.embeds);empty!(m.discrete)

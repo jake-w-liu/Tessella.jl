@@ -645,7 +645,11 @@ end
         @test boundary_params.background_field==2
         missing_boundary=joinpath(dir,"missing_boundary_layer_field.geo")
         write(missing_boundary,"BoundaryLayer Field = 3;\n")
-        @test_throws ArgumentError read_geo_params(missing_boundary)
+        # Gmsh stores the boundary-layer id without checking it against the
+        # declared fields — the lookup only happens when the field is used.
+        missing_boundary_params=read_geo_params(missing_boundary)
+        @test missing_boundary_params.boundary_layer_fields==[3]
+        @test isempty(missing_boundary_params.scan_errors)
         malformed_boundary=joinpath(dir,"malformed_boundary_layer_field.geo")
         write(malformed_boundary,"Field[1] = BoundaryLayer; BoundaryLayer Field = {1, x};\n")
         @test_throws ArgumentError read_geo_params(malformed_boundary)
@@ -667,10 +671,18 @@ end
 
         duplicate=joinpath(dir,"duplicate_field.geo")
         write(duplicate,"Field[1] = Box; Field[1] = Min; Background Field = 1;\n")
-        @test_throws ArgumentError read_geo_params(duplicate)
+        # `newField` failures are recoverable `Msg::Error` + `yymsg(0)`
+        # diagnostics: the original declaration wins and parsing continues.
+        duplicate_params=read_geo_params(duplicate)
+        @test duplicate_params.fields[1].kind=="Box"
+        @test duplicate_params.background_field==1
+        @test duplicate_params.scan_msg_error_count==1
+        @test "Cannot create field 1 of type 'Min'" in duplicate_params.scan_errors
         undeclared=joinpath(dir,"undeclared_field.geo")
         write(undeclared,"Field[2].VIn = 1;\n")
-        @test_throws ArgumentError read_geo_params(undeclared)
+        undeclared_params=read_geo_params(undeclared)
+        @test !haskey(undeclared_params.fields,2)
+        @test "No field with id 2" in undeclared_params.scan_errors
         malformed=joinpath(dir,"malformed_size.geo")
         write(malformed,"Mesh.MeshSizeMin = nope;\n")
         @test_throws ArgumentError read_geo_params(malformed)
@@ -914,8 +926,6 @@ end
                     "requires exactly one scalar index",
                 "Field[1] = Distance; Field[1].PointsList = {1e20:1e20 + 1};\n"=>
                     "does not advance",
-                "Field[1] = Box; Background Field = 0.4 * {3:4};\n"=>
-                    "requires exactly one",
                 "Field[1] = Box; Field[3] = Box; " *
                     "Background Field = 1 + 2 * {1:1};\n"=>"must be parenthesized",
                 "Field[1] = BoundaryLayer; " *
@@ -938,6 +948,16 @@ end
                 @test err isa ArgumentError
                 @test occursin(message,sprint(showerror,err))
             end
+            # A multi-value `Background Field` list is a recoverable
+            # `yymsg(0)` diagnostic in Gmsh — the scan records it and keeps
+            # parsing instead of throwing.
+            multi_background_path=joinpath(dir,"multi_background.geo")
+            write(multi_background_path,
+                  "Field[1] = Box; Background Field = 0.4 * {3:4};\n")
+            multi_background_params=read_geo_params(multi_background_path)
+            @test "Only 1 field can be set as a background field." in
+                  multi_background_params.scan_errors
+            @test multi_background_params.background_field==0
             for source in (
                 "Field[1] = Distance; Field[1].PointsList = {1:65537};\n",
                 "Field[1] = Distance; Field[1].PointsList = {point_group[], 1:65536};\n",
@@ -1266,11 +1286,8 @@ end
             @test geo_error("Field[1] = Threshold; Field[1].InField = 1e100;\n") isa ArgumentError
             for source in (
                 "Physical Point(\"bad\", missing) = {1};\n",
-                "Physical Point(\"bad\", -1) = {1};\n",
-                "Physical Point(\"bad\", 0.9) = {1};\n",
                 "Physical Point(\"bad\", 2147483648) = {1};\n",
                 "Physical Point(\"bad\", 1e100) = {1};\n",
-                "Field[0.9] = Box;\n",
                 "Field[2147483648] = Box;\n",
                 "Field[1e100] = Box;\n",
                 "Field[1] = Box; Field[missing].VIn = 1;\n",
@@ -1278,7 +1295,28 @@ end
                 "Field[1] = Min; Field[1].FieldsList = {2147483648};\n")
                 @test geo_error(source) isa ArgumentError
             end
-            @test geo_error("Field[1 + 1] = Box; Field[2.9] = Min;\n") isa ArgumentError
+            # Grammar `(int)` casts truncate silently — `0.9` becomes `0` —
+            # and negative or implicit-zero physical tags are legal: `0`
+            # resolves through `getMaxPhysicalNumber + 1`.
+            truncated_tags=joinpath(dir,"truncated_tags.geo")
+            write(truncated_tags,
+                  "Physical Point(\"negative\", -1) = {1};\n" *
+                  "Physical Point(\"fractional\", 0.9) = {1};\n" *
+                  "Field[0.9] = Box;\n" *
+                  "Field[1.9] = Min;\n")
+            truncated_params=read_geo_params(truncated_tags)
+            @test truncated_params.physical_groups[(0,-1)]=="negative"
+            @test truncated_params.physical_groups[(0,1)]=="fractional"
+            @test truncated_params.fields[0].kind=="Box"
+            @test truncated_params.fields[1].kind=="Min"
+            # A fractional field tag that collides after truncation hits the
+            # recoverable `newField` duplicate diagnostic.
+            fractional_dup=joinpath(dir,"fractional_dup.geo")
+            write(fractional_dup,"Field[1 + 1] = Box; Field[2.9] = Min;\n")
+            fractional_params=read_geo_params(fractional_dup)
+            @test fractional_params.fields[2].kind=="Box"
+            @test "Cannot create field 2 of type 'Min'" in
+                  fractional_params.scan_errors
 
             too_many_tokens=join(fill("1",div(Tessella.IO._MAX_GEO_EXPRESSION_TOKENS,2)+1),"+")
             err=geo_error("Mesh.MeshSizeMin = $too_many_tokens;\n")
