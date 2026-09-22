@@ -113,7 +113,10 @@ try
     mktempdir() do directory
         for (case_index, case) in enumerate(CASES)
             path = joinpath(directory, "case$case_index.geo")
-            write(path, case.source)
+            # OCC primitives are factory-gated upstream — bare `Cylinder`/...
+            # under the built-in kernel is a recoverable diagnostic, not a
+            # solid, so the sources run under `SetFactory("OpenCASCADE")`.
+            write(path, "SetFactory(\"OpenCASCADE\");\n" * case.source)
 
             parsed = Tessella.GeoExec.execute_geo(path)
             model = parsed.model

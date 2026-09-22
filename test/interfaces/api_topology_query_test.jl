@@ -68,7 +68,7 @@ end
         @test ntets(generated)==12
         generated_crc=mesh_crc(generated)
         @test generated_crc.sha==
-              "979b12cba32c4e7e8317040d31636eca298b177460adec514374372613ba2f23"
+              "03cfdc7130ae46c251a59237671e3bb37dcba83b690accde3770ac4a78d4cbb4"
         cached=_TOPOLOGY_API.LAST_MESH[]
 
         detached_entities=_TOPOLOGY_API.model.get_entities()

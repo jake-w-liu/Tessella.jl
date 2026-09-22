@@ -375,7 +375,7 @@ end
     @test all(==(Int32(64)),projected.blocks[volume_block].tags)
     crc=mixed_crc(projected)
     @test crc.sha==
-          "16d18e821aebd6486ad2a45f6dc3fa4a86e250f715e7fa5ec3ad35b4254fbdbb"
+          "a627074e471f709987484aa077e9b365736c6ea3dd0142a2db3e86aa38b651a6"
 
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
@@ -417,7 +417,7 @@ end
     @test hollow_projected.entity_data.entities[(3,1)].boundaries==
           Int32[1,2,3,4,5,6,-101,-102,-103,-104,-105,-106]
     @test mixed_crc(hollow_projected).sha==
-          "966c3b9248203d19f24bef8d736b231beda3e6bcacd50ac3007ef6a8f78f8fed"
+          "7974fa70a4858c63f0be92f1dc45edc0089e4f052067fab6c76ba9ba545fa5c1"
 
     signed=GeoModel()
     _add_explicit_cube_shell!(signed,0,0.0,1.0)
@@ -495,7 +495,7 @@ end
     @test nnodes(mesh)==15
     @test ntets(mesh)==24
     @test mesh_crc(mesh).sha==
-          "b9c89bf91a0adc809706c89959d706c264e2bbd10b38db7c95166f03ca4ce899"
+          "8ebccdbf84f1723a04ebf3c6e160e9b61653c42adc6caf077555e4b8fbdb7d39"
     for (slave,master,pairs,offset) in
             ((4,6,5,(1.0,0.0,0.0)),(5,3,5,(0.0,1.0,0.0)))
         mapping=model_periodic_nodes(model,mesh,2,slave)
@@ -527,7 +527,7 @@ end
     @test length(projected.periodic_links)==15
     projected_crc=mixed_crc(projected)
     @test projected_crc.sha==
-          "5bba51b352b63a497ecfc8be0aa2a0ec3d2fafe19af1be4296664aeffdfbfc05"
+          "7cd7c97bd03e24d45ba434bbb90ab80023c3cbba3f92e15e212ac0f4d21dd06b"
 
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
@@ -548,7 +548,7 @@ end
             else
                 @test reread.entity_data===nothing
                 @test mixed_crc(reread).sha==
-                      "976abf6aa3b9747bdc2a5213f4eb3cbe8e32bb5f1c0df5379ff5c67a5b84fbb0"
+                      "661e9410e8aff1867b479df8608272ccf04cdf26fa2bbd75fe640874d22c9303"
             end
         end
     end

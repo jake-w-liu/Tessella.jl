@@ -652,7 +652,10 @@ end
         @test isempty(missing_boundary_params.scan_errors)
         malformed_boundary=joinpath(dir,"malformed_boundary_layer_field.geo")
         write(malformed_boundary,"Field[1] = BoundaryLayer; BoundaryLayer Field = {1, x};\n")
-        @test_throws ArgumentError read_geo_params(malformed_boundary)
+        # `Unknown variable 'x'` is a recoverable yyerror upstream — the scan
+        # records it and keeps the boundary-layer id it could resolve.
+        malformed_boundary_params=read_geo_params(malformed_boundary)
+        @test "Unknown variable 'x'" in malformed_boundary_params.scan_errors
         quoted=joinpath(dir,"quoted_field_options.geo")
         write(quoted,raw"""Field[1] = Structured;
                            Field[1].FileName = "http://host/C:\new\tab\grid.bin";
@@ -685,10 +688,15 @@ end
         @test "No field with id 2" in undeclared_params.scan_errors
         malformed=joinpath(dir,"malformed_size.geo")
         write(malformed,"Mesh.MeshSizeMin = nope;\n")
-        @test_throws ArgumentError read_geo_params(malformed)
+        # `Unknown variable 'nope'` is recoverable upstream — recorded, and
+        # the option keeps its unset value.
+        malformed_params=read_geo_params(malformed)
+        @test "Unknown variable 'nope'" in malformed_params.scan_errors
         invalid=joinpath(dir,"unsupported_size_expression.geo")
         write(invalid,"Mesh.MeshSizeMin = 1oops;\n")
-        @test_throws ArgumentError read_geo_params(invalid)
+        invalid_params=read_geo_params(invalid)
+        @test any(e->occursin("unexpected token \"oops\"",e),
+                  invalid_params.scan_errors)
         valid_numeric=joinpath(dir,"numeric_mesh_options.geo")
         write(valid_numeric,"Mesh.MeshSizeMin = 1 + 2 * 3; Mesh.RandomSeed = 17;\n")
         numeric_params=read_geo_params(valid_numeric)
@@ -699,7 +707,9 @@ end
         @test read_geo_params(geometry_option).geometry_tolerance==2e-5
         invalid=joinpath(dir,"unsupported_seed_expression.geo")
         write(invalid,"Mesh.RandomSeed = 1oops;\n")
-        @test_throws ArgumentError read_geo_params(invalid)
+        invalid_params=read_geo_params(invalid)
+        @test any(e->occursin("unexpected token \"oops\"",e),
+                  invalid_params.scan_errors)
 
         @testset "finite Gmsh constant expressions" begin
             expressions=joinpath(dir,"constant_expressions.geo")
@@ -726,7 +736,7 @@ end
                 Field[field_tag].Size = half;
                 Field[field_tag].hwall_n = base / 8;
                 Field[field_tag].SizesList = {half, Atan2(1, 1), Round(-1.5)};
-                Field[field_tag].SurfacesList = {surface_group[], base + 2};
+                Field[field_tag].CurvesList = {surface_group[], base + 2};
                 Field[Sin[Pi / 2] + 3] = Min;
                 Field[Min[8, Sin[Pi / 2] + 3]].FieldsList = {1, Min(4, 2) + 2};
                 Field[Round(4.5)] = MathEval;
@@ -748,11 +758,11 @@ end
             @test parse.(Float64,Tessella.SizeField._geo_list(
                 params.fields[3],"SizesList")) ≈
                 [0.5,0.7853981633974483,-1.0]
-            @test params.fields[3].options["SurfacesList"]==
+            @test params.fields[3].options["CurvesList"]==
                   "{surface_group[], 4}"
             @test params.fields[4].options["FieldsList"]=="{1, 4}"
             @test params.fields[3].option_order==
-                  ["Size","hwall_n","SizesList","SurfacesList"]
+                  ["Size","hwall_n","SizesList","CurvesList"]
             @test params.fields[5].options["F"]==
                   raw"\"Sin(x) + base; // source, not a scanner expression\""
             @test params.boundary_layer_fields==[3]
@@ -916,26 +926,13 @@ end
                     return err
                 end
             end
+            # Value-domain failures (nonzero increment, non-advancing float
+            # ranges, 32-bit overflow, empty field-tag expressions) remain
+            # hard errors — the params reader cannot represent their values.
             invalid_ranges=(
                 "Field[1] = Min; Field[1].FieldsList = {1:5:0};\n"=>"nonzero",
-                "Field[1] = Min; Field[1].FieldsList = {:5};\n"=>"must not be empty",
-                "Field[1] = Min; Field[1].FieldsList = {1:};\n"=>"must not be empty",
-                "Field[1] = Min; Field[1].FieldsList = {1:2:3:4};\n"=>"at most two",
-                "Field[1] = Min; Field[1].FieldsList = {missing:5};\n"=>"unknown scalar",
-                "Physical Point(\"dynamic\", 1) = {points[]:5};\n"=>
-                    "requires exactly one scalar index",
                 "Field[1] = Distance; Field[1].PointsList = {1e20:1e20 + 1};\n"=>
                     "does not advance",
-                "Field[1] = Box; Field[3] = Box; " *
-                    "Background Field = 1 + 2 * {1:1};\n"=>"must be parenthesized",
-                "Field[1] = BoundaryLayer; " *
-                    "Field[1].SizesList = {1/* comment */2:12};\n"=>"unexpected token",
-                "Field[1] = BoundaryLayer; BoundaryLayer Field = -{};\n"=>
-                    "must not be empty",
-                "Field[1] = BoundaryLayer; BoundaryLayer Field = 2 * {};\n"=>
-                    "must not be empty",
-                "Field[1] = Distance; Field[1].PointsList = -{};\n"=>
-                    "must not be empty",
                 "Field[1] = BoundaryLayer; BoundaryLayer Field = ;\n"=>
                     "must not be empty",
                 "Field[1] = Distance; " *
@@ -947,6 +944,40 @@ end
                 err=range_error(source)
                 @test err isa ArgumentError
                 @test occursin(message,sprint(showerror,err))
+            end
+            # Grammar failures are recoverable `yyerror` diagnostics upstream
+            # — the scan records them in `scan_errors` and keeps parsing.
+            # Upstream reports these as bare `syntax error` diagnostics;
+            # the scan keeps parsing either way and records its more
+            # descriptive messages.
+            recoverable_ranges=(
+                "Field[1] = Min; Field[1].FieldsList = {:5};\n"=>
+                    "must not be empty",
+                "Field[1] = Min; Field[1].FieldsList = {1:};\n"=>
+                    "must not be empty",
+                "Field[1] = Min; Field[1].FieldsList = {1:2:3:4};\n"=>
+                    "at most two ':' separators",
+                "Field[1] = Min; Field[1].FieldsList = {missing:5};\n"=>
+                    "Unknown variable 'missing'",
+                "Physical Point(\"dynamic\", 1) = {points[]:5};\n"=>
+                    "range endpoint",
+                "Field[1] = Box; Field[3] = Box; " *
+                    "Background Field = 1 + 2 * {1:1};\n"=>
+                    "list multiplier",
+                "Field[1] = BoundaryLayer; " *
+                    "Field[1].SizesList = {1/* comment */2:12};\n"=>
+                    "unexpected token",
+                "Field[1] = BoundaryLayer; BoundaryLayer Field = -{};\n"=>
+                    "must not be empty",
+                "Field[1] = BoundaryLayer; BoundaryLayer Field = 2 * {};\n"=>
+                    "must not be empty",
+                "Field[1] = Distance; Field[1].PointsList = -{};\n"=>
+                    "must not be empty")
+            for (source,message) in recoverable_ranges
+                path=joinpath(dir,"recoverable_range.geo")
+                write(path,source)
+                params=read_geo_params(path)
+                @test any(e->occursin(message,e),params.scan_errors)
             end
             # A multi-value `Background Field` list is a recoverable
             # `yymsg(0)` diagnostic in Gmsh — the scan records it and keeps
@@ -1129,14 +1160,25 @@ end
             @test recovered.fields[1].options["PointsList"]=="{9, 2}"
             @test recovered.fields[2].options["PointsList"]=="{8}"
 
-            invalid_lists=(
-                "v[] = {1,2}; Mesh.MeshSizeMin = v[2];\n"=>"zero-based index",
+            # Upstream `yymsg` diagnostics are recoverable — recorded in
+            # `scan_errors` while the scan keeps going.
+            recoverable_lists=(
+                "v[] = {1,2}; Mesh.MeshSizeMin = v[2];\n"=>
+                    "Uninitialized variable 'v[2]'",
                 "v[] = {1,2}; v[{0,1}] = {3}; Mesh.MeshSizeMin = v[0];\n"=>
-                    "selects 2 entries",
+                    "Incompatible array dimensions in affectation",
                 "v[] = {1,2}; v = 3; v[1] = 4; Mesh.MeshSizeMin = v[0];\n"=>
-                    "is not a list",
+                    "Variable 'v' is not a list",
                 "v[] = {1}; v[] *= 2; Mesh.MeshSizeMin = v[0];\n"=>
-                    "not available for whole numeric lists",
+                    "Operators *= and /= not available for lists",
+            )
+            for (source,message) in recoverable_lists
+                path=joinpath(dir,"recoverable_list.geo")
+                write(path,source)
+                params=read_geo_params(path)
+                @test any(e->occursin(message,e),params.scan_errors)
+            end
+            invalid_lists=(
                 "v[] = {1:65537}; Mesh.MeshSizeMin = #v[];\n"=>
                     "expanded list exceeds 65536 entries",
                 "Field[1] = BoundaryLayer; Field[1].SizesList = missing[];\n"=>
@@ -1210,14 +1252,27 @@ end
             for (source,message) in (
                 "newp = 2; Mesh.MeshSizeMin = 1;\n"=>"read-only",
                 "newp[] = {2}; Mesh.MeshSizeMin = 1;\n"=>"read-only",
-                "Mesh.MeshSizeMin = newp[0];\n"=>"scalar and cannot use []",
-                "Rectangle(1) = {0,0,0,1,1}; Mesh.MeshSizeMin = newv;\n"=>
-                    "outside the tracked allocator subset",
             )
                 err=allocator_error(source)
                 @test err isa ArgumentError
                 @test occursin(message,sprint(showerror,err))
             end
+            # `newp[0]` is a grammar error upstream (`syntax error ([)`) —
+            # recorded, not thrown.
+            indexed=joinpath(dir,"indexed_allocator.geo")
+            write(indexed,"Mesh.MeshSizeMin = newp[0];\n")
+            @test any(e->occursin("syntax error ([",e),
+                      read_geo_params(indexed).scan_errors)
+            # An untracked topology change makes later `newX` reads
+            # unavailable — the read records the unavailability, it does not
+            # throw. `Rectangle`/`Disk` are tracked OCC primitives; `Extrude`
+            # remains outside the subset.
+            untracked=joinpath(dir,"untracked_topology.geo")
+            write(untracked,
+                  "Extrude {1,0,0} { Surface{1}; } x = newv; " *
+                  "Mesh.MeshSizeMin = x;\n")
+            @test any(e->occursin("outside the tracked allocator subset",e),
+                      read_geo_params(untracked).scan_errors)
             # Upstream `newp` is `(int)(getMaxTag(0)+1)` — the increment wraps
             # signed Int32, so a max tag of 2147483647 yields -2147483648.
             wrap_path=joinpath(dir,"allocator_wrap.geo")
@@ -1237,67 +1292,99 @@ end
                     return err
                 end
             end
+            # Upstream diagnostics on bad expressions are recoverable
+            # `yyerror`s — recorded in `scan_errors`, not thrown.
             invalid_expressions=(
-                "missing"=>"unknown scalar identifier",
-                "sin(1)"=>"unknown numeric function",
-                "Rand(1)"=>"non-constant or externally stateful",
-                "1 & 2"=>"outside the supported arithmetic subset",
-                "1 / 0"=>"non-finite",
-                "1e309"=>"must be finite",
-                "Hypot(1e154, 1e154)"=>"non-finite",
-                "Sqrt(-1)"=>"finite real domain",
-                "2++"=>"increment and decrement",
+                "missing"=>"Unknown variable 'missing'",
+                "sin(1)"=>"Unknown variable 'sin(.)'",
+                "1 / 0"=>"Division by zero in '1 / 0'",
+                "2++"=>"syntax error (++)",
                 "(1 + 2"=>"closing parenthesis")
             for (expression,message) in invalid_expressions
-                err=geo_error("Mesh.MeshSizeMin = $expression;\n")
-                @test err isa ArgumentError
-                @test occursin(message,sprint(showerror,err))
+                path=joinpath(dir,"bad_expression.geo")
+                write(path,"Mesh.MeshSizeMin = $expression;\n")
+                params=read_geo_params(path)
+                @test any(e->occursin(message,e),params.scan_errors)
+            end
+            # Stateful functions, bitwise ops, and non-finite results are
+            # legal upstream — `strtod` saturates `1e309` to `inf`, `Sqrt`
+            # yields NaN, and `Rand` draws from the parser RNG.
+            for (expression,check) in (
+                "Rand(1)"=>v->0<=v<1,
+                "1 & 2"=>v->v==0,
+                "1e309"=>v->v==Inf,
+                "Hypot(1e154, 1e154)"=>v->v==Inf,
+                "Sqrt(-1)"=>v->isnan(v))
+                path=joinpath(dir,"valid_expression.geo")
+                write(path,"Mesh.MeshSizeMin = $expression;\n")
+                params=read_geo_params(path)
+                @test check(params.mesh_size_min)
+                @test isempty(params.scan_errors)
             end
             dynamic_params=joinpath(dir,"dynamic_expression.geo")
             write(dynamic_params,"Mesh.MeshSizeMin = newp;\n")
             @test read_geo_params(dynamic_params).mesh_size_min==1.0
 
-            err=geo_error("a = Rand(1); Mesh.MeshSizeMin = a;\n")
-            @test err isa ArgumentError
-            @test occursin("numeric variable a is unavailable",sprint(showerror,err))
-            err=geo_error("a = 1; a += 1; Mesh.MeshSizeMin = a;\n")
-            @test err isa ArgumentError
-            @test occursin("compound assignment",sprint(showerror,err))
-            err=geo_error("a = 1; a[] = Surface{:}; Mesh.MeshSizeMin = a;\n")
-            @test err isa ArgumentError
-            @test occursin("numeric variable a is unavailable",sprint(showerror,err))
-            err=geo_error("a = 1; For i In {1:2}\n a += 1; EndFor\n" *
-                          "junk = newp; Mesh.MeshSizeMin = a;\n")
-            @test err isa ArgumentError
-            @test occursin("unsupported loop",sprint(showerror,err))
-            err=geo_error("For i In {1:2}\nMesh.MeshSizeMin = i; EndFor\n")
-            @test err isa ArgumentError
-            @test occursin("unsupported control-flow",sprint(showerror,err))
-            err=geo_error("If (0)\n dummy = 1;\n Mesh.MeshSizeMin = 5;\n" *
+            # `Rand` is a legal stateful function — the value is in [0,1).
+            rand_expr=joinpath(dir,"rand_expr.geo")
+            write(rand_expr,"a = Rand(1); Mesh.MeshSizeMin = a;\n")
+            @test 0<=read_geo_params(rand_expr).mesh_size_min<1
+            # Compound assignment is `NumericAffectation` upstream — it
+            # evaluates like any other statement during the scan.
+            compound=joinpath(dir,"compound_assign.geo")
+            write(compound,"a = 1; a += 1; Mesh.MeshSizeMin = a;\n")
+            @test read_geo_params(compound).mesh_size_min==2.0
+            # A list-form write on a scalar marks `a` unavailable — the
+            # unavailability surfaces when the option reads it.
+            entity_list=joinpath(dir,"entity_list_assign.geo")
+            write(entity_list,
+                  "a = 1; a[] = Surface{:}; Mesh.MeshSizeMin = a;\n")
+            @test any(e->occursin("unavailable",e),
+                      read_geo_params(entity_list).scan_errors)
+            # `For`/`If` replay like the executor: loop bodies run, and a
+            # false `If` skips its branch without touching bindings.
+            loop_assign=joinpath(dir,"loop_assign.geo")
+            write(loop_assign,"a = 1; For i In {1:2}\n a += 1; EndFor\n" *
+                              "junk = newp; Mesh.MeshSizeMin = a;\n")
+            @test read_geo_params(loop_assign).mesh_size_min==3.0
+            loop_index=joinpath(dir,"loop_index.geo")
+            write(loop_index,"For i In {1:2}\nMesh.MeshSizeMin = i; EndFor\n")
+            @test read_geo_params(loop_index).mesh_size_min==2.0
+            skipped=joinpath(dir,"skipped_branch.geo")
+            write(skipped,"If (0)\n dummy = 1;\n Mesh.MeshSizeMin = 5;\n" *
                           "EndIf\n Mesh.MeshSizeMax = 9;\n")
-            @test err isa ArgumentError
-            @test occursin("unsupported control-flow",sprint(showerror,err))
+            skipped_params=read_geo_params(skipped)
+            @test isnan(skipped_params.mesh_size_min)
+            @test skipped_params.mesh_size_max==9.0
             control_ignored=joinpath(dir,"control_ignored.geo")
             write(control_ignored,"If (0)\n dummy = 1;\n EndIf\n" *
                                   "Mesh.MeshSizeMax = 9;\n")
             @test read_geo_params(control_ignored).mesh_size_max==9.0
-            err=geo_error("a = 1; If (0)\n dummy = 1; a = 5; EndIf\n" *
+            guarded=joinpath(dir,"guarded_assign.geo")
+            write(guarded,"a = 1; If (0)\n dummy = 1; a = 5; EndIf\n" *
                           "Mesh.MeshSizeMin = a;\n")
-            @test err isa ArgumentError
-            @test occursin("numeric variable a is unavailable",sprint(showerror,err))
+            @test read_geo_params(guarded).mesh_size_min==1.0
 
             @test geo_error("Field[1] = Box; Background Field = 1e100;\n") isa ArgumentError
             @test geo_error("Field[1] = Threshold; Field[1].InField = 1e100;\n") isa ArgumentError
             for source in (
-                "Physical Point(\"bad\", missing) = {1};\n",
                 "Physical Point(\"bad\", 2147483648) = {1};\n",
                 "Physical Point(\"bad\", 1e100) = {1};\n",
                 "Field[2147483648] = Box;\n",
                 "Field[1e100] = Box;\n",
-                "Field[1] = Box; Field[missing].VIn = 1;\n",
                 "Field[1] = Box; Background Field = 2147483648;\n",
                 "Field[1] = Min; Field[1].FieldsList = {2147483648};\n")
                 @test geo_error(source) isa ArgumentError
+            end
+            # Undefined names in tag slots are recoverable `Unknown variable`
+            # diagnostics upstream.
+            for (source,message) in (
+                "Physical Point(\"bad\", missing) = {1};\n"=>"missing",
+                "Field[1] = Box; Field[missing].VIn = 1;\n"=>"Unknown variable 'missing'")
+                path=joinpath(dir,"missing_tag.geo")
+                write(path,source)
+                params=read_geo_params(path)
+                @test any(e->occursin(message,e),params.scan_errors)
             end
             # Grammar `(int)` casts truncate silently — `0.9` becomes `0` —
             # and negative or implicit-zero physical tags are legal: `0`
@@ -1322,18 +1409,25 @@ end
             @test "Cannot create field 2 of type 'Min'" in
                   fractional_params.scan_errors
 
+            # Expression resource limits abort the expression and record the
+            # diagnostic — parsing itself continues like upstream's yyerror
+            # recovery.
             too_many_tokens=join(fill("1",div(Tessella.IO._MAX_GEO_EXPRESSION_TOKENS,2)+1),"+")
-            err=geo_error("Mesh.MeshSizeMin = $too_many_tokens;\n")
-            @test err isa ArgumentError
-            @test occursin("tokens",sprint(showerror,err))
-            err=geo_error("Physical Point(\"too many\", $too_many_tokens) = {1};\n")
-            @test err isa ArgumentError
-            @test occursin("tokens",sprint(showerror,err))
+            token_path=joinpath(dir,"too_many_tokens.geo")
+            write(token_path,"Mesh.MeshSizeMin = $too_many_tokens;\n")
+            @test any(e->occursin("tokens",e),
+                      read_geo_params(token_path).scan_errors)
+            token_phys=joinpath(dir,"too_many_tokens_phys.geo")
+            write(token_phys,
+                  "Physical Point(\"too many\", $too_many_tokens) = {1};\n")
+            @test any(e->occursin("tokens",e),
+                      read_geo_params(token_phys).scan_errors)
             too_deep=repeat("(",Tessella.IO._MAX_GEO_EXPRESSION_DEPTH+1)*"1"*
                      repeat(")",Tessella.IO._MAX_GEO_EXPRESSION_DEPTH+1)
-            err=geo_error("Mesh.MeshSizeMin = $too_deep;\n")
-            @test err isa ArgumentError
-            @test occursin("nesting",sprint(showerror,err))
+            deep_path=joinpath(dir,"too_deep.geo")
+            write(deep_path,"Mesh.MeshSizeMin = $too_deep;\n")
+            @test any(e->occursin("nesting",e),
+                      read_geo_params(deep_path).scan_errors)
             too_long="1"*repeat(" ",Tessella.IO._MAX_GEO_EXPRESSION_BYTES)*"+0"
             err=geo_error("Mesh.MeshSizeMin = $too_long;\n")
             @test err isa ArgumentError

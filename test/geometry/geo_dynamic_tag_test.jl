@@ -447,7 +447,7 @@ end
     invalid_sources=(
         "newp = 2;"=>"read-only",
         "newreg[] = {2};"=>"read-only",
-        "Point(newp[0]) = {0,0,0,1};"=>"scalar and cannot use []",
+        "Point(newp[0]) = {0,0,0,1};"=>"syntax error ([)",
         "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; " *
         "Physical Point(\"same\")={1}; Physical Point(\"same\")={2};"=>
             "Could not modify physical point",
@@ -459,8 +459,11 @@ end
             "malformed Physical declaration",
         "Point(1)={0,0,0,1}; Physical Point(\"bad\",)={1};"=>
             "malformed Physical declaration",
+        # Under the built-in kernel a bare Boolean creates nothing upstream —
+        # the counters stay live (Gmsh reads `newv` fine after it), so the
+        # run's diagnostics are the OCC-gate message and the stray `;`.
         "BooleanFragments{Volume{1};}{Volume{1};}; Mesh.MeshSizeMax = newv;"=>
-            "topology-changing statement",
+            "Boolean operators only available",
     )
     for (source,message) in invalid_sources
         err=_dynamic_tag_error(source)

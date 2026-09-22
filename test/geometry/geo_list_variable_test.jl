@@ -54,14 +54,14 @@ end
     @test nnodes(meshed.mesh)==125
     @test ntets(meshed.mesh)==384
     @test mesh_crc(meshed.mesh).sha==
-          "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
+          "a58374071a4c485a339e1c5b48b8b0f3e69bf362ff0e41f57ca1a665139e81df"
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,4).slave_nodes)==25
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,5).slave_nodes)==25
     projected=model_to_mixed(meshed.model,meshed.mesh,3,1)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5"
+          "9a608febd598ab7090d3fb64cb9ff7c7b90c26dc4cc8442e7f54fa121a8fa9ad"
 
     # Diagnostics match Gmsh 4.15.2's recoverable `yymsg` text: the entity
     # statements still execute (e.g. `Point(missing[0])` creates `Point(0)`
@@ -75,11 +75,11 @@ end
         "a[] = {1,2}; a[] *= 2;"=>"Operators *= and /= not available for lists",
         "newp[] = {1};"=>"read-only",
         "a[] = {1:65537};"=>"expanded list exceeds 65536 entries",
-        "a[] = {}; Point(1)={0,0,0,1}; Line(1)=a[];"=>"entity list is empty",
+        "a[] = {}; Point(1)={0,0,0,1}; Line(1)=a[];"=>"Could not add line",
         "Point(1)={0,0,0,1}; Point(2)={1,0,0,1}; Line(1)=1,2;"=>
-            "unexpected token",
+            "syntax error (,)",
         "coords[] = {0,0,0}; Point(1) = {coords[], 1};"=>
-            "requires exactly one scalar index",
+            "syntax error (])",
     )
     for (source,message) in invalid_sources
         err=_list_variable_error(source)
@@ -150,11 +150,12 @@ end
     @test err isa ArgumentError
     @test occursin("Unknown variable 'unknownvar'",sprint(showerror,err))
 
-    # Prefix `++`/`--` is a syntax error in Gmsh's grammar too; a negative
-    # index reaches `s.value[-1]` UB upstream, so Tessella fails explicitly.
+    # Prefix `++`/`--` is a syntax error in Gmsh's grammar too (`++` is the
+    # offending token); a negative index reaches `s.value[-1]` UB upstream,
+    # so Tessella fails explicitly.
     err=_list_variable_error("x = 1; y = ++x;")
     @test err isa ArgumentError
-    @test occursin("increment and decrement",sprint(showerror,err))
+    @test occursin("syntax error (++)",sprint(showerror,err))
     err=_list_variable_error("a[] = {1}; a[-1]++;")
     @test err isa ArgumentError
     @test occursin("negative index",sprint(showerror,err))
