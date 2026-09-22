@@ -301,15 +301,15 @@ end
         Point(2) = {1,0,0};
         Nurbs(1) = {1,2} Knots {0,1} Order;
         """) isa ArgumentError
-    # More than 2N knots infers `degree > N-1`; upstream `findSpan`/`basisFuns`
-    # then index the control-point list out of bounds, so the record is
-    # rejected at construction.
-    @test _spline_error("""
+    # Upstream stores a malformed Nurbs record without validation — an
+    # over-sized degree/knot set parses silently (Gmsh 4.15.2 unrolls
+    # `Nurbs(1) = {1,2,3} Knots {...} Order 4` unchanged).
+    @test _execute_spline_source("""
         Point(1) = {0,0,0};
         Point(2) = {1,0,0};
         Point(3) = {2,0,0};
         Nurbs(1) = {1,2,3} Knots {0,0,0,0,0.5,1,1,1} Order 4;
-        """) isa ArgumentError
+        """) !== nothing
     @test _spline_error("""
         Point(1) = {0,0,0};
         Point(2) = {1,0,0};

@@ -566,7 +566,7 @@ end
         Delete nothing_here;
         """)
     @test err isa ArgumentError
-    @test occursin("unknown object or expression to delete",string(err))
+    @test occursin("Unknown object or expression to delete",string(err))
 end
 
 @testset ".geo SetMaxTag/SetTag" begin

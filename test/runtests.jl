@@ -77,11 +77,13 @@ using Tessella
     include("geometry/model_entity_state_test.jl") # visibility/color/coordinates/attributes
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_control_flow_test.jl") # If/For/While/Function control flow + conditional operators
+    include("geometry/geo_struct_test.jl")     # Struct/NameSpace/NameStruct namespaces + EOF rules
     include("geometry/geo_transform_test.jl") # Translate/Dilate/Rotate/Symmetry + Duplicata + coherence
     include("geometry/geo_extrude_test.jl")  # translational Extrude + params + lateral merge
     include("geometry/geo_curved_test.jl")   # circle/ellipse arcs, ruled surfaces, .geo curved statements
     include("geometry/geo_spline_test.jl")   # Spline/BSpline/Bezier/Nurbs records + .geo statements
     include("geometry/occ_primitives_test.jl") # materialized Cylinder/Sphere/Cone/Torus OCC boundaries
+    include("geometry/geo_recoverable_add_test.jl") # lenient built-in/OCC entity adds
     include("geometry/geo_list_variable_test.jl") # bounded numeric list variables
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
     include("geometry/geo_set_max_tag_test.jl") # factory-aware max-tag counters

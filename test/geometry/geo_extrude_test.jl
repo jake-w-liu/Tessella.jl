@@ -47,7 +47,7 @@ const _EXTRUDE_SQUARE = """
     # side effects only.
     r=_execute_extrude_source("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Point{1}; };
+        Extrude {0,0,1} { Point{1}; }
         """)
     @test r.model.points[2]==(0.0,0.0,1.0)
     @test r.model.curves[1]==(1,2)
@@ -197,7 +197,7 @@ end
         Point(1) = {0,0,0,1};
         Point(2) = {1,0,0,1};
         Line(1) = {1,2};
-        Extrude {0,0,1} { Curve{1}; Layers{3}; Recombine; };
+        Extrude {0,0,1} { Curve{1}; Layers{3}; Recombine; }
         """)
     q=r.model.meshing.extrude[(1,2)]
     @test q.layers==[3]
@@ -210,7 +210,7 @@ end
         Point(1) = {0,0,0,1};
         Point(2) = {1,0,0,1};
         Line(1) = {1,2};
-        Extrude {0,0,1} { Curve{1}; Layers{3,5}; };
+        Extrude {0,0,1} { Curve{1}; Layers{3,5}; }
         """)
     q=r.model.meshing.extrude[(1,2)]
     @test q.layers==[3]
@@ -228,23 +228,23 @@ end
         Point(1) = {0,0,0,1};
         Point(2) = {1,0,0,1};
         Line(1) = {1,2};
-        Extrude {0,0,1} { Curve{1}; QuadTriNoNewVerts; };
+        Extrude {0,0,1} { Curve{1}; QuadTriNoNewVerts; }
         """)
     @test r.model.meshing.extrude[(2,5)].quad_to_tri==:no_new_verts
 
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Point{1}; Layers{2,3,4}; };
+        Extrude {0,0,1} { Point{1}; Layers{2,3,4}; }
         """)
     @test err isa ArgumentError
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Point{1}; Layers{{2,3},{0.5}}; };
+        Extrude {0,0,1} { Point{1}; Layers{{2,3},{0.5}}; }
         """)
     @test err isa ArgumentError
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Point{1}; Hole(2); };
+        Extrude {0,0,1} { Point{1}; Hole(2); }
         """)
     @test err isa ArgumentError
 end
@@ -392,7 +392,7 @@ end
     # Statement (side-effect-only) and scalar-assignment forms.
     r=_execute_extrude_source("""
         Point(1) = {1,0,0,1};
-        Extrude {{0,0,1},{0,0,0},Pi/2} { Point{1}; };
+        Extrude {{0,0,1},{0,0,0},Pi/2} { Point{1}; }
         x = Extrude {{0,0,1},{0,0,0},Pi/2} { Point{2}; };
         """)
     @test r.lists["x"]==[4.0,2.0]
@@ -403,7 +403,7 @@ end
         Point(1) = {1,0,0,1};
         Point(2) = {1,1,0,1};
         Line(1) = {1,2};
-        Extrude {{0,0,1},{0,0,0},Pi/2} { Curve{1}; Layers{3}; Recombine; };
+        Extrude {{0,0,1},{0,0,0},Pi/2} { Curve{1}; Layers{3}; Recombine; }
         """)
     q=r.model.meshing.extrude[(2,5)]
     @test q.layers==[3] && q.recombine==true
@@ -411,7 +411,7 @@ end
     # The twist form stays an explicit error.
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {{0,0,1},{0,0,0},{1,0,0},Pi/2} { Point{1}; };
+        Extrude {{0,0,1},{0,0,0},{1,0,0},Pi/2} { Point{1}; }
         """)
     @test err isa ArgumentError
     @test occursin("twist",sprint(showerror,err))
@@ -419,7 +419,7 @@ end
     # A zero rotation axis fails before any topology is created.
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {{0,0,0},{0,0,0},Pi/2} { Point{1}; };
+        Extrude {{0,0,0},{0,0,0},Pi/2} { Point{1}; }
         """)
     @test err isa ArgumentError
     @test occursin("rotation axis",sprint(showerror,err))
@@ -462,14 +462,14 @@ end
 
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {Pi/2,{0,0,0},{0,0,1}} { Point{1}; };
+        Extrude {Pi/2,{0,0,0},{0,0,1}} { Point{1}; }
         """)
     @test err isa ArgumentError
     @test occursin("rotational",sprint(showerror,err))
 
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude { Point{1}; };
+        Extrude { Point{1}; }
         """)
     @test err isa ArgumentError
     @test occursin("boundary-layer",sprint(showerror,err))
@@ -477,7 +477,7 @@ end
     # The pipe form splits at the shape-list brace; the trailing
     # `Using Wire` must reject the whole statement before side effects.
     err=_extrude_error(_EXTRUDE_SQUARE * """
-        Extrude { Surface{1}; } Using Wire {3};
+        Extrude { Surface{1}; } Using Wire {3}
         """)
     @test err isa ArgumentError
     @test occursin("pipe",sprint(showerror,err))
@@ -491,7 +491,7 @@ end
 
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Point{99}; };
+        Extrude {0,0,1} { Point{99}; }
         """)
     @test err isa ArgumentError
     @test occursin("Point[99]",sprint(showerror,err))
@@ -499,14 +499,14 @@ end
     # Every entity block in the shape list must end with a semicolon.
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Point{1} };
+        Extrude {0,0,1} { Point{1} }
         """)
     @test err isa ArgumentError
     @test occursin("semicolon",sprint(showerror,err))
 
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
-        Extrude {0,0,1} { Extrude {0,0,1} { Point{1}; }; };
+        Extrude {0,0,1} { Extrude {0,0,1} { Point{1}; }; }
         """)
     @test err isa ArgumentError
 end
@@ -520,7 +520,7 @@ end
         Point(2) = {1,0,0,1};
         Line(1) = {1,2};
         Point(5) = {5,0,0,1};
-        Extrude {0,0,1} { Curve{1}; };
+        Extrude {0,0,1} { Curve{1}; }
         out[] = Extrude {0,0,1} { Point{5}; };
         """)
     @test r.lists["out"]==[8.0,6.0]

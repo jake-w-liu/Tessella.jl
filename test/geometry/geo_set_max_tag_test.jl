@@ -112,8 +112,10 @@ end
     @test sort!(collect(keys(primitive.model.volumes)))==[1]
     @test primitive.params.mesh_size_max==1.6
 
-    # Gmsh 4.15.2 errors "OpenCASCADE point with tag 1 already exists" when an
-    # explicit Point collides with a materialized Box corner.
+    # Gmsh 4.15.2 errors "OpenCASCADE point with tag 1 already exists"
+    # (Msg::Error) + "Could not add point" (yymsg) when an explicit Point
+    # collides with a materialized Box corner; the accumulated `Could not add`
+    # diagnostic is what reaches the `execute_geo` exception.
     overlap_error=_set_max_tag_error(raw"""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0,1,1,1};
@@ -121,7 +123,7 @@ end
         Mesh.MeshSizeMin = newp;
         """)
     @test overlap_error isa ArgumentError
-    @test occursin("Point[1] already exists",sprint(showerror,overlap_error))
+    @test occursin("Could not add point",sprint(showerror,overlap_error))
 
     for kind in ("Point","Curve","Surface","Volume")
         allocator=kind=="Point" ? "newp" : "newreg"
@@ -188,7 +190,7 @@ end
 
     invalid_sources=(
         "SetMaxTag Point(2147483648);"=>"signed 32-bit integer range",
-        "SetMaxTag Field(10);"=>"unrecognized statement",
+        "SetMaxTag Field(10);"=>"syntax error (Field)",
         "SetFactory(\"Unknown\");"=>
             "accepts only \"Built-in\" or \"OpenCASCADE\"",
         "SetFactory(factoryName);"=>"requires a literal",
@@ -352,14 +354,16 @@ end
     end
 
     # The two-point `Sphere`/`PolarSphere` forms stay built-in under either
-    # factory (upstream `newGeometrySphere`/`newGeometryPolarSphere`).
+    # factory (upstream `newGeometrySphere`/`newGeometryPolarSphere`) — they
+    # register parametric surfaces and create no volume entities.
     builtin_forms=_execute_set_max_tag_source("""
         Point(1) = {0,0,0};
         Point(2) = {1,0,0};
         Sphere(9) = {1,2};
         PolarSphere(10) = {1,2};
         """)
-    @test sort!(collect(keys(builtin_forms.model.volumes)))==[9,10]
+    @test isempty(builtin_forms.model.volumes)
+    @test isempty(builtin_forms.model.surfaces)
 
     # Boolean gating asymmetry (Gmsh.y): the tagged `(t) =` form silently
     # no-ops under built-in; the standalone/list term reports the diagnostic.

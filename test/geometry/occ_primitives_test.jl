@@ -251,27 +251,33 @@ end
 
 @testset ".geo two-point sphere forms" begin
     # Gmsh 4.15.2 built-in kernel: `Sphere`/`PolarSphere` take
-    # `{centerTag, pointTag}` — center point plus a point on the sphere.
+    # `{centerTag, pointTag}` — they create NO entity, registering a
+    # `gmshSurface` in `allGmshSurfaces` and installing it as the current
+    # parametric-surface context (`newGeometrySphere`/`newGeometryPolarSphere`).
     r=mktemp() do path,io
         write(io,"Point(1)={0,0,0}; Point(2)={3,0,0};\n" *
                  "Sphere(9) = {1,2};\nPolarSphere(10) = {2,1};\n")
         close(io)
         execute_geo(path)
     end
-    model=r.model
-    @test sort!(collect(keys(model.volumes)))==[9,10]
-    @test model.spheres[9].center==(0.0,0.0,0.0) && model.spheres[9].radius≈3.0
-    @test model.spheres[10].center==(3.0,0.0,0.0) && model.spheres[10].radius≈3.0
-    @test _materialized_curved_consistent(model,9)
-    @test _materialized_curved_consistent(model,10)
-    # Wrong arities fail the params pre-pass arity check.
+    @test isempty(r.model.volumes)
+    @test isempty(r.model.surfaces)
+    # Wrong arities fail with `PolarSphere requires 2 points`.
     err=mktemp() do path,io
         write(io,"Point(1)={0,0,0}; PolarSphere(9) = {1,1,1};\n")
         close(io)
         try; execute_geo(path); nothing catch e; e end
     end
     @test err isa ArgumentError
-    @test occursin("PolarSphere",sprint(showerror,err))
+    @test occursin("PolarSphere requires 2 points",sprint(showerror,err))
+    # Unknown center/point tags report through `Msg::Error` (recoverable —
+    # no `yymsg`, so `execute_geo` does not throw).
+    err=mktemp() do path,io
+        write(io,"Sphere(9) = {99,100};\n")
+        close(io)
+        try; execute_geo(path); nothing catch e; e end
+    end
+    @test err===nothing
 end
 
 @testset "OCC torus materialization" begin

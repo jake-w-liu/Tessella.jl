@@ -155,7 +155,7 @@ const _PERIODIC_SURFACE_VOLUME_GEO=normpath(joinpath(
     @test meshed.mesh!==nothing
     @test validate(meshed.mesh).ok
     @test mesh_crc(meshed.mesh).sha==
-          "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0"
+          "a58374071a4c485a339e1c5b48b8b0f3e69bf362ff0e41f57ca1a665139e81df"
     @test length(model_periodic_nodes(
         meshed.model,meshed.mesh,2,4).slave_nodes)==25
     @test length(model_periodic_nodes(
@@ -344,8 +344,8 @@ end
         err
     end
     @test pi_error isa ArgumentError
-    @test occursin("Pi is a reserved numeric constant",
-                   sprint(showerror,pi_error))
+    # `Pi` is `tPi` upstream — an affectation head rejects it at parse time.
+    @test occursin("syntax error (Pi)",sprint(showerror,pi_error))
     @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end

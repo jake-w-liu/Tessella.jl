@@ -77,9 +77,9 @@ end
         SetFactory("OpenCASCADE");
         tag = 1.9;
         Box(Max(1, tag)) = {0, 0, 0, Sqrt(1), 2, 3};
-        Translate {1 / 2, -1 / 2, 1} { Volume{tag}; };
-        Dilate {{0, 0, 0}, 2 / 1} { Volume{tag}; };
-        Rotate {{0, 0, 2}, {0, 0, 0}, Pi / 2} { Volume{tag}; };
+        Translate {1 / 2, -1 / 2, 1} { Volume{tag}; }
+        Dilate {{0, 0, 0}, 2 / 1} { Volume{tag}; }
+        Rotate {{0, 0, 2}, {0, 0, 0}, Pi / 2} { Volume{tag}; }
         """)
     @test collect(transformed.model.box_extents[1])≈[-3.0,1.0,2.0,4.0,2.0,6.0]
 
@@ -114,8 +114,6 @@ end
         "Point(1) = {0, 0};",
         "Point(1) = {0, 0, 0, 1, 2, 3};",
         "Point(1) = {0, 0, 0, 1}; Line(1) = {1:65537};",
-        "Point(1) = {0, 0, 0, 1}; Line(1) = {1, 1, 1};",
-        "Curve Loop(1) = {0, 1, 2};",
         "Box(1) = {0, 0, 0, 1, 1};",
         "SetFactory(\"OpenCASCADE\"); Box(1) = {0, 0, 0, 1, 1, 1}; " *
             "Translate {1, 2} { Volume{1}; };",
@@ -127,6 +125,15 @@ end
     for source in invalid_sources
         @test _geometry_expression_error(source) isa ArgumentError
     end
+    # Upstream stores degenerate/unknown-tag entities verbatim and silently:
+    # the line tolerance warning only applies to ≤2 control points
+    # (Geo.cpp:555), and `SortEdgesInLoop` stores the raw tag list untouched
+    # when a curve tag is unknown (Geo.cpp:3616).
+    lenient=_execute_geometry_expression_source(
+        "Point(1) = {0, 0, 0, 1}; Line(1) = {1, 1, 1}; " *
+        "Curve Loop(2) = {0, 1, 2};")
+    @test lenient.model.curve_control_points[1]==[1,1,1]
+    @test lenient.model.loops[2]==[0,1,2]
     point_count_error=_geometry_expression_error("Point(1) = {0, 0};")
     # Upstream's `VExpr_Single` needs 3–5 components — `{a,b}` is a syntax
     # error at the closing `}`.

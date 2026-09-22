@@ -1309,6 +1309,17 @@ struct _GeoNumericListTerm
     # ranges.
     values::Vector{Float64}
 end
+
+# A `Struct` definition inside a `gmsh_yynamespaces` namespace (Parser.h):
+# `_fopt`/`_copt` map member names to float/char vectors, `_tag` is the
+# resolved auto-or-forced tag and `_member_ValMax` continues `Enum`
+# auto-numbering across `Append` definitions.
+mutable struct _GeoStructDef
+    tag::Int
+    fopt::Dict{String,Vector{Float64}}
+    copt::Dict{String,Vector{String}}
+    member_valmax::Int
+end
 _GeoNumericListTerm(first,step,count)=
     _GeoNumericListTerm(first,step,count,Float64[])
 
@@ -1332,6 +1343,28 @@ struct _GeoExprToken
     pos::Int
 end
 
+# A `.geo` `For` frame — `LoopControlVariablesTab` (current/last/step), the
+# loop variable name ("" for `For (a:b)`), and the saved stream position
+# (`body_start` indexes `statements`, the array the header was parsed in —
+# `EndFor` only rewinds a level belonging to its own stream).
+mutable struct _GeoLoopLevel
+    var::String
+    x0::Float64
+    x1::Float64
+    step::Float64
+    body_start::Int
+    statements::Vector{String}
+end
+
+# A `While` frame (Tessella extension) — condition source re-evaluated at
+# each `EndWhile`, the body start position, and an iteration bound.
+mutable struct _GeoWhileLevel
+    cond::String
+    body_start::Int
+    statements::Vector{String}
+    iterations::Int
+end
+
 mutable struct _GeoNumericContext
     values::Dict{String,Float64}
     lists::Dict{String,Vector{Float64}}
@@ -1351,11 +1384,18 @@ mutable struct _GeoNumericContext
     # `Geometry.ExtrudeReturnLateralEntities` (defaults on): controls whether
     # extrude result lists append the lateral entities.
     extrude_return_lateral::Bool
-    # `.geo` `Function`/`Call` support: each name maps to its body statement
-    # range inside the executing file's statement array, and call_depth bounds
-    # recursion.
-    functions::Dict{String,UnitRange{Int}}
+    # `.geo` `Function`/`Macro`/`Call` support: each name maps to
+    # `(statement_array, body_start_index)` — the array reference keeps
+    # `Include`d files' bodies alive for later calls (Gmsh's FunctionManager
+    # stores file positions and survives `Delete All`/`NewModel`).
+    functions::Dict{String,Tuple{Vector{String},Int}}
     call_depth::Int
+    # `gmsh_yynamespaces` — `Struct` definitions per namespace: float members
+    # (fopt), char members (copt), the resolved tag and the running enum
+    # counter (`member_valmax`). `struct_maxtag` is each `Structs` container's
+    # `_max_tag` (per-namespace auto-tag allocator).
+    structs::Dict{String,Dict{String,_GeoStructDef}}
+    struct_maxtag::Dict{String,Int}
     # `gmsh_yystringsymbols` — a separate table from the numeric symbols, so
     # `x = 1; x = "s"` keeps both bindings live, `Delete x` erases only the
     # numeric entry, and `Delete Variables` leaves strings untouched.
@@ -1375,6 +1415,16 @@ mutable struct _GeoNumericContext
     mesh::Union{Nothing,Mesh}
     # `ImbricatedTest` — nested `If` depth, readable in expressions.
     if_depth::Int
+    # `statusImbricatedTests` — per-level branch status for the flat token
+    # stream. Written at `if_depth+1` (upstream index 0 is a real slot — an
+    # `If` opened at depth -1 stores there); reads only happen at depth > 0.
+    if_status::Vector{Bool}
+    # `ImbricatedLoop` + `LoopControlVariablesTab` + `yyposImbricatedLoopsTab` —
+    # the open `For` frames: loop variable, current/last/step values, and the
+    # stream position `EndFor` rewinds to. `While` (Tessella extension)
+    # frames hold the condition source for re-evaluation.
+    loop_stack::Vector{_GeoLoopLevel}
+    while_stack::Vector{_GeoWhileLevel}
     # `StringOption(GMSH_SET)` mirror: `(family, index, member)` option-string
     # writes, read back by `x.y`/`x[i].y` string expressions.
     option_strings::Dict{Tuple{String,Int,String},String}
@@ -1437,18 +1487,37 @@ mutable struct _GeoNumericContext
     # parsed (`lc == 0` maps to 1 upstream). `nothing` until the first Point
     # statement runs.
     temp_bbox::Union{Nothing,NTuple{2,NTuple{3,Float64}}}
+    # `allGmshSurfaces` — the registry of parametric geometry surfaces
+    # (`Sphere`/`PolarSphere`/`Parametric Surface`) keyed by their tag.
+    # Registering an existing tag reports `Surface N already exists` and then
+    # replaces the entry, matching `gmshSurface::New*`. It is not the model
+    # surface namespace.
+    parametric_surfaces::Dict{Int,Any}
+    # `myGmshSurface` — the parametric-surface coordinate context a
+    # `Sphere(n) = {center, point}`/`PolarSphere(n) = {center, point}` (or
+    # `Parametric Surface`) statement installs. `Euclidian Coordinates`
+    # resets it. It is not an entity: no tag is consumed and nothing lands in
+    # `m.surfaces`/`m.volumes`.
+    parametric_surface::Any
+    # Bookkeeping re-evaluation inside the allocator observer: upstream
+    # reduces each FExpr once in the grammar production, so the observer's
+    # re-reads must not duplicate the diagnostics the statement emitted.
+    suppress_diagnostics::Bool
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
     Dict{String,String}(),Dict{String,String}(),0,nothing,true,
-    Dict{String,UnitRange{Int}}(),0,
+    Dict{String,Tuple{Vector{String},Int}}(),0,
+    Dict{String,Dict{String,_GeoStructDef}}(),Dict{String,Int}(),
     Dict{String,Vector{String}}(),Dict{String,Float64}(),
-    Dict{String,String}(),"",nothing,0,
+    Dict{String,String}(),"",nothing,0,falses(101),
+    _GeoLoopLevel[],_GeoWhileLevel[],
     Dict{Tuple{String,Int,String},String}(),
     Dict{Tuple{String,Int,String},Float64}(),
     Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,nothing,
     String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
-    Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing)
+    Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
+    Dict{Int,Any}(),nothing,false)
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`
@@ -1459,12 +1528,16 @@ _GeoNumericContext()=_GeoNumericContext(
 struct _GeoSyntaxAbort <: Exception
     token::String
     detail::String
+    # `header` marks a failed control-construct header (`If (x y)`, `For i In
+    # {bad}`): upstream's `error tEND` recovery then discards through the
+    # next `;`, eating following control keywords and one `;`-statement.
+    header::Bool
 end
 
 _geo_syntax_abort(token::AbstractString)=
-    throw(_GeoSyntaxAbort(String(token),""))
+    throw(_GeoSyntaxAbort(String(token),"",false))
 _geo_syntax_abort(token::AbstractString,detail::AbstractString)=
-    throw(_GeoSyntaxAbort(String(token),String(detail)))
+    throw(_GeoSyntaxAbort(String(token),String(detail),false))
 
 Base.showerror(io::Base.IO,err::_GeoSyntaxAbort)=
     print(io,isempty(err.detail) ? "syntax error ($(err.token))" : err.detail)
@@ -1472,6 +1545,7 @@ Base.showerror(io::Base.IO,err::_GeoSyntaxAbort)=
 # `yymsg(0, ...)` — record a parse error; the stream continues and `execute_geo`
 # throws the accumulated diagnostics at the end (or at `Exit`/`Abort`).
 function _geo_yyerror!(context::_GeoNumericContext,message::AbstractString)
+    context.suppress_diagnostics && return nothing
     context.stderr_diagnostics &&
         (print(stderr,"Error   : ",message,"\n");flush(stderr))
     push!(context.exec_errors,String(message))
@@ -1481,6 +1555,7 @@ end
 # `yymsg(1, ...)` — a warning; printed like `Msg::Warning`, execution
 # continues.
 function _geo_yywarn!(context::_GeoNumericContext,message::AbstractString)
+    context.suppress_diagnostics && return nothing
     context.stderr_diagnostics &&
         (print(stderr,"Warning : ",message,"\n");flush(stderr))
     push!(context.exec_warnings,String(message))
@@ -1500,9 +1575,21 @@ end
 # plugin and field actions. Prints immediately and marks the run failed, but
 # does not bump `gmsh_yyerrorstate` (no >20 abort).
 function _geo_msg_error!(context::_GeoNumericContext,message::AbstractString)
+    context.suppress_diagnostics && return nothing
     context.stderr_diagnostics &&
         (print(stderr,"Error   : ",message,"\n");flush(stderr))
     context.msg_error_count+=1
+    return nothing
+end
+
+# The lexer's `Msg::Error("Unexpected end of file")` (Gmsh.l skip/skipTest):
+# one printed diagnostic that both marks the run failed (`msg_error_count`,
+# which bare `Exit` reads) and aborts the parse — upstream exits nonzero, so
+# the statement stream cannot silently deliver a truncated model. Recorded
+# in `exec_errors` so `execute_geo` throws, without reprinting.
+function _geo_eof_error!(context::_GeoNumericContext)
+    _geo_msg_error!(context,"Unexpected end of file")
+    push!(context.exec_errors,"Unexpected end of file")
     return nothing
 end
 
@@ -1605,7 +1692,7 @@ function _geo_context_list_value(context::_GeoNumericContext,name::String,
             _geo_yyerror!(context,"Unknown variable '$name(.)'")
             return 0.0
         end
-        throw(ArgumentError("$caller: Unknown variable '$name'"))
+        throw(ArgumentError("$caller: Unknown variable '$name(.)'"))
     end
     values=_geo_context_list(context,name,caller)
     index=_geo_int_value(index_value,"$caller index")
@@ -1643,6 +1730,8 @@ const _GEO_NUMERIC_FUNCTIONS=Set((
     "Acos","Asin","Atan","Ceil","Cos","Cosh","Exp","Fabs","Abs",
     "Floor","Log","Log10","Round","Sqrt","Sin","Sinh","Step","Tan",
     "Tanh","Atan2","Fmod","Modulo","Hypot","Max","Min"))
+# Fixed-arity binary numeric functions (`tX LP FExpr ',' FExpr RP`).
+const _GEO_BINARY_FUNCTIONS=Set(("Atan2","Fmod","Modulo","Hypot","Max","Min"))
 # Stateful FExpr functions taking only numeric arguments.
 const _GEO_STATEFUL_FUNCTIONS=Set(("Rand",))
 # Functions whose arguments cannot be parsed as plain numeric expressions:
@@ -1658,7 +1747,7 @@ const _GEO_STRING_FUNCTIONS=Set((
     "Str","StrCat","StrPrefix","StrRelative","StrReplace","UpperCase",
     "LowerCase","LowerCaseIn","StrChoice","StrSub","Sprintf","GetEnv",
     "GetString","GetStringValue","GetForcedStr","FixRelativePath","DirName",
-    "AbsolutePath","DefineString","NameStruct","NameToString"))
+    "AbsolutePath","DefineString","NameStruct","NameToString","N2S"))
 const _GEO_ALL_FUNCTIONS=union(_GEO_NUMERIC_FUNCTIONS,
     _GEO_NONCONSTANT_FUNCTIONS,_GEO_STATEFUL_FUNCTIONS,
     _GEO_RAW_ARG_FUNCTIONS,_GEO_STRING_FUNCTIONS)
@@ -1688,6 +1777,75 @@ const _GEO_EXPR_RESERVED_NAMES=Set((
     "Factory","Onelab","Macro","Info","Debug","SetOrder","Coherence",
     "Transfinite","Reverse","Adapt","Homogeneous","Generalized","In",
     "Abs","GetNumber","SetNumber","GetString","SetString","Exists"))
+# Gmsh 4.15.2 lexer keywords (Gmsh.l) — verbatim. `String__Index` positions
+# (struct/namespace names, `x.y` families, `ns::` parts) reject these; member
+# names (`tSTRING_Reserved`) reject all but Min/Max/Step/Box/Cylinder.
+const _GEO_LEXER_KEYWORDS=Set((
+    "Abort","Abs","AbsolutePath","Acos","AdaptMesh","Affine","Alias",
+    "AliasWithOptions","Append","ArcCos","ArcSin","ArcTan","ArcTan2","Asin",
+    "Atan","Atan2","BSpline","Betti","Bezier","Block","BooleanCoherence",
+    "BooleanCommon","BooleanCut","BooleanDifference","BooleanFragments",
+    "BooleanFuse","BooleanIntersection","BooleanSection","BooleanUnion",
+    "BoundingBox","Box","Call","Catenary","CatmullRom","Ceil","CenterOfMass",
+    "Chamfer","Characteristic","Circle","ClassifySurfaces","Closest",
+    "CodeName","Coherence","Cohomology","Color","ColorTable","Combine",
+    "Compound","Cone","Coordinates","CopyOptions","Cos","Cosh","Cpu",
+    "CreateGeometry","CreateTopology","CurrentDir","CurrentDirectory",
+    "CurrentFileName","Curve","Cylinder","DefineConstant","DefineNumber",
+    "DefineString","Degenerated","Delete","Dilate","DimNameSpace","DirName",
+    "Disk","Draw","Ellipse","Ellipsis","Ellipsoid","Elliptic","Else",
+    "ElseIf","EndFor","EndIf","Error","Euclidian","Exists","Exit","Exp",
+    "Extrude","Fabs","Field","FileExists","Fillet","Find","FixRelativePath",
+    "Floor","Fmod","For","Function","GMSH_MAJOR_VERSION","GMSH_MINOR_VERSION",
+    "GMSH_PATCH_VERSION","GeoEntity","GetEnv","GetForced","GetForcedStr",
+    "GetNumber","GetString","GetStringValue","GetValue","GmshExecutableName",
+    "HealShapes","Hide","Hole","Homology","Hypot","INTERPOLATION_SCHEME","If",
+    "In","Intersect","Knots","Layers","Length","Levelset","LinSpace","Line",
+    "List","ListFromFile","Log","Log10","LogSpace","LowerCase","LowerCaseIn",
+    "MPI_Rank","MPI_Size","Macro","Mass","MatrixOfInertia","Max","Memory",
+    "MeshAlgorithm","MeshSize","MeshSizeFromBoundary","Min","Modulo","N2S",
+    "NameStruct","NameToString","NewModel","Normal","Nurbs","OnelabAction",
+    "OnelabRun","Order","Parametric","Parent","Periodic","Physical","Pi",
+    "Plane","Plugin","Point","PolarSphere","Printf","Quadric","Rand",
+    "Recombine","RecombineMesh","Rectangle","Recursive","RefineMesh",
+    "RelocateMesh","RenumberMeshElements","RenumberMeshNodes",
+    "ReorientMesh","Return","Reverse","ReverseMesh","Rotate","Round","Ruled",
+    "S2N","ScaleLastLayer","SetChanged","SetFactory","SetMaxTag","SetNumber",
+    "SetPartition","SetString","SetTag","Sewing","ShapeFromFile","Show","Sin",
+    "Sinh","Slide","Smoother","Sphere","Spline","Split","Sprintf","Sqrt",
+    "Step","Str","StrCat","StrChoice","StrCmp","StrFind","StrLen","StrPrefix",
+    "StrRelative","StrReplace","StrSub","StringToName","Struct","Surface",
+    "Symmetry","SyncModel","T2","T3","TIME","Tan","Tanh","TestLevel",
+    "TextAttributes","ThickSolid","ThruSections","Today","Torus",
+    "TotalMemory","Transfinite","TransformMesh","Translate",
+    "UndefineConstant","Unique","UnsplitWindow","UpperCase","Using","Volume",
+    "Warning","Wedge","Wire"))
+# `tSTRING_Reserved` adds Min/Max/Step/Box/Cylinder to plain identifiers —
+# the only lexer keywords legal as member names.
+const _GEO_MEMBER_EXTRA_KEYS=Set(("Min","Max","Step","Box","Cylinder"))
+# Lexer keywords that head an `FExpr`/`FExpr_Multi` production — upstream
+# they shift and the error lands on the *following* token (`v = Point(1)`
+# → `(`, `v = List` → `;`), unlike pure-statement keywords which error at
+# the keyword itself (`v = Circle(1)` → `Circle`). `List` is excluded:
+# `tList LP` is a real production whose argument errors at the closer.
+const _GEO_FEXPR_SHIFT_KEYWORDS=Set((
+    "Point","Curve","Surface","Volume","GeoEntity","Physical","Line",
+    "Parent","Normal","Parametric","Affine","BoundingBox",
+    "CenterOfMass","Chamfer","Closest","Color","Dilate","Fillet",
+    "Intersect","Mass","MatrixOfInertia","Rotate",
+    "Ruled","Split","Struct","Translate","Symmetry","Extrude",
+    "BooleanCoherence","BooleanCommon","BooleanCut","BooleanDifference",
+    "BooleanFragments","BooleanFuse","BooleanIntersection",
+    "BooleanSection","BooleanUnion"))
+# Zero-argument `StringExpr` tokens — lexer-emitted literals that take no
+# argument list (`Today(1)` errors at `(` upstream).
+const _GEO_BARE_STRING_TOKENS=Set((
+    "Today","CodeName","GmshExecutableName","OnelabAction",
+    "CurrentFileName","CurrentDirectory","CurrentDir"))
+_geo_tstring_valid(name::String)=!(name in _GEO_LEXER_KEYWORDS)
+_geo_member_key_valid(name::String)=
+    !(name in _GEO_LEXER_KEYWORDS) || name in _GEO_MEMBER_EXTRA_KEYS
+
 # FLTK `menu_font_names` order — `getFontIndex` returns the position.
 const _GEO_FONT_NAMES=(
     "Times-Roman","Times-Bold","Times-Italic","Times-BoldItalic",
@@ -1714,6 +1872,47 @@ const _GEO_BARE_CONSTANTS=Dict{String,Function}(
     "Cpu"=>(_p)->_geo_cpu_time(),
     "Memory"=>(_p)->_geo_memory_mb(),
     "TotalMemory"=>(_p)->_geo_total_memory_mb())
+
+# Lexer keywords that never head a statement production — pure-expression
+# function names, bare constants/tokens and contextual words (`In`, `Using`,
+# `Knots`, ...). Used by `_geo_lhs_keyword_check`: as an assignment LHS head
+# they error at the keyword itself upstream (`Pi = 5` → `syntax error (Pi)`),
+# while statement-leading keywords shifted by the parser error at the next
+# token (`Printf[...] = ` → `[`, `Struct =` → `=`).
+const _GEO_EXPR_ONLY_KEYWORDS=union(
+    _GEO_ALL_FUNCTIONS,_GEO_BARE_STRING_TOKENS,
+    Set(keys(_GEO_BARE_CONSTANTS)),
+    Set(("In","Using","Knots","Append","Order","Layers","ScaleLastLayer",
+        "Sewing","Hole","Elliptic","Quadric","Ellipsoid","TIME","T2","T3",
+        "INTERPOLATION_SCHEME","Exists","GetValue","N2S","S2N","NameStruct",
+        "NameToString","StringToName","DimNameSpace","OnelabAction")))
+
+# The first source token of `s` for `syntax error (token)` reporting: a whole
+# identifier, a quote character, or a single punctuation char.
+function _geo_stmt_head_token(s::AbstractString)
+    t=strip(s)
+    isempty(t) && return ";"
+    (tm=match(r"^[A-Za-z_][A-Za-z0-9_]*",t))!==nothing && return String(tm.match)
+    return string(first(t))
+end
+
+# Statement head check for an affectation LHS: a lexer keyword in `String__`
+# position is a syntax error — at the keyword when it is expression-only, at
+# the following token when the keyword heads a statement the parser already
+# committed to.
+function _geo_lhs_keyword_check(body::AbstractString)
+    m=match(r"^[A-Za-z_][A-Za-z0-9_]*",body)
+    m===nothing && return nothing
+    name=String(m.match)
+    name in _GEO_LEXER_KEYWORDS || return nothing
+    if name in _GEO_EXPR_ONLY_KEYWORDS
+        _geo_syntax_abort(name)
+    else
+        _geo_syntax_abort(_geo_stmt_head_token(
+            body[nextind(body,lastindex(m.match)):end]))
+    end
+    return nothing
+end
 
 mutable struct _GeoTagAllocatorState
     builtin_point_max::Int
@@ -1944,9 +2143,11 @@ function _geo_allocator_next_tag(state::_GeoTagAllocatorState,kind::Symbol)
         return _geo_int32_incr(state.factory==:opencascade ?
             state.occ_volume_max : state.builtin_volume_max)
     elseif kind==:curveloop
-        return _geo_int32_incr(state.builtin_curveloop_max)
+        return _geo_int32_incr(state.factory==:opencascade ?
+            state.occ_curveloop_max : state.builtin_curveloop_max)
     elseif kind==:surfaceloop
-        return _geo_int32_incr(state.builtin_surfaceloop_max)
+        return _geo_int32_incr(state.factory==:opencascade ?
+            state.occ_surfaceloop_max : state.builtin_surfaceloop_max)
     end
     throw(ArgumentError("unknown auto-assign tag namespace $kind"))
 end
@@ -2187,6 +2388,32 @@ function _geo_allocator_record_primitive!(state::_GeoTagAllocatorState,
     _geo_allocator_record_explicit!(state,:volume,tag)
     state.volume_boundaries[tag]=
         (collect(points),collect(curves),collect(surfaces))
+    return nothing
+end
+
+# `Rectangle`/`Disk` are OCC-only *surface* primitives: the statement tag
+# binds the face, while the wire, edges, and vertices take sequential
+# automatic tags in `_bind`'s recursive pass. A positive `roundedRadius`
+# replaces each rectangle corner with an arc, doubling the point/curve
+# counts; a `Disk` edge is a single closed (ellipse) edge on one vertex.
+function _geo_allocator_record_surface_primitive!(
+        state::_GeoTagAllocatorState,kind::String,tag::Int,
+        values::Vector{Float64},caller::AbstractString)
+    state.geometry_unavailable===nothing || return nothing
+    point_count,curve_count=if kind=="Rectangle"
+        rounded=length(values)==6 && values[6]>0
+        rounded ? (8,8) : (4,4)
+    elseif kind=="Disk"
+        (1,1)
+    else
+        throw(ArgumentError(
+            "$caller: unsupported surface primitive allocator kind $kind"))
+    end
+    _geo_allocator_record_explicit!(state,:surface,tag)
+    _geo_allocator_record_explicit!(state,:curveloop,
+        _geo_allocator_next_tag(state,:curveloop))
+    _geo_allocator_record_hidden!(state,:point,point_count,caller)
+    _geo_allocator_record_hidden!(state,:curve,curve_count,caller)
     return nothing
 end
 
@@ -2502,7 +2729,10 @@ function _geo_expr_error(parser::_GeoExprParser,message::AbstractString,
     # descriptive text for scan-context callers.
     detail="$(parser.caller): $message at byte $pos in expression `" *
         _geo_expr_preview(parser.source)*"`"
-    token=parser.token.kind==:eof ? "end of file" : parser.token.text
+    # Expression fragments end where the enclosing statement's `tEND` (`;`)
+    # sat upstream — that terminator is the offending lookahead bison reports,
+    # so `:eof` maps to `;`, not a literal end-of-file token.
+    token=parser.token.kind==:eof ? ";" : parser.token.text
     _geo_syntax_abort(isempty(token) ? "?" : token,detail)
 end
 
@@ -2544,9 +2774,12 @@ function _geo_lex_token!(parser::_GeoExprParser)
                 _geo_expr_error(parser,"malformed numeric exponent",start)
         end
         text=String(source[start:prevind(source,i)])
-        value=tryparse(Float64,text)
-        (value!==nothing && isfinite(value)) ||
-            _geo_expr_error(parser,"numeric literal must be finite",start)
+        # `strtod` saturates overflow to HUGE_VAL and flushes underflow to
+        # 0 — `1e309` lexes as `inf` upstream with no diagnostic. Julia's
+        # `tryparse` reports `nothing` for both range failures, so recover
+        # the saturated value from the exponent sign.
+        value=something(tryparse(Float64,text),
+                        occursin(r"[eE]-",text) ? 0.0 : Inf)
         _GeoExprToken(:number,text,value::Float64,start)
     elseif _geo_ascii_letter(c)
         while i<=last && _geo_ascii_ident(source[i])
@@ -2586,6 +2819,9 @@ function _geo_lex_token!(parser::_GeoExprParser)
             i<=last && source[i]=='|' ? :or : :bit_or
         elseif c=='?'; :question
         elseif c==':'; :colon
+        elseif c=='~'; :tilde
+        elseif c=='{'; :left_brace
+        elseif c=='}'; :right_brace
         elseif c in ('"','\'')
             :quoted
         else
@@ -2935,6 +3171,56 @@ function _geo_parse_unary!(parser::_GeoExprParser)
         parser.token.kind==:identifier || _geo_expr_error(
             parser,"expected a numeric list name after #",pos)
         name=parser.token.text;_geo_advance!(parser)
+        hash_resolved=false
+        if name in ("StringToName","S2N") &&
+           parser.token.kind==:left_bracket
+            name=_geo_parse_strtoname!(parser)
+            hash_resolved=true
+        end
+        name=_geo_parse_name_tildes!(parser,name)
+        (hash_resolved || _geo_tstring_valid(name)) || _geo_syntax_abort(name)
+        dim_ns=nothing
+        if parser.token.kind==:colon &&
+           parser.index<=lastindex(parser.source) &&
+           parser.source[parser.index]==':'
+            (hash_resolved || _geo_tstring_valid(name)) || _geo_syntax_abort(
+                _geo_keyword_self_reports(name) ? name : "::")
+            dim_ns=name
+            _geo_advance!(parser);_geo_advance!(parser)
+            parser.token.kind==:identifier || _geo_expr_error(
+                parser,"expected a name after $dim_ns::",pos)
+            name=parser.token.text;_geo_advance!(parser)
+            dim_member_resolved=false
+            if name in ("StringToName","S2N") &&
+               parser.token.kind==:left_bracket
+                name=_geo_parse_strtoname!(parser)
+                dim_member_resolved=true
+            end
+            name=_geo_parse_name_tildes!(parser,name)
+            (dim_member_resolved || _geo_tstring_valid(name)) ||
+                _geo_syntax_abort(name)
+        end
+        if parser.token.kind==:dot
+            # `#x.member()` / `#ns::x.member()` — `getMember_Dim`: the number
+            # of values stored on the member (0 silently for unknown structs).
+            _geo_advance!(parser)
+            parser.token.kind==:identifier || _geo_expr_error(parser,
+                "expected a member name after $name.",pos)
+            member=parser.token.text;_geo_advance!(parser)
+            _geo_member_key_valid(member) || _geo_syntax_abort(member)
+            opener=parser.token.kind
+            opener in (:left_bracket,:left_paren) || _geo_expr_error(
+                parser,"expected () after member $member",pos)
+            closer=opener==:left_bracket ? :right_bracket : :right_paren
+            _geo_advance!(parser)
+            parser.token.kind==closer || _geo_expr_error(
+                parser,"member cardinality uses an empty selector",pos)
+            _geo_advance!(parser)
+            return Float64(_geo_member_dim(parser.context,
+                something(dim_ns,""),name,member,parser.caller))
+        end
+        dim_ns===nothing || _geo_expr_error(
+            parser,"expected a member name after $dim_ns::$name",pos)
         # Gmsh `#name()` counts a numeric or string list's elements; the legacy
         # `#name[]` spelling is retained for compatibility.
         opener=parser.token.kind
@@ -2978,15 +3264,56 @@ function _geo_parse_primary!(parser::_GeoExprParser)
         return value
     elseif token.kind==:identifier
         name=token.text;_geo_advance!(parser)
+        # `Struct` is `DefineStruct` — an FExpr_Single producing the tag.
+        name=="Struct" &&
+            return _geo_parse_inline_struct!(parser,token.pos)
+        # `StringToName[expr]`/`S2N[expr]` — a `String__Index` name production;
+        # the resolved name continues through member/scope/index grammar and
+        # is not re-lexed upstream (`S2N["Field"]::s` reads namespace Field).
+        resolved_name=false
+        if name in ("StringToName","S2N") && parser.token.kind==:left_bracket
+            name=_geo_parse_strtoname!(parser)
+            resolved_name=true
+        end
+        # `name~{FExpr}` — `StringIndex` name suffixes.
+        name=_geo_parse_name_tildes!(parser,name)
+        # `ns::` — contiguous `::` is upstream's `tSCOPE`; a spaced or single
+        # `:` stays for range/ternary handling.
+        resolved_ns=nothing
+        if parser.token.kind==:colon &&
+           parser.index<=lastindex(parser.source) &&
+           parser.source[parser.index]==':'
+            # `kw::s` — an FExpr-incapable keyword reports itself
+            # (`Field::s` → `Field`); FExpr heads error at `::` (`Sin::s`).
+            (resolved_name || _geo_tstring_valid(name)) || _geo_syntax_abort(
+                _geo_keyword_self_reports(name) ? name : "::")
+            resolved_ns=name
+            _geo_advance!(parser);_geo_advance!(parser)
+            parser.token.kind==:identifier || _geo_expr_error(parser,
+                "expected a name after $resolved_ns::",token.pos)
+            name=parser.token.text;_geo_advance!(parser)
+            member_resolved=false
+            if name in ("StringToName","S2N") &&
+               parser.token.kind==:left_bracket
+                name=_geo_parse_strtoname!(parser)
+                member_resolved=true
+            end
+            name=_geo_parse_name_tildes!(parser,name)
+            (member_resolved || _geo_tstring_valid(name)) ||
+                _geo_syntax_abort(name)
+        end
         if parser.token.kind==:dot
-            # `x.y` / `x.y(i)` / `x.y[i]` — `treat_Struct_FullName_dot_tSTRING_
-            # Float`: namespace members first (unsupported → falls through),
-            # then `NumberOption(GMSH_GET)` — unknown names record a
-            # diagnostic and yield the default 0.
+            # `x.y`/`ns::x.y` (+ optional `(i)`/`[i]` member index) —
+            # `treat_Struct_FullName_dot_tSTRING_Float`: struct member first,
+            # `NumberOption(x, 0, y)` when x is not a struct.
+            resolved_ns===nothing && !_geo_tstring_valid(name) &&
+                _geo_syntax_abort(
+                    _geo_keyword_self_reports(name) ? name : ".")
             _geo_advance!(parser)
             parser.token.kind==:identifier || _geo_expr_error(parser,
                 "expected an option name after $name.",token.pos)
             member=parser.token.text;_geo_advance!(parser)
+            _geo_member_key_valid(member) || _geo_syntax_abort(member)
             index=0
             if parser.token.kind==:left_paren ||
                parser.token.kind==:left_bracket
@@ -3001,7 +3328,10 @@ function _geo_parse_primary!(parser::_GeoExprParser)
             end
             # `x.y++`/`x.y--` — NumberOption GET then SET; returns the NEW
             # value (unlike variable postfix, which returns the old one).
+            # `ns::x.y++` is not in the upstream grammar.
             if parser.token.kind==:side_effect
+                resolved_ns===nothing || _geo_expr_error(parser,
+                    "unexpected ++/-- after $(resolved_ns)::$(name).$member")
                 delta=parser.token.text=="++" ? 1.0 : -1.0
                 _geo_advance!(parser)
                 d=_geo_option_number(parser.context,name,index,member;
@@ -3010,9 +3340,11 @@ function _geo_parse_primary!(parser::_GeoExprParser)
                 parser.context.option_numbers[(name,index,member)]=d+delta
                 return d+delta
             end
-            return _geo_option_number_read(parser.context,name,index,member,
-                parser.caller)
+            return _geo_member_number(parser.context,
+                something(resolved_ns,""),name,member,index,parser.caller)
         elseif parser.token.kind==:left_paren || parser.token.kind==:left_bracket
+            resolved_ns===nothing || _geo_expr_error(parser,
+                "unexpected index after $resolved_ns::$name",token.pos)
             # `x[i].y` — `NumberOption(GMSH_GET, x, i, y)`; the bracket index
             # belongs to the option family, not a variable element.
             lookahead_pos=parser.index
@@ -3037,6 +3369,7 @@ function _geo_parse_primary!(parser::_GeoExprParser)
                 parser.token.kind==:identifier || _geo_expr_error(parser,
                     "expected an option name after $name[.].",token.pos)
                 member=parser.token.text;_geo_advance!(parser)
+                _geo_member_key_valid(member) || _geo_syntax_abort(member)
                 if parser.token.kind==:side_effect
                     delta=parser.token.text=="++" ? 1.0 : -1.0
                     _geo_advance!(parser)
@@ -3053,40 +3386,77 @@ function _geo_parse_primary!(parser::_GeoExprParser)
             # Functions taking StringExprVar, ListOfDouble or raw-name
             # arguments cannot flow through the numeric argument loop; capture
             # the balanced argument text and dispatch per signature.
+            # `tStringToName` takes `[` only — `(` is the error token
+            # upstream (`StringToName(1)` → `syntax error (()`).
+            name in ("StringToName","S2N") &&
+                parser.token.kind==:left_paren && _geo_syntax_abort("(")
             if name in _GEO_RAW_ARG_FUNCTIONS
                 return _geo_raw_arg_function!(parser,name,token.pos)
             end
             opener=parser.token.kind
             closer=opener==:left_paren ? :right_paren : :right_bracket
+            known_function=(name in _GEO_NUMERIC_FUNCTIONS) ||
+                (name in _GEO_NONCONSTANT_FUNCTIONS) ||
+                (name in _GEO_STATEFUL_FUNCTIONS)
+            # `tList LP` is a real `FExpr_Multi` production — its argument
+            # errors at the closer (`List(1)` → `)`, `List[1]` → `]`).
+            name=="List" && _geo_syntax_abort(
+                closer==:right_paren ? ")" : "]")
+            # `tSymmetry`/`tExtrude` take a `VExpr` — `(`-arguments fail
+            # arity at `)`; `[` cannot start a `VExpr` (`Symmetry[1]`→`[`).
+            name in ("Symmetry","Extrude") && _geo_syntax_abort(
+                opener==:left_paren ? ")" : "[")
+            # Lexer-emitted literals (`newp`, `Cpu`, `Pi`, `Today`, ...)
+            # take no argument list, and `FExpr`-head keywords (`Point`,
+            # `Physical`, `Line`, ...) shift their production first —
+            # both error at the delimiter itself upstream (`Cpu()` → `(`,
+            # `Point[1]` → `[`).
+            (haskey(_GEO_BARE_CONSTANTS,name) ||
+             name in _GEO_SIDE_EFFECT_SYMBOLS ||
+             name in _GEO_BARE_STRING_TOKENS ||
+             (name in _GEO_FEXPR_SHIFT_KEYWORDS &&
+              !(name in ("Symmetry","Extrude")))) && _geo_syntax_abort(
+                opener==:left_paren ? "(" : "[")
+            # StringExpr-head names (`StrCat`, `N2S`, `Sprintf`, ...) cannot
+            # begin an `FExpr` — the token itself is the error
+            # (`Sin[StrCat["a"]]` → `StrCat`).
+            name in _GEO_STRING_FUNCTIONS && _geo_syntax_abort(name)
+            # Remaining lexer keywords cannot begin an expression — the
+            # keyword itself is the error (`v = Circle(1)` → `Circle`).
+            (name in _GEO_LEXER_KEYWORDS &&
+             !(name in _GEO_ALL_FUNCTIONS)) && _geo_syntax_abort(name)
             _geo_advance!(parser);_geo_enter!(parser)
+            # `x(i)`/`x[i]` are the same `String__Index LP FExpr RP`
+            # indexed read for every non-function tSTRING — the
+            # function/variable split is lexical, so an unknown name
+            # indexes (`Unknown variable 'x(.)'`), never "unknown
+            # function". Both forms take exactly one index and each
+            # function its fixed arity; the comma that would exceed it is
+            # the error token upstream (`x[1,2]`/`Sin[1,2]` → `,`).
+            is_index=!known_function
+            max_args=is_index || !(name in _GEO_BINARY_FUNCTIONS) ? 1 : 2
             args=Float64[]
             if parser.token.kind!=closer
                 while true
                     push!(args,_geo_parse_ternary!(parser))
                     parser.token.kind==:comma || break
+                    length(args)>=max_args && _geo_syntax_abort(",")
                     _geo_advance!(parser)
                 end
             end
+            # No FExpr production accepts an empty `()`/`[]` — the closer
+            # is the offending token (`x[]`/`f()` → `]`/`)`).
+            isempty(args) && _geo_syntax_abort(
+                closer==:right_paren ? ")" : "]")
             parser.token.kind==closer || _geo_expr_error(parser,
                 opener==:left_paren ? "expected closing parenthesis" :
                                       "expected closing bracket")
+            # A fixed-arity call missing arguments ends the production at
+            # the closer — `Atan2[1]` expects `, FExpr` and errors at `]`.
+            (!is_index && length(args)<max_args) && _geo_syntax_abort(
+                closer==:right_paren ? ")" : "]")
             _geo_advance!(parser);_geo_leave!(parser)
-            known_function=(name in _GEO_NUMERIC_FUNCTIONS) ||
-                (name in _GEO_NONCONSTANT_FUNCTIONS) ||
-                (name in _GEO_STATEFUL_FUNCTIONS)
-            # `LP`/`RP` cover both `()` and `[]` — `Sin[x]` is a function
-            # call, never an index. Function names are reserved tokens in
-            # Gmsh, so a variable cannot shadow them.
-            is_index=!known_function &&
-                (opener==:left_bracket ||
-                 _geo_context_has_variable(parser.context,name) ||
-                # `name(args)` on an unknown name is an indexed variable read
-                # (`String__Index '(' FExpr ')'`), not a function call — in
-                # exec contexts the miss is a recorded error plus 0.
-                 parser.context.soft_unknown_reads)
             if is_index
-                length(args)==1 || _geo_expr_error(parser,
-                    "numeric list $name requires exactly one scalar index",token.pos)
                 context=parser.context
                 if context.soft_unknown_reads
                     if !_geo_context_has_variable(context,name)
@@ -3120,6 +3490,11 @@ function _geo_parse_primary!(parser::_GeoExprParser)
             end
             value=_geo_apply_function(parser,name,args,token.pos)
             return value
+        elseif resolved_ns!==nothing
+            # `ns::name` — `Struct_FullName` tag read; variables and constants
+            # do not apply inside an explicit namespace.
+            return _geo_fullname_number(parser.context,resolved_ns,name,
+                parser.caller)
         elseif haskey(_GEO_BARE_CONSTANTS,name)
             return _GEO_BARE_CONSTANTS[name](parser)
         elseif haskey(parser.context.values,name)
@@ -3134,6 +3509,14 @@ function _geo_parse_primary!(parser::_GeoExprParser)
         elseif haskey(parser.context.unavailable,name)
             label=name in _GEO_SIDE_EFFECT_SYMBOLS ?
                   "dynamic tag allocator $name" : "numeric variable $name"
+            # Soft option-write reads recover like `Unknown variable` — the
+            # unavailability reason is the diagnostic, not a syntax error.
+            if parser.context.soft_unknown_reads
+                _geo_yyerror!(parser.context,
+                    "$label is unavailable ($(parser.context.unavailable[name]))")
+                parser.token.kind==:side_effect && _geo_advance!(parser)
+                return 0.0
+            end
             _geo_expr_error(parser,
                 "$label is unavailable ($(parser.context.unavailable[name]))",token.pos)
         elseif haskey(parser.context.lists,name)
@@ -3157,11 +3540,28 @@ function _geo_parse_primary!(parser::_GeoExprParser)
         elseif name in _GEO_SIDE_EFFECT_SYMBOLS
             _geo_expr_error(parser,
                 "dynamic tag allocator $name requires current allocation state",token.pos)
-        elseif name in _GEO_EXPR_RESERVED_NAMES || name in _GEO_ALL_FUNCTIONS
+        elseif (struct_tag=_geo_struct_tag(parser.context,"",name))!==nothing
+            # Bare struct read — `Struct_FullName` yields the tag. Checked
+            # before the reserved sets: `Mesh`, `While`, `Model`, ... are
+            # plain `tSTRING` upstream and can legally name a struct.
+            return Float64(struct_tag)
+        elseif name in _GEO_LEXER_KEYWORDS || name in _GEO_ALL_FUNCTIONS
             # Reserved token — upstream the lexer emits `tX`, which commits
-            # to its production; a bare use errors at the following token.
-            _geo_syntax_abort(parser.token.kind==:eof ? ";" :
-                isempty(parser.token.text) ? ";" : parser.token.text)
+            # to its production. `FExpr`-head and function keywords shift
+            # and error at the lookahead (`v = Sin`/`v = Point` → `;`);
+            # pure-statement keywords error at the keyword itself
+            # (`v = Circle` → `Circle`), as do `StringExpr`-production
+            # tokens — they cannot appear in an FExpr at all
+            # (`v = StrCat` → `(StrCat)`).
+            if name in _GEO_STRING_FUNCTIONS ||
+               (name in _GEO_LEXER_KEYWORDS &&
+                !(name in _GEO_ALL_FUNCTIONS) &&
+                !(name in _GEO_FEXPR_SHIFT_KEYWORDS) && name!="List")
+                _geo_syntax_abort(name)
+            else
+                _geo_syntax_abort(parser.token.kind==:eof ? ";" :
+                    isempty(parser.token.text) ? ";" : parser.token.text)
+            end
         else
             if parser.context.soft_unknown_reads
                 _geo_yyerror!(parser.context,"Unknown variable '$name'")
@@ -3173,7 +3573,9 @@ function _geo_parse_primary!(parser::_GeoExprParser)
             _geo_expr_error(parser,"unknown scalar identifier $name",token.pos)
         end
     elseif token.kind==:side_effect
-        _geo_expr_error(parser,"increment and decrement operators are not supported",token.pos)
+        # `++`/`--` where a value is expected is a grammar failure upstream
+        # (`NumericIncrement` binds only a postfix `tSTRING`).
+        _geo_syntax_abort(token.text)
     elseif token.kind==:unsupported_operator
         _geo_expr_error(parser,"operator $(token.text) is outside the supported arithmetic subset",
                         token.pos)
@@ -3183,6 +3585,92 @@ function _geo_parse_primary!(parser::_GeoExprParser)
         _geo_expr_error(parser,"invalid token $(repr(token.text))",token.pos)
     end
     _geo_expr_error(parser,"expected a numeric value",token.pos)
+end
+
+# `StringToName[expr]`/`S2N[expr]` in `String__Index` position: evaluate the
+# bracketed StringExprVar to the name it stands for.
+function _geo_parse_strtoname!(parser::_GeoExprParser)
+    open_pos=parser.token.pos
+    close=_geo_matching_delim(parser.source,open_pos)
+    close==0 && _geo_expr_error(parser,"unbalanced StringToName brackets")
+    inner=String(parser.source[
+        nextind(parser.source,open_pos):prevind(parser.source,close)])
+    parser.index=nextind(parser.source,close)
+    _geo_advance!(parser)
+    return _geo_eval_string(inner,parser.context,parser.caller)
+end
+
+# `name~{FExpr}` — `StringIndex` suffixes expand the name to `name_i`.
+function _geo_parse_name_tildes!(parser::_GeoExprParser,name::String)
+    while parser.token.kind==:tilde
+        _geo_advance!(parser)
+        parser.token.kind==:left_brace || _geo_expr_error(parser,
+            "expected {index} after ~ in a namespaced name")
+        _geo_advance!(parser);_geo_enter!(parser)
+        idx=_geo_int_value(_geo_parse_ternary!(parser),
+            "$(parser.caller) namespace index")
+        parser.token.kind==:right_brace || _geo_expr_error(parser,
+            "expected } after ~{index}")
+        _geo_advance!(parser);_geo_leave!(parser)
+        name=name*"_"*string(idx)
+    end
+    return name
+end
+
+# `Struct` in FExpr position (`DefineStruct` is FExpr_Single): parses
+# `name[`::`name] (Append [n]) [options]` inline from the token stream and
+# returns the tag.
+function _geo_parse_inline_struct!(parser::_GeoExprParser,pos::Int)
+    context=parser.context;caller=parser.caller
+    parser.token.kind==:identifier || _geo_expr_error(parser,
+        "expected a struct name after Struct",pos)
+    name=parser.token.text;_geo_advance!(parser)
+    name=_geo_parse_name_tildes!(parser,name)
+    _geo_tstring_valid(name) || _geo_syntax_abort(name)
+    ns=nothing
+    if parser.token.kind==:colon &&
+       parser.index<=lastindex(parser.source) &&
+       parser.source[parser.index]==':'
+        _geo_advance!(parser);_geo_advance!(parser)
+        parser.token.kind==:identifier || _geo_expr_error(parser,
+            "expected a struct name after $name::",pos)
+        ns=name
+        name=parser.token.text;_geo_advance!(parser)
+        name=_geo_parse_name_tildes!(parser,name)
+        _geo_tstring_valid(name) || _geo_syntax_abort(name)
+    end
+    append_level=0
+    if parser.token.kind==:left_paren
+        _geo_advance!(parser)
+        parser.token.kind==:identifier && parser.token.text=="Append" ||
+            _geo_expr_error(parser,
+                "expected `Append` inside the Struct definition parens",pos)
+        _geo_advance!(parser)
+        append_level=99
+        if parser.token.kind!=:right_paren
+            _geo_enter!(parser)
+            append_level=_geo_int_value(_geo_parse_ternary!(parser),
+                "$(caller) Struct Append level")
+            _geo_leave!(parser)
+        end
+        parser.token.kind==:right_paren || _geo_expr_error(parser,
+            "expected ) after Struct Append",pos)
+        _geo_advance!(parser)
+    end
+    parser.token.kind==:left_bracket || _geo_expr_error(parser,
+        "expected [options] in the Struct definition",pos)
+    open_pos=parser.token.pos
+    close=_geo_matching_delim(parser.source,open_pos)
+    close==0 && _geo_expr_error(parser,"unbalanced Struct options",pos)
+    options_src=String(parser.source[
+        nextind(parser.source,open_pos):prevind(parser.source,close)])
+    parser.index=nextind(parser.source,close)
+    _geo_advance!(parser)
+    (tag,redef)=_geo_def_struct!(context,something(ns,""),name,append_level,
+                                 options_src,caller)
+    redef && _geo_expr_diag!(context,
+        "Redefinition of Struct '$(something(ns,""))::$name'",caller)
+    return Float64(tag)
 end
 
 # ======== FExpr raw-argument and stateful functions ========
@@ -3202,38 +3690,100 @@ function _geo_raw_arg_function!(parser::_GeoExprParser,name::String,pos::Int)
     if name=="Exists"
         length(args)==1 || _geo_expr_error(
             parser,"Exists takes exactly one argument",pos)
-        # `Exists(x.y)` — the option/member form returns the option value
-        # (or 0 when unknown), silently.
+        # `tExists LP Struct_FullName ['.' tSTRING_Reserved] RP` —
+        # `type_treat=1`: variable→1, string variable→1, struct→its *tag*,
+        # member→1 (char members included); unknown structs fall through to
+        # a silent `NumberOption` read (an existing option yields its value).
+        arg=strip(args[1])
         if (om=match(
-                r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$",
-                strip(args[1])))!==nothing
-            value=_geo_option_number(context,String(om.captures[1]),0,
-                String(om.captures[2]))
-            return value===nothing ? 0.0 : value
+                r"^(?:([A-Za-z_][A-Za-z0-9_]*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*([\(\[])",
+                arg))!==nothing
+            # `Exists(x.member(i))` — no indexed member production upstream;
+            # the bracket is a syntax error.
+            _geo_syntax_abort(String(om.captures[4]))
         end
-        sym=_geo_symbol_name(args[1],context,caller)
-        return Float64(_geo_context_has_variable(context,sym) ||
-                       haskey(context.strings,sym))
+        if (om=match(
+                r"^(?:([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)$",
+                arg))!==nothing
+            return _geo_member_number(context,
+                om.captures[1]===nothing ? "" :
+                    _geo_symbol_name(om.captures[1],context,caller),
+                _geo_symbol_name(om.captures[2],context,caller),
+                String(om.captures[3]),0,caller;type_treat=1)
+        end
+        if (om=match(
+                r"^([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*::\s*(.+)$",
+                arg))!==nothing
+            sym=_geo_symbol_name(om.captures[2],context,caller)
+            return _geo_fullname_number(context,
+                _geo_symbol_name(om.captures[1],context,caller),sym,
+                caller;type_treat=1)
+        end
+        if (om=match(r"^[A-Za-z_][A-Za-z0-9_]*\s*([\(\[])",arg))!==nothing
+            # `Exists(x(i))`/`Exists(x[i])` — `String__Index` has no paren or
+            # bracket tail; the bracket is a syntax error upstream.
+            _geo_syntax_abort(String(om.captures[1]))
+        end
+        sym=_geo_symbol_name(arg,context,caller)
+        return _geo_fullname_number(context,nothing,sym,caller;type_treat=1)
     elseif name=="GetForced"
         (1<=length(args)<=2) || _geo_expr_error(
             parser,"GetForced takes one or two arguments",pos)
+        default=length(args)==2 ?
+            _geo_eval_numeric(args[2],context,caller) : 0.0
+        arg=strip(args[1])
         if (om=match(
-                r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$",
-                strip(args[1])))!==nothing
-            value=_geo_option_number(context,String(om.captures[1]),0,
-                String(om.captures[2]))
-            value!==nothing && return value
-            length(args)==2 &&
-                return _geo_eval_numeric(args[2],context,caller)
-            return 0.0
+                r"^(?:([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*[\(\[]\s*(.*?)\s*[\)\]]$",
+                arg))!==nothing
+            midx=_geo_int_value(_geo_eval_numeric(om.captures[4],context,
+                "$caller GetForced index"),"$caller GetForced index")
+            return _geo_member_number(context,
+                om.captures[1]===nothing ? "" :
+                    _geo_symbol_name(om.captures[1],context,caller),
+                _geo_symbol_name(om.captures[2],context,caller),
+                String(om.captures[3]),midx,caller;
+                default=default,type_treat=2)
         end
-        sym=_geo_symbol_name(args[1],context,caller)
-        if _geo_context_has_variable(context,sym)
-            return _geo_eval_numeric(sym,context,caller)
+        if (om=match(
+                r"^(?:([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)$",
+                arg))!==nothing
+            return _geo_member_number(context,
+                om.captures[1]===nothing ? "" :
+                    _geo_symbol_name(om.captures[1],context,caller),
+                _geo_symbol_name(om.captures[2],context,caller),
+                String(om.captures[3]),0,caller;
+                default=default,type_treat=2)
         end
-        length(args)==2 &&
-            return _geo_eval_numeric(args[2],context,caller)
-        return 0.0
+        if (om=match(
+                r"^([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*::\s*(.+)$",
+                arg))!==nothing
+            rest=String(om.captures[2])
+            ns=_geo_symbol_name(om.captures[1],context,caller)
+            if (im=match(r"^(.*?)\s*[\(\[]\s*(.*?)\s*[\)\]]$",rest))!==nothing
+                sym=_geo_symbol_name(im.captures[1],context,caller)
+                idx=_geo_int_value(_geo_eval_numeric(im.captures[2],context,
+                    "$caller GetForced index"),"$caller GetForced index")
+                return _geo_fullname_number(context,ns,sym,caller;
+                    type_var=2,index=idx,default=default,type_treat=2)
+            end
+            sym=_geo_symbol_name(rest,context,caller)
+            return _geo_fullname_number(context,ns,sym,
+                caller;default=default,type_treat=2)
+        end
+        if (im=match(
+                r"^([A-Za-z_][A-Za-z0-9_]*(?:~\{[^}]*\})*)\s*[\(\[]\s*(.*?)\s*[\)\]]$",
+                arg))!==nothing
+            # `GetForced(x(i), d)` — `Struct_FullName LP FExpr RP` indexed
+            # read (`type_var=2`); `LP`/`RP` cover `[]` too.
+            sym=_geo_symbol_name(im.captures[1],context,caller)
+            idx=_geo_int_value(_geo_eval_numeric(im.captures[2],context,
+                "$caller GetForced index"),"$caller GetForced index")
+            return _geo_fullname_number(context,nothing,sym,caller;
+                type_var=2,index=idx,default=default,type_treat=2)
+        end
+        sym=_geo_symbol_name(arg,context,caller)
+        return _geo_fullname_number(context,nothing,sym,caller;
+            default=default,type_treat=2)
     elseif name=="GetNumber"
         (1<=length(args)<=2) || _geo_expr_error(
             parser,"GetNumber takes one or two arguments",pos)
@@ -3286,11 +3836,13 @@ function _geo_raw_arg_function!(parser::_GeoExprParser,name::String,pos::Int)
         fontsize=something(_geo_option_number(context,"General",0,
             "GraphicsFontSize"),15.0)
         font=0;align=0
-        isodd(length(args)) && (_geo_yyerror!(context,
+        # `RecursiveListOfStringExprVar` — `x()`/`x.member()`/`{...}` items
+        # expand before pairing.
+        svals=_geo_eval_string_list(inner,context,caller)
+        isodd(length(svals)) && (_geo_yyerror!(context,
             "Number of text attributes should be even"); return 0.0)
-        for i in 1:2:length(args)-1
-            key=_geo_eval_string(args[i],context,caller)
-            value=_geo_eval_string(args[i+1],context,caller)
+        for i in 1:2:length(svals)-1
+            key=svals[i];value=svals[i+1]
             if key=="FontSize"
                 # `atoi` — a non-numeric value folds to 0.
                 fontsize=Float64(something(tryparse(Int,value),0))
@@ -3316,9 +3868,17 @@ function _geo_raw_arg_function!(parser::_GeoExprParser,name::String,pos::Int)
         end
         return Float64((align<<16)|(font<<8)|Int(fontsize))
     elseif name=="DimNameSpace"
-        # `getNumberOfNameSpaces` — Struct namespaces are unsupported, so the
-        # current namespace is empty or the queried one is unknown: both 0.
-        return 0.0
+        # `tDimNameSpace LP [String__Index] RP` — the number of Struct
+        # definitions in the queried (or default) namespace. Upstream reads
+        # through `gmsh_yynamespaces[ns]` — `Map::operator[]` *creates* an
+        # empty `Structs` entry for a missing namespace, so a later
+        # `NameStruct(ns::#i)` reports "Unknown Struct of index" rather than
+        # "Unknown NameSpace".
+        length(args)<=1 || _geo_expr_error(
+            parser,"DimNameSpace takes zero or one arguments",pos)
+        ns=isempty(args) ? "" : _geo_symbol_name(args[1],context,caller)
+        structs=get!(context.structs,ns,Dict{String,_GeoStructDef}())
+        return Float64(length(structs))
     elseif name in ("StringToName","S2N")
         length(args)==1 || _geo_expr_error(
             parser,"$name takes exactly one argument",pos)
@@ -3407,8 +3967,9 @@ function _geo_eval_numeric(raw::AbstractString,context::_GeoNumericContext,
     parser.token.kind==:eof || begin
         token=parser.token
         if token.kind==:side_effect
-            _geo_expr_error(parser,"increment and decrement operators are not supported",
-                            token.pos)
+            # Trailing `++`/`--` after a complete FExpr — `syntax error (++)`
+            # upstream.
+            _geo_syntax_abort(token.text)
         elseif token.kind==:unsupported_operator
             _geo_expr_error(parser,
                 "operator $(token.text) is outside the supported arithmetic subset",token.pos)
@@ -3484,35 +4045,113 @@ end
 
 # Resolve Gmsh `String__Index` to a flat symbol-table name: `x`, `x~{i}` (each
 # `~{expr}` suffix appends `_i`, recursively), `StringToName[sexpr]` and
-# `StringToName[sexpr]~{i}`. `ns::x` member names require `Struct` namespaces,
-# which are not implemented — the namespaced forms stay explicit blockers.
+# `StringToName[sexpr]~{i}`. `tSCOPE` is not part of the production — `ns::x`
+# reaches variables only through `Struct_FullName` expression forms, so a
+# stray `::` is the bison syntax error upstream reports.
 function _geo_symbol_name(raw::AbstractString,context::_GeoNumericContext,
                           caller::AbstractString)
     s=String(strip(raw))
-    isempty(s) && throw(ArgumentError("$caller: expected a variable name"))
+    isempty(s) && _geo_syntax_abort(";",
+        "$caller: expected a variable name")
     name=if (sm=match(r"^(?:StringToName|S2N)\s*\[",s))!==nothing
         open_pos=lastindex(sm.match)
         close=_geo_matching_delim(s,open_pos)
-        close==0 && throw(ArgumentError("$caller: unbalanced StringToName brackets"))
+        close==0 && _geo_syntax_abort("[",
+            "$caller: unbalanced StringToName brackets")
         inner=_geo_eval_string(
             s[nextind(s,open_pos):prevind(s,close)],context,caller)
         rest=String(strip(s[nextind(s,close):end]))
-        isempty(rest) || startswith(rest,"~") || throw(ArgumentError(
-            "$caller: unexpected text after StringToName[...]: $rest"))
+        isempty(rest) || startswith(rest,"~") || _geo_syntax_abort(
+            _geo_string_index_offender(rest),
+            "$caller: unexpected text after StringToName[...]: $rest")
         _geo_symbol_name_suffixes!(inner,rest,context,caller)
     else
         m=match(r"^([A-Za-z_][A-Za-z0-9_]*)(.*)$",s)
-        m===nothing && throw(ArgumentError(
-            "$caller: expected a variable name, got $s"))
+        m===nothing && _geo_syntax_abort(_geo_string_index_offender(s),
+            "$caller: expected a variable name, got $s")
         base=String(m.captures[1]);rest=String(strip(m.captures[2]))
-        if startswith(rest,"::")
-            # `ns::name` resolves inside a Struct namespace — unsupported
-            throw(ArgumentError(
-                "$caller: Struct namespaces are not supported: $s"))
-        end
+        # `tSCOPE` is not part of `String__Index` — `ns::` heads reach the
+        # parser only through `Struct_FullName` expression productions.
+        startswith(rest,"::") && _geo_syntax_abort("::",
+            "$caller: namespace `::` is not valid in a variable name: $s")
         _geo_symbol_name_suffixes!(base,rest,context,caller)
     end
     return name
+end
+
+# The first source token in `arg` that cannot extend a `String__Index`
+# (`identifier` / `StringToName[...]` followed by `~{expr}` suffixes) — the
+# bison lookahead a malformed `NameToString[...]` argument aborts on. A
+# contiguous `::` reports as the tSCOPE pair.
+function _geo_string_index_offender(arg::AbstractString)
+    s=String(strip(arg))
+    isempty(s) && return "?"
+    i=firstindex(s);last=lastindex(s)
+    if (m=match(r"^(?:StringToName|S2N)\s*\[",s))!==nothing
+        close=_geo_matching_delim(s,lastindex(m.match))
+        close==0 && return "["
+        i=nextind(s,close)
+    else
+        m=match(r"^[A-Za-z_][A-Za-z0-9_]*",s)
+        m===nothing && return string(s[i])
+        i=nextind(s,lastindex(m.match))
+    end
+    while i<=last
+        c=s[i]
+        isspace(c) && (i=nextind(s,i);continue)
+        if c=='~'
+            j=nextind(s,i)
+            while j<=last && isspace(s[j]); j=nextind(s,j); end
+            (j<=last && s[j]=='{') || return "~"
+            close=_geo_matching_delim(s,j)
+            close==0 && return "{"
+            i=nextind(s,close)
+        else
+            return c==':' && nextind(s,i)<=last && s[nextind(s,i)]==':' ?
+                "::" : string(c)
+        end
+    end
+    return "?"
+end
+
+# Resolve the leading `String__Index` of an assignment LHS — `name`,
+# `name~{FExpr}`…, `StringToName[sexpr]`/`S2N[sexpr]` (each optionally
+# followed by `~{}` suffixes). Returns `(resolved_name, rest)` where `rest`
+# is the unconsumed source (`(...)`, `[i]`, `.opt`, ` = …`…), or `nothing`
+# when the head is a plain identifier (the common case — the caller's
+# regexes then see the body unchanged) or not a `String__Index` at all.
+function _geo_lhs_string_index(src::AbstractString,
+                               context::_GeoNumericContext,
+                               caller::AbstractString)
+    s=String(strip(src));last=lastindex(s)
+    if (m=match(r"^(?:StringToName|S2N)\s*\[",s))!==nothing
+        close=_geo_matching_delim(s,lastindex(m.match))
+        close==0 && return nothing
+        i=nextind(s,close)
+    else
+        m=match(r"^[A-Za-z_][A-Za-z0-9_]*",s)
+        m===nothing && return nothing
+        # Only `tSTRING` heads form a `String__Index` — a lexer keyword
+        # (`Field`, `Physical`…) keeps its own statement forms.
+        _geo_tstring_valid(String(m.match)) || return nothing
+        i=nextind(s,lastindex(m.match))
+    end
+    head_end=i
+    while i<=last
+        j=i
+        while j<=last && isspace(s[j]); j=nextind(s,j); end
+        (j<=last && s[j]=='~') || break
+        k=nextind(s,j)
+        while k<=last && isspace(s[k]); k=nextind(s,k); end
+        (k<=last && s[k]=='{') || break
+        close=_geo_matching_delim(s,k)
+        close==0 && break
+        i=nextind(s,close);head_end=i
+    end
+    head=String(s[firstindex(s):prevind(s,head_end)])
+    occursin('~',head) || occursin('[',head) || return nothing
+    return (_geo_symbol_name(head,context,caller),
+            String(s[head_end:end]))
 end
 
 function _geo_symbol_name_suffixes!(base::String,rest::String,
@@ -3521,21 +4160,546 @@ function _geo_symbol_name_suffixes!(base::String,rest::String,
     s=rest
     while startswith(s,"~")
         m=match(r"^~\s*\{",s)
-        m===nothing && throw(ArgumentError(
-            "$caller: expected `{expr}` after `~` in a namespaced name"))
+        m===nothing && _geo_syntax_abort("~",
+            "$caller: expected `{expr}` after `~` in a namespaced name")
         open_pos=lastindex(m.match)
         close=_geo_matching_delim(s,open_pos)
-        close==0 && throw(ArgumentError(
-            "$caller: unbalanced braces in a namespaced name"))
+        close==0 && _geo_syntax_abort("{",
+            "$caller: unbalanced braces in a namespaced name")
         idx=_geo_int_value(_geo_eval_numeric(
             s[nextind(s,open_pos):prevind(s,close)],context,
             "$caller namespace index"),"$caller namespace index")
         base=base*"_"*string(idx)
         s=String(strip(s[nextind(s,close):end]))
     end
-    isempty(s) || throw(ArgumentError(
-        "$caller: unexpected text after a variable name: $s"))
+    isempty(s) || _geo_syntax_abort(
+        _geo_string_index_offender(s),
+        "$caller: unexpected text after a variable name: $s")
     return base
+end
+
+# ======== gmsh_yynamespaces — Struct / NameSpace / NameStruct ========
+
+# A `yymsg(0)`-class expression diagnostic: recorded under `.geo` execution
+# (the stream continues with the default value), thrown under the params
+# scan so callers mark the target unavailable.
+function _geo_expr_diag!(context::_GeoNumericContext,message::AbstractString,
+                        caller::AbstractString)
+    context.soft_unknown_reads || throw(ArgumentError("$caller: $message"))
+    _geo_yyerror!(context,message)
+    return nothing
+end
+
+# `NameSpaces::Find`/`Structs::Find` — the struct or nothing.
+@inline _geo_struct_get(context::_GeoNumericContext,ns::String,name::String)=
+    (s=get(context.structs,ns,nothing))===nothing ? nothing : get(s,name,nothing)
+
+# `NameSpaces::getTag` — the struct tag or nothing.
+@inline _geo_struct_tag(context::_GeoNumericContext,ns::String,name::String)=
+    (st=_geo_struct_get(context,ns,name))===nothing ? nothing : Float64(st.tag)
+
+# `String__Index` — `tSTRING` / `name~{FExpr}` / `StringToName[StringExprVar]`.
+# Returns the resolved name text.
+function _geo_string_index(context::_GeoNumericContext,src::AbstractString,
+                           caller::AbstractString)
+    return _geo_symbol_name(src,context,caller)
+end
+
+# `Struct_FullName` — `String__Index` or `String__Index :: String__Index`.
+# `ns` is nothing when no `::` prefix is present.
+function _geo_parse_fullname(context::_GeoNumericContext,src::AbstractString,
+                             caller::AbstractString)
+    s=String(strip(src))
+    depth=0;qc='\0';scope_at=0
+    i=firstindex(s);last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if qc!='\0'
+            c==qc && (qc='\0')
+        elseif c=='"' || c=='\''
+            qc=c
+        elseif c in ('{','[','(')
+            depth+=1
+        elseif c in ('}',']',')')
+            depth-=1
+        elseif depth==0 && c==':' && i<last && s[nextind(s,i)]==':'
+            scope_at=i;break
+        end
+        i=nextind(s,i)
+    end
+    if scope_at==0
+        return (nothing,_geo_string_index(context,s,caller))
+    end
+    ns=_geo_string_index(context,s[firstindex(s):prevind(s,scope_at)],caller)
+    name=_geo_string_index(context,s[nextind(s,scope_at,2):end],caller)
+    return (ns,name)
+end
+
+# `treat_Struct_FullName_Float` — `name`/`ns::name` numeric reads.
+# `ns===nothing` means no `::` prefix: variables (then Exists-string symbols)
+# shadow struct tags. `type_var`: 1 = scalar/tag read, 2 = `name(index)`
+# indexed read. `type_treat`: 0 = get, 1 = `Exists`, 2 = `GetForced`.
+function _geo_fullname_number(context::_GeoNumericContext,
+                              ns::Union{Nothing,String},name::String,
+                              caller::AbstractString;
+                              type_var::Int=1,index::Int=0,
+                              default::Float64=0.0,type_treat::Int=0)
+    if ns===nothing && _geo_context_has_variable(context,name)
+        type_treat==1 && return 1.0
+        values=_geo_context_list(context,name,caller)
+        if type_var==1
+            if isempty(values)
+                type_treat==0 &&
+                    _geo_expr_diag!(context,"Uninitialized variable '$name'",caller)
+                return default
+            end
+            return values[1]
+        elseif type_var==2
+            if !(0<=index<length(values))
+                type_treat==0 && _geo_expr_diag!(context,
+                    "Uninitialized variable '$name[$index]'",caller)
+                return default
+            end
+            return values[index+1]
+        end
+        return default
+    elseif ns===nothing && type_treat==1 && haskey(context.strings,name)
+        return 1.0
+    end
+    if type_var==1
+        tag=_geo_struct_tag(context,something(ns,""),name)
+        tag!==nothing && return tag
+        type_treat==0 &&
+            _geo_expr_diag!(context,"Unknown variable '$name'",caller)
+        return default
+    end
+    type_treat==0 &&
+        _geo_expr_diag!(context,"Unknown variable '$name(.)'",caller)
+    return default
+end
+
+# `treat_Struct_FullName_dot_tSTRING_Float` — `x.member`/`ns::x.member`
+# numeric reads (index optional). Unknown structs fall through to
+# `NumberOption(x, 0, member)` — the option system owns that diagnostic.
+function _geo_member_number(context::_GeoNumericContext,ns::String,
+                            name::String,member::String,index::Int,
+                            caller::AbstractString;
+                            default::Float64=0.0,type_treat::Int=0)
+    st=_geo_struct_get(context,ns,name)
+    if st===nothing
+        value=_geo_option_number(context,name,0,member;warn=type_treat==0)
+        return value===nothing ? default : value
+    end
+    vals=get(st.fopt,member,nothing)
+    vals===nothing && return begin
+        type_treat!=0 &&
+            return haskey(st.copt,member) ? 1.0 : default
+        type_treat==0 && _geo_expr_diag!(context,
+            "Unknown member '$member' of Struct $name",caller)
+        default
+    end
+    0<=index<length(vals) && return type_treat==1 ? 1.0 : vals[index+1]
+    type_treat==0 &&
+        _geo_expr_diag!(context,"Index $index out of range",caller)
+    return default
+end
+
+# `treat_Struct_FullName_dot_tSTRING_String` — `x.member`/`ns::x.member`
+# string reads. Unknown structs fall through to `StringOption`.
+function _geo_member_string(context::_GeoNumericContext,ns::String,
+                            name::String,member::String,index::Int,
+                            caller::AbstractString;
+                            default::String="",type_treat::Int=0)
+    st=_geo_struct_get(context,ns,name)
+    if st===nothing
+        value=_geo_option_string(context,name,0,member,caller;
+            warn=type_treat==0)
+        return value===nothing ? default : value
+    end
+    vals=get(st.copt,member,nothing)
+    vals===nothing && return begin
+        type_treat==0 && _geo_expr_diag!(context,
+            "Unknown member '$member' of Struct $name",caller)
+        default
+    end
+    0<=index<length(vals) && return vals[index+1]
+    type_treat==0 &&
+        _geo_expr_diag!(context,"Index $index out of range",caller)
+    return default
+end
+
+# `treat_Struct_FullName_String` — bare `name` in string position reads only
+# the string-symbol table (a struct tag is not a string).
+function _geo_fullname_string(context::_GeoNumericContext,name::String,
+                              caller::AbstractString;
+                              default::String="",type_treat::Int=0)
+    if haskey(context.strings,name)
+        values=context.strings[name]
+        length(values)==1 && return values[1]
+        type_treat==0 && _geo_expr_diag!(context,
+            "Expected single valued string variable '$name'",caller)
+        return default
+    end
+    type_treat==0 &&
+        _geo_expr_diag!(context,"Unknown string variable '$name'",caller)
+    return default
+end
+
+# `treat_Struct_FullName_dot_tSTRING_Float_getDim` — `#x.member()` /
+# `#ns::x.member()`: the member's element count (float or char side).
+function _geo_member_dim(context::_GeoNumericContext,ns::String,name::String,
+                        member::String,caller::AbstractString)
+    st=_geo_struct_get(context,ns,name)
+    st===nothing && return 0
+    vals=get(st.fopt,member,nothing)
+    vals!==nothing && return length(vals)
+    svals=get(st.copt,member,nothing)
+    svals!==nothing && return length(svals)
+    _geo_expr_diag!(context,"Unknown member '$member' of Struct $name",caller)
+    return 0
+end
+
+# `treat_Struct_FullName_dot_tSTRING_ListOfFloat` — `x.member()` /
+# `ns::x.member()` whole-member splices; nothing when the member is missing
+# (upstream yields nullptr → the splice contributes no elements).
+function _geo_member_fvector(context::_GeoNumericContext,ns::String,
+                             name::String,member::String,
+                             caller::AbstractString)
+    st=_geo_struct_get(context,ns,name)
+    st===nothing && return begin
+        _geo_expr_diag!(context,"Unknown Struct: $name",caller)
+        nothing
+    end
+    vals=get(st.fopt,member,nothing)
+    vals===nothing && return begin
+        _geo_expr_diag!(context,"Unknown member '$member' of Struct $name",caller)
+        nothing
+    end
+    return copy(vals)
+end
+
+# `treat_Struct_FullName_dot_tSTRING_ListOfString` — the char-side splice.
+function _geo_member_svector(context::_GeoNumericContext,ns::String,
+                             name::String,member::String,
+                             caller::AbstractString)
+    st=_geo_struct_get(context,ns,name)
+    st===nothing && return begin
+        _geo_expr_diag!(context,"Unknown Struct: $name",caller)
+        nothing
+    end
+    vals=get(st.copt,member,nothing)
+    vals===nothing && return begin
+        _geo_expr_diag!(context,"Unknown member '$member' of Struct $name",caller)
+        nothing
+    end
+    return copy(vals)
+end
+
+# `Structs::get_key_struct_from_tag` — iterates the namespace's (sorted) map
+# and returns the first struct whose tag equals `tag`: 0 = found,
+# 1 = unknown namespace, 2 = unknown struct tag.
+function _geo_struct_key_from_tag(context::_GeoNumericContext,ns::String,
+                                  tag::Int)
+    structs=get(context.structs,ns,nothing)
+    structs===nothing && return (1,"")
+    for (name,st) in sort!(collect(structs);by=first)
+        st.tag==tag && return (0,name)
+    end
+    return (2,"")
+end
+
+# `FloatParameterOption` items of a `Struct name[...]` definition: `init_options`
+# seeds `member_valmax` from the struct being appended to (or -1) and clears
+# `flag_Enum`. Mutates fopt/copt.
+function _geo_struct_option!(context::_GeoNumericContext,src::AbstractString,
+                             fopt::Dict{String,Vector{Float64}},
+                             copt::Dict{String,Vector{String}},
+                             flag_enum::Base.RefValue{Bool},
+                             member_valmax::Base.RefValue{Int},
+                             caller::AbstractString)
+    s=String(strip(src))
+    isempty(s) && return nothing
+    om=match(r"^([A-Za-z_][A-Za-z0-9_]*)(.*)$",s)
+    om===nothing &&
+        _geo_syntax_abort(string(first(s)),
+            "$caller: malformed Struct option $(repr(s))")
+    key=String(om.captures[1]);rest=String(strip(om.captures[2]))
+    if key in ("Min","Max","Step")
+        # `tMin FExpr`/`tMax FExpr`/`tStep FExpr` — a single expression, never
+        # a brace list or bare flag.
+        isempty(rest) &&
+            _geo_syntax_abort(",", "$caller: $key requires a value")
+        push!(get!(fopt,key,Float64[]),
+              _geo_eval_numeric(rest,context,"$caller $key option"))
+        return nothing
+    end
+    if isempty(rest)
+        # bare `tSTRING` — flag or `Enum` auto-numbering.
+        if !flag_enum[]
+            push!(get!(fopt,key,Float64[]),1.0)
+            key=="Enum" && (flag_enum[]=true)
+        else
+            member_valmax[]+=1
+            push!(get!(fopt,key,Float64[]),Float64(member_valmax[]))
+        end
+        return nothing
+    end
+    if (strm=match(r"^Str\s*[\(\[]",rest))!==nothing
+        # `tSTRING Str_BracedRecursiveListOfStringExprVar` — `Key Str[{..}]`.
+        open_at=lastindex(strm.match)
+        close=_geo_matching_delim(rest,open_at)
+        close==0 && _geo_syntax_abort(rest[open_at],
+            "$caller: unbalanced Str[...] in a Struct option")
+        String(strip(rest[nextind(rest,close):end]))=="" ||
+            _geo_syntax_abort(rest[nextind(rest,close)],
+                "$caller: unexpected text after $key Str[...]")
+        inner=String(strip(rest[nextind(rest,open_at):prevind(rest,close)]))
+        if startswith(inner,"{") &&
+                _geo_matching_delim(inner,firstindex(inner))==lastindex(inner)
+            # `tSTRING Str_BracedRecursiveListOfStringExprVar` — `Str[{...}]`
+            # pushes each element of the braced list to charOptions.
+            for item in _geo_eval_string_list(inner[nextind(inner,
+                    firstindex(inner)):prevind(inner,lastindex(inner))],
+                    context,caller)
+                push!(get!(copt,key,String[]),item)
+            end
+        elseif startswith(inner,"{")
+            # `Str[{a}, x]` — the leading `{...}` commits to the
+            # `Str_BracedRecursiveListOfStringExprVar` production, so the
+            # trailing comma is the offending lookahead.
+            _geo_eval_string_list(inner,context,caller;brace_commit=true)
+        else
+            # Unbraced `Str[...]`/`Str(...)` does not match the braced-list
+            # production — it is a `tSTRING StringExpr` where the `Str`
+            # function joins its arguments with `\n` into ONE char member.
+            push!(get!(copt,key,String[]),
+                _geo_eval_string("Str["*inner*"]",context,caller))
+        end
+        return nothing
+    end
+    if startswith(rest,"{")
+        close=_geo_matching_delim(rest,firstindex(rest))
+        close==0 && _geo_syntax_abort('{',
+            "$caller: unbalanced braces in a Struct option")
+        inner=String(rest[nextind(rest,firstindex(rest)):prevind(rest,close)])
+        after=String(strip(rest[nextind(rest,close):end]))
+        if !isempty(after)
+            # `FExpr_Multi tAFFECT String__Index '(' ')'` — pair the listed
+            # values with a string list variable elementwise.
+            em=match(r"^=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*$",after)
+            em===nothing && _geo_syntax_abort(first(after),
+                "$caller: unexpected text after $key {...}")
+            var=String(em.captures[1])
+            vals=_geo_numeric_list_values("{$inner}",context,caller;
+                                          allow_multiplier=true)
+            if !haskey(context.strings,var)
+                _geo_expr_diag!(context,"Unknown string variable '$var'",caller)
+            else
+                strs=context.strings[var]
+                if length(vals)!=length(strs)
+                    _geo_expr_diag!(context,"Size mismatch in enumeration: " *
+                        "$(length(vals)) != $(length(strs))",caller)
+                else
+                    append!(get!(fopt,key,Float64[]),vals)
+                    append!(get!(copt,key,String[]),strs)
+                end
+            end
+            return nothing
+        end
+        # `{ FExpr = StringExpr, ... }` enumeration, or a plain numeric list.
+        items=_geo_split_args(inner,caller)
+        is_enum=any(item->begin
+            d=0;q='\0'
+            for c in item
+                q!='\0' ? (c==q && (q='\0')) :
+                c in ('"','\'') ? (q=c) :
+                c in ('{','[','(') ? (d+=1) :
+                c in ('}',']',')') ? (d-=1) :
+                (d==0 && c=='=' && return true)
+            end
+            false
+        end,items)
+        if is_enum
+            for item in items
+                em=match(r"^(.*?)\s*=\s*(.*?)\s*$",item)
+                em===nothing && _geo_syntax_abort('{',
+                    "$caller: malformed enumeration item $(repr(item))")
+                push!(get!(fopt,key,Float64[]),_geo_eval_numeric(
+                    em.captures[1],context,"$caller enumeration value"))
+                push!(get!(copt,key,String[]),_geo_eval_string(
+                    em.captures[2],context,caller))
+            end
+        else
+            # A `key {...}` list is `ListOfDouble`/Enumeration — a quoted
+            # string inside is the offending lookahead upstream
+            # (`lst {"a","b"}` → `syntax error (")`; string lists need
+            # `Str[{...}]`).
+            qpos=findfirst(c->c=='"'||c=='\'',inner)
+            qpos===nothing ||
+                _geo_syntax_abort(string(inner[qpos]))
+            vals=_geo_numeric_list_values("{$inner}",context,caller;
+                                          allow_multiplier=true)
+            flag_enum[] && !isempty(vals) &&
+                (member_valmax[]=_geo_signed_gmsh_int_value(
+                    vals[1],"$caller $key enum bound"))
+            append!(get!(fopt,key,Float64[]),vals)
+        end
+        return nothing
+    end
+    if _geo_string_rhs(rest)
+        # `tSTRING StringExpr` — a char member.
+        push!(get!(copt,key,String[]),_geo_eval_string(rest,context,caller))
+        return nothing
+    end
+    # `tSTRING ListOfDouble` — single FExpr, `FExpr_Multi`, `-'{...}` or
+    # `n*{...}` multiplier lists.
+    vals=_geo_numeric_list_values(rest,context,caller;allow_multiplier=true)
+    flag_enum[] && !isempty(vals) &&
+        (member_valmax[]=_geo_signed_gmsh_int_value(
+            vals[1],"$caller $key enum bound"))
+    append!(get!(fopt,key,Float64[]),vals)
+    return nothing
+end
+
+# `NameSpaces::defStruct`/`Structs::defStruct` — insert-or-append a struct.
+# `append_level`: 0 = fresh definition, otherwise `Append`/`Append n`.
+# Returns (tag, redefinition::Bool) — on redefinition the existing struct is
+# kept and its tag returned (upstream `tag_out = getTag()`).
+function _geo_def_struct!(context::_GeoNumericContext,ns::String,
+                          name::String,append_level::Int,
+                          options_src::AbstractString,
+                          caller::AbstractString)
+    structs=get!(context.structs,ns,Dict{String,_GeoStructDef}())
+    existing=get(structs,name,nothing)
+    append=append_level!=0 && existing!==nothing
+    # `init_options(getMember_ValMax(ns, name))` — continues enum numbering
+    # across appends; a missing struct seeds -1 so the first flag lands on 0.
+    member_valmax=Ref(existing===nothing ? -1 : existing.member_valmax)
+    flag_enum=Ref(false)
+    fopt=Dict{String,Vector{Float64}}();copt=Dict{String,Vector{String}}()
+    for opt in _geo_split_args(options_src,caller)
+        _geo_struct_option!(context,opt,fopt,copt,flag_enum,member_valmax,
+                            caller)
+    end
+    if existing!==nothing && !append
+        return (existing.tag,true)
+    end
+    maxtag=get(context.struct_maxtag,ns,0)
+    tag=if haskey(fopt,"Tag")
+        forced=_geo_signed_gmsh_int_value(fopt["Tag"][1],
+            "$caller Struct Tag")
+        context.struct_maxtag[ns]=max(maxtag,forced)
+        forced
+    else
+        append ? -1 : (context.struct_maxtag[ns]=maxtag+1; maxtag+1)
+    end
+    if !append
+        # `Tag` auto-injection — visible as a member.
+        haskey(fopt,"Tag") || (fopt["Tag"]=Float64[tag])
+        structs[name]=_GeoStructDef(tag,fopt,copt,member_valmax[])
+        return (tag,false)
+    end
+    # `Struct::append` — `map::insert` merges only *new* member keys; the tag
+    # updates only when `Tag` was forced (tag >= 0); member_valmax always
+    # tracks the latest run.
+    tag>=0 && (existing.tag=tag)
+    existing.member_valmax=member_valmax[]
+    for (k,v) in fopt
+        haskey(existing.fopt,k) || (existing.fopt[k]=v)
+    end
+    for (k,v) in copt
+        haskey(existing.copt,k) || (existing.copt[k]=v)
+    end
+    return (existing.tag,false)
+end
+
+# `Struct name[...] ;` / `Struct ns::name (Append [n]) [opts] ;` — the
+# `DefineStruct tEND` statement form. `x = Struct ...` instead flows through
+# the FExpr production (`_geo_parse_inline_struct!`).
+function _geo_exec_struct_def!(raw::AbstractString,
+                               context::_GeoNumericContext)
+    caller="execute_geo: Struct"
+    s=String(strip(raw))
+    endswith(s,";") &&
+        (s=String(strip(s[firstindex(s):prevind(s,lastindex(s))])))
+    open_at=0;i=firstindex(s);last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if c=='['
+            open_at=i;break
+        elseif c=='"' || c=='\''
+            close=findnext(==(c),s,nextind(s,i))
+            close===nothing && break
+            i=close
+        end
+        i=nextind(s,i)
+    end
+    if open_at==0
+        # Grammar order is `Struct_FullName AppendOrNot '['` — the syntax
+        # error lands on the first token outside that sequence
+        # (`Struct = 5` → `(=)`, `Struct s` → `(;)`, `Struct s junk` →
+        # `(junk)`); quoted strings are not `String__Index` heads.
+        hm=match(r"^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*::\s*[A-Za-z_][A-Za-z0-9_]*)?(?:\s*\(\s*Append\b[^)]*\))?",s)
+        tail=hm===nothing ? s : String(strip(s[nextind(s,
+            lastindex(hm.match)):end]))
+        isempty(tail) && _geo_syntax_abort(";")
+        tm=match(r"^[A-Za-z_][A-Za-z0-9_]*",tail)
+        _geo_syntax_abort(tm===nothing ? string(first(tail)) :
+            String(tm.match))
+    end
+    close=_geo_matching_delim(s,open_at)
+    close==0 && _geo_syntax_abort(";")
+    tail=strip(s[nextind(s,close):end])
+    if !isempty(tail)
+        tm=match(r"^[A-Za-z_][A-Za-z0-9_]*",tail)
+        _geo_syntax_abort(tm===nothing ? string(first(tail)) :
+            String(tm.match))
+    end
+    # `Struct_FullName` parts are `String__Index` — lexer keywords abort at
+    # the keyword itself (`Struct Point [a]` → `syntax error (Point)`).
+    # `~{FExpr}` suffixes are blanked so their contents cannot fake a `::`.
+    header_pre=String(strip(s[firstindex(s):prevind(s,open_at)]))
+    header_pre=replace(header_pre,r"\(\s*Append\b[^)]*\)\s*$"=>"")
+    cleaned=IOBuffer();i=firstindex(header_pre);last=lastindex(header_pre)
+    while i<=last
+        c=header_pre[i]
+        if c=='~'
+            j=nextind(header_pre,i)
+            while j<=last && isspace(header_pre[j]); j=nextind(header_pre,j); end
+            if j<=last && header_pre[j]=='{'
+                cl=_geo_matching_delim(header_pre,j)
+                cl!=0 && (i=nextind(header_pre,cl);continue)
+            end
+        end
+        print(cleaned,c);i=nextind(header_pre,i)
+    end
+    for part in split(String(take!(cleaned)),"::")
+        pname=strip(part)
+        isempty(pname) && _geo_syntax_abort("::")
+        (pm=match(r"^[A-Za-z_][A-Za-z0-9_]*$",pname))===nothing &&
+            _geo_syntax_abort(string(first(pname)))
+        String(pm.match) in _GEO_LEXER_KEYWORDS &&
+            _geo_syntax_abort(String(pm.match))
+    end
+    options_src=String(s[nextind(s,open_at):prevind(s,close)])
+    header=String(strip(s[firstindex(s):prevind(s,open_at)]))
+    # `(Append)`/`(Append FExpr)` — `AppendOrNot`: 0 fresh, `Append` → 99,
+    # `Append n` → n; the level is only a boolean gate upstream.
+    append_level=0
+    if (am=match(r"\(\s*Append\b(.*)\)\s*$",header))!==nothing
+        header=String(strip(header[firstindex(header):prevind(header,
+            am.offset)]))
+        level_src=String(strip(am.captures[1]))
+        append_level=isempty(level_src) ? 99 : _geo_signed_gmsh_int_value(
+            _geo_eval_numeric(level_src,context,"$caller Append level"),
+            "$caller Append level")
+    end
+    (ns,name)=_geo_parse_fullname(context,header,caller)
+    (tag,redef)=_geo_def_struct!(context,something(ns,""),name,append_level,
+                                 options_src,caller)
+    redef && _geo_expr_diag!(context,
+        "Redefinition of Struct '$(something(ns,""))::$name'",caller)
+    return tag
 end
 
 # Convenience wrapper: evaluate a string expression without surrounding junk.
@@ -3592,6 +4756,67 @@ const _GEO_STRING_ENTITY_DIM=Dict(
 function _geo_string_dispatch(name::String,rest::String,
                               context::_GeoNumericContext,
                               caller::AbstractString)::String
+    # `StringIndex` — `name~{FExpr}` suffixes fold into the symbol before the
+    # `::`/member/index dispatch (`x~{1}.m` → `x_1.m`).
+    while startswith(rest,"~")
+        m2=match(r"^~\s*\{",rest)
+        m2===nothing && break
+        open_pos=lastindex(m2.match)
+        close=_geo_matching_delim(rest,open_pos)
+        close==0 && break
+        idx=_geo_int_value(_geo_eval_numeric(
+            rest[nextind(rest,open_pos):prevind(rest,close)],context,
+            "$caller namespace index"),"$caller namespace index")
+        name=name*"_"*string(idx)
+        rest=String(strip(rest[nextind(rest,close):end]))
+    end
+    if startswith(rest,"::")
+        # `ns::x.member` — `Struct_FullName '.' tSTRING_Reserved` in string
+        # position. The string-symbol table is not namespaced, so `ns::x`
+        # alone cannot resolve a string.
+        after=String(strip(rest[nextind(rest,firstindex(rest),2):end]))
+        nm=match(r"^([A-Za-z_][A-Za-z0-9_]*)(.*)$",after)
+        nm===nothing && throw(ArgumentError(
+            "$caller: expected a name after $name::"))
+        sname=String(nm.captures[1]);srest=String(strip(nm.captures[2]))
+        while startswith(srest,"~")
+            m2=match(r"^~\s*\{",srest)
+            m2===nothing && break
+            open_pos=lastindex(m2.match)
+            close=_geo_matching_delim(srest,open_pos)
+            close==0 && break
+            idx=_geo_int_value(_geo_eval_numeric(
+                srest[nextind(srest,open_pos):prevind(srest,close)],context,
+                "$caller namespace index"),"$caller namespace index")
+            sname=sname*"_"*string(idx)
+            srest=String(strip(srest[nextind(srest,close):end]))
+        end
+        startswith(srest,".") || throw(ArgumentError(
+            "$caller: expected a member after $name::$sname"))
+        mm=match(r"^\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$",srest)
+        mm===nothing && throw(ArgumentError(
+            "$caller: expected a member name after $name::$sname."))
+        member=String(mm.captures[1]);mtail=String(strip(mm.captures[2]))
+        index=0
+        if startswith(mtail,"(")
+            close=_geo_matching_delim(mtail,firstindex(mtail))
+            close==0 && throw(ArgumentError(
+                "$caller: unbalanced index after $name::$sname.$member"))
+            index=_geo_int_value(_geo_eval_numeric(
+                mtail[nextind(mtail,firstindex(mtail)):prevind(mtail,close)],
+                context,"$caller member index"),"$caller member index")
+            isempty(strip(mtail[nextind(mtail,close):end])) || throw(
+                ArgumentError("$caller: unexpected text after "*
+                    "$name::$sname.$member index"))
+        else
+            # `LP`/`RP` do not cover `[]` for string member indexes —
+            # `s.lst[0]` → `syntax error ([)` upstream.
+            startswith(mtail,"[") && _geo_syntax_abort("[")
+            isempty(mtail) || throw(ArgumentError(
+                "$caller: unexpected text after $name::$sname.$member: $mtail"))
+        end
+        return _geo_member_string(context,name,sname,member,index,caller)
+    end
     if isempty(rest)
         # zero-argument StringExpr tokens and bare string variables
         name=="Today" && return Libc.strftime("%a %b %e %H:%M:%S %Y",time())
@@ -3600,8 +4825,9 @@ function _geo_string_dispatch(name::String,rest::String,
             return joinpath(Sys.BINDIR,Base.julia_exename())
         name=="OnelabAction" && return ""
         name=="CurrentFileName" && return basename(context.file_name)
-        name=="CurrentDirectory" && return isempty(context.file_name) ?
-            "" : dirname(abspath(context.file_name))*"/"
+        (name=="CurrentDirectory" || name=="CurrentDir") &&
+            return isempty(context.file_name) ?
+                "" : dirname(abspath(context.file_name))*"/"
         name=="Empty" && return "" # tEmpty? — not a Gmsh token; leave to var
         if haskey(context.strings,name)
             values=context.strings[name]
@@ -3628,19 +4854,20 @@ function _geo_string_dispatch(name::String,rest::String,
                 "$caller: unbalanced $opener after $name"))
             inner=String(rest[nextind(rest,firstindex(rest)):prevind(rest,close)])
             tail=String(strip(rest[nextind(rest,close):end]))
-            if opener=='(' && name in _GEO_STRING_FUNCTIONS
-                isempty(tail) || throw(ArgumentError(
-                    "$caller: unexpected text after $name(...): $tail"))
-                return _geo_string_function(name,inner,context,caller)
-            elseif opener=='[' && name=="NameToString"
-                # `NameToString[x]` yields the identifier text — `$$ = $3`
-                # returns the String__Index name unchanged.
+            if opener=='[' && name in ("NameToString","N2S")
+                # `NameToString[String__Index]` yields the identifier text —
+                # `$$ = $3` returns the name unchanged (`x`, `x~{i}`, nested
+                # `StringToName`). Anything else aborts at the first token
+                # that cannot extend a `String__Index`.
                 isempty(tail) || throw(ArgumentError(
                     "$caller: unexpected text after NameToString[...]: $tail"))
-                match(r"^[A-Za-z_][A-Za-z0-9_]*$",strip(inner))===nothing &&
-                    throw(ArgumentError(
-                        "$caller: NameToString takes a bare identifier"))
-                return String(strip(inner))
+                arg=String(strip(inner))
+                try
+                    return _geo_symbol_name(arg,context,caller)
+                catch err
+                    err isa _GeoSyntaxAbort && rethrow()
+                    _geo_syntax_abort(_geo_string_index_offender(arg))
+                end
             elseif opener=='[' && name in ("StringToName","S2N")
                 # StringToName[s] evaluates to a *name*; in string context the
                 # named string variable's value is read.
@@ -3648,6 +4875,17 @@ function _geo_string_dispatch(name::String,rest::String,
                 isempty(tail) || throw(ArgumentError(
                     "$caller: unexpected text after StringToName[...]: $tail"))
                 return _geo_string_read(context,sym,caller)
+            elseif opener=='(' &&
+                name in ("NameToString","N2S","StringToName","S2N")
+                # The name productions take `[` only — `(` is the error
+                # token upstream.
+                _geo_syntax_abort("(")
+            elseif name in _GEO_STRING_FUNCTIONS
+                # `Name(args)`/`Name[args]` — `LP`/`RP` cover both `()` and
+                # `[]` upstream, so `StrCat[a, b]` is a function call.
+                isempty(tail) || throw(ArgumentError(
+                    "$caller: unexpected text after $name$opener...: $tail"))
+                return _geo_string_function(name,inner,context,caller)
             else
                 # `name[i]` / `name(i)` indexed string-element read
                 idx=_geo_int_value(_geo_eval_numeric(inner,context,
@@ -3666,12 +4904,29 @@ function _geo_string_dispatch(name::String,rest::String,
                 return _geo_string_index(context,name,idx,caller)
             end
         else
-            # `name.reserved` — option-string read
-            om=match(r"^\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*$",rest)
+            # `name.member` / `name.member(i)` — `StringExprVar` member read:
+            # struct member first, `StringOption(name, member)` otherwise.
+            om=match(r"^\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$",rest)
             om===nothing && throw(ArgumentError(
                 "$caller: unsupported text after $name: $rest"))
-            return _geo_option_string(context,name,0,
-                String(om.captures[1]),caller)
+            member=String(om.captures[1]);mtail=String(strip(om.captures[2]))
+            index=0
+            if startswith(mtail,"(")
+                close=_geo_matching_delim(mtail,firstindex(mtail))
+                close==0 && throw(ArgumentError(
+                    "$caller: unbalanced index after $name.$member"))
+                index=_geo_int_value(_geo_eval_numeric(
+                    mtail[nextind(mtail,firstindex(mtail)):prevind(mtail,close)],
+                    context,"$caller member index"),"$caller member index")
+                isempty(strip(mtail[nextind(mtail,close):end])) || throw(
+                    ArgumentError("$caller: unexpected text after "*
+                        "$name.$member index"))
+            else
+                startswith(mtail,"[") && _geo_syntax_abort("[")
+                isempty(mtail) || throw(ArgumentError(
+                    "$caller: unexpected text after $name.$member: $mtail"))
+            end
+            return _geo_member_string(context,"",name,member,index,caller)
         end
     end
     throw(ArgumentError("$caller: unrecognized string expression: $name$rest"))
@@ -3776,8 +5031,10 @@ function _geo_string_function(name::String,inner::AbstractString,
     str_arg(i)=_geo_string_expr(args[i],context,caller)
     str_args()=[str_arg(i) for i in eachindex(args)]
     if name=="StrCat" || name=="Str"
-        joined=join(str_args(),name=="Str" ? "\n" : "")
-        return joined
+        # `tStr`/`tStrCat` take `RecursiveListOfStringExprVar` — `x()`,
+        # `x.member()` and `{...}` items expand to multiple elements.
+        vals=_geo_eval_string_list(inner,context,caller)
+        return join(vals,name=="Str" ? "\n" : "")
     elseif name=="StrPrefix"
         length(args)==1 || throw(ArgumentError("$caller: StrPrefix takes one argument"))
         s=str_args()[1]
@@ -3871,25 +5128,32 @@ function _geo_string_function(name::String,inner::AbstractString,
     elseif name=="GetForcedStr"
         (length(args)==1 || length(args)==2) || throw(ArgumentError(
             "$caller: GetForcedStr takes one or two arguments"))
-        # `GetForcedStr(x.y [, default])` — option-string member read with a
-        # silent default fallback (`type_treat=2` suppresses diagnostics).
+        # `tGetForcedStr LP Struct_FullName ['.' tSTRING_Reserved]
+        # [GetForcedStr_Default] RP` — `type_treat=2`: silent defaults.
+        arg=strip(args[1])
+        default=length(args)==2 ?
+            _geo_string_expr(args[2],context,caller) : ""
         if (om=match(
-                r"^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$",
-                strip(args[1])))!==nothing
-            value=_geo_option_string(context,String(om.captures[1]),0,
-                String(om.captures[2]),caller;warn=false)
-            value!==nothing && return value
-            length(args)==2 &&
-                return _geo_string_expr(args[2],context,caller)
-            return ""
+                r"^(?:([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)$",
+                arg))!==nothing
+            return _geo_member_string(context,
+                om.captures[1]===nothing ? "" :
+                    _geo_symbol_name(om.captures[1],context,caller),
+                _geo_symbol_name(om.captures[2],context,caller),
+                String(om.captures[3]),0,caller;
+                default=default,type_treat=2)
         end
-        sym=_geo_symbol_name(args[1],context,caller)
+        # `treat_Struct_FullName_String` receives `nullptr` for the
+        # namespace upstream — `GetForcedStr(ns::x, d)` reads `x` from the
+        # (un-namespaced) string-symbol table, discarding `ns`.
+        arg=replace(arg,
+            r"^[A-Za-z_][A-Za-z0-9_]*(?:\s*~\s*\{[^}]*\})*\s*::\s*"=>"")
+        sym=_geo_symbol_name(arg,context,caller)
         if haskey(context.strings,sym)
             values=context.strings[sym]
             length(values)==1 && return values[1]
         end
-        length(args)==2 && return _geo_string_expr(args[2],context,caller)
-        return ""
+        return default
     elseif name=="FixRelativePath"
         length(args)==1 || throw(ArgumentError("$caller: FixRelativePath takes one argument"))
         return _geo_fix_relative_path(context.file_name,str_args()[1])
@@ -3916,8 +5180,66 @@ function _geo_string_function(name::String,inner::AbstractString,
         isempty(pname) || get!(context.onelab_strings,pname,spec)
         return spec
     elseif name=="NameStruct"
-        throw(ArgumentError(
-            "$caller: NameStruct requires Struct namespaces, which are not supported"))
+        # `tNameStruct LP NameStruct_Arg RP` — `#tag` or `ns::#tag`; the
+        # reverse tag→name lookup is `get_key_struct_from_tag` (case 1/2 are
+        # `yymsg(1)` warnings, not errors). The arg grammar is
+        # `'#' FExpr | String__Index tSCOPE '#' FExpr` — anything else is a
+        # bison syntax error at the offending token (`(5)`, `())`, `(bar)`,
+        # `(,)` upstream).
+        isempty(args) && _geo_syntax_abort(")")
+        length(args)==1 || _geo_syntax_abort(",")
+        arg=String(strip(args[1]))
+        isempty(arg) && _geo_syntax_abort(")")
+        last=lastindex(arg);i=firstindex(arg)
+        if arg[i]=='#'
+            ns="";tag_src=String(strip(arg[nextind(arg,i):end]))
+        else
+            # Consume the leading `String__Index` (identifier /
+            # `StringToName[...]` plus `~{expr}` suffixes), then `::` and `#`
+            # must follow — anything else is the offending token.
+            if (sm=match(r"^(?:StringToName|S2N)\s*\[",arg))!==nothing
+                cl=_geo_matching_delim(arg,lastindex(sm.match))
+                cl==0 && _geo_syntax_abort("[")
+                i=nextind(arg,cl)
+            else
+                hm=match(r"^[A-Za-z_][A-Za-z0-9_]*",arg)
+                hm===nothing &&
+                    _geo_syntax_abort(_geo_stmt_head_token(arg))
+                i=nextind(arg,lastindex(hm.match))
+            end
+            while true
+                j=i
+                while j<=last && isspace(arg[j]); j=nextind(arg,j); end
+                (j<=last && arg[j]=='~') || break
+                k=nextind(arg,j)
+                while k<=last && isspace(arg[k]); k=nextind(arg,k); end
+                (k<=last && arg[k]=='{') || break
+                cl=_geo_matching_delim(arg,k);cl==0 && break
+                i=nextind(arg,cl)
+            end
+            ns=_geo_symbol_name(arg[firstindex(arg):prevind(arg,i)],
+                context,caller)
+            rest=String(strip(arg[i:end]))
+            startswith(rest,"::") || _geo_syntax_abort(
+                isempty(rest) ? ")" :
+                (wm=match(r"^[A-Za-z_][A-Za-z0-9_]*",rest))!==nothing ?
+                    String(wm.match) : _geo_stmt_head_token(rest))
+            rest2=String(strip(rest[nextind(rest,2):end]))
+            isempty(rest2) && _geo_syntax_abort(")")
+            rest2[1]=='#' || _geo_syntax_abort(
+                (wm=match(r"^[A-Za-z_][A-Za-z0-9_]*",rest2))!==nothing ?
+                    String(wm.match) : _geo_stmt_head_token(rest2))
+            tag_src=String(strip(rest2[nextind(rest2,firstindex(rest2)):end]))
+        end
+        isempty(tag_src) && _geo_syntax_abort(")")
+        tag=_geo_int_value(_geo_eval_numeric(tag_src,context,
+            "$caller NameStruct tag"),"$caller NameStruct tag")
+        (code,sname)=_geo_struct_key_from_tag(context,ns,tag)
+        code==1 &&
+            _geo_yywarn!(context,"Unknown NameSpace '$ns' of Struct")
+        code==2 &&
+            _geo_yywarn!(context,"Unknown Struct of index $tag")
+        return sname
     end
     throw(ArgumentError("$caller: unknown string function $name"))
 end
@@ -4186,6 +5508,95 @@ function _geo_split_list_or_argerr(raw::AbstractString,caller::AbstractString)
     end
 end
 
+# Index of the opener matching the closer at `close_pos` (0 when
+# unbalanced) — the reverse of `_geo_matching_delim`. Quoted spans are
+# skipped pairwise, matching the forward scan's quote handling.
+function _geo_matching_delim_rev(src::AbstractString,close_pos::Int)
+    close_ch=src[close_pos]
+    open_ch=close_ch==')' ? '(' : close_ch==']' ? '[' : '{'
+    depth=0;i=close_pos
+    while true
+        c=src[i]
+        if c=='"' || c=='\''
+            q=c
+            while i>firstindex(src)
+                i=prevind(src,i)
+                src[i]==q && break
+            end
+            src[i]==q || return 0
+        elseif c==close_ch
+            depth+=1
+        elseif c==open_ch
+            depth-=1
+            depth==0 && return i
+        end
+        i>firstindex(src) || return 0
+        i=prevind(src,i)
+    end
+end
+
+# Lexer keywords that cannot head an FExpr production report themselves as
+# the syntax-error token (`Field::s` → `(Field)`), unlike FExpr-capable
+# keywords where the following `::` is the offender (`Sin::s`, `Pi::s`,
+# `Today::s` → `syntax error (::)`).
+_geo_keyword_self_reports(name::String)=
+    name in _GEO_LEXER_KEYWORDS && !(name in _GEO_ALL_FUNCTIONS) &&
+        !(name in _GEO_FEXPR_SHIFT_KEYWORDS) && name!="List" &&
+        !haskey(_GEO_BARE_CONSTANTS,name) && !(name in _GEO_BARE_STRING_TOKENS)
+
+# Does a `String__Index` (`tSTRING`, `name~{FExpr}`…, `StringToName[sexpr]`/
+# `S2N[sexpr]`) end immediately before `src[colon]`? Only then does a
+# contiguous `::` lex as upstream's tSCOPE inside an expression. After any
+# other token the `::` itself is the offending lookahead (`1::2`,
+# `a[i]::s`, `f(1)::s`, `Sin::s` → `syntax error (::)`), while a keyword
+# that cannot head an FExpr reports itself (`Field::s` → `(Field)`) — those
+# heads are accepted here so the expression parser reports the keyword.
+function _geo_scope_precedes(src::AbstractString,colon::Int)
+    j=colon
+    while true
+        j>firstindex(src) || return false
+        j=prevind(src,j)
+        isspace(src[j]) || break
+    end
+    c=src[j]
+    if _geo_ascii_ident(c)
+        k=j
+        while k>firstindex(src)
+            _geo_ascii_ident(src[prevind(src,k)]) || break
+            k=prevind(src,k)
+        end
+        _geo_ascii_letter(src[k]) || return false
+        n=String(src[k:j])
+        return _geo_tstring_valid(n) || _geo_keyword_self_reports(n)
+    elseif c=='}' || c==']'
+        open=_geo_matching_delim_rev(src,j)
+        open==0 && return false
+        k=open
+        while true
+            k>firstindex(src) || return false
+            k=prevind(src,k)
+            isspace(src[k]) || break
+        end
+        if c=='}'
+            # `~{FExpr}` is a StringIndex suffix — whatever precedes `~`
+            # must itself be a String__Index tail.
+            src[k]=='~' || return false
+            return _geo_scope_precedes(src,k)
+        end
+        # `StringToName[...]`/`S2N[...]` are the only bracket-closed
+        # String__Index forms — `a[i]`/`a(i)` are indexed FExpr reads.
+        _geo_ascii_letter(src[k]) || return false
+        e=k
+        while e>firstindex(src)
+            _geo_ascii_ident(src[prevind(src,e)]) || break
+            e=prevind(src,e)
+        end
+        return String(src[e:k]) in ("StringToName","S2N")
+    else
+        return false
+    end
+end
+
 # `tail` reports the token that follows an unterminated trailing range —
 # `}` inside braces, `;` at a bare statement RHS.
 function _geo_split_range(raw::AbstractString,caller::AbstractString;
@@ -4210,7 +5621,14 @@ function _geo_split_range(raw::AbstractString,caller::AbstractString;
         elseif c=='?' && parens==0 && brackets==0 && braces==0
             pending_ternary+=1
         elseif c==':' && parens==0 && brackets==0 && braces==0
-            if pending_ternary>0
+            if i<lastindex(source) && source[nextind(source,i)]==':' &&
+               _geo_scope_precedes(source,i)
+                # `ns::name` — a contiguous `::` after a `String__Index` is
+                # upstream's tSCOPE token, not a range separator; skip both
+                # characters. The token after `::` is validated by the
+                # expression parser (`ns::#1` → `#`, `ns::5` → `5`).
+                i=nextind(source,i)
+            elseif pending_ternary>0
                 # A ':' that answers a pending '?' belongs to the ternary, not
                 # the range — matching Gmsh's grammar where the conditional
                 # expression consumes its ':' greedily.
@@ -4805,6 +6223,22 @@ function _geo_list_reference_values(raw::AbstractString,
     depth<=_MAX_GEO_EXPRESSION_DEPTH || throw(ArgumentError(
         "$caller: list selector nesting exceeds $_MAX_GEO_EXPRESSION_DEPTH"))
     source=String(strip(raw))
+    # `x.member()`/`ns::x.member()` — `FExpr_Multi` whole-member splices;
+    # missing members contribute no elements (upstream `List_T*` nullptr).
+    member_splice=match(
+        r"^(-?)\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*$",
+        source)
+    if member_splice!==nothing
+        ns=member_splice.captures[2]===nothing ?
+            "" : String(member_splice.captures[2])
+        sname=String(member_splice.captures[3])
+        smember=String(member_splice.captures[4])
+        _geo_member_key_valid(smember) || return nothing
+        vals=_geo_member_fvector(context,ns,sname,smember,caller)
+        vals===nothing && return Float64[]
+        member_splice.captures[1]=="-" && (vals=-vals)
+        return vals
+    end
     whole=match(
         r"^(-?)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*$",source)
     # `x()` — `String__Index LP RP` splices the whole symbol payload,
@@ -4830,6 +6264,10 @@ function _geo_list_reference_values(raw::AbstractString,
     matched=whole===nothing ? (parens===nothing ? selected : parens) : whole
     sign=matched.captures[1]=="-" ? -1.0 : 1.0
     name=String(matched.captures[2])
+    # `String__Index` derives from `tSTRING` only — lexer keywords head
+    # their own productions (`DimNameSpace()` is a function call, never a
+    # variable splice).
+    _geo_tstring_valid(name) || return nothing
     values=parens===nothing ? _geo_context_list(context,name,caller) :
         _geo_symbol_payload(context,name,caller)
     result=if selected===nothing
@@ -4986,12 +6424,14 @@ function _geo_assign_bare!(context::_GeoNumericContext,name::String,
         return nothing
     end
     # Gmsh keeps separate numeric and string symbol tables — a string-only
-    # name can still take a numeric value here. `x = <single>` re-derives the
-    # flag as `s.list = (n != 1)`, so a one-element rhs makes even a list name
-    # scalar again: the write lands on `value[0]` and the array payload is
-    # kept (`_geo_context_set_scalar!` preserves it).
-    is_list=name in context.list_variables
-    if !is_list || (operation=="=" && length(rhs)==1)
+    # name can still take a numeric value here. `=` re-derives the flag as
+    # `s.list = (n != 1)` before dispatch: `x = {1,2}` turns a scalar name
+    # into a list, while a one-element rhs makes even a list name scalar
+    # again — the write lands on `value[0]` and the array payload is kept
+    # (`_geo_context_set_scalar!` preserves it). `op=` dispatches on the
+    # current flag.
+    is_list=operation=="=" ? length(rhs)!=1 : name in context.list_variables
+    if !is_list
         if length(rhs)!=1
             _geo_yyerror!(context,"Cannot assign list to variable '$name'")
             return nothing
@@ -5181,6 +6621,10 @@ end
 function _geo_exec_assignment!(context::_GeoNumericContext,
                                raw::AbstractString,caller::AbstractString)
     body=String(strip(raw))
+    # `String__Index` LHS heads — `x~{FExpr}`…/`StringToName[sexpr]` resolve to
+    # a plain identifier before the option/index assignment splits below.
+    lr=_geo_lhs_string_index(body,context,caller)
+    lr===nothing || (body=lr[1]*lr[2])
     # `Field[i].member = v` — mutates the field object's option (Gmsh
     # `field->options[member]`): unknown field/option names are diagnostics,
     # not silent stores.
@@ -5200,6 +6644,12 @@ function _geo_exec_assignment!(context::_GeoNumericContext,
             "'$(pm.captures[1])'")
         return true
     end
+    # A lexer keyword cannot head a `String__Index` affectation: expression-
+    # only tokens error at themselves, statement-leading tokens at the
+    # following token (`DimNameSpace[] = 3` → `(DimNameSpace)`, `Point[...]`
+    # → `[`). Field/Plugin statements above already consumed their literal
+    # heads, and a resolved `~{}`/`StringToName` name is not re-lexed upstream.
+    lr===nothing && _geo_lhs_keyword_check(body)
     # `x.Color.member = {r,g,b[,a]}` and `x.ColorTable = {colors}` — packed
     # RGBA color options.
     if (cm=match(
@@ -5270,9 +6720,25 @@ function _geo_exec_assignment!(context::_GeoNumericContext,
         end
         selector_src=String(strip(selector))
         if isempty(selector_src)
-            # `x() = Str(...)` — string-list form.
-            if (sm=match(r"^Str\s*\((.*)\)\s*$",rhs))!==nothing
-                values=_geo_eval_string_list(sm.captures[1],context,caller)
+            # `x() = Str[...]` — `String__Index LP RP tAFFECT tStr LP
+            # BracedOrNotRecursiveListOfStringExprVar RP`; a whole-argument
+            # `{...}` wraps the same flat list.
+            if (sm=match(r"^Str\s*[\(\[]",rhs))!==nothing
+                open_at=lastindex(sm.match)
+                close=_geo_matching_delim(rhs,open_at)
+                close==0 && _geo_syntax_abort(rhs[open_at],
+                    "$caller: unbalanced Str[...] in string-list assignment")
+                String(strip(rhs[nextind(rhs,close):end]))=="" ||
+                    _geo_syntax_abort(rhs[nextind(rhs,close)],
+                        "$caller: unexpected text after Str[...]")
+                inner=String(strip(rhs[nextind(rhs,open_at):prevind(rhs,close)]))
+                if startswith(inner,"{") &&
+                        _geo_matching_delim(inner,firstindex(inner))==
+                        lastindex(inner)
+                    inner=String(strip(inner[2:prevind(inner,lastindex(inner))]))
+                end
+                values=_geo_eval_string_list(inner,context,caller;
+                    brace_commit=true)
                 if operation=="="
                     context.strings[name]=values
                 elseif operation=="+="
@@ -5308,6 +6774,18 @@ function _geo_exec_assignment!(context::_GeoNumericContext,
         _geo_assign_indexed!(context,name,index,operation,rhs_values[1],caller)
         return true
     end
+    # `ns::x = ...` — `tSCOPE` is not part of the `String__Index` LHS
+    # production (`ns::x = 5` → `syntax error (::)` upstream).
+    match(r"^[A-Za-z_][A-Za-z0-9_]*\s*::",body)!==nothing &&
+        _geo_syntax_abort("::")
+    # `x.y[i] = ...`/`x.y(i) = ...` — a member index after `.y` is not part
+    # of the option-write LHS (`s.V[1] =`/`s.V(1) =` → `syntax error ([)`/
+    # `(()` upstream).
+    if (mm=match(
+            r"^[A-Za-z_][A-Za-z0-9_]*\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*([\[\(])",
+            body))!==nothing
+        _geo_syntax_abort(mm.captures[1]=="[" ? "[" : "(")
+    end
     return false
 end
 
@@ -5322,23 +6800,41 @@ function _geo_assign_field_option!(context::_GeoNumericContext,tag_src,
         "$caller field tag"),"$caller field tag")
     fields=context.fields
     spec=fields===nothing ? nothing : get(fields,tag,nothing)
+    # `field->options[member]` upstream — membership is per field *kind*, and
+    # the `Unknown option` diagnostic reports the class `getName()`
+    # (`Attractor` instantiates `DistanceField`).
+    member_ok=spec!==nothing &&
+        (kind_entry=get(_GEO_FIELD_OPTIONS,spec.kind,nothing))!==nothing &&
+        member in kind_entry[1]
+    normalized=if member_ok
+        _geo_normalize_field_option(rhs,member,context,caller)
+    else
+        # The RHS reduced inside the production before the field lookup ran —
+        # a numeric tail still reports its variables; a quoted/braced RHS
+        # follows the StringExpr/ListOfDouble forms instead.
+        if !startswith(rhs,"\"") && !startswith(rhs,"{")
+            try
+                _geo_eval_numeric(rhs,context,caller)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort && rethrow()
+            end
+        end
+        nothing
+    end
     if spec===nothing
         context.soft_unknown_reads || throw(ArgumentError(
             "$caller: No field with id $tag"))
         return _geo_yyerror!(context,"No field with id $tag")
     end
-    known=member in _GEO_FIELD_RAW_OPTIONS ||
-          member in _GEO_FIELD_FLOAT_LIST_OPTIONS ||
-          member in _GEO_FIELD_INTEGER_LIST_OPTIONS ||
-          member in _GEO_FIELD_NUMERIC_OPTIONS
-    if !known
+    if !member_ok
+        reported=kind_entry===nothing ? spec.kind : kind_entry[2]
         context.soft_unknown_reads || throw(ArgumentError(
             "$caller: Unknown option '$member' in field $tag of type " *
-            "'$(spec.kind)'"))
+            "'$reported'"))
         return _geo_yyerror!(context,"Unknown option '$member' in field $tag " *
-            "of type '$(spec.kind)'")
+            "of type '$reported'")
     end
-    normalized=_geo_normalize_field_option(rhs,member,context,caller)
     spec.options[member]=normalized
     member in spec.option_order || push!(spec.option_order,member)
     return nothing
@@ -5423,25 +6919,39 @@ function _geo_assign_bare_rhs!(context::_GeoNumericContext,name::String,
     return nothing
 end
 
-# `BracedOrNotRecursiveListOfStringExprVar` — flat StringExprVar items plus
-# `{...}` sub-groups; `x()` (`MultiStringExprVar`) splices every element of a
-# string-list variable. A bare multi-element name still reads as ONE string
-# and errors with "Expected single valued string variable".
+# `RecursiveListOfStringExprVar` — flat `StringExprVar`/`MultiStringExprVar`
+# items; `x()`/`x.member()` splices expand every element of a string-list
+# variable or char member. `{...}` groups are not items upstream; in
+# `BracedOrNot` contexts (`x() = Str[...]`, struct-option `Str[...]` —
+# `brace_commit=true`) a `{...}` opening the argument reduces as the braced
+# alternative and the following comma is the offending lookahead, while in
+# flat-only contexts (`Str`/`StrCat`/`TextAttributes`/`OnelabRun` arguments)
+# the `{` itself fails.
 function _geo_eval_string_list(raw::AbstractString,
                                context::_GeoNumericContext,
-                               caller::AbstractString)
+                               caller::AbstractString;
+                               brace_commit::Bool=false)
+    items=_geo_split_args(raw,caller)
     out=String[]
-    for item in _geo_split_args(raw,caller)
+    for (i,item) in enumerate(items)
         s=strip(item)
-        if startswith(s,"{") && endswith(s,"}")
-            append!(out,_geo_eval_string_list(
-                s[nextind(s,firstindex(s)):prevind(s,lastindex(s))],
-                context,caller))
+        if startswith(s,"{")
+            _geo_syntax_abort(
+                brace_commit && i==1 && length(items)>1 ? "," : "{")
         elseif (sm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)$",s))!==nothing
             name=String(sm.captures[1])
             haskey(context.strings,name) || throw(ArgumentError(
                 "$caller: Unknown string variable '$name'"))
             append!(out,context.strings[name])
+        elseif (sm=match(
+                r"^(?:([A-Za-z_][A-Za-z0-9_]*)\s*::\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)$",
+                s))!==nothing
+            # `x.member()`/`ns::x.member()` — `MultiStringExprVar` char-member
+            # splice; a missing member contributes no elements.
+            vals=_geo_member_svector(context,
+                sm.captures[1]===nothing ? "" : String(sm.captures[1]),
+                String(sm.captures[2]),String(sm.captures[3]),caller)
+            vals!==nothing && append!(out,vals)
         else
             push!(out,_geo_eval_string(s,context,caller))
         end
@@ -5455,7 +6965,11 @@ function _geo_string_rhs(rhs::AbstractString)
     s=strip(rhs)
     (startswith(s,'"') || startswith(s,'\'')) && return true
     m=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[\(\[\{]",s)
-    m!==nothing && m.captures[1] in _GEO_STRING_FUNCTIONS && return true
+    # `StringToName`/`S2N` are `StringIndex` name productions — a
+    # `String__Index`, not a `StringExpr` — so the FExpr `x =` production
+    # wins upstream and the resolved name reads as a numeric variable.
+    m!==nothing && m.captures[1] in _GEO_STRING_FUNCTIONS &&
+        !(m.captures[1] in ("StringToName","S2N")) && return true
     # `Point{i}`/`Surface{i}`/`Physical X{i}` are entity-name StringExprVars.
     match(r"^(?:Physical\s+)?(?:Point|Line|Curve|Surface|Volume)\s*\{",s)!==
         nothing && return true
@@ -5675,22 +7189,43 @@ end
 function _geo_apply_list_assignment!(context::_GeoNumericContext,
                                      raw::AbstractString,
                                      caller::AbstractString)
+    # `name[i] op v` or the parenthesized `name(i) op v` — upstream maps both
+    # through `String__Index '['|'(' FExpr ']'|')'` (identical index writes).
     statement=match(
-        r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(.*?)\s*\]\s*(\+=|-=|\*=|/=|=)\s*(.*?)\s*$",
+        r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(.*?)\s*\]\s*(\+\+|--|\+=|-=|\*=|/=|=)\s*(.*?)\s*$",
         strip(raw))
+    paren=statement===nothing
+    paren && (statement=match(
+        r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(.*?)\s*\)\s*(\+\+|--|\+=|-=|\*=|/=|=)\s*(.*?)\s*$",
+        strip(raw)))
     statement===nothing && return false
     name=String(statement.captures[1])
-    name=="Pi" && throw(ArgumentError(
-        "$caller: Pi is a reserved numeric constant; use a different list name"))
+    # `tSTRING name '['` — a lexer keyword head is a syntax error at the
+    # keyword for expression-only tokens (`DimNameSpace[]`) and at `[` for
+    # statement-leading ones (`Point[]`). The parenthesized form is
+    # different: `Point(i) = ...`, `Spline(i) = ...`, `Box(i) = ...` and the
+    # other `Keyword(FExpr) =` entity declarations are real productions the
+    # caller's entity arms consume — not list-index writes — so only
+    # expression-only keywords abort here (`Sin(0) = 1` → `(Sin)`).
+    if name in _GEO_LEXER_KEYWORDS
+        name in _GEO_EXPR_ONLY_KEYWORDS &&
+            _geo_syntax_abort(name)
+        paren ? (return false) : _geo_syntax_abort("[")
+    end
     name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
         "$caller: dynamic tag allocator $name is read-only and cannot be assigned as a list"))
     selector=String(strip(statement.captures[2]))
     operation=statement.captures[3]
     rhs=String(strip(statement.captures[4]))
-    rhs_values=_geo_numeric_list_values(
+    increment=operation in ("++","--")
+    increment && (operation=operation=="++" ? "+=" : "-=")
+    rhs_values=increment ? Float64[1.0] : _geo_numeric_list_values(
         rhs,context,"$caller: numeric list $name";allow_multiplier=true)
 
     if isempty(selector)
+        # `x[]++`/`x()++` is not an upstream production — after `]`/`)` the
+        # grammar expects an affectation (`syntax error (++)`).
+        increment && _geo_syntax_abort(statement.captures[3])
         if operation=="="
             _geo_context_set_list!(context,name,rhs_values,caller)
         elseif operation=="+="
@@ -5707,15 +7242,14 @@ function _geo_apply_list_assignment!(context::_GeoNumericContext,
             end
             _geo_context_set_list!(context,name,values,caller)
         else
-            throw(ArgumentError(
-                "$caller: operators *= and /= are not available for whole numeric lists"))
+            # `x[] *= v`/`x[] /= v` — recoverable upstream diagnostic; the
+            # list is left unchanged.
+            _geo_yyerror!(context,
+                "Operators *= and /= not available for lists")
         end
         return true
     end
 
-    values=_geo_context_list(context,name,caller)
-    name in context.list_variables || throw(ArgumentError(
-        "$caller: numeric variable $name is not a list and cannot use indexed mutation"))
     index_values=if startswith(selector,"{") && endswith(selector,"}")
         _geo_numeric_list_values(
             selector,context,"$caller: numeric list $name selector";
@@ -5724,15 +7258,51 @@ function _geo_apply_list_assignment!(context::_GeoNumericContext,
         Float64[_geo_eval_numeric(
             selector,context,"$caller: numeric list $name index")]
     end
-    length(index_values)==length(rhs_values) || throw(ArgumentError(
-        "$caller: numeric list $name assignment selects $(length(index_values)) " *
-        "entries but provides $(length(rhs_values)) values"))
-    indices=Int[_geo_context_index(
-        value,length(values),"$caller: numeric list $name") for value in index_values]
+    length(index_values)==length(rhs_values) ||
+        (_geo_yyerror!(context,
+            "Incompatible array dimensions in affectation"); return true)
+    indices=Int[_geo_signed_gmsh_int_value(
+        value,"$caller: numeric list $name index") for value in index_values]
+    for index in indices
+        index>=0 || throw(ArgumentError(
+            "$caller: negative index $index in numeric list $name"))
+        index+1<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
+            "$caller: index $index exceeds $_MAX_GEO_LIST_ITEMS entries"))
+    end
+
+    # `assignVariable`/`assignVariables` upstream: `x[i] = v` on a fresh name
+    # creates the list padded with zeros; `x[i] op v` on a fresh name is
+    # `Unknown variable`; any index write on a scalar is `not a list`. Each
+    # is a recoverable `yymsg(0)` diagnostic.
+    if haskey(context.values,name) && !(name in context.list_variables)
+        _geo_yyerror!(context,"Variable '$name' is not a list")
+        return true
+    end
+    if haskey(context.unavailable_lists,name) ||
+       haskey(context.unavailable,name)
+        values=_geo_context_list(context,name,caller)  # throws with the reason
+    elseif haskey(context.lists,name)
+        values=copy(context.lists[name])
+    else
+        if operation=="="
+            values=Float64[]
+        else
+            _geo_yyerror!(context,"Unknown variable '$name'")
+            return true
+        end
+    end
     for position in eachindex(indices)
         index=indices[position]
-        values[index]=_geo_list_mutation_value(
-            operation,values[index],rhs_values[position],context,caller)
+        length(values)<index+1 && resize!(values,index+1)
+        if operation=="/=" && rhs_values[position]==0
+            # Upstream skips the write and reports
+            # `Division by zero in 'x[i] /= 0'`.
+            _geo_yyerror!(context,"Division by zero in '$name[$index] /= " *
+                "$(rhs_values[position])'")
+            continue
+        end
+        values[index+1]=_geo_list_mutation_value(
+            operation,values[index+1],rhs_values[position],context,caller)
     end
     _geo_context_set_list!(context,name,values,caller)
     return true
@@ -5742,16 +7312,39 @@ function _geo_allocator_statement_values(raw::AbstractString,
                                          context::_GeoNumericContext,
                                          caller::AbstractString)
     pieces=_geo_split_list("{"*String(raw)*"}",caller)
-    terms,total=_geo_numeric_list_terms(pieces,context,caller)
-    values=Float64[];sizehint!(values,total)
-    for term in terms
-        value=term.first
-        for _ in 1:term.count
-            push!(values,value)
-            value+=term.step
+    # Bookkeeping re-evaluation — the statement's own diagnostics were
+    # already emitted, so list-term reads stay silent here.
+    mute=context.suppress_diagnostics
+    context.suppress_diagnostics=true
+    try
+        terms,total=_geo_numeric_list_terms(pieces,context,caller)
+        values=Float64[];sizehint!(values,total)
+        for term in terms
+            value=term.first
+            for _ in 1:term.count
+                push!(values,value)
+                value+=term.step
+            end
         end
+        return values
+    finally
+        context.suppress_diagnostics=mute
     end
-    return values
+end
+
+# A bookkeeping re-evaluation inside the allocator observer — the statement's
+# production already reduced (and diagnosed) the FExpr, so the observer's
+# re-read stays silent while observer-specific diagnostics (e.g. `GeoEntity
+# dim out of range`) still emit.
+function _geo_observe_eval_numeric(src,context::_GeoNumericContext,
+                                   caller::AbstractString)
+    mute=context.suppress_diagnostics
+    context.suppress_diagnostics=true
+    try
+        return _geo_eval_numeric(src,context,caller)
+    finally
+        context.suppress_diagnostics=mute
+    end
 end
 
 # Definition-site tag expression: Gmsh casts to `int` without a positivity
@@ -5761,7 +7354,7 @@ function _geo_allocator_statement_tag(raw::AbstractString,
                                       context::_GeoNumericContext,
                                       caller::AbstractString)
     return _geo_signed_gmsh_int_value(
-        _geo_eval_numeric(raw,context,caller),caller)
+        _geo_observe_eval_numeric(raw,context,caller),caller)
 end
 
 function _geo_physical_declaration(raw::AbstractString)
@@ -5913,7 +7506,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
 
     primitive=match(
-        r"^(Box|Cylinder|Sphere|PolarSphere|Cone|Torus)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}$",
+        r"^(Box|Cylinder|Sphere|PolarSphere|Cone|Torus|Rectangle|Disk)\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}$",
         source)
     if primitive!==nothing
         state.geometry_unavailable===nothing || return nothing
@@ -5934,19 +7527,28 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         end
         expected=kind=="Box" ? (6,) : kind=="Cylinder" ? (7,) :
                  kind=="Sphere" ? (2,4,5,6,7) :
-                 kind=="PolarSphere" ? (2,) : kind=="Torus" ? (5,6) : (8,)
-        length(values) in expected || throw(ArgumentError(
-            "$caller $kind parameters: expected $(join(expected," or ")) " *
-            "numeric values; got $(length(values)) after range expansion"))
-        # `tBox`/`tCylinder`/`tCone`/`tTorus` and the parameterized `tSphere`
-        # form are OCC-gated upstream — under the built-in factory the
-        # statement is a recoverable diagnostic and creates nothing, so the
-        # counters stay put. `PolarSphere` and the two-point `Sphere` are
-        # built-in `newGeometry*` entities under either factory.
+                 kind=="PolarSphere" ? (2,) : kind=="Torus" ? (5,6) :
+                 kind=="Rectangle" ? (5,6) : kind=="Disk" ? (4,5) : (8,)
+        # A wrong-arity primitive creates nothing upstream (recoverable
+        # `yymsg` diagnostic at execution) — the counters stay put, so the
+        # scan simply skips the record and lets the exec pass report it.
+        length(values) in expected || return nothing
+        # `tBox`/`tCylinder`/`tCone`/`tTorus`, `tRectangle`/`tDisk`, and the
+        # parameterized `tSphere` form are OCC-gated upstream — under the
+        # built-in factory the statement is a recoverable diagnostic and
+        # creates nothing, so the counters stay put. `PolarSphere` and the
+        # two-point `Sphere` are built-in `newGeometry*` entities under
+        # either factory.
         occ_gated=kind=="Sphere" ? length(values)>=4 :
-            kind in ("Box","Cylinder","Cone","Torus")
-        (!occ_gated || state.factory==:opencascade) &&
-            _geo_allocator_record_primitive!(state,kind,tag,values,caller)
+            kind in ("Box","Cylinder","Cone","Torus","Rectangle","Disk")
+        if !occ_gated || state.factory==:opencascade
+            if kind in ("Rectangle","Disk")
+                _geo_allocator_record_surface_primitive!(
+                    state,kind,tag,values,caller)
+            else
+                _geo_allocator_record_primitive!(state,kind,tag,values,caller)
+            end
+        end
         return nothing
     end
 
@@ -5960,7 +7562,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         else
             dim=try
                 _geo_signed_gmsh_int_value(
-                    _geo_eval_numeric(set_max.captures[2],context,
+                    _geo_observe_eval_numeric(set_max.captures[2],context,
                                       "$caller SetMaxTag dimension"),
                     "$caller SetMaxTag dimension")
             catch err
@@ -5983,7 +7585,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         end
         value=try
             _geo_signed_gmsh_int_value(
-                _geo_eval_numeric(set_max.captures[3],context,
+                _geo_observe_eval_numeric(set_max.captures[3],context,
                                   "$caller SetMaxTag $kind"),
                 "$caller SetMaxTag $kind")
         catch err
@@ -6000,7 +7602,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
 
     boolean=match(
-        r"^Boolean(Difference|Union|Intersection)\s*\(\s*(.*?)\s*\)\s*=\s*" *
+        r"^Boolean(Difference|Union|Intersection|Fuse|Common|Cut)\s*\(\s*(.*?)\s*\)\s*=\s*" *
         r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*" *
         r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*;?\s*$",
         source)
@@ -6054,7 +7656,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         return nothing
 
     topology_change=occursin(
-        r"\b(?:Boolean|BooleanFragments|Extrude|Delete|Duplicata|SetMaxTag|Merge|Coherence)\b",
+        r"\b(?:Boolean[A-Za-z]*|Extrude|Delete|Duplicata|SetMaxTag|Merge|Coherence)\b",
         source) || match(
         # A leading transform can merge coincident entities (lowering
         # automatic counters) even without a Duplicata.
@@ -6121,6 +7723,78 @@ const _GEO_FIELD_KINDS=Set((
     "Restrict","Constant","Min","MinAniso","IntersectAniso","Max","Laplacian",
     "Mean","Curvature","Param","ExternalProcess","MathEval","MathEvalAniso",
     "AttractorAnisoCurve","MaxEigenHessian","AutomaticMeshSizeField"))
+
+# Per-kind option membership — each upstream Field subclass registers its own
+# `options` map, so `Field[i].member = v` validates `member` against the
+# field's *kind* (`field->options[member]`), not a global list. The second
+# element is the class `getName()` reported by `Unknown option`/`No field`
+# diagnostics — `Attractor` instantiates `DistanceField`, so it reports
+# `of type 'Distance'`.
+const _GEO_FIELD_OPTIONS=Dict{String,Tuple{Set{String},String}}(
+    "Structured"=>(Set(("FileName","OutsideValue","SetOutsideValue",
+        "TextFormat")),"Structured"),
+    "Threshold"=>(Set(("DistMax","DistMin","IField","InField","LcMax","LcMin",
+        "Sigmoid","SizeMax","SizeMin","StopAtDistMax")),"Threshold"),
+    "BoundaryLayer"=>(Set(("AnisoMax","Beta","BetaLaw","CurvesList","EdgesList",
+        "ExcludedFaceList","ExcludedSurfacesList","FanNodesList",
+        "FanPointsList","FanPointsSizesList","IntersectMetrics","NbLayers",
+        "NodesList","PointsList","Quads","Ratio","Size","SizeFar","SizesList",
+        "Thickness","hfar","hwall_n","hwall_n_nodes","ratio","thickness")),
+        "BoundaryLayer"),
+    "Box"=>(Set(("Thickness","VIn","VOut","XMax","XMin","YMax","YMin","ZMax",
+        "ZMin")),"Box"),
+    "Cylinder"=>(Set(("Radius","VIn","VOut","XAxis","XCenter","YAxis","YCenter",
+        "ZAxis","ZCenter")),"Cylinder"),
+    "Ball"=>(Set(("Radius","Thickness","VIn","VOut","XCenter","YCenter",
+        "ZCenter")),"Ball"),
+    "Frustum"=>(Set(("InnerR1","InnerR2","InnerV1","InnerV2","OuterR1","OuterR2",
+        "OuterV1","OuterV2","R1_inner","R1_outer","R2_inner","R2_outer",
+        "V1_inner","V1_outer","V2_inner","V2_outer","X1","X2","Y1","Y2","Z1",
+        "Z2")),"Frustum"),
+    "LonLat"=>(Set(("FromStereo","IField","InField","RadiusStereo")),"LonLat"),
+    "PostView"=>(Set(("CropNegativeValues","IView","UseClosest","ViewIndex",
+        "ViewTag")),"PostView"),
+    "Gradient"=>(Set(("Delta","IField","InField","Kind")),"Gradient"),
+    "Octree"=>(Set(("InField",)),"Octree"),
+    "Distance"=>(Set(("CurvesList","EdgesList","FacesList","FieldX","FieldY",
+        "FieldZ","NNodesByEdge","NodesList","NumPointsPerCurve","PointsList",
+        "Sampling","SurfacesList")),"Distance"),
+    "Attractor"=>(Set(("CurvesList","EdgesList","FacesList","FieldX","FieldY",
+        "FieldZ","NNodesByEdge","NodesList","NumPointsPerCurve","PointsList",
+        "Sampling","SurfacesList")),"Distance"),
+    "Extend"=>(Set(("AnisoMax","Beta","BetaLaw","CurvesList","EdgesList",
+        "ExcludedFaceList","ExcludedSurfacesList","FanNodesList",
+        "FanPointsList","FanPointsSizesList","IncludeEmbedded",
+        "IntersectMetrics","NbLayers","NodesList","PointsList","Quads","Ratio",
+        "Size","SizeFar","SizeMax","SizesList","SurfacesList","Thickness",
+        "ViewIndex","VolumesList","hfar","hwall_n","hwall_n_nodes","ratio",
+        "thickness")),"Extend"),
+    "Restrict"=>(Set(("CurvesList","EdgesList","FacesList","IField","InField",
+        "IncludeBoundary","IncludeEmbedded","PointsList","RegionsList",
+        "SurfacesList","VerticesList","VolumesList")),"Restrict"),
+    "Constant"=>(Set(("CurvesList","IncludeBoundary","IncludeEmbedded",
+        "PointsList","SurfacesList","VIn","VOut","VolumesList")),"Constant"),
+    "Min"=>(Set(("FieldsList",)),"Min"),
+    "MinAniso"=>(Set(("FieldsList",)),"MinAniso"),
+    "IntersectAniso"=>(Set(("FieldsList",)),"IntersectAniso"),
+    "Max"=>(Set(("FieldsList",)),"Max"),
+    "Laplacian"=>(Set(("Delta","IField","InField")),"Laplacian"),
+    "Mean"=>(Set(("Delta","IField","InField")),"Mean"),
+    "Curvature"=>(Set(("Delta","IField","InField")),"Curvature"),
+    "Param"=>(Set(("FX","FY","FZ","IField","InField")),"Param"),
+    "ExternalProcess"=>(Set(("CommandLine",)),"ExternalProcess"),
+    "MathEval"=>(Set(("F",)),"MathEval"),
+    "MathEvalAniso"=>(Set(("M11","M12","M13","M22","M23","M33","m11","m12",
+        "m13","m22","m23","m33")),"MathEvalAniso"),
+    "AttractorAnisoCurve"=>(Set(("CurvesList","DistMax","DistMin","EdgesList",
+        "NNodesByEdge","NumPointsPerCurve","Sampling","SizeMaxNormal",
+        "SizeMaxTangent","SizeMinNormal","SizeMinTangent","dMax","dMin",
+        "lMaxNormal","lMaxTangent","lMinNormal","lMinTangent")),
+        "AttractorAnisoCurve"),
+    "MaxEigenHessian"=>(Set(("Delta","IField","InField")),"MaxEigenHessian"),
+    "AutomaticMeshSizeField"=>(Set(("p4estFileToLoad","nPointsPerCircle",
+        "nPointsPerGap","hMin","hMax","hBulk","gradation","smoothing",
+        "features")),"AutomaticMeshSizeField"))
 
 function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractString,
                                      context::_GeoNumericContext,caller::AbstractString)
@@ -6261,21 +7935,83 @@ end
            occursin(r"\bPhysical\s+(?:Point|Curve|Line|Surface|Volume)\b",code)
 end
 
+# `ListOfDouble`/`FExpr_Multi` terms the bounded evaluator cannot model —
+# entity selectors (`Point{..}`), queries (`Volume In BoundingBox{..}`,
+# `Parent Curve{..}`), shape producers (`BooleanX{..}{..}`,
+# `CombinedBoundary{..}`, `Duplicata{..}`, transforms, `Extrude{..}`), and
+# attribute queries (`Mass Volume{..}`, `Physical Volume(..)`). Upstream
+# they are valid productions — `tSTRING '{' MultipleShape '}'` accepts even
+# an unknown `name{..}` — so a parse failure on input containing one marks
+# the variable unavailable (like a failed evaluation), never a syntax
+# error. A leading `{` (`a = {1,2}` stores a list in a scalar) is likewise
+# a valid `ListOfDouble` the scalar evaluator cannot model.
+function _geo_list_term_unmodelable(source::AbstractString)
+    occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",source) && return true
+    startswith(strip(source),"{") && return true
+    return occursin(Regex(
+        "(?<![A-Za-z0-9_.])(?:Point|Curve|Line|Surface|Volume|" *
+        "GeoEntity|Physical|Parent|BoundingBox|Mass|CenterOfMass|" *
+        "MatrixOfInertia|Normal|Curvature|Parametric|Color|Closest|" *
+        "Intersect|Split|Fillet|Chamfer|ThruSections|Ruled|Compound|" *
+        "Levelset|Periodic|Duplicata|Boundary|PointsOf|CombinedBoundary|" *
+        "OrientedBoundary|OrientedCombinedBoundary|Translate|Rotate|" *
+        "Dilate|Symmetry|Affine|Transform|Extrude|ShapeFromFile|" *
+        "Boolean[A-Za-z]*)\\b"),source)
+end
+
+# An evaluation that aborts while reading an *already unavailable* binding
+# (`newX` after an untracked topology change, a poisoned list count, ...)
+# fails on the value, not the grammar — the assignment propagates the
+# unavailability rather than reporting a syntax error. Only the RHS is
+# scanned: an unavailable LHS name must not mask a malformed RHS.
+function _geo_rhs_uses_unavailable(source::AbstractString,
+                                   context::_GeoNumericContext)
+    rhs=source
+    eq=findfirst(isequal('='),source)
+    eq!==nothing && (rhs=source[nextind(source,eq):end])
+    for m in eachmatch(r"[A-Za-z_][A-Za-z0-9_]*",rhs)
+        name=m.match
+        (haskey(context.unavailable,name) ||
+         haskey(context.unavailable_lists,name)) && return true
+    end
+    return false
+end
+
 function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractString,
                              raw::AbstractString)
     name=String(name_raw)
-    # `Pi` is a lexical Gmsh constant, not a mutable scalar binding.
-    name=="Pi" && return nothing
+    # Lexer keywords (`Pi`, `DimNameSpace`, ...) are not mutable bindings —
+    # upstream rejects the statement as a syntax error, so the scan leaves
+    # no binding behind.
+    name in _GEO_LEXER_KEYWORDS && return nothing
     name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
         "read_geo_params: dynamic tag allocator $name is read-only"))
     try
-        value=_geo_eval_numeric(raw,context,
+        # `String__Index NumericAffectation ListOfDouble`: the RHS is a
+        # list production, so `a = {1,2}` defines a list while a single
+        # value stays scalar (`s.list = List_Nbr(rhs) != 1` upstream).
+        values=_geo_numeric_list_values(raw,context,
             "read_geo_params: scalar variable $name")
-        _geo_context_set_scalar!(context,name,value,
-            "read_geo_params: scalar variable $name")
+        if length(values)==1
+            _geo_context_set_scalar!(context,name,values[1],
+                "read_geo_params: scalar variable $name")
+        else
+            _geo_context_set_list!(context,name,values,
+                "read_geo_params: scalar variable $name")
+        end
     catch err
         err isa InterruptException && rethrow()
-        (err isa ArgumentError || err isa _GeoSyntaxAbort) || rethrow()
+        # `_GeoSyntaxAbort` propagates to the per-statement recovery — a
+        # syntax error leaves no binding behind upstream — unless the RHS is
+        # a valid entity/shape `ListOfDouble` production the bounded
+        # evaluator cannot model, or it reads an already-unavailable
+        # binding; both mark the variable unavailable.
+        if err isa _GeoSyntaxAbort
+            (_geo_list_term_unmodelable(raw) ||
+             _geo_rhs_uses_unavailable(raw,context)) || rethrow()
+        else
+            err isa ArgumentError || rethrow()
+        end
         had_list_payload=haskey(context.lists,name) ||
                          haskey(context.unavailable_lists,name)
         if haskey(context.lists,name)
@@ -6285,7 +8021,12 @@ function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractStrin
             _geo_context_forget!(context,name)
         end
         message=sprint(showerror,err)
-        reason=ncodeunits(message)<=240 ? message : String(first(message,220))*"…"
+        # An unmodelable entity/shape production failed inside the bounded
+        # evaluator — the grammar-abort text is misleading as the reason.
+        reason=err isa _GeoSyntaxAbort && _geo_list_term_unmodelable(raw) ?
+            "entity or shape expression requires geometry evaluation" :
+            ncodeunits(message)<=240 ? message :
+                String(first(message,220))*"…"
         context.unavailable[name]=reason
         if had_list_payload
             context.unavailable_lists[name]=reason
@@ -6297,7 +8038,7 @@ function _geo_record_scalar!(context::_GeoNumericContext,name_raw::AbstractStrin
 end
 
 function _geo_record_list!(context::_GeoNumericContext,raw::AbstractString)
-    matched=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\[",strip(raw))
+    matched=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[\[\(]",strip(raw))
     matched===nothing && return false
     name=String(matched.captures[1])
     name in _GEO_SIDE_EFFECT_SYMBOLS && throw(ArgumentError(
@@ -6307,10 +8048,26 @@ function _geo_record_list!(context::_GeoNumericContext,raw::AbstractString)
             context,raw,"read_geo_params: numeric list assignment")
     catch err
         err isa InterruptException && rethrow()
-        (err isa ArgumentError || err isa _GeoSyntaxAbort) || rethrow()
+        # `_GeoSyntaxAbort` propagates to the per-statement recovery — a
+        # syntax error leaves no binding behind upstream — unless the RHS is
+        # a valid entity/shape `ListOfDouble` production the bounded
+        # evaluator cannot model (`Volume In BoundingBox{..}`,
+        # `BooleanX{..}{..}`, `Point{..}`, ...) or reads an
+        # already-unavailable binding, both of which mark the variable
+        # unavailable instead. ArgumentError marks a failed evaluation so
+        # later reads see the variable as unavailable.
+        if err isa _GeoSyntaxAbort
+            (_geo_list_term_unmodelable(raw) ||
+             _geo_rhs_uses_unavailable(raw,context)) || rethrow()
+        else
+            err isa ArgumentError || rethrow()
+        end
         _geo_context_forget!(context,name)
         message=sprint(showerror,err)
-        reason=ncodeunits(message)<=240 ? message : String(first(message,220))*"…"
+        reason=err isa _GeoSyntaxAbort && _geo_list_term_unmodelable(raw) ?
+            "entity or shape expression requires geometry evaluation" :
+            ncodeunits(message)<=240 ? message :
+                String(first(message,220))*"…"
         context.unavailable[name]=reason
         context.unavailable_lists[name]=reason
         push!(context.list_variables,name)
@@ -6360,9 +8117,10 @@ function _geo_brace_terminated_statement(text::AbstractString)
     # `Delete { ListOfShapes }` ends at the closing brace with no `;`, as do
     # `Recursive Delete { ... }` and `Delete Embedded { ... }`.
     if name in ("Delete","Recursive","Show","Hide","Color","Intersect",
-                "Split","Closest","Fillet","Chamfer","ThruSections","Ruled",
+                "Closest","Fillet","Chamfer","ThruSections","Ruled",
                 "BooleanUnion","BooleanDifference","BooleanIntersection",
-                "BooleanFragments")
+                "BooleanFragments","BooleanSection","BooleanFuse",
+                "BooleanCoherence","BooleanCommon","BooleanCut")
         rest0=String(strip(s[nextind(s,firstindex(s),ncodeunits(mm.match)):end]))
         if name=="Recursive"
             dm=match(r"^(Delete|Color|Show|Hide)\b",rest0)
@@ -6380,8 +8138,7 @@ function _geo_brace_terminated_statement(text::AbstractString)
         end
         # `Color`/`Recursive Color` take a ColorExpr before the shape group: a
         # `{r,g,b[,a]}` list is itself a brace group, while named/quoted/option
-        # colors are not. `Split Curve(c){..}` uses one group;
-        # `Split Curve{..} Point{..}` uses two.
+        # colors are not.
         if name=="Color" && !startswith(rest0,"{")
             cm2=match(
                 r"^(?:\"[^\"]*\"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*(?:\s*\[[^\]]*\])?\s*(?:\.\s*[A-Za-z_][A-Za-z0-9_]*)*)",
@@ -6396,24 +8153,24 @@ function _geo_brace_terminated_statement(text::AbstractString)
             rest0=String(strip(rest0[nextind(rest0,firstindex(rest0),
                                            ncodeunits(rm.match)):end]))
             name="ThruSections"
-        elseif name=="Split"
-            cm=match(r"^Curve\s*([({])",rest0)
-            cm===nothing && return false
-            name=cm.captures[1]=="{" ? "Split2" : "Split1"
-            rest0=String(strip(rest0[nextind(rest0,firstindex(rest0),
-                                           ncodeunits("Curve")):end]))
         elseif name=="Intersect"
             cm=match(r"^Curve\b",rest0)
             cm===nothing && return false
             rest0=String(strip(rest0[nextind(rest0,firstindex(rest0),5):end]))
         end
-        groups=if name in ("Show","Hide","ThruSections","Split1","ColorWord")
+        groups=if name in ("Show","Hide","ThruSections","ColorWord")
             1
         elseif name=="Color"
             # `{r,g,b}` color list + shape group = 2 groups.
             startswith(rest0,"{") ? 2 : return false
+        elseif name=="Fillet"
+            # `Fillet {regions} {edges} {radii}`.
+            3
+        elseif name=="Chamfer"
+            # `Chamfer {regions} {edges} {surfaces} {distances}`.
+            4
         else
-            name in ("Split2","Closest","Fillet","Chamfer","Intersect") ||
+            name in ("Closest","Intersect") ||
                 startswith(name,"Boolean") ? 2 : 1
         end
         s=rest0
@@ -6475,10 +8232,31 @@ function _geo_brace_terminated_extrude(text::AbstractString)
         tail=String(strip(rest[nextind(rest,i):end]))
         # A shape-list group completes the statement only when nothing
         # follows it; a numeric vector group must be followed by the shape
-        # list, so the statement is still incomplete.
-        _geo_extrude_shape_group(body) && return isempty(tail)
+        # list, so the statement is still incomplete. A shape-list group
+        # may still be followed by the pipe suffix `Using Wire {expr}`
+        # (`tExtrude '{' ListOfShapes '}' tUsing tWire '{' FExpr '}'`).
+        if _geo_extrude_shape_group(body)
+            isempty(tail) && return true
+            (um=match(r"^Using\s+Wire\b",tail))===nothing && return false
+            grp=_geo_brace_group(String(strip(tail[nextind(tail,
+                firstindex(tail),length(um.match)):end])))
+            return grp!==nothing && isempty(grp[2])
+        end
         rest=tail
     end
+end
+
+# `Extrude { ListOfShapes }` alone is a complete `}`-terminated statement
+# (boundary-layer form) but stays open for the `Using Wire {expr}` pipe
+# suffix — the splitters hold the emit until the next token decides.
+function _geo_extrude_pipe_candidate(stmt::AbstractString)
+    match(r"^Extrude\b",stmt)===nothing && return false
+    grp=_geo_brace_group(String(strip(stmt[nextind(stmt,firstindex(stmt),
+                                                  7):end])))
+    grp===nothing && return false
+    body,tail=grp
+    isempty(tail) || return false
+    return _geo_extrude_shape_group(body)
 end
 
 # `body` is the content of one `{...}` group inside an `Extrude` statement.
@@ -6492,17 +8270,166 @@ function _geo_extrude_shape_group(body::AbstractString)
               "QuadTriNoNewVerts|RecombLaterals|Using|Hole)\\b"),b)!==nothing
 end
 
+# Consume one balanced `{...}` group at the start of `rest` — returns
+# `(body, tail)` or `nothing` when `rest` does not open with a balanced
+# group.
+function _geo_brace_group(rest::AbstractString)
+    startswith(rest,"{") || return nothing
+    depth=0;i=firstindex(rest);last=lastindex(rest)
+    while i<=last
+        c=rest[i]
+        c=='{' && (depth+=1)
+        if c=='}'
+            depth-=1
+            depth==0 && return (String(rest[2:prevind(rest,i)]),
+                                String(strip(rest[nextind(rest,i):end])))
+        end
+        i=nextind(rest,i)
+    end
+    return nothing
+end
+
+const _GEO_CONTROL_BARE=Dict(
+    "Else"=>:else,"EndIf"=>:endif,"EndWhile"=>:endwhile,"EndFor"=>:endfor,
+    "Return"=>:return)
+
+# Scan a balanced open/close group starting at raw[i] (the opener). Returns the
+# index of the matching close on the same line; control headers that spill to a
+# second line are a bounded-subset blocker.
+function _geo_scan_balanced(raw::AbstractString,i::Int,last::Int,
+                            open::Char,close::Char)
+    depth=0;qc='\0';k=i
+    while k<=last
+        c=raw[k]
+        if qc!='\0'
+            c==qc && (qc='\0')
+        elseif c=='"' || c=='\''
+            qc=c
+        elseif c==open
+            depth+=1
+        elseif c==close
+            depth-=1
+            depth==0 && return k
+        end
+        k=nextind(raw,k)
+    end
+    throw(ArgumentError(
+        "execute_geo: control statement must complete on a single line"))
+end
+
+# If raw[i:last] begins a control construct (If/ElseIf/While headers with a
+# parenthesized expression, `For name In {a:b[:c]}`, or the bare Else/EndIf/
+# EndWhile/EndFor markers), return (statement_text, last_consumed_index).
+# Gmsh 4.15.2's built-in kernel accepts only `For name In {a:b[:c]}` — comma
+# lists, single values, and C-style `For (init; cond; incr)` are rejected —
+# and has no While keyword; `While (expr) ... EndWhile` is a bounded
+# Tessella extension.
+function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
+    rest=SubString(raw,i,last)
+    matched=match(
+        r"^(If|ElseIf|While|Else|EndIf|EndWhile|For|EndFor|Function|Macro|Return)\b",
+        rest)
+    matched===nothing && return nothing
+    word=matched.captures[1]
+    if word=="EndWhile"
+        # `EndWhile` is not an upstream keyword — it only acts as a control
+        # marker at a statement boundary (`;`, line end, or EOF). `EndWhile x`
+        # is the upstream `tSTRING`-identifier form (`Unknown command`).
+        k=firstindex(rest)+sizeof(word)
+        while k<=lastindex(rest) && isspace(rest[k])
+            k=nextind(rest,k)
+        end
+        k<=lastindex(rest) && rest[k]!=';' && return nothing
+        return (word,i+sizeof(word)-1)
+    end
+    haskey(_GEO_CONTROL_BARE,word) && return (word,i+sizeof(word)-1)
+    j=firstindex(rest)+sizeof(word)
+    jlast=lastindex(rest)
+    while j<=jlast && isspace(rest[j])
+        j=nextind(rest,j)
+    end
+    if word=="Function" || word=="Macro"
+        # Gmsh's `Function name` header carries an identifier or quoted
+        # string-expression name on the same line and no `;`. A malformed
+        # header is not consumed here: it falls through to the `;` splitter
+        # so execution can report the syntax error at the offending token.
+        name_match=match(
+            r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\"|'[^']*')",SubString(rest,j))
+        name_match===nothing && return nothing
+        consumed=j-1+sizeof(name_match.match)
+        return (String(rest[firstindex(rest):consumed]),i+consumed-1)
+    end
+    if word=="For"
+        if j<=jlast && rest[j]=='('
+            # `For (a:b[:c])` — the anonymous range form.
+            close=_geo_scan_balanced(rest,j,jlast,'(',')')
+            return (String(rest[1:close]),i+close-1)
+        end
+        name_match=match(r"^[A-Za-z_][A-Za-z0-9_]*",SubString(rest,j))
+        name_match===nothing && return nothing
+        j+=sizeof(name_match.match)
+        while j<=jlast && isspace(rest[j])
+            j=nextind(rest,j)
+        end
+        match(r"^In\b",SubString(rest,j))===nothing && return nothing
+        j+=2
+        while j<=jlast && isspace(rest[j])
+            j=nextind(rest,j)
+        end
+        (j<=jlast && rest[j]=='{') || return nothing
+        close=_geo_scan_balanced(rest,j,jlast,'{','}')
+        return (String(rest[1:close]),i+close-1)
+    end
+    (j<=jlast && rest[j]=='(') || return nothing
+    close=_geo_scan_balanced(rest,j,jlast,'(',')')
+    if word=="While"
+        # `While(i) op v` is the upstream `String__Index ( FExpr )` index
+        # write, not the bounded While extension — let the `;` splitter and
+        # the index-assignment path handle it.
+        tail=String(strip(SubString(rest,close+1)))
+        match(r"^(?:\+\+|--|\+=|-=|\*=|/=|=)",tail)!==nothing && return nothing
+    end
+    return (String(rest[1:close]),i+close-1)
+end
+
 function _scan_geo_statements(consume,path::AbstractString)
     buffer=IOBuffer();quote_char='\0';block_comment=false
+    buf_has_content=false
     # `;` inside `{...}` groups (Boolean operand lists, `Delete` suffixes) is
     # part of the statement, not a terminator — matching _geo_exec_statements.
     # Transform and query statements may instead end at their final `}`.
     depth=0
+    # `Extrude {shapes}` is `}`-complete but may still take the `Using Wire`
+    # pipe suffix — its emit is deferred until the next real token, even
+    # across line boundaries.
+    extrude_pending=false
     for raw in eachline(path)
         i=firstindex(raw);lastindex_raw=lastindex(raw)
         while i<=lastindex_raw
+            # Control constructs carry no `;` — emit one as its own statement
+            # whenever it begins at a statement boundary (matching
+            # `_geo_exec_statements`).
+            if !block_comment && quote_char=='\0' && !buf_has_content
+                control=_geo_control_statement(raw,i,lastindex_raw)
+                if control!==nothing
+                    take!(buffer)
+                    consume(control[1])
+                    i=nextind(raw,control[2])
+                    continue
+                end
+            end
             c=raw[i];j=nextind(raw,i)
             nextc=j<=lastindex_raw ? raw[j] : '\0'
+            if extrude_pending && !block_comment && quote_char=='\0' &&
+               !isspace(c) && !(c=='/' && (nextc=='/' || nextc=='*'))
+                extrude_pending=false
+                if !(c=='U' && match(r"^Using\b",
+                        SubString(raw,i,lastindex_raw))!==nothing)
+                    statement=strip(String(take!(buffer)))
+                    isempty(statement) || consume(statement)
+                    buf_has_content=false
+                end
+            end
             if block_comment
                 if c=='*' && nextc=='/'
                     block_comment=false;i=nextind(raw,j);continue
@@ -6523,24 +8450,35 @@ function _scan_geo_statements(consume,path::AbstractString)
                     "read_geo_params: statement exceeds $_MAX_GEO_STATEMENT_BYTES bytes"))
                 block_comment=true;i=nextind(raw,j);continue
             elseif c=='"' || c=='\''
-                quote_char=c;write(buffer,c)
+                quote_char=c;write(buffer,c);buf_has_content=true
             elseif c=='{'
-                depth+=1;write(buffer,c)
+                depth+=1;write(buffer,c);buf_has_content=true
             elseif c=='}'
-                depth=max(0,depth-1);write(buffer,c)
+                depth=max(0,depth-1);write(buffer,c);buf_has_content=true
                 if depth==0 && _geo_brace_terminated_statement(
                         String(buffer.data[1:position(buffer)]))
-                    statement=strip(String(take!(buffer)))
-                    isempty(statement) || consume(statement)
+                    if _geo_extrude_pipe_candidate(
+                            String(buffer.data[1:position(buffer)]))
+                        # Possibly `Extrude {shapes} Using Wire {expr}` —
+                        # hold the emit until the next real token.
+                        extrude_pending=true
+                    else
+                        statement=strip(String(take!(buffer)))
+                        isempty(statement) || consume(statement)
+                        buf_has_content=false
+                    end
                 end
             elseif c==';' && depth==0
                 write(buffer,c)
                 statement=strip(String(take!(buffer)))
-                # A `;` left after a `}`-terminated transform is an empty
-                # statement, as is a bare `;` between statements.
-                all(==(';'),statement) || consume(statement)
+                # A `;` left after a `}`-terminated transform or between
+                # statements is an upstream `syntax error (;)` — it is still
+                # consumed so the diagnostic is recorded.
+                consume(statement)
+                buf_has_content=false
             else
                 write(buffer,c)
+                isspace(c) || (buf_has_content=true)
             end
             position(buffer)<=_MAX_GEO_STATEMENT_BYTES || throw(ArgumentError(
                 "read_geo_params: statement exceeds $_MAX_GEO_STATEMENT_BYTES bytes"))
@@ -6555,8 +8493,21 @@ function _scan_geo_statements(consume,path::AbstractString)
     quote_char=='\0' || throw(ArgumentError("read_geo_params: unterminated quoted string"))
     block_comment && throw(ArgumentError("read_geo_params: unterminated block comment"))
     tail=strip(String(take!(buffer)))
+    if extrude_pending && !isempty(tail)
+        # A held `Extrude {shapes}` with no `Using Wire` following is
+        # complete — emit it before the trailing-content checks.
+        consume(tail);tail=""
+    end
     (depth==0 || isempty(tail)) || throw(ArgumentError(
         "read_geo_params: unterminated brace-delimited statement"))
+    # A trailing run of bare `;` is still statements upstream (`syntax error
+    # (;)` per stray terminator) — consume them for the recorded diagnostic.
+    all(c->c==';'||isspace(c),tail) && !isempty(tail) && (consume(tail);tail="")
+    # Control keywords need no `;` upstream — a trailing `EndFor`/`EndIf`/
+    # `Return` still acts at EOF, closing its level like the execution pass.
+    !isempty(tail) &&
+        match(r"^(If|ElseIf|Else|EndIf|For|EndFor|While|EndWhile|Return|Function|Macro)\b",
+              tail)!==nothing && (consume(tail);tail="")
     code=_geo_unquoted_code(tail)
     if !isempty(tail) && (occursin(r"Field\s*\[",code) ||
                            occursin(r"(?:Background|BoundaryLayer)\s+Field",code) ||
@@ -6733,6 +8684,305 @@ function _geo_scan_physical_members(membership::AbstractString,
     return members
 end
 
+# ======== Scan-side control flow ========
+#
+# Upstream Gmsh drives `If`/`For`/`Function` with lexer-level `skip` calls and
+# `fsetpos` rewinds: dead branches and function bodies never parse, loop bodies
+# re-parse per iteration, and `Return` unwinds an entered `Call`. The params
+# scan mirrors that observable behavior with an explicit level stack: `:if`
+# levels gate statements on `active`, `:for`/`:while`/`:function` levels
+# collect body text which replays (or registers) when the matching closer
+# arrives. `MAX_RECUR_LOOPS`/`MAX_RECUR_TESTS` cap nesting at 100 like the
+# upstream tables.
+
+mutable struct _GeoScanLevel
+    kind::Symbol              # :if :for :while :function
+    active::Bool              # :if branch state; outer-active flag otherwise
+    taken::Bool               # :if — an earlier branch already ran
+    var::String               # :for loop variable ("" for `For (a:b)`)
+    range::Vector{Float64}    # :for — evaluated [first,last,step]
+    cond::String              # :while — condition source
+    buffer::Vector{String}    # :for/:while/:function collected body text
+    name::String              # :function name
+    closed::Bool              # :if — upstream `skip` already closed the level
+    debt::Bool                # :if — opened while `ImbricatedTest` was <= 0
+    nest::Int                 # buffered `For`/`While`/`Function` opens awaiting
+                              # their `EndFor`/`EndWhile`/`Return`
+end
+_GeoScanLevel(kind::Symbol;active::Bool=true,taken::Bool=false,var::String="",
+              range::Vector{Float64}=Float64[],cond::String="",
+              name::String="",closed::Bool=false,debt::Bool=false)=
+    _GeoScanLevel(kind,active,taken,var,range,cond,String[],name,closed,debt,0)
+
+# Unwinds a `Return` inside a replayed `Call` body back to the call site.
+struct _GeoScanReturnSignal end
+
+const _MAX_GEO_SCAN_NESTING=100
+const _MAX_GEO_SCAN_LOOP_ITERATIONS=1_000_000
+
+@inline function _geo_scan_collecting(levels::Vector{_GeoScanLevel})
+    return !isempty(levels) &&
+        levels[end].kind in (:for,:while,:function)
+end
+@inline function _geo_scan_active(levels::Vector{_GeoScanLevel})
+    return all(l -> l.active,levels)
+end
+@inline function _geo_scan_outer_active(levels::Vector{_GeoScanLevel})
+    # Activity of the scope enclosing the current top level.
+    return all(l -> l.active,@view levels[1:end-1])
+end
+
+# Soft numeric evaluation for scan-time conditions/range endpoints: an
+# unknown variable records `yymsg(0)` and yields 0, matching the grammar's
+# already-reduced FExpr arguments.
+function _geo_scan_soft_eval(src::AbstractString,
+                             context::_GeoNumericContext)
+    context.soft_unknown_reads=true
+    try
+        return _geo_eval_numeric(src,context,"read_geo_params")
+    finally
+        context.soft_unknown_reads=false
+    end
+end
+
+# Evaluate a strict `FExpr : FExpr [: FExpr]` range (the `tFor` forms are not
+# general lists: `{1,2}` errors at `,`, `{5}` at `}`, `(5)` at `)` upstream).
+# Each piece is evaluated in order with soft reads; a non-range form aborts
+# at the token the grammar rejected.
+function _geo_scan_for_range(spec::AbstractString,
+                             context::_GeoNumericContext,
+                             caller::AbstractString,
+                             closer::AbstractString)
+    source=String(strip(spec))
+    isempty(source) && _geo_syntax_abort(closer)
+    pieces=_geo_split_range(source,caller)
+    if pieces===nothing || length(pieces)==1
+        # Not a `a:b` form — evaluate the head expression, then report the
+        # offending separator or the closing brace/paren.
+        text=pieces===nothing ? source : pieces[1]
+        comma=_geo_scan_top_level_comma(text)
+        if comma>0
+            _geo_scan_soft_eval(text[firstindex(text):prevind(text,comma)],
+                                context)
+            _geo_syntax_abort(",")
+        end
+        _geo_scan_soft_eval(text,context)
+        _geo_syntax_abort(closer)
+    end
+    first=_geo_scan_soft_eval(pieces[1],context)
+    last=_geo_scan_soft_eval(pieces[2],context)
+    step=length(pieces)==2 ? 1.0 : _geo_scan_soft_eval(pieces[3],context)
+    return Float64[first,last,step]
+end
+
+# First top-level `,` index in `s` (outside every bracket kind and quotes), or
+# 0 — used to locate the comma the upstream range grammar rejects.
+function _geo_scan_top_level_comma(s::AbstractString)
+    parens=0;brackets=0;braces=0;qc='\0'
+    i=firstindex(s);last=lastindex(s)
+    while i<=last
+        c=s[i]
+        if qc!='\0'
+            c==qc && (qc='\0')
+        elseif c=='"' || c=='\''
+            qc=c
+        elseif c=='(';parens+=1
+        elseif c==')';parens-=1
+        elseif c=='[';brackets+=1
+        elseif c==']';brackets-=1
+        elseif c=='{';braces+=1
+        elseif c=='}';braces-=1
+        elseif c==',' && parens==0 && brackets==0 && braces==0
+            return i
+        end
+        i=nextind(s,i)
+    end
+    return 0
+end
+
+# Strip a leading control construct from `line` for the params scan — mirrors
+# `_geo_control_statement`/`_exec_line!`: a malformed header aborts at the
+# offending token (`If foo` → `(foo)`, `For = 5` → `(=)`, `If (x` → `(;)`).
+# Returns (word=..., arg=..., rest=...) or nothing.
+function _geo_scan_control_prefix(line::AbstractString,
+                                  context::_GeoNumericContext)
+    m=match(
+        r"^(If|ElseIf|While|Else|EndIf|For|EndFor|EndWhile|Return|Function|Macro)\b",
+        line)
+    m===nothing && return nothing
+    word=String(m.captures[1])
+    rest=String(strip(line[nextind(line,firstindex(line),
+                                 ncodeunits(word)):end]))
+    # `While`/`EndWhile` are the Tessella bounded extension — upstream has no
+    # lexer tokens for them, so `While = 5` is an ordinary assignment and
+    # `EndWhile x` an `Unknown command`. They only act as control flow in the
+    # `While (cond)` / bare-`EndWhile` shapes.
+    word=="While" && !startswith(rest,"(") && return nothing
+    word=="EndWhile" && !isempty(rest) && return nothing
+    if word in ("Else","EndIf","EndFor","EndWhile","Return")
+        return (word=word,arg="",rest=rest)
+    elseif word=="Function" || word=="Macro"
+        nm=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\"|'[^']*')",rest)
+        nm===nothing && _geo_syntax_abort(_geo_stmt_head_token(rest))
+        return (word="Function",
+                arg=_geo_scan_call_name(nm.match,context),
+                rest=String(strip(rest[nextind(rest,
+                    lastindex(nm.match)):end])))
+    elseif word=="For"
+        if startswith(rest,"(")
+            # `For (a:b[:c])` — the anonymous range form.
+            close=_geo_matching_delim(rest,firstindex(rest))
+            if close==0
+                _geo_scan_soft_eval_safe(rest[2:end],context)
+                _geo_syntax_abort(";")
+            end
+            spec=String(strip(rest[2:prevind(rest,close)]))
+            return (word="For",arg=("",spec,")"),
+                    rest=String(strip(rest[nextind(rest,close):end])))
+        end
+        nm=match(r"^[A-Za-z_][A-Za-z0-9_]*",rest)
+        nm===nothing && _geo_syntax_abort(_geo_stmt_head_token(rest))
+        var=String(nm.match)
+        var in _GEO_LEXER_KEYWORDS && _geo_syntax_abort(var)
+        rest2=String(strip(rest[nextind(rest,lastindex(nm.match)):end]))
+        match(r"^In\b",rest2)===nothing &&
+            _geo_syntax_abort(_geo_stmt_head_token(rest2))
+        rest3=String(strip(rest2[nextind(rest2,firstindex(rest2)+1):end]))
+        startswith(rest3,"{") ||
+            _geo_syntax_abort(_geo_stmt_head_token(rest3))
+        close=_geo_matching_delim(rest3,firstindex(rest3))
+        if close==0
+            _geo_scan_for_range(strip(rest3[2:end]),context,
+                                "read_geo_params: For range","}")
+            _geo_syntax_abort(";")
+        end
+        spec=String(strip(rest3[2:prevind(rest3,close)]))
+        return (word="For",arg=(var,spec,"}"),
+                rest=String(strip(rest3[nextind(rest3,close):end])))
+    else
+        # If/ElseIf/While — parenthesized condition.
+        startswith(rest,"(") ||
+            _geo_syntax_abort(_geo_stmt_head_token(rest))
+        close=_geo_matching_delim(rest,firstindex(rest))
+        if close==0
+            _geo_scan_soft_eval_safe(rest[2:end],context)
+            _geo_syntax_abort(";")
+        end
+        # `While(i) op v` is the upstream `String__Index ( FExpr )` index
+        # write — only `While (cond)` without an affectation tail is the
+        # extension's loop.
+        tail=String(strip(rest[nextind(rest,close):end]))
+        word=="While" && match(r"^(?:\+\+|--|\+=|-=|\*=|/=|=)",tail)!==nothing &&
+            return nothing
+        return (word=word,arg=String(strip(rest[2:prevind(rest,close)])),
+                rest=tail)
+    end
+end
+
+# Soft-eval that degrades an unparseable tail to `syntax error (;)` — for the
+# `If (x`/`For (` headers that ran to the line end upstream still tries to
+# reduce the FExpr, then reports the missing terminator.
+function _geo_scan_soft_eval_safe(src::AbstractString,
+                                  context::_GeoNumericContext)
+    try
+        return _geo_scan_soft_eval(src,context)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa _GeoSyntaxAbort && rethrow()
+        _geo_syntax_abort(";")
+    end
+end
+
+# `Call`/`Function` names: `String__Index` or `StringExpr` upstream — a bare
+# identifier, `x~{i}` string-index, quoted literal, or a string expression.
+function _geo_scan_call_name(raw::AbstractString,context::_GeoNumericContext)
+    s=String(strip(raw))
+    length(s)>=2 && startswith(s,"\"") && endswith(s,"\"") &&
+        return s[2:prevind(s,lastindex(s))]
+    length(s)>=2 && startswith(s,"'") && endswith(s,"'") &&
+        return s[2:prevind(s,lastindex(s))]
+    try
+        return _geo_symbol_name(s,context,"read_geo_params: Call")
+    catch err
+        err isa InterruptException && rethrow()
+        err isa _GeoSyntaxAbort && rethrow()
+        context.soft_unknown_reads=true
+        try
+            return _geo_eval_string(s,context,"read_geo_params: Call")
+        finally
+            context.soft_unknown_reads=false
+        end
+    end
+end
+
+# A "relevant" statement that survived every dispatch arm is malformed —
+# report the token upstream's committed production rejects, mirroring the
+# `_exec_line!` ordering:
+#   `Physical`      → after `tPhysical`, a kind word, `(`, `)`, `=`
+#   `Field[...]`    → `[ FExpr ]`, optional `.member`, then `=`
+#   `<name> Field`  → `Field` when the head is a keyword (`SetMaxTag Field` →
+#                     `(Field)`), else the token after `Field`
+#                     (`Background Field;` → `(;)`)
+#   `X.Y ...`       → option-write heads; the token after `X.Y`
+#   mid-expression  → the relevant keyword itself (`x = 5+Field[1]` → `(Field)`)
+function _geo_scan_malformed_abort!(body::AbstractString,
+                                    context::_GeoNumericContext)
+    src=String(strip(body))
+    if match(r"^Physical\b",src)!==nothing
+        rest=String(strip(src[nextind(src,firstindex(src)+7):end]))
+        km=match(r"^[A-Za-z_][A-Za-z0-9_]*",rest)
+        km===nothing && _geo_syntax_abort(_geo_stmt_head_token(rest))
+        kind=String(km.match)
+        kind in ("Point","Curve","Line","Surface","Volume") ||
+            _geo_syntax_abort(kind)
+        rest=String(strip(rest[nextind(rest,lastindex(km.match)):end]))
+        startswith(rest,"(") ||
+            _geo_syntax_abort(_geo_stmt_head_token(rest))
+        close=_geo_matching_delim(rest,firstindex(rest))
+        if close==0
+            _geo_scan_soft_eval(strip(rest[2:end]),context)
+            _geo_syntax_abort(";")
+        end
+        _geo_syntax_abort(_geo_stmt_head_token(
+            rest[nextind(rest,close):end]))
+    end
+    if match(r"^Field\b",src)!==nothing
+        rest=String(strip(src[nextind(src,firstindex(src)+4):end]))
+        if startswith(rest,"[")
+            close=_geo_matching_delim(rest,firstindex(rest))
+            close==0 && _geo_syntax_abort("[")
+            _geo_scan_soft_eval(rest[2:prevind(rest,close)],context)
+            rest=String(strip(rest[nextind(rest,close):end]))
+            (dm=match(r"^\.\s*[A-Za-z_][A-Za-z0-9_]*",rest))!==nothing &&
+                (rest=String(strip(rest[nextind(rest,
+                    lastindex(dm.match)):end])))
+        end
+        _geo_syntax_abort(_geo_stmt_head_token(rest))
+    end
+    if (m=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+Field\b(.*)$",src))!==nothing
+        # A keyword head already committed its own production upstream —
+        # `SetMaxTag Field` errors on `Field` (the expected GeoEntity slot),
+        # while a plain `tSTRING` head makes `tField` the `String__Index`
+        # affectation slot, erroring at what follows (`Background Field;` →
+        # `(;)`).
+        _geo_tstring_valid(String(m.captures[1])) ||
+            _geo_syntax_abort("Field")
+        _geo_syntax_abort(_geo_stmt_head_token(m.captures[2]))
+    end
+    if (m=match(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*",src))!==nothing
+        _geo_syntax_abort(_geo_stmt_head_token(
+            src[nextind(src,lastindex(m.match)):end]))
+    end
+    # A relevant token inside an otherwise fine statement aborts at that
+    # token (`x = 5 + Field[1]` → `syntax error (Field)`).
+    rm=match(
+        r"\b(Physical|Field|Background|BoundaryLayer|Mesh|Geometry|Point|Curve|Line|Surface|Volume)\b|Mesh\.[A-Za-z_][A-Za-z0-9_]*|Geometry\.[A-Za-z_][A-Za-z0-9_]*",
+        src)
+    rm===nothing ? _geo_syntax_abort(_geo_stmt_head_token(src)) :
+        _geo_syntax_abort(_geo_stmt_head_token(src[rm.offset:end]))
+    return nothing
+end
+
 """
     read_geo_params(path; max_file_bytes=typemax(Int)) -> GeoParams
 
@@ -6759,10 +9009,14 @@ counter. Built-in can lower a counter; OpenCASCADE only raises it. Tracked
 and re-tags the result boundary at the lowest free tags; any other topology
 change makes the affected allocator unavailable. Reads use the greatest
 counter among activated factories.
-Loops, macros, option reads, random/external functions, dynamic ranges, CSG and
-Boolean geometry are deliberately not evaluated. Numeric field options are
-normalized to literals; geometric references and string or point-dependent
-field expressions remain source strings.
+`If`/`ElseIf`/`Else`/`EndIf` conditionals, `For` ranges, the bounded `While`
+extension, `Function`/`Macro` definitions and `Call` replay follow upstream's
+lexer-level skip semantics: dead branches emit no diagnostics, `ElseIf`
+conditions still evaluate, loop bodies re-scan per iteration, function bodies
+register at `Return` and re-scan at `Call`. Option reads, random/external
+functions, CSG and Boolean geometry are deliberately not evaluated. Numeric
+field options are normalized to literals; geometric references and string or
+point-dependent field expressions remain source strings.
 """
 function read_geo_params(path;max_file_bytes=typemax(Int))
     caller="read_geo_params"
@@ -6801,48 +9055,596 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
     # replays each statement and prints them once, so the scan stays quiet.
     context.stderr_diagnostics=false
     allocator_state=_GeoTagAllocatorState()
-    control_depth=0
+    # Control-flow bookkeeping for the streaming pass — see `_GeoScanLevel`.
+    # `functions_defined` holds `Function`/`Macro` bodies for `Call` replay.
+    ctrl_levels=_GeoScanLevel[]
+    functions_defined=Dict{String,Vector{String}}()
+    # Loop bodies replay *after* their level pops, so the stack alone cannot
+    # reproduce upstream's `ImbricatedLoop` count — track replay depth.
+    loop_nesting=Ref(0)
+    # `ImbricatedTest` is mirrored on `context.if_depth` (also readable via
+    # the `TestLevel` option): `If` shifts increment, closers decrement, and
+    # stray `EndIf`s drive it negative — an `If` then opens a *debt* level
+    # whose midpoints are orphan errors but whose bodies still run.
+    # `skip_depth` mirrors upstream `skip`/`skipTest` `nb_skip`: `If` words
+    # inside a dead region only nest the char-level scan and never parse.
+    skip_depth=Ref(0)
     # `Exit`/`Abort` terminate the stream — everything after is unreachable.
-    # `stopped` lives in a Ref so the self-recursive closure never boxes it.
+    # `stopped` lives in a Ref so the self-recursive closure never boxes it;
+    # `stop_kind` scopes the stop like upstream: `Exit` is process-global,
+    # `Abort` and the >20-error cap halt only the current file's ParseFile.
     stopped=Ref(false)
+    stop_kind=Ref(:none)
+    # `error tEND` recovery (Gmsh.y:276): a syntax error discards tokens
+    # through the next `;`. Control keywords carry no `;`, so the discard
+    # eats them plus the first `;`-terminated statement — set after a
+    # control-header abort, cleared at file boundaries.
+    discard_pending=Ref(false)
+    # Replay a collected loop body once per iteration — upstream re-parses the
+    # body text at each `EndFor` rewind, so per-statement recovery applies.
+    function _scan_replay(body::Vector{String})
+        for stmt in body
+            stopped[] && break
+            _consume_stmt(stmt)
+        end
+        return nothing
+    end
+    function _scan_bind_loop_var(var::AbstractString,value::Float64)
+        # `For name In {..}` — upstream clears the list flag on the symbol and
+        # stores the scalar (`s.list = false; s.value[0] = first`).
+        isempty(var) && return nothing
+        delete!(context.lists,var)
+        delete!(context.list_variables,var)
+        delete!(context.unavailable_lists,var)
+        _geo_context_set_scalar!(context,var,value,caller)
+        return nothing
+    end
+    # `EndFor`'s increment — `s.value[0] += step` through the live symbol, so
+    # a body's own write propagates; a missing symbol is `Unknown loop
+    # variable`, a list payload `Bad loop variable`, each recoverable.
+    function _scan_loop_advance(var::AbstractString,x0::Float64,step::Float64,
+                                context::_GeoNumericContext,
+                                caller::AbstractString)
+        isempty(var) && return x0+step
+        if !haskey(context.values,var) && !haskey(context.lists,var)
+            _geo_yyerror!(context,"Unknown loop variable '$var'")
+            return x0
+        end
+        haskey(context.lists,var) &&
+            (_geo_yyerror!(context,"Bad loop variable $var");return x0)
+        x0=context.values[var]+step
+        _scan_bind_loop_var(var,x0)
+        return x0
+    end
+    # A control header whose evaluation fails on an unavailable value makes
+    # the whole construct untrackable — upstream it runs for real, so the
+    # body may mutate any binding: invalidate the tracked state and treat
+    # the header as inactive (loop skipped, branch not taken).
+    # `_GeoSyntaxAbort` still reports a genuinely malformed header.
+    function _scan_untrackable!()
+        reason="a loop or conditional reading an unavailable value may have changed it"
+        _geo_invalidate_context!(context,reason)
+        _geo_allocator_invalidate!(
+            allocator_state,reason;physical=true)
+        return nothing
+    end
+    # After an untrackable loop the names its body assigns exist upstream
+    # (with unknown values) — mark them unavailable so later conditional
+    # reads take the untrackable path instead of `Unknown variable`.
+    function _scan_mark_body_targets!(buffer::Vector{String})
+        reason="a loop that may have assigned it could not be tracked"
+        for stmt in buffer,
+            m in eachmatch(r"(?:^|[^A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]\n]*\]|\([^\)\n]*\))?\s*(?:\+=|-=|\*=|/=|=(?!=)|\+\+|--)",stmt)
+            name=String(m.captures[1])
+            _geo_context_forget!(context,name)
+            context.unavailable[name]=reason
+            context.unavailable_lists[name]=reason
+        end
+        return nothing
+    end
+    function _scan_push(levels::Vector{_GeoScanLevel},level::_GeoScanLevel)
+        # `If` nesting is capped through `context.if_depth` (`ImbricatedTest`)
+        # at the shift site; loops count open levels plus replay depth —
+        # upstream's `ImbricatedLoop` covers both.
+        if level.kind in (:for,:while)
+            count(l->l.kind in (:for,:while),levels)+loop_nesting[] <
+                _MAX_GEO_SCAN_NESTING-1 ||
+                _geo_yyerror!(context,
+                    "Reached maximum number of imbricated loops")
+        end
+        push!(levels,level)
+        return nothing
+    end
+    function _scan_replay_loop(body::Vector{String})
+        loop_nesting[]+=1
+        try
+            _scan_replay(body)
+        finally
+            loop_nesting[]-=1
+        end
+        return nothing
+    end
+    # End-of-file drain for one parsed file (upstream lexer semantics): an
+    # `If` whose last branch ran stays silent, a pending dead-region skip
+    # reports `Unexpected end of file` and marks the run failed, an unclosed
+    # `For`/`While` with a live header replays its buffered body once (the
+    # pass upstream already streamed) while a skipped one reports the EOF,
+    # and an unclosed `Function` reports the EOF but leaves the name
+    # registered (upstream `createFunction` ran at the header). Only levels
+    # at or above `min_depth` belong to this file — outer levels were opened
+    # by an including parent and persist across it.
+    function _scan_eof_drain(min_depth::Int)
+        # A dead-region `skip`/`skipTest` dies with the file — its nested
+        # `If` words never reach the parent stream.
+        skip_depth[]=0
+        # At most one collecting level can sit on top of the `If` run — while
+        # a level collects, every other control word buffers as text.
+        # Live `If` levels persist across the file boundary (upstream's
+        # `ImbricatedTest` is global — a parent's `EndIf` still closes one);
+        # only dead regions and the open collecting level unwind here.
+        while length(ctrl_levels)>min_depth &&
+              ctrl_levels[end].kind!==:if
+            # Pop before replaying: a level still on the stack collects its
+            # own replayed lines back into `buffer`, which would never
+            # terminate.
+            top=pop!(ctrl_levels)
+            if top.kind===:for
+                if top.active && !isempty(top.range)
+                    first,last,step=top.range
+                    if (step>0 && first>last) || (step<0 && first<last)
+                        # Upstream's `skip("For","EndFor")` was mid-flight.
+                        _geo_eof_error!(context)
+                    else
+                        # The buffered body is the one pass upstream already
+                        # streamed before `EndFor` would have rewound.
+                        _scan_replay_loop(top.buffer)
+                    end
+                end
+            elseif top.kind===:while
+                if top.active
+                    # `While` mirrors `For`: a true header condition streamed
+                    # the body once (replay it), a false one was a dead
+                    # region whose `skip` reports the EOF.
+                    if _geo_scan_soft_eval(top.cond,context)!=0
+                        _scan_replay_loop(top.buffer)
+                    else
+                        _geo_eof_error!(context)
+                    end
+                end
+            else # :function — upstream registered the name at the header
+                if top.active
+                    haskey(functions_defined,top.name) ||
+                        (functions_defined[top.name]=top.buffer)
+                    _geo_eof_error!(context)
+                end
+            end
+        end
+        # Inactive `If` levels above `min_depth` were mid-`skip`/`skipTest`
+        # at this file's EOF — upstream reports and decrements each. A
+        # `closed` level already decremented at its closing midpoint.
+        for k in length(ctrl_levels):-1:min_depth+1
+            lvl=ctrl_levels[k]
+            lvl.kind===:if || break
+            lvl.active && break
+            _geo_eof_error!(context)
+            lvl.closed || (context.if_depth-=1)
+            pop!(ctrl_levels)
+        end
+        return nothing
+    end
+    # Bison recovery: `error tEND` (Gmsh.y:276) discards tokens through the
+    # next `;` after a syntax error. The scan's statements are `;`-delimited
+    # (control keywords never split), so an abort's discard region is
+    # normally inside the aborted statement — only a `;`-less line (a
+    # replayed bare control or a `}`-terminated statement) spills it into
+    # following statements. The diagnostic is recorded (muted) and execution
+    # replays the statement for the visible error.
     function _consume_stmt(line)
+        if discard_pending[]
+            endswith(rstrip(line),';') && (discard_pending[]=false)
+            return nothing
+        end
+        # `gmsh_yyerrorstate > 20` aborts the current file's ParseFile —
+        # counted against `file_error_base` so an `Include`d file gets its
+        # own budget.
+        if !stopped[] &&
+           length(context.exec_errors)-context.file_error_base>20
+            _geo_yyerror!(context,"Too many errors: aborting parser...")
+            stopped[]=true
+            stop_kind[]=:toomany
+        end
+        stopped[] && return nothing
+        try
+            _consume_stmt_ctrl(String(line))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa _GeoSyntaxAbort || rethrow()
+            # Detail-bearing aborts are runtime diagnostics (unknown or
+            # unavailable names, domain and resource-limit failures) —
+            # upstream prints them verbatim, so the scan records the detail.
+            # Bare `syntax error (<token>)` is only for grammar failures.
+            _geo_yyerror!(context,isempty(err.detail) ?
+                "syntax error ($(err.token))" : err.detail)
+            endswith(rstrip(line),';') || (discard_pending[]=true)
+        end
+        return nothing
+    end
+    # Strip control prefixes off `line`, update the level stack, then route the
+    # residual statement: buffered when the innermost level collects, skipped
+    # in dead branches, otherwise processed by `_consume_stmt_inner`.
+    function _consume_stmt_ctrl(line::String)
+        stopped[] && return nothing
+        residual=String(strip(line))
+        # Header aborts escape marked: the `error tEND` discard then applies
+        # (a statement-level abort reaches `_consume_stmt` unmarked — its own
+        # `;` already terminates the recovery).
+        try
+        while true
+            isempty(residual) && return nothing
+            collecting=_geo_scan_collecting(ctrl_levels)
+            if !collecting &&
+               (!_geo_scan_active(ctrl_levels) || skip_depth[]>0)
+                # Upstream's dead-region `skip`/`skipTest` is char-level —
+                # `If` words only nest the scan (`nb_skip`), while `For`,
+                # `While`, `Function` and `Macro` headers — malformed or
+                # not — are invisible raw text.
+                wm=match(r"^(If|For|While|Function|Macro)\b",residual)
+                if wm!==nothing
+                    wm.match=="If" && (skip_depth[]+=1)
+                    return nothing
+                end
+                if skip_depth[]>0
+                    # Inside a nested `If` every midpoint/closer word is
+                    # invisible; the matching `EndIf` decrements `nb_skip`.
+                    match(r"^(ElseIf|Else)\b",residual)!==nothing &&
+                        return nothing
+                    if match(r"^EndIf\b",residual)!==nothing
+                        skip_depth[]-=1
+                        return nothing
+                    end
+                end
+                # A midpoint that fires while a branch already ran makes
+                # upstream `skip("If","EndIf")` — the level is *closed* and
+                # only `If`/`EndIf` words remain visible: later `ElseIf`/
+                # `Else` tokens are skipped text, not reparse candidates.
+                if !isempty(ctrl_levels) && (tl=ctrl_levels[end]).kind===:if &&
+                   tl.closed &&
+                   match(r"^(ElseIf|Else)\b",residual)!==nothing
+                    return nothing
+                end
+            end
+            pref=_geo_scan_control_prefix(residual,context)
+            pref===nothing && break
+            word=pref.word;arg=pref.arg;rest=pref.rest
+            handled=false
+            if collecting
+                top=ctrl_levels[end]
+                if top.kind===:for && word=="EndFor" && top.nest==0
+                    pop!(ctrl_levels)
+                    if top.active && !isempty(top.range)
+                        first,last,step=top.range
+                        # Upstream binds `first` at the header and advances
+                        # at `EndFor` through the live symbol — a body's own
+                        # `i = ...` write propagates, and a zero step is
+                        # legal (the body runs once, then the check pops).
+                        if !((step>0 && first>last) || (step<0 && first<last))
+                            x0=first;iterations=0
+                            while true
+                                _scan_replay_loop(top.buffer)
+                                stopped[] && break
+                                iterations+=1
+                                iterations<=_MAX_GEO_SCAN_LOOP_ITERATIONS ||
+                                    throw(ArgumentError(
+                                        "$caller: loop exceeds " *
+                                        "$_MAX_GEO_SCAN_LOOP_ITERATIONS " *
+                                        "iterations"))
+                                x0=_scan_loop_advance(
+                                    top.var,x0,step,context,caller)
+                                (step>0 ? x0<=last :
+                                 step<0 ? x0>=last : false) || break
+                            end
+                        end
+                    elseif top.active
+                        # Untrackable range — the buffered body never
+                        # replayed, so its assignment targets are values the
+                        # scan cannot know.
+                        _scan_mark_body_targets!(top.buffer)
+                    end
+                    handled=true
+                elseif top.kind===:while && word=="EndWhile" && top.nest==0
+                    pop!(ctrl_levels)
+                    if top.active
+                        iterations=0
+                        untrackable=false
+                        while !stopped[] && !untrackable
+                            cond=try
+                                _geo_scan_soft_eval(top.cond,context)!=0
+                            catch err
+                                err isa InterruptException && rethrow()
+                                err isa ArgumentError || rethrow()
+                                untrackable=true
+                                false
+                            end
+                            cond || break
+                            iterations+=1
+                            iterations<=_MAX_GEO_SCAN_LOOP_ITERATIONS ||
+                                throw(ArgumentError(
+                                    "$caller: loop exceeds " *
+                                    "$_MAX_GEO_SCAN_LOOP_ITERATIONS iterations"))
+                            _scan_replay_loop(top.buffer)
+                        end
+                        if untrackable
+                            _scan_untrackable!()
+                            _scan_mark_body_targets!(top.buffer)
+                        end
+                    end
+                    handled=true
+                elseif top.kind===:function && word=="Return" && top.nest==0
+                    pop!(ctrl_levels)
+                    if top.active
+                        # Upstream keeps the first body — a redefinition
+                        # already errored at its `Function` header.
+                        haskey(functions_defined,top.name) ||
+                            (functions_defined[top.name]=top.buffer)
+                    end
+                    handled=true
+                end
+                if !handled
+                    # A foreign control word inside a collecting level is
+                    # body text — but only that word. The rest of a joined
+                    # statement (`EndWhile EndFor`) is still scanned so a
+                    # closer for an *outer* family level applies, matching
+                    # upstream's flat token stream.
+                    if top.nest>0 && word in ("EndFor","EndWhile","Return")
+                        # The closer of a loop/function nested inside the
+                        # buffered body — it unwinds the count, it does not
+                        # close this level.
+                        top.nest-=1
+                    elseif word in ("For","While","Function","Macro")
+                        top.nest+=1
+                    end
+                    consumed=String(strip(chopsuffix(residual,rest)))
+                    isempty(consumed) || push!(top.buffer,consumed)
+                end
+            else
+                handled=true
+                if word=="If"
+                    # `tIf` shifts: `ImbricatedTest++` — the FExpr cond
+                    # already reduced (it reads the pre-increment level).
+                    parent=_geo_scan_active(ctrl_levels)
+                    cond=false
+                    if parent
+                        cond=try
+                            _geo_scan_soft_eval(arg,context)!=0
+                        catch err
+                            err isa InterruptException && rethrow()
+                            err isa ArgumentError || rethrow()
+                            _scan_untrackable!()
+                            false
+                        end
+                    end
+                    context.if_depth+=1
+                    if context.if_depth>_MAX_GEO_SCAN_NESTING-1
+                        _geo_yyerror!(context,
+                            "Reached maximum number of imbricated tests")
+                        context.if_depth=_MAX_GEO_SCAN_NESTING-1
+                    end
+                    _scan_push(ctrl_levels,_GeoScanLevel(
+                        :if;active=cond,taken=cond,
+                        debt=context.if_depth<=0))
+                elseif word=="ElseIf"
+                    if !isempty(ctrl_levels) &&
+                       ctrl_levels[end].kind===:if
+                        top=ctrl_levels[end]
+                        parent=_geo_scan_outer_active(ctrl_levels)
+                        if top.debt
+                            # Opened at `ImbricatedTest<=0`: the FExpr still
+                            # reduces, then the token is an orphan error and
+                            # the following text parses live.
+                            parent && _geo_scan_soft_eval(arg,context)
+                            _geo_yyerror!(context,"Orphan ElseIf")
+                            top.active=parent
+                            top.taken=true
+                        elseif parent
+                            # The FExpr argument already reduced upstream —
+                            # it evaluates even after a taken branch.
+                            c=try
+                                _geo_scan_soft_eval(arg,context)!=0
+                            catch err
+                                err isa InterruptException && rethrow()
+                                err isa ArgumentError || rethrow()
+                                _scan_untrackable!()
+                                false
+                            end
+                            was=top.taken
+                            top.taken|=c
+                            top.active=!was && c
+                            # A prior branch already ran: upstream now
+                            # `skip`s to `EndIf`, closing the level — later
+                            # midpoints are invisible text.
+                            if was
+                                top.closed=true
+                                context.if_depth-=1
+                            end
+                        else
+                            top.active=false
+                        end
+                    else
+                        _geo_scan_active(ctrl_levels) || (residual=rest;continue)
+                        _geo_scan_soft_eval(arg,context)
+                        _geo_yyerror!(context,"Orphan ElseIf")
+                    end
+                elseif word=="Else"
+                    if !isempty(ctrl_levels) &&
+                       ctrl_levels[end].kind===:if
+                        top=ctrl_levels[end]
+                        parent=_geo_scan_outer_active(ctrl_levels)
+                        if top.debt
+                            _geo_yyerror!(context,"Orphan Else")
+                            top.active=parent
+                            top.taken=true
+                        elseif top.taken
+                            # `Else` on a taken chain — upstream `skip`s to
+                            # `EndIf` and closes the level.
+                            top.closed=true
+                            top.active=false
+                            context.if_depth-=1
+                        else
+                            # `taken` is *not* set — upstream's status flag
+                            # stays 0 on `Else`, so a following ElseIf can
+                            # still activate.
+                            top.active=parent
+                        end
+                    else
+                        _geo_scan_active(ctrl_levels) &&
+                            _geo_yyerror!(context,"Orphan Else")
+                    end
+                elseif word=="EndIf"
+                    if !isempty(ctrl_levels) &&
+                       ctrl_levels[end].kind===:if
+                        top=pop!(ctrl_levels)
+                        if top.debt
+                            # A debt level closes below zero either way; the
+                            # `EndIf` only parses (and warns) when the cond
+                            # ran live or a midpoint stopped `skipTest` —
+                            # otherwise the skip consumed it silently.
+                            context.if_depth-=1
+                            top.taken &&
+                                _geo_yywarn!(context,"Orphan EndIf")
+                        elseif !top.closed
+                            # A `closed` level's `ImbricatedTest` already
+                            # decremented at the closing midpoint; the
+                            # `EndIf` was consumed by the skip.
+                            context.if_depth-=1
+                        end
+                    else
+                        # `tEndIf` decrements unconditionally — the warning
+                        # fires whenever the result is negative.
+                        context.if_depth-=1
+                        context.if_depth<0 &&
+                            _geo_yywarn!(context,"Orphan EndIf")
+                    end
+                elseif word=="For"
+                    var,spec,closer=arg
+                    parent=_geo_scan_active(ctrl_levels)
+                    range=Float64[]
+                    if parent
+                        range=try
+                            _geo_scan_for_range(
+                                spec,context,"$caller: For range",closer)
+                        catch err
+                            err isa InterruptException && rethrow()
+                            err isa ArgumentError || rethrow()
+                            _scan_untrackable!()
+                            Float64[]
+                        end
+                    end
+                    parent && !isempty(var) && !isempty(range) &&
+                        _scan_bind_loop_var(var,range[1])
+                    _scan_push(ctrl_levels,_GeoScanLevel(
+                        :for;active=parent,var=var,range=range))
+                elseif word=="While"
+                    _scan_push(ctrl_levels,_GeoScanLevel(
+                        :while;active=_geo_scan_active(ctrl_levels),
+                        cond=arg))
+                elseif word=="EndFor"
+                    _geo_scan_active(ctrl_levels) &&
+                        _geo_yyerror!(context,"Invalid For/EndFor loop")
+                elseif word=="EndWhile"
+                    # `While` is a Tessella extension — bare `EndWhile` is a
+                    # no-diagnostic marker here.
+                elseif word=="Function"
+                    parent=_geo_scan_active(ctrl_levels)
+                    # `createFunction` registers the name at this reduction,
+                    # before the body `skip` runs — a redefinition errors
+                    # here, not at `Return`, and the first body wins.
+                    parent && haskey(functions_defined,arg) &&
+                        _geo_yyerror!(context,
+                            "Redefinition of function $arg")
+                    _scan_push(ctrl_levels,_GeoScanLevel(
+                        :function;active=parent,name=arg))
+                elseif word=="Return"
+                    # `Return` inside a dead region is invisible text in
+                    # upstream's family `skip` — it only unwinds a `Call`
+                    # when the enclosing branches actually run.
+                    if _geo_scan_active(ctrl_levels)
+                        context.call_depth>0 && throw(_GeoScanReturnSignal())
+                        _geo_yyerror!(context,"Error while exiting function")
+                    end
+                end
+            end
+            residual=rest
+        end
+        catch err
+            err isa InterruptException && rethrow()
+            err isa _GeoSyntaxAbort || rethrow()
+            throw(_GeoSyntaxAbort(err.token,err.detail,true))
+        end
+        isempty(residual) && return nothing
+        if _geo_scan_collecting(ctrl_levels)
+            push!(ctrl_levels[end].buffer,residual)
+            return nothing
+        end
+        _geo_scan_active(ctrl_levels) || return nothing
+        # `Call name;` — upstream `enterFunction` re-parses the recorded body
+        # in the caller's scope; an unknown name is a recoverable diagnostic.
+        if (cm=match(r"^Call\s+(.+?)\s*;?\s*$",residual))!==nothing
+            name=_geo_scan_call_name(cm.captures[1],context)
+            body=get(functions_defined,name,nothing)
+            if body===nothing
+                _geo_yyerror!(context,"Unknown function '$name'")
+            else
+                depth0=length(ctrl_levels)
+                context.call_depth+=1
+                try
+                    context.call_depth<=128 || throw(ArgumentError(
+                        "$caller: Call depth exceeds 128"))
+                    _scan_replay(body)
+                catch err
+                    err isa _GeoScanReturnSignal || rethrow()
+                    resize!(ctrl_levels,depth0)
+                finally
+                    context.call_depth-=1
+                end
+            end
+            return nothing
+        end
+        _consume_stmt_inner(residual)
+        return nothing
+    end
+    function _consume_stmt_inner(line)
         stopped[] && return
         raw_body=if endswith(line,";")
             String(strip(line[firstindex(line):prevind(line,lastindex(line))]))
         else
             _geo_brace_terminated_statement(line) || throw(ArgumentError(
-                "read_geo_params: internal statement scanner lost a terminator"))
+                "read_geo_params: internal statement scanner lost a terminator: " *
+                repr(line)))
             String(strip(line))
+        end
+        # A bare `;` (including the `;` tail after a `}`-terminated statement)
+        # is an upstream `syntax error (;)` — one diagnostic per stray
+        # terminator, recorded, then recovery resumes.
+        if isempty(raw_body) || all(c->c==';'||isspace(c),raw_body)
+            for _ in 2:count(==(';'),line)
+                _geo_yyerror!(context,"syntax error (;)")
+            end
+            _geo_syntax_abort(";")
         end
         raw_code=_geo_unquoted_code(raw_body)
 
-        # Any control-flow/macro context could mutate prior scalar bindings.  We
-        # do not interpret it, so invalidate those bindings instead of using a
-        # stale value later.
-        if occursin(r"\b(?:For|EndFor|If|ElseIf|Else|EndIf|Macro|Function|Return|Call|DefineConstant|UndefineConstant)\b",raw_code)
+        # `Call`/`DefineConstant`-family statements mutate state the scan does
+        # not model — invalidate prior bindings instead of using a stale value
+        # later. Control headers never reach this point: `_consume_stmt_ctrl`
+        # strips them before dispatch.
+        if occursin(r"\b(?:Call|DefineConstant|UndefineConstant)\b",raw_code)
             reason="an unsupported loop, conditional, macro or include may have changed it"
             _geo_invalidate_context!(context,reason)
             _geo_allocator_invalidate!(
                 allocator_state,reason;physical=true)
         end
-        # Gmsh's EndIf/EndFor/Return do not carry semicolons; the streaming
-        # scanner consequently receives them as a harmless prefix of the first
-        # statement after the closed block.
-        body,closed=_geo_strip_control_terminators(raw_body)
-        control_depth=max(0,control_depth-closed)
+        body=raw_body
         code=_geo_unquoted_code(body)
-        opened=count(_ -> true,eachmatch(r"\b(?:For|If|Macro|Function)\b",code))
-        control_depth+=opened
-        if control_depth>0
-            reason="an unsupported loop, conditional or macro may have changed it"
-            _geo_invalidate_context!(context,reason)
-            _geo_allocator_invalidate!(
-                allocator_state,reason;physical=true)
-            _geo_relevant_code(code) && throw(ArgumentError(
-                "read_geo_params: malformed relevant statement or unsupported control-flow/macro context: " *
-                _geo_expr_preview(body)))
-            return
-        end
 
         # `Physical X{..}` selectors and Boundary-family actions read the
         # synced model mid-statement — the grammar gates that sync on
@@ -7073,8 +9875,8 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
                 end
                 return
             end
-            dl.captures[1]===nothing || throw(ArgumentError(
-                "read_geo_params: `Recursive Delete` requires a `{ ListOfShapes }` body"))
+            dl.captures[1]===nothing || _geo_syntax_abort(
+                isempty(tail) ? ";" : string(first(tail)))
             if (em=match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\")\s*\{",tail))!==nothing
                 word=strip(em.captures[1],'"')
                 word=="Embedded" || throw(ArgumentError(
@@ -7121,16 +9923,22 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
                     "read_geo_params: Delete namespace index")
                 String(nsm.captures[1])*"_"*string(idx)
             else
-                throw(ArgumentError("read_geo_params: malformed Delete statement"))
+                # `tDelete` expects a name, `name~{i}`, `{ ... }` or `[...]` —
+                # upstream's syntax error lands on the offending token
+                # (`Delete = 5` → `(=)`).
+                _geo_syntax_abort(isempty(tail) ? ";" :
+                    string(first(tail)))
             end
             if name=="All"
                 # `ClearProject` — model, fields, physical names, parser
-                # variables (numeric AND string) and function definitions all
-                # go away; the factory reverts to built-in.
+                # variables (numeric AND string) and the struct namespaces
+                # all go away; the factory reverts to built-in. Function
+                # definitions survive — `FunctionManager` is not cleared.
                 _geo_allocator_reset_model!(allocator_state,context;fresh=true)
                 allocator_state.factory=:builtin
                 empty!(context.values);empty!(context.lists)
-                empty!(context.strings);empty!(context.functions)
+                empty!(context.strings)
+                empty!(context.structs);empty!(context.struct_maxtag)
                 empty!(context.list_variables)
                 empty!(context.unavailable);empty!(context.unavailable_lists)
                 context.stored_list_items=0
@@ -7178,15 +9986,34 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
                 scan_has_mesh[]=false
                 return
             elseif name=="Struct"
-                return  # no struct namespaces during `.geo` scanning
+                # `gmsh_yynamespaces.clear()`.
+                empty!(context.structs);empty!(context.struct_maxtag)
+                return
             end
             known=haskey(context.values,name)||haskey(context.lists,name)||
                   haskey(context.unavailable,name)||
                   haskey(context.unavailable_lists,name)
-            known || throw(ArgumentError(
-                "read_geo_params: unknown object or expression to delete $(repr(name))"))
+            # `yymsg(0)` upstream — a recorded diagnostic, recoverable.
+            known || _geo_yyerror!(context,
+                "Unknown object or expression to delete '$name'")
             _geo_context_forget!(context,name)
             delete!(context.unavailable,name);delete!(context.unavailable_lists,name)
+            return
+        end
+
+        # `Struct name[...] ;` — `DefineStruct tEND`. The definition lands in
+        # the scan's namespace map so `x.member` reads resolve downstream;
+        # a redefinition or option error is a recorded diagnostic, not a
+        # scan abort (upstream `yymsg(0)` recovery semantics).
+        if (sm=match(r"^Struct\s+(.+?)\s*;?\s*$",body))!==nothing
+            try
+                _geo_exec_struct_def!(String(sm.captures[1]),context)
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort && rethrow()
+                err isa ArgumentError || rethrow()
+                _geo_yyerror!(context,err.msg)
+            end
             return
         end
 
@@ -7195,17 +10022,37 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         # declaration.
         match(r"^(?:Translate|Rotate|Dilate|Symmetry|Affine|Duplicata|Extrude|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",body)!==nothing &&
             return
+        # Bare `BooleanX {..}{..}`, `BooleanX(tag) = {..}{..}` and the OCC
+        # shape-list actions (`Closest`/`Fillet`/`Chamfer` brace groups,
+        # `Intersect Curve`, `Split Curve`, `ThruSections`) are complete
+        # upstream productions — params-neutral, with any topology effect
+        # already recorded by the allocator observer above.
+        match(Regex("^(?:Boolean(?:Union|Difference|Intersection|Fragments|" *
+            "Section|Fuse|Coherence|Common|Cut)\\s*\\{|" *
+            "Boolean(?:Union|Difference|Intersection|Fragments|Section|" *
+            "Fuse|Coherence|Common|Cut)\\s*\\([^)]*\\)\\s*=|" *
+            "(?:Closest|Fillet|Chamfer)\\s*\\{|" *
+            "(?:Intersect|Split)\\s+Curve\\b|(?:Ruled\\s+)?ThruSections\\b)"),
+            body)!==nothing && return
 
         mesh=match(r"^(Mesh|Geometry)(?:\s*\[\s*(.*?)\s*\])?\s*\.\s*(MeshSizeMin|MeshSizeMax|MeshSizeFactor|RandomSeed|MeshSizeFromCurvature|MinimumElementsPerTwoPi|BoundaryLayerFanElements|BoundaryLayerFanPoints|Tolerance)\s*=\s*(.*)$",body)
         if mesh!==nothing
             family=String(mesh.captures[1]);member=String(mesh.captures[3])
             key="$family.$member";raw=String(strip(mesh.captures[4]))
-            value=_geo_eval_numeric(raw,context,"read_geo_params: $key")
-            index=mesh.captures[2]===nothing ? 0 :
-                _geo_signed_gmsh_int_value(
-                    _geo_eval_numeric(mesh.captures[2],context,
-                        "read_geo_params: $key option index"),
-                    "read_geo_params: $key option index")
+            # Soft reads like the generic option-write branch below: a failed
+            # RHS records `yymsg(0)` and stores 0 upstream, never an abort.
+            context.soft_unknown_reads=true
+            value,index=try
+                v=_geo_eval_numeric(raw,context,"read_geo_params: $key")
+                i=mesh.captures[2]===nothing ? 0 :
+                    _geo_signed_gmsh_int_value(
+                        _geo_eval_numeric(mesh.captures[2],context,
+                            "read_geo_params: $key option index"),
+                        "read_geo_params: $key option index")
+                (v,i)
+            finally
+                context.soft_unknown_reads=false
+            end
             # `NumberOption(GMSH_SET)` lands in option state — `x.y` expression
             # reads and the allocator refresh consume it. Only the index-0
             # slot feeds the params surface below.
@@ -7229,9 +10076,10 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
 
         fm=match(r"^Field\s*\[\s*(.*)\s*\]\s*=\s*([A-Za-z][A-Za-z0-9_]*)$",body)
         if fm!==nothing
+            # The `FExpr` tag already reduced upstream: an unknown variable
+            # records `yymsg(0)` and yields 0 — `newField(0, kind)` proceeds.
             tag=_geo_signed_gmsh_int_value(
-                _geo_eval_numeric(fm.captures[1],context,
-                    "read_geo_params: Field declaration tag"),
+                _geo_scan_soft_eval(fm.captures[1],context),
                 "read_geo_params: Field declaration tag")
             kind=fm.captures[2]
             # `newField` fails recoverably: duplicate ids keep the original
@@ -7256,25 +10104,53 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
 
         om=match(r"^Field\s*\[\s*(.*)\s*\]\.([A-Za-z][A-Za-z0-9_]*)\s*=\s*(.*)$",body)
         if om!==nothing
-            tag=_geo_signed_gmsh_int_value(
-                _geo_eval_numeric(om.captures[1],context,
-                    "read_geo_params: Field option tag"),
-                "read_geo_params: Field option tag")
-            name=om.captures[2];value=String(strip(om.captures[3]))
-            isempty(value) &&
-                throw(ArgumentError("read_geo_params: Field[$tag].$name has an empty value"))
-            caller="read_geo_params: Field[$tag].$name"
-            # The right-hand side is evaluated before the field lookup, like
-            # the grammar's already-reduced FExpr argument.
-            normalized=_geo_normalize_field_option(value,name,context,caller)
-            # Option writes resolve the field id at statement time — a write to
-            # a field that does not exist yet stores nothing and is a
-            # recoverable parse error, even if the field is declared later.
-            # The executor replays the same check on its live field map.
-            haskey(kinds,tag) ||
-                (_geo_yyerror!(context,"No field with id $tag"); return)
-            get!(() -> Dict{String,String}(),options,tag)[name]=normalized
-            push!(get!(() -> String[],option_order,tag),name)
+            name=String(om.captures[2]);value=String(strip(om.captures[3]))
+            isempty(value) && _geo_syntax_abort(";")
+            # The tag and right-hand side already reduced upstream, so each
+            # failure records `yymsg(0)` and continues: tag→0 (`No field with
+            # id 0`), a bad RHS→0 before the member lookup.
+            context.soft_unknown_reads=true
+            try
+                tag=_geo_signed_gmsh_int_value(
+                    _geo_eval_numeric(om.captures[1],context,
+                        "read_geo_params: Field option tag"),
+                    "read_geo_params: Field option tag")
+                caller="read_geo_params: Field[$tag].$name"
+                # Upstream validates `member` against the field's *kind*
+                # (`field->options[member]`), after the FExpr RHS reduced.
+                kind=get(kinds,tag,nothing)
+                member_ok=kind!==nothing &&
+                    name in _GEO_FIELD_OPTIONS[kind][1]
+                normalized=if member_ok
+                    _geo_normalize_field_option(value,name,context,caller)
+                else
+                    # Unknown members still evaluate a numeric RHS upstream
+                    # (`Unknown variable 'x'` precedes the `Unknown option`
+                    # diagnostic); string RHS never reaches FExpr.
+                    if !startswith(value,"\"") && !startswith(value,"{")
+                        try
+                            _geo_eval_numeric(value,context,caller)
+                        catch err
+                            err isa InterruptException && rethrow()
+                            err isa _GeoSyntaxAbort && rethrow()
+                        end
+                    end
+                    value
+                end
+                # Option writes resolve the field id at statement time — a
+                # write to a field that does not exist yet stores nothing and
+                # is a recoverable parse error, even if the field is declared
+                # later. The executor replays the same check on its live map.
+                kind===nothing &&
+                    (_geo_yyerror!(context,"No field with id $tag"); return)
+                member_ok || (_geo_yyerror!(context,
+                    "Unknown option '$name' in field $tag of type " *
+                    "'$(_GEO_FIELD_OPTIONS[kind][2])'"); return)
+                get!(() -> Dict{String,String}(),options,tag)[name]=normalized
+                push!(get!(() -> String[],option_order,tag),name)
+            finally
+                context.soft_unknown_reads=false
+            end
             return
         end
 
@@ -7289,31 +10165,46 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         onm=match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\s*\[\s*(.*?)\s*\])?\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=|\+=|-=|\*=|/=)\s*(.+)$",body)
         if onm!==nothing && !_geo_string_rhs(String(strip(onm.captures[5])))
             family=String(onm.captures[1])
-            index=onm.captures[2]===nothing ? 0 :
-                _geo_signed_gmsh_int_value(
-                    _geo_eval_numeric(onm.captures[2],context,
-                        "read_geo_params: $family option index"),
-                    "read_geo_params: $family option index")
             member=String(onm.captures[3])
-            _geo_set_option_number!(context,family,index,member,
-                String(onm.captures[4]),
-                _geo_eval_numeric(onm.captures[5],context,
-                    "read_geo_params: $family.$member"),
-                "read_geo_params: $family.$member")
+            # Upstream `NumberOption` writes are fully recoverable: a bad RHS
+            # records `yymsg(0)` and yields 0, an unknown category/member is a
+            # `Msg::Error` — parsing continues either way. The scan mirrors
+            # that with soft reads so the diagnostics land in `scan_*` and the
+            # execution pass replays them once.
+            context.soft_unknown_reads=true
+            try
+                index=onm.captures[2]===nothing ? 0 :
+                    _geo_signed_gmsh_int_value(
+                        _geo_eval_numeric(onm.captures[2],context,
+                            "read_geo_params: $family option index"),
+                        "read_geo_params: $family option index")
+                _geo_set_option_number!(context,family,index,member,
+                    String(onm.captures[4]),
+                    _geo_eval_numeric(onm.captures[5],context,
+                        "read_geo_params: $family.$member"),
+                    "read_geo_params: $family.$member")
+            finally
+                context.soft_unknown_reads=false
+            end
             return
         end
         oni=match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\s*\[\s*(.*?)\s*\])?\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+\+|--)\s*$",body)
         if oni!==nothing
             family=String(oni.captures[1])
-            index=oni.captures[2]===nothing ? 0 :
-                _geo_signed_gmsh_int_value(
-                    _geo_eval_numeric(oni.captures[2],context,
-                        "read_geo_params: $family option index"),
-                    "read_geo_params: $family option index")
             member=String(oni.captures[3])
-            _geo_option_number_increment!(context,family,index,member,
-                oni.captures[4]=="++" ? 1.0 : -1.0,
-                "read_geo_params: $family.$member")
+            context.soft_unknown_reads=true
+            try
+                index=oni.captures[2]===nothing ? 0 :
+                    _geo_signed_gmsh_int_value(
+                        _geo_eval_numeric(oni.captures[2],context,
+                            "read_geo_params: $family option index"),
+                        "read_geo_params: $family option index")
+                _geo_option_number_increment!(context,family,index,member,
+                    oni.captures[4]=="++" ? 1.0 : -1.0,
+                    "read_geo_params: $family.$member")
+            finally
+                context.soft_unknown_reads=false
+            end
             return
         end
 
@@ -7324,60 +10215,218 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         fm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+Field\s*=\s*(.*)$",body)
         if fm!==nothing
             name=fm.captures[1]
-            if name=="Background"
-                tags=_geo_expression_field_tags(fm.captures[2],context,
-                                                "read_geo_params: Background Field";
-                                                deduplicate=false)
-                if length(tags)>1
-                    _geo_yyerror!(context,
-                        "Only 1 field can be set as a background field.")
-                elseif isempty(tags)
-                    _geo_yywarn!(context,"No field given (Background Field).")
+            # The tag list already reduced upstream — a bad entry records
+            # `yymsg(0)` and yields 0 rather than aborting the parse.
+            context.soft_unknown_reads=true
+            try
+                if name=="Background"
+                    tags=_geo_expression_field_tags(fm.captures[2],context,
+                                                    "read_geo_params: Background Field";
+                                                    deduplicate=false)
+                    if length(tags)>1
+                        _geo_yyerror!(context,
+                            "Only 1 field can be set as a background field.")
+                    elseif isempty(tags)
+                        _geo_yywarn!(context,"No field given (Background Field).")
+                    else
+                        background=tags[1]
+                    end
+                elseif name=="BoundaryLayer"
+                    for tag in _geo_expression_field_tags(
+                            fm.captures[2],context,
+                            "read_geo_params: BoundaryLayer Field")
+                        tag in boundary_layers || push!(boundary_layers,tag)
+                    end
                 else
-                    background=tags[1]
+                    _geo_yyerror!(context,"Unknown command '$name Field'")
                 end
-            elseif name=="BoundaryLayer"
-                for tag in _geo_expression_field_tags(
-                        fm.captures[2],context,
-                        "read_geo_params: BoundaryLayer Field")
-                    tag in boundary_layers || push!(boundary_layers,tag)
-                end
-            else
-                _geo_yyerror!(context,"Unknown command '$name Field'")
+            finally
+                context.soft_unknown_reads=false
             end
             return
+        end
+
+        # `x~{FExpr}`/`StringToName[sexpr]` LHS heads resolve to a plain
+        # identifier before the index/scalar splits — same rewrite the
+        # executor applies. The `~{i}` index already reduced upstream: a bad
+        # index records `yymsg(0)` and resolves with 0.
+        context.soft_unknown_reads=true
+        try
+            lr=_geo_lhs_string_index(body,context,"read_geo_params")
+            lr===nothing ||
+                (body=String(lr[1]*lr[2]); code=_geo_unquoted_code(body))
+        finally
+            context.soft_unknown_reads=false
         end
 
         _geo_record_list!(context,body) && return
 
         scalar=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$",body)
         if scalar!==nothing
+            # `x = <StringExpr>` stores a string variable upstream — but
+            # only when the RHS cannot reduce as `ListOfDouble`: quoted
+            # literals, string-producing calls, and bare string tokens.
+            # Entity names (`x = Point{1}`) are entity-list queries
+            # upstream — the numeric path handles (and diagnoses) them.
+            sname=String(scalar.captures[1])
+            srhs=String(strip(scalar.captures[2]))
+            string_only=(startswith(srhs,'"') || startswith(srhs,'\'') ||
+                (sm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[\(\[]",srhs))!==
+                    nothing &&
+                 sm.captures[1] in _GEO_STRING_FUNCTIONS &&
+                 !(sm.captures[1] in ("StringToName","S2N")) ||
+                srhs in ("Today","CodeName","GmshExecutableName",
+                         "OnelabAction","CurrentFileName","CurrentDirectory"))
+            if string_only &&
+               !(sname in _GEO_LEXER_KEYWORDS) &&
+               !(sname in _GEO_SIDE_EFFECT_SYMBOLS)
+                try
+                    context.strings[sname]=
+                        String[_geo_eval_string(srhs,context,
+                            "read_geo_params: string variable $sname")]
+                    delete!(context.values,sname)
+                    delete!(context.lists,sname)
+                    delete!(context.list_variables,sname)
+                catch err
+                    err isa InterruptException && rethrow()
+                    # Same recovery as numeric records: valid but
+                    # unmodelable string productions (entity names the
+                    # bounded evaluator cannot resolve) mark the variable
+                    # unavailable; grammar failures propagate.
+                    if err isa _GeoSyntaxAbort
+                        (_geo_list_term_unmodelable(srhs) ||
+                         _geo_rhs_uses_unavailable(srhs,context)) ||
+                            rethrow()
+                    else
+                        err isa ArgumentError || rethrow()
+                    end
+                    _geo_context_forget!(context,sname)
+                    message=sprint(showerror,err)
+                    context.unavailable[sname]=
+                        err isa _GeoSyntaxAbort &&
+                            _geo_list_term_unmodelable(srhs) ?
+                        "entity or shape expression requires geometry evaluation" :
+                        ncodeunits(message)<=240 ? message :
+                            String(first(message,220))*"…"
+                end
+                return
+            end
             _geo_record_scalar!(context,scalar.captures[1],scalar.captures[2])
             return
         end
-        mutation=match(r"^(?:\+\+|--)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+\+|--|\+=|-=|\*=|/=).*$",body)
+        # `++name`/`--name` have no upstream production — `NumericIncrement`
+        # is postfix-only (`a++`), so a prefix increment errors at the token.
+        if (pm=match(r"^(\+\+|--)\s*[A-Za-z_]",body))!==nothing
+            _geo_syntax_abort(pm.captures[1])
+        end
+        mutation=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(\+\+|--|\+=|-=|\*=|/=)\s*(.*)$",
+                       body)
         if mutation!==nothing
             name=String(mutation.captures[1])
-            had_list_payload=haskey(context.lists,name) ||
-                             haskey(context.unavailable_lists,name)
-            if haskey(context.lists,name)
-                delete!(context.values,name)
-                delete!(context.list_variables,name)
-            else
-                _geo_context_forget!(context,name)
+            op=mutation.captures[2]
+            rhs=String(strip(mutation.captures[3]))
+            # Lexer keywords (`Pi`, `newp`, ...) are not assignable — the op
+            # token is the upstream syntax error.
+            name in _GEO_LEXER_KEYWORDS && _geo_syntax_abort(op)
+            name in _GEO_SIDE_EFFECT_SYMBOLS && _geo_syntax_abort(op)
+            is_list=name in context.list_variables
+            if op in ("++","--")
+                delta=op=="++" ? 1.0 : -1.0
+                # Upstream checks `s.list` before touching `s.value` — a
+                # list name rejects even though its first element also
+                # sits in `values`.
+                if is_list
+                    _geo_yyerror!(context,"Variable '$name' is a list")
+                elseif haskey(context.values,name)
+                    _geo_context_set_scalar!(context,name,
+                        context.values[name]+delta,"read_geo_params")
+                elseif haskey(context.unavailable,name) ||
+                       haskey(context.unavailable_lists,name)
+                    # stays unavailable
+                else
+                    _geo_yyerror!(context,"Unknown variable '$name'")
+                end
+                return
             end
-            reason="an unsupported increment or compound assignment changed it"
-            context.unavailable[name]=reason
-            if had_list_payload
-                context.unavailable_lists[name]=reason
+            # `name op= ListOfDouble` — unknown RHS reads are recoverable
+            # (`yymsg` + a 0.0 element) upstream, so the RHS is evaluated
+            # with soft reads; genuine syntax errors still abort.
+            values=begin
+                soft=context.soft_unknown_reads
+                context.soft_unknown_reads=true
+                try
+                    _geo_numeric_list_values(rhs,context,
+                        "read_geo_params: compound assignment")
+                finally
+                    context.soft_unknown_reads=soft
+                end
+            end
+            if haskey(context.unavailable,name) ||
+               haskey(context.unavailable_lists,name)
+                return  # stays unavailable
+            elseif is_list
+                list=copy(context.lists[name])
+                if op=="+="
+                    length(list)+length(values)<=_MAX_GEO_LIST_ITEMS ||
+                        throw(ArgumentError(
+                            "read_geo_params: list exceeds " *
+                            "$_MAX_GEO_LIST_ITEMS entries"))
+                    _geo_context_set_list!(context,name,
+                        vcat(list,values),"read_geo_params")
+                elseif op=="-="
+                    # Each RHS element erases the first matching entry once
+                    # (`std::find` + erase upstream).
+                    for value in values
+                        index=findfirst(==(value),list)
+                        index===nothing || deleteat!(list,index)
+                    end
+                    _geo_context_set_list!(context,name,list,
+                        "read_geo_params")
+                else
+                    _geo_yyerror!(context,
+                        "Operators *= and /= not available for lists")
+                end
+            elseif haskey(context.values,name)
+                if length(values)!=1
+                    _geo_yyerror!(context,
+                        "Cannot assign list to variable '$name'")
+                else
+                    d=values[1];v=context.values[name]
+                    if op=="+="; v+=d
+                    elseif op=="-="; v-=d
+                    elseif op=="*="; v*=d
+                    elseif iszero(d)
+                        _geo_yyerror!(context,
+                            "Division by zero in '$name /= " *
+                            "$(_geo_gmsh_number(d))'")
+                    else
+                        v/=d
+                    end
+                    _geo_context_set_scalar!(context,name,v,"read_geo_params")
+                end
+            elseif length(values)==1
+                # `a op= <scalar>` on an undefined name is a recoverable
+                # `Unknown variable` — no binding is created.
+                _geo_yyerror!(context,"Unknown variable '$name'")
             else
-                delete!(context.unavailable_lists,name)
+                # `a op= <list>` on an undefined name still reports
+                # `Cannot assign list` (the new symbol defaults to scalar
+                # upstream); the empty symbol is marked unavailable so
+                # later reads diagnose rather than invent a value.
+                _geo_yyerror!(context,
+                    "Cannot assign list to variable '$name'")
+                context.unavailable[name]="uninitialized variable '$name'"
             end
             return
         end
 
         # `Exit`/`Abort` end the program — everything after is unreachable.
-        match(r"^(?:Exit\b|Abort\s*$)",body)!==nothing && (stopped[]=true; return)
+        # `Exit` is process-global; `Abort` halts only this file's ParseFile.
+        if match(r"^Exit\b",body)!==nothing || match(r"^Abort\s*$",body)!==nothing
+            stopped[]=true
+            stop_kind[]=startswith(body,"Exit") ? :exit : :abort
+            return
+        end
 
         # `NewModel` — `new GModel()` becomes current: geometry, fields,
         # physical groups AND the physical-name table die with the old model
@@ -7427,7 +10476,21 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             child_src=strip(im.captures[1],['"','\'',' '])
             child=_geo_fix_relative_path(path,child_src)
             if isfile(child) && !endswith(lowercase(child),".msh")
+                # Each `ParseFile` gets its own `gmsh_yyerrorstate` budget
+                # and stop scope: a child `Abort`/error-cap halts the child
+                # only, while `Exit` propagates into the parent stream.
+                parent_kind=stop_kind[]
+                parent_base=context.file_error_base
+                child_depth=length(ctrl_levels)
+                stopped[]=false
+                context.file_error_base=length(context.exec_errors)
                 _scan_geo_statements(_consume_stmt,child)
+                _scan_eof_drain(child_depth)
+                if stop_kind[]!==:exit
+                    stopped[]=false
+                    stop_kind[]=parent_kind
+                end
+                context.file_error_base=parent_base
             end
             return
         end
@@ -7500,12 +10563,67 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             return
         end
 
-        # Reject relevant assignments hidden in a loop/macro/prefix or malformed
-        # on their left-hand side. Quoted occurrences were removed from `code`.
-        if _geo_relevant_code(code)
-            throw(ArgumentError(
-                "read_geo_params: malformed relevant statement or unsupported control-flow/macro context: " *
-                _geo_expr_preview(body)))
+        # A relevant statement that reached here is malformed — the grammar
+        # already committed to a production, so the error lands on the token
+        # it rejects. `_geo_relevant_code` only matches well-formed heads;
+        # `Physical`-/`Field`-led and `<name> Field` statements reach the same
+        # committed productions even when the tail is bad (`Physical Foo` →
+        # `(Foo)`, `Field foo` → `(foo)`). Quoted occurrences were removed
+        # from `code`.
+        if _geo_relevant_code(code) ||
+           match(r"^(?:Physical|Field)\b",body)!==nothing ||
+           match(r"^[A-Za-z_][A-Za-z0-9_]*\s+Field\b",body)!==nothing
+            _geo_scan_malformed_abort!(body,context)
+        end
+
+        # Everything else reaching here is an unclassifiable `tSTRING`-headed
+        # or non-identifier statement — upstream's catch-all diagnostics:
+        # `name` alone → `syntax error (;)`; `name(expr)`/`name <expr>` without
+        # `=` evaluates the argument (soft — an unknown variable records) then
+        # `Unknown command 'name'`; `name {` aborts at the first braced token;
+        # a non-identifier head aborts at the token (`= 5` → `(=)`,
+        # `5 + 3` → `(5)`). A lexer-keyword head is never an unknown
+        # command — see the split below.
+        nm=match(r"^[A-Za-z_][A-Za-z0-9_]*",body)
+        nm===nothing && _geo_syntax_abort(_geo_stmt_head_token(body))
+        # A lexer-keyword head is never an unknown command. Expression-only
+        # keywords abort at the keyword itself (`DimNameSpace(ns);` →
+        # `(DimNameSpace)`, `Sin(1);` → `(Sin)`); statement-leading keywords
+        # (`Point`, `Curve Loop`, `Periodic`, `Spline`, the primitives, ...)
+        # shifted into real productions upstream — the scan does not track
+        # their state, so the executor owns any tail diagnostics.
+        nm_head=String(nm.match)
+        if nm_head in _GEO_LEXER_KEYWORDS
+            nm_head in _GEO_EXPR_ONLY_KEYWORDS || return nothing
+            _geo_syntax_abort(nm_head)
+        end
+        leftover=String(strip(body[nextind(body,lastindex(nm.match)):end]))
+        if isempty(leftover)
+            _geo_syntax_abort(";")
+        elseif startswith(leftover,"::")
+            # `tSCOPE` never follows a bare `tSTRING` in a statement — the
+            # `Struct_FullName` namespace forms exist only inside
+            # expressions (`ns::x = 5` → `syntax error (::)` upstream).
+            _geo_syntax_abort("::")
+        elseif startswith(leftover,"{")
+            _geo_syntax_abort(_geo_stmt_head_token(leftover[2:end]))
+        elseif startswith(leftover,"(")
+            close=_geo_matching_delim(leftover,firstindex(leftover))
+            if close==0
+                _geo_scan_soft_eval_safe(leftover[2:end],context)
+                _geo_syntax_abort(";")
+            end
+            _geo_scan_soft_eval(leftover[2:prevind(leftover,close)],context)
+            after=String(strip(leftover[nextind(leftover,close):end]))
+            isempty(after) ||
+                _geo_syntax_abort(_geo_stmt_head_token(after))
+            _geo_yyerror!(context,"Unknown command '$(nm.match)'")
+        else
+            # A string argument parses as `StringExpr` upstream — only the
+            # numeric form reaches FExpr evaluation.
+            _geo_string_rhs(leftover) ||
+                _geo_scan_soft_eval(leftover,context)
+            _geo_yyerror!(context,"Unknown command '$(nm.match)'")
         end
         return nothing
     end
@@ -7519,6 +10637,9 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         throw(ArgumentError(isempty(err.detail) ?
             "read_geo_params: syntax error ($(err.token))" : err.detail))
     end
+    # EOF with open levels — upstream's lexer-level `skip` semantics, shared
+    # with `Include`d files through `_scan_eof_drain`.
+    _scan_eof_drain(0)
     # No existence validation here: Gmsh stores background/boundary-layer ids
     # and option writes only after a field exists — stale ids are diagnosed
     # per statement above or surface at field-build time like `get(id)` misses.

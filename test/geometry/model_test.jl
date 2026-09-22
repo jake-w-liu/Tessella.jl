@@ -646,7 +646,7 @@ end
         write(io, """
             SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 1, 1, 1};
-            Translate {2, 0, 0} { Volume{1}; };
+            Translate {2, 0, 0} { Volume{1}; }
             """)
         close(io)
         execute_geo(path; mesh_dim=3)
@@ -807,8 +807,8 @@ end
         write(io, """
             SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 1, 1, 1};
-            Dilate {{0, 0, 0}, 2} { Volume{1}; };
-            Rotate {{0, 0, 1}, {0, 0, 0}, $(π/2)} { Volume{1}; };
+            Dilate {{0, 0, 0}, 2} { Volume{1}; }
+            Rotate {{0, 0, 1}, {0, 0, 0}, $(π/2)} { Volume{1}; }
             """)
         close(io)
         execute_geo(path; mesh_dim=3)

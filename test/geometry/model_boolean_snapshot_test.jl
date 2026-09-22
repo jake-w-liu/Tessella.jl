@@ -125,7 +125,7 @@ end
             Point{90} In Volume{1};
             Physical Volume("retained", 10) = {1, 2};
             BooleanDifference(3) = {Volume{1}; Delete;}{Volume{2};};
-            Translate {10, 0, 0} {Volume{2};};
+            Translate {10, 0, 0} {Volume{2};}
             Sphere(1) = {30, 0, 0, 1};
             """)
         close(io)

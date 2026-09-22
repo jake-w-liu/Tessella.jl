@@ -134,7 +134,7 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test ntris(fine)==4 && all(==(Int32(8)),fine.tri_tag)
         @test all(==(Int32(9)),fine.tet_tag) && validate(fine).ok
         @test mesh_crc(fine).sha==
-              "c3d7c10942ce6348de44d5bb6396a7328c5d035221f1f40fbd34d7064278d8a0"
+              "c10618c1d184e5339f6425da55020306d5f823c7668be82551970b7950ca847e"
         @test_throws ArgumentError refine_to_size(tagged,Inf)
         @test_throws ArgumentError refine_to_size(tagged,0.75;max_nodes=true)
         @test_throws ArgumentError refine_to_size(tagged,0.75;max_tets=1.0)
@@ -169,7 +169,7 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test_throws ArgumentError mesh_sized_cdt(cdtbox;hmax=0.5,max_nodes=8)
         sized_box=mesh_sized_cdt(cdtbox;hmax=1.0)
         @test mesh_crc(sized_box).sha==
-              "83fbfd93eeff0b9dde4e2f661fc589a87c0294a103ce62f1f75702a3efd4f7e1"
+              "57dabcaab87268d4552c5df9b16dec04f08a0b7417024ff5b20f0a4a1e0356d2"
         @test_throws ArgumentError mesh_sized_conforming(box_surface(0,1,0,1,0,1);hmax=1.,inset=-1.)
         @test isempty(Docs.undocumented_names(Tessella;private=false))
     end

@@ -59,6 +59,8 @@ using ..Model: model_entity_color, model_parametrization_bounds, model_normal
 using ..Model: model_reparametrize_on_surface
 using ..Model: _model_entity_bounding_box, _model_bounds_union
 using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
+using ..Model: _tag, _alloc_tag!, _alloc_curve_loop_tag,
+    _alloc_surface_loop_tag, _arc_stored_normal, _occ_cross
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
@@ -66,10 +68,11 @@ using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
 using ..IO: _geo_numeric_list_terms, _geo_numeric_list_values
 using ..IO: _geo_signed_gmsh_int_value
 using ..IO: _GEO_SIDE_EFFECT_SYMBOLS
-using ..IO: _MAX_GEO_LIST_ITEMS
+using ..IO: _MAX_GEO_LIST_ITEMS, _MAX_GEO_SCAN_NESTING
 using ..IO: _geo_context_set_scalar!, _geo_context_set_list!
 using ..IO: _geo_apply_list_assignment!, _geo_list_term_values
-using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group
+using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group,
+            _geo_extrude_pipe_candidate
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
 using ..IO: _geo_allocator_observe_statement!,_geo_allocator_resync_model!
 using ..IO: _geo_allocator_delete_entities!, _geo_allocator_reset_model!
@@ -85,14 +88,23 @@ using ..IO: _geo_vsnprintf_expand
 using ..IO: _geo_string_rhs, _geo_eval_string_list
 using ..IO: _geo_matching_delim, _GEO_COLOR_NAMES
 using ..IO: _geo_option_number
-using ..IO: _geo_msg_error!, _geo_context_has_variable
-using ..IO: _GeoSyntaxAbort, _geo_syntax_abort, _geo_first_token
+using ..IO: _geo_msg_error!, _geo_eof_error!, _geo_context_has_variable
+using ..IO: _geo_exec_struct_def!
+using ..IO: _GeoSyntaxAbort, _geo_syntax_abort, _geo_first_token,
+            _geo_stmt_head_token, _GeoLoopLevel, _GeoWhileLevel
+using ..IO: _geo_string_index_offender, _GEO_STRING_FUNCTIONS,
+            _geo_tstring_valid,
+            _GEO_BARE_STRING_TOKENS, _GEO_ALL_FUNCTIONS, _GEO_LEXER_KEYWORDS,
+            _geo_scan_top_level_comma, _geo_lhs_keyword_check,
+            _geo_control_statement, _GEO_CONTROL_BARE
 using ..IO: GeoFieldSpec, _GEO_FIELD_KINDS, _geo_expression_field_tags
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
 using ..IO: read_msh, write_msh
+using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate
+using LinearAlgebra: norm
 
 export execute_geo, GeoExecution
 
@@ -130,89 +142,6 @@ const _MAX_GEO_EXEC_STATEMENTS=1_000_000
 const _MAX_GEO_LOOP_ITERATIONS=1_000_000
 const _MAX_GEO_CALL_DEPTH=128
 
-const _GEO_CONTROL_BARE=Dict(
-    "Else"=>:else,"EndIf"=>:endif,"EndWhile"=>:endwhile,"EndFor"=>:endfor,
-    "Return"=>:return)
-
-# Scan a balanced open/close group starting at raw[i] (the opener). Returns the
-# index of the matching close on the same line; control headers that spill to a
-# second line are a bounded-subset blocker.
-function _geo_scan_balanced(raw::AbstractString,i::Int,last::Int,
-                            open::Char,close::Char)
-    depth=0;qc='\0';k=i
-    while k<=last
-        c=raw[k]
-        if qc!='\0'
-            c==qc && (qc='\0')
-        elseif c=='"' || c=='\''
-            qc=c
-        elseif c==open
-            depth+=1
-        elseif c==close
-            depth-=1
-            depth==0 && return k
-        end
-        k=nextind(raw,k)
-    end
-    throw(ArgumentError(
-        "execute_geo: control statement must complete on a single line"))
-end
-
-# If raw[i:last] begins a control construct (If/ElseIf/While headers with a
-# parenthesized expression, `For name In {a:b[:c]}`, or the bare Else/EndIf/
-# EndWhile/EndFor markers), return (statement_text, last_consumed_index).
-# Gmsh 4.15.2's built-in kernel accepts only `For name In {a:b[:c]}` — comma
-# lists, single values, and C-style `For (init; cond; incr)` are rejected —
-# and has no While keyword; `While (expr) ... EndWhile` is a bounded
-# Tessella extension.
-function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
-    rest=SubString(raw,i,last)
-    matched=match(
-        r"^(If|ElseIf|While|Else|EndIf|EndWhile|For|EndFor|Function|Return)\b",
-        rest)
-    matched===nothing && return nothing
-    word=matched.captures[1]
-    haskey(_GEO_CONTROL_BARE,word) && return (word,i+sizeof(word)-1)
-    j=firstindex(rest)+sizeof(word)
-    jlast=lastindex(rest)
-    while j<=jlast && isspace(rest[j])
-        j=nextind(rest,j)
-    end
-    if word=="Function"
-        # Gmsh's `Function name` header carries an identifier or quoted
-        # string-expression name on the same line and no `;`.
-        name_match=match(
-            r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\"|'[^']*')",SubString(rest,j))
-        name_match===nothing && throw(ArgumentError(
-            "execute_geo: malformed Function header; use `Function name`"))
-        consumed=j-1+sizeof(name_match.match)
-        return (String(rest[firstindex(rest):consumed]),i+consumed-1)
-    end
-    if word=="For"
-        name_match=match(r"^[A-Za-z_][A-Za-z0-9_]*",SubString(rest,j))
-        name_match===nothing && throw(ArgumentError(
-            "execute_geo: malformed For header; use `For name In {a:b[:c]}`"))
-        j+=sizeof(name_match.match)
-        while j<=jlast && isspace(rest[j])
-            j=nextind(rest,j)
-        end
-        match(r"^In\b",SubString(rest,j))===nothing && throw(ArgumentError(
-            "execute_geo: malformed For header; use `For name In {a:b[:c]}`"))
-        j+=2
-        while j<=jlast && isspace(rest[j])
-            j=nextind(rest,j)
-        end
-        (j<=jlast && rest[j]=='{') || throw(ArgumentError(
-            "execute_geo: malformed For header; use `For name In {a:b[:c]}`"))
-        close=_geo_scan_balanced(rest,j,jlast,'{','}')
-        return (String(rest[1:close]),i+close-1)
-    end
-    (j<=jlast && rest[j]=='(') || throw(ArgumentError(
-        "execute_geo: malformed $word header; use `$word (expression)`"))
-    close=_geo_scan_balanced(rest,j,jlast,'(',')')
-    return (String(rest[1:close]),i+close-1)
-end
-
 # Classify a standalone control statement; returns nothing for ordinary
 # `;`-terminated statements.
 function _geo_control_parse(line::AbstractString)
@@ -223,7 +152,10 @@ function _geo_control_parse(line::AbstractString)
             r"^For\s+([A-Za-z_][A-Za-z0-9_]*)\s+In\s*\{(.*)\}$",line))!==nothing
         return (kind=:for,var=String(matched.captures[1]),
                 range=String(matched.captures[2]))
-    elseif (matched=match(r"^Function\s+(.+)$",line))!==nothing
+    elseif (matched=match(r"^For\s*\((.*)\)$",line))!==nothing
+        # `For (a:b[:c])` — anonymous range, no loop variable.
+        return (kind=:for,var="",range=String(matched.captures[1]))
+    elseif (matched=match(r"^(?:Function|Macro)\s+(.+)$",line))!==nothing
         return (kind=:function,name=String(matched.captures[1]))
     elseif haskey(_GEO_CONTROL_BARE,line)
         return (kind=_GEO_CONTROL_BARE[line],)
@@ -244,6 +176,10 @@ function _geo_exec_statements(path::AbstractString)
     quote_char='\0'
     block_comment=false
     buf_has_content=false
+    # `Extrude {shapes}` is `}`-complete but may still take the `Using Wire`
+    # pipe suffix — its emit is deferred until the next real token, even
+    # across line boundaries.
+    extrude_pending=false
     for raw in eachline(path)
         i=firstindex(raw); last=lastindex(raw)
         while i<=last
@@ -261,6 +197,21 @@ function _geo_exec_statements(path::AbstractString)
             c=raw[i]
             nxt=nextind(raw,i)
             nextc=nxt<=last ? raw[nxt] : '\0'
+            if extrude_pending && !block_comment && quote_char=='\0' &&
+               !isspace(c) && !(c=='/' && (nextc=='/' || nextc=='*'))
+                extrude_pending=false
+                if !(c=='U' &&
+                     match(r"^Using\b",SubString(raw,i,last))!==nothing)
+                    statement=strip(String(take!(buf)))
+                    isempty(statement) || (
+                        length(statements)<_MAX_GEO_EXEC_STATEMENTS ||
+                            throw(ArgumentError(
+                                "execute_geo: input exceeds " *
+                                "$_MAX_GEO_EXEC_STATEMENTS statements"));
+                        push!(statements,statement))
+                    buf_has_content=false
+                end
+            end
             if block_comment
                 if c=='*' && nextc=='/'
                     block_comment=false
@@ -287,22 +238,28 @@ function _geo_exec_statements(path::AbstractString)
                 depth-=1; write(buf,c); buf_has_content=true
                 if depth==0 && _geo_brace_terminated_statement(
                         String(buf.data[1:position(buf)]))
-                    statement=strip(String(take!(buf)))
-                    length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
-                        "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
-                    push!(statements,statement)
-                    buf_has_content=false
+                    if _geo_extrude_pipe_candidate(
+                            String(buf.data[1:position(buf)]))
+                        # Possibly `Extrude {shapes} Using Wire {expr}` —
+                        # hold the emit until the next real token.
+                        extrude_pending=true
+                    else
+                        statement=strip(String(take!(buf)))
+                        length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                            "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+                        push!(statements,statement)
+                        buf_has_content=false
+                    end
                 end
             elseif c==';' && depth==0
                 write(buf,c)
                 statement=strip(String(take!(buf)))
-                # A `;` left after a `}`-terminated transform, or a bare `;`
-                # between statements, is an empty statement.
-                if !all(==(';'),statement)
-                    length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
-                        "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
-                    push!(statements,statement)
-                end
+                # A `;` left after a `}`-terminated transform or between
+                # statements is an upstream `syntax error (;)` — it is kept
+                # as a statement so execution reports and recovers on it.
+                length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+                    "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+                push!(statements,statement)
                 buf_has_content=false
             else
                 write(buf,c)
@@ -322,7 +279,26 @@ function _geo_exec_statements(path::AbstractString)
     block_comment && throw(ArgumentError("execute_geo: unterminated block comment"))
     depth==0 || throw(ArgumentError("execute_geo: unmatched opening brace"))
     tail=strip(String(take!(buf)))
-    isempty(tail) || throw(ArgumentError("execute_geo: unterminated statement: $tail"))
+    if extrude_pending && !isempty(tail)
+        # A held `Extrude {shapes}` with no `Using Wire` following is
+        # complete — emit it before the trailing-content checks.
+        push!(statements,tail);tail=""
+    end
+    # A trailing run of bare `;` is still statements upstream — `syntax error
+    # (;)` per stray terminator — so it is pushed for execution to report.
+    if !isempty(tail) && all(c->c==';'||isspace(c),tail)
+        for _ in 1:count(==(';'),tail)
+            push!(statements,";")
+        end
+    elseif !isempty(tail)
+        # Control keywords need no `;` upstream — a trailing `EndFor`,
+        # `EndIf` or `Return` still takes its action at EOF. Ordinary
+        # unterminated text stays a hard error.
+        control=_geo_control_statement(tail,firstindex(tail),lastindex(tail))
+        control===nothing && throw(ArgumentError(
+            "execute_geo: unterminated statement: $tail"))
+        push!(statements,control[1])
+    end
     return statements
 end
 
@@ -472,188 +448,292 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
                         context.stop===:exit ? context.exit_code : nothing)
 end
 
-const _GEO_CONTROL_CLOSE=Dict(:if=>:endif,:for=>:endfor,:while=>:endwhile)
-const _GEO_CONTROL_CLOSE_NAME=Dict(
-    :endif=>"EndIf",:endfor=>"EndFor",:endwhile=>"EndWhile")
-const _GEO_CONTROL_OPEN_NAME=Dict(
-    :if=>"If",:for=>"For",:while=>"While")
+# Upstream control flow is a token stream, not a block tree (Gmsh.y
+# 3887-4100): `If`/`ElseIf`/`Else`/`EndIf` shift `ImbricatedTest` and the
+# per-level `statusImbricatedTests`, `For` pushes a loop frame that `EndFor`
+# rewinds or pops, and dead text is consumed by `skip`/`skipTest` — char-level
+# scans that watch only their own family's keywords. `For`, `While`,
+# `Function`, `Return` and foreign closers are invisible inside an `If` skip;
+# `EndIf` inside a `For` body is a real statement that decrements the outer
+# counter when the body re-parses.
 
-# Locate the closer matching the opener statements[i] within
-# statements[i+1:hi], honoring nested blocks of any family. For an If block the
-# collected depth-1 ElseIf/Else midpoints are returned as well.
-function _geo_exec_find_block_end(statements::Vector{String},i::Int,hi::Int)
-    opener=_geo_control_parse(statements[i])
-    closer=_GEO_CONTROL_CLOSE[opener.kind]
-    depth=1;mids=Int[];mid_kinds=Symbol[]
-    j=i+1
-    while j<=hi
+# `skip("If","EndIf")` / `skip("For","EndFor")` / `skip("While","EndWhile")`:
+# same-family words nest; the depth-0 closer is consumed. Returns the index
+# after the closer; at EOF records `Unexpected end of file` (`Msg::Error`)
+# and returns past the end.
+function _geo_exec_skip_family(statements::Vector{String},i::Int,
+                               open_kind::Symbol,close_kind::Symbol,
+                               context::_GeoNumericContext)
+    depth=0;j=i
+    while j<=lastindex(statements)
         control=_geo_control_parse(statements[j])
         if control!==nothing
-            if haskey(_GEO_CONTROL_CLOSE,control.kind)
+            if control.kind===open_kind
                 depth+=1
-            elseif haskey(_GEO_CONTROL_CLOSE_NAME,control.kind)
+            elseif control.kind===close_kind
+                depth==0 && return j+1
                 depth-=1
-                if depth==0
-                    control.kind==closer || throw(ArgumentError(
-                        "execute_geo: $(statements[j]) cannot close a " *
-                        "$(_GEO_CONTROL_OPEN_NAME[opener.kind]) block"))
-                    return j,mids,mid_kinds
-                end
-            elseif depth==1 && control.kind in (:elseif,:else)
-                opener.kind===:if || throw(ArgumentError(
-                    "execute_geo: $(statements[j]) cannot appear inside a " *
-                    "$(_GEO_CONTROL_OPEN_NAME[opener.kind]) block"))
-                push!(mids,j);push!(mid_kinds,control.kind)
             end
         end
         j+=1
     end
-    throw(ArgumentError(
-        "execute_geo: $(statements[i]) has no matching " *
-        "$(_GEO_CONTROL_CLOSE_NAME[closer])"))
+    _geo_eof_error!(context)
+    return lastindex(statements)+1
 end
 
-function _geo_exec_if!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
-                       context::_GeoNumericContext,
-                       allocator_state::_GeoTagAllocatorState,
-                       executed::Base.RefValue{Int})
-    opener=_geo_control_parse(statements[i])
-    close,mids,mid_kinds=_geo_exec_find_block_end(statements,i,hi)
-    caller="execute_geo: If"
-    # Validate the whole branch structure up front, as Gmsh's parser does: a
-    # malformed trailing branch is an error even when an earlier branch ran.
-    seen_else=false
-    for kind in mid_kinds
-        if kind===:else
-            seen_else && throw(ArgumentError(
-                "execute_geo: If block has more than one Else"))
-            seen_else=true
-        else
-            seen_else && throw(ArgumentError(
-                "execute_geo: ElseIf cannot follow Else in an If block"))
+# `skipTest("If","EndIf","ElseIf",4)`: watches `If`/`ElseIf`/`Else`/`EndIf`.
+# Returns (index, type): type 0 — a depth-0 `EndIf` was consumed and index is
+# past it (the caller decrements `ImbricatedTest`); type 1/2 — the stream
+# landed ON a depth-0 `ElseIf`/`Else` which then parses normally. At EOF
+# records `Unexpected end of file` and returns type 0.
+function _geo_exec_skiptest(statements::Vector{String},i::Int,
+                            context::_GeoNumericContext)
+    depth=0;j=i
+    while j<=lastindex(statements)
+        control=_geo_control_parse(statements[j])
+        if control!==nothing
+            k=control.kind
+            if k===:elseif && depth==0
+                return j,1
+            elseif k===:else && depth==0
+                return j,2
+            elseif k===:endif
+                depth==0 && return j+1,0
+                depth-=1
+            elseif k===:if
+                depth+=1
+            end
         end
+        j+=1
     end
-    branch_lo=i+1
-    pending_cond=opener.cond
-    run_branch(lo2,hi2)=begin
-        context.if_depth+=1 # `ImbricatedTest`
-        try
-            return _exec_geo_statements!(
-                m,statements,lo2,hi2,context,allocator_state,executed)
-        finally
-            context.if_depth-=1
-        end
-    end
-    for k in eachindex(mids)
-        if pending_cond!==nothing &&
-           _geo_eval_numeric(pending_cond,context,caller)!=0
-            return run_branch(branch_lo,mids[k]-1),close+1
-        end
-        pending_cond=mid_kinds[k]===:else ? nothing :
-            _geo_control_parse(statements[mids[k]]).cond
-        branch_lo=mids[k]+1
-    end
-    if seen_else || (pending_cond!==nothing &&
-                     _geo_eval_numeric(pending_cond,context,caller)!=0)
-        return run_branch(branch_lo,close-1),close+1
-    end
-    return nothing,close+1
+    _geo_eof_error!(context)
+    return lastindex(statements)+1,0
 end
 
-function _geo_exec_for!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
-                        context::_GeoNumericContext,
-                        allocator_state::_GeoTagAllocatorState,
-                        executed::Base.RefValue{Int})
-    opener=_geo_control_parse(statements[i])
-    close,=_geo_exec_find_block_end(statements,i,hi)
+# `skip(nullptr,"Return")` — the flat scan a `Function`/`Macro` definition
+# runs: the first `Return` word is consumed, everything else is text.
+function _geo_exec_skip_return(statements::Vector{String},i::Int,
+                               context::_GeoNumericContext)
+    j=i
+    while j<=lastindex(statements)
+        control=_geo_control_parse(statements[j])
+        (control!==nothing && control.kind===:return) && return j+1
+        j+=1
+    end
+    _geo_eof_error!(context)
+    return lastindex(statements)+1
+end
+
+# `error tEND` recovery (Gmsh.y:276): after a syntax error the parser
+# discards tokens through the next `;`. Control keywords and `}`-terminated
+# statements carry no `;`, so the discard eats them plus the first
+# `;`-terminated statement — `If (x y) A; B;` drops `A` but `B` still parses,
+# and `If (x y) EndIf` drops the `EndIf` (no `Orphan EndIf` warning).
+function _geo_recovery_next_i(statements::Vector{String},i::Int)
+    j=i+1
+    while j<=lastindex(statements)
+        done=endswith(rstrip(statements[j]),';')
+        j+=1
+        done && break
+    end
+    return j
+end
+
+# `For name In {..}` clears the list flag and stores the scalar, like
+# upstream's `s.list = false; s.value.resize(1); s.value[0] = first`.
+function _geo_bind_loop_var(context::_GeoNumericContext,var::AbstractString,
+                            value::Float64,caller::AbstractString)
+    isempty(var) && return nothing
+    delete!(context.lists,var);delete!(context.list_variables,var)
+    delete!(context.unavailable_lists,var)
+    _geo_context_set_scalar!(context,var,value,caller)
+    return nothing
+end
+
+# `tIf '(' FExpr ')'`: the condition reduces before `ImbricatedTest++` (a
+# `TestLevel` read inside it sees the outer depth). A false condition runs
+# `skipTest` — the level stays open until a midpoint token or the consumed
+# `EndIf` closes it.
+function _geo_exec_if_header!(statements::Vector{String},i::Int,
+                              context::_GeoNumericContext)
+    control=_geo_control_parse(statements[i])
+    cond=_geo_eval_numeric(control.cond,context,"execute_geo")!=0
+    context.if_depth+=1
+    if context.if_depth>_MAX_GEO_SCAN_NESTING-1
+        _geo_yyerror!(context,"Reached maximum number of imbricated tests")
+        context.if_depth=_MAX_GEO_SCAN_NESTING-1
+    end
+    # `statusImbricatedTests[0]` is a real upstream slot (an `If` opened at a
+    # negative depth writes it); it is simply never read back.
+    context.if_depth>=0 &&
+        (context.if_status[context.if_depth+1]=cond)
+    cond && return i+1
+    j,typ=_geo_exec_skiptest(statements,i+1,context)
+    typ==0 && (context.if_depth-=1)
+    return j
+end
+
+# `tElseIf '(' FExpr ')'`: the condition reduces before the action — it
+# reports errors even when the level then `skip`s away. `status==1` skips to
+# `EndIf` and closes the level; a false cond re-runs `skipTest`; a true one
+# marks the level and lets the following text run.
+function _geo_exec_elseif!(statements::Vector{String},i::Int,
+                           context::_GeoNumericContext)
+    control=_geo_control_parse(statements[i])
+    cond=_geo_eval_numeric(control.cond,context,"execute_geo")!=0
+    if context.if_depth<=0
+        _geo_yyerror!(context,"Orphan ElseIf")
+        return i+1
+    end
+    if context.if_status[context.if_depth+1]
+        j=_geo_exec_skip_family(statements,i+1,:if,:endif,context)
+        context.if_depth-=1
+        return j
+    end
+    if cond
+        context.if_status[context.if_depth+1]=true
+        return i+1
+    end
+    j,typ=_geo_exec_skiptest(statements,i+1,context)
+    typ==0 && (context.if_depth-=1)
+    return j
+end
+
+# `tElse`: `status==1` skips to `EndIf` and closes the level; `status==0`
+# does *nothing* — the flag stays false, so a later `ElseIf` can still fire
+# (`If(0) A Else B ElseIf(1) C` runs B then C upstream).
+function _geo_exec_else!(statements::Vector{String},i::Int,
+                         context::_GeoNumericContext)
+    if context.if_depth<=0
+        _geo_yyerror!(context,"Orphan Else")
+        return i+1
+    end
+    if context.if_status[context.if_depth+1]
+        j=_geo_exec_skip_family(statements,i+1,:if,:endif,context)
+        context.if_depth-=1
+        return j
+    end
+    return i+1
+end
+
+# `tFor tSTRING tIn '{' FExpr : FExpr [: FExpr] '}'` and the anonymous
+# `tFor '(' FExpr : FExpr [: FExpr] ')'`: the range is evaluated once, the
+# variable binds `first`, and an out-of-range start runs `skip("For",
+# "EndFor")` — the level is never pushed, so the consumed `EndFor` does not
+# report `Invalid For/EndFor loop`. A zero step is legal: the body runs once
+# and the `EndFor` check pops the level immediately.
+function _geo_exec_for_header!(statements::Vector{String},i::Int,
+                               context::_GeoNumericContext)
+    control=_geo_control_parse(statements[i])
     caller="execute_geo: For"
-    variable=opener.var
-    (variable=="Pi" || variable in _GEO_SIDE_EFFECT_SYMBOLS) && throw(ArgumentError(
-        "$caller: loop variable $variable is reserved"))
-    pieces=_geo_split_list("{$(opener.range)}",caller)
-    range_pieces=length(pieces)==1 ?
-        _geo_split_range(pieces[1],caller) : nothing
-    range_pieces===nothing && throw(ArgumentError(
-        "$caller: Gmsh For ranges require a single `start:end[:increment]` " *
-        "term — comma lists and single values are rejected"))
-    # The For range is evaluated once at loop entry. Unlike a `a:b` list
-    # expression, the implicit two-term increment is always +1, so `{5:0}` is
-    # an empty loop (verified against pinned Gmsh 4.15.2's unrolled output).
-    first=_geo_eval_numeric(range_pieces[1],context,"$caller range start")
-    last=_geo_eval_numeric(range_pieces[2],context,"$caller range end")
-    step=length(range_pieces)==2 ? 1.0 :
-         _geo_eval_numeric(range_pieces[3],context,"$caller range increment")
-    count=_geo_range_count(first,last,step,_MAX_GEO_LIST_ITEMS,caller)
-    transfinite_tri=nothing
-    value=first
-    for _ in 1:count
-        _geo_context_set_scalar!(context,variable,value,caller)
-        assigned=_exec_geo_statements!(
-            m,statements,i+1,close-1,context,allocator_state,executed)
-        assigned===nothing || (transfinite_tri=assigned)
-        value+=step
-    end
-    # Gmsh's unroller leaves the loop variable at the first out-of-range value
-    # (i = start + count*step), and at the start value for an empty range.
-    _geo_context_set_scalar!(context,variable,value,caller)
-    return transfinite_tri,close+1
-end
-
-function _geo_exec_while!(m::GeoModel,statements::Vector{String},i::Int,hi::Int,
-                          context::_GeoNumericContext,
-                          allocator_state::_GeoTagAllocatorState,
-                          executed::Base.RefValue{Int})
-    opener=_geo_control_parse(statements[i])
-    close,=_geo_exec_find_block_end(statements,i,hi)
-    caller="execute_geo: While"
-    transfinite_tri=nothing
-    iterations=0
-    while _geo_eval_numeric(opener.cond,context,caller)!=0
-        iterations+=1
-        iterations<=_MAX_GEO_LOOP_ITERATIONS || throw(ArgumentError(
-            "$caller: loop exceeds $_MAX_GEO_LOOP_ITERATIONS iterations"))
-        assigned=_exec_geo_statements!(
-            m,statements,i+1,close-1,context,allocator_state,executed)
-        assigned===nothing || (transfinite_tri=assigned)
-    end
-    return transfinite_tri,close+1
-end
-
-# `_GeoSyntaxAbort` in a control header: upstream error recovery drops the
-# whole construct — the body never executes and the block closer then parses
-# standalone, reporting `Invalid For/EndFor loop` (error) or `Orphan EndIf`
-# (warning). Skips to the matching closer, emits that diagnostic, and
-# returns the index after it.
-function _geo_skip_aborted_block(statements::Vector{String},i::Int,hi::Int,
-                                 context::_GeoNumericContext)
-    depth=1;j=i+1
-    while j<=hi
-        inner=_geo_control_parse(statements[j])
-        if inner!==nothing
-            if inner.kind===:function
-                # Function bodies run to the first `Return`.
-                while j<=hi
-                    stop=_geo_control_parse(statements[j])
-                    (stop!==nothing && stop.kind===:return) && break
-                    j+=1
-                end
-            elseif inner.kind in (:if,:for,:while)
-                depth+=1
-            elseif inner.kind in (:endif,:endfor,:endwhile)
-                depth-=1
-                if depth==0
-                    if inner.kind===:endif
-                        _geo_yywarn!(context,"Orphan EndIf")
-                    else
-                        _geo_yyerror!(context,"Invalid For/EndFor loop")
-                    end
-                    return j+1
-                end
-            end
+    variable=control.var
+    !isempty(variable) &&
+        (variable=="Pi" || variable in _GEO_SIDE_EFFECT_SYMBOLS) &&
+        throw(ArgumentError("$caller: loop variable $variable is reserved"))
+    # The For range is `FExpr : FExpr [: FExpr]` upstream — not a list: a
+    # comma form evaluates its head then errors at `,`, a lone value
+    # evaluates then errors at `}`. Each endpoint reduces in order before
+    # the grammar commits.
+    spec=String(strip(control.range))
+    pieces=_geo_split_range(spec,caller)
+    if pieces===nothing || length(pieces)==1
+        text=pieces===nothing ? spec : pieces[1]
+        comma=_geo_scan_top_level_comma(text)
+        if comma>0
+            _geo_eval_numeric(
+                text[firstindex(text):prevind(text,comma)],context,caller)
+            _geo_syntax_abort(",")
         end
-        j+=1
+        _geo_eval_numeric(text,context,caller)
+        # `{` ranges fail at `}`, `( a:b )` ranges at `)`.
+        _geo_syntax_abort(isempty(variable) ? ")" : "}")
     end
-    return hi+1
+    first=_geo_eval_numeric(pieces[1],context,"$caller range start")
+    last=_geo_eval_numeric(pieces[2],context,"$caller range end")
+    step=length(pieces)==2 ? 1.0 :
+         _geo_eval_numeric(pieces[3],context,"$caller range increment")
+    _geo_bind_loop_var(context,variable,first,caller)
+    if (step>0 && first>last) || (step<0 && first<last)
+        return _geo_exec_skip_family(statements,i+1,:for,:endfor,context)
+    end
+    push!(context.loop_stack,
+          _GeoLoopLevel(variable,first,last,step,i+1,statements))
+    length(context.loop_stack)>_MAX_GEO_SCAN_NESTING-1 &&
+        _geo_yyerror!(context,"Reached maximum number of imbricated loops")
+    return i+1
+end
+
+# `tEndFor`: `ImbricatedLoop<=0` is `Invalid For/EndFor loop`. Otherwise the
+# loop variable advances `step` — through the live symbol, so a body's own
+# `i = ...` write propagates — and an in-range value rewinds the stream to
+# the saved body position while an out-of-range one pops the level.
+function _geo_exec_endfor!(statements::Vector{String},i::Int,
+                           context::_GeoNumericContext)
+    caller="execute_geo: For"
+    if isempty(context.loop_stack)
+        _geo_yyerror!(context,"Invalid For/EndFor loop")
+        return i+1
+    end
+    lvl=context.loop_stack[end]
+    if lvl.statements!==statements
+        # The frame belongs to a caller's stream — upstream's `fsetpos` on a
+        # foreign FILE* is undefined; report it like an orphan closer.
+        pop!(context.loop_stack)
+        _geo_yyerror!(context,"Invalid For/EndFor loop")
+        return i+1
+    end
+    x0=lvl.x0
+    if !isempty(lvl.var)
+        if !haskey(context.values,lvl.var) && !haskey(context.lists,lvl.var)
+            _geo_yyerror!(context,"Unknown loop variable '$(lvl.var)'")
+        elseif haskey(context.lists,lvl.var)
+            _geo_yyerror!(context,"Bad loop variable $(lvl.var)")
+        else
+            x0=context.values[lvl.var]+lvl.step
+            _geo_context_set_scalar!(context,lvl.var,x0,caller)
+        end
+    else
+        x0+=lvl.step
+    end
+    lvl.x0=x0
+    if (lvl.step>0 && x0<=lvl.x1) || (lvl.step<0 && x0>=lvl.x1)
+        return lvl.body_start
+    end
+    pop!(context.loop_stack)
+    return i+1
+end
+
+# `While (cond)` — Tessella's bounded extension (upstream lexes `While` as a
+# plain identifier). A true condition pushes a frame; a false one runs the
+# family skip to `EndWhile`.
+function _geo_exec_while_header!(statements::Vector{String},i::Int,
+                                 context::_GeoNumericContext)
+    control=_geo_control_parse(statements[i])
+    _geo_eval_numeric(control.cond,context,"execute_geo: While")!=0 ||
+        return _geo_exec_skip_family(
+            statements,i+1,:while,:endwhile,context)
+    push!(context.while_stack,
+          _GeoWhileLevel(control.cond,i+1,statements,0))
+    length(context.while_stack)+length(context.loop_stack)>
+        _MAX_GEO_SCAN_NESTING-1 &&
+        _geo_yyerror!(context,"Reached maximum number of imbricated loops")
+    return i+1
+end
+
+# `EndWhile` re-evaluates the condition: true rewinds to the body start,
+# false pops the frame. A stray `EndWhile` is silent (extension choice,
+# matching `EndWhile` having no upstream token).
+function _geo_exec_endwhile!(statements::Vector{String},i::Int,
+                             context::_GeoNumericContext)
+    isempty(context.while_stack) && return i+1
+    lvl=context.while_stack[end]
+    lvl.statements===statements || (pop!(context.while_stack);return i+1)
+    _geo_eval_numeric(lvl.cond,context,"execute_geo: While")!=0 ||
+        (pop!(context.while_stack);return i+1)
+    lvl.iterations+=1
+    lvl.iterations<=_MAX_GEO_LOOP_ITERATIONS || throw(ArgumentError(
+        "execute_geo: While loop exceeds $_MAX_GEO_LOOP_ITERATIONS iterations"))
+    return lvl.body_start
 end
 
 # Execute statements[lo:hi]; returns the last Mesh.TransfiniteTri assignment, if
@@ -673,9 +753,12 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
         # including inside If/For/While/Call bodies.
         context.stop===:run || break
         # Gmsh's parser aborts a file after more than 20 recorded errors
-        # (`gmsh_yyerrorstate > 20` in ParseFile) — counted per file.
+        # (`gmsh_yyerrorstate > 20` in ParseFile) — counted per file. The
+        # stop unwinds Call frames too: `enterFunction` stays inside the same
+        # FILE, so the abort kills the whole stream, not just the body.
         if length(context.exec_errors)-context.file_error_base>20
             _geo_yyerror!(context,"Too many errors: aborting parser...")
+            context.stop=:toomany
             break
         end
         line=statements[i]
@@ -686,25 +769,18 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 "execute_geo: control flow exceeds $_MAX_GEO_EXEC_STATEMENTS " *
                 "executed statements"))
             if match(r"^Call\b",line)!==nothing
-                assigned=_geo_exec_call!(
-                    m,statements,line,context,allocator_state,executed)
+                assigned=try
+                    _geo_exec_call!(
+                        m,statements,line,context,allocator_state,executed)
+                catch err
+                    err isa InterruptException && rethrow()
+                    err isa _GeoSyntaxAbort || rethrow()
+                    _geo_yyerror!(context,"syntax error ($(err.token))")
+                    nothing
+                end
                 assigned===nothing || (transfinite_tri=assigned)
                 i+=1
                 continue
-            end
-            occursin(
-                r"\b(Macro|Fillet|Chamfer)\b",
-                line) && throw(ArgumentError(
-                "execute_geo: unsupported statement $(line) — macros and " *
-                "advanced OCC features are blockers"))
-            # `Extrude {shapes} Using Wire {n}` splits at the shape-list
-            # brace; reject the OCC pipe continuation before the extrusion
-            # itself executes.
-            if match(r"^Extrude\b",line)!==nothing && i+1<=hi &&
-               match(r"^Using\b",statements[i+1])!==nothing
-                throw(ArgumentError(
-                    "execute_geo: pipe extrusion `Extrude {..} Using Wire " *
-                    "{..}` is OpenCASCADE-only and not implemented"))
             end
             _geo_context_refresh_allocators!(context,allocator_state)
             # `_GeoSyntaxAbort` marks an upstream *syntax error* — the bison
@@ -725,53 +801,70 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # inside `_geo_exec_delete!`; the observer skips them.
             syntax_aborted || _geo_allocator_observe_statement!(
                 allocator_state,line,context,"execute_geo")
-            occursin(r"\bBoolean(?:Difference|Union|Intersection|Fragments)?\b",
+            occursin(r"\bBoolean[A-Za-z]*\b",
                      line) &&
                 _geo_allocator_resync_model!(allocator_state,m)
-            i+=1
-        elseif control.kind===:if
-            assigned,i=try
-                _geo_exec_if!(
-                    m,statements,i,hi,context,allocator_state,executed)
-            catch err
-                err isa InterruptException && rethrow()
-                err isa _GeoSyntaxAbort || rethrow()
-                _geo_yyerror!(context,"syntax error ($(err.token))")
-                (nothing,_geo_skip_aborted_block(statements,i,hi,context))
-            end
-            assigned===nothing || (transfinite_tri=assigned)
-        elseif control.kind===:for
-            assigned,i=try
-                _geo_exec_for!(
-                    m,statements,i,hi,context,allocator_state,executed)
-            catch err
-                err isa InterruptException && rethrow()
-                err isa _GeoSyntaxAbort || rethrow()
-                _geo_yyerror!(context,"syntax error ($(err.token))")
-                (nothing,_geo_skip_aborted_block(statements,i,hi,context))
-            end
-            assigned===nothing || (transfinite_tri=assigned)
-        elseif control.kind===:while
-            assigned,i=try
-                _geo_exec_while!(
-                    m,statements,i,hi,context,allocator_state,executed)
-            catch err
-                err isa InterruptException && rethrow()
-                err isa _GeoSyntaxAbort || rethrow()
-                _geo_yyerror!(context,"syntax error ($(err.token))")
-                (nothing,_geo_skip_aborted_block(statements,i,hi,context))
-            end
-            assigned===nothing || (transfinite_tri=assigned)
-        elseif control.kind===:function
-            i=_geo_exec_function_def!(statements,i,hi,context)
-        elseif control.kind===:return
-            throw(ArgumentError(
-                "execute_geo: Return without an enclosing Function"))
+            # `error tEND` recovery: a `;`-terminated statement's own
+            # terminator ends the discard; a `}`-terminated one (Delete,
+            # Boolean*, Extrude, transforms) has none, so recovery eats
+            # through the next `;` like upstream.
+            i=syntax_aborted && !endswith(rstrip(line),';') ?
+                _geo_recovery_next_i(statements,i) : i+1
         else
-            throw(ArgumentError(
-                "execute_geo: $line without a matching opener"))
+            # Control tokens mutate the stream state — the branch/loop
+            # structure upstream implements with `skip`/`fsetpos` is flat
+            # here: a header dispatch returns the next stream index, which
+            # `EndFor`/`EndWhile` can rewind backwards. A `_GeoSyntaxAbort`
+            # inside a header is a bison syntax error: `error tEND` recovery
+            # discards through the next `;`-statement.
+            i=try
+                if control.kind===:if
+                    _geo_exec_if_header!(statements,i,context)
+                elseif control.kind===:elseif
+                    _geo_exec_elseif!(statements,i,context)
+                elseif control.kind===:else
+                    _geo_exec_else!(statements,i,context)
+                elseif control.kind===:endif
+                    context.if_depth-=1
+                    context.if_depth<0 &&
+                        _geo_yywarn!(context,"Orphan EndIf")
+                    i+1
+                elseif control.kind===:for
+                    _geo_exec_for_header!(statements,i,context)
+                elseif control.kind===:endfor
+                    _geo_exec_endfor!(statements,i,context)
+                elseif control.kind===:while
+                    _geo_exec_while_header!(statements,i,context)
+                elseif control.kind===:endwhile
+                    _geo_exec_endwhile!(statements,i,context)
+                elseif control.kind===:function
+                    _geo_exec_function_def!(statements,i,context)
+                elseif control.kind===:return
+                    # `leaveFunction` pops the call stack: inside a `Call`
+                    # body the flag unwinds to `_geo_exec_call!`; at top
+                    # level (empty stack) upstream emits `yymsg(0)`.
+                    if context.call_depth>0
+                        context.stop=:return
+                        break
+                    end
+                    _geo_yyerror!(context,"Error while exiting function")
+                    i+1
+                else
+                    throw(ArgumentError(
+                        "execute_geo: $line without a matching opener"))
+                end
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort || rethrow()
+                _geo_yyerror!(context,"syntax error ($(err.token))")
+                _geo_recovery_next_i(statements,i)
+            end
         end
     end
+    # Dangling `If`/`For`/`While` levels are silent at EOF — upstream's
+    # counters persist and the last branch/body pass already streamed (the
+    # `While` extension mirrors `For`). Only an EOF reached *while a skip
+    # scan was mid-flight* reports `Unexpected end of file`.
     return transfinite_tri
 end
 
@@ -789,31 +882,78 @@ function _geo_function_name(raw::AbstractString)
         "quoted string literal"))
 end
 
-# `Function name` registers its body — the statements up to the first `Return`
-# marker, matching Gmsh's token-level capture — without executing it. The body
-# may itself contain a `Function` statement, which registers when the outer
-# body runs (Gmsh's `Call` semantics resolve names at call time).
-function _geo_exec_function_def!(statements::Vector{String},i::Int,hi::Int,
+# `Function`/`Macro` names are `tSTRING` (identifier or quoted literal) or a
+# `StringExpr`; `Call` names are `String__Index` (which adds `name~{i}` and
+# `StringToName[..]` forms) or a `StringExpr`.
+function _geo_function_name_def(raw::AbstractString,
+                                context::_GeoNumericContext,
+                                caller::AbstractString)
+    name=strip(raw)
+    match(r"^[A-Za-z_][A-Za-z0-9_]*$",name)!==nothing && return String(name)
+    quoted=match(r"^\"(.*)\"$",name)
+    quoted===nothing && (quoted=match(r"^'(.*)'$",name))
+    quoted!==nothing && return String(quoted.captures[1])
+    return _geo_eval_string(name,context,caller)
+end
+
+function _geo_call_name(raw::AbstractString,context::_GeoNumericContext,
+                        caller::AbstractString)
+    s=String(strip(raw))
+    try
+        return _geo_symbol_name(s,context,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        # A `String__Index` parse failure does not commit the call — a
+        # StringExpr head (quoted literal, `Str[...]`, …) still applies; the
+        # classification below reports the right offending token otherwise.
+        err isa _GeoSyntaxAbort || rethrow()
+    end
+    # `tCall String__Index` — a tSTRING/`~{}`/`StringToName` head commits the
+    # name production and the first token that cannot extend it is the bison
+    # error (`Call f(1,2)` → `(`, `f[0]`/`ns::f`/`f.x`/`f g` → `[`/`::`/`.`/
+    # `g`). StringExpr heads (quoted literals, `Str`/`Sprintf`/…, bare string
+    # tokens) evaluate; other reserved heads error at the token itself.
+    head=match(r"^[A-Za-z_][A-Za-z0-9_]*",s)
+    if head===nothing
+        startswith(s,"\"") || startswith(s,"'") ||
+            _geo_syntax_abort(_geo_string_index_offender(s))
+    else
+        h=head.match
+        if !(h in _GEO_STRING_FUNCTIONS) && !(h in _GEO_BARE_STRING_TOKENS)
+            if h in ("StringToName","S2N") ||
+               (!(h in _GEO_ALL_FUNCTIONS) && !(h in _GEO_LEXER_KEYWORDS))
+                _geo_syntax_abort(_geo_string_index_offender(s))
+            else
+                _geo_syntax_abort(h)
+            end
+        end
+    end
+    return _geo_eval_string(s,context,caller)
+end
+
+# `Function name`/`Macro name` registers its body — the statement array it
+# came from plus the body start index, matching upstream's (file, position)
+# pair — without executing it. `createFunction` precedes `skip(..,"Return")`,
+# so the function is registered even when no `Return` follows (its body then
+# runs to the end of the array when called), and a redefinition is a
+# recoverable `yymsg(0)` diagnostic that keeps the existing body.
+function _geo_exec_function_def!(statements::Vector{String},i::Int,
                                  context::_GeoNumericContext)
     control=_geo_control_parse(statements[i])
-    name=_geo_function_name(control.name)
-    haskey(context.functions,name) && throw(ArgumentError(
-        "execute_geo: Redefinition of function $name"))
-    j=i+1
-    while j<=hi
-        inner=_geo_control_parse(statements[j])
-        (inner!==nothing && inner.kind===:return) && break
-        j+=1
+    name=_geo_function_name_def(control.name,context,"execute_geo: Function")
+    if haskey(context.functions,name)
+        _geo_yyerror!(context,"Redefinition of function $name")
+    else
+        context.functions[name]=(statements,i+1)
     end
-    j<=hi || throw(ArgumentError(
-        "execute_geo: Function $name has no matching Return"))
-    context.functions[name]=(i+1):(j-1)
-    return j+1
+    return _geo_exec_skip_return(statements,i+1,context)
 end
 
 # `Call name;` re-executes the registered body in the caller's scope with a
 # bounded recursion depth (Gmsh recurses by re-parsing the body text; an
-# unbounded call stack is a resource-bound violation here).
+# unbounded call stack is a resource-bound violation here). An unknown name
+# is a recoverable `yymsg(0)` diagnostic; `Return` unwinds by flagging
+# `context.stop`, which this frame clears on exit.
 function _geo_exec_call!(m::GeoModel,statements::Vector{String},
                          line::AbstractString,
                          context::_GeoNumericContext,
@@ -822,19 +962,23 @@ function _geo_exec_call!(m::GeoModel,statements::Vector{String},
     matched=match(r"^Call\s+(.+?)\s*;?\s*$",line)
     matched===nothing && throw(ArgumentError(
         "execute_geo: malformed Call statement; use `Call name;`"))
-    name=_geo_function_name(matched.captures[1])
+    name=_geo_call_name(matched.captures[1],context,"execute_geo: Call")
     body=get(context.functions,name,nothing)
-    body===nothing && throw(ArgumentError(
-        "execute_geo: Unknown function '$name'"))
+    if body===nothing
+        _geo_yyerror!(context,"Unknown function '$name'")
+        return nothing
+    end
+    (body_statements,body_start)=body
     context.call_depth+=1
     try
         context.call_depth<=_MAX_GEO_CALL_DEPTH || throw(ArgumentError(
             "execute_geo: Call depth exceeds $_MAX_GEO_CALL_DEPTH"))
         return _exec_geo_statements!(
-            m,statements,first(body),last(body),
+            m,body_statements,body_start,lastindex(body_statements),
             context,allocator_state,executed)
     finally
         context.call_depth-=1
+        context.stop===:return && (context.stop=:run)
     end
 end
 
@@ -848,6 +992,16 @@ end
 const _GEO_BOOLEAN_OPS=Dict("Difference"=>:difference,"Union"=>:union,
                             "Intersection"=>:intersection,
                             "Fragments"=>:fragments)
+# Gmsh.l maps the Boolean aliases onto the canonical operator tokens:
+# Fuse→Union, Cut→Difference, Common→Intersection, Coherence→Fragments.
+# `Section` stays distinct — `OCC_Internals::Section` is a real upstream
+# operator Tessella's native kernel does not implement.
+const _GEO_BOOLEAN_NAMES=Dict(
+    "Union"=>"Union","Fuse"=>"Union",
+    "Difference"=>"Difference","Cut"=>"Difference",
+    "Intersection"=>"Intersection","Common"=>"Intersection",
+    "Fragments"=>"Fragments","Coherence"=>"Fragments",
+    "Section"=>"Section")
 
 # Consecutive `{ ... }` operand groups of a `BooleanX ...` term: each group's
 # content is returned without its braces. The statement splitter already
@@ -909,7 +1063,7 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
                                 context::_GeoNumericContext,
                                 allocator_state=nothing)
     source=String(strip(raw))
-    mm=match(r"^Boolean(Difference|Union|Intersection|Fragments)\b(.*)$",source)
+    mm=match(r"^Boolean(Difference|Union|Intersection|Fragments|Section|Fuse|Coherence|Common|Cut)\b(.*)$",source)
     mm===nothing && return nothing
     caller="execute_geo: Boolean$(mm.captures[1])"
     rest=String(strip(mm.captures[2]))
@@ -923,8 +1077,12 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
             "Boolean operators only available with OpenCASCADE geometry kernel")
         return Float64[]
     end
+    opname=_GEO_BOOLEAN_NAMES[mm.captures[1]]
+    op=get(_GEO_BOOLEAN_OPS,opname,nothing)
+    op===nothing && throw(ArgumentError(
+        "execute_geo: Boolean$opname is not implemented"))
     operands=_geo_boolean_operands(groups,context,caller)
-    out=boolean_volumes_multi!(m,_GEO_BOOLEAN_OPS[mm.captures[1]],
+    out=boolean_volumes_multi!(m,op,
         operands.objects.tags,operands.tools.tags;
         remove_object=operands.objects.delete,
         remove_tool=operands.tools.delete,caller=caller)
@@ -1573,16 +1731,341 @@ function _geo_exec_point_sphere!(m::GeoModel,tag::Int,values,
     # tag-0 or negated reference reaches `Point[0]`/`Point[abs(t)]`.
     center_tag=abs(_geo_signed_gmsh_int_value(values[1],"$caller center point"))
     point_tag=abs(_geo_signed_gmsh_int_value(values[2],"$caller sphere point"))
-    haskey(m.points,center_tag) || (
-        _geo_msg_error!(context,"Unknown $kind center point $center_tag");
-        return nothing)
-    haskey(m.points,point_tag) || (
-        _geo_msg_error!(context,"Unknown $kind point $point_tag");
-        return nothing)
+    if !haskey(m.points,center_tag)
+        _geo_msg_error!(context,"Unknown $kind center point $center_tag")
+        context.parametric_surface=nothing
+        return nothing
+    end
+    if !haskey(m.points,point_tag)
+        _geo_msg_error!(context,"Unknown $kind point $point_tag")
+        context.parametric_surface=nothing
+        return nothing
+    end
+    itag=trunc(Int,tag)
     c=m.points[center_tag];p=m.points[point_tag]
     r=sqrt((p[1]-c[1])^2+(p[2]-c[2])^2+(p[3]-c[3])^2)
-    add_sphere!(m,c[1],c[2],c[3],r;tag=tag,_zero_literal=zero_literal)
+    # `newGeometrySphere`/`newGeometryPolarSphere` do not create an entity —
+    # `gmshSphere::New*` registers the surface in `allGmshSurfaces` and the
+    # grammar installs it as `myGmshSurface` (`$$.Type = 0`). A repeated tag
+    # reports through `Msg::Error`, then the registry entry is replaced.
+    surface=(kind=kind,tag=itag,center=c,radius=r)
+    haskey(context.parametric_surfaces,itag) &&
+        _geo_msg_error!(context,"Surface $itag already exists")
+    context.parametric_surfaces[itag]=surface
+    context.parametric_surface=surface
     return nothing
+end
+
+# `GEO_Internals::addX` emits `GEO <type> with tag <n> already exists`
+# (`Msg::Error`) and returns null on a duplicate tag; the grammar action then
+# emits `Could not add <name>` — both recoverable diagnostics, and the
+# existing entity is kept. Under the OpenCASCADE factory the same statement
+# routes to `OCC_Internals::addX`, whose wording is `OpenCASCADE <type> ...`
+# (`wire or curve loop` for curve loops).
+const _GEO_DUP_ENTITY_WORDS=(point=("GEO point","OpenCASCADE point"),
+    curve=("GEO curve","OpenCASCADE curve"),
+    curve_loop=("GEO curve loop","OpenCASCADE wire or curve loop"),
+    surface=("GEO surface","OpenCASCADE surface"),
+    surface_loop=("GEO surface loop","OpenCASCADE surface loop"),
+    volume=("GEO volume","OpenCASCADE volume"))
+
+function _geo_dup_entity!(context::_GeoNumericContext,exists::Bool,
+                          entity::Symbol,name_word::AbstractString,
+                          tag,zero_literal::Bool,allocator_state)
+    # `if(tag >= 0 && FindX(tag))` — the auto-assign path (`tag < 0` upstream,
+    # normalized to a nonliteral 0 by `_geo_exec_def_tag`) skips the lookup.
+    (exists && (zero_literal || tag>0)) || return false
+    words=getfield(_GEO_DUP_ENTITY_WORDS,entity)
+    word=allocator_state!==nothing &&
+        allocator_state.factory===:opencascade ? words[2] : words[1]
+    _geo_msg_error!(context,"$word with tag $(trunc(Int,tag)) already exists")
+    _geo_yyerror!(context,"Could not add $name_word")
+    return true
+end
+
+# `CreateCurve` resolves every control-point tag through `FindPoint`: misses
+# emit `Unknown control point %d in GEO curve %d` (`Msg::Error`) and are
+# dropped from the stored list — the curve still lands in `Curves` with only
+# the resolved points.
+function _geo_curve_found_points!(m::GeoModel,context::_GeoNumericContext,
+                                  points,tag)
+    found=Int[];sizehint!(found,length(points))
+    ok=true;itag=trunc(Int,tag)
+    for p in points
+        if haskey(m.points,p)
+            push!(found,p)
+        else
+            _geo_msg_error!(context,
+                "Unknown control point $p in GEO curve $itag")
+            ok=false
+        end
+    end
+    return (found,ok)
+end
+
+# `Tree_Add(Curves)` runs unconditionally once the tag is allocated: beg/end
+# are the first/last resolved control points (`p1 < 0` upstream), and a
+# zero-resolution list still occupies the tag.
+function _geo_store_curve!(m::GeoModel,tag,found::Vector{Int};
+                           kind=nothing,control_points::Bool=false,
+                           geometry=nothing)
+    itag=trunc(Int,tag)
+    m.curves[itag]=isempty(found) ? (0,0) : (first(found),last(found))
+    control_points && (m.curve_control_points[itag]=copy(found))
+    kind!==nothing && (m.curve_types[itag]=kind)
+    geometry!==nothing && (m.curve_geometry[itag]=geometry)
+    return nothing
+end
+
+# The `MSH_SEGM_LINE && Control_Points <= 2` position check at the end of
+# `CreateCurve`: endpoints comparing equal within
+# `Geometry.Tolerance * lc` (`ComparePosition`) emit a warning — the curve is
+# still valid (`ok` untouched).
+function _geo_line_tolerance_warn!(m::GeoModel,context::_GeoNumericContext,
+                                   found::Vector{Int},tag)
+    1<=length(found)<=2 || return nothing
+    a,b=first(found),last(found)
+    eps=something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)*
+        _geo_exec_lc(context)
+    pa,pb=m.points[a],m.points[b]
+    (abs(pa[1]-pb[1])<=eps && abs(pa[2]-pb[2])<=eps &&
+     abs(pa[3]-pb[3])<=eps) || return nothing
+    _geo_yywarn!(context,
+        "Start point $a and end point $b of GEO line $(trunc(Int,tag)) are " *
+        "closer than the geometrical tolerance, at position " *
+        "($(_geo_gmsh_number(pa[1])), $(_geo_gmsh_number(pa[2])), " *
+        "$(_geo_gmsh_number(pa[3])))")
+    return nothing
+end
+
+# `myatan2`/`myasin`/`angle_02pi` — Numeric.cpp's clamped variants.
+_geo_myatan2(y,x)=(y==0 && x==0) ? 0.0 : atan(y,x)
+_geo_myasin(a)=a<=-1.0 ? -π/2 : a>=1.0 ? π/2 : asin(a)
+function _geo_angle_02pi(a)
+    dp=2π
+    while a>dp || a<0.0
+        a>0 ? (a-=dp) : (a+=dp)
+    end
+    return a
+end
+
+# One `EndCurve` pass — the `MSH_SEGM_CIRC`/`MSH_SEGM_ELLI` branch, which runs
+# only when the resolved control list has 3 or 4 points. It builds the local
+# frame from the normalized center→endpoint directions (falling back to
+# `fallback_n` — `c->Circle.n`, `{0,0,1}` at `CreateCurve` time and the stored
+# normal for the `addX` re-run) when the cross product degenerates, checks
+# the projected radii, and reports `Circle or ellipse arc %d greater than Pi`
+# when `arc` is enabled (upstream gates that check on `c->Num > 0`, so the
+# reversed curve's pass never emits it). The 4-point form additionally
+# solves the ellipse's 2×2 system. Returns `ok` — `CreateCurve` folds only
+# the forward first pass into its `ok` out-param; every other pass emits
+# diagnostics with a discarded return.
+function _geo_endcurve_check!(m::GeoModel,context::_GeoNumericContext,
+                              found::Vector{Int},fallback_n,tag;
+                              arc::Bool)
+    itag=trunc(Int,tag)
+    center=m.points[found[2]]
+    d12=m.points[found[1]].-center
+    d32=m.points[found[end]].-center
+    d42=length(found)==4 ? m.points[found[3]].-center : nothing
+    n12,n32=norm(d12),norm(d32)
+    # `norme` leaves a zero vector unchanged rather than producing NaN — the
+    # downstream projections then see real zeros and the radius checks fire.
+    u12=n12>0 ? Tuple(d12./n12) : Tuple(d12)
+    u32=n32>0 ? Tuple(d32./n32) : Tuple(d32)
+    n=_occ_cross(u12,u32);nn=norm(n)
+    isvalid=nn>=1e-15
+    if isvalid
+        n=n./nn
+        (abs(n[1])<1e-5 && abs(n[2])<1e-5 && abs(n[3])<1e-5) && (isvalid=false)
+    end
+    if !isvalid
+        fb=Tuple(collect(fallback_n))
+        bn=norm(fb)
+        n=bn>0 ? fb./bn : fb
+    end
+    mv=_occ_cross(n,u12);mn=norm(mv)
+    mv=mn>0 ? mv./mn : mv
+    # Single-assignment copies keep the `proj` closure capture unboxed.
+    pn,pmv=n,mv
+    proj(v)=(u12[1]*v[1]+u12[2]*v[2]+u12[3]*v[3],
+             pmv[1]*v[1]+pmv[2]*v[2]+pmv[3]*v[3],
+             pn[1]*v[1]+pn[2]*v[2]+pn[3]*v[3])
+    pv0=proj(d12);pv2=proj(d32)
+    R=hypot(pv0[1],pv0[2]);R2=hypot(pv2[1],pv2[2])
+    ok=true;g=_geo_gmsh_number
+    a1=a3=0.0
+    if R==0||R2==0
+        _geo_msg_error!(context,
+            "Zero radius in circle or ellipse with tag $itag")
+        ok=false
+    elseif d42===nothing && abs((R-R2)/(R+R2))>0.1
+        _geo_msg_error!(context,
+            "Control points of circle with tag $itag are not cocircular: " *
+            "R1=$(g(R)), R2=$(g(R2)), n=[$(g(n[1])),$(g(n[2])),$(g(n[3]))]")
+        ok=false
+    end
+    if d42!==nothing
+        pv3=proj(d42)
+        a4=_geo_angle_02pi(_geo_myatan2(pv3[2],pv3[1]))
+        ca,sa=cos(a4),sin(a4)
+        x1=pv0[1]*ca+pv0[2]*sa;y1=-pv0[1]*sa+pv0[2]*ca
+        x3=pv2[1]*ca+pv2[2]*sa;y3=-pv2[1]*sa+pv2[2]*ca
+        det=x1*x1*y3*y3-x3*x3*y1*y1
+        s0=(y3*y3-y1*y1)/det;s1=(x1*x1-x3*x3)/det
+        if s0<=0||s1<=0
+            _geo_msg_error!(context,"Ellipse with tag $itag is wrong")
+            ok=false
+        else
+            f2=sqrt(1/s1)
+            a1=x1<0 ? -_geo_myasin(y1/f2)+a4+π : _geo_myasin(y1/f2)+a4
+            a3=x3<0 ? -_geo_myasin(y3/f2)+a4+π : _geo_myasin(y3/f2)+a4
+        end
+    else
+        a1=_geo_myatan2(pv0[2],pv0[1]);a3=_geo_myatan2(pv2[2],pv2[1])
+    end
+    a1=_geo_angle_02pi(a1);a3=_geo_angle_02pi(a3)
+    a1>=a3 && (a3+=2π)
+    if arc && itag>0 && a3-a1>1.01*π
+        _geo_msg_error!(context,
+            "Circle or ellipse arc $itag greater than Pi (angle=$(g(a3-a1)))")
+        _geo_msg_error!(context,
+            "(If you understand what this implies, you can disable this error")
+        _geo_msg_error!(context,
+            "message by selecting `Enable expert mode' in the option dialog.")
+        _geo_msg_error!(context,
+            "Otherwise, please subdivide the arc in smaller pieces.)")
+        ok=false
+    end
+    return ok
+end
+
+# `EndCurve` runs once inside `CreateCurve` (forward, default `{0,0,1}`
+# fallback normal — the only pass folded into the caller's `ok`), again in
+# `addCircleArc`/`addEllipseArc` when a `Plane {..}` normal was given, and
+# once more inside `CreateReversedCurve` on the mirrored control list
+# (`-Num`, no `>Pi` check — its return is discarded there too, as is the
+# reversed normal re-run's). For an ellipse whose resolved control list is
+# short of four points, the reversed construction's four unconditional slot
+# reads emit `Wrong list index (read)` per missing slot and the reversed
+# `EndCurve` reports `Ellipse with tag -N is wrong` (upstream runs the math
+# on uninitialized slot contents; the observed outcome is always the
+# ellipse-wrong diagnostic).
+function _geo_arc_endcurve_ok!(m::GeoModel,context::_GeoNumericContext,
+                               found::Vector{Int},normal,tag;
+                               ellipse::Bool,normal_given::Bool)
+    itag=trunc(Int,tag);nn=length(found);ok=true
+    if nn in (3,4)
+        ok=_geo_endcurve_check!(m,context,found,(0.0,0.0,1.0),itag;
+                                arc=true)
+        normal_given && _geo_endcurve_check!(m,context,found,normal,itag;
+                                             arc=true)
+    end
+    if ellipse && 0<nn<4
+        for _ in 1:(4-nn)
+            _geo_msg_error!(context,"Wrong list index (read)")
+        end
+        _geo_msg_error!(context,"Ellipse with tag $(-itag) is wrong")
+    elseif nn in (3,4)
+        _geo_endcurve_check!(m,context,found,(0.0,0.0,1.0),-itag;arc=false)
+        normal_given &&
+            _geo_endcurve_check!(m,context,found,normal,-itag;arc=false)
+    end
+    return ok
+end
+
+# `SortEdgesInLoop` (`reorient=false`) — chains signed curve tags by oriented
+# end→start connectivity, starting a new subloop with the next remaining
+# curve each time the chain closes on itself. A dead-end reports through
+# `ok=false` and the stored loop keeps only the chained prefix. Callers must
+# skip this entirely when any tag is unknown: `FindCurve` misses return
+# `true` early upstream and the raw input list is stored with no diagnostic.
+function _geo_sort_loop_partial(m::GeoModel,ids::Vector{Int})
+    isempty(ids) && return (Int[],true)
+    remaining=collect(ids)
+    ordered=Int[];sizehint!(ordered,length(ids))
+    ends(id)=(let (a,b)=m.curves[abs(id)];id>0 ? (a,b) : (b,a) end)
+    c0=c1=first(remaining)
+    push!(ordered,c0);deleteat!(remaining,1)
+    nb=length(ids)
+    while length(ordered)<nb
+        advanced=false
+        for (i,c2) in pairs(remaining)
+            ends(c1)[2]==ends(c2)[1] || continue
+            push!(ordered,c2);deleteat!(remaining,i)
+            c1=c2
+            if ends(c1)[2]==ends(c0)[1] && !isempty(remaining)
+                c0=c1=first(remaining)
+                push!(ordered,c0);deleteat!(remaining,1)
+            end
+            advanced=true
+            break
+        end
+        advanced || return (ordered,false)
+    end
+    return (ordered,true)
+end
+
+# `SetSurfaceGeneratrices` — each wire resolves through `FindEdgeLoop(
+# abs(iLoop))` (`Unknown curve loop %d in GEO surface %d`), then the loop's
+# curves through `FindCurve(ic)`/the model edge map (`Unknown curve %d`);
+# the reported curve tag carries the wire's sign and hole flip. Stops at the
+# first failure.
+function _geo_check_surface_wires!(m::GeoModel,context::_GeoNumericContext,
+                                   wires,tag)
+    itag=trunc(Int,tag)
+    for (i,wire) in enumerate(wires)
+        loop=get(m.loops,abs(wire),nothing)
+        if loop===nothing
+            _geo_msg_error!(context,
+                "Unknown curve loop $wire in GEO surface $itag")
+            return false
+        end
+        sgn=(wire<0 ? -1 : 1)*(i>1 ? -1 : 1)
+        for signed_curve in loop
+            ic=signed_curve*sgn
+            haskey(m.curves,abs(ic)) && continue
+            haskey(m.discrete,(1,abs(ic))) && continue
+            _geo_msg_error!(context,"Unknown curve $ic")
+            return false
+        end
+    end
+    return true
+end
+
+# `SetVolumeSurfaces` — each shell resolves through `FindSurfaceLoop(
+# abs(il))` (`Unknown surface loop %d`), then its surfaces through
+# `FindSurface(abs(is))`/the model face map (`Unknown surface %d in GEO
+# volume %d`). Stops at the first failure.
+function _geo_check_volume_shells!(m::GeoModel,context::_GeoNumericContext,
+                                   shells,tag)
+    itag=trunc(Int,tag)
+    for shell in shells
+        loop=get(m.surface_loops,abs(shell),nothing)
+        if loop===nothing
+            _geo_msg_error!(context,"Unknown surface loop $shell")
+            return false
+        end
+        for surface in loop
+            tag0=abs(surface)
+            haskey(m.surfaces,tag0) && continue
+            haskey(m.discrete,(2,tag0)) && continue
+            haskey(m.surface_geometry,tag0) && continue
+            _geo_msg_error!(context,
+                "Unknown surface $surface in GEO volume $itag")
+            return false
+        end
+    end
+    return true
+end
+
+# The shared `addX` epilogue: allocate the tag (upstream's
+# `getMaxTag(dim) + 1` auto path for nonliteral 0), store unconditionally,
+# then report `Could not add <name>` when the resolved record failed its
+# checks.
+function _geo_entity_tag(m::GeoModel,dim::Int,tag,caller,zero_literal::Bool)
+    return _alloc_tag!(m,dim,_tag(tag,caller,dim),caller;
+                       literal_zero=zero_literal)
 end
 
 function _geo_exec_entity_tags(raw::AbstractString,
@@ -1590,11 +2073,12 @@ function _geo_exec_entity_tags(raw::AbstractString,
                                caller::AbstractString;
                                signed::Bool=false,
                                wrap::Bool=true,
-                               abs_refs::Bool=false)
+                               abs_refs::Bool=false,
+                               allow_empty::Bool=false)
     source=wrap ? "{"*String(raw)*"}" : String(raw)
     values=_geo_numeric_list_values(
         source,context,caller;allow_multiplier=true)
-    isempty(values) && throw(ArgumentError(
+    (isempty(values) && !allow_empty) && throw(ArgumentError(
         "$caller: entity list is empty"))
     tags=Int[];sizehint!(tags,length(values))
     for numeric in values
@@ -2752,6 +3236,10 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
             sign=1.0;nvec+=1
         elseif c=='('
             (group,rest)=_geo_balanced_paren(rest,caller)
+            # A paren group is a plain `VExpr` — upstream its arity error is
+            # the closer (`Extrude(1)` → `)`, `Extrude(1,2,3,4)` → `,`).
+            nparts=length(_geo_split_top_commas(group,caller))
+            nparts!=3 && _geo_syntax_abort(nparts<3 ? ")" : ",")
             delta,motion=_geo_extrude_vector!(delta,sign,group,context,caller)
             if motion!==nothing
                 revolve===nothing || throw(ArgumentError(
@@ -2859,15 +3347,20 @@ function _geo_exec_entity_rhs_tags(raw::AbstractString,
                                    context::_GeoNumericContext,
                                    caller::AbstractString;
                                    signed::Bool=false,
-                                   abs_refs::Bool=false)
+                                   abs_refs::Bool=false,
+                                   allow_empty::Bool=false)
     # Gmsh parses every entity RHS as `ListOfDouble`: `{...}` groups, bare
     # `name[]`/`name[{..}]` references, `-{...}` negation, `expr * {...}`
     # multipliers and plain scalars — `_geo_numeric_list_values` covers the
-    # whole grammar and reports malformed brace forms itself.
+    # whole grammar and reports malformed brace forms itself. `allow_empty`
+    # mirrors `addX`'s empty-vector tolerance (`Line {}` reaches the inner
+    # `requires 2 points` diagnostic; loops/volumes store empty silently).
     source=String(strip(raw))
-    isempty(source) && throw(ArgumentError("$caller: entity list must not be empty"))
+    isempty(source) && !allow_empty && throw(ArgumentError(
+        "$caller: entity list must not be empty"))
     return _geo_exec_entity_tags(
-        source,context,caller;signed=signed,wrap=false,abs_refs=abs_refs)
+        source,context,caller;signed=signed,wrap=false,abs_refs=abs_refs,
+        allow_empty=allow_empty)
 end
 
 # `Periodic` slave/master lists resolve through `abs` like every other
@@ -2901,6 +3394,13 @@ function _geo_exec_vexpr5_rest(raw::AbstractString,
                                _geo_balanced_group(s,caller)
             parts=_geo_split_top_commas(group,caller)
             np=length(parts)
+            # Components are `FExpr` parsed one at a time — upstream a
+            # malformed component (`x[]` → `]`) errors before the arity
+            # check ever runs, so evaluate first.
+            evaluated=ntuple(5) do i
+                i<=np ? _geo_eval_numeric(parts[i],context,caller) :
+                        i==4 ? 0.0 : 1.0
+            end
             # `VExpr_Single` needs 3 (paren) or 3–5 (braces) FExpr components —
             # upstream the next token after the last legal component is the
             # error (`{a,b}` → `}`, `(a,b)` → `)`, a 4th/6th `,` → `,`).
@@ -2910,10 +3410,7 @@ function _geo_exec_vexpr5_rest(raw::AbstractString,
                     (paren ? "exactly 3 components" : "3 to 5 components") *
                     "; got $np")
             end
-            acc=acc .+ sign .* ntuple(5) do i
-                i<=np ? _geo_eval_numeric(parts[i],context,caller) :
-                        i==4 ? 0.0 : 1.0
-            end
+            acc=acc .+ sign .* evaluated
             s=String(strip(rest));sign=1.0;expect_term=false
         else
             if s[1]=='+' || s[1]=='-'
@@ -3421,8 +3918,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         _geo_sync_physical_view!(m,context)
         return nothing
     end
-    recursive && throw(ArgumentError(
-        "$caller: expected `{ ListOfShapes }` after `Recursive Delete`"))
+    recursive && _geo_syntax_abort(isempty(s) ? ";" : string(first(s)))
     # `Delete Embedded { Surface{...}; Volume{...}; }` clears every embedding
     # on the listed parents (dims 2 and 3 only — lower-dim entries are ignored
     # and a missing parent is an error), matching `removeEmbedded`.
@@ -3484,22 +3980,34 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
                 caller,"namespace index")
             String(nm.captures[1])*"_"*string(idx)
         else
-            throw(ArgumentError("$caller: malformed Delete statement"))
+            # `tDelete` expects a name, `name~{i}`, `{...}` or `[...]` —
+            # the syntax error lands on the offending token (`Delete = 5`
+            # → `(=)`).
+            _geo_syntax_abort(isempty(s) ? ";" : string(first(s)))
         end
     end
     if name=="All"
         # `ClearProject` — a fresh `GModel` becomes current (name, physical
         # and entity name tables, and compound specs all die with the old
-        # objects), the factory choice reverts to the built-in kernel, BOTH
-        # parser symbol tables are cleared, and `FunctionManager` is cleared.
-        # Options and the accumulated error flag survive.
+        # objects), the factory choice reverts to the built-in kernel, and
+        # `DeleteAllModelsAndViews` clears BOTH parser symbol tables and the
+        # struct namespaces. `FunctionManager` and options survive — it is
+        # only cleared by `OpenProject` (file open).
         _geo_reset_model_geometry!(m)
         _geo_reset_geometry_counters!(m,context)
         empty!(m.physical_names);empty!(m.entity_names)
         empty!(m.meshing.compounds)
         m.name=""
         empty!(context.values);empty!(context.lists)
-        empty!(context.strings);empty!(context.functions)
+        # `gmshSurface::reset()` runs with the fresh `GModel`: both the
+        # `allGmshSurfaces` registry and the `myGmshSurface` context die.
+        empty!(context.parametric_surfaces)
+        context.parametric_surface=nothing
+        # `gmsh_yystringsymbols` and `gmsh_yynamespaces` are cleared, but
+        # `FunctionManager` is not — registered functions survive `Delete All`
+        # upstream (it is only cleared by `OpenProject`).
+        empty!(context.strings)
+        empty!(context.structs);empty!(context.struct_maxtag)
         empty!(context.list_variables)
         empty!(context.unavailable);empty!(context.unavailable_lists)
         empty!(context.raw_physicals)
@@ -3520,6 +4028,8 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         empty!(context.raw_physicals)
+        empty!(context.parametric_surfaces)
+        context.parametric_surface=nothing
         context.geo_changed=true
         allocator_state===nothing ||
             _geo_allocator_reset_model!(allocator_state,context)
@@ -3554,8 +4064,9 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.mesh_node_owner=empty(context.mesh_node_owner)
         return nothing
     elseif name=="Struct"
-        # `gmsh_yynamespaces.clear()` — `Struct` definitions are unsupported,
-        # so clearing them is a no-op.
+        # `gmsh_yynamespaces.clear()` — every struct definition across all
+        # namespaces is dropped; tags reset with them.
+        empty!(context.structs);empty!(context.struct_maxtag)
         return nothing
     end
     known=haskey(context.values,name) || haskey(context.lists,name) ||
@@ -3577,6 +4088,51 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                      context::_GeoNumericContext,
                      allocator_state=nothing)
     _geo_statement_marks_internals(line) && (context.geo_changed=true)
+    # Malformed control headers — valid `If`/`ElseIf`/`For`/`Function`/`Macro`
+    # statements are consumed as control markers by the statement splitter and
+    # never reach this dispatch, so a leading keyword here is always a syntax
+    # error upstream. The grammar's token sequence is replayed so the error
+    # lands on the offender (`For = 5` → `(=)`, `For x = 5` → `(=)` after the
+    # loop variable shifts, `If foo` → `(foo)`). `While` is absent — it is not
+    # a lexer keyword upstream (`While = 5` assigns a variable there).
+    if (cm=match(r"^(If|ElseIf|For|Function|Macro)\b",line))!==nothing
+        word=cm.captures[1]
+        rest=strip(line[nextind(line,firstindex(line),
+                              ncodeunits(word)):end])
+        if word=="For"
+            nm=match(r"^[A-Za-z_][A-Za-z0-9_]*",rest)
+            nm===nothing &&
+                _geo_syntax_abort(_geo_stmt_head_token(rest))
+            rest=strip(rest[nextind(rest,lastindex(nm.match)):end])
+            match(r"^In\b",rest)===nothing &&
+                _geo_syntax_abort(_geo_stmt_head_token(rest))
+            rest=strip(rest[3:end])
+            startswith(rest,"{") ||
+                _geo_syntax_abort(_geo_stmt_head_token(rest))
+        elseif word=="Function" || word=="Macro"
+            match(r"^([A-Za-z_][A-Za-z0-9_]*|\"[^\"]*\"|'[^']*')",
+                  rest)===nothing &&
+                _geo_syntax_abort(_geo_stmt_head_token(rest))
+        else
+            startswith(rest,"(") ||
+                _geo_syntax_abort(_geo_stmt_head_token(rest))
+            close=_geo_matching_delim(rest,firstindex(rest))
+            if close==0
+                # `(` shifted; the error lands on the terminator (`;`) — the
+                # header expression still evaluated upstream, so report its
+                # own diagnostics before aborting.
+                _geo_eval_numeric(strip(rest[2:end]),context,"execute_geo")
+                _geo_syntax_abort(";")
+            else
+                _geo_eval_numeric(rest[2:prevind(rest,close)],context,
+                                  "execute_geo")
+            end
+        end
+        # A syntactically complete header cannot reach this dispatcher — the
+        # splitter consumes every valid control statement. Abort rather than
+        # silently dropping the construct.
+        _geo_syntax_abort(";")
+    end
     if occursin(r"^Periodic(?:\s|$)",line)
         _exec_periodic!(m,line,context)
         return
@@ -3594,6 +4150,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # `AddToTemporaryBoundingBox` — every `Point` statement feeds the
         # parse-time `CTX::instance()->lc` (also on a failed add upstream).
         _geo_exec_temp_bbox_add!(context,values[1],values[2],values[3])
+        _geo_dup_entity!(context,haskey(m.points,trunc(Int,tag)),
+                         :point,"point",tag,zero_literal,allocator_state) &&
+            return
         t=add_point!(m,values[1],values[2],values[3];
                    tag=tag,mesh_size=lc>0 ? lc : 1.0,
                    _zero_literal=zero_literal)
@@ -3608,10 +4167,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         points=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller endpoints";abs_refs=true)
-        length(points)==2 || throw(ArgumentError(
-            "$caller: expected two endpoint tags; got $(length(points))"))
-        add_line!(m,points[1],points[2];tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller endpoints";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"line",tag,zero_literal,allocator_state) &&
+            return
+        if length(points)<2
+            _geo_msg_error!(context,"Line requires 2 points")
+            _geo_yyerror!(context,"Could not add line")
+            return
+        end
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        _geo_line_tolerance_warn!(m,context,found,t)
+        _geo_store_curve!(m,t,found;control_points=length(found)>2)
+        ok || _geo_yyerror!(context,"Could not add line")
         return
     elseif (mm=match(
             r"^Circle\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3620,10 +4190,25 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         (points,normal)=_geo_circle_rhs(mm.captures[2],context,caller)
-        length(points)==3 || throw(ArgumentError(
-            "$caller: Circle requires 3 points"))
-        add_circle_arc!(m,points[1],points[2],points[3];
-                        tag=tag,plane_normal=normal,_zero_literal=zero_literal)
+        if length(points)!=3
+            # Grammar-level check — `addCircleArc` is never reached (`r`
+            # stays true), so no duplicate check, no `Could not add`, and no
+            # tag is consumed.
+            _geo_yyerror!(context,"Circle requires 3 points")
+            return
+        end
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"circle",tag,zero_literal,allocator_state) &&
+            return
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        n=_arc_stored_normal(normal,caller)
+        ok=_geo_arc_endcurve_ok!(m,context,found,n,t;
+                                 ellipse=false,
+                                 normal_given=normal!==nothing) && ok
+        _geo_store_curve!(m,t,found;kind=:circle,control_points=true,
+                          geometry=(n=n,))
+        ok || _geo_yyerror!(context,"Could not add circle")
         return
     elseif (mm=match(
             r"^Ellipse\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3632,16 +4217,28 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         (points,normal)=_geo_circle_rhs(mm.captures[2],context,caller)
-        length(points) in (3,4) || throw(ArgumentError(
-            "$caller: Ellipse requires 4 points"))
+        if !(length(points) in (3,4))
+            # Grammar-level check — `addEllipseArc` is never reached.
+            _geo_yyerror!(context,"Ellipse requires 4 points")
+            return
+        end
         # The built-in 3-tag form mirrors the OCC backward-compatibility
         # record: the start point doubles as the major-axis point
         # (`addEllipseArc(num, tags[0], tags[1], tags[0], tags[2], ..)`).
         length(points)==3 &&
             (points=[points[1],points[2],points[1],points[3]])
-        add_ellipse_arc!(m,points[1],points[2],points[3],points[4];
-                         tag=tag,plane_normal=normal,
-                         _zero_literal=zero_literal)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"ellipse",tag,zero_literal,allocator_state) &&
+            return
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        n=_arc_stored_normal(normal,caller)
+        ok=_geo_arc_endcurve_ok!(m,context,found,n,t;
+                                 ellipse=true,
+                                 normal_given=normal!==nothing) && ok
+        _geo_store_curve!(m,t,found;kind=:ellipse,control_points=true,
+                          geometry=(n=n,))
+        ok || _geo_yyerror!(context,"Could not add ellipse")
         return
     elseif (mm=match(
             r"^Spline\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3650,8 +4247,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         points=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller control points";abs_refs=true)
-        add_spline!(m,points;tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller control points";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"spline",tag,zero_literal,allocator_state) &&
+            return
+        if length(points)<2
+            _geo_msg_error!(context,
+                "Spline curve requires at least 2 control points")
+            _geo_yyerror!(context,"Could not add spline")
+            return
+        end
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        _geo_store_curve!(m,t,found;kind=:spline,control_points=true)
+        ok || _geo_yyerror!(context,"Could not add spline")
         return
     elseif (mm=match(
             r"^BSpline\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3660,8 +4270,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         points=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller control points";abs_refs=true)
-        add_bspline!(m,points;tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller control points";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"BSpline",tag,zero_literal,allocator_state) &&
+            return
+        if length(points)<2
+            _geo_msg_error!(context,
+                "BSpline curve requires at least 2 control points")
+            _geo_yyerror!(context,"Could not add BSpline")
+            return
+        end
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        _geo_store_curve!(m,t,found;kind=:bspline,control_points=true)
+        ok || _geo_yyerror!(context,"Could not add BSpline")
         return
     elseif (mm=match(
             r"^Bezier\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3670,8 +4293,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         points=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller control points";abs_refs=true)
-        add_bezier!(m,points;tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller control points";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"Bezier",tag,zero_literal,allocator_state) &&
+            return
+        if length(points)<2
+            _geo_msg_error!(context,
+                "Bezier curve requires at least 2 control points")
+            _geo_yyerror!(context,"Could not add Bezier")
+            return
+        end
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        _geo_store_curve!(m,t,found;kind=:bezier,control_points=true)
+        ok || _geo_yyerror!(context,"Could not add Bezier")
         return
     elseif (mm=match(
             r"^Nurbs\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3688,7 +4324,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "got $(repr(strip(mm.captures[2])))"))
         (points_raw,knots_tail)=split_knots
         points=_geo_exec_entity_rhs_tags(
-            points_raw,context,"$caller control points";abs_refs=true)
+            points_raw,context,"$caller control points";
+            abs_refs=true,allow_empty=true)
         split_order=_geo_split_at_keyword(knots_tail,"Order",caller)
         split_order===nothing && throw(ArgumentError(
             "$caller: expected `Order <expr>` after the knot list; got " *
@@ -3698,7 +4335,32 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "$caller: Nurbs requires an `Order` expression"))
         knots=_geo_numeric_list_values(knots_raw,context,"$caller knots")
         _geo_eval_numeric(order_raw,context,"$caller Order")
-        add_nurbs!(m,points,knots;tag=tag,_zero_literal=zero_literal)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"nurbs",tag,zero_literal,allocator_state) &&
+            return
+        if length(points)<2
+            # `addBSpline` reports through its BSpline record name even on
+            # the `Nurbs` statement.
+            _geo_msg_error!(context,
+                "BSpline curve requires at least 2 control points")
+            _geo_yyerror!(context,"Could not add nurbs")
+            return
+        end
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        if isempty(knots)
+            # An empty `Knots {}` builds the plain `MSH_SEGM_BSPLN` record.
+            _geo_store_curve!(m,t,found;kind=:bspline,control_points=true)
+        else
+            # `order = knots - points - 1` uses the *input* point count; the
+            # knot vector stores as `float` and `ubeg`/`uend` keep the raw
+            # doubles — upstream performs no knot validation.
+            degree=length(knots)-length(points)-1
+            _geo_store_curve!(m,t,found;kind=:nurbs,control_points=true,
+                geometry=(knots=Float64.(Float32.(knots)),deg=degree,
+                          ubeg=first(knots),uend=last(knots)))
+        end
+        ok || _geo_yyerror!(context,"Could not add nurbs")
         return
     elseif (mm=match(
             r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3707,8 +4369,24 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         curves=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller curves";signed=true)
-        add_curve_loop!(m,curves;tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller curves";
+            signed=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.loops,trunc(Int,tag)),
+                         :curve_loop,"curve loop",tag,zero_literal,
+                         allocator_state) && return
+        t=_alloc_curve_loop_tag(m,_tag(tag,caller,1),caller;
+                                literal_zero=zero_literal)
+        if all(id->haskey(m.curves,abs(id)),curves)
+            # `SortEdgesInLoop` stores the chained prefix even on a dead-end.
+            (ordered,ok)=_geo_sort_loop_partial(m,curves)
+            m.loops[t]=ordered
+            ok || (_geo_msg_error!(context,"Curve loop $t is wrong");
+                   _geo_yyerror!(context,"Could not add curve loop"))
+        else
+            # `FindCurve` misses return `true` early — the raw list is stored
+            # with no diagnostic at all.
+            m.loops[t]=copy(curves)
+        end
         return
     elseif (mm=match(
             r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3718,8 +4396,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             mm.captures[1],context,"$caller tag")
         # `SetSurfaceGeneratrices` resolves each wire through `abs(iLoop)`.
         loops=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller loops";abs_refs=true)
-        add_plane_surface!(m,loops;tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller loops";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.surfaces,trunc(Int,tag)),
+                         :surface,"plane surface",tag,zero_literal,
+                         allocator_state) && return
+        if isempty(loops)
+            _geo_msg_error!(context,
+                "Plane surface requires at least one curve loop")
+            _geo_yyerror!(context,"Could not add plane surface")
+            return
+        end
+        t=_geo_entity_tag(m,2,tag,caller,zero_literal)
+        ok=_geo_check_surface_wires!(m,context,loops,t)
+        m.surfaces[t]=loops
+        ok || _geo_yyerror!(context,"Could not add plane surface")
         return
     elseif (mm=match(
             r"^(Ruled\s+)?Surface\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3733,23 +4424,64 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (group,rest)=_geo_balanced_group(
             String(strip(mm.captures[3])),caller)
         wires=_geo_exec_entity_tags(group,context,"$caller loops";
-                                    abs_refs=true)
+                                    abs_refs=true,allow_empty=true)
         sphere_center=_geo_surface_constraint(rest,context,caller)
-        add_ruled_surface!(m,wires;tag=tag,sphere_center=sphere_center,
-                           _zero_literal=zero_literal)
+        _geo_dup_entity!(context,haskey(m.surfaces,trunc(Int,tag)),
+                         :surface,"surface",tag,zero_literal,
+                         allocator_state) && return
+        if isempty(wires)
+            _geo_msg_error!(context,"Surface requires at least one curve loop")
+            _geo_yyerror!(context,"Could not add surface")
+            return
+        end
+        # The first wire's existence and border count are pre-store checks —
+        # failures leave the tag unconsumed.
+        first_loop=get(m.loops,abs(first(wires)),nothing)
+        if first_loop===nothing
+            _geo_msg_error!(context,"Unknown curve loop $(abs(first(wires)))")
+            _geo_yyerror!(context,"Could not add surface")
+            return
+        end
+        borders=length(first_loop)
+        if !(borders in (3,4))
+            _geo_msg_error!(context,
+                "Wrong definition of surface $(trunc(Int,tag)): $borders " *
+                "borders instead of 3 or 4")
+            _geo_yyerror!(context,"Could not add surface")
+            return
+        end
+        t=_geo_entity_tag(m,2,tag,caller,zero_literal)
+        ok=_geo_check_surface_wires!(m,context,wires,t)
+        if sphere_center!==nothing && sphere_center>=0 &&
+                !haskey(m.points,sphere_center)
+            _geo_msg_error!(context,
+                "Unknown sphere center point $sphere_center")
+            ok=false
+        end
+        m.surfaces[t]=wires
+        m.surface_types[t]=borders==4 ? :ruled : :tric
+        (sphere_center!==nothing && sphere_center>=0 &&
+         haskey(m.points,sphere_center)) &&
+            (m.surface_geometry[t]=(sphere_center=sphere_center,))
+        ok || _geo_yyerror!(context,"Could not add surface")
         return
     elseif (mm=match(
-            r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            r"^Surface\s+Loop\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*(?:\s+Using\s+Sewing)?\s*;$",
             line)) !== nothing
         caller="execute_geo: Surface Loop"
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         surfaces=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller surfaces";signed=true)
-        # Gmsh stores surface loops without a closure check — `Volume`
-        # creation validates the shell later.
-        add_surface_loop!(m,surfaces;tag=tag,_zero_literal=zero_literal,
-                          _skip_validation=true)
+            mm.captures[2],context,"$caller surfaces";
+            signed=true,allow_empty=true)
+        # `addSurfaceLoop` validates nothing: the raw list is stored
+        # unconditionally (closure surfaces at `Volume` creation or later).
+        _geo_dup_entity!(context,haskey(m.surface_loops,trunc(Int,tag)),
+                         :surface_loop,"surface loop",tag,zero_literal,
+                         allocator_state) && return
+        t=_alloc_surface_loop_tag(m,_tag(tag,caller,2),caller;
+                                  literal_zero=zero_literal)
+        m.surface_loops[t]=copy(surfaces)
         return
     elseif (mm=match(
             r"^Volume\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -3761,9 +4493,15 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # checks shell and member-surface existence only (closure is deferred
         # to meshing).
         shells=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller surface loops";abs_refs=true)
-        add_volume!(m,shells;tag=tag,_zero_literal=zero_literal,
-                    _skip_validation=true)
+            mm.captures[2],context,"$caller surface loops";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.volumes,trunc(Int,tag)),
+                         :volume,"volume",tag,zero_literal,
+                         allocator_state) && return
+        t=_geo_entity_tag(m,3,tag,caller,zero_literal)
+        ok=_geo_check_volume_shells!(m,context,shells,t)
+        m.volumes[t]=copy(shells)
+        ok || _geo_yyerror!(context,"Could not add volume")
         return
     elseif (mm=match(
             r"^Box\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
@@ -3785,6 +4523,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Box requires 6 parameters")
             return
         end
+        _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"block",
+                         tag,zero_literal,allocator_state) &&
+            return
         add_box!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -3805,20 +4546,29 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Cylinder requires 7 parameters")
             return
         end
+        _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"cylinder",
+                         tag,zero_literal,allocator_state) &&
+            return
         add_cylinder!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
             r"^Sphere\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
             line)) !== nothing
         caller="execute_geo: Sphere"
-        (tag,zero_literal)=_geo_exec_def_tag(
-            mm.captures[1],context,"$caller tag")
+        # The two-point form registers the raw tag in `allGmshSurfaces` — the
+        # entity `tag < 0` auto-assignment does not apply there. The OCC
+        # parameter form still uses the normal addX tag semantics.
+        raw_tag=_geo_signed_gmsh_int_value(
+            _geo_eval_numeric(mm.captures[1],context,"$caller tag"),
+            "$caller tag")
+        tag=raw_tag<0 ? 0 : raw_tag
+        zero_literal=raw_tag==0
         values=_geo_exec_numeric_values(
             mm.captures[2],context,"$caller parameters")
         if length(values)==2
             # `Sphere(n) = {centerTag, pointTag}` — the built-in-kernel form:
             # center point plus a point on the sphere, radius = distance.
-            _geo_exec_point_sphere!(m,tag,values,context,caller,"sphere";
+            _geo_exec_point_sphere!(m,raw_tag,values,context,caller,"sphere";
                                     zero_literal=zero_literal)
         elseif 4<=length(values)<=7
             # `{x,y,z,r[,a1,a2,a3]}` — Gmsh gates this on OpenCASCADE;
@@ -3829,6 +4579,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                     "Sphere only available with OpenCASCADE geometry kernel")
                 return
             end
+            _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"sphere",
+                             tag,zero_literal,allocator_state) &&
+                return
             length(values)==4 || throw(ArgumentError(
                 "$caller: Sphere angle bounds (a1,a2,a3) are not supported"))
             add_sphere!(m,values[1],values[2],values[3],values[4];
@@ -3845,13 +4598,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # same center/radius construction as `Sphere` (the difference is the
         # surface parametrization, which Tessella's sphere does not carry).
         caller="execute_geo: PolarSphere"
-        (tag,zero_literal)=_geo_exec_def_tag(
-            mm.captures[1],context,"$caller tag")
+        raw_tag=_geo_signed_gmsh_int_value(
+            _geo_eval_numeric(mm.captures[1],context,"$caller tag"),
+            "$caller tag")
         values=_geo_exec_numeric_values(
             mm.captures[2],context,"$caller parameters")
         if length(values)==2
-            _geo_exec_point_sphere!(m,tag,values,context,caller,
-                                    "polar sphere";zero_literal=zero_literal)
+            _geo_exec_point_sphere!(m,raw_tag,values,context,caller,
+                                    "polar sphere";zero_literal=raw_tag==0)
         else
             _geo_yyerror!(context,"PolarSphere requires 2 points")
         end
@@ -3874,6 +4628,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Cone requires 8 parameters")
             return
         end
+        _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"cone",
+                         tag,zero_literal,allocator_state) &&
+            return
         add_cone!(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
@@ -3894,6 +4651,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Torus requires 5 or 6 parameters")
             return
         end
+        _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"torus",
+                         tag,zero_literal,allocator_state) &&
+            return
         add_torus!(m,values[1:5]...;tag=tag,_zero_literal=zero_literal,
                    angle=length(values)==6 ? values[6] : 2π)
         return
@@ -3905,10 +4665,21 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
         points=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller endpoints";abs_refs=true)
-        length(points)==2 || throw(ArgumentError(
-            "$caller: expected two endpoint tags; got $(length(points))"))
-        add_line!(m,points[1],points[2];tag=tag,_zero_literal=zero_literal)
+            mm.captures[2],context,"$caller endpoints";
+            abs_refs=true,allow_empty=true)
+        _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
+                         :curve,"line",tag,zero_literal,allocator_state) &&
+            return
+        if length(points)<2
+            _geo_msg_error!(context,"Line requires 2 points")
+            _geo_yyerror!(context,"Could not add line")
+            return
+        end
+        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        _geo_line_tolerance_warn!(m,context,found,t)
+        _geo_store_curve!(m,t,found;control_points=length(found)>2)
+        ok || _geo_yyerror!(context,"Could not add line")
         return
     elseif (mm=match(
             Regex("^(Rectangle|Disk|Wedge|ThickSolid|ThruSections|Wire)\\s*\\(|" *
@@ -3930,38 +4701,34 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_yyerror!(context,
             "$name only available with OpenCASCADE geometry kernel")
         return
-    elseif match(r"^Parametric\s+Surface\s*\(",line)!==nothing ||
-           match(r"^Coordinates\s+Surface\b",line)!==nothing
-        # `Parametric Surface` and the `Coordinates Surface` context belong to
-        # Gmsh's parametric-surface subsystem (`myGmshSurface`), which Tessella
-        # does not implement.
+    elseif (mm=match(
+            r"^Coordinates\s+Surface\s+(.*?)\s*;$",line)) !== nothing
+        # `Coordinates Surface n` installs a registered `allGmshSurfaces`
+        # entry as `myGmshSurface`. A miss assigns nullptr upstream, so the
+        # current context is cleared either way.
+        caller="execute_geo: Coordinates Surface"
+        surface_tag=_geo_signed_gmsh_int_value(
+            _geo_eval_numeric(mm.captures[1],context,"$caller surface"),
+            "$caller surface")
+        surface=get(context.parametric_surfaces,surface_tag,nothing)
+        surface===nothing && _geo_msg_error!(context,
+            "Surface $surface_tag does not exist")
+        context.parametric_surface=surface
+        return
+    elseif match(r"^Parametric\s+Surface\s*\(",line)!==nothing
+        # `Parametric Surface` belongs to Gmsh's expression-driven
+        # `myGmshSurface` subsystem, which Tessella does not implement.
         throw(ArgumentError(
             "execute_geo: parametric surfaces are not supported: $line"))
-    elseif (mm=match(
-            r"^Curve\s+\"[^\"]*\"\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
-            line)) !== nothing
-        # `Curve <word>(n) = {..}` — an alternate `Curve Loop` definition.
-        caller="execute_geo: Curve Loop"
-        (tag,zero_literal)=_geo_exec_def_tag(
-            mm.captures[1],context,"$caller tag")
-        curves=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller curves";signed=true)
-        add_curve_loop!(m,curves;tag=tag,_zero_literal=zero_literal)
-        return
-    elseif (mm=match(
-            r"^Surface\s+\"[^\"]*\"\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
-            line)) !== nothing
-        # `Surface <word>(n) = {..}` — an alternate `Surface Loop` definition.
-        caller="execute_geo: Surface Loop"
-        (tag,zero_literal)=_geo_exec_def_tag(
-            mm.captures[1],context,"$caller tag")
-        surfaces=_geo_exec_entity_rhs_tags(
-            mm.captures[2],context,"$caller surfaces";signed=true)
-        add_surface_loop!(m,surfaces;tag=tag,_zero_literal=zero_literal,
-                          _skip_validation=true)
+    elseif match(r"^(Curve|Surface)\s+\"",line)!==nothing
+        # `Curve "name"(n)` / `Surface "name"(n)` are not grammar forms —
+        # upstream aborts at the string token.
+        _geo_syntax_abort("\"")
         return
     elseif match(r"^Euclidian\s+Coordinates\s*;?\s*$",line)!==nothing
-        # `Euclidian Coordinates` resets `myGmshSurface` — already unset.
+        # `Euclidian Coordinates` deletes `myGmshSurface` — the parametric
+        # context a `Sphere(n) = {c, p}`-style statement installs.
+        context.parametric_surface=nothing
         return
     elseif (mm=match(
             r"^Compound\s+(Spline|BSpline)\s*\(",
@@ -4020,12 +4787,40 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         end
         return
     elseif match(r"^Closest\s*\{",line)!==nothing
+        if allocator_state!==nothing && allocator_state.factory==:opencascade
+            throw(ArgumentError(
+                "execute_geo: Closest requires an OpenCASCADE backend, " *
+                "which Tessella does not implement"))
+        end
         _geo_yyerror!(context,
             "Closest entity only available with OpenCASCADE geometry kernel")
         return
     elseif (mm=match(r"^(Fillet|Chamfer)\s*\{",line))!==nothing
+        # `tFillet {regions} {edges} {radii}` / `tChamfer {regions} {edges}
+        # {surfaces} {distances}` — OCC-only upstream; under OpenCASCADE the
+        # entity is created, which Tessella's native kernel cannot honor.
+        if allocator_state!==nothing && allocator_state.factory==:opencascade
+            throw(ArgumentError(
+                "execute_geo: $(mm.captures[1]) requires an OpenCASCADE " *
+                "backend, which Tessella does not implement"))
+        end
         _geo_yyerror!(context,
             "$(mm.captures[1]) only available with OpenCASCADE geometry kernel")
+        return
+    elseif match(
+            r"^(?:Ruled\s+)?ThruSections\s*(?:\{|[\w(+-])",
+            line)!==nothing
+        # `ThruSections {wires}` / `Ruled ThruSections {wires}` —
+        # `tThruSections ListOfDouble` (the `(tag) = {...}` assignments are
+        # handled above). Under OpenCASCADE upstream creates the entity;
+        # Tessella's native kernel does not implement it.
+        if allocator_state!==nothing && allocator_state.factory==:opencascade
+            throw(ArgumentError(
+                "execute_geo: ThruSections requires an OpenCASCADE backend, " *
+                "which Tessella does not implement"))
+        end
+        _geo_yyerror!(context,
+            "ThruSections only available with OpenCASCADE geometry kernel")
         return
     elseif match(r"^ShapeFromFile\s*\(",line)!==nothing
         _geo_yyerror!(context,
@@ -4036,7 +4831,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "HealShapes only available with OpenCASCADE geometry kernel")
         return
     elseif match(
-            r"^Boolean(?:Difference|Union|Intersection|Fragments)\s*\{",
+            r"^Boolean(?:Difference|Union|Intersection|Fragments|Section|Fuse|Coherence|Common|Cut)\s*\{",
             line)!==nothing
         # Standalone `BooleanX{...}{...}` — the resulting entities use
         # automatic tags and the statement discards the list.
@@ -4054,7 +4849,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             "execute_geo: OnelabRun: external ONELAB clients are not supported"))
         return
     elseif (mm=match(
-            r"^Boolean(Difference|Union|Intersection|Fragments)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
+            r"^Boolean(Difference|Union|Intersection|Fragments|Section|Fuse|Coherence|Common|Cut)\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
         caller="execute_geo: Boolean$(mm.captures[1])"
         # `_multiBind` treats `tag <= 0` as automatic and binds `tag > 0`
@@ -4068,8 +4863,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         if allocator_state===nothing || allocator_state.factory!==:opencascade
             return
         end
+        opname=_GEO_BOOLEAN_NAMES[mm.captures[1]]
+        op=get(_GEO_BOOLEAN_OPS,opname,nothing)
+        op===nothing && throw(ArgumentError(
+            "execute_geo: Boolean$opname is not implemented"))
         operands=_geo_boolean_operands(groups,context,caller)
-        boolean_volumes_multi!(m,_GEO_BOOLEAN_OPS[mm.captures[1]],
+        boolean_volumes_multi!(m,op,
             operands.objects.tags,operands.tools.tags;tag=tag,
             remove_object=operands.objects.delete,
             remove_tool=operands.tools.delete,caller=caller)
@@ -4427,11 +5226,38 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # ListOfDouble`; the background/boundary-layer stores live in params.
         _geo_exec_field_command!(context,String(fm.captures[1]),fm.captures[2])
         return
-    elseif (startswith(line,"Field") || startswith(line,"Background") ||
-            startswith(line,"BoundaryLayer")) &&
+    elseif startswith(line,"Field") &&
            !occursin(r"^Field\s*\[.*\]\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*=",line)
-        # `Field[i].member = v` option writes flow through to the assignment
-        # dispatcher so mid-file mutations reach the field map.
+        # `Field[i] = Kind` matched above and `Field[i].member = v` option
+        # writes flow to the assignment dispatcher. `Field` is `tField`
+        # upstream: after `[ FExpr ]` the grammar expects `=` — the syntax
+        # error lands on the breaking token (`Field = 5` → `(=)`,
+        # `Field[i];` → `(;)`), and the index expression still evaluates.
+        rest=String(strip(line[nextind(line,firstindex(line),
+                                     ncodeunits("Field")):end]))
+        if startswith(rest,"[")
+            close=_geo_matching_delim(rest,firstindex(rest))
+            close==0 && _geo_syntax_abort("[")
+            _geo_eval_numeric(
+                rest[2:prevind(rest,close)],context,"execute_geo: Field index")
+            rest=String(strip(rest[nextind(rest,close):end]))
+            (dm=match(r"^\.\s*[A-Za-z_][A-Za-z0-9_]*",rest))!==nothing &&
+                (rest=String(strip(rest[nextind(rest,
+                    lastindex(dm.match)):end])))
+        end
+        _geo_syntax_abort(_geo_stmt_head_token(rest))
+    elseif (bm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+Field\b(.*)$",line))!==nothing
+        # `<name> Field` without `= ...` — `tField` expects an affectation, so
+        # the error lands on the token after `Field` (`Background Field;` →
+        # `(;)`). A keyword head already committed its own production —
+        # `SetMaxTag Field(10)` errors on `Field` itself (the GeoEntity slot).
+        # `Background`/`BoundaryLayer` are plain `tSTRING` names upstream:
+        # `Background = 5` is an ordinary assignment and falls through below.
+        _geo_tstring_valid(String(bm.captures[1])) || _geo_syntax_abort("Field")
+        tail=String(strip(bm.captures[2]))
+        _geo_syntax_abort(_geo_stmt_head_token(tail))
+    elseif (mm=match(r"^Struct\s+(.+?)\s*;?\s*$",line)) !== nothing
+        _geo_exec_struct_def!(String(mm.captures[1]),context)
         return
     elseif (mm=match(r"^SetFactory\s*\(\s*(.*?)\s*\)\s*;?\s*$",line)) !== nothing
         # The grammar syncs the internals (when changed) before switching
@@ -4515,6 +5341,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         empty!(m.physical_names);empty!(m.entity_names)
         empty!(context.raw_physicals)
         empty!(m.meshing.compounds);context.mesh=nothing
+        empty!(context.parametric_surfaces)
+        context.parametric_surface=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         m.name=""
         context.geo_changed=true
@@ -4575,7 +5403,48 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     endswith(body,";") &&
         (body=String(strip(body[firstindex(body):prevind(body,lastindex(body))])))
     _geo_exec_assignment!(context,body,"execute_geo") && return
-    throw(ArgumentError("execute_geo: unrecognized statement: $line"))
+    # A statement that cannot start a `String__Index`/keyword production is a
+    # syntax error upstream (`= 5` left behind by `EndIf = 5` → `(=)`).
+    match(r"^[A-Za-z_]",body)===nothing &&
+        _geo_syntax_abort(_geo_stmt_head_token(body))
+    # `tSTRING`-headed remainders — upstream's catch-all: a bare name is
+    # `syntax error (;)`; `name(expr)`/`name <expr>` evaluates the argument
+    # (an unknown variable records) then reports `Unknown command 'name'`;
+    # `name {` aborts at the first braced token. A lexer-keyword head aborts
+    # like an LHS, never `Unknown command` (`DimNameSpace(ns);` →
+    # `(DimNameSpace)`, `Sin(1);` → `(Sin)`).
+    nm=match(r"^[A-Za-z_][A-Za-z0-9_]*",body)
+    _geo_lhs_keyword_check(body)
+    rest=String(strip(body[nextind(body,lastindex(nm.match)):end]))
+    if isempty(rest)
+        _geo_syntax_abort(";")
+    elseif startswith(rest,"::")
+        # `tSCOPE` never follows a bare `tSTRING` in a statement —
+        # `ns::x = 5` → `syntax error (::)` upstream.
+        _geo_syntax_abort("::")
+    elseif startswith(rest,"{")
+        _geo_syntax_abort(_geo_stmt_head_token(rest[2:end]))
+    elseif startswith(rest,"(")
+        close=_geo_matching_delim(rest,firstindex(rest))
+        if close==0
+            try
+                _geo_eval_numeric(rest[2:end],context,"execute_geo")
+            catch err
+                err isa InterruptException && rethrow()
+                err isa _GeoSyntaxAbort && rethrow()
+            end
+            _geo_syntax_abort(";")
+        end
+        _geo_eval_numeric(rest[2:prevind(rest,close)],context,"execute_geo")
+        after=String(strip(rest[nextind(rest,close):end]))
+        isempty(after) || _geo_syntax_abort(_geo_stmt_head_token(after))
+        _geo_yyerror!(context,"Unknown command '$(nm.match)'")
+    else
+        _geo_string_rhs(rest) ||
+            _geo_eval_numeric(rest,context,"execute_geo")
+        _geo_yyerror!(context,"Unknown command '$(nm.match)'")
+    end
+    return
 end
 
 # ======== `.geo` statement helpers ========
@@ -5340,9 +6209,10 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     finally
         context.file_name=parent_file
         context.file_error_base=parent_base
-        # `Abort` (errorstate 999) is local to the included file's ParseFile —
-        # the parent stream resumes; `Exit` is process-global and propagates.
-        context.stop===:abort && (context.stop=parent_stop)
+        # `Abort` (errorstate 999) and too-many-errors are local to the
+        # included file's ParseFile — the parent stream resumes; `Exit` is
+        # process-global and propagates.
+        context.stop in (:abort,:toomany) && (context.stop=parent_stop)
     end
     return nothing
 end
