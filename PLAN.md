@@ -335,7 +335,8 @@ including prior scalar bindings and pure numeric functions. Bounded numeric list
 support zero-based indexing, cardinality, copying, concatenation, selection,
 whole-list append/removal, and indexed or selected mutation. Known lists expand in
 field options, geometry/entity memberships, embeddings, Physical groups, and
-periodic slave/master sets; constant entity ranges share the list-size limit.
+periodic slave/master sets; entity ranges — literal or variable-backed — share
+the list-size limit.
 Boolean results own operation-time operand surface snapshots. An operand `Delete`
 removes its visible volume, every native solid encoding for that tag, target volume
 embeddings, and dimension-3 Physical memberships; empty groups and their names are
@@ -690,8 +691,9 @@ unclassified topology, transformations of arbitrary CAD entities, or complete `.
 execution. The `.geo` scanner evaluates finite arithmetic constants, pure numeric
 functions, comparison/logical/ternary operators, prior scalar bindings, and explicit
 field/physical tags with resource
-bounds. Finite constant `start:end[:increment]` lists are expanded in recognized
-numeric field options and field selectors; entirely numeric Physical memberships are
+bounds. Finite `start:end[:increment]` lists — literal or variable-backed — are
+expanded in recognized numeric field options and field selectors; entirely numeric
+Physical memberships are
 range-checked but remain geometry data. The executor runs
 `If`/`ElseIf`/`Else`/`EndIf` and `For name In {start:end[:increment]}`/`EndFor`
 with the built-in kernel's semantics (ranges evaluated once at entry, the loop
@@ -699,14 +701,16 @@ variable left at its first out-of-range value), plus a bounded `While`/`EndWhile
 extension that pinned Gmsh lacks. `Function name ... Return` registers a
 zero-argument body — the statements up to the first `Return` marker, matching
 Gmsh's token-level capture — and `Call name;` re-executes it in the shared
-variable scope with bounded recursion depth; names are identifiers or quoted
+variable scope with bounded recursion depth; `Macro` blocks share the same
+capture-and-call mechanism, names are identifiers or quoted
 string literals, and redefinition, call-before-definition, stray `Return`, and
-missing `Return` all fail like Gmsh. Translational and rotational `Extrude`
+missing `Return` all fail like Gmsh. Number and string option reads and writes
+resolve through the vendored Gmsh option table. Translational and rotational `Extrude`
 run as both a
 statement and a side-effecting value term (`out[] = Extrude{..}{..}`,
 `x = Extrude{..}{..}`). The scanner deliberately rejects
-`Macro` blocks, option reads, stateful functions, dynamic/general ranges,
-twist extrusions and fillets, allocator reads after
+twist, boundary-layer, pipe (`Using Wire`), volume, and nested `Extrude` forms,
+`Fillet`/`Chamfer`, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete`,
 `SetMaxTag` counters, and coherence-invalidating transform/Duplicata/Coherence/
 Extrude statements stay live or invalidate correctly), and geometry-derived Physical
@@ -760,7 +764,7 @@ and exposes the certified node map through
 the direct and session APIs. Bounded `.geo` execution accepts expression/list-backed
 `Periodic Line`, `Periodic Curve`, `Periodic Surface`, and `Periodic Volume`
 `Translate`, `Rotate`,
-and 12- or 16-entry `Affine` transforms plus constant ranges and numeric list
+and 12- or 16-entry `Affine` transforms plus ranges and numeric list
 variables in entity sets. Planar periodic
 surface pairs require disjoint, affine-equivalent boundary and embedded topology on
 one explicit volume. Periodic volume relations are stored, reported, and carried

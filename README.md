@@ -169,8 +169,9 @@ boundary-layer fan topology beyond the certified closed-wall extrusion, the full
 Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
 interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including macros, option reads,
-dynamic/general ranges, allocator reads after topology-changing or untracked
+`.geo` execution (including twist, boundary-layer, pipe (`Using Wire`), volume, and
+nested `Extrude` forms, `Fillet`/`Chamfer`, allocator reads after topology-changing
+or untracked
 declarations, and geometry-derived physical-group RHSs beyond the documented inline
 topology queries),
 mixed-element generation beyond the listed first-order surface recombination paths,
@@ -195,13 +196,13 @@ slave has one master; curve masters may be reused, a curve slave may become a ma
 in an acyclic chain, and independent relations may share corner points. The bounded
 `.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
 functions, comparison/logical/ternary operators, bounded numeric list
-assignment/indexing/selection/mutation, constant
-entity ranges, `If`/`ElseIf`/`Else`/`EndIf`, `For name In
-{start:end[:increment]}`/`EndFor`, bounded `While`/`EndWhile`, and
-`Function`/`Call`/`Return` control flow to
+assignment/indexing/selection/mutation, entity
+ranges, `If`/`ElseIf`/`Else`/`EndIf`, `For name In
+{start:end[:increment]}`/`EndFor`, bounded `While`/`EndWhile`,
+`Function`/`Macro`/`Call`/`Return` control flow, and named option reads/writes to
 all supported geometry statements. Entity lists, including periodic
 slave/master sets, can reuse whole or selected list variables.
-Point `MeshSize` selectors can likewise use `:`, expressions, constant ranges, and
+Point `MeshSize` selectors can likewise use `:`, expressions, ranges, and
 whole or selected numeric-list variables. Inline `PointsOf` blocks additionally
 select the recursive boundary Points of explicit Point, Curve/Line, Surface, and
 Volume entities; signed entity tags are normalized, hole boundaries participate,
