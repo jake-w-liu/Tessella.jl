@@ -72,7 +72,8 @@ Point/Line-In-Surface embeddings, and Point/Line/Surface-In-Volume recovery. Its
 scanner and executor handle finite arithmetic constants, pure numeric functions,
 comparison/logical/ternary operators, prior scalar bindings, bounded numeric list
 assignment/indexing/selection/mutation,
-explicit field/physical tags, and finite constant ranges in recognized numeric field
+explicit field/physical tags, and finite `start:end[:increment]` ranges — literal or
+variable-backed — in recognized numeric field
 and entity lists. `If`/`ElseIf`/`Else`/`EndIf` and `For name In
 {start:end[:increment]}`/`EndFor` match the built-in kernel (bit-exact against the
 pinned Gmsh's entity state over 4 differential cases), with a bounded
@@ -113,9 +114,10 @@ allocator namespace and chain-sort by endpoint connectivity. Arc and
 spline-family metadata follows transforms, Duplicata, coherence merges,
 retagging, and removal;
 meshing paths that cannot honor the geometry fail explicitly instead of
-treating curved records as chords. `Function name ... Return`/`Call name;` run Gmsh's
-zero-argument function semantics with token-level body capture and bounded
-recursion. The meshing-constraint statements reproduce the `GEO_Internals`
+treating curved records as chords. `Function`/`Macro name ... Return`/`Call name;`
+run Gmsh's zero-argument function semantics with token-level body capture, shared
+variable scope, and bounded recursion; named number/string options read and write
+through the vendored option table. The meshing-constraint statements reproduce the `GEO_Internals`
 setters — `Transfinite Curve` (Progression/Power/Bump/Beta, the `_HWall`
 wall-height variants, and the grammar-only `Beta_Symmetrical` forms, with
 signed-tag distribution reversal and tag-0 wildcards), `Transfinite Surface`
@@ -137,8 +139,8 @@ resurrect on tag re-creation, and queries filter them out like
 `Field[i]`, variables, and `name~{expr}` namespaces. `SetTag` fails
 explicitly like Gmsh's mid-parse model retag (28 differential cases over
 entity inventory, physical state, mesh node sets, and error paths). It rejects
-`Macro` blocks, option reads, stateful functions, dynamic/general ranges,
-rotational/twist/boundary-layer/pipe extrusions and fillets, allocator reads after
+twist, boundary-layer, pipe (`Using Wire`), volume, and nested `Extrude` forms,
+`Fillet`/`Chamfer`, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete` and
 `SetMaxTag` counters stay live, while entity-list `Delete`/`Recursive Delete`
 joins the untracked set), and geometry-derived Physical
@@ -432,7 +434,7 @@ untracked topology-changing declarations.
 Expression/list-backed `Periodic Line`, `Periodic Curve`,
 `Periodic Surface`, and `Periodic Volume` `Translate`, `Rotate`, and 12- or
 16-entry `Affine` statements,
-including bounded constant ranges and numeric list variables in entity sets, are in
+including bounded ranges and numeric list variables in entity sets, are in
 scope for the bounded `.geo`
 executor.
 
@@ -2298,7 +2300,8 @@ periodic `.geo` execution:
 
 - `Periodic Line`/`Periodic Curve` entity lists and Translate/Rotate/Affine
   entries now evaluate prior scalar bindings, finite arithmetic, and pure
-  numeric functions. Entity lists also expand bounded constant ranges and
+  numeric functions. Entity lists also expand bounded ranges — literal or
+  variable-backed — and
   truncate positive tags toward zero as Gmsh does. The executor accepts the
   documented 12-entry Affine form by adding the homogeneous row and the full
   16-entry form required by the pinned Gmsh 4.15.2 runtime.
