@@ -408,14 +408,6 @@ end
     q=r.model.meshing.extrude[(2,5)]
     @test q.layers==[3] && q.recombine==true
 
-    # The twist form stays an explicit error.
-    err=_extrude_error("""
-        Point(1) = {0,0,0,1};
-        Extrude {{0,0,1},{0,0,0},{1,0,0},Pi/2} { Point{1}; }
-        """)
-    @test err isa ArgumentError
-    @test occursin("twist",sprint(showerror,err))
-
     # A zero rotation axis fails before any topology is created.
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
@@ -423,6 +415,181 @@ end
         """)
     @test err isa ArgumentError
     @test occursin("rotation axis",sprint(showerror,err))
+end
+
+@testset ".geo twist Extrude" begin
+    # `Extrude {{T}, {A}, {X}, angle}` — Gmsh's `TRANSLATE_ROTATE` binds the
+    # first vector to the translation, the second to the axis direction,
+    # and the third to a point on the axis (verified against the 4.15.2
+    # parser's `GEO_Internals::twist` call and binary output). The swept
+    # generatrix is a `Spline` through `Geometry.ExtrudeSplinePoints`
+    # (default 5) generated vertices, each stepped `angle/d` about the
+    # axis and `T/d` along it.
+    r=_execute_extrude_source("""
+        Point(1) = {1,0,0,1};
+        out[] = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1}; };
+        """)
+    @test r.lists["out"]==[6.0,1.0]
+    @test r.model.curves[1]==(1,6)
+    @test r.model.curve_types[1]==:spline
+    @test r.model.curve_control_points[1]==[1,2,3,4,5,6]
+    # The translation is parallel to the axis: a clean helix,
+    # (cos(i·18°), sin(i·18°), 0.2·i) for i=1..5.
+    θ=pi/10
+    for (i,tag) in enumerate(2:6)
+        @test collect(r.model.points[tag])≈
+            [cos(i*θ),sin(i*θ),0.2*i] atol=1e-14
+    end
+
+    # Screw motion: the translation is NOT parallel to the axis — each
+    # step's delta rotates into the current frame (Gmsh-verified helix
+    # ending at (2,2,-2)).
+    r=_execute_extrude_source("""
+        Point(1) = {1,0,0,1};
+        out[] = Extrude {{1,0,0},{5,0,0},{0,2,0},Pi/2} { Point{1}; };
+        """)
+    @test r.lists["out"]==[6.0,1.0]
+    @test r.model.curve_control_points[1]==[1,2,3,4,5,6]
+    @test collect(r.model.points[6])≈[2.0,2.0,-2.0] atol=1e-14
+    @test collect(r.model.points[2])≈[1.2,0.0979,-0.6180] atol=1e-3
+
+    # `Geometry.ExtrudeSplinePoints` controls the generatrix subdivision:
+    # d=1 gives a two-control-point spline at the full twist, d=3 gives
+    # four.
+    r=_execute_extrude_source("""
+        Geometry.ExtrudeSplinePoints = 1;
+        Point(1) = {1,0,0,1};
+        out[] = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1}; };
+        """)
+    @test r.lists["out"]==[2.0,1.0]
+    @test r.model.curve_control_points[1]==[1,2]
+    @test collect(r.model.points[2])≈[0.0,1.0,1.0] atol=1e-14
+    r=_execute_extrude_source("""
+        Geometry.ExtrudeSplinePoints = 3;
+        Point(1) = {1,0,0,1};
+        out[] = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1}; };
+        """)
+    @test r.lists["out"]==[4.0,1.0]
+    @test r.model.curve_control_points[1]==[1,2,3,4]
+
+    # Curve twist: both endpoint generatrices are splines; the chapeau is
+    # the full-twist copy. Gmsh-verified layout out=[2,5,4,-3].
+    r=_execute_extrude_source("""
+        Point(1) = {1,0,0,1};
+        Point(2) = {1,1,0,1};
+        Line(1) = {1,2};
+        out[] = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Curve{1}; };
+        """)
+    @test r.lists["out"]==[2.0,5.0,4.0,-3.0]
+    @test r.model.curves[2]==(3,4)
+    @test r.model.curve_types[3]==:spline
+    @test r.model.curve_types[4]==:spline
+    @test r.model.curve_control_points[3]==[1,7,8,9,10,3]
+    @test r.model.curve_control_points[4]==[2,12,13,14,15,4]
+    @test r.model.loops[only(r.model.surfaces[5])]==[1,4,-2,-3]
+
+    # Surface twist: Gmsh's tag layout — laterals 13/17/21/25, re-tagged
+    # top 26, volume 1 — with spline generatrices 11/12/16/20.
+    r=_execute_extrude_source(_EXTRUDE_SQUARE * """
+        out[] = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Surface{1}; };
+        """)
+    @test r.lists["out"]==[26.0,1.0,13.0,17.0,21.0,25.0]
+    @test [r.model.loops[l] for l in r.model.surfaces[13]]==[[1,12,-6,-11]]
+    @test [r.model.loops[l] for l in r.model.surfaces[17]]==[[2,16,-7,-12]]
+    @test [r.model.loops[l] for l in r.model.surfaces[21]]==[[3,20,-8,-16]]
+    @test [r.model.loops[l] for l in r.model.surfaces[25]]==[[4,11,-9,-20]]
+    @test [r.model.loops[l] for l in r.model.surfaces[26]]==[[6,7,8,9]]
+    @test r.model.curve_types[11]==:spline
+    @test r.model.curve_control_points[11]==[1,25,26,27,28,5]
+    @test r.model.curve_control_points[20]==[4,58,59,60,61,14]
+    @test [r.model.surface_loops[sl] for sl in r.model.volumes[1]]==
+        [[-1,26,13,17,21,25]]
+
+    # ExtrudeReturnLateralEntities = 0 keeps the top/body pair.
+    r=_execute_extrude_source("""
+        Geometry.ExtrudeReturnLateralEntities = 0;
+        Point(1) = {1,0,0,1};
+        Point(2) = {1,1,0,1};
+        Line(1) = {1,2};
+        out[] = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Curve{1}; };
+        """)
+    @test r.lists["out"]==[2.0,5.0]
+
+    # Bare statement form and scalar-assignment form.
+    r=_execute_extrude_source("""
+        Point(1) = {1,0,0,1};
+        Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1}; }
+        x = Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{2}; };
+        """)
+    @test r.lists["x"]==[11.0,2.0]
+    @test r.model.curves[2]==(2,11)
+    # The second helix's generated vertices land on the first one's points
+    # 3..6 (same screw, shifted start) — coherence merges them into the
+    # spline's control list, and only the (cos108°, sin108°, 1.2) step is
+    # new.
+    @test r.model.curve_control_points[2]==[2,3,4,5,6,11]
+
+    # Expression-valued members and a negative angle.
+    r=_execute_extrude_source("""
+        a = Pi/4;
+        Point(1) = {1,0,0,1};
+        out[] = Extrude {{0,0,2*a/Pi},{0,0,1},{0,0,1},-a} { Point{1}; };
+        """)
+    @test r.lists["out"]==[6.0,1.0]
+    @test collect(r.model.points[6])≈[sqrt(0.5),-sqrt(0.5),0.5] atol=1e-14
+
+    # Extrusion mesh parameters attach to the twisted entities.
+    r=_execute_extrude_source("""
+        Point(1) = {1,0,0,1};
+        Point(2) = {1,1,0,1};
+        Line(1) = {1,2};
+        Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Curve{1}; Layers{3}; }
+        """)
+    q=r.model.meshing.extrude[(1,3)]
+    @test q.layers==[3]
+
+    # A zero twist axis fails before any topology is created — upstream
+    # silently collapses every generated vertex to `X + T/d` there (a
+    # zero Gram-Schmidt basis), so Tessella keeps the deliberate
+    # validation it applies to revolve rather than emitting a degenerate
+    # self-referential spline.
+    err=_extrude_error("""
+        Point(1) = {1,0,0,1};
+        Extrude {{0,0,1},{0,0,0},{0,0,1},Pi/2} { Point{1}; }
+        """)
+    @test err isa ArgumentError
+    @test occursin("rotation axis",sprint(showerror,err))
+
+    # Gmsh.y gates `TRANSLATE_ROTATE` on the built-in kernel: under the
+    # OpenCASCADE factory the parser logs "Twisting extrude not available
+    # with OpenCASCADE geometry kernel" and emits an empty result. Under
+    # Tessella's fatal-on-diagnostic contract that surfaces as a throw.
+    err=_extrude_error("""
+        SetFactory("OpenCASCADE");
+        Point(1) = {1,0,0,1};
+        Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1}; }
+        """)
+    @test err isa ArgumentError
+    @test occursin("Twisting extrude not available",sprint(showerror,err))
+
+    # The gate fires in the parser action — after `ListOfShapes` parses
+    # but before entity lookup — so shape-list syntax errors win while an
+    # unknown entity still reports only the twist diagnostic (verified
+    # against `gmsh -0`: `syntax error (})` then `Twisting extrude …`).
+    err=_extrude_error("""
+        SetFactory("OpenCASCADE");
+        Point(1) = {1,0,0,1};
+        Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1} }
+        """)
+    @test err isa ArgumentError
+    @test occursin("semicolon",sprint(showerror,err))
+    err=_extrude_error("""
+        SetFactory("OpenCASCADE");
+        Point(1) = {1,0,0,1};
+        Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{99}; }
+        """)
+    @test err isa ArgumentError
+    @test occursin("Twisting extrude not available",sprint(showerror,err))
 end
 
 @testset "rotational Extrude on OCC geometry" begin

@@ -219,6 +219,21 @@ function _affine_rotation(axis, origin, angle, caller)
                              loc=(o[1]-Mo_o[1],o[2]-Mo_o[2],o[3]-Mo_o[3])))
 end
 
+# The twist (rotate-then-translate) rigid motion of Gmsh's `TRANSLATE_ROTATE`
+# extrusions: the revolved affine plus a final translation step. The OCC
+# `gp_Trsf` record gains the same displacement in `loc` so the composed map
+# stays a single rigid transform.
+function _affine_translate_rotate(axis, origin, angle, delta, caller)
+    rot=_affine_rotation(axis,origin,angle,caller)
+    T=_finite_vector3(delta,caller,"translation delta")
+    return _AffineTransform(rot.linear,
+        (rot.offset[1]+T[1],rot.offset[2]+T[2],rot.offset[3]+T[3]),
+        vcat(rot.steps,[_gmsh_translation_step(T)]),
+        (linear=rot.occ.linear,
+         loc=(rot.occ.loc[1]+T[1],rot.occ.loc[2]+T[2],
+              rot.occ.loc[3]+T[3])))
+end
+
 # Reflection across the plane `A*x + B*y + C*z + D = 0` (Gmsh `Symmetry`). A
 # degenerate zero normal takes Gmsh's `p -> 1e-12` floor and acts as identity.
 function _affine_symmetry(a, b, c, d, caller)
@@ -1202,7 +1217,10 @@ end
 # Gmsh's `ExtrudeParams::geo`: the kernel `type` plus its operands. `:translate`
 # carries the displacement `T`; `:rotate` carries the revolved `axis`/`origin`/
 # `angle` and `rot`, the precomputed Gmsh rotation transform (three sequential
-# 4×4 applications, bit-identical to `ApplyTransformationToPoint`).
+# 4×4 applications, bit-identical to `ApplyTransformationToPoint`);
+# `:translate_rotate` carries the same plus the post-rotation displacement
+# `T` folded into `rot`'s fourth step, and the `spline_points` generatrix
+# subdivision count from `Geometry.ExtrudeSplinePoints`.
 _extrude_spec_translate(delta::NTuple{3,Float64}) = (type=:translate,T=delta)
 function _extrude_spec_rotate(axis, origin, angle, caller)
     a=_finite_vector3(axis,caller,"rotation axis")
@@ -1211,11 +1229,23 @@ function _extrude_spec_rotate(axis, origin, angle, caller)
     return (type=:rotate,rot=_affine_rotation(a,o,θ,caller),
             axis=a,origin=o,angle=θ)
 end
+function _extrude_spec_translate_rotate(axis, origin, angle, delta,
+                                        spline_points::Integer, caller)
+    a=_finite_vector3(axis,caller,"rotation axis")
+    o=_finite_vector3(origin,caller,"rotation origin")
+    θ=_finite_scalar(angle,caller,"rotation angle")
+    T=_finite_vector3(delta,caller,"translation delta")
+    return (type=:translate_rotate,
+            rot=_affine_translate_rotate(a,o,θ,T,caller),
+            T=T,axis=a,origin=o,angle=θ,
+            spline_points=trunc(Int,spline_points))
+end
 
 # The copy transform applied to chapeau points: the displacement for
-# `:translate`, the translate/rotate/translate matrix sequence for `:rotate`.
-_extrude_move(spec,p) = spec.type===:rotate ?
-    _affine_apply_steps(spec.rot,p) : p .+ spec.T
+# `:translate`, the translate/rotate/translate matrix sequence for `:rotate`,
+# and the same plus the final `T` step for `:translate_rotate`.
+_extrude_move(spec,p) = spec.type===:translate ? p .+ spec.T :
+    _affine_apply_steps(spec.rot,p)
 
 """
     extrude_entities!(model, entities, delta; params=nothing, caller) -> tags
@@ -1257,6 +1287,31 @@ function revolve_entities!(m::GeoModel,
                            return_lateral::Bool=true,
                            caller::AbstractString="revolve_entities!")
     spec=_extrude_spec_rotate(axis,origin,angle,caller)
+    return _extrude_entities!(m,entities,spec;
+                             params=params,return_lateral=return_lateral,
+                             caller=caller)
+end
+
+"""
+    twist_entities!(model, entities, axis, origin, delta, angle; ...) -> tags
+
+Twist-extrude every listed `(dim, tag)` entity — Gmsh's `TRANSLATE_ROTATE`
+(`Extrude {{dx,dy,dz}, {axis}, {point}, angle}`) with built-in-kernel
+semantics: swept vertices produce `Spline` helices through
+`spline_points` rotate-translate steps (`Geometry.ExtrudeSplinePoints`,
+default 5), curve extrusions produce ruled lateral surfaces, and surface
+extrusions produce volumes. Tag allocation, output lists, and merge
+semantics match `ExtrudeShapes(TRANSLATE_ROTATE, ...)`.
+"""
+function twist_entities!(m::GeoModel,
+                         entities::AbstractVector{<:Tuple{Integer,Integer}},
+                         axis, origin, delta, angle;
+                         spline_points::Integer=5,
+                         params::Union{Nothing,_GeoExtrudeParams}=nothing,
+                         return_lateral::Bool=true,
+                         caller::AbstractString="twist_entities!")
+    spec=_extrude_spec_translate_rotate(axis,origin,angle,delta,
+                                        spline_points,caller)
     return _extrude_entities!(m,entities,spec;
                              params=params,return_lateral=return_lateral,
                              caller=caller)
@@ -1308,6 +1363,8 @@ end
 function _extrude_point_copy!(m::GeoModel, src::Int, spec,
                               params, caller)
     chapeau=_fresh_point_copy!(m,src,caller)
+    spec.type===:translate_rotate &&
+        return _extrude_point_twist!(m,src,chapeau,spec,params,caller)
     m.points[chapeau]=_finite_result(
         _extrude_move(spec,m.points[chapeau]),caller)
     _points_close(m.points[chapeau],m.points[src],_coherence_eps(m)) &&
@@ -1345,6 +1402,43 @@ function _extrude_point!(m::GeoModel, src::Int, spec,
     push!(out,get(maps.points,chapeau,chapeau))
     haskey(m.curves,curve) && push!(out,curve)
     return nothing
+end
+
+# `ExtrudePoint` TRANSLATE_ROTATE: the generatrix is a `MSH_SEGM_SPLN`
+# through `extrudeSplinePoints` control points — each generated vertex is a
+# fresh `DuplicateVertex` of the previous one, stepped by `angle/d` about the
+# axis and `T/d` along the displacement (upstream divides by `d` but loops
+# `extrudeSplinePoints` times, so a nonpositive count leaves the untransformed
+# copy and a one-control-point "spline"). Unlike translate/rotate there is
+# no `ComparePosition` early return — the curve is always created.
+function _extrude_point_twist!(m::GeoModel, src::Int, chapeau::Int, spec,
+                               params, caller)
+    curve=_geo_newreg_alloc!(m,1,caller)
+    m.curve_types[curve]=:spline
+    d=spec.spline_points
+    if d>0
+        step=_affine_translate_rotate(spec.axis,spec.origin,
+            spec.angle/d,spec.T./d,caller)
+        m.points[chapeau]=_finite_result(
+            _affine_apply_steps(step,m.points[chapeau]),caller)
+        cps=Int[src,chapeau]
+        prev=chapeau
+        for i in 2:d
+            np=_fresh_point_copy!(m,prev,caller)
+            m.points[np]=_finite_result(
+                _affine_apply_steps(step,m.points[np]),caller)
+            push!(cps,np)
+            prev=np
+        end
+        m.curves[curve]=(src,prev)
+        m.curve_control_points[curve]=cps
+        params!==nothing && (m.meshing.extrude[(1,curve)]=params)
+        return (curve,prev)
+    end
+    m.curves[curve]=(src,chapeau)
+    m.curve_control_points[curve]=Int[src]
+    params!==nothing && (m.meshing.extrude[(1,curve)]=params)
+    return (curve,chapeau)
 end
 
 # `ExtrudeCurve`: duplicate the curve, transform the copy's point set, extrude
@@ -1530,8 +1624,8 @@ end
 
 # The `_AffineTransform` equivalent of the extrusion's copy transform —
 # only OCC geometry records read it (chapeau points use `_extrude_move`).
-_extrude_affine(spec) = spec.type===:rotate ? spec.rot :
-    _affine_translation(spec.T)
+_extrude_affine(spec) = spec.type===:translate ?
+    _affine_translation(spec.T) : spec.rot
 
 _extrude_occ_surface_transform(g, spec, caller, what) =
     (g===nothing || !hasproperty(g,:occ)) ? g :

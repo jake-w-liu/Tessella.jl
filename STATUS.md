@@ -139,7 +139,7 @@ resurrect on tag re-creation, and queries filter them out like
 `Field[i]`, variables, and `name~{expr}` namespaces. `SetTag` fails
 explicitly like Gmsh's mid-parse model retag (28 differential cases over
 entity inventory, physical state, mesh node sets, and error paths). It rejects
-twist, boundary-layer, pipe (`Using Wire`), volume, and nested `Extrude` forms,
+boundary-layer, pipe (`Using Wire`), volume, and nested `Extrude` forms,
 `Fillet`/`Chamfer`, allocator reads after
 untracked topology-changing declarations (tracked Boolean operand `Delete` and
 `SetMaxTag` counters stay live, while entity-list `Delete`/`Recursive Delete`
@@ -720,8 +720,23 @@ Re-measured on 2026-09-15 with Julia 1.12.7 after implementing rotational
   with their copies through the shared rigid-transform helpers.
 - The motion group is decoded by evaluated element shape (`[3,3,1]` revolve,
   `[3,3,3,1]` twist, `[1,1,1]`/single length-3 list translate) like the
-  grammar's `VExpr`/`FExpr` alternatives; the twist form and mixed
-  revolve+translate groups raise explicit `ArgumentError`s.
+  grammar's `VExpr`/`FExpr` alternatives; twist binds translation, axis
+  direction, and point-on-axis in `GEO_Internals::twist`'s forwarded order,
+  sweeping a `Spline` generatrix through `Geometry.ExtrudeSplinePoints`
+  (default 5) rotate-translate steps, while mixed revolve+translate groups
+  raise explicit `ArgumentError`s.
+- `twist_entities!` and the `.geo` motion group `Extrude {{delta},
+  {axis}, {point}, angle} {..}` run `ExtrudeShapes(TRANSLATE_ROTATE, ...)`
+  semantics on points, curves, and planar surfaces: swept vertices produce
+  `Spline` helices through `Geometry.ExtrudeSplinePoints` generated
+  vertices — each `DuplicateVertex`-copied from the previous and stepped
+  `angle/d` about the axis plus `delta/d` — while chapeau curves/surfaces
+  take the full rotate-translate copy and endpoint generatrices extrude
+  recursively. The 15-case `geo_twist` differential covers point, curve,
+  and surface twists, `ExtrudeSplinePoints` = 1/3/5, mixed entity lists,
+  lateral suppression, extrude parameters, and spline-knot evaluations:
+  13/15 bit-exact, two arbitrary-axis cases inside the documented 64-ulp
+  FMA-contraction band.
 - Bit parity against the shipped 4.15.2 binary required per-site contraction
   matching: `SetRotationMatrix`'s Gram-Schmidt/`norme`/`prodve`/`prosca` and
   matrix products fuse (`fma`), while `vecmat4x4` application rounds each
