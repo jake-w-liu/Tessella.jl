@@ -45,7 +45,8 @@ using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, add_torus!, bool
 using ..Model: _remove_volume_entity!
 using ..Model: embed!, translate_volume!, dilate_volume!, rotate_volume!
 using ..Model: transform_entities!, duplicate_entities!, coherence!
-using ..Model: merge_vertices!, extrude_entities!, revolve_entities!
+using ..Model: merge_vertices!, extrude_entities!, revolve_entities!,
+             twist_entities!
 using ..Model: _GeoExtrudeParams
 using ..Model: _affine_translation, _affine_dilation
 using ..Model: _affine_rotation, _affine_symmetry, _entity_label
@@ -2949,9 +2950,9 @@ end
 # `GEO_Internals::extrude` → `ExtrudeShapes` semantics: the expression value
 # is the flat `[top, body, laterals...]` tag list (laterals only under
 # `Geometry.ExtrudeReturnLateralEntities`, which defaults on). Rotational
-# (`{{axis}, {point}, angle}`), twist (`{{axis}, {point}, {delta}, angle}`),
-# boundary-layer (`Extrude {shapes; params}`), and `Using Wire` pipe forms are
-# recognized and rejected with explicit errors.
+# (`{{axis}, {point}, angle}`), and twist (`{{delta}, {axis}, {point},
+# angle}`) run natively; boundary-layer (`Extrude {shapes; params}`) and
+# `Using Wire` pipe forms are recognized and rejected with explicit errors.
 
 # Scan a balanced `(...)` group — the VExpr grammar also allows parenthesized
 # vectors — returning `(content, rest)`.
@@ -2997,16 +2998,21 @@ function _geo_extrude_vector_values(part::AbstractString,
     return _geo_exec_numeric_values(s,context,caller)
 end
 
-# The revolve/twist `{{A}, {X}, alpha}` / `{{A}, {X}, {T}, alpha}` motion
+# The revolve/twist `{{A}, {X}, alpha}` / `{{T}, {A}, {X}, alpha}` motion
 # group, decoded from the group's evaluated element lengths: the grammar's
 # VExpr members are length-3 vectors and the trailing FExpr a scalar.
+# `[3,3,1]` is revolve and `[3,3,3,1]` is twist (`TRANSLATE_ROTATE`) —
+# whose member order is translation, axis direction, point-on-axis (the
+# order `GEO_Internals::twist` forwards to `ExtrudeShapes`, not the
+# revolve order with a trailing delta).
 function _geo_extrude_revolve(values::Vector{Vector{Float64}},
                               caller::AbstractString)
     lengths=length.(values)
     if length(lengths)==4 && lengths[1:3]==[3,3,3] && lengths[4]==1
-        throw(ArgumentError(
-            "$caller: twist extrusion `Extrude {{axis}, {point}, {delta}, " *
-            "angle}` is not implemented"))
+        T,a,x,α=values
+        return (kind=:twist,axis=(a[1],a[2],a[3]),
+                origin=(x[1],x[2],x[3]),delta=(T[1],T[2],T[3]),
+                angle=α[1])
     end
     if !(length(lengths)==3 && lengths==[3,3,1])
         throw(ArgumentError(
@@ -3014,12 +3020,19 @@ function _geo_extrude_revolve(values::Vector{Vector{Float64}},
             "angle}`"))
     end
     a,x,α=values
-    return (axis=(a[1],a[2],a[3]),origin=(x[1],x[2],x[3]),angle=α[1])
+    return (kind=:rotate,axis=(a[1],a[2],a[3]),
+            origin=(x[1],x[2],x[3]),angle=α[1])
 end
+
+# `Geometry.ExtrudeSplinePoints` (default 5) — the generatrix subdivision
+# count for twist extrusions, `(int)`-cast like the option callback.
+_geo_extrude_spline_points(context::_GeoNumericContext) = trunc(Int,
+    something(_geo_option_number(context,"Geometry",0,
+        "ExtrudeSplinePoints"),5.0))
 
 # Accumulate one VExpr group into `delta` (`sign` folds `VExpr '+' VExpr` and
 # leading `tMINUS VExpr`), or decode the revolve `{{axis}, {point}, angle}` /
-# twist `{{axis}, {point}, {delta}, angle}` motion group. The group's
+# twist `{{delta}, {axis}, {point}, angle}` motion group. The group's
 # evaluated element lengths decide: `[1,1,1]` (or a single list variable
 # evaluating to three numbers) is the translational displacement, `[3,3,1]`
 # is revolve and `[3,3,3,1]` is twist — the same shapes the grammar's
@@ -3263,10 +3276,28 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
         "not implemented"))
     (revolve===nothing || delta==(0.0,0.0,0.0)) || throw(ArgumentError(
         "$caller: malformed displacement expression"))
+    # Gmsh.y gates `TRANSLATE_ROTATE` on the built-in kernel in the parser
+    # action — after `ListOfShapes` parses but before `ExtrudeShapes` runs
+    # — so under `SetFactory("OpenCASCADE")` shape-list syntax errors still
+    # surface first, while entity lookup never happens.
+    if revolve!==nothing && revolve.kind===:twist &&
+        allocator_state!==nothing &&
+        allocator_state.factory===:opencascade
+        _geo_exec_topology_query_blocks(shapes,"Extrude shape list",caller)
+        throw(ArgumentError(
+            "$caller: Twisting extrude not available with OpenCASCADE " *
+            "geometry kernel"))
+    end
     entities,params=_geo_extrude_shape_list!(m,shapes,context,caller,
                                              allocator_state)
     tags=revolve===nothing ?
         extrude_entities!(m,entities,delta;params=params,
+            return_lateral=context.extrude_return_lateral,caller=caller) :
+        revolve.kind===:twist ?
+        twist_entities!(m,entities,revolve.axis,revolve.origin,
+            revolve.delta,revolve.angle;
+            spline_points=_geo_extrude_spline_points(context),
+            params=params,
             return_lateral=context.extrude_return_lateral,caller=caller) :
         revolve_entities!(m,entities,revolve.axis,revolve.origin,
             revolve.angle;params=params,

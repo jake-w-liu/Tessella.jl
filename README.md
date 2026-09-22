@@ -169,7 +169,7 @@ boundary-layer fan topology beyond the certified closed-wall extrusion, the full
 Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
 interpolation, materially warped quadrangles, mixed component counts, and
 tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including twist, boundary-layer, pipe (`Using Wire`), volume, and
+`.geo` execution (including boundary-layer, pipe (`Using Wire`), volume, and
 nested `Extrude` forms, `Fillet`/`Chamfer`, allocator reads after topology-changing
 or untracked
 declarations, and geometry-derived physical-group RHSs beyond the documented inline
