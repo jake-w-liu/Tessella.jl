@@ -10,8 +10,8 @@ Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
 Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
 Translate/Rotate/Affine periodic straight curves, explicit-volume planar boundary
-surfaces, or stored mesh-inert volume relations with reusable masters and acyclic
-dependency chains. `MeshSize` and
+surfaces, or stored mesh-inert volume relations with reusable masters and
+dependency chains or cycles. `MeshSize` and
 `Characteristic Length` update existing explicit Point constraints directly or
 through recursive `PointsOf` boundaries of explicit Point/Curve/Surface/Volume
 entities. Physical declarations accept an explicit tag, with an optional name, or
@@ -346,7 +346,7 @@ straight curves at declaration; orientation-only declarations are check-free
 like upstream and hold all curves to the straight-curve requirement at mesh
 time. Surfaces must be planar boundaries of one explicit volume when meshed.
 Multiple periodic statements may
-reuse a master or form an acyclic master/slave chain. Read-only `newp`, the shared
+reuse a master or form a master/slave chain or cycle. Read-only `newp`, the shared
 curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the
 tracked explicit topology and supported full Box/Cylinder/Sphere/Cone/Torus
 primitives.

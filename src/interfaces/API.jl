@@ -7808,8 +7808,8 @@ Store validated straight-curve (`dim=1`), planar-surface (`dim=2`), or volume
 (`dim=3`) relations in
 the active model and invalidate any cached mesh. `affine` maps each master entity
 to its corresponding slave in Gmsh row-major 4×4 order. Each slave has one master;
-masters may be reused, and a slave may become a master in an acyclic dependency
-chain. Curves must share a planar surface when meshed. Surfaces must be
+masters may be reused, and a slave may become a master in a dependency chain or
+cycle. Curves must share a planar surface when meshed. Surfaces must be
 affine-equivalent boundaries of one explicit planar-shell volume. Volume
 relations are stored and reported but mesh-inert, as in Gmsh 4.15.2.
 """

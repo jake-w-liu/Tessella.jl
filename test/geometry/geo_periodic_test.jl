@@ -617,16 +617,54 @@ end
             end
         end
     end
-    # A cyclic declaration fails inside `set_periodic!` — upstream's
-    # `Msg::Error` channel: the run is marked failed, the parse completes,
-    # and the acyclic relations still record.
+    # A consistent cyclic declaration stores like upstream — `setMeshMaster`
+    # has no cycle check — and all three relations serialize. Upstream's
+    # deferred mesh copy starves the cycle members (empty link node lists);
+    # Tessella's parameter sync converges on the cycle instead, so the links
+    # carry real node pairs — a strict superset of upstream's output.
     cyclic=_execute_geo_source(
         _periodic_geo_curve_graph(:chain;cycle=true);mesh_dim=2)
-    @test cyclic.msg_error_count>0
+    @test cyclic.msg_error_count==0
     @test validate(cyclic.mesh).ok
+    @test mesh_crc(cyclic.mesh).sha==
+          "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
     cyclic_constraints=model_periodic_constraints(cyclic.model)
-    @test length(cyclic_constraints)==2
-    @test !any(Int.(getproperty.(cyclic_constraints,:slave_entity)).==30)
+    @test Int.(getproperty.(cyclic_constraints,:slave_entity))==[10,20,30]
+    @test Int.(getproperty.(cyclic_constraints,:master_entity))==[20,30,10]
+    for (slave_entity,master_entity,offset) in
+            ((10,20,0.3),(20,30,0.3),(30,10,-0.6))
+        cyclic_mapping=model_periodic_nodes(
+            cyclic.model,cyclic.mesh,1,slave_entity)
+        @test cyclic_mapping.master_entity==master_entity
+        @test length(cyclic_mapping.slave_nodes)==9
+        for (slave,master) in zip(cyclic_mapping.slave_nodes,
+                                  cyclic_mapping.master_nodes)
+            @test Tuple(cyclic.mesh.coords[:,slave])==
+                  (cyclic.mesh.coords[1,master],
+                   cyclic.mesh.coords[2,master]+offset,
+                   cyclic.mesh.coords[3,master])
+        end
+    end
+    # All three stored relations serialize — including the cycle-closing edge —
+    # plus their six endpoint links, matching upstream's nine `$Periodic`
+    # records (upstream's starved curve links carry empty node lists; the
+    # converged sync here populates them).
+    cyclic_mixed=model_to_mixed(cyclic.model,cyclic.mesh,1)
+    @test length(cyclic_mixed.periodic_links)==9
+    cyclic_counts=Dict{Int,Int}()
+    for link in cyclic_mixed.periodic_links
+        cyclic_counts[link.dim]=get(cyclic_counts,link.dim,0)+1
+    end
+    @test cyclic_counts==Dict(0=>6,1=>3)
+    cyclic_curve_masters=Dict{Int,Int}(
+        Int(link.slave_entity)=>Int(link.master_entity)
+        for link in cyclic_mixed.periodic_links if link.dim==1)
+    @test cyclic_curve_masters==Dict(10=>20,20=>30,30=>10)
+    cyclic_point_masters=Dict{Int,Int}(
+        Int(link.slave_entity)=>Int(link.master_entity)
+        for link in cyclic_mixed.periodic_links if link.dim==0)
+    @test cyclic_point_masters==
+          Dict(106=>104,105=>103,103=>101,104=>102,102=>106,101=>105)
 
     # Hard failures — syntax aborts and accumulated `yymsg(0)` errors are
     # still thrown as `ArgumentError` at end of parse.
@@ -761,9 +799,53 @@ end
         (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
     set_periodic!(model_only,3,[2],[1],
         (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
-    @test_throws ArgumentError set_periodic!(
-        model_only,3,[1],[2],
+    # A cyclic relation stores like upstream — `setMeshMaster` has no cycle
+    # check — and volume relations are mesh-inert, so nothing downstream
+    # needs the acyclic guarantee.
+    set_periodic!(model_only,3,[1],[2],
         (1.0,0.0,0.0,-2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+    @test sort!(Int.(getproperty.(
+        model_periodic_constraints(model_only),:slave_entity)))==[1,2]
+    @test_throws ArgumentError set_periodic!(
+        model_only,3,[1],[1],
+        (1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+end
+
+@testset "cyclic periodic surface dependency" begin
+    # Upstream stores the cycle — `GFace::setMeshMaster` has no cycle check —
+    # and its deferred mesh copy starves both members forever. Tessella's
+    # slave-copy path is recursive, so the cycle is detected in the ancestry
+    # walk and reported explicitly instead of recursing.
+    cyclic=_execute_geo_source(_periodic_geo_two_squares("""
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        Periodic Surface 1 {1, 2, 3, 4} = 2 {5, 6, 7, 8};
+        """))
+    @test cyclic.msg_error_count==0
+    surface_masters=Dict{Int,Int}(
+        Int(constraint.slave_entity)=>Int(constraint.master_entity)
+        for constraint in model_periodic_constraints(cyclic.model)
+        if constraint.dim==2)
+    @test surface_masters==Dict(1=>2,2=>1)
+    cycle_error=try
+        mesh_model_surface(cyclic.model,1)
+        nothing
+    catch err
+        err
+    end
+    @test cycle_error isa ArgumentError
+    @test occursin(
+        "cyclic periodic dependency Surface[1] -> Surface[2] -> Surface[1]",
+        sprint(showerror,cycle_error))
+    other_error=try
+        mesh_model_surface(cyclic.model,2)
+        nothing
+    catch err
+        err
+    end
+    @test other_error isa ArgumentError
+    @test occursin(
+        "cyclic periodic dependency Surface[2] -> Surface[1] -> Surface[2]",
+        sprint(showerror,other_error))
 end
 
 @testset "periodic surface induced-edge resolution" begin
