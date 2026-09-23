@@ -111,8 +111,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - translation and general finite nonsingular affine periodic node-pair
   certification/snapping using Gmsh's row-major 4×4 convention, with node numbers,
   connectivity, and physical tags preserved; the native model/API owns straight-
-  curve relations with one master per slave, reusable masters, and acyclic
-  master/slave chains; it synchronizes planar subdivisions for boundary or
+  curve relations with one master per slave, reusable masters, and
+  master/slave chains or cycles; it synchronizes planar subdivisions for boundary or
   embedded curves and returns detached node maps; it also owns affine-equivalent
   planar boundary-surface pairs on explicit volume shells, synchronizes each slave
   triangulation from its master, and certifies the tetrahedron-face map;
@@ -197,7 +197,7 @@ covers straight-curve pairs on one planar triangle-meshed surface, disjoint
 affine-equivalent planar boundary surfaces of one explicit surface-loop volume,
 and stored mesh-inert volume relations. Each
 slave has one master; curve masters may be reused, a curve slave may become a master
-in an acyclic chain, and independent relations may share corner points. The bounded
+in a chain or cycle, and independent relations may share corner points. The bounded
 `.geo` executor applies prior scalar bindings, finite arithmetic, pure numeric
 functions, comparison/logical/ternary operators, bounded numeric list
 assignment/indexing/selection/mutation, entity

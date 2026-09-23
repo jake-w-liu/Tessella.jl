@@ -425,21 +425,15 @@ end
     chain_constraints=model_periodic_constraints(chain)
     @test Int.(getproperty.(chain_constraints,:slave_entity))==[10,20]
     @test Int.(getproperty.(chain_constraints,:master_entity))==[20,30]
-    cycle_error=try
-        set_periodic!(chain,1,[30],[10],(
-            1.0,0.0,0.0,0.0,
-            0.0,1.0,0.0,-0.6,
-            0.0,0.0,1.0,0.0,
-            0.0,0.0,0.0,1.0))
-        nothing
-    catch err
-        err
-    end
-    @test cycle_error isa ArgumentError
-    @test occursin(
-        "cyclic periodic dependency Curve[10] -> Curve[20] -> Curve[30] -> Curve[10]",
-        sprint(showerror,cycle_error))
-    @test model_periodic_constraints(chain)==chain_constraints
+    # Upstream stores cyclic relations — `setMeshMaster` has no cycle check —
+    # and serializes every stored pair; only its mesh-time copy starves them.
+    @test set_periodic!(chain,1,[30],[10],(
+        1.0,0.0,0.0,0.0,
+        0.0,1.0,0.0,-0.6,
+        0.0,0.0,1.0,0.0,
+        0.0,0.0,0.0,1.0))===nothing
+    chain_constraints=model_periodic_constraints(chain)
+    @test Int.(getproperty.(chain_constraints,:slave_entity))==[10,20,30]
     chain_mesh=mesh_model_surface(chain,1)
     @test validate(chain_mesh).ok
     @test mesh_crc(chain_mesh).sha==
@@ -456,6 +450,16 @@ end
                    chain_mesh.coords[2,master]+0.3,
                    chain_mesh.coords[3,master])
         end
+    end
+    closing_mapping=model_periodic_nodes(chain,chain_mesh,1,30)
+    @test closing_mapping.master_entity==10
+    @test length(closing_mapping.slave_nodes)==9
+    for (slave,master) in zip(closing_mapping.slave_nodes,
+                              closing_mapping.master_nodes)
+        @test Tuple(chain_mesh.coords[:,slave])==
+              (chain_mesh.coords[1,master],
+               chain_mesh.coords[2,master]-0.6,
+               chain_mesh.coords[3,master])
     end
 
     inconsistent=periodic_square()

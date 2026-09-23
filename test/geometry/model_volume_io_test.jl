@@ -586,12 +586,25 @@ end
 
     cyclic=_periodic_cube_volume_fixture(periodic=false)
     set_periodic!(cyclic,2,[4],[6],constraints[1].affine)
-    @test_throws ArgumentError set_periodic!(cyclic,2,[6],[4],(
+    # Upstream stores the cyclic pair — `GFace::setMeshMaster` has no cycle
+    # check — and its deferred copy starves both surfaces. Tessella's volume
+    # path overwrite-copies after pre-meshing every boundary, so the
+    # consistent cycle resolves instead.
+    @test set_periodic!(cyclic,2,[6],[4],(
         1.0,0.0,0.0,-1.0,
         0.0,1.0,0.0,0.0,
         0.0,0.0,1.0,0.0,
-        0.0,0.0,0.0,1.0))
-    @test length(model_periodic_constraints(cyclic))==1
+        0.0,0.0,0.0,1.0))===nothing
+    @test length(model_periodic_constraints(cyclic))==2
+    cyclic_error=try
+        mesh_model_surface(cyclic,4)
+        nothing
+    catch err
+        err
+    end
+    @test cyclic_error isa ArgumentError
+    @test occursin("cyclic periodic dependency Surface[4] -> Surface[6] -> Surface[4]",
+                   sprint(showerror,cyclic_error))
 
     cross_volume=GeoModel()
     _add_explicit_cube_shell!(cross_volume,0,0.0,1.0)
@@ -649,12 +662,14 @@ end
     add_volume!(cyclic,[1];tag=1)
     add_volume!(cyclic,[101];tag=2)
     set_periodic!(cyclic,3,[2],[1],translate)
-    @test_throws ArgumentError set_periodic!(cyclic,3,[1],[2],(
+    # Cycles store like upstream — `setMeshMaster` has no cycle check — and
+    # mesh-inert volume relations need no acyclic guarantee downstream.
+    @test set_periodic!(cyclic,3,[1],[2],(
         1.0,0.0,0.0,-2.0,
         0.0,1.0,0.0,0.0,
         0.0,0.0,1.0,0.0,
-        0.0,0.0,0.0,1.0))
-    @test length(model_periodic_constraints(cyclic))==1
+        0.0,0.0,0.0,1.0))===nothing
+    @test length(model_periodic_constraints(cyclic))==2
 
     retagged=deepcopy(model)
     @test model_set_tag!(retagged,3,1,9)==9

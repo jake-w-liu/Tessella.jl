@@ -856,45 +856,25 @@ function _model_periodic_dependency_parents(
             "has more than one periodic master"))
         parents[slave]=master
     end
-
-    state=Dict{Tuple{Int,Int},UInt8}()
-    for start in sort!(collect(keys(parents)))
-        get(state,start,0x00)==0x00 || continue
-        path=Tuple{Int,Int}[]
-        positions=Dict{Tuple{Int,Int},Int}()
-        current=start
-        while haskey(parents,current) && get(state,current,0x00)==0x00
-            state[current]=0x01
-            push!(path,current)
-            positions[current]=length(path)
-            current=parents[current]
-        end
-        if get(state,current,0x00)==0x01
-            first_cycle=get(positions,current,0)
-            first_cycle>0 || throw(ErrorException(
-                "$caller: internal periodic dependency traversal failed"))
-            cycle=vcat(path[first_cycle:end],current)
-            description=join((
-                "$(_model_periodic_entity_label(entity[1]))[$(entity[2])]"
-                for entity in cycle)," -> ")
-            throw(ArgumentError(
-                "$caller: cyclic periodic dependency $description"))
-        end
-        for entity in path
-            state[entity]=0x02
-        end
-    end
     return parents
 end
 
+# Upstream stores cyclic relations and serializes every stored slave→master
+# link; only its mesh-time copy defers a slave whose master is still pending,
+# which starves cycle members. Tessella's pairwise machinery needs no special
+# ordering inside a consistent cycle — a `positions` re-entry simply ends the
+# depth walk so cyclic members order among themselves deterministically.
 function _model_periodic_constraint_order(constraints,caller::AbstractString)
     parents=_model_periodic_dependency_parents(constraints,caller)
     depths=Dict{Tuple{Int,Int},Int}()
     for start in sort!(collect(keys(parents)))
         haskey(depths,start) && continue
         path=Tuple{Int,Int}[]
+        positions=Dict{Tuple{Int,Int},Int}()
         current=start
-        while haskey(parents,current) && !haskey(depths,current)
+        while haskey(parents,current) && !haskey(depths,current) &&
+              !haskey(positions,current)
+            positions[current]=length(path)+1
             push!(path,current)
             current=parents[current]
         end
@@ -908,6 +888,41 @@ function _model_periodic_constraint_order(constraints,caller::AbstractString)
         constraint.dim,
         depths[(constraint.dim,Int(constraint.slave_entity))],
         constraint.slave_entity))
+end
+
+# Entities whose dependency chain never reaches a masterless root — cycle
+# members and everything downstream of a cycle. Upstream's PENDING-defer
+# loop starves exactly this set: the members' masters are never done, and a
+# dependent's pending master starves it the same way.
+function _model_periodic_starved(constraints)
+    parents=Dict{Int,Int}()
+    for constraint in constraints
+        parents[Int(constraint.slave_entity)]=Int(constraint.master_entity)
+    end
+    resolved=Dict{Int,Bool}()
+    for start in sort!(collect(keys(parents)))
+        haskey(resolved,start) && continue
+        path=Int[]
+        positions=Dict{Int,Int}()
+        current=start
+        starved=false
+        while haskey(parents,current)
+            if haskey(resolved,current)
+                starved=!resolved[current]
+                break
+            elseif haskey(positions,current)
+                starved=true
+                break
+            end
+            positions[current]=length(path)+1
+            push!(path,current)
+            current=parents[current]
+        end
+        for entity in path
+            resolved[entity]=!starved
+        end
+    end
+    return Set(entity for (entity,meshable) in resolved if !meshable)
 end
 
 # `GEdge::setMeshMaster(ge, tfo)`'s endpoint test: transform the master
@@ -964,9 +979,11 @@ recording Gmsh's orientation-only `Periodic Curve {slave} = {master}` relation:
 each pair's `reversed` flag is then `sign(slave_tag*master_tag) < 0` and no
 geometric endpoint check runs, matching `GEdge::setMeshMaster(source, ori)`.
 An entity may be the master of multiple relations or both a slave and a master
-in an acyclic dependency chain; each slave has exactly one master. Cycles are
-explicit blockers. Periodic curves must belong to the same planar surface when
-meshed. Periodic surfaces require disjoint, affine-equivalent boundary point
+in a dependency chain; each slave has exactly one master. Cycles are stored and
+serialized like upstream — upstream's mesh-time copy defers on pending masters
+and starves cycle members, so `mesh_model_surface` on a cyclic slave surface
+fails explicitly rather than recursing; cyclic curve relations on a meshed
+surface still synchronize and snap pairwise. Periodic surfaces require disjoint, affine-equivalent boundary point
 and loop topology; embedded topology is rechecked when an explicit planar-shell
 volume is meshed. Periodic volumes are stored and reported as a Tessella
 extension — Gmsh exposes no volume periodicity through either its `.geo`
@@ -1061,6 +1078,10 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
             !((constraint.dim,Int(constraint.slave_entity)) in
               Set((d,slave) for slave in overlap))
         end
+    # Upstream stores cyclic relations — `setMeshMaster` has no cycle check —
+    # and serializes every stored pair. Only mesh-time master copies defer on
+    # pending masters, starving cycle members; that surfaces where the copy
+    # runs, not at declaration.
     _model_periodic_dependency_parents(vcat(existing,pending),caller)
     for constraint in pending
         m.periodic[(constraint.dim,Int(constraint.slave_entity))]=constraint
@@ -2981,22 +3002,40 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
     outgoing=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
     indegree=Dict{Int,Int}()
     periodic_points=Set{Int}()
+    candidates=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
+    # A relation cycle's members can legitimately be absent from the mesh —
+    # upstream's deferred copy starves them and still serializes the link with
+    # an empty node list.
+    starved=_model_periodic_starved(
+        Iterators.filter(
+            constraint->constraint.dim==1,model_periodic_constraints(m)))
     for constraint in constraints
         mapping=try
             _model_periodic_nodes(m,mesh,constraint)
         catch err
             err isa InterruptException && rethrow()
             (err isa ArgumentError || err isa ErrorException) || rethrow()
-            throw(ArgumentError(
-                "$caller: periodic Curve[$(constraint.slave_entity)] mapping " *
-                "is incompatible with the input mesh — " * sprint(showerror,err)))
+            Int(constraint.slave_entity) in starved ||
+                throw(ArgumentError(
+                    "$caller: periodic Curve[$(constraint.slave_entity)] " *
+                    "mapping is incompatible with the input mesh — " *
+                    sprint(showerror,err)))
+            nothing
         end
-        _model_mapping_matches(mesh,constraint,mapping,caller;exact=true) ||
-            throw(ArgumentError(
-                "$caller: periodic Curve[$(constraint.slave_entity)] nodes are not exactly snapped"))
-        push!(curve_links,MixedPeriodicLink(
-            1,constraint.slave_entity,constraint.master_entity,
-            mapping.slave_nodes,mapping.master_nodes;affine=constraint.affine))
+        if mapping===nothing
+            push!(curve_links,MixedPeriodicLink(
+                1,constraint.slave_entity,constraint.master_entity,
+                Int32[],Int32[];affine=constraint.affine))
+        else
+            _model_mapping_matches(
+                mesh,constraint,mapping,caller;exact=true) ||
+                throw(ArgumentError(
+                    "$caller: periodic Curve[$(constraint.slave_entity)] nodes are not exactly snapped"))
+            push!(curve_links,MixedPeriodicLink(
+                1,constraint.slave_entity,constraint.master_entity,
+                mapping.slave_nodes,mapping.master_nodes;
+                affine=constraint.affine))
+        end
         slave_start,slave_stop=m.curves[Int(constraint.slave_entity)]
         master_start,master_stop=m.curves[Int(constraint.master_entity)]
         endpoint_pairs=constraint.reversed ?
@@ -3009,6 +3048,9 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
             edge=(slave_point,constraint.affine)
             if !(edge in edges)
                 push!(edges,edge)
+                push!(get!(
+                    Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}},
+                    candidates,slave_point),(master_point,constraint.affine))
                 indegree[slave_point]=get(indegree,slave_point,0)+1
             end
             get!(indegree,master_point,0)
@@ -3018,6 +3060,9 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
         # `nothing` affines compare against tuples through `isless` — map them
         # to a shared sentinel so a corner carrying mixed orientation-only
         # and transform relations still sorts deterministically.
+        sort!(edges;by=edge->(edge[1],edge[2]===nothing ? () : edge[2]))
+    end
+    for edges in values(candidates)
         sort!(edges;by=edge->(edge[1],edge[2]===nothing ? () : edge[2]))
     end
 
@@ -3047,6 +3092,13 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
     end
     visited==periodic_points || throw(ErrorException(
         "$caller: internal periodic endpoint traversal was incomplete"))
+    # A relation cycle leaves its lowest-tag member parentless — every member
+    # was reached as a fallback root, so the closing edge never fires. Upstream
+    # stores one master per vertex and emits it, so emit the stored pair.
+    for slave_point in sort!(collect(keys(candidates)))
+        haskey(parents,slave_point) && continue
+        parents[slave_point]=first(candidates[slave_point])
+    end
 
     links=MixedPeriodicLink[]
     for slave_point in sort!(collect(keys(parents)))
@@ -4378,17 +4430,26 @@ function _model_periodic_spanning_relations(
                     Tuple{Union{Nothing,NTuple{16,Float64}},Float64}})
     outgoing=Dict{Int,
                   Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}},Float64}}}()
+    candidates=Dict{Int,
+                    Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}},
+                                 Float64}}}()
     indegree=Dict{Int,Int}()
     entities=Set{Int}()
     for ((slave,master),(affine,atol)) in relations
         push!(get!(Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}},Float64}},
                    outgoing,master),(slave,affine,atol))
+        push!(get!(Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}},
+                                 Float64}},
+                   candidates,slave),(master,affine,atol))
         indegree[slave]=get(indegree,slave,0)+1
         get!(indegree,master,0)
         push!(entities,slave,master)
     end
     for edges in values(outgoing)
         sort!(edges;by=edge->(edge[1],edge[2],edge[3]))
+    end
+    for edges in values(candidates)
+        sort!(edges;by=edge->(edge[1],edge[2]===nothing ? () : edge[2],edge[3]))
     end
     roots=sort!(Int[entity for entity in entities
                     if get(indegree,entity,0)==0])
@@ -4413,6 +4474,13 @@ function _model_periodic_spanning_relations(
     end
     visited==entities || throw(ErrorException(
         "internal periodic entity traversal was incomplete"))
+    # A relation cycle leaves its lowest-tag member parentless — it entered as
+    # a fallback root, so the closing edge never fired. Upstream stores one
+    # master per entity and emits it, so emit the stored pair.
+    for slave in sort!(collect(keys(candidates)))
+        haskey(parents,slave) && continue
+        parents[slave]=first(candidates[slave])
+    end
     return parents
 end
 
@@ -4550,11 +4618,21 @@ function _model_projection_periodic_surface_links(
     curve_parents=_model_periodic_spanning_relations(curve_relations)
     explicit_curve_slaves=Set(
         Int(constraint.slave_entity) for constraint in curve_constraints)
+    # A relation cycle's members can legitimately be absent from the mesh —
+    # upstream's deferred copy starves them and still serializes the link with
+    # an empty node list.
+    starved_curves=_model_periodic_starved(
+        Iterators.filter(
+            constraint->constraint.dim==1,model_periodic_constraints(m)))
     for slave in sort!(collect(keys(curve_parents)))
         master,affine,atol=curve_parents[slave]
-        haskey(curve_entries,slave) && haskey(curve_entries,master) ||
-            throw(ErrorException(
+        if !(haskey(curve_entries,slave) && haskey(curve_entries,master))
+            slave in starved_curves || throw(ErrorException(
                 "$caller: periodic curve entity is absent from projection"))
+            push!(links,MixedPeriodicLink(
+                1,slave,master,Int32[],Int32[];affine=affine))
+            continue
+        end
         # An explicit relation already induced by a surface constraint emits
         # one link through the induced mapping; `reversed` only applies to a
         # transform-free pair that was never surface-induced.
@@ -5487,10 +5565,13 @@ curves. Point characteristic lengths are linearly interpolated over the
 deterministic initial constrained triangulation and drive refinement. Coincident
 PSLG inputs use the smaller constraint. Stored
 straight-curve periodic relations synchronize boundary or embedded curve subdivisions
-across each acyclic dependency graph. Bounded remeshing precedes topology-ordered affine
+across each dependency graph, including cycles. Bounded remeshing precedes
+topology-ordered affine
 snapping, so a curve may be both a slave and a downstream master. The returned
 triangle mesh is validated before it is returned. Relations meeting at a corner
-must produce the same exact snapped coordinate.
+must produce the same exact snapped coordinate. A slave surface copies its
+master's mesh; a cyclic surface dependency is rejected explicitly rather than
+recursing.
 """
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             max_periodic_passes=8,
@@ -5526,7 +5607,9 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         m,t,caller;external_curves=partner_curves)
     # A slave surface takes its master's mesh verbatim, like upstream's
     # meshGFace copy path — the master is meshed on demand so the relation
-    # holds even when the caller never meshed it directly.
+    # holds even when the caller never meshed it directly. Upstream defers a
+    # slave whose master is still pending, starving a dependency cycle —
+    # here the copy is recursive, so the cycle is rejected explicitly instead.
     surface_constraint=nothing
     for constraint in model_periodic_constraints(m)
         constraint.dim==2 && Int(constraint.slave_entity)==t || continue
@@ -5534,6 +5617,16 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         break
     end
     if surface_constraint!==nothing
+        chain=Int[t]
+        current=Int(surface_constraint.master_entity)
+        while haskey(m.periodic,(2,current))
+            current in chain && throw(ArgumentError(
+                "$caller: cyclic periodic dependency " * join((
+                    "Surface[$entity]" for entity in vcat(chain,current)),
+                    " -> ")))
+            push!(chain,current)
+            current=Int(m.periodic[(2,current)].master_entity)
+        end
         master_mesh=mesh_model_surface(
             m,Int(surface_constraint.master_entity);
             min_angle_deg=min_angle_deg,
