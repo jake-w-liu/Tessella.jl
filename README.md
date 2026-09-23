@@ -127,6 +127,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   explicit planar surface-loop volumes with cavity signs; periodic explicit volumes
   retain their derived boundary point/curve forest and surface-node maps through
   MSH2/MSH4 output, and the CLI uses this path for classified `-3` output;
+  the multi-surface `model_to_mixed` overload projects standalone periodic
+  surface pairs, merging shared nodes, emitting each shared entity's cells
+  once, and serializing the surface map, induced boundary links, and explicit
+  curve relations spanning the projected surfaces;
 - model and synchronized session APIs for dimension-scoped entity names, atomic
   positive-tag changes, ordered dependency-safe removal, analytical bounding boxes,
   containment selection, native entity types and plane equations, and explicit
@@ -505,7 +509,7 @@ edge-counterpart form that derives its transform from mapped boundary vertices.
 relations can still be stored through `set_periodic!` as a Tessella extension
 (Gmsh's `setPeriodic` silently ignores dimension 3) and remain mesh-inert.
 Cyclic curve
-dependencies, curved or non-boundary periodic surfaces,
+dependencies, curved periodic surfaces,
 and allocator reads after topology-changing or untracked declarations remain
 pending. Gmsh 4.15.2 has no
 serialized Point-In-Surface or Point/Line/Surface-In-Volume relation:

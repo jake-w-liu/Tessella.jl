@@ -417,7 +417,11 @@ MSH2 elementary ownership and MSH4 entity classification. Explicit planar
 surface-loop volumes require connected closed shells, support cavity loops, classify
 every tetrahedron boundary face exactly once, and retain signed volume boundaries.
 Periodic explicit shells retain their surface maps and induced boundary point/curve
-forest through MSH2/MSH4.
+forest through MSH2/MSH4. Standalone periodic surface pairs — not bounding a volume —
+project through the multi-surface `model_to_mixed` overload, which merges the
+per-surface meshes on shared nodes, emits each shared entity's cells once, and
+serializes the surface map, its induced boundary links, and explicit curve
+relations spanning the projected surfaces.
 Gmsh 4.15.2 does not serialize the Point/Line/Surface-In-Volume relation. Nested
 Point/Line-In-Surface constraints are certified against each sheet's face complex;
 embedded sheets may contain interior loops. MSH4 retains the nested curve relation.
@@ -429,7 +433,7 @@ general CAD parameterizations, curved/warped or
 compact-TransfiniteTri volumes, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, cyclic periodic-curve dependencies, curved
-or non-boundary periodic surfaces, or allocator reads after
+periodic surfaces, or allocator reads after
 untracked topology-changing declarations.
 Expression/list-backed `Periodic Line`, `Periodic Curve`, and
 `Periodic Surface` `Translate`, `Rotate`, and `Affine` statements —
