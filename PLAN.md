@@ -780,8 +780,8 @@ least twelve entries and zero-pad to the verbatim 16-entry record. Signed
 entity tags resolve through `abs` for lookup and set the orientation flag
 through the tag sign product; entity sets accept bounded ranges and numeric
 list variables. Planar periodic
-surface pairs require disjoint, affine-equivalent boundary and embedded topology on
-one explicit volume. Periodic volume relations are stored, reported, and carried
+surface pairs require disjoint, affine-equivalent boundary and embedded topology,
+either bounding one explicit volume or standalone in a multi-surface projection. Periodic volume relations are stored, reported, and carried
 through retag/removal lifecycle as a Tessella extension — Gmsh 4.15.2 has no
 `Periodic Volume` grammar production and its `setPeriodic` API silently ignores
 dimension 3. Volume meshing
@@ -806,6 +806,11 @@ the sheet may contain interior loops. MSH4 retains the nested Curve-In-Surface
 relation. Periodic explicit shells also emit the original surface maps and a
 deterministic one-master-per-slave forest for their induced boundary point/curve
 relations through MSH2/MSH4; the CLI uses this path for classified `-3` output.
+Standalone periodic surfaces — pairs not bounding a volume — project through
+the multi-surface `model_to_mixed` overload, which merges the per-surface
+meshes on shared nodes, emits each shared entity's cells once, and serializes
+the surface map plus its induced boundary links and any explicit curve
+relations spanning the projected surfaces.
 Gmsh 4.15.2 serializes
 those entities and cells but no
 Point/Line/Surface-In-Volume relation. P4 does not
@@ -815,7 +820,7 @@ quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, cyclic
-periodic-curve dependency graphs, curved or non-boundary periodic surfaces,
+periodic-curve dependency graphs, curved periodic surfaces,
 or allocator reads after untracked
 topology-changing declarations. The
 filled extrusion (`mesh_boundary_layer_filled`) certifies the remaining core with per-wall shell

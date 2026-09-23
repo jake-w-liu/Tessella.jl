@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: mesh_crc, validate
+using Tessella.MeshTypes: mesh_crc, validate, nnodes, ntris
 
 function _periodic_geo_square(periodic_statement::AbstractString;
                               mesh_size=0.5)
@@ -873,4 +873,128 @@ end
         rotated.model,2,1,constraint.affine,constraint.atol,"test")
     map=Dict(pairs)
     @test map[11]==9 && map[12]==10
+end
+
+@testset "multi-surface periodic projection" begin
+    # Two disjoint unit squares linked by a `Periodic Surface` edge map —
+    # upstream writes nine links for this fixture (4 induced point pairs,
+    # 4 induced curve pairs, and the surface map).
+    function disjoint_pair(extra::AbstractString="")
+        return """
+            Point(1) = {0, 0, 0, 0.5};
+            Point(2) = {1, 0, 0, 0.5};
+            Point(3) = {1, 1, 0, 0.5};
+            Point(4) = {0, 1, 0, 0.5};
+            Line(1) = {1, 2}; Line(2) = {2, 3};
+            Line(3) = {3, 4}; Line(4) = {4, 1};
+            Curve Loop(1) = {1, 2, 3, 4};
+            Plane Surface(1) = {1};
+            Point(5) = {2, 0, 0, 0.5};
+            Point(6) = {3, 0, 0, 0.5};
+            Point(7) = {3, 1, 0, 0.5};
+            Point(8) = {2, 1, 0, 0.5};
+            Line(5) = {5, 6}; Line(6) = {6, 7};
+            Line(7) = {7, 8}; Line(8) = {8, 5};
+            Curve Loop(2) = {5, 6, 7, 8};
+            Plane Surface(2) = {2};
+            Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+            $extra
+            """
+    end
+    execution=_execute_geo_source(disjoint_pair())
+    @test execution.msg_error_count==0
+    m=execution.model
+    parts=[(tag,mesh_model_surface(m,tag)) for tag in (1,2)]
+    mixed=model_to_mixed(m,parts)
+    @test size(mixed.coords,2)==nnodes(parts[1][2])+nnodes(parts[2][2])
+    @test length(mixed.periodic_links)==9
+    counts=Dict{Int,Int}()
+    for link in mixed.periodic_links
+        counts[link.dim]=get(counts,link.dim,0)+1
+        @test link.affine!==nothing && length(link.affine)==16
+    end
+    @test counts==Dict(0=>4,1=>4,2=>1)
+    surface_link=only(link for link in mixed.periodic_links if link.dim==2)
+    @test Int(surface_link.slave_entity)==2 &&
+          Int(surface_link.master_entity)==1
+    @test length(surface_link.slave_nodes)==nnodes(parts[2][2])
+    @test length(Set(surface_link.slave_nodes))==nnodes(parts[2][2])
+    curve_masters=Dict{Int,Int}(Int(link.slave_entity)=>Int(link.master_entity)
+        for link in mixed.periodic_links if link.dim==1)
+    @test curve_masters==Dict(5=>1,6=>2,7=>3,8=>4)
+    point_masters=Dict{Int,Int}(Int(link.slave_entity)=>Int(link.master_entity)
+        for link in mixed.periodic_links if link.dim==0)
+    @test point_masters==Dict(5=>1,6=>2,7=>3,8=>4)
+
+    # The serialized MSH4 reloads with the same nine links.
+    roundtrip=mktemp() do path,io
+        close(io)
+        Tessella.Elements.write_mixed_msh(path,mixed)
+        Tessella.Elements.read_mixed_msh(path)
+    end
+    @test length(roundtrip.periodic_links)==9
+    @test Set((link.dim,Int(link.slave_entity),Int(link.master_entity))
+              for link in roundtrip.periodic_links) ==
+          Set((link.dim,Int(link.slave_entity),Int(link.master_entity))
+              for link in mixed.periodic_links)
+
+    # An explicit curve relation duplicating an induced pair folds into the
+    # same link — one master per slave is preserved.
+    duplicated=_execute_geo_source(disjoint_pair(
+        "Periodic Curve {5} = {1} Translate {2, 0, 0};"))
+    @test duplicated.msg_error_count==0
+    dup_parts=[(tag,mesh_model_surface(duplicated.model,tag)) for tag in (1,2)]
+    dup_mixed=model_to_mixed(duplicated.model,dup_parts)
+    @test length(dup_mixed.periodic_links)==9
+
+    # Rejections: partial coverage, duplicates, unknown or mis-shaped entries.
+    @test_throws ArgumentError model_to_mixed(m,Tuple{Int,Mesh}[])
+    @test_throws ArgumentError model_to_mixed(m,[parts[1]])
+    @test_throws ArgumentError model_to_mixed(m,[parts[1],parts[1]])
+    @test_throws ArgumentError model_to_mixed(m,[(99,parts[1][2])])
+    @test_throws ArgumentError model_to_mixed(
+        m,[(1,parts[1][2]),(2,parts[1][2])])
+    @test_throws ArgumentError model_to_mixed(
+        m,[(1,"not a mesh"),(2,parts[2][2])])
+
+    # Adjacent coplanar squares share a boundary curve — the merge unifies
+    # the shared nodes and emits each shared cell once.
+    adjacent=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.5};
+        Point(2) = {1, 0, 0, 0.5};
+        Point(3) = {2, 0, 0, 0.5};
+        Point(4) = {2, 1, 0, 0.5};
+        Point(5) = {1, 1, 0, 0.5};
+        Point(6) = {0, 1, 0, 0.5};
+        Line(1) = {1, 2}; Line(2) = {2, 5}; Line(3) = {5, 6};
+        Line(4) = {6, 1}; Line(5) = {2, 3}; Line(6) = {3, 4};
+        Line(7) = {4, 5};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Curve Loop(2) = {5, 6, 7, -2};
+        Plane Surface(1) = {1};
+        Plane Surface(2) = {2};
+        """)
+    am=adjacent.model
+    aparts=[(tag,mesh_model_surface(am,tag)) for tag in (1,2)]
+    amixed=model_to_mixed(am,aparts)
+    @test isempty(amixed.periodic_links)
+    @test size(amixed.coords,2)<sum(nnodes(p[2]) for p in aparts)
+    tri_count=sum(block.msh==2 ? size(block.nodes,2) : 0
+                  for block in amixed.blocks)
+    @test tri_count==sum(ntris(p[2]) for p in aparts)
+    point_count=sum(block.msh==15 ? size(block.nodes,2) : 0
+                    for block in amixed.blocks)
+    @test point_count==6
+    seen_cells=Set{Tuple{Int,NTuple{4,Int32}}}()
+    for block in amixed.blocks,column in axes(block.nodes,2)
+        nodes=sort!(vec(Int32.(block.nodes[:,column])))
+        key=(block.msh,ntuple(
+            slot->slot<=length(nodes) ? nodes[slot] : Int32(0),4))
+        @test key ∉ seen_cells
+        push!(seen_cells,key)
+    end
+    # Shared curve 2 keeps curve-level ownership of its interior nodes in the
+    # merged classification.
+    data=amixed.entity_data
+    @test any(owner->owner==(1,Int32(2)),data.node_entities)
 end

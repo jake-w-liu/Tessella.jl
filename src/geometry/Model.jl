@@ -2554,7 +2554,9 @@ function _insert_periodic_parameter!(parameters::Vector{Float64},value::Float64,
 end
 
 function _surface_periodic_constraints(m::GeoModel,t::Int,
-                                       caller::AbstractString)
+                                       caller::AbstractString;
+                                       external_curves::Union{Nothing,
+                                                              Set{Int}}=nothing)
     boundary_curves=Set{Int}()
     for loop in m.surfaces[t],signed in m.loops[loop]
         push!(boundary_curves,abs(signed))
@@ -2567,9 +2569,16 @@ function _surface_periodic_constraints(m::GeoModel,t::Int,
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         slave_present=slave in surface_curves
         master_present=master in surface_curves
-        slave_present==master_present || throw(ArgumentError(
-            "$caller: periodic Curve[$slave]/Curve[$master] relation " *
-            "has only one entity on Surface[$t]"))
+        if slave_present!=master_present
+            foreign=slave_present ? master : slave
+            # A relation whose far endpoint lives on another surface being
+            # projected is skipped here — the multi-surface path emits it.
+            (external_curves!==nothing && foreign in external_curves) &&
+                continue
+            throw(ArgumentError(
+                "$caller: periodic Curve[$slave]/Curve[$master] relation " *
+                "has only one entity on Surface[$t]"))
+        end
         slave_present && push!(constraints,constraint)
     end
     return constraints
@@ -3075,7 +3084,8 @@ Periodic endpoint relations are emitted as a deterministic spanning forest when
 curve directions share corners, satisfying the MSH one-master-per-slave entity
 constraint while retaining every curve link.
 """
-function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
+function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
+                        external_curves::Union{Nothing,Set{Int}}=nothing)
     caller="model_to_mixed"
     surface=_tag(surface_tag,caller,2)
     haskey(m.surfaces,surface) || throw(ArgumentError(
@@ -3096,7 +3106,8 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
         _model_surface_embedding_tags(m,surface,caller)
 
     plane=_model_surface_plane(m,surface,caller;allow_ruled=true)
-    constraints=_surface_periodic_constraints(m,surface,caller)
+    constraints=_surface_periodic_constraints(
+        m,surface,caller;external_curves=external_curves)
     geometric_tolerance=max(1e-12,
         isempty(constraints) ? 0.0 : maximum(c.atol for c in constraints))
     for node in axes(mesh.coords,2)
@@ -3309,6 +3320,284 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer)
     end
     output=MixedMesh(
         mesh.coords,blocks;physical_names=names,entity_data=data,
+        elementary_entities=block_entities,periodic_links=links)
+    output_diagnostic=validate(output)
+    output_diagnostic.ok || throw(ErrorException(
+        "$caller: invalid projected mixed mesh — " *
+        join(output_diagnostic.messages,"; ")))
+    return output
+end
+
+"""
+    model_to_mixed(model, surface_meshes) -> MixedMesh
+
+Project several native planar surface meshes into one classified
+[`MixedMesh`](@ref), the combined output a `Mesh 2` produces in Gmsh.
+`surface_meshes` is a vector of `(surface_tag, mesh)` pairs produced by
+[`mesh_model_surface`](@ref). Nodes shared by several surfaces — common corner
+points and shared boundary-curve nodes — unify on bitwise-identical
+coordinates, and cells shared by two projected surfaces are emitted once,
+matching the single record per entity upstream writes.
+
+Periodic surface relations whose slave and master surfaces are both projected
+emit their dim-2 node map plus the induced boundary point and curve links;
+explicit periodic curve relations spanning two projected surfaces emit their
+link here as well. A periodic relation whose far endpoint does not belong to
+any projected surface is rejected like the single-entity projection, and a
+surface relation covering only one projected surface fails.
+"""
+function model_to_mixed(m::GeoModel,parts::AbstractVector)
+    caller="model_to_mixed"
+    surface_parts=Tuple{Int,Mesh}[]
+    for part in parts
+        (part isa Tuple && length(part)==2) || throw(ArgumentError(
+            "$caller: each surface entry must be a (tag, mesh) pair"))
+        tag=_tag(part[1],caller,2)
+        mesh=part[2]
+        mesh isa Mesh || throw(ArgumentError(
+            "$caller: each surface entry must be a (tag, mesh) pair"))
+        haskey(m.surfaces,tag) || throw(ArgumentError(
+            "$caller: unknown Surface[$tag]"))
+        push!(surface_parts,(tag,mesh))
+    end
+    isempty(surface_parts) && throw(ArgumentError(
+        "$caller: at least one surface mesh is required"))
+    tags=[tag for (tag,_) in surface_parts]
+    allunique(tags) || throw(ArgumentError(
+        "$caller: duplicate surface tags in input"))
+    tagset=Set(tags)
+
+    # Curves living on another projected surface relax the single-surface
+    # one-side rule — those relations emit at the merged level below.
+    function surface_curve_set(surface::Int)
+        boundary=_model_projection_surface_curves(m,surface)
+        _,embedded=_model_surface_embedding_tags(m,surface,caller)
+        return union(Set{Int}(boundary),Set{Int}(embedded))
+    end
+    part_curves=[surface_curve_set(tag) for (tag,_) in surface_parts]
+    included_curves=union(part_curves...)
+    curve_surfaces=Dict{Int,Set{Int}}()
+    for (index,(tag,_)) in enumerate(surface_parts),curve in part_curves[index]
+        push!(get!(()->Set{Int}(),curve_surfaces,curve),tag)
+    end
+
+    all_constraints=model_periodic_constraints(m)
+    surface_constraints=ModelPeriodicConstraint[]
+    for constraint in all_constraints
+        constraint.dim==2 || continue
+        slave_present=Int(constraint.slave_entity) in tagset
+        master_present=Int(constraint.master_entity) in tagset
+        slave_present==master_present || throw(ArgumentError(
+            "$caller: periodic Surface[$(constraint.slave_entity)]/" *
+            "Surface[$(constraint.master_entity)] relation has only one " *
+            "entity among the projected surfaces"))
+        slave_present && push!(surface_constraints,constraint)
+    end
+    cross_curve_constraints=ModelPeriodicConstraint[]
+    for constraint in all_constraints
+        constraint.dim==1 || continue
+        slave_surfaces=get(
+            curve_surfaces,Int(constraint.slave_entity),Set{Int}())
+        master_surfaces=get(
+            curve_surfaces,Int(constraint.master_entity),Set{Int}())
+        isempty(intersect(slave_surfaces,master_surfaces)) || continue
+        isempty(slave_surfaces) || isempty(master_surfaces) || push!(
+            cross_curve_constraints,constraint)
+    end
+
+    # Nodes shared across surfaces are bitwise-identical (the surface mesher
+    # produces the same coordinates for common geometry), like upstream's
+    # shared-node model.
+    lookup=Dict{NTuple{3,Int},Int32}()
+    coordinates=NTuple{3,Float64}[]
+    remaps=Vector{Vector{Int32}}(undef,length(surface_parts))
+    for (index,(tag,mesh)) in enumerate(surface_parts)
+        remap=Vector{Int32}(undef,nnodes(mesh))
+        for node in 1:nnodes(mesh)
+            x=mesh.coords[1,node];y=mesh.coords[2,node];z=mesh.coords[3,node]
+            key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
+            mapped=get(lookup,key,Int32(0))
+            if mapped==0
+                mapped=Int32(length(coordinates)+1)
+                lookup[key]=mapped
+                push!(coordinates,(x,y,z))
+            end
+            remap[node]=mapped
+        end
+        remaps[index]=remap
+    end
+    total_nodes=length(coordinates)
+    merged_coords=Matrix{Float64}(undef,3,total_nodes)
+    for (index,(x,y,z)) in enumerate(coordinates)
+        merged_coords[1,index]=x;merged_coords[2,index]=y;merged_coords[3,index]=z
+    end
+
+    subs=[model_to_mixed(m,mesh,tag;
+          external_curves=setdiff(included_curves,part_curves[index]))
+          for (index,(tag,mesh)) in enumerate(surface_parts)]
+
+    # Merged cells: shared corner points and boundary curves appear in both
+    # part projections — upstream serializes each entity's cells once.
+    cell_lists=Dict{Int,Vector{Tuple{Vector{Int32},Int32,Int32}}}()
+    type_order=Int[]
+    seen=Set{Tuple{Int,NTuple{4,Int32}}}()
+    for (part,sub) in enumerate(subs)
+        data=sub.entity_data;remap=remaps[part]
+        for (block_index,block) in enumerate(sub.blocks)
+            block isa ElementBlock || throw(ErrorException(
+                "$caller: unexpected element block in surface projection"))
+            entities=data.block_entities[block_index]
+            for column in axes(block.nodes,2)
+                mapped=Int32[remap[block.nodes[slot,column]]
+                             for slot in axes(block.nodes,1)]
+                sorted=sort(mapped)
+                key=(block.msh,ntuple(
+                    slot->slot<=length(sorted) ? sorted[slot] : Int32(0),4))
+                key in seen && continue
+                push!(seen,key)
+                list=get!(cell_lists,block.msh) do
+                    push!(type_order,block.msh)
+                    Tuple{Vector{Int32},Int32,Int32}[]
+                end
+                push!(list,(mapped,block.tags[column],entities[column]))
+            end
+        end
+    end
+    blocks=ElementBlock[]
+    block_entities=Vector{Int32}[]
+    for msh_type in sort!(type_order)
+        list=cell_lists[msh_type]
+        width=length(first(list)[1])
+        matrix=Matrix{Int32}(undef,width,length(list))
+        physical=Vector{Int32}(undef,length(list))
+        entities=Vector{Int32}(undef,length(list))
+        for (column,(nodes,phys,entity)) in enumerate(list)
+            matrix[:,column]=nodes
+            physical[column]=phys;entities[column]=entity
+        end
+        push!(blocks,ElementBlock(msh_type,matrix,physical))
+        push!(block_entities,entities)
+    end
+
+    # Node ownership: the lower-dimension entity wins, like the per-surface
+    # projection — equal-dimension disagreements mean a real conflict.
+    node_entities=fill((typemax(Int),Int32(0)),total_nodes)
+    for (part,sub) in enumerate(subs)
+        remap=remaps[part]
+        for (column,owner) in enumerate(sub.entity_data.node_entities)
+            node=Int(remap[column]);current=node_entities[node]
+            if owner[1]<current[1]
+                node_entities[node]=owner
+            elseif owner[1]==current[1] && owner!=current
+                labels=("Point","Curve","Surface","Volume")
+                throw(ArgumentError(
+                    "$caller: mesh node $node is classified to both " *
+                    "$(labels[current[1]+1])[$(current[2])] and " *
+                    "$(labels[owner[1]+1])[$(owner[2])]"))
+            end
+        end
+    end
+    any(owner->owner[1]==typemax(Int),node_entities) && throw(ErrorException(
+        "$caller: internal merge left an unclassified node"))
+
+    entities=Dict{Tuple{Int,Int},MixedEntity}()
+    names=Dict{Tuple{Int,Int},String}()
+    node_parametric=Union{Nothing,Vector{Float64}}[
+        nothing for _ in 1:total_nodes]
+    links=MixedPeriodicLink[]
+    for (part,sub) in enumerate(subs)
+        data=sub.entity_data;remap=remaps[part]
+        for (key,entity) in pairs(data.entities)
+            haskey(entities,key) || (entities[key]=entity)
+        end
+        for (key,name) in pairs(sub.physical_names)
+            haskey(names,key) || (names[key]=name)
+        end
+        for (column,value) in enumerate(data.node_parametric)
+            value===nothing && continue
+            node_parametric[Int(remap[column])]=value
+        end
+        for link in sub.periodic_links
+            push!(links,MixedPeriodicLink(
+                link.dim,link.slave_entity,link.master_entity,
+                Int32[remap[Int(node)] for node in link.slave_nodes],
+                Int32[remap[Int(node)] for node in link.master_nodes];
+                affine=link.affine))
+        end
+    end
+
+    if !isempty(surface_constraints) || !isempty(cross_curve_constraints)
+        total_tris=sum(ntris(mesh) for (_,mesh) in surface_parts)
+        merged_tris=Matrix{Int32}(undef,3,total_tris)
+        surface_tris=Dict{Int,Vector{Int32}}()
+        surface_nodes=Dict{Int,Set{Int32}}()
+        column=0
+        for (index,(tag,mesh)) in enumerate(surface_parts)
+            columns=Int32[];nodes=Set{Int32}()
+            for cell in axes(mesh.tris,2)
+                column+=1
+                for slot in 1:3
+                    node=remaps[index][mesh.tris[slot,cell]]
+                    merged_tris[slot,column]=node
+                    push!(nodes,node)
+                end
+                push!(columns,Int32(column))
+            end
+            surface_tris[tag]=columns;surface_nodes[tag]=nodes
+        end
+        merged_mesh=Mesh(merged_coords;tris=merged_tris)
+        tolerance=max(1e-12,maximum(
+            (constraint.atol for constraint in Iterators.flatten(
+                (surface_constraints,cross_curve_constraints))),init=0.0))
+        point_nodes=Dict{Int,Int32}()
+        curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
+        # Classification runs on each part's own mesh — identical inputs to the
+        # per-surface projection — and remaps node indices into merged space.
+        for (index,(tag,mesh)) in enumerate(surface_parts)
+            remap=remaps[index]
+            boundary,boundary_edges=_surface_boundary_topology(mesh,caller)
+            mesh_edges=_model_projection_triangle_edges(mesh)
+            boundary_curve_tags=_model_projection_surface_curves(m,tag)
+            _,embedded_curve_tags=_model_surface_embedding_tags(m,tag,caller)
+            for curve in vcat(boundary_curve_tags,embedded_curve_tags)
+                haskey(curve_entries,curve) && continue
+                entries_list=if curve in boundary_curve_tags
+                    try
+                        first(_curve_parameter_nodes(
+                            m,mesh,curve,boundary,boundary_edges,
+                            tolerance,caller))
+                    catch err
+                        err isa InterruptException && rethrow()
+                        err isa ArgumentError && rethrow()
+                        throw(ArgumentError(
+                            "$caller: merged mesh does not represent " *
+                            "Curve[$curve] — " * sprint(showerror,err)))
+                    end
+                else
+                    _model_projection_embedded_curve_nodes(
+                        m,mesh,curve,mesh_edges,tolerance,caller)
+                end
+                remapped=Tuple{Float64,Int}[
+                    (param,Int(remap[node])) for (param,node) in entries_list]
+                curve_entries[curve]=remapped
+                start_point,stop_point=m.curves[curve]
+                point_nodes[start_point]=Int32(remapped[1][2])
+                point_nodes[stop_point]=Int32(remapped[end][2])
+            end
+        end
+        append!(links,_model_projection_periodic_surface_links(
+            m,merged_mesh,surface_constraints,point_nodes,curve_entries,
+            surface_nodes,caller;curve_constraints=cross_curve_constraints,
+            surface_tris=surface_tris))
+    end
+
+    data=MixedEntityData(
+        entities;node_entities=node_entities,node_parametric=node_parametric,
+        external_node_tags=UInt64.(1:total_nodes),
+        block_entities=block_entities,
+        external_element_tags=_model_projection_external_elements(blocks))
+    output=MixedMesh(
+        merged_coords,blocks;physical_names=names,entity_data=data,
         elementary_entities=block_entities,periodic_links=links)
     output_diagnostic=validate(output)
     output_diagnostic.ok || throw(ErrorException(
@@ -4067,7 +4356,8 @@ function _model_periodic_surface_boundary_maps(
 end
 
 function _model_periodic_add_relation!(
-    relations::Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}},
+    relations::Dict{Tuple{Int,Int},
+                    Tuple{Union{Nothing,NTuple{16,Float64}},Float64}},
     slave::Int,master::Int,constraint::ModelPeriodicConstraint,
     caller::AbstractString,label::AbstractString)
     key=(slave,master)
@@ -4084,12 +4374,14 @@ function _model_periodic_add_relation!(
 end
 
 function _model_periodic_spanning_relations(
-    relations::Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}})
-    outgoing=Dict{Int,Vector{Tuple{Int,NTuple{16,Float64},Float64}}}()
+    relations::Dict{Tuple{Int,Int},
+                    Tuple{Union{Nothing,NTuple{16,Float64}},Float64}})
+    outgoing=Dict{Int,
+                  Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}},Float64}}}()
     indegree=Dict{Int,Int}()
     entities=Set{Int}()
     for ((slave,master),(affine,atol)) in relations
-        push!(get!(Vector{Tuple{Int,NTuple{16,Float64},Float64}},
+        push!(get!(Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}},Float64}},
                    outgoing,master),(slave,affine,atol))
         indegree[slave]=get(indegree,slave,0)+1
         get!(indegree,master,0)
@@ -4102,7 +4394,7 @@ function _model_periodic_spanning_relations(
                     if get(indegree,entity,0)==0])
     append!(roots,sort!(collect(setdiff(entities,Set(roots)))))
     visited=Set{Int}()
-    parents=Dict{Int,Tuple{Int,NTuple{16,Float64},Float64}}()
+    parents=Dict{Int,Tuple{Int,Union{Nothing,NTuple{16,Float64}},Float64}}()
     for root in roots
         root in visited && continue
         push!(visited,root)
@@ -4111,7 +4403,7 @@ function _model_periodic_spanning_relations(
             master=queue[head];head+=1
             for (slave,affine,atol) in get(
                     outgoing,master,
-                    Tuple{Int,NTuple{16,Float64},Float64}[])
+                    Tuple{Int,Union{Nothing,NTuple{16,Float64}},Float64}[])
                 slave in visited && continue
                 push!(visited,slave)
                 parents[slave]=(master,affine,atol)
@@ -4126,11 +4418,30 @@ end
 
 function _model_periodic_curve_entry_mapping(
     mesh::Mesh,slave::Int,master::Int,affine,atol::Float64,
-    slave_entries,master_entries,caller::AbstractString)
+    slave_entries,master_entries,caller::AbstractString;
+    reversed::Bool=false)
     constraint=ModelPeriodicConstraint(
-        1,Int32(slave),Int32(master),affine,false,atol)
-    mapping=_model_affine_node_pairs(
-        mesh,constraint,last.(master_entries),last.(slave_entries),caller)
+        1,Int32(slave),Int32(master),affine,reversed,atol)
+    mapping=if affine===nothing
+        # Orientation-only relations pair nodes by parametric order, exactly
+        # like upstream's zero-row-affine curve links.
+        ordered_slave=reversed ? reverse(slave_entries) : slave_entries
+        length(master_entries)==length(ordered_slave) || throw(ArgumentError(
+            "$caller: periodic Curve[$slave]/Curve[$master] node counts differ"))
+        for (master_entry,slave_entry) in zip(master_entries,ordered_slave)
+            mapped=reversed ? 1-slave_entry[1] : slave_entry[1]
+            abs(master_entry[1]-mapped)<=atol || throw(ArgumentError(
+                "$caller: periodic Curve[$slave]/Curve[$master] parameters " *
+                "differ"))
+        end
+        (master_entity=master,
+         slave_nodes=Int32[Int32(entry[2]) for entry in ordered_slave],
+         master_nodes=Int32[Int32(entry[2]) for entry in master_entries],
+         affine=nothing)
+    else
+        _model_affine_node_pairs(
+            mesh,constraint,last.(master_entries),last.(slave_entries),caller)
+    end
     node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
         zip(mapping.master_nodes,mapping.slave_nodes))
     function edge_set(entries,map)
@@ -4153,13 +4464,39 @@ function _model_periodic_curve_entry_mapping(
     return mapping
 end
 
+function _model_periodic_surface_nodes_2d(
+    m::GeoModel,mesh::Mesh,constraint::ModelPeriodicConstraint,
+    surface_nodes,surface_tris,caller::AbstractString)
+    slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+    mapping=_model_affine_node_pairs(
+        mesh,constraint,surface_nodes[master],surface_nodes[slave],caller)
+    node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
+        zip(mapping.master_nodes,mapping.slave_nodes))
+    mapped_master_faces=Set{NTuple{3,Int32}}()
+    for cell in surface_tris[master]
+        mapped=ntuple(slot->node_map[mesh.tris[slot,cell]],3)
+        push!(mapped_master_faces,_model_projection_face_key(mapped))
+    end
+    slave_face_keys=Set{NTuple{3,Int32}}()
+    for cell in surface_tris[slave]
+        push!(slave_face_keys,_model_projection_face_key(
+            ntuple(slot->mesh.tris[slot,cell],3)))
+    end
+    mapped_master_faces==slave_face_keys || throw(ArgumentError(
+        "$caller: periodic Surface[$slave]/Surface[$master] face topology " *
+        "does not match under the affine node map"))
+    return mapping
+end
+
 function _model_projection_periodic_surface_links(
     m::GeoModel,mesh::Mesh,constraints,point_nodes,curve_entries,
-    surface_nodes,caller::AbstractString)
-    point_relations=
-        Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}}()
-    curve_relations=
-        Dict{Tuple{Int,Int},Tuple{NTuple{16,Float64},Float64}}()
+    surface_nodes,caller::AbstractString;
+    curve_constraints=ModelPeriodicConstraint[],
+    surface_tris::Union{Nothing,Dict{Int,Vector{Int32}}}=nothing)
+    point_relations=Dict{Tuple{Int,Int},
+        Tuple{Union{Nothing,NTuple{16,Float64}},Float64}}()
+    curve_relations=Dict{Tuple{Int,Int},
+        Tuple{Union{Nothing,NTuple{16,Float64}},Float64}}()
     for constraint in constraints
         point_map,curve_map=
             _model_periodic_surface_boundary_maps(m,constraint,caller)
@@ -4170,6 +4507,26 @@ function _model_projection_periodic_surface_links(
         for (master,slave) in curve_map
             _model_periodic_add_relation!(
                 curve_relations,slave,master,constraint,caller,"Curve")
+        end
+    end
+    # Explicit curve relations spanning projected surfaces fold into the same
+    # spanning forests: endpoint vertices join the dim-0 relations like the
+    # per-surface path, and the curve pair joins the dim-1 relations — where a
+    # surface-induced pair already registered, consistency is enforced by
+    # `_model_periodic_add_relation!`.
+    for constraint in curve_constraints
+        slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+        _model_periodic_add_relation!(
+            curve_relations,slave,master,constraint,caller,"Curve")
+        slave_start,slave_stop=m.curves[slave]
+        master_start,master_stop=m.curves[master]
+        endpoint_pairs=constraint.reversed ?
+            ((slave_stop,master_start),(slave_start,master_stop)) :
+            ((slave_start,master_start),(slave_stop,master_stop))
+        for (slave_point,master_point) in endpoint_pairs
+            _model_periodic_add_relation!(
+                point_relations,slave_point,master_point,constraint,
+                caller,"Point")
         end
     end
 
@@ -4191,14 +4548,27 @@ function _model_projection_periodic_surface_links(
             affine=affine))
     end
     curve_parents=_model_periodic_spanning_relations(curve_relations)
+    explicit_curve_slaves=Set(
+        Int(constraint.slave_entity) for constraint in curve_constraints)
     for slave in sort!(collect(keys(curve_parents)))
         master,affine,atol=curve_parents[slave]
         haskey(curve_entries,slave) && haskey(curve_entries,master) ||
             throw(ErrorException(
                 "$caller: periodic curve entity is absent from projection"))
+        # An explicit relation already induced by a surface constraint emits
+        # one link through the induced mapping; `reversed` only applies to a
+        # transform-free pair that was never surface-induced.
+        explicit=slave in explicit_curve_slaves
+        reversed=explicit && any(
+            constraint->Int(constraint.slave_entity)==slave &&
+                           Int(constraint.master_entity)==master &&
+                           constraint.affine===nothing &&
+                           constraint.reversed,
+            curve_constraints)
         mapping=_model_periodic_curve_entry_mapping(
             mesh,slave,master,affine,atol,
-            curve_entries[slave],curve_entries[master],caller)
+            curve_entries[slave],curve_entries[master],caller;
+            reversed=reversed)
         push!(links,MixedPeriodicLink(
             1,slave,master,mapping.slave_nodes,mapping.master_nodes;
             affine=affine))
@@ -4206,7 +4576,10 @@ function _model_projection_periodic_surface_links(
     for constraint in constraints
         slave=Int(constraint.slave_entity)
         master=Int(constraint.master_entity)
-        mapping=_model_periodic_surface_nodes(m,mesh,constraint)
+        mapping=surface_tris===nothing ?
+            _model_periodic_surface_nodes(m,mesh,constraint) :
+            _model_periodic_surface_nodes_2d(
+                m,mesh,constraint,surface_nodes,surface_tris,caller)
         Set(mapping.slave_nodes)==surface_nodes[slave] || throw(ErrorException(
             "$caller: periodic Surface[$slave] mapping omits classified nodes"))
         Set(mapping.master_nodes)==surface_nodes[master] || throw(ErrorException(
@@ -5133,7 +5506,24 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     1<=max_periodic_passes<=64 || throw(ArgumentError(
         "$caller: max_periodic_passes must be in 1:64"))
     npasses=Int(max_periodic_passes)
-    constraints=_surface_periodic_constraints(m,t,caller)
+    # A periodic curve relation whose far endpoint lives on a surface paired
+    # with this one by a dim-2 relation needs no local synchronization — the
+    # slave-copy path reproduces the master's boundary nodes by construction.
+    partner_curves=Set{Int}()
+    for constraint in model_periodic_constraints(m)
+        constraint.dim==2 || continue
+        partner=Int(constraint.slave_entity)==t ? Int(constraint.master_entity) :
+                Int(constraint.master_entity)==t ? Int(constraint.slave_entity) :
+                0
+        (partner!=0 && haskey(m.surfaces,partner)) || continue
+        for loop in m.surfaces[partner],signed in m.loops[loop]
+            push!(partner_curves,abs(signed))
+        end
+        _,partner_embedded=_model_surface_embedding_tags(m,partner,caller)
+        union!(partner_curves,Set{Int}(partner_embedded))
+    end
+    constraints=_surface_periodic_constraints(
+        m,t,caller;external_curves=partner_curves)
     # A slave surface takes its master's mesh verbatim, like upstream's
     # meshGFace copy path — the master is meshed on demand so the relation
     # holds even when the caller never meshed it directly.
