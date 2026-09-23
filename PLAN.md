@@ -767,15 +767,24 @@ relations may meet at corners. Planar surface meshing synchronizes boundary or
 embedded curve subdivisions across each dependency graph through bounded remeshing
 and exposes the certified node map through
 the direct and session APIs. Bounded `.geo` execution accepts expression/list-backed
-`Periodic Line`, `Periodic Curve`, `Periodic Surface`, and `Periodic Volume`
-`Translate`, `Rotate`,
-and 12- or 16-entry `Affine` transforms plus ranges and numeric list
-variables in entity sets. Planar periodic
+`Periodic Line`, `Periodic Curve`, and `Periodic Surface` statements —
+`Periodic Volume` is a `syntax error (Volume)` like upstream's grammar —
+covering `Translate`, `Rotate`, `Affine`, the transform-free
+orientation-only curve form, and the `Periodic Surface j {c} = k {c}`
+edge-counterpart form that derives a translation or rotation from the mapped
+boundary vertices. Affine arity follows Gmsh's parser: curve transforms under
+twelve entries report the arity error yet still record the orientation-only
+relation, twelve-to-fifteen or over-sixteen entries run the endpoint check
+and drop on the exact-16 storage requirement, while surface transforms need at
+least twelve entries and zero-pad to the verbatim 16-entry record. Signed
+entity tags resolve through `abs` for lookup and set the orientation flag
+through the tag sign product; entity sets accept bounded ranges and numeric
+list variables. Planar periodic
 surface pairs require disjoint, affine-equivalent boundary and embedded topology on
 one explicit volume. Periodic volume relations are stored, reported, and carried
-through retag/removal lifecycle but remain mesh-inert — matching Gmsh 4.15.2,
-which accepts `setPeriodic(3)` yet constrains interiors only through periodic
-boundary entities and never serializes a dimension-3 record. Volume meshing
+through retag/removal lifecycle as a Tessella extension — Gmsh 4.15.2 has no
+`Periodic Volume` grammar production and its `setPeriodic` API silently ignores
+dimension 3. Volume meshing
 copies each master's facet topology to its slave
 and certifies the resulting tetrahedron-boundary node map. `model_to_mixed` projects
 a native planar triangle mesh into point,

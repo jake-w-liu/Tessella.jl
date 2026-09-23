@@ -14,7 +14,7 @@ module Elements
 
 using ..MeshTypes: Mesh, MeshDiagnostic, nnodes, nsegs, ntris, ntets
 import ..MeshTypes: validate
-using ..Transform: _transform_homogeneous
+using ..Transform: _periodic_affine_input
 using SHA
 using Printf: @printf, @sprintf
 
@@ -654,9 +654,9 @@ function MixedPeriodicLink(dim::Integer,slave_entity::Integer,
     transform=if affine===nothing
         nothing
     else
-        _,_,row_major=_transform_homogeneous(
+        _,_,stored=_periodic_affine_input(
             affine,"MixedPeriodicLink";name="affine transform")
-        row_major
+        stored
     end
     return MixedPeriodicLink(
         _OWNED_MIXED_PERIODIC_LINK,dimension,slave,master,transform,slaves,masters)
@@ -1596,8 +1596,9 @@ function _assert_mixed_periodic_links(m::MixedMesh,context::AbstractString)
             end
         end
         if link.affine!==nothing
-            _transform_homogeneous(
-                link.affine,context;name="periodic link $index affine transform")
+            _periodic_affine_input(
+                link.affine,context;
+                name="periodic link $index affine transform")
         end
         total_pairs=try Base.checked_add(total_pairs,length(link.slave_nodes)) catch err
             err isa InterruptException && rethrow()

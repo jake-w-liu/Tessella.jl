@@ -31,7 +31,8 @@ using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_collapsed
 using ..Transfinite: mesh_transfinite_patch
-using ..Transform: _affine_coordinate, _transform_homogeneous
+using ..Transform: _affine_coordinate, _transform_homogeneous,
+    _periodic_affine_3x4, _periodic_affine_input
 using ..Predicates: orient2, orient3
 using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm_atan2, _gm_pow, _gm_sincos
@@ -70,15 +71,18 @@ export mesh_model_surface, mesh_model_volume, model_entity, model_physical_tags
 
 """
 Owned affine relation between two native entities. `affine` maps the master
-entity to the slave entity in Gmsh row-major 4×4 order. For dimension 1,
-`reversed` records whether the master start maps to the slave end; it is false
-for dimension 2.
+entity to the slave entity in Gmsh row-major 4×4 order; it is `nothing` for a
+dimension-1 relation declared without a transform (Gmsh's orientation-only
+`Periodic Curve {slave} = {master}` form, serialized as a zero-row MSH affine
+record). For dimension 1, `reversed` records whether the master start maps to
+the slave end — inferred from the signed tags for transform-free relations and
+from endpoint geometry otherwise; it is false for dimension 2.
 """
 struct ModelPeriodicConstraint
     dim::Int
     slave_entity::Int32
     master_entity::Int32
-    affine::NTuple{16,Float64}
+    affine::Union{Nothing,NTuple{16,Float64}}
     reversed::Bool
     atol::Float64
 end
@@ -511,11 +515,23 @@ function add_line!(m::GeoModel, a, b; tag::Integer=0, _zero_literal::Bool=false)
     return t
 end
 
+# Periodic slave/master lists may carry signs: for a transform-free curve
+# relation Gmsh derives the orientation from `sign(slave*master)`, and every
+# lookup resolves `abs(tag)` (`addPeriodicEdge`/`addPeriodicFace`).
+function _periodic_signed_tag(value,caller::AbstractString,name::AbstractString)
+    value isa Integer || throw(ArgumentError(
+        "$caller: $name tag must be an integer"))
+    value isa Bool && throw(ArgumentError("$caller: $name tag must not be Bool"))
+    (-typemax(Int32)<=value<=typemax(Int32)) || throw(ArgumentError(
+        "$caller: $name tag magnitude exceeds Int32"))
+    return Int(value)
+end
+
 function _periodic_entity_tags(values,dim::Int,caller::AbstractString,
                                name::AbstractString)
     (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
         "$caller: $name entities must be a vector or tuple"))
-    return Int[_tag(value,caller,dim) for value in values]
+    return Int[_periodic_signed_tag(value,caller,name) for value in values]
 end
 
 function _model_periodic_tolerance(value,caller::AbstractString)
@@ -644,8 +660,6 @@ function _model_periodic_surface_topology(
     function curve_signatures(curves,map)
         signatures=NTuple{2,Int}[]
         for curve in curves
-            _model_require_line_curve(m,curve,caller,
-                                      "periodic surface correspondence")
             first_point,second_point=m.curves[curve]
             first_mapped=map[first_point];second_mapped=map[second_point]
             push!(signatures,first_mapped<second_mapped ?
@@ -674,28 +688,161 @@ function _model_periodic_surface_point_map(
             "disjoint point tags"))
     length(slave_points)==length(master_points) || throw(ArgumentError(
         "$caller: Surface[$slave] and Surface[$master] point counts differ"))
-    coefficients,translation,_=_transform_homogeneous(
-        affine,caller;name="affine transform")
-    available=Set(slave_points)
+    coefficients,translation=_periodic_affine_3x4(affine)
     point_map=Dict{Int,Int}()
+    mapped_slaves=Set{Int}()
     for (index,master_point) in pairs(master_points)
         expected=_model_affine_point(
             coefficients,translation,m.points[master_point],caller,index)
-        matches=Int[slave_point for slave_point in available
-                    if _model_point_distance(m.points[slave_point],expected)<=atol]
-        length(matches)==1 || throw(ArgumentError(
-            "$caller: affine image of Point[$master_point] on Surface[$master] " *
-            "matches $(length(matches)) points on Surface[$slave]; expected one"))
-        slave_point=only(matches)
+        # `GFace::setMeshMaster` scans the slave vertex set in tag order and
+        # keeps the first point inside `geom.tolerance*lc` — coincident slave
+        # points are not an error until the bijection check below.
+        slave_point=0
+        dist_min=Inf
+        for candidate in slave_points
+            distance=_model_point_distance(m.points[candidate],expected)
+            dist_min=min(dist_min,distance)
+            if distance<atol
+                slave_point=candidate
+                break
+            end
+        end
+        slave_point==0 && throw(ArgumentError(
+            "$caller: no corresponding point $master_point for periodic " *
+            "connection of surface $master to $slave (min. distance = " *
+            "$dist_min, tolerance = $atol)"))
         point_map[master_point]=slave_point
-        delete!(available,slave_point)
+        push!(mapped_slaves,slave_point)
     end
-    isempty(available) || throw(ErrorException(
-        "$caller: internal periodic surface point matching was incomplete"))
+    length(mapped_slaves)==length(master_points) || throw(ArgumentError(
+        "$caller: could not find all point correspondences for the " *
+        "periodic connection from surface $master to $slave"))
     _model_periodic_surface_topology(
         m,slave,master,point_map,caller;
         include_embeddings=include_embeddings)
     return point_map
+end
+
+# `GFace::setMeshMaster(master, tfo)`'s induced-edge resolution: every slave
+# boundary edge (`l_edges`, in loop order) and embedded edge must resolve a
+# master counterpart through the vertex correspondence. Directed endpoint
+# signatures give the unique forward/backward match; several candidates
+# disambiguate by comparing the transformed parametric midpoint inside
+# `localbb.diag()*1e-3`, then the transformed sampled bounding box — the same
+# order and tolerances as upstream (`GEdge::bounds(true)` samples three
+# parameter points, `point(0.5*(low+high))` is the mid). `on_match(slave,
+# master)` fires per resolved edge, in upstream's multimap order — slave
+# edges sorted by their `(begin, end)` vertex tags, boundary before embedded
+# among equal keys — so the executor can emit Gmsh's `Setting curve master`
+# progress lines. Returns `(point_map, pairs)` where `pairs` lists
+# `slave_curve => master_curve` in that order.
+function _model_periodic_surface_edge_map(
+        m::GeoModel,slave::Int,master::Int,affine,atol::Float64,
+        caller::AbstractString;on_match=nothing)
+    function edge_order(surface::Int)
+        curves=Int[];seen=Set{Int}()
+        for loop in m.surfaces[surface],signed in m.loops[loop]
+            curve=abs(signed)
+            curve in seen || (push!(seen,curve);push!(curves,curve))
+        end
+        _,embedded=_model_surface_embedding_tags(m,surface,caller)
+        return vcat(curves,embedded)
+    end
+    slave_edges=edge_order(slave);master_edges=edge_order(master)
+    length(slave_edges)==length(master_edges) || throw(ArgumentError(
+        "$caller: different number of curves ($(length(slave_edges)) vs " *
+        "$(length(master_edges))) for periodic correspondence between " *
+        "surfaces $master and $slave"))
+    point_map=_model_periodic_surface_point_map(
+        m,slave,master,affine,atol,caller;include_embeddings=true)
+    slave_to_master=Dict{Int,Int}(slave_point=>master_point
+        for (master_point,slave_point) in point_map)
+    master_lookup=Dict{NTuple{2,Int},Vector{Int}}()
+    for curve in master_edges
+        endpoints=m.curves[curve]
+        push!(get!(Vector{Int},master_lookup,endpoints),curve)
+    end
+    coefficients,translation=_periodic_affine_3x4(affine)
+    # `localbb`/`localp` are computed once per slave edge upstream — lazily
+    # here since the unique-match path never consults them.
+    function slave_geometry(edge::Int)
+        midpoint=try
+            lower,upper=model_parametrization_bounds(m,1,edge)
+            _model_curve_point(
+                m,edge,0.5*(lower[1]+upper[1]),caller)
+        catch err
+            err isa InterruptException && rethrow()
+            nothing
+        end
+        return midpoint
+    end
+    function edge_bbox(edge::Int)
+        lower,upper=model_parametrization_bounds(m,1,edge)
+        corners=[_model_curve_point(
+            m,edge,lower[1]+(index-1)/2*(upper[1]-lower[1]),caller)
+                 for index in 1:3]
+        lo=ntuple(axis->minimum(point->point[axis],corners),3)
+        hi=ntuple(axis->maximum(point->point[axis],corners),3)
+        return lo,hi
+    end
+    pairs=Pair{Int,Int}[]
+    # The multimap orders by (begin, end) vertex tags; equal keys keep
+    # insertion order (boundary first, then embedded).
+    ordered_slave=sort(slave_edges;by=curve->m.curves[curve])
+    for curve in ordered_slave
+        s0,s1=m.curves[curve]
+        mb0=slave_to_master[s0];mb1=slave_to_master[s1]
+        forward_list=get(master_lookup,(mb0,mb1),Int[])
+        backward_list=get(master_lookup,(mb1,mb0),Int[])
+        master_curve=nothing
+        if length(forward_list)==1 && (isempty(backward_list) || mb0==mb1)
+            master_curve=forward_list[1]
+        elseif length(backward_list)==1 && (isempty(forward_list) || mb0==mb1)
+            master_curve=backward_list[1]
+        else
+            local_lo,local_hi=edge_bbox(curve)
+            tolerance=1e-3*_model_point_distance(local_lo,local_hi)
+            local_mid=slave_geometry(curve)
+            for candidates in (forward_list,backward_list)
+                master_curve===nothing || break
+                isempty(candidates) && continue
+                for candidate in candidates
+                    master_mid=try
+                        lower,upper=model_parametrization_bounds(m,1,candidate)
+                        point=_model_curve_point(
+                            m,candidate,0.5*(lower[1]+upper[1]),caller)
+                        _model_affine_point(
+                            coefficients,translation,point,caller,1)
+                    catch err
+                        err isa InterruptException && rethrow()
+                        nothing
+                    end
+                    if local_mid!==nothing && master_mid!==nothing &&
+                            _model_point_distance(local_mid,master_mid)<tolerance
+                        master_curve=candidate
+                        break
+                    end
+                    lo,hi=edge_bbox(candidate)
+                    mapped_lo=_model_affine_point(
+                        coefficients,translation,lo,caller,1)
+                    mapped_hi=_model_affine_point(
+                        coefficients,translation,hi,caller,1)
+                    if _model_point_distance(mapped_lo,local_lo)<tolerance &&
+                            _model_point_distance(mapped_hi,local_hi)<tolerance
+                        master_curve=candidate
+                        break
+                    end
+                end
+            end
+        end
+        master_curve===nothing && throw(ArgumentError(
+            "$caller: could not find counterpart of curve $curve with end " *
+            "points $s0 $s1 (corresponding to curve with end points " *
+            "$mb0 $mb1) in surface $master"))
+        on_match===nothing || on_match(curve,master_curve)
+        push!(pairs,curve=>master_curve)
+    end
+    return point_map,pairs
 end
 
 function _model_periodic_dependency_parents(
@@ -763,30 +910,81 @@ function _model_periodic_constraint_order(constraints,caller::AbstractString)
         constraint.slave_entity))
 end
 
+# `GEdge::setMeshMaster(ge, tfo)`'s endpoint test: transform the master
+# endpoints by the affine and compare them with the slave endpoints both
+# forward and reversed. Returns `(reversed, mismatch)` — `reversed` is
+# `nothing` when neither assignment fits inside `tolerance` (upstream drops the
+# relation with an Info diagnostic in that case).
+function _model_periodic_curve_orientation(
+        m::GeoModel,slave::Int,master::Int,coefficients,translation,
+        tolerance::Float64,caller::AbstractString,index::Int=1)
+    slave_points=m.curves[slave];master_points=m.curves[master]
+    slave_start=m.points[slave_points[1]]
+    slave_stop=m.points[slave_points[2]]
+    mapped_start=_model_affine_point(
+        coefficients,translation,m.points[master_points[1]],caller,index)
+    mapped_stop=_model_affine_point(
+        coefficients,translation,m.points[master_points[2]],caller,index+1)
+    # `GEdge::setMeshMaster`'s distance names: `d01` is slave start against
+    # the transformed master end and `d10` slave end against the transformed
+    # master start — the Info diagnostic reports them in that order.
+    d00=_model_point_distance(mapped_start,slave_start)
+    d11=_model_point_distance(mapped_stop,slave_stop)
+    d01=_model_point_distance(mapped_stop,slave_start)
+    d10=_model_point_distance(mapped_start,slave_stop)
+    # `GEdge::setMeshMaster` tries the forward correspondence first, then the
+    # reversed one; a symmetric transform resolving both directions always
+    # stays forward. On mismatch its Info reports the endpoint distances of
+    # the direction preferred by the `d00*d11 < d01*d10` product comparison.
+    # Both comparisons are strict like upstream's `d.norm() < tol`.
+    reversed=if d00<tolerance && d11<tolerance
+        false
+    elseif d01<tolerance && d10<tolerance
+        true
+    else
+        nothing
+    end
+    distances=d00*d11<d01*d10 ? (d00,d11) : (d01,d10)
+    return (reversed=reversed,mismatch=max(distances...),distances=distances)
+end
+
 """
     set_periodic!(model, dim, slave_entities, master_entities, affine;
                   atol=1e-12)
 
 Persist affine relations between equally sized lists of straight native curves
 (`dim=1`), planar native surfaces (`dim=2`), or native volumes (`dim=3`).
-`affine` maps each master entity to its slave in Gmsh row-major 4×4 order. An
-entity may be the master of multiple relations or both a slave and a master in
-an acyclic dependency chain; each slave has exactly one master. Cycles are
+`affine` maps each master entity to its slave in Gmsh row-major 4×4 order —
+a 16-entry vector or 4×4 matrix is stored verbatim like
+`GEntity::setMeshMaster` (only the first twelve entries are ever applied), a
+12-entry vector pads to the canonical homogeneous row.
+Entity tags may be signed — lookups resolve `abs(tag)` like Gmsh's
+`addPeriodicEdge`/`addPeriodicFace`. For `dim=1`, `affine` may be `nothing`,
+recording Gmsh's orientation-only `Periodic Curve {slave} = {master}` relation:
+each pair's `reversed` flag is then `sign(slave_tag*master_tag) < 0` and no
+geometric endpoint check runs, matching `GEdge::setMeshMaster(source, ori)`.
+An entity may be the master of multiple relations or both a slave and a master
+in an acyclic dependency chain; each slave has exactly one master. Cycles are
 explicit blockers. Periodic curves must belong to the same planar surface when
-meshed. Periodic surfaces require disjoint, affine-equivalent boundary point and
-loop topology; embedded topology is rechecked when an explicit planar-shell
-volume is meshed. Periodic volumes are stored and reported as in Gmsh 4.15.2,
-where the relation is likewise accepted without constraining the interior mesh
-or adding periodic records — volume correspondence is carried entirely by the
-periodic boundary entities. The update is atomic.
+meshed. Periodic surfaces require disjoint, affine-equivalent boundary point
+and loop topology; embedded topology is rechecked when an explicit planar-shell
+volume is meshed. Periodic volumes are stored and reported as a Tessella
+extension — Gmsh exposes no volume periodicity through either its `.geo`
+grammar or `gmsh.model.mesh.setPeriodic` — and constrain no interior mesh:
+volume correspondence is carried entirely by the periodic boundary entities.
+The update is atomic. `overwrite=true` mirrors `.geo` redeclaration — like
+upstream's `setMeshMaster`, a repeated slave tag silently replaces its stored
+relation instead of raising.
 """
 function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
-                       atol=1e-12)
+                       atol=1e-12,overwrite::Bool=false)
     caller="set_periodic!"
     d=_dimension(dim,caller)
     d in (1,2,3) || throw(ArgumentError(
         "$caller: only Curve, Surface, and Volume periodicity " *
         "(dimensions 1, 2, and 3) are implemented"))
+    affine===nothing && d!=1 && throw(ArgumentError(
+        "$caller: only dimension-1 relations may omit the affine transform"))
     label=_model_periodic_entity_label(d)
     slaves=_periodic_entity_tags(slave_entities,d,caller,"slave")
     masters=_periodic_entity_tags(master_entities,d,caller,"master")
@@ -794,17 +992,27 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
         "$caller: slave and master entity counts differ"))
     isempty(slaves) && throw(ArgumentError(
         "$caller: need at least one slave/master $label pair"))
-    length(unique(slaves))==length(slaves) || throw(ArgumentError(
+    abs_slaves=abs.(slaves)
+    length(unique(abs_slaves))==length(abs_slaves) || throw(ArgumentError(
         "$caller: slave $label tags must be unique"))
-    overlap=sort!(Int[slave for slave in slaves
+    overlap=sort!(Int[slave for slave in abs_slaves
                       if haskey(m.periodic,(d,slave))])
-    isempty(overlap) || throw(ArgumentError(
+    # `.geo` redeclaration replaces a slave's relation like upstream's
+    # `setMeshMaster` — `overwrite` skips the uniqueness check and the write
+    # phase below replaces the stored constraint atomically.
+    (overwrite || isempty(overlap)) || throw(ArgumentError(
         "$caller: $label[$(first(overlap))] already has a periodic master"))
     tolerance=_model_periodic_tolerance(atol,caller)
-    coefficients,translation,row_major=_transform_homogeneous(
-        affine,caller;name="affine transform")
+    coefficients=translation=nothing
+    stored_affine=nothing
+    if affine!==nothing
+        coefficients,translation,stored_affine=_periodic_affine_input(
+            affine,caller;name="affine transform")
+    end
     pending=ModelPeriodicConstraint[]
-    for (pair_index,(slave,master)) in enumerate(zip(slaves,masters))
+    for (pair_index,(signed_slave,signed_master)) in
+            enumerate(zip(slaves,masters))
+        slave=abs(signed_slave);master=abs(signed_master)
         entities=d==1 ? m.curves : d==2 ? m.surfaces : m.volumes
         haskey(entities,slave) || throw(ArgumentError(
             "$caller: unknown slave $label[$slave]"))
@@ -814,40 +1022,46 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
             "$caller: slave and master $label tags must differ"))
         reversed=false
         if d==1
-            _model_curve_length(m,slave,caller)
-            _model_curve_length(m,master,caller)
-            slave_points=m.curves[slave];master_points=m.curves[master]
-            isempty(intersect(Set(slave_points),Set(master_points))) ||
-                throw(ArgumentError(
-                    "$caller: Curve[$slave] and Curve[$master] must have " *
-                    "disjoint endpoints"))
-            slave_start=m.points[slave_points[1]]
-            slave_stop=m.points[slave_points[2]]
-            mapped_start=_model_affine_point(
-                coefficients,translation,m.points[master_points[1]],caller,
-                2pair_index-1)
-            mapped_stop=_model_affine_point(
-                coefficients,translation,m.points[master_points[2]],caller,
-                2pair_index)
-            forward=max(_model_point_distance(mapped_start,slave_start),
-                        _model_point_distance(mapped_stop,slave_stop))
-            reverse_error=max(_model_point_distance(mapped_start,slave_stop),
-                              _model_point_distance(mapped_stop,slave_start))
-            mismatch=min(forward,reverse_error)
-            mismatch<=tolerance || throw(ArgumentError(
-                "$caller: affine map misses slave Curve[$slave] endpoints " *
-                "by $mismatch"))
-            reversed=reverse_error<forward
+            if coefficients===nothing
+                # Gmsh's orientation-only path (`GEdge::setMeshMaster(source,
+                # ori)`): no geometric check at all — `masterOrientation` is
+                # the sign of `iSource*iTarget` and parameter correspondence
+                # does the rest at mesh time.
+                reversed=signed_slave*signed_master<0
+            else
+                _model_curve_length(m,slave,caller)
+                _model_curve_length(m,master,caller)
+                slave_points=m.curves[slave];master_points=m.curves[master]
+                isempty(intersect(Set(slave_points),Set(master_points))) ||
+                    throw(ArgumentError(
+                        "$caller: Curve[$slave] and Curve[$master] must " *
+                        "have disjoint endpoints"))
+                orientation=_model_periodic_curve_orientation(
+                    m,slave,master,coefficients,translation,tolerance,caller,
+                    2pair_index-1)
+                orientation.reversed===nothing && throw(ArgumentError(
+                    "$caller: affine map misses slave Curve[$slave] endpoints " *
+                    "by $(orientation.mismatch)"))
+                reversed=orientation.reversed
+            end
         elseif d==2
-            _model_periodic_surface_point_map(
-                m,slave,master,row_major,tolerance,caller;
-                include_embeddings=false)
+            # Upstream's `GFace::setMeshMaster` resolves the full vertex and
+            # (boundary + embedded) edge correspondence at declaration time
+            # and stores the induced curve masters — a slave edge without a
+            # counterpart aborts the whole relation.
+            _model_periodic_surface_edge_map(
+                m,slave,master,stored_affine,tolerance,caller)
         end
         push!(pending,ModelPeriodicConstraint(
-            d,Int32(slave),Int32(master),row_major,reversed,tolerance))
+            d,Int32(slave),Int32(master),stored_affine,reversed,tolerance))
     end
-    _model_periodic_dependency_parents(
-        vcat(model_periodic_constraints(m),pending),caller)
+    existing=model_periodic_constraints(m)
+    isempty(overlap) ||
+        filter!(existing) do constraint
+            !((constraint.dim,Int(constraint.slave_entity)) in
+              Set((d,slave) for slave in overlap))
+        end
+    _model_periodic_dependency_parents(vcat(existing,pending),caller)
     for constraint in pending
         m.periodic[(constraint.dim,Int(constraint.slave_entity))]=constraint
     end
@@ -2509,8 +2723,10 @@ end
 
 function _model_mapping_matches(mesh::Mesh,constraint::ModelPeriodicConstraint,
                                 mapping,caller::AbstractString;exact::Bool)
-    coefficients,translation,_=_transform_homogeneous(
-        constraint.affine,caller;name="stored affine transform")
+    # Orientation-only curve relations carry no affine: the node pairing is
+    # parameter-based and was already verified while the mapping was built.
+    constraint.affine===nothing && return true
+    coefficients,translation=_periodic_affine_3x4(constraint.affine)
     for (master_node,slave_node) in zip(mapping.master_nodes,
                                         mapping.slave_nodes)
         master=(mesh.coords[1,master_node],mesh.coords[2,master_node],
@@ -2535,6 +2751,9 @@ function _snap_surface_periodic(m::GeoModel,mesh::Mesh,constraints,
     ordered=_model_periodic_constraint_order(constraints,caller)
     for constraint in ordered
         mapping=_model_periodic_nodes(m,output,constraint)
+        # Orientation-only relations have no transform to snap with; the
+        # synchronized parameters already pair the nodes on their own curves.
+        constraint.affine===nothing && continue
         output=periodic_identify_affine(
             output,constraint.affine,mapping.master_nodes,mapping.slave_nodes;
             atol=constraint.atol)
@@ -2750,7 +2969,7 @@ end
 function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
                                           constraints,caller::AbstractString)
     curve_links=MixedPeriodicLink[]
-    outgoing=Dict{Int,Vector{Tuple{Int,NTuple{16,Float64}}}}()
+    outgoing=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
     indegree=Dict{Int,Int}()
     periodic_points=Set{Int}()
     for constraint in constraints
@@ -2776,7 +2995,7 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
             ((slave_start,master_start),(slave_stop,master_stop))
         for (slave_point,master_point) in endpoint_pairs
             push!(periodic_points,slave_point);push!(periodic_points,master_point)
-            edges=get!(Vector{Tuple{Int,NTuple{16,Float64}}},
+            edges=get!(Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}},
                        outgoing,master_point)
             edge=(slave_point,constraint.affine)
             if !(edge in edges)
@@ -2787,14 +3006,17 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
         end
     end
     for edges in values(outgoing)
-        sort!(edges;by=edge->(edge[1],edge[2]))
+        # `nothing` affines compare against tuples through `isless` — map them
+        # to a shared sentinel so a corner carrying mixed orientation-only
+        # and transform relations still sorts deterministically.
+        sort!(edges;by=edge->(edge[1],edge[2]===nothing ? () : edge[2]))
     end
 
     # MSH periodic metadata permits only one relation per slave entity. Choose
     # a deterministic directed spanning forest through shared periodic corners,
     # matching Gmsh's endpoint-link convention without discarding curve links.
     visited=Set{Int}()
-    parents=Dict{Int,Tuple{Int,NTuple{16,Float64}}}()
+    parents=Dict{Int,Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}()
     roots=sort!(Int[point for point in periodic_points
                     if get(indegree,point,0)==0])
     append!(roots,sort!(collect(setdiff(periodic_points,Set(roots)))))
@@ -2806,7 +3028,7 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
             master_point=queue[head];head+=1
             for (slave_point,affine) in get(
                     outgoing,master_point,
-                    Tuple{Int,NTuple{16,Float64}}[])
+                    Tuple{Int,Union{Nothing,NTuple{16,Float64}}}[])
                 slave_point in visited && continue
                 push!(visited,slave_point)
                 parents[slave_point]=(master_point,affine)
@@ -3381,18 +3603,39 @@ function _model_periodic_surface_mesh(
             "$caller: Surface[$master] has multiple point tags at $key"))
         coordinate_points[key]=point
     end
+    coefficients,translation=_periodic_affine_3x4(constraint.affine)
     output_coordinates=Matrix{Float64}(undef,3,nnodes(master_mesh))
     for node in 1:nnodes(master_mesh)
         key=ntuple(axis->_model_projection_coordinate_key(
             master_mesh.coords[axis,node]),3)
         master_point=get(coordinate_points,key,nothing)
-        master_point===nothing && throw(ErrorException(
-            "$caller: periodic master Surface[$master] mesh introduced " *
-            "an unmapped node at $key"))
-        slave_point=point_map[master_point]
-        output_coordinates[:,node].=m.points[slave_point]
+        if master_point===nothing
+            # Interior and edge nodes take the transform image, like
+            # upstream's per-vertex `SPoint3::transform` copy.
+            output_coordinates[:,node].=_model_affine_point(
+                coefficients,translation,
+                (master_mesh.coords[1,node],master_mesh.coords[2,node],
+                 master_mesh.coords[3,node]),caller,node)
+        else
+            slave_point=point_map[master_point]
+            output_coordinates[:,node].=m.points[slave_point]
+        end
     end
-    output=Mesh(output_coordinates;tris=master_mesh.tris)
+    tris=master_mesh.tris
+    coefficients_det=coefficients[1]*(coefficients[5]*coefficients[9]-
+        coefficients[6]*coefficients[8])-
+        coefficients[4]*(coefficients[2]*coefficients[9]-
+        coefficients[3]*coefficients[8])+
+        coefficients[7]*(coefficients[2]*coefficients[6]-
+        coefficients[3]*coefficients[5])
+    if coefficients_det<0
+        # A mirrored transform flips triangle winding; swapping two vertices
+        # keeps the copied mesh positively oriented.
+        flipped=Matrix{Int32}(undef,3,size(tris,2))
+        flipped[1,:].=tris[1,:];flipped[2,:].=tris[3,:];flipped[3,:].=tris[2,:]
+        tris=flipped
+    end
+    output=Mesh(output_coordinates;tris=tris)
     diagnostic=validate(output)
     diagnostic.ok || throw(ArgumentError(
         "$caller: synchronized periodic Surface[$slave] mesh is invalid — " *
@@ -3539,8 +3782,7 @@ function _model_affine_node_pairs(
         "[$(constraint.slave_entity)] and " *
         "$(_model_periodic_entity_label(constraint.dim))" *
         "[$(constraint.master_entity)] node counts differ"))
-    coefficients,translation,_=_transform_homogeneous(
-        constraint.affine,caller;name="stored affine transform")
+    coefficients,translation=_periodic_affine_3x4(constraint.affine)
     slave_x=Float64[mesh.coords[1,node] for node in slave_nodes]
     used=Set{Int}()
     mapped_slaves=Vector{Int32}(undef,length(master_nodes))
@@ -3803,46 +4045,24 @@ function _model_periodic_surface_boundary_maps(
     m::GeoModel,constraint::ModelPeriodicConstraint,caller::AbstractString)
     slave=Int(constraint.slave_entity)
     master=Int(constraint.master_entity)
-    point_map=_model_periodic_surface_point_map(
-        m,slave,master,constraint.affine,constraint.atol,caller;
-        include_embeddings=false)
-    slave_curves=_model_projection_surface_curves(m,slave)
-    master_curves=_model_projection_surface_curves(m,master)
-    length(slave_curves)==length(master_curves) || throw(ArgumentError(
-        "$caller: periodic surfaces have different boundary-curve counts"))
-    slave_signatures=Dict{NTuple{2,Int},Int}()
-    for curve in slave_curves
-        _model_require_line_curve(m,curve,caller,
-                                  "periodic surface correspondence")
-        first_point,second_point=m.curves[curve]
-        signature=first_point<second_point ?
-            (first_point,second_point) : (second_point,first_point)
-        haskey(slave_signatures,signature) && throw(ArgumentError(
-            "$caller: Surface[$slave] repeats boundary edge $signature"))
-        slave_signatures[signature]=curve
+    # The declaration-time resolver already applied `GFace::setMeshMaster`'s
+    # correspondence rules (boundary and embedded edges alike); reuse it so
+    # projection sees the same induced pairs the declaration validated.
+    point_map,pairs=_model_periodic_surface_edge_map(
+        m,slave,master,constraint.affine,constraint.atol,caller)
+    curve_map=Dict{Int,Int}(master_curve=>slave_curve
+                          for (slave_curve,master_curve) in pairs)
+    # Upstream's dim-0 records exist only for vertices that are endpoints of
+    # a resolved curve — `GEdge::setMeshMaster` sets vertex masters there.
+    # Standalone embedded points enter `point_map` for the correspondence
+    # check but carry no vertex master, so they emit no point link.
+    endpoints=Set{Int}()
+    for (slave_curve,_) in pairs
+        union!(endpoints,m.curves[slave_curve])
     end
-    curve_map=Dict{Int,Int}()
-    used=Set{Int}()
-    for master_curve in master_curves
-        _model_require_line_curve(m,master_curve,caller,
-                                  "periodic surface correspondence")
-        first_point,second_point=m.curves[master_curve]
-        first_mapped=point_map[first_point]
-        second_mapped=point_map[second_point]
-        signature=first_mapped<second_mapped ?
-            (first_mapped,second_mapped) :
-            (second_mapped,first_mapped)
-        slave_curve=get(slave_signatures,signature,nothing)
-        slave_curve===nothing && throw(ArgumentError(
-            "$caller: affine image of Curve[$master_curve] has no boundary " *
-            "curve on Surface[$slave]"))
-        slave_curve in used && throw(ArgumentError(
-            "$caller: multiple master curves map to Curve[$slave_curve]"))
-        curve_map[master_curve]=slave_curve
-        push!(used,slave_curve)
-    end
-    length(used)==length(slave_curves) || throw(ErrorException(
-        "$caller: internal periodic boundary-curve matching was incomplete"))
+    point_map=Dict{Int,Int}(master_point=>slave_point
+        for (master_point,slave_point) in point_map
+        if slave_point in endpoints)
     return point_map,curve_map
 end
 
@@ -4914,6 +5134,24 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         "$caller: max_periodic_passes must be in 1:64"))
     npasses=Int(max_periodic_passes)
     constraints=_surface_periodic_constraints(m,t,caller)
+    # A slave surface takes its master's mesh verbatim, like upstream's
+    # meshGFace copy path — the master is meshed on demand so the relation
+    # holds even when the caller never meshed it directly.
+    surface_constraint=nothing
+    for constraint in model_periodic_constraints(m)
+        constraint.dim==2 && Int(constraint.slave_entity)==t || continue
+        surface_constraint=constraint
+        break
+    end
+    if surface_constraint!==nothing
+        master_mesh=mesh_model_surface(
+            m,Int(surface_constraint.master_entity);
+            min_angle_deg=min_angle_deg,
+            max_periodic_passes=max_periodic_passes,size_field=size_field)
+        output=_model_periodic_surface_mesh(
+            m,master_mesh,surface_constraint,caller)
+        return output
+    end
     forced=Dict{Int,Vector{Float64}}()
     param_sizes=_attribute_forced_parameters(m,t,forced,caller)
     mesh=nothing;embedded=NTuple{2,Int}[]

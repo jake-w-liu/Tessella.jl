@@ -55,7 +55,7 @@ using ..Model: set_entity_name!, remove_entity_name!, model_entity_name, model_s
 using ..Model: remove_entities!
 using ..Model: set_periodic!, model_periodic_nodes, _model_affine_point,
               _model_cross3
-using ..Transform: _transform_homogeneous
+using ..Transform: _transform_homogeneous, _periodic_affine_3x4
 using ..Model: mesh_model_surface, mesh_model_volume, model_to_mixed,
               _model_planar_surface_mesh
 using ..Model: _model_entity_known, _model_fresh_element_tag,
@@ -6072,25 +6072,30 @@ function _get_periodic_keys(element_type,function_space_type,tag,
                                   cached.coords[3,node])]=Int32(node)
                 end
             end
-            coefficients,translation,_=_transform_homogeneous(
-                constraint.affine,caller;name="periodic affine transform")
-            for nodes in incidences
-                for node in nodes
-                    haskey(pairing,node) && continue
-                    value=_mesh_node_coords(m,cached,node)
-                    value===nothing && continue
-                    mapped=_model_affine_point(
-                        coefficients,translation,value,caller,Int(node))
-                    best=Int32(0);best_distance=Inf
-                    for (mc,mtag) in master_nodes
-                        distance=sum(k->(mc[k]-mapped[k])^2,1:3)
-                        if distance<best_distance
-                            best_distance=distance;best=mtag
+            # An orientation-only curve relation has no transform: the
+            # parametric pairing from `model_periodic_nodes` is complete and
+            # unpaired incidences fall back to identity keys like upstream.
+            if constraint.affine!==nothing
+                coefficients,translation=_periodic_affine_3x4(
+                    constraint.affine)
+                for nodes in incidences
+                    for node in nodes
+                        haskey(pairing,node) && continue
+                        value=_mesh_node_coords(m,cached,node)
+                        value===nothing && continue
+                        mapped=_model_affine_point(
+                            coefficients,translation,value,caller,Int(node))
+                        best=Int32(0);best_distance=Inf
+                        for (mc,mtag) in master_nodes
+                            distance=sum(k->(mc[k]-mapped[k])^2,1:3)
+                            if distance<best_distance
+                                best_distance=distance;best=mtag
+                            end
                         end
+                        paired=best_distance<=max(constraint.atol^2,1e-18) ?
+                               best : nothing
+                        pairing[node]=paired===nothing ? node : paired
                     end
-                    paired=best_distance<=max(constraint.atol^2,1e-18) ?
-                           best : nothing
-                    pairing[node]=paired===nothing ? node : paired
                 end
             end
         end

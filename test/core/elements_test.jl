@@ -2998,14 +2998,17 @@ end
         1,2,1,[1,2],[3,3];affine=identity)
     @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
         1,2,1,[1],[2,3];affine=identity)
-    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
-        1,2,1,[1],[2];affine=zeros(4,4))
+    # Gmsh's `GEntity::setMeshMaster` stores the transform verbatim — a
+    # singular or non-homogeneous fourth row round-trips as written.
+    @test ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1],[2];affine=zeros(4,4)).affine==ntuple(_->0.0,16)
     nonfinite=copy(identity);nonfinite[1,1]=Inf
     @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
         1,2,1,[1],[2];affine=nonfinite)
     projective=copy(identity);projective[4,1]=1
-    @test_throws ArgumentError ElementsUnderTest.MixedPeriodicLink(
-        1,2,1,[1],[2];affine=projective)
+    @test ElementsUnderTest.MixedPeriodicLink(
+        1,2,1,[1],[2];affine=projective).affine==
+        (1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 1.0,0.0,0.0,1.0)
 
     @test_throws ArgumentError periodic_v4_fixture(
         links=[mesh.periodic_links[1],mesh.periodic_links[1]])

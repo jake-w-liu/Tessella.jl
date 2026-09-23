@@ -11,7 +11,7 @@ straight-curve relations separately.
 module Periodic
 
 using ..MeshTypes: Mesh, nnodes, validate
-using ..Transform: _affine_coordinate, _transform_homogeneous
+using ..Transform: _affine_coordinate, _periodic_affine_input
 
 export periodic_identify, periodic_identify_affine
 
@@ -111,7 +111,7 @@ function _periodic_output(mesh::Mesh,slaves::Vector{Int},
 end
 
 function _periodic_affine(raw,caller::AbstractString)
-    coefficients,translation,_=_transform_homogeneous(raw,caller)
+    coefficients,translation,=_periodic_affine_input(raw,caller)
     return coefficients,translation
 end
 
