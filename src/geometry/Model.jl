@@ -154,6 +154,17 @@ mutable struct ModelMeshingAttributes
     quad_tri::Set{Int}
     order::Int
     transfinite_tri::Int
+    # Generation-scoped mesh options mirrored into the model at mesh time
+    # (upstream reads them from global `CTX` state): `Mesh.FlexibleTransfinite`
+    # makes transfinite curve counts scale by `1/lcFactor`, `lc_factor` is
+    # `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` (one upstream
+    # option under two names), `recombine_all`/`recombine_algo` are
+    # `Mesh.RecombineAll`/`Mesh.RecombinationAlgorithm` — together they drive
+    # meshGEdge's odd-count forcing for recombined boundaries.
+    flexible_transfinite::Bool
+    lc_factor::Float64
+    recombine_all::Bool
+    recombine_algo::Int
     attached::Dict{Tuple{Int,Int},DiscreteEntity}
     homology_requests::Vector{NamedTuple{(:kind,:domain,:subdomain,:dims),
         Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}}
@@ -178,6 +189,10 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Set{Int}(),
     1,
     0,
+    false,
+    1.0,
+    false,
+    1,
     Dict{Tuple{Int,Int},DiscreteEntity}(),
     NamedTuple{(:kind,:domain,:subdomain,:dims),
                Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}[])
@@ -5307,7 +5322,10 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
         spec===nothing && throw(ArgumentError(
             "$caller: transfinite Volume[$t] requires boundary " *
             "Curve[$curve] to be transfinite"))
-        return spec.num_nodes-1
+        # Same `Mesh.FlexibleTransfinite` count adjustment the curve
+        # parameter path applies — the volume grid is sized by the meshed
+        # edge counts, not the stored declaration.
+        return _flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)-1
     end
     us=(edge_count(s[1],s[2]),edge_count(s[4],s[3]),
         edge_count(s[5],s[6]),edge_count(s[8],s[7]))

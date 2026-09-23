@@ -482,6 +482,10 @@ function _model_identity_meshing(
     migrated.quad_tri=quad_tri
     migrated.order=attributes.order
     migrated.transfinite_tri=attributes.transfinite_tri
+    migrated.flexible_transfinite=attributes.flexible_transfinite
+    migrated.lc_factor=attributes.lc_factor
+    migrated.recombine_all=attributes.recombine_all
+    migrated.recombine_algo=attributes.recombine_algo
     migrated.attached=_model_identity_discrete_map(
         attributes.attached,m,dimension,old_tag,new_tag)
     migrated.homology_requests=copy(attributes.homology_requests)

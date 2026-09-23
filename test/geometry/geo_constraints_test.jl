@@ -622,3 +622,80 @@ end
         """;mesh_dim=2)
     @test size(execution.mesh.coords,2)>0
 end
+
+@testset ".geo Mesh.FlexibleTransfinite" begin
+    # `Mesh.FlexibleTransfinite` divides transfinite curve node counts by
+    # `Mesh.CharacteristicLengthFactor` (upstream `meshGEdge`: `N /= lcFactor`,
+    # truncating). Counts verified against Gmsh 4.15.2: 11 -> 11/5/3.
+    flexible_square(options::AbstractString;count=11)=
+        _execute_constraint_source(_GEO_SQUARE * """
+            Transfinite Curve{:} = $count;
+            Transfinite Surface{1};
+            $options
+            """;mesh_dim=2)
+    @test size(flexible_square("Mesh.FlexibleTransfinite = 0;").mesh.coords,2)==121
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2;
+        """).mesh.coords,2)==25
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 3;
+        """).mesh.coords,2)==9
+    # `Mesh.MeshSizeFactor` is the same upstream option (`lcFactor`) under a
+    # second name — writes to either alias drive the division.
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.MeshSizeFactor = 2;
+        """).mesh.coords,2)==25
+    # Non-positive `lcFactor` writes are ignored upstream (`if(val > 0)` in
+    # `opt_mesh_lc_factor`), so the divisor stays 1.
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 0;
+        """).mesh.coords,2)==121
+    # Fractional factors truncate (`N /= lcFactor` on an int).
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2.9;
+        """).mesh.coords,2)==9
+    # `Recombine` on an adjacent face forces the reduced count odd so blossom
+    # can pair the boundary (12 -> 6 -> 7 per side); without the option the
+    # declared count is used unchanged.
+    @test size(flexible_square("""
+        Recombine Surface{1};
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2;
+        """;count=12).mesh.coords,2)==49
+    @test size(flexible_square("""
+        Recombine Surface{1};
+        Mesh.CharacteristicLengthFactor = 2;
+        """;count=12).mesh.coords,2)==144
+    # `Mesh.RecombinationAlgorithm = 0` disables the odd-count forcing.
+    @test size(flexible_square("""
+        Recombine Surface{1};
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2;
+        Mesh.RecombinationAlgorithm = 0;
+        """;count=12).mesh.coords,2)==36
+    # `Mesh.RecombineAll` forces odd counts without a per-surface flag.
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2;
+        Mesh.RecombineAll = 1;
+        """;count=12).mesh.coords,2)==49
+    # A factor that truncates the count below two clamps to the endpoint-only
+    # curve, matching Gmsh's degenerate corner grid (3 -> 1 -> 4 nodes).
+    @test size(flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2;
+        """;count=3).mesh.coords,2)==4
+    # The option state mirrors onto the model for `mesh_dim` generation.
+    execution=flexible_square("""
+        Mesh.FlexibleTransfinite = 1;
+        Mesh.CharacteristicLengthFactor = 2;
+        """)
+    @test execution.model.meshing.flexible_transfinite==true
+    @test execution.model.meshing.lc_factor==2.0
+    @test execution.model.meshing.recombine_algo==1
+end

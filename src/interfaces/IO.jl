@@ -3337,8 +3337,9 @@ function _geo_parse_primary!(parser::_GeoExprParser)
                 d=_geo_option_number(parser.context,name,index,member;
                     warn=true)
                 d===nothing && return 0.0
-                parser.context.option_numbers[(name,index,member)]=d+delta
-                return d+delta
+                _geo_store_option_number!(parser.context,name,index,member,
+                    d+delta,parser.caller)
+                return _geo_option_number(parser.context,name,index,member)
             end
             return _geo_member_number(parser.context,
                 something(resolved_ns,""),name,member,index,parser.caller)
@@ -3376,9 +3377,10 @@ function _geo_parse_primary!(parser::_GeoExprParser)
                     d=_geo_option_number(parser.context,name,opt_index,member;
                         warn=true)
                     d===nothing && return 0.0
-                    parser.context.option_numbers[(name,opt_index,member)]=
-                        d+delta
-                    return d+delta
+                    _geo_store_option_number!(parser.context,name,opt_index,
+                        member,d+delta,parser.caller)
+                    return _geo_option_number(parser.context,name,opt_index,
+                        member)
                 end
                 return _geo_option_number_read(parser.context,name,opt_index,
                     member,parser.caller)
@@ -7028,6 +7030,26 @@ function _geo_option_store_value(family::String,member::String,
         "$caller: unhandled option storage kind $kind for $family.$member"))
 end
 
+# `Mesh.MeshSizeFactor` and `Mesh.CharacteristicLengthFactor` are two names
+# for the single `CTX.mesh.lcFactor` (both DefaultOptions entries dispatch to
+# `opt_mesh_lc_factor`), so a write to either name mirrors into the other key.
+# The callback also ignores non-positive writes (`if(val > 0)`), which is
+# replicated by skipping the store entirely.
+function _geo_store_option_number!(context::_GeoNumericContext,
+                                   family::String,index::Int,
+                                   member::String,value::Float64,
+                                   caller::AbstractString)
+    v=_geo_option_store_value(family,member,value,caller)
+    if family=="Mesh" && index==0 &&
+       member in ("MeshSizeFactor","CharacteristicLengthFactor")
+        v>0 || return nothing
+        context.option_numbers[(family,index,member=="MeshSizeFactor" ?
+            "CharacteristicLengthFactor" : "MeshSizeFactor")]=v
+    end
+    context.option_numbers[(family,index,member)]=v
+    return nothing
+end
+
 function _geo_option_number_increment!(context::_GeoNumericContext,
                                        family::String,index::Int,
                                        member::String,delta::Float64,
@@ -7035,8 +7057,7 @@ function _geo_option_number_increment!(context::_GeoNumericContext,
     d=_geo_option_number(context,family,index,member)
     d===nothing && return _geo_option_number_unknown!(
         context,family,member,caller)
-    context.option_numbers[(family,index,member)]=
-        _geo_option_store_value(family,member,d+delta,caller)
+    _geo_store_option_number!(context,family,index,member,d+delta,caller)
     return nothing
 end
 
@@ -7049,8 +7070,7 @@ function _geo_set_option_number!(context::_GeoNumericContext,family::String,
     result=_geo_apply_numeric_op(operation,d,value,context,caller,
         index==0 ? "$family.$member" : "$family[$index].$member")
     result===nothing && return nothing
-    context.option_numbers[(family,index,member)]=
-        _geo_option_store_value(family,member,result,caller)
+    _geo_store_option_number!(context,family,index,member,result,caller)
     return nothing
 end
 
@@ -10061,7 +10081,11 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             if index==0
                 if key=="Mesh.MeshSizeMin";smin=value
                 elseif key=="Mesh.MeshSizeMax";smax=value
-                elseif key=="Mesh.MeshSizeFactor";sfactor=value
+                elseif key=="Mesh.MeshSizeFactor"
+                    # `opt_mesh_lc_factor` ignores non-positive writes — the
+                    # params surface sees the stored value, not the raw RHS.
+                    sfactor=something(_geo_option_number(
+                        context,"Mesh",0,"MeshSizeFactor"),1.0)
                 elseif key=="Mesh.RandomSeed";seed=_gmsh_random_seed(value)
                 elseif key=="Geometry.Tolerance";geometry_tolerance=value
                 elseif key=="Mesh.MeshSizeFromCurvature" ||

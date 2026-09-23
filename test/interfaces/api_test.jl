@@ -578,12 +578,27 @@ end
                        cached.coords[3,master])
             end
         end
-        @test_throws ArgumentError _API.mesh.set_periodic(1,[30],[10],(
+        # A cycle-closing declaration stores like upstream (`setMeshMaster`
+        # has no cycle check); the mesh cache invalidates on the constraint
+        # change and the next `generate` converges the cyclic parameter
+        # fixpoint, including the 30 -> 10 closing link at -0.6.
+        @test _API.mesh.set_periodic(1,[30],[10],(
             1.0,0.0,0.0,0.0,
             0.0,1.0,0.0,-0.6,
             0.0,0.0,1.0,0.0,
-            0.0,0.0,0.0,1.0))
-        @test mesh_crc(_API.mesh.get())==mesh_crc(cached)
+            0.0,0.0,0.0,1.0))===nothing
+        regen=_API.mesh.generate(2)
+        @test validate(regen).ok
+        recached=_API.mesh.get()
+        closing=_API.mesh.get_periodic_nodes(1,30)
+        @test closing.master_entity==10
+        @test length(closing.slave_nodes)==9
+        for (slave,master) in zip(closing.slave_nodes,
+                                  closing.master_nodes)
+            @test Tuple(recached.coords[:,slave])==
+                  (recached.coords[1,master],recached.coords[2,master]-0.6,
+                   recached.coords[3,master])
+        end
     finally
         _API.finalize()
     end
@@ -980,6 +995,48 @@ end
         free_point=m.add_point(0.25,0.25,0)
         _API.mesh.set_transfinite_surface(pin_face,"Left",[pa,pb,free_point])
         @test_throws ArgumentError _API.mesh.generate(2)
+    finally
+        _API.finalize()
+    end
+end
+
+@testset "API option Mesh.FlexibleTransfinite plumbing" begin
+    _API.finalize()
+    try
+        _API.initialize()
+        # Option surface: defaults, truncation, recombination clamp, and the
+        # `MeshSizeFactor`/`CharacteristicLengthFactor` single-field alias.
+        @test _API.option("Mesh.FlexibleTransfinite")==0.0
+        @test _API.option("Mesh.RecombineAll")==0.0
+        @test _API.option("Mesh.RecombinationAlgorithm")==1.0
+        @test _API.option("Mesh.CharacteristicLengthFactor")==1.0
+        @test _API.option("Mesh.FlexibleTransfinite",1)==1.0
+        @test _API.option("Mesh.FlexibleTransfinite")==1.0
+        @test _API.option("Mesh.RecombinationAlgorithm",9)==0.0
+        @test _API.option("Mesh.CharacteristicLengthFactor",2)==2.0
+        @test _API.option("Mesh.MeshSizeFactor")==2.0
+        @test _API.option("Mesh.MeshSizeFactor",3)==3.0
+        @test _API.option("Mesh.CharacteristicLengthFactor")==3.0
+        @test_throws ArgumentError _API.option("Mesh.CharacteristicLengthFactor",0.0)
+
+        m=_API.model
+        m.add_point(0,0,0);m.add_point(1,0,0);m.add_point(1,1,0);m.add_point(0,1,0)
+        m.add_line(1,2);m.add_line(2,3);m.add_line(3,4);m.add_line(4,1)
+        loop=m.add_curve_loop([1,2,3,4])
+        m.add_plane_surface([loop])
+        for c in 1:4
+            _API.mesh.set_transfinite_curve(c,11)
+        end
+        _API.mesh.set_transfinite_surface(1)
+        # FlexibleTransfinite=1 with lcFactor=3: 11 -> 3 nodes per side on
+        # the structured grid.
+        _API.mesh.generate(2)
+        nodes,_,_=_API.mesh.get_nodes()
+        @test length(nodes)==9
+        _API.option("Mesh.FlexibleTransfinite",0)
+        _API.mesh.generate(2)
+        nodes,_,_=_API.mesh.get_nodes()
+        @test length(nodes)==121
     finally
         _API.finalize()
     end

@@ -441,6 +441,9 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     # mesh-operation statements; the mesh_dim keyword still generates on
     # request.
     mesh=context.mesh
+    if dim in (2,3)
+        _geo_sync_meshing_options!(model,context)
+    end
     if dim==2
         isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
         length(model.surfaces)==1 || throw(ArgumentError(
@@ -4742,9 +4745,14 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
     elseif name=="Options"
         # `ReInitOptions` — restore the option-valued state `.geo` execution
         # tracks: mesh order, the transfinite-triangle flag, the extrude
-        # result-list behavior, and every tracked option write.
+        # result-list behavior, the generation-scoped option mirrors, and
+        # every tracked option write.
         m.meshing.order=1
         m.meshing.transfinite_tri=0
+        m.meshing.flexible_transfinite=false
+        m.meshing.lc_factor=1.0
+        m.meshing.recombine_all=false
+        m.meshing.recombine_algo=1
         context.extrude_return_lateral=true
         empty!(context.option_strings);empty!(context.option_numbers)
         empty!(context.option_colors)
@@ -6569,11 +6577,31 @@ end
 
 # ======== mid-file mesh commands (`Mesh n` and the mesh-operation family) =====
 
+# Generation-scoped `Mesh.*` options are upstream global CTX state read at
+# mesh time; mirror them into the model's meshing attributes before every
+# generation so `Mesh n` statements see the current option values. The
+# `MeshSizeFactor`/`CharacteristicLengthFactor` alias mirror in
+# `_geo_store_option_number!` keeps a single `lcFactor` visible under both
+# names, so reading either here picks up writes to the other.
+function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
+    m.meshing.flexible_transfinite=!iszero(something(
+        _geo_option_number(context,"Mesh",0,"FlexibleTransfinite"),0.0))
+    m.meshing.lc_factor=something(
+        _geo_option_number(context,"Mesh",0,"CharacteristicLengthFactor"),1.0)
+    m.meshing.recombine_all=!iszero(something(
+        _geo_option_number(context,"Mesh",0,"RecombineAll"),0.0))
+    m.meshing.recombine_algo=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"RecombinationAlgorithm"),1.0),
+        "execute_geo: Mesh.RecombinationAlgorithm")
+    return nothing
+end
+
 # `Mesh n;` — mesh every live entity up to `dim`, merging entity parts into a
 # single Mesh plus a node→(dim,tag) ownership map (lowest dimension wins, like
 # Gmsh's per-entity vertex storage).
 function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     caller="execute_geo: Mesh"
+    _geo_sync_meshing_options!(m,context)
     parts=Tuple{Int,Int,Mesh}[]
     if dim==1
         throw(ArgumentError(
