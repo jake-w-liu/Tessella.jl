@@ -51,14 +51,15 @@ using ..Model: _GeoExtrudeParams
 using ..Model: _affine_translation, _affine_dilation
 using ..Model: _affine_rotation, _affine_symmetry, _entity_label
 using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!, _has_entity,
-    _max_entity_physical_number
+    _max_entity_physical_number, _model_periodic_curve_orientation,
+    _model_periodic_surface_edge_map
 using ..Model: _model_boundary, _model_points_of, _model_direct_boundary
 using ..Model: _model_entity_dictionary, _model_entity_known, remove_embedded!
 using ..Model: model_entity, model_entities, model_entities_in_bounding_box
 using ..Model: model_physical_groups, _physical_live_members
 using ..Model: model_entity_color, model_parametrization_bounds, model_normal
 using ..Model: model_reparametrize_on_surface
-using ..Model: _model_entity_bounding_box, _model_bounds_union
+using ..Model: _model_entity_bounding_box, _model_bounds_union, _occ_geometry
 using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
 using ..Model: _tag, _alloc_tag!, _alloc_curve_loop_tag,
     _alloc_surface_loop_tag, _arc_stored_normal, _occ_cross
@@ -104,8 +105,8 @@ using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
 using ..IO: read_msh, write_msh
 using ..IO: _geo_gmsh_number
-using ..Transform: _affine_coordinate
-using LinearAlgebra: norm
+using ..Transform: _affine_coordinate, _periodic_affine_3x4
+using LinearAlgebra: norm, svd
 
 export execute_geo, GeoExecution
 
@@ -332,11 +333,19 @@ indexed or selected mutation. Entity-list positions expand whole or selected lis
 variables as well as constant ranges. Tags
 follow Gmsh's truncation toward zero into positive 32-bit values; oriented Curve and
 Surface Loop entries may instead be nonzero signed 32-bit values. `Periodic Line`,
-`Periodic Curve`, `Periodic Surface`, and `Periodic Volume` accept `Translate`,
-`Rotate`, and
-12- or 16-entry `.geo` `Affine` transforms. Curves must be straight and surfaces
-must be planar boundaries of one explicit volume; volume relations are stored
-but mesh-inert, as in Gmsh 4.15.2. Multiple periodic statements may
+`Periodic Curve`, and `Periodic Surface` accept `Translate`, `Rotate`, and
+`.geo` `Affine` transforms with the per-dimension arity rules Gmsh's parser
+applies (curves: an empty transform is the orientation-only form, 12–15 or
+>16 entries drop after the endpoint check; surfaces: 12+ entries zero-pad to
+the stored 16); the transform-free `Periodic Surface {s} = {m}` is rejected
+like upstream, and `Periodic Surface j {c} = k {c}` derives its transform
+from the mapped boundary vertices. `Periodic Volume` is not in Gmsh's
+grammar and is a `syntax error (Volume)` here; `set_periodic!` still stores
+volume relations as a Tessella extension. Affine curve relations require
+straight curves at declaration; orientation-only declarations are check-free
+like upstream and hold all curves to the straight-curve requirement at mesh
+time. Surfaces must be planar boundaries of one explicit volume when meshed.
+Multiple periodic statements may
 reuse a master or form an acyclic master/slave chain. Read-only `newp`, the shared
 curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the
 tracked explicit topology and supported full Box/Cylinder/Sphere/Cone/Torus
@@ -1681,21 +1690,6 @@ function _geo_exec_value_term(m::GeoModel,raw::AbstractString,
     boolean=_geo_exec_boolean_term(m,raw,context,allocator_state)
     boolean!==nothing && return boolean
     return _geo_exec_selector_term(m,raw,context,allocator_state)
-end
-
-function _geo_periodic_expressions(raw::AbstractString,count::Int,
-                                   context::_GeoNumericContext,
-                                   caller::AbstractString)
-    return _geo_exec_numeric_values(raw,count,context,caller)
-end
-
-function _geo_periodic_affine(raw::AbstractString,context::_GeoNumericContext,
-                              caller::AbstractString)
-    entries=_geo_exec_numeric_values(raw,context,caller)
-    length(entries) in (12,16) || throw(ArgumentError(
-        "$caller: expected 12 or 16 numeric values after list expansion"))
-    return length(entries)==12 ?
-        (entries...,0.0,0.0,0.0,1.0) : Tuple(entries)
 end
 
 function _geo_exec_numeric_values(raw::AbstractString,
@@ -3394,12 +3388,13 @@ function _geo_exec_entity_rhs_tags(raw::AbstractString,
         allow_empty=allow_empty)
 end
 
-# `Periodic` slave/master lists resolve through `abs` like every other
-# non-loop entity reference (`addPeriodicEdge`/`addPeriodicFace` abs both
-# operands); orientation is inferred geometrically by `set_periodic!`.
+# `Periodic` slave/master lists keep their signs: `addPeriodicEdge` resolves
+# entities through `abs(iTarget)`/`abs(iSource)` but derives the orientation of
+# a transform-free relation from `iSource * iTarget` — the signed values reach
+# `set_periodic!`, which does both.
 _geo_periodic_tags(raw::AbstractString,context::_GeoNumericContext,
                    caller::AbstractString)=
-    _geo_exec_entity_tags(raw,context,caller;abs_refs=true)
+    _geo_exec_entity_tags(raw,context,caller;signed=true)
 
 # Evaluate a Gmsh `VExpr` — `{a,b,c[,d[,e]]}` or `(a,b,c)` groups composed by
 # unary/binary `+`/`-` (`VExpr_Single` defaults components 4 and 5 to 0 and 1;
@@ -3555,15 +3550,13 @@ end
 
 function _geo_periodic_rotation(axis,origin,angle::Float64,
                                 caller::AbstractString)
-    axis_scale=max(abs(axis[1]),abs(axis[2]),abs(axis[3]))
-    axis_scale>0 || throw(ArgumentError(
-        "$caller: rotation axis must have positive length"))
-    scaled=(axis[1]/axis_scale,axis[2]/axis_scale,axis[3]/axis_scale)
-    scaled_length=hypot(scaled...)
-    (isfinite(scaled_length) && scaled_length>0) || throw(ArgumentError(
-        "$caller: rotation axis is not normalizable"))
-    x=scaled[1]/scaled_length;y=scaled[2]/scaled_length
-    z=scaled[3]/scaled_length
+    # Upstream's `computeAffineTransformation` plugs the raw axis components
+    # into Rodrigues' formula without normalizing: a non-unit axis yields a
+    # non-orthogonal map that the endpoint correspondence check then rejects,
+    # and a zero axis yields the `cos(angle)` uniform scale. Keeping the same
+    # arithmetic means Tessella's strict endpoint check rejects exactly the
+    # declarations upstream drops.
+    x,y,z=axis
     sine,cosine=sincos(angle);one_minus=1-cosine
     r11=muladd(x*x,one_minus,cosine)
     r12=muladd(x*y,one_minus,-z*sine)
@@ -3587,51 +3580,718 @@ function _geo_periodic_rotation(axis,origin,angle::Float64,
             0.0,0.0,0.0,1.0)
 end
 
+# `CTX::instance()->lc` as upstream's periodic actions see it. `addPeriodic*`
+# runs `GEO_Internals::synchronize` first, whose tail `SetBoundingBox()`
+# recomputes `lc` from `GModel::bounds()` — at `.geo` parse time entity
+# `mesh_vertices` are empty, so only `GVertex` positions (native points and
+# discrete vertices) plus OCC-native entity bounds feed the box — and
+# `FinishUpBoundingBox()` then expands every degenerate dimension. This is
+# deliberately not `_geo_exec_lc` (the raw `temp_bbox` diagonal): the periodic
+# tolerance follows the synchronized, expanded value.
+function _geo_periodic_lc(m::GeoModel,context::_GeoNumericContext)
+    caller="execute_geo: Periodic"
+    bounds=nothing
+    for point in values(m.points)
+        bounds=_geo_periodic_bounds_add(bounds,point)
+    end
+    for ((dimension,_),record) in m.discrete
+        dimension==0 && !isempty(record.node_coords) &&
+            (bounds=_geo_periodic_bounds_add(
+                bounds,record.node_coords[1:3,1]))
+    end
+    # Upstream's `bounds()` uses `entities[i]->bounds()` only for
+    # OpenCascadeModel natives; built-in entities contribute their (empty)
+    # mesh vertices. OCC-native curves carry `_occ_geometry`, OCC-native
+    # surfaces an `occ` record; an OCC volume's box is already covered by its
+    # OCC faces.
+    for tag in keys(m.curves)
+        _occ_geometry(m,tag)===nothing && continue
+        entity=_model_entity_bounding_box(m,1,tag,caller)
+        bounds=_geo_periodic_bounds_union(
+            bounds,(entity[1:3],entity[4:6]))
+    end
+    for tag in keys(m.surfaces)
+        geometry=get(m.surface_geometry,tag,nothing)
+        (geometry!==nothing && hasproperty(geometry,:occ) &&
+         geometry.occ!==nothing) || continue
+        entity=_model_entity_bounding_box(m,2,tag,caller)
+        bounds=_geo_periodic_bounds_union(
+            bounds,(entity[1:3],entity[4:6]))
+    end
+    bounds===nothing &&
+        (bounds=((-1.0,-1.0,-1.0),(1.0,1.0,1.0)))
+    lo,hi=bounds
+    tolerance=max(1e-6,
+        something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8))
+    range=(hi[1]-lo[1],hi[2]-lo[2],hi[3]-lo[3])
+    # `FinishUpBoundingBox` — note upstream has no z-only-degenerate branch.
+    if range[1]<tolerance && range[2]<tolerance && range[3]<tolerance
+        lo=(lo[1]-1.0,lo[2]-1.0,lo[3])
+        hi=(hi[1]+1.0,hi[2]+1.0,hi[3])
+    elseif range[1]<tolerance && range[2]<tolerance
+        lo=(lo[1]-range[3],lo[2]-range[3],lo[3])
+        hi=(hi[1]+range[3],hi[2]+range[3],hi[3])
+    elseif range[1]<tolerance && range[3]<tolerance
+        lo=(lo[1]-range[2],lo[2],lo[3]);hi=(hi[1]+range[2],hi[2],hi[3])
+    elseif range[2]<tolerance && range[3]<tolerance
+        lo=(lo[1],lo[2]-range[1],lo[3]);hi=(hi[1],hi[2]+range[1],hi[3])
+    elseif range[1]<tolerance
+        l=sqrt(range[2]*range[2]+range[3]*range[3])
+        lo=(lo[1]-l,lo[2],lo[3]);hi=(hi[1]+l,hi[2],hi[3])
+    elseif range[2]<tolerance
+        l=sqrt(range[1]*range[1]+range[3]*range[3])
+        lo=(lo[1],lo[2]-l,lo[3]);hi=(hi[1],hi[2]+l,hi[3])
+    end
+    return sqrt((hi[1]-lo[1])^2+(hi[2]-lo[2])^2+(hi[3]-lo[3])^2)
+end
+
+_geo_periodic_bounds_add(bounds,point)=bounds===nothing ?
+    ((point[1],point[2],point[3]),(point[1],point[2],point[3])) :
+    ((min(bounds[1][1],point[1]),min(bounds[1][2],point[2]),
+      min(bounds[1][3],point[3])),
+     (max(bounds[2][1],point[1]),max(bounds[2][2],point[2]),
+      max(bounds[2][3],point[3])))
+
+_geo_periodic_bounds_union(bounds,box)=bounds===nothing ? box :
+    ((min(bounds[1][1],box[1][1]),min(bounds[1][2],box[1][2]),
+      min(bounds[1][3],box[1][3])),
+     (max(bounds[2][1],box[2][1]),max(bounds[2][2],box[2][2]),
+      max(bounds[2][3],box[2][3])))
+
+_geo_periodic_atol(m::GeoModel,context::_GeoNumericContext)=
+    something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)*
+        _geo_periodic_lc(m,context)
+
+# Index of the first top-level `{` in an `FExpr` operand — `(`/`[` nest and
+# `==`/`!=`/`<=`/`>=` belong to the expression. A bare `=` or `;` ends it: the
+# operand is complete and that token is what bison reports as the syntax
+# error.
+function _geo_periodic_operand_brace(tail::AbstractString,detail)
+    depth=0;i=firstindex(tail);last=lastindex(tail)
+    while i<=last
+        c=tail[i]
+        if c=='(' || c=='['
+            depth+=1
+        elseif c==')' || c==']'
+            depth-=1
+        elseif depth==0
+            c=='{' && return i
+            if c=='='
+                prev=i>firstindex(tail) ? tail[prevind(tail,i)] : '\0'
+                nxt=i<last ? tail[nextind(tail,i)] : '\0'
+                if nxt=='='
+                    i=nextind(tail,i)  # `==`
+                elseif !(prev=='!' || prev=='<' || prev=='>')
+                    _geo_syntax_abort("=",detail)
+                end
+            elseif c==';'
+                _geo_syntax_abort(";",detail)
+            end
+        end
+        i=nextind(tail,i)
+    end
+    _geo_syntax_abort(";",detail)
+end
+
+# A `Periodic Curve|Surface` statement matching neither grammar production —
+# locate the first token diverging from `'{...} = {...} [transform]'` (or, for
+# surfaces, the `FExpr {..} = FExpr {..}` edge-map shape) and report it like
+# bison's `syntax error (token)`.
+function _geo_periodic_syntax_abort(line::AbstractString,dim::Int,
+                                    caller::AbstractString)
+    tail=strip(match(r"^Periodic\s+[A-Za-z]+(.*)$",line).captures[1])
+    endswith(tail,";") && (tail=strip(tail[1:end-1]))
+    detail="$caller: malformed periodic statement $line"
+    if startswith(tail,"{")
+        body,rest=_geo_balanced_group(tail,detail)
+        # `RecursiveListOfDouble` members are flat values — a nested `{`
+        # inside a tag group is the reported token.
+        occursin('{',body) && _geo_syntax_abort("{",detail)
+        tail=strip(rest)
+        startswith(tail,"=") ||
+            _geo_syntax_abort(_geo_first_token(tail),detail)
+        tail=strip(tail[2:end])
+        startswith(tail,"{") ||
+            _geo_syntax_abort(_geo_first_token(tail),detail)
+        body,rest=_geo_balanced_group(tail,detail)
+        occursin('{',body) && _geo_syntax_abort("{",detail)
+        _geo_syntax_abort(_geo_first_token(strip(rest)),detail)
+    elseif dim==2
+        for side in 1:2
+            index=_geo_periodic_operand_brace(tail,detail)
+            body,rest=_geo_balanced_group(tail[index:end],detail)
+            occursin('{',body) && _geo_syntax_abort("{",detail)
+            tail=strip(rest)
+            side==2 && break
+            startswith(tail,"=") ||
+                _geo_syntax_abort(_geo_first_token(tail),detail)
+            tail=strip(tail[2:end])
+        end
+        _geo_syntax_abort(_geo_first_token(tail),detail)
+    else
+        _geo_syntax_abort(_geo_first_token(tail),detail)
+    end
+end
+
 function _exec_periodic!(m::GeoModel,line::AbstractString,
                          context::_GeoNumericContext)
     entity=match(r"^Periodic\s+([A-Za-z]+)",line)
     entity===nothing && throw(ArgumentError(
         "execute_geo: malformed periodic statement $line"))
     entity_name=entity.captures[1]
+    # Gmsh's `.geo` grammar carries no `Periodic Volume` production: the
+    # statement is a parser-level `syntax error (Volume)` upstream.
+    entity_name=="Volume" && _geo_syntax_abort("Volume")
     dim=entity_name in ("Line","Curve") ? 1 : entity_name=="Surface" ? 2 :
-        entity_name=="Volume" ? 3 :
-        throw(ArgumentError(
-            "execute_geo: only Line/Curve, Surface, and Volume " *
-            "periodicity is implemented"))
-    caller="execute_geo: Periodic $(dim==1 ? "Curve" : dim==2 ? "Surface" : "Volume")"
+        _geo_syntax_abort(entity_name,
+            "execute_geo: malformed periodic statement $line")
+    caller="execute_geo: Periodic $(dim==1 ? "Curve" : "Surface")"
+    if dim==2
+        # `Periodic Surface j {slave curves} = k {master curves}` — the
+        # explicit edge-counterpart form, which derives the transform from
+        # the mapped boundary vertices.
+        edgemap=match(
+            r"^Periodic\s+Surface\s+([^{}]+?)\s*\{\s*([^}]*)\s*\}\s*=\s*([^{}]+?)\s*\{\s*([^}]*)\s*\}\s*;$",
+            line)
+        edgemap!==nothing && return _geo_periodic_surface_edge_map!(
+            m,edgemap,context,caller)
+    end
     statement=match(
-        r"^Periodic\s+(?:Line|Curve|Surface|Volume)\s*\{\s*([^}]*)\s*\}\s*=\s*\{\s*([^}]*)\s*\}\s*(.*?)\s*;$",
+        r"^Periodic\s+(?:Line|Curve|Surface)\s*\{\s*([^}]*)\s*\}\s*=\s*\{\s*([^}]*)\s*\}\s*(.*?)\s*;$",
         line)
-    statement===nothing && throw(ArgumentError(
-        "$caller: malformed periodic statement $line"))
+    statement===nothing &&
+        _geo_periodic_syntax_abort(line,dim,caller)
+    # `'{' RecursiveListOfDouble '}'` — an empty group is a parse-level
+    # `syntax error (})` upstream.
+    isempty(strip(statement.captures[1])) && _geo_syntax_abort("}")
+    isempty(strip(statement.captures[2])) && _geo_syntax_abort("}")
     slaves=_geo_periodic_tags(statement.captures[1],context,caller)
     masters=_geo_periodic_tags(statement.captures[2],context,caller)
+    atol=_geo_periodic_atol(m,context)
     transform=strip(statement.captures[3])
-    affine=if (matched=match(r"^Translate\s*\{\s*([^}]*)\s*\}$",transform)) !== nothing
-        delta=_geo_periodic_expressions(
-            matched.captures[1],3,context,"$caller Translate")
+    # Upstream evaluates the transform payload while reducing the production,
+    # so `ListOfDouble`/`VExpr` errors surface before the action's count
+    # check; the count diagnostic's wording differs per production (only the
+    # `PeriodicTransform` surface form drops the "of"). Count mismatches are
+    # `yymsg(0)` errors — recorded, never fatal mid-parse.
+    if isempty(transform)
+        length(slaves)==length(masters) || begin
+            _geo_yyerror!(context,
+                dim==1 ? "Wrong number of curves in periodicity constraint " *
+                         "($(length(masters)) -> $(length(slaves)))" :
+                         "Wrong number surfaces in periodicity constraint " *
+                         "($(length(masters)) -> $(length(slaves)))")
+            return nothing
+        end
+        # `PeriodicTransform` epsilon — orientation-only for curves; the
+        # surface action rejects a <12 transform.
+        if dim!=2
+            _geo_periodic_curve_orientation_pairs!(
+                m,slaves,masters,context,caller,atol)
+        else
+            _geo_yyerror!(context,
+                "Affine transformation requires at least 12 entries " *
+                "(0 provided)")
+        end
+        return nothing
+    end
+    if (matched=match(r"^Affine\b(.*)$",transform)) !== nothing
+        return _geo_periodic_affine_statement!(
+            m,dim,slaves,masters,matched.captures[1],context,caller,atol)
+    end
+    affine=if (matched=match(r"^Translate\b(.*)$",transform)) !== nothing
+        # `tTranslate VExpr` — any VExpr form (`{a,b,c}`, `(a,b,c)`,
+        # ±-composed); only the first three of its five slots are used.
+        delta=_geo_exec_vexpr(matched.captures[1],3,context,"$caller Translate")
         (1.0,0.0,0.0,delta[1],
          0.0,1.0,0.0,delta[2],
          0.0,0.0,1.0,delta[3],
          0.0,0.0,0.0,1.0)
-    elseif (matched=match(r"^Affine\s*\{\s*([^}]*)\s*\}$",transform)) !== nothing
-        _geo_periodic_affine(matched.captures[1],context,"$caller Affine")
-    elseif (matched=match(
-            r"^Rotate\s*\{\s*\{\s*([^}]*)\s*\}\s*,\s*\{\s*([^}]*)\s*\}\s*,\s*([^}]*)\s*\}$",
-            transform)) !== nothing
-        axis=_geo_periodic_expressions(
-            matched.captures[1],3,context,"$caller Rotate axis")
-        origin=_geo_periodic_expressions(
-            matched.captures[2],3,context,"$caller Rotate center")
-        angle=_geo_eval_numeric(
-            matched.captures[3],context,"$caller Rotate angle")
+    elseif (matched=match(r"^Rotate\b(.*)$",transform)) !== nothing
+        # `tRotate '{' VExpr ',' VExpr ',' FExpr '}'` — rotation axis,
+        # a point on the axis, and the angle.
+        body,rest=_geo_balanced_group(
+            matched.captures[1],"$caller Rotate")
+        isempty(rest) || _geo_syntax_abort(_geo_first_token(rest),
+            "$caller Rotate: unexpected text after transform $(repr(rest))")
+        parts=_geo_split_top_commas(body,"$caller Rotate")
+        length(parts)==3 || _geo_syntax_abort(
+            length(parts)<3 ? "}" : ",",
+            "$caller Rotate: expected {axis, center, angle}")
+        axis=_geo_exec_vexpr(parts[1],3,context,"$caller Rotate axis")
+        origin=_geo_exec_vexpr(parts[2],3,context,"$caller Rotate center")
+        angle=_geo_eval_numeric(parts[3],context,"$caller Rotate angle")
         _geo_periodic_rotation(axis,origin,angle,"$caller Rotate")
     else
-        throw(ArgumentError(
-            "$caller: expected a Translate, Rotate, or Affine transform"))
+        # After `{slave} = {master}` upstream expects `tEND`, `tAffine`,
+        # `tRotate`, or `tTranslate` — anything else is a parse-level
+        # `syntax error` on the unexpected token.
+        _geo_syntax_abort(_geo_first_token(transform),
+            "$caller: expected a Translate, Rotate, or Affine transform")
     end
-    set_periodic!(m,dim,slaves,masters,affine)
+    # `tTranslate`/`tRotate` productions — the transform is always 16 entries.
+    length(slaves)==length(masters) || begin
+        _geo_yyerror!(context,
+            dim==1 ? "Wrong number of curves in periodicity constraint " *
+                     "($(length(masters)) -> $(length(slaves)))" :
+                     "Wrong number of surfaces in periodicity constraint " *
+                     "($(length(masters)) -> $(length(slaves)))")
+        return nothing
+    end
+    if dim==1
+        _geo_periodic_curve_transform_pairs!(
+            m,slaves,masters,affine,16,context,caller,atol)
+    else
+        _geo_periodic_surface_transform_pairs!(
+            m,slaves,masters,affine,context,caller,atol)
+    end
     return nothing
+end
+
+# `tAffine ListOfDouble` payload handling. `Affine` takes any `ListOfDouble`
+# form — `{}`, `{...}`, `-{...}`, `k*{...}`, bare `FExpr`, or a list variable —
+# and gmsh's arity contract differs per dimension: curves keep the raw entry
+# count (below 12 the parser reports the arity error but the action still runs
+# the orientation path with an empty transform; at 12+ the transform path's
+# model-level exact-16 requirement applies), while surfaces zero-pad 12+
+# entries to a 16-entry record.
+function _geo_periodic_affine_statement!(
+        m::GeoModel,dim::Int,slaves::Vector{Int},masters::Vector{Int},
+        raw::AbstractString,context::_GeoNumericContext,
+        caller::AbstractString,atol::Float64)
+    # `tAffine ListOfDouble` — a bare `Affine` with no list is a parse-level
+    # `syntax error (;)` upstream.
+    isempty(strip(raw)) && _geo_syntax_abort(";")
+    entries=_geo_numeric_list_values(raw,context,"$caller Affine")
+    n=length(entries)
+    # The `PeriodicTransform` productions check counts inside the action —
+    # surfaces use the "Wrong number surfaces" wording without "of".
+    length(slaves)==length(masters) || begin
+        _geo_yyerror!(context,
+            dim==1 ? "Wrong number of curves in periodicity constraint " *
+                     "($(length(masters)) -> $(length(slaves)))" :
+                     "Wrong number surfaces in periodicity constraint " *
+                     "($(length(masters)) -> $(length(slaves)))")
+        return nothing
+    end
+    if dim==1 && n<12
+        # Upstream reports the arity error yet still runs the pair loop with
+        # an empty transform — the relation records as orientation-only.
+        n>0 && _geo_yyerror!(context,
+            "Affine transformation requires at least 12 entries " *
+            "($n provided)")
+        _geo_periodic_curve_orientation_pairs!(
+            m,slaves,masters,context,caller,atol)
+        return nothing
+    end
+    n<12 && begin
+        _geo_yyerror!(context,
+            "Affine transformation requires at least 12 entries " *
+            "($n provided)")
+        return nothing
+    end
+    # Only the first twelve entries are ever applied (`SPoint3::transform`
+    # reads a 3×4 row-major map). The stored record is upstream's verbatim
+    # vector — a curve `Affine{16}` keeps its fourth row as written and a
+    # surface `Affine{12..15}` keeps the parser's zero-padded tail — so MSH
+    # `$Periodic` output carries the same bytes Gmsh would write. For `n>16`
+    # upstream's copy runs past the 16-entry vector (undefined); the first
+    # sixteen entries are the only deterministic emulation of what survives.
+    record=ntuple(16) do i
+        i<=min(n,16) ? entries[i] : 0.0
+    end
+    if dim==1
+        _geo_periodic_curve_transform_pairs!(
+            m,slaves,masters,record,n,context,caller,atol)
+    else
+        _geo_periodic_surface_transform_pairs!(
+            m,slaves,masters,record,context,caller,atol)
+    end
+    return nothing
+end
+
+# Per-pair `addPeriodicEdge` loop with an empty transform — upstream resolves
+# each `abs()` tag pair, reporting `Msg::Error` for missing curves while the
+# remaining pairs still record their orientation-only relation.
+function _geo_periodic_curve_orientation_pairs!(
+        m::GeoModel,slaves::Vector{Int},masters::Vector{Int},
+        context::_GeoNumericContext,caller::AbstractString,atol::Float64)
+    for (signed_slave,signed_master) in zip(slaves,masters)
+        slave=abs(signed_slave);master=abs(signed_master)
+        if !(haskey(m.curves,slave) && haskey(m.curves,master))
+            _geo_msg_error!(context,
+                "Could not find curve $signed_slave or $signed_master " *
+                "for periodic copy")
+            continue
+        end
+        try
+            set_periodic!(m,1,[signed_slave],[signed_master],nothing;
+                          atol=atol,overwrite=true)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_msg_error!(context,sprint(showerror,err))
+        end
+    end
+    return nothing
+end
+
+# Per-pair `addPeriodicEdge` transform loop — `GEdge::setMeshMaster(source,
+# tfo)`: the first twelve entries map the master's endpoints onto the slave's.
+# A geometric mismatch is a `Msg::Info` drop (no error, no relation); a
+# matched pair with a non-16 arity reports `GEntity::setMeshMaster`'s
+# exact-16 `Msg::Error` for the edge and each endpoint vertex; only a matched
+# 16-entry transform records the relation.
+function _geo_periodic_curve_transform_pairs!(
+        m::GeoModel,slaves::Vector{Int},masters::Vector{Int},
+        affine::NTuple{16,Float64},n::Int,
+        context::_GeoNumericContext,caller::AbstractString,atol::Float64)
+    coefficients,translation=_periodic_affine_3x4(affine)
+    for (signed_slave,signed_master) in zip(slaves,masters)
+        slave=abs(signed_slave);master=abs(signed_master)
+        if !(haskey(m.curves,slave) && haskey(m.curves,master))
+            _geo_msg_error!(context,
+                "Could not find curve $signed_slave or $signed_master " *
+                "for periodic copy")
+            continue
+        end
+        orientation=_model_periodic_curve_orientation(
+            m,slave,master,coefficients,translation,atol,caller,1)
+        slave_points=m.curves[slave];master_points=m.curves[master]
+        if orientation.reversed===nothing
+            d1,d2=orientation.distances
+            _geo_yyinfo!(context,
+                "Error in transformation from curve $master " *
+                "($(master_points[1])-$(master_points[2])) to $slave " *
+                "($(slave_points[1])-$(slave_points[2])) (minimal " *
+                "transformed node distances $d1 $d2, tolerance $atol)")
+            continue
+        end
+        if n!=16
+            _geo_msg_error!(context,
+                "Periodicity transformation from entity $master to $slave " *
+                "(dim 1) has $n components, while 16 are required")
+            pairs=orientation.reversed ?
+                ((master_points[2],slave_points[1]),
+                 (master_points[1],slave_points[2])) :
+                ((master_points[1],slave_points[1]),
+                 (master_points[2],slave_points[2]))
+            for (mv,sv) in pairs
+                _geo_msg_error!(context,
+                    "Periodicity transformation from entity $mv to $sv " *
+                    "(dim 0) has $n components, while 16 are required")
+            end
+            continue
+        end
+        try
+            set_periodic!(m,1,[signed_slave],[signed_master],affine;
+                          atol=atol,overwrite=true)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_msg_error!(context,sprint(showerror,err))
+        end
+    end
+    return nothing
+end
+
+# Per-pair `addPeriodicFace` transform loop — upstream reports `Msg::Error`
+# for missing surfaces and `Msg::Info` progress for the rest; the per-pair
+# correspondence checks run inside `set_periodic!`.
+function _geo_periodic_surface_transform_pairs!(
+        m::GeoModel,slaves::Vector{Int},masters::Vector{Int},
+        affine::NTuple{16,Float64},
+        context::_GeoNumericContext,caller::AbstractString,atol::Float64)
+    for (signed_slave,signed_master) in zip(slaves,masters)
+        slave=abs(signed_slave);master=abs(signed_master)
+        if !(haskey(m.surfaces,slave) && haskey(m.surfaces,master))
+            _geo_msg_error!(context,
+                "Could not find surface $signed_slave or $signed_master " *
+                "for periodic copy")
+            continue
+        end
+        _geo_yyinfo!(context,"Setting mesh master using transformation")
+        try
+            # `GFace::setMeshMaster` resolves each boundary and embedded edge
+            # counterpart at declaration, reporting `Setting curve master`
+            # per success and aborting the relation on the first failure.
+            _model_periodic_surface_edge_map(
+                m,slave,master,affine,atol,caller;
+                on_match=(sc,mc)->_geo_yyinfo!(
+                    context,"Setting curve master $sc - $mc"))
+            set_periodic!(m,2,[signed_slave],[signed_master],affine;
+                          atol=atol,overwrite=true)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_msg_error!(context,sprint(showerror,err))
+        end
+    end
+    return nothing
+end
+
+# `Periodic Surface j {slave curves} = k {master curves}` — upstream's
+# `addPeriodicFace(target, source, edgeCounterparts)`: each slave boundary
+# curve resolves a signed master counterpart, the endpoint map induces a
+# vertex correspondence, and the transform is derived as a translation or a
+# rotation before taking the ordinary affine surface path.
+function _geo_periodic_surface_edge_map!(
+        m::GeoModel,edgemap::RegexMatch,
+        context::_GeoNumericContext,caller::AbstractString)
+    # `addPeriodicFace` resolves both surfaces through `abs(iTarget)`/`abs`
+    # but reports the raw signed tags in its diagnostic.
+    signed_slave=_geo_signed_gmsh_int_value(
+        _geo_eval_numeric(edgemap.captures[1],context,caller),"$caller slave")
+    signed_master=_geo_signed_gmsh_int_value(
+        _geo_eval_numeric(edgemap.captures[3],context,caller),"$caller master")
+    j_slave=abs(signed_slave);j_master=abs(signed_master)
+    slave_curves=_geo_exec_entity_tags(
+        edgemap.captures[2],context,caller;signed=true)
+    master_curves=_geo_exec_entity_tags(
+        edgemap.captures[4],context,caller;signed=true)
+    # `yymsg(0)` — the action's own diagnostic; parsing continues.
+    length(slave_curves)==length(master_curves) || begin
+        _geo_yyerror!(context,
+            "Wrong number of surface curves in periodicity constraint " *
+            "($(length(master_curves)) -> $(length(slave_curves)))")
+        return nothing
+    end
+    edgecopies=Dict{Int,Int}()
+    for (sc,mc) in zip(slave_curves,master_curves)
+        edgecopies[sc]=mc
+    end
+    _geo_yyinfo!(context,
+        "Encoding periodic connection between $signed_slave and " *
+        "$signed_master")
+    for (sc,mc) in sort!(collect(edgecopies);by=first)
+        _geo_yyinfo!(context,"$sc - $mc")
+    end
+    if !(haskey(m.surfaces,j_slave) && haskey(m.surfaces,j_master))
+        _geo_msg_error!(context,
+            "Could not find surface $signed_slave or $signed_master " *
+            "for periodic copy")
+        return nothing
+    end
+    vs2vt=Dict{Int,Int}()
+    # Upstream iterates `l_edges` in the face's loop order (a seam's repeated
+    # occurrence just rewrites the same `vs2vt` entry) — preserve that order
+    # so the first missing counterpart reported matches Gmsh's.
+    slave_boundary=Int[]
+    seen=Set{Int}()
+    for loop in m.surfaces[j_slave],signed in m.loops[loop]
+        curve=abs(signed)
+        curve in seen || (push!(seen,curve);push!(slave_boundary,curve))
+    end
+    for curve in slave_boundary
+        sign=1
+        source_e=get(edgecopies,curve,nothing)
+        if source_e===nothing
+            sign=-1
+            source_e=get(edgecopies,-curve,nothing)
+        end
+        if source_e===nothing
+            # Upstream prints `master->tag()` in this slot (its own typo) —
+            # kept verbatim.
+            _geo_msg_error!(context,
+                "Could not find curve counterpart $curve in slave " *
+                "surface $j_master")
+            return nothing
+        end
+        mc=abs(source_e)
+        haskey(m.curves,curve) ||
+            throw(ArgumentError("$caller: unknown slave Curve[$curve]"))
+        haskey(m.curves,mc) ||
+            throw(ArgumentError("$caller: unknown master Curve[$mc]"))
+        s0,s1=m.curves[curve];t0,t1=m.curves[mc]
+        if source_e*sign>0
+            vs2vt[t0]=s0;vs2vt[t1]=s1
+        else
+            vs2vt[t0]=s1;vs2vt[t1]=s0
+        end
+    end
+    affine=try
+        _geo_periodic_derive_transform(
+            m,vs2vt,j_slave,j_master,context,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_msg_error!(context,sprint(showerror,err))
+        return nothing
+    end
+    _geo_yyinfo!(context,"Setting mesh master using transformation")
+    try
+        _model_periodic_surface_edge_map(
+            m,j_slave,j_master,affine,_geo_periodic_atol(m,context),caller;
+            on_match=(sc,mc)->_geo_yyinfo!(
+                context,"Setting curve master $sc - $mc"))
+        set_periodic!(m,2,[j_slave],[j_master],affine;
+                      atol=_geo_periodic_atol(m,context),overwrite=true)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_msg_error!(context,sprint(showerror,err))
+    end
+    return nothing
+end
+
+# `computeMeanPlaneSimple` — centroid plus the least-squares normal (the
+# right-singular vector of the smallest singular value of the centered point
+# set).
+function _geo_mean_plane(points::Vector{NTuple{3,Float64}})
+    n=length(points)
+    cx=sum(point->point[1],points)/n
+    cy=sum(point->point[2],points)/n
+    cz=sum(point->point[3],points)/n
+    centered=Matrix{Float64}(undef,n,3)
+    for (index,point) in pairs(points)
+        centered[index,1]=point[1]-cx
+        centered[index,2]=point[2]-cy
+        centered[index,3]=point[3]-cz
+    end
+    decomposition=svd(centered)
+    column=argmin(decomposition.S)
+    nx,ny,nz=decomposition.V[1,column],decomposition.V[2,column],
+        decomposition.V[3,column]
+    scale=sqrt(nx*nx+ny*ny+nz*nz)
+    scale>0 || throw(ErrorException(
+        "_geo_mean_plane: degenerate singular vector"))
+    return (nx/scale,ny/scale,nz/scale),(cx,cy,cz)
+end
+
+# `sys2x2` — Cramer's rule with gmsh's relative singularity bound; `nothing`
+# when the system is singular.
+function _geo_sys2x2(m00,m01,m10,m11,b0,b1)
+    norm=m00*m00+m11*m11+m01*m01+m10*m10
+    det=m00*m11-m10*m01
+    (norm==0.0 || abs(det)/norm<1e-16) && return nothing
+    return ((b0*m11-m01*b1)/det,(m00*b1-m10*b0)/det)
+end
+
+# `myLine(plane_source, plane_target)` — a point on the intersection line of
+# two planes, trying z = 0, then x = 0, then y = 0 like upstream.
+function _geo_plane_intersect_point(n1,c1,n2,c2,caller,slave)
+    b1=n1[1]*c1[1]+n1[2]*c1[2]+n1[3]*c1[3]
+    b2=n2[1]*c2[1]+n2[2]*c2[2]+n2[3]*c2[3]
+    if (r=_geo_sys2x2(n1[1],n1[2],n2[1],n2[2],b1,b2))!==nothing
+        return (r[1],r[2],0.0)
+    elseif (r=_geo_sys2x2(n1[2],n1[3],n2[2],n2[3],b1,b2))!==nothing
+        return (0.0,r[1],r[2])
+    elseif (r=_geo_sys2x2(n1[1],n1[3],n2[1],n2[3],b1,b2))!==nothing
+        return (r[1],0.0,r[2])
+    end
+    throw(ArgumentError(
+        "$caller: only rotations or translations can currently be computed " *
+        "automatically for periodic surfaces: surface $slave not meshed"))
+end
+
+@inline _geo_pdist(a,b)=sqrt((a[1]-b[1])^2+(a[2]-b[2])^2+(a[3]-b[3])^2)
+@inline _geo_pdot(a,b)=a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+@inline _geo_pcross(a,b)=
+    (a[2]*b[3]-a[3]*b[2],a[3]*b[1]-a[1]*b[3],a[1]*b[2]-a[2]*b[1])
+@inline _geo_line_project(point,line_point,direction)=begin
+    u=_geo_pdot((point[1]-line_point[1],point[2]-line_point[2],
+                 point[3]-line_point[3]),direction)
+    (line_point[1]+direction[1]*u,line_point[2]+direction[2]*u,
+     line_point[3]+direction[3]*u)
+end
+
+# `GFace::setMeshMaster(master, edgeCopies)`'s transform derivation: a common
+# translation when every vertex displacement agrees within `1e-5·|DX|`,
+# otherwise a rotation about the intersection of the source and target mean
+# planes whose angle must be consistent to `1e-8`.
+function _geo_periodic_derive_transform(
+        m::GeoModel,vs2vt::Dict{Int,Int},slave::Int,master::Int,
+        context::_GeoNumericContext,caller::AbstractString)
+    pairs=sort!(collect(vs2vt);by=first)
+    # A boundaryless surface yields no correspondences: upstream's
+    # translation loop never runs, leaving `DX = 0` and the identity record.
+    isempty(pairs) && return (1.0,0.0,0.0,0.0,
+                              0.0,1.0,0.0,0.0,
+                              0.0,0.0,1.0,0.0,
+                              0.0,0.0,0.0,1.0)
+    sources=[m.points[master_point] for (master_point,_) in pairs]
+    targets=[m.points[slave_point] for (_,slave_point) in pairs]
+    dx=targets[1][1]-sources[1][1]
+    dy=targets[1][2]-sources[1][2]
+    dz=targets[1][3]-sources[1][3]
+    dnorm=sqrt(dx*dx+dy*dy+dz*dz)
+    translation=true
+    for index in 2:length(pairs)
+        ddx=(targets[index][1]-sources[index][1])-dx
+        ddy=(targets[index][2]-sources[index][2])-dy
+        ddz=(targets[index][3]-sources[index][3])-dz
+        if sqrt(ddx*ddx+ddy*ddy+ddz*ddz)>1e-5*dnorm
+            translation=false;break
+        end
+    end
+    if translation
+        _geo_yyinfo!(context,
+            "Periodic mesh translation found between $slave and $master: " *
+            "dx = ($(_geo_gmsh_number(dx)),$(_geo_gmsh_number(dy))," *
+            "$(_geo_gmsh_number(dz)))")
+        return (1.0,0.0,0.0,dx,
+                0.0,1.0,0.0,dy,
+                0.0,0.0,1.0,dz,
+                0.0,0.0,0.0,1.0)
+    end
+    n_source,c_source=_geo_mean_plane(sources)
+    n_target,c_target=_geo_mean_plane(targets)
+    direction=_geo_pcross(n_source,n_target)
+    dlength=sqrt(_geo_pdot(direction,direction))
+    dlength==0.0 && throw(ArgumentError(
+        "$caller: only rotations or translations can currently be computed " *
+        "automatically for periodic surfaces: surface $slave not meshed"))
+    direction=(direction[1]/dlength,direction[2]/dlength,direction[3]/dlength)
+    line_point=_geo_plane_intersect_point(
+        n_source,c_source,n_target,c_target,caller,slave)
+    gtol=something(
+        _geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
+    angle=0.0;count=0;rotation=true
+    for index in eachindex(pairs)
+        ps=sources[index];pt=targets[index]
+        p_ps=_geo_line_project(ps,line_point,direction)
+        p_pt=_geo_line_project(pt,line_point,direction)
+        d1=_geo_pdist(ps,pt)
+        d1>gtol || continue
+        _geo_pdist(p_ps,p_pt)>1e-8*d1 && (rotation=false)
+        t1=(ps[1]-p_ps[1],ps[2]-p_ps[2],ps[3]-p_ps[3])
+        t2=(pt[1]-p_pt[1],pt[2]-p_pt[2],pt[3]-p_pt[3])
+        sqrt(_geo_pdot(t1,t1))>1e-8*d1 || continue
+        measured=atan(_geo_pdot(_geo_pcross(t1,t2),direction),
+                      _geo_pdot(t1,t2))
+        if count==0
+            angle=measured
+        elseif abs(measured-angle)>1e-8
+            rotation=false
+        end
+        count+=1
+    end
+    rotation || throw(ArgumentError(
+        "$caller: only rotations or translations can currently be computed " *
+        "automatically for periodic surfaces: surface $slave not meshed"))
+    _geo_yyinfo!(context,
+        "Periodic mesh rotation found: axis " *
+        "($(_geo_gmsh_number(direction[1])),$(_geo_gmsh_number(direction[2]))" *
+        ",$(_geo_gmsh_number(direction[3]))) point " *
+        "($(_geo_gmsh_number(line_point[1])) $(_geo_gmsh_number(line_point[2]))" *
+        " $(_geo_gmsh_number(line_point[3]))) angle " *
+        "$(_geo_gmsh_number(angle*180/pi))")
+    sine,cosine=sincos(angle);one_minus=1-cosine
+    ux,uy,uz=direction
+    r11=cosine+ux*ux*one_minus;r12=ux*uy*one_minus-uz*sine
+    r13=ux*uz*one_minus+uy*sine
+    r21=uy*ux*one_minus+uz*sine;r22=cosine+uy*uy*one_minus
+    r23=uy*uz*one_minus-ux*sine
+    r31=uz*ux*one_minus-uy*sine;r32=uy*uz*one_minus+ux*sine
+    r33=cosine+uz*uz*one_minus
+    ox,oy,oz=line_point
+    t1=ox-(r11*ox+r12*oy+r13*oz)
+    t2=oy-(r21*ox+r22*oy+r23*oz)
+    t3=oz-(r31*ox+r32*oy+r33*oz)
+    return (r11,r12,r13,t1,
+            r21,r22,r23,t2,
+            r31,r32,r33,t3,
+            0.0,0.0,0.0,1.0)
 end
 
 # ---------------------------------------------------------------------------

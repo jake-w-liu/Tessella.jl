@@ -51,7 +51,7 @@ function _periodic_geo_rotation()
         Line(4) = {3, 1};
         Curve Loop(1) = {1, 2, -3, 4};
         Plane Surface(1) = {1};
-        axisZ = 2 * 1;
+        axisZ = 2 * 0.5;
         centerX = Cos(0);
         centerY = Sqrt(1);
         quarterTurn = Pi / 2;
@@ -143,6 +143,310 @@ end
 const _PERIODIC_SURFACE_VOLUME_GEO=normpath(joinpath(
     @__DIR__,"..","fixtures","periodic_surface_volume.geo"))
 
+# Two unit squares stacked in z: surface 1 at z=0 with curves 1–4, surface 2
+# at z=1 with curves 5–8 — the `Periodic Surface slave {curves} = master
+# {curves}` edge-map fixture.
+function _periodic_geo_two_squares(periodic_statement::AbstractString;
+                                   mesh_size=0.5)
+    return """
+        Point(1) = {0, 0, 0, $mesh_size}; Point(2) = {1, 0, 0, $mesh_size};
+        Point(3) = {1, 1, 0, $mesh_size}; Point(4) = {0, 1, 0, $mesh_size};
+        Point(5) = {0, 0, 1, $mesh_size}; Point(6) = {1, 0, 1, $mesh_size};
+        Point(7) = {1, 1, 1, $mesh_size}; Point(8) = {0, 1, 1, $mesh_size};
+        Line(1) = {1, 2}; Line(2) = {2, 3}; Line(3) = {3, 4}; Line(4) = {4, 1};
+        Line(5) = {5, 6}; Line(6) = {6, 7}; Line(7) = {7, 8}; Line(8) = {8, 5};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Curve Loop(2) = {5, 6, 7, 8};
+        Plane Surface(1) = {1};
+        Plane Surface(2) = {2};
+        $periodic_statement
+        """
+end
+
+@testset "bounded .geo transform-free periodic curve execution" begin
+    # `Periodic Curve {slave} = {master}` — upstream's orientation-only
+    # relation: no affine is stored, signed tags carry the reversal and no
+    # geometric endpoint check runs (`GEdge::setMeshMaster(source, ori)`).
+    for (statement,reversed) in (
+            ("Periodic Curve {2} = {4};",false),
+            ("Periodic Curve {2} = {-4};",true),
+            ("Periodic Curve {-2} = {4};",true),
+            ("Periodic Curve {-2} = {-4};",false),
+            ("Periodic Line {2} = {4};",false))
+        built=_execute_geo_source(_periodic_geo_square(statement))
+        constraint=only(model_periodic_constraints(built.model))
+        @test constraint.dim==1
+        @test (constraint.slave_entity,constraint.master_entity)==(2,4)
+        @test constraint.affine===nothing
+        @test constraint.reversed==reversed
+    end
+
+    # Orientation-only ignores geometry entirely — a longer slave curve is
+    # accepted where an affine relation would drop on its endpoint check.
+    mismatched=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.4};
+        Point(2) = {1, 0, 0, 0.4};
+        Point(3) = {3, 0, 1, 0.4};
+        Point(4) = {0, 0, 1, 0.4};
+        Line(1) = {1, 2};
+        Line(2) = {4, 3};
+        Periodic Curve {2} = {1};
+        """)
+    @test only(model_periodic_constraints(mismatched.model)).affine===nothing
+    dropped=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.4};
+        Point(2) = {1, 0, 0, 0.4};
+        Point(3) = {3, 0, 1, 0.4};
+        Point(4) = {0, 0, 1, 0.4};
+        Line(1) = {1, 2};
+        Line(2) = {4, 3};
+        Periodic Curve {2} = {1} Translate {0, 0, 1};
+        """)
+    @test dropped.msg_error_count==0
+    @test isempty(model_periodic_constraints(dropped.model))
+
+    # Meshing: the slave inherits the master's parameter distribution and the
+    # pairing is parameter-based — both transforms and orientation signs map
+    # onto the same synchronized nodes.
+    meshed=_execute_geo_source(
+        _periodic_geo_square("Periodic Curve {2} = {4};");mesh_dim=2)
+    @test validate(meshed.mesh).ok
+    mapping=model_periodic_nodes(meshed.model,meshed.mesh,1,2)
+    @test mapping.master_entity==4
+    @test mapping.affine===nothing
+    @test !isempty(mapping.slave_nodes)
+    slave_coordinates=[Tuple(meshed.mesh.coords[:,node])
+                       for node in mapping.slave_nodes]
+    master_coordinates=[Tuple(meshed.mesh.coords[:,node])
+                        for node in mapping.master_nodes]
+    # Forward pairing: equal parameters — curve 2 ascends (2→3) while curve 4
+    # descends (4→1), so t corresponds to opposite endpoints.
+    for (slave,master) in zip(slave_coordinates,master_coordinates)
+        @test slave[1]≈1.0 && master[1]≈0.0
+        @test slave[2]+master[2]≈1.0 atol=1e-12
+    end
+    reversed=_execute_geo_source(
+        _periodic_geo_square("Periodic Curve {2} = {-4};");mesh_dim=2)
+    reversed_mapping=model_periodic_nodes(
+        reversed.model,reversed.mesh,1,2)
+    for (slave,master) in zip(
+            (Tuple(reversed.mesh.coords[:,node])
+             for node in reversed_mapping.slave_nodes),
+            (Tuple(reversed.mesh.coords[:,node])
+             for node in reversed_mapping.master_nodes))
+        @test slave[2]≈master[2] atol=1e-12
+    end
+
+    # The zero-affine record round-trips through MSH4 exactly like Gmsh's own
+    # transform-free output — vertex links carry no affine either.
+    mixed=model_to_mixed(meshed.model,meshed.mesh,1)
+    link_kinds=sort!([(link.dim,link.affine===nothing)
+                      for link in mixed.periodic_links])
+    @test link_kinds==[(0,true),(0,true),(1,true)]
+    path=tempname()*".msh"
+    Tessella.Elements.write_mixed_msh(path,mixed)
+    back=Tessella.Elements.read_mixed_msh(path)
+    @test sort!([(link.dim,link.affine===nothing,length(link.slave_nodes))
+                 for link in back.periodic_links])==
+          sort!([(link.dim,link.affine===nothing,length(link.slave_nodes))
+                 for link in mixed.periodic_links])
+    rm(path;force=true)
+end
+
+@testset "bounded .geo periodic surface edge-mapping execution" begin
+    # `Periodic Surface j {slave curves} = k {master curves}` derives the
+    # transform from the mapped boundary vertices (a translation or a
+    # rotation about the mean-plane intersection) and then takes the
+    # ordinary affine surface path.
+    translated=_execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};"))
+    constraint=only(model_periodic_constraints(translated.model))
+    @test constraint.dim==2
+    @test (constraint.slave_entity,constraint.master_entity)==(2,1)
+    @test constraint.affine==
+          (1.0,0.0,0.0,0.0,
+           0.0,1.0,0.0,0.0,
+           0.0,0.0,1.0,1.0,
+           0.0,0.0,0.0,1.0)
+
+    # Signed curve entries flip the endpoint correspondence but still derive
+    # the same translation.
+    flipped=_execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface 2 {5, 6, 7, -8} = 1 {1, 2, 3, -4};"))
+    @test only(model_periodic_constraints(flipped.model)).affine==
+          constraint.affine
+
+    # A rotation: the slave square is the master square turned 90° about the
+    # x axis — the mean planes meet on that axis.
+    rotated=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.5}; Point(2) = {1, 0, 0, 0.5};
+        Point(3) = {1, 1, 0, 0.5}; Point(4) = {0, 1, 0, 0.5};
+        Point(5) = {0, 0, 0, 0.5}; Point(6) = {1, 0, 0, 0.5};
+        Point(7) = {1, 0, 1, 0.5}; Point(8) = {0, 0, 1, 0.5};
+        Line(1) = {1, 2}; Line(2) = {2, 3}; Line(3) = {3, 4}; Line(4) = {4, 1};
+        Line(5) = {5, 6}; Line(6) = {6, 7}; Line(7) = {7, 8}; Line(8) = {8, 5};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Curve Loop(2) = {5, 6, 7, 8};
+        Plane Surface(1) = {1};
+        Plane Surface(2) = {2};
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        """)
+    affine=only(model_periodic_constraints(rotated.model)).affine
+    @test affine!==nothing
+    # The derived map must send every master vertex onto its slave image.
+    model=rotated.model
+    for (master_point,slave_point) in ((1,5),(2,6),(3,7),(4,8))
+        expected=model.points[slave_point]
+        @test all(isapprox.(collect(_geo_periodic_affine_point(
+                affine,model.points[master_point]).-expected),0.0;atol=1e-12))
+    end
+
+    # A count mismatch is a `yymsg(0)` diagnostic — accumulated and thrown at
+    # end of parse like upstream's nonzero exit.
+    thrown=try
+        _execute_geo_source(_periodic_geo_two_squares(
+            "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3};"));nothing
+    catch err
+        err
+    end
+    @test thrown isa ArgumentError
+    @test occursin("Wrong number of surface curves in periodicity " *
+                   "constraint",sprint(showerror,thrown))
+    # `Msg::Error` diagnostics mark the run failed (msg_error_count) but the
+    # parse completes and returns a model without the relation — upstream's
+    # nonfatal `addPeriodicFace` contract. A matched-count declaration that
+    # still leaves a boundary curve unmapped fails the same way.
+    for (statement,needle) in (
+            ("Periodic Surface 2 {5, 6, 7} = 1 {1, 2, 3};",
+             "Could not find curve counterpart 8 in slave surface 1"),
+            ("Periodic Surface 2 {5, 6, 7, 9} = 1 {1, 2, 3, 4};",
+             "Could not find curve counterpart 8 in slave surface 1"),
+            ("Periodic Surface 9 {5, 6, 7, 8} = 1 {1, 2, 3, 4};",
+             "Could not find surface 9 or 1 for periodic copy"),
+            ("Periodic Surface 2 {5, 6, 7, 8} = 9 {1, 2, 3, 4};",
+             "Could not find surface 2 or 9 for periodic copy"))
+        built=_execute_geo_source(_periodic_geo_two_squares(statement))
+        @test built.msg_error_count>0
+        @test isempty(model_periodic_constraints(built.model))
+    end
+    # A master counterpart that is not a curve remains a hard diagnostic —
+    # upstream dereferences the missing edge outright here.
+    @test_throws ArgumentError _execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 9};"))
+
+    # `Periodic Surface 2 = 1` is a parse-level `syntax error (=)` upstream.
+    bare=try
+        _execute_geo_source(_periodic_geo_two_squares(
+            "Periodic Surface 2 = 1;"));nothing
+    catch err
+        err
+    end
+    @test bare isa ArgumentError
+    @test occursin("syntax error (=)",sprint(showerror,bare))
+end
+
+@testset "bounded .geo periodic affine arity" begin
+    affine12="{1,0,0,0, 0,1,0,0, 0,0,1,1}"
+    affine16="{1,0,0,0, 0,1,0,0, 0,0,1,1, 0,0,0,1}"
+    curve_geo="""
+        Point(1) = {0,0,0,0.2}; Point(2) = {1,0,0,0.2};
+        Point(3) = {0,0,1,0.2}; Point(4) = {1,0,1,0.2};
+        Line(1) = {1,2}; Line(2) = {3,4};
+        """
+    # `Affine{16}` on matching endpoints stores the affine relation.
+    stored=_execute_geo_source(
+        curve_geo*"Periodic Curve {2} = {1} Affine $affine16;")
+    @test only(model_periodic_constraints(stored.model)).affine!==nothing
+    # `Affine{}` records the orientation-only relation, like an empty
+    # `PeriodicTransform`.
+    empty_list=_execute_geo_source(
+        curve_geo*"Periodic Curve {2} = {1} Affine {};")
+    @test only(model_periodic_constraints(empty_list.model)).affine===nothing
+    # Curves with 12–15 or >16 entries: the endpoint check runs on the first
+    # twelve entries; matching geometry then reports `GEntity::setMeshMaster`'s
+    # exact-16 `Msg::Error` for the edge and each endpoint vertex — the
+    # relation drops, the parse still completes.
+    for statement in (
+            "Periodic Curve {2} = {1} Affine $affine12;",
+            "Periodic Curve {2} = {1} Affine " *
+                "{1,0,0,0,0,1,0,0,0,0,1,1,0,0,0,1,9};")
+        built=_execute_geo_source(curve_geo*statement)
+        @test built.msg_error_count==3
+        @test isempty(model_periodic_constraints(built.model))
+    end
+    # `Affine` with 1–11 entries is a `yymsg(0)` arity error — accumulated
+    # and thrown at end of parse (upstream still runs the orientation path,
+    # invisible behind the thrown diagnostic).
+    thrown=try
+        _execute_geo_source(
+            curve_geo*"Periodic Curve {2} = {1} Affine {1,0,0,0};");nothing
+    catch err
+        err
+    end
+    @test thrown isa ArgumentError
+    @test occursin("Affine transformation requires at least 12 entries " *
+                   "(4 provided)",sprint(showerror,thrown))
+    # A bare `Affine` keyword is a `syntax error (;)` upstream.
+    thrown=try
+        _execute_geo_source(
+            curve_geo*"Periodic Curve {2} = {1} Affine;");nothing
+    catch err
+        err
+    end
+    @test thrown isa ArgumentError
+    @test occursin("syntax error (;)",sprint(showerror,thrown))
+    # Mismatched curve geometry is a silent `Msg::Info` drop upstream: the
+    # parse succeeds, no relation records, nothing is marked failed.
+    dropped=_execute_geo_source("""
+        Point(1) = {0,0,0,0.2}; Point(2) = {1,0,0,0.2};
+        Point(3) = {0,0,1,0.2}; Point(4) = {5,0,1,0.2};
+        Line(1) = {1,2}; Line(2) = {3,4};
+        Periodic Curve {2} = {1} Translate {0,0,1};
+        """)
+    @test dropped.msg_error_count==0
+    @test isempty(model_periodic_constraints(dropped.model))
+    # The strict public API still rejects the same geometry — `set_periodic!`
+    # is a validator, the `.geo` path mirrors upstream's tolerant drop.
+    strict_model=_execute_geo_source("""
+        Point(1) = {0,0,0,0.2}; Point(2) = {1,0,0,0.2};
+        Point(3) = {0,0,1,0.2}; Point(4) = {5,0,1,0.2};
+        Line(1) = {1,2}; Line(2) = {3,4};
+        """).model
+    @test_throws ArgumentError set_periodic!(
+        strict_model,1,[2],[1],
+        (1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,1.0, 0.0,0.0,0.0,1.0))
+    # Surfaces need at least 12 entries and zero-pad to 16 — only the first
+    # twelve are ever applied (`SPoint3::transform` reads a 3×4 map).
+    for statement in (
+            "Periodic Surface {2} = {1} Affine $affine12;",
+            "Periodic Surface {2} = {1} Affine $affine16;",
+            "Periodic Surface {2} = {1} Affine " *
+                "{1,0,0,0,0,1,0,0,0,0,1,1,0,0,0,1,5,5,5,5};")
+        built=_execute_geo_source(_periodic_geo_two_squares(statement))
+        @test built.msg_error_count==0
+        @test only(model_periodic_constraints(built.model)).affine!==nothing
+    end
+    # The parser's `transfo(16, 0)` copy stores the fourth row verbatim — a
+    # 12-entry surface `Affine` keeps `(0, 0, 0, 0)`, matching the bytes
+    # upstream writes to `$Periodic`.
+    padded=_execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface {2} = {1} Affine $affine12;"))
+    @test only(model_periodic_constraints(padded.model)).affine[13:16]==
+          (0.0,0.0,0.0,0.0)
+    for (statement,needle) in (
+            ("Periodic Surface {2} = {1} Affine {1,0,0,0};","(4 provided)"),
+            ("Periodic Surface {2} = {1};","(0 provided)"))
+        thrown=try
+            _execute_geo_source(_periodic_geo_two_squares(statement));nothing
+        catch err
+            err
+        end
+        @test thrown isa ArgumentError
+        @test occursin("Affine transformation requires at least 12 entries " *
+                       needle,sprint(showerror,thrown))
+    end
+end
+
 @testset "bounded .geo periodic planar-surface execution" begin
     built=execute_geo(_PERIODIC_SURFACE_VOLUME_GEO)
     @test built.mesh===nothing
@@ -186,8 +490,13 @@ const _PERIODIC_SURFACE_VOLUME_GEO=normpath(joinpath(
         "Periodic Surface {4} = {6} Affine " *
         "{1,0,0,1, 0,1,0,0, 0,0,1,0};")
     affine_built=_execute_geo_source(affine_source)
-    @test first(model_periodic_constraints(affine_built.model)).affine==
-          first(model_periodic_constraints(meshed.model)).affine
+    # The applied 3×4 map is identical — but upstream pads a 12-entry
+    # `Affine` to row4 `(0,0,0,0)` while `Translate` derives `(0,0,0,1)`, so
+    # the stored records legitimately differ in the fourth row.
+    affine_constraint=first(model_periodic_constraints(affine_built.model))
+    translate_constraint=first(model_periodic_constraints(meshed.model))
+    @test affine_constraint.affine[1:12]==translate_constraint.affine[1:12]
+    @test affine_constraint.affine[13:16]==(0.0,0.0,0.0,0.0)
 
     @test_throws ArgumentError _execute_geo_source(replace(
         source,"Periodic Surface {4}"=>"Periodic Volume {4}"))
@@ -229,7 +538,8 @@ end
         Periodic Curve {2} = {4} Affine
           {PeriodicAffineOne,affineZero,affineZero,affineDx,
            affineZero,PeriodicAffineOne,affineZero,affineZero,
-           affineZero,affineZero,PeriodicAffineOne,affineZero};
+           affineZero,affineZero,PeriodicAffineOne,affineZero,
+           affineZero,affineZero,affineZero,PeriodicAffineOne};
         """))
     @test only(model_periodic_constraints(affine.model)).affine==
           translation_constraint.affine
@@ -307,16 +617,22 @@ end
             end
         end
     end
-    @test_throws ArgumentError _execute_geo_source(
+    # A cyclic declaration fails inside `set_periodic!` — upstream's
+    # `Msg::Error` channel: the run is marked failed, the parse completes,
+    # and the acyclic relations still record.
+    cyclic=_execute_geo_source(
         _periodic_geo_curve_graph(:chain;cycle=true);mesh_dim=2)
+    @test cyclic.msg_error_count>0
+    @test validate(cyclic.mesh).ok
+    cyclic_constraints=model_periodic_constraints(cyclic.model)
+    @test length(cyclic_constraints)==2
+    @test !any(Int.(getproperty.(cyclic_constraints,:slave_entity)).==30)
 
+    # Hard failures — syntax aborts and accumulated `yymsg(0)` errors are
+    # still thrown as `ArgumentError` at end of parse.
     invalid_statements=(
-        "Periodic Surface {1} = {1} Translate {1,0,0};",
         "Periodic Curve {2} = {4} Translate {1,0};",
         "Periodic Curve {2} = {4} Affine {1,0,0,1};",
-        "Periodic Curve {2} = {4} Affine " *
-        "{1,0,0,1, 0,1,0,0, 0,0,1,0, 0,0,0,2};",
-        "Periodic Curve {2} = {4} Rotate {{0,0,0},{0,0,0},1};",
         "Periodic Curve {2} = {4} Rotate {{0,0,1},{0,0,0},missingAngle};",
         "Periodic Curve {2} = {4} Translate {NaN,0,0};",
         "Periodic Curve {2} = {4} Translate {1 / 0,0,0};",
@@ -331,9 +647,31 @@ end
         @test_throws ArgumentError _execute_geo_source(
             _periodic_geo_square(statement))
     end
-    @test_throws ArgumentError _execute_geo_source(_periodic_geo_square(
-        "dynamicTag = newl; Periodic Curve {dynamicTag} = {4} " *
-        "Translate {1,0,0};"))
+    # `Msg::Error` diagnostics mark the run failed but return the model —
+    # upstream's nonfatal `addPeriodicEdge`/`addPeriodicFace` contract.
+    for statement in (
+            "Periodic Surface {1} = {1} Translate {1,0,0};",
+            "dynamicTag = newl; Periodic Curve {dynamicTag} = {4} " *
+                "Translate {1,0,0};")
+        built=_execute_geo_source(_periodic_geo_square(statement))
+        @test built.msg_error_count>0
+        @test isempty(model_periodic_constraints(built.model))
+    end
+    # A 16-entry `Affine` with a junk homogeneous row is stored verbatim like
+    # upstream's `GEntity::setMeshMaster` — only the first twelve entries are
+    # applied, so the stored record and its `$Periodic` bytes match Gmsh's.
+    junk_row=_execute_geo_source(_periodic_geo_square(
+        "Periodic Curve {2} = {4} Affine " *
+        "{1,0,0,1, 0,1,0,0, 0,0,1,0, 0,0,0,2};"))
+    junk_constraint=only(model_periodic_constraints(junk_row.model))
+    @test junk_constraint.affine[13:16]==(0.0,0.0,0.0,2.0)
+    @test junk_constraint.reversed
+    # A degenerate transform whose endpoints never match is a silent
+    # `Msg::Info` drop upstream — no relation, no error.
+    dropped=_execute_geo_source(_periodic_geo_square(
+        "Periodic Curve {2} = {4} Rotate {{0,0,0},{0,0,0},1};"))
+    @test dropped.msg_error_count==0
+    @test isempty(model_periodic_constraints(dropped.model))
     @test_throws ArgumentError _execute_geo_source(_periodic_geo_square(
         "newl = 2; Periodic Curve {newl} = {4} Translate {1,0,0};"))
     pi_error=try
@@ -377,30 +715,162 @@ function _periodic_geo_cube(offset::Int,shift::Float64)
 end
 
 @testset "bounded .geo periodic volume storage" begin
+    # Gmsh 4.15.2 has no `Periodic Volume` `.geo` production — the statement
+    # is a parse-level `syntax error (Volume)`. Tessella retains volume
+    # periodicity as a model-level extension through `set_periodic!`.
     source=_periodic_geo_cube(0,0.0)*"\n"*_periodic_geo_cube(100,2.0)*"""
         Volume(1) = {7}; Volume(2) = {107};
-        Periodic Volume {2} = {1} Translate {2, 0, 0};
         """
     built=_execute_geo_source(source)
+    @test isempty(model_periodic_constraints(built.model))
+    set_periodic!(built.model,3,[2],[1],
+        (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
     constraint=only(model_periodic_constraints(built.model))
     @test constraint.dim==3
     @test constraint.slave_entity==2 && constraint.master_entity==1
     @test constraint.affine[4]==2.0
 
-    affine=_execute_geo_source(
-        replace(source,"Translate {2, 0, 0}"=>
-            "Affine {1,0,0,2, 0,1,0,0, 0,0,1,0, 0,0,0,1}"))
-    @test only(model_periodic_constraints(affine.model)).affine[4]==2.0
-
-    @test_throws ArgumentError _execute_geo_source(
-        replace(source,"{2} = {1}"=>"{2} = {9}"))
-    @test_throws ArgumentError _execute_geo_source(
-        replace(source,"{2} = {1}"=>"{9} = {1}"))
-    @test_throws ArgumentError _execute_geo_source(
-        replace(source,"{2} = {1}"=>"{2} = {2}"))
+    for statement in (
+            "Periodic Volume {2} = {1} Translate {2, 0, 0};",
+            "Periodic Volume {2} = {1} " *
+                "Affine {1,0,0,2, 0,1,0,0, 0,0,1,0, 0,0,0,1};",
+            "Periodic Volume {2} = {9} Translate {2, 0, 0};",
+            "Periodic Volume {9} = {1} Translate {2, 0, 0};",
+            "Periodic Volume {2} = {2} Translate {2, 0, 0};")
+        error=try
+            _execute_geo_source(source*statement)
+            nothing
+        catch err
+            err
+        end
+        @test error isa ArgumentError
+        @test occursin("syntax error (Volume)",sprint(showerror,error))
+    end
     @test_throws ArgumentError _execute_geo_source(
         _periodic_geo_square("Periodic Volume {1} = {1} Translate {1,0,0};"))
-    @test_throws ArgumentError _execute_geo_source(
-        replace(source,"{2} = {1}"=>"{2} = {1}",count=1)*
-        "Periodic Volume {1} = {2} Translate {-2,0,0};")
+
+    model_only=_execute_geo_source(source).model
+    @test_throws ArgumentError set_periodic!(
+        model_only,3,[2],[9],
+        (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+    @test_throws ArgumentError set_periodic!(
+        model_only,3,[9],[1],
+        (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+    @test_throws ArgumentError set_periodic!(
+        model_only,3,[2],[2],
+        (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+    set_periodic!(model_only,3,[2],[1],
+        (1.0,0.0,0.0,2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+    @test_throws ArgumentError set_periodic!(
+        model_only,3,[1],[2],
+        (1.0,0.0,0.0,-2.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0))
+end
+
+@testset "periodic surface induced-edge resolution" begin
+    # `GFace::setMeshMaster(master, tfo)` resolves every slave boundary and
+    # embedded edge to a master counterpart at declaration, disambiguating
+    # shared endpoint signatures through the transformed curve midpoint —
+    # the pairs surface as the induced `$Periodic` curve links.
+    built=_execute_geo_source(_periodic_geo_two_squares(
+        "Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};"))
+    @test built.msg_error_count==0
+    constraint=only(model_periodic_constraints(built.model))
+    @test constraint.dim==2
+    _,pairs=Tessella.Model._model_periodic_surface_edge_map(
+        built.model,2,1,constraint.affine,constraint.atol,"test")
+    @test Dict(pairs)==Dict(5=>1,6=>2,7=>3,8=>4)
+
+    # A slave surface meshes as a verbatim copy of its master — upstream's
+    # meshGFace path meshes the master on demand, so the copy is exact even
+    # when the master was never meshed directly.
+    master_mesh=mesh_model_surface(built.model,1)
+    slave_mesh=mesh_model_surface(built.model,2)
+    @test slave_mesh.tris==master_mesh.tris
+    @test slave_mesh.coords==master_mesh.coords .+ [0.0,0.0,1.0]
+
+    # Embedded edges join the induced map: a matching embedded pair resolves
+    # like a boundary edge, and an unbalanced embedding aborts the whole
+    # relation with upstream's `Msg::Error` (the run is marked failed but
+    # returns a model).
+    matched=_execute_geo_source(_periodic_geo_two_squares("""
+        Point(9) = {0.25, 0.5, 0, 0.5}; Point(10) = {0.75, 0.5, 0, 0.5};
+        Point(11) = {0.25, 0.5, 1, 0.5}; Point(12) = {0.75, 0.5, 1, 0.5};
+        Line(9) = {9, 10}; Line(10) = {11, 12};
+        Line{9} In Surface{1}; Line{10} In Surface{2};
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        """))
+    @test matched.msg_error_count==0
+    constraint=only(model_periodic_constraints(matched.model))
+    _,pairs=Tessella.Model._model_periodic_surface_edge_map(
+        matched.model,2,1,constraint.affine,constraint.atol,"test")
+    @test Dict(pairs)[10]==9
+
+    unbalanced=_execute_geo_source(_periodic_geo_two_squares("""
+        Point(9) = {0.25, 0.5, 1, 0.5}; Point(10) = {0.75, 0.5, 1, 0.5};
+        Line(9) = {9, 10};
+        Line{9} In Surface{2};
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        """))
+    @test unbalanced.msg_error_count>0
+    @test isempty(model_periodic_constraints(unbalanced.model))
+
+    # Two embedded curves sharing one directed endpoint pair are ambiguous —
+    # the transformed candidate midpoint decides (a straight chord and an
+    # arc bulging away from the chord line resolve to their own kinds;
+    # upstream's sampled bounding box fallback cannot separate them, so the
+    # midpoint must hit first).
+    ambiguous=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.5}; Point(2) = {1, 0, 0, 0.5};
+        Point(3) = {1, 1, 0, 0.5}; Point(4) = {0, 1, 0, 0.5};
+        Point(5) = {0, 0, 1, 0.5}; Point(6) = {1, 0, 1, 0.5};
+        Point(7) = {1, 1, 1, 0.5}; Point(8) = {0, 1, 1, 0.5};
+        Point(9) = {0, 0.5, 0, 0.5}; Point(10) = {1, 0.5, 0, 0.5};
+        Point(11) = {0, 0.5, 1, 0.5}; Point(12) = {1, 0.5, 1, 0.5};
+        Point(13) = {0.5, 0.7, 0, 0.5}; Point(14) = {0.5, 0.7, 1, 0.5};
+        Line(1) = {1, 2}; Line(2) = {2, 3}; Line(3) = {3, 4};
+        Line(4) = {4, 1};
+        Line(5) = {5, 6}; Line(6) = {6, 7}; Line(7) = {7, 8};
+        Line(8) = {8, 5};
+        Line(9) = {9, 10}; Circle(10) = {9, 13, 10};
+        Line(11) = {11, 12}; Circle(12) = {11, 14, 12};
+        Curve Loop(1) = {1, 2, 3, 4}; Curve Loop(2) = {5, 6, 7, 8};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Line{9, 10} In Surface{1}; Line{11, 12} In Surface{2};
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        """)
+    @test ambiguous.msg_error_count==0
+    constraint=only(model_periodic_constraints(ambiguous.model))
+    _,pairs=Tessella.Model._model_periodic_surface_edge_map(
+        ambiguous.model,2,1,constraint.affine,constraint.atol,"test")
+    map=Dict(pairs)
+    @test map[11]==9 && map[12]==10
+
+    # A rotation-derived map resolves the same way: surface 2 is surface 1
+    # turned a quarter turn about the x axis, so the arc midpoint still
+    # identifies its counterpart.
+    rotated=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.5}; Point(2) = {1, 0, 0, 0.5};
+        Point(3) = {1, 1, 0, 0.5}; Point(4) = {0, 1, 0, 0.5};
+        Point(5) = {0, 0, 0, 0.5}; Point(6) = {1, 0, 0, 0.5};
+        Point(7) = {1, 0, 1, 0.5}; Point(8) = {0, 0, 1, 0.5};
+        Point(9) = {0, 0.5, 0, 0.5}; Point(10) = {1, 0.5, 0, 0.5};
+        Point(11) = {0, 0, 0.5, 0.5}; Point(12) = {1, 0, 0.5, 0.5};
+        Point(13) = {0.5, 0.7, 0, 0.5}; Point(14) = {0.5, 0, 0.7, 0.5};
+        Line(1) = {1, 2}; Line(2) = {2, 3}; Line(3) = {3, 4};
+        Line(4) = {4, 1};
+        Line(5) = {5, 6}; Line(6) = {6, 7}; Line(7) = {7, 8};
+        Line(8) = {8, 5};
+        Line(9) = {9, 10}; Circle(10) = {9, 13, 10};
+        Line(11) = {11, 12}; Circle(12) = {11, 14, 12};
+        Curve Loop(1) = {1, 2, 3, 4}; Curve Loop(2) = {5, 6, 7, 8};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Line{9, 10} In Surface{1}; Line{11, 12} In Surface{2};
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        """)
+    @test rotated.msg_error_count==0
+    constraint=only(model_periodic_constraints(rotated.model))
+    _,pairs=Tessella.Model._model_periodic_surface_edge_map(
+        rotated.model,2,1,constraint.affine,constraint.atol,"test")
+    map=Dict(pairs)
+    @test map[11]==9 && map[12]==10
 end

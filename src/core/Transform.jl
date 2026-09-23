@@ -106,6 +106,62 @@ function _transform_gmsh_affine(value,caller::AbstractString)
     return _transform_homogeneous(normalized,caller)
 end
 
+# Periodic-relation affine decode — `SPoint3::transform` semantics: only the
+# first twelve entries (the 3×4 row-major map) are ever applied. The stored
+# record keeps all sixteen entries verbatim like Gmsh's
+# `GEntity::setMeshMaster`, including whatever homogeneous row the source
+# carried, so `$Periodic` MSH records round-trip upstream's bytes exactly.
+function _periodic_affine_3x4(stored::NTuple{16,Float64})
+    coefficients=(stored[1],stored[5],stored[9],
+                  stored[2],stored[6],stored[10],
+                  stored[3],stored[7],stored[11])
+    translation=(stored[4],stored[8],stored[12])
+    return coefficients,translation
+end
+
+# User-facing periodic affine input — returns `(coefficients, translation,
+# stored)`. Sixteen-entry vectors and 4×4 matrices keep their fourth row
+# verbatim; a twelve-entry vector pads to the canonical homogeneous row
+# (Gmsh's API takes exactly 16 — the `.geo` executor builds its own padded
+# record, so this convenience only applies here). Every entry must be finite,
+# but unlike `_transform_homogeneous` the fourth row is stored, not
+# constrained, and no determinant certificate is required — upstream stores
+# whatever the endpoints validate.
+function _periodic_affine_input(value,caller::AbstractString;
+                                name::AbstractString="affine")
+    entries=Matrix{Float64}(undef,4,4)
+    if value isa AbstractMatrix
+        size(value)==(4,4) || throw(ArgumentError(
+            "$caller: $name matrix must be 4×4"))
+        for (row,row_index) in enumerate(axes(value,1)),
+            (column,column_index) in enumerate(axes(value,2))
+            entries[row,column]=_transform_float(
+                value[row_index,column_index],caller,"$name[$row,$column]")
+        end
+    elseif value isa Tuple || value isa AbstractVector
+        count=length(value)
+        count in (12,16) || throw(ArgumentError(
+            "$caller: $name must contain 12 or 16 entries by row"))
+        values=collect(value)
+        for row in 1:4,column in 1:4
+            flat=4(row-1)+column
+            entries[row,column]=flat<=count ? _transform_float(
+                values[flat],caller,"$name[$row,$column]") :
+                (column==4 ? 1.0 : 0.0)
+        end
+    else
+        throw(ArgumentError(
+            "$caller: $name must be a 4×4 matrix or a 12- or " *
+            "16-entry tuple/vector"))
+    end
+    stored=ntuple(16) do flat
+        row=(flat-1)÷4+1;column=mod(flat-1,4)+1
+        entries[row,column]
+    end
+    coefficients,translation=_periodic_affine_3x4(stored)
+    return coefficients,translation,stored
+end
+
 @inline _matrix_entry(matrix,index)=matrix[index]
 
 function _determinant_sign(matrix::NTuple{9,Float64},caller::AbstractString)

@@ -497,12 +497,14 @@ while special records without nodal properties fail explicitly.
 Boolean volumes own operation-time operand geometry. API Boolean operations and
 `.geo` `Delete` clauses make deleted volume tags reusable without changing an
 existing Boolean result.
-It accepts `Periodic Line`, `Periodic Curve`, `Periodic Surface`, and
-`Periodic Volume` with
-`Translate`, `Rotate`, and 12- or 16-entry `Affine` transforms. Volume relations
-are stored and reported but mesh-inert — matching Gmsh 4.15.2, which likewise
-constrains interiors only through periodic boundary entities and serializes no
-dimension-3 record. Cyclic curve
+It accepts `Periodic Line`, `Periodic Curve`, and `Periodic Surface` with
+`Translate`, `Rotate`, and `Affine` transforms, the transform-free
+orientation-only curve form, and the `Periodic Surface j {curves} = k {curves}`
+edge-counterpart form that derives its transform from mapped boundary vertices.
+`Periodic Volume` is a `syntax error (Volume)` like Gmsh's grammar; volume
+relations can still be stored through `set_periodic!` as a Tessella extension
+(Gmsh's `setPeriodic` silently ignores dimension 3) and remain mesh-inert.
+Cyclic curve
 dependencies, curved or non-boundary periodic surfaces,
 and allocator reads after topology-changing or untracked declarations remain
 pending. Gmsh 4.15.2 has no
