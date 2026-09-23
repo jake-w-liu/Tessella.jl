@@ -2216,9 +2216,58 @@ end
 # to the unknown-type warning path — a uniform distribution — like the
 # grammar-only `Beta_Symmetrical`/`Beta_Symmetrical_HWall` kinds (types 8/9).
 # HWall needs the curve's geometric length, so only straight curves support it.
+#
+# `Mesh.FlexibleTransfinite` (`meshGEdge` in Gmsh): with the option set, the
+# stored transfinite count is divided by `Mesh.CharacteristicLengthFactor`
+# (`lcFactor`, truncating) before meshing. When `Mesh.RecombinationAlgorithm`
+# is nonzero — its default — and either `Mesh.RecombineAll` is set or a face
+# the curve bounds is recombine-flagged, Gmsh forces the count odd so blossom
+# recombination can pair the surface triangles. (Gmsh 4.15.2 does not apply
+# the older sources' `increaseN` blossom bump to transfinite curves — both
+# per-face and `RecombineAll` recombination were verified to stop at the odd
+# count.) Division can truncate the count to one — Gmsh meshes the resulting
+# degenerate curve as its two endpoints, which the `>= 2` clamp reproduces.
+function _flexible_transfinite_nodes(m::GeoModel,num_nodes::Int,curve::Int,
+                                     caller::AbstractString)
+    m.meshing.flexible_transfinite || return num_nodes
+    adjusted=num_nodes
+    factor=m.meshing.lc_factor
+    if factor!=0.0
+        q=adjusted/factor
+        # Gmsh's `N /= lcFactor` truncates a C int — clamp the quotient into
+        # a safe range so Inf/NaN/overflow factors degrade to the degenerate
+        # endpoint-only mesh rather than throwing InexactError; counts beyond
+        # Int32 still fail on the parameter laws' node limit.
+        adjusted=isfinite(q) ?
+            trunc(Int,clamp(q,-2.2e9,2.2e9)) :
+            (q>0 ? Int64(2.2e9) : 0)
+    end
+    if m.meshing.recombine_algo!=0 &&
+       (m.meshing.recombine_all ||
+        any(face->haskey(m.meshing.recombine,(2,face)),
+            _model_curve_faces(m,curve)))
+        iseven(adjusted) && (adjusted+=1)
+    end
+    return max(2,adjusted)
+end
+
+# Faces a curve bounds through surface curve loops — Gmsh's `GEdge::faces()`,
+# which drives the recombined-boundary odd-count rule above.
+function _model_curve_faces(m::GeoModel,curve::Int)
+    faces=Int[]
+    for (surface,loops) in m.surfaces
+        any(loop->haskey(m.loops,loop) &&
+            any(signed->abs(signed)==curve,m.loops[loop]),loops) ||
+            continue
+        push!(faces,surface)
+    end
+    return faces
+end
+
 function _transfinite_parameters(m::GeoModel,num_nodes::Int,kind::Symbol,
                                  coef::Float64,caller::AbstractString,curve::Int;
                                  reversed::Bool=false)
+    num_nodes=_flexible_transfinite_nodes(m,num_nodes,curve,caller)
     if !reversed && kind in _TRANSFINITE_HWALL_KINDS
         law=kind===:progression_hwall ? :progression :
             kind===:bump_hwall ? :bump : :beta

@@ -154,7 +154,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   intersection auditing, and exact orientation postconditions;
 - normalized straight-curve transfinite parameters for Gmsh's Progression/Power,
   Bump, and Beta laws plus all three HWall variants, with signed orientation and
-  Float64 representability gates;
+  Float64 representability gates, and `Mesh.FlexibleTransfinite` count scaling
+  by `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` with the
+  recombined-boundary odd-count rule;
 - validated three-sided planar structured patches using both Gmsh
   `Mesh.TransfiniteTri` algorithms — the legacy collapsed-quadrilateral grid
   (default `0`, with auto-rotated or pinned collapsed corners) and the compact
@@ -179,7 +181,7 @@ or untracked
 declarations, and geometry-derived physical-group RHSs beyond the documented inline
 topology queries),
 mixed-element generation beyond the listed first-order surface recombination paths,
-non-affine CAD curve integration, FlexibleTransfinite, and size-map laws,
+non-affine CAD curve integration and size-map laws,
 quasi-transfinite or holed transfinite patches,
 curved/warped or compact-TransfiniteTri volumes,
 selective/high-order refinement, simplex-kernel integration,

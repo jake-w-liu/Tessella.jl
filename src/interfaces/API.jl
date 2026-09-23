@@ -73,7 +73,8 @@ using ..Model: _model_entity_known, _model_fresh_element_tag,
               create_topology!
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, validate,
                    boundary_edges
-using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr
+using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr,
+            _geo_signed_gmsh_int_value
 using ..SizeField: AbstractSizeField, build_geo_size_field, PostViewField
 using ..MeshEntityTopology: MeshEdgeTopology, MeshFaceTopology,
                             _mesh_edge_topology, _mesh_face_topology,
@@ -129,6 +130,12 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshSizeMin"=>0.0,
     "Mesh.MeshSizeMax"=>1.0e22,
     "Mesh.MeshSizeFactor"=>1.0,
+    # `Mesh.CharacteristicLengthFactor` is the same upstream option as
+    # `Mesh.MeshSizeFactor` (`opt_mesh_lc_factor`); both write one value.
+    "Mesh.CharacteristicLengthFactor"=>1.0,
+    "Mesh.FlexibleTransfinite"=>0.0,
+    "Mesh.RecombineAll"=>0.0,
+    "Mesh.RecombinationAlgorithm"=>1.0,
     "Mesh.TransfiniteTri"=>0.0)
 const OPTIONS = copy(DEFAULT_OPTIONS)
 const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
@@ -383,10 +390,14 @@ end
     option(name, value) -> Float64
 
 Get or set one supported process-global mesh option in an initialized session.
-`MeshSizeMin` is nonnegative; `MeshSizeMax` and `MeshSizeFactor` are positive;
+`MeshSizeMin` is nonnegative; `MeshSizeMax`, `MeshSizeFactor`, and its alias
+`CharacteristicLengthFactor` (one upstream `lcFactor` value) are positive;
 the minimum may not exceed the maximum. `Mesh.TransfiniteTri` is 0 or 1 and
-selects the three-sided transfinite surface algorithm. Boolean and nonfinite
-values are rejected, and a failed update leaves all options unchanged.
+selects the three-sided transfinite surface algorithm. `Mesh.FlexibleTransfinite`
+and `Mesh.RecombineAll` store a truncated integer flag, and
+`Mesh.RecombinationAlgorithm` truncates to 0–4 (out-of-range resets to 0) —
+all three feed the transfinite count rules at `generate` time. Boolean and
+nonfinite values are rejected, and a failed update leaves all options unchanged.
 """
 function option(name::AbstractString)
     key=String(name)
@@ -420,10 +431,23 @@ function option(name::AbstractString, value::Real)
         elseif key=="Mesh.TransfiniteTri"
             (v==0.0 || v==1.0) || throw(ArgumentError(
                 "API.option: TransfiniteTri must be 0 or 1"))
+        elseif key=="Mesh.FlexibleTransfinite" || key=="Mesh.RecombineAll"
+            # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
+            v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
+        elseif key=="Mesh.RecombinationAlgorithm"
+            # `opt_mesh_algo_recombine` truncates and resets out-of-[0,4] to 0.
+            v=Float64((i=_geo_signed_gmsh_int_value(v,"API.option");
+                       (i<0 || i>4) ? 0 : i))
         else
-            v>0 || throw(ArgumentError("API.option: MeshSizeFactor must be positive"))
+            v>0 || throw(ArgumentError(
+                "API.option: $key must be positive"))
         end
         OPTIONS[key]=v
+        if key in ("Mesh.MeshSizeFactor","Mesh.CharacteristicLengthFactor")
+            # One upstream option (`lcFactor`) under two names.
+            OPTIONS[key=="Mesh.MeshSizeFactor" ?
+                "Mesh.CharacteristicLengthFactor" : "Mesh.MeshSizeFactor"]=v
+        end
         if key=="Mesh.TransfiniteTri"
             model=CURRENT[]
             model===nothing || (model.meshing.transfinite_tri=Int(v))
@@ -1615,6 +1639,14 @@ function _generate(dim::Integer)
         m=_model_locked()
         caller="API.mesh.generate"
         _validate_generate_algorithms(m,dimension,caller)
+        # Generation-scoped `Mesh.*` options are upstream global CTX state —
+        # mirror them into the model before meshing (`CharacteristicLengthFactor`
+        # and `MeshSizeFactor` share one stored `lcFactor` via the alias in
+        # `option`).
+        m.meshing.flexible_transfinite=!iszero(OPTIONS["Mesh.FlexibleTransfinite"])
+        m.meshing.lc_factor=OPTIONS["Mesh.MeshSizeFactor"]
+        m.meshing.recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"])
+        m.meshing.recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"])
         size_field=_session_size_field_locked(m)
         parts=Tuple{Int,Mesh}[]
         if dimension==2

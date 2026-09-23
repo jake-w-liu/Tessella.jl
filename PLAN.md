@@ -731,7 +731,13 @@ triangles, and tetrahedra with Gmsh 4.15.2 child templates, shared lexicographic
 midpoints, compacted unused nodes, parent-tag preservation, and atomic session-cache
 integration. Normalized affine-line
 transfinite parameters cover Gmsh's Progression/Power, Bump, and Beta laws plus
-their HWall variants, with signed orientation and representability gates. Three-sided
+their HWall variants, with signed orientation and representability gates.
+`Mesh.FlexibleTransfinite` scales declared transfinite counts by the
+`Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` divisor (a single
+upstream `lcFactor` under two names), applies the recombined-boundary
+odd-count rule keyed on `Mesh.RecombinationAlgorithm`, `Mesh.RecombineAll`,
+and adjacent recombine-flagged faces, and clamps the truncated count to the
+endpoint-only curve Gmsh emits below two nodes. Three-sided
 and four-sided planar transfinite
 patches implement Gmsh's specific triangular and average-chord Coons interpolation
 for already-discretized, count-matched boundary chains. Four-sided grids can also be
@@ -815,7 +821,7 @@ Gmsh 4.15.2 serializes
 those entities and cells but no
 Point/Line/Surface-In-Volume relation. P4 does not
 yet claim
-non-affine CAD curve integration, FlexibleTransfinite, or size-map curve laws,
+non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 curved/warped or compact-TransfiniteTri volumes,
 volume/hybrid recombination, selective or
