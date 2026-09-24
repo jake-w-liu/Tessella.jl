@@ -1528,9 +1528,13 @@ _GeoNumericContext()=_GeoNumericContext(
 struct _GeoSyntaxAbort <: Exception
     token::String
     detail::String
-    # `header` marks a failed control-construct header (`If (x y)`, `For i In
-    # {bad}`): upstream's `error tEND` recovery then discards through the
-    # next `;`, eating following control keywords and one `;`-statement.
+    # `header` marks an abort whose production already consumed the
+    # statement's own `;` — a failed control-construct header (`If (x y)`,
+    # `For i In {bad}`) or a terminator-owning term like the `Split`
+    # Transform inside an `x =`/`x() =` list. Upstream's `error tEND`
+    # recovery then reports the following statement's token and discards
+    # through its `;`, eating following control keywords and one
+    # `;`-statement.
     header::Bool
 end
 
@@ -7687,7 +7691,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         return nothing
 
     topology_change=occursin(
-        r"\b(?:Boolean[A-Za-z]*|Extrude|Delete|Duplicata|SetMaxTag|Merge|Coherence)\b",
+        r"\b(?:Boolean[A-Za-z]*|Extrude|Delete|Duplicata|SetMaxTag|Merge|Coherence|Split)\b",
         source) || match(
         # A leading transform can merge coincident entities (lowering
         # automatic counters) even without a Duplicata.

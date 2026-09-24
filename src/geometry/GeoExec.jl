@@ -62,7 +62,8 @@ using ..Model: model_reparametrize_on_surface
 using ..Model: _model_entity_bounding_box, _model_bounds_union, _occ_geometry
 using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
 using ..Model: _tag, _alloc_tag!, _alloc_curve_loop_tag,
-    _alloc_surface_loop_tag, _arc_stored_normal, _occ_cross
+    _alloc_surface_loop_tag, _arc_stored_normal, _occ_cross,
+    _geo_newreg_alloc!
 using ..Model: mesh_model_surface, mesh_model_volume
 using ..Model: create_topology!, classify_surfaces!, create_geometry!,
     add_homology_request!, compute_homology!, _discrete_mesh_records_model,
@@ -815,13 +816,23 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # one. The allocator observer is skipped: the statement did not
             # execute.
             syntax_aborted=false
+            abort_ate_end=false
             assigned=try
                 _exec_line!(m,line,context,allocator_state)
             catch err
                 err isa InterruptException && rethrow()
                 err isa _GeoSyntaxAbort || rethrow()
-                _geo_yyerror!(context,"syntax error ($(err.token))")
-                syntax_aborted=true;nothing
+                # A `header` abort surfaces at the *next* token upstream:
+                # the nested production already consumed this statement's
+                # `;` (the `Split` Transform inside an `x =`/`x() =` list),
+                # so the error lands on the following statement's head —
+                # `$end` at the stream tail.
+                token=err.header ?
+                    (i+1<=lastindex(statements) ?
+                        _geo_stmt_head_token(statements[i+1]) : "\$end") :
+                    err.token
+                _geo_yyerror!(context,"syntax error ($token)")
+                syntax_aborted=true;abort_ate_end=err.header;nothing
             end
             assigned===nothing || (transfinite_tri=assigned)
             # `Delete`-family statements already drove the allocator update
@@ -841,11 +852,20 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 "CreateTopology|ClassifySurfaces|CreateGeometry|" *
                 "Homology|Cohomology|Betti|Mesh)\\b"),line)!==nothing &&
                 _geo_allocator_resync_model!(allocator_state,m)
+            # `Split Curve{..} Point{..}` reallocates through `NEWCURVE()`
+            # (`NEWREG` under `OldNewReg`) and rewires loops/physicals — the
+            # observer invalidates on it, so resync to keep `newX` reads
+            # live. The unanchored match also covers `s() = Split Curve…`.
+            occursin(r"\bSplit\s+Curve\b",line) &&
+                _geo_allocator_resync_model!(allocator_state,m)
             # `error tEND` recovery: a `;`-terminated statement's own
             # terminator ends the discard; a `}`-terminated one (Delete,
             # Boolean*, Extrude, transforms) has none, so recovery eats
-            # through the next `;` like upstream.
-            i=syntax_aborted && !endswith(rstrip(line),';') ?
+            # through the next `;` like upstream. A `header` abort already
+            # consumed the `;` (its production owned the terminator), so
+            # the discard starts with the next statement.
+            i=syntax_aborted &&
+                (abort_ate_end || !endswith(rstrip(line),';')) ?
                 _geo_recovery_next_i(statements,i) : i+1
         else
             # Control tokens mutate the stream state — the branch/loop
@@ -1567,12 +1587,29 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
     nm===nothing && return nothing
     name=nm.captures[1]
     caller="execute_geo: $name"
-    if name=="Intersect" || name=="Split"
-        # `tIntersect tCurve '{' RLD '}' tSurface '{' FExpr '}'` and
-        # `tSplit tCurve '{' FExpr '}' tPoint '{' RLD '}'` — real built-in
-        # kernel curve operations upstream; a hard blocker here.
+    if name=="Split"
+        # `tSplit tCurve '{' FExpr '}' tPoint '{' RLD '}' tEND` — reachable
+        # through `FExpr_Multi`, but the Transform production's own `tEND`
+        # is the statement `;`. The enclosing `x =`/`x() =` production is
+        # then left without a terminator: upstream reduces the transform
+        # (the split side effect commits), reports the *next* statement's
+        # token as a syntax error, and `error tEND` recovery discards that
+        # statement. Without the `;` the Transform cannot reduce at all —
+        # `x() = Split Curve{1} Point{2}, 3` errors at the `,` and the
+        # split does not run — so the arguments are validated first.
+        tail=String(strip(s[nextind(s,firstindex(s),5):end]))
+        (curve_tag,point_tags,rest)=_geo_split_curve_args(
+            tail,context,caller)
+        isempty(rest) || _geo_selector_abort(rest)
+        _geo_split_curve_run!(m,curve_tag,point_tags,context,caller,
+                              allocator_state)
+        throw(_GeoSyntaxAbort("Split","",true))
+    end
+    if name=="Intersect"
+        # `tIntersect tCurve '{' RLD '}' tSurface '{' FExpr '}'` — a real
+        # built-in kernel curve operation upstream; a hard blocker here.
         throw(ArgumentError(
-            "$caller: $name requires built-in kernel curve splitting, " *
+            "$caller: Intersect requires built-in kernel curve splitting, " *
             "which Tessella does not implement"))
     end
     rest=String(strip(s[nextind(s,firstindex(s),
@@ -2759,13 +2796,21 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         return (inner,s,true)
     end
     if name=="Split" || name=="Intersect"
-        # `tSplit tCurve ...` / `tIntersect tCurve ...` — real built-in kernel
-        # curve operations upstream; a hard blocker here. Any other head is a
-        # syntax error (the keyword expects `Curve`).
+        # `tSplit tCurve '{' FExpr '}' tPoint '{' RLD '}'` /
+        # `tIntersect tCurve '{' RLD '}' tSurface '{' FExpr '}'` — any other
+        # head is a syntax error (the keyword expects `Curve`). `Split`
+        # yields the new curve records; `Intersect` is a built-in kernel
+        # blocker.
         match(r"^Curve\b",s)===nothing && _geo_selector_abort(s)
-        throw(ArgumentError(
-            "$caller: $name requires built-in kernel curve splitting, " *
+        name=="Intersect" && throw(ArgumentError(
+            "$caller: Intersect requires built-in kernel curve splitting, " *
             "which Tessella does not implement"))
+        (new_tags,s)=_geo_exec_split_curve!(
+            m,s,context,"$caller: $name",allocator_state)
+        # The Transform production terminates on `tEND` — the member `;` is
+        # part of the `Split` production, like every other shape-list entry.
+        s=_geo_require_list_semicolon(s,caller,name)
+        return ([(1,tag) for tag in new_tags],s,true)
     end
     if name=="Physical" || name=="Parent"
         km=match(r"^(Point|Curve|Line|Surface|Volume)\b",s)
@@ -4614,6 +4659,195 @@ end
 
 # `.geo` `Delete`/`Recursive Delete`/`Delete Embedded` and the named `Delete X`
 # forms. `tail` is everything after the `Delete` keyword(s).
+# `tSplit tCurve '{' FExpr '}' tPoint '{' RecursiveListOfDouble '}'` — parse
+# the two argument groups, returning `(curve_tag, point_tags, rest)`. The
+# deprecated `Split Curve(c) {...}` form parses identically after its
+# warning, like upstream.
+function _geo_split_curve_args(s::AbstractString,
+                               context::_GeoNumericContext,
+                               caller::AbstractString)
+    s=String(strip(s))
+    match(r"^Curve\b",s)===nothing && _geo_selector_abort(s)
+    s=String(strip(s[nextind(s,firstindex(s),5):end]))
+    deprecated=startswith(s,"(")
+    if deprecated
+        _geo_yywarn!(context,
+            "'Split Curve(c) {...}' is deprecated: use 'Split Curve {c} " *
+            "Point {...}' instead")
+        (inner,s)=_geo_balanced_paren(s,caller)
+    else
+        startswith(s,"{") || _geo_selector_abort(s)
+        (inner,s)=_geo_balanced_group(s,caller)
+    end
+    curve_tag=_geo_constraint_int(_geo_eval_numeric(
+        inner,context,"$caller curve"),caller,"curve tag")
+    s=String(strip(s))
+    if !deprecated
+        match(r"^Point\b",s)===nothing && _geo_selector_abort(s)
+        s=String(strip(s[nextind(s,firstindex(s),5):end]))
+    end
+    startswith(s,"{") || _geo_selector_abort(s)
+    (plist,s)=_geo_balanced_group(s,caller)
+    point_tags=Int[_geo_constraint_int(value,caller,"point tag") for
+        value in _geo_numeric_list_values(
+            "{"*plist*"}",context,"$caller points";depth=1)]
+    return (curve_tag,point_tags,String(strip(s)))
+end
+
+# `GEO_Internals::splitCurve` — break a LINE/SPLN/BSPLN curve at the listed
+# control points: each run of consecutive control points becomes a new
+# same-type curve, curve loops and physical-group memberships are rewired
+# in place (`-c` expands to the new tags in reversed, negated order), and
+# the original is deleted. Break vertices not on the control-point list
+# are ignored; a periodic curve (beg == end) wraps its first and last
+# runs into a single curve. Segment tags come from `NEWCURVE()` — `NEWREG()`
+# under `Geometry.OldNewReg` (the default), the per-dimension curve counter
+# at 0 — and physical memberships update the raw group records, which the
+# lazy view resync then re-derives. Returns the new curve tags in creation
+# order.
+# The two upstream `SplitCurve` failure modes are recoverable `Msg::Error`s
+# (followed by the grammar's `yymsg(0, "Could not split curve")`), not aborts:
+# a missing curve or a non-LINE/SPLN/BSPLN type reports and yields nothing.
+# `nothing` marks that path; `caller` formats only the cause messages.
+function _geo_split_curve_impl!(m::GeoModel,curve_tag::Int,
+                                point_tags::Vector{Int},
+                                context::_GeoNumericContext,
+                                caller::AbstractString)
+    if !haskey(m.curves,curve_tag)
+        _geo_msg_error!(context,"Unknown curve $curve_tag to split")
+        return nothing
+    end
+    kind=get(m.curve_types,curve_tag,:line)
+    if !(kind in (:line,:spline,:bspline))
+        # `c->Typ` prints the `MSH_SEGM_*` code: CIRC 202, ELLI 204,
+        # NURBS 208, BEZIER 209 (LINE/SPLN/BSPLN never reach this branch).
+        type_id=kind==:circle ? 202 :
+            kind==:ellipse ? 204 :
+            kind==:nurbs ? 208 :
+            kind==:bezier ? 209 : 0
+        _geo_msg_error!(context,
+            "Cannot split curve $curve_tag with type $type_id")
+        return nothing
+    end
+    controls=kind==:line ? collect(m.curves[curve_tag]) :
+             copy(m.curve_control_points[curve_tag])
+    breaks=Set(point_tags)
+    a,b=m.curves[curve_tag]
+    periodic=a==b
+    first_periodic=true
+    last_periodic=false
+    runs=Vector{Int}[]
+    run=Int[]
+    i=1;n=length(controls)
+    while i<=n
+        pv=controls[i]
+        push!(run,pv)
+        if pv in breaks && length(run)>1
+            last_periodic && break
+            (periodic && first_periodic) || push!(runs,copy(run))
+            first_periodic=false
+            run=[pv]
+        end
+        if i==n && periodic && !first_periodic
+            # Upstream's `i = 0` followed by the loop `i++` resumes at the
+            # second control point (the first repeats the last on a
+            # periodic list).
+            i=1
+            last_periodic=true
+        end
+        i+=1
+    end
+    length(run)>1 && push!(runs,copy(run))
+    old_new_reg=!iszero(something(_geo_option_number(
+        context,"Geometry",0,"OldNewReg"),1.0))
+    new_tags=Int[]
+    for nodes in runs
+        tag=old_new_reg ? _geo_newreg_alloc!(m,1,caller) :
+            _alloc_tag!(m,1,0,caller)
+        _geo_store_curve!(m,tag,nodes;
+            kind=kind==:line ? nothing : kind,
+            control_points=kind!=:line)
+        push!(new_tags,tag)
+    end
+    for (loop,signed_curves) in m.loops
+        any(sc->abs(sc)==curve_tag,signed_curves) || continue
+        rebuilt=Int[]
+        for sc in signed_curves
+            if sc==curve_tag
+                append!(rebuilt,new_tags)
+            elseif sc==-curve_tag
+                for tag in Iterators.reverse(new_tags)
+                    push!(rebuilt,-tag)
+                end
+            else
+                push!(rebuilt,sc)
+            end
+        end
+        m.loops[loop]=rebuilt
+    end
+    # Upstream rewrites the physical group's `Entities` list in place: the
+    # raw records are the canonical store here, and the derived view follows
+    # at the next sync (memberships stay immediately visible either way).
+    carried=get(m.entity_physicals,(1,curve_tag),Int[])
+    for ((dim,ptag),members) in context.raw_physicals
+        dim==1 || continue
+        any(==(curve_tag),members) || continue
+        rebuilt=Int[]
+        for member in members
+            member==curve_tag ? append!(rebuilt,new_tags) :
+                push!(rebuilt,member)
+        end
+        context.raw_physicals[(dim,ptag)]=rebuilt
+    end
+    for ((dim,ptag),members) in m.physical
+        dim==1 || continue
+        any(==(curve_tag),members) || continue
+        rebuilt=Int[]
+        for member in members
+            member==curve_tag ? append!(rebuilt,new_tags) :
+                push!(rebuilt,member)
+        end
+        m.physical[(dim,ptag)]=rebuilt
+    end
+    for tag in new_tags
+        m.entity_physicals[(1,tag)]=copy(carried)
+    end
+    _geo_delete_entities!(m,[(1,curve_tag)])
+    return new_tags
+end
+
+# The `SplitCurve` call itself — separated from argument parsing so the
+# `FExpr_Multi` Transform path can check the terminator before committing
+# the side effect (upstream only runs `splitCurve` when the production
+# reduces).
+function _geo_split_curve_run!(m::GeoModel,curve_tag::Int,
+                               point_tags::Vector{Int},
+                               context::_GeoNumericContext,
+                               caller::AbstractString,allocator_state)
+    if allocator_state!==nothing && allocator_state.factory==:opencascade
+        _geo_yyerror!(context,
+            "Split Curve not available with OpenCASCADE geometry kernel")
+        return Int[]
+    end
+    new_tags=_geo_split_curve_impl!(m,curve_tag,point_tags,context,caller)
+    # `GEO_Internals::splitCurve` marks the internals changed even when the
+    # operation fails — the `_changed = true` runs before `return ok`.
+    context.geo_changed=true
+    if new_tags===nothing
+        _geo_yyerror!(context,"Could not split curve")
+        return Int[]
+    end
+    return new_tags
+end
+
+function _geo_exec_split_curve!(m::GeoModel,tail::AbstractString,
+                                context::_GeoNumericContext,
+                                caller::AbstractString,allocator_state)
+    (curve_tag,point_tags,rest)=_geo_split_curve_args(tail,context,caller)
+    return (_geo_split_curve_run!(
+        m,curve_tag,point_tags,context,caller,allocator_state),rest)
+end
+
 function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
                            context::_GeoNumericContext,
                            allocator_state)
@@ -5496,18 +5730,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         end
         return
     elseif match(r"^Split\s+Curve\b",line)!==nothing
-        if (dm=match(r"^Split\s+Curve\s*\(",line))!==nothing
-            _geo_yywarn!(context,
-                "'Split Curve(c) {...}' is deprecated: use 'Split Curve {c} " *
-                "Point {...}' instead")
-        end
-        if allocator_state!==nothing && allocator_state.factory==:opencascade
-            _geo_yyerror!(context,
-                "Split Curve not available with OpenCASCADE geometry kernel")
-        else
-            throw(ArgumentError(
-                "execute_geo: `Split Curve` is not implemented"))
-        end
+        splitcaller="execute_geo: Split"
+        (new_tags,rest)=_geo_exec_split_curve!(
+            m,String(strip(line[nextind(line,firstindex(line),5):end])),
+            context,splitcaller,allocator_state)
+        _geo_require_statement_end(rest,splitcaller)
         return
     elseif match(r"^Closest\s*\{",line)!==nothing
         if allocator_state!==nothing && allocator_state.factory==:opencascade
