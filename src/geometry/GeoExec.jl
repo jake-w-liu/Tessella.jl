@@ -113,6 +113,7 @@ using ..Elements: read_mixed_msh, MixedMesh, SpecialElementBlock,
 using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
                _record_append_element!, _model_fresh_element_tag
 using ..MeshTypes: validate
+using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate, _periodic_affine_3x4
 using LinearAlgebra: norm, svd
@@ -7231,9 +7232,23 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
         throw(ArgumentError(
             "$caller: external ONELAB clients are not supported"))
     elseif word=="OptimizeMesh"
+        # `GModel::optimizeMesh(how)` — the method is validated before any
+        # entity iteration, so an unknown name errors even without a mesh;
+        # a mesh without the relevant cells is a silent no-op.
+        arg in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D") ||
+            throw(ArgumentError(
+                "$caller: unknown or unsupported mesh optimization " *
+                "method \"$arg\""))
         context.mesh===nothing && return nothing
-        throw(ArgumentError(
-            "$caller: mesh optimization is not supported mid-file"))
+        if arg in ("","Gmsh","Optimize","Relocate3D")
+            ntets(context.mesh)>0 || return nothing
+            context.mesh=smooth_optimize(context.mesh;iters=1,
+                require_positive_tets=false)
+        else
+            ntris(context.mesh)>0 || return nothing
+            context.mesh=_laplacian_smooth_tri_cache(context.mesh,1,nothing)
+        end
+        return nothing
     elseif word=="SetBoundingBox"
         throw(ArgumentError(
             "$caller: `SetBoundingBox` was removed in Gmsh 3.0; " *

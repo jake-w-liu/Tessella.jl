@@ -26,7 +26,7 @@ runs flips then optimization smoothing. These properties are verified in the tes
 module Optimize
 
 using ..MeshTypes: Mesh, nnodes, ntets, node, tet_signed_volume, tet_dihedral_extrema,
-                   tet_radius_edge, tet_volume, boundary_faces, validate
+                   tet_radius_edge, tet_volume, boundary_faces, boundary_edges, validate
 using ..Predicates: orient3
 
 export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, TetQuality
@@ -561,6 +561,46 @@ function _node_tets(m::Mesh)
         push!(inc[m.tets[i,t]], Int32(t))
     end
     return inc
+end
+
+# Laplacian smoothing of a triangle cache — the "Laplace2D"/"Relocate2D"
+# method roles. Boundary nodes and nodes outside the entity selection stay
+# fixed; moves are the isotropic neighbor average in all three coordinates.
+function _laplacian_smooth_tri_cache(mesh::Mesh,iterations::Int,
+                                     movable)
+    boundary=falses(nnodes(mesh))
+    @inbounds for edge in first(boundary_edges(mesh.tris)),node in edge
+        boundary[node]=true
+    end
+    neighbors=[Int32[] for _ in 1:nnodes(mesh)]
+    @inbounds for cell in axes(mesh.tris,2),e in ((1,2),(2,3),(3,1))
+        a=mesh.tris[e[1],cell];b=mesh.tris[e[2],cell]
+        push!(neighbors[a],b);push!(neighbors[b],a)
+    end
+    for list in neighbors
+        sort!(unique!(list))
+    end
+    coords=Matrix{Float64}(mesh.coords)
+    for _ in 1:iterations
+        next=copy(coords)
+        @inbounds for node in axes(coords,2)
+            boundary[node] && continue
+            movable===nothing || movable[node] || continue
+            list=neighbors[node]
+            isempty(list) && continue
+            sx=0.0;sy=0.0;sz=0.0
+            for other in list
+                sx+=coords[1,other];sy+=coords[2,other];sz+=coords[3,other]
+            end
+            next[1,node]=sx/length(list)
+            next[2,node]=sy/length(list)
+            next[3,node]=sz/length(list)
+        end
+        coords=next
+    end
+    return Mesh(coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
+                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
+                tet_tag=mesh.tet_tag)
 end
 
 end # module Optimize

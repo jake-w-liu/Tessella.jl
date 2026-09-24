@@ -128,6 +128,12 @@ mesh time), `Recombine`/`Smoother`/`MeshAlgorithm`/`MeshSizeFromBoundary`,
 `Reverse`/`ReverseMesh`, `Degenerated`, and `Compound` with the
 `MeshAlgorithm` suffix marker — while `RelocateMesh`, `ReorientMesh`, and
 `RecombineMesh` validate but store nothing, matching Gmsh's no-mesh state.
+`OptimizeMesh "method"` mirrors `GModel::optimizeMesh(how)`: the name is
+validated first (unknown optimizers error even without a mesh), `""`/
+`"Gmsh"`/`"Optimize"`/`"Relocate3D"` run the boundary-preserving tetrahedral
+optimizer when the cache has tets, `"Laplace2D"`/`"Relocate2D"` run Laplacian
+smoothing on the triangle cache, and meshes lacking the relevant cells are
+silent no-ops.
 The discrete-model statements mirror `Gmsh.y`'s forms:
 `Homology`/`Cohomology`/`Betti` queue `addHomologyRequest` requests (bare
 `0:3` dimensions, `{dom}`/`{{dom},{sub}}` `ListOfDouble` lists, and the
