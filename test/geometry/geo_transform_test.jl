@@ -394,3 +394,161 @@ end
     # plane (a,b,c,0); the malformed case needs fewer than three components.
     @test _transform_error("Point(1)={0,0,0,1}; Symmetry {1,0} { Point{1}; }") isa ArgumentError
 end
+
+@testset ".geo Split Curve" begin
+    _pts(n)=join("Point($i)={$(i-1)*0.5,0,0,0.2};" for i in 1:n)
+    _spl=_pts(3)*"Spline(1)={1,2,3};"
+
+    # A spline breaks at the listed control point into same-type segments;
+    # tags come from NEWCURVE() — NEWREG() under Geometry.OldNewReg.
+    r=_execute_transform_source(_spl*"Split Curve{1} Point{2};")
+    @test sort!(collect(keys(r.model.curves)))==[2,3]
+    @test r.model.curve_control_points[2]==[1,2]
+    @test r.model.curve_control_points[3]==[2,3]
+    @test get(r.model.curve_types,2,:line)==:spline
+    @test r.model.curves[2]==(1,2) && r.model.curves[3]==(2,3)
+
+    # Physical tags inflate NEWREG: with Physical Point(9) the pieces are
+    # 10 and 11 upstream.
+    r=_execute_transform_source(
+        _spl*"Physical Point(9)={1}; Split Curve{1} Point{2};")
+    @test sort!(collect(keys(r.model.curves)))==[10,11]
+
+    # A surface tag above the curve max raises NEWREG too: upstream gives
+    # 21,22 with Plane Surface(20) present.
+    r=_execute_transform_source(_pts(7)*"""
+        Spline(1)={1,2,3};
+        Line(2)={4,5}; Line(3)={5,6}; Line(4)={6,7}; Line(5)={7,4};
+        Curve Loop(8)={2,3,4,5}; Plane Surface(20)={8};
+        Physical Point(3)={1};
+        Split Curve{1} Point{2};
+        """)
+    @test sort!(collect(keys(r.model.curves)))==[2,3,4,5,21,22]
+
+    # A straight Line split at its end point is a single renumbered copy.
+    r=_execute_transform_source("""
+        Point(1)={0,0,0,0.2}; Point(2)={1,0,0,0.2};
+        Line(1)={1,2}; Split Curve{1} Point{2};
+        """)
+    @test sort!(collect(keys(r.model.curves)))==[2]
+    @test r.model.curves[2]==(1,2)
+
+    # A closed (periodic) spline reseeds at the break into one closed curve.
+    r=_execute_transform_source(
+        _pts(3)*"Spline(1)={1,2,3,1}; Split Curve{1} Point{2};")
+    @test sort!(collect(keys(r.model.curves)))==[2]
+    @test r.model.curve_control_points[2]==[2,3,1,2]
+
+    # Forward loop rewiring: `+c` expands to the new tags in order, and the
+    # physical membership lands on the new curves.
+    r=_execute_transform_source(_pts(5)*"""
+        Spline(1)={1,2,3}; Line(2)={3,4}; Line(3)={4,5}; Line(4)={5,1};
+        Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+        Physical Curve(9)={1};
+        Split Curve{1} Point{2};
+        """)
+    @test r.model.loops[1]==[10,11,2,3,4]
+    @test sort!(collect(keys(r.model.curves)))==[2,3,4,10,11]
+    @test r.model.physical[(1,9)]==[10,11]
+    # The rewrite lands in the raw group records: `Physical Curve(9) -= {1}`
+    # removes nothing (the records hold the new tags, not the old curve).
+    r=_execute_transform_source(_pts(5)*"""
+        Spline(1)={1,2,3}; Line(2)={3,4}; Line(3)={4,5}; Line(4)={5,1};
+        Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+        Physical Curve(9)={1};
+        Split Curve{1} Point{2};
+        Physical Curve(9) -= {1};
+        """)
+    @test r.model.physical[(1,9)]==[10,11]
+
+    # Reversed loop rewiring: `-c` expands to reversed, negated new tags.
+    r=_execute_transform_source(_pts(3)*"""
+        Spline(1)={1,2,3}; Line(5)={1,3};
+        Curve Loop(1)={-1,5}; Plane Surface(1)={1};
+        Split Curve{1} Point{2};
+        """)
+    @test r.model.loops[1]==[-7,-6,5]
+    @test sort!(collect(keys(r.model.curves)))==[5,6,7]
+
+    # `newl` reads after Split stay live (the allocator resyncs): the next
+    # curve allocates NEWREG, tag 8 upstream.
+    r=_execute_transform_source(_pts(3)*"""
+        Spline(1)={1,2,3}; Line(5)={1,3};
+        Split Curve{1} Point{2};
+        Line(newl)={1,3};
+        """)
+    @test sort!(collect(keys(r.model.curves)))==[5,6,7,8]
+
+    # Nested inside a shape list the Transform is legal: Duplicata copies
+    # the two fresh segments (new endpoint copies come with them).
+    r=_execute_transform_source(_spl*"Duplicata { Split Curve{1} Point{2}; }")
+    @test sort!(collect(keys(r.model.curves)))==[2,3,4,5]
+    @test all(p in keys(r.model.points) for p in r.model.curves[4])
+
+    # A break vertex not on the control list silently yields one renumbered
+    # identical segment upstream.
+    r=_execute_transform_source(_spl*"Split Curve{1} Point{7};")
+    @test sort!(collect(keys(r.model.curves)))==[2]
+    @test r.model.curve_control_points[2]==[1,2,3]
+
+    # The deprecated `Split Curve(c) {...}` form parses with its warning.
+    r=_execute_transform_source(_spl*"Split Curve(1) {2};")
+    @test sort!(collect(keys(r.model.curves)))==[2,3]
+    @test any(w->occursin("deprecated",w),r.warnings)
+
+    # Unknown curve / unsplittable type are recoverable `Msg::Error`s plus
+    # `Could not split curve` — execution continues upstream (the error
+    # surfaces at end-of-parse; `Exit 0` leaves before that check).
+    err=_transform_error("""
+        Point(1)={0,0,0,0.2}; Split Curve{99} Point{1};
+        Point(2)={1,0,0,0.2};
+        """)
+    @test err isa ArgumentError
+    @test occursin("Could not split curve",err.msg)
+    r=_execute_transform_source("""
+        Point(1)={0,0,0,0.2}; Split Curve{99} Point{1};
+        Point(2)={1,0,0,0.2}; Exit 0;
+        """)
+    @test sort!(collect(keys(r.model.points)))==[1,2]
+    err=_transform_error("""
+        Point(1)={0,0,0,0.2}; Point(2)={1,0,0,0.2}; Point(3)={0,1,0,0.2};
+        Circle(1)={2,1,3}; Split Curve{1} Point{2}; Point(4)={1,1,0,0.2};
+        """)
+    @test err isa ArgumentError
+    @test occursin("Could not split curve",err.msg)
+    r=_execute_transform_source("""
+        Point(1)={0,0,0,0.2}; Point(2)={1,0,0,0.2}; Point(3)={0,1,0,0.2};
+        Circle(1)={2,1,3}; Split Curve{1} Point{2}; Point(4)={1,1,0,0.2};
+        Exit 0;
+        """)
+    @test sort!(collect(keys(r.model.curves)))==[1]
+    @test sort!(collect(keys(r.model.points)))==[1,2,3,4]
+
+    # Inside an FExpr_Multi (`x() = Split ...` or `x = Split ...`) the
+    # Transform's own `tEND` leaves the assignment unterminated upstream —
+    # the split runs, the variable is never assigned, a syntax error is
+    # reported at the next statement's token, and `error tEND` recovery
+    # drops that statement (verified against the pinned binary: curves
+    # 2,3 exist, `syntax error (Point)`, `Point(4)` is absent).
+    err=_transform_error(_spl*"s() = Split Curve{1} Point{2};")
+    @test err isa ArgumentError
+    @test occursin("syntax error",err.msg)
+    r=_execute_transform_source(
+        _spl*"s() = Split Curve{1} Point{2}; Point(4)={1,1,0,0.2}; "*
+            "Point(5)={2,2,0,0.2}; Exit 0;")
+    @test sort!(collect(keys(r.model.curves)))==[2,3]
+    @test !haskey(r.lists,"s")
+    @test sort!(collect(keys(r.model.points)))==[1,2,3,5]
+    r=_execute_transform_source(
+        _spl*"x = Split Curve{1} Point{2}; Point(4)={1,1,0,0.2}; Exit 0;")
+    @test sort!(collect(keys(r.model.curves)))==[2,3]
+    @test !haskey(r.model.points,4)
+    # Without the `;` the Transform cannot reduce upstream — `x() =
+    # Split Curve{1} Point{2}, 3` errors at the `,` and the split does
+    # not run; recovery then resumes at the next statement normally.
+    r=_execute_transform_source(
+        _spl*"x() = Split Curve{1} Point{2}, 3; Point(4)={1,1,0,0.2}; "*
+            "Exit 0;")
+    @test sort!(collect(keys(r.model.curves)))==[1]
+    @test haskey(r.model.points,4)
+end

@@ -134,6 +134,26 @@ validated first (unknown optimizers error even without a mesh), `""`/
 optimizer when the cache has tets, `"Laplace2D"`/`"Relocate2D"` run Laplacian
 smoothing on the triangle cache, and meshes lacking the relevant cells are
 silent no-ops.
+`Split Curve{c} Point{...}` mirrors `GEO_Internals::splitCurve`: a
+`Line`/`Spline`/`BSpline` record breaks at the listed control points into
+same-type segments tagged through `NEWCURVE()` — `NEWREG()` under the
+default `Geometry.OldNewReg`, so physical-group, loop, and higher-dimension
+maxima all feed the counter (verified bit-for-bit against the pinned
+binary's 10/11, 21/22, and 6/7 tag choices) — while curve loops rewire
+`±c` to the new tags in forward or reversed-negated order, physical
+memberships move in the raw group records (a later `-= {c}` touches
+nothing), a closed spline reseeds into a single closed curve, and the
+original record is deleted. Break vertices off the control list silently
+yield one renumbered identical curve; an unknown curve or a non-splittable
+type reports `Msg::Error` plus `Could not split curve` and continues. The
+deprecated `Split Curve(c) {...}` form parses with its warning, the
+`Duplicata { Split ... }` nested-transform form is legal inside shape
+lists, and inside an `FExpr_Multi` (`x =`/`x() = Split ...`) the
+production's own `tEND` consumption makes the assignment a syntax error
+after the split runs — the error lands on the next statement's token and
+`error tEND` recovery drops that statement, matching the pinned binary's
+statement-poisoning behavior (a non-`;` tail like `, 3` prevents the
+reduction, so the split never runs).
 The discrete-model statements mirror `Gmsh.y`'s forms:
 `Homology`/`Cohomology`/`Betti` queue `addHomologyRequest` requests (bare
 `0:3` dimensions, `{dom}`/`{{dom},{sub}}` `ListOfDouble` lists, and the
