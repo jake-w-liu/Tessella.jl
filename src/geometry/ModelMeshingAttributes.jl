@@ -918,16 +918,16 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
     return nothing
 end
 
-const _HOMOLOGY_KINDS=("Homology","Cohomology")
+const _HOMOLOGY_KINDS=("Homology","Cohomology","Betti")
 
 """
     add_homology_request!(model; kind="Homology", domain_tags=Int[],
                           subdomain_tags=Int[], dims=Int[])
 
 Queue a (co)homology computation request, matching Gmsh's
-`mesh.addHomologyRequest`. `kind` is `"Homology"` or `"Cohomology"`;
-`domain_tags`/`subdomain_tags` list entity tags and `dims` the chain
-dimensions to compute.
+`mesh.addHomologyRequest`. `kind` is `"Homology"`, `"Cohomology"` or
+`"Betti"` (ranks only, no stored chains); `domain_tags`/`subdomain_tags`
+list physical-group tags and `dims` the chain dimensions to compute.
 """
 function add_homology_request!(m::GeoModel;kind="Homology",domain_tags=Int[],
                                subdomain_tags=Int[],dims=Int[])
@@ -935,7 +935,8 @@ function add_homology_request!(m::GeoModel;kind="Homology",domain_tags=Int[],
     kind isa AbstractString || throw(ArgumentError(
         "$caller: kind must be a string"))
     String(kind) in _HOMOLOGY_KINDS || throw(ArgumentError(
-        "$caller: kind must be \"Homology\" or \"Cohomology\" (got \"$kind\")"))
+        "$caller: kind must be \"Homology\", \"Cohomology\" or \"Betti\" " *
+        "(got \"$kind\")"))
     domain=Int[_mesh_attr_positive_int(t,caller,"domain_tags entry")
                for t in domain_tags]
     subdomain=Int[_mesh_attr_positive_int(t,caller,"subdomain_tags entry")
@@ -1964,8 +1965,10 @@ function _homology_complex(cells::Dict{Tuple{Int,Int},
                            domain::Set{Tuple{Int,Int}},
                            subdomain::Set{Tuple{Int,Int}},
                            caller::AbstractString)
-    dom=[Set{Tuple}() for _ in 0:3]
-    sub=[Set{Tuple}() for _ in 0:3]
+    # Upstream's `ChainComplex` is fixed at dimensions 0:4 — the empty top
+    # level lets `complex[k+2]` serve as the boundary target for k=3.
+    dom=[Set{Tuple}() for _ in 0:4]
+    sub=[Set{Tuple}() for _ in 0:4]
     for (key,elements) in cells
         target=key in subdomain ? sub : key in domain ? dom : nothing
         target===nothing && continue
@@ -1987,8 +1990,8 @@ function _homology_complex(cells::Dict{Tuple{Int,Int},
             end
         end
     end
-    relative=[setdiff(dom[d+1],sub[d+1]) for d in 0:3]
-    return [sort!(collect(relative[d+1])) for d in 0:3]
+    relative=[setdiff(dom[d+1],sub[d+1]) for d in 0:4]
+    return [sort!(collect(relative[d+1])) for d in 0:4]
 end
 
 # GF(2) nullspace of the boundary map restricted to `cells_k` → `cells_km1`:
@@ -2099,55 +2102,138 @@ function compute_homology!(m::GeoModel,cells::Dict{Tuple{Int,Int},
         requests=m.meshing.homology_requests)
     caller="compute_homology!"
     output=Tuple{Int,Int}[]
+    # Upstream builds one `Homology` object per unique (domain, subdomain)
+    # request pair (`GModel::computeHomology` groups the multimap by key);
+    # the object's `_homologyComputed`/`_cohomologyComputed` dim flags persist
+    # across the pair's requests. A request whose dims were all computed by
+    # an earlier request stores nothing, while a partially computed request
+    # re-runs and re-stores chains for every requested dim.
+    pairs=Tuple{Vector{Int},Vector{Int}}[]
     for request in requests
-        kind=request.kind
-        kind in ("Homology","Cohomology") || throw(ArgumentError(
-            "$caller: unsupported computation type \"$kind\""))
-        domain=Set{Tuple{Int,Int}}()
-        for (dim,tag) in keys(m.physical)
-            tag in request.domain || continue
-            for entity in m.physical[(dim,tag)]
-                push!(domain,(dim,entity))
+        key=(request.domain,request.subdomain)
+        key in pairs || push!(pairs,key)
+    end
+    for key in pairs
+        group=[r for r in requests if (r.domain,r.subdomain)==key]
+        # Domain/subdomain entity sets and the cell complex are per pair —
+        # upstream resolves them once in the `Homology` constructor.
+        first=group[1]
+        top=model_dimension(m)
+        if isempty(first.domain)
+            # Upstream defaults an empty domain to every entity of the
+            # model's top dimension and skips the subdomain lookup entirely
+            # in that branch (`Homology::Homology` in geo/Homology.cpp).
+            top<0 && throw(ArgumentError("$caller: domain is empty"))
+            domain=Set{Tuple{Int,Int}}(
+                (top,tag) for tag in keys(_model_entity_dictionary(m,top)))
+            for (d,tag) in keys(m.discrete)
+                d==top && push!(domain,(top,tag))
+            end
+            subdomain=Set{Tuple{Int,Int}}()
+        else
+            domain=Set{Tuple{Int,Int}}()
+            for (dim,tag) in keys(m.physical)
+                tag in first.domain || continue
+                for entity in m.physical[(dim,tag)]
+                    push!(domain,(dim,entity))
+                end
+            end
+            subdomain=Set{Tuple{Int,Int}}()
+            for (dim,tag) in keys(m.physical)
+                tag in first.subdomain || continue
+                for entity in m.physical[(dim,tag)]
+                    push!(subdomain,(dim,entity))
+                end
             end
         end
         isempty(domain) && throw(ArgumentError("$caller: domain is empty"))
-        subdomain=Set{Tuple{Int,Int}}()
-        for (dim,tag) in keys(m.physical)
-            tag in request.subdomain || continue
-            for entity in m.physical[(dim,tag)]
-                push!(subdomain,(dim,entity))
-            end
+        # The cell complex builds lazily at the first request that actually
+        # computes — upstream constructs it inside `findHomologyBasis`/
+        # `findBettiNumbers`, so per-request dimension validation errors
+        # precede the empty-complex error.
+        complex=nothing
+        function complex_or_error()
+            complex===nothing || return complex
+            built=_homology_complex(cells,domain,subdomain,caller)
+            # Upstream: "Cell Complex is empty: check the domain and the
+            # mesh" — the domain entities carried no cells (e.g. nothing was
+            # meshed).
+            all(isempty,built) && throw(ArgumentError(
+                "$caller: cell complex is empty: check the domain and " *
+                "the mesh"))
+            complex=built
+            return built
         end
-        complex=_homology_complex(cells,domain,subdomain,caller)
-        for k in request.dims
-            (k isa Integer && !(k isa Bool) && 0<=k<=3) ||
-                throw(ArgumentError("$caller: dims entries must be in 0:3"))
-            cells_k=complex[Int(k)+1]
-            isempty(cells_k) && continue
-            lower=Int(k)==0 ? Tuple[] : complex[Int(k)]
-            if kind=="Homology"
-                cycles=_homology_cycles(lower,cells_k)
-                pivots=_homology_boundary_pivots(cells_k,complex[Int(k)+2])
-            else
-                cycles=_homology_cocycles(cells_k,complex[Int(k)+2])
-                pivots=_homology_coboundary_pivots(lower,cells_k)
-            end
-            for generator in _homology_quotient(cycles,pivots)
-                entity_tag=add_discrete_entity!(m,Int(k),0)
-                record=m.discrete[(Int(k),entity_tag)]
-                for cell_index in sort!(collect(generator))
-                    cell=cells_k[cell_index]
-                    _record_append_element!(record,
-                        _homology_cell_type(cell),
-                        Int32(_model_fresh_element_tag(m)),
-                        Int32[cell...])
+        computed_h=Set{Int}();computed_c=Set{Int}()
+        for request in group
+            kind=request.kind
+            kind in ("Homology","Cohomology","Betti") || throw(ArgumentError(
+                "$caller: unsupported computation type \"$kind\""))
+            # Upstream fills an empty dims list with 0:getDim()-1 and filters
+            # explicit dims to 0:getDim(), erroring when nothing survives.
+            dimensions=isempty(request.dims) ? collect(0:top-1) :
+                Int[k for k in request.dims
+                    if (k isa Integer && !(k isa Bool) && 0<=k<=top)]
+            isempty(dimensions) && throw(ArgumentError(
+                "$caller: invalid homology computation dimensions given"))
+            # `Betti` reports ranks without storing any chains.
+            kind=="Betti" && (complex_or_error();continue)
+            computed=kind=="Homology" ? computed_h : computed_c
+            all(d->d in computed,dimensions) && continue
+            union!(computed,dimensions)
+            current=complex_or_error()
+            name_domain=_homology_domain_string(request.domain,
+                                                request.subdomain)
+            for k in dimensions
+                cells_k=current[Int(k)+1]
+                isempty(cells_k) && continue
+                lower=Int(k)==0 ? Tuple[] : current[Int(k)]
+                if kind=="Cohomology"
+                    cycles=_homology_cocycles(cells_k,current[Int(k)+2])
+                    pivots=_homology_coboundary_pivots(lower,cells_k)
+                else
+                    cycles=_homology_cycles(lower,cells_k)
+                    pivots=_homology_boundary_pivots(cells_k,current[Int(k)+2])
                 end
-                physical=add_physical_group!(m,Int(k),[entity_tag])
-                push!(output,(Int(k),physical))
+                generator_index=0
+                for generator in _homology_quotient(cycles,pivots)
+                    generator_index+=1
+                    entity_tag=add_discrete_entity!(m,Int(k),0)
+                    record=m.discrete[(Int(k),entity_tag)]
+                    for cell_index in sort!(collect(generator))
+                        cell=cells_k[cell_index]
+                        _record_append_element!(record,
+                            _homology_cell_type(cell),
+                            Int32(_model_fresh_element_tag(m)),
+                            Int32[cell...])
+                    end
+                    # Upstream wraps each stored generator in a physical
+                    # group named "H_k{domain}i" / "H^k{domain}i"
+                    # (`storeChain`). Re-requests duplicate the name —
+                    # `setPhysicalName` enforces no uniqueness — so the
+                    # name is bound directly rather than through the
+                    # uniqueness-filtering kwarg.
+                    prefix=kind=="Homology" ? "H_" : "H^"
+                    group_name=prefix*string(k)*name_domain*
+                               string(generator_index)
+                    physical=add_physical_group!(m,Int(k),[entity_tag];
+                        name=group_name)
+                    m.physical_names[(Int(k),physical)]=group_name
+                    push!(output,(Int(k),physical))
+                end
             end
         end
     end
     return output
+end
+
+# `_getDomainString` — the `{d1,d2}` domain tag list (or `{0}` for the
+# whole-model default) plus a `,{s1,s2}` subdomain suffix, used in the
+# generated physical-group names.
+function _homology_domain_string(domain,subdomain)
+    s="{"*(isempty(domain) ? "0" : join(domain,","))*"}"
+    isempty(subdomain) || (s*=",{"*join(subdomain,",")*"}")
+    return s
 end
 
 # Cocycles of degree k: nullspace of the coboundary δ_k : k-cells → (k+1)-cells

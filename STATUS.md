@@ -128,6 +128,34 @@ mesh time), `Recombine`/`Smoother`/`MeshAlgorithm`/`MeshSizeFromBoundary`,
 `Reverse`/`ReverseMesh`, `Degenerated`, and `Compound` with the
 `MeshAlgorithm` suffix marker — while `RelocateMesh`, `ReorientMesh`, and
 `RecombineMesh` validate but store nothing, matching Gmsh's no-mesh state.
+The discrete-model statements mirror `Gmsh.y`'s forms:
+`Homology`/`Cohomology`/`Betti` queue `addHomologyRequest` requests (bare
+`0:3` dimensions, `{dom}`/`{{dom},{sub}}` `ListOfDouble` lists, and the
+`(dims){dom,sub}` form that requires both lists), executed at the end of
+`Mesh n`/`mesh_dim` generation like `GModel::computeHomology` — an empty
+domain covers the model's top-dimensional entities, explicit dims filter to
+`0:getDim()`, `Betti` reports ranks without storing, and surviving
+generators become discrete entities under `H_k{dom[,sub]}i`/`H^k{…}i`
+physical groups matching the pinned binary's names and tag allocation
+(requests repeated for a computed space store nothing, requests queued
+after meshing never run, and upstream's `.msh` chain-only output quirk is
+deliberately not mirrored — the generated mesh is preserved).
+`CreateTopology;`/`CreateTopology{a,b}` (simply-connected repair plus
+GEO-internals export defaults — the export rebuilds the pending physical
+registry from entity memberships like `exportDiscreteGEOInternals`),
+`ClassifySurfaces{a,b,c[,d]}`, and
+`CreateGeometry;`/`CreateGeometry{shapes}` dispatch to the discrete-entity
+implementations. `.geo` `Merge "file.msh"` now imports the file like
+`GModel::readMSH`: elementary (MSH2, missing tags → entity 0) or entity
+(MSH4) cell classification becomes discrete entities carrying their cells,
+MSH4 node/element tags, per-node entity classification, parametric
+coordinates, and declared boundaries are preserved, physical memberships and
+names join the model, and every element family is accepted while only the
+simplex cells fold into the mid-file mesh (meshing discrete entities
+themselves remains an explicit non-claim). Discrete tags share the
+elementary namespace like upstream's `getMaxElementaryNumber` — `newp`/
+`newl`/`news`/`newv`-family reads after `Merge`, `CreateTopology`, or
+homology output skip them (bit-exact counters against the pinned binary).
 `Delete{…}`/`Recursive Delete{…}` follow `GEO_Internals::remove` exactly:
 per-entity list-order attempts, absolute matching for points and curves,
 signed matching for surfaces and volumes, boundary-ownership refusal,

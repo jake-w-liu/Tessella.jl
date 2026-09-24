@@ -64,6 +64,10 @@ using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
 using ..Model: _tag, _alloc_tag!, _alloc_curve_loop_tag,
     _alloc_surface_loop_tag, _arc_stored_normal, _occ_cross
 using ..Model: mesh_model_surface, mesh_model_volume
+using ..Model: create_topology!, classify_surfaces!, create_geometry!,
+    add_homology_request!, compute_homology!, _discrete_mesh_records_model,
+    _curve_type, _periodic_curve_point, _transfinite_parameters,
+    model_dimension
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _geo_eval_numeric
 using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
@@ -88,7 +92,7 @@ using ..IO: _geo_split_args, _geo_yyerror!, _geo_yywarn!, _geo_yyinfo!,
 using ..IO: _geo_fix_relative_path, _geo_print_list_of_double
 using ..IO: _geo_vsnprintf_expand
 using ..IO: _geo_string_rhs, _geo_eval_string_list
-using ..IO: _geo_matching_delim, _GEO_COLOR_NAMES
+using ..IO: _geo_matching_delim, _GEO_COLOR_NAMES, _geo_braced_end
 using ..IO: _geo_option_number
 using ..IO: _geo_msg_error!, _geo_eof_error!, _geo_context_has_variable
 using ..IO: _geo_exec_struct_def!
@@ -103,7 +107,12 @@ using ..IO: GeoFieldSpec, _GEO_FIELD_KINDS, _geo_expression_field_tags
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
-using ..IO: read_msh, write_msh
+using ..IO: write_msh
+using ..Elements: read_mixed_msh, MixedMesh, SpecialElementBlock,
+                  msh_dimension, msh_family
+using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
+               _record_append_element!, _model_fresh_element_tag
+using ..MeshTypes: validate
 using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate, _periodic_affine_3x4
 using LinearAlgebra: norm, svd
@@ -448,12 +457,16 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
         isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
         length(model.surfaces)==1 || throw(ArgumentError(
             "execute_geo: Mesh 2 with multiple remaining surfaces $(sort(collect(keys(model.surfaces)))) is a blocker"))
-        mesh=mesh_model_surface(model, only(keys(model.surfaces)))
+        tag=only(keys(model.surfaces))
+        mesh=mesh_model_surface(model,tag)
+        _geo_run_homology!(model,mesh,[(2,tag,mesh)],"execute_geo")
     elseif dim==3
         isempty(model.volumes) && throw(ArgumentError("execute_geo: Mesh 3 requested but no volumes exist"))
         length(model.volumes)==1 || throw(ArgumentError(
             "execute_geo: Mesh 3 with multiple remaining volumes $(sort(collect(keys(model.volumes)))) is a blocker — Boolean Delete the operands or mesh a single volume"))
-        mesh=mesh_model_volume(model, only(keys(model.volumes)))
+        tag=only(keys(model.volumes))
+        mesh=mesh_model_volume(model,tag)
+        _geo_run_homology!(model,mesh,[(3,tag,mesh)],"execute_geo")
     end
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
                         context.lists,context.strings,
@@ -816,6 +829,16 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 allocator_state,line,context,"execute_geo")
             occursin(r"\bBoolean[A-Za-z]*\b",
                      line) &&
+                _geo_allocator_resync_model!(allocator_state,m)
+            # Statements that create entities outside the tracked allocator
+            # path resync so `newp`-family reads skip their tags upstream-
+            # style: `.msh` `Merge`/`Include` materialize discrete entities,
+            # the discrete-model statements derive boundary entities, and
+            # `Mesh n` runs queued homology requests whose chains share the
+            # elementary namespace.
+            match(Regex("^(?:Merge|Include|MergeWithBoundingBox|" *
+                "CreateTopology|ClassifySurfaces|CreateGeometry|" *
+                "Homology|Cohomology|Betti|Mesh)\\b"),line)!==nothing &&
                 _geo_allocator_resync_model!(allocator_state,m)
             # `error tEND` recovery: a `;`-terminated statement's own
             # terminator ends the discard; a `}`-terminated one (Delete,
@@ -6063,7 +6086,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         "CreateMeshFaces|RefineMesh|TransformMesh|SetOrder|" *
         "PartitionMesh|CreateOverlaps|AdaptMesh|CreateTopology|" *
         "ClassifySurfaces|CreateGeometry)\\b"),line)) !== nothing
-        _geo_exec_mesh_statement!(m,line,context)
+        _geo_exec_mesh_statement!(m,line,context,allocator_state)
         return
     elseif (mm=match(r"^Mesh\s+(.*?)\s*;?\s*$",line)) !== nothing
         d=_geo_eval_numeric(mm.captures[1],context,"execute_geo: Mesh")
@@ -6091,9 +6114,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif match(r"^Levelset\b",line)!==nothing
         throw(ArgumentError(
             "execute_geo: Levelset definitions are not supported"))
-    elseif match(r"^Homology\b",line)!==nothing
-        throw(ArgumentError(
-            "execute_geo: Homology computations are not supported"))
+    elseif (mm=match(r"^(Homology|Cohomology|Betti)\b(.*)$",line))!==nothing
+        # `Homology`/`Cohomology`/`Betti` queue a request like
+        # `GModel::addHomologyRequest`; requests run inside the next
+        # `Mesh n` (and the implicit final generation), after the mesh
+        # exists — the upstream `GModel::mesh` placement.
+        _geo_exec_homology_statement!(m,mm.captures[1],mm.captures[2],
+                                      context)
+        return
     end
     # Every remaining `name`-headed form is an Affectation: scalar/list
     # assignments, indexed and multi-index mutation, `++`/`--`, string and
@@ -6620,7 +6648,129 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     end
     isempty(parts) && throw(ArgumentError(
         "$caller $dim: no $(dim==2 ? "surfaces" : "entities") to mesh"))
-    return _geo_merge_entity_meshes(parts)
+    merged,owner=_geo_merge_entity_meshes(parts)
+    _geo_run_homology!(m,merged,parts,caller)
+    return merged,owner
+end
+
+# Run the queued `Homology`/`Cohomology`/`Betti` requests — upstream calls
+# `GModel::computeHomology` at the end of `GModel::mesh`, once every entity's
+# mesh vertices exist. The generated mesh is preserved and each surviving
+# generator is stored as a discrete entity under a named physical group;
+# pinned Gmsh 4.15.2's `.msh` output drops the mesh and serializes only the
+# chains, which Tessella deliberately does not mirror.
+function _geo_run_homology!(m::GeoModel,mesh::Mesh,
+                          parts::Vector{Tuple{Int,Int,Mesh}},
+                          caller::AbstractString)
+    isempty(m.meshing.homology_requests) && return nothing
+    cells=_geo_homology_cells(m,mesh,parts,caller)
+    compute_homology!(m,cells;requests=m.meshing.homology_requests)
+    return nothing
+end
+
+# Entity→element map for `compute_homology!`, in one node-index space keyed by
+# bitwise-identical coordinates: the generated mesh's nodes first, then any
+# extra nodes the curve/discrete records need (homology indices only identify
+# cells — they need not exist in `mesh`).
+function _geo_homology_cells(m::GeoModel,mesh::Mesh,
+                             parts::Vector{Tuple{Int,Int,Mesh}},
+                             caller::AbstractString)
+    lookup=Dict{NTuple{3,Int},Int32}()
+    for n in 1:nnodes(mesh)
+        x,y,z=mesh.coords[:,n]
+        lookup[(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))]=
+            Int32(n)
+    end
+    next=Int32(nnodes(mesh)+1)
+    function index_for(point)
+        x,y,z=point
+        key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
+        i=get(lookup,key,Int32(0))
+        i!=0 && return i
+        i=next;lookup[key]=i;next+=Int32(1)
+        return i
+    end
+    cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{Int32}}}}()
+    function entry(key)
+        get!(cells,key,Tuple{Int32,Vector{Int32}}[])
+    end
+    # Meshed entities own their top-dimension elements; boundary elements
+    # belong to the boundary entities (curves below, discrete records after).
+    for (dim,tag,part) in parts
+        remap=Int32[index_for(part.coords[:,n]) for n in 1:nnodes(part)]
+        elements=entry((dim,tag))
+        if dim==2
+            for t in 1:ntris(part)
+                push!(elements,(Int32(2),
+                    Int32[remap[part.tris[k,t]] for k in 1:3]))
+            end
+        elseif dim==3
+            for t in 1:ntets(part)
+                push!(elements,(Int32(4),
+                    Int32[remap[part.tets[k,t]] for k in 1:4]))
+            end
+        end
+    end
+    # Curve chains reproduce the mesher's subdivision exactly — transfinite
+    # parameters plus size-at-parameter insertion points, `Degenerated`
+    # collapsing to the endpoint edge — so node lookups hit the same merged
+    # coordinates. Only straight Lines subdivide today.
+    for (curve,(a,b)) in m.curves
+        _curve_type(m,curve)===:line || continue
+        # A `Degenerated` curve (or a degenerate-typed point curve) meshes to
+        # a single vertex — no 1-cells.
+        (curve in m.meshing.degenerated || a==b) && continue
+        parameters=Float64[]
+        spec=get(m.meshing.transfinite_curves,curve,nothing)
+        spec===nothing || append!(parameters,
+            _transfinite_parameters(m,spec.num_nodes,spec.kind,
+                spec.coef,caller,curve;reversed=spec.reversed))
+        for (plist,_) in get(m.meshing.size_at_params,(1,curve),
+                             Tuple{Vector{Float64},Float64}[])
+            append!(parameters,plist)
+        end
+        isempty(parameters) && (parameters=[0.0,1.0])
+        sort!(unique!(parameters))
+        indices=Int32[index_for(_periodic_curve_point(m,curve,p,caller))
+                      for p in parameters]
+        elements=entry((1,curve))
+        for i in 1:length(indices)-1
+            push!(elements,(Int32(1),Int32[indices[i],indices[i+1]]))
+        end
+    end
+    for (tag,point) in m.points
+        push!(entry((0,tag)),(Int32(15),Int32[index_for(point)]))
+    end
+    # Discrete entities (merged meshes, classified topology, meshing
+    # attachments) already store their elements against record node tags.
+    # Connectivity addresses the records' shared tag space — a node may live
+    # on a different entity's record (shared boundary vertices, and the
+    # child-entity migration `create_topology!` performs) — so tags resolve
+    # against a model-wide map, not the owning record.
+    global_nodes=Dict{Int32,Int32}()
+    for (_,record) in _discrete_mesh_records_model(m)
+        for (i,t) in enumerate(record.node_tags)
+            get!(global_nodes,t) do
+                index_for(record.node_coords[:,i])
+            end
+        end
+    end
+    for (key,record) in _discrete_mesh_records_model(m)
+        elements=entry(key)
+        for (msh_type,nodes) in zip(record.element_types,
+                                    record.element_nodes)
+            mapped=Vector{Int32}(undef,length(nodes))
+            for (k,t) in enumerate(nodes)
+                i=get(global_nodes,t,Int32(0))
+                i==0 && throw(ArgumentError(
+                    "$caller: discrete entity $key references unknown " *
+                    "node tag $t"))
+                mapped[k]=i
+            end
+            push!(elements,(Int32(msh_type),mapped))
+        end
+    end
+    return cells
 end
 
 # Merge per-entity meshes: nodes deduplicated by exact coordinates (shared
@@ -6688,7 +6838,8 @@ end
 # The mesh-operation statements act on `context.mesh` — the product of a
 # mid-file `Mesh n` — or record meshing constraints for the next generation.
 function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
-                                   context::_GeoNumericContext)
+                                   context::_GeoNumericContext,
+                                   allocator_state=nothing)
     caller="execute_geo"
     s=String(strip(line))
     if (mm=match(r"^RefineMesh\s*;?\s*$",s))!==nothing
@@ -6770,13 +6921,212 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
         throw(ArgumentError(
             "$caller: AdaptMesh requires levelset fields, which are not " *
             "supported"))
-    elseif (mm=match(r"^CreateTopology\b",s))!==nothing ||
-           (mm=match(r"^ClassifySurfaces\b",s))!==nothing ||
-           (mm=match(r"^CreateGeometry\b",s))!==nothing
-        throw(ArgumentError(
-            "$caller: discrete-model topology creation is not supported"))
+    elseif (mm=match(r"^CreateTopology\b(.*)$",s))!==nothing
+        _geo_exec_create_topology!(m,mm.captures[1],context,caller)
+        return
+    elseif (mm=match(r"^ClassifySurfaces\b(.*)$",s))!==nothing
+        _geo_exec_classify_surfaces!(m,mm.captures[1],context,caller)
+        return
+    elseif (mm=match(r"^CreateGeometry\b(.*)$",s))!==nothing
+        _geo_exec_create_geometry!(m,mm.captures[1],context,caller,
+                                   allocator_state)
+        return
     end
     throw(ArgumentError("$caller: unrecognized mesh command: $line"))
+end
+
+# Statements taking a balanced `{...}` argument must end right after it —
+# trailing text is the token the upstream parser would flag next.
+function _geo_require_statement_end(rest::AbstractString,
+                                    caller::AbstractString)
+    r=strip(rest)
+    (isempty(r) || r==";") && return nothing
+    _geo_syntax_abort(_geo_first_token(r))
+end
+
+# Fixed-arity `{...}` argument lists fail upstream while parsing — `}` when
+# the list is short, `,` when it is long.
+function _geo_arity_abort(count::Int,allowed,caller::AbstractString)
+    count in allowed && return nothing
+    _geo_syntax_abort(count<minimum(allowed) ? "}" : ",")
+end
+
+# `CreateTopology [ { makeSimplyConnected, exportDiscrete } ]` — derive a
+# boundary representation from the discrete entities like
+# `GModel::createTopologyFromMesh` (plus the simply-connected repair and the
+# GEO-internals export in the braced form).
+function _geo_exec_create_topology!(m::GeoModel,rest::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString)
+    caller="$caller: CreateTopology"
+    s=String(strip(rest))
+    if isempty(s) || s==";"
+        create_topology!(m)
+        _geo_export_discrete_internals!(m,context)
+        return nothing
+    end
+    (content,rest)=_geo_balanced_group(s,caller)
+    values=_geo_numeric_list_values("{"*content*"}",context,caller)
+    _geo_arity_abort(length(values),(2,),caller)
+    _geo_require_statement_end(rest,caller)
+    create_topology!(m;make_simply_connected=!iszero(values[1]),
+                     export_discrete=!iszero(values[2]))
+    iszero(values[2]) || _geo_export_discrete_internals!(m,context)
+    return nothing
+end
+
+# `GModel::exportDiscreteGEOInternals` — "Warning: this clears
+# GEO_Internals!" — rebuilds the internals from the model after
+# `createTopologyFromMesh`. Tessella's geometric entities live in the model
+# eagerly, so the only pending parser state is `raw_physicals`: pending
+# declarations that were never synchronized are dropped upstream, and the
+# registry is rebuilt from the entities' current physical memberships.
+function _geo_export_discrete_internals!(m::GeoModel,
+                                       context::_GeoNumericContext)
+    empty!(context.raw_physicals)
+    for ((dim,entity),pnums) in m.entity_physicals
+        for p in pnums
+            push!(get!(() -> Int[],context.raw_physicals,(dim,p)),entity)
+        end
+    end
+    # The derived `m.physical` view is stale until the next sync point.
+    context.geo_changed=true
+    return nothing
+end
+
+# `ClassifySurfaces { angle, boundary, forReparametrization [, curveAngle] }`
+# — `GModel::classifySurfaces`, which also runs `createTopologyFromMesh` when
+# the discrete model has no boundary representation yet.
+function _geo_exec_classify_surfaces!(m::GeoModel,rest::AbstractString,
+                                      context::_GeoNumericContext,
+                                      caller::AbstractString)
+    caller="$caller: ClassifySurfaces"
+    s=String(strip(rest))
+    startswith(s,"{") || _geo_syntax_abort(_geo_first_token(s))
+    (content,rest)=_geo_balanced_group(s,caller)
+    values=_geo_numeric_list_values("{"*content*"}",context,caller)
+    _geo_arity_abort(length(values),(3,4),caller)
+    _geo_require_statement_end(rest,caller)
+    classify_surfaces!(m;angle=values[1],boundary=!iszero(values[2]),
+                       for_reparametrization=!iszero(values[3]),
+                       curve_angle=length(values)==4 ? values[4] : pi)
+    return nothing
+end
+
+# `CreateGeometry [ { entities } ]` — `GModel::createGeometryOfDiscreteEntities`,
+# on every discrete curve/surface when the entity list is omitted.
+function _geo_exec_create_geometry!(m::GeoModel,rest::AbstractString,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString,allocator_state)
+    caller="$caller: CreateGeometry"
+    s=String(strip(rest))
+    if isempty(s) || s==";"
+        create_geometry!(m)
+        return nothing
+    end
+    (content,rest)=_geo_balanced_group(s,caller)
+    entities=_geo_shape_list_entities!(m,content,context,caller;
+                                       allocator_state=allocator_state)
+    _geo_require_statement_end(rest,caller)
+    create_geometry!(m,entities)
+    return nothing
+end
+
+# `Homology`/`Cohomology`/`Betti` queue a homology request — the upstream
+# `addHomologyRequest` calls in parser/Gmsh.y. Three forms:
+#   `Cmd;`                       — empty domain/subdomain, dims 0:3
+#   `Cmd { dom [, sub] };`       — one or two `ListOfDouble`s
+#   `Cmd (dims) { dom, sub };`   — dims then both lists (required upstream)
+function _geo_exec_homology_statement!(m::GeoModel,word::AbstractString,
+                                       rest::AbstractString,
+                                       context::_GeoNumericContext)
+    caller="execute_geo: $word"
+    s=String(strip(rest))
+    dims=Int[0,1,2,3]
+    if startswith(s,"(")
+        (inner,s)=_geo_balanced_paren(s,caller)
+        dims=_geo_homology_int_list(inner,context,caller)
+        (content,s)=_geo_balanced_group(s,caller)
+        (domain,subdomain)=_geo_homology_domains(
+            content,context,caller;require_two=true)
+        _geo_require_statement_end(s,caller)
+    elseif isempty(s) || s==";"
+        domain=Int[];subdomain=Int[]
+    elseif startswith(s,"{")
+        (content,s)=_geo_balanced_group(s,caller)
+        (domain,subdomain)=_geo_homology_domains(content,context,caller)
+        _geo_require_statement_end(s,caller)
+    else
+        _geo_syntax_abort(_geo_first_token(s))
+    end
+    add_homology_request!(m;kind=String(word),domain_tags=domain,
+                          subdomain_tags=subdomain,dims=dims)
+    return nothing
+end
+
+# `'{' ListOfDouble '}'` / `'{' ListOfDouble ',' ListOfDouble '}'` — a second
+# list only follows a complete braced/negated/scaled first list; a bare
+# `a,b` always parses as one flat `RecursiveListOfDouble` upstream.
+function _geo_homology_domains(content::AbstractString,
+                               context::_GeoNumericContext,
+                               caller::AbstractString;require_two::Bool=false)
+    s=String(strip(content))
+    isempty(s) &&
+        (require_two && _geo_syntax_abort("}"))
+    isempty(s) && return (Int[],Int[])
+    (first_src,rest)=_geo_homology_list_arg(s,caller)
+    domain=_geo_homology_int_list(first_src,context,caller)
+    if isempty(rest)
+        require_two && _geo_syntax_abort("}")
+        return (domain,Int[])
+    end
+    startswith(rest,",") || _geo_syntax_abort(_geo_first_token(rest))
+    (second_src,rest)=_geo_homology_list_arg(
+        String(strip(rest[nextind(rest,firstindex(rest)):end])),caller)
+    _geo_require_statement_end(rest,caller)
+    return (domain,_geo_homology_int_list(second_src,context,caller))
+end
+
+# One `ListOfDouble` at the head of `s` → `(source, rest)`. A `{...}` group
+# (optionally `-`-negated or `FExpr*`-scaled) ends at its balancing `}`;
+# anything else consumes the whole string as one flat list and the shared
+# evaluator reports embedded `{` misuse at the same token upstream would.
+function _geo_homology_list_arg(s::AbstractString,caller::AbstractString)
+    s=String(strip(s))
+    isempty(s) && _geo_syntax_abort("}")
+    brace=findfirst(==('{'),s)
+    brace===nothing && return (s,"")
+    prefix=String(strip(s[firstindex(s):prevind(s,brace)]))
+    (isempty(prefix) || prefix=="-" || endswith(prefix,"*")) ||
+        return (s,"")
+    group=String(s[brace:lastindex(s)])
+    closing=_geo_braced_end(group)
+    closing===nothing && _geo_syntax_abort("{")
+    src_end=nextind(s,brace,closing-1)  # index of the balancing `}` in `s`
+    src=String(s[firstindex(s):src_end])
+    rest=src_end<lastindex(s) ?
+        String(strip(s[nextind(s,src_end):end])) : ""
+    return (src,rest)
+end
+
+# Physical-group tags are C ints upstream — `(int)` truncation of the
+# evaluated scalar, with the grammar's int-range check.
+function _geo_homology_int_list(raw::AbstractString,
+                                context::_GeoNumericContext,
+                                caller::AbstractString)
+    s=String(strip(raw))
+    # A braced/negated/scaled group evaluates verbatim; flat content wraps in
+    # braces for the shared `RecursiveListOfDouble` evaluator.
+    brace=findfirst(==('{'),s)
+    src=if brace===nothing
+        "{"*s*"}"
+    else
+        prefix=String(strip(s[firstindex(s):prevind(s,brace)]))
+        (isempty(prefix) || prefix=="-" || endswith(prefix,"*")) ?
+            s : "{"*s*"}"
+    end
+    return Int[_geo_signed_gmsh_int_value(v,caller)
+               for v in _geo_numeric_list_values(src,context,caller)]
 end
 
 # Node ownership no longer maps cleanly after element regeneration — reset to
@@ -6854,7 +7204,8 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
         end
         # SetOrder/PartitionMesh/CreateOverlaps are dispatched before this —
         # reaching here means the FExpr form slipped past the mesh-op regex.
-        return _geo_exec_mesh_statement!(m,"$word $arg_src;",context)
+        return _geo_exec_mesh_statement!(m,"$word $arg_src;",context,
+                                         allocator_state)
     end
     arg=_geo_eval_string(arg_src,context,caller)
     if word=="Merge" || word=="MergeWithBoundingBox"
@@ -6907,10 +7258,17 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
     isfile(file) || throw(ArgumentError("$caller: missing file '$file'"))
     ext=lowercase(splitext(file)[2])
     if ext==".msh"
-        merged=read_msh(file).mesh
+        # `GModel::readMSH` imports the file's elementary entities as discrete
+        # model entities carrying their cells, and the cells join the mid-file
+        # mesh as well. `read_mixed_msh` keeps every element family plus the
+        # MSH2 elementary / MSH4 entity classification the simplex `read_msh`
+        # folds away.
+        mixed=read_mixed_msh(file)
+        merged=_geo_mixed_simplex_mesh(mixed,caller)
         context.mesh===nothing ? (context.mesh=merged) :
             (context.mesh=_geo_concat_meshes(context.mesh,merged))
         empty!(context.mesh_node_owner)
+        _geo_merge_discrete!(m,mixed,caller)
         return nothing
     end
     ext==".geo" || throw(ArgumentError(
@@ -6946,6 +7304,210 @@ function _geo_concat_meshes(a::Mesh,b::Mesh)
         seg_tag=vcat(a.seg_tag,b.seg_tag),
         tri_tag=vcat(a.tri_tag,b.tri_tag),
         tet_tag=vcat(a.tet_tag,b.tet_tag))
+end
+
+# `Merge "x.msh"` — fold the line/triangle/tetrahedron families into the
+# mid-file simplex mesh. Higher-order cells collapse to their corner vertices
+# (matching the `read_msh` fold); other families and point cells are accepted
+# by `GModel::readMSH` upstream but have no place in the simplex buffer — they
+# still land on the discrete entity records in `_geo_merge_discrete!`.
+function _geo_mixed_simplex_mesh(mixed::MixedMesh,caller::AbstractString)
+    ns=0;nf=0;nt=0
+    for block in mixed.blocks
+        block isa SpecialElementBlock && continue
+        family=msh_family(block.msh)
+        if family===:lin
+            ns=Base.checked_add(ns,size(block.nodes,2))
+        elseif family===:tri
+            nf=Base.checked_add(nf,size(block.nodes,2))
+        elseif family===:tet
+            nt=Base.checked_add(nt,size(block.nodes,2))
+        end
+    end
+    segs=Matrix{Int32}(undef,2,ns);st=Vector{Int32}(undef,ns)
+    tris=Matrix{Int32}(undef,3,nf);tt=Vector{Int32}(undef,nf)
+    tets=Matrix{Int32}(undef,4,nt);qt=Vector{Int32}(undef,nt)
+    js=0;jf=0;jt=0
+    @inbounds for block in mixed.blocks
+        block isa SpecialElementBlock && continue
+        family=msh_family(block.msh);n=size(block.nodes,2);n==0 && continue
+        if family===:lin
+            copyto!(segs,2js+1,block.nodes,1,2n)
+            copyto!(st,js+1,block.tags,1,n);js+=n
+        elseif family===:tri
+            copyto!(tris,3jf+1,block.nodes,1,3n)
+            copyto!(tt,jf+1,block.tags,1,n);jf+=n
+        elseif family===:tet
+            copyto!(tets,4jt+1,block.nodes,1,4n)
+            copyto!(qt,jt+1,block.tags,1,n);jt+=n
+        end
+    end
+    mesh=Mesh(mixed.coords;segs=segs,tris=tris,tets=tets,
+        seg_tag=st,tri_tag=tt,tet_tag=qt)
+    # `read_msh` validates the folded mesh; keep the same gate on this path.
+    diagnostic=validate(mesh)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: merged mesh is invalid — " * join(diagnostic.messages,"; ")))
+    return mesh
+end
+
+# `GModel::readMSH` — each elementary (MSH2) or entity (MSH4) tag becomes a
+# discrete model entity holding its cells; declared entity metadata adds
+# boundary lists, physical memberships, and physical names. MSH2 supplies no
+# node/element tag space or node classification, so nodes take the compact
+# 1:N tags and each vertex lands on the first entity whose cells reference it
+# (upstream's first-claim vertex map); MSH4 keeps the file's node/element tags,
+# per-node entity classification, and parametric coordinates.
+function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
+                              caller::AbstractString)
+    blocks=mixed.blocks
+    isempty(blocks) && return nothing
+    data=mixed.entity_data
+    elementary=mixed.elementary_entities
+    nnode=size(mixed.coords,2)
+    # Per-cell owner entity; entity order follows first appearance upstream.
+    order=Tuple{Int,Int}[]
+    cells=Dict{Tuple{Int,Int},Vector{NTuple{2,Int}}}()
+    for (bi,block) in enumerate(blocks)
+        block isa SpecialElementBlock && continue
+        dim=msh_dimension(block.msh)
+        n=size(block.nodes,2)
+        for j in 1:n
+            tag=Int(data!==nothing ? data.block_entities[bi][j] :
+                    elementary!==nothing ? elementary[bi][j] : Int32(0))
+            key=(dim,tag)
+            if !haskey(cells,key)
+                cells[key]=NTuple{2,Int}[]
+                push!(order,key)
+            end
+            push!(cells[key],(bi,j))
+        end
+    end
+    data===nothing || for key in keys(data.entities)
+        haskey(cells,key) && continue
+        cells[key]=NTuple{2,Int}[]
+        push!(order,key)
+    end
+    isempty(order) && return nothing
+    # Node ownership: the MSH4 node-block classification is authoritative;
+    # remaining vertices are claimed by the first entity whose cells use them.
+    owner=fill((-1,Int32(0)),nnode)
+    data===nothing ||
+        for i in 1:nnode
+            owner[i]=data.node_entities[i]
+        end
+    for (bi,block) in enumerate(blocks)
+        block isa SpecialElementBlock && continue
+        dim=msh_dimension(block.msh)
+        for j in 1:size(block.nodes,2)
+            tag=Int32(data!==nothing ? data.block_entities[bi][j] :
+                      elementary!==nothing ? elementary[bi][j] : Int32(0))
+            for ni in view(block.nodes,:,j)
+                owner[ni][1]<0 && (owner[ni]=(dim,tag))
+            end
+        end
+    end
+    # Records: existing discrete entities append; a collision with a real
+    # model entity leaves its cells mesh-level only (the entity itself is not
+    # reclassified); a zero tag is stored literally like upstream.
+    records=Dict{Tuple{Int,Int},Union{DiscreteEntity,Nothing}}()
+    for key in order
+        dim,tag=key
+        records[key]=if haskey(m.discrete,key)
+            m.discrete[key]
+        elseif _has_entity(m,dim,tag)
+            nothing
+        elseif tag==0
+            m.discrete[key]=DiscreteEntity()
+        else
+            m.discrete[(dim,add_discrete_entity!(m,dim,tag))]
+        end
+    end
+    node_tag=i->data!==nothing ? Int32(data.external_node_tags[i]) : Int32(i)
+    materialized=Dict{Int,Tuple{Int,Int}}()
+    function materialize(i::Int,key::Tuple{Int,Int})
+        haskey(materialized,i) && return nothing
+        record=get(records,key,nothing)
+        record===nothing && return nothing
+        params=data!==nothing ? data.node_parametric[i] : nothing
+        _record_append_node!(record,node_tag(i),
+            Float64[mixed.coords[1,i],mixed.coords[2,i],mixed.coords[3,i]],
+            params===nothing ? Float64[] : params)
+        materialized[i]=key
+        return nothing
+    end
+    # Explicitly classified nodes materialize on their owner first.
+    data===nothing || for i in 1:nnode
+        owner[i][1]<0 && continue
+        materialize(i,(owner[i][1],Int(owner[i][2])))
+    end
+    next_elem=_model_fresh_element_tag(m)
+    used=Set{Int32}()
+    for (_,record) in _discrete_mesh_records_model(m)
+        union!(used,record.element_tags)
+    end
+    for key in order
+        record=records[key]
+        record===nothing && continue
+        for (bi,j) in cells[key]
+            block=blocks[bi]
+            nodes=block.nodes[:,j]
+            for ni in nodes
+                materialize(Int(ni),key)
+            end
+            # MSH4 element tags are file tags; MSH2 and colliding tags fall
+            # back to fresh allocations.
+            element_tag=data!==nothing ?
+                Int32(data.external_element_tags[bi][j]) : Int32(0)
+            if element_tag<=0 || element_tag in used
+                while Int32(next_elem) in used
+                    next_elem+=1
+                end
+                element_tag=Int32(next_elem);next_elem+=1
+            end
+            push!(used,element_tag)
+            _record_append_element!(record,block.msh,element_tag,
+                Int32[node_tag(Int(ni)) for ni in nodes])
+        end
+    end
+    # Physical memberships live on the entity (upstream `GEntity::physicals`):
+    # MSH4 declares them per entity, MSH2 derives them from the cell tags.
+    for key in order
+        dim,tag=key
+        physicals=Set{Int32}()
+        if data!==nothing
+            entity=get(data.entities,key,nothing)
+            entity===nothing || union!(physicals,entity.physical_tags)
+        else
+            for (bi,j) in cells[key]
+                blocks[bi].tags[j]>0 && push!(physicals,blocks[bi].tags[j])
+            end
+        end
+        for ptag in physicals
+            ep=get!(() -> Int[],m.entity_physicals,key)
+            member=tag>0 ? Int(ptag) : -Int(ptag)
+            member in ep || push!(ep,member)
+            members=get!(() -> Int[],m.physical,(dim,Int(ptag)))
+            if !(tag in members)
+                push!(members,tag);sort!(members)
+            end
+            m.physical_tag_max=max(m.physical_tag_max,Int(ptag))
+        end
+    end
+    # Declared boundary lists attach to the new records only.
+    data===nothing || for key in order
+        record=records[key]
+        record===nothing && continue
+        entity=get(data.entities,key,nothing)
+        entity===nothing && continue
+        dim=key[1];dim==0 && continue
+        record.boundary=NTuple{2,Int}[(dim-1,abs(Int(b)))
+                                      for b in entity.boundaries]
+    end
+    for (key,name) in mixed.physical_names
+        get!(m.physical_names,key,name)
+    end
+    return nothing
 end
 
 # `Save`/`Print` — `CreateOutputFile` writes the current mesh; the only

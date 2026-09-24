@@ -366,6 +366,20 @@ records, `get_periodic_keys` pairs periodic nodes into function-space key
 sequences, `optimize` accepts Gmsh's method names with `dim_tags` entity
 scoping, and `generate` meshes multi-entity selections. Queries on a
 present-but-unmeshed model return empty data like Gmsh 4.15.2.
+The `.geo` executor reaches the same discrete layer: `Merge "file.msh"`
+imports the file's elementary (MSH2) or entity (MSH4) cell classification
+as discrete entities carrying their cells — node/element tags, node
+classification, parametric coordinates, declared boundaries, physical
+memberships, and physical names are preserved where the format declares
+them — and `Homology`/`Cohomology`/`Betti`,
+`CreateTopology{,a,b}`, `ClassifySurfaces{a,b,c[,d]}`, and
+`CreateGeometry{,shapes}` run their `Gmsh.y` forms on those entities.
+Homology requests execute at the end of `Mesh n` like
+`GModel::computeHomology`: an empty domain covers the model's
+top-dimensional entities, `Betti` reports ranks only, and stored
+generators join `H_k{dom[,sub]}i`/`H^k{…}i` physical groups named and
+allocated like the pinned binary (upstream's `.msh` output drops the mesh
+when chains exist; Tessella preserves the mesh and adds the chains).
 `API.mesh.get_nodes`, `get_elements`, `get_element_types`,
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
 detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element
