@@ -533,6 +533,21 @@ angle, `create_geometry` derives chord/PCA parametrizations for discrete
 curves and surfaces, the homology calls emit GF(2) simplicial chain
 generators inside new physical groups, and `compute_cross_field` fills a
 session-owned view with a smoothed element-wise frame field.
+The `.geo` layer reaches the same machinery: `Homology`/`Cohomology`/`Betti`
+queue `addHomologyRequest` requests (bare `0:3` dims, `{dom}` and
+`{{dom},{sub}}` list forms, `(dims){dom,sub}`) that run inside `Mesh n` like
+`GModel::computeHomology` — empty domains cover the top-dimensional
+entities, `Betti` stores nothing, and generators land in
+`H_k{dom[,sub]}i`/`H^k{…}i` physical groups named and allocated like the
+pinned binary (which itself drops the mesh on output — Tessella keeps it);
+`CreateTopology{,a,b}`, `ClassifySurfaces{a,b,c[,d]}`, and
+`CreateGeometry{,shapes}` dispatch likewise. `.geo` `Merge "file.msh"`
+imports `GModel::readMSH`-style: elementary (MSH2, missing → tag 0) or
+entity (MSH4) cell ownership becomes discrete entities holding their cells,
+with MSH4 tags, node classification, parametric coordinates, and declared
+boundaries preserved, physical memberships and names merged, and only the
+simplex cells folded into the mid-file mesh (meshing the discrete entities
+themselves stays unimplemented).
 `set_transfinite_*` (curves, surfaces, and volumes), `set_recombine`,
 `set_algorithm`, `set_smoothing`, `set_reverse`, `set_outward_orientation`,
 `set_compound`, `set_size_at_parametric_points`, `set_size_from_boundary`,

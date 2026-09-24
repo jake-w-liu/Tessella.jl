@@ -2681,31 +2681,42 @@ function _geo_allocator_resync_model!(state::_GeoTagAllocatorState,m)
         state.volume_boundaries[t]=(collect(pts),collect(curvs),
                                     collect(surfs))
     end
+    # Discrete entities (`Merge`-imported, `CreateTopology`-derived, homology
+    # chains) share the per-dimension elementary namespace upstream —
+    # `getMaxElementaryNumber` counts them — so the allocation maxima must
+    # skip their tags even though they join no live set.
+    discrete_max=ntuple(4) do d
+        top=0
+        for (dd,tag) in keys(m.discrete)
+            dd==d-1 && tag>top && (top=tag)
+        end
+        top
+    end
     state.builtin_point_max=max(state.builtin_point_floor,
-        _geo_live_max(state.live_builtin_points))
+        _geo_live_max(state.live_builtin_points),discrete_max[1])
     state.builtin_curve_max=max(state.builtin_curve_floor,
-        _geo_live_max(state.live_builtin_curves))
+        _geo_live_max(state.live_builtin_curves),discrete_max[2])
     state.builtin_surface_max=max(state.builtin_surface_floor,
-        _geo_live_max(state.live_builtin_surfaces))
+        _geo_live_max(state.live_builtin_surfaces),discrete_max[3])
     state.builtin_volume_max=max(state.builtin_volume_floor,
-        _geo_live_max(state.live_builtin_volumes))
+        _geo_live_max(state.live_builtin_volumes),discrete_max[4])
     state.occ_point_max=max(state.occ_point_floor,
-        _geo_live_max(state.live_occ_points))
+        _geo_live_max(state.live_occ_points),discrete_max[1])
     state.occ_curve_max=max(state.occ_curve_floor,
-        _geo_live_max(state.live_occ_curves))
+        _geo_live_max(state.live_occ_curves),discrete_max[2])
     state.occ_surface_max=max(state.occ_surface_floor,
-        _geo_live_max(state.live_occ_surfaces))
+        _geo_live_max(state.live_occ_surfaces),discrete_max[3])
     state.occ_volume_max=max(state.occ_volume_floor,
-        _geo_live_max(state.live_occ_volumes))
+        _geo_live_max(state.live_occ_volumes),discrete_max[4])
     state.point_entity_max=max(
         _geo_live_max(state.live_builtin_points),
-        _geo_live_max(state.live_occ_points))
+        _geo_live_max(state.live_occ_points),discrete_max[1])
     state.curve_entity_max=max(
         _geo_live_max(state.live_builtin_curves),
-        _geo_live_max(state.live_occ_curves))
+        _geo_live_max(state.live_occ_curves),discrete_max[2])
     state.surface_entity_max=max(
         _geo_live_max(state.live_builtin_surfaces),
-        _geo_live_max(state.live_occ_surfaces))
+        _geo_live_max(state.live_occ_surfaces),discrete_max[3])
     # the resynced sets are exact — allocator reads are live again even if a
     # statement the tracker cannot model (multi-operand Boolean groups)
     # invalidated them
@@ -10534,7 +10545,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
         # `SyncModel` forces a synchronize unconditionally; `BoundingBox`,
         # `Save`, `Print`, `Show`/`Hide`/`Color` (including the `Recursive`
         # and deprecated quoted forms), `RefineMesh`, `ReorientMesh`,
-        # `RelocateMesh`, `ClassifySurfaces`, `AdaptMesh` and `Mesh n` sync
+        # `RelocateMesh`, `AdaptMesh` and `Mesh n` sync
         # only when the internals changed — the entity-physical mirror must
         # refresh at exactly these points.
         if match(r"^SyncModel\b",body)!==nothing
@@ -10544,7 +10555,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int))
             return
         end
         if match(Regex("^(?:BoundingBox|Save\\b|Print\\b|Show|Hide|Color|" *
-            "RefineMesh|ReorientMesh|RelocateMesh|ClassifySurfaces|" *
+            "RefineMesh|ReorientMesh|RelocateMesh|" *
             "AdaptMesh)\\b"),body)!==nothing ||
            match(r"^Recursive\s+(?:Show|Hide|Color)\b",body)!==nothing ||
            match(r"^(?:Show|Hide)\s+[\"']",body)!==nothing
