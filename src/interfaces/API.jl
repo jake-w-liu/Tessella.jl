@@ -100,7 +100,7 @@ using ..MeshFunctionSpaces: MeshFunctionSpaces, mesh_basis_functions,
 using ..Elements: msh_spec, msh_type, msh_properties
 using ..Refine: refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
-using ..Optimize: smooth_optimize
+using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..HighOrder: HighOrder, P2Mesh, P2TriMesh, p2_trimesh, p2_tetmesh
 using ..Model: _compound_surface_meshes
 using ..GeoExec: execute_geo
@@ -5222,7 +5222,7 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
     # "Relocate3D" roles), and the 2-D methods run Laplacian smoothing on a
     # triangle cache. Netgen and the high-order optimizers need machinery
     # this build does not have.
-    method in ("","Gmsh","Relocate3D","Laplace2D","Relocate2D") ||
+    method in ("","Gmsh","Optimize","Relocate3D","Laplace2D","Relocate2D") ||
         throw(ArgumentError(
             "$caller: unknown or unsupported optimizer \"$method\""))
     force isa Bool || throw(ArgumentError("$caller: force must be Bool"))
@@ -5283,46 +5283,6 @@ function _optimize_movable_mask(cached::Mesh,class,pairs)
         end
     end
     return inside .& .!outside
-end
-
-# Laplacian smoothing of a triangle cache — the "Laplace2D"/"Relocate2D"
-# method roles. Boundary nodes and nodes outside the entity selection stay
-# fixed; moves are the isotropic neighbor average in all three coordinates.
-function _laplacian_smooth_tri_cache(mesh::Mesh,iterations::Int,
-                                     movable)
-    boundary=falses(nnodes(mesh))
-    @inbounds for edge in first(boundary_edges(mesh.tris)),node in edge
-        boundary[node]=true
-    end
-    neighbors=[Int32[] for _ in 1:nnodes(mesh)]
-    @inbounds for cell in axes(mesh.tris,2),e in ((1,2),(2,3),(3,1))
-        a=mesh.tris[e[1],cell];b=mesh.tris[e[2],cell]
-        push!(neighbors[a],b);push!(neighbors[b],a)
-    end
-    for list in neighbors
-        sort!(unique!(list))
-    end
-    coords=Matrix{Float64}(mesh.coords)
-    for _ in 1:iterations
-        next=copy(coords)
-        @inbounds for node in axes(coords,2)
-            boundary[node] && continue
-            movable===nothing || movable[node] || continue
-            list=neighbors[node]
-            isempty(list) && continue
-            sx=0.0;sy=0.0;sz=0.0
-            for other in list
-                sx+=coords[1,other];sy+=coords[2,other];sz+=coords[3,other]
-            end
-            next[1,node]=sx/length(list)
-            next[2,node]=sy/length(list)
-            next[3,node]=sz/length(list)
-        end
-        coords=next
-    end
-    return Mesh(coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
-                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
-                tet_tag=mesh.tet_tag)
 end
 
 # Per-element visibility is display state only: Gmsh 4.15.2 stores the raw

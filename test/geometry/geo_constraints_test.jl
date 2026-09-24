@@ -1,5 +1,6 @@
 using Test
 using Tessella
+using Tessella.MeshTypes: ntris, validate
 using Tessella.Model: model_physical_groups, model_entities_for_physical_group,
                       model_entities_for_physical_name,
                       model_physical_groups_for_entity
@@ -344,6 +345,43 @@ end
         ReorientMesh Volume{99};
         """)
     @test err===nothing
+end
+
+@testset ".geo OptimizeMesh" begin
+    # Without a mesh every method name validates but nothing moves, like
+    # `GModel::optimizeMesh` iterating an entity list with no cells.
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
+        OptimizeMesh "Gmsh";
+        OptimizeMesh "Laplace2D";
+        """)
+    @test execution.mesh===nothing
+
+    # Upstream validates the method name before any entity iteration, so an
+    # unknown optimizer errors even on an empty model.
+    err=_constraint_error(raw"""
+        OptimizeMesh "Bogus";
+        """)
+    @test err isa ArgumentError
+    @test occursin("optimization method", sprint(showerror,err))
+
+    # A 2-D cache has no regions: the 3-D methods are silent no-ops while the
+    # 2-D methods run Laplacian smoothing and keep the mesh.
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
+        OptimizeMesh "Gmsh";
+        OptimizeMesh "Optimize";
+        OptimizeMesh "Relocate3D";
+        OptimizeMesh "Laplace2D";
+        OptimizeMesh "Relocate2D";
+        """; mesh_dim=2)
+    @test execution.mesh!==nothing
+    @test ntris(execution.mesh)>0
+    @test validate(execution.mesh).ok
+
+    err=_constraint_error(_GEO_SQUARE * raw"""
+        OptimizeMesh "Netgen";
+        """; mesh_dim=2)
+    @test err isa ArgumentError
+    @test occursin("optimization method", sprint(showerror,err))
 end
 
 @testset ".geo Delete per-entity semantics" begin
