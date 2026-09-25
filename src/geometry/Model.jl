@@ -19,7 +19,8 @@ using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
                   msh_dimension
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
 using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
-                   PostViewField, field_value, size_at
+                   PostViewField, field_value, size_at,
+                   GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
                 refine_to_size
@@ -31,6 +32,7 @@ using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_collapsed
 using ..Transfinite: mesh_transfinite_patch
+using ..Mesh1D: mesh_curve, curve_length
 using ..Transform: _affine_coordinate, _transform_homogeneous,
     _periodic_affine_3x4, _periodic_affine_input
 using ..Predicates: orient2, orient3
@@ -142,6 +144,11 @@ mutable struct ModelMeshingAttributes
     transfinite_volumes::Dict{Int,Vector{Int}}
     recombine::Dict{Tuple{Int,Int},Float64}
     extrude::Dict{Tuple{Int,Int},_GeoExtrudeParams}
+    # `ExtrudeParams::geo.Source`/`geo.Mode` per generated curve —
+    # `(src_dim, signed_tag)`: `(0, p)` for a point-extruded generatrix,
+    # `(1, ±c)` for a face/volume top copy (the sign selects `copyMesh`'s
+    # reversed orientation).
+    extrude_sources::Dict{Tuple{Int,Int},NTuple{2,Int}}
     smoothing::Dict{Tuple{Int,Int},Int}
     reverse::Dict{Tuple{Int,Int},Bool}
     algorithm::Dict{Tuple{Int,Int},Int}
@@ -177,6 +184,7 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Int,Vector{Int}}(),
     Dict{Tuple{Int,Int},Float64}(),
     Dict{Tuple{Int,Int},_GeoExtrudeParams}(),
+    Dict{Tuple{Int,Int},NTuple{2,Int}}(),
     Dict{Tuple{Int,Int},Int}(),
     Dict{Tuple{Int,Int},Bool}(),
     Dict{Tuple{Int,Int},Int}(),
@@ -218,6 +226,13 @@ mutable struct GeoModel
     # mirroring Gmsh's `Curve` records.
     curve_types::Dict{Int,Symbol}
     curve_geometry::Dict{Int,NamedTuple}
+    # Generated curve discretization — normalized parameters in each curve's
+    # native range ([0,1] for built-in types; the OCC/Nurbs interval
+    # otherwise), mirroring `GEdge::mesh_vertices`+`lines` once `Mesh 1` (or a
+    # higher-dimension mesh that pre-meshes curves) ran. Cleared by entity
+    # deletion and `Delete All`/`NewModel` like upstream's deMeshGEdge;
+    # regenerated on every explicit `Mesh 1`.
+    curve_params::Dict{Int,Vector{Float64}}
     loops::Dict{Int,Vector{Int}}
     surfaces::Dict{Int,Vector{Int}}
     # Native geometry kind per surface — :plane (default), :ruled, or :tric.
@@ -275,6 +290,7 @@ dimension. Geometry is added explicitly and can then be meshed with
 GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Int,NTuple{2,Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Symbol}(), Dict{Int,NamedTuple}(),
+                      Dict{Int,Vector{Float64}}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
                       Dict{Int,Symbol}(), Dict{Int,NamedTuple}(),
                       Dict{Int,Vector{Int}}(), Dict{Int,Vector{Int}}(),
@@ -2346,10 +2362,14 @@ end
     a,b=m.curves[curve]
     # A point without an explicit size contributes the curve length, matching
     # the boundary-mesh-derived sizing used for unconstrained vertices.
+    # `point_size` stores 0 for unsized points (Gmsh's `!lc → MAX_LC`
+    # convention) — the stored zero is not a usable interpolation endpoint.
     p,q=m.points[a],m.points[b]
     edge_length=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
-    first_size=get(m.point_size,a,edge_length)
-    last_size=get(m.point_size,b,edge_length)
+    first_size=get(m.point_size,a,0.0)
+    first_size<=0.0 && (first_size=edge_length)
+    last_size=get(m.point_size,b,0.0)
+    last_size<=0.0 && (last_size=edge_length)
     mesh_size=muladd(parameter,last_size-first_size,first_size)
     (isfinite(mesh_size) && mesh_size>0) || throw(ErrorException(
         "$caller: Curve[$curve] has an unrepresentable interpolated Point size"))
@@ -5651,7 +5671,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             max_periodic_passes=max_periodic_passes,size_field=size_field)
         output=_model_periodic_surface_mesh(
             m,master_mesh,surface_constraint,caller)
-        return output
+        return _model_surface_boundary_writeback!(m,t,output,caller)
     end
     forced=Dict{Int,Vector{Float64}}()
     param_sizes=_attribute_forced_parameters(m,t,forced,caller)
@@ -5674,6 +5694,10 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     end
     mesh isa Mesh || throw(ErrorException(
         "$caller: internal surface meshing pass produced no mesh"))
+    # Write the refined boundary subdivision back onto the curves — upstream
+    # `meshGFace` updates each `GEdge`'s mesh with face-refinement splits, so
+    # the emitted line elements share the face's vertices.
+    mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)
     _validate_surface_embeddings(m,mesh,embedded,caller)
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ErrorException(
@@ -6364,5 +6388,6 @@ function _point_in_polygon(x,y,xs,ys,polygon)
     return inside
 end
 
+include("ModelMesh1D.jl")
 
 end # module

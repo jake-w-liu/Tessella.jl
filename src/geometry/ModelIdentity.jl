@@ -224,6 +224,8 @@ function _model_identity_curve_state(
         m.curve_types,old_tag,new_tag,caller,"Curve type")
     curve_geometry=_model_identity_rekey(
         m.curve_geometry,old_tag,new_tag,caller,"Curve geometry")
+    curve_params=_model_identity_rekey(
+        m.curve_params,old_tag,new_tag,caller,"Curve mesh parameters")
     loops=copy(m.loops)
     for (loop,signed_curves) in m.loops
         any(value->abs(value)==new_tag,signed_curves) && throw(ArgumentError(
@@ -235,7 +237,8 @@ function _model_identity_curve_state(
     end
     return (curves=curves,loops=loops,
             curve_control_points=curve_control_points,
-            curve_types=curve_types,curve_geometry=curve_geometry)
+            curve_types=curve_types,curve_geometry=curve_geometry,
+            curve_params=curve_params)
 end
 
 function _model_identity_surface_state(
@@ -375,6 +378,7 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m.curve_control_points=dimension_state.curve_control_points
         m.curve_types=dimension_state.curve_types
         m.curve_geometry=dimension_state.curve_geometry
+        m.curve_params=dimension_state.curve_params
     elseif dimension==2
         m.surfaces=dimension_state.surfaces
         m.surface_loops=dimension_state.surface_loops
@@ -422,6 +426,7 @@ function _model_identity_meshing(
     end
     recombine=Dict{Tuple{Int,Int},Float64}()
     extrude=Dict{Tuple{Int,Int},_GeoExtrudeParams}()
+    extrude_sources=Dict{Tuple{Int,Int},NTuple{2,Int}}()
     smoothing=Dict{Tuple{Int,Int},Int}()
     reverse=Dict{Tuple{Int,Int},Bool}()
     algorithm=Dict{Tuple{Int,Int},Int}()
@@ -433,6 +438,12 @@ function _model_identity_meshing(
     end
     for (key,value) in attributes.extrude
         extrude[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
+    end
+    for (key,(sdim,stag)) in attributes.extrude_sources
+        # Rekey the generated curve and retarget a source that itself moved.
+        new_key=key==(dimension,old_tag) ? (dimension,new_tag) : key
+        extrude_sources[new_key]=(sdim==dimension && stag==old_tag ?
+                                  (sdim,new_tag) : (sdim,stag))
     end
     for (key,value) in attributes.smoothing
         smoothing[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
@@ -470,6 +481,7 @@ function _model_identity_meshing(
     migrated.transfinite_volumes=transfinite_volumes
     migrated.recombine=recombine
     migrated.extrude=extrude
+    migrated.extrude_sources=extrude_sources
     migrated.smoothing=smoothing
     migrated.reverse=reverse
     migrated.algorithm=algorithm

@@ -647,6 +647,7 @@ only for a Tessella-to-Tessella escaped-name round trip, and read that file with
 """
 function write_msh(path, mesh; version=2.2,
                    physical_names=Dict{Tuple{Int,Int},String}(),
+                   point_elements=nothing,
                    gmsh_compatible=true)
     path isa AbstractString || throw(ArgumentError(
         "write_msh: path must be a string"))
@@ -666,6 +667,7 @@ function write_msh(path, mesh; version=2.2,
         throw(ArgumentError("write_msh: version must be 2.2 or 4.1 (got $version)"))
     gmsh_compatible isa Bool || throw(ArgumentError(
         "write_msh: gmsh_compatible must be Bool"))
+    points=_checked_point_elements(point_elements,mesh)
     _validate_write_mesh(mesh)
     names=_copy_physical_names(physical_names,"write_msh")
     if gmsh_compatible
@@ -687,8 +689,11 @@ function write_msh(path, mesh; version=2.2,
     # flushed write. A formatter/error cannot truncate a previously valid mesh.
     mktemp(parent) do tmp, io
         if ver == 2.2
-            _write_msh_v2(io, mesh, names, gmsh_compatible)
+            _write_msh_v2(io, mesh, names, gmsh_compatible, points)
         else
+            isempty(points) || throw(ArgumentError(
+                "write_msh: point_elements requires version 2.2 — the 4.1 " *
+                "entity-block layout cannot carry dim-0 elements"))
             _write_msh_v4(io, mesh, names, gmsh_compatible)
         end
         flush(io); close(io)
@@ -697,8 +702,40 @@ function write_msh(path, mesh; version=2.2,
     return path
 end
 
+# `point_elements` — `(node, physical, elementary)` triples written as MSH
+# type-15 point elements ahead of the line cells, mirroring upstream's
+# per-vertex `MPoint` elements.
+function _checked_point_elements(point_elements,mesh::Mesh)
+    point_elements===nothing && return Tuple{Int,Int,Int}[]
+    point_elements isa AbstractVector || throw(ArgumentError(
+        "write_msh: point_elements must be a vector of (node, physical, " *
+        "elementary) triples"))
+    checked=Tuple{Int,Int,Int}[]
+    for entry in point_elements
+        (entry isa Tuple && length(entry)==3) || throw(ArgumentError(
+            "write_msh: each point_elements entry must be a " *
+            "(node, physical, elementary) triple"))
+        node,physical,elementary=entry
+        for (what,value) in (("node",node),("physical",physical),
+                             ("elementary",elementary))
+            value isa Integer || throw(ArgumentError(
+                "write_msh: point_elements $what must be an integer"))
+            value isa Bool && throw(ArgumentError(
+                "write_msh: point_elements $what must not be Bool"))
+        end
+        1<=node<=nnodes(mesh) || throw(ArgumentError(
+            "write_msh: point element node $node is out of range"))
+        physical>=0 && elementary>=0 || throw(ArgumentError(
+            "write_msh: point element tags must be nonnegative"))
+        push!(checked,(Int(node),Int(physical),Int(elementary)))
+    end
+    return checked
+end
+
 function _validate_write_mesh(m::Mesh)
-    diagnostic=validate(m)
+    # Degenerate (zero-length / self-loop) segments are writable: Gmsh emits
+    # them for closed degenerate curves. Other defects still block.
+    diagnostic=validate(m; allow_degenerate_segs=true)
     diagnostic.ok || throw(ArgumentError(
         "write_msh: mesh is invalid — " * join(diagnostic.messages,"; ")))
     @inbounds for i in 1:nnodes(m),d in 1:3
@@ -731,7 +768,8 @@ function _write_physical_names(io, physical_names, gmsh_compatible::Bool)
     println(io, "\$EndPhysicalNames")
 end
 
-function _write_msh_v2(io, m::Mesh, physical_names, gmsh_compatible::Bool)
+function _write_msh_v2(io, m::Mesh, physical_names, gmsh_compatible::Bool,
+                       point_elements=Tuple{Int,Int,Int}[])
     println(io, "\$MeshFormat"); println(io, "2.2 0 8"); println(io, "\$EndMeshFormat")
     _write_physical_names(io, physical_names, gmsh_compatible)
     # nodes
@@ -741,10 +779,15 @@ function _write_msh_v2(io, m::Mesh, physical_names, gmsh_compatible::Bool)
         @printf(io, "%d %.17g %.17g %.17g\n", i, p[1], p[2], p[3])
     end
     println(io, "\$EndNodes")
-    # elements
-    nel = nsegs(m) + ntris(m) + ntets(m)
+    # elements — point cells first, matching upstream's per-vertex emission
+    nel = length(point_elements) + nsegs(m) + ntris(m) + ntets(m)
     println(io, "\$Elements"); println(io, nel)
     eid = 0
+    @inbounds for (node, physical, elementary) in point_elements
+        eid += 1
+        @printf(io, "%d %d 2 %d %d %d\n", eid, MSH_POINT, physical,
+                elementary, node)
+    end
     @inbounds for t in 1:nsegs(m)
         eid += 1; tag = m.seg_tag[t]
         @printf(io, "%d %d 2 %d %d %d %d\n", eid, MSH_LINE, tag, tag, m.segs[1,t], m.segs[2,t])
@@ -1439,6 +1482,11 @@ mutable struct _GeoNumericContext
     # `Field[i]` declarations recovered by the params pre-pass — `execute_geo`
     # wires the live map so `Field[i].member = v` mutates real field options.
     fields::Any
+    # `Background Field = {tag}` / `BoundaryLayer Field = {tags}` —
+    # `FieldManager::setBackgroundFieldId` stores the raw id unvalidated and
+    # `setBoundaryLayerField` dedup-appends, mirroring `GeoParams`.
+    background_field::Int
+    boundary_layer_fields::Vector{Int}
     # Exec hook resolving `Point{t}`/`Physical X{t}` name reads in string
     # expressions: `(dim, tag, :entity|:physical) -> String`; `nothing` in pure
     # contexts.
@@ -1514,7 +1562,7 @@ _GeoNumericContext()=_GeoNumericContext(
     _GeoLoopLevel[],_GeoWhileLevel[],
     Dict{Tuple{String,Int,String},String}(),
     Dict{Tuple{String,Int,String},Float64}(),
-    Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,nothing,
+    Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,0,Int[],nothing,
     String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
     Dict{Int,Any}(),nothing,false)
@@ -7045,21 +7093,32 @@ function _geo_option_store_value(family::String,member::String,
         "$caller: unhandled option storage kind $kind for $family.$member"))
 end
 
-# `Mesh.MeshSizeFactor` and `Mesh.CharacteristicLengthFactor` are two names
-# for the single `CTX.mesh.lcFactor` (both DefaultOptions entries dispatch to
-# `opt_mesh_lc_factor`), so a write to either name mirrors into the other key.
-# The callback also ignores non-positive writes (`if(val > 0)`), which is
-# replicated by skipping the store entirely.
+# `Mesh.MeshSizeFactor`/`Mesh.CharacteristicLengthFactor`,
+# `Mesh.MeshSizeMin`/`Mesh.CharacteristicLengthMin` and
+# `Mesh.MeshSizeMax`/`Mesh.CharacteristicLengthMax` are each two names for a
+# single `CTX.mesh` value (both DefaultOptions entries dispatch to the same
+# `opt_mesh_lc_*` callback), so a write to either name mirrors into the other
+# key. `opt_mesh_lc_factor` also ignores non-positive writes (`if(val > 0)`),
+# which is replicated by skipping the store entirely.
 function _geo_store_option_number!(context::_GeoNumericContext,
                                    family::String,index::Int,
                                    member::String,value::Float64,
                                    caller::AbstractString)
     v=_geo_option_store_value(family,member,value,caller)
-    if family=="Mesh" && index==0 &&
-       member in ("MeshSizeFactor","CharacteristicLengthFactor")
-        v>0 || return nothing
-        context.option_numbers[(family,index,member=="MeshSizeFactor" ?
-            "CharacteristicLengthFactor" : "MeshSizeFactor")]=v
+    if family=="Mesh" && index==0
+        alias=if member=="MeshSizeFactor" || member=="CharacteristicLengthFactor"
+            v>0 || return nothing
+            member=="MeshSizeFactor" ? "CharacteristicLengthFactor" :
+                "MeshSizeFactor"
+        elseif member=="MeshSizeMin" || member=="CharacteristicLengthMin"
+            member=="MeshSizeMin" ? "CharacteristicLengthMin" : "MeshSizeMin"
+        elseif member=="MeshSizeMax" || member=="CharacteristicLengthMax"
+            member=="MeshSizeMax" ? "CharacteristicLengthMax" : "MeshSizeMax"
+        else
+            nothing
+        end
+        alias!==nothing &&
+            (context.option_numbers[(family,index,alias)]=v)
     end
     context.option_numbers[(family,index,member)]=v
     return nothing

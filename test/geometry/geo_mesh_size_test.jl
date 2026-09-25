@@ -162,9 +162,9 @@ end
     meshed=execute_geo(_GEO_POINT_MESH_SIZE_FIXTURE;mesh_dim=2)
     @test validate(meshed.mesh).ok
     @test nnodes(meshed.mesh)==19
-    @test ntris(meshed.mesh)==24
+    @test ntris(meshed.mesh)==22
     @test mesh_crc(meshed.mesh).sha==
-          "b3f1bf410e917d050eacceab998b0fdf7b4cd61d1d9f263805b5120c06f1f4df"
+          "bc13025a46d55be5f2394351cc56ef2ffa3cb3186a3ce01ce08a84fdb4f69003"
     area=sum(triangle_area(
         node(meshed.mesh,meshed.mesh.tris[1,triangle]),
         node(meshed.mesh,meshed.mesh.tris[2,triangle]),
@@ -175,7 +175,7 @@ end
     @test validate(projected).ok
     @test projected.physical_names==parsed.model.physical_names
     @test mixed_crc(projected).sha==
-          "b7202dfa1cfb7469e7541c34e2b1bfae404c66f2462abc1953fa0b9374e5a010"
+          "2add0c7e45789451105f13afc551dd46d47c971db0232e93c53fcb807f86a485"
 
     asymmetric=_point_mesh_size_square([0.1,0.8,0.8,0.8])
     asymmetric_mesh=mesh_model_surface(asymmetric,1;min_angle_deg=20)

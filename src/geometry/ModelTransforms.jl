@@ -965,6 +965,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     delete!(m.entity_colors,key)
     delete!(m.meshing.recombine,key)
     delete!(m.meshing.extrude,key)
+    delete!(m.meshing.extrude_sources,key)
     delete!(m.meshing.smoothing,key)
     delete!(m.meshing.reverse,key)
     delete!(m.meshing.algorithm,key)
@@ -977,6 +978,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
         delete!(m.curve_control_points,tag)
         delete!(m.curve_types,tag)
         delete!(m.curve_geometry,tag)
+        delete!(m.curve_params,tag)
     elseif dim==2
         delete!(m.meshing.transfinite_surfaces,tag)
         delete!(m.surface_types,tag)
@@ -1387,7 +1389,10 @@ function _extrude_point_copy!(m::GeoModel, src::Int, spec,
         m.curve_control_points[curve]=Int[src,center,chapeau]
         m.curve_geometry[curve]=(n=(0.0,0.0,1.0),)
     end
-    params!==nothing && (m.meshing.extrude[(1,curve)]=params)
+    if params!==nothing
+        m.meshing.extrude[(1,curve)]=params
+        m.meshing.extrude_sources[(1,curve)]=(0,src)
+    end
     return (curve,chapeau)
 end
 
@@ -1432,12 +1437,18 @@ function _extrude_point_twist!(m::GeoModel, src::Int, chapeau::Int, spec,
         end
         m.curves[curve]=(src,prev)
         m.curve_control_points[curve]=cps
-        params!==nothing && (m.meshing.extrude[(1,curve)]=params)
+        if params!==nothing
+            m.meshing.extrude[(1,curve)]=params
+            m.meshing.extrude_sources[(1,curve)]=(0,src)
+        end
         return (curve,prev)
     end
     m.curves[curve]=(src,chapeau)
     m.curve_control_points[curve]=Int[src]
-    params!==nothing && (m.meshing.extrude[(1,curve)]=params)
+    if params!==nothing
+        m.meshing.extrude[(1,curve)]=params
+        m.meshing.extrude_sources[(1,curve)]=(0,src)
+    end
     return (curve,chapeau)
 end
 
@@ -1453,7 +1464,12 @@ function _extrude_curve_lateral!(m::GeoModel, c::Int, spec,
     # begin/end swap and the copy is wired end-to-begin.
     sbeg,send=c>0 ? (a,b) : (b,a)
     chapeau=_duplicate_curve!(m,src,caller;reversed=c<0)
-    params!==nothing && (m.meshing.extrude[(1,chapeau)]=params)
+    if params!==nothing
+        m.meshing.extrude[(1,chapeau)]=params
+        # `geo.Source = ic` — the signed generatrix tag drives `copyMesh`'s
+        # direction like upstream.
+        m.meshing.extrude_sources[(1,chapeau)]=(1,c)
+    end
     _transform_curve_points!(m,chapeau,spec,caller)
     _extrude_occ_transform!(m,1,chapeau,spec,caller)
     (cbeg,_)=_extrude_point_copy!(m,sbeg,spec,params,caller)
@@ -1528,8 +1544,14 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
     top_loops=[Int[_duplicate_curve!(m,abs(c),caller;reversed=c<0)
                    for c in m.loops[l]] for l in m.surfaces[tag]]
     if params!==nothing
-        for copies in top_loops, c in copies
-            m.meshing.extrude[(1,c)]=params
+        for (i,copies) in enumerate(top_loops)
+            # `geo.Source = c2num` — the signed source generatrix entry,
+            # positionally paired with the duplicated top loop.
+            source_loop=m.loops[m.surfaces[tag][i]]
+            for (j,c) in enumerate(copies)
+                m.meshing.extrude[(1,c)]=params
+                m.meshing.extrude_sources[(1,c)]=(1,source_loop[j])
+            end
         end
     end
     vol=_alloc_tag!(m,3,0,caller)
