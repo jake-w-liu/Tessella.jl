@@ -798,11 +798,14 @@ detection is the caller's job (it must count tets *per region*); `validate` repo
 global tet count so "no empty volumes" can never be vacuously true.
 """
 function validate(m::Mesh; require_positive_tets::Bool=true,
-                  require_manifold_tris::Bool=ntets(m)==0)
+                  require_manifold_tris::Bool=ntets(m)==0,
+                  allow_degenerate_segs::Bool=false)
     msgs = String[]
     _mesh_structure_messages!(msgs,m) || return MeshDiagnostic(false,msgs)
     # Segments are cells too: repeated endpoints, geometrically coincident
     # endpoints, overflowed lengths, and duplicate undirected cells are invalid.
+    # `allow_degenerate_segs` exists for serialization: MSH stores degenerate
+    # elements (closed zero-length curves) that Gmsh itself writes.
     ndegseg = 0; nbadseg = 0
     segkeys = Vector{NTuple{2,Int32}}(undef, nsegs(m))
     @inbounds for s in 1:nsegs(m)
@@ -810,7 +813,8 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
         segkeys[s] = _sort2(a,b)
         pa = node(m,a); pb = node(m,b)
         len = hypot(pb[1]-pa[1], pb[2]-pa[2], pb[3]-pa[3])
-        !isfinite(len) ? (nbadseg += 1) : (len == 0 && (ndegseg += 1))
+        !isfinite(len) ? (nbadseg += 1) :
+            (!allow_degenerate_segs && len == 0 && (ndegseg += 1))
     end
     nbadseg > 0 && push!(msgs, "$nbadseg segments have non-finite computed length")
     ndegseg > 0 && push!(msgs, "$ndegseg degenerate (zero-length) segments")

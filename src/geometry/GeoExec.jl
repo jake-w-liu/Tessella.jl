@@ -104,7 +104,16 @@ using ..IO: _geo_string_index_offender, _GEO_STRING_FUNCTIONS,
             _GEO_BARE_STRING_TOKENS, _GEO_ALL_FUNCTIONS, _GEO_LEXER_KEYWORDS,
             _geo_scan_top_level_comma, _geo_lhs_keyword_check,
             _geo_control_statement, _GEO_CONTROL_BARE
-using ..IO: GeoFieldSpec, _GEO_FIELD_KINDS, _geo_expression_field_tags
+using ..IO: GeoFieldSpec, GeoParams, _GEO_FIELD_KINDS,
+            _geo_expression_field_tags
+using ..SizeField: _build_geo_field
+using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
+               _model_mesh_dim01!, _model_mesh_dim01_grade!,
+               _model_mesh_dim01_parts!, _model_point_mesh_parts,
+               _model_curve_mesh_parts,
+               _model_curve_part_point, _model_planar_surface_mesh,
+               _model_curve_param_bounds,
+               _model_projection_physical_tags, _model_projection_legacy_tag
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
@@ -6318,11 +6327,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif (mm=match(r"^Mesh\s+(.*?)\s*;?\s*$",line)) !== nothing
         d=_geo_eval_numeric(mm.captures[1],context,"execute_geo: Mesh")
-        d in (1,2,3) || throw(ArgumentError(
-            "execute_geo: Mesh dimension must be 1, 2 or 3 (got $d)"))
+        d in (0,1,2,3) || throw(ArgumentError(
+            "execute_geo: Mesh dimension must be 0, 1, 2 or 3 (got $d)"))
         # Gmsh synchronizes GEO internals before meshing (when changed) — the
         # physical view and any pending unknown-member warnings materialize.
+        # `Mesh 0` synchronizes but meshes nothing upstream (`GModel::mesh`'s
+        # `ask==0` matches no generation branch).
         _geo_sync_physical_view_if_changed!(m,context)
+        d==0 && return
         context.mesh,context.mesh_node_owner=
             _geo_mesh_model(m,Int(d),context)
         return
@@ -6452,8 +6464,9 @@ function _geo_exec_field_declare!(context::_GeoNumericContext,tag_src,kind::Stri
 end
 
 # `X Field = {list}` — Gmsh's `String__Index tField tAFFECT ListOfDouble`:
-# `Background` takes exactly one tag and `BoundaryLayer` dedup-appends; both
-# stores are params-side. Any other prefix is an unknown command.
+# `Background` takes exactly one tag (`setBackgroundFieldId` stores the raw
+# id unvalidated — a dangling id only fails when the field is used) and
+# `BoundaryLayer` dedup-appends. Any other prefix is an unknown command.
 function _geo_exec_field_command!(context::_GeoNumericContext,name::String,
                                   list_src)
     caller="execute_geo: $name Field"
@@ -6465,8 +6478,15 @@ function _geo_exec_field_command!(context::_GeoNumericContext,name::String,
                 "Only 1 field can be set as a background field.")
         elseif isempty(tags)
             _geo_yywarn!(context,"No field given (Background Field).")
+        else
+            context.background_field=tags[1]
         end
-    elseif name!="BoundaryLayer"
+    elseif name=="BoundaryLayer"
+        for tag in _geo_expression_field_tags(list_src,context,caller)
+            tag in context.boundary_layer_fields ||
+                push!(context.boundary_layer_fields,tag)
+        end
+    else
         _geo_yyerror!(context,"Unknown command '$name Field'")
     end
     return nothing
@@ -6852,17 +6872,146 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
     return nothing
 end
 
+# Entity references inside `Distance`/`Restrict`/`Constant` field options —
+# the same `(dim, tag) -> Mesh` contract `build_geo_size_field`'s resolver
+# documents: a model point becomes a single-node mesh, a curve its stored
+# `curve_params` nodes when meshed (upstream samples the edge's mesh
+# vertices) else its endpoints, a surface its boundary PSLG mesh.
+function _geo_field_entity_mesh(m::GeoModel,dim::Int,name::AbstractString,
+                                caller::AbstractString)
+    tag=tryparse(Int,String(name))
+    if tag===nothing
+        numeric=tryparse(Float64,String(name))
+        (numeric===nothing || !isinteger(numeric) ||
+         numeric<typemin(Int) || numeric>typemax(Int)) && return nothing
+        tag=Int(numeric)
+    end
+    if dim==0
+        haskey(m.points,tag) || return nothing
+        return Mesh(reshape(collect(Float64.(m.points[tag])),3,1))
+    elseif dim==1
+        params=get(m.curve_params,tag,nothing)
+        if params!==nothing
+            coords=Matrix{Float64}(undef,3,length(params))
+            for (i,u) in enumerate(params)
+                p=_model_curve_part_point(m,tag,Float64(u),caller)
+                coords[1,i],coords[2,i],coords[3,i]=p
+            end
+            return Mesh(coords)
+        end
+        if haskey(m.curves,tag)
+            a,b=m.curves[tag]
+            (haskey(m.points,a) && haskey(m.points,b)) || return nothing
+            coords=hcat(collect(Float64.(m.points[a])),
+                        collect(Float64.(m.points[b])))
+            return Mesh(coords;segs=reshape(Int32[1;2],2,1))
+        end
+        return nothing
+    elseif dim==2
+        haskey(m.surfaces,tag) || return nothing
+        return _model_planar_surface_mesh(
+            m,tag,caller;include_embeddings=false)
+    end
+    return nothing
+end
+
+# `context_fields` resolver for the five model/view-backed field kinds — the
+# `.geo` executor has no view store or boundary-layer topology, so those
+# kinds fail with the same explicit diagnostic the API session uses.
+function _geo_mesh_context_fields(spec,config,entities,params)
+    throw(ArgumentError(
+        "build_geo_size_field: Field[$(spec.tag)] kind $(spec.kind) " *
+        "requires model context that is not available to .geo meshing"))
+end
+
+# The exec-time background field — `BGM_MeshSize` consumes the raw field
+# (`l3`) and applies the global lcMin/lcMax/lcFactor itself, so the builder
+# must not wrap it in `_gmsh_background`. `FieldManager::getBackgroundField`
+# returning an undeclared id only fails when the field is queried — mirror
+# that laziness by erroring at build time (the first use is the query).
+function _geo_mesh_background_field(m::GeoModel,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString)
+    tag=context.background_field
+    tag<=0 && return nothing
+    fields=context.fields
+    (fields===nothing || !haskey(fields,tag)) && throw(ArgumentError(
+        "$caller: background field $tag is not defined"))
+    opt(name)=_geo_option_number(context,"Mesh",0,name)
+    geometry_tolerance=something(
+        _geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
+    params=GeoParams(
+        something(opt("MeshSizeMin"),0.0),
+        something(opt("MeshSizeMax"),1e22),
+        m.meshing.lc_factor,
+        1,Dict{Tuple{Int,Int},String}(),fields,tag,
+        copy(context.boundary_layer_fields),geometry_tolerance)
+    bbox=try
+        _model_mesh_bbox(m,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        nothing
+    end
+    return _build_geo_field(
+        params,(d,name)->_geo_field_entity_mesh(m,d,name,caller),tag;
+        model_bbox=bbox,geometry_tolerance=geometry_tolerance,
+        context_fields=_geo_mesh_context_fields)
+end
+
+# Mesh-time `_ModelMesh1DOptions` — upstream reads global `CTX` state inside
+# `meshGEdge`/`BGM_MeshSize`; this bundle captures the equivalent `.geo`
+# option values, the padded model-bounds `lc` (`SetBoundingBox` runs at
+# `synchronize` before every `Mesh` statement), the selected background
+# field, the size callback, and the `Msg::Warning`/`Msg::Error` sinks.
+function _geo_mesh_1d_options(m::GeoModel,context::_GeoNumericContext,
+                              caller::AbstractString)
+    opt(name)=_geo_option_number(context,"Mesh",0,name)
+    iopt(name,default)=_geo_signed_gmsh_int_value(
+        something(opt(name),default),"$caller: Mesh.$name")
+    geometry_tolerance=something(
+        _geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
+    return _ModelMesh1DOptions(
+        _model_mesh_lc(m,geometry_tolerance,caller),
+        something(opt("MeshSizeMin"),0.0),
+        something(opt("MeshSizeMax"),1e22),
+        m.meshing.lc_factor,
+        !iszero(something(opt("MeshSizeFromPoints"),1.0)),
+        something(opt("MeshSizeFromCurvature"),0.0),
+        something(opt("LcIntegrationPrecision"),1e-9),
+        iopt("MinLineNodes",2.0),iopt("MinCircleNodes",7.0),
+        iopt("MinCurveNodes",3.0),
+        something(opt("ToleranceEdgeLength"),0.0),
+        geometry_tolerance,
+        !iszero(something(opt("MeshOnlyEmpty"),0.0)),
+        !iszero(something(opt("MeshOnlyVisible"),0.0)),
+        iopt("MaxRetries",10.0),
+        _geo_mesh_background_field(m,context,caller),
+        m.meshing.size_callback,
+        msg->_geo_yywarn!(context,msg),
+        msg->_geo_msg_error!(context,msg))
+end
+
 # `Mesh n;` — mesh every live entity up to `dim`, merging entity parts into a
 # single Mesh plus a node→(dim,tag) ownership map (lowest dimension wins, like
-# Gmsh's per-entity vertex storage).
+# Gmsh's per-entity vertex storage). `Mesh 1` re-grades every curve
+# (`deMeshGEdge` upstream); `Mesh 2`/`Mesh 3` reuse the stored
+# `curve_params` discretizations, re-running the 1-D pass only when a curve
+# is missing parameters (upstream's `old < 1` arm).
 function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     caller="execute_geo: Mesh"
     _geo_sync_meshing_options!(m,context)
     parts=Tuple{Int,Int,Mesh}[]
-    if dim==1
-        throw(ArgumentError(
-            "$caller 1: standalone curve meshing is not implemented — " *
-            "curve nodes are produced as part of surface/volume meshes"))
+    if dim>=1
+        options=_geo_mesh_1d_options(m,context,caller)
+        if dim==1
+            append!(parts,_model_mesh_dim01!(m,options,caller))
+        else
+            # Grade first (`meshDone1D` upstream); the parts are emitted only
+            # after surface meshing so boundary splits written back to
+            # `curve_params` by `meshGFace`-equivalent writeback appear in the
+            # line elements.
+            _model_mesh_dim01_grade!(m,options,caller)
+        end
     end
     if dim>=2
         for tag in sort!(collect(keys(m.surfaces)))
@@ -6874,8 +7023,12 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
             push!(parts,(3,tag,mesh_model_volume(m,tag)))
         end
     end
+    if dim>=2
+        append!(parts,_model_point_mesh_parts(m,caller))
+        append!(parts,_model_curve_mesh_parts(m,caller))
+    end
     isempty(parts) && throw(ArgumentError(
-        "$caller $dim: no $(dim==2 ? "surfaces" : "entities") to mesh"))
+        "$caller $dim: no entities to mesh"))
     merged,owner=_geo_merge_entity_meshes(parts)
     _geo_run_homology!(m,merged,parts,caller)
     return merged,owner
@@ -6909,13 +7062,15 @@ function _geo_homology_cells(m::GeoModel,mesh::Mesh,
         lookup[(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))]=
             Int32(n)
     end
-    next=Int32(nnodes(mesh)+1)
+    # One-element counter — mutating `next[1]` inside `index_for` leaves the
+    # captured binding itself assigned once, keeping it unboxed.
+    next=Int32[nnodes(mesh)+1]
     function index_for(point)
         x,y,z=point
         key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
         i=get(lookup,key,Int32(0))
         i!=0 && return i
-        i=next;lookup[key]=i;next+=Int32(1)
+        i=next[1];lookup[key]=i;next[1]=i+Int32(1)
         return i
     end
     cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{Int32}}}}()
@@ -6939,31 +7094,27 @@ function _geo_homology_cells(m::GeoModel,mesh::Mesh,
             end
         end
     end
-    # Curve chains reproduce the mesher's subdivision exactly — transfinite
-    # parameters plus size-at-parameter insertion points, `Degenerated`
-    # collapsing to the endpoint edge — so node lookups hit the same merged
-    # coordinates. Only straight Lines subdivide today.
-    for (curve,(a,b)) in m.curves
-        _curve_type(m,curve)===:line || continue
-        # A `Degenerated` curve (or a degenerate-typed point curve) meshes to
-        # a single vertex — no 1-cells.
-        (curve in m.meshing.degenerated || a==b) && continue
-        parameters=Float64[]
-        spec=get(m.meshing.transfinite_curves,curve,nothing)
-        spec===nothing || append!(parameters,
-            _transfinite_parameters(m,spec.num_nodes,spec.kind,
-                spec.coef,caller,curve;reversed=spec.reversed))
-        for (plist,_) in get(m.meshing.size_at_params,(1,curve),
-                             Tuple{Vector{Float64},Float64}[])
-            append!(parameters,plist)
+    # Curve chains come from the stored `curve_params` — the exact `Mesh 1`
+    # discretization — evaluated through the same part evaluator so node
+    # lookups hit the merged coordinates bitwise. Curves without stored
+    # parameters (kept/`Degenerated` state, or a `Mesh` statement that never
+    # graded them) contribute no 1-cells, like upstream's element store.
+    for (curve,params) in m.curve_params
+        haskey(m.curves,curve) || continue
+        a,b=m.curves[curve]
+        us=Float64.(params)
+        if a==b && length(us)>1
+            _,hi=_model_curve_param_bounds(m,curve,caller)
+            us[end]>=hi && (us=us[1:end-1])
         end
-        isempty(parameters) && (parameters=[0.0,1.0])
-        sort!(unique!(parameters))
-        indices=Int32[index_for(_periodic_curve_point(m,curve,p,caller))
-                      for p in parameters]
+        length(us)<(a==b ? 1 : 2) && continue
+        indices=Int32[index_for(_model_curve_part_point(m,curve,u,caller))
+                      for u in us]
         elements=entry((1,curve))
-        for i in 1:length(indices)-1
-            push!(elements,(Int32(1),Int32[indices[i],indices[i+1]]))
+        nseg=a==b ? length(indices) : length(indices)-1
+        for i in 1:nseg
+            j=a==b ? mod1(i+1,length(indices)) : i+1
+            push!(elements,(Int32(1),Int32[indices[i],indices[j]]))
         end
     end
     for (tag,point) in m.points
@@ -7025,6 +7176,15 @@ function _geo_merge_entity_meshes(parts::Vector{Tuple{Int,Int,Mesh}})
         remap=Vector{Int}(undef,nnodes(mesh))
         for n in 1:nnodes(mesh)
             remap[n]=node_index(mesh.coords[:,n])
+        end
+        if dim==0
+            # Vertex nodes classify on the vertex even when the part carries
+            # no elements — upstream `Mesh0D` stores each vertex's mesh
+            # vertex on its GVertex regardless of MPoint emission.
+            for n in remap
+                old=get(owner,n,(3,0))
+                dim<=old[1] && (owner[n]=(0,tag))
+            end
         end
         for s in 1:nsegs(mesh)
             a,b=remap[mesh.segs[1,s]],remap[mesh.segs[2,s]]
@@ -7769,7 +7929,18 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
             "$caller: no mesh exists — run `Mesh n;` first"))
         mesh=Mesh(zeros(3,0))
     end
-    write_msh(file,mesh;physical_names=m.physical_names)
+    # Upstream serializes an `MPoint` element per model vertex — the dim-0
+    # owners the merge recorded carry them, emitted in vertex-tag order.
+    point_elements=Tuple{Int,Int,Int}[]
+    owner=context.mesh_node_owner
+    dim0=sort!([(tag,node) for (node,(dim,tag)) in owner if dim==0])
+    for (tag,node) in dim0
+        physical=_model_projection_legacy_tag(
+            _model_projection_physical_tags(m,0,tag))
+        push!(point_elements,(node,Int(physical),tag))
+    end
+    write_msh(file,mesh;physical_names=m.physical_names,
+              point_elements=point_elements)
     return nothing
 end
 

@@ -318,7 +318,7 @@ end
     @test periodic_link.master_entity==5
     @test periodic_link.slave_nodes==periodic_mapping.slave_nodes
     @test mixed_crc(periodic_projection).sha==
-          "b02b470325db9d19ffbe498d48a8e86f632b5ea92c67657fd422e9aa05f9cf0b"
+          "55e65e08a77e9cc3b9d69531edc19601b50de9957de977b488ece16d1dae9e60"
 end
 
 @testset "holed native surface projection" begin

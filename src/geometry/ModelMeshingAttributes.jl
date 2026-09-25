@@ -391,6 +391,7 @@ function remove_constraints!(m::GeoModel,dim_tags=NTuple{2,Int}[])
         empty!(meshing.transfinite_volumes)
         empty!(meshing.recombine)
         empty!(meshing.extrude)
+        empty!(meshing.extrude_sources)
         empty!(meshing.smoothing)
         empty!(meshing.reverse)
         empty!(meshing.algorithm)
@@ -428,7 +429,8 @@ function remove_constraints!(m::GeoModel,dim_tags=NTuple{2,Int}[])
         end
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
-                      meshing.size_from_boundary,meshing.extrude)
+                      meshing.size_from_boundary,meshing.extrude,
+                      meshing.extrude_sources)
             delete!(store,(dimension,tag))
         end
         filter!(compound->!(compound.first==dimension && tag in compound.second),
@@ -2150,10 +2152,12 @@ function compute_homology!(m::GeoModel,cells::Dict{Tuple{Int,Int},
         # The cell complex builds lazily at the first request that actually
         # computes — upstream constructs it inside `findHomologyBasis`/
         # `findBettiNumbers`, so per-request dimension validation errors
-        # precede the empty-complex error.
-        complex=nothing
-        function complex_or_error()
-            complex===nothing || return complex
+        # precede the empty-complex error. `domain`/`subdomain` pass as
+        # arguments and `complex` lives in a `Ref` so the closure captures
+        # only once-assigned bindings (no boxed locals).
+        complex=Ref{Any}(nothing)
+        function complex_or_error(domain,subdomain)
+            complex[]===nothing || return complex[]
             built=_homology_complex(cells,domain,subdomain,caller)
             # Upstream: "Cell Complex is empty: check the domain and the
             # mesh" — the domain entities carried no cells (e.g. nothing was
@@ -2161,7 +2165,7 @@ function compute_homology!(m::GeoModel,cells::Dict{Tuple{Int,Int},
             all(isempty,built) && throw(ArgumentError(
                 "$caller: cell complex is empty: check the domain and " *
                 "the mesh"))
-            complex=built
+            complex[]=built
             return built
         end
         computed_h=Set{Int}();computed_c=Set{Int}()
@@ -2177,11 +2181,11 @@ function compute_homology!(m::GeoModel,cells::Dict{Tuple{Int,Int},
             isempty(dimensions) && throw(ArgumentError(
                 "$caller: invalid homology computation dimensions given"))
             # `Betti` reports ranks without storing any chains.
-            kind=="Betti" && (complex_or_error();continue)
+            kind=="Betti" && (complex_or_error(domain,subdomain);continue)
             computed=kind=="Homology" ? computed_h : computed_c
             all(d->d in computed,dimensions) && continue
             union!(computed,dimensions)
-            current=complex_or_error()
+            current=complex_or_error(domain,subdomain)
             name_domain=_homology_domain_string(request.domain,
                                                 request.subdomain)
             for k in dimensions
@@ -2420,6 +2424,17 @@ function _attribute_forced_parameters(m::GeoModel,t::Int,
         curve in boundary_curves || continue
         (first(list)==0.0 && last(list)==1.0) || throw(ArgumentError(
             "$caller: Curve[$curve] parameter list must span [0,1]"))
+    end
+    # A stored `curve_params` entry is the `Mesh 1` discretization — upstream
+    # `meshGFace` reuses `GEdge::mesh_vertices` verbatim, so it takes
+    # precedence over the recomputed attribute parameters above. Native
+    # parameter bounds map onto the [0,1] frame `forced` uses.
+    for curve in boundary_curves
+        params=get(m.curve_params,curve,nothing)
+        params===nothing && continue
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        forced[curve]=t0==0.0 && t1==1.0 ? Float64.(params) :
+            Float64[(u-t0)/(t1-t0) for u in params]
     end
     return param_sizes
 end

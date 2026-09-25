@@ -191,6 +191,7 @@ function _model_removal_state(
     curve_control_points=copy(m.curve_control_points)
     curve_types=copy(m.curve_types)
     curve_geometry=copy(m.curve_geometry)
+    curve_params=copy(m.curve_params)
     surfaces=copy(m.surfaces)
     surface_types=copy(m.surface_types)
     surface_geometry=copy(m.surface_geometry)
@@ -203,6 +204,7 @@ function _model_removal_state(
         delete!(curve_control_points,tag)
         delete!(curve_types,tag)
         delete!(curve_geometry,tag)
+        delete!(curve_params,tag)
     end
     for tag in removed_tags[3]
         delete!(surfaces,tag)
@@ -343,7 +345,7 @@ function _model_removal_state(
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
                       meshing.size_from_boundary,meshing.attached,
-                      meshing.extrude)
+                      meshing.extrude,meshing.extrude_sources)
             delete!(store,entity)
         end
     end
@@ -351,7 +353,8 @@ function _model_removal_state(
                            compound.second),meshing.compounds)
 
     return (;points,point_size,curves,curve_control_points,curve_types,
-            curve_geometry,loops,surfaces,surface_types,surface_geometry,
+            curve_geometry,curve_params,loops,surfaces,surface_types,
+            surface_geometry,
             surface_loops,volumes,
             entity_names,entity_visibility,entity_colors,physical,physical_names,
             entity_physicals,
@@ -391,6 +394,7 @@ function remove_entities!(m::GeoModel,dim_tags,recursive=false)
     m.curve_control_points=state.curve_control_points
     m.curve_types=state.curve_types
     m.curve_geometry=state.curve_geometry
+    m.curve_params=state.curve_params
     m.loops=state.loops
     m.surfaces=state.surfaces
     m.surface_types=state.surface_types
@@ -644,7 +648,7 @@ here.
 function _geo_reset_model_geometry!(m::GeoModel)
     empty!(m.points);empty!(m.point_size)
     empty!(m.curves);empty!(m.curve_control_points);empty!(m.curve_types)
-    empty!(m.curve_geometry)
+    empty!(m.curve_geometry);empty!(m.curve_params)
     empty!(m.loops)
     empty!(m.surfaces);empty!(m.surface_types);empty!(m.surface_geometry)
     empty!(m.surface_loops)
@@ -669,7 +673,8 @@ function _geo_reset_model_geometry!(m::GeoModel)
     end
     for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                   meshing.algorithm,meshing.size_at_params,
-                  meshing.size_from_boundary,meshing.attached,meshing.extrude)
+                  meshing.size_from_boundary,meshing.attached,meshing.extrude,
+                  meshing.extrude_sources)
         empty!(store)
     end
     empty!(meshing.homology_requests)

@@ -1193,6 +1193,7 @@ function _occ_materialize_rollback!(m::GeoModel, points, curves, loops,
         delete!(m.curve_types,curve)
         delete!(m.curve_geometry,curve)
         delete!(m.curve_control_points,curve)
+        delete!(m.curve_params,curve)
     end
     for point in points
         delete!(m.points,point)

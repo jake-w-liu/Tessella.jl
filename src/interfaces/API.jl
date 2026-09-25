@@ -3845,11 +3845,15 @@ function _clear_mesh(dim_tags=())
             for (_,_,record) in _discrete_mesh_records(model)
                 _record_clear!(record)
             end
+            # `GModel::clearMesh` demeshes every entity — `deMeshGEdge`
+            # drops each curve's stored discretization with it.
+            empty!(model.curve_params)
             return nothing
         end
         for (dim,tag) in pairs
             record=_model_mesh_record(model,dim,tag)
             record===nothing || _record_clear!(record)
+            dim==1 && delete!(model.curve_params,tag)
         end
         cached=LAST_MESH[]
         cached===nothing && return nothing

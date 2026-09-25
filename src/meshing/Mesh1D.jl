@@ -339,10 +339,23 @@ function _length_point(γ, derivative, t::Float64, t0::Float64, t1::Float64,
     return _IntegrationPoint(t, speed, 0.0, speed, 1.0)
 end
 
+# Evaluate a parametric size callback `u -> lc` (Gmsh's `F_Lc`-style curve
+# term): the value must be a positive finite size for `speed/h` to stay
+# representable.
+function _size_function_at(size_function, t::Float64,
+                           caller::AbstractString)
+    value = size_function(t)
+    (value isa Real && isfinite(value) && value > 0) || throw(ArgumentError(
+        "$caller: size_function must return a positive finite size at " *
+        "parameter $t (got $value)"))
+    return Float64(value)
+end
+
 function _metric_point(γ, derivative, field::AbstractSizeField, t::Float64,
                        t0::Float64, t1::Float64, curve_entity, begin_entity,
                        end_entity, at_begin::Bool, at_end::Bool,
-                       anisotropic_metric::Bool, caller::AbstractString)
+                       anisotropic_metric::Bool, size_function,
+                       caller::AbstractString)
     point = _pt3(γ(t), caller)
     tangent = _curve_tangent(γ, derivative, point, t, t0, t1, caller)
     speed = hypot(tangent[1], tangent[2], tangent[3])
@@ -358,7 +371,9 @@ function _metric_point(γ, derivative, field::AbstractSizeField, t::Float64,
         return _IntegrationPoint(t, lc, 0.0, speed, 1.0)
     end
 
-    h = size_at(field, point[1], point[2], point[3], curve_entity)
+    h = size_function === nothing ?
+        size_at(field, point[1], point[2], point[3], curve_entity) :
+        _size_function_at(size_function, t, caller)
     at_begin && begin_entity !== nothing &&
         (h = min(h, size_at(field, point[1], point[2], point[3], begin_entity)))
     at_end && end_entity !== nothing &&
@@ -556,13 +571,14 @@ end
 function _metric_points(γ, field::AbstractSizeField, derivative,
                         t0::Float64, t1::Float64, nsample, curve_entity,
                         begin_entity, end_entity, anisotropic_metric::Bool,
-                        precision::Float64, maxpoints::Int,
+                        size_function, precision::Float64, maxpoints::Int,
                         mindepth::Int, maxdepth::Int,
                         smooth_ratio, smoothing_iterations,
                         caller::AbstractString)
     evaluate(t, at_begin, at_end) = _metric_point(
         γ, derivative, field, t, t0, t1, curve_entity, begin_entity,
-        end_entity, at_begin, at_end, anisotropic_metric, caller)
+        end_entity, at_begin, at_end, anisotropic_metric, size_function,
+        caller)
     points = _integration_points(evaluate, t0, t1, nsample, precision,
                                  maxpoints, mindepth, maxdepth, caller)
     if smooth_ratio !== nothing
@@ -655,8 +671,8 @@ function metric_length(γ, field::AbstractSizeField; t0::Real=0.0,
         "metric_length")
     points = _metric_points(
         γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
-        end_entity, anisotropic_metric, precision, maxpoints, mindepth,
-        maxdepth, ratio, smoothing_iterations,
+        end_entity, anisotropic_metric, nothing, precision, maxpoints,
+        mindepth, maxdepth, ratio, smoothing_iterations,
         "metric_length")
     return points[end].p
 end
@@ -721,19 +737,24 @@ function _check_closed_curve(γ, t0::Float64, t1::Float64)
 end
 
 # Port of meshGEdge.cpp filterPoints for the standard (non-BAMG) algorithm.
-# Candidate interior vertices closer than 0.3 times the unsmoothed curve size
-# are removed as a group, provided the geometry-specific minimum is preserved.
+# Interior vertices closer than 0.3 times the curve size (evaluated at the
+# midpoint of the retained-neighbor interval, like `F_LcB`) are collected as
+# `(lc/d, index)` candidates, sorted ascending by ratio, and the first `last`
+# are removed — under `force_odd` (recombination odd-node forcing) `last` is
+# truncated to an even count, and the removal only proceeds when the geometry
+# minimum is preserved.
 function _filter_close_points!(points::Vector{NTuple{3,Float64}},
                                parameters::Vector{Float64}, γ,
                                field::AbstractSizeField, curve_entity,
                                minimum_segments::Int, closed::Bool,
+                               force_odd::Bool, size_function,
                                caller::AbstractString)
     length(points) == length(parameters) || throw(ArgumentError(
         "$caller: internal point/parameter length mismatch"))
     last_interior = closed ? length(points) : length(points) - 1
     last_interior >= 2 || return nothing
     interior_count = last_interior - 1
-    candidates = Int[]
+    candidates = Tuple{Float64,Int}[]
     sizehint!(candidates, min(interior_count, 256))
     previous_retained = 1
     @inbounds for index in 2:last_interior
@@ -743,27 +764,32 @@ function _filter_close_points!(points::Vector{NTuple{3,Float64}},
             parameter = _convex_coordinate(
                 parameters[previous_retained], parameter, 0.5)
         end
-        sample = _pt3(γ(parameter), caller)
-        size = size_at(field, sample[1], sample[2], sample[3], curve_entity)
+        size = if size_function === nothing
+            sample = _pt3(γ(parameter), caller)
+            size_at(field, sample[1], sample[2], sample[3], curve_entity)
+        else
+            _size_function_at(size_function, parameter, caller)
+        end
         if distance < size * 0.3
-            push!(candidates, index)
+            push!(candidates, (size / distance, index))
         else
             previous_retained = index
         end
     end
-
-    minimum_interior = minimum_segments - 1
-    interior_count - length(candidates) >= minimum_interior || return nothing
     isempty(candidates) && return nothing
 
-    candidate_position = 1
-    write_position = 1
-    @inbounds for read_position in 2:length(points)
-        if candidate_position <= length(candidates) &&
-           candidates[candidate_position] == read_position
-            candidate_position += 1
-            continue
-        end
+    # `std::sort(lengths)` — ascending `lc/d` (the least-constraining
+    # candidates are removed first); index tie-break keeps it deterministic.
+    sort!(candidates)
+    last = force_odd ? length(candidates) - length(candidates) % 2 :
+        length(candidates)
+    interior_count - last >= minimum_segments - 1 || return nothing
+    last == 0 && return nothing
+
+    removed = Set{Int}(index for (_, index) in candidates[1:last])
+    write_position = 0
+    @inbounds for read_position in 1:length(points)
+        read_position in removed && continue
         write_position += 1
         points[write_position] = points[read_position]
         parameters[write_position] = parameters[read_position]
@@ -778,15 +804,26 @@ end
                entity=nothing, endpoint_entities=nothing,
                anisotropic_metric=false, derivative=nothing,
                smooth_ratio=1.8, minimum_segments=nothing,
+               size_function=nothing, exact_edges=nothing,
+               force_odd=false,
                max_edges=10_000_000) -> (points, parameters)
 
 Mesh `γ` at equal increments of the Gmsh-style edge-count primitive. The initial
 number of edges follows Gmsh 4.15.2's `int(a + 1.99) - 1` rule, subject to the
-requested minimum. Its standard scalar policy then applies `filterPoints`, which
-can remove interior points closer than `0.3h` while preserving that minimum; the
-BAMG policy does not filter. The default minimum is one open edge or three closed
-edges; set `minimum_segments` to reproduce a geometry kernel's larger
-curve-specific minimum. Closed curves omit the duplicate endpoint.
+requested minimum — or `exact_edges` when an exact count is required (Gmsh's
+recombination odd-node forcing adjusts `N` after the standard rule). Its
+standard scalar policy then applies `filterPoints`, which can remove interior
+points closer than `0.3h` while preserving that minimum; the BAMG policy does
+not filter. The default minimum is one open edge or three closed edges; set
+`minimum_segments` to reproduce a geometry kernel's larger curve-specific
+minimum. Closed curves omit the duplicate endpoint.
+
+`size_function(u)` supplies the curve size at parameter `u` directly (Gmsh's
+`F_Lc`/`F_LcB` curve term — `BGM_MeshSize` evaluated on the curve), replacing
+the field's scalar curve evaluation; endpoint sizes still come from the field
+through `endpoint_entities`, matching Gmsh's `min(BGM(vertex), BGM(curve))`
+endpoint rule. `force_odd` enables filterPoints' even-count truncation used
+when recombination requires an odd node count.
 
 Integration, smoothing, derivative and entity-context keywords have the same
 meaning as in [`metric_length`](@ref). `max_integration_points` and `max_edges`
@@ -803,6 +840,8 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                     smooth_ratio=_GMSH_SMOOTH_RATIO,
                     max_smoothing_iterations=_GMSH_SMOOTH_ITERATIONS,
                     minimum_segments=nothing,
+                    size_function=nothing, exact_edges=nothing,
+                    force_odd::Bool=false,
                     max_edges=_DEFAULT_MAX_EDGES)
     t0, t1, nsample = _curve_args(t0, t1, nsample, "mesh_curve")
     curve_entity = _curve_entity(entity, "mesh_curve")
@@ -817,17 +856,26 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
         "mesh_curve")
     effective_minimum, maximum_edges = _edge_limits(
         minimum_segments, max_edges, closed, "mesh_curve")
+    anisotropic_metric && size_function !== nothing && throw(ArgumentError(
+        "mesh_curve: size_function is only supported with the scalar metric"))
     closed && _check_closed_curve(γ, t0, t1)
     integration = _metric_points(
         γ, field, derivative, t0, t1, nsample, curve_entity, begin_entity,
-        end_entity, anisotropic_metric, precision, maxpoints, mindepth,
-        maxdepth, ratio, smoothing_iterations,
+        end_entity, anisotropic_metric, size_function, precision, maxpoints,
+        mindepth, maxdepth, ratio, smoothing_iterations,
         "mesh_curve")
     total = integration[end].p
     total > 0 || throw(ArgumentError(
         "mesh_curve: curve has zero sampled metric length"))
-    nedge = _gmsh_edge_count(total, effective_minimum, maximum_edges,
-                             "mesh_curve")
+    nedge = if exact_edges === nothing
+        _gmsh_edge_count(total, effective_minimum, maximum_edges,
+                         "mesh_curve")
+    else
+        count = _positive_int(exact_edges, "mesh_curve", "exact_edges")
+        count <= maximum_edges || throw(ArgumentError(
+            "mesh_curve: exact_edges=$count exceeds max_edges=$maximum_edges"))
+        count
+    end
     !closed && nedge == typemax(Int) && throw(ArgumentError(
         "mesh_curve: open-curve node count exceeds the platform Int limit"))
     nnode = closed ? nedge : nedge + 1
@@ -841,7 +889,8 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
     end
     if !anisotropic_metric
         _filter_close_points!(points, parameters, γ, field, curve_entity,
-                              effective_minimum, closed, "mesh_curve")
+                              effective_minimum, closed, force_odd,
+                              size_function, "mesh_curve")
     end
     return points, parameters
 end
