@@ -4615,6 +4615,176 @@ end
             Int32[],Int32[2],Int32[],false,Float64[9.0],Int32(4))])).ok
 end
 
+@testset "mixed binary and view count boundaries" begin
+    mktempdir() do directory
+        for width in (4,8), count in (3,20)
+            word=width==4 ? UInt32 : UInt64
+            path=joinpath(directory,"nodes-$width-$count.msh")
+            open(path,"w") do io
+                print(io,"\$MeshFormat\n4.1 1 $width\n")
+                write(io,Int32(1)); print(io,"\n\$EndMeshFormat\n\$Nodes\n")
+                write(io,word.((1,count,1,count))...)
+                write(io,Int32.((1,1,0))...); write(io,word(count))
+                write(io,word.(1:count))
+                for i in 1:count
+                    write(io,Float64(i),0.0,0.0)
+                end
+                print(io,"\n\$EndNodes\n")
+            end
+            mesh=ElementsUnderTest.read_mixed_msh(path)
+            @test mesh.coords==vcat(permutedims(Float64.(1:count)),zeros(2,count))
+            @test ElementsUnderTest.validate(mesh).ok
+        end
+
+        # The declared count must not reserve bulk storage when even the
+        # minimum record payload is absent. Keep the fixtures themselves tiny.
+        for width in (4,8), section in ("Nodes","Elements")
+            word=width==4 ? UInt32 : UInt64
+            path=joinpath(directory,"truncated-$width-$section.msh")
+            open(path,"w") do io
+                print(io,"\$MeshFormat\n4.1 1 $width\n")
+                write(io,Int32(1)); print(io,"\n\$EndMeshFormat\n")
+                if section=="Elements"
+                    print(io,"\$Nodes\n"); write(io,zeros(word,4))
+                    print(io,"\n\$EndNodes\n")
+                end
+                print(io,"\$$section\n")
+                write(io,word.((1,10000,1,10000))...)
+            end
+            error=try
+                ElementsUnderTest.read_mixed_msh(path;max_file_bytes=filesize(path))
+            catch exception
+                exception
+            end
+            @test error isa ArgumentError
+            @test occursin("truncated binary payload in v4 binary $section",
+                           sprint(showerror,error))
+        end
+        for header in ("100000\n","0\n100000\n","0\n0\n100000\n")
+            lines=String[]
+            @test ElementsUnderTest._binary_data_header(
+                IOBuffer(header),"NodeData",lines)===nothing
+            @test length(lines)==Base.count(==('\n'),header)
+        end
+        truncated_v2=joinpath(directory,"truncated-v2-elements.msh")
+        open(truncated_v2,"w") do io
+            print(io,"\$MeshFormat\n2.2 1 8\n")
+            write(io,Int32(1)); print(io,"\n\$EndMeshFormat\n")
+            print(io,"\$Nodes\n0\n\n\$EndNodes\n\$Elements\n10000\n")
+        end
+        v2_error=try
+            ElementsUnderTest.read_mixed_msh(truncated_v2)
+        catch exception
+            exception
+        end
+        @test v2_error isa ArgumentError
+        @test occursin("truncated binary payload in v2 binary Elements",
+                       sprint(showerror,v2_error))
+
+        # View reference tags share the mesh's full UInt64 tag domain.
+        node1=UInt64(1)<<63; node2=typemax(UInt64); element=node2-1
+        path=joinpath(directory,"large-view-tags.msh")
+        write(path,"""
+        \$MeshFormat
+        4.1 0 8
+        \$EndMeshFormat
+        \$Nodes
+        1 2 $node1 $node2
+        1 1 0 2
+        $node1 $node2
+        0 0 0
+        1 0 0
+        \$EndNodes
+        \$Elements
+        1 1 $element $element
+        1 1 1 1
+        $element $node1 $node2
+        \$EndElements
+        \$NodeData
+        0
+        0
+        3
+        0
+        1
+        2
+        $node1 2.5
+        $node2 3.5
+        \$EndNodeData
+        \$ElementData
+        0
+        0
+        3
+        0
+        1
+        1
+        $element 4.5
+        \$EndElementData
+        \$ElementNodeData
+        0
+        0
+        3
+        0
+        1
+        1
+        $element 2 $node1 $node2 5.5 6.5
+        \$EndElementNodeData
+        \$ElementNodeData
+        0
+        0
+        3
+        0
+        1
+        1
+        $element 2 7.5 8.5
+        \$EndElementNodeData
+        """)
+        mesh=ElementsUnderTest.read_mixed_msh(path)
+        @test isempty(mesh.ancillary_sections)
+        @test length(mesh.data_sections)==4
+        @test [section.values for section in mesh.data_sections]==
+              [[2.5,3.5],[4.5],[5.5,6.5],[7.5,8.5]]
+        @test mesh.data_sections[1].nodes==Int32[1,2]
+        @test mesh.data_sections[3].nodes==Int32[1,2]
+        @test mesh.data_sections[4].implicit_nodes
+        output=joinpath(directory,"large-view-tags-out.msh")
+        ElementsUnderTest.write_mixed_msh(output,mesh;gmsh_compatible=false)
+        @test ElementsUnderTest.mixed_crc(ElementsUnderTest.read_mixed_msh(output))==
+              ElementsUnderTest.mixed_crc(mesh)
+        # Invalid view rows retain the existing ancillary fallback; wrapped
+        # multiplication must not turn an empty row into parsed view data.
+        malformed=joinpath(directory,"overflowing-view-row.msh")
+        write(malformed,read(path,String)*
+            "\$ElementNodeData\n0\n0\n3\n0\n$(Int64(1)<<62)\n1\n"*
+            "$element 4\n\$EndElementNodeData\n")
+        retained=ElementsUnderTest.read_mixed_msh(malformed)
+        @test length(retained.data_sections)==4
+        @test only(retained.ancillary_sections).name=="ElementNodeData"
+
+        block=ElementsUnderTest.ElementBlock(
+            15,reshape(Int32.(1:4),1,4),zeros(Int32,4))
+        for name in ("NodeData","ElementData","ElementNodeData")
+            nodes=name=="NodeData" ? Int32.(1:4) : Int32[]
+            elements=name=="NodeData" ? Int32[] : Int32.(1:4)
+            row_nodes=name=="ElementNodeData" ? ones(Int32,4) : Int32[]
+            section=ElementsUnderTest.MshDataSection(
+                name,String[],Float64[],Int64[0,1<<62,4],elements,nodes,
+                row_nodes,name=="ElementNodeData",Float64[],Int32(4))
+            @test_throws ArgumentError ElementsUnderTest.MixedMesh(
+                zeros(3,4),[block];data_sections=[section])
+        end
+        valid=ElementsUnderTest.MshDataSection(
+            "NodeData",String[],Float64[],Int64[0,1,4],Int32[],Int32.(1:4),
+            Int32[],false,zeros(4),Int32(4))
+        mutable_mesh=ElementsUnderTest.MixedMesh(zeros(3,4),[block];data_sections=[valid])
+        mutable_mesh.data_sections[1].header[2]=1<<62
+        empty!(mutable_mesh.data_sections[1].values)
+        @test !ElementsUnderTest.validate(mutable_mesh).ok
+        write(output,"preserve existing file")
+        @test_throws ArgumentError ElementsUnderTest.write_mixed_msh(output,mutable_mesh)
+        @test read(output,String)=="preserve existing file"
+    end
+end
+
 @testset "Elements public documentation" begin
     @test isempty(Base.Docs.undocumented_names(Tessella.Elements;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.Elements;recursive=true))
