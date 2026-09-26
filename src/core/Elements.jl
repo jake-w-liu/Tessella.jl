@@ -1695,7 +1695,9 @@ function _assert_mixed_ancillary(m::MixedMesh,nel::Int,nn::Int,
             "$context: data section $index has a non-positive component count"))
         denominator=section.name=="ElementNodeData" ?
             sum(section.row_nodes;init=0) : nentries
-        length(section.values)==denominator*ncomp || throw(ArgumentError(
+        (denominator==0 ? isempty(section.values) :
+         ncomp<=length(section.values)÷denominator &&
+         length(section.values)==denominator*ncomp) || throw(ArgumentError(
             "$context: data section $index value count does not match its " *
             "component count"))
     end
@@ -3212,25 +3214,25 @@ end
 # every consumed line into `lines`. Returns (components, entries) or nothing.
 function _binary_data_header(io,name::AbstractString,lines::Vector{String})
     try
-        push!(lines,readline(io))
+        push!(lines,_msh_line(io,"$name string-tag count"))
         nstr=_msh_int(strip(lines[end]),"$name string-tag count")
         nstr>=0 || return nothing
         for _ in 1:nstr
-            push!(lines,readline(io))
+            push!(lines,_msh_line(io,"$name string tag"))
         end
-        push!(lines,readline(io))
+        push!(lines,_msh_line(io,"$name real-tag count"))
         nreal=_msh_int(strip(lines[end]),"$name real-tag count")
         nreal>=0 || return nothing
         for _ in 1:nreal
-            push!(lines,readline(io))
+            push!(lines,_msh_line(io,"$name real tag"))
             _msh_float(strip(lines[end]),"$name real tag")
         end
-        push!(lines,readline(io))
+        push!(lines,_msh_line(io,"$name integer-tag count"))
         nint=_msh_int(strip(lines[end]),"$name integer-tag count")
         nint>=3 || return nothing
         ncomp=0; nentries=0
         for i in 1:nint
-            push!(lines,readline(io))
+            push!(lines,_msh_line(io,"$name integer tag"))
             value=_msh_int(strip(lines[end]),"$name integer tag")
             i==2 && (ncomp=value)
             i==3 && (nentries=value)
@@ -4322,6 +4324,12 @@ function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
         err isa InterruptException && rethrow()
         throw(ArgumentError("read_mixed_msh: cumulative v4 node count overflows Int"))
     end
+    # Every node needs a tag and three coordinates, even before block headers
+    # or optional parametric coordinates. Reject impossible declarations before
+    # reserving the accumulator storage from the untrusted count.
+    tag_width=wide ? sizeof(UInt64) : sizeof(UInt32)
+    _binary_available(io,_binary_bytes(count,tag_width+3sizeof(Float64),
+                                      "v4 binary Nodes"),"v4 binary Nodes")
     for values in (acc.x,acc.y,acc.z,acc.external_node_tags,
                    acc.node_entities,acc.node_parametric)
         sizehint!(values,target)
@@ -4350,7 +4358,7 @@ function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
                 "read_mixed_msh: v4 node coordinate count overflows Int"))
         end
         # Check the complete block payload before allocating either vector.
-        tag_bytes=_binary_bytes(nlocal,sizeof(UInt64),"v4 node tags")
+        tag_bytes=_binary_bytes(nlocal,tag_width,"v4 node tags")
         coordinate_bytes=_binary_bytes(
             coordinate_count,sizeof(Float64),"v4 node coordinates")
         block_bytes=try Base.checked_add(tag_bytes,coordinate_bytes) catch err
@@ -4616,6 +4624,9 @@ end
 function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
+    # Point elements have the smallest record: an element tag and one node tag.
+    _binary_available(io,_binary_bytes(count,2sizeof(Int32),"v2 binary Elements"),
+                      "v2 binary Elements")
     sizehint!(acc.element_tags,length(acc.element_tags)+count)
     nread=0
     while nread<count
@@ -4820,6 +4831,10 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
         0<declared_min<=declared_max || throw(ArgumentError(
             "read_mixed_msh: invalid v4 element-tag range"))
     end
+    # Point elements have the smallest record: an element tag and one node tag.
+    tag_width=wide ? sizeof(UInt64) : sizeof(UInt32)
+    _binary_available(io,_binary_bytes(count,2tag_width,"v4 binary Elements"),
+                      "v4 binary Elements")
     sizehint!(acc.element_tags,length(acc.element_tags)+count)
     actual_min=typemax(UInt64); actual_max=zero(UInt64); nread=0
     for _ in 1:nblocks
@@ -5280,14 +5295,14 @@ function _parse_data_section(pending::_PendingDataSection,node_map,tag_to_ref,
                 tokens=split(strip(row))
                 isempty(tokens) && return fail()
                 if name=="NodeData"
-                    tag=UInt64(_msh_int(tokens[1],"NodeData node tag"))
+                    tag=_msh_size_t(tokens[1],"NodeData node tag")
                     internal=get(node_map,tag,nothing)
                     internal===nothing && return fail()
                     push!(nodes,internal)
                     length(tokens)-1==ncomp || return fail()
                     first_value=2
                 elseif name=="ElementData"
-                    tag=UInt64(_msh_int(tokens[1],"ElementData element tag"))
+                    tag=_msh_size_t(tokens[1],"ElementData element tag")
                     ref=get(tag_to_ref,tag,nothing)
                     ref===nothing && return fail()
                     push!(elements,Int32(starts[ref.block]+ref.cell-1))
@@ -5295,25 +5310,27 @@ function _parse_data_section(pending::_PendingDataSection,node_map,tag_to_ref,
                     first_value=2
                 else
                     length(tokens)>=2 || return fail()
-                    tag=UInt64(_msh_int(tokens[1],"ElementNodeData element tag"))
+                    tag=_msh_size_t(tokens[1],"ElementNodeData element tag")
                     ref=get(tag_to_ref,tag,nothing)
                     ref===nothing && return fail()
                     push!(elements,Int32(starts[ref.block]+ref.cell-1))
                     k=_msh_int(tokens[2],"ElementNodeData nodes per element")
                     k>=1 || return fail()
                     rest=length(tokens)-2
-                    if rest==k*ncomp
+                    rest%k==0 || return fail()
+                    columns=rest÷k
+                    if columns==ncomp
                         # Gmsh's model-data dialect: the node tags are the
                         # element's own connectivity, so rows carry values only.
                         (!dialect_seen || implicit_nodes) || return fail()
                         dialect_seen=true; implicit_nodes=true
                         first_value=3
-                    elseif rest==k*(ncomp+1)
+                    elseif columns>0 && columns-1==ncomp
                         (!dialect_seen || !implicit_nodes) || return fail()
                         dialect_seen=true
                         for i in 1:k
-                            ntag=UInt64(_msh_int(
-                                tokens[2+i],"ElementNodeData node tag"))
+                            ntag=_msh_size_t(
+                                tokens[2+i],"ElementNodeData node tag")
                             internal=get(node_map,ntag,nothing)
                             internal===nothing && return fail()
                             push!(nodes,internal)
