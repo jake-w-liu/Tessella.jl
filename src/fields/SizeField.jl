@@ -344,19 +344,58 @@ end
 @inline _dot3(a,b) = a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
 @inline _norm3(a) = hypot(a[1],a[2],a[3])
 
+# Distance region tests must not consume overflowed or underflowed products:
+# a finite final norm can otherwise hide the failed projection calculation.
+@inline _distance_dot3(a,b)=_dot3(a,b)
+@inline function _distance_dot3(a::NTuple{3,Float64},b::NTuple{3,Float64})
+    products=(a[1]*b[1],a[2]*b[2],a[3]*b[3])
+    for i in 1:3
+        (!isfinite(products[i]) ||
+         (a[i]!=0 && b[i]!=0 && abs(products[i])<floatmin(Float64))) && return NaN
+    end
+    return products[1]+products[2]+products[3]
+end
+
+@inline function _distance_cross_component(a,b,c,d)
+    return a*b-c*d
+end
+@inline function _distance_cross_component(a::Float64,b::Float64,c::Float64,d::Float64)
+    left=a*b; right=c*d
+    (!isfinite(left) || !isfinite(right) ||
+     (a!=0 && b!=0 && abs(left)<floatmin(Float64)) ||
+     (c!=0 && d!=0 && abs(right)<floatmin(Float64))) && return NaN
+    value=left-right
+    # Cancellation can erase the only perpendicular component. Recompute
+    # uncertain products from the original coordinates in the exact path.
+    magnitude=abs(left)+abs(right)
+    magnitude>0 && abs(value)<=8eps(Float64)*magnitude && return NaN
+    return value
+end
+@inline _distance_cross3(a,b)=(
+    _distance_cross_component(a[2],b[3],a[3],b[2]),
+    _distance_cross_component(a[3],b[1],a[1],b[3]),
+    _distance_cross_component(a[1],b[2],a[2],b[1]))
+
 @inline function _distance_segment_kernel(p, a, b)
     ab = _sub3(b,a)
-    den = _dot3(ab,ab)
+    den = _distance_dot3(ab,ab)
+    isfinite(den) || return Inf
     den == 0 && return _norm3(_sub3(p,a))
-    t = clamp(_dot3(_sub3(p,a),ab)/den, zero(den), one(den))
-    return _norm3(_sub3(p,_addscaled3(a,ab,t)))
+    ap=_sub3(p,a)
+    projection=_distance_dot3(ap,ab)
+    isfinite(projection) || return Inf
+    projection<=0 && return _norm3(ap)
+    projection>=den && return _norm3(_sub3(p,b))
+    # Use the perpendicular residual directly. Subtracting a rounded
+    # projected point can lose a small distance next to a long edge.
+    return _norm3(_distance_cross3(ap,ab))/_norm3(ab)
 end
 
 function _distance_segment(p, a, b)
     d = _distance_segment_kernel(p,a,b)
     isfinite(d) && return min(Float64(d), GMSH_MAX_SIZE)
     return setprecision(BigFloat, 256) do
-        pb=map(BigFloat,p); ab=map(BigFloat,a); bb=map(BigFloat,b)
+        pb=map(Rational{BigInt},p); ab=map(Rational{BigInt},a); bb=map(Rational{BigInt},b)
         min(Float64(_distance_segment_kernel(pb,ab,bb)), GMSH_MAX_SIZE)
     end
 end
@@ -365,30 +404,35 @@ function _distance_triangle_kernel(p, a, b, c)
     ab=_sub3(b,a); ac=_sub3(c,a)
     cr=(ab[2]*ac[3]-ab[3]*ac[2], ab[3]*ac[1]-ab[1]*ac[3],
         ab[1]*ac[2]-ab[2]*ac[1])
-    if _dot3(cr,cr) == 0
+    normal_squared=_distance_dot3(cr,cr)
+    isfinite(normal_squared) || return Inf
+    # The cross product or its square can underflow for a valid triangle.
+    # Only the exact path can safely decide degeneracy in that case.
+    normal_squared isa Float64 && normal_squared<floatmin(Float64) && return Inf
+    if normal_squared == 0
         return min(_distance_segment_kernel(p,a,b), _distance_segment_kernel(p,b,c),
                    _distance_segment_kernel(p,c,a))
     end
-    ap=_sub3(p,a); d1=_dot3(ab,ap); d2=_dot3(ac,ap)
+    ap=_sub3(p,a); d1=_distance_dot3(ab,ap); d2=_distance_dot3(ac,ap)
+    (isfinite(d1) && isfinite(d2)) || return Inf
     (d1 <= 0 && d2 <= 0) && return _norm3(ap)
-    bp=_sub3(p,b); d3=_dot3(ab,bp); d4=_dot3(ac,bp)
+    bp=_sub3(p,b); d3=_distance_dot3(ab,bp); d4=_distance_dot3(ac,bp)
+    (isfinite(d3) && isfinite(d4)) || return Inf
     (d3 >= 0 && d4 <= d3) && return _norm3(bp)
     vc=d1*d4-d3*d2
     if vc <= 0 && d1 >= 0 && d3 <= 0
-        v=d1/(d1-d3)
-        return _norm3(_sub3(p,_addscaled3(a,ab,v)))
+        return _distance_segment_kernel(p,a,b)
     end
-    cp=_sub3(p,c); d5=_dot3(ab,cp); d6=_dot3(ac,cp)
+    cp=_sub3(p,c); d5=_distance_dot3(ab,cp); d6=_distance_dot3(ac,cp)
+    (isfinite(d5) && isfinite(d6)) || return Inf
     (d6 >= 0 && d5 <= d6) && return _norm3(cp)
     vb=d5*d2-d1*d6
     if vb <= 0 && d2 >= 0 && d6 <= 0
-        w=d2/(d2-d6)
-        return _norm3(_sub3(p,_addscaled3(a,ac,w)))
+        return _distance_segment_kernel(p,a,c)
     end
     va=d3*d6-d5*d4
     if va <= 0 && (d4-d3) >= 0 && (d5-d6) >= 0
-        bc=_sub3(c,b); w=(d4-d3)/((d4-d3)+(d5-d6))
-        return _norm3(_sub3(p,_addscaled3(b,bc,w)))
+        return _distance_segment_kernel(p,b,c)
     end
     denom=inv(va+vb+vc); v=vb*denom; w=vc*denom
     q=_addscaled3(_addscaled3(a,ab,v),ac,w)
@@ -399,7 +443,8 @@ function _distance_triangle(p, a, b, c)
     d = _distance_triangle_kernel(p,a,b,c)
     isfinite(d) && return min(Float64(d), GMSH_MAX_SIZE)
     return setprecision(BigFloat, 256) do
-        pb=map(BigFloat,p); ab=map(BigFloat,a); bb=map(BigFloat,b); cb=map(BigFloat,c)
+        pb=map(Rational{BigInt},p); ab=map(Rational{BigInt},a)
+        bb=map(Rational{BigInt},b); cb=map(Rational{BigInt},c)
         min(Float64(_distance_triangle_kernel(pb,ab,bb,cb)), GMSH_MAX_SIZE)
     end
 end

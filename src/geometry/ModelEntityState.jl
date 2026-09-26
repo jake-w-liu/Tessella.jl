@@ -107,13 +107,21 @@ end
 """
     set_point_coordinates!(model, tag, x, y, z)
 
-Replace one existing explicit Point's finite coordinates. Topology, mesh size,
-names, and other entity metadata remain attached to the Point tag.
+Replace one existing Point's finite coordinates. A discrete Point must own a
+mesh node, whose coordinates define its position. Topology, mesh size, names,
+and other entity metadata remain attached to the Point tag.
 """
 function set_point_coordinates!(m::GeoModel,tag,x,y,z)
     caller="set_point_coordinates!"
     _,point_tag=_model_metadata_entity(m,0,tag,caller)
     coordinate=_finite3(x,y,z,caller)
+    record=get(m.discrete,(0,point_tag),nothing)
+    if record!==nothing
+        isempty(record.node_coords) && throw(ArgumentError(
+            "$caller: discrete point has no node"))
+        record.node_coords[:,1].=coordinate
+        return nothing
+    end
     m.points[point_tag]=coordinate
     return nothing
 end

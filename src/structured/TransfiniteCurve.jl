@@ -87,8 +87,11 @@ end
 
 function _fill_progression!(parameters::Vector{Float64}, coefficient::Float64)
     magnitude = abs(coefficient)
-    ratio = coefficient > 0.0 ? magnitude : inv(magnitude)
-    return _fill_progression_log!(parameters, log(ratio))
+    # Negating the logarithm preserves reversed subnormal coefficients whose
+    # reciprocal overflows even though their first interior parameter is finite.
+    log_ratio = log(magnitude)
+    return _fill_progression_log!(parameters,
+                                  coefficient > 0.0 ? log_ratio : -log_ratio)
 end
 
 function _fill_progression_log!(parameters::Vector{Float64},

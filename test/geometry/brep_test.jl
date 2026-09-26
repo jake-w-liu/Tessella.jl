@@ -199,6 +199,39 @@ END-ISO-10303-21;
     end
 
     @testset "strict parser, resource, and atomic-write contracts" begin
+        # ISO 10303-21 strings encode one apostrophe as two consecutive
+        # apostrophes, including names preceding positional NURBS fields.
+        for (encoded,decoded) in (("", ""), ("O''Brien", "O'Brien"),
+                                  ("''''", "''"), ("''start''", "'start'"),
+                                  ("a''b''c''d", "a'b'c'd"),
+                                  ("曲線'';,(#4)", "曲線';,(#4)"))
+            source="DATA; #1=LABEL('$encoded',('next',1.)); ENDSEC;"
+            parsed=parse_step_entities(source)[1].args
+            @test parsed==Any[decoded,Any["next",1.0]]
+        end
+        for malformed in ("DATA; #1=LABEL('unterminated); ENDSEC;",
+                          "DATA; #1=LABEL('escaped''); ENDSEC;")
+            @test_throws ArgumentError parse_step_entities(malformed)
+        end
+        for parameters in ("'',(0.,,0.,0.)", "'',(0.,0.,0.,)",
+                           "'x' (0.,0.,0.)", ",1.", "1. 2.")
+            source="DATA; #1=CARTESIAN_POINT($parameters); ENDSEC;"
+            @test_throws ArgumentError parse_step_entities(source)
+        end
+        @test parse_step_entities(
+            "DATA; #1=LABEL((),\$,.T.,#1,*); ENDSEC;")[1].args==
+            Any[Any[],nothing,".T.",(:ref,1),nothing]
+        quoted_curve=replace(read(joinpath(FIXTURES,"bezier.step"),String),
+            "B_SPLINE_CURVE_WITH_KNOTS(''"=>
+            "B_SPLINE_CURVE_WITH_KNOTS('O''Brien'")
+        imported_quoted=mktemp() do path,io
+            write(io,quoted_curve); close(io)
+            only(import_nurbs_step(path))
+        end
+        for u in (0.0,0.25,0.5,0.75,1.0)
+            @test nurbs_eval(imported_quoted,u)==(2u,2u*(1-u),0.0)
+        end
+
         duplicate="""
 ISO-10303-21;
 DATA;

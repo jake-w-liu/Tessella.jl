@@ -167,9 +167,9 @@ function mesh_boundary_layer(surface::Mesh; hwall::Real, ratio::Real, nlayers::I
         ab=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
         ac=(c[1]-a[1],c[2]-a[2],c[3]-a[3])
         n=(ab[2]*ac[3]-ab[3]*ac[2], ab[3]*ac[1]-ab[1]*ac[3], ab[1]*ac[2]-ab[2]*ac[1])
-        area=triangle_area(a,b,c)
+        # The cross product is already twice the area-weighted unit normal.
         for id in (i,j,k)
-            normals[1,id]+=n[1]*area; normals[2,id]+=n[2]*area; normals[3,id]+=n[3]*area
+            normals[1,id]+=n[1]; normals[2,id]+=n[2]; normals[3,id]+=n[3]
         end
     end
     @inbounds for i in 1:nv
@@ -855,9 +855,9 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
         ab=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
         ac=(cc[1]-a[1],cc[2]-a[2],cc[3]-a[3])
         n=(ab[2]*ac[3]-ab[3]*ac[2], ab[3]*ac[1]-ab[1]*ac[3], ab[1]*ac[2]-ab[2]*ac[1])
-        area=triangle_area(a,b,cc)
+        # The cross product is already twice the area-weighted unit normal.
         for id in (i,j,k)
-            normals[1,id]+=n[1]*area; normals[2,id]+=n[2]*area; normals[3,id]+=n[3]*area
+            normals[1,id]+=n[1]; normals[2,id]+=n[2]; normals[3,id]+=n[3]
         end
     end
     @inbounds for i in 1:nv

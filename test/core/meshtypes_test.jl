@@ -153,6 +153,46 @@ end
         @test_throws ArgumentError tet_circumradius((0,0),b,c,d)
     end
 
+    @testset "anisotropic tetrahedron quality" begin
+        # A right tetrahedron's sphere center is the half-edge vector; its
+        # smallest dihedral is the angle between z=0 and the opposite face.
+        # Check every vertex ordering so the robust path cannot depend on the
+        # right-angle vertex being the normalization anchor.
+        for height in (1e-8,1e-100,1e-200,1e-310,nextfloat(0.0))
+            points=((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,height))
+            expected_radius=hypot(1.,1.,height)/2
+            expected_angle=setprecision(BigFloat,256) do
+                Float64(atan(sqrt(BigFloat(2))*BigFloat(height)))
+            end
+            for i in 1:4,j in 1:4,k in 1:4,l in 1:4
+                length(Set((i,j,k,l)))==4 || continue
+                ordered=(points[i],points[j],points[k],points[l])
+                @test tet_circumradius(ordered...) ≈ expected_radius rtol=32eps(Float64)
+                minimum_angle,maximum_angle=tet_dihedral_extrema(ordered...)
+                @test minimum_angle ≈ expected_angle rtol=32eps(Float64) atol=nextfloat(0.)
+                @test maximum_angle ≈ pi/2 rtol=8eps(Float64)
+                expected_ratio=expected_radius/height
+                @test tet_radius_edge(ordered...) ≈ expected_ratio rtol=32eps(Float64)
+            end
+        end
+        unequal=((0.,0.,0.),(2.,0.,0.),(0.,3.,0.),(0.,0.,1e-200))
+        @test tet_circumradius(unequal...) ≈ sqrt(13)/2 rtol=32eps(Float64)
+        # The small axes disappear under a single global Float64 normalization.
+        extreme=((0.,0.,0.),(1e308,0.,0.),(0.,1e-308,0.),(0.,0.,1e-308))
+        @test tet_circumradius(extreme...) ≈ 5e307 rtol=8eps(Float64)
+        extreme_min,extreme_max=tet_dihedral_extrema(extreme...)
+        @test extreme_min ≈ pi/4 rtol=8eps(Float64)
+        @test extreme_max ≈ pi/2 rtol=8eps(Float64)
+        flat=((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.25,0.25,0.))
+        @test tet_circumradius(flat...)==Inf
+        @test tet_radius_edge(flat...)==Inf
+        @test tet_dihedral_extrema(flat...)==(0.,Float64(pi))
+        obtuse=((-1.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,-1.,1.))
+        obtuse_min,obtuse_max=tet_dihedral_extrema(obtuse...)
+        @test obtuse_min ≈ pi/6 rtol=8eps(Float64)
+        @test obtuse_max ≈ 3pi/4 rtol=8eps(Float64)
+    end
+
     @testset "boundary extraction" begin
         # single tet: 4 boundary faces, manifold
         one = Mesh(Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]; tets=reshape(Int32[1,2,3,4],4,1))

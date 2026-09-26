@@ -98,7 +98,7 @@ using ..MeshFunctionSpaces: MeshFunctionSpaces, mesh_basis_functions,
                             mesh_keys_information, mesh_number_of_keys,
                             mesh_number_of_orientations
 using ..Elements: msh_spec, msh_type, msh_properties
-using ..Refine: refine_uniform
+using ..Refine: Refine, refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..HighOrder: HighOrder, P2Mesh, P2TriMesh, p2_trimesh, p2_tetmesh
@@ -343,10 +343,10 @@ mesh and restoring supported options to their defaults.
 """
 function initialize()
     lock(STATE_LOCK) do
+        empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
         empty!(MODEL_SLOTS)
         push!(MODEL_SLOTS,_new_slot(""))
         _slot_load_locked!(MODEL_SLOTS[1])
-        empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
         FIELD_TAG_MAX[]=0
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
     end
@@ -1340,8 +1340,8 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
 end
 
 @inline function _merged_node_owner(current,next)
-    current[1]==0 && return next
-    next[1]==0 && return current
+    current==(0,Int32(0)) && return next
+    next==(0,Int32(0)) && return current
     current[1]!=next[1] && return min(current[1],next[1])==current[1] ?
         current : next
     return min(current,next)
@@ -1647,6 +1647,7 @@ function _generate(dim::Integer)
         m.meshing.lc_factor=OPTIONS["Mesh.MeshSizeFactor"]
         m.meshing.recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"])
         m.meshing.recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"])
+        m.meshing.transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"])
         size_field=_session_size_field_locked(m)
         parts=Tuple{Int,Mesh}[]
         if dimension==2
@@ -3635,66 +3636,33 @@ function _inherit_refined_classification(class::_MeshClassification,
     seg_entities=inherit(refined.segs,class.seg_entities,2)
     tri_entities=inherit(refined.tris,class.tri_entities,4)
     tet_entities=inherit(refined.tets,class.tet_entities,8)
-    node_entities=Vector{Tuple{Int,Int32}}(undef,nnodes(refined))
-    assigned=falses(nnodes(refined))
-    # `refine_uniform` compacts referenced nodes in order then appends edge
-    # midpoints — surviving nodes match by coordinate.
-    linear_lookup=Dict{NTuple{3,Int64},Int32}()
-    for node in 1:nnodes(mesh)
-        key=ntuple(axis->round(Int64,mesh.coords[axis,node]*1e12),3)
-        linear_lookup[key]=Int32(node)
+    # Reuse the refiner's node compaction and edge ordering. Coordinates are
+    # not identities: distinct nodes may coincide, and any fixed rounding
+    # scale would collapse small meshes or overflow on large coordinates.
+    used=falses(nnodes(mesh))
+    Refine._mark_referenced!(used,mesh)
+    remap,compact_nodes=Refine._compact_map(used)
+    edge_count=nsegs(mesh)+3ntris(mesh)+6ntets(mesh)
+    edges=Refine._edge_records(mesh,remap,edge_count)
+    node_entities=fill((0,Int32(0)),nnodes(refined))
+    for old in eachindex(used)
+        used[old] || continue
+        node_entities[remap[old]]=class.node_entities[old]
     end
-    for node in 1:nnodes(refined)
-        key=ntuple(axis->round(Int64,refined.coords[axis,node]*1e12),3)
-        source=get(linear_lookup,key,Int32(0))
-        source==0 && continue
-        node_entities[node]=class.node_entities[source]
-        assigned[node]=true
-    end
-    # A midpoint's owner: collect its corner (non-midpoint) neighbors across
-    # the child cells it touches — that set is exactly its skeleton edge's two
-    # endpoints; apply the same endpoint-ownership rule as `_p2_mid_owners`.
-    entity_cells=((1,refined.segs,seg_entities,((1,2),)),
-                  (2,refined.tris,tri_entities,((1,2),(2,3),(3,1))),
-                  (3,refined.tets,tet_entities,
+    midpoint_ids=Dict(edge=>compact_nodes+index for (index,edge) in pairs(edges))
+    entity_cells=((1,mesh.segs,class.seg_entities,((1,2),)),
+                  (2,mesh.tris,class.tri_entities,((1,2),(2,3),(3,1))),
+                  (3,mesh.tets,class.tet_entities,
                    ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))))
-    neighbors=[Set{Int}() for _ in 1:nnodes(refined)]
-    for (_,cells,entities,edge_patterns) in entity_cells
-        isempty(entities) && continue
-        for cell in axes(cells,2)
-            corners=Int.(cells[:,cell])
-            for (i,j) in edge_patterns
-                a,b=corners[i],corners[j]
-                if assigned[a] != assigned[b]
-                    midpoint,endpoint=assigned[a] ? (b,a) : (a,b)
-                    push!(neighbors[midpoint],endpoint)
-                end
-            end
+    for (dimension,cells,entities,edge_patterns) in entity_cells
+        for cell in axes(cells,2),(i,j) in edge_patterns
+            a,b=cells[i,cell],cells[j,cell]
+            ea,eb=class.node_entities[a],class.node_entities[b]
+            owner=ea==eb ? ea : ea[1]!=eb[1] ?
+                (ea[1]>eb[1] ? ea : eb) : (dimension,entities[cell])
+            midpoint=midpoint_ids[minmax(remap[a],remap[b])]
+            node_entities[midpoint]=_merged_node_owner(node_entities[midpoint],owner)
         end
-    end
-    for (dimension,cells,entities,_) in entity_cells
-        for cell in axes(cells,2)
-            for corner in Int.(cells[:,cell])
-                assigned[corner] && continue
-                endpoints=neighbors[corner]
-                isempty(endpoints) && continue
-                owners=[node_entities[e] for e in endpoints]
-                first_owner=owners[1]
-                if all(==(first_owner),owners)
-                    node_entities[corner]=first_owner
-                elseif !all(o->o[1]==first_owner[1],owners)
-                    top=argmax(o->o[1],owners)
-                    node_entities[corner]=owners[top]
-                else
-                    node_entities[corner]=(dimension,entities[cell])
-                end
-                assigned[corner]=true
-            end
-        end
-    end
-    fallback=class.entities[1]
-    for node in 1:nnodes(refined)
-        assigned[node] || (node_entities[node]=fallback)
     end
     return _MeshClassification(cache,class.entity,class.entities,
         node_entities,class.boundaries,seg_entities,tri_entities,
@@ -4623,7 +4591,7 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
         for (_,_,record) in _discrete_mesh_records(model)
             position=findfirst(==(tag32),record.node_tags)
             position===nothing && continue
-            record.node_coords[:,position]=values
+            params=nothing
             if !isempty(parametric_coord)
                 length(parametric_coord)==size(record.node_params,1) ||
                     throw(ArgumentError(
@@ -4632,8 +4600,9 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
                 params=Float64[Float64(c) for c in parametric_coord]
                 all(isfinite,params) || throw(ArgumentError(
                     "$caller: parametric coordinates must be finite"))
-                record.node_params[:,position]=params
             end
+            record.node_coords[:,position]=values
+            params===nothing || (record.node_params[:,position]=params)
             return nothing
         end
         cached=_cached_mesh_locked(caller)
@@ -4705,13 +4674,30 @@ function _mesh_renumber_permutation(old_tags,new_tags,count,caller,label)
     return mapping
 end
 
-# Remap caller-assigned record tags by an explicit (old, new) pair list.
-# `update_nodes` also rewrites record element connectivity that references the
-# old tag. New tags must stay positive and must not collide with a tag that is
-# not itself being remapped.
-function _record_renumber!(records,old_list,new_list,label,caller,
-                           update_nodes::Bool,reserved::Int=0)
-    isempty(old_list) && return nothing
+# Validate the whole request before either sparse records or a dense cache is
+# changed. A pair list denotes a simultaneous mapping, including swaps/cycles.
+function _mesh_renumber_pairs(old_tags,new_tags,caller,label)
+    (old_tags isa AbstractVector || old_tags isa Tuple) || throw(ArgumentError(
+        "$caller: old_tags must be a vector or tuple of $label tags"))
+    (new_tags isa AbstractVector || new_tags isa Tuple) || throw(ArgumentError(
+        "$caller: new_tags must be a vector or tuple of $label tags"))
+    length(old_tags)==length(new_tags) || throw(ArgumentError(
+        "$caller: old_tags and new_tags must have the same length"))
+    parsed=map((old_tags,new_tags),("old_tags","new_tags")) do values,name
+        tags=Int[_mesh_query_integer(v,caller,"$name entry") for v in values]
+        all(t->0<t<=typemax(Int32),tags) || throw(ArgumentError(
+            "$caller: $name must contain positive Int32 tags"))
+        length(unique(tags))==length(tags) || throw(ArgumentError(
+            "$caller: $name must contain unique tags"))
+        tags
+    end
+    return parsed
+end
+
+# Construct the sparse mapping without mutating it so dense validation can
+# finish first. New tags must not collide with an unrenamed or reserved tag.
+function _record_renumbering(records,old_list,new_list,label,caller,
+                            reserved::Int=0)
     record_tags=Dict{Int32,DiscreteEntity}()
     for record in records
         source=label=="node" ? record.node_tags : record.element_tags
@@ -4739,20 +4725,19 @@ function _record_renumber!(records,old_list,new_list,label,caller,
             throw(ArgumentError(
                 "$caller: new tag $new collides with an existing $label tag"))
     end
-    for (old,new) in renames
-        record=record_tags[old]
-        if label=="node"
-            position=findfirst(==(old),record.node_tags)
-            record.node_tags[position]=new
-            update_nodes || continue
-            for connectivity in record.element_nodes
-                for i in eachindex(connectivity)
-                    connectivity[i]==old && (connectivity[i]=new)
-                end
-            end
-        else
-            position=findfirst(==(old),record.element_tags)
-            record.element_tags[position]=new
+    return renames
+end
+
+function _record_renumber!(records,renames,label)
+    for record in records
+        tags=label=="node" ? record.node_tags : record.element_tags
+        for i in eachindex(tags)
+            tags[i]=get(renames,tags[i],tags[i])
+        end
+        label=="node" || continue
+        # Boundary elements may refer to nodes classified on another record.
+        for connectivity in record.element_nodes, i in eachindex(connectivity)
+            connectivity[i]=get(renames,connectivity[i],connectivity[i])
         end
     end
     return nothing
@@ -4762,6 +4747,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
     caller="API.mesh.renumber_nodes"
     return lock(STATE_LOCK) do
         model=_model_locked()
+        old_list,new_list=_mesh_renumber_pairs(old_tags,new_tags,caller,"node")
         records=[record for (_,_,record) in _discrete_mesh_records(model)]
         cached=LAST_MESH[]
         if cached===nothing
@@ -4769,7 +4755,7 @@ function _renumber_nodes(old_tags=(),new_tags=())
                 "$caller: no mesh; call API.mesh.generate first"))
             # Record-only session: an empty pair list compacts every node to
             # 1:n in entity order; explicit pairs remap sparse tags directly.
-            if isempty(old_tags)
+            if isempty(old_list)
                 mapping32=Dict{Int32,Int32}()
                 next=Int32(1)
                 for record in records, tag in record.node_tags
@@ -4789,7 +4775,8 @@ function _renumber_nodes(old_tags=(),new_tags=())
                 end
                 return nothing
             end
-            _record_renumber!(records,old_tags,new_tags,"node",caller,true)
+            renames=_record_renumbering(records,old_list,new_list,"node",caller)
+            _record_renumber!(records,renames,"node")
             return nothing
         end
         record_tag_set=Set{Int32}()
@@ -4800,19 +4787,8 @@ function _renumber_nodes(old_tags=(),new_tags=())
         cache_new=Int[]
         record_old=Int[]
         record_new=Int[]
-        (old_tags isa AbstractVector || old_tags isa Tuple) ||
-            throw(ArgumentError(
-                "$caller: old_tags must be a vector or tuple of node tags"))
-        (new_tags isa AbstractVector || new_tags isa Tuple) ||
-            throw(ArgumentError(
-                "$caller: new_tags must be a vector or tuple of node tags"))
-        length(old_tags)==length(new_tags) || throw(ArgumentError(
-            "$caller: old_tags and new_tags must have the same length"))
-        for (old_value,new_value) in zip(old_tags,new_tags)
-            old=_mesh_query_integer(old_value,caller,"old_tags entry")
-            new=_mesh_query_integer(new_value,caller,"new_tags entry")
-            if Int32(0)<=(old<=typemax(Int32) ? Int32(old) : Int32(0)) &&
-               Int32(old) in record_tag_set
+        for (old,new) in zip(old_list,new_list)
+            if Int32(old) in record_tag_set
                 push!(record_old,old)
                 push!(record_new,new)
             else
@@ -4820,12 +4796,15 @@ function _renumber_nodes(old_tags=(),new_tags=())
                 push!(cache_new,new)
             end
         end
-        _record_renumber!(records,record_old,record_new,"node",caller,true,nnodes(cached))
+        overlay=_high_order_overlay(cached)
+        reserved=overlay===nothing ? nnodes(cached) : nnodes(overlay)
+        renames=_record_renumbering(records,record_old,record_new,"node",caller,reserved)
         if isempty(cache_old)
+            _record_renumber!(records,renames,"node")
             # Empty-pair form: dense cache tags are already 1:n, so only
             # record nodes compact — to count+1.. in entity order, with
             # record connectivity rewritten through the same mapping.
-            isempty(old_tags) || return nothing
+            isempty(old_list) || return nothing
             mapping32=Dict{Int32,Int32}()
             next=Int32(nnodes(cached)+1)
             for record in records, tag in record.node_tags
@@ -4876,6 +4855,10 @@ function _renumber_nodes(old_tags=(),new_tags=())
         new_class=class===nothing ? nothing : _MeshClassification(
             new_mesh,class.entity,class.entities,node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
+        for (old,new) in enumerate(mapping)
+            renames[Int32(old)]=new
+        end
+        _record_renumber!(records,renames,"node")
         _replace_mesh_cache_locked!(new_mesh,new_class)
         overlay!==nothing &&
             _rebind_high_order!(new_mesh,new_class,caller)
@@ -4890,12 +4873,13 @@ function _renumber_elements(old_tags=(),new_tags=())
     caller="API.mesh.renumber_elements"
     return lock(STATE_LOCK) do
         model=_model_locked()
+        old_list,new_list=_mesh_renumber_pairs(old_tags,new_tags,caller,"element")
         records=[record for (_,_,record) in _discrete_mesh_records(model)]
         cached=LAST_MESH[]
         if cached===nothing
             isempty(records) && throw(ArgumentError(
                 "$caller: no mesh; call API.mesh.generate first"))
-            if isempty(old_tags)
+            if isempty(old_list)
                 next=Int32(1)
                 for record in records
                     for i in eachindex(record.element_tags)
@@ -4905,7 +4889,8 @@ function _renumber_elements(old_tags=(),new_tags=())
                 end
                 return nothing
             end
-            _record_renumber!(records,old_tags,new_tags,"element",caller,false)
+            renames=_record_renumbering(records,old_list,new_list,"element",caller)
+            _record_renumber!(records,renames,"element")
             return nothing
         end
         triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
@@ -4913,21 +4898,11 @@ function _renumber_elements(old_tags=(),new_tags=())
         for record in records, etag in record.element_tags
             push!(record_tag_set,etag)
         end
-        (old_tags isa AbstractVector || old_tags isa Tuple) ||
-            throw(ArgumentError(
-                "$caller: old_tags must be a vector or tuple of element tags"))
-        (new_tags isa AbstractVector || new_tags isa Tuple) ||
-            throw(ArgumentError(
-                "$caller: new_tags must be a vector or tuple of element tags"))
-        length(old_tags)==length(new_tags) || throw(ArgumentError(
-            "$caller: old_tags and new_tags must have the same length"))
         cache_old=Int[]
         cache_new=Int[]
         record_old=Int[]
         record_new=Int[]
-        for (old_value,new_value) in zip(old_tags,new_tags)
-            old=_mesh_query_integer(old_value,caller,"old_tags entry")
-            new=_mesh_query_integer(new_value,caller,"new_tags entry")
+        for (old,new) in zip(old_list,new_list)
             if 0<old<=typemax(Int32) && Int32(old) in record_tag_set
                 push!(record_old,old)
                 push!(record_new,new)
@@ -4936,11 +4911,12 @@ function _renumber_elements(old_tags=(),new_tags=())
                 push!(cache_new,new)
             end
         end
-        _record_renumber!(records,record_old,record_new,"element",caller,false,total)
+        renames=_record_renumbering(records,record_old,record_new,"element",caller,total)
         if isempty(cache_old)
+            _record_renumber!(records,renames,"element")
             # With records present the empty-pair form compacts record
             # element tags to continue the dense sequence in entity order.
-            isempty(old_tags) || return nothing
+            isempty(old_list) || return nothing
             next=Int32(total+1)
             for record in records
                 for i in eachindex(record.element_tags)
@@ -4991,6 +4967,7 @@ function _renumber_elements(old_tags=(),new_tags=())
         new_class=class===nothing ? nothing : _MeshClassification(
             replacement,class.entity,class.entities,class.node_entities,class.boundaries,
             owners_out[1],owners_out[2],owners_out[3])
+        _record_renumber!(records,renames,"element")
         _replace_mesh_cache_locked!(replacement,new_class)
         overlay!==nothing &&
             _rebind_high_order!(replacement,new_class,caller)

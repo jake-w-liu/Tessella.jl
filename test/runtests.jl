@@ -66,6 +66,7 @@ using Tessella
     include("structured/transfinite_prism_test.jl") # affine five-face transfinite prisms
     include("structured/transfinite_hex_test.jl") # affine six-face recombined hexahedra
     include("geometry/model_test.jl")    # entity kernel + .geo execution
+    include("geometry/model_discrete_test.jl") # record atomicity and classification
     include("geometry/model_boolean_snapshot_test.jl") # owned Boolean operands and Delete cleanup
     include("geometry/model_boolean_multi_test.jl") # N-way OCC-cell Boolean operands
     include("geometry/model_topology_query_test.jl") # explicit topology query API
@@ -97,6 +98,8 @@ using Tessella
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
     include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
+    include("interfaces/api_record_mutation_test.jl") # atomic sparse/dense tag mutation
+    include("interfaces/api_refinement_classification_test.jl") # refinement identity and ownership
     include("interfaces/api_mesh_transform_test.jl") # atomic whole-cache affine transforms
     include("interfaces/api_mesh_data_test.jl") # detached node/element block queries
     include("interfaces/api_mesh_entity_topology_test.jl") # cached edge/face topology lifecycle

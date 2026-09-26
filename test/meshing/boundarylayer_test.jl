@@ -92,6 +92,43 @@ end
                                                    nlayers=1)
 end
 
+@testset "area-weighted boundary-layer normals" begin
+    # At the shared edge the incident areas are 1/2 and 1, with unit normals
+    # +z and +y. Their area-weighted direction is therefore (0,2,1)/√5.
+    coords=Float64[0 1 0 0; 0 0 1 0; 0 0 0 2]
+    tris=Int32[1 2; 2 1; 3 4]
+    expected=Float64[0,2,1]/sqrt(5)
+    hw=0.125
+    for winding in (1,-1)
+        faces=winding==1 ? tris : tris[[2,1,3],:]
+        surface=Mesh(coords;tris=faces)
+        saved=copy(surface.coords)
+        layer=mesh_boundary_layer(surface;hwall=hw,ratio=1.5,nlayers=2)
+        @test validate(layer).ok
+        @test layer.coords[:,5]≈hw*winding*expected atol=8eps(Float64)
+        @test layer.coords[:,9]≈2.5hw*winding*expected atol=8eps(Float64)
+        @test surface.coords==saved
+    end
+
+    # Splitting the +y face across the edge opposite vertex 1 preserves the
+    # total incident area vector there; area-squared weighting violates this.
+    subdivided=Mesh(hcat(coords,(coords[:,2]+coords[:,4])/2);
+                    tris=Int32[1 2 5; 2 1 1; 3 5 4])
+    layer=mesh_boundary_layer(subdivided;hwall=hw,ratio=1.5,nlayers=1)
+    @test validate(layer).ok
+    @test layer.coords[:,6]≈hw*expected atol=8eps(Float64)
+
+    # The filled path has its own normal accumulation. At corner 1 of this
+    # 1×2×3 box, the incident x/y/z-normal triangle areas sum to 3,3,2.
+    wall=Tessella.Geometry.box_surface(0.,1.,0.,2.,0.,3.)
+    filled=mesh_boundary_layer_filled(wall;hwall=hw,ratio=1.5,nlayers=1)
+    @test validate(filled).ok
+    @test filled.coords[:,9]≈hw*Float64[3,3,2]/sqrt(22) atol=8eps(Float64)
+    prism_volume,tet_volume=_bl_mixed_volumes(filled)
+    @test prism_volume>0 && tet_volume>0
+    @test prism_volume+tet_volume≈6 rtol=1e-12
+end
+
 @testset "2-D boundary-layer quads" begin
     # Unit segment along x, left-normal +y. Area = length * H.
     coords=Float64[0 1; 0 0; 0 0]

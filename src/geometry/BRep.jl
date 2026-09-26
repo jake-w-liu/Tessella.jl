@@ -117,16 +117,29 @@ function _step_parse_list(s, start)
     i=nextind(s,start); items=Any[]
     last=lastindex(s)
     while i<=last
-        while i<=last && (isspace(s[i]) || s[i]==','); i=nextind(s,i); end
+        i=_step_skipws(s,i,last)
         i<=last || throw(ArgumentError("import_step: unterminated list"))
-        s[i]==')' && return items, nextind(s,i)
+        if s[i]==')'
+            isempty(items) || throw(ArgumentError("import_step: missing list parameter"))
+            return items, nextind(s,i)
+        end
         if s[i]=='('
             sub,i=_step_parse_list(s,i); push!(items,sub)
         elseif s[i]=='\''
             j=nextind(s,i)
-            while j<=last && s[j]!='\''; j=nextind(s,j); end
+            while j<=last
+                if s[j]=='\''
+                    following=nextind(s,j)
+                    # STEP represents an embedded apostrophe with two
+                    # consecutive apostrophes inside the same string.
+                    following<=last && s[following]=='\'' || break
+                    j=nextind(s,following)
+                else
+                    j=nextind(s,j)
+                end
+            end
             j<=last || throw(ArgumentError("import_step: unterminated string"))
-            push!(items,s[nextind(s,i):prevind(s,j)])
+            push!(items,replace(s[nextind(s,i):prevind(s,j)],"''"=>"'"))
             i=nextind(s,j)
         elseif s[i]=='$' || s[i]=='*'
             push!(items,nothing); i=nextind(s,i)
@@ -152,6 +165,11 @@ function _step_parse_list(s, start)
             isfinite(v) || throw(ArgumentError("import_step: non-finite number $raw"))
             push!(items,v); i=j
         end
+        i=_step_skipws(s,i,last)
+        i<=last || throw(ArgumentError("import_step: unterminated list"))
+        s[i]==')' && return items, nextind(s,i)
+        s[i]==',' || throw(ArgumentError("import_step: expected ',' between list parameters"))
+        i=nextind(s,i)
     end
     throw(ArgumentError("import_step: unterminated list"))
 end
