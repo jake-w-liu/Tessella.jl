@@ -240,7 +240,8 @@ end
     tet_dihedral_extrema(a,b,c,d) -> (min_angle, max_angle) in radians
 
 Min and max of the six dihedral angles of the tet. Slivers show a min near 0 or
-a max near π. Computed from edge-orthogonal in-face vectors (numerically stable).
+a max near π. Computed from normalized face normals, with exact-dyadic refinement
+when normalized arithmetic loses a face or a small angle.
 """
 function tet_dihedral_extrema(a, b, c, d)
     normalized=_normalized_quality_tet(a,b,c,d,"tet_dihedral_extrema")
@@ -254,21 +255,28 @@ function tet_dihedral_extrema(a, b, c, d)
         i, j, k, l = e
         eij = _sub(P[j], P[i])
         len = _norm(eij)
-        len == 0 && return (0.0, Float64(pi))
-        u = _scale(eij, 1/len)                 # unit edge direction
+        len == 0 && return _tet_dihedral_exact(a,b,c,d)
         vk = _sub(P[k], P[i]); vl = _sub(P[l], P[i])
-        nk = _sub(vk, _scale(u, _dot(vk, u)))  # component of vk ⊥ edge
-        nl = _sub(vl, _scale(u, _dot(vl, u)))
+        nk = _cross(eij, vk); nl = _cross(eij, vl)
         dk = _norm(nk); dl = _norm(nl)
-        (dk == 0 || dl == 0) && return (0.0, Float64(pi))
-        cosang = clamp((nk[1]/dk)*(nl[1]/dl)+(nk[2]/dk)*(nl[2]/dl)+
-                       (nk[3]/dk)*(nl[3]/dl), -1.0, 1.0)
-        ang = acos(cosang)
+        (dk > sqrt(eps(Float64))*_cross_permanent(eij,vk) &&
+         dl > sqrt(eps(Float64))*_cross_permanent(eij,vl)) ||
+            return _tet_dihedral_exact(a,b,c,d)
+        nk = (nk[1]/dk,nk[2]/dk,nk[3]/dk)
+        nl = (nl[1]/dl,nl[2]/dl,nl[3]/dl)
+        sine = _norm(_cross(nk,nl)); cosine = _dot(nk,nl)
+        # atan keeps the sine of thin-feature angles when their cosine rounds
+        # to +/-1. Resolve cancellation and collapsed normalized axes exactly.
+        sine > sqrt(eps(Float64)) || return _tet_dihedral_exact(a,b,c,d)
+        ang = atan(sine,cosine)
         ang < mn && (mn = ang)
         ang > mx && (mx = ang)
     end
     return (mn, mx)
 end
+
+@inline _cross_permanent(a,b) = abs(a[2]*b[3])+abs(a[3]*b[2])+
+    abs(a[3]*b[1])+abs(a[1]*b[3])+abs(a[1]*b[2])+abs(a[2]*b[1])
 
 """Circumradius of tet `(a,b,c,d)`. Returns `Inf` for a degenerate (flat) tet."""
 function tet_circumradius(a, b, c, d)
@@ -277,9 +285,11 @@ function tet_circumradius(a, b, c, d)
     coordinate_scale,raw_points=normalized
     edge_scale,P=_relative_quality_tet(raw_points)
     radius=_tet_circumradius_normalized(P...)
-    isfinite(radius) || return Inf
+    isfinite(radius) || return _tet_circumradius_exact(a,b,c,d,false)
     edge_scaled=edge_scale*radius
-    return coordinate_scale*edge_scaled
+    result=coordinate_scale*edge_scaled
+    return isfinite(result) && result>0 ? result :
+           _tet_circumradius_exact(a,b,c,d,false)
 end
 
 function _tet_circumradius_normalized(a,b,c,d)
@@ -288,12 +298,17 @@ function _tet_circumradius_normalized(a,b,c,d)
               abs(C[1]),abs(C[2]),abs(C[3]))
     (isfinite(scale)&&scale>0) || return Inf
     An=_scale(A,inv(scale));Bn=_scale(B,inv(scale));Cn=_scale(C,inv(scale))
-    denom = 2.0 * _dot(An, _cross(Bn, Cn))       # normalized 12·signed volume
-    denom == 0 && return Inf
+    determinant = _dot(An, _cross(Bn, Cn))
+    permanent=abs(An[1])*(abs(Bn[2]*Cn[3])+abs(Bn[3]*Cn[2]))+
+              abs(An[2])*(abs(Bn[1]*Cn[3])+abs(Bn[3]*Cn[1]))+
+              abs(An[3])*(abs(Bn[1]*Cn[2])+abs(Bn[2]*Cn[1]))
+    abs(determinant)>sqrt(eps(Float64))*permanent || return Inf
+    denom = 2.0 * determinant                 # normalized 12·signed volume
     la = _dot(An, An); lb = _dot(Bn, Bn); lc = _dot(Cn, Cn)
     O = _add(_add(_scale(_cross(Bn, Cn), la), _scale(_cross(Cn, An), lb)),
              _scale(_cross(An, Bn), lc))
-    O = _scale(O, 1/denom)
+    # Dividing components avoids an overflowing reciprocal for thin right tets.
+    O = (O[1]/denom,O[2]/denom,O[3]/denom)
     return scale*_norm(O)
 end
 
@@ -304,12 +319,63 @@ function tet_radius_edge(a, b, c, d)
     _,raw_points=normalized
     _,P=_relative_quality_tet(raw_points)
     R=_tet_circumradius_normalized(P...)
+    isfinite(R) || return _tet_circumradius_exact(a,b,c,d,true)
     mn = Inf
     @inbounds for i in 1:4, j in i+1:4
         l = _norm(_sub(P[i], P[j])); l < mn && (mn = l)
     end
-    mn == 0 && return Inf
-    return R / mn
+    mn == 0 && return _tet_circumradius_exact(a,b,c,d,true)
+    result=R/mn
+    return isfinite(result) ? result : _tet_circumradius_exact(a,b,c,d,true)
+end
+
+@inline _quality_exact_points(a,b,c,d) =
+    ntuple(j->ntuple(i->Rational{BigInt}(Float64((a,b,c,d)[j][i])),3),4)
+
+function _tet_circumradius_exact(a,b,c,d,relative::Bool)::Float64
+    points=_quality_exact_points(a,b,c,d)
+    A=_sub(points[2],points[1]);B=_sub(points[3],points[1])
+    C=_sub(points[4],points[1])
+    denominator=2*_dot(A,_cross(B,C))
+    denominator==0 && return Inf
+    numerator=_add(_add(_scale(_cross(B,C),_dot(A,A)),
+                         _scale(_cross(C,A),_dot(B,B))),
+                    _scale(_cross(A,B),_dot(C,C)))
+    squared_radius=_dot(numerator,numerator)/denominator^2
+    squared=if relative
+        shortest=minimum(_dot(_sub(points[i],points[j]),
+                              _sub(points[i],points[j]))
+                         for i in 1:3 for j in i+1:4)
+        shortest==0 && return Inf
+        squared_radius/shortest
+    else
+        squared_radius
+    end
+    return setprecision(BigFloat,256) do
+        Float64(sqrt(BigFloat(squared)))
+    end
+end
+
+function _tet_dihedral_exact(a,b,c,d)
+    points=_quality_exact_points(a,b,c,d)
+    minimum_angle=Inf;maximum_angle=-Inf
+    for (i,j,k,l) in ((1,2,3,4),(1,3,2,4),(1,4,2,3),
+                      (2,3,1,4),(2,4,1,3),(3,4,1,2))
+        edge=_sub(points[j],points[i])
+        first=_cross(edge,_sub(points[k],points[i]))
+        second=_cross(edge,_sub(points[l],points[i]))
+        (_dot(first,first)==0 || _dot(second,second)==0) &&
+            return (0.0,Float64(pi))
+        normal_cross=_cross(first,second)
+        sine_squared=_dot(normal_cross,normal_cross)
+        cosine=_dot(first,second)
+        angle=setprecision(BigFloat,256) do
+            Float64(atan(sqrt(BigFloat(sine_squared)),BigFloat(cosine)))
+        end
+        minimum_angle=min(minimum_angle,angle)
+        maximum_angle=max(maximum_angle,angle)
+    end
+    return minimum_angle,maximum_angle
 end
 
 function _relative_quality_tet(points)

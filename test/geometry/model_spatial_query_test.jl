@@ -139,6 +139,33 @@ end
           (85.0,175.0,265.0,95.0,185.0,275.0)
 end
 
+@testset "near-axis cylinder and cone bounds retain radial extent" begin
+    for dominant in 1:3, direction in (-1.0,1.0), scale in (1.0,1.0e5)
+        axis=ntuple(i->scale*(i==dominant ? 3direction :
+                              i==mod1(dominant+1,3) ? 3.0e-9 : 0.0),3)
+        for (kind,r1,r2) in ((:cylinder,1.0,1.0),(:cone,1.0,0.5),
+                              (:cone,0.5,1.0))
+            model=GeoModel()
+            tag=kind===:cylinder ? add_cylinder!(model,0,0,0,axis...,r1) :
+                                  add_cone!(model,0,0,0,axis...,r1,r2)
+            expected=setprecision(BigFloat,256) do
+                a=BigFloat.(axis)
+                magnitude=sqrt(sum(x->x^2,a))
+                radial=ntuple(i->sqrt(sum(a[j]^2 for j in 1:3 if j!=i))/
+                                  magnitude,3)
+                lower=ntuple(i->min(-r1*radial[i],a[i]-r2*radial[i]),3)
+                upper=ntuple(i->max(r1*radial[i],a[i]+r2*radial[i]),3)
+                Float64.((lower...,upper...))
+            end
+            actual=model_bounding_box(model,3,tag)
+            @test _spatial_bounds_approx(actual,expected)
+            # The base circle extends across the zero coordinate on the
+            # nearly aligned axis; a rounded-to-zero radial bound is wrong.
+            @test direction>0 ? actual[dominant]<0 : actual[dominant+3]>0
+        end
+    end
+end
+
 @testset "Boolean snapshot bounding boxes" begin
     model=GeoModel()
     add_box!(model,0,0,0,2,1,1;tag=1)

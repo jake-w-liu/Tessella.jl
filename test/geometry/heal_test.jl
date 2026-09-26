@@ -132,6 +132,31 @@ end
         @test surface_diagnostics(
             exact_boundary;tol=threshold).n_coincident_pairs==0
 
+        # All-pairs oracle on exact original coordinates: rationalizing a
+        # rounded normalized point cannot recover a lost local separation.
+        function exact_pairs(coordinates,tolerance)
+            points=Rational{BigInt}.(coordinates)
+            widths=[maximum(points[d,:])-minimum(points[d,:]) for d in 1:3]
+            limit2=sum(abs2,widths)*Rational{BigInt}(tolerance)^2
+            return sum(sum(abs2,points[:,i]-points[:,j])<limit2
+                       for i in axes(points,2) for j in 1:i-1)
+        end
+        for exponent in (-400,0,400), axis in 1:3, factor in (0.25,2.0)
+            coordinates=zeros(3,4)
+            coordinates[axis,:]=ldexp.([7.,nextfloat(7.),7.,1e8],exponent)
+            tolerance=factor*eps(7.)/1e8
+            @test surface_diagnostics(Mesh(coordinates);tol=tolerance).
+                n_coincident_pairs==exact_pairs(coordinates,tolerance)
+        end
+        for coordinates in ([1e308 1e308;0. 1e-320;0 0],
+                             [0. 1e-320 1e308;0 0 0;0 0 0],
+                             [1e15 nextfloat(1e15) 1e15+1;0 0 0;0 0 0])
+            for tolerance in (1e-320,1e-9,0.1,1.0,2.0)
+                @test surface_diagnostics(Mesh(coordinates);tol=tolerance).
+                    n_coincident_pairs==exact_pairs(coordinates,tolerance)
+            end
+        end
+
         C = copy(cube.coords); C[1,1] = NaN
         nanmesh=Mesh(cube.coords;tris=cube.tris);nanmesh.coords[1,1]=NaN
         oknan, rnan = is_meshable(nanmesh)

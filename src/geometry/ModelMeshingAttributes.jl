@@ -741,14 +741,21 @@ function _transfinite_automatic_surface!(
 end
 
 # Return the `DiscreteEntity` node/element record for `(dim, tag)` — the
-# entity's own record for discrete entities, or a lazily created attachment
-# record for native entities (Gmsh stores added mesh data on any entity).
-function _discrete_data!(m::GeoModel,dim::Int,tag::Int,caller::AbstractString)
+# entity's own record for discrete entities, or an attachment record for native
+# entities. A new attachment is published only after the insertion validates.
+function _discrete_data(m::GeoModel,dim::Int,tag::Int,caller::AbstractString)
     record=get(m.discrete,(dim,tag),nothing)
     record!==nothing && return record
     _model_entity_known(m,dim,tag) || throw(ArgumentError(
         "$caller: unknown entity ($dim,$tag)"))
-    return get!(DiscreteEntity,m.meshing.attached,(dim,tag))
+    return get(DiscreteEntity,m.meshing.attached,(dim,tag))
+end
+
+function _discrete_mesh_tag(value,caller::AbstractString,name::AbstractString)
+    tag=_mesh_attr_positive_int(value,caller,name)
+    0<tag<=typemax(Int32) || throw(ArgumentError(
+        "$caller: $name must be a positive Int32 identifier"))
+    return Int32(tag)
 end
 
 # `(key, record)` pairs over both discrete entities and native-entity
@@ -784,7 +791,7 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
         "$caller: node_tags must be a vector or tuple"))
     (coords isa AbstractVector || coords isa Tuple) || throw(ArgumentError(
         "$caller: coords must be a flat vector or tuple of x,y,z triples"))
-    tags=Int[_mesh_attr_positive_int(t2,caller,"node_tags entry")
+    tags=Int32[_discrete_mesh_tag(t2,caller,"node_tags entry")
              for t2 in node_tags]
     length(coords)==3*length(tags) || throw(ArgumentError(
         "$caller: coords length $(length(coords)) is not 3×" *
@@ -800,16 +807,19 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
         pflat=Float64[_mesh_attr_finite(c,caller,"params entry")
                       for c in params]
     end
-    record=_discrete_data!(m,dimension,t,caller)
-    for (i,node_tag) in enumerate(tags)
-        for (key,other) in _discrete_mesh_records_model(m)
-            other===record && continue
-            Int32(node_tag) in other.node_tags && throw(ArgumentError(
+    record=_discrete_data(m,dimension,t,caller)
+    requested=Set(tags)
+    for (key,other) in _discrete_mesh_records_model(m)
+        other===record && continue
+        for node_tag in other.node_tags
+            node_tag in requested && throw(ArgumentError(
                 "$caller: node tag $node_tag is already owned by entity $key"))
         end
-        position=findfirst(==(Int32(node_tag)),record.node_tags)
+    end
+    for (i,node_tag) in enumerate(tags)
+        position=findfirst(==(node_tag),record.node_tags)
         if position===nothing
-            push!(record.node_tags,Int32(node_tag))
+            push!(record.node_tags,node_tag)
             record.node_coords=hcat(record.node_coords,
                                   reshape(flat[3i-2:3i],3,1))
             if !isempty(pflat)
@@ -838,6 +848,8 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
             end
         end
     end
+    haskey(m.discrete,(dimension,t)) ||
+        (m.meshing.attached[(dimension,t)]=record)
     return nothing
 end
 
@@ -848,8 +860,8 @@ end
 Append elements to entity `(dim, tag)`, matching Gmsh's `mesh.addElements`:
 `element_types` lists MSH type numbers and `element_tags[i]`/`node_tags[i]`
 the tag vector and flattened connectivity of block `i`. Every referenced node
-must already be classified on the entity. Element tags must be unique across
-the entity.
+must already be classified on the entity. Element tags must be strictly
+positive and unique across the model.
 """
 function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
                                 node_tags)
@@ -868,10 +880,13 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
         length(node_tags)==length(element_types) || throw(ArgumentError(
         "$caller: element_types, element_tags, and node_tags must have the " *
         "same block count"))
-    record=_discrete_data!(m,dimension,t,caller)
-    known=Set(Int.(record.node_tags))
+    record=_discrete_data(m,dimension,t,caller)
+    known=Set(record.node_tags)
     staged=Tuple{Int32,Int32,Vector{Int32}}[]
-    seen=Set{Int32}(record.element_tags)
+    seen=Set{Int32}()
+    for (_,other) in _discrete_mesh_records_model(m)
+        union!(seen,other.element_tags)
+    end
     for block in eachindex(element_types)
         msh_type=_mesh_attr_positive_int(element_types[block],caller,
                                          "element_types entry")
@@ -893,14 +908,13 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
             ArgumentError(
                 "$caller: node_tags[$block] length $(length(block_nodes)) is " *
                 "not $spec_nodes×$(length(block_tags)) element tags"))
-        flat_nodes=Int[_mesh_attr_positive_int(v,caller,"node_tags entry")
+        flat_nodes=Int32[_discrete_mesh_tag(v,caller,"node_tags entry")
                        for v in block_nodes]
         for (element_index,raw_tag) in enumerate(block_tags)
-            element_tag=_mesh_attr_positive_int(raw_tag,caller,
-                                                "element tag")
-            Int32(element_tag) in seen && throw(ArgumentError(
+            element_tag=_discrete_mesh_tag(raw_tag,caller,"element tag")
+            element_tag in seen && throw(ArgumentError(
                 "$caller: duplicate element tag $element_tag"))
-            push!(seen,Int32(element_tag))
+            push!(seen,element_tag)
             connectivity=flat_nodes[
                 spec_nodes*(element_index-1)+1:spec_nodes*element_index]
             for node in connectivity
@@ -908,8 +922,7 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
                     "$caller: element $element_tag references node $node " *
                     "which is not classified on entity ($dimension,$t)"))
             end
-            push!(staged,(Int32(msh_type),Int32(element_tag),
-                          Int32.(connectivity)))
+            push!(staged,(Int32(msh_type),element_tag,connectivity))
         end
     end
     for (msh_type,element_tag,connectivity) in staged
@@ -917,6 +930,8 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
         push!(record.element_tags,element_tag)
         push!(record.element_nodes,connectivity)
     end
+    haskey(m.discrete,(dimension,t)) ||
+        (m.meshing.attached[(dimension,t)]=record)
     return nothing
 end
 
@@ -1432,10 +1447,11 @@ function _split_chains_by_angle(chains::Vector{Tuple{Vector{Int32},Bool}},
     result=Tuple{Vector{Int32},Bool}[]
     for (chain,closed) in chains
         cuts=Int[]
-        limit=closed ? length(chain)-1 : length(chain)-1
-        for k in 2:limit
-            a=coords[chain[k-1]];b=coords[chain[k]];c=coords[chain[k+1]]
-            u=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
+        count=length(chain)-1
+        for k in (closed ? 1 : 2):count
+            previous=closed ? mod1(k-1,count) : k-1
+            a=coords[chain[previous]];b=coords[chain[k]];c=coords[chain[k+1]]
+            u=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
             v=(c[1]-b[1],c[2]-b[2],c[3]-b[3])
             nu=sqrt(u[1]^2+u[2]^2+u[3]^2);nv=sqrt(v[1]^2+v[2]^2+v[3]^2)
             (nu>0 && nv>0) || continue
@@ -1446,17 +1462,20 @@ function _split_chains_by_angle(chains::Vector{Tuple{Vector{Int32},Bool}},
             push!(result,(chain,closed))
             continue
         end
-        start=1
-        for cut in cuts
-            push!(result,(chain[start:cut],false))
-            start=cut
-        end
-        closed && start==1 || push!(result,(chain[start:end],false))
-        if closed && start>1
-            # Wrap segment between last cut and first cut through the seam.
-            wrapped=vcat(chain[start:end-1],chain[1:cuts[1]])
-            pop!(result)
-            push!(result,(wrapped,false))
+        if closed
+            for i in eachindex(cuts)
+                start=cuts[i];stop=cuts[mod1(i+1,length(cuts))]
+                segment=stop>start ? chain[start:stop] :
+                    vcat(chain[start:end-1],chain[1:stop])
+                push!(result,(segment,false))
+            end
+        else
+            start=1
+            for cut in cuts
+                push!(result,(chain[start:cut],false))
+                start=cut
+            end
+            push!(result,(chain[start:end],false))
         end
     end
     return result
@@ -1540,8 +1559,8 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
         for i in 2:length(owners)
             a=_find(owners[1]);b=_find(owners[i])
             a==b && continue
-            dot=clamp(normals[a][1]*normals[b][1]+normals[a][2]*normals[b][2]+
-                      normals[a][3]*normals[b][3],-1.0,1.0)
+            na=normals[owners[1]];nb=normals[owners[i]]
+            dot=clamp(na[1]*nb[1]+na[2]*nb[2]+na[3]*nb[3],-1.0,1.0)
             dot>threshold && (parent[b]=a)
         end
     end

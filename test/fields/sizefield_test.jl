@@ -97,6 +97,41 @@ end
         @test field_value(ft,0.25,0.25,2.0)==2.0
         @test field_value(ft,2.0,0.0,0.0)==1.0
 
+        # Analytic distances must survive underflow of squared edge lengths
+        # and squared triangle normals; all query coordinates remain finite.
+        for scale in (1.0,1e-100,1e-170)
+            a=(0.,0.,0.); b=(scale,0.,0.); c=(0.,scale,0.)
+            segment=DistanceField(segments=[(a,b)])
+            triangle=DistanceField(triangles=[(a,b,c)])
+            @test field_value(segment,scale/2,0.,0.)==0.
+            @test field_value(triangle,scale/4,scale/4,0.)==0.
+            @test field_value(segment,scale/2,scale,0.)≈scale rtol=8eps(Float64)
+            @test field_value(triangle,scale/4,scale/4,-scale)≈scale rtol=8eps(Float64)
+            @test field_value(segment,2scale,0.,0.)≈scale rtol=8eps(Float64)
+            @test field_value(triangle,2scale,0.,0.)≈scale rtol=8eps(Float64)
+            degenerate=DistanceField(triangles=[(a,b,(2scale,0.,0.))])
+            @test field_value(degenerate,scale,scale,0.)≈scale rtol=8eps(Float64)
+            repeated=DistanceField(triangles=[(a,a,a)],segments=[(a,a)])
+            @test field_value(repeated,0.,scale,0.)≈scale rtol=8eps(Float64)
+        end
+        # Exact on-edge and transverse-distance oracles across exponent gaps:
+        # a finite final norm must not hide an invalid projection calculation.
+        for (a,b,x) in (((0.,0.,0.),(1e-150,0.,0.),1e-200),
+                        ((0.,0.,0.),(1e200,0.,0.),1.),
+                        ((0.,0.,0.),(1e100,0.,0.),1e100*1e-50),
+                        ((0.,0.,0.),(1e-100,0.,0.),1e-100*1e-50),
+                        ((-1e308,0.,0.),(1e308,0.,0.),1e-200))
+            edge=DistanceField(segments=[(a,b)])
+            @test field_value(edge,x,0.,0.)==0.
+            @test field_value(edge,x,0.,1e-200)==1e-200
+            @test field_value(edge,x,0.,0.25)==0.25
+        end
+        elongated=DistanceField(triangles=[
+            ((0.,0.,0.),(1e-150,0.,0.),(0.,1e150,0.))])
+        @test field_value(elongated,1e-200,0.,0.)==0.
+        @test field_value(elongated,1e-200,0.,0.25)==0.25
+
+
         tm=Mesh(Float64[0 1 0;0 0 1;0 0 0];tris=reshape(Int32[1,2,3],3,1))
         @test field_value(DistanceField(tm),0.25,0.25,0.5)==0.5
         corrupted=Mesh(Float64[0 1 0;0 0 1;0 0 0];

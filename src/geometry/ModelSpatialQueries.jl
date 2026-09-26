@@ -76,8 +76,10 @@ function _model_cylinder_bounds(spec,caller::AbstractString,entity::AbstractStri
             "$caller: $entity has invalid cylinder parameters; rebuild the model"))
     axis=_model_bounds_unit_axis(spec.axis,caller,entity)
     endpoint=ntuple(index->center[index]+height*axis[index],3)
+    # The transverse norm avoids cancellation in sqrt(1-axis[index]^2)
+    # when the axis is nearly parallel to a coordinate direction.
     radial=ntuple(index->
-        radius*sqrt(max(0.0,muladd(-axis[index],axis[index],1.0))),3)
+        radius*hypot(axis[mod1(index+1,3)],axis[mod1(index+2,3)]),3)
     return _model_bounds_checked((
         ntuple(index->min(center[index],endpoint[index])-radial[index],3)...,
         ntuple(index->max(center[index],endpoint[index])+radial[index],3)...),
@@ -95,7 +97,7 @@ function _model_cone_bounds(spec,caller::AbstractString,entity::AbstractString)
     axis=_model_bounds_unit_axis(spec.axis,caller,entity)
     endpoint=ntuple(index->center[index]+height*axis[index],3)
     orthogonal=ntuple(index->
-        sqrt(max(0.0,muladd(-axis[index],axis[index],1.0))),3)
+        hypot(axis[mod1(index+1,3)],axis[mod1(index+2,3)]),3)
     return _model_bounds_checked((
         ntuple(index->min(center[index]-r1*orthogonal[index],
                           endpoint[index]-r2*orthogonal[index]),3)...,

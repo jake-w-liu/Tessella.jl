@@ -164,6 +164,12 @@ function _count_coincident(m::Mesh, reltol::Float64)
     end
     diag = hypot(hi[1]-lo[1], hi[2]-lo[2], hi[3]-lo[3])
     cellsize = diag*reltol
+    # Coordinates normalize into [-1,1]. Reserve 32 ulps for their divisions,
+    # three origin/distance subtractions, and the bbox/distance hypot calls.
+    # Unresolved cells and comparisons use original-coordinate exact values.
+    roundoff=32eps(Float64)
+    reltol>0 && cellsize<=roundoff &&
+        return _count_coincident_exact_grid(m,reltol)
     cellsize>diag && return nn*(nn-1)÷2
     if cellsize==0
         counts=Dict{NTuple{3,Float64},Int}()
@@ -174,9 +180,11 @@ function _count_coincident(m::Mesh, reltol::Float64)
         end
         return pairs
     end
-    inv = 1.0/cellsize
+    # Padding also keeps a pair rounded across a cell boundary in adjacent
+    # cells; the unpadded tolerance still governs the distance comparison.
+    inv = 1.0/(cellsize+roundoff)
     if !isfinite(inv) || diag*inv>typemax(Int)-2
-        return _count_coincident_exact_grid(m,scale,lo,cellsize)
+        return _count_coincident_exact_grid(m,reltol)
     end
     cell = Dict{NTuple{3,Int}, Vector{Int}}()
     sizehint!(cell, nn)
@@ -194,7 +202,10 @@ function _count_coincident(m::Mesh, reltol::Float64)
             haskey(cell, nb) || continue
             for j in cell[nb]
                 qj = qcoord(node(m,j))
-                hypot(qi[1]-qj[1], qi[2]-qj[2], qi[3]-qj[3]) < cellsize && (cnt += 1)
+                distance=hypot(qi[1]-qj[1],qi[2]-qj[2],qi[3]-qj[3])
+                abs(distance-cellsize)<=roundoff &&
+                    return _count_coincident_exact_grid(m,reltol)
+                distance<cellsize && (cnt+=1)
             end
         end
         push!(get!(cell, k, Int[]), i)
@@ -202,37 +213,31 @@ function _count_coincident(m::Mesh, reltol::Float64)
     return cnt
 end
 
-@inline function _exact_cell_index(value::Float64,cellsize::Float64)
-    ratio=Rational{BigInt}(value)/Rational{BigInt}(cellsize)
+@inline function _exact_cell_index(value::Rational{BigInt},
+                                   cellsize::Rational{BigInt})
+    ratio=value/cellsize
     return fld(numerator(ratio),denominator(ratio))
 end
 
-@inline function _exact_distance_below(a::NTuple{3,Float64},
-                                       b::NTuple{3,Float64},
-                                       threshold::Float64)
-    a==b && return true
-    dx=Rational{BigInt}(a[1])-Rational{BigInt}(b[1])
-    dy=Rational{BigInt}(a[2])-Rational{BigInt}(b[2])
-    dz=Rational{BigInt}(a[3])-Rational{BigInt}(b[3])
-    limit=Rational{BigInt}(threshold)
-    return dx^2+dy^2+dz^2<limit^2
-end
-
-
-# When `1/cellsize` cannot fit Float64 or an Int cell index, use exact BigInt
-# grid coordinates. This retains the spatial partition; the former x-only
-# sweep became quadratic for common planar point sets whose x coordinates tied.
-function _count_coincident_exact_grid(m::Mesh,scale::Float64,
-                                      lo::NTuple{3,Float64},
-                                      cellsize::Float64)
+# Preserve the original coordinates before any normalization rounds them.
+# The L1 bbox span bounds its Euclidean diagonal, so this rational cell width
+# needs only 27 neighbouring cells while the distance test uses the exact
+# squared diagonal. The spatial partition also handles planar point sets.
+function _count_coincident_exact_grid(m::Mesh,reltol::Float64)
+    lo=ntuple(d->Rational{BigInt}(minimum(@view m.coords[d,:])),3)
+    widths=ntuple(d->Rational{BigInt}(maximum(@view m.coords[d,:]))-lo[d],3)
+    extent=sum(widths)
+    extent==0 && return nnodes(m)*(nnodes(m)-1)÷2
+    tolerance=Rational{BigInt}(reltol)
+    cellsize=extent*tolerance
+    threshold2=sum(abs2,widths)*tolerance^2
     cells=Dict{NTuple{3,BigInt},
-               Vector{Tuple{NTuple{3,Float64},Int}}}()
+               Vector{Tuple{NTuple{3,Rational{BigInt}},Int}}}()
     sizehint!(cells,nnodes(m))
     count=0
     @inbounds for index in 1:nnodes(m)
         point=node(m,index)
-        q=(point[1]/scale-lo[1],point[2]/scale-lo[2],
-           point[3]/scale-lo[3])
+        q=ntuple(d->Rational{BigInt}(point[d])-lo[d],3)
         key=(_exact_cell_index(q[1],cellsize),
              _exact_cell_index(q[2],cellsize),
              _exact_cell_index(q[3],cellsize))
@@ -241,11 +246,11 @@ function _count_coincident_exact_grid(m::Mesh,scale::Float64,
             entries=get(cells,neighbour,nothing)
             entries===nothing && continue
             for (other,multiplicity) in entries
-                _exact_distance_below(q,other,cellsize) &&
+                sum((q[d]-other[d])^2 for d in 1:3)<threshold2 &&
                     (count+=multiplicity)
             end
         end
-        entries=get!(cells,key,Tuple{NTuple{3,Float64},Int}[])
+        entries=get!(cells,key,Tuple{NTuple{3,Rational{BigInt}},Int}[])
         duplicate=findfirst(entry->entry[1]==q,entries)
         if duplicate===nothing
             push!(entries,(q,1))

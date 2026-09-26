@@ -326,6 +326,23 @@ end
                            atol=64eps(Float64), rtol=64eps(Float64))
                   for index in 1:length(lengths)-1)
 
+        # Reversed subnormal coefficients can have representable parameters
+        # even though their geometric ratio itself overflows Float64.
+        for coefficient in (-1e-309,-1e-310,-nextfloat(0.))
+            actual=transfinite_curve_parameters(3;coefficient=coefficient)
+            reference=_big_reference(:progression,coefficient,3)
+            @test actual[2] ≈ reference[2] rtol=256eps(Float64) atol=nextfloat(0.)
+            @test all(>(0.),diff(actual))
+        end
+        # The same log-ratio path must preserve larger node counts, and still
+        # reject distributions whose first parameter really underflows.
+        actual=transfinite_curve_parameters(4;coefficient=-1e-155)
+        reference=_big_reference(:progression,-1e-155,4)
+        for index in eachindex(actual)
+            @test actual[index] ≈ reference[index] rtol=256eps(Float64) atol=nextfloat(0.)
+        end
+        @test_throws ArgumentError transfinite_curve_parameters(4;coefficient=-1e-310)
+
         # These coefficients exercise both cancellation-sensitive sides of the
         # Bump law while still having distinct Float64 reference parameters.
         for (coefficient, count) in ((1e-15, 257), (1e30, 17))
