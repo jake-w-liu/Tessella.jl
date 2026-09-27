@@ -551,8 +551,10 @@ blocker if the surface cannot be filled watertight (never a silently bad mesh). 
 axis-aligned boxes prefer [`mesh_box`](@ref) and for extrusions [`mesh_sized_extrude`](@ref)
 (exact boundary, no faceting); `mesh_sized` is the general fallback for arbitrary surfaces.
 `entity` and `entity_resolver` have the classification semantics documented by
-[`refine_to_size`](@ref); input surface triangles/segments and their tags are
-reattached to the conforming fill before field refinement. `vertex_entities`
+[`refine_to_size`](@ref); actual boundary faces and represented segment chains
+inherit input surface tags before field refinement. A retriangulated face that
+crosses incompatible source tags, or an unrecovered segment, is an explicit
+blocker. `vertex_entities`
 classifies the input surface vertices as point entities. It accepts one `(0,tag)`
 tuple, a per-surface-point vector, a sparse dictionary keyed by point index, or a
 callable `(index, point) -> entity`; point classifications are remapped through
@@ -610,6 +612,79 @@ end
 @inline _classification_coord_key(x::Float64,y::Float64,z::Float64)=
     (x==0 ? 0.0 : x,y==0 ? 0.0 : y,z==0 ? 0.0 : z)
 
+@inline _classification_cross2(a,b,c)=
+    (b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1])
+
+function _classification_area2(polygon)
+    area=zero(Rational{BigInt})
+    for i in eachindex(polygon)
+        a=polygon[i];b=polygon[mod1(i+1,length(polygon))]
+        area+=a[1]*b[2]-a[2]*b[1]
+    end
+    return abs(area)
+end
+
+# Exact projected intersection area: half-plane clipping retains boundary-only
+# contact as zero area, so neighboring source tags do not claim the same face.
+function _classification_overlap2(face,source)
+    polygon=collect(face)
+    winding=sign(_classification_cross2(source...))
+    for i in 1:3
+        isempty(polygon) && break
+        a=source[i];b=source[mod1(i+1,3)]
+        clipped=empty(polygon)
+        previous=last(polygon)
+        dp=winding*_classification_cross2(a,b,previous)
+        for current in polygon
+            dc=winding*_classification_cross2(a,b,current)
+            if (dp>=0)!=(dc>=0)
+                fraction=dp/(dp-dc)
+                push!(clipped,(previous[1]+fraction*(current[1]-previous[1]),
+                               previous[2]+fraction*(current[2]-previous[2])))
+            end
+            dc>=0 && push!(clipped,current)
+            previous=current;dp=dc
+        end
+        polygon=clipped
+    end
+    return _classification_area2(polygon)
+end
+
+function _classified_boundary_face(volume,surface,face,caller)
+    points=ntuple(i->MeshTypes.node(volume,face[i]),3)
+    drop=if Predicates.orient2(((p[2],p[3]) for p in points)...)!=0
+        1
+    elseif Predicates.orient2(((p[1],p[3]) for p in points)...)!=0
+        2
+    else
+        3
+    end
+    projected=ntuple(i->Mesh3D._rbproj2(Rational{BigInt}.(points[i]),drop),3)
+    target=_classification_area2(projected)
+    covered=zero(target);owner=nothing;winding=0
+    lo=ntuple(d->minimum(p[d] for p in points),3)
+    hi=ntuple(d->maximum(p[d] for p in points),3)
+    for t in axes(surface.tris,2)
+        source=ntuple(i->MeshTypes.node(surface,surface.tris[i,t]),3)
+        any(d->maximum(p[d] for p in source)<lo[d] ||
+               minimum(p[d] for p in source)>hi[d],1:3) && continue
+        all(p->Predicates.orient3(points...,p)==0,source) || continue
+        projected_source=ntuple(i->Mesh3D._rbproj2(Rational{BigInt}.(source[i]),drop),3)
+        overlap=_classification_overlap2(projected,projected_source)
+        overlap>0 || continue
+        tag=surface.tri_tag[t]
+        (owner===nothing || owner==tag) || throw(ErrorException(
+            "$caller: boundary face $face crosses incompatible surface tags $owner and $tag"))
+        owner=tag;covered+=overlap
+        winding=sign(_classification_cross2(projected_source...))
+    end
+    (owner!==nothing && covered==target) || throw(ErrorException(
+        "$caller: boundary face $face is not exactly covered by the source surface"))
+    oriented=sign(_classification_cross2(projected...))==winding ? face :
+        (face[1],face[3],face[2])
+    return oriented,owner
+end
+
 function _attach_surface_classification(volume::Mesh,surface::Mesh,
                                         caller::AbstractString)
     ids=Dict{NTuple{3,Float64},Int32}()
@@ -629,16 +704,42 @@ function _attach_surface_classification(volume::Mesh,surface::Mesh,
             "$caller: conforming fill did not preserve surface vertex $i at $key"))
         mapping[i]=mapped
     end
-    S=Matrix{Int32}(undef,2,size(surface.segs,2))
-    @inbounds for s in axes(surface.segs,2),i in 1:2
-        S[i,s]=mapping[surface.segs[i,s]]
+    segments=NTuple{2,Int32}[];segment_tags=Int32[]
+    if size(surface.segs,2)>0
+        edges=MeshTypes.unique_edges(Matrix{Int32}(undef,3,0),volume.tets)
+        xs=volume.coords[1,:];ys=volume.coords[2,:];zs=volume.coords[3,:]
+        for s in axes(surface.segs,2)
+            a=mapping[surface.segs[1,s]];b=mapping[surface.segs[2,s]]
+            chain=Mesh3D._rb_subsegments(xs,ys,zs,a,b,size(volume.coords,2))
+            for edge in chain
+                MeshTypes._sort2(edge...) in edges || throw(ErrorException(
+                    "$caller: surface segment $s is not represented by tetrahedron edges"))
+                length(segments)<typemax(Int32) || throw(ArgumentError(
+                    "$caller: classified segment count exceeds Int32"))
+                push!(segments,edge);push!(segment_tags,surface.seg_tag[s])
+            end
+        end
     end
-    F=Matrix{Int32}(undef,3,size(surface.tris,2))
-    @inbounds for f in axes(surface.tris,2),i in 1:3
-        F[i,f]=mapping[surface.tris[i,f]]
+    S=Matrix{Int32}(undef,2,length(segments))
+    for (s,edge) in pairs(segments);S[:,s].=edge;end
+    boundary=Set(first(boundary_faces(volume.tets)))
+    faces=NTuple{3,Int32}[];face_tags=Int32[]
+    for t in axes(surface.tris,2)
+        face=ntuple(i->mapping[surface.tris[i,t]],3)
+        key=MeshTypes._sort3(face...)
+        if key in boundary
+            push!(faces,face);push!(face_tags,surface.tri_tag[t])
+            delete!(boundary,key)
+        end
     end
+    for face in sort!(collect(boundary))
+        oriented,tag=_classified_boundary_face(volume,surface,face,caller)
+        push!(faces,oriented);push!(face_tags,tag)
+    end
+    F=Matrix{Int32}(undef,3,length(faces))
+    for (t,face) in pairs(faces);F[:,t].=face;end
     out=Mesh(copy(volume.coords);segs=S,tris=F,tets=copy(volume.tets),
-             seg_tag=copy(surface.seg_tag),tri_tag=copy(surface.tri_tag),
+             seg_tag=segment_tags,tri_tag=face_tags,
              tet_tag=copy(volume.tet_tag))
     diagnostic=validate(out)
     diagnostic.ok || throw(ErrorException(

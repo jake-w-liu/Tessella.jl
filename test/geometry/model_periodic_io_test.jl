@@ -73,9 +73,9 @@ end
     @test validate(projected).ok
     projected_crc=mixed_crc(projected)
     @test projected_crc.sha==
-          "d9aa0af0ed218f321adea7b7276312583ee31f4747e3771ca410b87be3b628b7"
+          "e52934d2d4b6a1d8ab6dcd3082449b5ee55b0066e24ffd1fb869d1d88090e5d9"
     @test [block.msh for block in projected.blocks]==[15,1,2]
-    @test [length(block.tags) for block in projected.blocks]==[4,16,22]
+    @test [length(block.tags) for block in projected.blocks]==[4,8,16]
     @test all(==(11),projected.blocks[1].tags)
     @test all(==(12),projected.blocks[2].tags)
     @test all(==(13),projected.blocks[3].tags)
@@ -92,10 +92,10 @@ end
     @test data.entities[(2,1)].boundaries==Int32[1,2,3,4]
     @test data.entities[(2,1)].physical_tags==Int32[13,14]
     @test count(entity->entity[1]==0,data.node_entities)==4
-    @test count(entity->entity[1]==1,data.node_entities)==12
-    @test count(entity->entity[1]==2,data.node_entities)==nnodes(mesh)-16
+    @test count(entity->entity[1]==1,data.node_entities)==4
+    @test count(entity->entity[1]==2,data.node_entities)==nnodes(mesh)-8
     @test projected.elementary_entities==data.block_entities
-    @test count(==(Int32(2)),data.block_entities[2])==4
+    @test count(==(Int32(2)),data.block_entities[2])==2
     @test all(==(Int32(1)),data.block_entities[3])
 
     @test length(projected.periodic_links)==3
@@ -122,7 +122,7 @@ end
             reread_curve=only(filter(link->link.dim==1,reread.periodic_links))
             @test reread_curve.slave_entity==2
             @test reread_curve.master_entity==4
-            @test length(reread_curve.slave_nodes)==5
+            @test length(reread_curve.slave_nodes)==3
             @test reread_curve.affine==mapping.affine
             @test reread.physical_names==projected.physical_names
             if version==2.2
@@ -138,7 +138,7 @@ end
     end
     @test all(length(crcs)==1 for crcs in values(format_crcs))
     @test only(format_crcs[2.2])==
-          "12a1eb50575a3af08273b1a0fdefca49d7e4b01b4898573e6346b6b61b4978c3"
+          "93e8ba7e7d7da84b4c19470eedae5f5b7fea1c97891af4b5d1f7f477f2835854"
     @test only(format_crcs[4.1])==projected_crc.sha
 
     owned_crc=mixed_crc(projected)
@@ -197,7 +197,9 @@ end
     @test_throws ArgumentError model_to_mixed(fresh_model,unsnapped,1)
 
     embedded=deepcopy(fresh_model)
-    add_point!(embedded,0.5,0.5,0;tag=5,mesh_size=0.5)
+    # The point must not coincide with an existing mesh vertex — the refined
+    # mesh does contain (0.5, 0.5).
+    add_point!(embedded,0.37,0.61,0;tag=5,mesh_size=0.5)
     embed!(embedded,0,[5],2,1)
     @test_throws ArgumentError model_to_mixed(embedded,fresh_mesh,1)
 
@@ -218,7 +220,7 @@ end
                 for link in double_projection.periodic_links if link.dim==1])==
           [(2,4),(3,1)]
     @test mixed_crc(double_projection).sha==
-          "231b6d20877b7427735f96454a7f2ddcbe7d1d5368db8ab7cb9e05bbc5ffcf34"
+          "4f6763b669fff38051748ed95c9316931933802e4eda2c8a7852602105f6203e"
 
     @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))

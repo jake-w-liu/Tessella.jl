@@ -170,7 +170,7 @@ Physical Volume("domain", 72) = {1};
         mesh=read_msh(output).mesh
         @test validate(mesh).ok && ntris(mesh)>0
         @test mesh_crc(mesh).sha==
-              "92e578bac6d8feb3f0f845f100665dcc145edf924965ad72be716da933f34461"
+              "850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4"
 
         explicit=joinpath(directory,"explicit.msh")
         wrapped="x"*input*"x"
@@ -212,7 +212,7 @@ Physical Volume("domain", 72) = {1};
         @test periodic.entity_data!==nothing
         @test periodic.elementary_entities===nothing
         @test mixed_crc(periodic).sha==
-              "cf03be1a36427f1ef0fbc4e852996bd65d2630b5ac384fa0267dd14e46ea6280"
+              "28773987187af5e28ea8900e21ddeac7d839867199f512d2081d5ff17242f884"
         @test length(periodic.periodic_links)==3
         @test sort([(Int(link.slave_entity),Int(link.master_entity))
                     for link in periodic.periodic_links if link.dim==0])==
@@ -221,7 +221,7 @@ Physical Volume("domain", 72) = {1};
             link->link.dim==1,periodic.periodic_links))
         @test periodic_curve.slave_entity==2
         @test periodic_curve.master_entity==4
-        @test length(periodic_curve.slave_nodes)==5
+        @test length(periodic_curve.slave_nodes)==3
 
         periodic_embedded_input=joinpath(
             directory,"periodic-embedded.geo")
@@ -247,7 +247,7 @@ Physical Volume("domain", 72) = {1};
         @test embedded_periodic_curve.master_entity==5
         @test length(embedded_periodic_curve.slave_nodes)==3
         @test mixed_crc(periodic_embedded).sha==
-              "b02e4da6aa4910bfb488f6b3eebc4ae0bf22f91867506a973390cc65f450d9ec"
+              "9ebe487eca88d79bf0e28067dc8312b50e2e80196fd30ae7f4fd70fbcb377084"
 
         periodic_graph_input=joinpath(directory,"periodic-graph.geo")
         periodic_graph_output=joinpath(directory,"periodic-graph.msh")
@@ -271,10 +271,10 @@ Physical Volume("domain", 72) = {1};
         @test Dict(slave=>Int(link.master_entity)
                    for (slave,link) in graph_curve_links)==
               Dict(10=>20,20=>30)
-        @test all(link->length(link.slave_nodes)==9,
+        @test all(link->length(link.slave_nodes)==4,
                   values(graph_curve_links))
         @test mixed_crc(periodic_graph).sha==
-              "3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1"
+              "2352adba6b73846c7d281b72550c85e21a7a166b50fa17a35bca80fad529adf2"
 
         embedded_input=joinpath(directory,"embedded.geo")
         embedded_output=joinpath(directory,"embedded.msh")
@@ -294,7 +294,7 @@ Physical Volume("domain", 72) = {1};
         @test embedded.physical_names==Dict(
             (0,31)=>"embedded points",(1,32)=>"embedded line",(2,33)=>"domain")
         @test mixed_crc(embedded).sha==
-              "ac8238a9530b41f1cffbb596f304f77e07a047f2f7db0695bc25770af117448e"
+              "e1fceead58c752562ae6e6d6cf1a413dcdca406d897417bb9969fee444bec8cc"
 
         embedded_volume_input=joinpath(directory,"embedded-volume.geo")
         embedded_volume_output=joinpath(directory,"embedded-volume.msh")
@@ -407,7 +407,7 @@ Physical Volume("domain", 72) = {1};
         point_mesh_size=read_msh(point_mesh_size_output).mesh
         @test validate(point_mesh_size).ok
         @test mesh_crc(point_mesh_size).sha==
-              "bc13025a46d55be5f2394351cc56ef2ffa3cb3186a3ce01ce08a84fdb4f69003"
+              "2b17b65bf07655c9f85d24d261375a828a5e0ec3af0f081bfe83ef0064f1d492"
 
         points_of_input=joinpath(directory,"point-mesh-size-points-of.geo")
         points_of_output=joinpath(directory,"point-mesh-size-points-of.msh")

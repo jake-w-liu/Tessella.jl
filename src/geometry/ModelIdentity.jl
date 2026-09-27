@@ -167,7 +167,7 @@ function _model_identity_periodic(
             "$caller: retagging would merge periodic slave relations at $new_key"))
         result[new_key]=ModelPeriodicConstraint(
             constraint.dim,Int32(slave),Int32(master),constraint.affine,
-            constraint.reversed,constraint.atol)
+            constraint.reversed,constraint.atol,constraint.derived)
     end
     return result
 end
@@ -329,6 +329,9 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         caller,"color")
     physical=_model_identity_physical(
         m,dimension,old_entity_tag,new_entity_tag,caller)
+    entity_physicals=_model_identity_entity_state(
+        m.entity_physicals,dimension,old_entity_tag,new_entity_tag,
+        caller,"Physical memberships")
     embeds=_model_identity_embeds(
         m,dimension,old_entity_tag,new_entity_tag,caller)
     periodic=_model_identity_periodic(
@@ -345,6 +348,7 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
         m.entity_visibility=entity_visibility
         m.entity_colors=entity_colors
         m.physical=physical
+        m.entity_physicals=entity_physicals
         m.embeds=embeds
         m.periodic=periodic
         m.meshing=meshing
@@ -398,6 +402,7 @@ function model_set_tag!(m::GeoModel,dim,tag,new_tag)
     m.entity_visibility=entity_visibility
     m.entity_colors=entity_colors
     m.physical=physical
+    m.entity_physicals=entity_physicals
     m.embeds=embeds
     m.periodic=periodic
     m.meshing=meshing
@@ -432,7 +437,7 @@ function _model_identity_meshing(
     algorithm=Dict{Tuple{Int,Int},Int}()
     size_at_params=
         Dict{Tuple{Int,Int},Vector{Tuple{Vector{Float64},Float64}}}()
-    size_from_boundary=Dict{Tuple{Int,Int},Bool}()
+    size_from_boundary=Dict{Tuple{Int,Int},Int}()
     for (key,value) in attributes.recombine
         recombine[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
     end
@@ -442,8 +447,8 @@ function _model_identity_meshing(
     for (key,(sdim,stag)) in attributes.extrude_sources
         # Rekey the generated curve and retarget a source that itself moved.
         new_key=key==(dimension,old_tag) ? (dimension,new_tag) : key
-        extrude_sources[new_key]=(sdim==dimension && stag==old_tag ?
-                                  (sdim,new_tag) : (sdim,stag))
+        extrude_sources[new_key]=(sdim,sdim==dimension ?
+            _model_identity_signed_tag(stag,old_tag,new_tag) : stag)
     end
     for (key,value) in attributes.smoothing
         smoothing[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
@@ -498,6 +503,7 @@ function _model_identity_meshing(
     migrated.lc_factor=attributes.lc_factor
     migrated.recombine_all=attributes.recombine_all
     migrated.recombine_algo=attributes.recombine_algo
+    migrated.lc_extend_from_boundary=attributes.lc_extend_from_boundary
     migrated.attached=_model_identity_discrete_map(
         attributes.attached,m,dimension,old_tag,new_tag)
     migrated.homology_requests=copy(attributes.homology_requests)

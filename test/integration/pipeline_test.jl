@@ -22,6 +22,57 @@ function _cube_surface()
     Mesh(C; tris=t)
 end
 
+@testset "surface classification follows actual volume boundary" begin
+    # The same square pyramid has two valid base triangulations. Reclassifying
+    # the alternate diagonal must certify complete source coverage, not merely
+    # choose the source triangle containing a face centroid.
+    coords=Float64[0 1 1 0 0.5;0 0 1 1 0.5;0 0 0 0 1]
+    faces=Int32[1 1 1 2 3 4;3 4 2 3 4 1;2 3 5 5 5 5]
+    cells=Int32[1 2;2 3;4 4;5 5]
+    volume=Mesh(coords;tets=cells)
+    surface=Mesh(coords;tris=faces,tri_tag=Int32[7,7,3,3,3,3])
+    source_faces=copy(surface.tris)
+    attached,mapping=Tessella._attach_surface_classification(volume,surface,"test")
+    actual=Set(first(boundary_faces(attached.tets)))
+    @test Set(Tuple(sort(collect(f))) for f in eachcol(attached.tris))==actual
+    @test count(==(Int32(7)),attached.tri_tag)==2
+    @test count(==(Int32(3)),attached.tri_tag)==4
+    @test mapping==Int32[1,2,3,4,5]
+    @test surface.tris==source_faces
+    crossing=Mesh(coords;tris=faces,tri_tag=Int32[7,8,3,3,3,3])
+    error=try Tessella._attach_surface_classification(volume,crossing,"test");nothing
+          catch err;err end
+    @test error isa ErrorException
+    @test occursin("crosses incompatible surface tags",sprint(showerror,error))
+    for scale in (1e-150,1e150)
+        scaled_volume=Mesh(coords.*scale;tets=cells)
+        scaled_surface=Mesh(coords.*scale;tris=faces,tri_tag=surface.tri_tag)
+        _,tag=Tessella._classified_boundary_face(
+            scaled_volume,scaled_surface,(Int32(1),Int32(2),Int32(4)),"test")
+        @test tag==7
+    end
+
+    edged=Mesh(coords;tris=faces,tri_tag=surface.tri_tag,
+               segs=reshape(Int32[1,2],2,1),seg_tag=Int32[9])
+    split,_=Tessella._attach_surface_classification(
+        refine_uniform(volume),edged,"test")
+    @test size(split.segs,2)==2 && split.seg_tag==Int32[9,9]
+    @test split.segs[2,1]==split.segs[1,2]
+    @test (split.segs[1,1],split.segs[2,2])==(1,2)
+    missing=Mesh(coords;tris=faces,tri_tag=surface.tri_tag,
+                 segs=reshape(Int32[1,3],2,1))
+    @test_throws ErrorException Tessella._attach_surface_classification(volume,missing,"test")
+
+    tunnel=box_tunnel_surface(0.,3.,0.,3.,0.,1.,1.,2.,1.,2.)
+    tagged=Mesh(tunnel.coords;tris=tunnel.tris,
+                tri_tag=fill(Int32(11),ntris(tunnel)))
+    filled=mesh_sized(tagged;hmax=10.)
+    @test validate(filled).ok
+    @test all(==(Int32(11)),filled.tri_tag)
+    @test Set(Tuple(sort(collect(f))) for f in eachcol(filled.tris))==
+          Set(first(boundary_faces(filled.tets)))
+end
+
 struct _UnreadPipelinePoints <: AbstractVector{Float64}
     count::Int
 end

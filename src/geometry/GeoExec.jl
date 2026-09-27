@@ -5020,6 +5020,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         m.meshing.lc_factor=1.0
         m.meshing.recombine_all=false
         m.meshing.recombine_algo=1
+        m.meshing.lc_extend_from_boundary=1
         context.extrude_return_lateral=true
         empty!(context.option_strings);empty!(context.option_numbers)
         empty!(context.option_colors)
@@ -6043,8 +6044,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         for value in list
             sd=_geo_constraint_int(value,caller,"Surface tag")
             haskey(m.surfaces,sd) || continue
-            number==0 ? delete!(m.meshing.size_from_boundary,(2,sd)) :
-                        (m.meshing.size_from_boundary[(2,sd)]=true)
+            # Upstream stores `(int)val` verbatim — 0 disables and negatives
+            # behave as unset, deferring to lcExtendFromBoundary at mesh time.
+            m.meshing.size_from_boundary[(2,sd)]=number
         end
         return
     elseif (mm=match(
@@ -6869,6 +6871,9 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
     m.meshing.recombine_algo=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"RecombinationAlgorithm"),1.0),
         "execute_geo: Mesh.RecombinationAlgorithm")
+    m.meshing.lc_extend_from_boundary=_geo_signed_gmsh_int_value(something(
+        _geo_option_number(context,"Mesh",0,"MeshSizeExtendFromBoundary"),1.0),
+        "execute_geo: Mesh.MeshSizeExtendFromBoundary")
     return nothing
 end
 

@@ -296,7 +296,10 @@ end
 
 Record whether the interior mesh size of entity `(dim, tag)` extends its
 boundary sizes rather than interpolating them, matching Gmsh's
-`setSizeFromBoundary`. Only `dim == 2` is supported, as upstream.
+`setSizeFromBoundary`. `val` stores a truncated integer flag — `0` disables
+boundary extension for the entity and a negative value behaves as unset,
+deferring to the global `Mesh.MeshSizeExtendFromBoundary` option at generate
+time. Only `dim == 2` is supported, as upstream.
 """
 function set_size_from_boundary!(m::GeoModel,dim,tag,val)
     caller="set_size_from_boundary!"
@@ -306,12 +309,12 @@ function set_size_from_boundary!(m::GeoModel,dim,tag,val)
         "$caller: only dim 2 (surfaces) is supported"))
     val isa Integer || val isa Bool || throw(ArgumentError(
         "$caller: val must be an integer flag"))
-    _mesh_attr_entity!(m,dimension,t,caller)
-    if val==0
-        delete!(m.meshing.size_from_boundary,(dimension,t))
-    else
-        m.meshing.size_from_boundary[(dimension,t)]=true
+    number=try Int(val) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: val exceeds the platform Int range"))
     end
+    _mesh_attr_entity!(m,dimension,t,caller)
+    m.meshing.size_from_boundary[(dimension,t)]=number
     return nothing
 end
 
@@ -2413,6 +2416,11 @@ function _attribute_forced_parameters(m::GeoModel,t::Int,
     for (edim,etag) in get(m.embeds,(2,t),NTuple{2,Int}[])
         edim==1 && push!(boundary_curves,etag)
     end
+    # Upstream `generate(2)` runs the whole `Mesh1D` pass before `Mesh2D`, so
+    # `meshGFace` always finds `GEdge::mesh_vertices` populated. Grade any
+    # boundary curve still missing stored parameters the same way — without
+    # this, an unmeshed curve would contribute only its endpoints.
+    _model_surface_mesh_curves!(m,boundary_curves,caller)
     param_sizes=Dict{Tuple{Int,Float64},Float64}()
     for (curve,spec) in m.meshing.transfinite_curves
         curve in boundary_curves || continue

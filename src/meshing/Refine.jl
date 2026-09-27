@@ -70,18 +70,18 @@ end
     @inbounds return (coords[1, i], coords[2, i], coords[3, i])
 end
 
-function _write_positive_tet!(tetrahedra::Matrix{Int32}, column::Int,
+function _write_oriented_tet!(tetrahedra::Matrix{Int32}, column::Int,
                               vertices::NTuple{4,Int32},
                               coords::Matrix{Float64}, parent::Int,
-                              child::Int)
+                              child::Int, parent_orientation::Int)
     a, b, c, d = vertices
     orientation = orient3(_point(coords, a), _point(coords, b),
                           _point(coords, c), _point(coords, d))
     orientation == 0 && throw(ArgumentError(
         "refine_uniform: tetrahedron $parent child $child has zero exact volume"))
-    # `orient3` follows Shewchuk's convention, opposite to MeshTypes' positive
-    # signed-volume convention. Swap once if the raw template is negative.
-    orientation > 0 && ((a, b) = (b, a))
+    # Preserve the parent's winding, including negative orientations explicitly
+    # admitted by require_positive_tets=false.
+    orientation != parent_orientation && ((a, b) = (b, a))
     @inbounds begin
         tetrahedra[1, column] = a
         tetrahedra[2, column] = b
@@ -258,6 +258,8 @@ function _refined_tetrahedra(mesh::Mesh, remap::Vector{Int32},
         b = _remapped(remap, mesh.tets[2, parent])
         c = _remapped(remap, mesh.tets[3, parent])
         d = _remapped(remap, mesh.tets[4, parent])
+        parent_orientation = orient3(_point(coords, a), _point(coords, b),
+                                     _point(coords, c), _point(coords, d))
         mab = _midpoint(midpoint_ids, a, b)
         mbc = _midpoint(midpoint_ids, b, c)
         mca = _midpoint(midpoint_ids, c, a)
@@ -275,8 +277,8 @@ function _refined_tetrahedra(mesh::Mesh, remap::Vector{Int32},
         base = 8(parent - 1)
         for child in 1:8
             column = base + child
-            _write_positive_tet!(tetrahedra, column, children[child], coords,
-                                 parent, child)
+            _write_oriented_tet!(tetrahedra, column, children[child], coords,
+                                 parent, child, parent_orientation)
             tags[column] = mesh.tet_tag[parent]
         end
     end
@@ -286,13 +288,16 @@ end
 """
     refine_uniform(mesh::Mesh;
                    max_nodes::Integer=typemax(Int32),
-                   max_cells::Integer=typemax(Int32)) -> Mesh
+                   max_cells::Integer=typemax(Int32),
+                   require_positive_tets::Bool=true) -> Mesh
 
 Uniformly refine every linear simplex in `mesh` once. Unreferenced input nodes
 are removed first. Referenced original nodes retain their relative order, and
 one shared midpoint is appended for every undirected edge in lexicographic edge
 order. Parent segments, triangles and tetrahedra produce 2, 4 and 8 children,
-with the parent's tag copied to every child.
+with the parent's tag and orientation copied to every child. Setting
+`require_positive_tets=false` admits negatively oriented input tetrahedra while
+preserving their orientation in the result.
 
 The input and result must satisfy [`MeshTypes.validate`](@ref). Output resource
 counts are checked before output allocation: `max_nodes` bounds the final node

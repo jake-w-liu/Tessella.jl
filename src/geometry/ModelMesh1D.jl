@@ -89,7 +89,7 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
     # bounds play upstream (a free cylinder/sphere/cone must not shrink lc).
     for cyl in values(m.cylinders)
         c=cyl.center; ax=cyl.axis; r=cyl.radius
-        n=norm((ax[1],ax[2],ax[3]))
+        n=hypot(ax[1],ax[2],ax[3])
         n>0 || continue
         u=(ax[1]/n,ax[2]/n,ax[3]/n); h=cyl.height/2
         for s in (-1,1)
@@ -101,7 +101,7 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
         grow!((c[1]-r,c[2]-r,c[3]-r)); grow!((c[1]+r,c[2]+r,c[3]+r))
     end
     for cone in values(m.cones)
-        c=cone.center; ax=cone.axis; n=norm((ax[1],ax[2],ax[3]))
+        c=cone.center; ax=cone.axis; n=hypot(ax[1],ax[2],ax[3])
         n>0 || continue
         u=(ax[1]/n,ax[2]/n,ax[3]/n); h=cone.height/2
         for s in (-1,1)
@@ -118,6 +118,73 @@ function _model_mesh_lc(m::GeoModel, geometry_tolerance::Float64,
     bbox=_model_mesh_bbox(m,caller)
     # `FinishUpBoundingBox` padding + diagonal — shared with the field builder.
     return _gmsh_bbox_characteristic_length(bbox,geometry_tolerance)
+end
+
+# `_ModelMesh1DOptions` for the model-API path (`mesh_model_surface` and
+# friends): upstream `CTX` defaults where the `.geo` context would supply
+# option values — `MeshSizeMin` 0, `MeshSizeMax` 1e22, `MeshSizeFromPoints` 1,
+# `MeshSizeFromCurvature` 0, `LcIntegrationPrecision` 1e-9, `MinLineNodes` 2,
+# `MinCircleNodes` 7, `MinCurveNodes` 3, `ToleranceEdgeLength` 0,
+# `Geometry.Tolerance` 1e-8, `MaxRetries` 10. There is no model-level field
+# store (`inner_field`) and no Msg channel — warning/error sinks stay
+# `nothing`, so upstream's print-and-continue paths continue silently.
+function _model_default_mesh1d_options(m::GeoModel,caller::AbstractString)
+    geometry_tolerance=1e-8
+    return _ModelMesh1DOptions(
+        _model_mesh_lc(m,geometry_tolerance,caller),
+        0.0,1e22,m.meshing.lc_factor,
+        true,0.0,1e-9,
+        2,7,3,0.0,geometry_tolerance,
+        false,false,10,
+        nothing,m.meshing.size_callback,
+        nothing,nothing)
+end
+
+# Curves a `_model_mesh_curve!` `:pending` result may be waiting on — the
+# periodic master and the dim-1 extrusion source (a point-generatrix source
+# has no curve dependency).
+function _model_curve_mesh_dependencies(m::GeoModel,curve::Integer)
+    deps=Int[]
+    constraint=get(m.periodic,(1,Int(curve)),nothing)
+    constraint!==nothing && push!(deps,Int(abs(constraint.master_entity)))
+    src=get(m.meshing.extrude_sources,(1,Int(curve)),nothing)
+    src!==nothing && src[1]==1 && push!(deps,abs(src[2]))
+    return deps
+end
+
+# Lazily run `meshGEdge` for boundary curves a `mesh_model_surface` call
+# still lacks stored discretizations for — upstream `generate(2)` runs the
+# whole `Mesh1D` pass first, so `meshGFace` always finds
+# `GEdge::mesh_vertices` populated. Periodic masters and extrusion sources
+# join the pending set (upstream's global pass reaches them too); curves
+# that stay PENDING past `Mesh.MaxRetries` keep no stored parameters, like
+# upstream's silently-starved status.
+function _model_surface_mesh_curves!(m::GeoModel,curves,caller::AbstractString)
+    pending=Set{Int}()
+    for curve in curves
+        haskey(m.curve_params,Int(curve)) || push!(pending,Int(curve))
+    end
+    isempty(pending) && return nothing
+    options=_model_default_mesh1d_options(m,caller)
+    for _ in 1:options.max_retries
+        isempty(pending) && break
+        progressed=false
+        for curve in sort!(collect(pending))
+            result=_model_mesh_curve!(m,curve,options,caller)
+            if result===:pending
+                for dep in _model_curve_mesh_dependencies(m,curve)
+                    haskey(m.curve_params,dep) && continue
+                    dep in pending && continue
+                    push!(pending,dep); progressed=true
+                end
+                continue
+            end
+            result===:keep || (m.curve_params[curve]=result)
+            delete!(pending,curve); progressed=true
+        end
+        progressed || break
+    end
+    return nothing
 end
 
 # ── BGM_MeshSize for dim 0/1 entities ────────────────────────────────────────
@@ -1039,12 +1106,38 @@ function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh::Mesh,
     a,b=m.curves[curve]
     a==b && return nothing
     _model_curve_periodic_involved(m,curve) && return nothing
-    entries,_=_curve_parameter_nodes(
+    entries,parameter_tolerance=_curve_parameter_nodes(
         m,mesh,curve,eligible_nodes,eligible_edges,0.0,caller)
+    # Inverse projection drifts a few ulps from the parameter the node was
+    # created at; each face's writeback would ratchet the stored value and the
+    # next face would emit a bitwise-different node — cracking the shared
+    # boundary in a volume PLC. Snap recomputed parameters onto the stored
+    # values so shared nodes keep bitwise-stable parameters; only genuinely
+    # new subdivisions contribute new entries.
+    existing=get(m.curve_params,curve,nothing)
+    if existing!==nothing
+        entries=[begin
+            parameter=entry[1]
+            match=findfirst(value->abs(value-parameter)<=parameter_tolerance,
+                            existing)
+            match===nothing || (parameter=existing[match])
+            # A stored value within endpoint tolerance still denotes the
+            # endpoint — mapping an exact 0/1 entry back onto 1−eps would
+            # evaluate one ulp off the shared corner and crack the boundary.
+            parameter<=parameter_tolerance && (parameter=0.0)
+            1-parameter<=parameter_tolerance && (parameter=1.0)
+            (parameter,entry[2])
+        end for entry in entries]
+    end
     m.curve_params[curve]=Float64[entry[1] for entry in entries]
     @inbounds for (parameter,node) in entries
         protected_nodes[node] && continue
-        point=_periodic_curve_point(m,curve,parameter,caller)
+        # Endpoints carry the model points bitwise — `p + 1·(q−p)` evaluates
+        # one ulp off and would crack the boundary shared with the adjacent
+        # face, which emits the corner's stored coordinates.
+        point=parameter==0.0 ? m.points[a] :
+              parameter==1.0 ? m.points[b] :
+              _periodic_curve_point(m,curve,parameter,caller)
         mesh.coords[1,node]=point[1]
         mesh.coords[2,node]=point[2]
         mesh.coords[3,node]=point[3]

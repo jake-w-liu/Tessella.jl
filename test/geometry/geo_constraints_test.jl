@@ -252,7 +252,7 @@ end
     @test meshing.recombine[(2,1)]==30.0
     @test meshing.smoothing[(2,1)]==4
     @test meshing.algorithm[(2,1)]==6
-    @test meshing.size_from_boundary[(2,1)]
+    @test meshing.size_from_boundary[(2,1)]==1
 
     # Default recombine angle is 45; `(int)` truncation applies to the angle.
     execution=_execute_constraint_source(_GEO_SQUARE * raw"""
@@ -282,12 +282,14 @@ end
     @test meshing.smoothing[(2,1)]==2
     @test meshing.smoothing[(2,2)]==2
 
-    # `MeshSizeFromBoundary = 0` clears the flag.
+    # `MeshSizeFromBoundary = 0` stores the verbatim 0 — upstream
+    # `getMeshSizeFromBoundary` resolves it to "do not extend", so the record
+    # carries the disable, not a deletion back to the enabled default.
     execution=_execute_constraint_source(_GEO_SQUARE * raw"""
         MeshSizeFromBoundary Surface{1} = 1;
         MeshSizeFromBoundary Surface{1} = 0;
         """)
-    @test !haskey(execution.model.meshing.size_from_boundary,(2,1))
+    @test execution.model.meshing.size_from_boundary[(2,1)]==0
 
     # MeshAlgorithm/MeshSizeFromBoundary only exist for surfaces in the .geo
     # grammar; other dimensions are syntax errors upstream.

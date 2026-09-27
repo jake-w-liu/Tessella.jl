@@ -87,3 +87,120 @@ end
         api.finalize()
     end
 end
+
+@testset "reversed volume refinement keeps entity classification" begin
+    api=Tessella.API
+    orientation(mesh)=Int[Tessella.Predicates.orient3(
+        (Tessella.MeshTypes.node(mesh,mesh.tets[j,i]) for j in 1:4)...)
+        for i in axes(mesh.tets,2)]
+    try
+        for reverse_all in (true,false)
+            api.initialize()
+            api.model.add_box(0,0,0,1,1,1)
+            api.mesh.generate(3)
+            reverse_all ? api.mesh.reverse() : api.mesh.reverse_elements([1])
+            original=api.mesh.get()
+            signs=orientation(original)
+            projected=api._classification_skeleton(original,true)
+            @test validate(projected).ok
+            @test orientation(original)==signs
+            @test projected.coords==original.coords
+            @test projected.tet_tag==original.tet_tag
+            refined=api.mesh.refine()
+            @test orientation(refined)==repeat(signs;inner=8)
+            @test api.mesh.get_element_types(3,1)==Int32[4]
+            @test length(api.mesh.get_elements_by_type(4,1)[1])==size(refined.tets,2)
+            @test !isempty(api.mesh.get_nodes(0,1)[1])
+            @test validate(refined;require_positive_tets=false).ok
+        end
+    finally
+        api.finalize()
+    end
+end
+
+@testset "boundary size extension option accepts integer flags" begin
+    api=Tessella.API
+    try
+        api.initialize()
+        for (input,expected) in ((0.,0.),(.75,0.),(-1.9,-1.),(2.9,2.),(1.,1.))
+            @test api.option("Mesh.MeshSizeExtendFromBoundary",input)==expected
+            @test api.option("Mesh.MeshSizeExtendFromBoundary")==expected
+        end
+        before=api.option("Mesh.MeshSizeExtendFromBoundary")
+        for value in (true,NaN,Inf,Float64(typemax(Int32))+1)
+            @test_throws ArgumentError api.option("Mesh.MeshSizeExtendFromBoundary",value)
+            @test api.option("Mesh.MeshSizeExtendFromBoundary")==before
+        end
+        api.option("Mesh.MeshSizeExtendFromBoundary",0)
+        api.model.add_box(0,0,0,1,1,1)
+        @test validate(api.mesh.generate(3)).ok
+        @test api.CURRENT[].meshing.lc_extend_from_boundary==0
+    finally
+        api.finalize()
+    end
+end
+
+@testset "boundary extension resolution honors 0 and negative modes" begin
+    api=Tessella.API
+    resolve=Tessella.Model._resolved_extend_from_boundary
+    function square_model()
+        api.initialize()
+        api.model.add_point(0,0,0)
+        api.model.add_point(1,0,0)
+        api.model.add_point(1,1,0)
+        api.model.add_point(0,1,0)
+        api.model.add_line(1,2)
+        api.model.add_line(2,3)
+        api.model.add_line(3,4)
+        api.model.add_line(4,1)
+        api.model.add_curve_loop(collect(1:4))
+        api.model.add_plane_surface([1])
+        return api.CURRENT[]
+    end
+    # A stored per-entity flag resolves verbatim: 0 disables even while the
+    # global default enables; a negative record defers to the global like
+    # upstream's unset -1.
+    try
+        m=square_model()
+        api.mesh.set_size_from_boundary(2,1,0)
+        @test m.meshing.size_from_boundary[(2,1)]==0
+        @test resolve(m,2,1)==0
+        api.mesh.set_size_from_boundary(2,1,2)
+        @test resolve(m,2,1)==2
+        api.mesh.set_size_from_boundary(2,1,-1)
+        @test resolve(m,2,1)==1
+        @test_throws ArgumentError api.mesh.set_size_from_boundary(2,1,0.5)
+        @test_throws ArgumentError api.mesh.set_size_from_boundary(3,1,1)
+    finally
+        api.finalize()
+    end
+    # With no per-entity record the surface falls back to the global — an
+    # explicit per-entity 0 still overrides an enabled global. OPTIONS only
+    # mirrors into `m.meshing.lc_extend_from_boundary` at generate time, so
+    # the model field is set directly here (the generate-level sync is
+    # covered by the mesh check below).
+    for mode in (0,-2,-3)
+        try
+            m=square_model()
+            m.meshing.lc_extend_from_boundary=mode
+            @test resolve(m,2,1)==mode
+            api.mesh.set_size_from_boundary(2,1,0)
+            @test resolve(m,2,1)==0
+            delete!(m.meshing.size_from_boundary,(2,1))
+            @test resolve(m,2,1)==mode
+        finally
+            api.finalize()
+        end
+    end
+    # Disabled extension still meshes — the global 0 option mirrors into the
+    # model at generate time and reaches the surface path.
+    try
+        m=square_model()
+        api.option("Mesh.MeshSizeExtendFromBoundary",0)
+        api.mesh.set_size_from_boundary(2,1,0)
+        @test validate(api.mesh.generate(2)).ok
+        @test m.meshing.lc_extend_from_boundary==0
+    finally
+        api.finalize()
+    end
+end

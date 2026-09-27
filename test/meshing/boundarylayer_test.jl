@@ -47,6 +47,14 @@ function _bl_mixed_volumes(m)
     return vp,vt
 end
 
+function _bl_interface_faces(m,nt)
+    prisms=only(b.nodes for b in m.blocks if b.msh==6)
+    tets=only(b.nodes for b in m.blocks if b.msh==4)
+    caps=Set(Tuple(sort(collect(f))) for f in eachcol(prisms[4:6,end-nt+1:end]))
+    boundary=Set(Tuple(sort(collect(f))) for f in first(Tessella.MeshTypes.boundary_faces(tets)))
+    return caps,boundary
+end
+
 @testset "prismatic boundary layer" begin
     # Unit square in z=0, two triangles.
     coords=Float64[0 1 1 0; 0 0 1 1; 0 0 0 0]
@@ -123,6 +131,7 @@ end
     wall=Tessella.Geometry.box_surface(0.,1.,0.,2.,0.,3.)
     filled=mesh_boundary_layer_filled(wall;hwall=hw,ratio=1.5,nlayers=1)
     @test validate(filled).ok
+    @test ==(_bl_interface_faces(filled,ntris(wall))...)
     @test filled.coords[:,9]≈hw*Float64[3,3,2]/sqrt(22) atol=8eps(Float64)
     prism_volume,tet_volume=_bl_mixed_volumes(filled)
     @test prism_volume>0 && tet_volume>0
@@ -396,6 +405,39 @@ end
     capids=Set(2nv+1:3nv)
     tetnodes=Set(Int(tets.nodes[i,c]) for c in axes(tets.nodes,2), i in 1:4)
     @test capids ⊆ tetnodes
+    @test ==(_bl_interface_faces(m,ntris(cube))...)
+
+    # Recovery feature tests must use cap identities after volume node sorting.
+    cap=Mesh(m.coords[:,2nv+1:3nv];tris=cube.tris)
+    core=Mesh(m.coords;tets=tets.nodes)
+    permutation=reverse(1:size(core.coords,2))
+    shuffled=Mesh(core.coords[:,permutation];tets=invperm(permutation)[core.tets])
+    @test Tessella.BoundaryLayer._tet_edge_set(core,cap)==
+          Tessella.BoundaryLayer._tet_edge_set(shuffled,cap)
+    @test Tessella.BoundaryLayer._tet_face_set(core,cap)==
+          Tessella.BoundaryLayer._tet_face_set(shuffled,cap)
+
+    # A valid refined core has the same volume and cap area, but its boundary
+    # midpoint nodes cannot meet the unchanged first-order prism caps.
+    refined=Tessella.Refine.refine_uniform(core)
+    cap_keys=Dict(Tuple(cap.coords[:,i])=>2nv+i for i in 1:nv)
+    reason=Ref("")
+    merged=Tessella.BoundaryLayer._merge_fill(refined,cap_keys,3nv,"test",reason)
+    @test merged!==nothing
+    wall_faces=[NTuple{3,Int}[Tuple(Int.(f)) for f in eachcol(cube.tris)]]
+    rejected=Tessella.BoundaryLayer._assemble_and_certify(
+        merged...,refined,m.coords[:,1:3nv],cap.coords,prisms.nodes,
+        cube.tris,2nv,ntris(cube),10_000,wall_faces,[collect(1:ntris(cube))],
+        Set{Int}(),[1.0],"test",reason)
+    @test rejected===nothing
+    @test reason[]=="core boundary does not match the prism cap facets"
+
+    # A through-hole cap has no single interior kernel: the fallback must not
+    # fill its hole with a convex fan when exact interface recovery fails.
+    tunnel=Tessella.Geometry.box_tunnel_surface(0.,3.,0.,3.,0.,1.,1.,2.,1.,2.)
+    facets=NTuple{3,Int32}[Tuple(f) for f in eachcol(tunnel.tris)]
+    @test Tessella.Mesh3D._rb_fan_steiner(tunnel.coords[1,:],tunnel.coords[2,:],
+                                      tunnel.coords[3,:],facets)===nothing
 
     # Annulus: outer solid wall + inner cavity wall.
     outer=Tessella.Geometry.sphere_surface((0.0,0.0,0.0),1.0)

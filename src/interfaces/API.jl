@@ -26,6 +26,7 @@ to Gmsh.
 """
 module API
 
+using ..Predicates: orient3
 using ..Recombine: recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
@@ -71,7 +72,7 @@ using ..Model: _model_entity_known, _model_fresh_element_tag,
               model_discrete_entity, model_discrete_entities, DiscreteEntity,
               classify_surfaces!, compute_homology!, create_geometry!,
               create_topology!
-using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, validate,
+using ..MeshTypes: Mesh, node, nnodes, nsegs, ntris, ntets, validate,
                    boundary_edges
 using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr,
             _geo_signed_gmsh_int_value
@@ -136,6 +137,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.FlexibleTransfinite"=>0.0,
     "Mesh.RecombineAll"=>0.0,
     "Mesh.RecombinationAlgorithm"=>1.0,
+    "Mesh.MeshSizeExtendFromBoundary"=>1.0,
     "Mesh.TransfiniteTri"=>0.0)
 const OPTIONS = copy(DEFAULT_OPTIONS)
 const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
@@ -393,10 +395,10 @@ Get or set one supported process-global mesh option in an initialized session.
 `MeshSizeMin` is nonnegative; `MeshSizeMax`, `MeshSizeFactor`, and its alias
 `CharacteristicLengthFactor` (one upstream `lcFactor` value) are positive;
 the minimum may not exceed the maximum. `Mesh.TransfiniteTri` is 0 or 1 and
-selects the three-sided transfinite surface algorithm. `Mesh.FlexibleTransfinite`
-and `Mesh.RecombineAll` store a truncated integer flag, and
-`Mesh.RecombinationAlgorithm` truncates to 0–4 (out-of-range resets to 0) —
-all three feed the transfinite count rules at `generate` time. Boolean and
+selects the three-sided transfinite surface algorithm. `Mesh.FlexibleTransfinite`,
+`Mesh.RecombineAll`, and `Mesh.MeshSizeExtendFromBoundary` store truncated integer
+flags. `Mesh.RecombinationAlgorithm` truncates to 0–4 (out-of-range resets to 0).
+These options feed meshing policies at `generate` time. Boolean and
 nonfinite values are rejected, and a failed update leaves all options unchanged.
 """
 function option(name::AbstractString)
@@ -431,7 +433,8 @@ function option(name::AbstractString, value::Real)
         elseif key=="Mesh.TransfiniteTri"
             (v==0.0 || v==1.0) || throw(ArgumentError(
                 "API.option: TransfiniteTri must be 0 or 1"))
-        elseif key=="Mesh.FlexibleTransfinite" || key=="Mesh.RecombineAll"
+        elseif key in ("Mesh.FlexibleTransfinite","Mesh.RecombineAll",
+                        "Mesh.MeshSizeExtendFromBoundary")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
         elseif key=="Mesh.RecombinationAlgorithm"
@@ -1282,17 +1285,20 @@ function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
         boundaries,seg_entities,tri_entities,tet_entities)
 end
 
-# Positively-oriented copy of a reversed volume part for classification:
-# reversal swaps the first two nodes of every tet, so the same swap restores
-# the orientation `model_to_mixed` certifies while keeping column order
-# aligned with the merged cache.
+# Classification certifies positive volumes even when the published cache
+# intentionally contains reversed tetrahedra. Preserve node/cell identities,
+# tags and source winding while orienting only this detached projection copy.
 function _classification_skeleton(mesh::Mesh,reversed::Bool)
     (reversed && ntets(mesh)>0) || return mesh
     tets=Matrix{Int32}(mesh.tets)
     @inbounds for cell in axes(tets,2)
-        tets[1,cell],tets[2,cell]=tets[2,cell],tets[1,cell]
+        if orient3(node(mesh,tets[1,cell]),node(mesh,tets[2,cell]),
+                   node(mesh,tets[3,cell]),node(mesh,tets[4,cell]))>0
+            tets[1,cell],tets[2,cell]=tets[2,cell],tets[1,cell]
+        end
     end
-    return Mesh(mesh.coords;tets=tets)
+    return Mesh(mesh.coords;segs=mesh.segs,tris=mesh.tris,tets=tets,
+                seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,tet_tag=mesh.tet_tag)
 end
 
 # Merge per-entity classified meshes into one shared-node mesh plus a merged
@@ -1648,6 +1654,8 @@ function _generate(dim::Integer)
         m.meshing.recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"])
         m.meshing.recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"])
         m.meshing.transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"])
+        m.meshing.lc_extend_from_boundary=Int(
+            OPTIONS["Mesh.MeshSizeExtendFromBoundary"])
         size_field=_session_size_field_locked(m)
         parts=Tuple{Int,Mesh}[]
         if dimension==2
@@ -3688,7 +3696,8 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
             nothing
         elseif length(class.entities)<=1
             _classify_cached_mesh(
-                m,refined,class.entity[1],Int(class.entity[2]),cache)
+                m,_classification_skeleton(refined,true),
+                class.entity[1],Int(class.entity[2]),cache)
         else
             _inherit_refined_classification(class,refined,cache)
         end
@@ -8141,8 +8150,10 @@ set_size_at_parametric_points(dim,tag,parametric_coord,sizes)=
     set_size_from_boundary(dim, tag, val)
 
 Record whether the interior mesh size of `Surface[tag]` extends its boundary
-sizes, matching Gmsh's `setSizeFromBoundary`. Only `dim == 2` is supported, as
-upstream.
+sizes, matching Gmsh's `setSizeFromBoundary`. `val` stores an integer flag —
+`0` disables, a positive value enables, and a negative value defers to the
+global `Mesh.MeshSizeExtendFromBoundary` option, like upstream's unset
+default. Only `dim == 2` is supported, as upstream.
 """
 set_size_from_boundary(dim,tag,val)=_set_size_from_boundary(dim,tag,val)
 

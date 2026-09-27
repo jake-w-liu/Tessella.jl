@@ -8,7 +8,8 @@ ASCENT integration and the external HFSS full-wave campaign are tracked separate
 The original Stage 0–6 simplex-mesher roadmap is complete and remains the regression
 baseline. The active roadmap now targets independent Gmsh 4.15.2 parity and is **not
 complete**. Work is ordered by ASCENT meshing value before UI and post-processing.
-The active package and verification contract supports Julia 1.12.x only. Older
+The active package and verification contract supports Julia 1.12.x and 1.13.x,
+with byte-identical mesh output verified across both lines. Older
 runtime measurements retained in the dated history below are provenance, not current
 support or test requirements.
 
@@ -29,7 +30,7 @@ support or test requirements.
 | P1 | **IN PROGRESS** | Native scalar/anisotropic catalog, strict `.geo` field graph with injected model/view context, Gmsh-style 1-D policy, model-level `.geo` `Mesh 0`/`Mesh 1` grading with stored `curve_params` discretizations feeding 2-D/3-D boundaries, and field/entity-aware 2-D, surface, and 3-D refinement |
 | P2 | **IN PROGRESS** | 125 fixed-node Gmsh types with canonical family/order lookup and detached property metadata plus ten serializable cut/border/child/sub-element records, mixed blocks/entities/classification/dimension-0:3 periodic and embedded-curve metadata, structural validation/CRC, ASCII/binary MSH v2.2/v4.1 read/write with cumulative repeated-node/periodic sections and persistent MSH2 elementary ownership, verbatim ancillary/unknown-section and tag-remapped view-data preservation, structural `$PartitionedEntities`/`$GhostElements` metadata on `MixedMesh`, 4- and 8-byte binary `size_t` decoding plus `size_t_bytes=4` Tessella-only MSH4 binary output, classified surface/explicit-shell/embedded-volume model-to-mixed projection, owned entity names, visibility/color state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization |
 | P3 | **IN PROGRESS** | Native analytical surfaces/imprints, classified ISO-10303-21 STEP/IGES box/sphere/cylinder/cone import, STEP/IGES NURBS curve and surface import with IGES export, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Circle/Ellipse/Spline/BSpline/Bezier/Nurbs/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, N-way multi-operand BooleanDifference/Union/Intersection/Fragments with OCC membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder/Sphere/Cone/Torus/Boolean `.geo` solids materializing their Gmsh 4.15.2 OCC boundary layouts (Cylinder/Sphere/Cone behind retained compact encodings for the analytic mesher), Translate/Dilate/90°-Rotate and straight-curve or planar-surface periodic `.geo` execution, mesh Boolean CSG, and finalized-mesh affine transforms |
-| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, `Mesh.FlexibleTransfinite` count scaling by `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` with the recombined-boundary odd-count rule, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and chains or cycles, synchronized planar periodic boundary surfaces on explicit volumes, stored mesh-inert periodic volume relations as a Tessella extension (Gmsh's `setPeriodic` silently ignores dimension 3), expression/list-backed `.geo` periodic entities and transforms with orientation-only curve forms and edge-counterpart surface maps, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
+| P4 | **IN PROGRESS** | Greedy and Edmonds-blossom surface recombination with optional full-quad, Point/Line-In-Surface embeddings, Point/Line/Surface-In-Volume recovery with nested constraints and holed planar sheets, explicit planar shell/cavity volumes, holed plane surfaces, piecewise-linear planar Point-size propagation, uniform refinement, Progression/Bump/Beta curve laws and HWall variants, `Mesh.FlexibleTransfinite` count scaling by `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` with the recombined-boundary odd-count rule, planar triangle/quad transfinite patches including recombined three-sided layouts, affine five-/six-face transfinite volumes, recombined hexahedra, prismatic 3-D layers with certified remaining-core fill/cavity walls, 2-D quad/fan layers, general-affine periodic node-pair certification/snapping, persistent native straight-curve relations for boundary or embedded curves with reusable masters and chains or cycles, synchronized planar periodic boundary surfaces on explicit volumes under translation and general affine (rotation) transforms with surface-derived curve masters matching upstream `setMeshMaster`, stored mesh-inert periodic volume relations as a Tessella extension (Gmsh's `setPeriodic` silently ignores dimension 3), expression/list-backed `.geo` periodic entities and transforms with orientation-only curve forms and edge-counterpart surface maps, and classified surface/volume projection with MSH2 cell ownership and supported MSH4 periodic/embedding metadata |
 | P5–P6 | **IN PROGRESS** | Synchronized model/mesh API with detached cache, session-independent fixed element type/property, bounded fixed-family quadrature and actual- and explicit-order nodal reference functions, atomic whole-cache uniform refinement, affine transformation, and clearing, detached bulk/connectivity-derived data and automatic/manual global edge/triangular/quadrangular-face catalogs, hierarchical H1 bases at orders 1:15 over Point, Line, Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism families and hierarchical H(curl) bases at orders 0:11 on Line/Triangle/Tetrahedron and 0:10 on Quadrangle/Hexahedron/Prism, lexicographic orientations, and vertex/edge/face/bubble keys, plus robust cached simplex point-location, local-coordinate, forward-map/Jacobian, and element-quality queries, deterministic topology/spatial/type/plane-property/nonpartition queries, Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization, owned visibility/color/attribute state, finite Point-coordinate updates, entity-name/tag/removal lifecycle, Physical-group queries, Point `set_size`, owned Boolean deletion, deterministic contiguous-block task partitioning for detached bulk/connectivity-derived, Jacobian, orientation, and element-quality queries, and periodic-map ownership, non-destructive bounded CLI with periodic/embedded surfaces, embedded volumes, and periodic explicit-shell metadata output, validated headless GUI, owned scalar nodal views, synchronized in-process plugins, plus expression- and numeric-list-backed geometry/entity lists, explicit model-topology, entity-identity/removal, spatial-query, native-metadata, native-evaluation, presentation-state, cached-refinement/affine-transform lifecycle, fixed element type/property, fixed-family quadrature, actual- and explicit-order nodal lookup, bulk/derived mesh-data, automatic/manual global edge/face topology, all-family hierarchical basis/orientation/key queries, point-location, Jacobian/reference-map, and element-quality checks, spatial and explicit-topology Point mesh sizes, topology-derived Physical groups, global automatic Physical tags, tracked tag allocators and `SetMaxTag`, t1-square, t4-hole, classified Point/Line-In-Surface, nested and holed Surface-In-Volume, and explicit Surface Loop/Volume MSH lifecycles, native/projected single-/two-direction, embedded, reusable-master/chained, and expression/list-backed periodic checks, planar periodic explicit-volume boundaries, low-level translation/rotation-periodic checks, 2-D boundary-layer quad, API-box, OCC-cylinder/cone, IGES-128 bilinear, Boolean snapshot/Delete, whole-mesh affine, element-catalog, mesh-query, mesh-entity-topology, mesh-point-location, mesh-Jacobian, mesh-quadrature, mesh-function-space, mesh-element-quality, MSH-section-preservation, MSH-partition-metadata, and MSH-size_t-width Gmsh 4.15.2 differentials, plus discrete-entity storage with `add_discrete_entity`, tag-addressed `add_nodes`/`add_elements`/`add_elements_by_type` records, model-file `import_stl`, mesh-record `create_topology`, dihedral-angle `classify_surfaces`, chord/PCA `create_geometry` with discrete evaluation, GF(2) simplicial `compute_homology` chain generators in new physical groups, element-wise `compute_cross_field` on a session view store, the `mesh.field` submodule (MathEval/Distance/Threshold composition, background and boundary-layer fields, removal semantics) consumed by 2-D/3-D generators, generator consumption of per-entity meshing attributes (transfinite curves/surfaces/volumes, recombine flags, algorithms, smoothing steps, order-2 high-order overlay, reverse and outward orientation, compound entity merging, parametric-point sizes, boundary point-size propagation, and size callbacks), record-based `recombine`/`split_quadrangles` quadrangle round trips, `get_periodic_keys` function-space pairing, entity-scoped `optimize` with Gmsh method names, multi-entity `generate`, and Gmsh-parity empty-cache query semantics |
 
 P1 does not claim 3-D multi-wall boundary-layer fans, the full Gmsh automatic-sizing
@@ -508,6 +509,90 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-verified on 2026-09-27 with Julia 1.13.0 and 1.12.7 after completing the
+embedded-recovery determinism and API-review repair increment:
+
+- `recover_triangle3`/`recover_segment3` now converge on holed and foreign-
+  vertex embedded sheets: covering faces are registered in the protected-cell
+  registry every iteration, pocket dispatch processes all distinct pockets per
+  pass, graft candidates require strict 2-D enclosure with no cavity vertex on
+  their edges or interior (vertex-on-face legality, matching `inside_cavity`'s
+  rule), an unseeded pool fill covers pockets with no clean seed face, and a
+  monotone-coverage acceptance gate rejects any fill or insertion that
+  regresses target coverage — eliminating the oscillation the registry alone
+  could not prevent. Sheet fills pass `soft_keepfaces=true` so coverage, not
+  constraint count, is the progress measure; curve recovery keeps hard
+  constraints.
+- Output is byte-identical across Julia 1.12.7 and 1.13.x on every exercised
+  fixture after sorting every `Dict`/`Set` iteration that influences output
+  order: the refinement edge queue and deferred requeue, CDT region and
+  missing-crease order, piercing-candidate edges, exact-Delaunay cavity faces,
+  segment-cavity boundary faces with a `claimseq` DFS ledger, cavity-growth
+  incidence, and the sheet gap edge set.
+- `mesh_model_volume` now scopes the task-local protected-cell registry:
+  emptied on entry and in `finally`. A registry left populated by an earlier
+  call in the same task previously leaked foreign keep-constraints into
+  `refine_to_size`'s cavity splits — same canonical `mesh_crc`, different raw
+  cell order, different `mixed_crc` per process. Verified by poisoning the
+  registry before `execute_geo`: the projected mesh still produces the
+  expected `ffd2559d…` CRC.
+- `Mesh.MeshSizeExtendFromBoundary` stores integer semantics; the documented
+  `0` disable setting is accepted and distinguishable from an absent value,
+  and float inputs truncate toward integers. Reversed-volume refinement
+  preserves parent orientation and `tet_tag`, and the classification skeleton
+  carries segments, triangles, and tags through.
+- Focused gates green: `mesh3d` 146,746/146,746 on both versions, closure-
+  boxing audit 76/76, refinement-classification 18/18, `.geo` constraints
+  suite clean. A full `Pkg.test()` under Julia 1.13 on this final tree is
+  still pending — earlier suite runs surfaced only stale-precompile failures
+  that each reproduce expected values on current code; see HANDOFF.md.
+
+Re-verified on 2026-09-26 with Julia 1.13.0 against the pinned Gmsh 4.15.2
+binary and vendored 4.15.2 source after completing the periodic explicit-volume
+conformity increment and the 2-D/3-D interior-density work beneath it:
+
+- `Periodic Surface` declarations now install derived curve masters per
+  resolved boundary pair, matching `GFace::setMeshMaster`'s per-edge
+  `GEdge::setMeshMaster` calls — the same induced pairs the pinned binary logs
+  as "Setting curve master". Slave curves mirror master `curve_params`
+  positionally instead of grading independently, and `ModelPeriodicConstraint`
+  carries a `derived` flag so `model_periodic_constraints` still reports only
+  declared relations while the internal graph sees the full upstream set.
+- Slave curve evaluation routes through the stored master-parameter pairing
+  (`affine(master(u_paired))`), so adjacent native faces and periodic copies
+  emit bitwise-identical boundary nodes; cyclic dim-1 relations detect the
+  closing chain and evaluate natively instead of composing affines around the
+  cycle. Periodic-surface boundary nodes are emitted through each slave
+  curve's own relation — upstream `copyMesh` semantics — while slave endpoints
+  keep their model `GVertex` coordinates (upstream behavior; the affine snap
+  applies to interior nodes only).
+- `mesh_curve` pins open-curve endpoint parameters to `t0`/`t1` — the
+  inversion at `total*nedge/nedge` rounded below `total` and produced `1−ε`
+  params that wrote back as 1-ulp-duplicate corner nodes. Writeback and PSLG
+  emission normalize near-endpoint stored parameters so stale `1−ε` entries
+  cannot demote a true endpoint.
+- The surface PSLG builders record canonical `(u,v)→3-D` coordinates for
+  entity-derived vertices and snap lifted output nodes to them, closing the
+  per-face `_plane_dropped_coordinate` bitwise divergence that cracked shared
+  curves on explicit-volume shells.
+- `_model_projection_boundary_surface_faces!` accepts near-coplanar faces
+  under a scale-relative plane-offset tolerance alongside exact `orient3==0`,
+  admitting affine-copied slave nodes sitting ~1 ulp off the rotated model
+  plane.
+- The rotated explicit periodic cube (`Periodic Surface 4 ← 6 Rotate π`
+  about the volume center) meshes natively and validates: 138 nodes/459 tets,
+  `validate` clean; the translational fixture meshes 142 nodes/484 tets.
+  Slave periodic surfaces carry 21 nodes each — matching the pinned binary's
+  `.msh` output (4 corners + 8 curve + 8 interior + 1 embedded) — and each
+  rotation variant pins its own connectivity CRC since Gmsh's own rotated run
+  produces different connectivity than the translated one.
+- Supporting repairs in the same increment: `mesh_curve`/`_invert_primitive`
+  endpoint pinning, `norm`→`hypot` in `_model_mesh_bbox`, a restored
+  `_model_surface_plane` gate before lazy curve grading so corrupt curved
+  geometry still rejects with `ArgumentError`, boxed-closure audit fixes via
+  a callable LL-resolver struct and single-assignment captures, and the
+  guarded all-zero-subvolume branch in `_insert_steiner3`.
 
 Re-verified on 2026-09-25 with Julia 1.13.0 against the pinned Gmsh 4.15.2
 binary and vendored 4.15.2 source after completing the native model-level

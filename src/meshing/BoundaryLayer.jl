@@ -16,7 +16,7 @@ using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, triangle_area, tet_volume,
 using ..Elements: ElementBlock, MixedMesh, validate
 using ..Predicates: orient2, orient3
 using ..Mesh3D: delaunay3d, to_mesh3, recover_segment3, recover_triangle3,
-                _raygrid, _inside_grid
+                _raygrid, _inside_grid, _rb_fan_steiner
 using ..RecoverCDT: recover_boundary_cdt
 
 export mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled
@@ -778,9 +778,10 @@ interior, and **away from** it for walls listed in `cavities` (1-based wall
 indices, i.e. interior holes) — then tetrahedralize the remaining core behind
 the last layer and merge interface nodes onto the prism-stack numbering.
 
-The core is filled by a two-stage ladder: an exact-coordinate Float64 Delaunay
+The core is filled by a bounded ladder: an exact-coordinate Float64 Delaunay
 path for Delaunay-friendly caps (flat/mostly-planar walls) under a hard Steiner
-budget, then an exact-rational conforming-recovery pass for harder caps. Both
+budget, an interior-kernel fan for star-shaped caps, then an exact-rational
+conforming-recovery pass for harder caps. All
 stages are held to the same independent certificates; whichever succeeds first
 is returned.
 
@@ -788,8 +789,8 @@ The returned mesh is certified before return:
 
 - every wall vertex survives recovery and merges into one shared node per cap
   position, so prisms and core tets conform with no cracks;
-- the recovered tetrahedron boundary tiles the offset caps exactly (equal total
-  area to 1e-9 relative);
+- the recovered tetrahedron boundary has exactly the prism cap's triangular
+  faces and equal total area to 1e-9 relative;
 - per-wall shell identities `|V(S)| ∓ V(prisms) == |V(cap)|` (minus for solids,
   plus for cavities) and the global fill identity
   `V(tets) == Σ V(solid caps) − Σ V(cavity caps)` hold to 1e-9 relative;
@@ -962,7 +963,29 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
         push!(errors,"float fill: "*sprint(showerror,err))
     end
 
-    # Stage 2 — exact-rational conforming recovery (bit-exact interface).
+    # A fan uses only one interior Steiner point and preserves every cap face.
+    # It is available only when the existing kernel test certifies a connected
+    # star-shaped cap; cavities and non-star-shaped caps proceed to recovery.
+    if result===nothing && nt<=tet_limit
+        reason[]=""
+        facets=NTuple{3,Int32}[(cap.tris[1,t],cap.tris[2,t],cap.tris[3,t]) for t in 1:nt]
+        cand=_rb_fan_steiner(cap.coords[1,:],cap.coords[2,:],cap.coords[3,:],facets)
+        if cand===nothing
+            push!(errors,"star fan: cap has no certified interior kernel")
+        else
+            m=_merge_fill(cand,cap_keys,nout,caller,reason)
+            if m===nothing
+                push!(errors,"star fan: "*reason[])
+            else
+                result=_assemble_and_certify(m...,cand,coords,cap_coords,prisms,
+                    surface.tris,cap_off,nt,tet_limit,wall_faces,comp_tris,
+                    cavity_set,wall_vol,caller,reason)
+                result===nothing && push!(errors,"star fan: "*reason[])
+            end
+        end
+    end
+
+    # Exact-rational conforming recovery (bit-exact interface).
     if result===nothing
         reason[]=""
         try
@@ -1004,24 +1027,33 @@ end
     return (b,c,a)
 end
 
-function _tet_face_set(m)
+function _cap_node_ids(m,cap)
+    ids=Dict(_norm_key(cap.coords[1,i],cap.coords[2,i],cap.coords[3,i])=>Int32(i)
+             for i in axes(cap.coords,2))
+    return [get(ids,_norm_key(m.coords[1,i],m.coords[2,i],m.coords[3,i]),Int32(0))
+            for i in axes(m.coords,2)]
+end
+
+function _tet_face_set(m,cap)
+    ids=_cap_node_ids(m,cap)
     s=Set{NTuple{3,Int32}}()
     @inbounds for t in axes(m.tets,2)
-        v=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])
-        push!(s,_sort3i(v[2],v[3],v[4]))
-        push!(s,_sort3i(v[1],v[3],v[4]))
-        push!(s,_sort3i(v[1],v[2],v[4]))
-        push!(s,_sort3i(v[1],v[2],v[3]))
+        v=(ids[m.tets[1,t]],ids[m.tets[2,t]],ids[m.tets[3,t]],ids[m.tets[4,t]])
+        for (a,b,c) in ((v[2],v[3],v[4]),(v[1],v[3],v[4]),
+                        (v[1],v[2],v[4]),(v[1],v[2],v[3]))
+            min(a,b,c)>0 && push!(s,_sort3i(a,b,c))
+        end
     end
     return s
 end
 
-function _tet_edge_set(m)
+function _tet_edge_set(m,cap)
+    ids=_cap_node_ids(m,cap)
     s=Set{NTuple{2,Int32}}()
     @inbounds for t in axes(m.tets,2)
-        v=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])
+        v=(ids[m.tets[1,t]],ids[m.tets[2,t]],ids[m.tets[3,t]],ids[m.tets[4,t]])
         for (a,b) in ((v[1],v[2]),(v[1],v[3]),(v[1],v[4]),(v[2],v[3]),(v[2],v[4]),(v[3],v[4]))
-            push!(s,a<b ? (a,b) : (b,a))
+            min(a,b)>0 && push!(s,a<b ? (a,b) : (b,a))
         end
     end
     return s
@@ -1045,7 +1077,7 @@ function _float_fill(cap)
     # Hardness gate: smooth/near-cospherical caps lose almost every crease edge
     # in the Delaunay tessellation, while flat caps lose only ambiguous quad
     # diagonals. Defer only in the former case.
-    es=_tet_edge_set(m)
+    es=_tet_edge_set(m,cap)
     nedge=0; miss_e=0
     @inbounds for t in 1:ntri
         for (i,j) in ((1,2),(2,3),(3,1))
@@ -1066,16 +1098,16 @@ function _float_fill(cap)
         size(m.coords,2)-nn>=budget && throw(ErrorException(
             "float fill: Steiner budget exhausted; deferring to exact recovery"))
         m=recover_segment3(m,pt(e[1]),pt(e[2]))
-        es=_tet_edge_set(m)
+        es=_tet_edge_set(m,cap)
     end
-    fs=_tet_face_set(m)
+    fs=_tet_face_set(m,cap)
     @inbounds for t in 1:ntri
         a=Int32(cap.tris[1,t]); b=Int32(cap.tris[2,t]); c=Int32(cap.tris[3,t])
         _sort3i(a,b,c) in fs && continue
         size(m.coords,2)-nn>=budget && throw(ErrorException(
             "float fill: Steiner budget exhausted; deferring to exact recovery"))
         m=recover_triangle3(m,pt(Int(a)),pt(Int(b)),pt(Int(c)))
-        fs=_tet_face_set(m)
+        fs=_tet_face_set(m,cap)
     end
     keep=falses(size(m.tets,2))
     g=_raygrid(cap)
@@ -1169,9 +1201,15 @@ function _assemble_and_certify(remap, newpts, total, fm, stack_coords,
         tets[r,t]=remap[Int(fm.tets[r,t])]
     end
 
-    # Interface tiling: the core boundary must reproduce the cap area exactly.
+    # A first-order prism's triangular cap cannot meet subdivided tet faces:
+    # equal area and shared original vertices still permit hanging nodes.
     bnd,maxinc=boundary_faces(tets)
     maxinc<=2 || (reason[]="non-manifold core (face incidence $maxinc)"; return nothing)
+    cap_faces=Set(_sort3i(Int32(cap_off+surface_tris[1,t]),
+                         Int32(cap_off+surface_tris[2,t]),
+                         Int32(cap_off+surface_tris[3,t])) for t in 1:nt)
+    Set(_sort3i(f...) for f in bnd)==cap_faces ||
+        (reason[]="core boundary does not match the prism cap facets"; return nothing)
     area_bnd=0.0
     @inbounds for f in bnd
         area_bnd+=triangle_area((all_coords[1,f[1]],all_coords[2,f[1]],all_coords[3,f[1]]),
