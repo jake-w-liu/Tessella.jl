@@ -403,8 +403,8 @@ function _delaunay3d_exact_build(pts::Vector{NTuple{3,RB}}, m::RB, D::RB,
             end
         end
         for ti in cav; alive[ti] = false; end
-        @inbounds for (key, c) in fcount
-            c == 1 || continue
+        @inbounds for key in sort!(collect(keys(fcount)))
+            fcount[key] == 1 || continue
             f = fverts[key]
             nt = orient3_rat(X[f[1]], X[f[2]], X[f[3]], p, f[1], f[2], f[3], i) > 0 ?
                  (f[1], f[2], f[3], i) : (f[1], f[3], f[2], i)

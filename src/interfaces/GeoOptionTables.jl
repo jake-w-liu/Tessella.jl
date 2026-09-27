@@ -1030,6 +1030,7 @@ const _GEO_NUMBER_OPTION_STORAGE=Dict{String,Any}(
     "Mesh.MedSingleModel"=>:int,
     "Mesh.MeshOnlyEmpty"=>:int,
     "Mesh.MeshOnlyVisible"=>:int,
+    "Mesh.MeshSizeExtendFromBoundary"=>:int,
     "Mesh.MeshSizeFromCurvatureIsotropic"=>:int,
     "Mesh.MetisAlgorithm"=>:int,
     "Mesh.MetisEdgeMatching"=>:int,

@@ -3,6 +3,7 @@ using Tessella
 using Tessella.MeshTypes: mesh_crc
 using Tessella.Model: model_boundary, model_entities,
                       model_entities_for_physical_group, model_entity_name,
+                      model_physical_groups_for_entity,
                       model_periodic_constraints, model_set_tag!,
                       remove_entity_name!, set_entity_name!
 
@@ -146,6 +147,10 @@ end
     @test model_entities_for_physical_group(model,1,102)==[106,108]
     @test model_entities_for_physical_group(model,2,103)==[121,122]
     @test model_entities_for_physical_group(model,3,104)==[140]
+    @test model_physical_groups_for_entity(model,0,110)==[101]
+    @test model_physical_groups_for_entity(model,1,108)==[102]
+    @test model_physical_groups_for_entity(model,2,121)==[103]
+    @test model_physical_groups_for_entity(model,3,140)==[104]
     @test model_entity_name(model,0,110)=="origin"
     @test model_entity_name(model,1,108)=="base edge"
     @test model_entity_name(model,1,106)=="vertical edge"
@@ -166,6 +171,41 @@ end
     @test after.tet_tag==before_tags
     @test !any(entity->entity in ((0,10),(1,8),(1,6),(2,21),(2,22),(3,40)),
                model_entities(model))
+end
+
+@testset "retag owned Physical state and signed extrusion sources" begin
+    for discrete in (false,true)
+        model=GeoModel()
+        discrete ? Tessella.Model.add_discrete_entity!(model,0,1) :
+                   add_point!(model,0,0,0;tag=1)
+        add_physical_group!(model,0,[1];tag=9)
+        add_physical_group!(model,0,[1];tag=-7,_literal_tag=true)
+        @test model_set_tag!(model,0,1,10)==10
+        @test model_physical_groups_for_entity(model,0,10)==[9,-7]
+        @test !haskey(model.entity_physicals,(0,1))
+        discrete ? Tessella.Model.add_discrete_entity!(model,0,1) :
+                   add_point!(model,2,0,0;tag=1)
+        @test isempty(model_physical_groups_for_entity(model,0,1))
+    end
+
+    for source_sign in (-1,1)
+        model=GeoModel()
+        add_point!(model,0,0,0;tag=1)
+        add_point!(model,1,0,0;tag=2)
+        add_line!(model,1,2;tag=1)
+        parameters=(layers=[2],heights=[1.0],scale_last=false,
+                    recombine=false,quad_to_tri=:none,recomb_laterals=false)
+        result=Tessella.Model.extrude_entities!(
+            model,[(1,source_sign)],(0.0,0.0,1.0);params=parameters)
+        top=result[1]
+        @test model_set_tag!(model,1,1,100)==100
+        @test model.meshing.extrude_sources[(1,top)]==(1,100source_sign)
+        model.curve_params[100]=[0.0,0.25,1.0]
+        options=Tessella.Model._model_default_mesh1d_options(model,"test")
+        @test Tessella.Model._model_curve_extrude_params(
+            model,top,parameters,options,"test")==
+            (source_sign<0 ? [0.0,0.75,1.0] : [0.0,0.25,1.0])
+    end
 end
 
 @testset "embedding source and target retagging" begin
@@ -217,7 +257,13 @@ end
     model_set_tag!(surfaces,2,2,102)
     constraint=only(model_periodic_constraints(surfaces))
     @test (Int(constraint.slave_entity),Int(constraint.master_entity))==(102,101)
-    @test only(keys(surfaces.periodic))==(2,102)
+    # The surface relation also stores its four induced curve masters
+    # internally — `model_periodic_constraints` hides them, the raw dict does
+    # not.
+    @test sort!(collect(keys(surfaces.periodic)))==
+          [(1,5),(1,6),(1,7),(1,8),(2,102)]
+    @test all(c->c.derived,
+              (c for (k,c) in surfaces.periodic if k[1]==1))
     @test model_entities_for_physical_group(surfaces,2,20)==[101,102]
     @test model_entity_name(surfaces,2,101)=="master"
     @test model_entity_name(surfaces,2,102)=="slave"

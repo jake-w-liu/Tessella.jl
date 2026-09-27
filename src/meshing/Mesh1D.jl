@@ -887,6 +887,14 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
         parameters[k + 1] = parameter
         points[k + 1] = _pt3(γ(parameter), "mesh_curve curve")
     end
+    if !closed
+        # The last node is the curve end by construction — `total * nedge /
+        # nedge` can round below `total`, so inversion returns a parameter a
+        # few ulps inside the bound and the evaluated point lands one ulp off
+        # the endpoint, cracking boundaries shared with adjacent entities.
+        parameters[end] = t1
+        points[end] = _pt3(γ(t1), "mesh_curve curve")
+    end
     if !anisotropic_metric
         _filter_close_points!(points, parameters, γ, field, curve_entity,
                               effective_minimum, closed, force_odd,

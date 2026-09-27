@@ -3,6 +3,20 @@ using Tessella
 using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node,
                           mesh_crc
 
+@testset "surface projection retains exact nonzero areas" begin
+    for axes in ((1,2),(1,3),(2,3)),scale in (1e-200,1.0,1e200)
+        first=ntuple(_->0.0,3)
+        second=ntuple(d->d==axes[1] ? scale : 0.0,3)
+        third=ntuple(d->d==axes[2] ? scale : 0.0,3)
+        projection=Tessella.Model._model_surface_projection(
+            [first,second,third],[1,2,3],1,"test")
+        @test projection[4]==axes
+    end
+    points=[(1e200,1e200,0.),(2e200,2e200,0.),(3e200,3e200+4e185,0.)]
+    @test Tessella.Predicates.orient2(points[1],points[2],points[3])!=0
+    @test Tessella.Model._model_surface_projection(points,[1,2,3],1,"test")[4]==(1,2)
+end
+
 @testset "entity model validation and tag semantics" begin
     oriented=GeoModel()
     for (tag,(x,y)) in enumerate(((0,0),(1,0),(1,1),(0,1)))
@@ -28,7 +42,7 @@ using Tessella.MeshTypes: Mesh, ntris, ntets, nnodes, validate, tet_volume, node
     @test validate(reversed_mesh).ok
     @test reversed_area≈1.0 atol=1e-12
     @test mesh_crc(reversed_mesh).sha==
-          "d88d6244f73026b3450f9a4be9a0402160cf86ef41ddc047586c0f889b0955b0"
+          "323796d9f1ea4ab45a39ac650c597d9b4d24912de4c94634c77750da7d5677e1"
 
     loops_before=copy(oriented.loops)
     # Scrambled but chainable members sort into connectivity order like
@@ -294,10 +308,10 @@ end
     mesh=mesh_model_surface(model,1)
     @test validate(mesh).ok
     @test mesh_crc(mesh).sha==
-          "6ea713b4493eeb5b31e7c70ea5312290ef698424fd787bb04f1df4ef55f894cf"
+          "04d814f6154458859d6466b209bd28c8d29e2343d1d3586f3cd36e1538608b75"
     mapping=model_periodic_nodes(model,mesh,1,2)
     @test mapping.master_entity==4
-    @test length(mapping.slave_nodes)==length(mapping.master_nodes)==7
+    @test length(mapping.slave_nodes)==length(mapping.master_nodes)==5
     for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
         @test Tuple(mesh.coords[:,slave])==
               (mesh.coords[1,master]+1,mesh.coords[2,master],mesh.coords[3,master])
@@ -319,8 +333,11 @@ end
         model,1;max_periodic_passes=0)
     @test_throws ArgumentError mesh_model_surface(
         model,1;max_periodic_passes=65)
-    @test_throws ErrorException mesh_model_surface(
-        model,1;max_periodic_passes=1)
+    # With upstream's reject-instead-of-split insertion the boundary
+    # discretization is stable after one pass, so a single synchronization
+    # pass already yields the converged mesh.
+    @test mesh_crc(mesh_model_surface(model,1;max_periodic_passes=1)).sha==
+          mesh_crc(mesh).sha
 
     # A surface containing only one entity from a relation is an explicit
     # blocker: silently meshing it would lose the required correspondence.
@@ -352,7 +369,7 @@ end
     @test !only(model_periodic_constraints(rotation_model)).reversed
     rotation_mesh=mesh_model_surface(rotation_model,1)
     @test mesh_crc(rotation_mesh).sha==
-          "f6ad616e56d52d7e10a598a4079db2de9b3d5f2a777f492f5a2366946d8ea990"
+          "11143057fa2470011462ab4b74708bfc296844cbc5e13d2d1595517a30392070"
     rotation_mapping=model_periodic_nodes(rotation_model,rotation_mesh,1,3)
     @test length(rotation_mapping.master_nodes)==3
     for (slave,master) in zip(rotation_mapping.slave_nodes,
@@ -377,12 +394,12 @@ end
     double_mesh=mesh_model_surface(double_periodic,1)
     @test validate(double_mesh).ok
     @test mesh_crc(double_mesh).sha==
-          "b82c9f0f4e235e90a754f2ec50b3a373ef0a2d514a79194d9b922873e35f8dd1"
+          "0d92847581b777c321d30cbd1dacef4da0f0e2b9c58242c05a91b5cbac64fb49"
     @test length(model_periodic_constraints(double_periodic))==2
     for slave_entity in (2,3)
         double_mapping=model_periodic_nodes(
             double_periodic,double_mesh,1,slave_entity)
-        @test length(double_mapping.slave_nodes)==9
+        @test length(double_mapping.slave_nodes)==5
     end
 
     translate_y03=(1.0,0.0,0.0,0.0,
@@ -404,12 +421,12 @@ end
     branch_mesh=mesh_model_surface(branch,1)
     @test validate(branch_mesh).ok
     @test mesh_crc(branch_mesh).sha==
-          "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+          "9a5503ab32b8725f2c9e739a075f2e45c4b35763439b0ff59a3b2d661d4678ae"
     for (slave_entity,offset) in ((10,0.6),(20,0.3))
         branch_mapping=model_periodic_nodes(
             branch,branch_mesh,1,slave_entity)
         @test branch_mapping.master_entity==30
-        @test length(branch_mapping.slave_nodes)==9
+        @test length(branch_mapping.slave_nodes)==4
         for (slave,master) in zip(branch_mapping.slave_nodes,
                                   branch_mapping.master_nodes)
             @test Tuple(branch_mesh.coords[:,slave])==
@@ -437,12 +454,12 @@ end
     chain_mesh=mesh_model_surface(chain,1)
     @test validate(chain_mesh).ok
     @test mesh_crc(chain_mesh).sha==
-          "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+          "5ff98566e9b7f69de0ce7893a95f413fad48a650081a29ae56f1f61ff092c088"
     for (slave_entity,master_entity) in ((10,20),(20,30))
         chain_mapping=model_periodic_nodes(
             chain,chain_mesh,1,slave_entity)
         @test chain_mapping.master_entity==master_entity
-        @test length(chain_mapping.slave_nodes)==9
+        @test length(chain_mapping.slave_nodes)==3
         for (slave,master) in zip(chain_mapping.slave_nodes,
                                   chain_mapping.master_nodes)
             @test Tuple(chain_mesh.coords[:,slave])==
@@ -453,13 +470,20 @@ end
     end
     closing_mapping=model_periodic_nodes(chain,chain_mesh,1,30)
     @test closing_mapping.master_entity==10
-    @test length(closing_mapping.slave_nodes)==9
-    for (slave,master) in zip(closing_mapping.slave_nodes,
-                              closing_mapping.master_nodes)
-        @test Tuple(chain_mesh.coords[:,slave])==
-              (chain_mesh.coords[1,master],
-               chain_mesh.coords[2,master]-0.6,
-               chain_mesh.coords[3,master])
+    @test length(closing_mapping.slave_nodes)==3
+    for (index,(slave,master)) in enumerate(zip(
+            closing_mapping.slave_nodes,closing_mapping.master_nodes))
+        actual=Tuple(chain_mesh.coords[:,slave])
+        expected=(chain_mesh.coords[1,master],
+                  chain_mesh.coords[2,master]-0.6,
+                  chain_mesh.coords[3,master])
+        # Interior nodes are affine(master) bitwise; endpoints keep the slave
+        # vertex's own coordinates and agree to transform rounding only.
+        if index==1 || index==length(closing_mapping.slave_nodes)
+            @test hypot((actual.-expected)...)<=1e-15
+        else
+            @test actual==expected
+        end
     end
 
     inconsistent=periodic_square()
@@ -473,7 +497,22 @@ end
         0.0,1.0,0.0,1.0,
         0.0,0.0,1.0,0.0,
         0.0,0.0,0.0,1.0))
-    @test_throws ErrorException mesh_model_surface(inconsistent,1)
+    # Declared slack stays at the slave vertices: upstream's copyMesh places
+    # interior slave nodes at affine(master) while endpoints keep their model
+    # coordinates, so a relation inconsistent within its declared tolerance
+    # still meshes (Gmsh logs the transform error as Info and continues).
+    inconsistent_mesh=mesh_model_surface(inconsistent,1)
+    @test validate(inconsistent_mesh).ok
+    inconsistent_mapping=model_periodic_nodes(
+        inconsistent,inconsistent_mesh,1,2)
+    inconsistent_offsets=[
+        maximum(abs.(inconsistent_mesh.coords[:,slave] .-
+                   ([1.0 1e-4 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0] *
+                    inconsistent_mesh.coords[:,master] .+ [1.0,0.0,0.0])))
+        for (slave,master) in zip(inconsistent_mapping.slave_nodes,
+                                  inconsistent_mapping.master_nodes)]
+    @test count(>(1e-15),inconsistent_offsets)==1
+    @test maximum(inconsistent_offsets)<=1e-3
 
     identity=(1.0,0.0,0.0,0.0,
               0.0,1.0,0.0,0.0,
@@ -749,7 +788,7 @@ end
     emesh=mesh_model_surface(emb,1)
     @test validate(emesh).ok
     @test mesh_crc(emesh).sha==
-          "facd37af4b1fc3de41273da4f3c7f1933ae1221512ad9bc09a2a0452f0b7540f"
+          "b395a6354b06674f09ecf4cd464cbb736ca94c61f98a58e8eaae99faf4bdbd55"
     @test any(i->hypot(emesh.coords[1,i]-0.5,emesh.coords[2,i]-0.5,emesh.coords[3,i])<=1e-12,
               1:nnodes(emesh))
     earea=sum(abs((node(emesh,emesh.tris[2,t])[1]-node(emesh,emesh.tris[1,t])[1])*

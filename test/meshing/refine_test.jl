@@ -163,6 +163,32 @@ end
         end
     end
 
+    @testset "admitted negative tetrahedra retain parent orientation" begin
+        coords = Float64[0 1 0 0 0;
+                         0 0 1 0 0;
+                         0 0 0 1 -1]
+        source = Mesh(coords; tets=Int32[1 1; 2 2; 3 3; 4 5],
+                      tet_tag=Int32[41, 42])
+        original_tets = copy(source.tets)
+        @test_throws ArgumentError refine_uniform(source)
+        refined = refine_uniform(source; require_positive_tets=false)
+        @test validate(refined; require_positive_tets=false).ok
+        @test refined.tet_tag == vcat(fill(Int32(41), 8), fill(Int32(42), 8))
+        volumes = _refine_tet_volumes(refined)
+        @test all(>(0), volumes[1:8])
+        @test all(<(0), volumes[9:16])
+        @test sum(volumes[1:8]) ≈ 1 / 6
+        @test sum(volumes[9:16]) ≈ -1 / 6
+        @test source.tets == original_tets
+        @test source.coords == coords
+        repeated = refine_uniform(refined; require_positive_tets=false)
+        @test validate(repeated; require_positive_tets=false).ok
+        repeated_volumes = _refine_tet_volumes(repeated)
+        @test all(>(0), repeated_volumes[1:64])
+        @test all(<(0), repeated_volumes[65:128])
+        @test sum(repeated_volumes[65:128]) ≈ -1 / 6
+    end
+
     @testset "invalid inputs, resource bounds, and Float64 extremes" begin
         source = _refine_unit_fixture()
         inverted = Mesh(source.coords;
@@ -233,14 +259,14 @@ end
         coplanar[1, :] = [0, 1, 0, 1]
         coplanar[2, :] = [0, 0, 1, 1]
         output = Matrix{Int32}(undef, 4, 1)
-        @test_throws ArgumentError Tessella.Refine._write_positive_tet!(
+        @test_throws ArgumentError Tessella.Refine._write_oriented_tet!(
             output, 1, (Int32(1), Int32(2), Int32(3), Int32(4)),
-            coplanar, 1, 1)
+            coplanar, 1, 1, -1)
 
         oriented_coords = Float64[0 1 0 0; 0 0 1 0; 0 0 0 1]
-        Tessella.Refine._write_positive_tet!(
+        Tessella.Refine._write_oriented_tet!(
             output, 1, (Int32(1), Int32(3), Int32(2), Int32(4)),
-            oriented_coords, 1, 1)
+            oriented_coords, 1, 1, -1)
         coordinate_mesh = Mesh(oriented_coords)
         @test tet_signed_volume((node(coordinate_mesh, output[i, 1])
                                  for i in 1:4)...) > 0

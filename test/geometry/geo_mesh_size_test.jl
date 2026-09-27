@@ -129,16 +129,16 @@ end
     topology_meshed=execute_geo(
         _GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE;mesh_dim=3)
     @test validate(topology_meshed.mesh).ok
-    @test nnodes(topology_meshed.mesh)==81
-    @test ntets(topology_meshed.mesh)==243
+    @test nnodes(topology_meshed.mesh)==52
+    @test ntets(topology_meshed.mesh)==119
     @test mesh_crc(topology_meshed.mesh).sha==
-          "555471bac403a465e41575f64021556ef551ad7453688b23177f759c5c773806"
+          "872ca40fdfe6d1e3d15a2719ab2d920c143c541c91c8340bf8994332f9944290"
     topology_projected=model_to_mixed(
         topology_meshed.model,topology_meshed.mesh,3,1)
     @test validate(topology_projected).ok
     @test topology_projected.physical_names==topology.model.physical_names
     @test mixed_crc(topology_projected).sha==
-          "c8c177821f3be94440ae0b754cfc26125d6d59620941191b852aeb0beb7a096c"
+          "0f5319121ae7acf63c3b7fafd337908b92e0c9d8661fb00dad8fa26b93b544ba"
 
     holed_topology=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
@@ -161,10 +161,10 @@ end
 
     meshed=execute_geo(_GEO_POINT_MESH_SIZE_FIXTURE;mesh_dim=2)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==19
-    @test ntris(meshed.mesh)==22
+    @test nnodes(meshed.mesh)==18
+    @test ntris(meshed.mesh)==24
     @test mesh_crc(meshed.mesh).sha==
-          "bc13025a46d55be5f2394351cc56ef2ffa3cb3186a3ce01ce08a84fdb4f69003"
+          "2b17b65bf07655c9f85d24d261375a828a5e0ec3af0f081bfe83ef0064f1d492"
     area=sum(triangle_area(
         node(meshed.mesh,meshed.mesh.tris[1,triangle]),
         node(meshed.mesh,meshed.mesh.tris[2,triangle]),
@@ -175,16 +175,16 @@ end
     @test validate(projected).ok
     @test projected.physical_names==parsed.model.physical_names
     @test mixed_crc(projected).sha==
-          "2add0c7e45789451105f13afc551dd46d47c971db0232e93c53fcb807f86a485"
+          "48716f65a6a9ea3f11e20e74f107cc00aa2efc3bd487c38bc43f5d4c8c0bf2b5"
 
     asymmetric=_point_mesh_size_square([0.1,0.8,0.8,0.8])
     asymmetric_mesh=mesh_model_surface(asymmetric,1;min_angle_deg=20)
     @test validate(asymmetric_mesh).ok
-    @test nnodes(asymmetric_mesh)==49
-    @test ntris(asymmetric_mesh)==72
-    @test _point_mesh_size_quadrants(asymmetric_mesh)==[45,8,11,8]
+    @test nnodes(asymmetric_mesh)==46
+    @test ntris(asymmetric_mesh)==70
+    @test _point_mesh_size_quadrants(asymmetric_mesh)==[44,9,10,7]
     @test mesh_crc(asymmetric_mesh).sha==
-          "b36070c0c394727d037d35cd0d1944e4807208cc265df4c34ad96c6da82ea1e2"
+          "7c2a5f2e374c6666349de1b9d7cbafeedb49c931179c279469d4dbc60f3b2245"
     for triangle in 1:ntris(asymmetric_mesh)
         nodes=asymmetric_mesh.tris[:,triangle]
         points=ntuple(slot->node(asymmetric_mesh,nodes[slot]),3)
@@ -194,7 +194,9 @@ end
         longest=maximum(hypot(
             points[mod1(slot+1,3)][1]-points[slot][1],
             points[mod1(slot+1,3)][2]-points[slot][2]) for slot in 1:3)
-        @test longest<=target
+        # Upstream's refinement bound `R < √2/2·lc` implies `longest ≤ √2·lc`
+        # with `lc` the propagated mean vertex size at the centroid.
+        @test longest<=sqrt(2)*target
     end
 
     xs=[0.0,2.0,2.0,0.0];ys=[0.0,0.0,2.0,2.0]
@@ -252,18 +254,18 @@ end
     embed!(merged,1,[5],2,1)
     merged_mesh=mesh_model_surface(merged,1;min_angle_deg=20)
     @test validate(merged_mesh).ok
-    @test nnodes(merged_mesh)==39
-    @test ntris(merged_mesh)==56
+    @test nnodes(merged_mesh)==26
+    @test ntris(merged_mesh)==38
     @test mesh_crc(merged_mesh).sha==
-          "0b48fd5481d111e3a2f4eb413b327dd3e31c83d6cb9fa29b7c6d37cd1bb102d5"
+          "c8e9914b7f48055d8da36918e6c3cdcfd56cf745f0d33b11b89b97378a4a7a1c"
 
     uniform_mesh=mesh_model_surface(
         _point_mesh_size_square(fill(0.8,4)),1;min_angle_deg=20)
     @test validate(uniform_mesh).ok
-    @test nnodes(uniform_mesh)==23
+    @test nnodes(uniform_mesh)==21
     @test ntris(uniform_mesh)==28
     @test mesh_crc(uniform_mesh).sha==
-          "f1bfa8a1cc61158cc6293540ad6ce6d7ce48054a616a3df57d93597857f1b089"
+          "d110c8a26d1f11a1372b769f8f8e0ecdeaeff98f6df760dd257c910444153230"
 
     periodic=_point_mesh_size_square([0.4,0.8,0.8,0.4])
     set_periodic!(periodic,1,[2],[4],(
@@ -275,9 +277,9 @@ end
     @test validate(periodic_mesh).ok
     periodic_nodes=model_periodic_nodes(periodic,periodic_mesh,1,2)
     @test length(periodic_nodes.slave_nodes)==
-          length(periodic_nodes.master_nodes)==9
+          length(periodic_nodes.master_nodes)==6
     @test mesh_crc(periodic_mesh).sha==
-          "43aa68464111f6c4c6e47faeed3ff94c503597b6bb5420d2916e3c2660215501"
+          "2e7351244f24625d5fe9dabd8e8236a1b53a1ca24eb3408ca5d02d1ad6f47687"
 
     expressions=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={1,0,0,1};

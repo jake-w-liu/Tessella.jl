@@ -27,7 +27,7 @@ using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, bou
 using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
 using ..SizeField: AbstractSizeField, ConstantSize, metric_edge_length,
-                   directional_size
+                   directional_size, DistanceField, field_value
 using ..PipelineSupport: PIPELINE_DEFAULT_MAX_NODES, PIPELINE_DEFAULT_MAX_TETS
 
 export Triangulation3, delaunay3d, tetrahedralize, tetrahedralize_multi,
@@ -1404,7 +1404,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         id
     end
     @inbounds for t in 1:size(m.tets,2); addtet!(Int(m.tets[1,t]),Int(m.tets[2,t]),Int(m.tets[3,t]),Int(m.tets[4,t]), false, tags0[t], nothing); end
-    for (e,_) in inc
+    for e in sort!(collect(keys(inc)))
         len=elen(e[1],e[2]); isfinite(len) || throw(ErrorException("refine_to_size: an edge length is non-finite"))
         queueedge!(e[1],e[2],len)
     end
@@ -1763,7 +1763,7 @@ function _refine_to_size(m::Mesh, field::AbstractSizeField;
         delete!(inc,e)
       end
       isempty(deferred)&&break
-      pending=collect(deferred);empty!(deferred)
+      pending=sort!(collect(deferred));empty!(deferred)
       for e in pending
           haskey(inc,e)||continue
           len=elen(e[1],e[2])
@@ -1938,6 +1938,14 @@ function _node_at3(mesh::Mesh, p; atol=0.0)
 end
 
 function _containing_tet(mesh::Mesh, p)
+    # Scan every tet and keep the strongest containment claim rather than the
+    # first: a point on a face/edge/vertex (zeros>0) must split that shared
+    # entity, but coplanar sliver tetrahedra can also report the point as
+    # strictly interior — splitting there would leave the point as a vertex
+    # lying on a face it does not subdivide (a non-conforming mesh). Among
+    # equal claims the larger-volume container is the more reliable host.
+    best_t=0; best_zeros=-1; best_volume=0.0
+    best_mask=(false,false,false,false)
     @inbounds for t in axes(mesh.tets,2)
         a=(mesh.coords[1,mesh.tets[1,t]],mesh.coords[2,mesh.tets[1,t]],mesh.coords[3,mesh.tets[1,t]])
         b=(mesh.coords[1,mesh.tets[2,t]],mesh.coords[2,mesh.tets[2,t]],mesh.coords[3,mesh.tets[2,t]])
@@ -1964,9 +1972,27 @@ function _containing_tet(mesh::Mesh, p)
                 ok=false; break
             end
         end
-        ok && return t, zeros, mask
+        ok || continue
+        if zeros>=3
+            # A tolerance-near vertex is not an exact coordinate duplicate.
+            # Resolve its true host dimension before deciding how to split it.
+            parent_sign=orient3(a,b,c,d)
+            signs=(orient3(p,b,c,d),orient3(a,p,c,d),
+                   orient3(a,b,p,d),orient3(a,b,c,p))
+            for s in signs
+                (s==0 || s==parent_sign) || (ok=false;break)
+            end
+            ok || continue
+            mask=(signs[1]==0,signs[2]==0,signs[3]==0,signs[4]==0)
+            zeros=sum(mask)
+        end
+        if zeros>best_zeros ||
+           (zeros==best_zeros && abs(volume)>best_volume)
+            best_t=t; best_zeros=zeros; best_volume=abs(volume)
+            best_mask=mask
+        end
     end
-    return 0, 0, (false,false,false,false)
+    return best_t, max(best_zeros,0), best_mask
 end
 
 function _finish_interior(mesh::Mesh, extra)
@@ -2089,17 +2115,975 @@ function _segment_face_hit(mesh::Mesh, p, q; atol=1e-12)
     return best
 end
 
+# In-plane recovery for a segment lying on tetrahedron faces (no piercing
+# crossing exists): the segment crosses face EDGES of the coplanar tiling.
+# Inserting one crossing splits that edge; once a crossed face's entry and exit
+# points both exist, its subdivision fan contains the segment's chord as an
+# edge, so coverage strictly progresses.
+function _segment_edge_hit(mesh::Mesh, p, q; atol=1e-12)
+    best=nothing; bestt=Inf
+    dir=_sub3(q,p)
+    L2=_dot3(dir,dir)
+    L2>0 || return nothing
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        pts=(_pt3(mesh,ids[1]),_pt3(mesh,ids[2]),_pt3(mesh,ids[3]),
+             _pt3(mesh,ids[4]))
+        for (i,j,k) in ((2,3,4),(1,3,4),(1,2,4),(1,2,3))
+            fa,fb,fc=pts[i],pts[j],pts[k]
+            normal=_cross3(_sub3(fb,fa),_sub3(fc,fa))
+            normal_norm=hypot(normal...)
+            normal_norm>0 || continue
+            abs(_dot3(normal,_sub3(p,fa)))<=atol*normal_norm || continue
+            abs(_dot3(normal,_sub3(q,fa)))<=atol*normal_norm || continue
+            # Project onto the face's best-conditioned coordinate pair — drop
+            # the normal's largest-magnitude axis.
+            drop=abs(normal[1])>=abs(normal[2]) && abs(normal[1])>=abs(normal[3]) ? 1 :
+                 abs(normal[2])>=abs(normal[3]) ? 2 : 3
+            axes3=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+            p2=(p[axes3[1]],p[axes3[2]])
+            q2=(q[axes3[1]],q[axes3[2]])
+            for (ei,ej) in ((i,j),(j,k),(k,i))
+                ea=pts[ei]; eb=pts[ej]
+                a2=(ea[axes3[1]],ea[axes3[2]])
+                b2=(eb[axes3[1]],eb[axes3[2]])
+                d=(q2[1]-p2[1],q2[2]-p2[2])
+                e=(b2[1]-a2[1],b2[2]-a2[2])
+                denom=d[1]*e[2]-d[2]*e[1]
+                denom_scale=hypot(d...)*hypot(e...)
+                denom_scale>0 || continue
+                # Parallel or collinear with the face edge — no interior
+                # crossing; a collinear edge already serves coverage.
+                abs(denom)<=1e-12*denom_scale && continue
+                s0=((a2[1]-p2[1])*e[2]-(a2[2]-p2[2])*e[1])/denom
+                s1=((a2[1]-p2[1])*d[2]-(a2[2]-p2[2])*d[1])/denom
+                (s0>1e-9 && s0<1-1e-9 && s1>1e-9 && s1<1-1e-9) || continue
+                hit=_add3(ea,_scale3(_sub3(eb,ea),s1))
+                _node_at3(mesh,hit; atol=1e-9)!=0 && continue
+                s0<bestt && (bestt=s0; best=hit)
+            end
+        end
+    end
+    return best
+end
+
+# Mesh nodes strictly on the open segment (p,q), in parameter order. A segment
+# that passes through an existing vertex can deadlock recovery: every remaining
+# face crossing coincides with that node and is skipped as a duplicate, and no
+# edge ever connects it to its neighbours along the segment. Splitting at such
+# vertices reduces coverage to the independent sub-segments between them.
+function _segment_chain_points3(mesh::Mesh, p, q; atol=1e-9)
+    dir=_sub3(q,p)
+    L2=_dot3(dir,dir)
+    L2>0 || return NTuple{3,Float64}[]
+    hits=Tuple{Float64,NTuple{3,Float64}}[]
+    @inbounds for n in axes(mesh.coords,2)
+        x=_pt3(mesh,n)
+        _on_segment3(x,p,q;atol=atol) || continue
+        t=_dot3(_sub3(x,p),dir)/L2
+        (t>atol && t<1-atol) || continue
+        push!(hits,(t,x))
+    end
+    sort!(hits)
+    return [x for (_,x) in hits]
+end
+
 function recover_segment3(mesh::Mesh, p, q; max_inserts::Integer=256)
     out,_=insert_steiner3(mesh,p)
     out,_=insert_steiner3(out,q)
-    for _ in 1:max_inserts
+    budget=Ref(Int(max_inserts))
+    return _recover_segment3(out,p,q,budget,Int(max_inserts))
+end
+
+# Does the open segment (p,q) meet tetrahedron `t` at all — interior, face,
+# edge, or vertex contact? Each sub-volume of `p+s*(q-p)` is affine in `s`, so
+# the feasible parameters form an interval; the tet is hit when that interval
+# overlaps (0,1).
+function _open_segment_hits_tet3(mesh::Mesh, t::Int, p, q)
+    a=_pt3(mesh,mesh.tets[1,t]); b=_pt3(mesh,mesh.tets[2,t])
+    c=_pt3(mesh,mesh.tets[3,t]); d=_pt3(mesh,mesh.tets[4,t])
+    volume=tet_signed_volume(a,b,c,d)
+    volume>0 || return false
+    s0=(tet_signed_volume(p,b,c,d),tet_signed_volume(a,p,c,d),
+        tet_signed_volume(a,b,p,d),tet_signed_volume(a,b,c,p))
+    s1=(tet_signed_volume(q,b,c,d),tet_signed_volume(a,q,c,d),
+        tet_signed_volume(a,b,q,d),tet_signed_volume(a,b,c,q))
+    tolerance=1e-9*volume
+    lo=0.0; hi=1.0
+    for k in 1:4
+        f0=s0[k]; f1=s1[k]
+        (f0<-tolerance && f1<-tolerance) && return false
+        den=f1-f0
+        if den>0
+            lo=max(lo,(-tolerance-f0)/den)
+        elseif den<0
+            hi=min(hi,(-tolerance-f0)/den)
+        end
+    end
+    return hi>=lo && hi>0 && lo<1
+end
+
+function _point_in_tets3(mesh::Mesh, tets, x)
+    @inbounds for t in tets
+        a=_pt3(mesh,mesh.tets[1,t]); b=_pt3(mesh,mesh.tets[2,t])
+        c=_pt3(mesh,mesh.tets[3,t]); d=_pt3(mesh,mesh.tets[4,t])
+        volume=tet_signed_volume(a,b,c,d)
+        volume>0 || continue
+        tolerance=1e-9*volume
+        (tet_signed_volume(x,b,c,d)>=-tolerance &&
+         tet_signed_volume(a,x,c,d)>=-tolerance &&
+         tet_signed_volume(a,b,x,d)>=-tolerance &&
+         tet_signed_volume(a,b,c,x)>=-tolerance) && return true
+    end
+    return false
+end
+
+# Does the open triangle (a,b,c) meet tetrahedron `t` at all? The overlap
+# region of a triangle and a tetrahedron is a polygon; its boundary is cut
+# either by the triangle's edges crossing the tetrahedron or by tetrahedron
+# edges piercing the triangle interior, so those two sweeps decide contact.
+function _open_triangle_hits_tet3(mesh::Mesh, t::Int, a, b, c)
+    _open_segment_hits_tet3(mesh,t,a,b) && return true
+    _open_segment_hits_tet3(mesh,t,b,c) && return true
+    _open_segment_hits_tet3(mesh,t,c,a) && return true
+    pts=(_pt3(mesh,mesh.tets[1,t]),_pt3(mesh,mesh.tets[2,t]),
+         _pt3(mesh,mesh.tets[3,t]),_pt3(mesh,mesh.tets[4,t]))
+    for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+        _segment_triangle_hit(pts[i],pts[j],a,b,c;atol=1e-9)===nothing ||
+            return true
+    end
+    return false
+end
+
+@inline _tet_opp_face3(q::NTuple{4,Int32},k::Int) =
+    ntuple(i -> q[i<k ? i : i+1], 3)
+
+# Last-resort recovery for the vertex-threading deadlock: the open segment
+# (p,q) pierces no face interior, crosses no coplanar face edge, and carries no
+# interior node — it leaves the star of its upstream node exactly at the
+# vertex, so point insertion can never create the missing edge. Remove a small
+# cavity around the segment (the tetrahedra the open segment meets, optionally
+# widened to the two endpoint stars) and re-triangulate it under an exact
+# constraint check: identical boundary faces, interior faces paired on opposite
+# sides, every interior vertex retained, pre-existing seg/tri cells preserved,
+# consistent positive orientation, volume conserved to Float64 resolution, and
+# the (p,q) endpoint nodes joined by an edge. Any violation abandons the fill
+# and recovery keeps its explicit error.
+# Cavity closure under vertex-on-boundary-face: a cavity vertex lying on a
+# boundary face makes that face unclaimable — the conforming fill must
+# subdivide the face through the vertex, which is only possible once the
+# outside tet sharing the face joins the cavity. Iterate: each absorption can
+# expose another vertex-bearing face on the new boundary.
+function _cavity_closure_vertex_faces3(mesh::Mesh, in_cav::BitVector;
+                                       max_steps::Int=8)
+    ntet=size(mesh.tets,2)
+    cav=copy(in_cav)
+    incidence=Dict{NTuple{3,Int32},Int}()
+    facetet=Dict{NTuple{3,Int32},Int}()
+    for _ in 1:max_steps
+        empty!(incidence); empty!(facetet)
+        @inbounds for t in 1:ntet
+            q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+            for k in 1:4
+                f=_sorted_face3(_tet_opp_face3(q,k)...)
+                if cav[t]
+                    incidence[f]=get(incidence,f,0)+1
+                else
+                    facetet[f]=t
+                end
+            end
+        end
+        grown=false
+        for f in sort!(collect(keys(incidence)))
+            count_f=incidence[f]
+            count_f==1 || continue
+            out=get(facetet,f,0)
+            out==0 && continue
+            fa=_pt3(mesh,f[1]); fb=_pt3(mesh,f[2]); fc=_pt3(mesh,f[3])
+            for t in findall(cav)
+                q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+                found=false
+                for v in q
+                    (v==f[1] || v==f[2] || v==f[3]) && continue
+                    _point_in_triangle3(_pt3(mesh,v),fa,fb,fc;atol=1e-9) ||
+                        continue
+                    cav[out]=true; grown=true; found=true; break
+                end
+                found && break
+            end
+        end
+        grown || break
+        count(cav)>96 && break
+    end
+    return cav
+end
+
+# Task-local registry of cells that embedded-entity recovery must preserve.
+# Curve/sheet coverage is recorded as it completes; cavity fills then carry the
+# registry through keepedges/keepfaces so a later fill cannot silently break an
+# earlier entity's recovered complex (the final postcondition re-checks every
+# embedded entity on the final mesh).
+function _protected_faces3()
+    get(task_local_storage(),:tessella_protected_faces,Set{NTuple{3,Int32}}())
+end
+function _protected_edges3()
+    get(task_local_storage(),:tessella_protected_edges,Set{NTuple{2,Int32}}())
+end
+function _protected_cells!()
+    pf=get(task_local_storage(),:tessella_protected_faces,nothing)
+    pf===nothing &&
+        (pf=Set{NTuple{3,Int32}}(); task_local_storage(:tessella_protected_faces,pf))
+    pe=get(task_local_storage(),:tessella_protected_edges,nothing)
+    pe===nothing &&
+        (pe=Set{NTuple{2,Int32}}(); task_local_storage(:tessella_protected_edges,pe))
+    return pf,pe
+end
+
+function _retriangulate_segment_cavity3(mesh::Mesh, p, q)
+    na=_node_at3(mesh,p; atol=1e-9)
+    nb=_node_at3(mesh,q; atol=1e-9)
+    (na==0 || nb==0 || na==nb) && return nothing
+    na32=Int32(na); nb32=Int32(nb)
+    ntet=size(mesh.tets,2)
+    star=falses(ntet)
+    pierced=falses(ntet)
+    @inbounds for t in 1:ntet
+        star[t]=(mesh.tets[1,t]==na32 || mesh.tets[2,t]==na32 ||
+                 mesh.tets[3,t]==na32 || mesh.tets[4,t]==na32 ||
+                 mesh.tets[1,t]==nb32 || mesh.tets[2,t]==nb32 ||
+                 mesh.tets[3,t]==nb32 || mesh.tets[4,t]==nb32)
+        pierced[t]=_open_segment_hits_tet3(mesh,t,p,q)
+    end
+    for widen in (false,true)
+        in_cav = widen ? (star .| pierced) : pierced
+        out=_refill_with_growth3(mesh,in_cav,na32,nb32)
+        out===nothing || return out
+    end
+    return nothing
+end
+
+# Refill `in_cav` (after vertex-face closure) and, on failure, absorb
+# face-neighbours of the cavity boundary and retry — a nonconvex cavity can
+# admit no legal fill at all (a boundary face whose every candidate cell
+# protrudes), while a ring larger by one usually does.
+function _refill_with_growth3(mesh::Mesh, in_cav0::BitVector,
+                              na::Int32, nb::Int32; kwargs...)
+    in_cav=_cavity_closure_vertex_faces3(mesh,in_cav0)
+    out=_refill_segment_cavity3(mesh,in_cav,na,nb;kwargs...)
+    out===nothing || return out
+    for _ in 1:3
+        incidence=Dict{NTuple{3,Int32},Int}()
+        for t in findall(in_cav)
+            q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+            for k in 1:4
+                f=_sorted_face3(_tet_opp_face3(q,k)...)
+                incidence[f]=get(incidence,f,0)+1
+            end
+        end
+        grown=false
+        @inbounds for j in axes(mesh.tets,2)
+            in_cav[j] && continue
+            r=(mesh.tets[1,j],mesh.tets[2,j],mesh.tets[3,j],mesh.tets[4,j])
+            for k in 1:4
+                f=_sorted_face3(_tet_opp_face3(r,k)...)
+                if get(incidence,f,0)==1
+                    in_cav[j]=true; grown=true; break
+                end
+            end
+        end
+        grown || break
+        count(in_cav)>96 && break
+        in_cav=_cavity_closure_vertex_faces3(mesh,in_cav)
+        out=_refill_segment_cavity3(mesh,in_cav,na,nb;kwargs...)
+        out===nothing || return out
+    end
+    return nothing
+end
+
+# Graft one coplanar face (u,v,w) into the tetrahedra the face pierces: the
+# pipe of traversed cells is retriangulated with the fill seeded by the
+# above/below sandwich pair, so a solved fill carries (u,v,w) as an interior
+# face — the mechanism that adds sheet coverage vertex insertion cannot make.
+# `w` need not be a cavity vertex; it joins the fill pool via `extra_verts`.
+function _graft_sheet_face3(mesh::Mesh, u::Int32, v::Int32, w::Int32)
+    pu,pv,pw=_pt3(mesh,u),_pt3(mesh,v),_pt3(mesh,w)
+    ntet=size(mesh.tets,2)
+    pipe=falses(ntet)
+    @inbounds for t in 1:ntet
+        pipe[t]=_open_triangle_hits_tet3(mesh,t,pu,pv,pw)
+    end
+    return _refill_with_growth3(mesh,pipe,u,v;
+                                require_edge=false,
+                                extra_verts=Int32[w],
+                                seed_face=(u,v,w),
+                                soft_keepfaces=true)
+end
+
+# Consistent on-plane Steiner insertion for a point whose host already carries
+# an on-plane edge (w1,w2): a bare interior split would create coplanar face
+# (x,w1,w2) with no counterpart in the neighbouring complex. Instead the star
+# of every host on-plane edge is refilled with x in the pool and the coplanar
+# face (w1,w2,x) seeded — the fill installs it on both sides at once, which a
+# unilateral split can never do.
+function _insert_onplane_steiner3(mesh::Mesh, x, pln, pln2, poff)
+    t0,_,_=_containing_tet(mesh,x)
+    t0>0 || return nothing
+    q=ntuple(i->mesh.tets[i,t0],4)
+    onp=Int32[]
+    for v in q
+        abs(_dot3(pln,_pt3(mesh,v))-poff)<=1e-9*sqrt(pln2) && push!(onp,v)
+    end
+    length(onp)>=2 || return nothing
+    ntet=size(mesh.tets,2)
+    in_cav=falses(ntet)
+    in_cav[t0]=true
+    @inbounds for t in 1:ntet
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        np=0
+        for v in onp
+            (ids[1]==v || ids[2]==v || ids[3]==v || ids[4]==v) && (np+=1)
+        end
+        np>=2 && (in_cav[t]=true)
+    end
+    # The seeded face (e1,e2,x) must carry no foreign on-plane vertex: one on
+    # an edge makes every containing cell a vertex-on-edge sliver, and one
+    # strictly inside a vertex-on-face — either way the fill starves
+    # (feasible (na,nb,x,y)=0 observed). Pick the pair whose seeded face is
+    # clear of every other on-plane vertex of the star.
+    ov=Int32[]
+    @inbounds for t in 1:ntet
+        in_cav[t] || continue
+        for i in 1:4
+            v=mesh.tets[i,t]
+            abs(_dot3(pln,_pt3(mesh,v))-poff)<=1e-9*sqrt(pln2) &&
+                push!(ov,v)
+        end
+    end
+    unique!(sort!(ov; by=v->hypot((_pt3(mesh,v).-x)...)))
+    drop=abs(pln[1])>=abs(pln[2]) && abs(pln[1])>=abs(pln[3]) ? 1 :
+         abs(pln[2])>=abs(pln[3]) ? 2 : 3
+    ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+    pp(p)=(p[ax[1]],p[ax[2]])
+    x2=pp(x)
+    e1=e2=Int32(0)
+    nov=min(12,length(ov))
+    for i in 1:nov-1, j in i+1:nov
+        c,d=ov[i],ov[j]
+        pc,pd=_pt3(mesh,c),_pt3(mesh,d)
+        f2a,f2b=pp(pc),pp(pd)
+        orient2(f2a,f2b,x2)==0 && continue
+        ok=true
+        for z in ov
+            (z==c || z==d) && continue
+            z2=pp(_pt3(mesh,z))
+            o1=orient2(f2a,f2b,z2); o2=orient2(f2b,x2,z2)
+            o3=orient2(x2,f2a,z2)
+            ((o1>0 || o2>0 || o3>0) &&
+             (o1<0 || o2<0 || o3<0)) && continue
+            if o1==0 || o2==0 || o3==0
+                onedge=false
+                for (g1,g2) in ((f2a,f2b),(f2b,x2),(x2,f2a))
+                    orient2(g1,g2,z2)==0 || continue
+                    min(g1[1],g2[1])-1e-15<=z2[1]<=
+                        max(g1[1],g2[1])+1e-15 &&
+                    min(g1[2],g2[2])-1e-15<=z2[2]<=
+                        max(g1[2],g2[2])+1e-15 &&
+                        (onedge=true; break)
+                end
+                onedge || continue
+            end
+            ok=false; break
+        end
+        if ok
+            e1,e2=c,d; break
+        end
+    end
+    nv=Int32(size(mesh.coords,2)+1)
+    # No clean seeded face: refill the star unseeded with x still required in
+    # the pool — the fill can fan around foreign verts, which no single seed
+    # face can express, and x's cells anchor the next pass.
+    e1==0 && return _refill_with_growth3(mesh,in_cav,q[1],q[2];
+                                       new_pt=x, require_edge=false,
+                                       soft_keepfaces=true)
+    return _refill_with_growth3(mesh,in_cav,q[1],q[2];
+                                new_pt=x, require_edge=false,
+                                seed_face=(e1,e2,nv),
+                                soft_keepfaces=true)
+end
+
+function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
+                                 na::Int32, nb::Int32;
+                                 new_pt=nothing, require_edge::Bool=true,
+                                 extra_verts::Vector{Int32}=Int32[],
+                                 seed_face::Union{Nothing,NTuple{3,Int32}}=nothing,
+                                 soft_keepfaces::Bool=false)
+    ntet=size(mesh.tets,2)
+    cav=findall(in_cav)
+    (isempty(cav) || length(cav)>96) && return nothing
+    # `new_pt` appends one additional vertex (the point being inserted) to the
+    # fill candidates; it is required to participate in the accepted fill.
+    nv=new_pt===nothing ? Int32(0) : Int32(size(mesh.coords,2)+1)
+    incidence=Dict{NTuple{3,Int32},Int}()
+    opposite=Dict{NTuple{3,Int32},Int32}()
+    oldvolume=0.0
+    for t in cav
+        q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        pa=_pt3(mesh,q[1]); pb=_pt3(mesh,q[2]); pc=_pt3(mesh,q[3]); pd=_pt3(mesh,q[4])
+        oldvolume+=abs(tet_signed_volume(pa,pb,pc,pd))
+        for k in 1:4
+            f=_sorted_face3(_tet_opp_face3(q,k)...)
+            incidence[f]=get(incidence,f,0)+1
+            opposite[f]=q[k]
+        end
+    end
+    (isfinite(oldvolume) && oldvolume>0) || return nothing
+    cavity_volume=oldvolume
+    boundary=[f for (f,c) in incidence if c==1]
+    isempty(boundary) && return nothing
+    # Deterministic face order: the search's claim ledger iterates this
+    # sequence (hash-order of `incidence` is runtime-dependent, so the same
+    # cavity could admit different first-found fills on different Julia
+    # versions).
+    sort!(boundary)
+    bset=Set(boundary)
+    verts=Int32[]; vseen=Set{Int32}()
+    for t in cav, i in 1:4
+        v=mesh.tets[i,t]
+        v in vseen || (push!(vseen,v); push!(verts,v))
+    end
+    if nv!=0
+        push!(vseen,nv); push!(verts,nv)
+    end
+    # `extra_verts` admits existing mesh vertices that are not cavity vertices
+    # (e.g. the apex of a grafted sheet face) into the fill pool; they are not
+    # required to be used — the seeding constraint decides that.
+    for x in extra_verts
+        x in vseen || (push!(vseen,x); push!(verts,x))
+    end
+    length(verts)>32 && return nothing
+    (na in vseen && nb in vseen) || return nothing
+    boundaryverts=Set{Int32}(v for f in boundary for v in f)
+    inner=[v for v in verts if !(v in boundaryverts)]
+    # Pre-existing cells interior to the cavity must survive the fill. A
+    # degenerate face — one vertex lying on the opposite edge — carries no
+    # area and every cell containing it is an illegal sliver, so it is not a
+    # usable constraint (vertex-on-edge nonconformity observed on the
+    # embedded-sheet fixtures produces exactly these).
+    keepfaces=Set{NTuple{3,Int32}}()
+    function consider_face(f)
+        get(incidence,f,0)==2 || return
+        fa,fb,fc=_pt3(mesh,f[1]),_pt3(mesh,f[2]),_pt3(mesh,f[3])
+        (_on_segment3(fc,fa,fb; atol=1e-9) ||
+         _on_segment3(fb,fa,fc; atol=1e-9) ||
+         _on_segment3(fa,fb,fc; atol=1e-9)) && return
+        push!(keepfaces,f)
+        return nothing
+    end
+    @inbounds for j in axes(mesh.tris,2)
+        consider_face(_sorted_face3(mesh.tris[1,j],mesh.tris[2,j],mesh.tris[3,j]))
+    end
+    keepedges=Set{NTuple{2,Int32}}()
+    # Required edges interior to the cavity must survive the fill. Candidates
+    # are the classified cells — mesh.segs — and every edge of the boundary
+    # triangulation mesh.tris, which carries the crease segments the surface
+    # projection audits for afterwards. An edge still carried by a kept
+    # tetrahedron (e.g. lying on the cavity boundary) needs no constraint.
+    kept_edges=Set{NTuple{2,Int32}}()
+    @inbounds for t in 1:ntet
+        in_cav[t] && continue
+        q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+            a,b=q[i],q[j]
+            push!(kept_edges,a<b ? (a,b) : (b,a))
+        end
+    end
+    function consider_edge(a,b)
+        # Only edges with both endpoints in the fill pool are expressible; an
+        # edge leaving the cavity is preserved by the kept tets outside.
+        (a in vseen && b in vseen) || return
+        # A pool vertex lying on the required edge makes every cell containing
+        # it illegal (vertex-on-edge). The conforming representative is the
+        # subdivided chain through the on-edge vertices, which covers the same
+        # geometric segment — require that instead.
+        pa,pb=_pt3(mesh,a),_pt3(mesh,b)
+        d=_sub3(pb,pa); dd=_dot3(d,d)
+        hits=Tuple{Float64,Int32}[]
+        if dd!=0
+            for w in verts
+                (w==a || w==b || w==nv) && continue
+                pw=_pt3(mesh,w)
+                t=_dot3(_sub3(pw,pa),d)/dd
+                (t>1e-9 && t<1-1e-9 &&
+                 _on_segment3(pw,pa,pb; atol=1e-9)) && push!(hits,(t,w))
+            end
+        end
+        isempty(hits) ||
+            sort!(hits;by=first)
+        chain=Int32[a]
+        append!(chain,(w for (_,w) in hits))
+        push!(chain,b)
+        for i in 1:length(chain)-1
+            x,y=chain[i],chain[i+1]
+            e=x<y ? (x,y) : (y,x)
+            e in kept_edges || push!(keepedges,e)
+        end
+        return nothing
+    end
+    @inbounds for j in axes(mesh.segs,2)
+        consider_edge(mesh.segs[1,j],mesh.segs[2,j])
+    end
+    @inbounds for j in axes(mesh.tris,2)
+        consider_edge(mesh.tris[1,j],mesh.tris[2,j])
+        consider_edge(mesh.tris[2,j],mesh.tris[3,j])
+        consider_edge(mesh.tris[1,j],mesh.tris[3,j])
+    end
+    # Embedded-entity cells recovered so far are equally required: a sheet
+    # face interior to this cavity must remain an interior face, and a curve
+    # segment must remain an edge — the final postcondition re-checks all of
+    # them on the spliced mesh.
+    for f in _protected_faces3()
+        consider_face(f)
+    end
+    for e in _protected_edges3()
+        consider_edge(e[1],e[2])
+    end
+    pts=Dict{Int32,NTuple{3,Float64}}(v => _pt3(mesh,v) for v in verts if v!=nv)
+    nv!=0 && (pts[nv]=new_pt)
+    oldside=Dict{NTuple{3,Int32},Int}()
+    for f in boundary
+        o=opposite[f]
+        oldside[f]=orient3(pts[f[1]],pts[f[2]],pts[f[3]],pts[o])
+    end
+    # Per-boundary-face geometry for the protrusion checks below: a fill cell
+    # must not cross the cavity boundary anywhere, which the centroid tests
+    # alone cannot guarantee in a nonconvex cavity.
+    bfpts=[(pts[f[1]],pts[f[2]],pts[f[3]]) for f in boundary]
+    bside=Dict{NTuple{3,Int32},Dict{Int32,Int}}()
+    for (bi,f) in enumerate(boundary)
+        fa,fb,fc=bfpts[bi]
+        bside[f]=Dict{Int32,Int}(v=>orient3(fa,fb,fc,pts[v]) for v in verts)
+    end
+    voltol=max(1e-10*oldvolume, 1024eps(Float64)*oldvolume)
+    claim=Dict{NTuple{3,Int32},Int8}(f=>0 for f in boundary)
+    # `claimseq` is the deterministic iteration universe for the search's
+    # claim ledger — Dict iteration order is runtime-dependent and would
+    # otherwise pick different minimum-candidate target faces on ties.
+    claimseq=copy(boundary); inseq=Set(boundary)
+    # Keepfaces proven pairable join the claim ledger once inside_cavity
+    # exists (see below); the rest cannot be expressed by any legal fill and
+    # are left unconstrained rather than making the search unsatisfiable.
+    pairable=Set{NTuple{3,Int32}}()
+    side1=Dict{NTuple{3,Int32},Int}()
+    news=NTuple{4,Int32}[]
+    volsum=Ref(0.0)
+    budget=Ref(200_000)
+
+    function inside_cavity(cell::NTuple{4,Int32})
+        cpts=(pts[cell[1]],pts[cell[2]],pts[cell[3]],pts[cell[4]])
+        cellvol=tet_signed_volume(cpts[1],cpts[2],cpts[3],cpts[4])
+        cellvol==0 && return false
+        # Legitimacy: a fill cell must be a genuine simplex of the vertex pool.
+        # A cell vertex lying on one of the cell's edges makes it a sliver the
+        # exact-zero volume test misses (observed ~1e-22), and a foreign pool
+        # vertex on or inside the cell would leave the fill non-conforming —
+        # the vertex has no cell to subdivide. Both pass combinatorial checks
+        # yet corrupt coverage: the embedded surface's pierced edge then stays
+        # intact behind a coincident node that dedup skips forever.
+        for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+                u,w=cpts[i],cpts[j]
+                for k in 1:4
+                    (k==i || k==j) && continue
+                    _on_segment3(cpts[k],u,w; atol=1e-9) && return false
+                end
+            end
+            sgn=cellvol>0 ? 1.0 : -1.0
+            tol=1e-9*abs(cellvol)
+            for w in verts
+                (w==cell[1] || w==cell[2] || w==cell[3] || w==cell[4]) && continue
+                pw=pts[w]
+                (sgn*tet_signed_volume(pw,cpts[2],cpts[3],cpts[4])>=-tol &&
+                 sgn*tet_signed_volume(cpts[1],pw,cpts[3],cpts[4])>=-tol &&
+                 sgn*tet_signed_volume(cpts[1],cpts[2],pw,cpts[4])>=-tol &&
+                 sgn*tet_signed_volume(cpts[1],cpts[2],cpts[3],pw)>=-tol) &&
+                    return false
+            end
+            # Boundary conformity: in a nonconvex cavity a cell between pool
+            # vertices can bulge through the boundary while its centroid still
+            # lies inside (verified on the embedded-sheet fixtures). Reject
+            # cells that pierce a boundary face, seat a vertex on one, or
+            # coplanar-overlap one — each splices a geometrically
+            # nonconforming region past every combinatorial check.
+            for (bi,f) in enumerate(boundary)
+                sd=bside[f]
+                fp=bfpts[bi]
+                for i in 1:4
+                    v=cell[i]
+                    sd[v]==0 || continue
+                    (v==f[1] || v==f[2] || v==f[3]) && continue
+                    _point_in_triangle3(cpts[i],fp[1],fp[2],fp[3];
+                                        atol=1e-9) && return false
+                end
+                for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+                    si,sj=sd[cell[i]],sd[cell[j]]
+                    (si==sj && si!=0) && continue
+                    _segment_triangle_hit(cpts[i],cpts[j],fp[1],fp[2],fp[3];
+                                          atol=1e-9)===nothing || return false
+                end
+            end
+            for k in 1:4
+                g=_sorted_face3(_tet_opp_face3(cell,k)...)
+                for (bi,f) in enumerate(boundary)
+                    g==f && continue
+                    sd=bside[f]
+                    (sd[g[1]]==0 && sd[g[2]]==0 && sd[g[3]]==0) || continue
+                    fp=bfpts[bi]
+                    fn=_cross3(_sub3(fp[2],fp[1]),_sub3(fp[3],fp[1]))
+                    drop=abs(fn[1])>=abs(fn[2]) && abs(fn[1])>=abs(fn[3]) ? 1 :
+                         abs(fn[2])>=abs(fn[3]) ? 2 : 3
+                    ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+                    s2=[(x[ax[1]],x[ax[2]]) for x in
+                        (pts[g[1]],pts[g[2]],pts[g[3]])]
+                    t2=[(x[ax[1]],x[ax[2]]) for x in fp]
+                    _tris_strict_overlap2(s2,t2) && return false
+                end
+            end
+        x=((cpts[1][1]+cpts[2][1]+cpts[3][1]+cpts[4][1])/4,
+           (cpts[1][2]+cpts[2][2]+cpts[3][2]+cpts[4][2])/4,
+           (cpts[1][3]+cpts[2][3]+cpts[3][3]+cpts[4][3])/4)
+        _point_in_tets3(mesh,cav,x) || return false
+        for k in 1:4
+            g=_tet_opp_face3(cell,k)
+            g in bset && continue
+            gx=((pts[g[1]][1]+pts[g[2]][1]+pts[g[3]][1])/3,
+                (pts[g[1]][2]+pts[g[2]][2]+pts[g[3]][2])/3,
+                (pts[g[1]][3]+pts[g[2]][3]+pts[g[3]][3])/3)
+            _point_in_tets3(mesh,cav,gx) || return false
+        end
+        return true
+    end
+
+    # Classify keepfaces: a face is enforceable exactly when legal cells exist
+    # inside the cavity on BOTH of its sides, in which case claim==2
+    # preserves it as an interior face. Faces failing that — carrying a pool
+    # vertex on an edge, or shadowed by one — cannot be expressed by any legal
+    # fill, so they are left unconstrained; the outer recovery loop re-checks
+    # coverage on the spliced mesh.
+    for f in keepfaces
+        fu,fv,fw=pts[f[1]],pts[f[2]],pts[f[3]]
+        plus=minus=false
+        for x in verts
+            (x==f[1] || x==f[2] || x==f[3]) && continue
+            sx=orient3(fu,fv,fw,pts[x])
+            sx==0 && continue
+            inside_cavity((f[1],f[2],f[3],x)) || continue
+            sx>0 ? (plus=true) : (minus=true)
+            plus && minus && break
+        end
+        (plus && minus) && push!(pairable,f)
+    end
+    # Pairable keepfaces enter the claim ledger up front so the solver targets
+    # them directly; otherwise they only appear once a cell happens to create
+    # them and most fills reach acceptance without ever claiming them.
+    for f in sort!(collect(pairable))
+        haskey(claim,f) || (claim[f]=0)
+        f in inseq || (push!(inseq,f); push!(claimseq,f))
+    end
+
+    # Geometric candidacy for a face — required apex side, nonzero volume, and
+    # inside the cavity — depends only on the face and the required side sign,
+    # so cache it and re-filter the cheap face quotas on every use.
+    candcache=Dict{Tuple{NTuple{3,Int32},Int},Vector{Tuple{Int32,Float64}}}()
+    function base_candidates(f::NTuple{3,Int32}, os::Int)
+        get!(candcache,(f,os)) do
+            fu,fv,fw=pts[f[1]],pts[f[2]],pts[f[3]]
+            list=Tuple{Int32,Float64}[]
+            for x in verts
+                (x==f[1] || x==f[2] || x==f[3]) && continue
+                sx=orient3(fu,fv,fw,pts[x])
+                (sx==0 || (os!=0 && sx!=os)) && continue
+                sv=tet_signed_volume(fu,fv,fw,pts[x])
+                sv==0 && continue
+                inside_cavity((f[1],f[2],f[3],x)) || continue
+                push!(list,(x,abs(sv)))
+            end
+            sort!(list; by=e->(e[1]!=na && e[1]!=nb, -e[2]))
+            list
+        end
+    end
+    function candidates(f::NTuple{3,Int32})
+        os = (f in bset) ? oldside[f] :
+             (haskey(side1,f) ? -side1[f] : 0)
+        candidate_vertices=Int32[]
+        for (x,_) in base_candidates(f,os)
+            ok=true
+            for k in 1:4
+                g=_sorted_face3(_tet_opp_face3((f[1],f[2],f[3],x),k)...)
+                get(claim,g,0) >= (g in bset ? 1 : 2) && (ok=false; break)
+            end
+            ok && push!(candidate_vertices,x)
+        end
+        candidate_vertices
+    end
+
+    function apply!(cell::NTuple{4,Int32})
+        fs=NTuple{3,Int32}[]
+        for k in 1:4
+            g=_sorted_face3(_tet_opp_face3(cell,k)...)
+            c=get(claim,g,0)
+            c >= (g in bset ? 1 : 2) && return nothing
+            push!(fs,g)
+        end
+        for (k,g) in enumerate(fs)
+            g in inseq || (push!(inseq,g); push!(claimseq,g))
+            claim[g]=get(claim,g,0)+1
+            if !(g in bset) && claim[g]==1
+                side1[g]=orient3(pts[g[1]],pts[g[2]],pts[g[3]],
+                                 pts[cell[k]])
+            end
+        end
+        push!(news,cell)
+        sv=tet_signed_volume(pts[cell[1]],pts[cell[2]],pts[cell[3]],pts[cell[4]])
+        volsum[]+=abs(sv)
+        return fs
+    end
+
+    function unapply!(cell::NTuple{4,Int32},fs::Vector{NTuple{3,Int32}})
+        for g in fs
+            claim[g]-=1
+            # A face fully unclaimed loses its recorded side; otherwise a
+            # stale side1 entry restricts the next candidate search to the
+            # wrong side and prunes legitimate fills.
+            claim[g]==0 && delete!(side1,g)
+        end
+        pop!(news)
+        sv=tet_signed_volume(pts[cell[1]],pts[cell[2]],pts[cell[3]],pts[cell[4]])
+        volsum[]-=abs(sv)
+        return nothing
+    end
+
+    function solve(recur)
+        (budget[]-=1)>0 || return false
+        target=nothing; tcands=Int32[]
+        for f in claimseq
+            c=get(claim,f,0)
+            # Boundary faces are unsatisfied until claimed once; interior faces
+            # created by the fill must be claimed a second time (paired). An
+            # interior face back at zero is simply absent — unless it is a
+            # keepface, which still needs its two claims and must be worked on
+            # explicitly or the search only reaches it by accident. In
+            # soft-keepfaces mode (callers whose own coverage gate arbitrates
+            # which sacrifices are acceptable) keepfaces pair opportunistically
+            # instead — requiring them jointly makes small cavities
+            # unsatisfiable.
+            (f in bset ? c==0 :
+                (c==1 || (!soft_keepfaces && c==0 && f in pairable))) || continue
+            cand=candidates(f)
+            isempty(cand) && return false
+            (target===nothing || length(cand)<length(tcands)) &&
+                (target=f; tcands=cand)
+        end
+        if target!==nothing
+            for x in tcands
+                cell=(target[1],target[2],target[3],x)
+                fs=apply!(cell)
+                fs===nothing && continue
+                volsum[]>cavity_volume+voltol && (unapply!(cell,fs); continue)
+                recur(recur) && return true
+                unapply!(cell,fs)
+            end
+            return false
+        end
+        abs(volsum[]-cavity_volume)>voltol && return false
+        used=Set{Int32}(v for cell in news for v in cell)
+        all(v->v in used, inner) || return false
+        (nv==0 || nv in used) || return false
+        (!require_edge ||
+         any(cell->((na==cell[1]||na==cell[2]||na==cell[3]||na==cell[4]) &&
+                    (nb==cell[1]||nb==cell[2]||nb==cell[3]||nb==cell[4])),
+             news)) || return false
+        for e in keepedges
+            any(cell->((e[1]==cell[1]||e[1]==cell[2]||e[1]==cell[3]||e[1]==cell[4]) &&
+                       (e[2]==cell[1]||e[2]==cell[2]||e[2]==cell[3]||e[2]==cell[4])),
+                news) || return false
+        end
+        soft_keepfaces ||
+            (all(f->get(claim,f,0)==2, pairable) || return false)
+        return true
+    end
+
+    # One full fill attempt from clean search state. `claim` is rebuilt to
+    # boundary/pairable zeros so a retry after relaxing constraints starts
+    # identically to the first attempt.
+    function reset_state()
+        empty!(news); empty!(side1)
+        volsum[]=0.0
+        budget[]=max(200_000,40_000*length(cav))
+        for f in collect(keys(claim))
+            (f in bset || f in pairable) ? (claim[f]=0) : delete!(claim,f)
+        end
+        return nothing
+    end
+    function attempt_fill()
+        reset_state()
+        if require_edge
+            # Seed with the required (na,nb) edge tet — the acceptance check
+            # only fires on complete fills, so an unseeded DFS spends the
+            # whole budget on fills that can never contain the edge. Every
+            # valid fill carries one of these cells, so seeding is complete:
+            # largest-volume first, mirroring the candidate ordering.
+            seeds=Tuple{Float64,NTuple{4,Int32}}[]
+            for x in verts, y in verts
+                (x==na || x==nb || y==na || y==nb || x==y) && continue
+                x<y || continue
+                sv=tet_signed_volume(pts[na],pts[nb],pts[x],pts[y])
+                sv==0 && continue
+                inside_cavity((na,nb,x,y)) || continue
+                push!(seeds,(abs(sv),(na,nb,x,y)))
+            end
+            sort!(seeds;by=first,rev=true)
+            for (_,cell) in seeds
+                fs=apply!(cell)
+                fs===nothing && continue
+                ok=volsum[]<=cavity_volume+voltol && solve(solve)
+                ok && return true
+                unapply!(cell,fs)
+            end
+            return false
+        elseif seed_face!==nothing
+            # Sandwich seeding for a grafted face: a fill exposes (fa,fb,fc)
+            # as an interior face exactly when it carries one cell on each
+            # side of it, so seeding the DFS with an above/below pair is
+            # complete for fills containing the face.
+            fa,fb,fc=seed_face
+            fu,fv,fw=pts[fa],pts[fb],pts[fc]
+            above=Tuple{Float64,Int32}[]; below=Tuple{Float64,Int32}[]
+            for x in verts
+                (x==fa || x==fb || x==fc) && continue
+                sx=orient3(fu,fv,fw,pts[x])
+                sx==0 && continue
+                sv=tet_signed_volume(fu,fv,fw,pts[x])
+                sv==0 && continue
+                inside_cavity((fa,fb,fc,x)) || continue
+                push!(sx>0 ? above : below,(abs(sv),x))
+            end
+            sort!(above;by=first,rev=true); sort!(below;by=first,rev=true)
+            for (_,x) in above, (_,y) in below
+                c1=(fa,fb,fc,x); c2=(fa,fb,fc,y)
+                f1=apply!(c1)
+                f1===nothing && continue
+                f2=apply!(c2)
+                if f2===nothing
+                    unapply!(c1,f1); continue
+                end
+                ok=volsum[]<=cavity_volume+voltol && solve(solve)
+                ok && return true
+                unapply!(c2,f2); unapply!(c1,f1)
+            end
+            return false
+        else
+            return solve(solve)
+        end
+    end
+    solved=attempt_fill()
+    if !solved && !soft_keepfaces && !isempty(pairable)
+        # Exact preservation of already-recovered sheet faces is preferred but
+        # not a prerequisite: no legal fill may express them jointly with the
+        # edge and boundary constraints. Degrade to an unconstrained fill —
+        # the outer postcondition re-checks coverage and re-covers any loss.
+        empty!(pairable)
+        solved=attempt_fill()
+    end
+    solved || return nothing
+    # Splice the fill in place of the cavity and verify globally.
+    coords_out = nv==0 ? mesh.coords :
+        hcat(mesh.coords, Float64[new_pt[1],new_pt[2],new_pt[3]])
+    keep=Int[t for t in 1:ntet if !in_cav[t]]
+    nout=length(keep)+length(news)
+    tets=Matrix{Int32}(undef,4,nout)
+    tags=isempty(mesh.tet_tag) ? Int32[] : Vector{Int32}(undef,nout)
+    @inbounds for (k,t) in enumerate(keep)
+        for i in 1:4; tets[i,k]=mesh.tets[i,t]; end
+        isempty(tags) || (tags[k]=mesh.tet_tag[t])
+    end
+    base=length(keep)
+    for (k,cell) in enumerate(news)
+        col=base+k
+        tets[1,col]=cell[1]; tets[2,col]=cell[2]
+        tets[3,col]=cell[3]; tets[4,col]=cell[4]
+        _orient_tet!(tets,coords_out,col)
+    end
+    if !isempty(tags)
+        for (k,cell) in enumerate(news)
+            cen=((coords_out[1,cell[1]]+coords_out[1,cell[2]]+
+                  coords_out[1,cell[3]]+coords_out[1,cell[4]])/4,
+                 (coords_out[2,cell[1]]+coords_out[2,cell[2]]+
+                  coords_out[2,cell[3]]+coords_out[2,cell[4]])/4,
+                 (coords_out[3,cell[1]]+coords_out[3,cell[2]]+
+                  coords_out[3,cell[3]]+coords_out[3,cell[4]])/4)
+            tag=isempty(mesh.tet_tag) ? Int32(0) : mesh.tet_tag[first(cav)]
+            for t in cav
+                a=_pt3(mesh,mesh.tets[1,t]); b=_pt3(mesh,mesh.tets[2,t])
+                c=_pt3(mesh,mesh.tets[3,t]); d=_pt3(mesh,mesh.tets[4,t])
+                volume=tet_signed_volume(a,b,c,d)
+                volume>0 || continue
+                tolerance=1e-9*volume
+                if (tet_signed_volume(cen,b,c,d)>=-tolerance &&
+                    tet_signed_volume(a,cen,c,d)>=-tolerance &&
+                    tet_signed_volume(a,b,cen,d)>=-tolerance &&
+                    tet_signed_volume(a,b,c,cen)>=-tolerance)
+                    tag=mesh.tet_tag[t]; break
+                end
+            end
+            tags[base+k]=tag
+        end
+    end
+    out=Mesh(coords_out; segs=copy(mesh.segs), tris=copy(mesh.tris),
+             tets=tets, seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag),
+             tet_tag=tags)
+    diagnostic=validate(out)
+    diagnostic.ok || return nothing
+    before=_tet_volume_sum3(mesh,"segment cavity input")
+    after=_tet_volume_sum3(out,"segment cavity output")
+    tolerance=max(1e-12*before,128eps(Float64)*max(before,after))
+    abs(after-before)<=tolerance || return nothing
+    return out
+end
+
+function _recover_segment3(out::Mesh, p, q, budget::Ref{Int},
+                           max_inserts::Int)
+    while true
         mesh_covers_segment3(out,p,q) && return out
         hit=_segment_face_hit(out,p,q)
-        hit===nothing && throw(ErrorException(
-            "recover_segment3: segment is not a tet-edge chain and no face crossing was found"))
+        hit===nothing && (hit=_segment_edge_hit(out,p,q))
+        if hit===nothing
+            chain=_segment_chain_points3(out,p,q)
+            if isempty(chain)
+                filled=_retriangulate_segment_cavity3(out,p,q)
+                filled===nothing && throw(ErrorException(
+                    "recover_segment3: segment is not a tet-edge chain, no " *
+                    "face crossing was found, and cavity retriangulation failed"))
+                budget[]-=1
+                budget[]>=0 || throw(ErrorException(
+                    "recover_segment3: exceeded max_inserts=$max_inserts"))
+                out=filled
+                continue
+            end
+            s=p
+            for x in chain
+                out=_recover_segment3(out,s,x,budget,max_inserts)
+                s=x
+            end
+            # A cavity fill inside a later sub-segment can remove edges that
+            # covered an earlier one, so the loop must re-verify coverage of
+            # the whole original segment rather than only the remaining tail.
+            out=_recover_segment3(out,s,q,budget,max_inserts)
+            continue
+        end
         out,_=insert_steiner3(out,hit)
+        budget[]-=1
+        budget[]>=0 || throw(ErrorException(
+            "recover_segment3: exceeded max_inserts=$max_inserts"))
     end
-    throw(ErrorException("recover_segment3: exceeded max_inserts=$max_inserts"))
 end
 
 function _triangle_area3(a,b,c)
@@ -2135,6 +3119,12 @@ function _mesh_covering_faces3(mesh::Mesh,a,b,c;collect_faces::Bool=true)
             pa=_pt3(mesh,s1); pb=_pt3(mesh,s2); pc=_pt3(mesh,s3)
             (_point_in_triangle3(pa,a,b,c) && _point_in_triangle3(pb,a,b,c) &&
              _point_in_triangle3(pc,a,b,c)) || continue
+            # A degenerate face — one vertex on the opposite edge — has no
+            # coverage to contribute, and letting it claim a face lets a
+            # sliver spanning a shared target edge register twice.
+            (_on_segment3(pc,pa,pb; atol=1e-9) ||
+             _on_segment3(pb,pa,pc; atol=1e-9) ||
+             _on_segment3(pa,pb,pc; atol=1e-9)) && continue
             push!(seen,key)
             covered+=_triangle_area3(pa,pb,pc)
             if collect_faces
@@ -2154,30 +3144,724 @@ function mesh_covers_triangle3(mesh::Mesh, a, b, c; rtol=1e-6)
     return abs(covered-target)<=rtol*target
 end
 
+# 2-D helpers in the sheet plane's dominant projection — the section polygon
+# of a bisected tetrahedron is convex, so overlap with the target triangle is
+# decided by vertex containment in either direction or a proper edge crossing.
+function _in_tri2(x, t)
+    s1=orient2(t[1],t[2],x); s2=orient2(t[2],t[3],x); s3=orient2(t[3],t[1],x)
+    return (s1>=0 && s2>=0 && s3>=0) || (s1<=0 && s2<=0 && s3<=0)
+end
+function _in_convex2(x, poly)
+    s=0
+    for i in eachindex(poly)
+        o=orient2(poly[i],poly[mod1(i+1,length(poly))],x)
+        o==0 && continue
+        s==0 && (s=o; continue)
+        o!=s && return false
+    end
+    return true
+end
+function _proper_cross2(a,b,c,d)
+    o1=orient2(a,b,c); o2=orient2(a,b,d); o3=orient2(c,d,a); o4=orient2(c,d,b)
+    return (o1!=o2) && (o3!=o4)
+end
+# Strict 2-D triangle-overlap test: positive-area intersection only — shared
+# vertices and shared edges do not count. Used both by cavity-fill boundary
+# checks and the coplanar-face diagnostics.
+function _tris_strict_overlap2(s,t)
+    function instrict(x,t)
+        s1=orient2(t[1],t[2],x); s2=orient2(t[2],t[3],x)
+        s3=orient2(t[3],t[1],x)
+        return (s1>0 && s2>0 && s3>0) || (s1<0 && s2<0 && s3<0)
+    end
+    function strictcross(a,b,c,d)
+        o1=orient2(a,b,c); o2=orient2(a,b,d)
+        o3=orient2(c,d,a); o4=orient2(c,d,b)
+        return o1*o2<0 && o3*o4<0
+    end
+    any(x->instrict(x,t),s) && return true
+    any(x->instrict(x,s),t) && return true
+    for i in 1:3, k in 1:3
+        strictcross(s[i],s[mod1(i+1,3)],t[k],t[mod1(k+1,3)]) && return true
+    end
+    return false
+end
+function _section_overlaps_triangle2(sec2, t)
+    any(x->_in_tri2(x,t), sec2) && return true
+    any(x->_in_convex2(x,sec2), t) && return true
+    for i in eachindex(sec2)
+        u,v=sec2[i],sec2[mod1(i+1,length(sec2))]
+        for k in 1:3
+            _proper_cross2(u,v,t[k],t[mod1(k+1,3)]) && return true
+        end
+    end
+    return false
+end
+
+# Sutherland–Hodgman clip of a convex polygon to the half-plane
+# `keep·orient2(p,q,x) ≥ 0`. Returns the same `poly` object when no edge
+# crosses the clip line (all vertices kept) so callers can use `===` to detect
+# an untouched polygon; an empty vector when the polygon is entirely outside.
+function _clip_poly_halfplane2(poly::Vector{NTuple{2,Float64}},
+                               p::NTuple{2,Float64},q::NTuple{2,Float64},
+                               keep::Integer)
+    out=NTuple{2,Float64}[]
+    n=length(poly); crossed=false
+    for i in 1:n
+        cur=poly[i]; prv=poly[mod1(i-1,n)]
+        oc=orient2(p,q,cur)*keep; op=orient2(p,q,prv)*keep
+        inc=oc>=0; inp=op>=0
+        if inc!=inp
+            crossed=true
+            t=op/(op-oc)
+            push!(out,(prv[1]+t*(cur[1]-prv[1]),prv[2]+t*(cur[2]-prv[2])))
+        end
+        inc && push!(out,cur)
+    end
+    crossed || return isempty(out) ? out : poly
+    return out
+end
+
+# Absolute signed-shoelace area of a 2-D polygon.
+function _poly_area2(poly::Vector{NTuple{2,Float64}})
+    a=0.0
+    for i in eachindex(poly)
+        u,v=poly[i],poly[mod1(i+1,length(poly))]
+        a+=u[1]*v[2]-u[2]*v[1]
+    end
+    return abs(a)/2
+end
+
+# Tet-edge pierce points of the sheet triangle interior — the structurally
+# necessary nodes for conforming the plane: splitting every edge that crosses
+# the sheet strictly reduces the crossing count until the triangle interior is
+# tiled by coplanar faces. Fixed midpoints alone can stall once they exist.
+#
+# A bisected tetrahedron's plane section is a convex polygon whose vertices
+# lie on the tetrahedron's edges; the section only becomes coplanar faces once
+# EVERY strict edge crossing of that tetrahedron is a node. Filtering each
+# crossing by the target triangle deadlocks sections that straddle the
+# triangle's edge — the needed point lies outside it — so selection is per
+# tetrahedron: its section polygon must overlap the triangle, then all of its
+# strict crossings are emitted.
+function _sheet_plane_crossings3(mesh::Mesh,a,b,c)
+    n=_cross3(_sub3(b,a),_sub3(c,a))
+    _dot3(n,n)>0 || return NTuple{3,Float64}[]
+    offset=_dot3(n,a)
+    drop=abs(n[1])>=abs(n[2]) && abs(n[1])>=abs(n[3]) ? 1 :
+         abs(n[2])>=abs(n[3]) ? 2 : 3
+    ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+    p2(x)=(x[ax[1]],x[ax[2]])
+    t2=(p2(a),p2(b),p2(c))
+    crossings=NTuple{3,Float64}[]
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        pts=(_pt3(mesh,ids[1]),_pt3(mesh,ids[2]),_pt3(mesh,ids[3]),
+             _pt3(mesh,ids[4]))
+        dvals=ntuple(i->_dot3(n,pts[i])-offset,4)
+        (any(>(zero(eltype(dvals))),dvals) &&
+         any(<(zero(eltype(dvals))),dvals)) || continue
+        sec2=NTuple{2,Float64}[]
+        hits=NTuple{3,Float64}[]
+        for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+            du,dv=dvals[i],dvals[j]
+            (du==0 && dv==0) && continue
+            (du>0)==(dv>0) && continue
+            pu,pv=pts[i],pts[j]
+            if du==0
+                x=pu
+            elseif dv==0
+                x=pv
+            else
+                s=du/(du-dv)
+                x=(pu[1]+s*(pv[1]-pu[1]),pu[2]+s*(pv[2]-pu[2]),
+                   pu[3]+s*(pv[3]-pu[3]))
+                push!(hits,x)
+            end
+            push!(sec2,p2(x))
+        end
+        for i in 1:4
+            dvals[i]==0 && push!(sec2,p2(pts[i]))
+        end
+        length(sec2)>=3 || continue
+        # Order the (convex) section polygon angularly around its centroid.
+        cen=(sum(x->x[1],sec2)/length(sec2),sum(x->x[2],sec2)/length(sec2))
+        sort!(sec2;by=x->atan(x[2]-cen[2],x[1]-cen[1]))
+        _section_overlaps_triangle2(sec2,t2) || continue
+        append!(crossings,hits)
+    end
+    return crossings
+end
+
+# Residual pockets can remain uncovered after every strict section crossing is
+# a node: where the sheet plane runs along a nearly in-plane face or edge (two
+# vertices on the plane, a third a hair off), the section is degenerate — no
+# crossing exists to insert and no coplanar face tiles the region. Seeding the
+# pocket with an interior on-plane point forces coplanar faces there.
+# Returns up to `count` spread-out samples: a seed whose insertion degenerates
+# a nearly-coplanar parent can be swapped for a different pocket point.
+function _uncovered_sheet_points3(mesh::Mesh,a,b,c;count::Int=12)
+    faces,target,_=_mesh_covering_faces3(mesh,a,b,c)
+    target>0 || return NTuple{3,Float64}[]
+    out=NTuple{3,Float64}[]
+    fpts=NTuple{3,NTuple{3,Float64}}[
+        (_pt3(mesh,f[1]),_pt3(mesh,f[2]),_pt3(mesh,f[3])) for f in faces]
+    u=_sub3(b,a); w=_sub3(c,a)
+    scale=max(hypot(u...),hypot(w...))
+    for res in (24,64,160)
+        rinv=1/res
+        for i in 1:res-1, j in 1:res-1-i
+            x=(a[1]+(i*u[1]+j*w[1])*rinv, a[2]+(i*u[2]+j*w[2])*rinv,
+               a[3]+(i*u[3]+j*w[3])*rinv)
+            _node_at3(mesh,x;atol=1e-9)==0 || continue
+            any(f->_point_in_triangle3(x,f[1],f[2],f[3]),fpts) && continue
+            # keep candidates apart so they seed different sub-pockets
+            all(y->hypot((x[1]-y[1],x[2]-y[2],x[3]-y[3])...)>0.25*scale/res,
+                out) || continue
+            push!(out,x)
+            length(out)>=count && return out
+        end
+    end
+    return out
+end
+
+# Boundary-chain gaps of the sheet coverage: tetrahedron edges lying on the
+# target's recovered side chains that border no coplanar face whose third
+# vertex sits inside the target. Each gap is the rim of an uncovered sliver
+# along the boundary. For every gap edge, on-plane vertices inside the target
+# (nearest first) are the candidate third vertices for a face graft.
+function _sheet_chain_edge_gaps3(mesh::Mesh,a,b,c;max_ws::Int=6)
+    n=_cross3(_sub3(b,a),_sub3(c,a))
+    n2=_dot3(n,n)
+    n2>0 || return Tuple{NTuple{2,Int32},Vector{Int32}}[]
+    offset=_dot3(n,a)
+    onplane=Int32[]; inside=Int32[]
+    for v in axes(mesh.coords,2)
+        abs(_dot3(n,_pt3(mesh,v))-offset)<=1e-9*sqrt(n2) || continue
+        push!(onplane,v)
+        _point_in_triangle3(_pt3(mesh,v),a,b,c) && push!(inside,v)
+    end
+    onset=Set{Int32}(onplane)
+    third=Dict{NTuple{2,Int32},Vector{Int32}}()
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for (i,j,k) in ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+            u,v,w=ids[i],ids[j],ids[k]
+            (u in onset && v in onset && w in onset) || continue
+            for (x,y,z) in ((u,v,w),(v,w,u),(w,u,v))
+                e=x<y ? (x,y) : (y,x)
+                push!(get!(Vector{Int32},third,e),z)
+            end
+        end
+    end
+    gaps=Tuple{NTuple{2,Int32},Vector{Int32}}[]
+    for (p,q) in ((a,b),(b,c),(c,a))
+        for (u,v) in sort!(collect(_tet_edge_set(mesh)))
+            (_on_segment3(_pt3(mesh,u),p,q;atol=1e-9) &&
+             _on_segment3(_pt3(mesh,v),p,q;atol=1e-9)) || continue
+            e=u<v ? (u,v) : (v,u)
+            ws=get(third,e,Int32[])
+            any(x->_point_in_triangle3(_pt3(mesh,x),a,b,c),ws) && continue
+            mx=(_pt3(mesh,u).+_pt3(mesh,v))./2
+            near=sort!(inside;
+                       by=x->hypot((_pt3(mesh,x).-mx)...))
+            push!(gaps,(e,near[1:min(max_ws,length(near))]))
+        end
+    end
+    return gaps
+end
+
+# Interior pocket detection: a tet pierced by the sheet plane whose section
+# overlaps the target contributes an uncovered hole where no coplanar face
+# covers the section. The section∩target polygon is clipped against every
+# covering face; the centroid of each surviving fragment is a point guaranteed
+# inside a pocket, of arbitrary thinness.
+function _sheet_pocket_points3(mesh::Mesh,a,b,c)
+    n=_cross3(_sub3(b,a),_sub3(c,a))
+    _dot3(n,n)>0 || return NTuple{3,Float64}[]
+    offset=_dot3(n,a)
+    drop=abs(n[1])>=abs(n[2]) && abs(n[1])>=abs(n[3]) ? 1 :
+         abs(n[2])>=abs(n[3]) ? 2 : 3
+    ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+    p2(x)=(x[ax[1]],x[ax[2]])
+    t2=(p2(a),p2(b),p2(c))
+    covering,_,_=_mesh_covering_faces3(mesh,a,b,c)
+    f2s=[(p2(_pt3(mesh,f[1])),p2(_pt3(mesh,f[2])),p2(_pt3(mesh,f[3])))
+         for f in covering]
+    best=Tuple{Float64,NTuple{3,Float64}}[]
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        pts=(_pt3(mesh,ids[1]),_pt3(mesh,ids[2]),_pt3(mesh,ids[3]),
+             _pt3(mesh,ids[4]))
+        dvals=ntuple(i->_dot3(n,pts[i])-offset,4)
+        sec2=NTuple{2,Float64}[]
+        for (i,j) in ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))
+            du,dv=dvals[i],dvals[j]
+            (du==0 && dv==0) && continue
+            (du>0)==(dv>0) && continue
+            pu,pv=pts[i],pts[j]
+            x= du==0 ? pu : dv==0 ? pv :
+               (pu[1]+(du/(du-dv))*(pv[1]-pu[1]),
+                pu[2]+(du/(du-dv))*(pv[2]-pu[2]),
+                pu[3]+(du/(du-dv))*(pv[3]-pu[3]))
+            push!(sec2,p2(x))
+        end
+        for i in 1:4
+            dvals[i]==0 && push!(sec2,p2(pts[i]))
+        end
+        length(sec2)>=3 || continue
+        cen=(sum(x->x[1],sec2)/length(sec2),sum(x->x[2],sec2)/length(sec2))
+        sort!(sec2;by=x->atan(x[2]-cen[2],x[1]-cen[1]))
+        _section_overlaps_triangle2(sec2,t2) || continue
+        # Exact hole detection: clip the section into the target, then subtract
+        # every covering face — frag\F = ⋃ᵢ frag∩outside(edgeᵢ). A surviving
+        # fragment is an uncovered pocket of arbitrary thinness; its centroid
+        # is guaranteed inside the hole.
+        frags=[copy(sec2)]
+        for i in 1:3
+            p,q=t2[i],t2[mod1(i+1,3)]
+            keep=orient2(p,q,t2[mod1(i+2,3)])
+            keep==0 && continue
+            frags=[_clip_poly_halfplane2(f,p,q,keep) for f in frags]
+            filter!(f->length(f)>=3,frags)
+        end
+        isempty(frags) && continue
+        for f2 in f2s
+            isempty(frags) && break
+            next=Vector{NTuple{2,Float64}}[]
+            for frag in frags
+                whole=false
+                for i in 1:3
+                    p,q=f2[i],f2[mod1(i+1,3)]
+                    inside=orient2(p,q,f2[mod1(i+2,3)])
+                    inside==0 && continue
+                    g=_clip_poly_halfplane2(frag,p,q,-inside)
+                    if g===frag
+                        whole=true; break
+                    end
+                    length(g)>=3 && push!(next,g)
+                end
+                whole && push!(next,frag)
+            end
+            # Union pieces overlap; bound the replication by keeping only the
+            # largest fragments — slivers below this rank are clip noise.
+            if length(next)>64
+                sort!(next;by=_poly_area2,rev=true)
+                resize!(next,64)
+            end
+            frags=next
+        end
+        for frag in frags
+            a2=0.0
+            for i in eachindex(frag)
+                u,v=frag[i],frag[mod1(i+1,length(frag))]
+                a2+=u[1]*v[2]-u[2]*v[1]
+            end
+            abs(a2)/2>1e-9 || continue
+            cx=sum(x->x[1],frag)/length(frag)
+            cy=sum(x->x[2],frag)/length(frag)
+            # A garbage clip intersection (near-parallel edges → t≈0/0) can
+            # place the vertex-average centroid inside a covering face; such a
+            # point is not a pocket and the caller would silently skip it,
+            # dead-ending recovery. Emit the first fragment point verified
+            # strictly outside every covering face — a true pocket location.
+            qx=qy=0.0; found=false
+            for (ux,uy) in Iterators.flatten(([(cx,cy)],frag))
+                intarget=true
+                for i in 1:3
+                    p,q=t2[i],t2[mod1(i+1,3)]
+                    keep=orient2(p,q,t2[mod1(i+2,3)])
+                    keep==0 && continue
+                    if orient2(p,q,(ux,uy))*keep<0
+                        intarget=false; break
+                    end
+                end
+                intarget || continue
+                bad=false
+                for f2 in f2s
+                    fa,fb,fc=f2
+                    orient2(fa,fb,fc)==0 && continue
+                    s1=orient2(fa,fb,(ux,uy)); s2=orient2(fb,fc,(ux,uy))
+                    s3=orient2(fc,fa,(ux,uy))
+                    if (s1>0 && s2>0 && s3>0) || (s1<0 && s2<0 && s3<0)
+                        bad=true; break
+                    end
+                end
+                if !bad
+                    qx,qy=ux,uy; found=true; break
+                end
+            end
+            found || continue
+            d=(offset-n[ax[1]]*qx-n[ax[2]]*qy)/n[drop]
+            pt=drop==1 ? (d,qx,qy) : drop==2 ? (qx,d,qy) : (qx,qy,d)
+            push!(best,(abs(a2)/2,pt))
+        end
+    end
+    # Union-of-clips fragments can replicate one physical hole many times;
+    # report only the largest pockets so the caller attacks dominant holes
+    # first instead of churning on clipped sliver noise. Replicas of a single
+    # hole share its centroid, so geometric dedupe keeps the list diverse.
+    sort!(best;by=x->x[1],rev=true)
+    out3=NTuple{3,Float64}[]
+    for x in best
+        pt=x[2]
+        all(y->hypot(y[1]-pt[1],y[2]-pt[2],y[3]-pt[3])>1e-9,out3) || continue
+        push!(out3,pt)
+        length(out3)>=8 && break
+    end
+    return out3
+end
+
+# Snap Steiner vertices a hair off the sheet plane onto it. Intersections
+# produced by Float64 arithmetic land ~1e-12 beside the analytic plane; left
+# alone they split the sheet into two nearly coincident triangulations whose
+# faces mutually overlap in projection — defeating the exact-orient conformity
+# checks and inflating area coverage past target. Boundary vertices are never
+# touched: the surface-fill certificate matches nodes by exact coordinates.
+function _snap_to_plane3(mesh::Mesh,a,b,c;atol=1e-9)
+    n=_cross3(_sub3(b,a),_sub3(c,a)); n2=_dot3(n,n)
+    n2>0 || return mesh
+    offset=_dot3(n,a); lim=atol*sqrt(n2)
+    boundary_verts=falses(size(mesh.coords,2))
+    incidence=Dict{NTuple{3,Int32},Int}()
+    @inbounds for t in axes(mesh.tets,2)
+        ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        for (i,j,k) in ((2,3,4),(1,3,4),(1,2,4),(1,2,3))
+            f=_sorted_face3(ids[i],ids[j],ids[k])
+            incidence[f]=get(incidence,f,0)+1
+        end
+    end
+    for (f,c) in incidence
+        c==1 || continue
+        boundary_verts[f[1]]=true; boundary_verts[f[2]]=true
+        boundary_verts[f[3]]=true
+    end
+    star=Vector{Int}[Int[] for _ in axes(mesh.coords,2)]
+    @inbounds for t in axes(mesh.tets,2), i in 1:4
+        push!(star[mesh.tets[i,t]],t)
+    end
+    coords=nothing
+    @inbounds for v in axes(mesh.coords,2)
+        boundary_verts[v] && continue
+        x=(mesh.coords[1,v],mesh.coords[2,v],mesh.coords[3,v])
+        d=_dot3(n,x)-offset
+        abs(d)<=lim || continue
+        coords===nothing && (coords=copy(mesh.coords))
+        s=d/n2
+        nx=(x[1]-s*n[1],x[2]-s*n[2],x[3]-s*n[3])
+        # Reject the snap if moving this vertex would flatten or invert any
+        # incident tetrahedron — near-plane slivers sit within the snap range.
+        safe=true
+        for t in star[v]
+            q=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+            sv=tet_signed_volume(
+                q[1]==v ? nx : (coords[1,q[1]],coords[2,q[1]],coords[3,q[1]]),
+                q[2]==v ? nx : (coords[1,q[2]],coords[2,q[2]],coords[3,q[2]]),
+                q[3]==v ? nx : (coords[1,q[3]],coords[2,q[3]],coords[3,q[3]]),
+                q[4]==v ? nx : (coords[1,q[4]],coords[2,q[4]],coords[3,q[4]]))
+            so=tet_signed_volume(_pt3(mesh,q[1]),_pt3(mesh,q[2]),
+                                 _pt3(mesh,q[3]),_pt3(mesh,q[4]))
+            (sv==0 || (so!=0 && signbit(sv)!=signbit(so))) &&
+                (safe=false; break)
+        end
+        safe || continue
+        coords[1,v]=nx[1]; coords[2,v]=nx[2]; coords[3,v]=nx[3]
+    end
+    coords===nothing && return mesh
+    return Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris),
+                tets=copy(mesh.tets), seg_tag=copy(mesh.seg_tag),
+                tri_tag=copy(mesh.tri_tag), tet_tag=copy(mesh.tet_tag))
+end
+
+# A strict-interior insert into a tet that already carries two on-plane
+# vertices spawns a coplanar child face (x,wi,wj) with no counterpart in the
+# neighbour's complex — vertex-on-face nonconformity that double-counts
+# coverage. Such spots need face-level repair (the graft pass), not one more
+# vertex, so these hosts are refused for interior candidates.
+function _onplane_host3(out::Mesh,x,pln,poff)
+    t0,_,_=_containing_tet(out,x)
+    t0>0 || return false
+    np=0
+    lim=1e-9*sqrt(_dot3(pln,pln))
+    for i in 1:4
+        abs(_dot3(pln,_pt3(out,out.tets[i,t0]))-poff)<=lim && (np+=1)
+    end
+    return np>=2
+end
+
+# Accept a structural change only when target coverage does not regress. The
+# keepfaces registry guides a fill to preserve earlier faces, but a cavity that
+# cannot satisfy every constraint relaxes them and trades one face for another —
+# without this gate the same pockets oscillate across iterations. Coverage is the
+# true progress measure, so it must be monotone. Returns (accepted, coverage).
+function _accept_sheet3(g, a, b, c, cov_cur, pf)
+    g===nothing && return (false, cov_cur)
+    cf2,_,c2=_mesh_covering_faces3(g,a,b,c)
+    c2>=cov_cur-1e-12 || return (false, cov_cur)
+    for f in cf2
+        push!(pf,_sorted_face3(f...))
+    end
+    return (true, c2)
+end
+
 function recover_triangle3(mesh::Mesh, a, b, c; max_inserts::Integer=256)
-    out=recover_segment3(mesh,a,b)
+    out=recover_segment3(_snap_to_plane3(mesh,a,b,c),a,b)
     out=recover_segment3(out,b,c)
     out=recover_segment3(out,c,a)
+    # Boundary recovery inserts its own crossing vertices — snap those too
+    # before the interior pass begins.
+    out=_snap_to_plane3(out,a,b,c)
+    # Every candidate Steiner point is analytically on the sheet plane, but
+    # crossing interpolation leaves them ~1e-12 off — vertices that close form
+    # tilted sliver tets whose faces overlap true coplanar faces. Project each
+    # candidate onto the exact plane before insertion.
+    pln=_cross3(_sub3(b,a),_sub3(c,a))
+    pln2=_dot3(pln,pln); poff=_dot3(pln,a)
+    snapx=pln2>0 ? (x->begin d=_dot3(pln,x)-poff;
+                     (x[1]-d/pln2*pln[1],x[2]-d/pln2*pln[2],x[3]-d/pln2*pln[3])
+                    end) : (x->x)
+    uc_done=0
+    pf,_=_protected_cells!()
+    _,_,cov_cur=_mesh_covering_faces3(out,a,b,c;collect_faces=false)
     for _ in 1:max_inserts
         mesh_covers_triangle3(out,a,b,c) && return out
-        # split the longest uncovered geometric edge of the sheet by inserting its midpoint
-        mid=_add3(_scale3(_add3(a,b),0.5), (0.0,0.0,0.0))
-        # try midpoints of the three sides, then the centroid
-        candidates=(_scale3(_add3(a,b),0.5), _scale3(_add3(b,c),0.5),
-                    _scale3(_add3(c,a),0.5), _scale3(_add3(_add3(a,b),c),1/3))
+        # Sheet faces recovered so far must survive every later cavity fill in
+        # this same loop — an unregistered face gets retriangulated away and
+        # the pocket it covered recurs (observed as an oscillating pair of
+        # pockets trading places across iterations).
+        for f in _mesh_covering_faces3(out,a,b,c)[1]
+            push!(pf,_sorted_face3(f...))
+        end
         inserted=false
-        for x in candidates
+        # Accept a structural change only when target coverage does not
+        # regress — see _accept_sheet3.
+        for x in _sheet_plane_crossings3(out,a,b,c)
+            x=snapx(x)
             _node_at3(out,x; atol=1e-9)==0 || continue
             try
-                out,_=insert_steiner3(out,x)
-                inserted=true
-                break
+                m2,_=insert_steiner3(out,x)
+                ok,c2=_accept_sheet3(m2,a,b,c,cov_cur,pf)
+                ok && (out=m2; cov_cur=c2; inserted=true)
             catch err
                 err isa InterruptException && rethrow()
                 (err isa ArgumentError || err isa ErrorException) || rethrow()
             end
         end
-        inserted || throw(ErrorException("recover_triangle3: could not insert a Steiner point on the sheet"))
+        inserted && continue
+        # fallback: midpoints of the three sides, then the centroid
+        candidates=(_scale3(_add3(a,b),0.5), _scale3(_add3(b,c),0.5),
+                    _scale3(_add3(c,a),0.5), _scale3(_add3(_add3(a,b),c),1/3))
+        for x in candidates
+            x=snapx(x)
+            (_node_at3(out,x; atol=1e-9)==0 && !_onplane_host3(out,x,pln,poff)) || continue
+            try
+                m2,_=insert_steiner3(out,x)
+                ok,c2=_accept_sheet3(m2,a,b,c,cov_cur,pf)
+                if ok; out=m2; cov_cur=c2; inserted=true; break; end
+            catch err
+                err isa InterruptException && rethrow()
+                (err isa ArgumentError || err isa ErrorException) || rethrow()
+            end
+        end
+        if !inserted && uc_done<32
+            uc=_uncovered_sheet_points3(out,a,b,c)
+            # A thin uncovered band yields hundreds of grid samples; inserting
+            # a vertex is only a seed for later face grafts, so cap the total
+            # number spent here — beyond it the pocket/graft pass is the only
+            # mechanism that actually adds coverage.
+            nins=0
+            for x in uc
+                x=snapx(x)
+                if _onplane_host3(out,x,pln,poff)
+                    g=_insert_onplane_steiner3(out,x,pln,pln2,poff)
+                    ok,c2=_accept_sheet3(g,a,b,c,cov_cur,pf)
+                    if ok
+                        out=g; cov_cur=c2; inserted=true
+                        uc_done+=1
+                        (nins+=1)>=8 && break
+                    end
+                    continue
+                end
+                try
+                    m2,_=insert_steiner3(out,x)
+                    ok,c2=_accept_sheet3(m2,a,b,c,cov_cur,pf)
+                    if ok
+                        out=m2; cov_cur=c2; inserted=true
+                        uc_done+=1; (nins+=1)>=8 && break
+                    end
+                catch err
+                    err isa InterruptException && rethrow()
+                    (err isa ArgumentError || err isa ErrorException) || rethrow()
+                end
+            end
+        end
+        if !inserted
+            # Graft pass: coverage shortfalls that survive every insert are
+            # boundary slivers — retriangulate the pipe of one gap edge to
+            # install the missing coplanar face directly.
+            gaps=_sheet_chain_edge_gaps3(out,a,b,c)
+            for (e,ws) in gaps
+                for w in ws
+                    g=_graft_sheet_face3(out,e[1],e[2],w)
+                    ok,c2=_accept_sheet3(g,a,b,c,cov_cur,pf)
+                    if ok; out=g; cov_cur=c2; inserted=true; break; end
+                end
+                inserted && break
+            end
+        end
+        if !inserted
+            # Interior pockets: a pierced tet whose section is inside the
+            # target but uncovered is a hole in the plane triangulation away
+            # from every boundary edge. Grafting an enclosing on-plane
+            # triangle over the pocket installs the missing faces directly;
+            # when no enclosing vertex triple exists the pocket point itself
+            # is inserted so the next pass can tile around it.
+            pockets=_sheet_pocket_points3(out,a,b,c)
+            if !isempty(pockets)
+                n=_cross3(_sub3(b,a),_sub3(c,a)); n2=_dot3(n,n)
+                offset=_dot3(n,a)
+                drop=abs(n[1])>=abs(n[2]) && abs(n[1])>=abs(n[3]) ? 1 :
+                     abs(n[2])>=abs(n[3]) ? 2 : 3
+                ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+                pp(x)=(x[ax[1]],x[ax[2]])
+                inside=Int32[]
+                for v in axes(out.coords,2)
+                    abs(_dot3(n,_pt3(out,v))-offset)<=1e-9*sqrt(n2) || continue
+                    _point_in_triangle3(_pt3(out,v),a,b,c) &&
+                        push!(inside,v)
+                end
+                cf_dirty=true; cf=NTuple{3,Int32}[]
+                for x in pockets
+                    if cf_dirty
+                        cf=_mesh_covering_faces3(out,a,b,c)[1]
+                        cf_dirty=false
+                    end
+                    # An earlier graft in this same pass may already cover x;
+                    # grafting on top of it would waste a fill and risk an
+                    # overlapping face. The skip must match the pocket
+                    # detector's exact-arithmetic coverage test (a fragment
+                    # centroid is strictly outside every covering face's
+                    # interior) — a looser tolerance would silently skip thin
+                    # wedges sitting near a face edge, dead-ending the pass.
+                    x2=pp(x)
+                    covered=false
+                    for f in cf
+                        fa,fb,fc=pp(_pt3(out,f[1])),pp(_pt3(out,f[2])),
+                                 pp(_pt3(out,f[3]))
+                        orient2(fa,fb,fc)==0 && continue
+                        s1=orient2(fa,fb,x2); s2=orient2(fb,fc,x2)
+                        s3=orient2(fc,fa,x2)
+                        if (s1>0 && s2>0 && s3>0) || (s1<0 && s2<0 && s3<0)
+                            covered=true; break
+                        end
+                    end
+                    covered && continue
+                    tri=nothing; bestarea=Inf
+                    dists=Vector{Float64}(undef,length(inside))
+                    @inbounds for ci in eachindex(inside)
+                        dists[ci]=hypot((_pt3(out,inside[ci]).-x)...)
+                    end
+                    cand=inside[sortperm(dists)]
+                    nc=min(48,length(cand))
+                    for i in 1:nc-2, j in i+1:nc-1, k in j+1:nc
+                        u,v,w=cand[i],cand[j],cand[k]
+                        pu,pv,pw=_pt3(out,u),_pt3(out,v),_pt3(out,w)
+                        # Strict 2-D containment: a grafted face removes the
+                        # pocket only when x lies strictly inside its projected
+                        # triangle — a needle-triple whose projection is
+                        # degenerate leaves the clip subtracting nothing.
+                        f2a,f2b,f2c=pp(pu),pp(pv),pp(pw)
+                        orient2(f2a,f2b,f2c)==0 && continue
+                        s1=orient2(f2a,f2b,x2); s2=orient2(f2b,f2c,x2)
+                        s3=orient2(f2c,f2a,x2)
+                        ((s1>0 && s2>0 && s3>0) ||
+                         (s1<0 && s2<0 && s3<0)) || continue
+                        # A face carrying a foreign on-plane vertex can never
+                        # be a legal fill face: a vertex on an edge gives every
+                        # containing tet a vertex-on-edge, and a vertex
+                        # strictly inside gives a vertex-on-face (observed:
+                        # feasible (na,nb,x,y)=0 regardless of cavity growth).
+                        # The conforming form is the subdivided chain/fan
+                        # through that vertex, which a single graft cannot
+                        # express — reject such triples.
+                        blocked=false
+                        for z in inside
+                            (z==u || z==v || z==w) && continue
+                            z2=pp(_pt3(out,z))
+                            o1=orient2(f2a,f2b,z2); o2=orient2(f2b,f2c,z2)
+                            o3=orient2(f2c,f2a,z2)
+                            ((o1>0 || o2>0 || o3>0) &&
+                             (o1<0 || o2<0 || o3<0)) && continue
+                            if o1==0 || o2==0 || o3==0
+                                # On an edge only counts when between the
+                                # endpoints — the orient signs above permit
+                                # points on the supporting line beyond them.
+                                onedge=false
+                                for (e1,e2) in ((f2a,f2b),(f2b,f2c),(f2c,f2a))
+                                    orient2(e1,e2,z2)==0 || continue
+                                    min(e1[1],e2[1])-1e-15<=z2[1]<=
+                                        max(e1[1],e2[1])+1e-15 &&
+                                    min(e1[2],e2[2])-1e-15<=z2[2]<=
+                                        max(e1[2],e2[2])+1e-15 &&
+                                        (onedge=true; break)
+                                end
+                                onedge || continue
+                            end
+                            blocked=true; break
+                        end
+                        blocked && continue
+                        # The smallest enclosing triangle pierces the fewest
+                        # tetrahedra, giving the graft's pipe cavity its best
+                        # chance of being refillable.
+                        ta=_triangle_area3(pu,pv,pw)
+                        ta<bestarea && (tri=(u,v,w); bestarea=ta)
+                    end
+                    if tri!==nothing
+                        g=_graft_sheet_face3(out,tri[1],tri[2],tri[3])
+                        ok,c2=_accept_sheet3(g,a,b,c,cov_cur,pf)
+                        if ok
+                            out=g; cov_cur=c2; inserted=true
+                            cf_dirty=true
+                            continue
+                        end
+                    end
+                    xs=snapx(x)
+                    if _onplane_host3(out,xs,pln,poff)
+                        # Consistent insertion: refill the on-plane edge star
+                        # with x seeded into a coplanar face — the only way to
+                        # add a vertex here without vertex-on-face overlap.
+                        g=_insert_onplane_steiner3(out,xs,pln,pln2,poff)
+                        ok,c2=_accept_sheet3(g,a,b,c,cov_cur,pf)
+                        if ok
+                            out=g; cov_cur=c2; inserted=true
+                            cf_dirty=true
+                        end
+                        continue
+                    end
+                    try
+                        oldn=size(out.coords,2)
+                        m2,vid=insert_steiner3(out,xs)
+                        # An insert that returns an existing node makes no
+                        # progress — the pocket is still uncovered and the
+                        # same points would recur next pass.
+                        if Int(vid)>oldn
+                            ok,c2=_accept_sheet3(m2,a,b,c,cov_cur,pf)
+                            if ok
+                                out=m2; cov_cur=c2; inserted=true
+                                cf_dirty=true
+                                continue
+                            end
+                        end
+                    catch err
+                        err isa InterruptException && rethrow()
+                        (err isa ArgumentError || err isa ErrorException) ||
+                            rethrow()
+                    end
+                end
+            end
+        end
+        inserted || throw(ErrorException(
+            "recover_triangle3: could not insert a Steiner point on the sheet"))
     end
     throw(ErrorException("recover_triangle3: exceeded max_inserts=$max_inserts"))
 end
@@ -2216,12 +3900,36 @@ function _insert_steiner3(mesh::Mesh,p::NTuple{3,Float64})
     elseif zeros==2
         _split_tets_on_edge(mesh,t,p,mask)
     else
-        throw(ArgumentError("insert_steiner3: point $p coincides with a tet vertex but was not found"))
+        throw(ArgumentError(
+            "insert_steiner3: point $p coincides with a tet vertex but was not found"))
     end
     diagnostic=validate(out)
-    diagnostic.ok || throw(ErrorException(
-        "insert_steiner3: insertion produced an invalid mesh — "*
-        join(diagnostic.messages,"; ")))
+    if !diagnostic.ok
+        repaired=_repair_steiner_split3(mesh,t,zeros,mask,p)
+        repaired===nothing || return repaired, Int32(size(mesh.coords,2)+1)
+        throw(ErrorException(
+            "insert_steiner3: insertion produced an invalid mesh — "*
+            join(diagnostic.messages,"; ")))
+    end
+    # A split can also yield an exactly flat child — all four vertices on one
+    # plane, e.g. the point lying on a face or edge that lies on an embedded
+    # sheet. Combinatorially valid, it still leaves degenerate coplanar faces
+    # behind; retriangulate the local region instead.
+    vnew=Int32(size(out.coords,2))
+    flat=false
+    @inbounds for j in axes(out.tets,2)
+        (out.tets[1,j]==vnew || out.tets[2,j]==vnew ||
+         out.tets[3,j]==vnew || out.tets[4,j]==vnew) || continue
+        tet_signed_volume(_pt3(out,out.tets[1,j]),_pt3(out,out.tets[2,j]),
+                          _pt3(out,out.tets[3,j]),_pt3(out,out.tets[4,j]))==0 &&
+            (flat=true; break)
+    end
+    if flat
+        repaired=_repair_steiner_split3(mesh,t,zeros,mask,p)
+        repaired===nothing || return repaired, vnew
+        throw(ErrorException(
+            "insert_steiner3: insertion produced a flat tetrahedron"))
+    end
     before=_tet_volume_sum3(mesh,"insert_steiner3 input")
     after=_tet_volume_sum3(out,"insert_steiner3 output")
     tolerance=max(1e-12*before,128eps(Float64)*max(before,after))
@@ -2386,6 +4094,58 @@ function _split_tets_on_edge(mesh::Mesh, t::Int, p, mask)
     end
     isempty(drop) && throw(ErrorException("insert_steiner3: edge split found no incident tetrahedra"))
     return _rebuild_tets(mesh, drop, news, ntags, p)
+end
+
+function _repair_steiner_split3(mesh::Mesh, t::Int, zeros::Int, mask, p)
+    # A naive split can yield an exactly flat child when the inserted point is
+    # coplanar with a nearly-degenerate parent — e.g. a tetrahedron whose face
+    # lies exactly on an embedded sheet plane while its apex is a hair off it:
+    # splitting the near-in-plane edge puts all four vertices of one child back
+    # on the plane. Repair by retriangulating the replaced region together with
+    # its face neighbours, with the new vertex included in the fill.
+    ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+    anchors=zeros==0 ? Int32[ids[1],ids[2],ids[3],ids[4]] :
+            Int32[ids[i] for i in 1:4 if !mask[i]]
+    length(anchors)>=2 || return nothing
+    ntet=size(mesh.tets,2)
+    in_cav=falses(ntet)
+    @inbounds for j in 1:ntet
+        q=(mesh.tets[1,j],mesh.tets[2,j],mesh.tets[3,j],mesh.tets[4,j])
+        found=true
+        for a in anchors
+            (a==q[1]||a==q[2]||a==q[3]||a==q[4]) || (found=false; break)
+        end
+        found && (in_cav[j]=true)
+    end
+    any(in_cav) || return nothing
+    # Grow by rings of face neighbours: a flat child's coplanar face is shared
+    # with a tetrahedron that must join the retriangulation, and tight
+    # non-convex pockets may need a second ring before a valid fill exists.
+    for ring in 1:2
+        changed=false
+        for j in findall(in_cav)
+            q=(mesh.tets[1,j],mesh.tets[2,j],mesh.tets[3,j],mesh.tets[4,j])
+            fset=Set{NTuple{3,Int32}}((
+                _sorted_face3(q[2],q[3],q[4]),_sorted_face3(q[1],q[3],q[4]),
+                _sorted_face3(q[1],q[2],q[4]),_sorted_face3(q[1],q[2],q[3])))
+            for n in 1:ntet
+                in_cav[n] && continue
+                r=(mesh.tets[1,n],mesh.tets[2,n],mesh.tets[3,n],mesh.tets[4,n])
+                for k in 1:4
+                    if _sorted_face3(_tet_opp_face3(r,k)...) in fset
+                        in_cav[n]=true; changed=true; break
+                    end
+                end
+            end
+        end
+        count(in_cav)>96 && break
+        in_cav=_cavity_closure_vertex_faces3(mesh,in_cav)
+        out=_refill_segment_cavity3(mesh,in_cav,anchors[1],anchors[2];
+                                    new_pt=p,require_edge=false)
+        out===nothing || return out
+        changed || break
+    end
+    return nothing
 end
 
 """
@@ -4549,6 +6309,7 @@ function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
     a = hm/sqrt(3.0)
     (isfinite(a)&&a>0) || throw(ArgumentError("mesh_sized_conforming: hmax is below Float64 spacing resolution"))
     sg = _raygrid(surface)
+    boundary_distance=DistanceField(surface;include_points=false,include_segments=false)
     nx=_ceil_count3((xhi-xlo)/a,"mesh_sized_conforming","x intervals")
     ny=_ceil_count3((yhi-ylo)/a,"mesh_sized_conforming","y intervals")
     nz=_ceil_count3((zhi-zlo)/a,"mesh_sized_conforming","z intervals")
@@ -4562,11 +6323,9 @@ function mesh_sized_conforming(surface::Mesh; hmax::Real, inset::Real=hmax,
     @inbounds for i in 0:nx, j in 0:ny, k in 0:nz
         px=xlo+i*(xhi-xlo)/nx; py=ylo+j*(yhi-ylo)/ny; pz=zlo+k*(zhi-zlo)/nz
         _inside_grid((px,py,pz),sg) || continue
-        ok=true
-        for v in 1:nn
-            if hypot(px-Px[v],py-Py[v],pz-Pz[v]) < ins; ok=false; break; end
-        end
-        ok && (push!(Ix,px); push!(Iy,py); push!(Iz,pz))
+        clearance=field_value(boundary_distance,px,py,pz)
+        (clearance>0 && clearance>=ins) || continue
+        push!(Ix,px); push!(Iy,py); push!(Iz,pz)
     end
     lastreason="no seed produced a conforming valid sized mesh"; lastnrec=0
     for kk in 0:nseeds-1

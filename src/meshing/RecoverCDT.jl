@@ -254,7 +254,7 @@ function build_regions(pts, facets)
     end
     comp=Dict{Int,Vector{Int}}(); for fi in 1:nf; push!(get!(comp,ufind(u,fi),Int[]),fi); end
     regions=Region[]
-    for (_,fis) in comp
+    for fis in sort!(collect(values(comp)); by=minimum)
         tris=[facets[fi] for fi in fis]; a,b,c=tris[1]
         A0=pts[a]; N=rcross(rsub(pts[b],pts[a]),rsub(pts[c],pts[a]))
         an=(abs(N[1]),abs(N[2]),abs(N[3])); drop = an[1]>=an[2] ? (an[1]>=an[3] ? 1 : 3) : (an[2]>=an[3] ? 2 : 3)
@@ -837,15 +837,16 @@ function recover_partition_cdt(surfaces;
         E=Set{NTuple{2,Int}}()
         for t in etets,i in 1:4,j in i+1:4;push!(E,ekey(t[i],t[j]));end
 
-        missing=NTuple{2,Int}[e for e in keys(seg2regs) if !(e in E)]
+        missing=sort!(NTuple{2,Int}[e for e in keys(seg2regs) if !(e in E)])
         if !isempty(missing)
             for e in missing;haskey(seg2regs,e)&&split_seg!(e);end
             continue
         end
 
         candidates=RBv[]
+        sortedE=sort!(collect(E))
         for reg in regions
-            for e in E
+            for e in sortedE
                 pierced,y=edge_pierces(reg,pts,e[1],e[2],budget)
                 if pierced;push!(candidates,y);break;end
             end
@@ -918,14 +919,16 @@ function _recover(surface::Mesh,limits::_RecoveryLimits,caller::AbstractString)
         # 1) missing crease subsegments -> midpoint split
         missing=NTuple{2,Int}[]
         for e in keys(seg2regs); (e in E) || push!(missing,e); end
+        sort!(missing)
         if !isempty(missing)
             for e in missing; haskey(seg2regs,e) && split_seg!(e); end
             continue
         end
         # 2) facet piercing -> insert exact piercing point (one per region per iter)
         newpts=RBv[]
+        sortedE=sort!(collect(E))
         for reg in regions
-            for e in E
+            for e in sortedE
                 pr,y=edge_pierces(reg,pts,e[1],e[2],budget)
                 pr && (push!(newpts,y); break)
             end

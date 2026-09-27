@@ -474,6 +474,18 @@ function _insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false,
     vid = Int32(vid)
     px, py = _pt(T, vid)
     t0 = locate(T, px, py, vid)
+    cavity, boundary = _delaunay_cavity(T, t0, vid, constrained)
+    for t in cavity; _killtri!(T, t); end
+    _retriangulate_cavity!(T, boundary, Int32(vid), newtris)
+    return nothing
+end
+
+# Delaunay insertion cavity rooted at `t0`: every neighbour whose
+# circumcircle contains `vid` is absorbed; constrained edges are never
+# crossed when `constrained` (CDT-preserving). Returns `(cavity, boundary)`
+# where `boundary` lists the shell edges `(a, b, outside_neighbour)` — the
+# same structure upstream's `recurFindCavity` produces for `insertVertexB`.
+function _delaunay_cavity(T::Triangulation, t0, vid, constrained::Bool)
     cavity = Int32[t0]
     incav = Set{Int32}(); push!(incav, t0)
     boundary = Tuple{Int32,Int32,Int32}[]     # (edge_a, edge_b, outside neighbour)
@@ -494,9 +506,7 @@ function _insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false,
             end
         end
     end
-    for t in cavity; _killtri!(T, t); end
-    _retriangulate_cavity!(T, boundary, Int32(vid), newtris)
-    return nothing
+    return cavity, boundary
 end
 
 function _retriangulate_cavity!(T::Triangulation, boundary, vid::Int32,
@@ -1187,19 +1197,62 @@ end
     return value>1
 end
 
-@inline function _needs_refine(T, t, B, maxarea, sizefn,edgefn)
+# Circumradius of the triangle in coordinate units; Inf for degenerate input.
+@inline function _circumradius2(a,b,c)
+    _,_,edge_scale,_=_quality_frame2(a,b,c)
+    edge_scale==0 && return Inf
+    cc=_circumcenter2(a,b,c)
+    R=_dist(a,cc)
+    return isfinite(R) ? R : Inf
+end
+
+# Preserve the ordinary arithmetic order, but do not let an overflowing sum
+# turn three finite positive sizes into an unconstrained mean.
+@inline function _mean_size3(a,b,c)
+    total=a+b+c
+    return isfinite(total) || isinf(a) || isinf(b) || isinf(c) ?
+        total/3 : a/3+b/3+c/3
+end
+
+@inline function _needs_refine(T, t, B, maxarea, sizefn,edgefn,radiusfn,
+                               gsizes=nothing)
     a=_pt(T,_vert(T,t,1)); b=_pt(T,_vert(T,t,2)); c=_pt(T,_vert(T,t,3))
     (_tri_area2(a,b,c) > maxarea || _radius_edge2(a,b,c) > B) && return true
-    if sizefn !== nothing
+    if gsizes !== nothing
+        # `MTri3` badness: XYZ circumradius over `min(lc, lcBGM)`, the means
+        # of the triangle's own vertex sizes (propagated / background).
+        i=_vert(T,t,1);j=_vert(T,t,2);k=_vert(T,t,3)
+        lc=min(_mean_size3(gsizes.vsize[i],gsizes.vsize[j],gsizes.vsize[k]),
+               _mean_size3(gsizes.vbgm[i],gsizes.vbgm[j],gsizes.vbgm[k]))
+        return _circumradius2(a,b,c) > (sqrt(2.0)/2.0)*lc
+    end
+    if sizefn !== nothing || radiusfn !== nothing
         cx = a[1]/3+b[1]/3+c[1]/3; cy = a[2]/3+b[2]/3+c[2]/3
-        rawh = sizefn(cx, cy)
-        rawh isa Real ||
-            throw(ArgumentError("refine!: size callback must return a real size (got $(typeof(rawh))) at ($cx,$cy)"))
-        h=_mesh2_float(rawh,"size callback result")
-        (isfinite(h) && h > 0) ||
-            throw(ArgumentError("refine!: size callback returned invalid size $rawh at ($cx,$cy)"))
-        emax = max(_dist(a,b), _dist(b,c), _dist(c,a))
-        emax > h && return true
+        h = 0.0
+        if sizefn !== nothing
+            rawh = sizefn(cx, cy)
+            rawh isa Real ||
+                throw(ArgumentError("refine!: size callback must return a real size (got $(typeof(rawh))) at ($cx,$cy)"))
+            h=_mesh2_float(rawh,"size callback result")
+            (isfinite(h) && h > 0) ||
+                throw(ArgumentError("refine!: size callback returned invalid size $rawh at ($cx,$cy)"))
+            emax = max(_dist(a,b), _dist(b,c), _dist(c,a))
+            emax > h && return true
+        end
+        if radiusfn !== nothing
+            if radiusfn !== sizefn
+                rawh = radiusfn(cx, cy)
+                rawh isa Real ||
+                    throw(ArgumentError("refine!: size_radius callback must return a real size (got $(typeof(rawh))) at ($cx,$cy)"))
+                h=_mesh2_float(rawh,"size_radius callback result")
+                (isfinite(h) && h > 0) ||
+                    throw(ArgumentError("refine!: size_radius callback returned invalid size $rawh at ($cx,$cy)"))
+            end
+            # Gmsh's Delaunay insertion stops at R/lc < sqrt(2)/2
+            # (`MTri3` radiusNorm 2): refine while the circumradius exceeds
+            # that fraction of the local target size.
+            _circumradius2(a,b,c) > (sqrt(2.0)/2.0)*h && return true
+        end
     end
     if edgefn!==nothing
         (_edge_metric_violation(edgefn,a,b) || _edge_metric_violation(edgefn,b,c) ||
@@ -1224,17 +1277,21 @@ function _encroaches(pa,pb,p)
     return diametral_sign(pa,pb,p)<0
 end
 
-# encroached by an adjacent apex? (in a CDT this suffices to detect any encroachment)
-function _subseg_encroached(T::Triangulation, a, b)
+# encroaching vertex for subsegment (a,b), or 0 — the apex of the triangle on
+# each side suffices to detect any encroachment in a CDT.
+function _subseg_encroacher(T::Triangulation, a, b)
     t1, k1, t2 = _edge_triangles(T, a, b)
-    t1 == 0 && return false
+    t1 == 0 && return Int32(0)
     pa = _pt(T,a); pb = _pt(T,b)
     p = _vert(T, t1, k1)
-    !_is_ghost_v(p) && _encroaches(pa, pb, _pt(T,p)) && return true
+    !_is_ghost_v(p) && _encroaches(pa, pb, _pt(T,p)) && return p
     j = _nslot(T, t2, t1); s = _vert(T, t2, j)
-    !_is_ghost_v(s) && _encroaches(pa, pb, _pt(T,s)) && return true
-    return false
+    !_is_ghost_v(s) && _encroaches(pa, pb, _pt(T,s)) && return s
+    return Int32(0)
 end
+
+# encroached by an adjacent apex? (in a CDT this suffices to detect any encroachment)
+_subseg_encroached(T::Triangulation, a, b) = _subseg_encroacher(T, a, b) != 0
 
 @inline function _setflag!(v::Vector{Bool}, i::Integer, val::Bool)
     while length(v) < i; push!(v, false); end
@@ -1278,9 +1335,24 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
     return mid
 end
 
+# Upstream `bidimMeshData`: per-vertex size arrays grown as Steiner vertices
+# are inserted. `vsize` is the propagated field — boundary vertices carry
+# `vSizesMap` (incident-edge sizes), inserted vertices the barycentric
+# interpolation inside their containing triangle (`lc1` in `addVertex`).
+# `vbgm` holds the background values — identical to `vsize` for initial
+# vertices, `BGM_MeshSize` at the insertion point for Steiner vertices (Inf
+# when no background evaluator exists, so the propagated side governs).
+struct _GmshVertexSizes{F}
+    vsize::Vector{Float64}
+    vbgm::Vector{Float64}
+    bgm::F
+end
+
 """
     refine!(T; min_angle_deg=25.0, max_area=Inf, size=nothing,
-            edge_metric=nothing, maxsteps=300_000) -> Vector{Bool}
+            edge_metric=nothing, size_radius=nothing,
+            vertex_sizes=nothing, vertex_bgm=nothing, bgm_size=nothing,
+            maxsteps=300_000) -> Vector{Bool}
 
 Ruppert refinement of the constrained Delaunay triangulation `T`: split
 encroached subsegments and insert circumcenters of skinny interior triangles
@@ -1291,9 +1363,38 @@ If `maxsteps` is exhausted while any criterion remains unmet, refinement throws 
 explicit blocker rather than returning a mesh that violates the requested bounds.
 `edge_metric(ax,ay,bx,by)` can additionally return the dimensionless metric
 length of an edge; values greater than one request refinement.
+`size(cx,cy)` bounds each triangle's longest edge by the local size, while
+`size_radius(cx,cy)` bounds its circumradius by `sqrt(2)/2` times the local
+size — the criterion Gmsh's 2-D Delaunay insertion uses (`MTri3`,
+`radiusNorm=2`). Both may be given; a triangle failing either bound refines.
+`gmsh_insertion=true` switches the Steiner insertion rules to Gmsh's
+`insertVertexB` model (meshGFaceDelaunayInsertion.cpp): constrained segments
+are never split on encroachment, and a candidate point is rejected — the
+triangle permanently skipped like upstream's `forceRadius(-1)` — when a new
+triangle edge would violate `d < 0.5·LL` to a vertex, `d < 0.4·LL`
+perpendicular to a constrained edge, or `cos(v) < -0.9999`. `LL` is the mean
+of the size callback at the candidate triangle's vertices (the boundary-edge
+length when no callback is given). Because rejections leave some triangles
+unrefined, `gmsh_insertion` callers accept a mesh that can retain locally
+oversized triangles near constraints, exactly as Gmsh does.
+`vertex_sizes` (requires `gmsh_insertion`) supplies per-vertex target sizes
+for the initial vertices — upstream's `vSizesMap`. Refinement then propagates
+them through the mesh: each inserted vertex is sized by barycentric
+interpolation inside its containing triangle, and a triangle is bad when its
+circumradius exceeds `sqrt(2)/2·min(lc, lcBGM)`, where `lc` and `lcBGM` are
+the means of the propagated and background (`vertex_bgm`, defaulting to the
+propagated values) sizes of its own three vertices. `bgm_size(x,y)` is the
+background evaluator assigned to inserted vertices — upstream's
+`BGM_MeshSize`. In this mode the angle/area bounds still apply when set
+(`min_angle_deg=0` disables them for the pure upstream R/lc criterion), while
+`size`, `size_radius`, and `edge_metric` must be left unset.
 """
 function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
-                 size=nothing, edge_metric=nothing, maxsteps::Integer=300_000)
+                 size=nothing, edge_metric=nothing, size_radius=nothing,
+                 gmsh_insertion::Bool=false,
+                 vertex_sizes=nothing, vertex_bgm=nothing, bgm_size=nothing,
+                 model_vertices=nothing,
+                 maxsteps::Integer=300_000)
     _assert_operable(T,"refine!")
     angle = _mesh2_float(min_angle_deg,"min_angle_deg")
     (isfinite(angle) && 0 <= angle < 60) ||
@@ -1317,21 +1418,160 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     # The quality scan resumes from `bad_scan_from`; every call starts with a
     # complete scan because the criteria may differ from an earlier call.
     T.bad_scan_from=Int32(1)
+    # `gmsh_insertion` mode: triangles whose Steiner candidate was rejected by
+    # the LL-distance rules stay permanently out of the queue (upstream
+    # `forceRadius(-1)`). Keys are sorted vertex triples so triangulation-slot
+    # recycling cannot leak a mark onto an unrelated triangle.
+    skipped=Set{NTuple{3,Int32}}()
+    gsizes=nothing
+    vertex_sizes===nothing && (vertex_bgm!==nothing || bgm_size!==nothing) &&
+        throw(ArgumentError("refine!: vertex_bgm and bgm_size require vertex_sizes"))
+    if vertex_sizes!==nothing
+        gmsh_insertion || throw(ArgumentError(
+            "refine!: vertex_sizes requires gmsh_insertion=true"))
+        size===nothing && size_radius===nothing && edge_metric===nothing ||
+            throw(ArgumentError(
+                "refine!: vertex_sizes cannot be combined with size, " *
+                "size_radius, or edge_metric"))
+        vertex_sizes isa AbstractVector{<:Real} || throw(ArgumentError(
+            "refine!: vertex_sizes must be a vector of real sizes"))
+        length(vertex_sizes)==T.nreal || throw(ArgumentError(
+            "refine!: vertex_sizes must hold one size per vertex " *
+            "($(T.nreal) vertices, got $(length(vertex_sizes)))"))
+        vsize=Float64.(vertex_sizes)
+        all(s->isfinite(s) && s>0,vsize) || throw(ArgumentError(
+            "refine!: vertex_sizes entries must be finite and positive"))
+        vbgm=if vertex_bgm===nothing
+            copy(vsize)
+        else
+            vertex_bgm isa AbstractVector{<:Real} || throw(ArgumentError(
+                "refine!: vertex_bgm must be a vector of real sizes"))
+            length(vertex_bgm)==T.nreal || throw(ArgumentError(
+                "refine!: vertex_bgm must hold one size per vertex " *
+                "($(T.nreal) vertices, got $(length(vertex_bgm)))"))
+            bg=Float64.(vertex_bgm)
+            # Background entries may be Inf (no constraint); NaN or
+            # non-positive values are invalid.
+            all(s->!isnan(s) && s>0,bg) || throw(ArgumentError(
+                "refine!: vertex_bgm entries must be positive"))
+            bg
+        end
+        gsizes=_GmshVertexSizes(vsize,vbgm,bgm_size)
+    end
+    # Upstream's perpendicular-distance test (`d4 < .4·LL`) applies to shell
+    # edges whose endpoints both live on model vertices/curves
+    # (`onWhat()->dim() != 2`), not on the triangle interior — every vertex
+    # of a constrained or embedded segment qualifies, plus any caller-added
+    # `model_vertices` (embedded points). Steiner vertices never qualify.
+    onmodel=nothing
+    if gmsh_insertion
+        onmodel=BitSet()
+        for key in Iterators.flatten((T.seg,T.internal))
+            push!(onmodel,key[1]);push!(onmodel,key[2])
+        end
+        if model_vertices!==nothing
+            model_vertices isa Bool && throw(ArgumentError(
+                "refine!: model_vertices must not be Bool"))
+            for v in model_vertices
+                (v isa Integer && !(v isa Bool) && 1<=v<=T.nreal) || throw(ArgumentError(
+                    "refine!: model_vertices entry $v is not a vertex of the triangulation"))
+                push!(onmodel,Int32(v))
+            end
+        end
+    elseif model_vertices!==nothing
+        throw(ArgumentError(
+            "refine!: model_vertices requires gmsh_insertion=true"))
+    end
+    llsrc=size_radius===nothing ? size : size_radius
     for _ in 1:nsteps
-        # (1) split an encroached subsegment, if any
-        enc = _find_encroached(T)
+        # (1) split an encroached subsegment, if any — Gmsh mode never does:
+        # `insertVertexB` preserves boundary edges and rejects the point.
+        enc = gmsh_insertion ? nothing : _find_encroached(T)
         if enc !== nothing
             _split_subsegment!(T, enc[1], enc[2], interior,pointids)
             continue
         end
         # (2) pick a triangle that violates the angle/area/size criteria
-        t = _find_bad(T, interior, B, area, size,edge_metric)
+        t = _find_bad(T, interior, B, area, size,edge_metric,size_radius,
+                      gmsh_insertion ? skipped : nothing, gsizes)
         if t==0
             _assert_operable(T,"refine! result")
             return interior
         end
         a=_vert(T,t,1); b=_vert(T,t,2); c=_vert(T,t,3)
         cc = _circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
+        if gmsh_insertion
+            # Upstream `insertAPoint`: the point is placed first (the exact
+            # predicates need its coordinates), the cavity grows from `worst`
+            # while the point is strictly inside its circumcircle and
+            # otherwise from the triangle actually containing it (`ptin`),
+            # and `insertVertexB` then rejects on a single-triangle cavity,
+            # an Euler count mismatch, a non-star-shaped cavity, or a
+            # too-close shell edge — leaving `worst` out of the queue.
+            key=(cc[1]==0 ? 0.0 : cc[1],cc[2]==0 ? 0.0 : cc[2])
+            vid=Int32(0);ptin=Int32(0);lc1=NaN;bg=Inf
+            cavity=nothing;boundary=nothing
+            ok=false
+            try
+                if isfinite(cc[1]) && isfinite(cc[2]) && !haskey(pointids,key)
+                    # `BGM_MeshSize` before mutating T: a callback failure cannot
+                    # strand an unreferenced coordinate.
+                    gsizes===nothing || (bg=_gmsh_bgm(gsizes,cc))
+                    vid=_add_vertex!(T,cc[1],cc[2])
+                    pointids[key]=vid
+                    if _in_circumcircle(T,t,vid)
+                        cavity,boundary=_delaunay_cavity(T,t,vid,true)
+                        ptin=_cavity_container(T,cavity,cc)
+                    else
+                        tc=try
+                            locate(T,cc[1],cc[2],vid)
+                        catch err
+                            err isa InterruptException && rethrow()
+                            Int32(0)
+                        end
+                        if tc!=0 && tc<=length(interior) && interior[tc] &&
+                           !_is_ghost_tri(T,tc)
+                            ptin=tc
+                            cavity,boundary=_delaunay_cavity(T,ptin,vid,true)
+                        end
+                    end
+                    if ptin!=0 && gsizes!==nothing
+                        ta=_vert(T,ptin,1);tb=_vert(T,ptin,2);td=_vert(T,ptin,3)
+                        w=_barycentric2(_pt(T,ta),_pt(T,tb),_pt(T,td),cc)
+                        lc1 = w===nothing ? NaN :
+                            w[1]*gsizes.vsize[ta]+w[2]*gsizes.vsize[tb]+
+                            w[3]*gsizes.vsize[td]
+                    end
+                end
+                ok = ptin!=0 &&
+                     (gsizes===nothing || (isfinite(lc1) && lc1>0)) &&
+                     _gmsh_cavity_accept(T,cavity,boundary,cc,onmodel,
+                                         _ShellLL(T,cc,llsrc,gsizes,lc1,bg))
+            finally
+                # Candidate evaluation has not changed topology. Roll back
+                # its coordinate on rejection and on callback/geometry errors.
+                if !ok && vid!=0
+                    pop!(T.x);pop!(T.y);pop!(T.vtri);T.nreal-=1
+                    delete!(pointids,key)
+                end
+            end
+            if !ok
+                # `forceRadius(0)`/`forceRadius(-1)`: drop the point, keep the
+                # triangle out of the queue.
+                push!(skipped,_trikey(T,t))
+                continue
+            end
+            # A failure past this point is a structural invariant break (a
+            # partially flipped cavity cannot be undone by popping the
+            # coordinate), so it propagates rather than skipping.
+            for ct in cavity; _killtri!(T,ct); end
+            newt=Int32[]
+            _retriangulate_cavity!(T,boundary,vid,newt)
+            for nt in newt; _setflag!(interior,nt,true); end
+            gsizes===nothing ||
+                (push!(gsizes.vsize,lc1);push!(gsizes.vbgm,bg))
+            continue
+        end
         # (3) if the circumcenter encroaches subsegments, split those instead
         sp = _encroached_by_point(T, cc)
         if sp !== nothing
@@ -1343,9 +1583,10 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         fallback=(pa[1]/3+pb[1]/3+pc[1]/3,pa[2]/3+pb[2]/3+pc[2]/3)
         _insert_steiner!(T, cc, interior,pointids;fallback=fallback)
     end
-    enc = _find_encroached(T)
+    enc = gmsh_insertion ? nothing : _find_encroached(T)
     T.bad_scan_from=Int32(1)
-    bad = _find_bad(T, interior, B, area, size,edge_metric)
+    bad = _find_bad(T, interior, B, area, size,edge_metric,size_radius,
+                    gmsh_insertion ? skipped : nothing, gsizes)
     if enc===nothing&&bad==0
         _assert_operable(T,"refine! result")
         return interior
@@ -1353,6 +1594,181 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     remaining = enc === nothing ? "a triangle still violates a quality/area/size bound" :
                                   "constrained segment $(enc) remains encroached"
     throw(ErrorException("refine!: reached maxsteps=$maxsteps before convergence; $remaining"))
+end
+
+# Sorted vertex triple identifying a triangle independent of its storage slot
+# (slots recycle through `T.freelist` during refinement).
+@inline _trikey(T,t) =
+    Tuple(sort!(Int32[_vert(T,t,1),_vert(T,t,2),_vert(T,t,3)]))
+
+# Per-candidate LL resolver for the cavity shell sweep — a callable struct,
+# not a lambda, so the per-iteration `lc1`/`bg` state is never boxed.
+struct _ShellLL{Tt,S}
+    T::Tt
+    cc::NTuple{2,Float64}
+    llsrc::S
+    gsizes::Union{Nothing,_GmshVertexSizes}
+    lc1::Float64
+    bg::Float64
+end
+@inline function (s::_ShellLL)(u::Integer,v::Integer)
+    s.gsizes===nothing && return _gmsh_edge_ll(s.T,u,v,s.cc,s.llsrc)
+    return min(_mean_size3(s.gsizes.vsize[u],s.gsizes.vsize[v],s.lc1),
+               _mean_size3(s.gsizes.vbgm[u],s.gsizes.vbgm[v],s.bg))
+end
+
+# `LL` for one candidate triangle edge — upstream evaluates the mean of the
+# three vertex sizes of each new triangle `(u,v,cc)` (`ONE_THIRD * vSizes`
+# in `insertVertexB`). With no size callback the edge's own length is the
+# scale, matching upstream's edge-length floors.
+function _gmsh_edge_ll(T,u,v,cc,llsrc)
+    d3=hypot(_pt(T,v)[1]-_pt(T,u)[1],_pt(T,v)[2]-_pt(T,u)[2])
+    llsrc===nothing && return d3
+    values=try
+        (llsrc(_pt(T,u)[1],_pt(T,u)[2]),
+         llsrc(_pt(T,v)[1],_pt(T,v)[2]),
+         llsrc(cc[1],cc[2]))
+    catch err
+        err isa InterruptException && rethrow()
+        # An out-of-domain candidate has no interpolated size — upstream
+        # drops it (`forceRadius(0)`); returning Inf forces the reject.
+        return Inf
+    end
+    sizes=map(values) do raw
+        raw isa Real || throw(ArgumentError(
+            "refine!: size callback must return a real size (got $(typeof(raw)))"))
+        value=_mesh2_float(raw,"size callback result")
+        isfinite(value) && value>0 || throw(ArgumentError(
+            "refine!: size callback returned invalid size $raw"))
+        value
+    end
+    return _mean_size3(sizes...)
+end
+
+# First cavity member containing `p`, matching upstream's `ptin` search —
+# barycentric membership with `invMapUV`'s 1e-8 tolerance. Ghost members can
+# never contain an in-domain point.
+function _cavity_container(T::Triangulation,cavity,cc)
+    tol=1e-8
+    for ct in cavity
+        _is_ghost_tri(T,ct) && continue
+        a=_vert(T,ct,1);b=_vert(T,ct,2);c=_vert(T,ct,3)
+        w=_barycentric2(_pt(T,a),_pt(T,b),_pt(T,c),cc)
+        w===nothing && continue
+        (w[2]>=-tol && w[3]>=-tol && w[2]<=1+tol && w[3]<=1+tol &&
+         w[1]>-tol) && return ct
+    end
+    return Int32(0)
+end
+
+# The `insertVertexB` accept test over the Delaunay cavity: reject when the
+# cavity has a single triangle or reaches outside the domain (ghost member),
+# when the shell count violates the Euler relation `shell == cavity + 2`,
+# when the retriangulated area differs from the cavity area (not star
+# shaped), or when any shell edge is too close — `d < .5·LL` to an endpoint,
+# `d < .4·LL` perpendicular on a model-edge pair (both endpoints `onmodel`),
+# or a degenerate new angle (`cosv < -.9999`). `llof(u,v)` resolves `LL` for
+# the candidate triangle `(u,v,new)`.
+function _gmsh_cavity_accept(T::Triangulation,cavity,boundary,cc,
+                             onmodel,llof)
+    length(cavity)==1 && return false
+    for ct in cavity
+        _is_ghost_tri(T,ct) && return false
+    end
+    length(boundary)!=length(cavity)+2 && return false
+    # All areas and distances must use one frame. Scale extreme coordinates
+    # by an exact power of two so products neither overflow nor underflow;
+    # the ordinary coordinate range retains its original arithmetic.
+    magnitude=max(abs(cc[1]),abs(cc[2]))
+    for ct in cavity, k in 1:3
+        p=_pt(T,_vert(T,ct,k))
+        magnitude=max(magnitude,abs(p[1]),abs(p[2]))
+    end
+    scale=0x1p-250<=magnitude<=0x1p250 ? 1.0 : exp2(exponent(magnitude))
+    center=(cc[1]/scale,cc[2]/scale)
+    oldv=0.0
+    for ct in cavity
+        oldv+=_tri_area2(_scaled_pt2(T,_vert(T,ct,1),scale),
+                         _scaled_pt2(T,_vert(T,ct,2),scale),
+                         _scaled_pt2(T,_vert(T,ct,3),scale))
+    end
+    newv=0.0;tooclose=false
+    for (u,v,_) in boundary
+        pu=_scaled_pt2(T,u,scale);pv=_scaled_pt2(T,v,scale)
+        d1=hypot(center[1]-pu[1],center[2]-pu[2])
+        d2=hypot(center[1]-pv[1],center[2]-pv[2])
+        d3=hypot(pv[1]-pu[1],pv[2]-pu[2])
+        ll=llof(u,v)/scale
+        if d1==0.0 || d2==0.0
+            tooclose=true
+        else
+            (d1<0.5*ll || d2<0.5*ll) && (tooclose=true)
+            if u in onmodel && v in onmodel && d3>0
+                d4=abs((pv[1]-pu[1])*(pu[2]-center[2])-
+                       (pu[1]-center[1])*(pv[2]-pu[2]))/d3
+                d4<0.4*ll && (tooclose=true)
+            end
+            (d1*d1+d2*d2-d3*d3)/(2*d1*d2)<-0.9999 && (tooclose=true)
+        end
+        newv+=_tri_area2(pu,pv,center)
+    end
+    abs(oldv-newv) > 1e-12*oldv && return false
+    tooclose && return false
+    return true
+end
+
+@inline function _scaled_pt2(T,i,scale)
+    p=_pt(T,i)
+    return (p[1]/scale,p[2]/scale)
+end
+
+# Barycentric coordinates of `p` inside triangle (a,b,c); `nothing` for a
+# degenerate triangle.
+@inline function _barycentric2(a,b,c,p)
+    v0x=b[1]-a[1];v0y=b[2]-a[2]
+    v1x=c[1]-a[1];v1y=c[2]-a[2]
+    v2x=p[1]-a[1];v2y=p[2]-a[2]
+    d=muladd(v0x,v1y,-v1x*v0y)
+    n2=v2x*v1y-v1x*v2y
+    n3=v0x*v2y-v2x*v0y
+    if !(isfinite(d) && abs(d)>=floatmin(Float64) && isfinite(n2) && isfinite(n3))
+        # Exact fallback also distinguishes true degeneracy from underflow.
+        R=Rational{BigInt}
+        v0x=R(b[1])-R(a[1]);v0y=R(b[2])-R(a[2])
+        v1x=R(c[1])-R(a[1]);v1y=R(c[2])-R(a[2])
+        v2x=R(p[1])-R(a[1]);v2y=R(p[2])-R(a[2])
+        exact_d=v0x*v1y-v1x*v0y
+        exact_d==0 && return nothing
+        w2=Float64((v2x*v1y-v1x*v2y)/exact_d)
+        w3=Float64((v0x*v2y-v2x*v0y)/exact_d)
+        return (1.0-w2-w3,w2,w3)
+    end
+    w2=n2/d
+    w3=n3/d
+    return (1.0-w2-w3,w2,w3)
+end
+
+# `BGM_MeshSize` for a candidate point — the background evaluator when one is
+# installed, otherwise Inf so `min(lc, lcBGM)` keeps the propagated side.
+# Candidates are evaluated before `locate` proves them in-domain, so an
+# evaluation error means "no background constraint here" (upstream fields are
+# globally defined and never fail); a returned value that is not a real,
+# positive size remains a contract error.
+function _gmsh_bgm(gsizes::_GmshVertexSizes,cc)
+    gsizes.bgm===nothing && return Inf
+    raw=try
+        gsizes.bgm(cc[1],cc[2])
+    catch err
+        err isa InterruptException && rethrow()
+        return Inf
+    end
+    raw isa Real || throw(ArgumentError(
+        "refine!: bgm_size callback must return a real size " *
+        "(got $(typeof(raw)))"))
+    v=_mesh2_float(raw,"bgm_size callback result")
+    (isnan(v) || v<=0) && throw(ArgumentError(
+        "refine!: bgm_size callback returned invalid size $raw"))
+    return v
 end
 
 # Deterministic iteration order over the constraint set (a Set has none), so the
@@ -1389,12 +1805,15 @@ end
 # coordinates, so resuming the scan there returns exactly the slot a full scan
 # would; the result is identical to scanning from slot 1 while the total cost
 # drops from quadratic to linear in the number of insertions.
-function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn,edgefn)
+function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn,edgefn,radiusfn,
+                   skipped::Union{Nothing,Set{NTuple{3,Int32}}}=nothing,
+                   gsizes=nothing)
     start=max(Int(T.bad_scan_from),1)
     nslots=length(T.alive)
     @inbounds for t in start:nslots
         (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) || continue
-        if _needs_refine(T, t, B, maxarea, sizefn,edgefn)
+        skipped!==nothing && _trikey(T,t) in skipped && continue
+        if _needs_refine(T, t, B, maxarea, sizefn,edgefn,radiusfn,gsizes)
             T.bad_scan_from=Int32(t)
             return Int32(t)
         end
@@ -1430,8 +1849,15 @@ function _insert_steiner!(T::Triangulation,p,interior::Vector{Bool},pointids;fal
     end
     vid = _add_vertex!(T, p[1], p[2])
     pointids[key]=vid
-    tc = locate(T, p[1], p[2], vid)
-    if _is_ghost_tri(T, tc) || tc > length(interior) || !interior[tc]
+    # `locate` may fail on numerically degenerate cavity shells; the point is
+    # uninsertable then, exactly like a landing outside the domain.
+    tc = try
+        locate(T, p[1], p[2], vid)
+    catch err
+        err isa InterruptException && rethrow()
+        Int32(0)
+    end
+    if tc == 0 || _is_ghost_tri(T, tc) || tc > length(interior) || !interior[tc]
         pop!(T.x); pop!(T.y); pop!(T.vtri); T.nreal -= 1;delete!(pointids,key)     # undo
         fallback===nothing &&
             throw(ErrorException("refine!: no representable interior Steiner point for the selected triangle"))

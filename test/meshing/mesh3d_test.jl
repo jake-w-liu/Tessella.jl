@@ -125,6 +125,26 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test !validate(flat).ok
         @test_throws ArgumentError insert_steiner3(flat,(0.1,0.1,0.0))
 
+        @testset "near vertices retain exact Steiner coordinates" begin
+            for scale in (1.0,1e-9)
+                coords=Float64[0 1 0 0;0 0 1 0;0 0 0 1].*scale
+                source=Mesh(coords;tets=reshape(Int32[1,2,3,4],4,1))
+                delta=1e-13*scale
+                for (point,count) in (((delta,delta,delta),4),
+                                      ((delta,delta,0.0),3),((delta,0.0,0.0),2))
+                    result,id=insert_steiner3(source,point)
+                    @test id==5 && ntets(result)==count
+                    @test Tuple(result.coords[:,id])==point
+                    @test validate(result).ok
+                    @test mesh_vol(result)≈mesh_vol(source) rtol=1e-12
+                end
+                @test_throws ArgumentError insert_steiner3(source,(-delta,delta,delta))
+                duplicate,id=insert_steiner3(source,(0.,0.,0.))
+                @test duplicate===source && id==1
+                @test source.coords==coords
+            end
+        end
+
         C=Float64[0 1 0 0;0 0 1 0;0 0 0 1]
         tagged=Mesh(C;segs=reshape(Int32[1,2],2,1),tris=reshape(Int32[1,2,3],3,1),
                     tets=reshape(Int32[1,2,3,4],4,1),seg_tag=Int32[7],
@@ -134,7 +154,7 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test ntris(fine)==4 && all(==(Int32(8)),fine.tri_tag)
         @test all(==(Int32(9)),fine.tet_tag) && validate(fine).ok
         @test mesh_crc(fine).sha==
-              "c10618c1d184e5339f6425da55020306d5f823c7668be82551970b7950ca847e"
+              "7d82449b8719d528d3cd4249f49de51f03f8521ace748cfd8b383af6fae68d2a"
         @test_throws ArgumentError refine_to_size(tagged,Inf)
         @test_throws ArgumentError refine_to_size(tagged,0.75;max_nodes=true)
         @test_throws ArgumentError refine_to_size(tagged,0.75;max_tets=1.0)
@@ -169,7 +189,7 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test_throws ArgumentError mesh_sized_cdt(cdtbox;hmax=0.5,max_nodes=8)
         sized_box=mesh_sized_cdt(cdtbox;hmax=1.0)
         @test mesh_crc(sized_box).sha==
-              "57dabcaab87268d4552c5df9b16dec04f08a0b7417024ff5b20f0a4a1e0356d2"
+              "e314a5a023c44b1e3ae996ee7d2fe66cd99d2779b92cf4dbcf723469beea9eb6"
         @test_throws ArgumentError mesh_sized_conforming(box_surface(0,1,0,1,0,1);hmax=1.,inset=-1.)
         @test isempty(Docs.undocumented_names(Tessella;private=false))
     end
@@ -1004,6 +1024,23 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
             C=Matrix{Float64}(undef,3,length(pr)); for (i,p) in enumerate(pr); C[:,i]=[p...]; end
             Tm=Matrix{Int32}(undef,3,length(faces)); for (t,f) in enumerate(faces); Tm[:,t]=Int32[f...]; end
             Mesh(C; tris=Tm)
+        end
+        @testset "lattice clearance is measured from boundary faces" begin
+            surface=box_surface(0.,1.7,0.,1.3,0.,1.1)
+            sized=mesh_sized_conforming(surface;hmax=0.7,inset=0.3,max_seeds=2)
+            original=Set(Tuple(p) for p in eachcol(surface.coords))
+            added=[Tuple(p) for p in eachcol(sized.coords) if !(Tuple(p) in original)]
+            @test !isempty(added)
+            @test validate(sized).ok
+            @test all(p->min(p[1],1.7-p[1],p[2],1.3-p[2],p[3],1.1-p[3])>=0.3,added)
+            cube=box_surface(0.,1.,0.,1.,0.,1.)
+            corners=Set(Tuple(p) for p in eachcol(cube.coords))
+            for inset in (0.0,0.5)
+                filled=mesh_sized_conforming(cube;hmax=0.9,inset=inset,max_seeds=2)
+                interior=Set(Tuple(p) for p in eachcol(filled.coords) if !(Tuple(p) in corners))
+                @test interior==Set([(0.5,0.5,0.5)])
+                @test validate(filled).ok
+            end
         end
         @testset "sphere (thick curved): conforming + genuine interior size reduction" begin
             s=_icosphere(3.0,2); base=recover_boundary(s); m=mesh_sized_conforming(s; hmax=1.5)

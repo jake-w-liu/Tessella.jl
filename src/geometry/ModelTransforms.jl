@@ -911,7 +911,7 @@ function _rewire_entity_refs!(m::GeoModel, dim::Int, drop::Int, keep::Int)
         master=Int(c.master_entity)==drop ? keep : Int(c.master_entity)
         periodic[key]=ModelPeriodicConstraint(c.dim,c.slave_entity,
                                               Int32(master),c.affine,
-                                              c.reversed,c.atol)
+                                              c.reversed,c.atol,c.derived)
     end
     m.periodic=periodic
     discrete=Dict{Tuple{Int,Int},DiscreteEntity}()

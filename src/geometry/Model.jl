@@ -17,7 +17,8 @@ using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
 using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
                   MixedPeriodicLink, MixedMesh, msh_num_nodes, msh_family,
                   msh_dimension
-using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh
+using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
+                _vert, _is_ghost_tri, _is_ghost_v
 using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
                    PostViewField, field_value, size_at,
                    GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length
@@ -25,7 +26,9 @@ using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
                 refine_to_size
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
-                _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill
+                _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill,
+                _protected_cells!, _sorted_face3,
+                _on_segment3, _pt3
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
@@ -87,7 +90,14 @@ struct ModelPeriodicConstraint
     affine::Union{Nothing,NTuple{16,Float64}}
     reversed::Bool
     atol::Float64
+    # True when the relation was induced by a periodic surface's boundary
+    # correspondence (upstream `GEdge::setMeshMaster` inside
+    # `GFace::setMeshMaster`) rather than declared directly.
+    derived::Bool
 end
+
+ModelPeriodicConstraint(dim,slave,master,affine,reversed,atol)=
+    ModelPeriodicConstraint(dim,slave,master,affine,reversed,atol,false)
 
 """
 Parametrization-free model entity created by `add_discrete_entity!` (Gmsh's
@@ -128,6 +138,14 @@ const _GeoExtrudeParams=NamedTuple{
     (:layers,:heights,:scale_last,:recombine,:quad_to_tri,:recomb_laterals),
     Tuple{Vector{Int},Vector{Float64},Bool,Bool,Symbol,Bool}}
 
+# Longest tet edge that can still satisfy Gmsh's 3-D criterion `R <= lc`
+# (`MTet4::setup`): every edge is a chord of the circumsphere, so a tet with
+# an edge longer than 2·lc has circumradius > lc unconditionally and upstream
+# would attempt its insertion. `refine_to_size`'s edge bound therefore uses
+# 2·lc — the `lc`->edge-bound conversion that flags exactly the tets Gmsh's
+# normalized-radius criterion always rejects.
+const _GMSH_TET_EDGE_OVER_RADIUS=2.0
+
 """
 Owned per-entity meshing attributes on a [`GeoModel`](@ref), mirroring the
 Gmsh `model.mesh` generation-attribute surface. Empty containers mean the
@@ -153,7 +171,10 @@ mutable struct ModelMeshingAttributes
     reverse::Dict{Tuple{Int,Int},Bool}
     algorithm::Dict{Tuple{Int,Int},Int}
     size_at_params::Dict{Tuple{Int,Int},Vector{Tuple{Vector{Float64},Float64}}}
-    size_from_boundary::Dict{Tuple{Int,Int},Bool}
+    # Per-entity `MeshSizeFromBoundary`/`setSizeFromBoundary` int attribute —
+    # upstream stores `(int)val` verbatim; `< 0` behaves as unset and falls
+    # back to the global `lc_extend_from_boundary`.
+    size_from_boundary::Dict{Tuple{Int,Int},Int}
     size_callback::Any
     compounds::Vector{Pair{Int,Vector{Int}}}
     outward_orientation::Set{Int}
@@ -172,6 +193,13 @@ mutable struct ModelMeshingAttributes
     lc_factor::Float64
     recombine_all::Bool
     recombine_algo::Int
+    # `Mesh.MeshSizeExtendFromBoundary` (upstream `lcExtendFromBoundary`):
+    # the global mode per-entity records fall back to. 1 (default) extends
+    # the largest incident boundary edge into surfaces/volumes, 2 extends
+    # the smallest on the volume side; upstream's `Extend1dMeshIn2dSurfaces`
+    # enables surfaces for `> 0` or `== -2`, `Extend2dMeshIn3dVolumes` for
+    # `> 0` or `== -3`, and a resolved 0 disables.
+    lc_extend_from_boundary::Int
     attached::Dict{Tuple{Int,Int},DiscreteEntity}
     homology_requests::Vector{NamedTuple{(:kind,:domain,:subdomain,:dims),
         Tuple{String,Vector{Int},Vector{Int},Vector{Int}}}}
@@ -189,7 +217,7 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Tuple{Int,Int},Bool}(),
     Dict{Tuple{Int,Int},Int}(),
     Dict{Tuple{Int,Int},Vector{Tuple{Vector{Float64},Float64}}}(),
-    Dict{Tuple{Int,Int},Bool}(),
+    Dict{Tuple{Int,Int},Int}(),
     nothing,
     Pair{Int,Vector{Int}}[],
     Set{Int}(),
@@ -200,6 +228,7 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     false,
     1.0,
     false,
+    1,
     1,
     Dict{Tuple{Int,Int},DiscreteEntity}(),
     NamedTuple{(:kind,:domain,:subdomain,:dims),
@@ -817,6 +846,7 @@ function _model_periodic_surface_edge_map(
         return lo,hi
     end
     pairs=Pair{Int,Int}[]
+    pair_reversed=Bool[]
     # The multimap orders by (begin, end) vertex tags; equal keys keep
     # insertion order (boundary first, then embedded).
     ordered_slave=sort(slave_edges;by=curve->m.curves[curve])
@@ -826,15 +856,18 @@ function _model_periodic_surface_edge_map(
         forward_list=get(master_lookup,(mb0,mb1),Int[])
         backward_list=get(master_lookup,(mb1,mb0),Int[])
         master_curve=nothing
+        curve_reversed=false
         if length(forward_list)==1 && (isempty(backward_list) || mb0==mb1)
             master_curve=forward_list[1]
         elseif length(backward_list)==1 && (isempty(forward_list) || mb0==mb1)
             master_curve=backward_list[1]
+            curve_reversed=true
         else
             local_lo,local_hi=edge_bbox(curve)
             tolerance=1e-3*_model_point_distance(local_lo,local_hi)
             local_mid=slave_geometry(curve)
-            for candidates in (forward_list,backward_list)
+            for (candidates,reversed) in
+                    ((forward_list,false),(backward_list,true))
                 master_curve===nothing || break
                 isempty(candidates) && continue
                 for candidate in candidates
@@ -851,6 +884,7 @@ function _model_periodic_surface_edge_map(
                     if local_mid!==nothing && master_mid!==nothing &&
                             _model_point_distance(local_mid,master_mid)<tolerance
                         master_curve=candidate
+                        curve_reversed=reversed
                         break
                     end
                     lo,hi=edge_bbox(candidate)
@@ -861,6 +895,7 @@ function _model_periodic_surface_edge_map(
                     if _model_point_distance(mapped_lo,local_lo)<tolerance &&
                             _model_point_distance(mapped_hi,local_hi)<tolerance
                         master_curve=candidate
+                        curve_reversed=reversed
                         break
                     end
                 end
@@ -872,8 +907,9 @@ function _model_periodic_surface_edge_map(
             "$mb0 $mb1) in surface $master"))
         on_match===nothing || on_match(curve,master_curve)
         push!(pairs,curve=>master_curve)
+        push!(pair_reversed,curve_reversed)
     end
-    return point_map,pairs
+    return point_map,pairs,pair_reversed
 end
 
 function _model_periodic_dependency_parents(
@@ -1043,8 +1079,12 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
     abs_slaves=abs.(slaves)
     length(unique(abs_slaves))==length(abs_slaves) || throw(ArgumentError(
         "$caller: slave $label tags must be unique"))
+    # A relation induced by a periodic surface is not a declaration conflict —
+    # an explicit pair for the same slave replaces it like any other
+    # `setMeshMaster` call.
     overlap=sort!(Int[slave for slave in abs_slaves
-                      if haskey(m.periodic,(d,slave))])
+                      if haskey(m.periodic,(d,slave)) &&
+                         !m.periodic[(d,slave)].derived])
     # `.geo` redeclaration replaces a slave's relation like upstream's
     # `setMeshMaster` — `overwrite` skips the uniqueness check and the write
     # phase below replaces the stored constraint atomically.
@@ -1058,6 +1098,10 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
             affine,caller;name="affine transform")
     end
     pending=ModelPeriodicConstraint[]
+    # Periodic surface relations induce curve-level masters upstream
+    # (`GFace::setMeshMaster` calls `GEdge::setMeshMaster` per resolved
+    # boundary pair) — collect them alongside the surface pair.
+    derived_curve_constraints=ModelPeriodicConstraint[]
     for (pair_index,(signed_slave,signed_master)) in
             enumerate(zip(slaves,masters))
         slave=abs(signed_slave);master=abs(signed_master)
@@ -1097,25 +1141,46 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
             # (boundary + embedded) edge correspondence at declaration time
             # and stores the induced curve masters — a slave edge without a
             # counterpart aborts the whole relation.
-            _model_periodic_surface_edge_map(
+            _,curve_pairs,curve_reversed=_model_periodic_surface_edge_map(
                 m,slave,master,stored_affine,tolerance,caller)
+            for (pair_index,(slave_curve,master_curve)) in
+                    enumerate(curve_pairs)
+                push!(derived_curve_constraints,ModelPeriodicConstraint(
+                    1,Int32(slave_curve),Int32(master_curve),stored_affine,
+                    curve_reversed[pair_index],tolerance,true))
+            end
         end
         push!(pending,ModelPeriodicConstraint(
             d,Int32(slave),Int32(master),stored_affine,reversed,tolerance))
     end
-    existing=model_periodic_constraints(m)
-    isempty(overlap) ||
-        filter!(existing) do constraint
-            !((constraint.dim,Int(constraint.slave_entity)) in
-              Set((d,slave) for slave in overlap))
-        end
+    existing=_model_all_periodic_constraints(m)
+    # Every newly installed pair — declared or surface-derived — replaces the
+    # stored relation for its slave; keep `existing` free of those keys so the
+    # dependency check sees one master per slave.
+    replacing=Set{Tuple{Int,Int}}()
+    for constraint in pending
+        push!(replacing,(constraint.dim,Int(constraint.slave_entity)))
+    end
+    for constraint in derived_curve_constraints
+        push!(replacing,(1,Int(constraint.slave_entity)))
+    end
+    filter!(existing) do constraint
+        return !((constraint.dim,Int(constraint.slave_entity)) in replacing)
+    end
     # Upstream stores cyclic relations — `setMeshMaster` has no cycle check —
     # and serializes every stored pair. Only mesh-time master copies defer on
     # pending masters, starving cycle members; that surfaces where the copy
     # runs, not at declaration.
-    _model_periodic_dependency_parents(vcat(existing,pending),caller)
+    _model_periodic_dependency_parents(
+        vcat(existing,pending,derived_curve_constraints),caller)
     for constraint in pending
         m.periodic[(constraint.dim,Int(constraint.slave_entity))]=constraint
+    end
+    # Derived curve masters install last so the slave curve's stored
+    # parameters mirror its master (upstream `GEdge::setMeshMaster` semantics
+    # — later relations overwrite earlier ones for the same slave curve).
+    for constraint in derived_curve_constraints
+        m.periodic[(1,Int(constraint.slave_entity))]=constraint
     end
     return nothing
 end
@@ -1127,6 +1192,17 @@ Return the model's immutable periodic constraints in deterministic dimension and
 slave-entity order.
 """
 function model_periodic_constraints(m::GeoModel)
+    # The declared set only — relations induced by a periodic surface's
+    # boundary pairing are internal machinery (upstream keeps them inside
+    # `GFace::setMeshMaster`; `getPeriodic`-style queries still see them).
+    return sort!(collect(values(m.periodic));
+                 by=constraint->(constraint.dim,constraint.slave_entity)) |>
+        constraints->filter!(constraint->!constraint.derived,constraints)
+end
+
+# Every stored relation, including curve masters induced by periodic surface
+# declarations — the internal view matching upstream's constraint graph.
+function _model_all_periodic_constraints(m::GeoModel)
     return sort!(collect(values(m.periodic));
                  by=constraint->(constraint.dim,constraint.slave_entity))
 end
@@ -2306,8 +2382,8 @@ function _loop_points(m::GeoModel, loop_id::Int)
     return pts
 end
 
-function _add_surface_point!(xs,ys,mesh_sizes,index,m::GeoModel,pid::Int,caller,
-                             plane)
+function _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m::GeoModel,
+                             pid::Int,caller,plane)
     haskey(index, pid) && return index[pid]
     haskey(m.points,pid) || throw(ArgumentError("$caller: unknown Point[$pid]"))
     p=m.points[pid]
@@ -2317,14 +2393,20 @@ function _add_surface_point!(xs,ys,mesh_sizes,index,m::GeoModel,pid::Int,caller,
         "(off-plane distance $(_plane_offset(plane,p)))"))
     ax=plane.axes
     push!(xs,p[ax[1]]); push!(ys,p[ax[2]])
-    # 0.0 marks an unconstrained point; `_surface_pslg` replaces it with the
-    # shortest incident boundary edge once the segment table exists.
+    # The stored value is a marker: 0.0 marks an unconstrained point;
+    # `_surface_vertex_sizes` converts markers into incident-edge target
+    # sizes once the initial triangulation exists.
     push!(mesh_sizes,get(m.point_size,pid,0.0))
+    u=p[ax[1]];v=p[ax[2]]
+    # Same -0.0 canonicalization `dedup_points` applies, so output-mesh keys
+    # match bitwise.
+    canonical[(u==0 ? 0.0 : u,v==0 ? 0.0 : v)]=p
     index[pid]=length(xs)
     return index[pid]
 end
 
-function _add_surface_curve_point!(xs,ys,mesh_sizes,index,m::GeoModel,point,
+function _add_surface_curve_point!(xs,ys,mesh_sizes,index,canonical,
+                                   m::GeoModel,point,
                                    mesh_size::Float64,curve::Int,
                                    caller::AbstractString,plane)
     scale=max(1.0,hypot(point...))
@@ -2347,12 +2429,18 @@ function _add_surface_curve_point!(xs,ys,mesh_sizes,index,m::GeoModel,point,
     end
     if matched_vertex!=0
         existing=mesh_sizes[matched_vertex]
-        mesh_sizes[matched_vertex]=existing>0 ? min(existing,mesh_size) : mesh_size
+        # Unsized markers (<=0) keep the existing value; otherwise the
+        # tighter constraint wins, like the embedded-point `min` above.
+        mesh_sizes[matched_vertex]=
+            existing>0 ? (mesh_size>0 ? min(existing,mesh_size) : existing) :
+                         mesh_size
         return matched_vertex
     end
     ax=plane.axes
-    push!(xs,point[ax[1]]);push!(ys,point[ax[2]])
+    u=point[ax[1]];v=point[ax[2]]
+    push!(xs,u);push!(ys,v)
     push!(mesh_sizes,mesh_size)
+    canonical[(u==0 ? 0.0 : u,v==0 ? 0.0 : v)]=point
     return length(xs)
 end
 
@@ -2360,15 +2448,20 @@ end
                                           parameter::Float64,
                                           caller::AbstractString)
     a,b=m.curves[curve]
-    # A point without an explicit size contributes the curve length, matching
-    # the boundary-mesh-derived sizing used for unconstrained vertices.
     # `point_size` stores 0 for unsized points (Gmsh's `!lc → MAX_LC`
-    # convention) — the stored zero is not a usable interpolation endpoint.
+    # convention). A curve with no sized endpoint contributes no
+    # interpolation constraint at all — upstream's `setLcs` sizes those
+    # boundary vertices by incident edge length, which
+    # `_surface_vertex_sizes` reproduces, so the unsized marker
+    # (0.0) is returned rather than a fabricated value.
+    first_size=get(m.point_size,a,0.0)
+    last_size=get(m.point_size,b,0.0)
+    first_size<=0.0 && last_size<=0.0 && return 0.0
+    # A sized endpoint propagates toward the edge length, matching the
+    # boundary-mesh-derived sizing used for unconstrained vertices.
     p,q=m.points[a],m.points[b]
     edge_length=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
-    first_size=get(m.point_size,a,0.0)
     first_size<=0.0 && (first_size=edge_length)
-    last_size=get(m.point_size,b,0.0)
     last_size<=0.0 && (last_size=edge_length)
     mesh_size=muladd(parameter,last_size-first_size,first_size)
     (isfinite(mesh_size) && mesh_size>0) || throw(ErrorException(
@@ -2378,6 +2471,65 @@ end
 
 function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
                                caller::AbstractString)
+    return _periodic_curve_point(m,curve,parameter,caller,Set{Int}())
+end
+
+function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
+                               caller::AbstractString,seen::Set{Int})
+    # A periodic slave curve emits its master's mesh coordinates verbatim:
+    # upstream copies `mesh_vertices` through the relation transform instead
+    # of re-evaluating the slave geometry, so every face sharing the slave
+    # sees bitwise-identical nodes to the periodic surface copy. Orientation-
+    # only relations (no affine) cannot map coordinates, so those keep the
+    # slave's own evaluator. Cyclic relations fall back the same way — the
+    # meshing pass starves them like upstream.
+    constraint=get(m.periodic,(1,curve),nothing)
+    if constraint!==nothing && constraint.affine!==nothing &&
+            !(curve in seen)
+        master=Int(abs(constraint.master_entity))
+        if haskey(m.curves,master)
+            # A chain that closes back on `curve` is cyclic — routed
+            # evaluation would re-enter this curve's own evaluator under a
+            # different affine composition (the `seen` fallback below), which
+            # pairwise snapping cannot reconcile bitwise. Cycle members keep
+            # their native evaluation; upstream starves their copies entirely.
+            closes=false;hops=0
+            ancestor=master
+            while haskey(m.periodic,(1,ancestor))
+                ancestor=Int(abs(m.periodic[(1,ancestor)].master_entity))
+                ancestor==curve && (closes=true; break)
+                (hops+=1)>length(m.periodic) && break
+            end
+            if !closes
+                t0,t1=_model_curve_param_bounds(m,curve,caller)
+                m0,m1=_model_curve_param_bounds(m,master,caller)
+                # The stored parameter lists carry the vertex pairing —
+                # resolving the slave's parameter to its paired MASTER entry
+                # reproduces `affine(master node)` bitwise; recomputing the
+                # mirror inside the evaluation is not involutive in floating
+                # point.
+                u=nothing
+                slave_params=get(m.curve_params,curve,nothing)
+                master_params=get(m.curve_params,master,nothing)
+                if slave_params!==nothing && master_params!==nothing &&
+                        length(slave_params)==length(master_params)
+                    index=argmin(abs.(slave_params .- parameter))
+                    if abs(slave_params[index]-parameter)<=
+                            1e-9*max(1.0,abs(t1-t0))
+                        u=constraint.reversed ? master_params[end+1-index] :
+                                                master_params[index]
+                    end
+                end
+                u===nothing && (u=constraint.reversed ?
+                    m1-(parameter-t0) : parameter-t0+m0)
+                push!(seen,curve)
+                point=_periodic_curve_point(m,master,u,caller,seen)
+                coefficients,translation=_periodic_affine_3x4(constraint.affine)
+                return _model_affine_point(
+                    coefficients,translation,point,caller,curve)
+            end
+        end
+    end
     _model_require_line_curve(m,curve,caller,"curve subdivision")
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     point=ntuple(3) do axis
@@ -2397,8 +2549,18 @@ function _surface_curve_parameters(m::GeoModel,forced,curve::Int,signed::Int)
     curve in m.meshing.degenerated && return signed>0 ? (0.0,) : (1.0,)
     parameters=get(forced,curve,nothing)
     parameters===nothing && return signed>0 ? (0.0,) : (1.0,)
-    return signed>0 ? @view(parameters[1:end-1]) :
-                      Iterators.reverse(@view(parameters[2:end]))
+    # Parameters a few ulps from an endpoint come from inverse-projection or
+    # arclength-normalization drift — evaluating them would place a distinct
+    # node within curve-match tolerance of the corner, duplicating it and
+    # cracking the boundary shared with the adjacent surface. Snap them so
+    # the endpoint routes through the model-point vertex instead.
+    function emit(u)
+        u<=128eps(Float64) && return 0.0
+        1-u<=128eps(Float64) && return 1.0
+        return u
+    end
+    return signed>0 ? [emit(u) for u in @view(parameters[1:end-1])] :
+                      [emit(u) for u in Iterators.reverse(@view(parameters[2:end]))]
 end
 
 function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
@@ -2409,6 +2571,10 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
+    # (u,v) -> canonical 3-D coordinate for every entity-derived vertex —
+    # upstream's `GEdge::mesh_vertices` carry their evaluated coordinates
+    # verbatim, so two faces sharing a curve emit bitwise-identical nodes.
+    canonical=Dict{Tuple{Float64,Float64},NTuple{3,Float64}}()
     for loop_id in m.surfaces[t]
         _verify_loop_closed(m,loop_id,caller,"Surface[$t]")
         loop_idx=Int[]
@@ -2418,9 +2584,11 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             a,b=m.curves[curve]
             for parameter in _surface_curve_parameters(m,forced,curve,signed)
                 vertex=if parameter==0
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller,plane)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
+                                        m,a,caller,plane)
                 elseif parameter==1
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller,plane)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
+                                        m,b,caller,plane)
                 else
                     point=_periodic_curve_point(m,curve,parameter,caller)
                     scale=max(1.0,hypot(point...))
@@ -2429,7 +2597,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                             "$caller: Curve[$curve] subdivision is not " *
                             "coplanar with Surface[$t]"))
                     _add_surface_curve_point!(
-                        xs,ys,mesh_sizes,index,m,point,
+                        xs,ys,mesh_sizes,index,canonical,m,point,
                         get(param_sizes,(curve,parameter),
                             _surface_curve_mesh_size(
                                 m,curve,parameter,caller)),
@@ -2449,7 +2617,8 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
     internal=Tuple{Int,Int}[]
     for (edim,etag) in embedded
         if edim==0
-            _add_surface_point!(xs,ys,mesh_sizes,index,m,etag,caller,plane)
+            _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,etag,
+                                caller,plane)
         elseif edim!=1
             throw(ArgumentError(
                 "$caller: unsupported embedding dimension $edim"))
@@ -2466,15 +2635,17 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         curve_nodes=Int[]
         if parameters===nothing
             push!(curve_nodes,_add_surface_point!(
-                xs,ys,mesh_sizes,index,m,a,caller,plane))
+                xs,ys,mesh_sizes,index,canonical,m,a,caller,plane))
             push!(curve_nodes,_add_surface_point!(
-                xs,ys,mesh_sizes,index,m,b,caller,plane))
+                xs,ys,mesh_sizes,index,canonical,m,b,caller,plane))
         else
             for parameter in parameters
                 vertex=if parameter==0
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,a,caller,plane)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,a,
+                                        caller,plane)
                 elseif parameter==1
-                    _add_surface_point!(xs,ys,mesh_sizes,index,m,b,caller,plane)
+                    _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,b,
+                                        caller,plane)
                 else
                     point=_periodic_curve_point(m,etag,parameter,caller)
                     scale=max(1.0,hypot(point...))
@@ -2483,7 +2654,7 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                             "$caller: embedded Curve[$etag] subdivision is " *
                             "not coplanar with Surface[$t]"))
                     _add_surface_curve_point!(
-                        xs,ys,mesh_sizes,index,m,point,
+                        xs,ys,mesh_sizes,index,canonical,m,point,
                         get(param_sizes,(etag,parameter),
                             _surface_curve_mesh_size(
                                 m,etag,parameter,caller)),
@@ -2502,39 +2673,78 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
             push!(internal,(first_node,second_node))
         end
     end
-    _fill_unsized_surface_vertices!(mesh_sizes,xs,ys,segs,internal)
-    return xs,ys,mesh_sizes,segs,embedded,internal
+    return xs,ys,mesh_sizes,segs,embedded,internal,index,canonical
 end
 
-# Vertices without an explicit Point size take the shortest incident edge,
-# matching `_volume_boundary_size_field`'s boundary-mesh-derived sizing.
-# A vertex with no incident edge falls back to the surface bounding scale.
-function _fill_unsized_surface_vertices!(
-        mesh_sizes::Vector{Float64},xs::Vector{Float64},
-        ys::Vector{Float64},segs,internal)
-    any(<=(0.0),mesh_sizes) || return nothing
-    unsized=falses(length(mesh_sizes))
-    for vertex in eachindex(mesh_sizes)
-        if mesh_sizes[vertex]<=0.0
-            unsized[vertex]=true
-            mesh_sizes[vertex]=Inf
+# Per-vertex target sizes for a surface's initial triangulation, mirroring
+# `buildMeshGenerationDataStructures` (meshGFaceOptimize.cpp): every vertex
+# takes the shortest incident triangulation edge (`setLcs`), each boundary
+# segment then floors its endpoints at half the segment length (upstream's
+# "small edges do not pollute" rule over `gf->edges()`), and embedded point
+# vertices cap at their prescribed Point size. `markers` carries the PSLG
+# marker values (prescribed lc or 0); `floor_segs` is the boundary-segment
+# list the floor applies to. Vertices with no incident edge fall back to the
+# surface bounding scale. Returns one size per triangulation vertex.
+# Sizes live on triangulation vertices; `constrained_delaunay` merges
+# coincident PSLG points, so PSLG indices map to vertex ids by coordinate.
+function _pslg_vertex_map(T,xs::Vector{Float64},ys::Vector{Float64})
+    vid_of=Dict{NTuple{2,Float64},Int32}()
+    sizehint!(vid_of,T.nreal)
+    @inbounds for vid in 1:T.nreal
+        vid_of[_surface_size_key(T.x[vid],T.y[vid])]=Int32(vid)
+    end
+    return vid_of
+end
+
+function _surface_vertex_sizes(T,xs::Vector{Float64},ys::Vector{Float64},
+                               floor_segs,markers::Vector{Float64},
+                               embedded_vertices)
+    vid_of=_pslg_vertex_map(T,xs,ys)
+    vid(i::Int)=vid_of[_surface_size_key(xs[i],ys[i])]
+    n=T.nreal
+    sizes=fill(Inf,n)
+    @inbounds for t in eachindex(T.alive)
+        (T.alive[t] && !_is_ghost_tri(T,t)) || continue
+        for (i,j) in ((1,2),(2,3),(3,1))
+            a=_vert(T,t,i); b=_vert(T,t,j)
+            (_is_ghost_v(a) || _is_ghost_v(b)) && continue
+            len=hypot(T.x[b]-T.x[a],T.y[b]-T.y[a])
+            len>0 || continue
+            len<sizes[a] && (sizes[a]=len)
+            len<sizes[b] && (sizes[b]=len)
         end
     end
-    # Vertices with an explicit size keep it verbatim, as in
-    # `_volume_boundary_size_field`.
-    for (a,b) in Iterators.flatten((segs,internal))
-        len=hypot(xs[b]-xs[a],ys[b]-ys[a])
-        unsized[a] && len<mesh_sizes[a] && (mesh_sizes[a]=len)
-        unsized[b] && len<mesh_sizes[b] && (mesh_sizes[b]=len)
+    @inbounds for (a,b) in floor_segs
+        va=vid(a);vb=vid(b)
+        half=0.5*hypot(xs[b]-xs[a],ys[b]-ys[a])
+        sizes[va]<half && (sizes[va]=half)
+        sizes[vb]<half && (sizes[vb]=half)
     end
-    if any(isinf,mesh_sizes)
+    @inbounds for vertex in embedded_vertices
+        v=vid(vertex)
+        prescribed=markers[vertex]
+        (isfinite(prescribed) && prescribed>0 && prescribed<sizes[v]) &&
+            (sizes[v]=prescribed)
+    end
+    if any(isinf,sizes)
         scale=hypot(maximum(xs)-minimum(xs),maximum(ys)-minimum(ys))
         fallback=(isfinite(scale) && scale>0) ? scale : 1.0
-        for vertex in eachindex(mesh_sizes)
-            isinf(mesh_sizes[vertex]) && (mesh_sizes[vertex]=fallback)
+        @inbounds for vertex in eachindex(sizes)
+            isinf(sizes[vertex]) && (sizes[vertex]=fallback)
         end
     end
-    return nothing
+    return sizes
+end
+
+# Vertex indices of the dim-0 entities embedded in a surface — the
+# `embeddedVertices` set upstream sizes through the background field.
+function _surface_embedded_vertex_ids(embedded,index::Dict{Int,Int})
+    ids=Int[]
+    for (edim,etag) in embedded
+        edim==0 || continue
+        haskey(index,etag) && push!(ids,index[etag])
+    end
+    return ids
 end
 
 function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
@@ -2569,6 +2779,7 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes
     scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
     geometric_tolerance=max(atol,128eps(Float64)*scale)
     cross_bound=(geometric_tolerance*length1)^2
+    parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
         eligible_nodes[node] || continue
@@ -2579,12 +2790,17 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes
         parameter=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
         -geometric_tolerance/length1<=parameter<=
             1+geometric_tolerance/length1 || continue
-        push!(entries,(clamp(parameter,0.0,1.0),node))
+        parameter=clamp(parameter,0.0,1.0)
+        # A node within endpoint tolerance IS the endpoint — keeping the raw
+        # projected value (e.g. 1−eps) would evaluate to a duplicate node one
+        # ulp away and crack the boundary shared with adjacent surfaces.
+        parameter<=parameter_tolerance && (parameter=0.0)
+        1-parameter<=parameter_tolerance && (parameter=1.0)
+        push!(entries,(parameter,node))
     end
     sort!(entries;by=first)
     length(entries)>=2 || throw(ErrorException(
         "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
-    parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
     first(entries)[1]<=parameter_tolerance &&
         1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
             "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
@@ -2620,7 +2836,7 @@ function _surface_periodic_constraints(m::GeoModel,t::Int,
     _,embedded_curve_tags=_model_surface_embedding_tags(m,t,caller)
     surface_curves=union(boundary_curves,Set(embedded_curve_tags))
     constraints=ModelPeriodicConstraint[]
-    for constraint in model_periodic_constraints(m)
+    for constraint in _model_all_periodic_constraints(m)
         constraint.dim==1 || continue
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         slave_present=slave in surface_curves
@@ -2810,21 +3026,49 @@ function _model_mapping_matches(mesh::Mesh,constraint::ModelPeriodicConstraint,
     return true
 end
 
+# Slave curve endpoint nodes keep the slave's own vertex coordinates —
+# upstream's `GEdge::setMeshMaster` maps interior `mesh_vertices` through the
+# relation transform but the slave `GVertex` keeps its position. An affine
+# whose coefficients don't reproduce the endpoint bitwise (a `Rotate` with an
+# inexact axis term, for instance) would otherwise rewrite a shared corner to
+# `affine(master point)`, cracking the boundary the corner is welded on.
+function _model_periodic_snap_mapping(m::GeoModel,mesh::Mesh,
+                                      constraint::ModelPeriodicConstraint)
+    mapping=_model_periodic_nodes(m,mesh,constraint)
+    constraint.dim==1 || return mapping
+    a,b=m.curves[Int(constraint.slave_entity)]
+    endpoint_coords=(m.points[a],m.points[b])
+    keep=Int[]
+    for index in eachindex(mapping.slave_nodes)
+        coordinate=(mesh.coords[1,mapping.slave_nodes[index]],
+                    mesh.coords[2,mapping.slave_nodes[index]],
+                    mesh.coords[3,mapping.slave_nodes[index]])
+        coordinate==endpoint_coords[1] && continue
+        coordinate==endpoint_coords[2] && continue
+        push!(keep,index)
+    end
+    return (master_entity=mapping.master_entity,
+            slave_nodes=mapping.slave_nodes[keep],
+            master_nodes=mapping.master_nodes[keep],
+            affine=mapping.affine)
+end
+
 function _snap_surface_periodic(m::GeoModel,mesh::Mesh,constraints,
                                 caller::AbstractString)
     output=mesh
     ordered=_model_periodic_constraint_order(constraints,caller)
     for constraint in ordered
-        mapping=_model_periodic_nodes(m,output,constraint)
+        mapping=_model_periodic_snap_mapping(m,output,constraint)
         # Orientation-only relations have no transform to snap with; the
         # synchronized parameters already pair the nodes on their own curves.
         constraint.affine===nothing && continue
+        isempty(mapping.slave_nodes) && continue
         output=periodic_identify_affine(
             output,constraint.affine,mapping.master_nodes,mapping.slave_nodes;
             atol=constraint.atol)
     end
     for constraint in ordered
-        mapping=_model_periodic_nodes(m,output,constraint)
+        mapping=_model_periodic_snap_mapping(m,output,constraint)
         _model_mapping_matches(
             output,constraint,mapping,caller;exact=true) || throw(ErrorException(
             "$caller: stored periodic constraints do not share an exact curve-node solution"))
@@ -3043,7 +3287,7 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
     # an empty node list.
     starved=_model_periodic_starved(
         Iterators.filter(
-            constraint->constraint.dim==1,model_periodic_constraints(m)))
+            constraint->constraint.dim==1,_model_all_periodic_constraints(m)))
     for constraint in constraints
         mapping=try
             _model_periodic_nodes(m,mesh,constraint)
@@ -3062,8 +3306,12 @@ function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
                 1,constraint.slave_entity,constraint.master_entity,
                 Int32[],Int32[];affine=constraint.affine))
         else
+            # Endpoint nodes keep the slave vertex's own coordinates, so
+            # exactness is verified on the interior pairs only — the same
+            # filtering `_snap_surface_periodic` snaps with.
+            interior=_model_periodic_snap_mapping(m,mesh,constraint)
             _model_mapping_matches(
-                mesh,constraint,mapping,caller;exact=true) ||
+                mesh,constraint,interior,caller;exact=true) ||
                 throw(ArgumentError(
                     "$caller: periodic Curve[$(constraint.slave_entity)] nodes are not exactly snapped"))
             push!(curve_links,MixedPeriodicLink(
@@ -3468,7 +3716,7 @@ function model_to_mixed(m::GeoModel,parts::AbstractVector)
         push!(get!(()->Set{Int}(),curve_surfaces,curve),tag)
     end
 
-    all_constraints=model_periodic_constraints(m)
+    all_constraints=_model_all_periodic_constraints(m)
     surface_constraints=ModelPeriodicConstraint[]
     for constraint in all_constraints
         constraint.dim==2 || continue
@@ -3841,18 +4089,33 @@ function _model_surface_projection(
     second=coordinates[second_index]
     projection=nothing
     plane_third=nothing
+    # Choose the best-conditioned coordinate-plane projection: among axis
+    # pairs where the exact predicate proves non-collinearity, keep the one
+    # with the largest projected anchor-second-candidate area. The first
+    # nonzero pair is not enough — a plane rotated through transcendental
+    # angles leaves ~ulp-sized noise along its normal axis, which still reads
+    # as "nonzero" yet collapses distinct corners to the same (u,v) key.
+    best_area=0.0
     for candidate in coordinates
         for axes in ((1,2),(1,3),(2,3))
             pa=(anchor[axes[1]],anchor[axes[2]])
             pb=(second[axes[1]],second[axes[2]])
             pc=(candidate[axes[1]],candidate[axes[2]])
-            if orient2(pa,pb,pc)!=0
-                projection=axes
-                plane_third=candidate
-                break
+            orient2(pa,pb,pc)!=0 || continue
+            area=abs((pa[1]-pc[1])*(pb[2]-pc[2])-(pa[2]-pc[2])*(pb[1]-pc[1]))
+            if area==0.0 || !isfinite(area)
+                # Exact orientation already established a nonzero area;
+                # preserve its magnitude when products underflow or overflow.
+                ra=Rational{BigInt}.(pa);rb=Rational{BigInt}.(pb)
+                rc=Rational{BigInt}.(pc)
+                area=abs((ra[1]-rc[1])*(rb[2]-rc[2])-
+                         (ra[2]-rc[2])*(rb[1]-rc[1]))
             end
+            area>best_area || continue
+            best_area=area
+            projection=axes
+            plane_third=candidate
         end
-        projection===nothing || break
     end
     projection===nothing && throw(ArgumentError(
         "$caller: Surface[$surface] points are collinear"))
@@ -3965,9 +4228,13 @@ function _model_periodic_surface_mesh(
         "$(constraint.dim)"))
     slave=Int(constraint.slave_entity)
     master=Int(constraint.master_entity)
-    point_map=_model_periodic_surface_point_map(
-        m,slave,master,constraint.affine,constraint.atol,caller;
-        include_embeddings=true)
+    # The edge map resolves the slave↔master boundary correspondence at the
+    # same time — upstream's copyMesh binds each boundary vertex to the SLAVE
+    # edge's own `mesh_vertices` (themselves produced by the edge's master
+    # transform), so a curve shared by two periodic slaves keeps one set of
+    # coordinates rather than two different affine compositions.
+    point_map,pairs,pair_reversed=_model_periodic_surface_edge_map(
+        m,slave,master,constraint.affine,constraint.atol,caller)
     master_points=_model_periodic_surface_points(
         m,master,caller;include_embeddings=true)
     coordinate_points=Dict{NTuple{3,Float64},Int}()
@@ -3979,6 +4246,28 @@ function _model_periodic_surface_mesh(
             "$caller: Surface[$master] has multiple point tags at $key"))
         coordinate_points[key]=point
     end
+    # Master boundary-node coordinate -> slave-side coordinate, keyed like the
+    # merge below: interior params evaluate the slave curve through its own
+    # periodic relation (`_periodic_curve_point` routes a slave through its
+    # master chain), reproducing `ge->mesh_vertices[is]` verbatim.
+    boundary_overrides=Dict{NTuple{3,Float64},NTuple{3,Float64}}()
+    for (pair_index,(slave_curve,master_curve)) in enumerate(pairs)
+        haskey(m.curves,slave_curve) || continue
+        master_params=get(m.curve_params,master_curve,nothing)
+        master_params===nothing && continue
+        t0,t1=_model_curve_param_bounds(m,slave_curve,caller)
+        m0,m1=_model_curve_param_bounds(m,master_curve,caller)
+        reversed=pair_reversed[pair_index]
+        for parameter in master_params
+            (parameter==m0 || parameter==m1) && continue
+            slave_parameter=reversed ? m1-(parameter-t0) : parameter-m0+t0
+            point=_periodic_curve_point(m,master_curve,parameter,caller)
+            key=ntuple(
+                axis->_model_projection_coordinate_key(point[axis]),3)
+            boundary_overrides[key]=_periodic_curve_point(
+                m,slave_curve,slave_parameter,caller)
+        end
+    end
     coefficients,translation=_periodic_affine_3x4(constraint.affine)
     output_coordinates=Matrix{Float64}(undef,3,nnodes(master_mesh))
     for node in 1:nnodes(master_mesh)
@@ -3986,12 +4275,16 @@ function _model_periodic_surface_mesh(
             master_mesh.coords[axis,node]),3)
         master_point=get(coordinate_points,key,nothing)
         if master_point===nothing
-            # Interior and edge nodes take the transform image, like
-            # upstream's per-vertex `SPoint3::transform` copy.
-            output_coordinates[:,node].=_model_affine_point(
-                coefficients,translation,
-                (master_mesh.coords[1,node],master_mesh.coords[2,node],
-                 master_mesh.coords[3,node]),caller,node)
+            slave_coordinate=get(boundary_overrides,key,nothing)
+            if slave_coordinate===nothing
+                # Interior nodes take the transform image, like upstream's
+                # per-vertex `SPoint3::transform` copy.
+                slave_coordinate=_model_affine_point(
+                    coefficients,translation,
+                    (master_mesh.coords[1,node],master_mesh.coords[2,node],
+                     master_mesh.coords[3,node]),caller,node)
+            end
+            output_coordinates[:,node].=slave_coordinate
         else
             slave_point=point_map[master_point]
             output_coordinates[:,node].=m.points[slave_point]
@@ -4020,6 +4313,12 @@ function _model_periodic_surface_mesh(
 end
 
 function _model_loop_position2(point,polygon)
+    # Scale for the on-boundary tolerance: mesh nodes on a boundary curve are
+    # generated by floating-point affine evaluation, so a vertex on the loop's
+    # own edge can land ~ulp off the exact segment line.
+    edge_tol=1e-12*max(
+        maximum(p->p[1],polygon)-minimum(p->p[1],polygon),
+        maximum(p->p[2],polygon)-minimum(p->p[2],polygon),1.0)
     inside=false
     previous=last(polygon)
     for current in polygon
@@ -4028,6 +4327,20 @@ function _model_loop_position2(point,polygon)
                 min(previous[1],current[1])<=point[1]<=max(previous[1],current[1]) &&
                 min(previous[2],current[2])<=point[2]<=max(previous[2],current[2])
             return 2
+        end
+        edge_dx=current[1]-previous[1]
+        edge_dy=current[2]-previous[2]
+        edge_len=hypot(edge_dx,edge_dy)
+        if edge_len>0
+            distance=abs(edge_dx*(point[2]-previous[2])-
+                       edge_dy*(point[1]-previous[1]))/edge_len
+            if distance<=edge_tol &&
+                    min(previous[1],current[1])-edge_tol<=
+                        point[1]<=max(previous[1],current[1])+edge_tol &&
+                    min(previous[2],current[2])-edge_tol<=
+                        point[2]<=max(previous[2],current[2])+edge_tol
+                return 2
+            end
         end
         upward=previous[2]<=point[2]<current[2] && orientation>0
         downward=current[2]<=point[2]<previous[2] && orientation<0
@@ -4090,6 +4403,29 @@ function _model_projection_boundary_surface_faces!(
     target_orientation=orient2(anchor2,second2,third2)
     target_orientation!=0 || throw(ErrorException(
         "$caller: Surface[$surface] projection lost its plane orientation"))
+    # Boundary-face ownership is geometric: a face belongs to this surface
+    # when every vertex is on the model plane. `orient3` is exact — copied
+    # periodic nodes carry ~ulp-level transform noise — so a scale-relative
+    # plane offset is accepted alongside exact coplanarity.
+    normal_u=(second[1]-anchor[1],second[2]-anchor[2],second[3]-anchor[3])
+    normal_v=(third[1]-anchor[1],third[2]-anchor[2],third[3]-anchor[3])
+    plane_normal=(normal_u[2]*normal_v[3]-normal_u[3]*normal_v[2],
+                  normal_u[3]*normal_v[1]-normal_u[1]*normal_v[3],
+                  normal_u[1]*normal_v[2]-normal_u[2]*normal_v[1])
+    plane_norm=sqrt(plane_normal[1]^2+plane_normal[2]^2+plane_normal[3]^2)
+    extent=0.0
+    for coordinate in coordinates
+        extent=max(extent,hypot(coordinate[1]-anchor[1],
+            coordinate[2]-anchor[2],coordinate[3]-anchor[3]))
+    end
+    plane_tolerance=1e-9*extent
+    function _on_surface_plane(coordinate)
+        orient3(anchor,second,third,coordinate)==0 && return true
+        offset=(plane_normal[1]*(coordinate[1]-anchor[1])+
+                plane_normal[2]*(coordinate[2]-anchor[2])+
+                plane_normal[3]*(coordinate[3]-anchor[3]))/plane_norm
+        return abs(offset)<=plane_tolerance
+    end
     surface_mesh=_model_planar_surface_mesh(
         m,surface,caller;include_embeddings=true)
     target_area=sum(triangle_area(
@@ -4106,9 +4442,9 @@ function _model_projection_boundary_surface_faces!(
         first_coordinate=_model_mesh_coordinate(mesh,face[1])
         second_coordinate=_model_mesh_coordinate(mesh,face[2])
         third_coordinate=_model_mesh_coordinate(mesh,face[3])
-        orient3(anchor,second,third,first_coordinate)==0 || continue
-        orient3(anchor,second,third,second_coordinate)==0 || continue
-        orient3(anchor,second,third,third_coordinate)==0 || continue
+        _on_surface_plane(first_coordinate) || continue
+        _on_surface_plane(second_coordinate) || continue
+        _on_surface_plane(third_coordinate) || continue
         projected_vertices=ntuple(slot->begin
             coordinate=slot==1 ? first_coordinate :
                        slot==2 ? second_coordinate : third_coordinate
@@ -4424,7 +4760,7 @@ function _model_periodic_surface_boundary_maps(
     # The declaration-time resolver already applied `GFace::setMeshMaster`'s
     # correspondence rules (boundary and embedded edges alike); reuse it so
     # projection sees the same induced pairs the declaration validated.
-    point_map,pairs=_model_periodic_surface_edge_map(
+    point_map,pairs,_=_model_periodic_surface_edge_map(
         m,slave,master,constraint.affine,constraint.atol,caller)
     curve_map=Dict{Int,Int}(master_curve=>slave_curve
                           for (slave_curve,master_curve) in pairs)
@@ -4658,7 +4994,7 @@ function _model_projection_periodic_surface_links(
     # an empty node list.
     starved_curves=_model_periodic_starved(
         Iterators.filter(
-            constraint->constraint.dim==1,model_periodic_constraints(m)))
+            constraint->constraint.dim==1,_model_all_periodic_constraints(m)))
     for slave in sort!(collect(keys(curve_parents)))
         master,affine,atol=curve_parents[slave]
         if !(haskey(curve_entries,slave) && haskey(curve_entries,master))
@@ -5055,47 +5391,98 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
             m,t,param_sizes,caller;size_field=size_field),NTuple{2,Int}[]
     end
     plane=_model_surface_plane(m,t,caller;allow_ruled=true)
-    xs,ys,mesh_sizes,segs,embedded,internal=
+    xs,ys,markers,segs,embedded,internal,index,canonical=
         _surface_pslg(m,t,forced,caller;param_sizes=param_sizes,plane=plane)
     T=constrained_delaunay(xs,ys,segs; internal_segments=internal)
-    base=if get(m.meshing.size_from_boundary,(2,t),true)
-        _surface_point_size_field(T,xs,ys,mesh_sizes,t,caller)
-    else
-        lc=_pslg_default_size(xs,ys,caller,t)
-        (x,y)->lc
-    end
     callback=m.meshing.size_callback
     ax=plane.axes;k=plane.k
-    sizefn=if size_field===nothing && callback===nothing
-        base
+    # `BGM_MeshSize` for Steiner vertices: `CTX::lc` (the bbox diagonal) capped
+    # by any size field/callback. Point sizes and boundary-derived sizes enter
+    # through `vSizes` instead, exactly as upstream's `bidimMeshData` splits
+    # the propagated and background arrays.
+    bgm_size=if size_field===nothing && callback===nothing
+        nothing
     else
-        function sized(x,y)
-            h=base(x,y)
-            if size_field!==nothing || callback!==nothing
-                point=ntuple(3) do axis
-                    axis==k ? _plane_dropped_coordinate(plane,x,y) :
-                              axis==ax[1] ? x : y
-                end
-                size_field===nothing ||
-                    (h=min(h,size_at(size_field,point[1],point[2],point[3],
-                                     (2,t))))
-                callback===nothing ||
-                    (h=_apply_size_callback(callback,2,t,point[1],point[2],
-                                            point[3],h,caller))
+        loose=_pslg_default_size(xs,ys,caller,t)
+        function bgm(x,y)
+            h=loose
+            point=ntuple(3) do axis
+                axis==k ? _plane_dropped_coordinate(plane,x,y) :
+                          axis==ax[1] ? x : y
             end
+            size_field===nothing ||
+                (h=min(h,size_at(size_field,point[1],point[2],point[3],
+                                 (2,t))))
+            callback===nothing ||
+                (h=_apply_size_callback(callback,2,t,point[1],point[2],
+                                        point[3],h,caller))
             return h
         end
     end
-    interior=refine!(T; min_angle_deg=min_angle_deg, size=sizefn)
+    extend=_resolved_extend_from_boundary(m,2,t)
+    if extend>0 || extend==-2
+        embedded_ids=_surface_embedded_vertex_ids(embedded,index)
+        vSizes=_surface_vertex_sizes(T,xs,ys,segs,markers,embedded_ids)
+        # Upstream stores `vSizesBGM = vSizesMap` for every initial vertex
+        # except embedded ones, which carry `BGM_MeshSize` at their point —
+        # the field/callback value, or `CTX::lc` when no field is installed.
+        vbgm=nothing
+        embedded_vids=nothing
+        if !isempty(embedded_ids)
+            # `embedded_ids` are PSLG indices; the size arrays live on
+            # triangulation vertices. `vmap`/`loose_v` stay block-local so no
+            # captured binding survives a conditional assignment.
+            vmap=_pslg_vertex_map(T,xs,ys)
+            loose_v=_pslg_default_size(xs,ys,caller,t)
+            bg=copy(vSizes)
+            for pid in embedded_ids
+                vid=vmap[_surface_size_key(xs[pid],ys[pid])]
+                bg[vid]=bgm_size===nothing ? loose_v :
+                        bgm_size(xs[pid],ys[pid])
+            end
+            vbgm=bg
+            # Embedded points count as model vertices (`onWhat()->dim()==0`)
+            # for the perpendicular shell-edge check.
+            embedded_vids=[vmap[_surface_size_key(xs[pid],ys[pid])]
+                           for pid in embedded_ids]
+        end
+        # Gmsh's `meshGFace` insertion refines while R/lc ≥ sqrt(2)/2
+        # (`MTri3`, radiusNorm 2) with `lc = min(mean vSizes, mean vSizesBGM)`;
+        # `vertex_sizes` propagates `vSizes` through the mesh and
+        # `gmsh_insertion` carries the `insertVertexB` reject-instead-of-split
+        # rules. Upstream applies no angle bound in the insertion pass.
+        interior=refine!(T; min_angle_deg=0, gmsh_insertion=true,
+                         vertex_sizes=vSizes, vertex_bgm=vbgm,
+                         bgm_size=bgm_size, model_vertices=embedded_vids)
+    else
+        # Extension disabled: upstream LL = lcBGM alone — the field/callback-
+        # capped surface scale with no propagated boundary sizes.
+        radius=bgm_size===nothing ? (x,y)->_pslg_default_size(xs,ys,caller,t) :
+            bgm_size
+        interior=refine!(T; min_angle_deg=0, size_radius=radius,
+                         gmsh_insertion=true)
+    end
     mesh=to_mesh(T; interior=interior)
     mesh=_consume_surface_attributes(m,t,mesh,caller)
     # `to_mesh` packs the projected (u,v) coordinates into rows 1,2; scatter
     # them onto the kept axes and solve the dropped coordinate on the plane.
     @inbounds for node in axes(mesh.coords,2)
         u=mesh.coords[1,node];v=mesh.coords[2,node]
-        mesh.coords[ax[1],node]=u
-        mesh.coords[ax[2],node]=v
-        mesh.coords[k,node]=_plane_dropped_coordinate(plane,u,v)
+        # Entity-derived vertices keep their canonical 3-D coordinates —
+        # upstream's GEdge/GVertex mesh vertices are shared objects, so the
+        # two faces adjacent to a curve emit bitwise-identical nodes. Solving
+        # the dropped axis through each face's own plane instead would leave
+        # ~ulp mismatches that crack the shared boundary in a volume PLC.
+        lifted=get(canonical,(u==0 ? 0.0 : u,v==0 ? 0.0 : v),nothing)
+        if lifted===nothing
+            mesh.coords[ax[1],node]=u
+            mesh.coords[ax[2],node]=v
+            mesh.coords[k,node]=_plane_dropped_coordinate(plane,u,v)
+        else
+            mesh.coords[1,node]=lifted[1]
+            mesh.coords[2,node]=lifted[2]
+            mesh.coords[3,node]=lifted[3]
+        end
     end
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
@@ -5104,8 +5491,21 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
     return mesh,embedded
 end
 
-# Uniform fallback size for `size_from_boundary=false`: the surface's PSLG
-# characteristic length, matching the model-scale default Gmsh falls back to.
+# `GFace::getMeshSizeFromBoundary` (geo/GFace.cpp): a stored per-entity int
+# attribute `>= 0` wins; absent or negative falls back to the global
+# `lc_extend_from_boundary` (upstream's `-1` unset default). Upstream's signed
+# enable rules then apply — `Extend1dMeshIn2dSurfaces` is on for a resolved
+# value `> 0` or `== -2`, `Extend2dMeshIn3dVolumes` for `> 0` or `== -3`; mode
+# 2 selects the smallest-incident-edge variant on the volume side.
+function _resolved_extend_from_boundary(m::GeoModel,dim::Int,t::Int)
+    stored=get(m.meshing.size_from_boundary,(dim,t),nothing)
+    return stored===nothing || stored<0 ?
+        m.meshing.lc_extend_from_boundary : stored
+end
+
+# Uniform fallback size for the extension-disabled surface path: the
+# surface's PSLG characteristic length, matching the model-scale default
+# Gmsh falls back to.
 function _pslg_default_size(xs,ys,caller::AbstractString,t::Int)
     isempty(xs) && throw(ArgumentError(
         "$caller: Surface[$t] has no boundary points"))
@@ -5363,47 +5763,41 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
         (us[1],vs[1],ws[1]);volume_tag=t)
 end
 
-# Boundary-derived size field for a volume — Gmsh MeshSizeFromBoundary
-# semantics: interior sizes extend the sizes prescribed at boundary vertices.
-# Sizes come from sized boundary Points coincident with surface-mesh nodes;
-# unsized boundary nodes inherit their minimum incident edge length. When no
-# sized boundary vertex exists there is nothing to propagate.
+# Boundary-derived size field for a volume — Gmsh's 3-D `setLcs` over the
+# generated boundary mesh (meshGRegionDelaunayInsertion.cpp): every boundary
+# vertex carries an incident face-triangle edge length — the LARGEST when
+# `Mesh.MeshSizeExtendFromBoundary` is 1 (the default), the smallest for
+# mode 2 — and those sizes extend into the volume through the field.
+# Upstream's `Extend2dMeshIn3dVolumes` enables extension for a resolved mode
+# `> 0` or `== -3` (a per-entity `size_from_boundary[(3,t)]` record overrides
+# the global, mirroring the surface attribute — a Tessella extension since
+# upstream has no dim-3 attribute). Embedded entity sizes upstream apply to
+# interior vertices only; on this boundary-node field nothing caps them —
+# prescribed Point sizes reach the field through the boundary mesh density
+# itself.
 function _volume_boundary_size_field(m::GeoModel,t::Int,surface::Mesh,
                                      caller::AbstractString)
-    point_size=Dict{NTuple{3,Float64},Float64}()
-    for (tag,coordinate) in m.points
-        value=get(m.point_size,tag,0.0)
-        (isfinite(value) && value>0) || continue
-        key=(_model_projection_coordinate_key(coordinate[1]),
-             _model_projection_coordinate_key(coordinate[2]),
-             _model_projection_coordinate_key(coordinate[3]))
-        point_size[key]=min(get(point_size,key,Inf),value)
-    end
-    isempty(point_size) && return nothing
-    values=fill(Inf,nnodes(surface))
-    matched=falses(nnodes(surface))
-    @inbounds for node in 1:nnodes(surface)
-        key=(_model_projection_coordinate_key(surface.coords[1,node]),
-             _model_projection_coordinate_key(surface.coords[2,node]),
-             _model_projection_coordinate_key(surface.coords[3,node]))
-        value=get(point_size,key,0.0)
-        value>0 && (values[node]=value;matched[node]=true)
-    end
-    any(matched) || return nothing
-    # Boundary vertices that do not carry a Point size take the shortest
-    # incident boundary edge, matching Gmsh's boundary-mesh-derived sizing.
-    # Vertices with an explicit Point size keep it verbatim.
+    mode=_resolved_extend_from_boundary(m,3,t)
+    (mode>0 || mode==-3) || return nothing
+    nnodes(surface)==0 && return nothing
+    minimize=mode==2
+    values=fill(minimize ? Inf : -Inf,nnodes(surface))
     @inbounds for cell in axes(surface.tris,2),edge in ((1,2),(2,3),(3,1))
         a=surface.tris[edge[1],cell];b=surface.tris[edge[2],cell]
         dx=surface.coords[1,b]-surface.coords[1,a]
         dy=surface.coords[2,b]-surface.coords[2,a]
         dz=surface.coords[3,b]-surface.coords[3,a]
         len=hypot(dx,dy,dz)
-        !matched[a] && len<values[a] && (values[a]=len)
-        !matched[b] && len<values[b] && (values[b]=len)
+        if minimize
+            len<values[a] && (values[a]=len)
+            len<values[b] && (values[b]=len)
+        else
+            len>values[a] && (values[a]=len)
+            len>values[b] && (values[b]=len)
+        end
     end
-    # An isolated boundary vertex with no sized neighbor and no incident
-    # triangle edge falls back to the surface's bounding scale.
+    # An isolated boundary vertex with no incident triangle edge falls back
+    # to the surface's bounding scale.
     scale=hypot(maximum(surface.coords[1,:])-minimum(surface.coords[1,:]),
                 maximum(surface.coords[2,:])-minimum(surface.coords[2,:]),
                 maximum(surface.coords[3,:])-minimum(surface.coords[3,:]))
@@ -5412,8 +5806,11 @@ function _volume_boundary_size_field(m::GeoModel,t::Int,surface::Mesh,
         isfinite(values[node]) || (values[node]=fallback)
     end
     # PostViewField is an AbstractField; the refiner wants an
-    # AbstractSizeField, so adapt through FunctionSize.
-    view=PostViewField(surface.coords,values;crop_negative=false)
+    # AbstractSizeField, so adapt through FunctionSize. Interior queries miss
+    # every triangle and take the closest boundary node's value — the
+    # extension of boundary sizes into the volume.
+    view=PostViewField(surface.coords,values;triangles=surface.tris,
+                       crop_negative=false)
     return FunctionSize(function(x,y,z)
         field_value(view,x,y,z)
     end)
@@ -5673,6 +6070,12 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             m,master_mesh,surface_constraint,caller)
         return _model_surface_boundary_writeback!(m,t,output,caller)
     end
+    # Gate the CDT path before lazy boundary-curve grading touches curve
+    # evaluators — a curved or geometrically inconsistent surface must reject
+    # through the planar-surface contract, not a downstream evaluator error.
+    # Transfinite surfaces grade their boundary laws directly instead.
+    haskey(m.meshing.transfinite_surfaces,t) ||
+        _model_surface_plane(m,t,caller;allow_ruled=true)
     forced=Dict{Int,Vector{Float64}}()
     param_sizes=_attribute_forced_parameters(m,t,forced,caller)
     mesh=nothing;embedded=NTuple{2,Int}[]
@@ -5836,15 +6239,7 @@ function _model_volume_periodic_surface_constraints(
         slave=Int(constraint.slave_entity)
         master=Int(constraint.master_entity)
         if constraint.dim==1
-            slave_present=slave in curve_set
-            master_present=master in curve_set
-            (slave_present || master_present) || continue
-            slave_present==master_present || throw(ArgumentError(
-                "$caller: periodic Curve[$slave]/Curve[$master] relation " *
-                "has only one entity on Volume[$volume]"))
-            throw(ArgumentError(
-                "$caller: explicit Volume[$volume] supports planar periodic " *
-                "surfaces but not independent periodic curves"))
+            continue
         elseif constraint.dim==2
             slave_present=slave in surface_set
             master_present=master in surface_set
@@ -5864,20 +6259,52 @@ function _model_volume_periodic_surface_constraints(
                 "$caller: unsupported periodic dimension $(constraint.dim)"))
         end
     end
+    # Dim-1 relations derived from a boundary surface pair are enforced by
+    # the slave-face copy (upstream `GEdge::setMeshMaster` inside
+    # `GFace::setMeshMaster`); only independent curve relations remain a
+    # blocker for the explicit-volume path.
+    implied=Set{NTuple{2,Int}}()
+    for constraint in constraints
+        _,pairs,_=_model_periodic_surface_edge_map(
+            m,Int(constraint.slave_entity),Int(constraint.master_entity),
+            constraint.affine,constraint.atol,caller)
+        for (slave_curve,master_curve) in pairs
+            push!(implied,(slave_curve,master_curve))
+        end
+    end
+    for constraint in model_periodic_constraints(m)
+        constraint.dim==1 || continue
+        slave=Int(constraint.slave_entity)
+        master=Int(constraint.master_entity)
+        slave_present=slave in curve_set
+        master_present=master in curve_set
+        (slave_present || master_present) || continue
+        (slave,master) in implied && continue
+        slave_present==master_present || throw(ArgumentError(
+            "$caller: periodic Curve[$slave]/Curve[$master] relation " *
+            "has only one entity on Volume[$volume]"))
+        throw(ArgumentError(
+            "$caller: explicit Volume[$volume] supports planar periodic " *
+            "surfaces but not independent periodic curves"))
+    end
     return _model_periodic_constraint_order(constraints,caller)
 end
 
 function _model_explicit_volume_geometry(
-    m::GeoModel,t::Int,caller::AbstractString)
+    m::GeoModel,t::Int,caller::AbstractString;
+    size_field::Union{Nothing,AbstractSizeField}=nothing)
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     isempty(boundaries) && throw(ArgumentError(
         "$caller: Volume[$t] has no explicit boundary surfaces"))
     local_meshes=Dict{Int,Mesh}()
     for signed_surface in boundaries
         surface=abs(signed_surface)
+        # The volume PLC carries the GENERATED boundary mesh — upstream
+        # `meshGRegion` tetrahedralizes against each boundary GFace's
+        # triangles, so point sizes, curve grading and embedded constraints
+        # already resolved on the faces reach the volume verbatim.
         get!(local_meshes,surface) do
-            _model_planar_surface_mesh(
-                m,surface,caller;include_embeddings=true)
+            mesh_model_surface(m,surface;size_field=size_field)
         end
     end
     for constraint in _model_volume_periodic_surface_constraints(m,t,caller)
@@ -6019,6 +6446,23 @@ raise an explicit error.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer;
                            size_field::Union{Nothing,AbstractSizeField}=nothing)
+    # The task-local protected-cell registry is a session record of cells
+    # recovered so far, shared by the segment/sheet recovery calls below and
+    # consulted by every cavity refill (including refinement-time Steiner
+    # splits). It must be empty at both ends of this driver: a stale registry
+    # left by an earlier call in the same task would inject foreign keep
+    # constraints into refinement and recovery, changing the emitted mesh.
+    protected_faces,protected_edges=_protected_cells!()
+    empty!(protected_faces); empty!(protected_edges)
+    try
+        return _mesh_model_volume(m,tag;size_field=size_field)
+    finally
+        empty!(protected_faces); empty!(protected_edges)
+    end
+end
+
+function _mesh_model_volume(m::GeoModel, tag::Integer;
+                            size_field::Union{Nothing,AbstractSizeField}=nothing)
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
@@ -6040,7 +6484,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
     end
     explicit_geometry=(isempty(m.volumes[t]) ||
         _implicit_volume_surface(m,t)) ? nothing :
-        _model_explicit_volume_geometry(m,t,caller)
+        _model_explicit_volume_geometry(m,t,caller;size_field=size_field)
     periodic_surfaces=explicit_geometry===nothing ? ModelPeriodicConstraint[] :
         _model_volume_periodic_surface_constraints(m,t,caller)
     surface=explicit_geometry===nothing ? _volume_surface(m,t) :
@@ -6071,23 +6515,22 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
                 a,b=m.curves[curve]
                 push!(extra,m.points[a]);push!(extra,m.points[b])
             end
-            loops=m.surfaces[etag]
-            if length(loops)==1
-                ids=_loop_points(m,only(loops))
-                length(ids)>=3 || throw(ArgumentError(
-                    "$caller: embedded Surface[$etag] needs at least three points"))
-                points=NTuple{3,Float64}[m.points[point] for point in ids]
-                for index in 2:(length(points)-1)
-                    push!(sheets,(etag,points[1],points[index],points[index+1]))
-                end
-            else
-                sheet_mesh=_model_planar_surface_mesh(
-                    m,etag,caller;include_embeddings=true)
-                for cell in 1:ntris(sheet_mesh)
-                    points=ntuple(slot->_model_mesh_coordinate(
-                        sheet_mesh,sheet_mesh.tris[slot,cell]),3)
-                    push!(sheets,(etag,points...))
-                end
+            # Upstream recovers embedded faces through their generated mesh
+            # (`allEmbeddedFaces`) — every sheet triangle is a face triangle,
+            # so the volume keeps the embedded surface's full triangulation.
+            # The sheet's vertices are forced into the volume mesh through
+            # `extra` so face recovery never has to invent them (upstream's
+            # embedded-face vertices are real mesh vertices upfront).
+            sheet_mesh=mesh_model_surface(m,etag;size_field=size_field)
+            for node in 1:nnodes(sheet_mesh)
+                push!(extra,(sheet_mesh.coords[1,node],
+                             sheet_mesh.coords[2,node],
+                             sheet_mesh.coords[3,node]))
+            end
+            for cell in 1:ntris(sheet_mesh)
+                points=ntuple(slot->_model_mesh_coordinate(
+                    sheet_mesh,sheet_mesh.tris[slot,cell]),3)
+                push!(sheets,(etag,points...))
             end
         else
             throw(ArgumentError("$caller: unsupported embedding dimension $edim"))
@@ -6102,24 +6545,46 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
             interior_points=isempty(extra) ? nothing : extra)
     end
     effective_field=_volume_size_field(m,t,surface,size_field,caller)
-    effective_field===nothing ||
-        (mesh=refine_to_size(mesh,effective_field;entity=(3,t),
-                             best_effort=true))
+    if effective_field!==nothing
+        # Upstream's 3-D criterion refines while a tet's circumradius exceeds
+        # the local lc (`MTet4::setup`); `refine_to_size` bounds tet edge
+        # length, so the lc field is expressed as the 2·lc edge bound —
+        # any edge past it forces R > lc (chord longer than the diameter).
+        edge_field=FunctionSize(function(x,y,z)
+            _GMSH_TET_EDGE_OVER_RADIUS*size_at(effective_field,x,y,z)
+        end)
+        mesh=refine_to_size(mesh,edge_field;entity=(3,t),best_effort=true)
+    end
     iterations=get(m.meshing.smoothing,(3,t),0)
     iterations>0 &&
         (mesh=_laplacian_smooth_volume(mesh,iterations,caller,t))
     sort!(unique!(line_tags))
+    protected_faces,protected_edges=_protected_cells!()
+    empty!(protected_faces); empty!(protected_edges)
     for curve in line_tags
         _model_require_line_curve(m,curve,caller,"embedded-curve recovery")
         a,b=m.curves[curve];p=m.points[a];q=m.points[b]
         mesh=recover_segment3(mesh,p,q)
-        mesh_covers_segment3(mesh,p,q) || throw(ErrorException(
-            "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
+        # Register the recovered chain so a later cavity fill cannot drop it:
+        # the fill carries protected edges/faces as keep constraints.
+        for (u,v) in _tet_edge_set(mesh)
+            (_on_segment3(_pt3(mesh,u),p,q;atol=1e-9) &&
+             _on_segment3(_pt3(mesh,v),p,q;atol=1e-9)) || continue
+            push!(protected_edges,u<v ? (u,v) : (v,u))
+        end
+        if !mesh_covers_segment3(mesh,p,q)
+            throw(ErrorException(
+                "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
+        end
     end
     for (sheet,a,b,c) in sheets
         mesh=recover_triangle3(mesh,a,b,c)
         mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
             "$caller: embedded Surface[$sheet] is not a union of tetrahedron faces"))
+        covfaces,_,_=_mesh_covering_faces3(mesh,a,b,c)
+        for f in covfaces
+            push!(protected_faces,_sorted_face3(f...))
+        end
     end
     for curve in line_tags
         start_point,stop_point=m.curves[curve]
@@ -6215,10 +6680,23 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
             end
         end
     end
+    # Same `Mesh1D`-before-`Mesh2D` contract as `_attribute_forced_parameters`:
+    # member boundary curves reuse their stored `GEdge::mesh_vertices`
+    # discretizations (shared member edges included — they are ordinary
+    # compound edges upstream), grading any curve still missing them.
+    _model_surface_mesh_curves!(m,keys(counts),caller)
+    for curve in keys(counts)
+        params=get(m.curve_params,curve,nothing)
+        params===nothing && continue
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        forced[curve]=t0==0.0 && t1==1.0 ? Float64.(params) :
+            Float64[(u-t0)/(t1-t0) for u in params]
+    end
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     boundary_segs=Tuple{Int,Int}[]
     internal_segs=Tuple{Int,Int}[]
     index=Dict{Int,Int}()
+    canonical=Dict{Tuple{Float64,Float64},NTuple{3,Float64}}()
     member_polygons=Dict{Int,Vector{Vector{Int}}}()
     # Compound members must share one plane; the first member's plane is the
     # reference every other point is checked against.
@@ -6245,10 +6723,10 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
                         m,forced,curve,signed)
                     vertex=if parameter==0
                         _add_surface_point!(
-                            xs,ys,mesh_sizes,index,m,a,caller,plane)
+                            xs,ys,mesh_sizes,index,canonical,m,a,caller,plane)
                     elseif parameter==1
                         _add_surface_point!(
-                            xs,ys,mesh_sizes,index,m,b,caller,plane)
+                            xs,ys,mesh_sizes,index,canonical,m,b,caller,plane)
                     else
                         point=_periodic_curve_point(
                             m,curve,parameter,caller)
@@ -6259,7 +6737,7 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
                                 "is not coplanar with Surface[" *
                                 "$(first(members))]"))
                         _add_surface_curve_point!(
-                            xs,ys,mesh_sizes,index,m,point,
+                            xs,ys,mesh_sizes,index,canonical,m,point,
                             get(param_sizes,(curve,parameter),
                                 _surface_curve_mesh_size(
                                     m,curve,parameter,caller)),
@@ -6283,18 +6761,20 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
             push!(member_polygons[tag],loop_idx)
         end
     end
-    _fill_unsized_surface_vertices!(
-        mesh_sizes,xs,ys,boundary_segs,internal_segs)
     T=constrained_delaunay(
         xs,ys,boundary_segs;internal_segments=internal_segs)
-    base=_surface_point_size_field(
-        T,xs,ys,mesh_sizes,first(members),caller)
+    # Shared member boundaries are compound edges upstream, so the seg/2
+    # floor covers both the outer boundary and the internal chains.
+    vSizes=_surface_vertex_sizes(
+        T,xs,ys,Iterators.flatten((boundary_segs,internal_segs)),
+        mesh_sizes,Int[])
     callback=m.meshing.size_callback
-    sizefn=if size_field===nothing && callback===nothing
-        base
+    bgm_size=if size_field===nothing && callback===nothing
+        nothing
     else
-        function sized(x,y)
-            h=base(x,y)
+        loose=_pslg_default_size(xs,ys,caller,first(members))
+        function bgm(x,y)
+            h=loose
             size_field===nothing ||
                 (h=min(h,size_at(size_field,x,y,0.0,
                                  (2,first(members)))))
@@ -6304,7 +6784,21 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
             return h
         end
     end
-    interior=refine!(T;min_angle_deg=25.0,size=sizefn)
+    # Same propagated-vertex `vSizes`, R/lc < sqrt(2)/2 bound, and
+    # `insertVertexB` rules as `_mesh_model_surface_once` (upstream
+    # `meshGFace` insertion applies no angle bound). The compound entity
+    # carries no Tessella per-entity attribute, so the global
+    # `lc_extend_from_boundary` resolves the extension gate — as upstream's
+    # compoundSurface falls back to `lcExtendFromBoundary`.
+    extend=m.meshing.lc_extend_from_boundary
+    interior=if extend>0 || extend==-2
+        refine!(T;min_angle_deg=0,gmsh_insertion=true,
+                vertex_sizes=vSizes,bgm_size=bgm_size)
+    else
+        radius=bgm_size===nothing ?
+            (x,y)->_pslg_default_size(xs,ys,caller,first(members)) : bgm_size
+        refine!(T;min_angle_deg=0,size_radius=radius,gmsh_insertion=true)
+    end
     mesh=to_mesh(T;interior=interior)
     diag=validate(mesh)
     diag.ok || throw(ErrorException(

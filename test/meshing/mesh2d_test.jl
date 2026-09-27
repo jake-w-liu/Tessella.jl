@@ -484,6 +484,67 @@ mesh_max_tri_area(m) = maximum(triangle_area(node(m,m.tris[1,t]),node(m,m.tris[2
     end
 end
 
+@testset "Mesh2D Gmsh insertion contracts and scale invariance" begin
+    M=Tessella.Mesh2D
+    square(s=1.0)=constrained_delaunay(s.*[0.,1.,1.,0.],s.*[0.,0.,1.,1.],
+                                     [(1,2),(2,3),(3,4),(4,1)])
+    for mode in (:callback,:vertices), scale in (1e-200,1.0,1e200)
+        T=square(scale)
+        constraints=copy(T.seg)
+        controls=mode==:callback ? (;size_radius=(x,y)->scale/4) :
+                                  (;vertex_sizes=fill(scale/4,4))
+        inside=refine!(T;min_angle_deg=0,gmsh_insertion=true,controls...,maxsteps=20)
+        m=to_mesh(T;interior=inside)
+        # The analytic answer is a center point and a four-triangle fan.
+        @test T.nreal==5
+        @test (T.x[5]/scale,T.y[5]/scale)≈(0.5,0.5)
+        @test T.seg==constraints
+        @test check_consistency(T)==(true,"ok")
+        @test is_constrained_delaunay(T)[1]
+        @test size(m.tris,2)==4
+        for t in eachcol(m.tris)
+            @test 5 in t
+            a,b,c=(m.coords[1:2,i]./scale for i in t)
+            @test abs((b[1]-a[1])*(c[2]-a[2])-
+                      (b[2]-a[2])*(c[1]-a[1]))/2≈0.25
+        end
+    end
+    # Radius and longest-edge criteria are distinct: a square's initial
+    # circumradius is sqrt(2)/2, so size_radius=1 accepts it exactly.
+    T=square()
+    refine!(T;min_angle_deg=0,size_radius=(x,y)->1.0)
+    @test T.nreal==4
+    T=square()
+    refine!(T;min_angle_deg=0,size_radius=(x,y)->0.9)
+    @test T.nreal==5
+
+    for invalid in (complex(0.25),"small",NaN,-0.25,true)
+        T=square()
+        before=(copy(T.x),copy(T.y),copy(T.tv),copy(T.tn),copy(T.vtri),T.nreal)
+        field(x,y)=x==0 || x==1 || y==0 || y==1 ? invalid : 0.25
+        @test_throws ArgumentError refine!(T;min_angle_deg=0,
+            gmsh_insertion=true,size_radius=field)
+        @test (T.x,T.y,T.tv,T.tn,T.vtri,T.nreal)==before
+        @test check_consistency(T)==(true,"ok")
+    end
+    @test_throws ArgumentError refine!(square();vertex_bgm=[1.,1.,1.,1.])
+    @test_throws ArgumentError refine!(square();bgm_size=(x,y)->1.0)
+    @test_throws ArgumentError refine!(square();gmsh_insertion=true,
+                                       model_vertices=[true])
+    @test_throws ArgumentError refine!(square();vertex_sizes=ones(4))
+    @test_throws ArgumentError refine!(square();gmsh_insertion=true,
+                                       vertex_sizes=ones(3))
+    @test_throws ArgumentError refine!(square();gmsh_insertion=true,
+                                       vertex_sizes=ones(4),size=(x,y)->1.0)
+    @test M._mean_size3(1e308,1e308,1e308)≈1e308
+    @test M._mean_size3(1e308,Inf,1e308)==Inf
+    for scale in (1e-200,1.0,1e200)
+        @test M._barycentric2((0.,0.),(scale,0.),(0.,scale),
+                              (scale/4,scale/2))≈(0.25,0.25,0.5)
+    end
+    @test M._barycentric2((0.,0.),(1.,0.),(2.,0.),(0.5,0.))===nothing
+end
+
 @testset "Mesh2D refinement scan cache reproduces the full scan" begin
     # `_find_bad` resumes from `bad_scan_from`; at every step of a manual
     # Ruppert loop its answer must equal an independent full scan over all
@@ -497,7 +558,7 @@ end
         for t in eachindex(T.alive)
             (T.alive[t] && t<=length(interior) && interior[t] &&
              !_is_ghost_tri(T,t)) || continue
-            _needs_refine(T,t,B,area,nothing,nothing) && return Int32(t)
+            _needs_refine(T,t,B,area,nothing,nothing,nothing) && return Int32(t)
         end
         return Int32(0)
     end
@@ -520,7 +581,7 @@ end
             continue
         end
         expected=full_scan(T,interior,B,area)
-        cached=_find_bad(T,interior,B,area,nothing,nothing)
+        cached=_find_bad(T,interior,B,area,nothing,nothing,nothing)
         @test cached==expected
         cached==0 && break
         a=_vert(T,cached,1);b=_vert(T,cached,2);c=_vert(T,cached,3)
