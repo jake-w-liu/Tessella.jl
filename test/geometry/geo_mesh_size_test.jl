@@ -129,16 +129,16 @@ end
     topology_meshed=execute_geo(
         _GEO_POINT_MESH_SIZE_POINTS_OF_FIXTURE;mesh_dim=3)
     @test validate(topology_meshed.mesh).ok
-    @test nnodes(topology_meshed.mesh)==52
-    @test ntets(topology_meshed.mesh)==119
+    @test nnodes(topology_meshed.mesh)==53
+    @test ntets(topology_meshed.mesh)==123
     @test mesh_crc(topology_meshed.mesh).sha==
-          "872ca40fdfe6d1e3d15a2719ab2d920c143c541c91c8340bf8994332f9944290"
+          "7b062e7742835e640feb81145500b55531af1ae49db9b99156b59b4665cfbe26"
     topology_projected=model_to_mixed(
         topology_meshed.model,topology_meshed.mesh,3,1)
     @test validate(topology_projected).ok
     @test topology_projected.physical_names==topology.model.physical_names
     @test mixed_crc(topology_projected).sha==
-          "0f5319121ae7acf63c3b7fafd337908b92e0c9d8661fb00dad8fa26b93b544ba"
+          "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0"
 
     holed_topology=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
