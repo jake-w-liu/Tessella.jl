@@ -2047,11 +2047,12 @@ function _postview_context_field(view,field_tag::Int,tsel::Int,config,
         size(values,1)==9 && (ncomp=9;break)
         size(values,1)==3 && (ncomp=max(ncomp,3))
     end
-    records=[element for element in elements if size(element.values,1)==ncomp]
+    keep=ncomp
+    records=[element for element in elements if size(element.values,1)==keep]
     field=PostViewField(records;time=tsel,
                         crop_negative=config.crop_negative_values,
                         use_closest=config.use_closest)
-    return ncomp==9 ? PostViewAnisoField(field) : field
+    return keep==9 ? PostViewAnisoField(field) : field
 end
 
 """

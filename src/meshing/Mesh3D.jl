@@ -4319,9 +4319,8 @@ function _thread_vertex_on_edge3(mesh::Mesh, a::Int32, b::Int32, m::Int32)
         w=tri[findfirst(u->u!=a && u!=b,tri)]
         w==m && continue
         tag=isempty(mesh.tri_tag) ? Int32(0) : mesh.tri_tag[j]
-        t1=(tri[1],tri[2],tri[3]); t2=(tri[1],tri[2],tri[3])
-        t1=ntuple(i->t1[i]==b ? m : t1[i],3)
-        t2=ntuple(i->t2[i]==a ? m : t2[i],3)
+        t1=ntuple(i->tri[i]==b ? m : tri[i],3)
+        t2=ntuple(i->tri[i]==a ? m : tri[i],3)
         push!(tri_out,t1); isempty(mesh.tri_tag) || push!(tri_tags,tag)
         push!(tri_out,t2); isempty(mesh.tri_tag) || push!(tri_tags,tag)
     end
