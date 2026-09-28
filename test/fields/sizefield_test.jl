@@ -1170,7 +1170,8 @@ end
             @test size_at(clean,1.0,2.0,2.0)≈3.05
             @test isnothing(close(clean))
         end
-        failed=ExternalProcessField("julia --startup-file=no $helper; exit 3")
+        failed=ExternalProcessField("julia --startup-file=no $helper"*
+                                    (Sys.iswindows() ? " & exit 3" : "; exit 3"))
         @test size_at(failed,3.0,4.0,0.0)≈5.05
         @test_throws ArgumentError close(failed)
         nested_leaf=ExternalProcessField("julia --startup-file=no $helper")
