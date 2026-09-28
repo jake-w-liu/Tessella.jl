@@ -366,10 +366,13 @@ end
      (a!=0 && b!=0 && abs(left)<floatmin(Float64)) ||
      (c!=0 && d!=0 && abs(right)<floatmin(Float64))) && return NaN
     value=left-right
-    # Cancellation can erase the only perpendicular component. Recompute
-    # uncertain products from the original coordinates in the exact path.
+    # Cancellation can erase the only perpendicular component. Under the guard
+    # `left` and `right` lie within a factor of two, so Sterbenz makes
+    # `left-right` exact; the fma residuals recover each product exactly, keeping
+    # the compensated result within a few ULPs of the exact difference.
     magnitude=abs(left)+abs(right)
-    magnitude>0 && abs(value)<=8eps(Float64)*magnitude && return NaN
+    magnitude>0 && abs(value)<=8eps(Float64)*magnitude &&
+        return value+(fma(a,b,-left)-fma(c,d,-right))
     return value
 end
 @inline _distance_cross3(a,b)=(
