@@ -2641,10 +2641,14 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
     # face interior to this cavity must remain an interior face, and a curve
     # segment must remain an edge — the final postcondition re-checks all of
     # them on the spliced mesh.
-    for f in _protected_faces3()
+    # The task-local registry persists across driver calls and keeps its grown
+    # capacity through `empty!`, so its iteration order is call-history
+    # dependent; `keepfaces`/`keepedges` insertion order (and every downstream
+    # enumeration built from them) must not inherit it.
+    for f in sort!(collect(_protected_faces3()))
         consider_face(f)
     end
-    for e in _protected_edges3()
+    for e in sort!(collect(_protected_edges3()))
         consider_edge(e[1],e[2])
     end
     pts=Dict{Int32,NTuple{3,Float64}}(v => _pt3(mesh,v) for v in verts if v!=nv)
