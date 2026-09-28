@@ -220,7 +220,7 @@ end
                 for link in double_projection.periodic_links if link.dim==1])==
           [(2,4),(3,1)]
     @test mixed_crc(double_projection).sha==
-          "4f6763b669fff38051748ed95c9316931933802e4eda2c8a7852602105f6203e"
+          "f9ef4d6e4552cd4944c61c5accb89b17497c021e54549161e5ffde2307b893b8"
 
     @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
     @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))

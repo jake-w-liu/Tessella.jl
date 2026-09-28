@@ -459,7 +459,7 @@ end
     @test meshed.mesh!==nothing
     @test validate(meshed.mesh).ok
     @test mesh_crc(meshed.mesh).sha==
-          "dc28416214d8699235ea4081de969d0b4785c46bc7e8f703e034e46ec075cbe9"
+          "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8"
     # Surface 4 includes the embedded probe; Gmsh 4.15.2 also gives this
     # slave 21 nodes (4 corners + 8 curve nodes + 8 interior + the probe).
     @test length(model_periodic_nodes(
@@ -477,7 +477,7 @@ end
     # Rotate-by-Pi rounding reaches the CDT predicates, so connectivity is
     # not rotation-invariant — upstream's rotated connectivity differs too.
     @test mesh_crc(rotated.mesh).sha==
-          "f49c86a7b166a40e45639ab5aa92cb7e61c85016b1a01df7d259641ca1233e14"
+          "385c7e98840b7a83acd5b2f78a62f2253e8eb8de4c5009c57b3400810aaab146"
     rotated_mapping=model_periodic_nodes(
         rotated.model,rotated.mesh,2,4)
     @test length(rotated_mapping.slave_nodes)==21

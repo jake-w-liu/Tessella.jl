@@ -2611,7 +2611,15 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         nloop>=3 || throw(ArgumentError(
             "$caller: Loop[$loop_id] needs at least three points"))
         for k in 1:nloop
-            push!(segs,(loop_idx[k],loop_idx[mod1(k+1,nloop)]))
+            i,j=loop_idx[k],loop_idx[mod1(k+1,nloop)]
+            # Two forced parameters can evaluate to bitwise-identical
+            # coordinates — a periodic slave's stale subdivision resolves to
+            # its paired master node in `_periodic_curve_point` regardless of
+            # the stored parameter's drift. The segment between coincident
+            # endpoints carries no boundary constraint (`dedup_points` welds
+            # the nodes regardless), so emit nothing rather than feeding
+            # `constrained_delaunay` a zero-length record.
+            i==j || (xs[i]==xs[j] && ys[i]==ys[j]) || push!(segs,(i,j))
         end
     end
     embedded=get(m.embeds,(2,t),NTuple{2,Int}[])
@@ -2669,7 +2677,9 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         for segment_index in 1:(length(curve_nodes)-1)
             first_node=curve_nodes[segment_index]
             second_node=curve_nodes[segment_index+1]
-            first_node==second_node && throw(ArgumentError(
+            (first_node==second_node ||
+             (xs[first_node]==xs[second_node] &&
+              ys[first_node]==ys[second_node])) && throw(ArgumentError(
                 "$caller: embedded Curve[$etag] has coincident subdivision nodes"))
             push!(internal,(first_node,second_node))
         end
@@ -2826,6 +2836,22 @@ function _insert_periodic_parameter!(parameters::Vector{Float64},value::Float64,
     return true
 end
 
+# Parameters closer than this cannot produce distinct boundary nodes: a
+# periodic slave's forced parameter resolves to the paired MASTER entry in
+# `_periodic_curve_point` whenever it lands within `1e-9*max(1,|t1-t0|)` of a
+# stored `curve_params` entry (native frame), so two candidates inside that
+# resolution evaluate to bitwise-identical coordinates and the segment
+# between them collapses to zero length. Propagated/extracted candidates are
+# therefore merged at the same resolution, expressed in the normalized
+# parameter frame the lists live in.
+function _periodic_parameter_merge_tolerance(m::GeoModel,curve::Int,
+                                             tolerance::Float64,
+                                             caller::AbstractString)
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    span=abs(t1-t0)
+    return max(tolerance,1e-9*max(1.0,span)/max(span,eps(Float64)))
+end
+
 function _surface_periodic_constraints(m::GeoModel,t::Int,
                                        caller::AbstractString;
                                        external_curves::Union{Nothing,
@@ -2927,18 +2953,21 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
         for (constraint,_) in relations
             slave=Int(constraint.slave_entity)
             master=Int(constraint.master_entity)
-            tolerance=component_tolerances[slave]
+            slave_tolerance=_periodic_parameter_merge_tolerance(
+                m,slave,component_tolerances[slave],"mesh_model_surface")
+            master_tolerance=_periodic_parameter_merge_tolerance(
+                m,master,component_tolerances[master],"mesh_model_surface")
             master_values=copy(parameters[master])
             slave_values=copy(parameters[slave])
             for parameter in master_values
                 mapped=constraint.reversed ? 1-parameter : parameter
                 propagated|=_insert_periodic_parameter!(
-                    parameters[slave],mapped,tolerance)
+                    parameters[slave],mapped,slave_tolerance)
             end
             for parameter in slave_values
                 mapped=constraint.reversed ? 1-parameter : parameter
                 propagated|=_insert_periodic_parameter!(
-                    parameters[master],mapped,tolerance)
+                    parameters[master],mapped,master_tolerance)
             end
         end
         if !propagated
@@ -2952,7 +2981,8 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
     changed=false
     for curve in sort!(collect(keys(parameters)))
         curve_forced=get!(()->Float64[0,1],forced,curve)
-        tolerance=component_tolerances[curve]
+        tolerance=_periodic_parameter_merge_tolerance(
+            m,curve,component_tolerances[curve],"mesh_model_surface")
         for parameter in parameters[curve]
             changed|=_insert_periodic_parameter!(
                 curve_forced,parameter,tolerance)
