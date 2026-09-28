@@ -86,6 +86,12 @@ const PRISM_PROPERTY_GAPS = setdiff(PROPERTY_API_GAPS, Set([140]))
 function gmsh_python_environment()
     python_name = get(ENV, "TESSELLA_PYTHON", "python3")
     python = Sys.which(python_name)
+    # Windows CPython installs name the interpreter `python` rather than the
+    # POSIX `python3`; fall back when the env var did not pin a name.
+    if python === nothing && !haskey(ENV, "TESSELLA_PYTHON")
+        python = Sys.which("python")
+        python !== nothing && (python_name = "python")
+    end
     python === nothing && error("Python executable '$python_name' was not found")
 
     paths = String[]

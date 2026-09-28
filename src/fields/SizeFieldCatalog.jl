@@ -3942,7 +3942,8 @@ function _ext_start!(field::ExternalProcessField)
     field.closed && throw(ArgumentError("ExternalProcessField: field is closed"))
     field.io===nothing || return
     try
-        field.io=open(Cmd(["/bin/sh","-c",field.command]); read=true, write=true)
+        shell=Sys.iswindows() ? ["cmd","/c"] : ["/bin/sh","-c"]
+        field.io=open(Cmd([shell;field.command]); read=true, write=true)
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("ExternalProcessField: failed to launch $(field.command): $err"))
