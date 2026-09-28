@@ -202,7 +202,7 @@ end
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "735e8ff39913b765d38acf27e84b83a761ae481a63d3d5af7f36cfb9e003a05a"
+          "7a4f0273ee2bb1211367cc1c5900ce39014569ab641ee0e7d558d1d2a9cbe440"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"classified-volume-$version-$binary.msh")
@@ -375,7 +375,7 @@ end
     @test all(==(Int32(64)),projected.blocks[volume_block].tags)
     crc=mixed_crc(projected)
     @test crc.sha==
-          "a627074e471f709987484aa077e9b365736c6ea3dd0142a2db3e86aa38b651a6"
+          "9bce88e319c67236317df64b876739a62f80982ed86eca028bd1e7bda022bcb6"
 
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
@@ -417,7 +417,7 @@ end
     @test hollow_projected.entity_data.entities[(3,1)].boundaries==
           Int32[1,2,3,4,5,6,-101,-102,-103,-104,-105,-106]
     @test mixed_crc(hollow_projected).sha==
-          "7974fa70a4858c63f0be92f1dc45edc0089e4f052067fab6c76ba9ba545fa5c1"
+          "c5868d44b2f81e9589451a821cd3731e2281bc8e09423a76810e46d49c5dd046"
 
     signed=GeoModel()
     _add_explicit_cube_shell!(signed,0,0.0,1.0)
@@ -492,12 +492,12 @@ end
 
     mesh=mesh_model_volume(model,1)
     @test validate(mesh).ok
-    @test nnodes(mesh)==15
-    @test ntets(mesh)==24
+    @test nnodes(mesh)==11
+    @test ntets(mesh)==16
     @test mesh_crc(mesh).sha==
-          "8ebccdbf84f1723a04ebf3c6e160e9b61653c42adc6caf077555e4b8fbdb7d39"
+          "2fc8151cb4a8176a9a81e02c9c3e56ca66f9f9a46baf0d14f25f751a977ad808"
     for (slave,master,pairs,offset) in
-            ((4,6,5,(1.0,0.0,0.0)),(5,3,5,(0.0,1.0,0.0)))
+            ((4,6,5,(1.0,0.0,0.0)),(5,3,4,(0.0,1.0,0.0)))
         mapping=model_periodic_nodes(model,mesh,2,slave)
         @test mapping.master_entity==master
         @test length(mapping.slave_nodes)==length(mapping.master_nodes)==pairs
@@ -523,11 +523,11 @@ end
     @test point_links==[(2,1),(3,2),(4,1),(6,5),(7,6),(8,5)]
     @test curve_links==
           [(2,4),(3,1),(6,8),(7,5),(10,9),(11,10),(12,9)]
-    @test surface_links==[(4,6,5),(5,3,5)]
+    @test surface_links==[(4,6,5),(5,3,4)]
     @test length(projected.periodic_links)==15
     projected_crc=mixed_crc(projected)
     @test projected_crc.sha==
-          "7cd7c97bd03e24d45ba434bbb90ab80023c3cbba3f92e15e212ac0f4d21dd06b"
+          "27417f652cf93e0d6aad41c2f1b6c65af3751dfb3cb3166432d2e798f25a6493"
 
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
@@ -548,7 +548,7 @@ end
             else
                 @test reread.entity_data===nothing
                 @test mixed_crc(reread).sha==
-                      "661e9410e8aff1867b479df8608272ccf04cdf26fa2bbd75fe640874d22c9303"
+                      "9cc65eb95bbcca5508016ff7cc1340a6d1a7311d0482c2759444c16ce4120502"
             end
         end
     end

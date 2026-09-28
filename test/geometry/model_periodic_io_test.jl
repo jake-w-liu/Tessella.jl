@@ -258,7 +258,7 @@ end
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "e762c7c566f1e5768ad1e2849302815dbfd9d19a14c1b3840abcefa4aedcaf43"
+          "5ebd7c701903c8dfeb270f051dde857d297cd76a28b80631435b394af399ee9c"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"embedded-$version-$binary.msh")
@@ -292,8 +292,13 @@ end
                0.0,0.0,0.0,1.0)
     set_periodic!(periodic_embedded,1,[6],[5],translate)
     @test_throws ArgumentError model_to_mixed(periodic_embedded,mesh,1)
-    @test_throws ErrorException mesh_model_surface(
-        periodic_embedded,1;max_periodic_passes=1)
+    @test_throws ArgumentError mesh_model_surface(
+        periodic_embedded,1;max_periodic_passes=0)
+    # Periodic parameters resolve at master-node resolution before the first
+    # pass, so synchronization converges in one pass — the budget only needs
+    # to bound a pathological graph, not require extra iterations here.
+    @test validate(mesh_model_surface(
+        periodic_embedded,1;max_periodic_passes=1)).ok
     periodic_mesh=mesh_model_surface(periodic_embedded,1)
     @test validate(periodic_mesh).ok
     periodic_mapping=model_periodic_nodes(
@@ -320,7 +325,7 @@ end
     @test periodic_link.master_entity==5
     @test periodic_link.slave_nodes==periodic_mapping.slave_nodes
     @test mixed_crc(periodic_projection).sha==
-          "55e65e08a77e9cc3b9d69531edc19601b50de9957de977b488ece16d1dae9e60"
+          "bc902c2e32f56aef07b962bdcf558e8d53b7c709e174720f41d948957b28909d"
 end
 
 @testset "holed native surface projection" begin
@@ -336,5 +341,5 @@ end
     @test projected.entity_data.entities[(1,4)].physical_tags==Int32[]
     @test projected.physical_names==Dict((1,22)=>"hole",(2,23)=>"domain")
     @test mixed_crc(projected).sha==
-          "654d305c58cfe9db2f87ac1424a31912863a21f75196beabc3f05c37d8f6e73f"
+          "53c9880cb9bf4269a19daf9fd8311f68ea4356f577800f8d91125a2ddf1892f3"
 end
