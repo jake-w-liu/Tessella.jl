@@ -23,6 +23,15 @@ moved (never interior chords — moving those tangles the volume), and every
 projection is reverted unless every incident element has a strictly positive
 exact cubic-Bernstein Jacobian certificate over the whole reference tetrahedron.
 Thus a between-sample fold cannot pass the guard.
+
+The same exact-Bernstein certification is extended to the curved non-simplex
+reference families by [`p2_quad_min_jacobian`](@ref) (gmsh type-10 9-node
+quadrangle, degree-(6,6) tensor-Bernstein bound of the Gram determinant
+`|∂x/∂u × ∂x/∂v|²`), [`p2_hex_min_jacobian`](@ref) (gmsh type-12 27-node
+hexahedron, degree-(5,5,5) bound of `det ∂x/∂(u,v,w)`) and
+[`p2_prism_min_jacobian`](@ref) (gmsh type-13 18-node prism,
+triangle-degree-4 × line-degree-5 product-Bernstein bound of the same signed
+determinant).
 """
 module HighOrder
 
@@ -35,7 +44,8 @@ using Printf: @printf
 export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
        p2_seg_length, p2_volume, p2_tri_area,
        write_msh_p2, curve_to_curve!, curve_to_cylinder!, curve_to_surface!,
-       p2_min_jacobian, p2_seg_min_jacobian, p2_tri_min_jacobian
+       p2_min_jacobian, p2_seg_min_jacobian, p2_tri_min_jacobian,
+       p2_quad_min_jacobian, p2_hex_min_jacobian, p2_prism_min_jacobian
 
 const _P2_EDGE_SLOTS = ((5, 1, 2), (6, 2, 3), (7, 3, 1),
                         (8, 1, 4), (9, 3, 4), (10, 2, 4))
@@ -1853,6 +1863,409 @@ function write_msh_p2(path, p::P2SegMesh; seg_tag=p.seg_tag)
         flush(io);close(io);mv(tmp,target;force=true)
     end
     return path
+end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Curved-P2 Jacobian certification on the non-simplex reference families —
+# gmsh type-10 (9-node quadrangle), type-12 (27-node hexahedron) and type-13
+# (18-node prism).  Every shape function is a product of quadratic Lagrange
+# factors on Gmsh's 1-D reference interval [-1,1] (cardinal nodes -1, 0, +1),
+# so each Jacobian column is a product-Bernstein polynomial whose exact
+# coefficients are accumulated in the same dyadic integer coordinate frame as
+# the simplex paths.  The certificates below follow the `p2_min_jacobian`
+# contract exactly: the returned Float64 is the smallest exact Bernstein
+# coefficient — a conservative global lower bound on the closed reference
+# domain, with `> 0` certifying strict positivity everywhere.
+#
+# 1-D factors on ξ∈[-1,1] with barycentric α=(1-ξ)/2, β=(1+ξ)/2: each ℓ_i is
+# the integer table /2 in the degree-2 Bernstein basis (α²,2αβ,β²) and each
+# ℓ_i' is the integer table /2 in the degree-1 basis (α,β), so every product
+# factor of a shape function or a derivative carries one exact 1/2.
+# ════════════════════════════════════════════════════════════════════════════════
+const _P2L2_VAL = ((2,-1,0),(0,4,0),(0,-1,2))     # 2·ℓ_i at ξ=-1,0,+1, in B²
+const _P2L2_DER = ((-3,1),(4,-4),(-1,3))          # 2·ℓ_i' at ξ=-1,0,+1, in B¹
+const _P2B2 = (1,2,1)
+const _P2B5 = (1,5,10,10,5,1)
+const _P2B6 = (1,6,15,20,15,6,1)
+
+# Per-node 1-D indices (1 ↔ ξ=-1, 2 ↔ 0, 3 ↔ +1) in the gmsh node order of
+# `lagrange_nodes`: corners, edge mids, face centers, body center.
+const _P2QUAD_NODES = ((1,1),(3,1),(3,3),(1,3),
+                        (2,1),(3,2),(2,3),(1,2),(2,2))
+const _P2HEX_NODES = (
+    (1,1,1),(3,1,1),(3,3,1),(1,3,1),(1,1,3),(3,1,3),(3,3,3),(1,3,3),
+    (2,1,1),(1,2,1),(1,1,2),(3,2,1),(3,1,2),(2,3,1),(3,3,2),(1,3,2),
+    (2,1,3),(1,2,3),(3,2,3),(2,3,3),
+    (2,2,1),(2,1,2),(1,2,2),(3,2,2),(2,3,2),(2,2,3),(2,2,2))
+# Prism nodes are (type-9 triangle node a, 1-D w-node b) products on the
+# triangle {r,s ≥ 0, r+s ≤ 1} × w ∈ [-1,1] domain.  The type-9 basis enters
+# through its exact degree-1 derivative Bernstein rows and the 2·T_a degree-2
+# value rows (multi order of _B2TRI_MULTI).
+const _P2PRI_NODES = (
+    (1,1),(2,1),(3,1),(1,3),(2,3),(3,3),
+    (4,1),(6,1),(1,2),(5,1),(2,2),(3,2),
+    (4,3),(6,3),(5,3),(4,2),(6,2),(5,2))
+const _P2TRI_DR = ((-3,1,1),(-1,3,-1),(0,0,0),(4,-4,0),(0,0,4),(0,0,-4))
+const _P2TRI_DS = ((-3,1,1),(0,0,0),(-1,-1,3),(0,-4,0),(0,4,0),(4,0,-4))
+const _P2TRI_V2 = ((2,0,0,-1,-1,0),(0,2,0,-1,0,-1),(0,0,2,0,-1,-1),
+                    (0,0,0,4,0,0),(0,0,0,0,0,4),(0,0,0,0,4,0))
+const _P2TRI_VTX = ((1,0,0),(0,1,0),(0,0,1))
+const _P2PRI_GROUP = let G = Array{Int8}(undef,3,3,6)
+    for v1 in 1:3, v2 in 1:3, g in 1:6
+        q = _P2TRI_VTX[v1] .+ _P2TRI_VTX[v2] .+ _B2TRI_MULTI[g]
+        G[v1,v2,g] = Int8(findfirst(==(q),_B4TRI_MULTI))
+    end
+    G
+end
+
+function _p2_element_coords(coords, caller::AbstractString)
+    coords isa AbstractMatrix || throw(ArgumentError(
+        "$caller: coords must be a matrix"))
+    size(coords, 1) == 3 || throw(ArgumentError(
+        "$caller: coords must be 3 × nnodes"))
+    (eltype(coords) <: Bool || any(value -> value isa Bool, coords)) &&
+        throw(ArgumentError("$caller: coordinates must not be Bool"))
+    C = try
+        Matrix{Float64}(coords)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OutOfMemoryError && rethrow()
+        throw(ArgumentError(
+            "$caller: coordinates must be representable as Float64: " *
+            sprint(showerror, err)))
+    end
+    nn = size(C, 2)
+    nn <= typemax(Int32) || throw(ArgumentError(
+        "$caller: $nn nodes exceed the Int32 indexing limit"))
+    @inbounds for i in axes(C, 2), d in 1:3
+        isfinite(C[d, i]) || throw(ArgumentError(
+            "$caller: node $i has a non-finite coordinate"))
+    end
+    return C
+end
+
+function _p2_element_conn(conn, rows::Int, what::AbstractString,
+                          caller::AbstractString)
+    conn isa AbstractMatrix || throw(ArgumentError(
+        "$caller: $what must be a matrix"))
+    size(conn, 1) == rows || throw(ArgumentError(
+        "$caller: $what must be $rows × nelements"))
+    (eltype(conn) <: Bool || any(value -> value isa Bool, conn)) &&
+        throw(ArgumentError("$caller: $what connectivity must not be Bool"))
+    size(conn, 2) <= typemax(Int32) || throw(ArgumentError(
+        "$caller: $what element count exceeds the Int32 topology limit"))
+    T = try
+        Matrix{Int32}(conn)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa OutOfMemoryError && rethrow()
+        throw(ArgumentError("$caller: $what connectivity must fit Int32: " *
+                            sprint(showerror, err)))
+    end
+    return T
+end
+
+function _p2_element_check(coords::Matrix{Float64}, conn::Matrix{Int32},
+                           what::AbstractString, caller::AbstractString)
+    nn = size(coords, 2)
+    @inbounds for t in axes(conn, 2), k in axes(conn, 1)
+        value = conn[k, t]
+        1 <= value <= nn || throw(ArgumentError(
+            "$caller: $what $t references node $value outside 1:$nn"))
+        for j in 1:k-1
+            conn[j, t] != value || throw(ArgumentError(
+                "$caller: $what $t repeats node $value"))
+        end
+    end
+    return nothing
+end
+
+@inline function _p2_det3(a::NTuple{3,BigInt}, b::NTuple{3,BigInt},
+                          c::NTuple{3,BigInt})
+    a[1]*(b[2]*c[3]-b[3]*c[2]) - a[2]*(b[1]*c[3]-b[3]*c[1]) +
+    a[3]*(b[1]*c[2]-b[2]*c[1])
+end
+
+# ── P2 quadrangle (gmsh type 10) — Gram determinant g = |∂x/∂u × ∂x/∂v|² ────
+# ∂x/∂u has tensor-Bernstein degree (1,2) and ∂x/∂v degree (2,1) on the
+# [-1,1]² reference square, so the cross product w has degree (3,3) and g
+# degree (6,6).  Each Jacobian column carries 2^e_d/4 per component, so w
+# carries 2^(f_c)/16 and g's Bernstein coefficient at (p,q) is
+# T_(p,q)·2^(fmin-8)/(C(6,p)C(6,q)); the per-component exponent normalization
+# of _p2tri_bernstein_coeffs applies unchanged.
+function _p2quad_bernstein_coeffs(coords, quad9, q::Integer)
+    C, exps = _integer_element_coords(coords, quad9, q, "quadrangle")
+    A = Matrix{BigInt}(undef, 3, 6)   # ∂x/∂u coefficient vectors, degree (1,2)
+    B = Matrix{BigInt}(undef, 3, 6)   # ∂x/∂v coefficient vectors, degree (2,1)
+    @inbounds for d in 1:3
+        for i in 0:1, j in 0:2
+            s = zero(BigInt)
+            for k in 1:9
+                a, b = _P2QUAD_NODES[k]
+                c = _P2L2_DER[a][i+1]*_P2L2_VAL[b][j+1]
+                c != 0 && (s += C[d,k]*c)
+            end
+            A[d, i*3+j+1] = s
+        end
+        for i in 0:2, j in 0:1
+            s = zero(BigInt)
+            for k in 1:9
+                a, b = _P2QUAD_NODES[k]
+                c = _P2L2_VAL[a][i+1]*_P2L2_DER[b][j+1]
+                c != 0 && (s += C[d,k]*c)
+            end
+            B[d, i*2+j+1] = s
+        end
+    end
+    # Cross-product coefficient vectors of w̃ = Ã × B̃, degree (3,3).  The
+    # C(3,·) product denominators are deferred: Ũ already holds the numerator
+    # weights, and they cancel exactly in the squared-norm sum below.
+    U = Array{NTuple{3,BigInt}}(undef, 4, 4)
+    fill!(U, (BigInt(0), BigInt(0), BigInt(0)))
+    @inbounds for i in 0:1, j in 0:2
+        m1 = i*3+j+1
+        a1 = (A[1,m1], A[2,m1], A[3,m1])
+        for i2 in 0:2, j2 in 0:1
+            m2 = i2*2+j2+1
+            wgt = _P2B2[i2+1]*_P2B2[j+1]
+            cross = _bigint_cross(a1, (B[1,m2], B[2,m2], B[3,m2]))
+            U[i+i2+1, j+j2+1] = U[i+i2+1, j+j2+1] .+ wgt .* cross
+        end
+    end
+    f = (exps[2]+exps[3], exps[1]+exps[3], exps[1]+exps[2])
+    fmin = 2*min(f[1], f[2], f[3])
+    T = zeros(BigInt, 7, 7)
+    @inbounds for c in 1:3
+        shift = 2*f[c] - fmin
+        for i in 0:3, j in 0:3, i2 in 0:3, j2 in 0:3
+            s = U[i+1,j+1][c]*U[i2+1,j2+1][c]
+            s != 0 && (T[i+i2+1, j+j2+1] += s << shift)
+        end
+    end
+    return T, fmin
+end
+
+function _p2quad_bernstein_bound(coords, quad9, q::Integer)
+    T, fmin = _p2quad_bernstein_coeffs(coords, quad9, q)
+    mp = mq = 1
+    @inbounds for p in 0:6, qq in 0:6
+        T[p+1,qq+1]*_P2B6[mp]*_P2B6[mq] <
+            T[mp,mq]*_P2B6[p+1]*_P2B6[qq+1] && (mp = p+1; mq = qq+1)
+    end
+    return all(>(0), T), T[mp,mq], _P2B6[mp]*_P2B6[mq], fmin-8
+end
+
+"""
+    p2_quad_min_jacobian(coords, quad9) -> Float64
+
+Minimum exact degree-(6,6) tensor-Bernstein coefficient of the
+quadratic-quadrangle Gram determinant `g = |∂x/∂u × ∂x/∂v|²` over all
+elements, returned as `Float64`. `coords` is a `3 × nnodes` real coordinate
+matrix and `quad9` is a `9 × nquads` integer connectivity matrix in gmsh
+type-10 order (corners, then the edge mids on `(1,2),(2,3),(3,4),(4,1)`, then
+the face center — the `lagrange_nodes(10)` layout). It is a conservative
+global lower bound: `> 0` formally certifies every element is a regular
+surface map over the whole closed reference square `[-1,1]²`; `≤ 0` means the
+batch is not certified (and may be folded or degenerate). For a planar
+parallelogram element this equals `(area/4)² > 0`.
+"""
+function p2_quad_min_jacobian(coords, quad9)
+    C = _p2_element_coords(coords, "p2_quad_min_jacobian")
+    Q = _p2_element_conn(quad9, 9, "quad9", "p2_quad_min_jacobian")
+    _p2_element_check(C, Q, "quadrangle", "p2_quad_min_jacobian")
+    size(Q, 2) == 0 && return 0.0
+    mn = Inf
+    for q in axes(Q, 2)
+        _, n, dn, e = _p2quad_bernstein_bound(C, Q, q)
+        d = _bound_float(n, dn, e)
+        d < mn && (mn = d)
+    end
+    return mn
+end
+
+# ── P2 hexahedron (gmsh type 12) — signed det J, tensor degree (5,5,5) ─────
+# ∂x/∂u has tensor-Bernstein degree (1,2,2), ∂x/∂v (2,1,2), ∂w (2,2,1) on
+# [-1,1]³; each carries 2^e_d/8 per component so det J is represented exactly
+# by its 216 Bernstein coefficients S_(p,q,r)·2^(scaleexp-9)/(C5p·C5q·C5r).
+function _p2hex_bernstein_coeffs(coords, hex27, t::Integer)
+    C, exps = _integer_element_coords(coords, hex27, t, "hexahedron")
+    A = Matrix{BigInt}(undef, 3, 18)  # ∂x/∂u coefficient vectors, degree (1,2,2)
+    B = Matrix{BigInt}(undef, 3, 18)  # ∂x/∂v coefficient vectors, degree (2,1,2)
+    D = Matrix{BigInt}(undef, 3, 18)  # ∂x/∂w coefficient vectors, degree (2,2,1)
+    @inbounds for d in 1:3
+        for i in 0:1, j in 0:2, k in 0:2
+            s = zero(BigInt)
+            for n in 1:27
+                a, b, c = _P2HEX_NODES[n]
+                cf = _P2L2_DER[a][i+1]*_P2L2_VAL[b][j+1]*_P2L2_VAL[c][k+1]
+                cf != 0 && (s += C[d,n]*cf)
+            end
+            A[d, i*9+j*3+k+1] = s
+        end
+        for i in 0:2, j in 0:1, k in 0:2
+            s = zero(BigInt)
+            for n in 1:27
+                a, b, c = _P2HEX_NODES[n]
+                cf = _P2L2_VAL[a][i+1]*_P2L2_DER[b][j+1]*_P2L2_VAL[c][k+1]
+                cf != 0 && (s += C[d,n]*cf)
+            end
+            B[d, i*6+j*3+k+1] = s
+        end
+        for i in 0:2, j in 0:2, k in 0:1
+            s = zero(BigInt)
+            for n in 1:27
+                a, b, c = _P2HEX_NODES[n]
+                cf = _P2L2_VAL[a][i+1]*_P2L2_VAL[b][j+1]*_P2L2_DER[c][k+1]
+                cf != 0 && (s += C[d,n]*cf)
+            end
+            D[d, i*6+j*2+k+1] = s
+        end
+    end
+    S = zeros(BigInt, 6, 6, 6)
+    @inbounds for i1 in 0:1, j1 in 0:2, k1 in 0:2
+        m1 = i1*9+j1*3+k1+1
+        a1 = (A[1,m1], A[2,m1], A[3,m1])
+        for i2 in 0:2, j2 in 0:1, k2 in 0:2
+            m2 = i2*6+j2*3+k2+1
+            b2 = (B[1,m2], B[2,m2], B[3,m2])
+            for i3 in 0:2, j3 in 0:2, k3 in 0:1
+                m3 = i3*6+j3*2+k3+1
+                wgt = _P2B2[i2+1]*_P2B2[i3+1]*_P2B2[j1+1]*_P2B2[j3+1]*
+                      _P2B2[k1+1]*_P2B2[k2+1]
+                S[i1+i2+i3+1, j1+j2+j3+1, k1+k2+k3+1] +=
+                    wgt*_p2_det3(a1, b2, (D[1,m3], D[2,m3], D[3,m3]))
+            end
+        end
+    end
+    return S, exps[1]+exps[2]+exps[3]
+end
+
+function _p2hex_bernstein_bound(coords, hex27, t::Integer)
+    S, scaleexp = _p2hex_bernstein_coeffs(coords, hex27, t)
+    mp = mq = mr = 1
+    @inbounds for p in 0:5, q in 0:5, r in 0:5
+        S[p+1,q+1,r+1]*_P2B5[mp]*_P2B5[mq]*_P2B5[mr] <
+            S[mp,mq,mr]*_P2B5[p+1]*_P2B5[q+1]*_P2B5[r+1] &&
+            (mp = p+1; mq = q+1; mr = r+1)
+    end
+    return all(>(0), S), S[mp,mq,mr], _P2B5[mp]*_P2B5[mq]*_P2B5[mr], scaleexp-9
+end
+
+"""
+    p2_hex_min_jacobian(coords, hex27) -> Float64
+
+Minimum exact degree-(5,5,5) tensor-Bernstein coefficient of the
+quadratic-hexahedron isoparametric Jacobian determinant `det ∂x/∂(u,v,w)`
+over all elements, returned as `Float64`. `coords` is a `3 × nnodes` real
+coordinate matrix and `hex27` is a `27 × nhexes` integer connectivity matrix
+in gmsh type-12 order (corners, edge mids, face centers, body center — the
+`lagrange_nodes(12)` layout). It is a conservative global lower bound: `> 0`
+formally certifies every element over the whole closed reference cube
+`[-1,1]³`; `≤ 0` means the batch is not certified (and may be folded). For a
+straight-sided parallelepiped element this equals `volume/8 > 0`.
+"""
+function p2_hex_min_jacobian(coords, hex27)
+    C = _p2_element_coords(coords, "p2_hex_min_jacobian")
+    H = _p2_element_conn(hex27, 27, "hex27", "p2_hex_min_jacobian")
+    _p2_element_check(C, H, "hexahedron", "p2_hex_min_jacobian")
+    size(H, 2) == 0 && return 0.0
+    mn = Inf
+    for t in axes(H, 2)
+        _, n, dn, e = _p2hex_bernstein_bound(C, H, t)
+        d = _bound_float(n, dn, e)
+        d < mn && (mn = d)
+    end
+    return mn
+end
+
+# ── P2 prism (gmsh type 13) — signed det J on the product domain ────────────
+# ∂x/∂r and ∂x/∂s are triangle-degree-1 × line-degree-2 (9 coefficient
+# vectors, each carrying 2^e_d/2), ∂x/∂w is triangle-degree-2 × line-degree-1
+# (12 vectors, 2^e_d/4).  det J therefore lives in the triangle-degree-4 ×
+# line-degree-5 product Bernstein basis (90 coefficients) and is represented
+# exactly by T_(γ,p)·2^(scaleexp-4)/(C(4,γ)·C(5,p)).
+function _p2pri_bernstein_coeffs(coords, pri18, t::Integer)
+    C, exps = _integer_element_coords(coords, pri18, t, "prism")
+    R = Matrix{BigInt}(undef, 3, 9)   # ∂x/∂r coefficient vectors, deg tri-1 × w-2
+    S = Matrix{BigInt}(undef, 3, 9)   # ∂x/∂s coefficient vectors, deg tri-1 × w-2
+    W = Matrix{BigInt}(undef, 3, 12)  # ∂x/∂w coefficient vectors, deg tri-2 × w-1
+    @inbounds for d in 1:3
+        for v in 1:3, b in 0:2
+            sr = ss = zero(BigInt)
+            for n in 1:18
+                a, bw = _P2PRI_NODES[n]
+                cr = _P2TRI_DR[a][v]*_P2L2_VAL[bw][b+1]
+                cr != 0 && (sr += C[d,n]*cr)
+                cs = _P2TRI_DS[a][v]*_P2L2_VAL[bw][b+1]
+                cs != 0 && (ss += C[d,n]*cs)
+            end
+            R[d, (v-1)*3+b+1] = sr
+            S[d, (v-1)*3+b+1] = ss
+        end
+        for g in 1:6, b in 0:1
+            s = zero(BigInt)
+            for n in 1:18
+                a, bw = _P2PRI_NODES[n]
+                c = _P2TRI_V2[a][g]*_P2L2_DER[bw][b+1]
+                c != 0 && (s += C[d,n]*c)
+            end
+            W[d, (g-1)*2+b+1] = s
+        end
+    end
+    T = zeros(BigInt, 15, 6)
+    @inbounds for v1 in 1:3, b1 in 0:2
+        m1 = (v1-1)*3+b1+1
+        a1 = (R[1,m1], R[2,m1], R[3,m1])
+        for v2 in 1:3, b2 in 0:2
+            m2 = (v2-1)*3+b2+1
+            a2 = (S[1,m2], S[2,m2], S[3,m2])
+            for g in 1:6, b3 in 0:1
+                m3 = (g-1)*2+b3+1
+                wgt = _P2B2[b1+1]*_P2B2[b2+1]*_B2TRI_WEIGHT[g]
+                T[Int(_P2PRI_GROUP[v1,v2,g]), b1+b2+b3+1] +=
+                    wgt*_p2_det3(a1, a2, (W[1,m3], W[2,m3], W[3,m3]))
+            end
+        end
+    end
+    return T, exps[1]+exps[2]+exps[3]
+end
+
+function _p2pri_bernstein_bound(coords, pri18, t::Integer)
+    T, scaleexp = _p2pri_bernstein_coeffs(coords, pri18, t)
+    mg = mp = 1
+    @inbounds for g in 1:15, p in 0:5
+        T[g,p+1]*_B4TRI_WEIGHT[mg]*_P2B5[mp] <
+            T[mg,mp]*_B4TRI_WEIGHT[g]*_P2B5[p+1] && (mg = g; mp = p+1)
+    end
+    return all(>(0), T), T[mg,mp], _B4TRI_WEIGHT[mg]*_P2B5[mp], scaleexp-4
+end
+
+"""
+    p2_prism_min_jacobian(coords, pri18) -> Float64
+
+Minimum exact triangle-degree-4 × line-degree-5 product-Bernstein coefficient
+of the quadratic-prism isoparametric Jacobian determinant
+`det ∂x/∂(r,s,w)` over all elements, returned as `Float64`. `coords` is a
+`3 × nnodes` real coordinate matrix and `pri18` is a `18 × nprisms` integer
+connectivity matrix in gmsh type-13 order (corners, edge mids, quadrilateral
+face centers — the `lagrange_nodes(13)` layout). It is a conservative global
+lower bound: `> 0` formally certifies every element over the whole closed
+reference prism `{r,s ≥ 0, r+s ≤ 1} × [-1,1]`; `≤ 0` means the batch is not
+certified (and may be folded). For a straight-sided prism this equals its
+volume `> 0` (the reference prism has unit volume).
+"""
+function p2_prism_min_jacobian(coords, pri18)
+    C = _p2_element_coords(coords, "p2_prism_min_jacobian")
+    P = _p2_element_conn(pri18, 18, "pri18", "p2_prism_min_jacobian")
+    _p2_element_check(C, P, "prism", "p2_prism_min_jacobian")
+    size(P, 2) == 0 && return 0.0
+    mn = Inf
+    for t in axes(P, 2)
+        _, n, dn, e = _p2pri_bernstein_bound(C, P, t)
+        d = _bound_float(n, dn, e)
+        d < mn && (mn = d)
+    end
+    return mn
 end
 
 end # module HighOrder

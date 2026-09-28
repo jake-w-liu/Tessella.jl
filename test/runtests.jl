@@ -146,6 +146,7 @@ using Tessella
 
     # Stage 6 — high-order elements.
     include("meshing/highorder_test.jl") # quadratic (P2) tet generation + type-11 I/O
+    include("meshing/highorder_jacobian_test.jl") # exact P2 Jacobian bounds for quad/hex/prism
 
     # Application: native meshes for all 22 HFSS User Guide case geometries (no gmsh/OCC).
     include("integration/hfss_cases_test.jl") # STATUS #12 meshing half — valid+watertight+conforming
