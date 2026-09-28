@@ -497,13 +497,18 @@ end
         m=to_mesh(T;interior=inside)
         # The analytic answer is a center point and a four-triangle fan.
         @test T.nreal==5
-        @test (T.x[5]/scale,T.y[5]/scale)≈(0.5,0.5)
+        @test all(isapprox.((T.x[5]/scale,T.y[5]/scale),(0.5,0.5)))
         @test T.seg==constraints
         @test check_consistency(T)==(true,"ok")
         @test is_constrained_delaunay(T)[1]
         @test size(m.tris,2)==4
+        # `to_mesh` renumbers nodes by coordinate order; the inserted center
+        # keeps a stable position, so look it up rather than its old id.
+        center=findfirst(k->m.coords[1,k]≈scale/2&&m.coords[2,k]≈scale/2,
+                         axes(m.coords,2))
+        @test center!==nothing
         for t in eachcol(m.tris)
-            @test 5 in t
+            @test center in t
             a,b,c=(m.coords[1:2,i]./scale for i in t)
             @test abs((b[1]-a[1])*(c[2]-a[2])-
                       (b[2]-a[2])*(c[1]-a[1]))/2≈0.25
@@ -539,8 +544,8 @@ end
     @test M._mean_size3(1e308,1e308,1e308)≈1e308
     @test M._mean_size3(1e308,Inf,1e308)==Inf
     for scale in (1e-200,1.0,1e200)
-        @test M._barycentric2((0.,0.),(scale,0.),(0.,scale),
-                              (scale/4,scale/2))≈(0.25,0.25,0.5)
+        @test all(M._barycentric2((0.,0.),(scale,0.),(0.,scale),
+                                  (scale/4,scale/2)).≈(0.25,0.25,0.5))
     end
     @test M._barycentric2((0.,0.),(1.,0.),(2.,0.),(0.5,0.))===nothing
 end
