@@ -276,6 +276,23 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test_throws ArgumentError tetrahedralize(isolated)
         @test_throws ArgumentError tetrahedralize(isolated;check=false)
 
+        # self-intersecting PLC: two interpenetrating cube shells merged into
+        # one boundary — faces properly cross, so no conforming fill exists;
+        # the input gate must reject it instead of refining forever.
+        c2=box_surface(0.5,2.5,0.5,2.5,0.5,2.5)
+        c3=box_surface(1.5,3.5,1.5,3.5,1.5,3.5)
+        crossed=Mesh(hcat(c2.coords,c3.coords);
+                     tris=hcat(c2.tris,c3.tris.+Int32(nnodes(c2))))
+        @test_throws ArgumentError tetrahedralize(crossed)
+        @test_throws ArgumentError recover_boundary(crossed)
+        # coplanar area overlap is the same violation: the small box's bottom
+        # face lies strictly inside the big box's top face — no edges pierce.
+        c4=box_surface(0.0,2.0,0.0,2.0,0.0,2.0)
+        c5=box_surface(0.0,1.0,0.0,1.0,2.0,4.0)
+        coplanar_overlap=Mesh(hcat(c4.coords,c5.coords);
+                              tris=hcat(c4.tris,c5.tris.+Int32(nnodes(c4))))
+        @test_throws ArgumentError tetrahedralize(coplanar_overlap)
+
         # non-convex L-prism (2×2×1 minus a 1×1×1 corner) → volume 3
         base=[(0.0,0.0),(2.0,0.0),(2.0,1.0),(1.0,1.0),(1.0,2.0),(0.0,2.0)]; nb=length(base)
         LC=Matrix{Float64}(undef,3,2nb)
