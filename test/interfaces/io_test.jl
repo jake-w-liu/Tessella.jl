@@ -1011,7 +1011,8 @@ end
                       startswith(gmsh_version,"4.15.2-")
                 function gmsh_range_output(code)
                     output=IOBuffer()
-                    command=ignorestatus(`$gmsh /dev/null -parse_and_exit -string $code`)
+                    devnull=Sys.iswindows() ? "NUL" : "/dev/null"
+                    command=ignorestatus(`$gmsh $devnull -parse_and_exit -string $code`)
                     run(pipeline(command;stdout=output,stderr=output))
                     return String(take!(output))
                 end

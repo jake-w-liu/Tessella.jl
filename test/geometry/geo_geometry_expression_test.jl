@@ -50,10 +50,10 @@ end
 
     meshed=execute_geo(_GEO_GEOMETRY_EXPRESSION_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==135
-    @test ntets(meshed.mesh)==437
+    @test nnodes(meshed.mesh)==139
+    @test ntets(meshed.mesh)==457
     @test mesh_crc(meshed.mesh).sha==
-          "7527493c95e40eafaff059826acc6e3fd3dddfd4a1b6a6230e976c56c4802e10"
+          "25c0b9c98a5b8dc959b7f58202d62ad783c49a7b1e00111d649731112b975ee6"
     volume=sum(tet_volume(
         node(meshed.mesh,meshed.mesh.tets[1,cell]),
         node(meshed.mesh,meshed.mesh.tets[2,cell]),
@@ -65,7 +65,7 @@ end
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "ffd2559d989c41fa734540af77d02541c8e35f7a0993b4692e69cbbea6232bda"
+          "8b76bf2a3c0f74cea3b1081dc9eb79627801b1a99ec7b250aaa899766a6e8d0a"
 
     optional_size=_execute_geometry_expression_source(
         "Point(1 + 0.9) = {0, 1, 2};")

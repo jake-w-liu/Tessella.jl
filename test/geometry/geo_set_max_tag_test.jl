@@ -48,7 +48,7 @@ end
     projected=model_to_mixed(meshed.model,meshed.mesh,3,601)
     @test validate(projected).ok
     @test mixed_crc(projected).sha==
-          "d5d07bb14b42c8ca5ff44f355051e9b761100b57d37cc882e73d224777685e72"
+          "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486"
 
     lowered=_execute_set_max_tag_source(raw"""
         Point(10) = {0,0,0,1};

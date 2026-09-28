@@ -863,7 +863,9 @@ finally:
     python,pythonpath=gmsh_python_environment()
     command=Cmd([python,"-c",script,path,string(dimension),string(tag)])
     isempty(pythonpath) || (command=addenv(command,"PYTHONPATH"=>pythonpath))
-    lines=split(chomp(read(command,String)),'\n';keepempty=true)
+    # Windows CPython print() emits CRLF: normalize before splitting.
+    lines=split(chomp(replace(read(command,String),"\r\n"=>"\n")),'\n';
+                keepempty=true)
     length(lines)==2 || error("unexpected Gmsh physical-name oracle output")
     return lines[1],lines[2]
 end

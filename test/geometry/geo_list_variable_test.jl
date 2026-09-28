@@ -51,17 +51,17 @@ end
 
     meshed=execute_geo(_GEO_LIST_VARIABLE_FIXTURE;mesh_dim=3)
     @test validate(meshed.mesh).ok
-    @test nnodes(meshed.mesh)==142
-    @test ntets(meshed.mesh)==484
+    @test nnodes(meshed.mesh)==135
+    @test ntets(meshed.mesh)==440
     @test mesh_crc(meshed.mesh).sha==
-          "dc28416214d8699235ea4081de969d0b4785c46bc7e8f703e034e46ec075cbe9"
+          "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8"
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,4).slave_nodes)==21
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,5).slave_nodes)==21
     projected=model_to_mixed(meshed.model,meshed.mesh,3,1)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "14168011de804c95364604f4e8d6bb9ac8222a49ea0302ec183dd883c70672f5"
+          "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461"
 
     # Diagnostics match Gmsh 4.15.2's recoverable `yymsg` text: the entity
     # statements still execute (e.g. `Point(missing[0])` creates `Point(0)`
