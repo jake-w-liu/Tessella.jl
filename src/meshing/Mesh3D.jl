@@ -1886,6 +1886,11 @@ function _require_surface3(surface::Mesh, caller::AbstractString; oriented::Bool
                 throw(ArgumentError("$caller: surface has inconsistent winding at edge $e"))
         end
     end
+    crossed=_plc_self_intersection3(surface)
+    crossed===nothing || throw(ArgumentError(
+        "$caller: surface triangles $(crossed[1]) and $(crossed[2]) " *
+        "improperly intersect (piercing interiors, coplanar overlap, or an " *
+        "embedded vertex) — a self-intersecting boundary is not a meshable PLC"))
     return nothing
 end
 
@@ -2097,6 +2102,150 @@ function _segment_triangle_hit(p, q, a, b, c; atol=1e-12)
     x=_add3(p, _scale3(_sub3(q,p), t))
     _point_in_triangle3(x,a,b,c; atol=atol) || return nothing
     return x
+end
+
+# ── PLC self-intersection gate ────────────────────────────────────────────────
+# A boundary surface whose triangles properly cross one another (piercing
+# interiors or overlapping coplanar patches) is not a meshable PLC: boundary
+# recovery can never conform, and exact recovery would refine forever against
+# the impossible constraint. `validate` only checks topology, so the geometric
+# gate lives here, inside `_require_surface3`, where every public boundary input
+# (tetrahedralize, recover_boundary, mesh_boolean, …) is already gated.
+@inline _orient2(a,b,c)=(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1])
+
+# Intersection of open segment (p,q) with the line through (a,b), in 2-D.
+function _line2_hit(p,q,a,b)
+    d1=_orient2(a,b,p);d2=_orient2(a,b,q)
+    t=d1/(d1-d2)
+    return (p[1]+(q[1]-p[1])*t, p[2]+(q[2]-p[2])*t)
+end
+
+# Area of the polygon clip(subject ∩ clip triangle): Sutherland–Hodgman
+# against the triangle's three half-planes. Positive-area overlap of two
+# coplanar triangles is exactly what this measures — boundary touches without
+# shared area contribute nothing.
+function _clip_tri_area2(subject::NTuple{3,NTuple{2,Float64}},
+                         clip::NTuple{3,NTuple{2,Float64}})
+    o=_orient2(clip[1],clip[2],clip[3])
+    o==0 && return 0.0
+    ccw=o>0
+    S=NTuple{2,Float64}[subject...]
+    @inbounds for i in 1:3
+        a=clip[i];b=clip[i==3 ? 1 : i+1]
+        ccw || ((a,b)=(b,a))                        # keep interior on the left
+        out=NTuple{2,Float64}[]
+        n=length(S)
+        n==0 && break
+        for k in 1:n
+            p=S[k];q=S[k==1 ? n : k-1]
+            dp=_orient2(a,b,p);dq=_orient2(a,b,q)
+            if dp>=0
+                dq<0 && push!(out,_line2_hit(q,p,a,b))
+                push!(out,p)
+            elseif dq>0
+                push!(out,_line2_hit(q,p,a,b))
+            end
+        end
+        S=out
+    end
+    n=length(S)
+    n<3 && return 0.0
+    area=0.0
+    @inbounds for k in 1:n
+        p=S[k];q=S[k==n ? 1 : k+1]
+        area+=p[1]*q[2]-p[2]*q[1]
+    end
+    return abs(area)/2
+end
+
+# Positive-area overlap of two triangles known to share one plane. Projection
+# drops the dominant normal axis; boundary touches without area don't count.
+function _coplanar_tri_overlap(p1,p2,p3,q1,q2,q3)
+    n=_cross3(_sub3(p2,p1),_sub3(p3,p1))
+    drop=abs(n[1])>=abs(n[2]) && abs(n[1])>=abs(n[3]) ? 1 :
+         abs(n[2])>=abs(n[3]) ? 2 : 3
+    ax=drop==1 ? (2,3) : drop==2 ? (1,3) : (1,2)
+    P=((p1[ax[1]],p1[ax[2]]),(p2[ax[1]],p2[ax[2]]),(p3[ax[1]],p3[ax[2]]))
+    Q=((q1[ax[1]],q1[ax[2]]),(q2[ax[1]],q2[ax[2]]),(q3[ax[1]],q3[ax[2]]))
+    area=_clip_tri_area2(P,Q)
+    scale=max(abs(_orient2(P[1],P[2],P[3])),abs(_orient2(Q[1],Q[2],Q[3])))/2
+    return area>1e-12*scale
+end
+
+# Point strictly inside a 3-D triangle's interior (on-plane and inside all
+# edges) — a vertex of one face embedded in another face is a PLC violation.
+function _pt_in_tri3_strict(x,a,b,c;atol=1e-9)
+    n=_cross3(_sub3(b,a),_sub3(c,a))
+    n2=_dot3(n,n)
+    n2>0 || return false
+    lim=atol*sqrt(n2)
+    abs(_dot3(n,_sub3(x,a)))<=lim || return false
+    n1=_cross3(_sub3(b,a),_sub3(x,a))
+    n2c=_cross3(_sub3(c,b),_sub3(x,b))
+    n3=_cross3(_sub3(a,c),_sub3(x,c))
+    return _dot3(n,n1)>lim*sqrt(n2) && _dot3(n,n2c)>lim*sqrt(n2) &&
+           _dot3(n,n3)>lim*sqrt(n2)
+end
+
+# Two triangles improperly sharing space: an edge piercing an interior, a
+# vertex embedded in the other interior, or coplanar area overlap.
+function _tris_improperly_meet(p1,p2,p3,q1,q2,q3;atol=1e-9)
+    for (a,b) in ((p1,p2),(p2,p3),(p3,p1))
+        _segment_triangle_hit(a,b,q1,q2,q3;atol=atol)!==nothing && return true
+    end
+    for (a,b) in ((q1,q2),(q2,q3),(q3,q1))
+        _segment_triangle_hit(a,b,p1,p2,p3;atol=atol)!==nothing && return true
+    end
+    # Coplanar faces: every vertex of q on p's plane (both triangles then share
+    # the plane), followed by a strict positive-area overlap test.
+    n=_cross3(_sub3(p2,p1),_sub3(p3,p1));n2=_dot3(n,n)
+    if n2>0
+        lim=atol*sqrt(n2);off=_dot3(n,p1)
+        coplanar=true
+        for x in (q1,q2,q3)
+            if abs(_dot3(n,x)-off)>lim; coplanar=false; break; end
+        end
+        coplanar && _coplanar_tri_overlap(p1,p2,p3,q1,q2,q3) && return true
+    end
+    for x in (p1,p2,p3)
+        _pt_in_tri3_strict(x,q1,q2,q3;atol=atol) && return true
+    end
+    for x in (q1,q2,q3)
+        _pt_in_tri3_strict(x,p1,p2,p3;atol=atol) && return true
+    end
+    return false
+end
+
+# First pair of surface triangles that improperly intersect, or nothing.
+# Faces are swept by min-x so each face is only tested against faces whose
+# bounding boxes overlap — near O(F) candidate pairs on typical surfaces.
+function _plc_self_intersection3(surface::Mesh;atol=1e-9)
+    F=size(surface.tris,2)
+    lo=Matrix{Float64}(undef,3,F);hi=Matrix{Float64}(undef,3,F)
+    @inbounds for f in 1:F, ax in 1:3
+        a=surface.coords[ax,surface.tris[1,f]]
+        b=surface.coords[ax,surface.tris[2,f]]
+        c=surface.coords[ax,surface.tris[3,f]]
+        lo[ax,f]=min(a,b,c);hi[ax,f]=max(a,b,c)
+    end
+    order=sortperm(@view lo[1,:])
+    @inbounds for i in 1:F-1
+        fi=order[i]
+        for j in i+1:F
+            fj=order[j]
+            lo[1,fj]>hi[1,fi]+atol && break
+            (hi[1,fj]<lo[1,fi]-atol || lo[2,fj]>hi[2,fi]+atol ||
+             hi[2,fj]<lo[2,fi]-atol || lo[3,fj]>hi[3,fi]+atol ||
+             hi[3,fj]<lo[3,fi]-atol) && continue
+            p1=_pt3(surface,surface.tris[1,fi]);p2=_pt3(surface,surface.tris[2,fi])
+            p3=_pt3(surface,surface.tris[3,fi])
+            q1=_pt3(surface,surface.tris[1,fj]);q2=_pt3(surface,surface.tris[2,fj])
+            q3=_pt3(surface,surface.tris[3,fj])
+            _tris_improperly_meet(p1,p2,p3,q1,q2,q3;atol=atol) &&
+                return (fi,fj)
+        end
+    end
+    return nothing
 end
 
 function _segment_face_hit(mesh::Mesh, p, q; atol=1e-12)
