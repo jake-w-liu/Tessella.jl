@@ -16,10 +16,12 @@ using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, triangle_area, tet_volume,
 using ..Elements: ElementBlock, MixedMesh, validate
 using ..Predicates: orient2, orient3
 using ..Mesh3D: delaunay3d, to_mesh3, recover_segment3, recover_triangle3,
-                _raygrid, _inside_grid, _rb_fan_steiner
+                _raygrid, _inside_grid, _rb_fan_steiner, _rb_orient_facets,
+                _signed_vol6
 using ..RecoverCDT: recover_boundary_cdt
 
-export mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled
+export mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled,
+       mesh_boundary_layer_fan
 
 function _finite(value, caller, name)
     value isa Bool && throw(ArgumentError("$caller: $name must not be Bool"))
@@ -985,6 +987,29 @@ function mesh_boundary_layer_filled(surface::Mesh; hwall::Real, ratio::Real,
         end
     end
 
+    # Ear-clipping fill for non-star-shaped caps: preserves every cap face by
+    # vertex identity while carving off one vertex's cone at a time.
+    if result===nothing && nt<=tet_limit
+        reason[]=""
+        try
+            cand=_vclip_fill(cap)
+            cand===nothing && throw(ErrorException("no removable ear"))
+            m=_merge_fill(cand,cap_keys,nout,caller,reason)
+            if m===nothing
+                push!(errors,"ear clip: "*reason[])
+            else
+                result=_assemble_and_certify(m...,cand,coords,cap_coords,prisms,
+                    surface.tris,cap_off,nt,tet_limit,wall_faces,comp_tris,
+                    cavity_set,wall_vol,caller,reason)
+                result===nothing && push!(errors,"ear clip: "*reason[])
+            end
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            push!(errors,"ear clip: "*sprint(showerror,err))
+        end
+    end
+
     # Exact-rational conforming recovery (bit-exact interface).
     if result===nothing
         reason[]=""
@@ -1138,6 +1163,263 @@ function _float_fill(cap)
     return Mesh(coords; tets=tets)
 end
 
+# Segment (p,q) piercing the interior of triangle (a,b,c) — a float heuristic
+# for the ear-clipping fill; exactness is enforced by the downstream certify.
+function _seg_pierces_tri(p,q,a,b,c)
+    ab,ac,ap=(b[1]-a[1],b[2]-a[2],b[3]-a[3]),(c[1]-a[1],c[2]-a[2],c[3]-a[3]),(a[1]-p[1],a[2]-p[2],a[3]-p[3])
+    n=_cross3(ab,ac); d=(q[1]-p[1],q[2]-p[2],q[3]-p[3]); den=_dot3(n,d)
+    abs(den)<1e-14 && return false
+    t=_dot3(n,ap)/den
+    (t<=1e-9 || t>=1-1e-9) && return false
+    h=(p[1]+d[1]*t,p[2]+d[2]*t,p[3]+d[3]*t)
+    v0,v1,v2=ab,ac,(h[1]-a[1],h[2]-a[2],h[3]-a[3])
+    d00,d01,d11=_dot3(v0,v0),_dot3(v0,v1),_dot3(v1,v1)
+    d20,d21=_dot3(v2,v0),_dot3(v2,v1)
+    den2=d00*d11-d01*d01
+    abs(den2)<1e-30 && return false
+    v=(d11*d20-d01*d21)/den2; w=(d00*d21-d01*d20)/den2
+    return 1-v-w>1e-9 && v>1e-9 && w>1e-9
+end
+function _tris_cross3(p1,p2,p3,a,b,c)
+    _seg_pierces_tri(p1,p2,a,b,c) && return true
+    _seg_pierces_tri(p2,p3,a,b,c) && return true
+    _seg_pierces_tri(p3,p1,a,b,c) && return true
+    _seg_pierces_tri(a,b,p1,p2,p3) && return true
+    _seg_pierces_tri(b,c,p1,p2,p3) && return true
+    _seg_pierces_tri(c,a,p1,p2,p3) && return true
+    return false
+end
+
+# Strict-interior point-in-tetrahedron on the exact orient3 predicate: the
+# point must lie on the opposite vertex's side of every face — the expected
+# sign of each face test is derived from the tetrahedron's own orientation,
+# so either winding is accepted.
+function _pt_in_tet(p,a,b,c,d)
+    s=orient3(a,b,c,d)
+    s==0 && return false
+    orient3(b,c,d,p)==-s || return false
+    orient3(a,d,c,p)==-s || return false
+    orient3(a,b,d,p)==-s || return false
+    orient3(a,c,b,p)==-s || return false
+    return true
+end
+
+# Tetrahedron interiors overlapping — vertex containment either way or a proper
+# face-face crossing. Shared faces and shared boundary edges are not overlaps.
+function _tets_overlap(t1,t2)
+    @inbounds for q in t1
+        _pt_in_tet(q,t2[1],t2[2],t2[3],t2[4]) && return true
+    end
+    @inbounds for q in t2
+        _pt_in_tet(q,t1[1],t1[2],t1[3],t1[4]) && return true
+    end
+    @inbounds for f1 in ((t1[2],t1[3],t1[4]),(t1[1],t1[4],t1[3]),
+                        (t1[1],t1[2],t1[4]),(t1[1],t1[3],t1[2])),
+                f2 in ((t2[2],t2[3],t2[4]),(t2[1],t2[4],t2[3]),
+                       (t2[1],t2[2],t2[4]),(t2[1],t2[3],t2[2]))
+        _tris_cross3(f1[1],f1[2],f1[3],f2[1],f2[2],f2[3]) && return true
+    end
+    return false
+end
+
+# Ear-clipping conforming fill of a closed triangle surface: each level picks a
+# vertex whose link polygon admits a fan triangulation whose coned-off ear
+# region stays inside the domain, emits the ear tets (v, link-tri), and recurses
+# on the reduced surface. Preserves every input facet by vertex identity — the
+# strict contract recover_boundary_cdt cannot give — so it is the last resort
+# before the exact engine when the cap is not star-shaped. Returns a Mesh with
+# only tets, or nothing when no removable ear exists (a Schoenhardt-type cap,
+# which the exact recovery stage then handles or rejects explicitly).
+function _vclip_fill(cap::Mesh)
+    res=_vclip_rec(cap,NTuple{4,NTuple{3,Float64}}[])
+    res===nothing && return nothing
+    C,tets=res
+    out=Matrix{Int32}(undef,4,length(tets))
+    @inbounds for (j,tt) in enumerate(tets), r in 1:4
+        out[r,j]=tt[r]
+    end
+    return Mesh(C;tets=out)
+end
+function _vclip_rec(cap::Mesh,anc::Vector{NTuple{4,NTuple{3,Float64}}})
+    nf=size(cap.tris,2); nn=size(cap.coords,2)
+    facets=NTuple{3,Int32}[(cap.tris[1,t],cap.tris[2,t],cap.tris[3,t]) for t in 1:nf]
+    oriented=_rb_orient_facets(facets)
+    oriented===nothing && return nothing
+    vt(i)=(cap.coords[1,i],cap.coords[2,i],cap.coords[3,i])
+    if nn==4
+        nf==4 || return nothing
+        v6=_signed_vol6(vt(1),vt(2),vt(3),vt(4))
+        v6==0 && return nothing
+        return (cap.coords,[v6>0 ? (Int32(1),Int32(2),Int32(3),Int32(4)) :
+                                   (Int32(2),Int32(1),Int32(3),Int32(4))])
+    end
+    nn<4 && return nothing
+    g=_raygrid(cap)
+    vfaces=[Int[] for _ in 1:nn]
+    @inbounds for (t,(a,b,c)) in enumerate(oriented), v in (a,b,c)
+        push!(vfaces[Int(v)],t)
+    end
+    tets=NTuple{4,Int32}[]
+    for v in sortperm(length.(vfaces))           # fewest faces first, stable
+        fs=vfaces[v]; k=length(fs)
+        k<3 && continue
+        ein=Dict{NTuple{2,Int32},Int}()
+        @inbounds for t in fs
+            a,b,c=oriented[t]
+            for e in (a<b ? (a,b) : (b,a), b<c ? (b,c) : (c,b), a<c ? (a,c) : (c,a))
+                ein[e]=get(ein,e,0)+1
+            end
+        end
+        link=NTuple{2,Int32}[]
+        for (e,cnt) in ein
+            cnt==1 && push!(link,e)
+            cnt>2 && (k=-1; break)
+        end
+        (k==-1 || length(link)!=k) && continue
+        nxt=Dict{Int32,Vector{Int32}}()
+        for (x,y) in link
+            push!(get!(nxt,x,Int32[]),y); push!(get!(nxt,y,Int32[]),x)
+        end
+        all(==(2),length.(values(nxt))) || continue
+        start=minimum(e->min(e[1],e[2]),link)
+        cyc=Int32[start]; prev=Int32(-1); cur=start
+        for _ in 1:k+2
+            w=nxt[cur][1]==prev ? nxt[cur][2] : nxt[cur][1]
+            w==start && break
+            push!(cyc,w); prev,cur=cur,w
+        end
+        length(cyc)==k || continue
+        cyc=cyc[2]<cyc[end] ? cyc : vcat(cyc[1],reverse(cyc[2:end]))
+        # try every fan triangulation of the link polygon (apex = each vertex);
+        # accept the first whose ear region is inside and whose new link
+        # triangles do not properly cross any surface face outside the fan
+        notfan=[t for t in 1:nf if !(t in fs)]
+        ptris=nothing
+        for ap in 1:k
+            A=cyc[ap]; ok=true; cand=NTuple{3,Int32}[]
+            for i in 2:k-1
+                v2=cyc[mod1(ap+i-1,k)]; v3=cyc[mod1(ap+i,k)]
+                push!(cand,(A,v2,v3))
+            end
+            for pt in cand
+                q=((vt(v)[1]+vt(pt[1])[1]+vt(pt[2])[1]+vt(pt[3])[1])/4,
+                   (vt(v)[2]+vt(pt[1])[2]+vt(pt[2])[2]+vt(pt[3])[2])/4,
+                   (vt(v)[3]+vt(pt[1])[3]+vt(pt[2])[3]+vt(pt[3])[3])/4)
+                _inside_grid(q,g) || (ok=false; break)
+            end
+            ok || continue
+            # the ear region must be empty of surface material: no link
+            # triangle may properly cross a remaining face and no remaining
+            # vertex may lie strictly inside any ear tet (exact orient3);
+            # ear-tet centroids inside R plus boundary conformance then give
+            # E ⊆ R, so the residual surface bounds R ∖ E
+            pv=vt(v)
+            for pt in cand, t in notfan
+                a,b,c=oriented[t]
+                _tris_cross3(vt(pt[1]),vt(pt[2]),vt(pt[3]),
+                             vt(a),vt(b),vt(c)) && (ok=false; break)
+            end
+            ok || continue
+            nvset=Set{Int32}()
+            for t in notfan, r in 1:3
+                push!(nvset,oriented[t][r])
+            end
+            for pt in cand
+                p1,p2,p3=vt(pt[1]),vt(pt[2]),vt(pt[3])
+                for u in nvset
+                    _pt_in_tet(vt(u),pv,p1,p2,p3) && (ok=false; break)
+                end
+                ok || break
+            end
+            ok || continue
+            # the ear region must leave the remaining domain: with the link
+            # triangles replacing the v-fan, every ear tet must sit OUTSIDE the
+            # residual surface — otherwise later ears re-carve its space
+            rfaces=NTuple{3,Int32}[oriented[t] for t in notfan]
+            append!(rfaces,cand)
+            rg=_raygrid(Mesh(cap.coords;tris=reshape(
+                [rfaces[t][r] for t in 1:length(rfaces),r in 1:3],3,:)))
+            for pt in cand
+                q=((vt(v)[1]+vt(pt[1])[1]+vt(pt[2])[1]+vt(pt[3])[1])/4,
+                   (vt(v)[2]+vt(pt[1])[2]+vt(pt[2])[2]+vt(pt[3])[2])/4,
+                   (vt(v)[3]+vt(pt[1])[3]+vt(pt[2])[3]+vt(pt[3])[3])/4)
+                _inside_grid(q,rg) && (ok=false; break)
+            end
+            ok || continue
+            # no new ear tet may overlap a tetrahedron already emitted at a
+            # shallower level — deeper residual surfaces can legitimately
+            # re-enter earlier ears' space, so this is checked pairwise rather
+            # than through the surface
+            et=NTuple{4,NTuple{3,Float64}}[]
+            for pt in cand
+                p1,p2,p3=vt(pt[1]),vt(pt[2]),vt(pt[3])
+                v6=_signed_vol6(pv,p1,p2,p3)
+                v6==0 && (ok=false; break)
+                push!(et,v6>0 ? (pv,p1,p2,p3) : (p1,pv,p2,p3))
+            end
+            ok || continue
+            for i in eachindex(et), j in 1:i-1
+                _tets_overlap(et[i],et[j]) && (ok=false; break)
+            end
+            ok || continue
+            for e in et
+                for a in anc
+                    _tets_overlap(e,a) && (ok=false; break)
+                end
+                ok || break
+            end
+            ok && (ptris=cand; break)
+        end
+        ptris===nothing && continue
+        pv=vt(v)
+        n0=length(tets)
+        for pt in ptris
+            v6=_signed_vol6(pv,vt(pt[1]),vt(pt[2]),vt(pt[3]))
+            v6==0 && break
+            push!(tets, v6>0 ? (Int32(v),pt[1],pt[2],pt[3]) :
+                               (pt[1],Int32(v),pt[2],pt[3]))
+        end
+        length(tets)-n0==length(ptris) || (resize!(tets,n0); continue)
+        # residual surface: S - fan + link tris, with v removed from numbering
+        keep=sort!(setdiff(1:nn,[v]))
+        remap=Dict{Int32,Int32}(Int32(u)=>Int32(i) for (i,u) in enumerate(keep))
+        S2=Int32[]
+        @inbounds for (t,(a,b,c)) in enumerate(oriented)
+            t in fs && continue
+            push!(S2,remap[a],remap[b],remap[c])
+        end
+        for pt in ptris
+            push!(S2,remap[pt[1]],remap[pt[2]],remap[pt[3]])
+        end
+        anc2=copy(anc)
+        for pt in ptris
+            p1,p2,p3=vt(pt[1]),vt(pt[2]),vt(pt[3])
+            v6=_signed_vol6(pv,p1,p2,p3)
+            push!(anc2,v6>0 ? (pv,p1,p2,p3) : (p1,pv,p2,p3))
+        end
+        sub=_vclip_rec(Mesh(cap.coords[:,keep];tris=reshape(S2,3,:)),anc2)
+        sub===nothing && (resize!(tets,n0); continue)
+        scoords,stets=sub
+        nkeep=length(keep)
+        extra=scoords[:,nkeep+1:end]
+        C=hcat(cap.coords,extra)
+        okall=true
+        for (a,b,c,d) in stets
+            A=a<=nkeep ? Int32(keep[Int(a)]) : Int32(nn+(Int(a)-nkeep))
+            B=b<=nkeep ? Int32(keep[Int(b)]) : Int32(nn+(Int(b)-nkeep))
+            C2=c<=nkeep ? Int32(keep[Int(c)]) : Int32(nn+(Int(c)-nkeep))
+            D=d<=nkeep ? Int32(keep[Int(d)]) : Int32(nn+(Int(d)-nkeep))
+            v6=_signed_vol6((C[1,A],C[2,A],C[3,A]),(C[1,B],C[2,B],C[3,B]),
+                            (C[1,C2],C[2,C2],C[3,C2]),(C[1,D],C[2,D],C[3,D]))
+            v6==0 && (okall=false; break)
+            push!(tets, v6>0 ? (A,B,C2,D) : (B,A,C2,D))
+        end
+        okall || (resize!(tets,n0); continue)
+        return (C,tets)
+    end
+    return nothing
+end
+
 # Merge a candidate core onto the prism-stack numbering through bit-exact cap
 # keys. Both engines preserve the wall's input coordinates exactly — the float
 # stage runs unperturbed and recovery inserts only points constructed from
@@ -1273,6 +1555,963 @@ function _assemble_and_certify(remap, newpts, total, fm, stack_coords,
          return nothing)
 
     return all_coords,tets
+end
+
+# ═══ joined multi-region boundary layers: 3-D edge fans and corner blocks ══════
+
+# Canonical split of a quad given cyclically (a,b,c,d): the diagonal whose
+# endpoints hold the smaller pair minimum, so any two cells sharing the face
+# triangulate it identically regardless of their own winding conventions.
+@inline function _fan_quad_tris(a::Int32,b::Int32,c::Int32,d::Int32)
+    if min(a,c)<min(b,d)
+        return (_sort3i(a,b,c),_sort3i(a,c,d))
+    end
+    return (_sort3i(b,c,d),_sort3i(b,d,a))
+end
+
+# The eight sorted-vertex triangle faces of a type-6 prism (bottom cap, top
+# cap, three side quads split on the canonical diagonal).
+function _fan_prism_faces(v::NTuple{6,Int32}, sink)
+    push!(sink,_sort3i(v[1],v[2],v[3]))
+    push!(sink,_sort3i(v[4],v[5],v[6]))
+    for (i,j) in ((1,2),(2,3),(3,1))
+        f1,f2=_fan_quad_tris(v[i],v[j],v[j+3],v[i+3])
+        push!(sink,f1); push!(sink,f2)
+    end
+    return sink
+end
+
+# Signed prism volume under the canonical side triangulation — identical in
+# spirit to _prism_volume6 but the skew-side diagonal is the shared rule, so
+# joined cells on both sides of an interface measure the same surface.
+function _fan_prism_volume(coords, v::NTuple{6,<:Integer})
+    pts=NTuple{3,Float64}[(coords[1,v[i]],coords[2,v[i]],coords[3,v[i]]) for i in 1:6]
+    cen=(sum(p[1] for p in pts)/6.0,sum(p[2] for p in pts)/6.0,sum(p[3] for p in pts)/6.0)
+    function vf(a,b,c)
+        s=_dot3(a,_cross3(b,c))/6.0
+        return orient3(a,b,c,cen)>0 ? s : -s
+    end
+    total=vf(pts[1],pts[2],pts[3])+vf(pts[4],pts[5],pts[6])
+    for (i,j) in ((1,2),(2,3),(3,1))
+        bi=pts[i]; bj=pts[j]; ti=pts[i+3]; tj=pts[j+3]
+        if min(v[i],v[j+3])<min(v[j],v[i+3])
+            total+=vf(bi,bj,tj)+vf(bi,tj,ti)
+        else
+            total+=vf(bj,bi,ti)+vf(bj,ti,tj)
+        end
+    end
+    return total
+end
+
+# The two vertices of surface triangle t other than v.
+@inline function _fan_others(tris,t,v)
+    a=Int(tris[1,t]); b=Int(tris[2,t]); c=Int(tris[3,t])
+    a==v && return b,c
+    b==v && return a,c
+    return a,b
+end
+
+function _fan_edge_map(tris,nt)
+    em=Dict{NTuple{2,Int32},Vector{Int32}}()
+    sizehint!(em,nt*3÷2)
+    @inbounds for t in 1:nt
+        a=tris[1,t]; b=tris[2,t]; c=tris[3,t]
+        for (x,y) in ((a,b),(b,c),(c,a))
+            key=x<y ? (x,y) : (y,x)
+            push!(get!(em,key,Int32[]),Int32(t))
+        end
+    end
+    return em
+end
+
+# Breadth-first check that one region's triangles are connected through shared
+# edges; disconnected regions have no single coherent extrusion.
+function _fan_check_connected(em,tris,region_of,r,trs,seen,inseen,caller)
+    length(trs)<=1 && return nothing
+    for t in trs; inseen[t]=true; end
+    first=trs[1]; seen[first]=true; stack=Int[first]; nseen=1
+    while !isempty(stack)
+        t=pop!(stack)
+        a=tris[1,t]; b=tris[2,t]; c=tris[3,t]
+        for (x,y) in ((a,b),(b,c),(c,a))
+            key=x<y ? (x,y) : (y,x)
+            for t2 in em[key]
+                u=Int(t2)
+                if inseen[u] && !seen[u]
+                    seen[u]=true; nseen+=1; push!(stack,u)
+                end
+            end
+        end
+    end
+    for t in trs; inseen[t]=false; seen[t]=false; end
+    nseen==length(trs) || throw(ArgumentError(
+        "$caller: region $r is not edge-connected"))
+    return nothing
+end
+
+# Cyclic walk through the triangle fan around one manifold vertex: returns the
+# v-edges crossed between consecutive fan triangles in walk order as
+# (other_endpoint, region_in, region_out) triples. A vertex whose incident
+# triangles do not form a single cycle is pinched — no coherent extrusion.
+function _fan_vertex_walk(tris, inc, v, region_of, em, caller)
+    t0=inc[1]; n_inc=length(inc)
+    o1,o2=_fan_others(tris,t0,v)
+    crossings=Vector{NTuple{3,Int32}}(undef,n_inc)
+    seen=falses(length(region_of)); seen[t0]=true
+    cur=t0; cure=Int32(min(o1,o2)); ncross=0
+    while true
+        key=Int32(v)<cure ? (Int32(v),cure) : (cure,Int32(v))
+        t12=em[key]
+        tnext=Int(t12[1]==cur ? t12[2] : t12[1])
+        ncross+=1
+        crossings[ncross]=(cure,Int32(region_of[cur]),Int32(region_of[tnext]))
+        tnext==t0 && break
+        (seen[tnext] || ncross>=n_inc) && throw(ArgumentError(
+            "$caller: vertex $v triangle fan does not form a single cycle"))
+        seen[tnext]=true
+        x,y=_fan_others(tris,tnext,v)
+        (x==cure || y==cure) || throw(ArgumentError(
+            "$caller: vertex $v triangle fan is inconsistent"))
+        cure=Int32(x==cure ? y : x)
+        cur=tnext
+    end
+    ncross==n_inc || throw(ArgumentError(
+        "$caller: vertex $v is pinched by disjoint triangle fans"))
+    return crossings
+end
+
+# Interior (non-endpoint) directions of one fan arc: `arctype` 1 rotates n_lo
+# onto n_hi through the short dihedral sector, 2 through the reflex sector.
+# Directions depend only on the arc key so distinct edges sharing the key share
+# the same node columns.
+function _fan_arc_dirs(n_lo,n_hi,arctype,nfan,caller,tag)
+    g=_cross3(n_lo,n_hi); gl=hypot(g[1],g[2],g[3])
+    co=_dot3(n_lo,n_hi)
+    if gl<=64eps(Float64)
+        co>0 && return fill(n_lo,nfan+1)
+        ax,ay,az=abs(n_lo[1]),abs(n_lo[2]),abs(n_lo[3])
+        ref=ay<=ax && ay<=az ? (0.0,1.0,0.0) :
+            ax<=az ? (1.0,0.0,0.0) : (0.0,0.0,1.0)
+        g=_cross3(ref,n_lo); gl=hypot(g[1],g[2],g[3])
+        (isfinite(gl) && gl>0) || throw(ArgumentError(
+            "$caller: cannot determine a fan axis at $tag"))
+    end
+    u=(g[1]/gl,g[2]/gl,g[3]/gl)
+    θ=atan(gl,co)
+    rays=Vector{NTuple{3,Float64}}(undef,nfan+1)
+    if arctype==1
+        for j in 0:nfan
+            φ=j*θ/nfan
+            rays[j+1]=_fan_rot(n_lo,u,φ)
+        end
+    else
+        for j in 0:nfan
+            φ=-j*(2π-θ)/nfan
+            rays[j+1]=_fan_rot(n_lo,u,φ)
+        end
+    end
+    return rays
+end
+
+@inline function _fan_rot(v,u,φ)
+    c,s=cos(φ),sin(φ)
+    cr=_cross3(u,v); d=_dot3(u,v)*(1-c)
+    return (v[1]*c+cr[1]*s+u[1]*d,
+            v[2]*c+cr[2]*s+u[2]*d,
+            v[3]*c+cr[3]*s+u[3]*d)
+end
+
+@inline function _fan_fid(idN,idF,v,rlo,rhi,at,nfan,j,k)
+    k==0 && return Int32(v)
+    j==0 && return idN[(Int32(rlo),Int32(v),Int32(k))]
+    j==nfan && return idN[(Int32(rhi),Int32(v),Int32(k))]
+    return idF[(Int32(v),Int32(rlo),Int32(rhi),Int32(at),Int32(j),Int32(k))]
+end
+
+"""
+    mesh_boundary_layer_fan(surface; regions, hwall, ratio, nlayers,
+                            unlayered=(), cavities=(), fan_elements=3,
+                            max_prisms=10_000_000, max_tets=10_000_000)
+                            -> MixedMesh
+
+Extrude the closed manifold wall(s) of `surface` into joined first-order
+boundary layers: `regions` partitions the surface triangles into connected
+patches (an iterable of triangle-index iterables covering every triangle
+exactly once), each layered region growing its own per-vertex, area-weighted
+normal columns by `nlayers` widths `hwall·ratio^(k-1)` — **into** each solid
+wall's interior and **away from** walls listed in `cavities`. Along a boundary
+edge between two layered regions the sector between the two extrusion wedges
+is swept by `fan_elements` strip columns — one prism at the surface level and
+two prisms per subsequent layer — and at a vertex where layered region arcs
+meet, the residual spherical polygon is filled with corner cells sharing every
+incident fan strip's end face. Regions in `unlayered` (1-based region indices)
+emit no cells; their triangles stay on the core boundary and layered
+neighbours end against them.
+
+The remaining core behind the last layer is tetrahedralized by the same
+certified ladder as [`mesh_boundary_layer_filled`](@ref) and the whole
+assembly is certified before return: every cell has strictly positive
+exact-predicate volume, the union boundary equals the input surface exactly,
+the core boundary matches the stack's exposed faces node-for-node, each wall's
+layer-cell volume equals `|V(wall)|−|V(cap)|` (sign reversed for cavities),
+and the global fill identity `V(tets) == Σ V(solid caps) − Σ V(cavity caps)`
+holds to 1e-9 relative.
+
+Pinched or open walls, non-connected or non-contiguous regions, coincident
+wedge normals on one side of an edge only, oversized `hwall`, and unmeshable
+caps are explicit blockers — never defective meshes. Layer parameters are
+uniform across regions; per-region grading is not expressible.
+"""
+function mesh_boundary_layer_fan(surface::Mesh; regions, hwall::Real,
+                                 ratio::Real, nlayers::Integer, unlayered=(),
+                                 cavities=(), fan_elements::Integer=3,
+                                 max_prisms::Integer=10_000_000,
+                                 max_tets::Integer=10_000_000)
+    caller="mesh_boundary_layer_fan"
+    ntris(surface)>0 || throw(ArgumentError("$caller: surface has no triangles"))
+    _validate_input(surface,caller,"surface")
+    applicable(iterate,regions) || throw(ArgumentError(
+        "$caller: regions must be an iterable of triangle index sets"))
+    hw=_finite(hwall,caller,"hwall"); hw>0 || throw(ArgumentError("$caller: hwall must be positive"))
+    ra=_finite(ratio,caller,"ratio"); ra>1 || throw(ArgumentError("$caller: ratio must be > 1"))
+    nl=_bounded_int(nlayers,caller,"nlayers";minimum=1)
+    nfan=_bounded_int(fan_elements,caller,"fan_elements";minimum=1)
+    prism_limit=_bounded_int(max_prisms,caller,"max_prisms")
+    tet_limit=_bounded_int(max_tets,caller,"max_tets")
+    nv=nnodes(surface); nt=ntris(surface)
+
+    comp_of,comp_tris,nc=_wall_components(surface,caller)
+    cavity_set=_bounded_index_set(cavities,nc,caller,"cavity")
+    nc>length(cavity_set) || throw(ArgumentError(
+        "$caller: every wall is a cavity; there is no solid core to fill"))
+
+    # Region partition: every triangle in exactly one edge-connected region.
+    region_of=zeros(Int32,nt); nreg=0; region_tris=Vector{Int}[]
+    for rs in regions
+        nreg+=1
+        s=_bounded_index_set(rs,nt,caller,"region $nreg")
+        isempty(s) && throw(ArgumentError("$caller: region $nreg is empty"))
+        trs=sort!(collect(s))
+        for t in trs
+            region_of[t]==0 || throw(ArgumentError(
+                "$caller: triangle $t belongs to multiple regions"))
+            region_of[t]=Int32(nreg)
+        end
+        push!(region_tris,trs)
+        nreg<=typemax(Int32) || throw(ArgumentError(
+            "$caller: region count exceeds Int32"))
+    end
+    nreg>0 || throw(ArgumentError("$caller: regions must not be empty"))
+    missing=findfirst(==(0),region_of)
+    missing===nothing || throw(ArgumentError(
+        "$caller: regions do not cover triangle $missing"))
+    unlayered_set=_bounded_index_set(unlayered,nreg,caller,"unlayered")
+    layered=[!(r in unlayered_set) for r in 1:nreg]
+    any(layered) || throw(ArgumentError(
+        "$caller: every region is unlayered; there is nothing to extrude"))
+
+    em=_fan_edge_map(surface.tris,nt)
+    seen=falses(nt); inseen=falses(nt)
+    for r in 1:nreg
+        _fan_check_connected(em,surface.tris,region_of,r,region_tris[r],
+                             seen,inseen,caller)
+    end
+
+    vinc=[Int[] for _ in 1:nv]
+    @inbounds for t in 1:nt, i in 1:3
+        push!(vinc[Int(surface.tris[i,t])],t)
+    end
+    bedges=NTuple{2,Int32}[]
+    for e in sort!(collect(keys(em)))
+        t12=em[e]
+        region_of[t12[1]]!=region_of[t12[2]] && push!(bedges,e)
+    end
+
+    # Per-wall enclosed volume, growth direction, material-side orient3 sign.
+    wall_faces=[NTuple{3,Int}[] for _ in 1:nc]
+    @inbounds for f in 1:nt
+        push!(wall_faces[comp_of[Int(surface.tris[1,f])]],
+              (Int(surface.tris[1,f]),Int(surface.tris[2,f]),Int(surface.tris[3,f])))
+    end
+    wall_vol=[_div_volume(surface.coords,wall_faces[c]) for c in 1:nc]
+    for c in 1:nc
+        (isfinite(wall_vol[c]) && wall_vol[c]!=0) || throw(ArgumentError(
+            "$caller: wall $c does not have a finite nonzero enclosed volume"))
+    end
+    dirs=[(c in cavity_set ? 1.0 : -1.0)*sign(wall_vol[c]) for c in 1:nc]
+    sgn=[-dirs[c] for c in 1:nc]
+
+    # Per-(region,vertex) inward normals for every region. Unlayered regions
+    # emit no columns, but their normals take part in endpoint merging: a
+    # layered neighbour must turn away from the unlayered wall so its side
+    # face bounds the core instead of covering input triangles.
+    nacc=Dict{Tuple{Int32,Int32},NTuple{3,Float64}}()
+    @inbounds for r in 1:nreg
+        for t in region_tris[r]
+            i,j,k=Int(surface.tris[1,t]),Int(surface.tris[2,t]),Int(surface.tris[3,t])
+            a=(surface.coords[1,i],surface.coords[2,i],surface.coords[3,i])
+            b=(surface.coords[1,j],surface.coords[2,j],surface.coords[3,j])
+            cc=(surface.coords[1,k],surface.coords[2,k],surface.coords[3,k])
+            ab=(b[1]-a[1],b[2]-a[2],b[3]-a[3])
+            ac=(cc[1]-a[1],cc[2]-a[2],cc[3]-a[3])
+            n=(ab[2]*ac[3]-ab[3]*ac[2],ab[3]*ac[1]-ab[1]*ac[3],ab[1]*ac[2]-ab[2]*ac[1])
+            for id in (i,j,k)
+                key=(Int32(r),Int32(id))
+                old=get(nacc,key,(0.0,0.0,0.0))
+                nacc[key]=(old[1]+n[1],old[2]+n[2],old[3]+n[3])
+            end
+        end
+    end
+    ndir=Dict{Tuple{Int32,Int32},NTuple{3,Float64}}()
+    for ((r,v),n) in nacc
+        L=hypot(n[1],n[2],n[3])
+        L>0 || throw(ArgumentError("$caller: vertex $v has a zero normal in region $r"))
+        s=dirs[comp_of[Int(v)]]/L
+        ndir[(r,v)]=(n[1]*s,n[2]*s,n[3]*s)
+    end
+
+    # Vertex walks for every boundary vertex; region arcs must be contiguous.
+    bverts=Int[]
+    for e in bedges
+        v,w=Int(e[1]),Int(e[2])
+        (isempty(bverts) || bverts[end]!=v) && push!(bverts,v)
+        (isempty(bverts) || bverts[end]!=w) && push!(bverts,w)
+    end
+    bverts=sort!(unique!(bverts))
+    walk_of=Dict{Int,Vector{NTuple{3,Int32}}}()
+    for v in bverts
+        w=_fan_vertex_walk(surface.tris,vinc[v],v,region_of,em,caller)
+        ntrans=0
+        for x in w
+            x[2]!=x[3] && (ntrans+=1)
+        end
+        distinct=length(Set(x[2] for x in w))
+        ntrans==distinct || throw(ArgumentError(
+            "$caller: regions are not contiguous around vertex $v"))
+        walk_of[v]=w
+    end
+
+    # Fan-arc classification per layered-layered boundary edge. On a convex
+    # (short-sector) dihedral the sector swept between the two layer normals
+    # lies inside the union of the two extrusion wedges, so wedge cells would
+    # double-cover the slabs: the two regions must instead share one merged
+    # offset node at each endpoint, which makes their side faces on the edge
+    # coincide into interior faces. Only reflex (long-sector) dihedrals leave
+    # a genuine gap and receive `fan_elements` strip columns. Merging can tilt
+    # a third edge's normals into a new convex or coincident pair, so the
+    # classification iterates to a fixed point; merges only ever make endpoint
+    # normals more coincident, bounding the number of passes.
+    earc=Dict{NTuple{2,Int32},Int8}()
+    eflat=Set{NTuple{2,Int32}}()
+    converged=false
+    for _pass in 1:4nreg+8
+        merged=false
+        empty!(earc); empty!(eflat)
+        for e in bedges
+            t1,t2=em[e]
+            r1=Int(region_of[t1]); r2=Int(region_of[t2])
+            L1=layered[r1]; L2=layered[r2]
+            (L1 || L2) || continue
+            v,w=Int(e[1]),Int(e[2])
+            rlo,rhi=min(r1,r2),max(r1,r2)
+            nlv=ndir[(Int32(rlo),Int32(v))]; nhv=ndir[(Int32(rhi),Int32(v))]
+            nlw=ndir[(Int32(rlo),Int32(w))]; nhw=ndir[(Int32(rhi),Int32(w))]
+            fv=(nlv==nhv); fw=(nlw==nhw)
+            fv && fw && (push!(eflat,e); continue)
+            o1,o2=_fan_edge_dihedral(surface,e,t1,t2)
+            s=sgn[comp_of[v]]
+            (o1==0 || o2==0) && throw(ArgumentError(
+                "$caller: boundary edge $e has a degenerate dihedral angle"))
+            sign(o1)!=sign(o2) && throw(ArgumentError(
+                "$caller: boundary edge $e has an inconsistent dihedral angle"))
+            at=sign(o1)==s ? Int8(1) : Int8(2)
+            if at==1
+                for u in (v,w)
+                    (u==v && fv) && continue
+                    (u==w && fw) && continue
+                    s1=ndir[(Int32(rlo),Int32(u))]
+                    s2=ndir[(Int32(rhi),Int32(u))]
+                    m=(s1[1]+s2[1],s1[2]+s2[2],s1[3]+s2[3])
+                    L=hypot(m[1],m[2],m[3])
+                    L>0 || throw(ArgumentError(
+                        "$caller: boundary edge $e forces opposing layer "*
+                        "normals at vertex $u"))
+                    mn=(m[1]/L,m[2]/L,m[3]/L)
+                    ndir[(Int32(rlo),Int32(u))]=mn
+                    ndir[(Int32(rhi),Int32(u))]=mn
+                end
+                merged=true
+            elseif L1 && L2
+                (fv || fw) && throw(ArgumentError(
+                    "$caller: boundary edge $e has coincident layer normals "*
+                    "at one endpoint only; the fan sector tapers to zero width"))
+                earc[e]=at
+            end
+        end
+        merged || (converged=true; break)
+    end
+    converged || throw(ArgumentError(
+        "$caller: convex boundary sectors did not converge to merged layer normals"))
+
+    # Per-vertex fan-arc list in walk order, and corner classification.
+    arc_of_v=Dict{Int,Vector{NTuple{4,Int32}}}()
+    corner_v=Int[]
+    for v in bverts
+        w=walk_of[v]
+        all_layered=true
+        for (other,rin,rout) in w
+            layered[Int(rin)] || (all_layered=false)
+            layered[Int(rout)] || (all_layered=false)
+        end
+        # fan-arc crossings (other endpoint, arctype, rin, rout) in walk order
+        list=NTuple{4,Int32}[]
+        for (other,rin,rout) in w
+            rin==rout && continue
+            e=Int32(v)<other ? (Int32(v),other) : (other,Int32(v))
+            e in eflat && continue
+            at=get(earc,e,Int8(0))
+            at==0 && continue
+            push!(list,(other,at,rin,rout))
+        end
+        arc_of_v[v]=list
+        if all_layered && length(list)>=2
+            same2=length(list)==2 &&
+                sort!([list[1][3],list[1][4]])==sort!([list[2][3],list[2][4]]) &&
+                list[1][2]==list[2][2]
+            same2 || push!(corner_v,v)
+        end
+    end
+    sort!(corner_v)
+
+    # Corner polygon spec: cyclic node entries (kind,a,b,c,j):
+    # kind 0 → region node (a=region); kind 1 → fan interior node
+    # (a=rlo,b=rhi,c=arctype,j=canonical ray).
+    polyspec_of=Dict{Int,Vector{NTuple{5,Int32}}}()
+    mdir=Dict{Int,NTuple{3,Float64}}()
+    for v in corner_v
+        P=NTuple{5,Int32}[]
+        for (other,at,rin,rout) in arc_of_v[v]
+            rlo,rhi=min(Int(rin),Int(rout)),max(Int(rin),Int(rout))
+            push!(P,(0,rin,0,0,0))
+            if rin==rlo
+                for j in 1:nfan-1
+                    push!(P,(1,Int32(rlo),Int32(rhi),at,Int32(j)))
+                end
+            else
+                for j in nfan-1:-1:1
+                    push!(P,(1,Int32(rlo),Int32(rhi),at,Int32(j)))
+                end
+            end
+        end
+        polyspec_of[v]=P
+        m=(0.0,0.0,0.0)
+        for (other,at,rin,rout) in arc_of_v[v]
+            n=ndir[(rin,Int32(v))]
+            m=(m[1]+n[1],m[2]+n[2],m[3]+n[3])
+        end
+        L=hypot(m[1],m[2],m[3])
+        L>0 || throw(ArgumentError(
+            "$caller: corner vertex $v has a zero interior direction"))
+        mdir[v]=(m[1]/L,m[2]/L,m[3]/L)
+    end
+
+    # Ray families for every distinct arc key.
+    arcrays=Dict{NTuple{4,Int32},Vector{NTuple{3,Float64}}}()
+    for v in bverts
+        for (other,at,rin,rout) in arc_of_v[v]
+            rlo,rhi=min(Int(rin),Int(rout)),max(Int(rin),Int(rout))
+            key=(Int32(v),Int32(rlo),Int32(rhi),at)
+            haskey(arcrays,key) && continue
+            arcrays[key]=_fan_arc_dirs(ndir[(Int32(rlo),Int32(v))],
+                ndir[(Int32(rhi),Int32(v))],Int(at),nfan,caller,
+                "vertex $v regions ($rlo,$rhi)")
+        end
+    end
+
+    offsets=_layer_offsets(hw,ra,nl,caller)
+
+    # Node emission: input nodes first, then per layer — deduplicated region
+    # columns (regions sharing a bitwise normal share the column), fan
+    # interior rays, corner centers.
+    points=Vector{NTuple{3,Float64}}(undef,nv)
+    @inbounds for i in 1:nv
+        points[i]=(surface.coords[1,i],surface.coords[2,i],surface.coords[3,i])
+    end
+    idN=Dict{NTuple{3,Int32},Int32}()
+    idF=Dict{NTuple{6,Int32},Int32}()
+    idC=Dict{NTuple{2,Int32},Int32}()
+    linc=[Int[] for _ in 1:nv]
+    @inbounds for ((r,v),n) in ndir
+        layered[Int(r)] && push!(linc[Int(v)],Int(r))
+    end
+    for v in 1:nv
+        sort!(linc[v]); unique!(linc[v])
+    end
+    dedup=Dict{Tuple{Int32,NTuple{3,Float64}},Int32}()
+    for k in 1:nl
+        d=offsets[k]
+        empty!(dedup)
+        for v in 1:nv
+            pv=points[v]
+            for r in linc[v]
+                n=ndir[(Int32(r),Int32(v))]
+                id=get(dedup,(Int32(v),n),Int32(0))
+                if id==0
+                    push!(points,(pv[1]+d*n[1],pv[2]+d*n[2],pv[3]+d*n[3]))
+                    id=Int32(length(points)); dedup[(Int32(v),n)]=id
+                end
+                idN[(Int32(r),Int32(v),Int32(k))]=id
+            end
+        end
+        for v in bverts
+            pv=points[v]
+            for (other,at,rin,rout) in arc_of_v[v]
+                rlo,rhi=min(Int(rin),Int(rout)),max(Int(rin),Int(rout))
+                rays=arcrays[(Int32(v),Int32(rlo),Int32(rhi),at)]
+                for j in 1:nfan-1
+                    key=(Int32(v),Int32(rlo),Int32(rhi),at,Int32(j),Int32(k))
+                    haskey(idF,key) && continue
+                    rj=rays[j+1]
+                    push!(points,(pv[1]+d*rj[1],pv[2]+d*rj[2],pv[3]+d*rj[3]))
+                    idF[key]=Int32(length(points))
+                end
+            end
+        end
+        for v in corner_v
+            m=mdir[v]
+            pv=points[v]
+            push!(points,(pv[1]+d*m[1],pv[2]+d*m[2],pv[3]+d*m[3]))
+            idC[(Int32(v),Int32(k))]=Int32(length(points))
+        end
+    end
+    nout=length(points)
+    nout<=typemax(Int32) || throw(ArgumentError("$caller: node count exceeds Int32"))
+    @inbounds for p in points
+        all(isfinite,p) || throw(ArgumentError(
+            "$caller: extruded node is non-finite"))
+    end
+
+    # Cell counts before allocation.
+    ntL=0
+    for r in 1:nreg
+        layered[r] && (ntL+=length(region_tris[r]))
+    end
+    nLL=length(earc)
+    ncorn=length(corner_v)
+    corner_tris=0; corner_prisms=0
+    for v in corner_v
+        Lp=length(polyspec_of[v])
+        corner_tris=_checked_add(corner_tris,Lp,caller,"corner triangle count")
+        corner_prisms=_checked_add(corner_prisms,Lp*(nl-1),caller,"corner prism count")
+    end
+    npr=_checked_add(_checked_mul(nl,ntL,caller,"region prism count"),
+        _checked_add(_checked_mul(nLL,_checked_mul(nfan,2nl-1,caller,"fan cell count"),caller,"fan prism count"),
+            corner_prisms,caller,"prism count"),caller,"prism count")
+    npr<=prism_limit || throw(ArgumentError(
+        "$caller: $npr prisms exceed max_prisms=$prism_limit"))
+    npr<=typemax(Int32) || throw(ArgumentError("$caller: prism count exceeds Int32"))
+    corner_tris=_checked_mul(corner_tris,1,caller,"corner tet count")
+    corner_tris<=tet_limit || throw(ArgumentError(
+        "$caller: $corner_tris stack tets exceed max_tets=$tet_limit"))
+
+    prisms=Matrix{Int32}(undef,6,npr)
+    pw=Vector{Int32}(undef,npr)
+    stets=Matrix{Int32}(undef,4,corner_tris)
+    tw=Vector{Int32}(undef,corner_tris)
+    pc=0; tc=0
+    @inbounds for k in 0:nl-1, r in 1:nreg
+        layered[r] || continue
+        for t in region_tris[r]
+            i,j,k2=Int(surface.tris[1,t]),Int(surface.tris[2,t]),Int(surface.tris[3,t])
+            b1=k==0 ? Int32(i) : idN[(Int32(r),Int32(i),Int32(k))]
+            b2=k==0 ? Int32(j) : idN[(Int32(r),Int32(j),Int32(k))]
+            b3=k==0 ? Int32(k2) : idN[(Int32(r),Int32(k2),Int32(k))]
+            t1=idN[(Int32(r),Int32(i),Int32(k+1))]
+            t2=idN[(Int32(r),Int32(j),Int32(k+1))]
+            t3=idN[(Int32(r),Int32(k2),Int32(k+1))]
+            pc+=1; prisms[:,pc].=(b1,b2,b3,t1,t2,t3); pw[pc]=Int32(comp_of[i])
+        end
+    end
+    for e in sort!(collect(keys(earc)))
+        v,w=Int(e[1]),Int(e[2])
+        t1,t2=em[e]
+        r1,r2=Int(region_of[t1]),Int(region_of[t2])
+        rlo,rhi=min(r1,r2),max(r1,r2)
+        at=earc[e]
+        for k in 1:nl, j in 0:nfan-1
+            a=_fan_fid(idN,idF,v,rlo,rhi,at,nfan,j,k-1)
+            b=_fan_fid(idN,idF,w,rlo,rhi,at,nfan,j,k-1)
+            c=_fan_fid(idN,idF,w,rlo,rhi,at,nfan,j+1,k-1)
+            d=_fan_fid(idN,idF,v,rlo,rhi,at,nfan,j+1,k-1)
+            A=_fan_fid(idN,idF,v,rlo,rhi,at,nfan,j,k)
+            B=_fan_fid(idN,idF,w,rlo,rhi,at,nfan,j,k)
+            C=_fan_fid(idN,idF,w,rlo,rhi,at,nfan,j+1,k)
+            D=_fan_fid(idN,idF,v,rlo,rhi,at,nfan,j+1,k)
+            if k==1
+                pc+=1; prisms[:,pc].=(a,A,D,b,B,C); pw[pc]=Int32(comp_of[v])
+            else
+                if min(a,c)<min(b,d)
+                    pc+=1; prisms[:,pc].=(a,b,c,A,B,C); pw[pc]=Int32(comp_of[v])
+                    pc+=1; prisms[:,pc].=(a,c,d,A,C,D); pw[pc]=Int32(comp_of[v])
+                else
+                    pc+=1; prisms[:,pc].=(b,c,d,B,C,D); pw[pc]=Int32(comp_of[v])
+                    pc+=1; prisms[:,pc].=(b,d,a,B,D,A); pw[pc]=Int32(comp_of[v])
+                end
+            end
+        end
+    end
+    for v in corner_v
+        P=polyspec_of[v]; m=length(P)
+        for k in 1:nl
+            pk=Vector{Int32}(undef,m)
+            for mi in 1:m
+                e=P[mi]
+                pk[mi]=e[1]==0 ? idN[(e[2],Int32(v),Int32(k))] :
+                    idF[(Int32(v),e[2],e[3],e[4],e[5],Int32(k))]
+            end
+            if k==1
+                pv=points[v]; c1=idC[(Int32(v),Int32(1))]
+                cp=points[Int(c1)]
+                for mi in 1:m
+                    m2=mi==m ? 1 : mi+1
+                    pa=points[Int(pk[mi])]; pb=points[Int(pk[m2])]
+                    tc+=1
+                    if _signed_vol6(pv,pa,pb,cp)>=0
+                        stets[:,tc].=(Int32(v),pk[mi],pk[m2],c1)
+                    else
+                        stets[:,tc].=(Int32(v),pk[m2],pk[mi],c1)
+                    end
+                    tw[tc]=Int32(comp_of[v])
+                end
+            else
+                pk1=Vector{Int32}(undef,m)
+                for mi in 1:m
+                    e=P[mi]
+                    pk1[mi]=e[1]==0 ? idN[(e[2],Int32(v),Int32(k-1))] :
+                        idF[(Int32(v),e[2],e[3],e[4],e[5],Int32(k-1))]
+                end
+                c0=idC[(Int32(v),Int32(k-1))]; c1=idC[(Int32(v),Int32(k))]
+                for mi in 1:m
+                    m2=mi==m ? 1 : mi+1
+                    pc+=1
+                    prisms[:,pc].=(c0,pk1[mi],pk1[m2],c1,pk[mi],pk[m2])
+                    pw[pc]=Int32(comp_of[v])
+                end
+            end
+        end
+    end
+    pc==npr || throw(ErrorException("$caller: prism count mismatch"))
+    tc==corner_tris || throw(ErrorException("$caller: corner tet count mismatch"))
+
+    # Derive the core boundary: every stack face with incidence one that is not
+    # an input triangle, plus every unlayered input triangle.
+    inc=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    facebuf=NTuple{3,Int32}[]
+    @inbounds for p in 1:npr
+        v6=Tuple(prisms[:,p])
+        empty!(facebuf)
+        _fan_prism_faces(v6,facebuf)
+        for f in facebuf
+            cnt,_=get(inc,f,(0,Int32(0)))
+            inc[f]=(cnt+1,pw[p])
+        end
+    end
+    @inbounds for t in 1:corner_tris
+        v4=(stets[1,t],stets[2,t],stets[3,t],stets[4,t])
+        for f in (_sort3i(v4[2],v4[3],v4[4]),_sort3i(v4[1],v4[3],v4[4]),
+                  _sort3i(v4[1],v4[2],v4[4]),_sort3i(v4[1],v4[2],v4[3]))
+            cnt,_=get(inc,f,(0,Int32(0)))
+            inc[f]=(cnt+1,tw[t])
+        end
+    end
+    inputset=Set{NTuple{3,Int32}}()
+    @inbounds for t in 1:nt
+        push!(inputset,_sort3i(surface.tris[1,t],surface.tris[2,t],surface.tris[3,t]))
+    end
+    cap_faces=NTuple{3,Int32}[]
+    cap_walls=Int32[]
+    for (f,(cnt,w)) in inc
+        cnt==1 && !(f in inputset) && (push!(cap_faces,f); push!(cap_walls,w))
+    end
+    @inbounds for t in 1:nt
+        layered[Int(region_of[t])] && continue
+        f=(surface.tris[1,t],surface.tris[2,t],surface.tris[3,t])
+        push!(cap_faces,f); push!(cap_walls,Int32(comp_of[Int(f[1])]))
+    end
+    perm=sortperm(cap_faces)
+    cap_faces=cap_faces[perm]; cap_walls=cap_walls[perm]
+    capnodes=Int32[]
+    seen_node=falses(nout)
+    for f in cap_faces, i in f
+        seen_node[Int(i)] || (push!(capnodes,i); seen_node[Int(i)]=true)
+    end
+    sort!(capnodes)
+    caplocal=Dict{Int32,Int32}(g=>Int32(i) for (i,g) in enumerate(capnodes))
+    cap_coords=Matrix{Float64}(undef,3,length(capnodes))
+    cap_keys=Dict{NTuple{3,Float64},Int}()
+    @inbounds for (i,g) in enumerate(capnodes)
+        p=points[Int(g)]
+        cap_coords[1,i]=p[1]; cap_coords[2,i]=p[2]; cap_coords[3,i]=p[3]
+        key=_norm_key(p[1],p[2],p[3])
+        previous=get(cap_keys,key,0)
+        previous==0 || throw(ArgumentError(
+            "$caller: cap nodes $(previous) and $g coincide"))
+        cap_keys[key]=Int(g)
+    end
+    cap_tris=Matrix{Int32}(undef,3,length(cap_faces))
+    @inbounds for (i,f) in enumerate(cap_faces)
+        cap_tris[1,i]=caplocal[f[1]]; cap_tris[2,i]=caplocal[f[2]]; cap_tris[3,i]=caplocal[f[3]]
+    end
+    cap=Mesh(cap_coords;tris=cap_tris)
+
+    # Same bounded fill ladder as mesh_boundary_layer_filled: exact-coordinate
+    # Delaunay, interior-kernel fan, ear clipping, exact-rational conforming
+    # recovery.
+    errors=String[]
+    result=nothing
+    reason=Ref("")
+    try
+        cand=_float_fill(cap)
+        m=_merge_fill(cand,cap_keys,nout,caller,reason)
+        if m===nothing
+            push!(errors,"float fill: "*reason[])
+        else
+            result=_fan_assemble_certify(m...,cand,points,prisms,pw,stets,tw,
+                cap_faces,cap_walls,surface.tris,wall_faces,comp_tris,
+                cavity_set,wall_vol,dirs,tet_limit,caller,reason)
+            result===nothing && push!(errors,"float fill: "*reason[])
+        end
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        push!(errors,"float fill: "*sprint(showerror,err))
+    end
+    if result===nothing && size(cap.tris,2)<=tet_limit
+        reason[]=""
+        ncf=size(cap.tris,2)
+        facets=NTuple{3,Int32}[(cap.tris[1,t],cap.tris[2,t],cap.tris[3,t]) for t in 1:ncf]
+        cand=_rb_fan_steiner(cap.coords[1,:],cap.coords[2,:],cap.coords[3,:],facets)
+        if cand===nothing
+            push!(errors,"star fan: cap has no certified interior kernel")
+        else
+            m=_merge_fill(cand,cap_keys,nout,caller,reason)
+            if m===nothing
+                push!(errors,"star fan: "*reason[])
+            else
+                result=_fan_assemble_certify(m...,cand,points,prisms,pw,stets,tw,
+                    cap_faces,cap_walls,surface.tris,wall_faces,comp_tris,
+                    cavity_set,wall_vol,dirs,tet_limit,caller,reason)
+                result===nothing && push!(errors,"star fan: "*reason[])
+            end
+        end
+    end
+    if result===nothing && size(cap.tris,2)<=tet_limit
+        reason[]=""
+        try
+            cand=_vclip_fill(cap)
+            cand===nothing && throw(ErrorException("no removable ear"))
+            m=_merge_fill(cand,cap_keys,nout,caller,reason)
+            if m===nothing
+                push!(errors,"ear clip: "*reason[])
+            else
+                result=_fan_assemble_certify(m...,cand,points,prisms,pw,stets,tw,
+                    cap_faces,cap_walls,surface.tris,wall_faces,comp_tris,
+                    cavity_set,wall_vol,dirs,tet_limit,caller,reason)
+                result===nothing && push!(errors,"ear clip: "*reason[])
+            end
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            push!(errors,"ear clip: "*sprint(showerror,err))
+        end
+    end
+    if result===nothing
+        reason[]=""
+        try
+            cand=recover_boundary_cdt(cap)
+            m=_merge_fill(cand,cap_keys,nout,caller,reason)
+            if m===nothing
+                push!(errors,"exact recovery: "*reason[])
+            else
+                result=_fan_assemble_certify(m...,cand,points,prisms,pw,stets,tw,
+                    cap_faces,cap_walls,surface.tris,wall_faces,comp_tris,
+                    cavity_set,wall_vol,dirs,tet_limit,caller,reason)
+                result===nothing && push!(errors,"exact recovery: "*reason[])
+            end
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            push!(errors,"exact recovery: "*sprint(showerror,err))
+        end
+    end
+    result===nothing && throw(ErrorException(
+        "$caller: remaining core could not be tetrahedralized and certified " *
+        "(reduce hwall/nlayers or coarsen the wall). Attempts: "*join(errors," | ")))
+
+    all_coords,all_tets=result
+    blocks=ElementBlock[]
+    npr>0 && push!(blocks,ElementBlock(6,prisms))
+    push!(blocks,ElementBlock(4,all_tets))
+    mesh=MixedMesh(all_coords,blocks)
+    diag=validate(mesh)
+    diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
+    return mesh
+end
+
+# Signed orient3-based dihedral votes for a boundary edge's two incident
+# triangles: the opposite vertex of each triangle tested against the other
+# triangle's plane. Both must agree for the sector to classify.
+function _fan_edge_dihedral(surface,e,t1,t2)
+    p(i)=(surface.coords[1,i],surface.coords[2,i],surface.coords[3,i])
+    tris=surface.tris
+    a=Int(e[1]); b=Int(e[2])
+    x,y,z=Int(tris[1,t2]),Int(tris[2,t2]),Int(tris[3,t2])
+    apex1= x!=a && x!=b ? x : y!=a && y!=b ? y : z
+    x,y,z=Int(tris[1,t1]),Int(tris[2,t1]),Int(tris[3,t1])
+    apex2= x!=a && x!=b ? x : y!=a && y!=b ? y : z
+    o1=orient3(p(Int(tris[1,t1])),p(Int(tris[2,t1])),p(Int(tris[3,t1])),p(apex1))
+    o2=orient3(p(Int(tris[1,t2])),p(Int(tris[2,t2])),p(Int(tris[3,t2])),p(apex2))
+    return o1,o2
+end
+
+# Certification for the joined-stack assembly: builds the merged coordinate
+# array, remaps the core candidate, then checks (a) the union of stack cells
+# and core tets is a manifold whose only boundary faces are exactly the input
+# triangles, (b) every prism and tet has strictly positive exact-predicate
+# volume, (c) each wall's layer-cell volume equals |V(wall)|−|V(cap)| (sign
+# reversed for cavities) and the global fill identity holds, all to 1e-9
+# relative. Returns (all_coords, all_tets) or nothing with `reason` set.
+function _fan_assemble_certify(remap,newpts,total,fm,points,prisms,pw,stets,tw,
+                               cap_faces,cap_walls,surface_tris,wall_faces,
+                               comp_tris,cavity_set,wall_vol,dirs,max_tets,
+                               caller,reason::Ref{String})
+    ncore=size(fm.tets,2); nstack=size(stets,2)
+    ntet=ncore+nstack
+    (ntet>0 && ntet<=max_tets) ||
+        (reason[]="core tetrahedron count $ntet out of contract"; return nothing)
+    all_coords=Matrix{Float64}(undef,3,total)
+    @inbounds for i in eachindex(points)
+        all_coords[1,i]=points[i][1]; all_coords[2,i]=points[i][2]; all_coords[3,i]=points[i][3]
+    end
+    nnew=length(newpts)
+    @inbounds for j in 1:nnew
+        i=total-nnew+j; p=newpts[j]
+        all_coords[1,i]=p[1]; all_coords[2,i]=p[2]; all_coords[3,i]=p[3]
+    end
+    all_tets=Matrix{Int32}(undef,4,ntet)
+    @inbounds for t in 1:nstack, r in 1:4
+        all_tets[r,t]=stets[r,t]
+    end
+    @inbounds for t in 1:ncore, r in 1:4
+        all_tets[r,nstack+t]=remap[Int(fm.tets[r,t])]
+    end
+
+    # Global watertightness: incidence over stack cells plus core tets; the
+    # only count-1 faces allowed are the input triangles themselves.
+    inc=Dict{NTuple{3,Int32},Int}()
+    facebuf=NTuple{3,Int32}[]
+    @inbounds for p in axes(prisms,2)
+        v6=(prisms[1,p],prisms[2,p],prisms[3,p],prisms[4,p],prisms[5,p],prisms[6,p])
+        empty!(facebuf)
+        _fan_prism_faces(v6,facebuf)
+        for f in facebuf
+            inc[f]=get(inc,f,0)+1
+        end
+    end
+    @inbounds for t in axes(all_tets,2)
+        a,b,c,d=all_tets[1,t],all_tets[2,t],all_tets[3,t],all_tets[4,t]
+        for f in (_sort3i(b,c,d),_sort3i(a,c,d),_sort3i(a,b,d),_sort3i(a,b,c))
+            inc[f]=get(inc,f,0)+1
+        end
+    end
+    inputset=Set{NTuple{3,Int32}}()
+    @inbounds for t in axes(surface_tris,2)
+        push!(inputset,_sort3i(surface_tris[1,t],surface_tris[2,t],surface_tris[3,t]))
+    end
+    nbnd=0; badfaces=NTuple{3,Int32}[]; overfaces=NTuple{3,Int32}[]
+    for (f,cnt) in inc
+        if cnt>2
+            push!(overfaces,f)
+        elseif cnt==1
+            nbnd+=1
+            f in inputset || push!(badfaces,f)
+        end
+    end
+    isempty(overfaces) ||
+        (reason[]="non-manifold union (face $(minimum(overfaces)) has incidence >2)";
+         return nothing)
+    isempty(badfaces) ||
+        (reason[]="union boundary face $(minimum(badfaces)) is not part of the input surface";
+         return nothing)
+    nbnd==length(inputset) ||
+        (reason[]="union boundary has $nbnd faces, expected $(length(inputset)) input triangles";
+         return nothing)
+
+    # Strictly positive exact-predicate cell volumes; layer volume per wall.
+    nc=length(wall_faces)
+    vlayer=zeros(Float64,nc)
+    @inbounds for p in axes(prisms,2)
+        v=_fan_prism_volume(all_coords,(Int(prisms[1,p]),Int(prisms[2,p]),
+            Int(prisms[3,p]),Int(prisms[4,p]),Int(prisms[5,p]),Int(prisms[6,p])))
+        v>0 || (reason[]="prism $p is degenerate or inverted; hwall exceeds this wall's feature size";
+                return nothing)
+        vlayer[Int(pw[p])]+=v
+    end
+    @inbounds for t in 1:nstack
+        pa=(all_coords[1,all_tets[1,t]],all_coords[2,all_tets[1,t]],all_coords[3,all_tets[1,t]])
+        pb=(all_coords[1,all_tets[2,t]],all_coords[2,all_tets[2,t]],all_coords[3,all_tets[2,t]])
+        pc2=(all_coords[1,all_tets[3,t]],all_coords[2,all_tets[3,t]],all_coords[3,all_tets[3,t]])
+        pd=(all_coords[1,all_tets[4,t]],all_coords[2,all_tets[4,t]],all_coords[3,all_tets[4,t]])
+        -orient3(pa,pb,pc2,pd)>0 ||
+            (reason[]="corner tetrahedron $t is degenerate or inverted"; return nothing)
+        vlayer[Int(tw[t])]+=abs(_signed_vol6(pa,pb,pc2,pd))/6.0
+    end
+    vfill=0.0
+    @inbounds for t in nstack+1:ntet
+        pa=(all_coords[1,all_tets[1,t]],all_coords[2,all_tets[1,t]],all_coords[3,all_tets[1,t]])
+        pb=(all_coords[1,all_tets[2,t]],all_coords[2,all_tets[2,t]],all_coords[3,all_tets[2,t]])
+        pc2=(all_coords[1,all_tets[3,t]],all_coords[2,all_tets[3,t]],all_coords[3,all_tets[3,t]])
+        pd=(all_coords[1,all_tets[4,t]],all_coords[2,all_tets[4,t]],all_coords[3,all_tets[4,t]])
+        -orient3(pa,pb,pc2,pd)>0 ||
+            (reason[]="tetrahedron $t is degenerate or inverted"; return nothing)
+        vfill+=tet_volume(pa,pb,pc2,pd)
+    end
+
+    # Per-wall cap volumes: each cap face is oriented so the owning core tet's
+    # apex lies on its positive orient3 side — consistently away from the
+    # core for solids and into the void for cavities.
+    apex=Dict{NTuple{3,Int32},Int32}()
+    @inbounds for t in nstack+1:ntet
+        a,b,c,d=all_tets[1,t],all_tets[2,t],all_tets[3,t],all_tets[4,t]
+        apex[_sort3i(b,c,d)]=a; apex[_sort3i(a,c,d)]=b
+        apex[_sort3i(a,b,d)]=c; apex[_sort3i(a,b,c)]=d
+    end
+    cap_signed=zeros(Float64,nc)
+    @inbounds for (i,f) in enumerate(cap_faces)
+        skey=_sort3i(f[1],f[2],f[3])
+        ap=get(apex,skey,Int32(0))
+        ap==0 && (reason[]="cap face $skey has no owning core tetrahedron";
+                  return nothing)
+        pa=(all_coords[1,f[1]],all_coords[2,f[1]],all_coords[3,f[1]])
+        pb=(all_coords[1,f[2]],all_coords[2,f[2]],all_coords[3,f[2]])
+        pc2=(all_coords[1,f[3]],all_coords[2,f[3]],all_coords[3,f[3]])
+        pd=(all_coords[1,ap],all_coords[2,ap],all_coords[3,ap])
+        q=_dot3(pa,_cross3(pb,pc2))/6.0
+        cap_signed[Int(cap_walls[i])]+= orient3(pa,pb,pc2,pd)>0 ? q : -q
+    end
+    @inbounds for c in 1:nc
+        capv=abs(cap_signed[c])
+        expected=c in cavity_set ? capv-abs(wall_vol[c]) : abs(wall_vol[c])-capv
+        abs(vlayer[c]-expected)<=1e-9*abs(wall_vol[c]) ||
+            (reason[]="wall $c layer volume $(vlayer[c]) violates its identity (expected $expected)";
+             return nothing)
+    end
+    expected_fill=sum(c in cavity_set ? -abs(cap_signed[c]) : abs(cap_signed[c]) for c in 1:nc)
+    expected_fill>0 || (reason[]="no positive fill region"; return nothing)
+    abs(vfill-expected_fill)<=1e-9*expected_fill ||
+        (reason[]="filled volume $vfill violates the global identity (expected $expected_fill)";
+         return nothing)
+    return all_coords,all_tets
 end
 
 end # module
