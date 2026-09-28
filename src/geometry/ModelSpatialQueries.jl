@@ -1267,8 +1267,9 @@ function _dist_ray_ruled(m::GeoModel,stag::Int,P::NTuple{3,Float64},
         resid>100.0*tol && (ambiguous=true;continue)
         (t>tol && -1e-9<=u<=1.0+1e-9 && -1e-9<=v<=1.0+1e-9) ||
             continue
-        duplicate=any(root->abs(root[3]-t)<=tol,roots)
-        duplicate || push!(roots,(u,v,t))
+        t_end=t
+        duplicate=any(root->abs(root[3]-t_end)<=tol,roots)
+        duplicate || push!(roots,(u,v,t_end))
     end
     count=0
     for (u,v,t) in roots
@@ -1357,9 +1358,9 @@ function _dist_volume_rep(m::GeoModel,tag::Int,which::Int,
         ntris(mesh)>0 || throw(ErrorException(
             "$caller: Volume[$tag] has no boundary triangles"))
         index=mod(which-1,ntris(mesh))+1
-        points=ntuple(k->_model_mesh_coordinate(mesh,mesh.tris[k,index]),3)
-        return ntuple(axis->(points[1][axis]+points[2][axis]+
-                             points[3][axis])/3.0,3)
+        corners=ntuple(k->_model_mesh_coordinate(mesh,mesh.tris[k,index]),3)
+        return ntuple(axis->(corners[1][axis]+corners[2][axis]+
+                             corners[3][axis])/3.0,3)
     end
     stag=faces[mod(which-1,length(faces))+1]
     points,_=_dist_scan(m,2,stag,caller)

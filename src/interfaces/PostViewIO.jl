@@ -898,8 +898,9 @@ function postview_field(view::PosView;kwargs...)
         components==9 && (ncomp=9;break)
         components==3 && (ncomp=max(ncomp,3))
     end
+    keep=ncomp
     records=[element for element in view.elements
-             if size(element.values,1)==ncomp]
+             if size(element.values,1)==keep]
     field=PostViewField(records;kwargs...)
-    return ncomp==9 ? PostViewAnisoField(field) : field
+    return keep==9 ? PostViewAnisoField(field) : field
 end
