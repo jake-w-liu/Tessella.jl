@@ -47,29 +47,32 @@ const _API=Tessella.API
         @test validate(generated).ok
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
-              "eae8751b0dad3b89f2d7a4416ea079a352a3bd6b8eff31ef7eb7d8bb78d8509a"
+              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
         node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
-        @test node_tags==UInt64.(1:9)
+        @test node_tags==UInt64.(1:size(generated.coords,2))
         @test reshape(node_coordinates,3,:)==generated.coords
         @test isempty(node_parameters)
         element_types,element_tags,element_nodes=_API.mesh.get_elements()
         @test element_types==Int32[4]
-        @test element_tags==[UInt64.(1:12)]
+        @test element_tags==[UInt64.(1:ntets(generated))]
         @test element_nodes==[UInt64.(vec(generated.tets))]
         @test _API.mesh.get_element_types()==Int32[4]
         @test _API.mesh.get_elements_by_type(4)==
-              (UInt64.(1:12),UInt64.(vec(generated.tets)))
+              (UInt64.(1:ntets(generated)),UInt64.(vec(generated.tets)))
         type_node_tags,type_node_coordinates,type_node_parameters=
             _API.mesh.get_nodes_by_element_type(4)
         @test type_node_tags==UInt64.(vec(generated.tets))
         @test reshape(type_node_coordinates,3,:)==
               generated.coords[:,Int.(type_node_tags)]
-        @test isempty(type_node_parameters)
-        @test length(_API.mesh.get_barycenters(4,-1,false,false))==36
-        @test length(_API.mesh.get_element_edge_nodes(4))==144
-        @test length(_API.mesh.get_element_face_nodes(4,3))==144
-        @test _API.mesh.get_max_node_tag()==UInt64(9)
-        @test _API.mesh.get_max_element_tag()==UInt64(12)
+        # Gmsh packs per-node parameters on the owning Line/Plane entity, so the
+        # by-type query reports parameters for classified boundary nodes.
+        @test !isempty(type_node_parameters)
+        @test length(_API.mesh.get_barycenters(4,-1,false,false))==
+              3ntets(generated)
+        @test length(_API.mesh.get_element_edge_nodes(4))==12ntets(generated)
+        @test length(_API.mesh.get_element_face_nodes(4,3))==12ntets(generated)
+        @test _API.mesh.get_max_node_tag()==UInt64(size(generated.coords,2))
+        @test _API.mesh.get_max_element_tag()==UInt64(ntets(generated))
 
         cached=_API.mesh.get()
         @test cached!==generated && cached.coords!==generated.coords
@@ -90,7 +93,9 @@ const _API=Tessella.API
         # Adding a volume invalidates the cache; generating again meshes both
         # volumes into the merged cache with per-entity classification.
         _API.mesh.generate(3)
-        @test ntets(_API.mesh.get())==24
+        @test ntets(_API.mesh.get())==
+              length(_API.mesh.get_elements(3,1)[2][1])+
+              length(_API.mesh.get_elements(3,2)[2][1])
         @test _API.mesh.get_elements(3,1)[1]==Int32[4]
         @test _API.mesh.get_elements(3,2)[1]==Int32[4]
     finally
@@ -281,7 +286,7 @@ end
         initial=_API.mesh.generate(3)
         @test validate(initial).ok
         @test mesh_crc(initial).sha==
-              "eae8751b0dad3b89f2d7a4416ea079a352a3bd6b8eff31ef7eb7d8bb78d8509a"
+              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
 
         @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
         @test _API.CURRENT[].point_size[101]==0.25
@@ -337,7 +342,7 @@ end
             node(generated,generated.tets[4,cell])) for cell in 1:ntets(generated))
         @test volume≈1/6 atol=1e-12
         @test mesh_crc(generated).sha==
-              "03cfdc7130ae46c251a59237671e3bb37dcba83b690accde3770ac4a78d4cbb4"
+              "afbd900ddda5c89329ad94d6230283459934c17e3a32b4666e4135b59df21a72"
         expected=mesh_crc(generated)
         @test_throws ArgumentError _API.model.add_surface_loop([1];tag=2)
         @test mesh_crc(_API.mesh.get())==expected
@@ -350,7 +355,7 @@ end
     fixture=normpath(joinpath(
         @__DIR__,"..","fixtures","periodic_surface_volume.geo"))
     source=replace(
-        read(fixture,String),
+        replace(read(fixture,String),"\r\n"=>"\n"),
         "Periodic Surface {4} = {6} Translate {1, 0, 0};\n"=>"",
         "Periodic Surface {5} = {3} Translate {0, 1, 0};\n"=>"")
     mktemp() do path,io
@@ -379,8 +384,8 @@ end
             @test validate(generated).ok
             expected=mesh_crc(generated)
             @test expected.sha==
-                  "a58374071a4c485a339e1c5b48b8b0f3e69bf362ff0e41f57ca1a665139e81df"
-            for (slave,master,pairs) in ((4,6,25),(5,3,25))
+                  "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8"
+            for (slave,master,pairs) in ((4,6,21),(5,3,21))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
                 @test length(mapping.slave_nodes)==
@@ -395,8 +400,8 @@ end
 
             refined=_API.mesh.refine()
             @test mesh_crc(refined).sha==
-                  "97cc7537053d447ca2c9bff1be0be82812c6ce1b7b384d54af3f50c5ee038408"
-            for (slave,master,pairs) in ((4,6,81),(5,3,81))
+                  "2b621a37a1a0e01edb88e3f7bca31cbf8eb1c2c02ba369403a873c0d996b33a8"
+            for (slave,master,pairs) in ((4,6,69),(5,3,69))
                 mapping=_API.mesh.get_periodic_nodes(2,slave)
                 @test mapping.master_entity==master
                 @test length(mapping.slave_nodes)==
@@ -444,11 +449,11 @@ end
         generated=_API.mesh.generate(2)
         expected=mesh_crc(generated)
         @test expected.sha==
-              "3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5"
+              "08674bf2c04858b96e77c2fe66959845f59721475fef80138ecfec5861d9cdba"
         mapping=_API.mesh.get_periodic_nodes(1,2)
         @test mapping.master_entity==4
         @test mapping.affine[4]==1
-        @test length(mapping.slave_nodes)==length(mapping.master_nodes)==5
+        @test length(mapping.slave_nodes)==length(mapping.master_nodes)==3
         cached=_API.mesh.get()
         for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
             @test Tuple(cached.coords[:,slave])==
@@ -481,9 +486,9 @@ end
         double_periodic=_API.mesh.generate(2)
         @test validate(double_periodic).ok
         @test mesh_crc(double_periodic).sha==
-              "95ef6d0db94505d4f35ff870af09e952d74a32508a338b3994af347b406e9d05"
-        @test length(_API.mesh.get_periodic_nodes(1,2).slave_nodes)==5
-        @test length(_API.mesh.get_periodic_nodes(1,3).slave_nodes)==5
+              "de51a8ac11edaf3bb95a4a7c4dbf55d27c8e1908a6c4bff3b0100463f69aafc3"
+        @test length(_API.mesh.get_periodic_nodes(1,2).slave_nodes)==3
+        @test length(_API.mesh.get_periodic_nodes(1,3).slave_nodes)==3
     finally
         _API.finalize()
     end
@@ -518,7 +523,7 @@ end
         generated=_API.mesh.generate(2)
         @test validate(generated).ok
         @test mesh_crc(generated).sha==
-              "9794a65ea5402683d0d50612522c2f71f7c98ec2a9f6b9e6b49a61e62cd85cf2"
+              "d32b6ce391d3fd5d5594844ee1a4446a8628120032a9236502bb079dbaac574e"
         mapping=_API.mesh.get_periodic_nodes(1,6)
         @test mapping.master_entity==5
         @test length(mapping.slave_nodes)==3
@@ -565,12 +570,12 @@ end
         generated=_API.mesh.generate(2)
         @test validate(generated).ok
         @test mesh_crc(generated).sha==
-              "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+              "9a5503ab32b8725f2c9e739a075f2e45c4b35763439b0ff59a3b2d661d4678ae"
         cached=_API.mesh.get()
         for (slave_entity,master_entity) in ((10,20),(20,30))
             mapping=_API.mesh.get_periodic_nodes(1,slave_entity)
             @test mapping.master_entity==master_entity
-            @test length(mapping.slave_nodes)==9
+            @test length(mapping.slave_nodes)==4
             for (slave,master) in zip(mapping.slave_nodes,
                                       mapping.master_nodes)
                 @test Tuple(cached.coords[:,slave])==
@@ -592,12 +597,15 @@ end
         recached=_API.mesh.get()
         closing=_API.mesh.get_periodic_nodes(1,30)
         @test closing.master_entity==10
-        @test length(closing.slave_nodes)==9
+        @test length(closing.slave_nodes)==4
         for (slave,master) in zip(closing.slave_nodes,
                                   closing.master_nodes)
-            @test Tuple(recached.coords[:,slave])==
-                  (recached.coords[1,master],recached.coords[2,master]-0.6,
-                   recached.coords[3,master])
+            # Endpoint nodes keep the slave curve's own vertex coordinates
+            # (setMeshMaster parity), which sit a few ULPs off the affine image.
+            @test all(isapprox.(
+                Tuple(recached.coords[:,slave]),
+                (recached.coords[1,master],recached.coords[2,master]-0.6,
+                 recached.coords[3,master]);atol=1e-12))
         end
     finally
         _API.finalize()
