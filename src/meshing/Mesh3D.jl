@@ -3062,6 +3062,16 @@ function _recover_segment3(out::Mesh, p, q, budget::Ref{Int},
         if hit===nothing
             chain=_segment_chain_points3(out,p,q)
             if isempty(chain)
+                na=_node_at3(out,p;atol=1e-9)
+                nb=_node_at3(out,q;atol=1e-9)
+                if na!=0 && nb!=0 && na!=nb
+                    threaded=_segment_vertex_on_edge3(
+                        out,Int32(na),Int32(nb))
+                    if threaded!==nothing &&
+                       mesh_covers_segment3(threaded,p,q)
+                        out=threaded; continue
+                    end
+                end
                 filled=_retriangulate_segment_cavity3(out,p,q)
                 filled===nothing && throw(ErrorException(
                     "recover_segment3: segment is not a tet-edge chain, no " *
@@ -4098,6 +4108,160 @@ function _split_tets_on_edge(mesh::Mesh, t::Int, p, mask)
     end
     isempty(drop) && throw(ErrorException("insert_steiner3: edge split found no incident tetrahedra"))
     return _rebuild_tets(mesh, drop, news, ntags, p)
+end
+
+# Thread an existing vertex M onto edge (a,b): M lies (nearly) on the open
+# segment a–b but the edge survives in the tetrahedron complex — a
+# vertex-on-edge nonconformity no Steiner insertion can repair. Every star
+# tetrahedron (a,b,x,y) splits into the two books (a,m,x,y) and (m,b,x,y);
+# star tetrahedra already carrying m are the degenerate junction cells and
+# dissolve (their faces reappear as book faces, keeping the complex
+# conforming). Classified triangles and segments spanning (a,b) split the
+# same way so boundary constraints track the new spine. The operation is the
+# 3-D analogue of the in-plane vertex-on-edge fix a 2-D constrained recovery
+# performs, and it is the only mechanism that creates edge (m,x) through the
+# blocked edge for every ring vertex x — including the other endpoint of a
+# leaf recovery segment.
+function _thread_vertex_on_edge3(mesh::Mesh, a::Int32, b::Int32, m::Int32)
+    nt=size(mesh.tets,2)
+    drop=Int[]
+    news=NTuple{4,Int32}[]
+    ntags=Int32[]
+    dissolved=0.0
+    @inbounds for t in 1:nt
+        v=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
+        hasA=false; hasB=false; hasM=false
+        for u in v
+            u==a && (hasA=true)
+            u==b && (hasB=true)
+            u==m && (hasM=true)
+        end
+        (hasA && hasB) || continue
+        if hasM
+            push!(drop,t)
+            dissolved+=abs(tet_signed_volume(
+                _pt3(mesh,v[1]),_pt3(mesh,v[2]),
+                _pt3(mesh,v[3]),_pt3(mesh,v[4])))
+            continue
+        end
+        push!(drop,t)
+        rest=Int32[u for u in v if u!=a && u!=b]
+        tag=isempty(mesh.tet_tag) ? Int32(0) : mesh.tet_tag[t]
+        push!(news,(a,m,rest[1],rest[2])); push!(ntags,tag)
+        push!(news,(m,b,rest[1],rest[2])); push!(ntags,tag)
+    end
+    isempty(drop) && return nothing
+    # The dissolving junction cells carry at most the hairline volume the
+    # vertex-on-edge offset permits; refuse if it is measurable — threading
+    # must be volume-conservative like every other local repair here.
+    total=_tet_volume_sum3(mesh,"thread vertex-on-edge input")
+    dissolved<=max(1e-9*total,1024eps(Float64)*total) || return nothing
+    tris=size(mesh.tris,2)
+    tri_out=Vector{NTuple{3,Int32}}()
+    tri_tags=Int32[]
+    @inbounds for j in 1:tris
+        tri=(mesh.tris[1,j],mesh.tris[2,j],mesh.tris[3,j])
+        ia=findfirst(==(a),tri); ib=findfirst(==(b),tri)
+        if ia===nothing || ib===nothing
+            push!(tri_out,tri)
+            isempty(mesh.tri_tag) || push!(tri_tags,mesh.tri_tag[j])
+            continue
+        end
+        w=tri[findfirst(u->u!=a && u!=b,tri)]
+        w==m && continue
+        tag=isempty(mesh.tri_tag) ? Int32(0) : mesh.tri_tag[j]
+        t1=(tri[1],tri[2],tri[3]); t2=(tri[1],tri[2],tri[3])
+        t1=ntuple(i->t1[i]==b ? m : t1[i],3)
+        t2=ntuple(i->t2[i]==a ? m : t2[i],3)
+        push!(tri_out,t1); isempty(mesh.tri_tag) || push!(tri_tags,tag)
+        push!(tri_out,t2); isempty(mesh.tri_tag) || push!(tri_tags,tag)
+    end
+    seg_out=Vector{NTuple{2,Int32}}()
+    seg_tags=Int32[]
+    @inbounds for j in axes(mesh.segs,2)
+        sg=(mesh.segs[1,j],mesh.segs[2,j])
+        if (sg[1]==a && sg[2]==b) || (sg[1]==b && sg[2]==a)
+            tag=isempty(mesh.seg_tag) ? Int32(0) : mesh.seg_tag[j]
+            push!(seg_out,(sg[1],m)); isempty(mesh.seg_tag) || push!(seg_tags,tag)
+            push!(seg_out,(m,sg[2])); isempty(mesh.seg_tag) || push!(seg_tags,tag)
+        else
+            push!(seg_out,sg)
+            isempty(mesh.seg_tag) || push!(seg_tags,mesh.seg_tag[j])
+        end
+    end
+    nkeep=nt-length(drop)
+    nout=nkeep+length(news)
+    nout<=typemax(Int32) || throw(ArgumentError(
+        "recover_segment3: tetrahedron count exceeds the Int32 topology limit"))
+    dropped=Set(drop)
+    tets=Matrix{Int32}(undef,4,nout)
+    tags=isempty(mesh.tet_tag) ? Int32[] : Vector{Int32}(undef,nout)
+    keep_index=1
+    @inbounds for t in 1:nt
+        t in dropped && continue
+        for i in 1:4; tets[i,keep_index]=mesh.tets[i,t]; end
+        isempty(tags) || (tags[keep_index]=mesh.tet_tag[t])
+        keep_index+=1
+    end
+    @inbounds for (k,cell) in enumerate(news)
+        col=nkeep+k
+        tets[1,col]=cell[1]; tets[2,col]=cell[2]
+        tets[3,col]=cell[3]; tets[4,col]=cell[4]
+        _orient_tet!(tets,mesh.coords,col)
+        isempty(tags) || (tags[col]=ntags[k])
+    end
+    trism=Matrix{Int32}(undef,3,length(tri_out))
+    for (k,tri) in enumerate(tri_out)
+        trism[1,k]=tri[1]; trism[2,k]=tri[2]; trism[3,k]=tri[3]
+    end
+    segsm=Matrix{Int32}(undef,2,length(seg_out))
+    for (k,sg) in enumerate(seg_out)
+        segsm[1,k]=sg[1]; segsm[2,k]=sg[2]
+    end
+    return Mesh(mesh.coords; segs=segsm, tris=trism, tets=tets,
+                seg_tag=seg_tags, tri_tag=tri_tags, tet_tag=tags)
+end
+
+# Leaf fallback for an uncovered segment whose endpoints are both mesh nodes:
+# the remaining span is pinned behind a tetrahedron edge carrying one
+# endpoint on it (vertex-on-edge — observed on embedded-sheet fixtures where
+# coplanar sheet vertices land on face edges of the volume complex). Find
+# that blocking edge — its star must also contain the other endpoint — and
+# thread the endpoint through it, which creates the required edge directly.
+# Protected cells are never threaded: the registry owns their survival.
+function _segment_vertex_on_edge3(mesh::Mesh, na::Int32, nb::Int32)
+    protected=Set{NTuple{2,Int32}}(_protected_edges3())
+    nt=size(mesh.tets,2)
+    for (m,n) in ((na,nb),(nb,na))
+        pm=_pt3(mesh,m)
+        for (a,b) in _tet_edge_set(mesh)
+            (a==m || b==m || a==n || b==n) && continue
+            ((a,b) in protected || (b,a) in protected) && continue
+            pa,pb=_pt3(mesh,a),_pt3(mesh,b)
+            _on_segment3(pm,pa,pb;atol=1e-9) || continue
+            d=_sub3(pb,pa); dd=_dot3(d,d)
+            dd>0 || continue
+            tt=_dot3(_sub3(pm,pa),d)/dd
+            (tt>1e-9 && tt<1-1e-9) || continue
+            hasN=false
+            @inbounds for t in 1:nt
+                v=(mesh.tets[1,t],mesh.tets[2,t],
+                   mesh.tets[3,t],mesh.tets[4,t])
+                if ((v[1]==a||v[2]==a||v[3]==a||v[4]==a) &&
+                    (v[1]==b||v[2]==b||v[3]==b||v[4]==b) &&
+                    (v[1]==n||v[2]==n||v[3]==n||v[4]==n))
+                    hasN=true; break
+                end
+            end
+            hasN || continue
+            out=_thread_vertex_on_edge3(mesh,a,b,m)
+            out===nothing && continue
+            diagnostic=validate(out)
+            diagnostic.ok || continue
+            return out
+        end
+    end
+    return nothing
 end
 
 function _repair_steiner_split3(mesh::Mesh, t::Int, zeros::Int, mask, p)
