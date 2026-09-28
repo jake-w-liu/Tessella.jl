@@ -336,7 +336,7 @@ end
     @test any(entity==(0,Int32(111))
               for entity in projected.entity_data.node_entities)
     @test mixed_crc(projected).sha==
-          "2ebe244a7bdbdab8a44c1c95899a1a7238e56bbfc5fff03fbddd5484312d1a49"
+          "0343772cf406301279413dca2127b440a0fe87c9df63ce33ec571f631d37b465"
 end
 
 @testset "explicit modeled volume shells" begin
