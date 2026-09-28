@@ -345,4 +345,168 @@ END-ISO-10303-21;
             @test_throws ArgumentError import_step(path)
         end
     end
+
+    @testset "closed-shell STEP BRep polyhedra" begin
+        # OCC-layout MANIFOLD_SOLID_BREP unit cube (ADVANCED_FACE→PLANE over
+        # EDGE_LOOP/ORIENTED_EDGE/EDGE_CURVE/LINE).
+        surface=import_step(joinpath(FIXTURES,"brep_occ_box.step");fill=false)
+        @test validate(surface).ok
+        @test nnodes(surface)==8
+        @test ntris(surface)==12
+        @test _brep_signed_surface_volume(surface)≈1.0 atol=1e-12
+        mesh=import_step(joinpath(FIXTURES,"brep_occ_box.step"))
+        @test validate(mesh).ok
+        @test ntets(mesh)>0
+        @test _brep_volume(mesh)≈1.0 atol=1e-12
+
+        # FACETED_BREP unit cube over bare POLY_LOOP polygons.
+        surface=import_step(joinpath(FIXTURES,"brep_poly_loop_box.step");
+                            fill=false)
+        @test validate(surface).ok
+        @test nnodes(surface)==8
+        @test ntris(surface)==12
+        @test _brep_signed_surface_volume(surface)≈1.0 atol=1e-12
+        mesh=import_step(joinpath(FIXTURES,"brep_poly_loop_box.step"))
+        @test ntets(mesh)>0
+        @test _brep_volume(mesh)≈1.0 atol=1e-12
+
+        # MANIFOLD_SOLID_BREP tetrahedron.
+        surface=import_step(joinpath(FIXTURES,"brep_edge_loop_tet.step");
+                            fill=false)
+        @test validate(surface).ok
+        @test nnodes(surface)==4
+        @test ntris(surface)==4
+        @test _brep_signed_surface_volume(surface)≈1/6 atol=1e-12
+        mesh=import_step(joinpath(FIXTURES,"brep_edge_loop_tet.step"))
+        @test ntets(mesh)>0
+        @test _brep_volume(mesh)≈1/6 atol=1e-12
+    end
+
+    @testset "closed-shell IGES BRep polyhedra" begin
+        # OCC-layout trimmed-plane unit cube (144→108/190 with
+        # 142/141→102/110 model-curve boundaries).
+        surface=import_iges(joinpath(FIXTURES,"brep_occ_box.igs");fill=false)
+        @test validate(surface).ok
+        @test nnodes(surface)==8
+        @test ntris(surface)==12
+        @test _brep_signed_surface_volume(surface)≈1.0 atol=1e-12
+        mesh=import_iges(joinpath(FIXTURES,"brep_occ_box.igs"))
+        @test validate(mesh).ok
+        @test ntets(mesh)>0
+        @test _brep_volume(mesh)≈1.0 atol=1e-12
+
+        # Type 186 MSBO unit tetrahedron
+        # (186/514/510/508/504/502 → 110 edges, 190 planes).
+        surface=import_iges(joinpath(FIXTURES,"brep_iges_msbo_tet.igs");
+                            fill=false)
+        @test validate(surface).ok
+        @test nnodes(surface)==4
+        @test ntris(surface)==4
+        @test _brep_signed_surface_volume(surface)≈1/6 atol=1e-12
+        mesh=import_iges(joinpath(FIXTURES,"brep_iges_msbo_tet.igs"))
+        @test ntets(mesh)>0
+        @test _brep_volume(mesh)≈1/6 atol=1e-12
+    end
+
+    @testset "torus BRep classification" begin
+        # STEP MANIFOLD_SOLID_BREP whose single face is an untrimmed
+        # TOROIDAL_SURFACE (seam edges collapse to one vertex), plus IGES
+        # type 160, type 198, and the OCC 144→120 Surface-of-Revolution
+        # layout — all the same R=2, r=0.5 ring torus. `fill=false` returns
+        # the closed triangle boundary; fill goes through the shared
+        # `tetrahedralize` path exercised by the polyhedron cases above.
+        for (fixture,importer) in (
+                ("brep_occ_torus.step",import_step),
+                ("brep_iges_160_torus.igs",import_iges),
+                ("brep_iges_198_torus.igs",import_iges),
+                ("brep_occ_torus.igs",import_iges))
+            surface=importer(joinpath(FIXTURES,fixture);fill=false)
+            @test validate(surface).ok
+            @test nnodes(surface)==1152
+            @test ntris(surface)==2304
+            @test _brep_signed_surface_volume(surface)≈
+                  9.729407356203293 atol=1e-12
+            @test abs(_brep_signed_surface_volume(surface)-2π^2*2*0.5^2)/
+                  (2π^2*2*0.5^2)<0.02
+        end
+    end
+
+    @testset "unsupported BRep topology is an explicit blocker" begin
+        # OPEN_SHELL members are not solids.
+        open_src=replace(read(joinpath(FIXTURES,"brep_occ_box.step"),String),
+                         "CLOSED_SHELL"=>"OPEN_SHELL")
+        err=mktemp() do path,io
+            write(io,open_src); close(io)
+            try import_step(path); nothing catch e e end
+        end
+        @test err isa ArgumentError
+        @test occursin("OPEN_SHELL",sprint(showerror,err))
+
+        # A face with two boundary loops (a hole) is out of scope.
+        hole_src=replace(read(joinpath(FIXTURES,"brep_occ_box.step"),String),
+            "#17 = ADVANCED_FACE('',(#18),#32,.F.);"=>
+            "#17 = ADVANCED_FACE('',(#18,#5000),#32,.F.);\n"*
+            "#5000 = FACE_BOUND('',#19,.T.);")
+        err=mktemp() do path,io
+            write(io,hole_src); close(io)
+            try import_step(path); nothing catch e e end
+        end
+        @test err isa ArgumentError
+        @test occursin("inner loops",sprint(showerror,err))
+
+        # A 120 revolution whose generatrix is not a full circle cannot be a
+        # torus.
+        partial_src=replace(read(joinpath(FIXTURES,"brep_occ_torus.igs"),String),
+            "100,0.,0.,0.,0.5,0.,0.5,0."=>"100,0.,0.,0.,0.5,0.,0.,0.5")
+        err=mktemp() do path,io
+            write(io,partial_src); close(io)
+            try import_iges(path); nothing catch e e end
+        end
+        @test err isa ArgumentError
+        @test occursin("full circle",sprint(showerror,err))
+
+        # A partial revolution sweep is not a full torus. Rewrite the 120
+        # P-record position-preservingly — IGES keeps the DE pointer at
+        # fixed columns 65..72.
+        sweep_src=read(joinpath(FIXTURES,"brep_occ_torus.igs"),String)
+        rebuilt=map(split(sweep_src,'\n')) do line
+            s=rpad(line,80)
+            if length(s)>=73 && s[73]=='P' && startswith(line,"120,")
+                return rpad("120,5,7,0.,3.0;",64)*s[65:80]
+            end
+            return line
+        end
+        sweep_src=join(rebuilt,'\n')
+        err=mktemp() do path,io
+            write(io,sweep_src); close(io)
+            try import_iges(path); nothing catch e e end
+        end
+        @test err isa ArgumentError
+        @test occursin("2π sweep",sprint(showerror,err))
+
+        # A boundary vertex landing ON the torus is a real trim — blocked.
+        # Rewrite each type-110 P-record as a degenerate segment pinned on
+        # the outer equator (rho=R+r => on-surface); the chained ring then
+        # fails the seam-detection check.
+        seam_src=read(joinpath(FIXTURES,"brep_occ_torus.igs"),String)
+        rebuilt=map(split(seam_src,'\n')) do line
+            s=rpad(line,80)
+            length(s)>=73 && s[73]=='P' || return line
+            if startswith(line,"110,") && !occursin("0.,0.,1.",line)
+                # boundary seams only — keep the DE-5 axis line
+                return rpad("110,2.5,0.,0.,2.5,0.,0.;",64)*s[65:80]
+            elseif startswith(line,"3.171504239E-15")
+                # continuation record of a rewritten seam line — drop it
+                return ""
+            end
+            return line
+        end
+        seam_src=join(rebuilt,'\n')
+        err=mktemp() do path,io
+            write(io,seam_src); close(io)
+            try import_iges(path); nothing catch e e end
+        end
+        @test err isa ArgumentError
+        @test occursin("trimmed",sprint(showerror,err))
+    end
 end
