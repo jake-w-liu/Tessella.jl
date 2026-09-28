@@ -557,8 +557,10 @@ end
     using Tessella.Mesh2D: Triangulation, constrained_delaunay, classify_interior
     using Tessella.Mesh2D: _find_bad, _find_encroached, _split_subsegment!
     using Tessella.Mesh2D: _needs_refine, _is_ghost_tri, _circumcenter2
-    using Tessella.Mesh2D: _encroached_by_point, _insert_steiner!, _pt, _vert
+    using Tessella.Mesh2D: _encroached_by_point, _insert_steiner!
     using Tessella.Mesh2D: _sorted_segs, _setflag!
+    # `_pt`/`_vert` are referenced qualified (Tessella.Mesh2D._pt) — `Main._pt`
+    # is already bound by earlier test files under the full-suite include order.
     function full_scan(T,interior,B,area)
         for t in eachindex(T.alive)
             (T.alive[t] && t<=length(interior) && interior[t] &&
@@ -589,14 +591,14 @@ end
         cached=_find_bad(T,interior,B,area,nothing,nothing,nothing)
         @test cached==expected
         cached==0 && break
-        a=_vert(T,cached,1);b=_vert(T,cached,2);c=_vert(T,cached,3)
-        cc=_circumcenter2(_pt(T,a),_pt(T,b),_pt(T,c))
+        a=Tessella.Mesh2D._vert(T,cached,1);b=Tessella.Mesh2D._vert(T,cached,2);c=Tessella.Mesh2D._vert(T,cached,3)
+        cc=_circumcenter2(Tessella.Mesh2D._pt(T,a),Tessella.Mesh2D._pt(T,b),Tessella.Mesh2D._pt(T,c))
         sp=_encroached_by_point(T,cc)
         if sp!==nothing
             _split_subsegment!(T,sp[1],sp[2],interior,pointids)
             continue
         end
-        pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+        pa=Tessella.Mesh2D._pt(T,a);pb=Tessella.Mesh2D._pt(T,b);pc=Tessella.Mesh2D._pt(T,c)
         fallback=(pa[1]/3+pb[1]/3+pc[1]/3,pa[2]/3+pb[2]/3+pc[2]/3)
         _insert_steiner!(T,cc,interior,pointids;fallback=fallback)
     end
