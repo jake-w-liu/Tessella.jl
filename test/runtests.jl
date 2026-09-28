@@ -95,6 +95,7 @@ using Tessella
     include("geometry/model_volume_io_test.jl") # classified volume-embedding MSH projection
     include("geometry/nurbs_test.jl")    # De Boor vs Bernstein/circle oracles
     include("meshing/boundarylayer_test.jl") # prismatic layer extrusion
+    include("meshing/boundary_layer_fan_test.jl") # multi-region fan layers + core fill
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
     include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
