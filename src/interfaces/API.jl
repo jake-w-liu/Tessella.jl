@@ -46,7 +46,7 @@ using ..Model: model_entity_type, model_entity_properties, model_parent,
 using ..Model: model_value, model_derivative, model_second_derivative,
                model_curvature, model_principal_curvatures, model_normal
 using ..Model: model_parametrization, model_parametrization_bounds,
-               model_is_inside, model_closest_point,
+               model_is_inside, model_closest_point, model_distance,
                model_reparametrize_on_surface
 using ..Model: set_entity_visibility!, model_entity_visibility
 using ..Model: set_entity_color!, model_entity_color, set_point_coordinates!
@@ -726,6 +726,10 @@ _get_closest_point(dim,tag,coord)=_with_model() do current
     model_closest_point(current,dim,tag,coord)
 end
 
+_get_distance(dim1,tag1,dim2,tag2)=_with_model() do current
+    model_distance(current,dim1,tag1,dim2,tag2)
+end
+
 _reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
     _with_model() do current
         model_reparametrize_on_surface(
@@ -908,7 +912,8 @@ using ..API: _get_entity_type, _get_entity_properties, _get_parent,
              _get_number_of_partitions, _get_partitions
 using ..API: _get_value, _get_derivative, _get_second_derivative, _get_curvature
 using ..API: _get_principal_curvatures, _get_normal, _get_parametrization,
-             _get_parametrization_bounds, _is_inside, _get_closest_point
+             _get_parametrization_bounds, _is_inside, _get_closest_point,
+             _get_distance
 using ..API: _reparametrize_on_surface
 using ..API: _set_visibility, _get_visibility, _set_color, _get_color
 using ..API: _set_coordinates, _set_attribute, _get_attribute,
@@ -1154,6 +1159,13 @@ is_inside(dim,tag,coord,parametric=false)=
 
 """Project concatenated 3-D coordinates onto an explicit Line or Plane."""
 get_closest_point(dim,tag,coord)=_get_closest_point(dim,tag,coord)
+
+"""
+Return `(distance, point1, point2)` — the minimum Euclidean distance between
+two entities and one attaining point on each, matching
+`gmsh.model.getDistance`.
+"""
+get_distance(dim1,tag1,dim2,tag2)=_get_distance(dim1,tag1,dim2,tag2)
 
 """Map Point or straight-Line parameters into an explicit Plane's parameters."""
 reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
