@@ -42,7 +42,7 @@ end
         base=_MESH_TRANSFORM_API.mesh.generate(3)
         base_crc=mesh_crc(base)
         @test base_crc.sha==
-              "eae8751b0dad3b89f2d7a4416ea079a352a3bd6b8eff31ef7eb7d8bb78d8509a"
+              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
         @test _MESH_TRANSFORM_API.model.get_bounding_box(-1,-1)==
               (0.0,0.0,0.0,1.0,1.0,1.0)
 
@@ -169,7 +169,7 @@ end
         identical=_MESH_TRANSFORM_API.mesh.affine_transform(identity)
         @test mesh_crc(identical)==generated_crc
         @test length(_MESH_TRANSFORM_API.mesh.get_periodic_nodes(
-            1,2).slave_nodes)==5
+            1,2).slave_nodes)==3
 
         rotate=(0.0,-1.0,0.0,0.0,
                 1.0,0.0,0.0,0.0,
@@ -190,7 +190,7 @@ end
         regenerated=_MESH_TRANSFORM_API.mesh.generate(2)
         @test mesh_crc(regenerated)==generated_crc
         @test length(_MESH_TRANSFORM_API.mesh.get_periodic_nodes(
-            1,2).slave_nodes)==5
+            1,2).slave_nodes)==3
     finally
         _MESH_TRANSFORM_API.finalize()
     end

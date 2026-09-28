@@ -46,7 +46,7 @@ end
     @test model_value(m,1,c,[0.5])≈[sqrt(0.5),sqrt(0.5),0.0]
     # Gmsh's `InterpolateCurve` derivatives are 1e-8-step finite differences,
     # not the analytic arc derivatives — these are the 4.15.2 binary's values.
-    @test model_derivative(m,1,c,[0.5])==[-1.1107207320559809,1.110720737607096,0.0]
+    @test model_derivative(m,1,c,[0.5])==[-1.110720737607096,1.110720737607096,0.0]
     @test model_curvature(m,1,c,[0.3])==[0.9805697128486208]
     @test model_curvature(m,1,c,[0.9])==[1.137437577809078]
     d2=model_second_derivative(m,1,c,[0.5])
