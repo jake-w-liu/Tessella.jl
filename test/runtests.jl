@@ -120,12 +120,14 @@ using Tessella
     include("interfaces/cli_test.jl") # bounded parser + non-destructive output
     include("interfaces/gui_test.jl") # validated headless command/state machine
     include("interfaces/post_test.jl") # owned scalar views + synchronized plugins
+    include("interfaces/post_view_io_test.jl") # Gmsh .pos list-format view I/O
 
     # Stage 1 — 2-D meshing (CRC-gated).
     include("meshing/mesh2d_test.jl") # Delaunay: exact empty-circumcircle oracle
 
     # Stage 2 — Gmsh-compatible size fields + 1-D/surface meshing (CRC-gated).
     include("fields/sizefield_test.jl") # Distance/Threshold/Box/Min fields + local 3-D sizing
+    include("fields/postview_field_test.jl") # PostView scalar/vector/tensor size fields
     include("meshing/mesh1d_test.jl") # size fields + graded edge meshing vs arc length
     include("meshing/meshsurface_test.jl") # planar/cylinder/parametric surface meshing
 

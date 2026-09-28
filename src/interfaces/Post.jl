@@ -1,9 +1,12 @@
 """
     Post
 
-List-based post-processing views (Gmsh `.pos` analogue). A view is an owned,
-named scalar field sampled at mesh nodes. Plugins are registered functions of a
-view; this compact interface does not yet claim the full Gmsh view data model.
+List-based post-processing views (Gmsh `.pos` analogue). `View` is an owned,
+named scalar field sampled at mesh nodes, and `PosView`/`read_pos`/`write_pos`
+cover the parsed `.pos` element-record format (scalar/vector/tensor point,
+line, triangle, quadrangle, tetrahedron, hexahedron, prism, and pyramid
+records with optional `TIME`, `T2`/`T3`, and `INTERPOLATION_SCHEME` blocks).
+Plugins are registered functions of a view.
 """
 module Post
 
@@ -112,5 +115,7 @@ end
 # "Scale". The factor is passed by creating a closure via add_plugin!.
 add_plugin!("Abs", v -> View(v.name*"_abs", v.coords, abs.(v.values)))
 add_plugin!("IsosurfaceZeroCount", v -> count(iszero, v.values))
+
+include("PostViewIO.jl")
 
 end # module

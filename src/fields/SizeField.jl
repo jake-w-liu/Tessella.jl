@@ -28,6 +28,7 @@ export MinAnisoField, IntersectAnisoField, AttractorAnisoCurveField
 export BoundaryLayerField, AutomaticMeshSizeField, ExternalProcessField
 export parse_matheval, eval_matheval, intersection_alauzet, intersection_conserve_mostaniso
 export build_geo_boundary_layer_fields
+export PostViewAnisoField, metric_raw, geo_postview_context
 
 """Finite sentinel used by Gmsh fields for "do not constrain the mesh size"."""
 const GMSH_MAX_SIZE = 1.0e22
@@ -2007,6 +2008,105 @@ function build_geo_boundary_layer_fields(params::GeoParams,entities;kwargs...)
         push!(values,_build_geo_field(params,entities,tag;kwargs...))
     end
     return Tuple(values)
+end
+
+function _postview_context_tag(view,caller::AbstractString)
+    hasproperty(view,:tag) || throw(ArgumentError(
+        "$caller: view object must expose an integer .tag"))
+    tag=view.tag
+    (tag isa Integer && !(tag isa Bool)) || throw(ArgumentError(
+        "$caller: view tag must be an integer"))
+    return try
+        Int(tag)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: view tag exceeds the platform Int range"))
+    end
+end
+
+function _postview_context_field(view,field_tag::Int,tsel::Int,config,
+                                 caller::AbstractString)
+    hasproperty(view,:elements) || throw(ArgumentError(
+        "$caller: view object must expose an .elements vector of element records"))
+    elements=view.elements
+    elements isa AbstractVector || throw(ArgumentError(
+        "$caller: view .elements must be an AbstractVector"))
+    isempty(elements) && throw(ArgumentError(
+        "build_geo_size_field: Field[$field_tag] view has no element records"))
+    # Gmsh's PostViewField::numComponents chooses tensor over vector over
+    # scalar whenever the view contains that kind of element data.
+    ncomp=1
+    for (i,element) in enumerate(elements)
+        hasproperty(element,:values) || throw(ArgumentError(
+            "build_geo_size_field: Field[$field_tag] view element $i has no " *
+            ".values"))
+        values=element.values
+        values isa AbstractArray || throw(ArgumentError(
+            "build_geo_size_field: Field[$field_tag] view element $i .values " *
+            "must be an array"))
+        size(values,1)==9 && (ncomp=9;break)
+        size(values,1)==3 && (ncomp=max(ncomp,3))
+    end
+    records=[element for element in elements if size(element.values,1)==ncomp]
+    field=PostViewField(records;time=tsel,
+                        crop_negative=config.crop_negative_values,
+                        use_closest=config.use_closest)
+    return ncomp==9 ? PostViewAnisoField(field) : field
+end
+
+"""
+    geo_postview_context(views::AbstractVector; time=1)
+
+Return a `context_fields` resolver for [`build_geo_size_field`](@ref) that
+implements Gmsh 4.15.2 `Field[i] = "PostView"` view selection over an ordered
+vector of parsed post views — objects exposing `.tag` (integer) and
+`.elements` (element-typed records, as produced by `Post.read_pos` and
+`Post.PosView`). `ViewIndex`/the deprecated `IView` are the 0-based position
+in `views`; a non-negative `ViewTag` selects by `.tag` first, like Gmsh's
+`getView()`. The dominant component kind follows Gmsh precedence — tensor if
+any element record holds 9 components, else vector, else scalar — and only
+records of that kind participate. Scalar/vector views build a
+[`PostViewField`](@ref); tensor views build a [`PostViewAnisoField`](@ref), so
+`Background Field = i` receives the metric overload gmsh uses for tensor data.
+`time` selects the active time step (1-based). `CropNegativeValues` and
+`UseClosest` are forwarded from the field options. A resolver is callable —
+it throws `ArgumentError` for non-PostView kinds, unknown tags/indices, and
+malformed views.
+"""
+function geo_postview_context(views::AbstractVector;time::Integer=1)
+    caller="geo_postview_context"
+    views isa AbstractVector || throw(ArgumentError(
+        "$caller: views must be an ordered AbstractVector (positions are " *
+        "Gmsh's ViewIndex order)"))
+    isempty(views) && throw(ArgumentError("$caller: views must be non-empty"))
+    time isa Bool && throw(ArgumentError("$caller: time must not be Bool"))
+    tsel=try
+        Int(time)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: time exceeds the platform Int range"))
+    end
+    tsel>=1 || throw(ArgumentError("$caller: time step $tsel is outside range"))
+    function resolver(spec::GeoFieldSpec,config,entities,params)
+        lowercase(spec.kind)=="postview" || throw(ArgumentError(
+            "build_geo_size_field: Field[$(spec.tag)] kind $(spec.kind) is " *
+            "not PostView"))
+        index=if config.view_tag>=0
+            found=findfirst(view->_postview_context_tag(view,caller)==
+                            config.view_tag,views)
+            found===nothing && throw(ArgumentError(
+                "build_geo_size_field: Field[$(spec.tag)] references unknown " *
+                "view tag $(config.view_tag)"))
+            found
+        else
+            config.view_index+1
+        end
+        (1<=index && index<=length(views)) || throw(ArgumentError(
+            "build_geo_size_field: Field[$(spec.tag)] view index " *
+            "$(config.view_index) is outside 0:$(length(views)-1)"))
+        return _postview_context_field(views[index],spec.tag,tsel,config,caller)
+    end
+    return resolver
 end
 
 """
