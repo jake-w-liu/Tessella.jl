@@ -20,15 +20,15 @@ const _MESH_LIFECYCLE_API=Tessella.API
         generated=_MESH_LIFECYCLE_API.mesh.generate(3)
         generated_crc=mesh_crc(generated)
         @test generated_crc.sha==
-              "eae8751b0dad3b89f2d7a4416ea079a352a3bd6b8eff31ef7eb7d8bb78d8509a"
+              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
 
         refined=_MESH_LIFECYCLE_API.mesh.refine()
         refined_crc=mesh_crc(refined)
         @test validate(refined).ok
-        @test refined_crc.n_nodes==35
-        @test refined_crc.n_tets==96
+        @test refined_crc.n_nodes==5378
+        @test refined_crc.n_tets==27768
         @test refined_crc.sha==
-              "83415c157f9b4daf2124e34562383d36be6fde037af214b0c34d14156dc93b15"
+              "47c38a1bf517b7e5a23fac3c9bba1f6d501576fa23470514e287ac304d928f74"
 
         stored=_MESH_LIFECYCLE_API.LAST_MESH[]
         @test stored!==nothing && stored!==refined
@@ -39,30 +39,30 @@ const _MESH_LIFECYCLE_API=Tessella.API
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
 
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.refine(
-            max_nodes=188)
+            max_nodes=39682)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.refine(
-            max_cells=767)
+            max_cells=222143)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
         @test_throws ArgumentError _MESH_LIFECYCLE_API.mesh.refine(
             max_nodes=true)
         @test mesh_crc(_MESH_LIFECYCLE_API.mesh.get())==refined_crc
 
         twice=_MESH_LIFECYCLE_API.mesh.refine(
-            max_nodes=189,max_cells=768)
+            max_nodes=39683,max_cells=222144)
         twice_crc=mesh_crc(twice)
         @test validate(twice).ok
-        @test twice_crc.n_nodes==189
-        @test twice_crc.n_tets==768
+        @test twice_crc.n_nodes==39683
+        @test twice_crc.n_tets==222144
         @test twice_crc.sha==
-              "148948f0e3430d600b6b8e46214b047bf2074fe581fdd61b59c7eb962c1997e7"
+              "b6ae93f66a976980b9c58606aeb6ab4bca671282c3bbb5d69633266a0b57a2f2"
 
         # `mesh.clear` removes only elements classified on the Volume; the
         # materialized corner Points keep their nodes, matching Gmsh's
         # `removeEntities`-style per-entity clearing. Unknown entities fail.
         @test _MESH_LIFECYCLE_API.mesh.clear([(3,1)])===nothing
         leftover=_MESH_LIFECYCLE_API.mesh.get()
-        @test nnodes(leftover)==98 && ntets(leftover)==0
+        @test nnodes(leftover)==4642 && ntets(leftover)==0
         _MESH_LIFECYCLE_API.mesh.generate(3)
         _MESH_LIFECYCLE_API.mesh.refine()
         _MESH_LIFECYCLE_API.mesh.refine()
@@ -121,12 +121,12 @@ end
         generated=_MESH_LIFECYCLE_API.mesh.generate(2)
         @test validate(generated).ok
         @test length(_MESH_LIFECYCLE_API.mesh.get_periodic_nodes(
-            1,2).slave_nodes)==5
+            1,2).slave_nodes)==3
 
         refined=_MESH_LIFECYCLE_API.mesh.refine()
         @test validate(refined).ok
         mapping=_MESH_LIFECYCLE_API.mesh.get_periodic_nodes(1,2)
-        @test length(mapping.slave_nodes)==length(mapping.master_nodes)==9
+        @test length(mapping.slave_nodes)==length(mapping.master_nodes)==5
         cached=_MESH_LIFECYCLE_API.mesh.get()
         for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
             @test Tuple(cached.coords[:,slave])==

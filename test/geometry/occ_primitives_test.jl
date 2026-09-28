@@ -119,8 +119,8 @@ end
     m=GeoModel()
     @test add_cone!(m,0,0,0,0,0,2,2,1)==1
     @test sort!(collect(keys(m.points)))==[1,2]
-    @test m.points[1]==(0.9999999999999999,-2.449293598294706e-16,2.0) &&
-          m.points[2]==(2.0,-4.898587196589413e-16,0.0)
+    @test all(m.points[1] .≈ (0.9999999999999999,-2.449293598294706e-16,2.0)) &&
+          all(m.points[2] .≈ (2.0,-4.898587196589413e-16,0.0))
     @test sort!(collect(keys(m.curves)))==[1,2,3]
     @test sort!(collect(keys(m.surfaces)))==[1,2,3]
     @test m.surface_loops[1]==[1,2,-3]
