@@ -38,74 +38,87 @@ end
 const _GM_LIBM_FUNS = (:sin, :cos, :tan, :asin, :acos, :atan, :atan2,
                        :sinh, :cosh, :tanh, :exp, :log, :log10, :pow)
 
-const _GM_LIBM = let handle = _gm_mathlib_handle()
-    NamedTuple{_GM_LIBM_FUNS}(ntuple(length(_GM_LIBM_FUNS)) do i
-        handle === nothing ? Ptr{Cvoid}(0) :
-            something(Libdl.dlsym(handle, String(_GM_LIBM_FUNS[i]);
-                                  throw_error=false), Ptr{Cvoid}(0))
-    end)
-end
+# Entry-point addresses are process state, not constants: a precompile image
+# that serialized them would call whatever occupied the recorded address after
+# the next boot's ASLR shuffle (dlopen bases are per-boot on Windows). They
+# live in `Ref` cells repopulated by `__init__` on every module load; the
+# top-level population covers the precompiling process itself.
+const _GM_LIBM = NamedTuple{_GM_LIBM_FUNS}(
+    ntuple(_ -> Ref{Ptr{Cvoid}}(Ptr{Cvoid}(0)), length(_GM_LIBM_FUNS)))
 
 # `sin`+`cos` of one operand fused by the C++ toolchain: clang emits
 # `__sincos_stret` (macOS) and gcc emits `sincos` (glibc) when a translation
 # unit calls both on the same argument. The fused sin can differ one ulp from
 # standalone `sin`, so paired evaluations need the combined entry point.
-const _GM_SINCOS_STRET = let handle = _gm_mathlib_handle()
-    (!Sys.isapple() || handle === nothing) ? Ptr{Cvoid}(0) :
+const _GM_SINCOS_STRET = Ref{Ptr{Cvoid}}(Ptr{Cvoid}(0))
+const _GM_SINCOS = Ref{Ptr{Cvoid}}(Ptr{Cvoid}(0))
+
+function _gm_resolve_libm!()
+    handle = _gm_mathlib_handle()
+    for name in _GM_LIBM_FUNS
+        _GM_LIBM[name][] = handle === nothing ? Ptr{Cvoid}(0) :
+            something(Libdl.dlsym(handle, String(name);
+                                throw_error=false), Ptr{Cvoid}(0))
+    end
+    _GM_SINCOS_STRET[] = (!Sys.isapple() || handle === nothing) ?
+        Ptr{Cvoid}(0) :
         something(Libdl.dlsym(handle, "__sincos_stret"; throw_error=false),
                   Ptr{Cvoid}(0))
-end
-const _GM_SINCOS = let handle = _gm_mathlib_handle()
-    (Sys.isapple() || Sys.iswindows() || handle === nothing) ? Ptr{Cvoid}(0) :
+    _GM_SINCOS[] = (Sys.isapple() || Sys.iswindows() || handle === nothing) ?
+        Ptr{Cvoid}(0) :
         something(Libdl.dlsym(handle, "sincos"; throw_error=false),
                   Ptr{Cvoid}(0))
+    return nothing
 end
 
-# Whether the platform C math library resolved (bit-parity available).
-_gm_libm_available() = _GM_LIBM.sin != C_NULL
+_gm_resolve_libm!()
+__init__() = _gm_resolve_libm!()
 
-@inline _gm_sin(x::Float64) = _GM_LIBM.sin == C_NULL ? sin(x) :
-    ccall(_GM_LIBM.sin, Float64, (Float64,), x)
-@inline _gm_cos(x::Float64) = _GM_LIBM.cos == C_NULL ? cos(x) :
-    ccall(_GM_LIBM.cos, Float64, (Float64,), x)
-@inline _gm_tan(x::Float64) = _GM_LIBM.tan == C_NULL ? tan(x) :
-    ccall(_GM_LIBM.tan, Float64, (Float64,), x)
-@inline _gm_asin(x::Float64) = _GM_LIBM.asin == C_NULL ? asin(x) :
-    ccall(_GM_LIBM.asin, Float64, (Float64,), x)
-@inline _gm_acos(x::Float64) = _GM_LIBM.acos == C_NULL ? acos(x) :
-    ccall(_GM_LIBM.acos, Float64, (Float64,), x)
-@inline _gm_atan(x::Float64) = _GM_LIBM.atan == C_NULL ? atan(x) :
-    ccall(_GM_LIBM.atan, Float64, (Float64,), x)
-@inline _gm_sinh(x::Float64) = _GM_LIBM.sinh == C_NULL ? sinh(x) :
-    ccall(_GM_LIBM.sinh, Float64, (Float64,), x)
-@inline _gm_cosh(x::Float64) = _GM_LIBM.cosh == C_NULL ? cosh(x) :
-    ccall(_GM_LIBM.cosh, Float64, (Float64,), x)
-@inline _gm_tanh(x::Float64) = _GM_LIBM.tanh == C_NULL ? tanh(x) :
-    ccall(_GM_LIBM.tanh, Float64, (Float64,), x)
-@inline _gm_exp(x::Float64) = _GM_LIBM.exp == C_NULL ? exp(x) :
-    ccall(_GM_LIBM.exp, Float64, (Float64,), x)
-@inline _gm_log(x::Float64) = _GM_LIBM.log == C_NULL ? log(x) :
-    ccall(_GM_LIBM.log, Float64, (Float64,), x)
-@inline _gm_log10(x::Float64) = _GM_LIBM.log10 == C_NULL ? log10(x) :
-    ccall(_GM_LIBM.log10, Float64, (Float64,), x)
+# Whether the platform C math library resolved (bit-parity available).
+_gm_libm_available() = _GM_LIBM.sin[] != C_NULL
+
+@inline _gm_sin(x::Float64) = _GM_LIBM.sin[] == C_NULL ? sin(x) :
+    ccall(_GM_LIBM.sin[], Float64, (Float64,), x)
+@inline _gm_cos(x::Float64) = _GM_LIBM.cos[] == C_NULL ? cos(x) :
+    ccall(_GM_LIBM.cos[], Float64, (Float64,), x)
+@inline _gm_tan(x::Float64) = _GM_LIBM.tan[] == C_NULL ? tan(x) :
+    ccall(_GM_LIBM.tan[], Float64, (Float64,), x)
+@inline _gm_asin(x::Float64) = _GM_LIBM.asin[] == C_NULL ? asin(x) :
+    ccall(_GM_LIBM.asin[], Float64, (Float64,), x)
+@inline _gm_acos(x::Float64) = _GM_LIBM.acos[] == C_NULL ? acos(x) :
+    ccall(_GM_LIBM.acos[], Float64, (Float64,), x)
+@inline _gm_atan(x::Float64) = _GM_LIBM.atan[] == C_NULL ? atan(x) :
+    ccall(_GM_LIBM.atan[], Float64, (Float64,), x)
+@inline _gm_sinh(x::Float64) = _GM_LIBM.sinh[] == C_NULL ? sinh(x) :
+    ccall(_GM_LIBM.sinh[], Float64, (Float64,), x)
+@inline _gm_cosh(x::Float64) = _GM_LIBM.cosh[] == C_NULL ? cosh(x) :
+    ccall(_GM_LIBM.cosh[], Float64, (Float64,), x)
+@inline _gm_tanh(x::Float64) = _GM_LIBM.tanh[] == C_NULL ? tanh(x) :
+    ccall(_GM_LIBM.tanh[], Float64, (Float64,), x)
+@inline _gm_exp(x::Float64) = _GM_LIBM.exp[] == C_NULL ? exp(x) :
+    ccall(_GM_LIBM.exp[], Float64, (Float64,), x)
+@inline _gm_log(x::Float64) = _GM_LIBM.log[] == C_NULL ? log(x) :
+    ccall(_GM_LIBM.log[], Float64, (Float64,), x)
+@inline _gm_log10(x::Float64) = _GM_LIBM.log10[] == C_NULL ? log10(x) :
+    ccall(_GM_LIBM.log10[], Float64, (Float64,), x)
 
 @inline _gm_atan2(y::Float64, x::Float64) =
-    _GM_LIBM.atan2 == C_NULL ? atan(y, x) :
-    ccall(_GM_LIBM.atan2, Float64, (Float64, Float64), y, x)
+    _GM_LIBM.atan2[] == C_NULL ? atan(y, x) :
+    ccall(_GM_LIBM.atan2[], Float64, (Float64, Float64), y, x)
 @inline _gm_pow(x::Float64, y::Float64) =
-    _GM_LIBM.pow == C_NULL ? x^y :
-    ccall(_GM_LIBM.pow, Float64, (Float64, Float64), x, y)
+    _GM_LIBM.pow[] == C_NULL ? x^y :
+    ccall(_GM_LIBM.pow[], Float64, (Float64, Float64), x, y)
 
 # Returns `(sin(x), cos(x))` through the toolchain's fused entry point —
 # `__sincos_stret` on macOS (two-double register struct return), `sincos` on
 # Linux (out-param form). Falls back to the separate shims, which in turn fall
 # back to Julia's builtins when no system library resolves.
 @inline function _gm_sincos(x::Float64)
-    if _GM_SINCOS_STRET != C_NULL
-        return ccall(_GM_SINCOS_STRET, NTuple{2,Float64}, (Float64,), x)
-    elseif _GM_SINCOS != C_NULL
+    if _GM_SINCOS_STRET[] != C_NULL
+        return ccall(_GM_SINCOS_STRET[], NTuple{2,Float64}, (Float64,), x)
+    elseif _GM_SINCOS[] != C_NULL
         s = Ref{Float64}(); c = Ref{Float64}()
-        ccall(_GM_SINCOS, Cvoid, (Float64, Ptr{Float64}, Ptr{Float64}), x, s, c)
+        ccall(_GM_SINCOS[], Cvoid, (Float64, Ptr{Float64}, Ptr{Float64}), x, s, c)
         return (s[], c[])
     end
     return (_gm_sin(x), _gm_cos(x))
