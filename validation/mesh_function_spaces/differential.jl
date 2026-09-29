@@ -953,7 +953,7 @@ try
         end
 
         result=bytes2hex(SHA.sha256(take!(stream)))
-        result=="45af63358fafcbc3b914260d66b0b1ba61d198560f5fa7a4ddc707ae3ef19076" ||
+        result=="b28f429e11b56c08f8b39999b892a7132cdd9d7eed79a5cf2e63835fdf525ac4" ||
             error("mesh function-space checksum changed to $result")
         result,length(nodal_coordinates)÷3,actual_order_case_count,
             explicit_order_case_count,nonsimplex_h1_case_count

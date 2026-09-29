@@ -455,9 +455,21 @@ function check_external_process()
                 end
                 """)
         end
-        julia = Sys.which("julia")
-        julia === nothing && error("Julia executable is not on PATH for ExternalProcess")
-        command = Base.shell_escape(julia, "--startup-file=no", helper)
+        julia = joinpath(Sys.BINDIR, Base.julia_exename())
+        isfile(julia) || error("Julia executable not found for ExternalProcess: $julia")
+        command = if Sys.iswindows()
+            # Gmsh's ExternalProcess field CreateProcess's the CommandLine
+            # directly (no shell), so POSIX quoting fails with
+            # ERROR_FILE_NOT_FOUND. Double quotes also break: Tessella wraps
+            # the same string in `cmd /c`, whose quote-stripping then eats
+            # the leading quote. Keep the line bare — Sys.BINDIR and the
+            # mktempdir path must not contain spaces for this probe.
+            any(isspace, julia * helper) && error(
+                "ExternalProcess probe requires space-free paths: $julia, $helper")
+            "$julia --startup-file=no $helper"
+        else
+            Base.shell_escape(julia, "--startup-file=no", helper)
+        end
         setup_model("external_process")
         add_field("ExternalProcess", 1; strings=(("CommandLine", command),))
         points = [(0.0, 0.0, 0.0), (3.0, 4.0, 0.0), (-1.0, 2.0, 2.0)]

@@ -26,7 +26,7 @@ Int32(5) in projected.entity_data.block_entities[point_block] ||
 projected.entity_data.entities[(2,1)].embedded_curves==Int32[] ||
     error("Tessella encoded a point as an embedded curve")
 projected_crc=mixed_crc(projected)
-projected_crc.sha=="222619f8e92298ab72ece09cae6dd9f8300781c9d8a7dc587fc5b3de50219fc3" ||
+projected_crc.sha=="8ad5304fa68d7b7ab2d16e65a2c7a0f8f4f42122d792bcd9892d628d1e9bceb1" ||
     error("Tessella embedded-point projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()

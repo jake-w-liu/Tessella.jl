@@ -202,7 +202,7 @@ end
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "3b0cfb2f2b2097d4f2a91c12fd14620bce135322581116df1c43db577a02a8e8"
+          "a16ce2477fa2362421aad65c5a6249d5faf282eac111ae5b2d47d574b7babd5b"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"classified-volume-$version-$binary.msh")

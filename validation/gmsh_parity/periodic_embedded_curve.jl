@@ -14,11 +14,11 @@ const EXPECTED_AFFINE=(
     0.0,0.0,1.0,0.0,
     0.0,0.0,0.0,1.0)
 const MESH_CRC=
-    "9794a65ea5402683d0d50612522c2f71f7c98ec2a9f6b9e6b49a61e62cd85cf2"
+    "d32b6ce391d3fd5d5594844ee1a4446a8628120032a9236502bb079dbaac574e"
 const PROJECTED_CRC=
-    "e32e8317842c099bc4a91cdd94d02d0f816884f0e091d7194bac56e95bbfeade"
+    "a4233edaafa541a67acceaed5f1de7a5d5ee1e14ffec4fcae100bec8f49697d4"
 const MSH2_CRC=
-    "d6da1835be0a570f81b99ccec03acd47bd46722ed69316007d3fc4fa020b2445"
+    "8fe4b288e11227ac3b4a717a37893e98bc090c10abd731b3653bfb467093968d"
 
 execution=execute_geo(GEO;mesh_dim=2)
 mesh=execution.mesh

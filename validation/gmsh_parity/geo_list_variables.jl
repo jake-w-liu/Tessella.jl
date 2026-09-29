@@ -20,10 +20,10 @@ execution=execute_geo(GEO;mesh_dim=3)
 mesh=execution.mesh
 mesh===nothing && error("Tessella list-variable fixture produced no mesh")
 validate(mesh).ok || error("Tessella list-variable mesh is invalid")
-nnodes(mesh)==125 && ntets(mesh)==384 || error(
+nnodes(mesh)==135 && ntets(mesh)==440 || error(
     "Tessella list-variable mesh size changed")
 mesh_crc(mesh).sha==
-    "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0" ||
+    "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8" ||
     error("Tessella list-variable mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -51,7 +51,7 @@ projected=model_to_mixed(execution.model,mesh,3,1)
 validate(projected).ok || error(
     "Tessella list-variable projection is invalid")
 mixed_crc(projected).sha==
-    "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5" ||
+    "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461" ||
     error("Tessella list-variable projection CRC changed")
 
 function find_gmsh_api()

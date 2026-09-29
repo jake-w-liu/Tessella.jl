@@ -23,36 +23,36 @@ const AFFINE_YN06=(
     0.0,0.0,1.0,0.0,
     0.0,0.0,0.0,1.0)
 const MESH_CRC=
-    "dad04f30f3b17630127c3f1b4f5b5a4776ae5ff20d3c89afa6c674fac24d5338"
+    "9a5503ab32b8725f2c9e739a075f2e45c4b35763439b0ff59a3b2d661d4678ae"
 const CASES=(
     (name=:branch,
      path=joinpath(@__DIR__,"periodic_curve_branch.geo"),
      masters=Dict(10=>30,20=>30),offsets=Dict(10=>0.6,20=>0.3),
      point_links=[(103,101),(104,102),(105,101),(106,102)],
-     projected_crc="6eb5020b186e9abdd8472312791bf375e1e9512066e7cc67b1fd2c1990a6d82f",
-     msh2_crc="bdc360ec06e87180d06b5bd0bb2091c6b3fa0d4ea27d8122d39556824d97014c"),
+     projected_crc="abeb59f940af753eaf42ce2545585746ddb6d5d919acd7fe6472158e79756b7d",
+     msh2_crc="8df145aa68b895333231d75ee7174acd47a2079a714dd641e70f2ad194a0b60a"),
     (name=:chain,
      path=joinpath(@__DIR__,"periodic_curve_chain.geo"),
      masters=Dict(10=>20,20=>30),offsets=Dict(10=>0.3,20=>0.3),
      point_links=[(103,101),(104,102),(105,103),(106,104)],
-     projected_crc="3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1",
-     msh2_crc="7fb21b1038e4d7f21b98ca52cb85951b8a6ed776c445f8151653fb1950878c88"),
+     projected_crc="2352adba6b73846c7d281b72550c85e21a7a166b50fa17a35bca80fad529adf2",
+     msh2_crc="36ad27420a777f540673e346383a137f5a60719cdef6b7ab5add1f5055154528"),
     (name=:expressions,
      path=joinpath(@__DIR__,"periodic_curve_expressions.geo"),
      masters=Dict(10=>20,20=>30),offsets=Dict(10=>0.3,20=>0.3),
      point_links=[(103,101),(104,102),(105,103),(106,104)],
-     projected_crc="3f98267cc70f9326ebe490c854cb59a9987c638e6aaabcba326d086bfb887ab1",
-     msh2_crc="7fb21b1038e4d7f21b98ca52cb85951b8a6ed776c445f8151653fb1950878c88"),
+     projected_crc="2352adba6b73846c7d281b72550c85e21a7a166b50fa17a35bca80fad529adf2",
+     msh2_crc="36ad27420a777f540673e346383a137f5a60719cdef6b7ab5add1f5055154528"),
 )
 const EXPRESSION_TRANSFORMS=(
     (name=:affine,
      path=joinpath(@__DIR__,"periodic_curve_affine_expressions.geo"),
-     slave=2,master=4,tessella_pairs=5,gmsh_pairs=3,
-     mesh_crc="3511d556ca0894daa79152eaf56abc6961024a72fa4f7e94f3357a7aa3cf0ff5"),
+     slave=2,master=4,tessella_pairs=3,gmsh_pairs=3,
+     mesh_crc="08674bf2c04858b96e77c2fe66959845f59721475fef80138ecfec5861d9cdba"),
     (name=:rotate,
      path=joinpath(@__DIR__,"periodic_curve_rotate_expressions.geo"),
      slave=3,master=1,tessella_pairs=3,gmsh_pairs=3,
-     mesh_crc="f6ad616e56d52d7e10a598a4079db2de9b3d5f2a777f492f5a2366946d8ea990"),
+     mesh_crc="5e0c8e95ee2cf9c4c4c674363a826f281a0b4e8d7dd9f2aa0a3831cb0ee15e0a"),
 )
 
 function expected_affine(offset)
@@ -114,8 +114,8 @@ for case in CASES
         mapping=model_periodic_nodes(execution.model,mesh,1,slave)
         mapping.master_entity==case.masters[slave] || error(
             "$(case.name) Curve[$slave] mapped to the wrong master")
-        length(mapping.slave_nodes)==length(mapping.master_nodes)==9 || error(
-            "$(case.name) Curve[$slave] compact pair count is not 9")
+        length(mapping.slave_nodes)==length(mapping.master_nodes)==4 || error(
+            "$(case.name) Curve[$slave] compact pair count is not 4")
         offset=case.offsets[slave]
         for (slave_node,master_node) in
                 zip(mapping.slave_nodes,mapping.master_nodes)
@@ -126,7 +126,7 @@ for case in CASES
         end
     end
     mixed=model_to_mixed(execution.model,mesh,1)
-    validate_graph_links(mixed,case,9)
+    validate_graph_links(mixed,case,4)
     mixed.entity_data.entities[(2,1)].embedded_curves==Int32[10,20,30] ||
         error("$(case.name) projection lost embedded curves")
     mixed_crc(mixed).sha==case.projected_crc || error(
@@ -241,7 +241,7 @@ try
                 write_mixed_msh(
                     path,projected[case.name];version=version,binary=binary)
                 reread=read_mixed_msh(path)
-                validate_graph_links(reread,case,9)
+                validate_graph_links(reread,case,4)
                 expected_crc=version==4.1 ?
                     case.projected_crc : case.msh2_crc
                 mixed_crc(reread).sha==expected_crc || error(
@@ -262,7 +262,7 @@ try
                     master,slave_nodes,master_nodes,affine=
                         gmsh.model.mesh.getPeriodicNodes(1,slave)
                     master==case.masters[slave] &&
-                        length(slave_nodes)==length(master_nodes)==9 &&
+                        length(slave_nodes)==length(master_nodes)==4 &&
                         affine==collect(expected_affine(case.offsets[slave])) ||
                         error("Gmsh lost $(case.name) MSH$version Curve[$slave]")
                 end
@@ -323,7 +323,7 @@ try
     println("GMSH_PARITY_PERIODIC_GRAPH_OK " *
             "gmsh=$(gmsh.GMSH_API_VERSION) modes=branch,chain,expressions " *
             "tessella_nodes=$(size(projected[:expressions].coords,2)) " *
-            "tessella_pairs=9 gmsh_tris=44 gmsh_pairs=3 " *
+            "tessella_pairs=4 gmsh_tris=44 gmsh_pairs=3 " *
             "gmsh_max_error=$max_gmsh_error transforms=translate,rotate,affine " *
             "transform_max_error=$(max(max_tessella_transform_error,max_gmsh_transform_error)) " *
             "affine_difference=$max_affine_difference cycle_maps=empty " *

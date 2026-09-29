@@ -41,10 +41,10 @@ execution=execute_geo(GEO;mesh_dim=3)
 mesh=execution.mesh
 mesh===nothing && error("Tessella dynamic-tag fixture produced no mesh")
 validate(mesh).ok || error("Tessella dynamic-tag mesh is invalid")
-nnodes(mesh)==125 && ntets(mesh)==384 || error(
+nnodes(mesh)==135 && ntets(mesh)==440 || error(
     "Tessella dynamic-tag mesh size changed")
 mesh_crc(mesh).sha==
-    "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0" ||
+    "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8" ||
     error("Tessella dynamic-tag mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -75,7 +75,7 @@ execution.params.fields[1].options["PointsList"]=="{9, 10}" || error(
 projected=model_to_mixed(execution.model,mesh,3,26)
 validate(projected).ok || error("Tessella dynamic-tag projection is invalid")
 mixed_crc(projected).sha==
-    "2c0749f8ff2bab314e2efafad8c349e33a1fb17ce481e3344e168f8969b40ece" ||
+    "862954f294ee82b3f7ab3871457a51b99c9053f261b0d9f30e8b00b161091934" ||
     error("Tessella dynamic-tag projection CRC changed")
 
 automatic_physical_execution=mktempdir() do directory
@@ -94,10 +94,10 @@ set_max_execution=execute_geo(SET_MAX_GEO;mesh_dim=3)
 set_max_mesh=set_max_execution.mesh
 set_max_mesh===nothing && error("Tessella SetMaxTag fixture produced no mesh")
 validate(set_max_mesh).ok || error("Tessella SetMaxTag mesh is invalid")
-nnodes(set_max_mesh)==30 && ntets(set_max_mesh)==60 || error(
+nnodes(set_max_mesh)==20 && ntets(set_max_mesh)==34 || error(
     "Tessella SetMaxTag mesh size changed")
 mesh_crc(set_max_mesh).sha==
-    "7a1131a5f09060687059afcdf1918cdc81983f04bb416121a6a2c60423cc6354" ||
+    "b37a5b6e0d579ce9b6a7ade506ffe4b7c2cbca909b850a59511560587a8d05fe" ||
     error("Tessella SetMaxTag mesh CRC changed")
 for (dim,tags) in SET_MAX_ENTITIES
     entities=dim==0 ? keys(set_max_execution.model.points) :
@@ -122,7 +122,7 @@ set_max_projected=model_to_mixed(
     set_max_execution.model,set_max_mesh,3,601)
 validate(set_max_projected).ok || error("Tessella SetMaxTag projection is invalid")
 mixed_crc(set_max_projected).sha==
-    "0f1b2ea4ad06ff62e9e7304a0b91f06c559fe733bbb7c8d3c0ed7f75d5075515" ||
+    "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486" ||
     error("Tessella SetMaxTag projection CRC changed")
 
 function find_gmsh_api()

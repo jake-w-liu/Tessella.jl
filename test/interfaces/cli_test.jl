@@ -316,7 +316,7 @@ Physical Volume("domain", 72) = {1};
             (0,51)=>"sheet points",(1,52)=>"sheet curves",
             (2,53)=>"sheet",(3,54)=>"domain")
         @test mixed_crc(embedded_volume).sha==
-              "e36b39c765d1eef3bd3112e7caf651cb60a6c6b0605d4d3e371dd44eb9b986bb"
+              "2a3d59faa941c542a48791ffad8147baed6ab737bdd10eff742cd13dbef51d09"
 
         explicit_shell_input=joinpath(directory,"explicit-shell.geo")
         explicit_shell_output=joinpath(directory,"explicit-shell.msh")

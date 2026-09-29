@@ -26,7 +26,7 @@ line_block=only(findall(block->block.msh==1,projected.blocks))
 Int32(5) in projected.entity_data.block_entities[line_block] ||
     error("Tessella embedded-line projection has no Curve[5] elements")
 projected_crc=mixed_crc(projected)
-projected_crc.sha=="0655fe3edb4344be584d2fe12b8d57637f65090524542d2bc1b515e148d55ea5" ||
+projected_crc.sha=="07dcc5950a5cf7f6e01dcd00ec6dbae71b00185ac4521e50b992b2274e2f13ce" ||
     error("Tessella embedded-line projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()

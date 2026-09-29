@@ -2664,11 +2664,24 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
                                  na::Int32, nb::Int32;
                                  new_pt=nothing, require_edge::Bool=true,
                                  extra_verts::Vector{Int32}=Int32[],
+                                 absorb_verts::Vector{Int32}=Int32[],
                                  seed_face::Union{Nothing,NTuple{3,Int32}}=nothing,
                                  soft_keepfaces::Bool=false)
     ntet=size(mesh.tets,2)
     cav=findall(in_cav)
     (isempty(cav) || length(cav)>96) && return nothing
+    aset=Set{Int32}(absorb_verts)
+    if !isempty(aset)
+        # An absorbed vertex leaves the fill pool and its incident cells all
+        # dissolve: any reference outside the cavity would orphan, and a
+        # required edge can never carry it.
+        require_edge && return nothing
+        @inbounds for t in 1:ntet
+            in_cav[t] && continue
+            (mesh.tets[1,t] in aset || mesh.tets[2,t] in aset ||
+             mesh.tets[3,t] in aset || mesh.tets[4,t] in aset) && return nothing
+        end
+    end
     # `new_pt` appends one additional vertex (the point being inserted) to the
     # fill candidates; it is required to participate in the accepted fill.
     nv=new_pt===nothing ? Int32(0) : Int32(size(mesh.coords,2)+1)
@@ -2698,7 +2711,7 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
     verts=Int32[]; vseen=Set{Int32}()
     for t in cav, i in 1:4
         v=mesh.tets[i,t]
-        v in vseen || (push!(vseen,v); push!(verts,v))
+        (v in vseen || v in aset) || (push!(vseen,v); push!(verts,v))
     end
     if nv!=0
         push!(vseen,nv); push!(verts,nv)
@@ -2710,7 +2723,8 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
         x in vseen || (push!(vseen,x); push!(verts,x))
     end
     length(verts)>32 && return nothing
-    (na in vseen && nb in vseen) || return nothing
+    ((na in vseen || na in aset) && (nb in vseen || nb in aset)) ||
+        return nothing
     boundaryverts=Set{Int32}(v for f in boundary for v in f)
     inner=[v for v in verts if !(v in boundaryverts)]
     # Pre-existing cells interior to the cavity must survive the fill. A
@@ -2721,6 +2735,7 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
     keepfaces=Set{NTuple{3,Int32}}()
     function consider_face(f)
         get(incidence,f,0)==2 || return
+        (f[1] in vseen && f[2] in vseen && f[3] in vseen) || return
         fa,fb,fc=_pt3(mesh,f[1]),_pt3(mesh,f[2]),_pt3(mesh,f[3])
         (_on_segment3(fc,fa,fb; atol=1e-9) ||
          _on_segment3(fb,fa,fc; atol=1e-9) ||
@@ -2802,6 +2817,11 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
     end
     pts=Dict{Int32,NTuple{3,Float64}}(v => _pt3(mesh,v) for v in verts if v!=nv)
     nv!=0 && (pts[nv]=new_pt)
+    # Absorbed vertices never join the fill pool, but a boundary face's
+    # opposite vertex can still be one — the side tests need its position.
+    for a in absorb_verts
+        pts[a]=_pt3(mesh,a)
+    end
     oldside=Dict{NTuple{3,Int32},Int}()
     for f in boundary
         o=opposite[f]
@@ -3203,7 +3223,8 @@ function _refill_segment_cavity3(mesh::Mesh, in_cav::BitVector,
 end
 
 function _recover_segment3(out::Mesh, p, q, budget::Ref{Int},
-                           max_inserts::Int)
+                           max_inserts::Int;
+                           absorb_p::Bool=false, absorb_q::Bool=false)
     while true
         mesh_covers_segment3(out,p,q) && return out
         hit=_segment_face_hit(out,p,q)
@@ -3222,9 +3243,30 @@ function _recover_segment3(out::Mesh, p, q, budget::Ref{Int},
                     end
                 end
                 filled=_retriangulate_segment_cavity3(out,p,q)
+                if filled===nothing && na!=0 && nb!=0 && na!=nb &&
+                   hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])<=1e-6
+                    # A sub-resolution station pair defeats every legal fill:
+                    # near-duplicate Steiner hits crowd the same crossing until
+                    # consecutive chain vertices sit below the tolerances the
+                    # fill predicates use, while every interior vertex must be
+                    # retained — no fill exists. Absorbing one endpoint vertex
+                    # into the cavity resolves the span by identification;
+                    # only interior chain stations qualify, never this call's
+                    # own endpoints.
+                    merged=_absorb_segment_pair3(out,p,q,Int32(na),Int32(nb),
+                                                 absorb_p,absorb_q)
+                    if merged!==nothing
+                        budget[]-=1
+                        budget[]>=0 || throw(ErrorException(
+                            "recover_segment3: exceeded " *
+                            "max_inserts=$max_inserts"))
+                        return merged
+                    end
+                end
                 filled===nothing && throw(ErrorException(
                     "recover_segment3: segment is not a tet-edge chain, no " *
-                    "face crossing was found, and cavity retriangulation failed"))
+                    "face crossing was found, and cavity retriangulation failed " *
+                    "for segment $p -> $q"))
                 budget[]-=1
                 budget[]>=0 || throw(ErrorException(
                     "recover_segment3: exceeded max_inserts=$max_inserts"))
@@ -3232,14 +3274,26 @@ function _recover_segment3(out::Mesh, p, q, budget::Ref{Int},
                 continue
             end
             s=p
-            for x in chain
-                out=_recover_segment3(out,s,x,budget,max_inserts)
+            # Recover one station at a time and rescan the chain from the
+            # cursor: a sub-call that absorbs a near-duplicate compacts the
+            # mesh, which can delete the nodes behind later station
+            # coordinates — iterating a stale list would feed the sub-calls
+            # points that no longer resolve to nodes.
+            while true
+                rest=_segment_chain_points3(out,s,q)
+                isempty(rest) && break
+                x=rest[1]
+                out=_recover_segment3(out,s,x,budget,max_inserts;
+                                      absorb_p=s==p ? absorb_p : true,
+                                      absorb_q=true)
                 s=x
             end
             # A cavity fill inside a later sub-segment can remove edges that
             # covered an earlier one, so the loop must re-verify coverage of
             # the whole original segment rather than only the remaining tail.
-            out=_recover_segment3(out,s,q,budget,max_inserts)
+            out=_recover_segment3(out,s,q,budget,max_inserts;
+                                  absorb_p=s==p ? absorb_p : true,
+                                  absorb_q=absorb_q)
             continue
         end
         out,_=insert_steiner3(out,hit)
@@ -4408,6 +4462,142 @@ function _segment_vertex_on_edge3(mesh::Mesh, na::Int32, nb::Int32)
             diagnostic.ok || continue
             return out
         end
+    end
+    return nothing
+end
+
+# A vertex may be absorbed — dropped from a cavity fill pool and deleted with
+# it — only when nothing outside the tetrahedra pins its coordinates: no
+# classified segment or triangle and no protected embedded cell.
+function _absorbable3(mesh::Mesh, v::Int32)
+    @inbounds for j in axes(mesh.segs,2)
+        (mesh.segs[1,j]==v || mesh.segs[2,j]==v) && return false
+    end
+    @inbounds for j in axes(mesh.tris,2)
+        (mesh.tris[1,j]==v || mesh.tris[2,j]==v ||
+         mesh.tris[3,j]==v) && return false
+    end
+    for f in _protected_faces3()
+        (f[1]==v || f[2]==v || f[3]==v) && return false
+    end
+    for e in _protected_edges3()
+        (e[1]==v || e[2]==v) && return false
+    end
+    return true
+end
+
+# Delete orphan vertex columns (vertices an absorb fill left unreferenced)
+# and renumber every id-keyed structure — cells plus the task-local
+# protected registry. A surviving reference to a deleted vertex pins stale
+# geometry, so any presence declines the compaction.
+function _compact_nodes3(mesh::Mesh, gone::Vector{Int32})
+    gset=Set{Int32}(gone)
+    protected_faces,protected_edges=_protected_cells!()
+    for f in protected_faces
+        (f[1] in gset || f[2] in gset || f[3] in gset) && return nothing
+    end
+    for e in protected_edges
+        (e[1] in gset || e[2] in gset) && return nothing
+    end
+    for t in axes(mesh.tets,2)
+        for i in 1:4
+            mesh.tets[i,t] in gset && return nothing
+        end
+    end
+    for j in axes(mesh.segs,2)
+        (mesh.segs[1,j] in gset || mesh.segs[2,j] in gset) && return nothing
+    end
+    for j in axes(mesh.tris,2)
+        for i in 1:3
+            mesh.tris[i,j] in gset && return nothing
+        end
+    end
+    n=size(mesh.coords,2)
+    keepcols=Int[i for i in 1:n if !(Int32(i) in gset)]
+    remap=zeros(Int32,n)
+    for (j,i) in enumerate(keepcols)
+        remap[i]=Int32(j)
+    end
+    tets=Matrix{Int32}(undef,4,size(mesh.tets,2))
+    @inbounds for t in axes(mesh.tets,2), i in 1:4
+        tets[i,t]=remap[mesh.tets[i,t]]
+    end
+    segsm=Matrix{Int32}(undef,2,size(mesh.segs,2))
+    @inbounds for j in axes(mesh.segs,2)
+        segsm[1,j]=remap[mesh.segs[1,j]]
+        segsm[2,j]=remap[mesh.segs[2,j]]
+    end
+    trism=Matrix{Int32}(undef,3,size(mesh.tris,2))
+    @inbounds for j in axes(mesh.tris,2)
+        trism[1,j]=remap[mesh.tris[1,j]]
+        trism[2,j]=remap[mesh.tris[2,j]]
+        trism[3,j]=remap[mesh.tris[3,j]]
+    end
+    out=Mesh(mesh.coords[:,keepcols]; segs=segsm, tris=trism, tets=tets,
+             seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag),
+             tet_tag=copy(mesh.tet_tag))
+    if !isempty(protected_edges)
+        remapped=Set{NTuple{2,Int32}}()
+        for e in protected_edges
+            push!(remapped,(remap[e[1]],remap[e[2]]))
+        end
+        empty!(protected_edges)
+        union!(protected_edges,remapped)
+    end
+    if !isempty(protected_faces)
+        remapped=Set{NTuple{3,Int32}}()
+        for f in protected_faces
+            push!(remapped,(remap[f[1]],remap[f[2]],remap[f[3]]))
+        end
+        empty!(protected_faces)
+        union!(protected_faces,remapped)
+    end
+    return out
+end
+
+# Dead-end escape for a sub-resolution station pair that no legal fill can
+# express while every interior vertex is retained: refill the pair's star
+# with the whole cluster of near-coincident cavity vertices removed from the
+# fill pool, dissolving all of their incident cells, then compact their
+# orphan columns out. The upstream vertex is preferred — the parent chain
+# iteration has already committed that station, so the survivor at q keeps
+# forward progress — but `absorb_na`/`absorb_nb` mark which endpoints are
+# interior stations rather than the caller's own constraint endpoints, and
+# `_absorbable3` declines pinned vertices.
+function _absorb_segment_pair3(mesh::Mesh, p, q, na::Int32, nb::Int32,
+                               absorb_na::Bool, absorb_nb::Bool)
+    sep=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+    radius=max(64*sep,4e-6)
+    mid=((p[1]+q[1])/2,(p[2]+q[2])/2,(p[3]+q[3])/2)
+    for (gone,stay,ok) in ((na,nb,absorb_na),(nb,na,absorb_nb))
+        (ok && _absorbable3(mesh,gone)) || continue
+        ntet=size(mesh.tets,2)
+        # Every near-coincident vertex crowding the pair has to dissolve with
+        # it — retaining one starves the fill's legality checks the same way.
+        # Their stars join the cavity so all incident cells dissolve rather
+        # than orphaning a reference.
+        absorb=Int32[gone]
+        @inbounds for v in Int32(1):Int32(size(mesh.coords,2))
+            (v==gone || v==stay) && continue
+            pv=_pt3(mesh,v)
+            hypot(pv[1]-mid[1],pv[2]-mid[2],pv[3]-mid[3])>radius && continue
+            _absorbable3(mesh,v) || continue
+            push!(absorb,v)
+        end
+        aset2=Set{Int32}(absorb)
+        in_cav=falses(ntet)
+        @inbounds for t in 1:ntet
+            in_cav[t]=(mesh.tets[1,t] in aset2 || mesh.tets[2,t] in aset2 ||
+                       mesh.tets[3,t] in aset2 || mesh.tets[4,t] in aset2 ||
+                       mesh.tets[1,t]==stay || mesh.tets[2,t]==stay ||
+                       mesh.tets[3,t]==stay || mesh.tets[4,t]==stay)
+        end
+        out=_refill_with_growth3(mesh,in_cav,na,nb;
+                                 require_edge=false,
+                                 absorb_verts=absorb)
+        out===nothing && continue
+        out=_compact_nodes3(out,absorb)
+        out===nothing || return out
     end
     return nothing
 end

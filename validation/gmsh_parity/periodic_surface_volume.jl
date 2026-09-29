@@ -26,15 +26,15 @@ const RELATIONS=(
     (dim=0,slave=6,master=5,tessella_pairs=1,gmsh_pairs=1,affine=AFFINE_X),
     (dim=0,slave=7,master=6,tessella_pairs=1,gmsh_pairs=1,affine=AFFINE_Y),
     (dim=0,slave=8,master=5,tessella_pairs=1,gmsh_pairs=1,affine=AFFINE_Y),
-    (dim=1,slave=2,master=4,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_X),
-    (dim=1,slave=3,master=1,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_Y),
-    (dim=1,slave=6,master=8,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_X),
-    (dim=1,slave=7,master=5,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_Y),
-    (dim=1,slave=10,master=9,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_X),
-    (dim=1,slave=11,master=10,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_Y),
-    (dim=1,slave=12,master=9,tessella_pairs=5,gmsh_pairs=4,affine=AFFINE_Y),
-    (dim=2,slave=4,master=6,tessella_pairs=25,gmsh_pairs=21,affine=AFFINE_X),
-    (dim=2,slave=5,master=3,tessella_pairs=25,gmsh_pairs=20,affine=AFFINE_Y),
+    (dim=1,slave=2,master=4,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_X),
+    (dim=1,slave=3,master=1,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_Y),
+    (dim=1,slave=6,master=8,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_X),
+    (dim=1,slave=7,master=5,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_Y),
+    (dim=1,slave=10,master=9,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_X),
+    (dim=1,slave=11,master=10,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_Y),
+    (dim=1,slave=12,master=9,tessella_pairs=4,gmsh_pairs=4,affine=AFFINE_Y),
+    (dim=2,slave=4,master=6,tessella_pairs=21,gmsh_pairs=21,affine=AFFINE_X),
+    (dim=2,slave=5,master=3,tessella_pairs=21,gmsh_pairs=20,affine=AFFINE_Y),
 )
 const EXPECTED_RELATIONS=Set(
     (relation.dim,relation.slave,relation.master) for relation in RELATIONS)
@@ -95,11 +95,11 @@ execution=execute_geo(GEO;mesh_dim=3)
 mesh=execution.mesh
 mesh===nothing && error("Tessella periodic volume produced no mesh")
 validate(mesh).ok || error("Tessella periodic volume mesh is invalid")
-nnodes(mesh)==125 && ntets(mesh)==384 || error(
+nnodes(mesh)==135 && ntets(mesh)==440 || error(
     "Tessella periodic volume size changed to $(nnodes(mesh)) nodes and " *
     "$(ntets(mesh)) tetrahedra")
 mesh_crc(mesh).sha==
-    "7290d425e4b3e881889b8b3bb6661a077b390cce3f1870d26487c5c6fcca55c0" ||
+    "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8" ||
     error("Tessella periodic volume mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -127,7 +127,7 @@ max_tessella_error==0 || error(
     "Tessella periodic volume coordinate error is $max_tessella_error")
 projected_crc=mixed_crc(projected)
 projected_crc.sha==
-    "1b3447d16ca7eea18b859b0ba8a0637a47bb859ce4ce327e113b9a1155dff7f5" ||
+    "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461" ||
     error("Tessella periodic volume projection CRC changed")
 
 function find_gmsh_api()
@@ -254,7 +254,7 @@ try
     projected_crcs[4.1]==Set([projected_crc.sha]) || error(
         "periodic volume MSH4 CRC depends on file mode")
     projected_crcs[2.2]==Set([
-        "7f47f5c9b09c210225421016d182b5516a0b7d51e8cefff66689645738d31291"]) ||
+        "b8251bd55dc17ab832e64c1cb976936fb22bdb4777587095334c6d4b3716546f"]) ||
         error("periodic volume MSH2 CRC changed or depends on file mode")
     max_roundtrip_error<=1e-12 || error(
         "Gmsh periodic volume round-trip error is $max_roundtrip_error")

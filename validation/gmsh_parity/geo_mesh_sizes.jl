@@ -34,10 +34,10 @@ native_sizes==EXPECTED_SIZES || error(
     "Tessella point-size constraints changed: $native_sizes")
 execution.model.physical_names==EXPECTED_PHYSICAL_NAMES || error(
     "Tessella point-size physical names changed")
-nnodes(mesh)==19 && ntris(mesh)==24 || error(
+nnodes(mesh)==18 && ntris(mesh)==24 || error(
     "Tessella point-size mesh size changed")
 mesh_crc(mesh).sha==
-    "b3f1bf410e917d050eacceab998b0fdf7b4cd61d1d9f263805b5120c06f1f4df" ||
+    "2b17b65bf07655c9f85d24d261375a828a5e0ec3af0f081bfe83ef0064f1d492" ||
     error("Tessella point-size mesh CRC changed")
 native_area=sum(triangle_area(
     node(mesh,mesh.tris[1,triangle]),node(mesh,mesh.tris[2,triangle]),
@@ -47,7 +47,7 @@ abs(native_area-1)<=32eps(Float64) || error(
 projected=model_to_mixed(execution.model,mesh,2,1)
 validate(projected).ok || error("Tessella point-size projection is invalid")
 mixed_crc(projected).sha==
-    "b7202dfa1cfb7469e7541c34e2b1bfae404c66f2462abc1953fa0b9374e5a010" ||
+    "48716f65a6a9ea3f11e20e74f107cc00aa2efc3bd487c38bc43f5d4c8c0bf2b5" ||
     error("Tessella point-size projection CRC changed")
 
 points_of_execution=execute_geo(POINTS_OF_GEO)
@@ -69,14 +69,14 @@ Tessella.Model._model_boundary(
     combined=true)==[2,3,4,5] || error(
         "Tessella CombinedBoundary cancellation changed")
 points_of_meshed=execute_geo(POINTS_OF_GEO;mesh_dim=3)
-nnodes(points_of_meshed.mesh)==81 && ntets(points_of_meshed.mesh)==243 || error(
+nnodes(points_of_meshed.mesh)==53 && ntets(points_of_meshed.mesh)==123 || error(
     "Tessella topology-derived Physical mesh size changed")
 points_of_projected=model_to_mixed(
     points_of_meshed.model,points_of_meshed.mesh,3,1)
 validate(points_of_projected).ok || error(
     "Tessella topology-derived Physical projection is invalid")
 mixed_crc(points_of_projected).sha==
-    "0226b78c2a3dc686c4b13849372e16eab8a1df2235c4e9417c9a087ee0df015c" ||
+    "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0" ||
     error("Tessella topology-derived Physical projection CRC changed")
 
 function native_spatial_mesh()
@@ -108,12 +108,12 @@ end
 spatial_mesh=native_spatial_mesh()
 validate(spatial_mesh).ok || error("Tessella spatial Point-size mesh is invalid")
 spatial_native_counts=native_quadrant_counts(spatial_mesh)
-nnodes(spatial_mesh)==49 && ntris(spatial_mesh)==72 || error(
+nnodes(spatial_mesh)==46 && ntris(spatial_mesh)==70 || error(
     "Tessella spatial Point-size mesh size changed")
-spatial_native_counts==[45,8,11,8] || error(
+spatial_native_counts==[44,9,10,7] || error(
     "Tessella spatial Point-size quadrant counts changed: $spatial_native_counts")
 mesh_crc(spatial_mesh).sha==
-    "b36070c0c394727d037d35cd0d1944e4807208cc265df4c34ad96c6da82ea1e2" ||
+    "7c2a5f2e374c6666349de1b9d7cbafeedb49c931179c279469d4dbc60f3b2245" ||
     error("Tessella spatial Point-size mesh CRC changed")
 spatial_native_area=sum(triangle_area(
     node(spatial_mesh,spatial_mesh.tris[1,triangle]),

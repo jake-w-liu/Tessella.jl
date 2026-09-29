@@ -502,7 +502,7 @@ try
         elseif case.name == :smoother_algorithm_state
             tm.meshing.smoothing[(2, 1)] == 4 || error("smoothing record lost")
             tm.meshing.algorithm[(2, 1)] == 6 || error("algorithm record lost")
-            tm.meshing.size_from_boundary[(2, 1)] ||
+            tm.meshing.size_from_boundary[(2, 1)] != 0 ||
                 error("size-from-boundary record lost")
             1 in tm.meshing.degenerated || error("degenerated flag lost")
             get(tm.meshing.reverse, (1, 1), false) ||

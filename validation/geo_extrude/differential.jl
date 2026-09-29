@@ -251,6 +251,16 @@ const CASES = (
     """,
 )
 
+# Rotational `Extrude` cases compare coordinates bit-for-bit on platforms
+# where Gmsh's C-library `sin`/`cos` agrees with the GmshLibm shims. The
+# Windows gmsh-4.15.2 build's internal trig differs from both msvcrt and
+# Julia's openlibm on non-representable angles (observed residuals
+# 2.0e-21 on cos(Pi/2)-scale components, 2.2e-16 in case 25's Gram-Schmidt
+# frame), so those cases compare at COORD_ATOL instead of bit-for-bit —
+# the same convention as validation/geo_transforms.
+const ULP_CASES = Set((14, 16, 18, 19, 20, 22, 23, 24, 25, 26))
+const COORD_ATOL = 64 * eps(1.0)
+
 const GMSH_EXECUTABLE = find_gmsh_executable()
 const GMSH_CLI_VERSION = strip(read(`$GMSH_EXECUTABLE --version`, String))
 (GMSH_CLI_VERSION == TARGET_GMSH_VERSION ||
@@ -300,10 +310,16 @@ try
             for tag in sort!(collect(keys(model.points)))
                 expected = gmsh.model.getValue(0, tag, Float64[])
                 actual = collect(model.points[tag])
-                all(reinterpret(UInt64, actual) .==
-                    reinterpret(UInt64, expected)) || error(
-                    "case $case_index Point($tag) differs: " *
-                    "Tessella=$actual Gmsh=$expected")
+                if case_index in ULP_CASES
+                    all(abs.(actual .- expected) .<= COORD_ATOL) || error(
+                        "case $case_index Point($tag) differs: " *
+                        "Tessella=$actual Gmsh=$expected")
+                else
+                    all(reinterpret(UInt64, actual) .==
+                        reinterpret(UInt64, expected)) || error(
+                        "case $case_index Point($tag) differs: " *
+                        "Tessella=$actual Gmsh=$expected")
+                end
                 samples[] += 1
             end
             for tag in sort!(collect(keys(model.curves)))
@@ -354,7 +370,9 @@ try
     end
 
     println("GEO_EXTRUDE_DIFFERENTIAL_OK gmsh=$runtime_version " *
-            "cases=$(length(CASES)) samples=$(samples[])")
+            "cases=$(length(CASES)) samples=$(samples[]) " *
+            "bit_exact=$(length(CASES) - length(ULP_CASES))/" *
+            "$(length(CASES))")
 finally
     gmsh.finalize()
 end
