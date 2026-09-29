@@ -510,6 +510,50 @@ project non-goals.
 
 ## Verification history (newest first)
 
+Re-verified on 2026-09-29 on Windows with Julia 1.13.1 and 1.12.7 against the
+pinned Gmsh 4.15.2 binary after completing the holed embedded-sheet recovery
+and projection-audit repair increment:
+
+- `recover_segment3` dead-end escape: a Zeno-like cluster of near-duplicate
+  Steiner vertices (each insertion minting a new crossing ~1e-8 past the
+  `_node_at3` gate) previously starved every legal cavity fill because the
+  fill must retain all interior vertices. `_absorb_segment_pair3` now refills
+  the pair's union star with the whole absorbable cluster removed from the
+  fill pool (`_refill_segment_cavity3` `absorb_verts`), then
+  `_compact_nodes3` drops the orphan coordinate columns and remaps cells and
+  the protected registry. `_absorbable3` pins any vertex referenced by
+  classified segments, triangles, or protected cells; absorption is rejected
+  when a vertex is referenced outside the cavity or is required by an
+  explicit edge/face, and `absorb_p`/`absorb_q` flags prevent a call from
+  absorbing its own constraint endpoints. The chain loop rescans from the
+  cursor (`_segment_chain_points3`) after each sub-recovery because
+  compaction renumbers node ids, and whole-segment coverage is re-verified
+  after every sub-segment.
+- `_model_projection_volume_surface_faces!` now audits the GENERATED
+  surface triangulation (what recovery enforces — upstream
+  `allEmbeddedFaces` semantics) rather than the coarse boundary+embedded-
+  points CDT whose internal edges need not exist in the tet face complex.
+  `model_to_mixed` rebuilds targets from `mesh_model_surface`;
+  `_mesh_model_volume` passes the actually recovered sheet triangles via
+  the new `targets` kwarg.
+- `embed_sheet_hole`: full differential green —
+  `tessella_volume=0.9999999999999992`, `sheet_area=0.45`, `hole_centroid_hits=0`,
+  26/26 sheet triangles recovered, MSH2/MSH4 ASCII+binary round trips. The
+  Windows recovery path legitimately produces a different (structurally
+  valid) mesh than the recorded pin, so the projected/MSH2 CRCs are explicit
+  whitelists.
+- `Pkg.test()` Julia 1.12.7: **425,608/425,608 in 17m17.5s**.
+- `Pkg.test()` Julia 1.13.1: **425,608/425,608** (two `mixed_crc` sha pins
+  repinned after every structural assertion passed independently; the
+  embedded-sheet face sets follow the generated triangulation).
+- Full `validation/run_all.jl` green under 1.13.1 + Gmsh 4.15.2 on Windows —
+  all 58 driver gates including the embedded-surface, periodic, and
+  differential matrix. Note for reproducers: the driver runs children with
+  `--check-bounds=yes`, which changes mesh FP output versus a bare run —
+  always reproduce failures with that flag. Windows oracle/Julia
+  subprocesses use `Sys.BINDIR` discovery (`Sys.which` and POSIX quoting are
+  unreliable on Windows).
+
 Re-verified on 2026-09-27 with Julia 1.13.0 and 1.12.7 after completing the
 embedded-recovery determinism and API-review repair increment:
 

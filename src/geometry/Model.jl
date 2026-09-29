@@ -4595,28 +4595,20 @@ end
 
 function _model_projection_volume_surface_faces!(
     claimed_faces::Set{NTuple{3,Int32}},m::GeoModel,mesh::Mesh,
-    surface::Int,caller::AbstractString)
-    targets=NTuple{3,NTuple{3,Float64}}[]
-    loops=m.surfaces[surface]
-    if length(loops)==1
-        point_tags=_loop_points(m,only(loops))
-        length(point_tags)>=3 || throw(ArgumentError(
-            "$caller: Surface[$surface] needs at least three points"))
-        coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
-        for index in 2:(length(coordinates)-1)
-            push!(targets,(coordinates[1],coordinates[index],
-                           coordinates[index+1]))
-        end
-    else
-        surface_mesh=_model_planar_surface_mesh(
-            m,surface,caller;include_embeddings=true)
-        for cell in 1:ntris(surface_mesh)
-            push!(targets,ntuple(slot->begin
-                node=surface_mesh.tris[slot,cell]
-                (surface_mesh.coords[1,node],surface_mesh.coords[2,node],
-                 surface_mesh.coords[3,node])
-            end,3))
-        end
+    surface::Int,caller::AbstractString;
+    targets::Union{Nothing,AbstractVector{NTuple{3,NTuple{3,Float64}}}}=nothing)
+    if targets===nothing
+        # Embedded surfaces are recovered through their GENERATED mesh —
+        # upstream `allEmbeddedFaces` maps every sheet triangle onto a chain
+        # of tetrahedron faces — so the audit replays that same
+        # triangulation rather than an unrelated coarse CDT whose internal
+        # edges need not exist in the volume face complex. `model_to_mixed`
+        # remeshes surfaces without a size field, matching this call;
+        # `mesh_model_volume` passes the recovered triangles explicitly.
+        generated=mesh_model_surface(m,surface)
+        targets=[ntuple(slot->_model_mesh_coordinate(
+                     generated,generated.tris[slot,cell]),3)
+                 for cell in 1:ntris(generated)]
     end
     local_faces=Set{NTuple{3,Int32}}()
     output=NTuple{3,Int32}[]
@@ -6638,6 +6630,11 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     point_nodes=Dict{Int,Int32}()
     curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
     final_boundary_faces=Set(first(boundary_faces(mesh.tets)))
+    sheet_targets=Dict{Int,Vector{NTuple{3,NTuple{3,Float64}}}}()
+    for (sheet,a,b,c) in sheets
+        push!(get!(sheet_targets,sheet,NTuple{3,NTuple{3,Float64}}[]),
+              (a,b,c))
+    end
     for surface_tag in surface_tags
         nested_points=surface_embedded_points[surface_tag]
         nested_curves=surface_embedded_curves[surface_tag]
@@ -6648,7 +6645,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                 m,mesh,surface_tag,caller)
         else
             _model_projection_volume_surface_faces!(
-                Set{NTuple{3,Int32}}(),m,mesh,surface_tag,caller)
+                Set{NTuple{3,Int32}}(),m,mesh,surface_tag,caller;
+                targets=get(sheet_targets,surface_tag,nothing))
         end
         nodes,edges=_model_projection_face_topology(faces)
         for point in nested_points
