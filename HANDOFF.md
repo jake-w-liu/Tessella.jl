@@ -26,7 +26,57 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Multi-entity `execute_geo` generation** — the `mesh_dim=2`/`mesh_dim=3`
+**Curved `Curve In Volume` embedding and classification** — the
+`Curve{t} In Volume{v}` / `Curve{t} In Surface{s}`-in-volume constraints
+no longer require `Line` curves. `mesh_model_volume` seeds the whole
+stored 1-D discretization of an embedded non-`Line` curve as interior
+points (upstream `restoreEmbeddedEdges` semantics — every graded chain
+node is a real vertex upfront, lazily graded through
+`_volume_embedded_curve_params!` when a direct `mesh_model_volume` call
+has no `Mesh 1` pass). Embedded sheets recover **before** embedded
+curves: a nested curve's links are already sheet edges (bitwise-identical
+evaluator coordinates), so face recovery realizes them and the per-link
+loop degenerates to a coverage audit — previously line-first recovery
+inserted chord-Steiner nodes ~1e-7 from sheet vertices that split sheet
+edges into degenerate stubs. `recover_segment3` still runs per link and
+registers its realized edges in the protected-cell registry. Closed
+curves (`a==b`) are supported end to end: the chain wraps to the shared
+vertex, the duplicated `t1` endpoint is dropped from seeding, and all
+three `model_to_mixed` projection paths guard the far-point map and emit
+the wraparound edge once. Tet-mesh curve classification was rewritten
+around `_segment_chain3` — a BFS corridor path through tet edges on each
+straight chord — so subdivision Steiner nodes ride the chain naturally
+and foreign/near-duplicate corridor vertices are simply skipped;
+`_curve_owned_coordinates` masks sibling-curve vertices per curve, and a
+sheet-nested curve prefers its host sheet's face-edge complex (tet-edge
+fallback registers the realized edges into the sheet complex for the
+nested-coverage validator). Self-overlapping closed curves emit each
+covered edge once per curve (`edge_owners`).
+
+Three `Mesh3D` numerical-stability repairs underneath: `_snap_to_plane3`
+keeps vertices already within interpolation noise of the plane (per-
+triangle Float64 planes differ ~1e-15, so re-snapping walked shared
+vertices off exact model coordinates and defeated bitwise dedupe);
+`recover_triangle3` snaps crossing candidates along the dominant normal
+axis so axis-aligned boundary coordinates stay bit-exact (a full normal
+projection had pushed a vertex on a boundary face ~2e-31 outside the
+domain, producing a certified boundary-piercing edge); and both
+`_segment_face_hit`/`_segment_edge_hit` skip crossings within 1e-6 of an
+existing on-segment station, eliminating a Zeno cascade that minted
+sub-resolution twin vertices a failing cavity refill could not express.
+A pocket-seed candidate near an existing vertex (1e-9) no longer inserts
+a duplicate.
+
+Known limitation (pre-existing on HEAD, reproduced on the pre-change
+worktree): the cavity refill can starve on coplanar vertex soup — e.g. a
+closed spline inside a *square* embedded sheet on a plane dense with
+sheet/curve vertices ends in a `recover_segment3`/`recover_triangle3`
+fill failure; the same square sheet alone, open curves on it, and closed
+curves on triangular sheets all pass. Files: `src/geometry/Model.jl`,
+`src/meshing/Mesh3D.jl`, `test/geometry/model_test.jl` (six new embedded-
+curve fixtures).
+
+Previous increment (for context): **multi-entity `execute_geo` generation** — the `mesh_dim=2`/`mesh_dim=3`
 keyword path no longer blocks on multiple remaining surfaces/volumes.
 A single entity keeps the established fast path (`mesh_model_surface` /
 `mesh_model_volume` + homology, output unchanged); multiple entities now
@@ -42,7 +92,7 @@ OCC volumes merge for `Mesh 3`. Files: `src/geometry/GeoExec.jl`,
 `test/geometry/geo_mesh_dim_test.jl` (new testset),
 `validation/gmsh_parity/curved_surface.jl` (merged `mesh_dim=2` run).
 
-Previous increment (for context): **curved-boundary planar surface meshing** — the general planar-surface
+Earlier increment (for context): **curved-boundary planar surface meshing** — the general planar-surface
 path no longer requires `Line` boundaries. `_surface_pslg` evaluates each
 non-`Line` boundary and embedded curve into an ordered subdivision chain
 (the stored `curve_params` native-parameter list when present — bitwise
@@ -85,8 +135,9 @@ rejected; `model_is_inside` honors the arc bulge. Gmsh 4.15.2
 differential (`validation/gmsh_parity/curved_surface.{geo,jl}`,
 registered): disk/annulus/segment triangulate with comparable counts
 (100/86/11 vs Gmsh 108/82/11) and the periodic pair's 23 Gmsh node pairs
-agree within 1.4e-9. Remaining gates intentionally kept: non-planar
-surfaces and `Curve In Volume` line gates (separate epic). Files:
+agree within 1.4e-9. Remaining gate intentionally kept: non-planar
+surfaces (`Curve In Volume` curved support landed in the increment
+above). Files:
 `src/geometry/Model.jl` (chains, ownership masks, native sync),
 `src/geometry/ModelMeshingAttributes.jl` (native forced/param_sizes),
 `src/geometry/ModelMesh1D.jl` (`_model_curve_l5` caller frame),

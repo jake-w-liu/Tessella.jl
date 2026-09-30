@@ -295,6 +295,16 @@ const CASES = (
      Point(9) = {0.37,0.51,0,0.1};
      Point{9} In Surface{1};
      """),
+    (name=:curve_in_volume_arc, mode=:curve_in_volume, dim=3,
+     # A circular arc bulges off its endpoint chord — a straight-segment
+     # embedding would carry zero off-chord nodes on the curve.
+     source=BOX * """
+     Point(9)={0.4,0.5,0.45,0.2};
+     Point(10)={0.5,0.5,0.55,0.2};
+     Point(11)={0.6,0.5,0.45,0.2};
+     Circle(13)={9,10,11};
+     Curve{13} In Volume{1};
+     """),
     (name=:err_bad_surface_corners, mode=:error, dim=0,
      source=SQUARE * "Transfinite Surface{1} = {1,2};\n",
      expect="corner"),
@@ -508,6 +518,46 @@ function check_embed_point(tmesh, present, name)
     return nothing
 end
 
+# `Curve{c} In Volume{v}`: an embedded curved curve must be realized as an
+# edge chain following the curve — nodes strictly off the endpoint chord.
+# Gmsh reports them via `getNodes(1, c)`; Tessella via the curve's projected
+# line cells in `model_to_mixed`.
+function check_curve_in_volume_arc(tmesh, tmodel, name)
+    p = (0.4, 0.5, 0.45); q = (0.6, 0.5, 0.45)
+    function off_chord(x)
+        vx, vy, vz = q[1]-p[1], q[2]-p[2], q[3]-p[3]
+        wx, wy, wz = x[1]-p[1], x[2]-p[2], x[3]-p[3]
+        cx = vy*wz - vz*wy; cy = vz*wx - vx*wz; cz = vx*wy - vy*wx
+        return hypot(cx, cy, cz) > 1e-6
+    end
+    gmsh_tags, gmsh_coords, _ = gmsh.model.mesh.getNodes(1, 13, true)
+    gmsh_off = count(
+        i -> off_chord(Tuple(gmsh_coords[3i-2:3i])), eachindex(gmsh_tags))
+    gmsh_off >= 1 || error(
+        "$name: Gmsh carried no off-chord node on Curve[13] " *
+        "(nodes=$(length(gmsh_tags)))")
+    mixed = model_to_mixed(tmodel, tmesh, 3, 1)
+    tessella_off = 0
+    tessella_cells = 0
+    for (block, ents) in zip(mixed.blocks, mixed.elementary_entities)
+        block.msh == 1 || continue
+        for cell in 1:size(block.nodes, 2)
+            ents[cell] == 13 || continue
+            tessella_cells += 1
+            for s in (1, 2)
+                off_chord(Tuple(mixed.coords[:, block.nodes[s, cell]])) &&
+                    (tessella_off += 1)
+            end
+        end
+    end
+    tessella_cells >= 1 ||
+        error("$name: Tessella projected no Curve[13] line cells")
+    tessella_off >= 1 || error(
+        "$name: Tessella carried no off-chord node on Curve[13] " *
+        "(cells=$tessella_cells)")
+    return nothing
+end
+
 results = String[]
 gaps = String[]
 
@@ -569,6 +619,8 @@ try
         elseif case.mode == :embed
             check_embed_point(t.execution.mesh,
                               case.name == :embedded_kept, case.name)
+        elseif case.mode == :curve_in_volume
+            check_curve_in_volume_arc(t.execution.mesh, tm, case.name)
         elseif case.mode == :recombine_gap
             tm.meshing.recombine[(2, 1)] == 30.0 || error(
                 "$(case.name): Tessella lost the Recombine 30 constraint")

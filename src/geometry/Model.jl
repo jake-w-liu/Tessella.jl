@@ -29,7 +29,7 @@ using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill,
                 _protected_cells!, _sorted_face3,
-                _on_segment3, _pt3
+                _on_segment3, _pt3, _segment_chain3
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
@@ -2976,14 +2976,29 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh::Mesh,curve::Int,
     sort!(entries;by=first)
     length(entries)>=2 || throw(ErrorException(
         "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
-    first(entries)[1]-t0<=parameter_tolerance &&
-        t1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
-            "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
+    if a==b
+        # A closed curve's shared vertex classifies at `t0`; the loop closes
+        # when the last chain node's edge reaches back to it.
+        first(entries)[1]-t0<=parameter_tolerance || throw(ErrorException(
+            "$caller: Curve[$curve] mesh chain does not reach its start vertex"))
+    else
+        first(entries)[1]-t0<=parameter_tolerance &&
+            t1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
+                "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
+    end
     for index in 1:(length(entries)-1)
         first_node=Int32(entries[index][2])
         second_node=Int32(entries[index+1][2])
         first_node!=second_node || throw(ErrorException(
             "$caller: Curve[$curve] repeats a mesh node"))
+        key=first_node<second_node ? (first_node,second_node) :
+                                     (second_node,first_node)
+        key in eligible_edges || throw(ErrorException(
+            "$caller: Curve[$curve] nodes do not form a mesh-edge chain"))
+    end
+    if a==b
+        first_node=Int32(entries[end][2])
+        second_node=Int32(entries[1][2])
         key=first_node<second_node ? (first_node,second_node) :
                                      (second_node,first_node)
         key in eligible_edges || throw(ErrorException(
@@ -3823,6 +3838,9 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
     line_cells=NTuple{2,Int32}[]
     line_entities=Int32[]
     claimed_edges=Set{Tuple{Int32,Int32}}()
+    # A closed two-node loop emits the same edge from both its links — only
+    # an edge owned by a *different* curve conflicts.
+    edge_owners=Dict{Tuple{Int32,Int32},Int32}()
     # Vertices a sibling curve owns outright are excluded per curve — at a
     # boundary pinch the two sides' subdivision vertices sit inside the
     # classification tolerance without sharing an edge.
@@ -3844,15 +3862,20 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
         start_point,stop_point=m.curves[curve]
         _model_projection_point!(
             point_nodes,node_points,start_point,entries[1][2],caller)
-        _model_projection_point!(
+        closed=start_point==stop_point
+        closed || _model_projection_point!(
             point_nodes,node_points,stop_point,entries[end][2],caller)
-        for index in 1:(length(entries)-1)
+        for index in 1:(closed ? length(entries) : length(entries)-1)
             first_node=Int32(entries[index][2])
-            second_node=Int32(entries[index+1][2])
+            second_node=Int32(entries[index<length(entries) ? index+1 : 1][2])
             edge=first_node<second_node ? (first_node,second_node) :
                                           (second_node,first_node)
-            edge in claimed_edges && throw(ArgumentError(
-                "$caller: boundary edge $edge belongs to multiple model curves"))
+            owner=get(edge_owners,edge,Int32(0))
+            (owner==Int32(0) || owner==Int32(curve)) ||
+                throw(ArgumentError(
+                    "$caller: boundary edge $edge belongs to multiple model curves"))
+            owner==Int32(0) || continue
+            edge_owners[edge]=Int32(curve)
             push!(claimed_edges,edge)
             push!(line_cells,(first_node,second_node))
             push!(line_entities,Int32(curve))
@@ -3871,15 +3894,20 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
         start_point,stop_point=m.curves[curve]
         _model_projection_point!(
             point_nodes,node_points,start_point,entries[1][2],caller)
-        _model_projection_point!(
+        closed=start_point==stop_point
+        closed || _model_projection_point!(
             point_nodes,node_points,stop_point,entries[end][2],caller)
-        for index in 1:(length(entries)-1)
+        for index in 1:(closed ? length(entries) : length(entries)-1)
             first_node=Int32(entries[index][2])
-            second_node=Int32(entries[index+1][2])
+            second_node=Int32(entries[index<length(entries) ? index+1 : 1][2])
             edge=first_node<second_node ? (first_node,second_node) :
                                           (second_node,first_node)
-            edge in claimed_edges && throw(ArgumentError(
-                "$caller: mesh edge $edge belongs to multiple model curves"))
+            owner=get(edge_owners,edge,Int32(0))
+            (owner==Int32(0) || owner==Int32(curve)) ||
+                throw(ArgumentError(
+                    "$caller: mesh edge $edge belongs to multiple model curves"))
+            owner==Int32(0) || continue
+            edge_owners[edge]=Int32(curve)
             push!(claimed_edges,edge)
             push!(line_cells,(first_node,second_node))
             push!(line_entities,Int32(curve))
@@ -3899,7 +3927,11 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
     for curve in all_curve_tags
         entries=curve_entries[curve]
         if length(entries)>2
-            for index in 2:(length(entries)-1)
+            # A closed curve's last entry is interior — the chain's tail
+            # wraps back to its shared start vertex.
+            stop=m.curves[curve][1]==m.curves[curve][2] ?
+                length(entries) : length(entries)-1
+            for index in 2:stop
                 node=entries[index][2]
                 owner=node_entities[node]
                 if owner[1]==2
@@ -4290,10 +4322,111 @@ function model_to_mixed(m::GeoModel,parts::AbstractVector)
     return output
 end
 
+# Classify the tet-mesh nodes a non-`Line` curve occupies. Three admission
+# channels mirror the realized chain: stored-parameter nodes bitwise (the
+# volume seeds and boundary parts evaluate the same coordinates), link-
+# interior subdivision vertices on each straight chord (recovery splits a
+# link into several tet edges — upstream emits the subdivided elements as
+# the embedded curve's mesh), and `model_closest_point`-projected nodes at
+# the projector's tolerance (caller-supplied meshes may carry the curve at
+# a different sampling). Consecutive sorted entries must be tet-edge
+# adjacent, so foreign nodes admitted by tolerance surface immediately.
+function _model_projection_tet_curve_nodes_curved(
+        m::GeoModel,mesh::Mesh,curve::Int,tet_edges,eligible,
+        atol::Float64,caller::AbstractString;
+        edges=tet_edges)
+    a,b=m.curves[curve];p=m.points[a];q=m.points[b]
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    span=t1-t0
+    (isfinite(span) && span>0) || throw(ArgumentError(
+        "$caller: Curve[$curve] has an unusable parameter range"))
+    scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
+    points=NTuple{3,Float64}[]
+    link_params=Float64[]
+    params=get(m.curve_params,curve,nothing)
+    if params===nothing || isempty(params)
+        params=[t0,t1]
+    end
+    for u in params
+        point=_periodic_curve_point(m,curve,u,caller)
+        all(isfinite,point) || throw(ArgumentError(
+            "$caller: Curve[$curve] evaluation is not " *
+            "Float64-representable"))
+        scale=max(scale,abs(point[1]),abs(point[2]),abs(point[3]))
+        push!(points,point);push!(link_params,u)
+    end
+    closed=a==b
+    if closed && length(points)>1 && link_params[end]>=t1
+        # A closed stored discretization can keep the duplicated hi endpoint;
+        # the realized loop closes through the shared vertex instead.
+        pop!(points);pop!(link_params)
+    end
+    # Endpoints weld to the model vertices like the emitting paths do. A
+    # closed curve's last stored parameter is interior — the loop closes
+    # through a wraparound link back to the shared vertex.
+    points[1]=p
+    closed || (points[end]=q)
+    geometric_tolerance=max(atol,128eps(Float64)*scale)
+    link_tolerance=max(1e-9,geometric_tolerance)
+    nlinks=closed ? length(points) : length(points)-1
+    # Each stored link is realized as a straight-chord edge chain. The BFS
+    # corridor path is the chain itself — vertices seeded off the corridor
+    # (near-duplicate Steiner nodes, foreign-corridor strays) are simply not
+    # on it, matching upstream's per-element chord constraint.
+    entries=Tuple{Float64,Int}[]
+    @inbounds for i in 1:nlinks
+        j=closed && i==length(points) ? 1 : i+1
+        P=points[i];Q=points[j]
+        vx=Q[1]-P[1];vy=Q[2]-P[2];vz=Q[3]-P[3]
+        L2=muladd(vx,vx,muladd(vy,vy,vz*vz))
+        L2>0 || continue
+        u_i=link_params[i];u_j=j==1 ? t1 : link_params[j]
+        chain=_segment_chain3(mesh,P,Q,edges;
+                              atol=link_tolerance,eligible=eligible)
+        chain===nothing && throw(ErrorException(
+            "$caller: Curve[$curve] nodes do not form a mesh-edge chain"))
+        isempty(entries) && push!(entries,(u_i,Int(chain[1])))
+        # Interior members interpolate the link's parameter span over the
+        # chord; the far endpoint keeps its stored parameter. A closed
+        # loop's closing endpoint is the shared start vertex — already the
+        # first entry — so its link stops one member short.
+        for k in 2:length(chain)
+            (closed && i==nlinks && k==length(chain)) && break
+            node=Int(chain[k])
+            u=k==length(chain) ? u_j :
+                u_i+(((mesh.coords[1,node]-P[1])*vx+
+                      (mesh.coords[2,node]-P[2])*vy+
+                      (mesh.coords[3,node]-P[3])*vz)/L2)*(u_j-u_i)
+            push!(entries,(u,node))
+        end
+    end
+    length(entries)>=2 || throw(ErrorException(
+        "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
+    return entries
+end
+
 function _model_projection_tet_curve_nodes(
     m::GeoModel,mesh::Mesh,curve::Int,tet_edges,
-    caller::AbstractString)
-    _model_require_line_curve(m,curve,caller,"embedded-curve classification")
+    caller::AbstractString;
+    owned::Union{Nothing,Dict{NTuple{3,Float64},Set{Int}}}=nothing,
+    edges=tet_edges)
+    if _curve_type(m,curve)!==:line
+        first_pass=owned===nothing ? trues(nnodes(mesh)) :
+            _curve_chain_eligible(mesh,trues(nnodes(mesh)),owned,curve)
+        try
+            return _model_projection_tet_curve_nodes_curved(
+                m,mesh,curve,tet_edges,first_pass,1e-12,caller;edges=edges)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            eligible,masked=_periodic_curve_eligible_nodes(m,mesh,curve)
+            masked || rethrow()
+            owned===nothing ||
+                (eligible=_curve_chain_eligible(mesh,eligible,owned,curve))
+            return _model_projection_tet_curve_nodes_curved(
+                m,mesh,curve,tet_edges,eligible,1e-12,caller;edges=edges)
+        end
+    end
     start_point,stop_point=m.curves[curve]
     first_coordinate=m.points[start_point]
     last_coordinate=m.points[stop_point]
@@ -4306,35 +4439,29 @@ function _model_projection_tet_curve_nodes(
     length1=sqrt(length2)
     scale=max(1.0,hypot(first_coordinate...),hypot(last_coordinate...))
     geometric_tolerance=max(1e-12,128eps(Float64)*scale)
-    parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
+    # The chord's realized tet-edge path is the chain — corridor vertices
+    # that are not on it (near-duplicate Steiner nodes, foreign strays) are
+    # simply skipped, matching upstream's per-element chord constraint.
+    eligible=owned===nothing ? nothing :
+        _curve_chain_eligible(mesh,trues(nnodes(mesh)),owned,curve)
+    chain=_segment_chain3(mesh,first_coordinate,last_coordinate,edges;
+                          atol=max(geometric_tolerance,1e-9),
+                          eligible=eligible)
+    chain===nothing && throw(ArgumentError(
+        "$caller: Curve[$curve] nodes do not form a tetrahedron-edge chain"))
     entries=Tuple{Float64,Int}[]
-    @inbounds for node in 1:nnodes(mesh)
-        wx=mesh.coords[1,node]-first_coordinate[1]
-        wy=mesh.coords[2,node]-first_coordinate[2]
-        wz=mesh.coords[3,node]-first_coordinate[3]
-        cross_norm=hypot(vy*wz-vz*wy,vz*wx-vx*wz,vx*wy-vy*wx)
-        cross_norm<=geometric_tolerance*length1 || continue
-        parameter=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
-        -parameter_tolerance<=parameter<=1+parameter_tolerance || continue
-        push!(entries,(clamp(parameter,0.0,1.0),node))
+    push!(entries,(0.0,Int(chain[1])))
+    @inbounds for k in 2:length(chain)
+        node=Int(chain[k])
+        parameter=k==length(chain) ? 1.0 :
+            clamp(muladd(mesh.coords[1,node]-first_coordinate[1],vx,
+                  muladd(mesh.coords[2,node]-first_coordinate[2],vy,
+                         (mesh.coords[3,node]-first_coordinate[3])*vz))/length2,
+                  0.0,1.0)
+        push!(entries,(parameter,node))
     end
-    sort!(entries;by=entry->(entry[1],entry[2]))
     length(entries)>=2 || throw(ArgumentError(
         "$caller: Curve[$curve] is not represented by two mesh nodes"))
-    first(entries)[1]<=parameter_tolerance &&
-        1-last(entries)[1]<=parameter_tolerance || throw(ArgumentError(
-        "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
-    for index in 1:(length(entries)-1)
-        first_parameter,first_raw=entries[index]
-        second_parameter,second_raw=entries[index+1]
-        second_parameter-first_parameter>parameter_tolerance || throw(ArgumentError(
-            "$caller: Curve[$curve] maps multiple mesh nodes to one parameter"))
-        first_node=Int32(first_raw);second_node=Int32(second_raw)
-        edge=first_node<second_node ? (first_node,second_node) :
-                                      (second_node,first_node)
-        edge in tet_edges || throw(ArgumentError(
-            "$caller: Curve[$curve] nodes do not form a tetrahedron-edge chain"))
-    end
     return entries
 end
 
@@ -5533,26 +5660,65 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     line_cells=NTuple{2,Int32}[]
     line_entities=Int32[]
     claimed_edges=Set{NTuple{2,Int32}}()
-    for curve in curve_tags
+    # A closed two-node loop emits the same edge from both its links — only
+    # an edge owned by a *different* curve conflicts.
+    edge_owners=Dict{NTuple{2,Int32},Int32}()
+    # Foreign-curve-owned vertices are not chain candidates — two distinct
+    # curves can pinch within the chain audit's projection tolerance.
+    curve_owned=_curve_owned_coordinates(m,curve_tags,caller)
+    function classify_curve!(curve,chain_edges)
         entries=_model_projection_tet_curve_nodes(
-            m,mesh,curve,tet_edges,caller)
+            m,mesh,curve,tet_edges,caller;
+            owned=curve_owned,edges=chain_edges)
+        closed=m.curves[curve][1]==m.curves[curve][2]
+        # Resolve the whole edge list and audit foreign ownership before
+        # committing anything — a nested curve retries on the tet-edge
+        # complex when its sheet chain does not conform, and a mid-loop
+        # throw must not leave this curve's cells half-committed.
+        cells=NTuple{2,Int32}[]
+        # A self-overlapping curve (coincident links, digon close) covers the
+        # same edge twice parametrically — it is still one element.
+        seen=Set{NTuple{2,Int32}}()
+        for index in 1:(closed ? length(entries) : length(entries)-1)
+            first_node=Int32(entries[index][2])
+            second_node=Int32(entries[index<length(entries) ?
+                                          index+1 : 1][2])
+            edge=first_node<second_node ? (first_node,second_node) :
+                                          (second_node,first_node)
+            edge in seen && continue
+            owner=get(edge_owners,edge,Int32(0))
+            (owner==Int32(0) || owner==Int32(curve)) ||
+                throw(ArgumentError(
+                    "$caller: mesh edge $edge belongs to multiple model curves"))
+            push!(seen,edge)
+            owner==Int32(0) && push!(cells,(first_node,second_node))
+        end
         curve_entries[curve]=entries
         start_point,stop_point=m.curves[curve]
         _model_projection_point!(
             point_nodes,node_points,start_point,entries[1][2],caller)
-        _model_projection_point!(
+        closed || _model_projection_point!(
             point_nodes,node_points,stop_point,entries[end][2],caller)
-        for index in 1:(length(entries)-1)
-            first_node=Int32(entries[index][2])
-            second_node=Int32(entries[index+1][2])
-            edge=first_node<second_node ? (first_node,second_node) :
-                                          (second_node,first_node)
-            edge in claimed_edges && throw(ArgumentError(
-                "$caller: mesh edge $edge belongs to multiple model curves"))
+        for edge_cell in cells
+            edge=edge_cell[1]<edge_cell[2] ? edge_cell :
+                                           (edge_cell[2],edge_cell[1])
+            edge_owners[edge]=Int32(curve)
             push!(claimed_edges,edge)
-            push!(line_cells,(first_node,second_node))
+            push!(line_cells,edge_cell)
             push!(line_entities,Int32(curve))
         end
+        return nothing
+    end
+    # Curves nested in an embedded surface defer until that sheet's faces are
+    # classified — their realized chain must follow the sheet's own edges.
+    nested_in=Dict{Int,Int}()
+    deferred_curves=Int[]
+    for surface in surface_tags, curve in surface_embedded_curves[surface]
+        nested_in[curve]=surface
+    end
+    for curve in curve_tags
+        haskey(nested_in,curve) && (push!(deferred_curves,curve); continue)
+        classify_curve!(curve,tet_edges)
     end
     for point in point_tags
         haskey(point_nodes,point) && continue
@@ -5598,6 +5764,33 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         throw(ArgumentError(
             "$caller: explicit Volume[$volume] shell does not exactly cover " *
             "the tetrahedron boundary — $detail"))
+    end
+    for curve in deferred_curves
+        sheet=nested_in[curve]
+        haskey(surface_edges,sheet) || throw(ArgumentError(
+            "$caller: embedded Surface[$sheet] carrying Curve[$curve] is " *
+            "not classified"))
+        sheet_edges=surface_edges[sheet]
+        # Prefer a chain realized through the sheet's own face edges — the
+        # strict upstream embedding topology. Sheet recovery only preserves
+        # face coverage, so an unconforming chord falls back to the volume's
+        # edge complex and its edges are registered into the sheet complex.
+        try
+            classify_curve!(curve,sheet_edges)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            classify_curve!(curve,tet_edges)
+        end
+        entries=curve_entries[curve]
+        closed=m.curves[curve][1]==m.curves[curve][2]
+        for index in 1:(closed ? length(entries) : length(entries)-1)
+            first_node=Int32(entries[index][2])
+            second_node=Int32(entries[index<length(entries) ?
+                                          index+1 : 1][2])
+            push!(sheet_edges,first_node<second_node ?
+                  (first_node,second_node) : (second_node,first_node))
+        end
     end
     for surface in surface_tags
         _model_projection_validate_nested_surface(
@@ -7110,6 +7303,67 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
     end
 end
 
+# Ensure an embedded curve carries the stored `curve_params` discretization.
+# Upstream's `Mesh 3` runs the 1-D pass over embedded edges first; a direct
+# `mesh_model_volume` call grades lazily with the same model-API defaults the
+# surface path uses, resolving periodic masters through the bounded retry.
+function _volume_embedded_curve_params!(m::GeoModel,curve::Int,
+                                        caller::AbstractString)
+    params=get(m.curve_params,curve,nothing)
+    params===nothing || return params
+    options=_model_default_mesh1d_options(m,caller)
+    pending=Set{Int}((curve,))
+    dependency=get(m.periodic,(1,curve),nothing)
+    while dependency!==nothing
+        master=abs(dependency.master_entity)
+        push!(pending,master)
+        dependency=get(m.periodic,(1,master),nothing)
+    end
+    for _ in 1:options.max_retries
+        isempty(pending) && break
+        for candidate in sort!(collect(pending))
+            result=_model_mesh_curve!(m,candidate,options,caller)
+            result===:pending && continue
+            result===:keep || (m.curve_params[candidate]=result)
+            delete!(pending,candidate)
+        end
+    end
+    params=get(m.curve_params,curve,nothing)
+    params===nothing && throw(ArgumentError(
+        "$caller: embedded Curve[$curve] could not be meshed"))
+    return params
+end
+
+# Ordered coordinates of an embedded curve's recovered chain: the endpoints
+# weld to the model vertices and interior nodes evaluate through
+# `_periodic_curve_point` — the same evaluator the surface PSLG and the
+# `owned` vertex map use — so seeded interior nodes and later classification
+# name the identical coordinates bitwise. `Line` curves stay endpoint-only:
+# seeding interior nodes would change the established line-embedding output.
+function _volume_embedded_curve_chain(m::GeoModel,curve::Int,
+                                      caller::AbstractString)
+    a,b=m.curves[curve]
+    p,q=m.points[a],m.points[b]
+    _curve_type(m,curve)===:line && return NTuple{3,Float64}[p,q]
+    params=_volume_embedded_curve_params!(m,curve,caller)
+    us=Float64.(params)
+    if a==b && length(us)>1
+        # A closed stored discretization may keep the duplicated hi endpoint
+        # (transfinite/periodic copies span the bounds inclusive); the loop
+        # closes through the shared vertex instead of a separate `t1` node.
+        _,hi=_model_curve_param_bounds(m,curve,caller)
+        us[end]>=hi && (us=us[1:end-1])
+    end
+    length(us)>=2 || throw(ErrorException(
+        "$caller: embedded Curve[$curve] has no usable discretization"))
+    chain=[_periodic_curve_point(m,curve,u,caller) for u in us]
+    chain[1]=p
+    # Open curves weld the far endpoint; closed loops append the shared
+    # vertex so the final link returns to the start.
+    a==b ? push!(chain,p) : (chain[end]=q)
+    return chain
+end
+
 function _mesh_model_volume(m::GeoModel, tag::Integer;
                             size_field::Union{Nothing,AbstractSizeField}=nothing)
     caller="mesh_model_volume"
@@ -7155,6 +7409,22 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             a,b=m.curves[etag]
             push!(line_tags,etag)
             push!(extra, m.points[a]); push!(extra, m.points[b])
+            if _curve_type(m,etag)!==:line
+                # Upstream's `restoreEmbeddedEdges` inserts the curve's whole
+                # 1-D mesh — every graded chain node is a real vertex upfront,
+                # like the embedded-face vertices below. A closed curve's
+                # last stored parameter is interior, not the far endpoint;
+                # only a stored `t1` (the duplicated closed endpoint, kept by
+                # transfinite/periodic copies) is skipped.
+                params=_volume_embedded_curve_params!(m,etag,caller)
+                _,hi=_model_curve_param_bounds(m,etag,caller)
+                closed=a==b
+                for i in 2:length(params)
+                    (closed ? params[i]>=hi : i==length(params)) && continue
+                    push!(extra,_periodic_curve_point(
+                        m,etag,params[i],caller))
+                end
+            end
         elseif edim==2
             for point in surface_embedded_points[etag]
                 push!(extra,m.points[point])
@@ -7210,22 +7480,11 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     sort!(unique!(line_tags))
     protected_faces,protected_edges=_protected_cells!()
     empty!(protected_faces); empty!(protected_edges)
-    for curve in line_tags
-        _model_require_line_curve(m,curve,caller,"embedded-curve recovery")
-        a,b=m.curves[curve];p=m.points[a];q=m.points[b]
-        mesh=recover_segment3(mesh,p,q)
-        # Register the recovered chain so a later cavity fill cannot drop it:
-        # the fill carries protected edges/faces as keep constraints.
-        for (u,v) in _tet_edge_set(mesh)
-            (_on_segment3(_pt3(mesh,u),p,q;atol=1e-9) &&
-             _on_segment3(_pt3(mesh,v),p,q;atol=1e-9)) || continue
-            push!(protected_edges,u<v ? (u,v) : (v,u))
-        end
-        if !mesh_covers_segment3(mesh,p,q)
-            throw(ErrorException(
-                "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
-        end
-    end
+    # Sheets recover first: a curve nested in an embedded surface already
+    # owns its chain links as sheet edges (bitwise-identical evaluator
+    # nodes), so face recovery realizes them without inventing chord-
+    # subdivision Steiner nodes that could land on sheet edges and split
+    # them into degenerate stubs.
     for (sheet,a,b,c) in sheets
         mesh=recover_triangle3(mesh,a,b,c)
         mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
@@ -7236,12 +7495,39 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         end
     end
     for curve in line_tags
-        start_point,stop_point=m.curves[curve]
-        mesh_covers_segment3(
-            mesh,m.points[start_point],m.points[stop_point]) ||
-            throw(ErrorException(
-                "$caller: embedded Curve[$curve] is absent from the final " *
-                "tetrahedron edge complex"))
+        # Each stored chain link recovers as a straight segment; a `Line`
+        # degrades to its single chord like before. A sheet-nested curve's
+        # links are already covered, so this is a coverage audit there.
+        chain=_volume_embedded_curve_chain(m,curve,caller)
+        for i in 1:(length(chain)-1)
+            p=chain[i];q=chain[i+1]
+            # A link already realized as a tet-edge chain (sheet-nested
+            # curves arrive that way) needs no recovery — `recover_segment3`
+            # would still insert endpoint Steiner vertices and perturb the
+            # protected sheet faces around them.
+            mesh_covers_segment3(mesh,p,q) ||
+                (mesh=recover_segment3(mesh,p,q))
+            # Register the recovered chain so a later cavity fill cannot drop
+            # it: the fill carries protected edges/faces as keep constraints.
+            for (u,v) in _tet_edge_set(mesh)
+                (_on_segment3(_pt3(mesh,u),p,q;atol=1e-9) &&
+                 _on_segment3(_pt3(mesh,v),p,q;atol=1e-9)) || continue
+                push!(protected_edges,u<v ? (u,v) : (v,u))
+            end
+            if !mesh_covers_segment3(mesh,p,q)
+                throw(ErrorException(
+                    "$caller: embedded Curve[$curve] is not a chain of tetrahedron edges"))
+            end
+        end
+    end
+    for curve in line_tags
+        chain=_volume_embedded_curve_chain(m,curve,caller)
+        for i in 1:(length(chain)-1)
+            mesh_covers_segment3(mesh,chain[i],chain[i+1]) ||
+                throw(ErrorException(
+                    "$caller: embedded Curve[$curve] is absent from the " *
+                    "final tetrahedron edge complex"))
+        end
     end
     for (sheet,a,b,c) in sheets
         mesh_covers_triangle3(mesh,a,b,c) || throw(ErrorException(
@@ -7279,9 +7565,37 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             point_nodes[point]=_model_projection_embedded_point_node(
                 m,mesh,point,1e-12,caller)
         end
+        # The sheet's own boundary curves can pinch against nested ones;
+        # their owned vertices must not become nested-chain candidates.
+        nested_owned=_curve_owned_coordinates(
+            m,Iterators.flatten(
+                (_model_projection_surface_curves(m,surface_tag),
+                 nested_curves)),caller)
         for curve in nested_curves
-            curve_entries[curve]=_model_projection_tet_curve_nodes(
-                m,mesh,curve,tet_edges,caller)
+            # Prefer a chain through the sheet's own face edges; an
+            # unconforming chord falls back to the volume's edge complex and
+            # its realized edges join the sheet's constraint complex.
+            try
+                curve_entries[curve]=_model_projection_tet_curve_nodes(
+                    m,mesh,curve,tet_edges,caller;
+                    owned=nested_owned,edges=edges)
+            catch err
+                err isa InterruptException && rethrow()
+                (err isa ArgumentError || err isa ErrorException) || rethrow()
+                curve_entries[curve]=_model_projection_tet_curve_nodes(
+                    m,mesh,curve,tet_edges,caller;
+                    owned=nested_owned,edges=tet_edges)
+            end
+            entries=curve_entries[curve]
+            closed=m.curves[curve][1]==m.curves[curve][2]
+            for index in 1:(closed ? length(entries) :
+                                    length(entries)-1)
+                first_node=Int32(entries[index][2])
+                second_node=Int32(entries[index<length(entries) ?
+                                              index+1 : 1][2])
+                push!(edges,first_node<second_node ?
+                      (first_node,second_node) : (second_node,first_node))
+            end
         end
         _model_projection_validate_nested_surface(
             surface_tag,nodes,edges,point_nodes,curve_entries,

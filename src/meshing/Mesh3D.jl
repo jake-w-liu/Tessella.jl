@@ -2073,6 +2073,63 @@ function mesh_covers_segment3(mesh::Mesh, p, q; atol=1e-12)
     return false
 end
 
+# Like `mesh_covers_segment3` but returns the covering node chain itself:
+# a breadth-first path from the (p)-node to the (q)-node through tetrahedron
+# edges that lie on the segment. Endpoint vertices prefer an exact coordinate
+# match so a seeded model vertex wins over a near-duplicate Steiner node.
+# `eligible` masks nodes that must not participate (e.g. vertices owned by a
+# different model curve). `edges` lets a caller reuse a precomputed edge set.
+# Returns `nothing` when the segment is not realized as an edge chain.
+function _segment_chain3(mesh::Mesh, p, q, edges;
+                        atol::Float64=1e-12,
+                        eligible::Union{Nothing,AbstractVector{Bool}}=nothing)
+    a=_node_at3(mesh,p; atol=0.0)
+    a==0 && (a=_node_at3(mesh,p; atol=atol))
+    a==0 && return nothing
+    b=_node_at3(mesh,q; atol=0.0)
+    b==0 && (b=_node_at3(mesh,q; atol=atol))
+    b==0 && return nothing
+    if eligible!==nothing
+        (eligible[a] && eligible[b]) || return nothing
+    end
+    a==b && return Int32[Int32(a)]
+    adj=Dict{Int32,Vector{Int32}}()
+    for (u,v) in edges
+        if eligible!==nothing
+            (eligible[u] && eligible[v]) || continue
+        end
+        pu=_pt3(mesh,u); pv=_pt3(mesh,v)
+        (_on_segment3(pu,p,q; atol=atol) && _on_segment3(pv,p,q; atol=atol)) ||
+            continue
+        push!(get!(Vector{Int32}, adj, Int32(u)), Int32(v))
+        push!(get!(Vector{Int32}, adj, Int32(v)), Int32(u))
+    end
+    nn=size(mesh.coords,2)
+    seen=falses(nn); parent=fill(Int32(0),nn)
+    queue=Int32[Int32(a)]; seen[a]=true; head=1; found=false
+    while head<=length(queue)
+        v=queue[head]; head+=1
+        if v==b
+            found=true; break
+        end
+        for u in get(adj, v, Int32[])
+            seen[u] && continue
+            seen[u]=true; parent[u]=Int32(v); push!(queue,u)
+        end
+    end
+    found || return nothing
+    path=Int32[]
+    x=Int32(b)
+    while true
+        push!(path,x)
+        x==a && break
+        x=parent[x]
+        x==0 && return nothing
+    end
+    reverse!(path)
+    return path
+end
+
 function _cross3(u,v)
     return (u[2]*v[3]-u[3]*v[2], u[3]*v[1]-u[1]*v[3], u[1]*v[2]-u[2]*v[1])
 end
@@ -2256,7 +2313,16 @@ function _segment_face_hit(mesh::Mesh, p, q; atol=1e-12)
         for (i,j,k) in ((2,3,4),(1,3,4),(1,2,4),(1,2,3))
             hit=_segment_triangle_hit(p,q,pts[i],pts[j],pts[k]; atol=atol)
             hit===nothing && continue
-            _node_at3(mesh,hit; atol=1e-9)!=0 && continue
+            vn=_node_at3(mesh,hit; atol=1e-6)
+            if vn!=0
+                # A crossing beside an existing on-segment station would add a
+                # twin vertex closer than the fill predicates can resolve —
+                # the station already represents the crossing topologically.
+                # Off-segment near vertices still dedupe only at the strict
+                # 1e-9 coincidence radius.
+                (_on_segment3(_pt3(mesh,vn),p,q; atol=1e-9) ||
+                 _node_at3(mesh,hit; atol=1e-9)!=0) && continue
+            end
             tt=_dot3(_sub3(hit,p), _sub3(q,p))
             tt<bestt && (bestt=tt; best=hit)
         end
@@ -2308,7 +2374,11 @@ function _segment_edge_hit(mesh::Mesh, p, q; atol=1e-12)
                 s1=((a2[1]-p2[1])*d[2]-(a2[2]-p2[2])*d[1])/denom
                 (s0>1e-9 && s0<1-1e-9 && s1>1e-9 && s1<1-1e-9) || continue
                 hit=_add3(ea,_scale3(_sub3(eb,ea),s1))
-                _node_at3(mesh,hit; atol=1e-9)!=0 && continue
+                vn=_node_at3(mesh,hit; atol=1e-6)
+                if vn!=0
+                    (_on_segment3(_pt3(mesh,vn),p,q; atol=1e-9) ||
+                     _node_at3(mesh,hit; atol=1e-9)!=0) && continue
+                end
                 s0<bestt && (bestt=s0; best=hit)
             end
         end
@@ -3763,6 +3833,12 @@ function _snap_to_plane3(mesh::Mesh,a,b,c;atol=1e-9)
         x=(mesh.coords[1,v],mesh.coords[2,v],mesh.coords[3,v])
         d=_dot3(n,x)-offset
         abs(d)<=lim || continue
+        # A vertex already within interpolation noise of the plane must stay:
+        # every recovered triangle computes its own Float64 plane, so
+        # re-snapping a shared vertex onto slightly different planes walks it
+        # off seeded model coordinates — bitwise dedupe then spawns duplicate
+        # nodes a few 1e-16 apart (observed for a curve vertex inside a sheet).
+        abs(d)<=64eps(Float64)*sqrt(n2)*max(1.0,hypot(x...)) && continue
         coords===nothing && (coords=copy(mesh.coords))
         s=d/n2
         nx=(x[1]-s*n[1],x[2]-s*n[2],x[3]-s*n[3])
@@ -3834,9 +3910,21 @@ function recover_triangle3(mesh::Mesh, a, b, c; max_inserts::Integer=256)
     # candidate onto the exact plane before insertion.
     pln=_cross3(_sub3(b,a),_sub3(c,a))
     pln2=_dot3(pln,pln); poff=_dot3(pln,a)
-    snapx=pln2>0 ? (x->begin d=_dot3(pln,x)-poff;
-                     (x[1]-d/pln2*pln[1],x[2]-d/pln2*pln[2],x[3]-d/pln2*pln[3])
-                    end) : (x->x)
+    # Snap along the dominant normal axis rather than the normal itself: both
+    # land the point on the plane exactly, but moving one coordinate keeps
+    # axis-aligned boundary coordinates bit-exact — a full normal projection
+    # perturbs tangential components by the plane's ~1e-15 off-axis tilt,
+    # which pushed a vertex on a boundary face epsilon outside the domain so
+    # its edges strictly pierced the boundary in the fill certificate.
+    snapaxis=pln2>0 ? argmax(abs.((pln[1],pln[2],pln[3]))) : 0
+    snapx=if pln2>0
+        x->begin d=_dot3(pln,x)-poff; t=d/pln[snapaxis]
+            snapaxis==1 ? (x[1]-t,x[2],x[3]) :
+            snapaxis==2 ? (x[1],x[2]-t,x[3]) : (x[1],x[2],x[3]-t)
+        end
+    else
+        x->x
+    end
     uc_done=0
     pf,_=_protected_cells!()
     _,_,cov_cur=_mesh_covering_faces3(out,a,b,c;collect_faces=false)
@@ -4043,6 +4131,11 @@ function recover_triangle3(mesh::Mesh, a, b, c; max_inserts::Integer=256)
                         end
                     end
                     xs=snapx(x)
+                    # A pocket seed within tolerance of an existing vertex
+                    # must not spawn a near-duplicate node — the fragment
+                    # centroid can coincide with a vertex whose incident
+                    # faces simply fail to cover the pocket yet.
+                    _node_at3(out,xs;atol=1e-9)!=0 && continue
                     if _onplane_host3(out,xs,pln,poff)
                         # Consistent insertion: refill the on-plane edge star
                         # with x seeded into a coplanar face — the only way to

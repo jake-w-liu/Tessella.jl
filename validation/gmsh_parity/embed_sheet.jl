@@ -38,7 +38,7 @@ sort!(unique(Int.(projected.entity_data.block_entities[surface_block])))==
         "Tessella embedded-sheet surface classification changed")
 projected.entity_data.entities[(3,1)].boundaries==Int32[-1,2,-3,4,-5,6] ||
     error("Tessella embedded-sheet lost the box's oriented shell")
-projected_crc.sha=="73b0d37dc43bbb14d02d202ad54d30932e1317dc7744392441ec856a1212f0bb" ||
+projected_crc.sha=="eb50392211a4d1d2a03875111d3d6ce61f14f7936fbf3f97063a231aded004ff" ||
     error("Tessella embedded-sheet projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()
@@ -147,7 +147,7 @@ try
         length(msh2_crcs)==1 || error(
             "Tessella embedded-sheet MSH2 modes produced different CRCs: $msh2_crcs")
         only(msh2_crcs)==
-            "74cd1bea2f183899921860aa6781a3c37941e5a0f838a8184f9d7e004ecb8f37" ||
+            "db4fe8cfade5acb08abb418348e1deab1287d588e43b26be00b38e3aad421cd6" ||
             error("Tessella embedded-sheet MSH2 CRC changed: $(only(msh2_crcs))")
     end
     println("GMSH_PARITY_EMBED_SHEET_OK gmsh=$(gmsh.GMSH_API_VERSION) " *
