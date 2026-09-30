@@ -5,6 +5,7 @@
 # is available instead of pretending that a coordinate-only substitute is parity.
 
 using ..Predicates: orient2, orient3
+using ..Elements: lagrange_nodes
 
 # ── Anisotropic metric ────────────────────────────────────────────────────────
 
@@ -2228,6 +2229,33 @@ end
 
 # ── PostView ──────────────────────────────────────────────────────────────────
 
+# One `.pos` custom-interpolation element. The value basis is
+# `Σₜ coefval[i,t] · Mₜ(u,v,w)` over exponent rows `expval` (Gmsh's
+# `computeShapeFunctions` convention); when `coefgeo` is non-empty the same
+# product maps reference coordinates to physical geometry, otherwise the
+# family's canonical first-order map applies. Pyramid families evaluate every
+# monomial Bergot-style as `uᵃvᵇwᶜ·(1-w)^(max(a,b)-a-b)`.
+struct _PVSchemeCell
+    kind::UInt8
+    flat::Bool
+    pyramid::Bool
+    coefval::Matrix{Float64}
+    expval::Vector{NTuple{3,Float64}}
+    coefgeo::Matrix{Float64}
+    expgeo::Vector{NTuple{3,Float64}}
+    coords::Matrix{Float64}
+    values::Matrix{Float64}
+end
+
+# `_postview_cell_kind` codes reused for the scheme-cell reference domains:
+# line=1, triangle=2, tetrahedron=3, hexahedron=4, prism=5, pyramid=6,
+# quadrangle=7 (scheme cells themselves dispatch as kind 8).
+const _POSTVIEW_SCHEME_KIND=(line=UInt8(1),triangle=UInt8(2),
+    tetrahedron=UInt8(3),hexahedron=UInt8(4),prism=UInt8(5),
+    pyramid=UInt8(6),quadrangle=UInt8(7))
+const _POSTVIEW_SCHEME_SAMPLE_MSH=(line=8,triangle=9,quadrangle=10,
+    tetrahedron=11,hexahedron=12,prism=13,pyramid=14)
+
 """
     PostViewField(coords, values; points=nothing, lines=(), triangles=(),
                   quadrangles=(), tetrahedra=(), hexahedra=(), prisms=(),
@@ -2256,10 +2284,14 @@ does; tensor views are instead evaluated through [`metric_raw`](@ref) and
 composes with anisotropic combinators and `refine_to_size`.
 Non-positive scalar results become `GMSH_MAX_SIZE` when `crop_negative=true`.
 
-Curved/high-order list interpolation matrices, mixed component
-counts, and non-planar quadrangles are rejected or not represented. Gmsh itself
-requires an adapted visualization grid before querying non-adapted high-order list
-data. Vector norms use overflow-safe arithmetic; results that are not representable
+Element records built through `PostViewField(records)` may additionally carry
+a `.scheme` (`Post.PosScheme`-compatible) custom-interpolation basis — the
+`SL2`/`INTERPOLATION_SCHEME` high-order `.pos` extension. Scheme elements are
+stored as [`_PVSchemeCell`](@ref)s: the value basis evaluates
+`Σₜ coefval[i,t]·Mₜ` and an optional `coefgeo`/`expgeo` pair curves the
+reference map, inverted per query by Newton iteration. Mixed component counts
+and non-planar first-order quadrangles are still rejected.
+Vector norms use overflow-safe arithmetic; results that are not representable
 as finite `Float64` values are rejected by the field-result contract.
 """
 struct PostViewField <: AbstractField
@@ -2287,6 +2319,7 @@ struct PostViewField <: AbstractField
     bvh_count::Vector{Int}
     cell_lo::Vector{NTuple{3,Float64}}
     cell_hi::Vector{NTuple{3,Float64}}
+    scheme_cells::Vector{_PVSchemeCell}
 end
 
 const _POSTVIEW_BVH_LEAF_SIZE=8
@@ -2628,7 +2661,9 @@ end
     id-=ny;id<=ntri && return UInt8(2),id
     id-=ntri;id<=nq && return UInt8(7),id
     id-=nq;id<=nl && return UInt8(1),id
-    return UInt8(0),id-nl
+    id-=nl;np=size(field.points,2)
+    id<=np && return UInt8(0),id
+    return UInt8(8),id-np
 end
 
 @inline function _postview_cell_indices(tetrahedra,hexahedra,prisms,pyramids,
@@ -2659,22 +2694,60 @@ end
 end
 
 function _build_postview_bvh(coords,tetrahedra,hexahedra,prisms,pyramids,
-                             triangles,quadrangles,lines,points)
-    ncells=sum(size(cells,2) for cells in
+                             triangles,quadrangles,lines,points,scheme_cells)
+    nfirst=sum(size(cells,2) for cells in
         (tetrahedra,hexahedra,prisms,pyramids,triangles,quadrangles,lines,points))
+    ncells=nfirst+length(scheme_cells)
     primitive_lo=Matrix{Float64}(undef,3,ncells)
     primitive_hi=Matrix{Float64}(undef,3,ncells)
     centroid=Matrix{Float64}(undef,3,ncells)
     @inbounds for id in 1:ncells
-        cells,j,arity=_postview_cell_indices(tetrahedra,hexahedra,prisms,pyramids,
-                                             triangles,quadrangles,lines,points,id)
-        for k in 1:3
-            lo=Inf;hi=-Inf
-            for slot in 1:arity
-                value=coords[k,cells[slot,j]]
-                lo=min(lo,value);hi=max(hi,value)
+        if id<=nfirst
+            cells,j,arity=_postview_cell_indices(
+                tetrahedra,hexahedra,prisms,pyramids,
+                triangles,quadrangles,lines,points,id)
+            for k in 1:3
+                lo=Inf;hi=-Inf
+                for slot in 1:arity
+                    value=coords[k,cells[slot,j]]
+                    lo=min(lo,value);hi=max(hi,value)
+                end
+                primitive_lo[k,id]=lo;primitive_hi[k,id]=hi
             end
-            primitive_lo[k,id]=lo;primitive_hi[k,id]=hi
+        else
+            cell=scheme_cells[id-nfirst]
+            ccoords=cell.coords
+            for k in 1:3
+                lo=Inf;hi=-Inf
+                for i in axes(ccoords,2)
+                    value=ccoords[k,i]
+                    lo=min(lo,value);hi=max(hi,value)
+                end
+                primitive_lo[k,id]=lo;primitive_hi[k,id]=hi
+            end
+            # A curved geometry map can bulge outside its node hull — grow the
+            # box by the map evaluated on the family's order-2 reference
+            # lattice so candidacy still covers the element's true extent.
+            if !cell.flat
+                scale=_pv_scheme_scale(cell)
+                scale>0 || continue
+                base=(ccoords[1,1],ccoords[2,1],ccoords[3,1])
+                nodes=lagrange_nodes(_POSTVIEW_SCHEME_SAMPLE_MSH[
+                    cell.kind==1 ? :line : cell.kind==2 ? :triangle :
+                    cell.kind==3 ? :tetrahedron : cell.kind==4 ? :hexahedron :
+                    cell.kind==5 ? :prism : cell.kind==6 ? :pyramid :
+                    :quadrangle])
+                for j in axes(nodes,2)
+                    mapped=_pv_scheme_map(cell,nodes[1,j],nodes[2,j],
+                                          nodes[3,j],base,scale)
+                    all(isfinite,mapped) || continue
+                    for k in 1:3
+                        value=base[k]+mapped[k]*scale
+                        primitive_lo[k,id]=min(primitive_lo[k,id],value)
+                        primitive_hi[k,id]=max(primitive_hi[k,id],value)
+                    end
+                end
+            end
         end
         dx=primitive_hi[1,id]-primitive_lo[1,id]
         dy=primitive_hi[2,id]-primitive_lo[2,id]
@@ -2751,9 +2824,12 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values;
                        crop_negative::Bool=true,use_closest::Bool=true,
                        reference_tolerance::Real=1e-6,
                        max_nodes::Integer=1_000_000,
-                       max_elements::Integer=1_000_000)
+                       max_elements::Integer=1_000_000,
+                       _scheme_cells::Vector{_PVSchemeCell}=_PVSchemeCell[],
+                       _extra_nodes::Union{Nothing,AbstractMatrix{<:Real}}=nothing)
     size(coords,1)==3 || throw(ArgumentError("PostViewField: coords must be 3×n"))
-    size(coords,2)>0 || throw(ArgumentError("PostViewField: empty view"))
+    (size(coords,2)>0 || !isempty(_scheme_cells)) ||
+        throw(ArgumentError("PostViewField: empty view"))
     node_limit=_postview_limit(max_nodes,"max_nodes")
     element_limit=_postview_limit(max_elements,"max_elements")
     n=size(coords,2)
@@ -2795,7 +2871,11 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values;
     end
     size(P,2)<=remaining || throw(ArgumentError(
         "PostViewField: element count exceeds max_elements=$element_limit"))
-    ncells=sum(size(cells,2) for cells in (P,L,T,Q,S,H,I,Y))
+    remaining-=size(P,2)
+    length(_scheme_cells)<=remaining || throw(ArgumentError(
+        "PostViewField: element count exceeds max_elements=$element_limit"))
+    ncells=sum(size(cells,2) for cells in (P,L,T,Q,S,H,I,Y)) +
+        length(_scheme_cells)
     ncells>0 || throw(ArgumentError("PostViewField: view contains no elements"))
     _validate_postview_cells(C,L,T,Q,S,H,I,Y)
 
@@ -2803,15 +2883,37 @@ function PostViewField(coords::AbstractMatrix{<:Real}, values;
     @inbounds for cells in (P,L,T,Q,S,H,I,Y), index in cells
         used[index]=true
     end
-    nearest_nodes=Int32[i for i in 1:n if used[i]]
-    nearest_coords=Matrix{Float64}(undef,3,length(nearest_nodes))
-    @inbounds for (j,index) in enumerate(nearest_nodes),d in 1:3
-        nearest_coords[d,j]=C[d,index]
+    # Scheme-element geometry nodes join the closest-node set (Gmsh's
+    # searchClosest fallbacks see every element node, not just the shared
+    # first-order connectivity).
+    nearest_count=count(used)
+    extra=_extra_nodes===nothing ? 0 : size(_extra_nodes,2)
+    nearest_coords=Matrix{Float64}(undef,3,nearest_count+extra)
+    j=0
+    @inbounds for index in 1:n
+        used[index] || continue
+        j+=1
+        for d in 1:3
+            nearest_coords[d,j]=C[d,index]
+        end
     end
+    if _extra_nodes!==nothing
+        size(_extra_nodes,1)==3 || throw(ArgumentError(
+            "PostViewField: _extra_nodes must be a 3×m matrix"))
+        @inbounds for j2 in 1:extra,d in 1:3
+            value=Float64(_extra_nodes[d,j2])
+            isfinite(value) || throw(ArgumentError(
+                "PostViewField: _extra_nodes must be finite"))
+            nearest_coords[d,nearest_count+j2]=value
+        end
+    end
+    isempty(nearest_coords) && throw(ArgumentError(
+        "PostViewField: view contains no active nodes"))
     tree=DistanceField(;points=nearest_coords)
-    bvh=_build_postview_bvh(C,S,H,I,Y,T,Q,L,P)
+    bvh=_build_postview_bvh(C,S,H,I,Y,T,Q,L,P,_scheme_cells)
     return PostViewField(C,vec(V),UInt8(size(V,1)),P,L,T,Q,S,H,I,Y,
-                         crop_negative,use_closest,tolerance,tree,bvh...)
+                         crop_negative,use_closest,tolerance,tree,bvh...,
+                         _scheme_cells)
 end
 
 # ── Record-list constructor (parsed .pos views) ─────────────────────────────
@@ -2895,18 +2997,48 @@ function PostViewField(records::AbstractVector;
     element_limit=_postview_limit(max_elements,"max_elements")
     length(records)<=element_limit || throw(ArgumentError(
         "$caller: element count exceeds max_elements=$element_limit"))
-    ncomp=0;nsteps=0;ntotal=0
+    tsel=Int(time)
+    tsel>=1 || throw(ArgumentError("$caller: time step $time is outside range"))
+    ncomp=0;nsteps=0;ntotal=0;nscheme_nodes=0
     kinds=Vector{Symbol}(undef,length(records))
+    scheme_flags=falses(length(records))
     @inbounds for i in eachindex(records)
         record=records[i]
         kind=_postview_record_kind(record,i,caller)
-        arity=_POSTVIEW_RECORD_ARITY[kind]
-        _postview_record_coords(record,arity,i,caller)
-        values=_postview_record_values(record,arity,i,caller)
-        components=size(values,1)
+        has_scheme=kind!==:point && hasproperty(record,:scheme) &&
+            getproperty(record,:scheme)!==nothing
+        if hasproperty(record,:scheme) && getproperty(record,:scheme)!==nothing
+            kind===:point && throw(ArgumentError(
+                "$caller: record $i is a point element but carries an " *
+                "interpolation scheme"))
+        end
+        if has_scheme
+            # Scheme records have scheme-defined widths; the cell builder
+            # validates them against the coefficient row counts.
+            v=_postview_record_property(record,:values,i,caller)
+            (v isa AbstractArray{<:Real} && ndims(v) in (2,3)) ||
+                throw(ArgumentError(
+                    "$caller: record $i values must be a matrix or " *
+                    "matrix×steps array"))
+            any(value->value isa Bool,v) && throw(ArgumentError(
+                "$caller: record $i values must not contain Bool entries"))
+            components=size(v,1)
+            steps=ndims(v)==3 ? size(v,3) : 1
+            scheme_flags[i]=true
+        else
+            arity=_POSTVIEW_RECORD_ARITY[kind]
+            _postview_record_coords(record,arity,i,caller)
+            values=_postview_record_values(record,arity,i,caller)
+            components=size(values,1)
+            steps=ndims(values)==3 ? size(values,3) : 1
+            ntotal+=arity
+            ntotal<=node_limit || throw(ArgumentError(
+                "$caller: node count exceeds max_nodes=$node_limit"))
+            ntotal<=typemax(Int32) || throw(ArgumentError(
+                "$caller: node count exceeds the Int32 connectivity limit"))
+        end
         components in (1,3,9) || throw(ArgumentError(
             "$caller: record $i values must have 1, 3, or 9 components per node"))
-        steps=ndims(values)==3 ? size(values,3) : 1
         steps>0 || throw(ArgumentError(
             "$caller: record $i has an empty time-step array"))
         steps<=typemax(Int32) || throw(ArgumentError(
@@ -2918,20 +3050,27 @@ function PostViewField(records::AbstractVector;
         nsteps==0 ? (nsteps=steps) : steps==nsteps || throw(ArgumentError(
             "$caller: record $i has $steps time steps but earlier records " *
             "have $nsteps"))
-        ntotal+=arity
-        ntotal<=node_limit || throw(ArgumentError(
-            "$caller: node count exceeds max_nodes=$node_limit"))
-        ntotal<=typemax(Int32) || throw(ArgumentError(
-            "$caller: node count exceeds the Int32 connectivity limit"))
         kinds[i]=kind
     end
+    tsel<=nsteps || throw(ArgumentError(
+        "$caller: time step $tsel is outside 1:$nsteps"))
     coords=Matrix{Float64}(undef,3,ntotal)
     values=Array{Float64,3}(undef,ncomp,ntotal,nsteps)
     columns=Dict{Symbol,Vector{Int32}}(kw=>Int32[] for
                                        kw in keys(_POSTVIEW_RECORD_CELLS))
+    scheme_cells=_PVSchemeCell[]
     first_node=Int32(1)
     @inbounds for i in eachindex(records)
-        record=records[i];kind=kinds[i];arity=_POSTVIEW_RECORD_ARITY[kind]
+        record=records[i];kind=kinds[i]
+        if scheme_flags[i]
+            cell_obj=_postview_scheme_cell(record,kind,i,tsel,caller)
+            nscheme_nodes+=size(cell_obj.coords,2)
+            nscheme_nodes<=node_limit || throw(ArgumentError(
+                "$caller: node count exceeds max_nodes=$node_limit"))
+            push!(scheme_cells,cell_obj)
+            continue
+        end
+        arity=_POSTVIEW_RECORD_ARITY[kind]
         c=_postview_record_property(record,:coords,i,caller)
         v=_postview_record_property(record,:values,i,caller)
         last_node=first_node+arity-1
@@ -2947,16 +3086,28 @@ function PostViewField(records::AbstractVector;
     end
     cell(name)=reshape(columns[name],_POSTVIEW_RECORD_ARITY[name],
                        length(columns[name])÷_POSTVIEW_RECORD_ARITY[name])
+    extra_nodes=Matrix{Float64}(undef,3,nscheme_nodes)
+    offset=0
+    @inbounds for cell_obj in scheme_cells
+        c=cell_obj.coords
+        for i2 in axes(c,2),d in 1:3
+            extra_nodes[d,offset+i2]=c[d,i2]
+        end
+        offset+=size(c,2)
+    end
     return PostViewField(coords,values;
                          points=cell(:point),lines=cell(:line),
                          triangles=cell(:triangle),
                          quadrangles=cell(:quadrangle),
                          tetrahedra=cell(:tetrahedron),
                          hexahedra=cell(:hexahedron),prisms=cell(:prism),
-                         pyramids=cell(:pyramid),time=time,
+                         pyramids=cell(:pyramid),time=tsel,
                          crop_negative=crop_negative,use_closest=use_closest,
                          reference_tolerance=reference_tolerance,
-                         max_nodes=max_nodes,max_elements=max_elements)
+                         max_nodes=max_nodes,max_elements=max_elements,
+                         _scheme_cells=scheme_cells,
+                         _extra_nodes=isempty(scheme_cells) ? nothing :
+                             extra_nodes)
 end
 
 @inline function _postview_scaled_query(p,a,scale)
@@ -3422,6 +3573,434 @@ end
             0.0,0.0,0.0,0.0)
 end
 
+# ── Scheme-cell evaluation ────────────────────────────────────────────────────
+# Monomial/geometry basis for `_PVSchemeCell`s. Pyramid families evaluate
+# every exponent row Bergot-style — `uᵃvᵇwᶜ·(1-w)^(max(a,b)-a-b)` with the
+# same `1-w` clamp Gmsh's pyramidalBasis applies near the apex singularity.
+
+@inline function _pv_monomial(e::NTuple{3,Float64},u,v,w,pyramid::Bool)
+    value=u^e[1]*v^e[2]*w^e[3]
+    pyramid || return value
+    t=max(1e-14,1.0-w)
+    return value*t^(max(e[1],e[2])-e[1]-e[2])
+end
+
+@inline function _pv_monomial_gradient(e::NTuple{3,Float64},u,v,w,
+                                       pyramid::Bool)
+    a,b,c=e
+    if !pyramid
+        du=a==0 ? 0.0 : a*u^(a-1)*v^b*w^c
+        dv=b==0 ? 0.0 : b*u^a*v^(b-1)*w^c
+        dw=c==0 ? 0.0 : c*u^a*v^b*w^(c-1)
+        return du,dv,dw
+    end
+    ee=max(a,b)-a-b
+    t=max(1e-14,1.0-w)
+    power=t^ee
+    du=a==0 ? 0.0 : a*u^(a-1)*v^b*w^c*power
+    dv=b==0 ? 0.0 : b*u^a*v^(b-1)*w^c*power
+    dw=u^a*v^b*((c==0 ? 0.0 : c*w^(c-1))*power +
+                w^c*(ee==0 ? 0.0 : -ee*t^(ee-1)))
+    return du,dv,dw
+end
+
+# Canonical first-order shape functions for kinds the nonlinear table does
+# not cover (line/triangle/tetrahedron) — the flat-geometry scheme basis.
+@inline function _pv_canonical_shape(kind::UInt8,slot::Int,u,v,w)
+    kind==1 && return slot==1 ? 0.5*(1-u) : 0.5*(1+u)
+    kind==2 && return slot==1 ? 1-u-v : slot==2 ? u : v
+    kind==3 && return slot==1 ? 1-u-v-w : slot==2 ? u : slot==3 ? v : w
+    return _postview_shape(kind,slot,u,v,w)
+end
+
+@inline function _pv_canonical_gradient(kind::UInt8,slot::Int,u,v,w)
+    kind==1 && return (slot==1 ? -0.5 : 0.5,0.0,0.0)
+    kind==2 && return slot==1 ? (-1.0,-1.0,0.0) :
+                slot==2 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
+    kind==3 && return slot==1 ? (-1.0,-1.0,-1.0) :
+                slot==2 ? (1.0,0.0,0.0) :
+                slot==3 ? (0.0,1.0,0.0) : (0.0,0.0,1.0)
+    return _postview_shape_gradient(kind,slot,u,v,w)
+end
+
+@inline function _pv_relative(cell::_PVSchemeCell,i::Int,base,d::Int,
+                              scale::Float64)
+    x=cell.coords[d,i]
+    delta=x-base[d]
+    return isfinite(delta) ? delta/scale : x/scale-base[d]/scale
+end
+
+function _pv_scheme_scale(cell::_PVSchemeCell)
+    coords=cell.coords
+    scale=0.0
+    @inbounds for i in 2:size(coords,2), d in 1:3
+        delta=coords[d,i]-coords[d,1]
+        if isfinite(delta)
+            scale=max(scale,abs(delta))
+        else
+            scale=max(scale,abs(coords[d,i]),abs(coords[d,1]))
+        end
+    end
+    return scale
+end
+
+# Physical map `Σᵢ Gᵢ(r)·qᵢ` in scale-normalized coordinates (`qᵢ` are the
+# node offsets from node 1). Flat cells use the canonical first-order family
+# basis; curved cells use `coefgeo[i,t]·Mₜ` over `expgeo` rows.
+function _pv_scheme_map(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
+    mapped=(0.0,0.0,0.0)
+    coords=cell.coords
+    if cell.flat
+        kind=cell.kind
+        @inbounds for i in 1:size(coords,2)
+            g=_pv_canonical_shape(kind,i,u,v,w)
+            mapped=(muladd(g,_pv_relative(cell,i,base,1,scale),mapped[1]),
+                    muladd(g,_pv_relative(cell,i,base,2,scale),mapped[2]),
+                    muladd(g,_pv_relative(cell,i,base,3,scale),mapped[3]))
+        end
+        return mapped
+    end
+    cg=cell.coefgeo
+    pyramid=cell.pyramid
+    @inbounds for t in eachindex(cell.expgeo)
+        m=_pv_monomial(cell.expgeo[t],u,v,w,pyramid)
+        for i in 1:size(coords,2)
+            a=cg[i,t]*m
+            mapped=(muladd(a,_pv_relative(cell,i,base,1,scale),mapped[1]),
+                    muladd(a,_pv_relative(cell,i,base,2,scale),mapped[2]),
+                    muladd(a,_pv_relative(cell,i,base,3,scale),mapped[3]))
+        end
+    end
+    return mapped
+end
+
+# dX/du,dX/dv,dX/dw of the normalized map. Intrinsically lower-dimensional
+# cells complete the 3×3 system with artificial columns exactly like the
+# first-order paths: two perpendiculars for lines, the physical surface
+# normal for triangles/quadrangles.
+function _pv_scheme_jacobian(cell::_PVSchemeCell,u,v,w,base,scale::Float64)
+    du=(0.0,0.0,0.0);dv=(0.0,0.0,0.0);dw=(0.0,0.0,0.0)
+    coords=cell.coords
+    if cell.flat
+        kind=cell.kind
+        @inbounds for i in 1:size(coords,2)
+            g=_pv_canonical_gradient(kind,i,u,v,w)
+            q=(_pv_relative(cell,i,base,1,scale),
+               _pv_relative(cell,i,base,2,scale),
+               _pv_relative(cell,i,base,3,scale))
+            du=(muladd(q[1],g[1],du[1]),muladd(q[2],g[1],du[2]),
+                muladd(q[3],g[1],du[3]))
+            dv=(muladd(q[1],g[2],dv[1]),muladd(q[2],g[2],dv[2]),
+                muladd(q[3],g[2],dv[3]))
+            dw=(muladd(q[1],g[3],dw[1]),muladd(q[2],g[3],dw[2]),
+                muladd(q[3],g[3],dw[3]))
+        end
+    else
+        cg=cell.coefgeo
+        pyramid=cell.pyramid
+        @inbounds for t in eachindex(cell.expgeo)
+            gu,gv,gw=_pv_monomial_gradient(cell.expgeo[t],u,v,w,pyramid)
+            for i in 1:size(coords,2)
+                c=cg[i,t]
+                q1=_pv_relative(cell,i,base,1,scale)
+                q2=_pv_relative(cell,i,base,2,scale)
+                q3=_pv_relative(cell,i,base,3,scale)
+                du=(muladd(q1,c*gu,du[1]),muladd(q2,c*gu,du[2]),
+                    muladd(q3,c*gu,du[3]))
+                dv=(muladd(q1,c*gv,dv[1]),muladd(q2,c*gv,dv[2]),
+                    muladd(q3,c*gv,dv[3]))
+                dw=(muladd(q1,c*gw,dw[1]),muladd(q2,c*gw,dw[2]),
+                    muladd(q3,c*gw,dw[3]))
+            end
+        end
+    end
+    kind=cell.kind
+    if kind==1
+        d=du
+        artificial=if (abs(d[1])>=abs(d[2]) && abs(d[1])>=abs(d[3])) ||
+                      (abs(d[2])>=abs(d[1]) && abs(d[2])>=abs(d[3]))
+            (d[2],-d[1],0.0)
+        else
+            (0.0,d[3],-d[2])
+        end
+        return du,artificial,_postview_cross(d,artificial)
+    elseif kind==2 || kind==7
+        return du,dv,_postview_cross(du,dv)
+    end
+    return du,dv,dw
+end
+
+@inline function _pv_scheme_inside(kind::UInt8,u,v,w,tolerance)
+    kind==1 && return abs(u)<=1+tolerance &&
+                      abs(v)<=tolerance && abs(w)<=tolerance
+    kind==2 && return u>=-tolerance && v>=-tolerance &&
+                      u+v<=1+tolerance && abs(w)<=tolerance
+    kind==3 && return u>=-tolerance && v>=-tolerance && w>=-tolerance &&
+                      u+v+w<=1+tolerance
+    return _postview_reference_inside(kind,u,v,w,tolerance)
+end
+
+# Value basis `Σₜ coefval[i,t]·Mₜ(r)` dotted with the element's stored
+# components — scalar/vector fold for the scalar operator.
+function _pv_scheme_scalar(cell::_PVSchemeCell,num_components::UInt8,u,v,w)
+    values=cell.values
+    cv=cell.coefval
+    pyramid=cell.pyramid
+    x=0.0;y=0.0;z=0.0
+    if num_components==1
+        @inbounds for t in eachindex(cell.expval)
+            m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+            for i in 1:size(values,2)
+                x=muladd(cv[i,t]*m,values[1,i],x)
+            end
+        end
+        return x
+    end
+    @inbounds for t in eachindex(cell.expval)
+        m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+        for i in 1:size(values,2)
+            a=cv[i,t]*m
+            x=muladd(a,values[1,i],x)
+            y=muladd(a,values[2,i],y)
+            z=muladd(a,values[3,i],z)
+        end
+    end
+    return hypot(x,y,z)
+end
+
+# Same fold for the nine row-major tensor components — written out so the
+# result is a concrete `NTuple{9,Float64}` without closure boxing.
+function _pv_scheme_tensor(cell::_PVSchemeCell,u,v,w)
+    values=cell.values
+    cv=cell.coefval
+    pyramid=cell.pyramid
+    t1=0.0;t2=0.0;t3=0.0;t4=0.0;t5=0.0;t6=0.0;t7=0.0;t8=0.0;t9=0.0
+    @inbounds for t in eachindex(cell.expval)
+        m=_pv_monomial(cell.expval[t],u,v,w,pyramid)
+        for i in 1:size(values,2)
+            a=cv[i,t]*m
+            t1=muladd(a,values[1,i],t1);t2=muladd(a,values[2,i],t2)
+            t3=muladd(a,values[3,i],t3);t4=muladd(a,values[4,i],t4)
+            t5=muladd(a,values[5,i],t5);t6=muladd(a,values[6,i],t6)
+            t7=muladd(a,values[7,i],t7);t8=muladd(a,values[8,i],t8)
+            t9=muladd(a,values[9,i],t9)
+        end
+    end
+    return (t1,t2,t3,t4,t5,t6,t7,t8,t9)
+end
+
+# Newton inversion of the scheme geometry map followed by the value fold —
+# the `_postview_cell_value` arm for kind-8 cells. Only the element's
+# intrinsic coordinates are iterated (the off-direction artificial parameters
+# do not move the map, so iterating them just accumulates drift); the
+# off-surface offsets are recovered afterwards by projecting the final
+# residual onto the artificial Jacobian columns — the same decomposition the
+# first-order line/quadrangle paths apply in closed form.
+@inline _pv_scheme_dim(kind::UInt8)=
+    kind==1 ? 1 : (kind==2 || kind==7) ? 2 : 3
+
+function _postview_scheme_value(field::PostViewField,j::Int,p,
+                                combine::C=_postview_weighted_scalar_operator) where {C}
+    cell=field.scheme_cells[j]
+    dim=_pv_scheme_dim(cell.kind)
+    scale=_pv_scheme_scale(cell)
+    scale>0 || return _postview_cell_miss(combine)
+    base=(cell.coords[1,1],cell.coords[2,1],cell.coords[3,1])
+    query=_postview_scaled_query(p,base,scale)
+    all(isfinite,query) || return _postview_cell_miss(combine)
+    u=0.0;v=0.0;w=0.0;error=1.0;iteration=1
+    while error>1e-6 && iteration<20
+        mapped=_pv_scheme_map(cell,u,v,w,base,scale)
+        residual=_sub3(query,mapped)
+        du,dv,dw=_pv_scheme_jacobian(cell,u,v,w,base,scale)
+        determinant=_postview_det(du,dv,dw)
+        (isfinite(determinant) && !iszero(determinant)) ||
+            return _postview_cell_miss(combine)
+        delta_u=_postview_det(residual,dv,dw)/determinant
+        delta_v=dim>=2 ? _postview_det(du,residual,dw)/determinant : 0.0
+        delta_w=dim==3 ? _postview_det(du,dv,residual)/determinant : 0.0
+        all(isfinite,(delta_u,delta_v,delta_w)) ||
+            return _postview_cell_miss(combine)
+        un=u+delta_u;vn=v+delta_v;wn=w+delta_w
+        all(isfinite,(un,vn,wn)) || return _postview_cell_miss(combine)
+        error=hypot(un-u,vn-v,wn-w)
+        u=un;v=vn;w=wn;iteration+=1
+    end
+    if dim==1
+        mapped=_pv_scheme_map(cell,u,0.0,0.0,base,scale)
+        residual=_sub3(query,mapped)
+        _,a2,a3=_pv_scheme_jacobian(cell,u,0.0,0.0,base,scale)
+        v=_dot3(residual,a2)/_dot3(a2,a2)
+        w=_dot3(residual,a3)/_dot3(a3,a3)
+        all(isfinite,(v,w)) || return _postview_cell_miss(combine)
+    elseif dim==2
+        mapped=_pv_scheme_map(cell,u,v,0.0,base,scale)
+        residual=_sub3(query,mapped)
+        _,_,n=_pv_scheme_jacobian(cell,u,v,0.0,base,scale)
+        w=_dot3(residual,n)/_dot3(n,n)
+        isfinite(w) || return _postview_cell_miss(combine)
+    end
+    _pv_scheme_inside(cell.kind,u,v,w,field.reference_tolerance) ||
+        return _postview_cell_miss(combine)
+    value=if combine===_postview_weighted_scalar_operator
+        _pv_scheme_scalar(cell,field.num_components,u,v,w)
+    else
+        _pv_scheme_tensor(cell,u,v,w)
+    end
+    return _postview_check_interpolant(value,"scheme element",j)
+end
+
+# Constructor-side geometric validation: flat cells reuse the family's
+# first-order degeneracy predicates; curved cells sample the geometric
+# Jacobian on the family's order-2 reference nodes and require a nonsingular
+# map at every node.
+function _pv_scheme_validate(cell::_PVSchemeCell,i::Int,caller::AbstractString)
+    coords=cell.coords
+    scale=_pv_scheme_scale(cell)
+    scale>0 || throw(ArgumentError(
+        "$caller: scheme element $i is degenerate (all nodes coincide)"))
+    ngeom=size(coords,2)
+    cells=Matrix{Int32}(undef,ngeom,1)
+    @inbounds for j in 1:ngeom
+        cells[j,1]=Int32(j)
+    end
+    kind=cell.kind
+    if cell.flat
+        if kind==1
+            _postview_point(coords,1)!=_postview_point(coords,2) ||
+                throw(ArgumentError(
+                    "$caller: scheme line $i is degenerate"))
+        elseif kind==2
+            _postview_triangle_nondegenerate(coords,cells,1) ||
+                throw(ArgumentError(
+                    "$caller: scheme triangle $i is degenerate"))
+        elseif kind==7
+            _postview_quadrangle_planar(coords,cells,1) || throw(ArgumentError(
+                "$caller: scheme quadrangle $i is non-planar; warped " *
+                "first-order geometry quadrangles are unsupported"))
+            _postview_nonlinear_nondegenerate(coords,cells,1,4,UInt8(7)) ||
+                throw(ArgumentError(
+                    "$caller: scheme quadrangle $i is degenerate"))
+        elseif kind==3
+            _postview_tetrahedron_nondegenerate(coords,cells,1) ||
+                throw(ArgumentError(
+                    "$caller: scheme tetrahedron $i is degenerate"))
+        else
+            _postview_nonlinear_nondegenerate(coords,cells,1,ngeom,kind) ||
+                throw(ArgumentError(
+                    "$caller: scheme element $i is degenerate"))
+        end
+        return nothing
+    end
+    base=(coords[1,1],coords[2,1],coords[3,1])
+    nodes=lagrange_nodes(_POSTVIEW_SCHEME_SAMPLE_MSH[
+        kind==1 ? :line : kind==2 ? :triangle : kind==3 ? :tetrahedron :
+        kind==4 ? :hexahedron : kind==5 ? :prism : kind==6 ? :pyramid :
+        :quadrangle])
+    for j in axes(nodes,2)
+        du,dv,dw=_pv_scheme_jacobian(cell,nodes[1,j],nodes[2,j],nodes[3,j],
+                                   base,scale)
+        determinant=_postview_det(du,dv,dw)
+        (isfinite(determinant) && !iszero(determinant)) || throw(ArgumentError(
+            "$caller: scheme element $i has a singular geometry map at " *
+            "reference node $j"))
+    end
+    return nothing
+end
+
+# Extract/validate one scheme matrix (`coefval`/`coefgeo`) or exponent table
+# (`expval`/`expgeo`) off a duck-typed record `.scheme`. Exponent tables are
+# zero-padded to three columns for a uniform monomial evaluator.
+function _postview_scheme_matrix(scheme,name::Symbol,i::Int,
+                                 caller::AbstractString)
+    hasproperty(scheme,name) || throw(ArgumentError(
+        "$caller: record $i scheme has no .$name property"))
+    m=getproperty(scheme,name)
+    m isa AbstractMatrix{<:Real} || throw(ArgumentError(
+        "$caller: record $i scheme .$name must be a real matrix"))
+    any(value->value isa Bool,m) && throw(ArgumentError(
+        "$caller: record $i scheme .$name must not contain Bool entries"))
+    converted=try
+        Float64.(m)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: record $i scheme .$name must be Float64-representable"))
+    end
+    all(isfinite,converted) || throw(ArgumentError(
+        "$caller: record $i scheme .$name must be finite"))
+    return converted
+end
+
+function _postview_scheme_exponents(scheme,name::Symbol,i::Int,
+                                    caller::AbstractString)
+    m=_postview_scheme_matrix(scheme,name,i,caller)
+    1<=size(m,2)<=3 || throw(ArgumentError(
+        "$caller: record $i scheme .$name must have 1 to 3 columns"))
+    rows=Vector{NTuple{3,Float64}}(undef,size(m,1))
+    @inbounds for r in 1:size(m,1)
+        rows[r]=(size(m,2)>=1 ? m[r,1] : 0.0,
+                 size(m,2)>=2 ? m[r,2] : 0.0,
+                 size(m,2)>=3 ? m[r,3] : 0.0)
+    end
+    return rows
+end
+
+# Build the `_PVSchemeCell` for record `i`: width checks against the scheme
+# matrix row counts, the active-step value slice, and geometric validation.
+function _postview_scheme_cell(record,kind::Symbol,i::Int,tsel::Int,
+                               caller::AbstractString)
+    scheme=_postview_record_property(record,:scheme,i,caller)
+    cv=_postview_scheme_matrix(scheme,:coefval,i,caller)
+    ev=_postview_scheme_exponents(scheme,:expval,i,caller)
+    size(cv,2)==length(ev) || throw(ArgumentError(
+        "$caller: record $i value coefficient column count $(size(cv,2)) " *
+        "must equal the value exponent row count $(length(ev))"))
+    has_geo=hasproperty(scheme,:coefgeo) &&
+        !isempty(getproperty(scheme,:coefgeo))
+    has_exp=hasproperty(scheme,:expgeo) &&
+        !isempty(getproperty(scheme,:expgeo))
+    has_geo==has_exp || throw(ArgumentError(
+        "$caller: record $i geometry coefficients and exponents must be " *
+        "provided together"))
+    if has_geo
+        cg=_postview_scheme_matrix(scheme,:coefgeo,i,caller)
+        eg=_postview_scheme_exponents(scheme,:expgeo,i,caller)
+        size(cg,2)==length(eg) || throw(ArgumentError(
+            "$caller: record $i geometry coefficient column count " *
+            "$(size(cg,2)) must equal the geometry exponent row count " *
+            "$(length(eg))"))
+    else
+        cg=Matrix{Float64}(undef,0,0);eg=NTuple{3,Float64}[]
+    end
+    ngeom=has_geo ? size(cg,1) : _POSTVIEW_RECORD_ARITY[kind]
+    nval=size(cv,1)
+    c=_postview_record_coords(record,ngeom,i,caller)
+    v=_postview_record_values(record,nval,i,caller)
+    C=try
+        Float64.(c)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: record $i coordinates must be Float64-representable"))
+    end
+    all(isfinite,C) || throw(ArgumentError(
+        "$caller: record $i coordinates must be finite"))
+    V=try
+        ndims(v)==3 ? Float64.(v[:,:,tsel]) : Float64.(v)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "$caller: record $i values must be Float64-representable"))
+    end
+    all(isfinite,V) || throw(ArgumentError(
+        "$caller: record $i values must be finite"))
+    cell=_PVSchemeCell(_POSTVIEW_SCHEME_KIND[kind],!has_geo,kind===:pyramid,
+                       cv,ev,cg,eg,C,V)
+    _pv_scheme_validate(cell,i,caller)
+    return cell
+end
+
 @inline function _postview_cell_value(field::PostViewField,id::Int,p,
                                       combine::C=_postview_weighted_scalar_operator) where {C}
     kind,j=_postview_cell_kind(field,id)
@@ -3437,6 +4016,7 @@ end
     kind==3 && return _postview_tetrahedron_value(field,j,p,combine)
     kind in UInt8(4):UInt8(7) &&
         return _postview_nonlinear_value(field,kind,j,p,combine)
+    kind==8 && return _postview_scheme_value(field,j,p,combine)
     throw(ErrorException("PostViewField: internal unsupported cell kind $kind"))
 end
 

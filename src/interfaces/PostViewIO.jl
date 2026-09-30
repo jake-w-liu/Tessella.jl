@@ -2,11 +2,18 @@
 # Included inside `module Post` from Post.jl. The parsed format is the text
 # `View "name" { TYPE(coords){values}; ... };` layout that Gmsh 4.15.2 writes
 # for list-based views and reads for `Merge`/`PostView` background fields.
+# Element records whose names carry a suffix (`SL2`, `ST2`, ...) and views with
+# `INTERPOLATION_SCHEME` records are the Gmsh high-order/interpolation-matrix
+# extension: Gmsh parses them for adapted visualization, and this reader
+# resolves them exactly for `PostViewField` background-field evaluation.
 
 using ..SizeField: PostViewField, PostViewAnisoField, AbstractField
+using ..Elements: lagrange_nodes
+using LinearAlgebra: inv
 using Printf: @sprintf
 
-export PosElement, PosText, PosView, read_pos, write_pos, postview_field
+export PosElement, PosScheme, PosText, PosView, read_pos, write_pos,
+       postview_field
 
 const _POS_ELEMENT_ARITY=(point=1,line=2,triangle=3,quadrangle=4,
                         tetrahedron=4,hexahedron=8,prism=6,pyramid=5)
@@ -34,36 +41,232 @@ const _POS_MAX_NAME_BYTES=1<<20
 const _POS_MAX_STRING_BYTES=1<<20
 
 """
-    PosElement(kind, coords, values)
+    PosScheme(coefval, expval)
+    PosScheme(coefval, expval, coefgeo, expgeo)
 
-One element record of a `.pos` view: `kind` is `:point`, `:line`, `:triangle`,
-`:quadrangle`, `:tetrahedron`, `:hexahedron`, `:prism`, or `:pyramid` with the
-canonical first-order node count (1, 2, 3, 4, 4, 8, 6, 5); `coords` is a finite
-`3×arity` matrix; `values` is a finite `c×arity` matrix (single step) or
-`c×arity×steps` array with `c ∈ (1, 3, 9)` scalar/vector/tensor components,
-ordered `[component, node, step]` as in the file. Inputs are copied.
+An element interpolation scheme as bound by a `.pos`
+`INTERPOLATION_SCHEME` record or a high-order `X2` record name. `coefval` is
+the `nval × nmonomial` coefficient matrix and `expval` the `nmonomial × d`
+(`d ≤ 3`) exponent table, so value basis function `i` evaluates as
+`Σⱼ coefval[i,j] · u^a v^b w^c` over exponent row `(a,b,c)` — Gmsh's
+`computeShapeFunctions` convention. On `:pyramid` elements every exponent row
+instead evaluates Bergot-style as `u^a v^b w^c · (1-w)^(max(a,b)-a-b)`. The
+two-matrix form keeps the family's canonical first-order geometry; the
+four-matrix form adds `coefgeo`/`expgeo` for a curved geometric map whose node
+count is `size(coefgeo,1)`. Inputs are copied.
+"""
+struct PosScheme
+    coefval::Matrix{Float64}
+    expval::Matrix{Float64}
+    coefgeo::Matrix{Float64}
+    expgeo::Matrix{Float64}
+    function PosScheme(coefval::AbstractMatrix{<:Real},
+                       expval::AbstractMatrix{<:Real},
+                       coefgeo::AbstractMatrix{<:Real}=
+                           Matrix{Float64}(undef,0,0),
+                       expgeo::AbstractMatrix{<:Real}=
+                           Matrix{Float64}(undef,0,0))
+        caller="PosScheme"
+        cv=_pos_scheme_matrix(coefval,caller,"value coefficients")
+        ev=_pos_scheme_matrix(expval,caller,"value exponents")
+        size(cv,2)==size(ev,1) || throw(ArgumentError(
+            "$caller: value coefficient column count $(size(cv,2)) must " *
+            "equal the value exponent row count $(size(ev,1))"))
+        1<=size(ev,2)<=3 || throw(ArgumentError(
+            "$caller: value exponents must have 1 to 3 columns " *
+            "(got $(size(ev,2)))"))
+        geo_given=!isempty(coefgeo) || !isempty(expgeo)
+        if geo_given
+            (isempty(coefgeo) || isempty(expgeo)) && throw(ArgumentError(
+                "$caller: geometry coefficients and exponents must be " *
+                "provided together"))
+            cg=_pos_scheme_matrix(coefgeo,caller,"geometry coefficients")
+            eg=_pos_scheme_matrix(expgeo,caller,"geometry exponents")
+            size(cg,2)==size(eg,1) || throw(ArgumentError(
+                "$caller: geometry coefficient column count $(size(cg,2)) " *
+                "must equal the geometry exponent row count $(size(eg,1))"))
+            1<=size(eg,2)<=3 || throw(ArgumentError(
+                "$caller: geometry exponents must have 1 to 3 columns " *
+                "(got $(size(eg,2)))"))
+        else
+            cg=Matrix{Float64}(undef,0,0)
+            eg=Matrix{Float64}(undef,0,0)
+        end
+        return new(cv,ev,cg,eg)
+    end
+end
+
+Base.:(==)(a::PosScheme,b::PosScheme)=
+    a.coefval==b.coefval && a.expval==b.expval &&
+    a.coefgeo==b.coefgeo && a.expgeo==b.expgeo
+Base.isequal(a::PosScheme,b::PosScheme)=a==b
+Base.hash(a::PosScheme,h::UInt)=
+    hash(a.expgeo,hash(a.coefgeo,hash(a.expval,hash(a.coefval,h))))
+
+function _pos_scheme_matrix(matrix,caller::AbstractString,
+                            what::AbstractString)::Matrix{Float64}
+    matrix isa AbstractMatrix{<:Real} || throw(ArgumentError(
+        "$caller: $what must be a real matrix"))
+    size(matrix,1)>=1 || throw(ArgumentError("$caller: $what is empty"))
+    any(v->v isa Bool,matrix) && throw(ArgumentError(
+        "$caller: $what must not contain Bool entries"))
+    converted=try
+        Matrix{Float64}(matrix)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("$caller: $what must be Float64-representable"))
+    end
+    all(isfinite,converted) || throw(ArgumentError(
+        "$caller: $what must be finite"))
+    return converted
+end
+
+_pos_scheme_geom_nodes(scheme::PosScheme,kind::Symbol)=
+    isempty(scheme.coefgeo) ? _POS_ELEMENT_ARITY[kind] : size(scheme.coefgeo,1)
+_pos_scheme_value_nodes(scheme::PosScheme)=size(scheme.coefval,1)
+
+# Order-2 MSH type per record family, matching PViewDataList::setOrder2.
+const _POS_ORDER2_MSH=(line=8,triangle=9,quadrangle=10,tetrahedron=11,
+                       hexahedron=12,prism=13,pyramid=14)
+
+# Bergot exponent triples (i,j,k), k ≤ 2−max(i,j), for the 14-node order-2
+# pyramid — pyramidalBasis enumerates i,j outer / k inner in this order.
+const _POS_PYR2_EXPS=NTuple{3,Float64}[
+    (i,j,k) for i in 0.0:2.0 for j in 0.0:2.0
+            for k in 0.0:(2.0-max(i,j))]
+
+@inline function _pos_monomial(exps::NTuple{3,Float64},u,v,w,pyramid::Bool)
+    value=u^exps[1]*v^exps[2]*w^exps[3]
+    pyramid || return value
+    # pyramidalBasis::VDM/evaluate clamps 1−w away from the apex singularity.
+    onemw=max(1e-14,1.0-w)
+    return value*onemw^(max(exps[1],exps[2])-exps[1]-exps[2])
+end
+
+# Nodal order-2 scheme for a record family: invert the Vandermonde of the
+# family monomials on the Gmsh-ordered reference nodes (lagrange_nodes), so
+# Nᵢ(nodeⱼ) = δᵢⱼ. Pyramid rows use the Bergot factor like Gmsh.
+function _pos_order2_scheme_build(kind::Symbol)::PosScheme
+    pyramid=kind===:pyramid
+    nodes=lagrange_nodes(_POS_ORDER2_MSH[kind])
+    n=size(nodes,2)
+    exps=if pyramid
+        _POS_PYR2_EXPS
+    else
+        NTuple{3,Float64}[(Float64(q[1]),Float64(q[2]),Float64(q[3]))
+                          for q in _pos_order2_lattice(kind)]
+    end
+    vandermonde=Matrix{Float64}(undef,n,n)
+    @inbounds for point in 1:n
+        u,v,w=nodes[1,point],nodes[2,point],nodes[3,point]
+        for term in 1:n
+            vandermonde[point,term]=_pos_monomial(exps[term],u,v,w,pyramid)
+        end
+    end
+    # Nᵢ(r) = Σₜ coef[i,t]·Mₜ(r) must satisfy Nᵢ(nodeⱼ) = δᵢⱼ, i.e.
+    # coef·Vᵀ = I — the coefficient matrix is (Vᵀ)⁻¹, not V⁻¹.
+    coef=Matrix(inv(vandermonde'))
+    exponent_matrix=Matrix{Float64}(undef,n,3)
+    @inbounds for term in 1:n
+        exponent_matrix[term,1]=exps[term][1]
+        exponent_matrix[term,2]=exps[term][2]
+        exponent_matrix[term,3]=exps[term][3]
+    end
+    return PosScheme(coef,exponent_matrix,coef,exponent_matrix)
+end
+
+# Integer exponent lattice per family at order 2. The sets are the family
+# monomials (triangle/tetrahedron total-degree, quadrangle/hexahedron tensor,
+# prism product, pyramid uses the Bergot triples above); their order only
+# affects the row order of the coefficient matrix, not the evaluated basis.
+function _pos_order2_lattice(kind::Symbol)
+    kind===:line && return NTuple{3,Int}[(0,0,0),(2,0,0),(1,0,0)]
+    kind===:triangle && return NTuple{3,Int}[
+        (0,0,0),(2,0,0),(0,2,0),(1,1,0),(1,0,0),(0,1,0)]
+    kind===:quadrangle && return NTuple{3,Int}[
+        (i,j,0) for j in 0:2 for i in 0:2]
+    kind===:tetrahedron && return NTuple{3,Int}[
+        (i,j,k) for k in 0:2 for j in 0:(2-k) for i in 0:(2-j-k)]
+    kind===:hexahedron && return NTuple{3,Int}[
+        (i,j,k) for k in 0:2 for j in 0:2 for i in 0:2]
+    kind===:prism && return NTuple{3,Int}[
+        (i,j,k) for k in 0:2 for j in 0:2 for i in 0:(2-j)]
+    throw(ErrorException("PosScheme: unsupported order-2 family $kind"))
+end
+
+# Cached shared order-2 schemes — one instance per family so views bind the
+# same object and element `===` comparisons stay cheap and deterministic.
+const _POS_ORDER2_SCHEMES=Dict{Symbol,PosScheme}(
+    kind=>_pos_order2_scheme_build(kind) for
+    kind in (:line,:triangle,:quadrangle,:tetrahedron,
+             :hexahedron,:prism,:pyramid))
+
+@inline _pos_order2_scheme(kind::Symbol)=_POS_ORDER2_SCHEMES[kind]
+
+@inline function _pos_suffix_valid(suffix::AbstractString)
+    return all(c->('a'<=c<='z' || 'A'<=c<='Z' ||
+                   '0'<=c<='9' || c=='_'),suffix)
+end
+
+"""
+    PosElement(kind, coords, values; suffix="", scheme=nothing)
+
+One element record of a `.pos` view. `kind` is `:point`, `:line`, `:triangle`,
+`:quadrangle`, `:tetrahedron`, `:hexahedron`, `:prism`, or `:pyramid`;
+`coords` is a finite `3×ngeom` matrix and `values` a finite `c×nval` matrix
+(single step) or `c×nval×steps` array with `c ∈ (1, 3, 9)` scalar/vector/tensor
+components, ordered `[component, node, step]` as in the file.
+
+With `scheme === nothing` the element is a canonical first-order record and
+both widths are the family arity (1, 2, 3, 4, 4, 8, 6, 5). With a
+[`PosScheme`](@ref), `coords` holds `size(scheme.coefgeo,1)` geometry nodes
+(the family arity when the scheme has no geometry matrices) and `values`
+holds `size(scheme.coefval,1)` value degrees of freedom. `suffix` is the
+record-name suffix (`"2"` for the built-in order-2 elements); a nonempty
+suffix without an explicit scheme binds the shared order-2 scheme for the
+family (point records keep the suffix verbatim without a scheme). Inputs are
+copied.
 """
 struct PosElement
     kind::Symbol
     coords::Matrix{Float64}
     values::Array{Float64,3}
+    suffix::String
+    scheme::Union{Nothing,PosScheme}
     function PosElement(kind::Symbol,coords::AbstractMatrix{<:Real},
-                        values::AbstractArray{<:Real})
+                        values::AbstractArray{<:Real};
+                        suffix::AbstractString="",
+                        scheme::Union{Nothing,PosScheme}=nothing)
         caller="PosElement"
         haskey(_POS_ELEMENT_ARITY,kind) || throw(ArgumentError(
             "$caller: kind $(repr(kind)) is unsupported (expected one of " *
             "point/line/triangle/quadrangle/tetrahedron/hexahedron/prism/pyramid)"))
-        arity=_POS_ELEMENT_ARITY[kind]
+        (scheme===nothing || kind!==:point) || throw(ArgumentError(
+            "$caller: point records cannot carry an interpolation scheme " *
+            "(Gmsh defines no high-order point basis)"))
+        _pos_suffix_valid(suffix) || throw(ArgumentError(
+            "$caller: record-name suffix $(repr(suffix)) may only contain " *
+            "letters, digits, and '_'"))
+        resolved=scheme
+        if resolved===nothing && !isempty(suffix) && kind!==:point
+            resolved=_pos_order2_scheme(kind)
+        end
+        ngeom=resolved===nothing ? _POS_ELEMENT_ARITY[kind] :
+            _pos_scheme_geom_nodes(resolved,kind)
+        nval=resolved===nothing ? _POS_ELEMENT_ARITY[kind] :
+            _pos_scheme_value_nodes(resolved)
         size(coords,1)==3 || throw(ArgumentError(
-            "$caller: coords must be a 3×$arity matrix"))
-        size(coords,2)==arity || throw(ArgumentError(
-            "$caller: kind $kind requires exactly $arity nodes"))
+            "$caller: coords must be a 3×$ngeom matrix"))
+        size(coords,2)==ngeom || throw(ArgumentError(
+            "$caller: kind $kind requires exactly $ngeom geometry nodes " *
+            "(got $(size(coords,2)))"))
         ndims(values) in (2,3) || throw(ArgumentError(
-            "$caller: values must be a c×$arity matrix or c×$arity×steps array"))
+            "$caller: values must be a c×$nval matrix or c×$nval×steps array"))
         size(values,1) in (1,3,9) || throw(ArgumentError(
             "$caller: values must have 1, 3, or 9 components per node"))
-        size(values,2)==arity || throw(ArgumentError(
-            "$caller: values must have exactly $arity nodes"))
+        size(values,2)==nval || throw(ArgumentError(
+            "$caller: values must have exactly $nval value nodes " *
+            "(got $(size(values,2)))"))
         ndims(values)==3 && size(values,3)==0 && throw(ArgumentError(
             "$caller: empty time-step array"))
         any(v->v isa Bool,coords) && throw(ArgumentError(
@@ -79,7 +282,7 @@ struct PosElement
         end
         V=try
             ndims(values)==3 ? Array{Float64,3}(Float64.(values)) :
-                reshape(Float64.(values),size(values,1),arity,1)
+                reshape(Float64.(values),size(values,1),nval,1)
         catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("$caller: values must be Float64-representable"))
@@ -88,7 +291,7 @@ struct PosElement
             "$caller: coordinates must be finite"))
         all(isfinite,V) || throw(ArgumentError(
             "$caller: values must be finite"))
-        return new(kind,C,V)
+        return new(kind,C,V,String(suffix),resolved)
     end
 end
 
@@ -150,18 +353,90 @@ struct PosText
     end
 end
 
+# Family precedence of an `INTERPOLATION_SCHEME` record, evaluated against
+# the element families present at the record's file position. Gmsh's grammar
+# scans line, triangle, quadrangle, tetrahedron, pyramid, prism, hexahedron
+# for two-matrix schemes and line, triangle, quadrangle, tetrahedron,
+# hexahedron for four-matrix schemes (the curved form cannot bind pyramids or
+# prisms).
+const _POS_SCHEME_PRECEDENCE2=(:line,:triangle,:quadrangle,:tetrahedron,
+                               :pyramid,:prism,:hexahedron)
+const _POS_SCHEME_PRECEDENCE4=(:line,:triangle,:quadrangle,:tetrahedron,
+                               :hexahedron)
+
+# Resolve the family→scheme binding of a view in file order: `kinds[i]` and
+# `suffixes[i]` describe element record i, `positions[s]` counts how many
+# element records precede scheme s. First binding wins per family, matching
+# `PViewData::setInterpolationMatrices`. Returns `(bound, source)` where
+# `source[family]` is the 1-based `interpolations` index that bound the
+# family, or `0` when a suffixed/scheme-carrying element bound it.
+function _pos_resolve_schemes(kinds::AbstractVector,
+                              suffixes::AbstractVector,
+                              element_schemes::AbstractVector,
+                              interpolations::AbstractVector,
+                              positions::AbstractVector,
+                              caller::AbstractString)
+    bound=Dict{Symbol,PosScheme}()
+    source=Dict{Symbol,Int}()
+    seen=Dict{Symbol,Bool}()
+    nschemes=length(interpolations)
+    next_scheme=1
+    nelem=length(kinds)
+    for pos in 0:nelem
+        while next_scheme<=nschemes && positions[next_scheme]==pos
+            matrices=interpolations[next_scheme]
+            precedence=length(matrices)==4 ?
+                _POS_SCHEME_PRECEDENCE4 : _POS_SCHEME_PRECEDENCE2
+            family=findfirst(family->get(seen,family,false),precedence)
+            if family!==nothing
+                target=precedence[family]
+                if !haskey(bound,target)
+                    bound[target]=length(matrices)==4 ?
+                        PosScheme(matrices[1],matrices[2],
+                                  matrices[3],matrices[4]) :
+                        PosScheme(matrices[1],matrices[2])
+                    source[target]=next_scheme
+                end
+            end
+            next_scheme+=1
+        end
+        pos==nelem && break
+        kind=kinds[pos+1]
+        seen[kind]=true
+        element_scheme=element_schemes[pos+1]
+        if !haskey(bound,kind) && kind!==:point &&
+           (!isempty(suffixes[pos+1]) || element_scheme!==nothing)
+            bound[kind]=element_scheme===nothing ?
+                _pos_order2_scheme(kind) : element_scheme
+            source[kind]=0
+        end
+    end
+    return bound,source
+end
+
 """
     PosView(name; tag=0, time=Float64[], elements=PosElement[],
-            texts=PosText[], interpolations=[])
+            texts=PosText[], interpolations=[], scheme_positions=[])
 
 A parsed `.pos` view: `elements` are [`PosElement`](@ref) records in file
 order, `time` lists the `TIME` step values (required to have one entry per
 data step when given, padded with `0:n-1` when omitted), `tag` is the view tag
 used by `PostView` field resolution (`read_pos` assigns `1:length(views)`).
 `interpolations` preserves `INTERPOLATION_SCHEME` matrices as read
-(list-of-rows matrices, 2 or 4 per scheme); they are not interpreted by
-[`PostViewField`](@ref) — Gmsh only uses them for adapted visualization grids.
-Every element record must share the same step count.
+(list-of-rows matrices, 2 or 4 per scheme) and `scheme_positions` the number
+of element records preceding each scheme (defaults: all schemes last, which
+matches `read_pos` output only when every scheme followed all elements).
+
+Each `INTERPOLATION_SCHEME` binds the first element family present at its
+file position in Gmsh's precedence order (line, triangle, quadrangle,
+tetrahedron, [pyramid, prism for two-matrix schemes], hexahedron); the first
+binding wins per family, and a suffixed record name (`SL2`, …) binds its
+family to the built-in order-2 nodal scheme at its own position. Elements of
+a bound family are retagged with the resolved [`PosScheme`](@ref), which
+revalidates their geometry/value widths — the scheme, not the name suffix,
+defines the record layout. Elements carrying an explicit scheme that
+contradicts the view-level binding raise `ArgumentError`. Every element
+record must share the same step count.
 """
 struct PosView
     name::String
@@ -170,13 +445,15 @@ struct PosView
     elements::Vector{PosElement}
     texts::Vector{PosText}
     interpolations::Vector{Vector{Matrix{Float64}}}
+    scheme_positions::Vector{Int}
     function PosView(name::AbstractString;
                      tag::Integer=0,
                      time::AbstractVector{<:Real}=Float64[],
                      elements::AbstractVector=PosElement[],
                      texts::AbstractVector=PosText[],
                      interpolations::AbstractVector=
-                         Vector{Matrix{Float64}}[])
+                         Vector{Matrix{Float64}}[],
+                     scheme_positions::AbstractVector{<:Integer}=Int[])
         caller="PosView"
         view_name=String(name)
         occursin('"',view_name) && throw(ArgumentError(
@@ -239,6 +516,95 @@ struct PosView
             end
             push!(scheme_list,matrices)
         end
+        positions=Int[]
+        if isempty(scheme_positions)
+            resize!(positions,length(scheme_list))
+            fill!(positions,length(element_list))
+        else
+            length(scheme_positions)==length(scheme_list) || throw(
+                ArgumentError(
+                    "$caller: scheme_positions has " *
+                    "$(length(scheme_positions)) entries for " *
+                    "$(length(scheme_list)) interpolation schemes"))
+            previous=0
+            for (i,position) in enumerate(scheme_positions)
+                position isa Bool && throw(ArgumentError(
+                    "$caller: scheme position $i must not be Bool"))
+                converted=try
+                    Int(position)
+                catch err
+                    err isa InterruptException && rethrow()
+                    throw(ArgumentError(
+                        "$caller: scheme position $i is outside Int bounds"))
+                end
+                0<=converted<=length(element_list) || throw(ArgumentError(
+                    "$caller: scheme position $i ($converted) is outside " *
+                    "0:$(length(element_list))"))
+                converted>=previous || throw(ArgumentError(
+                    "$caller: scheme positions must be nondecreasing"))
+                previous=converted
+                push!(positions,converted)
+            end
+        end
+        # Rebind schemes in file order, then retag every element to its
+        # family's resolved scheme. Elements without a scheme inherit the
+        # family binding (rebuild revalidates their record widths, like
+        # PViewDataList::_stat decoding the flat lists); elements carrying an
+        # explicit scheme must agree with the family binding.
+        resolved0,_=_pos_resolve_schemes(
+            Symbol[e.kind for e in element_list],
+            String[e.suffix for e in element_list],
+            Union{Nothing,PosScheme}[nothing for _ in element_list],
+            scheme_list,positions,caller)
+        # An element-level scheme only steers the binding when it differs
+        # from what the view-level records already bind for its family —
+        # elements retagged by family binding (the read_pos path) carry the
+        # bound scheme as data, not as a binding directive.
+        resolved,resolved_source=_pos_resolve_schemes(
+            Symbol[e.kind for e in element_list],
+            String[e.suffix for e in element_list],
+            Union{Nothing,PosScheme}[
+                let scheme=e.scheme
+                    (scheme===nothing || scheme==get(resolved0,e.kind,nothing)) ?
+                        nothing : scheme
+                end for e in element_list],
+            scheme_list,positions,caller)
+        first_of_family=Dict{Symbol,Int}()
+        for (i,element) in enumerate(element_list)
+            get!(first_of_family,element.kind,i)
+        end
+        for (i,element) in enumerate(element_list)
+            family_scheme=get(resolved,element.kind,nothing)
+            if element.scheme===nothing && family_scheme!==nothing
+                element_list[i]=PosElement(
+                    element.kind,element.coords,element.values;
+                    suffix=element.suffix,scheme=family_scheme)
+            elseif element.scheme!==nothing && family_scheme!==nothing &&
+                   element.scheme!=family_scheme
+                throw(ArgumentError(
+                    "$caller: element $i carries a scheme that contradicts " *
+                    "the view-level $(element.kind) binding"))
+            end
+        end
+        # Custom (non-order-2) schemes only serialize through
+        # INTERPOLATION_SCHEME records: an element-bound custom scheme would
+        # not rebind on re-parse (record names only convey order-2), so views
+        # must carry the scheme explicitly via `interpolations` +
+        # `scheme_positions`. A nonempty name suffix on a custom-scheme
+        # element is safe only when the binding scheme record precedes the
+        # element — otherwise the suffix's order-2 binding would shadow it.
+        for (i,element) in enumerate(element_list)
+            element.scheme===nothing && continue
+            element.kind===:point && continue
+            element.scheme===_pos_order2_scheme(element.kind) && continue
+            source=get(resolved_source,element.kind,0)
+            (source==0 || (!isempty(element.suffix) &&
+                           i<=positions[source])) && throw(ArgumentError(
+                "$caller: element $i carries a custom scheme not bound by " *
+                "an INTERPOLATION_SCHEME entry preceding it — add the " *
+                "scheme via `interpolations`/`scheme_positions` (suffixed " *
+                "names only serialize built-in order-2 elements)"))
+        end
         if isempty(element_list)
             length(steps_time)<=typemax(Int32) || throw(ArgumentError(
                 "$caller: time-step count exceeds the Int32 limit"))
@@ -260,7 +626,7 @@ struct PosView
             end
         end
         return new(view_name,view_tag,normalized_time,element_list,text_list,
-                   scheme_list)
+                   scheme_list,positions)
     end
 end
 
@@ -562,13 +928,20 @@ function _pos_matrix!(r::_PosReader,limits::_PosReadLimits,
 end
 
 function _pos_unknown_record(word::AbstractString,caller::AbstractString,at::Int)
-    if length(word)>2 && haskey(_POS_RECORD_TYPES,word[1:2])
-        return ArgumentError(
-            "$caller: record type '$word' at byte $at is a higher-order/" *
-            "interpolation-matrix element, which is not supported")
-    end
     return ArgumentError(
         "$caller: unknown view record '$word' at byte $at")
+end
+
+# Raw element record collected before the family schemes are resolved: the
+# record layout (geometry/value node counts) is only known once the view's
+# `INTERPOLATION_SCHEME` records and `X2` name suffixes have been bound.
+struct _PosRawElement
+    kind::Symbol
+    suffix::String
+    ncomp::Int
+    coords::Vector{Float64}
+    values::Vector{Float64}
+    at::Int
 end
 
 function _pos_parse_view(r::_PosReader,tag::Int,limits::_PosReadLimits,
@@ -582,12 +955,12 @@ function _pos_parse_view(r::_PosReader,tag::Int,limits::_PosReadLimits,
     occursin('"',name) && throw(ArgumentError(
         "$caller: view name contains an unbalanced quote"))
     _pos_expect!(r,:lbrace)
-    elements=PosElement[]
+    raw_elements=_PosRawElement[]
     texts=PosText[]
     schemes=Vector{Matrix{Float64}}[]
+    scheme_positions=Int[]
     time=Float64[]
     seen_time=false
-    nsteps=0
     while true
         t=_pos_take!(r)
         t.kind==:rbrace && break
@@ -630,44 +1003,85 @@ function _pos_parse_view(r::_PosReader,tag::Int,limits::_PosReadLimits,
                 "$caller: INTERPOLATION_SCHEME expects 2 or 4 matrices at " *
                 "byte $(t.at) (got $(length(matrices)))"))
             push!(schemes,matrices)
+            push!(scheme_positions,length(raw_elements))
             _pos_expect!(r,:semi)
         else
-            spec=get(_POS_RECORD_TYPES,word,nothing)
+            ncodeunits(word)>=2 || throw(_pos_unknown_record(word,caller,t.at))
+            spec=get(_POS_RECORD_TYPES,word[1:2],nothing)
             spec===nothing && throw(_pos_unknown_record(word,caller,t.at))
-            kind,arity,ncomp=spec
+            kind,_,ncomp=spec
             flat_coords=_pos_number_list!(r,:lparen,:rparen,caller)
-            length(flat_coords)==3*arity || throw(ArgumentError(
-                "$caller: $word record at byte $(t.at) expects $arity nodes " *
-                "($(3*arity) coordinates, got $(length(flat_coords)))"))
+            length(flat_coords)%3==0 || throw(ArgumentError(
+                "$caller: $word record at byte $(t.at) has " *
+                "$(length(flat_coords)) coordinates, not a multiple of 3"))
             flat_values=_pos_number_list!(r,:lbrace,:rbrace,caller)
-            width=arity*ncomp
-            (!isempty(flat_values) && length(flat_values)%width==0) ||
+            (length(flat_coords)+length(flat_values))<=limits.values ||
                 throw(ArgumentError(
-                    "$caller: $word record at byte $(t.at) has " *
-                    "$(length(flat_values)) values, not a positive multiple " *
-                    "of nodes×components=$width"))
-            steps=length(flat_values)÷width
-            nsteps==0 ? (nsteps=steps) : steps==nsteps || throw(ArgumentError(
-                "$caller: $word record at byte $(t.at) has $steps time " *
-                "steps but the view has $nsteps"))
-            (3*arity+length(flat_values))<=limits.values || throw(ArgumentError(
-                "$caller: element data exceeds max_values=$(limits.values)"))
-            coords=Matrix{Float64}(undef,3,arity)
-            copyto!(coords,flat_coords)
-            values=Array{Float64,3}(undef,ncomp,arity,steps)
-            @inbounds for s in 1:steps, j in 1:arity, c in 1:ncomp
-                values[c,j,s]=flat_values[(s-1)*width+(j-1)*ncomp+c]
-            end
-            push!(elements,PosElement(kind,coords,values))
+                    "$caller: element data exceeds max_values=$(limits.values)"))
+            push!(raw_elements,_PosRawElement(
+                kind,word[3:end],ncomp,flat_coords,flat_values,t.at))
             _pos_expect!(r,:semi)
         end
-        length(elements)+length(texts)+length(schemes)<=limits.elements ||
+        length(raw_elements)+length(texts)+length(schemes)<=limits.elements ||
             throw(ArgumentError(
                 "$caller: view records exceed max_elements=$(limits.elements)"))
     end
     _pos_expect!(r,:semi)
+    return _pos_assemble_view(name,tag,time,raw_elements,texts,
+                              schemes,scheme_positions,caller)
+end
+
+# Decode raw element records after the whole view body is known: resolve the
+# family scheme bindings in file order (INTERPOLATION_SCHEME positions plus
+# order-2 name suffixes), then validate each record's geometry and value
+# widths against its family's bound scheme — PViewDataList::_stat semantics.
+function _pos_assemble_view(name::AbstractString,tag::Int,
+                            time::Vector{Float64},raw::Vector{_PosRawElement},
+                            texts::Vector{PosText},
+                            schemes::Vector{Vector{Matrix{Float64}}},
+                            scheme_positions::Vector{Int},
+                            caller::AbstractString)::PosView
+    nelem=length(raw)
+    kinds=Symbol[raw[i].kind for i in 1:nelem]
+    suffixes=String[raw[i].suffix for i in 1:nelem]
+    bound,_=_pos_resolve_schemes(
+        kinds,suffixes,Union{Nothing,PosScheme}[nothing for _ in 1:nelem],
+        schemes,scheme_positions,caller)
+    elements=Vector{PosElement}(undef,nelem)
+    nsteps=0
+    @inbounds for i in 1:nelem
+        record=raw[i]
+        scheme=get(bound,record.kind,nothing)
+        ngeom=scheme===nothing ? _POS_ELEMENT_ARITY[record.kind] :
+            _pos_scheme_geom_nodes(scheme,record.kind)
+        nval=scheme===nothing ? _POS_ELEMENT_ARITY[record.kind] :
+            _pos_scheme_value_nodes(scheme)
+        word=_POS_RECORD_NAME[(record.kind,record.ncomp)]*record.suffix
+        length(record.coords)==3ngeom || throw(ArgumentError(
+            "$caller: $word record at byte $(record.at) expects $ngeom " *
+            "geometry nodes ($(3ngeom) coordinates, got " *
+            "$(length(record.coords)))"))
+        width=nval*record.ncomp
+        (!isempty(record.values) && length(record.values)%width==0) ||
+            throw(ArgumentError(
+                "$caller: $word record at byte $(record.at) has " *
+                "$(length(record.values)) values, not a positive multiple " *
+                "of nodes×components=$width"))
+        steps=length(record.values)÷width
+        nsteps==0 ? (nsteps=steps) : steps==nsteps || throw(ArgumentError(
+            "$caller: $word record at byte $(record.at) has $steps time " *
+            "steps but the view has $nsteps"))
+        coords=Matrix{Float64}(undef,3,ngeom)
+        copyto!(coords,record.coords)
+        values=Array{Float64,3}(undef,record.ncomp,nval,steps)
+        for s in 1:steps, j in 1:nval, c in 1:record.ncomp
+            values[c,j,s]=record.values[(s-1)*width+(j-1)*record.ncomp+c]
+        end
+        elements[i]=PosElement(record.kind,coords,values;
+                               suffix=record.suffix,scheme=scheme)
+    end
     return PosView(name;tag=tag,time=time,elements=elements,texts=texts,
-                   interpolations=schemes)
+                   interpolations=schemes,scheme_positions=scheme_positions)
 end
 
 function _pos_parse(data::Vector{UInt8},limits::_PosReadLimits,
@@ -787,7 +1201,14 @@ end
 
 function _pos_write_element(io::IO,element::PosElement)
     name=_POS_RECORD_NAME[(element.kind,size(element.values,1))]
-    print(io,name,'(')
+    suffix=element.suffix
+    if isempty(suffix) && element.scheme!==nothing &&
+       element.scheme===_pos_order2_scheme(element.kind)
+        # Built-in order-2 elements serialize through their suffixed name,
+        # which rebinds the shared scheme on re-parse.
+        suffix="2"
+    end
+    print(io,name,suffix,'(')
     for j in axes(element.coords,2)
         j>1 && print(io,',')
         print(io,_pos_fmt(element.coords[1,j]),',',
@@ -806,14 +1227,40 @@ function _pos_write_element(io::IO,element::PosElement)
     return nothing
 end
 
+function _pos_write_interpolation(io::IO,scheme::AbstractVector)
+    print(io,"INTERPOLATION_SCHEME")
+    for matrix in scheme
+        print(io,'{')
+        for i in axes(matrix,1)
+            i>first(axes(matrix,1)) && print(io,',')
+            print(io,'{',join((_pos_fmt(v) for v in matrix[i,:]),','),'}')
+        end
+        print(io,'}')
+    end
+    println(io,';')
+    return nothing
+end
+
 function _pos_write_view(io::IO,view::PosView)
     nsteps=isempty(view.elements) ? length(view.time) :
         size(view.elements[1].values,3)
     print(io,"View \"",view.name,"\" {\n")
     nsteps>1 && println(io,"TIME{",join((_pos_fmt(t) for t in view.time),','),
                         "};")
-    for element in view.elements
-        _pos_write_element(io,element)
+    nschemes=length(view.interpolations)
+    next_scheme=1
+    nelem=length(view.elements)
+    # INTERPOLATION_SCHEME records interleave at their recorded element
+    # positions so a re-parse binds the same families — PosView validated
+    # that element schemes agree with this binding order.
+    for index in 0:nelem
+        while next_scheme<=nschemes &&
+              view.scheme_positions[next_scheme]==index
+            _pos_write_interpolation(io,view.interpolations[next_scheme])
+            next_scheme+=1
+        end
+        index==nelem && break
+        _pos_write_element(io,view.elements[index+1])
     end
     for text in view.texts
         quoted=join((string('"',s,'"') for s in text.strings),',')
@@ -826,18 +1273,6 @@ function _pos_write_view(io::IO,view::PosView)
                     _pos_fmt(text.coords[2]),",",_pos_fmt(text.coords[3]),",",
                     _pos_fmt(text.style),"){",quoted,"};")
         end
-    end
-    for scheme in view.interpolations
-        print(io,"INTERPOLATION_SCHEME")
-        for matrix in scheme
-            print(io,'{')
-            for i in axes(matrix,1)
-                i>first(axes(matrix,1)) && print(io,',')
-                print(io,'{',join((_pos_fmt(v) for v in matrix[i,:]),','),'}')
-            end
-            print(io,'}')
-        end
-        println(io,';')
     end
     print(io,"};\n")
     return nothing

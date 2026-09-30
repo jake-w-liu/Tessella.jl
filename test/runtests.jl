@@ -129,6 +129,7 @@ using Tessella
     # Stage 2 — Gmsh-compatible size fields + 1-D/surface meshing (CRC-gated).
     include("fields/sizefield_test.jl") # Distance/Threshold/Box/Min fields + local 3-D sizing
     include("fields/postview_field_test.jl") # PostView scalar/vector/tensor size fields
+    include("fields/postview_highorder_test.jl") # high-order .pos records + PostViewField schemes
     include("meshing/mesh1d_test.jl") # size fields + graded edge meshing vs arc length
     include("meshing/meshsurface_test.jl") # planar/cylinder/parametric surface meshing
 
