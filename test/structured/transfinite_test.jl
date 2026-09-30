@@ -269,4 +269,177 @@ end
         @test large<=2.25small+262_144
         @info "transfinite allocation ratchet" small_bytes=small large_bytes=large
     end
+
+    @testset "warped transfinite patches (3-D Coons interpolation)" begin
+        # z = 0.5*u*v bilinear warp: 25 nodes / 32 triangles / 16 segments.
+        function _warped_quad(L::Int,H::Int;amplitude=0.5)
+            bottom=[(Float64(i)/L,0.0,0.0) for i in 0:L]
+            right=[(1.0,Float64(j)/H,amplitude*Float64(j)/H) for j in 0:H]
+            top=[(1.0-Float64(i)/L,1.0,amplitude*(1.0-Float64(i)/L))
+                 for i in 0:L]
+            left=[(0.0,1.0-Float64(j)/H,0.0) for j in 0:H]
+            return bottom,right,top,left
+        end
+        sides=_warped_quad(4,4)
+        @test_throws ArgumentError mesh_transfinite_patch(sides...)
+        mesh=mesh_transfinite_patch(sides...;arrangement=:left,
+                                    allow_warped=true,face_tag=21,
+                                    side_tags=(11,12,13,14))
+        @test validate(mesh).ok
+        @test (nnodes(mesh),nsegs(mesh),ntris(mesh))==(25,16,32)
+        @test all(mesh.tri_tag.==21)
+        @test (unique(mesh.seg_tag)|>sort)==[11,12,13,14]
+        for i in 1:nnodes(mesh)
+            x,y,z=node(mesh,i)
+            @test z==0.5x*y
+        end
+        @test _transfinite_canonical_triangles(mesh)==
+              sort!(_expected_triangles(4,4,:left))
+
+        # Every arrangement preserves the warped interior exactly.
+        for arrangement in (:right,:alternate_left,:alternate_right)
+            candidate=mesh_transfinite_patch(
+                sides...;arrangement=arrangement,allow_warped=true)
+            @test validate(candidate).ok
+            @test candidate.coords==mesh.coords
+            @test _transfinite_canonical_triangles(candidate)==
+                  sort!(_expected_triangles(4,4,arrangement))
+        end
+
+        # A coplanar boundary under `allow_warped` is bit-identical to the
+        # planar path.
+        planar=_transfinite_rectangle(4,4)
+        plain=mesh_transfinite_patch(planar...;arrangement=:alternate_left)
+        flagged=mesh_transfinite_patch(planar...;arrangement=:alternate_left,
+                                      allow_warped=true)
+        @test flagged.coords==plain.coords
+        @test flagged.tris==plain.tris
+        @test mesh_crc(flagged)==mesh_crc(plain)
+
+        # The warped path allocates linearly, same growth envelope as planar.
+        @noinline _warped_alloc(s)=@allocated mesh_transfinite_patch(
+            s...;arrangement=:alternate_left,allow_warped=true)
+        flat64=_transfinite_rectangle(64,64)
+        warp_sides=_warped_quad(64,64)
+        _warped_alloc(flat64);_warped_alloc(warp_sides)
+        flat_alloc=_warped_alloc(flat64)
+        warp_alloc=_warped_alloc(warp_sides)
+        @test warp_alloc<=1.5flat_alloc+262_144
+
+        # A genuinely non-coplanar ring that crosses itself in mid-air is
+        # rejected by the 3-D boundary audit.
+        c1=(0.0,0.0,0.0);c2=(1.0,1.0,1.0);c3=(0.0,1.0,0.0);c4=(1.0,0.0,1.0)
+        lin(a,b,n)=[ntuple(d->a[d]+(b[d]-a[d])*i/(n-1),3) for i in 0:n-1]
+        crossed=(lin(c1,c2,5),lin(c2,c3,5),lin(c3,c4,5),lin(c4,c1,5))
+        @test_throws ArgumentError mesh_transfinite_patch(
+            crossed...;allow_warped=true)
+
+        # A nonadjacent vertex-vertex contact (the ring touches itself) is
+        # also rejected: side 1's interior vertex lies on side 3's chain.
+        t1=[(0.0,0.0,0.0),(1.0,0.0,1.0),(2.0,0.0,0.0)]
+        t2=[(2.0,0.0,0.0),(2.0,1.0,0.0)]
+        t3=[(2.0,1.0,0.0),(1.0,0.0,1.0),(0.0,1.0,0.0)]
+        t4=[(0.0,1.0,0.0),(0.0,0.0,0.0)]
+        @test_throws ArgumentError mesh_transfinite_patch(
+            t1,t2,t3,t4;allow_warped=true)
+    end
+
+    @testset ".geo ruled-surface transfinite patches" begin
+        warped_geo=mktemp() do path,io
+            write(io,"""
+Point(1) = {0,0,0};
+Point(2) = {1,0,0};
+Point(3) = {1,1,0.5};
+Point(4) = {0,1,0};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1};
+""")
+            close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+        mesh=warped_geo.mesh
+        @test validate(mesh).ok
+        @test (size(mesh.coords,2),size(mesh.tris,2))==(25,32)
+        for i in axes(mesh.coords,2)
+            x,y,z=mesh.coords[:,i]
+            @test z==0.5x*y
+        end
+        # Deterministic output across runs.
+        rerun=mktemp() do path,io
+            write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0.5}; Point(4) = {0,1,0};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1};
+""")
+            close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+        @test mesh_crc(rerun.mesh)==mesh_crc(mesh)
+
+        # Plane surfaces keep the coplanarity requirement even when declared
+        # transfinite.
+        err=try
+            mktemp() do path,io
+                write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0.5}; Point(4) = {0,1,0};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Plane Surface(1) = {1};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1};
+""")
+                close(io)
+                execute_geo(path;mesh_dim=2)
+            end
+            nothing
+        catch caught
+            caught
+        end
+        @test err isa ArgumentError
+        @test occursin("coplanar",sprint(showerror,err))
+
+        # A coplanar `Surface` (ruled kind) now meshes identically to a plane
+        # patch rather than rejecting the kind outright.
+        flat=mktemp() do path,io
+            write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0}; Point(4) = {0,1,0};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1};
+""")
+            close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+        @test (size(flat.mesh.coords,2),size(flat.mesh.tris,2))==(25,32)
+
+        # `Surface ... In Sphere` keeps its own parameterization and does not
+        # take the warped Coons path.
+        sphere_err=try
+            mktemp() do path,io
+                write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0.5}; Point(4) = {0,1,0};
+Point(5) = {0.5,0.5,-2};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1} In Sphere{5};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1};
+""")
+                close(io)
+                execute_geo(path;mesh_dim=2)
+            end
+            nothing
+        catch caught
+            caught
+        end
+        @test sphere_err isa ArgumentError
+    end
 end

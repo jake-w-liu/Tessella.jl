@@ -26,49 +26,26 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-1. **`Mesh.MeshSizeExtendFromBoundary` integer semantics** — storage moved
-   Bool→Int; documented `0` (disable) now accepted and distinguished from
-   absent; float inputs truncate toward integer; Bool/NaN/Inf/out-of-range
-   reject without mutating prior state. Files: `ModelMeshingAttributes.jl`,
-   `GeoExec.jl`, `API.jl`, `GeoOptionTables.jl`, `ModelIdentity.jl`, tests in
-   `geo_constraints_test.jl`, `api_refinement_classification_test.jl`.
-
-2. **Reversed-volume refinement classification fix** — `Refine.jl`
-   `_write_positive_tet!` → `_write_oriented_tet!`: children preserve parent
-   orientation (checked via `orient3`) and `tet_tag`; the classification
-   skeleton in `API.jl` carries `segs`/`tris`/tags through instead of
-   discarding them. `refine_uniform` gained `require_positive_tets=false`.
-   Covered by `api_refinement_classification_test.jl` (18 tests).
-
-3. **Embedded curve/surface recovery overhaul** (`Mesh3D.jl`, ~1800 lines) —
-   `recover_segment3`/`recover_triangle3` now converge on the hard sheet
-   fixture (triangle at z=0.5, verts (0.2,0.2),(0.8,0.2),(0.5,0.8)): protected
-   face/edge registries per iteration, multi-pocket batch dispatch, geometric
-   dedupe of detector output, strict-enclosure grafting, foreign-vertex
-   seed-face rejection (vertex-on-edge AND vertex-on-face interior tests),
-   unseeded pool fallback, cavity-growth retry (`_refill_with_growth3`),
-   monotone-coverage acceptance gate (`_accept_sheet3`), `soft_keepfaces`
-   mode for sheet fills, and `_snap_to_plane3` for 1-ulp off-plane Steiner
-   vertices. Exact coverage certificate + `validate(mesh)` enforced.
-
-4. **Cross-version/per-process determinism** — sorted every hash-order-
-   sensitive iteration that influences output: `refine_to_size` initial edge
-   queue + deferred requeue, `RecoverCDT.build_regions` component order,
-   missing-crease edges, piercing-candidate edge set, `delaunay3d_exact`
-   cavity faces, `_refill_segment_cavity3` boundary faces + `claimseq` DFS
-   ledger, `_grow_cavity3` incidence, `_sheet_chain_edge_gaps3` edge set.
-   **Result: byte-identical coords/tets across Julia 1.12.7 and 1.13.x** on
-   every fixture (direct 5474 tets, classified 5934, holed, .geo 1067).
-
-5. **Task-local registry scoping fix** — `_protected_faces3`/`_protected_edges3`
-   live in `task_local_storage`. `mesh_model_volume` is now a thin wrapper
-   (`_mesh_model_volume` is the body) that empties the registry on entry and
-   in `finally`. Previously a registry left populated by an earlier call in
-   the same task leaked foreign keep-constraints into `refine_to_size`'s
-   cavity fills (via `_repair_steiner_split3`→`_refill_segment_cavity3`),
-   changing raw cell order → same canonical `mesh_crc` but different
-   `mixed_crc` per process. Verified: a deliberately poisoned registry now
-   produces the expected `ffd2559d…` CRC.
+**Warped transfinite quadrangles on ruled surfaces** — `mesh_transfinite_patch`
+gains `allow_warped`: a genuinely non-coplanar boundary now meshes via the
+existing 3-D Coons interpolation instead of rejecting. The path is gated by
+surface kind — `:ruled` (`Surface`/`Ruled Surface` fillings) only; `Plane
+Surface` and `In Sphere` surfaces keep their planar/spherical requirements and
+`:tric` (3-border) stays planar-only. Warped-mode audits run in 3-D: an
+orient3-based exact coplanarity split in `_patch_frame` (replacing the
+Rational{BigInt} fallback on the hot path — ~2 MB → ~0 for a 508-edge ring), an
+AABB-accelerated nonadjacent-segment intersection audit with exact
+coplanarity/projection tests, per-triangle nonzero-area certification with an
+exact fallback, an area-weighted orientation check against the ring's Newell
+normal, and an allocation-free fold audit on every shared grid edge
+(enumerated analytically from the regular cell layout). Coplanar inputs under
+`allow_warped` are bit-identical to the planar path. Gmsh 4.15.2 differential:
+25-node warped ruled patch matches node-for-node within 1.9e-13 (gmsh NURBS-fit
+noise vs Tessella's exact Coons) with identical canonical triangle/segment
+connectivity. Files: `src/structured/Transfinite.jl`,
+`src/geometry/Model.jl` (`_transfinite_surface_mesh` kind admission),
+`test/structured/transfinite_test.jl` (+78 tests), and
+`validation/transfinite/differential.jl` (`check_warped`).
 
 ## Verified results (this machine, this code)
 
@@ -178,8 +155,9 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   closest-vertex discrete analogue — sphere-fit curvature, facing-triangle
   `nPointsPerGap` local feature size, `hBulk` fallback, edge-gradation
   smoothing — resolved from model surfaces in `.geo` and API-session
-  background-field contexts), materially warped quadrangles, direct
-  tensor/metric-meshing parity.
+  background-field contexts), materially warped quadrangles beyond
+  transfinite ruled-surface patches (e.g. unstructured `Surface` filling on
+  non-coplanar wires), direct tensor/metric-meshing parity.
 - **P2**: general mixed-element generation/recombination beyond P4's
   first-order pairing, mixed blocks in the simplex kernels, high-order
   Jacobian certification beyond second-order segments/triangles/tetrahedra/

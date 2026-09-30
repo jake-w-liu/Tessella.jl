@@ -116,7 +116,7 @@ function add_curved_patch(arrangement)
     return curves,surface
 end
 
-function gmsh_to_tessella_node_map(mesh,surface)
+function gmsh_to_tessella_node_map(mesh,surface;tolerance_multiple=256)
     types,_,element_nodes=gmsh.model.mesh.getElements(2,surface)
     triangle_position=findfirst(==(Int32(2)),types)
     triangle_position===nothing && error("Gmsh emitted no type-2 triangles")
@@ -126,7 +126,7 @@ function gmsh_to_tessella_node_map(mesh,surface)
     used=falses(nnodes(mesh));mapping=Dict{UInt64,Int32}();maximum_error=0.0
     coordinates=Dict(tag=>gmsh.model.mesh.getNode(tag)[1] for tag in tags)
     scale=maximum((maximum(abs,point;init=0.0) for point in values(coordinates));init=1.0)
-    tolerance=256eps(Float64)*max(scale,1.0)
+    tolerance=tolerance_multiple*eps(Float64)*max(scale,1.0)
     for source in eachindex(tags)
         raw=coordinates[tags[source]];point=(raw[1],raw[2],raw[3])
         best=0;best_error=Inf
@@ -172,6 +172,54 @@ function check_arrangement(arrangement,symbol)
     end
     canonical_segments(mapped_segments)==canonical_segments(vec(mesh.segs)) ||
         error("$arrangement boundary connectivity differs from Gmsh")
+    return maximum_error
+end
+
+# A warped ruled surface (`Surface` filling a non-coplanar wire). Gmsh fits a
+# Coons-like NURBS surface and samples its parameters, which introduces fit
+# noise of order 1e-12 on unit geometry; Tessella evaluates the 3-D Coons
+# interpolation of the sampled boundary chains directly, so the node-map
+# tolerance for this case is widened accordingly.
+function add_warped_patch()
+    gmsh.clear();gmsh.model.add("transfinite_warped")
+    corners=[gmsh.model.geo.addPoint(x,y,z) for (x,y,z) in
+             ((0.,0.,0.),(1.,0.,0.),(1.,1.,0.5),(0.,1.,0.))]
+    curves=[gmsh.model.geo.addLine(corners[i],corners[mod1(i+1,4)])
+            for i in 1:4]
+    loop=gmsh.model.geo.addCurveLoop(curves)
+    surface=gmsh.model.geo.addSurfaceFilling([loop])
+    for curve in curves
+        gmsh.model.geo.mesh.setTransfiniteCurve(curve,5)
+    end
+    gmsh.model.geo.mesh.setTransfiniteSurface(surface,"Left",corners)
+    gmsh.model.geo.synchronize();gmsh.model.mesh.generate(2)
+    return curves,surface
+end
+
+function check_warped()
+    curves,surface=add_warped_patch()
+    sides=map(curve_points,curves)
+    mesh=mesh_transfinite_patch(sides...;arrangement=:left,allow_warped=true)
+    validate(mesh).ok || error("Tessella warped patch did not validate")
+    (nnodes(mesh),nsegs(mesh),ntris(mesh))==(25,16,32) || error(
+        "unexpected Tessella warped counts")
+    mapping,maximum_error=gmsh_to_tessella_node_map(mesh,surface;
+                                                  tolerance_multiple=16384)
+    types,_,element_nodes=gmsh.model.mesh.getElements(2,surface)
+    triangle_position=findfirst(==(Int32(2)),types)
+    triangle_position===nothing && error("Gmsh warped emitted no type-2 triangles")
+    mapped_triangles=Int32[mapping[tag] for tag in element_nodes[triangle_position]]
+    canonical_triangles(mapped_triangles)==canonical_triangles(vec(mesh.tris)) ||
+        error("warped triangle connectivity differs from Gmsh")
+    mapped_segments=Int32[]
+    for curve in curves
+        line_types,_,line_nodes=gmsh.model.mesh.getElements(1,curve)
+        line_position=findfirst(==(Int32(1)),line_types)
+        line_position===nothing && error("Gmsh curve $curve emitted no type-1 lines")
+        append!(mapped_segments,(mapping[tag] for tag in line_nodes[line_position]))
+    end
+    canonical_segments(mapped_segments)==canonical_segments(vec(mesh.segs)) ||
+        error("warped boundary connectivity differs from Gmsh")
     return maximum_error
 end
 
@@ -272,9 +320,11 @@ try
     for (arrangement,symbol) in cases
         push!(errors,check_arrangement(arrangement,symbol))
     end
+    warped_error=check_warped()
     check_failure_behavior()
     println("TRANSFINITE_DIFFERENTIAL_OK gmsh=$api_version arrangements=$(length(cases)) " *
             "coordinate_samples=$(20length(cases)) max_node_error=$(maximum(errors)) " *
+            "warped_nodes=25 warped_max_error=$warped_error " *
             "mismatch_nodes=18 mismatch_triangles=23 hole_elements=0")
 finally
     gmsh.finalize()
