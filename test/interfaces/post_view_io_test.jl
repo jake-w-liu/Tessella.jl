@@ -170,8 +170,11 @@ end
     @test size(io("View \"v\" { SP(0,0,0){1,2}; };")[1].elements[1].values,3)==2
     @test_throws ArgumentError io("View \"v\" { SL(0,0,0){1,2}; };")
     @test_throws ArgumentError io("View \"v\" { XX(0,0,0){1}; };")
+    # SL2 is a supported order-2 record (3 geometry + 3 value nodes).
+    @test io("View \"v\" { SL2(0,0,0, 1,0,0, 0.5,0,0){1,2,3}; };"
+        )[1].elements[1].suffix=="2"
     @test_throws ArgumentError io(
-        "View \"v\" { SL2(0,0,0, 1,0,0, 0.5,0,0){1,2,3}; };")
+        "View \"v\" { SL2(0,0,0, 1,0,0){1,2}; };")
     @test_throws ArgumentError io("View \"v\" { TIME{0,5}; SP(0,0,0){1}; };")
     @test_throws ArgumentError io("View \"v\" { TIME{}; SP(0,0,0){1}; };")
     @test_throws ArgumentError io("View \"v\" { TIME{0}; TIME{0}; };")

@@ -28,7 +28,7 @@ const CONTEXT_SKIPS = [
     (name="boundary-layer element construction",
      reason="the scalar BoundaryLayer law is checked, but fan/quads/extrusion topology belongs to the boundary-layer meshing track"),
     (name="PostView differential scope",
-     reason="closest scalar-point views are checked directly; first-order scalar/vector standard list elements, multiple-time-step selection, dominant-component (mixed-component) selection and the tensor scalar/metric operators are implemented and separately tested but are not exercised here; high-order/custom-interpolation element data remains unsupported"),
+     reason="closest scalar-point views are checked directly; first-order scalar/vector standard list elements, multiple-time-step selection, dominant-component (mixed-component) selection and the tensor scalar/metric operators are implemented and separately tested but are not exercised here; high-order/custom-interpolation element data is implemented and separately tested but has no Gmsh-side evaluator (the PostView field accepts first-order views only)"),
     (name="AutomaticMeshSizeField",
      reason="Tessella exposes a documented discrete sphere-fit analogue while Gmsh uses a global HXT/P4EST model pipeline; no equivalent input/state oracle exists"),
 ]
