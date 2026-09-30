@@ -1030,4 +1030,137 @@ end
                       node(sheetgeo.mesh,sheetgeo.mesh.tets[4,t]))
            for t in 1:ntets(sheetgeo.mesh))
     @test SG≈1.0 atol=1e-12
+
+    function entity_line_cells(mixed,curve)
+        cells=NTuple{2,Int32}[]
+        for (block,cell_entities) in zip(mixed.blocks,mixed.elementary_entities)
+            block.msh==1 || continue
+            for cell in 1:size(block.nodes,2)
+                cell_entities[cell]==curve || continue
+                a,b=block.nodes[1,cell],block.nodes[2,cell]
+                push!(cells,a<b ? (a,b) : (b,a))
+            end
+        end
+        return cells
+    end
+
+    # A curved curve embedded directly in a volume seeds its whole stored
+    # 1-D discretization and recovers each link as a straight-chord
+    # tetrahedral edge chain (upstream `restoreEmbeddedEdges`).
+    arcvol=GeoModel()
+    add_box!(arcvol,0,0,0,1,1,1; tag=1)
+    add_point!(arcvol,0.4,0.5,0.45; tag=11)
+    add_point!(arcvol,0.5,0.5,0.55; tag=12)
+    add_point!(arcvol,0.6,0.5,0.45; tag=13)
+    add_circle_arc!(arcvol,11,12,13; tag=100)
+    embed!(arcvol,1,[100],3,1)
+    av=mesh_model_volume(arcvol,1)
+    @test validate(av).ok
+    avm=model_to_mixed(arcvol,av,3,1)
+    @test validate(avm).ok
+    avcells=entity_line_cells(avm,100)
+    @test length(avcells)>1
+    @test length(avcells)==length(unique(avcells))
+
+    # A closed spline shares its first/last model point: the chain wraps
+    # back to the shared vertex and no point maps to two mesh nodes.
+    closedvol=GeoModel()
+    add_box!(closedvol,0,0,0,1,1,1; tag=1)
+    for (tag,x,y) in ((30,0.4,0.4),(31,0.6,0.4),(32,0.6,0.6),(33,0.4,0.6))
+        add_point!(closedvol,x,y,0.5; tag=tag)
+    end
+    add_spline!(closedvol,[30,31,32,33,30]; tag=20)
+    embed!(closedvol,1,[20],3,1)
+    cv=mesh_model_volume(closedvol,1)
+    @test validate(cv).ok
+    cvm=model_to_mixed(closedvol,cv,3,1)
+    @test validate(cvm).ok
+    cvcells=entity_line_cells(cvm,20)
+    @test length(cvcells)>2
+    @test length(cvcells)==length(unique(cvcells))
+
+    # A self-overlapping closed spline traverses one tetrahedral edge from
+    # both parametric links — it still projects as a single element.
+    overlapvol=GeoModel()
+    add_box!(overlapvol,0,0,0,1,1,1; tag=1)
+    for (tag,x,y) in ((30,0.3,0.5),(31,0.5,0.7),(32,0.7,0.5),(33,0.5,0.3))
+        add_point!(overlapvol,x,y,0.5; tag=tag)
+    end
+    add_spline!(overlapvol,[30,31,32,33,30]; tag=20)
+    embed!(overlapvol,1,[20],3,1)
+    ov=mesh_model_volume(overlapvol,1)
+    @test validate(ov).ok
+    ovm=model_to_mixed(overlapvol,ov,3,1)
+    @test validate(ovm).ok
+    ovcells=entity_line_cells(ovm,20)
+    @test length(ovcells)==length(unique(ovcells))
+
+    # A curved curve nested in a surface embedded in a volume: the sheet's
+    # own face edges carry the nested chain.
+    nestvol=GeoModel()
+    add_box!(nestvol,0,0,0,1,1,1; tag=1)
+    add_point!(nestvol,0.2,0.2,0.5; tag=10)
+    add_point!(nestvol,0.8,0.2,0.5; tag=11)
+    add_point!(nestvol,0.5,0.8,0.5; tag=12)
+    add_line!(nestvol,10,11; tag=13)
+    add_line!(nestvol,11,12; tag=14)
+    add_line!(nestvol,12,10; tag=15)
+    add_curve_loop!(nestvol,[13,14,15]; tag=7)
+    add_plane_surface!(nestvol,[7]; tag=7)
+    add_point!(nestvol,0.4,0.4,0.5; tag=30)
+    add_point!(nestvol,0.5,0.45,0.5; tag=31)
+    add_point!(nestvol,0.6,0.4,0.5; tag=32)
+    add_circle_arc!(nestvol,30,31,32; tag=20)
+    embed!(nestvol,1,[20],2,7)
+    embed!(nestvol,2,[7],3,1)
+    nv=mesh_model_volume(nestvol,1)
+    @test validate(nv).ok
+    nvm=model_to_mixed(nestvol,nv,3,1)
+    @test validate(nvm).ok
+    nvcells=entity_line_cells(nvm,20)
+    @test length(nvcells)==length(unique(nvcells))
+
+    # A closed spline nested in an embedded surface: the wraparound link
+    # closes through the shared vertex inside the sheet complex.
+    nestclosed=GeoModel()
+    add_box!(nestclosed,0,0,0,1,1,1; tag=1)
+    add_point!(nestclosed,0.2,0.2,0.5; tag=10)
+    add_point!(nestclosed,0.8,0.2,0.5; tag=11)
+    add_point!(nestclosed,0.5,0.8,0.5; tag=12)
+    add_line!(nestclosed,10,11; tag=13)
+    add_line!(nestclosed,11,12; tag=14)
+    add_line!(nestclosed,12,10; tag=15)
+    add_curve_loop!(nestclosed,[13,14,15]; tag=7)
+    add_plane_surface!(nestclosed,[7]; tag=7)
+    add_point!(nestclosed,0.5,0.35,0.5; tag=30)
+    add_point!(nestclosed,0.58,0.42,0.5; tag=31)
+    add_point!(nestclosed,0.5,0.5,0.5; tag=32)
+    add_point!(nestclosed,0.42,0.42,0.5; tag=33)
+    add_spline!(nestclosed,[30,31,32,33,30]; tag=20)
+    embed!(nestclosed,1,[20],2,7)
+    embed!(nestclosed,2,[7],3,1)
+    ncv=mesh_model_volume(nestclosed,1)
+    @test validate(ncv).ok
+    ncvm=model_to_mixed(nestclosed,ncv,3,1)
+    @test validate(ncvm).ok
+    ncvmcells=entity_line_cells(ncvm,20)
+    @test length(ncvmcells)==length(unique(ncvmcells))
+
+    # The .geo `Curve In Volume` statement routes through the same path.
+    curvevolgeo=mktemp() do path,io
+        write(io, """
+            SetFactory("OpenCASCADE");
+            Box(1) = {0, 0, 0, 1, 1, 1};
+            Point(11) = {0.4, 0.5, 0.45, 0.3};
+            Point(12) = {0.5, 0.5, 0.55, 0.3};
+            Point(13) = {0.6, 0.5, 0.45, 0.3};
+            Circle(100) = {11, 12, 13};
+            Curve{100} In Volume{1};
+            """)
+        close(io)
+        execute_geo(path; mesh_dim=3)
+    end
+    @test validate(curvevolgeo.mesh).ok
+    curvemixed=model_to_mixed(curvevolgeo.model,curvevolgeo.mesh,3,1)
+    @test validate(curvemixed).ok
 end

@@ -202,7 +202,7 @@ end
 
     crc=mixed_crc(projected)
     @test crc.sha==
-          "a16ce2477fa2362421aad65c5a6249d5faf282eac111ae5b2d47d574b7babd5b"
+          "07948f5316eba9bba1e22e67e42fc322b20d3351873611811aa535acefac4e62"
     mktempdir() do directory
         for version in (2.2,4.1),binary in (false,true)
             path=joinpath(directory,"classified-volume-$version-$binary.msh")
@@ -336,7 +336,7 @@ end
     @test any(entity==(0,Int32(111))
               for entity in projected.entity_data.node_entities)
     @test mixed_crc(projected).sha==
-          "296b848a750294764563065fd03a21a48a902c9ba9cc5c7d60dc3ad25dd5c532"
+          "c0ef37a7a94a074ade6ead430b2538ea749f336e2fc8488d0933e96554842902"
 end
 
 @testset "explicit modeled volume shells" begin
