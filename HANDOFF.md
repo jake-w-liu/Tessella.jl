@@ -26,7 +26,23 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Curved-boundary planar surface meshing** — the general planar-surface
+**Multi-entity `execute_geo` generation** — the `mesh_dim=2`/`mesh_dim=3`
+keyword path no longer blocks on multiple remaining surfaces/volumes.
+A single entity keeps the established fast path (`mesh_model_surface` /
+`mesh_model_volume` + homology, output unchanged); multiple entities now
+run `_geo_mesh_model` — the same pipeline a mid-file `Mesh n` statement
+executes — which grades 1-D entities, meshes every surface/volume part,
+adds point/curve parts, merges on bitwise coordinate keys, records
+per-node `(dim, tag)` ownership in `context.mesh_node_owner`, and runs
+homology on the merged product. Verified bitwise-identical to the
+`Mesh n` statement output (coords/tris/segs all `==`), merged triangles
+equal the union of per-surface products, shared-boundary nodes emit one
+copy, periodic curved slaves stay bitwise affine copies, and disjoint
+OCC volumes merge for `Mesh 3`. Files: `src/geometry/GeoExec.jl`,
+`test/geometry/geo_mesh_dim_test.jl` (new testset),
+`validation/gmsh_parity/curved_surface.jl` (merged `mesh_dim=2` run).
+
+Previous increment (for context): **curved-boundary planar surface meshing** — the general planar-surface
 path no longer requires `Line` boundaries. `_surface_pslg` evaluates each
 non-`Line` boundary and embedded curve into an ordered subdivision chain
 (the stored `curve_params` native-parameter list when present — bitwise
@@ -70,8 +86,7 @@ differential (`validation/gmsh_parity/curved_surface.{geo,jl}`,
 registered): disk/annulus/segment triangulate with comparable counts
 (100/86/11 vs Gmsh 108/82/11) and the periodic pair's 23 Gmsh node pairs
 agree within 1.4e-9. Remaining gates intentionally kept: non-planar
-surfaces, `Curve In Volume` line gates (separate epic), and the
-`execute_geo` multi-surface `Mesh 2` blocker. Files:
+surfaces and `Curve In Volume` line gates (separate epic). Files:
 `src/geometry/Model.jl` (chains, ownership masks, native sync),
 `src/geometry/ModelMeshingAttributes.jl` (native forced/param_sizes),
 `src/geometry/ModelMesh1D.jl` (`_model_curve_l5` caller frame),
@@ -340,6 +355,7 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   for the dated entry; `embed_sheet_hole` full differential including
   MSH2/MSH4 round trips).
 - `Pkg.test()` Julia 1.12.7: **425,608/425,608 in 17m17.5s**.
+- `Pkg.test()` Julia 1.13.1: **427,250/427,250 in 14m39.1s**.
 
 ## Remaining parity work (PLAN.md — all IN PROGRESS tracks)
 

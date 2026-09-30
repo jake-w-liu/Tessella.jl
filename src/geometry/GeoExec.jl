@@ -330,8 +330,9 @@ end
     execute_geo(path; mesh_dim=0) -> GeoExecution
 
 Execute Tessella's documented bounded `.geo` subset into a new [`GeoModel`](@ref).
-Use `mesh_dim=2` or `3` to mesh the single remaining surface or volume;
-`mesh_dim=0` only builds the model. Geometry statements outside the bounded
+Use `mesh_dim=2` or `3` to mesh the remaining surfaces or volumes — multiple
+entities merge on bitwise coordinates like a `Mesh n` statement; `mesh_dim=0`
+only builds the model. Geometry statements outside the bounded
 subset and malformed input raise `ArgumentError` instead of being partially
 accepted. Every numeric parameter, entity tag, and numeric entity-list entry in a
 supported statement accepts finite arithmetic, prior scalar bindings, pure
@@ -470,18 +471,27 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     end
     if dim==2
         isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
-        length(model.surfaces)==1 || throw(ArgumentError(
-            "execute_geo: Mesh 2 with multiple remaining surfaces $(sort(collect(keys(model.surfaces)))) is a blocker"))
-        tag=only(keys(model.surfaces))
-        mesh=mesh_model_surface(model,tag)
-        _geo_run_homology!(model,mesh,[(2,tag,mesh)],"execute_geo")
+        if length(model.surfaces)==1
+            tag=only(keys(model.surfaces))
+            mesh=mesh_model_surface(model,tag)
+            _geo_run_homology!(model,mesh,[(2,tag,mesh)],"execute_geo")
+        else
+            # Multi-surface models mesh like the `Mesh 2` statement: every
+            # entity part through `_geo_mesh_model`, merged on bitwise
+            # coordinates with per-node ownership for the mesh operations.
+            mesh,context.mesh_node_owner=_geo_mesh_model(model,2,context)
+            context.mesh=mesh
+        end
     elseif dim==3
         isempty(model.volumes) && throw(ArgumentError("execute_geo: Mesh 3 requested but no volumes exist"))
-        length(model.volumes)==1 || throw(ArgumentError(
-            "execute_geo: Mesh 3 with multiple remaining volumes $(sort(collect(keys(model.volumes)))) is a blocker — Boolean Delete the operands or mesh a single volume"))
-        tag=only(keys(model.volumes))
-        mesh=mesh_model_volume(model,tag)
-        _geo_run_homology!(model,mesh,[(3,tag,mesh)],"execute_geo")
+        if length(model.volumes)==1
+            tag=only(keys(model.volumes))
+            mesh=mesh_model_volume(model,tag)
+            _geo_run_homology!(model,mesh,[(3,tag,mesh)],"execute_geo")
+        else
+            mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
+            context.mesh=mesh
+        end
     end
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
                         context.lists,context.strings,
