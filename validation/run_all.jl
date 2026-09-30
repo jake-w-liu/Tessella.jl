@@ -413,6 +413,13 @@ periodic_curved_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=
 println("  command: ", periodic_curved_command)
 run(periodic_curved_command)
 
+println("\n── gmsh_parity curved surfaces ──  disk/annulus/segment + periodic arcs")
+curved_surface_script = joinpath(
+    HERE, "gmsh_parity", "curved_surface.jl")
+curved_surface_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $curved_surface_script`
+println("  command: ", curved_surface_command)
+run(curved_surface_command)
+
 println("\n── gmsh_parity 2-D boundary layer ──  Tessella vs analytic/Gmsh BL quads")
 bl2d_script = joinpath(HERE, "gmsh_parity", "boundary_layer_2d.jl")
 bl2d_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $bl2d_script`

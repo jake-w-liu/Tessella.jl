@@ -26,7 +26,60 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Curved periodic curve pairs** — `Periodic Curve` no longer rejects
+**Curved-boundary planar surface meshing** — the general planar-surface
+path no longer requires `Line` boundaries. `_surface_pslg` evaluates each
+non-`Line` boundary and embedded curve into an ordered subdivision chain
+(the stored `curve_params` native-parameter list when present — bitwise
+identical to the emitted 1-D nodes — else a uniform native-frame sample)
+instead of an endpoint chord; endpoint detection compares against native
+parameter bounds, and the exact `orient3` coplanarity audit runs on every
+evaluated point so a genuinely non-planar boundary still throws rather
+than silently degrading. The forced/sync machinery moved to native
+frames throughout: `_attribute_forced_parameters` maps
+`set_size_at_parametric_points!`'s normalized `[0,1]` entries into each
+curve's native range, sources transfinite lists from
+`_model_curve_transfinite_native_params`, and requires forced lists to
+span native bounds; `_surface_curve_parameters`, `_model_curve_l5`,
+`_surface_curve_mesh_size`, `_insert_periodic_parameter!`,
+`_periodic_parameter_merge_tolerance`, and both cross-map arms of
+`_synchronize_periodic_parameters!`/`_model_periodic_curve_nodes` all
+use bound-offset native semantics (`u_max − u + to_u_min` mirrors), which
+is bitwise-identical to `[0,1]` for `Line` curves — the periodic
+differentials' pinned SHAs re-pass unchanged. `_model_planar_surface_mesh`
+and `_model_projection_boundary_surface_faces!` build polygons from the
+sampled chains (`_surface_loop_vertex_chain`), extents cover the curve
+bulge, and plane fits prefer declared model points — evaluated samples
+join only on a degenerate fit (`_native_curve_plane_samples` also lets a
+single-vertex full-circle OCC edge yield a plane). `model_is_inside` and
+`model_to_mixed` classify against the same chains. Boundary pinches —
+distinct curve-owned vertices within projection tolerance of each other
+(Gmsh meshes them) — are handled by `_curve_owned_coordinates` +
+`_curve_chain_eligible`: foreign-owned exact vertices are masked out of
+each curve's chain audit while genuinely shared pinch vertices keep
+dual ownership; applied to writeback, periodic sync, embedded-curve
+validation, projection classification, and `model_periodic_nodes`.
+Curved embedded curves audit via `_periodic_curve_parameter_nodes`, and
+periodic surfaces derive masters on curved edges (`Periodic Surface` on
+arc-bowed flags emits bitwise `slave == affine(master)` meshes with zero
+near-duplicates). Verified: disk/annulus/segment/spline/NURBS-`[0,2]`
+boundaries mesh and validate; OCC `Box` faces (non-`[0,1]` line ranges)
+and OCC cylinder caps (closed-circle single-vertex edges) mesh; the
+zigzag pinch fixture meshes (10n/8t) where the audit previously
+rejected; `model_is_inside` honors the arc bulge. Gmsh 4.15.2
+differential (`validation/gmsh_parity/curved_surface.{geo,jl}`,
+registered): disk/annulus/segment triangulate with comparable counts
+(100/86/11 vs Gmsh 108/82/11) and the periodic pair's 23 Gmsh node pairs
+agree within 1.4e-9. Remaining gates intentionally kept: non-planar
+surfaces, `Curve In Volume` line gates (separate epic), and the
+`execute_geo` multi-surface `Mesh 2` blocker. Files:
+`src/geometry/Model.jl` (chains, ownership masks, native sync),
+`src/geometry/ModelMeshingAttributes.jl` (native forced/param_sizes),
+`src/geometry/ModelMesh1D.jl` (`_model_curve_l5` caller frame),
+`test/geometry/geo_curved_test.jl`/`geo_spline_test.jl` (rewritten +
+new sets), `validation/gmsh_parity/curved_surface.{geo,jl}`,
+`validation/run_all.jl`.
+
+Previous increment (for context): **curved periodic curve pairs** — `Periodic Curve` no longer rejects
 non-`Line` curves for affine (Translate/Rotate/Affine) and orientation-only
 relations. The declaration check is the endpoint correspondence like
 upstream's `GEdge::setMeshMaster`; the slave copies the master's stored
@@ -253,6 +306,18 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   documented below, NOT regressions from this diff. `set_periodic!`
   degenerate-curve rejection verified restored (was momentarily relaxed by
   the line-gate refactor mid-increment; `_model_curve_length` call kept).
+- `Pkg.test()` Julia 1.13.1 (curved-boundary surface increment):
+  **427,229 passed, 20 failed** in 13m55s — all 20 are the environmental
+  `mixed_crc`/`mesh_crc` SHA-pin drift set at the same locations verified
+  earlier (cli_test:318–441, api_test:49/288, model_volume_io:204/338,
+  api_mesh_lifecycle, api_mesh_transform:44, geo_dynamic_tag:81,
+  geo_geometry_expression:67, geo_list_variable:63, geo_mesh_size:140,
+  geo_set_max_tag:50); zero new failures. Line-model output additionally
+  certified bitwise-stable post-change: the pinned-SHA periodic
+  differentials (`GMSH_PARITY_PERIODIC_OK`,
+  `GMSH_PARITY_PERIODIC_EMBEDDED_OK`, `CURVED_PERIODIC_DIFFERENTIAL_OK`)
+  re-passed unchanged, and the new `GMSH_PARITY_CURVED_SURFACE_OK`
+  differential is green.
 - `Pkg.test()` Julia 1.13.1 (curved-periodic increment, final):
   **426,096/426,096 in 14m36.1s** — fully green including the +30
   `periodic curved curve pairs` tests; the earlier CRC/SHA-pin drift did

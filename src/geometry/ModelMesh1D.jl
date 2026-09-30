@@ -265,20 +265,24 @@ end
 
 # `prescribedMeshSizeAtParam`: linear interpolation over the sorted stored
 # (u, lc) pairs; clamps to the first entry below the range and linearly
-# extrapolates past the last like upstream.
-function _model_curve_l5(m::GeoModel,curve::Integer,u::Float64)
+# extrapolates past the last like upstream. The API stores normalized [0,1]
+# positions, so the native `u` is mapped into the same frame first.
+function _model_curve_l5(m::GeoModel,curve::Integer,u::Float64,
+                        caller::AbstractString)
     entries=get(m.meshing.size_at_params,(1,curve),nothing)
     (entries===nothing || isempty(entries)) && return GMSH_MAX_SIZE
     pairs=sort!(Tuple{Float64,Float64}[(u,lc) for (plist,lc) in entries
                                        for u in plist]; by=first)
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    v=(u-t0)/(t1-t0)
     us=Float64[p[1] for p in pairs]
     n=length(us)
-    it=searchsortedfirst(us,u)          # first index with us[it] >= u (n+1 past end)
+    it=searchsortedfirst(us,v)          # first index with us[it] >= v (n+1 past end)
     i1=min(it-1,n-1)                    # 0-based lower_bound position, capped
     i0=max(1,i1)-1
     u0,l0=pairs[i0+1]; u1,l1=pairs[i1+1]
     (i1==i0 || u0==u1) && return l0
-    alpha=(u-u0)/(u1-u0)
+    alpha=(v-u0)/(u1-u0)
     return l0*(1-alpha)+l1*alpha
 end
 
@@ -319,7 +323,7 @@ function _model_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,t0::Float64,
     l2=_model_curve_l2(m,curve,u,options.from_curvature)
     l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(1,curve))
-    l5=_model_curve_l5(m,curve,u)
+    l5=_model_curve_l5(m,curve,u,caller)
     lc=min(l1,l2,l3,GMSH_MAX_SIZE,l5)
     if options.callback!==nothing
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
@@ -936,7 +940,7 @@ function _model_discrete_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,
     end
     l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(1,curve))
-    l5=_model_curve_l5(m,curve,u)
+    l5=_model_curve_l5(m,curve,u,caller)
     lc=min(l1,l3,GMSH_MAX_SIZE,l5)
     if options.callback!==nothing
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
@@ -1367,13 +1371,21 @@ function _model_surface_boundary_writeback!(m::GeoModel,t::Int,mesh::Mesh,
     # snap produced (`affine(master)`); snapping them to the analytic curve
     # point would break the bitwise slave↔master correspondence.
     protected_nodes=falses(nnodes(mesh))
+    # Vertices a sibling curve owns outright are excluded per curve — at a
+    # boundary pinch the two sides' subdivision vertices sit inside the
+    # audit's projection tolerance without sharing an edge.
+    owned=_curve_owned_coordinates(
+        m,Iterators.flatten((boundary_curves,embedded_curves)),caller)
+    boundary_eligible(curve)=_curve_chain_eligible(
+        mesh,eligible_nodes,owned,curve)
+    all_eligible=trues(nnodes(mesh))
     for curve in sort!(collect(boundary_curves))
         _model_curve_periodic_involved(m,curve) || continue
         haskey(m.curves,curve) || continue
         a,b=m.curves[curve]
         a==b && continue
         entries=_model_curve_chain_entries(
-            m,mesh,curve,eligible_nodes,eligible_edges,caller)
+            m,mesh,curve,boundary_eligible(curve),eligible_edges,caller)
         entries===nothing && continue
         for (_,node) in entries
             protected_nodes[node]=true
@@ -1381,12 +1393,13 @@ function _model_surface_boundary_writeback!(m::GeoModel,t::Int,mesh::Mesh,
     end
     for curve in sort!(collect(boundary_curves))
         _model_surface_curve_writeback!(
-            m,curve,mesh,eligible_nodes,eligible_edges,
+            m,curve,mesh,boundary_eligible(curve),eligible_edges,
             protected_nodes,caller)
     end
     for curve in sort!(embedded_curves)
         _model_surface_curve_writeback!(
-            m,curve,mesh,trues(nnodes(mesh)),all_edges,
+            m,curve,mesh,
+            _curve_chain_eligible(mesh,all_eligible,owned,curve),all_edges,
             protected_nodes,caller)
     end
     return mesh

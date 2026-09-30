@@ -2401,6 +2401,50 @@ function _loop_points(m::GeoModel, loop_id::Int)
     return pts
 end
 
+# Interior native parameters a curved boundary contributes to a polygon
+# chain: the stored `Mesh 1` discretization when present — so post-mesh
+# projections see the exact emitted nodes — else a uniform interior sample.
+function _surface_curve_polygon_params(m::GeoModel,curve::Int,
+                                       caller::AbstractString;
+                                       fallback::Int=32)
+    stored=get(m.curve_params,curve,nothing)
+    (stored!==nothing && length(stored)>2) && return @view(stored[2:end-1])
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    return Float64[t0+(t1-t0)*(k/(fallback+1)) for k in 1:fallback]
+end
+
+# Ordered 3-D vertex chain for a boundary loop: each curve contributes its
+# traversal-direction start endpoint plus, for non-`Line` curves, the
+# interior subdivision coordinates in traversal order. The curve's trailing
+# endpoint is omitted — it is the next curve's start (and the last curve's
+# end is the first's start). Returns `(coordinates, representative_tags,
+# is_endpoint)` — sampled coordinates reuse the curve's first endpoint tag
+# for diagnostics, and `is_endpoint` marks entries that are stored model
+# points (vs evaluated interior samples).
+function _surface_loop_vertex_chain(m::GeoModel,loop_id::Int,
+                                    caller::AbstractString)
+    haskey(m.loops,loop_id) || throw(ArgumentError(
+        "$caller: unknown Loop[$loop_id]"))
+    vertices=NTuple{3,Float64}[]
+    tags=Int[]
+    endpoints=Bool[]
+    for signed in m.loops[loop_id]
+        curve=abs(signed)
+        haskey(m.curves,curve) || throw(ArgumentError(
+            "$caller: Loop[$loop_id] references unknown Curve[$curve]"))
+        a,b=m.curves[curve]
+        start=signed>0 ? a : b
+        push!(vertices,m.points[start]);push!(tags,start);push!(endpoints,true)
+        _curve_type(m,curve)===:line && continue
+        interior=_surface_curve_polygon_params(m,curve,caller)
+        for u in (signed>0 ? interior : Iterators.reverse(interior))
+            push!(vertices,_model_curve_point(m,curve,u,caller))
+            push!(tags,a);push!(endpoints,false)
+        end
+    end
+    return vertices,tags,endpoints
+end
+
 function _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m::GeoModel,
                              pid::Int,caller,plane)
     haskey(index, pid) && return index[pid]
@@ -2477,12 +2521,16 @@ end
     last_size=get(m.point_size,b,0.0)
     first_size<=0.0 && last_size<=0.0 && return 0.0
     # A sized endpoint propagates toward the edge length, matching the
-    # boundary-mesh-derived sizing used for unconstrained vertices.
+    # boundary-mesh-derived sizing used for unconstrained vertices. `parameter`
+    # arrives in the curve's native frame; the interpolation weight is the
+    # normalized fraction.
     p,q=m.points[a],m.points[b]
     edge_length=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
     first_size<=0.0 && (first_size=edge_length)
     last_size<=0.0 && (last_size=edge_length)
-    mesh_size=muladd(parameter,last_size-first_size,first_size)
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    alpha=(parameter-t0)/(t1-t0)
+    mesh_size=muladd(alpha,last_size-first_size,first_size)
     (isfinite(mesh_size) && mesh_size>0) || throw(ErrorException(
         "$caller: Curve[$curve] has an unrepresentable interpolated Point size"))
     return mesh_size
@@ -2567,21 +2615,26 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
     return point
 end
 
-function _surface_curve_parameters(m::GeoModel,forced,curve::Int,signed::Int)
+function _surface_curve_parameters(m::GeoModel,forced,curve::Int,signed::Int,
+                                   caller::AbstractString)
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
     # A `Degenerated` curve meshes to a single edge: it contributes only its
     # first endpoint, regardless of any stored parameter source (transfinite,
     # periodic, or size-at-params).
-    curve in m.meshing.degenerated && return signed>0 ? (0.0,) : (1.0,)
+    curve in m.meshing.degenerated && return signed>0 ? (t0,) : (t1,)
     parameters=get(forced,curve,nothing)
-    parameters===nothing && return signed>0 ? (0.0,) : (1.0,)
+    parameters===nothing && return signed>0 ? (t0,) : (t1,)
     # Parameters a few ulps from an endpoint come from inverse-projection or
     # arclength-normalization drift — evaluating them would place a distinct
     # node within curve-match tolerance of the corner, duplicating it and
     # cracking the boundary shared with the adjacent surface. Snap them so
-    # the endpoint routes through the model-point vertex instead.
+    # the endpoint routes through the model-point vertex instead. `forced`
+    # lists live in the curve's native parameter frame, so the endpoint tests
+    # compare against the native bounds.
+    tolerance=128eps(Float64)*max(1.0,abs(t1-t0))
     function emit(u)
-        u<=128eps(Float64) && return 0.0
-        1-u<=128eps(Float64) && return 1.0
+        u-t0<=tolerance && return t0
+        t1-u<=tolerance && return t1
         return u
     end
     return signed>0 ? [emit(u) for u in @view(parameters[1:end-1])] :
@@ -2605,13 +2658,14 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         loop_idx=Int[]
         for signed in m.loops[loop_id]
             curve=abs(signed)
-            _model_require_line_curve(m,curve,caller,"surface meshing")
             a,b=m.curves[curve]
-            for parameter in _surface_curve_parameters(m,forced,curve,signed)
-                vertex=if parameter==0
+            t0,t1=_model_curve_param_bounds(m,curve,caller)
+            for parameter in _surface_curve_parameters(m,forced,curve,signed,
+                                                       caller)
+                vertex=if parameter==t0
                     _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
                                         m,a,caller,plane)
-                elseif parameter==1
+                elseif parameter==t1
                     _add_surface_point!(xs,ys,mesh_sizes,index,canonical,
                                         m,b,caller,plane)
                 else
@@ -2661,8 +2715,8 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
         edim==1 || continue
         haskey(m.curves,etag) || throw(ArgumentError(
             "$caller: unknown embedded Curve[$etag]"))
-        _model_require_line_curve(m,etag,caller,"embedded-curve meshing")
         a,b=m.curves[etag]
+        t0,t1=_model_curve_param_bounds(m,etag,caller)
         parameters=etag in m.meshing.degenerated ? nothing :
                    get(forced,etag,nothing)
         curve_nodes=Int[]
@@ -2673,10 +2727,10 @@ function _surface_pslg(m::GeoModel,t::Int,forced,caller::AbstractString;
                 xs,ys,mesh_sizes,index,canonical,m,b,caller,plane))
         else
             for parameter in parameters
-                vertex=if parameter==0
+                vertex=if parameter==t0
                     _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,a,
                                         caller,plane)
-                elseif parameter==1
+                elseif parameter==t1
                     _add_surface_point!(xs,ys,mesh_sizes,index,canonical,m,b,
                                         caller,plane)
                 else
@@ -2939,8 +2993,9 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh::Mesh,curve::Int,
 end
 
 function _insert_periodic_parameter!(parameters::Vector{Float64},value::Float64,
-                                     tolerance::Float64)
-    candidate=clamp(value,0.0,1.0)
+                                     tolerance::Float64,
+                                     bounds::Tuple{Float64,Float64})
+    candidate=clamp(value,bounds[1],bounds[2])
     any(existing->abs(existing-candidate)<=tolerance,parameters) && return false
     push!(parameters,candidate);sort!(parameters)
     return true
@@ -2952,14 +3007,13 @@ end
 # stored `curve_params` entry (native frame), so two candidates inside that
 # resolution evaluate to bitwise-identical coordinates and the segment
 # between them collapses to zero length. Propagated/extracted candidates are
-# therefore merged at the same resolution, expressed in the normalized
-# parameter frame the lists live in.
+# therefore merged at the same native-frame resolution.
 function _periodic_parameter_merge_tolerance(m::GeoModel,curve::Int,
                                              tolerance::Float64,
                                              caller::AbstractString)
     t0,t1=_model_curve_param_bounds(m,curve,caller)
     span=abs(t1-t0)
-    return max(tolerance,1e-9*max(1.0,span)/max(span,eps(Float64)))
+    return max(tolerance,1e-9*max(1.0,span))
 end
 
 function _surface_periodic_constraints(m::GeoModel,t::Int,
@@ -3019,12 +3073,62 @@ function _periodic_curve_eligible_nodes(m::GeoModel,mesh::Mesh,curve::Int)
     return eligible,masked
 end
 
+# Every coordinate a curve owns outright — its model endpoints plus the
+# evaluated nodes of its stored discretization — mapped to the owning curve
+# set. At a boundary pinch two curves place distinct vertices within the
+# chain audit's projection tolerance of each other; a foreign-owned vertex
+# is not a Steiner candidate for this curve's chain, so per-curve masks
+# exclude it. Evaluations use `_periodic_curve_point` so the map names the
+# emitted (affine-copy) coordinates periodic slaves carry.
+function _curve_owned_coordinates(m::GeoModel,curves,caller::AbstractString)
+    owned=Dict{NTuple{3,Float64},Set{Int}}()
+    for curve in curves
+        haskey(m.curves,curve) || continue
+        a,b=m.curves[curve]
+        for endpoint in (a,b)
+            haskey(m.points,endpoint) || continue
+            push!(get!(()->Set{Int}(),owned,m.points[endpoint]),curve)
+        end
+        params=get(m.curve_params,curve,nothing)
+        params===nothing && continue
+        for u in params
+            point=_periodic_curve_point(m,curve,u,caller)
+            all(isfinite,point) || continue
+            push!(get!(()->Set{Int}(),owned,point),curve)
+        end
+    end
+    return owned
+end
+
+# `base` node eligibility minus vertices a different curve owns outright.
+# Nodes whose coordinates match one of this curve's own discretization
+# points keep their eligibility — a genuinely shared pinch vertex is owned
+# by both curves.
+function _curve_chain_eligible(mesh::Mesh,base,
+                               owned::Dict{NTuple{3,Float64},Set{Int}},
+                               curve::Int)
+    isempty(owned) && return base
+    mask=copy(base)
+    @inbounds for node in 1:nnodes(mesh)
+        mask[node] || continue
+        key=(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
+        owners=get(owned,key,nothing)
+        owners===nothing || curve in owners || (mask[node]=false)
+    end
+    return mask
+end
+
 function _periodic_curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,
                                          mesh_edges,atol::Float64,
-                                         caller::AbstractString)
+                                         caller::AbstractString;
+                                         owned::Union{Nothing,
+                                             Dict{NTuple{3,Float64},Set{Int}}}=
+                                             nothing)
+    first_pass=owned===nothing ? trues(nnodes(mesh)) :
+        _curve_chain_eligible(mesh,trues(nnodes(mesh)),owned,curve)
     try
         return _curve_parameter_nodes(
-            m,mesh,curve,trues(nnodes(mesh)),mesh_edges,atol,caller)
+            m,mesh,curve,first_pass,mesh_edges,atol,caller)
     catch err
         err isa InterruptException && rethrow()
         # Only the audit's own argument/error failures justify a masked
@@ -3032,23 +3136,39 @@ function _periodic_curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,
         (err isa ArgumentError || err isa ErrorException) || rethrow()
         eligible,masked=_periodic_curve_eligible_nodes(m,mesh,curve)
         masked || rethrow()
+        owned===nothing ||
+            (eligible=_curve_chain_eligible(mesh,eligible,owned,curve))
         return _curve_parameter_nodes(
             m,mesh,curve,eligible,mesh_edges,atol,caller)
     end
 end
 
 function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
-                                           constraints)
+                                           constraints,surface::Int)
     mesh_edges=_model_projection_triangle_edges(mesh)
+    # Foreign-curve-owned vertices are not admissible sync candidates — a
+    # periodic boundary pinching against an unconstrained curve would
+    # otherwise smear the other's owned vertex into this curve's chain.
+    # `owned` spans the whole surface boundary: relation curves can decoy
+    # against unconstrained members too.
+    owned=_curve_owned_coordinates(
+        m,Iterators.flatten(
+            ((abs(signed) for loop in m.surfaces[surface] for
+              signed in m.loops[loop]),
+             (etag for (edim,etag) in get(m.embeds,(2,surface),
+                                        NTuple{2,Int}[]) if edim==1))),
+        "mesh_model_surface")
     raw_parameters=Dict{Int,Vector{Float64}}()
     curve_tolerances=Dict{Int,Float64}()
     relations=Tuple{ModelPeriodicConstraint,Float64}[]
     for constraint in constraints
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
         master_entries,master_tolerance=_periodic_curve_parameter_nodes(
-            m,mesh,master,mesh_edges,constraint.atol,"mesh_model_surface")
+            m,mesh,master,mesh_edges,constraint.atol,"mesh_model_surface";
+            owned=owned)
         slave_entries,slave_tolerance=_periodic_curve_parameter_nodes(
-            m,mesh,slave,mesh_edges,constraint.atol,"mesh_model_surface")
+            m,mesh,slave,mesh_edges,constraint.atol,"mesh_model_surface";
+            owned=owned)
         tolerance=max(master_tolerance,slave_tolerance)
         for (curve,entries) in ((master,master_entries),(slave,slave_entries))
             values=get!(()->Float64[],raw_parameters,curve)
@@ -3092,8 +3212,9 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
     for curve in sort!(collect(keys(raw_parameters)))
         values=Float64[]
         tolerance=component_tolerances[curve]
+        bounds=_model_curve_param_bounds(m,curve,"mesh_model_surface")
         for parameter in raw_parameters[curve]
-            _insert_periodic_parameter!(values,parameter,tolerance)
+            _insert_periodic_parameter!(values,parameter,tolerance,bounds)
         end
         parameters[curve]=values
     end
@@ -3104,21 +3225,32 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
         for (constraint,_) in relations
             slave=Int(constraint.slave_entity)
             master=Int(constraint.master_entity)
+            slave_bounds=_model_curve_param_bounds(
+                m,slave,"mesh_model_surface")
+            master_bounds=_model_curve_param_bounds(
+                m,master,"mesh_model_surface")
             slave_tolerance=_periodic_parameter_merge_tolerance(
                 m,slave,component_tolerances[slave],"mesh_model_surface")
             master_tolerance=_periodic_parameter_merge_tolerance(
                 m,master,component_tolerances[master],"mesh_model_surface")
             master_values=copy(parameters[master])
             slave_values=copy(parameters[slave])
+            # The cross-map is `_model_curve_periodic_params`'s upstream
+            # `newu = u_max − u + to_u_min` shift, expressed per direction —
+            # for `[0,1]` line ranges it is the `1 − u` mirror verbatim.
             for parameter in master_values
-                mapped=constraint.reversed ? 1-parameter : parameter
+                mapped=constraint.reversed ?
+                    master_bounds[2]-parameter+slave_bounds[1] :
+                    parameter-master_bounds[1]+slave_bounds[1]
                 propagated|=_insert_periodic_parameter!(
-                    parameters[slave],mapped,slave_tolerance)
+                    parameters[slave],mapped,slave_tolerance,slave_bounds)
             end
             for parameter in slave_values
-                mapped=constraint.reversed ? 1-parameter : parameter
+                mapped=constraint.reversed ?
+                    slave_bounds[2]-parameter+master_bounds[1] :
+                    parameter-slave_bounds[1]+master_bounds[1]
                 propagated|=_insert_periodic_parameter!(
-                    parameters[master],mapped,master_tolerance)
+                    parameters[master],mapped,master_tolerance,master_bounds)
             end
         end
         if !propagated
@@ -3131,12 +3263,13 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
 
     changed=false
     for curve in sort!(collect(keys(parameters)))
-        curve_forced=get!(()->Float64[0,1],forced,curve)
+        bounds=_model_curve_param_bounds(m,curve,"mesh_model_surface")
+        curve_forced=get!(()->Float64[bounds...],forced,curve)
         tolerance=_periodic_parameter_merge_tolerance(
             m,curve,component_tolerances[curve],"mesh_model_surface")
         for parameter in parameters[curve]
             changed|=_insert_periodic_parameter!(
-                curve_forced,parameter,tolerance)
+                curve_forced,parameter,tolerance,bounds)
         end
     end
     return changed
@@ -3146,20 +3279,29 @@ function _model_periodic_curve_nodes(m::GeoModel,mesh::Mesh,
                                      constraint::ModelPeriodicConstraint)
     mesh_edges=_model_projection_triangle_edges(mesh)
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
+    owned=_curve_owned_coordinates(m,(slave,master),"model_periodic_nodes")
     master_entries,master_tolerance=_periodic_curve_parameter_nodes(
-        m,mesh,master,mesh_edges,constraint.atol,"model_periodic_nodes")
+        m,mesh,master,mesh_edges,constraint.atol,"model_periodic_nodes";
+        owned=owned)
     slave_entries,slave_tolerance=_periodic_curve_parameter_nodes(
-        m,mesh,slave,mesh_edges,constraint.atol,"model_periodic_nodes")
+        m,mesh,slave,mesh_edges,constraint.atol,"model_periodic_nodes";
+        owned=owned)
     ordered_slave=constraint.reversed ? reverse(slave_entries) : slave_entries
     length(master_entries)==length(ordered_slave) || throw(ErrorException(
         "model_periodic_nodes: Curve[$slave] and Curve[$master] node counts differ"))
     tolerance=max(master_tolerance,slave_tolerance)
+    slave_bounds=_model_curve_param_bounds(m,slave,"model_periodic_nodes")
+    master_bounds=_model_curve_param_bounds(m,master,"model_periodic_nodes")
     master_nodes=Vector{Int32}(undef,length(master_entries))
     slave_nodes=similar(master_nodes)
     for index in eachindex(master_entries)
         master_parameter,master_node=master_entries[index]
         slave_parameter,slave_node=ordered_slave[index]
-        mapped=constraint.reversed ? 1-slave_parameter : slave_parameter
+        # `_model_curve_periodic_params`'s `newu = u_max − u + to_u_min`
+        # mirror, expressed in the master frame — `1 − u` only on `[0,1]`.
+        mapped=constraint.reversed ?
+            slave_bounds[2]-slave_parameter+master_bounds[1] :
+            slave_parameter-slave_bounds[1]+master_bounds[1]
         abs(master_parameter-mapped)<=tolerance || throw(ErrorException(
             "model_periodic_nodes: Curve[$slave]/Curve[$master] parameters differ"))
         master_nodes[index]=Int32(master_node);slave_nodes[index]=Int32(slave_node)
@@ -3387,8 +3529,26 @@ end
 
 function _model_projection_embedded_curve_nodes(
     m::GeoModel,mesh::Mesh,curve::Int,mesh_edges,
-    atol::Float64,caller::AbstractString)
-    _model_require_line_curve(m,curve,caller,"embedded-curve classification")
+    atol::Float64,caller::AbstractString;
+    owned::Union{Nothing,Dict{NTuple{3,Float64},Set{Int}}}=nothing)
+    # Non-`Line` embedded curves classify through the same stored-parameter
+    # chain audit boundary curves use — emitting paths evaluate the shared
+    # native discretization, so the lookup recovers each node exactly.
+    if _curve_type(m,curve)!==:line
+        entries,_=_periodic_curve_parameter_nodes(
+            m,mesh,curve,mesh_edges,atol,caller;owned=owned)
+        return entries
+    end
+    eligible=owned===nothing ? trues(nnodes(mesh)) :
+        _curve_chain_eligible(mesh,trues(nnodes(mesh)),owned,curve)
+    return _embedded_line_curve_nodes(
+        m,mesh,curve,mesh_edges,atol,caller;eligible_nodes=eligible)
+end
+
+function _embedded_line_curve_nodes(
+    m::GeoModel,mesh::Mesh,curve::Int,mesh_edges,
+    atol::Float64,caller::AbstractString;
+    eligible_nodes=trues(nnodes(mesh)))
     start_point,stop_point=m.curves[curve]
     first_coordinate=m.points[start_point]
     last_coordinate=m.points[stop_point]
@@ -3405,6 +3565,7 @@ function _model_projection_embedded_curve_nodes(
     parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
+        eligible_nodes[node] || continue
         wx=mesh.coords[1,node]-first_coordinate[1]
         wy=mesh.coords[2,node]-first_coordinate[2]
         wz=mesh.coords[3,node]-first_coordinate[3]
@@ -3662,11 +3823,16 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
     line_cells=NTuple{2,Int32}[]
     line_entities=Int32[]
     claimed_edges=Set{Tuple{Int32,Int32}}()
+    # Vertices a sibling curve owns outright are excluded per curve — at a
+    # boundary pinch the two sides' subdivision vertices sit inside the
+    # classification tolerance without sharing an edge.
+    owned=_curve_owned_coordinates(m,all_curve_tags,caller)
     for curve in curve_tags
         entries=try
             first(_curve_parameter_nodes(
-                m,mesh,curve,boundary,boundary_edges,
-                geometric_tolerance,caller))
+                m,mesh,curve,
+                _curve_chain_eligible(mesh,boundary,owned,curve),
+                boundary_edges,geometric_tolerance,caller))
         catch err
             err isa InterruptException && rethrow()
             err isa ArgumentError && rethrow()
@@ -3699,7 +3865,8 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
     mesh_edges=_model_projection_triangle_edges(mesh)
     for curve in embedded_curves
         entries=_model_projection_embedded_curve_nodes(
-            m,mesh,curve,mesh_edges,geometric_tolerance,caller)
+            m,mesh,curve,mesh_edges,geometric_tolerance,caller;
+            owned=owned)
         curve_entries[curve]=entries
         start_point,stop_point=m.curves[curve]
         _model_projection_point!(
@@ -4073,13 +4240,16 @@ function model_to_mixed(m::GeoModel,parts::AbstractVector)
             mesh_edges=_model_projection_triangle_edges(mesh)
             boundary_curve_tags=_model_projection_surface_curves(m,tag)
             _,embedded_curve_tags=_model_surface_embedding_tags(m,tag,caller)
+            owned=_curve_owned_coordinates(
+                m,vcat(boundary_curve_tags,embedded_curve_tags),caller)
             for curve in vcat(boundary_curve_tags,embedded_curve_tags)
                 haskey(curve_entries,curve) && continue
                 entries_list=if curve in boundary_curve_tags
                     try
                         first(_curve_parameter_nodes(
-                            m,mesh,curve,boundary,boundary_edges,
-                            tolerance,caller))
+                            m,mesh,curve,
+                            _curve_chain_eligible(mesh,boundary,owned,curve),
+                            boundary_edges,tolerance,caller))
                     catch err
                         err isa InterruptException && rethrow()
                         err isa ArgumentError && rethrow()
@@ -4089,7 +4259,7 @@ function model_to_mixed(m::GeoModel,parts::AbstractVector)
                     end
                 else
                     _model_projection_embedded_curve_nodes(
-                        m,mesh,curve,mesh_edges,tolerance,caller)
+                        m,mesh,curve,mesh_edges,tolerance,caller;owned=owned)
                 end
                 remapped=Tuple{Float64,Int}[
                     (param,Int(remap[node])) for (param,node) in entries_list]
@@ -4193,6 +4363,29 @@ end
 # ruled patch whose boundary certifies planar is planar in fact. Every
 # boundary point is offset-checked while the PSLG is built, so a genuinely
 # non-planar ruled boundary still fails explicitly there.
+# Evaluated samples for native (non-OCC, non-`Line`) boundary curves — the
+# analogue of `_occ_surface_samples` for built-in arcs and splines. Returns
+# (coordinates, stand-in point tags) pairs; the stand-in tag is the curve's
+# first endpoint like the OCC helper uses.
+function _native_curve_plane_samples(m::GeoModel,surface::Int,
+                                     caller::AbstractString)
+    samples=NTuple{3,Float64}[]
+    tags=Int[]
+    for loop in m.surfaces[surface], signed in m.loops[loop]
+        curve=abs(signed)
+        _curve_type(m,curve)===:line && continue
+        _occ_geometry_checked(m,curve,caller)!==nothing && continue
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        a,_=m.curves[curve]
+        for k in 0:2
+            push!(samples,_model_curve_point(
+                m,curve,t0+(t1-t0)*(k/3),caller))
+            push!(tags,a)
+        end
+    end
+    return samples,tags
+end
+
 function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
                               allow_ruled::Bool=false)
     haskey(m.surfaces,surface) || throw(ArgumentError(
@@ -4228,8 +4421,22 @@ function _model_surface_plane(m::GeoModel,surface::Int,caller::AbstractString;
     occ_samples,occ_sample_tags=_occ_surface_samples(m,surface,caller)
     append!(point_tags,occ_sample_tags)
     append!(coordinates,occ_samples)
-    anchor,second,third,axes=_model_surface_projection(
-        coordinates,point_tags,surface,caller)
+    anchor,second,third,axes=try
+        _model_surface_projection(coordinates,point_tags,surface,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        # A loop of one closed curve — a full-circle disk, say — declares too
+        # few distinct points to fit a plane. Retry with evaluated on-curve
+        # samples (guaranteed coplanar modulo evaluator noise); a genuinely
+        # non-planar or collinear boundary rethrows unchanged.
+        native_samples,native_sample_tags=_native_curve_plane_samples(
+            m,surface,caller)
+        isempty(native_samples) && rethrow()
+        append!(point_tags,native_sample_tags)
+        append!(coordinates,native_samples)
+        _model_surface_projection(coordinates,point_tags,surface,caller)
+    end
     u=(second[1]-anchor[1],second[2]-anchor[2],second[3]-anchor[3])
     v=(third[1]-anchor[1],third[2]-anchor[2],third[3]-anchor[3])
     normal=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
@@ -4313,29 +4520,31 @@ function _model_planar_surface_mesh(
     haskey(m.surfaces,surface) || throw(ArgumentError(
         "$caller: unknown Surface[$surface]"))
     point_tags=Int[]
-    point_index=Dict{Int,Int}()
+    coordinates=NTuple{3,Float64}[]
+    vertex_index=Dict{NTuple{3,Float64},Int}()
+    # Vertices deduplicate on coordinates — an evaluated interior sample can
+    # coincide with a distinct model point the same weld would merge.
+    function add_coordinate!(point::Int,coordinate)
+        get!(vertex_index,coordinate) do
+            push!(coordinates,coordinate);push!(point_tags,point)
+            length(coordinates)
+        end
+    end
     function add_point_tag!(point::Int)
         haskey(m.points,point) || throw(ArgumentError(
             "$caller: Surface[$surface] references unknown Point[$point]"))
-        return get!(point_index,point) do
-            push!(point_tags,point)
-            length(point_tags)
-        end
+        return add_coordinate!(point,m.points[point])
     end
     segments=Tuple{Int,Int}[]
     for loop in m.surfaces[surface]
-        haskey(m.loops,loop) || throw(ArgumentError(
-            "$caller: Surface[$surface] references unknown Loop[$loop]"))
-        for signed_curve in m.loops[loop]
-            _model_require_line_curve(m,abs(signed_curve),caller,
-                                      "surface meshing")
-        end
-        loop_points=_loop_points(m,loop)
-        length(loop_points)>=3 || throw(ArgumentError(
+        chain,chain_tags,_=_surface_loop_vertex_chain(m,loop,caller)
+        length(chain)>=3 || throw(ArgumentError(
             "$caller: Surface[$surface] Loop[$loop] needs at least three points"))
-        indices=Int[add_point_tag!(point) for point in loop_points]
+        indices=Int[add_coordinate!(tag,coordinate)
+                    for (coordinate,tag) in zip(chain,chain_tags)]
         for index in eachindex(indices)
-            push!(segments,(indices[index],indices[mod1(index+1,length(indices))]))
+            i,j=indices[index],indices[mod1(index+1,length(indices))]
+            i==j || push!(segments,(i,j))
         end
     end
     internal_segments=Tuple{Int,Int}[]
@@ -4351,15 +4560,24 @@ function _model_planar_surface_mesh(
             add_point_tag!(point)
         end
         for curve in embedded_curves
-            _model_require_line_curve(m,curve,caller,
-                                      "embedded-curve meshing")
+            haskey(m.curves,curve) || throw(ArgumentError(
+                "$caller: unknown embedded Curve[$curve]"))
             start_point,stop_point=m.curves[curve]
-            first_index=add_point_tag!(start_point)
-            second_index=add_point_tag!(stop_point)
-            push!(internal_segments,(first_index,second_index))
+            ids=Int[add_point_tag!(start_point)]
+            if _curve_type(m,curve)!==:line
+                for u in _surface_curve_polygon_params(m,curve,caller)
+                    push!(ids,add_coordinate!(
+                        start_point,
+                        _model_curve_point(m,curve,u,caller)))
+                end
+            end
+            push!(ids,add_point_tag!(stop_point))
+            for k in 1:(length(ids)-1)
+                ids[k]==ids[k+1] ||
+                    push!(internal_segments,(ids[k],ids[k+1]))
+            end
         end
     end
-    coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
     _,_,_,projection=_model_surface_projection(
         coordinates,point_tags,surface,caller)
     first_axis,second_axis=projection
@@ -4590,21 +4808,42 @@ end
 function _model_projection_boundary_surface_faces!(
     claimed_faces::Set{NTuple{3,Int32}},mesh_boundary_faces,
     m::GeoModel,mesh::Mesh,surface::Int,caller::AbstractString)
+    chains=Vector{NTuple{3,Float64}}[]
+    coordinates=NTuple{3,Float64}[]
     point_tags=Int[]
-    polygons=Vector{NTuple{2,Float64}}[]
+    sampled=NTuple{3,Float64}[]
+    sampled_tags=Int[]
     for loop in m.surfaces[surface]
-        loop_points=_loop_points(m,loop)
-        append!(point_tags,loop_points)
+        chain,tags,endpoints=_surface_loop_vertex_chain(m,loop,caller)
+        push!(chains,chain)
+        for i in eachindex(chain)
+            if endpoints[i]
+                push!(coordinates,chain[i]);push!(point_tags,tags[i])
+            else
+                push!(sampled,chain[i]);push!(sampled_tags,tags[i])
+            end
+        end
     end
-    unique!(point_tags)
-    coordinates=NTuple{3,Float64}[m.points[point] for point in point_tags]
-    anchor,second,third,projection=_model_surface_projection(
-        coordinates,point_tags,surface,caller)
+    # The exact fit prefers declared model points; evaluated samples join only
+    # when the declared set cannot fit a plane (a closed-curve loop declares a
+    # single distinct endpoint). Evaluated coordinates are coplanar modulo
+    # evaluator noise, so the strict predicate may still reject a genuinely
+    # tilted closed-loop boundary — the same residual gap as
+    # `_model_surface_plane`.
+    anchor,second,third,projection=try
+        _model_surface_projection(coordinates,point_tags,surface,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        isempty(sampled) && rethrow()
+        append!(coordinates,sampled);append!(point_tags,sampled_tags)
+        _model_surface_projection(coordinates,point_tags,surface,caller)
+    end
     first_axis,second_axis=projection
-    for loop in m.surfaces[surface]
+    polygons=Vector{NTuple{2,Float64}}[]
+    for chain in chains
         polygon=NTuple{2,Float64}[]
-        for point in _loop_points(m,loop)
-            coordinate=m.points[point]
+        for coordinate in chain
             push!(polygon,
                 (_model_projection_coordinate_key(coordinate[first_axis]),
                  _model_projection_coordinate_key(coordinate[second_axis])))
@@ -4628,7 +4867,7 @@ function _model_projection_boundary_surface_faces!(
                   normal_u[1]*normal_v[2]-normal_u[2]*normal_v[1])
     plane_norm=sqrt(plane_normal[1]^2+plane_normal[2]^2+plane_normal[3]^2)
     extent=0.0
-    for coordinate in coordinates
+    for chain in chains, coordinate in chain
         extent=max(extent,hypot(coordinate[1]-anchor[1],
             coordinate[2]-anchor[2],coordinate[3]-anchor[3]))
     end
@@ -4860,8 +5099,8 @@ function _model_volume_embedding_inventory(
             (isempty(nested_points) && isempty(nested_curves)) ||
                 throw(ArgumentError(
                     "$caller: Surface[$surface] bounds primitive " *
-                    "Volume[$volume] and carries embedded entities; curved " *
-                    "surface meshing is unsupported"))
+                    "Volume[$volume] and carries embedded entities; non-" *
+                    "planar surface meshing is unsupported"))
         end
         Int[]
     else
@@ -6350,18 +6589,52 @@ end
 end
 
 function _validate_surface_embeddings(m::GeoModel,mesh::Mesh,embedded,
-                                      caller::AbstractString)
+                                      caller::AbstractString;
+                                      surface::Int=0)
+    owned=nothing
+    if surface!=0 && any(pair->pair[1]==1 &&
+                         _curve_type(m,pair[2])!==:line,embedded)
+        # Curved embedded curves audit against foreign-owned vertices — the
+        # map needs the surface's boundary curves alongside the embedded set.
+        owned=_curve_owned_coordinates(
+            m,Iterators.flatten(
+                ((abs(signed) for loop in m.surfaces[surface] for
+                  signed in m.loops[loop]),
+                 (etag for (edim,etag) in embedded if edim==1))),
+            caller)
+    end
+    _validate_surface_embeddings_owned(m,mesh,embedded,caller,owned)
+end
+
+function _validate_surface_embeddings_owned(m::GeoModel,mesh::Mesh,embedded,
+                                            caller::AbstractString,owned)
     for (edim,etag) in embedded
         if edim==0
             p=m.points[etag]
             _node_at(mesh,p)==0 && throw(ErrorException(
                 "$caller: embedded Point[$etag] at $p is not a mesh node"))
         elseif edim==1
-            _model_require_line_curve(m,etag,caller,
-                                      "embedded-curve verification")
-            a,b=m.curves[etag]
-            _mesh_covers_segment(mesh, m.points[a], m.points[b]) || throw(ErrorException(
-                "$caller: embedded Curve[$etag] is not a chain of mesh edges"))
+            if _curve_type(m,etag)===:line
+                a,b=m.curves[etag]
+                _mesh_covers_segment(mesh, m.points[a], m.points[b]) ||
+                    throw(ErrorException(
+                        "$caller: embedded Curve[$etag] is not a chain of " *
+                        "mesh edges"))
+            else
+                chain=try
+                    _periodic_curve_parameter_nodes(
+                        m,mesh,etag,_model_projection_triangle_edges(mesh),
+                        0.0,caller;owned=owned)
+                catch err
+                    err isa InterruptException && rethrow()
+                    (err isa ArgumentError || err isa ErrorException) ||
+                        rethrow()
+                    nothing
+                end
+                chain===nothing && throw(ErrorException(
+                    "$caller: embedded Curve[$etag] is not a chain of " *
+                    "mesh edges"))
+            end
         end
     end
     return nothing
@@ -6461,7 +6734,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             param_sizes=param_sizes)
         isempty(constraints) && break
         changed=_synchronize_periodic_parameters!(
-            forced,m,mesh,constraints)
+            forced,m,mesh,constraints,t)
         if changed
             pass<npasses || throw(ErrorException(
                 "$caller: periodic curve synchronization did not converge " *
@@ -6477,7 +6750,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     # `meshGFace` updates each `GEdge`'s mesh with face-refinement splits, so
     # the emitted line elements share the face's vertices.
     mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)
-    _validate_surface_embeddings(m,mesh,embedded,caller)
+    _validate_surface_embeddings(m,mesh,embedded,caller;surface=t)
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ErrorException(
         "$caller: invalid final mesh — "*join(diagnostic.messages,"; ")))
@@ -7056,9 +7329,14 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
     param_sizes=Dict{Tuple{Int,Float64},Float64}()
     for (key,specs) in m.meshing.size_at_params
         key[1]==1 || continue
+        etag=key[2]
+        etag in keys(counts) || continue
+        # Normalized [0,1] entries map into each member curve's native frame,
+        # matching `_attribute_forced_parameters`.
+        s0,s1=_model_curve_param_bounds(m,etag,caller)
         for (params,value) in specs
             for parameter in params
-                param_sizes[(key[2],parameter)]=value
+                param_sizes[(etag,s0+parameter*(s1-s0))]=value
             end
         end
     end
@@ -7070,9 +7348,7 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
     for curve in keys(counts)
         params=get(m.curve_params,curve,nothing)
         params===nothing && continue
-        t0,t1=_model_curve_param_bounds(m,curve,caller)
-        forced[curve]=t0==0.0 && t1==1.0 ? Float64.(params) :
-            Float64[(u-t0)/(t1-t0) for u in params]
+        forced[curve]=Float64.(params)
     end
     xs=Float64[];ys=Float64[];mesh_sizes=Float64[]
     boundary_segs=Tuple{Int,Int}[]
@@ -7093,20 +7369,18 @@ function _compound_surface_meshes(m::GeoModel,members::Vector{Int},
             loop_idx=Int[]
             for signed in m.loops[loop_id]
                 curve=abs(signed);a,b=m.curves[curve]
-                _model_require_line_curve(m,curve,caller,
-                                          "compound surface meshing")
+                t0,t1=_model_curve_param_bounds(m,curve,caller)
                 cspec=get(m.meshing.transfinite_curves,curve,nothing)
                 (cspec===nothing || curve in m.meshing.degenerated) ||
-                    (forced[curve]=collect(_transfinite_parameters(
-                        m,cspec.num_nodes,cspec.kind,cspec.coef,
-                        caller,curve;reversed=cspec.reversed)))
+                    (forced[curve]=_model_curve_transfinite_native_params(
+                        m,curve,t0,t1,cspec,caller))
                 loop_segment=Int[]
                 for parameter in _surface_curve_parameters(
-                        m,forced,curve,signed)
-                    vertex=if parameter==0
+                        m,forced,curve,signed,caller)
+                    vertex=if parameter==t0
                         _add_surface_point!(
                             xs,ys,mesh_sizes,index,canonical,m,a,caller,plane)
-                    elseif parameter==1
+                    elseif parameter==t1
                         _add_surface_point!(
                             xs,ys,mesh_sizes,index,canonical,m,b,caller,plane)
                     else
