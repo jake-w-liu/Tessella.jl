@@ -5979,11 +5979,23 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     end
     isempty(spec.corners) || (curve_points=_apply_pinned_surface_corners(
         m,t,signed_curves,curve_points,spec.corners,nside,caller))
-    plane=_model_surface_plane(m,t,caller)
-    for p in Iterators.flatten(curve_points)
-        scale=max(1.0,hypot(p...))
-        abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
-            "$caller: transfinite Surface[$t] boundary is not coplanar"))
+    kind=_surface_type(m,t)
+    (nside!=4 || kind in (:plane,:ruled)) || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] requires a planar or ruled " *
+        "surface-filling kind"))
+    # A ruled surface with a genuinely non-coplanar boundary meshes as a
+    # warped transfinite patch (3-D Coons interpolation). Surfaces carrying
+    # auxiliary filling geometry — `Surface … In Sphere` — keep their own
+    # parameterization and cannot use the Coons analogue.
+    allow_warped=nside==4 && kind==:ruled &&
+                 !haskey(m.surface_geometry,t)
+    if !allow_warped
+        plane=_model_surface_plane(m,t,caller)
+        for p in Iterators.flatten(curve_points)
+            scale=max(1.0,hypot(p...))
+            abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
+                "$caller: transfinite Surface[$t] boundary is not coplanar"))
+        end
     end
     # Corner consistency: each side ends where the next begins. The kernels
     # require bitwise-identical shared corners, while `_periodic_curve_point`
@@ -6022,7 +6034,8 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     end
     bottom,right,top,left=curve_points
     kernel=mesh_transfinite_patch(bottom,right,top,left;
-                                  arrangement=spec.arrangement)
+                                  arrangement=spec.arrangement,
+                                  allow_warped=allow_warped)
     mesh=Mesh(kernel.coords;tris=kernel.tris)
     return _consume_surface_attributes(m,t,mesh,caller)
 end

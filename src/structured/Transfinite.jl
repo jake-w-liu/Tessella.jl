@@ -9,7 +9,7 @@ four-corner Gmsh transfinite-surface construction for an affine planar surface.
 module Transfinite
 
 using ..MeshTypes: Mesh, boundary_edges, nnodes, nsegs, ntris, validate
-using ..Predicates: orient2
+using ..Predicates: orient2, orient3
 
 export mesh_transfinite_patch
 
@@ -33,11 +33,34 @@ struct _SegmentBox
     segment::Int
 end
 
+struct _SegmentBox3
+    xmin::Float64
+    xmax::Float64
+    ymin::Float64
+    ymax::Float64
+    zmin::Float64
+    zmax::Float64
+    segment::Int
+end
+
 struct _BoundaryNode
     xmin::Float64
     xmax::Float64
     ymin::Float64
     ymax::Float64
+    segment::Int
+    left::Int
+    right::Int
+    count::Int
+end
+
+struct _BoundaryNode3
+    xmin::Float64
+    xmax::Float64
+    ymin::Float64
+    ymax::Float64
+    zmin::Float64
+    zmax::Float64
     segment::Int
     left::Int
     right::Int
@@ -263,7 +286,59 @@ function _exact_plane_frame(ring,origin)
     return _frame_from_normal(normal)
 end
 
-function _plane_frame(ring,origin,scale)
+
+
+# `allow_warped` admits a genuinely non-coplanar boundary: the patch then
+# follows the 3-D Coons interpolation of its side chains instead of living in
+# a single plane. The Newell normal of the closed ring still defines the
+# orientation frame; it remains valid for any non-self-intersecting closed
+# polygon. Exactly-coplanar rings take the planar frame unchanged so planar
+# output is bit-identical either way.
+#
+# `_ring_coplanar_exact` distinguishes a truly warped ring from a coplanar
+# ring with Float64 accumulation noise: three non-collinear anchors span a
+# candidate plane and every remaining vertex must satisfy orient3 == 0 — an
+# exact-sign predicate that allocates nothing on the ordinary float path.
+function _ring_coplanar_exact(ring)
+    n=length(ring)
+    n<3 && return false
+    a=ring[1];b_index=0;best_norm=-1.0
+    @inbounds for i in 2:n
+        d=_sub3(ring[i],a);norm2=_dot3(d,d)
+        norm2>best_norm && (best_norm=norm2;b_index=i)
+    end
+    b_index==0 && return false
+    b=ring[b_index];ab=_sub3(b,a)
+    c_index=0;best_area=0.0
+    @inbounds for i in 2:n
+        i==b_index && continue
+        cross=_cross3(ab,_sub3(ring[i],a));area2=_dot3(cross,cross)
+        area2>best_area && (best_area=area2;c_index=i)
+    end
+    if c_index==0
+        # Every Float64 cross product canceled to zero (exactly representable
+        # near-collinear coordinates): resolve the third anchor exactly so a
+        # valid affine patch still receives its coplanarity certificate.
+        ea=ntuple(d->Rational{BigInt}(a[d]),3)
+        eb=ntuple(d->Rational{BigInt}(b[d]),3)
+        eab=_sub3(eb,ea)
+        @inbounds for i in 2:n
+            i==b_index && continue
+            ep=ntuple(d->Rational{BigInt}(ring[i][d]),3)
+            exact_cross=_cross3(eab,_sub3(ep,ea))
+            _dot3(exact_cross,exact_cross)>0 || continue
+            c_index=i;break
+        end
+        c_index==0 && return false
+    end
+    c=ring[c_index]
+    @inbounds for i in eachindex(ring)
+        orient3(a,b,c,ring[i])!=0 && return false
+    end
+    return true
+end
+
+function _patch_frame(ring,origin,scale,allow_warped::Bool)
     nx=0.0;ny=0.0;nz=0.0
     @inbounds for i in eachindex(ring)
         p=_normalize(ring[i],origin,scale)
@@ -277,24 +352,270 @@ function _plane_frame(ring,origin,scale)
         exact=_exact_plane_frame(ring,origin)
         exact===nothing && throw(ArgumentError(
             "mesh_transfinite_patch: boundary has no representable plane normal"))
-        return exact
+        return exact,true
     end
     normal=(nx/normal_length,ny/normal_length,nz/normal_length)
-    frame=_frame_from_normal(normal)
     tolerance=256eps(Float64)
-    @inbounds for (i,point) in pairs(ring)
+    warped=false
+    @inbounds for point in ring
         normalized=_normalize(point,origin,scale)
         distance=abs(_dot3(normalized,normal))
         if !(isfinite(distance)&&distance<=tolerance)
-            exact=_exact_plane_frame(ring,origin)
-            exact===nothing && throw(ArgumentError(
-                "mesh_transfinite_patch: boundary node $i is not coplanar " *
-                "(normalized distance $distance exceeds $tolerance)"))
-            return exact
+            warped=true;break
         end
     end
-    return frame
+    if warped
+        _ring_coplanar_exact(ring) &&
+            return _frame_from_normal(normal),true
+        allow_warped || throw(ArgumentError(
+            "mesh_transfinite_patch: boundary is not coplanar and the patch " *
+            "is not allowed to be warped"))
+    end
+    return _frame_from_normal(normal),!warped
 end
+
+# In exact arithmetic, two non-coplanar open segments cannot intersect, so a
+# 3-D intersection audit only needs the coplanar case plus the shared-endpoint
+# handling of adjacent ring edges. Coplanar candidates are tested in their
+# best-conditioned coordinate-plane projection; fully collinear candidates
+# fall back to a scalar interval-overlap test along the dominant axis.
+function _point_on_segment3(a,b,p)
+    cross=_cross3(_sub3(b,a),_sub3(p,a))
+    if !(cross[1]==0&&cross[2]==0&&cross[3]==0)
+        ea=ntuple(d->Rational{BigInt}(a[d]),3)
+        eb=ntuple(d->Rational{BigInt}(b[d]),3)
+        ep=ntuple(d->Rational{BigInt}(p[d]),3)
+        cross_exact=_cross3(_sub3(eb,ea),_sub3(ep,ea))
+        (cross_exact[1]==0&&cross_exact[2]==0&&cross_exact[3]==0) ||
+            return false
+    end
+    return min(a[1],b[1])<=p[1]<=max(a[1],b[1]) &&
+           min(a[2],b[2])<=p[2]<=max(a[2],b[2]) &&
+           min(a[3],b[3])<=p[3]<=max(a[3],b[3])
+end
+
+@inline _plane_axes(pair::Int)=pair==1 ? (2,3) : pair==2 ? (1,3) : (1,2)
+@inline _proj_axes(p,axes)=(p[axes[1]],p[axes[2]])
+
+function _segments_intersect_3d(a,b,c,d)
+    orient3(a,b,c,d)!=0 && return false
+    axes=0
+    @inbounds for tri in ((a,b,c),(a,b,d),(c,d,a),(c,d,b))
+        for pair in ((1,2),(1,3),(2,3))
+            orient2(_proj_axes(tri[1],pair),_proj_axes(tri[2],pair),
+                    _proj_axes(tri[3],pair))!=0 || continue
+            axes=pair;break
+        end
+        axes!=0 && break
+    end
+    if axes==0
+        # All four endpoints are collinear: compare interval ranges along the
+        # dominant coordinate of the common direction.
+        ab=_sub3(b,a)
+        axis=abs(ab[1])>=abs(ab[2])&&abs(ab[1])>=abs(ab[3]) ? 1 :
+              abs(ab[2])>=abs(ab[3]) ? 2 : 3
+        lo1,hi1=minmax(a[axis],b[axis]);lo2,hi2=minmax(c[axis],d[axis])
+        return max(lo1,lo2)<=min(hi1,hi2)
+    end
+    return _segments_intersect(_proj_axes(a,axes),_proj_axes(b,axes),
+                               _proj_axes(c,axes),_proj_axes(d,axes))
+end
+
+function _adjacent_overlap_3d(a,b,c,d)
+    shared = a==c || a==d ? a : b==c || b==d ? b : nothing
+    shared===nothing && return true
+    for point in (a,b)
+        point==shared || !_point_on_segment3(c,d,point) || return true
+    end
+    for point in (c,d)
+        point==shared || !_point_on_segment3(a,b,point) || return true
+    end
+    return false
+end
+
+@inline _box_overlap_3d(a,b)=a.xmin<=b.xmax&&b.xmin<=a.xmax&&
+                                   a.ymin<=b.ymax&&b.ymin<=a.ymax&&
+                                   a.zmin<=b.zmax&&b.zmin<=a.zmax
+
+function _build_boundary_tree_3d!(nodes,order,boxes,lo::Int,hi::Int)
+    xmin=Inf;xmax=-Inf;ymin=Inf;ymax=-Inf;zmin=Inf;zmax=-Inf
+    @inbounds for position in lo:hi
+        box=boxes[order[position]]
+        xmin=min(xmin,box.xmin);xmax=max(xmax,box.xmax)
+        ymin=min(ymin,box.ymin);ymax=max(ymax,box.ymax)
+        zmin=min(zmin,box.zmin);zmax=max(zmax,box.zmax)
+    end
+    count=hi-lo+1;node_index=length(nodes)+1
+    push!(nodes,_BoundaryNode3(xmin,xmax,ymin,ymax,zmin,zmax,0,0,0,count))
+    if lo==hi
+        @inbounds segment=boxes[order[lo]].segment
+        nodes[node_index]=_BoundaryNode3(xmin,xmax,ymin,ymax,zmin,zmax,
+                                         segment,0,0,1)
+        return node_index
+    end
+    xspan=xmax-xmin;yspan=ymax-ymin;zspan=zmax-zmin
+    axis=xspan>=yspan&&xspan>=zspan ? 1 : yspan>=zspan ? 2 : 3
+    sort!(@view(order[lo:hi]);
+          by=index->begin box=boxes[index]
+              axis==1 ? box.xmin/2+box.xmax/2 :
+              axis==2 ? box.ymin/2+box.ymax/2 : box.zmin/2+box.zmax/2 end,
+          alg=QuickSort)
+    middle=lo+(hi-lo)÷2
+    left=_build_boundary_tree_3d!(nodes,order,boxes,lo,middle)
+    right=_build_boundary_tree_3d!(nodes,order,boxes,middle+1,hi)
+    nodes[node_index]=_BoundaryNode3(xmin,xmax,ymin,ymax,zmin,zmax,
+                                     0,left,right,count)
+    return node_index
+end
+
+function _audit_boundary_pair_3d(points,i::Int,j::Int,count::Int)
+    a=points[i];b=points[mod1(i+1,count)]
+    c=points[j];d=points[mod1(j+1,count)]
+    _segments_intersect_3d(a,b,c,d) || return nothing
+    adjacent=_boundary_adjacent(min(i,j),max(i,j),count)
+    if !adjacent || _adjacent_overlap_3d(a,b,c,d)
+        throw(ArgumentError(
+            "mesh_transfinite_patch: boundary segments $i and $j intersect"))
+    end
+    return nothing
+end
+
+function _validate_simple_boundary_3d(points)
+    count=length(points)
+    boxes=Vector{_SegmentBox3}(undef,count)
+    @inbounds for i in 1:count
+        a=points[i];b=points[mod1(i+1,count)]
+        (isfinite(a[1])&&isfinite(a[2])&&isfinite(a[3])) ||
+            throw(ArgumentError(
+                "mesh_transfinite_patch: boundary node $i is not finite"))
+        boxes[i]=_SegmentBox3(min(a[1],b[1]),max(a[1],b[1]),
+                              min(a[2],b[2]),max(a[2],b[2]),
+                              min(a[3],b[3]),max(a[3],b[3]),i)
+    end
+    order=collect(1:count);nodes=_BoundaryNode3[]
+    node_capacity=_checked_add(_checked_mul(2,count,"boundary audit node"),-1,
+                               "boundary audit node")
+    sizehint!(nodes,node_capacity)
+    root=_build_boundary_tree_3d!(nodes,order,boxes,1,count)
+    limit=max(_BOUNDARY_AUDIT_FLOOR,
+              _checked_mul(_BOUNDARY_AUDIT_MULTIPLIER,count,
+                           "boundary-intersection audit"))
+    stack=Tuple{Int,Int}[(root,root)]
+    visits=0;candidates=0
+    while !isempty(stack)
+        first,second=pop!(stack);visits+=1
+        visits<=limit || throw(ArgumentError(
+            "mesh_transfinite_patch: boundary intersection audit exceeded " *
+            "its bounded traversal limit $limit"))
+        node1=nodes[first];node2=nodes[second]
+        _box_overlap_3d(node1,node2) || continue
+        if first==second
+            node1.segment!=0 && continue
+            push!(stack,(node1.left,node1.left),(node1.left,node1.right),
+                        (node1.right,node1.right))
+        elseif node1.segment!=0&&node2.segment!=0
+            candidates+=1
+            candidates<=limit || throw(ArgumentError(
+                "mesh_transfinite_patch: boundary intersection audit exceeded " *
+                "its bounded candidate limit $limit"))
+            _audit_boundary_pair_3d(points,node1.segment,node2.segment,count)
+        elseif node2.segment!=0 || (node1.segment==0&&node1.count>=node2.count)
+            push!(stack,(node1.left,second),(node1.right,second))
+        else
+            push!(stack,(first,node2.left),(first,node2.right))
+        end
+    end
+    return nothing
+end
+
+# Warped patches cannot be folded back to a reference plane, so orientation is
+# audited directly in 3-D: every output triangle must carry a nonzero area
+# (with an exact-arithmetic fallback when Float64 squares underflow), and the
+# area-weighted normal field must agree with the ring's Newell normal — which
+# rejects an inverted patch. Local folds between adjacent triangles are
+# rejected by requiring every interior shared edge to keep both incident
+# triangle normals on the same side of the dihedral (dot >= 0).
+function _triangle_normal_3d(coords,i1,i2,i3)
+    ax,ay,az=coords[1,i1],coords[2,i1],coords[3,i1]
+    bx,by,bz=coords[1,i2],coords[2,i2],coords[3,i2]
+    cx,cy,cz=coords[1,i3],coords[2,i3],coords[3,i3]
+    return _cross3((bx-ax,by-ay,bz-az),(cx-ax,cy-ay,cz-az))
+end
+
+function _validate_warped_patch(coords,triangles,ring,origin,scale,L::Int,H::Int)
+    nx=0.0;ny=0.0;nz=0.0
+    @inbounds for i in eachindex(ring)
+        p=_normalize(ring[i],origin,scale)
+        q=_normalize(ring[mod1(i+1,length(ring))],origin,scale)
+        nx+=(p[2]-q[2])*(p[3]+q[3])
+        ny+=(p[3]-q[3])*(p[1]+q[1])
+        nz+=(p[1]-q[1])*(p[2]+q[2])
+    end
+    normals=Vector{NTuple{3,Float64}}(undef,size(triangles,2))
+    gx=0.0;gy=0.0;gz=0.0
+    @inbounds for triangle in axes(triangles,2)
+        n=_triangle_normal_3d(coords,Int(triangles[1,triangle]),
+                              Int(triangles[2,triangle]),
+                              Int(triangles[3,triangle]))
+        n2=_dot3(n,n)
+        if !(isfinite(n2)&&n2>0)
+            ea=ntuple(d->Rational{BigInt}(coords[d,Int(triangles[1,triangle])]),3)
+            eb=ntuple(d->Rational{BigInt}(coords[d,Int(triangles[2,triangle])]),3)
+            ec=ntuple(d->Rational{BigInt}(coords[d,Int(triangles[3,triangle])]),3)
+            en=_cross3(_sub3(eb,ea),_sub3(ec,ea))
+            _dot3(en,en)>0 || throw(ArgumentError(
+                "mesh_transfinite_patch: cell triangle $triangle is degenerate"))
+            n=ntuple(d->Float64(en[d]),3)
+            nl=sqrt(_dot3(n,n));n=(n[1]/nl,n[2]/nl,n[3]/nl)
+        end
+        normals[triangle]=n
+        gx+=n[1];gy+=n[2];gz+=n[3]
+    end
+    gx*nx+gy*ny+gz*nz>0 || throw(ArgumentError(
+        "mesh_transfinite_patch: warped patch reverses boundary orientation"))
+    # Edge-sharing normal consistency enumerated analytically over the
+    # regular cell grid — no auxiliary incidence storage beyond `normals`.
+    # Cell (i,j) owns triangles 2(i·H+j)+1 and 2(i·H+j)+2, which share the
+    # cell diagonal; cells (i,j) and (i+1,j) share the grid edge between
+    # nodes (i+1,j) and (i+1,j+1); cells (i,j) and (i,j+1) share the edge
+    # between nodes (i,j+1) and (i+1,j+1).
+    @inbounds for i in 0:L-1,j in 0:H-1
+        base=2(i*H+j)
+        _dot3(normals[base+1],normals[base+2])>=0 || throw(ArgumentError(
+            "mesh_transfinite_patch: warped patch folds across a shared edge"))
+        if i<L-1
+            a=_node(i+1,j,L+1);b=_node(i+1,j+1,L+1)
+            _dot3(normals[_edge_owner(triangles,base+1,base+2,a,b)],
+                  normals[_edge_owner(triangles,base+2H+1,base+2H+2,a,b)])>=0 ||
+                throw(ArgumentError(
+                    "mesh_transfinite_patch: warped patch folds across " *
+                    "a shared edge"))
+        end
+        if j<H-1
+            a=_node(i,j+1,L+1);b=_node(i+1,j+1,L+1)
+            _dot3(normals[_edge_owner(triangles,base+1,base+2,a,b)],
+                  normals[_edge_owner(triangles,base+3,base+4,a,b)])>=0 ||
+                throw(ArgumentError(
+                    "mesh_transfinite_patch: warped patch folds across " *
+                    "a shared edge"))
+        end
+    end
+    return 1
+end
+
+# The triangle (of the two owned by a cell) containing both endpoints of a
+# shared grid edge.
+@inline function _edge_owner(triangles,t1::Int,t2::Int,a,b)
+    _edge_contains(triangles,t1,a,b) && return t1
+    _edge_contains(triangles,t2,a,b) && return t2
+    throw(ErrorException(
+        "mesh_transfinite_patch: internal warped-audit adjacency failed"))
+end
+
+@inline _edge_contains(triangles,t,a,b)=
+    _tri_contains(triangles,t,a)&&_tri_contains(triangles,t,b)
+@inline _tri_contains(triangles,t,v)=
+    triangles[1,t]==v||triangles[2,t]==v||triangles[3,t]==v
 
 @inline _project(frame::_PlaneFrame,point)=
     (_dot3(point,frame.u),_dot3(point,frame.v))
@@ -571,12 +892,16 @@ end
 """
     mesh_transfinite_patch(side1, side2, side3, side4;
         arrangement=:left, face_tag=0, side_tags=(0,0,0,0),
+        allow_warped=false,
         max_nodes=10_000_000, max_triangles=20_000_000) -> Mesh
 
-Construct a four-sided planar transfinite triangle patch. Each side is an
+Construct a four-sided transfinite triangle patch. Each side is an
 already-discretized vector of finite 3-D points, oriented cyclically as
 `c1→c2`, `c2→c3`, `c3→c4`, and `c4→c1`. Adjacent endpoints must match exactly
 after conversion to `Float64`, and opposite sides must have equal node counts.
+By default the boundary must be coplanar; `allow_warped=true` instead admits a
+genuinely non-coplanar ring, whose interior follows the three-dimensional
+Coons interpolation of the four side chains (the ruled-surface analogue).
 
 The supported Gmsh triangle arrangements are `:left`, `:right`,
 `:alternate_left`, and `:alternate_right`. The returned mesh contains the four
@@ -584,6 +909,10 @@ boundary segment chains; `face_tag` is copied to every triangle and each entry
 of `side_tags` to the corresponding chain. Resource counts and caller limits
 are checked before output allocation. The function returns a validated simple
 patch or throws a precise blocker; it never falls back to unstructured meshing.
+Warped patches are audited in 3-D: the boundary must be a non-intersecting
+closed ring, every output triangle must have nonzero area, and the
+area-weighted normal field must agree with the ring's orientation while no
+pair of adjacent triangles may fold across their shared edge.
 
 This bounded operation does not discretize curves, apply size or quality fields,
 smooth the grid, handle holes or three-sided/quasi-transfinite patches, map a
@@ -595,6 +924,7 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
                                 side3::AbstractVector,side4::AbstractVector;
                                 arrangement=:left,face_tag=0,
                                 side_tags=(0,0,0,0),
+                                allow_warped::Bool=false,
                                 max_nodes=_DEFAULT_MAX_NODES,
                                 max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
     mode=_arrangement(arrangement)
@@ -647,10 +977,16 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
 
     ring=_boundary_ring(sides)
     origin,scale=_normalization(ring)
-    frame=_plane_frame(ring,origin,scale)
-    projected_ring=NTuple{2,Float64}[
-        _project(frame,_normalize(point,origin,scale)) for point in ring]
-    _validate_simple_boundary(projected_ring)
+    frame,planar=_patch_frame(ring,origin,scale,allow_warped)
+    if planar
+        projected_ring=NTuple{2,Float64}[
+            _project(frame,_normalize(point,origin,scale)) for point in ring]
+        _validate_simple_boundary(projected_ring)
+    else
+        normalized_ring=NTuple{3,Float64}[
+            _normalize(point,origin,scale) for point in ring]
+        _validate_simple_boundary_3d(normalized_ring)
+    end
 
     bottom=_normalized_side(sides[1],origin,scale)
     right=_normalized_side(sides[2],origin,scale)
@@ -698,7 +1034,13 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
     _fill_segments!(segment_topology,segment_tags,width,L,H,physical_side_tags)
     triangle_topology=Matrix{Int32}(undef,3,triangles)
     _fill_triangles!(triangle_topology,width,L,H,mode)
-    _validate_triangle_orientation(coordinates,triangle_topology,origin,scale,frame)
+    if planar
+        _validate_triangle_orientation(coordinates,triangle_topology,
+                                       origin,scale,frame)
+    else
+        _validate_warped_patch(coordinates,triangle_topology,ring,origin,scale,
+                               L,H)
+    end
     triangle_tags=fill(physical_face_tag,triangles)
 
     mesh=Mesh(coordinates;segs=segment_topology,tris=triangle_topology,
