@@ -26,26 +26,35 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Warped transfinite quadrangles on ruled surfaces** — `mesh_transfinite_patch`
-gains `allow_warped`: a genuinely non-coplanar boundary now meshes via the
-existing 3-D Coons interpolation instead of rejecting. The path is gated by
-surface kind — `:ruled` (`Surface`/`Ruled Surface` fillings) only; `Plane
-Surface` and `In Sphere` surfaces keep their planar/spherical requirements and
-`:tric` (3-border) stays planar-only. Warped-mode audits run in 3-D: an
-orient3-based exact coplanarity split in `_patch_frame` (replacing the
-Rational{BigInt} fallback on the hot path — ~2 MB → ~0 for a 508-edge ring), an
-AABB-accelerated nonadjacent-segment intersection audit with exact
-coplanarity/projection tests, per-triangle nonzero-area certification with an
-exact fallback, an area-weighted orientation check against the ring's Newell
-normal, and an allocation-free fold audit on every shared grid edge
-(enumerated analytically from the regular cell layout). Coplanar inputs under
-`allow_warped` are bit-identical to the planar path. Gmsh 4.15.2 differential:
-25-node warped ruled patch matches node-for-node within 1.9e-13 (gmsh NURBS-fit
-noise vs Tessella's exact Coons) with identical canonical triangle/segment
-connectivity. Files: `src/structured/Transfinite.jl`,
-`src/geometry/Model.jl` (`_transfinite_surface_mesh` kind admission),
-`test/structured/transfinite_test.jl` (+78 tests), and
-`validation/transfinite/differential.jl` (`check_warped`).
+**Warped/non-affine transfinite volumes** — `Transfinite Volume` no longer
+collapses every block onto the affine eight-corner parallelepiped. The model
+path now requires all six boundary surfaces transfinite (Gmsh's
+incompatible-surface gate), meshes each with the four-sided patch kernel,
+reindexes every grid into its canonical `(vmin, umax, vmax, umin, wmin, wmax)`
+slot through Gmsh's eight dihedral corner permutations, and interpolates
+interior nodes with Gmsh's exact `transfiniteHex` Coons volume — six face
+interpolants minus twelve edge interpolants plus the trilinear corner term —
+parameterized by chord-length ratios along the s0s1/s1s2/s1s5 edge chains.
+`mesh_transfinite_volume` gains a `faces=` kwarg carrying the six canonical
+`(points, tris, tags)` records: shared edges are certified bitwise, corners
+must equal the face-grid corners bitwise in positive canonical order,
+boundary nodes reuse the face grids bitwise, and the emitted boundary is the
+canonical conforming split the six-tet cell subdivision induces (audited
+strictly outward per cell against inward-adjacent tab nodes). The direct
+`faces=nothing` path keeps the affine certification and exact-dyadic
+interpolation unchanged. Gmsh 4.15.2 differential: the warped
+shifted-corner case matches the node-coordinate multiset within the 1e-7
+tolerance; affine volumes pass through the faces path identically. Files:
+`src/structured/TransfiniteVolume.jl`, `src/geometry/Model.jl`
+(`_transfinite_volume_face_grid` + extracted `_transfinite_surface_sides`),
+`test/structured/transfinite_volume_test.jl` (+189 tests),
+`test/geometry/geo_constraints_test.jl` (+13), and
+`validation/geo_constraints/differential.jl` (`transfinite_volume_warped`).
+
+Previous increment (for context): warped transfinite quadrangles on ruled
+surfaces — `mesh_transfinite_patch(allow_warped=true)` meshes non-coplanar
+four-sided ruled boundaries via 3-D Coons with exact simplicity/orientation/
+fold audits (`f515628`).
 
 ## Verified results (this machine, this code)
 
@@ -136,12 +145,20 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Verified gates
 
+- `Pkg.test()` Julia 1.13.1 (this increment): **426,051/426,051** in 14m05s —
+  fully green including +189 warped-volume kernel tests and +13 `.geo`
+  transfinite-volume end-to-end tests.
+- `validation/geo_constraints/differential.jl` Gmsh 4.15.2:
+  `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=29` — the new
+  `transfinite_volume_warped` case (shifted-corner block, warped ruled face)
+  matches the node multiset within the 1e-7 tolerance; the affine volume case
+  passes through the faces path identically. `documented_gaps=2` unchanged.
+- `validation/transfinite/differential.jl` Gmsh 4.15.2: green
+  (warped_max_error=1.9e-13, unchanged by this increment).
 - `Pkg.test()` Julia 1.13.1 (post-`d3142ca` run): **425,712 passed,
-  21 failed**. Twenty failures are deterministic CRC/SHA pins whose
-  evaluated hashes reproduce identically on a clean-HEAD worktree
-  (`64a2c8b`) — pre-existing environment pin drift on this machine, not
-  regressions. The remaining failure was the stale `SL2` rejection pin,
-  fixed in this increment; `postview_highorder_test.jl` adds 125 passes.
+  21 failed** — the 20 CRC/SHA pins reproduced identically on clean HEAD
+  (environment drift, not regressions); the remaining failure was the stale
+  `SL2` pin fixed there.
 - Earlier verified run (pre-`d3142ca` tree): **425,608/425,608 in 13m30.0s**.
 - `validation/run_all.jl` on Windows + Gmsh 4.15.2: green (see STATUS.md
   for the dated entry; `embed_sheet_hole` full differential including

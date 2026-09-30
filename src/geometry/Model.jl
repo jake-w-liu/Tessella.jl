@@ -5719,6 +5719,111 @@ end
 # curve specs; the 8 corner vertices (points incident to exactly 3 boundary
 # edges) are ordered in Gmsh's canonical (s0..s7) order, either from the
 # stored corner list or automatically from the boundary edge graph.
+# The canonical face slots of a hexahedral transfinite volume in Gmsh's
+# `meshGRegionTransfinite.cpp` order — each entry lists the slot's four corner
+# positions (1-based indices into the ordered corner tuple) in the slot's
+# canonical parametric order: `(u,w)` on the v-faces, `(v,w)` on the u-faces,
+# `(u,v)` on the w-faces.
+const _VOLUME_FACE_SLOTS =
+    ((1, 2, 6, 5),   # vmin
+     (2, 3, 7, 6),   # umax
+     (4, 3, 7, 8),   # vmax
+     (1, 4, 8, 5),   # umin
+     (1, 2, 3, 4),   # wmin
+     (5, 6, 7, 8))   # wmax
+
+# Gmsh's eight dihedral corner permutations (its `permutations` table, 1-based
+# here): for permutation p, canonical slot corner k coincides with the face
+# mesh's `_VOLUME_FACE_PERMS[p][k]`-th grid corner.
+const _VOLUME_FACE_PERMS =
+    ((1, 2, 3, 4), (2, 3, 4, 1), (3, 4, 1, 2), (4, 1, 2, 3),
+     (4, 3, 2, 1), (3, 2, 1, 4), (2, 1, 4, 3), (1, 4, 3, 2))
+
+# Maps a face-grid node's local (i,j) ∈ 0:L×0:H to the canonical slot
+# coordinates (m,n), where the slot grid is (L+1)×(H+1) for odd permutations
+# and transposed (H+1)×(L+1) for even ones — Gmsh's `getVertex` cases.
+@inline function _volume_face_canonical_coords(p::Int, i::Int, j::Int,
+                                               L::Int, H::Int)
+    p == 1 && return i, j
+    p == 2 && return j, L - i
+    p == 3 && return L - i, H - j
+    p == 4 && return H - j, i
+    p == 5 && return i, H - j
+    p == 6 && return H - j, L - i
+    p == 7 && return L - i, j
+    return j, i
+end
+
+# One boundary surface of a transfinite volume, remeshed with the four-sided
+# transfinite patch kernel and reindexed onto its canonical face slot.
+# Returns (slot, points, tris) where `points` is the slot-ordered 3×(M·N)
+# matrix the volume kernel consumes and `tris` the face triangulation
+# reindexed into the same numbering. Surfaces that are not transfinite, not
+# four-sided, or whose corners cannot occupy any volume slot throw the same
+# "Incompatible surface" blocker Gmsh reports.
+function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
+                                       ordered, caller::AbstractString)
+    haskey(m.meshing.transfinite_surfaces, surf) || throw(ArgumentError(
+        "$caller: Incompatible surface $surf in transfinite volume $volume"))
+    spec,_,curve_points,nside,allow_warped,junctions=
+        _transfinite_surface_sides(m,surf,caller)
+    nside==4 || throw(ArgumentError(
+        "$caller: Incompatible surface $surf in transfinite volume $volume"))
+    # Weld both ends of every side to the shared corner vertex coordinates:
+    # the volume kernel requires bitwise-identical shared edges, which holds
+    # exactly when every chain endpoint is the vertex tuple itself.
+    for (position,chain) in enumerate(curve_points)
+        haskey(m.points,junctions[position]) || throw(ErrorException(
+            "$caller: transfinite Surface[$surf] junction " *
+            "$(junctions[position]) is not a model point"))
+        chain[1]=m.points[junctions[position]]
+        chain[end]=m.points[junctions[mod1(position+1,nside)]]
+    end
+    kernel=mesh_transfinite_patch(curve_points[1],curve_points[2],
+                                  curve_points[3],curve_points[4];
+                                  arrangement=spec.arrangement,
+                                  allow_warped=allow_warped)
+    L=length(curve_points[1])-1
+    H=length(curve_points[2])-1
+    found=0; slot=0
+    for p in 1:8
+        perm=_VOLUME_FACE_PERMS[p]
+        for f in 1:6
+            corners=_VOLUME_FACE_SLOTS[f]
+            all(k->ordered[corners[k]]==junctions[perm[k]],1:4) || continue
+            found==0 || throw(ArgumentError(
+                "$caller: Incompatible surface $surf in transfinite " *
+                "volume $volume (ambiguous slot orientation)"))
+            found=p; slot=f
+            break
+        end
+    end
+    found==0 && throw(ArgumentError(
+        "$caller: Incompatible surface $surf in transfinite volume $volume"))
+    M=iseven(found) ? H+1 : L+1
+    points=Matrix{Float64}(undef,3,size(kernel.coords,2))
+    L1=L+1
+    @inbounds for column in axes(kernel.coords,2)
+        local_index=column-1
+        i=local_index%L1
+        j=local_index÷L1
+        mcoord,ncoord=_volume_face_canonical_coords(found,i,j,L,H)
+        target=mcoord+1+ncoord*M
+        points[1,target]=kernel.coords[1,column]
+        points[2,target]=kernel.coords[2,column]
+        points[3,target]=kernel.coords[3,column]
+    end
+    tris=Matrix{Int32}(undef,3,size(kernel.tris,2))
+    @inbounds for tri in axes(kernel.tris,2),row in 1:3
+        local_index=Int(kernel.tris[row,tri])-1
+        i=local_index%L1
+        j=local_index÷L1
+        mcoord,ncoord=_volume_face_canonical_coords(found,i,j,L,H)
+        tris[row,tri]=Int32(mcoord+1+ncoord*M)
+    end
+    return slot,points,tris
+end
+
 function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     get(m.embeds,(3,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
         "$caller: transfinite Volume[$t] cannot carry embedded entities"))
@@ -5817,9 +5922,32 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
             "$caller: transfinite Volume[$t] $direction-direction edges " *
             "have mismatched node counts $family"))
     end
+    # Gmsh requires every boundary face to carry a transfinite surface mesh;
+    # each face grid is reindexed into its canonical slot here so the volume
+    # kernel can interpolate the full Coons transfiniteHex interior — warped
+    # and non-affine faces included. The affine fast path (faces=nothing)
+    # only remains for the kernel's own direct callers.
+    faces=Vector{Tuple{Matrix{Float64},Matrix{Int32},Vector{Int32}}}(undef,6)
+    slot_tags=Vector{Int32}(undef,6)
+    seen=falses(6)
+    for signed_surface in boundaries
+        surf=abs(signed_surface)
+        slot,points,tris=_transfinite_volume_face_grid(
+            m,t,surf,s,caller)
+        seen[slot] && throw(ArgumentError(
+            "$caller: Incompatible surface $surf in transfinite volume $t " *
+            "(duplicate face slot $slot)"))
+        seen[slot]=true
+        faces[slot]=(points,tris,fill(Int32(surf),size(tris,2)))
+        slot_tags[slot]=Int32(surf)
+    end
+    all(seen) || throw(ErrorException(
+        "$caller: transfinite Volume[$t] boundary faces do not cover the " *
+        "canonical six-slot layout"))
     return mesh_transfinite_volume(
         NTuple{3,Float64}[m.points[p] for p in s],
-        (us[1],vs[1],ws[1]);volume_tag=t)
+        (us[1],vs[1],ws[1]);volume_tag=t,faces=Tuple(faces),
+        face_tags=Tuple(slot_tags))
 end
 
 # Boundary-derived size field for a volume — Gmsh's 3-D `setLcs` over the
@@ -5941,13 +6069,16 @@ end
 # collapsed-quadrilateral algorithm, the default) or `mesh_transfinite_triangle`
 # (the compact `TransfiniteTri=1` algorithm, selected by `set_transfinite_tri!`
 # and requiring equal node counts on all three sides).
-function _transfinite_surface_mesh(m::GeoModel,t::Int,
-                                   param_sizes::Dict{Tuple{Int,Float64},
-                                                    Float64},
-                                   caller::AbstractString;
-                                   size_field::Union{Nothing,
-                                                     AbstractSizeField}=
-                                       nothing)
+# The audited boundary side chains of a transfinite surface: the loop's
+# non-degenerate signed curves discretized by their transfinite parameters,
+# optionally reordered by pinned corners, with the surface-filling gate
+# (planar, or ruled-without-auxiliary-geometry warping) applied. Returns the
+# surface spec, the signed curves, the side chains, the side count, the warped
+# flag, and each side's start-junction vertex tag in final chain order.
+# Corners are audited for consistency but NOT welded — the caller decides how
+# shared endpoints are unified.
+function _transfinite_surface_sides(m::GeoModel,t::Int,
+                                    caller::AbstractString)
     spec=m.meshing.transfinite_surfaces[t]
     get(m.embeds,(2,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
         "$caller: transfinite Surface[$t] cannot carry embedded entities"))
@@ -5977,8 +6108,13 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         signed<0 && reverse!(points)
         curve_points[position]=points
     end
-    isempty(spec.corners) || (curve_points=_apply_pinned_surface_corners(
-        m,t,signed_curves,curve_points,spec.corners,nside,caller))
+    junctions=Int[signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+                  for signed in signed_curves]
+    if !isempty(spec.corners)
+        curve_points=_apply_pinned_surface_corners(
+            m,t,signed_curves,curve_points,spec.corners,nside,caller)
+        junctions=collect(Int,spec.corners)
+    end
     kind=_surface_type(m,t)
     (nside!=4 || kind in (:plane,:ruled)) || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires a planar or ruled " *
@@ -6010,6 +6146,20 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             "$caller: transfinite Surface[$t] boundary corner $position is " *
             "inconsistent"))
     end
+    return spec,signed_curves,curve_points,nside,allow_warped,junctions
+end
+
+function _transfinite_surface_mesh(m::GeoModel,t::Int,
+                                   param_sizes::Dict{Tuple{Int,Float64},
+                                                    Float64},
+                                   caller::AbstractString;
+                                   size_field::Union{Nothing,
+                                                     AbstractSizeField}=
+                                       nothing)
+    spec,_,curve_points,nside,allow_warped,_=
+        _transfinite_surface_sides(m,t,caller)
+    # Weld each side end to the next side's start so shared corners agree
+    # bitwise before the kernels see them.
     for position in 1:nside
         curve_points[position][end]=curve_points[mod1(position+1,nside)][1]
     end

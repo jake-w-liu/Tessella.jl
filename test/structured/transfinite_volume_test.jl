@@ -8,6 +8,7 @@ if !isdefined(Tessella, :TransfiniteVolume)
     Base.include(Tessella, joinpath(
         @__DIR__, "..", "..", "src", "structured", "TransfiniteVolume.jl"))
 end
+using Tessella.Transfinite: mesh_transfinite_patch
 using Tessella.TransfiniteVolume: mesh_transfinite_volume
 
 function _affine_corners(origin=(0.0, 0.0, 0.0),
@@ -340,5 +341,273 @@ end
         @test large > small
         @test large <= 2.30small + 1_048_576
         @info "transfinite volume allocation ratchet" small_bytes=small large_bytes=large
+    end
+end
+
+# Six canonical face-slot grids for `mesh_transfinite_volume(; faces=...)`.
+# Slot order is Gmsh's `(vmin, umax, vmax, umin, wmin, wmax)`; each slot lists
+# its four volume corners in canonical parametric order and the two logical
+# axes (1=u, 2=v, 3=w) its (p1, p2) grid spans.
+const _VOL_FACE_CORNERS =
+    ((1, 2, 6, 5), (2, 3, 7, 6), (4, 3, 7, 8),
+     (1, 4, 8, 5), (1, 2, 3, 4), (5, 6, 7, 8))
+const _VOL_FACE_AXES =
+    ((1, 3), (2, 3), (1, 3), (2, 3), (1, 2), (1, 2))
+const _VOL_FACE_FIXED_AXIS = (2, 1, 2, 1, 3, 3)
+const _VOL_EDGE_AXIS =
+    Dict((1, 2) => 1, (2, 3) => 2, (3, 4) => 1, (1, 4) => 2,
+         (5, 6) => 1, (6, 7) => 2, (7, 8) => 1, (5, 8) => 2,
+         (1, 5) => 3, (2, 6) => 3, (3, 7) => 3, (4, 8) => 3)
+
+# Shared boundary edges must agree bitwise between the two owning faces, so
+# each of the twelve edges is discretized once in one canonical direction and
+# the reversed *vector* is handed to the face going the other way — the same
+# convention the model path applies to signed curves. Linear interpolation in
+# the opposite direction would differ by ulps and trip the certificate.
+function _volume_face_grids(corners, cells)
+    linear(a, b, n) = [a .+ t .* (b .- a) for t in range(0.0, 1.0, n + 1)]
+    cache = Dict{Tuple{Int,Int},Vector{NTuple{3,Float64}}}()
+    function edge(a, b)
+        return get!(cache, a < b ? (a, b) : (b, a)) do
+            a < b ? linear(corners[a], corners[b],
+                           cells[_VOL_EDGE_AXIS[(a, b)]]) :
+                    linear(corners[b], corners[a],
+                           cells[_VOL_EDGE_AXIS[(b, a)]])
+        end
+    end
+    side(a, b) = a < b ? edge(a, b) : reverse(edge(a, b))
+    return ntuple(6) do slot
+        cs = _VOL_FACE_CORNERS[slot]
+        patch = mesh_transfinite_patch(side(cs[1], cs[2]), side(cs[2], cs[3]),
+                                       side(cs[3], cs[4]), side(cs[4], cs[1]);
+                                       allow_warped=true)
+        (patch.coords, patch.tris, patch.tri_tag)
+    end
+end
+
+# Volume tab index of a canonical slot node: `(p1, p2)` on `slot` maps to
+# logical `(i, j, k)` with the slot's two parametric axes taking p1/p2 and the
+# third axis pinned at 0 or its maximum.
+function _slot_node_id(slot, p1, p2, cells)
+    nu, nv, nw = cells
+    a1, a2 = _VOL_FACE_AXES[slot]
+    fixed_axis = _VOL_FACE_FIXED_AXIS[slot]
+    ijk = zeros(Int, 3)
+    ijk[a1] = p1
+    ijk[a2] = p2
+    ijk[fixed_axis] = slot in (2, 3, 6) ? cells[fixed_axis] : 0
+    return ijk[1] + 1 + (nu + 1) * (ijk[2] + (nv + 1) * ijk[3])
+end
+
+@testset "six canonical face grids (transfiniteHex path)" begin
+    @testset "affine face grids reproduce the affine mesh" begin
+        corners = _affine_corners()
+        cells = (4, 3, 2)
+        faces = _volume_face_grids(corners, cells)
+        warped = mesh_transfinite_volume(corners, cells; faces=faces,
+                                         volume_tag=21,
+                                         face_tags=(11, 12, 13, 14, 15, 16))
+        affine = mesh_transfinite_volume(corners, cells)
+        @test validate(warped).ok
+        @test (nnodes(warped), ntris(warped), ntets(warped)) ==
+              (nnodes(affine), ntris(affine), ntets(affine))
+        # Boundary nodes reuse the face grids bitwise; interior nodes agree
+        # with the affine map to chord-ratio rounding.
+        @test maximum(j -> maximum(abs, warped.coords[:, j] .-
+                                        affine.coords[:, j]),
+                      axes(warped.coords, 2)) <= 1e-14
+        @test _volume_canonical_tets(warped) == _volume_canonical_tets(affine)
+        @test _volume_canonical_triangles(warped.tris) ==
+              _volume_canonical_triangles(affine.tris)
+        @test warped.tet_tag == fill(Int32(21), ntets(warped))
+        nu, nv, nw = cells
+        @test count(==(Int32(11)), warped.tri_tag) == 2 * nu * nw
+        @test count(==(Int32(12)), warped.tri_tag) == 2 * nv * nw
+        @test count(==(Int32(13)), warped.tri_tag) == 2 * nu * nw
+        @test count(==(Int32(14)), warped.tri_tag) == 2 * nv * nw
+        @test count(==(Int32(15)), warped.tri_tag) == 2 * nu * nv
+        @test count(==(Int32(16)), warped.tri_tag) == 2 * nu * nv
+        for slot in 1:6
+            a1, a2 = _VOL_FACE_AXES[slot]
+            n1 = cells[a1]; n2 = cells[a2]
+            for p2 in 0:n2, p1 in 0:n1
+                id = _slot_node_id(slot, p1, p2, cells)
+                @test Tuple(warped.coords[:, id]) ==
+                      Tuple(faces[slot][1][:, p1 + 1 + p2 * (n1 + 1)])
+            end
+        end
+        center = ntuple(d -> sum(point[d] for point in corners) / 8, 3)
+        @test all(orient3(node(warped, warped.tris[1, triangle]),
+                          node(warped, warped.tris[2, triangle]),
+                          node(warped, warped.tris[3, triangle]), center) > 0
+                  for triangle in axes(warped.tris, 2))
+    end
+
+    @testset "non-affine corners interpolate the face Coons interior" begin
+        corners = _affine_corners((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                                  (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        corners[7] = (1.2, 1.0, 1.0)
+        @test_throws ArgumentError mesh_transfinite_volume(corners, (2, 2, 2))
+        faces = _volume_face_grids(corners, (2, 2, 2))
+        mesh = mesh_transfinite_volume(corners, (2, 2, 2); faces=faces)
+        @test validate(mesh).ok
+        @test (nnodes(mesh), ntris(mesh), ntets(mesh)) == (27, 48, 48)
+        nid(i, j, k) = i + 1 + 3 * (j + 3k)
+        @test all(isapprox(node(mesh, nid(1, 1, 1))[d],
+                           (0.525, 0.5, 0.5)[d]; atol=8eps(Float64))
+                  for d in 1:3)
+        # Boundary nodes are the supplied face vertices bitwise.
+        for slot in 1:6
+            a1, a2 = _VOL_FACE_AXES[slot]
+            n1, n2 = (2, 2, 2)[a1], (2, 2, 2)[a2]
+            for p2 in 0:n2, p1 in 0:n1
+                id = _slot_node_id(slot, p1, p2, (2, 2, 2))
+                @test Tuple(mesh.coords[:, id]) ==
+                      Tuple(faces[slot][1][:, p1 + 1 + p2 * (n1 + 1)])
+            end
+        end
+        boundary, maximum_incidence = boundary_faces(mesh.tets)
+        @test maximum_incidence == 2
+        @test sort!(boundary) == _volume_canonical_triangles(mesh.tris)
+    end
+
+    @testset "curved boundary edges reach the interior" begin
+        corners = _affine_corners((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                                  (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        cells = (2, 2, 2)
+        faces = collect(_volume_face_grids(corners, cells))
+        # Bow edge s0s1 out of the v-min and w-min grids' shared p2=0 chain.
+        # The endpoints are welded to the corner vertices, like production.
+        for i in 0:2
+            bowed = i == 0 ? corners[1] :
+                    i == 2 ? corners[2] :
+                    (0.5, 0.3 * sin(pi * 0.5i), 0.0)
+            for slot in (1, 5)
+                points = faces[slot][1]
+                points[1, i + 1] = bowed[1]
+                points[2, i + 1] = bowed[2]
+                points[3, i + 1] = bowed[3]
+            end
+        end
+        mesh = mesh_transfinite_volume(corners, cells; faces=Tuple(faces))
+        @test validate(mesh).ok
+        nid(i, j, k) = i + 1 + 3 * (j + 3k)
+        @test node(mesh, nid(1, 0, 0)) == (0.5, 0.3, 0.0)
+        # The opposite face interior is untouched by the single bowed edge.
+        @test node(mesh, nid(1, 1, 0)) == (0.5, 0.5, 0.0)
+        # transfiniteHex pulls the center toward the bow.
+        @test all(isapprox(node(mesh, nid(1, 1, 1))[d],
+                           (0.5, 0.425, 0.5)[d]; atol=16eps(Float64))
+                  for d in 1:3)
+    end
+
+    @testset "face-grid and certificate validation" begin
+        corners = _affine_corners()
+        cells = (2, 2, 1)
+        faces = _volume_face_grids(corners, cells)
+        @test validate(mesh_transfinite_volume(
+            corners, cells; faces=faces)).ok
+
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=faces[1:5])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=(faces..., faces[1]))
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=(faces[1], faces[1], faces[1],
+                                   faces[1], faces[1], faces[1]))
+
+        short = collect(faces)
+        short[1] = (short[1][1][:, 1:end-1], short[1][2], short[1][3])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(short))
+
+        badshape = collect(faces)
+        badshape[1] = (badshape[1][1][1:2, :], badshape[1][2],
+                       badshape[1][3])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(badshape))
+
+        nonfinite = collect(faces)
+        points = copy(nonfinite[1][1])
+        points[1, 2] = NaN
+        nonfinite[1] = (points, nonfinite[1][2], nonfinite[1][3])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(nonfinite))
+
+        shorttris = collect(faces)
+        shorttris[1] = (shorttris[1][1], shorttris[1][2][:, 1:end-1],
+                        shorttris[1][3])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(shorttris))
+
+        badindex = collect(faces)
+        tris = copy(badindex[1][2])
+        tris[1, 1] = size(badindex[1][1], 2) + 1
+        badindex[1] = (badindex[1][1], tris, badindex[1][3])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(badindex))
+
+        shorttags = collect(faces)
+        shorttags[1] = (shorttags[1][1], shorttags[1][2],
+                        shorttags[1][3][1:end-1])
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(shorttags))
+
+        badtag = collect(faces)
+        tags = copy(badtag[1][3])
+        tags[1] = -1
+        badtag[1] = (badtag[1][1], badtag[1][2], tags)
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=Tuple(badtag))
+
+        # Perturb one interior shared-edge node in a single face: the two
+        # owners of s0s1 must agree bitwise.
+        drifted = collect(faces)
+        points = copy(drifted[5][1])
+        points[1, 2] = nextfloat(points[1, 2])
+        drifted[5] = (points, drifted[5][2], drifted[5][3])
+        error = try
+            mesh_transfinite_volume(corners, cells; faces=Tuple(drifted))
+            nothing
+        catch err
+            err
+        end
+        @test error isa ArgumentError
+        @test occursin("shared edge s0s1", sprint(showerror, error))
+
+        moved = copy(corners)
+        moved[7] = moved[7] .+ (0.0, 0.0, 1e-9)
+        error = try
+            mesh_transfinite_volume(moved, cells; faces=faces)
+            nothing
+        catch err
+            err
+        end
+        @test error isa ArgumentError
+        @test occursin("corners do not match the face grids",
+                       sprint(showerror, error))
+
+        # A left-handed corner order cannot pass the corner-matching gate
+        # against right-handed faces.
+        left = [corners[1], corners[4], corners[3], corners[2],
+                corners[5], corners[8], corners[7], corners[6]]
+        @test_throws ArgumentError mesh_transfinite_volume(
+            left, cells; faces=faces)
+
+        collapsed = collect(faces)
+        for slot in (1, 5)
+            points = copy(collapsed[slot][1])
+            points[:, 2] = points[:, 1]
+            collapsed[slot] = (points, collapsed[slot][2],
+                               collapsed[slot][3])
+        end
+        flat = copy(corners)
+        flat[2] = flat[1]
+        @test_throws ArgumentError mesh_transfinite_volume(
+            flat, cells; faces=Tuple(collapsed))
+
+        mismatched = _volume_face_grids(corners, (3, 2, 1))
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; faces=mismatched)
     end
 end
