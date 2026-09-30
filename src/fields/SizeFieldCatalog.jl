@@ -4374,57 +4374,374 @@ field_value(field::BoundaryLayerField,x,y,z,entity::Tuple{T,U}) where
 # ── Automatic mesh size from discrete curvature ───────────────────────────────
 
 """
-    AutomaticMeshSizeField(surface; n_nodes_per_circle=20, hmin=nothing, hmax=nothing)
+    AutomaticMeshSizeField(surface; n_nodes_per_circle=20, hmin, hmax)
+    AutomaticMeshSizeField(surfaces; n_nodes_per_circle=20, n_points_per_gap=0,
+                           hmin, hmax, hbulk, gradation=1.1, smoothing=true,
+                           features=true)
 
-Native analogue of Gmsh `AutomaticMeshSizeField` on a triangulated surface:
-per-vertex sphere-fit curvature `κ` yields `h = clamp(2π /(n κ), hmin, hmax)`,
-evaluated by closest-vertex interpolation.
+Native analogue of Gmsh `AutomaticMeshSizeField` over one or more
+triangulated surfaces: per-vertex sphere-fit curvature `κ` yields
+`h = clamp(2π /(n κ), hmin, hmax)`, evaluated by closest-vertex
+interpolation. Each input mesh keeps its own vertex set, so curvature rings
+never bleed across crease boundaries.
+
+On a vector/tuple of surfaces the union additionally applies the remaining
+pipeline stages of Gmsh's HXT field as discrete analogues:
+
+- `features && n_points_per_gap > 0` — local feature size between
+  non-incident triangles whose closest point lies within 60° of the
+  candidate's normal cone ("thin layers"), contributing
+  `h_gap = dist / n_points_per_gap`. Triangles incident to the query
+  vertex — including co-located duplicate vertices on neighbouring
+  surfaces — are excluded so shared edges are not phantom gaps.
+- `hbulk` — fallback size where neither curvature nor a gap prescribes
+  one (default `hmax`, matching Gmsh's `-1` sentinel for an unset `hBulk`).
+- `smoothing && gradation > 0` — iterative edge relaxation so sizes grow
+  by at most `max(0, gradation−1)` per unit of edge distance, the
+  multiplicative-per-hop octree bound written as its equivalent slope.
+
+Gmsh's own implementation stores the result in a p4est octree; Tessella
+keeps the closest-vertex discrete analogue and does not claim
+octree-identical output.
 """
 struct AutomaticMeshSizeField <: AbstractSizeField
     coords::Matrix{Float64}
     h::Vector{Float64}
     tree::DistanceField
 end
-function AutomaticMeshSizeField(surface::Mesh; n_nodes_per_circle::Real=20.0,
-                                hmin=nothing, hmax=nothing)
-    n=_positive_value(n_nodes_per_circle,"AutomaticMeshSizeField","n_nodes_per_circle")
-    diagnostic=validate(surface;require_positive_tets=false,require_manifold_tris=true)
-    diagnostic.ok || throw(ArgumentError(
-        "AutomaticMeshSizeField: invalid surface mesh: $(join(diagnostic.messages, "; "))"))
-    size(surface.tris,2)>0 || throw(ArgumentError("AutomaticMeshSizeField: surface has no triangles"))
-    xmin,xmax=extrema(@view surface.coords[1,:])
-    ymin,ymax=extrema(@view surface.coords[2,:])
-    zmin,zmax=extrema(@view surface.coords[3,:])
+function AutomaticMeshSizeField(surface::Mesh;kwargs...)
+    return AutomaticMeshSizeField((surface,);kwargs...)
+end
+function AutomaticMeshSizeField(surfaces::AbstractVector;kwargs...)
+    return AutomaticMeshSizeField(Tuple(surfaces);kwargs...)
+end
+function AutomaticMeshSizeField(surfaces::Tuple;
+                                n_nodes_per_circle::Real=20.0,
+                                n_points_per_gap::Real=0.0,
+                                hmin=nothing,hmax=nothing,hbulk=nothing,
+                                gradation::Real=1.1,smoothing::Bool=true,
+                                features::Bool=true)
+    caller="AutomaticMeshSizeField"
+    n=_positive_value(n_nodes_per_circle,caller,"n_nodes_per_circle")
+    ngap=_float_value(n_points_per_gap,caller,"n_points_per_gap")
+    ngap>=0 || throw(ArgumentError(
+        "$caller: n_points_per_gap must be non-negative"))
+    g=_float_value(gradation,caller,"gradation")
+    g>=0 || throw(ArgumentError("$caller: gradation must be non-negative"))
+    isempty(surfaces) && throw(ArgumentError(
+        "$caller: at least one surface mesh is required"))
+    nv_total=0;nt_total=0
+    @inbounds for (index,mesh) in pairs(surfaces)
+        mesh isa Mesh || throw(ArgumentError(
+            "$caller: surface $index is a $(typeof(mesh)), expected Mesh"))
+        diagnostic=validate(mesh;require_positive_tets=false,
+                            require_manifold_tris=true)
+        diagnostic.ok || throw(ArgumentError(
+            "$caller: invalid surface mesh $index: " *
+            "$(join(diagnostic.messages, "; "))"))
+        size(mesh.tris,2)>0 || throw(ArgumentError(
+            "$caller: surface $index has no triangles"))
+        nv_total+=size(mesh.coords,2);nt_total+=size(mesh.tris,2)
+    end
+    coords=Matrix{Float64}(undef,3,nv_total)
+    tris=Matrix{Int32}(undef,3,nt_total)
+    offset=0;tpos=0
+    xmin=Inf;xmax=-Inf;ymin=Inf;ymax=-Inf;zmin=Inf;zmax=-Inf
+    @inbounds for mesh in surfaces
+        nv=size(mesh.coords,2);nt=size(mesh.tris,2)
+        for i in 1:nv,d in 1:3
+            coords[d,offset+i]=mesh.coords[d,i]
+        end
+        for t in 1:nt,d in 1:3
+            tris[d,tpos+t]=mesh.tris[d,t]+offset
+        end
+        for i in 1:nv
+            x=mesh.coords[1,i];y=mesh.coords[2,i];z=mesh.coords[3,i]
+            xmin=min(xmin,x);xmax=max(xmax,x)
+            ymin=min(ymin,y);ymax=max(ymax,y)
+            zmin=min(zmin,z);zmax=max(zmax,z)
+        end
+        offset+=nv;tpos+=nt
+    end
     # Gmsh's automatic-size backend defines its model scale as the largest
     # bounding-box span (distinct from CTX::lc's diagonal convention).
     model_length=max(xmax-xmin,ymax-ymin,zmax-zmin)
     (isfinite(model_length) && model_length>0) || throw(ArgumentError(
-        "AutomaticMeshSizeField: maximum surface bounding-box span must be positive and finite"))
+        "$caller: maximum surface bounding-box span must be positive and finite"))
     hn=hmin===nothing ? model_length/1000 :
-       _positive_value(hmin,"AutomaticMeshSizeField","hmin")
+       _positive_value(hmin,caller,"hmin")
     hx=hmax===nothing ? model_length/20 :
-       _positive_value(hmax,"AutomaticMeshSizeField","hmax")
-    (isfinite(hn) && hn>0 && isfinite(hx) && hx>0) || throw(ArgumentError(
-        "AutomaticMeshSizeField: default sizes are not representable"))
-    hx>=hn || throw(ArgumentError("AutomaticMeshSizeField: require hmax >= hmin"))
-    nv=size(surface.coords,2)
-    rings=[Int[] for _ in 1:nv]
-    @inbounds for t in axes(surface.tris,2)
-        a=Int(surface.tris[1,t]); b=Int(surface.tris[2,t]); c=Int(surface.tris[3,t])
+       _positive_value(hmax,caller,"hmax")
+    hb=hbulk===nothing ? hx : _positive_value(hbulk,caller,"hbulk")
+    (isfinite(hn) && hn>0 && isfinite(hx) && hx>0 && isfinite(hb) && hb>0) ||
+        throw(ArgumentError(
+            "$caller: default sizes are not representable"))
+    hx>=hn || throw(ArgumentError("$caller: require hmax >= hmin"))
+    # Curvature rings stay inside each input surface's own vertex set: the
+    # union offsets already keep neighbouring meshes disjoint.
+    rings=[Int[] for _ in 1:nv_total]
+    @inbounds for t in axes(tris,2)
+        a=Int(tris[1,t]); b=Int(tris[2,t]); c=Int(tris[3,t])
         push!(rings[a],b,c); push!(rings[b],a,c); push!(rings[c],a,b)
     end
-    h=Vector{Float64}(undef,nv)
-    @inbounds for i in 1:nv
+    h=Vector{Float64}(undef,nv_total)
+    @inbounds for i in 1:nv_total
         nbr=unique(rings[i])
-        κ=_sphere_fit_curvature(surface.coords,i,nbr)
-        raw=κ>0 ? 2*π/(n*κ) : hx
+        κ=_sphere_fit_curvature(coords,i,nbr)
+        raw=κ>0 ? 2*π/(n*κ) : Inf
+        h[i]=raw
+    end
+    # Local feature size between non-incident, normal-facing triangles —
+    # the discrete analogue of hxtOctreeSurfacesProches. Co-located
+    # duplicate vertices on neighbouring surfaces count as incident, so
+    # glued edges do not register zero-width gaps.
+    lfs=features && ngap>0 ?
+        _auto_local_feature_sizes(coords,tris,groups=_auto_colocated_groups(
+            coords),bound=hx*ngap) : fill(Inf,nv_total)
+    @inbounds for i in 1:nv_total
+        raw=min(h[i],isfinite(lfs[i]) ? lfs[i]/ngap : Inf)
+        isfinite(raw) || (raw=hb)
         h[i]=clamp(raw,hn,hx)
         isfinite(h[i]) && h[i]>0 || throw(ArgumentError(
-            "AutomaticMeshSizeField: non-positive size at vertex $i"))
+            "$caller: non-positive size at vertex $i"))
     end
-    coords=copy(surface.coords)
-    tree=DistanceField(;points=[(coords[1,j],coords[2,j],coords[3,j]) for j in axes(coords,2)])
-    return AutomaticMeshSizeField(coords,h,tree)
+    smoothing && _auto_smooth_sizes!(h,coords,tris,max(0.0,g-1.0))
+    points=[(coords[1,j],coords[2,j],coords[3,j]) for j in axes(coords,2)]
+    return AutomaticMeshSizeField(coords,h,DistanceField(;points=points))
+end
+
+# Vertices that share an identical position — duplicates introduced when the
+# same boundary edge is meshed once per adjacent surface. Each member maps to
+# the shared 1-based group index.
+function _auto_colocated_groups(coords::AbstractMatrix{Float64})
+    groups=Dict{NTuple{3,Float64},Int}()
+    index=Vector{Int32}(undef,size(coords,2))
+    next=0
+    @inbounds for i in axes(coords,2)
+        key=(coords[1,i],coords[2,i],coords[3,i])
+        id=get(groups,key,0)
+        id==0 && (next+=1;groups[key]=next;id=next)
+        index[i]=Int32(id)
+    end
+    members=[Int32[] for _ in 1:next]
+    @inbounds for i in axes(coords,2)
+        push!(members[index[i]],Int32(i))
+    end
+    return index,members
+end
+
+# Closest point of triangle (a,b,c) to p, with the point itself — the
+# barycentric/edge Ericson case split shared by the feature-size probe.
+function _auto_closest_point_triangle(p,a,b,c)
+    ab=_sub3(b,a);ac=_sub3(c,a);ap=_sub3(p,a)
+    d1=_distance_dot3(ab,ap);d2=_distance_dot3(ac,ap)
+    (d1<=0 && d2<=0) && return _norm3(ap),a
+    bp=_sub3(p,b);d3=_distance_dot3(ab,bp);d4=_distance_dot3(ac,bp)
+    (d3>=0 && d4<=d3) && return _norm3(bp),b
+    vc=d1*d4-d3*d2
+    if vc<=0 && d1>=0 && d3<=0
+        t=d1/(d1-d3);q=_addscaled3(a,ab,t)
+        return _norm3(_sub3(p,q)),q
+    end
+    cp=_sub3(p,c);d5=_distance_dot3(ab,cp);d6=_distance_dot3(ac,cp)
+    (d6>=0 && d5<=d6) && return _norm3(cp),c
+    vb=d5*d2-d1*d6
+    if vb<=0 && d2>=0 && d6<=0
+        t=d2/(d2-d6);q=_addscaled3(a,ac,t)
+        return _norm3(_sub3(p,q)),q
+    end
+    va=d3*d6-d5*d4
+    if va<=0 && (d4-d3)>=0 && (d5-d6)>=0
+        t=(d4-d3)/((d4-d3)+(d5-d6));q=_addscaled3(b,_sub3(c,b),t)
+        return _norm3(_sub3(p,q)),q
+    end
+    denom=inv(va+vb+vc);v=vb*denom;w=vc*denom
+    q=_addscaled3(_addscaled3(a,ab,v),ac,w)
+    return _norm3(_sub3(p,q)),q
+end
+
+# Per-vertex distance to the nearest non-incident triangle whose closest
+# point lies within 60° of the candidate's normal cone. Triangles touching a
+# co-located vertex are incident — shared edges are not gaps. `bound`
+# (typically hmax·n_points_per_gap) prunes the BVH so only relevant hits are
+# evaluated.
+function _auto_local_feature_sizes(coords::AbstractMatrix{Float64},
+                                   tris::AbstractMatrix{Int32};
+                                   groups, bound::Float64)
+    _,group_members=groups
+    nt=size(tris,2)
+    tf=DistanceField(;triangles=[
+        ((coords[1,Int(tris[1,j])],coords[2,Int(tris[1,j])],
+          coords[3,Int(tris[1,j])]),
+         (coords[1,Int(tris[2,j])],coords[2,Int(tris[2,j])],
+          coords[3,Int(tris[2,j])]),
+         (coords[1,Int(tris[3,j])],coords[2,Int(tris[3,j])],
+          coords[3,Int(tris[3,j])])) for j in 1:nt])
+    # Per-vertex incident-triangle sets, shared through the co-location group.
+    tris_of_vertex=[Int32[] for _ in axes(coords,2)]
+    @inbounds for j in 1:nt
+        for slot in 1:3
+            push!(tris_of_vertex[Int(tris[slot,j])],Int32(j))
+        end
+    end
+    incident=Vector{Set{Int32}}(undef,size(coords,2))
+    @inbounds for i in axes(coords,2)
+        incident[i]=Set{Int32}()
+    end
+    @inbounds for members in group_members
+        shared=Set{Int32}()
+        for v in members
+            union!(shared,tris_of_vertex[Int(v)])
+        end
+        for v in members
+            incident[Int(v)]=shared
+        end
+    end
+    lfs=Vector{Float64}(undef,size(coords,2))
+    @inbounds for i in axes(coords,2)
+        p=(coords[1,i],coords[2,i],coords[3,i])
+        lfs[i]=_auto_lfs_search(tf,1,p,incident[i],Float64(bound))
+    end
+    return lfs
+end
+
+function _auto_lfs_search(tf::DistanceField,node::Int,p,
+                          incident::Set{Int32},best::Float64)
+    _distance_box(p,tf.bvh_lo[node],tf.bvh_hi[node])>=best && return best
+    count=tf.bvh_count[node]
+    if count>0
+        first=tf.bvh_first[node]
+        np=size(tf.points,2);ns=size(tf.segments,2)
+        @inbounds for pos in first:first+count-1
+            j=tf.bvh_order[pos]-np-ns
+            (j<1 || j in incident) && continue
+            a=(tf.triangles[1,j],tf.triangles[2,j],tf.triangles[3,j])
+            b=(tf.triangles[4,j],tf.triangles[5,j],tf.triangles[6,j])
+            c=(tf.triangles[7,j],tf.triangles[8,j],tf.triangles[9,j])
+            d,q=_auto_closest_point_triangle(p,a,b,c)
+            d<best || continue
+            # Facing test: the approach direction must lie inside the
+            # triangle's 60° normal cone (the medial-axis heuristic; coplanar
+            # continuations approach in-plane and are not gaps).
+            ab=_sub3(b,a);ac=_sub3(c,a)
+            nx=ab[2]*ac[3]-ab[3]*ac[2]
+            ny=ab[3]*ac[1]-ab[1]*ac[3]
+            nz=ab[1]*ac[2]-ab[2]*ac[1]
+            nn=sqrt(nx*nx+ny*ny+nz*nz)
+            (isfinite(nn) && nn>0) || continue
+            dq=_sub3(q,p)
+            abs(_distance_dot3(dq,(nx,ny,nz)))>=0.5*d*nn || continue
+            best=d
+        end
+        return best
+    end
+    left=tf.bvh_left[node];right=tf.bvh_right[node]
+    dl=_distance_box(p,tf.bvh_lo[left],tf.bvh_hi[left])
+    dr=_distance_box(p,tf.bvh_lo[right],tf.bvh_hi[right])
+    if dl<=dr
+        dl<best && (best=_auto_lfs_search(tf,left,p,incident,best))
+        dr<best && (best=_auto_lfs_search(tf,right,p,incident,best))
+    else
+        dr<best && (best=_auto_lfs_search(tf,right,p,incident,best))
+        dl<best && (best=_auto_lfs_search(tf,left,p,incident,best))
+    end
+    return best
+end
+
+# Edge-length gradation as a multi-source shortest-path problem on the union
+# edge graph: h'[v] = min_u (h[u] + slope·|u…v|). Every vertex starts as a
+# source at its prescribed value; a binary-heap Dijkstra settles the unique
+# order-independent fixpoint in O(E log V) with vertex-id tie-breaks so the
+# pop order is deterministic.
+function _auto_smooth_sizes!(h::AbstractVector{Float64},
+                             coords::AbstractMatrix{Float64},
+                             tris::AbstractMatrix{Int32},slope::Float64)
+    nv=length(h)
+    edges=Set{Tuple{Int32,Int32}}()
+    @inbounds for j in axes(tris,2)
+        a=tris[1,j];b=tris[2,j];c=tris[3,j]
+        push!(edges,a<b ? (a,b) : (b,a))
+        push!(edges,b<c ? (b,c) : (c,b))
+        push!(edges,a<c ? (a,c) : (c,a))
+    end
+    ordered=sort!(collect(edges))
+    # CSR adjacency.
+    degree=zeros(Int,nv)
+    @inbounds for e in ordered
+        degree[Int(e[1])]+=1;degree[Int(e[2])]+=1
+    end
+    firsts=Vector{Int}(undef,nv+1);firsts[1]=1
+    @inbounds for i in 1:nv
+        firsts[i+1]=firsts[i]+degree[i]
+    end
+    fill!(degree,0)
+    nbr=Vector{Int32}(undef,2length(ordered))
+    wgt=Vector{Float64}(undef,2length(ordered))
+    @inbounds for e in ordered
+        a,b=Int(e[1]),Int(e[2])
+        d=sqrt((coords[1,a]-coords[1,b])^2+
+               (coords[2,a]-coords[2,b])^2+
+               (coords[3,a]-coords[3,b])^2)*slope
+        ia=firsts[a]+degree[a];degree[a]+=1
+        ib=firsts[b]+degree[b];degree[b]+=1
+        nbr[ia]=Int32(b);wgt[ia]=d
+        nbr[ib]=Int32(a);wgt[ib]=d
+    end
+    # Min-heap of (tentative size, vertex) with vertex-id tie-breaks.
+    heap=Tuple{Float64,Int32}[(h[i],Int32(i)) for i in 1:nv]
+    _auto_heap_siftup!.(Ref(heap),eachindex(heap))
+    settled=falses(nv)
+    while !isempty(heap)
+        key,u=_auto_heap_pop!(heap)
+        settled[u] && continue
+        settled[u]=true
+        h[u]=key
+        @inbounds for k in firsts[u]:firsts[u+1]-1
+            v=Int(nbr[k])
+            settled[v] && continue
+            cand=key+wgt[k]
+            cand<h[v] || continue
+            h[v]=cand
+            _auto_heap_push!(heap,(cand,Int32(v)))
+        end
+    end
+    return h
+end
+
+@inline function _auto_heap_less(a::Tuple{Float64,Int32},
+                                 b::Tuple{Float64,Int32})
+    return a[1]<b[1] || (a[1]==b[1] && a[2]<b[2])
+end
+function _auto_heap_push!(heap::Vector{Tuple{Float64,Int32}},
+                          item::Tuple{Float64,Int32})
+    push!(heap,item)
+    _auto_heap_siftup!(heap,length(heap))
+    return heap
+end
+function _auto_heap_siftup!(heap::Vector{Tuple{Float64,Int32}},i::Int)
+    while i>1
+        parent=i>>1
+        _auto_heap_less(heap[i],heap[parent]) || return heap
+        heap[i],heap[parent]=heap[parent],heap[i]
+        i=parent
+    end
+    return heap
+end
+function _auto_heap_pop!(heap::Vector{Tuple{Float64,Int32}})
+    top=heap[1]
+    tail=pop!(heap)
+    isempty(heap) && return top
+    heap[1]=tail
+    i=1;n=length(heap)
+    while true
+        child=2i
+        child>n && break
+        child<n && _auto_heap_less(heap[child+1],heap[child]) && (child+=1)
+        _auto_heap_less(heap[child],heap[i]) || break
+        heap[i],heap[child]=heap[child],heap[i]
+        i=child
+    end
+    return top
 end
 function _sphere_fit_curvature(coords,i,nbr)
     isempty(nbr) && return 0.0

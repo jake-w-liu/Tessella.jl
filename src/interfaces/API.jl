@@ -58,7 +58,7 @@ using ..Model: set_periodic!, model_periodic_nodes, _model_affine_point,
               _model_cross3
 using ..Transform: _transform_homogeneous, _periodic_affine_3x4
 using ..Model: mesh_model_surface, mesh_model_volume, model_to_mixed,
-              _model_planar_surface_mesh
+              _model_planar_surface_mesh, _automatic_context_field
 using ..Model: _model_entity_known, _model_fresh_element_tag,
               _record_append_node!, _record_append_element!,
               set_transfinite_curve!,
@@ -7025,6 +7025,9 @@ function _session_size_field_locked(m::GeoModel)
                 "build_geo_size_field: PostView Field[$(spec.tag)] references " *
                 "unknown view $view_tag"))
             return _post_view_field(view,spec.tag)
+        elseif kind=="automaticmeshsizefield"
+            return _automatic_context_field(
+                m,spec,config,entities,"gmsh API")
         end
         throw(ArgumentError(
             "build_geo_size_field: Field[$(spec.tag)] kind $(spec.kind) " *

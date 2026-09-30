@@ -53,7 +53,8 @@ using ..Model: _affine_rotation, _affine_symmetry, _entity_label
 using ..Model: add_physical_group!, set_periodic!, set_transfinite_tri!, _has_entity,
     _max_entity_physical_number, _model_periodic_curve_orientation,
     _model_periodic_surface_edge_map
-using ..Model: _model_boundary, _model_points_of, _model_direct_boundary
+using ..Model: _model_boundary, _model_points_of, _model_direct_boundary,
+               _automatic_context_field
 using ..Model: _model_entity_dictionary, _model_entity_known, remove_embedded!
 using ..Model: model_entity, model_entities, model_entities_in_bounding_box
 using ..Model: model_physical_groups, _physical_live_members
@@ -6920,10 +6921,15 @@ function _geo_field_entity_mesh(m::GeoModel,dim::Int,name::AbstractString,
     return nothing
 end
 
-# `context_fields` resolver for the five model/view-backed field kinds — the
-# `.geo` executor has no view store or boundary-layer topology, so those
-# kinds fail with the same explicit diagnostic the API session uses.
-function _geo_mesh_context_fields(spec,config,entities,params)
+# `context_fields` resolver for the five model/view-backed field kinds —
+# `AutomaticMeshSizeField` resolves against the model surfaces through the
+# provided entity callback; the `.geo` executor has no view store or
+# boundary-layer topology, so the other kinds keep the explicit diagnostic.
+function _geo_mesh_context_fields(m::GeoModel,spec,config,entities,params)
+    if lowercase(spec.kind)=="automaticmeshsizefield"
+        return _automatic_context_field(
+            m,spec,config,entities,"execute_geo")
+    end
     throw(ArgumentError(
         "build_geo_size_field: Field[$(spec.tag)] kind $(spec.kind) " *
         "requires model context that is not available to .geo meshing"))
@@ -6960,7 +6966,8 @@ function _geo_mesh_background_field(m::GeoModel,
     return _build_geo_field(
         params,(d,name)->_geo_field_entity_mesh(m,d,name,caller),tag;
         model_bbox=bbox,geometry_tolerance=geometry_tolerance,
-        context_fields=_geo_mesh_context_fields)
+        context_fields=(spec,config,entities,params)->
+            _geo_mesh_context_fields(m,spec,config,entities,params))
 end
 
 # Mesh-time `_ModelMesh1DOptions` — upstream reads global `CTX` state inside
