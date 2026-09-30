@@ -152,9 +152,11 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - validated four-sided planar transfinite triangle patches using average-chord Coons
   interpolation, all four Gmsh diagonal arrangements, physical tags, bounded
   intersection auditing, and exact orientation postconditions;
-- normalized straight-curve transfinite parameters for Gmsh's Progression/Power,
-  Bump, and Beta laws plus all three HWall variants, with signed orientation and
-  Float64 representability gates, and `Mesh.FlexibleTransfinite` count scaling
+- transfinite curve subdivision for Gmsh's Progression/Power, Bump, and Beta
+  laws plus all three HWall variants — closed-form on `Line`/`Circle` and
+  `F_Transfinite` cell-size-density integration over the native parameter on
+  arcs and splines — with signed orientation and Float64 representability
+  gates, and `Mesh.FlexibleTransfinite` count scaling
   by `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` with the
   recombined-boundary odd-count rule;
 - validated three-sided planar structured patches using both Gmsh
@@ -560,7 +562,7 @@ entity presentation, Point-coordinate, and model-attribute state,
 uniform-refinement and session-cache lifecycle, transfinite-patch,
 fixed element type/property lookup, fixed-family reference quadrature,
 automatic/manual global edge/face topology,
-straight transfinite curve-law/HWall, unrecombined/recombined three-sided
+straight and curved transfinite curve-law/HWall, unrecombined/recombined three-sided
 transfinite, recombined-quadrangle, affine
 transfinite-volume, five-face-prism, native `.geo` and projected single-/two-direction
 periodic surface differentials, embedded, reusable-master/chained, and

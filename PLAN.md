@@ -907,7 +907,7 @@ cached automatic/manual global edge/face topology creation, insertion, and looku
 cached simplex point-location and local-coordinate queries,
 cached linear-simplex element-quality queries,
 fixed element type/property and fixed-family reference-quadrature lookup,
-four-sided transfinite, straight transfinite curve-law/HWall,
+four-sided transfinite, straight and curved transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, five-face-prism, and
 recombined-hexahedron differentials, plus native `.geo` and projected

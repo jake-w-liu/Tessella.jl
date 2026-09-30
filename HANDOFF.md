@@ -26,7 +26,47 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Warped/non-affine transfinite volumes** — `Transfinite Volume` no longer
+**Curved transfinite edges — `F_Transfinite` density semantics** — the
+`Transfinite Curve` constraint no longer rejects non-`Line` curves. Stored
+curve parameters, transfinite surface side chains, and the volume kernel's
+canonical face grids now all consume ONE native-parameter list
+(`_model_curve_transfinite_native_params`), so every part emits
+bitwise-identical boundary nodes and sibling parts cannot duplicate or
+ulp-split shared edge/corner vertices. `Line` and `Circle` keep the
+closed-form `_transfinite_parameters` fast path (uniform-speed
+parametrizations make the mass inversion recover law positions exactly);
+every other kind dispatches on Gmsh's three `F_Transfinite` arms — the
+default arm (`coef <= 0`, `coef == 1`, beta coefficient < 1) integrates
+`val ∝ ‖C′‖` giving uniform geometric-length fractions, the unknown-type
+arm (grammar-only `Beta_Symmetrical*`, reversed HWall records, the ±0
+wildcard) is `val = 1` giving uniform native-parameter fractions, and the
+law arm (progression/bump/beta plus HWall coefficients solved through
+Gmsh's bounded `newton_get_r`/`bissection_get_*` searches) integrates the
+cell-size density `‖C′‖/cellsize` over the native parameter with the
+shared adaptive trapezoid and places nodes at equal primitive marks.
+`_periodic_curve_point` and the writeback classify curved-edge boundary
+chains via bitwise stored-parameter lookup with a `model_closest_point`
+fallback, and corner endpoints weld to the stored vertex tuples.
+`_model_curve_length` now integrates true arc length for curved kinds so
+HWall laws work on arcs/splines. Gmsh 4.15.2 differential: 20 curved cases
+(Circle, Ellipse, Spline, BSpline, Bezier, Nurbs × uniform/progression/
+reversed/bump/beta/all-three-HWall plus fallback arms) match within 6.2e-8,
+and the curved annular-sector transfinite volume reproduces Gmsh's exact
+66/162/108 node/tet/tri counts. Files: `src/geometry/ModelMesh1D.jl`
+(density port), `src/geometry/Model.jl` (`_periodic_curve_point` un-gate,
+`_curve_parameter_nodes_curved`, shared side-chain weld),
+`test/geometry/geo_constraints_test.jl` (+15),
+`validation/geo_constraints/differential.jl` (`transfinite_curved_surface`,
+`transfinite_curved_volume`).
+
+**Blocked, not implemented**: transfinite volume recombination — recombined
+transfinite surfaces produce hexahedra upstream, but the compact `Mesh` and
+the full generation pipeline are simplex-only (`MixedMesh` carries
+non-simplex blocks only through isolated structured APIs). End-to-end
+quad/hex delivery needs a dedicated mixed-element epic (quad surface-patch
+kernel routing, hex volume kernel routing, compact-Mesh/generation changes).
+
+Previous increment (for context): **warped/non-affine transfinite volumes** — `Transfinite Volume` no longer
 collapses every block onto the affine eight-corner parallelepiped. The model
 path now requires all six boundary surfaces transfinite (Gmsh's
 incompatible-surface gate), meshes each with the four-sided patch kernel,
@@ -145,14 +185,36 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Verified gates
 
-- `Pkg.test()` Julia 1.13.1 (this increment): **426,051/426,051** in 14m05s —
-  fully green including +189 warped-volume kernel tests and +13 `.geo`
-  transfinite-volume end-to-end tests.
+- Curved-edge broad differential vs Gmsh 4.15.2 (`/c/tmp/curved_tf_diff.jl`):
+  20/20 cases — Circle, Ellipse, Spline, BSpline, Bezier, Nurbs across
+  uniform, progression, reversed progression, bump (lo/hi), beta, all three
+  HWall laws, `Beta_Symmetrical` fallback, reversed HWall, and ellipse law
+  variants — node multisets match within 6.2e-8 (spline-progression params
+  hit Gmsh's stored 0.1163858/0.2770245/0.5685709 at ~3e-9).
 - `validation/geo_constraints/differential.jl` Gmsh 4.15.2:
-  `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=29` — the new
-  `transfinite_volume_warped` case (shifted-corner block, warped ruled face)
-  matches the node multiset within the 1e-7 tolerance; the affine volume case
-  passes through the faces path identically. `documented_gaps=2` unchanged.
+  `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=31` — `transfinite_curved_surface`
+  (spline progression) and `transfinite_curved_volume` (annular sector,
+  66 nodes including the circle-center point entities) added;
+  `documented_gaps=2` unchanged.
+- `test/geometry/geo_constraints_test.jl`: all green incl. the +15
+  `.geo transfinite curves on curved edges` set (angle-fraction arcs,
+  arc-length-uniform splines, density-law params, reversed laws,
+  unknown-type fallback, bitwise stored/side-chain param sharing, annulus
+  counts).
+- A/B failure bisect (HEAD `a14b4dc` vs this tree, Julia 1.13.1): the 20
+  CRC/SHA-pin failures reproduce identically on clean HEAD — same computed
+  SHAs at both trees, including `model_volume_io_test.jl:338` and
+  `api_test.jl:288` (verified via a patched worktree that skips each file's
+  earlier failing pin so the later testsets run). Environment drift
+  documented below, NOT regressions from this diff. `set_periodic!`
+  degenerate-curve rejection verified restored (was momentarily relaxed by
+  the line-gate refactor mid-increment; `_model_curve_length` call kept).
+- `Pkg.test()` Julia 1.13.1 (this increment): **426,046 passed, 20 failed**
+  in 13m48s — all 20 are the environmental `mixed_crc`/`mesh_crc` SHA-pin
+  drift above; zero new failures.
+- `Pkg.test()` Julia 1.13.1 (previous increment): **426,051/426,051** in
+  14m05s — fully green including +189 warped-volume kernel tests and +13
+  `.geo` transfinite-volume end-to-end tests.
 - `validation/transfinite/differential.jl` Gmsh 4.15.2: green
   (warped_max_error=1.9e-13, unchanged by this increment).
 - `Pkg.test()` Julia 1.13.1 (post-`d3142ca` run): **425,712 passed,

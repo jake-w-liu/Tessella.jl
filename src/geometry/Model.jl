@@ -36,7 +36,10 @@ using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_collapsed
 using ..Transfinite: mesh_transfinite_patch
-using ..Mesh1D: mesh_curve, curve_length
+using ..Mesh1D: mesh_curve, curve_length, _adaptive_points, _length_point,
+    _invert_primitive, _IntegrationPoint, _GMSH_INTEGRATION_PRECISION,
+    _GMSH_MIN_INTEGRATION_DEPTH, _GMSH_MAX_INTEGRATION_DEPTH,
+    _DEFAULT_MAX_INTEGRATION_POINTS, _convex_coordinate
 using ..Transform: _affine_coordinate, _transform_homogeneous,
     _periodic_affine_3x4, _periodic_affine_input
 using ..Predicates: orient2, orient3
@@ -626,10 +629,20 @@ end
 @inline _model_point_distance(a,b)=
     hypot(a[1]-b[1],a[2]-b[2],a[3]-b[3])
 
+# Geometric curve length — the `GEdge::length()` the transfinite wall laws
+# scale their height against. `Line` takes the chord directly; every other
+# kind integrates the evaluator at Gmsh's integration precision (the same
+# convention `mesh_curve`'s grader uses).
 function _model_curve_length(m::GeoModel,curve::Int,caller::AbstractString)
-    _model_require_line_curve(m,curve,caller,"curve length")
-    a,b=m.curves[curve];p=m.points[a];q=m.points[b]
-    length1=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+    length1=if _curve_type(m,curve)===:line
+        a,b=m.curves[curve];p=m.points[a];q=m.points[b]
+        hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
+    else
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        γ=u->_model_curve_point(m,curve,u,caller)
+        curve_length(γ;t0=t0,t1=t1,
+                     integration_precision=_GMSH_INTEGRATION_PRECISION)
+    end
     (isfinite(length1) && length1>0) || throw(ArgumentError(
         "$caller: Curve[$curve] must have finite positive geometric length"))
     return length1
@@ -1123,6 +1136,12 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                 # does the rest at mesh time.
                 reversed=signed_slave*signed_master<0
             else
+                # Periodic affine curve pairing stays Line-gated — curved
+                # periodic curves are a documented non-claim. The length
+                # call keeps the degenerate (zero-length) rejection the
+                # line gate alone no longer enforces.
+                _model_require_line_curve(m,slave,caller,"periodic curve")
+                _model_require_line_curve(m,master,caller,"periodic curve")
                 _model_curve_length(m,slave,caller)
                 _model_curve_length(m,master,caller)
                 slave_points=m.curves[slave];master_points=m.curves[master]
@@ -2532,12 +2551,18 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
             end
         end
     end
-    _model_require_line_curve(m,curve,caller,"curve subdivision")
-    a,b=m.curves[curve];p=m.points[a];q=m.points[b]
-    point=ntuple(3) do axis
-        _affine_coordinate(
-            p[axis],0.0,parameter,0.0,0.0,q[axis],0.0,0.0,
-            p[axis],0.0,0.0,caller,curve)
+    # `parameter` is the stored/native parameter convention: the chord
+    # fraction for `Line`, the sweep/native parameter for arcs and the
+    # spline family, and the OCC range for materialized edges.
+    if _curve_type(m,curve)===:line
+        a,b=m.curves[curve];p=m.points[a];q=m.points[b]
+        point=ntuple(3) do axis
+            _affine_coordinate(
+                p[axis],0.0,parameter,0.0,0.0,q[axis],0.0,0.0,
+                p[axis],0.0,0.0,caller,curve)
+        end
+    else
+        point=_model_curve_point(m,curve,parameter,caller)
     end
     all(isfinite,point) || throw(ArgumentError(
         "$caller: Curve[$curve] periodic subdivision is not Float64-representable"))
@@ -2781,7 +2806,9 @@ end
 function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes,
                                 eligible_edges,atol::Float64,
                                 caller::AbstractString)
-    _model_require_line_curve(m,curve,caller,"curve mesh classification")
+    _curve_type(m,curve)===:line ||
+        return _curve_parameter_nodes_curved(
+            m,mesh,curve,eligible_nodes,eligible_edges,atol,caller)
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     vx=q[1]-p[1];vy=q[2]-p[2];vz=q[3]-p[3]
     length2=muladd(vx,vx,muladd(vy,vy,vz*vz))
@@ -2815,6 +2842,90 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes
         "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
     first(entries)[1]<=parameter_tolerance &&
         1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
+            "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
+    for index in 1:(length(entries)-1)
+        first_node=Int32(entries[index][2])
+        second_node=Int32(entries[index+1][2])
+        first_node!=second_node || throw(ErrorException(
+            "$caller: Curve[$curve] repeats a mesh node"))
+        key=first_node<second_node ? (first_node,second_node) :
+                                     (second_node,first_node)
+        key in eligible_edges || throw(ErrorException(
+            "$caller: Curve[$curve] nodes do not form a mesh-edge chain"))
+    end
+    return entries,parameter_tolerance
+end
+
+# Non-`Line` variant: the emitting paths evaluate the same deterministic
+# evaluator at the stored parameters, so every curved-edge boundary node
+# bitwise-matches an entry of the stored discretization — coordinate lookup
+# recovers each node's parameter exactly, with the endpoint model points
+# mapped to the parameter bounds. Nodes that fail the bitwise lookup fall
+# back to `model_closest_point` projection at the projector's own tolerance;
+# the sorted-chain audit is identical to the line path.
+function _curve_parameter_nodes_curved(m::GeoModel,mesh::Mesh,curve::Int,
+                                       eligible_nodes,eligible_edges,
+                                       atol::Float64,
+                                       caller::AbstractString)
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    span=t1-t0
+    (isfinite(span) && span>0) || throw(ArgumentError(
+        "$caller: Curve[$curve] has an unusable parameter range"))
+    a,b=m.curves[curve];p=m.points[a];q=m.points[b]
+    index=Dict{NTuple{3,Float64},Float64}()
+    scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
+    stored=get(m.curve_params,curve,nothing)
+    if stored!==nothing
+        for u in stored
+            point=_model_curve_point(m,curve,u,caller)
+            all(isfinite,point) || throw(ArgumentError(
+                "$caller: Curve[$curve] evaluation is not " *
+                "Float64-representable"))
+            scale=max(scale,abs(point[1]),abs(point[2]),abs(point[3]))
+            haskey(index,point) || (index[point]=u)
+        end
+    end
+    haskey(index,p) || (index[p]=t0)
+    haskey(index,q) || (index[q]=t1)
+    geometric_tolerance=max(atol,128eps(Float64)*scale)
+    parameter_tolerance=max(128eps(Float64)*span,
+                          geometric_tolerance*span)
+    entries=Tuple{Float64,Int}[]
+    unmatched_nodes=Int[]
+    unmatched=Float64[]
+    @inbounds for node in 1:nnodes(mesh)
+        eligible_nodes[node] || continue
+        key=(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
+        hit=get(index,key,nothing)
+        if hit!==nothing
+            push!(entries,(hit,node))
+        else
+            push!(unmatched_nodes,node)
+            push!(unmatched,key[1],key[2],key[3])
+        end
+    end
+    if !isempty(unmatched_nodes)
+        closest,parameters=model_closest_point(m,1,curve,unmatched)
+        # `GEdge::closestPoint` converges to a ~1e-8·scale residual — the
+        # admittance bound for a node the stored discretization cannot name.
+        projection_tolerance=max(geometric_tolerance,1e-8*scale)
+        @inbounds for i in eachindex(unmatched_nodes)
+            j=3i-2
+            dx=unmatched[j]-closest[j];dy=unmatched[j+1]-closest[j+1]
+            dz=unmatched[j+2]-closest[j+2]
+            muladd(dx,dx,muladd(dy,dy,dz*dz))<=
+                projection_tolerance*projection_tolerance || continue
+            parameter=parameters[i]
+            abs(parameter-t0)<=parameter_tolerance && (parameter=t0)
+            abs(parameter-t1)<=parameter_tolerance && (parameter=t1)
+            push!(entries,(parameter,unmatched_nodes[i]))
+        end
+    end
+    sort!(entries;by=first)
+    length(entries)>=2 || throw(ErrorException(
+        "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
+    first(entries)[1]-t0<=parameter_tolerance &&
+        t1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
             "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
     for index in 1:(length(entries)-1)
         first_node=Int32(entries[index][2])
@@ -5769,16 +5880,9 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
         _transfinite_surface_sides(m,surf,caller)
     nside==4 || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
-    # Weld both ends of every side to the shared corner vertex coordinates:
-    # the volume kernel requires bitwise-identical shared edges, which holds
-    # exactly when every chain endpoint is the vertex tuple itself.
-    for (position,chain) in enumerate(curve_points)
-        haskey(m.points,junctions[position]) || throw(ErrorException(
-            "$caller: transfinite Surface[$surf] junction " *
-            "$(junctions[position]) is not a model point"))
-        chain[1]=m.points[junctions[position]]
-        chain[end]=m.points[junctions[mod1(position+1,nside)]]
-    end
+    # `_transfinite_surface_sides` already welds every chain end to the
+    # shared vertex coordinates — the volume kernel's bitwise shared-edge
+    # certification relies on the same weld.
     kernel=mesh_transfinite_patch(curve_points[1],curve_points[2],
                                   curve_points[3],curve_points[4];
                                   arrangement=spec.arrangement,
@@ -6075,8 +6179,8 @@ end
 # (planar, or ruled-without-auxiliary-geometry warping) applied. Returns the
 # surface spec, the signed curves, the side chains, the side count, the warped
 # flag, and each side's start-junction vertex tag in final chain order.
-# Corners are audited for consistency but NOT welded — the caller decides how
-# shared endpoints are unified.
+# Corners are audited for consistency, then welded to the shared vertex
+# coordinates so every consumer sees bitwise-identical chain endpoints.
 function _transfinite_surface_sides(m::GeoModel,t::Int,
                                     caller::AbstractString)
     spec=m.meshing.transfinite_surfaces[t]
@@ -6101,10 +6205,14 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         cspec===nothing && throw(ArgumentError(
             "$caller: transfinite Surface[$t] requires boundary Curve[$curve] " *
             "to be transfinite"))
-        params=_transfinite_parameters(
-            m,cspec.num_nodes,cspec.kind,cspec.coef,caller,curve;
-            reversed=cspec.reversed)
-        points=[_periodic_curve_point(m,curve,p,caller) for p in params]
+        # The side chain evaluates the same native parameters the stored
+        # curve discretization carries — shared through
+        # `_model_curve_transfinite_native_params` so every part emits
+        # bitwise-identical boundary nodes.
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        params=_model_curve_transfinite_native_params(m,curve,t0,t1,cspec,
+                                                      caller)
+        points=[_periodic_curve_point(m,curve,u,caller) for u in params]
         signed<0 && reverse!(points)
         curve_points[position]=points
     end
@@ -6146,6 +6254,21 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
             "$caller: transfinite Surface[$t] boundary corner $position is " *
             "inconsistent"))
     end
+    # Weld both ends of every side to the shared corner vertex coordinates:
+    # every consumer must see bitwise-identical corners (the raw bound
+    # evaluation can sit an ulp off the vertex — `cos(pi/2)` does not return
+    # zero — and a welded corner's residue would propagate through the Coons
+    # interior and crack the merge against sibling parts).
+    for position in 1:nside
+        for vertex in (junctions[position],
+                       junctions[mod1(position+1,nside)])
+            haskey(m.points,vertex) || throw(ErrorException(
+                "$caller: transfinite Surface[$t] junction $vertex is not " *
+                "a model point"))
+        end
+        curve_points[position][1]=m.points[junctions[position]]
+        curve_points[position][end]=m.points[junctions[mod1(position+1,nside)]]
+    end
     return spec,signed_curves,curve_points,nside,allow_warped,junctions
 end
 
@@ -6158,11 +6281,6 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                        nothing)
     spec,_,curve_points,nside,allow_warped,_=
         _transfinite_surface_sides(m,t,caller)
-    # Weld each side end to the next side's start so shared corners agree
-    # bitwise before the kernels see them.
-    for position in 1:nside
-        curve_points[position][end]=curve_points[mod1(position+1,nside)][1]
-    end
     if nside==3
         s1,s2,s3=curve_points
         kernel=if m.meshing.transfinite_tri==1

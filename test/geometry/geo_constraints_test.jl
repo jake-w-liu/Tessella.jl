@@ -316,6 +316,120 @@ end
               execution.mesh.coords[1,:])
 end
 
+@testset ".geo transfinite curves on curved edges" begin
+    using Tessella.MeshTypes: nnodes, ntets, ntris
+
+    # A quarter-circle boundary at 5 nodes subdivides by angle fraction —
+    # the nodes land on the analytic 22.5° marks of the arc.
+    circle_patch=raw"""
+        Point(1) = {1,0,0,1}; Point(2) = {0,1,0,1}; Point(9) = {0,0,0,1};
+        Point(3) = {0.2,1.7,0,1}; Point(4) = {1,1.5,0,1};
+        Circle(1) = {1,9,2};
+        Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+        Curve Loop(1) = {1,2,3,4};
+        Plane Surface(1) = {1};
+        Transfinite Curve{:} = 4;
+        Transfinite Curve{1,3} = 5;
+        Transfinite Surface{1};
+        """
+    execution=_execute_constraint_source(circle_patch*"Mesh 2;\n";mesh_dim=0)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntris(execution.mesh))==(21,24)
+    for degrees in (22.5,45.0,67.5)
+        expected=[cosd(degrees),sind(degrees),0.0]
+        @test any(i->isapprox(execution.mesh.coords[:,i],expected;
+                              atol=1e-9),
+                  axes(execution.mesh.coords,2))
+    end
+
+    # A spline boundary subdivides its normalized parameter by arc length
+    # for the uniform law — matching Gmsh's `F_Transfinite` default arm.
+    spline_head=raw"""
+        Point(1) = {0,0,0,1}; Point(2) = {1,0.1,0,1};
+        Point(5) = {0.3,0.45,0,1}; Point(6) = {0.7,0.38,0,1};
+        Point(3) = {1,1.5,0,1}; Point(4) = {0,1.4,0,1};
+        Spline(1) = {1,5,6,2};
+        Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+        Curve Loop(1) = {1,2,3,4};
+        Plane Surface(1) = {1};
+        Transfinite Curve{:} = 4;
+        Transfinite Curve{1,3} = 5;
+        Transfinite Surface{1};
+        """
+    execution=_execute_constraint_source(spline_head*"Mesh 2;\n";mesh_dim=0)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntris(execution.mesh))==(22,24)
+    # Nonuniform laws are DENSITIES over the native parameter upstream — the
+    # node parameters are NOT the law positions arc-length-inverted. The
+    # values below are the Gmsh 4.15.2 stored parameters for this case
+    # (observed via its mesh node parameters); a length-fraction mapping
+    # would give ~0.1108/0.2722/0.5719 instead.
+    execution=_execute_constraint_source(spline_head*raw"""
+        Transfinite Curve{1} = 5 Using Progression 1.4;
+        Mesh 2;
+        """;mesh_dim=0)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntris(execution.mesh))==(22,24)
+    params=execution.model.curve_params[1]
+    @test isapprox(params,[0.0,0.1163858,0.2770245,0.5685709,1.0];atol=2e-6)
+    # The reversed declaration mirrors the distribution.
+    execution=_execute_constraint_source(spline_head*raw"""
+        Transfinite Curve{-1} = 5 Using Progression 1.4;
+        Mesh 2;
+        """;mesh_dim=0)
+    params=execution.model.curve_params[1]
+    @test isapprox(params,[0.0,0.3084843,0.6201999,0.8477194,1.0];atol=2e-6)
+    # `Beta_Symmetrical` has no `F_Transfinite` case upstream — the curve
+    # falls to the unknown-type `val = 1` arm, which on a curved
+    # parametrization is parameter-uniform, not length-uniform.
+    execution=_execute_constraint_source(spline_head*raw"""
+        Transfinite Curve{1} = 5 Using Beta_Symmetrical 2.5;
+        Mesh 2;
+        """;mesh_dim=0)
+    params=execution.model.curve_params[1]
+    @test params==[0.0,0.25,0.5,0.75,1.0]
+    # The transfinite side chain and the stored curve discretization share
+    # the same native parameters bitwise — sibling parts cannot duplicate
+    # boundary nodes.
+    spec=execution.model.meshing.transfinite_curves[1]
+    t0,t1=Tessella.Model._model_curve_param_bounds(
+        execution.model,1,"test")
+    @test Tessella.Model._model_curve_transfinite_native_params(
+        execution.model,1,t0,t1,spec,"test")==params
+    # An annular-sector volume: two ruled cylindrical faces plus four planar
+    # faces, all transfinite. The circle boundaries feed the volume's
+    # canonical face grids and interior — Gmsh emits the identical counts
+    # (the two extra nodes are the circle-center point entities).
+    annulus=raw"""
+        Point(1) = {0.5,0,0,1}; Point(2) = {1,0,0,1};
+        Point(3) = {0,0.5,0,1}; Point(4) = {0,1,0,1};
+        Point(5) = {0.5,0,1,1}; Point(6) = {1,0,1,1};
+        Point(7) = {0,0.5,1,1}; Point(8) = {0,1,1,1};
+        Point(9) = {0,0,0,1}; Point(10) = {0,0,1,1};
+        Circle(1) = {1,9,3}; Circle(2) = {2,9,4};
+        Circle(3) = {5,10,7}; Circle(4) = {6,10,8};
+        Line(5) = {1,2}; Line(6) = {3,4};
+        Line(7) = {5,6}; Line(8) = {7,8};
+        Line(9) = {1,5}; Line(10) = {2,6};
+        Line(11) = {3,7}; Line(12) = {4,8};
+        Curve Loop(1) = {1,6,-2,-5}; Curve Loop(2) = {3,8,-4,-7};
+        Curve Loop(3) = {1,11,-3,-9}; Curve Loop(4) = {2,12,-4,-10};
+        Curve Loop(5) = {5,10,-7,-9}; Curve Loop(6) = {6,12,-8,-11};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Surface(3) = {3}; Surface(4) = {4};
+        Plane Surface(5) = {5}; Plane Surface(6) = {6};
+        Surface Loop(1) = {1,2,3,4,5,6};
+        Volume(1) = {1};
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Transfinite Volume{1};
+        """
+    execution=_execute_constraint_source(annulus*"Mesh 3;\n";mesh_dim=0)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntets(execution.mesh),
+           ntris(execution.mesh))==(66,162,108)
+end
+
 @testset ".geo Recombine/Smoother/Algorithm/SizeFromBoundary" begin
     execution=_execute_constraint_source(_GEO_SQUARE * raw"""
         Recombine Surface{1} = 30;
