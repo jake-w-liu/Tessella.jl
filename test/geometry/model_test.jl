@@ -731,7 +731,10 @@ end
     mktemp() do path,io
         write(io, "SetFactory(\"OpenCASCADE\");\nBox(1) = {0, 0, 0, 1, 1, 1};\nBox(2) = {2, 0, 0, 1, 1, 1};\n")
         close(io)
-        @test_throws ArgumentError execute_geo(path; mesh_dim=3)
+        # Multiple remaining volumes merge like a `Mesh 3` statement.
+        merged=execute_geo(path; mesh_dim=3)
+        @test validate(merged.mesh).ok
+        @test ntets(merged.mesh)>0
         @test_throws ArgumentError execute_geo(path; mesh_dim=false)
         @test_throws ArgumentError execute_geo(path; mesh_dim=big(2)^100)
     end

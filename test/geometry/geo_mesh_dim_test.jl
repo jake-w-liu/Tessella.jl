@@ -130,3 +130,117 @@ end
     @test nsegs(periodic.mesh)==16
     @test periodic.model.curve_params[2]==periodic.model.curve_params[1]
 end
+
+@testset "execute_geo mesh_dim with multiple entities" begin
+    # The keyword path merges every remaining entity through `_geo_mesh_model`
+    # — the same pipeline a `Mesh n` statement runs — so multi-surface and
+    # multi-volume models are no longer blocked and both entry points produce
+    # bitwise-identical output.
+    shared_body="""
+        lc = 0.3;
+        Point(1)={0,0,0,lc}; Point(2)={1,0,0,lc}; Point(3)={2,0,0,lc};
+        Point(4)={0,1,0,lc}; Point(5)={1,1,0,lc}; Point(6)={2,1,0,lc};
+        Line(1)={1,2}; Line(2)={2,3};
+        Line(3)={4,5}; Line(4)={5,6};
+        Line(5)={1,4}; Line(6)={2,5}; Line(7)={3,6};
+        Curve Loop(1)={1,6,-3,-5};
+        Plane Surface(1)={1};
+        Curve Loop(2)={2,7,-4,-6};
+        Plane Surface(2)={2};
+        """
+    merged=_execute_mesh_dim_source(shared_body;mesh_dim=2)
+    @test validate(merged.mesh).ok
+    # The shared boundary curve 6 emits one copy of its nodes: the merge
+    # deduplicates on bitwise coordinates like upstream's `GModel::mesh`.
+    seen=Set{NTuple{3,Float64}}()
+    @test all(1:nnodes(merged.mesh)) do i
+        key=(merged.mesh.coords[1,i],merged.mesh.coords[2,i],
+             merged.mesh.coords[3,i])
+        key in seen && return false
+        push!(seen,key)
+        return true
+    end
+    @test count(i->merged.mesh.coords[1,i]==1.0,1:nnodes(merged.mesh))==
+        length(merged.model.curve_params[6])
+    # Both surfaces carry triangles on their side of the shared edge.
+    for cell in axes(merged.mesh.tris,2)
+        centroid_x=sum(merged.mesh.coords[1,merged.mesh.tris[k,cell]]
+                       for k in 1:3)/3
+        @test 0.0<=centroid_x<=2.0
+    end
+    @test any(cell->sum(merged.mesh.coords[1,merged.mesh.tris[k,cell]]
+                        for k in 1:3)/3<1.0,axes(merged.mesh.tris,2))
+    @test any(cell->sum(merged.mesh.coords[1,merged.mesh.tris[k,cell]]
+                        for k in 1:3)/3>1.0,axes(merged.mesh.tris,2))
+
+    # `mesh_dim=2` and a mid-file `Mesh 2` run the identical pipeline.
+    statement=_execute_mesh_dim_source(shared_body*"Mesh 2;\n")
+    @test merged.mesh.coords==statement.mesh.coords
+    @test merged.mesh.tris==statement.mesh.tris
+    @test merged.mesh.segs==statement.mesh.segs
+
+    # The merged triangle set is the union of the per-surface products.
+    parts=[Tessella.mesh_model_surface(merged.model,tag)
+           for tag in sort!(collect(keys(merged.model.surfaces)))]
+    @test ntris(merged.mesh)==sum(ntris,parts;init=0)
+
+    # Curved-boundary surfaces merge through the same path.
+    curved=_execute_mesh_dim_source("""
+        lc = 0.3;
+        Point(1)={0,0,0,lc}; Point(2)={1,0,0,lc}; Point(3)={-1,0,0,lc};
+        Circle(1)={2,1,3}; Circle(2)={3,1,2};
+        Curve Loop(1)={1,2}; Plane Surface(1)={1};
+        Point(10)={8,0,0,lc}; Point(11)={9,0,0,lc}; Point(12)={8.5,-0.1,0,lc};
+        Line(7)={10,11}; Circle(8)={11,12,10};
+        Curve Loop(4)={7,8}; Plane Surface(3)={4};
+        """;mesh_dim=2)
+    @test validate(curved.mesh).ok
+    curved_parts=[Tessella.mesh_model_surface(curved.model,tag)
+                  for tag in sort!(collect(keys(curved.model.surfaces)))]
+    @test ntris(curved.mesh)==sum(ntris,curved_parts;init=0)
+
+    # A periodic curved pair meshes through the merged path; the slave's node
+    # coordinates stay a bitwise affine copy of the master surface nodes.
+    periodic=_execute_mesh_dim_source("""
+        lc = 0.35;
+        Point(1)={0,0,0,lc}; Point(2)={1,0,0,lc};
+        Point(3)={1,1,0,lc}; Point(4)={0,1,0,lc}; Point(5)={0.5,0.6,0,lc};
+        Line(1)={1,2}; Line(2)={2,3}; Circle(3)={3,5,4}; Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+        Point(6)={3,0,0,lc}; Point(7)={4,0,0,lc};
+        Point(8)={4,1,0,lc}; Point(9)={3,1,0,lc}; Point(10)={3.5,0.6,0,lc};
+        Line(5)={6,7}; Line(6)={7,8}; Circle(7)={8,10,9}; Line(8)={9,6};
+        Curve Loop(2)={5,6,7,8}; Plane Surface(2)={2};
+        Periodic Surface {2} = {1} Translate {3,0,0};
+        """;mesh_dim=2)
+    @test validate(periodic.mesh).ok
+    slave=Set(NTuple{3,Float64}[
+        (periodic.mesh.coords[1,i],periodic.mesh.coords[2,i],
+         periodic.mesh.coords[3,i])
+        for i in 1:nnodes(periodic.mesh)
+        if periodic.mesh.coords[1,i]>2.0])
+    # Forward-map the master nodes like the periodic copy does: the affine
+    # relation emits `master + 3` verbatim, so the shifted set must match the
+    # slave's coordinates bitwise.
+    master=Set(NTuple{3,Float64}[
+        (periodic.mesh.coords[1,i]+3.0,periodic.mesh.coords[2,i],
+         periodic.mesh.coords[3,i])
+        for i in 1:nnodes(periodic.mesh)
+        if periodic.mesh.coords[1,i]<2.0])
+    @test slave==master
+
+    # Disjoint volumes merge for `mesh_dim=3` the same way.
+    volumes=_execute_mesh_dim_source("""
+        SetFactory("OpenCASCADE");
+        Mesh.CharacteristicLengthMin = 0.4;
+        Mesh.CharacteristicLengthMax = 0.4;
+        Box(1) = {0,0,0, 1,1,1};
+        Box(2) = {3,0,0, 1,1,1};
+        """;mesh_dim=3)
+    @test validate(volumes.mesh).ok
+    @test ntets(volumes.mesh)>0
+    box1_nodes=count(i->volumes.mesh.coords[1,i]<2.0,1:nnodes(volumes.mesh))
+    box2_nodes=count(i->volumes.mesh.coords[1,i]>2.0,1:nnodes(volumes.mesh))
+    @test box1_nodes>0 && box2_nodes>0
+    @test box1_nodes+box2_nodes==nnodes(volumes.mesh)
+end

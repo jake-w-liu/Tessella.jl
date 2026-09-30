@@ -73,6 +73,15 @@ slave_set=Set(NTuple{3,Float64}[
 slave_set==master_set ||
     error("Tessella periodic curved slave is not a bitwise affine copy")
 
+# Multi-surface `Mesh 2` merges every entity part on bitwise coordinates:
+# the triangle set equals the union of the per-surface products.
+merged_execution=execute_geo(GEO;mesh_dim=2)
+ntris(merged_execution.mesh)==
+    ntris(disk)+ntris(annulus)+ntris(segment) ||
+    error("Tessella merged Mesh 2 lost or duplicated surface triangles")
+validate(merged_execution.mesh).ok ||
+    error("Tessella merged Mesh 2 output is invalid")
+
 function find_gmsh_api()
     explicit=get(ENV,"GMSH_JULIA_API","")
     !isempty(explicit) && isfile(explicit) && return explicit
@@ -131,14 +140,18 @@ try
     gmsh_slave_triangles=sum(length,gmsh_slave_elements;init=0)
     gmsh_slave_triangles>0 ||
         error("Gmsh produced no triangles on the periodic slave surface")
+    gmsh_total_nodes,_=gmsh.model.mesh.getNodes()
     println("GMSH_PARITY_CURVED_SURFACE_OK gmsh=$(gmsh.GMSH_API_VERSION) " *
             "tessella_disk=$(ntris(disk)) tessella_annulus=$(ntris(annulus)) " *
             "tessella_segment=$(ntris(segment)) " *
+            "tessella_merged=$(ntris(merged_execution.mesh))tris " *
             "tessella_periodic=$(ntris(master))+$(ntris(slave)) " *
             "rim=$rim hole_rim=$hole_rim " *
             "gmsh_surfs=$(gmsh_counts[1])+$(gmsh_counts[2])+$(gmsh_counts[3]) " *
             "gmsh_periodic_pairs=$(length(gmsh_slaves)) " *
             "gmsh_slave_tris=$gmsh_slave_triangles " *
+            "gmsh_nodes=$(length(gmsh_total_nodes)) " *
+            "tessella_merged_nodes=$(nnodes(merged_execution.mesh)) " *
             "gmsh_max_error=$max_gmsh_error")
 finally
     gmsh.finalize()
