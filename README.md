@@ -197,7 +197,7 @@ require Tessella-only output because Gmsh 4.15.2 cannot consume them safely, and
 nonzero-physical special MSH4 requires compatible classification metadata for a
 Gmsh-safe rewrite. MSH2 retains cell-level elementary ownership but has no entity
 topology record for signed boundaries or embedding relations. Native model periodicity
-covers straight-curve pairs on one planar triangle-meshed surface, disjoint
+covers straight or curved curve pairs on one planar triangle-meshed surface, disjoint
 affine-equivalent planar boundary surfaces of one explicit surface-loop volume,
 and stored mesh-inert volume relations. Each
 slave has one master; curve masters may be reused, a curve slave may become a master

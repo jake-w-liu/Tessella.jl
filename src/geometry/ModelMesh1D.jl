@@ -1146,16 +1146,16 @@ function _model_point_mesh_parts(m::GeoModel,caller::AbstractString)
     return parts
 end
 
-# Evaluate a stored curve parameter for element emission. `:line` curves go
+# Evaluate a stored curve parameter for element emission. Every kind goes
 # through `_periodic_curve_point` — the same affine evaluator the surface
 # PSLG uses — so curve-part nodes deduplicate bitwise against the boundary
 # nodes surface meshing generates (the merge keys on `reinterpret`ed
-# coordinates).
+# coordinates). A periodic slave's curved part must emit `affine(master)`
+# nodes, not the slave's native evaluation: the two differ by ulps on arcs
+# and splines, and emitting both would leave unpaired near-duplicate nodes.
 function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
                                  caller::AbstractString)
-    _curve_type(m,curve)===:line &&
-        return _periodic_curve_point(m,curve,u,caller)
-    return _model_curve_point(m,curve,u,caller)
+    return _periodic_curve_point(m,curve,u,caller)
 end
 
 # Segment parts from the stored `curve_params` plus any discrete (1,*)
