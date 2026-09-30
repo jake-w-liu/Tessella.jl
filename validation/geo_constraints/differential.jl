@@ -115,6 +115,57 @@ const CASES = (
      Transfinite Surface{:};
      Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
      """),
+    (name=:transfinite_curved_surface, mode=:mesh, dim=0,
+     # Non-uniform laws on a curved curve are DENSITIES over the native
+     # parameter upstream (`F_Transfinite` integrates ‖C′‖/cellsize), not
+     # law positions arc-length-inverted — the progression node set sits
+     # at Gmsh's stored parameters 0.1163858/0.2770245/0.5685709. `Mesh 2`
+     # merges every part so the two free spline control points count.
+     source="""
+     Point(1) = {0,0,0,1}; Point(2) = {1,0.1,0,1};
+     Point(5) = {0.3,0.45,0,1}; Point(6) = {0.7,0.38,0,1};
+     Point(3) = {1,1.5,0,1}; Point(4) = {0,1.4,0,1};
+     Spline(1) = {1,5,6,2};
+     Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+     Curve Loop(1) = {1,2,3,4};
+     Plane Surface(1) = {1};
+     Transfinite Curve{:} = 4;
+     Transfinite Curve{1,3} = 5;
+     Transfinite Curve{1} = 5 Using Progression 1.4;
+     Transfinite Surface{1};
+     Mesh 2;
+     """),
+    (name=:transfinite_curved_volume, mode=:mesh, dim=0,
+     # Annular sector: two ruled cylindrical faces plus four planar faces,
+     # all transfinite — the arc boundaries feed the volume's canonical
+     # face grids and interior (the two extra nodes are the circle-center
+     # point entities, which Gmsh emits too). `Mesh 3` merges every part so
+     # the comparison sees them.
+     source="""
+     Point(1) = {0.5,0,0,1}; Point(2) = {1,0,0,1};
+     Point(3) = {0,0.5,0,1}; Point(4) = {0,1,0,1};
+     Point(5) = {0.5,0,1,1}; Point(6) = {1,0,1,1};
+     Point(7) = {0,0.5,1,1}; Point(8) = {0,1,1,1};
+     Point(9) = {0,0,0,1}; Point(10) = {0,0,1,1};
+     Circle(1) = {1,9,3}; Circle(2) = {2,9,4};
+     Circle(3) = {5,10,7}; Circle(4) = {6,10,8};
+     Line(5) = {1,2}; Line(6) = {3,4};
+     Line(7) = {5,6}; Line(8) = {7,8};
+     Line(9) = {1,5}; Line(10) = {2,6};
+     Line(11) = {3,7}; Line(12) = {4,8};
+     Curve Loop(1) = {1,6,-2,-5}; Curve Loop(2) = {3,8,-4,-7};
+     Curve Loop(3) = {1,11,-3,-9}; Curve Loop(4) = {2,12,-4,-10};
+     Curve Loop(5) = {5,10,-7,-9}; Curve Loop(6) = {6,12,-8,-11};
+     Plane Surface(1) = {1}; Plane Surface(2) = {2};
+     Surface(3) = {3}; Surface(4) = {4};
+     Plane Surface(5) = {5}; Plane Surface(6) = {6};
+     Surface Loop(1) = {1,2,3,4,5,6};
+     Volume(1) = {1};
+     Transfinite Curve{:} = 4;
+     Transfinite Surface{:};
+     Transfinite Volume{1};
+     Mesh 3;
+     """),
     (name=:transfinite_volume_warped, mode=:mesh, dim=3,
      # Point 7 shifted off the affine lattice: surface 4's boundary is
      # genuinely non-coplanar, so it carries a ruled (warped) transfinite
@@ -304,7 +355,14 @@ end
 const COORD_TOLERANCE = 1e-7
 
 function gmsh_coord_list(dim)
-    tags, coords, _ = gmsh.model.mesh.getNodes(dim, -1, true, false)
+    tags, coords, _ = if dim < 0
+        # `dim = -1` marks an in-source `Mesh n` merge — the flat all-dims
+        # query returns every node once; a per-dim boundary-inclusive read
+        # would duplicate boundary nodes shared between entity blocks.
+        gmsh.model.mesh.getNodes()
+    else
+        gmsh.model.mesh.getNodes(dim, -1, true, false)
+    end
     return [Tuple(coords[3i-2:3i]) for i in eachindex(tags)]
 end
 
@@ -408,7 +466,10 @@ function compare_mesh_counts(tmesh, dim, name)
     total_gmsh == total_tessella || error(
         "$name: node counts differ (gmsh=$total_gmsh " *
         "tessella=$total_tessella)")
-    coords_equal(gmsh_coord_list(dim), tessella_coord_list(tmesh)) || error(
+    # `dim=0` marks an in-source `Mesh n` statement — the merged mesh is
+    # compared against every gmsh entity's nodes.
+    coords_equal(gmsh_coord_list(dim==0 ? -1 : dim),
+                 tessella_coord_list(tmesh)) || error(
         "$name: node coordinate sets differ")
     if dim == 2
         gmsh_tris = get(gmsh_elements(2, -1), 2, 0)

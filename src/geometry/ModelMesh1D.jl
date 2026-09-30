@@ -579,15 +579,336 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     return parameters
 end
 
+# ── Arc-length inversion ─────────────────────────────────────────────────────
+#
+# Upstream reparametrizes every built-in curve by geometric length: the
+# transfinite law positions are length fractions, and `GEdge::point(par)`
+# inverts them into the native parameter through the edge's discretization.
+# `Line` and `Circle` parametrizations already advance at constant speed, so
+# their fractions map linearly; the other kinds (`Ellipse`, `Spline`,
+# `BSpline`, `Bezier`, `Nurbs`, OCC records) invert through an adaptively
+# refined cumulative-length table — the same `_adaptive_points`/trapezoid
+# primitive `mesh_curve` uses for its node placement.
+function _model_curve_length_table(m::GeoModel,curve::Int,
+                                   caller::AbstractString)
+    kind=_curve_type(m,curve)
+    # Uniform-speed parametrizations need no table.
+    (kind===:line || kind===:circle) && return nothing
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    γ=function(u)
+        point=_model_curve_point(m,curve,u,caller)
+        all(isfinite,point) || throw(ArgumentError(
+            "$caller: Curve[$curve] evaluation is not Float64-representable"))
+        return point
+    end
+    evaluate(t,_,_)=_length_point(γ,nothing,t,t0,t1,caller)
+    points=_adaptive_points(evaluate,t0,t1,_GMSH_INTEGRATION_PRECISION,
+                            _DEFAULT_MAX_INTEGRATION_POINTS,
+                            _GMSH_MIN_INTEGRATION_DEPTH,
+                            _GMSH_MAX_INTEGRATION_DEPTH,caller)
+    points[end].p>0 || throw(ArgumentError(
+        "$caller: Curve[$curve] has zero geometric length"))
+    return points
+end
+
+# Map the transfinite length fraction `t∈[0,1]` to the stored/native
+# parameter. `table` comes from `_model_curve_length_table`; uniform-speed
+# kinds take the linear map (bitwise identical to the legacy behavior).
+function _model_curve_length_param(m::GeoModel,curve::Int,t::Float64,
+                                   caller::AbstractString,
+                                   table=_model_curve_length_table(
+                                       m,curve,caller))
+    if table===nothing
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        return t0+t*(t1-t0)
+    end
+    u=_invert_primitive(table,t*table[end].p)
+    isfinite(u) || throw(ArgumentError(
+        "$caller: Curve[$curve] arc-length inversion is not Float64-representable"))
+    return u
+end
+
+# ── Transfinite density (`F_Transfinite` + `Integration`) ────────────────────
+#
+# Gmsh does NOT reparametrize curved transfinite curves by arc length: the
+# stored law defines a cell-size DENSITY in the normalized parameter —
+# `F_Transfinite` evaluates `val(u) = ‖C′(u)‖/cellsize((u−t0)/(t1−t0))`, and
+# `Integration`/`RecursiveIntegration` builds its primitive with the same
+# adaptive trapezoid `F_Lc` uses. Nodes then sit at equal primitive marks,
+# linearly inverted on (t, primitive) (`meshGEdge` NUMP walk). For
+# uniform-speed parametrizations (`:line`, `:circle`) that inversion recovers
+# the closed-form law positions exactly, so those kinds keep the bitwise
+# `_transfinite_parameters` fast path. Non-uniform kinds dispatch through the
+# same three `val` arms upstream takes:
+#
+#   * default arm — `coef <= 0`, `coef == 1`, or a beta coefficient < 1:
+#     `val ∝ ‖C′‖` → the primitive is arc length → uniform LENGTH fractions,
+#     recovered by the `_model_curve_length_param` inversion;
+#   * unknown-type arm — types 8/9 (`Beta_Symmetrical*`), reversed HWall
+#     records (the `type == 5..7` transforms match positive types only), and
+#     the ±0 wildcard (`:uniform` → type 0): `val = 1` → uniform PARAMETER
+#     fractions;
+#   * law arm — progression/bump/beta, plus HWall coefficients solved through
+#     the upstream bounded searches below: integrate `‖C′‖/cellsize` and
+#     invert equal mass marks.
+#
+# `coeffTransfinite <= 0` can only reach the record through a verbatim `.geo
+# Using` coefficient; upstream folds it into the default arm where the
+# resulting mass is nonpositive — the existing closed-form paths already fall
+# back to uniform there, and the curved path does the same through the
+# `:length` arm.
+
+# Stored kind → upstream `typeTransfinite`. `Power` aliases `Progression` at
+# parse time; types 8/9 and the ±0 wildcard have no `val` case.
+function _transfinite_law_type(kind::Symbol)
+    kind===:progression && return 1
+    kind===:bump && return 2
+    kind===:beta && return 3
+    kind===:progression_hwall && return 5
+    kind===:bump_hwall && return 6
+    kind===:beta_hwall && return 7
+    kind===:beta_symmetrical && return 8
+    kind===:beta_symmetrical_hwall && return 9
+    return 0
+end
+
+# `dfbeta` (meshGEdge.cpp) — the beta-law density.
+function _transfinite_dfbeta(t::Float64,beta::Float64)
+    zlog=log((1.0+beta)/(beta-1.0))
+    return 2.0beta/((1.0+beta-t)*(-1.0+beta+t)*zlog)
+end
+
+# `f_prog` + `newton_get_r` (a bounded bissection despite the name): solve
+# `hw·(r^s − 1)/(r − 1) == length` for the progression ratio on [1,4] with
+# `s = n − 1` segments; out-of-bracket inputs return 1.0 like upstream.
+function _transfinite_hwall_ratio(hw::Float64,length::Float64,n::Int)
+    segments=n-1
+    function f(r)
+        r==1.0 && return segments*hw/length
+        return hw*(r^segments-1.0)/(r-1.0)/length
+    end
+    (f(1.0)<1.0 && f(4.0)>1.0) || return 1.0
+    r1,r2=1.0,4.0
+    while true
+        r3=0.5*(r1+r2)
+        f3=f(r3)
+        abs(f3-1.0)<1e-12 && return r3
+        f3<1.0 ? (r1=r3) : (r2=r3)
+    end
+end
+
+# `f_bump` + `bissection_get_a`: solve the bump coefficient on [1e-8,100] so
+# the first integrated unit lands at `hw/length`; out-of-bracket → 1.0.
+function _transfinite_hwall_bump(hw::Float64,length::Float64,n::Int)
+    t=hw/length
+    function f(coef)
+        if coef>1.0
+            a=atan(1.0,sqrt(coef-1.0))/sqrt(coef-1.0)/n
+            A=coef-1.0
+            return (atan(sqrt(A))-atan(sqrt(A)*(1.0-2.0t)))/2.0/sqrt(A)/a
+        end
+        a=atanh(sqrt(1.0-coef))/sqrt(1.0-coef)/n
+        A=1.0-coef
+        return (atanh(sqrt(A))-atanh(sqrt(A)*(1.0-2.0t)))/2.0/sqrt(A)/a
+    end
+    (f(1e-8)>1.0 && f(100.0)<1.0) || return 1.0
+    alpha1,alpha2=1e-8,100.0
+    while true
+        alpha3=0.5*(alpha1+alpha2)
+        f3=f(alpha3)
+        abs(f3-1.0)<1e-8 && return alpha3
+        f3>1.0 ? (alpha1=alpha3) : (alpha2=alpha3)
+    end
+end
+
+# `f_beta` + `bissection_get_beta`: solve beta on [1+1e-8,5] so the first
+# integrated unit lands at `hw/length`; out-of-bracket → 100.0.
+function _transfinite_hwall_beta(hw::Float64,length::Float64,n::Int)
+    t=hw/length
+    f(beta)=n*(1.0+atanh((t-1.0)/beta)/atanh(1.0/beta))
+    (f(1.0+1e-8)>1.0 && f(5.0)<1.0) || return 100.0
+    beta1,beta2=1.0+1e-8,5.0
+    while true
+        beta3=0.5*(beta1+beta2)
+        f3=f(beta3)
+        abs(f3-1.0)<1e-8 && return beta3
+        f3>1.0 ? (beta1=beta3) : (beta2=beta3)
+    end
+end
+
+# The `nbpt` `F_Transfinite` builds its cell partition from — the stored node
+# count with the `FlexibleTransfinite` lcFactor truncation applied, WITHOUT
+# the recombination odd bump (upstream applies that to N only, after the
+# primitive is integrated).
+function _transfinite_law_nodes(m::GeoModel,num_nodes::Int,
+                                caller::AbstractString)
+    m.meshing.flexible_transfinite || return num_nodes
+    factor=m.meshing.lc_factor
+    factor==0.0 && return num_nodes
+    q=num_nodes/factor
+    adjusted=isfinite(q) ?
+        trunc(Int,clamp(q,-2.2e9,2.2e9)) :
+        (q>0 ? Int64(2.2e9) : 0)
+    return max(2,adjusted)
+end
+
+# The `(type, coef)` the `F_Transfinite` transforms leave behind: positive
+# HWall types solve their wall height into an ordinary coefficient (type 5
+# reciprocates a negative wall through the ratio; type 7 mirrors a negative
+# wall through the signed type). Reversed HWall records (type −5..−7) do not
+# transform and fall to the unknown-type arm — the same place grammar-only
+# types 8/9 and the type-0 wildcard land.
+function _transfinite_effective_law(spec,length::Float64,nbpt::Int)
+    type=_transfinite_law_type(spec.kind)
+    spec.reversed && (type=-type)
+    coef=spec.coef
+    if type==5
+        coef=_transfinite_hwall_ratio(abs(coef),length,nbpt)
+        spec.coef>0.0 || (coef=1.0/coef)
+        type=1
+    elseif type==6
+        coef=_transfinite_hwall_bump(abs(coef),length,nbpt)
+        type=2
+    elseif type==7
+        coef=_transfinite_hwall_beta(abs(coef),length,nbpt)
+        type=3*(spec.coef>0.0 ? 1 : -1)
+    end
+    return type,coef
+end
+
+# Which `val` arm the effective law lands in.
+function _transfinite_val_arm(type::Int,coef::Float64)
+    (coef<=0.0 || coef==1.0 || (abs(type)==3 && coef<1.0)) &&
+        return :length
+    abs(type) in (1,2,3) && return :density
+    return :param
+end
+
+# `F_Transfinite::operator()` — `val(t_normalized, speed)`. The progression
+# cell index `i` partitions the normalized parameter scaled by the geometric
+# length (upstream's `t * length / a`), and a reversed type reciprocates the
+# ratio / mirrors the beta argument.
+function _transfinite_val(type::Int,coef::Float64,length::Float64,nbpt::Int)
+    atype=abs(type)
+    if coef<=0.0 || coef==1.0 || (atype==3 && coef<1.0)
+        return (t,d)->d*coef/length
+    elseif atype==1
+        r=type>=0 ? coef : 1.0/coef
+        a=length*(r-1.0)/(r^(nbpt-1.0)-1.0)
+        lgr=log(r)
+        return function (t,d)
+            i=floor(Int,log(t*length/a*(r-1.0)+1.0)/lgr)
+            return d/(a*r^i)
+        end
+    elseif atype==2
+        aa=if coef>1.0
+            -4.0*sqrt(coef-1.0)*atan(1.0,sqrt(coef-1.0))/(nbpt*length)
+        else
+            2.0*sqrt(1.0-coef)*
+                log(abs((1.0+1.0/sqrt(1.0-coef))/
+                        (1.0-1.0/sqrt(1.0-coef))))/(nbpt*length)
+        end
+        b=-aa*length*length/(4.0*(coef-1.0))
+        return (t,d)->d/(-aa*(t*length-length*0.5)^2+b)
+    elseif atype==3
+        return type<0 ? ((t,d)->_transfinite_dfbeta(1.0-t,coef)) :
+                        ((t,d)->_transfinite_dfbeta(t,coef))
+    else
+        return (t,d)->1.0
+    end
+end
+
+# `Integration` + the `meshGEdge` node-mark walk: integrate the transfinite
+# density over [t0,t1] with the shared adaptive trapezoid, then place `count`
+# nodes at equal primitive marks (linear inversion on (t,p)). The speed `d`
+# is the same bounded finite difference the length table uses — upstream's
+# `ge->firstDer` norm.
+function _model_curve_transfinite_density_params(m::GeoModel,curve::Int,
+                                                 t0::Float64,t1::Float64,
+                                                 val,count::Int,
+                                                 caller::AbstractString)
+    γ=function(u)
+        point=_model_curve_point(m,curve,u,caller)
+        all(isfinite,point) || throw(ArgumentError(
+            "$caller: Curve[$curve] evaluation is not Float64-representable"))
+        return point
+    end
+    evaluate=function (t,_,_)
+        lp=_length_point(γ,nothing,t,t0,t1,caller)
+        tn=(t-t0)/(t1-t0)
+        return _IntegrationPoint(t,val(tn,lp.xp),0.0,lp.xp,1.0)
+    end
+    points=_adaptive_points(evaluate,t0,t1,_GMSH_INTEGRATION_PRECISION,
+                            _DEFAULT_MAX_INTEGRATION_POINTS,
+                            _GMSH_MIN_INTEGRATION_DEPTH,
+                            _GMSH_MAX_INTEGRATION_DEPTH,caller)
+    a=points[end].p
+    (isfinite(a) && a>0.0) || throw(ArgumentError(
+        "$caller: Curve[$curve] transfinite law integrates to a nonpositive " *
+        "mass"))
+    params=Vector{Float64}(undef,count)
+    params[1]=t0
+    params[end]=t1
+    b=a/(count-1)
+    @inbounds for k in 1:count-2
+        u=_invert_primitive(points,k*b)
+        isfinite(u) || throw(ArgumentError(
+            "$caller: Curve[$curve] transfinite inversion is not " *
+            "Float64-representable"))
+        params[k+1]=u
+    end
+    return params
+end
+
+# The native-parameter node list for a transfinite curve — the single source
+# both `curve_params` and the transfinite surface/volume side chains consume,
+# so every part emits bitwise-identical boundary nodes. Uniform-speed kinds
+# keep the closed-form path; curved kinds dispatch on the `val` arm.
+function _model_curve_transfinite_native_params(m::GeoModel,curve::Int,
+                                                t0::Float64,t1::Float64,spec,
+                                                caller::AbstractString)
+    kind=_curve_type(m,curve)
+    if kind===:line || kind===:circle
+        params=_transfinite_parameters(m,spec.num_nodes,spec.kind,
+                                       spec.coef,caller,curve;
+                                       reversed=spec.reversed)
+        return Float64[t0+p*(t1-t0) for p in params]
+    end
+    # One shared integration: the converged primitive IS `ge->length()`, and
+    # the :length arm inverts the same table — a second `curve_length` call
+    # would re-integrate the identical evaluator bitwise.
+    table=_model_curve_length_table(m,curve,caller)
+    length=table[end].p
+    # The HWall transforms run on `nbPointsTransfinite` BEFORE `nbpt` absorbs
+    # the `lcFactor` division — the divided count only enters the `val`
+    # partition (`F_Transfinite` line order).
+    type,coef=_transfinite_effective_law(spec,length,spec.num_nodes)
+    n_law=_transfinite_law_nodes(m,spec.num_nodes,caller)
+    arm=_transfinite_val_arm(type,coef)
+    count=_flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)
+    if arm===:length
+        # `val ∝ speed` → uniform geometric-length fractions.
+        return Float64[_model_curve_length_param(m,curve,f,caller,table)
+                       for f in _transfinite_uniform_parameters(count)]
+    elseif arm===:param
+        # `val = 1` → the primitive is the parameter itself.
+        return Float64[_convex_coordinate(t0,t1,k/(count-1))
+                       for k in 0:count-1]
+    end
+    val=_transfinite_val(type,coef,length,n_law)
+    return _model_curve_transfinite_density_params(m,curve,t0,t1,val,
+                                                   count,caller)
+end
+
 # Transfinite path — `F_Transfinite` positions on the stored law; flexible
-# transfinite and the recombination odd-count rules are folded into
-# `_transfinite_parameters` (which returns node positions on [0,1]).
+# transfinite and the recombination odd-count rules are folded into the count
+# (`_flexible_transfinite_nodes`). The node list is the shared
+# `_model_curve_transfinite_native_params` so stored parameters and boundary
+# side chains agree bitwise.
 function _model_curve_transfinite_params(m::GeoModel,curve::Integer,t0::Float64,
                                          t1::Float64,spec,
                                          caller::AbstractString)
-    params=_transfinite_parameters(m,spec.num_nodes,spec.kind,spec.coef,
-                                   caller,curve;reversed=spec.reversed)
-    return t0 .+ params .* (t1-t0)
+    return _model_curve_transfinite_native_params(m,curve,t0,t1,spec,caller)
 end
 
 # `BGM_MeshSize` for a dim-1 discrete entity — the same `meshGEdgeProcessing`
@@ -1114,6 +1435,7 @@ function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh::Mesh,
     # boundary in a volume PLC. Snap recomputed parameters onto the stored
     # values so shared nodes keep bitwise-stable parameters; only genuinely
     # new subdivisions contribute new entries.
+    bounds=_model_curve_param_bounds(m,curve,caller)
     existing=get(m.curve_params,curve,nothing)
     if existing!==nothing
         entries=[begin
@@ -1122,21 +1444,24 @@ function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh::Mesh,
                             existing)
             match===nothing || (parameter=existing[match])
             # A stored value within endpoint tolerance still denotes the
-            # endpoint — mapping an exact 0/1 entry back onto 1−eps would
-            # evaluate one ulp off the shared corner and crack the boundary.
-            parameter<=parameter_tolerance && (parameter=0.0)
-            1-parameter<=parameter_tolerance && (parameter=1.0)
+            # endpoint — mapping an exact bound entry back onto bound−eps
+            # would evaluate one ulp off the shared corner and crack the
+            # boundary.
+            parameter-bounds[1]<=parameter_tolerance &&
+                (parameter=bounds[1])
+            bounds[2]-parameter<=parameter_tolerance &&
+                (parameter=bounds[2])
             (parameter,entry[2])
         end for entry in entries]
     end
     m.curve_params[curve]=Float64[entry[1] for entry in entries]
     @inbounds for (parameter,node) in entries
         protected_nodes[node] && continue
-        # Endpoints carry the model points bitwise — `p + 1·(q−p)` evaluates
-        # one ulp off and would crack the boundary shared with the adjacent
-        # face, which emits the corner's stored coordinates.
-        point=parameter==0.0 ? m.points[a] :
-              parameter==1.0 ? m.points[b] :
+        # Endpoints carry the model points bitwise — evaluating one ulp off
+        # would crack the boundary shared with the adjacent face, which
+        # emits the corner's stored coordinates.
+        point=parameter==bounds[1] ? m.points[a] :
+              parameter==bounds[2] ? m.points[b] :
               _periodic_curve_point(m,curve,parameter,caller)
         mesh.coords[1,node]=point[1]
         mesh.coords[2,node]=point[2]

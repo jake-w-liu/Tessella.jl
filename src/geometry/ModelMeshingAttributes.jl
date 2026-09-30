@@ -2327,7 +2327,8 @@ end
 # type, so a reversed HWall record (negative type) never reaches it and falls
 # to the unknown-type warning path — a uniform distribution — like the
 # grammar-only `Beta_Symmetrical`/`Beta_Symmetrical_HWall` kinds (types 8/9).
-# HWall needs the curve's geometric length, so only straight curves support it.
+# HWall needs the curve's geometric length — chord for `Line`, integrated
+# arc length for the curved kinds (`_model_curve_length`).
 #
 # `Mesh.FlexibleTransfinite` (`meshGEdge` in Gmsh): with the option set, the
 # stored transfinite count is divided by `Mesh.CharacteristicLengthFactor`
