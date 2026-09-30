@@ -83,7 +83,11 @@ never use Gmsh as the production mesher; it is only a differential oracle.
   dyn-tag `75365136…`, set-max `d5d07bb1…`
 - `.geo` embedded sheet: `validate=true`, `covers=true`, 1067 tets
 
-## Current increment (uncommitted)
+## Latest landed increment (`659d8c7`, pushed to `origin/main`)
+
+The stash `wip-inventory` is fully superseded — every change it contained was
+landed and evolved by commits `487173b`–`659d8c7` (verified by symbol-level
+comparison of all nine files); it can be dropped at will.
 
 1. **Windows validation port** — `validation/run_all.jl` and the Gmsh oracle
    calls spawn children via `joinpath(Sys.BINDIR,Base.julia_exename())` and
@@ -141,9 +145,15 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Remaining parity work (PLAN.md — all IN PROGRESS tracks)
 
-- **P1**: boundary-layer 3-D multi-wall fans, full Gmsh automatic-sizing
-  pipeline, high-order/custom-interpolation size fields, `PostView`
-  metric/tensor fields, exact CAD distance.
+- **P1**: full Gmsh global automatic-sizing pipeline (`AutomaticMeshSizeField`
+  context resolver still throws — the native field is a documented discrete
+  sphere-fit analogue only), high-order/custom-interpolation `PostView`
+  element data, materially warped quadrangles, direct tensor/metric-meshing
+  parity.
+- **P2**: general mixed-element generation/recombination beyond P4's
+  first-order pairing, mixed blocks in the simplex kernels, high-order
+  Jacobian certification beyond second-order segments/triangles/tetrahedra/
+  quadrangles/hexahedra/prisms, indexing beyond `Int32`.
 - **P3**: general OpenCASCADE BREP kernel, NURBS CAD of unclassified
   topology, transforms of arbitrary CAD entities, full `.geo` execution,
   unrecognized CAD topology.
