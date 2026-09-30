@@ -134,10 +134,38 @@ comparison of all nine files); it can be dropped at will.
    `gmsh_pairs` and match each Tessella pair to its closest gmsh
    counterpart rather than requiring index alignment.
 
+## Latest landed increment (`d3142ca`, pushed to `origin/main`)
+
+**High-order/custom-interpolation `.pos` records in `PostViewField`** —
+Gmsh's parsed `.pos` extension (order-2 `SL2`/`ST2`/`SQ2`/`SS2`/`SH2`/`SI2`/
+`SY2` names plus two-/four-matrix `INTERPOLATION_SCHEME` records with
+precedence-ordered, file-position family binding) now parses, round-trips
+byte-exactly, and evaluates. `PosScheme`/`PosElement(suffix,scheme)` model
+the records; `read_pos` decodes elements in two phases so retroactive
+binding fixes widths before reassembly; `write_pos` preserves suffixes and
+scheme positions. `PostViewField` keeps scheme elements in dedicated
+`_PVSchemeCell`s (kind-8 BVH cells): values fold `coefval[i,t]·M_t` (Bergot
+factors on pyramids), curved `coefgeo` maps invert by Newton over intrinsic
+coordinates only (off-direction offsets recover from the final residual
+projection), scalar/vector/tensor and multi-step paths work, and the query
+path is allocation-free after warm-up. Order-2 bases come from inverting
+the transposed monomial Vandermonde on `lagrange_nodes`. Gmsh itself cannot
+evaluate such views (`OctreePost` requires a first-order adaptation), so
+this is strictly-beyond-Gmsh capability — the differential context-skip now
+documents the missing oracle rather than a missing feature. Files:
+`src/interfaces/PostViewIO.jl`, `src/fields/SizeFieldCatalog.jl`,
+`test/fields/postview_highorder_test.jl` (125 focused tests), stale `SL2`
+rejection pin updated in `test/interfaces/post_view_io_test.jl`.
+
 ## Verified gates
 
-- `Pkg.test()` Julia 1.13.1: **425,608/425,608 in 13m30.0s** (fresh run on
-  the final tree; two `mixed_crc` sha pins repinned to post-retarget values).
+- `Pkg.test()` Julia 1.13.1 (post-`d3142ca` run): **425,712 passed,
+  21 failed**. Twenty failures are deterministic CRC/SHA pins whose
+  evaluated hashes reproduce identically on a clean-HEAD worktree
+  (`64a2c8b`) — pre-existing environment pin drift on this machine, not
+  regressions. The remaining failure was the stale `SL2` rejection pin,
+  fixed in this increment; `postview_highorder_test.jl` adds 125 passes.
+- Earlier verified run (pre-`d3142ca` tree): **425,608/425,608 in 13m30.0s**.
 - `validation/run_all.jl` on Windows + Gmsh 4.15.2: green (see STATUS.md
   for the dated entry; `embed_sheet_hole` full differential including
   MSH2/MSH4 round trips).
@@ -147,9 +175,8 @@ comparison of all nine files); it can be dropped at will.
 
 - **P1**: full Gmsh global automatic-sizing pipeline (`AutomaticMeshSizeField`
   context resolver still throws — the native field is a documented discrete
-  sphere-fit analogue only), high-order/custom-interpolation `PostView`
-  element data, materially warped quadrangles, direct tensor/metric-meshing
-  parity.
+  sphere-fit analogue only), materially warped quadrangles, direct
+  tensor/metric-meshing parity.
 - **P2**: general mixed-element generation/recombination beyond P4's
   first-order pairing, mixed blocks in the simplex kernels, high-order
   Jacobian certification beyond second-order segments/triangles/tetrahedra/
