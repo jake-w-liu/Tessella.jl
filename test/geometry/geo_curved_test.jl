@@ -1,5 +1,6 @@
 using Test
 using Tessella
+using Tessella.MeshTypes: nnodes, ntris, validate
 using Tessella.Model: model_value, model_derivative, model_second_derivative,
                       model_curvature, model_parametrization_bounds,
                       model_entity_type, model_bounding_box, model_set_tag!,
@@ -209,7 +210,7 @@ end
     @test_throws ArgumentError add_ruled_surface!(m4,[l3])
 end
 
-@testset "curved paths fail explicitly instead of degrading to chords" begin
+@testset "curved boundary surfaces mesh; non-coplanar fails explicitly" begin
     m=GeoModel()
     add_point!(m,1.0,0.0,0.0;tag=1)
     add_point!(m,0.0,0.0,0.0;tag=2)
@@ -220,9 +221,28 @@ end
     add_line!(m,4,1;tag=3)
     l=add_curve_loop!(m,[1,2,3])
     s=add_ruled_surface!(m,[l];tag=1)
-    err=try mesh_model_surface(m,s); nothing catch e; e end
+    mesh=mesh_model_surface(m,s)
+    @test nnodes(mesh)>0 && ntris(mesh)>0
+    # The PSLG followed the evaluated arc subdivision: boundary nodes sit on
+    # the unit circle above the x-axis, not on the 4→1 chord.
+    @test any(1:nnodes(mesh)) do node
+        abs(hypot(mesh.coords[1,node],mesh.coords[2,node])-1.0)<1e-9 &&
+            mesh.coords[2,node]>1e-9
+    end
+    # A boundary arc bulging out of the surface plane still fails explicitly
+    # rather than silently degrading to a chord.
+    m2=GeoModel()
+    add_point!(m2,1.0,0.0,0.0;tag=1)
+    add_point!(m2,0.0,0.0,0.5;tag=2)
+    add_point!(m2,0.0,1.0,0.0;tag=3)
+    add_point!(m2,-1.0,0.0,0.0;tag=4)
+    add_circle_arc!(m2,1,2,3;tag=1)
+    add_line!(m2,3,4;tag=2)
+    add_line!(m2,4,1;tag=3)
+    l2=add_curve_loop!(m2,[1,2,3])
+    s2=add_ruled_surface!(m2,[l2];tag=1)
+    err=try mesh_model_surface(m2,s2); nothing catch e; e end
     @test err isa ArgumentError
-    @test occursin("Circle", sprint(showerror,err))
 end
 
 @testset "arc lifecycle" begin
@@ -338,4 +358,164 @@ end
     @test model_entity_type(m,1,2)=="Circle"
     @test model_entity_type(m,2,5)=="Surface"
     @test m.surface_types[5]==:ruled
+end
+
+@testset "curved-boundary surface PSLG meshing" begin
+    # Disk from two half-arcs — a multi-curve loop with no straight edges.
+    disk=_execute_curved_source("""
+        lc = 0.4;
+        Point(1) = {1, 0, 0, lc}; Point(2) = {-1, 0, 0, lc};
+        Point(3) = {0, 0, 0};
+        Circle(1) = {1, 3, 2}; Circle(2) = {2, 3, 1};
+        Curve Loop(1) = {1, 2};
+        Plane Surface(1) = {1};
+        """;mesh_dim=2)
+    @test disk.msg_error_count==0
+    @test nnodes(disk.mesh)>0 && ntris(disk.mesh)>0
+    # Every boundary node on each half-arc sits on the unit circle — no
+    # chord-flattened endpoint-only chain.
+    @test any(1:nnodes(disk.mesh)) do node
+        abs(hypot(disk.mesh.coords[1,node],disk.mesh.coords[2,node])-1.0)<1e-9 &&
+            abs(disk.mesh.coords[2,node])>0.5
+    end
+
+    # Annulus — a hole loop of two half-arcs inside an outer arc pair.
+    annulus=_execute_curved_source("""
+        lc = 0.5;
+        Point(1) = {2, 0, 0, lc}; Point(2) = {-2, 0, 0, lc};
+        Point(3) = {0, 0, 0};
+        Point(4) = {0.6, 0, 0, lc}; Point(5) = {-0.6, 0, 0, lc};
+        Circle(1) = {1, 3, 2}; Circle(2) = {2, 3, 1};
+        Circle(3) = {4, 3, 5}; Circle(4) = {5, 3, 4};
+        Curve Loop(1) = {1, 2}; Curve Loop(2) = {3, 4};
+        Plane Surface(1) = {1, 2};
+        """;mesh_dim=2)
+    @test annulus.msg_error_count==0
+    @test nnodes(annulus.mesh)>0 && ntris(annulus.mesh)>0
+    # The hole is genuinely open: no node lands inside the inner radius.
+    @test all(1:nnodes(annulus.mesh)) do node
+        hypot(annulus.mesh.coords[1,node],annulus.mesh.coords[2,node])>=0.6-1e-9
+    end
+
+    # A spline boundary loop.
+    spline=_execute_curved_source("""
+        lc = 0.4;
+        Point(1) = {0, 0, 0, lc}; Point(2) = {3, 0, 0, lc};
+        Point(3) = {3, 2, 0, lc}; Point(4) = {2, 1, 0, lc};
+        Point(5) = {1, 2.5, 0, lc}; Point(6) = {0, 2, 0, lc};
+        Line(1) = {1, 2}; Line(2) = {2, 3};
+        Spline(3) = {3, 4, 5, 6}; Line(4) = {6, 1};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Plane Surface(1) = {1};
+        """;mesh_dim=2)
+    @test spline.msg_error_count==0
+    @test nnodes(spline.mesh)>0 && ntris(spline.mesh)>0
+    # The spline bulge is present in the boundary chain — nodes reach above
+    # the straight 3→6 chord.
+    @test any(node->spline.mesh.coords[2,node]>2.05,1:nnodes(spline.mesh))
+end
+
+@testset "embedded curved curve constrains the surface mesh" begin
+    execution=_execute_curved_source("""
+        lc = 0.5;
+        Point(1) = {0, 0, 0, lc}; Point(2) = {4, 0, 0, lc};
+        Point(3) = {4, 4, 0, lc}; Point(4) = {0, 4, 0, lc};
+        Line(1) = {1, 2}; Line(2) = {2, 3};
+        Line(3) = {3, 4}; Line(4) = {4, 1};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Plane Surface(1) = {1};
+        Point(5) = {1, 1.6, 0, lc}; Point(6) = {2, 2, 0, lc};
+        Point(7) = {3, 1.6, 0, lc};
+        Circle(5) = {5, 6, 7};
+        Curve{5} In Surface{1};
+        """;mesh_dim=2)
+    @test execution.msg_error_count==0
+    mesh=execution.mesh
+    @test validate(mesh).ok
+    # The embedded arc is a chain of internal constraints following the
+    # bulge — mesh nodes land on the arc (center (2,2), radius sqrt(1.16))
+    # between its endpoints, dipping below the endpoint chord.
+    radius=sqrt(1.16)
+    @test any(1:nnodes(mesh)) do node
+        x,y=mesh.coords[1,node],mesh.coords[2,node]
+        abs(hypot(x-2.0,y-2.0)-radius)<1e-6 && y<1.55
+    end
+end
+
+@testset "periodic surfaces with curved boundary edges" begin
+    execution=_execute_curved_source("""
+        lc = 0.5;
+        Point(1) = {0, 0, 0, lc}; Point(2) = {2, 0, 0, lc};
+        Point(3) = {2, 2, 0, lc}; Point(4) = {0, 2, 0, lc};
+        Point(5) = {1, 2, 0, lc};
+        Line(1) = {1, 2}; Line(2) = {2, 3};
+        Circle(3) = {3, 5, 4}; Line(4) = {4, 1};
+        Curve Loop(1) = {1, 2, 3, 4};
+        Plane Surface(1) = {1};
+        Point(6) = {0, 0, 4, lc}; Point(7) = {2, 0, 4, lc};
+        Point(8) = {2, 2, 4, lc}; Point(9) = {0, 2, 4, lc};
+        Point(10) = {1, 2, 4, lc};
+        Line(5) = {6, 7}; Line(6) = {7, 8};
+        Circle(7) = {8, 10, 9}; Line(8) = {9, 6};
+        Curve Loop(2) = {5, 6, 7, 8};
+        Plane Surface(2) = {2};
+        Periodic Surface 2 {5, 6, 7, 8} = 1 {1, 2, 3, 4};
+        Mesh 2;
+        """)
+    @test execution.msg_error_count==0
+    m=execution.model
+    # The derived curve masters cover all four slave-side curves including
+    # the circle arc.
+    curve_masters=Dict{Int,Int}(
+        Int(constraint.slave_entity)=>Int(constraint.master_entity)
+        for ((dim,_),constraint) in m.periodic if dim==1)
+    @test curve_masters==Dict(5=>1,6=>2,7=>3,8=>4)
+    master=Tessella.Model.mesh_model_surface(m,1)
+    slave=Tessella.Model.mesh_model_surface(m,2)
+    @test nnodes(master)==nnodes(slave)
+    @test ntris(master)==ntris(slave)
+    # The slave is a bitwise affine (+4z) copy of the master — shared
+    # curve_params and `_periodic_curve_point` evaluation, no slave-side
+    # re-evaluation duplicates.
+    affine=get(m.periodic,(2,2),nothing).affine
+    master_set=Set(NTuple{3,Float64}[
+        (affine[4]+muladd(affine[3],master.coords[3,i],
+                          muladd(affine[2],master.coords[2,i],
+                                 affine[1]*master.coords[1,i])),
+         affine[8]+muladd(affine[7],master.coords[3,i],
+                          muladd(affine[6],master.coords[2,i],
+                                 affine[5]*master.coords[1,i])),
+         affine[12]+muladd(affine[11],master.coords[3,i],
+                           muladd(affine[10],master.coords[2,i],
+                                  affine[9]*master.coords[1,i])))
+        for i in 1:nnodes(master)])
+    slave_set=Set(NTuple{3,Float64}[
+        (slave.coords[1,i],slave.coords[2,i],slave.coords[3,i])
+        for i in 1:nnodes(slave)])
+    @test slave_set==master_set
+    # No near-duplicate slave nodes at the periodic curved boundary.
+    for i in 1:nnodes(slave), j in (i+1):nnodes(slave)
+        d=hypot(slave.coords[1,i]-slave.coords[1,j],
+                slave.coords[2,i]-slave.coords[2,j],
+                slave.coords[3,i]-slave.coords[3,j])
+        @test d==0.0 || d>=1e-9
+    end
+end
+
+@testset "model_is_inside on curved-boundary surfaces" begin
+    execution=_execute_curved_source("""
+        lc = 0.4;
+        Point(1) = {1, 0, 0, lc}; Point(2) = {-1, 0, 0, lc};
+        Point(3) = {0, 0, 0};
+        Circle(1) = {1, 3, 2}; Circle(2) = {2, 3, 1};
+        Curve Loop(1) = {1, 2};
+        Plane Surface(1) = {1};
+        """;mesh_dim=2)
+    m=execution.model
+    inside=Tessella.Model.model_is_inside
+    # Points in the bulge (|x|<1 near the rim) classify by the sampled arc,
+    # not the chord: (0,0.9) is in, (0,1.1) is out.
+    @test inside(m,2,1,[0.0,0.9,0.0])==1
+    @test inside(m,2,1,[0.0,1.1,0.0])==0
+    @test inside(m,2,1,[0.0,-0.9,0.0])==1
 end

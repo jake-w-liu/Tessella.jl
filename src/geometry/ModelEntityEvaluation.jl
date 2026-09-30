@@ -183,14 +183,20 @@ function _model_plane_polygons(m::GeoModel,tag::Int,plane)
         for point in _loop_points(m,loop)] for loop in m.surfaces[tag]]
 end
 
-# A contains/projection query flattens the boundary to a chord polygon; curved
-# boundary curves would silently lose their bulge, so they fail explicitly.
+# A contains/projection query flattens the boundary to a polygon; non-`Line`
+# boundary curves contribute their evaluated interior chain so the bulge is
+# not silently lost.
 function _model_plane_boundary_polygons(m::GeoModel,tag::Int,plane,
                                         caller::AbstractString)
-    for curve in _model_surface_curves(m,tag)
-        _model_require_line_curve(m,curve,caller,"plane boundary queries")
+    if all(curve->_curve_type(m,curve)===:line,
+           _model_surface_curves(m,tag))
+        return _model_plane_polygons(m,tag,plane)
     end
-    return _model_plane_polygons(m,tag,plane)
+    first_axis,second_axis=plane.projection
+    return [NTuple{2,Float64}[
+        (coordinate[first_axis],coordinate[second_axis])
+        for coordinate in first(_surface_loop_vertex_chain(m,loop,caller))]
+        for loop in m.surfaces[tag]]
 end
 
 function _model_plane_contains(

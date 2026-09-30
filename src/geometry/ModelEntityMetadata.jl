@@ -69,8 +69,22 @@ function _model_plane_geometry(
     occ_samples,occ_sample_tags=_occ_surface_samples(m,tag,caller)
     append!(point_tags,occ_sample_tags)
     append!(coordinates,occ_samples)
-    anchor,second,third,projection=_model_surface_projection(
-        coordinates,point_tags,tag,caller)
+    anchor,second,third,projection=try
+        _model_surface_projection(coordinates,point_tags,tag,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        # A loop whose declared points are collinear — two half-arcs on a
+        # diameter, say — cannot fit a plane on its own. Retry with evaluated
+        # on-curve samples (coplanar modulo evaluator noise); a genuinely
+        # non-planar boundary rethrows unchanged.
+        native_samples,native_sample_tags=_native_curve_plane_samples(
+            m,tag,caller)
+        isempty(native_samples) && rethrow()
+        append!(point_tags,native_sample_tags)
+        append!(coordinates,native_samples)
+        _model_surface_projection(coordinates,point_tags,tag,caller)
+    end
 
     R=Rational{BigInt}
     first_offset=ntuple(index->R(second[index])-R(anchor[index]),3)

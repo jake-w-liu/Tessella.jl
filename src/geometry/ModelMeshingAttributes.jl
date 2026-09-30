@@ -2432,17 +2432,20 @@ function _attribute_forced_parameters(m::GeoModel,t::Int,
         haskey(forced,curve) && throw(ArgumentError(
             "$caller: Curve[$curve] has both periodic and transfinite " *
             "constraints"))
-        forced[curve]=_transfinite_parameters(
-            m,spec.num_nodes,spec.kind,spec.coef,caller,curve;
-            reversed=spec.reversed)
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        forced[curve]=_model_curve_transfinite_native_params(
+            m,curve,t0,t1,spec,caller)
     end
     for ((edim,etag),entries) in m.meshing.size_at_params
         edim==1 || continue
         etag in boundary_curves || continue
         etag in m.meshing.degenerated && continue
+        # `set_size_at_parametric_points!` stores normalized [0,1] positions;
+        # `forced` and `param_sizes` live in the curve's native frame.
+        s0,s1=_model_curve_param_bounds(m,etag,caller)
         list=get!(forced,etag,Float64[])
         for (param,size) in entries
-            p=only(param)
+            p=s0+only(param)*(s1-s0)
             p in list || push!(list,p)
             param_sizes[(etag,p)]=size
         end
@@ -2450,19 +2453,19 @@ function _attribute_forced_parameters(m::GeoModel,t::Int,
     end
     for (curve,list) in forced
         curve in boundary_curves || continue
-        (first(list)==0.0 && last(list)==1.0) || throw(ArgumentError(
-            "$caller: Curve[$curve] parameter list must span [0,1]"))
+        t0,t1=_model_curve_param_bounds(m,curve,caller)
+        (first(list)==t0 && last(list)==t1) || throw(ArgumentError(
+            "$caller: Curve[$curve] parameter list must span its native range"))
     end
     # A stored `curve_params` entry is the `Mesh 1` discretization — upstream
     # `meshGFace` reuses `GEdge::mesh_vertices` verbatim, so it takes
-    # precedence over the recomputed attribute parameters above. Native
-    # parameter bounds map onto the [0,1] frame `forced` uses.
+    # precedence over the recomputed attribute parameters above. `forced`
+    # lists carry the native parameter frame the stored discretization,
+    # transfinite sides, and periodic copies all share.
     for curve in boundary_curves
         params=get(m.curve_params,curve,nothing)
         params===nothing && continue
-        t0,t1=_model_curve_param_bounds(m,curve,caller)
-        forced[curve]=t0==0.0 && t1==1.0 ? Float64.(params) :
-            Float64[(u-t0)/(t1-t0) for u in params]
+        forced[curve]=Float64.(params)
     end
     return param_sizes
 end

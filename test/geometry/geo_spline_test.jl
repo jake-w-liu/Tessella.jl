@@ -1,5 +1,6 @@
 using Test
 using Tessella
+using Tessella.MeshTypes: nnodes, ntris
 using Tessella.Model: model_value, model_derivative, model_second_derivative,
                       model_curvature, model_parametrization_bounds,
                       model_entity_type, model_bounding_box,
@@ -321,13 +322,53 @@ end
         """) isa ArgumentError
 end
 
-@testset "spline-family curves reject straight-line meshing" begin
+@testset "spline-family boundaries mesh in the surface kernel" begin
+    # A Catmull-Rom spline through a strictly-above-chord control polygon —
+    # the zigzag fixture dips to the chord at its midpoint, a degenerate
+    # self-touching boundary this test deliberately avoids.
+    m=GeoModel()
+    for (tag,(x,y)) in enumerate(((0.0,0.0),(1.0,1.0),(2.0,1.4),
+                                (3.0,1.0),(4.0,0.0)))
+        add_point!(m,x,y,0.0;tag=tag)
+    end
+    sp=add_spline!(m,[1,2,3,4,5])
+    close=add_line!(m,5,1)
+    lp=add_curve_loop!(m,[sp,close])
+    s=add_plane_surface!(m,[lp])
+    mesh=mesh_model_surface(m,s)
+    @test nnodes(mesh)>0 && ntris(mesh)>0
+    # The boundary chain follows the spline's evaluated subdivision, not the
+    # 5→1 chord: some mesh node lies above the chord's y=0 line.
+    @test any(node->mesh.coords[2,node]>0.5,1:nnodes(mesh))
+    # A Nurbs on a non-[0,1] knot range exercises native-frame parameters.
+    m2=GeoModel()
+    for (tag,(x,y)) in enumerate(((0.0,0.0),(1.0,1.0),(2.0,1.4),
+                                (3.0,1.0),(4.0,0.0)))
+        add_point!(m2,x,y,0.0;tag=tag)
+    end
+    nu=add_nurbs!(m2,[1,2,3,4,5],
+                  [0.0,0.0,0.0,0.0,1.0,2.0,2.0,2.0,2.0])
+    close2=add_line!(m2,5,1)
+    lp2=add_curve_loop!(m2,[nu,close2])
+    s2=add_plane_surface!(m2,[lp2])
+    mesh2=mesh_model_surface(m2,s2)
+    @test nnodes(mesh2)>0 && ntris(mesh2)>0
+end
+
+@testset "boundary pinch: spline midpoint tangent to the closing chord" begin
+    # The zigzag spline dips to y≈0 at u=0.5 — its subdivision vertex sits
+    # ~1e-11 from the chord's own midpoint vertex without sharing an edge.
+    # Each curve's writeback audit must not admit the other's vertex as a
+    # Steiner candidate (Gmsh meshes this degenerate boundary fine).
     m=_zigzag_model()
     sp=add_spline!(m,[1,2,3,4,5])
     close=add_line!(m,5,1)
     lp=add_curve_loop!(m,[sp,close])
     s=add_plane_surface!(m,[lp])
-    # `_model_require_line_curve` — curved boundaries must not silently
-    # degrade to chords in the straight-line surface kernel.
-    @test_throws ArgumentError mesh_model_surface(m,s)
+    mesh=mesh_model_surface(m,s)
+    @test nnodes(mesh)>0 && ntris(mesh)>0
+    # Both pinch vertices survive as distinct nodes near (2,0).
+    @test count(1:nnodes(mesh)) do node
+        abs(mesh.coords[1,node]-2.0)<1e-6 && abs(mesh.coords[2,node])<1e-6
+    end==2
 end
