@@ -1049,7 +1049,7 @@ end
     set_periodic!(model, dim, slave_entities, master_entities, affine;
                   atol=1e-12)
 
-Persist affine relations between equally sized lists of straight native curves
+Persist affine relations between equally sized lists of native curves
 (`dim=1`), planar native surfaces (`dim=2`), or native volumes (`dim=3`).
 `affine` maps each master entity to its slave in Gmsh row-major 4×4 order —
 a 16-entry vector or 4×4 matrix is stored verbatim like
@@ -1136,12 +1136,10 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                 # does the rest at mesh time.
                 reversed=signed_slave*signed_master<0
             else
-                # Periodic affine curve pairing stays Line-gated — curved
-                # periodic curves are a documented non-claim. The length
-                # call keeps the degenerate (zero-length) rejection the
-                # line gate alone no longer enforces.
-                _model_require_line_curve(m,slave,caller,"periodic curve")
-                _model_require_line_curve(m,master,caller,"periodic curve")
+                # The endpoint-correspondence check is curve-kind agnostic;
+                # the length call keeps the degenerate (zero-length)
+                # rejection and now covers curved kinds via integrated arc
+                # length.
                 _model_curve_length(m,slave,caller)
                 _model_curve_length(m,master,caller)
                 slave_points=m.curves[slave];master_points=m.curves[master]
@@ -2995,21 +2993,62 @@ function _surface_periodic_constraints(m::GeoModel,t::Int,
     return constraints
 end
 
+# A point entity that is not one of the curve's endpoints is a separate
+# vertex — its node may still sit exactly on the curve (a spline's
+# interpolation points project at ~0 residual) and be admitted as a bogus
+# chain link that cannot form a mesh edge. Recovery therefore runs the
+# unrestricted classification first — an embedded point wired into the
+# curve's edge chain is a legitimate member — and only retries with foreign
+# point entities masked out when that classification fails.
+function _periodic_curve_eligible_nodes(m::GeoModel,mesh::Mesh,curve::Int)
+    a,b=m.curves[curve]
+    start,stop=m.points[a],m.points[b]
+    eligible=trues(nnodes(mesh))
+    masked=false
+    for (_,point) in m.points
+        point==start && continue
+        point==stop && continue
+        masked=true
+        for node in 1:nnodes(mesh)
+            mesh.coords[1,node]==point[1] &&
+                mesh.coords[2,node]==point[2] &&
+                mesh.coords[3,node]==point[3] &&
+                (eligible[node]=false)
+        end
+    end
+    return eligible,masked
+end
+
+function _periodic_curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,
+                                         mesh_edges,atol::Float64,
+                                         caller::AbstractString)
+    try
+        return _curve_parameter_nodes(
+            m,mesh,curve,trues(nnodes(mesh)),mesh_edges,atol,caller)
+    catch err
+        err isa InterruptException && rethrow()
+        # Only the audit's own argument/error failures justify a masked
+        # retry — an unrelated internal error must surface unchanged.
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        eligible,masked=_periodic_curve_eligible_nodes(m,mesh,curve)
+        masked || rethrow()
+        return _curve_parameter_nodes(
+            m,mesh,curve,eligible,mesh_edges,atol,caller)
+    end
+end
+
 function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
                                            constraints)
     mesh_edges=_model_projection_triangle_edges(mesh)
-    all_nodes=trues(nnodes(mesh))
     raw_parameters=Dict{Int,Vector{Float64}}()
     curve_tolerances=Dict{Int,Float64}()
     relations=Tuple{ModelPeriodicConstraint,Float64}[]
     for constraint in constraints
         slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
-        master_entries,master_tolerance=_curve_parameter_nodes(
-            m,mesh,master,all_nodes,mesh_edges,constraint.atol,
-            "mesh_model_surface")
-        slave_entries,slave_tolerance=_curve_parameter_nodes(
-            m,mesh,slave,all_nodes,mesh_edges,constraint.atol,
-            "mesh_model_surface")
+        master_entries,master_tolerance=_periodic_curve_parameter_nodes(
+            m,mesh,master,mesh_edges,constraint.atol,"mesh_model_surface")
+        slave_entries,slave_tolerance=_periodic_curve_parameter_nodes(
+            m,mesh,slave,mesh_edges,constraint.atol,"mesh_model_surface")
         tolerance=max(master_tolerance,slave_tolerance)
         for (curve,entries) in ((master,master_entries),(slave,slave_entries))
             values=get!(()->Float64[],raw_parameters,curve)
@@ -3106,14 +3145,11 @@ end
 function _model_periodic_curve_nodes(m::GeoModel,mesh::Mesh,
                                      constraint::ModelPeriodicConstraint)
     mesh_edges=_model_projection_triangle_edges(mesh)
-    all_nodes=trues(nnodes(mesh))
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
-    master_entries,master_tolerance=_curve_parameter_nodes(
-        m,mesh,master,all_nodes,mesh_edges,constraint.atol,
-        "model_periodic_nodes")
-    slave_entries,slave_tolerance=_curve_parameter_nodes(
-        m,mesh,slave,all_nodes,mesh_edges,constraint.atol,
-        "model_periodic_nodes")
+    master_entries,master_tolerance=_periodic_curve_parameter_nodes(
+        m,mesh,master,mesh_edges,constraint.atol,"model_periodic_nodes")
+    slave_entries,slave_tolerance=_periodic_curve_parameter_nodes(
+        m,mesh,slave,mesh_edges,constraint.atol,"model_periodic_nodes")
     ordered_slave=constraint.reversed ? reverse(slave_entries) : slave_entries
     length(master_entries)==length(ordered_slave) || throw(ErrorException(
         "model_periodic_nodes: Curve[$slave] and Curve[$master] node counts differ"))
@@ -6339,7 +6375,7 @@ Mesh a native planar surface in `z=0`, including holes and embedded points or
 curves. Point characteristic lengths are linearly interpolated over the
 deterministic initial constrained triangulation and drive refinement. Coincident
 PSLG inputs use the smaller constraint. Stored
-straight-curve periodic relations synchronize boundary or embedded curve subdivisions
+straight or curved periodic relations synchronize boundary or embedded curve subdivisions
 across each dependency graph, including cycles. Bounded remeshing precedes
 topology-ordered affine
 snapping, so a curve may be both a slave and a downstream master. The returned

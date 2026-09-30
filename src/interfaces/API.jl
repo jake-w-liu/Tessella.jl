@@ -8,7 +8,7 @@ attribute state, finite Point-coordinate updates, and Physical-group queries,
 entity-name, atomic-tag, and dependency-safe removal mutations, Physical-group
 mutations, point-local mesh-size constraints, explicit planar surface-loop volumes,
 operation-time Boolean operand ownership, and persistent affine relations between
-straight periodic boundary or embedded curves and planar periodic volume boundaries.
+straight or curved periodic boundary or embedded curves and planar periodic volume boundaries.
 The session owns atomic uniform refinement, affine coordinate transformation,
 complete clearing, and detached Gmsh-shaped bulk node/element retrieval for its
 linear-simplex mesh cache, plus deterministic global edge and triangular or
@@ -7801,7 +7801,7 @@ set_size(dim_tags,size)=_set_size(dim_tags,size)
 """
     set_periodic(dim, slave_entities, master_entities, affine; atol=1e-12)
 
-Store validated straight-curve (`dim=1`), planar-surface (`dim=2`), or volume
+Store validated straight or curved curve (`dim=1`), planar-surface (`dim=2`), or volume
 (`dim=3`) relations in
 the active model and invalidate any cached mesh. `affine` maps each master entity
 to its corresponding slave in Gmsh row-major 4×4 order. Each slave has one master;

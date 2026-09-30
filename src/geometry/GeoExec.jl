@@ -9,7 +9,8 @@ Boolean union/difference/intersection,
 Translate/Dilate/90°-Rotate of those solids, Point/Line-In-Surface and
 Point/Line/Surface-In-Volume
 embeddings with nested point/curve sheet constraints, Physical groups, and
-Translate/Rotate/Affine periodic straight curves, explicit-volume planar boundary
+Translate/Rotate/Affine periodic straight or curved curves, explicit-volume
+planar boundary
 surfaces, or stored mesh-inert volume relations with reusable masters and
 dependency chains or cycles. `MeshSize` and
 `Characteristic Length` update existing explicit Point constraints directly or
@@ -362,10 +363,12 @@ the stored 16); the transform-free `Periodic Surface {s} = {m}` is rejected
 like upstream, and `Periodic Surface j {c} = k {c}` derives its transform
 from the mapped boundary vertices. `Periodic Volume` is not in Gmsh's
 grammar and is a `syntax error (Volume)` here; `set_periodic!` still stores
-volume relations as a Tessella extension. Affine curve relations require
-straight curves at declaration; orientation-only declarations are check-free
-like upstream and hold all curves to the straight-curve requirement at mesh
-time. Surfaces must be planar boundaries of one explicit volume when meshed.
+volume relations as a Tessella extension. Affine curve relations accept
+straight and curved curves — the declaration check is the endpoint
+correspondence like upstream's `GEdge::setMeshMaster`, and the slave copies
+the master's stored parameters at mesh time; orientation-only declarations
+are check-free like upstream. Surfaces must be planar boundaries of one
+explicit volume when meshed.
 Multiple periodic statements may
 reuse a master or form a master/slave chain or cycle. Read-only `newp`, the shared
 curve/loop/surface/volume/Physical-group allocator aliases, and `newf` follow the

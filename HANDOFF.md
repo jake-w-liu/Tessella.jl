@@ -26,7 +26,37 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Curved transfinite edges — `F_Transfinite` density semantics** — the
+**Curved periodic curve pairs** — `Periodic Curve` no longer rejects
+non-`Line` curves for affine (Translate/Rotate/Affine) and orientation-only
+relations. The declaration check is the endpoint correspondence like
+upstream's `GEdge::setMeshMaster`; the slave copies the master's stored
+parameters (`_model_curve_periodic_params` bound-offset semantics, already
+arbitrary-range) and evaluates through `_periodic_curve_point`, which emits
+`affine(master node)` bitwise for interior nodes while endpoints keep the
+slave vertices' own coordinates. Reversal is detected from the endpoint
+correspondence and mirrors the copied parameter list. Three fixes rode
+along: `_model_curve_part_point` routes every curve kind through
+`_periodic_curve_point` so a curved slave's segment part emits the same
+`affine(master)` nodes the surface boundary writes (native evaluation
+differed by ulps and left unpaired near-duplicate nodes), and the
+master/slave chain recovery in `_synchronize_periodic_parameters!` and
+`_model_periodic_curve_nodes` retries with foreign point entities masked
+out when unrestricted classification fails — a spline's interpolation
+points sit exactly on the curve as separate vertex entities and were being
+admitted as bogus chain links. Gmsh 4.15.2 differential
+(`validation/gmsh_parity/periodic_curve_curved.{geo,jl}`, registered in
+`run_all.jl`): circle and transfinite-spline Translate strips recover exact
+pair counts (9+7), the stored affine, bitwise `slave == affine(master)`
+correspondence, and ≤1e-7 cross agreement with Gmsh's re-evaluated pairs.
+Standalone `Mesh 1` probes (Translate circle, orientation-only circle,
+reflection-reversed circle, transfinite spline) match node counts exactly
+within 1.9e-8. Files: `src/geometry/Model.jl` (`set_periodic!` un-gate,
+`_periodic_curve_eligible_nodes` + `_periodic_curve_parameter_nodes`),
+`src/geometry/ModelMesh1D.jl` (`_model_curve_part_point`),
+`src/geometry/GeoExec.jl` (capability docstrings),
+`test/geometry/geo_periodic_test.jl` (+30).
+
+Previous increment (for context): **curved transfinite edges — `F_Transfinite` density semantics** — the
 `Transfinite Curve` constraint no longer rejects non-`Line` curves. Stored
 curve parameters, transfinite surface side chains, and the volume kernel's
 canonical face grids now all consume ONE native-parameter list
@@ -185,6 +215,20 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Verified gates
 
+- `validation/gmsh_parity/periodic_curve_curved.jl` Gmsh 4.15.2:
+  `CURVED_PERIODIC_DIFFERENTIAL_OK cases=2 pairs=16` — circle and
+  transfinite-spline Translate strips: exact pair counts, stored affine,
+  bitwise `slave == affine(master)` interior correspondence, ≤1e-7 cross
+  agreement vs Gmsh's re-evaluated slave nodes.
+- Standalone curved-periodic `Mesh 1` probes vs Gmsh 4.15.2
+  (`/c/tmp/per_curved_diff.jl`): circle Translate, orientation-only circle,
+  reflection-reversed circle, transfinite spline — exact node counts,
+  ≤1.9e-8 max error.
+- `test/geometry/geo_periodic_test.jl`: all green incl. the +30
+  `periodic curved curve pairs` set (Translate circle bitwise-affine params,
+  orientation-only copy, reflection reversal, spline density-law copy, and
+  the `model_periodic_nodes` strip-surface correspondence with no
+  near-duplicate slave nodes).
 - Curved-edge broad differential vs Gmsh 4.15.2 (`/c/tmp/curved_tf_diff.jl`):
   20/20 cases — Circle, Ellipse, Spline, BSpline, Bezier, Nurbs across
   uniform, progression, reversed progression, bump (lo/hi), beta, all three
@@ -209,7 +253,12 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   documented below, NOT regressions from this diff. `set_periodic!`
   degenerate-curve rejection verified restored (was momentarily relaxed by
   the line-gate refactor mid-increment; `_model_curve_length` call kept).
-- `Pkg.test()` Julia 1.13.1 (this increment): **426,046 passed, 20 failed**
+- `Pkg.test()` Julia 1.13.1 (curved-periodic increment, final):
+  **426,096/426,096 in 14m36.1s** — fully green including the +30
+  `periodic curved curve pairs` tests; the earlier CRC/SHA-pin drift did
+  not manifest in this run.
+- `Pkg.test()` Julia 1.13.1 (curved-transfinite-edges increment):
+  **426,046 passed, 20 failed**
   in 13m48s — all 20 are the environmental `mixed_crc`/`mesh_crc` SHA-pin
   drift above; zero new failures.
 - `Pkg.test()` Julia 1.13.1 (previous increment): **426,051/426,051** in

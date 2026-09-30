@@ -1104,3 +1104,148 @@ end
     data=amixed.entity_data
     @test any(owner->owner==(1,Int32(2)),data.node_entities)
 end
+
+@testset "periodic curved curve pairs" begin
+    # `Periodic Curve{slave} = {master} Translate{...}` accepts non-`Line`
+    # curves: the slave copies the master's stored parameters (upstream's
+    # `copyMesh` bound-offset semantics) and emits `affine(master node)`
+    # bitwise for shared boundary vertices.
+    translated=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 1}; Point(2) = {1, 0, 0, 1};
+        Point(3) = {0, 1, 0, 1};
+        Point(4) = {0, 0, 1, 1}; Point(5) = {1, 0, 1, 1};
+        Point(6) = {0, 1, 1, 1};
+        Circle(1) = {2, 1, 3};
+        Circle(2) = {5, 4, 6};
+        Periodic Curve{2} = {1} Translate{0, 0, 1};
+        Transfinite Curve{1, 2} = 4;
+        Mesh 1;
+        """;mesh_dim=0)
+    @test validate(translated.mesh).ok
+    @test nnodes(translated.mesh)==10
+    model=translated.model
+    @test model.curve_params[1]==model.curve_params[2]
+    # The slave's interior nodes are the master's interior nodes translated —
+    # bitwise, so sibling parts never crack the periodic boundary.
+    master_mid=_geo_periodic_affine_point(
+        model.periodic[(1,2)].affine,
+        Tessella.Model._model_curve_point(
+            model,1,model.curve_params[1][2],"test"))
+    slave_mid=Tessella.Model._periodic_curve_point(
+        model,2,model.curve_params[2][2],"test")
+    @test slave_mid==master_mid
+    @test isapprox(slave_mid[3],1.0;atol=1e-12)
+
+    # Orientation-only form (no affine): the slave inherits the master's
+    # discretization but evaluates on its own curve.
+    oriented=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 1}; Point(2) = {1, 0, 0, 1};
+        Point(3) = {0, 1, 0, 1};
+        Point(4) = {0, 0, 1, 1}; Point(5) = {1, 0, 1, 1};
+        Point(6) = {0, 1, 1, 1};
+        Circle(1) = {2, 1, 3};
+        Circle(2) = {5, 4, 6};
+        Periodic Curve{2} = {1};
+        Transfinite Curve{1, 2} = 4;
+        Mesh 1;
+        """;mesh_dim=0)
+    @test validate(oriented.mesh).ok
+    @test oriented.model.curve_params[2]==oriented.model.curve_params[1]
+
+    # A reversed affine (x->-x reflection swaps the endpoint correspondence:
+    # the mapped master start lands on the slave's END) mirrors the copied
+    # parameters inside the slave's bounds.
+    reflected=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 1}; Point(2) = {1, 0, 0, 1};
+        Point(3) = {0, 1, 0, 1};
+        Point(4) = {0, 1, 0, 1}; Point(5) = {-1, 0, 0, 1};
+        Circle(1) = {2, 1, 3};
+        Circle(2) = {4, 1, 5};
+        Periodic Curve{2} = {1}
+          Affine{-1, 0, 0, 0,
+                 0, 1, 0, 0,
+                 0, 0, 1, 0,
+                 0, 0, 0, 1};
+        Transfinite Curve{1, 2} = 4;
+        Mesh 1;
+        """;mesh_dim=0)
+    @test validate(reflected.mesh).ok
+    constraint=reflected.model.periodic[(1,2)]
+    @test constraint.reversed
+    expected=[-1.0,0.0,0.0]
+    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-9),
+              axes(reflected.mesh.coords,2))
+    expected=[-cosd(30),sind(30),0.0]
+    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-9),
+              axes(reflected.mesh.coords,2))
+    expected=[-sind(30),cosd(30),0.0]
+    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-9),
+              axes(reflected.mesh.coords,2))
+
+    # A spline pair under a transfinite constraint: the slave inherits the
+    # master's density-law parameters bitwise (upstream ignores the slave's
+    # own law when it meshes "as a copy of" the master).
+    splined=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 1}; Point(2) = {1, 0.1, 0, 1};
+        Point(3) = {0.3, 0.45, 0, 1}; Point(4) = {0.7, 0.38, 0, 1};
+        Point(5) = {0, 0, 1, 1}; Point(6) = {1, 0.1, 1, 1};
+        Point(7) = {0.3, 0.45, 1, 1}; Point(8) = {0.7, 0.38, 1, 1};
+        Spline(1) = {1, 3, 4, 2};
+        Spline(2) = {5, 7, 8, 6};
+        Periodic Curve{2} = {1} Translate{0, 0, 1};
+        Transfinite Curve{1, 2} = 5 Using Progression 1.4;
+        Mesh 1;
+        """;mesh_dim=0)
+    @test validate(splined.mesh).ok
+    @test splined.model.curve_params[2]==splined.model.curve_params[1]
+    @test length(splined.model.curve_params[1])==5
+
+    # The node-correspondence API recovers both pairs on a transfinite strip
+    # whose opposite sides are the periodic arcs. The slave's curve part must
+    # emit the same `affine(master)` nodes the surface boundary writes — a
+    # ulp off would leave unpaired near-duplicates and break the chain audit.
+    stripped=_execute_geo_source("""
+        Point(1) = {0, 0, 0, 0.5}; Point(2) = {4, 0, 0, 0.5};
+        Point(3) = {2, -5, 0, 0.5};
+        Circle(1) = {1, 3, 2};
+        Point(4) = {0, 3, 0, 0.5}; Point(5) = {4, 3, 0, 0.5};
+        Point(6) = {2, -2, 0, 0.5};
+        Circle(2) = {4, 6, 5};
+        Line(3) = {2, 5};
+        Line(4) = {4, 1};
+        Curve Loop(1) = {1, 3, -2, 4};
+        Plane Surface(1) = {1};
+        Periodic Curve{2} = {1} Translate{0, 3, 0};
+        Transfinite Curve{1, 2} = 9;
+        Transfinite Curve{3, 4} = 5;
+        Transfinite Surface{1} = {1, 2, 5, 4};
+        Mesh 2;
+        """;mesh_dim=0)
+    @test validate(stripped.mesh).ok
+    mapping=model_periodic_nodes(stripped.model,stripped.mesh,1,2)
+    @test mapping.master_entity==1
+    @test length(mapping.slave_nodes)==length(mapping.master_nodes)==9
+    for (slave,master) in zip(mapping.slave_nodes,mapping.master_nodes)
+        @test Tuple(stripped.mesh.coords[:,slave])==
+              (stripped.mesh.coords[1,master],
+               stripped.mesh.coords[2,master]+3.0,
+               stripped.mesh.coords[3,master])
+    end
+    # The merged mesh holds no near-duplicate nodes on the slave curve —
+    # every interior node sits exactly on one of the seven interior
+    # evaluations, and the two endpoint nodes carry the slave vertices' own
+    # coordinates bitwise (upstream keeps slave GVertex positions).
+    slave_coords=Set(
+        Tessella.Model._periodic_curve_point(
+            stripped.model,2,u,"test")
+        for u in stripped.model.curve_params[2][2:end-1])
+    interior_hits=count(
+        node->any(c->Tuple(stripped.mesh.coords[:,node])==c,slave_coords),
+        1:nnodes(stripped.mesh))
+    @test interior_hits==7
+    a,b=stripped.model.curves[2]
+    @test any(node->Tuple(stripped.mesh.coords[:,node])==
+                  stripped.model.points[a],1:nnodes(stripped.mesh))
+    @test any(node->Tuple(stripped.mesh.coords[:,node])==
+                  stripped.model.points[b],1:nnodes(stripped.mesh))
+end
