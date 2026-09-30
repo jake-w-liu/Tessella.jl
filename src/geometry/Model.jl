@@ -21,6 +21,7 @@ using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
                 _vert, _is_ghost_tri, _is_ghost_v
 using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
                    PostViewField, field_value, size_at,
+                   AutomaticMeshSizeField,
                    GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length
 using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
@@ -4249,6 +4250,41 @@ function _model_planar_surface_mesh(
         "$caller: Surface[$surface] triangulation is invalid — " *
         join(diagnostic.messages,"; ")))
     return output
+end
+
+# Model-level automatic sizing shared by the `.geo` executor and the API
+# session: union the surface meshes reachable through the `(dim, tag)`
+# entity callback and hand them to the native `AutomaticMeshSizeField`.
+function _automatic_context_field(m::GeoModel,spec,config,entities,
+                                  caller::AbstractString)
+    isempty(config.p4est_file) || throw(ArgumentError(
+        "$caller: Field[$(spec.tag)].p4estFileToLoad is not supported"))
+    surfaces=Mesh[]
+    for tag in sort!(collect(keys(m.surfaces)))
+        value=entities(2,string(tag))
+        value===nothing && throw(ArgumentError(
+            "$caller: Field[$(spec.tag)] could not mesh Surface[$tag]"))
+        if value isa Mesh
+            push!(surfaces,value)
+        elseif value isa AbstractVector && all(v->v isa Mesh,value)
+            append!(surfaces,value)
+        else
+            throw(ArgumentError(
+                "$caller: Field[$(spec.tag)] Surface[$tag] resolved to " *
+                "$(typeof(value)), expected Mesh"))
+        end
+    end
+    isempty(surfaces) && throw(ArgumentError(
+        "$caller: Field[$(spec.tag)] kind automaticmeshsizefield requires " *
+        "at least one model surface"))
+    return AutomaticMeshSizeField(surfaces;
+        n_nodes_per_circle=config.points_per_circle,
+        n_points_per_gap=config.points_per_gap,
+        hmin=config.hmin>=0 ? config.hmin : nothing,
+        hmax=config.hmax>=0 ? config.hmax : nothing,
+        hbulk=config.hbulk>=0 ? config.hbulk : nothing,
+        gradation=config.gradation,smoothing=config.smoothing,
+        features=config.features)
 end
 
 function _model_periodic_surface_mesh(

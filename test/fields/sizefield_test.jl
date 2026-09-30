@@ -1359,7 +1359,7 @@ end
         build_geo_size_field(automatic_defaults,Dict();context_fields=
             (spec,config,entities,params)->(automatic_config[]=config;auto),
             model_characteristic_length=Tessella.SizeField.GMSH_MAX_SIZE)
-        @test automatic_config[].points_per_gap==0
+        @test automatic_config[].points_per_gap==5
         @test automatic_config[].points_per_circle==20
         automatic_snapshot=GeoParams(NaN,NaN,1.0,0,
             Dict{Tuple{Int,Int},String}(),Dict(
@@ -1543,6 +1543,111 @@ end
             parsed=build_geo_size_field(read_geo_params(path),Dict())
             @test size_at(parsed,1.0,0.0,0.0)≈0.3
         end
+    end
+
+    @testset "automatic model sizing" begin
+        _quad(z)=Mesh(Float64[0 1 1 0;0 0 1 1;z z z z];
+                      tris=Int32[1 1;2 3;3 4])
+
+        # Parallel unit squares 0.1 apart: the gap prescribes h = gap/5 for
+        # every vertex (curvature is zero), below the hmax = 1/20 default.
+        slab=AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
+            n_points_per_gap=5,features=true,smoothing=false)
+        @test all(≈(0.02),slab.h)
+        @test size_at(slab,0.25,0.25,0.05)==0.02
+
+        # A gap too large to matter stays at hmax.
+        far=AutomaticMeshSizeField([_quad(0.0),_quad(50.0)];
+            n_points_per_gap=5,smoothing=false)
+        @test all(≈(2.5),far.h)
+
+        # `features`/`n_points_per_gap` disable the probe independently.
+        for off in (AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
+                        n_points_per_gap=5,features=false,smoothing=false),
+                    AutomaticMeshSizeField([_quad(0.0),_quad(0.1)];
+                        n_points_per_gap=0,smoothing=false))
+            @test all(≈(0.05),off.h)
+        end
+
+        # `hbulk` supplies the fallback where nothing is prescribed (still
+        # clamped by hmin/hmax).
+        bulk=AutomaticMeshSizeField(_quad(0.0);hbulk=0.3,hmax=1.0,
+            smoothing=false)
+        @test all(≈(0.3),bulk.h)
+
+        # A shared crease edge is not a phantom zero-width gap: the wall's
+        # triangles count as incident through the co-located twin vertices.
+        wall=Mesh(Float64[0 0 0 0; 0 1 1 0; 0 0 1 1];
+                  tris=Int32[1 1;2 3;3 4])
+        folded=AutomaticMeshSizeField([_quad(0.0),wall];
+            n_points_per_gap=5,smoothing=false)
+        @test all(>(0.01),folded.h)
+
+        # Same geometry rebuilt must produce identical sizes.
+        again=AutomaticMeshSizeField([_quad(0.0),wall];
+            n_points_per_gap=5,smoothing=false)
+        @test folded.h==again.h
+
+        # Gradation smoothing bounds the size growth along every union edge
+        # by (gradation−1)·|edge| — exercised on a tilted second plate whose
+        # per-vertex gaps vary.
+        tilt=Mesh(Float64[0 1 1 0; 0 0 1 1; 0.05 0.45 0.45 0.05];
+                  tris=Int32[1 1;2 3;3 4])
+        smooth=AutomaticMeshSizeField([_quad(0.0),tilt];
+            n_points_per_gap=5,gradation=1.1,smoothing=true)
+        h_unsmooth=AutomaticMeshSizeField([_quad(0.0),tilt];
+            n_points_per_gap=5,smoothing=false).h
+        @test all(smooth.h .<= h_unsmooth .+ 1e-12)
+        for (a,b) in unique_edges(cat(_quad(0.0).tris,tilt.tris.+4;dims=2),
+                                  zeros(Int32,4,0))
+            d=sqrt((smooth.coords[1,a]-smooth.coords[1,b])^2+
+                   (smooth.coords[2,a]-smooth.coords[2,b])^2+
+                   (smooth.coords[3,a]-smooth.coords[3,b])^2)
+            @test smooth.h[b]<=smooth.h[a]+0.1*d+1e-12
+            @test smooth.h[a]<=smooth.h[b]+0.1*d+1e-12
+        end
+
+        # Validation battery.
+        @test_throws ArgumentError AutomaticMeshSizeField(Mesh[])
+        @test_throws ArgumentError AutomaticMeshSizeField(
+            [_quad(0.0),_quad(0.1)];n_points_per_gap=-1)
+        @test_throws ArgumentError AutomaticMeshSizeField(
+            [_quad(0.0),_quad(0.1)];gradation=-0.5)
+        @test_throws ArgumentError AutomaticMeshSizeField(
+            _quad(0.0);hmin=1.0,hmax=0.1)
+        @test_throws ArgumentError AutomaticMeshSizeField(
+            [_quad(0.0),"not a mesh"])
+
+        # .geo end-to-end: the automatic background field meshes a unit
+        # square at its hmax = 1/20 default density.
+        geo_path=joinpath(@__DIR__,"..","tmp","automatic_field.geo")
+        mkpath(dirname(geo_path))
+        write(geo_path,"""
+            Point(1)={0,0,0,0}; Point(2)={1,0,0,0};
+            Point(3)={1,1,0,0}; Point(4)={0,1,0,0};
+            Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+            Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+            Field[1]=AutomaticMeshSizeField;
+            Field[1].nPointsPerCircle=30;
+            Background Field=1;
+            Mesh 2;
+            """)
+        execution=Tessella.GeoExec.execute_geo(geo_path;mesh_dim=2)
+        @test validate(execution.mesh).ok
+        @test size(execution.mesh.tris,2)>100
+        p4est_path=joinpath(@__DIR__,"..","tmp","automatic_p4est.geo")
+        write(p4est_path,"""
+            Point(1)={0,0,0,0}; Point(2)={1,0,0,0};
+            Point(3)={1,1,0,0}; Point(4)={0,1,0,0};
+            Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+            Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+            Field[1]=AutomaticMeshSizeField;
+            Field[1].p4estFileToLoad="sizes.bin";
+            Background Field=1;
+            Mesh 2;
+            """)
+        @test_throws ArgumentError Tessella.GeoExec.execute_geo(
+            p4est_path;mesh_dim=2)
     end
 
     @testset "directional anisotropic 1-D/2-D/3-D sizing" begin

@@ -173,9 +173,12 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Remaining parity work (PLAN.md — all IN PROGRESS tracks)
 
-- **P1**: full Gmsh global automatic-sizing pipeline (`AutomaticMeshSizeField`
-  context resolver still throws — the native field is a documented discrete
-  sphere-fit analogue only), materially warped quadrangles, direct
+- **P1**: octree-identical parity with Gmsh's HXT/p4est automatic-sizing
+  internals (the native `AutomaticMeshSizeField` is a documented
+  closest-vertex discrete analogue — sphere-fit curvature, facing-triangle
+  `nPointsPerGap` local feature size, `hBulk` fallback, edge-gradation
+  smoothing — resolved from model surfaces in `.geo` and API-session
+  background-field contexts), materially warped quadrangles, direct
   tensor/metric-meshing parity.
 - **P2**: general mixed-element generation/recombination beyond P4's
   first-order pairing, mixed blocks in the simplex kernels, high-order
