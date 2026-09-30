@@ -372,6 +372,24 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   documented below, NOT regressions from this diff. `set_periodic!`
   degenerate-curve rejection verified restored (was momentarily relaxed by
   the line-gate refactor mid-increment; `_model_curve_length` call kept).
+- `Pkg.test()` Julia 1.13.1 `--check-bounds=yes` (curved `Curve In
+  Volume` increment): **427,266 passed, 3 failed** in 14m49s — all 3 are
+  embedded-sheet `mixed_crc` pins (`model_volume_io_test.jl:204/338`,
+  `cli_test.jl:318`) that this increment's recovery repairs legitimately
+  shift; every structural assertion (validate, coverage, entity
+  classification) still passes, and the pins were updated to the new
+  deterministic connectivities with the focused files re-verified green.
+  IMPORTANT: the 14 CRC-pin "failures" seen under a bare `Pkg.test()`
+  are context artifacts — the pins are recorded for the
+  `--check-bounds=yes` FP/codegen context and identical bare-context
+  values reproduce on clean HEAD; always run the suite with
+  `--check-bounds=yes` before classifying a pin failure.
+- `validation/run_all.jl` Windows + Gmsh 4.15.2 (same increment): green
+  end-to-end, including the new `curve_in_volume_arc` case
+  (`GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=32`); `embed_sheet` and
+  `embed_sheet_hole` CRC allow-lists gained the new valid connectivities
+  produced by the `_snap_to_plane3` noise-floor and dominant-axis snap
+  repairs.
 - `Pkg.test()` Julia 1.13.1 (curved-boundary surface increment):
   **427,229 passed, 20 failed** in 13m55s — all 20 are the environmental
   `mixed_crc`/`mesh_crc` SHA-pin drift set at the same locations verified
