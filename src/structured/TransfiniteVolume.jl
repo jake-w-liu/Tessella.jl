@@ -1,15 +1,24 @@
 """
     TransfiniteVolume
 
-Bounded Gmsh-4.15.2-compatible transfinite volume meshing for an affine,
-six-faced, eight-corner block.  The result is a first-order simplex `Mesh`:
-each logical hexahedron is split into the six tetrahedra used by Gmsh when all
-six transfinite boundary faces are unrecombined.
+Bounded Gmsh-4.15.2-compatible transfinite volume meshing for a six-faced,
+eight-corner block.  The result is a first-order simplex `Mesh`: each logical
+hexahedron is split into the six tetrahedra used by Gmsh when all six
+transfinite boundary faces are unrecombined.
+
+Two input forms exist. With `faces=nothing` the block must be an affine
+parallelepiped certified from the eight corners, and the interior follows the
+exact dyadic/trilinear affine map. With `faces` the caller supplies the six
+canonical-oriented boundary face grids (Gmsh's `(vmin, umax, vmax, umin,
+wmin, wmax)` slot order); the interior then follows Gmsh's `transfiniteHex`
+Coons interpolation over those grids, so warped and otherwise non-affine
+blocks are admitted whenever their faces mesh.
 
 This module deliberately does not claim support for five-faced/prismatic
-volumes, curved or independently discretized faces, non-affine hexahedra,
-recombined hexahedra/prisms, QuadTri, holes, multiple blocks, periodic seams,
-or high-order elements. As required by the finalized `Mesh` contract,
+volumes, recombined hexahedra/prisms, QuadTri, holes, multiple blocks,
+periodic seams, or high-order elements. The `faces=nothing` path uses uniform
+`Progression 1` spacing; nonuniform laws arrive through the supplied face
+grids on the `faces` path. As required by the finalized `Mesh` contract,
 represented boundary areas and tetrahedron volumes must remain finite Float64
 values; finite input coordinates alone do not imply finite derived measures.
 """
@@ -300,6 +309,260 @@ end
 
 @inline _lerp(a::Float64, b::Float64, t::Float64) = (1 - t) * a + t * b
 
+# --- warped (face-input) transfinite volume path ------------------------------
+#
+# Gmsh's `MeshTransfiniteVolume` interpolates the volume from the six boundary
+# *face meshes*, not only from the corners: each interior tab node follows the
+# scalar `transfiniteHex` blend of the six face interpolants minus the twelve
+# edge interpolants plus the trilinear corner term, and the u/v/w parameters
+# are cumulative chord-length ratios measured along the s0s1, s1s2, and s1s5
+# edge chains. Boundary tab nodes reuse the face-mesh vertices bitwise, so a
+# genuinely non-affine block (warped ruled faces, curved edges) keeps its
+# surface discretization instead of collapsing onto the trilinear corner map.
+# The emitted boundary is the canonical conforming split induced by the six-
+# tet cell subdivision (as in the affine path); the face meshes' own
+# triangulations are validated but act as the transfinite-mesh certificate,
+# not the emitted boundary. The
+# callers hand the kernel six canonical-oriented grids in the face-tag order
+# `(vmin, umax, vmax, umin, wmin, wmax)`: every grid is a `3×(N1+1)·(N2+1)`
+# matrix whose column `p1 + p2*(N1+1)` is the canonical parametric node — the
+# u/v/w axes of each face slot are `(u,w)`, `(v,w)`, `(u,w)`, `(v,w)`,
+# `(u,v)`, `(u,v)` respectively.
+
+@inline function _warped_slot_dims(slot::Int, nu::Int, nv::Int, nw::Int)
+    slot == 1 && return (nu, nw)
+    slot == 2 && return (nv, nw)
+    slot == 3 && return (nu, nw)
+    slot == 4 && return (nv, nw)
+    slot == 5 && return (nu, nv)
+    slot == 6 && return (nu, nv)
+    throw(ArgumentError(
+        "mesh_transfinite_volume: face slot must lie in 1:6; got $slot"))
+end
+
+@inline _face_node(points, p1::Int, p2::Int, n1::Int) =
+    (points[1, p1 + 1 + p2 * n1], points[2, p1 + 1 + p2 * n1],
+     points[3, p1 + 1 + p2 * n1])
+
+# Six converted face records in canonical slot order. Each record carries the
+# point matrix, the face mesh's own triangles (indices into the same canonical
+# layout), and the boundary-element tags.
+struct _WarpedFace
+    points::Matrix{Float64}
+    tris::Matrix{Int32}
+    tags::Vector{Int32}
+end
+
+function _warped_face(raw, slot::Int, nu::Int, nv::Int, nw::Int)
+    count = try
+        length(raw)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: faces[$slot] is not indexable"))
+    end
+    count == 3 || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] must be a " *
+        "(points, triangles, tags) triple"))
+    n1, n2 = _warped_slot_dims(slot, nu, nv, nw)
+    expected = _checked_mul("faces[$slot] node", n1 + 1, n2 + 1)
+
+    points = try
+        raw[1]
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: could not read faces[$slot] points"))
+    end
+    points isa AbstractMatrix || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] points must be a matrix"))
+    size(points, 1) == 3 || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] points must have three rows"))
+    size(points, 2) == expected || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] carries $(size(points, 2)) " *
+        "nodes but the slot requires $expected"))
+    converted = Matrix{Float64}(undef, 3, expected)
+    @inbounds for column in 1:expected, row in 1:3
+        value = Float64(points[row, column])
+        isfinite(value) || throw(ArgumentError(
+            "mesh_transfinite_volume: faces[$slot] node $column is not finite"))
+        converted[row, column] = value
+    end
+
+    tris = try
+        raw[2]
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: could not read faces[$slot] triangles"))
+    end
+    tris isa AbstractMatrix || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] triangles must be a matrix"))
+    size(tris, 1) == 3 || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] triangles must have three rows"))
+    ntri = size(tris, 2)
+    expected_tris = _checked_mul("faces[$slot] triangle", 2, n1, n2)
+    ntri == expected_tris || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] carries $ntri triangles but " *
+        "the slot requires $expected_tris"))
+    converted_tris = Matrix{Int32}(undef, 3, ntri)
+    @inbounds for column in 1:ntri, row in 1:3
+        index = tris[row, column]
+        index isa Integer || throw(ArgumentError(
+            "mesh_transfinite_volume: faces[$slot] triangle $column vertex " *
+            "$row is not an integer"))
+        1 <= index <= expected || throw(ArgumentError(
+            "mesh_transfinite_volume: faces[$slot] triangle $column vertex " *
+            "$row indexes node $index outside 1:$expected"))
+        converted_tris[row, column] = Int32(index)
+    end
+
+    tags = try
+        raw[3]
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: could not read faces[$slot] tags"))
+    end
+    length(tags) == ntri || throw(ArgumentError(
+        "mesh_transfinite_volume: faces[$slot] carries $(length(tags)) tags " *
+        "for $ntri triangles"))
+    converted_tags = Vector{Int32}(undef, ntri)
+    @inbounds for index in 1:ntri
+        converted_tags[index] = _tag(tags[index], "faces[$slot] tag $index")
+    end
+    return _WarpedFace(converted, converted_tris, converted_tags)
+end
+
+function _warped_faces(raw, nu::Int, nv::Int, nw::Int)
+    count = try
+        length(raw)
+    catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: faces is not indexable"))
+    end
+    count == 6 || throw(ArgumentError(
+        "mesh_transfinite_volume: faces must contain exactly six records"))
+    faces = Vector{_WarpedFace}(undef, 6)
+    cursor = 1
+    try
+        for entry in raw
+            cursor <= 6 || throw(ArgumentError(
+                "mesh_transfinite_volume: faces produced more than six records"))
+            faces[cursor] = _warped_face(entry, cursor, nu, nv, nw)
+            cursor += 1
+        end
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError && rethrow()
+        throw(ArgumentError(
+            "mesh_transfinite_volume: could not read faces: " *
+            "$(sprint(showerror, err))"))
+    end
+    cursor == 7 || throw(ArgumentError(
+        "mesh_transfinite_volume: faces ended before six records"))
+    return faces
+end
+
+# The twelve boundary edges shared between adjacent face slots. Each entry is
+# (face_a, p1a, p2a_start, step_a) style data is too rigid for the mixed row/
+# column accesses, so the audit lists them explicitly.
+function _certify_shared_edges(faces, nu::Int, nv::Int, nw::Int)
+    f1, f2, f3, f4, f5, f6 = faces
+    npu, npv, npw = nu + 1, nv + 1, nw + 1
+    function check(name, a, b)
+        a == b || throw(ArgumentError(
+            "mesh_transfinite_volume: boundary faces disagree on shared " *
+            "edge $name ($(a) != $(b))"))
+        return nothing
+    end
+    @inbounds begin
+        for i in 0:nu
+            check("s0s1", _face_node(f5.points, i, 0, npu),
+                  _face_node(f1.points, i, 0, npu))
+            check("s3s2", _face_node(f5.points, i, nv, npu),
+                  _face_node(f3.points, i, 0, npu))
+            check("s4s5", _face_node(f6.points, i, 0, npu),
+                  _face_node(f1.points, i, nw, npu))
+            check("s7s6", _face_node(f6.points, i, nv, npu),
+                  _face_node(f3.points, i, nw, npu))
+        end
+        for j in 0:nv
+            check("s0s3", _face_node(f5.points, 0, j, npu),
+                  _face_node(f4.points, j, 0, npv))
+            check("s1s2", _face_node(f5.points, nu, j, npu),
+                  _face_node(f2.points, j, 0, npv))
+            check("s4s7", _face_node(f6.points, 0, j, npu),
+                  _face_node(f4.points, j, nw, npv))
+            check("s5s6", _face_node(f6.points, nu, j, npu),
+                  _face_node(f2.points, j, nw, npv))
+        end
+        for k in 0:nw
+            check("s0s4", _face_node(f1.points, 0, k, npu),
+                  _face_node(f4.points, 0, k, npv))
+            check("s1s5", _face_node(f1.points, nu, k, npu),
+                  _face_node(f2.points, 0, k, npv))
+            check("s3s7", _face_node(f3.points, 0, k, npu),
+                  _face_node(f4.points, nv, k, npv))
+            check("s2s6", _face_node(f3.points, nu, k, npu),
+                  _face_node(f2.points, nv, k, npv))
+        end
+    end
+    return nothing
+end
+
+# Cumulative chord-length ratios along one edge chain: gmsh parameterizes the
+# interpolation by the physical edge mesh, not by uniform logical index.
+function _chord_ratios(chain, what::AbstractString)
+    rows = length(chain)
+    ratios = Vector{Float64}(undef, rows)
+    total = 0.0
+    ratios[1] = 0.0
+    @inbounds for i in 2:rows
+        delta = _sub3(chain[i], chain[i - 1])
+        total += sqrt(_dot3(delta, delta))
+        ratios[i] = total
+    end
+    (isfinite(total) && total > 0) || throw(ArgumentError(
+        "mesh_transfinite_volume: reference edge $what is geometrically " *
+        "degenerate"))
+    @inbounds for i in 1:rows
+        ratios[i] /= total
+    end
+    return ratios
+end
+
+# The scalar `transfiniteHex` interpolation from Gmsh's
+# meshGRegionTransfinite.cpp, applied coordinate-wise with the same term
+# order so the result tracks upstream bitwise where inputs are identical.
+# `faces_uvw` = (umin, umax, vmin, vmax, wmin, wmax) interpolants at the
+# canonical face params. `edges_w` lists the w-parallel edges in Gmsh's
+# literal order (u0v0=s0s4, u0v1=s3s7, u1v0=s1s5, u1v1=s2s6), `edges_u` the
+# u-parallel edges (v0w0=s0s1, v0w1=s4s5, v1w0=s3s2, v1w1=s7s6), `edges_v` the
+# v-parallel edges (u0w0=s0s3, u1w0=s1s2, u0w1=s4s7, u1w1=s5s6), and `s` the
+# eight corner vertices.
+@inline function _transfinite_hex(faces_uvw, edges_u, edges_v, edges_w, s,
+                                  u::Float64, v::Float64, w::Float64)
+    fu0, fu1 = faces_uvw[1], faces_uvw[2]
+    fv0, fv1 = faces_uvw[3], faces_uvw[4]
+    fw0, fw1 = faces_uvw[5], faces_uvw[6]
+    return ntuple(3) do d
+        (1 - u) * fu0[d] + u * fu1[d] + (1 - v) * fv0[d] + v * fv1[d] +
+        (1 - w) * fw0[d] + w * fw1[d] -
+        ((1 - u) * (1 - v) * edges_w[1][d] + (1 - u) * v * edges_w[2][d] +
+         u * (1 - v) * edges_w[3][d] + u * v * edges_w[4][d]) -
+        ((1 - v) * (1 - w) * edges_u[1][d] + (1 - v) * w * edges_u[2][d] +
+         v * (1 - w) * edges_u[3][d] + v * w * edges_u[4][d]) -
+        ((1 - u) * (1 - w) * edges_v[1][d] + (1 - w) * u * edges_v[2][d] +
+         w * (1 - u) * edges_v[3][d] + u * w * edges_v[4][d]) +
+        (1 - u) * (1 - v) * (1 - w) * s[1][d] + u * (1 - v) * (1 - w) * s[2][d] +
+        u * v * (1 - w) * s[3][d] + (1 - u) * v * (1 - w) * s[4][d] +
+        (1 - u) * (1 - v) * w * s[5][d] + u * (1 - v) * w * s[6][d] +
+        u * v * w * s[7][d] + (1 - u) * v * w * s[8][d]
+    end
+end
+
 @inline function _trilinear(corners, u::Float64, v::Float64, w::Float64)
     ntuple(3) do dimension
         lower0 = _lerp(corners[1][dimension], corners[2][dimension], u)
@@ -361,39 +624,291 @@ function _canonical_triangles(tris)
     return result
 end
 
+# The canonical face-slot parametric directions into the logical tab grid:
+# slot s maps its (p1,p2) node to tab coordinates (i,j,k) via these tables.
+# (param axis 1 index, param axis 2 index, fixed axis index, fixed value)
+# expressed per slot in the order (vmin, umax, vmax, umin, wmin, wmax).
+const _WARPED_SLOT_PLANE =
+    ((1, 3, 2, 0),   # vmin:  (p1,p2) = (u,w),   fixed v = 0
+     (2, 3, 1, :hi), # umax:  (p1,p2) = (v,w),   fixed u = nu
+     (1, 3, 2, :hi), # vmax:  (p1,p2) = (u,w),   fixed v = nv
+     (2, 3, 1, 0),   # umin:  (p1,p2) = (v,w),   fixed u = 0
+     (1, 2, 3, 0),   # wmin:  (p1,p2) = (u,v),   fixed w = 0
+     (1, 2, 3, :hi)) # wmax:  (p1,p2) = (u,v),   fixed w = nw
+
+# The four inward tab nodes adjacent to a boundary cell: the cell at canonical
+# (I,J) has its neighbors offset one layer along the slot's fixed axis.
+@inline function _inward_candidates(node_id, slot::Int, I::Int, J::Int,
+                                    nu::Int, nv::Int, nw::Int)
+    a1, a2, fixed_axis, fixed = _WARPED_SLOT_PLANE[slot]
+    inner_coord = fixed == 0 ? 1 :
+        fixed_axis == 1 ? nu - 1 : fixed_axis == 2 ? nv - 1 : nw - 1
+    return ntuple(4) do corner
+        offset = corner - 1
+        coord = (0, 0, 0)
+        coord = Base.setindex(coord, I + (offset & 1), a1)
+        coord = Base.setindex(coord, J + (offset >> 1), a2)
+        coord = Base.setindex(coord, inner_coord, fixed_axis)
+        node_id(coord[1], coord[2], coord[3])
+    end
+end
+
+function _transfinite_volume_warped_mesh(converted_corners, raw_faces,
+                                         raw_face_tags,
+                                         nu::Int, nv::Int, nw::Int,
+                                         npu::Int, npv::Int, npw::Int,
+                                         node_count::Int, tet_count::Int,
+                                         triangle_count::Int,
+                                         converted_volume_tag::Int32)
+    faces = _warped_faces(raw_faces, nu, nv, nw)
+    _certify_shared_edges(faces, nu, nv, nw)
+    converted_face_tags = _face_tags(raw_face_tags)
+    node_id(i::Int, j::Int, k::Int) = Int32(i + 1 + npu * (j + npv * k))
+    coords = Matrix{Float64}(undef, 3, node_count)
+    tets = Matrix{Int32}(undef, 4, tet_count)
+    tri_tags = Vector{Int32}(undef, triangle_count)
+    tris = _mesh_transfinite_volume_warped(converted_corners, nu, nv, nw,
+                                           faces, node_id, coords, tets,
+                                           tri_tags, converted_face_tags)
+    extracted_boundary, maximum_incidence = boundary_faces(tets)
+    maximum_incidence == 2 || throw(ErrorException(
+        "mesh_transfinite_volume: constructed tet mesh has face incidence " *
+        "$maximum_incidence"))
+    sort!(extracted_boundary)
+    extracted_boundary == _canonical_triangles(tris) || throw(ErrorException(
+        "mesh_transfinite_volume: emitted boundary triangles do not match " *
+        "the tet boundary"))
+    mesh = Mesh(coords; tris=tris, tets=tets, tri_tag=tri_tags,
+                tet_tag=fill(converted_volume_tag, tet_count))
+    diagnostic = validate(mesh)
+    diagnostic.ok || _throw_simplex_validation(
+        "mesh_transfinite_volume", diagnostic.messages)
+    (nnodes(mesh), ntris(mesh), ntets(mesh)) ==
+        (node_count, triangle_count, tet_count) || throw(ErrorException(
+        "mesh_transfinite_volume: finalized mesh count invariant failed"))
+    return mesh
+end
+
+function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
+                                         faces, node_id, coords, tets,
+                                         tri_tags_source, face_tags)
+    f1, f2, f3, f4, f5, f6 = faces
+    npu, npv, npw = nu + 1, nv + 1, nw + 1
+
+    # The caller-provided corners must be the eight face-grid corners bitwise.
+    _face_node(f5.points, 0, 0, npu) == corners[1] &&
+        _face_node(f5.points, nu, 0, npu) == corners[2] &&
+        _face_node(f5.points, nu, nv, npu) == corners[3] &&
+        _face_node(f5.points, 0, nv, npu) == corners[4] &&
+        _face_node(f6.points, 0, 0, npu) == corners[5] &&
+        _face_node(f6.points, nu, 0, npu) == corners[6] &&
+        _face_node(f6.points, nu, nv, npu) == corners[7] &&
+        _face_node(f6.points, 0, nv, npu) == corners[8] ||
+        throw(ArgumentError(
+            "mesh_transfinite_volume: corners do not match the face grids"))
+    orientation = orient3(corners[1], corners[2], corners[4], corners[5])
+    orientation < 0 || throw(ArgumentError(
+        orientation == 0 ?
+        "mesh_transfinite_volume: canonical u/v/w corner directions are " *
+        "coplanar" :
+        "mesh_transfinite_volume: corners must use the positive canonical " *
+        "Gmsh order (s0,s1,s2,s3,s4,s5,s6,s7)"))
+
+    # Chord-length parameterization along Gmsh's three reference edges.
+    us = _chord_ratios(
+        [_face_node(f5.points, i, 0, npu) for i in 0:nu], "s0s1")
+    vs = _chord_ratios(
+        [_face_node(f2.points, j, 0, npv) for j in 0:nv], "s1s2")
+    ws = _chord_ratios(
+        [_face_node(f2.points, 0, k, npv) for k in 0:nw], "s1s5")
+
+    # Boundary tab nodes reuse the face grids bitwise (shared edges were
+    # certified identical, so any owning slot writes the same value).
+    @inbounds for k in 0:nw, j in 0:nv, i in 0:nu
+        boundary = i == 0 || i == nu || j == 0 || j == nv || k == 0 || k == nw
+        if boundary
+            point = i == 0 ? _face_node(f4.points, j, k, npv) :
+                    i == nu ? _face_node(f2.points, j, k, npv) :
+                    j == 0 ? _face_node(f1.points, i, k, npu) :
+                    j == nv ? _face_node(f3.points, i, k, npu) :
+                    k == 0 ? _face_node(f5.points, i, j, npu) :
+                    _face_node(f6.points, i, j, npu)
+        else
+            u = us[i + 1]; v = vs[j + 1]; w = ws[k + 1]
+            point = _transfinite_hex(
+                (_face_node(f4.points, j, k, npv),
+                 _face_node(f2.points, j, k, npv),
+                 _face_node(f1.points, i, k, npu),
+                 _face_node(f3.points, i, k, npu),
+                 _face_node(f5.points, i, j, npu),
+                 _face_node(f6.points, i, j, npu)),
+                (_face_node(f5.points, i, 0, npu),
+                 _face_node(f6.points, i, 0, npu),
+                 _face_node(f5.points, i, nv, npu),
+                 _face_node(f6.points, i, nv, npu)),
+                (_face_node(f5.points, 0, j, npu),
+                 _face_node(f5.points, nu, j, npu),
+                 _face_node(f6.points, 0, j, npu),
+                 _face_node(f6.points, nu, j, npu)),
+                (_face_node(f1.points, 0, k, npu),
+                 _face_node(f3.points, 0, k, npu),
+                 _face_node(f1.points, nu, k, npu),
+                 _face_node(f3.points, nu, k, npu)),
+                corners, u, v, w)
+            all(isfinite, point) || throw(ArgumentError(
+                "mesh_transfinite_volume: interpolation produced a " *
+                "non-finite coordinate at logical node ($i,$j,$k)"))
+        end
+        index = Int(node_id(i, j, k))
+        coords[1, index] = point[1]
+        coords[2, index] = point[2]
+        coords[3, index] = point[3]
+    end
+
+    tet_position = 0
+    @inbounds for k in 0:nw-1, j in 0:nv-1, i in 0:nu-1
+        a = node_id(i, j, k)
+        b = node_id(i + 1, j, k)
+        c = node_id(i, j + 1, k)
+        d = node_id(i, j, k + 1)
+        e = node_id(i + 1, j, k + 1)
+        f = node_id(i, j + 1, k + 1)
+        g = node_id(i + 1, j + 1, k)
+        h = node_id(i + 1, j + 1, k + 1)
+        for vertices in ((a, b, c, d), (b, c, d, e), (d, e, c, f),
+                         (b, c, e, g), (c, f, e, g), (e, f, h, g))
+            tet_position += 1
+            _emit_positive_tet!(tets, tet_position, coords, vertices...)
+        end
+    end
+
+    # Boundary triangles are the canonical tet-boundary split: the tet
+    # subdivision induces one fixed diagonal per face cell — (p1+1,p2)-(p1,p2+1)
+    # in every slot's canonical params — so each boundary cell emits
+    # (A,B,C),(B,D,C). Tessella's volume meshes carry the conforming boundary,
+    # which `_consume_volume_attributes` also re-derives downstream; each
+    # surface's own arrangement is a property of its surface record, not of
+    # this mesh. Every emitted triangle is certified strictly outward against
+    # the inward-adjacent tab nodes of its cell.
+    tris = Matrix{Int32}(undef, 3, length(tri_tags_source))
+    position = 1
+    @inbounds for slot in 1:6
+        a1, a2, fixed_axis, fixed = _WARPED_SLOT_PLANE[slot]
+        n1, n2 = _warped_slot_dims(slot, nu, nv, nw)
+        fixed_coord = fixed == 0 ? 0 :
+            fixed_axis == 1 ? nu : fixed_axis == 2 ? nv : nw
+        tag = face_tags[slot]
+        function tab_node(p1::Int, p2::Int)
+            coord = (0, 0, 0)
+            coord = Base.setindex(coord, p1, a1)
+            coord = Base.setindex(coord, p2, a2)
+            coord = Base.setindex(coord, fixed_coord, fixed_axis)
+            return node_id(coord[1], coord[2], coord[3])
+        end
+        for p2 in 0:n2-1, p1 in 0:n1-1
+            a = tab_node(p1, p2)
+            b = tab_node(p1 + 1, p2)
+            c = tab_node(p1, p2 + 1)
+            d = tab_node(p1 + 1, p2 + 1)
+            for tri in ((a, b, c), (b, d, c))
+                # Inward candidates of this boundary cell: the interior fold
+                # audit requires all nonzero inward signs on one side; a
+                # flipped emission is fixed by the same sign test.
+                sign = 0
+                for candidate in _inward_candidates(node_id, slot, p1, p2,
+                                                    nu, nv, nw)
+                    s = orient3(_node(coords, tri[1]), _node(coords, tri[2]),
+                                _node(coords, tri[3]),
+                                _node(coords, candidate))
+                    s == 0 && continue
+                    if sign == 0
+                        sign = s
+                    elseif sign != s
+                        throw(ArgumentError(
+                            "mesh_transfinite_volume: boundary cell " *
+                            "($p1,$p2) of face slot $slot folds over its " *
+                            "inward neighbors"))
+                    end
+                end
+                sign == 0 && throw(ArgumentError(
+                    "mesh_transfinite_volume: boundary cell ($p1,$p2) of " *
+                    "face slot $slot cannot certify its orientation (inward " *
+                    "reference degenerates)"))
+                if sign < 0
+                    tris[1, position] = tri[2]
+                    tris[2, position] = tri[1]
+                    tris[3, position] = tri[3]
+                else
+                    tris[1, position] = tri[1]
+                    tris[2, position] = tri[2]
+                    tris[3, position] = tri[3]
+                end
+                tri_tags_source[position] = tag
+                position += 1
+            end
+        end
+    end
+    position == length(tri_tags_source) + 1 || throw(ErrorException(
+        "mesh_transfinite_volume: internal boundary triangle count " *
+        "invariant failed"))
+    return tris
+end
+
 """
     mesh_transfinite_volume(corners, cells=(1,1,1);
                             volume_tag=0,
                             face_tags=(0,0,0,0,0,0),
+                            faces=nothing,
                             max_nodes=10_000_000,
                             max_tets=60_000_000,
                             max_boundary_triangles=20_000_000) -> Mesh
 
-Mesh an affine six-face block with the Gmsh 4.15.2 unrecombined transfinite
+Mesh a six-face block with the Gmsh 4.15.2 unrecombined transfinite
 volume subdivision. `corners` must contain eight finite 3-D points in Gmsh's
 canonical order `(s0,s1,s2,s3,s4,s5,s6,s7)`: the first four wind around the
-`w=0` face and the final four are their `w=1` counterparts. The four derived
+`w=0` face and the final four are their `w=1` counterparts. `cells=(nu,nv,nw)`
+gives positive logical-cell counts; curve laws are uniformly spaced
+(`Progression 1`).
+
+By default (`faces=nothing`) the block must be affine: the four derived
 corners must agree with an affine parallelepiped to a normalized,
-conditioning-scaled `4096eps(Float64)` tolerance. `cells=(nu,nv,nw)` gives
-positive logical-cell counts; curve laws are uniformly spaced (`Progression 1`).
+conditioning-scaled `4096eps(Float64)` tolerance, and every interior node
+follows the exact dyadic or trilinear affine map. Passing `faces` lifts that
+restriction: each entry is a `(points, triangles, tags)` triple for one
+boundary face slot in the `face_tags` order `(vmin, umax, vmax, umin, wmin,
+wmax)`, where `points` is a `3×(N1+1)(N2+1)` matrix in the slot's canonical
+parametric order — `(u,w)` for the v-faces, `(v,w)` for the u-faces, `(u,v)`
+for the w-faces — and `triangles`/`tags` carry that face mesh's own
+triangulation and element tags as the transfinite-mesh certificate (the
+triangulation is validated but the emitted boundary is always canonical,
+below). The interior then follows Gmsh's `transfiniteHex` Coons interpolation
+over the six face interpolants minus the twelve edge interpolants plus the
+trilinear corner term, parameterized by chord-length ratios along the `s0s1`,
+`s1s2`, and `s1s5` edge chains. Boundary tab nodes reuse the face vertices
+bitwise — shared edges must agree exactly or the call throws — and `corners`
+must be the eight face-grid corners bitwise in positive canonical order.
 
 The returned simplex mesh uses the exact six-tetrahedron connectivity pattern
-from Gmsh's `CREATE_SIM_1` through `CREATE_SIM_6`. Boundary triangles are the
-induced conforming face arrangements. Exact dyadic affine interpolation protects
-remote, narrow blocks whose nested Float64 interpolation would lose material, and
-a compensated exponent-scaled determinant audit certifies conservation of the
-corner-defined volume. `face_tags` follow Gmsh's canonical face order
-`(vmin, umax, vmax, umin, wmin, wmax)`; `volume_tag` labels every tet.
+from Gmsh's `CREATE_SIM_1` through `CREATE_SIM_6`, and the boundary triangles
+are the conforming split that subdivision induces: one fixed diagonal per
+face cell in every slot, certified strictly outward against the
+inward-adjacent interior nodes. In the affine path, exact dyadic affine
+interpolation protects remote, narrow blocks whose nested Float64
+interpolation would lose material, and a compensated exponent-scaled
+determinant audit certifies conservation of the corner-defined volume.
+`face_tags` follow Gmsh's canonical face order `(vmin, umax, vmax, umin,
+wmin, wmax)`; `volume_tag` labels every tet.
 
-Unsupported here: five-face degeneracies, curved/warped or independently
-discretized faces, nonuniform curve laws, recombination into hexahedra/prisms,
-QuadTri, holes, multiple blocks, periodic seams, high-order elements, and
-coordinate scales whose derived boundary areas or tetrahedron volumes are not
-finite Float64 values.
+Unsupported here: five-face degeneracies, nonuniform curve laws on the
+`faces=nothing` path (nonuniform spacing arrives through `faces` grids),
+recombination into hexahedra/prisms, QuadTri, holes, multiple blocks,
+periodic seams, high-order elements, and coordinate scales whose derived
+boundary areas or tetrahedron volumes are not finite Float64 values.
 """
 function mesh_transfinite_volume(corners, cells=(1, 1, 1);
                                  volume_tag=0,
                                  face_tags=(0, 0, 0, 0, 0, 0),
+                                 faces=nothing,
                                  max_nodes=_DEFAULT_MAX_NODES,
                                  max_tets=_DEFAULT_MAX_TETS,
                                  max_boundary_triangles=
@@ -431,6 +946,10 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
         "max_boundary_triangles=$triangle_limit"))
 
     converted_corners = _eight_corners(corners)
+    faces === nothing || return _transfinite_volume_warped_mesh(
+        converted_corners, faces, face_tags, nu, nv, nw,
+        npu, npv, npw, node_count, tet_count, triangle_count,
+        _tag(volume_tag, "volume_tag"))
     _certify_affine(converted_corners)
     converted_face_tags = _face_tags(face_tags)
     converted_volume_tag = _tag(volume_tag, "volume_tag")

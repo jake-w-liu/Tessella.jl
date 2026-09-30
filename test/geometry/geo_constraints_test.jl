@@ -241,6 +241,81 @@ end
     @test 1 in execution.model.meshing.quad_tri
 end
 
+@testset ".geo transfinite volume meshing" begin
+    using Tessella.MeshTypes: nnodes, ntets
+
+    constraints = raw"""
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        """
+    execution=_execute_constraint_source(_GEO_BOX * constraints;mesh_dim=3)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntets(execution.mesh))==(64,162)
+
+    # Every boundary surface must be transfinite (Gmsh's "Incompatible
+    # surface" blocker): dropping one declaration leaves the volume unmeshed.
+    err=_constraint_error(_GEO_BOX * raw"""
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{1,2,3,4,5};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        """;mesh_dim=3)
+    @test err isa ArgumentError
+    @test occursin("Incompatible surface 6",string(err))
+
+    # Every boundary curve must be transfinite.
+    err=_constraint_error(_GEO_BOX * raw"""
+        Transfinite Curve{1,2,3,4,5,6,7,8,9,10,11} = 4;
+        Transfinite Surface{:};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        """;mesh_dim=3)
+    @test err isa ArgumentError
+    @test occursin("requires boundary Curve[12] to be transfinite",string(err))
+
+    # Opposite edges in one direction must carry equal node counts.
+    err=_constraint_error(_GEO_BOX * raw"""
+        Transfinite Curve{1} = 5;
+        Transfinite Curve{2,3,4,5,6,7,8,9,10,11,12} = 4;
+        Transfinite Surface{:};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        """;mesh_dim=3)
+    @test err isa ArgumentError
+    @test occursin("mismatched node counts",string(err))
+
+    # A genuinely non-affine block: Point(7) moves off the corner
+    # parallelepiped, so its two incident ruled faces mesh as warped
+    # transfinite patches and the interior follows the face Coons
+    # interpolation instead of the trilinear corner map.
+    warped_box=raw"""
+        Point(1) = {0,0,0,0.5}; Point(2) = {1,0,0,0.5};
+        Point(3) = {1,1,0,0.5}; Point(4) = {0,1,0,0.5};
+        Point(5) = {0,0,1,0.5}; Point(6) = {1,0,1,0.5};
+        Point(7) = {1.2,1,1,0.5}; Point(8) = {0,1,1,0.5};
+        Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+        Line(5) = {5,6}; Line(6) = {6,7}; Line(7) = {7,8}; Line(8) = {8,5};
+        Line(9) = {1,5}; Line(10) = {2,6}; Line(11) = {3,7}; Line(12) = {4,8};
+        Curve Loop(1) = {1,2,3,4}; Curve Loop(2) = {5,6,7,8};
+        Curve Loop(3) = {1,10,-5,-9}; Curve Loop(4) = {2,11,-6,-10};
+        Curve Loop(5) = {3,12,-7,-11}; Curve Loop(6) = {4,9,-8,-12};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Plane Surface(3) = {3}; Surface(4) = {4};
+        Plane Surface(5) = {5}; Plane Surface(6) = {6};
+        Surface Loop(1) = {1,2,3,4,5,6};
+        Volume(1) = {1};
+        """ * constraints
+    execution=_execute_constraint_source(warped_box;mesh_dim=3)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntets(execution.mesh))==(64,162)
+    # The shifted vertex and its subdivided incident edges are in the mesh —
+    # x>1 nodes cannot come from the affine corner parallelepiped.
+    @test maximum(execution.mesh.coords[1,:])==1.2
+    @test count(>(1.0),execution.mesh.coords[1,:])>4
+    # A v-direction edge of the warped w-max face runs (1,0,1)→(1.2,1,1):
+    # its transfinite subdivision lands at x=1+0.2t.
+    @test any(isapprox(1.0+0.2/3;atol=1e-12),
+              execution.mesh.coords[1,:])
+end
+
 @testset ".geo Recombine/Smoother/Algorithm/SizeFromBoundary" begin
     execution=_execute_constraint_source(_GEO_SQUARE * raw"""
         Recombine Surface{1} = 30;
