@@ -40,6 +40,7 @@ include("structured/Transfinite.jl") # P4: validated four-sided planar transfini
 include("structured/TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
 include("structured/TransfiniteTriangle.jl") # P4: three-sided triangle/quad patches
 include("structured/TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
+include("structured/StructuredRecombine.jl") # P4: shared recombined-volume emission/audit
 include("structured/TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
 include("structured/TransfinitePrism.jl") # P4: affine five-face transfinite prisms
 include("structured/TransfiniteHex.jl") # P4: affine six-face recombined hexahedra

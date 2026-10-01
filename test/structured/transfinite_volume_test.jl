@@ -611,3 +611,315 @@ end
             corners, cells; faces=mismatched)
     end
 end
+
+# Simplex decompositions of the emitted recombined cells, indexed in each
+# cell tuple's own vertex order — the templates the kernel certifies
+# internally; kept local so the partition check below is test-side.
+const _VOL_SHADOW_HEX =
+    ((1, 2, 4, 5), (2, 4, 5, 6), (5, 6, 4, 8),
+     (2, 4, 6, 3), (4, 8, 6, 3), (6, 8, 7, 3))
+const _VOL_SHADOW_PRISM_1 = ((1, 2, 3, 4), (2, 3, 4, 5), (4, 5, 3, 6))
+const _VOL_SHADOW_PRISM_2 = ((3, 2, 6, 1), (2, 5, 6, 1), (6, 5, 4, 1))
+const _VOL_SHADOW_PRISM_1R = ((2, 1, 5, 3), (1, 3, 4, 5), (5, 4, 6, 3))
+const _VOL_SHADOW_PRISM_2R = ((3, 1, 2, 6), (1, 4, 2, 6), (6, 4, 2, 5))
+
+function _vol_block(mesh, msh)
+    found = filter(block -> block.msh == Int32(msh), mesh.blocks)
+    length(found) <= 1 || error("expected at most one type-$msh block")
+    return isempty(found) ? nothing : found[1]
+end
+
+# `==` on block/mesh structs is identity — compare fields explicitly.
+function _vol_same_blocks(a, b)
+    length(a.blocks) == length(b.blocks) || return false
+    return all((ba.msh, ba.nodes, ba.tags) == (bb.msh, bb.nodes, bb.tags)
+               for (ba, bb) in zip(a.blocks, b.blocks))
+end
+
+# Canonical per-block cell multisets: insensitive to emission order and
+# vertex winding, so the affine and warped emitters can be compared
+# topologically.
+function _vol_canonical_blocks(mesh)
+    return sort!(map(mesh.blocks) do block
+        (block.msh,
+         sort!([Tuple(sort(block.nodes[:, cell]))
+                for cell in axes(block.nodes, 2)]),
+         sort(block.tags))
+    end)
+end
+
+@noinline function _volume_recombined_allocated(corners, cells)
+    GC.gc()
+    return @allocated mesh_transfinite_volume(corners, cells; recombine=true)
+end
+
+@testset "six-face recombined volumes (MixedMesh)" begin
+    corners = _affine_corners()
+    cells = (2, 2, 1)
+    nu, nv, nw = cells
+    face_cells = (nu * nw, nv * nw, nu * nw, nv * nw, nu * nv, nu * nv)
+    reference = mesh_transfinite_volume(corners, cells)
+    center = ntuple(d -> sum(point[d] for point in corners) / 8, 3)
+
+    @testset "all-six recombined -> hexahedra" begin
+        mesh = mesh_transfinite_volume(
+            corners, cells; recombine=true, volume_tag=21,
+            face_tags=(11, 12, 13, 14, 15, 16))
+        @test validate(mesh).ok
+        @test mesh isa Tessella.Elements.MixedMesh
+        @test length(mesh.blocks) == 2
+        hexes = _vol_block(mesh, 5)
+        quads = _vol_block(mesh, 3)
+        @test _vol_block(mesh, 2) === nothing
+        @test _vol_block(mesh, 6) === nothing
+        @test size(hexes.nodes, 2) == nu * nv * nw
+        @test hexes.tags == fill(Int32(21), nu * nv * nw)
+        @test size(quads.nodes, 2) == sum(face_cells)
+        for slot in 1:6
+            @test count(==(Int32(10 + slot)), quads.tags) == face_cells[slot]
+        end
+        # Same lattice as the simplex mesh, bitwise.
+        @test mesh.coords == reference.coords
+        # Ordered cell tuples are the Gmsh CREATE_HEX order.
+        nid(i, j, k) = Int32(i + 1 + 3 * (j + 3k))
+        @test hexes.nodes[:, 1] ==
+              Int32[nid(0, 0, 0), nid(1, 0, 0), nid(1, 1, 0), nid(0, 1, 0),
+                    nid(0, 0, 1), nid(1, 0, 1), nid(1, 1, 1), nid(0, 1, 1)]
+        # Boundary quads cover each face's cells exactly once.
+        for slot in 1:6
+            a1, a2 = _VOL_FACE_AXES[slot]
+            expected = NTuple{4,Int32}[]
+            for p2 in 0:cells[a2]-1, p1 in 0:cells[a1]-1
+                ids = sort(Int32[_slot_node_id(slot, p1, p2, cells),
+                                 _slot_node_id(slot, p1 + 1, p2, cells),
+                                 _slot_node_id(slot, p1 + 1, p2 + 1, cells),
+                                 _slot_node_id(slot, p1, p2 + 1, cells)])
+                push!(expected, Tuple(ids))
+            end
+            emitted = NTuple{4,Int32}[]
+            for cell in axes(quads.nodes, 2)
+                quads.tags[cell] == Int32(10 + slot) || continue
+                push!(emitted, Tuple(sort(quads.nodes[:, cell])))
+            end
+            @test sort!(emitted) == sort!(expected)
+        end
+        # Every boundary quad is strictly outward on the affine box.
+        @inbounds for cell in axes(quads.nodes, 2)
+            a = Tuple(mesh.coords[:, quads.nodes[1, cell]])
+            b = Tuple(mesh.coords[:, quads.nodes[2, cell]])
+            c = Tuple(mesh.coords[:, quads.nodes[3, cell]])
+            d = Tuple(mesh.coords[:, quads.nodes[4, cell]])
+            @test orient3(a, b, c, center) > 0
+            @test orient3(a, c, d, center) > 0
+        end
+        # The shadow partition is exactly the reference six-tet subdivision.
+        shadow = NTuple{4,Int32}[]
+        for cell in axes(hexes.nodes, 2)
+            verts = ntuple(r -> hexes.nodes[r, cell], 8)
+            for tet in _VOL_SHADOW_HEX
+                push!(shadow, Tuple(sort!(
+                    Int32[verts[tet[1]], verts[tet[2]],
+                          verts[tet[3]], verts[tet[4]]])))
+            end
+        end
+        @test sort!(shadow) == _volume_canonical_tets(reference)
+        # Determinism.
+        again = mesh_transfinite_volume(
+            corners, cells; recombine=(true, true, true, true, true, true),
+            volume_tag=21, face_tags=(11, 12, 13, 14, 15, 16))
+        @test again.coords == mesh.coords
+        @test _vol_same_blocks(again, mesh)
+    end
+
+    @testset "prism-pair masks" begin
+        masks = (
+            (false, true, false, true, true, true),   # v-free
+            (true, false, true, false, true, true),   # u-free
+            (true, true, true, true, false, false))   # w-free
+        free_slots = ((1, 3), (2, 4), (5, 6))
+        for (mask, frees) in zip(masks, free_slots)
+            mesh = mesh_transfinite_volume(
+                corners, cells; recombine=mask, volume_tag=7,
+                face_tags=(11, 12, 13, 14, 15, 16))
+            @test validate(mesh).ok
+            @test mesh isa Tessella.Elements.MixedMesh
+            prisms = _vol_block(mesh, 6)
+            tris = _vol_block(mesh, 2)
+            quads = _vol_block(mesh, 3)
+            @test _vol_block(mesh, 5) === nothing
+            @test size(prisms.nodes, 2) == 2 * nu * nv * nw
+            @test prisms.tags == fill(Int32(7), 2 * nu * nv * nw)
+            free_area = sum(face_cells[s] for s in frees)
+            fixed_area = sum(face_cells) - free_area
+            @test size(tris.nodes, 2) == 2 * free_area
+            @test size(quads.nodes, 2) == fixed_area
+            for slot in 1:6
+                tag = Int32(10 + slot)
+                if slot in frees
+                    @test count(==(tag), tris.tags) == 2 * face_cells[slot]
+                    @test count(==(tag), quads.tags) == 0
+                else
+                    @test count(==(tag), quads.tags) == face_cells[slot]
+                    @test count(==(tag), tris.tags) == 0
+                end
+            end
+            @test mesh.coords == reference.coords
+            # Volume conservation: the cell shadow decompositions must sum
+            # to the box volume for every valid mask. The w-free pair uses
+            # the PRISM_1/2 tiling; the v/u-free pairs use the R variants
+            # indexed to the orientation-fixed emitted order.
+            templates = mask == (true, true, true, true, false, false) ?
+                (_VOL_SHADOW_PRISM_1, _VOL_SHADOW_PRISM_2) :
+                (_VOL_SHADOW_PRISM_1R, _VOL_SHADOW_PRISM_2R)
+            volume = 0.0
+            for cell in axes(prisms.nodes, 2)
+                verts = ntuple(r -> prisms.nodes[r, cell], 6)
+                template = templates[isodd(cell) ? 1 : 2]
+                for tet in template
+                    a = Tuple(mesh.coords[:, verts[tet[1]]])
+                    b = Tuple(mesh.coords[:, verts[tet[2]]])
+                    c = Tuple(mesh.coords[:, verts[tet[3]]])
+                    d = Tuple(mesh.coords[:, verts[tet[4]]])
+                    volume += tet_volume(a, b, c, d)
+                end
+            end
+            @test volume ≈ 2.0 atol=1e-12
+            # Outward boundary orientation on the affine box.
+            for cell in axes(tris.nodes, 2)
+                a = Tuple(mesh.coords[:, tris.nodes[1, cell]])
+                b = Tuple(mesh.coords[:, tris.nodes[2, cell]])
+                c = Tuple(mesh.coords[:, tris.nodes[3, cell]])
+                @test orient3(a, b, c, center) > 0
+            end
+            for cell in axes(quads.nodes, 2)
+                a = Tuple(mesh.coords[:, quads.nodes[1, cell]])
+                b = Tuple(mesh.coords[:, quads.nodes[2, cell]])
+                c = Tuple(mesh.coords[:, quads.nodes[3, cell]])
+                d = Tuple(mesh.coords[:, quads.nodes[4, cell]])
+                @test orient3(a, b, c, center) > 0
+                @test orient3(a, c, d, center) > 0
+            end
+        end
+    end
+
+    @testset "ordered tuples match the Gmsh macros" begin
+        unit = mesh_transfinite_volume(
+            _affine_corners(), (1, 1, 1); recombine=(true, true, true, true,
+                                                     false, false))
+        prisms = _vol_block(unit, 6)
+        @test prisms.nodes[:, 1] == Int32[1, 2, 3, 5, 6, 7]
+        @test prisms.nodes[:, 2] == Int32[4, 3, 2, 8, 7, 6]
+        # The w-free pair partitions the reference six-tet subdivision.
+        shadow = NTuple{4,Int32}[]
+        for (cell, template) in ((1, _VOL_SHADOW_PRISM_1),
+                                 (2, _VOL_SHADOW_PRISM_2))
+            verts = ntuple(r -> prisms.nodes[r, cell], 6)
+            for tet in template
+                push!(shadow, Tuple(sort!(
+                    Int32[verts[tet[1]], verts[tet[2]],
+                          verts[tet[3]], verts[tet[4]]])))
+            end
+        end
+        @test sort!(shadow) == _volume_canonical_tets(
+            mesh_transfinite_volume(_affine_corners(), (1, 1, 1)))
+
+        vfree = mesh_transfinite_volume(
+            _affine_corners(), (1, 1, 1); recombine=(false, true, false,
+                                                     true, true, true))
+        prisms = _vol_block(vfree, 6)
+        # Gmsh emits the partial-mask prisms with the MPrism orientation
+        # fixup applied to the literal macro order.
+        @test prisms.nodes[:, 1] == Int32[2, 1, 5, 4, 3, 7]
+        @test prisms.nodes[:, 2] == Int32[5, 6, 2, 7, 8, 4]
+
+        ufree = mesh_transfinite_volume(
+            _affine_corners(), (1, 1, 1); recombine=(true, false, true,
+                                                     false, true, true))
+        prisms = _vol_block(ufree, 6)
+        @test prisms.nodes[:, 1] == Int32[4, 2, 6, 3, 1, 5]
+        @test prisms.nodes[:, 2] == Int32[6, 8, 4, 5, 7, 3]
+    end
+
+    @testset "mask parsing and rejection parity" begin
+        default = mesh_transfinite_volume(corners, cells)
+        for disabled in (nothing, false,
+                         (false, false, false, false, false, false))
+            mesh = mesh_transfinite_volume(corners, cells;
+                                           recombine=disabled)
+            @test mesh isa Tessella.MeshTypes.Mesh
+            @test mesh_crc(mesh) == mesh_crc(default)
+            @test mesh.coords == default.coords
+            @test mesh.tets == default.tets
+            @test mesh.tris == default.tris
+        end
+
+        for bad in ((true, true, true, true, true, false),
+                    (false, false, false, false, true, true),
+                    (true, true, false, false, true, true),
+                    (false, true, true, true, true, false),
+                    (false, false, true, false, true, true))
+            error = try
+                mesh_transfinite_volume(corners, cells; recombine=bad)
+                nothing
+            catch err
+                err
+            end
+            @test error isa ArgumentError
+            @test occursin("wrong surface recombination",
+                           sprint(showerror, error))
+        end
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; recombine=(true, true, true, true, true))
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; recombine=fill(true, 7))
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; recombine=(true, true, true, true, true, 1))
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; recombine=1)
+        @test_throws ArgumentError mesh_transfinite_volume(
+            corners, cells; recombine="yes")
+    end
+
+    @testset "warped recombination" begin
+        wcorners = _affine_corners((0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                                   (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        wcorners[7] = (1.2, 1.0, 1.0)
+        wcells = (2, 2, 2)
+        faces = _volume_face_grids(wcorners, wcells)
+        for mask in ((true, true, true, true, true, true),
+                     (true, true, true, true, false, false))
+            mesh = mesh_transfinite_volume(
+                wcorners, wcells; faces=faces, recombine=mask)
+            @test validate(mesh).ok
+            @test mesh isa Tessella.Elements.MixedMesh
+            # The warped path shares the lattice connectivity with the
+            # affine path — canonical block contents are identical; only
+            # coordinates and emission order differ.
+            twin = mesh_transfinite_volume(_affine_corners(), wcells;
+                                           recombine=mask)
+            @test _vol_canonical_blocks(mesh) == _vol_canonical_blocks(twin)
+            # Boundary nodes reuse the face grids bitwise.
+            for slot in 1:6
+                a1, a2 = _VOL_FACE_AXES[slot]
+                n1, n2 = wcells[a1], wcells[a2]
+                for p2 in 0:n2, p1 in 0:n1
+                    id = _slot_node_id(slot, p1, p2, wcells)
+                    @test Tuple(mesh.coords[:, id]) ==
+                          Tuple(faces[slot][1][:, p1 + 1 + p2 * (n1 + 1)])
+                end
+            end
+        end
+    end
+
+    @testset "recombined allocation growth remains linear" begin
+        big = _affine_corners()
+        mesh_transfinite_volume(big, (8, 8, 4); recombine=true)
+        mesh_transfinite_volume(big, (16, 8, 4); recombine=true)
+        small = _volume_recombined_allocated(big, (8, 8, 4))
+        large = _volume_recombined_allocated(big, (16, 8, 4))
+        @test small > 0
+        @test large > small
+        @test large <= 2.40small + 1_048_576
+        @info "recombined transfinite volume allocation ratchet" small_bytes=small large_bytes=large
+    end
+end

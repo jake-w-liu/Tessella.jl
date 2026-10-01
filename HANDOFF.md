@@ -26,6 +26,49 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
+**Recombined six-face transfinite volumes** — `mesh_transfinite_volume`
+gains a `recombine=` mask in canonical face order `(vmin, umax, vmax, umin,
+wmin, wmax)` covering Gmsh 4.15.2's full six-face decision tree and
+returning a `MixedMesh` (`nothing`/`false`/all-false keeps the simplex
+`Mesh` path bitwise-unchanged). All-recombined emits one `CREATE_HEX`
+hexahedron per cell with quadrangle boundary sheets; exactly one
+unrecombined opposite face pair emits a prism pair per cell —
+`(F,T,F,T,T,T)` and `(T,F,T,F,T,T)` span v/u through prisms whose emitted
+order carries Gmsh's `MPrism` orientation fixup on the literal macro
+tuples (`(1↔2, 4↔5)` swap — the same fixup the compact-prism path needed),
+and `(T,T,T,T,F,F)` emits `CREATE_PRISM_1`/`CREATE_PRISM_2` pairs. Every
+other mask throws the "wrong surface recombination" `ArgumentError` Gmsh
+logs. Each emitted cell carries a certified shadow-tet decomposition —
+checked tet-for-tet against the reference six-tet partition where the
+tilings coincide (all-hex and w-free) — and the emitted boundary audits
+exact coverage against the shadow's exterior faces. The affine and
+`transfiniteHex` warped-face paths share the same emitters.
+
+Verified against the oracle: the extended
+`validation/transfinite_volume/differential.jl` runs 5 ordered recombined
+cases (all-hex on (3,2,2) and (1,1,1), w-free on (3,2,2), v-free/u-free on
+a skewed (2,3,2) block) plus 4 invalid-mask cases — ordered volume
+connectivity identical, per-face boundary cell sets identical, rejections
+identical. The shared recombination machinery moved into
+`src/structured/StructuredRecombine.jl` so the volume module (loaded
+before the prism module) can delegate; the prism file keeps thin wrappers
+with its own diagnostic prefix.
+
+Files: `src/structured/StructuredRecombine.jl` (new shared module),
+`src/structured/TransfiniteVolume.jl` (`recombine=` mask, shadow
+templates, recombined cell/boundary emitters, shared simplex/warped
+extractions), `src/structured/TransfinitePrism.jl` (delegating wrappers),
+`test/structured/transfinite_volume_test.jl` (recombined suites — all four
+patterns, pinned ordered tuples, mask/error matrix, warped grids,
+allocation ratchet; 370 focused tests),
+`validation/transfinite_volume/differential.jl` (recombined ordered +
+error cases), docs.
+
+Previous increment: **recombined five-face transfinite prism volumes** (`7cbd9ce`).
+
+<details>
+<summary>Earlier increment detail (five-face prism recombination)</summary>
+
 **Recombined five-face transfinite prism volumes** — `mesh_transfinite_prism`
 gains a `recombine=` mask in canonical `(f0,f1,f2,f4,f5)` order plus an
 `arrangement=` keyword, emitting Gmsh 4.15.2's recombined cells as a
@@ -65,6 +108,8 @@ focused tests),
 `validation/transfinite_prism/differential.jl` (five ordered
 recombined cases plus four error-state cases;
 `TRANSFINITE_PRISM_RECOMBINED_DIFFERENTIAL_OK gmsh=4.15.2`), docs.
+
+</details>
 
 Previous increment: **compact `Mesh.TransfiniteTri = 1` five-face prism
 volumes** (`a811801`) — the `TransfiniteTri = 1` blocker lifted: compact
@@ -511,12 +556,12 @@ and the curved annular-sector transfinite volume reproduces Gmsh's exact
 `validation/geo_constraints/differential.jl` (`transfinite_curved_surface`,
 `transfinite_curved_volume`).
 
-**Blocked, not implemented**: transfinite volume recombination — recombined
-transfinite surfaces produce hexahedra upstream, but the compact `Mesh` and
-the full generation pipeline are simplex-only (`MixedMesh` carries
-non-simplex blocks only through isolated structured APIs). End-to-end
-quad/hex delivery needs a dedicated mixed-element epic (quad surface-patch
-kernel routing, hex volume kernel routing, compact-Mesh/generation changes).
+**Partially unblocked**: transfinite volume recombination — the standalone
+kernels now emit recombined cells (`recombine=` on `mesh_transfinite_prism`
+and `mesh_transfinite_volume`, returning `MixedMesh` with Gmsh's valid
+patterns), but the compact `Mesh` and the full generation pipeline remain
+simplex-only — model-level `Recombine` on transfinite volumes still needs
+MixedMesh plumbing through `execute_geo`/`.msh` assembly.
 
 Previous increment (for context): **warped/non-affine transfinite volumes** — `Transfinite Volume` no longer
 collapses every block onto the affine eight-corner parallelepiped. The model

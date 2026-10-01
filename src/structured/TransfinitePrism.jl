@@ -34,6 +34,9 @@ using ..TransfiniteVolume: _WarpedFace, _chord_ratios, _face_node,
                            _transfinite_hex
 using ..Elements: ElementBlock, MixedMesh
 using ..TransfiniteTriangle: _arrangement
+using ..StructuredRecombine: _canon3, _canon4, _canonical_tets,
+                             _canonical_triangles
+import ..StructuredRecombine
 
 export mesh_transfinite_prism
 
@@ -311,59 +314,18 @@ end
     return (coords[1, index], coords[2, index], coords[3, index])
 end
 
-function _emit_canonical_tet!(tets, position::Int, coords,
-                              a::Int32, b::Int32, c::Int32, d::Int32)
-    sign = orient3(_node(coords, a), _node(coords, b),
-                   _node(coords, c), _node(coords, d))
-    sign == 0 && throw(ArgumentError(
-        "$_CALLER: interpolation produced a zero-volume tetrahedron " *
-        "at output position $position"))
-    sign < 0 || throw(ArgumentError(
-        "$_CALLER: interpolation reversed canonical tetrahedron $position; " *
-        "the represented grid is folded"))
-    @inbounds begin
-        tets[1, position] = a
-        tets[2, position] = b
-        tets[3, position] = c
-        tets[4, position] = d
-    end
-    return nothing
-end
+# The shared recombined-emission machinery lives in `StructuredRecombine`
+# (loaded before `TransfiniteVolume`); these delegations keep every kernel's
+# diagnostics prefixed with its own public entry point.
+_emit_canonical_tet!(tets, position::Int, coords,
+                     a::Int32, b::Int32, c::Int32, d::Int32) =
+    StructuredRecombine._emit_canonical_tet!(
+        _CALLER, tets, position, coords, a, b, c, d)
 
-function _write_outward_triangle!(tris, tags, position::Int, coords,
-                                  a::Int32, b::Int32, c::Int32,
-                                  opposite, tag::Int32)
-    sign = orient3(_node(coords, a), _node(coords, b), _node(coords, c), opposite)
-    sign == 0 && throw(ArgumentError(
-        "$_CALLER: interpolation produced a degenerate boundary triangle " *
-        "at output position $position"))
-    @inbounds begin
-        tris[1, position] = a
-        if sign > 0
-            tris[2, position] = b
-            tris[3, position] = c
-        else
-            tris[2, position] = c
-            tris[3, position] = b
-        end
-        tags[position] = tag
-    end
-    return position + 1
-end
-
-function _canonical_triangles(tris)
-    result = Vector{NTuple{3,Int32}}(undef, size(tris, 2))
-    @inbounds for triangle in axes(tris, 2)
-        a = tris[1, triangle]
-        b = tris[2, triangle]
-        c = tris[3, triangle]
-        result[triangle] = a <= b ?
-            (a <= c ? (b <= c ? (a, b, c) : (a, c, b)) : (c, a, b)) :
-            (b <= c ? (a <= c ? (b, a, c) : (b, c, a)) : (c, b, a))
-    end
-    sort!(result)
-    return result
-end
+_write_outward_triangle!(tris, tags, position::Int, coords,
+                         a::Int32, b::Int32, c::Int32, opposite, tag::Int32) =
+    StructuredRecombine._write_outward_triangle!(
+        _CALLER, tris, tags, position, coords, a, b, c, opposite, tag)
 
 function _certify_volume(coords, tets, corners)
     return _certify_tet_volume(
@@ -1424,25 +1386,27 @@ function _tri_arrangements(raw)
     return (_arrangement(raw[1], _CALLER), _arrangement(raw[2], _CALLER))
 end
 
-@inline _canon3(a::Int32, b::Int32, c::Int32) =
-    a <= b ? (a <= c ? (b <= c ? (a, b, c) : (a, c, b)) : (c, a, b)) :
-             (b <= c ? (a <= c ? (b, a, c) : (b, c, a)) : (c, b, a))
+_emit_recombined_cell!(cells::AbstractMatrix{Int32}, column::Int,
+                       shadow::AbstractMatrix{Int32}, position::Int,
+                       coords, vertices, decomp) =
+    StructuredRecombine._emit_recombined_cell!(
+        _CALLER, cells, column, shadow, position, coords, vertices, decomp)
 
-@inline function _canon4(a::Int32, b::Int32, c::Int32, d::Int32)
-    a, b = minmax(a, b); c, d = minmax(c, d)
-    a, c = minmax(a, c); b, d = minmax(b, d)
-    b, c = minmax(b, c)
-    return (a, b, c, d)
-end
+_write_outward_quad!(quads, tags, position::Int, coords,
+                     a::Int32, b::Int32, c::Int32, d::Int32, opposite,
+                     tag::Int32) =
+    StructuredRecombine._write_outward_quad!(
+        quads, tags, position, coords, a, b, c, d, opposite, tag)
 
-function _canonical_tets(tets::AbstractMatrix{Int32})
-    result = Vector{NTuple{4,Int32}}(undef, size(tets, 2))
-    @inbounds for tet in axes(tets, 2)
-        result[tet] = _canon4(
-            tets[1, tet], tets[2, tet], tets[3, tet], tets[4, tet])
-    end
-    return sort!(result)
-end
+_certify_recombined_boundary(shadow, tris, quads) =
+    StructuredRecombine._certify_recombined_boundary(_CALLER, shadow, tris,
+                                                     quads)
+
+_recombined_mixed_mesh(coords, tris, tri_tags, quads, quad_tags, hexes,
+                       prisms, volume_tag::Int32) =
+    StructuredRecombine._recombined_mixed_mesh(
+        _CALLER, coords, tris, tri_tags, quads, quad_tags, hexes, prisms,
+        volume_tag)
 
 # Positional simplex decompositions of the emitted volume cells, indexed in
 # each cell tuple's own vertex order. Unioned over a grid cell they reproduce
@@ -1458,112 +1422,6 @@ const _SHADOW_PRISM_3 = ((2, 1, 5, 3), (1, 4, 5, 3), (5, 4, 6, 3))
 const _SHADOW_PRISM_4 = _SHADOW_PRISM_1
 const _SHADOW_HEX = ((1, 2, 4, 5), (2, 4, 5, 6), (5, 6, 4, 8),
                      (2, 4, 6, 3), (4, 8, 6, 3), (6, 8, 7, 3))
-
-# Writes the cell tuple into `cells` at `column` and emits its tetrahedron
-# decomposition into `shadow`, certifying every constituent tetrahedron
-# through the canonical orientation check. Returns the updated shadow
-# position.
-@inline function _emit_recombined_cell!(cells::AbstractMatrix{Int32},
-        column::Int, shadow::AbstractMatrix{Int32}, position::Int,
-        coords, vertices, decomp)
-    @inbounds for i in eachindex(vertices)
-        cells[i, column] = vertices[i]
-    end
-    @inbounds for tet in decomp
-        position += 1
-        _emit_canonical_tet!(shadow, position, coords,
-                             vertices[tet[1]], vertices[tet[2]],
-                             vertices[tet[3]], vertices[tet[4]])
-    end
-    return position
-end
-
-# Quadrilateral analogue of `_write_outward_triangle!`: emits the boundary
-# quadrangle wound so its first corner triangle faces away from `opposite`.
-# A degenerate first triangle (non-planar warped quad) keeps the incoming
-# winding — the coverage audit still certifies the cell's placement.
-function _write_outward_quad!(quads, tags, position::Int, coords,
-                              a::Int32, b::Int32, c::Int32, d::Int32,
-                              opposite, tag::Int32)
-    sign = orient3(_node(coords, a), _node(coords, b),
-                   _node(coords, c), opposite)
-    @inbounds begin
-        quads[1, position] = a
-        if sign >= 0
-            quads[2, position] = b
-            quads[3, position] = c
-            quads[4, position] = d
-        else
-            quads[2, position] = d
-            quads[3, position] = c
-            quads[4, position] = b
-        end
-        tags[position] = tag
-    end
-    return position + 1
-end
-
-# Audits the emitted boundary cells against the shadow partition's boundary:
-# every emitted triangle must be a shadow boundary face and every emitted
-# quadrangle must contain exactly the two boundary triangles it covers —
-# once each, with nothing left over. This certifies exact coverage even for
-# the shifted quadrangles of the alternate/left compact arrangements, whose
-# covered triangle pairs are always subsets of the quad's vertex set.
-function _certify_recombined_boundary(shadow, tris, quads)
-    extracted_boundary, maximum_incidence = boundary_faces(shadow)
-    maximum_incidence == 2 || throw(ErrorException(
-        "$_CALLER: recombined volume decomposition produced face incidence " *
-        "$maximum_incidence"))
-    remaining = Set{NTuple{3,Int32}}()
-    sizehint!(remaining, length(extracted_boundary))
-    for face in extracted_boundary
-        push!(remaining, face)
-    end
-    @inbounds for t in axes(tris, 2)
-        key = _canon3(tris[1, t], tris[2, t], tris[3, t])
-        key in remaining || throw(ErrorException(
-            "$_CALLER: emitted boundary triangle $t is not on the volume " *
-            "boundary"))
-        delete!(remaining, key)
-    end
-    @inbounds for q in axes(quads, 2)
-        a = quads[1, q]; b = quads[2, q]; c = quads[3, q]; d = quads[4, q]
-        covered = 0
-        for face in (_canon3(a, b, c), _canon3(a, c, d),
-                     _canon3(a, b, d), _canon3(b, c, d))
-            if face in remaining
-                delete!(remaining, face)
-                covered += 1
-            end
-        end
-        covered == 2 || throw(ErrorException(
-            "$_CALLER: emitted boundary quadrangle $q does not cover " *
-            "exactly two boundary faces"))
-    end
-    isempty(remaining) || throw(ErrorException(
-        "$_CALLER: emitted boundary leaves $(length(remaining)) volume " *
-        "boundary faces uncovered"))
-    return nothing
-end
-
-function _recombined_mixed_mesh(coords, tris, tri_tags, quads, quad_tags,
-                                hexes, prisms, volume_tag::Int32)
-    blocks = ElementBlock[]
-    size(tris, 2) > 0 &&
-        push!(blocks, ElementBlock(2, tris, tri_tags))
-    size(quads, 2) > 0 &&
-        push!(blocks, ElementBlock(3, quads, quad_tags))
-    size(hexes, 2) > 0 &&
-        push!(blocks, ElementBlock(5, hexes,
-                                   fill(volume_tag, size(hexes, 2))))
-    size(prisms, 2) > 0 &&
-        push!(blocks, ElementBlock(6, prisms,
-                                   fill(volume_tag, size(prisms, 2))))
-    mesh = MixedMesh(coords, blocks)
-    diagnostic = validate(mesh)
-    diagnostic.ok || _throw_simplex_validation(_CALLER, diagnostic.messages)
-    return mesh
-end
 
 function _mesh_transfinite_prism_recombined(corners, nr::Int, ns::Int,
         nw::Int, faces, mask::NTuple{5,Bool}; compact::Bool, arrangement,
