@@ -372,3 +372,48 @@ end
         abs(mesh.coords[1,node]-2.0)<1e-6 && abs(mesh.coords[2,node])<1e-6
     end==2
 end
+
+@testset "closed spline grading meets the three-segment floor" begin
+    # Gmsh 4.15.2 emits a three-element loop on a coarse closed spline — the
+    # shared end vertex turns `N = minimumMeshSegments + 1` nodes into `N`
+    # edges, so the `MinCurveNodes - 1` open floor under-grades a closed
+    # curve into an unrealizable digon. The same source leaves an open
+    # spline at its two-segment floor.
+    graded=_execute_spline_source(raw"""
+        lc = 5;
+        Point(1) = {0.4,0.3,0.5,lc};
+        Point(2) = {0.5,0.4,0.5,lc};
+        Point(3) = {0.6,0.3,0.5,lc};
+        Point(4) = {0.5,0.2,0.5,lc};
+        Spline(10) = {1,2,3,4,1};
+        Spline(11) = {1,2,3,4};
+        Mesh 1;
+        """)
+    closed_params=graded.model.curve_params[10]
+    open_params=graded.model.curve_params[11]
+    # Closed curves drop the duplicated t1 endpoint: params count == edges.
+    @test length(closed_params)==3
+    @test closed_params[1]≈0.0
+    @test issorted(closed_params)
+    # Gmsh 4.15.2 places the two interior nodes at arc-length thirds.
+    @test model_value(graded.model,1,10,[closed_params[2]])≈
+        [0.5440137845686362,0.3789667547793607,0.4999999999999999] atol=1e-8
+    @test model_value(graded.model,1,10,[closed_params[3]])≈
+        [0.5440137835188129,0.221033244394902,0.5] atol=1e-8
+    @test length(open_params)-1==2
+    # A raised `MinCurveNodes` floor wins over the closed minimum: Gmsh
+    # emits four segments on the same closed spline. The statement uses
+    # the upstream-canonical `MinimumCurvePoints` spelling, which aliases
+    # onto `MinCurveNodes`.
+    raised=_execute_spline_source(raw"""
+        lc = 5;
+        Mesh.MinimumCurvePoints = 5;
+        Point(1) = {0.4,0.3,0.5,lc};
+        Point(2) = {0.5,0.4,0.5,lc};
+        Point(3) = {0.6,0.3,0.5,lc};
+        Point(4) = {0.5,0.2,0.5,lc};
+        Spline(10) = {1,2,3,4,1};
+        Mesh 1;
+        """)
+    @test length(raised.model.curve_params[10])==4
+end

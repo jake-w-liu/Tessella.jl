@@ -403,6 +403,15 @@ function _model_minimum_curve_segments(m::GeoModel,curve::Integer,
         a,b=m.curves[curve]
         a==b && (np=max(4,np))
     end
+    # A closed native curve needs at least three segments upstream: its
+    # shared end vertex turns the `N = minimumMeshSegments + 1` node target
+    # into `N` edges, and Gmsh 4.15.2 emits a three-edge loop on a coarse
+    # closed spline (still four under `MinCurvePoints 5`, matching the
+    # regular floor) — a two-segment digon only arises on degenerate input.
+    if !is_occ && kind!==:line && haskey(m.curves,curve)
+        a,b=m.curves[curve]
+        a==b && (np=max(np,3))
+    end
     # A curve bounding a two-generatrix surface needs at least 2 segments —
     # `gmshEdge::minimumMeshSegments`'s `Generatrices==2` rule (the
     # generatrices are the total boundary-curve count across the face's
