@@ -522,9 +522,7 @@ inward-bulging boundary, which Tessella refuses to emit. P4 does not yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite or holed transfinite patches,
 general CAD parameterizations, compact-TransfiniteTri volumes,
-`In Sphere` transfinite face fills, orphan `Point` vertex emission on the
-single-volume `mesh_dim=3` dispatch shortcut (the `Mesh 3` statement path
-retains them, matching Gmsh), volume/hybrid
+`In Sphere` transfinite face fills, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, curved
 periodic surfaces, or allocator reads after
@@ -548,6 +546,55 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
+Gmsh 4.15.2 binary after completing the all-dimension `execute_geo`
+emission increment:
+
+- `execute_geo(path; mesh_dim=n)` now routes every model through
+  `_geo_mesh_model` like the `Mesh n` statement: vertex parts (orphan
+  `Point` entities included — e.g. an arc's control-point entity),
+  graded curve parts, surface parts, and volume parts merge on bitwise
+  coordinates. Verified kwarg-vs-statement bitwise-identical on the
+  periodic-surface volume, its rotated variant, geometry-expression,
+  list-variable, SetMaxTag, PointsOf, and all periodic dim-2 fixtures;
+  Gmsh 4.15.2 emits the same element mix (126 nodes / 633 elements on
+  the curved-box oracle fixture).
+- The per-entity decomposition stays on `GeoExecution.mesh_parts`;
+  `geo_entity_mesh(execution, dim, tag)` recovers each entity's own
+  mesh for classified `model_to_mixed` projection, which keeps its
+  strict pure-entity contract and reproduces the pre-unification output
+  bitwise — every `mixed_crc` pin across the geometry and CLI suites is
+  unchanged. The CLI's `.msh` writer now serializes vertex/edge/face/
+  region cells like `gmsh -n`.
+- OCC `gp_Lin` parameters carry native (possibly nonzero-origin) bounds:
+  `_periodic_curve_point` no longer evaluates them as chord fractions,
+  and `_curve_parameter_nodes`/`_embedded_line_curve_nodes` emit native
+  frames with endpoint-exact snapping — a latent bug that broke OCC
+  Boolean-difference face meshing (constraint overlap / degenerate
+  triangles / broken endpoint chains). The BooleanDifference fixture now
+  meshes all six faces plus the volume (299 nodes / 72 segs / 592 tris /
+  12 tets, `validate` green, unit volume).
+- OCC-curved boundary faces (cylinder/sphere/cone/torus side walls that
+  cannot standalone-mesh) skip their surface part when they bound a
+  volume — the facets ride volume boundary recovery — while the OCC
+  Cylinder kwarg path now matches the `Mesh 3` statement path.
+- The `Include`/`Merge` relative-path helper's shadowed `in` binding (a
+  pre-existing `MethodError` on absolute Windows child paths) is fixed.
+- Caveat recorded: `mesh_model_volume`/`model_to_mixed` output is
+  sensitive to `--check-bounds` codegen (borderline FP decisions in the
+  Delaunay/refinement path); all pins are therefore verified under the
+  suite's `--check-bounds=yes` mode, and CRC probes must run with that
+  flag.
+- Gates green: `model_test` 104/104, `geo_periodic_test`,
+  `geo_mesh_dim_test` 159/159, `geo_curved_test`, `geo_constraints_test`,
+  `geo_mesh_size_test` 242/242, `geo_geometry_expression_test` 58/58,
+  `geo_list_variable_test` 66/66, `geo_set_max_tag_test` 95/95,
+  `geo_dynamic_tag_test` 143/143, `geo_discrete_statements_test`,
+  `transfinite_test` 193/193, `model_volume_io_test`,
+  `model_periodic_io_test`, `occ_primitives_test`, boolean multi/snapshot
+  and lifecycle files, `sizefield_test`, `cli_test`, `io_test`,
+  `pipeline_test`, and the remaining geo files.
 
 Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
 Gmsh 4.15.2 binary after completing the non-coplanar `Plane Surface`

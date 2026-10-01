@@ -53,7 +53,7 @@ end
     @test nnodes(meshed.mesh)==139
     @test ntets(meshed.mesh)==457
     @test mesh_crc(meshed.mesh).sha==
-          "25c0b9c98a5b8dc959b7f58202d62ad783c49a7b1e00111d649731112b975ee6"
+          "48656cd230252b831ec240081289d7c6f9103626726f2e4aa8728e1c764c49a7"
     volume=sum(tet_volume(
         node(meshed.mesh,meshed.mesh.tets[1,cell]),
         node(meshed.mesh,meshed.mesh.tets[2,cell]),
@@ -61,7 +61,8 @@ end
         node(meshed.mesh,meshed.mesh.tets[4,cell]))
         for cell in 1:ntets(meshed.mesh))
     @test volume≈1.0 atol=1e-12
-    projected=model_to_mixed(meshed.model,meshed.mesh,3,60)
+    projected=model_to_mixed(meshed.model,
+        geo_entity_mesh(meshed,3,60),3,60)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==

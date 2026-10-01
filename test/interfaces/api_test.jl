@@ -160,7 +160,7 @@ const _API=Tessella.API
             @test periodic_result.mesh!==nothing
             periodic_crc=mesh_crc(periodic_result.mesh)
             @test periodic_crc.sha==
-                  "08674bf2c04858b96e77c2fe66959845f59721475fef80138ecfec5861d9cdba"
+                  "393550fabf46b3bf286058d17df8b7ee344eb5abf05a290b123f99ac80102854"
             periodic_mapping=_API.mesh.get_periodic_nodes(1,2)
             @test periodic_mapping.master_entity==4
             @test length(periodic_mapping.slave_nodes)==3

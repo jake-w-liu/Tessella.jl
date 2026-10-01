@@ -44,8 +44,9 @@ end
     @test nnodes(meshed.mesh)==20
     @test ntets(meshed.mesh)==34
     @test mesh_crc(meshed.mesh).sha==
-          "b37a5b6e0d579ce9b6a7ade506ffe4b7c2cbca909b850a59511560587a8d05fe"
-    projected=model_to_mixed(meshed.model,meshed.mesh,3,601)
+          "682aa21cd95b35aa4e0d3bdfdff1dcb266ab014151c9475a84c5fea85b465e04"
+    projected=model_to_mixed(meshed.model,
+        geo_entity_mesh(meshed,3,601),3,601)
     @test validate(projected).ok
     @test mixed_crc(projected).sha==
           "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486"

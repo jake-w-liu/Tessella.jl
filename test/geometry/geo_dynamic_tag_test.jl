@@ -72,10 +72,11 @@ end
     @test nnodes(meshed.mesh)==135
     @test ntets(meshed.mesh)==440
     @test mesh_crc(meshed.mesh).sha==
-          "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8"
+          "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b"
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,22).slave_nodes)==21
     @test length(model_periodic_nodes(meshed.model,meshed.mesh,2,23).slave_nodes)==21
-    projected=model_to_mixed(meshed.model,meshed.mesh,3,26)
+    projected=model_to_mixed(meshed.model,
+        geo_entity_mesh(meshed,3,26),3,26)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==

@@ -239,7 +239,7 @@ end
 
     # The zero-affine record round-trips through MSH4 exactly like Gmsh's own
     # transform-free output — vertex links carry no affine either.
-    mixed=model_to_mixed(meshed.model,meshed.mesh,1)
+    mixed=model_to_mixed(meshed.model,geo_entity_mesh(meshed,2,1),1)
     link_kinds=sort!([(link.dim,link.affine===nothing)
                       for link in mixed.periodic_links])
     @test link_kinds==[(0,true),(0,true),(1,true)]
@@ -459,7 +459,7 @@ end
     @test meshed.mesh!==nothing
     @test validate(meshed.mesh).ok
     @test mesh_crc(meshed.mesh).sha==
-          "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8"
+          "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b"
     # Surface 4 includes the embedded probe; Gmsh 4.15.2 also gives this
     # slave 21 nodes (4 corners + 8 curve nodes + 8 interior + the probe).
     @test length(model_periodic_nodes(
@@ -477,7 +477,7 @@ end
     # Rotate-by-Pi rounding reaches the CDT predicates, so connectivity is
     # not rotation-invariant — upstream's rotated connectivity differs too.
     @test mesh_crc(rotated.mesh).sha==
-          "385c7e98840b7a83acd5b2f78a62f2253e8eb8de4c5009c57b3400810aaab146"
+          "a2a257956317108f705f881f79be6da0858ab8691f328376227036f9b08492a1"
     rotated_mapping=model_periodic_nodes(
         rotated.model,rotated.mesh,2,4)
     @test length(rotated_mapping.slave_nodes)==21
@@ -517,7 +517,7 @@ end
     @test translated.mesh!==nothing
     @test validate(translated.mesh).ok
     @test mesh_crc(translated.mesh).sha==
-          "08674bf2c04858b96e77c2fe66959845f59721475fef80138ecfec5861d9cdba"
+          "393550fabf46b3bf286058d17df8b7ee344eb5abf05a290b123f99ac80102854"
     translation_constraint=only(
         model_periodic_constraints(translated.model))
     @test translation_constraint.affine==
@@ -554,7 +554,7 @@ end
     rotated=_execute_geo_source(_periodic_geo_rotation();mesh_dim=2)
     @test validate(rotated.mesh).ok
     @test mesh_crc(rotated.mesh).sha==
-          "5e0c8e95ee2cf9c4c4c674363a826f281a0b4e8d7dd9f2aa0a3831cb0ee15e0a"
+          "d1e09225614d9346ab32ad35c7dfb96c1df7467c19433d63e8e579c04152495b"
     rotation_constraint=only(model_periodic_constraints(rotated.model))
     @test !rotation_constraint.reversed
     @test rotation_constraint.affine[2]≈-1.0 atol=1e-15
@@ -581,7 +581,7 @@ end
         _periodic_geo_embedded_curves();mesh_dim=2)
     @test validate(embedded.mesh).ok
     @test mesh_crc(embedded.mesh).sha==
-          "d32b6ce391d3fd5d5594844ee1a4446a8628120032a9236502bb079dbaac574e"
+          "72626ce45c3eeada59b4677203eda234a0bb35b1b75fdacb97c3c2ba8e7ccf05"
     embedded_mapping=model_periodic_nodes(
         embedded.model,embedded.mesh,1,6)
     @test embedded_mapping.master_entity==5
@@ -601,7 +601,7 @@ end
     @test (fractional_constraint.slave_entity,
            fractional_constraint.master_entity)==(2,4)
     @test mesh_crc(fractional.mesh).sha==
-          "08674bf2c04858b96e77c2fe66959845f59721475fef80138ecfec5861d9cdba"
+          "393550fabf46b3bf286058d17df8b7ee344eb5abf05a290b123f99ac80102854"
 
     for (mode,masters,offsets) in (
             (:branch,Dict(10=>30,20=>30),Dict(10=>0.6,20=>0.3)),
@@ -611,7 +611,7 @@ end
             _periodic_geo_curve_graph(mode);mesh_dim=2)
         @test validate(graph.mesh).ok
         @test mesh_crc(graph.mesh).sha==
-              "9a5503ab32b8725f2c9e739a075f2e45c4b35763439b0ff59a3b2d661d4678ae"
+              "e33b17bddb9efeb3bdf4b98db04cfe62ab14330c2508ad6c28e63b1bf83606ba"
         graph_constraints=model_periodic_constraints(graph.model)
         @test Int.(getproperty.(graph_constraints,:slave_entity))==[10,20]
         @test Int.(getproperty.(graph_constraints,:master_entity))==
@@ -646,7 +646,7 @@ end
     @test cyclic.msg_error_count==0
     @test validate(cyclic.mesh).ok
     @test mesh_crc(cyclic.mesh).sha==
-          "5ff98566e9b7f69de0ce7893a95f413fad48a650081a29ae56f1f61ff092c088"
+          "2b8462eb1fd09a3bf785efa963b2eb09c98d6b0a08d6bd49323c991d2b10dc74"
     cyclic_constraints=model_periodic_constraints(cyclic.model)
     @test Int.(getproperty.(cyclic_constraints,:slave_entity))==[10,20,30]
     @test Int.(getproperty.(cyclic_constraints,:master_entity))==[20,30,10]
@@ -673,7 +673,8 @@ end
     # plus their six endpoint links, matching upstream's nine `$Periodic`
     # records (upstream's starved curve links carry empty node lists; the
     # converged sync here populates them).
-    cyclic_mixed=model_to_mixed(cyclic.model,cyclic.mesh,1)
+    cyclic_mixed=model_to_mixed(cyclic.model,
+        geo_entity_mesh(cyclic,2,1),1)
     @test length(cyclic_mixed.periodic_links)==9
     cyclic_counts=Dict{Int,Int}()
     for link in cyclic_mixed.periodic_links

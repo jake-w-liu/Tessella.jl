@@ -392,9 +392,14 @@ end
         """;mesh_dim=2)
     @test annulus.msg_error_count==0
     @test nnodes(annulus.mesh)>0 && ntris(annulus.mesh)>0
-    # The hole is genuinely open: no node lands inside the inner radius.
-    @test all(1:nnodes(annulus.mesh)) do node
-        hypot(annulus.mesh.coords[1,node],annulus.mesh.coords[2,node])>=0.6-1e-9
+    # The hole is genuinely open: no surface-part node lands inside the inner
+    # radius. (The merged mesh also carries the arc centers' orphan vertex
+    # nodes — Point(3) sits at the origin — matching upstream's per-entity
+    # emission.)
+    annulus_surface=geo_entity_mesh(annulus,2,1)
+    @test all(1:nnodes(annulus_surface)) do node
+        hypot(annulus_surface.coords[1,node],
+              annulus_surface.coords[2,node])>=0.6-1e-9
     end
 
     # A spline boundary loop.

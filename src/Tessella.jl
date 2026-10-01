@@ -112,7 +112,7 @@ using .Model: GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_l
               model_discrete_entity,
               model_discrete_entities, DiscreteEntity
 using .NURBS: NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
-using .GeoExec: execute_geo
+using .GeoExec: execute_geo, geo_entity_mesh
 using .BoundaryLayer: mesh_boundary_layer, mesh_boundary_layer_2d, mesh_boundary_layer_filled
 using .Periodic: periodic_identify, periodic_identify_affine
 using .BRep: import_step, import_iges, import_nurbs_step, import_nurbs_iges,
@@ -191,7 +191,8 @@ export ModelPeriodicConstraint, set_periodic!, model_periodic_constraints,
        model_periodic_nodes, model_to_mixed
 export add_physical_group!, mesh_model_surface, mesh_model_volume
 export NURBSCurve, NURBSSurface, nurbs_eval, bspline_basis
-export execute_geo, mesh_boundary_layer, mesh_boundary_layer_2d,
+export execute_geo, geo_entity_mesh, mesh_boundary_layer,
+       mesh_boundary_layer_2d,
        mesh_boundary_layer_filled, periodic_identify, periodic_identify_affine
 export import_step, import_iges, import_nurbs_step, import_nurbs_iges, export_iges_nurbs
 export AbstractField, AbstractSizeField, AbstractAnisoField, ConstantSize, FunctionSize, DistanceField,

@@ -170,7 +170,7 @@ Physical Volume("domain", 72) = {1};
         mesh=read_msh(output).mesh
         @test validate(mesh).ok && ntris(mesh)>0
         @test mesh_crc(mesh).sha==
-              "850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4"
+              "b3f60bd561ab9015ca6b9a98fde12af5fa37166382690e6aca68b9329837bb23"
 
         explicit=joinpath(directory,"explicit.msh")
         wrapped="x"*input*"x"
@@ -407,7 +407,7 @@ Physical Volume("domain", 72) = {1};
         point_mesh_size=read_msh(point_mesh_size_output).mesh
         @test validate(point_mesh_size).ok
         @test mesh_crc(point_mesh_size).sha==
-              "2b17b65bf07655c9f85d24d261375a828a5e0ec3af0f081bfe83ef0064f1d492"
+              "74d5faf2f6598280b886ecceaf5b0eedf3373b93d2f601cffba1a4274d57c9af"
 
         points_of_input=joinpath(directory,"point-mesh-size-points-of.geo")
         points_of_output=joinpath(directory,"point-mesh-size-points-of.msh")
