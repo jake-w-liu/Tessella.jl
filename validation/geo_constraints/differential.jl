@@ -191,6 +191,73 @@ const CASES = (
      Transfinite Surface{:};
      Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
      """),
+    (name=:transfinite_prism, mode=:mesh, dim=0,
+     # Five-face triangular prism: Gmsh's legacy `Mesh.TransfiniteTri = 0`
+     # path meshes it as a degenerate hexahedron (s3≡s0, s7≡s4) — 52 nodes,
+     # 84 triangles, 135 tetrahedra. `Mesh 3` merges every part so the six
+     # corner point entities count too.
+     source="""
+     Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+     Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+     Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,1};
+     Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+     Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+     Curve Loop(1)={1,2,3}; Curve Loop(2)={7,8,9};
+     Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+     Curve Loop(5)={3,4,-9,-6};
+     Surface(1)={1}; Surface(2)={2};
+     Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+     Surface Loop(1)={1,2,3,4,5};
+     Volume(1)={1};
+     Transfinite Curve{:}=4;
+     Transfinite Surface{:};
+     Transfinite Volume{1}={1,2,3,4,5,6};
+     Mesh 3;
+     """),
+    (name=:transfinite_prism_curved, mode=:mesh, dim=0,
+     # Curve 2 is a quarter-circle arc: triangular face 1 meshes it in its
+     # own plane while quadrilateral face 4 becomes a warped ruled patch —
+     # the prism interior follows transfiniteHex on the degenerate slots.
+     source="""
+     Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+     Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+     Point(9)={1,1,0};
+     Line(1)={1,2}; Circle(2)={2,9,3}; Line(3)={3,1};
+     Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+     Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+     Curve Loop(1)={1,2,3}; Curve Loop(2)={7,8,9};
+     Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+     Curve Loop(5)={3,4,-9,-6};
+     Surface(1)={1}; Surface(2)={2};
+     Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+     Surface Loop(1)={1,2,3,4,5};
+     Volume(1)={1};
+     Transfinite Curve{:}=4;
+     Transfinite Surface{:};
+     Transfinite Volume{1}={1,2,3,4,5,6};
+     Mesh 3;
+     """),
+    (name=:transfinite_prism_auto, mode=:mesh, dim=0,
+     # No explicit corner list — `findTransfiniteCorners` seeds the apex
+     # from a triangular face, like upstream.
+     source="""
+     Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+     Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+     Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,1};
+     Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+     Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+     Curve Loop(1)={1,2,3}; Curve Loop(2)={7,8,9};
+     Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+     Curve Loop(5)={3,4,-9,-6};
+     Surface(1)={1}; Surface(2)={2};
+     Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+     Surface Loop(1)={1,2,3,4,5};
+     Volume(1)={1};
+     Transfinite Curve{:}=4;
+     Transfinite Surface{:};
+     Transfinite Volume{1};
+     Mesh 3;
+     """),
     (name=:transfquadtri_blocker, mode=:error, dim=3,
      # Native kernel emits tetrahedra only — the QuadTri flag is an explicit
      # blocker (Gmsh succeeds with its HAVE_QUADTRI path).
@@ -620,7 +687,8 @@ try
             check_embed_point(t.execution.mesh,
                               case.name == :embedded_kept, case.name)
         elseif case.mode == :curve_in_volume
-            check_curve_in_volume_arc(t.execution.mesh, tm, case.name)
+            check_curve_in_volume_arc(
+                geo_entity_mesh(t.execution, 3, 1), tm, case.name)
         elseif case.mode == :recombine_gap
             tm.meshing.recombine[(2, 1)] == 30.0 || error(
                 "$(case.name): Tessella lost the Recombine 30 constraint")

@@ -805,8 +805,15 @@ shared-edge/corner certification, bitwise boundary-node reuse, and the
 canonical conforming boundary split audited strictly outward. Affine blocks
 retain the exact-dyadic remote-grid interpolation and a represented-volume
 conservation audit on the kernel's direct path;
-canonical affine triangular prisms implement Gmsh's legacy collapsed-grid five-face
-tetrahedral path; positively ordered affine eight-corner blocks can also be emitted
+canonical triangular prisms implement Gmsh's legacy collapsed-grid five-face
+tetrahedral path (`Mesh.TransfiniteTri = 0`), mapped onto the degenerate
+hexahedral slot layout (`s3≡s0`, `s7≡s4`): the model path meshes the two
+triangular boundary faces with the collapsed-grid kernel (its node-count
+corner rotation honored), reindexes all five face grids onto the canonical
+slots, certifies every shared edge and corner bitwise, and interpolates the
+interior through the same `transfiniteHex` Coons formula — curved, warped,
+and ruled boundaries included — while the corner-only path keeps its affine
+certification and represented-volume audit; positively ordered affine eight-corner blocks can also be emitted
 as first-order recombined hexahedra with type-3 boundary quadrangles. Planar
 polylines with an explicit oriented plane normal extrude to type-3 quadrangles
 along left-normals, with optional convex-corner fans of first-layer triangles and
@@ -944,7 +951,9 @@ cached linear-simplex element-quality queries,
 fixed element type/property and fixed-family reference-quadrature lookup,
 four-sided transfinite, straight and curved transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
-recombined-quadrangle, affine transfinite-volume, five-face-prism, and
+recombined-quadrangle, affine transfinite-volume, affine and curved/warped
+five-face-prism (explicit and auto-detected corners, including Gmsh's
+matching "Incompatible surface" rejection), and
 recombined-hexahedron differentials, plus native `.geo` and projected
 single-/two-direction periodic surfaces, embedded, reusable-master/chained, and
 expression/list-backed periodic curves, low-level translation/rotation-periodic curves

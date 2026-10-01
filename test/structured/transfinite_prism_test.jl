@@ -357,6 +357,165 @@ end
             Tessella.TransfinitePrism; private=false))
     end
 
+    @testset "face-grid boundary input (degenerate-hexahedron slots)" begin
+        # Canonical slot grids for an affine prism — f0=(s0,s1,s5,s4),
+        # f1=(s1,s2,s6,s5), f2=(s0,s2,s6,s4) are (u,w)/(v,w) bilinear fills;
+        # f4/f5 are the collapsed triangular grids whose i=0 column repeats
+        # the apex bitwise.
+        function _affine_prism_faces(corners, nr, ns, nw)
+            s0, s1, s2, s4, s5, s6 = corners
+            function fill_grid(m, n, evaluate)
+                points = Matrix{Float64}(undef, 3, (m + 1) * (n + 1))
+                for j in 0:n, i in 0:m
+                    point = evaluate(i / m, j / n)
+                    column = i + 1 + j * (m + 1)
+                    points[1, column] = point[1]
+                    points[2, column] = point[2]
+                    points[3, column] = point[3]
+                end
+                return points
+            end
+            bilinear(a, b, c, d) = (u, v) -> _prism_lerp3(
+                _prism_lerp3(a, b, u), _prism_lerp3(d, c, u), v)
+            collapsed(a, b, c) = (u, v) -> _prism_lerp3(
+                a, _prism_lerp3(b, c, v), u)
+            function quad_tris(m, n)
+                result = Matrix{Int32}(undef, 3, 2 * m * n)
+                cursor = 0
+                for j in 0:n-1, i in 0:m-1
+                    a = i + 1 + j * (m + 1); b = a + 1
+                    d = a + m + 1; e = d + 1
+                    result[:, cursor + 1] .= (a, b, d)
+                    result[:, cursor + 2] .= (b, e, d)
+                    cursor += 2
+                end
+                return result
+            end
+            function collapsed_tris(m, n)
+                result = Matrix{Int32}(undef, 3, n * (2 * m - 1))
+                nodeat(i, j) = i + 1 + j * (m + 1)
+                cursor = 0
+                for j in 0:n-1
+                    result[:, cursor + 1] .= (nodeat(0, 0),
+                                            nodeat(1, j), nodeat(1, j + 1))
+                    cursor += 1
+                end
+                for i in 1:m-1, j in 0:n-1
+                    a = nodeat(i, j); b = nodeat(i + 1, j)
+                    c = nodeat(i, j + 1); g = nodeat(i + 1, j + 1)
+                    result[:, cursor + 1] .= (a, b, c)
+                    result[:, cursor + 2] .= (c, b, g)
+                    cursor += 2
+                end
+                return result
+            end
+            f0 = fill_grid(nr, nw, bilinear(s0, s1, s5, s4))
+            f1 = fill_grid(ns, nw, bilinear(s1, s2, s6, s5))
+            f2 = fill_grid(nr, nw, bilinear(s0, s2, s6, s4))
+            f4 = fill_grid(nr, ns, collapsed(s0, s1, s2))
+            f5 = fill_grid(nr, ns, collapsed(s4, s5, s6))
+            return ((f0, quad_tris(nr, nw), fill(Int32(11), 2nr * nw)),
+                    (f1, quad_tris(ns, nw), fill(Int32(12), 2ns * nw)),
+                    (f2, quad_tris(nr, nw), fill(Int32(13), 2nr * nw)),
+                    (f4, collapsed_tris(nr, ns), fill(Int32(14), ns * (2nr - 1))),
+                    (f5, collapsed_tris(nr, ns), fill(Int32(15), ns * (2nr - 1))))
+        end
+
+        corners = _affine_prism_corners()
+        nr, ns, nw = 2, 3, 2
+        affine = mesh_transfinite_prism(corners, (nr, ns, nw))
+        meshed = mesh_transfinite_prism(
+            corners, (nr, ns, nw); faces=_affine_prism_faces(corners, nr, ns, nw),
+            volume_tag=21, face_tags=(11, 12, 13, 14, 15))
+        @test validate(meshed).ok
+        @test (nnodes(meshed), ntris(meshed), ntets(meshed)) == (27, 46, 54)
+        # Boundary tab nodes reuse the face grids bitwise.
+        @test Tuple(meshed.coords[:, _prism_node(nr, ns, 0, 0, 1)]) ==
+              (0.0, 0.0, 0.5)
+        @test Tuple(meshed.coords[:, _prism_node(nr, ns, 2, 0, 0)]) ==
+              (3.0, 0.0, 0.0)
+        # Topology is canonical — identical connectivity to the affine path.
+        @test _prism_canonical_tets(meshed) == _prism_canonical_tets(affine)
+        @test _prism_canonical_triangles(meshed.tris) ==
+              _prism_canonical_triangles(affine.tris)
+        # transfiniteHex on the degenerate slot map reproduces the affine
+        # interior nodes to interpolation roundoff.
+        @test all(isapprox(meshed.coords[d, node_id],
+                           affine.coords[d, node_id];
+                           atol=64eps(3.0), rtol=64eps(3.0))
+                  for node_id in 1:nnodes(affine), d in 1:3)
+        @test count(==(Int32(14)), meshed.tri_tag) == 9
+        @test count(==(Int32(15)), meshed.tri_tag) == 9
+        @test meshed.tet_tag == fill(Int32(21), ntets(meshed))
+
+        # Warped boundary sheets: interior rows of the f1 grid bow outward —
+        # shared edges keep their bitwise values, so the weld stays exact and
+        # the interior follows transfiniteHex rather than the affine map.
+        warped_faces = _affine_prism_faces(corners, nr, ns, nw)
+        warped = copy(warped_faces[2][1])
+        for j in 1:ns-1, k in 1:nw-1
+            warped[1, j + 1 + k * (ns + 1)] += 0.25
+        end
+        warped_mesh = mesh_transfinite_prism(
+            corners, (nr, ns, nw);
+            faces=(warped_faces[1],
+                   (warped, warped_faces[2][2], warped_faces[2][3]),
+                   warped_faces[3], warped_faces[4], warped_faces[5]))
+        @test validate(warped_mesh).ok
+        @test _prism_canonical_tets(warped_mesh) == _prism_canonical_tets(affine)
+        warped_node = _prism_node(nr, ns, nr, 1, 1)
+        @test Tuple(warped_mesh.coords[:, warped_node]) ==
+              Tuple(warped[:, 2 + (ns + 1)])
+        @test warped_mesh.coords[:, _prism_node(nr, ns, 1, 1, 1)] !=
+              affine.coords[:, _prism_node(nr, ns, 1, 1, 1)]
+
+        faces5 = _affine_prism_faces(corners, nr, ns, nw)
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw); faces=faces5[1:4])
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw); faces=(faces5..., faces5[1]))
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw);
+            faces=(faces5[1][1:2], faces5[2], faces5[3], faces5[4], faces5[5]))
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw);
+            faces=(warped_faces[1][1][:, 1:end-1] |> p -> (p, faces5[1][2],
+                   faces5[1][3]), faces5[2], faces5[3], faces5[4], faces5[5]))
+        # Non-finite face coordinate.
+        bad_finite = copy(faces5[1][1]); bad_finite[3, 2] = NaN
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw);
+            faces=((bad_finite, faces5[1][2], faces5[1][3]),
+                   faces5[2], faces5[3], faces5[4], faces5[5]))
+        # Collapsed apex column must repeat the apex vertex bitwise.
+        bad_apex = copy(faces5[4][1]); bad_apex[1, 1 + 1 * (nr + 1)] += 1e-9
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw);
+            faces=(faces5[1], faces5[2], faces5[3],
+                   (bad_apex, faces5[4][2], faces5[4][3]), faces5[5]))
+        # Shared edge disagreement (f0 vs f2 on the s0-s4 collapsed edge —
+        # f0's i=0 column at k=1 is a non-corner axial node).
+        bad_edge = copy(faces5[1][1]); bad_edge[1, 1 + (nr + 1)] += 1e-9
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw);
+            faces=((bad_edge, faces5[1][2], faces5[1][3]),
+                   faces5[2], faces5[3], faces5[4], faces5[5]))
+        # Corners must coincide with the face grids bitwise.
+        corner_mismatch = copy(corners); corner_mismatch[5] =
+            corner_mismatch[5] .+ (0.0, 0.0, 1e-9)
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corner_mismatch, (nr, ns, nw); faces=faces5)
+        # Left-handed corner order is still rejected.
+        mirrored = [corners[1], corners[3], corners[2],
+                    corners[4], corners[6], corners[5]]
+        @test_throws ArgumentError mesh_transfinite_prism(
+            mirrored, (nr, ns, nw); faces=faces5)
+        # Non-affine corners are legal when the face grids carry them — the
+        # corner certification only pins the six shared vertices.
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (nr, ns, nw); faces=faces5, face_tags=(1, 2, 3, 4))
+    end
+
     @testset "allocation growth remains linear in output size" begin
         corners = _affine_prism_corners()
         mesh_transfinite_prism(corners, (24, 12, 6))
