@@ -510,6 +510,16 @@ observed strict ordering — each cell's tetrahedron decomposition certified
 against the unrecombined partition, boundary sheets emitted as type-3
 quadrangles or outward triangles, and unsupported partial masks rejected
 with Gmsh's "Wrong surface recombination in transfinite volume" diagnostic.
+`mesh_transfinite_volume`'s `recombine=` mask covers Gmsh's full six-face
+decision tree as a `MixedMesh`: all-recombined emits `CREATE_HEX`
+hexahedra with quadrangle boundary sheets, a single unrecombined opposite
+face pair emits the corresponding prism pair per cell (v/u-spanning pairs
+in the orientation-fixed `MPrism` ordering, or the w-spanning
+`CREATE_PRISM_1`/`CREATE_PRISM_2` pair), and every other partial mask
+rejects with the same diagnostic — each cell carries a certified
+shadow-tetrahedron decomposition and the emitted boundary audits exact
+shadow-exterior coverage, on both the affine and `transfiniteHex`
+warped-face paths.
 Surface recombination now
 includes Edmonds blossom matching and a `full_quad` perfect-matching gate.
 Planar polylines with an explicit oriented plane normal extrude to type-3

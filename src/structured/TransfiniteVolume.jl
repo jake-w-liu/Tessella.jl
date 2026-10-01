@@ -30,6 +30,8 @@ using ..Predicates: orient3
 using ..StructuredNumerics: _needs_exact_affine, _affine_basis3,
                             _affine_point3, _uses_exact_affine,
                             _certify_tet_volume
+using ..StructuredRecombine: _canonical_tets
+import ..StructuredRecombine
 
 export mesh_transfinite_volume
 
@@ -578,6 +580,43 @@ end
     return (coords[1, index], coords[2, index], coords[3, index])
 end
 
+# The shared recombined-emission machinery lives in `StructuredRecombine`
+# (loaded before this module); these delegations keep the diagnostics
+# prefixed with this kernel's public entry point.
+_emit_canonical_tet!(tets, position::Int, coords,
+                     a::Int32, b::Int32, c::Int32, d::Int32) =
+    StructuredRecombine._emit_canonical_tet!(
+        "mesh_transfinite_volume", tets, position, coords, a, b, c, d)
+
+_write_outward_triangle!(tris, tags, position::Int, coords,
+                         a::Int32, b::Int32, c::Int32, opposite, tag::Int32) =
+    StructuredRecombine._write_outward_triangle!(
+        "mesh_transfinite_volume", tris, tags, position, coords, a, b, c,
+        opposite, tag)
+
+_write_outward_quad!(quads, tags, position::Int, coords,
+                     a::Int32, b::Int32, c::Int32, d::Int32, opposite,
+                     tag::Int32) =
+    StructuredRecombine._write_outward_quad!(
+        quads, tags, position, coords, a, b, c, d, opposite, tag)
+
+_emit_recombined_cell!(cells::AbstractMatrix{Int32}, column::Int,
+                       shadow::AbstractMatrix{Int32}, position::Int,
+                       coords, vertices, decomp) =
+    StructuredRecombine._emit_recombined_cell!(
+        "mesh_transfinite_volume", cells, column, shadow, position, coords,
+        vertices, decomp)
+
+_certify_recombined_boundary(shadow, tris, quads) =
+    StructuredRecombine._certify_recombined_boundary(
+        "mesh_transfinite_volume", shadow, tris, quads)
+
+_recombined_mixed_mesh(coords, tris, tri_tags, quads, quad_tags, hexes,
+                       prisms, volume_tag::Int32) =
+    StructuredRecombine._recombined_mixed_mesh(
+        "mesh_transfinite_volume", coords, tris, tri_tags, quads, quad_tags,
+        hexes, prisms, volume_tag)
+
 function _emit_positive_tet!(tets, position::Int, coords,
                              a::Int32, b::Int32, c::Int32, d::Int32)
     sign = orient3(_node(coords, a), _node(coords, b),
@@ -599,6 +638,30 @@ function _emit_positive_tet!(tets, position::Int, coords,
     return nothing
 end
 
+# Gmsh's unrecombined six-tetrahedron cell subdivision
+# (`CREATE_SIM_1` through `CREATE_SIM_6`); also the reference partition the
+# recombined shadow decompositions are certified against.
+function _emit_six_simplex_tets!(tets, coords, node_id,
+                                 nu::Int, nv::Int, nw::Int)
+    tet_position = 0
+    @inbounds for k in 0:nw-1, j in 0:nv-1, i in 0:nu-1
+        a = node_id(i, j, k)
+        b = node_id(i + 1, j, k)
+        c = node_id(i, j + 1, k)
+        d = node_id(i, j, k + 1)
+        e = node_id(i + 1, j, k + 1)
+        f = node_id(i, j + 1, k + 1)
+        g = node_id(i + 1, j + 1, k)
+        h = node_id(i + 1, j + 1, k + 1)
+        for vertices in ((a, b, c, d), (b, c, d, e), (d, e, c, f),
+                         (b, c, e, g), (c, f, e, g), (e, f, h, g))
+            tet_position += 1
+            _emit_positive_tet!(tets, tet_position, coords, vertices...)
+        end
+    end
+    return tet_position
+end
+
 @inline function _write_triangle!(tris, tags, position::Int,
                                   a::Int32, b::Int32, c::Int32, tag::Int32)
     @inbounds begin
@@ -610,19 +673,7 @@ end
     return position + 1
 end
 
-function _canonical_triangles(tris)
-    result = Vector{NTuple{3,Int32}}(undef, size(tris, 2))
-    @inbounds for triangle in axes(tris, 2)
-        a = tris[1, triangle]
-        b = tris[2, triangle]
-        c = tris[3, triangle]
-        result[triangle] = a <= b ?
-            (a <= c ? (b <= c ? (a, b, c) : (a, c, b)) : (c, a, b)) :
-            (b <= c ? (a <= c ? (b, a, c) : (b, c, a)) : (c, b, a))
-    end
-    sort!(result)
-    return result
-end
+_canonical_triangles(tris) = StructuredRecombine._canonical_triangles(tris)
 
 # The canonical face-slot parametric directions into the logical tab grid:
 # slot s maps its (p1,p2) node to tab coordinates (i,j,k) via these tables.
@@ -750,8 +801,26 @@ end
 function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
                                          faces, node_id, coords, tets,
                                          tri_tags_source, face_tags)
+    _fill_warped_volume_coords!(coords, corners, faces, nu, nv, nw, node_id)
+    _emit_six_simplex_tets!(tets, coords, node_id, nu, nv, nw) ==
+        size(tets, 2) || throw(ErrorException(
+        "mesh_transfinite_volume: internal tetrahedron count invariant failed"))
+    tris = Matrix{Int32}(undef, 3, length(tri_tags_source))
+    _emit_warped_volume_boundary!(tris, tri_tags_source,
+                                  Matrix{Int32}(undef, 4, 0), Int32[],
+                                  coords, node_id, nu, nv, nw, face_tags,
+                                  nothing)
+    return tris
+end
+
+# Warped-path grid fill shared by the simplex and recombined paths: the
+# caller-provided corners must be the eight face-grid corners bitwise, the
+# u/v/w parameters follow cumulative chord-length ratios along Gmsh's three
+# reference edges, and boundary tab nodes reuse the face grids bitwise.
+function _fill_warped_volume_coords!(coords, corners, faces,
+                                     nu::Int, nv::Int, nw::Int, node_id)
     f1, f2, f3, f4, f5, f6 = faces
-    npu, npv, npw = nu + 1, nv + 1, nw + 1
+    npu, npv = nu + 1, nv + 1
 
     # The caller-provided corners must be the eight face-grid corners bitwise.
     _face_node(f5.points, 0, 0, npu) == corners[1] &&
@@ -822,34 +891,60 @@ function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
         coords[2, index] = point[2]
         coords[3, index] = point[3]
     end
+    return nothing
+end
 
-    tet_position = 0
-    @inbounds for k in 0:nw-1, j in 0:nv-1, i in 0:nu-1
-        a = node_id(i, j, k)
-        b = node_id(i + 1, j, k)
-        c = node_id(i, j + 1, k)
-        d = node_id(i, j, k + 1)
-        e = node_id(i + 1, j, k + 1)
-        f = node_id(i, j + 1, k + 1)
-        g = node_id(i + 1, j + 1, k)
-        h = node_id(i + 1, j + 1, k + 1)
-        for vertices in ((a, b, c, d), (b, c, d, e), (d, e, c, f),
-                         (b, c, e, g), (c, f, e, g), (e, f, h, g))
-            tet_position += 1
-            _emit_positive_tet!(tets, tet_position, coords, vertices...)
-        end
+# Audits one canonical boundary half-triangle of cell (p1,p2) in face `slot`:
+# signs of the cell's eight corners against the triangle's supporting plane,
+# then a pierce test for every straddling cell edge. Returns the orientation
+# sign of the incident tet's interior apex (nonzero on success).
+function _warped_boundary_half_sign(coords, ids, ltri, apex_letter::Int,
+                                    p1::Int, p2::Int, slot::Int)
+    pa = _node(coords, ids[ltri[1]])
+    pb = _node(coords, ids[ltri[2]])
+    pc = _node(coords, ids[ltri[3]])
+    # Signs of the cell's eight corners against the triangle's supporting
+    # plane; a straddling cell edge is then tested against the triangle's
+    # interior — only a true pierce is a fold, so a tilted boundary band that
+    # leaves a non-incident corner on the outward side stays legal (Gmsh
+    # parity).
+    signs = ntuple(8) do letter
+        letter == ltri[1] || letter == ltri[2] || letter == ltri[3] ? 0 :
+            orient3(pa, pb, pc, _node(coords, ids[letter]))
     end
+    for (x, y) in _WARPED_CELL_EDGES
+        (signs[x] == 0 || signs[y] == 0 || signs[x] == signs[y]) && continue
+        _segment_crosses_triangle(_node(coords, ids[x]),
+                                  _node(coords, ids[y]),
+                                  pa, pb, pc) && throw(ArgumentError(
+            "mesh_transfinite_volume: boundary cell ($p1,$p2) of face " *
+            "slot $slot folds over its inward neighbors"))
+    end
+    sign = signs[apex_letter]
+    sign == 0 && throw(ArgumentError(
+        "mesh_transfinite_volume: boundary cell ($p1,$p2) of face slot " *
+        "$slot cannot certify its orientation (inward reference degenerates)"))
+    return sign
+end
 
-    # Boundary triangles are the canonical tet-boundary split: the tet
-    # subdivision induces one fixed diagonal per face cell — (p1+1,p2)-(p1,p2+1)
-    # in every slot's canonical params — so each boundary cell emits
-    # (A,B,C),(B,D,C). Tessella's volume meshes carry the conforming boundary,
-    # which `_consume_volume_attributes` also re-derives downstream; each
-    # surface's own arrangement is a property of its surface record, not of
-    # this mesh. Every emitted triangle is certified strictly outward against
-    # the inward-adjacent tab nodes of its cell.
-    tris = Matrix{Int32}(undef, 3, length(tri_tags_source))
-    position = 1
+# Boundary emission for the warped path. With `mask === nothing` every face
+# cell emits the canonical tet-boundary split (A,B,C),(B,D,C) — one fixed
+# diagonal per face cell in every slot's canonical params — into `tris`.
+# With a six-slot `mask`, recombined face cells emit one quadrangle wound
+# like the audited first canonical half (its reverse when that half needed
+# flipping) into `quads` while unrecombined face cells keep the triangle
+# split. Tessella's volume meshes carry the conforming boundary, which
+# `_consume_volume_attributes` also re-derives downstream; each surface's own
+# arrangement is a property of its surface record, not of this mesh. Every
+# emitted cell is certified strictly outward against the inward-adjacent tab
+# nodes of its cell.
+function _emit_warped_volume_boundary!(tris, tri_tags_source,
+                                       quads, quad_tags,
+                                       coords, node_id,
+                                       nu::Int, nv::Int, nw::Int,
+                                       face_tags, mask)
+    tri_position = 1
+    quad_position = 1
     @inbounds for slot in 1:6
         a1, a2, fixed_axis, fixed = _WARPED_SLOT_PLANE[slot]
         n1, n2 = _warped_slot_dims(slot, nu, nv, nw)
@@ -866,6 +961,7 @@ function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
         letter_map = _WARPED_SLOT_LETTERS[slot]
         tri_letters = _WARPED_SLOT_TRIS[slot]
         apex_letters = _WARPED_SLOT_APEX_LETTER[slot]
+        recombined = mask !== nothing && mask[slot]
         for p2 in 0:n2-1, p1 in 0:n1-1
             a = tab_node(p1, p2)
             b = tab_node(p1 + 1, p2)
@@ -874,56 +970,54 @@ function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
             ids = _warped_cell_corner_ids(
                 letter_map, (a, b, c, d),
                 _inward_candidates(node_id, slot, p1, p2, nu, nv, nw))
-            for half in 1:2
-                ltri = tri_letters[half]
-                tri = (ids[ltri[1]], ids[ltri[2]], ids[ltri[3]])
-                pa = _node(coords, tri[1])
-                pb = _node(coords, tri[2])
-                pc = _node(coords, tri[3])
-                # Signs of the cell's eight corners against the triangle's
-                # supporting plane; a straddling cell edge is then tested
-                # against the triangle's interior — only a true pierce is a
-                # fold, so a tilted boundary band that leaves a non-incident
-                # corner on the outward side stays legal (Gmsh parity).
-                signs = ntuple(8) do letter
-                    letter == ltri[1] || letter == ltri[2] ||
-                        letter == ltri[3] ? 0 :
-                        orient3(pa, pb, pc, _node(coords, ids[letter]))
+            if recombined
+                # The canonical halves share the cyclic quad (a,b,d,c);
+                # half 1 (a,b,c) governs the emitted winding.
+                sign = _warped_boundary_half_sign(
+                    coords, ids, tri_letters[1], apex_letters[1], p1, p2, slot)
+                _warped_boundary_half_sign(
+                    coords, ids, tri_letters[2], apex_letters[2], p1, p2, slot)
+                @inbounds begin
+                    quads[1, quad_position] = a
+                    if sign > 0
+                        quads[2, quad_position] = b
+                        quads[3, quad_position] = d
+                        quads[4, quad_position] = c
+                    else
+                        quads[2, quad_position] = c
+                        quads[3, quad_position] = d
+                        quads[4, quad_position] = b
+                    end
+                    quad_tags[quad_position] = tag
                 end
-                for (x, y) in _WARPED_CELL_EDGES
-                    (signs[x] == 0 || signs[y] == 0 ||
-                     signs[x] == signs[y]) && continue
-                    _segment_crosses_triangle(_node(coords, ids[x]),
-                                              _node(coords, ids[y]),
-                                              pa, pb, pc) && throw(
-                        ArgumentError(
-                            "mesh_transfinite_volume: boundary cell " *
-                            "($p1,$p2) of face slot $slot folds over its " *
-                            "inward neighbors"))
+                quad_position += 1
+            else
+                for half in 1:2
+                    ltri = tri_letters[half]
+                    sign = _warped_boundary_half_sign(
+                        coords, ids, ltri, apex_letters[half], p1, p2, slot)
+                    if sign < 0
+                        tris[1, tri_position] = ids[ltri[2]]
+                        tris[2, tri_position] = ids[ltri[1]]
+                        tris[3, tri_position] = ids[ltri[3]]
+                    else
+                        tris[1, tri_position] = ids[ltri[1]]
+                        tris[2, tri_position] = ids[ltri[2]]
+                        tris[3, tri_position] = ids[ltri[3]]
+                    end
+                    tri_tags_source[tri_position] = tag
+                    tri_position += 1
                 end
-                sign = signs[apex_letters[half]]
-                sign == 0 && throw(ArgumentError(
-                    "mesh_transfinite_volume: boundary cell ($p1,$p2) of " *
-                    "face slot $slot cannot certify its orientation (inward " *
-                    "reference degenerates)"))
-                if sign < 0
-                    tris[1, position] = tri[2]
-                    tris[2, position] = tri[1]
-                    tris[3, position] = tri[3]
-                else
-                    tris[1, position] = tri[1]
-                    tris[2, position] = tri[2]
-                    tris[3, position] = tri[3]
-                end
-                tri_tags_source[position] = tag
-                position += 1
             end
         end
     end
-    position == length(tri_tags_source) + 1 || throw(ErrorException(
+    tri_position == size(tris, 2) + 1 || throw(ErrorException(
         "mesh_transfinite_volume: internal boundary triangle count " *
         "invariant failed"))
-    return tris
+    quad_position == size(quads, 2) + 1 || throw(ErrorException(
+        "mesh_transfinite_volume: internal boundary quadrangle count " *
+        "invariant failed"))
+    return nothing
 end
 
 """
@@ -931,15 +1025,16 @@ end
                             volume_tag=0,
                             face_tags=(0,0,0,0,0,0),
                             faces=nothing,
+                            recombine=nothing,
                             max_nodes=10_000_000,
                             max_tets=60_000_000,
-                            max_boundary_triangles=20_000_000) -> Mesh
+                            max_boundary_triangles=20_000_000) -> Mesh | MixedMesh
 
-Mesh a six-face block with the Gmsh 4.15.2 unrecombined transfinite
-volume subdivision. `corners` must contain eight finite 3-D points in Gmsh's
-canonical order `(s0,s1,s2,s3,s4,s5,s6,s7)`: the first four wind around the
-`w=0` face and the final four are their `w=1` counterparts. `cells=(nu,nv,nw)`
-gives positive logical-cell counts; curve laws are uniformly spaced
+Mesh a six-face block with the Gmsh 4.15.2 transfinite volume subdivision.
+`corners` must contain eight finite 3-D points in Gmsh's canonical order
+`(s0,s1,s2,s3,s4,s5,s6,s7)`: the first four wind around the `w=0` face and
+the final four are their `w=1` counterparts. `cells=(nu,nv,nw)` gives
+positive logical-cell counts; curve laws are uniformly spaced
 (`Progression 1`).
 
 By default (`faces=nothing`) the block must be affine: the four derived
@@ -960,27 +1055,47 @@ trilinear corner term, parameterized by chord-length ratios along the `s0s1`,
 bitwise — shared edges must agree exactly or the call throws — and `corners`
 must be the eight face-grid corners bitwise in positive canonical order.
 
-The returned simplex mesh uses the exact six-tetrahedron connectivity pattern
-from Gmsh's `CREATE_SIM_1` through `CREATE_SIM_6`, and the boundary triangles
-are the conforming split that subdivision induces: one fixed diagonal per
-face cell in every slot, certified strictly outward against the
-inward-adjacent interior nodes. In the affine path, exact dyadic affine
-interpolation protects remote, narrow blocks whose nested Float64
-interpolation would lose material, and a compensated exponent-scaled
-determinant audit certifies conservation of the corner-defined volume.
-`face_tags` follow Gmsh's canonical face order `(vmin, umax, vmax, umin,
-wmin, wmax)`; `volume_tag` labels every tet.
+With `recombine=nothing` (or `false`, or an all-false mask) the returned
+simplex `Mesh` uses the exact six-tetrahedron connectivity pattern from
+Gmsh's `CREATE_SIM_1` through `CREATE_SIM_6`, and the boundary triangles are
+the conforming split that subdivision induces: one fixed diagonal per face
+cell in every slot, certified strictly outward against the inward-adjacent
+interior nodes. In the affine path, exact dyadic affine interpolation
+protects remote, narrow blocks whose nested Float64 interpolation would lose
+material, and a compensated exponent-scaled determinant audit certifies
+conservation of the corner-defined volume. `face_tags` follow Gmsh's
+canonical face order `(vmin, umax, vmax, umin, wmin, wmax)`; `volume_tag`
+labels every tet.
 
-Unsupported here: five-face degeneracies, nonuniform curve laws on the
-`faces=nothing` path (nonuniform spacing arrives through `faces` grids),
-recombination into hexahedra/prisms, QuadTri, holes, multiple blocks,
-periodic seams, high-order elements, and coordinate scales whose derived
-boundary areas or tetrahedron volumes are not finite Float64 values.
+`recombine` selects Gmsh's six-face recombination decision tree and returns
+a `MixedMesh`: `true` (or all-true mask) emits one hexahedron per cell with
+quadrangles on every face; a mask with exactly one opposite face pair
+unrecombined emits the corresponding prism pair per cell —
+`(false,true,false,true,true,true)` and `(true,false,true,false,true,true)`
+leave the v- or u-face pair triangular with prisms spanning that axis, and
+`(true,true,true,true,false,false)` emits Gmsh's `CREATE_PRISM_1`/
+`CREATE_PRISM_2` pair with quadrangles on the four side faces. Every
+emitted volume cell carries a positional tetrahedral shadow decomposition
+certified strictly positively oriented; when the shadow reproduces the
+unrecombined partition it is checked tet-for-tet against the reference
+simplex subdivision, and the emitted boundary is audited against the
+shadow's exterior faces for exact coverage. Any other partial mask throws —
+matching Gmsh's "wrong surface recombination in transfinite volume"
+rejection. `max_tets` bounds the decomposed shadow-tetrahedron count and
+`max_boundary_triangles` bounds the emitted boundary cells (triangles plus
+quadrangles).
+
+Unsupported here: five-face degeneracies (`mesh_transfinite_prism`),
+nonuniform curve laws on the `faces=nothing` path (nonuniform spacing
+arrives through `faces` grids), QuadTri, holes, multiple blocks, periodic
+seams, high-order elements, and coordinate scales whose derived boundary
+areas or tetrahedron volumes are not finite Float64 values.
 """
 function mesh_transfinite_volume(corners, cells=(1, 1, 1);
                                  volume_tag=0,
                                  face_tags=(0, 0, 0, 0, 0, 0),
                                  faces=nothing,
+                                 recombine=nothing,
                                  max_nodes=_DEFAULT_MAX_NODES,
                                  max_tets=_DEFAULT_MAX_TETS,
                                  max_boundary_triangles=
@@ -998,26 +1113,34 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
     uv = _checked_mul("boundary triangle", nu, nv)
     uw = _checked_mul("boundary triangle", nu, nw)
     vw = _checked_mul("boundary triangle", nv, nw)
-    face_cells = _checked_add(_checked_add(uv, uw, "boundary triangle"),
-                              vw, "boundary triangle")
-    triangle_count = _checked_mul("boundary triangle", 4, face_cells)
 
     node_count <= typemax(Int32) || throw(ArgumentError(
         "mesh_transfinite_volume: $node_count nodes exceed Int32 indexing"))
     tet_count <= typemax(Int32) || throw(ArgumentError(
         "mesh_transfinite_volume: $tet_count tetrahedra exceed the Int32 topology limit"))
-    triangle_count <= typemax(Int32) || throw(ArgumentError(
-        "mesh_transfinite_volume: $triangle_count boundary triangles exceed " *
-        "the Int32 topology limit"))
     node_count <= node_limit || throw(ArgumentError(
         "mesh_transfinite_volume: $node_count nodes exceed max_nodes=$node_limit"))
     tet_count <= tet_limit || throw(ArgumentError(
         "mesh_transfinite_volume: $tet_count tetrahedra exceed max_tets=$tet_limit"))
+
+    converted_corners = _eight_corners(corners)
+    mask = _recombine_volume_mask(recombine)
+    mask === nothing || return _transfinite_volume_recombined(
+        converted_corners, faces, face_tags, mask, nu, nv, nw,
+        npu, npv, npw, node_count, tet_count, uv, uw, vw,
+        node_limit, tet_limit, triangle_limit,
+        _tag(volume_tag, "volume_tag"))
+
+    face_cells = _checked_add(_checked_add(uv, uw, "boundary triangle"),
+                              vw, "boundary triangle")
+    triangle_count = _checked_mul("boundary triangle", 4, face_cells)
+    triangle_count <= typemax(Int32) || throw(ArgumentError(
+        "mesh_transfinite_volume: $triangle_count boundary triangles exceed " *
+        "the Int32 topology limit"))
     triangle_count <= triangle_limit || throw(ArgumentError(
         "mesh_transfinite_volume: $triangle_count boundary triangles exceed " *
         "max_boundary_triangles=$triangle_limit"))
 
-    converted_corners = _eight_corners(corners)
     faces === nothing || return _transfinite_volume_warped_mesh(
         converted_corners, faces, face_tags, nu, nv, nw,
         npu, npv, npw, node_count, tet_count, triangle_count,
@@ -1025,48 +1148,15 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
     _certify_affine(converted_corners)
     converted_face_tags = _face_tags(face_tags)
     converted_volume_tag = _tag(volume_tag, "volume_tag")
-    affine_points = (converted_corners[1], converted_corners[2],
-                     converted_corners[4], converted_corners[5])
-    exact_interpolation = _needs_exact_affine(
-        affine_points..., (nu, nv, nw)) &&
-        _exact_affine_corners(converted_corners)
-    affine_basis = _affine_basis3(affine_points..., exact_interpolation)
 
     node_id(i::Int, j::Int, k::Int) = Int32(i + 1 + npu * (j + npv * k))
     coords = Matrix{Float64}(undef, 3, node_count)
-    @inbounds for k in 0:nw, j in 0:nv, i in 0:nu
-        u = i / nu; v = j / nv; w = k / nw
-        point = _uses_exact_affine(affine_basis) ?
-            _affine_point3(affine_basis, u, v, w,
-                           "mesh_transfinite_volume", (i, j, k)) :
-            _trilinear(converted_corners, u, v, w)
-        all(isfinite, point) || throw(ArgumentError(
-            "mesh_transfinite_volume: interpolation produced a non-finite " *
-            "coordinate at logical node ($i,$j,$k)"))
-        index = Int(node_id(i, j, k))
-        coords[1, index] = point[1]
-        coords[2, index] = point[2]
-        coords[3, index] = point[3]
-    end
+    _fill_affine_volume_coords!(coords, converted_corners, nu, nv, nw,
+                                node_id)
 
     tets = Matrix{Int32}(undef, 4, tet_count)
-    tet_position = 0
-    @inbounds for k in 0:nw-1, j in 0:nv-1, i in 0:nu-1
-        a = node_id(i, j, k)
-        b = node_id(i + 1, j, k)
-        c = node_id(i, j + 1, k)
-        d = node_id(i, j, k + 1)
-        e = node_id(i + 1, j, k + 1)
-        f = node_id(i, j + 1, k + 1)
-        g = node_id(i + 1, j + 1, k)
-        h = node_id(i + 1, j + 1, k + 1)
-        for vertices in ((a, b, c, d), (b, c, d, e), (d, e, c, f),
-                         (b, c, e, g), (c, f, e, g), (e, f, h, g))
-            tet_position += 1
-            _emit_positive_tet!(tets, tet_position, coords, vertices...)
-        end
-    end
-    tet_position == tet_count || throw(ErrorException(
+    _emit_six_simplex_tets!(tets, coords, node_id, nu, nv, nw) ==
+        tet_count || throw(ErrorException(
         "mesh_transfinite_volume: internal tetrahedron count invariant failed"))
 
     tris = Matrix{Int32}(undef, 3, triangle_count)
@@ -1159,6 +1249,338 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
         "mesh_transfinite_volume", diagnostic.messages)
     (nnodes(mesh), ntris(mesh), ntets(mesh)) ==
         (node_count, triangle_count, tet_count) || throw(ErrorException(
+        "mesh_transfinite_volume: finalized mesh count invariant failed"))
+    return mesh
+end
+
+# ============================ Recombination ============================
+#
+# Gmsh's six-face transfinite recombination decision tree
+# (meshGRegionTransfinite.cpp). The mask follows the canonical face order
+# (vmin, umax, vmax, umin, wmin, wmax) — the same order as `face_tags`:
+#   (T,T,T,T,T,T)  → one `CREATE_HEX` per cell;
+#   (F,T,F,T,T,T)  → a prism pair spanning the v direction;
+#   (T,F,T,F,T,T)  → a prism pair spanning the u direction;
+#   (T,T,T,T,F,F)  → `CREATE_PRISM_1`/`CREATE_PRISM_2` spanning w;
+#   all-false      → the unrecombined six-tet subdivision (simplex `Mesh`).
+# Every other partial mask is rejected — Gmsh logs "Wrong surface
+# recombination in transfinite volume" and fails the volume mesh; this
+# kernel throws the equivalent ArgumentError.
+function _recombine_volume_mask(recombine)
+    recombine === nothing && return nothing
+    mask = if recombine isa Bool
+        ntuple(_ -> recombine, 6)
+    elseif recombine isa Union{Tuple, AbstractVector}
+        length(recombine) == 6 || throw(ArgumentError(
+            "mesh_transfinite_volume: recombine mask must hold six entries " *
+            "in canonical face order (vmin,umax,vmax,umin,wmin,wmax), got " *
+            "$(length(recombine))"))
+        ntuple(6) do slot
+            flag = recombine[slot]
+            flag isa Bool || throw(ArgumentError(
+                "mesh_transfinite_volume: recombine mask entry $slot must " *
+                "be Bool, got $(typeof(flag))"))
+            flag
+        end
+    else
+        throw(ArgumentError(
+            "mesh_transfinite_volume: recombine must be a Bool or a " *
+            "six-element Bool mask in canonical face order " *
+            "(vmin,umax,vmax,umin,wmin,wmax), got $(typeof(recombine))"))
+    end
+    any(mask) || return nothing
+    all(mask) ||
+        mask == (false, true, false, true, true, true) ||
+        mask == (true, false, true, false, true, true) ||
+        mask == (true, true, true, true, false, false) ||
+        throw(ArgumentError(
+            "mesh_transfinite_volume: wrong surface recombination in " *
+            "transfinite volume — Gmsh's six-face pattern admits only all " *
+            "six faces recombined or a single opposite face pair left " *
+            "unrecombined"))
+    return mask
+end
+
+# Positional simplex decompositions of the emitted volume cells, indexed in
+# each cell tuple's own vertex order. `_SHADOW_HEX` and the PRISM_1/PRISM_2
+# pair reproduce the unrecombined six-tet partition exactly; the R variants
+# decompose the v-free/u-free prism pair, indexed in the emitted vertex
+# order — which is Gmsh's literal macro order with positions 1<->2 and
+# 4<->5 swapped, matching the orientation fixup Gmsh applies to the
+# otherwise negative-oriented partial-mask prisms.
+const _SHADOW_HEX = ((1, 2, 4, 5), (2, 4, 5, 6), (5, 6, 4, 8),
+                     (2, 4, 6, 3), (4, 8, 6, 3), (6, 8, 7, 3))
+const _SHADOW_PRISM_1 = ((1, 2, 3, 4), (2, 3, 4, 5), (4, 5, 3, 6))
+const _SHADOW_PRISM_2 = ((3, 2, 6, 1), (2, 5, 6, 1), (6, 5, 4, 1))
+const _SHADOW_PRISM_1R = ((2, 1, 5, 3), (1, 3, 4, 5), (5, 4, 6, 3))
+const _SHADOW_PRISM_2R = ((3, 1, 2, 6), (1, 4, 2, 6), (6, 4, 2, 5))
+
+# Affine-path grid fill shared by the simplex and recombined paths.
+function _fill_affine_volume_coords!(coords, converted_corners,
+                                     nu::Int, nv::Int, nw::Int, node_id)
+    affine_points = (converted_corners[1], converted_corners[2],
+                     converted_corners[4], converted_corners[5])
+    exact_interpolation = _needs_exact_affine(
+        affine_points..., (nu, nv, nw)) &&
+        _exact_affine_corners(converted_corners)
+    affine_basis = _affine_basis3(affine_points..., exact_interpolation)
+    @inbounds for k in 0:nw, j in 0:nv, i in 0:nu
+        u = i / nu; v = j / nv; w = k / nw
+        point = _uses_exact_affine(affine_basis) ?
+            _affine_point3(affine_basis, u, v, w,
+                           "mesh_transfinite_volume", (i, j, k)) :
+            _trilinear(converted_corners, u, v, w)
+        all(isfinite, point) || throw(ArgumentError(
+            "mesh_transfinite_volume: interpolation produced a non-finite " *
+            "coordinate at logical node ($i,$j,$k)"))
+        index = Int(node_id(i, j, k))
+        coords[1, index] = point[1]
+        coords[2, index] = point[2]
+        coords[3, index] = point[3]
+    end
+    return nothing
+end
+
+# Volume-cell emission in Gmsh's i-outermost loop order. `mask` is already
+# validated to one of the four admissible patterns by `_recombine_volume_mask`.
+function _emit_six_recombined_cells!(hexes, prisms, shadow, coords,
+                                     node_id, nu::Int, nv::Int, nw::Int, mask)
+    hex_position = 0
+    prism_position = 0
+    shadow_position = 0
+    all_recombined = all(mask)
+    v_free = !mask[1] && !mask[3]
+    u_free = !mask[2] && !mask[4]
+    @inbounds for i in 0:nu-1, j in 0:nv-1, k in 0:nw-1
+        a = node_id(i, j, k); b = node_id(i + 1, j, k)
+        c = node_id(i, j + 1, k); d = node_id(i, j, k + 1)
+        e = node_id(i + 1, j, k + 1); f = node_id(i, j + 1, k + 1)
+        g = node_id(i + 1, j + 1, k); h = node_id(i + 1, j + 1, k + 1)
+        if all_recombined
+            hex_position += 1
+            shadow_position = _emit_recombined_cell!(
+                hexes, hex_position, shadow, shadow_position, coords,
+                (a, b, g, c, d, e, h, f), _SHADOW_HEX)
+        elseif v_free
+            # Gmsh's literal macro order is negative-oriented; the emitted
+            # order applies the MPrism orientation fixup (1<->2, 4<->5).
+            prism_position += 1
+            shadow_position = _emit_recombined_cell!(
+                prisms, prism_position, shadow, shadow_position, coords,
+                (b, a, d, g, c, f), _SHADOW_PRISM_1R)
+            prism_position += 1
+            shadow_position = _emit_recombined_cell!(
+                prisms, prism_position, shadow, shadow_position, coords,
+                (d, e, b, f, h, g), _SHADOW_PRISM_2R)
+        elseif u_free
+            prism_position += 1
+            shadow_position = _emit_recombined_cell!(
+                prisms, prism_position, shadow, shadow_position, coords,
+                (g, b, e, c, a, d), _SHADOW_PRISM_1R)
+            prism_position += 1
+            shadow_position = _emit_recombined_cell!(
+                prisms, prism_position, shadow, shadow_position, coords,
+                (e, h, g, d, f, c), _SHADOW_PRISM_2R)
+        else
+            prism_position += 1
+            shadow_position = _emit_recombined_cell!(
+                prisms, prism_position, shadow, shadow_position, coords,
+                (a, b, c, d, e, f), _SHADOW_PRISM_1)
+            prism_position += 1
+            shadow_position = _emit_recombined_cell!(
+                prisms, prism_position, shadow, shadow_position, coords,
+                (g, c, b, h, f, e), _SHADOW_PRISM_2)
+        end
+    end
+    hex_position == size(hexes, 2) &&
+        prism_position == size(prisms, 2) &&
+        shadow_position == size(shadow, 2) || throw(ErrorException(
+        "mesh_transfinite_volume: internal recombined-cell count invariant " *
+        "failed"))
+    return nothing
+end
+
+# Affine-path boundary emission: unrecombined slots emit the canonical
+# tet-boundary triangle split, recombined slots emit one quadrangle per face
+# cell in the parametric cyclic order (A,B,D,C). Every cell is wound strictly
+# outward against the face's opposite corner.
+function _emit_affine_recombined_boundary!(tris, tri_tags, quads, quad_tags,
+        coords, node_id, opposite_corners, nu::Int, nv::Int, nw::Int,
+        face_tags, mask)
+    tri_position = 1
+    quad_position = 1
+    @inbounds for slot in 1:6
+        a1, a2, fixed_axis, fixed = _WARPED_SLOT_PLANE[slot]
+        n1, n2 = _warped_slot_dims(slot, nu, nv, nw)
+        fixed_coord = fixed == 0 ? 0 :
+            fixed_axis == 1 ? nu : fixed_axis == 2 ? nv : nw
+        tag = face_tags[slot]
+        opposite = opposite_corners[slot]
+        function tab_node(p1::Int, p2::Int)
+            coord = (0, 0, 0)
+            coord = Base.setindex(coord, p1, a1)
+            coord = Base.setindex(coord, p2, a2)
+            coord = Base.setindex(coord, fixed_coord, fixed_axis)
+            return node_id(coord[1], coord[2], coord[3])
+        end
+        if mask[slot]
+            for p2 in 0:n2-1, p1 in 0:n1-1
+                quad_position = _write_outward_quad!(
+                    quads, quad_tags, quad_position, coords,
+                    tab_node(p1, p2), tab_node(p1 + 1, p2),
+                    tab_node(p1 + 1, p2 + 1), tab_node(p1, p2 + 1),
+                    opposite, tag)
+            end
+        else
+            for p2 in 0:n2-1, p1 in 0:n1-1
+                a = tab_node(p1, p2); b = tab_node(p1 + 1, p2)
+                c = tab_node(p1, p2 + 1); d = tab_node(p1 + 1, p2 + 1)
+                tri_position = _write_outward_triangle!(
+                    tris, tri_tags, tri_position, coords, a, b, c,
+                    opposite, tag)
+                tri_position = _write_outward_triangle!(
+                    tris, tri_tags, tri_position, coords, b, d, c,
+                    opposite, tag)
+            end
+        end
+    end
+    tri_position == size(tris, 2) + 1 &&
+        quad_position == size(quads, 2) + 1 || throw(ErrorException(
+        "mesh_transfinite_volume: internal boundary cell count invariant " *
+        "failed"))
+    return nothing
+end
+
+function _transfinite_volume_recombined(converted_corners, raw_faces,
+        raw_face_tags, mask::NTuple{6,Bool}, nu::Int, nv::Int, nw::Int,
+        npu::Int, npv::Int, npw::Int, node_count::Int, tet_count::Int,
+        uv::Int, uw::Int, vw::Int,
+        node_limit::Int, tet_limit::Int, boundary_limit::Int,
+        converted_volume_tag::Int32)
+    all_recombined = all(mask)
+    cell_count = _checked_mul("cell", nu, nv, nw)
+    hex_count = all_recombined ? cell_count : 0
+    prism_count = all_recombined ? 0 : _checked_mul("prism", 2, cell_count)
+    slot_cells = (uw, vw, uw, vw, uv, uv)
+    tri_count = 0
+    quad_count = 0
+    @inbounds for slot in 1:6
+        if mask[slot]
+            quad_count = _checked_add(
+                quad_count, slot_cells[slot], "boundary cell")
+        else
+            tri_count = _checked_add(
+                tri_count, _checked_mul("boundary triangle", 2,
+                                        slot_cells[slot]),
+                "boundary triangle")
+        end
+    end
+    boundary_cells = _checked_add(tri_count, quad_count, "boundary cell")
+    boundary_cells <= typemax(Int32) || throw(ArgumentError(
+        "mesh_transfinite_volume: $boundary_cells boundary cells exceed " *
+        "the Int32 topology limit"))
+    boundary_cells <= boundary_limit || throw(ArgumentError(
+        "mesh_transfinite_volume: $boundary_cells boundary cells exceed " *
+        "max_boundary_triangles=$boundary_limit"))
+
+    node_id(i::Int, j::Int, k::Int) = Int32(i + 1 + npu * (j + npv * k))
+    coords = Matrix{Float64}(undef, 3, node_count)
+    faces = nothing
+    if raw_faces === nothing
+        _certify_affine(converted_corners)
+        _fill_affine_volume_coords!(coords, converted_corners, nu, nv, nw,
+                                    node_id)
+    else
+        faces = _warped_faces(raw_faces, nu, nv, nw)
+        _certify_shared_edges(faces, nu, nv, nw)
+        _fill_warped_volume_coords!(coords, converted_corners, faces,
+                                    nu, nv, nw, node_id)
+    end
+
+    hexes = Matrix{Int32}(undef, 8, hex_count)
+    prisms = Matrix{Int32}(undef, 6, prism_count)
+    shadow = Matrix{Int32}(undef, 4, tet_count)
+    _emit_six_recombined_cells!(hexes, prisms, shadow, coords, node_id,
+                                nu, nv, nw, mask)
+
+    # When the shadow reproduces the unrecombined partition (all-hex and the
+    # w-free prism pair), certify it against the reference simplex
+    # subdivision; the partial v/u-free tilings are instead certified by
+    # orientation, conformity, and boundary coverage below.
+    if all_recombined || (mask[1] && mask[2] && mask[3] && mask[4])
+        reference = Matrix{Int32}(undef, 4, tet_count)
+        _emit_six_simplex_tets!(reference, coords, node_id, nu, nv, nw) ==
+            tet_count || throw(ErrorException(
+            "mesh_transfinite_volume: internal reference partition count " *
+            "invariant failed"))
+        _canonical_tets(shadow) == _canonical_tets(reference) ||
+            throw(ErrorException(
+            "mesh_transfinite_volume: recombined cells do not partition " *
+            "the reference simplex mesh"))
+    end
+
+    tris = Matrix{Int32}(undef, 3, tri_count)
+    quads = Matrix{Int32}(undef, 4, quad_count)
+    tri_tags = Vector{Int32}(undef, tri_count)
+    quad_tags = Vector{Int32}(undef, quad_count)
+    converted_face_tags = _face_tags(raw_face_tags)
+    if faces === nothing
+        opposite_corners = (converted_corners[4], converted_corners[1],
+                            converted_corners[1], converted_corners[2],
+                            converted_corners[5], converted_corners[1])
+        _emit_affine_recombined_boundary!(tris, tri_tags, quads, quad_tags,
+            coords, node_id, opposite_corners, nu, nv, nw,
+            converted_face_tags, mask)
+        # Every emitted affine boundary cell must be strictly outward against
+        # the interior opposite corner; witness emission guarantees the
+        # winding but this independent pass keeps the certification absolute.
+        triangle = 0
+        @inbounds for slot in 1:6
+            mask[slot] && continue
+            opposite = opposite_corners[slot]
+            for _ in 1:2*slot_cells[slot]
+                triangle += 1
+                orient3(_node(coords, tris[1, triangle]),
+                        _node(coords, tris[2, triangle]),
+                        _node(coords, tris[3, triangle]), opposite) > 0 ||
+                    throw(ArgumentError(
+                        "mesh_transfinite_volume: boundary triangle " *
+                        "$triangle is not strictly outward-oriented"))
+            end
+        end
+        quad = 0
+        @inbounds for slot in 1:6
+            mask[slot] || continue
+            opposite = opposite_corners[slot]
+            for _ in 1:slot_cells[slot]
+                quad += 1
+                a = _node(coords, quads[1, quad])
+                b = _node(coords, quads[2, quad])
+                c = _node(coords, quads[3, quad])
+                d = _node(coords, quads[4, quad])
+                orient3(a, b, c, opposite) > 0 &&
+                    orient3(a, c, d, opposite) > 0 || throw(ArgumentError(
+                        "mesh_transfinite_volume: boundary quadrangle " *
+                        "$quad is not strictly outward-oriented"))
+            end
+        end
+    else
+        _emit_warped_volume_boundary!(tris, tri_tags, quads, quad_tags,
+                                      coords, node_id, nu, nv, nw,
+                                      converted_face_tags, mask)
+    end
+
+    if faces === nothing
+        _certify_tet_volume(
+            coords, shadow,
+            (converted_corners[1], converted_corners[2],
+             converted_corners[4], converted_corners[5]),
+            6, "mesh_transfinite_volume", "affine block")
+    end
+    _certify_recombined_boundary(shadow, tris, quads)
+    mesh = _recombined_mixed_mesh(coords, tris, tri_tags, quads, quad_tags,
+                                  hexes, prisms, converted_volume_tag)
+    size(mesh.coords, 2) == node_count || throw(ErrorException(
         "mesh_transfinite_volume: finalized mesh count invariant failed"))
     return mesh
 end

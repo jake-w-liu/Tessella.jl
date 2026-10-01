@@ -835,7 +835,21 @@ decomposition is certified against the unrecombined partition, the boundary
 sheets emit type-3 quadrangles or outward triangles with exact coverage
 audits, and every other partial mask fails with Gmsh's "Wrong surface
 recombination in transfinite volume" diagnostic; positively ordered affine eight-corner blocks can also be emitted
-as first-order recombined hexahedra with type-3 boundary quadrangles. Planar
+as first-order recombined hexahedra with type-3 boundary quadrangles. The
+six-face volume kernel carries Gmsh's full recombination decision tree on
+`mesh_transfinite_volume`'s `recombine=` mask in canonical face order:
+all six faces recombined emits one `CREATE_HEX` per cell with quadrangles
+on every face; exactly one opposite face pair unrecombined emits the
+matching prism pair per cell — `(F,T,F,T,T,T)`/`(T,F,T,F,T,T)` spanning
+v/u through the orientation-fixed `MPrism` ordering Gmsh applies to the
+literal macro tuples, and `(T,T,T,T,F,F)` emitting `CREATE_PRISM_1`/
+`CREATE_PRISM_2` — while every other partial mask throws the same "wrong
+surface recombination in transfinite volume" rejection. Each emitted cell
+carries a certified tetrahedral shadow decomposition (checked
+tet-for-tet against the reference six-tet partition where the tilings
+coincide), the boundary audits emitted triangles and quadrangles against
+the shadow's exterior faces, and both the affine path and the
+`transfiniteHex` warped-face path share the emission machinery. Planar
 polylines with an explicit oriented plane normal extrude to type-3 quadrangles
 along left-normals, with optional convex-corner fans of first-layer triangles and
 subsequent ring quadrangles. Their emitted coordinates receive scale-aware
@@ -926,9 +940,12 @@ best-fit plane (gmsh projects interior nodes
 onto the sphere — it needs the ruled
 param-domain mesher),
 volume/hybrid recombination beyond the
-five-face transfinite prism (`recombine=` mask
-on `mesh_transfinite_prism` covers both collapsed
-and compact layouts with Gmsh's valid patterns),
+transfinite prism/hexahedron kernels
+(`recombine=` on `mesh_transfinite_prism`
+covers both collapsed and compact five-face
+layouts, and `recombine=` on
+`mesh_transfinite_volume` covers Gmsh's
+full six-face decision tree),
 selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
 periodic surfaces,
@@ -981,7 +998,10 @@ subdivisions (explicit and auto-detected corners, loop-sign
 canonicalization, and Gmsh's matching "Incompatible surface" rejection),
 recombined five-face-prism masks in both subdivisions (ordered
 prism/hexahedron connectivity, per-face boundary sheets, and the invalid
-masks' matching "Wrong surface recombination" rejections), and
+masks' matching "Wrong surface recombination" rejections),
+recombined six-face volume masks (all-hex, all three opposite-face-pair
+prism patterns, per-face triangle/quadrangle boundary sheets, and the
+invalid masks' matching rejections), and
 recombined-hexahedron differentials, plus native `.geo` and projected
 single-/two-direction periodic surfaces, embedded, reusable-master/chained, and
 expression/list-backed periodic curves, low-level translation/rotation-periodic curves
