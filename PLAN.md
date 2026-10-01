@@ -822,7 +822,19 @@ keeps the distinct diagonal-plane interior evaluations unmerged exactly like
 upstream, and emits the `SIM_7`–`SIM_12` template set (three tetrahedra on
 diagonal cells, six on strictly lower cells) — boundary grids and GEdgeLoop
 canonicalization match between the standalone surface meshes and the volume
-face reads so shared entities weld bitwise; positively ordered affine eight-corner blocks can also be emitted
+face reads so shared entities weld bitwise. Both prism paths also emit
+Gmsh's recombined five-face cells through `mesh_transfinite_prism`'s
+`recombine=` mask: the collapsed layout accepts all five faces recombined
+(wedge prisms plus `CREATE_HEX` interior hexahedra) or the three axial
+quadrilateral faces alone (`CREATE_PRISM_1`/`CREATE_PRISM_2` pairs), while
+the compact layout recombines with all three axial faces and free
+triangular-face flags (`CREATE_PRISM_4` diagonal cells plus
+`CREATE_PRISM_3`/`CREATE_PRISM_4` strict-lower pairs, with Gmsh 4.15.2's
+observed `(c,a,g,f,d,h)` strict ordering); every emitted cell's tetrahedron
+decomposition is certified against the unrecombined partition, the boundary
+sheets emit type-3 quadrangles or outward triangles with exact coverage
+audits, and every other partial mask fails with Gmsh's "Wrong surface
+recombination in transfinite volume" diagnostic; positively ordered affine eight-corner blocks can also be emitted
 as first-order recombined hexahedra with type-3 boundary quadrangles. Planar
 polylines with an explicit oriented plane normal extrude to type-3 quadrangles
 along left-normals, with optional convex-corner fans of first-layer triangles and
@@ -913,7 +925,11 @@ surface meshing still interpolates on the
 best-fit plane (gmsh projects interior nodes
 onto the sphere — it needs the ruled
 param-domain mesher),
-volume/hybrid recombination, selective or
+volume/hybrid recombination beyond the
+five-face transfinite prism (`recombine=` mask
+on `mesh_transfinite_prism` covers both collapsed
+and compact layouts with Gmsh's valid patterns),
+selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
 periodic surfaces,
 or allocator reads after untracked
@@ -962,7 +978,10 @@ unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, affine and curved/warped
 five-face-prism in both the collapsed and compact `Mesh.TransfiniteTri`
 subdivisions (explicit and auto-detected corners, loop-sign
-canonicalization, and Gmsh's matching "Incompatible surface" rejection), and
+canonicalization, and Gmsh's matching "Incompatible surface" rejection),
+recombined five-face-prism masks in both subdivisions (ordered
+prism/hexahedron connectivity, per-face boundary sheets, and the invalid
+masks' matching "Wrong surface recombination" rejections), and
 recombined-hexahedron differentials, plus native `.geo` and projected
 single-/two-direction periodic surfaces, embedded, reusable-master/chained, and
 expression/list-backed periodic curves, low-level translation/rotation-periodic curves

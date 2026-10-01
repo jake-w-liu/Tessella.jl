@@ -63,7 +63,9 @@ function affine_prism_corners(origin, u, v, w)
             add(origin, w), add(origin, u, w), add(origin, v, w)]
 end
 
-function add_affine_prism(corners, cells)
+function add_affine_prism(corners, cells;
+                          recombined::Union{Nothing,NTuple{5,Bool}}=nothing,
+                          transfinite_tri=0)
     gmsh.clear()
     gmsh.model.add("transfinite_prism")
     points = Int32[gmsh.model.geo.addPoint(point...) for point in corners]
@@ -107,9 +109,20 @@ function add_affine_prism(corners, cells)
             faces[index], "Left",
             Int32[points[corner] for corner in face_corners[index]])
     end
+    if recombined !== nothing
+        for index in 1:5
+            recombined[index] &&
+                gmsh.model.geo.mesh.setRecombine(2, faces[index])
+        end
+    end
     gmsh.model.geo.mesh.setTransfiniteVolume(volume, points)
     gmsh.model.geo.synchronize()
-    gmsh.model.mesh.generate(3)
+    gmsh.option.setNumber("Mesh.TransfiniteTri", transfinite_tri)
+    try
+        gmsh.model.mesh.generate(3)
+    finally
+        gmsh.option.setNumber("Mesh.TransfiniteTri", 0)
+    end
     return faces, volume
 end
 
@@ -209,16 +222,21 @@ end
 @inline distance(a, b) =
     hypot(a[1] - b[1], a[2] - b[2], a[3] - b[3])
 
+# `node` is defined on `Mesh` only; the recombined paths return `MixedMesh`.
+@inline _vertex(mesh, index::Integer) =
+    (mesh.coords[1, index], mesh.coords[2, index], mesh.coords[3, index])
+
 function node_mapping(mesh)
+    tessella_nodes = size(mesh.coords, 2)
     tags, coordinates, _ = gmsh.model.mesh.getNodes()
     length(coordinates) == 3length(tags) || error(
         "Gmsh returned malformed node coordinates")
-    length(tags) == nnodes(mesh) || error(
-        "node-count mismatch: Gmsh $(length(tags)), Tessella $(nnodes(mesh))")
+    length(tags) == tessella_nodes || error(
+        "node-count mismatch: Gmsh $(length(tags)), Tessella $tessella_nodes")
     scale = maximum(abs, coordinates; init=1.0)
     # The pinned straight-curve inversion path leaves residuals around 1e-11.
     tolerance = 262_144eps(Float64) * max(scale, 1.0)
-    used = falses(nnodes(mesh))
+    used = falses(tessella_nodes)
     mapping = Dict{UInt64,Int32}()
     maximum_error = 0.0
     for source in eachindex(tags)
@@ -226,9 +244,9 @@ function node_mapping(mesh)
                  coordinates[3source])
         best = 0
         best_error = Inf
-        for destination in 1:nnodes(mesh)
+        for destination in 1:tessella_nodes
             used[destination] && continue
-            candidate_error = distance(point, node(mesh, destination))
+            candidate_error = distance(point, _vertex(mesh, destination))
             if candidate_error < best_error
                 best = destination
                 best_error = candidate_error
@@ -292,6 +310,145 @@ function check_case(corners, cells)
     return maximum_error, expected_nodes, expected_tets, expected_triangles
 end
 
+# Position-keyed cell helpers for the recombined mixed meshes. The compact
+# grid keeps near-coincident diagonal-plane vertex pairs (a surface vertex
+# and a distinct transfiniteHex-evaluated volume vertex), so a node-identity
+# mapping is ambiguous; quantizing coordinates to 1e-9 compares the geometry
+# of the connectivity instead — exact for ordered tuples.
+const POSITION_QUANTUM = 1e-9
+quantize(point) =
+    ntuple(axis -> round(Int64, point[axis] / POSITION_QUANTUM), 3)
+
+function gmsh_cells(connectivity, width::Int, positions, ordered::Bool)
+    length(connectivity) % width == 0 || error(
+        "Gmsh connectivity length is not divisible by $width")
+    result = map(1:width:length(connectivity)) do start
+        cell = [quantize(positions[connectivity[start + offset - 1]])
+                for offset in 1:width]
+        Tuple(ordered ? cell : sort!(cell))
+    end
+    return sort!(result)
+end
+
+function block_cells(block, mesh, ordered::Bool)
+    width = size(block.nodes, 1)
+    result = map(axes(block.nodes, 2)) do column
+        cell = [quantize((mesh.coords[1, block.nodes[row, column]],
+                          mesh.coords[2, block.nodes[row, column]],
+                          mesh.coords[3, block.nodes[row, column]]))
+                for row in 1:width]
+        Tuple(ordered ? cell : sort!(cell))
+    end
+    return sort!(result)
+end
+
+function gmsh_block_cells(dim, tag, wanted_type, positions, ordered)
+    types, _, element_nodes = gmsh.model.mesh.getElements(dim, tag)
+    cells = Tuple[]
+    for (type, connectivity) in zip(types, element_nodes)
+        type == wanted_type || continue
+        _, _, _, num_nodes, _, _ = gmsh.model.mesh.getElementProperties(
+            Int(type))
+        append!(cells, gmsh_cells(
+            connectivity, Int(num_nodes), positions, ordered))
+    end
+    return sort!(cells)
+end
+
+function check_recombined_case(corners, cells, mask; compact::Bool)
+    faces, volume = add_affine_prism(corners, cells;
+        recombined=mask, transfinite_tri=compact ? 1 : 0)
+    mesh = mesh_transfinite_prism(corners, cells;
+        recombine=mask, compact=compact,
+        face_tags=Int32.(1:5), volume_tag=Int32(1))
+    mesh isa Tessella.Elements.MixedMesh || error(
+        "recombined transfinite prism did not return a MixedMesh")
+    validate(mesh).ok || error(
+        "Tessella recombined transfinite prism did not validate")
+    _, maximum_error = node_mapping(mesh)
+    blocks = Dict(Int32(block.msh) => block for block in mesh.blocks)
+    tags, coordinates, _ = gmsh.model.mesh.getNodes()
+    positions = Dict{UInt64,NTuple{3,Float64}}(
+        tag => (coordinates[3index - 2], coordinates[3index - 1],
+                coordinates[3index])
+        for (index, tag) in enumerate(tags))
+
+    # Volume cells: exact ordered connectivity in quantized positions —
+    # the recombined prism/hexahedron ordering is pinned to Gmsh's macros.
+    for type in (Int32(5), Int32(6))
+        gmsh_ordered = gmsh_block_cells(3, volume, type, positions, true)
+        tessella_ordered = haskey(blocks, type) ?
+            block_cells(blocks[type], mesh, true) : Tuple[]
+        gmsh_ordered == tessella_ordered || error(
+            "ordered type-$type volume connectivity differs from Gmsh " *
+            "(gmsh=$(length(gmsh_ordered)) tessella=$(length(tessella_ordered)))")
+    end
+    types, _, _ = gmsh.model.mesh.getElements(3, volume)
+    all(t -> t in (Int32(5), Int32(6)), types) || error(
+        "Gmsh emitted unexpected volume element types: $types")
+    all(block -> Int32(block.msh) in (Int32(2), Int32(3), Int32(5), Int32(6)),
+        mesh.blocks) || error("Tessella emitted unexpected element types")
+
+    # Boundary cells: per-face canonical comparison — vertex winding may
+    # legitimately differ (outward normals vs the surface's own winding),
+    # as on the simplex path.
+    for type in (Int32(2), Int32(3))
+        block = get(blocks, type, nothing)
+        for (face_index, face) in enumerate(faces)
+            gmsh_list = gmsh_block_cells(2, face, type, positions, false)
+            tessella_list = if block === nothing
+                Tuple[]
+            else
+                selected = findall(==(Int32(face_index)), block.tags)
+                sub_block = Tessella.Elements.ElementBlock(
+                    block.msh, block.nodes[:, selected],
+                    block.tags[selected])
+                block_cells(sub_block, mesh, false)
+            end
+            gmsh_list == tessella_list || error(
+                "type-$type boundary cells on face $face differ from Gmsh " *
+                "(gmsh=$(length(gmsh_list)) " *
+                "tessella=$(length(tessella_list)))")
+        end
+    end
+    return maximum_error, size(mesh.coords, 2)
+end
+
+function check_recombined_error(corners, cells, mask; compact::Bool)
+    # Gmsh's "Wrong surface recombination in transfinite volume" is a
+    # logged Msg::Error, not an API exception — the volume emits no 3-D
+    # elements. An API-level exception is also a valid rejection.
+    gmsh_result = try
+        faces, volume = add_affine_prism(corners, cells;
+            recombined=mask, transfinite_tri=compact ? 1 : 0)
+        types, _, element_nodes = gmsh.model.mesh.getElements(3, volume)
+        (accepted=!isempty(types) && !all(isempty, element_nodes),)
+    catch err
+        err isa InterruptException && rethrow()
+        (accepted=false,)
+    end
+    gmsh_result.accepted && error(
+        "Gmsh emitted volume elements for the invalid recombination " *
+        "mask $mask (compact=$compact)")
+    tessella_error = try
+        mesh_transfinite_prism(corners, cells;
+            recombine=mask, compact=compact)
+        nothing
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || error(
+            "expected ArgumentError, got $(typeof(err)): $err")
+        sprint(showerror, err)
+    end
+    tessella_error !== nothing || error(
+        "Tessella accepted the invalid recombination mask $mask " *
+        "(compact=$compact)")
+    occursin("recombination", tessella_error) || error(
+        "Tessella rejection does not match Gmsh's recombination diagnostic: " *
+        tessella_error)
+    return nothing
+end
+
 gmsh.initialize([GMSH_EXECUTABLE, "-nopopup"], false, false)
 try
     gmsh.option.setNumber("General.Terminal", 0)
@@ -328,6 +485,59 @@ try
             "cases=$(length(cases)) nodes=$total_nodes tets=$total_tets " *
             "boundary_triangles=$total_triangles " *
             "max_node_error=$maximum_error algorithm=legacy_collapsed_left")
+
+    # Recombined masks are in canonical (f0,f1,f2,f4,f5) order — the three
+    # axial quadrilateral faces followed by the two triangular faces.
+    recombined_cases = (
+        # Collapsed, all five faces recombined: wedge prisms plus
+        # interior hexahedra and quadrangle boundary sheets.
+        (affine_prism_corners(
+             (0., 0., 0.), (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)),
+         (3, 3, 3), (true, true, true, true, true), false),
+        # Collapsed, axial faces only: wedge prisms plus PRISM_1/PRISM_2
+        # pairs; the triangular ends stay triangles.
+        (affine_prism_corners(
+             (0., 0., 0.), (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)),
+         (3, 3, 3), (true, true, true, false, false), false),
+        # Compact (Mesh.TransfiniteTri = 1), all faces recombined:
+        # PRISM_4 diagonals plus PRISM_3/PRISM_4 strict-lower pairs.
+        (affine_prism_corners(
+             (0., 0., 0.), (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)),
+         (3, 3, 3), (true, true, true, true, true), true),
+        # Compact with only the lower triangular face recombined — the
+        # compact branch leaves the triangular-face flags free.
+        (affine_prism_corners(
+             (0., 0., 0.), (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)),
+         (3, 3, 3), (true, true, true, true, false), true),
+        # A second compact size to cover strict-lower cells on a finer
+        # grid and the alternate arrangement's boundary layout.
+        (affine_prism_corners(
+             (0., 0., 0.), (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)),
+         (4, 4, 2), (true, true, true, false, true), true))
+    recombined_errors = (
+        # Collapsed rejects triangular-face asymmetry and any missing axial
+        # face; the compact branch still requires all three axials.
+        ((true, true, true, true, false), false),
+        ((false, true, true, true, true), false),
+        ((true, true, false, true, true), true),
+        ((true, false, true, false, false), false))
+    recombined_nodes = 0
+    for (corners, cells, mask, compact) in recombined_cases
+        error_value, nodes = check_recombined_case(
+            corners, cells, mask; compact=compact)
+        maximum_error = max(maximum_error, error_value)
+        recombined_nodes += nodes
+    end
+    for (mask, compact) in recombined_errors
+        check_recombined_error(
+            affine_prism_corners(
+                (0., 0., 0.), (1., 0., 0.), (0., 1., 0.), (0., 0., 1.)),
+            (3, 3, 3), mask; compact=compact)
+    end
+    println("TRANSFINITE_PRISM_RECOMBINED_DIFFERENTIAL_OK " *
+            "gmsh=$runtime_version cases=$(length(recombined_cases)) " *
+            "error_cases=$(length(recombined_errors)) " *
+            "nodes=$recombined_nodes max_node_error=$maximum_error")
 finally
     gmsh.finalize()
 end

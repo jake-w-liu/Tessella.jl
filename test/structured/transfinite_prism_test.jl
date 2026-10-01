@@ -54,6 +54,222 @@ end
             (1 - t) * a[3] + t * b[3])
 end
 
+# Canonical collapsed slot grids for an affine prism — f0=(s0,s1,s5,s4),
+# f1=(s1,s2,s6,s5), f2=(s0,s2,s6,s4) are (u,w)/(v,w) bilinear fills; f4/f5
+# are the collapsed triangular grids whose i=0 column repeats the apex
+# bitwise.
+function _affine_prism_faces(corners, nr, ns, nw)
+    s0, s1, s2, s4, s5, s6 = corners
+    function fill_grid(m, n, evaluate)
+        points = Matrix{Float64}(undef, 3, (m + 1) * (n + 1))
+        for j in 0:n, i in 0:m
+            point = evaluate(i / m, j / n)
+            column = i + 1 + j * (m + 1)
+            points[1, column] = point[1]
+            points[2, column] = point[2]
+            points[3, column] = point[3]
+        end
+        return points
+    end
+    bilinear(a, b, c, d) = (u, v) -> _prism_lerp3(
+        _prism_lerp3(a, b, u), _prism_lerp3(d, c, u), v)
+    collapsed(a, b, c) = (u, v) -> _prism_lerp3(
+        a, _prism_lerp3(b, c, v), u)
+    function quad_tris(m, n)
+        result = Matrix{Int32}(undef, 3, 2 * m * n)
+        cursor = 0
+        for j in 0:n-1, i in 0:m-1
+            a = i + 1 + j * (m + 1); b = a + 1
+            d = a + m + 1; e = d + 1
+            result[:, cursor + 1] .= (a, b, d)
+            result[:, cursor + 2] .= (b, e, d)
+            cursor += 2
+        end
+        return result
+    end
+    function collapsed_tris(m, n)
+        result = Matrix{Int32}(undef, 3, n * (2 * m - 1))
+        nodeat(i, j) = i + 1 + j * (m + 1)
+        cursor = 0
+        for j in 0:n-1
+            result[:, cursor + 1] .= (nodeat(0, 0),
+                                    nodeat(1, j), nodeat(1, j + 1))
+            cursor += 1
+        end
+        for i in 1:m-1, j in 0:n-1
+            a = nodeat(i, j); b = nodeat(i + 1, j)
+            c = nodeat(i, j + 1); g = nodeat(i + 1, j + 1)
+            result[:, cursor + 1] .= (a, b, c)
+            result[:, cursor + 2] .= (c, b, g)
+            cursor += 2
+        end
+        return result
+    end
+    f0 = fill_grid(nr, nw, bilinear(s0, s1, s5, s4))
+    f1 = fill_grid(ns, nw, bilinear(s1, s2, s6, s5))
+    f2 = fill_grid(nr, nw, bilinear(s0, s2, s6, s4))
+    f4 = fill_grid(nr, ns, collapsed(s0, s1, s2))
+    f5 = fill_grid(nr, ns, collapsed(s4, s5, s6))
+    return ((f0, quad_tris(nr, nw), fill(Int32(11), 2nr * nw)),
+            (f1, quad_tris(ns, nw), fill(Int32(12), 2ns * nw)),
+            (f2, quad_tris(nr, nw), fill(Int32(13), 2nr * nw)),
+            (f4, collapsed_tris(nr, ns), fill(Int32(14), ns * (2nr - 1))),
+            (f5, collapsed_tris(nr, ns), fill(Int32(15), ns * (2nr - 1))))
+end
+
+# Compact (`transfinite3`) slot grids: the triangular faces fill the full
+# (n+1)×(n+1) square with the diagonal-aliased compact lattice.
+function _compact_prism_faces(corners, n, nw)
+    s0, s1, s2, s4, s5, s6 = corners
+    np = n + 1
+    function fill_grid(evaluate, m, nn)
+        points = Matrix{Float64}(undef, 3, (m + 1) * (nn + 1))
+        for j in 0:nn, i in 0:m
+            point = evaluate(i, j)
+            column = i + 1 + j * (m + 1)
+            points[1, column] = point[1]
+            points[2, column] = point[2]
+            points[3, column] = point[3]
+        end
+        return points
+    end
+    bilinear(a, b, c, d) = (i, j) -> _prism_lerp3(
+        _prism_lerp3(a, b, i / n), _prism_lerp3(d, c, i / n), j / nw)
+    function compact_face(a, b, c)
+        fill_grid(n, n) do i, j
+            jp = min(j, i)
+            t = i == 0 ? 0.0 : jp / i
+            _prism_lerp3(a, _prism_lerp3(b, c, t), i / n)
+        end
+    end
+    function compact_tris()
+        result = Matrix{Int32}(undef, 3, n * n)
+        nodeat(i, j) = i + 1 + j * np
+        cursor = 0
+        for i in 0:n-1, j in 0:i-1
+            result[:, cursor + 1] .= (nodeat(i, j), nodeat(i + 1, j + 1),
+                                    nodeat(i, j + 1))
+            result[:, cursor + 2] .= (nodeat(i, j), nodeat(i + 1, j),
+                                    nodeat(i + 1, j + 1))
+            cursor += 2
+        end
+        for i in 0:n-1
+            result[:, cursor + 1] .= (nodeat(i, i), nodeat(i + 1, i),
+                                    nodeat(i + 1, i + 1))
+            cursor += 1
+        end
+        return result
+    end
+    function quad_tris(m, nn)
+        result = Matrix{Int32}(undef, 3, 2 * m * nn)
+        cursor = 0
+        for j in 0:nn-1, i in 0:m-1
+            a = i + 1 + j * (m + 1); b = a + 1
+            d = a + m + 1; e = d + 1
+            result[:, cursor + 1] .= (a, b, d)
+            result[:, cursor + 2] .= (b, e, d)
+            cursor += 2
+        end
+        return result
+    end
+    f0 = fill_grid(bilinear(s0, s1, s5, s4), n, nw)
+    f1 = fill_grid(bilinear(s1, s2, s6, s5), n, nw)
+    f2 = fill_grid(bilinear(s0, s2, s6, s4), n, nw)
+    f4 = compact_face(s0, s1, s2)
+    f5 = compact_face(s4, s5, s6)
+    return ((f0, quad_tris(n, nw), fill(Int32(11), 2n * nw)),
+            (f1, quad_tris(n, nw), fill(Int32(12), 2n * nw)),
+            (f2, quad_tris(n, nw), fill(Int32(13), 2n * nw)),
+            (f4, compact_tris(), fill(Int32(14), n * n)),
+            (f5, compact_tris(), fill(Int32(15), n * n)))
+end
+
+# Positional tetrahedron-decomposition templates for the emitted recombined
+# cells — the same vertex-order conventions as the kernel's shadow
+# decompositions.
+const _PRISM_SHADOW_TEMPLATES = (
+    ((1, 2, 3, 4), (2, 3, 4, 5), (4, 6, 5, 3)),   # wedge order (a,b,c,d,e,f)
+    ((1, 2, 3, 4), (2, 3, 4, 5), (4, 5, 3, 6)),   # PRISM_1/PRISM_4 order
+    ((3, 2, 6, 1), (2, 5, 6, 1), (6, 5, 4, 1)),   # PRISM_2 order
+    ((2, 1, 5, 3), (1, 4, 5, 3), (5, 4, 6, 3)))   # PRISM_3 order (c,a,g,f,d,h)
+const _HEX_SHADOW_TEMPLATE =
+    ((1, 2, 4, 5), (2, 4, 5, 6), (5, 6, 4, 8),
+     (2, 4, 6, 3), (4, 8, 6, 3), (6, 8, 7, 3))
+
+@inline function _canon4key(a, b, c, d)
+    a, b = minmax(a, b); c, d = minmax(c, d)
+    a, c = minmax(a, c); b, d = minmax(b, d)
+    b, c = minmax(b, c)
+    return (a, b, c, d)
+end
+
+@inline function _canon3key(a, b, c)
+    a <= b || ((a, b) = (b, a))
+    b <= c || ((b, c) = (c, b))
+    a <= b || ((a, b) = (b, a))
+    return (a, b, c)
+end
+
+# Decomposes every volume cell of a recombined `MixedMesh` into tetrahedra
+# of the reference simplex partition: every shadow template whose tet set is
+# contained in `reference_keys` contributes — the union over all cells is
+# then compared for exact multiset equality with the partition.
+function _recombined_shadow_tets(mesh, reference_keys::Set)
+    found = NTuple{4,Int32}[]
+    for block in mesh.blocks
+        block.msh in (5, 6) || continue
+        templates = block.msh == 6 ? _PRISM_SHADOW_TEMPLATES :
+                                    (_HEX_SHADOW_TEMPLATE,)
+        for cell in axes(block.nodes, 2)
+            vertices = block.nodes[:, cell]
+            cell_tets = Set{NTuple{4,Int32}}()
+            for template in templates
+                tets = [_canon4key(vertices[t[1]], vertices[t[2]],
+                                   vertices[t[3]], vertices[t[4]])
+                        for t in template]
+                all(tet -> tet in reference_keys, tets) ||
+                    continue
+                union!(cell_tets, tets)
+            end
+            isempty(cell_tets) &&
+                error("recombined cell has no simplex-partition decomposition")
+            append!(found, cell_tets)
+        end
+    end
+    return found
+end
+
+# Audits the emitted boundary cells against the simplex mesh's boundary
+# triangulation: every triangle is a boundary face and every quadrangle
+# covers exactly two boundary faces — once each, with nothing left over.
+function _assert_boundary_cover(mesh, reference)
+    remaining = Set(_prism_canonical_triangles(reference.tris))
+    for block in mesh.blocks
+        block.msh in (2, 3) || continue
+        for cell in axes(block.nodes, 2)
+            nodes = block.nodes[:, cell]
+            if block.msh == 2
+                key = _canon3key(nodes[1], nodes[2], nodes[3])
+                @test key in remaining
+                delete!(remaining, key)
+            else
+                a, b, c, d = nodes[1], nodes[2], nodes[3], nodes[4]
+                covered = 0
+                for face in (_canon3key(a, b, c), _canon3key(a, c, d),
+                             _canon3key(a, b, d), _canon3key(b, c, d))
+                    if face in remaining
+                        delete!(remaining, face)
+                        covered += 1
+                    end
+                end
+                @test covered == 2
+            end
+        end
+    end
+    @test isempty(remaining)
+    return nothing
+end
+
 struct _UnreadPrismCorners end
 Base.length(::_UnreadPrismCorners) = 6
 Base.iterate(::_UnreadPrismCorners) =
@@ -358,69 +574,6 @@ end
     end
 
     @testset "face-grid boundary input (degenerate-hexahedron slots)" begin
-        # Canonical slot grids for an affine prism — f0=(s0,s1,s5,s4),
-        # f1=(s1,s2,s6,s5), f2=(s0,s2,s6,s4) are (u,w)/(v,w) bilinear fills;
-        # f4/f5 are the collapsed triangular grids whose i=0 column repeats
-        # the apex bitwise.
-        function _affine_prism_faces(corners, nr, ns, nw)
-            s0, s1, s2, s4, s5, s6 = corners
-            function fill_grid(m, n, evaluate)
-                points = Matrix{Float64}(undef, 3, (m + 1) * (n + 1))
-                for j in 0:n, i in 0:m
-                    point = evaluate(i / m, j / n)
-                    column = i + 1 + j * (m + 1)
-                    points[1, column] = point[1]
-                    points[2, column] = point[2]
-                    points[3, column] = point[3]
-                end
-                return points
-            end
-            bilinear(a, b, c, d) = (u, v) -> _prism_lerp3(
-                _prism_lerp3(a, b, u), _prism_lerp3(d, c, u), v)
-            collapsed(a, b, c) = (u, v) -> _prism_lerp3(
-                a, _prism_lerp3(b, c, v), u)
-            function quad_tris(m, n)
-                result = Matrix{Int32}(undef, 3, 2 * m * n)
-                cursor = 0
-                for j in 0:n-1, i in 0:m-1
-                    a = i + 1 + j * (m + 1); b = a + 1
-                    d = a + m + 1; e = d + 1
-                    result[:, cursor + 1] .= (a, b, d)
-                    result[:, cursor + 2] .= (b, e, d)
-                    cursor += 2
-                end
-                return result
-            end
-            function collapsed_tris(m, n)
-                result = Matrix{Int32}(undef, 3, n * (2 * m - 1))
-                nodeat(i, j) = i + 1 + j * (m + 1)
-                cursor = 0
-                for j in 0:n-1
-                    result[:, cursor + 1] .= (nodeat(0, 0),
-                                            nodeat(1, j), nodeat(1, j + 1))
-                    cursor += 1
-                end
-                for i in 1:m-1, j in 0:n-1
-                    a = nodeat(i, j); b = nodeat(i + 1, j)
-                    c = nodeat(i, j + 1); g = nodeat(i + 1, j + 1)
-                    result[:, cursor + 1] .= (a, b, c)
-                    result[:, cursor + 2] .= (c, b, g)
-                    cursor += 2
-                end
-                return result
-            end
-            f0 = fill_grid(nr, nw, bilinear(s0, s1, s5, s4))
-            f1 = fill_grid(ns, nw, bilinear(s1, s2, s6, s5))
-            f2 = fill_grid(nr, nw, bilinear(s0, s2, s6, s4))
-            f4 = fill_grid(nr, ns, collapsed(s0, s1, s2))
-            f5 = fill_grid(nr, ns, collapsed(s4, s5, s6))
-            return ((f0, quad_tris(nr, nw), fill(Int32(11), 2nr * nw)),
-                    (f1, quad_tris(ns, nw), fill(Int32(12), 2ns * nw)),
-                    (f2, quad_tris(nr, nw), fill(Int32(13), 2nr * nw)),
-                    (f4, collapsed_tris(nr, ns), fill(Int32(14), ns * (2nr - 1))),
-                    (f5, collapsed_tris(nr, ns), fill(Int32(15), ns * (2nr - 1))))
-        end
-
         corners = _affine_prism_corners()
         nr, ns, nw = 2, 3, 2
         affine = mesh_transfinite_prism(corners, (nr, ns, nw))
@@ -572,73 +725,6 @@ end
         # compact lattice vertex (i,min(j,i)) — upper-triangle slots repeat
         # the diagonal-edge vertex bitwise so the kernel weld sees exactly
         # (n+1)(n+2)/2 distinct nodes per triangular face.
-        function _compact_prism_faces(corners, n, nw)
-            s0, s1, s2, s4, s5, s6 = corners
-            np = n + 1
-            npw = nw + 1
-            function fill_grid(evaluate, m, nn)
-                points = Matrix{Float64}(undef, 3, (m + 1) * (nn + 1))
-                for j in 0:nn, i in 0:m
-                    point = evaluate(i, j)
-                    column = i + 1 + j * (m + 1)
-                    points[1, column] = point[1]
-                    points[2, column] = point[2]
-                    points[3, column] = point[3]
-                end
-                return points
-            end
-            bilinear(a, b, c, d) = (i, j) -> _prism_lerp3(
-                _prism_lerp3(a, b, i / n), _prism_lerp3(d, c, i / n), j / nw)
-            # Lower/upper compact lattice vertices at axial ends.
-            function compact_face(a, b, c)
-                fill_grid(n, n) do i, j
-                    jp = min(j, i)
-                    t = i == 0 ? 0.0 : jp / i
-                    _prism_lerp3(a, _prism_lerp3(b, c, t), i / n)
-                end
-            end
-            function compact_tris()
-                result = Matrix{Int32}(undef, 3, n * n)
-                nodeat(i, j) = i + 1 + j * np
-                cursor = 0
-                for i in 0:n-1, j in 0:i-1
-                    result[:, cursor + 1] .= (nodeat(i, j), nodeat(i + 1, j + 1),
-                                            nodeat(i, j + 1))
-                    result[:, cursor + 2] .= (nodeat(i, j), nodeat(i + 1, j),
-                                            nodeat(i + 1, j + 1))
-                    cursor += 2
-                end
-                for i in 0:n-1
-                    result[:, cursor + 1] .= (nodeat(i, i), nodeat(i + 1, i),
-                                            nodeat(i + 1, i + 1))
-                    cursor += 1
-                end
-                return result
-            end
-            function quad_tris(m, nn)
-                result = Matrix{Int32}(undef, 3, 2 * m * nn)
-                cursor = 0
-                for j in 0:nn-1, i in 0:m-1
-                    a = i + 1 + j * (m + 1); b = a + 1
-                    d = a + m + 1; e = d + 1
-                    result[:, cursor + 1] .= (a, b, d)
-                    result[:, cursor + 2] .= (b, e, d)
-                    cursor += 2
-                end
-                return result
-            end
-            f0 = fill_grid(bilinear(s0, s1, s5, s4), n, nw)
-            f1 = fill_grid(bilinear(s1, s2, s6, s5), n, nw)
-            f2 = fill_grid(bilinear(s0, s2, s6, s4), n, nw)
-            f4 = compact_face(s0, s1, s2)
-            f5 = compact_face(s4, s5, s6)
-            return ((f0, quad_tris(n, nw), fill(Int32(11), 2n * nw)),
-                    (f1, quad_tris(n, nw), fill(Int32(12), 2n * nw)),
-                    (f2, quad_tris(n, nw), fill(Int32(13), 2n * nw)),
-                    (f4, compact_tris(), fill(Int32(14), n * n)),
-                    (f5, compact_tris(), fill(Int32(15), n * n)))
-        end
-
         n, nw = 3, 3
         affine = mesh_transfinite_prism(corners, (n, n, nw); compact=true)
         meshed = mesh_transfinite_prism(
@@ -675,6 +761,195 @@ end
             faces=(bad_faces[1], bad_faces[2], bad_faces[3],
                    (bad_faces[4][1], bad_faces[4][2][:, 1:end-1],
                     bad_faces[4][3][1:end-1]), bad_faces[5]))
+    end
+
+    @testset "recombined collapsed emission (wedge prisms + hexes)" begin
+        corners = _affine_prism_corners()
+        reference = mesh_transfinite_prism(corners, (3, 3, 3))
+        reference_tets = _prism_canonical_tets(reference)
+
+        # Gmsh oracle prism_r_all.geo: 18 hexes + 9 prisms, 39 quads + 6 tris.
+        mesh = mesh_transfinite_prism(corners, (3, 3, 3); recombine=true)
+        @test mesh isa Tessella.Elements.MixedMesh
+        blocks = Dict(b.msh => b for b in mesh.blocks)
+        @test sort(collect(keys(blocks))) == [2, 3, 5, 6]
+        @test size(blocks[6].nodes) == (6, 9)    # wedge prisms
+        @test size(blocks[5].nodes) == (8, 18)   # interior hexahedra
+        @test size(blocks[2].nodes) == (3, 6)    # wedge tris only
+        @test size(blocks[3].nodes) == (4, 39)   # 27 axial + 12 face quads
+        @test size(mesh.coords, 2) == 52
+
+        # Cell tetrahedron decomposition tiles the simplex partition exactly.
+        @test sort(_recombined_shadow_tets(mesh, Set(reference_tets))) ==
+            reference_tets
+
+        # Every boundary cell lies on the shadow boundary, covering each
+        # boundary face exactly once.
+        _assert_boundary_cover(mesh, reference)
+
+        # Tags propagate.
+        tagged = mesh_transfinite_prism(corners, (3, 3, 3); recombine=true,
+                                      volume_tag=7,
+                                      face_tags=(11, 12, 13, 14, 15))
+        tb = Dict(b.msh => b for b in tagged.blocks)
+        @test all(==(Int32(7)), tb[5].tags)
+        @test all(==(Int32(7)), tb[6].tags)
+        @test Set(tb[2].tags) == Set(Int32[14, 15])
+        @test Set(tb[3].tags) == Set(Int32[11, 12, 13, 14, 15])
+    end
+
+    @testset "recombined collapsed axial-only emission (PRISM_1/PRISM_2)" begin
+        corners = _affine_prism_corners()
+        # Gmsh oracle prism_r_quads.geo: 45 prisms, 27 quads + 30 tris.
+        mesh = mesh_transfinite_prism(corners, (3, 3, 3);
+                                      recombine=(true, true, true,
+                                                 false, false))
+        blocks = Dict(b.msh => b for b in mesh.blocks)
+        @test sort(collect(keys(blocks))) == [2, 3, 6]
+        @test size(blocks[6].nodes) == (6, 45)
+        @test size(blocks[3].nodes) == (4, 27)
+        @test size(blocks[2].nodes) == (3, 30)
+        @test size(mesh.coords, 2) == 52
+
+        reference = mesh_transfinite_prism(corners, (3, 3, 3))
+        @test sort(_recombined_shadow_tets(
+            mesh, Set(_prism_canonical_tets(reference)))) ==
+            _prism_canonical_tets(reference)
+        _assert_boundary_cover(mesh, reference)
+    end
+
+    @testset "recombined compact emission (PRISM_3/PRISM_4)" begin
+        corners = _affine_prism_corners()
+        reference = mesh_transfinite_prism(corners, (3, 3, 3); compact=true)
+
+        # Gmsh oracle prism_rc_all.geo: 27 prisms, 33 quads + 6 tris.
+        mesh = mesh_transfinite_prism(corners, (3, 3, 3);
+                                      compact=true, recombine=true)
+        blocks = Dict(b.msh => b for b in mesh.blocks)
+        @test sort(collect(keys(blocks))) == [2, 3, 6]
+        @test size(blocks[6].nodes) == (6, 27)
+        @test size(blocks[3].nodes) == (4, 33)
+        @test size(blocks[2].nodes) == (3, 6)
+        @test size(mesh.coords, 2) == 46
+        refset = Set(_prism_canonical_tets(reference))
+        @test sort(_recombined_shadow_tets(mesh, refset)) ==
+            _prism_canonical_tets(reference)
+        _assert_boundary_cover(mesh, reference)
+
+        # Axial-only recombination keeps both triangular faces simplex.
+        quads_only = mesh_transfinite_prism(corners, (3, 3, 3);
+            compact=true, recombine=(true, true, true, false, false))
+        qb = Dict(b.msh => b for b in quads_only.blocks)
+        @test size(qb[6].nodes) == (6, 27)
+        @test size(qb[3].nodes) == (4, 27)
+        @test size(qb[2].nodes) == (3, 18)
+        _assert_boundary_cover(quads_only, reference)
+
+        # Mixed triangular-face states: f4 only, f5 only.
+        for mask in ((true, true, true, true, false),
+                     (true, true, true, false, true))
+            mixed = mesh_transfinite_prism(corners, (3, 3, 3);
+                                           compact=true, recombine=mask)
+            mb = Dict(b.msh => b for b in mixed.blocks)
+            @test size(mb[6].nodes) == (6, 27)
+            @test size(mb[3].nodes) == (4, 30)
+            @test size(mb[2].nodes) == (3, 12)
+            _assert_boundary_cover(mixed, reference)
+        end
+
+        # Arrangement variants emit the same counts with valid coverage.
+        ref4 = mesh_transfinite_prism(corners, (4, 4, 2); compact=true)
+        for arrangement in (:left, :right, :alternate_left,
+                            :alternate_right, (:right, :left))
+            am = mesh_transfinite_prism(corners, (4, 4, 2);
+                compact=true, recombine=true, arrangement=arrangement)
+            ab = Dict(b.msh => b for b in am.blocks)
+            @test size(ab[6].nodes) == (6, 32)
+            @test size(ab[3].nodes) == (4, 3 * 4 * 2 + 2 * 6)
+            @test size(ab[2].nodes) == (3, 8)
+            _assert_boundary_cover(am, ref4)
+        end
+    end
+
+    @testset "recombined masks, dispatch, and error states" begin
+        corners = _affine_prism_corners()
+        @test mesh_transfinite_prism(corners, (2, 2, 2);
+                                     recombine=nothing) isa Tessella.MeshTypes.Mesh
+        @test mesh_transfinite_prism(corners, (2, 2, 2);
+                                     recombine=false) isa Tessella.MeshTypes.Mesh
+        @test mesh_transfinite_prism(corners, (2, 2, 2);
+            recombine=(false, false, false, false, false)) isa
+            Tessella.MeshTypes.Mesh
+
+        # recombine=nothing and recombine=false are bitwise identical.
+        plain = mesh_transfinite_prism(corners, (3, 2, 2))
+        explicit = mesh_transfinite_prism(corners, (3, 2, 2); recombine=false)
+        @test plain.coords == explicit.coords
+        @test plain.tets == explicit.tets
+        @test plain.tris == explicit.tris
+
+        for mask in ((true, true, false, true, true),   # partial axial
+                     (false, false, false, true, true), # triangular only
+                     (true, true, true, true, false),   # mixed tri states
+                     (false, true, true, true, true))
+            @test_throws ArgumentError mesh_transfinite_prism(
+                corners, (2, 2, 1); recombine=mask)
+            # In the compact branch triangular-face states are free, but the
+            # three axial faces must all be recombined.
+            compact_mask = (mask[1], mask[2], mask[3], true, false)
+            if mask[1] && mask[2] && mask[3]
+                @test mesh_transfinite_prism(corners, (2, 2, 1);
+                    compact=true, recombine=compact_mask) isa
+                    Tessella.Elements.MixedMesh
+            else
+                @test_throws ArgumentError mesh_transfinite_prism(
+                    corners, (2, 2, 1); compact=true,
+                    recombine=compact_mask)
+            end
+        end
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (2, 2, 1); recombine=(true, true, true))
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (2, 2, 1); recombine=(true, true, true, 1, true))
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (2, 2, 1); compact=true, recombine=true,
+            arrangement=:bogus)
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (2, 2, 1); compact=true, recombine=true,
+            arrangement=(:left,))
+    end
+
+    @testset "recombined warped face-grid emission" begin
+        corners = _affine_prism_corners()
+        for compact in (false, true)
+            simplex = mesh_transfinite_prism(corners, (3, 3, 2);
+                                           compact=compact)
+            faces = compact ? _compact_prism_faces(corners, 3, 2) :
+                              _affine_prism_faces(corners, 3, 3, 2)
+            warped = mesh_transfinite_prism(corners, (3, 3, 2);
+                compact=compact, faces=faces, recombine=true)
+            @test warped isa Tessella.Elements.MixedMesh
+            @test validate(warped).ok
+            @test sort(_recombined_shadow_tets(
+                warped, Set(_prism_canonical_tets(simplex)))) ==
+                _prism_canonical_tets(simplex)
+            _assert_boundary_cover(warped, simplex)
+        end
+    end
+
+    @testset "recombined allocation growth remains linear" begin
+        small = @allocated mesh_transfinite_prism(
+            _affine_prism_corners(), (3, 3, 3); recombine=true)
+        large = @allocated mesh_transfinite_prism(
+            _affine_prism_corners(), (6, 6, 6); recombine=true)
+        tets_small, tets_large = 54, 432
+        @test large / max(small, 1) < 4.0 * (tets_large / tets_small)
+
+        csmall = @allocated mesh_transfinite_prism(
+            _affine_prism_corners(), (3, 3, 3); compact=true, recombine=true)
+        clarge = @allocated mesh_transfinite_prism(
+            _affine_prism_corners(), (6, 6, 6); compact=true, recombine=true)
+        @test clarge / max(csmall, 1) < 4.0 * (tets_large / tets_small)
     end
 
     @testset "allocation growth remains linear in output size" begin
