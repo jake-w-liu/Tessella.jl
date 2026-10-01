@@ -26,7 +26,55 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Compact `Mesh.TransfiniteTri = 1` five-face prism volumes** — the
+**Recombined five-face transfinite prism volumes** — `mesh_transfinite_prism`
+gains a `recombine=` mask in canonical `(f0,f1,f2,f4,f5)` order plus an
+`arrangement=` keyword, emitting Gmsh 4.15.2's recombined cells as a
+`MixedMesh` (`recombine=nothing`/`false` keeps the simplex `Mesh` path
+bitwise-unchanged). The collapsed layout (`Mesh.TransfiniteTri = 0`)
+accepts exactly the two masks Gmsh accepts: all five faces recombined —
+collapsed wedge prisms plus `CREATE_HEX(a,b,g,c,d,e,h,f)` interior
+hexahedra — or the three axial quadrilateral faces alone — wedge prisms
+plus `CREATE_PRISM_1(a,b,c,d,e,f)`/`CREATE_PRISM_2(g,c,b,h,f,e)` pairs. The
+compact layout (`transfinite3`) accepts any mask with all three axial faces
+recombined: `CREATE_PRISM_4(a,b,g,d,e,h)` on diagonal cells and
+`CREATE_PRISM_3`/`CREATE_PRISM_4` pairs on strictly lower cells — with the
+observed Gmsh 4.15.2 strict ordering `(c,a,g,f,d,h)`, which differs from the
+upstream macro's literal `(a,c,g,…)` argument list. Every other mask fails
+with Gmsh's "Wrong surface recombination in transfinite volume" diagnostic.
+
+Every emitted cell's tetrahedron shadow decomposition is certified against
+the unrecombined simplex partition (the shared emitters are the exact
+reference), and the boundary sheets — type-3 quadrangles on recombined
+quadrilateral faces, outward triangles or arrangement-aware recombined
+layouts on the triangular faces — are audited for exact coverage of the
+simplex boundary. Verified against the oracle on the unit prism at n=3:
+collapsed all-five 52 nodes / 6 tris / 39 quads / 9 prisms / 18 hexes,
+collapsed axial-only 52 / 30 / 27 / 45 prisms, compact all-five
+46 / 6 / 33 / 27 prisms, plus compact mixed triangular-face masks and the
+(4,4,2) second-size case — ordered volume connectivity identical in all
+patterns, per-face boundary sets identical, invalid-mask rejections
+identical.
+
+Files: `src/structured/TransfinitePrism.jl` (`recombine=`/`arrangement=`
+keywords, `_mesh_transfinite_prism_recombined` mask gate, collapsed and
+compact recombined emitters, shadow-decomposition certification and boundary
+coverage audit, shared extractions of the simplex emitters),
+`test/structured/transfinite_prism_test.jl` (recombined suites — shadow
+tiling, warped face grids, mask/error matrix, allocation ratchet; 837
+focused tests),
+`validation/transfinite_prism/differential.jl` (five ordered
+recombined cases plus four error-state cases;
+`TRANSFINITE_PRISM_RECOMBINED_DIFFERENTIAL_OK gmsh=4.15.2`), docs.
+
+Previous increment: **compact `Mesh.TransfiniteTri = 1` five-face prism
+volumes** (`a811801`) — the `TransfiniteTri = 1` blocker lifted: compact
+`transfinite3` subdivision, expanded-slot bitwise welding, GEdgeLoop-style
+chaining at surface and volume level, `SIM_7`–`SIM_12` emission.
+
+<details>
+<summary>Earlier increment detail (compact TransfiniteTri=1 prisms)</summary>
+
+The
 `TransfiniteTri = 1` blocker is lifted: triangular-prism volumes now mesh
 through Gmsh 4.15.2's compact `transfinite3` subdivision. The triangular
 faces mesh with the compact equal-side lattice (`(n+1)(n+2)/2` nodes, equal
@@ -77,6 +125,8 @@ surface and volume paths, compact face-grid expansion in
 `test/structured/transfinite_prism_test.jl` (compact suites),
 `test/geometry/geo_constraints_test.jl` (`.geo` parity and rejection tests),
 `validation/geo_constraints/differential.jl` (three new cases), docs.
+
+</details>
 
 Previous increment: **five-face transfinite prism volumes** — `Transfinite
 Volume` on a triangular-prism boundary (two triangular + three
