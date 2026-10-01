@@ -7119,6 +7119,24 @@ function _geo_store_option_number!(context::_GeoNumericContext,
         end
         alias!==nothing &&
             (context.option_numbers[(family,index,alias)]=v)
+        # The `Min*Nodes`/`Minimum*Nodes`/`Minimum*Points` spellings are
+        # each one CTX.mesh slot upstream (`opt_mesh_min_*_nodes`), so a
+        # write to any alias must reach the name the graders read.
+        aliases=if member in ("MinCircleNodes","MinimumCircleNodes",
+                            "MinimumCirclePoints")
+            ("MinCircleNodes","MinimumCircleNodes","MinimumCirclePoints")
+        elseif member in ("MinCurveNodes","MinimumCurveNodes",
+                          "MinimumCurvePoints")
+            ("MinCurveNodes","MinimumCurveNodes","MinimumCurvePoints")
+        elseif member in ("MinLineNodes","MinimumLineNodes")
+            ("MinLineNodes","MinimumLineNodes")
+        else
+            ()
+        end
+        for other in aliases
+            other==member && continue
+            context.option_numbers[(family,index,other)]=v
+        end
     end
     context.option_numbers[(family,index,member)]=v
     return nothing

@@ -26,8 +26,33 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Curved `Curve In Volume` embedding and classification** — the
-`Curve{t} In Volume{v}` / `Curve{t} In Surface{s}`-in-volume constraints
+**Closed-curve grading floor + `Min*`/`Minimum*` option aliases** —
+`_model_minimum_curve_segments` now applies Gmsh's closed native curve
+floor `max(np, 3)`: upstream, `N = minimumMeshSegments + 1` is a *node*
+target, so the shared end vertex turns `N` nodes into `N` edges on a
+closed loop and a `MinCurveNodes-1` open floor under-grades a closed
+curve into an unrealizable two-segment digon. Verified against the Gmsh
+4.15.2 oracle: a coarse closed spline emits 3 elements with interior
+nodes at arc-length thirds (matched to ~1e-9), an open spline keeps its
+2-element floor, and `Mesh.MinimumCurvePoints = 5` raises the closed
+spline to 4 segments — the raised regular floor still wins.
+
+`_geo_store_option_number!` now synchronizes the Gmsh-canonical option
+spellings at storage time: `MinCircleNodes`/`MinimumCircleNodes`/
+`MinimumCirclePoints`, `MinCurveNodes`/`MinimumCurveNodes`/
+`MinimumCurvePoints`, and `MinLineNodes`/`MinimumLineNodes` each address
+a single `CTX.mesh` slot upstream (`opt_mesh_min_*_nodes`), so a write to
+any spelling mirrors to the sibling keys the graders read. Previously the
+canonical `Mesh.MinimumCurvePoints` parsed into the option table but was
+silently inert — `_geo_mesh_1d_options` reads only `MinCurveNodes`.
+
+Files: `src/geometry/ModelMesh1D.jl`, `src/interfaces/IO.jl`,
+`test/geometry/geo_spline_test.jl` (new testset, 7 assertions — uses the
+canonical `MinimumCurvePoints` spelling so the alias path is exercised).
+
+Previous increment (for context): **curved `Curve In Volume` embedding**
+— the `Curve{t} In Volume{v}` /
+`Curve{t} In Surface{s}`-in-volume constraints
 no longer require `Line` curves. `mesh_model_volume` seeds the whole
 stored 1-D discretization of an embedded non-`Line` curve as interior
 points (upstream `restoreEmbeddedEdges` semantics — every graded chain
@@ -372,6 +397,16 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
   documented below, NOT regressions from this diff. `set_periodic!`
   degenerate-curve rejection verified restored (was momentarily relaxed by
   the line-gate refactor mid-increment; `_model_curve_length` call kept).
+- `Pkg.test()` Julia 1.13.1 `--check-bounds=yes` (closed-curve floor +
+  option-alias increment): **427,276/427,276** in ~15m. Focused files
+  (`geo_spline`, `model`, `geo_mesh_dim`, `model_volume_io`,
+  `geo_periodic`, `geo_curved`, `cli`, `allocation_audit`) all green;
+  `geo_splines` (20 cases), `geo_curved` (8), and `geo_constraints` (32)
+  differentials verified against Gmsh 4.15.2 via the pip-installed
+  `gmsh.jl` (`GMSH_JULIA_API` under the Python312 Lib dir — its
+  `gmsh-4.15.dll` is statically linked, unlike the `gmsh-api/` copy whose
+  OCCT/FLTK deps are scattered across JLL artifact dirs and won't
+  `dlopen` standalone).
 - `Pkg.test()` Julia 1.13.1 `--check-bounds=yes` (curved `Curve In
   Volume` increment): **427,266 passed, 3 failed** in 14m49s — all 3 are
   embedded-sheet `mixed_crc` pins (`model_volume_io_test.jl:204/338`,
