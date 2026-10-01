@@ -772,8 +772,14 @@ for already-discretized, count-matched boundary chains. Four-sided ruled surface
 as warped transfinite patches — the same Coons interpolation evaluated in 3-D,
 audited by an exact orient3 boundary-simplicity pass, per-triangle nonzero-area
 certification, an area-weighted orientation check against the ring's Newell
-normal, and a fold audit on every shared grid edge; `Plane Surface` and
-`In Sphere` surfaces keep their planar/spherical requirements. Four-sided grids can also be
+normal, and a fold audit on every shared grid edge; `Plane Surface` keeps its
+planar requirements while `Surface … In Sphere` (and four concentric arc
+generatrices, auto-detected like gmsh's `ruledSurface::checkSphere`) evaluate
+the ruled surface's own `S(u,v)` for interior nodes — the `TransfiniteQua`
+blend projected onto the sphere through the center at radius |S0−O| — leaving
+boundary nodes on their true curves, including on non-coplanar boundaries and
+inside transfinite-volume face grids; a corner reorder or degenerated boundary
+skip is rejected precisely since it would desynchronize the evaluation frame. Four-sided grids can also be
 emitted as Gmsh-compatible first-order quadrangles with exact projected
 corner-Jacobian certification. Three-sided grids can also be emitted with
 Gmsh's arrangement-dependent mix of first-order triangles and quadrangles,
@@ -878,8 +884,13 @@ yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 compact-TransfiniteTri volumes,
-`In Sphere` transfinite face fills (excluded
-by the ruled-surface gate),
+`In Sphere` transfinite three-sided patches
+and corner-reordered fills (four-sided fills
+are supported); unstructured `In Sphere`
+surface meshing still interpolates on the
+best-fit plane (gmsh projects interior nodes
+onto the sphere — it needs the ruled
+param-domain mesher),
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
 periodic surfaces,

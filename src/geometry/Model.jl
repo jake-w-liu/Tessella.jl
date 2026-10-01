@@ -6371,8 +6371,9 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
                                        ordered, caller::AbstractString)
     haskey(m.meshing.transfinite_surfaces, surf) || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
-    spec,_,curve_points,nside,allow_warped,junctions,project_plane=
-        _transfinite_surface_sides(m,surf,caller)
+    spec,signed_curves,curve_points,nside,allow_warped,junctions,
+        project_plane,sphere_center=
+            _transfinite_surface_sides(m,surf,caller)
     nside==4 || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
     # `_transfinite_surface_sides` already welds every chain end to the
@@ -6382,7 +6383,11 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
                                   curve_points[3],curve_points[4];
                                   arrangement=spec.arrangement,
                                   allow_warped=allow_warped,
-                                  project_plane=project_plane)
+                                  project_plane=project_plane,
+                                  interpolate=sphere_center===nothing ?
+                                      nothing : _transfinite_sphere_eval(
+                                          m,surf,signed_curves,
+                                          sphere_center,caller))
     L=length(curve_points[1])-1
     H=length(curve_points[2])-1
     found=0; slot=0
@@ -6761,14 +6766,37 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     (nside!=4 || kind in (:plane,:ruled)) || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires a planar or ruled " *
         "surface-filling kind"))
+    # A ruled surface with sphere geometry — `Surface … In Sphere` or four
+    # concentric arc generatrices — keeps its own parametrization: interior
+    # nodes evaluate `S(u,v)` (the `TransfiniteQua` generatrix blend plus
+    # `TransfiniteSph` projection), not Coons. The evaluation consumes the
+    # loop generatrices in stored order, so a degenerated skip or a corner
+    # reorder would desynchronize the grid frame — reject both (a pinned
+    # corner list matching the natural junction order is a no-op and stays
+    # supported).
+    sphere_center=nothing
+    if nside==4 && kind==:ruled
+        gens=m.loops[only(loops)]
+        sphere_center=_ruled_sphere_center(m,t,gens,caller)
+        if sphere_center!==nothing
+            length(gens)==4 || throw(ArgumentError(
+                "$caller: transfinite Surface[$t] `In Sphere` requires an " *
+                "undegenerated four-curve boundary"))
+            isempty(spec.corners) || spec.corners==Int[
+                signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+                for signed in gens] || throw(ArgumentError(
+                    "$caller: transfinite Surface[$t] `In Sphere` does not " *
+                    "support a reordered pinned corner list"))
+        end
+    end
     # A ruled surface with a genuinely non-coplanar boundary meshes as a
     # warped transfinite patch (3-D Coons interpolation). Surfaces carrying
     # auxiliary filling geometry — `Surface … In Sphere` — keep their own
     # parameterization and cannot use the Coons analogue.
-    allow_warped=nside==4 && kind==:ruled &&
+    allow_warped=nside==4 && kind==:ruled && sphere_center===nothing &&
                  !haskey(m.surface_geometry,t)
     project_plane=nothing
-    if !allow_warped
+    if !allow_warped && sphere_center===nothing
         # `Plane Surface` treats a non-coplanar boundary as Gmsh's
         # `planeSurface` does: the declared plane comes from on-curve
         # boundary samples — off-plane control points do not veto it — and
@@ -6834,7 +6862,7 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         curve_points[position][end]=m.points[junctions[mod1(position+1,nside)]]
     end
     return spec,signed_curves,curve_points,nside,allow_warped,junctions,
-           project_plane
+           project_plane,sphere_center
 end
 
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
@@ -6844,8 +6872,8 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    size_field::Union{Nothing,
                                                      AbstractSizeField}=
                                        nothing)
-    spec,_,curve_points,nside,allow_warped,_,project_plane=
-        _transfinite_surface_sides(m,t,caller)
+    spec,signed_curves,curve_points,nside,allow_warped,_,project_plane,
+        sphere_center=_transfinite_surface_sides(m,t,caller)
     if nside==3
         s1,s2,s3=curve_points
         kernel=if m.meshing.transfinite_tri==1
@@ -6869,9 +6897,31 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     kernel=mesh_transfinite_patch(bottom,right,top,left;
                                   arrangement=spec.arrangement,
                                   allow_warped=allow_warped,
-                                  project_plane=project_plane)
+                                  project_plane=project_plane,
+                                  interpolate=sphere_center===nothing ?
+                                      nothing : _transfinite_sphere_eval(
+                                          m,t,signed_curves,sphere_center,
+                                          caller))
     mesh=Mesh(kernel.coords;tris=kernel.tris)
     return _consume_surface_attributes(m,t,mesh,caller)
+end
+
+# Continuous `S(u,v)` interior evaluation for a transfinite `In Sphere`
+# ruled patch — gmsh's `meshGFaceTransfinite` evaluates the surface's own
+# parametrization on the averaged-chord grid (the `TransfiniteQua`
+# generatrix blend plus `TransfiniteSph` projection). Generatrices and
+# corner vertices are resolved once so per-node evaluation does not
+# re-read the loop or re-detect the sphere. Boundary nodes stay on their
+# discretized side chains.
+function _transfinite_sphere_eval(m::GeoModel,t::Int,gens::Vector{Int},
+                                  center::NTuple{3,Float64},
+                                  caller::AbstractString)
+    S=ntuple(4) do i
+        signed=gens[i]
+        endpoints=m.curves[abs(signed)]
+        m.points[signed>0 ? endpoints[1] : endpoints[2]]
+    end
+    return (u,v)->_ruled_qua_point(m,gens,S,u,v,center,caller)
 end
 
 @inline function _points_close(p,q,tolerance)
