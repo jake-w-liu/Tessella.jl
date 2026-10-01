@@ -620,6 +620,14 @@ end
 @inline _project(frame::_PlaneFrame,point)=
     (_dot3(point,frame.u),_dot3(point,frame.v))
 
+# Orthogonal projection of `point` onto the plane through `anchor` with unit
+# `normal` — the `planeSurface` reparametrization of a boundary vertex whose
+# true position sits off the surface plane.
+@inline function _project_onto_plane(point,anchor,normal)
+    d=_dot3(_sub3(point,anchor),normal)
+    return _sub3(point,(d*normal[1],d*normal[2],d*normal[3]))
+end
+
 @inline function _on_segment(a,b,p)
     orient2(a,b,p)==0 || return false
     return min(a[1],b[1])<=p[1]<=max(a[1],b[1]) &&
@@ -925,6 +933,7 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
                                 arrangement=:left,face_tag=0,
                                 side_tags=(0,0,0,0),
                                 allow_warped::Bool=false,
+                                project_plane=nothing,
                                 max_nodes=_DEFAULT_MAX_NODES,
                                 max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
     mode=_arrangement(arrangement)
@@ -975,7 +984,30 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
     length(Set(corners))==4 || throw(ArgumentError(
         "mesh_transfinite_patch: the four corners must be distinct"))
 
-    ring=_boundary_ring(sides)
+    # `project_plane` is Gmsh's `planeSurface` transfinite semantics for a
+    # non-coplanar boundary: the side chains are projected onto the declared
+    # plane for the (u,v) bookkeeping and interior interpolation (the
+    # interior stays exactly planar), while emitted boundary nodes keep the
+    # true positions. Mutually exclusive with `allow_warped`.
+    allow_warped && project_plane!==nothing && throw(ArgumentError(
+        "mesh_transfinite_patch: project_plane and allow_warped are " *
+        "mutually exclusive"))
+    interp_sides=sides
+    if project_plane!==nothing
+        (project_plane isa Tuple && length(project_plane)==2) ||
+            throw(ArgumentError("mesh_transfinite_patch: project_plane must " *
+                                "be an (anchor, normal) tuple"))
+        anchor,plane_normal=project_plane
+        normal_norm=_norm3(plane_normal)
+        (isfinite(normal_norm)&&normal_norm>0) || throw(ArgumentError(
+            "mesh_transfinite_patch: project_plane normal is degenerate"))
+        unit_normal=(plane_normal[1]/normal_norm,plane_normal[2]/normal_norm,
+                     plane_normal[3]/normal_norm)
+        interp_sides=ntuple(4) do i
+            [_project_onto_plane(p,anchor,unit_normal) for p in sides[i]]
+        end
+    end
+    ring=_boundary_ring(interp_sides)
     origin,scale=_normalization(ring)
     frame,planar=_patch_frame(ring,origin,scale,allow_warped)
     if planar
@@ -987,11 +1019,17 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
             _normalize(point,origin,scale) for point in ring]
         _validate_simple_boundary_3d(normalized_ring)
     end
+    emit_ring=ring
+    if project_plane!==nothing
+        emit_ring=_boundary_ring(sides)
+        _validate_simple_boundary_3d(NTuple{3,Float64}[
+            _normalize(point,origin,scale) for point in emit_ring])
+    end
 
-    bottom=_normalized_side(sides[1],origin,scale)
-    right=_normalized_side(sides[2],origin,scale)
-    top=reverse(_normalized_side(sides[3],origin,scale))
-    left=reverse(_normalized_side(sides[4],origin,scale))
+    bottom=_normalized_side(interp_sides[1],origin,scale)
+    right=_normalized_side(interp_sides[2],origin,scale)
+    top=reverse(_normalized_side(interp_sides[3],origin,scale))
+    left=reverse(_normalized_side(interp_sides[4],origin,scale))
     u=_averaged_parameters(bottom,top,"u")
     v=_averaged_parameters(right,left,"v")
     c2=bottom[end];c3=top[end];c4=top[1]
@@ -1034,12 +1072,12 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
     _fill_segments!(segment_topology,segment_tags,width,L,H,physical_side_tags)
     triangle_topology=Matrix{Int32}(undef,3,triangles)
     _fill_triangles!(triangle_topology,width,L,H,mode)
-    if planar
+    if planar && project_plane===nothing
         _validate_triangle_orientation(coordinates,triangle_topology,
                                        origin,scale,frame)
     else
-        _validate_warped_patch(coordinates,triangle_topology,ring,origin,scale,
-                               L,H)
+        _validate_warped_patch(coordinates,triangle_topology,emit_ring,
+                               origin,scale,L,H)
     end
     triangle_tags=fill(physical_face_tag,triangles)
 

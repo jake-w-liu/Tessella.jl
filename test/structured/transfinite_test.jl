@@ -382,11 +382,14 @@ Transfinite Surface {1};
         end
         @test mesh_crc(rerun.mesh)==mesh_crc(mesh)
 
-        # Plane surfaces keep the coplanarity requirement even when declared
-        # transfinite.
-        err=try
-            mktemp() do path,io
-                write(io,"""
+        # A `Plane Surface` whose boundary vertices are not coplanar meshes
+        # anyway, matching upstream `planeSurface`: the declared plane comes
+        # from the first non-collinear on-curve boundary samples — here the
+        # plane through the samples of edges 1 and 2, z = 0.5y — boundary
+        # nodes keep their true positions while the interior interpolates
+        # exactly on the plane.
+        tilted=mktemp() do path,io
+            write(io,"""
 Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0.5}; Point(4) = {0,1,0};
 Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
 Curve Loop(1) = {1,2,3,4};
@@ -394,16 +397,49 @@ Plane Surface(1) = {1};
 Transfinite Curve {1,2,3,4} = 5;
 Transfinite Surface {1};
 """)
-                close(io)
-                execute_geo(path;mesh_dim=2)
-            end
-            nothing
-        catch caught
-            caught
+            close(io)
+            execute_geo(path;mesh_dim=2)
         end
-        @test err isa ArgumentError
-        @test occursin("coplanar",sprint(showerror,err))
+        @test validate(tilted.mesh).ok
+        @test (size(tilted.mesh.coords,2),size(tilted.mesh.tris,2))==(25,32)
+        for i in axes(tilted.mesh.coords,2)
+            x,y,z=tilted.mesh.coords[:,i]
+            interior=1e-9<x<1-1e-9 && 1e-9<y<1-1e-9
+            interior && @test z ≈ 0.5y atol=1e-12
+        end
+        # The lifted corner keeps its true off-plane coordinate.
+        @test any(i->tilted.mesh.coords[:,i] ≈ [1.0,1.0,0.5],
+                  axes(tilted.mesh.coords,2))
 
+        # A `Plane Surface` whose boundary curve leaves the declared plane
+        # takes the same projected route: the arc's interior nodes keep
+        # their true off-plane coordinates while the patch interior stays
+        # exactly on the corner-defined y=0 plane.
+        curved=mktemp() do path,io
+            write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0};
+Point(5) = {0,0,1}; Point(6) = {1,0,1}; Point(9) = {0.5,0,1};
+Line(1) = {1,2}; Line(5) = {2,6}; Circle(6) = {6,9,5}; Line(7) = {5,1};
+Curve Loop(1) = {1,5,6,7};
+Plane Surface(1) = {1};
+Transfinite Curve{1,5,6,7} = 5;
+Transfinite Surface{1};
+""")
+            close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+        @test validate(curved.mesh).ok
+        @test (size(curved.mesh.coords,2),size(curved.mesh.tris,2))==(25,32)
+        # The arc bulges off the plane: its interior nodes keep y > 0, while
+        # every patch-interior node lies exactly on y=0.
+        arc_bulge=count(i->curved.mesh.coords[2,i]>1e-9,
+                        axes(curved.mesh.coords,2))
+        @test arc_bulge==3
+        for i in axes(curved.mesh.coords,2)
+            x,y,z=curved.mesh.coords[:,i]
+            (abs(y)>1e-9 || x<1e-9 || x>1-1e-9 || z<1e-9) && continue
+            @test y==0.0
+        end
         # A coplanar `Surface` (ruled kind) now meshes identically to a plane
         # patch rather than rejecting the kind outright.
         flat=mktemp() do path,io

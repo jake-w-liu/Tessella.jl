@@ -855,14 +855,30 @@ the surface map plus its induced boundary links and any explicit curve
 relations spanning the projected surfaces.
 Gmsh 4.15.2 serializes
 those entities and cells but no
-Point/Line/Surface-In-Volume relation. P4 does not
+Point/Line/Surface-In-Volume relation. `Plane Surface` transfinite
+boundaries follow upstream `planeSurface`/`computeMeanPlane` semantics:
+the declared plane comes from the first non-collinear triple of on-curve
+boundary samples at 1/3 and 2/3 parameter — off-plane control points never
+enter — and the patch projects side chains onto it for (u,v) bookkeeping
+and interior interpolation while emitted boundary nodes keep true
+positions (planar interior, warped boundary band). Transfinite volume
+boundaries may therefore carry curved edges whose arcs leave an adjacent
+face's plane; the boundary-fold audit certifies each emitted boundary
+triangle by the incident tet's apex and rejects only a true
+edge-through-triangle pierce, so benign inward/outward bulges mesh while
+genuinely self-intersecting configurations — including ones Gmsh 4.15.2
+emits silently — stay rejected. P4 does not
 yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
-curved-edge or compact-TransfiniteTri volumes (transfinite boundaries still
-require straight `Line` curves — upstream subdivides arbitrary curve laws, so
-non-`Line` edges remain a documented gap; `In Sphere` face fills are excluded
+compact-TransfiniteTri volumes,
+`In Sphere` transfinite face fills (excluded
 by the ruled-surface gate),
+or orphan `Point` vertex emission on the single-volume `mesh_dim=3`
+dispatch shortcut (`execute_geo` with one volume calls
+`mesh_model_volume` directly, so standalone vertex nodes that Gmsh emits
+— e.g. an arc's control-point entity — are dropped there while the
+`Mesh 3` statement path retains them),
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
 periodic surfaces,
