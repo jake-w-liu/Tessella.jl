@@ -26,7 +26,48 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Closed-curve grading floor + `Min*`/`Minimum*` option aliases** —
+**Non-coplanar `Plane Surface` transfinite boundaries** — upstream
+`GFace::computeMeanPlane` semantics are now reproduced: the declared
+plane comes from the first non-collinear triple of on-curve boundary
+samples (two per edge, at ~1/3 and ~2/3 of each curve's parameter
+bounds — `_transfinite_declared_plane`), so an off-plane arc *control
+point* never vetoes the fit. `mesh_transfinite_patch`'s new
+`project_plane=(anchor, normal)` mode projects the side chains onto that
+plane for the (u,v) bookkeeping and Coons interpolation — the interior
+lands exactly on the declared plane — while emitted boundary nodes keep
+their true coordinates and the warped-patch audit runs on the emitted
+band. Verified bitwise against the Gmsh 4.15.2 oracle: a `Plane Surface`
+with a lifted boundary vertex puts its interior exactly on the
+edge-sample plane `z = 0.5y` (all 9 interior nodes bitwise-identical),
+and a curved front face of a transfinite volume bulges off its plane
+with a flat interior.
+
+**Precise transfinite-volume fold audit** — the boundary-cell audit no
+longer rejects on a mere sign split among inward candidates. Each emitted
+boundary triangle is now certified by the *incident tet's* apex (per-slot
+letter tables `_WARPED_SLOT_LETTERS`/`_WARPED_SLOT_TRIS`/
+`_WARPED_SLOT_APEX_LETTER` map the six-tet cell subdivision), and a sign
+straddle escalates to an exact edge-through-triangle pierce test over
+the 19 subdivision edges (`_segment_crosses_triangle`). Outcome on the
+curved-front-face fixtures: outward and shallow-inward bulges now mesh
+with min tet volume matching Gmsh to ~9 digits, while the strong inward
+bulge is still rejected — and correctly so: Gmsh 4.15.2's own output on
+that fixture is self-intersecting (an interior tet edge pierces a
+boundary triangle), which Tessella refuses to emit.
+
+Known gap logged in PLAN.md: `execute_geo(path; mesh_dim=3)` with a
+single volume dispatches `mesh_model_volume` directly and bypasses
+`_geo_mesh_model`, so orphan `Point` entities (e.g. an arc's
+control-point vertex) are not emitted as standalone nodes there — the
+`Mesh 3` statement path retains them, matching Gmsh.
+
+Files: `src/geometry/Model.jl`, `src/structured/Transfinite.jl`,
+`src/structured/TransfiniteVolume.jl`,
+`test/structured/transfinite_test.jl`,
+`test/geometry/geo_constraints_test.jl`.
+
+Previous increment (for context): **closed-curve grading floor +
+`Min*`/`Minimum*` option aliases** —
 `_model_minimum_curve_segments` now applies Gmsh's closed native curve
 floor `max(np, 3)`: upstream, `N = minimumMeshSegments + 1` is a *node*
 target, so the shared end vertex turns `N` nodes into `N` edges on a
@@ -359,6 +400,20 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 
 ## Verified gates
 
+- `validation/transfinite/differential.jl` Gmsh 4.15.2:
+  `TRANSFINITE_DIFFERENTIAL_OK` — 4 arrangements, `max_node_error=1.6e-15`,
+  warped patch checks green.
+- `validation/transfinite_volume/differential.jl` Gmsh 4.15.2:
+  `TRANSFINITE_VOLUME_DIFFERENTIAL_OK` — 2 cases, `max_node_error=9.5e-12`.
+- `validation/geo_constraints/differential.jl` Gmsh 4.15.2:
+  `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=32 documented_gaps=2`;
+  `geo_curved` (8 cases) and `geo_splines` (20) differentials green.
+- `test/structured/transfinite_test.jl` 192/192 (incl. the lifted-corner
+  `Plane Surface` projection fixture with bitwise-verified interior) and
+  `test/geometry/geo_constraints_test.jl` 23/23 (incl. outward/shallow-inward
+  curved-face volumes and the strong-inward rejection pin);
+  `test/structured/transfinite_volume_test.jl` 274/274.
+- Full suite 427,308/427,308 under `--check-bounds=yes`.
 - `validation/gmsh_parity/periodic_curve_curved.jl` Gmsh 4.15.2:
   `CURVED_PERIODIC_DIFFERENTIAL_OK cases=2 pairs=16` — circle and
   transfinite-spline Translate strips: exact pair counts, stored affine,

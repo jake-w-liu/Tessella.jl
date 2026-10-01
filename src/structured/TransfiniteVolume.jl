@@ -638,6 +638,7 @@ const _WARPED_SLOT_PLANE =
 
 # The four inward tab nodes adjacent to a boundary cell: the cell at canonical
 # (I,J) has its neighbors offset one layer along the slot's fixed axis.
+# Order: (I,J), (I+1,J), (I,J+1), (I+1,J+1) in the slot's parametric axes.
 @inline function _inward_candidates(node_id, slot::Int, I::Int, J::Int,
                                     nu::Int, nv::Int, nw::Int)
     a1, a2, fixed_axis, fixed = _WARPED_SLOT_PLANE[slot]
@@ -651,6 +652,63 @@ const _WARPED_SLOT_PLANE =
         coord = Base.setindex(coord, inner_coord, fixed_axis)
         node_id(coord[1], coord[2], coord[3])
     end
+end
+
+# Cell-letter space for the boundary fold audit: the eight corners of a cell
+# are named a..h for (i,j,k),(i+1,j,k),(i,j+1,k),(i,j,k+1),(i+1,j,k+1),
+# (i,j+1,k+1),(i+1,j+1,k),(i+1,j+1,k+1) — the vertex order of the fixed
+# six-tet subdivision (a,b,c,d),(b,c,d,e),(d,e,c,f),(b,c,e,g),(c,f,e,g),
+# (e,f,h,g). Per slot, `_WARPED_SLOT_LETTERS` maps each letter to a positive
+# index into the boundary quad tabs (a,b,c,d) or a negative index into the
+# `_inward_candidates` tuple; `_WARPED_SLOT_TRIS` gives the two emitted
+# boundary tris as letter triples — (a,b,d),(b,e,d) on vmin say — and
+# `_WARPED_SLOT_APEX_LETTER` the interior apex of the incident tet for each.
+# The incident apex is the canonical inward witness: strictly on the inward
+# side certifies the emitted orientation; exactly on the triangle's plane
+# means the incident tet is degenerate and cannot certify.
+const _WARPED_SLOT_LETTERS =
+    (( 1, 2,-1, 3, 4,-3,-2,-4),   # vmin:  boundary a,b,d,e
+     (-1, 1,-2,-3, 3,-4, 2, 4),   # umax:  boundary b,e,g,h
+     (-1,-2, 1,-3,-4, 3, 2, 4),   # vmax:  boundary c,f,g,h
+     ( 1,-1, 2, 3,-3, 4,-2,-4),   # umin:  boundary a,c,d,f
+     ( 1, 2, 3,-1,-2,-3, 4,-4),   # wmin:  boundary a,b,c,g
+     (-1,-2,-3, 1, 2, 3,-4, 4))   # wmax:  boundary d,e,f,h
+const _WARPED_SLOT_TRIS =
+    (((1, 2, 4), (2, 5, 4)),      # vmin
+     ((2, 7, 5), (7, 8, 5)),      # umax
+     ((3, 7, 6), (7, 8, 6)),      # vmax
+     ((1, 3, 4), (3, 6, 4)),      # umin
+     ((1, 2, 3), (2, 7, 3)),      # wmin
+     ((4, 5, 6), (5, 8, 6)))      # wmax
+const _WARPED_SLOT_APEX_LETTER =
+    ((3, 3), (3, 6), (5, 5), (2, 5), (4, 5), (3, 7))
+
+# Every tet edge of the six-tet cell subdivision, in letter indices: a real
+# fold is some edge piercing an emitted boundary triangle's interior — the
+# discriminating test when the corner signs straddle the supporting plane.
+const _WARPED_CELL_EDGES =
+    ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4),(2,5),(3,5),(4,5),(4,6),(5,6),
+     (3,6),(2,7),(3,7),(5,7),(6,7),(5,8),(6,8),(7,8))
+
+@inline function _warped_cell_corner_ids(map, tabs, cands)
+    return ntuple(8) do letter
+        source = map[letter]
+        source > 0 ? tabs[source] : cands[-source]
+    end
+end
+
+# True when the open segment (p,q) pierces the interior or boundary of
+# triangle (a,b,c): the endpoints already straddle the supporting plane
+# (nonzero, opposite), so the three edge-plane orientations decide whether
+# the crossing point lands in the closed triangle. A grazing contact — the
+# pierce point on a triangle edge — counts as a crossing too: a cell edge
+# touching the emitted boundary sheet is not a certifiable configuration.
+@inline function _segment_crosses_triangle(p, q, a, b, c)
+    o1 = orient3(p, q, a, b)
+    o2 = orient3(p, q, b, c)
+    o3 = orient3(p, q, c, a)
+    return (o1 >= 0 && o2 >= 0 && o3 >= 0) ||
+           (o1 <= 0 && o2 <= 0 && o3 <= 0)
 end
 
 function _transfinite_volume_warped_mesh(converted_corners, raw_faces,
@@ -805,31 +863,45 @@ function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
             coord = Base.setindex(coord, fixed_coord, fixed_axis)
             return node_id(coord[1], coord[2], coord[3])
         end
+        letter_map = _WARPED_SLOT_LETTERS[slot]
+        tri_letters = _WARPED_SLOT_TRIS[slot]
+        apex_letters = _WARPED_SLOT_APEX_LETTER[slot]
         for p2 in 0:n2-1, p1 in 0:n1-1
             a = tab_node(p1, p2)
             b = tab_node(p1 + 1, p2)
             c = tab_node(p1, p2 + 1)
             d = tab_node(p1 + 1, p2 + 1)
-            for tri in ((a, b, c), (b, d, c))
-                # Inward candidates of this boundary cell: the interior fold
-                # audit requires all nonzero inward signs on one side; a
-                # flipped emission is fixed by the same sign test.
-                sign = 0
-                for candidate in _inward_candidates(node_id, slot, p1, p2,
-                                                    nu, nv, nw)
-                    s = orient3(_node(coords, tri[1]), _node(coords, tri[2]),
-                                _node(coords, tri[3]),
-                                _node(coords, candidate))
-                    s == 0 && continue
-                    if sign == 0
-                        sign = s
-                    elseif sign != s
-                        throw(ArgumentError(
+            ids = _warped_cell_corner_ids(
+                letter_map, (a, b, c, d),
+                _inward_candidates(node_id, slot, p1, p2, nu, nv, nw))
+            for half in 1:2
+                ltri = tri_letters[half]
+                tri = (ids[ltri[1]], ids[ltri[2]], ids[ltri[3]])
+                pa = _node(coords, tri[1])
+                pb = _node(coords, tri[2])
+                pc = _node(coords, tri[3])
+                # Signs of the cell's eight corners against the triangle's
+                # supporting plane; a straddling cell edge is then tested
+                # against the triangle's interior — only a true pierce is a
+                # fold, so a tilted boundary band that leaves a non-incident
+                # corner on the outward side stays legal (Gmsh parity).
+                signs = ntuple(8) do letter
+                    letter == ltri[1] || letter == ltri[2] ||
+                        letter == ltri[3] ? 0 :
+                        orient3(pa, pb, pc, _node(coords, ids[letter]))
+                end
+                for (x, y) in _WARPED_CELL_EDGES
+                    (signs[x] == 0 || signs[y] == 0 ||
+                     signs[x] == signs[y]) && continue
+                    _segment_crosses_triangle(_node(coords, ids[x]),
+                                              _node(coords, ids[y]),
+                                              pa, pb, pc) && throw(
+                        ArgumentError(
                             "mesh_transfinite_volume: boundary cell " *
                             "($p1,$p2) of face slot $slot folds over its " *
                             "inward neighbors"))
-                    end
                 end
+                sign = signs[apex_letters[half]]
                 sign == 0 && throw(ArgumentError(
                     "mesh_transfinite_volume: boundary cell ($p1,$p2) of " *
                     "face slot $slot cannot certify its orientation (inward " *

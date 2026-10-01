@@ -459,8 +459,14 @@ surfaces (`Surface`/`Ruled Surface` fillings) with non-coplanar boundaries mesh
 as warped transfinite patches — the same Coons interpolation evaluated in 3-D
 with an exact orient3 boundary-simplicity audit, per-triangle nonzero-area
 certification, an area-weighted orientation check against the ring's Newell
-normal, and a fold audit on every shared grid edge; `Plane Surface` and
-`In Sphere` surfaces keep their planar/spherical requirements. Four-sided grids can also
+normal, and a fold audit on every shared grid edge. A `Plane Surface` whose
+transfinite boundary is not coplanar follows upstream `computeMeanPlane`
+semantics instead of rejecting: the declared plane comes from the first
+non-collinear on-curve boundary samples (curve control points never enter),
+the side chains project onto it for (u,v) bookkeeping and interior
+interpolation — so the interior stays exactly planar — while emitted
+boundary nodes keep their true positions and the warped-patch audit runs on
+the emitted band. `In Sphere` surfaces keep their spherical requirement. Four-sided grids can also
 be emitted as first-order Gmsh type-3 quadrangles with exact projected
 corner-Jacobian certification. Eight-corner transfinite volume blocks require
 all six boundary surfaces transfinite (Gmsh's incompatible-surface gate) and
@@ -507,12 +513,18 @@ Gmsh 4.15.2 does not serialize the Point/Line/Surface-In-Volume relation. Nested
 Point/Line-In-Surface constraints are certified against each sheet's face complex;
 embedded sheets may contain interior loops. MSH4 retains the nested curve relation.
 The CLI uses these projections for periodic
-or embedded `-2` output and classified `-3` output. P4 does not yet claim
+or embedded `-2` output and classified `-3` output. Volume boundaries may
+carry curved edges whose arcs leave an adjacent `Plane Surface`'s declared
+plane; the boundary-fold audit certifies each emitted boundary triangle by
+the incident tet's apex and rejects only a true edge-through-triangle
+pierce — Gmsh 4.15.2 silently emits a self-intersecting mesh on a strongly
+inward-bulging boundary, which Tessella refuses to emit. P4 does not yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite or holed transfinite patches,
-general CAD parameterizations, curved-edge or
-compact-TransfiniteTri volumes (transfinite boundaries still require
-straight `Line` curves — upstream subdivides arbitrary laws), volume/hybrid
+general CAD parameterizations, compact-TransfiniteTri volumes,
+`In Sphere` transfinite face fills, orphan `Point` vertex emission on the
+single-volume `mesh_dim=3` dispatch shortcut (the `Mesh 3` statement path
+retains them, matching Gmsh), volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, curved
 periodic surfaces, or allocator reads after
@@ -536,6 +548,43 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
+Gmsh 4.15.2 binary after completing the non-coplanar `Plane Surface`
+transfinite increment:
+
+- `_transfinite_declared_plane` reproduces upstream `computeMeanPlane`:
+  two on-curve samples per boundary edge at ~1/3 and ~2/3 of each curve's
+  native parameter bounds, then the plane through the first non-collinear
+  triple — off-plane arc control points never veto the fit.
+  `mesh_transfinite_patch`'s new `project_plane` mode projects side chains
+  for (u,v) bookkeeping and Coons interpolation (interior lands exactly on
+  the declared plane) while emitted boundary nodes keep true positions;
+  the warped-patch audit runs on the emitted band. Verified bitwise: the
+  lifted-corner `Plane Surface` interior lands on `z = 0.5y` with all 9
+  interior nodes bitwise-identical to Gmsh 4.15.2.
+- The transfinite-volume boundary-fold audit now certifies each emitted
+  boundary triangle by the incident tet's apex and escalates a sign
+  straddle to an exact edge-through-triangle pierce test over the cell's
+  19 subdivision edges (`_segment_crosses_triangle`, exact `orient3`).
+  Outward and shallow-inward curved-face bulges mesh with min tet volume
+  matching Gmsh to ~9 digits; the strong inward bulge stays rejected —
+  Gmsh 4.15.2's own output there is self-intersecting (verified: a tet
+  edge pierces a boundary triangle), which Tessella refuses to emit.
+- New coverage: `transfinite_test` asserts the lifted-corner patch meshes
+  planar-interior with true boundary positions (25 nodes / 32 tris like
+  Gmsh) plus an off-plane-arc `Plane Surface`; `geo_constraints_test`
+  adds outward + shallow-inward curved-front-face volume fixtures
+  (384 tets, all-positive, `validate` green, ≥3 off-plane arc nodes) and
+  pins the strong-inward rejection.
+- Gates green: `transfinite_test` 192/192, `transfinite_volume_test`
+  274/274, `geo_constraints_test`, `geo_curved_test`, `geo_periodic_test`,
+  `model_test`, `geo_mesh_dim_test`, `mesh3d_test`, structured
+  quad/prism/hex/triangle/curve files, and `allocation_audit_test` all
+  pass; `transfinite` (4 arrangements, max err 1.6e-15),
+  `transfinite_volume` (2 cases, 9.5e-12), `geo_constraints` (32),
+  `geo_curved` (8), and `geo_splines` (20) differentials green against
+  Gmsh 4.15.2; full suite 427,308/427,308 under `--check-bounds=yes`.
 
 Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
 Gmsh 4.15.2 binary after completing the closed-curve grading floor and

@@ -6344,7 +6344,7 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
                                        ordered, caller::AbstractString)
     haskey(m.meshing.transfinite_surfaces, surf) || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
-    spec,_,curve_points,nside,allow_warped,junctions=
+    spec,_,curve_points,nside,allow_warped,junctions,project_plane=
         _transfinite_surface_sides(m,surf,caller)
     nside==4 || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
@@ -6354,7 +6354,8 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
     kernel=mesh_transfinite_patch(curve_points[1],curve_points[2],
                                   curve_points[3],curve_points[4];
                                   arrangement=spec.arrangement,
-                                  allow_warped=allow_warped)
+                                  allow_warped=allow_warped,
+                                  project_plane=project_plane)
     L=length(curve_points[1])-1
     H=length(curve_points[2])-1
     found=0; slot=0
@@ -6641,12 +6642,50 @@ end
 # collapsed-quadrilateral algorithm, the default) or `mesh_transfinite_triangle`
 # (the compact `TransfiniteTri=1` algorithm, selected by `set_transfinite_tri!`
 # and requiring equal node counts on all three sides).
+# The `Plane Surface` mean plane under upstream `GFace::computeMeanPlane`
+# semantics: two on-curve samples per boundary edge at 1/3 and 2/3 of the
+# edge's parameter bounds — curve control points never enter — then the
+# plane through the first two samples and the first later sample not
+# collinear with them. A loop whose leading straight edges span a plane
+# keeps it regardless of off-plane curved samples later in the loop.
+# Returns `(anchor, normal)` with an unnormalized `normal`, or `nothing`
+# when every sample triple is collinear (a degenerate ribbon cannot
+# declare a plane).
+function _transfinite_declared_plane(m::GeoModel,signed_curves,
+                                     caller::AbstractString)
+    samples=NTuple{3,Float64}[]
+    for signed in signed_curves
+        t0,t1=_model_curve_param_bounds(m,abs(signed),caller)
+        push!(samples,_periodic_curve_point(
+            m,abs(signed),t0+(t1-t0)*0.333,caller))
+        push!(samples,_periodic_curve_point(
+            m,abs(signed),t0+(t1-t0)*0.666,caller))
+    end
+    length(samples)>=3 || return nothing
+    anchor=samples[1]
+    u=(samples[2][1]-anchor[1],samples[2][2]-anchor[2],
+       samples[2][3]-anchor[3])
+    scale=max(1.0,maximum(p->maximum(abs,p),samples))
+    threshold=1e-9*scale*scale
+    for i in 3:length(samples)
+        v=(samples[i][1]-anchor[1],samples[i][2]-anchor[2],
+           samples[i][3]-anchor[3])
+        normal=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],
+                u[1]*v[2]-u[2]*v[1])
+        norm2=normal[1]^2+normal[2]^2+normal[3]^2
+        (isfinite(norm2)&&norm2>threshold^2) && return (anchor,normal)
+    end
+    return nothing
+end
+
 # The audited boundary side chains of a transfinite surface: the loop's
 # non-degenerate signed curves discretized by their transfinite parameters,
 # optionally reordered by pinned corners, with the surface-filling gate
-# (planar, or ruled-without-auxiliary-geometry warping) applied. Returns the
-# surface spec, the signed curves, the side chains, the side count, the warped
-# flag, and each side's start-junction vertex tag in final chain order.
+# (planar, or ruled-without-auxiliary-geometry warping, or a `Plane
+# Surface` boundary projected onto its declared mean plane) applied.
+# Returns the surface spec, the signed curves, the side chains, the side
+# count, the warped flag, each side's start-junction vertex tag in final
+# chain order, and the optional `(anchor, normal)` projection plane.
 # Corners are audited for consistency, then welded to the shared vertex
 # coordinates so every consumer sees bitwise-identical chain endpoints.
 function _transfinite_surface_sides(m::GeoModel,t::Int,
@@ -6701,12 +6740,42 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     # parameterization and cannot use the Coons analogue.
     allow_warped=nside==4 && kind==:ruled &&
                  !haskey(m.surface_geometry,t)
+    project_plane=nothing
     if !allow_warped
-        plane=_model_surface_plane(m,t,caller)
-        for p in Iterators.flatten(curve_points)
-            scale=max(1.0,hypot(p...))
-            abs(_plane_offset(plane,p))<=1e-12*scale || throw(ArgumentError(
-                "$caller: transfinite Surface[$t] boundary is not coplanar"))
+        # `Plane Surface` treats a non-coplanar boundary as Gmsh's
+        # `planeSurface` does: the declared plane comes from on-curve
+        # boundary samples — off-plane control points do not veto it — and
+        # the kernel reparametrizes the projected boundary onto it so the
+        # interior interpolates exactly planar while emitted boundary
+        # nodes keep their true positions. The strict vertex/control-point
+        # coplanarity audit still decides whether the ordinary planar path
+        # applies.
+        plane_error=nothing
+        plane=try
+            _model_surface_plane(m,t,caller)
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            plane_error=err
+            nothing
+        end
+        coplanar=plane!==nothing
+        if coplanar
+            for p in Iterators.flatten(curve_points)
+                scale=max(1.0,hypot(p...))
+                abs(_plane_offset(plane,p))<=1e-12*scale ||
+                    (coplanar=false;break)
+            end
+        end
+        if !coplanar
+            rejected=plane_error===nothing ? ArgumentError(
+                "$caller: transfinite Surface[$t] boundary is not " *
+                "coplanar") : plane_error
+            (nside==4 && kind==:plane && !haskey(m.surface_geometry,t)) ||
+                throw(rejected)
+            project_plane=_transfinite_declared_plane(
+                m,signed_curves,caller)
+            project_plane===nothing && throw(rejected)
         end
     end
     # Corner consistency: each side ends where the next begins. The kernels
@@ -6737,7 +6806,8 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         curve_points[position][1]=m.points[junctions[position]]
         curve_points[position][end]=m.points[junctions[mod1(position+1,nside)]]
     end
-    return spec,signed_curves,curve_points,nside,allow_warped,junctions
+    return spec,signed_curves,curve_points,nside,allow_warped,junctions,
+           project_plane
 end
 
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
@@ -6747,7 +6817,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    size_field::Union{Nothing,
                                                      AbstractSizeField}=
                                        nothing)
-    spec,_,curve_points,nside,allow_warped,_=
+    spec,_,curve_points,nside,allow_warped,_,project_plane=
         _transfinite_surface_sides(m,t,caller)
     if nside==3
         s1,s2,s3=curve_points
@@ -6771,7 +6841,8 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     bottom,right,top,left=curve_points
     kernel=mesh_transfinite_patch(bottom,right,top,left;
                                   arrangement=spec.arrangement,
-                                  allow_warped=allow_warped)
+                                  allow_warped=allow_warped,
+                                  project_plane=project_plane)
     mesh=Mesh(kernel.coords;tris=kernel.tris)
     return _consume_surface_attributes(m,t,mesh,caller)
 end

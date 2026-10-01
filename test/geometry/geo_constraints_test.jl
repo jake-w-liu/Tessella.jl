@@ -242,7 +242,7 @@ end
 end
 
 @testset ".geo transfinite volume meshing" begin
-    using Tessella.MeshTypes: nnodes, ntets
+    using Tessella.MeshTypes: nnodes, ntets, tet_signed_volume
 
     constraints = raw"""
         Transfinite Curve{:} = 4;
@@ -314,6 +314,59 @@ end
     # its transfinite subdivision lands at x=1+0.2t.
     @test any(isapprox(1.0+0.2/3;atol=1e-12),
               execution.mesh.coords[1,:])
+
+    # A curved boundary edge can leave its `Plane Surface`'s declared plane:
+    # upstream's `planeSurface` mean plane comes from on-curve boundary
+    # samples — the arc's control point never enters it — so the front
+    # face's interior interpolates exactly on y=0 while the arc keeps its
+    # true positions. The arc bulging OUT of the box stays a valid
+    # transfinite volume, and so does a shallow inward bulge.
+    curved_volume(center)=raw"""
+        Point(1) = {0,0,0,0.4}; Point(2) = {1,0,0,0.4};
+        Point(3) = {1,1,0,0.4}; Point(4) = {0,1,0,0.4};
+        Point(5) = {0,0,1,0.4}; Point(6) = {1,0,1,0.4};
+        Point(7) = {1,1,1,0.4}; Point(8) = {0,1,1,0.4};
+        Point(9) = """ * center * raw""";
+        Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+        Line(5) = {2,6}; Circle(6) = {6,9,5}; Line(7) = {5,1};
+        Line(8) = {3,7}; Line(9) = {7,8}; Line(10) = {8,4};
+        Line(11) = {6,7}; Line(12) = {8,5};
+        Curve Loop(1) = {1,2,3,4}; Curve Loop(2) = {1,5,6,7};
+        Curve Loop(3) = {8,9,10,-3}; Curve Loop(4) = {-4,-10,12,7};
+        Curve Loop(5) = {2,8,-11,-5}; Curve Loop(6) = {-6,11,9,12};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Plane Surface(3) = {3}; Plane Surface(4) = {4};
+        Plane Surface(5) = {5}; Surface(6) = {6};
+        Surface Loop(1) = {1,2,3,4,5,6};
+        Volume(1) = {1};
+        Transfinite Curve{:} = 5;
+        Transfinite Surface{:};
+        Transfinite Volume{1};
+        """
+    for center in ("{0.5,0.3,1,0.4}","{0.5,-0.25,1,0.4}")
+        execution=_execute_constraint_source(
+            curved_volume(center);mesh_dim=3)
+        @test validate(execution.mesh).ok
+        @test ntets(execution.mesh)==384
+        # Every tetrahedron is strictly positive — the volume did not fold.
+        @test all(t->tet_signed_volume(
+                      execution.mesh.coords[:,execution.mesh.tets[1,t]],
+                      execution.mesh.coords[:,execution.mesh.tets[2,t]],
+                      execution.mesh.coords[:,execution.mesh.tets[3,t]],
+                      execution.mesh.coords[:,execution.mesh.tets[4,t]])>0,
+                  axes(execution.mesh.tets,2))
+        # The arc's interior nodes keep their true off-plane coordinates.
+        @test count(i->abs(execution.mesh.coords[2,i])>1e-9,
+                    axes(execution.mesh.coords,2))>=3
+    end
+
+    # The strongly inward-bulging mirror (an antipodal arc dipping deep into
+    # the box) is REJECTED by the boundary-fold audit: Gmsh 4.15.2 silently
+    # emits a self-intersecting mesh for it — an interior tet edge pierces
+    # the emitted boundary band — and Tessella refuses to emit the defect.
+    err=_constraint_error(curved_volume("{0.5,0,1,0.4}");mesh_dim=3)
+    @test err isa ArgumentError
+    @test occursin("folds",string(err))
 end
 
 @testset ".geo transfinite curves on curved edges" begin
