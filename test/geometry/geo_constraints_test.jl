@@ -370,6 +370,89 @@ end
     err=_constraint_error(curved_volume("{0.5,0,1,0.4}");mesh_dim=3)
     @test err isa ArgumentError
     @test occursin("folds",string(err))
+
+    # A five-face transfinite volume: Gmsh's legacy `Mesh.TransfiniteTri=0`
+    # path meshes the prism as a degenerate hexahedron (s3≡s0, s7≡s4), with
+    # collapsed-triangle grids on the two triangular faces. Gmsh 4.15.2 emits
+    # 52 nodes / 246 dim≥1 elements (27 segments, 84 triangles, 135
+    # tetrahedra) for this fixture.
+    prism=raw"""
+        Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+        Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+        Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,1};
+        Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+        Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+        Curve Loop(1)={1,2,3}; Curve Loop(2)={7,8,9};
+        Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+        Curve Loop(5)={3,4,-9,-6};
+        Surface(1)={1}; Surface(2)={2};
+        Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+        Surface Loop(1)={1,2,3,4,5};
+        Volume(1)={1};
+        Transfinite Curve{:}=4;
+        Transfinite Surface{:};
+        """
+    execution=_execute_constraint_source(prism*raw"""
+        Transfinite Volume{1}={1,2,3,4,5,6};
+        Mesh 3;
+        """)
+    using Tessella.MeshTypes: nsegs
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),nsegs(execution.mesh),
+           ntris(execution.mesh),ntets(execution.mesh))==(52,27,84,135)
+    # The volume-only part carries no boundary triangles.
+    part=geo_entity_mesh(execution,3,1)
+    @test (nnodes(part),ntris(part),ntets(part))==(52,0,135)
+    # Six corner points are the tetrahedral degree-6 vertices of the unit
+    # prism and every tet is positively oriented.
+    @test all(t->tet_signed_volume(
+                  execution.mesh.coords[:,execution.mesh.tets[1,t]],
+                  execution.mesh.coords[:,execution.mesh.tets[2,t]],
+                  execution.mesh.coords[:,execution.mesh.tets[3,t]],
+                  execution.mesh.coords[:,execution.mesh.tets[4,t]])>0,
+              axes(execution.mesh.tets,2))
+
+    # Corner detection without an explicit list seeds the apex from a
+    # triangular face — the same five-face mesh results.
+    execution=_execute_constraint_source(prism*raw"""
+        Transfinite Volume{1};
+        Mesh 3;
+        """)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntets(execution.mesh))==(52,135)
+
+    # The compact `Mesh.TransfiniteTri=1` algorithm uses a different prism
+    # cell pattern upstream and stays an explicit blocker.
+    err=_constraint_error(prism*raw"""
+        Mesh.TransfiniteTri=1;
+        Transfinite Volume{1}={1,2,3,4,5,6};
+        Mesh 3;
+        """)
+    @test err isa ArgumentError
+    @test occursin("Mesh.TransfiniteTri=1",string(err))
+
+    # A five-face volume whose boundary is not a prism (a square pyramid:
+    # one quadrilateral + four triangular faces) is rejected by the
+    # boundary-topology audit rather than silently hexahedral.
+    err=_constraint_error(raw"""
+        Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={1,1,0};
+        Point(4)={0,1,0}; Point(5)={0.5,0.5,1};
+        Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+        Line(5)={1,5}; Line(6)={2,5}; Line(7)={3,5}; Line(8)={4,5};
+        Curve Loop(1)={1,2,3,4}; Curve Loop(2)={1,6,-5};
+        Curve Loop(3)={2,7,-6}; Curve Loop(4)={3,8,-7};
+        Curve Loop(5)={4,5,-8};
+        Surface(1)={1}; Surface(2)={2}; Surface(3)={3};
+        Surface(4)={4}; Surface(5)={5};
+        Surface Loop(1)={1,2,3,4,5};
+        Volume(1)={1};
+        Transfinite Curve{:}=4;
+        Transfinite Surface{:};
+        Transfinite Volume{1};
+        Mesh 3;
+        """)
+    @test err isa ArgumentError
+    @test occursin("prismatic boundary topology",string(err))
 end
 
 @testset ".geo transfinite curves on curved edges" begin

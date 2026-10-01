@@ -26,7 +26,50 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Three-sided ruled/spherical transfinite fills** — three-generatrix
+**Five-face transfinite prism volumes** — `Transfinite Volume` on a
+triangular-prism boundary (two triangular + three quadrilateral faces) now
+meshes through Gmsh 4.15.2's legacy `Mesh.TransfiniteTri = 0` collapsed-grid
+algorithm instead of rejecting. Following `meshGRegionTransfinite.cpp`, the
+six prism corners map onto the degenerate hexahedral slot layout
+(`s3≡s0`, `s7≡s4`): the two triangular faces mesh with the collapsed-grid
+kernel (its node-count corner rotation honored — the apex is read back from
+the kernel output), the three axial quadrilaterals with the four-sided patch
+kernel, and every face grid reindexes onto its canonical slot through the
+dihedral permutations. `mesh_transfinite_prism` gained a `faces=` path:
+boundary tab nodes reuse the grids bitwise after all nine shared edges and
+six corners certify bitwise-identical, and interior nodes evaluate
+`transfiniteHex` on the degenerate slot map — so warped and curved
+boundaries interpolate exactly like the six-face path (the affine volume
+audit is corner-path only; the warped path keeps per-tet orientation and
+finite-coordinate certification plus the strict outward boundary split and
+tet-boundary conformance audit). Explicit six-corner declarations and
+auto-detection both work; the latter seeds the apex from a triangular face
+like upstream's `findTransfiniteCorners`. `Mesh.TransfiniteTri = 1` stays an
+explicit blocker (different upstream cell pattern).
+
+Verified against the Gmsh 4.15.2 oracle on the unit triangular prism:
+identical 52 nodes / 27 segments / 84 triangles / 135 tetrahedra (Gmsh's
+252-element total adds six type-15 point elements emitted at `.msh`
+serialization — a `Mesh` contract difference, not a topology gap),
+worst bidirectional node distance ~1.8e-12; a curved-boundary variant
+(one arc edge, warped ruled quad faces) matches at ~1.5e-9 — gmsh's arc
+Newton-spacing noise; and a rotated-loop variant reproduces Gmsh's own
+"Incompatible surface 2 in transfinite volume 1" rejection verbatim.
+Kernel tests pin the exact canonical tet ordering, bitwise boundary reuse,
+and all malformed-input rejections; `.geo` tests cover explicit corners,
+auto-detection, the `TransfiniteTri=1` blocker, and the pyramid-topology
+rejection. Allocation ratchet: 2.00× bytes for 2× subdivision.
+
+Files: `src/structured/TransfinitePrism.jl` (`faces=` records, shared-edge
+and corner certification, warped coordinate fill, inward-witness boundary
+orientation), `src/geometry/Model.jl` (five-face dispatch in
+`_transfinite_volume_mesh`, `_transfinite_prism_volume_mesh`,
+`_transfinite_prism_tri_face_grid`, auto corner detection),
+`test/structured/transfinite_prism_test.jl` (face-grid suite),
+`test/geometry/geo_constraints_test.jl` (`.geo` parity tests), docs.
+
+Previous increment (for context): **three-sided ruled/spherical
+transfinite fills** — three-generatrix
 `Surface` fills (gmsh `MSH_SURF_TRIC`, geomType RuledSurface) no longer
 reject non-coplanar boundaries. Following `meshGFaceTransfinite`, the
 kernels keep interpolating the boundary in real space (`TRAN_TRI`), then a
@@ -498,16 +541,26 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 - `validation/transfinite_volume/differential.jl` Gmsh 4.15.2:
   `TRANSFINITE_VOLUME_DIFFERENTIAL_OK` — 2 cases, `max_node_error=9.5e-12`.
 - `validation/geo_constraints/differential.jl` Gmsh 4.15.2:
-  `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=32 documented_gaps=2`;
+  `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=35 documented_gaps=2` (now
+  includes `transfinite_prism`, `transfinite_prism_curved`, and
+  `transfinite_prism_auto`; the `curve_in_volume_arc` check was re-aimed at
+  the volume entity part after the all-dims merge — `model_to_mixed` volume
+  projection requires a seg/tri-free input);
   `geo_curved` (8 cases) and `geo_splines` (20) differentials green.
 - `test/structured/transfinite_test.jl` 226/226 (incl. the lifted-corner
   `Plane Surface` projection fixture and the `In Sphere` fills — flat,
   non-coplanar, pinned-identity, reordered-rejection, and implicit
   four-arc sphere fixtures, all verified against Gmsh 4.15.2 node sets)
-  and `test/geometry/geo_constraints_test.jl` 23/23 (incl.
-  outward/shallow-inward curved-face volumes and the strong-inward
-  rejection pin); `test/structured/transfinite_volume_test.jl` 274/274.
-- Full suite 427,308/427,308 under `--check-bounds=yes`.
+  and `test/geometry/geo_constraints_test.jl` (incl. 33/33 in the
+  transfinite-volume set — the prism cases covering explicit corners,
+  auto-detection, `TransfiniteTri=1` rejection, and the pyramid-topology
+  rejection, plus outward/shallow-inward curved-face volumes and the
+  strong-inward rejection pin); `test/structured/transfinite_volume_test.jl`
+  274/274; `test/structured/transfinite_prism_test.jl` 157/157 (incl. the
+  face-grid suite — bitwise boundary reuse, warped interpolation, and all
+  malformed-input rejections; allocation ratchet 2.00× for 2× subdivision).
+- Full suite **427,400/427,400** under `--check-bounds=yes` (prism
+  increment).
 - `validation/gmsh_parity/periodic_curve_curved.jl` Gmsh 4.15.2:
   `CURVED_PERIODIC_DIFFERENTIAL_OK cases=2 pairs=16` — circle and
   transfinite-spline Translate strips: exact pair counts, stored affine,

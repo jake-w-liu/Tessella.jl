@@ -32,9 +32,11 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _on_segment3, _pt3, _segment_chain3
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
+using ..TransfinitePrism: mesh_transfinite_prism
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
-                             mesh_transfinite_triangle_collapsed
+                             mesh_transfinite_triangle_collapsed,
+                             _collapsed_node
 using ..Transfinite: mesh_transfinite_patch
 using ..Mesh1D: mesh_curve, curve_length, _adaptive_points, _length_point,
     _invert_primitive, _IntegrationPoint, _GMSH_INTEGRATION_PRECISION,
@@ -6439,9 +6441,14 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
         "$caller: TransfQuadTri Volume[$t] requires the QuadTri hexahedral " *
         "transfinite algorithm, which Tessella does not implement"))
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
+    # Gmsh `MeshTransfiniteVolume` also accepts a five-face prism boundary —
+    # a degenerate hexahedron with s3≡s0 and s7≡s4 — dispatched separately.
+    if length(boundaries)==5
+        return _transfinite_prism_volume_mesh(m,t,boundaries,caller)
+    end
     length(boundaries)==6 || throw(ArgumentError(
-        "$caller: transfinite Volume[$t] requires exactly 6 boundary " *
-        "surfaces; found $(length(boundaries))"))
+        "$caller: transfinite Volume[$t] requires exactly 5 (prism) or 6 " *
+        "(hexahedron) boundary surfaces; found $(length(boundaries))"))
     edge_curve=Dict{NTuple{2,Int},Int}()
     neighbors=Dict{Int,Set{Int}}()
     for signed_surface in boundaries
@@ -6555,7 +6562,240 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
         face_tags=Tuple(slot_tags))
 end
 
-# Boundary-derived size field for a volume — Gmsh's 3-D `setLcs` over the
+# One triangular boundary face of a five-face transfinite volume, meshed with
+# the collapsed-grid kernel and expanded onto its canonical slot — the
+# degenerate-hexahedron f4 (wmin) or f5 (wmax) slot of Gmsh's prism map. The
+# kernel's deduplicated node numbering expands to the full (L+1)×(H+1)
+# transfinite_vertices layout whose i=0 column repeats the collapsed apex
+# bitwise; `ordered` is the volume's eight degenerate-hex corner slots
+# (s0,s1,s2,s0,s4,s5,s6,s4) and `apex_position` the index of the collapsed
+# corner inside `junctions` (detected from the kernel output upstream so the
+# kernel's own node-count corner rotation is honored).
+function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
+                                          ordered,kernel,r::Int,junctions,
+                                          curve_points,
+                                          caller::AbstractString)
+    apex=junctions[r]
+    b=junctions[mod1(r+1,3)]
+    c=junctions[mod1(r+2,3)]
+    corners4=(apex,b,c,apex)
+    found=0; slot=0
+    for p in 1:8
+        perm=_VOLUME_FACE_PERMS[p]
+        for f in 1:6
+            slot_corners=_VOLUME_FACE_SLOTS[f]
+            all(k->ordered[slot_corners[k]]==corners4[perm[k]],1:4) ||
+                continue
+            found==0 || throw(ArgumentError(
+                "$caller: Incompatible surface $surf in transfinite " *
+                "volume $volume (ambiguous slot orientation)"))
+            found=p; slot=f
+            break
+        end
+    end
+    found==0 && throw(ArgumentError(
+        "$caller: Incompatible surface $surf in transfinite volume $volume"))
+    # Kernel grid extents follow the rotated side order: the collapsed side1
+    # is the apex-incident chain starting at corner r.
+    L=length(curve_points[r])-1
+    H=length(curve_points[mod1(r+1,3)])-1
+    size(kernel.coords,2)==1+L*(H+1) || throw(ErrorException(
+        "$caller: transfinite Surface[$surf] collapsed node count is not " *
+        "consistent with its boundary sides"))
+    M=iseven(found) ? H+1 : L+1
+    points=Matrix{Float64}(undef,3,(L+1)*(H+1))
+    @inbounds for j in 0:H, i in 0:L
+        source=Int(_collapsed_node(i,j,H))
+        mcoord,ncoord=_volume_face_canonical_coords(found,i,j,L,H)
+        target=mcoord+1+ncoord*M
+        points[1,target]=kernel.coords[1,source]
+        points[2,target]=kernel.coords[2,source]
+        points[3,target]=kernel.coords[3,source]
+    end
+    # The face's own triangulation, reindexed onto the canonical grid —
+    # deduplicated kernel vertices map to their first grid position (the apex
+    # to (0,0)); slot order is preserved for the kernel's structural checks.
+    tris=Matrix{Int32}(undef,3,size(kernel.tris,2))
+    H1=H+1
+    @inbounds for tri in axes(kernel.tris,2),row in 1:3
+        vertex=Int(kernel.tris[row,tri])
+        local_i=vertex==1 ? 0 : (vertex-2)÷H1+1
+        local_j=vertex==1 ? 0 : (vertex-2)%H1
+        mcoord,ncoord=_volume_face_canonical_coords(found,local_i,local_j,L,H)
+        tris[row,tri]=Int32(mcoord+1+ncoord*M)
+    end
+    return slot,points,tris
+end
+
+# Transfinite volume fill for a five-face prism — Gmsh's second
+# `MeshTransfiniteVolume` branch. Six corners map onto the degenerate
+# hexahedral layout (s3≡s0, s7≡s4): the two three-sided boundary faces are
+# meshed with the collapsed-grid triangle kernel and the three axial
+# quadrilaterals with the four-sided patch kernel, then every face grid is
+# reindexed onto its canonical slot and `mesh_transfinite_prism` interpolates
+# the interior through `transfiniteHex`. The compact `Mesh.TransfiniteTri=1`
+# option selects upstream's different prism/tetrahedron cell pattern, which
+# Tessella does not implement.
+function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
+                                        caller::AbstractString)
+    m.meshing.transfinite_tri==1 && throw(ArgumentError(
+        "$caller: transfinite Volume[$t] uses Mesh.TransfiniteTri=1, whose " *
+        "five-face prism subdivision Tessella does not implement"))
+    edge_curve=Dict{NTuple{2,Int},Int}()
+    neighbors=Dict{Int,Set{Int}}()
+    for signed_surface in boundaries
+        for loop in m.surfaces[abs(signed_surface)]
+            for signed in m.loops[loop]
+                curve=abs(signed)
+                a,b=m.curves[curve]
+                key=a<b ? (a,b) : (b,a)
+                if !haskey(edge_curve,key)
+                    edge_curve[key]=curve
+                    push!(get!(neighbors,a,Set{Int}()),b)
+                    push!(get!(neighbors,b,Set{Int}()),a)
+                end
+            end
+        end
+    end
+    corners=sort!(collect(p for (p,adj) in pairs(neighbors) if
+                          length(adj)>=3))
+    length(corners)==6 || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] requires a prismatic boundary " *
+        "topology (6 corner Points); found $(length(corners))"))
+    length(edge_curve)==9 || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] requires 9 boundary Curves; " *
+        "found $(length(edge_curve))"))
+
+    # Boundary surface side chains. Each face must be transfinite; the two
+    # three-sided faces carry the collapsed apex and the quadrilaterals the
+    # usual four-side topology.
+    faces_data=Vector{NamedTuple{(:surf,:spec,:curve_points,:nside,
+                                  :junctions,:ruled_tri)}}(undef,5)
+    tri_faces=Int[]
+    for (index,signed_surface) in enumerate(boundaries)
+        surf=abs(signed_surface)
+        haskey(m.meshing.transfinite_surfaces,surf) || throw(ArgumentError(
+            "$caller: Incompatible surface $surf in transfinite volume $t"))
+        spec,_,curve_points,nside,_,junctions,_,_,ruled_tri=
+            _transfinite_surface_sides(m,surf,caller)
+        nside==3 || nside==4 || throw(ArgumentError(
+            "$caller: Incompatible surface $surf in transfinite volume $t"))
+        faces_data[index]=(;surf,spec,curve_points,nside,junctions,ruled_tri)
+        nside==3 && push!(tri_faces,index)
+    end
+    length(tri_faces)==2 || throw(ArgumentError(
+        "$caller: transfinite Volume[$t] requires a prism boundary " *
+        "(exactly two three-sided surfaces); found $(length(tri_faces))"))
+
+    # The collapsed apex of each triangular face is its first node — the
+    # kernel's `allow_corner_rotation` may shift which junction it is.
+    apex_junction=Dict{Int,NTuple{3,Int}}()
+    tri_kernels=Dict{Int,Tuple{Mesh,Int}}()
+    for index in tri_faces
+        face=faces_data[index]
+        s1,s2,s3=face.curve_points
+        kernel=mesh_transfinite_triangle_collapsed(
+            s1,s2,s3;arrangement=face.spec.arrangement,
+            allow_corner_rotation=isempty(face.spec.corners),
+            project=face.ruled_tri ?
+                _transfinite_ruled_tri_project(m,face.surf,caller) :
+                nothing)
+        apex=(kernel.coords[1,1],kernel.coords[2,1],kernel.coords[3,1])
+        r=findfirst(j->m.points[j]==apex,face.junctions)
+        r===nothing && throw(ErrorException(
+            "$caller: transfinite Surface[$(face.surf)] collapsed apex is " *
+            "not a boundary junction"))
+        apex_junction[face.surf]=(face.junctions[r],
+            face.junctions[mod1(r+1,3)],face.junctions[mod1(r+2,3)])
+        tri_kernels[face.surf]=(kernel,r)
+    end
+
+    stored=m.meshing.transfinite_volumes[t]
+    ordered=if isempty(stored)
+        # The first three-sided boundary face seeds the canonical order —
+        # upstream's `findTransfiniteCorners` likewise starts from a
+        # triangular face: (apex, next, previous) in its own corner cycle,
+        # then the axial counterparts.
+        lower=faces_data[tri_faces[1]]
+        s0,s1,s2=apex_junction[lower.surf]
+        s4set=setdiff(neighbors[s0],(s1,s2))
+        s5set=setdiff(neighbors[s1],(s0,s2))
+        s6set=setdiff(neighbors[s2],(s0,s1))
+        (length(s4set)==1 && length(s5set)==1 && length(s6set)==1) ||
+            throw(ArgumentError(
+                "$caller: transfinite Volume[$t] boundary is not a prism " *
+                "edge graph"))
+        s4=only(s4set); s5=only(s5set); s6=only(s6set)
+        # The kernel requires orient3(s0,s1,s2,s4) < 0; mirroring the lower
+        # face's corner order flips the orientation.
+        if orient3(m.points[s0],m.points[s1],m.points[s2],
+                   m.points[s4])>0
+            s1,s2=s2,s1
+            s5,s6=s6,s5
+        end
+        (s0,s1,s2,s4,s5,s6)
+    else
+        length(stored)==6 || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] supports only 6-corner prism " *
+            "blocks"))
+        Set(stored)==Set(corners) || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] corners must be its 6 " *
+            "boundary corner Points"))
+        Tuple(stored)
+    end
+    # Degenerate hexahedral corner table for slot matching: s3≡s0, s7≡s4.
+    s8=(ordered[1],ordered[2],ordered[3],ordered[1],
+        ordered[4],ordered[5],ordered[6],ordered[4])
+    function edge_count(a,b)
+        curve=get(edge_curve,a<b ? (a,b) : (b,a),0)
+        curve==0 && throw(ArgumentError(
+            "$caller: transfinite Volume[$t] corner pair ($a,$b) is not " *
+            "a boundary edge"))
+        spec=get(m.meshing.transfinite_curves,curve,nothing)
+        spec===nothing && throw(ArgumentError(
+            "$caller: transfinite Volume[$t] requires boundary " *
+            "Curve[$curve] to be transfinite"))
+        return _flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)-1
+    end
+    s0,s1,s2,s4,s5,s6=ordered
+    us=(edge_count(s0,s1),edge_count(s0,s2),edge_count(s4,s5),
+        edge_count(s4,s6))
+    vs=(edge_count(s1,s2),edge_count(s5,s6))
+    ws=(edge_count(s0,s4),edge_count(s1,s5),edge_count(s2,s6))
+    for (direction,family) in (("u",us),("v",vs),("w",ws))
+        allequal(family) || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] $direction-direction edges " *
+            "have mismatched node counts $family"))
+    end
+    faces=Vector{Tuple{Matrix{Float64},Matrix{Int32},Vector{Int32}}}(undef,6)
+    slot_tags=Vector{Int32}(undef,6)
+    seen=falses(6)
+    for face in faces_data
+        slot,points,tris=if face.nside==4
+            _transfinite_volume_face_grid(m,t,face.surf,s8,caller)
+        else
+            kernel,r=tri_kernels[face.surf]
+            _transfinite_prism_tri_face_grid(
+                m,t,face.surf,s8,kernel,r,face.junctions,face.curve_points,
+                caller)
+        end
+        seen[slot] && throw(ArgumentError(
+            "$caller: Incompatible surface $(face.surf) in transfinite " *
+            "volume $t (duplicate face slot $slot)"))
+        seen[slot]=true
+        faces[slot]=(points,tris,fill(Int32(face.surf),size(tris,2)))
+        slot_tags[slot]=Int32(face.surf)
+    end
+    count(seen)==5 || throw(ErrorException(
+        "$caller: transfinite Volume[$t] boundary faces do not cover the " *
+        "canonical prism slot layout"))
+    return mesh_transfinite_prism(
+        NTuple{3,Float64}[m.points[p] for p in ordered],
+        (us[1],vs[1],ws[1]);volume_tag=t,
+        faces=(faces[1],faces[2],faces[3],faces[5],faces[6]),
+        face_tags=(slot_tags[1],slot_tags[2],slot_tags[3],slot_tags[5],
+                   slot_tags[6]))
+end
 # generated boundary mesh (meshGRegionDelaunayInsertion.cpp): every boundary
 # vertex carries an incident face-triangle edge length — the LARGEST when
 # `Mesh.MeshSizeExtendFromBoundary` is 1 (the default), the smallest for
