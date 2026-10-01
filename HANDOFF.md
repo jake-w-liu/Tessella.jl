@@ -26,7 +26,35 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**`In Sphere` transfinite face fills** — four-sided ruled surfaces with
+**Three-sided ruled/spherical transfinite fills** — three-generatrix
+`Surface` fills (gmsh `MSH_SURF_TRIC`, geomType RuledSurface) no longer
+reject non-coplanar boundaries. Following `meshGFaceTransfinite`, the
+kernels keep interpolating the boundary in real space (`TRAN_TRI`), then a
+new `project` callback inverts each interior point through
+`GFace::XYZtoUV`'s loose off-surface variant (`Precision = 1e-3`,
+`MaxIter = 10`, fixed 9×9 restart grid, silent last-iterate fallback, no
+relaxation recursion) and re-evaluates `point(Up,Vp)` — `TransfiniteTriB`
+plus `TransfiniteSph` when the generatrices describe a sphere. Both tri
+kernels accept `project` (collapsed `TransfiniteTri=0` default and compact
+`1`), boundary nodes stay on their true curves, and the planar gate is
+unchanged when `project === nothing`. Verified against Gmsh 4.15.2 on the
+sphere-octant fixture (three concentric great-circle arcs): collapsed
+22 nodes/28 tris and compact 16/16 — identical counts, node sets matching
+to ~2.3e-9 (gmsh's arc-spacing solver noise), every interior node
+on-sphere. `_ruled_xyz_to_uv` gained an `on_surface` flag; existing
+on-surface callers (strict 1e-8/25-iter, recursive relaxation, warnings)
+are untouched.
+
+Files: `src/structured/TransfiniteTriangle.jl` (`project` kwarg on all
+three entry points + `allow_warped` frame gate),
+`src/geometry/ModelEntityEvaluation.jl` (`on_surface` branch),
+`src/geometry/Model.jl` (`ruled_tri` detection on `:ruled`/`:tric`,
+`_transfinite_ruled_tri_project`),
+`test/structured/transfinite_test.jl` (both-kernel sphere regression),
+`test/structured/transfinite_triangle_test.jl` (project contract), docs.
+
+Previous increment (for context): **`In Sphere` transfinite face fills**
+— four-sided ruled surfaces with
 sphere geometry (`Surface … In Sphere{p}`, or four concentric arc
 generatrices — the same detection gmsh's `ruledSurface::checkSphere`
 applies) no longer fall through to planar rejection or warped Coons.
@@ -45,7 +73,7 @@ bitwise top-face interior node `(0.5,0.5,1.1213203435596424)` in the
 transfinite-volume fixture. A degenerated-curve skip or a corner reorder
 rejects precisely — it would desynchronize the generatrix evaluation
 frame from the kernel grid (identity pinning still works). Three-sided
-sphere patches remain an explicit gap in PLAN.md.
+sphere patches were closed by the increment above.
 
 Files: `src/structured/Transfinite.jl` (`interpolate` kwarg + 3-D audit
 routing), `src/geometry/Model.jl` (`sphere_center` in

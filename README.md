@@ -159,11 +159,13 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   gates, and `Mesh.FlexibleTransfinite` count scaling
   by `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` with the
   recombined-boundary odd-count rule;
-- validated three-sided planar structured patches using both Gmsh
+- validated three-sided structured patches using both Gmsh
   `Mesh.TransfiniteTri` algorithms — the legacy collapsed-quadrilateral grid
   (default `0`, with auto-rotated or pinned collapsed corners) and the compact
   triangular lattice (`1`) — with all four diagonal arrangements, recombined
-  triangle/quadrangle layouts, and exact geometry/boundary postconditions;
+  triangle/quadrangle layouts, ruled-surface fills (including warped and
+  spherical boundaries via the `XYZtoUV` → `point(Up,Vp)` inversion), and
+  exact geometry/boundary postconditions;
 - recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
   physical tags, and exact projected corner-Jacobian certification;
 - affine six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron

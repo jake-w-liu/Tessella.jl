@@ -461,6 +461,27 @@ end
         nonplanar[2] = (nonplanar[2][1], nonplanar[2][2], 1.0e-6)
         @test_throws ArgumentError mesh_transfinite_triangle(
             nonplanar, sides[2], sides[3])
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            nonplanar, sides[2], sides[3])
+        # `project` re-evaluates interior points through a surface
+        # parametrization (ruled fills are non-coplanar). A non-finite
+        # projection is rejected, and a warped boundary that would fail the
+        # planar gate is accepted when `project` is supplied.
+        @test_throws ArgumentError mesh_transfinite_triangle(
+            sides...; project=point->(NaN, NaN, NaN))
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed(
+            sides...; project=point->(NaN, NaN, NaN))
+        @test_throws ArgumentError mesh_transfinite_triangle_patch(
+            sides...; project=point->(NaN, NaN, NaN))
+        for kernel in (mesh_transfinite_triangle,
+                       mesh_transfinite_triangle_collapsed)
+            lifted = kernel(nonplanar, sides[2], sides[3];
+                            project=identity)
+            @test validate(lifted).ok
+            flat = kernel(sides...; project=identity)
+            @test flat.coords == kernel(sides...).coords
+            @test flat.tris == kernel(sides...).tris
+        end
 
         bowtie = ([(0.0, 0.0, 0.0), (1.0, 1.5, 0.0), (0.0, 2.0, 0.0)],
                   [(0.0, 2.0, 0.0), (2.0, 0.0, 0.0), (1.0, 2.0, 0.0)],
