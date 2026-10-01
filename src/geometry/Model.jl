@@ -36,7 +36,7 @@ using ..TransfinitePrism: mesh_transfinite_prism
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_collapsed,
-                             _collapsed_node
+                             _collapsed_node, _node
 using ..Transfinite: mesh_transfinite_patch
 using ..Mesh1D: mesh_curve, curve_length, _adaptive_points, _length_point,
     _invert_primitive, _IntegrationPoint, _GMSH_INTEGRATION_PRECISION,
@@ -6571,13 +6571,69 @@ end
 # (s0,s1,s2,s0,s4,s5,s6,s4) and `apex_position` the index of the collapsed
 # corner inside `junctions` (detected from the kernel output upstream so the
 # kernel's own node-count corner rotation is honored).
+# Gmsh's `findTransfiniteCorners` canonicalizes an unpinned boundary through
+# `GEdgeLoop`: the loop's unsigned curves are chained geometrically starting
+# from the first curve's *storage* direction, ignoring the declared loop
+# signs. Returns `(junctions, sides)` in chain order — every side's point
+# list runs in its chain direction — so the kernel's corner order and grid
+# match Gmsh's regardless of how the curve loop was signed.
+# Next edge in the geometric chain: the index inside `pending` of the curve
+# touching `vend`, or `nothing` when no pending curve connects.
+function _chained_tri_next(m::GeoModel,signed_curves,pending,vend::Int)
+    for (idx,q) in pairs(pending)
+        ea,eb=m.curves[abs(signed_curves[q])]
+        (ea==vend || eb==vend) && return idx
+    end
+    return nothing
+end
+
+function _transfinite_chained_tri(m::GeoModel,signed_curves,curve_points,
+                                  surf::Int,caller::AbstractString)
+    nside=length(signed_curves)
+    pending=collect(1:nside)
+    p0=popfirst!(pending)
+    a0,b0=m.curves[abs(signed_curves[p0])]
+    junctions=Vector{Int}(undef,nside)
+    sides=Vector{Vector{NTuple{3,Float64}}}(undef,nside)
+    junctions[1]=a0
+    sides[1]=signed_curves[p0]>0 ? curve_points[p0] :
+        reverse(curve_points[p0])
+    vend=b0
+    for position in 2:nside
+        idx=_chained_tri_next(m,signed_curves,pending,vend)
+        idx===nothing && throw(ArgumentError(
+            "$caller: transfinite Surface[$surf] boundary is not a single " *
+            "closed chain"))
+        q=pending[idx]
+        deleteat!(pending,idx)
+        aq,bq=m.curves[abs(signed_curves[q])]
+        forward=aq==vend
+        junctions[position]=vend
+        storage_direction=signed_curves[q]>0 ? curve_points[q] :
+            reverse(curve_points[q])
+        sides[position]=forward ? storage_direction :
+            reverse(storage_direction)
+        vend=forward ? bq : aq
+    end
+    vend==junctions[1] || throw(ArgumentError(
+        "$caller: transfinite Surface[$surf] boundary is not a closed chain"))
+    return junctions,sides
+end
+
 function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
                                           ordered,kernel,r::Int,junctions,
                                           curve_points,
-                                          caller::AbstractString)
-    apex=junctions[r]
-    b=junctions[mod1(r+1,3)]
-    c=junctions[mod1(r+2,3)]
+                                          caller::AbstractString;
+                                          compact::Bool=false)
+    if compact
+        apex=junctions[1]
+        b=junctions[2]
+        c=junctions[3]
+    else
+        apex=junctions[r]
+        b=junctions[mod1(r+1,3)]
+        c=junctions[mod1(r+2,3)]
+    end
     corners4=(apex,b,c,apex)
     found=0; slot=0
     for p in 1:8
@@ -6596,16 +6652,27 @@ function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
     found==0 && throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
     # Kernel grid extents follow the rotated side order: the collapsed side1
-    # is the apex-incident chain starting at corner r.
-    L=length(curve_points[r])-1
-    H=length(curve_points[mod1(r+1,3)])-1
-    size(kernel.coords,2)==1+L*(H+1) || throw(ErrorException(
-        "$caller: transfinite Surface[$surf] collapsed node count is not " *
-        "consistent with its boundary sides"))
+    # is the apex-incident chain starting at corner r; the compact kernel's
+    # sides already run in chained order.
+    L=length(curve_points[compact ? 1 : r])-1
+    H=length(curve_points[compact ? 2 : mod1(r+1,3)])-1
+    if compact
+        L==H || throw(ArgumentError(
+            "$caller: Incompatible surface $surf in transfinite volume " *
+            "$volume (compact triangles require equal side divisions)"))
+        size(kernel.coords,2)==(L+1)*(L+2)÷2 || throw(ErrorException(
+            "$caller: transfinite Surface[$surf] compact node count is not " *
+            "consistent with its boundary sides"))
+    else
+        size(kernel.coords,2)==1+L*(H+1) || throw(ErrorException(
+            "$caller: transfinite Surface[$surf] collapsed node count is " *
+            "not consistent with its boundary sides"))
+    end
     M=iseven(found) ? H+1 : L+1
     points=Matrix{Float64}(undef,3,(L+1)*(H+1))
     @inbounds for j in 0:H, i in 0:L
-        source=Int(_collapsed_node(i,j,H))
+        source=compact ? Int(_node(i,min(j,i))) :
+            Int(_collapsed_node(i,j,H))
         mcoord,ncoord=_volume_face_canonical_coords(found,i,j,L,H)
         target=mcoord+1+ncoord*M
         points[1,target]=kernel.coords[1,source]
@@ -6619,9 +6686,14 @@ function _transfinite_prism_tri_face_grid(m::GeoModel,volume::Int,surf::Int,
     H1=H+1
     @inbounds for tri in axes(kernel.tris,2),row in 1:3
         vertex=Int(kernel.tris[row,tri])
-        local_i=vertex==1 ? 0 : (vertex-2)÷H1+1
-        local_j=vertex==1 ? 0 : (vertex-2)%H1
-        mcoord,ncoord=_volume_face_canonical_coords(found,local_i,local_j,L,H)
+        local_i,local_j=if compact
+            i=(isqrt(8*vertex-7)-1)÷2
+            i,vertex-(i*(i+1)÷2)-1
+        else
+            vertex==1 ? (0,0) : ((vertex-2)÷H1+1,(vertex-2)%H1)
+        end
+        mcoord,ncoord=_volume_face_canonical_coords(found,local_i,local_j,
+                                                  L,H)
         tris[row,tri]=Int32(mcoord+1+ncoord*M)
     end
     return slot,points,tris
@@ -6630,17 +6702,15 @@ end
 # Transfinite volume fill for a five-face prism — Gmsh's second
 # `MeshTransfiniteVolume` branch. Six corners map onto the degenerate
 # hexahedral layout (s3≡s0, s7≡s4): the two three-sided boundary faces are
-# meshed with the collapsed-grid triangle kernel and the three axial
-# quadrilaterals with the four-sided patch kernel, then every face grid is
-# reindexed onto its canonical slot and `mesh_transfinite_prism` interpolates
-# the interior through `transfiniteHex`. The compact `Mesh.TransfiniteTri=1`
-# option selects upstream's different prism/tetrahedron cell pattern, which
-# Tessella does not implement.
+# meshed with the collapsed-grid triangle kernel (`Mesh.TransfiniteTri = 0`)
+# or the equal-sided compact kernel (`Mesh.TransfiniteTri = 1`, upstream's
+# `transfinite3` branch), the three axial quadrilaterals with the four-sided
+# patch kernel, then every face grid is reindexed onto its canonical slot
+# and `mesh_transfinite_prism` interpolates the interior through
+# `transfiniteHex`.
 function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
                                         caller::AbstractString)
-    m.meshing.transfinite_tri==1 && throw(ArgumentError(
-        "$caller: transfinite Volume[$t] uses Mesh.TransfiniteTri=1, whose " *
-        "five-face prism subdivision Tessella does not implement"))
+    compact=m.meshing.transfinite_tri==1
     edge_curve=Dict{NTuple{2,Int},Int}()
     neighbors=Dict{Int,Set{Int}}()
     for signed_surface in boundaries
@@ -6669,18 +6739,19 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
     # Boundary surface side chains. Each face must be transfinite; the two
     # three-sided faces carry the collapsed apex and the quadrilaterals the
     # usual four-side topology.
-    faces_data=Vector{NamedTuple{(:surf,:spec,:curve_points,:nside,
-                                  :junctions,:ruled_tri)}}(undef,5)
+    faces_data=Vector{NamedTuple{(:surf,:spec,:signed_curves,:curve_points,
+                                  :nside,:junctions,:ruled_tri)}}(undef,5)
     tri_faces=Int[]
     for (index,signed_surface) in enumerate(boundaries)
         surf=abs(signed_surface)
         haskey(m.meshing.transfinite_surfaces,surf) || throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t"))
-        spec,_,curve_points,nside,_,junctions,_,_,ruled_tri=
+        spec,signed_curves,curve_points,nside,_,junctions,_,_,ruled_tri=
             _transfinite_surface_sides(m,surf,caller)
         nside==3 || nside==4 || throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t"))
-        faces_data[index]=(;surf,spec,curve_points,nside,junctions,ruled_tri)
+        faces_data[index]=(;surf,spec,signed_curves,curve_points,nside,
+                           junctions,ruled_tri)
         nside==3 && push!(tri_faces,index)
     end
     length(tri_faces)==2 || throw(ArgumentError(
@@ -6688,26 +6759,50 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
         "(exactly two three-sided surfaces); found $(length(tri_faces))"))
 
     # The collapsed apex of each triangular face is its first node — the
-    # kernel's `allow_corner_rotation` may shift which junction it is.
+    # kernel's `allow_corner_rotation` may shift which junction it is. The
+    # compact kernel has no apex: Gmsh's `GEdgeLoop` chains its boundary
+    # geometrically (unsigned, from the first loop curve's storage direction)
+    # and the chained corner order is the face's canonical orientation.
     apex_junction=Dict{Int,NTuple{3,Int}}()
     tri_kernels=Dict{Int,Tuple{Mesh,Int}}()
+    chained=Dict{Int,Tuple{Vector{Int},Vector{Vector{NTuple{3,Float64}}}}}()
     for index in tri_faces
         face=faces_data[index]
-        s1,s2,s3=face.curve_points
-        kernel=mesh_transfinite_triangle_collapsed(
-            s1,s2,s3;arrangement=face.spec.arrangement,
-            allow_corner_rotation=isempty(face.spec.corners),
-            project=face.ruled_tri ?
-                _transfinite_ruled_tri_project(m,face.surf,caller) :
-                nothing)
-        apex=(kernel.coords[1,1],kernel.coords[2,1],kernel.coords[3,1])
-        r=findfirst(j->m.points[j]==apex,face.junctions)
-        r===nothing && throw(ErrorException(
-            "$caller: transfinite Surface[$(face.surf)] collapsed apex is " *
-            "not a boundary junction"))
-        apex_junction[face.surf]=(face.junctions[r],
-            face.junctions[mod1(r+1,3)],face.junctions[mod1(r+2,3)])
-        tri_kernels[face.surf]=(kernel,r)
+        if compact
+            # Explicit `Transfinite Surface … {corners}` pins replace the
+            # geometric chaining (upstream's explicit-corners branch).
+            face_junctions,face_sides=isempty(face.spec.corners) ?
+                _transfinite_chained_tri(m,face.signed_curves,
+                                         face.curve_points,
+                                         face.surf,caller) :
+                (face.junctions,face.curve_points)
+            kernel=mesh_transfinite_triangle(
+                face_sides[1],face_sides[2],face_sides[3];
+                arrangement=face.spec.arrangement,
+                project=face.ruled_tri ?
+                    _transfinite_ruled_tri_project(m,face.surf,caller) :
+                    nothing)
+            apex_junction[face.surf]=(face_junctions[1],
+                face_junctions[2],face_junctions[3])
+            tri_kernels[face.surf]=(kernel,0)
+            chained[face.surf]=(face_junctions,face_sides)
+        else
+            s1,s2,s3=face.curve_points
+            kernel=mesh_transfinite_triangle_collapsed(
+                s1,s2,s3;arrangement=face.spec.arrangement,
+                allow_corner_rotation=isempty(face.spec.corners),
+                project=face.ruled_tri ?
+                    _transfinite_ruled_tri_project(m,face.surf,caller) :
+                    nothing)
+            apex=(kernel.coords[1,1],kernel.coords[2,1],kernel.coords[3,1])
+            r=findfirst(j->m.points[j]==apex,face.junctions)
+            r===nothing && throw(ErrorException(
+                "$caller: transfinite Surface[$(face.surf)] collapsed " *
+                "apex is not a boundary junction"))
+            apex_junction[face.surf]=(face.junctions[r],
+                face.junctions[mod1(r+1,3)],face.junctions[mod1(r+2,3)])
+            tri_kernels[face.surf]=(kernel,r)
+        end
     end
 
     stored=m.meshing.transfinite_volumes[t]
@@ -6775,9 +6870,11 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
             _transfinite_volume_face_grid(m,t,face.surf,s8,caller)
         else
             kernel,r=tri_kernels[face.surf]
+            face_junctions,face_sides=compact ? chained[face.surf] :
+                (face.junctions,face.curve_points)
             _transfinite_prism_tri_face_grid(
-                m,t,face.surf,s8,kernel,r,face.junctions,face.curve_points,
-                caller)
+                m,t,face.surf,s8,kernel,r,face_junctions,face_sides,
+                caller;compact)
         end
         seen[slot] && throw(ArgumentError(
             "$caller: Incompatible surface $(face.surf) in transfinite " *
@@ -6794,7 +6891,8 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
         (us[1],vs[1],ws[1]);volume_tag=t,
         faces=(faces[1],faces[2],faces[3],faces[5],faces[6]),
         face_tags=(slot_tags[1],slot_tags[2],slot_tags[3],slot_tags[5],
-                   slot_tags[6]))
+                   slot_tags[6]),
+        compact=compact)
 end
 # generated boundary mesh (meshGRegionDelaunayInsertion.cpp): every boundary
 # vertex carries an incident face-triangle edge length — the LARGEST when
@@ -7131,6 +7229,16 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                     "$caller: transfinite Surface[$t] has mismatched " *
                     "boundary curve node counts ($(length(s1)), " *
                     "$(length(s2)), $(length(s3)))"))
+            # `findTransfiniteCorners` canonicalizes an unpinned boundary
+            # through `GEdgeLoop` — the corner order is the geometric chain
+            # order, not the signed loop order — so the compact lattice is
+            # independent of the declared signs and welds bitwise onto a
+            # prism volume's canonical face grid.
+            if isempty(spec.corners)
+                _,curve_points=_transfinite_chained_tri(
+                    m,signed_curves,curve_points,t,caller)
+                s1,s2,s3=curve_points
+            end
             mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement,
                                       project=project)
         else

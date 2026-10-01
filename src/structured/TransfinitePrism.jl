@@ -3,15 +3,17 @@
 
 Bounded Gmsh-4.15.2-compatible five-face transfinite meshing for a triangular
 prism. The result is a first-order simplex `Mesh` with the exact unrecombined
-tetrahedron topology used by Gmsh's legacy collapsed-grid
-(`Mesh.TransfiniteTri = 0`) volume path. Corners alone describe an affine
-prism; the optional `faces=` input supplies meshed boundary face grids on the
-degenerate-hexahedron slot map (`s3≡s0`, `s7≡s4`), lifting the affine
-restriction so curved and warped boundaries interpolate through Gmsh's
-`transfiniteHex` formula exactly like the six-face path.
+tetrahedron topology used by Gmsh's volume path — the legacy collapsed-grid
+subdivision by default, and with `compact=true` the compact
+transfinite-triangle subdivision (`Mesh.TransfiniteTri = 1`, Gmsh's
+`transfinite3` branch) whose full-square tab grid leaves the
+upper-triangular interior nodes as unreferenced orphans. Corners alone
+describe an affine prism; the optional `faces=` input supplies meshed
+boundary face grids on the degenerate-hexahedron slot map (`s3≡s0`, `s7≡s4`),
+lifting the affine restriction so curved and warped boundaries interpolate
+through Gmsh's `transfiniteHex` formula exactly like the six-face path.
 
-This module deliberately does not claim support for the specific compact
-triangular algorithm (`Mesh.TransfiniteTri = 1`), independently discretized
+This module deliberately does not claim support for independently discretized
 mismatched faces, nonuniform curve laws without face grids, recombined prisms
 or hexahedra, QuadTri, holes, multiple blocks, periodic seams, or high-order
 elements. As required by the finalized `Mesh` contract, represented boundary
@@ -384,7 +386,8 @@ end
     throw(ArgumentError("$_CALLER: face slot must lie in 1:5; got $slot"))
 end
 
-function _prism_face(raw, slot::Int, nr::Int, ns::Int, nw::Int)
+function _prism_face(raw, slot::Int, nr::Int, ns::Int, nw::Int,
+                     compact::Bool=false)
     count = try
         length(raw)
     catch err
@@ -442,10 +445,13 @@ function _prism_face(raw, slot::Int, nr::Int, ns::Int, nw::Int)
     size(tris, 1) == 3 || throw(ArgumentError(
         "$_CALLER: faces[$slot] triangles must have three rows"))
     ntri = size(tris, 2)
-    expected_tris = slot >= 4 ?
-        _checked_mul("faces[$slot] triangle", n2,
-                     _checked_add(2 * n1, -1, "triangle column")) :
+    expected_tris = if slot >= 4
+        compact ? _checked_mul("faces[$slot] triangle", n1, n2) :
+            _checked_mul("faces[$slot] triangle", n2,
+                         _checked_add(2 * n1, -1, "triangle column"))
+    else
         _checked_mul("faces[$slot] triangle", 2, n1, n2)
+    end
     ntri == expected_tris || throw(ArgumentError(
         "$_CALLER: faces[$slot] carries $ntri triangles but the slot " *
         "requires $expected_tris"))
@@ -478,7 +484,7 @@ function _prism_face(raw, slot::Int, nr::Int, ns::Int, nw::Int)
     return _WarpedFace(converted, converted_tris, converted_tags)
 end
 
-function _prism_faces(raw, nr::Int, ns::Int, nw::Int)
+function _prism_faces(raw, nr::Int, ns::Int, nw::Int, compact::Bool=false)
     count = try
         length(raw)
     catch err
@@ -493,7 +499,7 @@ function _prism_faces(raw, nr::Int, ns::Int, nw::Int)
         for entry in raw
             cursor <= 5 || throw(ArgumentError(
                 "$_CALLER: faces produced more than five records"))
-            faces[cursor] = _prism_face(entry, cursor, nr, ns, nw)
+            faces[cursor] = _prism_face(entry, cursor, nr, ns, nw, compact)
             cursor += 1
         end
     catch err
@@ -638,21 +644,172 @@ function _fill_warped_prism!(coords, corners, faces, nr::Int, ns::Int,
     return nothing
 end
 
+# ---------------------------------------------------------------------------
+# Compact `Mesh.TransfiniteTri = 1` subdivision — Gmsh's `transfinite3`
+# branch of `MeshTransfiniteVolume`. The two triangular faces keep their
+# compact equal-sided kernels expanded onto a *full* (nr+1)×(ns+1) grid —
+# slots past the diagonal alias the diagonal vertex — so the tab stays
+# square and the tetrahedron loops emit `SIM_10`–`SIM_12` on diagonal cells
+# and `SIM_7`–`SIM_12` on strictly lower-triangular cells. Interior slots
+# behind the diagonal (`j > i`) become unreferenced orphan nodes exactly like
+# upstream.
+
+# Welds the two triangular boundary planes by bitwise coordinate identity —
+# the expanded compact grids repeat the aliased diagonal vertices — then
+# hands interior slots (i >= 1) one fresh node each. Returns the
+# `node_id(i,j,k)` closure plus the exact node count (two compact lattices
+# plus one apex and nr*(ns+1) fresh nodes per interior layer).
+function _compact_prism_ids(f4::Matrix{Float64}, f5::Matrix{Float64},
+                            nr::Int, ns::Int, nw::Int)
+    n2 = ns + 1
+    plane = _checked_mul("node", nr + 1, n2)
+    lattice = div(_checked_mul("node", nr + 1, nr + 2), 2)
+    block = _checked_add(_checked_mul("node", nr, n2), 1, "node")
+    interior = _checked_mul(
+        "node", block, _checked_add(nw, -1, "node"))
+    base5 = _checked_add(lattice, interior, "node")
+    node_count = _checked_add(base5, lattice, "node")
+    # The welded ids index into the coords columns — guard before any Int32
+    # conversion below.
+    node_count <= typemax(Int32) || throw(ArgumentError(
+        "$_CALLER: $node_count nodes exceed Int32 indexing"))
+    function weld(points)
+        ids = Vector{Int32}(undef, plane)
+        seen = Dict{NTuple{3,Float64},Int32}()
+        next = Ref(0)
+        @inbounds for lin in 1:plane
+            key = (points[1, lin], points[2, lin], points[3, lin])
+            ids[lin] = get!(seen, key) do
+                Int32(next[] += 1)
+            end
+        end
+        next[] == lattice || throw(ArgumentError(
+            "$_CALLER: compact triangular face expansion carries " *
+            "$(next[]) distinct nodes but the prism slot requires $lattice"))
+        return ids
+    end
+    id4 = weld(f4)
+    id5 = weld(f5)
+    node_id(i::Int, j::Int, k::Int) =
+        k == 0 ? id4[i + j * n2 + 1] :
+        k == nw ? Int32(base5) + id5[i + j * n2 + 1] :
+        i == 0 ? Int32(lattice + (k - 1) * block + 1) :
+            Int32(lattice + (k - 1) * block + 2 + (i - 1) * n2 + j)
+    return node_id, node_count
+end
+
+# Full-square expanded face grids for an affine compact prism: canonical
+# slot (i,j) on a triangular face holds the compact lattice vertex
+# (i, min(j,i)) — the diagonal fold the kernel welds back together.
+function _synthetic_compact_prism_faces(corners, n::Int, nw::Int)
+    np = n + 1
+    npw = nw + 1
+    tri = Matrix{Float64}(undef, 3, _checked_mul("node", np, np))
+    f4 = tri
+    f5 = Matrix{Float64}(undef, 3, size(tri, 2))
+    @inbounds for i in 0:n, j in 0:n
+        opposite = i == 0 ? 0.0 : min(j, i) / i
+        lower = _prism_point(corners, i / n, opposite, 0.0)
+        upper = _prism_point(corners, i / n, opposite, 1.0)
+        index = i + j * np + 1
+        f4[1, index] = lower[1]
+        f4[2, index] = lower[2]
+        f4[3, index] = lower[3]
+        f5[1, index] = upper[1]
+        f5[2, index] = upper[2]
+        f5[3, index] = upper[3]
+    end
+    quads = ntuple(_ -> Matrix{Float64}(undef, 3,
+                                        _checked_mul("node", np, npw)), 3)
+    f0, f1, f2 = quads
+    @inbounds for i in 0:n, k in 0:nw
+        index = i + k * np + 1
+        a = _prism_point(corners, i / n, 0.0, k / nw)
+        f0[1, index] = a[1]; f0[2, index] = a[2]; f0[3, index] = a[3]
+        b = _prism_point(corners, i / n, 1.0, k / nw)
+        f2[1, index] = b[1]; f2[2, index] = b[2]; f2[3, index] = b[3]
+        c = _prism_point(corners, 1.0, i / n, k / nw)
+        f1[1, index] = c[1]; f1[2, index] = c[2]; f1[3, index] = c[3]
+    end
+    quadtris = Matrix{Int32}(undef, 3, _checked_mul(
+        "boundary triangle", 2, n, nw))
+    cursor = 0
+    @inbounds for i in 0:n-1, k in 0:nw-1
+        a = i + k * np + 1
+        b = a + 1
+        d = a + np
+        e = b + np
+        quadtris[1, cursor += 1] = a
+        quadtris[2, cursor] = b
+        quadtris[3, cursor] = d
+        quadtris[1, cursor += 1] = b
+        quadtris[2, cursor] = e
+        quadtris[3, cursor] = d
+    end
+    # Compact triangulation: {(i,j),(i+1,j+1),(i,j+1)} plus
+    # {(i,j),(i+1,j),(i+1,j+1)} per strictly-lower cell and the single
+    # diagonal triangle {(i,i),(i+1,i),(i+1,i+1)}.
+    tritris2 = Matrix{Int32}(undef, 3, _checked_mul(
+        "boundary triangle", n, n))
+    cursor = 0
+    @inbounds for i in 0:n-1, j in 0:i-1
+        a = i + j * np + 1
+        b = i + 1 + j * np + 1
+        cp = i + (j + 1) * np + 1
+        g = i + 1 + (j + 1) * np + 1
+        tritris2[1, cursor += 1] = a
+        tritris2[2, cursor] = g
+        tritris2[3, cursor] = cp
+        tritris2[1, cursor += 1] = a
+        tritris2[2, cursor] = b
+        tritris2[3, cursor] = g
+    end
+    @inbounds for i in 0:n-1
+        a = i + i * np + 1
+        b = i + 1 + i * np + 1
+        c = i + 1 + (i + 1) * np + 1
+        tritris2[1, cursor += 1] = a
+        tritris2[2, cursor] = b
+        tritris2[3, cursor] = c
+    end
+    tags0 = zeros(Int32, size(quadtris, 2))
+    tags4 = zeros(Int32, size(tritris2, 2))
+    return (_WarpedFace(f0, quadtris, tags0),
+            _WarpedFace(f1, quadtris, tags0),
+            _WarpedFace(f2, quadtris, tags0),
+            _WarpedFace(f4, tritris2, tags4),
+            _WarpedFace(f5, tritris2, tags4))
+end
+
 """
     mesh_transfinite_prism(corners, cells=(1,1,1);
                           volume_tag=0,
                           face_tags=(0,0,0,0,0),
                           faces=nothing,
+                          compact=false,
                           max_nodes=10_000_000,
                           max_tets=60_000_000,
                           max_boundary_triangles=20_000_000) -> Mesh
 
-Mesh a triangular prism using Gmsh 4.15.2's five-face legacy collapsed-grid
-transfinite algorithm (`Mesh.TransfiniteTri = 0`) with all surfaces
-unrecombined and using the `Left` triangle arrangement. `corners` must contain
-six finite points in canonical order `(s0,s1,s2,s4,s5,s6)`: the first three
-define the lower triangular face and the final three are their axial
-counterparts. The canonical orientation must be positive.
+Mesh a triangular prism using Gmsh 4.15.2's five-face transfinite algorithm
+with all surfaces unrecombined and using the `Left` triangle arrangement.
+`corners` must contain six finite points in canonical order
+`(s0,s1,s2,s4,s5,s6)`: the first three define the lower triangular face and
+the final three are their axial counterparts. The canonical orientation must
+be positive.
+
+With `compact=false` (the default, `Mesh.TransfiniteTri = 0`) the prism uses
+the legacy collapsed-grid subdivision: Gmsh's exact three-tetrahedron
+collapsed-wedge pattern and six-tetrahedron interior-block pattern without
+per-cell vertex reordering. With `compact=true` (`Mesh.TransfiniteTri = 1`,
+Gmsh's `transfinite3` branch selected whenever either triangular face carries
+the compact transfinite surface) the two triangular faces keep their
+equal-sided compact grids expanded onto a full `nr×ns` cell square — slots
+past the diagonal alias the diagonal vertex — diagonal cells emit the
+`SIM_10`/`SIM_11`/`SIM_12` tetrahedron templates and strictly lower cells
+emit `SIM_7` through `SIM_12`; interior grid slots behind the diagonal
+(`j > i`) are filled with `transfiniteHex` coordinates but left unreferenced
+as orphan nodes exactly like upstream. Compact mode requires `nr == ns`.
 
 `cells=(nr,ns,nw)` gives positive logical-cell counts. The two sides incident
 to collapsed corner `s0` each have `nr` cells, side `s1-s2` has `ns`, and all
@@ -683,15 +840,15 @@ tetrahedron's inward apex — so curved, warped, and ruled boundary faces are
 supported. The `corners` need not be affine in this path, but must coincide
 bitwise with the face grids' six corner vertices.
 
-Unsupported here: `Mesh.TransfiniteTri = 1`, recombination, QuadTri, holes,
-multiple blocks, periodic seams, high-order elements, and coordinate scales
-whose derived triangle areas or tetrahedron volumes are not finite Float64
-values.
+Unsupported here: recombination, QuadTri, holes, multiple blocks, periodic
+seams, high-order elements, and coordinate scales whose derived triangle
+areas or tetrahedron volumes are not finite Float64 values.
 """
 function mesh_transfinite_prism(corners, cells=(1, 1, 1);
                                 volume_tag=0,
                                 face_tags=(0, 0, 0, 0, 0),
                                 faces=nothing,
+                                compact=false,
                                 max_nodes=_DEFAULT_MAX_NODES,
                                 max_tets=_DEFAULT_MAX_TETS,
                                 max_boundary_triangles=
@@ -700,6 +857,16 @@ function mesh_transfinite_prism(corners, cells=(1, 1, 1);
     tet_limit = _limit(max_tets, "max_tets")
     triangle_limit = _limit(max_boundary_triangles, "max_boundary_triangles")
     nr, ns, nw = _three_counts(cells)
+
+    compact isa Bool || throw(ArgumentError(
+        "$_CALLER: compact must be a Bool, got $(typeof(compact))"))
+    if compact
+        return _mesh_transfinite_prism_compact(
+            corners, nr, ns, nw, faces;
+            volume_tag=volume_tag, face_tags=face_tags,
+            node_limit=node_limit, tet_limit=tet_limit,
+            triangle_limit=triangle_limit)
+    end
 
     opposite_nodes = _checked_add(ns, 1, "node")
     axial_nodes = _checked_add(nw, 1, "node")
@@ -931,6 +1098,197 @@ function mesh_transfinite_prism(corners, cells=(1, 1, 1);
     # on the per-tet orientation certification instead.
     faces === nothing &&
         _certify_volume(coords, tets, converted_corners)
+
+    mesh = Mesh(coords; tris=tris, tets=tets, tri_tag=tri_tags,
+                tet_tag=fill(converted_volume_tag, tet_count))
+    diagnostic = validate(mesh)
+    diagnostic.ok || _throw_simplex_validation(_CALLER, diagnostic.messages)
+    (nnodes(mesh), ntris(mesh), ntets(mesh)) ==
+        (node_count, triangle_count, tet_count) || throw(ErrorException(
+        "$_CALLER: finalized mesh count invariant failed"))
+    return mesh
+end
+
+# Compact (`Mesh.TransfiniteTri = 1`) pipeline — the full-square tab with
+# coordinate-welded triangular planes and the `SIM_7`–`SIM_12` template set.
+# Grid slots behind the diagonal (`j > i` at interior layers) stay
+# unreferenced orphan nodes, mirroring Gmsh exactly.
+function _mesh_transfinite_prism_compact(corners, nr::Int, ns::Int, nw::Int,
+                                         faces; volume_tag, face_tags,
+                                         node_limit, tet_limit,
+                                         triangle_limit)
+    ns == nr || throw(ArgumentError(
+        "$_CALLER: the compact transfinite-triangle subdivision requires " *
+        "equal radial and opposite cell counts (nr=$nr != ns=$ns)"))
+    converted_corners = _six_corners(corners)
+    converted_face_tags = _face_tags(face_tags)
+    converted_volume_tag = _tag(volume_tag, "volume_tag")
+    affine = faces === nothing
+    affine && _certify_affine(converted_corners)
+    wfaces = affine ?
+        _synthetic_compact_prism_faces(converted_corners, nr, nw) :
+        _prism_faces(faces, nr, ns, nw, true)
+    _certify_shared_prism_edges(wfaces, nr, ns, nw)
+    _certify_prism_corners(converted_corners, wfaces, nr, ns)
+
+    node_id, node_count = _compact_prism_ids(
+        wfaces[4].points, wfaces[5].points, nr, ns, nw)
+    n2 = ns + 1
+    tet_count = _checked_mul("tetrahedron", 3, nr, nr, nw)
+    side_triangles = _checked_mul(
+        "boundary triangle", 2, nw,
+        _checked_add(_checked_mul("boundary triangle", 2, nr), ns,
+                     "boundary triangle"))
+    triangle_count = _checked_add(
+        side_triangles,
+        _checked_mul("boundary triangle", 2, nr, nr),
+        "boundary triangle")
+
+    node_count <= typemax(Int32) || throw(ArgumentError(
+        "$_CALLER: $node_count nodes exceed Int32 indexing"))
+    tet_count <= typemax(Int32) || throw(ArgumentError(
+        "$_CALLER: $tet_count tetrahedra exceed the Int32 topology limit"))
+    triangle_count <= typemax(Int32) || throw(ArgumentError(
+        "$_CALLER: $triangle_count boundary triangles exceed the Int32 topology limit"))
+    node_count <= node_limit || throw(ArgumentError(
+        "$_CALLER: $node_count nodes exceed max_nodes=$node_limit"))
+    tet_count <= tet_limit || throw(ArgumentError(
+        "$_CALLER: $tet_count tetrahedra exceed max_tets=$tet_limit"))
+    triangle_count <= triangle_limit || throw(ArgumentError(
+        "$_CALLER: $triangle_count boundary triangles exceed " *
+        "max_boundary_triangles=$triangle_limit"))
+
+    coords = Matrix{Float64}(undef, 3, node_count)
+    _fill_warped_prism!(coords, converted_corners, wfaces,
+                        nr, ns, nw, node_id)
+
+    tets = Matrix{Int32}(undef, 4, tet_count)
+    tet_position = 0
+    # Diagonal cells (j == i): upstream emits SIM_10/SIM_11/SIM_12.
+    @inbounds for i in 0:nr-1, k in 0:nw-1
+        a = node_id(i, i, k)
+        b = node_id(i + 1, i, k)
+        d = node_id(i, i, k + 1)
+        e = node_id(i + 1, i, k + 1)
+        g = node_id(i + 1, i + 1, k)
+        h = node_id(i + 1, i + 1, k + 1)
+        for vertices in ((a, b, g, d), (b, g, d, e), (d, e, g, h))
+            tet_position += 1
+            _emit_canonical_tet!(tets, tet_position, coords, vertices...)
+        end
+    end
+    # Strictly-lower cells (j < i): SIM_7 through SIM_12.
+    @inbounds for i in 1:nr-1, j in 0:i-1, k in 0:nw-1
+        a = node_id(i, j, k)
+        b = node_id(i + 1, j, k)
+        c = node_id(i, j + 1, k)
+        d = node_id(i, j, k + 1)
+        e = node_id(i + 1, j, k + 1)
+        f = node_id(i, j + 1, k + 1)
+        g = node_id(i + 1, j + 1, k)
+        h = node_id(i + 1, j + 1, k + 1)
+        for vertices in ((a, c, d, g), (c, f, d, g), (d, f, h, g),
+                         (a, b, g, d), (b, g, d, e), (d, e, g, h))
+            tet_position += 1
+            _emit_canonical_tet!(tets, tet_position, coords, vertices...)
+        end
+    end
+    tet_position == tet_count || throw(ErrorException(
+        "$_CALLER: internal tetrahedron count invariant failed"))
+
+    tris = Matrix{Int32}(undef, 3, triangle_count)
+    tri_tags = Vector{Int32}(undef, triangle_count)
+    position = 1
+    # f0 (j = 0): SIM_10/SIM_11 induced faces — diagonal cells included.
+    @inbounds for i in 0:nr-1, k in 0:nw-1
+        a = node_id(i, 0, k); b = node_id(i + 1, 0, k)
+        d = node_id(i, 0, k + 1); e = node_id(i + 1, 0, k + 1)
+        inward = _node(coords, node_id(i + 1, 1, k))
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, a, b, d, inward,
+            converted_face_tags[1])
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, b, d, e, inward,
+            converted_face_tags[1])
+    end
+    # f1 (i = nr): SIM_11's (e,b,g) and SIM_12's (e,g,h) faces; the j = nr-1
+    # cell arrives from the diagonal cell of row nr-1.
+    @inbounds for j in 0:nr-1, k in 0:nw-1
+        b = node_id(nr, j, k); g = node_id(nr, j + 1, k)
+        e = node_id(nr, j, k + 1); h = node_id(nr, j + 1, k + 1)
+        inward = _node(coords, node_id(nr - 1, j, k + 1))
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, b, g, e, inward,
+            converted_face_tags[2])
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, e, g, h, inward,
+            converted_face_tags[2])
+    end
+    # f2 (diagonal plane): SIM_10's (a,g,d) and SIM_12's (d,g,h) faces.
+    @inbounds for i in 0:nr-1, k in 0:nw-1
+        a = node_id(i, i, k); g = node_id(i + 1, i + 1, k)
+        d = node_id(i, i, k + 1); h = node_id(i + 1, i + 1, k + 1)
+        inward0 = _node(coords, node_id(i + 1, i, k))
+        inward1 = _node(coords, node_id(i + 1, i, k + 1))
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, a, g, d, inward0,
+            converted_face_tags[3])
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, d, g, h, inward1,
+            converted_face_tags[3])
+    end
+    # f4 (k = 0): SIM_10's (a,b,g) on every cell plus SIM_7's (a,c,g) on
+    # strictly-lower cells — the compact face triangulation.
+    @inbounds for i in 0:nr-1
+        a = node_id(i, i, 0); b = node_id(i + 1, i, 0)
+        g = node_id(i + 1, i + 1, 0)
+        inward = _node(coords, node_id(i, i, 1))
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, a, b, g, inward,
+            converted_face_tags[4])
+        for j in 0:i-1
+            a = node_id(i, j, 0); b = node_id(i + 1, j, 0)
+            c = node_id(i, j + 1, 0); g = node_id(i + 1, j + 1, 0)
+            inward = _node(coords, node_id(i, j, 1))
+            position = _write_outward_triangle!(
+                tris, tri_tags, position, coords, a, c, g, inward,
+                converted_face_tags[4])
+            position = _write_outward_triangle!(
+                tris, tri_tags, position, coords, a, b, g, inward,
+                converted_face_tags[4])
+        end
+    end
+    # f5 (k = nw): SIM_12's (d,e,h) on every cell plus SIM_9's (d,f,h) on
+    # strictly-lower cells.
+    @inbounds for i in 0:nr-1
+        d = node_id(i, i, nw); e = node_id(i + 1, i, nw)
+        h = node_id(i + 1, i + 1, nw)
+        inward = _node(coords, node_id(i + 1, i + 1, nw - 1))
+        position = _write_outward_triangle!(
+            tris, tri_tags, position, coords, d, e, h, inward,
+            converted_face_tags[5])
+        for j in 0:i-1
+            d = node_id(i, j, nw); e = node_id(i + 1, j, nw)
+            f = node_id(i, j + 1, nw); h = node_id(i + 1, j + 1, nw)
+            inward = _node(coords, node_id(i + 1, j + 1, nw - 1))
+            position = _write_outward_triangle!(
+                tris, tri_tags, position, coords, d, f, h, inward,
+                converted_face_tags[5])
+            position = _write_outward_triangle!(
+                tris, tri_tags, position, coords, d, e, h, inward,
+                converted_face_tags[5])
+        end
+    end
+    position == triangle_count + 1 || throw(ErrorException(
+        "$_CALLER: internal boundary triangle count invariant failed"))
+
+    extracted_boundary, maximum_incidence = boundary_faces(tets)
+    maximum_incidence == 2 || throw(ErrorException(
+        "$_CALLER: constructed tet mesh has face incidence $maximum_incidence"))
+    sort!(extracted_boundary)
+    extracted_boundary == _canonical_triangles(tris) || throw(ErrorException(
+        "$_CALLER: emitted boundary triangles do not match the tet boundary"))
+    affine && _certify_volume(coords, tets, converted_corners)
 
     mesh = Mesh(coords; tris=tris, tets=tets, tri_tag=tri_tags,
                 tet_tag=fill(converted_volume_tag, tet_count))

@@ -805,15 +805,24 @@ shared-edge/corner certification, bitwise boundary-node reuse, and the
 canonical conforming boundary split audited strictly outward. Affine blocks
 retain the exact-dyadic remote-grid interpolation and a represented-volume
 conservation audit on the kernel's direct path;
-canonical triangular prisms implement Gmsh's legacy collapsed-grid five-face
-tetrahedral path (`Mesh.TransfiniteTri = 0`), mapped onto the degenerate
-hexahedral slot layout (`s3≡s0`, `s7≡s4`): the model path meshes the two
+canonical triangular prisms implement both of Gmsh's five-face
+tetrahedral paths, mapped onto the degenerate
+hexahedral slot layout (`s3≡s0`, `s7≡s4`). The legacy collapsed-grid
+subdivision (`Mesh.TransfiniteTri = 0`) meshes the two
 triangular boundary faces with the collapsed-grid kernel (its node-count
 corner rotation honored), reindexes all five face grids onto the canonical
 slots, certifies every shared edge and corner bitwise, and interpolates the
 interior through the same `transfiniteHex` Coons formula — curved, warped,
 and ruled boundaries included — while the corner-only path keeps its affine
-certification and represented-volume audit; positively ordered affine eight-corner blocks can also be emitted
+certification and represented-volume audit. The compact subdivision
+(`Mesh.TransfiniteTri = 1`, upstream's `transfinite3`) meshes the triangular
+faces with the compact equal-side lattice, expands each into the square
+slots with upper-triangle slots welded bitwise onto the diagonal vertices,
+keeps the distinct diagonal-plane interior evaluations unmerged exactly like
+upstream, and emits the `SIM_7`–`SIM_12` template set (three tetrahedra on
+diagonal cells, six on strictly lower cells) — boundary grids and GEdgeLoop
+canonicalization match between the standalone surface meshes and the volume
+face reads so shared entities weld bitwise; positively ordered affine eight-corner blocks can also be emitted
 as first-order recombined hexahedra with type-3 boundary quadrangles. Planar
 polylines with an explicit oriented plane normal extrude to type-3 quadrangles
 along left-normals, with optional convex-corner fans of first-layer triangles and
@@ -898,7 +907,6 @@ emits silently — stay rejected. P4 does not
 yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
-compact-TransfiniteTri volumes,
 and corner-reordered fills (three- and four-sided ruled/spherical fills
 are supported); unstructured `In Sphere`
 surface meshing still interpolates on the
@@ -952,8 +960,9 @@ fixed element type/property and fixed-family reference-quadrature lookup,
 four-sided transfinite, straight and curved transfinite curve-law/HWall,
 unrecombined/recombined three-sided transfinite,
 recombined-quadrangle, affine transfinite-volume, affine and curved/warped
-five-face-prism (explicit and auto-detected corners, including Gmsh's
-matching "Incompatible surface" rejection), and
+five-face-prism in both the collapsed and compact `Mesh.TransfiniteTri`
+subdivisions (explicit and auto-detected corners, loop-sign
+canonicalization, and Gmsh's matching "Incompatible surface" rejection), and
 recombined-hexahedron differentials, plus native `.geo` and projected
 single-/two-direction periodic surfaces, embedded, reusable-master/chained, and
 expression/list-backed periodic curves, low-level translation/rotation-periodic curves

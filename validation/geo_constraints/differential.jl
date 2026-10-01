@@ -258,6 +258,78 @@ const CASES = (
      Transfinite Volume{1};
      Mesh 3;
      """),
+    (name=:transfinite_prism_compact, mode=:mesh, dim=0,
+     # `Mesh.TransfiniteTri = 1` selects Gmsh's compact triangular-prism
+     # subdivision: the triangular faces use the (n+1)(n+2)/2 compact
+     # lattice, diagonal expanded slots weld onto diagonal vertices, and
+     # the strictly-lower cells emit SIM_7-SIM_12 — 46 nodes, 72
+     # triangles, 81 tetrahedra.
+     source="""
+     Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+     Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+     Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,1};
+     Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+     Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+     Curve Loop(1)={1,2,3}; Curve Loop(2)={7,8,9};
+     Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+     Curve Loop(5)={3,4,-9,-6};
+     Surface(1)={1}; Surface(2)={2};
+     Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+     Surface Loop(1)={1,2,3,4,5};
+     Volume(1)={1};
+     Transfinite Curve{:}=4;
+     Transfinite Surface{:};
+     Transfinite Volume{1}={1,2,3,4,5,6};
+     Mesh.TransfiniteTri=1;
+     Mesh 3;
+     """),
+    (name=:transfinite_prism_compact_reversed, mode=:mesh, dim=0,
+     # The upper triangle's loop lists its curves reversed — Gmsh's
+     # unsigned GEdgeLoop chaining canonicalizes the corner order, so the
+     # compact mesh is identical to the forward declaration.
+     source="""
+     Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+     Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+     Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,1};
+     Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+     Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+     Curve Loop(1)={1,2,3}; Curve Loop(2)={-7,-9,-8};
+     Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+     Curve Loop(5)={3,4,-9,-6};
+     Surface(1)={1}; Surface(2)={2};
+     Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+     Surface Loop(1)={1,2,3,4,5};
+     Volume(1)={1};
+     Transfinite Curve{:}=4;
+     Transfinite Surface{:};
+     Transfinite Volume{1}={1,2,3,4,5,6};
+     Mesh.TransfiniteTri=1;
+     Mesh 3;
+     """),
+    (name=:transfinite_prism_compact_curved, mode=:mesh, dim=0,
+     # Compact subdivision of the curved-edge prism: the warped
+     # quadrilateral patch feeds transfiniteHex on the expanded slots and
+     # the diagonal-plane interior vertices stay distinct, matching Gmsh.
+     source="""
+     Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={0,1,0};
+     Point(4)={0,0,1}; Point(5)={1,0,1}; Point(6)={0,1,1};
+     Point(9)={1,1,0};
+     Line(1)={1,2}; Circle(2)={2,9,3}; Line(3)={3,1};
+     Line(4)={1,4}; Line(5)={2,5}; Line(6)={3,6};
+     Line(7)={4,5}; Line(8)={5,6}; Line(9)={6,4};
+     Curve Loop(1)={1,2,3}; Curve Loop(2)={7,8,9};
+     Curve Loop(3)={1,5,-7,-4}; Curve Loop(4)={2,6,-8,-5};
+     Curve Loop(5)={3,4,-9,-6};
+     Surface(1)={1}; Surface(2)={2};
+     Surface(3)={3}; Surface(4)={4}; Surface(5)={5};
+     Surface Loop(1)={1,2,3,4,5};
+     Volume(1)={1};
+     Transfinite Curve{:}=4;
+     Transfinite Surface{:};
+     Transfinite Volume{1}={1,2,3,4,5,6};
+     Mesh.TransfiniteTri=1;
+     Mesh 3;
+     """),
     (name=:transfquadtri_blocker, mode=:error, dim=3,
      # Native kernel emits tetrahedra only — the QuadTri flag is an explicit
      # blocker (Gmsh succeeds with its HAVE_QUADTRI path).
