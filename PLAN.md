@@ -785,7 +785,15 @@ corner-Jacobian certification. Three-sided grids can also be emitted with
 Gmsh's arrangement-dependent mix of first-order triangles and quadrangles,
 including the shared alternate layout and
 the central `Left` zigzag, with exact projected corner-Jacobian and atomic-coverage
-certification. Positively ordered eight-corner blocks
+certification. Three-sided ruled surfaces (`Surface` fills, including
+`In Sphere` and concentric-arc sphere patches) interpolate their interior
+through Gmsh's real-space `TRAN_TRI` chain — the interpolated Cartesian point
+is inverted through `GFace::XYZtoUV` with the loose off-surface settings
+(`Precision = 1e-3`, `MaxIter = 10`, fixed 9×9 restart grid, silent
+last-iterate fallback) and re-evaluated as `point(Up,Vp)` on the ruled
+parametrization (`TransfiniteTriB` plus `TransfiniteSph` sphere projection),
+in both the collapsed and compact `TransfiniteTri` kernels. Positively
+ordered eight-corner blocks
 implement Gmsh's unrecombined six-tetrahedron transfinite volume subdivision.
 The model path meshes every boundary face with the four-sided patch kernel
 (required, matching Gmsh's incompatible-surface gate), reindexes each into its
@@ -884,8 +892,7 @@ yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite patches, general CAD parameterizations,
 compact-TransfiniteTri volumes,
-`In Sphere` transfinite three-sided patches
-and corner-reordered fills (four-sided fills
+and corner-reordered fills (three- and four-sided ruled/spherical fills
 are supported); unstructured `In Sphere`
 surface meshing still interpolates on the
 best-fit plane (gmsh projects interior nodes

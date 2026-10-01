@@ -470,7 +470,15 @@ the emitted band. `Surface … In Sphere` (and four concentric arc
 generatrices, auto-detected like `ruledSurface::checkSphere`) evaluate the
 ruled surface's own `S(u,v)` — the `TransfiniteQua` blend projected onto the
 sphere at radius |S0−O| — for interior nodes on flat and non-coplanar
-boundaries alike, including inside transfinite-volume face grids. Four-sided grids can also
+boundaries alike, including inside transfinite-volume face grids.
+Three-sided ruled surfaces (`Surface` fills, non-coplanar or spherical
+boundaries included) interpolate their interior in real space per
+`meshGFaceTransfinite`: each `TRAN_TRI` Cartesian point is inverted through
+`GFace::XYZtoUV`'s loose off-surface Newton (`Precision = 1e-3`,
+`MaxIter = 10`, fixed 9×9 restart grid, silent last-iterate fallback) and
+re-evaluated as `point(Up,Vp)` on the ruled parametrization —
+`TransfiniteTriB` plus `TransfiniteSph` — in both the collapsed and
+compact `TransfiniteTri` kernels. Four-sided grids can also
 be emitted as first-order Gmsh type-3 quadrangles with exact projected
 corner-Jacobian certification. Eight-corner transfinite volume blocks require
 all six boundary surfaces transfinite (Gmsh's incompatible-surface gate) and
@@ -526,8 +534,7 @@ inward-bulging boundary, which Tessella refuses to emit. P4 does not yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite or holed transfinite patches,
 general CAD parameterizations, compact-TransfiniteTri volumes,
-`In Sphere` three-sided transfinite patches or corner-reordered fills,
-volume/hybrid
+or corner-reordered fills, volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, curved
 periodic surfaces, or allocator reads after
@@ -551,6 +558,26 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
+Gmsh 4.15.2 binary after completing three-sided ruled transfinite fills:
+
+- Three-generatrix `Surface` loops (gmsh `MSH_SURF_TRIC`, geomType
+  RuledSurface) — including non-coplanar boundaries and concentric-arc
+  sphere patches — now mesh instead of rejecting on the planar gate. The
+  kernels keep their real-space `TRAN_TRI` interior; a new `project`
+  callback inverts each interior point through `_ruled_xyz_to_uv`'s new
+  `on_surface=false` variant (the exact `XYZtoUV(..., 1.0, false)`
+  convention: `Precision = 1e-3`, `MaxIter = 10`, 9×9 restart grid,
+  last-iterate return on non-convergence) and re-evaluates the ruled
+  `point(Up,Vp)`. On the sphere-octant fixture (three unit great-circle
+  arcs, `Transfinite Curve = 5`) both kernels reproduce Gmsh 4.15.2's
+  node sets within ~2.3e-9: collapsed 22 nodes / 28 triangles, compact
+  `Mesh.TransfiniteTri=1` 16 / 16 — every interior node on the unit
+  sphere, boundary nodes bitwise on the true arcs.
+- The planar gate is untouched when `project === nothing` (flat patches
+  byte-identical), and existing on-surface `XYZtoUV` callers keep the
+  strict 1e-8/25-iteration recursive-relaxation behavior.
 
 Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
 Gmsh 4.15.2 binary after completing `In Sphere` transfinite fills:

@@ -293,7 +293,7 @@ function _exact_plane_frame(ring, origin)
     return _frame_from_normal(normal)
 end
 
-function _plane_frame(ring, origin, scale)
+function _plane_frame(ring, origin, scale; allow_warped::Bool=false)
     nx = 0.0
     ny = 0.0
     nz = 0.0
@@ -313,6 +313,10 @@ function _plane_frame(ring, origin, scale)
     end
     normal = (nx / normal_length, ny / normal_length, nz / normal_length)
     frame = _frame_from_normal(normal)
+    # Ruled-surface fills project their interior back through the surface
+    # parametrization (`project`), so a genuinely non-coplanar boundary is
+    # legal — the Newell normal still gives a consistent orientation frame.
+    allow_warped && return frame
     tolerance = 256eps(Float64)
     @inbounds for (index, point) in pairs(ring)
         normalized = _normalize(point, origin, scale)
@@ -883,6 +887,7 @@ function mesh_transfinite_triangle(side1,
                                    arrangement=:left,
                                    face_tag=0,
                                    side_tags=(0, 0, 0),
+                                   project=nothing,
                                    max_nodes=_DEFAULT_MAX_NODES,
                                    max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
     for (index, side) in enumerate((side1, side2, side3))
@@ -942,7 +947,7 @@ function mesh_transfinite_triangle(side1,
 
     ring = _boundary_ring(sides)
     origin, scale = _normalization(ring)
-    frame = _plane_frame(ring, origin, scale)
+    frame = _plane_frame(ring, origin, scale; allow_warped=project!==nothing)
     projected_ring = NTuple{2,Float64}[
         _project(frame, _normalize(point, origin, scale)) for point in ring]
     _validate_simple_boundary(projected_ring)
@@ -974,7 +979,12 @@ function mesh_transfinite_triangle(side1,
                     corner2, corner3, u, v)
                 all(isfinite, normalized) || throw(ArgumentError(
                     "$_CALLER: transfinite interpolation generated a non-finite coordinate"))
-                _physical_point(normalized, origin, scale)
+                physical = _physical_point(normalized, origin, scale)
+                point = project === nothing ? physical : project(physical)
+                all(isfinite, point) || throw(ArgumentError(
+                    "$_CALLER: surface projection generated a non-finite " *
+                    "coordinate"))
+                point
             end
             node = Int(_node(i, j))
             coordinates[1, node] = point[1]
@@ -1045,6 +1055,7 @@ function mesh_transfinite_triangle_patch(
     arrangement=:left,
     face_tag=0,
     side_tags=(0, 0, 0),
+    project=nothing,
     max_nodes=_DEFAULT_MAX_NODES,
     max_triangles=_DEFAULT_MAX_TRIANGLES,
     max_quadrangles=_DEFAULT_MAX_QUADRANGLES)::MixedMesh
@@ -1110,6 +1121,7 @@ function mesh_transfinite_triangle_patch(
         arrangement=layout,
         face_tag=physical_face_tag,
         side_tags=physical_side_tags,
+        project=project,
         max_nodes=node_limit,
         max_triangles=certification_triangles)
     (nnodes(certified) == nodes && nsegs(certified) == segments &&
@@ -1129,7 +1141,7 @@ function mesh_transfinite_triangle_patch(
                          certified.coords[3, index])
     end
     origin, scale = _normalization(ring)
-    frame = _plane_frame(ring, origin, scale)
+    frame = _plane_frame(ring, origin, scale; allow_warped=project!==nothing)
     reference = _validate_triangle_orientation(
         certified.coords, certified.tris, origin, scale, frame)
     _validate_recombined_geometry(
@@ -1297,6 +1309,7 @@ function mesh_transfinite_triangle_collapsed(side1,
                                              face_tag=0,
                                              side_tags=(0, 0, 0),
                                              allow_corner_rotation=true,
+                                             project=nothing,
                                              max_nodes=_DEFAULT_MAX_NODES,
                                              max_triangles=
                                                  _DEFAULT_MAX_TRIANGLES)::Mesh
@@ -1376,7 +1389,7 @@ function mesh_transfinite_triangle_collapsed(side1,
 
     ring = _boundary_ring(sides)
     origin, scale = _normalization(ring)
-    frame = _plane_frame(ring, origin, scale)
+    frame = _plane_frame(ring, origin, scale; allow_warped=project!==nothing)
     projected_ring = NTuple{2,Float64}[
         _project(frame, _normalize(point, origin, scale)) for point in ring]
     _validate_simple_boundary(projected_ring)
@@ -1410,7 +1423,16 @@ function mesh_transfinite_triangle_collapsed(side1,
             all(isfinite, normalized) || throw(ArgumentError(
                 "$_COLLAPSED_CALLER: transfinite interpolation generated a " *
                 "non-finite coordinate"))
-            _physical_point(normalized, origin, scale)
+            physical = _physical_point(normalized, origin, scale)
+            # `project` is the surface's own `XYZtoUV -> point(Up,Vp)`
+            # evaluation for ruled-surface fills (gmsh interpolates a ruled
+            # face's interior in real space then projects it back onto the
+            # surface parametrization).
+            point = project === nothing ? physical : project(physical)
+            all(isfinite, point) || throw(ArgumentError(
+                "$_COLLAPSED_CALLER: surface projection generated a " *
+                "non-finite coordinate"))
+            point
         end
         node = Int(_collapsed_node(i, j, height))
         coordinates[1, node] = point[1]

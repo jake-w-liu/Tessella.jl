@@ -6372,7 +6372,7 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
     haskey(m.meshing.transfinite_surfaces, surf) || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
     spec,signed_curves,curve_points,nside,allow_warped,junctions,
-        project_plane,sphere_center=
+        project_plane,sphere_center,_=
             _transfinite_surface_sides(m,surf,caller)
     nside==4 || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
@@ -6766,6 +6766,13 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     (nside!=4 || kind in (:plane,:ruled)) || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires a planar or ruled " *
         "surface-filling kind"))
+    # A three-sided `Surface` (Gmsh `MSH_SURF_TRIC` — geomType RuledSurface)
+    # interpolates its interior in real space (`TRAN_TRI` on the boundary
+    # nodes) and projects the result back through `XYZtoUV -> point(Up,Vp)`
+    # — `TransfiniteTriB` plus `TransfiniteSph` when the generatrices describe
+    # a sphere. The ruled parametrization owns the interior, so neither the
+    # coplanarity gate nor the planar fallback applies.
+    ruled_tri=nside==3 && kind in (:ruled,:tric)
     # A ruled surface with sphere geometry — `Surface … In Sphere` or four
     # concentric arc generatrices — keeps its own parametrization: interior
     # nodes evaluate `S(u,v)` (the `TransfiniteQua` generatrix blend plus
@@ -6796,7 +6803,7 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     allow_warped=nside==4 && kind==:ruled && sphere_center===nothing &&
                  !haskey(m.surface_geometry,t)
     project_plane=nothing
-    if !allow_warped && sphere_center===nothing
+    if !allow_warped && sphere_center===nothing && !ruled_tri
         # `Plane Surface` treats a non-coplanar boundary as Gmsh's
         # `planeSurface` does: the declared plane comes from on-curve
         # boundary samples — off-plane control points do not veto it — and
@@ -6862,7 +6869,7 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         curve_points[position][end]=m.points[junctions[mod1(position+1,nside)]]
     end
     return spec,signed_curves,curve_points,nside,allow_warped,junctions,
-           project_plane,sphere_center
+           project_plane,sphere_center,ruled_tri
 end
 
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
@@ -6873,20 +6880,24 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                                      AbstractSizeField}=
                                        nothing)
     spec,signed_curves,curve_points,nside,allow_warped,_,project_plane,
-        sphere_center=_transfinite_surface_sides(m,t,caller)
+        sphere_center,ruled_tri=_transfinite_surface_sides(m,t,caller)
     if nside==3
         s1,s2,s3=curve_points
+        project=ruled_tri ? _transfinite_ruled_tri_project(m,t,caller) :
+            nothing
         kernel=if m.meshing.transfinite_tri==1
             (length(s1)==length(s2) && length(s1)==length(s3)) ||
                 throw(ArgumentError(
                     "$caller: transfinite Surface[$t] has mismatched " *
                     "boundary curve node counts ($(length(s1)), " *
                     "$(length(s2)), $(length(s3)))"))
-            mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement)
+            mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement,
+                                      project=project)
         else
             mesh_transfinite_triangle_collapsed(
                 s1,s2,s3;arrangement=spec.arrangement,
-                allow_corner_rotation=isempty(spec.corners))
+                allow_corner_rotation=isempty(spec.corners),
+                project=project)
         end
         # The entity cache stores the untagged simplex complex; boundary
         # curves are not meshed by generate(2).
@@ -6922,6 +6933,25 @@ function _transfinite_sphere_eval(m::GeoModel,t::Int,gens::Vector{Int},
         m.points[signed>0 ? endpoints[1] : endpoints[2]]
     end
     return (u,v)->_ruled_qua_point(m,gens,S,u,v,center,caller)
+end
+
+# Interior evaluation for a three-sided ruled transfinite fill — gmsh's
+# `meshGFaceTransfinite` interpolates the boundary vertices in real space
+# (`TRAN_TRI`) on `RuledSurface` faces, inverts the interpolated point through
+# `GFace::XYZtoUV` with its loose off-surface settings (relax=1,
+# `onSurface=false`: `Precision=1e-3`, `MaxIter=10`, silent last-iterate
+# fallback), then re-evaluates `point(Up,Vp)` — `TransfiniteTriB` plus any
+# `TransfiniteSph` sphere projection. The physical interpolation itself stays
+# in the kernel; this callback is the projection half.
+function _transfinite_ruled_tri_project(m::GeoModel,t::Int,
+                                        caller::AbstractString)
+    lc=_model_lc(m)
+    silent=Returns(nothing)
+    return function(point)
+        u,v=_ruled_xyz_to_uv(m,t,point,1.0,lc,false,silent,silent,caller;
+                             on_surface=false)
+        return _ruled_surface_point(m,t,u,v,caller)
+    end
 end
 
 @inline function _points_close(p,q,tolerance)

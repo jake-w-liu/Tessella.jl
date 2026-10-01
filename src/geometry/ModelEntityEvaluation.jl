@@ -529,16 +529,23 @@ function _invert_singular3x3(mat::Matrix{Float64})
 end
 
 # `GFace::XYZtoUV` — damped Newton (SVD pseudo-inverse step) restarted over a
-# fixed 9×9 initial-guess grid; failed passes recurse at `relax *= 0.75` until
-# `relax < 1e-3`. `warn`/`info` receive the upstream `Msg::Warning`/`Msg::Info`
-# texts ("Converged at iter. ...", "Point ...: Relaxation factor = ...",
-# "Inverse surface mapping could not converge").
+# fixed 9×9 initial-guess grid. `on_surface=false` selects the loose
+# off-surface variant the transfinite mesher calls (`XYZtoUV(..., 1.0, false)`:
+# `Precision = 1e-3`, `MaxIter = 10`, no XYZ convergence test, and an
+# unconverged pass returns the last iterate instead of recursing). The
+# on-surface variant recurses at `relax *= 0.75` until `relax < 1e-3`.
+# `warn`/`info` receive the upstream `Msg::Warning`/`Msg::Info` texts
+# ("Converged at iter. ...", "Point ...: Relaxation factor = ...",
+# "Inverse surface mapping could not converge") — unreachable when
+# `on_surface=false`.
 function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
                           relax::Float64,lc::Float64,test_xyz::Bool,warn,info,
-                          caller::AbstractString,old_ruled::Bool=false)
+                          caller::AbstractString,old_ruled::Bool=false;
+                          on_surface::Bool=true)
     guesses=(0.5,0.6,0.4,0.7,0.3,0.8,0.2,1.0,0.0)
     umin=vmin=0.0;umax=vmax=1.0
-    tol=1e-8*((umax-umin)^2+(vmax-vmin)^2)
+    tol=(on_surface ? 1e-8 : 1e-3)*((umax-umin)^2+(vmax-vmin)^2)
+    max_iter=on_surface ? 25 : 10
     U=V=Unew=Vnew=0.0
     for (i,initu) in pairs(guesses), (j,initv) in pairs(guesses)
         U=umin+initu*(umax-umin);V=vmin+initv*(vmax-vmin)
@@ -547,7 +554,7 @@ function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
         err2=sqrt((target[1]-point[1])^2+(target[2]-point[2])^2+
                   (target[3]-point[3])^2)
         err2<1e-8*lc && return (U,V)
-        while err>tol && iter<25
+        while err>tol && iter<max_iter
             point=_ruled_surface_point(m,tag,U,V,caller,old_ruled)
             du=_ruled_surface_d1(m,tag,U,V,1,caller,old_ruled)
             dv=_ruled_surface_d1(m,tag,U,V,2,caller,old_ruled)
@@ -563,8 +570,9 @@ function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
                       (target[3]-point[3])^2)
             iter+=1;U=Unew;V=Vnew
         end
-        if iter<25 && err<=tol &&
+        if iter<max_iter && err<=tol &&
             umin<=Unew<=umax && vmin<=Vnew<=vmax
+            on_surface || return (Unew,Vnew)
             if err2>1e-4*lc && test_xyz
                 continue
             end
@@ -577,6 +585,7 @@ function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
             return (Unew,Vnew)
         end
     end
+    on_surface || return (U,V)
     if relax<1e-3
         warn("Inverse surface mapping could not converge")
         return (U,V)
@@ -584,7 +593,7 @@ function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
     info(@sprintf("Point %g %g %g: Relaxation factor = %g",
                   target[1],target[2],target[3],0.75*relax))
     return _ruled_xyz_to_uv(m,tag,target,0.75*relax,lc,test_xyz,warn,
-                            info,caller,old_ruled)
+                            info,caller,old_ruled;on_surface=on_surface)
 end
 
 # `gmshVertex::reparamOnFace` — the generatrix-corner map for ruled surfaces;

@@ -568,5 +568,54 @@ Transfinite Surface {1} = {2,3,4,1};
             caught
         end
         @test pinned_err isa ArgumentError
+
+        # A three-sided ruled surface of three concentric great-circle arcs
+        # (a sphere octant) is non-planar but meshes through Gmsh 4.15.2's
+        # real-space `TRAN_TRI` → `XYZtoUV` → `point(Up,Vp)` chain: the
+        # collapsed kernel emits 22 nodes / 28 triangles and the compact
+        # `TransfiniteTri=1` kernel 16 / 16, both matching gmsh's node sets
+        # within ~3e-9 (its arc-spacing solver noise). Interior nodes land
+        # on the unit sphere; boundary nodes stay on the true arcs.
+        for (transfinite_tri,nodes_expected,tris_expected) in
+            ((0,22,28),(1,16,16))
+            tri_sph=mktemp() do path,io
+                write(io,"""
+Mesh.TransfiniteTri = $transfinite_tri;
+Point(1) = {1,0,0}; Point(2) = {0,1,0}; Point(3) = {0,0,1};
+Point(9) = {0,0,0};
+Circle(1) = {1,9,2}; Circle(2) = {2,9,3}; Circle(3) = {3,9,1};
+Curve Loop(1) = {1,2,3};
+Surface(1) = {1};
+Transfinite Curve {1,2,3} = 5;
+Transfinite Surface {1};
+""")
+                close(io)
+                execute_geo(path;mesh_dim=2)
+            end
+            @test (size(tri_sph.mesh.coords,2),
+                   size(tri_sph.mesh.tris,2))==
+                (nodes_expected,tris_expected)
+            on_sphere=0
+            center_node=false
+            for i in 1:size(tri_sph.mesh.coords,2)
+                x,y,z=tri_sph.mesh.coords[:,i]
+                if (x,y,z)==(0.0,0.0,0.0)
+                    center_node=true
+                    continue
+                end
+                on_sphere+=abs(hypot(x,y,z)-1.0)<1e-9
+            end
+            @test on_sphere==nodes_expected-1
+            @test center_node
+            # The great-circle boundary is exact: arc midpoints keep their
+            # 45° positions rather than TRAN_TRI-interpolated coordinates.
+            nodes=Set(Tuple(tri_sph.mesh.coords[:,c])
+                      for c in 1:size(tri_sph.mesh.coords,2))
+            for corner in ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0))
+                @test corner in nodes
+            end
+            s2=sqrt(0.5)
+            @test any(n->hypot(n[1]-s2,n[2]-s2,n[3])<1e-9,nodes)
+        end
     end
 end
