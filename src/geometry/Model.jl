@@ -2599,8 +2599,11 @@ function _periodic_curve_point(m::GeoModel,curve::Int,parameter::Float64,
     end
     # `parameter` is the stored/native parameter convention: the chord
     # fraction for `Line`, the sweep/native parameter for arcs and the
-    # spline family, and the OCC range for materialized edges.
-    if _curve_type(m,curve)===:line
+    # spline family, and the OCC range for materialized edges. An OCC line
+    # carries `gp_Lin` parameters (its `t0` need not be 0), so it must
+    # evaluate through `_occ_line_point` rather than the chord fraction —
+    # `_model_curve_point`'s dispatch orders OCC kinds ahead of `:line`.
+    if _curve_type(m,curve)===:line && _occ_geometry(m,curve)===nothing
         a,b=m.curves[curve];p=m.points[a];q=m.points[b]
         point=ntuple(3) do axis
             _affine_coordinate(
@@ -2870,7 +2873,16 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes
     scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
     geometric_tolerance=max(atol,128eps(Float64)*scale)
     cross_bound=(geometric_tolerance*length1)^2
-    parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
+    fraction_tolerance=max(128eps(Float64),geometric_tolerance/length1)
+    # Entries carry the native parameter frame — `m.curve_params` values and
+    # `_periodic_curve_point` consume it. A `Line` entity's chord fraction
+    # coincides with its native parameter, but an OCC `gp_Lin` keeps its own
+    # `t0..t1` range, so the fraction is scaled onto the stored bounds.
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    span=t1-t0
+    (isfinite(span) && span>0) || throw(ArgumentError(
+        "$caller: Curve[$curve] has an unusable parameter range"))
+    parameter_tolerance=fraction_tolerance*span
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
         eligible_nodes[node] || continue
@@ -2878,22 +2890,27 @@ function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes
         wz=mesh.coords[3,node]-p[3]
         cx=vy*wz-vz*wy;cy=vz*wx-vx*wz;cz=vx*wy-vy*wx
         muladd(cx,cx,muladd(cy,cy,cz*cz))<=cross_bound || continue
-        parameter=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
-        -geometric_tolerance/length1<=parameter<=
+        fraction=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
+        -geometric_tolerance/length1<=fraction<=
             1+geometric_tolerance/length1 || continue
-        parameter=clamp(parameter,0.0,1.0)
+        fraction=clamp(fraction,0.0,1.0)
         # A node within endpoint tolerance IS the endpoint — keeping the raw
         # projected value (e.g. 1−eps) would evaluate to a duplicate node one
-        # ulp away and crack the boundary shared with adjacent surfaces.
-        parameter<=parameter_tolerance && (parameter=0.0)
-        1-parameter<=parameter_tolerance && (parameter=1.0)
+        # ulp away and crack the boundary shared with adjacent surfaces. The
+        # stored bound is emitted bitwise: `t0+fraction*span` can sit one ulp
+        # off `t1`, which the writeback would evaluate into a corner
+        # duplicate.
+        fraction<=fraction_tolerance && (fraction=0.0)
+        1-fraction<=fraction_tolerance && (fraction=1.0)
+        parameter=fraction==0.0 ? t0 : fraction==1.0 ? t1 :
+                  t0+fraction*span
         push!(entries,(parameter,node))
     end
     sort!(entries;by=first)
     length(entries)>=2 || throw(ErrorException(
         "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
-    first(entries)[1]<=parameter_tolerance &&
-        1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
+    first(entries)[1]-t0<=parameter_tolerance &&
+        t1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
             "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
     for index in 1:(length(entries)-1)
         first_node=Int32(entries[index][2])
@@ -3577,7 +3594,14 @@ function _embedded_line_curve_nodes(
     scale=max(1.0,hypot(first_coordinate...),hypot(last_coordinate...))
     geometric_tolerance=max(atol,128eps(Float64)*scale)
     cross_bound=(geometric_tolerance*length1)^2
-    parameter_tolerance=max(128eps(Float64),geometric_tolerance/length1)
+    fraction_tolerance=max(128eps(Float64),geometric_tolerance/length1)
+    # Same native-frame contract as `_curve_parameter_nodes`: an OCC `gp_Lin`
+    # keeps its own `t0..t1`, so the chord fraction scales onto the bounds.
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    span=t1-t0
+    (isfinite(span) && span>0) || throw(ArgumentError(
+        "$caller: embedded Curve[$curve] has an unusable parameter range"))
+    parameter_tolerance=fraction_tolerance*span
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
         eligible_nodes[node] || continue
@@ -3586,15 +3610,18 @@ function _embedded_line_curve_nodes(
         wz=mesh.coords[3,node]-first_coordinate[3]
         cx=vy*wz-vz*wy;cy=vz*wx-vx*wz;cz=vx*wy-vy*wx
         muladd(cx,cx,muladd(cy,cy,cz*cz))<=cross_bound || continue
-        parameter=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
-        -parameter_tolerance<=parameter<=1+parameter_tolerance || continue
-        push!(entries,(clamp(parameter,0.0,1.0),node))
+        fraction=muladd(wx,vx,muladd(wy,vy,wz*vz))/length2
+        -fraction_tolerance<=fraction<=1+fraction_tolerance || continue
+        fraction=clamp(fraction,0.0,1.0)
+        parameter=fraction==0.0 ? t0 : fraction==1.0 ? t1 :
+                  t0+fraction*span
+        push!(entries,(parameter,node))
     end
     sort!(entries;by=entry->(entry[1],entry[2]))
     length(entries)>=2 || throw(ArgumentError(
         "$caller: embedded Curve[$curve] is not represented by two mesh nodes"))
-    first(entries)[1]<=parameter_tolerance &&
-        1-last(entries)[1]<=parameter_tolerance || throw(ArgumentError(
+    first(entries)[1]-t0<=parameter_tolerance &&
+        t1-last(entries)[1]<=parameter_tolerance || throw(ArgumentError(
         "$caller: embedded Curve[$curve] mesh chain does not reach both endpoints"))
     for index in 1:(length(entries)-1)
         first_parameter,first_raw=entries[index]

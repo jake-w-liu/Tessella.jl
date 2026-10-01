@@ -9,7 +9,7 @@ metadata. Unknown flags and OCC-only files are blockers.
 """
 module CLI
 
-using ..GeoExec: execute_geo
+using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh
 using ..Model: model_periodic_constraints, model_to_mixed
 using ..Elements: write_mixed_msh
@@ -131,7 +131,11 @@ function main(args::AbstractVector{<:AbstractString})
             target===nothing && throw(ArgumentError(
                 "tessella: classified $entity_name projection requires exactly " *
                 "one selected $entity_name"))
-            projected=model_to_mixed(result.model,result.mesh,dim,target)
+            # `model_to_mixed` projects a single entity's own mesh — the
+            # merged execution product carries every entity's cells, so the
+            # target's part is the correct input.
+            projected=model_to_mixed(result.model,
+                geo_entity_mesh(result,dim,target),dim,target)
             projected_relations=Set(
                 (link.dim,Int(link.slave_entity),Int(link.master_entity))
                 for link in projected.periodic_links)

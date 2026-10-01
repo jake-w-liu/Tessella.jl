@@ -272,7 +272,10 @@ end
     @test err isa ArgumentError
     @test occursin("requires boundary Curve[12] to be transfinite",string(err))
 
-    # Opposite edges in one direction must carry equal node counts.
+    # Opposite edges in one direction must carry equal node counts; the
+    # boundary surfaces mesh before the volume, so the patch kernel's
+    # side-mismatch diagnostic fires first (the `Mesh 3` statement path
+    # reports the same error).
     err=_constraint_error(_GEO_BOX * raw"""
         Transfinite Curve{1} = 5;
         Transfinite Curve{2,3,4,5,6,7,8,9,10,11,12} = 4;
@@ -280,7 +283,7 @@ end
         Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
         """;mesh_dim=3)
     @test err isa ArgumentError
-    @test occursin("mismatched node counts",string(err))
+    @test occursin("non-matching node counts",string(err))
 
     # A genuinely non-affine block: Point(7) moves off the corner
     # parallelepiped, so its two incident ruled faces mesh as warped

@@ -542,7 +542,13 @@ session-owned view with a smoothed element-wise frame field.
 The `.geo` layer reaches the same machinery: `Homology`/`Cohomology`/`Betti`
 queue `addHomologyRequest` requests (bare `0:3` dims, `{dom}` and
 `{{dom},{sub}}` list forms, `(dims){dom,sub}`) that run inside `Mesh n` like
-`GModel::computeHomology` — empty domains cover the top-dimensional
+`GModel::computeHomology`. `Mesh n`/`mesh_dim=n` mesh every entity of
+dimension ≤ n through `_geo_mesh_model` regardless of entity count — vertex
+parts (orphan `Point` entities included, matching upstream's per-entity
+emission), graded curve parts, surface parts, and volume parts merge into one
+execution mesh whose per-entity decomposition stays on
+`GeoExecution.mesh_parts` for classified `model_to_mixed` projection — empty
+domains cover the top-dimensional
 entities, `Betti` stores nothing, and generators land in
 `H_k{dom[,sub]}i`/`H^k{…}i` physical groups named and allocated like the
 pinned binary (which itself drops the mesh on output — Tessella keeps it);
@@ -874,11 +880,6 @@ quasi-transfinite patches, general CAD parameterizations,
 compact-TransfiniteTri volumes,
 `In Sphere` transfinite face fills (excluded
 by the ruled-surface gate),
-or orphan `Point` vertex emission on the single-volume `mesh_dim=3`
-dispatch shortcut (`execute_geo` with one volume calls
-`mesh_model_volume` directly, so standalone vertex nodes that Gmsh emits
-— e.g. an arc's control-point entity — are dropped there while the
-`Mesh 3` statement path retains them),
 volume/hybrid recombination, selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
 periodic surfaces,

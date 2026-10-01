@@ -1513,6 +1513,10 @@ mutable struct _GeoNumericContext
     # `_geo_merge_entity_meshes` so `RelocateMesh`/`TransformMesh {..}{..}` can
     # scope to an entity.
     mesh_node_owner::Dict{Int,Tuple{Int,Int}}
+    # The `(dim, tag, mesh)` parts `_geo_mesh_model` merged into the current
+    # mesh — entity-level consumers (classified `model_to_mixed` projection,
+    # field views) need each entity's own mesh, not the merged product.
+    mesh_parts::Vector{Tuple{Int,Int,Mesh}}
     # `GEO_Internals::PhysicalGroups` — the raw physical-group records as the
     # `.geo` parser keeps them: `(dim, raw_signed_tag)` → the raw signed member
     # tags. `Physical X(n)` looks up `n` here verbatim, so groups `-4` and `4`
@@ -1564,6 +1568,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Dict{Tuple{String,Int,String},Float64}(),
     Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,0,Int[],nothing,
     String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
+    Tuple{Int,Int,Mesh}[],
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
     Dict{Int,Any}(),nothing,false)
 
@@ -5312,7 +5317,8 @@ end
 function _geo_fix_relative_path(reference::AbstractString,in::AbstractString)
     isempty(in) && return ""
     (startswith(in,"/") || startswith(in,"\\") ||
-     (ncodeunits(in)>3 && in[2]==':' && in[3] in ('/','\\'))) && return String(in)
+     (ncodeunits(in)>3 && in[2]==':' &&
+      (in[3]=='/' || in[3]=='\\'))) && return String(in)
     dir=dirname(String(reference))
     return isempty(dir) ? String(in) : dir*"/"*in
 end

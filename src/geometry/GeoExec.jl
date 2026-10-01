@@ -62,6 +62,7 @@ using ..Model: model_physical_groups, _physical_live_members
 using ..Model: model_entity_color, model_parametrization_bounds, model_normal
 using ..Model: model_reparametrize_on_surface
 using ..Model: _model_entity_bounding_box, _model_bounds_union, _occ_geometry
+using ..Model: _surface_type, _model_volume_boundary_surfaces
 using ..Model: _geo_delete_entities!, _geo_reset_model_geometry!
 using ..Model: _tag, _alloc_tag!, _alloc_curve_loop_tag,
     _alloc_surface_loop_tag, _arc_stored_normal, _occ_cross,
@@ -130,7 +131,7 @@ using ..IO: _geo_gmsh_number
 using ..Transform: _affine_coordinate, _periodic_affine_3x4
 using LinearAlgebra: norm, svd
 
-export execute_geo, GeoExecution
+export execute_geo, GeoExecution, geo_entity_mesh
 
 """
     GeoExecution
@@ -159,6 +160,31 @@ struct GeoExecution
     # `Exit;` uses the accumulated error count, so a nonzero code means the
     # Gmsh process would have failed — `execute_geo` throws in that case.
     exit_code::Union{Nothing,Int}
+    # The `(dim, tag, mesh)` entity parts `mesh` was merged from — each part
+    # carries the entity's own mesh in its own node space, so entity-level
+    # consumers (`model_to_mixed` classified projection) recover the pure
+    # per-entity view instead of the all-dimension product. Empty when no
+    # mesh was generated through `_geo_mesh_model`.
+    mesh_parts::Vector{Tuple{Int,Int,Mesh}}
+end
+
+"""
+    geo_entity_mesh(execution, dim, tag) -> Mesh
+
+Return the `(dim, tag)` entity's own mesh from `execution.mesh_parts` — the
+per-entity view of the merged product [`execute_geo`](@ref) builds.
+Entity-level consumers such as the classified [`model_to_mixed`](@ref)
+projection need the entity's mesh alone; the merged mesh additionally carries
+every other entity's point, segment, and triangle cells. Throws
+`ArgumentError` when no matching part exists (for example when the file
+produced no `Mesh n`/`mesh_dim` product).
+"""
+function geo_entity_mesh(execution::GeoExecution,dim::Integer,tag::Integer)
+    for (d,t,mesh) in execution.mesh_parts
+        (d==dim && t==tag) && return mesh
+    end
+    throw(ArgumentError(
+        "geo_entity_mesh: no ($dim, $tag) part in the execution mesh"))
 end
 
 const _MAX_GEO_EXEC_STATEMENT_BYTES=1_000_000
@@ -471,32 +497,22 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0)
     end
     if dim==2
         isempty(model.surfaces) && throw(ArgumentError("execute_geo: Mesh 2 requested but no surfaces exist"))
-        if length(model.surfaces)==1
-            tag=only(keys(model.surfaces))
-            mesh=mesh_model_surface(model,tag)
-            _geo_run_homology!(model,mesh,[(2,tag,mesh)],"execute_geo")
-        else
-            # Multi-surface models mesh like the `Mesh 2` statement: every
-            # entity part through `_geo_mesh_model`, merged on bitwise
-            # coordinates with per-node ownership for the mesh operations.
-            mesh,context.mesh_node_owner=_geo_mesh_model(model,2,context)
-            context.mesh=mesh
-        end
+        # Upstream `Mesh n` meshes every entity of dimension <= n regardless
+        # of entity count: vertex parts (including orphan `Point` entities),
+        # graded curve parts, and the surface parts merge on bitwise
+        # coordinates with per-node ownership for the mesh operations.
+        mesh,context.mesh_node_owner=_geo_mesh_model(model,2,context)
+        context.mesh=mesh
     elseif dim==3
         isempty(model.volumes) && throw(ArgumentError("execute_geo: Mesh 3 requested but no volumes exist"))
-        if length(model.volumes)==1
-            tag=only(keys(model.volumes))
-            mesh=mesh_model_volume(model,tag)
-            _geo_run_homology!(model,mesh,[(3,tag,mesh)],"execute_geo")
-        else
-            mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
-            context.mesh=mesh
-        end
+        mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
+        context.mesh=mesh
     end
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
                         context.lists,context.strings,
                         copy(context.exec_warnings),context.msg_error_count,
-                        context.stop===:exit ? context.exit_code : nothing)
+                        context.stop===:exit ? context.exit_code : nothing,
+                        context.mesh_parts)
 end
 
 # Upstream control flow is a token stream, not a block tree (Gmsh.y
@@ -4989,6 +5005,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.stored_list_items=0
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
+        context.mesh_parts=empty(context.mesh_parts)
         context.geo_changed=true
         if allocator_state!==nothing
             _geo_allocator_reset_model!(allocator_state,context;fresh=true)
@@ -5002,6 +5019,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         _geo_reset_geometry_counters!(m,context)
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
+        context.mesh_parts=empty(context.mesh_parts)
         empty!(context.raw_physicals)
         empty!(context.parametric_surfaces)
         context.parametric_surface=nothing
@@ -5043,6 +5061,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         # `GModel::deleteMesh` — drops the mid-file mesh and its ownership.
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
+        context.mesh_parts=empty(context.mesh_parts)
         return nothing
     elseif name=="Struct"
         # `gmsh_yynamespaces.clear()` — every struct definition across all
@@ -6319,6 +6338,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         empty!(context.parametric_surfaces)
         context.parametric_surface=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
+        context.mesh_parts=empty(context.mesh_parts)
         m.name=""
         context.geo_changed=true
         if allocator_state!==nothing
@@ -7039,7 +7059,25 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
         end
     end
     if dim>=2
+        # OCC-curved primitive faces (Cylinder/Sphere/Cone/Torus side walls)
+        # cannot standalone-mesh; when the face bounds a volume its facets
+        # ride the volume's boundary recovery instead of emitting tri
+        # elements (upstream emits the face's own tris — a documented gap).
+        # A standalone unmeshable surface still fails through
+        # `mesh_model_surface`'s own diagnostic.
+        boundary_surfaces=Set{Int}()
+        if dim==3
+            for tag in keys(m.volumes)
+                for signed in _model_volume_boundary_surfaces(m,tag,caller)
+                    push!(boundary_surfaces,abs(signed))
+                end
+            end
+        end
         for tag in sort!(collect(keys(m.surfaces)))
+            if dim==3 && tag in boundary_surfaces &&
+                    _surface_type(m,tag) in (:cylinder,:sphere,:cone,:torus)
+                continue
+            end
             push!(parts,(2,tag,mesh_model_surface(m,tag)))
         end
     end
@@ -7055,6 +7093,11 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     isempty(parts) && throw(ArgumentError(
         "$caller $dim: no entities to mesh"))
     merged,owner=_geo_merge_entity_meshes(parts)
+    # Retain the per-entity decomposition so classified projections
+    # (`model_to_mixed`) can recover each entity's own mesh from the merged
+    # product — upstream serializes vertex/edge/face/region cells to their
+    # owning entity, and the part mesh is that view.
+    context.mesh_parts=parts
     _geo_run_homology!(m,merged,parts,caller)
     return merged,owner
 end
@@ -7695,6 +7738,7 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         context.mesh===nothing ? (context.mesh=merged) :
             (context.mesh=_geo_concat_meshes(context.mesh,merged))
         empty!(context.mesh_node_owner)
+        empty!(context.mesh_parts)
         _geo_merge_discrete!(m,mixed,caller)
         return nothing
     end

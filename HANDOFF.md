@@ -26,7 +26,50 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Non-coplanar `Plane Surface` transfinite boundaries** — upstream
+**All-dimension `execute_geo` emission + entity mesh parts** —
+`execute_geo(path; mesh_dim=n)` no longer takes single-entity shortcuts:
+like the `Mesh n` statement, `_geo_mesh_model` now meshes every entity of
+dimension ≤ n and merges the parts on bitwise coordinates — so orphan
+`Point` entities (e.g. an arc's control-point vertex), curve segs, and
+surface tris all appear in the kwarg-path product, matching Gmsh 4.15.2's
+per-entity emission (verified bitwise-identical kwarg vs `Mesh n`
+statement on periodic/expression/list/SetMaxTag/PointsOf fixtures and the
+curved-box oracle's 126-node/633-element breakdown). The per-entity
+decomposition survives on `GeoExecution.mesh_parts`;
+`geo_entity_mesh(execution, dim, tag)` returns one entity's own mesh so
+classified `model_to_mixed` projection keeps its strict pure-entity
+contract (CLI classified serialization updated; OCC-curved boundary faces
+that cannot standalone-mesh skip their surface part when they bound a
+volume, keeping the OCC Cylinder kwarg path equal to `Mesh 3`).
+
+Two latent OCC-parameter bugs fixed along the way: `_periodic_curve_point`
+evaluated OCC `gp_Lin` native parameters (e.g. `t0=1`) as chord
+fractions, and `_curve_parameter_nodes`/`_embedded_line_curve_nodes`
+emitted fractions where `m.curve_params` stores native — together they
+broke every OCC Boolean-difference face (constraint overlap, degenerate
+triangles, broken endpoint chains). All six faces plus the volume now
+mesh (299 nodes / 72 segs / 592 tris / 12 tets, `validate` green).
+
+Also fixed: `_geo_fix_relative_path` shadowed `in` (MethodError on
+absolute Windows child paths in `Include`/`Merge` — pre-existing at
+HEAD). `model_to_mixed` output on entity parts is bitwise-identical to
+the old shortcut input — every `mixed_crc` pin is unchanged.
+
+Note for future CRC probing: `mesh_model_volume`/`model_to_mixed` output
+differs between `--check-bounds` modes (borderline FP decisions in the
+Delaunay/refinement path). Always probe pins with
+`julia --project=. --check-bounds=yes` — the suite's gate mode — or the
+measured CRC will not match CI.
+
+Files: `src/geometry/GeoExec.jl` (`GeoExecution.mesh_parts`,
+`geo_entity_mesh`, unified `mesh_dim` dispatch, OCC-face skip),
+`src/geometry/Model.jl` (native parameter frames), `src/interfaces/IO.jl`
+(`_GeoNumericContext.mesh_parts` lifecycle + reset paths, `in` fix),
+`src/interfaces/CLI.jl` (classified projection via `geo_entity_mesh`),
+`src/Tessella.jl` (export), plus the repinned geo/cli/model tests.
+
+Previous increment (for context): **non-coplanar `Plane Surface`
+transfinite boundaries + precise volume fold audit** — upstream
 `GFace::computeMeanPlane` semantics are now reproduced: the declared
 plane comes from the first non-collinear triple of on-curve boundary
 samples (two per edge, at ~1/3 and ~2/3 of each curve's parameter
@@ -54,12 +97,6 @@ with min tet volume matching Gmsh to ~9 digits, while the strong inward
 bulge is still rejected — and correctly so: Gmsh 4.15.2's own output on
 that fixture is self-intersecting (an interior tet edge pierces a
 boundary triangle), which Tessella refuses to emit.
-
-Known gap logged in PLAN.md: `execute_geo(path; mesh_dim=3)` with a
-single volume dispatches `mesh_model_volume` directly and bypasses
-`_geo_mesh_model`, so orphan `Point` entities (e.g. an arc's
-control-point vertex) are not emitted as standalone nodes there — the
-`Mesh 3` statement path retains them, matching Gmsh.
 
 Files: `src/geometry/Model.jl`, `src/structured/Transfinite.jl`,
 `src/structured/TransfiniteVolume.jl`,

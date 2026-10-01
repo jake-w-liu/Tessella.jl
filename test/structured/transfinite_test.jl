@@ -429,7 +429,8 @@ Transfinite Surface{1};
             execute_geo(path;mesh_dim=2)
         end
         @test validate(curved.mesh).ok
-        @test (size(curved.mesh.coords,2),size(curved.mesh.tris,2))==(25,32)
+        # 25 patch nodes plus the orphan arc-center Point(9) vertex.
+        @test (size(curved.mesh.coords,2),size(curved.mesh.tris,2))==(26,32)
         # The arc bulges off the plane: its interior nodes keep y > 0, while
         # every patch-interior node lies exactly on y=0.
         arc_bulge=count(i->curved.mesh.coords[2,i]>1e-9,

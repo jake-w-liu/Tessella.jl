@@ -1161,6 +1161,7 @@ end
         execute_geo(path; mesh_dim=3)
     end
     @test validate(curvevolgeo.mesh).ok
-    curvemixed=model_to_mixed(curvevolgeo.model,curvevolgeo.mesh,3,1)
+    curvemixed=model_to_mixed(curvevolgeo.model,
+        geo_entity_mesh(curvevolgeo,3,1),3,1)
     @test validate(curvemixed).ok
 end

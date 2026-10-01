@@ -132,9 +132,9 @@ end
     @test nnodes(topology_meshed.mesh)==53
     @test ntets(topology_meshed.mesh)==123
     @test mesh_crc(topology_meshed.mesh).sha==
-          "7b062e7742835e640feb81145500b55531af1ae49db9b99156b59b4665cfbe26"
+          "4a091b1beb6b9a6af5c14a47bc276cf8a1849d7740b027f4b241e157a50632c0"
     topology_projected=model_to_mixed(
-        topology_meshed.model,topology_meshed.mesh,3,1)
+        topology_meshed.model,geo_entity_mesh(topology_meshed,3,1),3,1)
     @test validate(topology_projected).ok
     @test topology_projected.physical_names==topology.model.physical_names
     @test mixed_crc(topology_projected).sha==
@@ -164,14 +164,15 @@ end
     @test nnodes(meshed.mesh)==18
     @test ntris(meshed.mesh)==24
     @test mesh_crc(meshed.mesh).sha==
-          "2b17b65bf07655c9f85d24d261375a828a5e0ec3af0f081bfe83ef0064f1d492"
+          "74d5faf2f6598280b886ecceaf5b0eedf3373b93d2f601cffba1a4274d57c9af"
     area=sum(triangle_area(
         node(meshed.mesh,meshed.mesh.tris[1,triangle]),
         node(meshed.mesh,meshed.mesh.tris[2,triangle]),
         node(meshed.mesh,meshed.mesh.tris[3,triangle]))
         for triangle in 1:ntris(meshed.mesh))
     @test area≈1.0 atol=32eps(Float64)
-    projected=model_to_mixed(meshed.model,meshed.mesh,2,1)
+    projected=model_to_mixed(meshed.model,
+        geo_entity_mesh(meshed,2,1),2,1)
     @test validate(projected).ok
     @test projected.physical_names==parsed.model.physical_names
     @test mixed_crc(projected).sha==
