@@ -516,6 +516,167 @@ end
             corners, (nr, ns, nw); faces=faces5, face_tags=(1, 2, 3, 4))
     end
 
+    @testset "compact TransfiniteTri=1 subdivision (transfinite3)" begin
+        corners = _affine_prism_corners(
+            (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0))
+        # Gmsh 4.15.2 emits 6/8/3, 19/32/24, and 46/72/81
+        # (nodes/boundary triangles/tetrahedra) for n=1,2,3 — the expanded
+        # tab slots behind the diagonal weld onto the diagonal vertices
+        # while the interior orphans stay unreferenced, exactly like
+        # upstream.
+        for (n, nw, counts) in ((1, 1, (6, 8, 3)),
+                                (2, 2, (19, 32, 24)),
+                                (3, 3, (46, 72, 81)))
+            mesh = mesh_transfinite_prism(corners, (n, n, nw); compact=true)
+            @test validate(mesh).ok
+            @test (nnodes(mesh), ntris(mesh), ntets(mesh)) == counts
+            @test all(orient3(node(mesh, mesh.tets[1, tet]),
+                              node(mesh, mesh.tets[2, tet]),
+                              node(mesh, mesh.tets[3, tet]),
+                              node(mesh, mesh.tets[4, tet])) == -1
+                      for tet in axes(mesh.tets, 2))
+            boundary, maximum_incidence = boundary_faces(mesh.tets)
+            @test maximum_incidence == 2
+            @test sort!(boundary) == _prism_canonical_triangles(mesh.tris)
+        end
+        mesh3 = mesh_transfinite_prism(corners, (3, 3, 3); compact=true)
+        @test _prism_mesh_volume(mesh3) ≈ 0.5 rtol = 512eps(Float64)
+        # The compact lattice fills j-rows (j ≤ i vertices per row) — the
+        # lower face lattice occupies nodes 1:(n+1)(n+2)/2 and the upper
+        # face lattice ends the mesh, so the six canonical corners land on
+        # fixed bitwise positions.
+        lattice = (3 + 1) * (3 + 2) ÷ 2
+        @test node(mesh3, Int32(1)) == corners[1]          # (0,0) → s0
+        @test node(mesh3, Int32(4)) == corners[2]          # (3,0) → s1
+        @test node(mesh3, Int32(lattice)) == corners[3]    # (3,3) → s2
+        top0 = nnodes(mesh3) - lattice
+        @test node(mesh3, Int32(top0 + 1)) == corners[4]   # s4
+        @test node(mesh3, Int32(top0 + 4)) == corners[5]   # s5
+        @test node(mesh3, Int32(top0 + lattice)) == corners[6]  # s6
+
+        # The compact subdivision requires equal radial/opposite counts —
+        # upstream's transfinite3 equal-sides audit.
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (2, 3, 2); compact=true)
+        # Bad keyword types are rejected before dispatch.
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (1, 1, 1); compact=1)
+    end
+
+    @testset "compact face-grid boundary input (expanded diagonal slots)" begin
+        corners = _affine_prism_corners(
+            (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0))
+        # Expanded compact grids: slot (i,j) of the full square carries the
+        # compact lattice vertex (i,min(j,i)) — upper-triangle slots repeat
+        # the diagonal-edge vertex bitwise so the kernel weld sees exactly
+        # (n+1)(n+2)/2 distinct nodes per triangular face.
+        function _compact_prism_faces(corners, n, nw)
+            s0, s1, s2, s4, s5, s6 = corners
+            np = n + 1
+            npw = nw + 1
+            function fill_grid(evaluate, m, nn)
+                points = Matrix{Float64}(undef, 3, (m + 1) * (nn + 1))
+                for j in 0:nn, i in 0:m
+                    point = evaluate(i, j)
+                    column = i + 1 + j * (m + 1)
+                    points[1, column] = point[1]
+                    points[2, column] = point[2]
+                    points[3, column] = point[3]
+                end
+                return points
+            end
+            bilinear(a, b, c, d) = (i, j) -> _prism_lerp3(
+                _prism_lerp3(a, b, i / n), _prism_lerp3(d, c, i / n), j / nw)
+            # Lower/upper compact lattice vertices at axial ends.
+            function compact_face(a, b, c)
+                fill_grid(n, n) do i, j
+                    jp = min(j, i)
+                    t = i == 0 ? 0.0 : jp / i
+                    _prism_lerp3(a, _prism_lerp3(b, c, t), i / n)
+                end
+            end
+            function compact_tris()
+                result = Matrix{Int32}(undef, 3, n * n)
+                nodeat(i, j) = i + 1 + j * np
+                cursor = 0
+                for i in 0:n-1, j in 0:i-1
+                    result[:, cursor + 1] .= (nodeat(i, j), nodeat(i + 1, j + 1),
+                                            nodeat(i, j + 1))
+                    result[:, cursor + 2] .= (nodeat(i, j), nodeat(i + 1, j),
+                                            nodeat(i + 1, j + 1))
+                    cursor += 2
+                end
+                for i in 0:n-1
+                    result[:, cursor + 1] .= (nodeat(i, i), nodeat(i + 1, i),
+                                            nodeat(i + 1, i + 1))
+                    cursor += 1
+                end
+                return result
+            end
+            function quad_tris(m, nn)
+                result = Matrix{Int32}(undef, 3, 2 * m * nn)
+                cursor = 0
+                for j in 0:nn-1, i in 0:m-1
+                    a = i + 1 + j * (m + 1); b = a + 1
+                    d = a + m + 1; e = d + 1
+                    result[:, cursor + 1] .= (a, b, d)
+                    result[:, cursor + 2] .= (b, e, d)
+                    cursor += 2
+                end
+                return result
+            end
+            f0 = fill_grid(bilinear(s0, s1, s5, s4), n, nw)
+            f1 = fill_grid(bilinear(s1, s2, s6, s5), n, nw)
+            f2 = fill_grid(bilinear(s0, s2, s6, s4), n, nw)
+            f4 = compact_face(s0, s1, s2)
+            f5 = compact_face(s4, s5, s6)
+            return ((f0, quad_tris(n, nw), fill(Int32(11), 2n * nw)),
+                    (f1, quad_tris(n, nw), fill(Int32(12), 2n * nw)),
+                    (f2, quad_tris(n, nw), fill(Int32(13), 2n * nw)),
+                    (f4, compact_tris(), fill(Int32(14), n * n)),
+                    (f5, compact_tris(), fill(Int32(15), n * n)))
+        end
+
+        n, nw = 3, 3
+        affine = mesh_transfinite_prism(corners, (n, n, nw); compact=true)
+        meshed = mesh_transfinite_prism(
+            corners, (n, n, nw);
+            faces=_compact_prism_faces(corners, n, nw), compact=true,
+            volume_tag=21, face_tags=(11, 12, 13, 14, 15))
+        @test validate(meshed).ok
+        @test (nnodes(meshed), ntris(meshed), ntets(meshed)) == (46, 72, 81)
+        @test _prism_canonical_tets(meshed) == _prism_canonical_tets(affine)
+        @test _prism_canonical_triangles(meshed.tris) ==
+              _prism_canonical_triangles(affine.tris)
+        # Face-boundary nodes reuse the supplied grids bitwise; interior
+        # nodes agree to transfiniteHex interpolation roundoff.
+        @test all(isapprox(meshed.coords[d, id], affine.coords[d, id];
+                           atol=64eps(1.0), rtol=64eps(1.0))
+                  for id in 1:nnodes(affine), d in 1:3)
+        @test meshed.tet_tag == fill(Int32(21), ntets(meshed))
+        @test count(==(Int32(14)), meshed.tri_tag) == n * n
+        @test count(==(Int32(15)), meshed.tri_tag) == n * n
+
+        # A face grid whose upper-triangle slots carry distinct positions
+        # instead of the aliased diagonal vertex cannot weld to the compact
+        # lattice — the distinct-node audit rejects it.
+        bad_faces = _compact_prism_faces(corners, n, nw)
+        bad4 = copy(bad_faces[4][1])
+        bad4[1, 1 + 1 + 2 * (n + 1)] += 0.5   # slot (1,2) — above the diagonal
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (n, n, nw); compact=true,
+            faces=(bad_faces[1], bad_faces[2], bad_faces[3],
+                   (bad4, bad_faces[4][2], bad_faces[4][3]), bad_faces[5]))
+        # Collapsed-style grids (n*(2n-1) triangles) are not compact inputs.
+        @test_throws ArgumentError mesh_transfinite_prism(
+            corners, (n, n, nw); compact=true,
+            faces=(bad_faces[1], bad_faces[2], bad_faces[3],
+                   (bad_faces[4][1], bad_faces[4][2][:, 1:end-1],
+                    bad_faces[4][3][1:end-1]), bad_faces[5]))
+    end
+
     @testset "allocation growth remains linear in output size" begin
         corners = _affine_prism_corners()
         mesh_transfinite_prism(corners, (24, 12, 6))
@@ -526,5 +687,22 @@ end
         @test large > small
         @test large <= 2.30small + 1_048_576
         @info "transfinite prism allocation ratchet" small_bytes=small large_bytes=large
+    end
+
+    @testset "compact allocation growth remains linear in output size" begin
+        corners = _affine_prism_corners()
+        compact_allocated(cells) = (GC.gc();
+            @allocated mesh_transfinite_prism(corners, cells; compact=true))
+        mesh_transfinite_prism(corners, (8, 8, 8); compact=true)
+        mesh_transfinite_prism(corners, (16, 16, 8); compact=true)
+        small = compact_allocated((8, 8, 8))
+        large = compact_allocated((16, 16, 8))
+        # Doubling the radial cell count quadruples the tetrahedron and
+        # interior-node totals; the weld dictionary and output matrices
+        # grow linearly with them.
+        @test small > 0
+        @test large > small
+        @test large <= 4.60small + 1_048_576
+        @info "compact transfinite prism allocation ratchet" small_bytes=small large_bytes=large
     end
 end

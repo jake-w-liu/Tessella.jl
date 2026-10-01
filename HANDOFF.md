@@ -26,8 +26,61 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Five-face transfinite prism volumes** — `Transfinite Volume` on a
-triangular-prism boundary (two triangular + three quadrilateral faces) now
+**Compact `Mesh.TransfiniteTri = 1` five-face prism volumes** — the
+`TransfiniteTri = 1` blocker is lifted: triangular-prism volumes now mesh
+through Gmsh 4.15.2's compact `transfinite3` subdivision. The triangular
+faces mesh with the compact equal-side lattice (`(n+1)(n+2)/2` nodes, equal
+radial/opposite counts enforced); each grid expands into the square
+degenerate-hexahedron slots with upper-triangle slots (`j > i`) welded
+bitwise onto the diagonal vertices, so the volume `tab` stays a full square
+grid exactly like upstream's `getVertex` aliasing. Diagonal cells emit the
+`SIM_10`–`SIM_12` tetrahedra and strictly lower cells add `SIM_7`–`SIM_9`
+(three/six per layer cell — 81 tets at n=3). The interior slots behind the
+diagonal stay distinct `transfiniteHex` evaluations — geometrically
+coincident with the diagonal face's surface nodes but never welded, matching
+Gmsh's orphan-vertex behavior.
+
+Corner canonicalization follows `GEdgeLoop`: unsigned curves chain
+geometrically starting from the first stored curve's storage direction (loop
+declaration signs are ignored for the chain start), and unpinned compact
+triangular surfaces apply the same chaining at surface level — so the
+standalone surface mesh and the volume's face grid share bitwise kernel
+inputs and weld exactly. A compact triangular face whose chained first
+corner is not the prism apex is rejected with Gmsh's "Incompatible surface"
+message, bit-identical to the oracle.
+
+Verified against the oracle on the unit triangular prism: identical
+46 nodes / 27 segments / 72 triangles / 81 tetrahedra (surface, volume, and
+boundary element composition all match), node multisets equal within
+~1.8e-12; a reversed upper-loop variant meshes identically (Gmsh's
+canonicalization makes the sign choice unobservable); a curved-edge variant
+(warped quad patch through `transfiniteHex` on the expanded slots) yields
+47/81 at ~1.5e-9 — gmsh's arc Newton-spacing noise; and a malformed
+reversed-storage variant whose chained apex misses the prism apex is
+rejected with Gmsh's exact "Incompatible surface 2 in transfinite volume 1".
+On a corrupt-input fixture where Gmsh silently emits six negative-volume
+tetrahedra Tessella's per-tet orientation certification rejects — the
+intended strict divergence. Kernel tests pin the compact node layout
+(j-major lattice rows), expanded face-grid welding audits (distinct-node
+counts, collapsed-style grids rejected), tet ordering, and a dedicated
+allocation ratchet (3.56× bytes for 4× tet growth — linear in output size).
+The differential driver gains three compact cases (plain, reversed-loop,
+curved): `GEO_CONSTRAINTS_DIFFERENTIAL_OK gmsh=4.15.2 cases=38`.
+
+Files: `src/structured/TransfinitePrism.jl` (`compact` kwarg,
+`_mesh_transfinite_prism_compact`, `_compact_prism_ids` bitwise weld,
+`_synthetic_compact_prism_faces`, compact `SIM_7`–`SIM_12` emission and
+boundary triangulation, distinct-node audits), `src/geometry/Model.jl`
+(`_transfinite_chained_tri` GEdgeLoop-style canonicalization shared by
+surface and volume paths, compact face-grid expansion in
+`_transfinite_prism_tri_face_grid`, compact dispatch),
+`test/structured/transfinite_prism_test.jl` (compact suites),
+`test/geometry/geo_constraints_test.jl` (`.geo` parity and rejection tests),
+`validation/geo_constraints/differential.jl` (three new cases), docs.
+
+Previous increment: **five-face transfinite prism volumes** — `Transfinite
+Volume` on a triangular-prism boundary (two triangular + three
+quadrilateral faces) now
 meshes through Gmsh 4.15.2's legacy `Mesh.TransfiniteTri = 0` collapsed-grid
 algorithm instead of rejecting. Following `meshGRegionTransfinite.cpp`, the
 six prism corners map onto the degenerate hexahedral slot layout
@@ -44,8 +97,7 @@ audit is corner-path only; the warped path keeps per-tet orientation and
 finite-coordinate certification plus the strict outward boundary split and
 tet-boundary conformance audit). Explicit six-corner declarations and
 auto-detection both work; the latter seeds the apex from a triangular face
-like upstream's `findTransfiniteCorners`. `Mesh.TransfiniteTri = 1` stays an
-explicit blocker (different upstream cell pattern).
+like upstream's `findTransfiniteCorners`.
 
 Verified against the Gmsh 4.15.2 oracle on the unit triangular prism:
 identical 52 nodes / 27 segments / 84 triangles / 135 tetrahedra (Gmsh's

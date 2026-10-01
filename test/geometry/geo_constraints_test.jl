@@ -421,15 +421,70 @@ end
     @test validate(execution.mesh).ok
     @test (nnodes(execution.mesh),ntets(execution.mesh))==(52,135)
 
-    # The compact `Mesh.TransfiniteTri=1` algorithm uses a different prism
-    # cell pattern upstream and stays an explicit blocker.
-    err=_constraint_error(prism*raw"""
+    # The compact `Mesh.TransfiniteTri=1` algorithm keeps the triangular
+    # faces on equal-sided compact lattices (Gmsh's `transfinite3` branch):
+    # the volume's slot grid still reads the face lattice with the j>i
+    # slots aliased to the diagonal, and the cell subdivision emits
+    # SIM_10–SIM_12 on diagonal cells and SIM_7–SIM_12 on strictly-lower
+    # cells. Gmsh 4.15.2 emits 46 nodes / 189 dim≥1 elements (27 segments,
+    # 72 triangles, 81 tetrahedra) for this fixture.
+    execution=_execute_constraint_source(prism*raw"""
+        Mesh.TransfiniteTri=1;
+        Transfinite Volume{1}={1,2,3,4,5,6};
+        Mesh 3;
+        """)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),nsegs(execution.mesh),
+           ntris(execution.mesh),ntets(execution.mesh))==(46,27,72,81)
+    part=geo_entity_mesh(execution,3,1)
+    @test (nnodes(part),ntris(part),ntets(part))==(46,0,81)
+    @test all(t->tet_signed_volume(
+                  execution.mesh.coords[:,execution.mesh.tets[1,t]],
+                  execution.mesh.coords[:,execution.mesh.tets[2,t]],
+                  execution.mesh.coords[:,execution.mesh.tets[3,t]],
+                  execution.mesh.coords[:,execution.mesh.tets[4,t]])>0,
+              axes(execution.mesh.tets,2))
+    # The triangular face mesh and the volume's canonical grid come from
+    # the same canonicalized boundary chain — every node welds bitwise.
+    surface_part=geo_entity_mesh(execution,2,2)
+    volume_nodes=Set(Tuple(part.coords[:,c]) for c in axes(part.coords,2))
+    @test all(Tuple(surface_part.coords[:,c]) in volume_nodes
+              for c in axes(surface_part.coords,2))
+
+    # Sign-reversed loops yield the same canonicalized boundary chain — the
+    # mesh is identical to the forward declaration.
+    execution=_execute_constraint_source(replace(
+        prism,"Curve Loop(2)={7,8,9}"=>"Curve Loop(2)={-7,-9,-8}")*raw"""
+        Mesh.TransfiniteTri=1;
+        Transfinite Volume{1}={1,2,3,4,5,6};
+        Mesh 3;
+        """)
+    @test validate(execution.mesh).ok
+    @test (nnodes(execution.mesh),ntets(execution.mesh))==(46,81)
+
+    # A triangular face whose canonical corner order does not begin on the
+    # prism apex cannot occupy the degenerate slot — Gmsh reports the same
+    # "Incompatible surface" rejection.
+    err=_constraint_error(replace(
+        prism,"Curve Loop(2)={7,8,9}"=>"Curve Loop(2)={9,7,8}")*raw"""
         Mesh.TransfiniteTri=1;
         Transfinite Volume{1}={1,2,3,4,5,6};
         Mesh 3;
         """)
     @test err isa ArgumentError
-    @test occursin("Mesh.TransfiniteTri=1",string(err))
+    @test occursin("Incompatible surface 2",string(err))
+
+    # Compact triangles require equal side divisions — a mismatched edge
+    # count is rejected (the quad whose opposite sides desynchronize fires
+    # first, the same "non-matching" audit upstream performs).
+    err=_constraint_error(prism*raw"""
+        Mesh.TransfiniteTri=1;
+        Transfinite Curve{7,8,9}=3;
+        Transfinite Volume{1}={1,2,3,4,5,6};
+        Mesh 3;
+        """)
+    @test err isa ArgumentError
+    @test occursin("non-matching node counts",string(err))
 
     # A five-face volume whose boundary is not a prism (a square pyramid:
     # one quadrilateral + four triangular faces) is rejected by the
