@@ -377,6 +377,22 @@ function _ruled_trib_blend(u::Float64,v::Float64,c1,c1b,c2,c2b,c3,c3b,S)
     end
 end
 
+# `point(u,v)` on a four-generatrix ruled surface with pre-resolved corner
+# vertices `S` — `TransfiniteQua` plus the optional `TransfiniteSph`
+# projection — without re-reading the loop or re-detecting the sphere.
+# Transfinite `In Sphere` patches evaluate this continuously per interior
+# node.
+function _ruled_qua_point(m::GeoModel,gens,S,u::Float64,v::Float64,
+                          center,caller::AbstractString)
+    point=_ruled_qua_blend(u,v,
+        _ruled_curve_point(m,gens[1],u,caller),
+        _ruled_curve_point(m,gens[2],v,caller),
+        _ruled_curve_point(m,gens[3],1.0-u,caller),
+        _ruled_curve_point(m,gens[4],1.0-v,caller),S)
+    center===nothing || (point=_ruled_sphere_project(S[1],center,point))
+    return point
+end
+
 function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
                               caller::AbstractString,old_ruled::Bool=false)
     gens=m.loops[first(m.surfaces[tag])]
@@ -390,14 +406,7 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
     center=_ruled_sphere_center(m,tag,gens,caller)
     if length(gens)>=4
         S=(corner(1),corner(2),corner(3),corner(4))
-        point=_ruled_qua_blend(u,v,
-            _ruled_curve_point(m,gens[1],u,caller),
-            _ruled_curve_point(m,gens[2],v,caller),
-            _ruled_curve_point(m,gens[3],1.0-u,caller),
-            _ruled_curve_point(m,gens[4],1.0-v,caller),S)
-        center!==nothing &&
-            (point=_ruled_sphere_project(S[1],center,point))
-        return point
+        return _ruled_qua_point(m,gens,S,u,v,center,caller)
     end
     S=(corner(1),corner(2),corner(3))
     point=if old_ruled

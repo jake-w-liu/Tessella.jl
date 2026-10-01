@@ -26,9 +26,36 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**All-dimension `execute_geo` emission + entity mesh parts** —
-`execute_geo(path; mesh_dim=n)` no longer takes single-entity shortcuts:
-like the `Mesh n` statement, `_geo_mesh_model` now meshes every entity of
+**`In Sphere` transfinite face fills** — four-sided ruled surfaces with
+sphere geometry (`Surface … In Sphere{p}`, or four concentric arc
+generatrices — the same detection gmsh's `ruledSurface::checkSphere`
+applies) no longer fall through to planar rejection or warped Coons.
+`mesh_transfinite_patch` gained an `interpolate` callback that evaluates
+the surface's own `S(u,v)` on the averaged-chord grid — `_ruled_qua_point`
+(the `TransfiniteQua` generatrix blend plus `TransfiniteSph` projection at
+radius |S0−O|), now factored out of `_ruled_surface_point` so meshing and
+`model_value` share one expression. Boundary nodes stay on their welded
+side chains; only the interior projects onto the sphere. Coplanar and
+non-coplanar boundaries both work, and transfinite-volume face grids use
+the same evaluation. Verified against the Gmsh 4.15.2 oracle on three
+fixtures (flat-corner `In Sphere`, raised-corner `In Sphere`, implicit
+four-arc sphere): identical node/element counts, interior nodes on-sphere
+to ~1e-12 (residuals are gmsh's transfinite-curve Newton-spacing noise),
+bitwise top-face interior node `(0.5,0.5,1.1213203435596424)` in the
+transfinite-volume fixture. A degenerated-curve skip or a corner reorder
+rejects precisely — it would desynchronize the generatrix evaluation
+frame from the kernel grid (identity pinning still works). Three-sided
+sphere patches remain an explicit gap in PLAN.md.
+
+Files: `src/structured/Transfinite.jl` (`interpolate` kwarg + 3-D audit
+routing), `src/geometry/Model.jl` (`sphere_center` in
+`_transfinite_surface_sides`, `_transfinite_sphere_eval`, both patch
+consumers), `src/geometry/ModelEntityEvaluation.jl` (`_ruled_qua_point`
+factor-out), `test/structured/transfinite_test.jl`, docs.
+
+Previous increment (for context): **all-dimension `execute_geo` emission
++ entity mesh parts** — `execute_geo(path; mesh_dim=n)` no longer takes
+single-entity shortcuts: like the `Mesh n` statement, `_geo_mesh_model` now meshes every entity of
 dimension ≤ n and merges the parts on bitwise coordinates — so orphan
 `Point` entities (e.g. an arc's control-point vertex), curve segs, and
 surface tris all appear in the kwarg-path product, matching Gmsh 4.15.2's
@@ -445,11 +472,13 @@ rejection pin updated in `test/interfaces/post_view_io_test.jl`.
 - `validation/geo_constraints/differential.jl` Gmsh 4.15.2:
   `GEO_CONSTRAINTS_DIFFERENTIAL_OK cases=32 documented_gaps=2`;
   `geo_curved` (8 cases) and `geo_splines` (20) differentials green.
-- `test/structured/transfinite_test.jl` 192/192 (incl. the lifted-corner
-  `Plane Surface` projection fixture with bitwise-verified interior) and
-  `test/geometry/geo_constraints_test.jl` 23/23 (incl. outward/shallow-inward
-  curved-face volumes and the strong-inward rejection pin);
-  `test/structured/transfinite_volume_test.jl` 274/274.
+- `test/structured/transfinite_test.jl` 226/226 (incl. the lifted-corner
+  `Plane Surface` projection fixture and the `In Sphere` fills — flat,
+  non-coplanar, pinned-identity, reordered-rejection, and implicit
+  four-arc sphere fixtures, all verified against Gmsh 4.15.2 node sets)
+  and `test/geometry/geo_constraints_test.jl` 23/23 (incl.
+  outward/shallow-inward curved-face volumes and the strong-inward
+  rejection pin); `test/structured/transfinite_volume_test.jl` 274/274.
 - Full suite 427,308/427,308 under `--check-bounds=yes`.
 - `validation/gmsh_parity/periodic_curve_curved.jl` Gmsh 4.15.2:
   `CURVED_PERIODIC_DIFFERENTIAL_OK cases=2 pairs=16` — circle and

@@ -900,7 +900,8 @@ end
 """
     mesh_transfinite_patch(side1, side2, side3, side4;
         arrangement=:left, face_tag=0, side_tags=(0,0,0,0),
-        allow_warped=false,
+        allow_warped=false, project_plane=nothing,
+        interpolate=nothing,
         max_nodes=10_000_000, max_triangles=20_000_000) -> Mesh
 
 Construct a four-sided transfinite triangle patch. Each side is an
@@ -922,6 +923,13 @@ closed ring, every output triangle must have nonzero area, and the
 area-weighted normal field must agree with the ring's orientation while no
 pair of adjacent triangles may fold across their shared edge.
 
+`interpolate` replaces the planar/Coons interior evaluation entirely — it is
+called as `interpolate(u, v)` on the averaged-chord grid coordinates and
+returns the physical interior point (the surface's own `S(u,v)`, e.g. a ruled
+sphere patch with an `In Sphere` projection). Boundary nodes keep their
+side-chain positions either way. `interpolate` implies the warped 3-D audits
+and is mutually exclusive with `project_plane`.
+
 This bounded operation does not discretize curves, apply size or quality fields,
 smooth the grid, handle holes or three-sided/quasi-transfinite patches, map a
 general CAD parameterization, generate quadrangles, or construct transfinite
@@ -934,6 +942,7 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
                                 side_tags=(0,0,0,0),
                                 allow_warped::Bool=false,
                                 project_plane=nothing,
+                                interpolate=nothing,
                                 max_nodes=_DEFAULT_MAX_NODES,
                                 max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
     mode=_arrangement(arrangement)
@@ -992,6 +1001,13 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
     allow_warped && project_plane!==nothing && throw(ArgumentError(
         "mesh_transfinite_patch: project_plane and allow_warped are " *
         "mutually exclusive"))
+    # `interpolate` is the surface's own S(u,v) evaluation (e.g. a ruled
+    # sphere patch) — it replaces interior interpolation entirely and forces
+    # the 3-D audits, since the emitted interior need not share the ring's
+    # best-fit plane.
+    interpolate!==nothing && project_plane!==nothing && throw(ArgumentError(
+        "mesh_transfinite_patch: project_plane and interpolate are " *
+        "mutually exclusive"))
     interp_sides=sides
     if project_plane!==nothing
         (project_plane isa Tuple && length(project_plane)==2) ||
@@ -1009,7 +1025,9 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
     end
     ring=_boundary_ring(interp_sides)
     origin,scale=_normalization(ring)
-    frame,planar=_patch_frame(ring,origin,scale,allow_warped)
+    frame,planar=_patch_frame(ring,origin,scale,
+                              allow_warped || interpolate!==nothing)
+    planar=planar && interpolate===nothing
     if planar
         projected_ring=NTuple{2,Float64}[
             _project(frame,_normalize(point,origin,scale)) for point in ring]
@@ -1037,20 +1055,6 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
     width=L+1
     coordinates=Matrix{Float64}(undef,3,nodes)
     @inbounds for j in 0:H,i in 0:L
-        normalized = if j==0
-            bottom[i+1]
-        elseif i==L
-            right[j+1]
-        elseif j==H
-            top[i+1]
-        elseif i==0
-            left[j+1]
-        else
-            _coons(left[j+1],right[j+1],bottom[i+1],top[i+1],
-                   c2,c3,c4,u[i+1],v[j+1])
-        end
-        all(isfinite,normalized) || throw(ArgumentError(
-            "mesh_transfinite_patch: transfinite interpolation generated a non-finite coordinate"))
         point = if j==0
             sides[1][i+1]
         elseif i==L
@@ -1059,9 +1063,15 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
             sides[3][L-i+1]
         elseif i==0
             sides[4][H-j+1]
+        elseif interpolate===nothing
+            _physical_point(
+                _coons(left[j+1],right[j+1],bottom[i+1],top[i+1],
+                       c2,c3,c4,u[i+1],v[j+1]),origin,scale)
         else
-            _physical_point(normalized,origin,scale)
+            interpolate(u[i+1],v[j+1])
         end
+        all(isfinite,point) || throw(ArgumentError(
+            "mesh_transfinite_patch: transfinite interpolation generated a non-finite coordinate"))
         node=Int(_node(i,j,width))
         coordinates[1,node]=point[1];coordinates[2,node]=point[2]
         coordinates[3,node]=point[3]

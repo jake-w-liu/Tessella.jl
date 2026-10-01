@@ -466,7 +466,11 @@ non-collinear on-curve boundary samples (curve control points never enter),
 the side chains project onto it for (u,v) bookkeeping and interior
 interpolation — so the interior stays exactly planar — while emitted
 boundary nodes keep their true positions and the warped-patch audit runs on
-the emitted band. `In Sphere` surfaces keep their spherical requirement. Four-sided grids can also
+the emitted band. `Surface … In Sphere` (and four concentric arc
+generatrices, auto-detected like `ruledSurface::checkSphere`) evaluate the
+ruled surface's own `S(u,v)` — the `TransfiniteQua` blend projected onto the
+sphere at radius |S0−O| — for interior nodes on flat and non-coplanar
+boundaries alike, including inside transfinite-volume face grids. Four-sided grids can also
 be emitted as first-order Gmsh type-3 quadrangles with exact projected
 corner-Jacobian certification. Eight-corner transfinite volume blocks require
 all six boundary surfaces transfinite (Gmsh's incompatible-surface gate) and
@@ -522,7 +526,8 @@ inward-bulging boundary, which Tessella refuses to emit. P4 does not yet claim
 non-affine CAD curve integration or size-map curve laws,
 quasi-transfinite or holed transfinite patches,
 general CAD parameterizations, compact-TransfiniteTri volumes,
-`In Sphere` transfinite face fills, volume/hybrid
+`In Sphere` three-sided transfinite patches or corner-reordered fills,
+volume/hybrid
 recombination, selective or high-order refinement, coarsening,
 3-D multi-wall boundary-layer fans, curved
 periodic surfaces, or allocator reads after
@@ -546,6 +551,37 @@ formats and API, GUI, and post-processing are unfinished parity tracks, not
 project non-goals.
 
 ## Verification history (newest first)
+
+Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
+Gmsh 4.15.2 binary after completing `In Sphere` transfinite fills:
+
+- Four-sided ruled surfaces carrying sphere geometry — `Surface …
+  In Sphere{p}` or four concentric arc generatrices (the same
+  `checkSphere` detection upstream applies) — now mesh through the
+  surface's own `S(u,v)` evaluation: `mesh_transfinite_patch`'s new
+  `interpolate` callback runs the `TransfiniteQua` generatrix blend plus
+  `TransfiniteSph` projection (radius |S0−O|) on the averaged-chord grid,
+  replacing the Coons interior while boundary nodes keep their welded
+  side-chain positions. Coplanar and non-coplanar boundaries both mesh
+  and bitwise/ulp-level agree with Gmsh 4.15.2: the flat-corner fixture
+  reproduces gmsh's 26-node/32-triangle patch (interior nodes at
+  2.1213203436 from `(0.5,0.5,-2)`, e.g. (0.2427816723, 0.2427816723,
+  0.0898989123)) — differences ≤ ~2e-12, gmsh's own transfinite-curve
+  Newton-spacing noise — and the four great-circle-arc unit-sphere patch
+  matches within ~1e-9.
+- The volume kernel consumes the same evaluation through
+  `_transfinite_volume_face_grid`: an `In Sphere` top face of a
+  transfinite cube produces gmsh's bitwise-identical projected node
+  (0.5, 0.5, 1.1213203435596424) and a volume interior node matching to
+  ~1.5e-12.
+- Unsafe frame mismatches reject precisely: a degenerated-curve skip or
+  a corner reorder would desynchronize the generatrix evaluation from
+  the kernel grid (identity pinning stays supported).
+- Gates green: `transfinite_test` 226/226 (new sphere assertions),
+  `transfinite_volume_test`, `transfinite_hex_test`,
+  `geo_curved_test`, `model_test` 104/104, `geo_mesh_dim_test`,
+  `geo_geometry_expression_test`, `geo_periodic_test`, `api_test`,
+  `geo_constraints_test`.
 
 Re-verified on 2026-10-01 on Windows with Julia 1.13.1 against the pinned
 Gmsh 4.15.2 binary after completing the all-dimension `execute_geo`

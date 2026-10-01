@@ -457,12 +457,17 @@ Transfinite Surface {1};
         end
         @test (size(flat.mesh.coords,2),size(flat.mesh.tris,2))==(25,32)
 
-        # `Surface ... In Sphere` keeps its own parameterization and does not
-        # take the warped Coons path.
-        sphere_err=try
-            mktemp() do path,io
+        # `Surface ... In Sphere` keeps its own parameterization: interior
+        # nodes evaluate `S(u,v)` — the `TransfiniteQua` generatrix blend
+        # projected onto the sphere through the center with radius
+        # |corner1-center| — while boundary nodes stay on the true lines.
+        # Gmsh 4.15.2 emits the same 26-node / 32-triangle patch for both a
+        # coplanar boundary and the non-coplanar one below (verified
+        # within its ~1e-12 transfinite-curve solver noise).
+        for raised in (0.0,0.5)
+            sph=mktemp() do path,io
                 write(io,"""
-Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0.5}; Point(4) = {0,1,0};
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,$raised}; Point(4) = {0,1,0};
 Point(5) = {0.5,0.5,-2};
 Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
 Curve Loop(1) = {1,2,3,4};
@@ -473,10 +478,95 @@ Transfinite Surface {1};
                 close(io)
                 execute_geo(path;mesh_dim=2)
             end
+            @test (size(sph.mesh.coords,2),size(sph.mesh.tris,2))==(26,32)
+            center=(0.5,0.5,-2.0)
+            radius=sqrt(4.5)
+            interior=0
+            for i in 1:size(sph.mesh.coords,2)
+                x,y,z=sph.mesh.coords[:,i]
+                interior_node=x>1e-12 && x<1-1e-12 &&
+                              y>1e-12 && y<1-1e-12 &&
+                              (x,y,z) != center
+                interior_node || continue
+                interior+=1
+                @test hypot(x-center[1],y-center[2],z-center[3]) ≈
+                    radius atol=1e-12
+            end
+            @test interior==9
+            # Boundary nodes stay on the true curves — corners and line
+            # midpoints keep exact positions (the raised corner is NOT on
+            # the sphere), and the `In Sphere` center point is emitted.
+            nodes=Set(Tuple(sph.mesh.coords[:,c])
+                      for c in 1:size(sph.mesh.coords,2))
+            @test (0.5,0.0,0.0) in nodes
+            @test (1.0,1.0,raised) in nodes
+            @test (0.0,0.5,0.0) in nodes
+            @test center in nodes
+        end
+        # A pinned corner list matching the natural junction order is a
+        # no-op for the surface evaluation frame; a reordered list would
+        # desynchronize it from the kernel grid and is rejected explicitly.
+        identical=mktemp() do path,io
+            write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0}; Point(4) = {0,1,0};
+Point(5) = {0.5,0.5,-2};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1} In Sphere{5};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1} = {1,2,3,4};
+""")
+            close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+        @test (size(identical.mesh.coords,2),size(identical.mesh.tris,2))==
+            (26,32)
+        # Four concentric great-circle arcs with non-coplanar normals
+        # auto-detect the sphere (gmsh `ruledSurface::checkSphere`) without
+        # an explicit `In Sphere`: same evaluation, same gmsh node set
+        # (~1e-9 from its arc-spacing solver).
+        arc_sph=mktemp() do path,io
+            write(io,"""
+Point(1) = {0.8,0.0,0.6}; Point(2) = {0.0,0.8,0.6};
+Point(3) = {-0.8,0.0,0.6}; Point(4) = {0.0,-0.8,0.6};
+Point(9) = {0,0,0};
+Circle(1) = {1,9,2}; Circle(2) = {2,9,3};
+Circle(3) = {3,9,4}; Circle(4) = {4,9,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1};
+""")
+            close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+        @test (size(arc_sph.mesh.coords,2),size(arc_sph.mesh.tris,2))==(26,32)
+        on_sphere=count(i->abs(hypot(arc_sph.mesh.coords[1,i],
+                                     arc_sph.mesh.coords[2,i],
+                                     arc_sph.mesh.coords[3,i])-1.0)<1e-11,
+                        1:size(arc_sph.mesh.coords,2))
+        # Every node except the orphan arc-center entity lands on the unit
+        # sphere — boundary arcs are great circles, the interior is
+        # `TransfiniteSph`-projected.
+        @test on_sphere==25
+        pinned_err=try
+            mktemp() do path,io
+                write(io,"""
+Point(1) = {0,0,0}; Point(2) = {1,0,0}; Point(3) = {1,1,0}; Point(4) = {0,1,0};
+Point(5) = {0.5,0.5,-2};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,4}; Line(4) = {4,1};
+Curve Loop(1) = {1,2,3,4};
+Surface(1) = {1} In Sphere{5};
+Transfinite Curve {1,2,3,4} = 5;
+Transfinite Surface {1} = {2,3,4,1};
+""")
+                close(io)
+                execute_geo(path;mesh_dim=2)
+            end
             nothing
         catch caught
             caught
         end
-        @test sphere_err isa ArgumentError
+        @test pinned_err isa ArgumentError
     end
 end
