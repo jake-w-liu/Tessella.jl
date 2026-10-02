@@ -164,7 +164,8 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                              preserve_segments=true,
                              physical_names=Dict{Tuple{Int,Int},String}(),
                              algorithm=:greedy,
-                             full_quad=false)
+                             full_quad=false,
+                             protected_edges=nothing)
     preserve_segments isa Bool || throw(ArgumentError(
         "recombine_triangles: preserve_segments must be Bool"))
     full_quad isa Bool || throw(ArgumentError(
@@ -175,6 +176,13 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
         "recombine_triangles: algorithm must be :greedy or :blossom"))
     full_quad && algorithm!==:blossom && throw(ArgumentError(
         "recombine_triangles: full_quad requires algorithm=:blossom"))
+    protected = protected_edges===nothing ? nothing :
+        begin
+            protected_edges isa AbstractSet || throw(ArgumentError(
+                "recombine_triangles: protected_edges must be a set of " *
+                "two-node edge tuples"))
+            protected_edges
+        end
     threshold=_recombine_quality(min_quality)
     size(mesh.tets,2)==0 || throw(ArgumentError(
         "recombine_triangles: input must not contain tetrahedra"))
@@ -200,7 +208,9 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                 first_triangle,first_u,first_v=owners[edge]
                 candidate=_candidate(mesh.coords,triangles,first_triangle,triangle,
                                      first_u,first_v,u,v,edge)
-                candidate===nothing || push!(candidates,candidate)
+                (candidate===nothing ||
+                 (protected!==nothing && edge in protected)) ||
+                    push!(candidates,candidate)
                 push!(completed,edge)
             else
                 owners[edge]=(triangle,u,v)

@@ -13,7 +13,7 @@ retained as owned metadata.
 module Elements
 
 using ..MeshTypes: Mesh, MeshDiagnostic, nnodes, nsegs, ntris, ntets
-import ..MeshTypes: validate
+import ..MeshTypes: validate, nnodes
 using ..Transform: _periodic_affine_input
 using SHA
 using Printf: @printf, @sprintf
@@ -1235,6 +1235,10 @@ function _copy_physical_names(names, context::AbstractString)
     end
     return out
 end
+
+# Node accessor parity with the simplex `Mesh` container — mixed-element
+# consumers share node-level algorithms (periodic snaps, coordinate audits).
+@inline nnodes(m::MixedMesh) = size(m.coords, 2)
 
 function _copy_mixed_entity_data(data::MixedEntityData)
     return MixedEntityData(data.entities;

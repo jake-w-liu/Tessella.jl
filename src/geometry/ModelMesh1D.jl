@@ -1333,6 +1333,28 @@ function _mesh_boundary_classification(mesh::Mesh)
         key=a<b ? (a,b) : (b,a)
         counts[key]=get(counts,key,0)+1
     end
+    return _mesh_boundary_from_counts(mesh,counts)
+end
+
+# Mixed variant: quadrangle perimeter edges pair identically under the
+# degree-1 boundary rule — recombination never touches boundary edges.
+function _mesh_boundary_classification(mesh::MixedMesh)
+    counts=Dict{NTuple{2,Int32},Int}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        msh_dimension(block.msh)==2 || continue
+        slots=_surface_cell_edge_slots(msh_num_nodes(block.msh))
+        slots===nothing && continue
+        @inbounds for cell in axes(block.nodes,2),(u,v) in slots
+            a=block.nodes[u,cell]; b=block.nodes[v,cell]
+            key=a<b ? (a,b) : (b,a)
+            counts[key]=get(counts,key,0)+1
+        end
+    end
+    return _mesh_boundary_from_counts(mesh,counts)
+end
+
+function _mesh_boundary_from_counts(mesh,counts)
     eligible=falses(nnodes(mesh))
     edges=Set{NTuple{2,Int32}}()
     for (key,n) in counts
@@ -1353,7 +1375,7 @@ end
 # skipped, as are zero-length `a==b` lines, which have no boundary chain.
 # Embedded curves classify over all triangle edges — their recovered
 # constraint chain is interior — and get the same writeback.
-function _model_surface_boundary_writeback!(m::GeoModel,t::Int,mesh::Mesh,
+function _model_surface_boundary_writeback!(m::GeoModel,t::Int,mesh,
                                             caller::AbstractString)
     # A periodic slave surface is a verbatim mapped copy of its master — its
     # boundary nodes are owned by the mapping — and a periodic master's
@@ -1428,7 +1450,7 @@ end
 
 # Soft variant of `_curve_parameter_nodes`: returns `nothing` instead of
 # throwing when the curve has no usable mesh-edge chain.
-function _model_curve_chain_entries(m::GeoModel,mesh::Mesh,curve::Int,
+function _model_curve_chain_entries(m::GeoModel,mesh,curve::Int,
                                     eligible_nodes,eligible_edges,
                                     caller::AbstractString)
     try
@@ -1440,7 +1462,7 @@ function _model_curve_chain_entries(m::GeoModel,mesh::Mesh,curve::Int,
     end
 end
 
-function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh::Mesh,
+function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh,
                                          eligible_nodes,eligible_edges,
                                          protected_nodes,
                                          caller::AbstractString)

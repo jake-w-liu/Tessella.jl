@@ -159,9 +159,12 @@ implemented and wired into `.geo` and API-session model contexts),
 materially warped
 quadrangles beyond transfinite ruled-surface patches, direct tensor or
 metric-meshing parity, or full
-`.geo`/CAD-model execution. P2 does not yet claim general mixed-element
-generation or recombination beyond P4's first-order surface pairing,
-integration of mixed blocks into the simplex meshing kernels, curved
+`.geo`/CAD-model execution. Mixed-element generation now flows through the
+model pipeline — recombined surfaces and transfinite volumes merge into
+`MixedMesh` products with per-entity blocks, classified projection, and
+v2.2/v4.1 serialization — but P2 does not yet claim general recombination
+beyond the validated surface pairing and structured-volume masks,
+integration of mixed blocks into the unstructured meshing kernels, curved
 high-order Jacobian certification beyond second-order segments, triangles,
 tetrahedra, quadrangles, hexahedra, and prisms, internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
@@ -940,12 +943,15 @@ best-fit plane (gmsh projects interior nodes
 onto the sphere — it needs the ruled
 param-domain mesher),
 volume/hybrid recombination beyond the
-transfinite prism/hexahedron kernels
-(`recombine=` on `mesh_transfinite_prism`
-covers both collapsed and compact five-face
-layouts, and `recombine=` on
-`mesh_transfinite_volume` covers Gmsh's
-full six-face decision tree),
+model-wired transfinite masks (`Recombine
+Surface`/`Mesh.RecombineAll` now drive
+recombined unstructured surfaces, patch
+kernels, and five-/six-face transfinite
+volumes through `execute_geo`'s MixedMesh
+merge; `model_to_mixed` volume projection
+of a recombined part remains a documented
+blocker, and unstructured volume
+hex-dominant recombination is untouched),
 selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
 periodic surfaces,

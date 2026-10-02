@@ -19,7 +19,7 @@ background-field graph.
 module IO
 
 using ..MeshTypes: Mesh, nnodes, nsegs, ntris, ntets, node, validate
-using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names
+using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh
 using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm_exp, _gm_log,
                   _gm_log10, _gm_pow
@@ -1455,7 +1455,7 @@ mutable struct _GeoNumericContext
     # The mesh produced by mid-file `Mesh n` statements — Gmsh keeps it on the
     # current model; `Save`, `Delete Meshes`, `NewModel` and the mesh-operation
     # statements consume it.
-    mesh::Union{Nothing,Mesh}
+    mesh::Union{Nothing,Mesh,MixedMesh}
     # `ImbricatedTest` — nested `If` depth, readable in expressions.
     if_depth::Int
     # `statusImbricatedTests` — per-level branch status for the flat token
@@ -1516,7 +1516,7 @@ mutable struct _GeoNumericContext
     # The `(dim, tag, mesh)` parts `_geo_mesh_model` merged into the current
     # mesh — entity-level consumers (classified `model_to_mixed` projection,
     # field views) need each entity's own mesh, not the merged product.
-    mesh_parts::Vector{Tuple{Int,Int,Mesh}}
+    mesh_parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
     # `GEO_Internals::PhysicalGroups` — the raw physical-group records as the
     # `.geo` parser keeps them: `(dim, raw_signed_tag)` → the raw signed member
     # tags. `Physical X(n)` looks up `n` here verbatim, so groups `-4` and `4`
@@ -1568,7 +1568,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Dict{Tuple{String,Int,String},Float64}(),
     Dict{Tuple{String,Int,String},NTuple{4,Int}}(),0,nothing,0,Int[],nothing,
     String[],String[],0,false,:run,0,Dict{Int,Tuple{Int,Int}}(),
-    Tuple{Int,Int,Mesh}[],
+    Tuple{Int,Int,Union{Mesh,MixedMesh}}[],
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
     Dict{Int,Any}(),nothing,false)
 

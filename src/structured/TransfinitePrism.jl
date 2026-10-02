@@ -7,7 +7,9 @@ exact tetrahedron topology used by Gmsh's volume path — the legacy
 collapsed-grid subdivision by default, and with `compact=true` the compact
 transfinite-triangle subdivision (`Mesh.TransfiniteTri = 1`, Gmsh's
 `transfinite3` branch) whose full-square tab grid leaves the
-upper-triangular interior nodes as unreferenced orphans. The `recombine=`
+upper-triangular interior slots unreferenced — they carry their own
+`transfiniteHex` evaluation and persist as orphan entity nodes exactly as
+Gmsh writes them. The `recombine=`
 keyword instead emits Gmsh's five-face recombined cells — wedge prisms,
 `CREATE_PRISM_1..4` pairs, and interior hexahedra — as a `MixedMesh` whose
 tetrahedron decomposition is certified against the unrecombined partition.
@@ -619,8 +621,9 @@ end
 # slots past the diagonal alias the diagonal vertex — so the tab stays
 # square and the tetrahedron loops emit `SIM_10`–`SIM_12` on diagonal cells
 # and `SIM_7`–`SIM_12` on strictly lower-triangular cells. Interior slots
-# behind the diagonal (`j > i`) become unreferenced orphan nodes exactly like
-# upstream.
+# behind the diagonal (`j > i`) stay unreferenced orphan nodes carrying
+# their own `transfiniteHex` evaluation — Gmsh stores and writes them as
+# ordinary entity nodes, so no weld folds them.
 
 # Welds the two triangular boundary planes by bitwise coordinate identity —
 # the expanded compact grids repeat the aliased diagonal vertices — then
@@ -995,7 +998,8 @@ end
 # Compact (`Mesh.TransfiniteTri = 1`) pipeline — the full-square tab with
 # coordinate-welded triangular planes and the `SIM_7`–`SIM_12` template set.
 # Grid slots behind the diagonal (`j > i` at interior layers) stay
-# unreferenced orphan nodes, mirroring Gmsh exactly.
+# unreferenced orphan nodes with their own `transfiniteHex` coordinates —
+# Gmsh's written mesh carries them verbatim.
 function _mesh_transfinite_prism_compact(corners, nr::Int, ns::Int, nw::Int,
                                          faces; volume_tag, face_tags,
                                          node_limit, tet_limit,

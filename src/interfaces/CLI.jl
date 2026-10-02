@@ -12,7 +12,7 @@ module CLI
 using ..GeoExec: execute_geo, geo_entity_mesh
 using ..IO: write_msh
 using ..Model: model_periodic_constraints, model_to_mixed
-using ..Elements: write_mixed_msh
+using ..Elements: write_mixed_msh, MixedMesh
 
 export main
 
@@ -125,7 +125,11 @@ function main(args::AbstractVector{<:AbstractString})
         explicit_shell=dim==3 && target!==nothing &&
                        !isempty(result.model.volumes[target])
         if isempty(constraints) && !embedded && !explicit_shell
-            write_msh(destination,result.mesh;version=4.1)
+            if result.mesh isa MixedMesh
+                write_mixed_msh(destination,result.mesh;version=4.1)
+            else
+                write_msh(destination,result.mesh;version=4.1)
+            end
         else
             entity_name=dim==2 ? "surface" : "volume"
             target===nothing && throw(ArgumentError(

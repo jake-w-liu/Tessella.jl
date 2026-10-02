@@ -121,8 +121,9 @@ using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
 using ..IO: write_msh
-using ..Elements: read_mixed_msh, MixedMesh, SpecialElementBlock,
-                  msh_dimension, msh_family
+using ..Elements: read_mixed_msh, write_mixed_msh, MixedMesh, ElementBlock,
+                  SpecialElementBlock, MixedElementBlock,
+                  msh_dimension, msh_family, msh_num_nodes
 using ..Model: add_discrete_entity!, DiscreteEntity, _record_append_node!,
                _record_append_element!, _model_fresh_element_tag
 using ..MeshTypes: validate
@@ -142,7 +143,7 @@ validated `mesh`, and the sizing/field `params` recovered by
 """
 struct GeoExecution
     model::GeoModel
-    mesh::Union{Nothing,Mesh}
+    mesh::Union{Nothing,Mesh,MixedMesh}
     params
     transfinite_tri::Union{Nothing,Int}
     # Final scalar/list variables from the `.geo` program (`out[]`,
@@ -165,14 +166,15 @@ struct GeoExecution
     # consumers (`model_to_mixed` classified projection) recover the pure
     # per-entity view instead of the all-dimension product. Empty when no
     # mesh was generated through `_geo_mesh_model`.
-    mesh_parts::Vector{Tuple{Int,Int,Mesh}}
+    mesh_parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
 end
 
 """
-    geo_entity_mesh(execution, dim, tag) -> Mesh
+    geo_entity_mesh(execution, dim, tag) -> Union{Mesh,MixedMesh}
 
 Return the `(dim, tag)` entity's own mesh from `execution.mesh_parts` — the
-per-entity view of the merged product [`execute_geo`](@ref) builds.
+per-entity view of the merged product [`execute_geo`](@ref) builds (a
+`MixedMesh` when the entity meshed recombined quadrangles/polyhedra).
 Entity-level consumers such as the classified [`model_to_mixed`](@ref)
 projection need the entity's mesh alone; the merged mesh additionally carries
 every other entity's point, segment, and triangle cells. Throws
@@ -2450,9 +2452,16 @@ _gmsh_sign(x::Integer)=sign(x)
 # records carry theirs on the model.
 function _geo_model_has_mesh_elements(m::GeoModel,context::_GeoNumericContext)
     mesh=context.mesh
-    if mesh!==nothing && (size(mesh.segs,2)+size(mesh.tris,2)+
-                          size(mesh.tets,2))>0
-        return true
+    if mesh isa Mesh
+        (size(mesh.segs,2)+size(mesh.tris,2)+size(mesh.tets,2))>0 &&
+            return true
+    elseif mesh isa MixedMesh
+        for block in mesh.blocks
+            block isa ElementBlock && size(block.nodes,2)>0 &&
+                return true
+            block isa SpecialElementBlock &&
+                length(block.tags)>0 && return true
+        end
     end
     for rec in values(m.discrete)
         isempty(rec.element_tags) || return true
@@ -7045,7 +7054,7 @@ end
 function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     caller="execute_geo: Mesh"
     _geo_sync_meshing_options!(m,context)
-    parts=Tuple{Int,Int,Mesh}[]
+    parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[]
     if dim>=1
         options=_geo_mesh_1d_options(m,context,caller)
         if dim==1
@@ -7108,8 +7117,8 @@ end
 # generator is stored as a discrete entity under a named physical group;
 # pinned Gmsh 4.15.2's `.msh` output drops the mesh and serializes only the
 # chains, which Tessella deliberately does not mirror.
-function _geo_run_homology!(m::GeoModel,mesh::Mesh,
-                          parts::Vector{Tuple{Int,Int,Mesh}},
+function _geo_run_homology!(m::GeoModel,mesh,
+                          parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}},
                           caller::AbstractString)
     isempty(m.meshing.homology_requests) && return nothing
     cells=_geo_homology_cells(m,mesh,parts,caller)
@@ -7121,20 +7130,20 @@ end
 # bitwise-identical coordinates: the generated mesh's nodes first, then any
 # extra nodes the curve/discrete records need (homology indices only identify
 # cells — they need not exist in `mesh`).
-function _geo_homology_cells(m::GeoModel,mesh::Mesh,
-                             parts::Vector{Tuple{Int,Int,Mesh}},
+function _geo_homology_cells(m::GeoModel,mesh,
+                             parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}},
                              caller::AbstractString)
     lookup=Dict{NTuple{3,Int},Int32}()
+    mcoords=mesh.coords
     for n in 1:nnodes(mesh)
-        x,y,z=mesh.coords[:,n]
+        x,y,z=mcoords[1,n],mcoords[2,n],mcoords[3,n]
         lookup[(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))]=
             Int32(n)
     end
     # One-element counter — mutating `next[1]` inside `index_for` leaves the
     # captured binding itself assigned once, keeping it unboxed.
     next=Int32[nnodes(mesh)+1]
-    function index_for(point)
-        x,y,z=point
+    function index_for(x,y,z)
         key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
         i=get(lookup,key,Int32(0))
         i!=0 && return i
@@ -7148,17 +7157,31 @@ function _geo_homology_cells(m::GeoModel,mesh::Mesh,
     # Meshed entities own their top-dimension elements; boundary elements
     # belong to the boundary entities (curves below, discrete records after).
     for (dim,tag,part) in parts
-        remap=Int32[index_for(part.coords[:,n]) for n in 1:nnodes(part)]
+        pcoords=part.coords
+        remap=Int32[index_for(pcoords[1,n],pcoords[2,n],pcoords[3,n])
+                    for n in 1:nnodes(part)]
         elements=entry((dim,tag))
-        if dim==2
-            for t in 1:ntris(part)
-                push!(elements,(Int32(2),
-                    Int32[remap[part.tris[k,t]] for k in 1:3]))
+        if part isa Mesh
+            if dim==2
+                for t in 1:ntris(part)
+                    push!(elements,(Int32(2),
+                        Int32[remap[part.tris[k,t]] for k in 1:3]))
+                end
+            elseif dim==3
+                for t in 1:ntets(part)
+                    push!(elements,(Int32(4),
+                        Int32[remap[part.tets[k,t]] for k in 1:4]))
+                end
             end
-        elseif dim==3
-            for t in 1:ntets(part)
-                push!(elements,(Int32(4),
-                    Int32[remap[part.tets[k,t]] for k in 1:4]))
+        else
+            for block in part.blocks
+                block isa ElementBlock || continue
+                msh_dimension(block.msh)==dim || continue
+                width=size(block.nodes,1)
+                for cell in axes(block.nodes,2)
+                    push!(elements,(Int32(block.msh),
+                        Int32[remap[block.nodes[k,cell]] for k in 1:width]))
+                end
             end
         end
     end
@@ -7176,7 +7199,7 @@ function _geo_homology_cells(m::GeoModel,mesh::Mesh,
             us[end]>=hi && (us=us[1:end-1])
         end
         length(us)<(a==b ? 1 : 2) && continue
-        indices=Int32[index_for(_model_curve_part_point(m,curve,u,caller))
+        indices=Int32[index_for(_model_curve_part_point(m,curve,u,caller)...)
                       for u in us]
         elements=entry((1,curve))
         nseg=a==b ? length(indices) : length(indices)-1
@@ -7186,7 +7209,7 @@ function _geo_homology_cells(m::GeoModel,mesh::Mesh,
         end
     end
     for (tag,point) in m.points
-        push!(entry((0,tag)),(Int32(15),Int32[index_for(point)]))
+        push!(entry((0,tag)),(Int32(15),Int32[index_for(point...)]))
     end
     # Discrete entities (merged meshes, classified topology, meshing
     # attachments) already store their elements against record node tags.
@@ -7196,9 +7219,10 @@ function _geo_homology_cells(m::GeoModel,mesh::Mesh,
     # against a model-wide map, not the owning record.
     global_nodes=Dict{Int32,Int32}()
     for (_,record) in _discrete_mesh_records_model(m)
+        rcoords=record.node_coords
         for (i,t) in enumerate(record.node_tags)
             get!(global_nodes,t) do
-                index_for(record.node_coords[:,i])
+                index_for(rcoords[1,i],rcoords[2,i],rcoords[3,i])
             end
         end
     end
@@ -7222,16 +7246,24 @@ end
 
 # Merge per-entity meshes: nodes deduplicated by exact coordinates (shared
 # boundary nodes are bitwise identical across entity meshes), elements tagged
-# with their generating entity in `owner` for node-level classification.
-function _geo_merge_entity_meshes(parts::Vector{Tuple{Int,Int,Mesh}})
+# with their generating entity in `owner` for node-level classification. A
+# `MixedMesh` part (recombined surfaces/volumes) switches the product to the
+# mixed merge — quadrangles and polyhedra have no simplex container.
+function _geo_merge_entity_meshes(parts)
+    caller="execute_geo: Mesh"
+    all(part->part[3] isa Mesh,parts) ||
+        return _geo_merge_entity_meshes_mixed(parts,caller)
     coord_list=NTuple{3,Float64}[]
     lookup=Dict{NTuple{3,Int},Int}()
     owner=Dict{Int,Tuple{Int,Int}}()
-    segs=Matrix{Int32}(undef,2,0);seg_tag=Int32[]
-    tris=Matrix{Int32}(undef,3,0);tri_tag=Int32[]
-    tets=Matrix{Int32}(undef,4,0);tet_tag=Int32[]
-    function node_index(col)
-        x,y,z=col
+    nseg=sum(part->nsegs(part[3]),parts)
+    ntri=sum(part->ntris(part[3]),parts)
+    ntet=sum(part->ntets(part[3]),parts)
+    segs=Matrix{Int32}(undef,2,nseg);seg_tag=Vector{Int32}(undef,nseg)
+    tris=Matrix{Int32}(undef,3,ntri);tri_tag=Vector{Int32}(undef,ntri)
+    tets=Matrix{Int32}(undef,4,ntet);tet_tag=Vector{Int32}(undef,ntet)
+    seg_at=tri_at=tet_at=0
+    function node_index(x,y,z)
         key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
         i=get(lookup,key,0)
         i==0 || return i
@@ -7242,8 +7274,9 @@ function _geo_merge_entity_meshes(parts::Vector{Tuple{Int,Int,Mesh}})
     end
     for (dim,tag,mesh) in parts
         remap=Vector{Int}(undef,nnodes(mesh))
+        pcoords=mesh.coords
         for n in 1:nnodes(mesh)
-            remap[n]=node_index(mesh.coords[:,n])
+            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n])
         end
         if dim==0
             # Vertex nodes classify on the vertex even when the part carries
@@ -7254,32 +7287,33 @@ function _geo_merge_entity_meshes(parts::Vector{Tuple{Int,Int,Mesh}})
                 dim<=old[1] && (owner[n]=(0,tag))
             end
         end
-        for s in 1:nsegs(mesh)
+        @inbounds for s in 1:nsegs(mesh)
             a,b=remap[mesh.segs[1,s]],remap[mesh.segs[2,s]]
-            segs=hcat(segs,Int32[a,b])
-            push!(seg_tag,mesh.seg_tag[s])
+            segs[1,seg_at+=1]=a;segs[2,seg_at]=b
+            seg_tag[seg_at]=mesh.seg_tag[s]
             for n in (a,b)
                 old=get(owner,n,(3,0))
                 dim<=old[1] && (owner[n]=(dim,tag))
             end
         end
-        for t in 1:ntris(mesh)
+        @inbounds for t in 1:ntris(mesh)
             a,b,c=(remap[mesh.tris[k,t]] for k in 1:3)
-            tris=hcat(tris,Int32[a,b,c])
-            push!(tri_tag,mesh.tri_tag[t])
+            tris[1,tri_at+=1]=a;tris[2,tri_at]=b;tris[3,tri_at]=c
+            tri_tag[tri_at]=mesh.tri_tag[t]
             for n in (a,b,c)
                 old=get(owner,n,(3,0))
                 dim<=old[1] && (owner[n]=(dim,tag))
             end
         end
-        for t in 1:ntets(mesh)
-            idx=[remap[mesh.tets[k,t]] for k in 1:4]
-            tets=hcat(tets,Int32.(idx))
-            push!(tet_tag,mesh.tet_tag[t])
-            for n in idx
+        @inbounds for t in 1:ntets(mesh)
+            tet_at+=1
+            @inbounds for k in 1:4
+                n=remap[mesh.tets[k,t]]
+                tets[k,tet_at]=n
                 old=get(owner,n,(3,0))
                 dim<=old[1] && (owner[n]=(dim,tag))
             end
+            tet_tag[tet_at]=mesh.tet_tag[t]
         end
     end
     coords=Matrix{Float64}(undef,3,length(coord_list))
@@ -7289,6 +7323,165 @@ function _geo_merge_entity_meshes(parts::Vector{Tuple{Int,Int,Mesh}})
     merged=Mesh(coords;segs=segs,tris=tris,tets=tets,
                 seg_tag=seg_tag,tri_tag=tri_tag,tet_tag=tet_tag)
     return merged,owner
+end
+
+# Mixed counterpart: parts carrying quadrangle/hexahedron/prism blocks merge
+# into a `MixedMesh` whose blocks bucket by (MSH type, entity dim, entity tag)
+# in first-seen order, so each entity's cells serialize to their own block
+# with the entity tag as the elementary field — upstream's per-entity store.
+# Simplex parts contribute their segs/tris/tets as line/triangle/tetrahedron
+# cells; `tags` keep each cell's physical tag and `owner` keeps the same
+# lowest-dimension node classification the simplex merge computes.
+function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString)
+    coord_list=NTuple{3,Float64}[]
+    lookup=Dict{NTuple{3,Int},Int}()
+    owner=Dict{Int,Tuple{Int,Int}}()
+    order=Tuple{Int,Int,Int}[]
+    buckets=Dict{Tuple{Int,Int,Int},Tuple{Vector{Int32},Vector{Int32},Int}}()
+    function node_index(x,y,z)
+        key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
+        i=get(lookup,key,0)
+        i==0 || return i
+        i=length(coord_list)+1
+        lookup[key]=i
+        push!(coord_list,(x,y,z))
+        return i
+    end
+    function bucket(msh,dim,tag)
+        key=(Int(msh),dim,tag)
+        entry=get(buckets,key,nothing)
+        entry===nothing || return entry
+        width=msh_num_nodes(msh)
+        width===nothing && throw(ArgumentError(
+            "$caller: cannot merge variable-width MSH type $msh"))
+        entry=(Int32[],Int32[],Int(width))
+        buckets[key]=entry
+        push!(order,key)
+        return entry
+    end
+    for (dim,tag,mesh) in parts
+        remap=Vector{Int}(undef,nnodes(mesh))
+        pcoords=mesh.coords
+        for n in 1:nnodes(mesh)
+            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n])
+        end
+        if dim==0
+            for n in remap
+                old=get(owner,n,(3,0))
+                dim<=old[1] && (owner[n]=(0,tag))
+            end
+        end
+        if mesh isa Mesh
+            for (msh,nodes,tags) in ((1,mesh.segs,mesh.seg_tag),
+                                     (2,mesh.tris,mesh.tri_tag),
+                                     (4,mesh.tets,mesh.tet_tag))
+                size(nodes,2)==0 && continue
+                flat,cell_tags,width=bucket(msh,dim,tag)
+                size(nodes,1)==width || throw(ErrorException(
+                    "$caller: MSH type $msh node width $width does not " *
+                    "match $(size(nodes,1))"))
+                base=length(flat)
+                ncells=size(nodes,2)
+                resize!(flat,base+ncells*width)
+                @inbounds for cell in 1:ncells,row in 1:width
+                    flat[base+(cell-1)*width+row]=Int32(remap[nodes[row,cell]])
+                end
+                append!(cell_tags,tags)
+                @inbounds for cell in 1:ncells,row in 1:width
+                    n=remap[nodes[row,cell]]
+                    old=get(owner,n,(3,0))
+                    dim<=old[1] && (owner[n]=(dim,tag))
+                end
+            end
+        else
+            for block in mesh.blocks
+                block isa ElementBlock || throw(ArgumentError(
+                    "$caller: cannot merge a special-element block " *
+                    "(MSH type $(block.msh)) into the model mesh"))
+                cells=block.nodes
+                size(cells,2)==0 && continue
+                flat,cell_tags,width=bucket(block.msh,dim,tag)
+                size(cells,1)==width || throw(ErrorException(
+                    "$caller: MSH type $(block.msh) node width $width " *
+                    "does not match $(size(cells,1))"))
+                base=length(flat)
+                ncells=size(cells,2)
+                resize!(flat,base+ncells*width)
+                @inbounds for cell in 1:ncells,row in 1:width
+                    flat[base+(cell-1)*width+row]=Int32(remap[cells[row,cell]])
+                end
+                append!(cell_tags,block.tags)
+                @inbounds for cell in 1:ncells,row in 1:width
+                    n=remap[cells[row,cell]]
+                    old=get(owner,n,(3,0))
+                    dim<=old[1] && (owner[n]=(dim,tag))
+                end
+            end
+        end
+    end
+    blocks=ElementBlock[]
+    elementary=Vector{Vector{Int32}}()
+    for (msh,dim,tag) in order
+        flat,tags,width=buckets[(msh,dim,tag)]
+        nodes=reshape(flat,width,:)
+        push!(blocks,ElementBlock(msh,nodes,tags))
+        push!(elementary,fill(Int32(tag),size(nodes,2)))
+    end
+    coords=Matrix{Float64}(undef,3,length(coord_list))
+    for (i,(x,y,z)) in enumerate(coord_list)
+        coords[1,i]=x;coords[2,i]=y;coords[3,i]=z
+    end
+    merged=MixedMesh(coords,blocks;elementary_entities=elementary)
+    return merged,owner
+end
+
+# Cell count of a given dimension on either mesh representation — the
+# `ntris`/`ntets` presence checks the mesh-operation guards need.
+_geo_mesh_dim_cells(mesh::Mesh,dim::Int)=
+    dim==2 ? ntris(mesh) : dim==3 ? ntets(mesh) :
+    dim==1 ? nsegs(mesh) : 0
+function _geo_mesh_dim_cells(mesh::MixedMesh,dim::Int)
+    total=0
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        msh_dimension(block.msh)==dim || continue
+        total+=size(block.nodes,2)
+    end
+    return total
+end
+
+# `RecombineMesh` on a mixed product: each triangle block recombines in place
+# (blocks are already per-entity buckets, so cells never pair across entity
+# boundaries) and the resulting triangle/quadrangle blocks splice back at the
+# same position, preserving the elementary-entity rows.
+function _geo_recombine_mixed_blocks(mesh::MixedMesh;algorithm::Symbol)
+    out=MixedElementBlock[]
+    elementary=mesh.elementary_entities
+    elementary_out=elementary===nothing ? nothing : Vector{Int32}[]
+    for (bi,block) in enumerate(mesh.blocks)
+        if block isa ElementBlock && Int(block.msh)==2
+            sub=Mesh(mesh.coords;tris=block.nodes,tri_tag=block.tags)
+            rec=recombine_triangles(sub;algorithm=algorithm)
+            for rblock in rec.blocks
+                rblock isa ElementBlock && rblock.msh in (2,3) || continue
+                push!(out,rblock)
+                elementary_out!==nothing && push!(elementary_out,
+                    fill(elementary[bi][1],size(rblock.nodes,2)))
+            end
+        else
+            push!(out,block)
+            elementary_out!==nothing &&
+                push!(elementary_out,elementary[bi])
+        end
+    end
+    return MixedMesh(mesh.coords,out;
+                     physical_names=mesh.physical_names,
+                     entity_data=mesh.entity_data,
+                     elementary_entities=elementary_out,
+                     periodic_links=mesh.periodic_links,
+                     ancillary_sections=mesh.ancillary_sections,
+                     data_sections=mesh.data_sections,
+                     partition_data=mesh.partition_data)
 end
 
 # The mesh-operation statements act on `context.mesh` — the product of a
@@ -7302,12 +7495,24 @@ function _geo_exec_mesh_statement!(m::GeoModel,line::AbstractString,
         # `RefineMesh` syncs the internals first when changed.
         _geo_sync_physical_view_if_changed!(m,context)
         context.mesh===nothing && return nothing
+        context.mesh isa Mesh || throw(ArgumentError(
+            "$caller: RefineMesh requires a simplex mesh — the current " *
+            "mesh carries non-simplex elements"))
         context.mesh=refine_uniform(context.mesh)
         _geo_remesh_owner!(context)
         return
     elseif (mm=match(r"^RecombineMesh\s*;?\s*$",s))!==nothing
         context.mesh===nothing && return nothing
-        context.mesh=recombine_triangles(context.mesh)
+        _geo_sync_meshing_options!(m,context)
+        # Upstream `RecombineMesh` (Generator.cpp) reads `algoRecombine`
+        # live: blossom matching for 1/3, simple pairing otherwise — the
+        # statement has no full-quad arm.
+        algorithm=m.meshing.recombine_algo in (1,3) ? :blossom : :greedy
+        context.mesh=if context.mesh isa Mesh
+            recombine_triangles(context.mesh;algorithm=algorithm)
+        else
+            _geo_recombine_mixed_blocks(context.mesh;algorithm=algorithm)
+        end
         _geo_remesh_owner!(context)
         return
     elseif (mm=match(r"^RenumberMeshNodes\s*;?\s*$",s))!==nothing ||
@@ -7622,7 +7827,7 @@ function _geo_relocate_node(m::GeoModel,dim::Int,tag::Int,
     return nothing
 end
 
-function _geo_transform_mesh_nodes!(mesh::Mesh,owner,matrix,wanted)
+function _geo_transform_mesh_nodes!(mesh,owner,matrix,wanted)
     n=length(matrix)
     # Gmsh's affine transform packs row-major 4x4 with defaults.
     a=Float64[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
@@ -7695,13 +7900,20 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
                 "$caller: unknown or unsupported mesh optimization " *
                 "method \"$arg\""))
         context.mesh===nothing && return nothing
+        mesh=context.mesh
         if arg in ("","Gmsh","Optimize","Relocate3D")
-            ntets(context.mesh)>0 || return nothing
-            context.mesh=smooth_optimize(context.mesh;iters=1,
+            _geo_mesh_dim_cells(mesh,3)>0 || return nothing
+            mesh isa Mesh || throw(ArgumentError(
+                "$caller: OptimizeMesh \"$arg\" requires a simplex mesh — " *
+                "the current mesh carries non-simplex elements"))
+            context.mesh=smooth_optimize(mesh;iters=1,
                 require_positive_tets=false)
         else
-            ntris(context.mesh)>0 || return nothing
-            context.mesh=_laplacian_smooth_tri_cache(context.mesh,1,nothing)
+            _geo_mesh_dim_cells(mesh,2)>0 || return nothing
+            mesh isa Mesh || throw(ArgumentError(
+                "$caller: OptimizeMesh \"$arg\" requires a simplex mesh — " *
+                "the current mesh carries non-simplex elements"))
+            context.mesh=_laplacian_smooth_tri_cache(mesh,1,nothing)
         end
         return nothing
     elseif word=="SetBoundingBox"
@@ -7775,6 +7987,43 @@ function _geo_concat_meshes(a::Mesh,b::Mesh)
         seg_tag=vcat(a.seg_tag,b.seg_tag),
         tri_tag=vcat(a.tri_tag,b.tri_tag),
         tet_tag=vcat(a.tet_tag,b.tet_tag))
+end
+
+# `Merge "x.msh"` against a recombined/mixed mid-file mesh: both sides join
+# as `MixedMesh` blocks with the simplex part expanded into line/triangle/
+# tetrahedron blocks. Per-entity classification is already dropped on this
+# path (`mesh_parts`/`mesh_node_owner` reset), so the concat keeps cell tags
+# and physical names only.
+function _geo_concat_meshes(a,b)
+    offset=Int32(nnodes(a))
+    coords=hcat(a.coords,b.coords)
+    function shifted_blocks(mesh)
+        shift=mesh===a ? Int32(0) : offset
+        out=ElementBlock[]
+        if mesh isa Mesh
+            for (msh,nodes,tags) in ((1,mesh.segs,mesh.seg_tag),
+                                     (2,mesh.tris,mesh.tri_tag),
+                                     (4,mesh.tets,mesh.tet_tag))
+                size(nodes,2)>0 &&
+                    push!(out,ElementBlock(msh,nodes.+shift,tags))
+            end
+        else
+            for block in mesh.blocks
+                block isa ElementBlock || throw(ArgumentError(
+                    "execute_geo: cannot merge a special-element block " *
+                    "(MSH type $(block.msh)) into the current mesh"))
+                push!(out,ElementBlock(block.msh,block.nodes.+shift,
+                                       block.tags))
+            end
+        end
+        return out
+    end
+    blocks=append!(shifted_blocks(a),shifted_blocks(b))
+    names=merge(a isa MixedMesh ? a.physical_names :
+                    Dict{Tuple{Int,Int},String}(),
+                b isa MixedMesh ? b.physical_names :
+                    Dict{Tuple{Int,Int},String}())
+    return MixedMesh(coords,blocks;physical_names=names)
 end
 
 # `Merge "x.msh"` — fold the line/triangle/tetrahedron families into the
@@ -8008,8 +8257,35 @@ function _geo_exec_save!(m::GeoModel,path::AbstractString,
             _model_projection_physical_tags(m,0,tag))
         push!(point_elements,(node,Int(physical),tag))
     end
-    write_msh(file,mesh;physical_names=m.physical_names,
-              point_elements=point_elements)
+    if mesh isa MixedMesh
+        # `write_msh` is simplex-only — the recombined product serializes
+        # through `write_mixed_msh`, keeping each entity's blocks and its
+        # elementary tags. MPoint cells join as a trailing point block.
+        blocks=Vector{MixedElementBlock}(mesh.blocks)
+        elementary=mesh.elementary_entities===nothing ? nothing :
+            Vector{Int32}[copy(entities) for entities in
+                          mesh.elementary_entities]
+        if !isempty(point_elements)
+            npoints=length(point_elements)
+            pnodes=Matrix{Int32}(undef,1,npoints)
+            ptags=Vector{Int32}(undef,npoints)
+            pent=Vector{Int32}(undef,npoints)
+            for (i,(node,physical,etag)) in enumerate(point_elements)
+                pnodes[1,i]=Int32(node)
+                ptags[i]=Int32(physical)
+                pent[i]=Int32(etag)
+            end
+            push!(blocks,ElementBlock(15,pnodes,ptags))
+            elementary!==nothing && push!(elementary,pent)
+        end
+        out=MixedMesh(mesh.coords,blocks;
+                      physical_names=m.physical_names,
+                      elementary_entities=elementary)
+        write_mixed_msh(file,out;version=2.2)
+    else
+        write_msh(file,mesh;physical_names=m.physical_names,
+                  point_elements=point_elements)
+    end
     return nothing
 end
 

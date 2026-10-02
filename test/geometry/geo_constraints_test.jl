@@ -427,7 +427,9 @@ end
     # slots aliased to the diagonal, and the cell subdivision emits
     # SIM_10–SIM_12 on diagonal cells and SIM_7–SIM_12 on strictly-lower
     # cells. Gmsh 4.15.2 emits 46 nodes / 189 dim≥1 elements (27 segments,
-    # 72 triangles, 81 tetrahedra) for this fixture.
+    # 72 triangles, 81 tetrahedra) for this fixture — the two interior tab
+    # slots behind the compact diagonal are unreferenced orphan nodes with
+    # their own evaluated coordinates, exactly like upstream.
     execution=_execute_constraint_source(prism*raw"""
         Mesh.TransfiniteTri=1;
         Transfinite Volume{1}={1,2,3,4,5,6};
@@ -436,6 +438,9 @@ end
     @test validate(execution.mesh).ok
     @test (nnodes(execution.mesh),nsegs(execution.mesh),
            ntris(execution.mesh),ntets(execution.mesh))==(46,27,72,81)
+    # The raw volume part carries all 46 slot columns — the two
+    # behind-diagonal orphans hold distinct evaluated coordinates like
+    # Gmsh's written node entries.
     part=geo_entity_mesh(execution,3,1)
     @test (nnodes(part),ntris(part),ntets(part))==(46,0,81)
     @test all(t->tet_signed_volume(
@@ -1121,4 +1126,151 @@ end
     @test execution.model.meshing.flexible_transfinite==true
     @test execution.model.meshing.lc_factor==2.0
     @test execution.model.meshing.recombine_algo==1
+end
+
+@testset ".geo model-level recombination" begin
+    # Unstructured `Recombine Surface` emits a MixedMesh with quadrangle and
+    # leftover-triangle blocks per entity. The default (blossom) algorithm
+    # pairs a boundary regraded to the odd-node count (24 segments here).
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
+        Recombine Surface{1};
+        """;mesh_dim=2)
+    @test execution.mesh isa MixedMesh
+    nquad=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3)
+    ntri=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==2)
+    @test (nquad,ntri)==(47,4)
+    @test sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==1)==24
+
+    # `Mesh.RecombinationAlgorithm = 0` keeps the unforced boundary grading,
+    # so every quadrangle replaces exactly two triangles of the simplex
+    # product generated on the same grading.
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
+        Recombine Surface{1};
+        Mesh.RecombinationAlgorithm = 0;
+        """;mesh_dim=2)
+    @test execution.mesh isa MixedMesh
+    nquad=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3)
+    ntri=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==2)
+    @test nquad>0
+    execution_simplex=_execute_constraint_source(_GEO_SQUARE;mesh_dim=2)
+    @test 2*nquad+ntri==ntris(execution_simplex.mesh)
+
+    # The full-quad arms (2/3) run upstream's triangle-subdivision pipeline,
+    # which the pairing kernel does not implement — the rejection is explicit.
+    err=_constraint_error(_GEO_SQUARE * raw"""
+        Recombine Surface{1};
+        Mesh.RecombinationAlgorithm = 3;
+        """;mesh_dim=2)
+    @test err isa ArgumentError
+    @test occursin("RecombinationAlgorithm",err.msg)
+
+    # Transfinite + Recombine gives an all-quadrangle MixedMesh — Gmsh's
+    # structured patch, not the simplex path.
+    execution=_execute_constraint_source(_GEO_SQUARE * raw"""
+        Transfinite Curve{:} = 5;
+        Transfinite Surface{1};
+        Recombine Surface{1};
+        """;mesh_dim=2)
+    @test execution.mesh isa MixedMesh
+    quads=only([b for b in execution.mesh.blocks if b.msh==3])
+    @test size(quads.nodes,2)==16
+    @test !any(b.msh==2 for b in execution.mesh.blocks)
+
+    # A fully recombined transfinite volume emits hexahedra plus quadrangle
+    # boundary sheets through the MixedMesh merge.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{:};
+        Transfinite Volume{1};
+        """;mesh_dim=3)
+    @test execution.mesh isa MixedMesh
+    hexes=only([b for b in execution.mesh.blocks if b.msh==5])
+    @test size(hexes.nodes,2)==27
+    @test sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==3)==54
+    @test !any(b.msh==4 for b in execution.mesh.blocks)
+    @test !any(b.msh==2 for b in execution.mesh.blocks)
+
+    # `Mesh.RecombineAll` drives the same volume mask without per-surface
+    # flags.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Transfinite Volume{1};
+        Mesh.RecombineAll = 1;
+        """;mesh_dim=3)
+    @test execution.mesh isa MixedMesh
+    @test any(b.msh==5 && size(b.nodes,2)==27 for b in execution.mesh.blocks)
+
+    # An unrecombined opposite face pair emits prisms through the same mask
+    # path (x=0/x=1 faces left simplex).
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{1,2,3,5};
+        Transfinite Volume{1};
+        """;mesh_dim=3)
+    @test execution.mesh isa MixedMesh
+    @test any(b.msh==6 && size(b.nodes,2)==54 for b in execution.mesh.blocks)
+
+    # `Mesh 3` on a recombined boundary folds boundary quadrangles into the
+    # PLC and still produces a valid all-tet interior — the merged product
+    # is mixed because the surface parts keep their quadrangle blocks.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Recombine Surface{:};
+        """;mesh_dim=3)
+    @test execution.mesh isa MixedMesh
+    ntets=sum(size(b.nodes,2) for b in execution.mesh.blocks if b.msh==4)
+    @test ntets>0
+    @test validate(execution.mesh).ok
+
+    # Compact transfinite prism volumes prune behind-diagonal slots exactly
+    # like Gmsh's writer — every emitted node is referenced by a cell.
+    prism_source=raw"""
+        Point(1) = {0,0,0,0.3};
+        Point(2) = {1,0,0,0.3};
+        Point(3) = {0,1,0,0.3};
+        Point(4) = {0,0,1,0.3};
+        Point(5) = {1,0,1,0.3};
+        Point(6) = {0,1,1,0.3};
+        Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,1};
+        Line(4) = {4,5}; Line(5) = {5,6}; Line(6) = {6,4};
+        Line(7) = {1,4}; Line(8) = {2,5}; Line(9) = {3,6};
+        Curve Loop(1) = {1,2,3};
+        Curve Loop(2) = {4,5,6};
+        Curve Loop(3) = {1,8,-4,-7};
+        Curve Loop(4) = {2,9,-5,-8};
+        Curve Loop(5) = {3,7,-6,-9};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Plane Surface(3) = {3}; Plane Surface(4) = {4};
+        Plane Surface(5) = {5};
+        Surface Loop(1) = {1,2,3,4,5};
+        Volume(1) = {1};
+        Mesh.TransfiniteTri = 1;
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{:};
+        Transfinite Volume{1};
+        """
+    execution=_execute_constraint_source(prism_source;mesh_dim=3)
+    @test execution.mesh isa MixedMesh
+    # 46 merged nodes like Gmsh's written set — two compact-tab interior
+    # slots behind the diagonal are unreferenced orphan nodes with their
+    # own evaluated coordinates.
+    @test size(execution.mesh.coords,2)==46
+    used=falses(size(execution.mesh.coords,2))
+    for b in execution.mesh.blocks
+        used[b.nodes[:]].=true
+    end
+    @test count(used)==44
+
+    # Simplex-only mesh statements reject a mixed product explicitly.
+    err=_constraint_error(_GEO_SQUARE * raw"""
+        Transfinite Curve{:} = 5;
+        Transfinite Surface{1};
+        Recombine Surface{1};
+        Mesh 2;
+        RefineMesh;
+        """)
+    @test err isa ArgumentError
 end
