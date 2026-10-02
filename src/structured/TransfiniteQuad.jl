@@ -235,6 +235,7 @@ end
 """
     mesh_transfinite_quad_patch(side1, side2, side3, side4;
         arrangement=:left, face_tag=0, side_tags=(0,0,0,0),
+        allow_warped=false, project_plane=nothing, interpolate=nothing,
         max_nodes=10_000_000, max_quadrangles=10_000_000) -> MixedMesh
 
 Construct a recombined four-sided planar transfinite patch. The four boundary
@@ -269,6 +270,9 @@ function mesh_transfinite_quad_patch(side1,
                                      arrangement=:left,
                                      face_tag=0,
                                      side_tags=(0, 0, 0, 0),
+                                     allow_warped::Bool=false,
+                                     project_plane=nothing,
+                                     interpolate=nothing,
                                      max_nodes=_DEFAULT_MAX_NODES,
                                      max_quadrangles=_DEFAULT_MAX_QUADRANGLES)::MixedMesh
     for (index,side) in enumerate((side1,side2,side3,side4))
@@ -276,6 +280,10 @@ function mesh_transfinite_quad_patch(side1,
             "$_CALLER: side $index must be an AbstractVector"))
     end
     _arrangement(arrangement)
+    allow_warped && project_plane!==nothing && throw(ArgumentError(
+        "$_CALLER: project_plane and allow_warped are mutually exclusive"))
+    interpolate!==nothing && project_plane!==nothing && throw(ArgumentError(
+        "$_CALLER: project_plane and interpolate are mutually exclusive"))
     node_limit = _limit(max_nodes, "max_nodes")
     quadrangle_limit = _limit(max_quadrangles, "max_quadrangles")
     side_tags isa Tuple && length(side_tags) == 4 || throw(ArgumentError(
@@ -326,6 +334,9 @@ function mesh_transfinite_quad_patch(side1,
         arrangement=:left,
         face_tag=physical_face_tag,
         side_tags=physical_side_tags,
+        allow_warped=allow_warped,
+        project_plane=project_plane,
+        interpolate=interpolate,
         max_nodes=node_limit,
         max_triangles=certification_triangles)
     (nnodes(certified) == nodes && nsegs(certified) == segments) ||

@@ -98,7 +98,9 @@ using ..MeshFunctionSpaces: MeshFunctionSpaces, mesh_basis_functions,
                             mesh_keys, mesh_keys_for_element,
                             mesh_keys_information, mesh_number_of_keys,
                             mesh_number_of_orientations
-using ..Elements: msh_spec, msh_type, msh_properties
+using ..Elements: msh_spec, msh_type, msh_properties, MixedMesh,
+                  MixedElementBlock, ElementBlock, SpecialElementBlock,
+                  msh_dimension
 using ..Refine: Refine, refine_uniform
 using ..Transform: affine_transform, _transform_gmsh_affine
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
@@ -140,7 +142,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MeshSizeExtendFromBoundary"=>1.0,
     "Mesh.TransfiniteTri"=>0.0)
 const OPTIONS = copy(DEFAULT_OPTIONS)
-const LAST_MESH = Ref{Union{Nothing,Mesh}}(nothing)
+const LAST_MESH = Ref{Union{Nothing,Mesh,MixedMesh}}(nothing)
 const LAST_MESH_CLASS = Ref{Union{Nothing,_MeshClassification}}(nothing)
 const LAST_MESH_LOCATOR = Ref{Union{Nothing,SimplexLocator}}(nothing)
 const LAST_MESH_EDGES = Ref{Union{Nothing,MeshEdgeTopology}}(nothing)
@@ -190,7 +192,7 @@ mutable struct _ModelSlot
     name::String
     file_name::String
     model::GeoModel
-    mesh::Union{Nothing,Mesh}
+    mesh::Union{Nothing,Mesh,MixedMesh}
     class::Union{Nothing,_MeshClassification}
     locator::Union{Nothing,SimplexLocator}
     edges::Union{Nothing,MeshEdgeTopology}
@@ -289,7 +291,7 @@ function _slot_clear_globals_locked!()
     return nothing
 end
 
-function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh},
+function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh,MixedMesh},
                                      class::Union{Nothing,_MeshClassification}=
                                          nothing)
     class!==nothing && class.mesh!==mesh && throw(ArgumentError(
@@ -386,6 +388,18 @@ function _copy_mesh(mesh::Mesh)
     return Mesh(mesh.coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
                 seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,tet_tag=mesh.tet_tag)
 end
+
+# Recombined/mixed products keep their own container — the constructor copies
+# blocks and metadata, so this is the deep copy the cache needs.
+_copy_mesh(mesh::MixedMesh)=MixedMesh(
+    mesh.coords,mesh.blocks;
+    physical_names=mesh.physical_names,
+    entity_data=mesh.entity_data,
+    elementary_entities=mesh.elementary_entities,
+    periodic_links=mesh.periodic_links,
+    ancillary_sections=mesh.ancillary_sections,
+    data_sections=mesh.data_sections,
+    partition_data=mesh.partition_data)
 
 """
     option(name) -> Float64
@@ -6178,6 +6192,11 @@ function _recombine()
         m=_model_locked()
         settings=sort!(collect(m.meshing.recombine);by=first)
         isempty(settings) && return nothing
+        # Same dispatch as the `.geo` `RecombineMesh` statement
+        # (Generator.cpp): blossom matching under
+        # `Mesh.RecombinationAlgorithm` 1/3, simple pairing otherwise.
+        api_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"])
+        algorithm=api_algo in (1,3) ? :blossom : :greedy
         cached=LAST_MESH[]
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
         for ((dim,tag),angle) in settings
@@ -6210,7 +6229,7 @@ function _recombine()
                 cells[:,column].=[position[n] for n in nodes]
             end
             submesh=Mesh(coords;tris=cells)
-            recombined=recombine_triangles(submesh)
+            recombined=recombine_triangles(submesh;algorithm=algorithm)
             target=record
             if target===nothing
                 add_discrete_entity!(m,dim,tag)

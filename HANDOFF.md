@@ -556,12 +556,48 @@ and the curved annular-sector transfinite volume reproduces Gmsh's exact
 `validation/geo_constraints/differential.jl` (`transfinite_curved_surface`,
 `transfinite_curved_volume`).
 
-**Partially unblocked**: transfinite volume recombination — the standalone
-kernels now emit recombined cells (`recombine=` on `mesh_transfinite_prism`
-and `mesh_transfinite_volume`, returning `MixedMesh` with Gmsh's valid
-patterns), but the compact `Mesh` and the full generation pipeline remain
-simplex-only — model-level `Recombine` on transfinite volumes still needs
-MixedMesh plumbing through `execute_geo`/`.msh` assembly.
+**Model-level recombination plumbed end-to-end**: `Recombine Surface` /
+`Mesh.RecombineAll` now flow through the whole generation pipeline.
+Unstructured surfaces run `recombine_triangles` as a post-pass before
+per-entity smoothing/reverse with embedded-curve chain edges protected
+(`protected_edges=` on `recombine_triangles`); transfinite quad/triangle
+surfaces dispatch to the recombined patch kernels
+(`mesh_transfinite_quad_patch` — now forwarding `allow_warped`/
+`project_plane`/`interpolate` — `mesh_transfinite_triangle_patch`, and the
+new `mesh_transfinite_triangle_collapsed_patch` for `Mesh.TransfiniteTri=0`).
+Transfinite volumes derive their `recombine=` masks from the boundary
+surfaces' recombined flags in canonical slot order (Gmsh's
+`orientedFaces[i].recombined()` rule — `Recombine Volume` never drives the
+kernel): six faces map 1:1, five-face prisms map slots (1,2,3,5,6) onto
+(f0,f1,f2,f4,f5) with the compact layout additionally passing each
+triangular face's `arrangement` pair. `execute_geo` merges mixed parts by
+bucketing element blocks per (MSH type, entity dim, tag) with bitwise
+coordinate dedup and lowest-dimension node ownership; `context.mesh`,
+`GeoExecution.mesh`, `mesh_parts`, the API/IO caches, and `geo_entity_mesh`
+are now `Union{Mesh,MixedMesh}`; `Save` writes mixed products via
+`write_mixed_msh` (v2.2) with MPoint blocks appended. `model_to_mixed`
+projects mixed surface parts (one block per input dim-2 block, cells
+classified on the surface); volume-projection of a MixedMesh part throws a
+documented blocker. PLC boundary assembly folds recombined boundary
+quadrangles onto the 1-3 diagonal for unstructured volumes (upstream keeps
+quads + pyramid transitions — cell-level nonconformity across the 2-D/3-D
+interface is inherent to an all-tet interior). Periodic slave copies,
+boundary writeback, homology extraction, surface/volume smoothing and
+reverse, and `OptimizeMesh`/`RefineMesh`/`RecombineMesh` guards all accept
+or correctly reject mixed meshes. Compact `Mesh.TransfiniteTri=1` prism
+interior slots behind the diagonal keep their own `transfiniteHex`
+evaluations as unreferenced orphan entity nodes — Gmsh 4.15.2 stores and
+writes them verbatim (46 nodes; aliasing them to the diagonal vertex was
+tried and reverted — it welds the pair Gmsh keeps distinct). Gmsh 4.15.2
+differentials all green: six-face all-recombined and valid
+opposite-pair-free volumes, five-face legacy and compact recombined prisms,
+unrecombined compact prism, unstructured `Recombine Surface` + `Mesh 3`,
+plus focused recombine/periodic/mesh-dim/io suites. Files:
+`src/structured/TransfinitePrism.jl`,
+`src/structured/TransfiniteQuad.jl`, `src/meshing/Recombine.jl`,
+`src/meshing/Periodic.jl`, `src/core/Elements.jl` (`nnodes(::MixedMesh)`),
+`src/geometry/{Model,ModelMesh1D,ModelMeshingAttributes,GeoExec}.jl`,
+`src/interfaces/{API,CLI,IO}.jl`.
 
 Previous increment (for context): **warped/non-affine transfinite volumes** — `Transfinite Volume` no longer
 collapses every block onto the affine eight-corner parallelepiped. The model

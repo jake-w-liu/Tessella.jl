@@ -11,6 +11,7 @@ straight-curve relations separately.
 module Periodic
 
 using ..MeshTypes: Mesh, nnodes, validate
+using ..Elements: MixedMesh
 using ..Transform: _affine_coordinate, _periodic_affine_input
 
 export periodic_identify, periodic_identify_affine
@@ -69,7 +70,8 @@ function _periodic_tolerance(atol,caller::AbstractString)
     return tolerance
 end
 
-function _periodic_pairs(mesh::Mesh,master::AbstractVector{<:Integer},
+function _periodic_pairs(mesh::Union{Mesh,MixedMesh},
+                         master::AbstractVector{<:Integer},
                          slave::AbstractVector{<:Integer},caller::AbstractString)
     length(master)==length(slave) || throw(ArgumentError(
         "$caller: master and slave node counts differ"))
@@ -96,11 +98,7 @@ end
 function _periodic_output(mesh::Mesh,slaves::Vector{Int},
                           expected_coordinates::Vector{NTuple{3,Float64}},
                           caller::AbstractString)
-    coords=copy(mesh.coords)
-    for i in eachindex(slaves)
-        ib=slaves[i];expected=expected_coordinates[i]
-        coords[1,ib]=expected[1];coords[2,ib]=expected[2];coords[3,ib]=expected[3]
-    end
+    coords=_periodic_snapped_coords(mesh,slaves,expected_coordinates)
     out=Mesh(coords; segs=copy(mesh.segs), tris=copy(mesh.tris), tets=copy(mesh.tets),
              seg_tag=copy(mesh.seg_tag), tri_tag=copy(mesh.tri_tag),
              tet_tag=copy(mesh.tet_tag))
@@ -108,6 +106,37 @@ function _periodic_output(mesh::Mesh,slaves::Vector{Int},
     diagnostic.ok || throw(ErrorException(
         "$caller: invalid mesh — "*join(diagnostic.messages,"; ")))
     return out
+end
+
+# The mixed container path preserves every block and its metadata verbatim —
+# a periodic snap only corrects node coordinates, never element connectivity.
+function _periodic_output(mesh::MixedMesh,slaves::Vector{Int},
+                          expected_coordinates::Vector{NTuple{3,Float64}},
+                          caller::AbstractString)
+    coords=_periodic_snapped_coords(mesh,slaves,expected_coordinates)
+    out=MixedMesh(coords,mesh.blocks;
+                  physical_names=mesh.physical_names,
+                  entity_data=mesh.entity_data,
+                  elementary_entities=mesh.elementary_entities,
+                  periodic_links=mesh.periodic_links,
+                  ancillary_sections=mesh.ancillary_sections,
+                  data_sections=mesh.data_sections,
+                  partition_data=mesh.partition_data)
+    diagnostic=validate(out)
+    diagnostic.ok || throw(ErrorException(
+        "$caller: invalid mesh — "*join(diagnostic.messages,"; ")))
+    return out
+end
+
+function _periodic_snapped_coords(mesh::Union{Mesh,MixedMesh},
+                                  slaves::Vector{Int},
+                                  expected_coordinates::Vector{NTuple{3,Float64}})
+    coords=copy(mesh.coords)
+    for i in eachindex(slaves)
+        ib=slaves[i];expected=expected_coordinates[i]
+        coords[1,ib]=expected[1];coords[2,ib]=expected[2];coords[3,ib]=expected[3]
+    end
+    return coords
 end
 
 function _periodic_affine(raw,caller::AbstractString)
@@ -128,7 +157,8 @@ The returned `Mesh` stores the corrected geometry, not a persistent periodic
 entity relation. Callers that need solver constraints must retain the supplied
 node pairs separately.
 """
-function periodic_identify(mesh::Mesh, translation, master::AbstractVector{<:Integer},
+function periodic_identify(mesh::Union{Mesh,MixedMesh}, translation,
+                           master::AbstractVector{<:Integer},
                            slave::AbstractVector{<:Integer}; atol::Real=1e-12)
     caller="periodic_identify"
     input_diagnostic=validate(mesh)
@@ -171,7 +201,7 @@ Euclidean-distance tolerance. The returned `Mesh` stores corrected geometry,
 not persistent periodic entity metadata; callers that need solver constraints
 must retain the supplied pairs and affine transform.
 """
-function periodic_identify_affine(mesh::Mesh,affine,
+function periodic_identify_affine(mesh::Union{Mesh,MixedMesh},affine,
                                   master::AbstractVector{<:Integer},
                                   slave::AbstractVector{<:Integer};
                                   atol::Real=1e-12)

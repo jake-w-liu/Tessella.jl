@@ -14,9 +14,9 @@ module Model
 
 using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
                    triangle_area, tet_signed_volume, tet_volume
-using ..Elements: ElementBlock, MixedEntity, MixedEntityData,
-                  MixedPeriodicLink, MixedMesh, msh_num_nodes, msh_family,
-                  msh_dimension
+using ..Elements: ElementBlock, MixedElementBlock, MixedEntity,
+                  MixedEntityData, MixedPeriodicLink, MixedMesh,
+                  msh_num_nodes, msh_family, msh_dimension
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
                 _vert, _is_ghost_tri, _is_ghost_v
 using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
@@ -35,9 +35,13 @@ using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfinitePrism: mesh_transfinite_prism
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
+                             mesh_transfinite_triangle_patch,
                              mesh_transfinite_triangle_collapsed,
+                             mesh_transfinite_triangle_collapsed_patch,
                              _collapsed_node, _node
 using ..Transfinite: mesh_transfinite_patch
+using ..TransfiniteQuad: mesh_transfinite_quad_patch
+using ..Recombine: recombine_triangles, _edge_key
 using ..Mesh1D: mesh_curve, curve_length, _adaptive_points, _length_point,
     _invert_primitive, _IntegrationPoint, _GMSH_INTEGRATION_PRECISION,
     _GMSH_MIN_INTEGRATION_DEPTH, _GMSH_MAX_INTEGRATION_DEPTH,
@@ -2848,11 +2852,19 @@ function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
         key=a<b ? (a,b) : (b,a)
         edge_counts[key]=get(edge_counts,key,0)+1
     end
-    boundary=falses(nnodes(mesh))
+    return _surface_boundary_from_counts(edge_counts,nnodes(mesh),caller)
+end
+
+# Degree-1 edge/node recovery shared by the simplex and mixed surface
+# containers — recombination leaves the boundary edge set invariant (paired
+# diagonals are interior), so the same count audit applies.
+function _surface_boundary_from_counts(edge_counts,nn::Int,
+                                       caller::AbstractString)
+    boundary=falses(nn)
     edges=Set{Tuple{Int32,Int32}}()
     for ((a,b),count) in edge_counts
         count<=2 || throw(ArgumentError(
-            "$caller: mesh edge ($a,$b) has $count incident triangles"))
+            "$caller: mesh edge ($a,$b) has $count incident surface cells"))
         count==1 || continue
         push!(edges,(a,b))
         boundary[a]=true;boundary[b]=true
@@ -2860,7 +2872,32 @@ function _surface_boundary_topology(mesh::Mesh,caller::AbstractString)
     return boundary,edges
 end
 
-function _curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,eligible_nodes,
+# Edge slots of a linear dim-2 MSH element: triangle perimeter, quadrangle
+# perimeter. Returns `nothing` for non-polygon or unsupported widths.
+@inline _surface_cell_edge_slots(width::Int) =
+    width==3 ? ((1,2),(2,3),(3,1)) :
+    width==4 ? ((1,2),(2,3),(3,4),(4,1)) : nothing
+
+# Oriented dim-2 cell edges of a mixed surface mesh — the quadrangle
+# perimeter replaces the two shared diagonals an unrecombined simplex mesh
+# carried. Line blocks are skipped.
+function _surface_boundary_topology(mesh::MixedMesh,caller::AbstractString)
+    edge_counts=Dict{Tuple{Int32,Int32},Int}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        msh_dimension(block.msh)==2 || continue
+        slots=_surface_cell_edge_slots(msh_num_nodes(block.msh))
+        slots===nothing && continue
+        @inbounds for cell in axes(block.nodes,2),slots in slots
+            a=block.nodes[slots[1],cell];b=block.nodes[slots[2],cell]
+            key=a<b ? (a,b) : (b,a)
+            edge_counts[key]=get(edge_counts,key,0)+1
+        end
+    end
+    return _surface_boundary_from_counts(edge_counts,nnodes(mesh),caller)
+end
+
+function _curve_parameter_nodes(m::GeoModel,mesh,curve::Int,eligible_nodes,
                                 eligible_edges,atol::Float64,
                                 caller::AbstractString)
     _curve_type(m,curve)===:line ||
@@ -2934,7 +2971,7 @@ end
 # mapped to the parameter bounds. Nodes that fail the bitwise lookup fall
 # back to `model_closest_point` projection at the projector's own tolerance;
 # the sorted-chain audit is identical to the line path.
-function _curve_parameter_nodes_curved(m::GeoModel,mesh::Mesh,curve::Int,
+function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
                                        eligible_nodes,eligible_edges,
                                        atol::Float64,
                                        caller::AbstractString)
@@ -3088,7 +3125,7 @@ end
 # unrestricted classification first — an embedded point wired into the
 # curve's edge chain is a legitimate member — and only retries with foreign
 # point entities masked out when that classification fails.
-function _periodic_curve_eligible_nodes(m::GeoModel,mesh::Mesh,curve::Int)
+function _periodic_curve_eligible_nodes(m::GeoModel,mesh,curve::Int)
     a,b=m.curves[curve]
     start,stop=m.points[a],m.points[b]
     eligible=trues(nnodes(mesh))
@@ -3138,7 +3175,7 @@ end
 # Nodes whose coordinates match one of this curve's own discretization
 # points keep their eligibility — a genuinely shared pinch vertex is owned
 # by both curves.
-function _curve_chain_eligible(mesh::Mesh,base,
+function _curve_chain_eligible(mesh,base,
                                owned::Dict{NTuple{3,Float64},Set{Int}},
                                curve::Int)
     isempty(owned) && return base
@@ -3152,7 +3189,7 @@ function _curve_chain_eligible(mesh::Mesh,base,
     return mask
 end
 
-function _periodic_curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,
+function _periodic_curve_parameter_nodes(m::GeoModel,mesh,curve::Int,
                                          mesh_edges,atol::Float64,
                                          caller::AbstractString;
                                          owned::Union{Nothing,
@@ -3177,7 +3214,7 @@ function _periodic_curve_parameter_nodes(m::GeoModel,mesh::Mesh,curve::Int,
     end
 end
 
-function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
+function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh,
                                            constraints,surface::Int)
     mesh_edges=_model_projection_triangle_edges(mesh)
     # Foreign-curve-owned vertices are not admissible sync candidates — a
@@ -3309,7 +3346,7 @@ function _synchronize_periodic_parameters!(forced,m::GeoModel,mesh::Mesh,
     return changed
 end
 
-function _model_periodic_curve_nodes(m::GeoModel,mesh::Mesh,
+function _model_periodic_curve_nodes(m::GeoModel,mesh,
                                      constraint::ModelPeriodicConstraint)
     mesh_edges=_model_projection_triangle_edges(mesh)
     slave=Int(constraint.slave_entity);master=Int(constraint.master_entity)
@@ -3344,12 +3381,14 @@ function _model_periodic_curve_nodes(m::GeoModel,mesh::Mesh,
             master_nodes=master_nodes,affine=constraint.affine)
 end
 
-function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
+function _model_periodic_nodes(m::GeoModel,mesh,
                                constraint::ModelPeriodicConstraint)
     constraint.dim==1 && return _model_periodic_curve_nodes(
         m,mesh,constraint)
-    constraint.dim==2 && return _model_periodic_surface_nodes(
-        m,mesh,constraint)
+    constraint.dim==2 && (mesh isa Mesh || throw(ArgumentError(
+        "model_periodic_nodes: periodic Surface mapping requires a " *
+        "tetrahedron volume mesh"))) &&
+        return _model_periodic_surface_nodes(m,mesh,constraint)
     constraint.dim==3 && return (
         master_entity=Int(constraint.master_entity),
         slave_nodes=Int32[],master_nodes=Int32[],affine=constraint.affine)
@@ -3357,7 +3396,7 @@ function _model_periodic_nodes(m::GeoModel,mesh::Mesh,
         "model_periodic_nodes: unsupported periodic dimension $(constraint.dim)"))
 end
 
-function _model_mapping_matches(mesh::Mesh,constraint::ModelPeriodicConstraint,
+function _model_mapping_matches(mesh,constraint::ModelPeriodicConstraint,
                                 mapping,caller::AbstractString;exact::Bool)
     # Orientation-only curve relations carry no affine: the node pairing is
     # parameter-based and was already verified while the mapping was built.
@@ -3387,7 +3426,7 @@ end
 # whose coefficients don't reproduce the endpoint bitwise (a `Rotate` with an
 # inexact axis term, for instance) would otherwise rewrite a shared corner to
 # `affine(master point)`, cracking the boundary the corner is welded on.
-function _model_periodic_snap_mapping(m::GeoModel,mesh::Mesh,
+function _model_periodic_snap_mapping(m::GeoModel,mesh,
                                       constraint::ModelPeriodicConstraint)
     mapping=_model_periodic_nodes(m,mesh,constraint)
     constraint.dim==1 || return mapping
@@ -3408,7 +3447,7 @@ function _model_periodic_snap_mapping(m::GeoModel,mesh::Mesh,
             affine=mapping.affine)
 end
 
-function _snap_surface_periodic(m::GeoModel,mesh::Mesh,constraints,
+function _snap_surface_periodic(m::GeoModel,mesh,constraints,
                                 caller::AbstractString)
     output=mesh
     ordered=_model_periodic_constraint_order(constraints,caller)
@@ -3443,7 +3482,7 @@ relations return empty node arrays with the stored master and affine: as in
 Gmsh 4.15.2, volume periodicity is mesh-inert and carries no node
 correspondence.
 """
-function model_periodic_nodes(m::GeoModel,mesh::Mesh,dim,slave_entity)
+function model_periodic_nodes(m::GeoModel,mesh,dim,slave_entity)
     caller="model_periodic_nodes"
     d=_dimension(dim,caller);slave=_tag(slave_entity,caller,d)
     constraint=get(m.periodic,(d,slave),nothing)
@@ -3469,7 +3508,7 @@ end
 @inline _model_projection_legacy_tag(tags::Vector{Int32})=
     isempty(tags) ? Int32(0) : first(tags)
 
-function _model_projection_bbox(mesh::Mesh,nodes,caller::AbstractString)
+function _model_projection_bbox(mesh,nodes,caller::AbstractString)
     isempty(nodes) && throw(ErrorException(
         "$caller: internal entity projection has no nodes"))
     first_node=Int(first(nodes))
@@ -3561,8 +3600,28 @@ function _model_projection_triangle_edges(mesh::Mesh)
     return edges
 end
 
+# Dim-2 cell edges of a recombined surface part — quadrangle perimeters count
+# once each; the absorbed diagonal is gone. Periodic-chain classification
+# audits the same degree-1 boundary on either container.
+function _model_projection_triangle_edges(mesh::MixedMesh)
+    edges=Set{Tuple{Int32,Int32}}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        msh_dimension(block.msh)==2 || continue
+        slots=_surface_cell_edge_slots(msh_num_nodes(block.msh))
+        slots===nothing && continue
+        @inbounds for cell in axes(block.nodes,2),(a,b) in slots
+            first_node=block.nodes[a,cell]
+            second_node=block.nodes[b,cell]
+            push!(edges,first_node<second_node ?
+                  (first_node,second_node) : (second_node,first_node))
+        end
+    end
+    return edges
+end
+
 function _model_projection_embedded_curve_nodes(
-    m::GeoModel,mesh::Mesh,curve::Int,mesh_edges,
+    m::GeoModel,mesh,curve::Int,mesh_edges,
     atol::Float64,caller::AbstractString;
     owned::Union{Nothing,Dict{NTuple{3,Float64},Set{Int}}}=nothing)
     # Non-`Line` embedded curves classify through the same stored-parameter
@@ -3580,7 +3639,7 @@ function _model_projection_embedded_curve_nodes(
 end
 
 function _embedded_line_curve_nodes(
-    m::GeoModel,mesh::Mesh,curve::Int,mesh_edges,
+    m::GeoModel,mesh,curve::Int,mesh_edges,
     atol::Float64,caller::AbstractString;
     eligible_nodes=trues(nnodes(mesh)))
     start_point,stop_point=m.curves[curve]
@@ -3640,7 +3699,7 @@ function _embedded_line_curve_nodes(
 end
 
 function _model_projection_embedded_point_node(
-    m::GeoModel,mesh::Mesh,point::Int,atol::Float64,caller::AbstractString)
+    m::GeoModel,mesh,point::Int,atol::Float64,caller::AbstractString)
     coordinate=m.points[point]
     scale=max(1.0,hypot(coordinate...))
     tolerance=max(atol,128eps(Float64)*scale)
@@ -3659,7 +3718,7 @@ function _model_projection_embedded_point_node(
     return only(matches)
 end
 
-function _model_projection_periodic_links(m::GeoModel,mesh::Mesh,point_nodes,
+function _model_projection_periodic_links(m::GeoModel,mesh,point_nodes,
                                           constraints,caller::AbstractString)
     curve_links=MixedPeriodicLink[]
     outgoing=Dict{Int,Vector{Tuple{Int,Union{Nothing,NTuple{16,Float64}}}}}()
@@ -3803,7 +3862,8 @@ Periodic endpoint relations are emitted as a deterministic spanning forest when
 curve directions share corners, satisfying the MSH one-master-per-slave entity
 constraint while retaining every curve link.
 """
-function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
+function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
+                        surface_tag::Integer;
                         external_curves::Union{Nothing,Set{Int}}=nothing)
     caller="model_to_mixed"
     surface=_tag(surface_tag,caller,2)
@@ -3812,14 +3872,35 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
     diagnostic=validate(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
-    nsegs(mesh)==0 || throw(ArgumentError(
-        "$caller: input must not contain explicit segment cells"))
-    ntets(mesh)==0 || throw(ArgumentError(
-        "$caller: input must be a surface mesh without tetrahedra"))
-    ntris(mesh)>0 || throw(ArgumentError(
-        "$caller: input must contain triangle cells"))
-    all(iszero,mesh.tri_tag) || throw(ArgumentError(
-        "$caller: input triangle tags must be zero; physical ownership comes from the model"))
+    if mesh isa Mesh
+        nsegs(mesh)==0 || throw(ArgumentError(
+            "$caller: input must not contain explicit segment cells"))
+        ntets(mesh)==0 || throw(ArgumentError(
+            "$caller: input must be a surface mesh without tetrahedra"))
+        ntris(mesh)>0 || throw(ArgumentError(
+            "$caller: input must contain triangle cells"))
+        all(iszero,mesh.tri_tag) || throw(ArgumentError(
+            "$caller: input triangle tags must be zero; physical ownership comes from the model"))
+    else
+        # A recombined part arrives as a `MixedMesh`: the same contract —
+        # dim-2 element blocks only, untagged (physical ownership is
+        # re-derived from the model here).
+        for block in mesh.blocks
+            block isa ElementBlock || throw(ArgumentError(
+                "$caller: input must not contain special-element blocks"))
+            dimension=msh_dimension(block.msh)
+            dimension==1 && throw(ArgumentError(
+                "$caller: input must not contain explicit segment cells"))
+            dimension==3 && throw(ArgumentError(
+                "$caller: input must be a surface mesh without volume cells"))
+            dimension==0 && throw(ArgumentError(
+                "$caller: input must not contain point cells"))
+        end
+        _surface_cell_count(mesh)>0 || throw(ArgumentError(
+            "$caller: input must contain dim-2 cells"))
+        all(block->all(iszero,block.tags),mesh.blocks) || throw(ArgumentError(
+            "$caller: input cell tags must be zero; physical ownership comes from the model"))
+    end
 
     embedded_points,embedded_curves=
         _model_surface_embedding_tags(m,surface,caller)
@@ -3987,7 +4068,7 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
     point_tags=sort!(collect(keys(point_nodes)))
     total_elements=try
         subtotal=Base.checked_add(length(point_tags),length(line_cells))
-        Base.checked_add(subtotal,ntris(mesh))
+        Base.checked_add(subtotal,_surface_cell_count(mesh))
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("$caller: projected element count overflows Int"))
@@ -4035,19 +4116,25 @@ function model_to_mixed(m::GeoModel,mesh::Mesh,surface_tag::Integer;
         2,surface,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
         physical_tags=surface_physical,boundaries=surface_boundaries,
         embedded_curves=embedded_curves)
-    triangle_physical=fill(
-        _model_projection_legacy_tag(surface_physical),ntris(mesh))
+    surface_legacy=_model_projection_legacy_tag(surface_physical)
 
     blocks=ElementBlock[
         ElementBlock(15,point_matrix,point_physical),
         ElementBlock(1,line_matrix,line_physical),
-        ElementBlock(2,mesh.tris,triangle_physical),
     ]
     block_entities=Vector{Int32}[
         Int32.(point_tags),
         line_entities,
-        fill(Int32(surface),ntris(mesh)),
     ]
+    # Dim-2 cells emit one block per input block — a simplex part is a
+    # single triangle block; a recombined part keeps its triangle and
+    # quadrangle blocks, each cell classified on the surface entity.
+    for (msh,cells) in _surface_dim2_blocks(mesh)
+        count=size(cells,2)
+        push!(blocks,ElementBlock(
+            msh,cells,fill(surface_legacy,count)))
+        push!(block_entities,fill(Int32(surface),count))
+    end
     external_node_tags=UInt64.(1:nnodes(mesh))
     external_element_tags=_model_projection_external_elements(blocks)
     node_parametric=Union{Nothing,Vector{Float64}}[
@@ -4090,13 +4177,13 @@ surface relation covering only one projected surface fails.
 """
 function model_to_mixed(m::GeoModel,parts::AbstractVector)
     caller="model_to_mixed"
-    surface_parts=Tuple{Int,Mesh}[]
+    surface_parts=Tuple{Int,Union{Mesh,MixedMesh}}[]
     for part in parts
         (part isa Tuple && length(part)==2) || throw(ArgumentError(
             "$caller: each surface entry must be a (tag, mesh) pair"))
         tag=_tag(part[1],caller,2)
         mesh=part[2]
-        mesh isa Mesh || throw(ArgumentError(
+        mesh isa Union{Mesh,MixedMesh} || throw(ArgumentError(
             "$caller: each surface entry must be a (tag, mesh) pair"))
         haskey(m.surfaces,tag) || throw(ArgumentError(
             "$caller: unknown Surface[$tag]"))
@@ -4809,7 +4896,7 @@ function _automatic_context_field(m::GeoModel,spec,config,entities,
 end
 
 function _model_periodic_surface_mesh(
-    m::GeoModel,master_mesh::Mesh,constraint::ModelPeriodicConstraint,
+    m::GeoModel,master_mesh,constraint::ModelPeriodicConstraint,
     caller::AbstractString)
     constraint.dim==2 || throw(ErrorException(
         "$caller: internal periodic surface mesh received dimension " *
@@ -4878,21 +4965,44 @@ function _model_periodic_surface_mesh(
             output_coordinates[:,node].=m.points[slave_point]
         end
     end
-    tris=master_mesh.tris
     coefficients_det=coefficients[1]*(coefficients[5]*coefficients[9]-
         coefficients[6]*coefficients[8])-
         coefficients[4]*(coefficients[2]*coefficients[9]-
         coefficients[3]*coefficients[8])+
         coefficients[7]*(coefficients[2]*coefficients[6]-
         coefficients[3]*coefficients[5])
-    if coefficients_det<0
-        # A mirrored transform flips triangle winding; swapping two vertices
-        # keeps the copied mesh positively oriented.
-        flipped=Matrix{Int32}(undef,3,size(tris,2))
-        flipped[1,:].=tris[1,:];flipped[2,:].=tris[3,:];flipped[3,:].=tris[2,:]
-        tris=flipped
+    # A mirrored transform flips cell winding; swapping two vertices keeps
+    # the copied mesh positively oriented. Dim-2 blocks on a recombined
+    # master copy over with the same convention `_reversed_surface_mesh`
+    # uses — triangles swap 2↔3, quadrangles 2↔4.
+    flip=cell->begin
+        width=size(cell,1)
+        width==3 && return cell[[1,3,2],:]
+        width==4 && return cell[[1,4,3,2],:]
+        cell
     end
-    output=Mesh(output_coordinates;tris=tris)
+    if master_mesh isa Mesh
+        tris=master_mesh.tris
+        coefficients_det<0 && (tris=flip(tris))
+        output=Mesh(output_coordinates;tris=tris)
+    else
+        blocks=map(master_mesh.blocks) do block
+            block isa ElementBlock &&
+                msh_dimension(block.msh)==2 ||
+                return block
+            nodes=coefficients_det<0 ?
+                flip(block.nodes) : Matrix{Int32}(block.nodes)
+            ElementBlock(block.msh,nodes,copy(block.tags))
+        end
+        output=MixedMesh(output_coordinates,blocks;
+                         physical_names=master_mesh.physical_names,
+                         entity_data=master_mesh.entity_data,
+                         elementary_entities=master_mesh.elementary_entities,
+                         periodic_links=master_mesh.periodic_links,
+                         ancillary_sections=master_mesh.ancillary_sections,
+                         data_sections=master_mesh.data_sections,
+                         partition_data=master_mesh.partition_data)
+    end
     diagnostic=validate(output)
     diagnostic.ok || throw(ArgumentError(
         "$caller: synchronized periodic Surface[$slave] mesh is invalid — " *
@@ -4950,7 +5060,7 @@ function _model_surface_contains2(point,polygons)
     return true
 end
 
-@inline function _model_mesh_coordinate(mesh::Mesh,node::Integer)
+@inline function _model_mesh_coordinate(mesh,node::Integer)
     return (mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
 end
 
@@ -5092,7 +5202,7 @@ function _model_projection_boundary_surface_faces!(
 end
 
 function _model_affine_node_pairs(
-    mesh::Mesh,constraint::ModelPeriodicConstraint,master_nodes_raw,
+    mesh,constraint::ModelPeriodicConstraint,master_nodes_raw,
     slave_nodes_raw,caller::AbstractString)
     master_nodes=sort!(unique!(Int[Int(node) for node in master_nodes_raw]))
     slave_nodes=sort!(unique!(Int[Int(node) for node in slave_nodes_raw]);
@@ -5643,6 +5753,15 @@ function _model_projection_periodic_surface_links(
     return links
 end
 
+# Classified projection of a recombined volume part — the projection's
+# sheet/edge classification is tetrahedron-face based. `execute_geo` merges
+# such parts into the mixed product directly; only this projection entry is
+# unsupported.
+_model_volume_to_mixed(m::GeoModel,mesh::MixedMesh,volume::Int)=throw(
+    ArgumentError("model_to_mixed: classified projection of Volume[$volume] " *
+        "requires a tetrahedron mesh — a recombined MixedMesh volume part " *
+        "cannot be projected"))
+
 function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     caller="model_to_mixed"
     haskey(m.volumes,volume) || throw(ArgumentError(
@@ -5987,7 +6106,8 @@ serialized volume-embedding relation; MSH4 classification, signed volume boundar
 its Curve-In-Surface relation, and MSH2 cell ownership remain available.
 """
 function model_to_mixed(
-    m::GeoModel,mesh::Mesh,entity_dim::Integer,entity_tag::Integer)
+    m::GeoModel,mesh::Union{Mesh,MixedMesh},entity_dim::Integer,
+    entity_tag::Integer)
     caller="model_to_mixed"
     dim=_dimension(entity_dim,caller)
     dim in (2,3) || throw(ArgumentError(
@@ -5997,7 +6117,7 @@ function model_to_mixed(
                     _model_volume_to_mixed(m,mesh,tag)
 end
 
-function _node_at(mesh::Mesh, p; atol=1e-12)
+function _node_at(mesh, p; atol=1e-12)
     @inbounds for i in 1:nnodes(mesh)
         hypot(mesh.coords[1,i]-p[1],mesh.coords[2,i]-p[2],mesh.coords[3,i]-p[3])<=atol && return i
     end
@@ -6130,6 +6250,28 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
                          gmsh_insertion=true)
     end
     mesh=to_mesh(T; interior=interior)
+    # Upstream `meshGFace` recombination ordering: recombine the freshly
+    # generated triangles into quadrangles before per-entity smoothing and
+    # reverse run. Embedded-curve chain segments are protected edges — a
+    # recombined quad may never absorb them, the same contract upstream's
+    # embedded-edge bookkeeping enforces.
+    if _model_surface_recombined(m,t)
+        algo=m.meshing.recombine_algo
+        # Upstream `algoRecombine` (0 simple, 1 blossom — the default) is a
+        # triangle-pairing pass; 2/3 run the full-quad pipelines that turn
+        # leftover triangles into quadrangles with fresh Steiner nodes
+        # (algo 2 additionally halves the 1-D mesh first) — a stage this
+        # kernel does not implement, so those values fail explicitly.
+        algo>=2 && throw(ArgumentError(
+            "$caller: Mesh.RecombinationAlgorithm=$algo requests the " *
+            "full-quad subdivision pipeline on Surface[$t], which is not " *
+            "implemented — supported values are 0 (simple) and 1 " *
+            "(blossom)"))
+        mesh=recombine_triangles(
+            mesh;
+            algorithm=algo==0 ? :greedy : :blossom,
+            protected_edges=_embedded_protected_edges(mesh,xs,ys,internal))
+    end
     mesh=_consume_surface_attributes(m,t,mesh,caller)
     # `to_mesh` packs the projected (u,v) coordinates into rows 1,2; scatter
     # them onto the kept axes and solve the dropped coordinate on the plane.
@@ -6153,9 +6295,93 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
     end
     diag=validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
-    ntris(mesh)>0 || throw(ErrorException(
-        "$caller: Surface[$t] produced no triangles"))
+    _surface_cell_count(mesh)>0 || throw(ErrorException(
+        "$caller: Surface[$t] produced no cells"))
     return mesh,embedded
+end
+
+# Dim-2 cell count on either surface representation — triangles for a
+# simplex part, all dim-2 blocks for a recombined `MixedMesh`.
+_surface_cell_count(mesh::Mesh)=ntris(mesh)
+function _surface_cell_count(mesh::MixedMesh)
+    total=0
+    for block in mesh.blocks
+        block isa ElementBlock && msh_dimension(block.msh)==2 ||
+            continue
+        total+=size(block.nodes,2)
+    end
+    return total
+end
+
+# `(msh_type, connectivity)` pairs for the dim-2 cells of either surface
+# representation — one triangle pair for a simplex part, one entry per dim-2
+# block for a recombined `MixedMesh` (block order preserved).
+function _surface_dim2_blocks(mesh::Mesh)
+    ntris(mesh)>0 ? Tuple{Int,Matrix{Int32}}[(2,mesh.tris)] :
+                    Tuple{Int,Matrix{Int32}}[]
+end
+function _surface_dim2_blocks(mesh::MixedMesh)
+    out=Tuple{Int,Matrix{Int32}}[]
+    for block in mesh.blocks
+        block isa ElementBlock && msh_dimension(block.msh)==2 ||
+            continue
+        push!(out,(block.msh,block.nodes))
+    end
+    return out
+end
+
+# Dim-3 cell count on either volume representation — tetrahedra for a
+# simplex part, every dim-3 block for a recombined `MixedMesh`.
+_volume_cell_count(mesh::Mesh)=ntets(mesh)
+function _volume_cell_count(mesh::MixedMesh)
+    total=0
+    for block in mesh.blocks
+        block isa ElementBlock && msh_dimension(block.msh)==3 ||
+            continue
+        total+=size(block.nodes,2)
+    end
+    return total
+end
+
+# The transfinite volume kernels emit their boundary sheets alongside the
+# volume cells; a model part keeps only the volume cells because the boundary
+# entities' own parts serialize the surface elements (and `model_to_mixed`
+# re-derives boundary faces from the volume topology). A simplex part drops
+# its `tris`; a recombined `MixedMesh` drops its dim-2 blocks, keeping the
+# node list — including the compact layout's orphan nodes — so shared
+# boundary nodes still deduplicate bitwise in the entity merge.
+_volume_part_strip(mesh::Mesh)=Mesh(mesh.coords;tets=mesh.tets)
+function _volume_part_strip(mesh::MixedMesh)
+    blocks=MixedElementBlock[]
+    for block in mesh.blocks
+        block isa ElementBlock && msh_dimension(block.msh)==3 ||
+            continue
+        # Fresh block — the kernel's `volume_tag` is an entity label, not a
+        # physical tag; the simplex strip likewise drops `tet_tag`.
+        push!(blocks,ElementBlock(block.msh,block.nodes))
+    end
+    return MixedMesh(mesh.coords,blocks)
+end
+
+# Embedded-curve constraint edges keyed by mesh node indices — recombination
+# must not pair the two triangles sharing such an edge, because upstream
+# keeps embedded chains visible as face-internal line edges. `internal`
+# carries PSLG vertex pairs; `to_mesh` preserves the (u,v) coordinates
+# bitwise, so a coordinate lookup resolves each endpoint's mesh node.
+function _embedded_protected_edges(mesh,xs,ys,internal)
+    isempty(internal) && return nothing
+    loc=Dict{NTuple{2,Float64},Int32}()
+    for node in 1:nnodes(mesh)
+        loc[(mesh.coords[1,node],mesh.coords[2,node])]=Int32(node)
+    end
+    protected=Set{NTuple{2,Int32}}()
+    for (a,b) in internal
+        na=get(loc,(xs[a],ys[a]),nothing)
+        nb=get(loc,(xs[b],ys[b]),nothing)
+        na===nothing || nb===nothing ||
+            push!(protected,_edge_key(na,nb))
+    end
+    return protected
 end
 
 # `GFace::getMeshSizeFromBoundary` (geo/GFace.cpp): a stored per-entity int
@@ -6210,7 +6436,7 @@ end
 # Post-refinement attribute passes for a surface mesh: `smoothing` runs that
 # many boundary-preserving Laplacian iterations; `reverse` flips triangle
 # orientation, matching Gmsh's `setReverse`/`setSmoothing` semantics.
-function _consume_surface_attributes(m::GeoModel,t::Int,mesh::Mesh,
+function _consume_surface_attributes(m::GeoModel,t::Int,mesh,
                                      caller::AbstractString)
     iterations=get(m.meshing.smoothing,(2,t),0)
     iterations>0 && (mesh=_laplacian_smooth_surface(mesh,iterations,caller,t))
@@ -6219,18 +6445,39 @@ function _consume_surface_attributes(m::GeoModel,t::Int,mesh::Mesh,
     return mesh
 end
 
-function _laplacian_smooth_surface(mesh::Mesh,iterations::Int,
-                                   caller::AbstractString,t::Int)
+# Laplacian smoothing shared by simplex and mixed surfaces: the neighbor graph
+# is the union of all dim-2 cell edges (triangle edges + quadrangle
+# perimeters), the boundary mask is the degree-1 edge set. Only the (u,v)
+# parametric plane coordinates are averaged — the lifted coordinate is
+# re-solved afterwards by the caller.
+function _surface_smooth_neighbors(mesh,caller::AbstractString)
     boundary,_=_surface_boundary_topology(mesh,caller)
-    coords=Matrix{Float64}(mesh.coords)
     neighbors=[Int32[] for _ in 1:nnodes(mesh)]
-    @inbounds for cell in axes(mesh.tris,2),e in ((1,2),(2,3),(3,1))
-        a=mesh.tris[e[1],cell];b=mesh.tris[e[2],cell]
-        push!(neighbors[a],b);push!(neighbors[b],a)
+    if mesh isa Mesh
+        @inbounds for cell in axes(mesh.tris,2),e in ((1,2),(2,3),(3,1))
+            a=mesh.tris[e[1],cell];b=mesh.tris[e[2],cell]
+            push!(neighbors[a],b);push!(neighbors[b],a)
+        end
+    else
+        for block in mesh.blocks
+            block isa ElementBlock || continue
+            msh_dimension(block.msh)==2 || continue
+            slots=_surface_cell_edge_slots(msh_num_nodes(block.msh))
+            slots===nothing && continue
+            @inbounds for cell in axes(block.nodes,2),e in slots
+                a=block.nodes[e[1],cell];b=block.nodes[e[2],cell]
+                push!(neighbors[a],b);push!(neighbors[b],a)
+            end
+        end
     end
     for list in neighbors
         sort!(unique!(list))
     end
+    return boundary,neighbors
+end
+
+function _surface_smooth_coords(mesh,boundary,neighbors,iterations::Int)
+    coords=Matrix{Float64}(mesh.coords)
     for _ in 1:iterations
         next=copy(coords)
         @inbounds for node in axes(coords,2)
@@ -6246,11 +6493,35 @@ function _laplacian_smooth_surface(mesh::Mesh,iterations::Int,
         end
         coords=next
     end
+    return coords
+end
+
+function _laplacian_smooth_surface(mesh::Mesh,iterations::Int,
+                                   caller::AbstractString,t::Int)
+    boundary,neighbors=_surface_smooth_neighbors(mesh,caller)
+    coords=_surface_smooth_coords(mesh,boundary,neighbors,iterations)
     return Mesh(coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
                 seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
                 tet_tag=mesh.tet_tag)
 end
 
+function _laplacian_smooth_surface(mesh::MixedMesh,iterations::Int,
+                                   caller::AbstractString,t::Int)
+    boundary,neighbors=_surface_smooth_neighbors(mesh,caller)
+    coords=_surface_smooth_coords(mesh,boundary,neighbors,iterations)
+    return MixedMesh(coords,mesh.blocks;
+                     physical_names=mesh.physical_names,
+                     entity_data=mesh.entity_data,
+                     elementary_entities=mesh.elementary_entities,
+                     periodic_links=mesh.periodic_links,
+                     ancillary_sections=mesh.ancillary_sections,
+                     data_sections=mesh.data_sections,
+                     partition_data=mesh.partition_data)
+end
+
+# `GEntity::reverse` per family: a triangle swaps its last two vertices, a
+# quadrangle swaps the second and fourth (the `(a,b,c,d) -> (a,d,c,b)` flip).
+# Non-2-D blocks are untouched — curve reversal is a separate attribute.
 function _reversed_surface_mesh(mesh::Mesh,caller::AbstractString,t::Int)
     tris=Matrix{Int32}(mesh.tris)
     @inbounds for cell in axes(tris,2)
@@ -6261,11 +6532,39 @@ function _reversed_surface_mesh(mesh::Mesh,caller::AbstractString,t::Int)
                 tet_tag=mesh.tet_tag)
 end
 
+function _reversed_surface_mesh(mesh::MixedMesh,caller::AbstractString,t::Int)
+    blocks=map(mesh.blocks) do block
+        if block isa ElementBlock && msh_dimension(block.msh)==2
+            width=msh_num_nodes(block.msh)
+            width in (3,4) || throw(ArgumentError(
+                "$caller: Reverse Surface[$t] does not support MSH type " *
+                "$(block.msh)"))
+            nodes=Matrix{Int32}(block.nodes)
+            second=2;fourth=width==3 ? 3 : 4
+            @inbounds for cell in axes(nodes,2)
+                nodes[second,cell],nodes[fourth,cell]=
+                    nodes[fourth,cell],nodes[second,cell]
+            end
+            ElementBlock(block.msh,nodes,copy(block.tags))
+        else
+            block
+        end
+    end
+    return MixedMesh(mesh.coords,blocks;
+                     physical_names=mesh.physical_names,
+                     entity_data=mesh.entity_data,
+                     elementary_entities=mesh.elementary_entities,
+                     periodic_links=mesh.periodic_links,
+                     ancillary_sections=mesh.ancillary_sections,
+                     data_sections=mesh.data_sections,
+                     partition_data=mesh.partition_data)
+end
+
 # Post-generation attribute passes for a volume mesh: `smoothing` runs that
 # many boundary-preserving Laplacian iterations over the tetrahedron edge
 # graph; `reverse` flips tetrahedron orientation, matching Gmsh's
 # `setReverse`/`setSmoothing` semantics on dim-3 entities.
-function _consume_volume_attributes(m::GeoModel,t::Int,mesh::Mesh,
+function _consume_volume_attributes(m::GeoModel,t::Int,mesh,
                                     caller::AbstractString)
     iterations=get(m.meshing.smoothing,(3,t),0)
     iterations>0 &&
@@ -6320,6 +6619,117 @@ function _reversed_volume_mesh(mesh::Mesh,caller::AbstractString,t::Int)
     return Mesh(mesh.coords;segs=mesh.segs,tris=mesh.tris,tets=tets,
                 seg_tag=mesh.seg_tag,tri_tag=mesh.tri_tag,
                 tet_tag=mesh.tet_tag)
+end
+
+# Linear dim-3 element edges/faces shared by the mixed volume attribute
+# passes — the MSH vertex orders of `MElement.h` (tet 4, hex 5, prism 6).
+const _VOLUME_CELL_EDGES = Dict{Int,Vector{NTuple{2,Int}}}(
+    4=>[(1,2),(1,3),(1,4),(2,3),(2,4),(3,4)],
+    5=>[(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+        (1,5),(2,6),(3,7),(4,8)],
+    6=>[(1,2),(2,3),(1,3),(4,5),(5,6),(4,6),(1,4),(2,5),(3,6)])
+const _VOLUME_CELL_FACES = Dict{Int,Vector{NTuple{N,Int} where N}}(
+    4=>[(1,2,3),(1,2,4),(1,3,4),(2,3,4)],
+    5=>[(1,2,3,4),(5,6,7,8),(1,2,6,5),(2,3,7,6),(3,4,8,7),(4,1,5,8)],
+    6=>[(1,2,3),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)])
+
+# Reverse per `MElement::reverse`: tet swaps the first two vertices, a prism
+# the first two of each triangular end, a hexahedron the third vertex of each
+# quadrilateral end.
+const _VOLUME_REVERSE_SWAPS = Dict{Int,Vector{NTuple{2,Int}}}(
+    4=>[(1,2)], 5=>[(1,3),(5,7)], 6=>[(1,2),(4,5)])
+
+# Boundary nodes of a dim-3 cell set: nodes incident to faces carrying a
+# single incident volume cell. Quads count with their four-corner canonical
+# key so a recombined face needs no diagonal split to classify.
+function _volume_boundary_mask(mesh::MixedMesh,caller::AbstractString)
+    face_counts=Dict{NTuple{4,Int32},Int}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        faces=get(_VOLUME_CELL_FACES,Int(block.msh),nothing)
+        faces===nothing && continue
+        @inbounds for cell in axes(block.nodes,2),face in faces
+            nodes=sort!(Int32[block.nodes[face[slot],cell]
+                              for slot in 1:length(face)])
+            key=length(nodes)==3 ?
+                (nodes[1],nodes[2],nodes[3],Int32(0)) :
+                (nodes[1],nodes[2],nodes[3],nodes[4])
+            face_counts[key]=get(face_counts,key,0)+1
+        end
+    end
+    boundary=falses(nnodes(mesh))
+    for (key,count) in face_counts
+        count==1 || continue
+        for node in key
+            node==0 && continue
+            boundary[node]=true
+        end
+    end
+    return boundary
+end
+
+function _laplacian_smooth_volume(mesh::MixedMesh,iterations::Int,
+                                  caller::AbstractString,t::Int)
+    boundary=_volume_boundary_mask(mesh,caller)
+    neighbors=[Int32[] for _ in 1:nnodes(mesh)]
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        edges=get(_VOLUME_CELL_EDGES,Int(block.msh),nothing)
+        edges===nothing && continue
+        @inbounds for cell in axes(block.nodes,2),e in edges
+            a=block.nodes[e[1],cell];b=block.nodes[e[2],cell]
+            push!(neighbors[a],b);push!(neighbors[b],a)
+        end
+    end
+    for list in neighbors
+        sort!(unique!(list))
+    end
+    coords=Matrix{Float64}(mesh.coords)
+    for _ in 1:iterations
+        next=copy(coords)
+        @inbounds for node in axes(coords,2)
+            boundary[node] && continue
+            list=neighbors[node]
+            isempty(list) && continue
+            sx=0.0;sy=0.0;sz=0.0
+            for other in list
+                sx+=coords[1,other];sy+=coords[2,other];sz+=coords[3,other]
+            end
+            next[1,node]=sx/length(list)
+            next[2,node]=sy/length(list)
+            next[3,node]=sz/length(list)
+        end
+        coords=next
+    end
+    return MixedMesh(coords,mesh.blocks;
+                     physical_names=mesh.physical_names,
+                     entity_data=mesh.entity_data,
+                     elementary_entities=mesh.elementary_entities,
+                     periodic_links=mesh.periodic_links,
+                     ancillary_sections=mesh.ancillary_sections,
+                     data_sections=mesh.data_sections,
+                     partition_data=mesh.partition_data)
+end
+
+function _reversed_volume_mesh(mesh::MixedMesh,caller::AbstractString,t::Int)
+    blocks=map(mesh.blocks) do block
+        swaps=block isa ElementBlock ?
+            get(_VOLUME_REVERSE_SWAPS,Int(block.msh),nothing) : nothing
+        swaps===nothing && return block
+        nodes=Matrix{Int32}(block.nodes)
+        @inbounds for cell in axes(nodes,2),(a,b) in swaps
+            nodes[a,cell],nodes[b,cell]=nodes[b,cell],nodes[a,cell]
+        end
+        ElementBlock(block.msh,nodes,copy(block.tags))
+    end
+    return MixedMesh(mesh.coords,blocks;
+                     physical_names=mesh.physical_names,
+                     entity_data=mesh.entity_data,
+                     elementary_entities=mesh.elementary_entities,
+                     periodic_links=mesh.periodic_links,
+                     ancillary_sections=mesh.ancillary_sections,
+                     data_sections=mesh.data_sections,
+                     partition_data=mesh.partition_data)
 end
 
 # Transfinite volume fill for an explicit six-surface volume — Gmsh's
@@ -6556,10 +6966,15 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     all(seen) || throw(ErrorException(
         "$caller: transfinite Volume[$t] boundary faces do not cover the " *
         "canonical six-slot layout"))
+    # Gmsh's `MeshTransfiniteVolume` derives `recombined[i]` from each face's
+    # `GFace::recombined()` flag in canonical slot order — `Recombine Surface`
+    # attributes and `Mesh.RecombineAll`, never `Recombine Volume`.
     return mesh_transfinite_volume(
         NTuple{3,Float64}[m.points[p] for p in s],
         (us[1],vs[1],ws[1]);volume_tag=t,faces=Tuple(faces),
-        face_tags=Tuple(slot_tags))
+        face_tags=Tuple(slot_tags),
+        recombine=Tuple(
+            _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6))
 end
 
 # One triangular boundary face of a five-face transfinite volume, meshed with
@@ -6886,13 +7301,27 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
     count(seen)==5 || throw(ErrorException(
         "$caller: transfinite Volume[$t] boundary faces do not cover the " *
         "canonical prism slot layout"))
+    # Same face-flag rule as the six-face path: `recombined[i]` follows each
+    # boundary surface's `Recombine Surface`/`Mesh.RecombineAll` state in the
+    # kernel's (f0,f1,f2,f4,f5) slot order — f4/f5 are the two triangular
+    # faces. Their stored `arrangement` steers the compact layout's
+    # recombined triangular boundary sheets.
+    face_spec=Dict(face.surf=>face.spec for face in faces_data)
     return mesh_transfinite_prism(
         NTuple{3,Float64}[m.points[p] for p in ordered],
         (us[1],vs[1],ws[1]);volume_tag=t,
         faces=(faces[1],faces[2],faces[3],faces[5],faces[6]),
         face_tags=(slot_tags[1],slot_tags[2],slot_tags[3],slot_tags[5],
                    slot_tags[6]),
-        compact=compact)
+        compact=compact,
+        recombine=(
+            _model_surface_recombined(m,Int(slot_tags[1])),
+            _model_surface_recombined(m,Int(slot_tags[2])),
+            _model_surface_recombined(m,Int(slot_tags[3])),
+            _model_surface_recombined(m,Int(slot_tags[5])),
+            _model_surface_recombined(m,Int(slot_tags[6]))),
+        arrangement=(face_spec[Int(slot_tags[5])].arrangement,
+                     face_spec[Int(slot_tags[6])].arrangement))
 end
 # generated boundary mesh (meshGRegionDelaunayInsertion.cpp): every boundary
 # vertex carries an incident face-triangle edge length — the LARGEST when
@@ -7210,6 +7639,23 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
            project_plane,sphere_center,ruled_tri
 end
 
+# Keeps only the dim-2 cell blocks of a transfinite surface kernel result —
+# boundary strips and helper blocks never enter a surface part, matching the
+# `Mesh(coords; tris=...)` stripping the simplex path performs.
+function _surface_part_strip(kernel::MixedMesh,caller::AbstractString,
+                             t::Int)
+    blocks=ElementBlock[]
+    for block in kernel.blocks
+        block isa ElementBlock && msh_dimension(block.msh)==2 ||
+            continue
+        push!(blocks,ElementBlock(block.msh,block.nodes,
+                                  zeros(Int32,size(block.nodes,2))))
+    end
+    isempty(blocks) && throw(ErrorException(
+        "$caller: Transfinite Surface[$t] produced no cells"))
+    return MixedMesh(kernel.coords,blocks)
+end
+
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    param_sizes::Dict{Tuple{Int,Float64},
                                                     Float64},
@@ -7223,6 +7669,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         s1,s2,s3=curve_points
         project=ruled_tri ? _transfinite_ruled_tri_project(m,t,caller) :
             nothing
+        recombined=_model_surface_recombined(m,t)
         kernel=if m.meshing.transfinite_tri==1
             (length(s1)==length(s2) && length(s1)==length(s3)) ||
                 throw(ArgumentError(
@@ -7239,29 +7686,60 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                     m,signed_curves,curve_points,t,caller)
                 s1,s2,s3=curve_points
             end
-            mesh_transfinite_triangle(s1,s2,s3;arrangement=spec.arrangement,
-                                      project=project)
+            # `Recombine Surface` selects the `_patch` variant, which emits
+            # quadrangle blocks where the arrangement pairs base triangles.
+            if recombined
+                mesh_transfinite_triangle_patch(
+                    s1,s2,s3;arrangement=spec.arrangement,
+                    project=project)
+            else
+                mesh_transfinite_triangle(
+                    s1,s2,s3;arrangement=spec.arrangement,
+                    project=project)
+            end
         else
-            mesh_transfinite_triangle_collapsed(
-                s1,s2,s3;arrangement=spec.arrangement,
-                allow_corner_rotation=isempty(spec.corners),
-                project=project)
+            if recombined
+                mesh_transfinite_triangle_collapsed_patch(
+                    s1,s2,s3;arrangement=spec.arrangement,
+                    allow_corner_rotation=isempty(spec.corners),
+                    project=project)
+            else
+                mesh_transfinite_triangle_collapsed(
+                    s1,s2,s3;arrangement=spec.arrangement,
+                    allow_corner_rotation=isempty(spec.corners),
+                    project=project)
+            end
         end
-        # The entity cache stores the untagged simplex complex; boundary
+        # The entity cache stores the untagged cell complex; boundary
         # curves are not meshed by generate(2).
-        mesh=Mesh(kernel.coords;tris=kernel.tris)
+        mesh=kernel isa MixedMesh ?
+            _surface_part_strip(kernel,caller,t) :
+            Mesh(kernel.coords;tris=kernel.tris)
         return _consume_surface_attributes(m,t,mesh,caller)
     end
     bottom,right,top,left=curve_points
-    kernel=mesh_transfinite_patch(bottom,right,top,left;
-                                  arrangement=spec.arrangement,
-                                  allow_warped=allow_warped,
-                                  project_plane=project_plane,
-                                  interpolate=sphere_center===nothing ?
-                                      nothing : _transfinite_sphere_eval(
-                                          m,t,signed_curves,sphere_center,
-                                          caller))
-    mesh=Mesh(kernel.coords;tris=kernel.tris)
+    kernel=if _model_surface_recombined(m,t)
+        mesh_transfinite_quad_patch(bottom,right,top,left;
+                                    arrangement=spec.arrangement,
+                                    allow_warped=allow_warped,
+                                    project_plane=project_plane,
+                                    interpolate=sphere_center===nothing ?
+                                        nothing : _transfinite_sphere_eval(
+                                            m,t,signed_curves,sphere_center,
+                                            caller))
+    else
+        mesh_transfinite_patch(bottom,right,top,left;
+                               arrangement=spec.arrangement,
+                               allow_warped=allow_warped,
+                               project_plane=project_plane,
+                               interpolate=sphere_center===nothing ?
+                                   nothing : _transfinite_sphere_eval(
+                                       m,t,signed_curves,sphere_center,
+                                       caller))
+    end
+    mesh=kernel isa MixedMesh ?
+        _surface_part_strip(kernel,caller,t) :
+        Mesh(kernel.coords;tris=kernel.tris)
     return _consume_surface_attributes(m,t,mesh,caller)
 end
 
@@ -7307,7 +7785,7 @@ end
            abs(p[3]-q[3])<=tolerance
 end
 
-function _validate_surface_embeddings(m::GeoModel,mesh::Mesh,embedded,
+function _validate_surface_embeddings(m::GeoModel,mesh,embedded,
                                       caller::AbstractString;
                                       surface::Int=0)
     owned=nothing
@@ -7325,7 +7803,7 @@ function _validate_surface_embeddings(m::GeoModel,mesh::Mesh,embedded,
     _validate_surface_embeddings_owned(m,mesh,embedded,caller,owned)
 end
 
-function _validate_surface_embeddings_owned(m::GeoModel,mesh::Mesh,embedded,
+function _validate_surface_embeddings_owned(m::GeoModel,mesh,embedded,
                                             caller::AbstractString,owned)
     for (edim,etag) in embedded
         if edim==0
@@ -7463,7 +7941,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         mesh=_snap_surface_periodic(m,mesh,constraints,caller)
         break
     end
-    mesh isa Mesh || throw(ErrorException(
+    (mesh isa Mesh || mesh isa MixedMesh) || throw(ErrorException(
         "$caller: internal surface meshing pass produced no mesh"))
     # Write the refined boundary subdivision back onto the curves — upstream
     # `meshGFace` updates each `GEdge`'s mesh with face-refinement splits, so
@@ -7658,13 +8136,41 @@ function _model_volume_periodic_surface_constraints(
     return _model_periodic_constraint_order(constraints,caller)
 end
 
+# Boundary facets of a generated surface part as `(n1,n2,n3)` local-node
+# triangles — the PLC the volume tetrahedralizer sees. Quadrangle blocks fold
+# back along the 1-3 diagonal, the split `_certify_recombined_boundary` and
+# upstream's quad-to-triangle boundary transfer both use.
+_volume_boundary_faces(mesh::Mesh)=
+    ((mesh.tris[1,cell],mesh.tris[2,cell],mesh.tris[3,cell])
+     for cell in axes(mesh.tris,2))
+function _volume_boundary_faces(mesh::MixedMesh)
+    faces=NTuple{3,Int32}[]
+    for block in mesh.blocks
+        block isa ElementBlock && msh_dimension(block.msh)==2 || continue
+        width=size(block.nodes,1)
+        if width==3
+            @inbounds for cell in axes(block.nodes,2)
+                push!(faces,(block.nodes[1,cell],block.nodes[2,cell],
+                             block.nodes[3,cell]))
+            end
+        elseif width==4
+            @inbounds for cell in axes(block.nodes,2)
+                a=block.nodes[1,cell];b=block.nodes[2,cell]
+                c=block.nodes[3,cell];d=block.nodes[4,cell]
+                push!(faces,(a,b,c));push!(faces,(a,c,d))
+            end
+        end
+    end
+    return faces
+end
+
 function _model_explicit_volume_geometry(
     m::GeoModel,t::Int,caller::AbstractString;
     size_field::Union{Nothing,AbstractSizeField}=nothing)
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     isempty(boundaries) && throw(ArgumentError(
         "$caller: Volume[$t] has no explicit boundary surfaces"))
-    local_meshes=Dict{Int,Mesh}()
+    local_meshes=Dict{Int,Union{Mesh,MixedMesh}}()
     for signed_surface in boundaries
         surface=abs(signed_surface)
         # The volume PLC carries the GENERATED boundary mesh — upstream
@@ -7706,10 +8212,10 @@ function _model_explicit_volume_geometry(
                             local_mesh.coords[3,node])
                 local_nodes[node]=global_node(coordinate)
             end
-            for cell in 1:ntris(local_mesh)
-                face=(local_nodes[local_mesh.tris[1,cell]],
-                      local_nodes[local_mesh.tris[2,cell]],
-                      local_nodes[local_mesh.tris[3,cell]])
+            for local_face in _volume_boundary_faces(local_mesh)
+                face=(local_nodes[local_face[1]],
+                      local_nodes[local_face[2]],
+                      local_nodes[local_face[3]])
                 key=_model_projection_face_key(face)
                 key in seen_faces && throw(ArgumentError(
                     "$caller: explicit Volume[$t] surfaces overlap on " *
@@ -7898,17 +8404,20 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     if haskey(m.meshing.transfinite_volumes,t)
         mesh=_transfinite_volume_mesh(m,t,caller)
         mesh=_consume_volume_attributes(m,t,mesh,caller)
-        # model_to_mixed expects an untagged pure tetrahedron complex —
-        # boundary faces are re-derived from tet faces downstream and
-        # ownership comes from the model, like `tetrahedralize` output.
-        mesh=Mesh(mesh.coords;tets=mesh.tets)
+        # model_to_mixed expects an untagged pure volume complex — boundary
+        # faces are re-derived from volume-cell faces downstream (or emitted
+        # by the boundary-surface parts) and ownership comes from the model,
+        # like `tetrahedralize` output. A recombined part keeps only its
+        # dim-3 blocks (tetrahedra/hexahedra/prisms) for the same reason.
+        mesh=_volume_part_strip(mesh)
         reversed=get(m.meshing.reverse,(3,t),false)
-        diagnostic=validate(mesh;require_positive_tets=!reversed)
+        diagnostic=mesh isa Mesh ?
+            validate(mesh;require_positive_tets=!reversed) : validate(mesh)
         diagnostic.ok || throw(ErrorException(
             "$caller: transfinite Volume[$t] produced an invalid mesh — " *
             join(diagnostic.messages,"; ")))
-        ntets(mesh)>0 || throw(ErrorException(
-            "$caller: Volume[$t] produced no tetrahedra"))
+        _volume_cell_count(mesh)>0 || throw(ErrorException(
+            "$caller: Volume[$t] produced no volume cells"))
         return mesh
     end
     explicit_geometry=(isempty(m.volumes[t]) ||
@@ -7972,9 +8481,12 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                              sheet_mesh.coords[2,node],
                              sheet_mesh.coords[3,node]))
             end
-            for cell in 1:ntris(sheet_mesh)
+            # A recombined sheet carries quadrangles — face recovery needs
+            # the folded triangles, the same 1-3 split the PLC boundary
+            # sees.
+            for face in _volume_boundary_faces(sheet_mesh)
                 points=ntuple(slot->_model_mesh_coordinate(
-                    sheet_mesh,sheet_mesh.tris[slot,cell]),3)
+                    sheet_mesh,face[slot]),3)
                 push!(sheets,(etag,points...))
             end
         else

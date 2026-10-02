@@ -6,11 +6,11 @@
 # physical groups and names, and — for the deterministic structured cases —
 # the full node-coordinate multiset and per-entity element counts.
 #
-# Intentional nonclaims: recombine/algorithm/smoother effects inside the
-# `.geo` mesh path (Tessella records the constraints; Gmsh auto-applies
-# recombine at generate), compound-entity meshing (an API `mesh.generate`
-# unit-grouping feature), and unstructured-mesh topology equivalence — only
-# targeted probes (embedded-node presence, element counts) compare there.
+# Intentional nonclaims: algorithm/smoother effects inside the `.geo` mesh
+# path (Tessella records the constraints), compound-entity meshing (an API
+# `mesh.generate` unit-grouping feature), and unstructured-mesh topology
+# equivalence — only targeted probes (embedded-node presence, element
+# counts, quadrangle presence under `Recombine`) compare there.
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."); io=devnull)
@@ -410,7 +410,7 @@ const CASES = (
      Compound Curve{2,3};
      Compound Curve{4,99,-6};
      """),
-    (name=:recombine_state, mode=:recombine_gap, dim=2,
+    (name=:recombine_state, mode=:recombine, dim=2,
      source=SQUARE * "Recombine Surface{1} = 30;\n"),
     (name=:smoother_algorithm_state, mode=:state, dim=0,
      source=SQUARE * """
@@ -761,16 +761,24 @@ try
         elseif case.mode == :curve_in_volume
             check_curve_in_volume_arc(
                 geo_entity_mesh(t.execution, 3, 1), tm, case.name)
-        elseif case.mode == :recombine_gap
+        elseif case.mode == :recombine
             tm.meshing.recombine[(2, 1)] == 30.0 || error(
                 "$(case.name): Tessella lost the Recombine 30 constraint")
             gmsh_quads = get(gmsh_elements(2, -1), 3, 0)
             gmsh_quads > 0 || error(
                 "$(case.name): Gmsh produced no quads under Recombine")
-            push!(gaps,
-                  "recombine: constraint stored; `.geo` mesh path keeps " *
-                  "simplices (recombine is the API post-pass) — gmsh_quads=" *
-                  "$gmsh_quads tessella_tris=$(size(t.execution.mesh.tris, 2))")
+            # Parity: the `.geo` generate pass applies the stored constraint —
+            # Tessella's MixedMesh carries quadrangle blocks (plus any
+            # pairing leftovers), like Gmsh's recombined surface.
+            mesh = t.execution.mesh
+            tessella_quads = mesh isa Tessella.Elements.MixedMesh ?
+                sum(size(b.nodes, 2) for b in mesh.blocks
+                    if b isa Tessella.Elements.ElementBlock && b.msh == 3;
+                    init=0) : 0
+            tessella_quads > 0 || error(
+                "$(case.name): Tessella produced no quads under Recombine " *
+                "— the stored constraint never reached generate " *
+                "(gmsh_quads=$gmsh_quads)")
         elseif case.name == :compound_curve_state
             # The last spec wins curve 2; missing/negative members are
             # skipped. Gmsh additionally materializes compound entities.
