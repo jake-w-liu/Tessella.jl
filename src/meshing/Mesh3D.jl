@@ -23,7 +23,9 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
-using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, tet_signed_volume
+using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, boundary_faces, tet_signed_volume
+using ..Elements: MixedMesh, ElementBlock,
+                  _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES
 using ..Mesh2D: constrained_delaunay, to_mesh
 using ..ExactMesh3D: delaunay3d_exact
 using ..SizeField: AbstractSizeField, ConstantSize, metric_edge_length,
@@ -315,6 +317,11 @@ end
 
 @inline _sort3t(a,b,c) = begin
     a,b = a<=b ? (a,b) : (b,a); b,c = b<=c ? (b,c) : (c,b); a,b = a<=b ? (a,b) : (b,a); (a,b,c)
+end
+@inline _sort4t(a,b,c,d) = begin
+    a,b = a<=b ? (a,b) : (b,a); c,d = c<=d ? (c,d) : (d,c)
+    a,c = a<=c ? (a,c) : (c,a); b,d = b<=d ? (b,d) : (d,b)
+    b,c = b<=c ? (b,c) : (c,b); (a,b,c,d)
 end
 # slot in tet t whose opposite face has the vertex set {u,v,w}
 @inline function _nslot_by_face(T::Triangulation3, t, u, v, w)
@@ -1935,7 +1942,7 @@ function _interior_points3(raw,limit::Int,nn::Int,caller::AbstractString)
     return points
 end
 
-function _node_at3(mesh::Mesh, p; atol=0.0)
+function _node_at3(mesh, p; atol=0.0)
     @inbounds for i in axes(mesh.coords,2)
         hypot(mesh.coords[1,i]-p[1],mesh.coords[2,i]-p[2],mesh.coords[3,i]-p[3])<=atol && return i
     end
@@ -2021,7 +2028,7 @@ function insert_interior_points(mesh::Mesh, extra)
     return out
 end
 
-@inline function _pt3(mesh::Mesh, i::Integer)
+@inline function _pt3(mesh, i::Integer)
     i=Int(i)
     return (mesh.coords[1,i], mesh.coords[2,i], mesh.coords[3,i])
 end
@@ -2047,6 +2054,80 @@ function _tet_edge_set(mesh::Mesh)
         end
     end
     return edges
+end
+
+# Undirected edge set of a volume mesh's dim-3 cells — tetrahedra for `Mesh`,
+# the `_VOLUME_CELL_EDGES` table for each tet/hex/prism block of a `MixedMesh`.
+_volume_edge_set(mesh::Mesh)=_tet_edge_set(mesh)
+
+function _volume_edge_set(mesh::MixedMesh)
+    edges=Set{NTuple{2,Int32}}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        cell_edges=get(_VOLUME_CELL_EDGES,Int(block.msh),nothing)
+        cell_edges===nothing && continue
+        @inbounds for c in axes(block.nodes,2),(i,j) in cell_edges
+            a=block.nodes[i,c];b=block.nodes[j,c]
+            push!(edges,a<b ? (a,b) : (b,a))
+        end
+    end
+    return edges
+end
+
+# Incidence over every dim-3 cell face of a mixed volume mesh: canonical
+# sorted keys -> count, with one cyclic ordering kept per face so an emitted
+# quad keeps a real cell winding (the sorted key need not be cyclic).
+function _mixed_volume_face_incidence(mesh::MixedMesh)
+    tri_counts=Dict{NTuple{3,Int32},Int}()
+    quad_counts=Dict{NTuple{4,Int32},Int}()
+    tri_orders=Dict{NTuple{3,Int32},NTuple{3,Int32}}()
+    quad_orders=Dict{NTuple{4,Int32},NTuple{4,Int32}}()
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        cell_faces=get(_VOLUME_CELL_FACES,Int(block.msh),nothing)
+        cell_faces===nothing && continue
+        @inbounds for c in axes(block.nodes,2), f in cell_faces
+            if length(f)==3
+                u=block.nodes[f[1],c];v=block.nodes[f[2],c]
+                w=block.nodes[f[3],c]
+                key=_sort3t(u,v,w)
+                tri_counts[key]=get(tri_counts,key,0)+1
+                get!(tri_orders,key,(u,v,w))
+            else
+                a=block.nodes[f[1],c];b=block.nodes[f[2],c]
+                cc=block.nodes[f[3],c];d=block.nodes[f[4],c]
+                key=_sort4t(a,b,cc,d)
+                quad_counts[key]=get(quad_counts,key,0)+1
+                get!(quad_orders,key,(a,b,cc,d))
+            end
+        end
+    end
+    return tri_counts,quad_counts,tri_orders,quad_orders
+end
+
+# Single-incidence faces of a volume mesh's dim-3 cells: canonical keys for
+# membership and a key -> cyclic-order map for emission. The `Mesh` form
+# reuses `boundary_faces` (a sorted triple is already a valid cyclic tri
+# ordering, so the order map is empty).
+function _volume_cell_boundary_faces(mesh::Mesh)
+    return Set(first(boundary_faces(mesh.tets))),
+           Dict{NTuple{3,Int32},NTuple{3,Int32}}()
+end
+
+function _volume_cell_boundary_faces(mesh::MixedMesh)
+    tri_counts,quad_counts,tri_orders,quad_orders=
+        _mixed_volume_face_incidence(mesh)
+    boundary=Set{NTuple{N,Int32} where N}()
+    orders=Dict{NTuple{N,Int32} where N,NTuple{N,Int32} where N}()
+    for (key,count) in tri_counts
+        count==1 || continue
+        push!(boundary,key); orders[key]=tri_orders[key]
+    end
+    for (key,count) in quad_counts
+        count==1 || continue
+        push!(boundary,key); orders[key]=quad_orders[key]
+    end
+    return boundary,orders
 end
 
 function mesh_covers_segment3(mesh::Mesh, p, q; atol=1e-12)
@@ -2080,7 +2161,7 @@ end
 # `eligible` masks nodes that must not participate (e.g. vertices owned by a
 # different model curve). `edges` lets a caller reuse a precomputed edge set.
 # Returns `nothing` when the segment is not realized as an edge chain.
-function _segment_chain3(mesh::Mesh, p, q, edges;
+function _segment_chain3(mesh, p, q, edges;
                         atol::Float64=1e-12,
                         eligible::Union{Nothing,AbstractVector{Bool}}=nothing)
     a=_node_at3(mesh,p; atol=0.0)
@@ -3389,6 +3470,27 @@ end
     return (first_node,second_node,third_node)
 end
 
+# One candidate coverage test shared by the tet and mixed-cell variants: the
+# face's vertices must sit inside the target triangle and the returned cell is
+# oriented to the target's normal. Returns `(key, oriented_face, area)` or
+# `nothing` when the face cannot claim coverage.
+function _covering_face3(mesh,a,b,c,u,v,w,reference_normal)
+    key=_sorted_face3(u,v,w)
+    s1,s2,s3=key
+    pa=_pt3(mesh,s1); pb=_pt3(mesh,s2); pc=_pt3(mesh,s3)
+    (_point_in_triangle3(pa,a,b,c) && _point_in_triangle3(pb,a,b,c) &&
+     _point_in_triangle3(pc,a,b,c)) || return nothing
+    # A degenerate face — one vertex on the opposite edge — has no
+    # coverage to contribute, and letting it claim a face lets a
+    # sliver spanning a shared target edge register twice.
+    (_on_segment3(pc,pa,pb; atol=1e-9) ||
+     _on_segment3(pb,pa,pc; atol=1e-9) ||
+     _on_segment3(pa,pb,pc; atol=1e-9)) && return nothing
+    face_normal=_cross3(_sub3(pb,pa),_sub3(pc,pa))
+    oriented=_dot3(reference_normal,face_normal)<0 ? (s1,s3,s2) : key
+    return (key,oriented,_triangle_area3(pa,pb,pc))
+end
+
 function _mesh_covering_faces3(mesh::Mesh,a,b,c;collect_faces::Bool=true)
     target=_triangle_area3(a,b,c)
     target>0 || return NTuple{3,Int32}[],target,0.0
@@ -3399,25 +3501,54 @@ function _mesh_covering_faces3(mesh::Mesh,a,b,c;collect_faces::Bool=true)
     @inbounds for t in axes(mesh.tets,2)
         ids=(mesh.tets[1,t],mesh.tets[2,t],mesh.tets[3,t],mesh.tets[4,t])
         for (i,j,k) in ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
-            u,v,w=ids[i],ids[j],ids[k]
-            key=_sorted_face3(u,v,w)
-            key in seen && continue
-            s1,s2,s3=key
-            pa=_pt3(mesh,s1); pb=_pt3(mesh,s2); pc=_pt3(mesh,s3)
-            (_point_in_triangle3(pa,a,b,c) && _point_in_triangle3(pb,a,b,c) &&
-             _point_in_triangle3(pc,a,b,c)) || continue
-            # A degenerate face — one vertex on the opposite edge — has no
-            # coverage to contribute, and letting it claim a face lets a
-            # sliver spanning a shared target edge register twice.
-            (_on_segment3(pc,pa,pb; atol=1e-9) ||
-             _on_segment3(pb,pa,pc; atol=1e-9) ||
-             _on_segment3(pa,pb,pc; atol=1e-9)) && continue
-            push!(seen,key)
-            covered+=_triangle_area3(pa,pb,pc)
-            if collect_faces
-                face_normal=_cross3(_sub3(pb,pa),_sub3(pc,pa))
-                push!(faces,_dot3(reference_normal,face_normal)<0 ?
-                            (s1,s3,s2) : key)
+            face=_covering_face3(mesh,a,b,c,ids[i],ids[j],ids[k],
+                                 reference_normal)
+            face===nothing && continue
+            face[1] in seen && continue
+            push!(seen,face[1])
+            covered+=face[3]
+            collect_faces && push!(faces,face[2])
+        end
+    end
+    collect_faces && sort!(faces;by=face->_sorted_face3(face...))
+    return faces,target,covered
+end
+
+# Mixed-element variant: quad faces cover through both diagonal halves — a
+# folded quad is only planar within one surface region, and the folded
+# triangles are the emitted sheet cells.
+function _mesh_covering_faces3(mesh::MixedMesh,a,b,c;collect_faces::Bool=true)
+    target=_triangle_area3(a,b,c)
+    target>0 || return NTuple{3,Int32}[],target,0.0
+    reference_normal=_cross3(_sub3(b,a),_sub3(c,a))
+    seen=Set{NTuple{3,Int32}}()
+    faces=NTuple{3,Int32}[]
+    covered=0.0
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        cell_faces=get(_VOLUME_CELL_FACES,Int(block.msh),nothing)
+        cell_faces===nothing && continue
+        @inbounds for t in axes(block.nodes,2), f in cell_faces
+            if length(f)==3
+                face=_covering_face3(mesh,a,b,c,block.nodes[f[1],t],
+                                     block.nodes[f[2],t],block.nodes[f[3],t],
+                                     reference_normal)
+                face===nothing && continue
+                face[1] in seen && continue
+                push!(seen,face[1])
+                covered+=face[3]
+                collect_faces && push!(faces,face[2])
+            else
+                n1=block.nodes[f[1],t];n2=block.nodes[f[2],t]
+                n3=block.nodes[f[3],t];n4=block.nodes[f[4],t]
+                for (u,v,w) in ((n1,n2,n3),(n1,n3,n4))
+                    face=_covering_face3(mesh,a,b,c,u,v,w,reference_normal)
+                    face===nothing && continue
+                    face[1] in seen && continue
+                    push!(seen,face[1])
+                    covered+=face[3]
+                    collect_faces && push!(faces,face[2])
+                end
             end
         end
     end
@@ -6021,6 +6152,23 @@ function _rb_present_edges(m::Mesh, coord2pid::Dict{NTuple{3,Float64},Int32})
     return E, mid
 end
 
+function _rb_present_edges(m::MixedMesh, coord2pid::Dict{NTuple{3,Float64},Int32})
+    mid=Vector{Int32}(undef,size(m.coords,2))
+    for i in 1:size(m.coords,2)
+        mid[i]=coord2pid[(m.coords[1,i],m.coords[2,i],m.coords[3,i])]
+    end
+    E=Set{NTuple{2,Int32}}()
+    for block in m.blocks
+        block isa ElementBlock || continue
+        edges=get(_VOLUME_CELL_EDGES,Int(block.msh),nothing)
+        edges===nothing && continue
+        @inbounds for c in axes(block.nodes,2),(i,j) in edges
+            push!(E,_rbekey(mid[block.nodes[i,c]],mid[block.nodes[j,c]]))
+        end
+    end
+    return E, mid
+end
+
 # drop kept flats -> new keep mask (zero-volume tets contribute 0 volume; dropping a
 # boundary-plane flat just re-triangulates that facet with the opposite diagonal — the
 # gate rejects any drop that removes real coverage).
@@ -6048,6 +6196,19 @@ function _rb_point_in_region_closed(reg::RBRegion, Px,Py,Pz, y)
     return false
 end
 
+# Is the Float64 triangle with P-id vertices (u,v,w) inside some closed input
+# region (on-plane + centroid inside)?
+function _rb_tri_in_regions(regions::Vector{RBRegion}, Px,Py,Pz, u,v,w)
+    fa=_rbptP(Px,Py,Pz,u); fb=_rbptP(Px,Py,Pz,v); fc=_rbptP(Px,Py,Pz,w)
+    for r in regions
+        (_rb_side_float(r.plane,fa)==0 && _rb_side_float(r.plane,fb)==0 &&
+         _rb_side_float(r.plane,fc)==0) || continue
+        _rb_face_centroid_in_region_closed(r,Px,Py,Pz,fa,fb,fc) &&
+            return true
+    end
+    return false
+end
+
 # every boundary face of the kept tet mesh must lie in some input region (on-plane +
 # inside): certifies tet-mesh boundary ⊆ input surface (no exterior bulge). P ids.
 function _rb_boundary_in_surface(mid, m::Mesh, regions::Vector{RBRegion}, Px,Py,Pz)
@@ -6061,15 +6222,47 @@ function _rb_boundary_in_surface(mid, m::Mesh, regions::Vector{RBRegion}, Px,Py,
     for (f,c) in inc
         c==1 || continue
         a,b,cc=f
-        fa=_rbptP(Px,Py,Pz,a); fb=_rbptP(Px,Py,Pz,b); fc=_rbptP(Px,Py,Pz,cc)
-        found=false
-        for r in regions
-            (_rb_side_float(r.plane,fa)==0 && _rb_side_float(r.plane,fb)==0 &&
-             _rb_side_float(r.plane,fc)==0) || continue
-            _rb_face_centroid_in_region_closed(r,Px,Py,Pz,fa,fb,fc) &&
-                (found=true; break)
+        _rb_tri_in_regions(regions,Px,Py,Pz,a,b,cc) || return (false, f)
+    end
+    return (true, (Int32(0),Int32(0),Int32(0)))
+end
+
+# Mixed-element variant: tet faces and the tri ends of prisms check directly;
+# a boundary quad certifies through both halves of its first-vertex fan (a
+# folded quad is planar only inside a single region).
+function _rb_boundary_in_surface(mid, m::MixedMesh, regions::Vector{RBRegion}, Px,Py,Pz)
+    tri_inc=Dict{NTuple{3,Int32},Int}()
+    quad_inc=Dict{NTuple{4,Int32},Int}()
+    quad_order=Dict{NTuple{4,Int32},NTuple{4,Int32}}()
+    for block in m.blocks
+        block isa ElementBlock || continue
+        cell_faces=get(_VOLUME_CELL_FACES,Int(block.msh),nothing)
+        cell_faces===nothing && continue
+        @inbounds for c in axes(block.nodes,2), f in cell_faces
+            if length(f)==3
+                key=_sort3t(mid[block.nodes[f[1],c]],
+                            mid[block.nodes[f[2],c]],
+                            mid[block.nodes[f[3],c]])
+                tri_inc[key]=get(tri_inc,key,0)+1
+            else
+                u=mid[block.nodes[f[1],c]];v=mid[block.nodes[f[2],c]]
+                w=mid[block.nodes[f[3],c]];x=mid[block.nodes[f[4],c]]
+                key=_sort4t(u,v,w,x)
+                quad_inc[key]=get(quad_inc,key,0)+1
+                get!(quad_order,key,(u,v,w,x))
+            end
         end
-        found || return (false, f)
+    end
+    for (f,c) in tri_inc
+        c==1 || continue
+        _rb_tri_in_regions(regions,Px,Py,Pz,f[1],f[2],f[3]) ||
+            return (false, f)
+    end
+    for (f,c) in quad_inc
+        c==1 || continue
+        a,b,cc,d=quad_order[f]
+        _rb_tri_in_regions(regions,Px,Py,Pz,a,b,cc) || return (false, f)
+        _rb_tri_in_regions(regions,Px,Py,Pz,a,cc,d) || return (false, f)
     end
     return (true, (Int32(0),Int32(0),Int32(0)))
 end
@@ -6097,7 +6290,7 @@ end
 
 # ---- the exact geometric conformity + validity gate ----
 # returns (ok, nrecovered, reason). nrecovered = #input facets in conforming regions.
-function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz, facets)
+function _rb_gate(surface::Mesh, m, regions::Vector{RBRegion}, S, Px,Py,Pz, facets)
     v = validate(m)
     v.ok || return (false, 0, "invalid tet mesh: $(join(v.messages, "; "))")
     # `validate` already runs the complete vertex-link manifold audit.  Repeating
@@ -6112,6 +6305,20 @@ function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz
     end
     E,mid = _rb_present_edges(m, coord2pid)
     nreal=length(Px2)
+    # A singly-incident quad face's 1-3 fold diagonal is a PLC triangulation
+    # artifact, not a real surface edge — the exact-coplanarity region union
+    # can split on ulp-level interpolation noise there, minting a phantom
+    # crease the cell has no diagonal edge to carry. Real creases are the
+    # quad's perimeter edges, which stay audited.
+    phantom=Set{NTuple{2,Int32}}()
+    if m isa MixedMesh
+        _,quad_counts,_,quad_orders=_mixed_volume_face_incidence(m)
+        for (key,count) in quad_counts
+            count==1 || continue
+            a,_,c,_=quad_orders[key]
+            push!(phantom,_rbekey(mid[a],mid[c]))
+        end
+    end
     facet_ok = trues(length(facets))
     reg_of = Dict{Int,Int}()
     for (ri,r) in enumerate(regions), fi in r.facets; reg_of[fi]=ri; end
@@ -6119,6 +6326,7 @@ function _rb_gate(surface::Mesh, m::Mesh, regions::Vector{RBRegion}, S, Px,Py,Pz
     region_bad = falses(length(regions))
     for (ri,r) in enumerate(regions)
         for (u,v2) in r.bnd_edges
+            (u,v2) in phantom && continue
             present=true
             for (a,b) in _rb_subsegments(Px2,Py2,Pz2,u,v2,nreal)
                 (_rbekey(a,b) in E) || (present=false; break)
@@ -6158,7 +6366,7 @@ end
 # `surface`.  This is the reusable front door to the exact recovery gate: validity
 # and closed-manifold checks alone are insufficient because a restricted Delaunay
 # fill can cap a non-convex PLC while remaining a perfectly valid convex-hull mesh.
-function _certify_surface_fill(surface::Mesh, m::Mesh)
+function _certify_surface_fill(surface::Mesh, m)
     Px, Py, Pz, facets = _rb_dedup_surface(surface)
     length(Px) >= 4 || return (false, "input has fewer than four distinct vertices")
     isempty(facets) && return (false, "input has no non-degenerate facets")

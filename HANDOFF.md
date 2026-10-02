@@ -26,43 +26,45 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
-**Recombined six-face transfinite volumes** — `mesh_transfinite_volume`
-gains a `recombine=` mask in canonical face order `(vmin, umax, vmax, umin,
-wmin, wmax)` covering Gmsh 4.15.2's full six-face decision tree and
-returning a `MixedMesh` (`nothing`/`false`/all-false keeps the simplex
-`Mesh` path bitwise-unchanged). All-recombined emits one `CREATE_HEX`
-hexahedron per cell with quadrangle boundary sheets; exactly one
-unrecombined opposite face pair emits a prism pair per cell —
-`(F,T,F,T,T,T)` and `(T,F,T,F,T,T)` span v/u through prisms whose emitted
-order carries Gmsh's `MPrism` orientation fixup on the literal macro
-tuples (`(1↔2, 4↔5)` swap — the same fixup the compact-prism path needed),
-and `(T,T,T,T,F,F)` emits `CREATE_PRISM_1`/`CREATE_PRISM_2` pairs. Every
-other mask throws the "wrong surface recombination" `ArgumentError` Gmsh
-logs. Each emitted cell carries a certified shadow-tet decomposition —
-checked tet-for-tet against the reference six-tet partition where the
-tilings coincide (all-hex and w-free) — and the emitted boundary audits
-exact coverage against the shadow's exterior faces. The affine and
-`transfiniteHex` warped-face paths share the same emitters.
+**Classified projection of recombined volume parts** — `model_to_mixed`
+now accepts a `MixedMesh` volume part (recombined transfinite hexes,
+prisms, or unstructured-mixed tets) and projects it end to end: boundary
+quadrangle faces classify onto their surfaces whole (one cyclic `face_orders`
+winding recovered per canonical face key), embedded sheets keep their
+folded tri-half coverage chains, periodic surface maps pair quad-face node
+sets, physical tags ride per-block, and the emitted mesh carries the
+input's native tet/hex/prism blocks with per-entity ownership — points,
+curve segs, surface tri/quad blocks, volume blocks, `MixedEntity`
+hierarchy, and `MixedPeriodicLink`s all populate. The shared dim-3 edge/face
+topology tables moved to `Elements.jl` (`_VOLUME_CELL_EDGES` /
+`_VOLUME_CELL_FACES`) so `Mesh3D` and `Model` share one MSH-order source;
+`_rb_gate` gained a phantom-crease exemption for singly-incident quad
+faces whose 1-3 fold diagonal is a PLC triangulation artifact (the
+exact-`orient3` region union can split on ulp transfinite-interpolation
+noise there — the diagonal is not a real surface edge and no cell has a
+diagonal edge to carry it).
 
-Verified against the oracle: the extended
-`validation/transfinite_volume/differential.jl` runs 5 ordered recombined
-cases (all-hex on (3,2,2) and (1,1,1), w-free on (3,2,2), v-free/u-free on
-a skewed (2,3,2) block) plus 4 invalid-mask cases — ordered volume
-connectivity identical, per-face boundary cell sets identical, rejections
-identical. The shared recombination machinery moved into
-`src/structured/StructuredRecombine.jl` so the volume module (loaded
-before the prism module) can delegate; the prism file keeps thin wrappers
-with its own diagnostic prefix.
+Also landed with it: eight stale `gmsh_parity` validation scripts
+(`embed_sheet`, `embed_sheet_hole`, `explicit_shell`,
+`geo_geometry_expressions`, `geo_dynamic_tags`, `geo_list_variables`,
+`periodic_surface_volume`, `geo_mesh_sizes`) were restored to green —
+they predate `GeoExecution.mesh` carrying boundary/embedded cells and now
+project through `geo_entity_mesh(execution, dim, tag)` with refreshed CRC
+pins (every pin verified bitwise-identical between `6970ab1` and this
+tree before updating — zero behavioral drift).
 
-Files: `src/structured/StructuredRecombine.jl` (new shared module),
-`src/structured/TransfiniteVolume.jl` (`recombine=` mask, shadow
-templates, recombined cell/boundary emitters, shared simplex/warped
-extractions), `src/structured/TransfinitePrism.jl` (delegating wrappers),
-`test/structured/transfinite_volume_test.jl` (recombined suites — all four
-patterns, pinned ordered tuples, mask/error matrix, warped grids,
-allocation ratchet; 370 focused tests),
-`validation/transfinite_volume/differential.jl` (recombined ordered +
-error cases), docs.
+Verified: all-hex transfinite box projects to 27 hexes / 54 quads / 36
+segs / 8 points with the full 27-entity hierarchy; the five-face
+recombined prism projects to 45 prisms + 27 quads + 30 tris; periodic
+boundary links survive quad faces; `validate` passes everywhere; tet-path
+output is bitwise unchanged (`mixed_crc` identical at HEAD vs this tree on
+every pinned fixture). Full `Pkg.test()` under `--check-bounds=yes`:
+428,560/428,560.
+
+Files: `src/core/Elements.jl`, `src/meshing/Mesh3D.jl`,
+`src/geometry/Model.jl`, `src/geometry/GeoExec.jl`,
+`test/geometry/geo_constraints_test.jl` (+31 asserts),
+`validation/gmsh_parity/{embed_sheet,embed_sheet_hole,explicit_shell,geo_geometry_expressions,geo_dynamic_tags,geo_list_variables,periodic_surface_volume,geo_mesh_sizes}.jl`, docs.
 
 Previous increment: **recombined five-face transfinite prism volumes** (`7cbd9ce`).
 
@@ -577,8 +579,8 @@ coordinate dedup and lowest-dimension node ownership; `context.mesh`,
 are now `Union{Mesh,MixedMesh}`; `Save` writes mixed products via
 `write_mixed_msh` (v2.2) with MPoint blocks appended. `model_to_mixed`
 projects mixed surface parts (one block per input dim-2 block, cells
-classified on the surface); volume-projection of a MixedMesh part throws a
-documented blocker. PLC boundary assembly folds recombined boundary
+classified on the surface); volume-projection of a MixedMesh part was a
+documented blocker — closed by the classified-projection increment above. PLC boundary assembly folds recombined boundary
 quadrangles onto the 1-3 diagonal for unstructured volumes (upstream keeps
 quads + pyramid transitions — cell-level nonconformity across the 2-D/3-D
 interface is inherent to an all-tet interior). Periodic slave copies,

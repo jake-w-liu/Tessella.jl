@@ -949,8 +949,8 @@ recombined unstructured surfaces, patch
 kernels, and five-/six-face transfinite
 volumes through `execute_geo`'s MixedMesh
 merge; `model_to_mixed` volume projection
-of a recombined part remains a documented
-blocker, and unstructured volume
+now classifies recombined tet/hex/prism
+parts end to end, and unstructured volume
 hex-dominant recombination is untouched),
 selective or
 high-order refinement, coarsening, 3-D multi-wall boundary-layer fans, curved
