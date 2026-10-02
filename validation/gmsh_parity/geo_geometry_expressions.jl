@@ -25,7 +25,7 @@ validate(mesh).ok || error("Tessella geometry-expression mesh is invalid")
 nnodes(mesh)==139 && ntets(mesh)==457 || error(
     "Tessella geometry-expression mesh size changed")
 mesh_crc(mesh).sha==
-    "25c0b9c98a5b8dc959b7f58202d62ad783c49a7b1e00111d649731112b975ee6" ||
+    "48656cd230252b831ec240081289d7c6f9103626726f2e4aa8728e1c764c49a7" ||
     error("Tessella geometry-expression mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -43,11 +43,11 @@ for (dim,tags) in EXPECTED_ENTITIES
 end
 execution.model.physical_names==EXPECTED_PHYSICAL_NAMES || error(
     "Tessella geometry-expression physical names changed")
-projected=model_to_mixed(execution.model,mesh,3,60)
+projected=model_to_mixed(execution.model,geo_entity_mesh(execution,3,60),3,60)
 validate(projected).ok || error(
     "Tessella geometry-expression projection is invalid")
 mixed_crc(projected).sha==
-    "8b76bf2a3c0f74cea3b1081dc9eb79627801b1a99ec7b250aaa899766a6e8d0a" ||
+    "9438d3c9f69b07832d335159ca36b85d3e0a469b23e5edca1f1362dcccf8b018" ||
     error("Tessella geometry-expression projection CRC changed")
 
 function find_gmsh_api()

@@ -24,7 +24,7 @@ tessella_volume=sum(tet_volume(
     for cell in 1:ntets(mesh))
 abs(tessella_volume-1)<=1e-12 ||
     error("Tessella explicit shell volume $tessella_volume != 1")
-projected=model_to_mixed(result.model,mesh,3,1)
+projected=model_to_mixed(result.model,geo_entity_mesh(result,3,1),3,1)
 validate(projected).ok || error("Tessella explicit-shell projection is invalid")
 projected.entity_data.entities[(3,1)].boundaries==EXPECTED_BOUNDARIES ||
     error("Tessella explicit-shell projection lost volume boundaries")

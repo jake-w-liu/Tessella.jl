@@ -16,7 +16,8 @@ using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
                    triangle_area, tet_signed_volume, tet_volume
 using ..Elements: ElementBlock, MixedElementBlock, MixedEntity,
                   MixedEntityData, MixedPeriodicLink, MixedMesh,
-                  msh_num_nodes, msh_family, msh_dimension
+                  msh_num_nodes, msh_family, msh_dimension,
+                  _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES
 using ..Mesh2D: constrained_delaunay, refine!, classify_interior, to_mesh,
                 _vert, _is_ghost_tri, _is_ghost_v
 using ..SizeField: AbstractSizeField, ConstantSize, FunctionSize, MinSize,
@@ -27,7 +28,8 @@ using ..Geometry: box_surface, cylinder_surface, sphere_surface, cone_surface
 using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle3,
                 refine_to_size
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
-                _tet_edge_set, _mesh_covering_faces3, _certify_surface_fill,
+                _tet_edge_set, _volume_edge_set, _volume_cell_boundary_faces,
+                _mesh_covering_faces3, _certify_surface_fill,
                 _protected_cells!, _sorted_face3,
                 _on_segment3, _pt3, _segment_chain3
 using ..Periodic: periodic_identify_affine
@@ -4448,7 +4450,7 @@ end
 # a different sampling). Consecutive sorted entries must be tet-edge
 # adjacent, so foreign nodes admitted by tolerance surface immediately.
 function _model_projection_tet_curve_nodes_curved(
-        m::GeoModel,mesh::Mesh,curve::Int,tet_edges,eligible,
+        m::GeoModel,mesh,curve::Int,tet_edges,eligible,
         atol::Float64,caller::AbstractString;
         edges=tet_edges)
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
@@ -4522,7 +4524,7 @@ function _model_projection_tet_curve_nodes_curved(
 end
 
 function _model_projection_tet_curve_nodes(
-    m::GeoModel,mesh::Mesh,curve::Int,tet_edges,
+    m::GeoModel,mesh,curve::Int,tet_edges,
     caller::AbstractString;
     owned::Union{Nothing,Dict{NTuple{3,Float64},Set{Int}}}=nothing,
     edges=tet_edges)
@@ -4590,6 +4592,14 @@ end
     first_node>second_node &&
         ((first_node,second_node)=(second_node,first_node))
     return (first_node,second_node,third_node)
+end
+
+@inline function _model_projection_face_key(face::NTuple{4,Int32})
+    a,b,c,d=face
+    a>b && ((a,b)=(b,a)); c>d && ((c,d)=(d,c))
+    a>c && ((a,c)=(c,a)); b>d && ((b,d)=(d,b))
+    b>c && ((b,c)=(c,b))
+    return (a,b,c,d)
 end
 
 @inline _model_projection_coordinate_key(value::Float64)=
@@ -5072,8 +5082,9 @@ end
 end
 
 function _model_projection_boundary_surface_faces!(
-    claimed_faces::Set{NTuple{3,Int32}},mesh_boundary_faces,
-    m::GeoModel,mesh::Mesh,surface::Int,caller::AbstractString)
+    claimed_faces,mesh_boundary_faces,
+    m::GeoModel,mesh,surface::Int,caller::AbstractString;
+    face_orders::Union{Nothing,AbstractDict}=nothing)
     chains=Vector{NTuple{3,Float64}}[]
     coordinates=NTuple{3,Float64}[]
     point_tags=Int[]
@@ -5155,45 +5166,77 @@ function _model_projection_boundary_surface_faces!(
     (isfinite(target_area) && target_area>0) || throw(ArgumentError(
         "$caller: Surface[$surface] has no finite positive area"))
 
-    output=NTuple{3,Int32}[]
+    _projection_vertex(coordinate)=
+        (_model_projection_coordinate_key(coordinate[first_axis]),
+         _model_projection_coordinate_key(coordinate[second_axis]))
+    output=(NTuple{N,Int32} where N)[]
     covered_area=0.0
-    for face in sort!(collect(mesh_boundary_faces))
-        first_coordinate=_model_mesh_coordinate(mesh,face[1])
-        second_coordinate=_model_mesh_coordinate(mesh,face[2])
-        third_coordinate=_model_mesh_coordinate(mesh,face[3])
-        _on_surface_plane(first_coordinate) || continue
-        _on_surface_plane(second_coordinate) || continue
-        _on_surface_plane(third_coordinate) || continue
-        projected_vertices=ntuple(slot->begin
-            coordinate=slot==1 ? first_coordinate :
-                       slot==2 ? second_coordinate : third_coordinate
-            (_model_projection_coordinate_key(coordinate[first_axis]),
-             _model_projection_coordinate_key(coordinate[second_axis]))
-        end,3)
-        all(vertex->_model_surface_contains2(vertex,polygons),
-            projected_vertices) || continue
-        centroid=(_model_mean3(projected_vertices[1][1],
-                               projected_vertices[2][1],
-                               projected_vertices[3][1]),
-                  _model_mean3(projected_vertices[1][2],
-                               projected_vertices[2][2],
-                               projected_vertices[3][2]))
-        _model_surface_contains2(centroid,polygons) || continue
-        face in claimed_faces && throw(ArgumentError(
-            "$caller: mesh face $face belongs to multiple model surfaces"))
-        face_orientation=orient2(projected_vertices...)
-        face_orientation!=0 || throw(ArgumentError(
-            "$caller: boundary Surface[$surface] contains degenerate projected " *
-            "mesh face $face"))
-        oriented=face_orientation==target_orientation ? face :
-                 (face[1],face[3],face[2])
-        push!(claimed_faces,face)
+    # `mesh_boundary_faces` holds canonical sorted keys; `face_orders` maps a
+    # key back to one incident cell's cyclic order, which quad cells need — a
+    # sorted quadruple is not necessarily a valid cyclic winding.
+    for key in sort!(collect(mesh_boundary_faces))
+        face=face_orders===nothing ? key : get(face_orders,key,key)
+        if length(face)==3
+            p1=_model_mesh_coordinate(mesh,face[1])
+            p2=_model_mesh_coordinate(mesh,face[2])
+            p3=_model_mesh_coordinate(mesh,face[3])
+            (_on_surface_plane(p1) && _on_surface_plane(p2) &&
+             _on_surface_plane(p3)) || continue
+            projected_vertices=(_projection_vertex(p1),_projection_vertex(p2),
+                                _projection_vertex(p3))
+            all(vertex->_model_surface_contains2(vertex,polygons),
+                projected_vertices) || continue
+            centroid=(_model_mean3(projected_vertices[1][1],
+                                   projected_vertices[2][1],
+                                   projected_vertices[3][1]),
+                      _model_mean3(projected_vertices[1][2],
+                                   projected_vertices[2][2],
+                                   projected_vertices[3][2]))
+            _model_surface_contains2(centroid,polygons) || continue
+            face_orientation=orient2(projected_vertices...)
+            face_orientation!=0 || throw(ArgumentError(
+                "$caller: boundary Surface[$surface] contains degenerate " *
+                "projected mesh face $key"))
+            oriented=face_orientation==target_orientation ? face :
+                     (face[1],face[3],face[2])
+            face_area=triangle_area(p1,p2,p3)
+        else
+            p1=_model_mesh_coordinate(mesh,face[1])
+            p2=_model_mesh_coordinate(mesh,face[2])
+            p3=_model_mesh_coordinate(mesh,face[3])
+            p4=_model_mesh_coordinate(mesh,face[4])
+            (_on_surface_plane(p1) && _on_surface_plane(p2) &&
+             _on_surface_plane(p3) && _on_surface_plane(p4)) || continue
+            projected_vertices=(_projection_vertex(p1),_projection_vertex(p2),
+                                _projection_vertex(p3),_projection_vertex(p4))
+            all(vertex->_model_surface_contains2(vertex,polygons),
+                projected_vertices) || continue
+            centroid=((projected_vertices[1][1]+projected_vertices[2][1]+
+                       projected_vertices[3][1]+projected_vertices[4][1])/4,
+                      (projected_vertices[1][2]+projected_vertices[2][2]+
+                       projected_vertices[3][2]+projected_vertices[4][2])/4)
+            _model_surface_contains2(centroid,polygons) || continue
+            # Both fan halves must wind identically — a nonconvex or
+            # self-crossing quad has no single orientation to emit.
+            first_half=orient2(projected_vertices[1],projected_vertices[2],
+                               projected_vertices[3])
+            second_half=orient2(projected_vertices[1],projected_vertices[3],
+                                projected_vertices[4])
+            (first_half==second_half && first_half!=0) || throw(ArgumentError(
+                "$caller: boundary Surface[$surface] contains degenerate or " *
+                "nonconvex projected mesh face $key"))
+            oriented=first_half==target_orientation ? face :
+                     (face[1],face[4],face[3],face[2])
+            face_area=triangle_area(p1,p2,p3)+triangle_area(p1,p3,p4)
+        end
+        key in claimed_faces && throw(ArgumentError(
+            "$caller: mesh face $key belongs to multiple model surfaces"))
+        push!(claimed_faces,key)
         push!(output,oriented)
-        covered_area+=triangle_area(
-            first_coordinate,second_coordinate,third_coordinate)
+        covered_area+=face_area
     end
     isempty(output) && throw(ArgumentError(
-        "$caller: boundary Surface[$surface] has no tetrahedron faces"))
+        "$caller: boundary Surface[$surface] has no volume-cell faces"))
     (isfinite(covered_area) &&
      abs(covered_area-target_area)<=1e-6*target_area) || throw(ArgumentError(
         "$caller: boundary Surface[$surface] mesh area $covered_area does not " *
@@ -5251,30 +5294,32 @@ function _model_affine_node_pairs(
 end
 
 function _model_periodic_surface_nodes(
-    m::GeoModel,mesh::Mesh,constraint::ModelPeriodicConstraint)
+    m::GeoModel,mesh,constraint::ModelPeriodicConstraint)
     caller="model_periodic_nodes"
-    ntets(mesh)>0 || throw(ArgumentError(
-        "$caller: periodic Surface mapping requires a tetrahedron mesh"))
     slave=Int(constraint.slave_entity)
     master=Int(constraint.master_entity)
-    boundary=Set(first(boundary_faces(mesh.tets)))
+    boundary,face_orders=_volume_cell_boundary_faces(mesh)
+    isempty(boundary) && throw(ArgumentError(
+        "$caller: periodic Surface mapping requires a volume mesh"))
     slave_faces=_model_projection_boundary_surface_faces!(
-        Set{NTuple{3,Int32}}(),boundary,m,mesh,slave,caller)
+        Set{NTuple{N,Int32} where N}(),boundary,m,mesh,slave,caller;
+        face_orders=face_orders)
     master_faces=_model_projection_boundary_surface_faces!(
-        Set{NTuple{3,Int32}}(),boundary,m,mesh,master,caller)
+        Set{NTuple{N,Int32} where N}(),boundary,m,mesh,master,caller;
+        face_orders=face_orders)
     slave_nodes,_=_model_projection_face_topology(slave_faces)
     master_nodes,_=_model_projection_face_topology(master_faces)
     mapping=_model_affine_node_pairs(
         mesh,constraint,master_nodes,slave_nodes,caller)
     node_map=Dict(master_node=>slave_node for (master_node,slave_node) in
         zip(mapping.master_nodes,mapping.slave_nodes))
-    mapped_master_faces=Set{NTuple{3,Int32}}()
+    mapped_master_faces=Set{NTuple{N,Int32} where N}()
     for face in master_faces
-        mapped=ntuple(slot->node_map[face[slot]],3)
+        mapped=ntuple(slot->node_map[face[slot]],Val(length(face)))
         push!(mapped_master_faces,_model_projection_face_key(mapped))
     end
-    slave_face_keys=Set(_model_projection_face_key(face)
-                        for face in slave_faces)
+    slave_face_keys=Set{NTuple{N,Int32} where N}(
+        _model_projection_face_key(face) for face in slave_faces)
     mapped_master_faces==slave_face_keys || throw(ArgumentError(
         "$caller: periodic Surface[$slave]/Surface[$master] face topology " *
         "does not match under the affine node map"))
@@ -5282,7 +5327,7 @@ function _model_periodic_surface_nodes(
 end
 
 function _model_projection_volume_surface_faces!(
-    claimed_faces::Set{NTuple{3,Int32}},m::GeoModel,mesh::Mesh,
+    claimed_faces,m::GeoModel,mesh,
     surface::Int,caller::AbstractString;
     targets::Union{Nothing,AbstractVector{NTuple{3,NTuple{3,Float64}}}}=nothing)
     if targets===nothing
@@ -5430,10 +5475,11 @@ end
 function _model_projection_face_topology(faces)
     nodes=Set{Int32}()
     edges=Set{NTuple{2,Int32}}()
-    for (first_node,second_node,third_node) in faces
-        push!(nodes,first_node,second_node,third_node)
-        for (a,b) in ((first_node,second_node),(second_node,third_node),
-                      (third_node,first_node))
+    for face in faces
+        n=length(face)
+        for i in 1:n
+            push!(nodes,face[i])
+            a=face[i];b=face[i==n ? 1 : i+1]
             push!(edges,a<b ? (a,b) : (b,a))
         end
     end
@@ -5567,7 +5613,7 @@ function _model_periodic_spanning_relations(
 end
 
 function _model_periodic_curve_entry_mapping(
-    mesh::Mesh,slave::Int,master::Int,affine,atol::Float64,
+    mesh,slave::Int,master::Int,affine,atol::Float64,
     slave_entries,master_entries,caller::AbstractString;
     reversed::Bool=false)
     constraint=ModelPeriodicConstraint(
@@ -5639,7 +5685,7 @@ function _model_periodic_surface_nodes_2d(
 end
 
 function _model_projection_periodic_surface_links(
-    m::GeoModel,mesh::Mesh,constraints,point_nodes,curve_entries,
+    m::GeoModel,mesh,constraints,point_nodes,curve_entries,
     surface_nodes,caller::AbstractString;
     curve_constraints=ModelPeriodicConstraint[],
     surface_tris::Union{Nothing,Dict{Int,Vector{Int32}}}=nothing)
@@ -5753,22 +5799,12 @@ function _model_projection_periodic_surface_links(
     return links
 end
 
-# Classified projection of a recombined volume part — the projection's
-# sheet/edge classification is tetrahedron-face based. `execute_geo` merges
-# such parts into the mixed product directly; only this projection entry is
-# unsupported.
-_model_volume_to_mixed(m::GeoModel,mesh::MixedMesh,volume::Int)=throw(
-    ArgumentError("model_to_mixed: classified projection of Volume[$volume] " *
-        "requires a tetrahedron mesh — a recombined MixedMesh volume part " *
-        "cannot be projected"))
-
-function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
-    caller="model_to_mixed"
-    haskey(m.volumes,volume) || throw(ArgumentError(
-        "$caller: unknown Volume[$volume]"))
-    diagnostic=validate(mesh)
-    diagnostic.ok || throw(ArgumentError(
-        "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+# Classified volume projection input contract. A `Mesh` must be pure
+# tetrahedra; a `MixedMesh` (e.g. a recombined transfinite part) carries
+# tetrahedron/hexahedron/prism `ElementBlock`s only — every cell untagged,
+# positively oriented, and of a supported linear MSH type. Both return the
+# volume-cell count.
+function _volume_projection_contract(mesh::Mesh,caller::AbstractString)
     nsegs(mesh)==0 || throw(ArgumentError(
         "$caller: volume input must not contain explicit segment cells"))
     ntris(mesh)==0 || throw(ArgumentError(
@@ -5777,6 +5813,48 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         "$caller: volume input must contain tetrahedron cells"))
     all(iszero,mesh.tet_tag) || throw(ArgumentError(
         "$caller: input tetrahedron tags must be zero; physical ownership comes from the model"))
+    return ntets(mesh)
+end
+
+function _volume_projection_contract(mesh::MixedMesh,caller::AbstractString)
+    cell_count=0
+    for block in mesh.blocks
+        block isa ElementBlock || throw(ArgumentError(
+            "$caller: volume input must not contain non-element cell blocks"))
+        dim=msh_dimension(Int(block.msh))
+        dim==0 && throw(ArgumentError(
+            "$caller: volume input must not contain explicit point cells"))
+        dim==1 && throw(ArgumentError(
+            "$caller: volume input must not contain explicit segment cells"))
+        dim==2 && throw(ArgumentError(
+            "$caller: volume input must not contain explicit surface cells"))
+        haskey(_VOLUME_CELL_FACES,Int(block.msh)) || throw(ArgumentError(
+            "$caller: MSH $(block.msh) volume cells are unsupported"))
+        all(iszero,block.tags) || throw(ArgumentError(
+            "$caller: input volume cell tags must be zero; physical " *
+            "ownership comes from the model"))
+        @inbounds for cell in axes(block.nodes,2)
+            _volume_cell_signed_volume(
+                mesh.coords,block.nodes,cell,Int(block.msh))>0 ||
+                throw(ArgumentError(
+                    "$caller: MSH $(block.msh) cell $cell is inverted or " *
+                    "degenerate"))
+        end
+        cell_count+=size(block.nodes,2)
+    end
+    cell_count>0 || throw(ArgumentError(
+        "$caller: volume input must contain volume cells"))
+    return cell_count
+end
+
+function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int)
+    caller="model_to_mixed"
+    haskey(m.volumes,volume) || throw(ArgumentError(
+        "$caller: unknown Volume[$volume]"))
+    diagnostic=validate(mesh)
+    diagnostic.ok || throw(ArgumentError(
+        "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
+    volume_cell_count=_volume_projection_contract(mesh,caller)
 
     explicit_geometry=(isempty(m.volumes[volume]) ||
         _implicit_volume_surface(m,volume)) ? nothing :
@@ -5785,7 +5863,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         _volume_surface(m,volume,caller) : explicit_geometry.surface
     fills_volume,fill_reason=_certify_surface_fill(domain_surface,mesh)
     fills_volume || throw(ArgumentError(
-        "$caller: input tetrahedron mesh does not fill Volume[$volume] — $fill_reason"))
+        "$caller: input volume mesh does not fill Volume[$volume] — $fill_reason"))
     explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
         mesh,volume,explicit_geometry.expected_volume,
         explicit_geometry.comparison_scale,caller)
@@ -5801,7 +5879,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         boundary_surface_tags,
         Int[surface for surface in surface_tags
             if !(surface in boundary_surface_set)])
-    tet_edges=_tet_edge_set(mesh)
+    cell_edges=_volume_edge_set(mesh)
     point_nodes=Dict{Int,Int32}()
     node_points=Dict{Int32,Int}()
     curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
@@ -5816,7 +5894,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     curve_owned=_curve_owned_coordinates(m,curve_tags,caller)
     function classify_curve!(curve,chain_edges)
         entries=_model_projection_tet_curve_nodes(
-            m,mesh,curve,tet_edges,caller;
+            m,mesh,curve,cell_edges,caller;
             owned=curve_owned,edges=chain_edges)
         closed=m.curves[curve][1]==m.curves[curve][2]
         # Resolve the whole edge list and audit foreign ownership before
@@ -5866,7 +5944,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
     end
     for curve in curve_tags
         haskey(nested_in,curve) && (push!(deferred_curves,curve); continue)
-        classify_curve!(curve,tet_edges)
+        classify_curve!(curve,cell_edges)
     end
     for point in point_tags
         haskey(point_nodes,point) && continue
@@ -5874,17 +5952,18 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         _model_projection_point!(point_nodes,node_points,point,node,caller)
     end
 
-    claimed_faces=Set{NTuple{3,Int32}}()
-    surface_cells=NTuple{3,Int32}[]
+    claimed_faces=Set{NTuple{N,Int32} where N}()
+    surface_cells=(NTuple{N,Int32} where N)[]
     surface_entities=Int32[]
     surface_nodes=Dict{Int,Set{Int32}}()
     surface_edges=Dict{Int,Set{NTuple{2,Int32}}}()
-    mesh_boundary_faces=Set(first(boundary_faces(mesh.tets)))
-    claimed_boundary_faces=Set{NTuple{3,Int32}}()
+    mesh_boundary_faces,face_orders=_volume_cell_boundary_faces(mesh)
+    claimed_boundary_faces=Set{NTuple{N,Int32} where N}()
     for surface in projection_surface_tags
         faces=if surface in boundary_surface_set
             _model_projection_boundary_surface_faces!(
-                claimed_faces,mesh_boundary_faces,m,mesh,surface,caller)
+                claimed_faces,mesh_boundary_faces,m,mesh,surface,caller;
+                face_orders=face_orders)
         else
             _model_projection_volume_surface_faces!(
                 claimed_faces,m,mesh,surface,caller)
@@ -5928,7 +6007,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         catch err
             err isa InterruptException && rethrow()
             (err isa ArgumentError || err isa ErrorException) || rethrow()
-            classify_curve!(curve,tet_edges)
+            classify_curve!(curve,cell_edges)
         end
         entries=curve_entries[curve]
         closed=m.curves[curve][1]==m.curves[curve][2]
@@ -5981,7 +6060,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
 
     total_elements=0
     for count in (length(point_tags),length(line_cells),
-                  length(surface_cells),ntets(mesh))
+                  length(surface_cells),volume_cell_count)
         total_elements=try Base.checked_add(total_elements,count) catch err
             err isa InterruptException && rethrow()
             throw(ArgumentError("$caller: projected element count overflows Int"))
@@ -6023,8 +6102,12 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
             curve_physical[Int(line_entities[cell])])
     end
 
-    surface_matrix=Matrix{Int32}(undef,3,length(surface_cells))
-    surface_physical=Vector{Int32}(undef,length(surface_cells))
+    surface_tri_indices=Int[]
+    surface_quad_indices=Int[]
+    for (index,cell) in pairs(surface_cells)
+        length(cell)==3 ? push!(surface_tri_indices,index) :
+                          push!(surface_quad_indices,index)
+    end
     surface_memberships=Dict{Int,Vector{Int32}}()
     for surface in surface_tags
         tags=_model_projection_physical_tags(m,2,surface)
@@ -6037,18 +6120,13 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
             boundaries=_model_projection_surface_boundaries(m,surface),
             embedded_curves=surface_embedded_curves[surface])
     end
-    for (cell,face) in pairs(surface_cells)
-        surface_matrix[:,cell].=face
-        surface_physical[cell]=_model_projection_legacy_tag(
-            surface_memberships[Int(surface_entities[cell])])
-    end
 
     volume_tags=_model_projection_physical_tags(m,3,volume)
     union!(projected_groups,((3,Int(tag)) for tag in volume_tags))
     entities[(3,volume)]=MixedEntity(
         3,volume,_model_projection_bbox(mesh,axes(mesh.coords,2),caller);
         physical_tags=volume_tags,boundaries=Int32.(boundary_surfaces))
-    tet_physical=fill(_model_projection_legacy_tag(volume_tags),ntets(mesh))
+    volume_physical=_model_projection_legacy_tag(volume_tags)
 
     blocks=ElementBlock[]
     block_entities=Vector{Int32}[]
@@ -6061,12 +6139,39 @@ function _model_volume_to_mixed(m::GeoModel,mesh::Mesh,volume::Int)
         push!(blocks,ElementBlock(1,line_matrix,line_physical))
         push!(block_entities,line_entities)
     end
-    if !isempty(surface_cells)
-        push!(blocks,ElementBlock(2,surface_matrix,surface_physical))
-        push!(block_entities,surface_entities)
+    for (indices,msh_type) in
+            ((surface_tri_indices,2),(surface_quad_indices,3))
+        isempty(indices) && continue
+        arity=msh_type==2 ? 3 : 4
+        cell_matrix=Matrix{Int32}(undef,arity,length(indices))
+        cell_physical=Vector{Int32}(undef,length(indices))
+        cell_entities=Int32[]
+        for (index,cell_index) in pairs(indices)
+            face=surface_cells[cell_index]
+            for slot in 1:arity
+                cell_matrix[slot,index]=face[slot]
+            end
+            entity=surface_entities[cell_index]
+            cell_physical[index]=_model_projection_legacy_tag(
+                surface_memberships[Int(entity)])
+            push!(cell_entities,entity)
+        end
+        push!(blocks,ElementBlock(msh_type,cell_matrix,cell_physical))
+        push!(block_entities,cell_entities)
     end
-    push!(blocks,ElementBlock(4,mesh.tets,tet_physical))
-    push!(block_entities,fill(Int32(volume),ntets(mesh)))
+    if mesh isa Mesh
+        push!(blocks,ElementBlock(4,mesh.tets,
+                                  fill(volume_physical,ntets(mesh))))
+        push!(block_entities,fill(Int32(volume),ntets(mesh)))
+    else
+        # Volume blocks keep the input's native cell families (tet/hex/prism).
+        for block in mesh.blocks
+            ncells=size(block.nodes,2)
+            push!(blocks,ElementBlock(Int(block.msh),block.nodes,
+                                      fill(volume_physical,ncells)))
+            push!(block_entities,fill(Int32(volume),ncells))
+        end
+    end
 
     external_node_tags=UInt64.(1:nnodes(mesh))
     external_element_tags=_model_projection_external_elements(blocks)
@@ -6621,17 +6726,9 @@ function _reversed_volume_mesh(mesh::Mesh,caller::AbstractString,t::Int)
                 tet_tag=mesh.tet_tag)
 end
 
-# Linear dim-3 element edges/faces shared by the mixed volume attribute
-# passes — the MSH vertex orders of `MElement.h` (tet 4, hex 5, prism 6).
-const _VOLUME_CELL_EDGES = Dict{Int,Vector{NTuple{2,Int}}}(
-    4=>[(1,2),(1,3),(1,4),(2,3),(2,4),(3,4)],
-    5=>[(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
-        (1,5),(2,6),(3,7),(4,8)],
-    6=>[(1,2),(2,3),(1,3),(4,5),(5,6),(4,6),(1,4),(2,5),(3,6)])
-const _VOLUME_CELL_FACES = Dict{Int,Vector{NTuple{N,Int} where N}}(
-    4=>[(1,2,3),(1,2,4),(1,3,4),(2,3,4)],
-    5=>[(1,2,3,4),(5,6,7,8),(1,2,6,5),(2,3,7,6),(3,4,8,7),(4,1,5,8)],
-    6=>[(1,2,3),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)])
+# Linear dim-3 cell edge/face topology lives in Elements.jl as
+# `_VOLUME_CELL_EDGES`/`_VOLUME_CELL_FACES` (imported above) so the meshing
+# kernel and this module share one table.
 
 # Reverse per `MElement::reverse`: tet swaps the first two vertices, a prism
 # the first two of each triangular end, a hexahedron the third vertex of each
@@ -8046,8 +8143,58 @@ function _model_mesh_volume(mesh::Mesh,caller::AbstractString)
     return total
 end
 
+# Signed volume of one dim-3 cell under the cyclic `_VOLUME_CELL_FACES`
+# ordering — each face fans from its first vertex and is oriented away from
+# the cell centroid by the exact `orient3` predicate (the `_prism_volume6`
+# convention), so folded or flat cells report ≤ 0.
+function _volume_cell_signed_volume(coords::AbstractMatrix{Float64},
+                                    nodes::AbstractMatrix{Int32},
+                                    cell::Int,msh::Int)
+    nverts=size(nodes,1)
+    cx=cy=cz=0.0
+    @inbounds for i in 1:nverts
+        v=nodes[i,cell]
+        cx+=coords[1,v];cy+=coords[2,v];cz+=coords[3,v]
+    end
+    scale=1.0/nverts
+    center=(cx*scale,cy*scale,cz*scale)
+    total=0.0
+    @inbounds for f in _VOLUME_CELL_FACES[msh]
+        a1=nodes[f[1],cell]
+        pa=(coords[1,a1],coords[2,a1],coords[3,a1])
+        for k in 2:length(f)-1
+            a2=nodes[f[k],cell];a3=nodes[f[k+1],cell]
+            pb=(coords[1,a2],coords[2,a2],coords[3,a2])
+            pc=(coords[1,a3],coords[2,a3],coords[3,a3])
+            s=(pa[1]*(pb[2]*pc[3]-pb[3]*pc[2])+
+               pa[2]*(pb[3]*pc[1]-pb[1]*pc[3])+
+               pa[3]*(pb[1]*pc[2]-pb[2]*pc[1]))/6.0
+            total+=orient3(pa,pb,pc,center)>0 ? s : -s
+        end
+    end
+    return total
+end
+
+function _model_mesh_volume(mesh::MixedMesh,caller::AbstractString)
+    total=0.0;correction=0.0
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        haskey(_VOLUME_CELL_FACES,Int(block.msh)) || continue
+        @inbounds for cell in axes(block.nodes,2)
+            value=_volume_cell_signed_volume(
+                mesh.coords,block.nodes,cell,Int(block.msh))
+            isfinite(value) || throw(ArgumentError(
+                "$caller: MSH $(block.msh) cell $cell has non-finite volume"))
+            total,correction=_model_compensated_add(total,correction,value)
+        end
+    end
+    (isfinite(total) && total>0) || throw(ArgumentError(
+        "$caller: volume mesh has no finite positive volume"))
+    return total
+end
+
 function _model_certify_explicit_volume_semantics(
-    mesh::Mesh,volume::Int,expected_volume::Float64,
+    mesh,volume::Int,expected_volume::Float64,
     comparison_scale::Float64,caller::AbstractString)
     actual_volume=_model_mesh_volume(mesh,caller)
     tolerance=128eps(Float64)*max(comparison_scale,actual_volume)

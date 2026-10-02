@@ -37,14 +37,14 @@ execution.model.physical_names==EXPECTED_PHYSICAL_NAMES || error(
 nnodes(mesh)==18 && ntris(mesh)==24 || error(
     "Tessella point-size mesh size changed")
 mesh_crc(mesh).sha==
-    "2b17b65bf07655c9f85d24d261375a828a5e0ec3af0f081bfe83ef0064f1d492" ||
+    "74d5faf2f6598280b886ecceaf5b0eedf3373b93d2f601cffba1a4274d57c9af" ||
     error("Tessella point-size mesh CRC changed")
 native_area=sum(triangle_area(
     node(mesh,mesh.tris[1,triangle]),node(mesh,mesh.tris[2,triangle]),
     node(mesh,mesh.tris[3,triangle])) for triangle in 1:ntris(mesh))
 abs(native_area-1)<=32eps(Float64) || error(
     "Tessella point-size area is $native_area, expected 1")
-projected=model_to_mixed(execution.model,mesh,2,1)
+projected=model_to_mixed(execution.model,geo_entity_mesh(execution,2,1),2,1)
 validate(projected).ok || error("Tessella point-size projection is invalid")
 mixed_crc(projected).sha==
     "48716f65a6a9ea3f11e20e74f107cc00aa2efc3bd487c38bc43f5d4c8c0bf2b5" ||
@@ -72,11 +72,11 @@ points_of_meshed=execute_geo(POINTS_OF_GEO;mesh_dim=3)
 nnodes(points_of_meshed.mesh)==53 && ntets(points_of_meshed.mesh)==123 || error(
     "Tessella topology-derived Physical mesh size changed")
 points_of_projected=model_to_mixed(
-    points_of_meshed.model,points_of_meshed.mesh,3,1)
+    points_of_meshed.model,geo_entity_mesh(points_of_meshed,3,1),3,1)
 validate(points_of_projected).ok || error(
     "Tessella topology-derived Physical projection is invalid")
 mixed_crc(points_of_projected).sha==
-    "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0" ||
+    "4640321fc7eb29fef6951cf2faf8975fcaa75ab332b37e29a55a4c47f9d7ed05" ||
     error("Tessella topology-derived Physical projection CRC changed")
 
 function native_spatial_mesh()

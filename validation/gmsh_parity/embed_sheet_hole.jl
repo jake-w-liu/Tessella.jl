@@ -19,11 +19,13 @@ const PROJECTED_CRC=(
     "2b1f9b682ceb7bfd94e1ee6651801215e7279a807e31daa2769af170dae48a11",
     "03fc0458f443790cfd210731b8b30410e673f412da003109e86d8a97906936f9",
     "a82cc295568a011129abae5c84d8fe078d23aff5d4dab5ea9645e64ca1c7fbcb",
+    "2aca2892639937fa0fb8099be6ef49e393977e6e8b75c098ede9b66116edc0ab",
 )
 const MSH2_CRC=(
     "35c40759cf9bbe7f3b9a9305e17d40fd7741a66e027ecf4d984c08fa820a17d3",
     "5e58c6f70f6248a443daabdbc743826df17cc1675a37b705b5ee4d2a101ddeb4",
     "6dd1b3951396c8b0ab5d4b82d493c052ea180a5dd826f89b0bf70bc437208eb1",
+    "074cbd444591ff4f6e9f010664101b748a76a363d1e39d1fa3ba13df788ef0a7",
 )
 
 function triangle_stats(coordinate,connectivity)
@@ -50,7 +52,7 @@ volume=sum(tet_volume(
     for cell in 1:ntets(mesh))
 abs(volume-1)<=1e-12 || error("Tessella holed-sheet volume $volume != 1")
 
-projected=model_to_mixed(result.model,mesh,3,1)
+projected=model_to_mixed(result.model,geo_entity_mesh(result,3,1),3,1)
 validate(projected).ok || error("Tessella holed-sheet projection is invalid")
 surface_index=only(findall(block->block.msh==2,projected.blocks))
 surface_block=projected.blocks[surface_index]

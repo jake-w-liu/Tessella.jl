@@ -248,6 +248,19 @@ msh_order(msh::Integer)=msh_spec(msh).order
 """Return the element-family symbol for a Gmsh numeric type."""
 msh_family(msh::Integer)=msh_spec(msh).family
 
+# Linear dim-3 element edges/faces shared by the mixed volume attribute
+# passes and the classified volume projection — the MSH vertex orders of
+# `MElement.h` (tet 4, hex 5, prism 6). Faces are listed in cyclic order.
+const _VOLUME_CELL_EDGES = Dict{Int,Vector{NTuple{2,Int}}}(
+    4=>[(1,2),(1,3),(1,4),(2,3),(2,4),(3,4)],
+    5=>[(1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
+        (1,5),(2,6),(3,7),(4,8)],
+    6=>[(1,2),(2,3),(1,3),(4,5),(5,6),(4,6),(1,4),(2,5),(3,6)])
+const _VOLUME_CELL_FACES = Dict{Int,Vector{NTuple{N,Int} where N}}(
+    4=>[(1,2,3),(1,2,4),(1,3,4),(2,3,4)],
+    5=>[(1,2,3,4),(5,6,7,8),(1,2,6,5),(2,3,7,6),(3,4,8,7),(4,1,5,8)],
+    6=>[(1,2,3),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)])
+
 abstract type AbstractElementBlock end
 
 """One homogeneous block: `nodes` is `nnodes × ncells` (1-based indices)."""

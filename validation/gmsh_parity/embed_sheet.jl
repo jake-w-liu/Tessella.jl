@@ -19,7 +19,7 @@ V=sum(tet_volume(node(mesh,mesh.tets[1,t]),node(mesh,mesh.tets[2,t]),
                  node(mesh,mesh.tets[3,t]),node(mesh,mesh.tets[4,t]))
       for t in 1:ntets(mesh))
 abs(V-1)<=1e-12 || error("Tessella embed-sheet volume $V != 1")
-projected=model_to_mixed(result.model,mesh,3,1)
+projected=model_to_mixed(result.model,geo_entity_mesh(result,3,1),3,1)
 validate(projected).ok || error("Tessella embedded-sheet projection is invalid")
 surface_block=only(findall(block->block.msh==2,projected.blocks))
 Int32(101) in projected.entity_data.block_entities[surface_block] ||
@@ -38,7 +38,7 @@ sort!(unique(Int.(projected.entity_data.block_entities[surface_block])))==
         "Tessella embedded-sheet surface classification changed")
 projected.entity_data.entities[(3,1)].boundaries==Int32[-1,2,-3,4,-5,6] ||
     error("Tessella embedded-sheet lost the box's oriented shell")
-projected_crc.sha=="eb50392211a4d1d2a03875111d3d6ce61f14f7936fbf3f97063a231aded004ff" ||
+projected_crc.sha=="50bd42ccd0a876755b667cf55f5bbffae528f436767b154eb5dca605f0c81974" ||
     error("Tessella embedded-sheet projection CRC changed: $(projected_crc.sha)")
 
 function find_gmsh_api()
@@ -147,7 +147,7 @@ try
         length(msh2_crcs)==1 || error(
             "Tessella embedded-sheet MSH2 modes produced different CRCs: $msh2_crcs")
         only(msh2_crcs)==
-            "db4fe8cfade5acb08abb418348e1deab1287d588e43b26be00b38e3aad421cd6" ||
+            "4315525560b73baf42981b032c4793d9368472dd126f6fdd4265c27047165f2e" ||
             error("Tessella embedded-sheet MSH2 CRC changed: $(only(msh2_crcs))")
     end
     println("GMSH_PARITY_EMBED_SHEET_OK gmsh=$(gmsh.GMSH_API_VERSION) " *

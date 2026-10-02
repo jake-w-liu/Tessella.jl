@@ -99,7 +99,7 @@ nnodes(mesh)==135 && ntets(mesh)==440 || error(
     "Tessella periodic volume size changed to $(nnodes(mesh)) nodes and " *
     "$(ntets(mesh)) tetrahedra")
 mesh_crc(mesh).sha==
-    "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8" ||
+    "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b" ||
     error("Tessella periodic volume mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -121,13 +121,13 @@ for relation in filter(relation->relation.dim==2,RELATIONS)
         "Tessella changed Surface[$(relation.slave)] pair count")
 end
 
-projected=model_to_mixed(execution.model,mesh,3,1)
+projected=model_to_mixed(execution.model,geo_entity_mesh(execution,3,1),3,1)
 max_tessella_error=validate_mixed_relations(projected,:tessella_pairs)
 max_tessella_error==0 || error(
     "Tessella periodic volume coordinate error is $max_tessella_error")
 projected_crc=mixed_crc(projected)
 projected_crc.sha==
-    "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461" ||
+    "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102" ||
     error("Tessella periodic volume projection CRC changed")
 
 function find_gmsh_api()
@@ -254,7 +254,7 @@ try
     projected_crcs[4.1]==Set([projected_crc.sha]) || error(
         "periodic volume MSH4 CRC depends on file mode")
     projected_crcs[2.2]==Set([
-        "b8251bd55dc17ab832e64c1cb976936fb22bdb4777587095334c6d4b3716546f"]) ||
+        "d8c7da6a4f188947e8221975edfa71b8efe7a5434d198e7f948f2787f6b05cd1"]) ||
         error("periodic volume MSH2 CRC changed or depends on file mode")
     max_roundtrip_error<=1e-12 || error(
         "Gmsh periodic volume round-trip error is $max_roundtrip_error")

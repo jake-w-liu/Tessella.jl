@@ -1,7 +1,9 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris, validate
-using Tessella.Model: model_physical_groups, model_entities_for_physical_group,
+using Tessella.MeshTypes: ntris, nnodes, validate
+using Tessella.Elements: ElementBlock, MixedMesh
+using Tessella.Model: model_to_mixed, model_physical_groups,
+                      model_entities_for_physical_group,
                       model_entities_for_physical_name,
                       model_physical_groups_for_entity
 
@@ -1273,4 +1275,137 @@ end
         RefineMesh;
         """)
     @test err isa ArgumentError
+end
+
+@testset ".geo classified projection of recombined volumes" begin
+    function _block_counts(mesh::MixedMesh)
+        counts=Dict{Int,Int}()
+        for block in mesh.blocks
+            block isa ElementBlock || continue
+            counts[Int(block.msh)]=get(counts,Int(block.msh),0)+
+                size(block.nodes,2)
+        end
+        return counts
+    end
+
+    # All-hexahedral transfinite box: the classified projection keeps the
+    # native hex block, emits quad boundary faces, and classifies the full
+    # entity hierarchy.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{:};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        Mesh 3;
+        """;mesh_dim=3)
+    part=geo_entity_mesh(execution,3,1)
+    @test part isa MixedMesh
+    projected=model_to_mixed(execution.model,part,3,1)
+    @test projected isa MixedMesh
+    @test validate(projected).ok
+    counts=_block_counts(projected)
+    @test counts[15]==8 && counts[1]==36
+    @test counts[3]==54 && counts[5]==27
+    @test !haskey(counts,2) && !haskey(counts,4)
+    entities=projected.entity_data.entities
+    @test count(e->e.dim==0,values(entities))==8
+    @test count(e->e.dim==1,values(entities))==12
+    @test count(e->e.dim==2,values(entities))==6
+    @test count(e->e.dim==3,values(entities))==1
+    @test entities[(3,1)].boundaries==Int32[1,2,3,4,5,6]
+
+    # Recombined five-face prism: quads and triangle caps coexist, and the
+    # folded-quad diagonal on a transfinite side face does not mint a
+    # phantom surface crease during fill certification.
+    prism_source=raw"""
+        Point(1) = {0,0,0,0.4}; Point(2) = {1,0,0,0.4};
+        Point(3) = {0,1,0,0.4}; Point(4) = {0,0,1,0.4};
+        Point(5) = {1,0,1,0.4}; Point(6) = {0,1,1,0.4};
+        Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,1};
+        Line(4) = {4,5}; Line(5) = {5,6}; Line(6) = {6,4};
+        Line(7) = {1,4}; Line(8) = {2,5}; Line(9) = {3,6};
+        Curve Loop(1) = {1,2,3}; Curve Loop(2) = {4,5,6};
+        Curve Loop(3) = {1,8,-4,-7}; Curve Loop(4) = {2,9,-5,-8};
+        Curve Loop(5) = {3,7,-6,-9};
+        Plane Surface(1) = {1}; Plane Surface(2) = {2};
+        Plane Surface(3) = {3}; Plane Surface(4) = {4};
+        Plane Surface(5) = {5};
+        Surface Loop(1) = {1,2,3,4,5};
+        Volume(1) = {1};
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{3,4,5};
+        Transfinite Volume{1} = {1,2,3,4,5,6};
+        Mesh 3;
+        """
+    execution=_execute_constraint_source(prism_source;mesh_dim=3)
+    part=geo_entity_mesh(execution,3,1)
+    @test part isa MixedMesh
+    projected=model_to_mixed(execution.model,part,3,1)
+    @test projected isa MixedMesh
+    @test validate(projected).ok
+    counts=_block_counts(projected)
+    @test counts[15]==6 && counts[1]==27
+    @test counts[3]==27 && counts[2]==30 && counts[6]==45
+    entities=projected.entity_data.entities
+    @test count(e->e.dim==0,values(entities))==6
+    @test count(e->e.dim==1,values(entities))==9
+    @test count(e->e.dim==2,values(entities))==5
+    @test entities[(3,1)].boundaries==Int32[1,2,3,4,5]
+
+    # Periodic boundary surfaces still emit the affine node links through
+    # quad faces on a recombined volume.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Periodic Surface 2 {5,6,7,8} = 1 {1,2,3,4};
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{:};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        Mesh 3;
+        """;mesh_dim=3)
+    part=geo_entity_mesh(execution,3,1)
+    projected=model_to_mixed(execution.model,part,3,1)
+    @test validate(projected).ok
+    surface_links=[l for l in projected.periodic_links if l.dim==2]
+    @test length(surface_links)==1
+    @test only(surface_links).slave_entity==2
+    @test only(surface_links).master_entity==1
+    @test length(only(surface_links).slave_nodes)==16
+
+    # Physical groups ride through quad surface blocks and hex cells.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
+        Physical Surface(10) = {1,3,5};
+        Physical Volume(20) = {1};
+        Transfinite Curve{:} = 4;
+        Transfinite Surface{:};
+        Recombine Surface{:};
+        Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
+        Mesh 3;
+        """;mesh_dim=3)
+    part=geo_entity_mesh(execution,3,1)
+    projected=model_to_mixed(execution.model,part,3,1)
+    quad_tags=Int32[]
+    hex_tags=Int32[]
+    for block in projected.blocks
+        block isa ElementBlock || continue
+        block.msh==3 && append!(quad_tags,block.tags)
+        block.msh==5 && append!(hex_tags,block.tags)
+    end
+    @test 10 in quad_tags
+    @test all(==(20),hex_tags)
+
+    # A MixedMesh carrying non-volume blocks is not a volume part.
+    bad=MixedMesh(part.coords,
+                  [ElementBlock(2,ones(Int32,3,1),Int32[0]),
+                   first(b for b in part.blocks if b isa ElementBlock)])
+    @test_throws ArgumentError model_to_mixed(execution.model,bad,3,1)
+
+    # Simplex volumes still project through the shared path.
+    execution=_execute_constraint_source(_GEO_BOX * "Mesh 3;\n";mesh_dim=3)
+    part=geo_entity_mesh(execution,3,1)
+    @test part isa Mesh
+    projected=model_to_mixed(execution.model,part,3,1)
+    @test validate(projected).ok
+    counts=_block_counts(projected)
+    @test counts[4]>0 && counts[2]>0 && !haskey(counts,3) && !haskey(counts,5)
 end

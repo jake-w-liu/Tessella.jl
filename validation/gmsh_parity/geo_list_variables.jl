@@ -23,7 +23,7 @@ validate(mesh).ok || error("Tessella list-variable mesh is invalid")
 nnodes(mesh)==135 && ntets(mesh)==440 || error(
     "Tessella list-variable mesh size changed")
 mesh_crc(mesh).sha==
-    "98155e98b3124ebc2d7952136fb1ac96836a18e450be59c998356893bfdb2dc8" ||
+    "e5c6e4de5c25c6c4733884e36ef718b559073205595f4a449618b3d40726307b" ||
     error("Tessella list-variable mesh CRC changed")
 tessella_volume=sum(tet_volume(
     node(mesh,mesh.tets[1,cell]),node(mesh,mesh.tets[2,cell]),
@@ -47,11 +47,11 @@ execution.params.fields[201].options["PointsList"]=="{101, 102}" || error(
  for constraint in model_periodic_constraints(execution.model)]==
     [(2,4,6),(2,5,3)] || error(
         "Tessella list-variable periodic relations changed")
-projected=model_to_mixed(execution.model,mesh,3,1)
+projected=model_to_mixed(execution.model,geo_entity_mesh(execution,3,1),3,1)
 validate(projected).ok || error(
     "Tessella list-variable projection is invalid")
 mixed_crc(projected).sha==
-    "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461" ||
+    "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102" ||
     error("Tessella list-variable projection CRC changed")
 
 function find_gmsh_api()
