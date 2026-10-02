@@ -15,7 +15,8 @@ if !isdefined(Tessella, :TransfiniteTriangle)
 end
 using Tessella.TransfiniteTriangle: mesh_transfinite_triangle,
                                     mesh_transfinite_triangle_patch,
-                                    mesh_transfinite_triangle_collapsed
+                                    mesh_transfinite_triangle_collapsed,
+                                    mesh_transfinite_triangle_collapsed_patch
 
 const TARGET_GMSH_VERSION = "4.15.2"
 
@@ -344,6 +345,72 @@ function check_collapsed(arrangement, symbol, count=6; tilted=false,
     return maximum_error
 end
 
+# Recombined arm of the same collapsed algorithm (`Mesh.TransfiniteTri = 0`
+# plus `Recombine Surface`): upstream keeps the apex fan triangular and emits
+# one quadrangle per remaining grid cell, independent of the arrangement.
+function check_collapsed_recombined(arrangement, symbol, count=6;
+                                    tilted=false, counts=nothing,
+                                    corners=nothing, rotate=0)
+    curves, surface = add_curved_triangle(
+        arrangement, count; tilted=tilted, counts=counts, corners=corners,
+        recombine=true)
+    sides = map(curve_points, curves)
+    rotate > 0 && (sides = Tuple(sides[mod1(index + rotate, 3)]
+                               for index in 1:3))
+    mesh = mesh_transfinite_triangle_collapsed_patch(
+        sides...; arrangement=symbol, face_tag=21, side_tags=(11, 12, 13),
+        allow_corner_rotation=corners isa AbstractVector && isempty(corners))
+    Tessella.Elements.validate(mesh).ok || error(
+        "Tessella recombined collapsed $arrangement patch did not validate")
+    mapping, maximum_error = gmsh_to_tessella_node_map(mesh, surface)
+
+    line_block = only(filter(block -> block.msh == 1, mesh.blocks))
+    triangle_block = only(filter(block -> block.msh == 2, mesh.blocks))
+    quadrangle_blocks = filter(block -> block.msh == 3, mesh.blocks)
+    quadrangle_count = isempty(quadrangle_blocks) ? 0 :
+                        size(only(quadrangle_blocks).nodes, 2)
+    types, _, element_nodes = gmsh.model.mesh.getElements(2, surface)
+    triangle_position = findfirst(==(Int32(2)), types)
+    triangle_position === nothing && error(
+        "Gmsh recombined collapsed $arrangement emitted no triangles")
+    size(triangle_block.nodes, 2) == 0 && error(
+        "Tessella recombined collapsed $arrangement emitted no fan triangles")
+    mapped_triangles = Int32[
+        mapping[tag] for tag in element_nodes[triangle_position]]
+    canonical_triangles(mapped_triangles) ==
+        canonical_triangles(vec(triangle_block.nodes)) || error(
+            "recombined collapsed $arrangement triangle connectivity " *
+            "differs from Gmsh")
+    length(element_nodes[triangle_position]) ==
+        3size(triangle_block.nodes, 2) || error(
+            "recombined collapsed $arrangement fan count differs from Gmsh")
+
+    quadrangle_position = findfirst(==(Int32(3)), types)
+    mapped_quadrangles = quadrangle_position === nothing ? Int32[] :
+        Int32[mapping[tag] for tag in element_nodes[quadrangle_position]]
+    tessella_quadrangles = isempty(quadrangle_blocks) ? NTuple{4,Int32}[] :
+        canonical_quadrangles(vec(only(quadrangle_blocks).nodes))
+    canonical_quadrangles(mapped_quadrangles) == tessella_quadrangles ||
+        error("recombined collapsed $arrangement quadrangle connectivity " *
+              "differs from Gmsh")
+
+    mapped_segments = Int32[]
+    for curve in curves
+        line_types, _, line_nodes = gmsh.model.mesh.getElements(1, curve)
+        line_position = findfirst(==(Int32(1)), line_types)
+        line_position === nothing && error(
+            "Gmsh curve $curve emitted no first-order lines")
+        append!(mapped_segments,
+                (mapping[tag] for tag in line_nodes[line_position]))
+    end
+    canonical_segments(mapped_segments) ==
+        canonical_segments(vec(line_block.nodes)) || error(
+            "recombined collapsed $arrangement boundary connectivity " *
+            "differs from Gmsh")
+    return maximum_error, canonical_triangles(mapped_triangles),
+           tessella_quadrangles, Tessella.Elements.mixed_crc(mesh).sha
+end
+
 gmsh.initialize([GMSH_EXECUTABLE, "-nopopup"], false, false)
 try
     gmsh.option.setNumber("General.Terminal", 0)
@@ -459,6 +526,47 @@ try
         "Left", :left, 0; counts=(6, 8, 8), rotate=2,
         corners=[7, 1, 4]))
     collapsed_samples += 43
+
+    # Recombined collapsed arm: same geometries under `Recombine Surface`.
+    # Upstream's recombined collapsed emission is arrangement-independent —
+    # the branch precedes the diagonal dispatch — so Tessella's canonical
+    # cells and CRC must be identical across all four arrangements.
+    collapsed_recombined_errors = Float64[]
+    collapsed_recombined_topologies = Tuple{
+        Vector{NTuple{3,Int32}},Vector{NTuple{4,Int32}}}[]
+    collapsed_recombined_crcs = String[]
+    collapsed_recombined_samples = 0
+    for (arrangement, symbol) in cases
+        maximum_error, triangles, quadrangles, crc =
+            check_collapsed_recombined(arrangement, symbol)
+        push!(collapsed_recombined_errors, maximum_error)
+        push!(collapsed_recombined_topologies, (triangles, quadrangles))
+        push!(collapsed_recombined_crcs, crc)
+        collapsed_recombined_samples += 31
+    end
+    all(topology == collapsed_recombined_topologies[1]
+        for topology in collapsed_recombined_topologies) || error(
+        "recombined collapsed topology changed with arrangement")
+    all(crc == collapsed_recombined_crcs[1]
+        for crc in collapsed_recombined_crcs) || error(
+        "recombined collapsed mesh changed with arrangement")
+    for count in (2, 4, 7)
+        maximum_error, _, _, _ = check_collapsed_recombined(
+            "Left", :left, count)
+        push!(collapsed_recombined_errors, maximum_error)
+        collapsed_recombined_samples += 1 + (count - 1) * count
+    end
+    maximum_error, _, _, _ = check_collapsed_recombined(
+        "Left", :left, 6; tilted=true)
+    push!(collapsed_recombined_errors, maximum_error)
+    collapsed_recombined_samples += 31
+    push!(collapsed_recombined_errors, check_collapsed_recombined(
+        "Left", :left, 0; counts=(5, 5, 8), corners=Int[])[1])
+    collapsed_recombined_samples += 33
+    push!(collapsed_recombined_errors, check_collapsed_recombined(
+        "Left", :left, 0; counts=(6, 8, 8), rotate=2,
+        corners=[7, 1, 4])[1])
+    collapsed_recombined_samples += 43
     println("TRANSFINITE_TRIANGLE_DIFFERENTIAL_OK gmsh=$api_version " *
             "arrangements=$(length(cases)) resolutions=5 geometries=2 " *
             "coordinate_samples=$coordinate_samples " *
@@ -474,7 +582,13 @@ try
             "recombined_crcs=$(join(recombined_crcs, ',')) " *
             "collapsed_arrangements=$(length(cases)) " *
             "collapsed_coordinate_samples=$collapsed_samples " *
-            "collapsed_max_node_error=$(maximum(collapsed_errors))")
+            "collapsed_max_node_error=$(maximum(collapsed_errors)) " *
+            "collapsed_recombined_arrangements=$(length(cases)) " *
+            "collapsed_recombined_samples=$collapsed_recombined_samples " *
+            "collapsed_recombined_max_node_error=" *
+            "$(maximum(collapsed_recombined_errors)) " *
+            "collapsed_recombined_reference_triangles=5 " *
+            "collapsed_recombined_reference_quadrangles=20")
 finally
     gmsh.finalize()
 end

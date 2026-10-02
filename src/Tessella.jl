@@ -87,7 +87,8 @@ using .Transfinite: mesh_transfinite_patch
 using .TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using .TransfiniteTriangle: mesh_transfinite_triangle,
                            mesh_transfinite_triangle_patch,
-                           mesh_transfinite_triangle_collapsed
+                           mesh_transfinite_triangle_collapsed,
+                           mesh_transfinite_triangle_collapsed_patch
 using .TransfiniteQuad: mesh_transfinite_quad_patch
 using .TransfiniteVolume: mesh_transfinite_volume
 using .TransfinitePrism: mesh_transfinite_prism
@@ -178,6 +179,7 @@ export transfinite_curve_parameters, transfinite_curve_hwall
 export mesh_transfinite_triangle
 export mesh_transfinite_triangle_patch
 export mesh_transfinite_triangle_collapsed
+export mesh_transfinite_triangle_collapsed_patch
 export mesh_transfinite_quad_patch
 export mesh_transfinite_volume
 export mesh_transfinite_prism
