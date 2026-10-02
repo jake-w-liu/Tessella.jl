@@ -10,7 +10,8 @@ if !isdefined(Tessella, :TransfiniteTriangle)
 end
 using Tessella.TransfiniteTriangle: mesh_transfinite_triangle,
                                     mesh_transfinite_triangle_patch,
-                                    mesh_transfinite_triangle_collapsed
+                                    mesh_transfinite_triangle_collapsed,
+                                    mesh_transfinite_triangle_collapsed_patch
 
 @inline _triangle_node(i::Int, j::Int) = Int32((i * (i + 1)) ÷ 2 + j + 1)
 
@@ -731,5 +732,139 @@ end
             unit...; max_triangles=14)
         @test mesh_crc(mesh) == mesh_crc(mesh_transfinite_triangle_collapsed(
             unit...))
+    end
+
+    @testset "recombined collapsed-quadrilateral TransfiniteTri=0 arm" begin
+        # Recombined form of the legacy collapsed algorithm: the apex fan
+        # stays triangular and every remaining grid cell emits one
+        # quadrangle — 3 fan triangles + 6 quadrangles on the unit patch.
+        unit = _straight_triangle(3; corners=((0.0, 0.0, 0.0),
+                                            (1.0, 0.0, 0.0),
+                                            (0.0, 1.0, 0.0)))
+        certified = mesh_transfinite_triangle_collapsed(
+            unit...; face_tag=7, side_tags=(11, 12, 13))
+        mixed = mesh_transfinite_triangle_collapsed_patch(
+            unit...; face_tag=7, side_tags=(11, 12, 13))
+        @test Tessella.Elements.validate(mixed).ok
+        @test [block.msh for block in mixed.blocks] == [1, 2, 3]
+        @test mixed.coords == certified.coords
+        @test mixed.blocks[1].nodes == certified.segs
+        @test mixed.blocks[1].tags == certified.seg_tag
+        triangle_block = _triangle_block(mixed, 2)
+        quadrangle_block = _triangle_block(mixed, 3)
+        # Node 1 is the collapsed corner; row i owns 2+(i-1)*4 .. 2+i*4-1.
+        @test [Tuple(triangle_block.nodes[:, cell])
+               for cell in axes(triangle_block.nodes, 2)] ==
+              [(1, 2, 3), (1, 3, 4), (1, 4, 5)]
+        @test [Tuple(quadrangle_block.nodes[:, cell])
+               for cell in axes(quadrangle_block.nodes, 2)] ==
+              [(2, 6, 7, 3), (3, 7, 8, 4), (4, 8, 9, 5),
+               (6, 10, 11, 7), (7, 11, 12, 8), (8, 12, 13, 9)]
+        @test triangle_block.tags == fill(Int32(7), 3)
+        @test quadrangle_block.tags == fill(Int32(7), 6)
+        @test _triangle_mixed_surface_area(mixed) ≈ 0.5
+        # Every emitted cell must consume exactly the certified atomics:
+        # 3 fan triangles plus 6 pairs from the quads cover all 15 tris.
+        consumed = NTuple{3,Int32}[]
+        for cell in axes(triangle_block.nodes, 2)
+            push!(consumed, Tuple(sort(triangle_block.nodes[:, cell])))
+        end
+        for cell in axes(quadrangle_block.nodes, 2)
+            quad = quadrangle_block.nodes[:, cell]
+            found = 0
+            for triangle in axes(certified.tris, 2)
+                issubset(certified.tris[:, triangle], quad) || continue
+                found += 1
+                push!(consumed, Tuple(sort(certified.tris[:, triangle])))
+            end
+            @test found == 2
+        end
+        @test sort!(consumed) ==
+              _triangle_canonical_triangles(certified)
+
+        # Arrangement independence: the recombined branch precedes Gmsh's
+        # diagonal dispatch, so all four arrangements emit identical meshes.
+        crcs = Set(Tessella.Elements.mixed_crc(
+            mesh_transfinite_triangle_collapsed_patch(
+                unit...; arrangement=arrangement, face_tag=7,
+                side_tags=(11, 12, 13))).sha
+            for arrangement in
+                (:left, :right, :alternate_left, :alternate_right))
+        @test length(crcs) == 1
+        @test Tessella.Elements.mixed_crc(mixed) ==
+              Tessella.Elements.mixed_crc(
+                  mesh_transfinite_triangle_collapsed_patch(unit...;
+                      face_tag=7, side_tags=(11, 12, 13)))
+
+        # Unequal counts rotate the collapsed corner identically to the
+        # simplex arm: (4,4,6) rotates to the second junction, emitting
+        # 5 fan triangles + 10 quadrangles.
+        s1 = [(i / 3, 0.0, 0.0) for i in 0:3]
+        s2 = [_triangle_lerp3((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), i / 3)
+              for i in 0:3]
+        s3 = [_triangle_lerp3((0.0, 1.0, 0.0), (0.0, 0.0, 0.0), i / 5)
+              for i in 0:5]
+        rotated = mesh_transfinite_triangle_collapsed_patch(
+            s1, s2, s3; side_tags=(11, 12, 13))
+        @test Tessella.Elements.validate(rotated).ok
+        @test size(rotated.coords, 2) == 19
+        @test Tuple(rotated.coords[:, 1]) == (1.0, 0.0, 0.0)
+        @test size(_triangle_block(rotated, 1).nodes, 2) == 11
+        @test size(_triangle_block(rotated, 2).nodes, 2) == 5
+        @test size(_triangle_block(rotated, 3).nodes, 2) == 10
+        @test _triangle_mixed_surface_area(rotated) ≈ 0.5
+        # The rotated recombined mesh must reuse the rotated simplex
+        # coordinates and tags.
+        rotated_certified = mesh_transfinite_triangle_collapsed(
+            s1, s2, s3; side_tags=(11, 12, 13))
+        @test rotated.coords == rotated_certified.coords
+        @test _triangle_block(rotated, 1).nodes == rotated_certified.segs
+        @test _triangle_block(rotated, 1).tags == rotated_certified.seg_tag
+
+        # Pinned second junction with rotation disabled.
+        pinned = mesh_transfinite_triangle_collapsed_patch(
+            s2, s3, s1; allow_corner_rotation=false)
+        @test Tessella.Elements.validate(pinned).ok
+        @test Tuple(pinned.coords[:, 1]) == (1.0, 0.0, 0.0)
+
+        # Minimal patch: two nodes on the collapsed sides collapse the grid
+        # to the fan alone — no quadrangle block is emitted.
+        minimal = mesh_transfinite_triangle_collapsed_patch(
+            _straight_triangle(1; corners=((0.0, 0.0, 0.0),
+                                           (1.0, 0.0, 0.0),
+                                           (0.5, 1.0, 0.0)))...)
+        @test [block.msh for block in minimal.blocks] == [1, 2]
+        @test size(_triangle_block(minimal, 2).nodes, 2) == 1
+
+        # Diagnostics keep this entry point's caller prefix.
+        bad_b = [_triangle_lerp3((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), i / 5)
+                 for i in 0:5]
+        bad_c = [_triangle_lerp3((0.0, 1.0, 0.0), (0.0, 0.0, 0.0), i / 5)
+                 for i in 0:5]
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            s1, bad_b, bad_c)
+        thrown = try
+            mesh_transfinite_triangle_collapsed_patch(s1, bad_b, bad_c)
+            nothing
+        catch error
+            error
+        end
+        @test thrown isa ArgumentError
+        @test startswith(thrown.msg,
+                         "mesh_transfinite_triangle_collapsed_patch:")
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; arrangement=:diagonal)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; side_tags=(1, 2))
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; allow_corner_rotation=1)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; max_nodes=12)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; max_triangles=2)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; max_quadrangles=5)
+        @test_throws ArgumentError mesh_transfinite_triangle_collapsed_patch(
+            unit...; max_quadrangles=true)
     end
 end

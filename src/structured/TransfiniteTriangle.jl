@@ -24,7 +24,8 @@ import ..Elements
 using ..Elements: ElementBlock, MixedMesh
 
 export mesh_transfinite_triangle, mesh_transfinite_triangle_patch,
-       mesh_transfinite_triangle_collapsed
+       mesh_transfinite_triangle_collapsed,
+       mesh_transfinite_triangle_collapsed_patch
 
 const _CALLER = "mesh_transfinite_triangle"
 const _RECOMBINED_CALLER = "mesh_transfinite_triangle_patch"
@@ -1465,6 +1466,252 @@ function mesh_transfinite_triangle_collapsed(side1,
         "$_COLLAPSED_CALLER: internal output count postcondition failed"))
     _validate_boundary_postcondition(mesh)
     return mesh
+end
+
+const _COLLAPSED_PATCH_CALLER = "mesh_transfinite_triangle_collapsed_patch"
+
+# Recombined collapsed-grid emission (Gmsh 4.15.2 meshGFaceTransfinite.cpp
+# 926-955): the i = 0 apex fan stays triangular and every i >= 1 grid cell
+# emits one quadrangle, independent of `transfiniteArrangement` — the
+# recombination branch precedes the diagonal split upstream.
+function _fill_collapsed_recombined_cells!(triangles, quadrangles,
+                                           width::Int, height::Int)
+    triangle = 0
+    @inbounds for j in 0:height-1
+        triangle += 1
+        triangles[1, triangle] = _collapsed_node(0, 0, height)
+        triangles[2, triangle] = _collapsed_node(1, j, height)
+        triangles[3, triangle] = _collapsed_node(1, j + 1, height)
+    end
+    quadrangle = 0
+    @inbounds for i in 1:width-1, j in 0:height-1
+        quadrangle += 1
+        quadrangles[1, quadrangle] = _collapsed_node(i, j, height)
+        quadrangles[2, quadrangle] = _collapsed_node(i + 1, j, height)
+        quadrangles[3, quadrangle] = _collapsed_node(i + 1, j + 1, height)
+        quadrangles[4, quadrangle] = _collapsed_node(i, j + 1, height)
+    end
+    triangle == size(triangles, 2) || throw(ErrorException(
+        "$_COLLAPSED_PATCH_CALLER: internal triangle count invariant failed"))
+    quadrangle == size(quadrangles, 2) || throw(ErrorException(
+        "$_COLLAPSED_PATCH_CALLER: internal quadrangle count invariant failed"))
+    return nothing
+end
+
+# Multiset coverage audit: every certified atomic triangle must be consumed by
+# exactly one emitted cell — a fan triangle consumes its canonical triple, a
+# quadrangle consumes the two certified triples contained in its node set.
+function _certify_collapsed_recombined_coverage(certified_tris, triangles,
+                                                quadrangles)
+    remaining = Dict{NTuple{3,Int32},Int}()
+    sizehint!(remaining, size(certified_tris, 2))
+    @inbounds for cell in axes(certified_tris, 2)
+        key = Tuple(sort!(Int32[certified_tris[1, cell],
+                                certified_tris[2, cell],
+                                certified_tris[3, cell]]))
+        remaining[key] = get(remaining, key, 0) + 1
+    end
+    function consume!(key)
+        left = get(remaining, key, 0)
+        left > 0 || throw(ErrorException(
+            "$_COLLAPSED_PATCH_CALLER: emitted cell $key is not a certified " *
+            "atomic triangle"))
+        left == 1 ? delete!(remaining, key) : (remaining[key] = left - 1)
+        return nothing
+    end
+    @inbounds for cell in axes(triangles, 2)
+        consume!(Tuple(sort!(Int32[triangles[1, cell], triangles[2, cell],
+                                   triangles[3, cell]])))
+    end
+    @inbounds for cell in axes(quadrangles, 2)
+        quad = (quadrangles[1, cell], quadrangles[2, cell],
+                quadrangles[3, cell], quadrangles[4, cell])
+        covered = 0
+        for triple in ((quad[1], quad[2], quad[3]),
+                       (quad[1], quad[2], quad[4]),
+                       (quad[1], quad[3], quad[4]),
+                       (quad[2], quad[3], quad[4]))
+            key = Tuple(sort!(Int32[triple[1], triple[2], triple[3]]))
+            haskey(remaining, key) || continue
+            covered += 1
+            consume!(key)
+        end
+        covered == 2 || throw(ErrorException(
+            "$_COLLAPSED_PATCH_CALLER: quadrangle $cell covers $covered " *
+            "atomic triangles, expected 2"))
+    end
+    isempty(remaining) || throw(ErrorException(
+        "$_COLLAPSED_PATCH_CALLER: $(length(remaining)) certified atomic " *
+        "triangles are not covered by the emitted cells"))
+    return nothing
+end
+
+"""
+    mesh_transfinite_triangle_collapsed_patch(side1, side2, side3;
+        arrangement=:left, face_tag=0, side_tags=(0,0,0),
+        allow_corner_rotation=true, project=nothing,
+        max_nodes=10_000_000, max_triangles=20_000_000,
+        max_quadrangles=10_000_000) -> MixedMesh
+
+Construct the recombined form of Gmsh 4.15.2's `Mesh.TransfiniteTri = 0`
+collapsed-quadrilateral patch — the `Recombine`/`Mesh.RecombineAll` arm of the
+legacy three-sided transfinite surface. Inputs and node placement have the
+same contract as [`mesh_transfinite_triangle_collapsed`](@ref). The result
+contains Gmsh type-1 boundary lines, one type-2 triangle per apex-fan row,
+and one type-3 quadrangle per remaining collapsed-grid cell, matching
+`meshGFaceTransfinite.cpp`'s recombined collapsed emission.
+
+Recombined emission is arrangement-independent upstream — the `recombine`
+branch precedes the diagonal split — so `arrangement` is accepted for
+interface parity and validation but does not change the emitted cells.
+
+The node placement is first certified by the unrecombined collapsed kernel.
+Every emitted quadrangle then receives an exact projected four-corner
+Jacobian check, a multiset audit proves the mixed cells consume every
+certified atomic triangle exactly once, and an edge-incidence audit proves
+exact conservation of the emitted boundary segments.
+
+Counts and caller limits are checked before certification or output
+allocation. `max_triangles` bounds the emitted triangles; the certified
+simplex triangulation is internally sized by its own larger count.
+"""
+function mesh_transfinite_triangle_collapsed_patch(
+    side1, side2, side3;
+    arrangement=:left,
+    face_tag=0,
+    side_tags=(0, 0, 0),
+    allow_corner_rotation=true,
+    project=nothing,
+    max_nodes=_DEFAULT_MAX_NODES,
+    max_triangles=_DEFAULT_MAX_TRIANGLES,
+    max_quadrangles=_DEFAULT_MAX_QUADRANGLES)::MixedMesh
+
+    for (index, side) in enumerate((side1, side2, side3))
+        side isa AbstractVector || throw(ArgumentError(
+            "$_COLLAPSED_PATCH_CALLER: side $index must be an AbstractVector"))
+    end
+    layout = _arrangement(arrangement, _COLLAPSED_PATCH_CALLER)
+    node_limit = _limit(max_nodes, "max_nodes", _COLLAPSED_PATCH_CALLER)
+    triangle_limit = _limit(
+        max_triangles, "max_triangles", _COLLAPSED_PATCH_CALLER)
+    quadrangle_limit = _limit(
+        max_quadrangles, "max_quadrangles", _COLLAPSED_PATCH_CALLER)
+    side_tags isa Tuple && length(side_tags) == 3 || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: side_tags must be a three-integer tuple"))
+    physical_side_tags = ntuple(index -> _tag(
+        side_tags[index], "side_tags[$index]", _COLLAPSED_PATCH_CALLER), 3)
+    physical_face_tag = _tag(face_tag, "face_tag", _COLLAPSED_PATCH_CALLER)
+    allow_corner_rotation isa Bool || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: allow_corner_rotation must be a Bool"))
+
+    # Mirror the certified kernel's collapsed-corner rotation so the emitted
+    # fan/quadrangle layout matches its grid before any allocation.
+    lengths = (length(side1), length(side2), length(side3))
+    @inbounds for side in 1:3
+        lengths[side] >= 2 || throw(ArgumentError(
+            "$_COLLAPSED_PATCH_CALLER: side $side needs at least two points"))
+    end
+    rotated = allow_corner_rotation && lengths[1] != lengths[3]
+    width = (rotated ? lengths[2] : lengths[1]) - 1
+    height = (rotated ? lengths[3] : lengths[2]) - 1
+    # The kernel's post-rotation opposite-sides check, reproduced so the
+    # diagnostic keeps this entry point's caller prefix.
+    (rotated ? lengths[2] : lengths[1]) ==
+        (rotated ? lengths[1] : lengths[3]) || throw(ArgumentError(
+            "$_COLLAPSED_PATCH_CALLER: non-matching number of nodes on " *
+            "opposite sides $(rotated ? lengths[1] : lengths[3]) != " *
+            "$(rotated ? lengths[2] : lengths[1])"))
+
+    nodes = _checked_add(
+        _checked_mul(width, height + 1, "node", _COLLAPSED_PATCH_CALLER), 1,
+        "node", _COLLAPSED_PATCH_CALLER)
+    triangles = height
+    quadrangles = _checked_mul(
+        width - 1, height, "quadrangle", _COLLAPSED_PATCH_CALLER)
+    certification_triangles = _checked_mul(
+        height, _checked_add(_checked_mul(2, width, "cell row",
+            _COLLAPSED_PATCH_CALLER), -1, "fan column",
+            _COLLAPSED_PATCH_CALLER), "certification triangle",
+        _COLLAPSED_PATCH_CALLER)
+    segments = _checked_add(
+        _checked_mul(2, width, "segment", _COLLAPSED_PATCH_CALLER), height,
+        "segment", _COLLAPSED_PATCH_CALLER)
+    nodes <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $nodes nodes exceed the Int32 indexing limit"))
+    certification_triangles <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $certification_triangles certification " *
+        "triangles exceed the Int32 topology limit"))
+    quadrangles <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $quadrangles quadrangles exceed the Int32 " *
+        "topology limit"))
+    segments <= _INT32_MAX || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $segments segments exceed the Int32 " *
+        "topology limit"))
+    nodes <= node_limit || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $nodes nodes exceed max_nodes=$node_limit"))
+    triangles <= triangle_limit || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $triangles triangles exceed " *
+        "max_triangles=$triangle_limit"))
+    quadrangles <= quadrangle_limit || throw(ArgumentError(
+        "$_COLLAPSED_PATCH_CALLER: $quadrangles quadrangles exceed " *
+        "max_quadrangles=$quadrangle_limit"))
+
+    certified = mesh_transfinite_triangle_collapsed(
+        side1, side2, side3;
+        arrangement=layout,
+        face_tag=physical_face_tag,
+        side_tags=physical_side_tags,
+        allow_corner_rotation=allow_corner_rotation,
+        project=project,
+        max_nodes=node_limit,
+        max_triangles=certification_triangles)
+    (nnodes(certified) == nodes && nsegs(certified) == segments &&
+     ntris(certified) == certification_triangles) || throw(ErrorException(
+        "$_COLLAPSED_PATCH_CALLER: certified lattice count postcondition failed"))
+
+    triangle_topology = Matrix{Int32}(undef, 3, triangles)
+    quadrangle_topology = Matrix{Int32}(undef, 4, quadrangles)
+    _fill_collapsed_recombined_cells!(
+        triangle_topology, quadrangle_topology, width, height)
+    _certify_collapsed_recombined_coverage(
+        certified.tris, triangle_topology, quadrangle_topology)
+
+    ring = Vector{NTuple{3,Float64}}(undef, segments)
+    @inbounds for segment in 1:segments
+        index = Int(certified.segs[1, segment])
+        ring[segment] = (certified.coords[1, index],
+                         certified.coords[2, index],
+                         certified.coords[3, index])
+    end
+    origin, scale = _normalization(ring)
+    frame = _plane_frame(ring, origin, scale; allow_warped=project!==nothing)
+    reference = _validate_triangle_orientation(
+        certified.coords, certified.tris, origin, scale, frame)
+    _validate_recombined_geometry(
+        certified.coords, triangle_topology, quadrangle_topology,
+        origin, scale, frame, reference)
+    _validate_recombined_boundary(
+        certified.segs, triangle_topology, quadrangle_topology)
+
+    blocks = ElementBlock[
+        ElementBlock(1, certified.segs, certified.seg_tag),
+        ElementBlock(2, triangle_topology,
+                     fill(physical_face_tag, triangles)),
+    ]
+    quadrangles == 0 || push!(blocks, ElementBlock(
+        3, quadrangle_topology, fill(physical_face_tag, quadrangles)))
+    result = MixedMesh(certified.coords, blocks)
+    diagnostic = Elements.validate(result)
+    diagnostic.ok || throw(ErrorException(
+        "$_COLLAPSED_PATCH_CALLER: internal MixedMesh validation failed — " *
+        join(diagnostic.messages, "; ")))
+    (size(result.coords, 2) == nodes &&
+     size(result.blocks[1].nodes, 2) == segments &&
+     size(result.blocks[2].nodes, 2) == triangles &&
+     (quadrangles == 0 ||
+      size(result.blocks[3].nodes, 2) == quadrangles)) || throw(ErrorException(
+        "$_COLLAPSED_PATCH_CALLER: output count postcondition failed"))
+    return result
 end
 
 end # module TransfiniteTriangle

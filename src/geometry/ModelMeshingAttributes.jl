@@ -186,6 +186,16 @@ function set_recombine!(m::GeoModel,dim,tag,angle=45.0)
     return nothing
 end
 
+# Whether the generated surface mesh is recombined into quadrangles — Gmsh's
+# `GFace::recombined()` (`meshGFace.cpp`): `Mesh.RecombineAll` or a per-face
+# `Recombine Surface[tag]` attribute. The transfinite volume kernels derive
+# their recombination masks from these face flags (the `recombined[6]` array
+# in `MeshTransfiniteVolume`), so `Recombine Volume` records do not feed the
+# structured volume emission.
+@inline _model_surface_recombined(m::GeoModel,surface::Int) =
+    m.meshing.recombine_all ||
+    haskey(m.meshing.recombine,(2,surface))
+
 """
     set_smoothing!(model, dim, tag, val)
 

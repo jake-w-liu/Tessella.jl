@@ -1357,6 +1357,15 @@ Re-measured on 2026-09-14 with Julia 1.12.7 after implementing the legacy
 - `api_test.jl`, `cli_test.jl`, and `transfinite_triangle_test.jl` updated and
   passing; `validation/transfinite_triangle/differential.jl` extended with a
   collapsed-algorithm section.
+- The collapsed kernel's recombined arm is
+  `mesh_transfinite_triangle_collapsed_patch` — the `Recombine`/`RecombineAll`
+  arm of `Mesh.TransfiniteTri=0`, returning a `MixedMesh` with the apex fan
+  kept triangular and one quadrangle per remaining grid cell. Emission is
+  arrangement-independent (upstream's recombine branch precedes the diagonal
+  dispatch), certified against the unrecombined kernel's geometry, audited
+  for atomic-triangle coverage and boundary conservation, and differential-
+  verified cell-for-cell against Gmsh 4.15.2 including corner rotation and
+  pinned-corner boundaries.
 
 Re-measured on 2026-09-14 with Julia 1.12.7 after materializing `add_box!`
 boundary topology and generalizing planar surface meshing off z=0:
