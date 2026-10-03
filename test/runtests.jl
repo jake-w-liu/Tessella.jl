@@ -55,6 +55,7 @@ using Tessella
     include("core/mesh_element_quality_test.jl") # Gmsh-shaped simplex quality measures
     include("core/transform_test.jl")    # validated affine transforms + orientation preservation
     include("interfaces/io_test.jl")     # .msh v2/v4 round-trip, STL, .geo scan
+    include("interfaces/stream_cleanup_test.jl") # reader failure closes OS handles
     include("core/elements_test.jl")     # fixed/special Gmsh 4.15.2 records + mixed entity I/O
     include("meshing/recombine_test.jl") # deterministic triangle-to-quad recombination
     include("meshing/refine_test.jl")    # deterministic one-level uniform simplex refinement
@@ -92,6 +93,10 @@ using Tessella
     include("geometry/geo_constraints_test.jl") # .geo Transfinite/Recombine/Delete meshing constraints
     include("geometry/geo_transfquadtri_test.jl") # boundary-diagonal mixed-volume transitions
     include("geometry/geo_quadtri_extrude_test.jl") # QuadTriAddVerts structured extrusion
+    include("geometry/quadtri_nonew_templates_test.jl") # exact full-hex face relation
+    include("geometry/quadtri_nonew_jacobian_test.jl") # complete P1 cell map certificates
+    include("geometry/quadtri_nonew_nonhex_jacobian_test.jl") # exact pyramid/prism domain checks
+    include("geometry/geo_quadtri_nonew_test.jl") # isolated NoNew source-quad sweeps
     include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
     include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
@@ -104,6 +109,7 @@ using Tessella
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
     include("interfaces/api_mixed_cache_test.jl") # native mixed cache ownership and mutations
+    include("interfaces/api_p2_certification_test.jl") # full P2 maps and atomic publication
     include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning
@@ -159,6 +165,7 @@ using Tessella
     # Stage 6 — high-order elements.
     include("meshing/highorder_test.jl") # quadratic (P2) tet generation + type-11 I/O
     include("meshing/highorder_jacobian_test.jl") # exact P2 Jacobian bounds for quad/hex/prism
+    include("meshing/high_order_pyramid_test.jl") # full rational Pyr14 map bounds
 
     # Application: native meshes for all 22 HFSS User Guide case geometries (no gmsh/OCC).
     include("integration/hfss_cases_test.jl") # STATUS #12 meshing half — valid+watertight+conforming

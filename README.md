@@ -181,8 +181,14 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   boundary, and represented-volume certification;
 - native `TransfQuadTri` and `QuadTriAddVerts` transitions, using actual boundary
   diagonals and certified tetrahedron/pyramid fans alongside retained hexes/prisms;
-  translation, rotation, twist, fixed columns, graded layers, neighboring sweeps,
+  AddVerts checks the complete reference maps of its actual retained cells.
+  Translation, rotation, twist, fixed columns, graded layers, neighboring sweeps,
   and toroidal revolutions have pinned oracle coverage.
+- native `QuadTriNoNewVerts` for an isolated source quadrangle, with normalized
+  positive layer groups and free or recombined laterals; one completed operation
+  plan supplies the volume, surfaces, and classified projection. Whole-domain
+  P1 Jacobian and typed-boundary checks plus bounded convex-hull separation reject
+  uncertified or overlapping layers before publishing mesh state.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh
@@ -195,7 +201,8 @@ declarations, and geometry-derived physical-group RHSs beyond the documented inl
 topology queries),
 mixed-element generation beyond the listed structured and surface-recombination paths,
 quasi-transfinite or holed transfinite patches,
-`QuadTriNoNewVerts`, curved CAD mixed order elevation/refinement,
+general `QuadTriNoNewVerts` source grids, triangular/mixed roots, collapsed
+columns, shared neighbors, and copied-source chains; curved CAD mixed order elevation/refinement,
 selective refinement, simplex-kernel integration,
 curved-cell Jacobian certification beyond the documented P2 families,
 and explicit-tag `$ElementNodeData` output that the
@@ -401,6 +408,10 @@ records, `get_periodic_keys` pairs periodic nodes into function-space key
 sequences, `optimize` accepts Gmsh's method names with `dim_tags` entity
 scoping, and `generate` meshes multi-entity selections. Queries on a
 present-but-unmeshed model return empty data like Gmsh 4.15.2.
+Legacy simplex P2 edits retain actual midpoint geometry through relabeling,
+selection, affine maps, and repeated order-two requests. Primary-node edits
+change only the requested node. Refinement and optimization of edited curved
+simplex overlays require a placement kernel and reject before changing state.
 The `.geo` executor reaches the same discrete layer: `Merge "file.msh"`
 imports the file's elementary (MSH2) or entity (MSH4) cell classification
 as discrete entities carrying their cells — node/element tags, node

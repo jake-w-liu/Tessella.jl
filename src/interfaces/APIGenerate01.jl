@@ -517,6 +517,7 @@ function _dim01_quadratic!(assembly,m,entities;only_visible=false)
         end
         cell.msh=target
         cell.tag=_dim01_next_tag!(assembly,false)
+        _api_p2_constructed_cell_certify(assembly.nodes,cell,assembly.caller)
     end
     return true
 end

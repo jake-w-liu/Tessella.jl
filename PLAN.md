@@ -276,7 +276,9 @@ and `setAllVolumesPositive` fixes orientation). `QuadTriAddVerts` consumes
 the actual lateral/top diagonals, retaining unconstrained prism/hex cells
 and introducing centroid tetrahedron/pyramid fans at divided cells;
 `RecombLaterals` controls free lateral recombination. `QuadTriNoNewVerts`
-still needs its separate diagonal-selection kernel. `ScaleLastLayer` and
+has its separate diagonal-selection kernel for one isolated source quadrangle
+with normalized positive layer groups. General source categories and neighboring
+region propagation remain pending. `ScaleLastLayer` and
 `Using name[i]` remain mesh-inert outside their boundary-layer paths.
 Extrude terms nested inside numeric entity-tag expressions execute natively;
 bare nested shape-list blocks and Volume sources reject like Gmsh.
@@ -1020,15 +1022,29 @@ Tests, differential fixtures, and typed hashes live in
 `test/interfaces/api_generate01_test.jl`, `validation/api_generate01/`, and
 `test/artifacts/api_generate01_crc.txt`; release evidence is in STATUS.md.
 
-The next priority is the independent `QuadTriNoNewVerts` diagonal planner.
-Port the upstream category, pivot, neighbor-constraint, and layer-face rules
-into deterministic logical-cell decisions while preserving source identities.
-Use compact incidence tables, certify the resulting cell fans and complete
-boundary tiling, and restrict added centroids to the upstream unsliceable-cell
+The independent `QuadTriNoNewVerts` planner now handles one isolated source
+quadrangle with four boundary vertices. A packed, independently certified
+full-hex relation and three-state cap chain choose conforming faces without
+new vertices. Recombined laterals retain earlier hexes and record the final
+unsliceable cell before introducing its certified centroid fan. One completed
+operation plan drives the actual boundary and classified projection; no persistent
+geometry-sensitive plan survives edits. A bounded exact convex-hull separation
+certificate rejects uncertified layer intersections before publication.
+Actual P1 hex, pyramid, and prism Jacobian checks cover the whole reference
+cell; positive tetrahedral partition volumes alone do not certify these maps.
+AddVerts also certifies actual retained factory cells. Newly constructed API
+full-P2 maps pass complete reference-domain checks for all seven standard
+families before publication, including the Pyramid14 rational map. Legacy
+simplex mutation rebuilds prepare their P2 overlays before changing the cache.
+These conversion checks do not implement native curved-CAD node placement.
+
+Continue with the upstream category, pivot, neighbor-constraint, and layer-face
+phases for source grids, triangular/mixed roots, collapsed columns, shared
+regions, copied-source chains, and cyclic sweeps. Preserve source identities,
+certify complete boundary tiling, and restrict centroids to verified unsliceable
 cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
-sets and invariant checks instead of selecting one accidental process result.
-Cover translation, rotation, twist, grading, recombined laterals, fixed columns,
-and neighboring volumes before removing the current precise blocker.
+sets and invariant checks instead of one accidental process result. The existing
+precise blockers remain on these unfinished categories.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public
 tag lifecycle, remaining meshing algorithms and fields, broad formats/API,

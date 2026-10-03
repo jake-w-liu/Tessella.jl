@@ -18,5 +18,6 @@ The native output must pass validation. The production mesher never calls Gmsh.
 The geometry unit tests additionally certify exact surface/volume face
 conformity, shared laterals against neighboring QuadTri, hexahedral, and
 tetrahedral sweeps, standalone classified projection, folded-fan rejection,
-and output-sized allocation growth. `QuadTriNoNewVerts` remains an explicit
-blocker; its distinct diagonal-generation algorithm is not replaced by a fan.
+and output-sized allocation growth. The separate `QuadTriNoNewVerts` planner
+is covered by `validation/quadtri_nonew/`; its diagonal-selection algorithm
+uses a certified cap chain for the isolated source-quadrangle slice.

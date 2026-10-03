@@ -15,6 +15,25 @@ const STAGE_COUNT=Ref(0)
 const ALLOW_DUPLICATE_CELLS=Ref(false)
 const LEGACY_SOURCE_TAG_BLOCKERS=Ref(0)
 
+# Gmsh 4.15.2's generated Julia wrapper drops its CFunction after installing
+# the callback. Keep the trampoline rooted until Gmsh has unregistered it.
+function with_oracle_size_callback(f,callback)
+    thunk(dim,tag,x,y,z,lc,data)=callback(dim,tag,x,y,z,lc)
+    handle=@cfunction($thunk,Cdouble,
+        (Cint,Cint,Cdouble,Cdouble,Cdouble,Cdouble,Ptr{Cvoid}))
+    GC.@preserve handle begin
+        ierr=Ref{Cint}(0)
+        ccall((:gmshModelMeshSetSizeCallback,gmsh.lib),Cvoid,
+            (Ptr{Cvoid},Ptr{Cvoid},Ptr{Cint}),handle,C_NULL,ierr)
+        ierr[]==0 || error(gmsh.logger.getLastError())
+        try
+            return f()
+        finally
+            gmsh.model.mesh.removeSizeCallback()
+        end
+    end
+end
+
 function fresh(name;order=1,only_empty=false,renumber=true)
     api.initialize()
     gmsh.clear();gmsh.model.add(name)
@@ -333,11 +352,13 @@ try
             gmsh.model.mesh.field.setAsBackgroundMesh(oracle_field)
             native_lc=Float64[];oracle_lc=Float64[]
             api.mesh.set_size_callback((dim,tag,x,y,z,lc)->(push!(native_lc,lc);lc))
-            gmsh.model.mesh.setSizeCallback((dim,tag,x,y,z,lc)->(push!(oracle_lc,lc);lc))
-            generate(1,name)
-            @test !isempty(native_lc) && !isempty(oracle_lc)
-            @test Set(native_lc)==Set(oracle_lc)==Set([0.1])
-            api.mesh.remove_size_callback();gmsh.model.mesh.removeSizeCallback()
+            with_oracle_size_callback((dim,tag,x,y,z,lc)->(push!(oracle_lc,lc);lc)) do
+                GC.gc()
+                generate(1,name)
+                @test !isempty(native_lc) && !isempty(oracle_lc)
+                @test Set(native_lc)==Set(oracle_lc)==Set([0.1])
+            end
+            api.mesh.remove_size_callback()
             option("Mesh.CharacteristicLengthFactor",1);generate(1,name*"_factor1")
         end
         fixture("native_visibility") do name

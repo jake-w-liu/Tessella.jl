@@ -72,6 +72,8 @@ validation/
     differential.jl      # required Gmsh 4.15.2 five-face-prism differential
   transfinite_hex/
     differential.jl      # required Gmsh 4.15.2 recombined-hexahedron differential
+  quadtri_nonew/
+    differential.jl      # required isolated NoNew source-quad certificates and oracle
   gmsh_parity/
     box_api.jl           # Tessella API box volume vs analytic 1 and Gmsh 4.15.2
     geo_geometry_expressions.jl # bounded geometry-expression execution

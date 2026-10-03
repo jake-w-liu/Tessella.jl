@@ -279,10 +279,13 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
                            spec,src_signed::Int,caller::AbstractString;
                            min_angle_deg::Real=25.0,
                            max_periodic_passes=8,
-                           size_field::Union{Nothing,AbstractSizeField}=nothing)
+                           size_field::Union{Nothing,AbstractSizeField}=nothing,
+                           source_mesh=nothing)
     src=abs(src_signed)
-    srcmesh=mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
-        max_periodic_passes=max_periodic_passes,size_field=size_field)
+    srcmesh=source_mesh===nothing ?
+        mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
+            max_periodic_passes=max_periodic_passes,size_field=size_field) :
+        source_mesh
     u_top=_extrude_level_us(params)[end]
     transforms=_extrude_level_transforms(spec,(u_top,),caller)
     scoords=srcmesh.coords
@@ -309,7 +312,8 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         return Mesh(out;tris=nodes)
     end
     if _extrude_quadtri_top(m,t,params,caller)
-        return _extrude_quadtri_top_part(m,src,srcmesh,coords,remap,caller)
+        return _extrude_quadtri_top_part(m,src,srcmesh,coords,remap,caller;
+                                        quad_to_tri=params.quad_to_tri)
     end
     blocks=ElementBlock[]
     for block in srcmesh.blocks
@@ -809,15 +813,6 @@ function _extrude_entity_params(m::GeoModel,dim::Int,tag::Int,
                                 caller::AbstractString)
     params=_extrude_gate(m,dim,tag)
     params===nothing && return nothing
-    if params.quad_to_tri===:no_new_verts && params.recombine &&
-       (dim==3 || any(r->_extrude_is_quadtri(_extrude_gate(m,3,r)),
-                     _extrude_quadtri_regions(m,tag,caller)))
-        kind="QuadTriNoNewVerts"
-        throw(ArgumentError(
-            "$caller: $kind on $(dim==2 ? "Surface" : "Volume")[$tag] " *
-            "requires the QuadToTri extrusion kernel, which Tessella " *
-            "does not implement"))
-    end
     spec=get(m.meshing.extrude_specs,(dim,tag),nothing)
     link=get(m.meshing.extrude_sources,(dim,tag),nothing)
     (spec===nothing || link===nothing) && throw(ArgumentError(
@@ -832,7 +827,11 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
                                min_angle_deg::Real=25.0,
                                max_periodic_passes=8,
                                size_field::Union{Nothing,AbstractSizeField}=nothing,
-                               edges=nothing)
+                               edges=nothing,scope=nothing)
+    planned=_extrude_nonew_surface_mesh(m,t,caller;scope=scope,
+        min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
+        size_field=size_field)
+    planned===nothing || return planned
     entry=_extrude_entity_params(m,2,t,caller)
     entry===nothing && return nothing
     params,spec,link=entry
@@ -849,17 +848,35 @@ end
 # the standalone `mesh_model_volume` arm runs the subdivision over this one
 # volume's prism records (identical to the global result when no second
 # extruded volume shares its lateral faces).
-function _extrude_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
+function _extrude_curve_params_stage(m::GeoModel)
+    # Lazy curve grading and surface boundary writeback replace dictionary
+    # entries; they do not mutate the stored parameter vectors or geometry.
+    # Keep those writes local without copying the size callback or geometry.
+    working=GeoModel(ntuple(i->getfield(m,i),Val(fieldcount(GeoModel)))...)
+    working.curve_params=copy(m.curve_params)
+    return working
+end
+
+function _extrude_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
+                              scope=nothing,
+                              size_field::Union{Nothing,AbstractSizeField}=nothing,
+                              _working_model::Bool=false)
+    planned=_extrude_nonew_volume_mesh(m,t,caller;scope=scope,size_field=size_field)
+    planned===nothing || return planned
     entry=_extrude_entity_params(m,3,t,caller)
     entry===nothing && return nothing
     params,spec,link=entry
-    sweep=_extrude_volume_sweep(m,t,params,spec,link[2],caller)
+    staged=params.recombine && params.quad_to_tri===:add_verts && !_working_model
+    working=staged ? _extrude_curve_params_stage(m) : m
+    sweep=_extrude_volume_sweep(working,t,params,spec,link[2],caller)
     if params.recombine && params.quad_to_tri===:add_verts
-        _extrude_quadtri_addverts!(m,sweep,caller)
+        _extrude_quadtri_addverts!(working,sweep,caller)
     elseif !params.recombine
         _extrude_subdivide!(_ExtrudeVolumeSweep[sweep],caller)
     end
-    return _extrude_volume_part(m,sweep,caller)
+    part=_extrude_volume_part(working,sweep,caller)
+    staged && (m.curve_params=working.curve_params)
+    return part
 end
 
 # The model-wide extrusion pass upstream interleaves into `Mesh 3`:
@@ -867,16 +884,22 @@ end
 # `SubdivideExtrudedMesh` diagonal selection, then lateral-surface remesh
 # against the global edge set. Returns the per-volume parts plus the
 # remesh bookkeeping `_geo_mesh_model` applies to the surface parts.
-function _extrude_volume_pass(m::GeoModel,caller::AbstractString)
+function _extrude_volume_pass(m::GeoModel,caller::AbstractString;scope=nothing)
     tags=Int[]
     for tag in keys(m.volumes)
         _extrude_gate(m,3,tag)===nothing || push!(tags,tag)
     end
     isempty(tags) && return nothing
     sort!(tags)
+    scope===nothing && (scope=_extrude_nonew_scope(m,caller;tags=tags))
     sweeps=_ExtrudeVolumeSweep[]
+    parts=Dict{Int,Union{Mesh,MixedMesh}}()
     for tag in tags
         params,spec,link=_extrude_entity_params(m,3,tag,caller)
+        if _extrude_is_nonew(params)
+            parts[tag]=_extrude_nonew_volume_mesh(m,tag,caller;scope=scope)
+            continue
+        end
         push!(sweeps,_extrude_volume_sweep(m,tag,params,spec,link[2],caller))
     end
     subdivided=[s for s in sweeps if !s.recombine]
@@ -887,7 +910,6 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString)
         params.recombine && params.quad_to_tri===:add_verts || continue
         _extrude_quadtri_addverts!(m,sweep,caller;edges=edges)
     end
-    parts=Dict{Int,Union{Mesh,MixedMesh}}()
     for sweep in sweeps
         parts[sweep.tag]=_extrude_volume_part(m,sweep,caller)
     end
@@ -906,7 +928,10 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString)
             link[1]==1 && push!(remesh,abs(s))
         end
     end
-    return (parts=parts,edges=edges,remesh=remesh)
+    return (parts=parts,edges=edges,remesh=remesh,scope=scope)
 end
 
 include("ModelExtrudeQuadTri.jl")
+include("ModelExtrudeQuadTriNoNew.jl")
+include("ModelExtrudeNoNewScope.jl")
+include("ModelExtrudeNoNewProjection.jl")

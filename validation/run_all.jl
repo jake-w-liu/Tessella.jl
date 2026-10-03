@@ -335,6 +335,12 @@ geo_quadtri_extrude_command = `$(Base.julia_cmd()) --startup-file=no --check-bou
 println("  command: ", geo_quadtri_extrude_command)
 run(geo_quadtri_extrude_command)
 
+println("\n── quadtri_nonew ──  Gmsh 4.15.2 isolated NoNew source-quad sweeps")
+quadtri_nonew_script = joinpath(HERE, "quadtri_nonew", "differential.jl")
+quadtri_nonew_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $quadtri_nonew_script`
+println("  command: ", quadtri_nonew_command)
+run(quadtri_nonew_command)
+
 println("\n── gmsh_parity box ──  Tessella API vs analytic/Gmsh box volume")
 box_api_script = joinpath(HERE, "gmsh_parity", "box_api.jl")
 box_api_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $box_api_script`

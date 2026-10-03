@@ -191,7 +191,8 @@ end
 end
 
 function _extrude_quadtri_top_part(m::GeoModel,src::Int,srcmesh,
-                                   coords,remap,caller::AbstractString)
+                                   coords,remap,caller::AbstractString;
+                                   quad_to_tri::Symbol=:add_verts)
     tris=NTuple{3,Int32}[]
     structured=_extrude_quadtri_structured_root(m,src)
     for block in srcmesh.blocks
@@ -204,7 +205,19 @@ function _extrude_quadtri_top_part(m::GeoModel,src::Int,srcmesh,
             for i in axes(block.nodes,2)
                 cell=ntuple(k->remap[block.nodes[k,i]],4)
                 a,b,c,d=cell
-                if _extrude_quadtri_top_diagonal(coords,cell,structured)
+                if quad_to_tri===:no_new_verts
+                    # NoNew uses the original source vertex precedence. The
+                    # output remap and AddVerts distance policy do not select
+                    # this cap's diagonal.
+                    original=ntuple(k->block.nodes[k,i],4)
+                    low=1
+                    for k in 2:4
+                        original[k]<original[low] && (low=k)
+                    end
+                    p=cell[low];q=cell[mod1(low+1,4)]
+                    r=cell[mod1(low+2,4)];s=cell[mod1(low+3,4)]
+                    push!(tris,(p,q,r));push!(tris,(p,r,s))
+                elseif _extrude_quadtri_top_diagonal(coords,cell,structured)
                     # Structured roots use upstream's reverse pair ordering.
                     if structured
                         push!(tris,(a,c,d)); push!(tris,(a,b,c))
@@ -328,6 +341,39 @@ function _extrude_quadtri_certify(v::NTuple{N,NTuple{3,Float64}},center,
     return nothing
 end
 
+function _extrude_quadtri_certify_retained(sweep::_ExtrudeVolumeSweep,
+        ntets::Int,nhexes::Int,nprisms::Int,npyramids::Int)
+    # The factory may replace collapsed logical cells with a different
+    # element family. Certify the actual retained maps, as the fan branch
+    # already does for its emitted tetrahedra and pyramids.
+    caller="QuadTriAddVerts retained cell"
+    try
+        for index in ntets+1:length(sweep.tets)
+            v=sweep.tets[index]
+            volume=tet_signed_volume(v...)
+            all(p->all(isfinite,p),v) && -orient3(v...)!=0 &&
+                isfinite(volume) && volume!=0 ||
+                throw(ArgumentError("$caller: degenerate or nonfinite Tet4 map"))
+        end
+        for index in nhexes+1:length(sweep.hexes)
+            v=sweep.hexes[index]
+            corner=-orient3(v[1],v[2],v[4],v[5])
+            orientation=corner>0 ? 1 : corner<0 ? -1 : 0
+            _extrude_nonew_hex_jacobian_certify(v,orientation,caller)
+        end
+        for index in nprisms+1:length(sweep.prisms)
+            _extrude_nonew_prism_jacobian_certify(sweep.prisms[index],caller)
+        end
+        for index in npyramids+1:length(sweep.pyramids)
+            _extrude_nonew_pyramid_jacobian_certify(sweep.pyramids[index],caller)
+        end
+    catch err
+        err isa ArgumentError || rethrow()
+        throw(ArgumentError(replace(err.msg,"QuadTriNoNewVerts"=>"QuadTriAddVerts")))
+    end
+    return nothing
+end
+
 function _extrude_quadtri_fan!(sweep::_ExtrudeVolumeSweep,
                                v::NTuple{N,NTuple{3,Float64}},edges) where N
     n=N÷2
@@ -349,11 +395,14 @@ function _extrude_quadtri_fan!(sweep::_ExtrudeVolumeSweep,
                 _extrude_ein(edges,v[6],v[8])
     end
     if !divided
+        ntets=length(sweep.tets);nhexes=length(sweep.hexes)
+        nprisms=length(sweep.prisms);npyramids=length(sweep.pyramids)
         if n==3
             _extrude_pripyrtet!(sweep.tets,sweep.pyramids,sweep.prisms,v)
         else
             _extrude_hexpri!(sweep.hexes,sweep.prisms,sweep.degenerate,v)
         end
+        _extrude_quadtri_certify_retained(sweep,ntets,nhexes,nprisms,npyramids)
         return nothing
     end
     center=_extrude_quadtri_centroid(v)
