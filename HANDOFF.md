@@ -1,7 +1,7 @@
 # Handoff — Tessella.jl work state
 
 Continuation instructions for resuming this work on another machine.
-Branch: `main` (this state is pushed). Goal: independent Gmsh 4.15.2 parity —
+Branch: `main`. Goal: independent Gmsh 4.15.2 parity —
 never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Environment
@@ -24,7 +24,83 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 - Validation driver: `julia --project=. validation/run_all.jl` (Windows:
   prefix `GMSH_JULIA_API` as above)
 
-## What this push contains (increment just landed)
+## Current increment
+
+**Transfinite and extruded QuadTri transitions** are native. Six-face boxes
+and collapsed five-face prisms use the actual boundary triangulations to
+retain undivided cells or introduce one centroid per divided logical cell,
+with tetrahedra and pyramids. Exact orientation checks certify the fans;
+face-incidence and boundary-coverage checks reject incompatible boundaries.
+Compact `Mesh.TransfiniteTri=1` prisms follow upstream's ordinary branch,
+which ignores `TransfQuadTri`.
+
+`QuadTriAddVerts`, including `RecombLaterals`, now consumes the shared
+lateral/top diagonal constraints and preserves retained hexes/prisms.
+Translation, rotation, twist, graded layers, fixed rotation columns, and
+neighboring swept volumes have regression coverage. `QuadTriNoNewVerts`
+remains a distinct pending diagonal-selection algorithm.
+
+The parser accepts Gmsh's `ScaleLastLayer` spelling, lexical QuadTri
+variants, and nested extrusions inside numeric entity selectors. Bare
+nested blocks and volume sources are rejected by Gmsh too. Shape lists
+must precede extrusion parameters, with syntax errors raised before
+trailing expressions can mutate model state.
+
+The synchronized API now retains native mixed blocks and node/element
+classification through generation, querying, order-one/full order-two
+conversion, affine transforms, duplicate removal, deterministic partitioning,
+and uniform refinement. Edge/face catalogs, reference maps, Jacobians,
+local-coordinate inversion, location, basis keys, and primary/full edge/face
+node queries cover the linear and full quadratic standard families. Pyramid
+refinement emits four pyramids and eight tetrahedra. Order elevation and
+refinement on curved native CAD require a separate placement kernel and fail
+before cache mutation; existing discrete P2 geometry queries remain supported.
+
+Confirmed bugs fixed alongside these kernels: deleting a curve now removes
+its stored discretization; automatic field tags belong to each model and
+reuse the removed maximum; copied lines cohere with their implicit-control
+source lines; orphan point entities retain distinct mesh nodes at
+coincident curve/surface positions; independent coincident curves/surfaces
+and imported-record homology retain entity identity; and extreme or near-parallel rotation
+axes no longer overflow, underflow, or collapse a direction. Ordinary
+rotation results remain bitwise unchanged, and the scalar rotation helper
+allocates zero bytes in warmed checks.
+
+Recovered curve samples share explicit Point constraints in the same carrier
+surface or volume. Attached Points transmit boundary incidence through their
+first stored vertex while homology retains explicit Point elements or creates
+one on the last vertex when none are stored. Additional Point vertices remain
+distinct. The function-space validation checksum now streams through a fixed
+64 KiB buffer, preserving its exact byte protocol and full oracle coverage.
+
+Current measured kernel allocation reductions are 25.5% at a 2-cell box
+edge and 34.9% at 8 cells. AddVerts allocation growth is 2.390 times for
+four times the source quadrangles. These are bounded measurements, not a
+claim that all mesher paths are fully optimized. Reusing P2 basis derivatives
+reduced the measured 100-hexahedron bulk Jacobian allocation by 87.8%.
+Partition traversal scales linearly on the measured disconnected-cell cases.
+Six complete QuadTri CRC records match Julia 1.12.7 and 1.13.1; their recipes
+and hashes are in `test/artifacts/quadtri_crc.txt`. Windows external-field
+launch handles quoted paths and a PATH without System32, with protocol and
+pinned-oracle checks.
+
+The frozen production tree passes the full bounds-checked Julia 1.12.7 package
+gate: 453,047/453,047 assertions in 25m00.2s. Julia 1.13.1 passes
+453,085/453,085 in 19m29.6s, including 38 optional Gmsh source-provenance
+assertions from the independently verified checkout.
+Node identity passes 18 pinned geometry fixtures. Original aggregate child
+coverage is complete: prefix 10 + A 11 + B 23 + C 23 = 67 original child
+drivers passed through exact resumptions, rather than one uninterrupted
+aggregate process. The five analytic benchmarks and final coax forensic probe
+also completed. STATUS.md records the detailed evidence and the separately
+verified validator checksum and input-contract corrections.
+
+The next API generation-zero/one increment has begun in the isolated worktree
+`C:/tmp/tessella_api_generate01` on `codex/api-generate01`. Its options,
+global raw-record connectivity and generation planner changes are outside this
+frozen increment.
+
+## Previous increment (`43183bd`)
 
 **`.geo` `Extrude … Layers` structured sweep** — `Layers`-marked extrusions
 now mesh like `meshGRegionExtruded`/`MeshExtrudedSurface` instead of
@@ -76,24 +152,37 @@ Files: `src/geometry/ModelExtrude.jl` (new), `src/geometry/Model.jl`,
 
 ### Not yet finished (carry-over for the next increments)
 
-- **`QuadTri*` extrusions** (`QuadTriAddVerts`, `QuadTriNoNewVerts`, plus
-  the `RecombLaterals` modifier) — explicit blocker; needs the QuadToTri
-  lateral-remeshing kernel (upstream `createQuaTri`/`MeshExtrudedSurface`
-  quadriangulation path). Gmsh's own build runs it ("Remeshing lateral
-  surfaces for QuadToTri region").
-- **Extruded `Volume{…}` sources and nested `Extrude`** — still explicit
-  errors (volume extrusion matches upstream's own rejection).
+- **`QuadTriNoNewVerts` extrusions** — the independent diagonal-selection
+  algorithm is still an explicit blocker. AddVerts and its free-lateral
+  recombination modifier are implemented in the current increment.
+- **Curved CAD mixed order elevation/refinement** — implement curve/surface
+  placement stencils before enabling these paths. Native mixed optimization,
+  quadrangle splitting, triangle recombination, cross fields, and remaining
+  non-simplex quality metrics still have precise blockers.
+- **API dimension-zero/one generation** — `.geo` model-level grading is
+  implemented; the synchronized API's geometry generator still accepts only
+  dimensions 2/3. The next increment needs a typed Point15/Line cache assembler,
+  atomic source-record reconciliation, dimension-zero postprocessing, and
+  sparse-tag query adapters for `Mesh.Renumber=0`; see PLAN.md.
+- **Raw record tag identity in geometric mesh merge** — distinct coincident
+  raw node tags within one point/curve record need tag-based keys. This
+  increment rejects that path precisely; raw records with unique coordinates
+  retain their classification and imported cross-record homology tags work.
+- **Displaced native mesh vertices on boundaries** — isolated native Point
+  attachments replace their geometry-position mesh node, matching Gmsh.
+  Incident curves/embeddings need a placement implementation; current
+  point/curve/surface/volume generators reject those cases before meshing.
 - **Non-recombined tet-split connectivity parity** — diagonal class is a
   different valid member than Gmsh's (mesher-internal source-tri vertex
   ordering); counts/nodes/volume match.
 - **Recombined quad-source hex connectivity** — waits on the surface
   recombiner producing Gmsh-identical interior quad layouts (pre-existing
   recombination gap propagated through the sweep).
-- **Mesh-inert extrude params** — `ScaleLast`, `RecombLaterals`,
-  `Using name[i]` parse but are not consumed (upstream also inert outside
-  QuadToTri/boundary-layer paths).
-- **Broader parity backlog per PLAN.md** — `TransfQuadTri` QuadToTri mesh
-  kernel in general, unstructured `In Sphere`/param-domain fills, 3-D
+- **Remaining extrude params** — `ScaleLastLayer` and `Using name[i]`
+  need their boundary-layer-specific consumers. They are inert on ordinary
+  geometric sweeps upstream as well.
+- **Broader parity backlog per PLAN.md** — boundary-layer and pipe
+  extrusions, unstructured `In Sphere`/param-domain fills, 3-D
   `Recombine Volume` recombination on unstructured tets, general OCC BREP
   kernel and NURBS CAD of unclassified topology, remaining
   fields/algorithms, GUI/post-processing. The end goal is a complete

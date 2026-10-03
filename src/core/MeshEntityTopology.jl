@@ -1,33 +1,61 @@
 """
     MeshEntityTopology
 
-Deterministic global edge and face identifiers for finalized linear-simplex
-[`Mesh`](@ref) values. Automatic numbering follows first encounter in segment,
-triangle, then tetrahedron order, using Gmsh's local simplex patterns. Explicit
+Deterministic global edge and face identifiers for finalized linear
+[`Mesh`](@ref) and [`MixedMesh`](@ref) values. Automatic numbering follows
+first encounter in stored block and cell order, using Gmsh's local patterns. Explicit
 positive identifiers can also be attached atomically to node pairs, triangles,
 or quadrangles. Lookups return detached Gmsh-shaped tag and orientation arrays.
 """
 module MeshEntityTopology
 
 using ..MeshTypes: Mesh, nnodes
+using ..Elements: MixedMesh, ElementBlock, msh_num_nodes
 
 const _SEGMENT_EDGES=((1,2),)
 const _TRIANGLE_EDGES=((1,2),(2,3),(3,1))
 const _TETRAHEDRON_EDGES=((1,2),(2,3),(3,1),(4,1),(4,3),(4,2))
 const _TRIANGLE_FACES=((1,2,3),)
 const _TETRAHEDRON_FACES=((1,3,2),(1,2,4),(1,4,3),(4,2,3))
+# Gmsh 4.15.2 MQuadrangle/MHexahedron/MPrism/MPyramid local order.
+const _QUADRANGLE_EDGES=((1,2),(2,3),(3,4),(4,1))
+const _HEXAHEDRON_EDGES=((1,2),(1,4),(1,5),(2,3),(2,6),(3,4),
+                         (3,7),(4,8),(5,6),(5,8),(6,7),(7,8))
+const _PRISM_EDGES=((1,2),(1,3),(1,4),(2,3),(2,5),(3,6),(4,5),(4,6),(5,6))
+const _PYRAMID_EDGES=((1,2),(1,4),(1,5),(2,3),(2,5),(3,4),(3,5),(4,5))
+const _QUADRANGLE_FACES=((1,2,3,4),)
+const _HEXAHEDRON_FACES=((1,4,3,2),(1,2,6,5),(1,5,8,4),
+                         (2,3,7,6),(3,4,8,7),(5,6,7,8))
+const _PRISM_TRIANGLE_FACES=((1,3,2),(4,5,6))
+const _PRISM_QUADRANGLE_FACES=((1,2,5,4),(1,4,6,3),(2,3,6,5))
+const _PYRAMID_TRIANGLE_FACES=((1,2,5),(4,1,5),(2,3,5),(3,4,5))
+const _PYRAMID_QUADRANGLE_FACES=((1,4,3,2),)
 
 @inline function _simplex_edge_patterns(element_type::Int)
+    8<=element_type<=14 && (element_type-=7)
     element_type==1 && return _SEGMENT_EDGES
     element_type==2 && return _TRIANGLE_EDGES
+    element_type==3 && return _QUADRANGLE_EDGES
     element_type==4 && return _TETRAHEDRON_EDGES
+    element_type==5 && return _HEXAHEDRON_EDGES
+    element_type==6 && return _PRISM_EDGES
+    element_type==7 && return _PYRAMID_EDGES
     return ()
 end
 
 @inline function _simplex_face_patterns(element_type::Int,face_type::Int)
-    face_type==3 || return ()
-    element_type==2 && return _TRIANGLE_FACES
-    element_type==4 && return _TETRAHEDRON_FACES
+    8<=element_type<=14 && (element_type-=7)
+    if face_type==3
+        element_type==2 && return _TRIANGLE_FACES
+        element_type==4 && return _TETRAHEDRON_FACES
+        element_type==6 && return _PRISM_TRIANGLE_FACES
+        element_type==7 && return _PYRAMID_TRIANGLE_FACES
+    elseif face_type==4
+        element_type==3 && return _QUADRANGLE_FACES
+        element_type==5 && return _HEXAHEDRON_FACES
+        element_type==6 && return _PRISM_QUADRANGLE_FACES
+        element_type==7 && return _PYRAMID_QUADRANGLE_FACES
+    end
     return ()
 end
 
@@ -140,6 +168,18 @@ function _add_generated_face!(nodes,identifiers,tags,used_tags,
     return nothing
 end
 
+function _add_generated_face!(nodes,identifiers,tags,used_tags,
+                              a::Int32,b::Int32,c::Int32,d::Int32,
+                              element_type::Int,cell::Int)
+    _distinct_quadrangle(a,b,c,d) || throw(ArgumentError(
+        "mesh_face_topology: type-$element_type cell $cell has repeated face nodes"))
+    key=_quadrangle_key(a,b,c,d)
+    haskey(tags,key) && return nothing
+    tag=_next_topology_tag(used_tags,length(used_tags),"mesh_face_topology")
+    _record_quadrangle!(nodes,identifiers,tags,used_tags,a,b,c,d,tag)
+    return nothing
+end
+
 function _edge_topology_copy(
     topology::Union{Nothing,MeshEdgeTopology},node_count::Int)
     topology===nothing && return MeshEdgeTopology(
@@ -233,13 +273,13 @@ function _append_generated_edges!(replacement::MeshEdgeTopology,
 end
 
 function _mesh_edge_topology_for_cells(
-    mesh::Mesh,topology::Union{Nothing,MeshEdgeTopology},
+    mesh::Union{Mesh,MixedMesh},topology::Union{Nothing,MeshEdgeTopology},
     cells::AbstractMatrix{Int32},element_type::Int)
     caller="mesh_edge_topology_for_cells"
     patterns=_simplex_edge_patterns(element_type)
     isempty(patterns) && throw(ArgumentError(
-        "$caller: unsupported linear-simplex element type $element_type"))
-    size(cells,1)==maximum(maximum,patterns) || throw(ArgumentError(
+        "$caller: unsupported linear element type $element_type"))
+    size(cells,1)==msh_num_nodes(element_type) || throw(ArgumentError(
         "$caller: type-$element_type connectivity has $(size(cells,1)) rows"))
     if topology!==nothing
         topology.node_count==nnodes(mesh) || error(
@@ -270,13 +310,15 @@ end
 # Face-topology counterpart of `_mesh_edge_topology_for_cells`: extend the
 # face catalog with the Solin-ordered triangular faces of the requested
 # cells, preserving every already-registered tag.
-function _mesh_face_topology_for_cells(
-    mesh::Mesh,topology::Union{Nothing,MeshFaceTopology},
+function _mesh_triangle_topology_for_cells(
+    mesh::Union{Mesh,MixedMesh},topology::Union{Nothing,MeshFaceTopology},
     cells::AbstractMatrix{Int32},element_type::Int)
     caller="mesh_face_topology_for_cells"
     patterns=_simplex_face_patterns(element_type,3)
     isempty(patterns) && throw(ArgumentError(
         "$caller: element type $element_type has no triangular faces"))
+    size(cells,1)==msh_num_nodes(element_type) || throw(ArgumentError(
+        "$caller: type-$element_type connectivity has $(size(cells,1)) rows"))
     if topology!==nothing
         topology.node_count==nnodes(mesh) || error(
             "mesh_face_topology: internal topology does not match the mesh")
@@ -308,6 +350,115 @@ function _mesh_face_topology_for_cells(
             replacement.triangle_tags,replacement.used_tags,
             cells[pattern[1],cell],cells[pattern[2],cell],
             cells[pattern[3],cell],element_type,Int(cell))
+    end
+    return replacement
+end
+
+function _append_generated_faces!(replacement,cells,patterns,element_type)
+    for cell in axes(cells,2), face in patterns
+        if length(face)==3
+            _add_generated_face!(replacement.triangle_nodes,
+                replacement.triangle_identifiers,replacement.triangle_tags,
+                replacement.used_tags,cells[face[1],cell],cells[face[2],cell],
+                cells[face[3],cell],element_type,Int(cell))
+        else
+            _add_generated_face!(replacement.quadrangle_nodes,
+                replacement.quadrangle_identifiers,replacement.quadrangle_tags,
+                replacement.used_tags,cells[face[1],cell],cells[face[2],cell],
+                cells[face[3],cell],cells[face[4],cell],element_type,Int(cell))
+        end
+    end
+    return replacement
+end
+
+function _mesh_face_topology_for_cells(
+    mesh::Union{Mesh,MixedMesh},topology::Union{Nothing,MeshFaceTopology},
+    cells::AbstractMatrix{Int32},element_type::Int)
+    element_type in (2,4,9,11) && return _mesh_triangle_topology_for_cells(
+        mesh,topology,cells,element_type)
+    caller="mesh_face_topology_for_cells"
+    triangles=_simplex_face_patterns(element_type,3)
+    quadrangles=_simplex_face_patterns(element_type,4)
+    isempty(triangles) && isempty(quadrangles) && throw(ArgumentError(
+        "$caller: element type $element_type has no supported linear faces"))
+    size(cells,1)==msh_num_nodes(element_type) || throw(ArgumentError(
+        "$caller: type-$element_type connectivity has $(size(cells,1)) rows"))
+    if topology!==nothing
+        topology.node_count==nnodes(mesh) || error(
+            "$caller: internal topology does not match the mesh")
+        missing=false
+        for patterns in (triangles,quadrangles),cell in axes(cells,2),face in patterns
+            if length(face)==3
+                a,b,c=cells[face[1],cell],cells[face[2],cell],cells[face[3],cell]
+                _distinct_triangle(a,b,c) || throw(ArgumentError(
+                    "$caller: type-$element_type cell $cell has repeated face nodes"))
+                missing |= !haskey(topology.triangle_tags,_triangle_key(a,b,c))
+            else
+                a,b,c,d=cells[face[1],cell],cells[face[2],cell],cells[face[3],cell],cells[face[4],cell]
+                _distinct_quadrangle(a,b,c,d) || throw(ArgumentError(
+                    "$caller: type-$element_type cell $cell has repeated face nodes"))
+                missing |= !haskey(topology.quadrangle_tags,_quadrangle_key(a,b,c,d))
+            end
+        end
+        missing || return topology
+    end
+    replacement=_face_topology_copy(topology,nnodes(mesh))
+    _append_generated_faces!(replacement,cells,(triangles...,quadrangles...),element_type)
+    return replacement
+end
+
+function _mixed_topology_block(block,caller)
+    block isa ElementBlock || throw(ArgumentError(
+        "$caller: special-element connectivity is unsupported"))
+    (1<=block.msh<=15 || isempty(block.nodes)) ||
+        throw(ArgumentError("$caller: unsupported non-linear element type $(block.msh)"))
+    return block
+end
+
+function _mesh_edge_topology(
+    mesh::MixedMesh,topology::Union{Nothing,MeshEdgeTopology}=nothing)
+    caller="mesh_edge_topology"
+    candidate_count=0
+    for raw in mesh.blocks
+        block=_mixed_topology_block(raw,caller)
+        count=_checked_edge_candidate_count(block.nodes,_simplex_edge_patterns(block.msh),caller)
+        candidate_count=_checked_topology_capacity(candidate_count,count,caller)
+    end
+    replacement=_edge_topology_copy(topology,nnodes(mesh))
+    capacity=_checked_topology_capacity(length(replacement.nodes),candidate_count,caller)
+    sizehint!(replacement.nodes,capacity);sizehint!(replacement.identifiers,capacity)
+    sizehint!(replacement.tags,capacity);sizehint!(replacement.used_tags,capacity)
+    for raw in mesh.blocks
+        block=_mixed_topology_block(raw,caller)
+        _append_generated_edges!(replacement,block.nodes,_simplex_edge_patterns(block.msh),block.msh)
+    end
+    return replacement
+end
+
+function _mesh_face_topology(
+    mesh::MixedMesh,topology::Union{Nothing,MeshFaceTopology}=nothing)
+    caller="mesh_face_topology"
+    ntri=0;nquad=0
+    for raw in mesh.blocks
+        block=_mixed_topology_block(raw,caller)
+        ntri=_checked_topology_capacity(ntri,_checked_edge_candidate_count(
+            block.nodes,_simplex_face_patterns(block.msh,3),caller),caller)
+        nquad=_checked_topology_capacity(nquad,_checked_edge_candidate_count(
+            block.nodes,_simplex_face_patterns(block.msh,4),caller),caller)
+    end
+    replacement=_face_topology_copy(topology,nnodes(mesh))
+    ct=_checked_topology_capacity(length(replacement.triangle_nodes),ntri,caller)
+    cq=_checked_topology_capacity(length(replacement.quadrangle_nodes),nquad,caller)
+    sizehint!(replacement.triangle_nodes,ct);sizehint!(replacement.triangle_identifiers,ct)
+    sizehint!(replacement.triangle_tags,ct)
+    sizehint!(replacement.quadrangle_nodes,cq);sizehint!(replacement.quadrangle_identifiers,cq)
+    sizehint!(replacement.quadrangle_tags,cq)
+    sizehint!(replacement.used_tags,_checked_topology_capacity(ct,cq,caller))
+    for raw in mesh.blocks
+        block=_mixed_topology_block(raw,caller)
+        patterns=(_simplex_face_patterns(block.msh,3)...,
+                  _simplex_face_patterns(block.msh,4)...)
+        _append_generated_faces!(replacement,block.nodes,patterns,block.msh)
     end
     return replacement
 end
@@ -491,7 +642,7 @@ function _add_manual_quadrangle!(nodes,identifiers,tags,used_tags,
 end
 
 function _mesh_add_edges(
-    topology::Union{Nothing,MeshEdgeTopology},mesh::Mesh,
+    topology::Union{Nothing,MeshEdgeTopology},mesh::Union{Mesh,MixedMesh},
     edge_tag_values,edge_node_values,
     caller::AbstractString="mesh_add_edges")
     identifiers=_checked_identifier_sequence(
@@ -515,7 +666,7 @@ function _mesh_add_edges(
 end
 
 function _mesh_add_faces(
-    topology::Union{Nothing,MeshFaceTopology},mesh::Mesh,face_type_value,
+    topology::Union{Nothing,MeshFaceTopology},mesh::Union{Mesh,MixedMesh},face_type_value,
     face_tag_values,face_node_values,
     caller::AbstractString="mesh_add_faces")
     face_type=_checked_face_type(face_type_value,caller)
@@ -582,7 +733,7 @@ function _checked_face_type(value,caller::AbstractString)
 end
 
 function _mesh_edges(topology::Union{Nothing,MeshEdgeTopology},
-                     mesh::Mesh,node_tags,
+                     mesh::Union{Mesh,MixedMesh},node_tags,
                      caller::AbstractString="mesh_edges")
     nodes=_checked_node_sequence(node_tags,2,nnodes(mesh),caller)
     isempty(nodes) && return UInt64[],Int32[]
@@ -610,7 +761,7 @@ function _mesh_edges(topology::Union{Nothing,MeshEdgeTopology},
 end
 
 function _mesh_faces(topology::Union{Nothing,MeshFaceTopology},
-                     mesh::Mesh,face_type_value,node_tags,
+                     mesh::Union{Mesh,MixedMesh},face_type_value,node_tags,
                      caller::AbstractString="mesh_faces")
     face_type=_checked_face_type(face_type_value,caller)
     nodes=_checked_node_sequence(node_tags,face_type,nnodes(mesh),caller)

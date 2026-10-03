@@ -5,6 +5,42 @@ using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume, validate
 
 const _API=Tessella.API
 
+@testset "API field tag allocation follows each model's live fields" begin
+    _API.initialize()
+    try
+        field=_API.mesh.field
+        # Gmsh 4.15.2: automatic tags use the current model's live maximum.
+        @test field.add("MathEval")==1
+        @test field.add("MathEval",10)==10
+        @test field.add("MathEval")==11
+        _API.model.add("second")
+        @test isempty(field.list())
+        @test field.add("MathEval")==1
+        _API.model.set_current("")
+        @test field.list()==Int32[1,10,11]
+        @test field.add("MathEval")==12
+        field.remove(10)
+        @test field.add("MathEval")==13
+        field.remove(13)
+        @test field.add("MathEval")==13
+        field.remove(13);field.remove(12);field.remove(11)
+        @test field.add("MathEval")==2
+        field.remove(1);field.remove(2)
+        @test field.add("MathEval")==1
+        # Switching and removing models preserve the surviving allocator;
+        # a later fresh model starts from an empty field set.
+        _API.model.set_current("second")
+        @test field.add("MathEval")==2
+        _API.model.remove()
+        @test field.add("MathEval")==2
+        _API.model.remove()
+        _API.model.add("fresh")
+        @test field.add("MathEval")==1
+    finally
+        _API.finalize()
+    end
+end
+
 @testset "owned and validated API session" begin
     _API.finalize()
     @test_throws ArgumentError _API.option("Mesh.MeshSizeFactor")
@@ -47,7 +83,7 @@ const _API=Tessella.API
         @test validate(generated).ok
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
-              "59e84a4009170152f7c89d702292e868872850aa8e3cc5fcd3a47112d0007665"
+              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
         node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
         @test node_tags==UInt64.(1:size(generated.coords,2))
         @test reshape(node_coordinates,3,:)==generated.coords
@@ -286,7 +322,7 @@ end
         initial=_API.mesh.generate(3)
         @test validate(initial).ok
         @test mesh_crc(initial).sha==
-              "59e84a4009170152f7c89d702292e868872850aa8e3cc5fcd3a47112d0007665"
+              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
 
         @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
         @test _API.CURRENT[].point_size[101]==0.25

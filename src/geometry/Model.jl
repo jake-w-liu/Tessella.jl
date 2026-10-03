@@ -35,6 +35,7 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfinitePrism: mesh_transfinite_prism
+using ..StructuredQuadTri: _transfinite_quadtri
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
 using ..TransfiniteTriangle: mesh_transfinite_triangle,
                              mesh_transfinite_triangle_patch,
@@ -6740,7 +6741,7 @@ end
 # the first two of each triangular end, a hexahedron the third vertex of each
 # quadrilateral end.
 const _VOLUME_REVERSE_SWAPS = Dict{Int,Vector{NTuple{2,Int}}}(
-    4=>[(1,2)], 5=>[(1,3),(5,7)], 6=>[(1,2),(4,5)])
+    4=>[(1,2)], 5=>[(1,3),(5,7)], 6=>[(1,2),(4,5)], 7=>[(1,3)])
 
 # Boundary nodes of a dim-3 cell set: nodes incident to faces carrying a
 # single incident volume cell. Quads count with their four-corner canonical
@@ -6947,12 +6948,7 @@ end
 function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     get(m.embeds,(3,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
         "$caller: transfinite Volume[$t] cannot carry embedded entities"))
-    # `TransfQuadTri` selects Gmsh's HAVE_QUADTRI path — hexa/prism elements
-    # with boundary-diagonal subdivision at unrecombined faces. The native
-    # kernel emits tetrahedra only, so the flag is an explicit blocker here.
-    t in m.meshing.quad_tri && throw(ArgumentError(
-        "$caller: TransfQuadTri Volume[$t] requires the QuadTri hexahedral " *
-        "transfinite algorithm, which Tessella does not implement"))
+    quadtri=t in m.meshing.quad_tri
     boundaries=_model_volume_boundary_surfaces(m,t,caller)
     # Gmsh `MeshTransfiniteVolume` also accepts a five-face prism boundary —
     # a degenerate hexahedron with s3≡s0 and s7≡s4 — dispatched separately.
@@ -7072,12 +7068,22 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     # Gmsh's `MeshTransfiniteVolume` derives `recombined[i]` from each face's
     # `GFace::recombined()` flag in canonical slot order — `Recombine Surface`
     # attributes and `Mesh.RecombineAll`, never `Recombine Volume`.
-    return mesh_transfinite_volume(
+    mesh=mesh_transfinite_volume(
         NTuple{3,Float64}[m.points[p] for p in s],
         (us[1],vs[1],ws[1]);volume_tag=t,faces=Tuple(faces),
         face_tags=Tuple(slot_tags),
-        recombine=Tuple(
+        recombine=quadtri ? true : Tuple(
             _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6))
+    return quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller) : mesh
+end
+
+# Resolve the actual boundary cells after their independent surface kernels
+# have applied each face's arrangement and recombination flags. QuadTri
+# preserves those faces exactly instead of selecting a volume-local diagonal.
+function _model_transfinite_quadtri(m::GeoModel,t::Int,mesh::MixedMesh,
+                                    boundaries,caller::AbstractString)
+    parts=[(abs(s),mesh_model_surface(m,abs(s))) for s in boundaries]
+    return _transfinite_quadtri(mesh,parts;caller="$caller: TransfQuadTri Volume[$t]")
 end
 
 # One triangular boundary face of a five-face transfinite volume, meshed with
@@ -7229,6 +7235,10 @@ end
 function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
                                         caller::AbstractString)
     compact=m.meshing.transfinite_tri==1
+    # Upstream's compact transfinite3 branch uses its ordinary prism
+    # subdivision even with QuadTri set; centroid transitions belong to the
+    # collapsed-grid branch, where each logical cell is a prism or hex.
+    quadtri=t in m.meshing.quad_tri && !compact
     edge_curve=Dict{NTuple{2,Int},Int}()
     neighbors=Dict{Int,Set{Int}}()
     for signed_surface in boundaries
@@ -7410,14 +7420,14 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
     # faces. Their stored `arrangement` steers the compact layout's
     # recombined triangular boundary sheets.
     face_spec=Dict(face.surf=>face.spec for face in faces_data)
-    return mesh_transfinite_prism(
+    mesh=mesh_transfinite_prism(
         NTuple{3,Float64}[m.points[p] for p in ordered],
         (us[1],vs[1],ws[1]);volume_tag=t,
         faces=(faces[1],faces[2],faces[3],faces[5],faces[6]),
         face_tags=(slot_tags[1],slot_tags[2],slot_tags[3],slot_tags[5],
                    slot_tags[6]),
         compact=compact,
-        recombine=(
+        recombine=quadtri ? true : (
             _model_surface_recombined(m,Int(slot_tags[1])),
             _model_surface_recombined(m,Int(slot_tags[2])),
             _model_surface_recombined(m,Int(slot_tags[3])),
@@ -7425,6 +7435,7 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
             _model_surface_recombined(m,Int(slot_tags[6]))),
         arrangement=(face_spec[Int(slot_tags[5])].arrangement,
                      face_spec[Int(slot_tags[6])].arrangement))
+    return quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller) : mesh
 end
 # generated boundary mesh (meshGRegionDelaunayInsertion.cpp): every boundary
 # vertex carries an incident face-triangle edge length — the LARGEST when
@@ -7965,6 +7976,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     t=_tag(tag,caller,2)
     haskey(m.surfaces,t) || throw(ArgumentError(
         "$caller: unknown Surface[$t]"))
+    _model_require_point_mesh_geometry(m,caller)
     max_periodic_passes isa Bool && throw(ArgumentError(
         "$caller: max_periodic_passes must not be Bool"))
     max_periodic_passes isa Integer || throw(ArgumentError(
@@ -8566,6 +8578,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
+    _model_require_point_mesh_geometry(m,caller)
     # `GenerateMesh` runs `meshGRegionExtruded` for every `Layers`-marked
     # volume ahead of `meshGRegion` — the sweep wins over even an attached
     # transfinite attribute (`meshGRegion::operator()` returns early on

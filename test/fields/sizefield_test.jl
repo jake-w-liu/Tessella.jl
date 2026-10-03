@@ -1147,7 +1147,7 @@ end
         corrupted_auto.tris[1,1]=Int32(size(C,2)+1)
         @test_throws ArgumentError AutomaticMeshSizeField(corrupted_auto)
 
-        helper=joinpath(@__DIR__,"..","tmp","extproc_size.jl")
+        helper=joinpath(@__DIR__,"..","tmp","extproc size helper.jl")
         mkpath(dirname(helper))
         write(helper,"""
             while true
@@ -1157,7 +1157,12 @@ end
                 write(stdout, hypot(x,y,z)+0.05); flush(stdout)
             end
             """)
-        extp=ExternalProcessField("julia --startup-file=no $helper")
+        julia_executable=joinpath(Sys.BINDIR,Base.julia_exename())
+        process_command(args...)=Sys.iswindows() ?
+            join(('"'*String(arg)*'"' for arg in args)," ") :
+            Base.shell_escape(args...)
+        helper_command=process_command(julia_executable,"--startup-file=no",helper)
+        extp=ExternalProcessField(helper_command)
         @test size_at(extp,3.0,4.0,0.0)≈5.05
         @test isopen(extp)
         close(extp)
@@ -1166,15 +1171,15 @@ end
         # Explicit close waits for the protocol peer, so a clean peer cannot
         # lose its final stdout flush and a non-zero peer exit is observable.
         for _ in 1:3
-            clean=ExternalProcessField("julia --startup-file=no $helper")
+            clean=ExternalProcessField(helper_command)
             @test size_at(clean,1.0,2.0,2.0)≈3.05
             @test isnothing(close(clean))
         end
-        failed=ExternalProcessField("julia --startup-file=no $helper"*
+        failed=ExternalProcessField(helper_command*
                                     (Sys.iswindows() ? " & exit 3" : "; exit 3"))
         @test size_at(failed,3.0,4.0,0.0)≈5.05
         @test_throws ArgumentError close(failed)
-        nested_leaf=ExternalProcessField("julia --startup-file=no $helper")
+        nested_leaf=ExternalProcessField(helper_command)
         nested=BoundedSize(MathEvalField("F1+0.01";fields=Dict(1=>nested_leaf));
                            size_min=0.001,size_max=10.0)
         @test size_at(nested,0.0,0.0,0.0)≈0.06
@@ -1191,7 +1196,8 @@ end
                 write(stdout,x); flush(stdout)
             end
             """)
-        scalar_leaf=ExternalProcessField("julia --startup-file=no $scalar_helper")
+        scalar_leaf=ExternalProcessField(process_command(julia_executable,
+            "--startup-file=no",scalar_helper))
         @test field_value(scalar_leaf,-0.2,0.0,0.0)==-0.2
         @test_throws ArgumentError size_at(scalar_leaf,-0.2,0.0,0.0)
         scalar_abs=MathEvalField("Abs(F1)";fields=Dict(1=>scalar_leaf))
@@ -1213,7 +1219,7 @@ end
                 end
                 """)
             interrupted=ExternalProcessField(
-                "julia --startup-file=no $slow $marker")
+                process_command(julia_executable,"--startup-file=no",slow,marker))
             task=@async try
                 size_at(interrupted,1.0,0.0,0.0)
             catch err
@@ -1228,6 +1234,28 @@ end
             @test fetch(task) isa InterruptException
             @test !isopen(interrupted)
             @test_throws ArgumentError size_at(interrupted,2.0,0.0,0.0)
+        end
+        if Sys.iswindows()
+            # Both the interpreter and peer are absolute paths, so launching
+            # the shell must also work without relying on a System32 PATH entry.
+            withenv("PATH"=>Sys.BINDIR) do
+                isolated=ExternalProcessField(helper_command)
+                try
+                    @test size_at(isolated,3.0,4.0,0.0)≈5.05
+                finally
+                    close(isolated)
+                end
+            end
+            mktempdir() do dir
+                launcher=joinpath(dir,"protocol launcher with spaces.cmd")
+                write(launcher,"@echo off\r\n"*helper_command*"\r\n")
+                scripted=ExternalProcessField(process_command(launcher))
+                try
+                    @test size_at(scripted,1.0,2.0,2.0)≈3.05
+                finally
+                    close(scripted)
+                end
+            end
         end
 
         aniso=MathEvalAnisoField(; m11="1/(0.2*0.2)", m22="1/(0.4*0.4)", m33="1/(0.4*0.4)")

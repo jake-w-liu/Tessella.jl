@@ -1,6 +1,55 @@
 using Test
 using Tessella
 
+function _rotation_sweep_allocation_probe(n::Int)
+    point=(1.0,2.0,3.0)
+    for i in 1:n
+        point=Tessella.Model._extrude_rotate_point(
+            (0.0,1.0,0.0),(1.0,-2.0,3.0),0.0001*i,point)
+    end
+    return point
+end
+
+@testset "rigid sweep rotations retain analytic coordinates without allocations" begin
+    origin=(1.0,-2.0,3.0)
+    for (axis,point,expected) in (
+            ((1.0,0.0,0.0),(1.0,-1.0,3.0),(1.0,-2.0,4.0)),
+            ((0.0,1.0,0.0),(1.0,-2.0,4.0),(2.0,-2.0,3.0)),
+            ((0.0,0.0,1.0),(2.0,-2.0,3.0),(1.0,-1.0,3.0)))
+        actual=Tessella.Model._extrude_rotate_point(
+            axis,origin,Float64(pi/2),point)
+        @test all(isapprox(actual[i],expected[i];rtol=0,atol=64eps())
+                  for i in 1:3)
+    end
+    # A third-turn around the (1,1,1) diagonal cyclically permutes x,y,z.
+    diagonal=Tessella.Model._extrude_rotate_point(
+        (1.0,1.0,1.0),(0.0,0.0,0.0),Float64(2pi/3),(1.0,2.0,3.0))
+    @test all(isapprox(diagonal[i],(3.0,1.0,2.0)[i];rtol=0,atol=64eps())
+              for i in 1:3)
+    for scale in (1e-300,1e-160,1e160,1e300)
+        axis=(0.0,0.0,scale)
+        transform=Tessella.Model._affine_rotation(
+            axis,(0.0,0.0,0.0),Float64(pi/2),"rotation scale regression")
+        for actual in (Tessella.Model._affine_apply_steps(
+                           transform,(1.0,0.0,0.0)),
+                       Tessella.Model._occ_trsf_apply(
+                           transform,(1.0,0.0,0.0)),
+                       Tessella.Model._extrude_rotate_point(
+                           axis,(0.0,0.0,0.0),Float64(pi/2),(1.0,0.0,0.0)))
+            @test all(isapprox(actual[i],(0.0,1.0,0.0)[i];
+                               rtol=0,atol=64eps()) for i in 1:3)
+        end
+    end
+    for axis in ((1e-300,0.0,1.0),(1e-300,1e-300,1.0))
+        near_parallel=Tessella.Model._extrude_rotate_point(
+            axis,(0.0,0.0,0.0),Float64(pi/2),(1.0,0.0,0.0))
+        @test all(isapprox(near_parallel[i],(0.0,1.0,0.0)[i];
+                           rtol=0,atol=64eps()) for i in 1:3)
+    end
+    _rotation_sweep_allocation_probe(1000)
+    @test (@allocated _rotation_sweep_allocation_probe(1000))==0
+end
+
 function _execute_transform_source(source::AbstractString;mesh_dim=0)
     return mktemp() do path,io
         write(io,source)

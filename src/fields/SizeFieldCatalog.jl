@@ -4839,8 +4839,19 @@ function _ext_start!(field::ExternalProcessField)
     field.closed && throw(ArgumentError("ExternalProcessField: field is closed"))
     field.io===nothing || return
     try
-        shell=Sys.iswindows() ? ["cmd","/c"] : ["/bin/sh","-c"]
-        field.io=open(Cmd([shell;field.command]); read=true, write=true)
+        command=if Sys.iswindows()
+            # cmd.exe parses its command tail itself. CRT argument escaping
+            # would insert backslashes before quotes in executable/file paths.
+            # /s removes exactly our outer quote pair, preserving the user's
+            # command, and ComSpec works even when PATH omits System32.
+            shell=get(ENV,"COMSPEC",joinpath(get(ENV,"SystemRoot","C:\\Windows"),
+                                            "System32","cmd.exe"))
+            Cmd(Cmd([shell,"/d","/s","/c","\""*field.command*"\""]);
+                windows_verbatim=true,windows_hide=true)
+        else
+            Cmd(["/bin/sh","-c",field.command])
+        end
+        field.io=open(command; read=true, write=true)
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("ExternalProcessField: failed to launch $(field.command): $err"))

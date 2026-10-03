@@ -102,7 +102,7 @@ using ..Elements: msh_spec, msh_type, msh_properties, MixedMesh,
                   MixedElementBlock, ElementBlock, SpecialElementBlock,
                   msh_dimension
 using ..Refine: Refine, refine_uniform
-using ..Transform: affine_transform, _transform_gmsh_affine
+using ..Transform: affine_transform, _transform_gmsh_affine, _determinant_sign
 using ..Optimize: smooth_optimize, _laplacian_smooth_tri_cache
 using ..HighOrder: HighOrder, P2Mesh, P2TriMesh, p2_trimesh, p2_tetmesh
 using ..Model: _compound_surface_meshes
@@ -118,7 +118,7 @@ export initialize, finalize, option, model, mesh, open_geo!
 # `seg/tri/tet_entities[c]` is the entity tag owning cell column `c`;
 # `boundaries[(dim,tag)]` lists the entity's boundary tags one dimension down.
 struct _MeshClassification
-    mesh::Mesh
+    mesh::Union{Mesh,MixedMesh}
     entity::Tuple{Int,Int32}
     entities::Vector{Tuple{Int,Int32}}
     node_entities::Vector{Tuple{Int,Int32}}
@@ -126,7 +126,12 @@ struct _MeshClassification
     seg_entities::Vector{Int32}
     tri_entities::Vector{Int32}
     tet_entities::Vector{Int32}
+    cell_entities::Dict{Int,Vector{Int32}}
 end
+
+_MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets)=
+    _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+                        Dict{Int,Vector{Int32}}(1=>segs,2=>tris,4=>tets))
 
 const CURRENT = Ref{Union{Nothing,GeoModel}}(nothing)
 const DEFAULT_OPTIONS = Dict{String,Float64}(
@@ -171,7 +176,7 @@ const BOUNDARY_LAYER_FIELDS = Ref{Vector{Int}}(Int[])
 # 1-based partition of dense element `tag`. The `mesh` identity anchors the
 # record to the cache it describes, mirroring `_MeshClassification`.
 struct _MeshPartition
-    mesh::Mesh
+    mesh::Union{Mesh,MixedMesh}
     num_partitions::Int
     element_partitions::Vector{Int32}
 end
@@ -204,6 +209,7 @@ mutable struct _ModelSlot
     high_order::Union{Nothing,P2Mesh,P2TriMesh}
     high_order_mids::Vector{Tuple{Int,Int32}}
     fields::Dict{Int,_ApiField}
+    field_tag_max::Int
     background_field::Int
     boundary_layer_fields::Vector{Int}
 end
@@ -217,7 +223,7 @@ function _new_slot(name::AbstractString)
                       nothing,nothing,Dict{Int,Int32}(),Dict{Int,Int32}(),
                       Dict{Int,Dict{Int,Int32}}(),nothing,nothing,
                       Tuple{Int,Int32}[],
-                      Dict{Int,_ApiField}(),0,Int[])
+                      Dict{Int,_ApiField}(),0,0,Int[])
 end
 
 function _current_slot_index_locked()
@@ -245,6 +251,7 @@ function _slot_capture_locked!()
     slot.high_order=LAST_MESH_HIGH_ORDER[]
     slot.high_order_mids=LAST_MESH_HIGH_ORDER_MIDS[]
     slot.fields=FIELD_SPECS[]
+    slot.field_tag_max=FIELD_TAG_MAX[]
     slot.background_field=BACKGROUND_FIELD[]
     slot.boundary_layer_fields=BOUNDARY_LAYER_FIELDS[]
     # `visibility` is a shared Dict object; its contents need no copy.
@@ -258,6 +265,8 @@ function _slot_load_locked!(slot::_ModelSlot)
     LAST_MESH[]=slot.mesh
     LAST_MESH_CLASS[]=slot.class
     LAST_MESH_LOCATOR[]=slot.locator
+    isdefined(@__MODULE__,:LAST_MIXED_MESH_LOCATOR) &&
+        (LAST_MIXED_MESH_LOCATOR[]=nothing)
     LAST_MESH_EDGES[]=slot.edges
     LAST_MESH_FACES[]=slot.faces
     LAST_MESH_PARTITION[]=slot.partition
@@ -266,6 +275,7 @@ function _slot_load_locked!(slot::_ModelSlot)
     LAST_MESH_HIGH_ORDER_MIDS[]=slot.high_order_mids
     ELEMENT_VISIBILITY[]=slot.visibility
     FIELD_SPECS[]=slot.fields
+    FIELD_TAG_MAX[]=slot.field_tag_max
     BACKGROUND_FIELD[]=slot.background_field
     BOUNDARY_LAYER_FIELDS[]=slot.boundary_layer_fields
     return nothing
@@ -278,6 +288,8 @@ function _slot_clear_globals_locked!()
     LAST_MESH[]=nothing
     LAST_MESH_CLASS[]=nothing
     LAST_MESH_LOCATOR[]=nothing
+    isdefined(@__MODULE__,:LAST_MIXED_MESH_LOCATOR) &&
+        (LAST_MIXED_MESH_LOCATOR[]=nothing)
     LAST_MESH_EDGES[]=nothing
     LAST_MESH_FACES[]=nothing
     LAST_MESH_PARTITION[]=nothing
@@ -286,6 +298,7 @@ function _slot_clear_globals_locked!()
     LAST_MESH_HIGH_ORDER_MIDS[]=Tuple{Int,Int32}[]
     ELEMENT_VISIBILITY[]=Dict{Int,Int32}()
     FIELD_SPECS[]=Dict{Int,_ApiField}()
+    FIELD_TAG_MAX[]=0
     BACKGROUND_FIELD[]=0
     BOUNDARY_LAYER_FIELDS[]=Int[]
     return nothing
@@ -299,6 +312,8 @@ function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh,MixedMesh},
     LAST_MESH[]=mesh
     LAST_MESH_CLASS[]=class
     LAST_MESH_LOCATOR[]=nothing
+    isdefined(@__MODULE__,:LAST_MIXED_MESH_LOCATOR) &&
+        (LAST_MIXED_MESH_LOCATOR[]=nothing)
     LAST_MESH_EDGES[]=nothing
     LAST_MESH_FACES[]=nothing
     LAST_MESH_PARTITION[]=nothing
@@ -333,7 +348,7 @@ function _rebind_high_order!(cache::Mesh,class,caller::AbstractString)
     return nothing
 end
 
-function _cached_classification_locked(mesh::Mesh)
+function _cached_classification_locked(mesh::Union{Mesh,MixedMesh})
     class=LAST_MESH_CLASS[]
     (class===nothing || class.mesh!==mesh) && return nothing
     return class
@@ -391,15 +406,7 @@ end
 
 # Recombined/mixed products keep their own container — the constructor copies
 # blocks and metadata, so this is the deep copy the cache needs.
-_copy_mesh(mesh::MixedMesh)=MixedMesh(
-    mesh.coords,mesh.blocks;
-    physical_names=mesh.physical_names,
-    entity_data=mesh.entity_data,
-    elementary_entities=mesh.elementary_entities,
-    periodic_links=mesh.periodic_links,
-    ancillary_sections=mesh.ancillary_sections,
-    data_sections=mesh.data_sections,
-    partition_data=mesh.partition_data)
+_copy_mesh(mesh::MixedMesh)=_canonical_mixed_copy(mesh)
 
 """
     option(name) -> Float64
@@ -1332,7 +1339,7 @@ end
 # every remaining top-level entity into a single node-addressable mesh.
 # `parts` holds `(entity_tag, part_mesh, part_class)` triples in sorted tag
 # order. Nodes shared across parts (boundary nodes on common curves/points)
-# unify by rounded coordinate key; on conflicting ownership the
+# unify by entity ownership and exact coordinates; on conflicting ownership the
 # lower-dimension owner wins, matching `model_to_mixed`'s classification rule.
 function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
                                  caller::AbstractString)
@@ -1380,20 +1387,27 @@ end
 end
 
 # Concatenate disjoint per-entity meshes into one shared-node mesh, unifying
-# nodes whose coordinates coincide (boundary nodes on entities common to
-# several parts). Columns of `segs`/`tris`/`tets` stay part-ordered so the
+# nodes whose ownership and coordinates coincide (boundary nodes on entities
+# common to several parts). Columns of `segs`/`tris`/`tets` stay part-ordered so the
 # merged per-cell entity vectors remain index-aligned.
 function _merge_entity_meshes(parts,caller::AbstractString;
-                              require_positive_tets::Bool=true)
-    index=Dict{NTuple{3,Float64},Int32}()
+                              require_positive_tets::Bool=true,
+                              node_entities=nothing)
+    any(part->part[2] isa MixedMesh,parts) &&
+        return _merge_mixed_entity_meshes(parts,caller;node_entities=node_entities)
+    index=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
     coordinates=NTuple{3,Float64}[]
     remaps=Vector{Vector{Int32}}(undef,length(parts))
     for (part,(tag,mesh)) in enumerate(parts)
         remap=Vector{Int32}(undef,nnodes(mesh))
         for node in 1:nnodes(mesh)
-            key=ntuple(axis->round(mesh.coords[axis,node],
-                                   sigdigits=12)+0.0,3)
+            owner=node_entities===nothing || node_entities[part]===nothing ?
+                (-1,Int32(0)) : node_entities[part][node]
+            point=ntuple(axis->mesh.coords[axis,node]+0.0,3)
+            key=(owner[1],owner[2],point)
             remap[node]=get!(index,key) do
+                length(coordinates)<typemax(Int32) || throw(ArgumentError(
+                    "$caller: merged mesh exceeds the Int32 node limit"))
                 push!(coordinates,(mesh.coords[1,node],mesh.coords[2,node],
                                    mesh.coords[3,node]))
                 Int32(length(coordinates))
@@ -1670,6 +1684,7 @@ function _generate(dim::Integer)
     return lock(STATE_LOCK) do
         m=_model_locked()
         caller="API.mesh.generate"
+        Model._model_require_point_mesh_geometry(m,caller)
         _validate_generate_algorithms(m,dimension,caller)
         # Generation-scoped `Mesh.*` options are upstream global CTX state —
         # mirror them into the model before meshing (`CharacteristicLengthFactor`
@@ -1683,7 +1698,7 @@ function _generate(dim::Integer)
         m.meshing.lc_extend_from_boundary=Int(
             OPTIONS["Mesh.MeshSizeExtendFromBoundary"])
         size_field=_session_size_field_locked(m)
-        parts=Tuple{Int,Mesh}[]
+        parts=Tuple{Int,Union{Mesh,MixedMesh}}[]
         if dimension==2
             isempty(m.surfaces) && throw(ArgumentError("$caller: no surfaces"))
             units=_generate_units(m,2,sort!(collect(keys(m.surfaces))))
@@ -1707,20 +1722,22 @@ function _generate(dim::Integer)
         else
             throw(ArgumentError("$caller: dim must be 2 or 3"))
         end
-        generated,remaps,seg_keeps=_merge_entity_meshes(
-            parts,caller;require_positive_tets=!any(
-                tag->get(m.meshing.reverse,(dimension,tag),false),
-                (tag for (tag,_) in parts)))
         classified=[(tag,mesh,_classify_cached_mesh(
                          m,_classification_skeleton(
                              mesh,dimension==3 &&
                                  get(m.meshing.reverse,(3,tag),false)),
                          dimension,tag,mesh)) for (tag,mesh) in parts]
+        node_owners=[class===nothing ? nothing : class.node_entities
+                     for (_,_,class) in classified]
+        generated,remaps,seg_keeps=_merge_entity_meshes(
+            parts,caller;node_entities=node_owners,require_positive_tets=!any(
+                tag->get(m.meshing.reverse,(dimension,tag),false),
+                (tag for (tag,_) in parts)))
         cache=_copy_mesh(generated)
         class=_merge_classified_parts(classified,remaps,seg_keeps,cache,caller)
         _replace_mesh_cache_locked!(cache,class)
         _apply_mesh_order(m,cache,class,caller)
-        generated
+        generated isa MixedMesh ? _copy_mesh(LAST_MESH[]) : generated
     end
 end
 
@@ -1858,6 +1875,8 @@ end
 # cannot exist in the simplex cache.
 function _mesh_entity_cell_positions(class::_MeshClassification,msh::Int,
                                      entity::Int)
+    class.mesh isa MixedMesh &&
+        return findall(==(Int32(entity)),get(class.cell_entities,msh,Int32[]))
     cell_entities=msh==1 ? class.seg_entities :
                   msh==2 ? class.tri_entities :
                   msh==4 ? class.tet_entities : Int32[]
@@ -1867,7 +1886,7 @@ end
 # Returns `(msh_type, (offset, cells) or nothing, positions)`. `positions` is
 # `nothing` for the complete block and otherwise the 1-based column indices of
 # the cells classified on the requested entity.
-function _mesh_query_type_block(mesh::Mesh,element_type,tag,
+function _mesh_query_type_block(mesh::Union{Mesh,MixedMesh},element_type,tag,
                                 caller::AbstractString)
     msh=_mesh_query_integer(element_type,caller,"element_type")
     spec=msh_spec(msh)
@@ -2003,7 +2022,7 @@ function _mesh_query_point(x,y,z,caller::AbstractString)
             _mesh_query_coordinate(z,caller,"z"))
 end
 
-function _mesh_query_element_tag(mesh::Mesh,value,caller::AbstractString)
+function _mesh_query_element_tag(mesh::Union{Mesh,MixedMesh},value,caller::AbstractString)
     tag=_mesh_query_integer(value,caller,"element_tag")
     _,_,total=_mesh_element_offsets(mesh)
     1<=tag<=total || throw(ArgumentError(
@@ -2186,8 +2205,8 @@ function _get_keys(element_type,function_space_type,tag=-1,
                     cached,edge_replacement,selected_cells,msh)
             end
             if needs_faces
-                face_replacement=_mesh_face_topology_for_cells(
-                    cached,face_replacement,selected_cells,msh)
+                face_replacement=_mesh_face_topology_for_key_cells(
+                    cached,face_replacement,selected_cells,msh,function_space_type)
             end
         end
         result=positions===nothing ?
@@ -2223,8 +2242,8 @@ function _get_keys_for_element(element_tag,function_space_type,
                 cached,edge_replacement,cells,Int(record.element_type))
         end
         if needs_faces
-            face_replacement=_mesh_face_topology_for_cells(
-                cached,face_replacement,cells,Int(record.element_type))
+            face_replacement=_mesh_face_topology_for_key_cells(
+                cached,face_replacement,cells,Int(record.element_type),function_space_type)
         end
         result=mesh_keys_for_element(
             cached,tag,function_space_type,edge_replacement,face_replacement;
@@ -2266,13 +2285,11 @@ function _create_edges(dim_tags=())
         selected=_mesh_selected_entities(
             _model_locked(),class,pairs,caller)
         replacement=LAST_MESH_EDGES[]
-        for (dim,msh,cells,owners) in ((1,1,cached.segs,class.seg_entities),
-                                       (2,2,cached.tris,class.tri_entities),
-                                       (3,4,cached.tets,class.tet_entities))
+        for (msh,dim,_,cells,owners) in _cache_catalog(cached,class)
             columns=_mesh_selected_cell_columns(owners,dim,selected)
             isempty(columns) && continue
             replacement=_mesh_edge_topology_for_cells(
-                cached,replacement,cells[:,columns],msh)
+                cached,replacement,cells[:,columns],Int(msh))
         end
         LAST_MESH_EDGES[]=replacement
         nothing
@@ -2296,12 +2313,12 @@ function _create_faces(dim_tags=())
         selected=_mesh_selected_entities(
             _model_locked(),class,pairs,caller)
         replacement=LAST_MESH_FACES[]
-        for (dim,msh,cells,owners) in ((2,2,cached.tris,class.tri_entities),
-                                       (3,4,cached.tets,class.tet_entities))
+        for (msh,dim,_,cells,owners) in _cache_catalog(cached,class)
+            dim>=2 || continue
             columns=_mesh_selected_cell_columns(owners,dim,selected)
             isempty(columns) && continue
             replacement=_mesh_face_topology_for_cells(
-                cached,replacement,cells[:,columns],msh)
+                cached,replacement,cells[:,columns],Int(msh))
         end
         LAST_MESH_FACES[]=replacement
         nothing
@@ -2361,7 +2378,7 @@ function _get_all_faces(face_type)
     end
 end
 
-function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
+function _mesh_nodes_for_cells(mesh::Union{Mesh,MixedMesh},cells::Matrix{Int32})
     count=length(cells)
     coordinate_count=Base.checked_mul(3,count)
     node_tags=Vector{UInt64}(undef,count)
@@ -2379,7 +2396,7 @@ function _mesh_nodes_for_cells(mesh::Mesh,cells::Matrix{Int32})
     return node_tags,coordinates
 end
 
-function _mesh_barycenters(mesh::Mesh,cells::AbstractMatrix{Int32},fast::Bool,
+function _mesh_barycenters(mesh::Union{Mesh,MixedMesh},cells::AbstractMatrix{Int32},fast::Bool,
                            caller::AbstractString)
     nodes_per_element=size(cells,1)
     count=size(cells,2)
@@ -2480,7 +2497,7 @@ function _mesh_classified_entities(class::_MeshClassification,dimension::Int)
     return sort!(collect(tags))
 end
 
-function _mesh_nodes_payload(mesh::Mesh,indices::Vector{Int})
+function _mesh_nodes_payload(mesh::Union{Mesh,MixedMesh},indices::Vector{Int})
     count=length(indices)
     node_tags=UInt64.(indices)
     coordinates=Vector{Float64}(undef,Base.checked_mul(3,count))
@@ -2496,7 +2513,7 @@ end
 # all-dimension queries since they own no parametrization. Every classified
 # dim-1 entity is a straight Line and every classified dim-2 entity is a
 # loop-bounded Plane, so the exact-rational parametrization covers them all.
-function _mesh_entity_parameters(model::GeoModel,mesh::Mesh,dim::Int,tag::Int,
+function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh},dim::Int,tag::Int,
                                  indices::Vector{Int})
     (dim==1 || dim==2) || return Float64[]
     coordinates=Vector{Float64}(undef,Base.checked_mul(3,length(indices)))
@@ -2632,7 +2649,7 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
                 emit!(etypes[i],etags[i],enodes[i])
             end
             if overlay!==nothing &&
-                    (dimension<0 || dimension==Int(skeleton_etype))
+                    (dimension<0 || dimension==msh_dimension(skeleton_etype))
                 conn=_p2_cells(overlay)
                 offset=_p2_tag_offset(cached,overlay)
                 emit!(_p2_etype(overlay),
@@ -2648,7 +2665,6 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
             end
         end
     else
-        tri_offset,tet_offset,_=_mesh_element_offsets(cached)
         for dim in (dimension<0 ? (0:3) : (dimension:dimension))
             tags=Int.(_mesh_classified_entities(class,dim))
             for (edim,etag,_) in _discrete_mesh_records(m)
@@ -2656,13 +2672,9 @@ function _merged_element_data(m::GeoModel,cached,dimension::Int)
             end
             sort!(unique!(tags))
             for etag in tags
-                for (etype,offset,cells) in
-                    ((Int32(1),0,cached.segs),
-                     (Int32(2),tri_offset,cached.tris),
-                     (Int32(4),tet_offset,cached.tets))
+                for (etype,_,offset,cells,cell_owners) in _cache_catalog(cached,class)
                     Int(msh_spec(etype).dim)==dim || continue
-                    positions=_mesh_entity_cell_positions(
-                        class,Int(etype),etag)
+                    positions=findall(==(Int32(etag)),cell_owners)
                     isempty(positions) && continue
                     if overlay!==nothing &&
                             _p2_skeleton_etype(overlay)==etype
@@ -3040,21 +3052,23 @@ function _get_elements(dim=-1,tag=-1)
             "$caller: entity-specific elements require mesh classification " *
             "metadata; use a negative tag to query a complete dimension"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
-        triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(cached)
-        blocks=((Int32(1),1,0,cached.segs,class.seg_entities),
-                (Int32(2),2,triangle_offset,cached.tris,class.tri_entities),
-                (Int32(4),3,tetrahedron_offset,cached.tets,
-                 class.tet_entities))
+        blocks=_cache_catalog(cached,class)
         element_types=Int32[]
         element_tags=Vector{Vector{UInt64}}()
         node_tags=Vector{Vector{UInt64}}()
+        overlay=_high_order_overlay(cached)
         for (element_type,block_dimension,offset,cells,owners) in blocks
             block_dimension==dimension || continue
             positions=findall(==(Int32(entity)),owners)
             isempty(positions) && continue
-            push!(element_types,element_type)
+            if overlay!==nothing && _p2_skeleton_etype(overlay)==element_type
+                push!(element_types,_p2_etype(overlay))
+                push!(node_tags,UInt64.(vec(@view _p2_cells(overlay)[:,positions])))
+            else
+                push!(element_types,element_type)
+                push!(node_tags,UInt64.(vec(@view cells[:,positions])))
+            end
             push!(element_tags,UInt64.(offset .+ positions))
-            push!(node_tags,UInt64.(vec(@view cells[:,positions])))
         end
         attached=get(model.meshing.attached,(dimension,entity),nothing)
         if attached!==nothing
@@ -3123,6 +3137,14 @@ function _get_element_types(dim=-1,tag=-1)
             "dimension"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
         result=Int32[]
+        if cached isa MixedMesh
+            for (msh,dim,_,cells,owners) in _cache_catalog(cached,class)
+                dim==dimension && any(==(Int32(entity)),owners) && push!(result,msh)
+            end
+            attached=get(model.meshing.attached,(dimension,entity),nothing)
+            attached===nothing || append!(result,attached.element_types)
+            return sort!(unique!(result))
+        end
         overlay=_high_order_overlay(cached)
         tri_etype=overlay isa P2TriMesh ? Int32(9) : Int32(2)
         tet_etype=overlay isa P2Mesh ? Int32(11) : Int32(4)
@@ -3164,6 +3186,7 @@ function _get_element(element_tag)
         class===nothing && throw(ArgumentError(
             "$caller: element classification requires mesh classification " *
             "metadata; generate a mesh so the cache owns entity ownership"))
+        cached isa MixedMesh && return _mixed_element_record(cached,class,tag)
         if tag<=triangle_offset
             return Int32(1),UInt64.(vec(cached.segs[:,tag])),1,
                 Int(class.seg_entities[tag])
@@ -3438,7 +3461,8 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
                 "$caller: element_type exceeds the Int32 range"))
         end
         fast_mode=_mesh_query_bool(fast,caller,"fast")
-        _mesh_query_bool(primary,caller,"primary")
+        primary_mode=_mesh_query_bool(primary,caller,"primary")
+        primary_count=msh_properties(msh).num_primary_nodes
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         if entity>=0
             known=any(dimension->_model_entity_known(
@@ -3474,8 +3498,9 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
         result=Float64[]
         if first_selected<=ncache
             chosen=@view columns[first_selected:min(last_selected,ncache)]
+            node_count=primary_mode ? primary_count : size(cells,1)
             append!(result,_mesh_barycenters(
-                cached,@view(cells[:,chosen]),fast_mode,caller))
+                cached,@view(cells[1:node_count,chosen]),fast_mode,caller))
         end
         if last_selected>ncache
             record_first=max(first_selected,ncache+1)-ncache
@@ -3494,10 +3519,12 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
                 index_of=_record_node_index(model)
                 for i in @view matching[lo:hi]
                     nodes=record.element_nodes[i]
+                    node_count=primary_mode ? primary_count : length(nodes)
                     weight=fast_mode ? 1.0 :
-                           inv(Float64(length(nodes)))
+                           inv(Float64(node_count))
                     bx=by=bz=0.0
-                    for node in nodes
+                    for local_node in 1:node_count
+                        node=nodes[local_node]
                         owner,position=index_of[node]
                         bx+=weight*owner.node_coords[1,position]
                         by+=weight*owner.node_coords[2,position]
@@ -3541,7 +3568,7 @@ function _get_element_edge_nodes(element_type,tag=-1,primary=false,
         end
         _mesh_query_bool(primary,caller,"primary")
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
-        patterns=_simplex_edge_patterns(msh)
+        patterns=_mesh_query_edge_patterns(msh,primary,caller)
         cached=LAST_MESH[]
         cache_columns=0:-1
         cells=nothing
@@ -3590,7 +3617,7 @@ function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
             "$caller: face_type must be 3 (triangle) or 4 (quadrangle)"))
         _mesh_query_bool(primary,caller,"primary")
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
-        patterns=_simplex_face_patterns(msh,face)
+        patterns=_mesh_query_face_patterns(msh,face,primary,caller)
         cached=LAST_MESH[]
         cache_columns=0:-1
         cells=nothing
@@ -3709,6 +3736,7 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
         cached=LAST_MESH[]
         cached===nothing && throw(ArgumentError(
             "API.mesh.refine: no mesh; call API.mesh.generate first"))
+        cached isa MixedMesh && return _mixed_refine_locked!(m,cached,max_nodes,max_cells)
         overlay=_high_order_overlay(cached)
         # `reverse` may legitimately invert tets; refinement preserves
         # orientation, so an inverted input yields an inverted (but otherwise
@@ -3895,12 +3923,7 @@ function _affine_transform_mesh(affine,dim_tags=())
             selected_record_keys=Set{Tuple{Int,Int}}(
                 (Int(p[1]),Int(p[2])) for p in pairs)
         end
-        orientation=matrix[1,1]*(matrix[2,2]*matrix[3,3]-
-                                matrix[2,3]*matrix[3,2])-
-                    matrix[1,2]*(matrix[2,1]*matrix[3,3]-
-                                matrix[2,3]*matrix[3,1])+
-                    matrix[1,3]*(matrix[2,1]*matrix[3,2]-
-                                matrix[2,2]*matrix[3,1])
+        orientation=_determinant_sign(coefficients,caller)
         for (edim,etag,record) in _discrete_mesh_records(model)
             (selected_record_keys===nothing ||
              (edim,etag) in selected_record_keys) || continue
@@ -3915,8 +3938,9 @@ function _affine_transform_mesh(affine,dim_tags=())
         end
         cached===nothing && return Mesh(Matrix{Float64}(undef,3,0))
         if isempty(pairs)
-            transformed=affine_transform(
-                cached,matrix;translation=translation)
+            transformed=cached isa MixedMesh ? _mixed_affine_cache(cached,
+                _cached_classification_locked(cached),matrix,translation;orientation) :
+                affine_transform(cached,matrix;translation=translation)
         else
             class=_cached_classification_locked(cached)
             class===nothing && throw(ArgumentError(
@@ -3928,15 +3952,17 @@ function _affine_transform_mesh(affine,dim_tags=())
             for node in eachindex(class.node_entities)
                 class.node_entities[node] in selected && (mask[node]=true)
             end
-            transformed=affine_transform(
-                cached,matrix;translation=translation,node_mask=mask)
+            transformed=cached isa MixedMesh ?
+                _mixed_affine_cache(cached,class,matrix,translation,mask;orientation) :
+                affine_transform(cached,matrix;translation=translation,node_mask=mask)
         end
         # An affine map preserves connectivity, so the classification stays
         # index-aligned; it is rebound to the transformed cache object.
         overlay=_high_order_overlay(cached)
         class=_cached_classification_locked(cached)
         cache=_copy_mesh(transformed)
-        new_class=class===nothing ? nothing : _MeshClassification(
+        new_class=class===nothing ? nothing : cache isa MixedMesh ?
+            _mixed_rebind_class(class,cache) : _MeshClassification(
             cache,class.entity,class.entities,class.node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
         _replace_mesh_cache_locked!(cache,new_class)
@@ -4043,6 +4069,8 @@ function _remove_elements(dim,tag,element_tags=())
             "$caller: removing elements requires mesh classification " *
             "metadata; generate a mesh so the cache owns entity ownership"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
+        cached isa MixedMesh && return _mixed_remove_elements(
+            cached,class,dimension,entity,element_tags,caller)
         triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
         # The simplex cache owns no dimension-0 cells; a Point selection can
         # only no-op on an empty list or reject tags classified elsewhere.
@@ -4167,6 +4195,11 @@ function _reverse_mesh(dim_tags=())
             end
         end
         cached===nothing && return nothing
+        if cached isa MixedMesh
+            replacement,new_class=_mixed_reverse_cache(cached,class;selected=selected)
+            _replace_mesh_cache_locked!(replacement,new_class)
+            return nothing
+        end
         replacement=_copy_mesh(cached)
         for (dimension,cells,owners) in (
                 (1,replacement.segs,class===nothing ? Int32[] :
@@ -4230,6 +4263,15 @@ function _reverse_elements(element_tags)
         isempty(pending) && return nothing
         cached===nothing && throw(ArgumentError(
             "$caller: no mesh; call API.mesh.generate first"))
+        if cached isa MixedMesh
+            _,_,total=_mesh_element_offsets(cached)
+            all(tag->1<=tag<=total,pending) || throw(ArgumentError(
+                "$caller: unknown element; expected a dense tag in 1:$total"))
+            class=_cached_classification_locked(cached)
+            replacement,new_class=_mixed_reverse_cache(cached,class;tags=Set(pending))
+            _replace_mesh_cache_locked!(replacement,new_class)
+            return nothing
+        end
         triangle_offset,tetrahedron_offset,total=_mesh_element_offsets(cached)
         per_block=(Int[],Int[],Int[])
         for dense in pending
@@ -4325,6 +4367,7 @@ function _remove_duplicate_nodes(dim_tags=())
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
         records=_discrete_mesh_records(model)
+        cached isa MixedMesh && return _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
         if cached===nothing
             isempty(records) && throw(ArgumentError(
                 "$caller: no mesh; call API.mesh.generate first"))
@@ -4465,6 +4508,7 @@ function _remove_duplicate_elements(dim_tags=())
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
         records=_discrete_mesh_records(model)
+        cached isa MixedMesh && return _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
         if cached===nothing
             isempty(records) && throw(ArgumentError(
                 "$caller: no mesh; call API.mesh.generate first"))
@@ -4660,6 +4704,13 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
             "entity; pass an empty parametric_coord"))
         coordinates=copy(cached.coords)
         coordinates[:,tag]=values
+        if cached isa MixedMesh
+            replacement=_mixed_with_coordinates(cached,coordinates)
+            class=_cached_classification_locked(cached)
+            _replace_mesh_cache_locked!(replacement,class===nothing ? nothing :
+                _mixed_rebind_class(class,replacement))
+            return nothing
+        end
         replacement=Mesh(coordinates;segs=cached.segs,tris=cached.tris,
                          tets=cached.tets,seg_tag=cached.seg_tag,
                          tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
@@ -4871,6 +4922,17 @@ function _renumber_nodes(old_tags=(),new_tags=())
         for node in 1:nnodes(cached)
             inverse[node]=Int32(mapping[node])
         end
+        if cached isa MixedMesh
+            class=_cached_classification_locked(cached)
+            selections=[collect(axes(cells,2)) for (_,cells,_) in _cache_native_blocks(cached)]
+            new_mesh,new_class=_mixed_select_columns(cached,class,selections;node_order=order)
+            for (old,new) in enumerate(mapping)
+                renames[Int32(old)]=new
+            end
+            _record_renumber!(records,renames,"node")
+            _replace_mesh_cache_locked!(new_mesh,new_class)
+            return nothing
+        end
         blocks=Vector{Matrix{Int32}}(undef,3)
         for (block,cells) in enumerate((
                 cached.segs,cached.tris,cached.tets))
@@ -4964,6 +5026,13 @@ function _renumber_elements(old_tags=(),new_tags=())
         mapping=_mesh_renumber_permutation(
             cache_old,cache_new,total,caller,"element")
         mapping===nothing && return nothing
+        if cached isa MixedMesh
+            replacement,new_class=_mixed_renumber_elements(cached,
+                _cached_classification_locked(cached),mapping,caller)
+            _record_renumber!(records,renames,"element")
+            _replace_mesh_cache_locked!(replacement,new_class)
+            return nothing
+        end
         for position in 1:total
             target=Int(mapping[position])
             block_of=position<=triangle_offset ? 1 :
@@ -5067,6 +5136,7 @@ function _reorder_elements(element_type,tag,ordering)
         class===nothing && throw(ArgumentError(
             "$caller: reordering requires mesh classification metadata"))
         _mesh_classified_entity(model,class,dimension,entity,caller)
+        cached isa MixedMesh && return _mixed_reorder(cached,class,msh,entity,ordering,caller)
         cells=dimension==1 ? cached.segs :
               dimension==2 ? cached.tris :
               dimension==3 ? cached.tets :
@@ -5248,6 +5318,12 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
     return lock(STATE_LOCK) do
         model=_model_locked()
         cached=_cached_mesh_locked(caller)
+        if cached isa MixedMesh
+            iterations==0 && return nothing
+            throw(ArgumentError(
+                "$caller: native mixed element optimization is not implemented; " *
+                "supported kernels require a linear simplex cache"))
+        end
         for (edim,etag) in pairs
             _model_entity_known(model,edim,etag) || throw(ArgumentError(
                 "$caller: unknown " *
@@ -5467,15 +5543,10 @@ function _compute_renumbering(method="RCMK",element_tags=())
                 "$caller: unknown element $tag"))
             push!(selected,tag)
         end
-        triangle_offset,tetrahedron_offset,_=_mesh_element_offsets(cached)
         isempty(element_tags) &&
             (selected=Set{Int}(1:total))
-        cells=Tuple{Int,Matrix{Int32}}[]
-        size(cached.segs,2)>0 && push!(cells,(0,cached.segs))
-        size(cached.tris,2)>0 &&
-            push!(cells,(triangle_offset,cached.tris))
-        size(cached.tets,2)>0 &&
-            push!(cells,(tetrahedron_offset,cached.tets))
+        cells=Tuple{Int,Matrix{Int32}}[(offset,cells)
+            for (_,_,offset,cells,_) in _cache_catalog(cached) if !isempty(cells)]
         involved=Set{Int32}()
         for (offset,block) in cells
             for column in axes(block,2)
@@ -5619,12 +5690,18 @@ end
 function _set_order(order)
     lock(STATE_LOCK) do
         model=_model_locked()
+        previous_order=model.meshing.order
         set_order!(model,order)
         cached=LAST_MESH[]
         cached===nothing && return nothing
-        _apply_mesh_order(model,cached,
-                          _cached_classification_locked(cached),
-                          "API.mesh.set_order")
+        try
+            _apply_mesh_order(model,cached,
+                              _cached_classification_locked(cached),
+                              "API.mesh.set_order")
+        catch
+            model.meshing.order=previous_order
+            rethrow()
+        end
     end
     return nothing
 end
@@ -5733,6 +5810,7 @@ function _partition_elements(mesh::Mesh,num_partitions::Int)
         target=part==num_partitions ? total : min(assigned+quota,total)
         queue=Int[]
         while assigned<target
+            empty!(queue)
             while seed<=total && assignment[seed]!=0
                 seed+=1
             end
@@ -5936,17 +6014,19 @@ function _get_periodic_nodes(dim,slave_entity)
     end
 end
 
+include("APIMixedCache.jl")
+include("APIMixedQueries.jl")
+include("APIMixedAdvanced.jl")
+include("APIMixedRefine.jl")
+
 """Gmsh-style mesh generation, mutation, bulk retrieval, and periodic operations."""
 # Per-entity element list across the simplex cache (dim-matched blocks) and
 # the entity's discrete/attached record — the input cells for homology.
 function _entity_all_elements(m::GeoModel,cached,class,dim::Int,tag::Int)
     out=Tuple{Int32,Vector{Int32}}[]
     if cached!==nothing && class!==nothing
-        _,triangle_offset,tetrahedron_offset=_mesh_element_offsets(cached)
-        blocks=dim==1 ? ((cached.segs,class.seg_entities,Int32(1)),) :
-               dim==2 ? ((cached.tris,class.tri_entities,Int32(2)),) :
-               dim==3 ? ((cached.tets,class.tet_entities,Int32(4)),) : ()
-        for (cells,owners,msh_type) in blocks
+        for (msh_type,dimension,_,cells,owners) in _cache_catalog(cached,class)
+            dimension==dim || continue
             for column in axes(cells,2)
                 owners[column]==tag || continue
                 push!(out,(msh_type,Int32.(cells[:,column])))
@@ -5973,9 +6053,7 @@ function _compute_homology()
               _cached_classification_locked(cached)
         cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{Int32}}}}()
         if class!==nothing
-            for dim in 1:3
-                owners=dim==1 ? class.seg_entities :
-                       dim==2 ? class.tri_entities : class.tet_entities
+            for (_,dim,_,_,owners) in _cache_catalog(cached,class)
                 for tag in unique(owners)
                     key=(dim,Int(tag))
                     entries=_entity_all_elements(
@@ -6040,12 +6118,11 @@ function _get_periodic_keys(element_type,function_space_type,tag,
         end
         incidences=Vector{Int32}[]
         if cached!==nothing && class!==nothing
-            cells=_mesh_element_block(cached,msh_type)
-            if cells!==nothing
-                owners=msh_type==1 ? class.seg_entities :
-                       msh_type==2 ? class.tri_entities :
-                       msh_type==4 ? class.tet_entities : nothing
-                if owners!==nothing
+            block=_mesh_element_block(cached,msh_type)
+            if block!==nothing
+                _,cells=block
+                owners=get(class.cell_entities,msh_type,Int32[])
+                if !isempty(owners)
                     for column in axes(cells,2)
                         owners[column]==entity_tag || continue
                         push!(incidences,Int32.(cells[:,column]))
@@ -6199,6 +6276,9 @@ function _recombine()
         algorithm=api_algo in (1,3) ? :blossom : :greedy
         cached=LAST_MESH[]
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
+        cached isa MixedMesh && any(block->block.msh==2 && !isempty(block.nodes),cached.blocks) &&
+            throw(ArgumentError(
+                "$caller: triangle recombination within a native mixed cache is not implemented"))
         for ((dim,tag),angle) in settings
             dim==2 || continue
             _model_entity_known(m,dim,tag) || throw(ArgumentError(
@@ -6313,6 +6393,9 @@ function _split_quadrangles(quality=1.0,tag=-1)
     return lock(STATE_LOCK) do
         m=_model_locked()
         cached=LAST_MESH[]
+        cached isa MixedMesh && any(block->msh_family(block.msh)===:qua &&
+            !isempty(block.nodes),cached.blocks) && throw(ArgumentError(
+                "$caller: splitting native mixed quadrangle caches is not implemented"))
         keys=Tuple{Int,Int}[]
         if tag_value<0
             for (edim,etag,record) in _discrete_mesh_records(m)
@@ -6660,6 +6743,9 @@ function _compute_cross_field()
     return lock(STATE_LOCK) do
         m=_model_locked()
         cached=LAST_MESH[]
+        cached isa MixedMesh && throw(ArgumentError(
+            "$caller: native mixed surface cross fields are not implemented; " *
+            "the implemented kernel requires linear simplex elements"))
         elements=NTuple{3,NTuple{3,Float64}}[]
         # Surface elements from cache and records, in entity order. A volume
         # cache stores only tets, so fall back to its boundary faces — faces
@@ -6856,6 +6942,8 @@ function _field_remove(tag)
         _session_field(tag,"API.field.remove")
         value=Int(_mesh_query_integer(tag,"API.field.remove","tag"))
         delete!(FIELD_SPECS[],value)
+        value==FIELD_TAG_MAX[] &&
+            (FIELD_TAG_MAX[]=maximum(keys(FIELD_SPECS[]);init=0))
         BACKGROUND_FIELD[]==value && (BACKGROUND_FIELD[]=0)
         filter!(!=(value),BOUNDARY_LAYER_FIELDS[])
         return nothing

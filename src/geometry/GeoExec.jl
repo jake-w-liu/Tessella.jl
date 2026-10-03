@@ -117,6 +117,7 @@ using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _model_curve_part_point, _model_planar_surface_mesh,
                _model_curve_param_bounds,
                _model_projection_physical_tags, _model_projection_legacy_tag,
+               _model_projection_surface_curves, _model_mesh_part_node_entities,
                _extrude_volume_pass
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
@@ -3193,11 +3194,20 @@ function _geo_extrude_element!(m::GeoModel, element::AbstractString,
                                context::_GeoNumericContext,
                                params::_GeoExtrudeParams,
                                caller::AbstractString,
-                               allocator_state=nothing)
+                               allocator_state=nothing;
+                               allow_shapes::Bool=true)
     mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)",element)
     mm===nothing && throw(ArgumentError(
         "$caller: malformed shape list element near $(repr(element))"))
     name=mm.captures[1]
+    # Gmsh.l intentionally permits these selected letter-case variants,
+    # without making keywords generally case-insensitive.
+    if startswith(name,"Quad")
+        occursin(r"^Quad[tT]ri[aA]dd[vV]erts$",name) &&
+            (name="QuadTriAddVerts")
+        occursin(r"^Quad[tT]ri[nN]o[nN]ew[vV]erts$",name) &&
+            (name="QuadTriNoNewVerts")
+    end
     s=String(strip(element[nextind(element,firstindex(element),
                              ncodeunits(mm.match)):end]))
     if name=="Layers"
@@ -3245,9 +3255,9 @@ function _geo_extrude_element!(m::GeoModel, element::AbstractString,
             scale_last=params.scale_last,recombine=params.recombine,
             quad_to_tri=params.quad_to_tri,
             recomb_laterals=params.recomb_laterals))
-    elseif name=="ScaleLast"
+    elseif name=="ScaleLastLayer"
         isempty(s) || throw(ArgumentError(
-            "$caller: ScaleLast takes no value"))
+            "$caller: ScaleLastLayer takes no value"))
         return (nothing,(layers=params.layers,heights=params.heights,
             scale_last=true,recombine=params.recombine,
             quad_to_tri=params.quad_to_tri,
@@ -3260,7 +3270,7 @@ function _geo_extrude_element!(m::GeoModel, element::AbstractString,
             quad_to_tri=params.quad_to_tri,
             recomb_laterals=params.recomb_laterals))
     elseif name in ("QuadTriAddVerts","QuadTriNoNewVerts")
-        recomb=startswith(s,"RecombLaterals")
+        recomb=match(r"^Recomb[lL]aterals\b",s)!==nothing
         (recomb || isempty(s)) || throw(ArgumentError(
             "$caller: unexpected text after $name parameter"))
         recomb && !isempty(strip(s[nextind(s,firstindex(s),14):end])) &&
@@ -3287,17 +3297,21 @@ function _geo_extrude_element!(m::GeoModel, element::AbstractString,
         throw(ArgumentError(
             "$caller: Hole extrusion parameters apply to boundary-layer " *
             "extrusion, which is not implemented"))
-    elseif name=="Extrude"
-        throw(ArgumentError(
-            "$caller: Extrude terms cannot be nested inside an Extrude " *
-            "shape list"))
-    elseif name in ("Translate","Rotate","Dilate","Symmetry","Affine",
+    elseif name in ("Extrude","Translate","Rotate","Dilate","Symmetry","Affine",
                     "Duplicata","Boundary","CombinedBoundary",
                     "OrientedBoundary","OrientedCombinedBoundary",
                     "PointsOf","Split","Intersect","Closest")
-        throw(ArgumentError(
-            "$caller: $name cannot appear inside an Extrude shape list"))
+        # `ListOfShapes` contains entity selectors and Shape definitions,
+        # never Transform or Extrude productions. Extrude expressions are
+        # still valid inside an entity's numeric tag list (`Point{Extrude
+        # {...}{Point{1};}};`), where the value-term hook evaluates them.
+        _geo_syntax_abort(name)
     end
+    # Gmsh's Extrude production is `ListOfShapes ExtrudeParameters`: after
+    # the first parameter the parser cannot return to shape entries. Check
+    # the head before evaluating its tag expressions or inline definitions,
+    # since a rejected entry must not commit those side effects.
+    allow_shapes || _geo_syntax_abort(name)
     # A `Shape` element: `Kind{...}`, `Entity{d}{...}`, `Physical`/`Parent`
     # selectors, or an inline `Kind(tag) = rhs` definition. Feed the element
     # its stripped semicolon so the shared parsers see the full form.
@@ -3317,12 +3331,18 @@ function _geo_extrude_shape_list!(m::GeoModel, body::AbstractString,
                                   allocator_state=nothing)
     params=_GEO_EXTRUDE_PARAMS
     entities=NTuple{2,Int}[]
+    allow_shapes=true
     isempty(strip(body)) && return (entities,params)
     for element in _geo_exec_topology_query_blocks(
             body,"Extrude shape list",caller)
         entries,params=_geo_extrude_element!(
-            m,element,context,params,caller,allocator_state)
-        entries===nothing || append!(entities,entries)
+            m,element,context,params,caller,allocator_state;
+            allow_shapes=allow_shapes)
+        if entries===nothing
+            allow_shapes=false
+        else
+            append!(entities,entries)
+        end
         length(entities)<=_MAX_GEO_LIST_ITEMS || throw(ArgumentError(
             "$caller: shape list expands beyond $_MAX_GEO_LIST_ITEMS entities"))
     end
@@ -3395,16 +3415,15 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     # action — after `ListOfShapes` parses but before `ExtrudeShapes` runs
     # — so under `SetFactory("OpenCASCADE")` shape-list syntax errors still
     # surface first, while entity lookup never happens.
+    entities,params=_geo_extrude_shape_list!(m,shapes,context,caller,
+                                             allocator_state)
     if revolve!==nothing && revolve.kind===:twist &&
         allocator_state!==nothing &&
         allocator_state.factory===:opencascade
-        _geo_exec_topology_query_blocks(shapes,"Extrude shape list",caller)
         throw(ArgumentError(
             "$caller: Twisting extrude not available with OpenCASCADE " *
             "geometry kernel"))
     end
-    entities,params=_geo_extrude_shape_list!(m,shapes,context,caller,
-                                             allocator_state)
     tags=revolve===nothing ?
         extrude_entities!(m,entities,delta;params=params,
             return_lateral=context.extrude_return_lateral,caller=caller) :
@@ -7118,13 +7137,14 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     end
     isempty(parts) && throw(ArgumentError(
         "$caller $dim: no entities to mesh"))
-    merged,owner=_geo_merge_entity_meshes(parts)
+    node_entities=_geo_mesh_part_node_entities(m,parts,caller)
+    merged,owner=_geo_merge_entity_meshes(parts;node_entities)
     # Retain the per-entity decomposition so classified projections
     # (`model_to_mixed`) can recover each entity's own mesh from the merged
     # product — upstream serializes vertex/edge/face/region cells to their
     # owning entity, and the part mesh is that view.
     context.mesh_parts=parts
-    _geo_run_homology!(m,merged,parts,caller)
+    _geo_run_homology!(m,merged,parts,caller;node_owner=owner,part_node_entities=node_entities)
     return merged,owner
 end
 
@@ -7136,50 +7156,76 @@ end
 # chains, which Tessella deliberately does not mirror.
 function _geo_run_homology!(m::GeoModel,mesh,
                           parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}},
-                          caller::AbstractString)
+                          caller::AbstractString;node_owner=nothing,part_node_entities=nothing)
     isempty(m.meshing.homology_requests) && return nothing
-    cells=_geo_homology_cells(m,mesh,parts,caller)
+    cells=_geo_homology_cells(m,mesh,parts,caller;node_owner,part_node_entities)
     compute_homology!(m,cells;requests=m.meshing.homology_requests)
     return nothing
 end
 
 # Entity→element map for `compute_homology!`, in one node-index space keyed by
-# bitwise-identical coordinates: the generated mesh's nodes first, then any
+# entity ownership and exact coordinates: the generated mesh's nodes first, then any
 # extra nodes the curve/discrete records need (homology indices only identify
 # cells — they need not exist in `mesh`).
 function _geo_homology_cells(m::GeoModel,mesh,
                              parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}},
-                             caller::AbstractString)
-    lookup=Dict{NTuple{3,Int},Int32}()
+                             caller::AbstractString;node_owner=nothing,part_node_entities=nothing)
+    lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int32}()
+    legacy_lookup=Dict{NTuple{3,Int},Int32}()
     mcoords=mesh.coords
     for n in 1:nnodes(mesh)
+        entity=node_owner===nothing ? (-1,0) : get(node_owner,n,(3,0))
         x,y,z=mcoords[1,n],mcoords[2,n],mcoords[3,n]
-        lookup[(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))]=
-            Int32(n)
+        coordinate=_geo_mesh_coordinate_key(x,y,z)
+        lookup[(entity...,coordinate)]=Int32(n)
+        legacy_lookup[coordinate]=Int32(n)
     end
     # One-element counter — mutating `next[1]` inside `index_for` leaves the
     # captured binding itself assigned once, keeping it unboxed.
     next=Int32[nnodes(mesh)+1]
-    function index_for(x,y,z)
-        key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
-        i=get(lookup,key,Int32(0))
+    function index_for(x,y,z,entity)
+        coordinate=_geo_mesh_coordinate_key(x,y,z)
+        key=(entity...,coordinate)
+        i=entity==(-1,0) ? get(legacy_lookup,coordinate,Int32(0)) : get(lookup,key,Int32(0))
         i!=0 && return i
-        i=next[1];lookup[key]=i;next[1]=i+Int32(1)
+        i=next[1];lookup[key]=i;legacy_lookup[coordinate]=i;next[1]=i+Int32(1)
         return i
     end
     cells=Dict{Tuple{Int,Int},Vector{Tuple{Int32,Vector{Int32}}}}()
+    part_nodes=Dict{Tuple{Int,Int},Dict{NTuple{3,Int},Int32}}()
+    emitted=Set{Tuple{Int,Int}}()
+    point_sources=Set{Tuple{Int,Int}}()
     function entry(key)
         get!(cells,key,Tuple{Int32,Vector{Int32}}[])
     end
     # Meshed entities own their top-dimension elements; boundary elements
     # belong to the boundary entities (curves below, discrete records after).
-    for (dim,tag,part) in parts
+    for (part_index,(dim,tag,part)) in enumerate(parts)
         pcoords=part.coords
-        remap=Int32[index_for(pcoords[1,n],pcoords[2,n],pcoords[3,n])
-                    for n in 1:nnodes(part)]
+        remap=Int32[index_for(pcoords[1,n],pcoords[2,n],pcoords[3,n],
+                    part_node_entities===nothing ? (-1,0) : part_node_entities[part_index][n])
+                  for n in 1:nnodes(part)]
         elements=entry((dim,tag))
+        part_nodes[(dim,tag)]=Dict(_geo_mesh_coordinate_key(
+            pcoords[1,n],pcoords[2,n],pcoords[3,n])=>remap[n]
+            for n in 1:nnodes(part))
         if part isa Mesh
-            if dim==2
+            if dim==0
+                isempty(remap) || push!(point_sources,(0,tag))
+                record=get(m.discrete,(0,tag),get(m.meshing.attached,(0,tag),nothing))
+                # Mesh0D keeps explicitly stored MPoint elements. When none
+                # exist it creates one on the last stored vertex; the other
+                # classified vertices remain mesh nodes without point cells.
+                if !isempty(remap) &&
+                   (record===nothing || !(Int32(15) in record.element_types))
+                    push!(elements,(Int32(15),Int32[remap[end]]))
+                end
+            elseif dim==1
+                for t in 1:nsegs(part)
+                    push!(elements,(Int32(1),
+                        Int32[remap[part.segs[k,t]] for k in 1:2]))
+                end
+            elseif dim==2
                 for t in 1:ntris(part)
                     push!(elements,(Int32(2),
                         Int32[remap[part.tris[k,t]] for k in 1:3]))
@@ -7201,32 +7247,16 @@ function _geo_homology_cells(m::GeoModel,mesh,
                 end
             end
         end
+        isempty(elements) || push!(emitted,(dim,tag))
     end
-    # Curve chains come from the stored `curve_params` — the exact `Mesh 1`
-    # discretization — evaluated through the same part evaluator so node
-    # lookups hit the merged coordinates bitwise. Curves without stored
-    # parameters (kept/`Degenerated` state, or a `Mesh` statement that never
-    # graded them) contribute no 1-cells, like upstream's element store.
-    for (curve,params) in m.curve_params
-        haskey(m.curves,curve) || continue
-        a,b=m.curves[curve]
-        us=Float64.(params)
-        if a==b && length(us)>1
-            _,hi=_model_curve_param_bounds(m,curve,caller)
-            us[end]>=hi && (us=us[1:end-1])
-        end
-        length(us)<(a==b ? 1 : 2) && continue
-        indices=Int32[index_for(_model_curve_part_point(m,curve,u,caller)...)
-                      for u in us]
-        elements=entry((1,curve))
-        nseg=a==b ? length(indices) : length(indices)-1
-        for i in 1:nseg
-            j=a==b ? mod1(i+1,length(indices)) : i+1
-            push!(elements,(Int32(1),Int32[indices[i],indices[j]]))
-        end
-    end
+    # Native curve chains above use the emitted segment parts, preserving
+    # topological identities at coincident points and the actual 1-D mesh.
     for (tag,point) in m.points
-        push!(entry((0,tag)),(Int32(15),Int32[index_for(point...)]))
+        ((0,tag) in emitted || (0,tag) in point_sources) && continue
+        record=get(m.discrete,(0,tag),get(m.meshing.attached,(0,tag),nothing))
+        record!==nothing && Int32(15) in record.element_types && continue
+        index=index_for(point...,node_owner===nothing ? (-1,0) : (0,tag))
+        push!(entry((0,tag)),(Int32(15),Int32[index]))
     end
     # Discrete entities (merged meshes, classified topology, meshing
     # attachments) already store their elements against record node tags.
@@ -7235,15 +7265,28 @@ function _geo_homology_cells(m::GeoModel,mesh,
     # child-entity migration `create_topology!` performs) — so tags resolve
     # against a model-wide map, not the owning record.
     global_nodes=Dict{Int32,Int32}()
-    for (_,record) in _discrete_mesh_records_model(m)
+    records=sort!(_discrete_mesh_records_model(m);by=first)
+    for (key,record) in records
         rcoords=record.node_coords
+        actual=get(part_nodes,key,nothing)
         for (i,t) in enumerate(record.node_tags)
             get!(global_nodes,t) do
-                index_for(rcoords[1,i],rcoords[2,i],rcoords[3,i])
+                x,y,z=rcoords[1,i],rcoords[2,i],rcoords[3,i]
+                coordinate=_geo_mesh_coordinate_key(x,y,z)
+                # Resolve through the current part, including its boundary
+                # owners. Distinct coincident record tags keep their entity
+                # identity; shared tags use this model-wide map.
+                mapped=actual===nothing ? Int32(0) :
+                    get(actual,coordinate,Int32(0))
+                mapped==0 ? index_for(x,y,z,key) : mapped
             end
         end
     end
-    for (key,record) in _discrete_mesh_records_model(m)
+    for (key,record) in records
+        # Generated parts replace stored mesh connectivity, which may have
+        # changed during remeshing. Re-adding records would duplicate cells
+        # or attach a stale chain to another coincident entity.
+        key in emitted && continue
         elements=entry(key)
         for (msh_type,nodes) in zip(record.element_types,
                                     record.element_nodes)
@@ -7261,17 +7304,158 @@ function _geo_homology_cells(m::GeoModel,mesh,
     return cells
 end
 
-# Merge per-entity meshes: nodes deduplicated by exact coordinates (shared
+@inline _geo_mesh_coordinate_key(x,y,z)=(
+    reinterpret(Int,x==0 ? 0.0 : x),reinterpret(Int,y==0 ? 0.0 : y),
+    reinterpret(Int,z==0 ? 0.0 : z))
+
+function _geo_mesh_children(m,dim,tag,caller)
+    children=Tuple{Int,Int}[]
+    if dim==1 && haskey(m.curves,tag)
+        a,b=m.curves[tag];push!(children,(0,a),(0,b))
+    elseif dim==2 && haskey(m.surfaces,tag)
+        append!(children,((1,c) for c in _model_projection_surface_curves(m,tag)))
+    elseif dim==3
+        append!(children,((2,abs(s)) for s in _model_volume_boundary_surfaces(m,tag,caller)))
+    end
+    append!(children,get(m.embeds,(dim,tag),Tuple{Int,Int}[]))
+    return children
+end
+
+# Classify from actual lower-dimensional mesh parts. This avoids geometric
+# projection, preserves independent coincident entities, and shares boundary
+# identities through the model's topology. Distinct interior/tab evaluations
+# remain volume nodes unless they exactly share a lower-dimensional node.
+function _geo_mesh_point_incidence_coordinate(m,point)
+    haskey(m.points,point) && return m.points[point]
+    record=get(m.discrete,(0,point),get(m.meshing.attached,(0,point),nothing))
+    (record===nothing || isempty(record.node_tags)) && return nothing
+    return (record.node_coords[1,1],record.node_coords[2,1],record.node_coords[3,1])
+end
+
+function _geo_mesh_constraint_point_owners(m,parts,caller)
+    isempty(m.embeds) && return nothing
+    aliases=Dict{Int,Dict{NTuple{3,Int},Tuple{Int,Int}}}()
+    entities=Dict((dim,tag)=>mesh for (dim,tag,mesh) in parts)
+    for ((dim,tag),constraints) in m.embeds
+        dim in (2,3) || continue
+        mesh=get(entities,(dim,tag),nothing)
+        mesh===nothing && continue
+        points=Int[p for (d,p) in constraints if d==0]
+        curves=Int[c for (d,c) in constraints if d==1 && haskey(m.curve_params,c)]
+        (isempty(points) || isempty(curves)) && continue
+        # Only coordinates referenced by actual carrier cells can transmit
+        # recovered constraint incidence. Unused interpolation/tab vertices
+        # and unrelated coincident model points keep their own identities.
+        candidates=Dict{NTuple{3,Int},Vector{Int}}()
+        for point in points
+            coordinate=_geo_mesh_point_incidence_coordinate(m,point)
+            coordinate===nothing && continue
+            key=_geo_mesh_coordinate_key(coordinate...)
+            matches=get!(candidates,key,Int[])
+            point in matches || push!(matches,point)
+        end
+        used=Set{NTuple{3,Int}}()
+        cells=mesh isa Mesh ? (dim==2 ? (mesh.tris,) : (mesh.tets,)) :
+            (b.nodes for b in mesh.blocks if b isa ElementBlock && msh_dimension(b.msh)==dim)
+        for block in cells,node in block
+            key=_geo_mesh_coordinate_key(mesh.coords[1,node],
+                mesh.coords[2,node],mesh.coords[3,node])
+            haskey(candidates,key) && push!(used,key)
+        end
+        for curve in curves
+            curve_mesh=get(entities,(1,curve),nothing)
+            curve_mesh===nothing && continue
+            source=_model_mesh_part_node_entities(m,1,curve,curve_mesh,caller)
+            for node in eachindex(source)
+                source[node]==(1,curve) || continue
+                key=_geo_mesh_coordinate_key(curve_mesh.coords[1,node],
+                    curve_mesh.coords[2,node],curve_mesh.coords[3,node])
+                key in used || continue
+                matches=get(candidates,key,nothing)
+                matches===nothing && continue
+                length(matches)==1 || throw(ArgumentError(
+                    "$caller: embedded Points[$(matches[1])] and [$(matches[2])] " *
+                    "coincide on Curve[$curve]; preserving their separate " *
+                    "constraint identities is not implemented"))
+                point=only(matches)
+                owners=get!(aliases,curve,Dict{NTuple{3,Int},Tuple{Int,Int}}())
+                previous=get(owners,key,(0,point))
+                previous==(0,point) || throw(ArgumentError(
+                    "$caller: embedded Points[$(previous[2])] and [$point] " *
+                    "coincide on Curve[$curve]; preserving their separate " *
+                    "constraint identities is not implemented"))
+                owners[key]=(0,point)
+            end
+        end
+    end
+    return aliases
+end
+
+function _geo_mesh_part_node_entities(m,parts,caller)
+    result=Vector{Vector{Tuple{Int,Int}}}(undef,length(parts))
+    maps=Dict{Tuple{Int,Int},Dict{NTuple{3,Int},Tuple{Int,Int}}}()
+    constraint_points=_geo_mesh_constraint_point_owners(m,parts,caller)
+    for dim in 0:3, (index,(pdim,tag,mesh)) in enumerate(parts)
+        pdim==dim || continue
+        owners=fill((dim,tag),nnodes(mesh))
+        if dim<=1
+            source=_model_mesh_part_node_entities(m,dim,tag,mesh,caller)
+            for n in eachindex(owners);owners[n]=(source[n][1],Int(source[n][2]));end
+            aliases=dim==1 && constraint_points!==nothing ? get(constraint_points,tag,nothing) : nothing
+            if aliases!==nothing
+                for n in eachindex(owners)
+                    owners[n]==(1,tag) || continue
+                    key=_geo_mesh_coordinate_key(mesh.coords[1,n],mesh.coords[2,n],mesh.coords[3,n])
+                    owners[n]=get(aliases,key,owners[n])
+                end
+            end
+        else
+            boundary=Dict{NTuple{3,Int},Tuple{Int,Int}}()
+            pending=_geo_mesh_children(m,dim,tag,caller)
+            seen=Set{Tuple{Int,Int}}()
+            while !isempty(pending)
+                child=pop!(pending)
+                child in seen && continue
+                push!(seen,child)
+                child[1]<dim || continue
+                entry=get(maps,child,nothing)
+                if entry!==nothing
+                    for (key,owner) in entry
+                        boundary[key]=min(get(boundary,key,(4,0)),owner)
+                    end
+                end
+                child[1]>0 && append!(pending,_geo_mesh_children(m,child...,caller))
+            end
+            for node in eachindex(owners)
+                key=_geo_mesh_coordinate_key(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
+                owners[node]=get(boundary,key,owners[node])
+            end
+        end
+        result[index]=owners
+        entry=Dict{NTuple{3,Int},Tuple{Int,Int}}()
+        incidence=dim==0 ? _geo_mesh_point_incidence_coordinate(m,tag) : nothing
+        incidence_key=incidence===nothing ? nothing : _geo_mesh_coordinate_key(incidence...)
+        for node in eachindex(owners)
+            key=_geo_mesh_coordinate_key(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
+            dim==0 && incidence_key!==nothing && key!=incidence_key && continue
+            entry[key]=min(get(entry,key,(4,0)),owners[node])
+        end
+        maps[(dim,tag)]=entry
+    end
+    return result
+end
+
+# Merge per-entity meshes: nodes deduplicated by entity ownership and exact coordinates (shared
 # boundary nodes are bitwise identical across entity meshes), elements tagged
 # with their generating entity in `owner` for node-level classification. A
 # `MixedMesh` part (recombined surfaces/volumes) switches the product to the
 # mixed merge — quadrangles and polyhedra have no simplex container.
-function _geo_merge_entity_meshes(parts)
+function _geo_merge_entity_meshes(parts;node_entities=nothing)
     caller="execute_geo: Mesh"
     all(part->part[3] isa Mesh,parts) ||
-        return _geo_merge_entity_meshes_mixed(parts,caller)
+        return _geo_merge_entity_meshes_mixed(parts,caller;node_entities)
     coord_list=NTuple{3,Float64}[]
-    lookup=Dict{NTuple{3,Int},Int}()
+    lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int}()
     owner=Dict{Int,Tuple{Int,Int}}()
     nseg=sum(part->nsegs(part[3]),parts)
     ntri=sum(part->ntris(part[3]),parts)
@@ -7280,8 +7464,8 @@ function _geo_merge_entity_meshes(parts)
     tris=Matrix{Int32}(undef,3,ntri);tri_tag=Vector{Int32}(undef,ntri)
     tets=Matrix{Int32}(undef,4,ntet);tet_tag=Vector{Int32}(undef,ntet)
     seg_at=tri_at=tet_at=0
-    function node_index(x,y,z)
-        key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
+    function node_index(x,y,z,entity)
+        key=(entity...,_geo_mesh_coordinate_key(x,y,z))
         i=get(lookup,key,0)
         i==0 || return i
         i=length(coord_list)+1
@@ -7289,11 +7473,16 @@ function _geo_merge_entity_meshes(parts)
         push!(coord_list,(x,y,z))
         return i
     end
-    for (dim,tag,mesh) in parts
+    for (index,(dim,tag,mesh)) in enumerate(parts)
         remap=Vector{Int}(undef,nnodes(mesh))
         pcoords=mesh.coords
         for n in 1:nnodes(mesh)
-            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n])
+            entity=node_entities===nothing ? (-1,0) : node_entities[index][n]
+            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n],entity)
+            if node_entities!==nothing
+                own=node_entities[index][n]
+                owner[remap[n]]=min(get(owner,remap[n],(4,0)),own)
+            end
         end
         if dim==0
             # Vertex nodes classify on the vertex even when the part carries
@@ -7349,14 +7538,15 @@ end
 # Simplex parts contribute their segs/tris/tets as line/triangle/tetrahedron
 # cells; `tags` keep each cell's physical tag and `owner` keeps the same
 # lowest-dimension node classification the simplex merge computes.
-function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString)
+function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
+                                       node_entities=nothing)
     coord_list=NTuple{3,Float64}[]
-    lookup=Dict{NTuple{3,Int},Int}()
+    lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int}()
     owner=Dict{Int,Tuple{Int,Int}}()
     order=Tuple{Int,Int,Int}[]
     buckets=Dict{Tuple{Int,Int,Int},Tuple{Vector{Int32},Vector{Int32},Int}}()
-    function node_index(x,y,z)
-        key=(reinterpret(Int,x),reinterpret(Int,y),reinterpret(Int,z))
+    function node_index(x,y,z,entity)
+        key=(entity...,_geo_mesh_coordinate_key(x,y,z))
         i=get(lookup,key,0)
         i==0 || return i
         i=length(coord_list)+1
@@ -7376,11 +7566,16 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString)
         push!(order,key)
         return entry
     end
-    for (dim,tag,mesh) in parts
+    for (index,(dim,tag,mesh)) in enumerate(parts)
         remap=Vector{Int}(undef,nnodes(mesh))
         pcoords=mesh.coords
         for n in 1:nnodes(mesh)
-            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n])
+            entity=node_entities===nothing ? (-1,0) : node_entities[index][n]
+            remap[n]=node_index(pcoords[1,n],pcoords[2,n],pcoords[3,n],entity)
+            if node_entities!==nothing
+                own=node_entities[index][n]
+                owner[remap[n]]=min(get(owner,remap[n],(4,0)),own)
+            end
         end
         if dim==0
             for n in remap

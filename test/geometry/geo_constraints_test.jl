@@ -235,8 +235,8 @@ end
         """)
     @test execution.model.meshing.transfinite_volumes[1]==Int[]
 
-    # TransfQuadTri wildcard flags every current volume; meshing a flagged
-    # volume is the native-kernel QuadTri blocker.
+    # TransfQuadTri wildcard flags every current volume; the mesher consumes
+    # the flag when a transfinite volume is generated.
     execution=_execute_constraint_source(_GEO_BOX * raw"""
         TransfQuadTri{:};
         """)
@@ -1532,13 +1532,14 @@ end
         # Arc points are off the extrusion plane (y stays, x/z rotate).
         @test all(>=(0.0),round.(execution.mesh.coords[2,:];digits=9))
     end
-    @testset "QuadTri extrusion is a hard blocker" begin
-        err=_constraint_error(_GEO_EXTRUDE_TRI * raw"""
+    @testset "QuadTriAddVerts transition and NoNewVerts blocker" begin
+        execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
             Extrude{0,0,2}{Surface{1};Layers{3};Recombine;QuadTriAddVerts;}
             """;mesh_dim=3)
-        @test err !== nothing
-        @test occursin("QuadTriAddVerts",sprint(showerror,err))
-        @test occursin("QuadToTri",sprint(showerror,err))
+        counts=_extrude_block_counts(execution.mesh)
+        @test counts[4]>0
+        @test counts[7]>0
+        @test validate(execution.mesh).ok
         err=_constraint_error(_GEO_EXTRUDE_TRI * raw"""
             Extrude{0,0,2}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;}
             """;mesh_dim=3)

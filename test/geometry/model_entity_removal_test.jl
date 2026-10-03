@@ -23,6 +23,45 @@ function _removal_two_triangles()
     return model
 end
 
+@testset ".geo deletion discards removed curve meshes" begin
+    source=raw"""
+        Point(1)={0,0,0,0.1};Point(2)={1,0,0,0.1};
+        Point(3)={0,1,0,0.1};Point(4)={2,0,0,0.1};
+        Line(1)={1,2};Line(2)={2,3};Line(3)={3,1};Line(4)={2,4};
+        Curve Loop(1)={1,2,3};Plane Surface(1)={1};
+        Mesh 1;
+        """
+    function deletion_model(tail)
+        mktemp() do path,io
+            write(io,source,tail)
+            close(io)
+            execute_geo(path;mesh_dim=0).model
+        end
+    end
+    # A refused deletion keeps its discretization; a recursive deletion
+    # releases all removed curves while retaining the independent curve.
+    refused=deletion_model("Delete{Curve{1};}")
+    @test haskey(refused.curves,1)
+    @test length(refused.curve_params[1])==11
+    deleted=deletion_model("Recursive Delete{Surface{1};}")
+    @test Set(keys(deleted.curves))==Set([4])
+    @test Set(keys(deleted.curve_params))==Set([4])
+    @test deleted.curve_params[4]==refused.curve_params[4]
+
+    # Reusing a removed tag must mesh the new curve's constraint rather
+    # than reuse the deleted line's much finer discretization.
+    recreated=deletion_model(raw"""
+        Delete{Surface{1};Curve{1};}
+        Line(1)={1,3};Transfinite Curve{1}=3;
+        """)
+    @test !haskey(recreated.curve_params,1)
+    Tessella.Model._model_surface_mesh_curves!(recreated,[1],"deletion regression")
+    @test length(recreated.curve_params[1])==3
+    @test recreated.curve_params[1][1]==0.0
+    @test recreated.curve_params[1][end]==1.0
+    @test recreated.curve_params[4]==refused.curve_params[4]
+end
+
 function _removal_tetrahedron(;embedded=false)
     model=GeoModel()
     for (tag,x,y,z) in ((1,0.0,0.0,0.0),(2,1.0,0.0,0.0),

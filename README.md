@@ -12,7 +12,7 @@ ASCENT-relevant meshing capabilities implemented first. That parity target is **
 complete**. Bounds-checked package and focused gates for each implementation
 increment are recorded in [`STATUS.md`](STATUS.md).
 The separate external ASCENT solve campaign is recorded in [`ASCENT.md`](ASCENT.md).
-Tessella supports Julia 1.12.x only; [`Project.toml`](Project.toml) is the
+Tessella supports Julia 1.12.x and 1.13.x; [`Project.toml`](Project.toml) is the
 machine-readable runtime contract.
 
 ```julia
@@ -65,8 +65,13 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   lexicographic orientations, and global vertex/edge/face/bubble
   degree-of-freedom keys;
 - deterministic global edge and triangular/quadrangular-face catalogs for cached
-  simplex meshes, with atomic explicit insertion, orientation-stable lookup, and
+  simplex and native mixed meshes, with atomic explicit insertion, orientation-stable lookup, and
   detached tag/node arrays;
+- native mixed API caches for standard linear/full quadratic families, preserving
+  classification through reference/Jacobian/location queries, basis keys,
+  affine transforms, duplicate removal, partitioning, order changes, and
+  family-preserving uniform refinement; curved CAD elevation/refinement has an
+  explicit placement-kernel blocker;
 - globally certified quadratic segments, triangles, and tetrahedra (exact
   Bernstein Jacobian certificates, curve/surface curving, and Gmsh type-8/9/11
   output), plus strict and atomic simplex MSH
@@ -168,28 +173,31 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   exact geometry/boundary postconditions;
 - recombined four-sided planar transfinite patches with Gmsh type-3 quadrangles,
   physical tags, and exact projected corner-Jacobian certification;
-- affine six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron
+- affine and face-interpolated warped six-face transfinite volumes using Gmsh's unrecombined six-tetrahedron
   subdivision, with boundary tags, exact topology/orientation postconditions,
   exact-dyadic remote-grid interpolation, and represented-volume certification;
-- affine five-face triangular prisms using Gmsh's legacy collapsed-grid tetrahedron
-  templates, with exact orientation, boundary, and represented-volume certification.
+- affine and face-interpolated five-face triangular prisms using Gmsh's collapsed
+  and compact layouts, with recombined prism/hex emission and exact orientation,
+  boundary, and represented-volume certification;
+- native `TransfQuadTri` and `QuadTriAddVerts` transitions, using actual boundary
+  diagonals and certified tetrahedron/pyramid fans alongside retained hexes/prisms;
+  translation, rotation, twist, fixed columns, graded layers, neighboring sweeps,
+  and toroidal revolutions have pinned oracle coverage.
 
-P1 through P4 remain **in progress**. Current non-claims include 3-D multi-wall
-boundary-layer fan topology beyond the certified closed-wall extrusion, the full
-Gmsh automatic-sizing pipeline, broader `PostView` data including high-order/custom
-interpolation, materially warped quadrangles, mixed component counts, and
-tensor-to-metric evaluation, general OpenCASCADE/unclassified NURBS CAD, and full
-`.geo` execution (including boundary-layer, pipe (`Using Wire`), volume, and
-nested `Extrude` forms, `Fillet`/`Chamfer`, allocator reads after topology-changing
+P1 through P4 remain **in progress**. Current non-claims include boundary-layer
+topologies beyond the certified multi-region fan layouts, the full Gmsh
+automatic-sizing pipeline, materially warped unstructured surface fills,
+general tensor/metric meshing parity, general OpenCASCADE/unclassified NURBS CAD, and full
+`.geo` execution (including boundary-layer and pipe (`Using Wire`)
+extrusion forms, `Fillet`/`Chamfer`, allocator reads after topology-changing
 or untracked
 declarations, and geometry-derived physical-group RHSs beyond the documented inline
 topology queries),
-mixed-element generation beyond the listed first-order surface recombination paths,
-non-affine CAD curve integration and size-map laws,
+mixed-element generation beyond the listed structured and surface-recombination paths,
 quasi-transfinite or holed transfinite patches,
-curved/warped or compact-TransfiniteTri volumes,
-selective/high-order refinement, simplex-kernel integration,
-curved-cell Jacobian certification,
+`QuadTriNoNewVerts`, curved CAD mixed order elevation/refinement,
+selective refinement, simplex-kernel integration,
+curved-cell Jacobian certification beyond the documented P2 families,
 and explicit-tag `$ElementNodeData` output that the
 connectivity-implied record cannot express under `gmsh_compatible=true`. MSH2
 ASCII is the lossless
@@ -386,7 +394,7 @@ allocated like the pinned binary (upstream's `.msh` output drops the mesh
 when chains exist; Tessella preserves the mesh and adds the chains).
 `API.mesh.get_nodes`, `get_elements`, `get_element_types`,
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
-detached Gmsh-shaped arrays for the current linear-simplex cache. Node and element
+detached Gmsh-shaped arrays for simplex and native mixed caches. Node and element
 tags are dense identifiers derived for that cache; segments, triangles, and
 tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence.
 Whole-dimension element filters are supported, and a nonnegative `tag` filters
@@ -403,12 +411,13 @@ the contiguous Gmsh block slice (`task>=num_tasks` is empty).
 `get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
 `get_element_face_nodes` provide the corresponding detached, connectivity-derived
 arrays. Type-node results repeat shared nodes in element order, and edge/face results
-use Gmsh's local linear-simplex ordering. High-order nodes are not represented.
+use Gmsh's local ordering. Full quadratic edge/face queries include interpolation
+nodes, while `primary=true` returns corners.
 `get_barycenters`, `get_element_edge_nodes`, and `get_element_face_nodes` accept
 nondefault `task`/`num_tasks` and return the contiguous Gmsh block slice
 (`task>=num_tasks` is empty); `get_nodes_by_element_type` takes no task parameters
 in Gmsh 4.15.2 and neither does this query.
-`create_edges` and `create_faces` idempotently fill missing whole-cache simplex
+`create_edges` and `create_faces` idempotently fill missing whole-cache primary
 topology and preserve entries attached with `add_edges` or `add_faces`.
 `add_edges` accepts node pairs; `add_faces` accepts triangles or quadrangles. Both
 operations require positive identifiers, enforce one edge or face per identifier,

@@ -172,12 +172,12 @@ end
 
 @testset ".geo Extrude parameters" begin
     # Layers{counts}{heights}... documented Gmsh form is
-    # Layers{{counts...},{heights...}}; Recombine, ScaleLast, QuadTri and
+    # Layers{{counts...},{heights...}}; Recombine, ScaleLastLayer, QuadTri and
     # Using modifiers attach to every created entity.
     r=_execute_extrude_source(_EXTRUDE_SQUARE * """
         out[] = Extrude {0,0,1} { Surface{1};
             Layers{{2,4},{0.2,0.8}};
-            ScaleLast;
+            ScaleLastLayer;
             QuadTriAddVerts RecombLaterals;
             Using Index[2];
         };
@@ -191,6 +191,19 @@ end
     @test q.recombine==false
     @test q.quad_to_tri==:add_verts
     @test q.recomb_laterals==true
+
+    # `tScaleLast` is lexed as ScaleLastLayer, including when no Layers
+    # parameter precedes it (verified against Gmsh 4.15.2's lexer/binary).
+    r=_execute_extrude_source("""
+        Point(1) = {0,0,0,1};
+        out[] = Extrude {0,0,1} { Point{1}; ScaleLastLayer; };
+        """)
+    @test r.lists["out"]==[2.0,1.0]
+    @test r.model.meshing.extrude[(1,1)].scale_last
+    @test _extrude_error("""
+        Point(1) = {0,0,0,1};
+        Extrude {0,0,1} { Point{1}; Layers{2}; ScaleLast; }
+        """) isa ArgumentError
 
     # Layers{n}: one layer of n elements, height 1.0.
     r=_execute_extrude_source("""
@@ -232,6 +245,31 @@ end
         """)
     @test r.model.meshing.extrude[(2,5)].quad_to_tri==:no_new_verts
 
+    # The lexer admits selected case variants of the QuadTri modifiers
+    # and RecombLaterals (Gmsh.l), rather than arbitrary case folding.
+    variants=Tuple{String,Symbol}[]
+    for t in ("T","t"), a in ("A","a"), v in ("V","v")
+        push!(variants,("Quad"*t*"ri"*a*"dd"*v*"erts",:add_verts))
+    end
+    for t in ("T","t"), n in ("N","n"), N in ("N","n"), v in ("V","v")
+        push!(variants,("Quad"*t*"ri"*n*"o"*N*"ew"*v*"erts",:no_new_verts))
+    end
+    for (name,kind) in variants, modifier in ("RecombLaterals","Recomblaterals")
+        r=_execute_extrude_source("""
+            Point(1) = {0,0,0,1};
+            Extrude {0,0,1} { Point{1}; Layers{2}; $name $modifier; }
+            """)
+        q=r.model.meshing.extrude[(1,1)]
+        @test q.quad_to_tri==kind
+        @test q.recomb_laterals
+    end
+    for name in ("QuadTRIAddVerts","quadTriNoNewVerts","Recomblaterals")
+        @test _extrude_error("""
+            Point(1) = {0,0,0,1};
+            Extrude {0,0,1} { Point{1}; Layers{2}; $name; }
+            """) isa ArgumentError
+    end
+
     err=_extrude_error("""
         Point(1) = {0,0,0,1};
         Extrude {0,0,1} { Point{1}; Layers{2,3,4}; }
@@ -247,6 +285,87 @@ end
         Extrude {0,0,1} { Point{1}; Hole(2); }
         """)
     @test err isa ArgumentError
+end
+
+@testset ".geo nested Extrude expressions and parameter ordering" begin
+    # Extrude is an FExpr_Multi, so its output tags may be consumed by a
+    # shape's numeric list. A bare Extrude is not a ListOfShapes member.
+    r=_execute_extrude_source("""
+        Point(1) = {0,0,0,1};
+        out[] = Extrude {0,1,0} {
+            Point{Extrude {0,0,1} { Point{1}; }};
+        };
+        """)
+    @test r.lists["out"]==[3.0,2.0,4.0,3.0]
+    @test r.model.points==Dict(1=>(0.0,0.0,0.0),2=>(0.0,0.0,1.0),
+                               3=>(0.0,1.0,1.0),4=>(0.0,1.0,0.0))
+    @test r.model.curves==Dict(1=>(1,2),2=>(2,3),3=>(1,4))
+
+    # Each level keeps its own mesh parameters. The nested extrusion
+    # finishes before the outer parameter section begins.
+    r=_execute_extrude_source("""
+        Point(1) = {0,0,0,1};
+        out[] = Extrude {0,1,0} {
+            Point{Extrude {0,0,1} { Point{1}; Layers{3}; Recombine; }};
+            Layers{2};
+        };
+        """)
+    @test r.lists["out"]==[3.0,2.0,4.0,3.0]
+    @test r.model.meshing.extrude[(1,1)].layers==[3]
+    @test r.model.meshing.extrude[(1,1)].recombine
+    for tag in (2,3)
+        @test r.model.meshing.extrude[(1,tag)].layers==[2]
+        @test !r.model.meshing.extrude[(1,tag)].recombine
+    end
+
+    # Every parameter, even Layers{0} or an inert Using modifier, closes
+    # ListOfShapes. All selector/definition families then error at the head
+    # token, before an unknown tag or a nested expression can be evaluated.
+    for param in ("Layers{0}","ScaleLastLayer","Recombine 0",
+                  "QuadTriAddVerts","QuadTriNoNewVerts RecombLaterals",
+                  "Using View[3]")
+        for (entry,token) in (("Point{99}","Point"),("Curve{99}","Curve"),
+                ("Surface{99}","Surface"),("Volume{99}","Volume"),
+                ("GeoEntity{0}{99}","GeoEntity"),
+                ("Physical Point{99}","Physical"),
+                ("Parent Point{99}","Parent"),
+                ("Point(9)={9,0,0,1}","Point"),
+                ("Point{Extrude {0,0,1} { Point{1}; }}","Point"))
+            err=_extrude_error("""
+                Point(1) = {0,0,0,1};
+                out[] = Extrude {0,1,0} { Point{1}; $param; $entry; };
+                """)
+            @test err isa ArgumentError
+            @test occursin("syntax error ($token)",sprint(showerror,err))
+        end
+    end
+
+    # Exit 0 exposes the model after syntax recovery while clearing the
+    # accumulated diagnostic. Neither the rejected inline definition nor
+    # the rejected expression is allowed to create geometry.
+    for entry in ("Point(9)={9,0,0,1}",
+                  "Point{Extrude {0,0,1} { Point{1}; }}")
+        r=_execute_extrude_source("""
+            Point(1) = {0,0,0,1};
+            out[] = Extrude {0,1,0} { Point{1}; Layers{2}; $entry; };
+            Exit 0;
+            """)
+        @test sort!(collect(keys(r.model.points)))==[1]
+        @test isempty(r.model.curves)
+        @test !haskey(r.lists,"out")
+    end
+
+    for entry in ("Extrude {0,0,1} { Point{1}; }",
+                  "Translate {0,0,1} { Point{1}; }",
+                  "Duplicata { Point{1}; }")
+        token=first(split(entry))
+        err=_extrude_error("""
+            Point(1) = {0,0,0,1};
+            Extrude {0,1,0} { $entry; }
+            """)
+        @test err isa ArgumentError
+        @test occursin("syntax error ($token)",sprint(showerror,err))
+    end
 end
 
 @testset ".geo rotational Extrude" begin
@@ -572,6 +691,19 @@ end
     @test err isa ArgumentError
     @test occursin("Twisting extrude not available",sprint(showerror,err))
 
+    # Full ListOfShapes syntax, including its parameter phase boundary,
+    # must be checked before the factory-specific parser action fires.
+    for (entry,token) in (("Point{1}; Layers{2}; Point{99};","Point"),
+            ("Extrude {0,0,1} { Point{1}; };","Extrude"))
+        err=_extrude_error("""
+            SetFactory("OpenCASCADE");
+            Point(1) = {1,0,0,1};
+            Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { $entry }
+            """)
+        @test err isa ArgumentError
+        @test occursin("syntax error ($token)",sprint(showerror,err))
+    end
+
     # The gate fires in the parser action — after `ListOfShapes` parses
     # but before entity lookup — so shape-list syntax errors win while an
     # unknown entity still reports only the twist diagnostic (verified
@@ -614,6 +746,60 @@ end
     # Queries against the rotated records evaluate on the rotated geometry.
     c=Tessella.Model._occ_geometry_checked(m,5,"test")
     @test collect(c.center)≈[0.0,-2.0,0.0] atol=1e-14
+end
+
+@testset ".geo extrusion coherence on a fixed rotation edge" begin
+    # Both endpoints of Curve4 lie on the y-axis. Its top copy has explicit
+    # endpoint controls while the source line stores them implicitly; Gmsh
+    # merges the copy into Curve4 and emits only three lateral surfaces.
+    for angle in ("Pi/3","-Pi/3"),params in ("","Layers{3}; Recombine;")
+        source=_EXTRUDE_SQUARE*"""
+            out[] = Extrude {{0,1,0},{0,0,0},$angle} {
+                Surface{1}; $params
+            };
+            """
+        r=_execute_extrude_source(source)
+        @test r.lists["out"]==[21.0,1.0,12.0,16.0,19.0]
+        @test sort!(collect(keys(r.model.curves)))==[1,2,3,4,6,7,8,11,15]
+        @test r.model.loops[only(r.model.surfaces[21])]==[6,7,8,4]
+        @test r.model.curves[4]==(4,1)
+        # Keep the strict shell audit: every curve must be shared by two
+        # distinct surfaces, including the unswept source/top Curve4.
+        @test sort!(Tessella.Model._model_volume_boundary_surfaces(
+            r.model,1,"fixed-edge test"))==[-1,12,16,19,21]
+    end
+
+    # The ordinary structured sweep uses the same geometry, independently
+    # of QuadTri: three layers become three prisms with ten welded nodes.
+    r=_execute_extrude_source(_EXTRUDE_SQUARE*"""
+        Transfinite Curve{:}=2;
+        Transfinite Surface{1};
+        Recombine Surface{1};
+        Extrude {{0,1,0},{0,0,0},Pi/3} {
+            Surface{1}; Layers{3}; Recombine;
+        }
+        """;mesh_dim=3)
+    @test validate(r.mesh).ok
+    @test size(r.mesh.coords,2)==10
+    volume=geo_entity_mesh(r,3,1)
+    @test Dict(b.msh=>size(b.nodes,2) for b in volume.blocks)==Dict(6=>3)
+
+    # Coherence must make the same comparison in either copied direction
+    # and rewire stored loop references through the signed survivor. Build
+    # the raw reference before coherence, as extrusion creation itself does.
+    for reversed in (false,true)
+        m=_execute_extrude_source("""
+            Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+            Line(1)={1,2};
+            """).model
+        copy=Tessella.Model._duplicate_curve!(
+            m,1,"fixed-edge coherence test";reversed)
+        m.loops[1]=[copy,reversed ? 1 : -1]
+        Tessella.Model.coherence!(m)
+        @test sort!(collect(keys(m.curves)))==[1]
+        @test sort!(collect(keys(m.points)))==[1,2]
+        @test m.loops[1]==(reversed ? [-1,1] : [1,-1])
+    end
 end
 
 @testset ".geo Extrude degenerate and error paths" begin

@@ -316,7 +316,7 @@ Physical Volume("domain", 72) = {1};
             (0,51)=>"sheet points",(1,52)=>"sheet curves",
             (2,53)=>"sheet",(3,54)=>"domain")
         @test mixed_crc(embedded_volume).sha==
-              "c93fa592770d520661f686ce0c2dcfb1c6b23aeeafd6cf7f514b7ffe51a03ce5"
+              "4e15ea906aef23ba9fb15865cdf97502e1c3da834f990fe58a79d5cb673cca43"
 
         explicit_shell_input=joinpath(directory,"explicit-shell.geo")
         explicit_shell_output=joinpath(directory,"explicit-shell.msh")
@@ -350,7 +350,7 @@ Physical Volume("domain", 72) = {1};
             (0,70)=>"corners",(0,71)=>"probe",(1,72)=>"edges",
             (2,73)=>"boundary",(3,74)=>"domain")
         @test mixed_crc(geometry_expression).sha==
-              "9438d3c9f69b07832d335159ca36b85d3e0a469b23e5edca1f1362dcccf8b018"
+              "8b76bf2a3c0f74cea3b1081dc9eb79627801b1a99ec7b250aaa899766a6e8d0a"
 
         list_variable_input=joinpath(directory,"list-variables.geo")
         list_variable_output=joinpath(directory,"list-variables.msh")
@@ -361,7 +361,7 @@ Physical Volume("domain", 72) = {1};
         list_variable_mesh=read_mixed_msh(list_variable_output)
         @test validate(list_variable_mesh).ok
         @test mixed_crc(list_variable_mesh).sha==
-              "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102"
+              "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461"
         @test list_variable_mesh.physical_names==Dict(
             (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
             (2,63)=>"boundary",(3,64)=>"domain")
@@ -375,7 +375,7 @@ Physical Volume("domain", 72) = {1};
         dynamic_tag_mesh=read_mixed_msh(dynamic_tag_output)
         @test validate(dynamic_tag_mesh).ok
         @test mixed_crc(dynamic_tag_mesh).sha==
-              "8d94c09de58fad89d00b3e405a46220e872be8e0a694390ce4881e925be34700"
+              "862954f294ee82b3f7ab3871457a51b99c9053f261b0d9f30e8b00b161091934"
         @test dynamic_tag_mesh.physical_names==Dict(
             (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
             (2,63)=>"boundary",(3,64)=>"domain")
@@ -393,7 +393,7 @@ Physical Volume("domain", 72) = {1};
         set_max_tag_mesh=read_mixed_msh(set_max_tag_output)
         @test validate(set_max_tag_mesh).ok
         @test mixed_crc(set_max_tag_mesh).sha==
-              "b4a9e7a3af36c9820abee40a76666b658887b9879a059233beedfd9b0d94487c"
+              "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486"
         @test set_max_tag_mesh.physical_names==Dict(
             (0,603)=>"corners",(1,604)=>"edges",
             (2,605)=>"boundary",(3,606)=>"domain")
@@ -418,7 +418,7 @@ Physical Volume("domain", 72) = {1};
         points_of_mesh=read_mixed_msh(points_of_output)
         @test validate(points_of_mesh).ok
         @test mixed_crc(points_of_mesh).sha==
-              "4640321fc7eb29fef6951cf2faf8975fcaa75ab332b37e29a55a4c47f9d7ed05"
+              "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0"
         @test points_of_mesh.physical_names==
               Dict((0,11)=>"vertices",(3,12)=>"domain",
                    (0,21)=>"endpoints",(1,22)=>"face boundary",
@@ -439,7 +439,7 @@ Physical Volume("domain", 72) = {1};
             periodic_surface_volume_output)
         @test validate(periodic_surface_volume).ok
         @test mixed_crc(periodic_surface_volume).sha==
-              "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102"
+              "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461"
         @test length(periodic_surface_volume.periodic_links)==15
         @test sort([(Int(link.slave_entity),Int(link.master_entity),
                      length(link.slave_nodes))
