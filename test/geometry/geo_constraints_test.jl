@@ -1,6 +1,6 @@
 using Test
 using Tessella
-using Tessella.MeshTypes: ntris, nnodes, validate
+using Tessella.MeshTypes: ntris, nnodes, nsegs, ntets, validate
 using Tessella.Elements: ElementBlock, MixedMesh
 using Tessella.Model: model_to_mixed, model_physical_groups,
                       model_entities_for_physical_group,
@@ -1408,4 +1408,149 @@ end
     @test validate(projected).ok
     counts=_block_counts(projected)
     @test counts[4]>0 && counts[2]>0 && !haskey(counts,3) && !haskey(counts,5)
+end
+
+# `.geo` `Extrude ... Layers` — the structured sweep upstream's
+# `meshGRegionExtruded`/`meshGFaceExtruded`/`SubdivideExtrudedMesh`
+# produces: lateral quad strips or constrained triangle pairs, verbatim
+# top copies, prisms/hexahedra under `Recombine`, and the global
+# diagonal-compatible three-tetrahedron subdivision otherwise. Element
+# counts below are the Gmsh 4.15.2 outputs for the same files.
+const _GEO_EXTRUDE_TRI = raw"""
+Point(1) = {0,0,0,0.5};
+Point(2) = {1,0,0,0.5};
+Point(3) = {0,1,0,0.5};
+Line(1) = {1,2}; Line(2) = {2,3}; Line(3) = {3,1};
+Curve Loop(1) = {1,2,3};
+Plane Surface(1) = {1};
+"""
+
+function _extrude_block_counts(mesh)
+    counts=Dict{Int,Int}()
+    mesh isa MixedMesh || return counts
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        counts[block.msh]=get(counts,block.msh,0)+size(block.nodes,2)
+    end
+    return counts
+end
+
+@testset ".geo Extrude Layers sweep" begin
+    @testset "triangle source, Recombine -> prisms" begin
+        execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};Layers{3};Recombine;}
+            """;mesh_dim=3)
+        counts=_extrude_block_counts(execution.mesh)
+        # Gmsh: 21 quads (lateral strips), 14 tris (bottom+top copies),
+        # 21 prisms, 23 segs.
+        @test counts[3]==21
+        @test counts[2]==14
+        @test counts[6]==21
+        @test counts[1]==23
+        @test nnodes(execution.mesh)==32
+        volume=geo_entity_mesh(execution,3,1)
+        @test volume isa MixedMesh
+        @test only(size(b.nodes,2) for b in volume.blocks
+                   if b isa ElementBlock && b.msh==6)==21
+        # The classified projection accepts the swept volume part.
+        projected=model_to_mixed(execution.model,volume,3,1)
+        @test projected isa MixedMesh
+        pcounts=_extrude_block_counts(projected)
+        @test pcounts[6]==21
+        @test pcounts[3]==21
+    end
+    @testset "triangle source, no Recombine -> tets" begin
+        execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};Layers{3};}
+            """;mesh_dim=3)
+        # Gmsh: 23 segs, 56 tris (14 copies + 42 lateral), 63 tets
+        # (7 triangles x 3 layers x 3).
+        @test execution.mesh isa Mesh
+        @test nsegs(execution.mesh)==23
+        @test ntris(execution.mesh)==56
+        @test ntets(execution.mesh)==63
+        @test nnodes(execution.mesh)==32
+        @test validate(execution.mesh).ok
+        # Determinism — the sweep must reproduce bitwise.
+        again=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};Layers{3};}
+            """;mesh_dim=3)
+        @test again.mesh.coords==execution.mesh.coords
+        @test again.mesh.tets==execution.mesh.tets
+        @test again.mesh.tris==execution.mesh.tris
+    end
+    @testset "quadrangle source, Recombine -> hexahedra" begin
+        execution=_execute_constraint_source(_GEO_SQUARE * raw"""
+            Recombine Surface{1};
+            Extrude{0,0,2}{Surface{1};Layers{3};Recombine;}
+            """;mesh_dim=3)
+        counts=_extrude_block_counts(execution.mesh)
+        # The swept hexahedra outnumber any recombination-leftover
+        # prisms and the laterals are pure quadrangle strips.
+        @test counts[5]>0
+        volume=geo_entity_mesh(execution,3,1)
+        @test volume isa MixedMesh
+        btypes=sort!(collect(Set(b.msh for b in volume.blocks
+                                 if b isa ElementBlock)))
+        @test 5 in btypes
+    end
+    @testset "layer groups and heights" begin
+        execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};Layers{{2,3},{0.4,1.0}};Recombine;}
+            """;mesh_dim=3)
+        counts=_extrude_block_counts(execution.mesh)
+        # Gmsh: 35 prisms (7 triangles x (2+3) levels), 35 lateral quads,
+        # 14 tris, 29 segs, 48 nodes.
+        @test counts[6]==35
+        @test counts[3]==35
+        @test counts[2]==14
+        @test counts[1]==29
+        @test nnodes(execution.mesh)==48
+        # The intermediate level lands at the normalized group height —
+        # z = 2*(0.4 + k/3*0.6) for k=1,2.
+        zs=sort!(unique(round.(execution.mesh.coords[3,:];digits=9)))
+        @test 2*0.4+2*1.2/3*1 in zs
+        @test 2*(0.4+2/3*0.6) in zs
+    end
+    @testset "rotation extrusion" begin
+        execution=_execute_constraint_source(raw"""
+            Point(1)={1,0,0,0.4};
+            Point(2)={2,0,0,0.4};
+            Point(3)={2,1,0,0.4};
+            Point(4)={1,1,0,0.4};
+            Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+            Curve Loop(1)={1,2,3,4};
+            Plane Surface(1)={1};
+            Extrude{{0,1,0},{0,0,0},Pi/2}{Surface{1};Layers{4};}
+            """;mesh_dim=3)
+        # A quarter-turn twist sweep — interior nodes must follow the arc,
+        # not the chord.
+        @test validate(execution.mesh).ok
+        zs=execution.mesh.coords[3,:]
+        xs=execution.mesh.coords[1,:]
+        @test any(>(0.5),abs.(xs))
+        # Arc points are off the extrusion plane (y stays, x/z rotate).
+        @test all(>=(0.0),round.(execution.mesh.coords[2,:];digits=9))
+    end
+    @testset "QuadTri extrusion is a hard blocker" begin
+        err=_constraint_error(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};Layers{3};Recombine;QuadTriAddVerts;}
+            """;mesh_dim=3)
+        @test err !== nothing
+        @test occursin("QuadTriAddVerts",sprint(showerror,err))
+        @test occursin("QuadToTri",sprint(showerror,err))
+        err=_constraint_error(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;}
+            """;mesh_dim=3)
+        @test err !== nothing
+        @test occursin("QuadToTri",sprint(showerror,err))
+    end
+    @testset "no Layers falls back to unstructured filling" begin
+        execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
+            Extrude{0,0,2}{Surface{1};}
+            """;mesh_dim=3)
+        @test execution.mesh isa Mesh
+        @test ntets(execution.mesh)>0
+        @test nsegs(execution.mesh)>0
+    end
 end

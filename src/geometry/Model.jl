@@ -175,11 +175,16 @@ mutable struct ModelMeshingAttributes
     transfinite_volumes::Dict{Int,Vector{Int}}
     recombine::Dict{Tuple{Int,Int},Float64}
     extrude::Dict{Tuple{Int,Int},_GeoExtrudeParams}
-    # `ExtrudeParams::geo.Source`/`geo.Mode` per generated curve —
-    # `(src_dim, signed_tag)`: `(0, p)` for a point-extruded generatrix,
-    # `(1, ±c)` for a face/volume top copy (the sign selects `copyMesh`'s
-    # reversed orientation).
+    # `ExtrudeParams::geo.Source`/`geo.Mode` per generated entity —
+    # `(src_dim, signed_tag)`: `(0, p)` for a point-extruded generatrix
+    # connector, `(1, ±c)` for a curve top copy or a lateral surface's
+    # generatrix (the sign selects `copyMesh`'s reversed orientation), and
+    # `(2, ±s)` for an extruded volume or its copied top surface.
     extrude_sources::Dict{Tuple{Int,Int},NTuple{2,Int}}
+    # The `_ExtrudeSpec` transform record per generated entity — the sweep
+    # kernels re-evaluate it at each `Layers` level's normalized parameter
+    # (upstream `ExtrudeParams::Extrude(t)`).
+    extrude_specs::Dict{Tuple{Int,Int},Any}
     smoothing::Dict{Tuple{Int,Int},Int}
     reverse::Dict{Tuple{Int,Int},Bool}
     algorithm::Dict{Tuple{Int,Int},Int}
@@ -226,6 +231,7 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     Dict{Tuple{Int,Int},Float64}(),
     Dict{Tuple{Int,Int},_GeoExtrudeParams}(),
     Dict{Tuple{Int,Int},NTuple{2,Int}}(),
+    Dict{Tuple{Int,Int},Any}(),
     Dict{Tuple{Int,Int},Int}(),
     Dict{Tuple{Int,Int},Bool}(),
     Dict{Tuple{Int,Int},Int}(),
@@ -7953,7 +7959,8 @@ recursing.
 """
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             max_periodic_passes=8,
-                            size_field::Union{Nothing,AbstractSizeField}=nothing)
+                            size_field::Union{Nothing,AbstractSizeField}=nothing,
+                            _extrude_edges=nothing)
     caller="mesh_model_surface"
     t=_tag(tag,caller,2)
     haskey(m.surfaces,t) || throw(ArgumentError(
@@ -7983,6 +7990,17 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     end
     constraints=_surface_periodic_constraints(
         m,t,caller;external_curves=partner_curves)
+    # `meshGFace::operator()`: `MeshTransfiniteSurface` runs first, then
+    # `MeshExtrudedSurface`, then the mesh-master (periodic) copy — a
+    # `Layers` extrusion sweeps its lateral/top surfaces before the slave
+    # path is ever consulted.
+    haskey(m.meshing.transfinite_surfaces,t) || begin
+        swept=_extrude_surface_mesh(
+            m,t,caller;min_angle_deg=min_angle_deg,
+            max_periodic_passes=max_periodic_passes,size_field=size_field,
+            edges=_extrude_edges)
+        swept===nothing || return swept
+    end
     # A slave surface takes its master's mesh verbatim, like upstream's
     # meshGFace copy path — the master is meshed on demand so the relation
     # holds even when the caller never meshed it directly. Upstream defers a
@@ -8548,6 +8566,12 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
+    # `GenerateMesh` runs `meshGRegionExtruded` for every `Layers`-marked
+    # volume ahead of `meshGRegion` — the sweep wins over even an attached
+    # transfinite attribute (`meshGRegion::operator()` returns early on
+    # `ExtrudeMesh` before `MeshTransfiniteVolume`).
+    swept=_extrude_volume_mesh(m,t,caller)
+    swept===nothing || return swept
     if haskey(m.meshing.transfinite_volumes,t)
         mesh=_transfinite_volume_mesh(m,t,caller)
         mesh=_consume_volume_attributes(m,t,mesh,caller)
@@ -9038,5 +9062,6 @@ function _point_in_polygon(x,y,xs,ys,polygon)
 end
 
 include("ModelMesh1D.jl")
+include("ModelExtrude.jl")
 
 end # module

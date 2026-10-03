@@ -264,8 +264,17 @@ the surviving reversed record and rewires loops to `∓keep`) and compares
 surfaces as sorted absolute generatrix multisets, so merged laterals drop
 their body entry exactly like Gmsh. `Layers` (all three forms), `Recombine`,
 `ScaleLast`, `QuadTri*`/`RecombLaterals`, and `Using name[i]` parse into
-per-entity meshing parameters; boundary-layer, pipe,
-volume, and nested `Extrude` forms raise explicit errors. `Circle`/`Ellipse`
+per-entity meshing parameters; `Layers`/`Recombine` then drive the
+structured sweep at mesh time (`meshGRegionExtruded`/`MeshExtrudedSurface`
+parity: every swept corner is the `Extrude(u,·)` transform evaluation —
+triangle generatrices sweep to prisms, recombined quadrilaterals to
+hexahedra, non-recombined triangles subdivide prisms to tetrahedra through
+the global phase-1/2/3 shared-diagonal pass with lateral-surface remeshing,
+and `setAllVolumesPositive` fixes orientation), while `QuadTri*` forms raise
+an explicit mesh-time blocker pending the QuadToTri remeshing kernel and
+`ScaleLast`/`RecombLaterals`/`Using name[i]` stay mesh-inert like upstream;
+boundary-layer, pipe, volume, and nested `Extrude` forms raise explicit
+errors. `Circle`/`Ellipse`
 records store Gmsh's control points ([start, center, end] and
 [start, center, major, end] respectively, with the three-tag ellipse form
 duplicating start as major) plus the optional `Plane{..}` fallback normal,

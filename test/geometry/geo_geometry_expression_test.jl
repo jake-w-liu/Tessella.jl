@@ -66,7 +66,7 @@ end
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "8b76bf2a3c0f74cea3b1081dc9eb79627801b1a99ec7b250aaa899766a6e8d0a"
+          "9438d3c9f69b07832d335159ca36b85d3e0a469b23e5edca1f1362dcccf8b018"
 
     optional_size=_execute_geometry_expression_source(
         "Point(1 + 0.9) = {0, 1, 2};")

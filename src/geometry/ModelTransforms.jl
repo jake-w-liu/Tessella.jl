@@ -966,6 +966,7 @@ function _drop_entity_state!(m::GeoModel, dim::Int, tag::Int)
     delete!(m.meshing.recombine,key)
     delete!(m.meshing.extrude,key)
     delete!(m.meshing.extrude_sources,key)
+    delete!(m.meshing.extrude_specs,key)
     delete!(m.meshing.smoothing,key)
     delete!(m.meshing.reverse,key)
     delete!(m.meshing.algorithm,key)
@@ -1392,6 +1393,7 @@ function _extrude_point_copy!(m::GeoModel, src::Int, spec,
     if params!==nothing
         m.meshing.extrude[(1,curve)]=params
         m.meshing.extrude_sources[(1,curve)]=(0,src)
+        m.meshing.extrude_specs[(1,curve)]=spec
     end
     return (curve,chapeau)
 end
@@ -1440,6 +1442,7 @@ function _extrude_point_twist!(m::GeoModel, src::Int, chapeau::Int, spec,
         if params!==nothing
             m.meshing.extrude[(1,curve)]=params
             m.meshing.extrude_sources[(1,curve)]=(0,src)
+            m.meshing.extrude_specs[(1,curve)]=spec
         end
         return (curve,prev)
     end
@@ -1448,6 +1451,7 @@ function _extrude_point_twist!(m::GeoModel, src::Int, chapeau::Int, spec,
     if params!==nothing
         m.meshing.extrude[(1,curve)]=params
         m.meshing.extrude_sources[(1,curve)]=(0,src)
+        m.meshing.extrude_specs[(1,curve)]=spec
     end
     return (curve,chapeau)
 end
@@ -1469,13 +1473,15 @@ function _extrude_curve_lateral!(m::GeoModel, c::Int, spec,
         # `geo.Source = ic` — the signed generatrix tag drives `copyMesh`'s
         # direction like upstream.
         m.meshing.extrude_sources[(1,chapeau)]=(1,c)
+        m.meshing.extrude_specs[(1,chapeau)]=spec
     end
     _transform_curve_points!(m,chapeau,spec,caller)
     _extrude_occ_transform!(m,1,chapeau,spec,caller)
     (cbeg,_)=_extrude_point_copy!(m,sbeg,spec,params,caller)
     (cend,_)=_extrude_point_copy!(m,send,spec,params,caller)
     (cbeg===nothing && cend===nothing) && return nothing
-    return (_extrude_lateral_surface!(m,c,chapeau,cbeg,cend,params,caller),
+    return (_extrude_lateral_surface!(m,c,chapeau,cbeg,cend,spec,params,
+                                     caller),
             chapeau)
 end
 
@@ -1511,7 +1517,7 @@ end
 # -chapeau, -CurveBeg`, or Gmsh's triangular three-edge variants when one
 # connecting curve collapsed (`MSH_SURF_TRIC`).
 function _extrude_lateral_surface!(m::GeoModel, src::Int, chapeau::Int,
-                                   cbeg, cend, params, caller)
+                                   cbeg, cend, spec, params, caller)
     surf=_geo_newreg_alloc!(m,2,caller)
     # `src` is the signed generatrix record: `pc` for `ic>0`, the reversed
     # record for `ic<0` — the loop carries the source with its sign.
@@ -1528,7 +1534,13 @@ function _extrude_lateral_surface!(m::GeoModel, src::Int, chapeau::Int,
     # `ExtrudeCurve`: a collapsed side gives a three-edge `MSH_SURF_TRIC`
     # patch, otherwise the four-generatrix `MSH_SURF_REGL` ruled surface.
     m.surface_types[surf]=length(generatrices)==4 ? :ruled : :tric
-    params!==nothing && (m.meshing.extrude[(2,surf)]=params)
+    if params!==nothing
+        m.meshing.extrude[(2,surf)]=params
+        # `geo.Mode = EXTRUDED_ENTITY` / `geo.Source = ic` — the signed
+        # generatrix the sweep kernel sweeps.
+        m.meshing.extrude_sources[(2,surf)]=(1,src)
+        m.meshing.extrude_specs[(2,surf)]=spec
+    end
     return surf
 end
 
@@ -1551,11 +1563,18 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
             for (j,c) in enumerate(copies)
                 m.meshing.extrude[(1,c)]=params
                 m.meshing.extrude_sources[(1,c)]=(1,source_loop[j])
+                m.meshing.extrude_specs[(1,c)]=spec
             end
         end
     end
     vol=_alloc_tag!(m,3,0,caller)
-    params!==nothing && (m.meshing.extrude[(3,vol)]=params)
+    if params!==nothing
+        m.meshing.extrude[(3,vol)]=params
+        # `geo.Mode = EXTRUDED_ENTITY` / `geo.Source = is` — the signed
+        # source surface `meshGRegionExtruded` sweeps.
+        m.meshing.extrude_sources[(3,vol)]=(2,is)
+        m.meshing.extrude_specs[(3,vol)]=spec
+    end
     laterals=Int[]
     for l in m.surfaces[tag], c in m.loops[l]
         result=_extrude_curve_lateral!(m,c,spec,params,caller)
@@ -1582,7 +1601,13 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
     haskey(m.surface_geometry,tag) &&
         (m.surface_geometry[top]=_extrude_occ_surface_transform(
             m.surface_geometry[tag],spec,caller,"Surface[$top]"))
-    params!==nothing && (m.meshing.extrude[(2,top)]=params)
+    if params!==nothing
+        m.meshing.extrude[(2,top)]=params
+        # `geo.Mode = COPIED_ENTITY` / `geo.Source = is` — the copy path
+        # `MeshExtrudedSurface` takes for top surfaces.
+        m.meshing.extrude_sources[(2,top)]=(2,is)
+        m.meshing.extrude_specs[(2,top)]=spec
+    end
     slt=haskey(m.surface_loops,vol) ? _geo_next_surface_loop_tag(m) : vol
     m.surface_loops[slt]=vcat(-tag,top,laterals)
     m.volumes[vol]=Int[slt]
