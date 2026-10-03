@@ -19,7 +19,7 @@ end
 
 function _mesh_data_install!(mesh)
     lock(_MESH_DATA_API.STATE_LOCK) do
-        _MESH_DATA_API.LAST_MESH[]=_MESH_DATA_API._copy_mesh(mesh)
+        _MESH_DATA_API._replace_mesh_cache_locked!(_MESH_DATA_API._copy_mesh(mesh))
     end
     return nothing
 end
@@ -364,11 +364,12 @@ end
         @test length(_MESH_DATA_API.mesh.get_element_edge_nodes(4))==96
         @test length(_MESH_DATA_API.mesh.get_element_face_nodes(4,3))==96
 
+        max_node_before_clear=_MESH_DATA_API.mesh.get_max_node_tag()
         @test _MESH_DATA_API.mesh.clear()===nothing
         @test _MESH_DATA_API.mesh.get_nodes()==(UInt64[],Float64[],Float64[])
         @test _MESH_DATA_API.mesh.get_elements()==
               (Int32[],Vector{UInt64}[],Vector{UInt64}[])
-        @test _MESH_DATA_API.mesh.get_max_node_tag()==0
+        @test _MESH_DATA_API.mesh.get_max_node_tag()==max_node_before_clear
 
         allocation_small=_mesh_data_segment_fixture(5_000)
         allocation_large=_mesh_data_segment_fixture(10_000)
@@ -389,6 +390,8 @@ end
         @test nodes_by_type_large>nodes_by_type_small
         @test nodes_by_type_large<=2.2nodes_by_type_small+65_536
 
+        maxima_before_empty=(_MESH_DATA_API.mesh.get_max_node_tag(),
+                             _MESH_DATA_API.mesh.get_max_element_tag())
         _mesh_data_install!(Mesh(zeros(3,0)))
         @test _MESH_DATA_API.mesh.get_nodes()==
               (UInt64[],Float64[],Float64[])
@@ -399,8 +402,8 @@ end
         @test isempty(_MESH_DATA_API.mesh.get_barycenters(4,-1,false,false))
         @test isempty(_MESH_DATA_API.mesh.get_element_edge_nodes(4))
         @test isempty(_MESH_DATA_API.mesh.get_element_face_nodes(4,3))
-        @test _MESH_DATA_API.mesh.get_max_node_tag()==UInt64(0)
-        @test _MESH_DATA_API.mesh.get_max_element_tag()==UInt64(0)
+        @test _MESH_DATA_API.mesh.get_max_node_tag()==maxima_before_empty[1]
+        @test _MESH_DATA_API.mesh.get_max_element_tag()==maxima_before_empty[2]
     finally
         _MESH_DATA_API.finalize()
     end

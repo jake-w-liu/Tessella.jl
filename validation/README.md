@@ -40,6 +40,8 @@ validation/
     differential.jl      # required whole-cache affine-transform differential
   mesh_data_queries/
     differential.jl      # required bulk and connectivity-derived query differential
+  api_generate01/
+    differential.jl      # required classified 0D/1D generation and sparse lifecycle differential
   mesh_entity_topology/
     differential.jl      # required automatic/manual global edge/face differential
   mesh_point_location/

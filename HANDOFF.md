@@ -26,6 +26,48 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Current increment
 
+The synchronized API supports `generate(0)` and `generate(1)` through a
+detached planner. Fresh dimension-zero generation produces no cells;
+dimension one emits Point15 and linear or full quadratic Line cells. Retained
+raw data keeps source identity, including coincident nodes, sparse tags,
+explicit Point-cell subsets, and fully discrete higher-dimensional cells.
+Native higher-dimensional source caches recover their existing boundary
+cells before the dimension-one transition, using actual mesh provenance.
+Legacy higher-dimensional caches with nonempty native attached records lack
+allocation provenance; their dimension-one transition is rejected before mutation.
+`Mesh.ElementOrder` controls generation independently of immediate `set_order`,
+including raw meshes that have not been generated through the API.
+
+Tagged cache queries and mutations use public labels through checked inverse
+tables. Mirrored records have one authoritative query source. Renumbering,
+clear, insertion, duplicate removal, refinement, homology, and periodic
+queries preserve the verified ownership/tag contracts; historical maximum
+tags survive clearing and renumbering. Periodic keys return Gmsh's seven
+arrays, with master coordinates before slave coordinates. Selected edits
+preserve element and per-window visibility, remapping flags on renumbering.
+Generation prepares the model, mesh, classification, and P2 data before
+publishing them, so failures leave the current model/cache intact.
+
+The TF-Line length prepass now evaluates its constant derivative directly.
+The planner indexes owner incidence instead of repeatedly scanning every
+node and cell. Six before/after P1 output hashes are identical. In warmed
+Julia 1.12.7 bounds-checked tests, 333/666/1333 independent TF3 curves dropped
+from 1.08/2.15/4.31 GB to 12.73/21.92/49.57 MB allocated. Full P2 scaling was
+also measured; these are bounded measurements, not universal optimization.
+
+The frozen production tree passes the full bounds-checked Julia 1.12.7
+package gate: 456,607/456,607 assertions in 25m38.0s. Julia 1.13.1 passes
+456,607/456,607 in 19m33.7s. Both include 38 optional source-provenance checks.
+Focused tests pass 3,522 assertions, and the pinned 0D/1D differential
+passes 9,388 across 108 fixtures and 196 stages. All six affected differential
+drivers pass; nine complete CRC records match across Julia 1.12.7 and 1.13.1.
+STATUS.md records the detailed verification and separately counted blockers.
+The broader parity goal remains active. The next implementation is the separate
+`QuadTriNoNewVerts` diagonal-selection planner; native curved-CAD P2 placement,
+remaining algorithms, formats, and API coverage are still unfinished.
+
+## Previous increment (`35908d4`)
+
 **Transfinite and extruded QuadTri transitions** are native. Six-face boxes
 and collapsed five-face prisms use the actual boundary triangulations to
 retain undivided cells or introduce one centroid per divided logical cell,
@@ -95,11 +137,6 @@ aggregate process. The five analytic benchmarks and final coax forensic probe
 also completed. STATUS.md records the detailed evidence and the separately
 verified validator checksum and input-contract corrections.
 
-The next API generation-zero/one increment has begun in the isolated worktree
-`C:/tmp/tessella_api_generate01` on `codex/api-generate01`. Its options,
-global raw-record connectivity and generation planner changes are outside this
-frozen increment.
-
 ## Previous increment (`43183bd`)
 
 **`.geo` `Extrude … Layers` structured sweep** — `Layers`-marked extrusions
@@ -153,20 +190,15 @@ Files: `src/geometry/ModelExtrude.jl` (new), `src/geometry/Model.jl`,
 ### Not yet finished (carry-over for the next increments)
 
 - **`QuadTriNoNewVerts` extrusions** — the independent diagonal-selection
-  algorithm is still an explicit blocker. AddVerts and its free-lateral
-  recombination modifier are implemented in the current increment.
+  planner is the next implementation increment and remains an explicit blocker.
+  AddVerts and its free-lateral recombination modifier are implemented.
 - **Curved CAD mixed order elevation/refinement** — implement curve/surface
   placement stencils before enabling these paths. Native mixed optimization,
   quadrangle splitting, triangle recombination, cross fields, and remaining
   non-simplex quality metrics still have precise blockers.
-- **API dimension-zero/one generation** — `.geo` model-level grading is
-  implemented; the synchronized API's geometry generator still accepts only
-  dimensions 2/3. The next increment needs a typed Point15/Line cache assembler,
-  atomic source-record reconciliation, dimension-zero postprocessing, and
-  sparse-tag query adapters for `Mesh.Renumber=0`; see PLAN.md.
-- **Raw record tag identity in geometric mesh merge** — distinct coincident
+- **Raw record tag identity in `.geo` geometric mesh merge** — distinct coincident
   raw node tags within one point/curve record need tag-based keys. This
-  increment rejects that path precisely; raw records with unique coordinates
+  geometry path rejects that case precisely; raw records with unique coordinates
   retain their classification and imported cross-record homology tags work.
 - **Displaced native mesh vertices on boundaries** — isolated native Point
   attachments replace their geometry-position mesh node, matching Gmsh.

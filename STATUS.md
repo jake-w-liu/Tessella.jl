@@ -317,13 +317,15 @@ after the equivalent update. Per-window visibility is stored display state, Box
 and Cylinder/Sphere/Cone/Torus volumes present their materialized boundary
 entities, and Boolean volumes present their materialized result boundary the
 same way.
-`API.mesh.refine` atomically replaces the complete cached linear-simplex mesh through
-the canonical uniform-refinement kernel and returns detached storage; rejected
-resource bounds leave the prior cache unchanged. `API.mesh.clear` discards only the
-complete cache and preserves model geometry. Entity-selective clearing removes
+`API.mesh.refine` atomically refines linear-simplex caches and supported native
+mixed P1/P2 cells to linear children through the pinned family templates,
+including four pyramids and eight tetrahedra per pyramid, and returns detached
+storage. Rejected resource bounds or unsupported curved native CAD placement
+leave the prior cache unchanged. `API.mesh.clear` discards
+the complete cache and preserves model geometry. Entity-selective clearing removes
 the cells classified on the listed entities and drops their owned nodes;
-entities owning no cache cells — points and volume-boundary entities — are
-verified no-ops, matching Gmsh 4.15.2's boundary-mesh retention.
+entities owning no cache cells are no-ops. Tagged Point15 cells can be cleared;
+boundary entities absent from a legacy tet-only cache remain no-ops.
 `API.mesh.affine_transform` accepts a native 4×4 matrix or exactly 12/16 Gmsh
 row-major entries, rejects singular and nonfinite maps, and commits only a detached,
 validated whole-cache result. Reflections rewind simplex connectivity instead of
@@ -335,20 +337,23 @@ per-entity semantics are mirrored on the flat shared-node cache, and outputs
 failing validation leave the cache unchanged.
 Bulk session queries expose detached node tags and coordinates, element types, tags,
 and connectivity, type and whole-dimension filters, and maximum tags. Node and
-element tags are dense identifiers rebuilt for the current cache; linear segment,
-triangle, and tetrahedron blocks use MSH types 1, 2, and 4 with one global
-element-tag sequence. A `model_to_mixed` classification snapshot stored with the
-cache supports entity-filtered node, element, type-funnel, Jacobian, orientation,
+element tags are dense identifiers for legacy caches and stored public labels
+for tagged caches, including sparse tags. Query families use numeric MSH type
+order independently of internal block positions. A classification snapshot
+stored with the cache supports entity-filtered node, element, type-funnel,
+Jacobian, orientation,
 key, and `get_element` queries; `include_boundary` emits transitive boundary-entity
 nodes after the entity's own, `dim=-1` ignores `tag`, and unknown entities fail
-explicitly. Parametric queries reparametrize every returned node on the queried
-entity — one `u` per node on a Line, `(u, v)` per node on a Plane, empty for
-Points, Volumes, and all-dimension queries — while `get_nodes_by_element_type`
+explicitly. Native Line and Plane queries use `u` or `(u, v)` parameters;
+tagged raw records preserve their stored parameters. Points, Volumes, and
+all-dimension queries emit none, while `get_nodes_by_element_type`
 packs each repeated node's parameters on its owning entity in entry order,
 matching Gmsh 4.15.2's variable-width emission.
 Connectivity-derived queries expose repeated per-element node coordinates,
-barycenters, and edge/face nodes in Gmsh's local linear-simplex ordering. All cached
-nodes are primary, and nonfinite fast coordinate sums fail explicitly. Nondefault
+barycenters, and edge/face nodes in Gmsh's local ordering. Native mixed P1/P2
+queries use actual cells. Full quadratic edge/face outputs include interpolation
+nodes; `primary=true` selects corners.
+Nonfinite fast coordinate sums fail explicitly. Nondefault
 `task`/`num_tasks` returns the contiguous Gmsh block slice for `get_elements_by_type`,
 barycenters, and edge/face nodes; `task>=num_tasks` is the silently-empty range,
 and negative, zero-count, or non-integer task arguments fail explicitly.
@@ -369,10 +374,11 @@ Triangle, Tetrahedron, Quadrangle, Hexahedron, and Prism families plus the
 order-independent Point basis; hierarchical H(curl) functions and curls cover
 orders 0 through 11 on Line, Triangle, and Tetrahedron and orders 0 through 10
 on Quadrangle, Hexahedron, and Prism. They preserve Gmsh's orientation-major
-layout and lexicographic
-primary-node orientation rank. Node-based keys use dense node tags; explicit-order
-queries that require nodes absent from the linear cache fail instead of inventing
-keys. Hierarchical key catalogs lay out vertex, edge, face, and bubble keys like
+layout and the lexicographic orientation rank of primary public node tags.
+Node-based keys use public node tags;
+bubble keys use public element tags, and edge/face keys use topology identifiers.
+Explicit-order queries that require nodes absent from the linear cache fail
+instead of inventing keys. Hierarchical key catalogs lay out vertex, edge, face, and bubble keys like
 Gmsh 4.15.2's `getKeys`; edge- and face-based keys reuse the global topology
 catalogs and lazily add only
 requested edges or faces. Key coordinates and all returned arrays are detached. Higher-order
@@ -382,12 +388,13 @@ extensions. Pyramid/Trihedron hierarchical spaces remain explicit blockers. `get
 `task`/`num_tasks` and returns the contiguous Gmsh block slice; `task>=num_tasks`
 is empty, where the pinned release segfaults in its unguarded per-entity loop.
 Whole-cache edge and face creation assigns positive global identifiers to missing
-simplex topology in first-encounter segment, triangle, then tetrahedron order.
+primary cell topology in first-encounter cache order; legacy simplex caches visit
+segments, triangles, then tetrahedra.
 `add_edges` and `add_faces` atomically attach explicit positive identifiers to node
 pairs, triangles, or quadrangles; face identifiers share one namespace across both
 face types. Exact association repeats are idempotent. Later creation preserves
 manual entries, begins automatic candidates at the relevant catalog size plus one,
-skips identifiers already in use, and fills missing simplex edges and triangles.
+skips identifiers already in use, and fills missing primary edges and faces.
 Edge lookup returns the same tag in either direction and orientation `+1` for
 ascending node tags or `-1` for descending tags. Both face types preserve Gmsh
 4.15.2's zero orientation result. All-entity results are tag-sorted instead of
@@ -397,18 +404,23 @@ zero or conflicting identifiers, repeated or unknown nodes, and malformed or par
 invalid batches atomically; Gmsh 4.15.2 accepts or partially applies those cases.
 Entity-selective creation adds only the cells classified on the listed
 entities, matching Gmsh 4.15.2's dimTags selection.
-Cached point-location queries use a deterministic AABB hierarchy, decreasing-dimension
-then increasing-tag result order, scaled affine inversion, and exact-rational
-fallbacks. The strict contract uses Gmsh 4.15.2's default `1e-6` reference tolerance;
-relaxed search widens it by decades through `1.0`. Segment and triangle off-span
+Cached point-location queries use deterministic candidate lookup, decreasing dimension
+then increasing public tags, scaled affine inversion, and exact-rational
+fallbacks. Native mixed P1/P2 cells use their actual isoparametric maps, with
+conservative quadratic candidate bounds; native mixed reference maps and Jacobians
+also use the actual P1/P2 cells. The strict contract uses Gmsh 4.15.2's default
+`1e-6` reference tolerance; relaxed search widens it by decades through `1.0`.
+Segment and triangle off-span
 coordinates use orthogonal projection with unused coordinates fixed at zero, avoiding
 the pinned implementation's measured inversion artifacts. Every cache replacement or
-invalidation discards the hierarchy. Element-by-tag entity classification remains
-unfinished because the finalized simplex cache does not own entity tags.
-Cached quality queries preserve dense tag request order and implement the 13
+invalidation discards the hierarchy. `get_element` resolves type, public
+connectivity, and entity ownership through the stored classification snapshot.
+Cached quality queries preserve public-tag request order and implement the 13
 documented Gmsh 4.15.2 measures for linear triangles and tetrahedra. Compatible
 segment measures follow the pinned API; its undefined or unreliable 1-D Jacobian,
-inverse-gradient-error, and isotropy paths are explicit blockers. Scaled arithmetic
+inverse-gradient-error, and isotropy paths are explicit blockers. Other native
+mixed P1/P2 families support `minEdge` and `maxEdge`; remaining quality measures
+have precise blockers. Scaled arithmetic
 keeps the warmed per-element kernel allocation-free, while exact-rational and fixed
 256-bit BigFloat fallbacks distinguish degeneracy and retain finite ratios across
 overflowing spans, subnormal scales, and ill-conditioned simplices. Batch queries
@@ -589,7 +601,56 @@ project non-goals.
 
 ## Verification history (newest first)
 
-Current increment, 2026-10-03, Julia 1.12.7 with bounds checks and pinned
+API generation-zero/one increment, 2026-10-03:
+
+- The frozen production tree passes the full normal-compile, bounds-checked
+  Julia 1.12.7 package gate: 456,607/456,607 assertions in 25m38.0s, including
+  38 optional provenance checks against the independently verified Gmsh source.
+  Julia 1.13.1 passes the same 456,607/456,607 assertions in 19m33.7s, including
+  the same 38 source checks. All 80 frozen production/manifest hashes are unchanged.
+- Focused 0D/1D coverage passes 3,522/3,522 assertions in 51.4s. The strict
+  Gmsh 4.15.2 differential passes 9,388/9,388 in 36.0s across 108 fixtures
+  and 196 stages. One legacy attached-source allocation-history blocker is
+  counted separately; the four unsafe raw native P2 DLL fixtures are excluded.
+- All six affected pinned differential drivers exit zero under normal Julia
+  1.12.7 with bounds checks: mixed cache (152 checks), mixed queries (60 cases,
+  2,612 checks), mixed refinement (31 cases), transfinite curves (39 cases plus
+  18 HWall cases), mesh-data queries, and mesh affine transforms. The query
+  driver's existing upstream exception counts remain explicit.
+- Nine complete public API CRC records and allocator maxima match bitwise on
+  normal bounds-checked Julia 1.12.7 and 1.13.1. Recipes and pins are in
+  `test/interfaces/api_generate01_artifacts.jl` and
+  `test/artifacts/api_generate01_crc.txt`. The release allocation audit passes
+  76/76 assertions on both Julia versions. Two closure captures discovered
+  during the full gates were removed and checked for `Core.Box` regressions.
+- Dimensions 0/1 now use detached preparation and atomic model/cache
+  publication. Native Point/Line cells, full P2 lines, sparse raw records,
+  physical-group priority, `Mesh.MeshOnlyEmpty`, visibility, callbacks,
+  fields, graded laws, and immediate order conversion have focused coverage.
+- Tagged queries and mutations use public IDs. Mirrored records no longer
+  duplicate homology topology. Historical tag maxima persist across clear
+  and renumber; attached lower cells and native higher-dimensional source
+  boundary provenance survive the verified transitions.
+- Immediate order conversion also processes raw meshes before generation.
+  Selective clear validates every requested entity before changing records;
+  failed mixed valid/unknown selections preserve the entire model/cache.
+  Legacy higher-dimensional caches with nonempty native attachments lack
+  historical allocation provenance; the dimension-one transition is precisely
+  blocked before mutation, with sparse and dense-looking source-tag regressions.
+- Periodic nodes support primary/full-P2 correspondence; periodic keys
+  follow the pinned seven-output protocol. Node compaction remaps stored
+  periodic links and drops pairs involving removed nodes. Identity-preserving
+  edits keep global/window visibility and remap flags on element renumbering.
+- Six P1 performance fixtures retain identical before/after output hashes.
+  Warmed normal-compile Julia 1.12.7 with bounds checks: 333/666/1333 TF3
+  curves allocate 12,734,060/21,922,915/49,565,039 bytes, reduced from
+  approximately 1.08/2.15/4.31 GB; median times are 7.15/12.08/30.70 ms.
+  Single 1000/2000/4000-node curves allocate 2.37/4.46/10.13 MB.
+  Full P2 single-curve 1999/3999/7999-node output allocates
+  13.27/26.78/53.89 MB; many-curve 1665/3330/6665-node output allocates
+  22.05/40.99/86.68 MB. These are measured cases, not a universal bound.
+
+Previous QuadTri increment, 2026-10-03, Julia 1.12.7 with bounds checks and pinned
 Gmsh 4.15.2:
 
 - The final frozen-production package gate passes 453,047/453,047 assertions
@@ -604,10 +665,6 @@ Gmsh 4.15.2:
   2/24/35, cylinder volume is 62.652572 and sphere volume is 20.102034. The
   literal coax probe handles its expected upstream nonzero exit, empty volume
   cells and invalid duplicate-surface partial mesh.
-- The next API generation-zero/one work is isolated at
-  `C:/tmp/tessella_api_generate01` on `codex/api-generate01`. Its API options,
-  global raw-record connectivity and generation planner changes are outside
-  this frozen increment.
 - Transfinite QuadTri transitions pass 22,872 assertions over all six-face
   masks, arrangements, prism masks, positive analytic volumes, classified
   projection, physical ownership, deterministic output, and allocation

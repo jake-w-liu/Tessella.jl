@@ -325,21 +325,44 @@ native geometry queries immediately use the new coordinates. Box and
 Cylinder/Sphere/Cone/Torus volumes present their materialized boundary
 entities, and Boolean volumes present their materialized result boundary the
 same way.
-`API.mesh.refine` replaces the complete cached linear-simplex mesh only after the
-canonical uniform-refinement kernel succeeds and returns independent caller-owned
-storage. `API.mesh.clear` discards the complete cache, or only the cells and
+`API.mesh.generate(0)` postprocesses existing data and leaves fresh geometry
+empty. `generate(1)` emits classified Point15 and Line1/Line8 cells using the
+shared native curve evaluator, including fields, callbacks, size limits,
+graded laws, and periodic curves. `Mesh.ElementOrder` controls generation;
+`set_order` changes the existing mesh independently. `Mesh.Renumber=0`
+retains sparse public tags, while renumbering can prioritize physical groups.
+Tagged queries, topology, keys, and supported mutations resolve public labels
+through inverse tables; distinct coincident raw vertices retain their source
+identity. Historical maximum tags survive clear and renumber. Periodic nodes
+can include P2 nodes, and periodic keys return seven arrays with master
+coordinates before slave coordinates, matching Gmsh 4.15.2.
+
+Dimension-one transitions reject legacy native dimension-2/3 caches with
+nonempty attached mesh records before mutation because their source allocation
+history is unavailable. This does not block verified lower-dimensional tagged
+attachments. Native raw Line8 fixtures without actual Point boundary meshes
+remain an oracle gap: four pinned Gmsh setter fixtures crashed its DLL. Fully
+discrete P2 and native raw P2 with actual Point records have verified coverage;
+see [`validation/api_generate01/README.md`](validation/api_generate01/README.md).
+
+`API.mesh.refine` atomically refines linear-simplex caches and supported native
+mixed P1/P2 Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism,
+and Pyramid cells, returning linear child cells and independent caller-owned
+storage. Curved native CAD placement remains blocked before mutation.
+`API.mesh.clear` discards the complete cache, or only the cells and
 owned nodes classified on the entities passed in `dim_tags`, without changing
 model geometry; entities owning no cache cells are no-ops, matching Gmsh's
 boundary-mesh retention. `API.mesh.affine_transform` applies a finite nonsingular
 4×4 matrix or a strict 12-/16-entry Gmsh row-major transform to the complete
 cache, or only to the nodes owned by the entities in `dim_tags`.
-`API.mesh.remove_elements` drops listed dense element tags — or every element
+`API.mesh.remove_elements` drops listed public element tags — or every element
 on an entity — while retaining nodes; `reverse` and `reverse_elements` flip
 first-order simplex orientation with Gmsh 4.15.2's vertex conventions;
 `reorder_elements` permutes an entity's element block with Gmsh's zero-based
 source-position ordering; `set_node`, `renumber_nodes`, and
-`renumber_elements` update coordinates and dense tags with validated
-permutations; and `get_duplicate_nodes`, `remove_duplicate_nodes`, and
+`renumber_elements` update coordinates and labels; tagged caches support sparse
+renumbering and preserve surviving labels on removal, while legacy caches
+retain their dense-permutation contract. `get_duplicate_nodes`, `remove_duplicate_nodes`, and
 `remove_duplicate_elements` report and repair exact-coordinate or same-entity
 duplicates with optional entity filters. `remove_embedded` drops embedding
 records from parent surfaces and volumes, `get_periodic` reports each entity's
@@ -370,7 +393,7 @@ MathEval, Distance, and Threshold fields, background and boundary-layer
 assignments, and field removal; the generators consume it together with
 per-entity meshing attributes — `set_transfinite_*` on curves, surfaces,
 and volumes, `set_recombine`, `set_algorithm`, `set_smoothing`,
-`set_order` (a validated order-2 overlay), `set_reverse`,
+`set_order` (validated P1/P2 conversion, with a simplex P2 overlay), `set_reverse`,
 `set_outward_orientation`, `set_compound`, `set_size_at_parametric_points`,
 `set_size_from_boundary`, and the size-callback pair. `recombine` and
 `split_quadrangles` move quadrangles between the simplex cache and entity
@@ -394,18 +417,19 @@ allocated like the pinned binary (upstream's `.msh` output drops the mesh
 when chains exist; Tessella preserves the mesh and adds the chains).
 `API.mesh.get_nodes`, `get_elements`, `get_element_types`,
 `get_elements_by_type`, `get_max_node_tag`, and `get_max_element_tag` expose
-detached Gmsh-shaped arrays for simplex and native mixed caches. Node and element
-tags are dense identifiers derived for that cache; segments, triangles, and
-tetrahedra use MSH types 1, 2, and 4 and share one element-tag sequence.
+detached Gmsh-shaped arrays for simplex and native mixed caches. Legacy caches
+use dense node and element identifiers; tagged caches expose their stored
+public labels, including sparse tags. Element families are returned in numeric
+MSH type order, independently of their internal block positions.
 Whole-dimension element filters are supported, and a nonnegative `tag` filters
 node, element, type-funnel, Jacobian, orientation, key, and `get_element` queries
 onto the `(dim, tag)` model entity through the `model_to_mixed` classification
 snapshot stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities fail
-explicitly. `get_nodes` reparametrizes each returned node on the queried Line or
-Plane (`u` or `(u, v)` per node; Points, Volumes, and all-dimension queries emit
-none), and `get_nodes_by_element_type` packs each repeated node's parameters on
-its owning entity, both matching Gmsh 4.15.2.
+explicitly. Native Line and Plane queries use `u` or `(u, v)` parameters;
+tagged raw records preserve their stored parameters. Points, Volumes, and
+all-dimension queries emit none. `get_nodes_by_element_type` packs each repeated
+node's parameters on its owning entity, matching Gmsh 4.15.2.
 `get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
 the contiguous Gmsh block slice (`task>=num_tasks` is empty).
 `get_nodes_by_element_type`, `get_barycenters`, `get_element_edge_nodes`, and
@@ -436,30 +460,33 @@ replacement discards both catalogs. Entity-selective creation adds only the
 cells classified on the listed `dim_tags` entities.
 `get_element_by_coordinates`, `get_elements_by_coordinates`, and
 `get_local_coordinates_in_element` use a reusable AABB hierarchy over the current
-cache. Matches are deterministic: greatest dimension first, then smallest dense tag.
+cache. Matches are deterministic: greatest dimension first, then smallest public
+element tag, using dense tags for legacy caches.
 Strict search uses the pinned Gmsh 4.15.2 `1e-6` reference tolerance; relaxed search
 widens it by decades through `1.0` and stops at the first nonempty level. Scaled
-affine inversion falls back to exact rational arithmetic for ill-conditioned cases.
+affine inversion falls back to exact rational arithmetic for ill-conditioned cases;
+native mixed P1/P2 cells use their actual isoparametric maps with conservative
+quadratic candidate bounds.
 Off-span segment and triangle coordinates are stable orthogonal projections with
 unused coordinates set to zero. The locator is discarded whenever the mesh cache
 changes. Degenerate cells and Float64-unrepresentable local coordinates fail
-explicitly. `API.mesh.get_element` resolves a dense element tag to its type,
+explicitly. `API.mesh.get_element` resolves a public element tag to its type,
 connectivity, and owning entity through the classification snapshot;
-`API.mesh.get_node` resolves a dense node tag to its coordinates, owning
-entity, and parameters reparametrized on that owner.
+`API.mesh.get_node` resolves a public node tag to its coordinates, owning
+entity, and stored or owner-parametrized coordinates.
 `API.mesh.get_nodes_for_physical_group` returns the sorted unique node set
 over a Physical group's member, boundary, and embedded entities;
 `API.mesh.get_embedded` reports an entity's embedded entities and
 `API.mesh.get_sizes` reports Point mesh sizes with Gmsh-compatible zeros for
 other and unknown entities.
 `get_jacobians` and `get_jacobian` return detached forward-map data for cached
-linear segments, triangles, and tetrahedra. Evaluation points are concatenated
-`(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and
+linear simplex maps and native mixed P1/P2 cell maps. Evaluation points are
+concatenated `(u,v,w)` triples; outputs follow Gmsh's element-then-point ordering and
 column-flattened 3×3 matrices. Segment and triangle frames use Gmsh-compatible
 low-dimensional regularization, while tetrahedron determinants retain orientation.
 Malformed or nonfinite evaluation coordinates, degenerate maps, and
-Float64-unrepresentable results fail explicitly. Entity filtering retains the
-cache-metadata blocker described above. Nondefault `task`/`num_tasks` returns the
+Float64-unrepresentable results fail explicitly. Entity filtering requires a
+classified cache. Nondefault `task`/`num_tasks` returns the
 contiguous Gmsh block slice of cached elements (`task>=num_tasks` is empty).
 `get_integration_points` returns detached `(u,v,w)` reference coordinates and
 weights for every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron,
@@ -504,14 +531,16 @@ higher-order nodes, so a numeric Lagrange key query whose order differs from the
 stored element fails explicitly. Number-of-key/orientation and key-information
 queries remain session-independent. `get_basis_functions_orientation` accepts
 nondefault `task`/`num_tasks` and returns the contiguous Gmsh block slice
-(`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Trihedron bases and
-entity filtering remain
-explicit blockers. Tessella evaluates the catalogued
+(`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Trihedron bases remain
+explicit blockers; entity filtering requires a classified cache.
+Tessella evaluates the catalogued
 higher-order Prism and incomplete Pyramid spaces that Gmsh 4.15.2 cannot construct
 reliably; those paths are certified by nodality, partition, and gradient invariants.
-`get_element_qualities` returns detached values in dense-tag request order for the
-13 documented Gmsh 4.15.2 measures. It preserves signed tetrahedron Jacobian,
-volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
+`get_element_qualities` returns detached values in public-tag request order.
+Linear triangles and tetrahedra support the 13 documented Gmsh 4.15.2 measures;
+native mixed P1/P2 cells also support `minEdge` and `maxEdge`. Remaining
+unsupported family/order combinations fail precisely. It preserves signed
+tetrahedron Jacobian, volume, inverse-condition, inverse-gradient-error, and inradius behavior, while
 degenerate shape measures return zero and undefined circumradii return `Inf`.
 Gmsh 4.15.2 has no reliable linear-segment implementation for `minDetJac`,
 `maxDetJac`, `minSIGE`, or `minIsotropy`; Tessella rejects those combinations

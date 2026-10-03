@@ -848,7 +848,7 @@ function add_discrete_nodes!(m::GeoModel,dim,tag,node_tags,coords,
                 record.node_params=hcat(record.node_params,column)
             elseif size(record.node_params,2)>0
                 record.node_params=hcat(record.node_params,
-                                        zeros(dimension,1))
+                                        zeros(size(record.node_params,1),1))
             end
         else
             record.node_coords[:,position].=flat[3i-2:3i]
@@ -874,7 +874,8 @@ end
 Append elements to entity `(dim, tag)`, matching Gmsh's `mesh.addElements`:
 `element_types` lists MSH type numbers and `element_tags[i]`/`node_tags[i]`
 the tag vector and flattened connectivity of block `i`. Every referenced node
-must already be classified on the entity. Element tags must be strictly
+must already exist in the model; nodes retain their owning entity, including
+boundary nodes used by higher-dimensional elements. Element tags must be strictly
 positive and unique across the model.
 """
 function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
@@ -895,10 +896,11 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
         "$caller: element_types, element_tags, and node_tags must have the " *
         "same block count"))
     record=_discrete_data(m,dimension,t,caller)
-    known=Set(record.node_tags)
+    known=Set{Int32}()
     staged=Tuple{Int32,Int32,Vector{Int32}}[]
     seen=Set{Int32}()
     for (_,other) in _discrete_mesh_records_model(m)
+        union!(known,other.node_tags)
         union!(seen,other.element_tags)
     end
     for block in eachindex(element_types)
@@ -934,7 +936,7 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
             for node in connectivity
                 node in known || throw(ArgumentError(
                     "$caller: element $element_tag references node $node " *
-                    "which is not classified on entity ($dimension,$t)"))
+                    "which does not exist in the model"))
             end
             push!(staged,(Int32(msh_type),element_tag,connectivity))
         end

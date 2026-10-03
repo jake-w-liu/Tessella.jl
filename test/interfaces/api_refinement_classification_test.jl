@@ -199,7 +199,7 @@ end
         api.option("Mesh.MeshSizeExtendFromBoundary",0)
         api.mesh.set_size_from_boundary(2,1,0)
         @test validate(api.mesh.generate(2)).ok
-        @test m.meshing.lc_extend_from_boundary==0
+        @test api.CURRENT[].meshing.lc_extend_from_boundary==0
     finally
         api.finalize()
     end

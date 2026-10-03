@@ -354,6 +354,8 @@ end
         @test api.mesh.get_element_types(2,1)==Int32[3]
         @test api.mesh.get().coords==linear.coords
         api.mesh.set_order(2)
+        # Generation reads the global option; set_order changes the current mesh.
+        api.option("Mesh.ElementOrder",2)
         @test api.mesh.generate(2) isa MixedMesh
         @test api.mesh.get_element_types(2,1)==Int32[10]
     finally

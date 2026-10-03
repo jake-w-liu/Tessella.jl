@@ -233,7 +233,7 @@ run(mesh_entity_topology_command) # ProcessFailedException makes validation/run_
 mixed_topology_script = joinpath(HERE,"mesh_entity_topology","mixed_differential.jl")
 run(`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mixed_topology_script`)
 
-for folder in ("api_mixed_cache", "api_mixed_queries", "api_mixed_refine")
+for folder in ("api_mixed_cache", "api_mixed_queries", "api_mixed_refine", "api_generate01")
     println("\n── ",folder," ──  Gmsh 4.15.2 native mixed mesh API")
     script=joinpath(HERE,folder,"differential.jl")
     command=`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $script`

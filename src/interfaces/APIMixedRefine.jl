@@ -128,6 +128,15 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
     end
     linear,linear_class=_mixed_select_columns(linear,linear_class,
         [collect(axes(b.nodes,2)) for b in linear.blocks];node_order=findall(used))
+    tagged=stored_class!==nothing && stored_class.public_tags!==nothing
+    if tagged
+        ordering_class=linear_class
+        order=sortperm(linear.entity_data.external_node_tags;
+            by=tag->(ordering_class.node_entities[ordering_class.public_tags.node_indices[tag]],tag),
+            alg=Base.Sort.MergeSort)
+        linear,linear_class=_mixed_select_columns(linear,linear_class,
+            [collect(axes(b.nodes,2)) for b in linear.blocks];node_order=order)
+    end
     counts,node_count=_mixed_refine_plan(linear,node_limit,cell_limit,caller)
     quadratic,quadclass=_mixed_quadratic_cache(linear,linear_class,caller)
     nnodes(quadratic)==node_count || error("$caller: internal support-node count mismatch")
@@ -135,6 +144,15 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
     tags=Dict(msh=>Vector{Int32}(undef,n) for (msh,n) in counts)
     owners=Dict(msh=>Vector{Int32}(undef,n) for (msh,n) in counts)
     cursors=Dict(msh=>0 for msh in keys(counts))
+    external=tagged ? Dict(msh=>Vector{UInt64}(undef,n) for (msh,n) in counts) : nothing
+    element_max=tagged ? max(ELEMENT_TAG_MAX[],maximum(stored_class.public_tags.element_tags;
+        init=UInt64(0))) : UInt64(0)
+    if tagged
+        converted=sum(length(block.tags) for block in linear.blocks if block.msh!=15;init=0)
+        element_max<=typemax(Int32)-2converted || throw(ArgumentError(
+            "$caller: refinement order-conversion tags exceed Int32"))
+        element_max+=UInt64(2converted)
+    end
     catalog=_cache_catalog(quadratic,quadclass)
     for (bi,(input,_,_,support,parent_owners)) in enumerate(catalog)
         original=linear.blocks[bi]
@@ -154,6 +172,16 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
                 _mixed_refine_certify(quadratic.coords,connectivity[target],column,target,orientation,caller)
                 tags[target][column]=original.tags[parent]
                 owners[target][column]=parent_owners[parent]
+                if tagged
+                    if target==15
+                        external[target][column]=linear.entity_data.external_element_tags[bi][parent]
+                    else
+                        element_max<typemax(Int32) || throw(ArgumentError(
+                            "$caller: refined public element tags exceed Int32"))
+                        element_max+=UInt64(1)
+                        external[target][column]=element_max
+                    end
+                end
                 cursors[target]=column
             end
         end
@@ -168,6 +196,31 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
         end
     end
     blocks=[ElementBlock(msh,connectivity[msh],tags[msh]) for msh in sort!(collect(keys(counts))) if counts[msh]>0]
+    if tagged
+        assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
+            NODE_TAG_MAX[],element_max,node_limit,cell_limit,caller)
+        data=quadratic.entity_data
+        for position in axes(quadratic.coords,2)
+            _dim01_add_node!(assembly,data.external_node_tags[position],
+                ntuple(axis->quadratic.coords[axis,position],3),
+                quadclass.node_entities[position],data.node_parametric[position])
+        end
+        for block in blocks,column in axes(block.nodes,2)
+            _dim01_add_cell!(assembly,block.msh,
+                (Int(msh_dimension(block.msh)),owners[block.msh][column]),
+                @view(block.nodes[:,column]),external[block.msh][column];
+                physical=block.tags[column])
+        end
+        plan=_dim01_finish!(assembly,deepcopy(m),model_entities(m),
+            Set{Tuple{Int,Int32}}(),falses(length(assembly.nodes)),
+            !iszero(OPTIONS["Mesh.Renumber"]),false;
+            save_all=!iszero(OPTIONS["Mesh.SaveAll"]),curve_parameter_order=true)
+        diagnostic=validate(plan.mesh)
+        diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*
+            join(diagnostic.messages,"; ")))
+        _commit_tagged_plan_locked!(plan;authority=stored_class.public_tags.authority)
+        return _copy_mesh(plan.mesh)
+    end
     refined=MixedMesh(quadratic.coords,blocks;physical_names=cached.physical_names)
     diagnostic=validate(refined)
     diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*join(diagnostic.messages,"; ")))
