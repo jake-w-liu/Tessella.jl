@@ -26,6 +26,96 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Current increment
 
+`QuadTriNoNewVerts` has its independent first region kernel for one isolated,
+nondegenerate source quadrangle with four boundary vertices. Positive layer
+groups must end at normalized height 1.0. Free laterals use a packed full-hex
+relation and a three-state cap chain with no added volume vertices. Recombined
+laterals retain earlier hexes and record the final unsliceable cell before
+emitting two tetrahedra and five pyramids around one certified centroid.
+
+One completed operation plan supplies the actual volume, source/cap/lateral
+meshes, and classified projection through standalone, GEO, and API entry points.
+Curved connector classification uses retained column nodes. Projection permits
+node and cell renumbering and rejects changed coordinates or winding atomically.
+The API 3D actual-cell cache keeps its existing volume-only contract; complete
+lower-dimensional cell publication in that cache remains separate work.
+
+Exact local cell and typed-boundary checks are accompanied by a conservative
+global convex-hull separation certificate. Adjacent cells require an exactly
+planar shared cap with opposite strict halfspaces. A balanced BVH uses certified
+supporting planes, strict AABB gaps, and explicit traversal/predicate budgets
+for nonadjacent intervals. Undecidable separation has a precise blocker.
+Confirmed overlapping multi-turn rotations and thin helices now fail before
+mesh state is published; separated multi-turn helices remain supported.
+Whole-domain P1 Jacobian checks also reject internal isoparametric folds that
+positive tetrahedral partition volumes can miss. Hexes use outward interval
+and exact tensor-Bernstein bounds, pyramids use four exact base-corner signs,
+and prisms use the exact triangle-vertex quadratic positivity criterion.
+The AddVerts factory now certifies its actual retained hexes, prisms, pyramids,
+and tetrahedra as well; it can otherwise retain the same internally folded
+hex that the NoNew regression exposed. GEO stages both operation types before
+grading or changing mesh options, so certification failure preserves the model.
+Standalone AddVerts isolates only the curve-discretization dictionary while
+sharing read-only geometry and callbacks; it publishes grading after all cells
+and emission succeed. API generation already owns a detached model and avoids
+that additional dictionary copy.
+
+New API order-two products are certified for all seven full quadratic standard
+families before cache publication. Pyramid14 uses the collapsed rational map's
+144 tensor-Bernstein coefficients, with normalized outward intervals and an
+exact integer fallback. A captured large-offset straight-sided Pyr5 conversion
+has a negative interior P2 Jacobian despite valid P1 geometry and now rejects
+atomically. Legacy simplex mutations prepare their P2 overlays before replacing
+the cache or model. Permutations and exact selections transfer existing actual
+midpoints by original primary-node identity, including independent coincident
+entities; conflicting edge geometry during node merging rejects before mutation.
+Finite primary-node edits retain untouched actual midpoints, and affine maps
+transform the stored actual nodes. Repeated order-two requests retain the existing
+overlay. User-edited singular maps remain inspectable through these operations;
+new construction keeps its full geometric checks. Legacy curved-simplex
+refinement and optimization require a still-unimplemented placement kernel and
+reject before changing state; zero optimization iterations preserve the mesh.
+Mixed-cache refinement follows Gmsh's linear output and rebuilt supports. The
+legacy straight-simplex path retains its documented re-elevated query overlay;
+it does not claim Gmsh's exact post-refinement order or polynomial restriction
+of an edited curved map. Complete higher-dimensional API lifecycle work must
+resolve that legacy distinction.
+Existing imported P2 records remain inspectable; native curved-CAD P2 node
+placement remains separate unfinished work.
+
+GEO scanners and the ASCII STL reader now own their input streams through
+`open` blocks. Immediate-unlink regressions cover parse failures without relying
+on garbage collection to release Windows file handles.
+The API 0D/1D oracle driver also roots Gmsh's Julia callback trampoline until
+unregistration; its generated wrapper otherwise loses the handle to GC. The
+same strict fixtures now include forced collection while the callback is active.
+
+NoNew GEO point parts use sorted CAD tags, fixing complete-CRC variation from
+dictionary ordering of unused control points. The 24 native records in
+`test/artifacts/quadtri_nonew_crc.txt` match Julia 1.12.7 and 1.13.1. The pinned
+oracle has pointer-dependent admissible cap and cell choices, so differential
+checks certify each mesh's full complex instead of pinning a random Gmsh split.
+Six large-angle helical oracle probes are counted separately: Gmsh errors or
+emits a different cell route. Certified native helices are not claimed as
+Gmsh-parity cases.
+Release gates and bounded allocation measurements are recorded in STATUS.md.
+Final normal, bounds-checked package gates pass 484,513/484,513 assertions on
+Julia 1.12.7 in 25m34.6s and Julia 1.13.1 in 20m42.0s, including 38 optional
+pinned-source checks each. All 389 production/test/validation input hashes stayed
+unchanged throughout the gates; subsequent CRC-file EOF cleanup preserves all
+24 parsed records. Focused public coverage passes 3,604 checks, the independent P2 peer
+passes 111, and all six affected API differential drivers pass. Strict NoNew
+coverage includes 44 oracle samples with separately counted gaps; 24 native
+CRC products remain identical across both Julia versions.
+
+Continue the NoNew source-category and neighboring-region phases: source grids,
+triangular/mixed roots, collapsed columns, shared regions, copied-source chains,
+and cyclic sweeps. Native curved-CAD P2 placement, complete higher-dimensional
+public tag/cell lifecycle, remaining algorithms, fields, formats, and API coverage
+also remain unfinished. The broad parity goal is active.
+
+## Previous increment (`a964f90`)
+
 The synchronized API supports `generate(0)` and `generate(1)` through a
 detached planner. Fresh dimension-zero generation produces no cells;
 dimension one emits Point15 and linear or full quadratic Line cells. Retained
@@ -63,7 +153,7 @@ passes 9,388 across 108 fixtures and 196 stages. All six affected differential
 drivers pass; nine complete CRC records match across Julia 1.12.7 and 1.13.1.
 STATUS.md records the detailed verification and separately counted blockers.
 The broader parity goal remains active. The next implementation is the separate
-`QuadTriNoNewVerts` diagonal-selection planner; native curved-CAD P2 placement,
+`QuadTriNoNewVerts` continuation described above; native curved-CAD P2 placement,
 remaining algorithms, formats, and API coverage are still unfinished.
 
 ## Previous increment (`35908d4`)
@@ -190,7 +280,9 @@ Files: `src/geometry/ModelExtrude.jl` (new), `src/geometry/Model.jl`,
 ### Not yet finished (carry-over for the next increments)
 
 - **`QuadTriNoNewVerts` extrusions** — the independent diagonal-selection
-  planner is the next implementation increment and remains an explicit blocker.
+  planner's isolated-source-quad slice is described above. Source grids,
+  triangular/mixed roots, collapsed columns, shared neighbors, and copied-source
+  chains still require their category and propagation phases.
   AddVerts and its free-lateral recombination modifier are implemented.
 - **Curved CAD mixed order elevation/refinement** — implement curve/surface
   placement stencils before enabling these paths. Native mixed optimization,

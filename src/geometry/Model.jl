@@ -3873,7 +3873,8 @@ constraint while retaining every curve link.
 """
 function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
                         surface_tag::Integer;
-                        external_curves::Union{Nothing,Set{Int}}=nothing)
+                        external_curves::Union{Nothing,Set{Int}}=nothing,
+                        _extrude_scope=nothing)
     caller="model_to_mixed"
     surface=_tag(surface_tag,caller,2)
     haskey(m.surfaces,surface) || throw(ArgumentError(
@@ -3910,6 +3911,10 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
         all(block->all(iszero,block.tags),mesh.blocks) || throw(ArgumentError(
             "$caller: input cell tags must be zero; physical ownership comes from the model"))
     end
+
+    planned=_extrude_nonew_surface_projection(
+        m,mesh,surface,caller;scope=_extrude_scope)
+    planned===nothing || return planned
 
     embedded_points,embedded_curves=
         _model_surface_embedding_tags(m,surface,caller)
@@ -5854,7 +5859,7 @@ function _volume_projection_contract(mesh::MixedMesh,caller::AbstractString)
     return cell_count
 end
 
-function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int)
+function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=nothing)
     caller="model_to_mixed"
     haskey(m.volumes,volume) || throw(ArgumentError(
         "$caller: unknown Volume[$volume]"))
@@ -5862,15 +5867,20 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
     volume_cell_count=_volume_projection_contract(mesh,caller)
+    nonew=_extrude_is_nonew(_extrude_gate(m,3,volume)) ?
+        _extrude_nonew_projection_context(m,mesh,volume,caller;scope=_extrude_scope) :
+        nothing
 
-    explicit_geometry=(isempty(m.volumes[volume]) ||
+    explicit_geometry=(nonew!==nothing || isempty(m.volumes[volume]) ||
         _implicit_volume_surface(m,volume)) ? nothing :
         _model_explicit_volume_geometry(m,volume,caller)
-    domain_surface=explicit_geometry===nothing ?
-        _volume_surface(m,volume,caller) : explicit_geometry.surface
-    fills_volume,fill_reason=_certify_surface_fill(domain_surface,mesh)
-    fills_volume || throw(ArgumentError(
-        "$caller: input volume mesh does not fill Volume[$volume] — $fill_reason"))
+    if nonew===nothing
+        domain_surface=explicit_geometry===nothing ?
+            _volume_surface(m,volume,caller) : explicit_geometry.surface
+        fills_volume,fill_reason=_certify_surface_fill(domain_surface,mesh)
+        fills_volume || throw(ArgumentError(
+            "$caller: input volume mesh does not fill Volume[$volume] — $fill_reason"))
+    end
     explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
         mesh,volume,explicit_geometry.expected_volume,
         explicit_geometry.comparison_scale,caller)
@@ -5898,11 +5908,11 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int)
     edge_owners=Dict{NTuple{2,Int32},Int32}()
     # Foreign-curve-owned vertices are not chain candidates — two distinct
     # curves can pinch within the chain audit's projection tolerance.
-    curve_owned=_curve_owned_coordinates(m,curve_tags,caller)
+    curve_owned=nonew===nothing ? _curve_owned_coordinates(m,curve_tags,caller) : nothing
     function classify_curve!(curve,chain_edges)
-        entries=_model_projection_tet_curve_nodes(
+        entries=nonew===nothing ? _model_projection_tet_curve_nodes(
             m,mesh,curve,cell_edges,caller;
-            owned=curve_owned,edges=chain_edges)
+            owned=curve_owned,edges=chain_edges) : nonew.curves[curve]
         closed=m.curves[curve][1]==m.curves[curve][2]
         # Resolve the whole edge list and audit foreign ownership before
         # committing anything — a nested curve retries on the tet-edge
@@ -5967,7 +5977,16 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int)
     mesh_boundary_faces,face_orders=_volume_cell_boundary_faces(mesh)
     claimed_boundary_faces=Set{NTuple{N,Int32} where N}()
     for surface in projection_surface_tags
-        faces=if surface in boundary_surface_set
+        faces=if nonew!==nothing
+            faces=nonew.surfaces[surface]
+            for face in faces
+                key=_model_projection_face_key(face)
+                key in claimed_faces && throw(ArgumentError(
+                    "$caller: mesh face $key belongs to multiple model surfaces"))
+                push!(claimed_faces,key)
+            end
+            faces
+        elseif surface in boundary_surface_set
             _model_projection_boundary_surface_faces!(
                 claimed_faces,mesh_boundary_faces,m,mesh,surface,caller;
                 face_orders=face_orders)
@@ -6199,6 +6218,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int)
     output_diagnostic.ok || throw(ErrorException(
         "$caller: invalid projected mixed mesh — " *
         join(output_diagnostic.messages,"; ")))
+    nonew===nothing || (m.curve_params=nonew.curve_params)
     return output
 end
 
@@ -6219,14 +6239,14 @@ its Curve-In-Surface relation, and MSH2 cell ownership remain available.
 """
 function model_to_mixed(
     m::GeoModel,mesh::Union{Mesh,MixedMesh},entity_dim::Integer,
-    entity_tag::Integer)
+    entity_tag::Integer;_extrude_scope=nothing)
     caller="model_to_mixed"
     dim=_dimension(entity_dim,caller)
     dim in (2,3) || throw(ArgumentError(
         "$caller: classified projection supports only surface or volume entities"))
     tag=_tag(entity_tag,caller,dim)
-    return dim==2 ? model_to_mixed(m,mesh,tag) :
-                    _model_volume_to_mixed(m,mesh,tag)
+    return dim==2 ? model_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope) :
+                    _model_volume_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope)
 end
 
 function _node_at(mesh, p; atol=1e-12)
@@ -7971,7 +7991,7 @@ recursing.
 function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                             max_periodic_passes=8,
                             size_field::Union{Nothing,AbstractSizeField}=nothing,
-                            _extrude_edges=nothing)
+                            _extrude_edges=nothing,_extrude_scope=nothing)
     caller="mesh_model_surface"
     t=_tag(tag,caller,2)
     haskey(m.surfaces,t) || throw(ArgumentError(
@@ -7984,6 +8004,10 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     1<=max_periodic_passes<=64 || throw(ArgumentError(
         "$caller: max_periodic_passes must be in 1:64"))
     npasses=Int(max_periodic_passes)
+    planned=_extrude_nonew_surface_mesh(m,t,caller;scope=_extrude_scope,
+        min_angle_deg=min_angle_deg,max_periodic_passes=npasses,
+        size_field=size_field)
+    planned===nothing || return planned
     # A periodic curve relation whose far endpoint lives on a surface paired
     # with this one by a dim-2 relation needs no local synchronization — the
     # slave-copy path reproduces the master's boundary nodes by construction.
@@ -8010,7 +8034,7 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         swept=_extrude_surface_mesh(
             m,t,caller;min_angle_deg=min_angle_deg,
             max_periodic_passes=max_periodic_passes,size_field=size_field,
-            edges=_extrude_edges)
+            edges=_extrude_edges,scope=_extrude_scope)
         swept===nothing || return swept
     end
     # A slave surface takes its master's mesh verbatim, like upstream's
@@ -8038,7 +8062,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         master_mesh=mesh_model_surface(
             m,Int(surface_constraint.master_entity);
             min_angle_deg=min_angle_deg,
-            max_periodic_passes=max_periodic_passes,size_field=size_field)
+            max_periodic_passes=max_periodic_passes,size_field=size_field,
+            _extrude_scope=_extrude_scope)
         output=_model_periodic_surface_mesh(
             m,master_mesh,surface_constraint,caller)
         return _model_surface_boundary_writeback!(m,t,output,caller)
@@ -8496,7 +8521,9 @@ certify their affine tetrahedron-boundary node maps. Unsupported solid encodings
 raise an explicit error.
 """
 function mesh_model_volume(m::GeoModel, tag::Integer;
-                           size_field::Union{Nothing,AbstractSizeField}=nothing)
+                           size_field::Union{Nothing,AbstractSizeField}=nothing,
+                           _extrude_scope=nothing,
+                           _extrude_working_model::Bool=false)
     # The task-local protected-cell registry is a session record of cells
     # recovered so far, shared by the segment/sheet recovery calls below and
     # consulted by every cavity refill (including refinement-time Steiner
@@ -8506,7 +8533,9 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
     protected_faces,protected_edges=_protected_cells!()
     empty!(protected_faces); empty!(protected_edges)
     try
-        return _mesh_model_volume(m,tag;size_field=size_field)
+        return _mesh_model_volume(m,tag;size_field=size_field,
+                                  _extrude_scope=_extrude_scope,
+                                  _extrude_working_model=_extrude_working_model)
     finally
         empty!(protected_faces); empty!(protected_edges)
     end
@@ -8574,7 +8603,9 @@ function _volume_embedded_curve_chain(m::GeoModel,curve::Int,
 end
 
 function _mesh_model_volume(m::GeoModel, tag::Integer;
-                            size_field::Union{Nothing,AbstractSizeField}=nothing)
+                            size_field::Union{Nothing,AbstractSizeField}=nothing,
+                            _extrude_scope=nothing,
+                            _extrude_working_model::Bool=false)
     caller="mesh_model_volume"
     t=_tag(tag,caller,3)
     haskey(m.volumes,t) || throw(ArgumentError("$caller: unknown Volume[$t]"))
@@ -8583,7 +8614,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     # volume ahead of `meshGRegion` — the sweep wins over even an attached
     # transfinite attribute (`meshGRegion::operator()` returns early on
     # `ExtrudeMesh` before `MeshTransfiniteVolume`).
-    swept=_extrude_volume_mesh(m,t,caller)
+    swept=_extrude_volume_mesh(m,t,caller;scope=_extrude_scope,size_field=size_field,
+                               _working_model=_extrude_working_model)
     swept===nothing || return swept
     if haskey(m.meshing.transfinite_volumes,t)
         mesh=_transfinite_volume_mesh(m,t,caller)

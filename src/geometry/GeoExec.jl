@@ -118,7 +118,9 @@ using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _model_curve_param_bounds,
                _model_projection_physical_tags, _model_projection_legacy_tag,
                _model_projection_surface_curves, _model_mesh_part_node_entities,
-               _extrude_volume_pass
+               _extrude_volume_pass, _extrude_gate, _extrude_is_nonew,
+               _extrude_is_quadtri,
+               _extrude_nonew_scope
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
@@ -224,6 +226,12 @@ end
 # boundary. Transform and query statements may end at their final `}` (the Gmsh
 # grammar needs no `;` there) or at a `;`.
 function _geo_exec_statements(path::AbstractString)
+    open(path,"r") do stream
+        _geo_exec_statements(stream)
+    end
+end
+
+function _geo_exec_statements(stream::Base.IO)
     statements=String[]
     buf=IOBuffer()
     depth=0
@@ -234,7 +242,7 @@ function _geo_exec_statements(path::AbstractString)
     # pipe suffix — its emit is deferred until the next real token, even
     # across line boundaries.
     extrude_pending=false
-    for raw in eachline(path)
+    for raw in eachline(stream)
         i=firstindex(raw); last=lastindex(raw)
         while i<=last
             if !block_comment && quote_char=='\0' && !buf_has_content
@@ -7073,6 +7081,22 @@ end
 # is missing parameters (upstream's `old < 1` arm).
 function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     caller="execute_geo: Mesh"
+    original=m
+    # QuadTri certificates can reject after source grading. Stage the complete
+    # operation, including 1-D grading and homology, so a failed request does
+    # not publish model discretizations or mesh parts.
+    staged=false
+    if dim>=2
+        for tag in keys(m.volumes)
+            params=_extrude_gate(m,3,tag)
+            if _extrude_is_nonew(params) ||
+                    (dim==3 && _extrude_is_quadtri(params))
+                staged=true
+                break
+            end
+        end
+    end
+    staged && (m=deepcopy(m))
     _geo_sync_meshing_options!(m,context)
     parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[]
     if dim>=1
@@ -7087,6 +7111,11 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
             _model_mesh_dim01_grade!(m,options,caller)
         end
     end
+    # NoNew finalizes its region and boundary together. Keep this completed
+    # plan within the current Mesh operation, including Mesh 2 queries of its
+    # cap/laterals, instead of retaining a geometry-sensitive session cache.
+    extrude_scope=dim>=2 ?
+        _extrude_nonew_scope(m,caller;_working_model=staged) : nothing
     if dim>=2
         # OCC-curved primitive faces (Cylinder/Sphere/Cone/Torus side walls)
         # cannot standalone-mesh; when the face bounds a volume its facets
@@ -7107,7 +7136,8 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
                     _surface_type(m,tag) in (:cylinder,:sphere,:cone,:torus)
                 continue
             end
-            push!(parts,(2,tag,mesh_model_surface(m,tag)))
+            push!(parts,(2,tag,mesh_model_surface(
+                m,tag;_extrude_scope=extrude_scope)))
         end
     end
     if dim==3
@@ -7115,24 +7145,29 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
         # the unstructured pass, then `SubdivideExtrudedMesh` picks the
         # shared prism-face diagonals globally and remeshes the affected
         # lateral surfaces against that edge set.
-        pass=_extrude_volume_pass(m,caller)
+        pass=_extrude_volume_pass(m,caller;scope=extrude_scope)
         for tag in sort!(collect(keys(m.volumes)))
             if pass!==nothing && haskey(pass.parts,tag)
                 push!(parts,(3,tag,pass.parts[tag]))
             else
-                push!(parts,(3,tag,mesh_model_volume(m,tag)))
+                push!(parts,(3,tag,mesh_model_volume(
+                    m,tag;_extrude_scope=extrude_scope)))
             end
         end
         if pass!==nothing && !isempty(pass.remesh)
             for (i,(pdim,ptag,_)) in enumerate(parts)
                 pdim==2 && ptag in pass.remesh || continue
                 parts[i]=(2,ptag,mesh_model_surface(
-                    m,ptag;_extrude_edges=pass.edges))
+                    m,ptag;_extrude_edges=pass.edges,_extrude_scope=extrude_scope))
             end
         end
     end
     if dim>=2
-        append!(parts,_model_point_mesh_parts(m,caller))
+        point_parts=_model_point_mesh_parts(m,caller)
+        # NoNew retains CAD control points as well as the completed sweep.
+        # Give those point parts a stable order within this scoped product.
+        extrude_scope!==nothing && sort!(point_parts;by=part->part[2])
+        append!(parts,point_parts)
         append!(parts,_model_curve_mesh_parts(m,caller))
     end
     isempty(parts) && throw(ArgumentError(
@@ -7143,8 +7178,13 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     # (`model_to_mixed`) can recover each entity's own mesh from the merged
     # product — upstream serializes vertex/edge/face/region cells to their
     # owning entity, and the part mesh is that view.
-    context.mesh_parts=parts
     _geo_run_homology!(m,merged,parts,caller;node_owner=owner,part_node_entities=node_entities)
+    if staged
+        for name in fieldnames(GeoModel)
+            setfield!(original,name,getfield(m,name))
+        end
+    end
+    context.mesh_parts=parts
     return merged,owner
 end
 

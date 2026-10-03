@@ -3,6 +3,8 @@
 import ..Model
 import ..Elements
 
+include("APIMixedP2Certification.jl")
+
 function _canonical_mixed_copy(mesh::MixedMesh)
     order=Int[]
     groups=Dict{Int,Vector{Int}}()
@@ -116,9 +118,9 @@ function _mixed_classification(cache,entity,entities,node_entities,boundaries,ow
 end
 
 function _classify_cached_mesh(m::GeoModel,mesh::MixedMesh,dim::Int,tag::Int,
-                               cache::MixedMesh)
-    projected=dim==2 ? model_to_mixed(m,mesh,tag) :
-                      model_to_mixed(m,mesh,dim,tag)
+                               cache::MixedMesh;_extrude_scope=nothing)
+    projected=dim==2 ? model_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope) :
+                      model_to_mixed(m,mesh,dim,tag;_extrude_scope=_extrude_scope)
     data=projected.entity_data
     data===nothing && throw(ErrorException(
         "API.mesh.generate: mixed entity projection has no classification"))
@@ -446,6 +448,7 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
         result=_mixed_rebuild_metadata(mesh,blocks;coords,node_entities,
             node_parametric=parameters,external_node_tags=external)
     end
+    _api_p2_constructed_mesh_certify(result,caller)
     return result,_mixed_rebind_class(class,result;
         node_entities=node_entities,owners=owners)
 end

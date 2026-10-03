@@ -392,11 +392,9 @@ function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh,MixedMesh},
     return mesh
 end
 
-# Re-elevate a mutated cache to order 2 — used by every mesh mutation that
-# preserves Gmsh's "order survives mutation" semantics. Midnode tags are
-# re-densified along the new skeleton's edges, consistent with this session's
-# positional node-tag model.
-function _rebind_high_order!(cache::Mesh,class,caller::AbstractString)
+# Construct a new straight order-2 map after a geometry-changing operation.
+function _prepare_high_order_overlay(cache::Mesh,class,caller::AbstractString;
+                                     certify::Bool=true)
     dimension=ntets(cache)>0 ? 3 : ntris(cache)>0 ? 2 : 0
     dimension==0 && return nothing
     p2=try
@@ -409,9 +407,134 @@ function _rebind_high_order!(cache::Mesh,class,caller::AbstractString)
     end
     entities=class===nothing ? Tuple{Int,Int32}[(dimension,Int32(0))] :
         class.entities
-    _set_high_order_overlay(p2,cache,_p2_mid_owners(
-        p2,cache,class,dimension,Int.(last.(entities))))
+    certify && _api_p2_overlay_certify(p2,caller)
+    return (p2,_p2_mid_owners(p2,cache,class,dimension,Int.(last.(entities))))
+end
+
+# Rebind retained actual quadratic geometry by primary-node identity. Neither
+# endpoint coordinates nor a reconstructed straight midpoint identifies an
+# edge: coincident independent entities can carry different curved maps.
+function _prepare_preserved_high_order_overlay(cache::Mesh,class,source::Mesh,
+        overlay,caller::AbstractString;primary_map=nothing,
+        mid_coordinates=overlay.coords,certify::Bool=false)
+    dimension=ntets(cache)>0 ? 3 : ntris(cache)>0 ? 2 : 0
+    dimension==0 && return nothing
+    old_count=nnodes(source)
+    count=nnodes(cache)
+    if primary_map===nothing
+        old_count==count || throw(ArgumentError(
+            "$caller: quadratic rebinding requires an explicit primary-node map"))
+    else
+        length(primary_map)==old_count || throw(ArgumentError(
+            "$caller: quadratic primary-node map length does not match the source"))
+        all(index->0<=index<=count,primary_map) || throw(ArgumentError(
+            "$caller: quadratic primary-node map contains an invalid target"))
+    end
+    size(mid_coordinates)==size(overlay.coords) || throw(ArgumentError(
+        "$caller: quadratic midpoint coordinates do not match the source"))
+    skeleton=dimension==2 ? cache.tris : cache.tets
+    slots=dimension==2 ? HighOrder._P2TRI_EDGE_SLOTS : HighOrder._P2_EDGE_SLOTS
+    width=dimension==2 ? 6 : 10
+    cells=Matrix{Int32}(undef,width,size(skeleton,2))
+    edge_nodes=Dict{Tuple{Int32,Int32},Int32}()
+    edge_bound=min(Base.checked_mul(length(slots),size(skeleton,2)),
+                   Int(typemax(Int32))-count)
+    sizehint!(edge_nodes,edge_bound)
+    for column in axes(skeleton,2)
+        for row in axes(skeleton,1)
+            cells[row,column]=skeleton[row,column]
+        end
+        for (slot,i,j) in slots
+            edge=minmax(skeleton[i,column],skeleton[j,column])
+            mid=get(edge_nodes,edge,Int32(0))
+            if mid==0
+                count+length(edge_nodes)<typemax(Int32) || throw(ArgumentError(
+                    "$caller: quadratic node count exceeds the Int32 indexing limit"))
+                mid=Int32(count+length(edge_nodes)+1)
+                edge_nodes[edge]=mid
+            end
+            cells[slot,column]=mid
+        end
+    end
+    coordinates=Matrix{Float64}(undef,3,count+length(edge_nodes))
+    copyto!(@view(coordinates[:,1:count]),cache.coords)
+    assigned=falses(length(edge_nodes))
+    old_cells=_p2_cells(overlay)
+    for column in axes(old_cells,2),(slot,i,j) in _p2_edge_slots(overlay)
+        a,b=old_cells[i,column],old_cells[j,column]
+        1<=a<=old_count && 1<=b<=old_count || throw(ArgumentError(
+            "$caller: quadratic source primary node is outside its cache"))
+        if primary_map!==nothing
+            a,b=Int32(primary_map[a]),Int32(primary_map[b])
+        end
+        (a==0 || b==0) && continue
+        edge=minmax(a,b)
+        target=get(edge_nodes,edge,Int32(0))
+        target==0 && continue
+        old_mid=old_cells[slot,column]
+        point=(mid_coordinates[1,old_mid],mid_coordinates[2,old_mid],
+               mid_coordinates[3,old_mid])
+        if assigned[target-count]
+            existing=(coordinates[1,target],coordinates[2,target],coordinates[3,target])
+            point==existing || throw(ArgumentError(
+                "$caller: merging primary edge $edge conflicts with existing " *
+                "quadratic midpoint geometry"))
+        else
+            coordinates[1,target]=point[1]
+            coordinates[2,target]=point[2]
+            coordinates[3,target]=point[3]
+            assigned[target-count]=true
+        end
+    end
+    all(assigned) || throw(ArgumentError(
+        "$caller: quadratic rebinding cannot construct a new edge without " *
+        "retained midpoint geometry"))
+    p2=dimension==2 ? P2TriMesh(coordinates,cells;tri_tag=cache.tri_tag,
+        _check_geometry=false) : P2Mesh(coordinates,cells;tet_tag=cache.tet_tag,
+        require_positive_tets=false,_check_geometry=false)
+    certify && _api_p2_overlay_certify(p2,caller)
+    entities=class===nothing ? Tuple{Int,Int32}[(dimension,Int32(0))] : class.entities
+    return (p2,_p2_mid_owners(p2,cache,class,dimension,Int.(last.(entities))))
+end
+
+function _high_order_overlay_is_straight(overlay)
+    cells=_p2_cells(overlay)
+    for column in axes(cells,2),(slot,i,j) in _p2_edge_slots(overlay)
+        a,b,mid=cells[i,column],cells[j,column],cells[slot,column]
+        for axis in 1:3
+            expected=HighOrder._midpoint_coordinate(
+                overlay.coords[axis,a],overlay.coords[axis,b])
+            overlay.coords[axis,mid]==expected || return false
+        end
+    end
+    return true
+end
+
+function _rebind_high_order!(cache::Mesh,class,caller::AbstractString)
+    prepared=_prepare_high_order_overlay(cache,class,caller)
+    prepared===nothing || _set_high_order_overlay(prepared[1],cache,prepared[2])
     return nothing
+end
+
+# Prepare rejecting geometry before replacing the cache or model. Pure cell/
+# label permutations and exact selections retain the actual quadratic map,
+# including user-edited midpoints, without requiring a new Jacobian proof.
+function _replace_mesh_cache_with_overlay_locked!(cache,class,caller;
+        overlay=nothing,certify::Bool=true,preserve_visibility::Bool=false,
+        staged_model=nothing,primary_map=nothing,prepared_overlay=nothing)
+    prepared=prepared_overlay!==nothing ? prepared_overlay :
+        (overlay===nothing || cache===nothing) ? nothing : certify ?
+        _prepare_high_order_overlay(cache,class,caller;certify) :
+        _prepare_preserved_high_order_overlay(cache,class,LAST_MESH[],overlay,
+            caller;primary_map)
+    if staged_model!==nothing
+        index=_current_slot_index_locked()
+        index!=0 && (MODEL_SLOTS[index].model=staged_model)
+        CURRENT[]=staged_model
+    end
+    _replace_mesh_cache_locked!(cache,class;preserve_visibility)
+    prepared===nothing || _set_high_order_overlay(prepared[1],cache,prepared[2])
+    return cache
 end
 
 function _cached_classification_locked(mesh::Union{Mesh,MixedMesh})
@@ -1343,9 +1466,10 @@ end
 # never fails generation: the record simply stays absent and entity-filtered
 # queries keep their explicit blocker.
 function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
-                               cache::Mesh)
+                               cache::Mesh;_extrude_scope=nothing)
     classified=try
-        dim==2 ? model_to_mixed(m,mesh,tag) : model_to_mixed(m,mesh,dim,tag)
+        dim==2 ? model_to_mixed(m,mesh,tag;_extrude_scope=_extrude_scope) :
+                 model_to_mixed(m,mesh,dim,tag;_extrude_scope=_extrude_scope)
     catch err
         err isa InterruptException && rethrow()
         return nothing
@@ -1701,6 +1825,9 @@ function _apply_mesh_order(m::GeoModel,cached::Mesh,class,caller)
         _set_high_order_overlay(nothing,nothing)
         return nothing
     end
+    # A repeated order request retains the existing actual nodal map, including
+    # finite user edits; it is not a request to interpolate from the corners.
+    _high_order_overlay(cached)===nothing || return nothing
     dimension=ntets(cached)>0 ? 3 : 2
     p2=try
         dimension==2 ? p2_trimesh(cached) :
@@ -1713,6 +1840,7 @@ function _apply_mesh_order(m::GeoModel,cached::Mesh,class,caller)
     entities=class===nothing ? Tuple{Int,Int32}[] : class.entities
     isempty(entities) &&
         (entities=Tuple{Int,Int32}[(dimension,Int32(0))])
+    _api_p2_overlay_certify(p2,caller)
     _set_high_order_overlay(p2,cached,_p2_mid_owners(
         p2,cached,class,dimension,Int.(last.(entities))))
     return nothing
@@ -1798,6 +1926,8 @@ function _generate(dim::Integer)
             OPTIONS["Mesh.MeshSizeExtendFromBoundary"])
         m.meshing.order=order
         size_field=_session_size_field_locked(m)
+        extrude_scope=Model._extrude_nonew_scope(
+            m,caller;size_field=size_field,_working_model=true)
         parts=Tuple{Int,Union{Mesh,MixedMesh}}[]
         if dimension==2
             isempty(m.surfaces) && throw(ArgumentError("$caller: no surfaces"))
@@ -1805,7 +1935,8 @@ function _generate(dim::Integer)
             for tags in units
                 if length(tags)==1
                     push!(parts,(tags[1],mesh_model_surface(
-                        m,tags[1];size_field=size_field)))
+                        m,tags[1];size_field=size_field,
+                        _extrude_scope=extrude_scope)))
                 else
                     for (tag,mesh) in _compound_surface_meshes(
                             m,tags,caller;size_field=size_field)
@@ -1817,7 +1948,8 @@ function _generate(dim::Integer)
             isempty(m.volumes) && throw(ArgumentError("$caller: no volumes"))
             for tag in sort!(collect(keys(m.volumes)))
                 push!(parts,(tag,mesh_model_volume(
-                    m,tag;size_field=size_field)))
+                    m,tag;size_field=size_field,_extrude_scope=extrude_scope,
+                    _extrude_working_model=true)))
             end
         else
             throw(ArgumentError("$caller: dim must be 2 or 3"))
@@ -1826,7 +1958,8 @@ function _generate(dim::Integer)
                          m,_classification_skeleton(
                              mesh,dimension==3 &&
                                  get(m.meshing.reverse,(3,tag),false)),
-                         dimension,tag,mesh)) for (tag,mesh) in parts]
+                         dimension,tag,mesh;_extrude_scope=extrude_scope))
+                    for (tag,mesh) in parts]
         node_owners=[class===nothing ? nothing : class.node_entities
                      for (_,_,class) in classified]
         generated,remaps,seg_keeps=_merge_entity_meshes(
@@ -1846,6 +1979,7 @@ function _generate(dim::Integer)
                     cache,class=_mixed_quadratic_cache(linear,linear_class,caller)
                 else
                     cache,class=_mixed_prune_unused(cache,class)
+                    _api_p2_constructed_mesh_certify(cache,caller)
                 end
             elseif any(block->msh_spec(block.msh).family!==:pnt &&
                     msh_spec(block.msh).order!=1,cache.blocks)
@@ -1854,6 +1988,7 @@ function _generate(dim::Integer)
         elseif order==2
             overlay=dimension==2 ? p2_trimesh(cache) :
                 p2_tetmesh(cache;require_positive_tets=false)
+            _api_p2_overlay_certify(overlay,caller)
             entities=class===nothing ? [0] : Int.(last.(class.entities))
             mids=_p2_mid_owners(overlay,cache,class,dimension,entities)
         end
@@ -3954,6 +4089,12 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
             "API.mesh.refine: no mesh; call API.mesh.generate first"))
         cached isa MixedMesh && return _mixed_refine_locked!(m,cached,max_nodes,max_cells)
         overlay=_high_order_overlay(cached)
+        (overlay===nothing || _high_order_overlay_is_straight(overlay)) ||
+            throw(ArgumentError(
+                "API.mesh.refine: curved quadratic simplex refinement is not " *
+                "implemented; existing actual midpoint geometry is retained"))
+        staged_model=overlay===nothing ? nothing : deepcopy(m)
+        projection_model=staged_model===nothing ? m : staged_model
         # `reverse` may legitimately invert tets; refinement preserves
         # orientation, so an inverted input yields an inverted (but otherwise
         # structurally valid) output — bypass only the orientation check.
@@ -3966,14 +4107,13 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
             nothing
         elseif length(class.entities)<=1
             _classify_cached_mesh(
-                m,_classification_skeleton(refined,true),
+                projection_model,_classification_skeleton(refined,true),
                 class.entity[1],Int(class.entity[2]),cache)
         else
             _inherit_refined_classification(class,refined,cache)
         end
-        _replace_mesh_cache_locked!(cache,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(cache,new_class,"API.mesh.refine")
+        _replace_mesh_cache_with_overlay_locked!(cache,new_class,"API.mesh.refine";
+            overlay,staged_model)
         refined
     end
 end
@@ -3986,7 +4126,7 @@ end
 # dimensional generating entity — are no-ops, matching Gmsh 4.15.2's retention
 # of boundary meshes and unmeshable vertices.
 function _clear_classified_mesh(mesh::Mesh,class::_MeshClassification,
-                                cleared::Set{Tuple{Int,Int32}})
+                                cleared::Set{Tuple{Int,Int32}};node_map=nothing)
     cell_blocks=((1,mesh.segs,class.seg_entities),
                  (2,mesh.tris,class.tri_entities),
                  (3,mesh.tets,class.tet_entities))
@@ -4032,11 +4172,12 @@ function _clear_classified_mesh(mesh::Mesh,class::_MeshClassification,
             keep[node]=true
         end
     end
-    old_to_new=Vector{Int32}(undef,count)
+    old_to_new=zeros(Int32,count)
     index=0
     for node in 1:count
         keep[node] && (index+=1;old_to_new[node]=index)
     end
+    node_map===nothing || (node_map[]=old_to_new)
     index==0 && return nothing,nothing
     coordinates=mesh.coords[:,keep]
     node_entities=Vector{Tuple{Int,Int32}}(undef,index)
@@ -4111,20 +4252,24 @@ function _clear_mesh(dim_tags=())
         end
         cached===nothing && return nothing
         overlay=_high_order_overlay(cached)
-        replacement,record=_clear_classified_mesh(cached,class,cleared)
+        node_map=Ref{Union{Nothing,Vector{Int32}}}(nothing)
+        replacement,record=cached isa Mesh ?
+            _clear_classified_mesh(cached,class,cleared;node_map) :
+            _clear_classified_mesh(cached,class,cleared)
         if replacement!==cached
             if replacement isa MixedMesh && record.public_tags!==nothing
                 replacement,record=_mixed_refresh_periodic_links(staged,replacement,record,caller)
             end
         end
-        index=_current_slot_index_locked()
-        index!=0 && (MODEL_SLOTS[index].model=staged)
-        CURRENT[]=staged
         if replacement!==cached
-            _replace_mesh_cache_locked!(replacement,record;
-                                       preserve_visibility=record.public_tags!==nothing)
-            overlay!==nothing &&
-                _rebind_high_order!(replacement,record,caller)
+            _replace_mesh_cache_with_overlay_locked!(replacement,record,caller;
+                overlay,certify=false,preserve_visibility=record!==nothing &&
+                    record.public_tags!==nothing,
+                staged_model=staged,primary_map=node_map[])
+        else
+            index=_current_slot_index_locked()
+            index!=0 && (MODEL_SLOTS[index].model=staged)
+            CURRENT[]=staged
         end
         nothing
     end
@@ -4136,6 +4281,9 @@ function _affine_transform_mesh(affine,dim_tags=())
         model=_model_locked()
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
         cached=LAST_MESH[]
+        staged_model=cached isa Mesh && _high_order_overlay(cached)!==nothing ?
+            deepcopy(model) : nothing
+        staged_model===nothing || (model=staged_model)
         cached===nothing && isempty(model.discrete) &&
             isempty(model.meshing.attached) && throw(ArgumentError(
                 "$caller: no mesh; call API.mesh.generate first"))
@@ -4191,8 +4339,24 @@ function _affine_transform_mesh(affine,dim_tags=())
             _mixed_rebind_class(class,cache) : _MeshClassification(
             cache,class.entity,class.entities,class.node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
-        _replace_mesh_cache_locked!(cache,new_class;preserve_visibility=true)
-        overlay!==nothing && _rebind_high_order!(cache,new_class,caller)
+        prepared=nothing
+        if overlay!==nothing
+            mid_coordinates=copy(overlay.coords)
+            count=nnodes(cached)
+            moved=matrix*(@view overlay.coords[:,count+1:end]) .+
+                reshape(collect(translation),3,1)
+            mid_owners=LAST_MESH_HIGH_ORDER_MIDS[]
+            for index in axes(moved,2)
+                (isempty(pairs) || mid_owners[index] in selected) || continue
+                for axis in 1:3
+                    mid_coordinates[axis,count+index]=moved[axis,index]
+                end
+            end
+            prepared=_prepare_preserved_high_order_overlay(cache,new_class,cached,
+                overlay,caller;mid_coordinates)
+        end
+        _replace_mesh_cache_with_overlay_locked!(cache,new_class,caller;
+            prepared_overlay=prepared,preserve_visibility=true,staged_model)
         transformed
     end
 end
@@ -4216,9 +4380,8 @@ function _remove_element_columns(mesh::Mesh,class::_MeshClassification,
         dimension==1 ? class.seg_entities[keep] : class.seg_entities,
         dimension==2 ? class.tri_entities[keep] : class.tri_entities,
         dimension==3 ? class.tet_entities[keep] : class.tet_entities)
-    _replace_mesh_cache_locked!(replacement,record)
-    overlay!==nothing &&
-        _rebind_high_order!(replacement,record,"API.mesh.remove_elements")
+    _replace_mesh_cache_with_overlay_locked!(replacement,record,"API.mesh.remove_elements";
+        overlay,certify=false)
     return nothing
 end
 
@@ -4448,9 +4611,8 @@ function _reverse_mesh(dim_tags=())
         new_class=class===nothing ? nothing : _MeshClassification(
             replacement,class.entity,class.entities,class.node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
-        _replace_mesh_cache_locked!(replacement,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(replacement,new_class,caller)
+        _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
+            overlay,certify=false)
         return nothing
     end
 end
@@ -4518,9 +4680,8 @@ function _reverse_elements(element_tags)
         new_class=class===nothing ? nothing : _MeshClassification(
             replacement,class.entity,class.entities,class.node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
-        _replace_mesh_cache_locked!(replacement,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(replacement,new_class,caller)
+        _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
+            overlay,certify=false)
         return nothing
     end
 end
@@ -4634,17 +4795,6 @@ function _remove_duplicate_nodes(dim_tags=())
             for node in 1:count
                 keep[node] && (index+=1;old_to_new[node]=index)
             end
-            # Record connectivity referencing dense cache tags follows the
-            # same survivor/compaction remap.
-            for (_,_,record) in records
-                for connectivity in record.element_nodes
-                    for i in eachindex(connectivity)
-                        tag=connectivity[i]
-                        1<=tag<=count || continue
-                        connectivity[i]=old_to_new[Int(replacement[tag])]
-                    end
-                end
-            end
             # Surviving cache nodes keep their new dense tags; coincident
             # record nodes merge onto them (dense positions cannot hold
             # caller-assigned tags, so the cache member must win).
@@ -4656,7 +4806,6 @@ function _remove_duplicate_nodes(dim_tags=())
                                        cached.coords[3,node]))
                 cache_keepers[key]=(old_to_new[node],true)
             end
-            _record_dedup_nodes!(records,record_pairs,cache_keepers)
             coordinates=cached.coords[:,keep]
             blocks=Vector{Matrix{Int32}}(undef,3)
             for (block,cells) in enumerate((
@@ -4678,9 +4827,24 @@ function _remove_duplicate_nodes(dim_tags=())
             new_class=class===nothing ? nothing : _MeshClassification(
                 new_mesh,class.entity,class.entities,node_entities,class.boundaries,
                 class.seg_entities,class.tri_entities,class.tet_entities)
-            _replace_mesh_cache_locked!(new_mesh,new_class)
-            overlay!==nothing &&
-                _rebind_high_order!(new_mesh,new_class,caller)
+            primary_map=Int32[old_to_new[replacement[node]] for node in 1:count]
+            # Coalescing primary edges can conflict with edited midpoint maps.
+            # Prove the transfer before changing any live record or cache.
+            prepared=overlay===nothing ? nothing :
+                _prepare_preserved_high_order_overlay(new_mesh,new_class,cached,
+                    overlay,caller;primary_map)
+            for (_,_,record) in records
+                for connectivity in record.element_nodes
+                    for i in eachindex(connectivity)
+                        tag=connectivity[i]
+                        1<=tag<=count || continue
+                        connectivity[i]=primary_map[tag]
+                    end
+                end
+            end
+            _record_dedup_nodes!(records,record_pairs,cache_keepers)
+            _replace_mesh_cache_with_overlay_locked!(new_mesh,new_class,caller;
+                prepared_overlay=prepared)
             return nothing
         end
         # No cache duplicates: still merge records against unchanged cache
@@ -4788,9 +4952,8 @@ function _remove_duplicate_elements(dim_tags=())
             new_class=_MeshClassification(replacement,class.entity,class.entities,
                 class.node_entities,class.boundaries,new_owners[1],
                 new_owners[2],new_owners[3])
-            _replace_mesh_cache_locked!(replacement,new_class)
-            overlay!==nothing &&
-                _rebind_high_order!(replacement,new_class,caller)
+            _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
+                overlay,certify=false)
         end
         # Record elements dedup per entity; an attached record on a native
         # entity is additionally seeded with that entity's surviving cache
@@ -4965,9 +5128,14 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
         new_class=class===nothing ? nothing : _MeshClassification(
             replacement,class.entity,class.entities,class.node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
-        _replace_mesh_cache_locked!(replacement,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(replacement,new_class,caller)
+        prepared=nothing
+        if overlay!==nothing
+            edited=deepcopy(overlay)
+            edited.coords[:,tag]=values
+            prepared=(edited,copy(LAST_MESH_HIGH_ORDER_MIDS[]))
+        end
+        _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
+            prepared_overlay=prepared)
         return nothing
     end
 end
@@ -5206,13 +5374,15 @@ function _renumber_nodes(old_tags=(),new_tags=())
         new_class=class===nothing ? nothing : _MeshClassification(
             new_mesh,class.entity,class.entities,node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
+        prepared=overlay===nothing ? nothing :
+            _prepare_preserved_high_order_overlay(new_mesh,new_class,cached,
+                overlay,caller;primary_map=inverse)
         for (old,new) in enumerate(mapping)
             renames[Int32(old)]=new
         end
         _record_renumber!(records,renames,"node")
-        _replace_mesh_cache_locked!(new_mesh,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(new_mesh,new_class,caller)
+        _replace_mesh_cache_with_overlay_locked!(new_mesh,new_class,caller;
+            prepared_overlay=prepared)
         return nothing
     end
 end
@@ -5335,9 +5505,8 @@ function _renumber_elements(old_tags=(),new_tags=())
             replacement,class.entity,class.entities,class.node_entities,class.boundaries,
             owners_out[1],owners_out[2],owners_out[3])
         _record_renumber!(records,renames,"element")
-        _replace_mesh_cache_locked!(replacement,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(replacement,new_class,caller)
+        _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
+            overlay,certify=false)
         return nothing
     end
 end
@@ -5445,9 +5614,8 @@ function _reorder_elements(element_type,tag,ordering)
         new_class=_MeshClassification(replacement,class.entity,class.entities,
             class.node_entities,class.boundaries,class.seg_entities,
             class.tri_entities,class.tet_entities)
-        _replace_mesh_cache_locked!(replacement,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(replacement,new_class,caller)
+        _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
+            overlay,certify=false)
         return nothing
     end
 end
@@ -5593,6 +5761,12 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
                 "$(_MESH_ENTITY_LABELS[edim+1])[$etag]"))
         end
         class=_cached_classification_locked(cached)
+        iterations==0 && return nothing
+        overlay=_high_order_overlay(cached)
+        (overlay===nothing || _high_order_overlay_is_straight(overlay)) ||
+            throw(ArgumentError(
+                "$caller: curved quadratic simplex optimization is not " *
+                "implemented; existing actual midpoint geometry is retained"))
         movable=_optimize_movable_mask(cached,class,pairs)
         smoothed=if method in ("Laplace2D","Relocate2D")
             _laplacian_smooth_tri_cache(cached,iterations,movable)
@@ -5608,9 +5782,7 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
         new_class=class===nothing ? nothing : _MeshClassification(
             smoothed,class.entity,class.entities,class.node_entities,class.boundaries,
             class.seg_entities,class.tri_entities,class.tet_entities)
-        _replace_mesh_cache_locked!(smoothed,new_class)
-        overlay!==nothing &&
-            _rebind_high_order!(smoothed,new_class,caller)
+        _replace_mesh_cache_with_overlay_locked!(smoothed,new_class,caller;overlay)
         return nothing
     end
 end

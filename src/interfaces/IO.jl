@@ -1013,10 +1013,16 @@ function _stl_is_binary(path)
 end
 
 function _read_stl_ascii(path,facet_limit::Int=Int(typemax(Int32)))
+    open(path,"r") do stream
+        _read_stl_ascii(stream,facet_limit)
+    end
+end
+
+function _read_stl_ascii(stream::Base.IO,facet_limit::Int=Int(typemax(Int32)))
     tris = NTuple{9,Float64}[]
     verts = NTuple{3,Float64}[]
     infacet=false;inloop=false
-    for line in eachline(path)
+    for line in eachline(stream)
         s = split(strip(line))
         isempty(s) && continue
         tok=lowercase(replace(s[1],'\ufeff'=>""))
@@ -8511,6 +8517,12 @@ function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
 end
 
 function _scan_geo_statements(consume,path::AbstractString)
+    open(path,"r") do stream
+        _scan_geo_statements(consume,stream)
+    end
+end
+
+function _scan_geo_statements(consume,stream::Base.IO)
     buffer=IOBuffer();quote_char='\0';block_comment=false
     buf_has_content=false
     # `;` inside `{...}` groups (Boolean operand lists, `Delete` suffixes) is
@@ -8521,7 +8533,7 @@ function _scan_geo_statements(consume,path::AbstractString)
     # pipe suffix — its emit is deferred until the next real token, even
     # across line boundaries.
     extrude_pending=false
-    for raw in eachline(path)
+    for raw in eachline(stream)
         i=firstindex(raw);lastindex_raw=lastindex(raw)
         while i<=lastindex_raw
             # Control constructs carry no `;` — emit one as its own statement

@@ -65,7 +65,8 @@ struct P2Mesh
     function P2Mesh(coords, tet10;
                     tet_tag=zeros(Int32,
                                   tet10 isa AbstractMatrix ? size(tet10, 2) : 0),
-                    require_positive_tets::Bool=true)
+                    require_positive_tets::Bool=true,
+                    _check_geometry::Bool=true)
         coords isa AbstractMatrix || throw(ArgumentError(
             "P2Mesh: coords must be a matrix"))
         tet10 isa AbstractMatrix || throw(ArgumentError(
@@ -113,14 +114,16 @@ struct P2Mesh
                                 sprint(showerror, err)))
         end
         _check_p2_arrays(C, T, tags, "P2Mesh";
-                         require_positive_tets=require_positive_tets)
+                         require_positive_tets=require_positive_tets,
+                         _check_geometry)
         new(C, T, tags)
     end
 end
 
 function _check_p2_arrays(coords::Matrix{Float64}, tet10::Matrix{Int32},
                           tet_tag::Vector{Int32}, caller::AbstractString;
-                          require_positive_tets::Bool=true)
+                          require_positive_tets::Bool=true,
+                          _check_geometry::Bool=true)
     size(coords, 1) == 3 || throw(ArgumentError(
         "$caller: coords storage must have three rows"))
     size(tet10, 1) == 10 || throw(ArgumentError(
@@ -153,14 +156,19 @@ function _check_p2_arrays(coords::Matrix{Float64}, tet10::Matrix{Int32},
     end
     ne == 0 && return nothing
 
-    linear = Mesh(coords; tets=Matrix(@view tet10[1:4, :]))
-    diagnostic = validate(linear; require_positive_tets=require_positive_tets)
-    diagnostic.ok || throw(ArgumentError(
-        "$caller: linear corner complex is invalid — " *
-        join(diagnostic.messages, "; ")))
+    if _check_geometry
+        linear = Mesh(coords; tets=Matrix(@view tet10[1:4, :]))
+        diagnostic = validate(linear; require_positive_tets=require_positive_tets)
+        diagnostic.ok || throw(ArgumentError(
+            "$caller: linear corner complex is invalid — " *
+            join(diagnostic.messages, "; ")))
+    end
     edge_mid = Dict{Tuple{Int32,Int32},Int32}()
     mid_edge = Dict{Int32,Tuple{Int32,Int32}}()
     corners = Set{Int32}(@view tet10[1:4, :])
+    edge_bound=min(Base.checked_mul(6,ne),nn-length(corners))
+    sizehint!(edge_mid,edge_bound)
+    sizehint!(mid_edge,edge_bound)
     @inbounds for t in axes(tet10, 2), (slot, i, j) in _P2_EDGE_SLOTS
         a = tet10[i, t]
         b = tet10[j, t]
@@ -829,7 +837,8 @@ struct P2TriMesh
     tri_tag::Vector{Int32}
     function P2TriMesh(coords, tri6;
                        tri_tag=zeros(Int32,
-                                     tri6 isa AbstractMatrix ? size(tri6, 2) : 0))
+                                     tri6 isa AbstractMatrix ? size(tri6, 2) : 0),
+                       _check_geometry::Bool=true)
         coords isa AbstractMatrix || throw(ArgumentError(
             "P2TriMesh: coords must be a matrix"))
         tri6 isa AbstractMatrix || throw(ArgumentError(
@@ -877,13 +886,14 @@ struct P2TriMesh
             throw(ArgumentError("P2TriMesh: tags must fit Int32: " *
                                 sprint(showerror, err)))
         end
-        _check_p2tri_arrays(C, T, tags, "P2TriMesh")
+        _check_p2tri_arrays(C, T, tags, "P2TriMesh";_check_geometry)
         new(C, T, tags)
     end
 end
 
 function _check_p2tri_arrays(coords::Matrix{Float64}, tri6::Matrix{Int32},
-                             tri_tag::Vector{Int32}, caller::AbstractString)
+                             tri_tag::Vector{Int32}, caller::AbstractString;
+                             _check_geometry::Bool=true)
     nn = size(coords, 2)
     ne = size(tri6, 2)
     nn <= typemax(Int32) || throw(ArgumentError(
@@ -912,14 +922,19 @@ function _check_p2tri_arrays(coords::Matrix{Float64}, tri6::Matrix{Int32},
     end
     ne == 0 && return nothing
 
-    linear = Mesh(coords; tris=Matrix(@view tri6[1:3, :]))
-    diagnostic = validate(linear)
-    diagnostic.ok || throw(ArgumentError(
-        "$caller: linear corner complex is invalid — " *
-        join(diagnostic.messages, "; ")))
+    if _check_geometry
+        linear = Mesh(coords; tris=Matrix(@view tri6[1:3, :]))
+        diagnostic = validate(linear)
+        diagnostic.ok || throw(ArgumentError(
+            "$caller: linear corner complex is invalid — " *
+            join(diagnostic.messages, "; ")))
+    end
     edge_mid = Dict{Tuple{Int32,Int32},Int32}()
     mid_edge = Dict{Int32,Tuple{Int32,Int32}}()
     corners = Set{Int32}(@view tri6[1:3, :])
+    edge_bound=min(Base.checked_mul(3,ne),nn-length(corners))
+    sizehint!(edge_mid,edge_bound)
+    sizehint!(mid_edge,edge_bound)
     @inbounds for t in axes(tri6, 2), (slot, i, j) in _P2TRI_EDGE_SLOTS
         a = tri6[i, t]
         b = tri6[j, t]
@@ -2267,5 +2282,7 @@ function p2_prism_min_jacobian(coords, pri18)
     end
     return mn
 end
+
+include("HighOrderPyramid.jl")
 
 end # module HighOrder
