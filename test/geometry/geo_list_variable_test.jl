@@ -62,7 +62,7 @@ end
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461"
+          "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102"
 
     # Diagnostics match Gmsh 4.15.2's recoverable `yymsg` text: the entity
     # statements still execute (e.g. `Point(missing[0])` creates `Point(0)`

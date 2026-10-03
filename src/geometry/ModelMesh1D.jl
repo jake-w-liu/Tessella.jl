@@ -1166,8 +1166,42 @@ end
 # coordinates). A periodic slave's curved part must emit `affine(master)`
 # nodes, not the slave's native evaluation: the two differ by ulps on arcs
 # and splines, and emitting both would leave unpaired near-duplicate nodes.
+#
+# Extruded curves are the exception: upstream places their mesh nodes at
+# `ep->Extrude` transform evaluations, not on the curve's own geometry —
+# a point-generatrix connector emits `extrudeMesh(GVertex)` (the source
+# vertex swept to each level's `u`) and a top-copy chapeau emits
+# `copyMesh(GEdge)` (each generatrix node swept to `u_top`). Evaluating the
+# recorded spec keeps the curve's nodes bitwise equal to the positions the
+# lateral surface and volume sweeps compute; a connector whose spline end
+# vertex sits off the eval path (a twist `{{T},{axis},{P},a}` connector)
+# keeps that vertex only as the curve's own endpoint, like upstream.
 function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
                                  caller::AbstractString)
+    src=get(m.meshing.extrude_sources,(1,Int(curve)),nothing)
+    if src!==nothing
+        params=get(m.meshing.extrude,(1,Int(curve)),nothing)
+        spec=get(m.meshing.extrude_specs,(1,Int(curve)),nothing)
+        if params!==nothing && !isempty(params.layers) && spec!==nothing
+            if src[1]==0 && haskey(m.points,src[2])
+                t0,t1=_model_curve_param_bounds(m,curve,caller)
+                level=t1==t0 ? 0.0 : (u-t0)/(t1-t0)
+                return _extrude_at(spec,m.points[src[2]],level,caller)
+            elseif src[1]==1 && (haskey(m.curves,abs(src[2])) ||
+                                 haskey(m.discrete,(1,abs(src[2]))))
+                gen=abs(src[2])
+                usrc=u
+                if src[2]<0
+                    _,t1=_model_curve_param_bounds(m,curve,caller)
+                    u_min=_model_curve_param_bounds(m,gen,caller)[1]
+                    usrc=t1+u_min-u
+                end
+                u_top=_extrude_level_us(params)[end]
+                return _extrude_at(spec,
+                    _periodic_curve_point(m,gen,usrc,caller),u_top,caller)
+            end
+        end
+    end
     return _periodic_curve_point(m,curve,u,caller)
 end
 

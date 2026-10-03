@@ -26,6 +26,85 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## What this push contains (increment just landed)
 
+**`.geo` `Extrude … Layers` structured sweep** — `Layers`-marked extrusions
+now mesh like `meshGRegionExtruded`/`MeshExtrudedSurface` instead of
+falling back to an unstructured volume fill. `ModelExtrude.jl` (new,
+`include`d from `Model.jl`) sweeps the source surface mesh through each
+layer-group level parameter (`us` from uniform counts, per-group counts,
+and explicit height fractions): triangle generatrices emit prisms under
+`Recombine`, recombined quadrilateral generatrices emit hexahedra, and
+non-recombined triangles subdivide each prism into three tetrahedra via a
+port of upstream's global `SubdivideExtrudedMesh` phase-1/2/3 shared-
+diagonal selection; affected lateral surfaces remesh against the shared
+edge set in a model-wide pass after all volume sweeps (upstream's
+`GenerateMesh` ordering). `extrude_specs` is a new per-entity transform
+record plumbed through `ModelMeshingAttributes`, identity migration,
+removal, and `_drop_entity_state!`; `extrude_sources` widened to surfaces
+and volumes (`(1,±c)` laterals, `(2,±s)` tops/volumes).
+
+Two rules carry the parity: every swept corner is a pure
+`_extrude_at(spec, p, u)` transform evaluation — upstream
+`pos.find(Extrude(u, pos))` semantics — so columns, lateral grids, and top
+copies weld bitwise with the curve/point parts at merge (twist connectors
+keep their off-path spline endpoints as curve endpoints only, exactly like
+Gmsh); and `_extrude_make_positive!` runs upstream `setAllVolumesPositive`
+via canonical tet-decomposition signed volumes over tets/hexes/prisms/
+pyramids (`_VOLUME_CELL_FACES[7]` added). `QuadTriAddVerts`/
+`QuadTriNoNewVerts` extrusions raise an explicit blocker naming the
+QuadToTri kernel rather than silently sweeping wrong output.
+
+Verified against the oracle: element-type counts and node counts identical
+on translation (tri/quad × `Recombine` on/off), rotation, twist,
+multi-layer nonuniform heights, and no-`Layers` fallback; recombined
+tri-source prisms bitwise (21/21); merged output conforming and
+`validate`-clean on every nondegenerate case (the flat in-plane rotation
+emits Gmsh's identical 160 zero-volume tets). Attainable bound recorded in
+STATUS.md: non-recombined tet splits can choose a different valid diagonal
+class (mesher-internal source-tri ordering), and recombined-quad hex
+connectivity waits on the surface recombiner. `geo_constraints_test`
+extrusion set: 308 assertions. The full `Pkg.test()` run surfaced only 20
+pre-existing stale CRC pins — every one verified bitwise-identical between
+`d53490f` and this tree, then repinned in place.
+
+Files: `src/geometry/ModelExtrude.jl` (new), `src/geometry/Model.jl`,
+`src/geometry/ModelTransforms.jl`, `src/geometry/ModelMesh1D.jl`,
+`src/geometry/ModelIdentity.jl`, `src/geometry/ModelRemoval.jl`,
+`src/geometry/ModelMeshingAttributes.jl`, `src/geometry/GeoExec.jl`,
+`src/core/Elements.jl`, `test/geometry/geo_constraints_test.jl`
+(+extrusion testset), repinned CRCs in `test/geometry/*` and
+`test/interfaces/*`, docs.
+
+### Not yet finished (carry-over for the next increments)
+
+- **`QuadTri*` extrusions** (`QuadTriAddVerts`, `QuadTriNoNewVerts`, plus
+  the `RecombLaterals` modifier) — explicit blocker; needs the QuadToTri
+  lateral-remeshing kernel (upstream `createQuaTri`/`MeshExtrudedSurface`
+  quadriangulation path). Gmsh's own build runs it ("Remeshing lateral
+  surfaces for QuadToTri region").
+- **Extruded `Volume{…}` sources and nested `Extrude`** — still explicit
+  errors (volume extrusion matches upstream's own rejection).
+- **Non-recombined tet-split connectivity parity** — diagonal class is a
+  different valid member than Gmsh's (mesher-internal source-tri vertex
+  ordering); counts/nodes/volume match.
+- **Recombined quad-source hex connectivity** — waits on the surface
+  recombiner producing Gmsh-identical interior quad layouts (pre-existing
+  recombination gap propagated through the sweep).
+- **Mesh-inert extrude params** — `ScaleLast`, `RecombLaterals`,
+  `Using name[i]` parse but are not consumed (upstream also inert outside
+  QuadToTri/boundary-layer paths).
+- **Broader parity backlog per PLAN.md** — `TransfQuadTri` QuadToTri mesh
+  kernel in general, unstructured `In Sphere`/param-domain fills, 3-D
+  `Recombine Volume` recombination on unstructured tets, general OCC BREP
+  kernel and NURBS CAD of unclassified topology, remaining
+  fields/algorithms, GUI/post-processing. The end goal is a complete
+  native Julia mesher with no external dependencies.
+
+Previous increment: **classified projection of recombined volume parts**
+(`d53490f`).
+
+<details>
+<summary>Earlier increment detail (classified recombined projection)</summary>
+
 **Classified projection of recombined volume parts** — `model_to_mixed`
 now accepts a `MixedMesh` volume part (recombined transfinite hexes,
 prisms, or unstructured-mixed tets) and projects it end to end: boundary
@@ -65,6 +144,8 @@ Files: `src/core/Elements.jl`, `src/meshing/Mesh3D.jl`,
 `src/geometry/Model.jl`, `src/geometry/GeoExec.jl`,
 `test/geometry/geo_constraints_test.jl` (+31 asserts),
 `validation/gmsh_parity/{embed_sheet,embed_sheet_hole,explicit_shell,geo_geometry_expressions,geo_dynamic_tags,geo_list_variables,periodic_surface_volume,geo_mesh_sizes}.jl`, docs.
+
+</details>
 
 Previous increment: **recombined five-face transfinite prism volumes** (`7cbd9ce`).
 

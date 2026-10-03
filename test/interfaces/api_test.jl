@@ -47,7 +47,7 @@ const _API=Tessella.API
         @test validate(generated).ok
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
-              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
+              "59e84a4009170152f7c89d702292e868872850aa8e3cc5fcd3a47112d0007665"
         node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
         @test node_tags==UInt64.(1:size(generated.coords,2))
         @test reshape(node_coordinates,3,:)==generated.coords
@@ -286,7 +286,7 @@ end
         initial=_API.mesh.generate(3)
         @test validate(initial).ok
         @test mesh_crc(initial).sha==
-              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
+              "59e84a4009170152f7c89d702292e868872850aa8e3cc5fcd3a47112d0007665"
 
         @test _API.mesh.set_size((0=>101,0=>102),0.25)===nothing
         @test _API.CURRENT[].point_size[101]==0.25

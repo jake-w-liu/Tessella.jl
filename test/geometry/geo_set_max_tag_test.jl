@@ -49,7 +49,7 @@ end
         geo_entity_mesh(meshed,3,601),3,601)
     @test validate(projected).ok
     @test mixed_crc(projected).sha==
-          "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486"
+          "b4a9e7a3af36c9820abee40a76666b658887b9879a059233beedfd9b0d94487c"
 
     lowered=_execute_set_max_tag_source(raw"""
         Point(10) = {0,0,0,1};

@@ -20,7 +20,7 @@ const _MESH_LIFECYCLE_API=Tessella.API
         generated=_MESH_LIFECYCLE_API.mesh.generate(3)
         generated_crc=mesh_crc(generated)
         @test generated_crc.sha==
-              "685ae426e57a88732577b13e644113e0bff790099eb0e7292071cc2b8bb77678"
+              "59e84a4009170152f7c89d702292e868872850aa8e3cc5fcd3a47112d0007665"
 
         refined=_MESH_LIFECYCLE_API.mesh.refine()
         refined_crc=mesh_crc(refined)
@@ -28,7 +28,7 @@ const _MESH_LIFECYCLE_API=Tessella.API
         @test refined_crc.n_nodes==5378
         @test refined_crc.n_tets==27768
         @test refined_crc.sha==
-              "47c38a1bf517b7e5a23fac3c9bba1f6d501576fa23470514e287ac304d928f74"
+              "8224af8bf7e76c5598e6fcbcb9038793bfdbf1c4bb9b54e99b6fae83035aff1d"
 
         stored=_MESH_LIFECYCLE_API.LAST_MESH[]
         @test stored!==nothing && stored!==refined
@@ -55,7 +55,7 @@ const _MESH_LIFECYCLE_API=Tessella.API
         @test twice_crc.n_nodes==39683
         @test twice_crc.n_tets==222144
         @test twice_crc.sha==
-              "b6ae93f66a976980b9c58606aeb6ab4bca671282c3bbb5d69633266a0b57a2f2"
+              "e6300519a55b1129d433f692ef6eae9eccec8e2bb58f4482210fb44d45f9c69a"
 
         # `mesh.clear` removes only elements classified on the Volume; the
         # materialized corner Points keep their nodes, matching Gmsh's

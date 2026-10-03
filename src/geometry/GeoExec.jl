@@ -116,7 +116,8 @@ using ..Model: _ModelMesh1DOptions, _model_mesh_lc, _model_mesh_bbox,
                _model_curve_mesh_parts,
                _model_curve_part_point, _model_planar_surface_mesh,
                _model_curve_param_bounds,
-               _model_projection_physical_tags, _model_projection_legacy_tag
+               _model_projection_physical_tags, _model_projection_legacy_tag,
+               _extrude_volume_pass
 using ..MeshTypes: nnodes, nsegs, ntris, ntets
 using ..Refine: refine_uniform
 using ..Recombine: recombine_triangles
@@ -7091,8 +7092,24 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
         end
     end
     if dim==3
+        # `meshGRegionExtruded` sweeps every `Layers`-marked volume ahead of
+        # the unstructured pass, then `SubdivideExtrudedMesh` picks the
+        # shared prism-face diagonals globally and remeshes the affected
+        # lateral surfaces against that edge set.
+        pass=_extrude_volume_pass(m,caller)
         for tag in sort!(collect(keys(m.volumes)))
-            push!(parts,(3,tag,mesh_model_volume(m,tag)))
+            if pass!==nothing && haskey(pass.parts,tag)
+                push!(parts,(3,tag,pass.parts[tag]))
+            else
+                push!(parts,(3,tag,mesh_model_volume(m,tag)))
+            end
+        end
+        if pass!==nothing && !isempty(pass.remesh)
+            for (i,(pdim,ptag,_)) in enumerate(parts)
+                pdim==2 && ptag in pass.remesh || continue
+                parts[i]=(2,ptag,mesh_model_surface(
+                    m,ptag;_extrude_edges=pass.edges))
+            end
         end
     end
     if dim>=2

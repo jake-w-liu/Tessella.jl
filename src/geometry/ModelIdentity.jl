@@ -432,6 +432,7 @@ function _model_identity_meshing(
     recombine=Dict{Tuple{Int,Int},Float64}()
     extrude=Dict{Tuple{Int,Int},_GeoExtrudeParams}()
     extrude_sources=Dict{Tuple{Int,Int},NTuple{2,Int}}()
+    extrude_specs=Dict{Tuple{Int,Int},Any}()
     smoothing=Dict{Tuple{Int,Int},Int}()
     reverse=Dict{Tuple{Int,Int},Bool}()
     algorithm=Dict{Tuple{Int,Int},Int}()
@@ -445,10 +446,14 @@ function _model_identity_meshing(
         extrude[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
     end
     for (key,(sdim,stag)) in attributes.extrude_sources
-        # Rekey the generated curve and retarget a source that itself moved.
+        # Rekey the generated entity and retarget a source that itself moved.
         new_key=key==(dimension,old_tag) ? (dimension,new_tag) : key
         extrude_sources[new_key]=(sdim,sdim==dimension ?
             _model_identity_signed_tag(stag,old_tag,new_tag) : stag)
+    end
+    for (key,value) in attributes.extrude_specs
+        extrude_specs[key==(dimension,old_tag) ? (dimension,new_tag) : key]=
+            value
     end
     for (key,value) in attributes.smoothing
         smoothing[key==(dimension,old_tag) ? (dimension,new_tag) : key]=value
@@ -487,6 +492,7 @@ function _model_identity_meshing(
     migrated.recombine=recombine
     migrated.extrude=extrude
     migrated.extrude_sources=extrude_sources
+    migrated.extrude_specs=extrude_specs
     migrated.smoothing=smoothing
     migrated.reverse=reverse
     migrated.algorithm=algorithm

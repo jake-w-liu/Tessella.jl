@@ -345,7 +345,8 @@ function _model_removal_state(
         for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                       meshing.algorithm,meshing.size_at_params,
                       meshing.size_from_boundary,meshing.attached,
-                      meshing.extrude,meshing.extrude_sources)
+                      meshing.extrude,meshing.extrude_sources,
+                      meshing.extrude_specs)
             delete!(store,entity)
         end
     end
@@ -674,7 +675,7 @@ function _geo_reset_model_geometry!(m::GeoModel)
     for store in (meshing.recombine,meshing.smoothing,meshing.reverse,
                   meshing.algorithm,meshing.size_at_params,
                   meshing.size_from_boundary,meshing.attached,meshing.extrude,
-                  meshing.extrude_sources)
+                  meshing.extrude_sources,meshing.extrude_specs)
         empty!(store)
     end
     empty!(meshing.homology_requests)
