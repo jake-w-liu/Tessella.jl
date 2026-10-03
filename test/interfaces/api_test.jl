@@ -912,12 +912,13 @@ end
         @test_throws ArgumentError _API.mesh.optimize("Netgen")
         # After clear(), queries answer empty arrays instead of throwing —
         # Gmsh parity for an unmeshed-but-known model.
+        maxima=(_API.mesh.get_max_node_tag(),_API.mesh.get_max_element_tag())
         _API.mesh.clear()
         @test _API.mesh.get_nodes()[1]==UInt64[]
         @test _API.mesh.get_elements()[1]==Int32[]
         @test _API.mesh.get_element_types()==Int32[]
-        @test _API.mesh.get_max_node_tag()==0
-        @test _API.mesh.get_max_element_tag()==0
+        @test _API.mesh.get_max_node_tag()==maxima[1]
+        @test _API.mesh.get_max_element_tag()==maxima[2]
         @test _API.mesh.get_nodes(3,1)[1]==UInt64[]
         @test_throws ArgumentError _API.mesh.get_nodes(3,99)
     finally

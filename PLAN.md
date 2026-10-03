@@ -93,6 +93,7 @@ Tessella
     ├── IO          strict/atomic MSH v2.2/v4.1, STL, bounded `.geo` scan
     ├── Post        owned scalar nodal views and synchronized in-process plugins
     ├── API         model/mesh/option façade
+    ├── APIGenerate01/APITaggedCache/Mutations detached generation and public IDs
     ├── APIMixedCache/Queries/Advanced/Refine native classified mixed lifecycle
     ├── CLI         `tessella file.geo -2|-3` entry
     └── GUI         headless command/state machine
@@ -507,13 +508,16 @@ Line and Plane queries immediately observe the new coordinates. Gmsh 4.15.2 reta
 stale Plane parameter bounds in the measured equivalent update. Box and Cylinder/Sphere/Cone/Torus volumes
 present their materialized OCC boundary entities, and Boolean volumes present
 their materialized result boundary the same way.
-The synchronized mesh API routes complete cached linear-simplex refinement through
-the canonical uniform-refinement kernel, commits only after successful validation and
-resource preflight, and returns detached storage. Whole-cache clearing is idempotent
+The synchronized mesh API routes linear-simplex refinement through the canonical
+uniform-refinement kernel and supports native mixed P1/P2 refinement to linear
+Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, and Pyramid
+children. It commits only after successful validation and resource preflight,
+and returns detached storage. Whole-cache clearing is idempotent
 and leaves model geometry intact. Entity-selective clearing removes only the cells
 classified on the listed entities and the nodes they owned, retaining boundary-owned
-nodes under their own classification as Gmsh 4.15.2 does; entities owning no cells —
-points and the boundary entities of a tet-only volume cache — are verified no-ops.
+nodes under their own classification as Gmsh 4.15.2 does; entities owning no cells
+are no-ops. Point selections can remove actual Point15 cells in tagged caches;
+boundary entities absent from a legacy tet-only cache remain no-ops.
 It also
 routes strict 12-/16-entry Gmsh row-major or native 4×4 affine transforms through the
 canonical transform kernel, atomically caches a detached validated result, and
@@ -521,12 +525,14 @@ rewinds orientation-reversing simplex connectivity. Entity-selective transforms 
 only the nodes classified on the listed entities and rewind only cells whose every
 node moved, matching Gmsh 4.15.2's per-entity node storage on the flat shared-node
 cache. Singular, nonfinite, malformed, unknown-entity, and output-invalid transforms
-leave the prior cache unchanged. `remove_elements` drops listed dense tags or every
-cell on an entity while retaining nodes (dense tags re-index), `reverse` and
+leave the prior cache unchanged. `remove_elements` drops listed public tags or every
+cell on an entity while retaining nodes. Tagged caches preserve surviving labels;
+legacy dense caches re-index their cells. `reverse` and
 `reverse_elements` flip first-order simplex orientation with Gmsh's vertex
 conventions, `reorder_elements` permutes an entity-local element block with Gmsh's
 zero-based source-position ordering, `set_node`/`renumber_nodes`/`renumber_elements`
-apply validated coordinate and dense-tag updates, `remove_embedded` drops embedding
+apply validated coordinate and label updates, with sparse renumbering on tagged
+caches and dense permutations on legacy caches. `remove_embedded` drops embedding
 records from parent entities, and `get_duplicate_nodes`/`remove_duplicate_nodes`/
 `remove_duplicate_elements` report and repair exact-coordinate or same-entity
 connectivity duplicates. `get_periodic` maps each entity to its periodic master
@@ -591,8 +597,9 @@ algorithm by default, or the compact `1` patch —
 smoothing steps run after filling, `reverse`/`outward_orientation` flip
 entity meshes, compounds merge member entities into one classification,
 per-entity sizes and boundary point sizes propagate through composed size
-fields, and `set_order(2)` keeps a validated high-order overlay on the
-cache that survives refinement, transforms, renumbering, and optimization.
+fields. `set_order` converts existing P1/P2 data independently of the generation
+option; legacy simplex P2 caches use a validated overlay that survives supported
+refinement, transforms, renumbering, and optimization.
 `recombine` pairs flagged entities' triangles into quadrangle records and
 `split_quadrangles` splits them back, both on the entity's discrete record.
 `get_periodic_keys` pairs master/slave periodic nodes into function-space
@@ -607,17 +614,18 @@ straight planar extruded faces and discrete geometry remain supported. Mixed
 optimization, quadrangle splitting, triangle recombination, cross fields, and
 remaining non-simplex quality metrics still require implementations.
 Read-only bulk cache queries return detached flat coordinates, MSH type blocks,
-connectivity, and dense node/element tags derived for the current cache. Segment,
-triangle, and tetrahedron blocks use types 1, 2, and 4 with one global dense
-element-tag sequence; whole-dimension element filters preserve those tags. Known
+connectivity, and public node/element labels. Legacy caches use dense tags;
+tagged caches retain their stored labels, including sparse tags. Numeric MSH
+family query order is independent of internal block positions, and
+whole-dimension element filters preserve each cell's public label. Known
 fixed-node types absent from the simplex cache return empty blocks. A nonnegative
 `tag` filters elements, types, nodes, and the type-funnel queries onto the
 `(dim, tag)` model entity through the `model_to_mixed` classification snapshot
 stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities
-fail explicitly. `get_element` resolves one dense element tag to its type,
-connectivity, and owning entity, `get_node` resolves one dense node tag to
-its coordinates, owning entity, and owner-parametrized coordinates, and
+fail explicitly. `get_element` resolves one public element tag to its type,
+connectivity, and owning entity, `get_node` resolves one public node tag to
+its coordinates, owning entity, and stored or owner-parametrized coordinates, and
 `get_nodes_for_physical_group` emits each member entity's own, transitive
 boundary, and transitively embedded nodes as one sorted unique set.
 `get_embedded` reports the model's embedding records for an entity and
@@ -658,12 +666,12 @@ defines no Pyramid hierarchical family and no Trihedron basis. Hierarchical
 H(curl) functions and curls cover orders 0:11 on Line, Triangle, and Tetrahedron
 and orders 0:10 on Quadrangle, Hexahedron, and Prism.
 Values use Gmsh's orientation-major layout. Hierarchical orientation indices are
-lexicographic ranks of primary node tags. Lagrange keys are dense node tags;
+lexicographic ranks of primary public node tags. Lagrange keys are public node tags;
 numeric Lagrange key queries that require nodes absent from the linear cache fail
 explicitly. Hierarchical H1/H(curl) keys follow Gmsh's
 getKeys layout: vertex keys are node tags, edge and face keys are
 global topology identifiers created lazily only for the requested type or element
-and located at stable midpoints or centroids, and bubble keys are dense element
+and located at stable midpoints or centroids, and bubble keys are public element
 tags. Key metadata reports owning entity dimension and
 order for complete element-sized groups. Session-independent reference quadrature
 covers every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron,
@@ -679,11 +687,12 @@ pending. `get_basis_functions_orientation` accepts nondefault
 segfaults); reference quadrature, basis-function, and key queries take no task
 parameters in Gmsh 4.15.2 and neither do these.
 Whole-cache edge and face creation assigns positive global identifiers to missing
-simplex topology in first-encounter segment, triangle, then tetrahedron order.
+primary cell topology in first-encounter cache order; legacy simplex caches visit
+segments, triangles, then tetrahedra.
 Manual insertion atomically attaches explicit positive identifiers to node pairs,
 triangles, or quadrangles; face identifiers share one namespace across both face
 types. Exact association repeats are idempotent, and later creation preserves manual
-entries while filling missing simplex edges and triangles. Automatic candidates
+entries while filling missing primary edges and faces. Automatic candidates
 start at the relevant catalog size plus one and skip identifiers already in use.
 Edge lookup returns the same tag for either direction and orientation `+1` for
 ascending node tags or `-1` for descending tags. Both face types preserve Gmsh
@@ -698,8 +707,9 @@ matching Gmsh 4.15.2's `createEdges`/`createFaces` dimTags selection; entities
 owning no cells contribute nothing.
 Point-location queries use lazily cached deterministic lookup over simplex and
 native mixed caches. Linear maps use AABB bounds; curved quadratic maps use
-conservative candidate bounds and isoparametric inversion. They return all dense matches in decreasing dimension
-and increasing tag order, or the first such match with detached type, connectivity,
+conservative candidate bounds and isoparametric inversion. They return public
+element labels in decreasing dimension and increasing public tags, or the
+first such match with detached type, connectivity,
 and local coordinates. Segment coordinates use `[-1,1]`; triangle and tetrahedron
 coordinates use the unit simplex. The strict search uses Gmsh 4.15.2's default
 `1e-6` reference tolerance. Relaxed search widens it by decades through `1.0` and
@@ -707,7 +717,7 @@ stops at the first nonempty level. Scaled affine filters have exact-rational
 fallbacks; segment and triangle off-span queries use stable orthogonal projection
 instead of Gmsh's measured inversion artifacts. Cache replacement, refinement,
 transformation, clearing, and model-invalidating mutations discard the locator.
-`get_element` resolves a dense element tag to its type, connectivity, and
+`get_element` resolves a public element tag to its type, connectivity, and
 owning entity through the classification snapshot; an unclassifiable cache
 fails explicitly.
 The immutable element catalog also owns family/order-to-type lookup and detached
@@ -995,37 +1005,35 @@ consumer-side validation track, not a substitute for the parity work above.
 
 ## Next implementation increment
 
-The next priority is synchronized API generation in dimensions zero and one,
-followed by the independent `QuadTriNoNewVerts` diagonal planner. Native model
-grading already exists in `ModelMesh1D.jl`; the API currently accepts only
-dimensions two and three. A detached `APIGenerate01.jl` helper should assemble
-typed Point15/Line1/Line8 blocks and ownership, reconcile retained raw records
-with authoritative cache queries, and commit model/cache state atomically.
-`API.jl` then supplies the generation branch, option adapter and raw session
-background-field builder. The one-dimensional evaluator already applies global
-size clipping/scaling, so it must not receive the existing wrapped API field.
+Synchronized API generation in dimensions zero and one is implemented in
+`APIGenerate01.jl`, with detached preparation and atomic publication. Tagged
+Point15/Line1/Line8 caches retain sparse source identity through queries and
+supported mutations, with one authoritative source for mirrored records.
+`APITaggedMutations.jl` reconstructs existing native boundary provenance for
+dimension-one transitions and provides detached public-label renumbering.
+Immediate `set_order` is independent of `Mesh.ElementOrder`. The raw session
+field adapter leaves clipping/scaling to the shared 1-D evaluator.
+Legacy higher-dimensional caches with nonempty native attached records have
+no reliable allocation provenance, so the dimension-one transition rejects
+that source state before mutation. Complete 2-D/3-D public tag tracking remains pending.
+Tests, differential fixtures, and typed hashes live in
+`test/interfaces/api_generate01_test.jl`, `validation/api_generate01/`, and
+`test/artifacts/api_generate01_crc.txt`; release evidence is in STATUS.md.
 
-Dimension-zero generation is a no-op on fresh geometry but still applies order
-and renumber postprocessing to an existing mesh. Dimension-one generation
-retains explicit Point15 connectivity; otherwise it synthesizes one cell on the
-last stored Point vertex. Curve and carrier incidence uses the first vertex.
-Retained raw records preserve their classification under `Mesh.MeshOnlyEmpty`.
-Sparse `Mesh.Renumber=0` support requires external-tag lookup throughout queries
-and mutation before it can be claimed; owner/coordinate welding cannot replace
-source-tag identity for coincident raw vertices.
+The next priority is the independent `QuadTriNoNewVerts` diagonal planner.
+Port the upstream category, pivot, neighbor-constraint, and layer-face rules
+into deterministic logical-cell decisions while preserving source identities.
+Use compact incidence tables, certify the resulting cell fans and complete
+boundary tiling, and restrict added centroids to the upstream unsliceable-cell
+cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
+sets and invariant checks instead of selecting one accidental process result.
+Cover translation, rotation, twist, grading, recombined laterals, fixed columns,
+and neighboring volumes before removing the current precise blocker.
 
-Add `test/interfaces/api_generate01_test.jl` and
-`validation/api_generate01/differential.jl`, covering native/discrete points and
-curves, explicit point-cell subsets, raw attachments, cache replacement,
-physical groups, order changes, renumbering, graded/closed/periodic curves,
-callbacks, background fields and size limits. Compare typed connectivity,
-external tags and ownership in addition to counts. Keep the existing precise
-raw-identity and curved-CAD placement blockers until those paths have verified
-implementations; an upstream raw-curve elevation crash is an oracle gap.
-
-Implementation has begun in `C:/tmp/tessella_api_generate01` on
-`codex/api-generate01`. API options, global raw-record connectivity and the
-detached generation planner are isolated from the frozen production increment.
+Native curved-CAD P2 placement/refinement, complete higher-dimensional public
+tag lifecycle, remaining meshing algorithms and fields, broad formats/API,
+and UI/postprocessing remain separate unfinished tracks. Unsafe raw native
+P2 fixtures that crash the pinned Gmsh library are recorded oracle gaps.
 
 ## Verification discipline
 

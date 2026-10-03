@@ -476,15 +476,26 @@ function mesh_basis_orientations(mesh::MixedMesh,element_type,function_space_typ
     else
         MeshReferenceGeometry._checked_element_positions(positions,size(cells,2),caller)
     end
-    return Int32[_mixed_cell_orientation(cells,cell,space,family) for cell in selected]
+    return Int32[_mixed_cell_orientation(mesh,cells,cell,space,family) for cell in selected]
 end
 
-@inline function _mixed_cell_orientation(cells,cell,space,family)
+@inline function _mixed_cell_orientation(mesh,cells,cell,space,family)
     space.hierarchical || return Int32(0)
     vertex_count=family===:pnt ? 1 : family===:lin ? 2 : family===:tri ? 3 :
         (family===:tet || family===:qua) ? 4 : family===:hex ? 8 :
         family===:pri ? 6 : 5
-    return MeshFunctionSpaces._orientation_rank(@view cells[1:vertex_count,cell])
+    # Hierarchical orientations are determined by public vertex tags. Sparse
+    # tags can reverse a corner comparison even when dense indices increase.
+    rank=0
+    @inbounds for first in 1:vertex_count-1
+        first_tag=_cache_node_tag(mesh,cells[first,cell])
+        smaller=0
+        for second in first+1:vertex_count
+            smaller+=_cache_node_tag(mesh,cells[second,cell])<first_tag
+        end
+        rank+=smaller*factorial(vertex_count-first)
+    end
+    return Int32(rank)
 end
 
 function mesh_basis_orientation(mesh::MixedMesh,element_tag,function_space_type;
@@ -493,7 +504,7 @@ function mesh_basis_orientation(mesh::MixedMesh,element_tag,function_space_type;
     space=MeshFunctionSpaces._function_space(function_space_type,caller)
     msh,_,cells,cell,family=_mixed_query_reference(mesh,tag,caller)
     MeshFunctionSpaces._basis_element_contract(msh,space,caller)
-    return _mixed_cell_orientation(cells,cell,space,family)
+    return _mixed_cell_orientation(mesh,cells,cell,space,family)
 end
 
 function _mixed_keys_for_cells(mesh::MixedMesh,cells,msh::Int,space,
@@ -539,7 +550,7 @@ function _mixed_keys_for_cells(mesh::MixedMesh,cells,msh::Int,space,
         for local_node in 1:counts.vertex
             cursor+=1
             type_keys[cursor]=type_pattern[cursor-(cell-1)*function_count]
-            node=Int(cells[local_node,cell]);entity_keys[cursor]=UInt64(node)
+            node=Int(cells[local_node,cell]);entity_keys[cursor]=_cache_node_tag(mesh,node)
             if return_coord
                 @inbounds for component in 1:3
                     coordinates[3(cursor-1)+component]=mesh.coords[component,node]
@@ -669,7 +680,7 @@ function _mixed_mesh_keys(mesh::MixedMesh,element_type,function_space_type,
     isempty(selected) && return Int32[],UInt64[],Float64[]
     selected_cells=positions===nothing ? cells : cells[:,selected]
     return _mixed_keys_for_cells(mesh,selected_cells,msh,space,nodal_count,
-        topology,face_topology,UInt64.(offset .+ selected),coordinate_requested,caller)
+        topology,face_topology,_cache_element_tags(mesh,offset .+ selected),coordinate_requested,caller)
 end
 
 function mesh_keys_for_element(mesh::MixedMesh,element_tag,function_space_type,
@@ -682,7 +693,7 @@ function mesh_keys_for_element(mesh::MixedMesh,element_tag,function_space_type,
     _,_,nodal_count,_=MeshFunctionSpaces._basis_element_contract(msh,space,caller)
     coordinate_requested=MeshFunctionSpaces._checked_bool(return_coord,caller,"return_coord")
     return _mixed_keys_for_cells(mesh,cells[:,cell:cell],msh,space,nodal_count,
-        topology,face_topology,UInt64[tag],coordinate_requested,caller)
+        topology,face_topology,UInt64[_cache_element_tag(mesh,tag)],coordinate_requested,caller)
 end
 
 function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSICN")

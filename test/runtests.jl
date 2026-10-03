@@ -104,6 +104,7 @@ using Tessella
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
     include("interfaces/api_mixed_cache_test.jl") # native mixed cache ownership and mutations
+    include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning
     include("interfaces/api_mixed_refine_test.jl") # native family-preserving mixed refinement

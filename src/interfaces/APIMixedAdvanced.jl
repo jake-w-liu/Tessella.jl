@@ -11,7 +11,12 @@ function _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
     count=nnodes(cached)
     replacement=collect(Int32,1:count)
     groups=Dict{NTuple{3,Float64},Int32}()
-    for node in 1:count
+    public_tags=class===nothing ? nothing : class.public_tags
+    # Gmsh visits classified entities in dimension/tag order. Public tag order
+    # does not select the survivor of two coincident sparse-tag vertices.
+    candidates=public_tags===nothing ? (1:count) :
+               sortperm(class.node_entities;alg=Base.Sort.MergeSort)
+    for node in candidates
         (scan_cache && (selected===nothing || class.node_entities[node] in selected)) || continue
         point=(cached.coords[1,node],cached.coords[2,node],cached.coords[3,node])
         replacement[node]=get!(groups,point,Int32(node))
@@ -28,12 +33,17 @@ function _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
     if !all(keep)
         blocks=ElementBlock[ElementBlock(block.msh,remap[block.nodes],block.tags)
                             for block in cached.blocks]
-        mesh=MixedMesh(cached.coords[:,keep],blocks;physical_names=cached.physical_names)
+        links=_mixed_remap_periodic_nodes(cached,remap,caller)
+        mesh=_mixed_rebuild_metadata(cached,blocks;node_order=findall(keep),
+                                     periodic_links=links)
         new_class=class===nothing ? nothing : _mixed_rebind_class(class,mesh;
             node_entities=class.node_entities[keep])
         for (_,_,record) in records,connectivity in record.element_nodes,i in eachindex(connectivity)
             tag=connectivity[i]
-            1<=tag<=count && (connectivity[i]=remap[tag])
+            dense=public_tags===nothing ? (1<=tag<=count ? Int(tag) : 0) :
+                                          get(public_tags.node_indices,UInt64(tag),0)
+            dense!=0 && (connectivity[i]=public_tags===nothing ? remap[dense] :
+                         Int32(_cache_node_tag(public_tags,replacement[dense])))
         end
         _replace_mesh_cache_locked!(mesh,new_class)
         cached=mesh
@@ -44,7 +54,8 @@ function _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
         keep[node] || continue
         (scan_cache && (selected===nothing || class.node_entities[node] in selected)) || continue
         point=(cached.coords[1,remap[node]],cached.coords[2,remap[node]],cached.coords[3,remap[node]])
-        keepers[point]=(remap[node],true)
+        keepers[point]=(public_tags===nothing ? remap[node] :
+                       Int32(_cache_node_tag(public_tags,node)),true)
     end
     _record_dedup_nodes!(records,record_pairs,keepers)
     return nothing
@@ -56,7 +67,7 @@ function _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
     selected=isempty(pairs) ? nothing : _mesh_selected_entities(model,class,pairs,caller)
     record_selected=isempty(pairs) ? nothing : Set{Tuple{Int,Int}}(pairs)
     seen=Set{Tuple{Int32,Int32,Tuple}}()
-    blocks=ElementBlock[];owners=Dict{Int,Vector{Int32}}()
+    selections=Vector{Int}[]
     changed=false
     for (bi,(msh,dim,_,cells,cell_owners)) in enumerate(_cache_catalog(cached,class))
         keep=trues(size(cells,2))
@@ -69,12 +80,10 @@ function _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
                 push!(seen,key)
             end
         end
-        push!(blocks,ElementBlock(msh,cells[:,keep],cached.blocks[bi].tags[keep]))
-        append!(get!(()->Int32[],owners,Int(msh)),cell_owners[keep])
+        push!(selections,findall(keep))
     end
     if changed
-        mesh=MixedMesh(cached.coords,blocks;physical_names=cached.physical_names)
-        class=_mixed_rebind_class(class,mesh;owners)
+        mesh,class=_mixed_select_columns(cached,class,selections)
         _replace_mesh_cache_locked!(mesh,class)
         cached=mesh
     end
@@ -86,7 +95,8 @@ function _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
             for (_,dimension,_,cells,cell_owners) in _cache_catalog(cached,class)
                 dimension==dim || continue
                 for column in axes(cells,2)
-                    cell_owners[column]==tag && push!(seed,sort!(collect(@view cells[:,column])))
+                    cell_owners[column]==tag && push!(seed,sort!(Int32.(
+                        _cache_node_tags(class.public_tags,@view cells[:,column]))))
                 end
             end
         end

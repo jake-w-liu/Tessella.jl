@@ -1071,10 +1071,22 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
     end
     t0,t1=_model_curve_param_bounds(m,curve,caller)
     degenerate==0 && return _model_curve_single_edge_params(m,curve,caller)
-    γ=u->_model_curve_point(m,curve,u,caller)
-    length=curve_length(γ;t0=t0,t1=t1,
-                        integration_precision=options.integration_precision *
-                            options.ctx_lc)
+    spec=get(m.meshing.transfinite_curves,curve,nothing)
+    length=if spec!==nothing && kind===:line
+        # The F_One prepass integrates a constant derivative on a Line. Only
+        # its zero-length gate is consumed by this transfinite branch; the
+        # prescribed law computes its own line length where needed. Avoid
+        # rebuilding exact line evaluators for every integration sample.
+        chord=_model_point_distance(m.points[a],m.points[b])
+        isfinite(chord) || throw(ArgumentError(
+            "$caller: Curve[$curve] has non-finite geometric length"))
+        chord
+    else
+        γ=u->_model_curve_point(m,curve,u,caller)
+        curve_length(γ;t0=t0,t1=t1,
+                     integration_precision=options.integration_precision *
+                         options.ctx_lc)
+    end
     if length==0.0
         if options.tolerance_edge_length==0.0
             # `!length && !toleranceEdgeLength` → N=1 upstream.
@@ -1086,7 +1098,6 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         minimum=_model_minimum_curve_segments(m,curve,options,caller)
         return collect(range(t0,t1,length=minimum+1))
     end
-    spec=get(m.meshing.transfinite_curves,curve,nothing)
     spec!==nothing &&
         return _model_curve_transfinite_params(m,curve,t0,t1,spec,caller)
     return _model_curve_grade_params(m,curve,t0,t1,options,caller)

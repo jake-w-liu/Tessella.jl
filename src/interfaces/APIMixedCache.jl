@@ -286,8 +286,37 @@ end
 
 function _mixed_require_linear_cad(m,class,caller)
     class===nothing && return nothing
-    entities=Set{Tuple{Int,Int32}}(keys(class.boundaries))
-    union!(entities,class.node_entities)
+    entities=Set{Tuple{Int,Int32}}()
+    if hasproperty(class,:mesh)
+        for (_,dim,_,cells,owners) in _cache_catalog(class.mesh,class)
+            dim>0 || continue
+            for owner in owners
+                push!(entities,(dim,owner))
+            end
+            for node in cells
+                owner=class.node_entities[node]
+                owner[1]>0 && push!(entities,owner)
+            end
+        end
+    else
+        # The detached assembler supplies only the active native entities
+        # requiring new interpolation nodes, with their boundary closure.
+        union!(entities,keys(class.boundaries))
+        union!(entities,class.node_entities)
+    end
+    queue=collect(entities)
+    position=1
+    while position<=length(queue)
+        entity=queue[position]
+        position+=1
+        entity[1]>0 || continue
+        for tag in get(class.boundaries,entity,Int32[])
+            boundary=(entity[1]-1,abs(tag))
+            boundary in entities && continue
+            push!(entities,boundary)
+            push!(queue,boundary)
+        end
+    end
     for (dim,entity) in sort!(collect(entities))
         tag=Int(entity)
         if dim==1 && haskey(m.curves,tag)
@@ -343,7 +372,7 @@ function _mixed_linear_cache(mesh,class)
     used .|= .!referenced
     mapping=zeros(Int32,nnodes(mesh));mapping[used]=Int32.(1:count(used))
     blocks=[ElementBlock(b.msh,mapping[b.nodes],b.tags) for b in blocks]
-    result=MixedMesh(mesh.coords[:,used],blocks;physical_names=mesh.physical_names)
+    result=_mixed_rebuild_metadata(mesh,blocks;node_order=findall(used))
     return result,_mixed_rebind_class(class,result;
         node_entities=class.node_entities[used],owners=owners)
 end
@@ -402,7 +431,21 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
     for (node,p) in enumerate(points),axis in 1:3
         coords[axis,node]=p[axis]
     end
-    result=MixedMesh(coords,blocks;physical_names=mesh.physical_names)
+    if mesh.entity_data===nothing
+        result=MixedMesh(coords,blocks;physical_names=mesh.physical_names)
+    else
+        data=mesh.entity_data
+        first_new=maximum(data.external_node_tags;init=UInt64(0))
+        class.public_tags===nothing || (first_new=max(NODE_TAG_MAX[],first_new))
+        count=length(points)-nnodes(mesh)
+        first_new<=typemax(Int32)-count || throw(ArgumentError(
+            "$caller: elevated public node tags exceed Int32"))
+        external=vcat(data.external_node_tags,first_new .+ UInt64.(1:count))
+        parameters=vcat(data.node_parametric,
+            Union{Nothing,Vector{Float64}}[nothing for _ in 1:count])
+        result=_mixed_rebuild_metadata(mesh,blocks;coords,node_entities,
+            node_parametric=parameters,external_node_tags=external)
+    end
     return result,_mixed_rebind_class(class,result;
         node_entities=node_entities,owners=owners)
 end
@@ -466,6 +509,47 @@ function _mixed_with_coordinates(mesh,coords;blocks=mesh.blocks)
         data_sections=mesh.data_sections,partition_data=mesh.partition_data)
 end
 
+function _mixed_rebuild_metadata(mesh,blocks;node_order=nothing,selections=nothing,
+        node_entities=nothing,node_parametric=nothing,external_node_tags=nothing,
+        external_element_tags=nothing,block_entities=nothing,coords=nothing,
+        periodic_links=nothing)
+    order=node_order===nothing ? collect(1:nnodes(mesh)) : node_order
+    coordinates=coords===nothing ? mesh.coords[:,order] : coords
+    if periodic_links===nothing
+        if node_order===nothing || isempty(mesh.periodic_links)
+            periodic_links=mesh.periodic_links
+        else
+            remap=zeros(Int32,nnodes(mesh))
+            for (new,old) in enumerate(order)
+                remap[old]=Int32(new)
+            end
+            periodic_links=_mixed_remap_periodic_nodes(mesh,remap,
+                "API mesh node selection";drop_removed=true)
+        end
+    end
+    data=mesh.entity_data
+    kept_blocks=findall(block->!isempty(block.nodes),blocks)
+    if data!==nothing
+        stored_data=data
+        selected=selections===nothing ? [collect(axes(b.nodes,2)) for b in mesh.blocks] : selections
+        entities=node_entities===nothing ? data.node_entities[order] : node_entities
+        parameters=node_parametric===nothing ? data.node_parametric[order] : node_parametric
+        nodes=external_node_tags===nothing ? data.external_node_tags[order] : external_node_tags
+        owners=block_entities===nothing ?
+            [stored_data.block_entities[i][selected[i]] for i in eachindex(selected)] : block_entities
+        cells=external_element_tags===nothing ?
+            [stored_data.external_element_tags[i][selected[i]] for i in eachindex(selected)] : external_element_tags
+        data=Elements.MixedEntityData(data.entities;node_entities=entities,
+            node_parametric=parameters,external_node_tags=nodes,
+            block_entities=owners[kept_blocks],external_element_tags=cells[kept_blocks])
+    end
+    elementary=data===nothing ? nothing : data.block_entities
+    return MixedMesh(coordinates,blocks[kept_blocks];physical_names=mesh.physical_names,
+        entity_data=data,elementary_entities=elementary,
+        periodic_links=periodic_links,ancillary_sections=mesh.ancillary_sections,
+        data_sections=mesh.data_sections,partition_data=mesh.partition_data)
+end
+
 function _mixed_affine_cache(mesh,class,matrix,translation,mask=nothing;orientation)
     coords=copy(mesh.coords)
     for node in axes(coords,2)
@@ -494,7 +578,7 @@ function _mixed_select_columns(mesh,class,selections;node_order=nothing)
         push!(blocks,ElementBlock(msh,nodes,mesh.blocks[bi].tags[chosen]))
         class===nothing || append!(get!(()->Int32[],owners,Int(msh)),cell_owners[chosen])
     end
-    result=MixedMesh(coords,blocks;physical_names=mesh.physical_names)
+    result=_mixed_rebuild_metadata(mesh,blocks;node_order,selections)
     new_class=class===nothing ? nothing : _mixed_rebind_class(class,result;
         owners=owners,node_entities=node_order===nothing ? class.node_entities :
                                                     class.node_entities[node_order])
@@ -503,7 +587,8 @@ end
 
 function _mixed_remove_elements(mesh,class,dim,entity,tags,caller)
     catalog=_cache_catalog(mesh,class)
-    listed=Set{Int}(_mesh_query_integer(value,caller,"element_tags entry") for value in tags)
+    _,_,count=_mesh_element_offsets(mesh)
+    listed=Set{Int}(_cache_element_index(class.public_tags,value,count,caller) for value in tags)
     if !isempty(listed)
         for tag in listed
             _,_,owner_dim,owner=_mixed_element_record(mesh,class,tag)
@@ -515,7 +600,8 @@ function _mixed_remove_elements(mesh,class,dim,entity,tags,caller)
                            (isempty(listed) || offset+column in listed)),axes(cells,2))
         for (_,bdim,offset,cells,owners) in catalog]
     result,new_class=_mixed_select_columns(mesh,class,selections)
-    _replace_mesh_cache_locked!(result,new_class)
+    _replace_mesh_cache_locked!(result,new_class;
+                               preserve_visibility=class.public_tags!==nothing)
     return nothing
 end
 
@@ -532,7 +618,8 @@ function _mixed_reorder(mesh,class,msh,entity,ordering,caller)
         "$caller: ordering must be a permutation of 0:$(length(positions)-1)"))
     selections[block][positions]=positions[permutation.+1]
     replacement,new_class=_mixed_select_columns(mesh,class,selections)
-    _replace_mesh_cache_locked!(replacement,new_class)
+    _replace_mesh_cache_locked!(replacement,new_class;
+                               preserve_visibility=class.public_tags!==nothing)
     return nothing
 end
 
@@ -563,8 +650,34 @@ end
 
 function _mixed_rebind_class(class,mesh;node_entities=class.node_entities,
                              owners=class.cell_entities)
-    return _mixed_classification(mesh,class.entity,class.entities,node_entities,
+    result=_mixed_classification(mesh,class.entity,class.entities,node_entities,
                                 class.boundaries,owners)
+    class.public_tags===nothing && return result
+    return _classification_with_public_tags(result,
+        _cache_public_tags(mesh;authority=class.public_tags.authority))
+end
+
+# The simplex cache keeps its P2 geometry in an overlay. Lower-dimensional
+# generation must ingest the actual cells and midnodes rather than its skeleton.
+function _dim01_actual_cache(cached,class;physical_names=Dict{Tuple{Int,Int},String}())
+    (cached===nothing || cached isa MixedMesh) && return cached,class
+    overlay=_high_order_overlay(cached)
+    overlay===nothing && return cached,class
+    blocks=ElementBlock[];owners=Dict{Int,Vector{Int32}}()
+    for (msh,dim,_,cells,classified) in _cache_catalog(cached,class)
+        isempty(cells) && continue
+        if msh==_p2_skeleton_etype(overlay)
+            msh=_p2_etype(overlay);cells=_p2_cells(overlay)
+        end
+        physical=dim==1 ? cached.seg_tag : dim==2 ? cached.tri_tag : cached.tet_tag
+        push!(blocks,ElementBlock(msh,cells,physical))
+        owners[Int(msh)]=classified
+    end
+    actual=MixedMesh(overlay.coords,blocks;physical_names)
+    class===nothing && return actual,nothing
+    actual_class=_mixed_classification(actual,class.entity,class.entities,
+        vcat(class.node_entities,LAST_MESH_HIGH_ORDER_MIDS[]),class.boundaries,owners)
+    return actual,actual_class
 end
 
 function _clear_classified_mesh(mesh::MixedMesh,class::_MeshClassification,
@@ -573,6 +686,7 @@ function _clear_classified_mesh(mesh::MixedMesh,class::_MeshClassification,
     kept=[findall(owner->!((dim,owner) in cleared),owners)
           for (_,dim,_,_,owners) in catalog]
     removed=Set{Tuple{Int,Int32}}()
+    union!(removed,intersect(cleared,Set(class.node_entities)))
     survivors=fill((4,Int32(0)),nnodes(mesh))
     referenced=falses(nnodes(mesh))
     for (bi,(_,dim,_,cells,owners)) in enumerate(catalog)
@@ -588,7 +702,6 @@ function _clear_classified_mesh(mesh::MixedMesh,class::_MeshClassification,
     isempty(removed) && return mesh,class
     keep=BitVector([!(owner in removed) || referenced[node]
                     for (node,owner) in enumerate(class.node_entities)])
-    any(keep) || return nothing,nothing
     remap=zeros(Int32,nnodes(mesh))
     next=Int32(0)
     for node in eachindex(keep)
@@ -600,13 +713,30 @@ function _clear_classified_mesh(mesh::MixedMesh,class::_MeshClassification,
     blocks=ElementBlock[]
     owners=Dict{Int,Vector{Int32}}()
     for (bi,(msh,dim,_,cells,cell_owners)) in enumerate(catalog)
-        isempty(kept[bi]) && continue
         block=mesh.blocks[bi]
         push!(blocks,ElementBlock(msh,remap[cells[:,kept[bi]]],block.tags[kept[bi]]))
         append!(get!(()->Int32[],owners,Int(msh)),cell_owners[kept[bi]])
     end
-    replacement=MixedMesh(mesh.coords[:,keep],blocks;
-                           physical_names=mesh.physical_names)
+    replacement=_mixed_rebuild_metadata(mesh,blocks;node_order=findall(keep),
+        selections=kept,node_entities=node_entities)
     return replacement,_mixed_rebind_class(class,replacement;
                         node_entities=node_entities,owners=owners)
+end
+
+function _mixed_refresh_periodic_links(model,mesh,class,caller)
+    isempty(mesh.periodic_links) && return mesh,class
+    links=Elements.MixedPeriodicLink[]
+    for link in mesh.periodic_links
+        if link.dim==1 && haskey(model.periodic,(1,Int(link.slave_entity)))
+            mapping=_dim01_periodic_nodes(model,mesh,class,Int(link.slave_entity),caller;
+                                          include_high_order=true)
+            push!(links,Elements.MixedPeriodicLink(1,link.slave_entity,
+                mapping.master_entity,mapping.slave_nodes,mapping.master_nodes;
+                affine=mapping.affine))
+        else
+            push!(links,link)
+        end
+    end
+    replacement=_mixed_rebuild_metadata(mesh,mesh.blocks;periodic_links=links)
+    return replacement,_mixed_rebind_class(class,replacement)
 end
