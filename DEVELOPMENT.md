@@ -4,7 +4,7 @@ This project meshes geometry that a FEM solver trusts. **A mesh is evidence, not
 scaffolding.** These rules are mandatory and mirror the ASCENT research-code
 standard.
 
-Development and verification use Julia 1.12.x only. `Project.toml` owns the
+Development and verification use Julia 1.12.x and 1.13.x. `Project.toml` owns the
 machine-readable runtime requirement.
 
 ## Core loop (every change)

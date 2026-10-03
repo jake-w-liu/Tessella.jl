@@ -63,6 +63,7 @@ using Tessella
     include("structured/transfinite_triangle_test.jl") # specific three-sided triangle/quad patches
     include("structured/transfinite_quad_test.jl") # recombined four-sided quadrangle patches
     include("structured/transfinite_volume_test.jl") # affine six-face structured volumes
+    include("structured/structured_quadtri_test.jl") # warped/folded transition certificates
     include("structured/transfinite_prism_test.jl") # affine five-face transfinite prisms
     include("structured/transfinite_hex_test.jl") # affine six-face recombined hexahedra
     include("geometry/model_test.jl")    # entity kernel + .geo execution
@@ -89,6 +90,10 @@ using Tessella
     include("geometry/geo_dynamic_tag_test.jl") # geometry/Physical allocation and lifecycle
     include("geometry/geo_set_max_tag_test.jl") # factory-aware max-tag counters
     include("geometry/geo_constraints_test.jl") # .geo Transfinite/Recombine/Delete meshing constraints
+    include("geometry/geo_transfquadtri_test.jl") # boundary-diagonal mixed-volume transitions
+    include("geometry/geo_quadtri_extrude_test.jl") # QuadTriAddVerts structured extrusion
+    include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
+    include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
     include("geometry/geo_periodic_test.jl") # expression-backed periodic curves
     include("geometry/model_periodic_io_test.jl") # classified periodic/embedded MSH projection
@@ -98,6 +103,10 @@ using Tessella
     include("meshing/boundary_layer_fan_test.jl") # multi-region fan layers + core fill
     include("meshing/periodic_test.jl")  # periodic identification
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
+    include("interfaces/api_mixed_cache_test.jl") # native mixed cache ownership and mutations
+    include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
+    include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning
+    include("interfaces/api_mixed_refine_test.jl") # native family-preserving mixed refinement
     include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
     include("interfaces/api_record_mutation_test.jl") # atomic sparse/dense tag mutation
     include("interfaces/api_refinement_classification_test.jl") # refinement identity and ownership

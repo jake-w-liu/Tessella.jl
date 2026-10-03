@@ -1098,6 +1098,7 @@ end
 # keep no stored mesh, matching upstream's silently-starved status.
 function _model_mesh_curves!(m::GeoModel,options::_ModelMesh1DOptions,
                            caller::AbstractString)
+    _model_require_point_mesh_geometry(m,caller)
     pending=Set{Int}(keys(m.curves))
     for (dim,tag) in keys(m.discrete)
         dim==1 && push!(pending,tag)
@@ -1137,13 +1138,133 @@ function _model_mesh_needs_dim1(m::GeoModel)
 end
 
 # ── Parts for `_geo_merge_entity_meshes` ─────────────────────────────────────
+function _model_require_point_mesh_geometry(m::GeoModel,caller::AbstractString)
+    displaced=Set{Int}()
+    for ((dim,tag),record) in m.meshing.attached
+        dim==0 && haskey(m.points,tag) && !isempty(record.node_tags) || continue
+        point=ntuple(axis->record.node_coords[axis,1],3)
+        point==m.points[tag] || push!(displaced,tag)
+    end
+    isempty(displaced) && return nothing
+    for curve in sort!(collect(keys(m.curves)))
+        for point in m.curves[curve]
+            point in displaced || continue
+            throw(ArgumentError("$caller: native Point[$point] has an attached " *
+                "mesh vertex off its geometry and is incident to Curve[$curve]; " *
+                "boundary meshing from displaced native vertices is not implemented"))
+        end
+    end
+    for ((dim,tag),record) in _discrete_mesh_records_model(m)
+        dim==1 || continue
+        for (boundary_dim,point) in record.boundary
+            boundary_dim==0 && point in displaced || continue
+            throw(ArgumentError("$caller: native Point[$point] has an attached " *
+                "mesh vertex off its geometry and is incident to Curve[$tag]; " *
+                "boundary meshing from displaced native vertices is not implemented"))
+        end
+    end
+    for (entity,embedded) in m.embeds, (dim,point) in embedded
+        dim==0 && point in displaced || continue
+        throw(ArgumentError("$caller: native Point[$point] has an attached " *
+            "mesh vertex off its geometry and is embedded in entity $entity; " *
+            "embedding displaced native vertices is not implemented"))
+    end
+    return nothing
+end
+
+# The current entity-part merger identifies vertices by entity and exact
+# coordinates. Raw records can contain distinct tags at the same position,
+# even for disconnected components of one curve. Reject that unresolved
+# identity case before emitting a part rather than silently welding its nodes.
+function _model_assert_raw_node_identity(record::DiscreteEntity,dim::Int,
+                                          tag::Int,caller::AbstractString)
+    seen=Dict{NTuple{3,UInt64},Int32}()
+    for (node,node_tag) in enumerate(record.node_tags)
+        key=ntuple(3) do axis
+            coordinate=record.node_coords[axis,node]
+            reinterpret(UInt64,coordinate==0.0 ? 0.0 : coordinate)
+        end
+        previous=get(seen,key,Int32(0))
+        if previous!=0 && previous!=node_tag
+            entity=dim==0 ? "Point" : "Curve"
+            throw(ArgumentError("$caller: raw $entity[$tag] has distinct node " *
+                "tags $previous and $node_tag at identical coordinates; " *
+                "preserving coincident nodes within one entity is not implemented"))
+        end
+        seen[key]=node_tag
+    end
+    return nothing
+end
+
 # One `(0, point, Mesh)` part per model point — upstream `Mesh0D` classifies
 # a mesh vertex on every model vertex, positioned at the vertex's own
 # coordinates (curve parts snap their endpoints to it, mirroring upstream's
 # shared `MVertex`).
+function _model_mesh_part_node_entities(m::GeoModel,dim::Int,tag::Int,mesh,
+                                         caller::AbstractString)
+    owners=fill((dim,Int32(tag)),nnodes(mesh))
+    dim==0 && return owners
+    if dim==1
+        record=get(m.discrete,(1,tag),get(m.meshing.attached,(1,tag),nothing))
+        if haskey(m.curves,tag) &&
+           (record===nothing || haskey(m.curve_params,tag))
+            a,b=m.curves[tag]
+            if !isempty(owners)
+                owners[1]=(0,Int32(a))
+                a!=b && (owners[end]=(0,Int32(b)))
+            end
+            return owners
+        end
+        record===nothing && throw(ArgumentError("$caller: unknown discrete curve $tag"))
+        # MeshOnlyEmpty keeps raw node classification verbatim. Coincident
+        # record nodes are not the model vertex's own mesh vertex upstream.
+        if !haskey(m.curve_params,tag)
+            _model_assert_raw_node_identity(record,1,tag,caller)
+            return owners
+        end
+        endpoints=if haskey(m.curves,tag)
+            unique!(collect(m.curves[tag]))
+        else
+            Int[point for (boundary_dim,point) in record.boundary if boundary_dim==0]
+        end
+        # Remeshed discrete curves use their boundary vertices, while the
+        # stored record need not enumerate those vertices in curve order.
+        degree=zeros(Int,nnodes(mesh))
+        for cell in axes(mesh.segs,2),node in @view mesh.segs[:,cell]
+            degree[node]+=1
+        end
+        for point in endpoints
+            coordinates=if haskey(m.points,point)
+                (m.points[point],)
+            else
+                point_record=get(m.discrete,(0,point),get(m.meshing.attached,(0,point),nothing))
+                point_record===nothing ? () : Tuple(
+                    ntuple(axis->point_record.node_coords[axis,node],3)
+                    for node in axes(point_record.node_coords,2))
+            end
+            for node in eachindex(owners)
+                (degree[node]==1 || length(endpoints)==1 && degree[node]>0) || continue
+                p=ntuple(axis->mesh.coords[axis,node],3)
+                any(==(p),coordinates) || continue
+                owners[node]=(0,Int32(point))
+            end
+        end
+        return owners
+    end
+    dim in (2,3) || throw(ArgumentError("$caller: invalid mesh part dimension $dim"))
+    projected=model_to_mixed(m,mesh,dim,tag)
+    data=projected.entity_data
+    data!==nothing && length(data.node_entities)==nnodes(mesh) ||
+        throw(ErrorException("$caller: mesh part projection changed the node set"))
+    return copy(data.node_entities)
+end
+
 function _model_point_mesh_parts(m::GeoModel,caller::AbstractString)
+    _model_require_point_mesh_geometry(m,caller)
     parts=Tuple{Int,Int,Mesh}[]
     for (tag,point) in m.points
+        record=get(m.meshing.attached,(0,tag),nothing)
+        record!==nothing && !isempty(record.node_tags) && continue
         coords=Matrix{Float64}(undef,3,1)
         coords[1,1],coords[2,1],coords[3,1]=point
         push!(parts,(0,tag,Mesh(coords)))
@@ -1154,6 +1275,7 @@ function _model_point_mesh_parts(m::GeoModel,caller::AbstractString)
         dim==0 || continue
         n=size(record.node_coords,2)
         n==0 && continue
+        _model_assert_raw_node_identity(record,dim,tag,caller)
         push!(parts,(0,tag,Mesh(Matrix{Float64}(record.node_coords[:,1:n]))))
     end
     return parts
@@ -1211,6 +1333,7 @@ end
 # bitwise against the `(0, point)` parts. Closed curves (`a==b`) connect
 # their last node back to the first, like upstream's shared end vertex.
 function _model_curve_mesh_parts(m::GeoModel,caller::AbstractString)
+    _model_require_point_mesh_geometry(m,caller)
     parts=Tuple{Int,Int,Mesh}[]
     for (curve,params) in sort!(collect(m.curve_params))
         haskey(m.curves,curve) || continue
@@ -1300,6 +1423,7 @@ function _model_curve_mesh_parts(m::GeoModel,caller::AbstractString)
         end
         haskey(m.curves,tag) && haskey(m.curve_params,tag) && continue
         isempty(record.element_types) && continue
+        _model_assert_raw_node_identity(record,dim,tag,caller)
         local_index=Dict{Int32,Int}(nt=>i for (i,nt) in
                                     enumerate(record.node_tags))
         segs=Matrix{Int32}(undef,2,0);seg_tag=Int32[]

@@ -97,8 +97,10 @@ end
 projected=Dict{Symbol,MixedMesh}()
 for case in CASES
     execution=execute_geo(case.path;mesh_dim=2)
-    mesh=execution.mesh
-    mesh===nothing && error("$(case.name) periodic graph produced no mesh")
+    global_mesh=execution.mesh
+    global_mesh===nothing && error("$(case.name) periodic graph produced no mesh")
+    validate(global_mesh).ok || error("$(case.name) periodic global mesh is invalid")
+    mesh=geo_entity_mesh(execution,2,1)
     validate(mesh).ok || error("$(case.name) periodic graph mesh is invalid")
     mesh_crc(mesh).sha==MESH_CRC || error(
         "$(case.name) periodic graph mesh CRC changed: $(mesh_crc(mesh).sha)")
@@ -139,9 +141,11 @@ expression_affines,max_tessella_transform_error=let
     max_error=0.0
     for case in EXPRESSION_TRANSFORMS
         execution=execute_geo(case.path;mesh_dim=2)
-        mesh=execution.mesh
-        mesh===nothing && error(
+        global_mesh=execution.mesh
+        global_mesh===nothing && error(
             "$(case.name) expression transform produced no mesh")
+        validate(global_mesh).ok || error("$(case.name) expression global mesh is invalid")
+        mesh=geo_entity_mesh(execution,2,1)
         validate(mesh).ok || error(
             "$(case.name) expression transform mesh is invalid")
         mesh_crc(mesh).sha==case.mesh_crc || error(

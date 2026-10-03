@@ -127,7 +127,7 @@ max_tessella_error==0 || error(
     "Tessella periodic volume coordinate error is $max_tessella_error")
 projected_crc=mixed_crc(projected)
 projected_crc.sha==
-    "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102" ||
+    "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461" ||
     error("Tessella periodic volume projection CRC changed")
 
 function find_gmsh_api()
@@ -254,7 +254,7 @@ try
     projected_crcs[4.1]==Set([projected_crc.sha]) || error(
         "periodic volume MSH4 CRC depends on file mode")
     projected_crcs[2.2]==Set([
-        "d8c7da6a4f188947e8221975edfa71b8efe7a5434d198e7f948f2787f6b05cd1"]) ||
+        "b8251bd55dc17ab832e64c1cb976936fb22bdb4777587095334c6d4b3716546f"]) ||
         error("periodic volume MSH2 CRC changed or depends on file mode")
     max_roundtrip_error<=1e-12 || error(
         "Gmsh periodic volume round-trip error is $max_roundtrip_error")

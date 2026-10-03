@@ -104,6 +104,9 @@ geo_extrude_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes 
 println("  command: ", geo_extrude_command)
 run(geo_extrude_command)
 
+mesh_identity_script=joinpath(HERE,"geo_mesh_identity","differential.jl")
+run(`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mesh_identity_script`)
+
 println("\n── geo_curved ──  entity-level Gmsh 4.15.2 .geo arc/surface-filling differential")
 geo_curved_script = joinpath(HERE, "geo_curved", "differential.jl")
 geo_curved_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_curved_script`
@@ -227,6 +230,17 @@ mesh_entity_topology_command = `$(Base.julia_cmd()) --startup-file=no --check-bo
 println("  command: ", mesh_entity_topology_command)
 run(mesh_entity_topology_command) # ProcessFailedException makes validation/run_all.jl nonzero.
 
+mixed_topology_script = joinpath(HERE,"mesh_entity_topology","mixed_differential.jl")
+run(`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $mixed_topology_script`)
+
+for folder in ("api_mixed_cache", "api_mixed_queries", "api_mixed_refine")
+    println("\n── ",folder," ──  Gmsh 4.15.2 native mixed mesh API")
+    script=joinpath(HERE,folder,"differential.jl")
+    command=`$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $script`
+    println("  command: ",command)
+    run(command)
+end
+
 println("\n── mesh_point_location ──  Gmsh 4.15.2 simplex location and reference coordinates")
 mesh_location_script = joinpath(
     HERE, "mesh_point_location", "differential.jl")
@@ -308,6 +322,18 @@ transfinite_prism_script = joinpath(HERE, "transfinite_prism", "differential.jl"
 transfinite_prism_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $transfinite_prism_script`
 println("  command: ", transfinite_prism_command)
 run(transfinite_prism_command) # ProcessFailedException makes validation/run_all.jl nonzero.
+
+println("\n── quadtri_transfinite ──  Gmsh 4.15.2 boundary-diagonal transitions")
+quadtri_transfinite_script = joinpath(HERE, "quadtri_transfinite", "differential.jl")
+quadtri_transfinite_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $quadtri_transfinite_script`
+println("  command: ", quadtri_transfinite_command)
+run(quadtri_transfinite_command)
+
+println("\n── geo_quadtri_extrude ──  Gmsh 4.15.2 AddVerts sweep transitions")
+geo_quadtri_extrude_script = joinpath(HERE, "geo_quadtri_extrude", "differential.jl")
+geo_quadtri_extrude_command = `$(Base.julia_cmd()) --startup-file=no --check-bounds=yes --project=$size_field_project $geo_quadtri_extrude_script`
+println("  command: ", geo_quadtri_extrude_command)
+run(geo_quadtri_extrude_command)
 
 println("\n── gmsh_parity box ──  Tessella API vs analytic/Gmsh box volume")
 box_api_script = joinpath(HERE, "gmsh_parity", "box_api.jl")

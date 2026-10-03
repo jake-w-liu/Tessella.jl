@@ -47,7 +47,7 @@ projected=model_to_mixed(execution.model,geo_entity_mesh(execution,3,60),3,60)
 validate(projected).ok || error(
     "Tessella geometry-expression projection is invalid")
 mixed_crc(projected).sha==
-    "9438d3c9f69b07832d335159ca36b85d3e0a469b23e5edca1f1362dcccf8b018" ||
+    "8b76bf2a3c0f74cea3b1081dc9eb79627801b1a99ec7b250aaa899766a6e8d0a" ||
     error("Tessella geometry-expression projection CRC changed")
 
 function find_gmsh_api()

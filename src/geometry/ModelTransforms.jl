@@ -50,6 +50,7 @@ end
 # (K·s, += I, += K²·(1−cos)). The diagonal of K² contracts as
 # −fma(X,X,Y·Y), and the libm calls go through the platform libm shims.
 function _occ_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
+    axis=_rotation_axis_scaled(axis)
     mod=sqrt(fma(axis[3],axis[3],fma(axis[1],axis[1],axis[2]*axis[2])))
     A,B,C=axis[1]/mod,axis[2]/mod,axis[3]/mod
     s,c=_gm_sincos(angle)
@@ -141,35 +142,45 @@ end
 # the fused multiply-add the compiled sum-of-products expressions produce
 # (`norm3`/`prosca`: `fma(c,c,fma(a,a,b*b))`; `prodve`: the first product of
 # each component fused, the second rounded).
-@inline function _gmsh_norme!(v::Vector{Float64})
+@inline function _gmsh_norme(v::NTuple{3,Float64})
+    v=_rotation_axis_scaled(v)
     mod=sqrt(fma(v[1],v[1],fma(v[2],v[2],v[3]*v[3])))
-    if mod!=0.0
-        inv=1.0/mod
-        v[1]*=inv;v[2]*=inv;v[3]*=inv
-    end
-    return v
+    mod==0.0 && return v
+    inv=1.0/mod
+    return (v[1]*inv,v[2]*inv,v[3]*inv)
 end
 
-@inline _gmsh_prodve(a::Vector{Float64},b::Vector{Float64}) =
-    [fma(a[2],b[3],-(a[3]*b[2])), fma(-a[1],b[3],a[3]*b[1]),
-     fma(a[1],b[2],-(a[2]*b[1]))]
+@inline _gmsh_prodve(a::NTuple{3,Float64},b::NTuple{3,Float64}) =
+    (fma(a[2],b[3],-(a[3]*b[2])),fma(-a[1],b[3],a[3]*b[1]),
+     fma(a[1],b[2],-(a[2]*b[1])))
+
+# Rescale only when squaring the finite direction would overflow or lose
+# relative precision in the subnormal range. Ordinary axes retain the
+# upstream normalization arithmetic and its bitwise output.
+@inline function _rotation_axis_scaled(axis::NTuple{3,Float64})
+    squared=fma(axis[1],axis[1],fma(axis[2],axis[2],axis[3]*axis[3]))
+    isfinite(squared) && squared>=floatmin(Float64) && return axis
+    scale=max(abs(axis[1]),abs(axis[2]),abs(axis[3]))
+    scale==0.0 && return axis
+    return (axis[1]/scale,axis[2]/scale,axis[3]/scale)
+end
 
 # SetRotationMatrix from Geo.cpp: orthonormal basis (axis, t1, t2) built by
 # Gmsh's GramSchmidt, an in-basis rotation about the axis, then
 # plan'·rot·plan with Gmsh's triple-loop order.
 function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
-    axe=[axis[1],axis[2],axis[3]]
+    axe=_rotation_axis_scaled(axis)
     if axe[1]!=0.0
-        t1=[0.0,1.0,0.0];t2=[0.0,0.0,1.0]
+        t1=(0.0,1.0,0.0);t2=(0.0,0.0,1.0)
     elseif axe[2]!=0.0
-        t1=[1.0,0.0,0.0];t2=[0.0,0.0,1.0]
+        t1=(1.0,0.0,0.0);t2=(0.0,0.0,1.0)
     else
-        t1=[1.0,0.0,0.0];t2=[0.0,1.0,0.0]
+        t1=(1.0,0.0,0.0);t2=(0.0,1.0,0.0)
     end
     # GramSchmidt(axe, t1, t2): v1=axis, v2=t1, v3=t2.
-    _gmsh_norme!(axe)
-    t1=_gmsh_norme!(_gmsh_prodve(t2,axe))
-    t2=_gmsh_norme!(_gmsh_prodve(axe,t1))
+    axe=_gmsh_norme(axe)
+    t1=_gmsh_norme(_gmsh_prodve(t2,axe))
+    t2=_gmsh_norme(_gmsh_prodve(axe,t1))
     plan=(axe,t1,t2)   # rows
     s,c=_gm_sincos(angle)
     rot=((1.0,0.0,0.0),(0.0,c,-s),(0.0,s,c))
@@ -197,12 +208,31 @@ function _gmsh_rotation_matrix(axis::NTuple{3,Float64}, angle::Float64)
             0.0,0.0,0.0,1.0)
 end
 
+# Built-in sweep evaluations need only Gmsh's three matrix applications.
+# Tuple steps avoid allocating a general affine/OCC record for every
+# connector node, while preserving each rounded intermediate coordinate.
+@inline function _extrude_rotation_steps(axis::NTuple{3,Float64},
+                                         origin::NTuple{3,Float64},
+                                         angle::Float64)
+    return (_gmsh_translation_step((-origin[1],-origin[2],-origin[3])),
+            _gmsh_rotation_matrix(axis,angle),_gmsh_translation_step(origin))
+end
+
+@inline function _extrude_rotate_point(axis::NTuple{3,Float64},
+                                       origin::NTuple{3,Float64},
+                                       angle::Float64,p::NTuple{3,Float64})
+    for step in _extrude_rotation_steps(axis,origin,angle)
+        p=_gmsh_matvec4x4(step,p)
+    end
+    return p
+end
+
 function _affine_rotation(axis, origin, angle, caller)
-    a=_finite_vector3(axis,caller,"rotation axis")
+    a=_rotation_axis_scaled(_finite_vector3(axis,caller,"rotation axis"))
     o=_finite_vector3(origin,caller,"rotation origin")
     θ=_finite_scalar(angle,caller,"rotation angle")
-    n=sqrt(a[1]^2+a[2]^2+a[3]^2)
-    n>0 || throw(ArgumentError("$caller: rotation axis must be nonzero"))
+    max(abs(a[1]),abs(a[2]),abs(a[3]))>0 ||
+        throw(ArgumentError("$caller: rotation axis must be nonzero"))
     rstep=_gmsh_rotation_matrix(a,θ)
     L=(rstep[1],rstep[2],rstep[3],rstep[5],rstep[6],rstep[7],
        rstep[9],rstep[10],rstep[11])
@@ -817,15 +847,18 @@ function _merge_curves!(m::GeoModel)
         # `CompareTwoCurves` distinguishes by record type (Line/Circle/Ellipse
         # — Gmsh's CIRC and CIRC_INV records are equivalent, which Tessella's
         # unsigned types already express) and control-point count first, so
-        # both are part of the undirected key; the directed vector is
-        # canonicalized against its own reversal. OCC curves fold their stored
+        # both are part of the undirected key. A plain built-in line stores
+        # its endpoint controls implicitly, while DuplicateCurve materializes
+        # them: compare the effective directed list so a fixed-edge copy
+        # still merges with its source. The vector is canonicalized against
+        # its own reversal. OCC curves fold their stored
         # geometry in too: two coincident closed circles sharing a seam vertex
         # only describe the same edge when center, axis, and radius agree.
         occ=_occ_geometry(m,tag)
         signature=occ===nothing ? nothing :
                   occ.occ===:circle ? (occ.center,occ.n,occ.r) :
                   occ.occ===:line ? (occ.t0,occ.t1) : nothing
-        ukey=(_curve_type(m,tag),length(cps),min(dkey,reverse(dkey)),
+        ukey=(_curve_type(m,tag),length(dkey),min(dkey,reverse(dkey)),
               signature)
         if haskey(seen,ukey)
             keep=seen[ukey]
@@ -1226,7 +1259,7 @@ end
 # subdivision count from `Geometry.ExtrudeSplinePoints`.
 _extrude_spec_translate(delta::NTuple{3,Float64}) = (type=:translate,T=delta)
 function _extrude_spec_rotate(axis, origin, angle, caller)
-    a=_finite_vector3(axis,caller,"rotation axis")
+    a=_rotation_axis_scaled(_finite_vector3(axis,caller,"rotation axis"))
     o=_finite_vector3(origin,caller,"rotation origin")
     θ=_finite_scalar(angle,caller,"rotation angle")
     return (type=:rotate,rot=_affine_rotation(a,o,θ,caller),
@@ -1234,7 +1267,7 @@ function _extrude_spec_rotate(axis, origin, angle, caller)
 end
 function _extrude_spec_translate_rotate(axis, origin, angle, delta,
                                         spline_points::Integer, caller)
-    a=_finite_vector3(axis,caller,"rotation axis")
+    a=_rotation_axis_scaled(_finite_vector3(axis,caller,"rotation axis"))
     o=_finite_vector3(origin,caller,"rotation origin")
     θ=_finite_scalar(angle,caller,"rotation angle")
     T=_finite_vector3(delta,caller,"translation delta")

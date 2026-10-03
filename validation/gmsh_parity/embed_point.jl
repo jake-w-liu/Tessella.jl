@@ -18,7 +18,7 @@ area=sum(begin
     abs((b[1]-a[1])*(c[2]-a[2])-(c[1]-a[1])*(b[2]-a[2]))/2
 end for t in 1:ntris(mesh))
 abs(area-1)<=1e-12 || error("Tessella embed area $area != 1")
-projected=model_to_mixed(result.model,mesh,1)
+projected=model_to_mixed(result.model,geo_entity_mesh(result,2,1),1)
 validate(projected).ok || error("Tessella embedded-point projection is invalid")
 point_block=only(findall(block->block.msh==15,projected.blocks))
 Int32(5) in projected.entity_data.block_entities[point_block] ||

@@ -76,7 +76,7 @@ points_of_projected=model_to_mixed(
 validate(points_of_projected).ok || error(
     "Tessella topology-derived Physical projection is invalid")
 mixed_crc(points_of_projected).sha==
-    "4640321fc7eb29fef6951cf2faf8975fcaa75ab332b37e29a55a4c47f9d7ed05" ||
+    "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0" ||
     error("Tessella topology-derived Physical projection CRC changed")
 
 function native_spatial_mesh()

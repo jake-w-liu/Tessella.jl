@@ -18,7 +18,9 @@ gmsh_available() = try success(pipeline(`gmsh --version`; stdout=devnull, stderr
 "gmsh version string (or \"n/a\")."
 function gmsh_version()
     try
-        return strip(read(pipeline(`gmsh --version`; stderr=`cat`), String))
+        output = IOBuffer()
+        run(pipeline(`gmsh --version`; stdout=output, stderr=output))
+        return strip(String(take!(output)))
     catch
         return "n/a"
     end
@@ -32,7 +34,7 @@ Mesh `geo` to `out` (MSH 2.2) with gmsh's 3-D mesher, timing the wall clock.
 """
 function run_gmsh(geo::AbstractString, out::AbstractString; algo::Integer=1)
     isfile(out) && rm(out)
-    cmd = `gmsh -3 $geo -o $out -format msh2 -algo del3d -clscale 1.0 -v 2 -nt 1`
+    cmd = `gmsh -3 $geo -o $out -format msh2 -setnumber Mesh.Algorithm3D $algo -clscale 1.0 -v 2 -nt 1`
     ok = false
     seconds = @elapsed (ok = success(pipeline(cmd; stdout=devnull, stderr=devnull)))
     return (ok = ok && isfile(out), seconds = seconds)

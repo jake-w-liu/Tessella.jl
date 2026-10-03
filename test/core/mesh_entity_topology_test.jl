@@ -6,6 +6,54 @@ using Tessella.MeshTypes: unique_edges, unique_faces
 
 const _ENTITY_TOPOLOGY=Tessella.MeshEntityTopology
 
+@testset "native mixed edge and face catalogs" begin
+    coords=Float64[0 1 1 0 0 1 1 0 2 2 2 2;
+                   0 0 1 1 0 0 1 1 0 1 0 1;
+                   0 0 0 0 1 1 1 1 0 0 1 1]
+    for (base,nodes,ne,nt,nq) in ((3,[1,2,3,4],4,0,1),
+            (5,collect(1:8),12,0,6),(6,[1,2,4,5,6,8],9,2,3),
+            (7,[1,2,3,4,5],8,4,1)), order in 1:2
+        msh=order==1 ? base : base+7
+        coordinates=order==1 ? coords : Tessella.Elements.lagrange_nodes(msh)
+        indices=order==1 ? nodes : collect(1:size(coordinates,2))
+        mesh=Tessella.Elements.MixedMesh(coordinates,[
+            Tessella.Elements.ElementBlock(msh,reshape(Int32.(indices),:,1))])
+        edges=_ENTITY_TOPOLOGY._mesh_edge_topology(mesh)
+        faces=_ENTITY_TOPOLOGY._mesh_face_topology(mesh)
+        @test length(edges.identifiers)==ne
+        @test length(faces.triangle_identifiers)==nt
+        @test length(faces.quadrangle_identifiers)==nq
+        @test sort!(vcat(faces.triangle_identifiers,faces.quadrangle_identifiers))==UInt64.(1:nt+nq)
+        @test _ENTITY_TOPOLOGY._mesh_face_topology_for_cells(
+            mesh,faces,only(mesh.blocks).nodes,msh)===faces
+        @test _ENTITY_TOPOLOGY._mesh_edge_topology_for_cells(
+            mesh,edges,only(mesh.blocks).nodes,msh)===edges
+        alltags,allnodes=_ENTITY_TOPOLOGY._mesh_all_edges(edges)
+        @test _ENTITY_TOPOLOGY._mesh_edges(edges,mesh,allnodes)[1]==alltags
+        for kind in (3,4)
+            tags,fnodes=_ENTITY_TOPOLOGY._mesh_all_faces(faces,kind)
+            @test _ENTITY_TOPOLOGY._mesh_faces(faces,mesh,kind,fnodes)==
+                (tags,zeros(Int32,length(tags)))
+        end
+    end
+    adjacent=Tessella.Elements.MixedMesh(coords,[Tessella.Elements.ElementBlock(
+        5,Int32[1 2;2 9;3 10;4 3;5 6;6 11;7 12;8 7])])
+    edges=_ENTITY_TOPOLOGY._mesh_edge_topology(adjacent)
+    faces=_ENTITY_TOPOLOGY._mesh_face_topology(adjacent)
+    @test length(edges.identifiers)==20
+    @test length(faces.quadrangle_identifiers)==11
+    manual=_ENTITY_TOPOLOGY._mesh_add_faces(nothing,adjacent,4,[42],[2,3,7,6])
+    merged=_ENTITY_TOPOLOGY._mesh_face_topology(adjacent,manual)
+    @test only(_ENTITY_TOPOLOGY._mesh_faces(merged,adjacent,4,[6,7,3,2])[1])==42
+    @test length(merged.quadrangle_identifiers)==11
+    @test manual.quadrangle_identifiers==[42]
+    @test_throws ArgumentError _ENTITY_TOPOLOGY._mesh_add_edges(edges,adjacent,[99],[1,13])
+    degenerate=Tessella.Elements.MixedMesh(coords,[Tessella.Elements.ElementBlock(
+        3,reshape(Int32[1,2,2,4],4,1))])
+    @test_throws ArgumentError _ENTITY_TOPOLOGY._mesh_edge_topology(degenerate)
+    @test_throws ArgumentError _ENTITY_TOPOLOGY._mesh_face_topology(degenerate)
+end
+
 function _entity_topology_fixture()
     return Mesh(
         Float64[0 1 0 0 1;0 0 1 0 1;0 0 0 1 1];

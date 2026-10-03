@@ -51,7 +51,7 @@ projected=model_to_mixed(execution.model,geo_entity_mesh(execution,3,1),3,1)
 validate(projected).ok || error(
     "Tessella list-variable projection is invalid")
 mixed_crc(projected).sha==
-    "4e3f934d3d51bba616fd24cbc9e38bb17599e692cc749d29022a7b655cc52102" ||
+    "b6b1a35fcba5abd8a13a5efb4d028a62681e30c766ea2e3d52bc31f1e011e461" ||
     error("Tessella list-variable projection CRC changed")
 
 function find_gmsh_api()

@@ -330,14 +330,14 @@ const CASES = (
      Mesh.TransfiniteTri=1;
      Mesh 3;
      """),
-    (name=:transfquadtri_blocker, mode=:error, dim=3,
-     # Native kernel emits tetrahedra only — the QuadTri flag is an explicit
-     # blocker (Gmsh succeeds with its HAVE_QUADTRI path).
+    (name=:transfquadtri, mode=:mesh, dim=0,
+     # Boundary transitions preserve the surface's actual diagonals.
      source=BOX * """
      Transfinite Curve{:} = 3;
      Transfinite Surface{:};
      Transfinite Volume{1};
      TransfQuadTri{1};
+     Mesh 3;
      """),
     (name=:delete_owned_refused, mode=:state, dim=0,
      source=SQUARE * "Delete{Curve{1};}\n"),
@@ -720,15 +720,6 @@ try
         end
 
         if case.mode == :error
-            # TransfQuadTri is a Tessella-only blocker — Gmsh succeeds.
-            if case.name == :transfquadtri_blocker
-                t.error !== nothing || error(
-                    "$(case.name): Tessella did not reject TransfQuadTri")
-                g.error === nothing || error(
-                    "$(case.name): Gmsh rejected TransfQuadTri: $(g.error)")
-                push!(gaps, "transfquadtri: Tessella native-kernel blocker " *
-                            "(Gmsh HAVE_QUADTRI path only)")
-            else
                 t.error === nothing && error(
                     "$(case.name): Tessella accepted an invalid source")
                 g.error === nothing && error(
@@ -739,7 +730,6 @@ try
                     error("$(case.name): Tessella error " *
                           "$(sprint(showerror, t.error)) lacks " *
                           repr(expect))
-            end
             push!(results, string(case.name))
             continue
         end

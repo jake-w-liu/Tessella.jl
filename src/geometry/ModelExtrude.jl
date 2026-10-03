@@ -42,13 +42,45 @@ function _extrude_at(spec,p::NTuple{3,Float64},t::Float64,
         T=spec.T
         return (p[1]+t*T[1],p[2]+t*T[2],p[3]+t*T[3])
     elseif spec.type===:rotate
-        return _affine_apply_steps(
-            _affine_rotation(spec.axis,spec.origin,spec.angle*t,caller),p)
+        return _extrude_rotate_point(spec.axis,spec.origin,spec.angle*t,p)
     end
     T=spec.T
-    return _affine_apply_steps(
-        _affine_translate_rotate(spec.axis,spec.origin,spec.angle*t,
-                                 (t*T[1],t*T[2],t*T[3]),caller),p)
+    p=_extrude_rotate_point(spec.axis,spec.origin,spec.angle*t,p)
+    return _gmsh_matvec4x4(
+        _gmsh_translation_step((t*T[1],t*T[2],t*T[3])),p)
+end
+
+# Rigid transforms depend on the layer level, so build O(levels) records
+# and reuse them at every node instead of allocating per point evaluation.
+function _extrude_level_transforms(spec,us,caller::AbstractString)
+    spec.type===:translate && return nothing
+    if spec.type===:rotate
+        transforms=Vector{NTuple{3,NTuple{16,Float64}}}(undef,length(us))
+        for l in eachindex(us)
+            transforms[l]=_extrude_rotation_steps(
+                spec.axis,spec.origin,spec.angle*us[l])
+        end
+        return transforms
+    end
+    transforms=Vector{NTuple{4,NTuple{16,Float64}}}(undef,length(us))
+    for l in eachindex(us)
+        u=us[l]
+        steps=_extrude_rotation_steps(spec.axis,spec.origin,spec.angle*u)
+        transforms[l]=(steps...,_gmsh_translation_step(
+            (u*spec.T[1],u*spec.T[2],u*spec.T[3])))
+    end
+    return transforms
+end
+
+@inline function _extrude_level_at(spec,p::NTuple{3,Float64},u::Float64,
+                                   transforms,l::Int)
+    if transforms===nothing
+        return (p[1]+u*spec.T[1],p[2]+u*spec.T[2],p[3]+u*spec.T[3])
+    end
+    for step in transforms[l]
+        p=_gmsh_matvec4x4(step,p)
+    end
+    return p
 end
 
 # The evaluated node chain `_model_curve_mesh_parts` emits for `curve` —
@@ -206,16 +238,25 @@ function _extrude_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         "$caller: Surface[$t] generatrix Curve[$gen] has no segments"))
     us=_extrude_level_us(params)
     nlev=length(us)
+    transforms=_extrude_level_transforms(spec,us,caller)
     grid=Matrix{NTuple{3,Float64}}(undef,nnode,nlev)
     for i in 1:nnode
         grid[i,1]=chain[i]
         for l in 2:nlev
-            grid[i,l]=_extrude_at(spec,chain[i],us[l],caller)
+            grid[i,l]=_extrude_level_at(spec,chain[i],us[l],transforms,l)
         end
+    end
+    for r in _extrude_quadtri_regions(m,t,caller)
+        seam=_extrude_quadtri_seam_index(m,r,caller)
+        seam===nothing && continue
+        for i in 1:nnode
+            grid[i,nlev]=_extrude_quadtri_snap_seam(seam,grid[i,nlev],caller)
+        end
+        break
     end
     tris=NTuple{3,NTuple{3,Float64}}[]
     quads=NTuple{4,NTuple{3,Float64}}[]
-    recombine=params.recombine
+    recombine=_extrude_quadtri_lateral_recombine(m,t,params,caller)
     for i in 1:nseg,l in 1:nlev-1
         i2=closed ? mod1(i+1,nnode) : i+1
         _extrude_quatri!(tris,quads,grid[i,l],grid[i2,l],
@@ -243,6 +284,7 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     srcmesh=mesh_model_surface(m,src;min_angle_deg=min_angle_deg,
         max_periodic_passes=max_periodic_passes,size_field=size_field)
     u_top=_extrude_level_us(params)[end]
+    transforms=_extrude_level_transforms(spec,(u_top,),caller)
     scoords=srcmesh.coords
     lookup=Dict{NTuple{3,Float64},Int32}()
     coords=NTuple{3,Float64}[]
@@ -250,7 +292,7 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     for i in 1:nnodes(srcmesh)
         p=(scoords[1,i],scoords[2,i],scoords[3,i])
         remap[i]=_extrude_node!(lookup,coords,
-            _extrude_at(spec,p,u_top,caller))
+            _extrude_level_at(spec,p,u_top,transforms,1))
     end
     if srcmesh isa Mesh
         ntri=ntris(srcmesh)
@@ -265,6 +307,9 @@ function _extrude_top_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
             out[1,i]=x;out[2,i]=y;out[3,i]=z
         end
         return Mesh(out;tris=nodes)
+    end
+    if _extrude_quadtri_top(m,t,params,caller)
+        return _extrude_quadtri_top_part(m,src,srcmesh,coords,remap,caller)
     end
     blocks=ElementBlock[]
     for block in srcmesh.blocks
@@ -299,12 +344,19 @@ function _extrude_volume_columns(m::GeoModel,t::Int,src::Int,srcmesh,
     nlev=length(us)
     nn=nnodes(srcmesh)
     scoords=srcmesh.coords
+    transforms=_extrude_level_transforms(spec,us,caller)
     cols=Matrix{NTuple{3,Float64}}(undef,nlev,nn)
     for i in 1:nn
         p=(scoords[1,i],scoords[2,i],scoords[3,i])
         cols[1,i]=p
         for l in 2:nlev
-            cols[l,i]=_extrude_at(spec,p,us[l],caller)
+            cols[l,i]=_extrude_level_at(spec,p,us[l],transforms,l)
+        end
+    end
+    seam=_extrude_quadtri_seam_index(m,t,caller)
+    if seam!==nothing
+        for i in 1:nn
+            cols[nlev,i]=_extrude_quadtri_snap_seam(seam,cols[nlev,i],caller)
         end
     end
     return cols
@@ -378,6 +430,7 @@ mutable struct _ExtrudeVolumeSweep
     hexes::Vector{NTuple{8,NTuple{3,Float64}}}
     prisms::Vector{NTuple{6,NTuple{3,Float64}}}
     pyramids::Vector{NTuple{5,NTuple{3,Float64}}}
+    interior::Vector{NTuple{3,Float64}}
     degenerate::Vector{Bool}
 end
 
@@ -397,7 +450,7 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     sweep=_ExtrudeVolumeSweep(t,params.recombine,cols,
         NTuple{6,NTuple{3,Float64}}[],NTuple{4,NTuple{3,Float64}}[],
         NTuple{8,NTuple{3,Float64}}[],NTuple{6,NTuple{3,Float64}}[],
-        NTuple{5,NTuple{3,Float64}}[],Bool[false])
+        NTuple{5,NTuple{3,Float64}}[],NTuple{3,Float64}[],Bool[false])
     tricells=NTuple{3,Int}[]
     quadcells=NTuple{4,Int}[]
     if srcmesh isa Mesh
@@ -425,7 +478,9 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         c1,c2,c3=cell
         v=(cols[l,c1],cols[l,c2],cols[l,c3],
            cols[l+1,c1],cols[l+1,c2],cols[l+1,c3])
-        if recombine
+        if recombine && params.quad_to_tri===:add_verts
+            push!(sweep.prisms,v)
+        elseif recombine
             _extrude_pripyrtet!(sweep.tets,sweep.pyramids,sweep.prisms,v)
         else
             push!(sweep.prism6,v)
@@ -435,12 +490,13 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         c1,c2,c3,c4=cell
         v=(cols[l,c1],cols[l,c2],cols[l,c3],cols[l,c4],
            cols[l+1,c1],cols[l+1,c2],cols[l+1,c3],cols[l+1,c4])
-        if recombine
+        if recombine && params.quad_to_tri===:add_verts
+            push!(sweep.hexes,v)
+        elseif recombine
             _extrude_hexpri!(sweep.hexes,sweep.prisms,sweep.degenerate,v)
         else
-            # "Cannot extrude quadrangles without Recombine" — upstream
-            # reports and emits nothing for the quadrangle sweep.
-            sweep.degenerate[]=true
+            throw(ArgumentError(
+                "$caller: Cannot extrude quadrangles without Recombine"))
         end
     end
     return sweep
@@ -656,7 +712,10 @@ function _extrude_make_positive!(coords::Matrix{Float64},
                                  nodes::Matrix{Int32},msh::Int)
     (a1,b1),(a2,b2)=_EXTRUDE_REVERSE_SWAPS[msh]
     @inbounds for cell in axes(nodes,2)
-        _extrude_cell_signed_volume(coords,nodes,cell,msh)>=0 && continue
+        volume=_extrude_cell_signed_volume(coords,nodes,cell,msh)
+        isfinite(volume) && volume!=0 || throw(ArgumentError(
+            "extruded mesh: degenerate or nonfinite volume in element type $msh"))
+        volume>0 && continue
         nodes[a1,cell],nodes[b1,cell]=nodes[b1,cell],nodes[a1,cell]
         a2==0 && continue
         nodes[a2,cell],nodes[b2,cell]=nodes[b2,cell],nodes[a2,cell]
@@ -669,11 +728,20 @@ end
 # blocks follow ascending MSH type like the writer's serialization order.
 function _extrude_volume_part(m::GeoModel,sweep::_ExtrudeVolumeSweep,
                               caller::AbstractString)
+    sweep.degenerate[] && throw(ArgumentError(
+        "$caller: Wrong hexahedron in extrusion"))
     lookup=Dict{NTuple{3,Float64},Int32}()
     coords=NTuple{3,Float64}[]
     cols=sweep.cols
     for i in axes(cols,2),l in axes(cols,1)
         _extrude_node!(lookup,coords,cols[l,i])
+    end
+    for p in sweep.interior
+        _extrude_node!(lookup,coords,p)
+    end
+    # Transition fans introduce body vertices after the column sweep.
+    for cells in (sweep.tets,sweep.hexes,sweep.prisms,sweep.pyramids),cell in cells,p in cell
+        _extrude_node!(lookup,coords,p)
     end
     out=Matrix{Float64}(undef,3,length(coords))
     for (i,(x,y,z)) in enumerate(coords)
@@ -741,9 +809,10 @@ function _extrude_entity_params(m::GeoModel,dim::Int,tag::Int,
                                 caller::AbstractString)
     params=_extrude_gate(m,dim,tag)
     params===nothing && return nothing
-    if params.quad_to_tri!==:none && params.recombine
-        kind=params.quad_to_tri===:add_verts ? "QuadTriAddVerts" :
-                                               "QuadTriNoNewVerts"
+    if params.quad_to_tri===:no_new_verts && params.recombine &&
+       (dim==3 || any(r->_extrude_is_quadtri(_extrude_gate(m,3,r)),
+                     _extrude_quadtri_regions(m,tag,caller)))
+        kind="QuadTriNoNewVerts"
         throw(ArgumentError(
             "$caller: $kind on $(dim==2 ? "Surface" : "Volume")[$tag] " *
             "requires the QuadToTri extrusion kernel, which Tessella " *
@@ -785,7 +854,9 @@ function _extrude_volume_mesh(m::GeoModel,t::Int,caller::AbstractString)
     entry===nothing && return nothing
     params,spec,link=entry
     sweep=_extrude_volume_sweep(m,t,params,spec,link[2],caller)
-    if !params.recombine
+    if params.recombine && params.quad_to_tri===:add_verts
+        _extrude_quadtri_addverts!(m,sweep,caller)
+    elseif !params.recombine
         _extrude_subdivide!(_ExtrudeVolumeSweep[sweep],caller)
     end
     return _extrude_volume_part(m,sweep,caller)
@@ -811,18 +882,25 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString)
     subdivided=[s for s in sweeps if !s.recombine]
     edges=nothing
     isempty(subdivided) || (edges=_extrude_subdivide!(subdivided,caller))
+    for sweep in sweeps
+        params=_extrude_gate(m,3,sweep.tag)
+        params.recombine && params.quad_to_tri===:add_verts || continue
+        _extrude_quadtri_addverts!(m,sweep,caller;edges=edges)
+    end
     parts=Dict{Int,Union{Mesh,MixedMesh}}()
     for sweep in sweeps
         parts[sweep.tag]=_extrude_volume_part(m,sweep,caller)
     end
     remesh=Set{Int}()
     for sweep in sweeps
-        sweep.recombine && continue
+        volume_params=_extrude_gate(m,3,sweep.tag)
+        quadtri=sweep.recombine && volume_params.quad_to_tri===:add_verts
+        sweep.recombine && !(quadtri && edges!==nothing) && continue
         for sl in m.volumes[sweep.tag],s in m.surface_loops[sl]
             ep=get(m.meshing.extrude,(2,abs(s)),nothing)
             ep===nothing && continue
             isempty(ep.layers) && continue
-            ep.recombine && continue
+            ep.recombine && !quadtri && continue
             link=get(m.meshing.extrude_sources,(2,abs(s)),nothing)
             link===nothing && continue
             link[1]==1 && push!(remesh,abs(s))
@@ -830,3 +908,5 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString)
     end
     return (parts=parts,edges=edges,remesh=remesh)
 end
+
+include("ModelExtrudeQuadTri.jl")

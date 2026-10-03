@@ -607,6 +607,7 @@ function _geo_delete_entities!(m::GeoModel,dim_tags;recursive::Bool=false)
     m.curve_control_points=state.curve_control_points
     m.curve_types=state.curve_types
     m.curve_geometry=state.curve_geometry
+    m.curve_params=state.curve_params
     m.surfaces=state.surfaces
     m.surface_types=state.surface_types
     m.surface_geometry=state.surface_geometry

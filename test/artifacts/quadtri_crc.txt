@@ -1,0 +1,44 @@
+Native QuadTri mixed-mesh CRC regression records
+==============================================
+
+Reference geometry/connectivity: Gmsh 4.15.2, validated by
+validation/quadtri_transfinite/differential.jl and
+validation/geo_quadtri_extrude/differential.jl.
+CRC: Tessella.Elements.mixed_crc, including exact coordinate bits, oriented
+connectivity, element type/order, physical tags, and entity ownership.
+Runtime gate: normal compilation, --project=. --check-bounds=yes.
+All six records match bitwise on Julia 1.12.7 and Julia 1.13.1.
+
+transfquadtri_box_n3
+Fixture: quadtri_box.geo; append Mesh.TransfiniteTri=0;
+Transfinite Curve{:}=4; Transfinite Surface{:} Left;
+Transfinite Volume{1}; TransfQuadTri{1}; Recombine Surface{1,2,3};
+Global: n_nodes=85, n_blocks=21, n_cells=276,
+        bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+        sha=2938c7188f2ccb1159c9df3db102fa7e1c3ca43d07ce4cb86b9729de93973d69
+Volume 1: n_nodes=85, n_blocks=3, n_cells=159,
+          bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+          sha=5ade95ed527ba619ff150c536b27d2c863efc8bba4ed933fd5ea85986c2200e1
+
+transfquadtri_prism_n3
+Fixture: quadtri_prism.geo; append Mesh.TransfiniteTri=0;
+Transfinite Curve{:}=4; Transfinite Surface{:} Left;
+Transfinite Volume{1}; TransfQuadTri{1}; Recombine Surface{3,4,5};
+Global: n_nodes=64, n_blocks=18, n_cells=183,
+        bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+        sha=17d4afbbf28ef179760aff9bce7e1c44feb722f623af05a14b8cab76dbe277c1
+Volume 1: n_nodes=64, n_blocks=4, n_cells=99,
+          bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+          sha=3188df0104d79397f470294da0fa7cd3898fd6a4b9ec141f4f19ceb021708efc
+
+quadtri_addverts_n2_layers2_laterals
+Fixture: unit square in the xy plane with points (0,0,0),(1,0,0),
+(1,1,0),(0,1,0), consecutive lines 1..4 and Surface 1;
+Transfinite Curve{:}=3; Transfinite Surface{1}; Recombine Surface{1};
+Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriAddVerts RecombLaterals;}
+Global: n_nodes=31, n_blocks=21, n_cells=84,
+        bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+        sha=731dff627c14f4982ac1dcab342c69f49c07ed13e1d78b35b64f72d79eb5a2d4
+Volume 1: n_nodes=31, n_blocks=3, n_cells=32,
+          bbox=((0.0,0.0,0.0),(1.0,1.0,1.0)),
+          sha=510be5d0090dcf135ac3f26f8dd9b89e86a186acd643ed9289d1226abf3e4377

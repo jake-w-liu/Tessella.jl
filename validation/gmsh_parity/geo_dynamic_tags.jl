@@ -75,7 +75,7 @@ execution.params.fields[1].options["PointsList"]=="{9, 10}" || error(
 projected=model_to_mixed(execution.model,geo_entity_mesh(execution,3,26),3,26)
 validate(projected).ok || error("Tessella dynamic-tag projection is invalid")
 mixed_crc(projected).sha==
-    "8d94c09de58fad89d00b3e405a46220e872be8e0a694390ce4881e925be34700" ||
+    "862954f294ee82b3f7ab3871457a51b99c9053f261b0d9f30e8b00b161091934" ||
     error("Tessella dynamic-tag projection CRC changed")
 
 automatic_physical_execution=mktempdir() do directory
@@ -122,7 +122,7 @@ set_max_projected=model_to_mixed(
     set_max_execution.model,geo_entity_mesh(set_max_execution,3,601),3,601)
 validate(set_max_projected).ok || error("Tessella SetMaxTag projection is invalid")
 mixed_crc(set_max_projected).sha==
-    "b4a9e7a3af36c9820abee40a76666b658887b9879a059233beedfd9b0d94487c" ||
+    "b9420ba06a5d6a3d9abaca80c6a8c88e9ee654ee74700b0d0bbf747f52b51486" ||
     error("Tessella SetMaxTag projection CRC changed")
 
 function find_gmsh_api()

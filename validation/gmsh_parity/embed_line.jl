@@ -18,7 +18,7 @@ area=sum(begin
     abs((b[1]-a[1])*(c[2]-a[2])-(c[1]-a[1])*(b[2]-a[2]))/2
 end for t in 1:ntris(mesh))
 abs(area-1)<=1e-12 || error("Tessella embed-line area $area != 1")
-projected=model_to_mixed(result.model,mesh,1)
+projected=model_to_mixed(result.model,geo_entity_mesh(result,2,1),1)
 validate(projected).ok || error("Tessella embedded-line projection is invalid")
 projected.entity_data.entities[(2,1)].embedded_curves==Int32[5] ||
     error("Tessella projection did not attach Curve[5] to Surface[1]")

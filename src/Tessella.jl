@@ -25,11 +25,11 @@ const TESSELLA_STAGE = 6  # see STATUS.md stage board
 include("core/GmshLibm.jl")       # platform-libm shims for Gmsh/OCCT bit parity
 include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
 include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
-include("core/MeshEntityTopology.jl") # P5: deterministic global edge and face catalogs
 include("core/MeshPointLocation.jl") # P5: robust finalized-simplex reference inversion and AABB lookup
 include("core/MeshElementQuality.jl") # P5: robust Gmsh-shaped linear-simplex quality queries
 include("core/Transform.jl")      # P3: validated affine mesh transformations
 include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
+include("core/MeshEntityTopology.jl") # P5: deterministic global edge and face catalogs
 include("core/MeshQuadrature.jl") # P5: bounded Gmsh-shaped reference quadrature
 include("core/MeshReferenceGeometry.jl") # P5: robust Gmsh-shaped linear-simplex Jacobians
 include("core/MeshFunctionSpaces.jl") # P5: arbitrary-order nodal and order-one H1/simplex-H(curl) bases
@@ -43,6 +43,7 @@ include("structured/TransfiniteQuad.jl") # P4: recombined four-sided quadrangle 
 include("structured/StructuredRecombine.jl") # P4: shared recombined-volume emission/audit
 include("structured/TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
 include("structured/TransfinitePrism.jl") # P4: affine five-face transfinite prisms
+include("structured/StructuredQuadTri.jl") # P4: transfinite boundary-diagonal transitions
 include("structured/TransfiniteHex.jl") # P4: affine six-face recombined hexahedra
 include("meshing/ExactMesh3D.jl") # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("interfaces/IO.jl")       # Stage 0: .msh v2/v4 read/write, STL, .geo scan

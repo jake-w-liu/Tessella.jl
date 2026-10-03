@@ -73,8 +73,10 @@ try
     # explicit Transfinite count both produce quarter-point subdivisions here.
     native_execution=execute_geo(NATIVE_GEO;mesh_dim=2)
     native_model=native_execution.model
-    native_mesh=native_execution.mesh
-    native_mesh===nothing && error("Tessella native periodic `.geo` did not mesh")
+    native_global_mesh=native_execution.mesh
+    native_global_mesh===nothing && error("Tessella native periodic `.geo` did not mesh")
+    validate(native_global_mesh).ok || error("Tessella native periodic global mesh is invalid")
+    native_mesh=geo_entity_mesh(native_execution,2,1)
     validate(native_mesh).ok || error(
         "Tessella native periodic `.geo` mesh is invalid")
     native_crc=mesh_crc(native_mesh).sha
@@ -205,8 +207,10 @@ try
         "Gmsh two-direction y-periodic relation changed")
 
     two_execution=execute_geo(TWO_DIRECTION_GEO;mesh_dim=2)
-    two_mesh=two_execution.mesh
-    two_mesh===nothing && error("Tessella two-direction `.geo` did not mesh")
+    two_global_mesh=two_execution.mesh
+    two_global_mesh===nothing && error("Tessella two-direction `.geo` did not mesh")
+    validate(two_global_mesh).ok || error("Tessella two-direction global mesh is invalid")
+    two_mesh=geo_entity_mesh(two_execution,2,1)
     two_crc=mesh_crc(two_mesh).sha
     two_crc=="de51a8ac11edaf3bb95a4a7c4dbf55d27c8e1908a6c4bff3b0100463f69aafc3" ||
         error("Tessella two-direction periodic mesh CRC changed to $two_crc")

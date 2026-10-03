@@ -249,6 +249,77 @@ const CASES = (
     out[] = Extrude {0,0,1} { Point{1}; };
     out2[] = Extrude {{0,0,1},{0,0,0},Pi/2} { Point{2}; };
     """,
+    # The ListOfShapes grammar accepts nested Extrude value terms inside
+    # numeric entity tags, while rejecting bare nested Extrude members.
+    """
+    Point(1) = {0,0,0,1};
+    out[] = Extrude {0,1,0} {
+        Point{Extrude {0,0,1} { Point{1}; }};
+    };
+    """,
+    """
+    Point(1) = {0,0,0,1};
+    out[] = Extrude {0,1,0} {
+        Point{Extrude {0,0,1} { Point{1}; Layers{3}; Recombine; }};
+        Layers{2};
+    };
+    """,
+    """
+    Point(1) = {0,0,0,1};
+    out[] = Extrude {0,1,0} {
+        Point{Extrude {0,0,1} {
+            Point{Extrude {1,0,0} { Point{1}; }};
+        }};
+    };
+    """,
+    """
+    Point(1) = {1,0,0,1};
+    out[] = Extrude {0,0,1} {
+        Point{Extrude {{0,0,1},{0,0,0},Pi/2} { Point{1}; }};
+    };
+    """,
+    """
+    Point(1) = {1,0,0,1};
+    out[] = Extrude {0,1,0} {
+        Point{Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} { Point{1}; }};
+    };
+    """,
+    """
+    Point(1) = {0,0,0,1};
+    out[] = Extrude {0,0,1} {
+        Point{1}; Layers{2}; ScaleLastLayer; Recombine;
+    };
+    """,
+    """
+    Point(1) = {0,0,0,1};
+    out[] = Extrude {0,0,1} {
+        Point{1}; Layers{2}; QuadtriAddverts Recomblaterals;
+    };
+    """,
+    """
+    Point(1) = {0,0,0,1};
+    out[] = Extrude {0,0,1} {
+        Point{1}; Layers{2}; QuadtrinoNewverts RecombLaterals;
+    };
+    """,
+)
+
+const ERROR_CASES = (
+    ("Point(1)={0,0,0,1};\n" *
+     "Extrude {0,1,0} { Extrude {0,0,1} { Point{1}; }; }\n", "Extrude"),
+    ("Point(1)={0,0,0,1};\n" *
+     "Extrude {0,1,0} { Point{1}; Layers{0}; Point{99}; }\n", "Point"),
+    ("Point(1)={0,0,0,1};\n" *
+     "Extrude {0,1,0} { Point{1}; Recombine; " *
+     "Point(9)={9,0,0,1}; }\n", "Point"),
+    ("Point(1)={0,0,0,1};\n" *
+     "Extrude {0,1,0} { Point{1}; Using View[3]; " *
+     "GeoEntity{0}{1}; }\n", "GeoEntity"),
+    ("Point(1)={0,0,0,1};\n" *
+     "Extrude {0,1,0} { Point{1}; Layers{2}; ScaleLast; }\n", "ScaleLast"),
+    ("SetFactory(\"OpenCASCADE\");\nPoint(1)={1,0,0,1};\n" *
+     "Extrude {{0,0,1},{0,0,1},{0,0,1},Pi/2} " *
+     "{ Point{1}; Layers{2}; Point{99}; }\n", "Point"),
 )
 
 # Rotational `Extrude` cases compare coordinates bit-for-bit on platforms
@@ -258,7 +329,7 @@ const CASES = (
 # 2.0e-21 on cos(Pi/2)-scale components, 2.2e-16 in case 25's Gram-Schmidt
 # frame), so those cases compare at COORD_ATOL instead of bit-for-bit —
 # the same convention as validation/geo_transforms.
-const ULP_CASES = Set((14, 16, 18, 19, 20, 22, 23, 24, 25, 26))
+const ULP_CASES = Set((14, 16, 18, 19, 20, 22, 23, 24, 25, 26, 30, 31))
 const COORD_ATOL = 64 * eps(1.0)
 
 const GMSH_EXECUTABLE = find_gmsh_executable()
@@ -367,10 +438,39 @@ try
                 samples[] += 1
             end
         end
+        # Let Gmsh finish syntax recovery and close each parser file. A
+        # thrown parser error leaves its input handle open on Windows and
+        # prevents subsequent cases from resetting the parser state.
+        gmsh.option.setNumber("General.AbortOnError", 0)
+        for (case_index, (source, token)) in enumerate(ERROR_CASES)
+            path=joinpath(directory,"error$case_index.geo")
+            write(path,source)
+            actual=try
+                Tessella.GeoExec.execute_geo(path)
+                ""
+            catch err
+                sprint(showerror,err)
+            end
+            gmsh.clear()
+            gmsh.logger.start()
+            expected=try
+                gmsh.open(path)
+                join(gmsh.logger.get(),"\n")
+            finally
+                gmsh.logger.stop()
+            end
+            diagnostic="syntax error ($token)"
+            occursin(diagnostic,actual) || error(
+                "error case $case_index Tessella diagnostic differs: $actual")
+            occursin(diagnostic,expected) || error(
+                "error case $case_index Gmsh diagnostic differs: $expected")
+            samples[]+=1
+        end
     end
 
     println("GEO_EXTRUDE_DIFFERENTIAL_OK gmsh=$runtime_version " *
             "cases=$(length(CASES)) samples=$(samples[]) " *
+            "error_cases=$(length(ERROR_CASES)) " *
             "bit_exact=$(length(CASES) - length(ULP_CASES))/" *
             "$(length(CASES))")
 finally

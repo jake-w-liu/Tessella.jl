@@ -138,7 +138,7 @@ end
     @test validate(topology_projected).ok
     @test topology_projected.physical_names==topology.model.physical_names
     @test mixed_crc(topology_projected).sha==
-          "4640321fc7eb29fef6951cf2faf8975fcaa75ab332b37e29a55a4c47f9d7ed05"
+          "80692b37f43b68ee26fe3b5cfd462173c3af1fbcd5ffc5ed4d2af50b72a98ed0"
 
     holed_topology=_execute_point_mesh_size_source(raw"""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};

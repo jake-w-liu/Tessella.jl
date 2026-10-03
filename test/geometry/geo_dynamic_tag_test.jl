@@ -80,7 +80,7 @@ end
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==
-          "8d94c09de58fad89d00b3e405a46220e872be8e0a694390ce4881e925be34700"
+          "862954f294ee82b3f7ab3871457a51b99c9053f261b0d9f30e8b00b161091934"
 
     primitive_source=raw"""
         SetFactory("OpenCASCADE");

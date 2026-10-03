@@ -181,18 +181,58 @@ function _compare_exact(label,gmsh_values,tessella_values)
     return nothing
 end
 
+# Full Hexahedron orientation blocks can contribute gigabytes to this
+# checksum. Keep its byte protocol unchanged while retaining only one
+# fixed-size encoding buffer and the incremental SHA state.
+struct _FunctionChecksum
+    context::SHA.SHA2_256_CTX
+    buffer::Vector{UInt8}
+end
+_FunctionChecksum()=_FunctionChecksum(SHA.SHA2_256_CTX(),Vector{UInt8}(undef,65536))
+
+@inline function _function_put_u64!(buffer,offset,value::UInt64)
+    @inbounds for shift in 0:8:56
+        buffer[offset+(shift>>3)]=(value>>shift)%UInt8
+    end
+    return nothing
+end
+
+function _function_checksum_header!(stream,label,count)
+    SHA.update!(stream.context,codeunits(label))
+    stream.buffer[1]=0
+    SHA.update!(stream.context,stream.buffer,1)
+    _function_put_u64!(stream.buffer,1,UInt64(count))
+    SHA.update!(stream.context,stream.buffer,8)
+    return nothing
+end
+
 function _write_ints!(stream,label,values)
-    write(stream,codeunits(label));write(stream,UInt8(0))
-    write(stream,htol(UInt64(length(values))))
-    foreach(value->write(stream,htol(Int64(value))),values)
+    _function_checksum_header!(stream,label,length(values))
+    used=0
+    for value in values
+        _function_put_u64!(stream.buffer,used+1,reinterpret(UInt64,Int64(value)))
+        used+=8
+        if used==length(stream.buffer)
+            SHA.update!(stream.context,stream.buffer)
+            used=0
+        end
+    end
+    used==0 || SHA.update!(stream.context,stream.buffer,used)
     return nothing
 end
 
 function _write_floats!(stream,label,values)
-    write(stream,codeunits(label));write(stream,UInt8(0))
-    write(stream,htol(UInt64(length(values))))
-    foreach(value->write(
-        stream,htol(reinterpret(UInt64,Float64(value)))),values)
+    _function_checksum_header!(stream,label,length(values))
+    used=0
+    for value in values
+        _function_put_u64!(stream.buffer,used+1,reinterpret(UInt64,Float64(value)))
+        used+=8
+        if used==length(stream.buffer)
+            SHA.update!(stream.context,stream.buffer)
+            used=0
+        end
+    end
+    used==0 || SHA.update!(stream.context,stream.buffer,used)
     return nothing
 end
 
@@ -242,7 +282,7 @@ try
         fixture=_function_mesh()
         baseline=mesh_crc(fixture)
         _install_function_mesh!(fixture)
-        stream=IOBuffer()
+        stream=_FunctionChecksum()
 
         rng=Xoshiro(0x4d65736846756e63)
         local_coordinates=Float64[
@@ -602,9 +642,10 @@ try
         # Higher-order hierarchical H1 and H(curl) families across every
         # reference type Gmsh 4.15.2 supports: Line, Triangle, Quadrangle,
         # Tetrahedron, Hexahedron, Prism (and the order-independent Point
-        # H1). Basis blocks are compared on the full orientation set for
-        # small families and on a selected spread for Quadrangle (24),
-        # Prism (720), and Hexahedron (40320) to keep the run bounded.
+        # H1). Basis blocks are compared on the full orientation set and
+        # on a selected spread for Quadrangle (24), Prism (720), and
+        # Hexahedron (40320). Their checksum bytes are streamed so retaining
+        # the complete oracle comparisons does not grow a second full copy.
         high_h1_spaces=("H1Legendre2","H1Legendre4","GradH1Legendre3")
         high_hcurl_spaces=("HcurlLegendre1","HcurlLegendre3",
                            "CurlHcurlLegendre2")
@@ -952,7 +993,7 @@ try
                 "a rejected function-space query changed the mesh")
         end
 
-        result=bytes2hex(SHA.sha256(take!(stream)))
+        result=bytes2hex(SHA.digest!(stream.context))
         result=="b28f429e11b56c08f8b39999b892a7132cdd9d7eed79a5cf2e63835fdf525ac4" ||
             error("mesh function-space checksum changed to $result")
         result,length(nodal_coordinates)÷3,actual_order_case_count,

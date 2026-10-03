@@ -21,8 +21,10 @@ const MSH2_CRC=
     "8fe4b288e11227ac3b4a717a37893e98bc090c10abd731b3653bfb467093968d"
 
 execution=execute_geo(GEO;mesh_dim=2)
-mesh=execution.mesh
-mesh===nothing && error("Tessella embedded periodic curves produced no mesh")
+global_mesh=execution.mesh
+global_mesh===nothing && error("Tessella embedded periodic curves produced no mesh")
+validate(global_mesh).ok || error("Tessella embedded periodic global mesh is invalid")
+mesh=geo_entity_mesh(execution,2,1)
 validate(mesh).ok || error("Tessella embedded periodic-curve mesh is invalid")
 mesh_crc(mesh).sha==MESH_CRC || error(
     "Tessella embedded periodic-curve mesh CRC changed: $(mesh_crc(mesh).sha)")

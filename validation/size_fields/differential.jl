@@ -459,14 +459,8 @@ function check_external_process()
         isfile(julia) || error("Julia executable not found for ExternalProcess: $julia")
         command = if Sys.iswindows()
             # Gmsh's ExternalProcess field CreateProcess's the CommandLine
-            # directly (no shell), so POSIX quoting fails with
-            # ERROR_FILE_NOT_FOUND. Double quotes also break: Tessella wraps
-            # the same string in `cmd /c`, whose quote-stripping then eats
-            # the leading quote. Keep the line bare — Sys.BINDIR and the
-            # mktempdir path must not contain spaces for this probe.
-            any(isspace, julia * helper) && error(
-                "ExternalProcess probe requires space-free paths: $julia, $helper")
-            "$julia --startup-file=no $helper"
+            # directly; native Windows double quotes support paths with spaces.
+            "\"$julia\" --startup-file=no \"$helper\""
         else
             Base.shell_escape(julia, "--startup-file=no", helper)
         end
