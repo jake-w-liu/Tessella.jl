@@ -7790,6 +7790,78 @@ function _surface_part_strip(kernel::MixedMesh,caller::AbstractString,
     return MixedMesh(kernel.coords,blocks)
 end
 
+# Gmsh's unsigned GEdgeLoop corner frame determines the compact lattice, while
+# Generator::orientMeshGFace subsequently orients emitted cells to the CAD
+# surface before applying the user's Reverse constraint. Keep the interpolation
+# frame (also consumed by transfinite volumes) and compare only its topological
+# cycle with the signed exterior loop. No floating normal or centroid is needed.
+function _transfinite_tri_frame_reversed(m::GeoModel,signed_curves,frame,
+                                          caller::AbstractString,t::Int)
+    junctions=ntuple(3) do k
+        signed=signed_curves[k]
+        signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+    end
+    start=findfirst(==(frame[1]),junctions)
+    start===nothing && throw(ErrorException(
+        "$caller: Transfinite Surface[$t] frame is outside its boundary"))
+    all(k->frame[k]==junctions[mod1(start+k-1,3)],1:3) && return false
+    all(k->frame[k]==junctions[mod1(start-k+1,3)],1:3) && return true
+    throw(ErrorException(
+        "$caller: Transfinite Surface[$t] frame is not a boundary cycle"))
+end
+
+# Four-sided faces use the same unsigned GEdgeLoop interpolation frame as
+# three-sided faces. The explicit corner frame can also oppose the CAD loop;
+# orient the emitted cells after interpolation, before the user's Reverse.
+function _transfinite_quad_frame_reversed(m::GeoModel,signed_curves,frame,
+                                           caller::AbstractString,t::Int)
+    junctions=ntuple(4) do k
+        signed=signed_curves[k]
+        signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+    end
+    start=findfirst(==(frame[1]),junctions)
+    start===nothing && throw(ErrorException(
+        "$caller: Transfinite Surface[$t] frame is outside its boundary"))
+    all(k->frame[k]==junctions[mod1(start+k-1,4)],1:4) && return false
+    all(k->frame[k]==junctions[mod1(start-k+1,4)],1:4) && return true
+    throw(ErrorException(
+        "$caller: Transfinite Surface[$t] frame is not a boundary cycle"))
+end
+
+# A ruled sphere's radius belongs to the original CAD generatrix frame
+# (TransfiniteSph uses its first corner), even when the meshing frame rotates
+# or reverses. Preserve S(u,v) and map the grid parameters by that D4 symmetry.
+@inline _transfinite_quad_corner_uv(k::Int)=
+    (k in (2,3) ? 1.0 : 0.0,k in (3,4) ? 1.0 : 0.0)
+
+@inline function _transfinite_quad_frame_parameter(du,dv,u,v)
+    return du==1.0 ? u : du==-1.0 ? 1.0-u : dv==1.0 ? v : 1.0-v
+end
+
+function _transfinite_quad_sphere_eval(m::GeoModel,t::Int,signed_curves,frame,
+                                       center::NTuple{3,Float64},
+                                       caller::AbstractString)
+    interpolate=_transfinite_sphere_eval(m,t,signed_curves,center,caller)
+    original=ntuple(4) do k
+        signed=signed_curves[k]
+        signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+    end
+    Tuple(frame)==original && return interpolate
+    slots=ntuple(4) do k
+        slot=findfirst(==(frame[k]),original)
+        slot===nothing && throw(ErrorException(
+            "$caller: Transfinite Surface[$t] frame is outside its boundary"))
+        slot
+    end
+    a=_transfinite_quad_corner_uv(slots[1])
+    b=_transfinite_quad_corner_uv(slots[2])
+    d=_transfinite_quad_corner_uv(slots[4])
+    du=(b[1]-a[1],b[2]-a[2]);dv=(d[1]-a[1],d[2]-a[2])
+    return (u,v)->interpolate(
+        _transfinite_quad_frame_parameter(du[1],dv[1],u,v),
+        _transfinite_quad_frame_parameter(du[2],dv[2],u,v))
+end
+
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    param_sizes::Dict{Tuple{Int,Float64},
                                                     Float64},
@@ -7797,7 +7869,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    size_field::Union{Nothing,
                                                      AbstractSizeField}=
                                        nothing)
-    spec,signed_curves,curve_points,nside,allow_warped,_,project_plane,
+    spec,signed_curves,curve_points,nside,allow_warped,junctions,project_plane,
         sphere_center,ruled_tri=_transfinite_surface_sides(m,t,caller)
     if nside==3
         s1,s2,s3=curve_points
@@ -7811,12 +7883,12 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                     "boundary curve node counts ($(length(s1)), " *
                     "$(length(s2)), $(length(s3)))"))
             # `findTransfiniteCorners` canonicalizes an unpinned boundary
-            # through `GEdgeLoop` — the corner order is the geometric chain
-            # order, not the signed loop order — so the compact lattice is
-            # independent of the declared signs and welds bitwise onto a
-            # prism volume's canonical face grid.
+            # through `GEdgeLoop` so the compact lattice is independent of
+            # declared signs and welds bitwise onto a prism volume's canonical
+            # face grid. Emitted surface winding is reconciled below, without
+            # changing that interpolation frame.
             if isempty(spec.corners)
-                _,curve_points=_transfinite_chained_tri(
+                junctions,curve_points=_transfinite_chained_tri(
                     m,signed_curves,curve_points,t,caller)
                 s1,s2,s3=curve_points
             end
@@ -7849,31 +7921,37 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         mesh=kernel isa MixedMesh ?
             _surface_part_strip(kernel,caller,t) :
             Mesh(kernel.coords;tris=kernel.tris)
+        _transfinite_tri_frame_reversed(m,signed_curves,junctions,caller,t) &&
+            (mesh=_reversed_surface_mesh(mesh,caller,t))
         return _consume_surface_attributes(m,t,mesh,caller)
     end
+    if isempty(spec.corners)
+        # The chaining helper is generic in side count; only this public
+        # surface path changes its frame. Volume-grid consumers keep theirs.
+        junctions,curve_points=_transfinite_chained_tri(
+            m,signed_curves,curve_points,t,caller)
+    end
+    interpolate=sphere_center===nothing ? nothing : _transfinite_quad_sphere_eval(
+        m,t,signed_curves,junctions,sphere_center,caller)
     bottom,right,top,left=curve_points
     kernel=if _model_surface_recombined(m,t)
         mesh_transfinite_quad_patch(bottom,right,top,left;
                                     arrangement=spec.arrangement,
                                     allow_warped=allow_warped,
                                     project_plane=project_plane,
-                                    interpolate=sphere_center===nothing ?
-                                        nothing : _transfinite_sphere_eval(
-                                            m,t,signed_curves,sphere_center,
-                                            caller))
+                                    interpolate=interpolate)
     else
         mesh_transfinite_patch(bottom,right,top,left;
                                arrangement=spec.arrangement,
                                allow_warped=allow_warped,
                                project_plane=project_plane,
-                               interpolate=sphere_center===nothing ?
-                                   nothing : _transfinite_sphere_eval(
-                                       m,t,signed_curves,sphere_center,
-                                       caller))
+                               interpolate=interpolate)
     end
     mesh=kernel isa MixedMesh ?
         _surface_part_strip(kernel,caller,t) :
         Mesh(kernel.coords;tris=kernel.tris)
+    _transfinite_quad_frame_reversed(m,signed_curves,junctions,caller,t) &&
+        (mesh=_reversed_surface_mesh(mesh,caller,t))
     return _consume_surface_attributes(m,t,mesh,caller)
 end
 

@@ -130,7 +130,23 @@ struct _MeshClassification
     tet_entities::Vector{Int32}
     cell_entities::Dict{Int,Vector{Int32}}
     public_tags::Union{Nothing,_CachePublicTags}
+    # Exact support identities from the classified lower-dimensional cells.
+    # These maps are read-only once the classification is published.
+    edge_entities::Dict{NTuple{2,Int32},Tuple{Int,Int32}}
+    face_entities::Dict{NTuple{3,Int32},Tuple{Int,Int32}}
+    quad_entities::Dict{NTuple{4,Int32},Tuple{Int,Int32}}
 end
+
+_MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+                    cells,tags,edges,faces)=
+    _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+        cells,tags,edges,faces,Dict{NTuple{4,Int32},Tuple{Int,Int32}}())
+
+_MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+                    cells,tags)=
+    _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
+        cells,tags,Dict{NTuple{2,Int32},Tuple{Int,Int32}}(),
+        Dict{NTuple{3,Int32},Tuple{Int,Int32}}())
 
 _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,cells)=
     _MeshClassification(mesh,entity,entities,node_entities,boundaries,segs,tris,tets,
@@ -161,6 +177,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.MinCurveNodes"=>3.0,
     "Mesh.ToleranceEdgeLength"=>0.0,
     "Geometry.Tolerance"=>1.0e-8,
+    "Geometry.OldRuledSurface"=>0.0,
     "Mesh.MeshOnlyEmpty"=>0.0,
     "Mesh.MeshOnlyVisible"=>0.0,
     "Mesh.MaxRetries"=>10.0,
@@ -414,7 +431,7 @@ end
 # Rebind retained actual quadratic geometry by primary-node identity. Neither
 # endpoint coordinates nor a reconstructed straight midpoint identifies an
 # edge: coincident independent entities can carry different curved maps.
-function _prepare_preserved_high_order_overlay(cache::Mesh,class,source::Mesh,
+function _prepare_preserved_high_order_geometry(cache::Mesh,source::Mesh,
         overlay,caller::AbstractString;primary_map=nothing,
         mid_coordinates=overlay.coords,certify::Bool=false)
     dimension=ntets(cache)>0 ? 3 : ntris(cache)>0 ? 2 : 0
@@ -493,6 +510,16 @@ function _prepare_preserved_high_order_overlay(cache::Mesh,class,source::Mesh,
         _check_geometry=false) : P2Mesh(coordinates,cells;tet_tag=cache.tet_tag,
         require_positive_tets=false,_check_geometry=false)
     certify && _api_p2_overlay_certify(p2,caller)
+    return p2
+end
+
+function _prepare_preserved_high_order_overlay(cache::Mesh,class,source::Mesh,
+        overlay,caller::AbstractString;primary_map=nothing,
+        mid_coordinates=overlay.coords,certify::Bool=false)
+    p2=_prepare_preserved_high_order_geometry(cache,source,overlay,caller;
+        primary_map,mid_coordinates,certify)
+    p2===nothing && return nothing
+    dimension=ntets(cache)>0 ? 3 : 2
     entities=class===nothing ? Tuple{Int,Int32}[(dimension,Int32(0))] : class.entities
     return (p2,_p2_mid_owners(p2,cache,class,dimension,Int.(last.(entities))))
 end
@@ -601,14 +628,16 @@ _copy_mesh(mesh::MixedMesh)=_canonical_mixed_copy(mesh)
     option(name) -> Float64
     option(name, value) -> Float64
 
-Get or set one supported process-global mesh option in an initialized session.
+Get or set one supported process-global option in an initialized session.
 `MeshSizeMin` is nonnegative; `MeshSizeMax`, `MeshSizeFactor`, and its alias
 `CharacteristicLengthFactor` (one upstream `lcFactor` value) are positive;
 the minimum may not exceed the maximum. `Mesh.TransfiniteTri` is 0 or 1 and
 selects the three-sided transfinite surface algorithm. `Mesh.FlexibleTransfinite`,
 `Mesh.RecombineAll`, and `Mesh.MeshSizeExtendFromBoundary` store truncated integer
 flags. `Mesh.RecombinationAlgorithm` truncates to 0–4 (out-of-range resets to 0).
-These options feed meshing policies at `generate` time. Boolean and
+`Geometry.OldRuledSurface` selects the legacy triangular ruled evaluator for
+geometry and computed native node-parameter queries. The mesh options feed
+meshing policies at `generate` time. Boolean and
 nonfinite values are rejected, and a failed update leaves all options unchanged.
 """
 function option(name::AbstractString)
@@ -647,7 +676,7 @@ function option(name::AbstractString, value::Real)
                         "Mesh.MeshSizeExtendFromBoundary","Mesh.MeshSizeFromPoints",
                         "Mesh.MeshSizeFromCurvature","Mesh.MeshOnlyEmpty",
                         "Mesh.MeshOnlyVisible","Mesh.MaxRetries","Mesh.Renumber",
-                        "Mesh.ElementOrder","Mesh.SaveAll")
+                        "Mesh.ElementOrder","Mesh.SaveAll","Geometry.OldRuledSurface")
             # Gmsh stores `(int)val` — truncation, not a 0/1 restriction.
             v=Float64(_geo_signed_gmsh_int_value(v,"API.option"))
         elseif key in ("Mesh.MinLineNodes","Mesh.MinCircleNodes","Mesh.MinCurveNodes")
@@ -906,15 +935,18 @@ _get_entity_properties(dim,tag)=_with_model() do current
 end
 
 _get_value(dim,tag,parametric_coord)=_with_model() do current
-    model_value(current,dim,tag,parametric_coord)
+    model_value(current,dim,tag,parametric_coord;
+        old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
 _get_derivative(dim,tag,parametric_coord)=_with_model() do current
-    model_derivative(current,dim,tag,parametric_coord)
+    model_derivative(current,dim,tag,parametric_coord;
+        old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
 _get_second_derivative(dim,tag,parametric_coord)=_with_model() do current
-    model_second_derivative(current,dim,tag,parametric_coord)
+    model_second_derivative(current,dim,tag,parametric_coord;
+        old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
 _get_curvature(dim,tag,parametric_coord)=_with_model() do current
@@ -926,11 +958,16 @@ _get_principal_curvatures(tag,parametric_coord)=_with_model() do current
 end
 
 _get_normal(tag,parametric_coord)=_with_model() do current
-    model_normal(current,tag,parametric_coord)
+    model_normal(current,tag,parametric_coord;
+        old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
 end
 
+_api_model_parametrization(current,dim,tag,coord)=
+    model_parametrization(current,dim,tag,coord;
+        old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
+
 _get_parametrization(dim,tag,coord)=_with_model() do current
-    model_parametrization(current,dim,tag,coord)
+    _api_model_parametrization(current,dim,tag,coord)
 end
 
 _get_parametrization_bounds(dim,tag)=_with_model() do current
@@ -952,7 +989,8 @@ end
 _reparametrize_on_surface(dim,tag,parametric_coord,surface_tag,which=0)=
     _with_model() do current
         model_reparametrize_on_surface(
-            current,dim,tag,parametric_coord,surface_tag,which)
+            current,dim,tag,parametric_coord,surface_tag,which;
+            old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
     end
 
 _set_visibility(dim_tags,value,recursive=false)=_with_model() do current
@@ -1465,6 +1503,217 @@ end
 # block connectivity back into per-cache-cell entity tags. A projection failure
 # never fails generation: the record simply stays absent and entity-filtered
 # queries keep their explicit blocker.
+@inline function _api_support_face(a::Int32,b::Int32,c::Int32)
+    a>b && ((a,b)=(b,a))
+    b>c && ((b,c)=(c,b))
+    a>b && ((a,b)=(b,a))
+    return (a,b,c)
+end
+
+@inline function _api_support_quad(a::Int32,b::Int32,c::Int32,d::Int32)
+    a>b && ((a,b)=(b,a))
+    c>d && ((c,d)=(d,c))
+    a>c && ((a,c)=(c,a))
+    b>d && ((b,d)=(d,b))
+    b>c && ((b,c)=(c,b))
+    return (a,b,c,d)
+end
+
+@inline function _api_support_edges(family::Symbol)
+    family===:lin && return ((0,1),)
+    family===:tri && return Elements._TRI_EDGES
+    family===:qua && return Elements._QUA_EDGES
+    family===:tet && return Elements._TET_EDGES
+    family===:hex && return Elements._HEX_EDGES
+    family===:pri && return Elements._PRI_EDGES
+    family===:pyr && return Elements._PYR_EDGES
+    return ()
+end
+
+@inline function _api_support_faces(family::Symbol)
+    family===:tri && return ((1,2,3),)
+    family===:tet && return ((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+    family===:pri && return ((1,2,3),(4,5,6))
+    family===:pyr && return ((1,2,5),(2,3,5),(3,4,5),(4,1,5))
+    return ()
+end
+
+@inline function _api_support_quads(family::Symbol)
+    family===:qua && return ((1,2,3,4),)
+    family===:hex && return ((1,2,3,4),(5,6,7,8),(1,2,6,5),
+                           (2,3,7,6),(3,4,8,7),(4,1,5,8))
+    family===:pri && return ((1,2,5,4),(2,3,6,5),(3,1,4,6))
+    family===:pyr && return ((1,2,3,4),)
+    return ()
+end
+
+# A lower-dimensional actual cell certifies a stronger support than an
+# incident higher-dimensional cell. Same-dimension ties remain unresolved
+# until all lower-dimensional cells have been visited.
+function _api_support_insert!(owners::Dict{K,Tuple{Int,Int32}},
+                              conflicts::Set{K},key::K,owner) where K
+    previous=get(owners,key,(4,Int32(0)))
+    if owner[1]<previous[1]
+        owners[key]=owner
+        delete!(conflicts,key)
+    elseif owner[1]==previous[1] && owner!=previous
+        push!(conflicts,key)
+    end
+    return nothing
+end
+
+function _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,
+                             msh::Int,cells,owners)
+    family=msh_family(msh)
+    dimension=msh_dimension(msh)
+    dimension==0 && return nothing
+    length(owners)==size(cells,2) || throw(ArgumentError(
+        "API mesh classification: cell support ownership is incomplete"))
+    for column in axes(cells,2)
+        owner=(dimension,owners[column])
+        for (i,j) in _api_support_edges(family)
+            key=minmax(cells[i+1,column],cells[j+1,column])
+            _api_support_insert!(edges,edge_conflicts,key,owner)
+        end
+        if family===:tri
+            key=_api_support_face(cells[1,column],cells[2,column],cells[3,column])
+            _api_support_insert!(faces,face_conflicts,key,owner)
+        elseif family===:qua
+            key=_api_support_quad(cells[1,column],cells[2,column],cells[3,column],cells[4,column])
+            _api_support_insert!(quads,quad_conflicts,key,owner)
+        end
+    end
+    return nothing
+end
+
+function _api_check_support_conflicts(edges,faces,quads)
+    (isempty(edges) && isempty(faces) && isempty(quads)) || throw(ArgumentError(
+        "API mesh classification: an actual primary support has ambiguous " *
+        "entity ownership; a classified lower-dimensional cell is required"))
+    return nothing
+end
+
+function _api_projected_support_entities(mesh::MixedMesh)
+    edges=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
+    faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    edge_capacity=0;face_capacity=0;quad_capacity=0
+    for block in mesh.blocks
+        family=msh_family(block.msh)
+        edge_capacity+=length(_api_support_edges(family))*size(block.nodes,2)
+        family===:tri && (face_capacity+=size(block.nodes,2))
+        family===:qua && (quad_capacity+=size(block.nodes,2))
+    end
+    sizehint!(edges,edge_capacity);sizehint!(faces,face_capacity)
+    sizehint!(quads,quad_capacity)
+    for (index,block) in enumerate(mesh.blocks)
+        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,
+            Int(block.msh),block.nodes,mesh.entity_data.block_entities[index])
+    end
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    return edges,faces,quads
+end
+
+function _api_mesh_support_entities(mesh::Mesh,segs,tris,tets)
+    edges=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
+    faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    sizehint!(edges,nsegs(mesh)+3ntris(mesh)+6ntets(mesh))
+    sizehint!(faces,ntris(mesh))
+    for (msh,cells,owners) in ((1,mesh.segs,segs),(2,mesh.tris,tris),(4,mesh.tets,tets))
+        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,msh,cells,owners)
+    end
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    return edges,faces,quads
+end
+
+# Remapping uses primary node identities only. Filtering removes supports
+# whose actual primary cell no longer survives a selection or compaction.
+function _api_remap_support_entities(class,mesh,primary_map=nothing)
+    isempty(class.edge_entities) && isempty(class.face_entities) && isempty(class.quad_entities) &&
+        return class.edge_entities,class.face_entities,class.quad_entities
+    edge_keys=Set{NTuple{2,Int32}}()
+    face_keys=Set{NTuple{3,Int32}}()
+    quad_keys=Set{NTuple{4,Int32}}()
+    edge_capacity=0;face_capacity=0;quad_capacity=0
+    for (msh,cells,_) in _cache_native_blocks(mesh)
+        family=msh_family(msh)
+        edge_capacity+=length(_api_support_edges(family))*size(cells,2)
+        face_capacity+=length(_api_support_faces(family))*size(cells,2)
+        quad_capacity+=length(_api_support_quads(family))*size(cells,2)
+    end
+    sizehint!(edge_keys,edge_capacity);sizehint!(face_keys,face_capacity)
+    sizehint!(quad_keys,quad_capacity)
+    for (msh,cells,_) in _cache_native_blocks(mesh)
+        family=msh_family(msh)
+        for column in axes(cells,2)
+            for (i,j) in _api_support_edges(family)
+                push!(edge_keys,minmax(cells[i+1,column],cells[j+1,column]))
+            end
+            for (i,j,k) in _api_support_faces(family)
+                push!(face_keys,_api_support_face(cells[i,column],cells[j,column],cells[k,column]))
+            end
+            for (i,j,k,l) in _api_support_quads(family)
+                push!(quad_keys,_api_support_quad(cells[i,column],cells[j,column],cells[k,column],cells[l,column]))
+            end
+        end
+    end
+    edges=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
+    faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    sizehint!(edges,min(length(edge_keys),length(class.edge_entities)))
+    sizehint!(faces,min(length(face_keys),length(class.face_entities)))
+    sizehint!(quads,min(length(quad_keys),length(class.quad_entities)))
+    for (key,owner) in class.edge_entities
+        a,b=primary_map===nothing ? key : (primary_map[key[1]],primary_map[key[2]])
+        (a==0 || b==0 || a==b) && continue
+        mapped=minmax(Int32(a),Int32(b))
+        mapped in edge_keys || continue
+        _api_support_insert!(edges,edge_conflicts,mapped,owner)
+    end
+    for (key,owner) in class.face_entities
+        a,b,c=primary_map===nothing ? key :
+            (primary_map[key[1]],primary_map[key[2]],primary_map[key[3]])
+        (a==0 || b==0 || c==0 || a==b || a==c || b==c) && continue
+        mapped=_api_support_face(Int32(a),Int32(b),Int32(c))
+        mapped in face_keys || continue
+        _api_support_insert!(faces,face_conflicts,mapped,owner)
+    end
+    for (key,owner) in class.quad_entities
+        a,b,c,d=primary_map===nothing ? key :
+            (primary_map[key[1]],primary_map[key[2]],primary_map[key[3]],primary_map[key[4]])
+        (a==0 || b==0 || c==0 || d==0) && continue
+        mapped=_api_support_quad(Int32(a),Int32(b),Int32(c),Int32(d))
+        (mapped[1]==mapped[2] || mapped[2]==mapped[3] || mapped[3]==mapped[4]) && continue
+        mapped in quad_keys || continue
+        _api_support_insert!(quads,quad_conflicts,mapped,owner)
+    end
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    return edges,faces,quads
+end
+
+function _api_rebind_class(class,mesh::Mesh;
+        node_entities=class.node_entities,seg_entities=class.seg_entities,
+        tri_entities=class.tri_entities,tet_entities=class.tet_entities,
+        primary_map=nothing)
+    edges,faces,quads=primary_map===nothing ?
+        (class.edge_entities,class.face_entities,class.quad_entities) :
+        _api_remap_support_entities(class,mesh,primary_map)
+    cells=Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities)
+    return _MeshClassification(mesh,class.entity,class.entities,node_entities,
+        class.boundaries,seg_entities,tri_entities,tet_entities,cells,
+        class.public_tags,edges,faces,quads)
+end
+
 function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
                                cache::Mesh;_extrude_scope=nothing)
     classified=try
@@ -1512,9 +1761,12 @@ function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
     tet_entities=cell_entities(mesh.tets)
     (seg_entities===nothing || tri_entities===nothing ||
      tet_entities===nothing) && return nothing
+    edges,faces,quads=_api_projected_support_entities(classified)
     return _MeshClassification(
         cache,(dim,Int32(tag)),[(dim,Int32(tag))],copy(data.node_entities),
-        boundaries,seg_entities,tri_entities,tet_entities)
+        boundaries,seg_entities,tri_entities,tet_entities,
+        Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities),
+        nothing,edges,faces,quads)
 end
 
 # Classification certifies positive volumes even when the published cache
@@ -1546,6 +1798,12 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
     node_entities=fill((0,Int32(0)),nnodes(merged))
     boundaries=Dict{Tuple{Int,Int32},Vector{Int32}}()
     seg_entities=Int32[];tri_entities=Int32[];tet_entities=Int32[]
+    edge_entities=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
+    face_entities=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quad_entities=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
     dim=nothing
     for (tag,_,class) in parts
         class===nothing && return nothing
@@ -1555,6 +1813,18 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
     end
     for (part,(_,part_mesh,class)) in enumerate(parts)
         remap=remaps[part]
+        for (key,owner) in class.edge_entities
+            _api_support_insert!(edge_entities,edge_conflicts,
+                minmax(remap[key[1]],remap[key[2]]),owner)
+        end
+        for (key,owner) in class.face_entities
+            _api_support_insert!(face_entities,face_conflicts,
+                _api_support_face(remap[key[1]],remap[key[2]],remap[key[3]]),owner)
+        end
+        for (key,owner) in class.quad_entities
+            _api_support_insert!(quad_entities,quad_conflicts,
+                _api_support_quad(remap[key[1]],remap[key[2]],remap[key[3]],remap[key[4]]),owner)
+        end
         for (column,entity) in enumerate(class.node_entities)
             owner=_merged_node_owner(node_entities[remap[column]],entity)
             node_entities[remap[column]]=owner
@@ -1572,9 +1842,12 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
         append!(tri_entities,class.tri_entities)
         append!(tet_entities,class.tet_entities)
     end
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
     return _MeshClassification(
         merged,entities[1],entities,node_entities,boundaries,
-        seg_entities,tri_entities,tet_entities)
+        seg_entities,tri_entities,tet_entities,
+        Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities),
+        nothing,edge_entities,face_entities,quad_entities)
 end
 
 @inline function _merged_node_owner(current,next)
@@ -1714,29 +1987,45 @@ end
 
 # Overlay midnode indices (tag - linear node count) owned by `(dim, tag)` —
 # a preallocation-free two-pass scan over the stored owner table.
-function _p2_entity_mids(dim::Int,tag::Int)
+function _p2_entity_mids(dim::Int,tag::Int;class=nothing,include_boundary=false)
     mids=LAST_MESH_HIGH_ORDER_MIDS[]
+    selected=Set{Tuple{Int,Int32}}([(dim,Int32(tag))])
+    if include_boundary && class!==nothing
+        queue=Tuple{Int,Int32}[(dim,Int32(tag))]
+        position=1
+        while position<=length(queue)
+            key=queue[position];position+=1
+            key[1]>0 || continue
+            for boundary in get(class.boundaries,key,Int32[])
+                next=(key[1]-1,boundary)
+                next in selected && continue
+                push!(selected,next);push!(queue,next)
+            end
+        end
+    end
     count=0
     @inbounds for owner in mids
-        owner==(dim,Int32(tag)) && (count+=1)
+        owner in selected && (count+=1)
     end
     result=Vector{Int}(undef,count)
     position=0
     @inbounds for (index,owner) in enumerate(mids)
-        owner==(dim,Int32(tag)) && (result[position+=1]=index)
+        owner in selected && (result[position+=1]=index)
     end
     return result
 end
 
 # Append an overlay's midnodes owned by `(dim, tag)` to a node payload,
-# evaluating model parametrization when `parametric` — the same source the
-# linear path uses, so midnode params match Gmsh's per-node params.
+# evaluating the requested model carrier when `parametric`, as the native
+# primary-node query does. This computes UVs rather than returning an imported
+# element's optional stored parameter payload.
 function _append_p2_midnodes!(node_tags,coordinates,parameters,
                               model::GeoModel,cached::Mesh,dim::Int,tag::Int,
-                              parametric::Bool)
+                              parametric::Bool;include_boundary::Bool=false)
     overlay=_high_order_overlay(cached)
     overlay===nothing && return nothing
-    mids=_p2_entity_mids(dim,tag)
+    mids=_p2_entity_mids(dim,tag;class=_cached_classification_locked(cached),
+                         include_boundary)
     isempty(mids) && return nothing
     n0=nnodes(cached)
     for mid in mids
@@ -1750,44 +2039,35 @@ function _append_p2_midnodes!(node_tags,coordinates,parameters,
         @inbounds for (position,mid) in enumerate(mids),axis in 1:3
             values[3position-3+axis]=overlay.coords[axis,n0+mid]
         end
-        append!(parameters,model_parametrization(model,dim,tag,values))
+        append!(parameters,_api_model_parametrization(model,dim,tag,values))
     end
     return nothing
 end
 
-# Owner entity for each quadratic midnode, Gmsh-style: a midnode belongs to
-# the lowest-dimension entity containing its skeleton edge — approximated by
-# endpoint ownership (equal owners win; different-dim owners defer to the
-# higher-dim endpoint since a low-dim entity owns only its corner node; equal
-# dims on different entities mean an interior edge owned by the cell).
+# A quadratic support belongs to the lowest-dimensional actual classified
+# cell containing its primary edge. Endpoints alone cannot certify a carrier:
+# two boundary nodes can also span an interior chord.
 function _p2_mid_owners(p2,mesh::Mesh,class,dimension::Int,entities)
     conn=_p2_cells(p2)
     skeleton=dimension==2 ? mesh.tris : mesh.tets
-    cell_entities=class===nothing ? nothing :
-        dimension==2 ? class.tri_entities : class.tet_entities
-    node_entities=class===nothing ? Tuple{Int,Int32}[] :
-        class.node_entities
+    supports=class===nothing ? nothing : class.edge_entities
+    if class!==nothing && isempty(supports)
+        # Compatibility classes created without a projection can certify
+        # only the actual cells they contain, never an endpoint inference.
+        supports,_=_api_mesh_support_entities(mesh,class.seg_entities,
+                                              class.tri_entities,class.tet_entities)
+    end
     fallback=(dimension,Int32(first(entities)))
     owners=fill(fallback,nnodes(p2)-nnodes(mesh))
     @inbounds for cell in axes(conn,2),(slot,i,j) in _p2_edge_slots(p2)
         mid=Int(conn[slot,cell])
         index=mid-nnodes(mesh)
         (index<1 || index>length(owners)) && continue
-        owner=if isempty(node_entities)
-            fallback
-        else
-            a=Int(skeleton[i,cell]);b=Int(skeleton[j,cell])
-            ea=a<=length(node_entities) ? node_entities[a] : fallback
-            eb=b<=length(node_entities) ? node_entities[b] : fallback
-            if ea==eb
-                ea
-            elseif ea[1]==eb[1]
-                cell_entities===nothing || cell>length(cell_entities) ?
-                    fallback : (dimension,cell_entities[cell])
-            else
-                ea[1]>eb[1] ? ea : eb
-            end
-        end
+        key=minmax(skeleton[i,cell],skeleton[j,cell])
+        owner=supports===nothing ? fallback : get(supports,key,(4,Int32(0)))
+        owner[1]==4 && throw(ArgumentError(
+            "API quadratic mesh: actual primary-edge carrier metadata is " *
+            "incomplete; midpoint ownership cannot be inferred from endpoints"))
         owners[index]=owner
     end
     return owners
@@ -2163,6 +2443,26 @@ function _mesh_query_type_block(mesh::Union{Mesh,MixedMesh},element_type,tag,
     return msh,block,positions
 end
 
+# Query the actually published family, while using primary classification only
+# to select its entity columns. The replaced top-dimensional linear block is
+# absent; lower-dimensional linear cells retain their original representation.
+function _published_mesh_query_type_block(cached,element_type,tag,caller)
+    overlay=_high_order_overlay(cached)
+    if overlay!==nothing
+        msh=_mesh_query_integer(element_type,caller,"element_type")
+        if msh==_p2_etype(overlay)
+            _,_,positions=_mesh_query_type_block(cached,
+                Int(_p2_skeleton_etype(overlay)),tag,caller)
+            return overlay,msh,(_p2_tag_offset(cached,overlay),_p2_cells(overlay)),positions
+        elseif msh==_p2_skeleton_etype(overlay)
+            _mesh_query_type_block(cached,msh,tag,caller)
+            return cached,msh,nothing,Int[]
+        end
+    end
+    msh,block,positions=_mesh_query_type_block(cached,element_type,tag,caller)
+    return cached,msh,block,positions
+end
+
 @inline function _mesh_selected_columns(cells::AbstractMatrix{Int32},
                                         positions)
     return positions===nothing ? axes(cells,2) : positions
@@ -2295,6 +2595,62 @@ function _no_element_at_coordinates(caller::AbstractString,p)
         "$caller: no element found at ($(p[1]), $(p[2]), $(p[3]))"))
 end
 
+function _legacy_p2_local_coordinates(cached,overlay,tag::Int,p,caller;
+                                      location=false)
+    offset=_p2_tag_offset(cached,overlay)
+    if offset<tag<=offset+size(_p2_cells(overlay),2)
+        dimension=overlay isa P2TriMesh ? 2 : 3
+        return _mixed_local_coordinates(overlay,_p2_cells(overlay),tag-offset,
+            Int(_p2_etype(overlay)),dimension,dimension==2 ? :tri : :tet,
+            tag,p,caller;location=location)
+    end
+    return _local_coordinates(cached,tag,p,caller)
+end
+
+function _legacy_p2_matching_tags!(matches,cached,overlay,p,dimension,tolerance,caller)
+    empty!(matches)
+    offset=_p2_tag_offset(cached,overlay)
+    top_dimension=overlay isa P2TriMesh ? 2 : 3
+    for (msh,dim,block_offset,cells,_) in _cache_catalog(cached)
+        (dimension<0 || dim==dimension) || continue
+        for cell in axes(cells,2)
+            element=block_offset+cell
+            coordinates,residual,_=_legacy_p2_local_coordinates(
+                cached,overlay,element,p,caller;location=true)
+            coordinates===nothing && continue
+            family=offset<element<=offset+size(_p2_cells(overlay),2) ?
+                (top_dimension==2 ? :tri : :tet) : msh_spec(msh).family
+            _mixed_inside_reference(coordinates,residual,family,tolerance) &&
+                push!(matches,element)
+        end
+    end
+    return matches
+end
+
+function _legacy_p2_locate_elements(cached,overlay,p,dimension,strict,caller)
+    matches=Int[]
+    _legacy_p2_matching_tags!(matches,cached,overlay,p,dimension,
+        MeshPointLocation.STRICT_REFERENCE_TOLERANCE,caller)
+    if isempty(matches) && !strict
+        for tolerance in MeshPointLocation.RELAXED_REFERENCE_TOLERANCES
+            _legacy_p2_matching_tags!(matches,cached,overlay,p,dimension,tolerance,caller)
+            isempty(matches) || break
+        end
+    end
+    sort!(matches;by=element->(-Int(msh_dimension(
+        mesh_element_record(cached,element).element_type)),element))
+    return UInt64.(matches)
+end
+
+function _legacy_p2_element_record(cached,overlay,tag::Int)
+    offset=_p2_tag_offset(cached,overlay)
+    if offset<tag<=offset+size(_p2_cells(overlay),2)
+        return (element_type=_p2_etype(overlay),
+                node_tags=@view(_p2_cells(overlay)[:,tag-offset]))
+    end
+    return mesh_element_record(cached,tag)
+end
+
 function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
     caller="API.mesh.get_element_by_coordinates"
     return lock(STATE_LOCK) do
@@ -2302,15 +2658,19 @@ function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
         p=_mesh_query_point(x,y,z,caller)
         dimension=_mesh_query_dimension(dim,caller)
         strict_mode=_mesh_query_bool(strict,caller,"strict")
-        locator=_cached_mesh_locator_locked(cached)
-        tags=_locate_elements(locator,p,dimension,strict_mode,caller)
+        overlay=_high_order_overlay(cached)
+        tags=overlay===nothing ? _locate_elements(
+            _cached_mesh_locator_locked(cached),p,dimension,strict_mode,caller) :
+            _legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
         isempty(tags) && _no_element_at_coordinates(caller,p)
         table=_mesh_public_tags(cached)
         ordered=_mesh_public_location_order(cached,tags)
         element_tag=first(ordered)
-        record=mesh_element_record(cached,element_tag)
-        coordinates,_,_=
-            _local_coordinates(cached,Int(element_tag),p,caller)
+        record=overlay===nothing ? mesh_element_record(cached,element_tag) :
+            _legacy_p2_element_record(cached,overlay,Int(element_tag))
+        coordinates,_,_=overlay===nothing ?
+            _local_coordinates(cached,Int(element_tag),p,caller) :
+            _legacy_p2_local_coordinates(cached,overlay,Int(element_tag),p,caller)
         return _cache_element_tag(table,element_tag),record.element_type,
             _cache_node_tags(table,record.node_tags),coordinates...
     end
@@ -2323,8 +2683,10 @@ function _get_elements_by_coordinates(x,y,z,dim=-1,strict=false)
         p=_mesh_query_point(x,y,z,caller)
         dimension=_mesh_query_dimension(dim,caller)
         strict_mode=_mesh_query_bool(strict,caller,"strict")
-        locator=_cached_mesh_locator_locked(cached)
-        tags=_locate_elements(locator,p,dimension,strict_mode,caller)
+        overlay=_high_order_overlay(cached)
+        tags=overlay===nothing ? _locate_elements(
+            _cached_mesh_locator_locked(cached),p,dimension,strict_mode,caller) :
+            _legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
         isempty(tags) && _no_element_at_coordinates(caller,p)
         return _cache_element_tags(_mesh_public_tags(cached),_mesh_public_location_order(cached,tags))
     end
@@ -2348,7 +2710,9 @@ function _get_local_coordinates_in_element(element_tag,x,y,z)
         cached=_cached_mesh_locked(caller)
         tag=_mesh_public_element_index(cached,element_tag,caller)
         p=_mesh_query_point(x,y,z,caller)
-        coordinates,_,_=_local_coordinates(cached,tag,p,caller)
+        overlay=_high_order_overlay(cached)
+        coordinates,_,_=overlay===nothing ? _local_coordinates(cached,tag,p,caller) :
+            _legacy_p2_local_coordinates(cached,overlay,tag,p,caller)
         return _require_local_coordinates(coordinates,caller,tag)
     end
 end
@@ -2360,15 +2724,67 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
         cached=_cached_mesh_locked(caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         selected=_mesh_task_tags(element_tags,task_index,task_count,caller)
+        overlay=_high_order_overlay(cached)
+        if overlay!==nothing
+            name=MeshElementQuality._quality_name(quality_name,caller)
+            offset=_p2_tag_offset(cached,overlay)
+            result=Vector{Float64}(undef,length(selected))
+            for (index,element) in enumerate(selected)
+                position=_mesh_public_element_index(cached,element,caller)
+                result[index]=offset<position<=offset+size(_p2_cells(overlay),2) ?
+                    _legacy_p2_quality(overlay,position-offset,name,caller) :
+                    only(mesh_element_qualities(cached,(position,),name))
+            end
+            return result
+        end
         mesh_element_qualities(cached,
             [_mesh_public_element_index(cached,tag,caller) for tag in selected],quality_name)
     end
+end
+
+# Evaluate a retained legacy overlay directly. The shared mixed-cell writer
+# needs only its actual coordinates/connectivity, so no copied cache is needed.
+function _legacy_p2_jacobians(overlay,local_coord,positions,offset::Int,caller)
+    local_coordinates,point_count=
+        MeshReferenceGeometry._checked_local_coordinates(local_coord,caller)
+    cells=_p2_cells(overlay)
+    selected=if positions isa UnitRange{Int}
+        MeshReferenceGeometry._checked_element_range(positions,size(cells,2),caller)
+        positions
+    else
+        MeshReferenceGeometry._checked_element_positions(positions,size(cells,2),caller)
+    end
+    (point_count==0 || isempty(selected)) && return Float64[],Float64[],Float64[]
+    results=MeshReferenceGeometry._allocate_results(length(selected),point_count,caller)
+    _mixed_write_jacobians!(results...,overlay,cells,selected,offset,
+        Int(_p2_etype(overlay)),local_coordinates,point_count,caller)
+    return results
 end
 
 function _get_jacobians(element_type,local_coord,tag=-1,task=0,num_tasks=1)
     caller="API.mesh.get_jacobians"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
+        overlay=_high_order_overlay(cached)
+        if overlay!==nothing
+            requested=_mesh_query_integer(element_type,caller,"element_type")
+            if requested==_p2_etype(overlay)
+                _,_,positions=_mesh_query_type_block(cached,
+                    Int(_p2_skeleton_etype(overlay)),tag,caller)
+                task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+                selected=positions===nothing ? _mesh_task_range(
+                    size(_p2_cells(overlay),2),task_index,task_count) :
+                    positions[_mesh_task_range(length(positions),task_index,task_count)]
+                return _legacy_p2_jacobians(overlay,local_coord,selected,
+                    _p2_tag_offset(cached,overlay),caller)
+            elseif requested==_p2_skeleton_etype(overlay)
+                # This family is replaced in the public element product.
+                _mesh_query_type_block(cached,requested,tag,caller)
+                _mesh_query_tasks(task,num_tasks,caller)
+                return _legacy_p2_jacobians(overlay,local_coord,1:0,
+                    _p2_tag_offset(cached,overlay),caller)
+            end
+        end
         msh,block,positions=_mesh_query_type_block(
             cached,element_type,tag,caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
@@ -2390,6 +2806,14 @@ function _get_jacobian(element_tag,local_coord)
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         tag=_mesh_public_element_index(cached,element_tag,caller)
+        overlay=_high_order_overlay(cached)
+        if overlay!==nothing
+            offset=_p2_tag_offset(cached,overlay)
+            if offset<tag<=offset+size(_p2_cells(overlay),2)
+                cell=tag-offset
+                return _legacy_p2_jacobians(overlay,local_coord,cell:cell,offset,caller)
+            end
+        end
         mesh_jacobian(cached,tag,local_coord)
     end
 end
@@ -2412,9 +2836,16 @@ function _get_basis_functions_orientation(element_type,function_space_type,
     caller="API.mesh.get_basis_functions_orientation"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block,positions=_mesh_query_type_block(
+        query_mesh,msh,block,positions=_published_mesh_query_type_block(
             cached,element_type,tag,caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
+        if query_mesh isa Union{P2TriMesh,P2Mesh}
+            count=positions===nothing ? size(block[2],2) : length(positions)
+            task_columns=_mesh_task_range(count,task_index,task_count)
+            selected=positions===nothing ? task_columns : positions[task_columns]
+            return _legacy_p2_basis_orientations(query_mesh,selected,
+                function_space_type;caller=caller)
+        end
         if positions!==nothing
             selected=_mesh_task_range(
                 length(positions),task_index,task_count)
@@ -2435,6 +2866,14 @@ function _get_basis_functions_orientation_for_element(
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         tag=_mesh_public_element_index(cached,element_tag,caller)
+        overlay=_high_order_overlay(cached)
+        if overlay!==nothing
+            offset=_p2_tag_offset(cached,overlay)
+            if offset<tag<=offset+size(_p2_cells(overlay),2)
+                return only(_legacy_p2_basis_orientations(overlay,
+                    tag-offset:tag-offset,function_space_type;caller=caller))
+            end
+        end
         mesh_basis_orientation(
             cached,tag,function_space_type;caller=caller)
     end
@@ -2465,7 +2904,7 @@ function _get_keys(element_type,function_space_type,tag=-1,
     caller="API.mesh.get_keys"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
-        msh,block,positions=_mesh_query_type_block(
+        query_mesh,msh,block,positions=_published_mesh_query_type_block(
             cached,element_type,tag,caller)
         needs_edges,needs_faces=_hierarchical_key_catalog_needs(
             function_space_type,msh_spec(msh).family)
@@ -2485,15 +2924,22 @@ function _get_keys(element_type,function_space_type,tag=-1,
                     cached,face_replacement,selected_cells,msh,function_space_type)
             end
         end
-        result=positions===nothing ?
+        result=if query_mesh isa Union{P2TriMesh,P2Mesh}
+            _legacy_p2_keys(query_mesh,
+                _mesh_selected_columns(block[2],positions),block[1],
+                function_space_type,edge_replacement,face_replacement;
+                return_coord=return_coord,caller=caller)
+        elseif positions===nothing
             mesh_keys(
                 cached,msh,function_space_type,edge_replacement,
                 face_replacement;
-                return_coord=return_coord,caller=caller) :
+                return_coord=return_coord,caller=caller)
+        else
             mesh_keys(
                 cached,msh,function_space_type,positions,edge_replacement,
                 face_replacement;
                 return_coord=return_coord,caller=caller)
+        end
         block!==nothing || return result
         needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
         needs_faces && (LAST_MESH_FACES[]=face_replacement)
@@ -2507,7 +2953,9 @@ function _get_keys_for_element(element_tag,function_space_type,
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         tag=_mesh_public_element_index(cached,element_tag,caller)
-        record=mesh_element_record(cached,tag)
+        overlay=_high_order_overlay(cached)
+        record=overlay===nothing ? mesh_element_record(cached,tag) :
+            _legacy_p2_element_record(cached,overlay,tag)
         needs_edges,needs_faces=_hierarchical_key_catalog_needs(
             function_space_type,msh_spec(Int(record.element_type)).family)
         edge_replacement=LAST_MESH_EDGES[]
@@ -2521,9 +2969,16 @@ function _get_keys_for_element(element_tag,function_space_type,
             face_replacement=_mesh_face_topology_for_key_cells(
                 cached,face_replacement,cells,Int(record.element_type),function_space_type)
         end
-        result=mesh_keys_for_element(
-            cached,tag,function_space_type,edge_replacement,face_replacement;
-            return_coord=return_coord,caller=caller)
+        result=if overlay!==nothing && record.element_type==_p2_etype(overlay)
+            offset=_p2_tag_offset(cached,overlay)
+            _legacy_p2_keys(overlay,tag-offset:tag-offset,offset,
+                function_space_type,edge_replacement,face_replacement;
+                return_coord=return_coord,caller=caller)
+        else
+            mesh_keys_for_element(
+                cached,tag,function_space_type,edge_replacement,face_replacement;
+                return_coord=return_coord,caller=caller)
+        end
         needs_edges && (LAST_MESH_EDGES[]=edge_replacement)
         needs_faces && (LAST_MESH_FACES[]=face_replacement)
         return result
@@ -2674,7 +3129,7 @@ function _get_all_faces(face_type)
     end
 end
 
-function _mesh_nodes_for_cells(mesh::Union{Mesh,MixedMesh},cells::Matrix{Int32})
+function _mesh_nodes_for_cells(mesh::Union{Mesh,MixedMesh,P2TriMesh,P2Mesh},cells::Matrix{Int32})
     count=length(cells)
     coordinate_count=Base.checked_mul(3,count)
     node_tags=Vector{UInt64}(undef,count)
@@ -2692,7 +3147,7 @@ function _mesh_nodes_for_cells(mesh::Union{Mesh,MixedMesh},cells::Matrix{Int32})
     return node_tags,coordinates
 end
 
-function _mesh_barycenters(mesh::Union{Mesh,MixedMesh},cells::AbstractMatrix{Int32},fast::Bool,
+function _mesh_barycenters(mesh::Union{Mesh,MixedMesh,P2TriMesh,P2Mesh},cells::AbstractMatrix{Int32},fast::Bool,
                            caller::AbstractString)
     nodes_per_element=size(cells,1)
     count=size(cells,2)
@@ -2805,11 +3260,11 @@ end
 
 # Flat parametric coordinates of the node positions in `indices` on the entity
 # `(dim, tag)`, matching Gmsh's `returnParametricCoord` output: one `u` per node
-# on a Line, `(u, v)` per node on a Plane, and nothing for Points, Volumes, or
-# all-dimension queries since they own no parametrization. Every classified
-# dim-1 entity is a straight Line and every classified dim-2 entity is a
-# loop-bounded Plane, so the exact-rational parametrization covers them all.
-function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh},dim::Int,tag::Int,
+# on a Curve, `(u, v)` per node on a Surface, and nothing for Points, Volumes, or
+# all-dimension queries since they own no parametrization. Tagged caches retain
+# their stored parameters; legacy native caches compute the owning entity's
+# inverse, including the ruled evaluator used by extruded laterals.
+function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh,P2TriMesh,P2Mesh},dim::Int,tag::Int,
                                  indices::Vector{Int})
     (dim==1 || dim==2) || return Float64[]
     if mesh isa MixedMesh && mesh.entity_data!==nothing
@@ -2822,7 +3277,7 @@ function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh},dim
                 if mesh.entity_data.node_entities[index]==(dim,Int32(tag))
                     parameter!==nothing && length(parameter)==dim && append!(values,parameter)
                 elseif !haskey(model.discrete,(dim,tag))
-                    append!(values,model_parametrization(model,dim,tag,collect(@view mesh.coords[:,index])))
+                    append!(values,_api_model_parametrization(model,dim,tag,collect(@view mesh.coords[:,index])))
                 end
             end
             return values
@@ -2836,7 +3291,7 @@ function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh},dim
     @inbounds for position in eachindex(indices),axis in 1:3
         coordinates[3position-3+axis]=mesh.coords[axis,indices[position]]
     end
-    return model_parametrization(model,dim,tag,coordinates)
+    return _api_model_parametrization(model,dim,tag,coordinates)
 end
 
 # --- Discrete/attached mesh data -------------------------------------------
@@ -3122,7 +3577,8 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                     node_tags,coordinates,parameters,record,parametric)
             end
             _append_p2_midnodes!(node_tags,coordinates,parameters,
-                                 model,cached,dimension,entity,parametric)
+                                 model,cached,dimension,entity,parametric;
+                                 include_boundary=boundary)
             return node_tags,coordinates,parameters
         end
         # All entities of `dimension`: classified entities first, then records.
@@ -3148,7 +3604,8 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                     model,cached,dimension,Int(entity_tag),group))
                 _append_p2_midnodes!(node_tags,coordinates,parameters,
                                      model,cached,dimension,
-                                     Int(entity_tag),parametric)
+                                     Int(entity_tag),parametric;
+                                     include_boundary=boundary)
             end
         end
         for (edim,etag,record) in _discrete_mesh_records(model)
@@ -3192,7 +3649,7 @@ function _get_node(node_tag)
             "metadata; generate a mesh so the cache owns entity ownership"))
         if tag>nnodes(cached)
             dimension,entity=LAST_MESH_HIGH_ORDER_MIDS[][tag-nnodes(cached)]
-            parameters=dimension in (1,2) ? vec(model_parametrization(
+            parameters=dimension in (1,2) ? vec(_api_model_parametrization(
                 model,dimension,Int(entity),
                 vec(overlay.coords[:,tag]))) : Float64[]
             return vec(overlay.coords[:,tag]),parameters,dimension,Int(entity)
@@ -3614,7 +4071,7 @@ function _get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)
                         class,Int(_p2_skeleton_etype(overlay)),entity)
                     ncache=length(positions)
                 end
-            else
+            elseif overlay===nothing || Int32(msh)!=_p2_skeleton_etype(overlay)
                 block=_mesh_element_block(cached,msh)
                 if block!==nothing
                     offset,cells=block
@@ -3674,12 +4131,13 @@ function _record_nodes_of_type(m::GeoModel,msh::Int32,tag::Int,
     node_tags=UInt64[]
     coordinates=Float64[]
     parameters=Float64[]
-    edim_filter=tag<0 ? -1 : Int(msh_spec(msh).dim)
+    spec=msh_spec(msh)
+    edim_filter=tag<0 ? -1 : Int(spec.dim)
     index_of=_record_node_index(m)
     for (edim,etag,record) in _discrete_mesh_records(m)
         (tag<0 || (etag==tag && edim==edim_filter)) || continue
         for i in eachindex(record.element_tags)
-            record.element_types[i]==msh || continue
+            msh_spec(record.element_types[i]).family==spec.family || continue
             for node in record.element_nodes[i]
                 owner,position=index_of[node]
                 push!(node_tags,UInt64(node))
@@ -3725,48 +4183,60 @@ function _get_nodes_by_element_type(element_type,tag=-1,
         coordinates=Float64[]
         parameters=Float64[]
         if cached!==nothing
-            _,block,positions=_mesh_query_type_block(
-                cached,element_type,tag,caller)
-            if block!==nothing
-                _,cells=block
-                selected=cells[:,_mesh_selected_columns(cells,positions)]
-                nt,co=_mesh_nodes_for_cells(cached,selected)
-                append!(node_tags,_cache_node_tags(_mesh_public_tags(cached),nt))
-                append!(coordinates,co)
-                if parametric
-                    class=_cached_classification_locked(cached)
-                    if class!==nothing
-                        # Gmsh packs each repeated node's parameters on its
-                        # owning entity — one `u` for Line owners, `(u, v)`
-                        # for Plane owners, and nothing for Point or Volume
-                        # owners — in entry order.
-                        node_list=Int.(vec(selected))
-                        groups=Dict{Tuple{Int,Int32},Vector{Int}}()
-                        for node in unique(node_list)
-                            owner=class.node_entities[node]
-                            owner[1] in (1,2) || continue
-                            push!(get!(groups,owner,Int[]),node)
-                        end
-                        node_parameters=Dict{Int,Vector{Float64}}()
-                        for ((owner_dim,owner_tag),members) in groups
-                            if class.public_tags!==nothing
-                                for node in members
-                                    node_parameters[node]=_mesh_entity_parameters(
-                                        model,cached,owner_dim,Int(owner_tag),[node])
+            # Gmsh selects the parent element family here, independently of
+            # the requested order, and emits every actual interpolation node.
+            requested_spec=msh_spec(msh32)
+            _mesh_query_type_block(cached,element_type,tag,caller)
+            overlay=_high_order_overlay(cached)
+            for (stored_msh,_,_,_,_) in _cache_catalog(cached)
+                msh_spec(stored_msh).family==requested_spec.family || continue
+                published_msh=overlay!==nothing && stored_msh==_p2_skeleton_etype(overlay) ?
+                    Int(_p2_etype(overlay)) : Int(stored_msh)
+                query_mesh,_,block,positions=_published_mesh_query_type_block(
+                    cached,published_msh,tag,caller)
+                if block!==nothing
+                    _,cells=block
+                    selected=cells[:,_mesh_selected_columns(cells,positions)]
+                    nt,co=_mesh_nodes_for_cells(query_mesh,selected)
+                    append!(node_tags,_cache_node_tags(_mesh_public_tags(cached),nt))
+                    append!(coordinates,co)
+                    if parametric
+                        class=_cached_classification_locked(cached)
+                        if class!==nothing
+                            # Gmsh packs each repeated node's parameters on its
+                            # owning entity — one `u` for Line owners, `(u, v)`
+                            # for Plane owners, and nothing for Point or Volume
+                            # owners — in entry order.
+                            node_list=Int.(vec(selected))
+                            groups=Dict{Tuple{Int,Int32},Vector{Int}}()
+                            for node in unique(node_list)
+                                owner=node<=length(class.node_entities) ?
+                                    class.node_entities[node] :
+                                    LAST_MESH_HIGH_ORDER_MIDS[][node-length(class.node_entities)]
+                                owner[1] in (1,2) || continue
+                                push!(get!(groups,owner,Int[]),node)
+                            end
+                            node_parameters=Dict{Int,Vector{Float64}}()
+                            for ((owner_dim,owner_tag),members) in groups
+                                if class.public_tags!==nothing
+                                    for node in members
+                                        node_parameters[node]=_mesh_entity_parameters(
+                                            model,cached,owner_dim,Int(owner_tag),[node])
+                                    end
+                                    continue
                                 end
-                                continue
+                                values=_mesh_entity_parameters(
+                                    model,query_mesh,owner_dim,Int(owner_tag),members)
+                                length(values)==length(members)*owner_dim || continue
+                                for (index,node) in enumerate(members)
+                                    node_parameters[node]=values[
+                                        (index-1)*owner_dim+1:index*owner_dim]
+                                end
                             end
-                            values=_mesh_entity_parameters(
-                                model,cached,owner_dim,Int(owner_tag),members)
-                            length(values)==length(members)*owner_dim || continue
-                            for (index,node) in enumerate(members)
-                                node_parameters[node]=values[
-                                    (index-1)*owner_dim+1:index*owner_dim]
+                            for node in node_list
+                                append!(parameters,get(
+                                    node_parameters,node,Float64[]))
                             end
-                        end
-                        for node in node_list
-                            append!(parameters,get(
-                                node_parameters,node,Float64[]))
                         end
                     end
                 end
@@ -3820,11 +4290,12 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
         # Count cache and record elements before the task slice so only the
         # selected elements' barycenters are ever computed.
         cached=LAST_MESH[]
+        query_mesh=cached
         cells=nothing
         columns=nothing
         ncache=0
         if cached!==nothing
-            _,block,positions=_mesh_query_type_block(
+            query_mesh,_,block,positions=_published_mesh_query_type_block(
                 cached,element_type,tag,caller)
             if block!==nothing
                 _,cells=block
@@ -3847,7 +4318,7 @@ function _get_barycenters(element_type,tag,fast,primary,task=0,num_tasks=1)
             chosen=@view columns[first_selected:min(last_selected,ncache)]
             node_count=primary_mode ? primary_count : size(cells,1)
             append!(result,_mesh_barycenters(
-                cached,@view(cells[1:node_count,chosen]),fast_mode,caller))
+                query_mesh,@view(cells[1:node_count,chosen]),fast_mode,caller))
         end
         if last_selected>ncache
             record_first=max(first_selected,ncache+1)-ncache
@@ -3920,7 +4391,7 @@ function _get_element_edge_nodes(element_type,tag=-1,primary=false,
         cache_columns=0:-1
         cells=nothing
         if cached!==nothing
-            _,block,positions=_mesh_query_type_block(
+            _,_,block,positions=_published_mesh_query_type_block(
                 cached,element_type,tag,caller)
             if block!==nothing
                 _,cells=block
@@ -3969,7 +4440,7 @@ function _get_element_face_nodes(element_type,face_type,tag=-1,primary=false,
         cache_columns=0:-1
         cells=nothing
         if cached!==nothing
-            _,block,positions=_mesh_query_type_block(
+            _,_,block,positions=_published_mesh_query_type_block(
                 cached,element_type,tag,caller)
             if block!==nothing
                 _,cells=block
@@ -4032,8 +4503,9 @@ end
 # Re-derive the classification after uniform refinement without a geometric
 # re-projection: each refined cell inherits its parent cell's owner (children
 # are emitted in fixed groups of 2/4/8 per parent), kept nodes keep their
-# owner, and each new edge-midpoint node takes the owner of its skeleton edge
-# under the same endpoint rule the order-2 overlay uses.
+# owner, and each new edge-midpoint node takes its certified primary-edge
+# carrier. Actual parent boundary triangles also certify the newly introduced
+# interior edges of their four child faces.
 function _inherit_refined_classification(class::_MeshClassification,
                                          refined::Mesh,cache::Mesh)
     mesh=class.mesh
@@ -4061,24 +4533,53 @@ function _inherit_refined_classification(class::_MeshClassification,
         used[old] || continue
         node_entities[remap[old]]=class.node_entities[old]
     end
-    midpoint_ids=Dict(edge=>compact_nodes+index for (index,edge) in pairs(edges))
-    entity_cells=((1,mesh.segs,class.seg_entities,((1,2),)),
-                  (2,mesh.tris,class.tri_entities,((1,2),(2,3),(3,1))),
-                  (3,mesh.tets,class.tet_entities,
-                   ((1,2),(1,3),(1,4),(2,3),(2,4),(3,4))))
-    for (dimension,cells,entities,edge_patterns) in entity_cells
-        for cell in axes(cells,2),(i,j) in edge_patterns
-            a,b=cells[i,cell],cells[j,cell]
-            ea,eb=class.node_entities[a],class.node_entities[b]
-            owner=ea==eb ? ea : ea[1]!=eb[1] ?
-                (ea[1]>eb[1] ? ea : eb) : (dimension,entities[cell])
-            midpoint=midpoint_ids[minmax(remap[a],remap[b])]
-            node_entities[midpoint]=_merged_node_owner(node_entities[midpoint],owner)
+    midpoint_ids=Dict(edge=>Int32(compact_nodes+index) for (index,edge) in pairs(edges))
+    parent_edges,parent_faces,parent_quads=isempty(class.edge_entities) ?
+        _api_mesh_support_entities(mesh,class.seg_entities,class.tri_entities,class.tet_entities) :
+        (class.edge_entities,class.face_entities,class.quad_entities)
+    edge_entities=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
+    face_entities=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quad_entities=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    for (msh,cells,owners) in ((1,refined.segs,seg_entities),
+                             (2,refined.tris,tri_entities),
+                             (4,refined.tets,tet_entities))
+        _api_support_cells!(edge_entities,edge_conflicts,face_entities,
+                            face_conflicts,quad_entities,quad_conflicts,msh,cells,owners)
+    end
+    for (key,owner) in parent_edges
+        a,b=remap[key[1]],remap[key[2]]
+        (a==0 || b==0) && continue
+        midpoint=get(midpoint_ids,minmax(a,b),Int32(0))
+        midpoint==0 && continue
+        node_entities[midpoint]=owner
+        _api_support_insert!(edge_entities,edge_conflicts,minmax(a,midpoint),owner)
+        _api_support_insert!(edge_entities,edge_conflicts,minmax(midpoint,b),owner)
+    end
+    for (key,owner) in parent_faces
+        a,b,c=remap[key[1]],remap[key[2]],remap[key[3]]
+        (a==0 || b==0 || c==0) && continue
+        mab=get(midpoint_ids,minmax(a,b),Int32(0))
+        mbc=get(midpoint_ids,minmax(b,c),Int32(0))
+        mca=get(midpoint_ids,minmax(c,a),Int32(0))
+        (mab==0 || mbc==0 || mca==0) && continue
+        for face in ((a,mab,mca),(mab,mbc,mca),(mab,b,mbc),(mca,mbc,c))
+            _api_support_insert!(face_entities,face_conflicts,
+                _api_support_face(face...),owner)
+            for (i,j) in ((1,2),(2,3),(3,1))
+                _api_support_insert!(edge_entities,edge_conflicts,minmax(face[i],face[j]),owner)
+            end
         end
     end
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    all(owner->owner!=(0,Int32(0)),node_entities) || throw(ArgumentError(
+        "API.mesh.refine: actual primary-edge carrier metadata is incomplete"))
     return _MeshClassification(cache,class.entity,class.entities,
         node_entities,class.boundaries,seg_entities,tri_entities,
-        tet_entities)
+        tet_entities,Dict{Int,Vector{Int32}}(1=>seg_entities,2=>tri_entities,4=>tet_entities),
+        nothing,edge_entities,face_entities,quad_entities)
 end
 
 function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
@@ -4205,9 +4706,9 @@ function _clear_classified_mesh(mesh::Mesh,class::_MeshClassification,
                      seg_tag=mesh.seg_tag[kept_columns[1]],
                      tri_tag=mesh.tri_tag[kept_columns[2]],
                      tet_tag=mesh.tet_tag[kept_columns[3]])
-    record=_MeshClassification(replacement,class.entity,class.entities,node_entities,
-                               class.boundaries,cell_entities[1],
-                               cell_entities[2],cell_entities[3])
+    record=_api_rebind_class(class,replacement;node_entities,
+        seg_entities=cell_entities[1],tri_entities=cell_entities[2],
+        tet_entities=cell_entities[3],primary_map=old_to_new)
     return replacement,record
 end
 
@@ -4336,9 +4837,7 @@ function _affine_transform_mesh(affine,dim_tags=())
         class=_cached_classification_locked(cached)
         cache=_copy_mesh(transformed)
         new_class=class===nothing ? nothing : cache isa MixedMesh ?
-            _mixed_rebind_class(class,cache) : _MeshClassification(
-            cache,class.entity,class.entities,class.node_entities,class.boundaries,
-            class.seg_entities,class.tri_entities,class.tet_entities)
+            _mixed_rebind_class(class,cache) : _api_rebind_class(class,cache)
         prepared=nothing
         if overlay!==nothing
             mid_coordinates=copy(overlay.coords)
@@ -4375,11 +4874,10 @@ function _remove_element_columns(mesh::Mesh,class::_MeshClassification,
         seg_tag=dimension==1 ? mesh.seg_tag[keep] : mesh.seg_tag,
         tri_tag=dimension==2 ? mesh.tri_tag[keep] : mesh.tri_tag,
         tet_tag=dimension==3 ? mesh.tet_tag[keep] : mesh.tet_tag)
-    record=_MeshClassification(replacement,class.entity,class.entities,class.node_entities,
-        class.boundaries,
-        dimension==1 ? class.seg_entities[keep] : class.seg_entities,
-        dimension==2 ? class.tri_entities[keep] : class.tri_entities,
-        dimension==3 ? class.tet_entities[keep] : class.tet_entities)
+    record=_api_rebind_class(class,replacement;
+        seg_entities=dimension==1 ? class.seg_entities[keep] : class.seg_entities,
+        tri_entities=dimension==2 ? class.tri_entities[keep] : class.tri_entities,
+        tet_entities=dimension==3 ? class.tet_entities[keep] : class.tet_entities)
     _replace_mesh_cache_with_overlay_locked!(replacement,record,"API.mesh.remove_elements";
         overlay,certify=false)
     return nothing
@@ -4608,9 +5106,7 @@ function _reverse_mesh(dim_tags=())
         # Connectivity is unchanged as a set, so the classification stays
         # index-aligned and is rebound to the reversed cache object.
         overlay=_high_order_overlay(cached)
-        new_class=class===nothing ? nothing : _MeshClassification(
-            replacement,class.entity,class.entities,class.node_entities,class.boundaries,
-            class.seg_entities,class.tri_entities,class.tet_entities)
+        new_class=class===nothing ? nothing : _api_rebind_class(class,replacement)
         _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
             overlay,certify=false)
         return nothing
@@ -4677,9 +5173,7 @@ function _reverse_elements(element_tags)
         _reverse_simplex_columns!(replacement.tets,per_block[3])
         overlay=_high_order_overlay(cached)
         class=_cached_classification_locked(cached)
-        new_class=class===nothing ? nothing : _MeshClassification(
-            replacement,class.entity,class.entities,class.node_entities,class.boundaries,
-            class.seg_entities,class.tri_entities,class.tet_entities)
+        new_class=class===nothing ? nothing : _api_rebind_class(class,replacement)
         _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
             overlay,certify=false)
         return nothing
@@ -4824,15 +5318,23 @@ function _remove_duplicate_nodes(dim_tags=())
                           tets=blocks[3],seg_tag=cached.seg_tag,
                           tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
             overlay=_high_order_overlay(cached)
-            new_class=class===nothing ? nothing : _MeshClassification(
-                new_mesh,class.entity,class.entities,node_entities,class.boundaries,
-                class.seg_entities,class.tri_entities,class.tet_entities)
             primary_map=Int32[old_to_new[replacement[node]] for node in 1:count]
             # Coalescing primary edges can conflict with edited midpoint maps.
-            # Prove the transfer before changing any live record or cache.
-            prepared=overlay===nothing ? nothing :
-                _prepare_preserved_high_order_overlay(new_mesh,new_class,cached,
+            # Prove the actual geometry first, then its remapped carriers,
+            # before changing any live record or cache.
+            geometry=overlay===nothing ? nothing :
+                _prepare_preserved_high_order_geometry(new_mesh,cached,
                     overlay,caller;primary_map)
+            new_class=class===nothing ? nothing : _api_rebind_class(class,new_mesh;
+                node_entities,primary_map)
+            prepared=nothing
+            if geometry!==nothing
+                dimension=ntets(new_mesh)>0 ? 3 : 2
+                entities=new_class===nothing ? Tuple{Int,Int32}[(dimension,Int32(0))] :
+                    new_class.entities
+                prepared=(geometry,_p2_mid_owners(geometry,new_mesh,new_class,
+                    dimension,Int.(last.(entities))))
+            end
             for (_,_,record) in records
                 for connectivity in record.element_nodes
                     for i in eachindex(connectivity)
@@ -4949,9 +5451,9 @@ function _remove_duplicate_elements(dim_tags=())
                              seg_tag=new_tags[1],tri_tag=new_tags[2],
                              tet_tag=new_tags[3])
             overlay=_high_order_overlay(cached)
-            new_class=_MeshClassification(replacement,class.entity,class.entities,
-                class.node_entities,class.boundaries,new_owners[1],
-                new_owners[2],new_owners[3])
+            new_class=_api_rebind_class(class,replacement;
+                seg_entities=new_owners[1],tri_entities=new_owners[2],
+                tet_entities=new_owners[3])
             _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
                 overlay,certify=false)
         end
@@ -5125,9 +5627,7 @@ function _set_node(node_tag,coord,parametric_coord=Float64[])
                          tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
         overlay=_high_order_overlay(cached)
         class=_cached_classification_locked(cached)
-        new_class=class===nothing ? nothing : _MeshClassification(
-            replacement,class.entity,class.entities,class.node_entities,class.boundaries,
-            class.seg_entities,class.tri_entities,class.tet_entities)
+        new_class=class===nothing ? nothing : _api_rebind_class(class,replacement)
         prepared=nothing
         if overlay!==nothing
             edited=deepcopy(overlay)
@@ -5371,9 +5871,8 @@ function _renumber_nodes(old_tags=(),new_tags=())
                       tets=blocks[3],seg_tag=cached.seg_tag,
                       tri_tag=cached.tri_tag,tet_tag=cached.tet_tag)
         overlay=_high_order_overlay(cached)
-        new_class=class===nothing ? nothing : _MeshClassification(
-            new_mesh,class.entity,class.entities,node_entities,class.boundaries,
-            class.seg_entities,class.tri_entities,class.tet_entities)
+        new_class=class===nothing ? nothing : _api_rebind_class(class,new_mesh;
+            node_entities,primary_map=inverse)
         prepared=overlay===nothing ? nothing :
             _prepare_preserved_high_order_overlay(new_mesh,new_class,cached,
                 overlay,caller;primary_map=inverse)
@@ -5501,9 +6000,9 @@ function _renumber_elements(old_tags=(),new_tags=())
                          tets=blocks[3],seg_tag=tags_out[1],
                          tri_tag=tags_out[2],tet_tag=tags_out[3])
         overlay=_high_order_overlay(cached)
-        new_class=class===nothing ? nothing : _MeshClassification(
-            replacement,class.entity,class.entities,class.node_entities,class.boundaries,
-            owners_out[1],owners_out[2],owners_out[3])
+        new_class=class===nothing ? nothing : _api_rebind_class(class,replacement;
+            seg_entities=owners_out[1],tri_entities=owners_out[2],
+            tet_entities=owners_out[3])
         _record_renumber!(records,renames,"element")
         _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
             overlay,certify=false)
@@ -5611,9 +6110,7 @@ function _reorder_elements(element_type,tag,ordering)
                          tets=blocks[3],seg_tag=cell_tags[1],
                          tri_tag=cell_tags[2],tet_tag=cell_tags[3])
         overlay=_high_order_overlay(cached)
-        new_class=_MeshClassification(replacement,class.entity,class.entities,
-            class.node_entities,class.boundaries,class.seg_entities,
-            class.tri_entities,class.tet_entities)
+        new_class=_api_rebind_class(class,replacement)
         _replace_mesh_cache_with_overlay_locked!(replacement,new_class,caller;
             overlay,certify=false)
         return nothing
@@ -5779,9 +6276,7 @@ function _optimize_mesh(method="",force=false,niter=1,dim_tags=())
                             require_positive_tets=false,movable=movable)
         end
         overlay=_high_order_overlay(cached)
-        new_class=class===nothing ? nothing : _MeshClassification(
-            smoothed,class.entity,class.entities,class.node_entities,class.boundaries,
-            class.seg_entities,class.tri_entities,class.tet_entities)
+        new_class=class===nothing ? nothing : _api_rebind_class(class,smoothed)
         _replace_mesh_cache_with_overlay_locked!(smoothed,new_class,caller;overlay)
         return nothing
     end
@@ -6598,6 +7093,8 @@ end
 
 include("APIMixedCache.jl")
 include("APIMixedQueries.jl")
+include("APILegacyP2Queries.jl")
+include("APILegacyP2QualityBounds.jl")
 include("APIMixedAdvanced.jl")
 include("APIMixedRefine.jl")
 include("APIGenerate01.jl")
@@ -8027,7 +8524,8 @@ get_integration_points(element_type,integration_type)=
     get_element_by_coordinates(x, y, z, dim=-1, strict=false)
 
 Return `(element_tag, element_type, node_tags, u, v, w)` for the first cached
-element at a finite point. With `dim=-1`, the deterministic first
+element at a finite point, using its actual interpolation nodes and reference
+map. With `dim=-1`, the deterministic first
 match has the greatest dimension and then the smallest public tag. `strict=true`
 uses the pinned Gmsh 4.15.2 reference tolerance of `1e-6`; relaxed search widens
 that tolerance by decades through `1.0` and stops at the first nonempty level.
@@ -8051,8 +8549,9 @@ get_elements_by_coordinates(x,y,z,dim=-1,strict=false)=
 
 Return `(u,v,w)` reference coordinates for one public cached element tag. Segment
 coordinates use `u ∈ [-1,1]`; triangle and tetrahedron coordinates use the standard
-unit simplex. Segment and triangle points are orthogonally projected onto the
-element span, with unused coordinates returned as exact zeros. The point need not
+unit simplex. Linear segment and triangle points are orthogonally projected onto
+the element span; quadratic overlays invert their actual stored map. Unused
+reference coordinates are zero. The point need not
 lie inside the element. A Float64-unrepresentable result fails explicitly.
 """
 get_local_coordinates_in_element(element_tag,x,y,z)=
@@ -8087,11 +8586,13 @@ get_element_qualities(element_tags,quality_name="minSICN",task=0,num_tasks=1)=
     get_jacobians(element_type, local_coord, tag=-1, task=0, num_tasks=1)
 
 Return detached `(jacobians, determinants, coordinates)` for every cached element
-of one linear-simplex Gmsh type at concatenated `(u,v,w)` points. Results are
+of one published Gmsh type at concatenated `(u,v,w)` points. Results are
 ordered by element and then point; each 3×3 Jacobian is flattened by column.
 Segment determinants are positive lengths, triangle determinants are positive
-area scales, and tetrahedron determinants retain orientation. The cache supports
-types 1, 2, and 4. A nonnegative `tag` selects only the elements classified on
+area scales, and tetrahedron determinants retain orientation. Legacy quadratic
+triangle/tetrahedron overlays use their actual type-9/type-11 nodal maps; their
+replaced linear family is empty. A nonnegative `tag` selects only the elements
+classified on
 the entity of `tag` in the type's own dimension; unknown entities fail
 explicitly. With `num_tasks > 1`, only the contiguous Gmsh block of cached elements
 with 0-based positions `begin = (task*count) ÷ num_tasks` through
@@ -8162,7 +8663,7 @@ get_number_of_orientations(element_type,function_space_type)=
 
 Return one lexicographic orientation index per cached element of the requested
 supported type. Nodal spaces return zeros. Known fixed types absent from the
-linear-simplex cache return an empty vector. A nonnegative `tag` selects only
+published cache return an empty vector. A nonnegative `tag` selects only
 the elements classified on the entity of `tag` in the type's own dimension;
 unknown entities fail explicitly. With `num_tasks > 1`, only the
 contiguous Gmsh block of cached elements with 0-based positions
@@ -8200,8 +8701,9 @@ Return detached `(type_keys, entity_keys, coordinates)` for every cached element
 of one supported type. Lagrange and order-one H1 keys use public node tags;
 lowest-order H(curl) keys use stable global edge tags and lazily add only the edges
 visited by the requested type. Coordinates locate node or edge-midpoint keys and
-are omitted when `return_coord=false`. A numeric Lagrange space must match the
-stored interpolation-node count; the cache does not synthesize higher-order keys.
+are omitted when `return_coord=false`. Nodal keys use every actual interpolation
+node even for an explicit `LagrangeN` order. Basis evaluation and
+[`get_number_of_keys`](@ref) retain the requested-order count.
 A nonnegative `tag` selects only the elements classified on the entity of `tag`
 in the type's own dimension; unknown entities fail explicitly.
 """
@@ -8234,13 +8736,15 @@ get_number_of_keys(element_type,function_space_type)=
     get_keys_information(type_keys, entity_keys, element_type,
                          function_space_type)
 
-Return `(entity_dimension, polynomial_order)` for complete element-sized groups
-of supported node or edge keys. Actual- and explicit-order nodal metadata covers
-every fixed family except Trihedron; hierarchical H1 metadata covers linear
-simplexes, Point type 15, and every fixed Quadrangle, Hexahedron, and Prism type.
+Return `(entity_dimension, polynomial_order)` for supported node or edge keys.
+Actual- and explicit-order nodal metadata covers every fixed family except
+Trihedron. Hierarchical H1 metadata covers Point, Line, Triangle, Tetrahedron,
+Quadrangle, Hexahedron and Prism families; H(curl) covers those with edges.
 Point H1 keys report order 0 since the Point vertex function is constant.
-Lowest-order H(curl) metadata covers linear simplexes. Key arrays must have equal lengths and the expected type-key value for
-the selected space.
+Nodal metadata omits an incomplete requested-basis group. Hierarchical metadata
+preserves the submitted key count and pads an incomplete final group with `(0, 0)`.
+Key arrays must have equal lengths and positive entity keys. Nodal type keys
+must match the selected space.
 """
 get_keys_information(type_keys,entity_keys,element_type,function_space_type)=
     _get_keys_information(
@@ -8360,13 +8864,15 @@ get_elements_by_type(element_type,tag=-1,task=0,num_tasks=1)=
                               return_parametric_coord=true)
 
 Return detached node tags and coordinates in per-element connectivity order for
-one fixed-node Gmsh element type. Shared nodes consequently appear once per element
+the input type's parent family. The requested order does not filter elements;
+each actual element contributes all its interpolation nodes. Shared nodes appear once per element
 use. A nonnegative `tag` selects only the elements classified on the entity of
 `tag` in the type's own dimension; unknown entities fail explicitly. With
 `return_parametric_coord=true` the third result packs each entry's parameters
-on its owning entity — one `u` for a Line owner, `(u, v)` for a Plane owner,
-and nothing for Point or Volume owners — matching Gmsh 4.15.2's variable-width
-emission order; an unclassified cache returns an empty parametric vector.
+on its owning entity — one `u` for a Curve owner, `(u, v)` for a Surface owner,
+and nothing for Point or Volume owners. Tagged caches retain stored parameters;
+legacy native caches compute inverse parameters on their owning geometry.
+An unclassified cache returns an empty parametric vector.
 """
 get_nodes_by_element_type(element_type,tag=-1,return_parametric_coord=true)=
     _get_nodes_by_element_type(element_type,tag,return_parametric_coord)

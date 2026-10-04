@@ -910,19 +910,87 @@ end
     @test mesh_keys_information(
         Int32[],UInt64[],2,"HcurlLegendre0")==Tuple{Int32,Int32}[]
 
+    # Explicit-order nodal keys still identify the actual stored nodes;
+    # the separately requested basis count can differ from the key count.
+    for space in ("Lagrange2","Lagrange3","GradLagrange2")
+        @test mesh_keys(mesh,2,space)==mesh_keys(mesh,2,"Lagrange")
+        @test mesh_keys_for_element(mesh,2,space)==
+            mesh_keys_for_element(mesh,2,"Lagrange")
+    end
+    @test mesh_number_of_keys(2,"Lagrange3")==10
+    @test mesh_keys_information(Int32[0],UInt64[1],2,"Lagrange")==
+        Tuple{Int32,Int32}[]
+    @test mesh_keys_information(Int32[0,0,0],UInt64[1,2,3],3,"H1Legendre1")==
+        Tuple{Int32,Int32}[(0,0),(0,0),(0,0)]
+    @test mesh_keys_information(zeros(Int32,13),UInt64.(1:13),2,"Lagrange2")==
+        fill((Int32(0),Int32(2)),12)
+    @test mesh_keys_information(zeros(Int32,30),UInt64.(1:30),11,"Lagrange1")==
+        fill((Int32(0),Int32(1)),28)
+    @test mesh_keys_information(zeros(Int32,30),UInt64.(1:30),11,"Lagrange3")==
+        fill((Int32(0),Int32(3)),20)
+
     for invalid in (
         ()->mesh_keys(mesh,2,"HcurlLegendre0"),
-        ()->mesh_keys(mesh,2,"Lagrange2"),
         ()->mesh_keys(mesh,2,"Lagrange";return_coord=1),
         ()->mesh_keys_for_element(mesh,0,"Lagrange"),
         ()->mesh_keys_for_element(mesh,4,"Lagrange"),
-        ()->mesh_keys_for_element(mesh,2,"GradLagrange2"),
-        ()->mesh_keys_information(Int32[0],UInt64[1],2,"Lagrange"),
         ()->mesh_keys_information(Int32[0,0,0],UInt64[1,2],2,"Lagrange"),
-        ()->mesh_keys_information(
-            Int32[0,0,0],UInt64[1,2,3],3,"H1Legendre1"),
         ()->mesh_keys_information(Int32[1,1,1],UInt64[1,0,3],2,
                                   "HcurlLegendre0"),
+    )
+        @test_throws ArgumentError invalid()
+    end
+end
+
+@testset "Hierarchical key metadata retains an incomplete tail" begin
+    # Literal Gmsh 4.15.2 getKeysInfo sequences. Hierarchical metadata is
+    # allocated for every submitted key; only complete groups are populated.
+    # Submitted type/entity values do not determine the per-basis sequence.
+    for (element_type,spaces,pattern) in (
+        (2,("H1Legendre2","GradH1Legendre2"),
+         Tuple{Int32,Int32}[(0,1),(0,1),(0,1),(1,2),(1,2),(1,2)]),
+        (4,("H1Legendre2","GradH1Legendre2"),
+         Tuple{Int32,Int32}[(0,1),(0,1),(0,1),(0,1),
+                           (1,2),(1,2),(1,2),(1,2),(1,2),(1,2)]),
+        (2,("HcurlLegendre1","CurlHcurlLegendre1"),
+         Tuple{Int32,Int32}[(1,0),(1,1),(1,0),(1,1),(1,0),(1,1)]),
+        (4,("HcurlLegendre1","CurlHcurlLegendre1"),
+         Tuple{Int32,Int32}[(1,0),(1,1),(1,0),(1,1),(1,0),(1,1),
+                           (1,0),(1,1),(1,0),(1,1),(1,0),(1,1)]),
+    )
+        count=length(pattern)
+        for space in spaces, (key_count,expected) in (
+            (1,Tuple{Int32,Int32}[(0,0)]),
+            (count,pattern),
+            (count+1,vcat(pattern,Tuple{Int32,Int32}[(0,0)])),
+            (2count+2,vcat(pattern,pattern,Tuple{Int32,Int32}[(0,0),(0,0)])),
+        )
+            types=fill(Int32(17),key_count)
+            entities=UInt64.(1000 .+ 3 .* (0:key_count-1))
+            original_types=copy(types)
+            original_entities=copy(entities)
+            info=mesh_keys_information(types,entities,element_type,space)
+            @test info==expected
+            @test types==original_types
+            @test entities==original_entities
+            info[1]=(Int32(99),Int32(99))
+            @test mesh_keys_information(types,entities,element_type,space)==expected
+        end
+    end
+
+    # Nodal metadata uses push_back instead: its incomplete tail is omitted.
+    for space in ("Lagrange2","GradLagrange2"), (key_count,result_count) in
+            ((1,0),(7,6),(14,12))
+        @test mesh_keys_information(zeros(Int32,key_count),UInt64.(1:key_count),
+            2,space)==fill((Int32(0),Int32(2)),result_count)
+    end
+    for invalid in (
+        ()->mesh_keys_information(Int32[17],UInt64[],2,"H1Legendre2"),
+        ()->mesh_keys_information(Int32[17],UInt64[0],2,"H1Legendre2"),
+        ()->mesh_keys_information(Int32[17],UInt64[],4,"CurlHcurlLegendre1"),
+        ()->mesh_keys_information(Int32[17],UInt64[0],4,"CurlHcurlLegendre1"),
+        ()->mesh_keys_information(Int32[0],UInt64[],2,"Lagrange2"),
+        ()->mesh_keys_information(Int32[0],UInt64[0],2,"Lagrange2"),
     )
         @test_throws ArgumentError invalid()
     end

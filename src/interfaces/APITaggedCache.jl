@@ -130,7 +130,8 @@ function _classification_with_public_tags(class,tags::_CachePublicTags)
         "API mesh classification: public tags describe a different mesh cache"))
     return _MeshClassification(class.mesh,class.entity,class.entities,
         class.node_entities,class.boundaries,class.seg_entities,class.tri_entities,
-        class.tet_entities,class.cell_entities,tags)
+        class.tet_entities,class.cell_entities,tags,class.edge_entities,class.face_entities,
+        class.quad_entities)
 end
 
 function _classification_with_public_tags(class;authority=())

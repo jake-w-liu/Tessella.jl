@@ -70,7 +70,9 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - native mixed API caches for standard linear/full quadratic families, preserving
   classification through reference/Jacobian/location queries, basis keys,
   affine transforms, duplicate removal, partitioning, order changes, and
-  family-preserving uniform refinement; curved CAD elevation/refinement has an
+  family-preserving uniform refinement; new full P2 products receive complete
+  reference-domain certificates for all seven standard families, including
+  Pyramid14's rational map; curved CAD elevation/refinement has an
   explicit placement-kernel blocker;
 - globally certified quadratic segments, triangles, and tetrahedra (exact
   Bernstein Jacobian certificates, curve/surface curving, and Gmsh type-8/9/11
@@ -184,11 +186,13 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   AddVerts checks the complete reference maps of its actual retained cells.
   Translation, rotation, twist, fixed columns, graded layers, neighboring sweeps,
   and toroidal revolutions have pinned oracle coverage.
-- native `QuadTriNoNewVerts` for an isolated source quadrangle, with normalized
+- native `QuadTriNoNewVerts` for an isolated source triangle or quadrangle, with normalized
   positive layer groups and free or recombined laterals; one completed operation
   plan supplies the volume, surfaces, and classified projection. Whole-domain
   P1 Jacobian and typed-boundary checks plus bounded convex-hull separation reject
   uncertified or overlapping layers before publishing mesh state.
+  Triangular sources emit three tetrahedra or one retained prism per interval
+  without adding nodes; their caps preserve the actual source-cell ordering.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh
@@ -201,7 +205,7 @@ declarations, and geometry-derived physical-group RHSs beyond the documented inl
 topology queries),
 mixed-element generation beyond the listed structured and surface-recombination paths,
 quasi-transfinite or holed transfinite patches,
-general `QuadTriNoNewVerts` source grids, triangular/mixed roots, collapsed
+general `QuadTriNoNewVerts` source grids, mixed roots, collapsed
 columns, shared neighbors, and copied-source chains; curved CAD mixed order elevation/refinement,
 selective refinement, simplex-kernel integration,
 curved-cell Jacobian certification beyond the documented P2 families,
@@ -344,6 +348,25 @@ identity. Historical maximum tags survive clear and renumber. Periodic nodes
 can include P2 nodes, and periodic keys return seven arrays with master
 coordinates before slave coordinates, matching Gmsh 4.15.2.
 
+P2 nodes inherit ownership from actual classified primary edges and faces.
+Simplex and native mixed refinement preserve child edge and face supports,
+including sparse tagged node identities. `get_nodes` with
+`include_boundary=true` includes the quadratic boundary nodes. These supports
+follow primary node identity through cache edits and renumbering, including
+native mixed edge and face nodes after duplicate-node compaction.
+
+Legacy Tri6/Tet10 query overlays use their retained interpolation nodes for
+reference maps, inverse coordinates, location, keys and connectivity-derived
+data. Exact-type queries omit the replaced linear block;
+`get_nodes_by_element_type` selects the family across orders and returns its
+actual nodes. Quadratic simplex qualities follow Gmsh's sampled shape and
+subdivided Bernstein conventions. Triangle `volume` integrates curved area;
+tetrahedron `volume` uses its corner tetrahedron.
+Explicit-order nodal keys identify the element's actual stored nodes while
+`get_number_of_keys` reports the requested basis count. Nodal key information
+omits an incomplete requested-basis group. Hierarchical key information retains
+the supplied length and pads an incomplete tail with `(0, 0)`.
+
 Dimension-one transitions reject legacy native dimension-2/3 caches with
 nonempty attached mesh records before mutation because their source allocation
 history is unavailable. This does not block verified lower-dimensional tagged
@@ -354,8 +377,10 @@ see [`validation/api_generate01/README.md`](validation/api_generate01/README.md)
 
 `API.mesh.refine` atomically refines linear-simplex caches and supported native
 mixed P1/P2 Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism,
-and Pyramid cells, returning linear child cells and independent caller-owned
-storage. Curved native CAD placement remains blocked before mutation.
+and Pyramid cells. Mixed refinement returns linear child cells; supported
+legacy straight-simplex refinement retains its re-elevated query overlay.
+Returned mesh storage is independent. Curved native CAD placement remains
+blocked before mutation.
 `API.mesh.clear` discards the complete cache, or only the cells and
 owned nodes classified on the entities passed in `dim_tags`, without changing
 model geometry; entities owning no cache cells are no-ops, matching Gmsh's
@@ -400,14 +425,16 @@ MathEval, Distance, and Threshold fields, background and boundary-layer
 assignments, and field removal; the generators consume it together with
 per-entity meshing attributes — `set_transfinite_*` on curves, surfaces,
 and volumes, `set_recombine`, `set_algorithm`, `set_smoothing`,
-`set_order` (validated P1/P2 conversion, with a simplex P2 overlay), `set_reverse`,
+`set_reverse`,
 `set_outward_orientation`, `set_compound`, `set_size_at_parametric_points`,
 `set_size_from_boundary`, and the size-callback pair. `recombine` and
 `split_quadrangles` move quadrangles between the simplex cache and entity
 records, `get_periodic_keys` pairs periodic nodes into function-space key
 sequences, `optimize` accepts Gmsh's method names with `dim_tags` entity
 scoping, and `generate` meshes multi-entity selections. Queries on a
-present-but-unmeshed model return empty data like Gmsh 4.15.2.
+present-but-unmeshed model return empty data like Gmsh 4.15.2. Generation uses
+`Mesh.ElementOrder`; `set_order` converts the existing mesh to validated P1/P2
+products, with the supported legacy simplex overlay.
 Legacy simplex P2 edits retain actual midpoint geometry through relabeling,
 selection, affine maps, and repeated order-two requests. Primary-node edits
 change only the requested node. Refinement and optimization of edited curved
@@ -437,8 +464,10 @@ node, element, type-funnel, Jacobian, orientation, key, and `get_element` querie
 onto the `(dim, tag)` model entity through the `model_to_mixed` classification
 snapshot stored with the cache; `dim=-1` ignores `tag`, `include_boundary` appends
 transitive boundary-entity nodes after the entity's own, and unknown entities fail
-explicitly. Native Line and Plane queries use `u` or `(u, v)` parameters;
-tagged raw records preserve their stored parameters. Points, Volumes, and
+explicitly. Native geometry queries compute available curve or surface
+parameters, including ruled and three-sided fills. Tagged raw records preserve
+their stored parameters; Gmsh can leave new face-center parameters unstored.
+Points, Volumes, and
 all-dimension queries emit none. `get_nodes_by_element_type` packs each repeated
 node's parameters on its owning entity, matching Gmsh 4.15.2.
 `get_elements_by_type` accepts nondefault `task`/`num_tasks` and returns
@@ -536,10 +565,10 @@ tags; bulk and single-element orientation queries return those indices directly.
 hierarchical vertex, edge, face, and bubble keys for H1/H(curl) spaces, laid out
 like Gmsh 4.15.2's `getKeys`. Edge- and face-key queries lazily create only the
 topology visited by the requested type or element, reuse explicit or previously
-created identifiers, and return stable midpoint or centroid coordinates. The
-linear-simplex cache owns no synthetic
-higher-order nodes, so a numeric Lagrange key query whose order differs from the
-stored element fails explicitly. Number-of-key/orientation and key-information
+created identifiers, and return stable midpoint or centroid coordinates.
+Actual- and explicit-order nodal key queries identify the interpolation nodes
+stored on the queried element; the requested order controls reference basis
+counts and metadata. Number-of-key/orientation and key-information
 queries remain session-independent. `get_basis_functions_orientation` accepts
 nondefault `task`/`num_tasks` and returns the contiguous Gmsh block slice
 (`task>=num_tasks` is empty, where Gmsh 4.15.2 segfaults). Trihedron bases remain

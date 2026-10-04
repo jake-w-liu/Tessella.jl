@@ -83,7 +83,7 @@ function mesh_element_record(mesh::MixedMesh,element_tag)
             node_tags=UInt64.(cells[:,cell]))
 end
 
-@inline _mixed_node(mesh::MixedMesh,cells,cell::Int,local_node::Int)=
+@inline _mixed_node(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell::Int,local_node::Int)=
     (mesh.coords[1,cells[local_node,cell]],
      mesh.coords[2,cells[local_node,cell]],
      mesh.coords[3,cells[local_node,cell]])
@@ -92,12 +92,24 @@ end
     (muladd(value,delta[1],origin[1]),muladd(value,delta[2],origin[2]),
      muladd(value,delta[3],origin[3]))
 
-function _mixed_map(mesh::MixedMesh,cells,cell::Int,family::Val,
+function _mixed_map(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell::Int,family::Val,
                     uvw::NTuple{3,Float64},caller::AbstractString,tag::Int,msh::Int=0;
                     shape=nothing)
     u,v,w=uvw
     values,gradients=if shape!==nothing
         shape
+    elseif mesh isa P2TriMesh
+        # Legacy inverse queries revisit the same simplex at each Newton
+        # iterate. Its barycentric basis fits in immutable tuples, avoiding
+        # rebuilding the general nodal engine and its interpolation arrays.
+        a=1.0-u-v
+        dr,ds=HighOrder._p2tri_grads(u,v)
+        ((a*(2a-1),u*(2u-1),v*(2v-1),4a*u,4u*v,4v*a),
+         ntuple(i->(dr[i],ds[i],0.0),6))
+    elseif mesh isa P2Mesh
+        a=1.0-u-v-w
+        ((a*(2a-1),u*(2u-1),v*(2v-1),w*(2w-1),
+          4a*u,4u*v,4v*a,4a*w,4v*w,4u*w),HighOrder._p2_grads(u,v,w))
     elseif msh==0 || msh_spec(msh).order<2
         (MeshFunctionSpaces._first_order_values(family,u,v,w,caller,tag),
          MeshFunctionSpaces._first_order_gradients(family,u,v,w,caller,tag))
@@ -135,7 +147,7 @@ end
     return (0.0,0.0,0.0)
 end
 
-function _mixed_scale(mesh::MixedMesh,cells,cell::Int)
+function _mixed_scale(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell::Int)
     origin=_mixed_node(mesh,cells,cell,1)
     scale=0.0
     @inbounds for local_node in 2:size(cells,1)
@@ -182,6 +194,13 @@ end
 function _local_coordinates(mesh::MixedMesh,tag::Int,p::NTuple{3,Float64},
                              caller::AbstractString;location::Bool=false)
     msh,dimension,cells,cell,family=_mixed_query_reference(mesh,tag,caller)
+    return _mixed_local_coordinates(mesh,cells,cell,msh,dimension,family,tag,p,
+                                    caller;location=location)
+end
+
+function _mixed_local_coordinates(mesh,cells,cell,msh,dimension,family,tag,
+                                   p::NTuple{3,Float64},caller::AbstractString;
+                                   location::Bool=false)
     linear=msh_spec(msh).order<2
     a=_mixed_node(mesh,cells,cell,1)
     if family===:pnt
@@ -364,7 +383,7 @@ function _locate_elements(locator::_MixedMeshLocator,p::NTuple{3,Float64},
     return UInt64.(matches)
 end
 
-function _mixed_frame(mesh::MixedMesh,cells,cell,family::Symbol,dimension::Int,
+function _mixed_frame(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell,family::Symbol,dimension::Int,
                       uvw,caller::AbstractString,tag::Int,msh::Int=0;shape=nothing)
     mapped,du,dv,dw=_mixed_map(mesh,cells,cell,Val(family),uvw,caller,tag,msh;shape=shape)
     if dimension==0
@@ -507,13 +526,12 @@ function mesh_basis_orientation(mesh::MixedMesh,element_tag,function_space_type;
     return _mixed_cell_orientation(mesh,cells,cell,space,family)
 end
 
-function _mixed_keys_for_cells(mesh::MixedMesh,cells,msh::Int,space,
+function _mixed_keys_for_cells(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,msh::Int,space,
                                nodal_count,topology,face_topology,element_tags,
                                return_coord::Bool,caller::AbstractString)
-    if !space.hierarchical && size(cells,1)!=nodal_count
-        throw(ArgumentError("$caller: the cached element stores $(size(cells,1)) " *
-            "nodes, but the requested basis requires $nodal_count"))
-    end
+    # Gmsh validates the requested nodal space but emits the actual element's
+    # vertices as keys, even when an explicit Lagrange order differs. Basis
+    # evaluation and getNumberOfKeys retain the requested-order count.
     family=msh_spec(msh).family
     if !space.hierarchical
         counts=(vertex=size(cells,1),edge=0,face=0,bubble=0)

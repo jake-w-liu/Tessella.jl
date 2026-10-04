@@ -173,11 +173,19 @@ end
             Tuple{Int32,Int32}[(0,-1),(0,-1),(0,-1)]
 
         before=_MESH_FUNCTION_API.mesh.get_all_edges()
+        for space in ("Lagrange2","Lagrange3","GradLagrange2")
+            @test _MESH_FUNCTION_API.mesh.get_keys(2,space)==
+                _MESH_FUNCTION_API.mesh.get_keys(2,"Lagrange")
+            @test _MESH_FUNCTION_API.mesh.get_keys_for_element(2,space)==
+                _MESH_FUNCTION_API.mesh.get_keys_for_element(2,"Lagrange")
+        end
+        @test _MESH_FUNCTION_API.mesh.get_keys_information(
+            Int32[1],UInt64[1],4,"HcurlLegendre0")==Tuple{Int32,Int32}[(0,0)]
+        @test _MESH_FUNCTION_API.mesh.get_keys_information(
+            Int32[0,0,0],UInt64[3,1,2],2,"Lagrange2")==Tuple{Int32,Int32}[]
+        @test _MESH_FUNCTION_API.mesh.get_all_edges()==before
+        @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
         for invalid in (
-            ()->_MESH_FUNCTION_API.mesh.get_keys(
-                2,"Lagrange2"),
-            ()->_MESH_FUNCTION_API.mesh.get_keys_for_element(
-                2,"GradLagrange2"),
             ()->_MESH_FUNCTION_API.mesh.get_keys(
                 4,"HcurlLegendre0",-1,1),
             ()->_MESH_FUNCTION_API.mesh.get_keys(
@@ -194,8 +202,6 @@ end
                 4,"HcurlLegendre0",-1,0,0),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
                 4,"HcurlLegendre0",-1,true,1),
-            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
-                Int32[1],UInt64[1],4,"HcurlLegendre0"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
                 10,[0,0,0],"Lagrange11"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions(
@@ -303,6 +309,87 @@ end
             Tessella.API.mesh;private=false))
         @test isempty(Test.detect_ambiguities(
             Tessella.API.mesh;recursive=true))
+    finally
+        _MESH_FUNCTION_API.finalize()
+    end
+end
+
+@testset "API key metadata preserves hierarchical tails without cache changes" begin
+    _MESH_FUNCTION_API.finalize()
+    _MESH_FUNCTION_API.initialize()
+    try
+        _install_mesh_function_fixture!(_mesh_function_api_fixture())
+        _MESH_FUNCTION_API.mesh.get_keys(4,"HcurlLegendre0")
+        cache=_MESH_FUNCTION_API.LAST_MESH[]
+        edge_catalog=_MESH_FUNCTION_API.LAST_MESH_EDGES[]
+        before_edges=_MESH_FUNCTION_API.mesh.get_all_edges()
+        baseline=mesh_crc(cache)
+
+        # Independent pinned sequences include vertices/edges and alternating
+        # Hcurl orders; the aliases expose the same key metadata protocol.
+        for (element_type,spaces,pattern) in (
+            (2,("H1Legendre2","GradH1Legendre2"),
+             Tuple{Int32,Int32}[(0,1),(0,1),(0,1),(1,2),(1,2),(1,2)]),
+            (4,("H1Legendre2","GradH1Legendre2"),
+             Tuple{Int32,Int32}[(0,1),(0,1),(0,1),(0,1),
+                               (1,2),(1,2),(1,2),(1,2),(1,2),(1,2)]),
+            (2,("HcurlLegendre1","CurlHcurlLegendre1"),
+             Tuple{Int32,Int32}[(1,0),(1,1),(1,0),(1,1),(1,0),(1,1)]),
+            (4,("HcurlLegendre1","CurlHcurlLegendre1"),
+             Tuple{Int32,Int32}[(1,0),(1,1),(1,0),(1,1),(1,0),(1,1),
+                               (1,0),(1,1),(1,0),(1,1),(1,0),(1,1)]),
+        )
+            count=length(pattern)
+            for space in spaces, (key_count,expected) in (
+                (1,Tuple{Int32,Int32}[(0,0)]),
+                (count,pattern),
+                (count+1,vcat(pattern,Tuple{Int32,Int32}[(0,0)])),
+                (2count+2,vcat(pattern,pattern,Tuple{Int32,Int32}[(0,0),(0,0)])),
+            )
+                types=fill(Int32(17),key_count)
+                entities=UInt64.(1000 .+ 3 .* (0:key_count-1))
+                original_types=copy(types)
+                original_entities=copy(entities)
+                info=_MESH_FUNCTION_API.mesh.get_keys_information(
+                    types,entities,element_type,space)
+                @test info==expected
+                @test types==original_types
+                @test entities==original_entities
+                info[1]=(Int32(99),Int32(99))
+                @test _MESH_FUNCTION_API.mesh.get_keys_information(
+                    types,entities,element_type,space)==expected
+                @test _MESH_FUNCTION_API.LAST_MESH[]===cache
+                @test _MESH_FUNCTION_API.LAST_MESH_EDGES[]===edge_catalog
+                @test _MESH_FUNCTION_API.mesh.get_all_edges()==before_edges
+                @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
+            end
+        end
+        for space in ("Lagrange2","GradLagrange2"), (key_count,result_count) in
+                ((1,0),(7,6),(14,12))
+            @test _MESH_FUNCTION_API.mesh.get_keys_information(
+                zeros(Int32,key_count),UInt64.(1:key_count),2,space)==
+                fill((Int32(0),Int32(2)),result_count)
+        end
+        for invalid in (
+            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
+                Int32[17],UInt64[],2,"H1Legendre2"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
+                Int32[17],UInt64[0],2,"H1Legendre2"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
+                Int32[17],UInt64[],4,"CurlHcurlLegendre1"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
+                Int32[17],UInt64[0],4,"CurlHcurlLegendre1"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
+                Int32[0],UInt64[],2,"Lagrange2"),
+            ()->_MESH_FUNCTION_API.mesh.get_keys_information(
+                Int32[0],UInt64[0],2,"Lagrange2"),
+        )
+            @test_throws ArgumentError invalid()
+            @test _MESH_FUNCTION_API.LAST_MESH[]===cache
+            @test _MESH_FUNCTION_API.LAST_MESH_EDGES[]===edge_catalog
+            @test _MESH_FUNCTION_API.mesh.get_all_edges()==before_edges
+            @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
+        end
     finally
         _MESH_FUNCTION_API.finalize()
     end

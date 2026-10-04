@@ -37,7 +37,7 @@ function _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
         mesh=_mixed_rebuild_metadata(cached,blocks;node_order=findall(keep),
                                      periodic_links=links)
         new_class=class===nothing ? nothing : _mixed_rebind_class(class,mesh;
-            node_entities=class.node_entities[keep])
+            node_entities=class.node_entities[keep],primary_map=remap)
         for (_,_,record) in records,connectivity in record.element_nodes,i in eachindex(connectivity)
             tag=connectivity[i]
             dense=public_tags===nothing ? (1<=tag<=count ? Int(tag) : 0) :

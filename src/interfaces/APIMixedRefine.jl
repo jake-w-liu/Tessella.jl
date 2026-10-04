@@ -110,6 +110,176 @@ function _mixed_refine_unclassified(mesh)
         fill((0,Int32(0)),nnodes(mesh)),Dict{Tuple{Int,Int32},Vector{Int32}}(),owners)
 end
 
+# Refinement changes the primary support identities. Carry the actual parent
+# Line/Triangle/Quadrangle associations into their children before a later
+# order conversion; endpoint classification and model closure are insufficient
+# after a caller merges nodes classified on different Point entities.
+function _mixed_refine_check_support_conflicts!(edges,edge_conflicts,face_conflicts,
+                                               quad_conflicts)
+    # Raw surface/volume cells can share an edge without declaring a Curve.
+    # Such a body tie has no certified lower carrier: leave it uncatalogued
+    # and preserve the existing node associations and per-cell fallback.
+    for key in edge_conflicts
+        edges[key][1]>=2 && delete!(edges,key)
+    end
+    filter!(key->haskey(edges,key),edge_conflicts)
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    return nothing
+end
+
+function _mixed_refine_parent_supports(mesh,class)
+    edges=copy(class.edge_entities);faces=copy(class.face_entities)
+    quads=copy(class.quad_entities)
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    capacity=length(edges);face_capacity=length(faces);quad_capacity=length(quads)
+    for (msh,cells,_) in _cache_native_blocks(mesh)
+        family=msh_family(msh)
+        capacity+=length(_api_support_edges(family))*size(cells,2)
+        family===:tri && (face_capacity+=size(cells,2))
+        family===:qua && (quad_capacity+=size(cells,2))
+    end
+    sizehint!(edges,capacity);sizehint!(faces,face_capacity);sizehint!(quads,quad_capacity)
+    for (msh,_,_,cells,owners) in _cache_catalog(mesh,class)
+        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,
+            Int(msh),cells,owners)
+    end
+    _mixed_refine_check_support_conflicts!(edges,edge_conflicts,face_conflicts,quad_conflicts)
+    return edges,faces,quads
+end
+
+function _mixed_refine_support_nodes(linear,quadratic)
+    mids=Dict{NTuple{2,Int32},Int32}()
+    centers=Dict{NTuple{4,Int32},Int32}()
+    edge_capacity=0;quad_capacity=0
+    for block in linear.blocks
+        family=msh_family(block.msh)
+        edge_capacity+=length(_api_support_edges(family))*size(block.nodes,2)
+        quad_capacity+=length(_api_support_quads(family))*size(block.nodes,2)
+    end
+    sizehint!(mids,edge_capacity);sizehint!(centers,quad_capacity)
+    for (bi,block) in enumerate(linear.blocks)
+        family=msh_family(block.msh)
+        family===:pnt && continue
+        support=quadratic.blocks[bi].nodes
+        reference=Elements.lagrange_nodes(quadratic.blocks[bi].msh)
+        for slot in size(block.nodes,1)+1:size(reference,2)
+            weights=MeshFunctionSpaces._first_order_values(Val(family),
+                reference[1,slot],reference[2,slot],reference[3,slot],
+                "API.mesh.refine",slot)
+            rows=findall(!iszero,collect(weights))
+            if length(rows)==2
+                i,j=rows
+                for column in axes(block.nodes,2)
+                    key=minmax(block.nodes[i,column],block.nodes[j,column])
+                    mids[key]=support[slot,column]
+                end
+            elseif length(rows)==4
+                i,j,k,l=rows
+                for column in axes(block.nodes,2)
+                    key=_api_support_quad(block.nodes[i,column],block.nodes[j,column],
+                        block.nodes[k,column],block.nodes[l,column])
+                    centers[key]=support[slot,column]
+                end
+            end
+        end
+    end
+    return mids,centers
+end
+
+@inline function _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,
+                                          a,b,c,owner)
+    _api_support_insert!(faces,face_conflicts,_api_support_face(a,b,c),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(a,b),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(b,c),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(c,a),owner)
+    return nothing
+end
+
+@inline function _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                                          a,b,c,d,owner)
+    _api_support_insert!(quads,quad_conflicts,_api_support_quad(a,b,c,d),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(a,b),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(b,c),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(c,d),owner)
+    _api_support_insert!(edges,edge_conflicts,minmax(d,a),owner)
+    return nothing
+end
+
+function _mixed_refine_child_supports(linear,class,quadratic,blocks,owners;
+                                      parent_supports=nothing)
+    parent_edges,parent_faces,parent_quads=parent_supports===nothing ?
+        _mixed_refine_parent_supports(linear,class) : parent_supports
+    mids,centers=_mixed_refine_support_nodes(linear,quadratic)
+    edges=Dict{NTuple{2,Int32},Tuple{Int,Int32}}()
+    faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    capacity=2length(parent_edges)+9length(parent_faces)+12length(parent_quads)
+    for block in blocks
+        capacity+=length(_api_support_edges(msh_family(block.msh)))*size(block.nodes,2)
+    end
+    sizehint!(edges,capacity);sizehint!(faces,4length(parent_faces))
+    sizehint!(quads,4length(parent_quads))
+    for ((a,b),owner) in parent_edges
+        middle=mids[(a,b)]
+        _api_support_insert!(edges,edge_conflicts,minmax(a,middle),owner)
+        _api_support_insert!(edges,edge_conflicts,minmax(middle,b),owner)
+    end
+    for ((a,b,c),owner) in parent_faces
+        ab=mids[minmax(a,b)];bc=mids[minmax(b,c)];ca=mids[minmax(c,a)]
+        _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,a,ab,ca,owner)
+        _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,ab,b,bc,owner)
+        _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,ca,bc,c,owner)
+        _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,ab,bc,ca,owner)
+    end
+    # A sorted quadrangle support does not retain its perimeter. Read the
+    # actual parent cell's face cycle, never infer adjacency from node numbers.
+    visited=Set{NTuple{4,Int32}}();sizehint!(visited,length(parent_quads))
+    for block in linear.blocks,column in axes(block.nodes,2)
+        for (i,j,k,l) in _api_support_quads(msh_family(block.msh))
+            a=block.nodes[i,column];b=block.nodes[j,column]
+            c=block.nodes[k,column];d=block.nodes[l,column]
+            key=_api_support_quad(a,b,c,d)
+            haskey(parent_quads,key) && !(key in visited) || continue
+            push!(visited,key)
+            owner=parent_quads[key]
+            ab=mids[minmax(a,b)];bc=mids[minmax(b,c)]
+            cd=mids[minmax(c,d)];da=mids[minmax(d,a)];center=centers[key]
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                a,ab,center,da,owner)
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                ab,b,bc,center,owner)
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                center,bc,c,cd,owner)
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                da,center,cd,d,owner)
+        end
+    end
+    length(visited)==length(parent_quads) || throw(ArgumentError(
+        "API.mesh.refine: an actual quadrangle support has no parent face cycle"))
+    # Actual child lower-dimensional cells also certify their carriers;
+    # remaining body edges inherit their actual parent cell's entity.
+    for block in blocks
+        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,
+            Int(block.msh),block.nodes,owners[Int(block.msh)])
+    end
+    _mixed_refine_check_support_conflicts!(edges,edge_conflicts,face_conflicts,quad_conflicts)
+    return edges,faces,quads
+end
+
+function _mixed_refine_support_class(class,mesh,owners,edges,faces,quads;
+                                    node_entities=class.node_entities)
+    result=_mixed_classification(mesh,class.entity,class.entities,node_entities,
+        class.boundaries,owners;edge_entities=edges,face_entities=faces,quad_entities=quads)
+    class.public_tags===nothing && return result
+    return _classification_with_public_tags(result,
+        _cache_public_tags(mesh;authority=class.public_tags.authority))
+end
+
 function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
     caller="API.mesh.refine"
     node_limit=_mixed_refine_limit(max_nodes,"max_nodes")
@@ -138,6 +308,9 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
             [collect(axes(b.nodes,2)) for b in linear.blocks];node_order=order)
     end
     counts,node_count=_mixed_refine_plan(linear,node_limit,cell_limit,caller)
+    parent_supports=_mixed_refine_parent_supports(linear,linear_class)
+    linear_class=_mixed_refine_support_class(linear_class,linear,linear_class.cell_entities,
+        parent_supports...)
     quadratic,quadclass=_mixed_quadratic_cache(linear,linear_class,caller)
     nnodes(quadratic)==node_count || error("$caller: internal support-node count mismatch")
     connectivity=Dict(msh=>Matrix{Int32}(undef,Elements.msh_num_nodes(msh),n) for (msh,n) in counts)
@@ -196,6 +369,8 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
         end
     end
     blocks=[ElementBlock(msh,connectivity[msh],tags[msh]) for msh in sort!(collect(keys(counts))) if counts[msh]>0]
+    edges,faces,quads=_mixed_refine_child_supports(linear,linear_class,quadratic,blocks,owners;
+        parent_supports=parent_supports)
     if tagged
         assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
             NODE_TAG_MAX[],element_max,node_limit,cell_limit,caller)
@@ -218,6 +393,19 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
         diagnostic=validate(plan.mesh)
         diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*
             join(diagnostic.messages,"; ")))
+        positions=Dict{UInt64,Int32}();sizehint!(positions,nnodes(plan.mesh))
+        for (position,tag) in enumerate(plan.mesh.entity_data.external_node_tags)
+            positions[tag]=Int32(position)
+        end
+        mapping=Int32[positions[plan.node_tag_map[tag]] for tag in data.external_node_tags]
+        intermediate=_mixed_classification(quadratic,quadclass.entity,quadclass.entities,
+            quadclass.node_entities,quadclass.boundaries,owners;
+            edge_entities=edges,face_entities=faces,quad_entities=quads)
+        mapped_edges,mapped_faces,mapped_quads=_api_remap_support_entities(
+            intermediate,plan.mesh,mapping)
+        refined_class=_mixed_refine_support_class(plan.class,plan.mesh,plan.class.cell_entities,
+            mapped_edges,mapped_faces,mapped_quads)
+        plan=merge(plan,(class=refined_class,))
         _commit_tagged_plan_locked!(plan;authority=stored_class.public_tags.authority)
         return _copy_mesh(plan.mesh)
     end
@@ -225,8 +413,8 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
     diagnostic=validate(refined)
     diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*join(diagnostic.messages,"; ")))
     cache=_copy_mesh(refined)
-    new_class=stored_class===nothing ? nothing : _mixed_rebind_class(quadclass,cache;
-        node_entities=copy(quadclass.node_entities),owners=owners)
+    new_class=stored_class===nothing ? nothing : _mixed_refine_support_class(
+        quadclass,cache,owners,edges,faces,quads;node_entities=copy(quadclass.node_entities))
     _replace_mesh_cache_locked!(cache,new_class)
     return refined
 end
