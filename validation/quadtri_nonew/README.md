@@ -469,3 +469,57 @@ bound is `allocated_next <= 2.15 * allocated_previous + 65536`. The lowered
 code scan recognizes `GlobalRef(Core, :Box)` and uses deliberately boxed
 positional and keyword positive controls. Input hashes must remain stable.
 Final resource and release results require their completed guarded runs.
+
+The rectangular-grid extension adds 24 saved primary Gmsh 4.15.2 P1/P2
+products from `test/artifacts/quadtri_nonew_rect_grid_oracle.toml` and
+`test/artifacts/quadtri_nonew_rect_grid_variants_oracle.toml`. The 16 original
+controls cover 2-by-3 and 3-by-3 grids, N1/N3, both normal signs and both
+lateral policies. Eight variants add the other coordinate planes, skew and
+rounded trapezoid geometry, Progression 4/Bump 2 and grouped layer levels.
+Raw Float64 bits, classified cells, actual source identities, interpolation
+supports, Curve parameters and stored/computed Surface UV records are retained.
+The strict extension preserves the earlier 170 cases, serializers and CRC rows.
+`QUADTRI_NONEW_CASE=rect_grid` selects these 24 saved cases. The separate
+`QUADTRI_NONEW_RECT_GRID_DIFFERENTIAL_OK` marker reports saved/P2/variant and
+raw stored-parameter provenance counts.
+
+The source certificate uses actual regular grid incidence, strict coherent
+convex quadrangles and a Jordan boundary. Four actual native Line chains and
+strictly ordered stored axis-normal columns establish the full source product.
+Each physical source edge has one lateral choice per interval. B3 corner,
+adjacent-B2 edge and B0 interior cells use fixed corner factories and linear
+cap carry; no centroid is added. Native original source-column ordinal ranking
+sets eligible terminal cap and interior lateral choices. Upstream uses primary
+vertex pointer ordering, so the saved products require existence of one
+consistent global rank. Their free cell families and connectivity are not
+universal native pins.
+
+For F=a*b, B=2(a+b) and N intervals, recombined products contain F(N-1) Hex8,
+4F-2B Tet4 and F+B Pyr5 cells. P1 has (a+1)(b+1)(N+1) nodes and P2 has
+(2a+1)(2b+1)(2N+1). Typed supports and carrier ownership come from actual
+primary identities. Independent exact literal-reference Vandermonde maps
+certify actual Tet10, Hex27, Prism18 and rational Pyramid14 nodal geometry
+with full-reference Bernstein bounds and exact volume integrals. Deliberately
+folded corner and interior support controls reject invalid quadratic maps.
+Empty raw upstream stored Surface UVs are counted separately; native computed
+parameters must reevaluate the queried coordinates at unchanged 2e-11.
+
+Run the rectangular-grid resource gate with normal compilation and bounds
+checks on both supported runtimes; it does not require Gmsh:
+
+```sh
+/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/rect_grid_resources.jl
+/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/rect_grid_resources.jl
+```
+
+The gate measures 24 P1 path/policy/scale rows at 500, 1,000 and 2,000
+intervals for standalone volume, GEO, classified projection and public API.
+Separate actual source-size series measure 1,000, 2,000 and 4,000 quadrangles.
+Construction allocations include constructor/downstream copies; extraction
+and independent audits follow measurement. The unchanged doubling bound is
+`allocated_next <= 2.15 * allocated_previous + 65536`. Six P2 audits cover
+2-by-3 N1/N3 and 3-by-3 N3 with both policies, including actual B0 Hex27/Prism18
+supports. Full-cell P1 maps, parent partitions, opposite typed faces, P2
+ownership/closure/UVs and true `Core.Box` controls are checked. Input hashes
+must remain stable. Release success requires completed guarded resource,
+strict and package runs recorded in STATUS.md.

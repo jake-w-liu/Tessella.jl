@@ -22,6 +22,8 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_three_quad_
 const QT3S=QuadTriNoNewThreeQuadStripCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_four_quad_strip_certificates.jl"))
 const QT4S=QuadTriNoNewFourQuadStripCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_rect_grid_certificates.jl"))
+const QTRG=QuadTriNoNewRectGridCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -1119,6 +1121,189 @@ function four_strip_saved_case(record;oracle_only=false)
 end
 
 
+# Definitions to append to the existing saved-case driver. No prior gate or
+# pointer-sensitive family signature is changed.
+function rect_grid_saved_fixture(record)
+    audit=record["audit"];raw=record["payload"]
+    f=QTRG.fixture(raw["name"];grid=Tuple(Int.(audit["grid"])),
+        layers=audit["intervals"]==1 ? :one : :three,
+        height=Float64(audit["direction"]),laterals=Bool(audit["recombine_laterals"]))
+    if haskey(raw,"variant")
+        variant=raw["variant"];axes=Tuple(Int.(variant["axes"]).+1)
+        corners=Tuple(ntuple(k->k==axes[1] ? Float64(xy[1]) : k==axes[2] ? Float64(xy[2]) : 0.,3)
+            for xy in variant["corners"])
+        return merge(f,(;source=raw["input_geo"],axes,corners,
+            height=Float64(variant["height"]),levels=Float64.(raw["requested_levels"])))
+    end
+    return merge(f,(;source=raw["input_geo"]))
+end
+
+function rect_grid_saved_integrity(record)
+    raw=record["payload"];audit=record["audit"];tolerance=2e-11
+    raw["status"]=="certified" && isempty(raw["warnings_or_errors"]) || error("rect-grid primary certification status")
+    literal_hash=bytes2hex(sha256(raw["input_geo"]))
+    if haskey(audit,"input_literal_sha256")
+        literal_hash==audit["input_literal_sha256"] || error("rect-grid exact input text hash")
+        raw["input_sha256"]==audit["capture_input_sha256"] || error("rect-grid preserved input-file hash")
+        record["capture_sha256"]==audit["payload_sha256"] || error("rect-grid saved payload provenance")
+    else
+        # The new geometric captures record the actual file hash directly.
+        # Keep Windows CRLF bytes distinct from the decoded recipe text hash.
+        raw["input_sha256"] in (literal_hash,bytes2hex(sha256(replace(raw["input_geo"],"\n"=>"\r\n")))) || error("rect-grid geometric input-file hash")
+        length(record["capture_sha256"])==64 || error("rect-grid geometric saved provenance hash")
+    end
+    for phase in ("p1","p2"),node in raw[phase]["nodes"]
+        for (values,bits) in ((node["coordinates"],node["coordinate_bits"]),(node["stored_parameters"],node["stored_parameter_bits"]))
+            length(values)==length(bits) || error("rect-grid packed payload width")
+            all(string(reinterpret(UInt64,Float64(value));base=16,pad=16)==bit for (value,bit) in zip(values,bits)) || error("rect-grid saved Float64 payload bits")
+        end
+    end
+    original=Dict(Int(node["tag"])=>node for node in raw["p1"]["nodes"])
+    quadratic=Dict(Int(node["tag"])=>node for node in raw["p2"]["nodes"])
+    remap=Dict(parse(Int,node)=>Int(mapped) for (node,mapped) in raw["primary_remap"])
+    Set(keys(remap))==Set(keys(original)) && length(Set(values(remap)))==length(original) || error("rect-grid primary label bijection")
+    for (old,new) in remap
+        original[old]["coordinate_bits"]==quadratic[new]["coordinate_bits"] && original[old]["owner"]==quadratic[new]["owner"] || error("rect-grid saved primary identity changed")
+    end
+    inverse=Dict(new=>old for (old,new) in remap)
+    supports=Dict(parse(Int,node)=>Tuple(Int.(support)) for (node,support) in raw["supports"])
+    Set(keys(supports))==setdiff(Set(keys(quadratic)),Set(values(remap))) || error("rect-grid saved interpolation support coverage")
+    length(Set(values(supports)))==length(supports) || error("rect-grid saved distinct support identity")
+    carriers=quad_patch_actual_carriers((Int(cell["type"]),Int.(cell["nodes"]),(Int(entity["dim"]),Int(entity["tag"])))
+        for entity in raw["p1"]["entities"] for cell in entity["cells"])
+    for (node,support) in supports
+        carrier=carriers[Tuple(sort!([inverse[id] for id in support]))]
+        Tuple(Int.(quadratic[node]["owner"]))==carrier || error("rect-grid saved interpolation carrier")
+        mean=[sum(Float64(quadratic[id]["coordinates"][axis]) for id in support)/length(support) for axis in 1:3]
+        maximum(abs.(Float64.(quadratic[node]["coordinates"]).-mean))<=tolerance || error("rect-grid saved interpolation placement")
+    end
+    for phase in ("p1","p2")
+        certificates=raw[phase*"_whole_maps"]
+        cells=Set((Int(entity["dim"]),Int(entity["tag"]),Int(cell["tag"]),Int(cell["type"])) for entity in raw[phase]["entities"] if entity["dim"]>0 for cell in entity["cells"])
+        Set((Int(row["entity"][1]),Int(row["entity"][2]),Int(row["cell"]),Int(row["type"])) for row in certificates)==cells || error("rect-grid saved whole-map coverage")
+        all(strip_fraction(row["minimum_exact"])>0 && Float64(strip_fraction(row["minimum_exact"]))==row["minimum"] for row in certificates) || error("rect-grid saved positive exact whole-map bounds")
+    end
+    recorded=Dict((Tuple(Int.(row["entity"])),Int(row["cell"]))=>row for row in raw["p2_whole_maps"])
+    for entity in raw["p2"]["entities"]
+        entity["dim"]==3 || continue
+        for cell in entity["cells"]
+            map=QTRG.quadratic_map_certificate(Int(cell["type"]),Tuple(Tuple(Float64.(quadratic[Int(node)]["coordinates"])) for node in cell["nodes"]))
+            stored=recorded[((3,Int(entity["tag"])),Int(cell["tag"]))]
+            map.minimum==strip_fraction(stored["minimum_exact"]) && map.coefficients==stored["coefficients"] && collect(map.degrees)==stored["degrees"] || error("rect-grid actual P2 polynomial differs from independent exact primary proof")
+        end
+    end
+    for query in raw["computed_uv"]
+        length(query["computed_uv"])==2 && all(isfinite,query["computed_uv"]) || error("rect-grid saved computed surface UV width")
+        # The original six captures retain inverse UVs without a getValue
+        # result. Later captures additionally preserve their reevaluation.
+        # Native reevaluation is checked independently for every case below.
+        if haskey(query,"evaluated")
+            maximum(abs.(Float64.(query["evaluated"]).-Float64.(quadratic[Int(query["node"])]["coordinates"])))<=tolerance || error("rect-grid saved computed surface UV")
+        end
+    end
+    # Compare full face-node identities through actual supports, not merely
+    # the common primary coordinates or a quadrature sample.
+    basis=Dict{Int,Tuple}(node=>(node,) for node in values(remap));merge!(basis,supports)
+    face_rows=Dict{Tuple,Vector{Tuple}}()
+    for entity in raw["p2"]["entities"]
+        entity["dim"]==3 || continue
+        for cell in entity["cells"],pattern in QTRG.FACES[Int(cell["type"])-7]
+            nodes=Int.(cell["nodes"]);primary=QTRG.key(nodes[k] for k in pattern)
+            actual=QTRG.key(node for node in nodes if Set(basis[node])⊆Set(primary))
+            length(actual)==(length(primary)==3 ? 6 : 9) || error("rect-grid saved quadratic face width")
+            push!(get!(face_rows,primary,Tuple[]),actual)
+        end
+    end
+    all(length(rows) in (1,2) && (length(rows)==1 || rows[1]==rows[2]) for rows in values(face_rows)) || error("rect-grid saved complete P2 face conformity")
+    boundary=Dict(face=>only(rows) for (face,rows) in face_rows if length(rows)==1)
+    lower=Dict(QTRG.key(cell["nodes"][1:(Int(cell["type"])==9 ? 3 : 4)])=>QTRG.key(cell["nodes"])
+        for entity in raw["p2"]["entities"] if entity["dim"]==2 for cell in entity["cells"])
+    boundary==lower || error("rect-grid saved actual P2 typed exterior")
+    return quadratic
+end
+
+function rect_grid_saved_surface_queries(record)
+    haskey(record["audit"],"surface_queries") && return record["audit"]["surface_queries"]
+    raw=record["payload"]
+    return [Dict("tag"=>Int(entity["tag"]),"owned"=>length(entity["owned"]["tags"]),
+        "closure"=>length(entity["closure"]["tags"]),"empty_stored_uv"=>count(node->node["owner"]==[2,entity["tag"]] && isempty(node["stored_parameters"]),raw["p2"]["nodes"]))
+        for entity in raw["p2"]["entities"] if entity["dim"]==2]
+end
+
+function rect_grid_check_factories(certificate,relation)
+    for (macro_id,state) in certificate.states
+        families=Tuple(sort!([cell.msh for cell in certificate.domains[macro_id]]))
+        (state,families) in relation || error("rect-grid actual macro differs from immutable315 state/family relation")
+    end
+end
+
+function rect_grid_saved_case(record,masks,relation;oracle_only=false)
+    raw=record["payload"];audit=record["audit"];f=rect_grid_saved_fixture(record);n=f.intervals;a,b=f.grid
+    saved_nodes=rect_grid_saved_integrity(record)
+    source,_=two_tri_saved_mesh(raw,"p1",2,1);linear,index=two_tri_saved_mesh(raw,"p1",3,1)
+    saved=QTRG.certify(linear,f,source;oracle=true)
+    all(state in masks for state in values(saved.states)) || error("rect-grid primary factory relation")
+    rect_grid_check_factories(saved,relation)
+    two_tri_saved_boundary(raw,index)==Set(keys(saved.boundary)) || error("rect-grid primary typed exterior")
+    isempty(raw["logical"]["extra_nodes"]) && nnodes(linear)==(a+1)*(b+1)*(n+1) || error("rect-grid primary no-center product")
+    nnodes(two_tri_saved_mesh(raw,"p2",3,1)[1])==(2a+1)*(2b+1)*(2n+1) || error("rect-grid primary P2 lattice count")
+    owners=[count(node->node["owner"][1]==dim,values(saved_nodes)) for dim in 0:3]
+    empty_parameters=count(node->node["owner"][1]==2 && isempty(node["stored_parameters"]),values(saved_nodes))
+    surface_queries=rect_grid_saved_surface_queries(record)
+    empty_parameters==sum(Int(row["empty_stored_uv"]) for row in surface_queries) || error("rect-grid stored-UV gap provenance")
+    if !oracle_only
+        execution=QTRG.execute(f.source);volume=geo_entity_mesh(execution,3,1);actual_source=geo_entity_mesh(execution,2,1)
+        quad_patch_source_match(actual_source,source,2e-11)
+        actual=QTRG.certify(volume,f,actual_source)
+        all(state in masks for state in values(actual.states)) || error("rect-grid native factory relation")
+        rect_grid_check_factories(actual,relation)
+        QTNN.surface_faces(execution.mesh_parts,volume)==Set(keys(actual.boundary)) || error("rect-grid native complete typed exterior")
+        projection=model_to_mixed(execution.model,volume,3,1)
+        nodes=Dict(Int(node["tag"])=>node for node in raw["p1"]["nodes"])
+        for node in 1:nnodes(volume)
+            matches=[tag for tag in keys(index) if maximum(abs.(QTRG.point(volume,node).-Tuple(Float64.(nodes[tag]["coordinates"]))))<=2e-11]
+            length(matches)==1 || error("rect-grid native actual primary geometry bijection")
+            Tuple(Int.(nodes[only(matches)]["owner"]))==projection.entity_data.node_entities[node] || error("rect-grid native primary owner")
+        end
+        chains=haskey(raw,"source_chains") ? raw["source_chains"] : audit["source_chains"]
+        for chain in chains
+            params=execution.model.curve_params[Int(chain["curve"])]
+            expected=Float64.(chain["stored_owned_parameters"])
+            length(params)==length(expected)+2 && maximum(abs.(sort(params[2:end-1]).-sort(expected)))<=2e-11 || error("rect-grid actual sampled curve parameters")
+        end
+        mktempdir() do directory
+            path=joinpath(directory,"rect_grid_saved.geo");write(path,f.source)
+            native_api(path,api->begin
+                cache=api.mesh.generate(3);first=QTRG.public_volume(api,1)
+                QTNN.typed_signature(first)==QTNN.typed_signature(volume) || error("rect-grid API/GEO primary cells")
+                data=api.mesh.get_elements(3,1);projected=model_to_mixed(api.CURRENT[],cache,3,1)
+                isempty(api.mesh.get_elements(2)[1]) || error("rect-grid API3 lower-cell contract")
+                api.mesh.set_order(2);p2=QTRG.public_volume(api,1)
+                certificate=QTRG.certify_quadratic(p2,f,actual_source)
+                abs(Float64(certificate.total)-Float64(actual.total))<=2e-11 || error("rect-grid actual P2 reference integral")
+                strip_native_supports(api,cache,data,projected,1,2e-11)==nnodes(p2)-nnodes(first) || error("rect-grid complete actual P2 supports")
+                native_owners=zeros(Int,4)
+                for node in api.mesh.get_nodes()[1]
+                    p,uv,dim,owner=api.mesh.get_node(node);native_owners[dim+1]+=1
+                    if dim in (1,2)
+                        length(uv)==dim && maximum(abs.(api.model.get_value(dim,owner,uv).-p))<=2e-11 || error("rect-grid native computed carrier parameters")
+                    end
+                end
+                native_owners==owners || error("rect-grid native P2 owner counts")
+                for row in surface_queries,include_boundary in (false,true)
+                    ids,xyz,uv=api.mesh.get_nodes(2,Int(row["tag"]),include_boundary,true)
+                    length(ids)==row[include_boundary ? "closure" : "owned"] && length(uv)==2length(ids) || error("rect-grid native surface owned/closure query")
+                    maximum(abs.(api.model.get_value(2,Int(row["tag"]),uv).-xyz))<=2e-11 || error("rect-grid native boundary computed UV")
+                end
+                api.mesh.set_order(1)
+                QTNN.typed_signature(QTRG.public_volume(api,1))==QTNN.typed_signature(first) || error("rect-grid P2/P1 actual cell roundtrip")
+            end)
+        end
+    end
+    return empty_parameters
+end
+
+
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -1136,6 +1321,8 @@ three_strip_cases=Ref(0);three_strip_quadratic_cases=Ref(0);three_strip_variant_
 three_strip_parameter_provenance_gaps=Ref(0);three_strip_empty_parameters=Ref(0)
 four_strip_cases=Ref(0);four_strip_quadratic_cases=Ref(0);four_strip_variant_cases=Ref(0)
 four_strip_parameter_provenance_gaps=Ref(0);four_strip_empty_parameters=Ref(0)
+rect_grid_cases=Ref(0);rect_grid_quadratic_cases=Ref(0);rect_grid_variant_cases=Ref(0)
+rect_grid_parameter_provenance_gaps=Ref(0);rect_grid_empty_parameters=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -1572,6 +1759,33 @@ try
         record["capture_kind"]=="independent_variant" && (four_strip_variant_cases[]+=1)
         println("QUADTRI_NONEW_FOUR_QUAD_STRIP_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
     end
+    rect_catalog=TOML.parsefile(joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_rect_grid_oracle.toml"))
+    rect_variant_path=joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_rect_grid_variants_oracle.toml")
+    rect_variants=TOML.parsefile(rect_variant_path)
+    # This new artifact was independently checked against all eight original
+    # JSON/file hashes and losslessly decoded. Bind that entire payload as
+    # well as its primary manifest; canonical LF permits platform checkout.
+    bytes2hex(sha256(replace(read(rect_variant_path,String),"\r\n"=>"\n")))==
+        "133cff82ad4215232d8c2c5f1bda0c9f0cdda788048e2702da3b4c564d3e02f3" &&
+        rect_variants["primary_manifest_sha256"]=="e609a845958f15ab29b55b95aa3bc19183ff9fdc48b93c517fbac7d56843c377" ||
+        error("rect-grid independent geometric capture provenance")
+    rect_catalog["gmsh_version"]==rect_variants["gmsh_version"]=="4.15.2" &&
+        rect_catalog["coordinate_abs_tolerance"]==rect_variants["coordinate_abs_tolerance"]==2e-11 &&
+        rect_catalog["fixture_count"]==16 && rect_variants["fixture_count"]==8 || error("rect-grid saved oracle catalog contract")
+    rect_masks=Set(Tuple(Int.(row["states"])) for row in rect_catalog["factory_masks"])
+    rect_relation=Set((Tuple(Int.(row["states"])),Tuple(sort!(Int.(row["types"])))) for row in rect_catalog["factory_masks"])
+    length(rect_catalog["factory_masks"])==315 && length(rect_masks)==253 || error("rect-grid immutable factory relation")
+    for record in vcat(rect_catalog["fixtures"],rect_variants["fixtures"])
+        name=record["payload"]["name"]
+        isempty(selected) || selected=="rect_grid" || occursin(selected,"rect_grid_"*name) || continue
+        empty_parameters=rect_grid_saved_case(record,rect_masks,rect_relation;oracle_only)
+        rect_grid_cases[]+=1;rect_grid_quadratic_cases[]+=1
+        rect_grid_empty_parameters[]+=empty_parameters
+        empty_parameters>0 && (rect_grid_parameter_provenance_gaps[]+=1)
+        haskey(record["payload"],"variant") && (rect_grid_variant_cases[]+=1)
+        println("QUADTRI_NONEW_RECT_GRID_SAVED_OK name=$name C=0 p1_nodes=$(length(record["payload"]["p1"]["nodes"])) p2_nodes=$(length(record["payload"]["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
+    end
+    println("QUADTRI_NONEW_RECT_GRID_DIFFERENTIAL_OK saved_cases=$(rect_grid_cases[]) p2_cases=$(rect_grid_quadratic_cases[]) independent_variants=$(rect_grid_variant_cases[]) parameter_provenance_gaps=$(rect_grid_parameter_provenance_gaps[]) empty_stored_uv=$(rect_grid_empty_parameters[])")
     println("QUADTRI_NONEW_FOUR_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(four_strip_cases[]) p2_cases=$(four_strip_quadratic_cases[]) independent_variants=$(four_strip_variant_cases[]) parameter_provenance_gaps=$(four_strip_parameter_provenance_gaps[]) empty_stored_uv=$(four_strip_empty_parameters[])")
     println("QUADTRI_NONEW_THREE_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(three_strip_cases[]) p2_cases=$(three_strip_quadratic_cases[]) independent_variants=$(three_strip_variant_cases[]) parameter_provenance_gaps=$(three_strip_parameter_provenance_gaps[]) empty_stored_uv=$(three_strip_empty_parameters[])")
     println("QUADTRI_NONEW_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(quad_strip_cases[]) p2_cases=$(quad_strip_quadratic_cases[]) independent_variants=$(quad_strip_variant_cases[]) parameter_provenance_gaps=$(quad_strip_parameter_provenance_gaps[]) empty_stored_uv=$(quad_strip_empty_parameters[])")

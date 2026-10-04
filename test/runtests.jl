@@ -111,9 +111,12 @@ using Tessella
     include("geometry/geo_quadtri_nonew_three_quad_strip_test.jl") # eight-boundary-node source paths
     include("geometry/quadtri_nonew_four_quad_strip_chain_test.jl") # independent exhaustive four-cell paths
     include("geometry/geo_quadtri_nonew_four_quad_strip_test.jl") # ten-boundary-node source paths
+    include("geometry/quadtri_nonew_rect_grid_plan_test.jl") # independent physical-face propagation
+    include("geometry/geo_quadtri_nonew_rect_grid_test.jl") # dynamic B3/B2/B0 source disks
     include("geometry/quadtri_centroid_overflow_test.jl") # finite actual means after Float sum overflow
     include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
     include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
+    include("geometry/model_surface_curve_writeback_test.jl") # exact parameter matching and allocation growth
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
     include("geometry/geo_periodic_test.jl") # expression-backed periodic curves
     include("geometry/model_periodic_io_test.jl") # classified periodic/embedded MSH projection
@@ -131,6 +134,7 @@ using Tessella
     include("interfaces/api_nonew_quad_strip_boundary_test.jl") # joined strip P2 carriers and lifecycle
     include("interfaces/api_nonew_three_quad_strip_boundary_test.jl") # three-strip P2 carriers and lifecycle
     include("interfaces/api_nonew_four_quad_strip_boundary_test.jl") # four-strip P2 carriers and lifecycle
+    include("interfaces/api_nonew_rect_grid_boundary_test.jl") # dynamic grid P2 carriers and lifecycle
     include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning

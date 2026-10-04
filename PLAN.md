@@ -1157,15 +1157,40 @@ all 446 frozen inputs and the scoped index. The verified worktree is
 `C:/tmp/tessella_nonew_four_quad_strip`, based on pushed `0f9601f`.
 The twelve-field ranking initializer uses `Val(12)` to avoid a confirmed
 13 MB fixed allocation while preserving exact factory and tie selection.
-The next bounded implementation is a dynamic rectangular Quad-grid path under
-axis-normal translation, including B3, adjacent-B2 and B0 source cells with
-coupled actual face propagation. Sixteen independent primary P1/P2 controls cover
-2-by-3 and 3-by-3 source grids, N1/N3, both normal directions and both lateral
-policies. Current source-only sampling passes 1,469 checks on each runtime at
-unchanged `2e-11`; native general-grid volume parity remains unimplemented.
-Actual source samples and incidence remain authoritative; pointer minima are
-not public-tag minima. B1/B4 categories, transformed products, mixed roots and
-shared neighbors/regions remain separate unfinished phases with precise blockers.
+The dynamic rectangular Quad-grid implementation is wired into source
+certification, physical face planning, indexed emission and classified
+projection in `C:/tmp/tessella_nonew_rectangular_grid`, based on `78af21d`.
+It retains actual original source identities and native four-Line chains,
+and certifies a coherent strict convex regular disk with a Jordan boundary
+before accepting strictly ordered axis-normal stored columns. Skew, trapezoid,
+rounded and graded grids are admitted by the same actual-input checks.
+B3 corners, adjacent-B2 edge cells and B0 interior cells share one physical
+edge decision per interval. The planner uses finite immutable corner factories
+and linear cap carry, without a global exponential state search or centroid.
+For `F=ab`, `B=2(a+b)` and N intervals, recombined products contain
+`F(N-1)` Hex8, `4F-2B` Tet4 and `F+B` Pyr5 cells. P1 and P2 node counts are
+`(a+1)(b+1)(N+1)` and `(2a+1)(2b+1)(2N+1)`.
+Twenty-four saved primary controls and independent actual P1/P2 map certificates
+cover both lateral policies, normal signs, coordinate planes and graded sources.
+Focused geometry passes 37,773 and API passes 162,172 on each supported runtime.
+The permanent independent planner suite passes 25,471 on each runtime. Forty-eight
+new native CRC rows agree across runtimes, giving 241 total rows: 232 NoNew and
+nine API01. Previous 193 rows and both immutable tables remain unchanged.
+V2 full strict replay passes all 194 cases; both rectangular resource gates
+pass 8,483,845 assertions, 36 matching geometry/support/owner records and all
+unchanged growth bounds. All 459 frozen inputs remain unchanged. A confirmed
+boxed curve-parameter scan and repeated Mixed validation container growth are
+fixed without changing original source parameters or validation semantics.
+All twelve frozen resource gates pass 95,257,884 assertions; corresponding
+geometry/support records match across runtimes. Full normal bounds-checked
+package tests pass 1,089,298 assertions each on Julia1.12.7 and1.13.1;
+all459 frozen inputs and index guards pass.
+Upstream primary pointer minima are not public-tag minima. Native original
+source-column ordinal ranking is consistent across eligible terminal caps and
+interior shared laterals; saved upstream products are checked for existence of
+one global rank rather than pinned to one process's free connectivity.
+B1/B4 categories, other source topologies, transformed products, mixed roots and
+shared neighbors/regions remain unfinished phases with precise blockers.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public
 tag lifecycle, remaining meshing algorithms and fields, broad formats/API,

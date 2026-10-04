@@ -191,6 +191,8 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   strictly convex four-corner planar transfinite source containing two Tri3 cells,
   or a recombined 2-by-2 Quad4 patch with an existing interior source pivot,
   or a recombined strip containing two, three or four Quad4 cells,
+  or a regular recombined rectangular Quad4 source grid with at least two
+  cells in each direction,
   with normalized
   positive layer groups and free or recombined laterals; one completed operation
   plan supplies the volume, surfaces, and classified projection. Whole-domain
@@ -217,6 +219,18 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   quadratic meshes have `30N+15`, `42N+21` or `54N+27` nodes for free laterals, and
   `30N+31`, `42N+45` or `54N+59` for recombined laterals. Every shared face in a
   strip is solved together before indexed output is emitted.
+  Rectangular grids retain the actual four native Line chains and original
+  cell identities. A strict source disk and axis-normal column certificate
+  admits convex skew, trapezoid and graded grids as well as rectangles. Shared
+  physical faces are planned once, with B3 corners, adjacent-B2 edge cells and
+  B0 interior cells; no centroid is added. An `a`-by-`b` source with `N`
+  intervals has `(a+1)(b+1)(N+1)` primary nodes and
+  `(2a+1)(2b+1)(2N+1)` quadratic nodes. Recombined laterals emit
+  `ab(N-1)` Hex8, `4ab-4(a+b)` Tet4 and `ab+2(a+b)` Pyr5 cells.
+  Exact actual P2 map certificates cover all emitted families, including
+  Prism18 and rational Pyramid14. Native primary-column ordinal ranking gives
+  consistent eligible cap and terminal shared-face choices; upstream pointer
+  ordering can produce other admissible connectivity.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh
@@ -229,7 +243,8 @@ declarations, and geometry-derived physical-group RHSs beyond the documented inl
 topology queries),
 mixed-element generation beyond the listed structured and surface-recombination paths,
 quasi-transfinite or holed transfinite patches,
-general `QuadTriNoNewVerts` source grids, mixed roots, collapsed
+other `QuadTriNoNewVerts` source topologies and B1/B4 categories, transformed
+source grids, mixed roots, collapsed
 columns, shared neighbors, and copied-source chains; curved CAD mixed order elevation/refinement,
 selective refinement, simplex-kernel integration,
 curved-cell Jacobian certification beyond the documented P2 families,

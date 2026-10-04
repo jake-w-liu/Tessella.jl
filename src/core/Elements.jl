@@ -1357,6 +1357,7 @@ function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
     length(data.external_node_tags)==nn || throw(ArgumentError(
         "$context: external node-tag length mismatch"))
     seen_nodes=Set{UInt64}()
+    sizehint!(seen_nodes,nn)
     classified_entities=Set{Tuple{Int,Int}}()
     for i in 1:nn
         dim,tag=data.node_entities[i]
@@ -1384,6 +1385,11 @@ function _assert_mixed_entity_data(m::MixedMesh,context::AbstractString)
     length(data.external_element_tags)==length(m.blocks) || throw(ArgumentError(
         "$context: external element-tag block count mismatch"))
     seen_elements=Set{UInt64}()
+    element_capacity=0
+    for block in m.blocks
+        element_capacity=Base.checked_add(element_capacity,_block_ncells(block))
+    end
+    sizehint!(seen_elements,element_capacity)
     for (bi,block) in pairs(m.blocks)
         entities=data.block_entities[bi]
         external_tags=data.external_element_tags[bi]
@@ -1914,6 +1920,13 @@ function validate(m::MixedMesh; reject_duplicate_cells=true)
         return MeshDiagnostic(false,messages)
     end
     seen=reject_duplicate_cells ? Set{Any}() : nothing
+    if reject_duplicate_cells
+        cell_capacity=0
+        for block in m.blocks
+            cell_capacity=Base.checked_add(cell_capacity,_block_ncells(block))
+        end
+        sizehint!(seen,cell_capacity)
+    end
     for (bi,b) in pairs(m.blocks)
         @inbounds for j in 1:_block_ncells(b)
             k=_cell_arity(b,j)
