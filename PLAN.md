@@ -1048,6 +1048,16 @@ diagonal chain, and this source category adds no nodes. One completed
 operation plan drives the actual boundary and classified projection; no persistent
 geometry-sensitive plan survives edits. A bounded exact convex-hull separation
 certificate rejects uncertified layer intersections before publication.
+The first bounded source grid contains two conforming Tri3 cells on a strictly
+convex four-corner planar transfinite surface under axis-aligned normal
+translation in either direction. A joined prism relation chooses the common
+swept face once for the entire region, using the actual source-cell identities.
+The actual source complex and strictly ordered column product certify all
+cross-cell and cross-layer contacts. Free laterals emit `6N` Tet4 cells;
+recombined laterals emit `2N` Pri6 cells; both use exactly `4(N+1)` nodes.
+Direct indexed output avoids temporary coordinate-cell arrays and volume
+coordinate welding. The assembled typed face complex additionally verifies
+opposite outward cycles on every internal face.
 Actual P1 hex, pyramid, and prism Jacobian checks cover the whole reference
 cell; positive tetrahedral partition volumes alone do not certify these maps.
 AddVerts also certifies actual retained factory cells. Newly constructed API
@@ -1075,13 +1085,11 @@ cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
 sets and invariant checks instead of one accidental process result. The existing
 precise blockers remain on these unfinished categories.
 
-Start the grid phase with exactly two conforming Tri3 cells on one strictly
-convex four-sided planar transfinite source under axis-aligned normal translation
-in either direction. Join the prism
-relations across their common swept face, retain one column matrix, and prove
-source-complex coverage and actual stored-column product disjointness before
-publishing the complete typed boundary. Support both lateral policies and
-positive normalized graded layers within this bounded contract.
+Continue the grid phase with a bounded 2-by-2 quadrangle source, then a
+two-quadrangle strip. Extend the category and joined face-state propagation
+using actual source incidence, one column matrix, complete source-complex and
+stored-column certificates, and the existing whole-cell map checks. General
+transformed grids, mixed roots and shared regions remain separate phases.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public
 tag lifecycle, remaining meshing algorithms and fields, broad formats/API,

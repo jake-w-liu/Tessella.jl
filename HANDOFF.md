@@ -26,6 +26,53 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Current increment
 
+The first bounded `QuadTriNoNewVerts` source grid contains exactly two conforming
+Tri3 cells on a strictly convex four-corner planar transfinite source. It supports
+axis-aligned normal translation in either direction, both lateral policies and
+positive normalized graded layers. A joined prism relation chooses the internal
+swept face once for the entire region. Free laterals emit `6N` Tet4 cells;
+recombined laterals emit `2N` Pri6 cells; both use exactly `4(N+1)` P1 nodes.
+
+The actual signed source complex and actual strictly ordered column planes
+certify the complete product before direct indexed output. Whole-cell map
+checks and assembled typed boundary checks remain mandatory, including opposite
+outward cyclic orientations on every internal face. The internal source diagonal
+has no CAD Curve or swept lateral Surface. Scope and projection retain the same
+operation-owned columns and actual boundary surfaces.
+
+Volume and lateral output use direct source-major indices from the certified
+columns. API classification and merge tables reserve their known payload
+bounds; constructors, validation and downstream copies remain included in
+the allocation measurements.
+
+Related precision fixes use local curve extent for node classification and
+endpoint snapping, including closed curves without stored samples. Curved
+endpoint tolerances scale to the native parameter range through the local
+curve extent. Both straight and curved chains bound snapping below their
+actual adjacent parameter gaps, preserving representable graded samples.
+Retained NoNew templates can use an exact logical centroid witness when adjacent
+stored planes have no representable interior Float64 point; an emitted centroid still
+has to form valid actual cells. Mixed signed volumes use local corner differences
+and reference face winding. Single-entity simplex refinement now inherits its
+actual parent supports, as the multiple-entity route already did.
+
+Coherence uses the unpadded local GEO bounding-box diagonal. Relative spatial
+bins preserve explicit tiny tolerances without integer overflow or missed
+nearby points; exact-zero tolerance retains exact duplicate handling. A point
+extrusion captures its source tolerance before moving the copied point, keeping
+the established collapsed full-turn behavior. Padded synchronized factory
+coherence remains a separate API lifecycle context; that native endpoint is
+not implemented yet.
+
+Both supported normal, bounds-checked package gates pass 520,434 assertions.
+The focused allocation gates and strict Gmsh 4.15.2 differential also pass;
+the complete final release evidence is recorded in STATUS.md.
+Continue with a bounded 2-by-2 quadrangle source and then a two-quadrangle strip.
+General transformed grids, mixed roots, shared regions, copied-source chains,
+collapsed columns and cyclic sweeps remain unfinished phases.
+
+## Previous increment (`f5b45fa`)
+
 The isolated `QuadTriNoNewVerts` source category now includes one triangle with
 three distinct boundary vertices. Its true six-corner prism relation has 13
 admissible face patterns. Free laterals choose an existing-corner three-tet
@@ -89,14 +136,6 @@ Release evidence is recorded in STATUS.md. Both final bounds-checked package
 gates pass 490,276 assertions; focused, differential, artifact and resource
 checks also pass. Continue with the remaining NoNew source-category and
 neighboring-region phases.
-
-The next bounded source-grid contract is a strictly convex four-sided planar
-transfinite source with exactly two conforming Tri3 cells under axis-aligned
-normal translation in either direction.
-Choose their common swept face once for the whole region, then certify the
-actual source complex and stored column product before emitting either cell.
-Both lateral policies and positive normalized graded layers belong to that
-contract. Other grids and general transformed grids retain precise blockers.
 
 ## Previous increment (`9406a01`)
 

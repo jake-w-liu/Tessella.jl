@@ -2918,7 +2918,11 @@ function _curve_parameter_nodes(m::GeoModel,mesh,curve::Int,eligible_nodes,
     (isfinite(length2) && length2>0) || throw(ArgumentError(
         "$caller: Curve[$curve] has an unusable planar length"))
     length1=sqrt(length2)
-    scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
+    # Membership and endpoint snapping use differences from the first
+    # endpoint. A common coordinate offset is not geometric uncertainty:
+    # scaling tolerance by it would admit neighboring edges of an otherwise
+    # exactly representable translated patch.
+    scale=length1
     geometric_tolerance=max(atol,128eps(Float64)*scale)
     cross_bound=(geometric_tolerance*length1)^2
     fraction_tolerance=max(128eps(Float64),geometric_tolerance/length1)
@@ -2930,7 +2934,8 @@ function _curve_parameter_nodes(m::GeoModel,mesh,curve::Int,eligible_nodes,
     span=t1-t0
     (isfinite(span) && span>0) || throw(ArgumentError(
         "$caller: Curve[$curve] has an unusable parameter range"))
-    parameter_tolerance=fraction_tolerance*span
+    admittance_tolerance=fraction_tolerance*span
+    parameter_tolerance=fraction_tolerance<0.5 ? admittance_tolerance : 0.0
     entries=Tuple{Float64,Int}[]
     @inbounds for node in 1:nnodes(mesh)
         eligible_nodes[node] || continue
@@ -2942,14 +2947,8 @@ function _curve_parameter_nodes(m::GeoModel,mesh,curve::Int,eligible_nodes,
         -geometric_tolerance/length1<=fraction<=
             1+geometric_tolerance/length1 || continue
         fraction=clamp(fraction,0.0,1.0)
-        # A node within endpoint tolerance IS the endpoint — keeping the raw
-        # projected value (e.g. 1−eps) would evaluate to a duplicate node one
-        # ulp away and crack the boundary shared with adjacent surfaces. The
-        # stored bound is emitted bitwise: `t0+fraction*span` can sit one ulp
-        # off `t1`, which the writeback would evaluate into a corner
-        # duplicate.
-        fraction<=fraction_tolerance && (fraction=0.0)
-        1-fraction<=fraction_tolerance && (fraction=1.0)
+        # Keep represented interior fractions until the complete chain can
+        # bound snapping below its actual neighboring sample separation.
         parameter=fraction==0.0 ? t0 : fraction==1.0 ? t1 :
                   t0+fraction*span
         push!(entries,(parameter,node))
@@ -2957,8 +2956,18 @@ function _curve_parameter_nodes(m::GeoModel,mesh,curve::Int,eligible_nodes,
     sort!(entries;by=first)
     length(entries)>=2 || throw(ErrorException(
         "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
-    first(entries)[1]-t0<=parameter_tolerance &&
-        t1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
+    for i in 1:(length(entries)-1)
+        gap=entries[i+1][1]-entries[i][1]
+        gap>0.0 && (parameter_tolerance=min(parameter_tolerance,gap/4))
+    end
+    for i in eachindex(entries)
+        parameter,node=entries[i]
+        parameter-t0<=parameter_tolerance && (parameter=t0)
+        t1-parameter<=parameter_tolerance && (parameter=t1)
+        entries[i]=(parameter,node)
+    end
+    first(entries)[1]-t0<=admittance_tolerance &&
+        t1-last(entries)[1]<=admittance_tolerance || throw(ErrorException(
             "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
     for index in 1:(length(entries)-1)
         first_node=Int32(entries[index][2])
@@ -2990,7 +2999,10 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
         "$caller: Curve[$curve] has an unusable parameter range"))
     a,b=m.curves[curve];p=m.points[a];q=m.points[b]
     index=Dict{NTuple{3,Float64},Float64}()
-    scale=max(1.0,hypot(p[1],p[2],p[3]),hypot(q[1],q[2],q[3]))
+    # Exact stored samples name their native parameters irrespective of a
+    # common translation. Fallback projection tolerances use this curve's
+    # local extent, rather than its distance from the coordinate origin.
+    scale=hypot(q[1]-p[1],q[2]-p[2],q[3]-p[3])
     stored=get(m.curve_params,curve,nothing)
     if stored!==nothing
         for u in stored
@@ -2998,15 +3010,34 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
             all(isfinite,point) || throw(ArgumentError(
                 "$caller: Curve[$curve] evaluation is not " *
                 "Float64-representable"))
-            scale=max(scale,abs(point[1]),abs(point[2]),abs(point[3]))
+            scale=max(scale,hypot(point[1]-p[1],point[2]-p[2],point[3]-p[3]))
             haskey(index,point) || (index[point]=u)
         end
     end
+    if a==b && scale==0.0
+        # A closed curve's endpoints carry no extent. Without a useful
+        # stored discretization, measure interior evaluations relative to
+        # its seam so projection residuals retain a local length scale.
+        for fraction in (0.25,0.5,0.75)
+            point=_model_curve_point(m,curve,t0+fraction*span,caller)
+            all(isfinite,point) || throw(ArgumentError(
+                "$caller: Curve[$curve] evaluation is not " *
+                "Float64-representable"))
+            scale=max(scale,hypot(point[1]-p[1],point[2]-p[2],point[3]-p[3]))
+        end
+    end
+    (isfinite(scale) && scale>0.0) || throw(ArgumentError(
+        "$caller: Curve[$curve] has an unusable local extent"))
     haskey(index,p) || (index[p]=t0)
     haskey(index,q) || (index[q]=t1)
     geometric_tolerance=max(atol,128eps(Float64)*scale)
-    parameter_tolerance=max(128eps(Float64)*span,
-                          geometric_tolerance*span)
+    admittance_tolerance=max(128eps(Float64)*span,
+                            (geometric_tolerance/scale)*span)
+    parameter_tolerance=admittance_tolerance
+    # A world-space admission tolerance has to be converted to the native
+    # parameter frame. When its endpoint neighborhoods overlap, it cannot
+    # identify either endpoint; preserve the actual native parameters.
+    parameter_tolerance<span/2 || (parameter_tolerance=0.0)
     entries=Tuple{Float64,Int}[]
     unmatched_nodes=Int[]
     unmatched=Float64[]
@@ -3033,22 +3064,33 @@ function _curve_parameter_nodes_curved(m::GeoModel,mesh,curve::Int,
             muladd(dx,dx,muladd(dy,dy,dz*dz))<=
                 projection_tolerance*projection_tolerance || continue
             parameter=parameters[i]
-            abs(parameter-t0)<=parameter_tolerance && (parameter=t0)
-            abs(parameter-t1)<=parameter_tolerance && (parameter=t1)
             push!(entries,(parameter,unmatched_nodes[i]))
         end
     end
     sort!(entries;by=first)
     length(entries)>=2 || throw(ErrorException(
         "$caller: Curve[$curve] is not represented by a two-node mesh-edge chain"))
+    # Surface writeback consumes this same tolerance when matching stored
+    # samples and snapping endpoints. Keep it below the separation of actual
+    # native samples so a short, known interval cannot be collapsed there.
+    for i in 1:(length(entries)-1)
+        gap=entries[i+1][1]-entries[i][1]
+        gap>0.0 && (parameter_tolerance=min(parameter_tolerance,gap/4))
+    end
+    for i in eachindex(entries)
+        parameter,node=entries[i]
+        parameter-t0<=parameter_tolerance && (parameter=t0)
+        t1-parameter<=parameter_tolerance && (parameter=t1)
+        entries[i]=(parameter,node)
+    end
     if a==b
         # A closed curve's shared vertex classifies at `t0`; the loop closes
         # when the last chain node's edge reaches back to it.
-        first(entries)[1]-t0<=parameter_tolerance || throw(ErrorException(
+        first(entries)[1]-t0<=admittance_tolerance || throw(ErrorException(
             "$caller: Curve[$curve] mesh chain does not reach its start vertex"))
     else
-        first(entries)[1]-t0<=parameter_tolerance &&
-            t1-last(entries)[1]<=parameter_tolerance || throw(ErrorException(
+        first(entries)[1]-t0<=admittance_tolerance &&
+            t1-last(entries)[1]<=admittance_tolerance || throw(ErrorException(
                 "$caller: Curve[$curve] mesh chain does not reach both endpoints"))
     end
     for index in 1:(length(entries)-1)
@@ -5849,8 +5891,8 @@ function _volume_projection_contract(mesh::MixedMesh,caller::AbstractString)
             _volume_cell_signed_volume(
                 mesh.coords,block.nodes,cell,Int(block.msh))>0 ||
                 throw(ArgumentError(
-                    "$caller: MSH $(block.msh) cell $cell is inverted or " *
-                    "degenerate"))
+                    "$caller: MSH $(block.msh) cell $cell has invalid " *
+                    "cell topology or winding (inverted or degenerate)"))
         end
         cell_count+=size(block.nodes,2)
     end
@@ -8276,33 +8318,30 @@ function _model_mesh_volume(mesh::Mesh,caller::AbstractString)
     return total
 end
 
-# Signed volume of one dim-3 cell under the cyclic `_VOLUME_CELL_FACES`
-# ordering — each face fans from its first vertex and is oriented away from
-# the cell centroid by the exact `orient3` predicate (the `_prism_volume6`
-# convention), so folded or flat cells report ≤ 0.
+# Signed boundary volume with each cyclic face split from its first vertex.
+# `_VOLUME_CELL_FACES` stores incidence cycles, so the bottom caps and two tet
+# faces need their reference winding reversed. Anchor every determinant at an
+# actual corner: origin-based products lose local volume under translation,
+# and a rounded centroid can lie on a face of a thin represented cell. This
+# signed sum is not a whole-domain Jacobian certificate for a warped cell.
 function _volume_cell_signed_volume(coords::AbstractMatrix{Float64},
                                     nodes::AbstractMatrix{Int32},
                                     cell::Int,msh::Int)
-    nverts=size(nodes,1)
-    cx=cy=cz=0.0
-    @inbounds for i in 1:nverts
-        v=nodes[i,cell]
-        cx+=coords[1,v];cy+=coords[2,v];cz+=coords[3,v]
-    end
-    scale=1.0/nverts
-    center=(cx*scale,cy*scale,cz*scale)
-    total=0.0
-    @inbounds for f in _VOLUME_CELL_FACES[msh]
+    @inbounds first_node=nodes[1,cell]
+    @inbounds anchor=(coords[1,first_node],coords[2,first_node],coords[3,first_node])
+    total=0.0;correction=0.0
+    @inbounds for (face_index,f) in pairs(_VOLUME_CELL_FACES[msh])
+        reverse_face=msh==4 ? (face_index==1 || face_index==3) :
+                     ((msh==5 || msh==6) && face_index==1)
         a1=nodes[f[1],cell]
         pa=(coords[1,a1],coords[2,a1],coords[3,a1])
         for k in 2:length(f)-1
             a2=nodes[f[k],cell];a3=nodes[f[k+1],cell]
             pb=(coords[1,a2],coords[2,a2],coords[3,a2])
             pc=(coords[1,a3],coords[2,a3],coords[3,a3])
-            s=(pa[1]*(pb[2]*pc[3]-pb[3]*pc[2])+
-               pa[2]*(pb[3]*pc[1]-pb[1]*pc[3])+
-               pa[3]*(pb[1]*pc[2]-pb[2]*pc[1]))/6.0
-            total+=orient3(pa,pb,pc,center)>0 ? s : -s
+            value=tet_signed_volume(anchor,pa,pb,pc)
+            total,correction=_model_compensated_add(
+                total,correction,reverse_face ? -value : value)
         end
     end
     return total

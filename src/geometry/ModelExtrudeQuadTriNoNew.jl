@@ -1,5 +1,5 @@
 # Isolated NoNewVerts region kernels for one nondegenerate source triangle or
-# quadrangle with every corner on the source boundary. Quadrangle face choices
+# quadrangle, and a bounded two-triangle source grid. Quadrangle face choices
 # form a cap chain; triangular caps allow independent prism choices per interval.
 # All other source categories retain explicit preflight blockers until their
 # region-wide propagation phases are implemented.
@@ -243,14 +243,69 @@ function _extrude_nonew_add_diagonals!(edges,v,states)
     return nothing
 end
 
+function _extrude_nonew_exact_centroid_face(vertices,center,a,b,c,orientation,caller)
+    da=vertices[a].-center;db=vertices[b].-center;dc=vertices[c].-center
+    determinant=da[1]*(db[2]*dc[3]-db[3]*dc[2])-
+                da[2]*(db[1]*dc[3]-db[3]*dc[1])+
+                da[3]*(db[1]*dc[2]-db[2]*dc[1])
+    determinant*orientation>0 || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts exact logical centroid has a folded or degenerate face"))
+    return nothing
+end
+
+# A centroid used only as a logical boundary witness need not be a representable
+# mesh vertex. Adjacent floating-point layer planes can have no Float64 point
+# between them. Retry failed witnesses with exact rational arithmetic, while
+# emitted template cells retain all their finite positive-volume/map checks.
+function _extrude_nonew_exact_centroid_certify(v::NTuple{N,NTuple{3,Float64}},
+                                              edges,caller) where N
+    family=N==6 ? 6 : 5
+    total=0.0
+    for (a,b,c,d) in _EXTRUDE_CELL_TETS[family]
+        total+=tet_signed_volume(v[a],v[b],v[c],v[d])
+    end
+    isfinite(total) && total!=0 || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts degenerate or nonfinite logical cell volume"))
+    orientation=total>0 ? 1 : -1
+    vertices=ntuple(i->ntuple(d->Rational{BigInt}(v[i][d]),3),N)
+    center=ntuple(d->sum(vertex[d] for vertex in vertices)/N,3)
+    faces=N==6 ? _EXTRUDE_QT_PRISM_FACES : _EXTRUDE_QT_HEX_FACES
+    for face in faces
+        if length(face)==3
+            _extrude_nonew_exact_centroid_face(vertices,center,
+                face[1],face[2],face[3],orientation,caller)
+            continue
+        end
+        a,b,c,d=face
+        first=_extrude_ein(edges,v[a],v[c])
+        second=_extrude_ein(edges,v[b],v[d])
+        first && second && throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts boundary quadrangle has conflicting diagonals"))
+        if first || !second
+            _extrude_nonew_exact_centroid_face(vertices,center,a,b,c,orientation,caller)
+            _extrude_nonew_exact_centroid_face(vertices,center,a,c,d,orientation,caller)
+        end
+        if second || !first
+            _extrude_nonew_exact_centroid_face(vertices,center,a,b,d,orientation,caller)
+            _extrude_nonew_exact_centroid_face(vertices,center,b,c,d,orientation,caller)
+        end
+    end
+    return nothing
+end
+
 function _extrude_nonew_certify(v,edges,template,caller)
     center=_extrude_quadtri_centroid(v)
     try
         _extrude_quadtri_certify(v,center,edges)
     catch err
         err isa ArgumentError || rethrow()
-        throw(ArgumentError("$caller: "*replace(err.msg,
-            "QuadTriAddVerts"=>"QuadTriNoNewVerts")))
+        if template===nothing
+            # This unsliceable branch emits the Float64 centroid as a real
+            # vertex, so its original representability checks remain required.
+            throw(ArgumentError("$caller: "*replace(err.msg,
+                "QuadTriAddVerts"=>"QuadTriNoNewVerts")))
+        end
+        _extrude_nonew_exact_centroid_certify(v,edges,caller)
     end
     template===nothing && return nothing
     total=0.0
@@ -259,6 +314,10 @@ function _extrude_nonew_certify(v,edges,template,caller)
         total+=tet_signed_volume(v[a],v[b],v[c],v[d])
     end
     orientation=total>0 ? 1 : -1
+    return _extrude_nonew_certify_template(v,template,orientation,caller)
+end
+
+function _extrude_nonew_certify_template(v,template,orientation::Int,caller)
     for position in 1:Int(template.ncells)
         cell=template.cells[position]
         if cell.msh==5
@@ -287,6 +346,22 @@ end
 # Called on an operation-owned working model by the scope helper. No region
 # mesh, cache or allocator state is published until its completed face complex
 # and every actual cell have passed certification.
+function _extrude_nonew_two_tri_candidate(m::GeoModel,source::Int,sides::Int,
+                                          caller::AbstractString)
+    sides==4 && haskey(m.meshing.transfinite_surfaces,source) || return false
+    curves=_model_projection_surface_curves(m,source)
+    # Reject known larger grids before source/column allocation. Missing curve
+    # controls remain the ordinary native surface mesher's diagnostic.
+    for curve in curves
+        control=get(m.meshing.transfinite_curves,curve,nothing)
+        control===nothing && return false
+        _flexible_transfinite_nodes(m,control.num_nodes,curve,caller)==2 ||
+            throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts multiple source cells require the boundary-category planner"))
+    end
+    return !_model_surface_recombined(m,source)
+end
+
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
         size_field::Union{Nothing,AbstractSizeField}=nothing)
@@ -306,10 +381,20 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     sides in (3,4) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts other source boundaries require the boundary-category planner"))
     top,laterals=_extrude_nonew_region_boundary(m,t,source,caller;sides)
+    two_tri=_extrude_nonew_two_tri_candidate(m,source,sides,caller)
     levels,refs=_extrude_nonew_levels(params,caller;source_nodes=sides,
-        extra_nodes=sides==4 ? 1 : 0,cells_per_interval=sides==4 ? 6 : 3)
+        extra_nodes=sides==4 && !two_tri ? 1 : 0,
+        cells_per_interval=two_tri && params.recomb_laterals ? 2 : sides==4 ? 6 : 3)
     source_mesh=mesh_model_surface(m,source;min_angle_deg=min_angle_deg,
         max_periodic_passes=max_periodic_passes,size_field=size_field)
+    if two_tri
+        catalog=_extrude_nonew_two_tri_catalog(m,source,source_mesh,spec,
+            levels,refs,params.recomb_laterals,caller)
+        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        _extrude_nonew_two_tri_product_certify(cols,catalog,spec,caller)
+        return _extrude_nonew_two_tri_finish(m,t,params,source,source_mesh,
+            catalog,cols,top,laterals,caller)
+    end
     cell=_extrude_nonew_source_cell(source_mesh,caller)
     length(cell)==sides || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts source cell does not match its boundary category"))
@@ -381,3 +466,4 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
 end
 
 include("ModelExtrudeNoNewTriangle.jl")
+include("ModelExtrudeNoNewTwoTri.jl")

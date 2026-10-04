@@ -174,7 +174,11 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
         scope.volumes[volume]
     end
     lookup=_extrude_nonew_projection_lookup(mesh,completed,caller)
-    _extrude_nonew_certify_boundary(mesh,completed.surfaces,caller)
+    two_tri=completed.catalog isa _ExtrudeNoNewTwoTriCatalog
+    face_capacity=two_tri ?
+        (completed.volume isa Mesh ? 16 : 7)*length(completed.catalog.layer_refs)+2 : 0
+    _extrude_nonew_certify_boundary(mesh,completed.surfaces,caller;
+        face_capacity=face_capacity)
     curves=Set{Int}()
     points=Set{Int}()
     for surface in keys(completed.surfaces)

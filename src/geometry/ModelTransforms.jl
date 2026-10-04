@@ -736,7 +736,7 @@ end
     coherence!(model; tol) -> Bool
 
 Merge coincident entities the way Gmsh's `ReplaceAllDuplicates` does after a
-transform: points within `tol` (relative to the model's coordinate scale) fuse
+transform: points within `tol` times the local bounding-box diagonal fuse
 into the lowest tag, then curves sharing an endpoint pair, then surfaces whose
 flattened boundary-curve sequences match. References are rewired through
 physical groups, embeddings, periodic relations, discrete boundaries, compound
@@ -749,12 +749,59 @@ function coherence!(m::GeoModel; tol::Real=_COHERENCE_RTOL)
            !isempty(maps.surfaces)
 end
 
-# The coordinate-scaled tolerance Gmsh's `ComparePosition`-style coincidence
-# checks share with the merge passes.
+# GEO's in-operation characteristic length (`AddToTemporaryBoundingBox`) is
+# the unpadded bounding-box diagonal, with one as the zero-extent fallback.
+# In particular, translating a model must not change which Points coincide.
+# OCC circles can store just one seam Point; include their active curve bounds
+# so that a closed circle's scale does not become its closing-roundoff error.
 function _coherence_eps(m::GeoModel, tol::Real=_COHERENCE_RTOL)
-    scale=isempty(m.points) ? 1.0 :
-          max(1.0,maximum(p->maximum(abs.(p)),values(m.points)))
-    return Float64(tol)*scale
+    factor=Float64(tol)
+    factor==0.0 && return 0.0
+    isempty(m.points) && return factor
+    lo=first(values(m.points)); hi=lo
+    for p in values(m.points)
+        lo=(min(lo[1],p[1]),min(lo[2],p[2]),min(lo[3],p[3]))
+        hi=(max(hi[1],p[1]),max(hi[2],p[2]),max(hi[3],p[3]))
+    end
+    for tag in keys(m.curves)
+        geometry=_occ_geometry(m,tag)
+        (geometry===nothing || geometry.occ!==:circle) && continue
+        bounds=_occ_circle_bounding_box(geometry)
+        lo=(min(lo[1],bounds[1]),min(lo[2],bounds[2]),min(lo[3],bounds[3]))
+        hi=(max(hi[1],bounds[4]),max(hi[2],bounds[5]),max(hi[3],bounds[6]))
+    end
+    scale=hypot(hi[1]-lo[1],hi[2]-lo[2],hi[3]-lo[3])
+    scale==0.0 && return factor
+    isfinite(scale) && return factor*scale
+    # The coordinate differences or even their norm can overflow although
+    # tol times that length is finite. Scale first on this exceptional path.
+    isfinite(factor) || return factor
+    magnitude=abs(factor)
+    return copysign(hypot(magnitude*hi[1]-magnitude*lo[1],
+        magnitude*hi[2]-magnitude*lo[2],magnitude*hi[3]-magnitude*lo[3]),factor)
+end
+
+# Two-tolerance-wide relative bins leave a half-bin margin for rounded
+# subtraction/division. Cap their indices well below Float64's integer
+# precision limit as well as Int's limit; otherwise near Points can round two
+# bins apart when an explicitly tiny tolerance gives a quotient near 2^53.
+# Saturation only coarsens candidate buckets: actual distance decides merging.
+const _COHERENCE_BIN_LIMIT=Int(1)<<45
+@inline function _coherence_spatial_component(value::Float64,origin::Float64,
+                                               tolerance::Float64)
+    difference=value-origin
+    quotient=isfinite(difference) ? 0.5*(difference/tolerance) :
+             0.5*(value/tolerance-origin/tolerance)
+    quotient>=Float64(_COHERENCE_BIN_LIMIT) && return _COHERENCE_BIN_LIMIT
+    quotient<=-Float64(_COHERENCE_BIN_LIMIT) && return -_COHERENCE_BIN_LIMIT
+    return floor(Int,quotient)
+end
+@inline function _coherence_spatial_cell(p::NTuple{3,Float64},
+        origin::NTuple{3,Float64},tolerance::Float64)
+    tolerance==0.0 && return (0,0,0)
+    return (_coherence_spatial_component(p[1],origin[1],tolerance),
+            _coherence_spatial_component(p[2],origin[2],tolerance),
+            _coherence_spatial_component(p[3],origin[3],tolerance))
 end
 
 # Run the three merge passes and return each dimension's dropped=>survivor
@@ -793,23 +840,38 @@ end
 function _merge_points!(m::GeoModel,eps)
     mapping=Dict{Int,Int}()
     isempty(m.points) && return mapping
-    grid=Dict{NTuple{3,Int},Vector{Int}}()
-    for tag in sort!(collect(keys(m.points)))
-        p=m.points[tag]
-        cell=ntuple(i->floor(Int,p[i]/eps),3)
-        keep=0
-        for dx in -1:1, dy in -1:1, dz in -1:1
-            for other in get(grid,(cell[1]+dx,cell[2]+dy,cell[3]+dz),Int[])
-                if _points_close(p,m.points[other],eps)
-                    keep=other; break
-                end
-            end
-            keep!=0 && break
+    order=sort!(collect(keys(m.points)))
+    if eps==0.0
+        seen=Dict{NTuple{3,Float64},Int}()
+        for tag in order
+            p=m.points[tag]
+            key=(p[1]==0.0 ? 0.0 : p[1],p[2]==0.0 ? 0.0 : p[2],
+                 p[3]==0.0 ? 0.0 : p[3])
+            keep=get(seen,key,0)
+            keep==0 ? (seen[key]=tag) : (mapping[tag]=keep)
         end
-        if keep==0
-            push!(get!(grid,cell,Int[]),tag)
-        else
-            mapping[tag]=keep
+    else
+        origin=m.points[first(order)]
+        grid=Dict{NTuple{3,Int},Vector{Int}}()
+        for tag in order
+            p=m.points[tag]
+            cell=_coherence_spatial_cell(p,origin,eps)
+            keep=0
+            for dx in -1:1, dy in -1:1, dz in -1:1
+                bucket=get(grid,(cell[1]+dx,cell[2]+dy,cell[3]+dz),nothing)
+                bucket===nothing && continue
+                for other in bucket
+                    if _points_close(p,m.points[other],eps)
+                        keep=other; break
+                    end
+                end
+                keep!=0 && break
+            end
+            if keep==0
+                push!(get!(grid,cell,Int[]),tag)
+            else
+                mapping[tag]=keep
+            end
         end
     end
     isempty(mapping) && return mapping
@@ -1398,12 +1460,15 @@ end
 # nested endpoint extrusions inside `ExtrudeCurve`.
 function _extrude_point_copy!(m::GeoModel, src::Int, spec,
                               params, caller)
+    # Keep the operation's source characteristic length: a full-turn copy's
+    # closing residue must not replace a zero-extent source's fallback scale.
+    tolerance=_coherence_eps(m)
     chapeau=_fresh_point_copy!(m,src,caller)
     spec.type===:translate_rotate &&
         return _extrude_point_twist!(m,src,chapeau,spec,params,caller)
     m.points[chapeau]=_finite_result(
         _extrude_move(spec,m.points[chapeau]),caller)
-    _points_close(m.points[chapeau],m.points[src],_coherence_eps(m)) &&
+    _points_close(m.points[chapeau],m.points[src],tolerance) &&
         return (nothing,chapeau)
     curve=_geo_newreg_alloc!(m,1,caller)
     m.curves[curve]=(src,chapeau)

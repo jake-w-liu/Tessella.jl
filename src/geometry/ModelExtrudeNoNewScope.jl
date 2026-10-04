@@ -5,7 +5,7 @@ struct _ExtrudeNoNewCompletePlan
     volume::Union{Mesh,MixedMesh}
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
     columns::Matrix{NTuple{3,Float64}}
-    catalog::_ExtrudeNoNewCatalog
+    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog}
 end
 
 struct _ExtrudeNoNewScope
@@ -83,6 +83,62 @@ end
 @inline _extrude_nonew_face_key(face::NTuple{4,Int32})=
     _model_projection_face_key(face)
 
+struct _ExtrudeNoNewFaceIncidence
+    count::UInt8
+    orientation::UInt8
+end
+
+@inline function _extrude_nonew_face_cycle(face::NTuple{N,Int32}) where N
+    first=1
+    for index in 2:N
+        face[index]<face[first] && (first=index)
+    end
+    origin=first
+    return ntuple(k->k<=N ? face[mod1(origin+k-1,N)] : Int32(0),4)
+end
+
+@inline function _extrude_nonew_face_orientation(cycle::NTuple{4,Int32},width::Int)
+    # Canonical rotation starts at the minimum vertex. For a quadrangle the
+    # middle vertex's rank identifies the opposite pair, and one bit records
+    # the order of the two remaining vertices. Reversal flips only that bit.
+    width==3 && return UInt8(cycle[2]<cycle[3])
+    middle_rank=Int(cycle[2]<cycle[3])+Int(cycle[4]<cycle[3])
+    return UInt8(middle_rank<<1) | UInt8(cycle[2]<cycle[4])
+end
+
+function _extrude_nonew_count_faces!(
+        counts::Dict{NTuple{4,Int32},_ExtrudeNoNewFaceIncidence},
+        nodes,msh::Int,caller::AbstractString)
+    # The shared topology catalog records vertex incidence, and does not orient
+    # all faces outwards. This bounded check uses outward cycles for positive
+    # Tet4 and Pri6 maps instead.
+    faces=msh==4 ? ((1,3,2),(1,2,4),(2,3,4),(3,1,4)) :
+          msh==6 ? ((1,3,2),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)) : nothing
+    faces===nothing && throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts oriented face check does not support volume type $msh"))
+    for column in axes(nodes,2),face in faces
+        vertices=ntuple(k->nodes[face[k],column],length(face))
+        key=_extrude_nonew_face_key(vertices)
+        orientation=_extrude_nonew_face_orientation(
+            _extrude_nonew_face_cycle(vertices),length(face))
+        previous=get(counts,key,nothing)
+        if previous===nothing
+            counts[key]=_ExtrudeNoNewFaceIncidence(0x01,orientation)
+        else
+            previous.count==1 || throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts volume face $key has incidence $(Int(previous.count)+1)"))
+            orientation==xor(previous.orientation,0x01) ||
+                throw(ArgumentError(
+                    "$caller: QuadTriNoNewVerts internal volume face $key has equal or inconsistent orientation"))
+            counts[key]=_ExtrudeNoNewFaceIncidence(0x02,previous.orientation)
+        end
+    end
+    return nothing
+end
+
+@inline _extrude_nonew_face_count(count::Int)=count
+@inline _extrude_nonew_face_count(incidence::_ExtrudeNoNewFaceIncidence)=incidence.count
+
 function _extrude_nonew_count_faces!(counts,nodes,msh::Int,
                                      caller::AbstractString)
     faces=get(_VOLUME_CELL_FACES,msh,nothing)
@@ -141,8 +197,16 @@ end
 # treated as equivalent. Coordinate lookup is confined to this one certified
 # isolated region; independent coincident entities never share this registry.
 function _extrude_nonew_certify_boundary(volume,surfaces,
+        caller::AbstractString;oriented_internal::Bool=false,face_capacity::Int=0)
+    counts=oriented_internal ?
+        Dict{NTuple{4,Int32},_ExtrudeNoNewFaceIncidence}() :
+        Dict{NTuple{4,Int32},Int}()
+    face_capacity>0 && sizehint!(counts,face_capacity)
+    return _extrude_nonew_certify_boundary(volume,surfaces,counts,caller)
+end
+
+function _extrude_nonew_certify_boundary(volume,surfaces,counts,
                                          caller::AbstractString)
-    counts=Dict{NTuple{4,Int32},Int}()
     if volume isa Mesh
         _extrude_nonew_count_faces!(counts,volume.tets,4,caller)
     else
@@ -154,8 +218,13 @@ function _extrude_nonew_certify_boundary(volume,surfaces,
     end
     isempty(counts) && throw(ArgumentError(
         "$caller: QuadTriNoNewVerts completed volume has no cells"))
-    boundary=Set{NTuple{4,Int32}}(key for (key,count) in counts if count==1)
+    boundary=Set{NTuple{4,Int32}}()
+    sizehint!(boundary,count(value->_extrude_nonew_face_count(value)==1,values(counts)))
+    for (key,incidence) in counts
+        _extrude_nonew_face_count(incidence)==1 && push!(boundary,key)
+    end
     lookup=Dict{NTuple{3,Float64},Int32}()
+    sizehint!(lookup,nnodes(volume))
     for node in 1:nnodes(volume)
         coordinate=_extrude_nonew_coordinate(volume,node)
         haskey(lookup,coordinate) && throw(ArgumentError(
@@ -164,6 +233,7 @@ function _extrude_nonew_certify_boundary(volume,surfaces,
         lookup[coordinate]=Int32(node)
     end
     actual=Set{NTuple{4,Int32}}()
+    sizehint!(actual,length(boundary))
     for tag in sort!(collect(keys(surfaces)))
         _extrude_nonew_surface_faces!(actual,surfaces[tag],lookup,tag,caller)
     end
@@ -190,12 +260,19 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         working,plan.top_tag,params,spec,link[2],caller;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field,source_mesh=plan.source_mesh)
+    two_tri=plan.catalog isa _ExtrudeNoNewTwoTriCatalog
     for tag in plan.lateral_tags
         params,spec,link=_extrude_entity_params(working,2,tag,caller)
-        surfaces[tag]=_extrude_lateral_mesh(
-            working,tag,params,spec,link[2],caller;edges=plan.edges)
+        surfaces[tag]=two_tri ?
+            _extrude_nonew_two_tri_lateral(working,tag,params,link[2],
+                plan.sweep.cols,plan.catalog,plan.edges,caller) :
+            _extrude_lateral_mesh(
+                working,tag,params,spec,link[2],caller;edges=plan.edges)
     end
-    _extrude_nonew_certify_boundary(volume,surfaces,caller)
+    face_capacity=two_tri ?
+        (volume isa Mesh ? 16 : 7)*length(plan.catalog.layer_refs)+2 : 0
+    _extrude_nonew_certify_boundary(volume,surfaces,caller;
+        oriented_internal=two_tri,face_capacity=face_capacity)
     _working_model || (m.curve_params=working.curve_params)
     return _ExtrudeNoNewCompletePlan(volume,surfaces,plan.sweep.cols,plan.catalog)
 end
