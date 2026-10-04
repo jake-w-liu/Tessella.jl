@@ -26,6 +26,75 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Latest verified increment
 
+The verified worktree is `C:/tmp/tessella_nonew_four_quad_strip` on
+`codex/nonew-four-quad-strip`, based on verified and pushed `0f9601f`.
+The bounded four-Quad catalog, 81-state joined cap solver, direct indexed
+emission and classified projection are implemented. Ten actual source nodes,
+all thirteen source edges and every nonadjacent cell pair are certified.
+Recombined laterals retain four actual terminal centers in source-cell order.
+Twenty-four saved native P1/P2 products and all 256 cyclic source-catalog
+frames pass focused checks. Geometry passes 5,607 assertions on each runtime,
+covering exactly 192 finished products and 256 catalog-only frames. All 24 new
+CRC records match across runtimes; the prior 169 records and both tables remain
+unchanged. The current 193 CRC rows comprise 184 NoNew and nine API01 records.
+Full strict native replay passes all 170 scoped cases in 312.551s; its log SHA256 is
+`161B29164056DE826F28E31AB86282213902D0CCD26E1825DD6004821A32CB00`. The new
+four-Quad resource gate passes 14,958,057 checks on each runtime with matching
+P1 geometry and six P2 audit rows per runtime, unchanged growth bounds and all 41 actual methods free
+of true `Core.Box`. All ten resource gates pass 78,290,194 assertions, with
+240 corresponding P1 rows and the retained P2 audit rows matching across
+supported runtimes. Normal bounds package verification passes
+862,550/862,550 assertions on Julia 1.12.7 in 30m53.1s
+(wrapper 1,858.0566338s), preserving all 446 inputs and the scoped index.
+The Julia 1.12.7 log is `test/tmp/pkg_four_strip_frozen_v1_julia112.log`, SHA256
+`AB63845A963E291C99A2518C9B65EA2BE07C3D7CE5BAB7995059B0B962B50740`.
+Julia 1.13.1 also passes 862,550/862,550 in 22m32.1s
+(wrapper 1,357.1686771s). Its log is
+`test/tmp/pkg_four_strip_frozen_v1_julia113.log`, SHA256
+`287F4DCA4B1815E4CE36015D28BDABFBD1268CF8AE574DF1C60395FBE3BCED98`.
+The ignored `test/tmp` directory carries the
+verified original and geometric-variant preparation and current evidence.
+
+A confirmed fixed allocation in the twelve-field ranking initializer is
+removed by `ntuple(..., Val(12))`. Detached checks preserve every selected
+record, cost, alignment and short chain while reducing warm relation allocation
+from 13.19 MB to 68.7 KB. No comparator or ranking rule changes.
+The independent production comparison passes 8,398,080 transitions over all
+256 cyclic frames and 1,024 canonical exterior preferences, with 6,400 scalar
+rank crosschecks. These are separate frame/preference domains, not their
+Cartesian product. Permanent exhaustive short-path tests pass 2,429 assertions
+under all 24 stored source-cell orders. The permanent new API suite has
+133,284 assertions; focused runs add nine old-artifact checks and pass
+133,293 on each runtime. The release freezes 446 raw inputs: 98 production/Project,
+194 test and 154 validation files, their scoped index and base HEAD.
+The freeze manifest SHA256 is
+`0FF77953A027C73D24F0591AACF9EFAF0212544088DAAFE3348DCFE5BBD81624`;
+the scoped index SHA256 is
+`c2614390e877718e1e0744ca397c7dc6967f2b1752140abacf3d478758141678`.
+Both package gates and all assigned release checks are complete. Preserve this
+verified worktree and begin new implementation in a fresh worktree from published
+main. The broad mesher goal remains active.
+
+## Next increment
+
+The next implementation is a dynamic native rectangular Quad-grid path under
+axis-normal translation, with actual B3, adjacent-B2 and B0 source-cell handling
+and coupled shared-face propagation. Sixteen primary Gmsh 4.15.2 P1/P2 controls
+cover actual 2-by-3 and 3-by-3 source grids, one/three layers, both normal directions
+and lateral policies. Independent checks certify actual maps, source incidence,
+typed faces, ownership, interpolation supports and raw Curve parameters. Current
+source-only comparisons pass 1,469 checks on Julia 1.12.7 and 1.13.1, with maximum
+coordinate/parameter error `2.0594637106796654e-12` below unchanged `2e-11`.
+There is no native general-grid volume-parity claim yet.
+
+Preparation is retained under ignored `test/tmp/next_general_quad_grid_*`, including
+the combined matrix audit, source review and 86-file carry manifest. Use actual
+sampled coordinates and source incidence; do not substitute ideal grid fractions.
+Gmsh's pointer minima are not public-tag minima. B1/B4 source categories, shared
+neighbors/regions and transformed products remain separate pending phases.
+
+## Previous increment (`0f9601f`)
+
 The bounded three-quadrangle `QuadTriNoNewVerts` strip is implemented and verified
 in `C:/tmp/tessella_nonew_three_quad_strip` on `codex/nonew-three-quad-strip`,
 based on verified and pushed `e3f18c9`. The new catalog preserves eight actual
@@ -71,16 +140,14 @@ The ignored `test/tmp/three_strip_release_freeze_v1.json` and gate logs retain
 the release snapshot. Leave this verified worktree's tracked files unchanged;
 continue the next increment in a fresh worktree from verified main.
 
-The broad goal remains active. Continue with the bounded four-Quad path:
-ten actual boundary nodes, native five-/two-node chains, an 81-state joined
-cap relation and four actual terminal centers under recombined laterals.
-Independent preparation is in this worktree's ignored `test/tmp` directory:
+At that release, the next category was the bounded four-Quad path, now verified
+above. Its independent preparation remains in the archived worktree's ignored
+`test/tmp` directory:
 `next_four_quad_strip_design_review.md`,
 `next_four_quad_strip_v2_design_addendum.md`,
 `next_four_quad_strip_api_checklist.md` and their hash manifests/captures.
 Eight original and 16 geometric variants are independently certified.
-Current source-only sampling passes 416 checks at the unchanged `2e-11`
-tolerance; the four-Quad volume planner remains to be implemented.
+The preparatory source-only comparison passed 416 checks at unchanged `2e-11`.
 General transformed grids, mixed roots and shared regions remain separate phases.
 
 ## Previous increment (`e3f18c9`)

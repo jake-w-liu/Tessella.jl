@@ -398,3 +398,74 @@ partition and opposite typed faces. Each doubling keeps the unchanged bound
 recognizes `GlobalRef(Core, :Box)` and includes deliberately boxed positional
 and keyword positive controls. Input hashes must remain stable. Final resource
 and release results are recorded only after the corresponding gates complete.
+
+The four-Quad strip extension replays 24 saved primary Gmsh 4.15.2 products
+from `test/artifacts/quadtri_nonew_four_quad_strip_oracle.toml`. Eight unit
+fixtures cover one/three intervals, both normal signs and both lateral policies;
+sixteen additional fixtures cover rounded/skew sources, all coordinate planes,
+represented graded/nonbinary levels, Progression 4, reversed curves, sparse
+tags and opposite pins. The actual source has ten boundary nodes, four Quad4
+cells, thirteen edges, three shared edges forming a path, and CAD chain widths
+two/five. The earlier 146 scoped cases, serializers and artifact records remain
+unchanged. `QUADTRI_NONEW_CASE=next_four_quad_strip` selects the 24 saved cases.
+
+The artifact retains all exact inputs/hashes, raw coordinate/parameter bits,
+actual classified lower and volume cells, primary P1/P2 identity remaps,
+interpolation supports and stored/computed UV records. Promotion performs no
+meshing and verifies a lossless raw JSON roundtrip. It contains 3,153 exact
+whole-map records per order and five actual Pri6/Pri18 cells. Their bilinear
+interfaces are certified using actual reference maps and exact mapped-flux
+integration, rather than a flat tetrahedral split. Pointer-sensitive free
+families/connectivity/public labels remain evidence of admissible products,
+not a universal native pin. Native products must satisfy their own actual
+source identities, top/lateral policy, whole maps and opposite typed faces.
+
+For N intervals and C added centers, P1 nodes are `10(N+1)+C`; P2 nodes are
+`54N+27+8C`. Free laterals add no center. RecombLaterals records exactly four
+terminal problems, giving eight Tet4, twenty Pyr5 and `4(N-1)` retained Hex8.
+P1 Point/Curve/Surface/Volume owner counts are `8`, `4N+8`, `6N-6`, `C`;
+P2 owner counts are `8`, `8N+28`, `32N-2`, `14N-7+8C`. Actual interpolation
+supports number `44N+17+7C`. Caps have seven owned/27 closure nodes; a long
+lateral has `14N-7` owned/`18N+9` closure nodes, and a short lateral has
+`2N-1` owned/`6N+3` closure nodes. Owner assertions follow actual classified
+Line/Tri/Quad support identities, not endpoint or coordinate guesses.
+
+The twelve recombined saved products contain 340 empty stored Surface UV
+records (80 from the original eight products, 260 from the sixteen variants).
+Computed inverses are retained separately. Native complete computed UV queries
+must evaluate the actual nodes at the unchanged `2e-11` coordinate bound;
+the dedicated counter records the stored-parameter provenance difference.
+Actual Progression 4 samples are preserved, including measured deviations
+from ideal analytic fractions; the coordinate bound is not relaxed.
+
+The new terminal marker is `QUADTRI_NONEW_FOUR_QUAD_STRIP_DIFFERENTIAL_OK`,
+with separate saved/P2/variant/provenance/empty-UV counters. Full execution
+reports 24/24/16/12/340 for this extension. Native geometry, API, resource and
+full release results require their completed guarded runs; fixture promotion
+and primary certificates alone do not establish native parity.
+
+The four-strip geometry suite independently checks 192 finished products
+(all 24 original cell orders, four cyclic frame patterns and both policies).
+It separately checks all 256 independent cyclic source-catalog frames for
+one retained original order. The latter checks source identity and shared
+edge reversal; they do not claim 24-by-256 finished-volume coverage.
+
+Run the separate four-Quad strip resource gate with normal compilation and
+bounds checks on both runtimes; it does not require Gmsh:
+
+```sh
+/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/four_quad_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/four_quad_strip_resources.jl
+```
+
+The 24 path/policy/scale rows cover 1,000, 2,000 and 4,000 intervals for
+standalone volume, GEO, classified projection and public API generation.
+Warmed allocations measure construction, including constructor and downstream
+copies; output extraction and independent audits occur afterward. The audits
+check ten actual source columns, exactly four recombined terminal centroids,
+full cell reference maps, mapped bilinear face flux, every macro partition,
+opposite typed faces and actual P2 carrier identities. The unchanged growth
+bound is `allocated_next <= 2.15 * allocated_previous + 65536`. The lowered
+code scan recognizes `GlobalRef(Core, :Box)` and uses deliberately boxed
+positional and keyword positive controls. Input hashes must remain stable.
+Final resource and release results require their completed guarded runs.

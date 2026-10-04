@@ -20,6 +20,8 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_quad_strip_
 const QTS=QuadTriNoNewQuadStripCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_three_quad_strip_certificates.jl"))
 const QT3S=QuadTriNoNewThreeQuadStripCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_four_quad_strip_certificates.jl"))
+const QT4S=QuadTriNoNewFourQuadStripCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -989,6 +991,134 @@ function three_strip_saved_case(record;oracle_only=false)
 end
 
 
+# Four-Quad saved products retain their own counters and parameter provenance.
+function four_strip_saved_fixture(record)
+    phase=record["p1"];source=only(filter(e->e["dim"]==2 && e["tag"]==record["source_tag"],phase["entities"]))
+    nodes=Dict(p["tag"]=>p for p in phase["nodes"])
+    successors=Dict{Int,Int}()
+    for (dimension,signed) in source["oriented_boundary"]
+        dimension==1 || error("strip source CAD boundary dimension")
+        curve=only(filter(e->e["dim"]==1 && e["tag"]==abs(signed),phase["entities"]))
+        cells=curve["cells"];a=first(cells)["nodes"][1];b=last(cells)["nodes"][2]
+        signed<0 && ((a,b)=(b,a))
+        haskey(successors,a) && error("strip repeated CAD corner successor")
+        successors[a]=b
+    end
+    length(successors)==4 && Set(keys(successors))==Set(values(successors)) || error("strip CAD corner cycle")
+    first_corner=argmin(n->nodes[n]["owner"][2],collect(keys(successors)))
+    corner_ids=ntuple(4) do k
+        node=first_corner
+        for _ in 2:k;node=successors[node];end
+        node
+    end
+    successors[last(corner_ids)]==first_corner && length(unique(corner_ids))==4 || error("strip CAD corner cycle closure")
+    corners=Tuple(Tuple(Float64.(nodes[n]["coordinates"])) for n in corner_ids)
+    axis=Int(record["normal_axis"]);other=Tuple(i for i in 1:3 if i!=axis);axes=(other...,axis)
+    winding=sign((corners[2][other[1]]-corners[1][other[1]])*(corners[3][other[2]]-corners[1][other[2]])-
+                 (corners[2][other[2]]-corners[1][other[2]])*(corners[3][other[1]]-corners[1][other[1]]))
+    plane=record["plane"]=="XZ" ? :ZX : Symbol(record["plane"])
+    f=QT4S.fixture(record["name"];plane,shape=record["geometry_shape"]=="unit_square" ? :unit : :rounded,
+                  height=record["translation_height"],laterals=record["recombine_laterals"],layers=:one)
+    return merge(f,(;source=record["input_geo"],axes,corners,winding=Int(winding),
+                    levels=Float64.(record["intended_levels"]),height=Float64(record["translation_height"]),
+                    surface=Int(record["source_tag"]),curve_tags=Tuple(Int.(record["source_curve_tags"])),
+                    point_tags=Tuple(Int(nodes[n]["owner"][2]) for n in corner_ids),
+                    intervals=Int(record["intervals"]),translation=ntuple(k->k==axis ? Float64(record["translation_height"]) : 0.,3)))
+end
+
+
+function four_strip_saved_case(record;oracle_only=false)
+    tolerance=2e-11;n=Int(record["intervals"]);laterals=record["recombine_laterals"]
+    f=four_strip_saved_fixture(record)
+    saved_nodes=quad_patch_saved_integrity(record,tolerance)
+    strip_saved_reference_integrity(record)
+    owners=[count(node->node["owner"][1]==dim,values(saved_nodes)) for dim in 0:3]
+    owners==[8,8n+28,32n-2,14n-7+(laterals ? 32 : 0)] || error("four-strip saved owner dimension counts")
+    source,_=two_tri_saved_mesh(record,"p1",2,record["source_tag"])
+    linear,index=two_tri_saved_mesh(record,"p1",3,record["volume_tag"])
+    quadratic,_=two_tri_saved_mesh(record,"p2",3,record["volume_tag"])
+    saved=QT4S.certify(linear,f,source;oracle=true)
+    two_tri_saved_boundary(record,index)==Set(keys(saved.boundary)) || error("four-strip saved actual typed exterior")
+    exact_saved_volume=strip_integrated_volume(linear)
+    exact_saved_volume==saved.total && exact_saved_volume==
+        sum(strip_fraction(row["exact_partition_volume"]) for row in record["strip_macro_certificate"]["macro_cells"]) ||
+        error("four-strip saved actual reference integration differs from macro partition")
+    QTNN.certify_quadratic(quadratic,linear)
+    nnodes(quadratic)==54n+27+(laterals ? 32 : 0) || error("four-strip saved P2 node count")
+    empty_parameters=count(node->node["owner"][1]==2 && isempty(node["stored_parameters"]),values(saved_nodes))
+    empty_parameters==(laterals ? 10n : 0)==record["empty_stored_surface_uv_nodes"] ||
+        error("four-strip saved stored UV provenance count")
+    for (lateral,width) in zip(record["lateral_tags"],record["lateral_chain_widths"])
+        entity=only(e for e in record["p2"]["entities"] if e["dim"]==2 && e["tag"]==lateral)
+        length(entity["owned"]["tags"])==(width==5 ? 14n-7 : 2n-1) &&
+            length(entity["closure"]["tags"])==(width==5 ? 18n+9 : 6n+3) ||
+            error("four-strip saved lateral owner/closure counts")
+    end
+    if !oracle_only
+        execution=QT4S.execute(f.source)
+        volume=geo_entity_mesh(execution,3,record["volume_tag"])
+        actual_source=geo_entity_mesh(execution,2,record["source_tag"])
+        quad_patch_source_match(actual_source,source,tolerance)
+        native=QT4S.certify(volume,f,actual_source)
+        strip_integrated_volume(volume)==native.total || error("four-strip native actual reference integration")
+        QTNN.surface_faces(execution.mesh_parts,volume)==Set(keys(native.boundary)) || error("four-strip native finalized typed exterior")
+        nnodes(volume)==nnodes(linear) || error("four-strip native primary node count")
+        # Free finalized masks can choose different valid existing-node factories.
+        # Every primary column and actual terminal centroid must still agree.
+        for p in eachcol(volume.coords)
+            count(q->maximum(abs.(p.-q))<=tolerance,eachcol(linear.coords))==1 || error("four-strip actual primary/centroid geometry")
+        end
+        mktempdir() do directory
+            path=joinpath(directory,"four_quad_strip_saved.geo");write(path,f.source)
+            native_api(path,api->begin
+                cache=api.mesh.generate(3)
+                first=QT4S.public_volume(api,record["volume_tag"])
+                primary_data=api.mesh.get_elements(3,record["volume_tag"])
+                QTNN.typed_signature(first)==QTNN.typed_signature(volume) || error("four-strip API/GEO actual primary cells")
+                isempty(api.mesh.get_elements(2)[1]) || error("four-strip API3 lower-cell contract changed")
+                projected=model_to_mixed(api.CURRENT[],cache,3,record["volume_tag"])
+                api.mesh.set_order(2)
+                actual=QT4S.public_volume(api,record["volume_tag"])
+                QTNN.certify_quadratic(actual,first)
+                quadratic_volume_from_jacobians(actual,api.mesh;expected=Float64(native.total))
+                strip_native_supports(api,cache,primary_data,projected,record["volume_tag"],tolerance)==
+                    44n+17+(laterals ? 28 : 0) || error("four-strip native P2 support count")
+                native_owners=zeros(Int,4)
+                for node in api.mesh.get_nodes()[1]
+                    p,uv,dim,owner=api.mesh.get_node(node);native_owners[dim+1]+=1
+                    if dim==2
+                        length(uv)==2 && maximum(abs.(api.model.get_value(2,owner,uv).-p))<=tolerance ||
+                            error("four-strip native computed surface UV")
+                    end
+                end
+                native_owners==owners || error("four-strip native owner dimension counts")
+                for (lateral,width) in zip(record["lateral_tags"],record["lateral_chain_widths"])
+                    own,_,uv=api.mesh.get_nodes(2,lateral,false,true)
+                    length(own)==(width==5 ? 14n-7 : 2n-1) && length(uv)==2length(own) ||
+                        error("four-strip native lateral owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,lateral,true,true)
+                    length(closure)==(width==5 ? 18n+9 : 6n+3) && length(uv)==2length(closure) &&
+                        maximum(abs.(api.model.get_value(2,lateral,uv).-coords))<=tolerance ||
+                        error("four-strip native lateral closure/computed UV")
+                end
+                for cap in (record["source_tag"],record["top_tag"])
+                    own,_,uv=api.mesh.get_nodes(2,cap,false,true)
+                    length(own)==7 && length(uv)==14 || error("four-strip native cap owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,cap,true,true)
+                    length(closure)==27 && length(uv)==54 &&
+                        maximum(abs.(api.model.get_value(2,cap,uv).-coords))<=tolerance ||
+                        error("four-strip native cap closure/computed UV")
+                end
+                api.mesh.set_order(1)
+                QTNN.typed_signature(QT4S.public_volume(api,record["volume_tag"]))==QTNN.typed_signature(first) ||
+                    error("four-strip actual P2/P1 roundtrip")
+            end)
+        end
+    end
+    return empty_parameters
+end
+
+
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -1004,6 +1134,8 @@ quad_strip_cases=Ref(0);quad_strip_quadratic_cases=Ref(0);quad_strip_variant_cas
 quad_strip_parameter_provenance_gaps=Ref(0);quad_strip_empty_parameters=Ref(0)
 three_strip_cases=Ref(0);three_strip_quadratic_cases=Ref(0);three_strip_variant_cases=Ref(0)
 three_strip_parameter_provenance_gaps=Ref(0);three_strip_empty_parameters=Ref(0)
+four_strip_cases=Ref(0);four_strip_quadratic_cases=Ref(0);four_strip_variant_cases=Ref(0)
+four_strip_parameter_provenance_gaps=Ref(0);four_strip_empty_parameters=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -1427,6 +1559,20 @@ try
         record["capture_kind"]=="independent_variant" && (three_strip_variant_cases[]+=1)
         println("QUADTRI_NONEW_THREE_QUAD_STRIP_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
     end
+    four_strip_catalog=TOML.parsefile(joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_four_quad_strip_oracle.toml"))
+    four_strip_catalog["gmsh_version"]=="4.15.2" && four_strip_catalog["coordinate_abs_tolerance"]==2e-11 &&
+        length(four_strip_catalog["fixtures"])==24 && four_strip_catalog["empty_stored_surface_uv_nodes"]==340 ||
+        error("four-strip saved oracle catalog contract")
+    for record in four_strip_catalog["fixtures"]
+        isempty(selected) || occursin(selected,record["name"]) || continue
+        empty_parameters=four_strip_saved_case(record;oracle_only)
+        four_strip_cases[]+=1;four_strip_quadratic_cases[]+=1
+        four_strip_empty_parameters[]+=empty_parameters
+        empty_parameters>0 && (four_strip_parameter_provenance_gaps[]+=1)
+        record["capture_kind"]=="independent_variant" && (four_strip_variant_cases[]+=1)
+        println("QUADTRI_NONEW_FOUR_QUAD_STRIP_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
+    end
+    println("QUADTRI_NONEW_FOUR_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(four_strip_cases[]) p2_cases=$(four_strip_quadratic_cases[]) independent_variants=$(four_strip_variant_cases[]) parameter_provenance_gaps=$(four_strip_parameter_provenance_gaps[]) empty_stored_uv=$(four_strip_empty_parameters[])")
     println("QUADTRI_NONEW_THREE_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(three_strip_cases[]) p2_cases=$(three_strip_quadratic_cases[]) independent_variants=$(three_strip_variant_cases[]) parameter_provenance_gaps=$(three_strip_parameter_provenance_gaps[]) empty_stored_uv=$(three_strip_empty_parameters[])")
     println("QUADTRI_NONEW_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(quad_strip_cases[]) p2_cases=$(quad_strip_quadratic_cases[]) independent_variants=$(quad_strip_variant_cases[]) parameter_provenance_gaps=$(quad_strip_parameter_provenance_gaps[]) empty_stored_uv=$(quad_strip_empty_parameters[])")
     println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) two_tri_saved_cases=$(two_tri_cases[]) two_tri_p2_cases=$(two_tri_quadratic_cases[]) two_tri_parameter_provenance_gaps=$(two_tri_parameter_provenance_gaps[]) two_tri_empty_stored_uv=$(two_tri_saved_empty_parameters[]) quad_patch_saved_cases=$(quad_patch_cases[]) quad_patch_p2_cases=$(quad_patch_quadratic_cases[]) quad_patch_trapezoid_cases=$(quad_patch_trapezoid_cases[]) quad_patch_parameter_provenance_gaps=$(quad_patch_parameter_provenance_gaps[]) quad_patch_empty_stored_uv=$(quad_patch_empty_parameters[]) oracle_only=$oracle_only")

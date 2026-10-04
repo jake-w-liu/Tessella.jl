@@ -525,7 +525,7 @@ function run_tests()
                 @test_throws ArgumentError API.mesh.clear([(3,carriers.volume),(3,90001)])
                 unchanged(before)
                 for i in f.long_pair
-                    API.mesh.set_transfinite_curve(f.curve_tags[i],5)
+                    API.mesh.set_transfinite_curve(f.curve_tags[i],6)
                 end
                 before=snapshot()
                 @test_throws r"QuadTriNoNewVerts" API.mesh.generate(3)

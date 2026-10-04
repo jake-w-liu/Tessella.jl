@@ -124,7 +124,7 @@ end
 
     @testset "Unsupported source and boundary changes reject atomically" begin
         f=_TQSC.fixture("guard";layers=:one)
-        larger=replace(f.source,"}=4;"=>"}=5;")
+        larger=replace(f.source,"}=4;"=>"}=6;")
         @test larger!=f.source
         _tqsc_atomic(merge(f,(;source=larger)),r"QuadTriNoNewVerts")
         tilted=replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.1,0.0,1.0}")
