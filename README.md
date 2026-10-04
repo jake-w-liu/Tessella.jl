@@ -190,7 +190,7 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
 - native `QuadTriNoNewVerts` for an isolated source triangle or quadrangle, or a
   strictly convex four-corner planar transfinite source containing two Tri3 cells,
   or a recombined 2-by-2 Quad4 patch with an existing interior source pivot,
-  or a recombined strip containing two or three Quad4 cells,
+  or a recombined strip containing two, three or four Quad4 cells,
   with normalized
   positive layer groups and free or recombined laterals; one completed operation
   plan supplies the volume, surfaces, and classified projection. Whole-domain
@@ -209,14 +209,14 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   hexahedra and twelve pyramids, using exactly `9(N+1)` primary nodes without
   an added centroid. The actual source partition and element maps are certified
   before the complete typed boundary and projection are published.
-  The two- and three-Quad strips retain their actual three-/two-node and
-  four-/two-node native Line chains. Both support axis-normal translation in
+  The two-, three- and four-Quad strips retain their actual three-/two-node,
+  four-/two-node and five-/two-node native Line chains. They support axis-normal translation in
   either direction and preserve the original source-cell ordering. Free
-  products use exactly `6(N+1)` or `8(N+1)` primary nodes; recombined laterals
-  add exactly two or three strictly representable terminal centroids. Their
-  quadratic meshes have `30N+15` or `42N+21` nodes for free laterals, and
-  `30N+31` or `42N+45` for recombined laterals. Both shared faces in a
-  three-Quad strip are solved together before indexed output is emitted.
+  products use exactly `6(N+1)`, `8(N+1)` or `10(N+1)` primary nodes; recombined laterals
+  add exactly two, three or four strictly representable terminal centroids. Their
+  quadratic meshes have `30N+15`, `42N+21` or `54N+27` nodes for free laterals, and
+  `30N+31`, `42N+45` or `54N+59` for recombined laterals. Every shared face in a
+  strip is solved together before indexed output is emitted.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh

@@ -1133,13 +1133,39 @@ strict native replay passes all 146 scoped cases, the shared AddVerts
 differential passes 32 cases and all eight resource gates pass on unchanged
 438 frozen production/test/validation inputs and scoped index.
 
-Continue with a bounded four-Quad path: ten actual boundary
+The current bounded four-Quad path is implemented: ten actual boundary
 vertices, native five-/two-node chains and an 81-state cap relation coupling
 three shared faces. Eight original and 16 geometric variants have independent
-primary map/capacity/support proofs. Current source-only sampling passes 416
-checks at the unchanged tolerance. The retained ignored preparation must be
-carried into the next worktree after the three-Quad release is pushed. General transformed grids, mixed roots and
-shared regions remain unfinished and retain precise blockers.
+primary map/capacity/support proofs. Its preparatory source-only comparison passed
+416 checks at unchanged tolerance. Geometry passes 5,607 checks on both
+supported runtimes, including 192 actual finished products and 256 catalog-only
+frames. All 8,398,080 production transitions and 6,400 scalar rank checks match
+the independent export across separate 256-frame and 1,024-preference domains,
+rather than their Cartesian product;
+2,429 permanent short-path checks cover all 24 original source-cell orders.
+The permanent API suite passes 133,284 checks on each runtime; focused wrappers
+add nine retained-artifact checks and pass 133,293. All 24 new CRC rows agree across
+runtimes, bringing the total to 193 (184 NoNew plus nine API01), with all prior
+169 rows and both immutable tables unchanged. The full 170-case native differential
+passes in 312.551s, and the new resource gate passes 14,958,057 assertions on each line,
+including six P2 rows and 41 actual methods with no true `Core.Box`.
+All ten resource gates pass 78,290,194 assertions with unchanged growth bounds
+and 240 matching corresponding P1 rows and retained P2 audits. Normal bounds
+package verification passes 862,550 assertions on each supported runtime,
+in 30m53.1s/22m32.1s (wrappers 1,858.0566338s/1,357.1686771s), preserving
+all 446 frozen inputs and the scoped index. The verified worktree is
+`C:/tmp/tessella_nonew_four_quad_strip`, based on pushed `0f9601f`.
+The twelve-field ranking initializer uses `Val(12)` to avoid a confirmed
+13 MB fixed allocation while preserving exact factory and tie selection.
+The next bounded implementation is a dynamic rectangular Quad-grid path under
+axis-normal translation, including B3, adjacent-B2 and B0 source cells with
+coupled actual face propagation. Sixteen independent primary P1/P2 controls cover
+2-by-3 and 3-by-3 source grids, N1/N3, both normal directions and both lateral
+policies. Current source-only sampling passes 1,469 checks on each runtime at
+unchanged `2e-11`; native general-grid volume parity remains unimplemented.
+Actual source samples and incidence remain authoritative; pointer minima are
+not public-tag minima. B1/B4 categories, transformed products, mixed roots and
+shared neighbors/regions remain separate unfinished phases with precise blockers.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public
 tag lifecycle, remaining meshing algorithms and fields, broad formats/API,
