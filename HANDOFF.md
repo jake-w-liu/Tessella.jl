@@ -1,8 +1,12 @@
 # Handoff — Tessella.jl work state
 
 Continuation instructions for resuming this work on another machine.
-Branch: `main`. Goal: independent Gmsh 4.15.2 parity —
-never use Gmsh as the production mesher; it is only a differential oracle.
+Branch: `main`. Active user goal: complete the full Julia-native Tessella
+mesher, correctly implementing ALL remaining parity requirements and unfinished
+features across the roadmap. Fix every confirmed bug, verify correctness and
+allocation efficiency for each increment, push verified changes to main and
+continue. Individual category releases do not complete this goal. Production
+meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Environment
 
@@ -24,7 +28,165 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 - Validation driver: `julia --project=. validation/run_all.jl` (Windows:
   prefix `GMSH_JULIA_API` as above)
 
-## Latest verified increment
+## Current increment
+
+Continue in `C:/tmp/tessella_nonew_rectangular_grid` on
+`codex/nonew-rectangular-grid`, based on verified and pushed `78af21d`.
+The dynamic actual rectangular source certificate, B3/adjacent-B2/B0 physical
+face planner and direct indexed volume/boundary/projection route are implemented.
+All final release gates pass. Focused geometry passes 37,773 and
+API passes 162,172 on Julia 1.12.7 and 1.13.1 with normal compilation and bounds
+checks. Exact literal-reference P2 certificates include Prism18 and rational
+Pyramid14 maps, actual integrals and adversarial support folds. Forty-eight new
+native CRC rows agree across runtimes; 241 rows now comprise 232 NoNew and nine
+API01, with old rows and tables unchanged. Full package, strict and resource
+release gates are GREEN on the final V2 freeze below. The ignored
+`test/tmp/rectangular_grid_initial_carry_v1.json` records 99 preparation files
+copied exactly from the previous worktree, including the 16 primary controls.
+Use the current increment's own guards; carried freeze logs retain historical
+base HEADs. The previous verified worktree's tracked files remain unchanged.
+
+The rejected V1 release freeze is `test/tmp/rect_grid_release_freeze_v1.json`,
+SHA256 `05682A0EB48C7847D78CA51EDFCCA22CE82CAED7204748801E5842F2429F798E`.
+It preserves 458 raw inputs: 101 production/Project, 202 test and 155 validation
+files, base `78af21d`, and scoped staged index
+`68ab55c8da9fe6f92dbaad2b9c034a9728465f838874de713c089804dd4f48d6`.
+The reused worktree-resolved guard is `test/tmp/frozen_tree_four_strip.py` with
+the NEW manifest. Serial normal bounds package gates use
+`test/tmp/run_rect_grid_pkg_serial_v1.ps1` (112 then 113); full strict replay
+uses `test/tmp/run_rect_grid_strict_v1.ps1`. This V1 release candidate is rejected:
+the new normal-112 resource gate has six allocation-growth failures despite
+passing all geometry/P2 checks and 52 actual method boxing checks. Actual source
+F1000/F2000/F4000 construction allocates about 27/87/302 MB. Sampled attribution
+and a detached matching reproduction confirm a mutable captured parameter in
+`_model_surface_curve_writeback!` boxes arithmetic during an O(n^2) scan.
+Fresh audit owns the scalar matching/search fix and its permanent regression;
+root/Oracle investigate the separate slight free projection/API growth excess.
+Do not relax the unchanged `2.15*previous+65536` bound.
+
+V1 full strict replay is terminal GREEN for all 194 cases in 366.838s, with
+all 458 inputs and index unchanged; log SHA256 is
+`5733D08204F7E589C1C89E47DB1E80030825508E3E1A4E701A7513D0C0405FDE`.
+Root Pkg session 85505 was intentionally interrupted after the resource failure,
+in 875.5016859s, by terminating only its verified owned Julia descendants
+556/26044; final 458-input guard passed and Julia 1.13 did not launch. Its log
+is interrupted evidence, not a package pass or a correctness failure.
+TwoTri and QuadPatch resource pairs passed their V1 guards and are preserved;
+the old-gate batch stopped intentionally before QuadStrip. All V1 release jobs
+are terminal/drained. Preserve failed/interrupted logs and manifest exactly.
+After fixes and focused rechecks, stage a NEW release freeze and rerun final
+serial package, full strict and all twelve resource gates. Root documentation
+lies outside the scoped freeze.
+
+The current V2 freeze is `test/tmp/rect_grid_release_freeze_v2.json`, SHA256
+`3E15DA4A95A9CA32A98AC93122B7893375446EF91AA1ED01A667B906F21C4869`.
+It preserves 459 raw inputs: 101 production/Project, 203 test and 155 validation
+files, base `78af21d`, scoped staged index
+`25ec64ca694112f4e365bc4d4096cebfae7000c6617acb210f30b54efa659b91`.
+Tracked inputs are frozen. Root strict V2, all twelve resource V2 gates and
+independent source replay use this candidate; serial Pkg V2 completed112 then113
+after the Rect112 allocation gate passed. Use the `_v2` root wrappers
+and `final_v2` resource epochs. Never overwrite V1 evidence.
+
+V2 full strict replay is terminal GREEN: all 194 cases, including the 24
+new rectangular products and their actual P2 checks, in 390.873s; both 459-path
+and scoped-index guards pass. Log SHA256 is
+`85C42B31A048C45F454A5613B03F2404073B2336D4792D1D71CD10FBCDC8205A`.
+Independent actual source replay is also terminal GREEN on both runtimes:
+6,340 checks each, all 80 retained primary records over 23 distinct recipes,
+exact corresponding native source/curve/parameter bit digests, and unchanged
+2e-11 parity tolerance. Its maximum coordinate error is 1.5005330311623766e-11
+and parameter error 8.212125424122974e-12. Both global and internal 459-input
+bytes/pathset/index/HEAD guards pass. Nine prior CRC files remain raw unchanged,
+comprising 193 NoNew/API01 and 40 AddVerts rows. The cross-runtime closure is
+`test/tmp/rect_grid_writeback_source_compare_final_v3.json`, SHA256
+`90ADFD6F978A339435D5644B9259657699803806F017B0B031A0A92184EA052F`.
+
+Both V2 rectangular resource gates are terminal GREEN: 8,483,845 assertions
+each, 56 actual lowered-method boxing checks, 24 entry rows, six actual source
+growth rows and six actual P2 audits; wrappers 247.0215204s/201.2205335s.
+Both full459/index guards pass; all 36 corresponding geometry/support/owner
+records and all 104 directly consumed input hashes are equal across runtimes.
+All 40 doubling comparisons satisfy the unchanged 2.15*previous+65536 bound;
+maximum ratio is 2.137528031 on free API N500 to N1000. Actual F1000/2000/F4000
+free source-entry allocations are 8,577,380/17,227,555/34,444,790 bytes versus
+the rejected V1 approximately 27/87/302 MB. Exact pair comparison SHA256 is
+`539912E4D6402A4E3ECA82AA3B96E5E7FD9695AFD659E99A817D9FCA32D03FD0`.
+Normal112 body log SHA256 is
+`DB81E54764427FDF1D93A118E4F0ACD589E6C0CA2F9E3231B026B548AB7A9D14`;
+normal113 is
+`27050F00E62EB5FEB460839EABA0502B9DA8A6DA398956C10DB488C3B325A974`.
+Root serial Pkg V2 session9754:112 is terminal GREEN, 1,089,298/1,089,298
+in 30m05.1s body /1810.2905926s wrapper, final459/index guard passed.
+Log SHA256 is `B67D0941658F08516DB867A628E201BA2BEF76C8BA0E57656466FD96DDAB20B8`.
+Normal113 is terminal GREEN, 1,089,298/1,089,298 in 25m08.6s body /
+1513.5708083s wrapper; both459/index guards passed. Log SHA256 is
+`801F0509F1C85DCFB4EFC52DDFF0B88248196981F3642FBA404462DEE860DE9D`.
+Serial session9754 is EXIT0/drained. Fresh serial old-resource
+V2 batch4379 is terminal EXIT0/drained: all ten older gates pass, totaling
+78,290,194 assertions, 240 matching P1 measurements and 24 matching P2 audits.
+All 459/index/HEAD guards pass. Worst older-family ratio is 2.117887693;
+summary SHA256 is
+`C0AC16C4F4D414B53CD32A5F7E385160A66F9F597C69553653018E0976EB3483`.
+All twelve resource gates now pass 95,257,884 assertions under the same V2
+freeze. All required V2 release checks are terminal GREEN.
+
+The matching fix preserves exact old writeback payloads in 1,441 checks over
+288 actual products. Both runtimes pass its 1,332 permanent regressions,
+including generated closure boxing and warmed growth checks. Sorted finite
+parameter lists use checked binary search; unordered/nonfinite lists retain
+first-match scalar traversal. Source SHA256 is
+`2236D3CB0280592A6575D2C5BE90569782BE62EF50517D547D3D962A7D8C60B1`.
+The separate projection resize excess was isolated in generic Mixed validation
+and entity-data tag sets; they now reserve validated node and checked aggregate
+cell capacities without removing validation/copies. Actual typed face-update
+helpers preserve dictionary contents and oriented incidence errors while
+reducing temporary face allocations; the detached 24 checks cover both lateral
+policies and N500/1000/2000. Final whole-entry growth passes on both runtimes.
+
+Selected native strict replay already passes all 24 new cases, including actual
+P2 certificates and eight independent variants, in 270.8717913s with 107 consumed
+inputs unchanged. Twelve cases contain 308 empty upstream stored Surface UVs;
+native computed queries satisfy the unchanged inverse/reevaluation contract.
+Final driver SHA256 is
+`D3C0C04FFF276CFAD675B7AB391683074C27B02907B81893DCF4744E0DE5D976`.
+The broad goal remains active after this release. The next prepared increment is
+an arbitrary-length one-cell-wide B4 grid with recombined laterals. Preparation
+is ignored and must not change the frozen inputs. Drafts are Source
+`next_b4_rect_grid_source_mode_v1.draft` (232CFFA7...), catalog
+`next_b4_strip_plan_v1.draft` (067A4D24...), root emitter
+`next_b4_root_indexed_emission_v1.draft` (4423D087...), and Nested's five
+permanent-helper/geometry/API drafts plus lossless12-case artifact. Preserve
+`quadtri_nonew_b4_rec_strip_oracle.toml.tmp` (F7B9F89F...) and use the corrected
+provenance artifact `quadtri_nonew_b4_rec_strip_oracle_v2.toml.tmp`
+(D938C9CA...). All12 raw law/coefficient fields already match their exact
+`input_geo`; only the preparatory description was wrong. Saved fixtures must
+consume the exact recipe. Ownership formulas
+are independently verified against all12 raw primary captures (15,222 checks).
+A process-local isolated composition passes288 checks/24 actual original and
+reordered-cyclic products, with all1344 actual reference maps, typed physical
+face partitions, strict real centers, original ordinal caps and exact macro
+integrals independently audited. This is preparation, not released parity.
+Four M7/N3 skew Progression4/count8 source products (two recipes with
+original/reordered cells) have coordinate error 2.5855761975890346e-11 against
+the unchanged2e-11 gate, explicitly RED. A normal112 source-only replay on
+clean78 reproduces the exact current native Curve3 Y2.0000872047720657 versus
+primary2.0000872047979215: the sampling gap predates V2. All98 baseline
+production/Project inputs remain unchanged. A dependency-free pinned C++
+numerical replay of native Line1e-5 firstDer, adaptive trapezoid integration,
+numerical curve length and F_Transfinite reproduces both saved parameter arrays
+exactly. Correct source placement in the next worktree; retain the tolerance
+and assess previous CRC impacts. Preserve all failed harness/world-age/
+coordinate-audit evidence. Source-only draft proof passes254,799 checks each
+on normal bounds-checked112/113, with116 identical actual source records,
+56 recipes,448 variants,60 rounded controls,42 atomic negatives and four
+unchanged rectangular baselines. All459/index/HEAD guards pass; its geometric
+proof does not imply Gmsh coordinate equality. Final ledger SHA256 is
+`FFF30BE1F25D82F55FA5E3B43E567950C4FDEA3BE4A3F844AEE3DE8B2A2F0422`.
+Begin its tracked implementation
+in a fresh worktree from verified pushed main after this release completes.
+
+## Latest verified increment (`78af21d`)
 
 The verified worktree is `C:/tmp/tessella_nonew_four_quad_strip` on
 `codex/nonew-four-quad-strip`, based on verified and pushed `0f9601f`.
@@ -75,17 +237,18 @@ Both package gates and all assigned release checks are complete. Preserve this
 verified worktree and begin new implementation in a fresh worktree from published
 main. The broad mesher goal remains active.
 
-## Next increment
+## Rectangular-grid preparation provenance
 
-The next implementation is a dynamic native rectangular Quad-grid path under
+Preparation for the current implementation targeted a dynamic native rectangular Quad-grid path under
 axis-normal translation, with actual B3, adjacent-B2 and B0 source-cell handling
 and coupled shared-face propagation. Sixteen primary Gmsh 4.15.2 P1/P2 controls
 cover actual 2-by-3 and 3-by-3 source grids, one/three layers, both normal directions
 and lateral policies. Independent checks certify actual maps, source incidence,
-typed faces, ownership, interpolation supports and raw Curve parameters. Current
+typed faces, ownership, interpolation supports and raw Curve parameters. Preparatory
 source-only comparisons pass 1,469 checks on Julia 1.12.7 and 1.13.1, with maximum
 coordinate/parameter error `2.0594637106796654e-12` below unchanged `2e-11`.
-There is no native general-grid volume-parity claim yet.
+Those source-only checks did not establish native volume parity; use the current
+increment's complete geometry, API and release evidence above.
 
 Preparation is retained under ignored `test/tmp/next_general_quad_grid_*`, including
 the combined matrix audit, source review and 86-file carry manifest. Use actual

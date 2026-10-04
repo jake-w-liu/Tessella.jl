@@ -1750,6 +1750,38 @@ function _model_curve_chain_entries(m::GeoModel,mesh,curve::Int,
     end
 end
 
+# Return the original first matching stored index. The lower-bound predicate
+# uses the same rounded subtraction as the membership check; forming
+# `parameter - tolerance` can change which value lies on the tolerance edge.
+# Caller-supplied unordered or nonfinite lists retain their linear semantics.
+function _model_surface_curve_parameter_match(existing::Vector{Float64},
+                                              parameter::Float64,
+                                              tolerance::Float64,
+                                              ordered::Bool)
+    if ordered
+        lower=firstindex(existing)
+        upper=lastindex(existing)
+        @inbounds while lower<=upper
+            middle=lower+((upper-lower)>>>1)
+            value=existing[middle]
+            if value<parameter && abs(value-parameter)>tolerance
+                lower=middle+1
+            else
+                upper=middle-1
+            end
+        end
+        @inbounds if lower<=lastindex(existing) &&
+                     abs(existing[lower]-parameter)<=tolerance
+            return lower
+        end
+    else
+        @inbounds for index in eachindex(existing)
+            abs(existing[index]-parameter)<=tolerance && return index
+        end
+    end
+    return 0
+end
+
 function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh,
                                          eligible_nodes,eligible_edges,
                                          protected_nodes,
@@ -1770,11 +1802,14 @@ function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh,
     bounds=_model_curve_param_bounds(m,curve,caller)
     existing=get(m.curve_params,curve,nothing)
     if existing!==nothing
-        entries=[begin
+        ordered=issorted(existing) && all(isfinite,existing)
+        snapped=similar(entries)
+        @inbounds for index in eachindex(entries)
+            entry=entries[index]
             parameter=entry[1]
-            match=findfirst(value->abs(value-parameter)<=parameter_tolerance,
-                            existing)
-            match===nothing || (parameter=existing[match])
+            match=_model_surface_curve_parameter_match(
+                existing,parameter,parameter_tolerance,ordered)
+            match==0 || (parameter=existing[match])
             # A stored value within endpoint tolerance still denotes the
             # endpoint — mapping an exact bound entry back onto bound−eps
             # would evaluate one ulp off the shared corner and crack the
@@ -1783,8 +1818,9 @@ function _model_surface_curve_writeback!(m::GeoModel,curve::Int,mesh,
                 (parameter=bounds[1])
             bounds[2]-parameter<=parameter_tolerance &&
                 (parameter=bounds[2])
-            (parameter,entry[2])
-        end for entry in entries]
+            snapped[index]=(parameter,entry[2])
+        end
+        entries=snapped
     end
     m.curve_params[curve]=Float64[entry[1] for entry in entries]
     @inbounds for (parameter,node) in entries

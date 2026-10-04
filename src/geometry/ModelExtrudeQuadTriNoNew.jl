@@ -423,15 +423,20 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         _extrude_nonew_three_quad_strip_candidate(m,source,sides,caller)
     four_quad_strip=!quad_patch && !quad_strip && !three_quad_strip &&
         _extrude_nonew_four_quad_strip_candidate(m,source,sides,caller)
-    two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip &&
+    grid_shape=quad_patch || quad_strip || three_quad_strip || four_quad_strip ?
+        nothing : _extrude_nonew_rect_grid_shape(m,source,sides,caller)
+    rect_grid=grid_shape!==nothing
+    two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid &&
         _extrude_nonew_two_tri_candidate(m,source,sides,caller)
+    grid_nodes,grid_cells_per_interval=rect_grid ?
+        _extrude_nonew_rect_grid_preflight(grid_shape,caller) : (0,0)
     levels,refs=_extrude_nonew_levels(params,caller;
-        source_nodes=quad_patch ? 9 : quad_strip ? 6 : three_quad_strip ? 8 : four_quad_strip ? 10 : sides,
-        extra_nodes=four_quad_strip ? (params.recomb_laterals ? 4 : 0) :
+        source_nodes=rect_grid ? grid_nodes : quad_patch ? 9 : quad_strip ? 6 : three_quad_strip ? 8 : four_quad_strip ? 10 : sides,
+        extra_nodes=rect_grid ? 0 : four_quad_strip ? (params.recomb_laterals ? 4 : 0) :
             three_quad_strip ? (params.recomb_laterals ? 3 : 0) :
             quad_strip ? (params.recomb_laterals ? 2 : 0) :
             sides==4 && !two_tri && !quad_patch ? 1 : 0,
-        cells_per_interval=four_quad_strip ? (params.recomb_laterals ? 28 : 24) :
+        cells_per_interval=rect_grid ? grid_cells_per_interval : four_quad_strip ? (params.recomb_laterals ? 28 : 24) :
             three_quad_strip ? (params.recomb_laterals ? 21 : 18) :
             quad_patch ? 24 : quad_strip ? (params.recomb_laterals ? 14 : 12) :
             two_tri && params.recomb_laterals ? 2 : sides==4 ? 6 : 3)
@@ -464,6 +469,16 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
         _extrude_nonew_four_quad_strip_product_certify(cols,catalog,spec,caller)
         return _extrude_nonew_four_quad_strip_finish(m,t,params,source,source_mesh,
+            catalog,cols,top,laterals,caller)
+    elseif rect_grid
+        source_data=_extrude_nonew_rect_grid_source(m,source,source_mesh,spec,caller)
+        source_data.grid_shape==grid_shape || _extrude_nonew_rect_grid_error(caller,
+            "actual source dimensions differ from their preflight")
+        catalog=_extrude_nonew_rect_grid_plan(source_data,levels,refs,
+            params.recomb_laterals,caller)
+        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        _extrude_nonew_rect_grid_product_certify(cols,catalog,spec,caller)
+        return _extrude_nonew_rect_grid_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif two_tri
         catalog=_extrude_nonew_two_tri_catalog(m,source,source_mesh,spec,
@@ -549,3 +564,4 @@ include("ModelExtrudeNoNewQuadPatch.jl")
 include("ModelExtrudeNoNewQuadStrip.jl")
 include("ModelExtrudeNoNewThreeQuadStrip.jl")
 include("ModelExtrudeNoNewFourQuadStrip.jl")
+include("ModelExtrudeNoNewRectGrid.jl")

@@ -25,6 +25,38 @@ support or test requirements.
 
 ### Active parity increment
 
+The dynamic rectangular Quad-grid NoNew path is implemented in
+`C:/tmp/tessella_nonew_rectangular_grid` on `codex/nonew-rectangular-grid`,
+from verified and pushed `78af21d`. Actual regular source incidence, convex
+cells and a Jordan boundary certify four native Line chains before strictly
+ordered axis-normal columns are accepted. B3 corners, adjacent-B2 edge cells
+and B0 interior cells use one coupled physical face plan, indexed emission
+and classified projection without an added centroid. The same actual-input
+certificate admits skew, trapezoid, rounded and graded straight-edge disks.
+Focused normal bounds checks pass 37,773 geometry assertions on each runtime
+and 162,172 API assertions on each runtime. The permanent independent planner
+suite passes 25,471 on each runtime. Independent
+actual P2 Bernstein bounds and exact integrals cover Tet10, Hex27, Prism18 and
+rational Pyramid14 maps. Refinement, support ownership, sparse tags, MSH
+round trips, coincident independent regions and atomic precision rejection
+are covered. Both runtimes produce identical 48 new CRC rows, bringing the
+total to 241: 232 NoNew and nine API01. The old 193 rows and both tables remain
+unchanged. The V2 full strict replay passes all 194 cases with 459 frozen
+inputs unchanged. Both rectangular resource gates pass 8,483,845 assertions,
+36 matching geometry/support records and all unchanged allocation-growth
+bounds. Actual source-entry F1000/2000/F4000 allocation is approximately
+8.6/17.2/34.4 MB after fixing boxed curve-parameter matching, down from the
+rejected candidate's 27/87/302 MB. Both runtimes also pass 6,340 independent
+actual source replay checks. All twelve frozen resource gates pass 95,257,884
+assertions with matching cross-runtime records. Full normal bounds-checked
+package tests pass 1,089,298 assertions each on Julia1.12.7 and1.13.1,
+in30m05.1s and25m08.6s; all459 frozen inputs and index guards pass.
+Upstream pointer-sensitive products are checked for consistent global
+rank and admissibility; native source-column ordinals are not claimed to match
+raw upstream pointer order. The full mesher/parity goal remains active.
+
+### Previous increment (`78af21d`)
+
 The bounded four-Quad strip is implemented in
 `C:/tmp/tessella_nonew_four_quad_strip` on `codex/nonew-four-quad-strip`, from
 verified and pushed `0f9601f`. Its ten actual boundary nodes, thirteen source
