@@ -5938,7 +5938,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
         boundary_surface_tags,
         Int[surface for surface in surface_tags
             if !(surface in boundary_surface_set)])
-    cell_edges=_volume_edge_set(mesh)
+    cell_edges=nonew===nothing ? _volume_edge_set(mesh) : nonew.edges
     point_nodes=Dict{Int,Int32}()
     node_points=Dict{Int32,Int}()
     curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
@@ -6016,7 +6016,9 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
     surface_entities=Int32[]
     surface_nodes=Dict{Int,Set{Int32}}()
     surface_edges=Dict{Int,Set{NTuple{2,Int32}}}()
-    mesh_boundary_faces,face_orders=_volume_cell_boundary_faces(mesh)
+    mesh_boundary_faces,face_orders=nonew===nothing ?
+        _volume_cell_boundary_faces(mesh) :
+        (nonew.boundary,Dict{NTuple{N,Int32} where N,NTuple{N,Int32} where N}())
     claimed_boundary_faces=Set{NTuple{N,Int32} where N}()
     for surface in projection_surface_tags
         faces=if nonew!==nothing

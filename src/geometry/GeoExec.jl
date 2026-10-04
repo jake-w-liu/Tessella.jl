@@ -7434,6 +7434,7 @@ end
 function _geo_mesh_part_node_entities(m,parts,caller)
     result=Vector{Vector{Tuple{Int,Int}}}(undef,length(parts))
     maps=Dict{Tuple{Int,Int},Dict{NTuple{3,Int},Tuple{Int,Int}}}()
+    sizehint!(maps,length(parts))
     constraint_points=_geo_mesh_constraint_point_owners(m,parts,caller)
     for dim in 0:3, (index,(pdim,tag,mesh)) in enumerate(parts)
         pdim==dim || continue
@@ -7450,9 +7451,10 @@ function _geo_mesh_part_node_entities(m,parts,caller)
                 end
             end
         else
-            boundary=Dict{NTuple{3,Int},Tuple{Int,Int}}()
             pending=_geo_mesh_children(m,dim,tag,caller)
             seen=Set{Tuple{Int,Int}}()
+            entries=Dict{NTuple{3,Int},Tuple{Int,Int}}[]
+            boundary_capacity=0
             while !isempty(pending)
                 child=pop!(pending)
                 child in seen && continue
@@ -7460,11 +7462,19 @@ function _geo_mesh_part_node_entities(m,parts,caller)
                 child[1]<dim || continue
                 entry=get(maps,child,nothing)
                 if entry!==nothing
-                    for (key,owner) in entry
-                        boundary[key]=min(get(boundary,key,(4,0)),owner)
-                    end
+                    push!(entries,entry)
+                    boundary_capacity=Base.checked_add(boundary_capacity,length(entry))
                 end
                 child[1]>0 && append!(pending,_geo_mesh_children(m,child...,caller))
+            end
+            # Interior-heavy parts need capacity for their actual child maps,
+            # rather than for every interior vertex in the carrier mesh.
+            boundary=Dict{NTuple{3,Int},Tuple{Int,Int}}()
+            sizehint!(boundary,min(nnodes(mesh),boundary_capacity))
+            for entry in entries
+                for (key,owner) in entry
+                    boundary[key]=min(get(boundary,key,(4,0)),owner)
+                end
             end
             for node in eachindex(owners)
                 key=_geo_mesh_coordinate_key(mesh.coords[1,node],mesh.coords[2,node],mesh.coords[3,node])
@@ -7473,6 +7483,8 @@ function _geo_mesh_part_node_entities(m,parts,caller)
         end
         result[index]=owners
         entry=Dict{NTuple{3,Int},Tuple{Int,Int}}()
+        # Each actual part contributes at most one key per stored vertex.
+        sizehint!(entry,nnodes(mesh))
         incidence=dim==0 ? _geo_mesh_point_incidence_coordinate(m,tag) : nothing
         incidence_key=incidence===nothing ? nothing : _geo_mesh_coordinate_key(incidence...)
         for node in eachindex(owners)

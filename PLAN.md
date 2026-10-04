@@ -1058,6 +1058,18 @@ recombined laterals emit `2N` Pri6 cells; both use exactly `4(N+1)` nodes.
 Direct indexed output avoids temporary coordinate-cell arrays and volume
 coordinate welding. The assembled typed face complex additionally verifies
 opposite outward cycles on every internal face.
+The bounded 2-by-2 recombined TF3 source patch is implemented and verified.
+Nine retained nodes and four actual convex Quad4 cells share
+one interior source pivot. Actual sampled native three-node Line chains and
+the complete source complex certify the axis-normal product, including
+rounded straight-edge samples. Constant phase selections preserve physical
+pivot diagonals and native corner-fan priority. Free laterals emit
+`(24N-8)` Tet4 plus four Pyr5; recombined laterals emit `4(N-1)` Hex8 plus
+twelve Pyr5, with exactly `9(N+1)` primary nodes and no added centroid.
+Direct indexed volume/cap/lateral output and actual three-node projection
+chains preserve complete boundary and P2 support identity. Both normal,
+bounds-checked package gates pass 591,635 assertions; new and old resource
+regressions and the full strict Gmsh differential pass on unchanged 422 inputs.
 Actual P1 hex, pyramid, and prism Jacobian checks cover the whole reference
 cell; positive tetrahedral partition volumes alone do not certify these maps.
 AddVerts also certifies actual retained factory cells. Newly constructed API
@@ -1085,8 +1097,8 @@ cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
 sets and invariant checks instead of one accidental process result. The existing
 precise blockers remain on these unfinished categories.
 
-Continue the grid phase with a bounded 2-by-2 quadrangle source, then a
-two-quadrangle strip. Extend the category and joined face-state propagation
+Continue the grid phase with the two-quadrangle strip. Extend the category and
+joined face-state propagation
 using actual source incidence, one column matrix, complete source-complex and
 stored-column certificates, and the existing whole-cell map checks. General
 transformed grids, mixed roots and shared regions remain separate phases.

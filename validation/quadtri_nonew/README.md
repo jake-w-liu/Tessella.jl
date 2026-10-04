@@ -213,3 +213,66 @@ Julia 1.12.7 and 1.13.1. Compare all 40 complete rows before replacing the pin
 file; retain the independent geometry certificates and the original 24 quad
 records. A changed digest is evidence to investigate, rather than a reason to
 skip an ownership or parameter query.
+
+The separate quad-patch replay reads
+`test/artifacts/quadtri_nonew_quad_patch_oracle.toml`. It promotes twelve saved
+Gmsh 4.15.2 rectangular products and four independently captured convex
+trapezoids without remeshing the oracle. Inputs cover one or three uniform
+intervals, three graded intervals, both normal signs and both lateral policies;
+the trapezoids cover the graded three-interval profile. Full original P1/P2
+coordinates and bits, actual lower and volume cells, owner tags, stored node
+parameters, packed parameter queries, primary identity remaps and interpolation
+support carriers remain in the artifact. The sixteen input and JSON hashes
+identify the exact captures.
+
+The native source must retain nine actual vertices and four Quad4 cells sharing
+one interior pivot. The replay independently certifies the actual sampled source
+partition, each emitted Tet4/Pyramid5/translated Hex8 map, macro volumes and
+opposite internal typed faces, pivot cap diagonals and finalized exterior cells.
+P2 construction checks actual primary identities and shared interpolation
+supports, positive public quadrature Jacobians and integrated swept volume.
+Every new P2 node is classified against its native actual P1 lower-cell carrier,
+which also verifies the native three-node source and copied top Curve chains.
+The recorded rounded trapezoid has two source Curve middle samples exactly
+noncollinear with their endpoint chords; actual sampled topology is authoritative.
+Raw pointer-selected oracle volume connectivity remains evidence rather than a
+native tag or template pin.
+
+For N intervals the bounded patch has 9(N+1) P1 nodes and 50N+25 P2 nodes. P2
+owner counts are 8 Point, 8N+20 Curve, 24N+6 Surface and 18N-9 Volume nodes.
+Each cap has nine owned nodes and 25 closure nodes; each lateral has 6N-3 owned
+nodes and 10N+5 closure nodes. Native computed UVs must reevaluate all actual
+nodes. Eight recombined saved fixtures have 160 surface nodes with empty upstream
+stored UVs; these are counted provenance differences. The driver appends separate
+quad-patch counters while preserving the original 86 oracle samples, twelve
+two-triangle saved cases and earlier native artifact pins. Set
+`QUADTRI_NONEW_CASE=next_quad` for the sixteen-case targeted replay.
+
+Run the separate quad-patch resource gate from the repository root with normal
+compilation and bounds checks on both runtimes. Replace the executable paths
+below with the installed Julia 1.12.7 and 1.13.1 binaries; no Gmsh installation
+or binding is needed. An optional final argument naming a file in an existing
+directory writes the measured rows and input hashes as TOML.
+
+```sh
+/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_patch_resources.jl
+/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_patch_resources.jl
+```
+
+Each run produces 24 rows: standalone volume, GEO, classified projection and
+public API generation, for free and recombined laterals at 1,000, 2,000 and
+4,000 intervals. After warming each operation, the helper takes the minimum of
+three construction allocation measurements and three construction timings.
+Output extraction and the independent geometry audit are outside those
+measurements; normal constructors, returned-mesh copies and projection/merge
+work inside the operation remain counted. Each path must preserve the same
+actual geometry digest, complete column identities, typed families, macro
+partition volumes and opposite internal face incidences.
+
+For each path and policy, every doubling retains the unchanged gate
+`allocated_next <= 2.15 * allocated_previous + 65536`. The lowered-code scan
+recognizes `GlobalRef(Core, :Box)` as well as direct boxes, and must first detect
+a deliberately boxed captured local in an actual lowered positive control.
+Production and helper inputs are hashed before and after the run. The terminal
+`QUAD_PATCH_RESOURCE_OK` marker follows the assertions; documenting these
+commands does not establish final resource or full-validation success.

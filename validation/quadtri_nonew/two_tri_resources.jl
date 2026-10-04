@@ -18,11 +18,19 @@ println("START TWO_TRI_RESOURCE Julia=",VERSION," inputs=",length(START))
 
 function count_boxes(value)
     value isa Core.Box && return 1
+    value isa GlobalRef && return value==GlobalRef(Core,:Box) ? 1 : 0
     value isa Core.CodeInfo && return sum(count_boxes,value.code;init=0)
     value isa Expr && return sum(count_boxes,value.args;init=0)
     value isa Core.NewvarNode && return count_boxes(value.slot)
     value isa QuoteNode && return count_boxes(value.value)
     return value===Core.Box ? 1 : 0
+end
+
+function box_control()
+    captured=0
+    read=()->captured
+    captured=1
+    return read
 end
 
 # This linear audit uses actual source identities and actual cell coordinates.
@@ -118,6 +126,7 @@ end
 
 records=Dict{String,Any}[]
 @testset "Two-triangle grid allocation and complete payload" begin
+    @test count_boxes(Base.uncompressed_ast(first(methods(box_control))))>0
     for recombined in (false,true)
         previous=Dict{Symbol,Any}()
         for layers in (1000,2000,4000)

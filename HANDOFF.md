@@ -26,6 +26,51 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Current increment
 
+The bounded 2-by-2 `QuadTriNoNewVerts` source patch is implemented and verified.
+Its native recombined TF3 source has nine actual nodes, four
+strictly convex Quad4 cells, eight sampled boundary edges and one existing
+interior pivot. Four straight native Line curves retain their three-node
+chains, including rounded middle samples that need not be exactly collinear
+with the stored endpoints. Exact axis-normal translation in either direction
+and positive normalized graded layers use one certified actual column product.
+
+The shared pivot fixes physical cap/shared-face diagonals. Constant phase
+lookups preserve native corner-fan priority without requiring one particular
+factory apex. Free laterals emit `(24N-8)` Tet4 and four Pyr5 cells; recombined
+laterals emit `4(N-1)` Hex8 and twelve Pyr5 cells. Both retain `9(N+1)` primary
+nodes and add no body centroid. Direct indexed volume, pivot cap and native
+three-node-chain lateral builders retain normal constructor validation.
+Actual element maps and complete typed boundary checks remain mandatory.
+
+Projection maps the retained three-node source/top chains through their actual
+source IDs and column rows. Internal source radial edges introduce no CAD
+curves or swept surfaces. Actual P2 supports give `50N+25` nodes, with owner
+counts `8`, `8N+20`, `24N+6`, `18N-9` by dimension. Independent native fixtures
+include graded rounded trapezoids. Final normal bounds-checked package gates
+pass 591,635 assertions on both Julia 1.12.7 and 1.13.1. The new resource gates
+pass 6,385,550 assertions each and the two-triangle regressions pass 1,596,389
+each, with unchanged allocation bounds. The full strict Gmsh differential
+retains all 86 original samples and 12 two-triangle fixtures and adds 16 patch
+fixtures. All 422 frozen inputs and staged/runtime blobs match before and
+after. Detailed times, memory observations and provenance are in STATUS.md.
+
+GEO classification reserves from actual child-map closure sizes. Projection
+reuses audited input edges and typed external boundaries while retaining all
+actual-cell and shell checks. All 88 older NoNew CRC rows and both immutable
+template tables remain unchanged; the new 24 API CRC rows match both runtimes.
+Keep the broader goal active.
+
+Continue with the two-quadrangle strip. Its six-node source needs an all-boundary
+joined cap relation, native two-/three-node chains and exactly two certified
+terminal centroids in recombined mode. Free families remain pointer-admissible
+rather than one saved native family pin. The ignored next-strip design and
+variant proofs are preserved in the archived quad-patch worktree for transfer.
+Larger grids,
+general transformed products, mixed roots, shared regions, copied-source
+chains, collapsed columns and cyclic sweeps remain separate phases.
+
+## Previous increment (`057a77a`)
+
 The first bounded `QuadTriNoNewVerts` source grid contains exactly two conforming
 Tri3 cells on a strictly convex four-corner planar transfinite source. It supports
 axis-aligned normal translation in either direction, both lateral policies and

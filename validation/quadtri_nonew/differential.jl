@@ -14,6 +14,8 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_triangle_ce
 const QTNT=QuadTriNoNewTriangleCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_two_tri_certificates.jl"))
 const QTT=QuadTriNoNewTwoTriCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_quad_patch_certificates.jl"))
+const QTP=QuadTriNoNewQuadPatchCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -362,6 +364,238 @@ function two_tri_saved_case(record;oracle_only=false)
     end
     return empty_parameters
 end
+# Saved patch cases extend the gate without regenerating any saved oracle.
+# These catalogs are independent literal MSH primary support patterns.
+const QUAD_PATCH_EDGE_PATTERNS=merge(TWO_TRI_EDGE_PATTERNS,Dict(
+    5=>((1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),(1,5),(2,6),(3,7),(4,8)),
+    7=>((1,2),(2,3),(3,4),(4,1),(1,5),(2,5),(3,5),(4,5))))
+const QUAD_PATCH_FACE_PATTERNS=merge(TWO_TRI_FACE_PATTERNS,Dict(
+    5=>((1,4,3,2),(5,6,7,8),(1,2,6,5),(2,3,7,6),(3,4,8,7),(4,1,5,8)),
+    7=>((1,4,3,2),(1,2,5),(2,3,5),(3,4,5),(4,1,5))))
+
+function quad_patch_actual_carriers(rows)
+    catalog=Dict{Tuple,Set{Tuple{Int,Int}}}()
+    for (msh,cell,owner) in rows
+        if msh==1
+            two_tri_add_carrier!(catalog,cell,owner)
+        elseif haskey(QUAD_PATCH_EDGE_PATTERNS,msh)
+            for edge in QUAD_PATCH_EDGE_PATTERNS[msh]
+                two_tri_add_carrier!(catalog,Tuple(cell[i] for i in edge),owner)
+            end
+            if owner[1]==2
+                two_tri_add_carrier!(catalog,cell,owner)
+            elseif haskey(QUAD_PATCH_FACE_PATTERNS,msh)
+                for face in QUAD_PATCH_FACE_PATTERNS[msh]
+                    two_tri_add_carrier!(catalog,Tuple(cell[i] for i in face),owner)
+                end
+                msh==5 && two_tri_add_carrier!(catalog,cell,owner)
+            end
+        end
+    end
+    result=Dict{Tuple,Tuple{Int,Int}}()
+    for (key,owners) in catalog
+        dimension=minimum(first,owners)
+        actual=filter(owner->owner[1]==dimension,collect(owners))
+        length(actual)==1 || error("quad-patch actual support has ambiguous lower carrier")
+        result[key]=only(actual)
+    end
+    return result
+end
+
+function quad_patch_saved_integrity(record,tolerance)
+    bytes2hex(sha256(record["input_geo"]))==record["input_sha256"] || error("quad-patch exact input hash")
+    length(record["saved_json_sha256"])==64 || error("quad-patch saved provenance hash")
+    for phase in ("p1","p2"),node in record[phase]["nodes"]
+        for (values,bits) in ((node["coordinates"],node["coordinate_bits"]),
+                              (node["stored_parameters"],node["stored_parameter_bits"]))
+            length(values)==length(bits) || error("quad-patch packed node payload")
+            for i in eachindex(values)
+                string(reinterpret(UInt64,Float64(values[i]));base=16,pad=16)==bits[i] ||
+                    error("quad-patch saved Float64 payload bits")
+            end
+        end
+    end
+    old=Dict(node["tag"]=>node for node in record["p1"]["nodes"])
+    new=Dict(node["tag"]=>node for node in record["p2"]["nodes"])
+    pairs=record["primary_remap"]
+    length(pairs)==length(old) && length(unique(first.(pairs)))==length(old) &&
+        length(unique(last.(pairs)))==length(old) || error("quad-patch primary identity remap")
+    inverse=Dict(pair[2]=>pair[1] for pair in pairs)
+    for pair in pairs
+        old[pair[1]]["coordinate_bits"]==new[pair[2]]["coordinate_bits"] &&
+            old[pair[1]]["owner"]==new[pair[2]]["owner"] || error("quad-patch primary identity changed")
+    end
+    carriers=quad_patch_actual_carriers((Int(row["type"]),Int.(row["nodes"]),
+        (Int(entity["dim"]),Int(entity["tag"])))
+        for entity in record["p1"]["entities"] for row in entity["cells"])
+    supports=record["supports"]
+    Set(row["node"] for row in supports)==setdiff(Set(keys(new)),Set(keys(inverse))) ||
+        error("quad-patch saved interpolation support coverage")
+    for support in supports
+        ids=support["primary"];key=Tuple(sort!([inverse[id] for id in ids]))
+        expected=carriers[key]
+        Tuple(support["owner"])==expected && Tuple(new[support["node"]]["owner"])==expected ||
+            error("quad-patch saved support owner differs from actual incidence")
+        mean=[sum(Float64(new[id]["coordinates"][i]) for id in ids)/length(ids) for i in 1:3]
+        maximum(abs.(Float64.(new[support["node"]]["coordinates"]).-mean))<=tolerance ||
+            error("quad-patch saved support geometry")
+    end
+    for surface in record["surface_queries"]
+        queries=haskey(surface,"inverse") ? surface["inverse"] : surface["computed"]
+        for query in queries
+            uv=haskey(query,"computed_uv") ? query["computed_uv"] : query["uv"]
+            length(uv)==2 && maximum(abs.(Float64.(query["evaluated"]).-
+                Float64.(new[query["node"]]["coordinates"])))<=tolerance || error("quad-patch saved computed UV")
+        end
+    end
+    return new
+end
+
+function quad_patch_native_supports(api,linear,linear_data,projected,volume,tolerance)
+    types,_,connections=linear_data
+    actual_types,_,actual_connections=api.mesh.get_elements(3,volume)
+    targets=Dict(4=>11,5=>12,7=>14);inverse=Dict{UInt64,Int}()
+    length(types)==length(actual_types) || error("quad-patch native P2 family change")
+    for (msh,nodes) in zip(types,connections)
+        target=targets[Int(msh)];slot=findfirst(==(target),actual_types)
+        slot===nothing && error("quad-patch native P2 family missing")
+        before=reshape(nodes,msh_spec(msh).nnodes,:)
+        after=reshape(actual_connections[slot],msh_spec(target).nnodes,:)
+        size(before,2)==size(after,2) || error("quad-patch native P2 cell count change")
+        for column in axes(before,2),row in axes(before,1)
+            current=after[row,column];original=Int(before[row,column])
+            get(inverse,current,original)==original || error("quad-patch native primary identity conflict")
+            inverse[current]=original
+        end
+    end
+    length(inverse)==nnodes(linear) && Set(values(inverse))==Set(1:nnodes(linear)) ||
+        error("quad-patch native primary identity is not bijective")
+    projected.coords==linear.coords || error("quad-patch actual projection changed primary IDs")
+    data=projected.entity_data
+    carriers=quad_patch_actual_carriers((Int(block.msh),Tuple(cell),
+        (Tessella.Elements.msh_dimension(block.msh),Int(data.block_entities[b][column])))
+        for (b,block) in enumerate(projected.blocks) for (column,cell) in enumerate(eachcol(block.nodes)))
+    supports=Dict{UInt64,Tuple}()
+    function add_support(node,primary)
+        key=Tuple(sort!([inverse[id] for id in primary]))
+        get(supports,node,key)==key || error("quad-patch native shared support identity")
+        supports[node]=key
+    end
+    for msh in actual_types
+        for edge in eachcol(reshape(api.mesh.get_element_edge_nodes(msh,volume,false),3,:))
+            add_support(edge[3],edge[1:2])
+        end
+        if msh in (12,14)
+            for face in eachcol(reshape(api.mesh.get_element_face_nodes(msh,4,volume,false),9,:))
+                add_support(face[9],face[1:4])
+            end
+        end
+        if msh==12
+            slot=only(findall(==(msh),actual_types))
+            for cell in eachcol(reshape(actual_connections[slot],27,:));add_support(cell[27],cell[1:8]);end
+        end
+    end
+    Set(keys(supports))==setdiff(Set(api.mesh.get_nodes()[1]),Set(keys(inverse))) ||
+        error("quad-patch native interpolation support coverage")
+    for (node,support) in supports
+        p,_,dim,entity=api.mesh.get_node(node)
+        (dim,entity)==carriers[support] || error("quad-patch native P2 owner differs from actual P1 carriers")
+        expected=[sum(linear.coords[i,id] for id in support)/length(support) for i in 1:3]
+        maximum(abs.(p.-expected))<=tolerance || error("quad-patch native P2 support geometry")
+    end
+    return length(supports)
+end
+
+function quad_patch_source_match(native,saved,tolerance)
+    ids=Dict{Int,Int}()
+    for node in 1:nnodes(native)
+        matches=findall(i->maximum(abs.(native.coords[:,node].-saved.coords[:,i]))<=tolerance,1:nnodes(saved))
+        length(matches)==1 || error("quad-patch source geometry is not uniquely matched")
+        ids[node]=only(matches)
+    end
+    Set(values(ids))==Set(1:nnodes(saved)) || error("quad-patch source identity match is not bijective")
+    actual=Set(QTP.cycle(Tuple(ids[n] for n in cell)) for block in QTP.blocks(native) for cell in eachcol(block.nodes))
+    expected=Set(QTP.cycle(Tuple(cell)) for block in QTP.blocks(saved) for cell in eachcol(block.nodes))
+    actual==expected || error("quad-patch oriented source complex differs from saved oracle")
+    return nothing
+end
+
+function quad_patch_saved_case(record;oracle_only=false)
+    tolerance=2e-11;n=record["intervals"];laterals=record["recombine_laterals"]
+    layers=record["profile"]=="L1" ? :one : record["profile"]=="L3" ? :three : :graded
+    shape=record["geometry_shape"]=="unit_square" ? :unit : :rounded
+    f=QTP.fixture(record["name"];shape,height=record["direction"],laterals,layers,pins=(1,2,3,4))
+    f=merge(f,(;source=record["input_geo"]))
+    saved_nodes=quad_patch_saved_integrity(record,tolerance)
+    owners=[count(node->node["owner"][1]==dim,values(saved_nodes)) for dim in 0:3]
+    owners==[8,8n+20,24n+6,18n-9] || error("quad-patch saved owner dimension counts")
+    source,_=two_tri_saved_mesh(record,"p1",2,record["source_tag"])
+    linear,index=two_tri_saved_mesh(record,"p1",3,record["volume_tag"])
+    quadratic,_=two_tri_saved_mesh(record,"p2",3,record["volume_tag"])
+    saved=QTP.certify(linear,f,source)
+    two_tri_saved_boundary(record,index)==Set(keys(saved.boundary)) || error("quad-patch saved typed exterior mismatch")
+    QTNN.certify_quadratic(quadratic,linear)
+    nnodes(quadratic)==50n+25 || error("quad-patch saved P2 node count")
+    empty_parameters=count(node->node["owner"][1]==2 && isempty(node["stored_parameters"]),values(saved_nodes))
+    empty_parameters==(laterals ? 8n : 0)==record["empty_stored_surface_uv_nodes"] || error("quad-patch stored UV provenance count")
+    if !oracle_only
+        execution=QTP.execute(f.source)
+        volume=geo_entity_mesh(execution,3,record["volume_tag"])
+        actual_source=geo_entity_mesh(execution,2,record["source_tag"])
+        quad_patch_source_match(actual_source,source,tolerance)
+        native=QTP.certify(volume,f,actual_source)
+        QTNN.surface_faces(execution.mesh_parts,volume)==Set(keys(native.boundary)) || error("quad-patch native typed exterior mismatch")
+        QTNN.counts(volume)==QTNN.counts(linear) && nnodes(volume)==nnodes(linear) || error("quad-patch native primary product counts")
+        for p in eachcol(volume.coords)
+            count(q->maximum(abs.(p.-q))<=tolerance,eachcol(linear.coords))==1 || error("quad-patch actual column geometry")
+        end
+        mktempdir() do directory
+            path=joinpath(directory,"quad_patch_saved.geo");write(path,f.source)
+            native_api(path,api->begin
+                primary_cache=api.mesh.generate(3)
+                first=QTP.public_volume(api,record["volume_tag"])
+                primary_data=api.mesh.get_elements(3,record["volume_tag"])
+                QTNN.typed_signature(first)==QTNN.typed_signature(volume) || error("quad-patch API/GEO primary cells")
+                isempty(api.mesh.get_elements(2)[1]) || error("quad-patch API3 lower-cell contract changed")
+                projected=model_to_mixed(api.CURRENT[],primary_cache,3,record["volume_tag"])
+                api.mesh.set_order(2)
+                actual=QTP.public_volume(api,record["volume_tag"])
+                QTNN.certify_quadratic(actual,first)
+                quadratic_volume_from_jacobians(actual,api.mesh;expected=Float64(native.total))
+                quad_patch_native_supports(api,primary_cache,primary_data,projected,record["volume_tag"],tolerance)==41n+16 ||
+                    error("quad-patch native interpolation support count")
+                native_owners=zeros(Int,4)
+                for node in api.mesh.get_nodes()[1]
+                    p,uv,dim,entity=api.mesh.get_node(node);native_owners[dim+1]+=1
+                    if dim==2
+                        length(uv)==2 && maximum(abs.(api.model.get_value(2,entity,uv).-p))<=tolerance ||
+                            error("quad-patch native computed surface UV")
+                    end
+                end
+                native_owners==owners || error("quad-patch native owner dimension counts")
+                for lateral in record["lateral_tags"]
+                    own,_,uv=api.mesh.get_nodes(2,lateral,false,true)
+                    length(own)==6n-3 && length(uv)==2length(own) || error("quad-patch lateral owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,lateral,true,true)
+                    length(closure)==10n+5 && length(uv)==2length(closure) &&
+                        maximum(abs.(api.model.get_value(2,lateral,uv).-coords))<=tolerance || error("quad-patch lateral closure/computed UV")
+                end
+                for cap in (record["source_tag"],record["top_tag"])
+                    own,_,uv=api.mesh.get_nodes(2,cap,false,true)
+                    length(own)==9 && length(uv)==18 || error("quad-patch cap owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,cap,true,true)
+                    length(closure)==25 && length(uv)==50 &&
+                        maximum(abs.(api.model.get_value(2,cap,uv).-coords))<=tolerance || error("quad-patch cap closure/computed UV")
+                end
+                api.mesh.set_order(1)
+                QTNN.typed_signature(QTP.public_volume(api,record["volume_tag"]))==QTNN.typed_signature(first) ||
+                    error("quad-patch actual P2/P1 cell roundtrip")
+            end)
+        end
+    end
+    return empty_parameters
+end
+
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -371,6 +605,8 @@ triangle_cases=Ref(0);triangle_quadratic_cases=Ref(0);triangle_isolated_cases=Re
 triangle_parameter_provenance_gaps=Ref(0)
 two_tri_cases=Ref(0);two_tri_quadratic_cases=Ref(0);two_tri_parameter_provenance_gaps=Ref(0)
 two_tri_saved_empty_parameters=Ref(0)
+quad_patch_cases=Ref(0);quad_patch_quadratic_cases=Ref(0);quad_patch_trapezoid_cases=Ref(0)
+quad_patch_parameter_provenance_gaps=Ref(0);quad_patch_empty_parameters=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -758,7 +994,19 @@ try
         empty_parameters>0 && (two_tri_parameter_provenance_gaps[]+=1)
         println("QUADTRI_NONEW_TWO_TRI_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
     end
-    println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) two_tri_saved_cases=$(two_tri_cases[]) two_tri_p2_cases=$(two_tri_quadratic_cases[]) two_tri_parameter_provenance_gaps=$(two_tri_parameter_provenance_gaps[]) two_tri_empty_stored_uv=$(two_tri_saved_empty_parameters[]) oracle_only=$oracle_only")
+    patch_catalog=TOML.parsefile(joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_quad_patch_oracle.toml"))
+    patch_catalog["gmsh_version"]=="4.15.2" && patch_catalog["coordinate_abs_tolerance"]==2e-11 &&
+        length(patch_catalog["fixtures"])==16 || error("quad-patch saved oracle catalog contract")
+    for record in patch_catalog["fixtures"]
+        isempty(selected) || occursin(selected,record["name"]) || continue
+        empty_parameters=quad_patch_saved_case(record;oracle_only)
+        quad_patch_cases[]+=1;quad_patch_quadratic_cases[]+=1
+        quad_patch_empty_parameters[]+=empty_parameters
+        empty_parameters>0 && (quad_patch_parameter_provenance_gaps[]+=1)
+        record["geometry_shape"]=="trapezoid" && (quad_patch_trapezoid_cases[]+=1)
+        println("QUADTRI_NONEW_QUAD_PATCH_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
+    end
+    println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) two_tri_saved_cases=$(two_tri_cases[]) two_tri_p2_cases=$(two_tri_quadratic_cases[]) two_tri_parameter_provenance_gaps=$(two_tri_parameter_provenance_gaps[]) two_tri_empty_stored_uv=$(two_tri_saved_empty_parameters[]) quad_patch_saved_cases=$(quad_patch_cases[]) quad_patch_p2_cases=$(quad_patch_quadratic_cases[]) quad_patch_trapezoid_cases=$(quad_patch_trapezoid_cases[]) quad_patch_parameter_provenance_gaps=$(quad_patch_parameter_provenance_gaps[]) quad_patch_empty_stored_uv=$(quad_patch_empty_parameters[]) oracle_only=$oracle_only")
 finally
     gmsh.finalize()
 end

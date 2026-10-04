@@ -4,6 +4,7 @@ function _extrude_nonew_cell_counts(mesh,remap=nothing;dimension::Int=3)
     counts=Dict{Tuple{Int,Tuple},Int}()
     if mesh isa Mesh
         cells=dimension==3 ? mesh.tets : mesh.tris
+        sizehint!(counts,size(cells,2))
         msh=dimension==3 ? 4 : 2
         for column in axes(cells,2)
             cell=ntuple(k->remap===nothing ? cells[k,column] :
@@ -12,6 +13,12 @@ function _extrude_nonew_cell_counts(mesh,remap=nothing;dimension::Int=3)
             counts[key]=get(counts,key,0)+1
         end
     else
+        capacity=0
+        for block in mesh.blocks
+            block isa ElementBlock && msh_dimension(block.msh)==dimension || continue
+            capacity=Base.checked_add(capacity,size(block.nodes,2))
+        end
+        sizehint!(counts,capacity)
         for block in mesh.blocks
             block isa ElementBlock && msh_dimension(block.msh)==dimension || continue
             for column in axes(block.nodes,2)
@@ -30,6 +37,7 @@ function _extrude_nonew_projection_lookup(mesh,completed,
     nnodes(mesh)==nnodes(completed.volume) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts input node set does not match the completed sweep"))
     lookup=Dict{NTuple{3,Float64},Int32}()
+    sizehint!(lookup,nnodes(mesh))
     for node in 1:nnodes(mesh)
         coordinate=_extrude_nonew_coordinate(mesh,node)
         haskey(lookup,coordinate) && throw(ArgumentError(
@@ -175,10 +183,19 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     end
     lookup=_extrude_nonew_projection_lookup(mesh,completed,caller)
     two_tri=completed.catalog isa _ExtrudeNoNewTwoTriCatalog
-    face_capacity=two_tri ?
-        (completed.volume isa Mesh ? 16 : 7)*length(completed.catalog.layer_refs)+2 : 0
-    _extrude_nonew_certify_boundary(mesh,completed.surfaces,caller;
+    quad_patch=completed.catalog isa _ExtrudeNoNewQuadPatchCatalog
+    intervals=length(completed.catalog.layer_refs)
+    face_capacity=quad_patch ? _extrude_nonew_quad_patch_face_capacity(completed.catalog) :
+        two_tri ? (completed.volume isa Mesh ? 16 : 7)*intervals+2 : 0
+    typed_boundary=_extrude_nonew_certify_boundary(mesh,completed.surfaces,caller;
         face_capacity=face_capacity)
+    # Retain the audited input-node boundary instead of rebuilding its full
+    # volume-face incidence in the classified projection.
+    boundary=Set{NTuple{N,Int32} where N}()
+    sizehint!(boundary,length(typed_boundary))
+    for face in typed_boundary
+        push!(boundary,face[4]==0 ? (face[1],face[2],face[3]) : face)
+    end
     curves=Set{Int}()
     points=Set{Int}()
     for surface in keys(completed.surfaces)
@@ -214,7 +231,17 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     for curve in curve_tags
         a,b=working.curves[curve]
         link=get(working.meshing.extrude_sources,(1,curve),nothing)
-        chain=if curve in source_curves || (link!==nothing && link[1]==1)
+        chain=if quad_patch && (curve in source_curves || (link!==nothing && link[1]==1))
+            original=curve in source_curves ? curve : abs(link[2])
+            position=findfirst(==(original),completed.catalog.boundary_curves)
+            position===nothing && throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts Curve[$curve] has no actual source boundary chain"))
+            level=curve in source_curves ? 1 : size(columns,1)
+            nodes=Int32[lookup[ntuple(k->_model_projection_coordinate_key(
+                columns[level,node][k]),3)] for node in completed.catalog.boundary_chains[position]]
+            nodes[1]==point_nodes[a] || reverse!(nodes)
+            nodes
+        elseif curve in source_curves || (link!==nothing && link[1]==1)
             Int32[point_nodes[a],point_nodes[b]]
         elseif link!==nothing && link[1]==0
             coordinate=ntuple(k->_model_projection_coordinate_key(
@@ -247,5 +274,6 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     for (surface,part) in completed.surfaces
         surfaces[surface]=_extrude_nonew_projection_faces(part,lookup,caller)
     end
-    return (curves=entries,surfaces=surfaces,curve_params=working.curve_params)
+    return (curves=entries,surfaces=surfaces,curve_params=working.curve_params,
+            edges=edges,boundary=boundary)
 end
