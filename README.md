@@ -188,6 +188,7 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   and toroidal revolutions have pinned oracle coverage.
 - native `QuadTriNoNewVerts` for an isolated source triangle or quadrangle, or a
   strictly convex four-corner planar transfinite source containing two Tri3 cells,
+  or a recombined 2-by-2 Quad4 patch with an existing interior source pivot,
   with normalized
   positive layer groups and free or recombined laterals; one completed operation
   plan supplies the volume, surfaces, and classified projection. Whole-domain
@@ -200,6 +201,12 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   interval with exactly `4(N+1)` nodes. Actual source incidence and strictly
   ordered column planes certify the complete product; shared typed faces have
   opposite outward cycles, and the internal diagonal has no CAD lateral surface.
+  The bounded 2-by-2 patch retains actual three-node native boundary chains and
+  supports normal translation in either direction. Free laterals emit
+  `(24N-8)` tetrahedra and four pyramids; recombined laterals emit `4(N-1)`
+  hexahedra and twelve pyramids, using exactly `9(N+1)` primary nodes without
+  an added centroid. The actual source partition and element maps are certified
+  before the complete typed boundary and projection are published.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh

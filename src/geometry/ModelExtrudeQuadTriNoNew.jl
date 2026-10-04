@@ -1,5 +1,5 @@
 # Isolated NoNewVerts region kernels for one nondegenerate source triangle or
-# quadrangle, and a bounded two-triangle source grid. Quadrangle face choices
+# quadrangle, and bounded two-triangle and 2-by-2 quadrangle source grids. Quadrangle face choices
 # form a cap chain; triangular caps allow independent prism choices per interval.
 # All other source categories retain explicit preflight blockers until their
 # region-wide propagation phases are implemented.
@@ -362,6 +362,19 @@ function _extrude_nonew_two_tri_candidate(m::GeoModel,source::Int,sides::Int,
     return !_model_surface_recombined(m,source)
 end
 
+function _extrude_nonew_quad_patch_candidate(m::GeoModel,source::Int,sides::Int,
+                                             caller::AbstractString)
+    sides==4 && haskey(m.meshing.transfinite_surfaces,source) &&
+        _model_surface_recombined(m,source) || return false
+    curves=_model_projection_surface_curves(m,source)
+    for curve in curves
+        control=get(m.meshing.transfinite_curves,curve,nothing)
+        control===nothing && return false
+        _flexible_transfinite_nodes(m,control.num_nodes,curve,caller)==3 || return false
+    end
+    return true
+end
+
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
         size_field::Union{Nothing,AbstractSizeField}=nothing)
@@ -381,13 +394,22 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     sides in (3,4) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts other source boundaries require the boundary-category planner"))
     top,laterals=_extrude_nonew_region_boundary(m,t,source,caller;sides)
-    two_tri=_extrude_nonew_two_tri_candidate(m,source,sides,caller)
-    levels,refs=_extrude_nonew_levels(params,caller;source_nodes=sides,
-        extra_nodes=sides==4 && !two_tri ? 1 : 0,
-        cells_per_interval=two_tri && params.recomb_laterals ? 2 : sides==4 ? 6 : 3)
+    quad_patch=_extrude_nonew_quad_patch_candidate(m,source,sides,caller)
+    two_tri=!quad_patch && _extrude_nonew_two_tri_candidate(m,source,sides,caller)
+    levels,refs=_extrude_nonew_levels(params,caller;source_nodes=quad_patch ? 9 : sides,
+        extra_nodes=sides==4 && !two_tri && !quad_patch ? 1 : 0,
+        cells_per_interval=quad_patch ? 24 :
+            two_tri && params.recomb_laterals ? 2 : sides==4 ? 6 : 3)
     source_mesh=mesh_model_surface(m,source;min_angle_deg=min_angle_deg,
         max_periodic_passes=max_periodic_passes,size_field=size_field)
-    if two_tri
+    if quad_patch
+        catalog=_extrude_nonew_quad_patch_catalog(m,source,source_mesh,spec,
+            levels,refs,params.recomb_laterals,caller)
+        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        _extrude_nonew_quad_patch_product_certify(cols,catalog,spec,caller)
+        return _extrude_nonew_quad_patch_finish(m,t,params,source,source_mesh,
+            catalog,cols,top,laterals,caller)
+    elseif two_tri
         catalog=_extrude_nonew_two_tri_catalog(m,source,source_mesh,spec,
             levels,refs,params.recomb_laterals,caller)
         cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
@@ -467,3 +489,4 @@ end
 
 include("ModelExtrudeNoNewTriangle.jl")
 include("ModelExtrudeNoNewTwoTri.jl")
+include("ModelExtrudeNoNewQuadPatch.jl")

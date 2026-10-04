@@ -5,7 +5,7 @@ struct _ExtrudeNoNewCompletePlan
     volume::Union{Mesh,MixedMesh}
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
     columns::Matrix{NTuple{3,Float64}}
-    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog}
+    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog}
 end
 
 struct _ExtrudeNoNewScope
@@ -111,9 +111,11 @@ function _extrude_nonew_count_faces!(
         nodes,msh::Int,caller::AbstractString)
     # The shared topology catalog records vertex incidence, and does not orient
     # all faces outwards. This bounded check uses outward cycles for positive
-    # Tet4 and Pri6 maps instead.
+    # Tet4, Hex8, Pri6 and Pyr5 maps instead.
     faces=msh==4 ? ((1,3,2),(1,2,4),(2,3,4),(3,1,4)) :
-          msh==6 ? ((1,3,2),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)) : nothing
+          msh==5 ? ((1,4,3,2),(5,6,7,8),(1,2,6,5),(2,3,7,6),(3,4,8,7),(4,1,5,8)) :
+          msh==6 ? ((1,3,2),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)) :
+          msh==7 ? ((1,4,3,2),(1,2,5),(2,3,5),(3,4,5),(4,1,5)) : nothing
     faces===nothing && throw(ArgumentError(
         "$caller: QuadTriNoNewVerts oriented face check does not support volume type $msh"))
     for column in axes(nodes,2),face in faces
@@ -240,7 +242,7 @@ function _extrude_nonew_certify_boundary(volume,surfaces,counts,
     actual==boundary || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts finalized surfaces do not exactly " *
         "cover the typed volume boundary"))
-    return nothing
+    return boundary
 end
 
 function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
@@ -255,24 +257,29 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         max_periodic_passes=max_periodic_passes,size_field=size_field)
     volume=_extrude_volume_part(working,plan.sweep,caller)
     surfaces=Dict{Int,Union{Mesh,MixedMesh}}(plan.source_tag=>plan.source_mesh)
+    quad_patch=plan.catalog isa _ExtrudeNoNewQuadPatchCatalog
     params,spec,link=_extrude_entity_params(working,2,plan.top_tag,caller)
-    surfaces[plan.top_tag]=_extrude_top_mesh(
+    surfaces[plan.top_tag]=quad_patch ?
+        _extrude_nonew_quad_patch_top(working,plan.top_tag,params,
+            plan.sweep.cols,plan.catalog,caller) : _extrude_top_mesh(
         working,plan.top_tag,params,spec,link[2],caller;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field,source_mesh=plan.source_mesh)
     two_tri=plan.catalog isa _ExtrudeNoNewTwoTriCatalog
     for tag in plan.lateral_tags
         params,spec,link=_extrude_entity_params(working,2,tag,caller)
-        surfaces[tag]=two_tri ?
+        surfaces[tag]=quad_patch ?
+            _extrude_nonew_quad_patch_lateral(working,tag,params,link[2],
+                plan.sweep.cols,plan.catalog,plan.edges,caller) : two_tri ?
             _extrude_nonew_two_tri_lateral(working,tag,params,link[2],
                 plan.sweep.cols,plan.catalog,plan.edges,caller) :
             _extrude_lateral_mesh(
                 working,tag,params,spec,link[2],caller;edges=plan.edges)
     end
-    face_capacity=two_tri ?
+    face_capacity=quad_patch ? _extrude_nonew_quad_patch_face_capacity(plan.catalog) : two_tri ?
         (volume isa Mesh ? 16 : 7)*length(plan.catalog.layer_refs)+2 : 0
     _extrude_nonew_certify_boundary(volume,surfaces,caller;
-        oriented_internal=two_tri,face_capacity=face_capacity)
+        oriented_internal=two_tri || quad_patch,face_capacity=face_capacity)
     _working_model || (m.curve_params=working.curve_params)
     return _ExtrudeNoNewCompletePlan(volume,surfaces,plan.sweep.cols,plan.catalog)
 end

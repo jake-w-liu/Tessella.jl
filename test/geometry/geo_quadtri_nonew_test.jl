@@ -233,7 +233,7 @@ end
         fixture=_QTNN.fixture("guard","Layers{3}",[0.,1/3,2/3,1.],false)
         _qtnn_api(fixture.source,(api,_)->begin
             api.mesh.generate(3)
-            for curve in 1:4;api.mesh.set_transfinite_curve(curve,3);end
+            for curve in 1:4;api.mesh.set_transfinite_curve(curve,4);end
             model=api.CURRENT[];cache=api.LAST_MESH[];class=api.LAST_MESH_CLASS[]
             payload=(api.mesh.get_nodes(),api.mesh.get_elements())
             params=deepcopy(model.curve_params)
@@ -245,11 +245,10 @@ end
             @test model.curve_params==params && model.meshing.extrude==attrs
             @test (api.mesh.get_max_node_tag(),api.mesh.get_max_element_tag())==counters
         end)
-        # The unrecombined two-triangle grid is supported. Larger source
-        # grids still require the boundary-category planner under either
-        # source recombination policy.
+        # The unrecombined two-triangle and recombined 2-by-2 quadrangle grids
+        # are supported. Larger source grids retain the category blocker.
         sources=(
-            replace(fixture.source,"Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
+            replace(fixture.source,"Transfinite Curve{:}=2"=>"Transfinite Curve{:}=4"),
             replace(fixture.source,"Recombine Surface{1};"=>"",
                     "Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
             replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{0,0,0},Pi/3}"))
