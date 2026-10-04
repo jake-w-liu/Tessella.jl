@@ -308,7 +308,8 @@ end
         for laterals in (false,true)
             fixture=_QPC.fixture("guard";laterals,layers=:three)
             invalid=(replace(fixture.source,"Transfinite Curve{1,2,3,4}=3"=>
-                    "Transfinite Curve{1,3}=2; Transfinite Curve{2,4}=6"),
+                    (laterals ? "Transfinite Curve{1,3}=2; Transfinite Curve{2}=6; Transfinite Curve{4}=7" :
+                        "Transfinite Curve{1,3}=2; Transfinite Curve{2,4}=6")),
                 replace(fixture.source,"Recombine Surface{1};"=>""),
                 replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0.0,1.0}"),
                 replace(fixture.source,"Layers{3}"=>"Layers{{1},{0.5}}"),
@@ -320,7 +321,8 @@ end
             _qpc_api(fixture.source,(api,geometry)->begin
                 api.mesh.generate(3);api.mesh.set_order(2)
                 for (position,curve) in pairs(fixture.curve_tags)
-                    api.mesh.set_transfinite_curve(curve,position in (1,3) ? 2 : 6)
+                    api.mesh.set_transfinite_curve(curve,
+                        position in (1,3) ? 2 : (laterals && position==4 ? 7 : 6))
                 end
                 before=_qpc_api_snapshot(api)
                 @test_throws r"QuadTriNoNewVerts" api.mesh.generate(3)

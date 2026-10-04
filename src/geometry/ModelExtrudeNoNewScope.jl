@@ -5,7 +5,7 @@ struct _ExtrudeNoNewCompletePlan
     volume::Union{Mesh,MixedMesh}
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
     columns::Matrix{NTuple{3,Float64}}
-    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog}
+    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog}
 end
 
 struct _ExtrudeNoNewScope
@@ -274,7 +274,7 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
     quad_strip=plan.catalog isa _ExtrudeNoNewQuadStripCatalog
     three_quad_strip=plan.catalog isa _ExtrudeNoNewThreeQuadStripCatalog
     four_quad_strip=plan.catalog isa _ExtrudeNoNewFourQuadStripCatalog
-    rect_grid=plan.catalog isa _ExtrudeNoNewRectGridCatalog
+    dynamic_grid=plan.catalog isa _ExtrudeNoNewDynamicGridCatalog
     params,spec,link=_extrude_entity_params(working,2,plan.top_tag,caller)
     surfaces[plan.top_tag]=quad_patch ?
         _extrude_nonew_quad_patch_top(working,plan.top_tag,params,
@@ -284,7 +284,7 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         _extrude_nonew_three_quad_strip_top(working,plan.top_tag,params,
             plan.sweep.cols,plan.catalog,caller) : four_quad_strip ?
         _extrude_nonew_four_quad_strip_top(working,plan.top_tag,params,
-            plan.sweep.cols,plan.catalog,caller) : rect_grid ?
+            plan.sweep.cols,plan.catalog,caller) : dynamic_grid ?
         _extrude_nonew_rect_grid_top(working,plan.top_tag,params,
             plan.sweep.cols,plan.catalog,caller) : _extrude_top_mesh(
         working,plan.top_tag,params,spec,link[2],caller;
@@ -301,7 +301,7 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
             _extrude_nonew_three_quad_strip_lateral(working,tag,params,link[2],
                 plan.sweep.cols,plan.catalog,plan.edges,caller) : four_quad_strip ?
             _extrude_nonew_four_quad_strip_lateral(working,tag,params,link[2],
-                plan.sweep.cols,plan.catalog,plan.edges,caller) : rect_grid ?
+                plan.sweep.cols,plan.catalog,plan.edges,caller) : dynamic_grid ?
             _extrude_nonew_rect_grid_lateral(working,tag,params,link[2],
                 plan.sweep.cols,plan.catalog,plan.edges,caller) : two_tri ?
             _extrude_nonew_two_tri_lateral(working,tag,params,link[2],
@@ -312,11 +312,11 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
     face_capacity=quad_patch ? _extrude_nonew_quad_patch_face_capacity(plan.catalog) : quad_strip ?
         _extrude_nonew_quad_strip_face_capacity(plan.catalog) : three_quad_strip ?
         _extrude_nonew_three_quad_strip_face_capacity(plan.catalog) : four_quad_strip ?
-        _extrude_nonew_four_quad_strip_face_capacity(plan.catalog) : rect_grid ?
-        _extrude_nonew_rect_grid_face_capacity(plan.catalog) : two_tri ?
+        _extrude_nonew_four_quad_strip_face_capacity(plan.catalog) : dynamic_grid ?
+        _extrude_nonew_dynamic_grid_face_capacity(plan.catalog) : two_tri ?
         (volume isa Mesh ? 16 : 7)*length(plan.catalog.layer_refs)+2 : 0
     _extrude_nonew_certify_boundary(volume,surfaces,caller;
-        oriented_internal=two_tri || quad_patch || quad_strip || three_quad_strip || four_quad_strip || rect_grid,
+        oriented_internal=two_tri || quad_patch || quad_strip || three_quad_strip || four_quad_strip || dynamic_grid,
         face_capacity=face_capacity)
     _working_model || (m.curve_params=working.curve_params)
     return _ExtrudeNoNewCompletePlan(volume,surfaces,plan.sweep.cols,plan.catalog)

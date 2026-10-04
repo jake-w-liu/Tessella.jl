@@ -715,6 +715,9 @@ function run_tests()
                 for i in f.long_pair
                     API.mesh.set_transfinite_curve(f.curve_tags[i],6)
                 end
+                # Free M5 remains unsupported. Recombined arbitrary strips
+                # are supported, so reject unmatched opposite source chains.
+                laterals && API.mesh.set_transfinite_curve(f.curve_tags[last(f.long_pair)],7)
                 before=snapshot()
                 @test_throws r"QuadTriNoNewVerts" API.mesh.generate(3)
                 unchanged(before)

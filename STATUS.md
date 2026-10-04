@@ -25,6 +25,62 @@ support or test requirements.
 
 ### Active parity increment
 
+Arbitrary-length recombined B4 strips and the native GEO Line source-sampling
+fix are implemented and verified in `C:/tmp/tessella_nonew_b4_strip`, from verified
+and pushed `9806d5b`. Source/plan/emission and the shared boundary/projection
+route are integrated. Initial normal112 checks pass24 actual source-to-volume
+projection assertions and all twelve saved B4 primary/P2 differentials,
+including84 terminal centers and384 retained empty stored Surface UVs.
+The preexisting M7 Progression4/count8 source-coordinate error is corrected
+at the unchanged2e-11 tolerance; measured maximum source error is5.55e-17.
+Final focused geometry checks pass 19,516 assertions on each supported runtime,
+and the full strict replay passes all 206 cases. Certified CRC runs pass
+24,121 checks each for 24 matching new rows; API lifecycle tests pass 93,523
+each. The combined pins now contain 256 NoNew and nine API01 rows, with
+40 AddVerts rows tracked separately. Exactly two API01 source
+sampling fingerprints change after independently measured Progression/Bump
+correction; the other seven API01 rows and prior NoNew rows remain pinned.
+The V1 471-input release candidate is rejected after two allocation growth
+failures in projection/API and an invalid fixed-ulp source-area harness
+assertion. Independent exact arithmetic proves the represented M4000 source
+area is exactly one; the harness now checks exact dyadic cancellation.
+Full resource checks otherwise pass 3,062,935 assertions; the strict
+V1 replay is green with unchanged inputs/index. The V1 package run was
+intentionally stopped after the resource failure, before Julia1.13 launched;
+it is interrupted evidence, not a package pass. Detached projection capacity
+proof passes61 checks with every actual payload/metadata field unchanged;
+N500/1000/2000 allocation falls to22.89/46.00/91.27MB and both unchanged
+growth bounds pass. API capacity proof passes27 actual-path checks and32
+overlapping/coincident-part checks. Promoted fixes pass86 actual API assertions
+plus3 provenance guards each on112/113, with exact semantics and unchanged
+growth bounds. Actual generic projection AST audits pass23 each over11 bodies.
+The471-input V2 strict replay passes206 cases, and both B4 resource gates pass
+3,062,938 assertions with matching actual geometry/P2 records and unchanged
+growth bounds. V2 is rejected after the package run exposes five stale
+Quad-patch atomic-failure assertions: their recombined five-Quad input is now
+supported. Its exact471 raw inputs are archived; the package112 run was
+deliberately stopped after those failures, with final guard passing and113
+not launched. The disproven negative fixtures are corrected without deleting
+any atomic assertions. The corrected five GEO suites pass10,000 checks each on
+normal bounds-checked112/113; all83 quad-patch assertion tokens and free M5
+blockers remain intact. Final V3 freezes471 inputs with new scoped index and
+passes both package gates,206-case strict replay and all14 resource gates.
+Bounds-checked package suites pass1,311,533 checks each on Julia1.12.7 and
+1.13.1, with wrapper times1884.313713s and1503.420155s. All471 inputs and
+the scoped index remain unchanged before and after every release gate.
+The14 allocation gates pass101,383,766 checks with exact cross-runtime resource
+records and unchanged2.15 growth/+65536-byte bounds. Final release evidence
+`test/tmp/b4_final_release_evidence_v3.json` has SHA256
+B6F204A611C0FBFDFB62ADDFBC296C2FD733C3F53E6A3A206930A1A3850364A4.
+All18 old artifact files and immutable existing-corner tables remain pinned,
+apart from the two independently justified API01 source fingerprints above.
+Free B4 propagation is the next implementation increment. Its physical phase
+and final emission drafts pass whole-product checks for nonterminal retained
+centers; public Scope/Projection/P2/API integration remains unfinished.
+All other parity requirements remain part of the full active goal.
+
+### Latest verified increment (`9806d5b`)
+
 The dynamic rectangular Quad-grid NoNew path is implemented in
 `C:/tmp/tessella_nonew_rectangular_grid` on `codex/nonew-rectangular-grid`,
 from verified and pushed `78af21d`. Actual regular source incidence, convex

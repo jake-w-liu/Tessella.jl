@@ -1,7 +1,12 @@
 # A dynamic regular source disk is certified once. Physical face propagation
 # selects existing-corner factories in source order, without a global cap search.
 include("ModelExtrudeNoNewRectGridSource.jl")
+abstract type _ExtrudeNoNewDynamicGridCatalog end
 include("ModelExtrudeNoNewRectGridPlan.jl")
+include("ModelExtrudeNoNewB4StripPlan.jl")
+
+@inline _extrude_nonew_dynamic_grid_face_capacity(catalog::_ExtrudeNoNewDynamicGridCatalog)=
+    catalog.face_capacity
 
 function _extrude_nonew_rect_grid_preflight(shape,caller)
     a,b=shape
@@ -25,7 +30,7 @@ end
 end
 
 function _extrude_nonew_rect_grid_product_certify(cols,
-        catalog::_ExtrudeNoNewRectGridCatalog,spec,caller)
+        catalog::_ExtrudeNoNewDynamicGridCatalog,spec,caller)
     source=catalog.source
     spec.type===:translate && all(isfinite,spec.T) && count(!iszero,spec.T)==1 ||
         _extrude_nonew_rect_grid_error(caller,"requires one finite axis-normal translation")
@@ -134,7 +139,7 @@ function _extrude_nonew_rect_grid_finish(m::GeoModel,t::Int,params,source_tag::I
 end
 
 function _extrude_nonew_rect_grid_top(m::GeoModel,t::Int,params,
-        cols,catalog::_ExtrudeNoNewRectGridCatalog,caller)
+        cols,catalog::_ExtrudeNoNewDynamicGridCatalog,caller)
     nlevels,_=_extrude_nonew_rect_grid_dimensions(cols,catalog,caller)
     source=catalog.source;ncells=length(source.source_cells)
     coordinates=Matrix{Float64}(undef,3,length(source.source_coordinates))
@@ -161,7 +166,7 @@ function _extrude_nonew_rect_grid_top(m::GeoModel,t::Int,params,
 end
 
 function _extrude_nonew_rect_grid_lateral(m::GeoModel,t::Int,params::_GeoExtrudeParams,
-        gen_signed::Int,cols,catalog::_ExtrudeNoNewRectGridCatalog,edges,caller)
+        gen_signed::Int,cols,catalog::_ExtrudeNoNewDynamicGridCatalog,edges,caller)
     source=catalog.source;gen=abs(gen_signed)
     number=findfirst(==(gen),source.boundary_curves)
     number!==nothing && haskey(m.curves,gen) || _extrude_nonew_rect_grid_error(caller,
