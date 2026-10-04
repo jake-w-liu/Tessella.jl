@@ -34,9 +34,13 @@ whose actual mesh and boundary entities satisfy the linear CAD requirement.
 Tags, typed oriented connectivity, node/cell ownership and query array order are
 compared exactly. Stored raw fixture coordinates are exact. Ordinary coordinate
 comparisons use `atol=5e-12, rtol=5e-12`; endpoint inverse coordinates use1e-10.
-The three Progression/Bump/Beta grading fixtures alone use `atol=3e-7` because
-Gmsh integrates an approximate adaptive density. Independent unit tests check
-the native analytic spacing to8eps. Periodic pair dictionaries are exact; raw
+The three Progression/Bump/Beta grading fixtures and the periodic master
+grading fixture retain their historical `atol=3e-7` comparison with Gmsh's
+sampled adaptive density primitive. Native nonuniform Lines now use that same
+density-integration route. Independent saved-coordinate unit tests enforce
+`atol=2e-11, rtol=0` for the three laws and retain `atol=3e-12` for the periodic
+master. Standalone analytic parameter helpers keep their separate exact-law
+tests. Periodic pair dictionaries are exact; raw
 pair array order depends on Gmsh's maps keyed by allocated MVertex pointers.
 
 One confirmed source-state limitation has a precise atomic blocker: legacy
@@ -59,4 +63,7 @@ digests include coordinate bits, oriented typed connectivity, physical names,
 entity ownership, public labels, parameters and periodic metadata. Allocator
 maxima are pinned alongside each digest. All nine records match bitwise under
 normal Julia 1.12.7 and 1.13.1 with bounds checks. Graded artifact hashes pin the
-native analytic law, while the differential applies the stated upstream bound.
+native density-integration samples, independently checked against Gmsh 4.15.2
+coordinates. Exactly the three graded hashes changed for the native Line fix;
+the other six records remain byte-identical. The differential retains the
+historical bound stated above.

@@ -449,9 +449,13 @@ end
             surface=mesh_model_surface(geometry.model,1)
             @test nnodes(surface)==6 && size(surface.tris,2)==4 && validate(surface).ok
             parameters=deepcopy(geometry.model.curve_params)
-            fraction=1/(1+ratio)
-            @test parameters[1][2]≈fraction atol=8eps(Float64)*fraction rtol=0
-            @test parameters[3][2]≈1-fraction atol=8eps(Float64) rtol=0
+            # Native F_Transfinite integrates and inverts a sampled density.
+            # These saved Gmsh 4.15.2 controls include its extreme endpoint
+            # partition behavior; analytic grading remains a separate API.
+            forward=ratio==1e6 ? 1.0074495582442956e-6 : 7.450581596923805e-9
+            reverse=ratio==1e6 ? 0.9999999925474284 : 0.499999996273405
+            @test parameters[1][2]≈forward atol=2e-11 rtol=0
+            @test parameters[3][2]≈reverse atol=2e-11 rtol=0
             @test 0<parameters[1][2]<1 && 0<parameters[3][2]<1
             for curve in 1:4
                 @test first(parameters[curve])==0 && last(parameters[curve])==1

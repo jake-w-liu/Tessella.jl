@@ -2186,6 +2186,27 @@ function _generate_units(m::GeoModel,dimension::Int,entities::Vector{Int})
     return groups
 end
 
+function _generation_meshing_options(order::Int)
+    return (flexible_transfinite=!iszero(OPTIONS["Mesh.FlexibleTransfinite"]),
+        lc_factor=OPTIONS["Mesh.MeshSizeFactor"],
+        recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"]),
+        recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"]),
+        transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"]),
+        lc_extend_from_boundary=Int(OPTIONS["Mesh.MeshSizeExtendFromBoundary"]),
+        order=order)
+end
+
+function _apply_generation_meshing_options!(m::GeoModel,settings)
+    m.meshing.flexible_transfinite=settings.flexible_transfinite
+    m.meshing.lc_factor=settings.lc_factor
+    m.meshing.recombine_all=settings.recombine_all
+    m.meshing.recombine_algo=settings.recombine_algo
+    m.meshing.transfinite_tri=settings.transfinite_tri
+    m.meshing.lc_extend_from_boundary=settings.lc_extend_from_boundary
+    m.meshing.order=settings.order
+    return nothing
+end
+
 function _generate(dim::Integer)
     dim isa Bool && throw(ArgumentError("API.mesh.generate: dim must not be Bool"))
     dimension=try
@@ -2213,8 +2234,8 @@ function _generate(dim::Integer)
                 element_order=order,renumber=!iszero(OPTIONS["Mesh.Renumber"]),
                 save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
                 initial_max_node_tag=NODE_TAG_MAX[],
-                initial_max_element_tag=ELEMENT_TAG_MAX[])
-            plan.model.meshing.order=order
+                initial_max_element_tag=ELEMENT_TAG_MAX[],
+                generation_meshing=_generation_meshing_options(order))
             _commit_tagged_plan_locked!(plan;preserve_visibility=true,
                                        element_tag_map=plan.visibility_tag_map)
             return _copy_mesh(plan.mesh)
@@ -2226,14 +2247,7 @@ function _generate(dim::Integer)
         # mirror them into the model before meshing (`CharacteristicLengthFactor`
         # and `MeshSizeFactor` share one stored `lcFactor` via the alias in
         # `option`).
-        m.meshing.flexible_transfinite=!iszero(OPTIONS["Mesh.FlexibleTransfinite"])
-        m.meshing.lc_factor=OPTIONS["Mesh.MeshSizeFactor"]
-        m.meshing.recombine_all=!iszero(OPTIONS["Mesh.RecombineAll"])
-        m.meshing.recombine_algo=Int(OPTIONS["Mesh.RecombinationAlgorithm"])
-        m.meshing.transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"])
-        m.meshing.lc_extend_from_boundary=Int(
-            OPTIONS["Mesh.MeshSizeExtendFromBoundary"])
-        m.meshing.order=order
+        _apply_generation_meshing_options!(m,_generation_meshing_options(order))
         size_field=_session_size_field_locked(m)
         extrude_scope=Model._extrude_nonew_scope(
             m,caller;size_field=size_field,_working_model=true)

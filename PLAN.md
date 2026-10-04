@@ -818,8 +818,9 @@ their HWall variants, with signed orientation and representability gates.
 `Mesh.FlexibleTransfinite` scales declared transfinite counts by the
 `Mesh.CharacteristicLengthFactor`/`Mesh.MeshSizeFactor` divisor (a single
 upstream `lcFactor` under two names), applies the recombined-boundary
-odd-count rule keyed on `Mesh.RecombinationAlgorithm`, `Mesh.RecombineAll`,
-and adjacent recombine-flagged faces, and clamps the truncated count to the
+odd-count rule when the integrated density exceeds 0.75, keyed on
+`Mesh.RecombinationAlgorithm`, `Mesh.RecombineAll`, and adjacent recombine-flagged
+faces, and clamps the truncated count to the
 endpoint-only curve Gmsh emits below two nodes. Three-sided
 and four-sided planar transfinite
 patches implement Gmsh's specific triangular and average-chord Coons interpolation
@@ -1072,6 +1073,19 @@ bounds-checked package gates pass 591,635 assertions; new and old resource
 regressions and the full strict Gmsh differential pass on unchanged 422 inputs.
 Actual P1 hex, pyramid, and prism Jacobian checks cover the whole reference
 cell; positive tetrahedral partition volumes alone do not certify these maps.
+The bounded two-quadrangle strip retains six actual boundary source nodes and
+opposite native two-/three-node Line chains. A packed nine-state joined cap
+relation selects both macro templates with one conforming swept shared face.
+Free laterals retain `6(N+1)` primary nodes and at most `12N` cells. Recombined
+laterals retain `2(N-1)` Hex8 and introduce exactly two representable terminal
+centroids with four Tet4 and ten Pyr5 cells. Direct indexed output and actual
+variable-width curve projection preserve source/cap and lower-dimensional
+carriers. Independent saved native P1/P2 maps include warped Prism6 and Pyr5
+faces. Actual P2 support graphs contain `30N+15` or `30N+31` nodes respectively.
+Final normal bounds-checked package gates pass 641,183 assertions on both
+supported runtimes; all six resource regressions, strict native replay and
+affected API/curve differentials pass on unchanged 429 frozen inputs.
+Larger source grids and neighboring-region propagation remain unfinished.
 AddVerts also certifies actual retained factory cells. Newly constructed API
 full-P2 maps pass complete reference-domain checks for all seven standard
 families before publication, including the Pyramid14 rational map. Legacy
@@ -1097,7 +1111,10 @@ cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
 sets and invariant checks instead of one accidental process result. The existing
 precise blockers remain on these unfinished categories.
 
-Continue the grid phase with the two-quadrangle strip. Extend the category and
+Continue the grid phase with the bounded three-Quad source strip: eight actual
+boundary vertices, native four-/two-node chains, a coupled 27-state cap relation,
+and three strictly representable terminal means under recombined laterals.
+Preserve both simultaneous shared-face choices. Extend the category and
 joined face-state propagation
 using actual source incidence, one column matrix, complete source-complex and
 stored-column certificates, and the existing whole-cell map checks. General

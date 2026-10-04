@@ -450,7 +450,9 @@ end
             @test _API01.mesh.get_node(slave)[1]==_API01.mesh.get_node(leader)[1]+[0.,2.,0]
         end
         _,master_xyz,_=_API01.mesh.get_nodes(1,1,true)
-        @test sort(master_xyz[1:3:end])≈[0.,1/15,3/15,7/15,1.] atol=3e-12
+        # Saved Gmsh 4.15.2 master samples from this periodic native Line.
+        @test sort(master_xyz[1:3:end])≈[0.,.06666666781522945,
+            .19999999863373244,.46666666554782726,1.] atol=3e-12
         before=_api01_snapshot()
         _API01.mesh.generate(0)
         @test _api01_snapshot()==before
@@ -533,14 +535,16 @@ end
     end
 end
 
-@testset "Analytic native curve grading agrees with closed forms" begin
-    beta=1.2
-    amplitude=atanh(inv(beta))
-    beta_positions=[beta*(tanh(amplitude)-tanh((1-u)*amplitude)) for u in (0:6)./6]
-    cases=(("Progression",2.,[0.,1/31,3/31,7/31,15/31,1.]),
-           ("Bump",2.,[0.,(1-inv(sqrt(3)))/2,(sqrt(3)-1)/2,.5,
-                       (3-sqrt(3))/2,(1+inv(sqrt(3)))/2,1.]),
-           ("Beta",beta,beta_positions))
+@testset "Native Line grading retains Gmsh density-integration samples" begin
+    # Gmsh 4.15.2 samples native Lines by integrating F_Transfinite and
+    # inverting its sampled density primitive. These saved public getNodes
+    # coordinates differ from the separate analytic parameter helper's laws.
+    cases=(("Progression",2.,[0.,.03225806585200275,.09677419010543135,
+                              .2258064432066724,.4838709572937826,1.]),
+           ("Bump",2.,[0.,.2113246604743475,.3660253944175726,
+                       .4999999999989506,.6339746055809568,.788675339524792,1.]),
+           ("Beta",1.2,[0.,.0865292929320693,.2036267615379391,
+                        .3559899524133273,.544421476246288,.7633519289437464,1.]))
     for (law,coefficient,expected) in cases
         _api01_begin()
         try
@@ -548,7 +552,7 @@ end
             _API01.mesh.set_transfinite_curve(1,length(expected),law,coefficient)
             _API01.mesh.generate(1)
             _,xyz,_=_API01.mesh.get_nodes(1,1,true)
-            @test sort(xyz[1:3:end])≈expected atol=8eps(Float64) rtol=8eps(Float64)
+            @test sort(xyz[1:3:end])≈expected atol=2e-11 rtol=0
         finally
             _API01.finalize()
         end

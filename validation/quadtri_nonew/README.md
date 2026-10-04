@@ -276,3 +276,68 @@ a deliberately boxed captured local in an actual lowered positive control.
 Production and helper inputs are hashed before and after the run. The terminal
 `QUAD_PATCH_RESOURCE_OK` marker follows the assertions; documenting these
 commands does not establish final resource or full-validation success.
+
+Run the separate quad-strip resource gate with normal compilation and bounds
+checks on both runtimes; it needs no Gmsh installation or binding:
+
+```sh
+/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/quad_strip_resources.jl
+```
+
+The strip gate produces 24 path/policy/scale rows: standalone volume, GEO,
+classified projection and public API generation, with free and recombined
+laterals at 1,000, 2,000 and 4,000 intervals. Warmed allocation measurements
+cover construction only; extraction and the independent audit run afterward.
+Constructor copies and projection or merge work performed during construction
+remain counted. The audit uses the six actual source columns, independently
+locates the two terminal centroids for recombined laterals, and certifies the
+whole cell maps, bilinear quadrangle boundary flux, per-macro accounting and
+opposite typed internal faces. A terminal centroid cell need not span both
+slab planes; its actual extent must remain inside its assigned terminal macro.
+
+Every doubling retains `allocated_next <= 2.15 * allocated_previous + 65536`.
+The lowered-code check recognizes `GlobalRef(Core, :Box)` and includes an
+actual boxed-local positive control. It also scans generated keyword bodies,
+including optional positional wrappers, and verifies a boxed keyword control.
+Input hashes must remain unchanged.
+These reproducible commands describe the gate. Final strip resource and full
+release results are recorded in the repository's `STATUS.md`.
+
+The quad-strip replay reads sixteen captured Gmsh 4.15.2 P1/P2 products from
+`test/artifacts/quadtri_nonew_quad_strip_oracle.toml`, without remeshing them.
+Eight unit XY cases cover one or three uniform intervals, both normal signs
+and both lateral policies. Eight independent variants add normalized graded
+layers, rounded trapezoids, source Progression 4, YZ/XZ normal directions,
+reversed Curve definitions, sparse tags and opposite transfinite pins. Exact
+input hashes, raw classified lower/volume cells, coordinate and parameter bits,
+primary remaps, interpolation supports, computed UV queries and independent
+whole-reference-map certificates remain in the artifact. The saved actual
+Progression samples and the unchanged absolute `2e-11` geometry tolerance are
+authoritative. `QUADTRI_NONEW_CASE=quad_strip` selects this sixteen-case replay.
+
+The source has six actual nodes and two Quad4 cells with one shared edge.
+Free products use only the `6(N+1)` source columns. Recombined products add
+exactly two Volume-owned terminal centroids and contain `2(N-1)` Hex8,
+four Tet4 and ten Pyramid5 cells. Saved free family/connectivity choices are
+pointer-dependent evidence, rather than native template or tag pins. Both
+products must preserve actual source and cap states, all typed opposite shared
+faces and exact per-macro slab volumes. A general Prism6 is integrated from
+its actual reference map, including warped bilinear faces; a fixed flat
+tetrahedral partition is not substituted for that map.
+
+For N intervals the full P2 graph has `30N+15` nodes with free laterals and
+`30N+31` with recombined laterals. Point, Curve and Surface ownership counts
+are `8`, `8N+12` and `16N-2`; Volume counts are `6N-3` and `6N+13` respectively.
+Each cap has three owned nodes and fifteen closure nodes. A lateral over a
+three-node source Curve chain has `6N-3` owned nodes and `10N+5` closure nodes;
+a two-node chain has `2N-1` and `6N+3`. Native interpolation nodes are checked
+against the actual projected P1 carrier identities, with shared support
+conformity, positive public Jacobian quadrature and the P2/P1 roundtrip.
+
+The eight recombined captures contain 126 surface nodes with empty stored UVs.
+Their independent computed inverses remain valid. Native complete computed UV
+queries must reevaluate the actual coordinates; separate strip counters record
+this stored-parameter provenance difference. The original 114 cases, their
+serializers and earlier native CRC records remain unchanged. The new replay and
+resource commands do not claim completed final release gates.

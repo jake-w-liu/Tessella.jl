@@ -26,6 +26,66 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Current increment
 
+The bounded two-quadrangle `QuadTriNoNewVerts` strip is implemented. Its
+recombined native transfinite source has six actual boundary nodes, two convex
+Quad4 cells, one shared edge and opposite two-/three-node native Line chains.
+The actual signed source complex and strictly ordered stored column planes
+certify an exact axis-normal translation in either direction, including
+normalized graded layers and rounded source samples.
+
+Free laterals use a packed nine-state joined cap relation over the unchanged
+315 corner templates, emit at most `12N` cells and retain `6(N+1)` primary
+nodes. Actual shared-face orientation joins the two macro choices. Recombined
+laterals retain `2(N-1)` Hex8 cells and add exactly two actual terminal
+centroids, four Tet4 and ten Pyr5 cells. Both centroids must be representable
+strict interior points of their actual stored macros. The seven-cell fan is
+separate from the immutable corner-template records.
+
+One completed plan supplies direct indexed volume, source/cap/lateral parts,
+actual variable-width curve chains and classified projection. Actual typed
+primary supports produce `30N+15` P2 nodes for free laterals and `30N+31` for
+recombined laterals. Whole reference-map certificates and opposite typed
+internal faces remain mandatory; warped Prism6 and Pyramid5 faces use their
+actual interpolation maps rather than a flat diagonal proxy.
+
+Native nonuniform straight Line sampling now follows the existing bounded
+`F_Transfinite` density primitive and numerical inversion. The old analytic
+shortcut missed saved Progression 4 sources by up to `8.60e-9`; all eight
+corrected variants satisfy the unchanged `2e-11` source-coordinate gate.
+Standalone analytic grading and nonflexible native Circle sampling keep their
+contracts. Flexible Circle density laws use the original declared count for
+HWall transforms and the scaled law count for primitive inversion.
+An extreme decreasing progression now handles the rounded terminal density
+explicitly and still rejects unrepresentable interior partitions.
+
+Focused geometry passes 911 assertions and the new API suite passes 48,105
+on both supported runtimes. Final normal bounds-checked package gates pass
+641,183/641,183 assertions on Julia 1.12.7 and 1.13.1 in 27m03.5s/21m38.1s.
+All six final allocation gates and the strict Gmsh replay pass with all 429
+frozen production/test/validation inputs and staged/runtime blobs unchanged.
+API generation grading pins use saved native Line samples:
+three affected CRC records change and six remain exact. Dimension 0/1 API
+generation now applies all seven current meshing options to its existing staged
+model, retaining atomic failures and one deep copy. Recombination count changes
+use the integrated density threshold of 0.75 before placement and closed-endpoint
+omission. Gmsh 4.15.2's former blossom count bump is an identity. Ordinary native
+Line threshold precision now uses the pinned derivative at cached integration
+samples, preserving placement and a single field-callback pass.
+The final API generation differentials pass 9,388 checks on each runtime and
+all nine CRC records match the staged pins and each other. All 112 older NoNew
+CRC rows and both immutable template tables remain unchanged. Complete gate
+times, retained failed runs and freeze provenance are recorded in STATUS.md.
+The broad parity goal remains active. Continue with the bounded three-Quad
+source strip: eight actual boundary nodes, native four-/two-node chains,
+a coupled 27-state cap relation and exactly three terminal centroids under
+recombined laterals. Retained independent design, source/mask/support proofs,
+eight actual primary captures, typed-capacity addendum and integration checklist
+are in the archived strip worktree's ignored test/tmp directory.
+General transformed products, mixed roots, shared regions,
+copied-source chains, collapsed columns and cyclic sweeps remain separate phases.
+
+## Previous increment (`a941938`)
+
 The bounded 2-by-2 `QuadTriNoNewVerts` source patch is implemented and verified.
 Its native recombined TF3 source has nine actual nodes, four
 strictly convex Quad4 cells, eight sampled boundary edges and one existing

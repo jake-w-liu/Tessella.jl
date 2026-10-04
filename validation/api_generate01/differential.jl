@@ -322,8 +322,9 @@ try
         for (law,coefficient,count) in (("Progression",2.,6),("Bump",2.,7),("Beta",1.2,7))
             fixture("graded_$(law)") do name
                 point(1,0.);point(2,1.);line(1,1,2;count,law,coefficient)
-                # Exact analytic grading is compared with upstream adaptive
-                # density integration, bounded by3e-7 on these fixtures.
+                # Native Lines also use the sampled adaptive density primitive.
+                # Keep this historical 3e-7 differential bound; independent
+                # saved-coordinate unit checks enforce 2e-11 on these laws.
                 generate(1,name;coordinate_tolerance=3e-7)
             end
         end

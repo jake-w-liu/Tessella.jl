@@ -33,6 +33,29 @@ function box_control()
     return read
 end
 
+function keyword_box_control(value=1;initial=0)
+    captured=initial+value
+    read=()->captured
+    captured=1
+    return read
+end
+
+function box_methods(method::Method)
+    result=Method[method]
+    if !isempty(Base.kwarg_decl(method))
+        body=Base.bodyfunction(method)
+        body isa Function && append!(result,methods(body))
+    end
+    # Optional positional wrappers can hide their keyword body from bodyfunction.
+    prefix="#"*String(method.name)*"#"
+    for name in names(method.module;all=true)
+        startswith(String(name),prefix) || continue
+        value=getfield(method.module,name)
+        value isa Function && append!(result,methods(value))
+    end
+    return result
+end
+
 # This linear audit uses actual source identities and actual cell coordinates.
 # The small geometry suite separately checks exact rational partition volumes.
 function audit(volume,source,layers,recombined)
@@ -127,6 +150,10 @@ end
 records=Dict{String,Any}[]
 @testset "Two-triangle grid allocation and complete payload" begin
     @test count_boxes(Base.uncompressed_ast(first(methods(box_control))))>0
+    for keyword_control in methods(keyword_box_control)
+        @test count_boxes(Base.uncompressed_ast(keyword_control))==0
+        @test any(method->count_boxes(Base.uncompressed_ast(method))>0,box_methods(keyword_control))
+    end
     for recombined in (false,true)
         previous=Dict{Symbol,Any}()
         for layers in (1000,2000,4000)
@@ -168,14 +195,19 @@ records=Dict{String,Any}[]
         end
     end
     checked=0
+    seen=Set{Method}()
     for name in names(Model;all=true)
         (startswith(String(name),"_extrude_nonew_two_tri") ||
          name in (:_extrude_nonew_face_cycle,:_extrude_nonew_face_orientation,
                   :_extrude_nonew_count_faces!)) || continue
         value=getfield(Model,name);value isa Function || continue
         for method in methods(value)
-            @test count_boxes(Base.uncompressed_ast(method))==0
-            checked+=1
+            for actual in box_methods(method)
+                actual in seen && continue
+                push!(seen,actual)
+                @test count_boxes(Base.uncompressed_ast(actual))==0
+                checked+=1
+            end
         end
     end
     println("TWO_TRI_RESOURCE_BOX_METHODS=",checked)

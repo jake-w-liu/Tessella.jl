@@ -4,15 +4,15 @@
 # Digest includes coordinate bits, oriented typed connectivity, owners, physical
 # names, public node/element tags, source parameters, and periodic relations.
 # Identical on normal Julia 1.12.7 and 1.13.1, --check-bounds=yes.
-# Graded fixtures pin the native analytic law; their upstream adaptive density
-# integration comparison uses the documented 3e-7 bound in the differential.
+# Graded fixtures pin native Line density-integration samples, independently
+# checked against Gmsh 4.15.2 coordinates at 2e-11 in the API unit tests.
 # name<TAB>nodes<TAB>blocks<TAB>cells<TAB>max_node<TAB>max_element<TAB>sha256
 fresh_generation0	0	0	0	0	0	c752c58c84df5782d142a8b052531c163087a4941ee9d9ad80d19eed3297ffbb
 physical_independent_curves	7	2	9	8	9	ed685f8b77c3db9ea81cb81adf83bd5f6de966670aeaf6047104151ab120a9bf
 raw_coincident_point_vertices	2	1	1	902	1	4adfc56ab975dd3145af790ad6d07579d51ad09719af384f1eafcd47bf6aab82
 raw_coincident_disconnected_chains	6	1	4	900	400	4d375c1f7276fdb883d7edab7d3198cabaf48fa36ccc0e1d8f86d91dbfa3de1f
 native_sparse_onlyempty_quadratic	5	2	4	35	206	7ebfb2aa825c9d1674bce5f8c3eedfc8507eb3d721fbdd1e5bb33d97cc743bdc
-graded_progression	6	2	7	6	7	6d13bfd2625edfd996bde018b5ea2ba85c9a490f613e93344a602f46666e4cae
-graded_bump	7	2	8	7	8	08dd28311cd661dddfe776f126348359a2ebcc4aeb3a7aff13edaebe093fa094
-graded_beta	7	2	8	7	8	42fdc41c5e3ff0fe49464178e414c840363486d5acf897e24d80707d35831ab8
+graded_progression	6	2	7	6	7	d2acd8101d6b8e9fb86640eaf74c591df6d636068dc6c02c3720abd49d27e44d
+graded_bump	7	2	8	7	8	70e534fa158da9afac3ebe0b520b2ac477e202745a56bdaa4209466366ccedee
+graded_beta	7	2	8	7	8	1e10a19a5f9399cb26046d4b96f564afc3f45c731b2ca8de958e1dac1be8572c
 periodic_full_quadratic	10	2	8	10	12	4d756f64046ad3745a6ae40381639a4c35f461f3f29d4ee9b7f3460009bb0686

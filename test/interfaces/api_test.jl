@@ -1086,3 +1086,114 @@ end
         _API.finalize()
     end
 end
+
+@testset "API generation 0/1 consumes staged meshing options" begin
+    # Gmsh 4.15.2 model.mesh.generate(1) on a unit rectangle. Flexible
+    # sampling uses the divided density count, then the selected recombination
+    # algorithm can add an odd output node; Beta below the mass threshold keeps six nodes.
+    progression6=[0.,.03225806585200275,.09677419010543135,
+        .2258064432066724,.4838709572937826,1.]
+    progression7=[0.,.026881721064744665,.07526881325362779,
+        .16129031265135113,.3118279414865123,.5698924592368471,1.]
+    cases=(("Progression",2.,true,:face,0,progression6),
+        ("Progression",2.,true,:face,1,progression7),
+        ("Progression",2.,true,:all,0,progression6),
+        ("Progression",2.,true,:all,1,progression7),
+        ("Beta",.5,true,:face,0,collect(0.:.2:1.)),
+        ("Beta",.5,true,:face,1,collect(0.:.2:1.)),
+        ("Progression",1.,false,:none,1,collect(range(0.,1.;length=12))),
+        ("Progression",1.,true,:none,1,collect(0.:.2:1.)))
+    for (index,(law,coefficient,flexible,recombine,algorithm,expected)) in enumerate(cases)
+        _API.initialize()
+        try
+            for (tag,x,y) in ((1,0.,0.),(2,1.,0.),(3,1.,1.),(4,0.,1.))
+                _API.model.add_point(x,y,0.;tag,meshSize=1.)
+            end
+            for (tag,a,b) in ((1,1,2),(2,2,3),(3,3,4),(4,4,1))
+                _API.model.add_line(a,b;tag)
+            end
+            _API.model.add_curve_loop([1,2,3,4];tag=1)
+            _API.model.add_plane_surface([1];tag=1)
+            recombine===:face && _API.mesh.set_recombine(2,1)
+            _API.mesh.set_transfinite_curve(1,12,law,coefficient)
+            for curve in 2:4;_API.mesh.set_transfinite_curve(curve,3);end
+            _API.option("Mesh.FlexibleTransfinite",flexible ? 1 : 0)
+            _API.option(isodd(index) ? "Mesh.CharacteristicLengthFactor" :
+                "Mesh.MeshSizeFactor",2.)
+            _API.option("Mesh.RecombineAll",recombine===:all ? 1 : 0)
+            _API.option("Mesh.RecombinationAlgorithm",algorithm)
+            _API.mesh.generate(1)
+            tags,xyz,_=_API.mesh.get_nodes(1,1,true)
+            owned,_,parameters=_API.mesh.get_nodes(1,1,false)
+            @test length(tags)==length(expected)
+            @test sort(xyz[1:3:end])≈expected atol=2e-11 rtol=0
+            @test length(owned)==length(expected)-2
+            @test sort(parameters)≈expected[2:end-1] atol=2e-11 rtol=0
+            @test length(_API.mesh.get_elements_by_type(1,1)[1])==length(expected)-1
+            attributes=_API.CURRENT[].meshing
+            @test attributes.flexible_transfinite==flexible
+            @test attributes.lc_factor==2.
+            @test attributes.recombine_all==(recombine===:all)
+            @test attributes.recombine_algo==algorithm
+        finally
+            _API.finalize()
+        end
+    end
+
+    _API.initialize()
+    try
+        _API.model.add_point(0.,0,0;tag=1)
+        _API.model.add_point(1.,0,0;tag=2)
+        _API.model.add_line(1,2;tag=1)
+        _API.mesh.set_transfinite_curve(1,3)
+        _API.mesh.generate(1)
+        before=(_API.mesh.get_nodes(),_API.mesh.get_elements())
+        _API.option("Mesh.FlexibleTransfinite",1)
+        _API.option("Mesh.MeshSizeFactor",3.)
+        _API.option("Mesh.RecombineAll",1)
+        _API.option("Mesh.RecombinationAlgorithm",0)
+        _API.option("Mesh.TransfiniteTri",1)
+        _API.option("Mesh.MeshSizeExtendFromBoundary",2)
+        _API.mesh.generate(0)
+        @test (_API.mesh.get_nodes(),_API.mesh.get_elements())==before
+        attributes=_API.CURRENT[].meshing
+        @test attributes.flexible_transfinite
+        @test attributes.lc_factor==3.
+        @test attributes.recombine_all
+        @test attributes.recombine_algo==0
+        @test attributes.transfinite_tri==1
+        @test attributes.lc_extend_from_boundary==2
+    finally
+        _API.finalize()
+    end
+
+    _API.initialize()
+    try
+        _API.model.add_point(1e16,0,0;tag=1)
+        _API.model.add_point(1e16+2,0,0;tag=2)
+        _API.model.add_line(1,2;tag=1)
+        _API.mesh.set_transfinite_curve(1,2)
+        callback=(dim,tag,x,y,z,lc)->lc
+        _API.mesh.set_size_callback(callback)
+        _API.mesh.generate(1)
+        _API.option("Mesh.FlexibleTransfinite",1)
+        _API.option("Mesh.CharacteristicLengthFactor",2.)
+        _API.option("Mesh.RecombineAll",1)
+        _API.option("Mesh.RecombinationAlgorithm",0)
+        _API.option("Mesh.ElementOrder",2)
+        model=_API.CURRENT[];cache=_API.LAST_MESH[];class=_API.LAST_MESH_CLASS[]
+        model_before=repr(model)
+        payload=(_API.mesh.get_nodes(),_API.mesh.get_elements())
+        counters=(_API.NODE_TAG_MAX[],_API.ELEMENT_TAG_MAX[])
+        options=copy(_API.OPTIONS)
+        @test_throws ArgumentError _API.mesh.generate(1)
+        @test _API.CURRENT[]===model && repr(model)==model_before
+        @test _API.LAST_MESH[]===cache && _API.LAST_MESH_CLASS[]===class
+        @test (_API.mesh.get_nodes(),_API.mesh.get_elements())==payload
+        @test (_API.NODE_TAG_MAX[],_API.ELEMENT_TAG_MAX[])==counters
+        @test _API.OPTIONS==options
+        @test model.meshing.size_callback===callback
+    finally
+        _API.finalize()
+    end
+end

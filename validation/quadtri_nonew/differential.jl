@@ -16,6 +16,8 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_two_tri_cer
 const QTT=QuadTriNoNewTwoTriCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_quad_patch_certificates.jl"))
 const QTP=QuadTriNoNewQuadPatchCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_quad_strip_certificates.jl"))
+const QTS=QuadTriNoNewQuadStripCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -596,6 +598,267 @@ function quad_patch_saved_case(record;oracle_only=false)
     return empty_parameters
 end
 
+# Strip-specific exact integration uses the actual reference map. A warped
+# bilinear Prism6 face cannot be replaced by an arbitrary flat tetra split.
+const STRIP_Q=Rational{BigInt}
+const STRIP_HEX_SIGNS=((0,0,0),(1,0,0),(1,1,0),(0,1,0),
+                       (0,0,1),(1,0,1),(1,1,1),(0,1,1))
+strip_det(a,b,c)=a[1]*(b[2]*c[3]-b[3]*c[2])-a[2]*(b[1]*c[3]-b[3]*c[1])+a[3]*(b[1]*c[2]-b[2]*c[1])
+strip_sub(a,b)=ntuple(i->a[i]-b[i],3)
+strip_tet(a,b,c,d)=strip_det(strip_sub(b,a),strip_sub(c,a),strip_sub(d,a))
+
+function strip_reference_volume(msh,points)
+    v=Tuple(ntuple(i->STRIP_Q(p[i]),3) for p in points)
+    msh==4 && return strip_tet(v...)/6
+    if msh==7
+        return sum(strip_tet(v[k],v[mod1(k+1,4)],v[mod1(k-1,4)],v[5]) for k in 1:4)/12
+    elseif msh==6
+        a=strip_sub(v[2],v[1]);b=strip_sub(v[3],v[1])
+        A=strip_sub(strip_sub(v[5],v[4]),a);B=strip_sub(strip_sub(v[6],v[4]),b)
+        total=zero(STRIP_Q)
+        for k in 1:3
+            c=strip_sub(v[k+3],v[k])
+            q0=strip_det(a,b,c)
+            q1=strip_det(A,b,c)+strip_det(a,B,c)
+            q2=strip_det(A,B,c)
+            q0>0 && q0+q1+q2>0 || error("strip nonpositive Prism6 endpoint map")
+            if q2>0 && -2q2<q1<0
+                4q0*q2-q1*q1>0 || error("strip nonpositive Prism6 interior map")
+            end
+            total+=(q0+q1/2+q2/3)/6
+        end
+        return total
+    elseif msh==5
+        # det(J) has degree at most2 per unit-cube axis: exact tensor Simpson.
+        samples=((STRIP_Q(0),STRIP_Q(1//6)),(STRIP_Q(1//2),STRIP_Q(2//3)),(STRIP_Q(1),STRIP_Q(1//6)))
+        total=zero(STRIP_Q)
+        for (u,wu) in samples,(s,ws) in samples,(w,ww) in samples
+            x=(u,s,w)
+            jac=ntuple(3) do axis
+                ntuple(3) do d
+                    sum((v[k][d]-v[1][d])*(STRIP_HEX_SIGNS[k][axis]==0 ? -1 : 1)*
+                        prod(STRIP_HEX_SIGNS[k][j]==0 ? 1-x[j] : x[j] for j in 1:3 if j!=axis) for k in 1:8)
+                end
+            end
+            total+=wu*ws*ww*strip_det(jac...)
+        end
+        return total
+    end
+    error("strip unsupported P1 reference volume family $msh")
+end
+
+function strip_integrated_volume(mesh)
+    return sum(strip_reference_volume(block.msh,Tuple(QTNN.point(mesh,n) for n in cell))
+               for block in QTS.blocks(mesh) if Tessella.Elements.msh_dimension(block.msh)==3
+               for cell in eachcol(block.nodes))
+end
+
+function strip_saved_fixture(record)
+    phase=record["p1"];source=only(filter(e->e["dim"]==2 && e["tag"]==record["source_tag"],phase["entities"]))
+    nodes=Dict(p["tag"]=>p for p in phase["nodes"])
+    successors=Dict{Int,Int}()
+    for (dimension,signed) in source["oriented_boundary"]
+        dimension==1 || error("strip source CAD boundary dimension")
+        curve=only(filter(e->e["dim"]==1 && e["tag"]==abs(signed),phase["entities"]))
+        cells=curve["cells"];a=first(cells)["nodes"][1];b=last(cells)["nodes"][2]
+        signed<0 && ((a,b)=(b,a))
+        haskey(successors,a) && error("strip repeated CAD corner successor")
+        successors[a]=b
+    end
+    length(successors)==4 && Set(keys(successors))==Set(values(successors)) || error("strip CAD corner cycle")
+    first_corner=argmin(n->nodes[n]["owner"][2],collect(keys(successors)))
+    corner_ids=ntuple(4) do k
+        node=first_corner
+        for _ in 2:k;node=successors[node];end
+        node
+    end
+    successors[last(corner_ids)]==first_corner && length(unique(corner_ids))==4 || error("strip CAD corner cycle closure")
+    corners=Tuple(Tuple(Float64.(nodes[n]["coordinates"])) for n in corner_ids)
+    axis=Int(record["normal_axis"]);other=Tuple(i for i in 1:3 if i!=axis);axes=(other...,axis)
+    winding=sign((corners[2][other[1]]-corners[1][other[1]])*(corners[3][other[2]]-corners[1][other[2]])-
+                 (corners[2][other[2]]-corners[1][other[2]])*(corners[3][other[1]]-corners[1][other[1]]))
+    plane=record["plane"]=="XZ" ? :ZX : Symbol(record["plane"])
+    f=QTS.fixture(record["name"];plane,shape=record["geometry_shape"]=="unit_square" ? :unit : :rounded,
+                  height=record["translation_height"],laterals=record["recombine_laterals"],layers=:one)
+    return merge(f,(;source=record["input_geo"],axes,corners,winding=Int(winding),
+                    levels=Float64.(record["intended_levels"]),height=Float64(record["translation_height"]),
+                    surface=Int(record["source_tag"]),curve_tags=Tuple(Int.(record["source_curve_tags"])),
+                    point_tags=Tuple(Int(nodes[n]["owner"][2]) for n in corner_ids)))
+end
+
+function strip_saved_reference_integrity(record)
+    for phase in ("p1","p2")
+        certificates=record["reference_map_certificates"][phase]
+        cells=[(e["dim"],e["tag"],c["tag"],c["type"]) for e in record[phase]["entities"] if e["dim"]>0 for c in e["cells"]]
+        Set((r["entity"][1],r["entity"][2],r["cell"],r["type"]) for r in certificates)==Set(cells) ||
+            error("strip saved whole-reference certificate coverage")
+        for r in certificates
+            pieces=split(r["minimum_exact"],'/')
+            q=length(pieces)==1 ? STRIP_Q(parse(BigInt,only(pieces))) : parse(BigInt,pieces[1])//parse(BigInt,pieces[2])
+            q>0 && Float64(q)==r["minimum"] || error("strip saved whole-reference bound")
+        end
+    end
+    for entry in record["p2_macro_reference_integration"]
+        entry["exact_actual_p2_map_volume"]==entry["exact_actual_p2_boundary_flux"] ||
+            error("strip actual P2 macro map/boundary integration")
+    end
+    return nothing
+end
+
+function strip_fraction(text)
+    parts=split(text,'/')
+    return length(parts)==1 ? STRIP_Q(parse(BigInt,only(parts))) :
+        parse(BigInt,parts[1])//parse(BigInt,parts[2])
+end
+
+function strip_native_supports(api,linear,linear_data,projected,entity,tolerance)
+    types,_,connections=linear_data
+    actual_types,_,actual_connections=api.mesh.get_elements(3,entity)
+    targets=Dict(4=>11,5=>12,6=>13,7=>14);inverse=Dict{UInt64,Int}()
+    length(types)==length(actual_types) || error("strip native P2 family change")
+    for (msh,nodes) in zip(types,connections)
+        target=targets[Int(msh)];slot=findfirst(==(target),actual_types)
+        slot===nothing && error("strip native P2 family missing")
+        before=reshape(nodes,msh_spec(msh).nnodes,:)
+        after=reshape(actual_connections[slot],msh_spec(target).nnodes,:)
+        size(before,2)==size(after,2) || error("strip native P2 cell count change")
+        for column in axes(before,2),row in axes(before,1)
+            current=after[row,column];original=Int(before[row,column])
+            get(inverse,current,original)==original || error("strip native primary identity conflict")
+            inverse[current]=original
+        end
+    end
+    length(inverse)==nnodes(linear) && Set(values(inverse))==Set(1:nnodes(linear)) ||
+        error("strip native primary identity is not bijective")
+    projected.coords==linear.coords || error("strip actual projection changed primary IDs")
+    data=projected.entity_data
+    carriers=quad_patch_actual_carriers((Int(block.msh),Tuple(cell),
+        (Tessella.Elements.msh_dimension(block.msh),Int(data.block_entities[b][column])))
+        for (b,block) in enumerate(projected.blocks) for (column,cell) in enumerate(eachcol(block.nodes)))
+    supports=Dict{UInt64,Tuple}()
+    function add_support(node,primary)
+        support=Tuple(sort!([inverse[id] for id in primary]))
+        get(supports,node,support)==support || error("strip native shared support identity")
+        supports[node]=support
+    end
+    for msh in actual_types
+        for edge in eachcol(reshape(api.mesh.get_element_edge_nodes(msh,entity,false),3,:))
+            add_support(edge[3],edge[1:2])
+        end
+        if msh in (12,13,14)
+            for face in eachcol(reshape(api.mesh.get_element_face_nodes(msh,4,entity,false),9,:))
+                add_support(face[9],face[1:4])
+            end
+        end
+        if msh==12
+            slot=only(findall(==(msh),actual_types))
+            for cell in eachcol(reshape(actual_connections[slot],27,:))
+                add_support(cell[27],cell[1:8])
+            end
+        end
+    end
+    Set(keys(supports))==setdiff(Set(api.mesh.get_nodes()[1]),Set(keys(inverse))) ||
+        error("strip native interpolation support coverage")
+    for (node,support) in supports
+        p,_,dim,owner=api.mesh.get_node(node)
+        (dim,owner)==carriers[support] || error("strip native P2 owner differs from actual P1 carrier")
+        expected=[sum(linear.coords[i,id] for id in support)/length(support) for i in 1:3]
+        maximum(abs.(p.-expected))<=tolerance || error("strip native P2 support geometry")
+    end
+    return length(supports)
+end
+
+function strip_saved_case(record;oracle_only=false)
+    tolerance=2e-11;n=Int(record["intervals"]);laterals=record["recombine_laterals"]
+    f=strip_saved_fixture(record)
+    saved_nodes=quad_patch_saved_integrity(record,tolerance)
+    strip_saved_reference_integrity(record)
+    owners=[count(node->node["owner"][1]==dim,values(saved_nodes)) for dim in 0:3]
+    owners==[8,8n+12,16n-2,6n+(laterals ? 13 : -3)] || error("strip saved owner dimension counts")
+    source,_=two_tri_saved_mesh(record,"p1",2,record["source_tag"])
+    linear,index=two_tri_saved_mesh(record,"p1",3,record["volume_tag"])
+    quadratic,_=two_tri_saved_mesh(record,"p2",3,record["volume_tag"])
+    saved=QTS.certify(linear,f,source;oracle=true)
+    two_tri_saved_boundary(record,index)==Set(keys(saved.boundary)) || error("strip saved actual typed exterior")
+    exact_saved_volume=strip_integrated_volume(linear)
+    exact_saved_volume==saved.total && exact_saved_volume==
+        sum(strip_fraction(row["exact_partition_volume"]) for row in record["strip_macro_certificate"]["macro_cells"]) ||
+        error("strip saved actual reference integration differs from macro partition")
+    QTNN.certify_quadratic(quadratic,linear)
+    nnodes(quadratic)==30n+(laterals ? 31 : 15) || error("strip saved P2 node count")
+    empty_parameters=count(node->node["owner"][1]==2 && isempty(node["stored_parameters"]),values(saved_nodes))
+    empty_parameters==(laterals ? 6n : 0)==record["empty_stored_surface_uv_nodes"] ||
+        error("strip saved stored UV provenance count")
+    for (lateral,width) in zip(record["lateral_tags"],record["lateral_chain_widths"])
+        entity=only(e for e in record["p2"]["entities"] if e["dim"]==2 && e["tag"]==lateral)
+        length(entity["owned"]["tags"])==(width==3 ? 6n-3 : 2n-1) &&
+            length(entity["closure"]["tags"])==(width==3 ? 10n+5 : 6n+3) ||
+            error("strip saved lateral owner/closure counts")
+    end
+    if !oracle_only
+        execution=QTS.execute(f.source)
+        volume=geo_entity_mesh(execution,3,record["volume_tag"])
+        actual_source=geo_entity_mesh(execution,2,record["source_tag"])
+        quad_patch_source_match(actual_source,source,tolerance)
+        native=QTS.certify(volume,f,actual_source)
+        strip_integrated_volume(volume)==native.total || error("strip native actual reference integration")
+        QTNN.surface_faces(execution.mesh_parts,volume)==Set(keys(native.boundary)) || error("strip native finalized typed exterior")
+        nnodes(volume)==nnodes(linear) || error("strip native primary node count")
+        # Free finalized masks can choose different valid existing-node factories.
+        # Every primary column and actual terminal centroid must still agree.
+        for p in eachcol(volume.coords)
+            count(q->maximum(abs.(p.-q))<=tolerance,eachcol(linear.coords))==1 || error("strip actual primary/centroid geometry")
+        end
+        mktempdir() do directory
+            path=joinpath(directory,"quad_strip_saved.geo");write(path,f.source)
+            native_api(path,api->begin
+                cache=api.mesh.generate(3)
+                first=QTS.public_volume(api,record["volume_tag"])
+                primary_data=api.mesh.get_elements(3,record["volume_tag"])
+                QTNN.typed_signature(first)==QTNN.typed_signature(volume) || error("strip API/GEO actual primary cells")
+                isempty(api.mesh.get_elements(2)[1]) || error("strip API3 lower-cell contract changed")
+                projected=model_to_mixed(api.CURRENT[],cache,3,record["volume_tag"])
+                api.mesh.set_order(2)
+                actual=QTS.public_volume(api,record["volume_tag"])
+                QTNN.certify_quadratic(actual,first)
+                quadratic_volume_from_jacobians(actual,api.mesh;expected=Float64(native.total))
+                strip_native_supports(api,cache,primary_data,projected,record["volume_tag"],tolerance)==
+                    24n+(laterals ? 23 : 9) || error("strip native P2 support count")
+                native_owners=zeros(Int,4)
+                for node in api.mesh.get_nodes()[1]
+                    p,uv,dim,owner=api.mesh.get_node(node);native_owners[dim+1]+=1
+                    if dim==2
+                        length(uv)==2 && maximum(abs.(api.model.get_value(2,owner,uv).-p))<=tolerance ||
+                            error("strip native computed surface UV")
+                    end
+                end
+                native_owners==owners || error("strip native owner dimension counts")
+                for (lateral,width) in zip(record["lateral_tags"],record["lateral_chain_widths"])
+                    own,_,uv=api.mesh.get_nodes(2,lateral,false,true)
+                    length(own)==(width==3 ? 6n-3 : 2n-1) && length(uv)==2length(own) ||
+                        error("strip native lateral owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,lateral,true,true)
+                    length(closure)==(width==3 ? 10n+5 : 6n+3) && length(uv)==2length(closure) &&
+                        maximum(abs.(api.model.get_value(2,lateral,uv).-coords))<=tolerance ||
+                        error("strip native lateral closure/computed UV")
+                end
+                for cap in (record["source_tag"],record["top_tag"])
+                    own,_,uv=api.mesh.get_nodes(2,cap,false,true)
+                    length(own)==3 && length(uv)==6 || error("strip native cap owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,cap,true,true)
+                    length(closure)==15 && length(uv)==30 &&
+                        maximum(abs.(api.model.get_value(2,cap,uv).-coords))<=tolerance ||
+                        error("strip native cap closure/computed UV")
+                end
+                api.mesh.set_order(1)
+                QTNN.typed_signature(QTS.public_volume(api,record["volume_tag"]))==QTNN.typed_signature(first) ||
+                    error("strip actual P2/P1 roundtrip")
+            end)
+        end
+    end
+    return empty_parameters
+end
+
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -607,6 +870,8 @@ two_tri_cases=Ref(0);two_tri_quadratic_cases=Ref(0);two_tri_parameter_provenance
 two_tri_saved_empty_parameters=Ref(0)
 quad_patch_cases=Ref(0);quad_patch_quadratic_cases=Ref(0);quad_patch_trapezoid_cases=Ref(0)
 quad_patch_parameter_provenance_gaps=Ref(0);quad_patch_empty_parameters=Ref(0)
+quad_strip_cases=Ref(0);quad_strip_quadratic_cases=Ref(0);quad_strip_variant_cases=Ref(0)
+quad_strip_parameter_provenance_gaps=Ref(0);quad_strip_empty_parameters=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -1006,6 +1271,19 @@ try
         record["geometry_shape"]=="trapezoid" && (quad_patch_trapezoid_cases[]+=1)
         println("QUADTRI_NONEW_QUAD_PATCH_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
     end
+    strip_catalog=TOML.parsefile(joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_quad_strip_oracle.toml"))
+    strip_catalog["gmsh_version"]=="4.15.2" && strip_catalog["coordinate_abs_tolerance"]==2e-11 &&
+        length(strip_catalog["fixtures"])==16 || error("quad-strip saved oracle catalog contract")
+    for record in strip_catalog["fixtures"]
+        isempty(selected) || occursin(selected,record["name"]) || continue
+        empty_parameters=strip_saved_case(record;oracle_only)
+        quad_strip_cases[]+=1;quad_strip_quadratic_cases[]+=1
+        quad_strip_empty_parameters[]+=empty_parameters
+        empty_parameters>0 && (quad_strip_parameter_provenance_gaps[]+=1)
+        record["capture_kind"]=="independent_variant" && (quad_strip_variant_cases[]+=1)
+        println("QUADTRI_NONEW_QUAD_STRIP_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
+    end
+    println("QUADTRI_NONEW_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(quad_strip_cases[]) p2_cases=$(quad_strip_quadratic_cases[]) independent_variants=$(quad_strip_variant_cases[]) parameter_provenance_gaps=$(quad_strip_parameter_provenance_gaps[]) empty_stored_uv=$(quad_strip_empty_parameters[])")
     println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) two_tri_saved_cases=$(two_tri_cases[]) two_tri_p2_cases=$(two_tri_quadratic_cases[]) two_tri_parameter_provenance_gaps=$(two_tri_parameter_provenance_gaps[]) two_tri_empty_stored_uv=$(two_tri_saved_empty_parameters[]) quad_patch_saved_cases=$(quad_patch_cases[]) quad_patch_p2_cases=$(quad_patch_quadratic_cases[]) quad_patch_trapezoid_cases=$(quad_patch_trapezoid_cases[]) quad_patch_parameter_provenance_gaps=$(quad_patch_parameter_provenance_gaps[]) quad_patch_empty_stored_uv=$(quad_patch_empty_parameters[]) oracle_only=$oracle_only")
 finally
     gmsh.finalize()

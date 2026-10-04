@@ -33,6 +33,29 @@ function patch_box_control()
     return read
 end
 
+function patch_keyword_box_control(value=1;initial=0)
+    captured=initial+value
+    read=()->captured
+    captured=1
+    return read
+end
+
+function patch_box_methods(method::Method)
+    result=Method[method]
+    if !isempty(Base.kwarg_decl(method))
+        body=Base.bodyfunction(method)
+        body isa Function && append!(result,methods(body))
+    end
+    # Optional positional wrappers can hide their keyword body from bodyfunction.
+    prefix="#"*String(method.name)*"#"
+    for name in names(method.module;all=true)
+        startswith(String(name),prefix) || continue
+        value=getfield(method.module,name)
+        value isa Function && append!(result,methods(value))
+    end
+    return result
+end
+
 # Independent outward-face integration, anchored at an actual cell corner.
 function patch_signed_volume(points,msh)
     anchor=points[1]
@@ -159,6 +182,10 @@ end
 patch_records=Dict{String,Any}[]
 @testset "2-by-2 quadrangle allocation and actual complete product" begin
     @test patch_boxes(Base.uncompressed_ast(first(methods(patch_box_control))))>0
+    for keyword_control in methods(patch_keyword_box_control)
+        @test patch_boxes(Base.uncompressed_ast(keyword_control))==0
+        @test any(method->patch_boxes(Base.uncompressed_ast(method))>0,patch_box_methods(keyword_control))
+    end
     for recombined in (false,true)
         previous=Dict{Symbol,Any}()
         for layers in (1000,2000,4000)
@@ -200,6 +227,7 @@ patch_records=Dict{String,Any}[]
         end
     end
     checked=0
+    seen=Set{Method}()
     for name in names(PatchModel;all=true)
         (startswith(String(name),"_extrude_nonew_quad_patch") ||
          name in (:_extrude_nonew_face_cycle,:_extrude_nonew_face_orientation,
@@ -207,8 +235,12 @@ patch_records=Dict{String,Any}[]
                   :_extrude_nonew_cell_counts,:_extrude_nonew_projection_lookup)) || continue
         value=getfield(PatchModel,name);value isa Function || continue
         for method in methods(value)
-            @test patch_boxes(Base.uncompressed_ast(method))==0
-            checked+=1
+            for actual in patch_box_methods(method)
+                actual in seen && continue
+                push!(seen,actual)
+                @test patch_boxes(Base.uncompressed_ast(actual))==0
+                checked+=1
+            end
         end
     end
     println("QUAD_PATCH_RESOURCE_BOX_METHODS=",checked)
