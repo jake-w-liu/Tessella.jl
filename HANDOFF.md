@@ -26,6 +26,80 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 
 ## Current increment
 
+The isolated `QuadTriNoNewVerts` source category now includes one triangle with
+three distinct boundary vertices. Its true six-corner prism relation has 13
+admissible face patterns. Free laterals choose an existing-corner three-tet
+template; recombined laterals retain one prism per interval. Triangular caps
+need no diagonal state, and this route introduces no centroids or other nodes.
+
+The same operation-owned plan supplies the volume, five boundary surfaces,
+column classification and projection through standalone, GEO and API entry
+points. Whole-domain actual-cell Jacobian certificates and bounded exact hull
+separation cover both source categories. Positive layer groups still end at
+normalized height 1.0. Source grids, mixed roots, collapsed columns, shared
+regions, copied-source chains and cyclic sweeps remain separate implementations.
+Native curved-CAD P2 placement and complete 2-D/3-D public cell/tag lifecycle
+also remain pending. The broad parity goal remains active.
+
+Public three- and four-sided transfinite surfaces now reconcile their emitted
+winding with the signed CAD boundary before applying `Reverse`. Unpinned
+four-sided frames use unsigned edge chaining for the diagonal convention.
+Reordered spherical grids evaluate the original CAD parameter frame and radius.
+Internal transfinite volume grids retain their existing frames. The sweep
+preserves the corrected actual source/cap incidence.
+
+Native ruled surfaces now use their existing inverse evaluator for model and
+node parameter queries, including quadratic prism face centers. API geometry
+queries honor `Geometry.OldRuledSurface`. Native caches retain their existing
+computed-parameter contract; Gmsh can leave new face-center parameters unstored.
+The strict triangle differential counts that provenance difference separately.
+Exact stored-parameter lifecycle parity remains pending with the broader 2-D/3-D
+public cache and allocation provenance work.
+
+Quadratic ownership now follows classified actual primary edges and triangle
+or quadrangle faces rather than endpoint labels. Simplex and native mixed
+refinement inherit the actual child edge, triangle and quadrangle supports;
+sparse tagged caches transfer them through the retained node-tag map. Raw
+shared edges without lower-dimensional carriers keep their existing per-cell
+fallback. The
+`get_nodes(..., include_boundary=true)` includes the quadratic nodes on the
+requested entity's boundary. Support maps use original node identities through
+renumbering, selection, merging and cache adapters; independent coincident
+components remain distinct. This repairs free-lateral Tet10 queries without
+changing their coordinates or cells. The two affected public P2 digests change;
+the remaining 38 triangle records and all 24 quadrangle records are preserved.
+Native straight/planar mixed P2 construction also retains curve and surface carriers
+after safe point compaction, including Hex27 and Prism18 face centers. Ambiguous
+coincident support merges reject before changing the cache or attached records.
+
+Legacy simplex query overlays now publish and evaluate their actual Tri6/Tet10
+geometry for Jacobians, inverse coordinates, location, basis orientations, keys,
+barycenters and edge/face nodes. Replaced linear blocks are absent from exact-type
+queries. `get_nodes_by_element_type` follows Gmsh's family-wide convention and
+returns actual interpolation nodes independently of the requested order.
+Quality queries use actual quadratic derivatives, sampled shape measures and
+subdivided Bernstein determinant/isotropy bounds. Curved triangle `volume` is
+the order-five area rule; tetrahedron `volume` keeps Gmsh's corner-volume
+convention. Lower linear cells, entity/task selection and public tags survive.
+Explicit-order nodal keys retain actual stored nodes while basis counts describe
+the requested order. Nodal metadata omits incomplete requested-basis groups;
+hierarchical metadata retains the submitted length with a `(0, 0)` tail.
+
+Release evidence is recorded in STATUS.md. Both final bounds-checked package
+gates pass 490,276 assertions; focused, differential, artifact and resource
+checks also pass. Continue with the remaining NoNew source-category and
+neighboring-region phases.
+
+The next bounded source-grid contract is a strictly convex four-sided planar
+transfinite source with exactly two conforming Tri3 cells under axis-aligned
+normal translation in either direction.
+Choose their common swept face once for the whole region, then certify the
+actual source complex and stored column product before emitting either cell.
+Both lateral policies and positive normalized graded layers belong to that
+contract. Other grids and general transformed grids retain precise blockers.
+
+## Previous increment (`9406a01`)
+
 `QuadTriNoNewVerts` has its independent first region kernel for one isolated,
 nondegenerate source quadrangle with four boundary vertices. Positive layer
 groups must end at normalized height 1.0. Free laterals use a packed full-hex
@@ -109,7 +183,7 @@ coverage includes 44 oracle samples with separately counted gaps; 24 native
 CRC products remain identical across both Julia versions.
 
 Continue the NoNew source-category and neighboring-region phases: source grids,
-triangular/mixed roots, collapsed columns, shared regions, copied-source chains,
+mixed roots, collapsed columns, shared regions, copied-source chains,
 and cyclic sweeps. Native curved-CAD P2 placement, complete higher-dimensional
 public tag/cell lifecycle, remaining algorithms, fields, formats, and API coverage
 also remain unfinished. The broad parity goal is active.
@@ -280,8 +354,8 @@ Files: `src/geometry/ModelExtrude.jl` (new), `src/geometry/Model.jl`,
 ### Not yet finished (carry-over for the next increments)
 
 - **`QuadTriNoNewVerts` extrusions** — the independent diagonal-selection
-  planner's isolated-source-quad slice is described above. Source grids,
-  triangular/mixed roots, collapsed columns, shared neighbors, and copied-source
+  planner's isolated-source triangle and quadrangle slices are described above.
+  Source grids, mixed roots, collapsed columns, shared neighbors, and copied-source
   chains still require their category and propagation phases.
   AddVerts and its free-lateral recombination modifier are implemented.
 - **Curved CAD mixed order elevation/refinement** — implement curve/surface

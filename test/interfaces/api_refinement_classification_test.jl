@@ -12,14 +12,18 @@ using Tessella
         # The unused first node coincides with a referenced point but has a
         # different identity and owner; it must disappear during compaction.
         mesh=Mesh(scale.*[0. 0 1 0;0 0 0 1;0 0 0 0];
+                  segs=reshape(Int32[2,3],2,1),
                   tris=reshape(Int32[2,3,4],3,1))
         owners=Tuple{Int,Int32}[(0,99),(0,1),(1,2),(2,3)]
-        class=classified(mesh,owners;tris=Int32[3])
+        # Curve2 owns an actual line support; endpoint labels alone cannot
+        # establish the carrier of a quadratic midpoint.
+        class=classified(mesh,owners;segs=Int32[2],tris=Int32[3])
         refined=Tessella.Refine.refine_uniform(mesh)
         result=api._inherit_refined_classification(class,refined,refined)
         @test result.node_entities==Tuple{Int,Int32}[
             (0,1),(1,2),(2,3),(1,2),(2,3),(2,3)]
         @test result.tri_entities==fill(Int32(3),4)
+        @test result.seg_entities==fill(Int32(2),2)
         @test result.mesh===refined
         @test class.node_entities==owners
     end

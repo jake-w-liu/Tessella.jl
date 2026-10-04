@@ -62,6 +62,8 @@ using Tessella
     include("structured/transfinite_test.jl") # validated four-sided planar structured patches
     include("structured/transfinite_curve_test.jl") # straight Progression/Bump/Beta/HWall laws
     include("structured/transfinite_triangle_test.jl") # specific three-sided triangle/quad patches
+    include("geometry/transfinite_triangle_orientation_test.jl") # public CAD-relative triangle winding
+    include("geometry/transfinite_quad_orientation_test.jl") # public four-sided frames and CAD winding
     include("structured/transfinite_quad_test.jl") # recombined four-sided quadrangle patches
     include("structured/transfinite_volume_test.jl") # affine six-face structured volumes
     include("structured/structured_quadtri_test.jl") # warped/folded transition certificates
@@ -77,6 +79,7 @@ using Tessella
     include("geometry/model_spatial_query_test.jl") # analytical bounding boxes
     include("geometry/model_entity_metadata_test.jl") # native type/property/partition metadata
     include("geometry/model_entity_evaluation_test.jl") # native geometry evaluation
+    include("geometry/model_ruled_parametrization_test.jl") # ruled inverse and actual P2 node parameters
     include("geometry/model_entity_state_test.jl") # visibility/color/coordinates/attributes
     include("geometry/geo_geometry_expression_test.jl") # expression-backed geometry execution
     include("geometry/geo_control_flow_test.jl") # If/For/While/Function control flow + conditional operators
@@ -94,9 +97,12 @@ using Tessella
     include("geometry/geo_transfquadtri_test.jl") # boundary-diagonal mixed-volume transitions
     include("geometry/geo_quadtri_extrude_test.jl") # QuadTriAddVerts structured extrusion
     include("geometry/quadtri_nonew_templates_test.jl") # exact full-hex face relation
+    include("geometry/quadtri_nonew_prism_templates_test.jl") # true triangular-prism relation
     include("geometry/quadtri_nonew_jacobian_test.jl") # complete P1 cell map certificates
     include("geometry/quadtri_nonew_nonhex_jacobian_test.jl") # exact pyramid/prism domain checks
+    include("geometry/quadtri_nonew_prism_global_test.jl") # bounded six-corner hull separation
     include("geometry/geo_quadtri_nonew_test.jl") # isolated NoNew source-quad sweeps
+    include("geometry/geo_quadtri_nonew_triangle_test.jl") # isolated triangular-source sweeps
     include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
     include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
@@ -110,10 +116,12 @@ using Tessella
     include("interfaces/api_test.jl") # synchronized session, detached mesh cache
     include("interfaces/api_mixed_cache_test.jl") # native mixed cache ownership and mutations
     include("interfaces/api_p2_certification_test.jl") # full P2 maps and atomic publication
+    include("interfaces/api_p2_boundary_ownership_test.jl") # actual primary support and boundary closure
     include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning
     include("interfaces/api_mixed_refine_test.jl") # native family-preserving mixed refinement
+    include("interfaces/api_mixed_refine_support_test.jl") # inherited actual edge and face carriers
     include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
     include("interfaces/api_record_mutation_test.jl") # atomic sparse/dense tag mutation
     include("interfaces/api_refinement_classification_test.jl") # refinement identity and ownership
@@ -122,6 +130,10 @@ using Tessella
     include("interfaces/api_mesh_entity_topology_test.jl") # cached edge/face topology lifecycle
     include("interfaces/api_mesh_point_location_test.jl") # cached simplex point location
     include("interfaces/api_mesh_jacobian_test.jl") # cached simplex Jacobian maps
+    include("interfaces/api_legacy_p2_jacobian_test.jl") # actual retained quadratic maps
+    include("interfaces/api_legacy_p2_query_test.jl") # published quadratic types and node data
+    include("interfaces/api_legacy_p2_quality_test.jl") # actual quadratic quality definitions
+    include("interfaces/api_legacy_p2_quality_bounds_test.jl") # interior extrema and isotropy bounds
     include("interfaces/api_mesh_quadrature_test.jl") # session-independent reference rules
     include("interfaces/api_mesh_function_spaces_test.jl") # nodal/hierarchical basis-key API
     include("interfaces/api_mesh_element_quality_test.jl") # cached simplex quality queries

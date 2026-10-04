@@ -163,6 +163,105 @@ function add_curved_triangle(arrangement, count;
     return curves, surface
 end
 
+# Public CAD-relative winding is a separate contract from the canonical side
+# frame used by the low-level interpolation and transfinite-volume kernels.
+# Gmsh Generator calls orientMeshGFace after filling, then applies reverseMesh.
+function public_orientation_cases()
+    result=NamedTuple[]
+    for algorithm in (0,1),direction in (-1,1),count in (2,5)
+        push!(result,(;algorithm,direction,count))
+    end
+    for direction in (-1,1)
+        for corners in ((1,2,3),(1,3,2))
+            push!(result,(;direction,corners))
+        end
+        push!(result,(;direction,reverse=true))
+        push!(result,(;direction,recombine=true,count=5))
+        push!(result,(;direction,axis=:xz))
+    end
+    return result
+end
+
+function exact_public_cell_orientation(coordinates,nodes,normal)
+    a,b,c=(Rational{BigInt}.(coordinates[:,node]) for node in nodes[1:3])
+    u=b.-a;v=c.-a
+    cross=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+    return sign(sum(cross[d]*Rational{BigInt}(normal[d]) for d in 1:3))
+end
+
+function check_public_orientation(case)
+    native=Tessella.GeoModel()
+    algorithm=get(case,:algorithm,1);count=get(case,:count,2)
+    corners=collect(Int,get(case,:corners,()))
+    points=get(case,:axis,:xy)===:xy ?
+        ((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)) :
+        ((0.,0.,0.),(1.,0.,0.),(0.,0.,1.))
+    loop=case.direction==1 ? [1,2,3] : [-3,-2,-1]
+    gmsh.clear();gmsh.model.add("public_triangle_orientation")
+    gmsh.option.setNumber("Mesh.TransfiniteTri",algorithm)
+    Tessella.Model.set_transfinite_tri!(native,algorithm)
+    for (tag,point) in enumerate(points)
+        gmsh.model.geo.addPoint(point...,1.,tag)
+        Tessella.Model.add_point!(native,point...;tag,mesh_size=1.)
+    end
+    for (tag,(a,b)) in enumerate(((1,2),(2,3),(3,1)))
+        gmsh.model.geo.addLine(a,b,tag)
+        Tessella.Model.add_line!(native,a,b;tag)
+        gmsh.model.geo.mesh.setTransfiniteCurve(tag,count)
+        Tessella.Model.set_transfinite_curve!(native,tag,count)
+    end
+    gmsh.model.geo.addCurveLoop(loop,1);gmsh.model.geo.addPlaneSurface([1],1)
+    Tessella.Model.add_curve_loop!(native,loop;tag=1)
+    Tessella.Model.add_plane_surface!(native,[1];tag=1)
+    gmsh.model.geo.mesh.setTransfiniteSurface(1,"Left",corners)
+    Tessella.Model.set_transfinite_surface!(native,1,"Left",corners)
+    if get(case,:recombine,false)
+        gmsh.model.geo.mesh.setRecombine(2,1)
+        Tessella.Model.set_recombine!(native,2,1)
+    end
+    gmsh.model.geo.synchronize()
+    if get(case,:reverse,false)
+        gmsh.model.mesh.setReverse(2,1,true)
+        Tessella.Model.set_reverse!(native,2,1,true)
+    end
+    gmsh.model.mesh.generate(2)
+    mesh=Tessella.Model.mesh_model_surface(native,1)
+    normal=get(case,:axis,:xy)===:xy ?
+        (0.,0.,Float64(case.direction)) : (0.,Float64(-case.direction),0.)
+    gmsh.model.getNormal(1,[0.,0.])==collect(normal) || error(
+        "Gmsh public triangle CAD normal differs from the signed analytic plane")
+    Tessella.Model.model_normal(native,1,[0.,0.])==collect(normal) || error(
+        "native public triangle CAD normal differs from the signed analytic plane")
+    expected=get(case,:reverse,false) ? -1 : 1
+    tags,xyz,_=gmsh.model.mesh.getNodes()
+    coordinates=reshape(xyz,3,:)
+    positions=Dict(tag=>index for (index,tag) in enumerate(tags))
+    types,_,families=gmsh.model.mesh.getElements(2,1)
+    oracle_counts=Dict{Int,Int}()
+    for (msh,nodes) in zip(types,families)
+        width=gmsh.model.mesh.getElementProperties(msh)[4]
+        cells=reshape(nodes,width,:)
+        oracle_counts[msh]=size(cells,2)
+        for cell in eachcol(cells)
+            exact_public_cell_orientation(coordinates,[positions[tag] for tag in cell],normal)==expected ||
+                error("Gmsh public triangle winding disagrees with CAD/Reverse on $case")
+        end
+    end
+    blocks=mesh isa Tessella.MeshTypes.Mesh ?
+        (Tessella.Elements.ElementBlock(2,mesh.tris),) : mesh.blocks
+    native_counts=Dict{Int,Int}()
+    for block in blocks
+        native_counts[block.msh]=size(block.nodes,2)
+        for cell in eachcol(block.nodes)
+            exact_public_cell_orientation(mesh.coords,cell,normal)==expected ||
+                error("native public triangle winding disagrees with CAD/Reverse on $case")
+        end
+    end
+    native_counts==oracle_counts || error(
+        "public triangle family/count mismatch on $case: $native_counts != $oracle_counts")
+    return sum(values(native_counts))
+end
+
 function gmsh_to_tessella_node_map(mesh, surface)
     types, _, element_nodes = gmsh.model.mesh.getElements(2, surface)
     tags = sort!(unique(reduce(vcat, element_nodes; init=UInt64[])))
@@ -567,6 +666,8 @@ try
         "Left", :left, 0; counts=(6, 8, 8), rotate=2,
         corners=[7, 1, 4])[1])
     collapsed_recombined_samples += 43
+    orientation_cases=public_orientation_cases()
+    orientation_cells=sum(check_public_orientation,orientation_cases)
     println("TRANSFINITE_TRIANGLE_DIFFERENTIAL_OK gmsh=$api_version " *
             "arrangements=$(length(cases)) resolutions=5 geometries=2 " *
             "coordinate_samples=$coordinate_samples " *
@@ -588,7 +689,9 @@ try
             "collapsed_recombined_max_node_error=" *
             "$(maximum(collapsed_recombined_errors)) " *
             "collapsed_recombined_reference_triangles=5 " *
-            "collapsed_recombined_reference_quadrangles=20")
+            "collapsed_recombined_reference_quadrangles=20 " *
+            "public_orientation_cases=$(length(orientation_cases)) " *
+            "public_orientation_cells=$orientation_cells")
 finally
     gmsh.finalize()
 end

@@ -1532,7 +1532,7 @@ end
         # Arc points are off the extrusion plane (y stays, x/z rotate).
         @test all(>=(0.0),round.(execution.mesh.coords[2,:];digits=9))
     end
-    @testset "QuadTriAddVerts transition and NoNewVerts triangular-source guard" begin
+    @testset "QuadTriAddVerts transition and NoNewVerts source-grid guard" begin
         execution=_execute_constraint_source(_GEO_EXTRUDE_TRI * raw"""
             Extrude{0,0,2}{Surface{1};Layers{3};Recombine;QuadTriAddVerts;}
             """;mesh_dim=3)

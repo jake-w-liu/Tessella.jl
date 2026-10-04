@@ -950,7 +950,70 @@ try
         _compare_exact("post-single triangle keys",
                        gmsh_triangle,tessella_triangle)
 
+        # Positive stored-node protocol checks stay outside the checksum
+        # stream: explicit nodal order changes basis metadata, not mesh keys.
         before=Tessella.API.mesh.get_all_edges()
+        for (element_type,nodes,counts,gmsh_element,element) in (
+            (2,UInt64[3,1,2],(3,6,10),UInt64(102),UInt64(2)),
+            (4,UInt64[4,2,1,3],(4,10,20),UInt64(103),UInt64(3)))
+            expected_coordinates=collect(vec(_FUNCTION_COORDINATES[:,Int.(nodes)]))
+            for order in 1:3
+                space="Lagrange$order"
+                label="stored-P1 type-$element_type $space"
+                expected=(zeros(Int32,length(nodes)),nodes,expected_coordinates)
+                gmsh_keys=gmsh.model.mesh.getKeys(element_type,space,-1,true)
+                native_keys=Tessella.API.mesh.get_keys(element_type,space,-1,true)
+                _compare_exact("$label pinned stored keys",expected,gmsh_keys)
+                _compare_exact("$label native stored keys",expected,native_keys)
+                _compare_exact("$label per-element stored keys",
+                    gmsh.model.mesh.getKeysForElement(gmsh_element,space,true),
+                    Tessella.API.mesh.get_keys_for_element(element,space,true))
+                count=counts[order]
+                _compare_exact("$label pinned requested-basis count",count,
+                    gmsh.model.mesh.getNumberOfKeys(element_type,space))
+                _compare_exact("$label native requested-basis count",count,
+                    Tessella.API.mesh.get_number_of_keys(element_type,space))
+                actual_info=order==1 ? fill((Int32(0),Int32(1)),length(nodes)) :
+                    Tuple{Int32,Int32}[]
+                _compare_exact("$label pinned actual-key metadata",actual_info,
+                    gmsh.model.mesh.getKeysInformation(
+                        gmsh_keys[1],gmsh_keys[2],element_type,space))
+                _compare_exact("$label native actual-key metadata",actual_info,
+                    Tessella.API.mesh.get_keys_information(
+                        native_keys[1],native_keys[2],element_type,space))
+                pattern=fill((Int32(0),Int32(order)),count)
+                element_type==2 && order==3 && (pattern[end]=(Int32(2),Int32(3)))
+                # Requested-basis groups are complete; a final partial nodal
+                # group is omitted, including when actual P1 keys are fewer.
+                for submitted in (0,1,count-1,count,count+1,2count+1)
+                    types=zeros(Int32,submitted);entities=fill(UInt64(1),submitted)
+                    expected_info=repeat(pattern,submitted÷count)
+                    _compare_exact("$label pinned metadata length-$submitted",
+                        expected_info,gmsh.model.mesh.getKeysInformation(
+                            types,entities,element_type,space))
+                    _compare_exact("$label native metadata length-$submitted",
+                        expected_info,Tessella.API.mesh.get_keys_information(
+                            types,entities,element_type,space))
+                end
+            end
+        end
+        # Hierarchical metadata instead retains the submitted length and
+        # defaults an incomplete trailing group to (0,0), as Gmsh4.15.2 does.
+        for submitted in (1,7)
+            indices=[mod1(i,length(gmsh_single[1])) for i in 1:submitted]
+            expected_info=vcat(fill((Int32(1),Int32(0)),6*(submitted÷6)),
+                               fill((Int32(0),Int32(0)),submitted%6))
+            _compare_exact("partial HcurlLegendre0 pinned metadata",expected_info,
+                gmsh.model.mesh.getKeysInformation(
+                    gmsh_single[1][indices],gmsh_single[2][indices],4,"HcurlLegendre0"))
+            _compare_exact("partial HcurlLegendre0 native metadata",expected_info,
+                Tessella.API.mesh.get_keys_information(
+                    tessella_single[1][indices],tessella_single[2][indices],4,"HcurlLegendre0"))
+        end
+        Tessella.API.mesh.get_all_edges()==before || error(
+            "stored-node or partial metadata queries changed the edge catalog")
+        mesh_crc(Tessella.API.mesh.get())==baseline || error(
+            "stored-node or partial metadata queries changed the mesh")
         for invalid in (
             ()->Tessella.API.mesh.get_basis_functions(
                 4,Float64[0,0],"Lagrange"),
@@ -968,8 +1031,6 @@ try
                 4,"HcurlLegendre0",-1,-1,1),
             ()->Tessella.API.mesh.get_basis_functions_orientation(
                 4,"HcurlLegendre0",-1,0,0),
-            ()->Tessella.API.mesh.get_keys_information(
-                Int32[1],UInt64[1],4,"HcurlLegendre0"),
             ()->Tessella.API.mesh.get_basis_functions(
                 2,Float64[0,0,0],"Lagrange11"),
             ()->Tessella.API.mesh.get_basis_functions(
@@ -1015,7 +1076,8 @@ try
             " nonsimplex_h1_cases=",nonsimplex_h1_case_count,
             " all_orientations=32 max_abs_difference=",
             _MAX_ABS_DIFFERENCE[],
-            " lazy_edge_catalog=true sha=",digest)
+            " stored_p1_explicit_key_cases=6 stored_p1_metadata_tail_cases=36 " *
+            "hierarchical_partial_key_info_cases=2 lazy_edge_catalog=true sha=",digest)
 finally
     gmsh.finalize()
 end

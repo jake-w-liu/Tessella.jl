@@ -1139,12 +1139,16 @@ function model_normal(m::GeoModel,tag,parametric_coordinates;
 end
 
 """
-    model_parametrization(model, dim, tag, coordinates) -> Vector{Float64}
+    model_parametrization(model, dim, tag, coordinates;
+                          old_ruled_surface=false) -> Vector{Float64}
 
-Return orthogonal Line or Plane parameters for concatenated 3-D coordinates.
+Return native entity parameters for concatenated 3-D coordinates. Lines and
+Planes use orthogonal parameters; ruled patches use their existing damped
+Newton inverse. `old_ruled_surface` selects the legacy triangular blend.
 Coordinates need not lie inside the trimmed entity.
 """
-function model_parametrization(m::GeoModel,dim,tag,coordinates)
+function model_parametrization(m::GeoModel,dim,tag,coordinates;
+                               old_ruled_surface::Bool=false)
     caller="model_parametrization"
     dimension,entity_tag=_model_evaluation_entity(
         m,dim,tag,(0,1,2),caller)
@@ -1186,9 +1190,12 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
         get(m.surface_geometry,entity_tag,nothing) : nothing
     occ_surface=surface_geometry!==nothing &&
         hasproperty(surface_geometry,:occ)
-    plane=dimension==2 && !occ_surface ?
+    ruled_surface=dimension==2 && !occ_surface &&
+        _surface_type(m,entity_tag) in (:ruled,:tric)
+    plane=dimension==2 && !occ_surface && !ruled_surface ?
         _model_plane_frame(m,entity_tag,caller) : nothing
-    lc=(arc!==nothing || spline!==nothing || occ!==nothing || occ_surface) ?
+    lc=(arc!==nothing || spline!==nothing || occ!==nothing || occ_surface ||
+        ruled_surface) ?
         _model_lc(m) : 0.0
     for index in 1:3:length(values)
         coordinate=(values[index],values[index+1],values[index+2])
@@ -1223,6 +1230,14 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
             # or `GFace::XYZtoUV`'s multi-seed Newton on failure.
             append!(output,_occ_surface_parameter_on_face(
                 surface_geometry,coordinate,lc))
+        elseif ruled_surface
+            # `gmshFace::parFromPoint` delegates non-plane patches to
+            # `GFace::XYZtoUV`. `model::getParametrization` requires both
+            # on-surface and XYZ convergence tests, independent of the
+            # transfinite mesher's looser inverse variant.
+            append!(output,_ruled_xyz_to_uv(m,entity_tag,coordinate,1.0,lc,
+                true,_model_evaluation_silent,_model_evaluation_silent,
+                caller,old_ruled_surface))
         else
             append!(output,_model_plane_parameters(
                 plane,coordinate,caller,(index+2)÷3))
@@ -1230,6 +1245,8 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates)
     end
     return output
 end
+
+_model_evaluation_silent(::AbstractString)=nothing
 
 """Return detached parametric lower and upper bounds for a Point, Line, or Plane."""
 function model_parametrization_bounds(m::GeoModel,dim,tag)

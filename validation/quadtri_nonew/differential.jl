@@ -9,6 +9,8 @@ using Tessella.MeshTypes: nnodes
 
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_certificates.jl"))
 const QTNN=QuadTriNoNewCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_triangle_certificates.jl"))
+const QTNT=QuadTriNoNewTriangleCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -41,7 +43,23 @@ function native_api(path,action)
     end
 end
 
-function quadratic_volume_from_jacobians(mesh,interface)
+# Read the actual public cell product, including the legacy simplex P2 overlay.
+# mesh.get() deliberately continues to expose the primary Mesh in that route.
+function triangle_api_volume(api,entity=1)
+    tags,xyz,_=api.mesh.get_nodes();coordinates=reshape(xyz,3,:)
+    positions=Dict(tag=>index for (index,tag) in enumerate(tags))
+    types,_,families=api.mesh.get_elements(3,entity)
+    used=sort!(unique(vcat(families...)))
+    remap=Dict(tag=>Int32(index) for (index,tag) in enumerate(used))
+    blocks=ElementBlock[]
+    for (type,nodes) in zip(types,families)
+        width=msh_spec(type).nnodes
+        push!(blocks,ElementBlock(type,reshape(Int32[remap[tag] for tag in nodes],width,:)))
+    end
+    return MixedMesh(coordinates[:,[positions[tag] for tag in used]],blocks)
+end
+
+function quadratic_volume_from_jacobians(mesh,interface;expected=1.)
     total=0.
     for block in mesh.blocks
         if interface===gmsh.model.mesh
@@ -55,7 +73,7 @@ function quadratic_volume_from_jacobians(mesh,interface)
         length(determinants)==length(weights)*size(block.nodes,2) || error("P2 quadrature shape")
         total+=sum(determinants .* repeat(weights,size(block.nodes,2)))
     end
-    abs(total-1.)<=2e-11 || error("P2 integrated swept volume $total differs from 1")
+    abs(total-expected)<=2e-11 || error("P2 integrated swept volume $total differs from $expected")
     return total
 end
 
@@ -109,6 +127,8 @@ oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
 height_errors=Ref(0);isolated_cases=Ref(0)
 native_helical_cases=Ref(0);helical_oracle_gaps=Ref(0)
+triangle_cases=Ref(0);triangle_quadratic_cases=Ref(0);triangle_isolated_cases=Ref(0)
+triangle_parameter_provenance_gaps=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -311,7 +331,181 @@ try
             end
         end
     end
-    println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) oracle_samples=$(oracle_samples[]) oracle_only=$oracle_only")
+    for fixture in QTNT.fixtures()
+        isempty(selected) || occursin(selected,fixture.name) || continue
+        mktempdir() do directory
+            path=joinpath(directory,"$(fixture.name).geo")
+            write(path,fixture.source*"Mesh 3;\n")
+            gmsh.clear();gmsh.open(path)
+            oracle,element_tags=oracle_volume()
+            oc=QTNT.certify(oracle,fixture)
+            source_types,_,source_nodes=gmsh.model.mesh.getElements(2,1)
+            source_types==[2] && length(only(source_nodes))==3 || error("triangle oracle source cell changed")
+            source_points=Tuple(Tuple(gmsh.model.mesh.getNode(node)[1]) for node in only(source_nodes))
+            q=map(QTNT.exact_point,source_points)
+            sign(QTNT.determinant(q[2].-q[1],q[3].-q[1],(0,0,1)))==fixture.winding ||
+                error("triangle oracle source winding changed")
+            oracle_surface_faces(oracle)==Set(keys(oc.boundary)) ||
+                error("$(fixture.name): triangle oracle surface boundary mismatch")
+            all(>(0),gmsh.model.mesh.getElementQualities(element_tags,"minDetJac")) ||
+                error("$(fixture.name): triangle oracle Jacobian quality")
+            if !oracle_only
+                execution=QTNN.execute(fixture.source)
+                native=geo_entity_mesh(execution,3,1);nc=QTNT.certify(native,fixture)
+                QTNT.certify_cap_winding(execution.mesh_parts,native,fixture,nc)
+                QTNN.surface_faces(execution.mesh_parts,native)==Set(keys(nc.boundary)) ||
+                    error("$(fixture.name): native triangle surface boundary mismatch")
+                nnodes(native)==nnodes(oracle) || error("triangle volume node counts differ")
+                for i in eachindex(nc.grid_ids)
+                    p=QTNN.point(native,nc.grid_ids[i]);q=QTNN.point(oracle,oc.grid_ids[i])
+                    maximum(abs.(p.-q))<=2e-11 || error("triangle swept coordinates differ")
+                end
+                nc.family_counts==oc.family_counts || error("triangle volume family counts differ")
+                QTNT.crc(QTNN.execute(fixture.source).mesh)==QTNT.crc(execution.mesh) ||
+                    error("nondeterministic native triangle CRC")
+                native_api(path,api->begin
+                    actual=api.mesh.generate(3)
+                    QTNT.certify(actual,fixture)
+                    QTNN.typed_signature(actual)==QTNN.typed_signature(native) ||
+                        error("triangle API/GEO volume differs")
+                    isempty(api.mesh.get_elements(2)[1]) || error("legacy API3 lower-cell contract changed")
+                    length(api.mesh.get_nodes(3,1,true)[1])==nnodes(actual) ||
+                        error("triangle API volume closure differs")
+                    isempty(api.mesh.get_nodes(3,1,false)[1]) || error("triangle API invented body nodes")
+                end)
+            end
+            triangle_cases[]+=1;oracle_samples[]+=1
+            println("QUADTRI_NONEW_TRIANGLE_OK name=$(fixture.name) families=$(oc.family_counts)")
+        end
+    end
+    if isempty(selected) || selected=="triangle"
+        for laterals in (false,true),winding in (-1,1)
+            fixture=QTNT.fixture("triangle_p2","Layers{3}",[0.,1/3,2/3,1.],laterals;winding)
+            mktempdir() do directory
+                path=joinpath(directory,"triangle_p2.geo");write(path,fixture.source)
+                gmsh.clear();gmsh.open(path);gmsh.model.mesh.generate(3)
+                linear,_=oracle_volume();QTNT.certify(linear,fixture)
+                gmsh.model.mesh.setOrder(2);quadratic,tags=oracle_volume()
+                QTNN.certify_quadratic(quadratic,linear)
+                quadratic_volume_from_jacobians(quadratic,gmsh.model.mesh;expected=.5)
+                all(>(0),gmsh.model.mesh.getElementQualities(tags,"minDetJac")) ||
+                    error("triangle oracle P2 quality")
+                empty_face_parameters=0
+                oracle_lateral_count=0
+                for (_,surface) in gmsh.model.getEntities(2)
+                    owned,_,parameters=gmsh.model.mesh.getNodes(2,surface,false,true)
+                    isempty(owned) && continue
+                    oracle_lateral_count+=1
+                    length(owned)==5 && length(parameters)==(laterals ? 4 : 10) ||
+                        error("oracle lateral ownership/parameter dimensions changed")
+                    boundary_nodes,_,boundary_parameters=gmsh.model.mesh.getNodes(2,surface,true,true)
+                    length(boundary_nodes)==21 && length(boundary_parameters)==(laterals ? 36 : 42) ||
+                        error("oracle partial boundary parameter provenance changed")
+                    for node in owned
+                        p,uv,dim,owner=gmsh.model.mesh.getNode(node)
+                        dim==2 && owner==surface || error("oracle P2 lateral ownership")
+                        if isempty(uv)
+                            empty_face_parameters+=1
+                            # The stored absence is distinct from the complete
+                            # geometric inverse available on the same surface.
+                            computed=gmsh.model.getParametrization(2,surface,p)
+                            maximum(abs.(gmsh.model.getValue(2,surface,computed).-p))<=2e-11 ||
+                                error("oracle geometric inverse roundtrip")
+                        end
+                    end
+                end
+                oracle_lateral_count==3 || error("oracle P2 lateral ownership missing")
+                empty_face_parameters==(laterals ? 9 : 0) || error("oracle face-center parameter provenance")
+                if laterals
+                    triangle_parameter_provenance_gaps[]+=1
+                    println("QUADTRI_NONEW_TRIANGLE_PARAMETER_PROVENANCE_GAP winding=$winding oracle_empty_face_nodes=$empty_face_parameters native_contract=computed_uv")
+                end
+                if !oracle_only
+                    native_api(path,api->begin
+                        api.mesh.generate(3)
+                        first=triangle_api_volume(api)
+                        api.mesh.set_order(2);actual=triangle_api_volume(api)
+                        QTNN.certify_quadratic(actual,first)
+                        quadratic_volume_from_jacobians(actual,api.mesh;expected=.5)
+                        node_tags=api.mesh.get_nodes()[1]
+                        for node in node_tags
+                            p,uv,dim,entity=api.mesh.get_node(node)
+                            dim==2 || continue
+                            length(uv)==2 || error("native computed lateral UV missing")
+                            maximum(abs.(api.model.get_value(2,entity,uv).-p))<=2e-11 ||
+                                error("native computed lateral UV does not reproduce actual node")
+                        end
+                        lateral_count=0
+                        for (_,surface) in api.model.get_entities(2)
+                            # The source and cap have no interior P2 nodes.
+                            # All three actual laterals own five supports.
+                            owned,_,parameters=api.mesh.get_nodes(2,surface,false,true)
+                            isempty(owned) && continue
+                            lateral_count+=1
+                            length(owned)==5 && length(parameters)==10 ||
+                                error("native computed lateral parameter dimensions")
+                            boundary_nodes,coordinates,uv=api.mesh.get_nodes(2,surface,true,true)
+                            length(boundary_nodes)==21 && length(uv)==42 ||
+                                error("native computed boundary parameter dimensions")
+                            maximum(abs.(api.model.get_value(2,surface,uv).-coordinates))<=2e-11 ||
+                                error("native computed boundary UV roundtrip")
+                        end
+                        lateral_count==3 || error("native P2 lateral ownership missing")
+                        api.mesh.set_order(1)
+                        QTNN.typed_signature(triangle_api_volume(api))==QTNN.typed_signature(first) ||
+                            error("triangle P2/P1 actual cell roundtrip differs")
+                    end)
+                end
+                triangle_quadratic_cases[]+=1;oracle_samples[]+=1
+                println("QUADTRI_NONEW_TRIANGLE_P2_OK laterals=$laterals winding=$winding")
+            end
+        end
+        for coincident in (false,true)
+            mktempdir() do directory
+                path=joinpath(directory,"triangle_isolated.geo");write(path,QTNT.paired_source())
+                gmsh.clear();gmsh.open(path)
+                if coincident
+                    for (_,tag) in gmsh.model.getEntities(0)
+                        x,y,z=gmsh.model.getValue(0,tag,Float64[])
+                        x>=3 || continue
+                        gmsh.model.setCoordinates(tag,x-3,y,z)
+                    end
+                end
+                gmsh.model.mesh.generate(3)
+                entities=last.(gmsh.model.getEntities(3));length(entities)==2 || error("triangle region count")
+                for (index,entity) in enumerate(entities)
+                    volume=oracle_volume(entity)[1]
+                    if index==2 && !coincident
+                        volume=MixedMesh(volume.coords.-[3.,0,0],volume.blocks)
+                    end
+                    f=QTNT.fixture("triangle_isolated","Layers{3}",[0.,1/3,2/3,1.],index==2)
+                    QTNT.certify(volume,f)
+                end
+                a=gmsh.model.mesh.getNodes(3,entities[1],true)[1]
+                b=gmsh.model.mesh.getNodes(3,entities[2],true)[1]
+                length(a)==length(b)==12 && isempty(intersect(a,b)) || error("triangle oracle identities welded")
+                length(gmsh.model.mesh.getNodes()[1])==24 || error("triangle oracle global node count")
+                if !oracle_only
+                    native_api(path,api->begin
+                        if coincident
+                            for (tag,p) in collect(api.CURRENT[].points)
+                                p[1]>=3 || continue
+                                api.model.set_coordinates(tag,p[1]-3,p[2],p[3])
+                            end
+                        end
+                        generated=api.mesh.generate(3)
+                        a=api.mesh.get_nodes(3,entities[1],true)[1]
+                        b=api.mesh.get_nodes(3,entities[2],true)[1]
+                        length(a)==length(b)==12 && isempty(intersect(a,b)) || error("triangle native identities welded")
+                        nnodes(generated)==24 || error("triangle native global node count")
+                    end)
+                end
+                triangle_isolated_cases[]+=1;oracle_samples[]+=1
+                println("QUADTRI_NONEW_TRIANGLE_ISOLATED_OK coincident=$coincident")
+            end
+        end
+    end
+    println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) oracle_only=$oracle_only")
 finally
     gmsh.finalize()
 end

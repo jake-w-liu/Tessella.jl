@@ -94,7 +94,7 @@ end
 
 _high_order_overlay(::MixedMesh)=nothing
 _append_p2_midnodes!(tags,coords,params,m::GeoModel,mesh::MixedMesh,
-                     dim::Int,tag::Int,include_boundary::Bool)=nothing
+    dim::Int,tag::Int,parametric::Bool;include_boundary::Bool=false)=nothing
 
 function _mesh_element_data(mesh::MixedMesh,dimension::Int)
     types=Int32[];tags=Vector{UInt64}[];nodes=Vector{UInt64}[]
@@ -112,9 +112,13 @@ function _mesh_element_types(mesh::MixedMesh,dimension::Int)
         if (dimension<0 || dimension==dim) && !isempty(cells)]))
 end
 
-function _mixed_classification(cache,entity,entities,node_entities,boundaries,owners)
+function _mixed_classification(cache,entity,entities,node_entities,boundaries,owners;
+        edge_entities=Dict{Tuple{Int32,Int32},Tuple{Int,Int32}}(),
+        face_entities=Dict{NTuple{3,Int32},Tuple{Int,Int32}}(),
+        quad_entities=Dict{NTuple{4,Int32},Tuple{Int,Int32}}())
     return _MeshClassification(cache,entity,entities,node_entities,boundaries,
-        get(owners,1,Int32[]),get(owners,2,Int32[]),get(owners,4,Int32[]),owners)
+        get(owners,1,Int32[]),get(owners,2,Int32[]),get(owners,4,Int32[]),owners,
+        nothing,edge_entities,face_entities,quad_entities)
 end
 
 function _classify_cached_mesh(m::GeoModel,mesh::MixedMesh,dim::Int,tag::Int,
@@ -152,8 +156,10 @@ function _classify_cached_mesh(m::GeoModel,mesh::MixedMesh,dim::Int,tag::Int,
             push!(values,owner)
         end
     end
+    edges,faces,quads=_api_projected_support_entities(projected)
     return _mixed_classification(cache,(dim,Int32(tag)),[(dim,Int32(tag))],
-                                copy(data.node_entities),boundaries,owners)
+        copy(data.node_entities),boundaries,owners;
+        edge_entities=edges,face_entities=faces,quad_entities=quads)
 end
 
 function _classification_skeleton(mesh::MixedMesh,reversed::Bool)
@@ -244,6 +250,23 @@ function _merge_classified_parts(parts,remaps,keeps,merged::MixedMesh,caller)
     node_entities=fill((0,Int32(0)),nnodes(merged))
     boundaries=Dict{Tuple{Int,Int32},Vector{Int32}}()
     owners=Dict{Int,Vector{Int32}}()
+    edges=Dict{Tuple{Int32,Int32},Tuple{Int,Int32}}()
+    faces=Dict{NTuple{3,Int32},Tuple{Int,Int32}}()
+    quads=Dict{NTuple{4,Int32},Tuple{Int,Int32}}()
+    edge_conflicts=Set{NTuple{2,Int32}}()
+    face_conflicts=Set{NTuple{3,Int32}}()
+    quad_conflicts=Set{NTuple{4,Int32}}()
+    edge_capacity=0;face_capacity=0;quad_capacity=0
+    for part in parts
+        record=part[3]
+        record===nothing && throw(ErrorException(
+            "$caller: mixed generation requires entity classification"))
+        edge_capacity+=length(record.edge_entities)
+        face_capacity+=length(record.face_entities)
+        quad_capacity+=length(record.quad_entities)
+    end
+    sizehint!(edges,edge_capacity);sizehint!(faces,face_capacity)
+    sizehint!(quads,quad_capacity)
     for (i,(tag,part,class)) in enumerate(parts)
         class===nothing && throw(ErrorException(
             "$caller: mixed generation requires entity classification"))
@@ -259,8 +282,26 @@ function _merge_classified_parts(parts,remaps,keeps,merged::MixedMesh,caller)
         for (bi,(msh,_,_,cells,cell_owners)) in enumerate(_cache_catalog(part,class))
             append!(get!(()->Int32[],owners,Int(msh)),cell_owners[keeps[i][bi]])
         end
+        # Every part's top-dimensional cells survive generation. A duplicate
+        # Line cell still has an identical retained support, so no repeated
+        # scan of the entire merged graph is needed to filter these catalogs.
+        mapping=remaps[i]
+        for (support,owner) in class.edge_entities
+            _api_support_insert!(edges,edge_conflicts,
+                minmax(mapping[support[1]],mapping[support[2]]),owner)
+        end
+        for (support,owner) in class.face_entities
+            _api_support_insert!(faces,face_conflicts,
+                _api_support_face(mapping[support[1]],mapping[support[2]],mapping[support[3]]),owner)
+        end
+        for (support,owner) in class.quad_entities
+            _api_support_insert!(quads,quad_conflicts,
+                _api_support_quad(mapping[support[1]],mapping[support[2]],mapping[support[3]],mapping[support[4]]),owner)
+        end
     end
-    return _mixed_classification(merged,entities[1],entities,node_entities,boundaries,owners)
+    _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
+    return _mixed_classification(merged,entities[1],entities,node_entities,boundaries,owners;
+        edge_entities=edges,face_entities=faces,quad_entities=quads)
 end
 
 function _apply_mesh_order(m::GeoModel,cached::MixedMesh,class,caller)
@@ -376,7 +417,7 @@ function _mixed_linear_cache(mesh,class)
     blocks=[ElementBlock(b.msh,mapping[b.nodes],b.tags) for b in blocks]
     result=_mixed_rebuild_metadata(mesh,blocks;node_order=findall(used))
     return result,_mixed_rebind_class(class,result;
-        node_entities=class.node_entities[used],owners=owners)
+        node_entities=class.node_entities[used],owners=owners,primary_map=mapping)
 end
 
 function _mixed_quadratic_cache(input_mesh,input_class,caller)
@@ -414,11 +455,22 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
                         "$caller: elevated node coordinates are non-finite"))
                     push!(points,p)
                     owner=(dim,cell_owners[column])
-                    for (candidate,allnodes) in entity_nodes
-                        candidate[1]>dim && break
-                        all(term->Int(term[1]) in allnodes,terms) || continue
-                        owner=candidate
-                        break
+                    certified=length(terms)==2 ? get(class.edge_entities,
+                        minmax(terms[1][1],terms[2][1]),nothing) :
+                        length(terms)==3 ? get(class.face_entities,
+                            _api_support_face(terms[1][1],terms[2][1],terms[3][1]),nothing) :
+                        length(terms)==4 ? get(class.quad_entities,
+                            _api_support_quad(terms[1][1],terms[2][1],terms[3][1],terms[4][1]),nothing) :
+                        nothing
+                    if certified!==nothing
+                        owner=certified
+                    else
+                        for (candidate,allnodes) in entity_nodes
+                            candidate[1]>dim && break
+                            all(term->Int(term[1]) in allnodes,terms) || continue
+                            owner=candidate
+                            break
+                        end
                     end
                     push!(node_entities,owner)
                     Int32(length(points))
@@ -584,7 +636,8 @@ function _mixed_select_columns(mesh,class,selections;node_order=nothing)
     result=_mixed_rebuild_metadata(mesh,blocks;node_order,selections)
     new_class=class===nothing ? nothing : _mixed_rebind_class(class,result;
         owners=owners,node_entities=node_order===nothing ? class.node_entities :
-                                                    class.node_entities[node_order])
+                                                    class.node_entities[node_order],
+        primary_map=mapping)
     return result,new_class
 end
 
@@ -652,9 +705,10 @@ function _mixed_element_record(mesh::MixedMesh,class,tag::Int)
 end
 
 function _mixed_rebind_class(class,mesh;node_entities=class.node_entities,
-                             owners=class.cell_entities)
+                             owners=class.cell_entities,primary_map=nothing)
+    edges,faces,quads=_api_remap_support_entities(class,mesh,primary_map)
     result=_mixed_classification(mesh,class.entity,class.entities,node_entities,
-                                class.boundaries,owners)
+        class.boundaries,owners;edge_entities=edges,face_entities=faces,quad_entities=quads)
     class.public_tags===nothing && return result
     return _classification_with_public_tags(result,
         _cache_public_tags(mesh;authority=class.public_tags.authority))
@@ -679,7 +733,9 @@ function _dim01_actual_cache(cached,class;physical_names=Dict{Tuple{Int,Int},Str
     actual=MixedMesh(overlay.coords,blocks;physical_names)
     class===nothing && return actual,nothing
     actual_class=_mixed_classification(actual,class.entity,class.entities,
-        vcat(class.node_entities,LAST_MESH_HIGH_ORDER_MIDS[]),class.boundaries,owners)
+        vcat(class.node_entities,LAST_MESH_HIGH_ORDER_MIDS[]),class.boundaries,owners;
+        edge_entities=class.edge_entities,face_entities=class.face_entities,
+        quad_entities=class.quad_entities)
     return actual,actual_class
 end
 
@@ -723,7 +779,7 @@ function _clear_classified_mesh(mesh::MixedMesh,class::_MeshClassification,
     replacement=_mixed_rebuild_metadata(mesh,blocks;node_order=findall(keep),
         selections=kept,node_entities=node_entities)
     return replacement,_mixed_rebind_class(class,replacement;
-                        node_entities=node_entities,owners=owners)
+        node_entities=node_entities,owners=owners,primary_map=remap)
 end
 
 function _mixed_refresh_periodic_links(model,mesh,class,caller)

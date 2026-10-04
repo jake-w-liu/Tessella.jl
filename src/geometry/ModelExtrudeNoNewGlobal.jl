@@ -1,11 +1,11 @@
-# A conservative global certificate for the first NoNewVerts source-quad
-# slice. Retained cells use their interval's eight column nodes. Recorded
+# A conservative global certificate for an isolated NoNewVerts source cell.
+# Retained cells use their interval's six or eight column nodes. Recorded quad
 # problems additionally use a rounded centroid; the subsequent local face-fan
 # certificate must prove that actual point lies inside the boundary and hence
 # its convex hull. Certifying these hulls therefore certifies the actual P1 cell
 # complex, without making an inference from the continuous CAD sweep.
 #
-# Preconditions are finite, distinct columns, four distinct source indices,
+# Preconditions are finite, distinct columns, three or four source indices,
 # strictly increasing layer levels, and the subsequent local cell certificate.
 # Adjacent hulls must meet only in their
 # exactly planar shared cap. Nonadjacent hulls require a strict separating
@@ -17,7 +17,7 @@
 # outer-cap planes prune fine angular ranges whose coordinate AABBs overlap.
 # Explicit linear traversal and N*log(N) point-test budgets bound configurations
 # whose broad phase would otherwise approach quadratic work. Predicate work per
-# final candidate is constant: two sets of at most 56 triangle planes.
+# final candidate is constant: two sets of at most 20 prism or 56 hex planes.
 
 const _EXTRUDE_NONEW_GLOBAL_VISITS_PER_INTERVAL = 128
 
@@ -40,7 +40,7 @@ end
 @inline function _extrude_nonew_hull_bounds(v)
     lo_x=v[1][1];lo_y=v[1][2];lo_z=v[1][3]
     hi_x=lo_x;hi_y=lo_y;hi_z=lo_z
-    for i in 2:8
+    for i in 2:length(v)
         p=v[i]
         lo_x=min(lo_x,p[1]);lo_y=min(lo_y,p[2]);lo_z=min(lo_z,p[3])
         hi_x=max(hi_x,p[1]);hi_y=max(hi_y,p[2]);hi_z=max(hi_z,p[3])
@@ -62,7 +62,7 @@ function _extrude_nonew_hull_range_side(cols,cell,plane,lower,upper,
         point_budget,caller;required=0)
     p=cols[plane,cell[1]];q=cols[plane,cell[2]];r=cols[plane,cell[3]]
     side=required
-    for layer in lower:upper,k in 1:4
+    for layer in lower:upper,k in 1:length(cell)
         point_budget[]-=1
         point_budget[]>=0 || _extrude_nonew_global_pending(caller,
             "the bounded supporting-plane point-test budget is exceeded")
@@ -115,18 +115,22 @@ function _extrude_nonew_hull_caps_separate(a,b,cols,cell,point_budget,caller)
 end
 
 # Use the shared cap as an exact supporting plane on both sides. Checking all
-# eight nonshared corners also excludes adjacent interval interiors overlapping
-# behind their nominal shared cap. Coplanarity uses exact orient3 signs.
+# nonshared corners also excludes adjacent interval interiors overlapping
+# behind their nominal shared cap. A three-point cap defines its plane; a quad
+# additionally requires exact coplanarity of its fourth point.
 function _extrude_nonew_hull_adjacent(cols,cell,layer,caller)
     shared=layer+1
     p=cols[shared,cell[1]];q=cols[shared,cell[2]]
-    r=cols[shared,cell[3]];s=cols[shared,cell[4]]
-    orient3(p,q,r,s)==0 || _extrude_nonew_global_pending(caller,
-        "shared cap of intervals $layer and $(layer+1) is not exactly planar")
+    r=cols[shared,cell[3]]
+    if length(cell)==4
+        s=cols[shared,cell[4]]
+        orient3(p,q,r,s)==0 || _extrude_nonew_global_pending(caller,
+            "shared cap of intervals $layer and $(layer+1) is not exactly planar")
+    end
     sign=orient3(p,q,r,cols[layer,cell[1]])
     sign!=0 || _extrude_nonew_global_pending(caller,
         "interval $layer has no strict shared-cap halfspace")
-    for k in 1:4
+    for k in 1:length(cell)
         orient3(p,q,r,cols[layer,cell[k]])==sign &&
         orient3(p,q,r,cols[layer+2,cell[k]])==-sign ||
             _extrude_nonew_global_pending(caller,
@@ -140,10 +144,11 @@ end
 # the other hull to lie on the opposite side. Degenerate triangles provide no
 # certificate and are skipped without floating normal/dot calculations.
 function _extrude_nonew_hull_support_separates(v,w)
-    for a in 1:6,b in a+1:7,c in b+1:8
+    count=length(v)
+    for a in 1:count-2,b in a+1:count-1,c in b+1:count
         side=0
         supporting=true
-        for k in 1:8
+        for k in 1:count
             sign=orient3(v[a],v[b],v[c],v[k])
             if sign!=0
                 if side==0
@@ -156,7 +161,7 @@ function _extrude_nonew_hull_support_separates(v,w)
         end
         supporting && side!=0 || continue
         separates=true
-        for k in 1:8
+        for k in 1:length(w)
             if orient3(v[a],v[b],v[c],w[k])!=-side
                 separates=false
                 break
@@ -206,10 +211,14 @@ function _extrude_nonew_hull_pair!(nodes,cols,cell,first::Int32,second::Int32,
 end
 
 function _extrude_nonew_global_certify(cols,cell,spec,caller)
+    source_corners=length(cell)
+    source_corners in (3,4) || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts global certificate needs a triangle or quadrangle"))
     intervals=size(cols,1)-1
     intervals>0 || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts global certificate needs at least one interval"))
-    intervals<=(_EXTRUDE_NONEW_MAX_NODES-5)÷4 || throw(ArgumentError(
+    extra=source_corners==4 ? 1 : 0
+    intervals<=(_EXTRUDE_NONEW_MAX_NODES-source_corners-extra)÷source_corners || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts global certificate exceeds the node limit"))
     for layer in 1:intervals-1
         _extrude_nonew_hull_adjacent(cols,cell,layer,caller)

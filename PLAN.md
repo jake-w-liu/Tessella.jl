@@ -145,7 +145,7 @@ meshing kernel, where `size_at` enforces a finite `h > 0` contract.
 | Track | Exit condition | State |
 |---|---|---|
 | P1 | full scalar/isotropic/anisotropic field catalog and field-driven 1-D/2-D/3-D sizing | IN PROGRESS — native catalog, strict field graph, entity-aware mesher integration, model-level `.geo` `Mesh 0`/`Mesh 1` grading with stored `curve_params` boundary reuse, `.pos`-backed `PostView` scalar/vector/tensor size fields with Gmsh dominant-component selection, tensor-to-metric `PostViewAnisoField` evaluation, and a documented multi-surface discrete `AutomaticMeshSizeField` analogue — sphere-fit curvature, facing-triangle `nPointsPerGap` local feature size, `hBulk` fallback, and edge-`gradation`/`smoothing` — resolved from model surfaces in `.geo` and API-session background-field contexts |
-| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types with canonical family/order lookup and detached property metadata plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, Gmsh-compatible MSH4 surface/embedded-curve metadata, structural MSH4 partition metadata (`$PartitionedEntities`/`$GhostElements`), and verbatim ancillary/unknown-section plus tag-remapped view-data preservation across ASCII and binary MSH 2.2/4.1 round trips, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, presentation state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization, plus exact tensor-Bernstein minimum-Jacobian certification for P2 quadrangle, hexahedron, and prism |
+| P2 | general entity model and every Gmsh element family/order in memory and MSH I/O | IN PROGRESS — 125 fixed-node types with canonical family/order lookup and detached property metadata plus special records, mixed MSH I/O with cumulative repeated-node sections, declared MSH2 elementary ownership, persistent MSH2/MSH4 periodic links, Gmsh-compatible MSH4 surface/embedded-curve metadata, structural MSH4 partition metadata (`$PartitionedEntities`/`$GhostElements`), and verbatim ancillary/unknown-section plus tag-remapped view-data preservation across ASCII and binary MSH 2.2/4.1 round trips, plus a tagged point/curve/surface/surface-loop/volume kernel with owned entity names, presentation state, attributes, finite Point-coordinate updates, atomic live-reference retagging, dependency-safe recursive removal, explicit topology, spatial, type, plane-property, and nonpartition metadata queries, and native Point/Line/Circle/Ellipse-arc/Spline/BSpline/Bezier/Nurbs/Plane evaluation and surface reparametrization, plus exact tensor-Bernstein minimum-Jacobian certification for P2 quadrangle, hexahedron and prism, and rational collapsed-map Pyramid14 certificates for new API products |
 | P3 | built-in/OCC-equivalent CAD, BREP/NURBS, imports, Booleans, transforms, `.geo` execution | IN PROGRESS — NURBS evaluation and STEP/IGES NURBS import (B_SPLINE / IGES 126/128) with IGES export, classified STEP/IGES box/sphere/cylinder/cone solids, expression-, numeric-list-, and tracked-tag-allocator-backed Point/Line/Circle/Ellipse/Spline/BSpline/Bezier/Nurbs/Loop/Plane Surface/Surface/Ruled Surface/Surface Loop/Volume with checked `SetMaxTag`, positive Point `MeshSize`, explicit-topology `PointsOf`, topology-derived Physical groups, global automatic Physical tags, owned operation-time Boolean operands with complete Delete cleanup, N-way
 multi-operand BooleanDifference/Union/Intersection/Fragments with OCC
 membership-cell decomposition and preserve-numbering tag rebinding, Box/Cylinder/Sphere/Cone/Torus/Boolean `.geo` solids with materialized Gmsh 4.15.2 OCC boundary layouts (rim/pole Points, closed-circle and degenerate edges, Cylinder/Sphere/Cone/Torus and Plane faces, signed surface loops), with Cylinder/Sphere/Cone retaining their compact encodings for the analytic mesher, explicit-entity Translate/Dilate/Rotate/Symmetry with Gmsh's shape-list grammar/Duplicata/Coherence, translational, rotational, and twist `Extrude` for points/curves/planar surfaces with Gmsh's tag allocation, output lists, signed-generatrix and merge semantics plus `Layers`/`Recombine`/`ScaleLastLayer`/`QuadTri*`/`Using` parameters, `Circle`/`Ellipse` arcs with Gmsh's `EndCurve` control-point/`Plane`-normal semantics and `Surface`/`Ruled Surface` filling including `In Sphere`/`Using Point` sphere-center metadata, straight/curved curve or planar-surface periodic `.geo` execution, analytic OCC evaluation/reparametrization on all materialized face kinds (Cylinder/Sphere/Cone/Torus/Plane) with OCCT's `ElSLib` contractions, stored-pcurve `CurveOnSurface` semantics, `Extrema` elementary-surface projectors, and `BRepClass_FaceClassifier` wire containment, the `.geo` meshing-constraint family (`Transfinite Curve`/`Surface`/`Volume` with signed tags, wildcards, HWall and grammar-only laws, `TransfQuadTri`, `Recombine`, `Smoother`, `MeshAlgorithm`, `MeshSizeFromBoundary`, `Reverse`/`ReverseMesh`, `Degenerated`, `Compound`, and validating `Relocate`/`Reorient`/`RecombineMesh` forms), `Delete`/`Recursive Delete`/`Delete Embedded` with `GEO_Internals::remove` per-entity semantics plus the named `Delete` lifecycle forms, and explicit `SetTag` rejection, plus mesh Booleans/transforms and classified STEP/IGES ring-torus (`TOROIDAL_SURFACE`, IGES 160/198) and closed planar polyhedral shell (`MANIFOLD_SOLID_BREP`/`FACETED_BREP`/`BREP_WITH_VOIDS`) import; unrecognized CAD topology remains pending implementation |
@@ -168,7 +168,7 @@ v2.2/v4.1 serialization — but P2 does not yet claim general recombination
 beyond the validated surface pairing and structured-volume masks,
 integration of mixed blocks into the unstructured meshing kernels, curved
 high-order Jacobian certification beyond second-order segments, triangles,
-tetrahedra, quadrangles, hexahedra, and prisms, internal indexing
+tetrahedra, quadrangles, hexahedra, prisms, and pyramids, internal indexing
 beyond `Int32`, or lossless multi-physical-group projection through MSH v2.2.
 Ancillary and unknown MSH sections now round trip verbatim — payload bytes,
 binary mode, and source anchor position — while parsed
@@ -276,7 +276,7 @@ and `setAllVolumesPositive` fixes orientation). `QuadTriAddVerts` consumes
 the actual lateral/top diagonals, retaining unconstrained prism/hex cells
 and introducing centroid tetrahedron/pyramid fans at divided cells;
 `RecombLaterals` controls free lateral recombination. `QuadTriNoNewVerts`
-has its separate diagonal-selection kernel for one isolated source quadrangle
+has its separate diagonal-selection kernel for one isolated source triangle or quadrangle
 with normalized positive layer groups. General source categories and neighboring
 region propagation remain pending. `ScaleLastLayer` and
 `Using name[i]` remain mesh-inert outside their boundary-layer paths.
@@ -602,6 +602,16 @@ per-entity sizes and boundary point sizes propagate through composed size
 fields. `set_order` converts existing P1/P2 data independently of the generation
 option; legacy simplex P2 caches use a validated overlay that survives supported
 refinement, transforms, renumbering, and optimization.
+Its reference maps, inverse coordinates, location, orientations, keys and
+connectivity-derived queries evaluate the retained Tri6/Tet10 nodes. Quadratic
+simplex quality queries use actual affine derivative fields: nodal samples for
+SICN/SIGE, Bernstein coefficients for scaled Jacobian, and adaptive Bernstein
+bounds for determinant extrema and isotropy. Triangle area uses the order-five
+rule; tetrahedron volume follows Gmsh's corner-volume convention.
+Explicit-order nodal keys retain actual interpolation nodes independently of
+the requested basis count. Nodal key metadata omits an incomplete group;
+hierarchical metadata retains the submitted length with a `(0, 0)` tail,
+following the distinct pinned upstream branches.
 `recombine` pairs flagged entities' triangles into quadrangle records and
 `split_quadrangles` splits them back, both on the entity's discrete record.
 `get_periodic_keys` pairs master/slave periodic nodes into function-space
@@ -636,7 +646,10 @@ silent zeros). `get_nodes` reparametrizes every returned node
 on the queried Line or Plane entity — one `u` or `(u, v)` per node — while
 Points, Volumes, and all-dimension queries emit no parameters, matching Gmsh
 4.15.2's unparametrized cases; `get_nodes_by_element_type` packs each repeated
-node's parameters on its owning entity in entry order. Detached bulk/connectivity-derived,
+node's parameters on its owning entity in entry order. This query selects the
+element family across polynomial orders and includes each actual interpolation
+node. Exact-type connectivity and reference queries keep their type filter.
+Detached bulk/connectivity-derived,
 Jacobian, orientation, and quality queries accept nondefault `task`/`num_tasks` and
 return the contiguous Gmsh block slice (`begin=(task*count)÷num_tasks` through
 `end=((task+1)*count)÷num_tasks`); quality validation is slice-scoped over the
@@ -668,14 +681,15 @@ defines no Pyramid hierarchical family and no Trihedron basis. Hierarchical
 H(curl) functions and curls cover orders 0:11 on Line, Triangle, and Tetrahedron
 and orders 0:10 on Quadrangle, Hexahedron, and Prism.
 Values use Gmsh's orientation-major layout. Hierarchical orientation indices are
-lexicographic ranks of primary public node tags. Lagrange keys are public node tags;
-numeric Lagrange key queries that require nodes absent from the linear cache fail
-explicitly. Hierarchical H1/H(curl) keys follow Gmsh's
+lexicographic ranks of primary public node tags. Lagrange keys identify actual
+stored interpolation nodes independently of the requested basis order.
+Hierarchical H1/H(curl) keys follow Gmsh's
 getKeys layout: vertex keys are node tags, edge and face keys are
 global topology identifiers created lazily only for the requested type or element
 and located at stable midpoints or centroids, and bubble keys are public element
 tags. Key metadata reports owning entity dimension and
-order for complete element-sized groups. Session-independent reference quadrature
+order for complete element-sized groups, with any incomplete hierarchical tail
+retained as `(0, 0)`. Session-independent reference quadrature
 covers every fixed-node Point, Line, Triangle, Quadrangle, Tetrahedron, Hexahedron,
 Prism, and Pyramid type. `GaussN` preserves every Gmsh 4.15.2 economical table,
 including Triangle through order 20 and Tetrahedron through order 21; higher
@@ -1023,10 +1037,14 @@ Tests, differential fixtures, and typed hashes live in
 `test/artifacts/api_generate01_crc.txt`; release evidence is in STATUS.md.
 
 The independent `QuadTriNoNewVerts` planner now handles one isolated source
-quadrangle with four boundary vertices. A packed, independently certified
-full-hex relation and three-state cap chain choose conforming faces without
-new vertices. Recombined laterals retain earlier hexes and record the final
-unsliceable cell before introducing its certified centroid fan. One completed
+triangle or quadrangle with only its three or four boundary vertices. A packed,
+independently certified full-hex relation and three-state cap chain choose
+conforming quadrangle-source faces without new vertices. Recombined laterals
+retain earlier hexes and record the final unsliceable cell before introducing
+its certified centroid fan. The true six-corner prism relation has 13 admissible
+patterns; free triangular-source laterals use three existing-corner tetrahedra
+per interval, while recombined laterals retain a prism. Triangular caps need no
+diagonal chain, and this source category adds no nodes. One completed
 operation plan drives the actual boundary and classified projection; no persistent
 geometry-sensitive plan survives edits. A bounded exact convex-hull separation
 certificate rejects uncertified layer intersections before publication.
@@ -1038,13 +1056,32 @@ families before publication, including the Pyramid14 rational map. Legacy
 simplex mutation rebuilds prepare their P2 overlays before changing the cache.
 These conversion checks do not implement native curved-CAD node placement.
 
+P2 carriers come from actual classified primary edges and boundary triangles
+or quadrangles. Simplex and native mixed refinement inherit actual child edge,
+triangle and quadrangle supports through primary identity and sparse node-tag
+maps; node and cell edits
+preserve or remap them by primary identity. Quadratic boundary queries include
+the requested entity's full boundary closure. Endpoint labels alone cannot
+establish whether an edge lies on a curve, surface or volume.
+Native mixed construction uses these supports for edge and face nodes after
+compaction, retaining the original carrier even when a merged Point belongs
+to another CAD entity's boundary.
+
 Continue with the upstream category, pivot, neighbor-constraint, and layer-face
-phases for source grids, triangular/mixed roots, collapsed columns, shared
+phases for source grids, mixed roots, collapsed columns, shared
 regions, copied-source chains, and cyclic sweeps. Preserve source identities,
 certify complete boundary tiling, and restrict centroids to verified unsliceable
 cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
 sets and invariant checks instead of one accidental process result. The existing
 precise blockers remain on these unfinished categories.
+
+Start the grid phase with exactly two conforming Tri3 cells on one strictly
+convex four-sided planar transfinite source under axis-aligned normal translation
+in either direction. Join the prism
+relations across their common swept face, retain one column matrix, and prove
+source-complex coverage and actual stored-column product disjointness before
+publishing the complete typed boundary. Support both lateral policies and
+positive normalized graded layers within this bounded contract.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public
 tag lifecycle, remaining meshing algorithms and fields, broad formats/API,

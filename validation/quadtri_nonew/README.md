@@ -27,7 +27,35 @@ referenced volume nodes; one allocator-dependent outcome adds a volume-owned
 centroid in the first interval. Their actual node and family counts and local
 certificate outcomes are reported, without accepting them as valid parity
 fixtures.
-Source grids, triangular or mixed roots, collapsed columns, shared neighbors,
+The triangle extension adds 36 P1 cases with one plain source triangle: both
+source windings, positive and negative normal translation, tilted translation,
+uniform and graded groups, and mild rotation/twist in both angle directions.
+Free laterals produce three tetrahedra per interval; RecombLaterals produces
+one six-node prism per interval. Both use exactly three column nodes per level,
+with no centroid or collapsed fourth column. Source and cap remain triangles.
+Four affine triangle cases certify full Tet10/Prism18 support and the actual
+public P2/P1 roundtrip. Two more cases check separate and coincident independent
+source identities. This extends the original quad matrix and leaves its 24
+native CRC records unchanged.
+
+The two recombined triangle P2 cases also record a parameter-provenance gap.
+Both policies require five native owned nodes and 21 nodes with boundaries on
+each lateral, with complete computed parameter arrays of lengths 10 and 42.
+The free Tet10 Gmsh route has the same parameter lengths. Separate public units
+check ordinary Tri6 boundary curves, independent coincident Tet10 carriers,
+identity-preserving mutations and the refined child-face supports.
+For the recombined Gmsh route, `getNodes` supplies only four stored parameter
+values and `getNode` supplies no stored UV for its three Prism18 face centers
+on each planar ruled lateral. Nine face centers per case therefore have empty stored
+parameters. The native 2D/3D cache retains its existing computed-UV query
+contract: every returned UV must evaluate back to the actual node. With boundary
+nodes included, the fixture returns 21 nodes with 36 stored parameter values in
+Gmsh and 42 computed values natively. Direct geometric parametrization is
+checked independently. These two cases count the provenance difference
+explicitly; they do not claim exact stored-parameter parity. Complete stored
+2D/3D parameter provenance remains part of the broader public lifecycle work.
+
+Source grids, mixed roots, collapsed columns, shared neighbors,
 copied-source chains and closed revolutions require their separate planner
 phases and are outside this first slice.
 
@@ -38,8 +66,14 @@ with the emitted surface cells. Coordinates use an absolute 2e-11 bound.
 Translation additionally has its analytic swept volume. Warped quadrangles use
 their bilinear surface flux; no hidden diagonal or continuous curved-CAD volume
 is substituted for the represented P1 mesh.
+For triangles, the full Tet4 Jacobian is checked with exact rational arithmetic.
+The Pri6 determinant is differentiated directly from its six reference shape
+functions. It is affine over the reference triangle and quadratic axially;
+exact endpoint and stationary-minimum checks at all three triangle vertices
+therefore certify the entire reference prism, including warped cells.
 
-Free volume cells contain no added vertices. RecombLaterals keeps earlier hexes and
+Free volume cells contain no added vertices. In the quadrangle slice,
+RecombLaterals keeps earlier hexes and
 adds exactly one centroid in the final interval, producing two tetrahedra and
 five pyramids there. The upstream NoNew top split uses vertex pointer ordering;
 the native planner uses deterministic source-node precedence. Both opposite
@@ -55,6 +89,9 @@ observed typed signatures correspond to the two admissible cap diagonals.
 Native repeated execution must preserve its complete mixed-mesh CRC. Global
 GEO meshes retain the existing CAD/control point parts; these are separate from
 the volume's no-added-vertex rule.
+Triangle free-lateral signatures can also differ between Gmsh allocations.
+Their family counts, actual typed complex, finalized boundary and full P1 maps
+remain mandatory certificates; a random oracle's diagonal choices are not pins.
 
 Geometry units additionally cover standalone surface/volume and API/GEO
 consistency, equivalent regroupings, affine full-P2 elevation and return to P1,
@@ -103,3 +140,20 @@ The 24 records in `test/artifacts/quadtri_nonew_crc.txt` cover 20 global GEO P1
 products and four API volume P2 products. CAD point parts use sorted entity tags
 for NoNew products, keeping their exact output stable across dictionary insertion
 and rehashing. These pins agree on Julia 1.12.7 and 1.13.1 with bounds checks.
+
+The separate 40 records in `test/artifacts/quadtri_nonew_triangle_crc.txt` cover
+36 triangle global GEO P1 products and four actual public API P2 products. Build
+them with `QuadTriNoNewTriangleCertificates.artifact_records()` from
+`test/geometry/quadtri_nonew_triangle_certificates.jl`. Each tab-separated row
+contains `name`, `kind`, `n_nodes`, `n_cells`, `families`, and `sha`. The global
+digest combines the exact global mesh, every sorted entity mesh part and the
+classified volume product. The public P2 digest reads actual node and element
+queries, including external labels, coordinate bits, owner dimensions/tags,
+computed parameters, oriented connectivity and physical names. It therefore
+includes the simplex high-order overlay as well as native mixed cells.
+
+Regeneration uses normal Julia compilation and `--check-bounds=yes` on both
+Julia 1.12.7 and 1.13.1. Compare all 40 complete rows before replacing the pin
+file; retain the independent geometry certificates and the original 24 quad
+records. A changed digest is evidence to investigate, rather than a reason to
+skip an ownership or parameter query.

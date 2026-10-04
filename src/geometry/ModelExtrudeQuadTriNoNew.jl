@@ -1,10 +1,11 @@
-# The first NoNewVerts region kernel: one nondegenerate source quadrangle
-# with all four corners on the source boundary. Its face decisions form a
-# chain through the extrusion intervals, rather than independent hex splits.
+# Isolated NoNewVerts region kernels for one nondegenerate source triangle or
+# quadrangle with every corner on the source boundary. Quadrangle face choices
+# form a cap chain; triangular caps allow independent prism choices per interval.
 # All other source categories retain explicit preflight blockers until their
 # region-wide propagation phases are implemented.
 
 include("ModelExtrudeQuadTriNoNewTemplates.jl")
+include("ModelExtrudeNoNewPrismTemplates.jl")
 include("ModelExtrudeNoNewGlobal.jl")
 include("ModelExtrudeNoNewJacobian.jl")
 include("ModelExtrudeNoNewNonHexJacobian.jl")
@@ -12,7 +13,7 @@ include("ModelExtrudeNoNewNonHexJacobian.jl")
 const _EXTRUDE_NONEW_MAX_NODES = 10_000_000
 
 struct _ExtrudeNoNewCatalog
-    source_cell::NTuple{4,Int32}
+    source_cell::Union{NTuple{3,Int32},NTuple{4,Int32}}
     boundary_mask::UInt8
     levels::Vector{Float64}
     layer_refs::Vector{NTuple{2,Int32}}
@@ -23,7 +24,8 @@ end
     return first==cell[1] || first==cell[3]
 end
 
-function _extrude_nonew_levels(params,caller)
+function _extrude_nonew_levels(params,caller;source_nodes::Int=4,
+        extra_nodes::Int=1,cells_per_interval::Int=6)
     length(params.layers)==length(params.heights) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts layer groups have inconsistent lengths"))
     intervals=0
@@ -45,11 +47,12 @@ function _extrude_nonew_levels(params,caller)
         "$caller: QuadTriNoNewVerts requires at least one layer"))
     last(params.heights)==1.0 || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts requires a normalized final layer height of 1.0"))
-    # This bound precedes level/column allocation and includes a possible
-    # recorded final-cell centroid. It matches the structured kernels' default.
-    intervals<=(_EXTRUDE_NONEW_MAX_NODES-5)÷4 || throw(ArgumentError(
+    # This bound precedes level/column allocation. Quadrangles reserve a possible
+    # recorded final-cell centroid; triangles never create one. The node limit
+    # matches the structured kernels' default.
+    intervals<=(_EXTRUDE_NONEW_MAX_NODES-source_nodes-extra_nodes)÷source_nodes || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts exceeds the $_EXTRUDE_NONEW_MAX_NODES node limit"))
-    6intervals<=typemax(Int32) || throw(ArgumentError(
+    cells_per_interval*intervals<=typemax(Int32) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts output cell count exceeds Int32"))
     levels=_extrude_level_us(params)
     all(isfinite,levels) && all(i->levels[i]>levels[i-1],2:length(levels)) ||
@@ -64,32 +67,40 @@ function _extrude_nonew_levels(params,caller)
     return levels,refs
 end
 
-function _extrude_nonew_source_cell(source,caller)
-    source isa MixedMesh || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts triangular sources require the boundary-prism planner"))
+function _extrude_nonew_source_cell(source::Mesh,caller)
+    ntris(source)==1 || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts multiple source cells require the boundary-category planner"))
+    cell=ntuple(k->source.tris[k,1],3)
+    nnodes(source)==3 && allunique(cell) || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts requires one triangle with three distinct source nodes"))
+    return cell
+end
+
+function _extrude_nonew_source_cell(source::MixedMesh,caller)
     count=0
     cell=(Int32(0),Int32(0),Int32(0),Int32(0))
     for block in source.blocks
         msh_dimension(block.msh)==2 || continue
-        block isa ElementBlock && block.msh==3 || throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts currently requires one linear source quadrangle"))
+        block isa ElementBlock && block.msh in (2,3) || throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts currently requires one linear source triangle or quadrangle"))
         for column in axes(block.nodes,2)
             count+=1
             count==1 || throw(ArgumentError(
                 "$caller: QuadTriNoNewVerts multiple source cells require the boundary-category planner"))
-            cell=ntuple(k->block.nodes[k,column],4)
+            cell=block.msh==2 ? ntuple(k->block.nodes[k,column],3) :
+                ntuple(k->block.nodes[k,column],4)
         end
     end
-    count==1 && nnodes(source)==4 && allunique(cell) || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts requires one quadrangle with four distinct source nodes"))
+    count==1 && nnodes(source)==length(cell) && allunique(cell) || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts requires one cell with distinct source nodes"))
     return cell
 end
 
-function _extrude_nonew_region_boundary(m,t,source,caller)
+function _extrude_nonew_region_boundary(m,t,source,caller;sides::Int=4)
     boundary=abs.(_model_volume_boundary_surfaces(m,t,caller))
-    length(boundary)==6 && allunique(boundary) && source in boundary ||
+    length(boundary)==sides+2 && allunique(boundary) && source in boundary ||
         throw(ArgumentError(
-            "$caller: QuadTriNoNewVerts requires an isolated six-face sweep"))
+            "$caller: QuadTriNoNewVerts requires an isolated $(sides+2)-face sweep"))
     isempty(get(m.embeds,(3,t),NTuple{2,Int}[])) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts embedded volume constraints require the region planner"))
     top=0
@@ -115,24 +126,25 @@ function _extrude_nonew_region_boundary(m,t,source,caller)
                 "$caller: QuadTriNoNewVerts has incompatible boundary extrusion provenance"))
         end
     end
-    top!=0 && length(laterals)==4 || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts requires one copied cap and four laterals"))
+    top!=0 && length(laterals)==sides || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts requires one copied cap and $sides laterals"))
     return top,sort!(laterals)
 end
 
 function _extrude_nonew_preferences(m,source,cell,source_mesh,caller)
     curves=_model_projection_surface_curves(m,source)
-    length(curves)==4 || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts source needs four boundary generatrices"))
-    coordinates=ntuple(k->ntuple(d->source_mesh.coords[d,cell[k]],3),4)
-    choices=zeros(UInt8,4)
+    sides=length(cell)
+    length(curves)==sides || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts source needs $sides boundary generatrices"))
+    coordinates=ntuple(k->ntuple(d->source_mesh.coords[d,cell[k]],3),sides)
+    choices=zeros(UInt8,sides)
     for curve in curves
         chain=_extrude_curve_nodes(m,curve,caller)
         length(chain)==2 || throw(ArgumentError(
             "$caller: QuadTriNoNewVerts source boundary contains more than one segment"))
         found=false
-        for side in 1:4
-            next=mod1(side+1,4)
+        for side in 1:sides
+            next=mod1(side+1,sides)
             if chain[1]==coordinates[side] && chain[2]==coordinates[next]
                 choices[side]==0 || throw(ArgumentError(
                     "$caller: QuadTriNoNewVerts has duplicate source boundary incidence"))
@@ -148,7 +160,7 @@ function _extrude_nonew_preferences(m,source,cell,source_mesh,caller)
     end
     all(!iszero,choices) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts has a source corner outside its boundary"))
-    return ntuple(k->choices[k],4)
+    return ntuple(k->choices[k],sides)
 end
 
 # Build the constant-size cap transition relation once for the actual lateral
@@ -212,8 +224,12 @@ function _extrude_nonew_chain(intervals::Int,preferred,top_state::UInt8,caller)
     return result
 end
 
-@inline function _extrude_nonew_corners(cols,cell,layer)
+@inline function _extrude_nonew_corners(cols,cell::NTuple{4,Int32},layer)
     return ntuple(k->k<=4 ? cols[layer,cell[k]] : cols[layer+1,cell[k-4]],8)
+end
+
+@inline function _extrude_nonew_corners(cols,cell::NTuple{3,Int32},layer)
+    return ntuple(k->k<=3 ? cols[layer,cell[k]] : cols[layer+1,cell[k-3]],6)
 end
 
 function _extrude_nonew_add_diagonals!(edges,v,states)
@@ -238,7 +254,8 @@ function _extrude_nonew_certify(v,edges,template,caller)
     end
     template===nothing && return nothing
     total=0.0
-    for (a,b,c,d) in _EXTRUDE_CELL_TETS[5]
+    family=length(v)==6 ? 6 : 5
+    for (a,b,c,d) in _EXTRUDE_CELL_TETS[family]
         total+=tet_signed_volume(v[a],v[b],v[c],v[d])
     end
     orientation=total>0 ? 1 : -1
@@ -285,16 +302,26 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     source=abs(link[2])
     haskey(m.meshing.extrude_sources,(2,source)) && throw(ArgumentError(
         "$caller: QuadTriNoNewVerts copied or chained sources require the dependency planner"))
-    top,laterals=_extrude_nonew_region_boundary(m,t,source,caller)
-    levels,refs=_extrude_nonew_levels(params,caller)
+    sides=length(_model_projection_surface_curves(m,source))
+    sides in (3,4) || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts other source boundaries require the boundary-category planner"))
+    top,laterals=_extrude_nonew_region_boundary(m,t,source,caller;sides)
+    levels,refs=_extrude_nonew_levels(params,caller;source_nodes=sides,
+        extra_nodes=sides==4 ? 1 : 0,cells_per_interval=sides==4 ? 6 : 3)
     source_mesh=mesh_model_surface(m,source;min_angle_deg=min_angle_deg,
         max_periodic_passes=max_periodic_passes,size_field=size_field)
     cell=_extrude_nonew_source_cell(source_mesh,caller)
+    length(cell)==sides || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts source cell does not match its boundary category"))
     preferred=_extrude_nonew_preferences(m,source,cell,source_mesh,caller)
     cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
     all(p->all(isfinite,p),cols) && allunique(cols) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts collapsed or coincident columns require the degenerate-cell planner"))
     _extrude_nonew_global_certify(cols,cell,spec,caller)
+    if length(cell)==3
+        return _extrude_nonew_triangle_finish(m,t,params,source,source_mesh,
+            cell,preferred,cols,levels,refs,top,laterals,caller)
+    end
     intervals=length(refs)
     top_state=UInt8(_extrude_nonew_top_diagonal(cell) ? 1 : 2)
     states=Matrix{UInt8}(undef,6,intervals)
@@ -352,3 +379,5 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         top_tag=top,lateral_tags=laterals,catalog=catalog,faces=states,
         problem_layers=problems)
 end
+
+include("ModelExtrudeNoNewTriangle.jl")

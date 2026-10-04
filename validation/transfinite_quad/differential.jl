@@ -223,6 +223,156 @@ function check_case(arrangement, symbol, counts=(5, 4, 5, 4); tilted=false)
            mixed_crc(mesh).sha, expected[1]
 end
 
+# Public Model surfaces additionally choose GEdgeLoop's unsigned automatic
+# corner frame, then orient emitted cells to CAD before the user's Reverse.
+# Keep the low-level ordered-grid checks above unchanged.
+function public_frame_cases()
+    result=NamedTuple[]
+    for axis in (:xy,:xz),direction in (-1,1),arrangement in
+        ("Left","Right","AlternateLeft","AlternateRight"),
+        corners in ((),(1,2,3,4),(1,4,3,2),(2,3,4,1)),recombine in (false,true)
+        push!(result,(;axis,direction,arrangement,corners,recombine))
+    end
+    for direction in (-1,1),arrangement in
+        ("Left","Right","AlternateLeft","AlternateRight"),recombine in (false,true)
+        push!(result,(;direction,arrangement,recombine,count=3))
+        push!(result,(;direction,arrangement,recombine,reverse=true))
+    end
+    for directions in 0:15,direction in (-1,1),recombine in (false,true)
+        push!(result,(;direction,arrangement="AlternateLeft",recombine,directions))
+    end
+    for direction in (-1,1),raised_corner in 0:4,recombine in (false,true)
+        push!(result,(;direction,arrangement="Left",recombine,count=5,kind=:sphere,raised_corner))
+    end
+    return result
+end
+
+function public_cycle(nodes)
+    n=length(nodes)
+    return minimum(ntuple(k->nodes[mod1(start+k-1,n)],n) for start in 1:n)
+end
+
+function public_orientation(coordinates,nodes,normal)
+    a,b,c=(Rational{BigInt}.(coordinates[:,node]) for node in nodes[1:3])
+    u=b.-a;v=c.-a
+    cross=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],u[1]*v[2]-u[2]*v[1])
+    return sign(sum(cross[k]*normal[k] for k in 1:3))
+end
+
+function check_public_frame(case)
+    native=Tessella.GeoModel()
+    spherical=get(case,:kind,:plane)===:sphere
+    points=spherical ? ntuple(k->begin
+        corners=((0.,0.),(1.,0.),(1.,1.),(0.,1.))
+        height=case.raised_corner in (1,4) ? .125 : .5
+        (corners[k]...,k==case.raised_corner ? height : 0.)
+    end,4) :
+        get(case,:axis,:xy)===:xy ?
+        ((0.,0.,0.),(2.,0.,0.),(2.5,1.5,0.),(.5,1.5,0.)) :
+        ((0.,0.,0.),(2.,0.,0.),(2.5,0.,1.5),(.5,0.,1.5))
+    gmsh.clear();gmsh.model.add("public_quad_frame")
+    # Native Model has no smoothing directive; keep the public CAD/frame
+    # comparison independent of the optional smoothing used above.
+    gmsh.option.setNumber("Mesh.Smoothing",0)
+    for (tag,point) in enumerate(points)
+        gmsh.model.geo.addPoint(point...,1.,tag)
+        Tessella.Model.add_point!(native,point...;tag,mesh_size=1.)
+    end
+    count=get(case,:count,2);directions=get(case,:directions,0)
+    stored=ntuple(k->iszero(directions&(1<<(k-1))) ? 1 : -1,4)
+    for curve in 1:4
+        a=stored[curve]==1 ? curve : mod1(curve+1,4)
+        b=stored[curve]==1 ? mod1(curve+1,4) : curve
+        gmsh.model.geo.addLine(a,b,curve)
+        Tessella.Model.add_line!(native,a,b;tag=curve)
+        gmsh.model.geo.mesh.setTransfiniteCurve(curve,count)
+        Tessella.Model.set_transfinite_curve!(native,curve,count)
+    end
+    loop=case.direction==1 ? collect(1:4) : [-4,-3,-2,-1]
+    signed=[s*stored[abs(s)] for s in loop]
+    gmsh.model.geo.addCurveLoop(signed,1)
+    Tessella.Model.add_curve_loop!(native,signed;tag=1)
+    if spherical
+        gmsh.model.geo.addPoint(.5,.5,-2.,1.,5)
+        Tessella.Model.add_point!(native,.5,.5,-2.;tag=5,mesh_size=1.)
+        gmsh.model.geo.addSurfaceFilling([1],1,5)
+        Tessella.Model.add_ruled_surface!(native,[1];tag=1,sphere_center=5)
+    else
+        gmsh.model.geo.addPlaneSurface([1],1)
+        Tessella.Model.add_plane_surface!(native,[1];tag=1)
+    end
+    corners=collect(Int,get(case,:corners,()))
+    gmsh.model.geo.mesh.setTransfiniteSurface(1,case.arrangement,corners)
+    Tessella.Model.set_transfinite_surface!(native,1,case.arrangement,corners)
+    if case.recombine
+        gmsh.model.geo.mesh.setRecombine(2,1)
+        Tessella.Model.set_recombine!(native,2,1)
+    end
+    gmsh.model.geo.synchronize()
+    if get(case,:reverse,false)
+        gmsh.model.mesh.setReverse(2,1,true)
+        Tessella.Model.set_reverse!(native,2,1,true)
+    end
+    gmsh.model.mesh.generate(2)
+    mesh=try
+        Tessella.Model.mesh_model_surface(native,1)
+    catch caught
+        error("public source meshing failed on $case: "*sprint(showerror,caught))
+    end
+    Tessella.validate(mesh).ok || error("public frame produced invalid cells on $case")
+    types,_,families=gmsh.model.mesh.getElements(2,1)
+    tags=sort!(unique(reduce(vcat,families;init=UInt64[])))
+    length(tags)==size(mesh.coords,2) || error("public source node count differs on $case")
+    oracle_coords=Dict(tag=>gmsh.model.mesh.getNode(tag)[1] for tag in tags)
+    used=falses(size(mesh.coords,2));mapping=Dict{UInt64,Int32}()
+    maximum_error=0.
+    scale=max(1.,maximum(abs,mesh.coords))
+    for tag in tags
+        best=0;distance=Inf
+        for index in axes(mesh.coords,2)
+            used[index] && continue
+            candidate_error=_distance(oracle_coords[tag],view(mesh.coords,:,index))
+            if candidate_error<distance;best=index;distance=candidate_error;end
+        end
+        # Uniform curved-edge spacing upstream has ~1e-12 Newton noise;
+        # the spherical fixtures also retain its geometric projection noise.
+        best!=0 && distance<=2e-9*scale || error(
+            "public source coordinate mismatch on $case: $distance")
+        mapping[tag]=Int32(best);used[best]=true
+        maximum_error=max(maximum_error,distance)
+    end
+    all(used) || error("public source has an unmatched actual node on $case")
+    native_blocks=mesh isa Tessella.MeshTypes.Mesh ?
+        (Tessella.Elements.ElementBlock(2,mesh.tris),) : mesh.blocks
+    native_cells=sort!([(Int(block.msh),public_cycle(cell))
+                       for block in native_blocks for cell in eachcol(block.nodes)])
+    oracle_cells=Tuple[]
+    for (msh,nodes) in zip(types,families)
+        width=gmsh.model.mesh.getElementProperties(msh)[4]
+        for cell in eachcol(reshape(nodes,width,:))
+            push!(oracle_cells,(Int(msh),public_cycle(Int32[mapping[tag] for tag in cell])))
+        end
+    end
+    native_cells==sort!(oracle_cells) || error(
+        "public oriented source connectivity differs on $case")
+    if !spherical
+        normal=get(case,:axis,:xy)===:xy ?
+            (0,0,case.direction) : (0,-case.direction,0)
+        expected=get(case,:reverse,false) ? -1 : 1
+        for block in native_blocks,cell in eachcol(block.nodes)
+            public_orientation(mesh.coords,cell,normal)==expected || error(
+                "public source winding disagrees with CAD/Reverse on $case")
+        end
+        projected=Tessella.Model.model_to_mixed(native,mesh,1)
+        for point in 1:4
+            index=only(findall(i->Tuple(mesh.coords[:,i])==points[point],axes(mesh.coords,2)))
+            projected.entity_data.node_entities[index]==(0,Int32(point)) || error(
+                "public source primary Point identity differs on $case")
+        end
+    end
+    return length(native_cells),maximum_error
+end
+
 gmsh.initialize([GMSH_EXECUTABLE, "-nopopup"], false, false)
 try
     gmsh.option.setNumber("General.Terminal", 0)
@@ -263,12 +413,20 @@ try
     push!(errors, maximum_error)
     coordinate_samples += nodes
 
+    public_cases=public_frame_cases()
+    public_cells=0;public_maximum_error=0.
+    for case in public_cases
+        cells,cell_error=check_public_frame(case)
+        public_cells+=cells;public_maximum_error=max(public_maximum_error,cell_error)
+    end
     println("TRANSFINITE_QUAD_DIFFERENTIAL_OK gmsh=$api_version " *
             "arrangements=$(length(cases)) resolutions=4 geometries=2 " *
             "coordinate_samples=$coordinate_samples " *
             "max_node_error=$(maximum(errors)) reference_nodes=20 " *
             "reference_segments=14 reference_quadrangles=12 " *
-            "arrangement_topologies=1 ordered_connectivity=1")
+            "arrangement_topologies=1 ordered_connectivity=1 " *
+            "public_frame_cases=$(length(public_cases)) public_frame_cells=$public_cells " *
+            "public_frame_max_node_error=$public_maximum_error")
 finally
     gmsh.finalize()
 end

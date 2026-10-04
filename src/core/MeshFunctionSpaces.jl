@@ -1233,12 +1233,8 @@ function _keys_for_cells(mesh::Mesh,cells::AbstractMatrix{Int32},
                          face_topology::Union{Nothing,MeshFaceTopology},
                          element_tags::Union{Nothing,Vector{UInt64}},
                          return_coord::Bool,caller::AbstractString)
-    if !space.hierarchical && size(cells,1)!=nodal_count
-        throw(ArgumentError(
-            "$caller: element type $element_type stores $(size(cells,1)) " *
-            "nodal keys, but the requested basis requires $nodal_count; " *
-            "the cached mesh owns only its stored interpolation nodes"))
-    end
+    # Gmsh nodal keys identify the element's stored interpolation nodes even
+    # when an explicit-order function space has a different basis count.
     if space.hierarchical
         family=msh_spec(element_type).family
         order=space.key_order
@@ -1403,7 +1399,11 @@ function _checked_entity_keys(values,caller::AbstractString)
     return result
 end
 
-"""Return `(entity dimension, polynomial order)` metadata for complete key groups."""
+"""Return `(entity dimension, polynomial order)` key metadata.
+
+Nodal metadata omits incomplete requested-basis groups. Hierarchical metadata
+preserves the input length and pads an incomplete trailing group with `(0, 0)`.
+"""
 function mesh_keys_information(type_keys,entity_keys,element_type_value,
                                function_space_type;
                                caller::AbstractString="mesh_keys_information")
@@ -1418,9 +1418,10 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
     length(types_raw)==length(entities) || throw(ArgumentError(
         "$caller: type_keys and entity_keys must have equal lengths"))
     keys_per_element=nodal_count
-    length(types_raw)%keys_per_element==0 || throw(ArgumentError(
-        "$caller: key count $(length(types_raw)) must be divisible by " *
-        "$keys_per_element for element type $element_type"))
+    # Both upstream branches fill complete requested-basis groups. The nodal
+    # branch appends only those groups; the hierarchical branch resizes to the
+    # submitted key count and leaves an incomplete tail value-initialized.
+    result_length=(length(types_raw)÷keys_per_element)*keys_per_element
     if space.hierarchical
         # Per-element (dimension, order) metadata repeats the basis's
         # getKeysInfo sequence; Gmsh 4.15.2 answers it regardless of the
@@ -1429,18 +1430,20 @@ function mesh_keys_information(type_keys,entity_keys,element_type_value,
             _h1_keys_info(family,space.key_order) :
             _hcurl_keys_info(family,space.key_order)
         result=Vector{Tuple{Int32,Int32}}(undef,length(types_raw))
-        for group_start in 1:keys_per_element:length(result)
+        for group_start in 1:keys_per_element:result_length
             for index in 1:keys_per_element
                 result[group_start+index-1]=pattern[index]
             end
         end
+        for index in result_length+1:length(result)
+            result[index]=(Int32(0),Int32(0))
+        end
         return result
     end
-    types=types_raw
     bubble_count=_nodal_bubble_count(basis_type)
     nonbubble_count=nodal_count-bubble_count
     dimension=Int32(msh_spec(basis_type).dim)
-    result=Vector{Tuple{Int32,Int32}}(undef,length(types))
+    result=Vector{Tuple{Int32,Int32}}(undef,result_length)
     order=Int32(space.key_order)
     for group_start in 1:nodal_count:length(result)
         fill!(@view(result[group_start:group_start+nonbubble_count-1]),
