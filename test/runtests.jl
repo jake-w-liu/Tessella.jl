@@ -85,6 +85,7 @@ using Tessella
     include("geometry/geo_control_flow_test.jl") # If/For/While/Function control flow + conditional operators
     include("geometry/geo_struct_test.jl")     # Struct/NameSpace/NameStruct namespaces + EOF rules
     include("geometry/geo_transform_test.jl") # Translate/Dilate/Rotate/Symmetry + Duplicata + coherence
+    include("geometry/model_coherence_precision_test.jl") # local tolerance and rounded spatial bins
     include("geometry/geo_extrude_test.jl")  # translational Extrude + params + lateral merge
     include("geometry/geo_curved_test.jl")   # circle/ellipse arcs, ruled surfaces, .geo curved statements
     include("geometry/geo_spline_test.jl")   # Spline/BSpline/Bezier/Nurbs records + .geo statements
@@ -103,6 +104,7 @@ using Tessella
     include("geometry/quadtri_nonew_prism_global_test.jl") # bounded six-corner hull separation
     include("geometry/geo_quadtri_nonew_test.jl") # isolated NoNew source-quad sweeps
     include("geometry/geo_quadtri_nonew_triangle_test.jl") # isolated triangular-source sweeps
+    include("geometry/geo_quadtri_nonew_two_tri_test.jl") # jointly certified two-triangle source grids
     include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
     include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
@@ -117,6 +119,7 @@ using Tessella
     include("interfaces/api_mixed_cache_test.jl") # native mixed cache ownership and mutations
     include("interfaces/api_p2_certification_test.jl") # full P2 maps and atomic publication
     include("interfaces/api_p2_boundary_ownership_test.jl") # actual primary support and boundary closure
+    include("interfaces/api_nonew_two_tri_boundary_test.jl") # two-triangle grid P2 carriers and lifecycle
     include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning

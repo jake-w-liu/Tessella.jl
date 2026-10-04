@@ -245,9 +245,13 @@ end
             @test model.curve_params==params && model.meshing.extrude==attrs
             @test (api.mesh.get_max_node_tag(),api.mesh.get_max_element_tag())==counters
         end)
+        # The unrecombined two-triangle grid is supported. Larger source
+        # grids still require the boundary-category planner under either
+        # source recombination policy.
         sources=(
             replace(fixture.source,"Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
-            replace(fixture.source,"Recombine Surface{1};"=>""),
+            replace(fixture.source,"Recombine Surface{1};"=>"",
+                    "Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
             replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{0,0,0},Pi/3}"))
         for source in sources
             geometry=_QTNN.execute(source;dim=0)

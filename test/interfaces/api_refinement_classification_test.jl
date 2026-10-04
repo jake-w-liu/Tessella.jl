@@ -61,11 +61,38 @@ using Tessella
     end
 end
 
-@testset "multiple surface refinement retains classification" begin
+@testset "single curve refinement retains classification and parameters" begin
     api=Tessella.API
     try
         api.initialize()
-        for surface in 1:2
+        api.model.add_point(0,0,0;tag=1)
+        api.model.add_point(2,0,0;tag=2)
+        api.model.add_line(1,2;tag=1)
+        api.mesh.set_transfinite_curve(1,3)
+        api.mesh.generate(1)
+        for level in 1:2
+            api.mesh.refine()
+            segments=2^(level+1)
+            @test api.mesh.get_element_types(1,1)==Int32[1]
+            @test length(api.mesh.get_elements_by_type(1,1)[1])==segments
+            @test length(api.mesh.get_nodes(1,1,true)[1])==segments+1
+            tags,_,parameters=api.mesh.get_nodes(1,1)
+            @test length(tags)==segments-1
+            @test sort(parameters)==[index/segments for index in 1:segments-1]
+            @test length(api.mesh.get_nodes(0,1)[1])==1
+            @test length(api.mesh.get_nodes(0,2)[1])==1
+        end
+    finally
+        api.finalize()
+    end
+end
+
+@testset "single and multiple surface refinement retains classification" begin
+    api=Tessella.API
+    for surface_count in (1,2)
+    try
+        api.initialize()
+        for surface in 1:surface_count
             offset=3(surface-1)
             for (i,(x,y)) in enumerate(((0.,0.),(1.,0.),(0.,1.)))
                 api.model.add_point(x+2(surface-1),y,0;tag=offset+i)
@@ -79,16 +106,17 @@ end
             api.mesh.set_transfinite_surface(surface)
         end
         api.mesh.generate(2)
-        counts=[length(api.mesh.get_elements_by_type(2,tag)[1]) for tag in 1:2]
+        counts=[length(api.mesh.get_elements_by_type(2,tag)[1]) for tag in 1:surface_count]
         for level in 1:2
             @test validate(api.mesh.refine()).ok
-            for tag in 1:2
+            for tag in 1:surface_count
                 @test length(api.mesh.get_elements_by_type(2,tag)[1])==4^level*counts[tag]
                 @test !isempty(api.mesh.get_nodes(2,tag)[1])
             end
         end
     finally
         api.finalize()
+    end
     end
 end
 

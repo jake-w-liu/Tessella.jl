@@ -186,13 +186,20 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   AddVerts checks the complete reference maps of its actual retained cells.
   Translation, rotation, twist, fixed columns, graded layers, neighboring sweeps,
   and toroidal revolutions have pinned oracle coverage.
-- native `QuadTriNoNewVerts` for an isolated source triangle or quadrangle, with normalized
+- native `QuadTriNoNewVerts` for an isolated source triangle or quadrangle, or a
+  strictly convex four-corner planar transfinite source containing two Tri3 cells,
+  with normalized
   positive layer groups and free or recombined laterals; one completed operation
   plan supplies the volume, surfaces, and classified projection. Whole-domain
   P1 Jacobian and typed-boundary checks plus bounded convex-hull separation reject
   uncertified or overlapping layers before publishing mesh state.
   Triangular sources emit three tetrahedra or one retained prism per interval
   without adding nodes; their caps preserve the actual source-cell ordering.
+  Two-triangle sources support axis-aligned normal translation in either
+  direction. Their joined prism relation emits six tetrahedra or two prisms per
+  interval with exactly `4(N+1)` nodes. Actual source incidence and strictly
+  ordered column planes certify the complete product; shared typed faces have
+  opposite outward cycles, and the internal diagonal has no CAD lateral surface.
 
 P1 through P4 remain **in progress**. Current non-claims include boundary-layer
 topologies beyond the certified multi-region fan layouts, the full Gmsh

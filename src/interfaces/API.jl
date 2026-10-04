@@ -1732,6 +1732,11 @@ function _classify_cached_mesh(m::GeoModel,mesh::Mesh,dim::Int,tag::Int,
             Int32[abs(boundary) for boundary in entity.boundaries]
     end
     owner=Dict{NTuple{4,Int32},Int32}()
+    owner_capacity=0
+    for block in classified.blocks
+        owner_capacity=Base.checked_add(owner_capacity,size(block.nodes,2))
+    end
+    sizehint!(owner,owner_capacity)
     for (block_index,block) in enumerate(classified.blocks)
         block_entities=data.block_entities[block_index]
         for column in axes(block.nodes,2)
@@ -1811,6 +1816,18 @@ function _merge_classified_parts(parts,remaps,seg_keeps,merged::Mesh,
         class.entity[1]==dim || return nothing
         push!(entities,(dim,Int32(tag)))
     end
+    edge_capacity=0;face_capacity=0;quad_capacity=0
+    for (_,_,class) in parts
+        edge_capacity=Base.checked_add(edge_capacity,length(class.edge_entities))
+        face_capacity=Base.checked_add(face_capacity,length(class.face_entities))
+        quad_capacity=Base.checked_add(quad_capacity,length(class.quad_entities))
+    end
+    sizehint!(edge_entities,edge_capacity)
+    sizehint!(face_entities,face_capacity)
+    sizehint!(quad_entities,quad_capacity)
+    sizehint!(seg_entities,nsegs(merged))
+    sizehint!(tri_entities,ntris(merged))
+    sizehint!(tet_entities,ntets(merged))
     for (part,(_,part_mesh,class)) in enumerate(parts)
         remap=remaps[part]
         for (key,owner) in class.edge_entities
@@ -1869,6 +1886,12 @@ function _merge_entity_meshes(parts,caller::AbstractString;
         return _merge_mixed_entity_meshes(parts,caller;node_entities=node_entities)
     index=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
     coordinates=NTuple{3,Float64}[]
+    node_capacity=0
+    for (_,mesh) in parts
+        node_capacity=Base.checked_add(node_capacity,nnodes(mesh))
+    end
+    sizehint!(index,node_capacity)
+    sizehint!(coordinates,node_capacity)
     remaps=Vector{Vector{Int32}}(undef,length(parts))
     for (part,(tag,mesh)) in enumerate(parts)
         remap=Vector{Int32}(undef,nnodes(mesh))
@@ -1891,15 +1914,21 @@ function _merge_entity_meshes(parts,caller::AbstractString;
         "$caller: merged mesh exceeds the Int32 node limit"))
     counts=zeros(Int,3)
     for (_,mesh) in parts
-        counts[1]+=nsegs(mesh);counts[2]+=ntris(mesh);counts[3]+=ntets(mesh)
+        counts[1]=Base.checked_add(counts[1],nsegs(mesh))
+        counts[2]=Base.checked_add(counts[2],ntris(mesh))
+        counts[3]=Base.checked_add(counts[3],ntets(mesh))
     end
     segs=Matrix{Int32}(undef,2,counts[1])
     tris=Matrix{Int32}(undef,3,counts[2])
     tets=Matrix{Int32}(undef,4,counts[3])
     seg_tag=Int32[];tri_tag=Int32[];tet_tag=Int32[]
+    sizehint!(seg_tag,counts[1])
+    sizehint!(tri_tag,counts[2])
+    sizehint!(tet_tag,counts[3])
     # Segments on seams shared between parts (e.g. compound members) appear in
     # every part — keep the first occurrence so each curve owns one chain.
     seen_segs=Set{NTuple{2,Int32}}()
+    sizehint!(seen_segs,counts[1])
     seg_keeps=[falses(nsegs(mesh)) for (_,mesh) in parts]
     seg_count=0
     for (part,(_,mesh)) in enumerate(parts)
@@ -4595,7 +4624,6 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
                 "API.mesh.refine: curved quadratic simplex refinement is not " *
                 "implemented; existing actual midpoint geometry is retained"))
         staged_model=overlay===nothing ? nothing : deepcopy(m)
-        projection_model=staged_model===nothing ? m : staged_model
         # `reverse` may legitimately invert tets; refinement preserves
         # orientation, so an inverted input yields an inverted (but otherwise
         # structurally valid) output — bypass only the orientation check.
@@ -4606,11 +4634,10 @@ function _refine(;max_nodes=typemax(Int32),max_cells=typemax(Int32))
         cache=_copy_mesh(refined)
         new_class=if class===nothing
             nothing
-        elseif length(class.entities)<=1
-            _classify_cached_mesh(
-                projection_model,_classification_skeleton(refined,true),
-                class.entity[1],Int(class.entity[2]),cache)
         else
+            # Refinement changes the actual subdivision, including layered
+            # source grids. Inherit certified parent supports for single and
+            # multiple entities instead of reprojecting onto the old topology.
             _inherit_refined_classification(class,refined,cache)
         end
         _replace_mesh_cache_with_overlay_locked!(cache,new_class,"API.mesh.refine";

@@ -38,6 +38,59 @@ public P2/P1 roundtrip. Two more cases check separate and coincident independent
 source identities. This extends the original quad matrix and leaves its 24
 native CRC records unchanged.
 
+The bounded two-Tri extension replays twelve already captured Gmsh 4.15.2
+products from `test/artifacts/quadtri_nonew_two_tri_oracle.toml`; it does not
+regenerate those oracle meshes. The exact inputs use one four-sided TF2 source
+with two actual Tri3 cells, normal translation in both directions, free and
+recombined laterals, and one, three uniform, or three graded intervals. The
+catalog retains input hashes, all raw P1/P2 node and lower/volume cell data,
+classified owners, primary identity remaps, interpolation supports, and stored
+and computed parameter payloads. `QUADTRI_NONEW_CASE=nonew_two_tri` selects these
+twelve cases. Separate terminal counters preserve the original 86-case evidence.
+The companion `test/artifacts/quadtri_nonew_two_tri_crc.txt` pins 24 native API
+P1/P2 products for the same matrix. It uses the existing strict public
+node/cell/owner/parameter serializer, extended with sorted actual support
+catalogs and complete computed surface own/closure queries. The 24 rows are
+byte-identical on normal Julia 1.12.7 and 1.13.1 with bounds checks and are
+asserted by `api_nonew_two_tri_boundary_test.jl`. The earlier 40 triangle and
+24 quadrangle records remain unchanged.
+
+Each two-Tri P1 product has `4(N+1)` column nodes and either `6N` tetrahedra or
+`2N` prisms. Its actual source winding and diagonal must match the saved source;
+both native and saved volume products receive independent typed-face,
+opposite-incidence, convex-source/product and whole Tet4/Pri6 map certificates.
+Free volume template choices may differ from the saved pointer-selected
+connectivity. Every native mesh must match its own finalized external surfaces.
+The full P2 graph has `18N+9` nodes, owned by Points/Curves/Surfaces/Volume in
+counts `8`, `8N+4`, `8N-2`, `2N-1`. Each of the four laterals has `2N-1` owned
+nodes and `6N+3` nodes including its boundary. Both cap diagonal midpoints are
+Surface-owned; internal shared supports are Volume-owned without an invented
+CAD surface. Native P2 support identity is checked against its own actual
+projected P1 Line/Tri/Quad carriers and interpolation, followed by actual public
+Jacobian quadrature and the return to P1. Saved raw tags are not native tag
+allocation pins. Coordinate comparisons retain the absolute `2e-11` bound.
+
+The six recombined saved fixtures contain 56 lateral face centers with empty
+stored UVs. They have valid independently computed geometric inverses. The
+native query contract returns complete computed own/closure UV pairs and must
+evaluate them back to the actual node coordinates. Separate provenance counters
+record this difference; the saved raw partial arrays remain in the artifact.
+
+Run the independent allocation and payload gate with normal compilation:
+`julia --project=. --check-bounds=yes validation/quadtri_nonew/two_tri_resources.jl`.
+It needs no Gmsh installation. Both lateral policies pass through standalone,
+GEO, classified projection and public API generation at 1,000, 2,000 and 4,000
+intervals. Each measured output receives a complete linear audit of actual
+column identities, cell maps, partition volumes and opposite internal face
+cycles; the four paths must produce the same geometry digest. Allocation
+doubling and lowered helper code are checked separately, with every production
+and certificate input hashed before and after. Direct indexed construction
+uses certified columns for the volume and its lateral surfaces, avoiding
+temporary coordinate-cell arrays and coordinate welding dictionaries. API
+classification and merge tables reserve their known payload bounds. Normal
+mesh constructors and boundary/projection copies remain part of these measured
+allocations.
+
 The two recombined triangle P2 cases also record a parameter-provenance gap.
 Both policies require five native owned nodes and 21 nodes with boundaries on
 each lateral, with complete computed parameter arrays of lengths 10 and 42.
@@ -55,9 +108,12 @@ checked independently. These two cases count the provenance difference
 explicitly; they do not claim exact stored-parameter parity. Complete stored
 2D/3D parameter provenance remains part of the broader public lifecycle work.
 
-Source grids, mixed roots, collapsed columns, shared neighbors,
+Other source grids, mixed roots, collapsed columns, shared neighbors,
 copied-source chains and closed revolutions require their separate planner
-phases and are outside this first slice.
+phases and are outside these bounded slices. The two-Tri category additionally
+requires a strictly convex source in an axis-aligned plane with straight CAD
+curves and normal translation. Rotations, twists and tilted translation of this
+source category remain separate planner work.
 
 Independent certificates check the actual typed face complex, opposite
 orientations of shared faces, a closed manifold boundary, Euler characteristic,

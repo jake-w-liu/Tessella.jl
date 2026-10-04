@@ -4,6 +4,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__,"..","..");io=devnull)
 using Tessella
+using TOML, SHA
 using Tessella.Elements: MixedMesh, ElementBlock, msh_spec
 using Tessella.MeshTypes: nnodes
 
@@ -11,6 +12,8 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_certificate
 const QTNN=QuadTriNoNewCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_triangle_certificates.jl"))
 const QTNT=QuadTriNoNewTriangleCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_two_tri_certificates.jl"))
+const QTT=QuadTriNoNewTwoTriCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -122,6 +125,243 @@ function initialize_oracle()
     gmsh.option.setNumber("Mesh.SecondOrderLinear",0)
     gmsh.option.setNumber("Mesh.SecondOrderIncomplete",0)
 end
+
+# These twelve products were already captured from pinned Gmsh 4.15.2. Replay
+# their complete integer topology and provenance without regenerating them.
+# Raw oracle tags/templates remain evidence, not native allocation pins.
+const TWO_TRI_EDGE_PATTERNS=Dict(
+    2=>((1,2),(2,3),(3,1)),3=>((1,2),(2,3),(3,4),(4,1)),
+    4=>((1,2),(2,3),(3,1),(1,4),(2,4),(3,4)),
+    6=>((1,2),(2,3),(3,1),(4,5),(5,6),(6,4),(1,4),(2,5),(3,6)))
+const TWO_TRI_FACE_PATTERNS=Dict(
+    4=>((1,3,2),(1,2,4),(2,3,4),(3,1,4)),
+    6=>((1,3,2),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6)))
+
+function two_tri_saved_mesh(record,phase,dimension,entity)
+    stage=record[phase]
+    rows=only(filter(e->e["dim"]==dimension && e["tag"]==entity,stage["entities"]))["cells"]
+    used=sort!(unique(vcat((row["nodes"] for row in rows)...)))
+    index=Dict(tag=>Int32(i) for (i,tag) in enumerate(used))
+    nodes=Dict(row["tag"]=>row for row in stage["nodes"])
+    coordinates=hcat((Float64.(nodes[tag]["coordinates"]) for tag in used)...)
+    types=unique(row["type"] for row in rows)
+    blocks=ElementBlock[]
+    for msh in types
+        chosen=filter(row->row["type"]==msh,rows)
+        cells=hcat((Int32[index[tag] for tag in row["nodes"]] for row in chosen)...)
+        push!(blocks,ElementBlock(msh,cells))
+    end
+    mesh=dimension==2 && types==[2] ? Tessella.MeshTypes.Mesh(coordinates;tris=only(blocks).nodes) :
+                                      MixedMesh(coordinates,blocks)
+    return mesh,index
+end
+
+function two_tri_add_carrier!(catalog,support,owner)
+    push!(get!(catalog,Tuple(sort!(collect(support))),Set{Tuple{Int,Int}}()),owner)
+end
+
+function two_tri_actual_carriers(rows)
+    catalog=Dict{Tuple,Set{Tuple{Int,Int}}}()
+    for (msh,cell,owner) in rows
+        if msh==1
+            two_tri_add_carrier!(catalog,cell,owner)
+        elseif haskey(TWO_TRI_EDGE_PATTERNS,msh)
+            for (a,b) in TWO_TRI_EDGE_PATTERNS[msh]
+                two_tri_add_carrier!(catalog,(cell[a],cell[b]),owner)
+            end
+            if owner[1]==2
+                two_tri_add_carrier!(catalog,cell,owner)
+            elseif haskey(TWO_TRI_FACE_PATTERNS,msh)
+                for face in TWO_TRI_FACE_PATTERNS[msh]
+                    two_tri_add_carrier!(catalog,Tuple(cell[i] for i in face),owner)
+                end
+            end
+        end
+    end
+    result=Dict{Tuple,Tuple{Int,Int}}()
+    for (key,owners) in catalog
+        dimension=minimum(first,owners)
+        actual=filter(owner->owner[1]==dimension,collect(owners))
+        length(actual)==1 || error("two-Tri actual support has ambiguous lower carrier")
+        result[key]=only(actual)
+    end
+    return result
+end
+
+function two_tri_saved_carriers(record)
+    return two_tri_actual_carriers((Int(row["type"]),Int.(row["nodes"]),
+                (Int(entity["dim"]),Int(entity["tag"])))
+        for entity in record["p1"]["entities"] for row in entity["cells"])
+end
+
+function two_tri_saved_boundary(record,index)
+    return Set(QTNN.key(index[tag] for tag in row["nodes"])
+        for entity in record["p1"]["entities"] if entity["dim"]==2 for row in entity["cells"])
+end
+
+function two_tri_source_signature(source)
+    return Set(minimum(Tuple(QTT.point(source,cell[mod1(i+k,3)]) for i in 1:3)
+                       for k in 0:2) for cell in eachcol(source.tris))
+end
+
+function two_tri_saved_integrity(record,tolerance)
+    bytes2hex(sha256(record["input_geo"]))==record["input_sha256"] || error("two-Tri exact input hash")
+    # Windows input-file bytes have their own preserved hash; do not substitute
+    # the Unicode text hash or invent raw-label equality with native output.
+    all(length(record[key])==64 for key in
+        ("input_file_sha256","saved_json_sha256")) || error("two-Tri saved provenance hashes")
+    for phase in ("p1","p2"),node in record[phase]["nodes"],i in 1:3
+        string(reinterpret(UInt64,Float64(node["coordinates"][i]));base=16,pad=16)==
+            node["coordinate_bits"][i] || error("two-Tri saved Float64 coordinate bits")
+    end
+    old=Dict(node["tag"]=>node for node in record["p1"]["nodes"])
+    new=Dict(node["tag"]=>node for node in record["p2"]["nodes"])
+    pairs=record["primary_tag_remap"]
+    length(pairs)==length(old) && length(unique(first.(pairs)))==length(old) &&
+        length(unique(last.(pairs)))==length(old) || error("two-Tri primary identity remap")
+    inverse=Dict(pair[2]=>pair[1] for pair in pairs)
+    for pair in pairs
+        old[pair[1]]["coordinate_bits"]==new[pair[2]]["coordinate_bits"] &&
+            old[pair[1]]["owner"]==new[pair[2]]["owner"] || error("two-Tri primary identity changed")
+    end
+    carriers=two_tri_saved_carriers(record)
+    for support in record["support_carriers"]
+        ids=support["primary_support"]
+        key=Tuple(sort!([inverse[id] for id in ids]))
+        expected=carriers[key]
+        Tuple(support["carrier"])==expected && Tuple(new[support["node"]]["owner"])==expected ||
+            error("two-Tri saved support ownership is not actual classified incidence")
+        mean=[sum(Float64(new[id]["coordinates"][i]) for id in ids)/length(ids) for i in 1:3]
+        maximum(abs.(Float64.(new[support["node"]]["coordinates"]).-mean))<=tolerance ||
+            error("two-Tri saved support is not affine P1 interpolation")
+    end
+    for inverse_record in record["computed_surface_parameters"]
+        node=new[inverse_record["node"]]
+        length(inverse_record["computed_uv"])==2 &&
+            maximum(abs.(Float64.(inverse_record["evaluated_coordinates"]).-
+                         Float64.(node["coordinates"])))<=tolerance || error("saved computed UV roundtrip")
+    end
+    return new
+end
+
+function two_tri_native_supports(api,linear,linear_data,projected,msh,volume,tolerance)
+    types,tags,connections=linear_data
+    actual_types,actual_tags,actual_connections=api.mesh.get_elements(3,volume)
+    length(types)==length(actual_types)==1 && length(only(tags))==length(only(actual_tags)) ||
+        error("two-Tri native P2 changed primary cells")
+    primary=msh_spec(only(types)).nnodes
+    before=reshape(only(connections),primary,:)
+    after=reshape(only(actual_connections),msh_spec(msh).nnodes,:)
+    inverse=Dict{UInt64,Int}()
+    for column in axes(before,2),row in 1:primary
+        current=after[row,column];original=Int(before[row,column])
+        get(inverse,current,original)==original || error("two-Tri native primary support identity")
+        inverse[current]=original
+    end
+    length(inverse)==nnodes(linear) && length(unique(values(inverse)))==nnodes(linear) ||
+        error("two-Tri native primary identity is not bijective")
+    projected.coords==linear.coords || error("two-Tri actual projection changed primary IDs")
+    data=projected.entity_data
+    carriers=two_tri_actual_carriers((Int(block.msh),Tuple(cell),
+                (Tessella.Elements.msh_dimension(block.msh),Int(data.block_entities[b][column])))
+        for (b,block) in enumerate(projected.blocks) for (column,cell) in enumerate(eachcol(block.nodes)))
+    supports=Dict{UInt64,Tuple}()
+    for edge in eachcol(reshape(api.mesh.get_element_edge_nodes(msh,volume,false),3,:))
+        key=Tuple(sort!([inverse[id] for id in edge[1:2]]))
+        get(supports,edge[3],key)==key || error("two-Tri native shared P2 edge identity")
+        supports[edge[3]]=key
+    end
+    if msh==13
+        for face in eachcol(reshape(api.mesh.get_element_face_nodes(msh,4,volume,false),9,:))
+            key=Tuple(sort!([inverse[id] for id in face[1:4]]))
+            get(supports,face[9],key)==key || error("two-Tri native shared P2 face identity")
+            supports[face[9]]=key
+        end
+    end
+    for (node,support) in supports
+        p,_,dim,entity=api.mesh.get_node(node)
+        (dim,entity)==carriers[support] || error("two-Tri native P2 carrier differs from its actual P1 boundary")
+        expected=[sum(linear.coords[i,id] for id in support)/length(support) for i in 1:3]
+        maximum(abs.(p.-expected))<=tolerance || error("two-Tri native P2 support geometry")
+    end
+    return length(supports)
+end
+
+function two_tri_saved_case(record;oracle_only=false)
+    tolerance=2e-11;n=record["intervals"];laterals=record["recombine_laterals"]
+    levels=record["intended_levels"]
+    layers=record["profile"]=="L1" ? :one : record["profile"]=="L3" ? :three : :graded
+    f=QTT.fixture(record["name"];height=record["direction"],laterals,layers,pins=(1,2,3,4))
+    f=merge(f,(;source=record["input_geo"]))
+    saved_nodes=two_tri_saved_integrity(record,tolerance)
+    owner_counts=[count(node->node["owner"][1]==dim,values(saved_nodes)) for dim in 0:3]
+    owner_counts==[8,8n+4,8n-2,2n-1] &&
+        owner_counts==[record["p2_owner_counts"][string(dim)] for dim in 0:3] ||
+        error("two-Tri saved owner dimension counts")
+    source,_=two_tri_saved_mesh(record,"p1",2,record["source_tag"])
+    linear,index=two_tri_saved_mesh(record,"p1",3,record["volume_tag"])
+    quadratic,_=two_tri_saved_mesh(record,"p2",3,record["volume_tag"])
+    saved=QTT.certify(linear,f,source)
+    two_tri_saved_boundary(record,index)==Set(keys(saved.boundary)) || error("two-Tri saved lower/volume boundary mismatch")
+    QTNN.certify_quadratic(quadratic,linear)
+    nnodes(quadratic)==18n+9 || error("two-Tri saved P2 node count")
+    empty_parameters=sum(length(row["empty_owned_uv_nodes"]) for row in record["laterals"])
+    empty_parameters==(laterals ? 4n : 0) || error("two-Tri saved stored UV provenance")
+    for lateral in record["laterals"]
+        lateral["owned"]==2n-1 && lateral["closure"]==6n+3 || error("two-Tri saved lateral ownership")
+    end
+    if !oracle_only
+        execution=QTT.execute(f.source)
+        volume=geo_entity_mesh(execution,3,record["volume_tag"])
+        actual_source=geo_entity_mesh(execution,2,record["source_tag"])
+        two_tri_source_signature(actual_source)==two_tri_source_signature(source) || error("two-Tri oriented source differs from pinned source")
+        native=QTT.certify(volume,f,actual_source)
+        QTNN.surface_faces(execution.mesh_parts,volume)==Set(keys(native.boundary)) || error("two-Tri native finalized lower/volume boundary mismatch")
+        QTNN.counts(volume)==QTNN.counts(linear) || error("two-Tri saved/native volume family counts")
+        nnodes(volume)==nnodes(linear) || error("two-Tri saved/native primary node counts")
+        for p in eachcol(volume.coords)
+            any(q->maximum(abs.(p.-q))<=tolerance,eachcol(linear.coords)) || error("two-Tri swept grid geometry")
+        end
+        mktempdir() do directory
+            path=joinpath(directory,"two_tri_saved.geo");write(path,f.source)
+            native_api(path,api->begin
+                primary_cache=api.mesh.generate(3)
+                first=QTT.public_volume(api,record["volume_tag"])
+                primary_data=api.mesh.get_elements(3,record["volume_tag"])
+                QTNN.typed_signature(first)==QTNN.typed_signature(volume) || error("two-Tri API/GEO primary product")
+                isempty(api.mesh.get_elements(2)[1]) || error("two-Tri API3 lower-cell contract changed")
+                projected=model_to_mixed(api.CURRENT[],primary_cache,3,record["volume_tag"])
+                api.mesh.set_order(2)
+                actual=QTT.public_volume(api,record["volume_tag"])
+                QTNN.certify_quadratic(actual,first)
+                quadratic_volume_from_jacobians(actual,api.mesh;expected=1.)
+                two_tri_native_supports(api,primary_cache,primary_data,projected,laterals ? 13 : 11,
+                    record["volume_tag"],tolerance)==14n+5 || error("two-Tri native interpolation support count")
+                owners=zeros(Int,4)
+                for node in api.mesh.get_nodes()[1]
+                    p,uv,dim,entity=api.mesh.get_node(node);owners[dim+1]+=1
+                    if dim==2
+                        length(uv)==2 && maximum(abs.(api.model.get_value(2,entity,uv).-p))<=tolerance ||
+                            error("two-Tri native computed surface UV")
+                    end
+                end
+                owners==[8,8n+4,8n-2,2n-1] || error("two-Tri native owner dimension counts")
+                for lateral in record["lateral_tags"]
+                    own,_,uv=api.mesh.get_nodes(2,lateral,false,true)
+                    length(own)==2n-1 && length(uv)==2length(own) || error("two-Tri native lateral owned query")
+                    closure,coords,uv=api.mesh.get_nodes(2,lateral,true,true)
+                    length(closure)==6n+3 && length(uv)==2length(closure) &&
+                        maximum(abs.(api.model.get_value(2,lateral,uv).-coords))<=tolerance ||
+                            error("two-Tri native lateral closure/computed UV")
+                end
+                api.mesh.set_order(1)
+                QTNN.typed_signature(QTT.public_volume(api,record["volume_tag"]))==QTNN.typed_signature(first) ||
+                    error("two-Tri actual P2/P1 cell roundtrip")
+            end)
+        end
+    end
+    return empty_parameters
+end
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -129,6 +369,8 @@ height_errors=Ref(0);isolated_cases=Ref(0)
 native_helical_cases=Ref(0);helical_oracle_gaps=Ref(0)
 triangle_cases=Ref(0);triangle_quadratic_cases=Ref(0);triangle_isolated_cases=Ref(0)
 triangle_parameter_provenance_gaps=Ref(0)
+two_tri_cases=Ref(0);two_tri_quadratic_cases=Ref(0);two_tri_parameter_provenance_gaps=Ref(0)
+two_tri_saved_empty_parameters=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -505,7 +747,18 @@ try
             end
         end
     end
-    println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) oracle_only=$oracle_only")
+    catalog=TOML.parsefile(joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_two_tri_oracle.toml"))
+    catalog["gmsh_version"]=="4.15.2" && catalog["coordinate_abs_tolerance"]==2e-11 &&
+        length(catalog["fixtures"])==12 || error("two-Tri saved oracle catalog contract")
+    for record in catalog["fixtures"]
+        isempty(selected) || occursin(selected,record["name"]) || continue
+        empty_parameters=two_tri_saved_case(record;oracle_only)
+        two_tri_cases[]+=1;two_tri_quadratic_cases[]+=1
+        two_tri_saved_empty_parameters[]+=empty_parameters
+        empty_parameters>0 && (two_tri_parameter_provenance_gaps[]+=1)
+        println("QUADTRI_NONEW_TWO_TRI_SAVED_OK name=$(record["name"]) p1_nodes=$(length(record["p1"]["nodes"])) p2_nodes=$(length(record["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
+    end
+    println("QUADTRI_NONEW_DIFFERENTIAL_OK gmsh=4.15.2 p1_cases=$(completed[]) p2_cases=$(quadratic_cases[]) native_helical_cases=$(native_helical_cases[]) helical_oracle_gaps=$(helical_oracle_gaps[]) height_errors=$(height_errors[]) isolated_cases=$(isolated_cases[]) triangle_cases=$(triangle_cases[]) triangle_p2_cases=$(triangle_quadratic_cases[]) triangle_isolated_cases=$(triangle_isolated_cases[]) triangle_parameter_provenance_gaps=$(triangle_parameter_provenance_gaps[]) oracle_samples=$(oracle_samples[]) two_tri_saved_cases=$(two_tri_cases[]) two_tri_p2_cases=$(two_tri_quadratic_cases[]) two_tri_parameter_provenance_gaps=$(two_tri_parameter_provenance_gaps[]) two_tri_empty_stored_uv=$(two_tri_saved_empty_parameters[]) oracle_only=$oracle_only")
 finally
     gmsh.finalize()
 end

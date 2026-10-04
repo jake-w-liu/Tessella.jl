@@ -683,3 +683,55 @@ end
     remove_entities!(removed_slave,[(3,2)])
     @test isempty(model_periodic_constraints(removed_slave))
 end
+
+# Independent exact boundary integration. These are outward reference cycles,
+# rather than the incidence-only topology table used by the implementation.
+function _classified_exact_cell_face_volume(coordinates,order,faces)
+    points=Tuple(ntuple(d->Rational{BigInt}(coordinates[d,index]),3) for index in order)
+    anchor=points[1]
+    total=Rational{BigInt}(0)
+    for face in faces,k in 2:length(face)-1
+        a=points[face[1]].-anchor
+        b=points[face[k]].-anchor
+        c=points[face[k+1]].-anchor
+        determinant=a[1]*(b[2]*c[3]-b[3]*c[2])-
+                    a[2]*(b[1]*c[3]-b[3]*c[1])+
+                    a[3]*(b[1]*c[2]-b[2]*c[1])
+        total+=determinant/6
+    end
+    return total
+end
+
+@testset "Mixed volume signed measure uses local represented coordinates" begin
+    reference_cells=(
+        (4,((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,1.)),
+           (2,1,3,4),((1,3,2),(1,2,4),(1,4,3),(2,3,4))),
+        (5,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),
+            (0.,0.,1.),(1.,0.,1.),(1.,1.,1.),(0.,1.,1.)),
+           (3,2,1,4,7,6,5,8),
+           ((1,4,3,2),(5,6,7,8),(1,2,6,5),(2,3,7,6),(3,4,8,7),(4,1,5,8))),
+        (6,((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),
+            (0.,0.,1.),(1.,0.,1.),(0.,1.,1.)),
+           (2,1,3,5,4,6),((1,3,2),(4,5,6),(1,2,5,4),(2,3,6,5),(3,1,4,6))),
+        (7,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),(.5,.5,1.)),
+           (3,2,1,4,5),((1,2,5),(4,1,5),(2,3,5),(3,4,5),(1,4,3,2))))
+    offset_base=2.0^50+2.0
+    frames=(((0.,0.,0.),(1.,1.,1.)),
+            ((offset_base,offset_base,offset_base),(1.,1.,1.)),
+            ((0.,0.,offset_base),(1.,1.,.25)),
+            ((-offset_base,-offset_base,-offset_base),(1.,1.,.25)),
+            ((0.,0.,0.),(1e-100,1e-100,1e-100)),
+            ((0.,0.,0.),(1e100,1e100,1e100)))
+    for (msh,reference,reversed,faces) in reference_cells,(offset,scale) in frames
+        coordinates=[offset[d]+scale[d]*point[d] for d in 1:3,point in reference]
+        for (order,orientation) in ((Tuple(1:length(reference)),1),(reversed,-1))
+            exact=_classified_exact_cell_face_volume(coordinates,order,faces)
+            @test sign(exact)==orientation
+            nodes=reshape(Int32[order...],:,1)
+            actual=Tessella.Model._volume_cell_signed_volume(coordinates,nodes,1,msh)
+            @test isfinite(actual)
+            @test sign(actual)==orientation
+            @test actual≈Float64(exact) rtol=8eps(Float64) atol=0
+        end
+    end
+end

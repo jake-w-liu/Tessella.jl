@@ -91,20 +91,22 @@ function _extrude_quadtri_seam_index(m::GeoModel,r::Int,
     root==0 && return nothing
     mesh=mesh_model_surface(m,root)
     tolerance=_coherence_eps(m)
+    origin=nnodes(mesh)==0 ? (0.0,0.0,0.0) :
+        (mesh.coords[1,1],mesh.coords[2,1],mesh.coords[3,1])
     grid=Dict{NTuple{3,Int},Vector{NTuple{3,Float64}}}()
     for i in 1:nnodes(mesh)
         p=(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
-        cell=ntuple(k->floor(Int,p[k]/tolerance),3)
+        cell=_coherence_spatial_cell(p,origin,tolerance)
         push!(get!(grid,cell,NTuple{3,Float64}[]),p)
     end
-    return (grid,tolerance)
+    return (grid,tolerance,origin)
 end
 
 function _extrude_quadtri_snap_seam(index,p::NTuple{3,Float64},
                                     caller::AbstractString)
     index===nothing && return p
-    grid,tolerance=index
-    cell=ntuple(k->floor(Int,p[k]/tolerance),3)
+    grid,tolerance,origin=index
+    cell=_coherence_spatial_cell(p,origin,tolerance)
     for dx in -1:1,dy in -1:1,dz in -1:1
         bucket=get(grid,(cell[1]+dx,cell[2]+dy,cell[3]+dz),nothing)
         bucket===nothing && continue
