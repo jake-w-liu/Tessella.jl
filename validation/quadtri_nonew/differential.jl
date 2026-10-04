@@ -24,6 +24,8 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_four_quad_s
 const QT4S=QuadTriNoNewFourQuadStripCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_rect_grid_certificates.jl"))
 const QTRG=QuadTriNoNewRectGridCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_b4_rec_strip_certificates.jl"))
+const QTB4=QuadTriNoNewB4RecStripCertificates
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -1138,9 +1140,11 @@ function rect_grid_saved_fixture(record)
     return merge(f,(;source=raw["input_geo"]))
 end
 
-function rect_grid_saved_integrity(record)
+function rect_grid_saved_integrity(record;allowed_warnings=nothing)
     raw=record["payload"];audit=record["audit"];tolerance=2e-11
-    raw["status"]=="certified" && isempty(raw["warnings_or_errors"]) || error("rect-grid primary certification status")
+    raw["status"]=="certified" && (allowed_warnings===nothing ?
+        isempty(raw["warnings_or_errors"]) : raw["warnings_or_errors"]==allowed_warnings) ||
+        error("saved actual primary certification status")
     literal_hash=bytes2hex(sha256(raw["input_geo"]))
     if haskey(audit,"input_literal_sha256")
         literal_hash==audit["input_literal_sha256"] || error("rect-grid exact input text hash")
@@ -1304,6 +1308,83 @@ function rect_grid_saved_case(record,masks,relation;oracle_only=false)
 end
 
 
+function b4_rec_strip_saved_case(record;oracle_only=false)
+    raw=record["payload"];audit=record["audit"];f=QTB4.saved_fixture(record)
+    m=f.strip_length;n=f.intervals;tolerance=2e-11
+    warnings=String.(audit["recorded_warnings"])
+    length(warnings)==m+2 &&
+        warnings[1]=="Warning: QuadToTri meshed $m elements in region 1 with body-centered internal vertices." &&
+        warnings[2]=="Warning: ( Mesh *should* still conformal, but the user should be aware of these internal vertices. )" &&
+        all(startswith(warnings[k+2],"Warning: Internal Vertex $k at (x,y,z) = (") for k in 1:m) &&
+        !any(occursin("Error",line) for line in raw["gmsh_log"]) ||
+        error("B4 retained body-center warning provenance")
+    saved_nodes=rect_grid_saved_integrity(record;allowed_warnings=warnings)
+    source,_=two_tri_saved_mesh(raw,"p1",2,1)
+    linear,index=two_tri_saved_mesh(raw,"p1",3,1)
+    saved=QTB4.certify(linear,f,source;oracle=true)
+    length(saved.centers)==m && saved.ncell==m*(n+6) &&
+        nnodes(linear)==2*(m+1)*(n+1)+m || error("B4 actual primary fan counts")
+    two_tri_saved_boundary(raw,index)==Set(keys(saved.boundary)) || error("B4 saved typed exterior")
+    quadratic=two_tri_saved_mesh(raw,"p2",3,1)[1]
+    qsaved=QTB4.certify_quadratic(quadratic,f,source;oracle=true)
+    nnodes(quadratic)==(12m+6)*n+14m+3 && qsaved.ncell==saved.ncell || error("B4 saved P2 support counts")
+    owners=[count(node->node["owner"][1]==dim,values(saved_nodes)) for dim in 0:3]
+    owners==[8,8n+8m-4,8m*n-2,(2m-1)*(2n-1)+8m] || error("B4 actual primary P2 carrier counts")
+    empty_parameters=count(node->node["owner"][1]==2 && isempty(node["stored_parameters"]),values(saved_nodes))
+    empty_parameters==audit["empty_stored_surface_uv"] || error("B4 stored UV provenance")
+    surface_queries=rect_grid_saved_surface_queries(record)
+    empty_parameters==sum(Int(row["empty_stored_uv"]) for row in surface_queries) || error("B4 actual surface query coverage")
+    if !oracle_only
+        execution=QTB4.execute(f.source)
+        volume=geo_entity_mesh(execution,3,1);actual_source=geo_entity_mesh(execution,2,1)
+        quad_patch_source_match(actual_source,source,tolerance)
+        actual=QTB4.certify(volume,f,actual_source)
+        QTNN.surface_faces(execution.mesh_parts,volume)==Set(keys(actual.boundary)) || error("B4 native typed exterior")
+        projection=model_to_mixed(execution.model,volume,3,1)
+        nodes=Dict(Int(node["tag"])=>node for node in raw["p1"]["nodes"])
+        for node in 1:nnodes(volume)
+            matches=[tag for tag in keys(index) if maximum(abs.(QTB4.point(volume,node).-Tuple(Float64.(nodes[tag]["coordinates"]))))<=tolerance]
+            length(matches)==1 || error("B4 actual primary geometry bijection")
+            Tuple(Int.(nodes[only(matches)]["owner"]))==projection.entity_data.node_entities[node] || error("B4 primary carrier identity")
+        end
+        for chain in raw["source_chains"]
+            params=execution.model.curve_params[Int(chain["curve"])];expected=Float64.(chain["stored_owned_parameters"])
+            length(params)==length(expected)+2 &&
+                maximum(abs.(sort(params[2:end-1]).-sort(expected));init=0.)<=tolerance || error("B4 sampled native Curve parameters")
+        end
+        mktempdir() do directory
+            path=joinpath(directory,"b4_rec_strip_saved.geo");write(path,f.source)
+            native_api(path,api->begin
+                cache=api.mesh.generate(3);first=QTB4.public_volume(api,1)
+                QTNN.typed_signature(first)==QTNN.typed_signature(volume) || error("B4 API/GEO primary cells")
+                data=api.mesh.get_elements(3,1);projected=model_to_mixed(api.CURRENT[],cache,3,1)
+                isempty(api.mesh.get_elements(2)[1]) || error("B4 API3 lower-cell contract")
+                api.mesh.set_order(2);p2=QTB4.public_volume(api,1)
+                certificate=QTB4.certify_quadratic(p2,f,actual_source)
+                abs(Float64(certificate.total)-Float64(actual.total))<=tolerance || error("B4 actual P2 reference integral")
+                strip_native_supports(api,cache,data,projected,1,tolerance)==nnodes(p2)-nnodes(first) || error("B4 complete actual P2 supports")
+                native_owners=zeros(Int,4)
+                for node in api.mesh.get_nodes()[1]
+                    p,uv,dim,owner=api.mesh.get_node(node);native_owners[dim+1]+=1
+                    if dim in (1,2)
+                        length(uv)==dim && maximum(abs.(api.model.get_value(dim,owner,uv).-p))<=tolerance || error("B4 computed carrier parameters")
+                    end
+                end
+                native_owners==owners || error("B4 P2 carrier counts")
+                for row in surface_queries,include_boundary in (false,true)
+                    ids,xyz,uv=api.mesh.get_nodes(2,Int(row["tag"]),include_boundary,true)
+                    length(ids)==row[include_boundary ? "closure" : "owned"] && length(uv)==2length(ids) || error("B4 surface owned/closure query")
+                    maximum(abs.(api.model.get_value(2,Int(row["tag"]),uv).-xyz))<=tolerance || error("B4 computed surface UV")
+                end
+                api.mesh.set_order(1)
+                QTNN.typed_signature(QTB4.public_volume(api,1))==QTNN.typed_signature(first) || error("B4 P2/P1 actual cell roundtrip")
+            end)
+        end
+    end
+    return empty_parameters
+end
+
+
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -1323,6 +1404,7 @@ four_strip_cases=Ref(0);four_strip_quadratic_cases=Ref(0);four_strip_variant_cas
 four_strip_parameter_provenance_gaps=Ref(0);four_strip_empty_parameters=Ref(0)
 rect_grid_cases=Ref(0);rect_grid_quadratic_cases=Ref(0);rect_grid_variant_cases=Ref(0)
 rect_grid_parameter_provenance_gaps=Ref(0);rect_grid_empty_parameters=Ref(0)
+b4_rec_strip_cases=Ref(0);b4_rec_strip_quadratic_cases=Ref(0);b4_rec_strip_empty_parameters=Ref(0)
 try
     startswith(gmsh.option.getString("General.Version"),"4.15.2") ||
         error("Gmsh4.15.2 runtime required")
@@ -1785,6 +1867,21 @@ try
         haskey(record["payload"],"variant") && (rect_grid_variant_cases[]+=1)
         println("QUADTRI_NONEW_RECT_GRID_SAVED_OK name=$name C=0 p1_nodes=$(length(record["payload"]["p1"]["nodes"])) p2_nodes=$(length(record["payload"]["p2"]["nodes"])) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
     end
+    b4_path=joinpath(@__DIR__,"..","..","test","artifacts","quadtri_nonew_b4_rec_strip_oracle.toml")
+    bytes2hex(sha256(replace(read(b4_path,String),"\r\n"=>"\n")))==
+        "d938c9ca971125160988d744752a9ae385f5cb725035271e9c6195a1530148db" || error("B4 immutable primary/control provenance")
+    b4_catalog=TOML.parsefile(b4_path)
+    b4_catalog["gmsh_version"]=="4.15.2" && b4_catalog["coordinate_abs_tolerance"]==2e-11 &&
+        b4_catalog["fixture_count"]==12 && b4_catalog["actual_terminal_centers"]==84 &&
+        b4_catalog["empty_stored_surface_uv_nodes"]==384 || error("B4 saved primary catalog contract")
+    for record in b4_catalog["fixtures"]
+        name=record["payload"]["name"]
+        isempty(selected) || selected=="b4_rec_strip" || occursin(selected,"b4_rec_strip_"*name) || continue
+        empty_parameters=b4_rec_strip_saved_case(record;oracle_only)
+        b4_rec_strip_cases[]+=1;b4_rec_strip_quadratic_cases[]+=1;b4_rec_strip_empty_parameters[]+=empty_parameters
+        println("QUADTRI_NONEW_B4_REC_STRIP_SAVED_OK name=$name actual_centers=$(record["audit"]["center_count"]) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
+    end
+    println("QUADTRI_NONEW_B4_REC_STRIP_DIFFERENTIAL_OK saved_cases=$(b4_rec_strip_cases[]) p2_cases=$(b4_rec_strip_quadratic_cases[]) empty_stored_uv=$(b4_rec_strip_empty_parameters[])")
     println("QUADTRI_NONEW_RECT_GRID_DIFFERENTIAL_OK saved_cases=$(rect_grid_cases[]) p2_cases=$(rect_grid_quadratic_cases[]) independent_variants=$(rect_grid_variant_cases[]) parameter_provenance_gaps=$(rect_grid_parameter_provenance_gaps[]) empty_stored_uv=$(rect_grid_empty_parameters[])")
     println("QUADTRI_NONEW_FOUR_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(four_strip_cases[]) p2_cases=$(four_strip_quadratic_cases[]) independent_variants=$(four_strip_variant_cases[]) parameter_provenance_gaps=$(four_strip_parameter_provenance_gaps[]) empty_stored_uv=$(four_strip_empty_parameters[])")
     println("QUADTRI_NONEW_THREE_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(three_strip_cases[]) p2_cases=$(three_strip_quadratic_cases[]) independent_variants=$(three_strip_variant_cases[]) parameter_provenance_gaps=$(three_strip_parameter_provenance_gaps[]) empty_stored_uv=$(three_strip_empty_parameters[])")

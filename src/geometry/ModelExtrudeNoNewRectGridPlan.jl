@@ -1,7 +1,7 @@
 # Constructive normal-translation NoNew phases for a rectangular B3/B2/B0
 # source. Physical source edges are assigned once; per-column cap states carry
 # across every layer group. The immutable existing-corner factories are reused.
-struct _ExtrudeNoNewRectGridCatalog
+struct _ExtrudeNoNewRectGridCatalog <: _ExtrudeNoNewDynamicGridCatalog
     source::_ExtrudeNoNewRectGridSource
     top_states::Vector{UInt8}
     template_indices::Matrix{UInt16}

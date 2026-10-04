@@ -134,6 +134,12 @@ function _classify_cached_mesh(m::GeoModel,mesh::MixedMesh,dim::Int,tag::Int,
         (dim,tag)=>Int32[abs(b) for b in entity.boundaries]
         for ((dim,tag),entity) in data.entities)
     ownership=Dict{Tuple{Int,Tuple},Int32}()
+    cell_capacity=0
+    for block in projected.blocks
+        block isa ElementBlock || continue
+        cell_capacity=Base.checked_add(cell_capacity,size(block.nodes,2))
+    end
+    sizehint!(ownership,cell_capacity)
     for (bi,block) in enumerate(projected.blocks)
         block isa ElementBlock || continue
         for column in axes(block.nodes,2)
@@ -177,6 +183,12 @@ end
 function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing)
     positions=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
     coordinates=NTuple{3,Float64}[]
+    node_capacity=0
+    for (_,mesh) in parts
+        node_capacity=max(node_capacity,nnodes(mesh))
+    end
+    sizehint!(positions,node_capacity)
+    sizehint!(coordinates,node_capacity)
     remaps=Vector{Vector{Int32}}(undef,length(parts))
     counts=Dict{Int,Int}()
     for (i,(_,mesh)) in enumerate(parts)

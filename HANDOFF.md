@@ -30,6 +30,244 @@ meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Current increment
 
+The verified recombined increment is in `C:/tmp/tessella_nonew_b4_strip` on
+`codex/nonew-b4-strip`, based on verified and pushed `9806d5b`. It implements
+arbitrary-length recombined B4 strips through the actual regular-disk source certificate, original-column
+terminal ranks, checked indexed emission and real terminal center fans. The
+shared top/lateral/projection route must preserve actual support carriers.
+It also corrects the confirmed preexisting native GEO Line density sampler from
+the pinned1e-5 firstDer/numerical-length protocol, with unchanged primary
+coordinate tolerance and measured previous CRC impact. All unfinished parity
+tracks remain part of the active goal. Free B4 propagation is the next phase;
+do not present the recombined category as completion of the full goal.
+
+Root owns emitter, dispatcher, shared Scope/Projection and strict validation;
+Fresh owns Source/Plan and resource validation; Oracle owns the native Line
+sampling fix and regressions; Nested owns geometry/API/P2 helper tests, saved
+provenance and stale negative-fixture migration. Previous verified worktrees
+are immutable tracked archives. The rejected V1/V2 candidates are retained
+below. Final V3 passes all release gates; commit and audit its exact bytes,
+fast-forward/push main, then create `C:/tmp/tessella_nonew_b4_free` on
+`codex/nonew-b4-free` for the public free-B4 integration. Preserve this
+recombined worktree as a tracked archive after publication.
+
+Root initial normal112/bounds probe is EXIT0/drained:24 end-to-end source,
+volume and classified-projection assertions, followed by all twelve retained
+B4 strict P1/P2 products,384 stored Surface UV gaps and complete actual
+centers/supports/carriers/map integrals,339.8190932s wrapper. Log is
+`test/tmp/b4_root_initial_smoke_and_strict_v2.log`, SHA256
+`56E8D79EFA46DCD8B64CB6FEA0E566FF99E59E339B759A7E358535C8DEA99C70`.
+The first smoke harness incorrectly referenced `Tessella.nnodes`; its log is
+preserved as a harness error, then corrected to `Tessella.MeshTypes.nnodes`.
+This focused probe predates the final freeze and does not replace release gates.
+Full initial strict regression is also EXIT0/drained: all206 cases, comprising
+the earlier194 and twelve B4 products,404.680273s. All122 actual source/helper/
+artifact/driver hashes stay unchanged; ledger is
+`test/tmp/b4_full_strict_focus_v1_julia112.json`, log SHA256
+`A21B6D434B8296EB6F851497FBB25F93B46802C8C480505149680385A2C963F5`.
+This directly scoped proof is not the final global release freeze.
+Oracle raw M7 source proof now matches primary Curve3 Y2.0000872047979215
+on both signs, max source coordinate5.55e-17/parameter2.78e-17. Candidate
+ModelMesh1D SHA isC18BF064EEBAC289971CFD0367A44DE183A46A56694438019B8A91984B9995BA.
+Permanent sampler normal112/113 each pass202 checks. Nine API01 rows have exactly
+two measured changed records, graded Progression/Bump; the other seven rows
+and all counts/maxima remain unchanged. Independent cross-runtime proof is
+complete and exactly these two pins are promoted. Affected API generate01
+differentials pass9,388 each, with108 cases/196 stages and one retained legacy
+source-tag blocker; GEO constraint differentials pass38 cases each with zero
+documented gaps. Actual source/driver hashes remain stable. Maximum native
+source residuals are bounded results, not universal primary bit parity.
+Focused B4 geometry passes19,516 on each runtime; the independent permanent
+planner passes108,994 on each. Certified new CRC112 passes24,121 checks for24
+actual-map/carrier-audited rows, with row SHA256
+`E0CB1DD880C17DFBF7F5D811E75F04933B9D7C2A03DC7483D80553E3DDB9A11B`.
+Matching CRC113 is also green24,121, and final API passes93,523 on both lines,
+with all114 direct inputs and the103 production/Project path set stable.
+The new B4 CRC raw SHA is59EB1B6E1E95B12BC609DB7BE76B5734E7F74560E840A480C0AF366E2C7364C9.
+All256 NoNew plus9 API01 rows are pinned;40 AddVerts rows are separate.
+The recorded mixed-cache cross-family renumber blocker is unfinished parity
+work queued after the current increment, not a permanent scope exclusion.
+
+Rejected V1 freeze: `test/tmp/b4_release_freeze_v1.json`, SHA256
+`05503987DB8425CD9F45B1EA81EF9F828D78F1096BB14FD1C5B034D66F0D5698`,
+471 inputs (103 production/Project,212 test,156 validation), base9806d5b,
+scoped index4c3f3c2dbea6190b71103f95a2dbf47f4c02ad81ece591b8705747bba74ad1fb.
+Its exact raw inputs are preserved in `test/tmp/b4_rejected_freeze_v1_inputs.zip`,
+SHA256527B9D0CAD1A3BDA8094CBF7581D777EF298A3F757C46FEE7F61D9B5F25C5475.
+The resource112 run passes3,062,935 assertions and fails two unchanged allocation
+ratchets atN500→1000: projection24,055,953→52,602,266 and printed
+API measurement37,230,980→81,850,597. The API failure expression printed a
+separate81,794,057 allocation; retain the measured row as resource authority.
+N1000→2000 and M1000→2000→4000 source-growth bounds pass. A third failure is the
+aggregate source-area harness check atM4000. Independent exact replay proves
+the represented total is1//1 while rounded per-cell summation is27.5eps below
+one, disproving the old16eps assertion. Fresh replaces that global assertion
+with exact dyadic cancellation; per-cell tolerances and positivity remain.
+All maps, typed faces, actual P2 supports/carriers and74 lowered methods pass;
+all471 before/after input/index guards pass. No ratchet is relaxed.
+Strict V1 is EXIT0/drained,206 cases/414.3379421s; log SHA256
+68DE6BEE6A99DD2E744C2D1F92903D2EF68D8EA8140784AB009FC2ED53D3D907.
+Root package session84055 was deliberately stopped at600.9916079s after the
+resource failure, only verified owned Julia descendants16140/27280 terminated;
+the final471 guard passed and113 never launched. Log SHA256
+E52562A900102F96C91D4790B5C8952B32396CEC99AD51EBAA545690CB493EDD.
+Oracle owns detached Projection attribution, Nested owns API residual containers,
+and Fresh owns the confirmed exact-area harness correction. Coordinate any tracked
+source edits; retain V1 logs and frozen bytes as rejected evidence.
+
+API capacity preparation passes27 detached actual-path checks and32 additional
+overlapping/coincident-part checks under normal112/bounds. Exact payloads,
+node owners, remaps, support identities, curve parameters and allocator maxima
+are preserved. Minimal hints use the actual projected-cell bound and the
+maximum part-node count; tracked promotion remains held while the projection
+proof completes. Projection tiny preflight passes37 checks; its full detached
+N500/1000/2000 sweep runs in `b4_projection_capacity_proof_v3_full`.
+
+Free B4 preparation is independently verified without entering production.
+The Julia local decision draft matches all2,985,984 classification/rank cases
+on both runtimes, with zero warmed varied-input allocation. The Julia physical
+phase draft matches all30,264 independent outer inputs:242,115 reference and40
+AST/control checks each, including21,533 later mask changes and428 retained
+problem records. All36 actual physical/local methods are unboxed and warmed
+source growth passes unchanged bounds. Evidence manifest is
+`test/tmp/next_free_b4_physical_comparison_v2.json`, SHA256
+ADE1695ECF403D0E57F5CF2F2FFA55106AF86CD4491083875841BCF9C4348BDB.
+Generic center-fan emission and complete geometry/API integration remain
+unfinished. These drafts do not constitute a free B4 production release.
+
+The minimal confirmed capacity fixes are now promoted: Elements SHA256
+0AF900CDC76C1B25F6BE74BE6B1C49779EEB3BA12DECFDF8835E8FA9F8594FDB;
+Model SHA256D37354057E2FB8320D037F7F694D81AAE1A7F6DD62728E94D5B9C0B2F5D45800;
+APIMixedCache SHA256E881470D51D3ABFEEF28F376B9DD5C6574D84EBE08F1C374F5D2861D4E3D8984.
+Actual generic/keyword/projection-closure AST audits pass23 each on112/113
+over11 bodies, with both deliberate boxed controls detected. Actual combined
+API validation passes86 testset assertions plus3 provenance guards each.
+N500/1000/2000 whole API allocation is35,438,645/71,074,345/141,392,994 bytes
+on112 and37,587,427/75,342,265/149,983,442 on113; both unchanged growth
+ratchets pass. Exact payload/class/support/params/maxima/remap/keep semantics,
+overlapping parts and independent coincident regions are preserved.
+API evidence is `test/tmp/b4_api_reserve_actual_final_evidence_v1.json`,
+SHA2565B2CE9E772C150A6FFDAAB8EF7BEB46A7E9CCD6341CF51039EE8529740A64F2B.
+
+Rejected V2 freeze is `test/tmp/b4_release_freeze_v2.json`, SHA256
+E563DCD9DE004FE909B03F4677437314EA91D45841B3F59A47605A026E37C51A,
+471 inputs (103 production/Project,212 test,156 validation), base9806d5b,
+scoped indexac46ed48a4f8bb5f1b678655fe81e621504a1ea3dd0472286b569f8db21c6613.
+All V2 owned guarded jobs have drained. Preserve every log and raw input
+archive; use a new `final_v3` epoch after the minimal proven fixture repair.
+Keep at most three heavy Julia jobs. Do not create new ignored `.jl` files
+while Pkg.test runs; future implementation may continue in ignored `.draft`
+and Python/JSON evidence. Final resource ledger checker is
+`test/tmp/b4_final_resource_ledger_v1.py`; it requires all14 actual gates,
+their unchanged growth checks, cross-runtime geometry/support rows and hashes.
+
+V2 is now REJECTED, not a final package pass. Its strict replay is terminal
+GREEN206cases/409.2319214s, log02548818D55F2AC8138490B8ECFE3B830065EE9F99F6E23467B9CD282DA82C11.
+Both B4 resources pass3,062,938 checks each with matching12layer/3source/3P2
+records,74 unboxed methods and all471/direct guards. Pair evidence is
+`test/tmp/b4_resources_final_v2_pair_summary.json`, SHA256
+05EB62AD5B8FE1C42FCFF47B2067C34C2CAADC813B828C75A50E597BAE094BFC.
+Pkg112 exposes five stale assertions in geo_quadtri_nonew_quad_patch_test:
+its recombined M5 source is newly supported, so expecting rejection and
+unchanged operation state is wrong. Existing free M5 blockers remain valid.
+Inventory the other old GEO fixtures before changing an expectation; preserve
+all atomic-state assertions and replace only disproven recombined negatives
+with genuinely mismatched opposite Curve counts6/7.
+Root intentionally stopped only identity-verified owned Julia test25228 and
+parent7588, leaving Python wrapper21932 alive for the final471/index guard.
+Session21186 is drained EXIT1 at1534.4682201s; Julia exit4294967295 is the
+intentional stop, and113 never launched. Log SHA256
+0D014F75D3EEE0BCE029BE15ACC94D7EF8E033124F150B6807FD01A6443B5A4C.
+Exact raw V2 inputs are archived in `test/tmp/b4_release_freeze_v2_inputs.zip`,
+SHA256C0FCF88D584EB50FDBEE820F1320CDE60C97A1EE6646D8B432C3FD97B8598930.
+`test/tmp/b4_resources_hold_final_v2.txt` prevents more V2 gates. Nested's
+Quad-strip112 completed4,846,359checks/24rows/36unboxedmethods with all guards
+passing; the hold prevented113. The five completed older gates total
+20,810,259checks/120rows. Oracle's old queue never launched.
+Inventory `test/tmp/b4_geo_negative_fixture_inventory_v1.md` proves only the
+two quad-patch inputs need rec-only opposite6/7 replacements. The base,
+two-/three-/four-Quad GEO helpers all use free laterals, so preserve their M5
+blockers. All atomic-state assertions remain unchanged.
+
+Native public factory probes also pass360 each on112/113 for four reversed
+Curve single-Quad recipes. Later masks(1,2,2,1,1,1)/(2,1,1,2,1,1) emit6Tet,
+while a literal pinned factory replay selects2Tet+2Pyr. Native geometry is
+valid. The first actual Gmsh capture fails with FindDiagonalEdgeIndices
+unexpected surface configuration; accepted direct public parity is not yet
+established. Keep this as an investigated factory-choice candidate, not an
+invalid-map claim or a confirmed current product mismatch from a failed oracle.
+Peer evidence is `test/tmp/b4_isolated_factory_public_pair_v1.json`, SHA256
+A620DC217A9871A907190A9952D49B6163F03093D9AD15A39B35CD3154DFAE2B.
+
+The two rec-only quad-patch expectations are corrected; free M5 controls and
+all83 assertion/test tokens are preserved. Five old GEO suites pass10,000
+checks each on normal bounds-checked112/113 (297.128831/230.316655s), with all
+471/index/head/source guards. Evidence
+`test/tmp/b4_old_geo_negative_focus_v3_evidence.json`, SHA256
+F343EC4EEF724B559C40AE4D337B859501D6B5C937B7FFC9329DC342CD9D7986.
+
+Final V3 freeze is verified: `test/tmp/b4_release_freeze_v3.json`, SHA256
+13BBFE3B0A4FA91BD51802FD57D9416D58F28B0100FFD191B2D6007499174107,
+471 inputs (103 production/Project,212 test,156 validation), base9806d5b,
+scoped index8d814dd4b1409e8bbfd8bfd4de714aa16f05bcf972933085aa48519be8286fe4.
+Root serial package112/113 session77695 is terminalGREEN/drained. Package112 is
+GREEN1,311,533 assertions/31m15.9s body,1884.3137128s wrapper, all471/index
+before/after guards. Log SHA256
+ADD7E98FF218158EAA55D9B833BED1ED11F1583F4E23BB8C9A398514ACE26931.
+Package113 is terminalGREEN1,311,533 assertions/24m58.6s body,
+1503.420155s wrapper, all471/index before/after guards. Log SHA256
+EA3DFFF3B872657A9482AA35AEB0D30B0D8C5BB330653C4361838D90ECDE2719.
+Strict112 session43291
+is terminalGREEN/drained:206 cases/414.5665332s, all471/index guards, log SHA256
+E6494F2159DF6F48159E54F58EDF910E64A494D4DD7BEF7F8888B339C4D6506C.
+Fresh B4 resource pair31653 is terminalGREEN/drained:3,062,938 checks each,
+12P1/3source/3P2 exact cross-runtime rows,109 direct inputs and74 unboxed
+methods. Wrapper times250.095659/201.221392s; all471/index guards pass.
+Pair evidence `test/tmp/b4_resources_final_v3_pair_summary.json`, SHA256
+F6B10E81FDBA5B4AF7846FE2BF9DC55E4B4DEB688BC3AFE69A02006C13CCF849.
+Nested old-first-three-family queue19425 is terminalGREEN/drained:25,656,618
+checks/144P1 rows across6 gates, maxdoubling2.1273367573; all471/index and
+direct guards. Summary `test/tmp/b4_old_resource_summary_final_v3.json`, SHA256
+3270734B2A4A5BDF07577D61F07DBDB753CE1FBC9653CADCA5E9CE0C0E58B50B.
+Root launched old-last-three-family queue39767 while Oracle was in research;
+its console is `test/tmp/b4_oracle_resource_sequence_final_v3.console.log`.
+The queue is terminalGREEN/drained: Three-Quad11,358,731, Four-Quad14,958,057
+and Rectangular8,483,848 checks per runtime. All14 resource gates pass
+101,383,766 checks. Final resource evidence is
+`test/tmp/b4_final_resource_evidence_v3.json`, SHA256
+0AB6E14B9A1A10B0727BADDC81C72798A061340A335B1D3265FE1291B27FC0AC.
+Fresh's corrected source adapter and centerful catalog/emitter proofs are
+terminalGREEN on both runtimes, with unchanged dependency hashes and equal
+whole-product digests. Those ignored future drafts cannot change the release
+source/index. Exact471 raw V3 inputs plus manifest are archived and
+verified in `test/tmp/b4_release_freeze_v3_inputs.zip`, SHA256
+F70BABB4F5A8150FC5D0158DB9067AAFC89BD4544464202E56938B38C071A6DB. Epoch `final_v3` and new
+logs only; no scoped/index edits or new ignored `.jl` during Pkg.test. All14
+resource gates and both package runs have passed. Root final evidence helpers
+are `b4_final_resource_ledger_v1.py` and `b4_final_release_ledger_v1.py` under
+`test/tmp`. Final release evidence is `test/tmp/b4_final_release_evidence_v3.json`,
+SHA256 B6F204A611C0FBFDFB62ADDFBC296C2FD733C3F53E6A3A206930A1A3850364A4.
+This verifies both1,311,533-check package suites, all206 strict cases, all14
+resources/101,383,766 checks and unchanged old artifacts/tables except the
+two independently disproven API01 fingerprints. Postcommit checkout audits
+and remote verification complete publication; the full mesher goal stays active.
+
+Free B4 remains preparation. New local P2 identity proof covers729 masks,
+7,290 actual Tet10/Pyramid14 support sets and11,664 internal Triangle6 traces;
+retained fan local count is35, not a global free P2 formula. Count-only admission
+prototype passes9,631 BigInt boundary/overflow checks each on112/113. Direct
+certified-source physical adapter passes16,146 semantic and41 AST/guard checks
+per runtime. The catalog/emitter passes19,963 geometry and57 AST/guard checks
+per runtime over17 products, including real nonterminal centers; all53 actual
+implementation/constructor methods are unboxed and all117 input hashes match.
+Pair evidence `test/tmp/next_free_b4_source_catalog_compare_v1_pair.json`, SHA256
+7A8562C7820FB18072ECEDAA1C6A187E4A9348A1C1F78D90CE1D4FC9EA5AD8B9.
+No production method override or tracked implementation edit was made. These
+do not replace integrated
+whole-product, global support/carrier, public API and allocation verification.
+
+## Latest verified increment (`9806d5b`)
+
 Continue in `C:/tmp/tessella_nonew_rectangular_grid` on
 `codex/nonew-rectangular-grid`, based on verified and pushed `78af21d`.
 The dynamic actual rectangular source certificate, B3/adjacent-B2/B0 physical
@@ -186,7 +424,7 @@ proof does not imply Gmsh coordinate equality. Final ledger SHA256 is
 Begin its tracked implementation
 in a fresh worktree from verified pushed main after this release completes.
 
-## Latest verified increment (`78af21d`)
+## Previous verified increment (`78af21d`)
 
 The verified worktree is `C:/tmp/tessella_nonew_four_quad_strip` on
 `codex/nonew-four-quad-strip`, based on verified and pushed `0f9601f`.

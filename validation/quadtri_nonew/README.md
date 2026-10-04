@@ -523,3 +523,68 @@ supports. Full-cell P1 maps, parent partitions, opposite typed faces, P2
 ownership/closure/UVs and true `Core.Box` controls are checked. Input hashes
 must remain stable. Release success requires completed guarded resource,
 strict and package runs recorded in STATUS.md.
+
+## Arbitrary-length recombined B4 strips
+
+The strict driver adds twelve independently captured M5/M7/M9 all-boundary
+strips, with one or three intervals, both normal signs, unit/skew/rounded
+geometry and literal Progression/Bump controls. Select them with
+`QUADTRI_NONEW_CASE=b4_rec_strip`. The earlier194 cases retain their contracts.
+The saved artifact keeps exact recipes, source parameters, Float64 bits,
+typed cells, real centers, full-reference map bounds, interpolation supports,
+carrier proofs and stored/computed UV records. The pinned oracle's body-center
+warnings remain recorded; the driver checks their exact expected form and
+rejects Error diagnostics. The twelve captures contain84 real terminal
+centers and384 empty stored Surface UV records. Native computed UVs must
+reevaluate the actual queried coordinates within the unchanged2e-11 tolerance.
+
+The source admits exactly one Quad across and at least five along, using the
+same actual regular-disk incidence, strict convexity and Jordan boundary
+proof as the rectangular path. Original source-column ordinals determine one
+consistent terminal rank; public oracle node tags do not substitute for its
+pointer order. Earlier macros are whole Hex8 cells. Each terminal macro emits
+its actual strictly interior mean and a fully certified seven-cell fan.
+For M source Quads and N intervals, family counts are2M Tet4, M(N-1) Hex8
+and5M Pyr5; P1/P2 node counts are2(M+1)(N+1)+M and(12M+6)N+14M+3.
+Actual primary/support identities determine carriers, including the real
+Volume centers and their radial supports. Independent exact reference maps
+certify every actual linear/quadratic cell and macro integral.
+
+Two retained M7 Progression4 recipes exposed a preexisting source-sampling
+error on a length-two offset Line. The native GEO Line density route now uses
+the pinned bounded1e-5 first derivative and numerically integrated length.
+It preserves public exact evaluation and the separate recombination-count
+protocol. The strict native products pass the original coordinate tolerance;
+the artifact preserves the earlier failed source-only evidence as provenance.
+Free B4 face propagation and other unfinished source categories remain work
+under the active full-parity goal. Resource and final package release results
+are recorded separately in STATUS.md after the candidate is frozen.
+
+Run the recombined B4 resource gate with normal compilation and bounds checks
+on both supported runtimes; it does not require Gmsh:
+
+```sh
+/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/b4_rec_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/b4_rec_strip_resources.jl
+```
+
+The gate measures twelve P1 construction rows: five source Quads with 500,
+1,000 and 2,000 intervals through standalone volume, GEO, classified projection
+and public API generation. A separate one-interval source series uses 1,000,
+2,000 and 4,000 actual Quads and their real terminal centers. Independent
+audits follow the measured construction and copies. The allocation bound stays
+`allocated_next <= 2.15 * allocated_previous + 65536`. Three P2 products cover
+M5/N1, M5/N3 and M7/N3, with actual support identities, carriers, closure and
+UV reevaluation. Full-cell interval bounds, actual mean enclosures, macro
+integrals, opposite typed internal faces and the complete shell are checked.
+Actual named and generated keyword/closure bodies are scanned for true
+`Core.Box`, with positive controls. Release success requires completed guarded
+resource, strict and package runs with stable inputs and index.
+
+The aggregate source-area certificate cancels exact dyadic signed triangle
+areas; a fixed ulp bound on summing thousands of rounded cell areas is not
+used. Positive per-cell areas and their independent map tolerances remain
+checked. Confirmed container-growth failures are corrected through checked
+capacity hints in tag validation, face topology/projection and API ownership
+and merge construction, without changing mesh identities or the allocation
+growth bound.

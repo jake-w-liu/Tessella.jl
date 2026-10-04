@@ -840,8 +840,8 @@ end
 # difference, including the reciprocal multiplication shown here. The
 # recombination threshold reads the numerically integrated density, so a
 # coefficient near 0.75 cannot be compared directly to that threshold.
-# This count-only evaluator leaves the established node-placement stencil
-# and exact public Line value/derivative contracts unchanged.
+# Count decisions and native Line transfinite placement share this stencil;
+# public Line value/derivative evaluation retains its exact arithmetic.
 function _transfinite_native_line_speed(first::NTuple{3,Float64},
                                          last::NTuple{3,Float64},t::Float64)
     left_step=t<1e-5 ? 0.0 : 1e-5
@@ -856,6 +856,32 @@ function _transfinite_native_line_speed(first::NTuple{3,Float64},
         squared+=derivative*derivative
     end
     return sqrt(squared)
+end
+
+# Preserve the existing robust placement evaluator when native squared-norm
+# arithmetic overflows/underflows or its local stencil loses all information.
+# This is separate from count-only mass, whose primary threshold arithmetic
+# must remain unchanged.
+@inline function _model_native_line_sampling_speed(first,last,t::Float64,
+                                                   gamma,caller)
+    speed=_transfinite_native_line_speed(first,last,t)
+    isfinite(speed) && speed>0.0 && return speed
+    return _length_point(gamma,nothing,t,0.0,1.0,caller).xp
+end
+
+function _model_native_line_sampling_length(m::GeoModel,curve::Int,caller)
+    a,b=m.curves[curve]
+    first,last=m.points[a],m.points[b]
+    gamma=t->_model_curve_point(m,curve,t,caller)
+    evaluate=(t,_,_)->begin
+        speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
+        _IntegrationPoint(t,speed,0.0,speed,1.0)
+    end
+    points=_adaptive_points(evaluate,0.0,1.0,_GMSH_INTEGRATION_PRECISION,
+                            _DEFAULT_MAX_INTEGRATION_POINTS,
+                            _GMSH_MIN_INTEGRATION_DEPTH,
+                            _GMSH_MAX_INTEGRATION_DEPTH,caller)
+    return points[end].p
 end
 
 function _model_native_line_recombination_mass(first::NTuple{3,Float64},
@@ -936,10 +962,17 @@ function _model_curve_transfinite_density_params(m::GeoModel,curve::Int,
             "$caller: Curve[$curve] evaluation is not Float64-representable"))
         return point
     end
+    native_line=_curve_type(m,curve)===:line &&
+        get(m.curve_geometry,curve,nothing)===nothing && t0==0.0 && t1==1.0
+    endpoints=native_line ?
+        (m.points[first(m.curves[curve])],m.points[last(m.curves[curve])]) :
+        ((0.0,0.0,0.0),(0.0,0.0,0.0))
     evaluate=function (t,_,_)
-        lp=_length_point(γ,nothing,t,t0,t1,caller)
+        speed=native_line ?
+            _model_native_line_sampling_speed(endpoints[1],endpoints[2],t,γ,caller) :
+            _length_point(γ,nothing,t,t0,t1,caller).xp
         tn=(t-t0)/(t1-t0)
-        return _IntegrationPoint(t,val(tn,lp.xp),0.0,lp.xp,1.0)
+        return _IntegrationPoint(t,val(tn,speed),0.0,speed,1.0)
     end
     points=_adaptive_points(evaluate,t0,t1,_GMSH_INTEGRATION_PRECISION,
                             _DEFAULT_MAX_INTEGRATION_POINTS,
@@ -980,9 +1013,11 @@ function _model_curve_transfinite_native_params(m::GeoModel,curve::Int,
         raw_type=_transfinite_law_type(spec.kind)*(spec.reversed ? -1 : 1)
         if _transfinite_val_arm(raw_type,spec.coef)===:density || raw_type in (5,6,7)
             a,b=m.curves[curve]
-            length=kind===:line ?
-                _model_point_distance(m.points[a],m.points[b]) :
-                _model_curve_length(m,curve,caller)
+            native_line=kind===:line &&
+                get(m.curve_geometry,curve,nothing)===nothing && t0==0.0 && t1==1.0
+            length=native_line ? _model_native_line_sampling_length(m,curve,caller) :
+                kind===:line ? _model_point_distance(m.points[a],m.points[b]) :
+                              _model_curve_length(m,curve,caller)
             (isfinite(length) && length>0.0) || throw(ArgumentError(
                 "$caller: Curve[$curve] has nonpositive or nonfinite geometric length"))
             type,coef=_transfinite_effective_law(spec,length,spec.num_nodes)

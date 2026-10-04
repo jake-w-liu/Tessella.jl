@@ -5529,6 +5529,13 @@ end
 function _model_projection_face_topology(faces)
     nodes=Set{Int32}()
     edges=Set{NTuple{2,Int32}}()
+    if faces isa AbstractVector || faces isa Tuple
+        capacity=0
+        for face in faces
+            capacity=Base.checked_add(capacity,length(face))
+        end
+        sizehint!(nodes,capacity);sizehint!(edges,capacity)
+    end
     for face in faces
         n=length(face)
         for i in 1:n
@@ -6012,6 +6019,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
     end
 
     claimed_faces=Set{NTuple{N,Int32} where N}()
+    nonew===nothing || sizehint!(claimed_faces,length(nonew.boundary))
     surface_cells=(NTuple{N,Int32} where N)[]
     surface_entities=Int32[]
     surface_nodes=Dict{Int,Set{Int32}}()
@@ -6020,6 +6028,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;_extrude_scope=noth
         _volume_cell_boundary_faces(mesh) :
         (nonew.boundary,Dict{NTuple{N,Int32} where N,NTuple{N,Int32} where N}())
     claimed_boundary_faces=Set{NTuple{N,Int32} where N}()
+    nonew===nothing || sizehint!(claimed_boundary_faces,length(nonew.boundary))
     for surface in projection_surface_tags
         faces=if nonew!==nothing
             faces=nonew.surfaces[surface]

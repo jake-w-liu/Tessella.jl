@@ -29,9 +29,16 @@ end
 @noinline _extrude_nonew_rect_grid_source_error(caller,reason)=
     _extrude_nonew_rect_grid_error(caller,"source $reason")
 
-function _extrude_nonew_rect_grid_sizes(a::Int,b::Int,caller)
-    a>=2 && b>=2 || _extrude_nonew_rect_grid_source_error(caller,
-        "requires at least two actual quadrangles in both directions")
+function _extrude_nonew_rect_grid_sizes(a::Int,b::Int,caller;mode::Symbol=:rectangular)
+    if mode===:rectangular
+        a>=2 && b>=2 || _extrude_nonew_rect_grid_source_error(caller,
+            "requires at least two actual quadrangles in both directions")
+    elseif mode===:b4_strip
+        min(a,b)==1 && max(a,b)>=5 || _extrude_nonew_rect_grid_source_error(caller,
+            "B4-strip mode requires exactly one direction of one actual Quad and the other of at least five")
+    else
+        _extrude_nonew_rect_grid_source_error(caller,"has an unsupported private source category mode")
+    end
     counts=try
         vertices=Base.checked_mul(Base.checked_add(a,1),Base.checked_add(b,1))
         cells=Base.checked_mul(a,b)
@@ -49,7 +56,7 @@ end
 
 # A candidate check precedes source grading/allocation. Bounded categories keep
 # their earlier dispatcher priority. The constructor independently rechecks it.
-function _extrude_nonew_rect_grid_shape(m::GeoModel,source::Int,sides::Int,caller)
+function _extrude_nonew_rect_grid_shape(m::GeoModel,source::Int,sides::Int,caller;mode::Symbol=:rectangular)
     sides==4 && haskey(m.meshing.transfinite_surfaces,source) &&
         _model_surface_recombined(m,source) || return nothing
     loops=m.surfaces[source]
@@ -64,10 +71,17 @@ function _extrude_nonew_rect_grid_shape(m::GeoModel,source::Int,sides::Int,calle
         control===nothing && return 0
         _flexible_transfinite_nodes(m,control.num_nodes,curve,caller)
     end
-    widths[1]>=3 && widths[2]>=3 && widths[1]==widths[3] && widths[2]==widths[4] ||
+    widths[1]>=2 && widths[2]>=2 && widths[1]==widths[3] && widths[2]==widths[4] ||
         return nothing
     shape=(widths[1]-1,widths[2]-1)
-    _extrude_nonew_rect_grid_sizes(shape[1],shape[2],caller)
+    if mode===:rectangular
+        shape[1]>=2 && shape[2]>=2 || return nothing
+    elseif mode===:b4_strip
+        min(shape...)==1 && max(shape...)>=5 || return nothing
+    else
+        _extrude_nonew_rect_grid_source_error(caller,"has an unsupported private source category mode")
+    end
+    _extrude_nonew_rect_grid_sizes(shape[1],shape[2],caller;mode=mode)
     return shape
 end
 
@@ -272,12 +286,14 @@ function _extrude_nonew_rect_grid_boundary_certify(planar,boundary,caller)
     return nothing
 end
 
-function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spec,caller)
-    shape=_extrude_nonew_rect_grid_shape(m,source,4,caller)
+function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spec,caller;
+                                       mode::Symbol=:rectangular)
+    shape=_extrude_nonew_rect_grid_shape(m,source,4,caller;mode=mode)
     shape!==nothing || _extrude_nonew_rect_grid_source_error(caller,
+        mode===:b4_strip ? "requires four native straight Curve chains defining a one-by-at-least-five actual Quad strip" :
         "requires four native straight Curve chains with equal opposite effective counts >=3")
     a,b=shape
-    vertices,cell_count,edge_count,boundary_count=_extrude_nonew_rect_grid_sizes(a,b,caller)
+    vertices,cell_count,edge_count,boundary_count=_extrude_nonew_rect_grid_sizes(a,b,caller;mode=mode)
     source_mesh isa MixedMesh && nnodes(source_mesh)==vertices && length(source_mesh.blocks)==1 ||
         _extrude_nonew_rect_grid_source_error(caller,"requires the complete actual linear Quad grid without extra nodes")
     block=only(source_mesh.blocks)
@@ -414,8 +430,13 @@ function _extrude_nonew_rect_grid_source(m::GeoModel,source::Int,source_mesh,spe
             boundary_vertices[cell[corner]] && (mask|=UInt8(1)<<(corner-1))
         end
         count=count_ones(mask)
-        count in (0,2,3) || _extrude_nonew_rect_grid_source_error(caller,
-            "requires only B0, adjacent-B2 and B3 rectangular source cells")
+        if mode===:b4_strip
+            count==4 && mask==0x0f || _extrude_nonew_rect_grid_source_error(caller,
+                "B4-strip mode requires every actual source Quad corner on the actual boundary")
+        else
+            count in (0,2,3) || _extrude_nonew_rect_grid_source_error(caller,
+                "requires only B0, adjacent-B2 and B3 rectangular source cells")
+        end
         if count==2
             adjacent=0
             for corner in 1:4

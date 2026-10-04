@@ -187,13 +187,13 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     quad_strip=completed.catalog isa _ExtrudeNoNewQuadStripCatalog
     three_quad_strip=completed.catalog isa _ExtrudeNoNewThreeQuadStripCatalog
     four_quad_strip=completed.catalog isa _ExtrudeNoNewFourQuadStripCatalog
-    rect_grid=completed.catalog isa _ExtrudeNoNewRectGridCatalog
+    dynamic_grid=completed.catalog isa _ExtrudeNoNewDynamicGridCatalog
     intervals=length(completed.catalog.layer_refs)
     face_capacity=quad_patch ? _extrude_nonew_quad_patch_face_capacity(completed.catalog) :
         quad_strip ? _extrude_nonew_quad_strip_face_capacity(completed.catalog) :
         three_quad_strip ? _extrude_nonew_three_quad_strip_face_capacity(completed.catalog) :
         four_quad_strip ? _extrude_nonew_four_quad_strip_face_capacity(completed.catalog) :
-        rect_grid ? _extrude_nonew_rect_grid_face_capacity(completed.catalog) :
+        dynamic_grid ? _extrude_nonew_dynamic_grid_face_capacity(completed.catalog) :
         two_tri ? (completed.volume isa Mesh ? 16 : 7)*intervals+2 : 0
     typed_boundary=_extrude_nonew_certify_boundary(mesh,completed.surfaces,caller;
         face_capacity=face_capacity)
@@ -239,15 +239,15 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     for curve in curve_tags
         a,b=working.curves[curve]
         link=get(working.meshing.extrude_sources,(1,curve),nothing)
-        chain=if (quad_patch || quad_strip || three_quad_strip || four_quad_strip || rect_grid) &&
+        chain=if (quad_patch || quad_strip || three_quad_strip || four_quad_strip || dynamic_grid) &&
                 (curve in source_curves || (link!==nothing && link[1]==1))
             original=curve in source_curves ? curve : abs(link[2])
-            source_catalog=rect_grid ? completed.catalog.source : completed.catalog
+            source_catalog=dynamic_grid ? completed.catalog.source : completed.catalog
             position=findfirst(==(original),source_catalog.boundary_curves)
             position===nothing && throw(ArgumentError(
                 "$caller: QuadTriNoNewVerts Curve[$curve] has no actual source boundary chain"))
             level=curve in source_curves ? 1 : size(columns,1)
-            width=(quad_strip || three_quad_strip || four_quad_strip || rect_grid) ?
+            width=(quad_strip || three_quad_strip || four_quad_strip || dynamic_grid) ?
                 Int(source_catalog.boundary_widths[position]) : 3
             nodes=Int32[lookup[ntuple(k->_model_projection_coordinate_key(
                 columns[level,source_catalog.boundary_chains[position][index]][k]),3)]

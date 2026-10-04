@@ -1189,7 +1189,17 @@ Upstream primary pointer minima are not public-tag minima. Native original
 source-column ordinal ranking is consistent across eligible terminal caps and
 interior shared laterals; saved upstream products are checked for existence of
 one global rank rather than pinned to one process's free connectivity.
-B1/B4 categories, other source topologies, transformed products, mixed roots and
+The next increment extends the actual source certificate to arbitrary-length
+one-cell-wide recombined B4 strips, with at least five source Quads. One
+terminal mean per original cell supplies a certified seven-cell fan; earlier
+intervals remain whole Hex8 cells. Checked capacities, shared boundary sheets
+and actual primary/support carriers use the same dynamic-grid interface.
+For M source cells and N intervals, the family counts are 2M Tet4,
+M(N-1) Hex8 and 5M Pyr5; primary and quadratic node counts are
+2(M+1)(N+1)+M and (12M+6)N+14M+3. The implementation and its permanent
+geometry/API, strict differential and resource checks are being completed in
+`C:/tmp/tessella_nonew_b4_strip`, from verified and pushed `9806d5b`.
+B1 categories, free B4 propagation, other source topologies, transformed products, mixed roots and
 shared neighbors/regions remain unfinished phases with precise blockers.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public

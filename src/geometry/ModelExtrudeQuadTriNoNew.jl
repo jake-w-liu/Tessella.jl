@@ -1,6 +1,6 @@
-# Isolated NoNewVerts region kernels for one nondegenerate source triangle or
-# quadrangle, and bounded two-triangle, two-quadrangle and 2-by-2 quadrangle source grids. Quadrangle face choices
-# form a cap chain; triangular caps allow independent prism choices per interval.
+# NoNewVerts kernels for isolated triangles/quadrangles, bounded joined source
+# catalogs, complete rectangular Quad disks and recombined all-boundary strips.
+# Physical face propagation retains original source-column identities.
 # All other source categories retain explicit preflight blockers until their
 # region-wide propagation phases are implemented.
 
@@ -426,17 +426,28 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     grid_shape=quad_patch || quad_strip || three_quad_strip || four_quad_strip ?
         nothing : _extrude_nonew_rect_grid_shape(m,source,sides,caller)
     rect_grid=grid_shape!==nothing
-    two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid &&
+    strip_shape=quad_patch || quad_strip || three_quad_strip || four_quad_strip || rect_grid ?
+        nothing : _extrude_nonew_rect_grid_shape(m,source,sides,caller;mode=:b4_strip)
+    b4_strip=strip_shape!==nothing
+    b4_strip && !params.recomb_laterals && _extrude_nonew_b4_strip_plan_error(caller,
+        "free lateral faces require the pending all-boundary propagation planner")
+    two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
         _extrude_nonew_two_tri_candidate(m,source,sides,caller)
-    grid_nodes,grid_cells_per_interval=rect_grid ?
-        _extrude_nonew_rect_grid_preflight(grid_shape,caller) : (0,0)
+    grid_nodes,grid_cells_per_interval,grid_centers=if rect_grid
+        vertices,cells=_extrude_nonew_rect_grid_preflight(grid_shape,caller)
+        (vertices,cells,0)
+    elseif b4_strip
+        _extrude_nonew_b4_strip_preflight(strip_shape,caller)
+    else
+        (0,0,0)
+    end
     levels,refs=_extrude_nonew_levels(params,caller;
-        source_nodes=rect_grid ? grid_nodes : quad_patch ? 9 : quad_strip ? 6 : three_quad_strip ? 8 : four_quad_strip ? 10 : sides,
-        extra_nodes=rect_grid ? 0 : four_quad_strip ? (params.recomb_laterals ? 4 : 0) :
+        source_nodes=rect_grid || b4_strip ? grid_nodes : quad_patch ? 9 : quad_strip ? 6 : three_quad_strip ? 8 : four_quad_strip ? 10 : sides,
+        extra_nodes=rect_grid || b4_strip ? grid_centers : four_quad_strip ? (params.recomb_laterals ? 4 : 0) :
             three_quad_strip ? (params.recomb_laterals ? 3 : 0) :
             quad_strip ? (params.recomb_laterals ? 2 : 0) :
             sides==4 && !two_tri && !quad_patch ? 1 : 0,
-        cells_per_interval=rect_grid ? grid_cells_per_interval : four_quad_strip ? (params.recomb_laterals ? 28 : 24) :
+        cells_per_interval=rect_grid || b4_strip ? grid_cells_per_interval : four_quad_strip ? (params.recomb_laterals ? 28 : 24) :
             three_quad_strip ? (params.recomb_laterals ? 21 : 18) :
             quad_patch ? 24 : quad_strip ? (params.recomb_laterals ? 14 : 12) :
             two_tri && params.recomb_laterals ? 2 : sides==4 ? 6 : 3)
@@ -479,6 +490,17 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
         _extrude_nonew_rect_grid_product_certify(cols,catalog,spec,caller)
         return _extrude_nonew_rect_grid_finish(m,t,params,source,source_mesh,
+            catalog,cols,top,laterals,caller)
+    elseif b4_strip
+        source_data=_extrude_nonew_rect_grid_source(m,source,source_mesh,spec,caller;
+            mode=:b4_strip)
+        source_data.grid_shape==strip_shape || _extrude_nonew_b4_strip_error(caller,
+            "actual source dimensions differ from their preflight")
+        catalog=_extrude_nonew_b4_strip_plan(source_data,levels,refs,
+            params.recomb_laterals,caller)
+        cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
+        _extrude_nonew_rect_grid_product_certify(cols,catalog,spec,caller)
+        return _extrude_nonew_b4_strip_finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif two_tri
         catalog=_extrude_nonew_two_tri_catalog(m,source,source_mesh,spec,
@@ -565,3 +587,4 @@ include("ModelExtrudeNoNewQuadStrip.jl")
 include("ModelExtrudeNoNewThreeQuadStrip.jl")
 include("ModelExtrudeNoNewFourQuadStrip.jl")
 include("ModelExtrudeNoNewRectGrid.jl")
+include("ModelExtrudeNoNewB4Strip.jl")

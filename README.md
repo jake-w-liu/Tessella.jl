@@ -192,9 +192,10 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   or a recombined 2-by-2 Quad4 patch with an existing interior source pivot,
   or a recombined strip containing two, three or four Quad4 cells,
   or a regular recombined rectangular Quad4 source grid with at least two
-  cells in each direction,
+  cells in each direction, or an arbitrary-length recombined one-cell-wide
+  Quad4 strip with at least five cells,
   with normalized
-  positive layer groups and free or recombined laterals; one completed operation
+  positive layer groups and the lateral policies described below; one completed operation
   plan supplies the volume, surfaces, and classified projection. Whole-domain
   P1 Jacobian and typed-boundary checks plus bounded convex-hull separation reject
   uncertified or overlapping layers before publishing mesh state.
@@ -219,6 +220,14 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   quadratic meshes have `30N+15`, `42N+21` or `54N+27` nodes for free laterals, and
   `30N+31`, `42N+45` or `54N+59` for recombined laterals. Every shared face in a
   strip is solved together before indexed output is emitted.
+  Arbitrary-length one-cell-wide strips currently support recombined laterals.
+  They retain the actual native Line chains and original cell identities,
+  including convex skew and graded sources, in either axis-normal direction.
+  For `M` source Quads and `N` intervals, they emit `2M` Tet4, `M(N-1)` Hex8
+  and `5M` Pyr5 cells with one strictly representable actual terminal centroid
+  per source cell. P1 and P2 contain `2(M+1)(N+1)+M` and
+  `(12M+6)N+14M+3` nodes. Full cell maps, source partitions, typed faces and
+  actual primary/support carriers are certified before publication.
   Rectangular grids retain the actual four native Line chains and original
   cell identities. A strict source disk and axis-normal column certificate
   admits convex skew, trapezoid and graded grids as well as rectangles. Shared
@@ -243,7 +252,7 @@ declarations, and geometry-derived physical-group RHSs beyond the documented inl
 topology queries),
 mixed-element generation beyond the listed structured and surface-recombination paths,
 quasi-transfinite or holed transfinite patches,
-other `QuadTriNoNewVerts` source topologies and B1/B4 categories, transformed
+other `QuadTriNoNewVerts` source topologies, B1 categories and free B4 propagation, transformed
 source grids, mixed roots, collapsed
 columns, shared neighbors, and copied-source chains; curved CAD mixed order elevation/refinement,
 selective refinement, simplex-kernel integration,

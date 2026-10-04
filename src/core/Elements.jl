@@ -596,6 +596,8 @@ function _mixed_positive_tag_vector(values,context::AbstractString;unique_values
     (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
         "$context values must be a vector or tuple"))
     out=UInt64[]; seen=Set{UInt64}()
+    capacity=length(values)
+    sizehint!(out,capacity);sizehint!(seen,capacity)
     for value in values
         value isa Integer || throw(ArgumentError("$context must be an integer"))
         _elements_reject_bool(value,context)
