@@ -404,8 +404,8 @@ function _model_minimum_curve_segments(m::GeoModel,curve::Integer,
         a==b && (np=max(4,np))
     end
     # A closed native curve needs at least three segments upstream: its
-    # shared end vertex turns the `N = minimumMeshSegments + 1` node target
-    # into `N` edges, and Gmsh 4.15.2 emits a three-edge loop on a coarse
+    # repeated endpoint is omitted from the `N = minimumMeshSegments + 1`
+    # target, leaving N−1 unique nodes and edges. Gmsh emits a three-edge loop on a coarse
     # closed spline (still four under `MinCurvePoints 5`, matching the
     # regular floor) — a two-segment digon only arises on degenerate input.
     if !is_occ && kind!==:line && haskey(m.curves,curve)
@@ -536,7 +536,7 @@ end
 
 # Ordinary (non-transfinite) grading: `F_Lc` integration through
 # `mesh_curve`, the `minimumMeshSegments` floor and the recombination
-# odd-count/`increaseN` adjustments; `filterPoints` runs inside the kernel
+# mass-gated odd-count adjustment; `filterPoints` runs inside the kernel
 # with the BGM field and the `forceOdd` truncation rule.
 function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
                                    t1::Float64,
@@ -551,9 +551,8 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     endpoints=((0,a),(0,b))
     # Recombination odd-N forcing (upstream counts N = elements + 1):
     # `(method != TRANSFINITE || flexible) && algoRecombine != 0`, then
-    # `N%2==0 → N++` under RecombineAll or a recombined adjacent face, and
-    # `increaseN` for blossom algorithms 2/4. filterPoints truncates its
-    # removal count to even under the same condition.
+    # `N%2==0 && a>0.75 → N++` under RecombineAll or a recombined adjacent
+    # face. Gmsh 4.15.2's `increaseN` is an identity for all algorithms.
     odd_nodes=m.meshing.recombine_algo!=0 &&
         (m.meshing.recombine_all ||
          any(face->haskey(m.meshing.recombine,(2,face)),
@@ -561,34 +560,24 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
     # `filterPoints` truncates its removal count to even only under
     # `recombineAll` — the face-recombine arm does not force it.
     force_odd=m.meshing.recombine_algo!=0 && m.meshing.recombine_all
+    native_line=_curve_type(m,curve)===:line &&
+        get(m.curve_geometry,curve,nothing)===nothing
+    # Reuse the existing size samples/smoothing for the count-only native
+    # Line stencil; a different differentiation residual can straddle 0.75.
+    # Do not invoke field callbacks or rebuild the placement primitive.
+    count_primitive=odd_nodes && native_line ?
+        points->_model_native_line_recombination_mass(
+            m.points[a],m.points[b],points) : nothing
     # `Integration` precision upstream is `lcIntegrationPrecision * lc`.
     precision=options.integration_precision*options.ctx_lc
-    function grade(exact)
-        _,graded=mesh_curve(
-            γ,field;t0=t0,t1=t1,closed=closed,
-            entity=(1,curve),endpoint_entities=endpoints,
-            size_function=size_function,
-            integration_precision=precision,
-            minimum_segments=minimum,exact_edges=exact,
-            force_odd=force_odd)
-        return graded
-    end
-    parameters=grade(nothing)
-    nedge=closed ? length(parameters) : length(parameters)-1
-    # `N` counts nodes upstream (edges+1 for open curves; a closed curve's
-    # shared vertex makes its node count equal its edge count). The odd-N
-    # and `increaseN` adjustments only apply when recombination is actually
-    # requested — `RecombineAll` or a recombined adjacent face (upstream
-    # `meshGEdgeProcessing` lines ~696-715).
-    if odd_nodes
-        nnode=closed ? nedge : nedge+1
-        iseven(nnode) && (nnode+=1)
-        if m.meshing.recombine_algo in (2,4) && isodd(div(nnode+1,2)-1)
-            nnode+=2
-        end
-        target=closed ? nnode : nnode-1
-        target!=nedge && return grade(target)
-    end
+    _,parameters=mesh_curve(
+        γ,field;t0=t0,t1=t1,closed=closed,
+        entity=(1,curve),endpoint_entities=endpoints,
+        size_function=size_function,
+        integration_precision=precision,
+        minimum_segments=minimum,force_odd=force_odd,
+        _recombine_odd_nodes=odd_nodes,
+        _recombination_primitive=count_primitive)
     return parameters
 end
 
@@ -649,10 +638,12 @@ end
 # `Integration`/`RecursiveIntegration` builds its primitive with the same
 # adaptive trapezoid `F_Lc` uses. Nodes then sit at equal primitive marks,
 # linearly inverted on (t, primitive) (`meshGEdge` NUMP walk). For
-# uniform-speed parametrizations (`:line`, `:circle`) that inversion recovers
-# the closed-form law positions exactly, so those kinds keep the bitwise
-# `_transfinite_parameters` fast path. Non-uniform kinds dispatch through the
-# same three `val` arms upstream takes:
+# native Lines the sampled density and primitive inversion can differ from
+# the closed-form grading law, even with constant geometric speed. Circles
+# without FlexibleTransfinite retain their established analytic positions;
+# flexible Circles, nonuniform native Lines and
+# non-uniform-speed curves dispatch through the same three `val` arms
+# upstream takes:
 #
 #   * default arm — `coef <= 0`, `coef == 1`, or a beta coefficient < 1:
 #     `val ∝ ‖C′‖` → the primitive is arc length → uniform LENGTH fractions,
@@ -810,7 +801,21 @@ function _transfinite_val(type::Int,coef::Float64,length::Float64,nbpt::Int)
         a=length*(r-1.0)/(r^(nbpt-1.0)-1.0)
         lgr=log(r)
         return function (t,d)
-            i=floor(Int,log(t*length/a*(r-1.0)+1.0)/lgr)
+            argument=t*length/a*(r-1.0)+1.0
+            # An extreme decreasing ratio can round the terminal logarithm
+            # argument to zero. Native F_Transfinite contributes zero density
+            # at that endpoint; make this explicit without converting Inf to
+            # an integer. An unresolved interior partition is an error.
+            if argument<=0.0 && t==1.0 && r<1.0
+                return 0.0
+            end
+            (isfinite(argument) && argument>0.0) || throw(ArgumentError(
+                "transfinite progression has an unrepresentable interior density partition"))
+            index=log(argument)/lgr
+            (isfinite(index) && typemin(Int)<=index<typemax(Int)) ||
+                throw(ArgumentError(
+                    "transfinite progression has an unrepresentable density partition index"))
+            i=floor(Int,index)
             return d/(a*r^i)
         end
     elseif atype==2
@@ -829,6 +834,91 @@ function _transfinite_val(type::Int,coef::Float64,length::Float64,nbpt::Int)
     else
         return (t,d)->1.0
     end
+end
+
+# Native GEO Line derivatives in `InterpolateCurve` use a bounded 1e-5
+# difference, including the reciprocal multiplication shown here. The
+# recombination threshold reads the numerically integrated density, so a
+# coefficient near 0.75 cannot be compared directly to that threshold.
+# This count-only evaluator leaves the established node-placement stencil
+# and exact public Line value/derivative contracts unchanged.
+function _transfinite_native_line_speed(first::NTuple{3,Float64},
+                                         last::NTuple{3,Float64},t::Float64)
+    left_step=t<1e-5 ? 0.0 : 1e-5
+    right_step=t>1.0-1e-5 ? 0.0 : 1e-5
+    reciprocal=1.0/(left_step+right_step)
+    squared=0.0
+    @inbounds for axis in 1:3
+        delta=last[axis]-first[axis]
+        left=first[axis]+(t-left_step)*delta
+        right=first[axis]+(t+right_step)*delta
+        derivative=(right-left)*reciprocal
+        squared+=derivative*derivative
+    end
+    return sqrt(squared)
+end
+
+function _model_native_line_recombination_mass(first::NTuple{3,Float64},
+                                               last::NTuple{3,Float64},points)
+    previous=points[1]
+    previous_density=_transfinite_native_line_speed(first,last,previous.t)/previous.h
+    mass=0.0
+    @inbounds for index in 2:length(points)
+        current=points[index]
+        density=_transfinite_native_line_speed(first,last,current.t)/current.h
+        mass+=0.5*(previous_density+density)*(current.t-previous.t)
+        previous=current
+        previous_density=density
+    end
+    return mass
+end
+
+function _model_curve_transfinite_mass(m::GeoModel,curve::Int,spec,
+                                       caller::AbstractString)
+    # A caller with no stored law has the ordinary uniform transfinite
+    # density. Nonpositive coefficients never satisfy the positive mass
+    # threshold; the uniform coefficient's mass is safely above it.
+    spec===nothing && return 1.0
+    raw_type=_transfinite_law_type(spec.kind)*(spec.reversed ? -1 : 1)
+    hwall=raw_type in (5,6,7)
+    # Positive HWall types interpret a negative coefficient as the wall
+    # side and transform it into a positive ordinary law first.
+    (!hwall && spec.coef<=0.0) && return 0.0
+    (!hwall && spec.coef==1.0) && return 1.0
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    _transfinite_val_arm(raw_type,spec.coef)===:param &&
+        !hwall && return t1-t0
+
+    native_line=_curve_type(m,curve)===:line &&
+        get(m.curve_geometry,curve,nothing)===nothing
+    endpoints=native_line ?
+        (m.points[first(m.curves[curve])],m.points[last(m.curves[curve])]) :
+        ((0.0,0.0,0.0),(0.0,0.0,0.0))
+    gamma=u->_model_curve_point(m,curve,u,caller)
+    speed=t->native_line ?
+        _transfinite_native_line_speed(endpoints[1],endpoints[2],t) :
+        _length_point(gamma,nothing,t,t0,t1,caller).xp
+    length_evaluate=(t,_,_)->begin
+        d=speed(t)
+        _IntegrationPoint(t,d,0.0,d,1.0)
+    end
+    length_points=_adaptive_points(length_evaluate,t0,t1,
+        _GMSH_INTEGRATION_PRECISION,_DEFAULT_MAX_INTEGRATION_POINTS,
+        _GMSH_MIN_INTEGRATION_DEPTH,_GMSH_MAX_INTEGRATION_DEPTH,caller)
+    geometric_length=length_points[end].p
+    geometric_length==0.0 && return 0.0
+    type,coef=_transfinite_effective_law(spec,geometric_length,spec.num_nodes)
+    nbpt=_transfinite_law_nodes(m,spec.num_nodes,caller)
+    val=_transfinite_val(type,coef,geometric_length,nbpt)
+    density_evaluate=(t,_,_)->begin
+        d=speed(t)
+        density=val((t-t0)/(t1-t0),d)
+        _IntegrationPoint(t,density,0.0,d,1.0)
+    end
+    density_points=_adaptive_points(density_evaluate,t0,t1,
+        _GMSH_INTEGRATION_PRECISION,_DEFAULT_MAX_INTEGRATION_POINTS,
+        _GMSH_MIN_INTEGRATION_DEPTH,_GMSH_MAX_INTEGRATION_DEPTH,caller)
+    return density_points[end].p
 end
 
 # `Integration` + the `meshGEdge` node-mark walk: integrate the transfinite
@@ -875,12 +965,41 @@ end
 
 # The native-parameter node list for a transfinite curve — the single source
 # both `curve_params` and the transfinite surface/volume side chains consume,
-# so every part emits bitwise-identical boundary nodes. Uniform-speed kinds
-# keep the closed-form path; curved kinds dispatch on the `val` arm.
+# so every part emits bitwise-identical boundary nodes. Native straight
+# nonuniform laws use F_Transfinite's sampled density primitive as upstream
+# does; a constant geometric speed does not make its stepwise progression
+# density or numerical inversion equal to the analytic grading formula.
+# The standalone analytic grading helper remains a separate contract.
 function _model_curve_transfinite_native_params(m::GeoModel,curve::Int,
                                                 t0::Float64,t1::Float64,spec,
                                                 caller::AbstractString)
     kind=_curve_type(m,curve)
+    if kind===:line || (kind===:circle && m.meshing.flexible_transfinite)
+        count=_flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)
+        count==2 && return Float64[t0,t1]
+        raw_type=_transfinite_law_type(spec.kind)*(spec.reversed ? -1 : 1)
+        if _transfinite_val_arm(raw_type,spec.coef)===:density || raw_type in (5,6,7)
+            a,b=m.curves[curve]
+            length=kind===:line ?
+                _model_point_distance(m.points[a],m.points[b]) :
+                _model_curve_length(m,curve,caller)
+            (isfinite(length) && length>0.0) || throw(ArgumentError(
+                "$caller: Curve[$curve] has nonpositive or nonfinite geometric length"))
+            type,coef=_transfinite_effective_law(spec,length,spec.num_nodes)
+            if _transfinite_val_arm(type,coef)===:density
+                n_law=_transfinite_law_nodes(m,spec.num_nodes,caller)
+                val=_transfinite_val(type,coef,length,n_law)
+                return _model_curve_transfinite_density_params(
+                    m,curve,t0,t1,val,count,caller)
+            elseif _transfinite_val_arm(type,coef)===:length
+                # HWall's original declared count can put its transform
+                # outside the solver bracket (ordinary coefficient 1).
+                # Do not solve it again with the recombination output count.
+                return Float64[_convex_coordinate(t0,t1,p)
+                    for p in _transfinite_uniform_parameters(count)]
+            end
+        end
+    end
     if kind===:line || kind===:circle
         params=_transfinite_parameters(m,spec.num_nodes,spec.kind,
                                        spec.coef,caller,curve;

@@ -1,5 +1,6 @@
 using Test
 using Tessella
+using SHA
 using Tessella.MeshTypes: ntris, nnodes, nsegs, ntets, validate
 using Tessella.Elements: ElementBlock, MixedMesh
 using Tessella.Model: model_to_mixed, model_physical_groups,
@@ -1128,6 +1129,288 @@ end
     @test execution.model.meshing.flexible_transfinite==true
     @test execution.model.meshing.lc_factor==2.0
     @test execution.model.meshing.recombine_algo==1
+end
+
+@testset ".geo flexible transfinite density and recombination" begin
+    # Gmsh 4.15.2 meshGEdge uses the declared count (divided by lcFactor)
+    # in F_Transfinite, then adjusts the output count only when its numerical
+    # density primitive exceeds 0.75. These controls were captured from
+    # actual native Line meshes, including both neighbors of the threshold.
+    function flexible_line(law,coefficient,count,factor,algorithm,all_faces)
+        flags=all_faces ? "Mesh.RecombineAll=1;" : "Recombine Surface{1};"
+        return _execute_constraint_source(_GEO_SQUARE * """
+            Mesh.FlexibleTransfinite=1;
+            Mesh.CharacteristicLengthFactor=$factor;
+            Mesh.RecombinationAlgorithm=$algorithm;
+            $flags
+            Transfinite Curve{1}=$count Using $law $coefficient;
+            Transfinite Curve{2,3,4}=3;
+            Mesh 1;
+            """)
+    end
+    for (coefficient,blossom_count) in
+            ((0.5,6),(prevfloat(0.75),6),(0.75,6),(nextfloat(0.75),6),(0.9,7)),
+        algorithm in (0,1),all_faces in (false,true)
+        execution=flexible_line("Beta",coefficient,12,2.0,algorithm,all_faces)
+        part=geo_entity_mesh(execution,1,1)
+        count=algorithm==0 ? 6 : blossom_count
+        @test nnodes(part)==count
+        @test nsegs(part)==count-1
+        @test validate(part).ok
+        @test part.coords[1,:]≈collect(range(0.0,1.0;length=count)) atol=2e-11 rtol=0
+        @test execution.model.curve_params[1]≈part.coords[1,:] atol=0 rtol=0
+        @test all(diff(execution.model.curve_params[1]).>0)
+        @test Tessella.Model._flexible_transfinite_nodes(
+            execution.model,12,1,"density control")==count
+    end
+
+    # The density still uses six points when recombination produces seven;
+    # rebuilding the law with seven would give different actual positions.
+    progression_samples=(
+        (0,Float64[0,0.0029325535916704293,0.014662747401729634,
+                    0.061583559284854296,0.24926683194892127,1]),
+        (1,Float64[0,0.00244379307574998,0.010752676685410667,
+                    0.03812314575766151,0.12414462647064331,
+                    0.3743889670179139,1]))
+    for (algorithm,expected) in progression_samples
+        execution=flexible_line("Progression",4.0,3,0.5,algorithm,false)
+        part=geo_entity_mesh(execution,1,1)
+        @test part.coords[1,:]≈expected atol=2e-11 rtol=0
+        @test nsegs(part)==length(expected)-1
+        @test execution.model.meshing.transfinite_curves[1].num_nodes==3
+        @test execution.model.curve_params[1]≈part.coords[1,:] atol=0 rtol=0
+    end
+    for (law,coefficient) in (("Bump",2.0),("Beta",1.1),
+                             ("Progression_HWall",0.1),
+                             ("Bump_HWall",0.01),("Beta_HWall",0.05))
+        execution=flexible_line(law,coefficient,7,0.5,1,false)
+        part=geo_entity_mesh(execution,1,1)
+        @test nnodes(part)==15
+        @test nsegs(part)==14
+        @test validate(part).ok
+        @test all(diff(execution.model.curve_params[1]).>0)
+    end
+    # Positive HWall types transform signed/zero wall heights before the
+    # mass gate. A negative coefficient denotes the opposite wall, whereas
+    # a negative type (reversed curve declaration) follows another arm.
+    for (law,coefficient) in (("Progression_HWall",-0.1),("Bump_HWall",-0.01),
+                             ("Beta_HWall",-0.05),("Progression_HWall",0.0),
+                             ("Bump_HWall",0.0),("Beta_HWall",0.0))
+        execution=flexible_line(law,coefficient,12,2.0,1,false)
+        part=geo_entity_mesh(execution,1,1)
+        @test nnodes(part)==7
+        @test nsegs(part)==6
+        @test validate(part).ok
+        @test all(diff(execution.model.curve_params[1]).>0)
+    end
+    # The truncated law count of one needs no interior primitive marks.
+    execution=flexible_line("Progression",4.0,3,2.0,1,false)
+    @test geo_entity_mesh(execution,1,1).coords[1,:]==[0.0,1.0]
+
+    # Flexible Circle controls retain the declared-count HWall transform
+    # and the divided density-law count, independently of the final odd N.
+    # These native OCC Circle samples were captured from Gmsh 4.15.2; the
+    # established curved-law comparison bound is 3e-7.
+    for (law,coefficient,expected) in (
+            ("Progression",2.0,Float64[0,0.1689028348257925,0.47292790152443426,
+                1.0134169226425884,1.9592727403206374,3.5807399265602187]),
+            ("Progression_HWall",-0.1,Float64[0,1.6898564402531275,
+                3.0526184812969497,4.1476425356450335,5.024710690883849,
+                5.725188895849936]))
+        execution=_execute_constraint_source("""
+            SetFactory("OpenCASCADE");Cylinder(1)={0,0,0,0,0,1,1};
+            Mesh.FlexibleTransfinite=1;Mesh.MeshSizeFactor=2;
+            Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=1;
+            Transfinite Curve{1}=12 Using $law $coefficient;Mesh 1;
+            """)
+        part=geo_entity_mesh(execution,1,1)
+        stored_params=execution.model.curve_params[1]
+        params=stored_params[1:end-1]
+        @test nnodes(part)==nsegs(part)==length(expected)==6
+        @test stored_params[end]==2pi
+        @test maximum(abs.(params.-expected))<=3e-7
+        @test all(diff(params).>0)
+        @test part.segs[:,end]==Int32[6,1]
+        @test validate(part).ok
+        for node in axes(part.coords,2)
+            @test maximum(abs.(part.coords[:,node].-
+                [cos(expected[node]),sin(expected[node]),1.0]))<=3e-7
+        end
+        @test execution.model.meshing.transfinite_curves[1].num_nodes==12
+    end
+    # The actual Circle primitive has a different numerical threshold from
+    # the unit native Line above. Saved OCC controls keep five unique nodes
+    # for Beta0.5 and six for all three 0.75 neighbors and Beta0.9.
+    for (coefficient,unique_count) in ((0.5,5),(prevfloat(0.75),6),
+                                      (0.75,6),(nextfloat(0.75),6),(0.9,6))
+        execution=_execute_constraint_source("""
+            SetFactory("OpenCASCADE");Cylinder(1)={0,0,0,0,0,1,1};
+            Mesh.FlexibleTransfinite=1;Mesh.MeshSizeFactor=2;
+            Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=1;
+            Transfinite Curve{1}=12 Using Beta $coefficient;Mesh 1;
+            """)
+        part=geo_entity_mesh(execution,1,1)
+        params=execution.model.curve_params[1]
+        @test nnodes(part)==nsegs(part)==unique_count
+        @test length(params)==unique_count+1
+        @test params[end]==2pi
+        expected=Float64[2pi*k/unique_count for k in 0:unique_count]
+        @test maximum(abs.(params.-expected))<=2e-11
+        @test Tessella.Model._flexible_transfinite_nodes(
+            execution.model,12,1,"Circle mass control")==unique_count+1
+    end
+end
+
+@testset ".geo ordinary curve recombination counts" begin
+    # Independent Gmsh 4.15.2 controls: meshGEdge's increaseN is an identity,
+    # and the odd-N adjustment is disabled below primitive mass 0.75.
+    # The digest covers actual directed Line1 coordinates/connectivity,
+    # elementary node/cell carriers and stored native parameters in curve
+    # order, keeping legacy global dense tag numbering a separate contract.
+    function curve_digest(model,part)
+        chain=Int[part.segs[1,1]]
+        for cell in axes(part.segs,2)
+            @test part.segs[1,cell]==chain[end]
+            push!(chain,Int(part.segs[2,cell]))
+        end
+        @test allunique(chain)
+        owners=Tessella.GeoExec._geo_mesh_part_node_entities(
+            model,[(1,1,part)],"ordinary curve control")[1]
+        bytes=IOBuffer()
+        write(bytes,htol(UInt32(length(chain))),htol(UInt32(nsegs(part))),UInt8(1))
+        for node in chain
+            for x in part.coords[:,node]
+                write(bytes,htol(reinterpret(UInt64,x)))
+            end
+            for carrier in owners[node]
+                write(bytes,htol(Int32(carrier)))
+            end
+        end
+        for cell in axes(part.segs,2)
+            write(bytes,htol(Int32(cell)),htol(Int32(cell+1)),
+                  htol(Int32(1)),htol(Int32(1)))
+        end
+        for parameter in model.curve_params[1]
+            write(bytes,htol(reinterpret(UInt64,parameter)))
+        end
+        return bytes2hex(sha256(take!(bytes))),chain,owners
+    end
+    for size in (0.18,2.0),algorithm in (0,1,2,4)
+        execution=_execute_constraint_source("""
+            Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=$algorithm;
+            Mesh.MeshSizeMin=$size;Mesh.MeshSizeMax=$size;Mesh.MeshSizeFromPoints=0;
+            Point(1)={0,0,0};Point(2)={1,0,0};Line(1)={1,2};Mesh 1;
+            """)
+        part=geo_entity_mesh(execution,1,1)
+        digest,chain,owners=curve_digest(execution.model,part)
+        expected_count=size==0.18 ? 7 : 2
+        expected_digest=size==0.18 ?
+            "664ada8df794669435356a46cb39bfeac867612c74e5a56c4f4c0e83538c8968" :
+            "f7f5b024dbb79850422e5e5dd4b816b64f4d23df516ebd1e4890106362018247"
+        @test length(chain)==expected_count
+        @test nsegs(part)==expected_count-1
+        @test [owners[node] for node in chain]==
+            [(0,1);fill((1,1),expected_count-2);(0,2)]
+        @test execution.model.curve_params[1]==[part.coords[1,node] for node in chain]
+        @test execution.model.curve_params[1]≈
+            collect(range(0.0,1.0;length=expected_count)) atol=2e-11 rtol=0
+        @test validate(part).ok
+        @test digest==expected_digest
+    end
+    # A positive primitive with an initially even N exercises the actual
+    # adjustment: native size 0.2 gives N6 without blossom and N7 with it.
+    for algorithm in (0,1,2,4)
+        execution=_execute_constraint_source("""
+            Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=$algorithm;
+            Mesh.MeshSizeMin=0.2;Mesh.MeshSizeMax=0.2;Mesh.MeshSizeFromPoints=0;
+            Point(1)={0,0,0};Point(2)={1,0,0};Line(1)={1,2};Mesh 1;
+            """)
+        part=geo_entity_mesh(execution,1,1)
+        expected_count=algorithm==0 ? 6 : 7
+        @test nnodes(part)==expected_count
+        @test nsegs(part)==expected_count-1
+        @test execution.model.curve_params[1]≈
+            collect(range(0.0,1.0;length=expected_count)) atol=2e-11 rtol=0
+    end
+    # Gmsh's native Line derivative uses a 1e-5 stencil. At these three
+    # independently captured sizes its integrated mass is just below 0.75,
+    # even when the placement primitive rounds above that threshold.
+    for size in (prevfloat(4/3),4/3,nextfloat(4/3))
+        execution=_execute_constraint_source("""
+            Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=1;
+            Mesh.MeshSizeMin=$size;Mesh.MeshSizeMax=$size;Mesh.MeshSizeFromPoints=0;
+            Point(1)={0,0,0};Point(2)={1,0,0};Line(1)={1,2};Mesh 1;
+            """)
+        part=geo_entity_mesh(execution,1,1)
+        digest,chain,owners=curve_digest(execution.model,part)
+        @test nnodes(part)==2 && nsegs(part)==1
+        @test part.coords[:,chain]==Float64[0 1;0 0;0 0]
+        @test owners[chain]==[(0,1),(0,2)]
+        @test execution.model.curve_params[1]==[0.0,1.0]
+        @test digest=="f7f5b024dbb79850422e5e5dd4b816b64f4d23df516ebd1e4890106362018247"
+    end
+    # Count-only native integration reuses the already smoothed sizes.
+    # Fixing the resulting edge count explicitly must reproduce the entire
+    # field-call trace and placement, including filterPoints callbacks.
+    function sampled_curve(;exact_edges=nothing)
+        trace=Float64[]
+        count_calls=Ref(0)
+        smoothed=Ref(false)
+        law=x->x<=0.5 ? 0.2 : 0.3
+        field=Tessella.SizeField.FunctionSize((x,y,z)->(push!(trace,x);law(x)))
+        primitive=function(samples)
+            count_calls[]+=1
+            smoothed[]=any(p->p.h!=law(p.t),samples)
+            calls_before=length(trace)
+            value=Tessella.Model._model_native_line_recombination_mass(
+                (0.0,0.0,0.0),(1.0,0.0,0.0),samples)
+            @test length(trace)==calls_before
+            return value
+        end
+        points,parameters=Tessella.Mesh1D.mesh_curve(t->(t,0.0,0.0),field;
+            derivative=t->(1.0,0.0,0.0),nsample=32,smooth_ratio=1.01,
+            force_odd=true,_recombine_odd_nodes=true,
+            _recombination_primitive=primitive,exact_edges=exact_edges)
+        return points,parameters,trace,count_calls[],smoothed[]
+    end
+    counted=sampled_curve()
+    fixed=sampled_curve(;exact_edges=length(counted[2])-1)
+    @test counted[4]==1
+    @test counted[5]
+    @test fixed[4]==0
+    @test counted[1:3]==fixed[1:3]
+    # Upstream N includes both endpoints even for a closed curve; the
+    # published mesh omits its repeated endpoint. A Cylinder's seam circles
+    # therefore contain seven unique nodes for algorithm0 and eight for
+    # algorithms1/2/4, as independently captured from Gmsh 4.15.2.
+    for algorithm in (0,1,2,4)
+        execution=_execute_constraint_source("""
+            SetFactory("OpenCASCADE");Cylinder(1)={0,0,0,0,0,1,1};
+            Mesh.RecombineAll=1;Mesh.RecombinationAlgorithm=$algorithm;
+            Mesh.MeshSizeMin=1;Mesh.MeshSizeMax=1;Mesh.MeshSizeFromPoints=0;
+            Mesh 1;
+            """)
+        expected_count=algorithm==0 ? 7 : 8
+        for curve in (1,3)
+            part=geo_entity_mesh(execution,1,curve)
+            model=execution.model
+            params=model.curve_params[curve]
+            owners=Tessella.GeoExec._geo_mesh_part_node_entities(
+                model,[(1,curve,part)],"closed curve control")[1]
+            @test nnodes(part)==nsegs(part)==expected_count
+            @test part.segs[:,end]==Int32[expected_count,1]
+            @test model.curves[curve][1]==model.curves[curve][2]
+            @test owners[1]==(0,model.curves[curve][1])
+            @test owners[2:end]==fill((1,curve),expected_count-1)
+            @test all(diff(params).>0)
+            expected_params=Float64[2pi*k/expected_count for k in 0:expected_count-1]
+            @test maximum(abs.(params.-expected_params))<=2e-11
+            @test all(node->isapprox(hypot(part.coords[1,node],part.coords[2,node]),
+                                    1.0;atol=4eps(Float64),rtol=0),
+                      axes(part.coords,2))
+            @test validate(part).ok
+        end
+    end
 end
 
 @testset ".geo model-level recombination" begin

@@ -842,6 +842,8 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
                     minimum_segments=nothing,
                     size_function=nothing, exact_edges=nothing,
                     force_odd::Bool=false,
+                    _recombine_odd_nodes::Bool=false,
+                    _recombination_primitive=nothing,
                     max_edges=_DEFAULT_MAX_EDGES)
     t0, t1, nsample = _curve_args(t0, t1, nsample, "mesh_curve")
     curve_entity = _curve_entity(entity, "mesh_curve")
@@ -868,8 +870,24 @@ function mesh_curve(γ, field::AbstractSizeField; t0::Real=0.0,
     total > 0 || throw(ArgumentError(
         "mesh_curve: curve has zero sampled metric length"))
     nedge = if exact_edges === nothing
-        _gmsh_edge_count(total, effective_minimum, maximum_edges,
-                         "mesh_curve")
+        candidate=_gmsh_edge_count(total, effective_minimum, maximum_edges,
+                                   "mesh_curve")
+        # Native meshGEdge's recombination policy adjusts N (edges + 1)
+        # before placement, only for an integrated primitive above 0.75.
+        # Keep this independent of filterPoints' even-removal policy and
+        # leave the public exact-edge contract unchanged.
+        if _recombine_odd_nodes && iseven(candidate+1)
+            odd_total=_recombination_primitive===nothing ? total :
+                _recombination_primitive(integration)
+            (isfinite(odd_total) && odd_total>=0.0) || throw(ArgumentError(
+                "mesh_curve: recombination primitive must be finite and nonnegative"))
+            if odd_total>0.75
+                candidate<maximum_edges || throw(ArgumentError(
+                    "mesh_curve: recombination edge count exceeds max_edges=$maximum_edges"))
+                candidate+=1
+            end
+        end
+        candidate
     else
         count = _positive_int(exact_edges, "mesh_curve", "exact_edges")
         count <= maximum_edges || throw(ArgumentError(

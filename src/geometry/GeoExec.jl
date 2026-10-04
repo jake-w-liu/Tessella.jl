@@ -7595,6 +7595,12 @@ function _geo_merge_entity_meshes_mixed(parts,caller::AbstractString;
     coord_list=NTuple{3,Float64}[]
     lookup=Dict{Tuple{Int,Int,NTuple{3,Int}},Int}()
     owner=Dict{Int,Tuple{Int,Int}}()
+    # Lower-dimensional parts often repeat the largest retained part's nodes.
+    # Use that part to reserve the initial merge tables and coordinate vector.
+    capacity=maximum(part->nnodes(part[3]),parts;init=0)
+    sizehint!(lookup,capacity)
+    sizehint!(owner,capacity)
+    sizehint!(coord_list,capacity)
     order=Tuple{Int,Int,Int}[]
     buckets=Dict{Tuple{Int,Int,Int},Tuple{Vector{Int32},Vector{Int32},Int}}()
     function node_index(x,y,z,entity)

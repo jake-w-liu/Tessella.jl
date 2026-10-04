@@ -798,7 +798,8 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
                               save_all=false,
                               max_nodes=typemax(Int32),max_cells=typemax(Int32),
                               initial_max_node_tag=UInt64(0),
-                              initial_max_element_tag=UInt64(0))
+                              initial_max_element_tag=UInt64(0),
+                              generation_meshing=nothing)
     dimension in (0,1) || throw(ArgumentError("$caller: dim must be zero or one"))
     element_order in (1,2) || throw(ArgumentError(
         "$caller: mesh order $element_order is not supported (supported: 1, 2)"))
@@ -807,6 +808,11 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
     max_cells isa Integer && !(max_cells isa Bool) && 0<=max_cells<=typemax(Int32) ||
         throw(ArgumentError("$caller: max_cells must be a nonnegative Int32-representable integer"))
     m=deepcopy(source_model)
+    # API options describe this generation, while source-cache completion above
+    # it still uses the attributes of the mesh being retained. Apply only after
+    # staging so a rejected request leaves the live model/session untouched.
+    generation_meshing===nothing ||
+        _apply_generation_meshing_options!(m,generation_meshing)
     entities=model_entities(m)
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
         UInt64(initial_max_node_tag),UInt64(initial_max_element_tag),

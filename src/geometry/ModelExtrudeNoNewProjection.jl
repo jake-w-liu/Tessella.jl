@@ -184,8 +184,10 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     lookup=_extrude_nonew_projection_lookup(mesh,completed,caller)
     two_tri=completed.catalog isa _ExtrudeNoNewTwoTriCatalog
     quad_patch=completed.catalog isa _ExtrudeNoNewQuadPatchCatalog
+    quad_strip=completed.catalog isa _ExtrudeNoNewQuadStripCatalog
     intervals=length(completed.catalog.layer_refs)
     face_capacity=quad_patch ? _extrude_nonew_quad_patch_face_capacity(completed.catalog) :
+        quad_strip ? _extrude_nonew_quad_strip_face_capacity(completed.catalog) :
         two_tri ? (completed.volume isa Mesh ? 16 : 7)*intervals+2 : 0
     typed_boundary=_extrude_nonew_certify_boundary(mesh,completed.surfaces,caller;
         face_capacity=face_capacity)
@@ -231,14 +233,17 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
     for curve in curve_tags
         a,b=working.curves[curve]
         link=get(working.meshing.extrude_sources,(1,curve),nothing)
-        chain=if quad_patch && (curve in source_curves || (link!==nothing && link[1]==1))
+        chain=if (quad_patch || quad_strip) &&
+                (curve in source_curves || (link!==nothing && link[1]==1))
             original=curve in source_curves ? curve : abs(link[2])
             position=findfirst(==(original),completed.catalog.boundary_curves)
             position===nothing && throw(ArgumentError(
                 "$caller: QuadTriNoNewVerts Curve[$curve] has no actual source boundary chain"))
             level=curve in source_curves ? 1 : size(columns,1)
+            width=quad_strip ? Int(completed.catalog.boundary_widths[position]) : 3
             nodes=Int32[lookup[ntuple(k->_model_projection_coordinate_key(
-                columns[level,node][k]),3)] for node in completed.catalog.boundary_chains[position]]
+                columns[level,completed.catalog.boundary_chains[position][index]][k]),3)]
+                for index in 1:width]
             nodes[1]==point_nodes[a] || reverse!(nodes)
             nodes
         elseif curve in source_curves || (link!==nothing && link[1]==1)

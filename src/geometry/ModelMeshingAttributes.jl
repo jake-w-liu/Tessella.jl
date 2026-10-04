@@ -2347,14 +2347,16 @@ end
 # stored transfinite count is divided by `Mesh.CharacteristicLengthFactor`
 # (`lcFactor`, truncating) before meshing. When `Mesh.RecombinationAlgorithm`
 # is nonzero — its default — and either `Mesh.RecombineAll` is set or a face
-# the curve bounds is recombine-flagged, Gmsh forces the count odd so blossom
+# the curve bounds is recombine-flagged, Gmsh forces the count odd only when
+# the integrated transfinite density is greater than 0.75, so blossom
 # recombination can pair the surface triangles. (Gmsh 4.15.2 does not apply
 # the older sources' `increaseN` blossom bump to transfinite curves — both
 # per-face and `RecombineAll` recombination were verified to stop at the odd
 # count.) Division can truncate the count to one — Gmsh meshes the resulting
 # degenerate curve as its two endpoints, which the `>= 2` clamp reproduces.
 function _flexible_transfinite_nodes(m::GeoModel,num_nodes::Int,curve::Int,
-                                     caller::AbstractString)
+                                     caller::AbstractString;
+                                     spec=nothing)
     m.meshing.flexible_transfinite || return num_nodes
     adjusted=num_nodes
     factor=m.meshing.lc_factor
@@ -2368,11 +2370,13 @@ function _flexible_transfinite_nodes(m::GeoModel,num_nodes::Int,curve::Int,
             trunc(Int,clamp(q,-2.2e9,2.2e9)) :
             (q>0 ? Int64(2.2e9) : 0)
     end
-    if m.meshing.recombine_algo!=0 &&
+    if adjusted>=2 && iseven(adjusted) && m.meshing.recombine_algo!=0 &&
        (m.meshing.recombine_all ||
         any(face->haskey(m.meshing.recombine,(2,face)),
             _model_curve_faces(m,curve)))
-        iseven(adjusted) && (adjusted+=1)
+        law_spec=spec===nothing ? get(m.meshing.transfinite_curves,curve,nothing) : spec
+        _model_curve_transfinite_mass(m,curve,law_spec,caller)>0.75 &&
+            (adjusted+=1)
     end
     return max(2,adjusted)
 end
@@ -2393,7 +2397,8 @@ end
 function _transfinite_parameters(m::GeoModel,num_nodes::Int,kind::Symbol,
                                  coef::Float64,caller::AbstractString,curve::Int;
                                  reversed::Bool=false)
-    num_nodes=_flexible_transfinite_nodes(m,num_nodes,curve,caller)
+    spec=(num_nodes=num_nodes,kind=kind,coef=coef,reversed=reversed)
+    num_nodes=_flexible_transfinite_nodes(m,num_nodes,curve,caller;spec)
     if !reversed && kind in _TRANSFINITE_HWALL_KINDS
         law=kind===:progression_hwall ? :progression :
             kind===:bump_hwall ? :bump : :beta
