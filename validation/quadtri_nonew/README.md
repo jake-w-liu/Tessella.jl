@@ -341,3 +341,60 @@ queries must reevaluate the actual coordinates; separate strip counters record
 this stored-parameter provenance difference. The original 114 cases, their
 serializers and earlier native CRC records remain unchanged. The new replay and
 resource commands do not claim completed final release gates.
+
+The three-Quad strip replay appends sixteen saved Gmsh 4.15.2 products from
+`test/artifacts/quadtri_nonew_three_quad_strip_oracle.toml`. Eight original unit
+XY fixtures cover one or three uniform intervals, both normal signs and both
+lateral policies. Eight independent variants add graded normalized layers,
+rounded trapezoids, skew parallelograms, YZ/XZ normals, native Progression 4,
+reversed Curves, sparse tags and opposite transfinite pins. The artifact retains
+all exact input hashes, raw coordinate and stored-parameter bits, classified
+lower and volume cells, explicit primary remaps, interpolation support owners,
+computed UV queries and 1,584 independent whole-map certificates at each order.
+Saved source samples remain authoritative at the unchanged absolute `2e-11`
+coordinate tolerance. Set `QUADTRI_NONEW_CASE=three_quad_strip` for this replay.
+
+This source has eight actual boundary nodes and three strictly convex Quad4
+cells in a path, with two shared edges and opposite two/four-node Curve chains.
+The joined planner preserves original source cell indices and corner identities.
+Free products use only `8(N+1)` retained column nodes. Recombined products add
+exactly three Volume-owned terminal centroids and contain `3(N-1)` Hex8, six
+Tet4 and fifteen Pyramid5 cells. Free family and connectivity choices in the
+saved pointer-dependent products are evidence, not native pins. Actual cell
+reference maps, opposite typed faces and each macro slab partition are checked;
+the saved warped Prism6 witness uses its actual bilinear map and exact reference
+integral, rather than a fixed tetrahedral proxy.
+
+For N intervals and C centroids (zero free, three recombined), P2 has
+`42N+21+8C` nodes. Point, Curve, Surface and Volume ownership counts are
+`8`, `8N+20`, `24N-2` and `10N-5+8C`. Each cap has five owned nodes and 21
+closure nodes. Four-node Curve laterals have `10N-5` owned and `14N+7` closure
+nodes; two-node Curve laterals have `2N-1` and `6N+3`. Native supports are
+compared against actual classified P1 carriers, and computed surface parameters
+must reevaluate every queried node. The eight recombined captures contain 168
+surface nodes with empty upstream stored UVs; separate three-strip counters
+record those provenance gaps without replacing the native computed-UV contract.
+
+The original 130 live/saved cases, serializers, counters and 136 earlier native
+CRC rows remain unchanged. New three-strip counters are reported separately.
+These fixture and command descriptions do not establish final release success.
+
+Run the separate three-Quad strip resource gate with normal compilation and
+bounds checks on both runtimes; it does not require Gmsh:
+
+```sh
+/path/to/julia-1.12.7/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/three_quad_strip_resources.jl
+/path/to/julia-1.13.1/bin/julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/three_quad_strip_resources.jl
+```
+
+The gate measures 24 path/policy/scale rows at 1,000, 2,000 and 4,000 intervals
+for standalone volume, GEO, classified projection and public API generation.
+Warmed construction measurements retain constructor and downstream copies;
+output extraction and independent audits follow the measurement. The audit
+checks the eight actual source columns, exactly three recombined terminal
+centroids, full cell reference maps, mapped bilinear face flux, every macro
+partition and opposite typed faces. Each doubling keeps the unchanged bound
+`allocated_next <= 2.15 * allocated_previous + 65536`. The lowered-code scan
+recognizes `GlobalRef(Core, :Box)` and includes deliberately boxed positional
+and keyword positive controls. Input hashes must remain stable. Final resource
+and release results are recorded only after the corresponding gates complete.

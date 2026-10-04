@@ -275,6 +275,25 @@ end
 
 # QtFindVertsCentroid sums in the original corner order, omitting the top
 # copy of each fixed column. This order matters for bitwise coordinate parity.
+@noinline function _extrude_quadtri_centroid_exact(
+        v::NTuple{N,NTuple{3,Float64}},center::NTuple{3,Float64}) where N
+    # Preserve the usual downstream rejection for nonfinite input coordinates.
+    for p in v
+        isfinite(p[1]) && isfinite(p[2]) && isfinite(p[3]) || return center
+    end
+    n=N÷2
+    x=Rational{BigInt}(0);y=Rational{BigInt}(0);z=Rational{BigInt}(0);count=0
+    for k in 1:N
+        k>n && v[k]==v[k-n] && continue
+        p=v[k];x+=Rational{BigInt}(p[1]);y+=Rational{BigInt}(p[2])
+        z+=Rational{BigInt}(p[3]);count+=1
+    end
+    # Only overflowed components need a different rounding path.
+    return (isfinite(center[1]) ? center[1] : Float64(x/count),
+            isfinite(center[2]) ? center[2] : Float64(y/count),
+            isfinite(center[3]) ? center[3] : Float64(z/count))
+end
+
 @inline function _extrude_quadtri_centroid(v::NTuple{N,NTuple{3,Float64}}) where N
     n=N÷2
     x=0.0;y=0.0;z=0.0;count=0
@@ -282,7 +301,10 @@ end
         k>n && v[k]==v[k-n] && continue
         p=v[k];x+=p[1];y+=p[2];z+=p[3];count+=1
     end
-    return (x/count,y/count,z/count)
+    center=(x/count,y/count,z/count)
+    (isfinite(x) && isfinite(y) && isfinite(z)) || count==0 ||
+        return _extrude_quadtri_centroid_exact(v,center)
+    return center
 end
 
 const _EXTRUDE_QT_HEX_FACES=((1,4,3,2),(5,6,7,8),(1,2,6,5),

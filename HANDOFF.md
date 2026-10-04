@@ -24,7 +24,66 @@ never use Gmsh as the production mesher; it is only a differential oracle.
 - Validation driver: `julia --project=. validation/run_all.jl` (Windows:
   prefix `GMSH_JULIA_API` as above)
 
-## Current increment
+## Latest verified increment
+
+The bounded three-quadrangle `QuadTriNoNewVerts` strip is implemented and verified
+in `C:/tmp/tessella_nonew_three_quad_strip` on `codex/nonew-three-quad-strip`,
+based on verified and pushed `e3f18c9`. The new catalog preserves eight actual
+source nodes, three original Quad4 cells and two oppositely oriented shared
+edges. Its coupled 27-state cap solver and direct source-major output are wired
+into completed planning and classified projection. All ten source edges and
+nonadjacent end-cell containment are checked before product certification.
+
+Normal bounds verification compares 233,280 production transitions
+against the independent saved 315-record export: all 64 cyclic frames and all
+256 exterior preference combinations match exact selected records, costs,
+alignment and both shared-face reversals. The independent preference histogram
+is unchanged. Exhaustive short-path checks pass 762 assertions on each supported
+runtime, including all six original source-cell orders. The new geometry suite
+passes 1,580 assertions on each line and the public API suite passes 75,709.
+Sixteen saved native P1/P2 products certify actual interpolation maps,
+typed faces, owners and support identity. All 24 new CRC records match across
+Julia 1.12.7 and 1.13.1. The 136 older NoNew and nine API01 records and both
+immutable template tables remain byte-identical.
+
+A confirmed common centroid overflow bug is fixed: finite actual corner means
+near `1e308` previously became `Inf` during accumulation. A noinline exact
+rational fallback replaces only nonfinite components; the original addition
+order, fixed-column omission, healthy output bits and zero warmed allocation
+remain. The permanent regression passes 1,996 assertions on each supported
+runtime, including all 16 valid public large-coordinate products. Direct huge
+CAD declarations collapsed during construction and are not the successful
+witness; the test moves ordinary topology with the public coordinate setter.
+No successful huge-coordinate Gmsh parity claim is made.
+
+Final normal bounds package gates pass 721,230/721,230 assertions on each
+supported runtime, in 28m38.4s on Julia 1.12.7 and 23m01.7s on 1.13.1.
+All eight resource gates pass 48,374,080 assertions in total, with unchanged
+growth bounds and matching corresponding geometry/node rows across runtimes.
+The new strip audits all 41 actual methods, including both centroid helpers,
+with no true `Core.Box`; both deliberately boxed controls are detected.
+Full strict native replay passes 146 scoped cases and the shared AddVerts
+differential passes all 32 existing cases. No prior artifact is repinned.
+
+All final jobs preserve 438 frozen inputs (97 production/Project, 188 test,
+153 validation), their raw hashes, scoped Git index and base HEAD.
+The ignored `test/tmp/three_strip_release_freeze_v1.json` and gate logs retain
+the release snapshot. Leave this verified worktree's tracked files unchanged;
+continue the next increment in a fresh worktree from verified main.
+
+The broad goal remains active. Continue with the bounded four-Quad path:
+ten actual boundary nodes, native five-/two-node chains, an 81-state joined
+cap relation and four actual terminal centers under recombined laterals.
+Independent preparation is in this worktree's ignored `test/tmp` directory:
+`next_four_quad_strip_design_review.md`,
+`next_four_quad_strip_v2_design_addendum.md`,
+`next_four_quad_strip_api_checklist.md` and their hash manifests/captures.
+Eight original and 16 geometric variants are independently certified.
+Current source-only sampling passes 416 checks at the unchanged `2e-11`
+tolerance; the four-Quad volume planner remains to be implemented.
+General transformed grids, mixed roots and shared regions remain separate phases.
+
+## Previous increment (`e3f18c9`)
 
 The bounded two-quadrangle `QuadTriNoNewVerts` strip is implemented. Its
 recombined native transfinite source has six actual boundary nodes, two convex
@@ -75,8 +134,8 @@ The final API generation differentials pass 9,388 checks on each runtime and
 all nine CRC records match the staged pins and each other. All 112 older NoNew
 CRC rows and both immutable template tables remain unchanged. Complete gate
 times, retained failed runs and freeze provenance are recorded in STATUS.md.
-The broad parity goal remains active. Continue with the bounded three-Quad
-source strip: eight actual boundary nodes, native four-/two-node chains,
+The broad parity goal remains active. At that release, the next increment was
+the bounded three-Quad source strip: eight actual boundary nodes, native four-/two-node chains,
 a coupled 27-state cap relation and exactly three terminal centroids under
 recombined laterals. Retained independent design, source/mask/support proofs,
 eight actual primary captures, typed-capacity addendum and integration checklist

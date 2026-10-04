@@ -107,6 +107,9 @@ using Tessella
     include("geometry/geo_quadtri_nonew_two_tri_test.jl") # jointly certified two-triangle source grids
     include("geometry/geo_quadtri_nonew_quad_patch_test.jl") # existing-pivot 2-by-2 quadrangle grids
     include("geometry/geo_quadtri_nonew_quad_strip_test.jl") # all-boundary two-quad joined cap chains
+    include("geometry/quadtri_nonew_three_quad_strip_chain_test.jl") # exhaustive short joined paths
+    include("geometry/geo_quadtri_nonew_three_quad_strip_test.jl") # eight-boundary-node source paths
+    include("geometry/quadtri_centroid_overflow_test.jl") # finite actual means after Float sum overflow
     include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
     include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
     include("geometry/geo_mesh_size_test.jl") # Point sizing and topology-derived Physical groups
@@ -124,6 +127,7 @@ using Tessella
     include("interfaces/api_nonew_two_tri_boundary_test.jl") # two-triangle grid P2 carriers and lifecycle
     include("interfaces/api_nonew_quad_patch_boundary_test.jl") # quad-patch P2 carriers and lifecycle
     include("interfaces/api_nonew_quad_strip_boundary_test.jl") # joined strip P2 carriers and lifecycle
+    include("interfaces/api_nonew_three_quad_strip_boundary_test.jl") # three-strip P2 carriers and lifecycle
     include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning

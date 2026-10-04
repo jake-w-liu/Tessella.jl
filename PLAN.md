@@ -1111,7 +1111,7 @@ cases. Gmsh's pointer-sensitive alternatives require measured admissible cell
 sets and invariant checks instead of one accidental process result. The existing
 precise blockers remain on these unfinished categories.
 
-Continue the grid phase with the bounded three-Quad source strip: eight actual
+The bounded three-Quad source strip is implemented and verified: eight actual
 boundary vertices, native four-/two-node chains, a coupled 27-state cap relation,
 and three strictly representable terminal means under recombined laterals.
 Preserve both simultaneous shared-face choices. Extend the category and
@@ -1119,6 +1119,27 @@ joined face-state propagation
 using actual source incidence, one column matrix, complete source-complex and
 stored-column certificates, and the existing whole-cell map checks. General
 transformed grids, mixed roots and shared regions remain separate phases.
+The catalog, solver, direct emission and classified projection are implemented.
+Independent checks cover all 233,280 factory transitions and exhaustive short
+paths under all six source-cell permutations. The new geometry suite passes
+1,580 assertions and the API suite passes 75,709 on each supported runtime.
+Sixteen saved primary P1/P2 captures certify actual maps and supports; all 24
+new CRC records match across runtimes without repinning prior artifacts.
+Finite actual terminal means near `1e308` use an exact overflow-only fallback;
+1,996 permanent regression assertions pass on each line, including all 16
+large-coordinate products, healthy bit parity and zero warmed allocation.
+Final package gates pass 721,230/721,230 assertions on each supported runtime;
+strict native replay passes all 146 scoped cases, the shared AddVerts
+differential passes 32 cases and all eight resource gates pass on unchanged
+438 frozen production/test/validation inputs and scoped index.
+
+Continue with a bounded four-Quad path: ten actual boundary
+vertices, native five-/two-node chains and an 81-state cap relation coupling
+three shared faces. Eight original and 16 geometric variants have independent
+primary map/capacity/support proofs. Current source-only sampling passes 416
+checks at the unchanged tolerance. The retained ignored preparation must be
+carried into the next worktree after the three-Quad release is pushed. General transformed grids, mixed roots and
+shared regions remain unfinished and retain precise blockers.
 
 Native curved-CAD P2 placement/refinement, complete higher-dimensional public
 tag lifecycle, remaining meshing algorithms and fields, broad formats/API,

@@ -1,25 +1,25 @@
-if !isdefined(@__MODULE__,:QuadTriNoNewQuadStripCertificates)
-    include("../geometry/quadtri_nonew_quad_strip_certificates.jl")
+if !isdefined(@__MODULE__,:QuadTriNoNewThreeQuadStripCertificates)
+    include("../geometry/quadtri_nonew_three_quad_strip_certificates.jl")
 end
 if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
     include("../geometry/quadtri_nonew_triangle_certificates.jl")
 end
 
-module NoNewQuadStripBoundaryTests
+module NoNewThreeQuadStripBoundaryTests
 
 using Test,Tessella,SHA,TOML
 using Tessella.Elements: msh_dimension
-using ..QuadTriNoNewQuadStripCertificates
+using ..QuadTriNoNewThreeQuadStripCertificates
 using ..QuadTriNoNewTriangleCertificates
 const API=Tessella.API
-const Cert=QuadTriNoNewQuadStripCertificates
+const Cert=QuadTriNoNewThreeQuadStripCertificates
 const PROFILES=(:one,:three,:graded)
 
 function with_model(f,action)
     API.initialize()
     try
         mktempdir() do directory
-            path=joinpath(directory,"quad_strip_boundary.geo");write(path,f.source)
+            path=joinpath(directory,"three_quad_strip_boundary.geo");write(path,f.source)
             opened=API.open_geo!(path;mesh_dim=0);out=Int.(opened.lists["sweep"])
             return action((;source=f.surface,top=out[1],volume=out[2],laterals=out[3:end]))
         end
@@ -34,7 +34,8 @@ function snapshot()
         cache=API.LAST_MESH[],class=API.LAST_MESH_CLASS[],
         overlay=API.LAST_MESH_HIGH_ORDER[],edges=API.LAST_MESH_EDGES[],faces=API.LAST_MESH_FACES[],
         payload=(API.mesh.get_nodes(),API.mesh.get_elements()),
-        history=(API.NODE_TAG_MAX[],API.ELEMENT_TAG_MAX[]))
+        history=(API.NODE_TAG_MAX[],API.ELEMENT_TAG_MAX[]),
+        options=copy(API.OPTIONS),callback=model.meshing.size_callback)
 end
 
 function unchanged(before)
@@ -45,6 +46,7 @@ function unchanged(before)
     @test API.LAST_MESH_EDGES[]===before.edges && API.LAST_MESH_FACES[]===before.faces
     @test (API.mesh.get_nodes(),API.mesh.get_elements())==before.payload
     @test (API.NODE_TAG_MAX[],API.ELEMENT_TAG_MAX[])==before.history
+    @test API.OPTIONS==before.options && before.model.meshing.size_callback===before.callback
 end
 
 function actual_carriers(carriers)
@@ -120,7 +122,7 @@ end
 function check_quadratic(carriers,f,expected)
     n=length(f.levels)-1
     volume_nodes=API.mesh.get_nodes(3,carriers.volume,true)[1]
-    @test length(volume_nodes)==30n+(f.laterals ? 31 : 15)
+    @test length(volume_nodes)==42n+(f.laterals ? 45 : 21)
     counts=zeros(Int,4)
     for node in volume_nodes
         p,uv,dim,owner=API.mesh.get_node(node)
@@ -128,19 +130,20 @@ function check_quadratic(carriers,f,expected)
         @test dim in (1,2) ? length(uv)==dim : isempty(uv)
         dim in (1,2) && (@test maximum(abs.(API.model.get_value(dim,owner,uv).-p))<=2e-11)
     end
-    @test counts==[8,8n+12,16n-2,6n+(f.laterals ? 13 : -3)]
+    @test counts==[8,8n+20,24n-2,10n+(f.laterals ? 19 : -5)]
     types,tags,_=API.mesh.get_elements(3,carriers.volume)
     families=Dict(Int(t)=>length(ids) for (t,ids) in zip(types,tags))
     # Free choices are constrained by the complete joined relation, rather
     # than a pointer-dependent family signature. Every actual elevated cell
     # and node is checked below; recombined terminal fans have fixed counts.
     if f.laterals
-        correct=Dict(12=>2(n-1),11=>4,14=>10)
+        correct=Dict(12=>3(n-1),11=>6,14=>15)
         filter!(pair->last(pair)>0,correct)
         @test families==correct
     end
     supports=support_nodes(carriers.volume)
-    @test length(supports)==24n+(f.laterals ? 23 : 9)
+    @test length(supports)==34n+(f.laterals ? 34 : 13)
+    @test length(volume_nodes)-length(supports)==8(n+1)+(f.laterals ? 3 : 0)
     signature=Dict{Tuple,Tuple}()
     for (node,support) in supports
         p,uv,dim,owner=API.mesh.get_node(node)
@@ -155,19 +158,32 @@ function check_quadratic(carriers,f,expected)
     for surface in carriers.laterals
         curve=abs(API.CURRENT[].meshing.extrude_sources[(2,surface)][2])
         long=curve in (f.curve_tags[i] for i in f.long_pair)
-        own=check_parameters(2,surface,false,long ? 6n-3 : 2n-1)
-        closure=check_parameters(2,surface,true,long ? 10n+5 : 6n+3)
+        own=check_parameters(2,surface,false,long ? 10n-5 : 2n-1)
+        closure=check_parameters(2,surface,true,long ? 14n+7 : 6n+3)
         @test own⊆closure
     end
     for surface in (carriers.source,carriers.top)
-        own=check_parameters(2,surface,false,3)
-        closure=check_parameters(2,surface,true,15)
+        own=check_parameters(2,surface,false,5)
+        closure=check_parameters(2,surface,true,21)
         @test own⊆closure
     end
     for curve in f.curve_tags
         long=curve in (f.curve_tags[i] for i in f.long_pair)
-        check_parameters(1,curve,false,long ? 3 : 1)
-        check_parameters(1,curve,true,long ? 5 : 3)
+        check_parameters(1,curve,false,long ? 5 : 1)
+        check_parameters(1,curve,true,long ? 7 : 3)
+    end
+    source_and_top=Set(Int.(f.curve_tags))
+    union!(source_and_top,(abs(curve) for (_,curve) in
+        API.model.get_boundary([(2,carriers.top)],false,false,false)))
+    lateral_curves=Set(abs(curve) for surface in carriers.laterals for (_,curve) in
+        API.model.get_boundary([(2,surface)],false,false,false))
+    vertical_curves=setdiff(lateral_curves,source_and_top)
+    @test length(vertical_curves)==4
+    for curve in vertical_curves
+        # Only this region's four native corner columns participate here;
+        # another independent region can have coincident curve geometry.
+        check_parameters(1,curve,false,2n-1)
+        check_parameters(1,curve,true,2n+1)
     end
     for msh in types
         q,_=API.mesh.get_integration_points(msh,"Gauss3")
@@ -179,11 +195,11 @@ function check_quadratic(carriers,f,expected)
 end
 
 artifact_name(profile,laterals,direction,order)=
-    "quad_strip_$(profile)_R$(laterals)_D$(direction)_P$(order)"
+    "three_quad_strip_$(profile)_R$(laterals)_D$(direction)_P$(order)"
 
 function artifact_record(name,order)
     base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer();println(buffer,"quad_strip_support_query_v1");println(buffer,base.sha)
+    buffer=IOBuffer();println(buffer,"three_quad_strip_support_query_v1");println(buffer,base.sha)
     class=API.LAST_MESH_CLASS[]
     for (label,catalog) in (("edge",class.edge_entities),("tri",class.face_entities),("quad",class.quad_entities))
         println(buffer,label);write(buffer,UInt64(length(catalog)))
@@ -210,9 +226,12 @@ function artifact_records()
     for profile in PROFILES,laterals in (false,true),direction in (-1,1)
         f=Cert.fixture("artifact";layers=profile,laterals,height=direction,pins=(1,2,3,4))
         with_model(f,carriers->begin
-            API.mesh.generate(3)
+            linear=API.mesh.generate(3)
+            expected=actual_carriers(carriers)
+            @test Cert.certify(linear,f,expected.source).total==1
             push!(records,artifact_record(artifact_name(profile,laterals,direction,1),1))
             API.mesh.set_order(2)
+            check_quadratic(carriers,f,expected)
             push!(records,artifact_record(artifact_name(profile,laterals,direction,2),2))
         end)
     end
@@ -220,26 +239,28 @@ function artifact_records()
 end
 
 function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_quad_strip_crc.txt")
+    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_three_quad_strip_crc.txt")
     records=Dict{String,NamedTuple}()
     for line in readlines(path)
         isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t');length(fields)==6 || error("quad strip artifact row width")
+            fields=split(line,'\t');length(fields)==6 || error("three-Quad strip artifact row width")
             name,kind,n_nodes,n_cells,families,sha=String.(fields)
             haskey(records,name) && error("quad strip duplicate artifact name")
             records[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
         end
     end
-    length(records)==24 || error("quad strip artifact must contain24 products")
+    length(records)==24 || error("three-Quad strip artifact must contain24 products")
     return records
 end
 
 function saved_oracles()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_quad_strip_oracle.toml")
+    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_three_quad_strip_oracle.toml")
     artifact=TOML.parsefile(path)
     @test artifact["gmsh_version"]=="4.15.2" && artifact["fixture_count"]==16
-    return Dict((f["profile"],f["laterals"],f["direction"])=>f
-                for f in artifact["fixtures"] if f["capture_kind"]=="original_unit")
+    originals=filter(f->occursin(r"^next_three_quad_strip_L[13]_",f["name"]),artifact["fixtures"])
+    @test length(originals)==8
+    return Dict((f["intervals"]==1 ? "L1" : "L3",f["recombine_laterals"],
+                Int(sign(f["translation_height"])))=>f for f in originals)
 end
 
 function check_saved_primary(saved,volume)
@@ -283,16 +304,85 @@ function cell_geometry(volume)
         for cell in eachcol(reshape(nodes,Tessella.Elements.msh_spec(msh).nnodes,:)))
 end
 
+function lower_primary_tags()
+    primary=Set{UInt64}()
+    types,tags,connectivity=API.mesh.get_elements()
+    for (msh,nodes) in zip(types,connectivity)
+        msh_dimension(msh)<=1 || continue
+        width=Tessella.Elements.msh_spec(msh).nnodes
+        count=msh==15 ? 1 : 2
+        for cell in eachcol(reshape(nodes,width,:)),node in cell[1:count]
+            push!(primary,node)
+        end
+    end
+    return primary
+end
+
+function check_lower_regeneration(entity,old,current,order,old_primary,new_primary)
+    oldtags,oldxyz,oldparams=old
+    tags,xyz,params=current
+    oldpoints=reshape(oldxyz,3,:);points=reshape(xyz,3,:)
+    olduv=reshape(oldparams,entity[1],length(oldtags));uv=reshape(params,entity[1],length(tags))
+    @test length(tags)==length(oldtags) && allunique(tags)
+    @test Set(Tuple(p) for p in eachcol(uv))==Set(Tuple(p) for p in eachcol(olduv))
+    signature(a,b,ids,selected)=Set((Tuple(a[:,i]),Tuple(b[:,i])) for i in eachindex(ids) if ids[i] in selected)
+    @test signature(points,uv,tags,new_primary)==signature(oldpoints,olduv,oldtags,old_primary)
+    if order==2
+        # Gmsh Generator.cpp runs SetOrder1 before MeshOnlyEmpty and creates
+        # requested P2 supports on CAD afterward. Primary sampling is retained;
+        # old linear-average P2 bits need not equal new CAD evaluation bits.
+        # A pinned edited-midpoint control independently proves this rebuild.
+        @test xyz==API.model.get_value(entity[1],entity[2],params)
+    else
+        @test signature(points,uv,tags,Set(tags))==signature(oldpoints,olduv,oldtags,Set(oldtags))
+    end
+end
+
+# MSH2 and MSH4 may group the same cells differently. Primary node identity,
+# complete typed connectivity, physical tag and elementary owner are retained.
+function file_cells(mesh;owners=true)
+    return sort!([(block.msh,Tuple(cell),block.tags[column],
+        !owners ? Int32(0) : mesh.entity_data===nothing ? mesh.elementary_entities[index][column] :
+            mesh.entity_data.block_entities[index][column])
+        for (index,block) in enumerate(mesh.blocks)
+        for (column,cell) in enumerate(eachcol(block.nodes))])
+end
+
+function check_files(mesh,directory,stem;names=mesh.physical_names)
+    classified=mesh.entity_data!==nothing || mesh.elementary_entities!==nothing
+    for version in (2.2,4.1),binary in (false,true)
+        path=joinpath(directory,"$(stem)_$(version)_$(binary).msh")
+        Tessella.Elements.write_mixed_msh(path,mesh;version,binary)
+        back=Tessella.Elements.read_mixed_msh(path)
+        @test back.physical_names==names
+        @test back.coords==mesh.coords
+        @test file_cells(back;owners=classified)==file_cells(mesh;owners=classified)
+        if version==4.1 && mesh.entity_data!==nothing
+            @test back.entity_data.node_entities==mesh.entity_data.node_entities
+            @test back.entity_data.node_parametric==mesh.entity_data.node_parametric
+        end
+    end
+end
+
 function run_tests()
-@testset "Quad-strip actual P2 carriers and public lifecycle" begin
+@testset "Three-Quad strip actual P2 carriers and public lifecycle" begin
     @testset "Twelve P1/P2 native golden products" begin
         pins=artifact_pins()
         oracle=saved_oracles()
         for profile in PROFILES,laterals in (false,true),direction in (-1,1)
             f=Cert.fixture("golden";layers=profile,laterals,height=direction,pins=(1,2,3,4))
             with_model(f,carriers->begin
-                API.mesh.generate(3)
-                @test length(API.mesh.get_nodes()[1])==6length(f.levels)+(f.laterals ? 2 : 0)
+                linear=API.mesh.generate(3)
+                @test length(API.mesh.get_nodes()[1])==8length(f.levels)+(f.laterals ? 3 : 0)
+                source=Tessella.Model.mesh_model_surface(API.CURRENT[],carriers.source)
+                certificate=Cert.certify(linear,f,source)
+                @test certificate.total==1
+                owned=zeros(Int,4)
+                for node in API.mesh.get_nodes(3,carriers.volume,true)[1]
+                    owned[API.mesh.get_node(node)[3]+1]+=1
+                end
+                n=length(f.levels)-1
+                @test owned==[8,4n+4,4n-4,f.laterals ? 3 : 0]
                 # Higher-dimensional generation retains the published volume
                 # cell cache while lower carriers are exposed through nodes.
                 @test isempty(API.mesh.get_elements(2)[1])
@@ -307,21 +397,61 @@ function run_tests()
                 before=snapshot();API.mesh.set_order(2)
                 @test (API.mesh.get_nodes(),API.mesh.get_elements())==before.payload
                 API.mesh.set_order(1)
-                @test length(API.mesh.get_nodes()[1])==6length(f.levels)+(f.laterals ? 2 : 0)
+                @test length(API.mesh.get_nodes()[1])==8length(f.levels)+(f.laterals ? 3 : 0)
                 API.mesh.set_order(2)
                 @test check_quadratic(carriers,f,expected)==initial
             end)
         end
     end
 
-    @testset "Opposite winding, axes, curved-free CAD sampling and sparse entity tags" begin
+    @testset "Opposite winding, axes, rounded straight-CAD sampling and sparse entity tags" begin
         for plane in (:XY,:YZ,:ZX),laterals in (false,true)
             f=Cert.fixture("owners";plane,laterals,height=-1.,layers=:graded,shape=:rounded,
                            winding=-1,pins=:opposite,curve_reverse=5,tags=:sparse,
                            progression=4.,long_pair=plane===:YZ ? (2,4) : (1,3))
             with_model(f,carriers->begin
-                API.mesh.generate(3);expected=actual_carriers(carriers)
+                linear=API.mesh.generate(3);expected=actual_carriers(carriers)
+                @test Cert.certify(linear,f,expected.source).total>0
                 API.mesh.set_order(2);check_quadratic(carriers,f,expected)
+            end)
+        end
+    end
+
+    @testset "Surface generation and immediate quadratic volume generation" begin
+        for laterals in (false,true)
+            f=Cert.fixture("shell";laterals,layers=:three)
+            n=length(f.levels)-1
+            with_model(f,carriers->begin
+                API.mesh.generate(2)
+                @test length(API.mesh.get_nodes()[1])==8(n+1)
+                types,tags,_=API.mesh.get_elements(2)
+                @test sum(length,tags)==(laterals ? 8n+9 : 16n+9)
+                @test isempty(API.mesh.get_elements(3)[1])
+                API.mesh.set_order(2)
+                @test length(API.mesh.get_nodes()[1])==32n+26
+                owned=zeros(Int,4)
+                for node in API.mesh.get_nodes()[1]
+                    owned[API.mesh.get_node(node)[3]+1]+=1
+                end
+                @test owned==[8,8n+20,24n-2,0]
+                for surface in (carriers.source,carriers.top)
+                    check_parameters(2,surface,false,5)
+                    check_parameters(2,surface,true,21)
+                end
+                for surface in carriers.laterals
+                    curve=abs(API.CURRENT[].meshing.extrude_sources[(2,surface)][2])
+                    long=curve in (f.curve_tags[i] for i in f.long_pair)
+                    check_parameters(2,surface,false,long ? 10n-5 : 2n-1)
+                    check_parameters(2,surface,true,long ? 14n+7 : 6n+3)
+                end
+            end)
+            with_model(f,carriers->begin
+                API.option("Mesh.ElementOrder",2)
+                API.mesh.generate(3)
+                expected=actual_carriers(carriers)
+                check_quadratic(carriers,f,expected)
+                name=artifact_name(:three,laterals,1,2)
+                @test artifact_record(name,2)==artifact_pins()[name]
             end)
         end
     end
@@ -381,7 +511,7 @@ function run_tests()
                 first_nodes=API.mesh.get_nodes(3,carriers[1].volume,true)[1]
                 second_nodes=API.mesh.get_nodes(3,carriers[2].volume,true)[1]
                 @test isempty(intersect(first_nodes,second_nodes))
-                @test length(API.mesh.get_nodes()[1])==2*(30*3)+15+31
+                @test length(API.mesh.get_nodes()[1])==2*(42*3)+21+45
                 for (c,f,e) in zip(carriers,(left,right),expected)
                     check_quadratic(c,f,e)
                 end
@@ -433,16 +563,19 @@ function run_tests()
                     end
                     @test API.mesh.get_node(node)[3:4]==owner
                 end
+                # Refining the width-four strip doubles each original edge:
+                # its P2 cap/long patch has 13x5 nodes, with 11x3 interiors.
+                # The width-two short patch has 5x5 nodes and 3x3 interiors.
                 for surface in carriers.laterals
                     curve=abs(API.CURRENT[].meshing.extrude_sources[(2,surface)][2])
                     long=curve in (f.curve_tags[i] for i in f.long_pair)
-                    own=check_parameters(2,surface,false,long ? 21 : 9)
-                    closure=check_parameters(2,surface,true,long ? 45 : 25)
+                    own=check_parameters(2,surface,false,long ? 33 : 9)
+                    closure=check_parameters(2,surface,true,long ? 65 : 25)
                     @test own⊆closure
                 end
                 for surface in (carriers.source,carriers.top)
-                    check_parameters(2,surface,false,21)
-                    check_parameters(2,surface,true,45)
+                    check_parameters(2,surface,false,33)
+                    check_parameters(2,surface,true,65)
                 end
             end)
         end
@@ -468,13 +601,13 @@ function run_tests()
         for laterals in (false,true)
             base=Cert.fixture("metadata";laterals,layers=:graded,tags=:sparse)
             f=merge(base,(;source=base.source*"""
-                Physical Surface("strip source",501)={$(base.surface)};
-                Physical Surface("strip cap",502)={sweep[0]};
-                Physical Volume("strip body",503)={sweep[1]};
+                Physical Surface("three-strip source",501)={$(base.surface)};
+                Physical Surface("three-strip cap",502)={sweep[0]};
+                Physical Volume("three-strip body",503)={sweep[1]};
                 """))
             with_model(f,carriers->begin
                 API.mesh.generate(3)
-                expected=Dict((2,501)=>"strip source",(2,502)=>"strip cap",(3,503)=>"strip body")
+                expected=Dict((2,501)=>"three-strip source",(2,502)=>"three-strip cap",(3,503)=>"three-strip body")
                 @test API.model.get_physical_groups()==sort!(collect(keys(expected)))
                 @test API.model.get_entities_for_physical_group(2,501)==[carriers.source]
                 @test API.model.get_entities_for_physical_group(2,502)==[carriers.top]
@@ -495,22 +628,16 @@ function run_tests()
                         @test API.model.get_physical_groups_for_entity(3,carriers.volume)==[503]
                     end
                 end
-                # MSH4 owns cell carriers in entity_data; its reader need not
-                # duplicate that information into the optional MSH2 field.
-                signature(mesh)=sort!([(b.msh,Tuple(cell),b.tags[i],mesh.entity_data.block_entities[j][i])
-                    for (j,b) in enumerate(mesh.blocks) for (i,cell) in enumerate(eachcol(b.nodes))])
+                # MSH4 preserves node ownership and parameters; MSH2 carries
+                # the actual cell ownership and first physical membership.
                 @test all(all(==(503),b.tags) for b in projected.blocks if msh_dimension(b.msh)==3)
                 mktempdir() do directory
-                    for binary in (false,true)
-                        path=joinpath(directory,"strip.msh")
-                        Tessella.Elements.write_mixed_msh(path,projected;version=4.1,binary)
-                        back=Tessella.Elements.read_mixed_msh(path)
-                        @test back.physical_names==expected
-                        @test back.coords==projected.coords
-                        @test signature(back)==signature(projected)
-                        @test back.entity_data.node_entities==projected.entity_data.node_entities
-                        @test back.entity_data.node_parametric==projected.entity_data.node_parametric
-                    end
+                    check_files(projected,directory,"three_strip_classified";names=expected)
+                    # The bare API3 cache declares its actual volume cells;
+                    # classification is queried separately through the API.
+                    # Serialize every actual P2 node and connectivity slot.
+                    actual=API.mesh.get()
+                    check_files(actual,directory,"three_strip_p2_cache")
                 end
             end)
         end
@@ -533,9 +660,39 @@ function run_tests()
             end)
         end
     end
+
+    @testset "Actual lower supports survive an OnlyEmpty one-dimensional generation" begin
+        for laterals in (false,true),initial_order in (1,2)
+            f=Cert.fixture("lower_bridge";laterals,layers=:graded)
+            with_model(f,carriers->begin
+                API.mesh.generate(3)
+                old_primary=Set(API.mesh.get_nodes()[1])
+                initial_order==2 && API.mesh.set_order(2)
+                before=Dict((dim,tag)=>API.mesh.get_nodes(dim,tag,false,true)
+                    for dim in (0,1) for (_,tag) in API.model.get_entities(dim))
+                high=(API.mesh.get_max_node_tag(),API.mesh.get_max_element_tag())
+                # Immediate set_order does not change the generation option.
+                API.option("Mesh.ElementOrder",initial_order)
+                API.option("Mesh.MeshOnlyEmpty",1)
+                API.mesh.generate(1)
+                new_primary=lower_primary_tags()
+                for (entity,payload) in before
+                    check_lower_regeneration(entity,payload,API.mesh.get_nodes(entity...,false,true),
+                        initial_order,old_primary,new_primary)
+                end
+                types,tags,_=API.mesh.get_elements(1)
+                @test !isempty(types) && sum(length,tags)==16+4(length(f.levels)-1)
+                @test API.mesh.get_max_node_tag()>=high[1]
+                @test API.mesh.get_max_element_tag()>=high[2]
+                before=snapshot()
+                @test_throws ArgumentError API.mesh.clear([(1,first(f.curve_tags)),(1,90001)])
+                unchanged(before)
+            end)
+        end
+    end
 end
 end
 
-get(ENV,"TESSELLA_STRIP_DEFINE_ONLY","")=="1" || run_tests()
+get(ENV,"TESSELLA_THREE_STRIP_DEFINE_ONLY","")=="1" || run_tests()
 
 end
