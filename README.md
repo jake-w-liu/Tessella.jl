@@ -220,7 +220,7 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   quadratic meshes have `30N+15`, `42N+21` or `54N+27` nodes for free laterals, and
   `30N+31`, `42N+45` or `54N+59` for recombined laterals. Every shared face in a
   strip is solved together before indexed output is emitted.
-  Arbitrary-length one-cell-wide strips currently support recombined laterals.
+  Arbitrary-length one-cell-wide strips support free and recombined laterals.
   They retain the actual native Line chains and original cell identities,
   including convex skew and graded sources, in either axis-normal direction.
   For `M` source Quads and `N` intervals, they emit `2M` Tet4, `M(N-1)` Hex8
@@ -228,6 +228,14 @@ write_msh("mesh.msh", ms; version=4.1)   # solver-consumable gmsh MSH
   per source cell. P1 and P2 contain `2(M+1)(N+1)+M` and
   `(12M+6)N+14M+3` nodes. Full cell maps, source partitions, typed faces and
   actual primary/support carriers are certified before publication.
+  Free laterals use actual shared-face propagation before selecting existing-corner
+  tetrahedron/pyramid templates. Each retained problem receives one actual
+  eight-corner mean and a certified fan in its own interval, including
+  nonterminal intervals and final masks that become template-eligible.
+  With `C` retained problems, the primary node count is
+  `2(M+1)(N+1)+C`; checked admission reserves `MN` possible means and `12MN`
+  cells before allocating layers. Complete P2 maps and support carriers are
+  certified against the actual emitted cells rather than a fixed family count.
   Rectangular grids retain the actual four native Line chains and original
   cell identities. A strict source disk and axis-normal column certificate
   admits convex skew, trapezoid and graded grids as well as rectangles. Shared
@@ -252,7 +260,7 @@ declarations, and geometry-derived physical-group RHSs beyond the documented inl
 topology queries),
 mixed-element generation beyond the listed structured and surface-recombination paths,
 quasi-transfinite or holed transfinite patches,
-other `QuadTriNoNewVerts` source topologies, B1 categories and free B4 propagation, transformed
+other `QuadTriNoNewVerts` source topologies, B1 categories, transformed
 source grids, mixed roots, collapsed
 columns, shared neighbors, and copied-source chains; curved CAD mixed order elevation/refinement,
 selective refinement, simplex-kernel integration,
@@ -440,9 +448,13 @@ on an entity — while retaining nodes; `reverse` and `reverse_elements` flip
 first-order simplex orientation with Gmsh 4.15.2's vertex conventions;
 `reorder_elements` permutes an entity's element block with Gmsh's zero-based
 source-position ordering; `set_node`, `renumber_nodes`, and
-`renumber_elements` update coordinates and labels; tagged caches support sparse
-renumbering and preserve surviving labels on removal, while legacy caches
-retain their dense-permutation contract. `get_duplicate_nodes`, `remove_duplicate_nodes`, and
+`renumber_elements` update coordinates and labels. Classified native simplex,
+quadratic and mixed caches use geometry-preserving public label tables for
+sparse renaming and retain surviving identities on removal. Unclassified
+legacy caches retain their dense-permutation contract. Existing native Point
+attachments preserve their identities through generation with renumbering
+disabled; cache/record references are checked before publication.
+`get_duplicate_nodes`, `remove_duplicate_nodes`, and
 `remove_duplicate_elements` report and repair exact-coordinate or same-entity
 duplicates with optional entity filters. `remove_embedded` drops embedding
 records from parent surfaces and volumes, `get_periodic` reports each entity's

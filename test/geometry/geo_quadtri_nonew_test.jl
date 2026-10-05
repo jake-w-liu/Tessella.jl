@@ -245,11 +245,11 @@ end
             @test model.curve_params==params && model.meshing.extrude==attrs
             @test (api.mesh.get_max_node_tag(),api.mesh.get_max_element_tag())==counters
         end)
-        # Two triangles and rectangular Quad grids are supported. A five-Quad
-        # all-boundary strip still requires its separate propagation phase.
+        # Valid all-boundary strips are supported; unmatched opposite
+        # source chains remain malformed.
         sources=(
             replace(fixture.source,"Transfinite Curve{:}=2"=>
-                "Transfinite Curve{1,3}=2; Transfinite Curve{2,4}=6"),
+                "Transfinite Curve{1,3}=2; Transfinite Curve{2}=6; Transfinite Curve{4}=7"),
             replace(fixture.source,"Recombine Surface{1};"=>"",
                     "Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
             replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{0,0,0},Pi/3}"))

@@ -326,6 +326,7 @@ function _apply_mesh_order(m::GeoModel,cached::MixedMesh,class,caller)
                   msh_spec(block.msh).order==order,cached.blocks)
         if order==2
             replacement,new_class=_mixed_prune_unused(cached,class)
+            _validate_record_cache_labels(m,replacement,new_class,nnodes(replacement),caller)
             replacement===cached || _replace_mesh_cache_locked!(replacement,new_class)
         end
         return nothing
@@ -335,6 +336,7 @@ function _apply_mesh_order(m::GeoModel,cached::MixedMesh,class,caller)
     linear,linear_class=_mixed_linear_cache(cached,class)
     replacement,new_class=order==1 ? (linear,linear_class) :
         _mixed_quadratic_cache(linear,linear_class,caller)
+    _validate_record_cache_labels(m,replacement,new_class,nnodes(replacement),caller)
     _replace_mesh_cache_locked!(replacement,new_class)
     return nothing
 end
@@ -513,8 +515,15 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller)
             node_parametric=parameters,external_node_tags=external)
     end
     _api_p2_constructed_mesh_certify(result,caller)
+    public_nodes=nothing
+    if class.public_tags!==nothing && mesh.entity_data===nothing
+        count=nnodes(result)-nnodes(mesh)
+        NODE_TAG_MAX[]<=typemax(Int32)-count || throw(ArgumentError(
+            "$caller: elevated public node tags exceed Int32"))
+        public_nodes=vcat(class.public_tags.node_tags,NODE_TAG_MAX[] .+ UInt64.(1:count))
+    end
     return result,_mixed_rebind_class(class,result;
-        node_entities=node_entities,owners=owners)
+        node_entities=node_entities,owners=owners,public_node_tags=public_nodes)
 end
 
 # Gmsh SetOrderN rebuilds mesh-vertex associations from element connectivity.
@@ -579,7 +588,7 @@ end
 function _mixed_rebuild_metadata(mesh,blocks;node_order=nothing,selections=nothing,
         node_entities=nothing,node_parametric=nothing,external_node_tags=nothing,
         external_element_tags=nothing,block_entities=nothing,coords=nothing,
-        periodic_links=nothing)
+        periodic_links=nothing,keep_empty_blocks::Bool=false)
     order=node_order===nothing ? collect(1:nnodes(mesh)) : node_order
     coordinates=coords===nothing ? mesh.coords[:,order] : coords
     if periodic_links===nothing
@@ -595,7 +604,8 @@ function _mixed_rebuild_metadata(mesh,blocks;node_order=nothing,selections=nothi
         end
     end
     data=mesh.entity_data
-    kept_blocks=findall(block->!isempty(block.nodes),blocks)
+    kept_blocks=keep_empty_blocks ? collect(eachindex(blocks)) :
+        findall(block->!isempty(block.nodes),blocks)
     if data!==nothing
         stored_data=data
         selected=selections===nothing ? [collect(axes(b.nodes,2)) for b in mesh.blocks] : selections
@@ -649,7 +659,7 @@ function _mixed_select_columns(mesh,class,selections;node_order=nothing)
     new_class=class===nothing ? nothing : _mixed_rebind_class(class,result;
         owners=owners,node_entities=node_order===nothing ? class.node_entities :
                                                     class.node_entities[node_order],
-        primary_map=mapping)
+        primary_map=mapping,selections)
     return result,new_class
 end
 
@@ -717,11 +727,30 @@ function _mixed_element_record(mesh::MixedMesh,class,tag::Int)
 end
 
 function _mixed_rebind_class(class,mesh;node_entities=class.node_entities,
-                             owners=class.cell_entities,primary_map=nothing)
+                             owners=class.cell_entities,primary_map=nothing,selections=nothing,
+                             public_node_tags=nothing)
     edges,faces,quads=_api_remap_support_entities(class,mesh,primary_map)
     result=_mixed_classification(mesh,class.entity,class.entities,node_entities,
         class.boundaries,owners;edge_entities=edges,face_entities=faces,quad_entities=quads)
     class.public_tags===nothing && return result
+    if mesh.entity_data===nothing
+        public=class.public_tags
+        nodes=public_node_tags===nothing ? copy(public.node_tags) : public_node_tags
+        if primary_map!==nothing && public_node_tags===nothing
+            nodes=zeros(UInt64,nnodes(mesh))
+            for (old,target) in enumerate(primary_map)
+                target==0 && continue
+                nodes[target]==0 && (nodes[target]=public.node_tags[old])
+            end
+        end
+        tags=UInt64[];offset=0
+        for (bi,(_,cells,_)) in enumerate(_cache_native_blocks(class.mesh))
+            chosen=selections===nothing ? collect(axes(cells,2)) : selections[bi]
+            append!(tags,public.element_tags[offset .+ chosen]);offset+=size(cells,2)
+        end
+        return _classification_with_public_tags(result,
+            _cache_public_tags(mesh;authority=public.authority,node_tags=nodes,element_tags=tags))
+    end
     return _classification_with_public_tags(result,
         _cache_public_tags(mesh;authority=class.public_tags.authority))
 end
@@ -748,6 +777,12 @@ function _dim01_actual_cache(cached,class;physical_names=Dict{Tuple{Int,Int},Str
         vcat(class.node_entities,LAST_MESH_HIGH_ORDER_MIDS[]),class.boundaries,owners;
         edge_entities=class.edge_entities,face_entities=class.face_entities,
         quad_entities=class.quad_entities)
+    if class.public_tags!==nothing
+        public=class.public_tags
+        actual_class=_classification_with_public_tags(actual_class,
+            _cache_public_tags(actual;authority=public.authority,
+                node_tags=public.node_tags,element_tags=public.element_tags))
+    end
     return actual,actual_class
 end
 
@@ -791,7 +826,7 @@ function _clear_classified_mesh(mesh::MixedMesh,class::_MeshClassification,
     replacement=_mixed_rebuild_metadata(mesh,blocks;node_order=findall(keep),
         selections=kept,node_entities=node_entities)
     return replacement,_mixed_rebind_class(class,replacement;
-        node_entities=node_entities,owners=owners,primary_map=remap)
+        node_entities=node_entities,owners=owners,primary_map=remap,selections=kept)
 end
 
 function _mixed_refresh_periodic_links(model,mesh,class,caller)

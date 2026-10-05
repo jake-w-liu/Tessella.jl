@@ -43,6 +43,11 @@ function _dim01_add_node!(assembly::_Dim01Assembly,tag::UInt64,point,owner,
         previous=assembly.nodes[position]
         previous.owner==owner && previous.point==point || throw(ArgumentError(
             "$(assembly.caller): source node $tag has conflicting ownership or coordinates"))
+        # Raw records can omit parameters that are retained in the classified
+        # cache. Fill that absence without replacing caller-provided values.
+        if previous.parameter===nothing && parameter!==nothing
+            assembly.nodes[position]=_Dim01Node(tag,point,owner,copy(parameter))
+        end
         return position
     end
     length(assembly.nodes)<assembly.max_nodes || throw(ArgumentError(
@@ -94,18 +99,7 @@ function _dim01_physical(m,entity)
         Model._model_projection_physical_tags(m,entity[1],entity[2]))
 end
 
-function _dim01_ingest!(assembly,m,cached,cached_class)
-    records=sort!(collect(Model._discrete_mesh_records_model(m));by=first)
-    for ((dim,tag),record) in records
-        owner=(dim,Int32(tag))
-        for column in eachindex(record.node_tags)
-            parameter=size(record.node_params,1)==dim &&
-                      size(record.node_params,2)==length(record.node_tags) ?
-                      collect(@view record.node_params[:,column]) : nothing
-            point=ntuple(axis->record.node_coords[axis,column],3)
-            _dim01_add_node!(assembly,UInt64(record.node_tags[column]),point,owner,parameter)
-        end
-    end
+function _dim01_ingest_record_cells!(assembly,m,records)
     cell_tags=Dict{UInt64,Int}()
     raw_cells=Set{Tuple{Int,Tuple{Int,Int32},Tuple}}()
     for ((dim,tag),record) in records
@@ -128,7 +122,25 @@ function _dim01_ingest!(assembly,m,cached,cached_class)
             cell_tags[external]=length(assembly.cells)
         end
     end
-    cached===nothing && return Int32[]
+    return cell_tags,raw_cells
+end
+
+function _dim01_ingest!(assembly,m,cached,cached_class)
+    records=sort!(collect(Model._discrete_mesh_records_model(m));by=first)
+    for ((dim,tag),record) in records
+        owner=(dim,Int32(tag))
+        for column in eachindex(record.node_tags)
+            parameter=size(record.node_params,1)==dim &&
+                      size(record.node_params,2)==length(record.node_tags) ?
+                      collect(@view record.node_params[:,column]) : nothing
+            point=ntuple(axis->record.node_coords[axis,column],3)
+            _dim01_add_node!(assembly,UInt64(record.node_tags[column]),point,owner,parameter)
+        end
+    end
+    if cached===nothing
+        _dim01_ingest_record_cells!(assembly,m,records)
+        return Int32[]
+    end
     cached_class===nothing && throw(ArgumentError(
         "$(assembly.caller): existing mesh needs entity classification"))
     data=cached isa MixedMesh ? cached.entity_data : nothing
@@ -146,9 +158,7 @@ function _dim01_ingest!(assembly,m,cached,cached_class)
         owner=cached_class.node_entities[column]
         parameter=data===nothing ? nothing : data.node_parametric[column]
         if authoritative
-            data===nothing && throw(ArgumentError(
-                "$(assembly.caller): tagged existing mesh needs external node metadata"))
-            mapping[column]=_dim01_add_node!(assembly,data.external_node_tags[column],
+            mapping[column]=_dim01_add_node!(assembly,cached_class.public_tags.node_tags[column],
                 point,owner,parameter)
         else
             matches=get(raw_positions,(owner,point),Int32[])
@@ -170,6 +180,10 @@ function _dim01_ingest!(assembly,m,cached,cached_class)
             end
         end
     end
+    # A raw cell may reference a published cache-owned primary/support node.
+    # Resolve those exact labels before parsing record connectivity; raw nodes
+    # still establish ownership first and parameter enrichment remains intact.
+    cell_tags,raw_cells=_dim01_ingest_record_cells!(assembly,m,records)
     for (bi,(msh,dim,offset,cells,owners)) in enumerate(_cache_catalog(cached,cached_class))
         physical=_cache_native_blocks(cached)[bi][3]
         for column in axes(cells,2)
@@ -179,7 +193,8 @@ function _dim01_ingest!(assembly,m,cached,cached_class)
             # cell can already exist in an attached sparse source record.
             # Preserve that actual source tag rather than mirror it twice.
             !authoritative && (Int(msh),owner,Tuple(nodes)) in raw_cells && continue
-            external=data===nothing ? UInt64(offset+column) :
+            external=authoritative ? cached_class.public_tags.element_tags[offset+column] :
+                     data===nothing ? UInt64(offset+column) :
                                       data.external_element_tags[bi][column]
             previous=get(cell_tags,external,0)
             if previous!=0
@@ -509,6 +524,8 @@ function _dim01_quadratic!(assembly,m,entities;only_visible=false)
                     parameters=Model.model_parametrization(m,1,Int(owner[2]),collect(point))
                     parameter=Float64[parameters[1]]
                     point=Model._model_curve_part_point(m,Int(owner[2]),parameters[1],assembly.caller)
+                elseif owner[1]==2 && haskey(m.surfaces,Int(owner[2]))
+                    parameter=Model.model_parametrization(m,2,Int(owner[2]),collect(point))
                 end
                 node=_dim01_add_node!(assembly,_dim01_next_tag!(assembly,true),point,owner,parameter)
                 support_nodes[key]=node
@@ -776,7 +793,8 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map)
     for (bi,block) in enumerate(mesh.blocks)
         dim=msh_dimension(block.msh)
         for column in axes(block.nodes,2)
-            record=records[(dim,Int(data.block_entities[bi][column]))]
+            record=get(records,(dim,Int(data.block_entities[bi][column])),nothing)
+            record===nothing && continue
             push!(record.element_types,Int32(block.msh))
             push!(record.element_tags,Int32(data.external_element_tags[bi][column]))
             push!(record.element_nodes,Int32.(data.external_node_tags[block.nodes[:,column]]))

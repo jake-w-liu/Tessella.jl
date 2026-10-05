@@ -25,7 +25,7 @@ end
 end
 
 function _extrude_nonew_levels(params,caller;source_nodes::Int=4,
-        extra_nodes::Int=1,cells_per_interval::Int=6)
+        extra_nodes::Int=1,extra_nodes_per_interval::Int=0,cells_per_interval::Int=6)
     length(params.layers)==length(params.heights) || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts layer groups have inconsistent lengths"))
     intervals=0
@@ -47,12 +47,18 @@ function _extrude_nonew_levels(params,caller;source_nodes::Int=4,
         "$caller: QuadTriNoNewVerts requires at least one layer"))
     last(params.heights)==1.0 || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts requires a normalized final layer height of 1.0"))
-    # This bound precedes level/column allocation. Quadrangles reserve a possible
-    # recorded final-cell centroid; triangles never create one. The node limit
-    # matches the structured kernels' default.
-    intervals<=(_EXTRUDE_NONEW_MAX_NODES-source_nodes-extra_nodes)÷source_nodes || throw(ArgumentError(
-        "$caller: QuadTriNoNewVerts exceeds the $_EXTRUDE_NONEW_MAX_NODES node limit"))
-    cells_per_interval*intervals<=typemax(Int32) || throw(ArgumentError(
+    # Reserve all possible recorded centers before allocating levels or columns.
+    source_nodes>0 && extra_nodes>=0 && extra_nodes_per_interval>=0 &&
+        cells_per_interval>0 || throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts requires positive source/cell bounds and nonnegative extra-node bounds"))
+    node_limit=_EXTRUDE_NONEW_MAX_NODES
+    source_nodes<=node_limit && extra_nodes<=node_limit-source_nodes &&
+        extra_nodes_per_interval<=node_limit-source_nodes || throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts exceeds the $node_limit node limit"))
+    stride=source_nodes+extra_nodes_per_interval
+    intervals<=(node_limit-source_nodes-extra_nodes)÷stride || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts exceeds the $node_limit node limit"))
+    intervals<=typemax(Int32)÷cells_per_interval || throw(ArgumentError(
         "$caller: QuadTriNoNewVerts output cell count exceeds Int32"))
     levels=_extrude_level_us(params)
     all(isfinite,levels) && all(i->levels[i]>levels[i-1],2:length(levels)) ||
@@ -429,19 +435,21 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     strip_shape=quad_patch || quad_strip || three_quad_strip || four_quad_strip || rect_grid ?
         nothing : _extrude_nonew_rect_grid_shape(m,source,sides,caller;mode=:b4_strip)
     b4_strip=strip_shape!==nothing
-    b4_strip && !params.recomb_laterals && _extrude_nonew_b4_strip_plan_error(caller,
-        "free lateral faces require the pending all-boundary propagation planner")
     two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
         _extrude_nonew_two_tri_candidate(m,source,sides,caller)
-    grid_nodes,grid_cells_per_interval,grid_centers=if rect_grid
+    grid_nodes,grid_cells_per_interval,grid_centers,grid_interval_centers=if rect_grid
         vertices,cells=_extrude_nonew_rect_grid_preflight(grid_shape,caller)
-        (vertices,cells,0)
+        (vertices,cells,0,0)
+    elseif b4_strip && params.recomb_laterals
+        vertices,cells,centers=_extrude_nonew_b4_strip_preflight(strip_shape,caller)
+        (vertices,cells,centers,0)
     elseif b4_strip
-        _extrude_nonew_b4_strip_preflight(strip_shape,caller)
+        _ExtrudeNoNewB4Free.preflight(strip_shape,caller)
     else
-        (0,0,0)
+        (0,0,0,0)
     end
     levels,refs=_extrude_nonew_levels(params,caller;
+        extra_nodes_per_interval=grid_interval_centers,
         source_nodes=rect_grid || b4_strip ? grid_nodes : quad_patch ? 9 : quad_strip ? 6 : three_quad_strip ? 8 : four_quad_strip ? 10 : sides,
         extra_nodes=rect_grid || b4_strip ? grid_centers : four_quad_strip ? (params.recomb_laterals ? 4 : 0) :
             three_quad_strip ? (params.recomb_laterals ? 3 : 0) :
@@ -496,11 +504,16 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
             mode=:b4_strip)
         source_data.grid_shape==strip_shape || _extrude_nonew_b4_strip_error(caller,
             "actual source dimensions differ from their preflight")
-        catalog=_extrude_nonew_b4_strip_plan(source_data,levels,refs,
-            params.recomb_laterals,caller)
+        catalog=params.recomb_laterals ?
+            _extrude_nonew_b4_strip_plan(source_data,levels,refs,true,caller) :
+            _ExtrudeNoNewB4Free.plan(source_data,levels,refs,caller)
         cols=_extrude_volume_columns(m,t,source,source_mesh,params,spec,levels,caller)
         _extrude_nonew_rect_grid_product_certify(cols,catalog,spec,caller)
-        return _extrude_nonew_b4_strip_finish(m,t,params,source,source_mesh,
+        if params.recomb_laterals
+            return _extrude_nonew_b4_strip_finish(m,t,params,source,source_mesh,
+                catalog,cols,top,laterals,caller)
+        end
+        return _ExtrudeNoNewB4Free.finish(m,t,params,source,source_mesh,
             catalog,cols,top,laterals,caller)
     elseif two_tri
         catalog=_extrude_nonew_two_tri_catalog(m,source,source_mesh,spec,
@@ -588,3 +601,4 @@ include("ModelExtrudeNoNewThreeQuadStrip.jl")
 include("ModelExtrudeNoNewFourQuadStrip.jl")
 include("ModelExtrudeNoNewRectGrid.jl")
 include("ModelExtrudeNoNewB4Strip.jl")
+include("ModelExtrudeNoNewB4Free.jl")

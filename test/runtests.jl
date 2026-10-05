@@ -115,6 +115,9 @@ using Tessella
     include("geometry/geo_quadtri_nonew_rect_grid_test.jl") # dynamic B3/B2/B0 source disks
     include("geometry/quadtri_nonew_b4_strip_plan_test.jl") # dynamic recombined B4 source patterns
     include("geometry/geo_quadtri_nonew_b4_rec_strip_test.jl") # actual terminal centers and complete maps
+    include("geometry/quadtri_nonew_b4_free_strip_plan_test.jl") # deferred factories and retained interval centers
+    include("geometry/geo_quadtri_nonew_b4_free_strip_test.jl") # complete free B4 source and P2 certificates
+    include("geometry/quadtri_nonew_b4_free_strip_retention_test.jl") # persistent center after a supported final mask
     include("geometry/quadtri_centroid_overflow_test.jl") # finite actual means after Float sum overflow
     include("geometry/geo_mesh_identity_test.jl") # coincident orphan point identities
     include("geometry/model_mesh_identity_helpers_test.jl") # discrete and closed curve mesh-node ownership
@@ -139,16 +142,20 @@ using Tessella
     include("interfaces/api_nonew_four_quad_strip_boundary_test.jl") # four-strip P2 carriers and lifecycle
     include("interfaces/api_nonew_rect_grid_boundary_test.jl") # dynamic grid P2 carriers and lifecycle
     include("interfaces/api_nonew_b4_rec_strip_boundary_test.jl") # arbitrary B4 carriers and lifecycle
+    include("interfaces/api_nonew_b4_free_strip_boundary_test.jl") # actual free B4 supports and retained-center lifecycle
     include("interfaces/api_generate01_test.jl") # native 0D/1D generation and sparse identities
     include("interfaces/api_mixed_queries_test.jl") # native mixed reference and function-space queries
     include("interfaces/api_mixed_advanced_test.jl") # native duplicate removal and partitioning
     include("interfaces/api_mixed_refine_test.jl") # native family-preserving mixed refinement
+    include("interfaces/api_duplicate_point_refine_test.jl") # distinct Point cells on one node and lossless MSH I/O
     include("interfaces/api_mixed_refine_support_test.jl") # inherited actual edge and face carriers
     include("interfaces/api_mesh_lifecycle_test.jl") # cached refinement and clearing
     include("interfaces/api_record_mutation_test.jl") # atomic sparse/dense tag mutation
     include("interfaces/api_refinement_classification_test.jl") # refinement identity and ownership
     include("interfaces/api_mesh_transform_test.jl") # atomic whole-cache affine transforms
     include("interfaces/api_mesh_data_test.jl") # detached node/element block queries
+    include("interfaces/api_public_element_labels_test.jl") # native public labels, Point retention and actual quadratic geometry
+    include("interfaces/api_public_recombine_labels_test.jl") # public identities, greedy admission and actual Curve edges
     include("interfaces/api_mesh_entity_topology_test.jl") # cached edge/face topology lifecycle
     include("interfaces/api_mesh_point_location_test.jl") # cached simplex point location
     include("interfaces/api_mesh_jacobian_test.jl") # cached simplex Jacobian maps

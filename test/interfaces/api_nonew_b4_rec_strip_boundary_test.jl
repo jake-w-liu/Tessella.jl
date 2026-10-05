@@ -220,12 +220,29 @@ function run_tests()
             old=API.mesh.get_nodes()[1];API.mesh.renumber_nodes(old,reverse(old))
             @test node_geometry()==geometry && cell_geometry()==cells
             groups=API.mesh.get_elements()[2]
-            element=UInt64.(vcat(groups...));before=snapshot()
-            @test_throws r"across element types" API.mesh.renumber_elements(element,reverse(element))
+            element=UInt64.(vcat(groups...))
+            before_elements=Dict(tag=>API.mesh.get_element(tag) for tag in element)
+            source=Tessella.Model.mesh_model_surface(API.CURRENT[],carriers.source)
+            # Native public labels rename cells simultaneously across families;
+            # ordered connectivity and actual entity identity stay with the cell.
+            # Independent Gmsh 4.15.2 cross-family label evidence is recorded in
+            # b4_cross_family_renumber_primary_v1.json (D46F930B...ACB87D29).
+            @test any(before_elements[old][1]!=before_elements[new][1]
+                for (old,new) in zip(element,reverse(element)))
+            API.mesh.renumber_elements(element,reverse(element))
+            @test all(API.mesh.get_element(new)==before_elements[old]
+                for (old,new) in zip(element,reverse(element)))
+            public_elements=UInt64.(vcat(API.mesh.get_elements()[2]...))
+            @test allunique(public_elements) && Set(public_elements)==Set(element)
+            @test node_geometry()==geometry && cell_geometry()==cells
+            certified=Cert.certify_quadratic(Cert.public_volume(API,carriers.volume),f,source)
+            @test certified.p1_total==1 && length(certified.centers)==5
+            before=snapshot()
+            @test_throws r"duplicate element tag" API.mesh.renumber_elements(
+                element[1:2],fill(element[1],2))
             unchanged(before)
-            # Legacy mixed caches permit permutations within each family.
-            # Sparse arbitrary labels are exercised after the tagged bridge.
-            for group in groups
+            # Query the current family memberships after the global permutation.
+            for group in API.mesh.get_elements()[2]
                 API.mesh.renumber_elements(group,reverse(group))
             end
             @test node_geometry()==geometry && cell_geometry()==cells
@@ -363,7 +380,11 @@ function run_tests()
     @testset "Unsupported and precision requests are atomic" begin
         for m in (5,7)
             f=Cert.fixture("atomic";strip_length=m,layers=:one)
-            invalid=(replace(f.source," RecombLaterals"=>""),
+            long_tags=Tuple(f.curve_tags[i] for i in f.long_pair)
+            malformed=replace(replace(f.source," RecombLaterals"=>""),
+                "Transfinite Curve{$(join(long_tags,','))}=$(m+1);"=>
+                "Transfinite Curve{$(first(long_tags))}=$(m+1);Transfinite Curve{$(last(long_tags))}=$(m+2);")
+            invalid=(malformed,
                 replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.125,0.0,1.0}"),
                 replace(f.source,"Layers{1}"=>"Layers{{1},{0.5}}"))
             for source in invalid

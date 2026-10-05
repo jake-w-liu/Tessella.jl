@@ -105,6 +105,52 @@ function _quad_quality(coords,nodes::NTuple{4,Int32})
     return isfinite(quality) ? clamp(quality,0.0,1.0) : 0.0
 end
 
+# Pinned Gmsh qualityMeasures.cpp qmQuadrangle::eta; RecombineTriangle
+# uses this signed corner-angle measure for the strict greedy angle admission.
+function _gmsh_recombine_pair_measure(coords,nodes::NTuple{4,Int32})
+    scale=0.0
+    for node in nodes,axis in 1:3
+        scale=max(scale,abs(coords[axis,Int(node)]))
+    end
+    scale>0 || return 0.0
+    points=Vector{NTuple{3,Float64}}(undef,4)
+    for i in 1:4
+        node=Int(nodes[i])
+        points[i]=(coords[1,node]/scale,coords[2,node]/scale,coords[3,node]/scale)
+    end
+    edges=Vector{NTuple{3,Float64}}(undef,4)
+    corners=Vector{NTuple{3,Float64}}(undef,4)
+    for i in 1:4
+        edges[i]=_sub3(points[mod1(i+1,4)],points[i])
+    end
+    deviation=0.0
+    for i in 1:4
+        corners[i]=_cross3(edges[i],edges[mod1(i+1,4)])
+        previous=edges[mod1(i-1,4)];current=edges[i]
+        angle=min(180.0,atan(_norm3(_cross3(previous,current)),
+            -_dot3(previous,current))*(180.0/pi))
+        deviation=max(deviation,abs(90.0-angle))
+    end
+    sign=1.0
+    for i in 2:4
+        _dot3(corners[1],corners[i])<0 && (sign=-1.0)
+    end
+    return sign*(1.0-deviation/90.0)
+end
+
+function _recombine_angle(value)
+    value===nothing && return nothing
+    value isa Real && !(value isa Bool) || throw(ArgumentError(
+        "recombine_triangles: recombine_angle must be real"))
+    angle=try Float64(value) catch err
+        err isa InterruptException && rethrow()
+        throw(ArgumentError("recombine_triangles: recombine_angle must be Float64-representable"))
+    end
+    isfinite(angle) && 0<=angle<=90 || throw(ArgumentError(
+        "recombine_triangles: recombine_angle must lie in 0:90"))
+    return angle
+end
+
 function _candidate(coords,triangles,first_triangle::Int32,second_triangle::Int32,
                     first_u::Int32,first_v::Int32,
                     second_u::Int32,second_v::Int32,edge)
@@ -154,7 +200,9 @@ trying neighbors in that same quality order. `full_quad=true` requires
 projected quadrangles with matching physical tags and quality at least
 `min_quality` are accepted. Unpaired triangles are retained unless `full_quad`
 is requested. Segment connectivity and all per-cell physical tags are preserved
-by default.
+by default. `recombine_angle` optionally applies the pinned Gmsh strict
+signed corner-angle measure admission to greedy pairing; successful Blossom
+matching and `full_quad` retain their existing matching contract.
 
 The input must be a validated surface/curve mesh without tetrahedra. This is a
 surface recombination operation; it does not generate a structured grid or modify
@@ -165,7 +213,7 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
                              physical_names=Dict{Tuple{Int,Int},String}(),
                              algorithm=:greedy,
                              full_quad=false,
-                             protected_edges=nothing)
+                             protected_edges=nothing,recombine_angle=nothing)
     preserve_segments isa Bool || throw(ArgumentError(
         "recombine_triangles: preserve_segments must be Bool"))
     full_quad isa Bool || throw(ArgumentError(
@@ -184,6 +232,7 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
             protected_edges
         end
     threshold=_recombine_quality(min_quality)
+    angle=_recombine_angle(recombine_angle)
     size(mesh.tets,2)==0 || throw(ArgumentError(
         "recombine_triangles: input must not contain tetrahedra"))
     diagnostic=MeshTypes.validate(mesh)
@@ -256,7 +305,8 @@ function recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
             first=Int(candidate.first_triangle);second=Int(candidate.second_triangle)
             if !used[first] && !used[second] &&
                mesh.tri_tag[first]==mesh.tri_tag[second] &&
-               candidate.quality>=threshold
+               candidate.quality>=threshold &&
+               (angle===nothing || _gmsh_recombine_pair_measure(mesh.coords,candidate.nodes)<angle)
                 used[first]=true;used[second]=true;push!(accepted,candidate)
             end
         end

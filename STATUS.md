@@ -25,6 +25,84 @@ support or test requirements.
 
 ### Active parity increment
 
+The current joint candidate in `C:/tmp/tessella_nonew_b4_free`, based on
+verified and pushed `5479d73`, integrates free B4 extrusion, native sparse
+public labels, Point identity preservation and API triangle recombination.
+Its corrected V2 freeze binds 490 raw inputs and the scoped index; the reopened
+ZIP independently verifies all 491 members. Installed-source API checks pass
+220,363 assertions on each supported runtime with identical 153 inputs;
+243 actual implementation bodies pass zero Core.Box on both runtimes.
+The V2 strict replay passes all 218 cases with the complete input guard held.
+Full package runs pass 1,524,909 checks on each supported runtime with all
+490 frozen inputs and the index held. All 18 resource gates pass: 121,594,248
+family checks and 102 duplicate-Point checks. Actual geometry is identical
+across runtimes and allocation/retained growth keeps `2.15*previous+65536`.
+The final release ledger SHA256 is
+`ab5d14dbc418833dc2b685cdd9ead5753b5ba004d67635d6339b9377b852d7a8`.
+All 21 existing artifacts and the immutable corner tables remain unchanged.
+Distinct Point cells on one node now survive refinement and all supported
+MSH format combinations; the
+focused Point candidate passed 79 regression, 51 resource and 4,338 existing
+element checks on each runtime before joint integration.
+
+The V1 package run failed with
+1,524,663 passes, five failures and two errors while all frozen inputs held.
+The Mixed bulk coordinate-query regression and obsolete cross-family rejection
+are corrected and pass the installed-source V2 API checks. Four
+ignored preview trees caused the layout failure and have been moved outside
+test with all bytes verified. Strict replay passed all 218 cases, and seven
+resource gates passed before the remaining sequence was held. The corrected
+V2 now passes all global gates; V1 failures and their evidence are preserved.
+The full Julia-native mesher goal
+includes every unfinished roadmap requirement and continues after increments.
+
+Free B4 propagation, final literal factories and retained mean fans are
+implemented through actual Source, Scope, Projection, P2 and API paths.
+Prior focused checks include 58,593 factory/fan/preflight assertions per
+runtime and independent centerful full-map certificates. Existing artifacts,
+315/13 templates and correctness/allocation thresholds remain unchanged.
+
+The joint lifecycle fixes bind existing Point records before covered-record
+cleanup, preserve native Point identities through order/dimension changes,
+and validate actual sparse public rows and raw cache references before
+publication. Complete raw Volume CAD closures, intentional aggregate
+repetitions, native P2 Surface parameters, cached Curve parameters and closed
+Curve endpoint incidence are retained. The preceding combined AST focus passed
+on both Julia 1.12.7 and 1.13.1: 234 bodies, zero Core.Box, 120 stable inputs.
+The complete corrected label suite passes on both supported runtimes with
+118 stable inputs, including 300 Point lifecycle checks per runtime.
+The preceding V5 API focus passed 126,423 checks on each supported runtime
+with the same 149 stable inputs. An independent 76-cell primary
+count localizes a remaining generate(2) aggregate gap to 8 missing Point and
+28 missing Line cells. Its 39 Surface cells agree. Real higher-generation
+assembly owns this unfinished contract.
+API focus, both full package runs, strict 218-case replay and all 18 resource
+gates pass against the final joint freeze.
+
+Independent recombination proofs cover retained labels, retired highwater,
+boundary/embedded-edge exclusions, temporary-cell allocation, P2 no-op,
+greedy angle admission and successful Blossom behavior. The guarded preview
+passed 174 checks; the joint permanent suites now pass in the V7 API focus. Native
+generation and GEO recombination angle callers remain a separate audit track.
+
+The first joint label focus failed an old allocator expectation independently
+disproved by the pinned primary. Repeated 2D generation retains Curve primary
+nodes and globally elevates independent discrete Curves when quadratic order
+is requested. Those are confirmed unfinished production contracts, assigned
+to the higher-generation implementation. The narrowed allocator regression
+uses independently proved stable discrete Point records and preserves all
+unresolved-reference rejection controls; it does not assert complete phase parity.
+
+Real mesh reuse and MeshOnlyEmpty implementation is active in isolated
+`C:/tmp/tessella_onlyempty_higher`. Checked per-entity mesh products, generation
+completion status and detached assembly are being wired into the actual 2D
+entry path, followed by Source/cap/lateral and 3D ingestion. No completed
+higher-generation parity claim is made. Generic duplicate-Point refinement is
+verified in this joint increment. Cross-Surface periodicity and broader roadmap
+tracks remain unfinished.
+
+### Latest verified increment (`5479d73`)
+
 Arbitrary-length recombined B4 strips and the native GEO Line source-sampling
 fix are implemented and verified in `C:/tmp/tessella_nonew_b4_strip`, from verified
 and pushed `9806d5b`. Source/plan/emission and the shared boundary/projection
@@ -79,7 +157,7 @@ and final emission drafts pass whole-product checks for nonterminal retained
 centers; public Scope/Projection/P2/API integration remains unfinished.
 All other parity requirements remain part of the full active goal.
 
-### Latest verified increment (`9806d5b`)
+### Previous verified increment (`9806d5b`)
 
 The dynamic rectangular Quad-grid NoNew path is implemented in
 `C:/tmp/tessella_nonew_rectangular_grid` on `codex/nonew-rectangular-grid`,

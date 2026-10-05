@@ -4,7 +4,11 @@
 @inline _legacy_p2_cells(mesh::P2Mesh) = mesh.tet10
 @inline _legacy_p2_type(::P2TriMesh) = 9
 @inline _legacy_p2_type(::P2Mesh) = 11
-@inline _cache_node_tag(::Union{P2TriMesh,P2Mesh},index::Integer) = UInt64(index)
+@inline function _cache_node_tag(mesh::Union{P2TriMesh,P2Mesh},index::Integer)
+    cached=LAST_MESH[]
+    return _high_order_overlay(cached)===mesh ?
+        _cache_node_tag(_mesh_public_tags(cached),index) : UInt64(index)
+end
 
 function _legacy_p2_selected(mesh,selected,caller)
     count=size(_legacy_p2_cells(mesh),2)
@@ -35,7 +39,9 @@ function _legacy_p2_keys(mesh,selected,offset,function_space_type,
     coords=MeshFunctionSpaces._checked_bool(return_coord,caller,"return_coord")
     positions=_legacy_p2_selected(mesh,selected,caller)
     cells=@view _legacy_p2_cells(mesh)[:,positions]
-    tags=UInt64[offset+cell for cell in positions]
+    cached=LAST_MESH[]
+    public=_high_order_overlay(cached)===mesh ? _mesh_public_tags(cached) : nothing
+    tags=_cache_element_tags(public,offset .+ positions)
     return _mixed_keys_for_cells(mesh,cells,msh,space,nodal_count,
         topology,face_topology,tags,coords,caller)
 end

@@ -30,6 +30,147 @@ meshing must be independent; Gmsh 4.15.2 is only a differential oracle.
 
 ## Current increment
 
+Continue in `C:/tmp/tessella_nonew_b4_free` on `codex/nonew-b4-free`, from
+verified and pushed `5479d738fe2191d747653ae143d222dfbae6e392`. Main and the
+recombined worktree are clean. Their 471 frozen input blobs and remote main
+match the verified recombined release. The active full mesher goal continues.
+
+The joint candidate integrates arbitrary-length free B4 strips, native
+public element/node labels, Point identity preservation, and public triangle
+recombination. Root owns joint production integration and release checks;
+free_api owns permanent API tests and their two-runtime checks. The corrected
+V2 also preserves distinct Point cells sharing one node through refinement
+and supported MSH ASCII/binary 2.2/4.1 I/O. Structural checks still reject
+non-Point duplicates and invalid metadata. Its global freeze binds 490 inputs
+(105 production/project, 225 test, 160 validation), scoped index
+`a70bc4459137b9a9b425e6eed67fcf9ea9fca1470bee655b6467b336e18edcde`,
+and manifest SHA256
+`637bc5865f4c020c484cbc7d46a3a269e0aa029dab3d3db063eb6b5db7daa7a8`.
+The reopened V2 archive has 491 verified members, 7,449,599 bytes and SHA256
+`b55f0ed888dde38b26cea0e33017a8cb462bab00dd6e0e3be20786805e2163fc`.
+Installed-source API checks pass 220,363 assertions on each supported runtime
+with the same 153 inputs held; pair SHA256
+`75a251b2d5a813ac71ff8e5ac209cc82d816fc117efe1ef19b531e1ad2516129`.
+The actual installed-body audit passes 243 bodies with zero Core.Box and the
+same 120 inputs on both runtimes. V2 strict replay passes all 218 cases in
+474.797 seconds with the complete 490-input guard held, log SHA256
+`b8a93edf2d534d8e33470725e6afd01ac631908ea6923e06c01cbaba90bff34e`.
+The full Julia112 package run passes 1,524,909 checks in 2,075.226 seconds,
+with all 490 inputs and the index held. Log SHA256
+`783ce7fe4275b848963c93459d3acb6da5dd6bd7494c030f69607c0e33706954`.
+Julia113 also passes all 1,524,909 package checks in 1,667.909 seconds,
+log SHA256 `7b9b5232fadc9fdc846ef778ba16771ffda8f9d95b5b7262a374ea468008b15a`.
+All 18 resource gates pass against the same frozen tree: 121,594,248 existing
+family checks plus 102 duplicate-Point checks, with unchanged growth limits
+`2.15*previous+65536` and identical actual geometry across both runtimes.
+The final release ledger SHA256 is
+`ab5d14dbc418833dc2b685cdd9ead5753b5ba004d67635d6339b9377b852d7a8`.
+All 21 preexisting artifacts and both immutable corner tables remain unchanged.
+This is a verified increment; the full mesher goal remains active.
+
+The earlier failed V1 global freeze binds 488 inputs (105 production/project, 224 test, 159
+validation) and scoped index `f35bf59a578eb112f914ca6904379e2c03e70189ea4ce9863e6c608dd6b9dacd`.
+`b4_free_release_freeze_joint_v1.json` has SHA256
+`a3716be21067bfcefabce2d3aca7785e5f72700d34258b2b4ddbb20e9d4f9eca`.
+Its independently reopened/hash-verified ZIP has 489 members, 7,444,171 bytes
+and SHA256 `d83550dbb53e91e4b359ce93eeef5954045031bf8e4be1baff42504540ab941c`.
+The V1 full Julia112 package run failed with 1,524,663 passes, five failures
+and two errors; all 488 frozen inputs and the index remained unchanged.
+Failures comprise nested ignored preview copies under test/tmp, an obsolete
+cross-family renumbering rejection, and a genuine unclassified Mixed bulk
+coordinate-query regression. All four owned previews were relocated with
+every byte verified to C:/tmp/tessella_verification_previews/free_joint_v1.
+The V1 strict 218-case replay passed. Seven completed resource gates passed;
+the next gate was held before launch after the package failure. V1 evidence
+is preserved and is not release approval. A corrected V2 must repeat the
+complete package, strict and resource gates before commit or publication.
+The preceding API V5 focus passed 126,423 checks on each supported
+runtime with the same 149 actual inputs held. Independent primary count
+proof now localizes the 76-versus-40 M5/N1 generate(2) aggregate discrepancy:
+both implementations have 39 Surface cells, while the current native aggregate
+omits 8 Point and 28 Line cells. The higher-generation assembly track owns
+this confirmed gap; it is not a Surface-topology difference.
+
+Free B4 physical propagation finishes before final factory dispatch. Retained
+problems emit actual mean-centered fans in any interval, including later
+factory-eligible masks and nonterminal intervals. Admission reserves
+`V(N+1)+MN` nodes and `12MN` cells before allocating levels/columns. The
+independent 253 literal factory complexes, all 729 final masks, full-reference
+fan maps and actual retained-center Source products are preserved. Prior
+focused geometry, API, strict and resource results are source-version
+evidence; final gates must bind the complete joint tree. All old positive
+CRC artifacts, 315/13 templates, dispatch priorities and thresholds stay held.
+
+The pre-label checkpoint preserves 484 raw scoped inputs in
+`test/tmp/b4_free_pre_label_checkpoint_v1_inputs.zip`, SHA256
+`c1b4eef46de93c589ae4793106d34c070968cd01627ccd775e3baee52cc7a3d7`.
+Its 485 members are individually verified. It is an integration backup.
+The subsequently captured owner label source was applied by clean three-way
+integration; `joint_public_labels_capture_v1.patch` has SHA256
+`a5c15765f4e14b7865e6d88228babdefbf6f7c282cd16d2d11213a4ef31b970e`.
+
+Native Point attachments are bound before obsolete covered records are
+reconciled. Owner-based public labels preserve Point node111/cell777 with
+Mesh.Renumber=0; enabled renumbering maps them to node1/cell1. Sparse labels,
+metadata, actual support parameters and retained raw/cache references are
+validated against staged actual rows before atomic publication. Raw native
+Volume queries use the complete CAD closure and aggregate queries retain
+intentional cross-entity repetitions. Missing raw parameters no longer erase
+cached Curve parameters or native Surface P2 UVs. Closed-Curve endpoint
+multiplicity and unclassified-cache queries retain their contracts.
+
+The recombination candidate preserves surviving raw triangle identities,
+excludes actual boundary/embedded edges, charges temporary candidates before
+geometry/admission rejection, and stages fresh quadrangle labels above the
+historical highwater. P2 triangles retain the pinned no-op behavior. Greedy
+angle admission uses the signed upstream quadrangle measure; successful
+Blossom ignores that threshold. The independent 11-case allocator/angle
+authority and 174-check preview remain preparation evidence. Other generation
+and GEO recombination callers still require independent review.
+
+The final normal/bounds AST focus passes on Julia 1.12.7 and 1.13.1:
+243 actual method bodies, zero Core.Box, 120 guarded inputs unchanged. The
+pair report is `test/tmp/joint_ast_point_pair_v5.json`, SHA256
+`1cca2254f1e42ea52bea476d71aa398fa3afecad658d883a80d3431e6892d6ec`.
+The resource gate includes the same public label/lifecycle inventory plus
+analytical disjoint-triangle label growth at 1000/2000/4000 cells. Allocation
+and retained-table growth use the unchanged `2.15*previous+65536` bound.
+All 16 family/runtime gates and both duplicate-Point gates passed the final joint freeze.
+
+The corrected full joint label suite passes on both supported runtimes,
+with 118 inputs held: Julia112 228.638 seconds and Julia113 178.453 seconds.
+The Point identity lifecycle contributes 300 checks on each runtime.
+The first full joint label runs stopped at an independently false allocator
+fixture. Exact primary proof `public_labels_square_regeneration_primary_v2.json`
+(SHA256 `655558baa12280d45202480e2c0df42485647a505b8401e466001b593fdc5442`)
+shows repeated 2D generation retains completed Curve primary nodes and globally
+elevates an unrelated discrete Curve when ElementOrder=2. Current production
+does not yet implement those higher-phase contracts. The allocator fixture
+now uses unrelated discrete Points, whose preservation was independently
+proved by `public_labels_square_point_records_primary_v2.json` (SHA256
+`5128641775becb0b2d07f0e850a1908f93edd25118b16027a350393c7c4d8802`).
+Original unresolved Curve-reference rejection controls remain unchanged.
+The exact Curve phase case is retained as a separate implementation regression.
+
+Real higher-dimensional mesh reuse/OnlyEmpty implementation is active in
+`C:/tmp/tessella_onlyempty_higher`, branch `codex/onlyempty-higher`, owned by
+free_resources. It was seeded byteexact from the integrated joint tree before
+the recombination patch; it is not a released or final joint tree. The first
+real 2D slice stages checked per-entity products and detached generation
+assembly. Actual Source/cap/lateral ingestion, generation completion status,
+global order postpasses and 3D reuse remain under implementation. Sparse
+public labels do not define pointer ranking. Consistent Source/cap reversal
+and the exact Curve phase proof are independent authorities for this track.
+
+Remaining ALL scope includes B1/nontransfinite and other source topologies,
+shared neighbors/regions, chained/transformed products, mixed roots, curved
+CAD and higher orders, meshing algorithms/fields, formats/API and UI/postprocess.
+Known duplicate-Point-cell refinement admission and cross-Surface periodic
+contracts remain unfinished. Precise current diagnostics do not complete
+these requested parity requirements. After each verified publication, continue.
+
+## Verified recombined increment (`5479d73`)
+
 The verified recombined increment is in `C:/tmp/tessella_nonew_b4_strip` on
 `codex/nonew-b4-strip`, based on verified and pushed `9806d5b`. It implements
 arbitrary-length recombined B4 strips through the actual regular-disk source certificate, original-column
@@ -46,10 +187,9 @@ Fresh owns Source/Plan and resource validation; Oracle owns the native Line
 sampling fix and regressions; Nested owns geometry/API/P2 helper tests, saved
 provenance and stale negative-fixture migration. Previous verified worktrees
 are immutable tracked archives. The rejected V1/V2 candidates are retained
-below. Final V3 passes all release gates; commit and audit its exact bytes,
-fast-forward/push main, then create `C:/tmp/tessella_nonew_b4_free` on
-`codex/nonew-b4-free` for the public free-B4 integration. Preserve this
-recombined worktree as a tracked archive after publication.
+below. Final V3 passes all release gates and is committed, audited in both
+checkouts, pushed and independently matched to remote main. This recombined
+worktree is now an immutable tracked archive.
 
 Root initial normal112/bounds probe is EXIT0/drained:24 end-to-end source,
 volume and classified-projection assertions, followed by all twelve retained

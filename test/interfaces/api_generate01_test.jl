@@ -956,7 +956,9 @@ include("api_generate01_artifacts.jl")
     end
 end
 
-@testset "Legacy native higher caches reject untracked attachment allocations atomically" begin
+# Gmsh 4.15.2 Mesh0D retains the native Point111/PointCell777 identities through
+# higher generation and subsequent Curve remeshing.
+@testset "Native higher generation binds preattached Point identities before lower remeshing" begin
     _api01_begin(;renumber=false)
     try
         _API01.model.add_box(0,0,0,1,1,1;tag=1)
@@ -972,24 +974,21 @@ end
         end
         _API01.mesh.set_transfinite_volume(1)
         _API01.mesh.generate(3)
+        @test _API01.mesh.get_nodes(0,1)==(UInt64[111],xyz,Float64[])
+        @test _API01.mesh.get_elements(0,1)==(Int32[15],[UInt64[777]],[UInt64[111]])
+        @test length(_API01.mesh.get_nodes()[1])==8 && allunique(_API01.mesh.get_nodes()[1])
+        @test _API01.mesh.get_node(111)==(xyz,Float64[],0,1)
+        @test _API01.mesh.get_element_types(3,1)==Int32[5]
         for (_,curve) in _API01.model.get_entities(1)
             _API01.mesh.set_transfinite_curve(curve,3)
         end
-        model=_API01.CURRENT[];cache=_API01.LAST_MESH[]
-        class=_API01.LAST_MESH_CLASS[];before=_api01_snapshot()
-        point_payload=_API01.mesh.get_nodes(0,1)
-        parameters=deepcopy(model.curve_params)
-        attributes=deepcopy(model.meshing.transfinite_curves)
-        counters=(_API01.mesh.get_max_node_tag(),_API01.mesh.get_max_element_tag())
-        @test_throws r"untracked source tag allocations" _API01.mesh.generate(1)
-        @test _API01.CURRENT[]===model
-        @test _API01.LAST_MESH[]===cache
-        @test _API01.LAST_MESH_CLASS[]===class
-        @test _api01_snapshot()==before
-        @test model.curve_params==parameters
-        @test model.meshing.transfinite_curves==attributes
-        @test (_API01.mesh.get_max_node_tag(),_API01.mesh.get_max_element_tag())==counters
-        @test _API01.mesh.get_nodes(0,1)==point_payload
+        point_payload=(_API01.mesh.get_nodes(0,1),_API01.mesh.get_elements(0,1))
+        _API01.mesh.generate(1)
+        @test (_API01.mesh.get_nodes(0,1),_API01.mesh.get_elements(0,1))==point_payload
+        @test length(_API01.mesh.get_nodes()[1])==20 && allunique(_API01.mesh.get_nodes()[1])
+        @test isempty(_API01.mesh.get_elements(3,1)[1])
+        @test length(_API01.mesh.get_elements_by_type(1)[1])==24
+        _api01_check_references()
     finally
         _API01.finalize()
     end

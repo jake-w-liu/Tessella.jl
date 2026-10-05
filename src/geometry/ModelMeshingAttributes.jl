@@ -879,7 +879,7 @@ boundary nodes used by higher-dimensional elements. Element tags must be strictl
 positive and unique across the model.
 """
 function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
-                                node_tags)
+                                node_tags;_known_node_tags=())
     caller="add_discrete_elements!"
     dimension=_dimension(dim,caller)
     t=_tag(tag,caller,dimension)
@@ -902,6 +902,12 @@ function add_discrete_elements!(m::GeoModel,dim,tag,element_types,element_tags,
     for (_,other) in _discrete_mesh_records_model(m)
         union!(known,other.node_tags)
         union!(seen,other.element_tags)
+    end
+    # API caches retain their dense geometry separately from mesh records.
+    # A detached record edit may reference those already-published nodes without
+    # creating mirror records or changing which entity owns the node.
+    for node in _known_node_tags
+        push!(known,_discrete_mesh_tag(node,caller,"known node tag"))
     end
     for block in eachindex(element_types)
         msh_type=_mesh_attr_positive_int(element_types[block],caller,

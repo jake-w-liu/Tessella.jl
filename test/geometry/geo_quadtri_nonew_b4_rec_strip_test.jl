@@ -171,7 +171,11 @@ function b4_match_saved_source(record)
 end
 
 function b4_atomic_standalone(f)
-    invalid=(replace(f.source," RecombLaterals"=>""),
+    long_tags=Tuple(f.curve_tags[i] for i in f.long_pair)
+    malformed=replace(replace(f.source," RecombLaterals"=>""),
+        "Transfinite Curve{$(join(long_tags,','))}=$(f.strip_length+1);"=>
+        "Transfinite Curve{$(first(long_tags))}=$(f.strip_length+1);Transfinite Curve{$(last(long_tags))}=$(f.strip_length+2);")
+    invalid=(malformed,
         replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.125,0.0,1.0}"),
         replace(f.source,"Layers{1}"=>"Layers{{1},{0.5}}"))
     for text in invalid

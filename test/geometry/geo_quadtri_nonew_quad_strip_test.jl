@@ -112,7 +112,9 @@ end
 
     @testset "Unsupported source or transform failures are atomic" begin
         f=_QSC.fixture("guard";layers=:one)
-        larger=replace(f.source,"}=3;"=>"}=6;")
+        long_tags=Tuple(f.curve_tags[i] for i in f.long_pair)
+        larger=replace(f.source,"Transfinite Curve{$(join(long_tags,','))}=3;"=>
+            "Transfinite Curve{$(first(long_tags))}=6;Transfinite Curve{$(last(long_tags))}=7;")
         _qsc_atomic(merge(f,(;source=larger)),r"QuadTriNoNewVerts")
         tilted=replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.1,0.0,1.0}")
         @test tilted!=f.source
