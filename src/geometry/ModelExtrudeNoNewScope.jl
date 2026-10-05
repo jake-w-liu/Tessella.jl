@@ -5,7 +5,7 @@ struct _ExtrudeNoNewCompletePlan
     volume::Union{Mesh,MixedMesh}
     surfaces::Dict{Int,Union{Mesh,MixedMesh}}
     columns::Matrix{NTuple{3,Float64}}
-    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog}
+    catalog::Union{_ExtrudeNoNewCatalog,_ExtrudeNoNewTwoTriCatalog,_ExtrudeNoNewQuadPatchCatalog,_ExtrudeNoNewQuadStripCatalog,_ExtrudeNoNewThreeQuadStripCatalog,_ExtrudeNoNewFourQuadStripCatalog,_ExtrudeNoNewRectGridCatalog,_ExtrudeNoNewB4StripCatalog,_ExtrudeNoNewB4Free.Catalog}
 end
 
 struct _ExtrudeNoNewScope

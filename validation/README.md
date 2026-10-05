@@ -42,6 +42,8 @@ validation/
     differential.jl      # required bulk and connectivity-derived query differential
   api_generate01/
     differential.jl      # required classified 0D/1D generation and sparse lifecycle differential
+  api_point_duplicates/
+    point_duplicate_refine_resources.jl # actual Point identity, refinement allocation and implementation AST
   mesh_entity_topology/
     differential.jl      # required automatic/manual global edge/face differential
   mesh_point_location/

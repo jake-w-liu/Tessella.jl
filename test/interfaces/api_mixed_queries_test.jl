@@ -231,3 +231,37 @@ end
         _MIXED_QUERY_API.finalize()
     end
 end
+
+
+@testset "unclassified mixed Point location keeps geometric adapters" begin
+    _MIXED_QUERY_API.finalize()
+    try
+        _MIXED_QUERY_API.initialize()
+        mesh=MixedMesh(Float64[0 1 0;0 0 1;0 0 0],
+            [ElementBlock(15,reshape(Int32[1],1,1)),
+             ElementBlock(1,reshape(Int32[1,2],2,1)),
+             ElementBlock(2,reshape(Int32[1,2,3],3,1))])
+        _mixed_query_install!(mesh)
+        published=_MIXED_QUERY_API.LAST_MESH[]
+        @test _MIXED_QUERY_API.LAST_MESH_CLASS[]===nothing
+        @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,-1,true)==UInt64[3,2,1]
+        locator=_MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]
+        @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,-1,true)==UInt64[3,2,1]
+        @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===locator
+        for (dimension,element) in ((0,1),(1,2),(2,3))
+            @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,dimension,true)==UInt64[element]
+        end
+        @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.,0.,0.,0,true)==
+            (UInt64(1),Int32(15),UInt64[1],0.,0.,0.)
+        jac=(Float64[1,0,0,0,1,0,0,0,1],Float64[1],Float64[0,0,0])
+        @test _MIXED_QUERY_API.mesh.get_jacobian(1,[0.,0.,0.])==jac
+        @test _MIXED_QUERY_API.mesh.get_jacobians(15,[0.,0.,0.])==jac
+        @test _MIXED_QUERY_API.mesh.get_keys(15,"Lagrange")==
+            (Int32[0],UInt64[1],Float64[0,0,0])
+        @test _MIXED_QUERY_API.LAST_MESH[]===published
+        @test _MIXED_QUERY_API.LAST_MESH_CLASS[]===nothing
+        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_elements_by_coordinates(4.,4.,4.,-1,true)
+    finally
+        _MIXED_QUERY_API.finalize()
+    end
+end

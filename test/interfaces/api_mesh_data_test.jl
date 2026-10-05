@@ -1266,7 +1266,8 @@ end
             _MESH_DATA_API.mesh.get_element(1)
         @test (owner_dim_after,owner_tag_after)==
             (owner_dim_before,owner_tag_before)
-        # renumber_elements swaps two triangles inside their block.
+        # Gmsh 4.15.2 renames labels without moving the triangles' stored
+        # columns (independent cross-family fixture retained in test/tmp).
         tri_tags=_MESH_DATA_API.mesh.get_elements_by_type(2)[1]
         length(tri_tags)>=2 || error("fixture needs >=2 triangles")
         first_conn=copy(reshape(
@@ -1274,8 +1275,9 @@ end
         _MESH_DATA_API.mesh.renumber_elements(
             [tri_tags[1],tri_tags[2]],[tri_tags[2],tri_tags[1]])
         @test reshape(
-            _MESH_DATA_API.mesh.get_elements_by_type(2)[2],3,:)[:,2]==
+            _MESH_DATA_API.mesh.get_elements_by_type(2)[2],3,:)[:,1]==
             first_conn
+        @test _MESH_DATA_API.mesh.get_element(tri_tags[2])[2]==first_conn
         # reorder_elements permutes the entity's block by 0-based source
         # positions; reversing restores under a second application.
         tri_count=length(_MESH_DATA_API.mesh.get_elements_by_type(2,1)[1])

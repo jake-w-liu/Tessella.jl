@@ -556,8 +556,8 @@ the pinned bounded1e-5 first derivative and numerically integrated length.
 It preserves public exact evaluation and the separate recombination-count
 protocol. The strict native products pass the original coordinate tolerance;
 the artifact preserves the earlier failed source-only evidence as provenance.
-Free B4 face propagation and other unfinished source categories remain work
-under the active full-parity goal. Resource and final package release results
+Other unfinished source categories remain work under the active full-parity
+goal. Resource and final package release results
 are recorded separately in STATUS.md after the candidate is frozen.
 
 Run the recombined B4 resource gate with normal compilation and bounds checks
@@ -588,3 +588,55 @@ checked. Confirmed container-growth failures are corrected through checked
 capacity hints in tag validation, face topology/projection and API ownership
 and merge construction, without changing mesh identities or the allocation
 growth bound.
+
+## Arbitrary-length free B4 strips
+
+The strict driver replays twelve original free M5/M7/M9 primary captures with
+one or three intervals and both normal signs. Select them with
+`QUADTRI_NONEW_CASE=b4_free_strip`. Original recipes, coordinate/parameter bits,
+typed cells, primary remaps, interpolation supports and stored/computed UV
+payloads remain literal authority. These captures contain no retained center;
+their pointer-dependent families and diagonals are independently certified
+rather than used as native connectivity pins. The earlier 206 cases retain
+their contracts and every prior CRC artifact remains unchanged.
+
+The native planner acts on the actual certified source incidence. It finishes
+all physical face decisions before choosing an existing-corner factory.
+Retained problems append their actual eight-corner mean in original
+cell/interval order and emit a complete fan, including nonterminal intervals.
+The permanent suite separately checks all 729 final masks, the 253 supported
+literal C++ factory complexes, and every retained-center fan with exact whole
+maps, opposite internal faces and complete shells. Actual centerful Source
+products exercise operation Scope, classified Projection and public seeded
+mesh lifecycle; ordinary recipes separately exercise real generate(3).
+
+Run the allocation gate with normal compilation and bounds checks:
+
+```sh
+julia --startup-file=no --project=. --check-bounds=yes validation/quadtri_nonew/b4_free_strip_resources.jl
+```
+
+It measures actual plan, emission, standalone, GEO, projection, classification,
+merge and API paths at 500/1000/2000 intervals, with a separate 1000/2000/4000
+source series at three intervals. Actual P2 supports, carriers, UVs and two
+retained-center Source witnesses receive independent audits. Allocation
+doubling retains `allocated_next <= 2.15 * allocated_previous + 65536`; actual
+lowered method bodies include keyword and closure bodies with true Core.Box
+positive controls, including generation reconciliation, independent-record
+label validation, order changes, CAD boundary queries and the shared native
+support-node parameter paths. Public lifecycle checks independently cover
+raw native records, discrete records, aggregate closure repetitions, repeated
+generation and atomic rejection of unsupported label collisions.
+The joint inventory also scans public renaming, Point identity binding,
+metadata/refinement/order adapters and API recombination bodies. Analytical
+disjoint unit-right triangles measure actual label-table allocation and retained
+size at 1000/2000/4000 cells, with unchanged `2.15*previous+65536` growth bounds.
+These measurements are additional to the existing free geometry growth rows.
+The focused joint AST check covers 234 actual bodies with zero Core.Box on
+both supported runtimes; final resource runs must bind the final joint tree.
+Repeated 2D Curve retention and global quadratic discrete-Curve elevation
+remain separate confirmed generation-phase implementation work. The allocator
+fixture uses independently proved stable discrete Point records and preserves
+the original unresolved-reference rejection controls.
+Release success requires completed guarded package,
+strict and all family resource checks, recorded in STATUS.md.

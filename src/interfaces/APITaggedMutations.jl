@@ -22,12 +22,22 @@ end
 function _tagged_renumber_order(model,cached,class,node::Bool,caller)
     public=class.public_tags
     entries=Tuple{Tuple{Int,Int32},Int,Int,UInt64}[]
+    count=node ? length(public.node_tags) : length(public.element_tags)
+    for ((dim,tag),record) in Model._discrete_mesh_records_model(model)
+        _cache_covers_record(public,dim,tag) && continue
+        count=Base.checked_add(count,length(node ? record.node_tags : record.element_tags))
+    end
+    sizehint!(entries,count)
     if node
         for (position,tag) in enumerate(public.node_tags)
-            push!(entries,(class.node_entities[position],0,position,tag))
+            owner=position<=length(class.node_entities) ? class.node_entities[position] :
+                LAST_MESH_HIGH_ORDER_MIDS[][position-length(class.node_entities)]
+            push!(entries,(owner,0,position,tag))
         end
     else
         for (msh,dim,offset,_,owners) in _cache_catalog(cached,class)
+            overlay=_high_order_overlay(cached)
+            overlay!==nothing && msh==_p2_skeleton_etype(overlay) && (msh=_p2_etype(overlay))
             for (column,owner) in enumerate(owners)
                 push!(entries,((dim,owner),Int(msh),column,
                                public.element_tags[offset+column]))
@@ -62,6 +72,7 @@ function _tagged_renumber_mapping(order,old_tags,new_tags,caller,kind)
     next=maximum(values(requested);init=UInt64(0))
     mapping=Dict{UInt64,UInt64}()
     used=Set{UInt64}()
+    sizehint!(mapping,length(order));sizehint!(used,length(order))
     for old in order
         new=get(requested,old,UInt64(0))
         if new==0
@@ -96,10 +107,10 @@ function _tagged_record_renumber!(model,mapping,node::Bool)
     return nothing
 end
 
-function _tagged_mesh_max_tags(model,mesh)
-    node=maximum(mesh.entity_data.external_node_tags;init=UInt64(0))
-    element=maximum((maximum(tags;init=UInt64(0))
-                     for tags in mesh.entity_data.external_element_tags);init=UInt64(0))
+function _tagged_mesh_max_tags(model,mesh,public=nothing)
+    public===nothing && (public=_cache_public_tags(mesh))
+    node=maximum(public.node_tags;init=UInt64(0))
+    element=maximum(public.element_tags;init=UInt64(0))
     for (_,record) in Model._discrete_mesh_records_model(model)
         node=max(node,UInt64(maximum(record.node_tags;init=Int32(0))))
         element=max(element,UInt64(maximum(record.element_tags;init=Int32(0))))
@@ -111,9 +122,15 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller)
     node=kind===:node || kind=="node"
     node || kind===:element || kind=="element" || throw(ArgumentError(
         "$caller: renumber kind must be node or element"))
-    cached isa MixedMesh && cached.entity_data!==nothing &&
-        class!==nothing && class.public_tags!==nothing && class.mesh===cached ||
-        throw(ArgumentError("$caller: tagged renumbering requires a classified mixed cache"))
+    cached isa Union{Mesh,MixedMesh} && class!==nothing && class.mesh===cached ||
+        throw(ArgumentError("$caller: renumbering requires a classified mesh cache"))
+    overlay=_high_order_overlay(cached)
+    public=class.public_tags
+    if public===nothing
+        count=overlay===nothing ? nnodes(cached) : nnodes(overlay)
+        public=_cache_public_tags(cached;node_count=count)
+        class=_classification_with_public_tags(class,public)
+    end
     label=node ? "node" : "element"
     old_tags,new_tags=_tagged_renumber_lists(old_list,new_list,caller,label)
     order=_tagged_renumber_order(model,cached,class,node,caller)
@@ -122,19 +139,32 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller)
     mapping=_tagged_renumber_mapping(order,old_tags,new_tags,caller,label)
     staged_model=deepcopy(model)
     _tagged_record_renumber!(staged_model,mapping,node)
-    data=cached.entity_data
-    node_tags=node ? UInt64[mapping[tag] for tag in data.external_node_tags] :
-                     data.external_node_tags
-    element_tags=node ? data.external_element_tags :
-        [UInt64[mapping[tag] for tag in tags] for tags in data.external_element_tags]
-    mesh=_mixed_rebuild_metadata(cached,cached.blocks;
-        external_node_tags=node_tags,external_element_tags=element_tags)
-    new_class=_mixed_rebind_class(class,mesh)
-    max_node_tag,max_element_tag=_tagged_mesh_max_tags(staged_model,mesh)
+    node_tags=node ? UInt64[mapping[tag] for tag in public.node_tags] : public.node_tags
+    element_tags=node ? public.element_tags : UInt64[mapping[tag] for tag in public.element_tags]
+    mesh=cached
+    if cached isa MixedMesh && cached.entity_data!==nothing
+        # Labels do not validate or reconstruct an existing mesh. In particular,
+        # an edited empty block keeps its stored position and metadata arrays.
+        mesh=deepcopy(cached)
+        data=mesh.entity_data
+        data.external_node_tags[:]=node_tags
+        offset=0
+        for (index,block) in enumerate(mesh.blocks)
+            width=length(block.tags)
+            data.external_element_tags[index][:]=element_tags[offset+1:offset+width]
+            offset+=width
+        end
+    end
+    table=_cache_public_tags(mesh;authority=public.authority,node_tags,element_tags,
+        node_count=length(node_tags),caller)
+    rebound=mesh===cached ? class : _mixed_rebind_class(class,mesh)
+    new_class=_classification_with_public_tags(rebound,table)
+    max_node_tag,max_element_tag=_tagged_mesh_max_tags(staged_model,mesh,table)
     # Renumbering does not lower Gmsh's historical maximum tag counters.
-    previous_node,previous_element=_tagged_mesh_max_tags(model,cached)
+    previous_node,previous_element=_tagged_mesh_max_tags(model,cached,public)
     return (model=staged_model,mesh=mesh,class=new_class,
-        element_tag_map=node ? nothing : mapping,
+        element_tag_map=node ? nothing : mapping,authority=public.authority,
+        preserved_overlay=overlay,preserved_mid_owners=LAST_MESH_HIGH_ORDER_MIDS[],
         max_node_tag=max(max_node_tag,previous_node,UInt64(NODE_TAG_MAX[])),
         max_element_tag=max(max_element_tag,previous_element,UInt64(ELEMENT_TAG_MAX[])))
 end

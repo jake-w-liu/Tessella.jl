@@ -1899,20 +1899,26 @@ function _assert_mixed_partition_data(m::MixedMesh,nel::Int,
 end
 
 """
-    validate(m::MixedMesh; reject_duplicate_cells=true) -> MeshDiagnostic
+    validate(m::MixedMesh; reject_duplicate_cells=true,
+             reject_duplicate_point_cells=true) -> MeshDiagnostic
 
 Validate finite coordinates and connectivity. The check rejects repeated
 indices within each ordinary cell or constituent simplex and, by default,
-duplicate cells independent of their local orientation. Lossless MSH4 metadata
+duplicate cells independent of their local orientation. Operations preserving
+distinct Point-cell identities can set `reject_duplicate_point_cells=false`;
+duplicate non-Point cells still reject. Lossless MSH4 metadata
 is checked for aligned arrays, valid entity references and topology, legacy-tag
 consistency, finite parametrics, globally unique positive external tags,
 aligned non-negative MSH2 elementary-entity tags, and structurally valid
 periodic entity/node links. Geometry/Jacobian validity for curved high-order
 cells is not inferred from nodal coordinates by this structural validator.
 """
-function validate(m::MixedMesh; reject_duplicate_cells=true)
+function validate(m::MixedMesh; reject_duplicate_cells=true,
+                  reject_duplicate_point_cells=true)
     reject_duplicate_cells isa Bool || throw(ArgumentError(
         "validate(MixedMesh): reject_duplicate_cells must be Bool"))
+    reject_duplicate_point_cells isa Bool || throw(ArgumentError(
+        "validate(MixedMesh): reject_duplicate_point_cells must be Bool"))
     messages=String[]
     try
         _assert_mixed_structure(m,"validate(MixedMesh)")
@@ -1925,6 +1931,7 @@ function validate(m::MixedMesh; reject_duplicate_cells=true)
     if reject_duplicate_cells
         cell_capacity=0
         for block in m.blocks
+            !reject_duplicate_point_cells && block.msh==15 && continue
             cell_capacity=Base.checked_add(cell_capacity,_block_ncells(block))
         end
         sizehint!(seen,cell_capacity)
@@ -1971,7 +1978,7 @@ function validate(m::MixedMesh; reject_duplicate_cells=true)
                 "block $bi type $(b.msh) cell $j repeats a node index within a constituent simplex")
             duplicate_part && push!(messages,
                 "block $bi type $(b.msh) cell $j duplicates a constituent simplex")
-            if reject_duplicate_cells
+            if reject_duplicate_cells && (reject_duplicate_point_cells || b.msh!=15)
                 if key in seen
                     push!(messages,
                         "duplicate type $(b.msh) cell at block $bi cell $j")
@@ -5830,7 +5837,9 @@ function write_mixed_msh(path::AbstractString,m::MixedMesh;version=4.1,
             "name(s) " * join(sort!(bad_names),",") *
             "; use gmsh_compatible=false only for a Tessella-only round trip"))
     end
-    diagnostic=validate(m)
+    # Distinct Point elements can share a vertex in every supported MSH format.
+    # Keep duplicate rejection for non-Point cells and all metadata checks.
+    diagnostic=validate(m;reject_duplicate_point_cells=false)
     diagnostic.ok || throw(ArgumentError(
         "write_mixed_msh: invalid mixed mesh: "*join(diagnostic.messages,"; ")))
     if gmsh_compatible && value==4.1

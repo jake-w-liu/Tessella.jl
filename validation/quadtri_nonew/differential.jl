@@ -26,6 +26,7 @@ include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_rect_grid_c
 const QTRG=QuadTriNoNewRectGridCertificates
 include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_b4_rec_strip_certificates.jl"))
 const QTB4=QuadTriNoNewB4RecStripCertificates
+include(joinpath(@__DIR__,"..","..","test","geometry","quadtri_nonew_b4_free_strip_certificates.jl"))
 binding=get(ENV,"GMSH_JULIA_API","")
 isfile(binding) || error("set GMSH_JULIA_API to pinned Gmsh4.15.2 gmsh.jl")
 include(binding)
@@ -1385,6 +1386,8 @@ function b4_rec_strip_saved_case(record;oracle_only=false)
 end
 
 
+include(joinpath(@__DIR__,"b4_free_strip_differential.jl"))
+
 initialize_oracle()
 oracle_only=get(ENV,"QUADTRI_NONEW_ORACLE_ONLY","")=="1"
 completed=Ref(0);oracle_samples=Ref(0);quadratic_cases=Ref(0)
@@ -1881,6 +1884,7 @@ try
         b4_rec_strip_cases[]+=1;b4_rec_strip_quadratic_cases[]+=1;b4_rec_strip_empty_parameters[]+=empty_parameters
         println("QUADTRI_NONEW_B4_REC_STRIP_SAVED_OK name=$name actual_centers=$(record["audit"]["center_count"]) oracle_empty_stored_uv=$empty_parameters native_contract=computed_uv")
     end
+    b4_free_strip=b4_free_strip_saved_catalog(;selected,oracle_only)
     println("QUADTRI_NONEW_B4_REC_STRIP_DIFFERENTIAL_OK saved_cases=$(b4_rec_strip_cases[]) p2_cases=$(b4_rec_strip_quadratic_cases[]) empty_stored_uv=$(b4_rec_strip_empty_parameters[])")
     println("QUADTRI_NONEW_RECT_GRID_DIFFERENTIAL_OK saved_cases=$(rect_grid_cases[]) p2_cases=$(rect_grid_quadratic_cases[]) independent_variants=$(rect_grid_variant_cases[]) parameter_provenance_gaps=$(rect_grid_parameter_provenance_gaps[]) empty_stored_uv=$(rect_grid_empty_parameters[])")
     println("QUADTRI_NONEW_FOUR_QUAD_STRIP_DIFFERENTIAL_OK saved_cases=$(four_strip_cases[]) p2_cases=$(four_strip_quadratic_cases[]) independent_variants=$(four_strip_variant_cases[]) parameter_provenance_gaps=$(four_strip_parameter_provenance_gaps[]) empty_stored_uv=$(four_strip_empty_parameters[])")

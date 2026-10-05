@@ -45,7 +45,7 @@ function _mixed_remove_duplicate_nodes!(model,cached,pairs,records,caller)
             dense!=0 && (connectivity[i]=public_tags===nothing ? remap[dense] :
                          Int32(_cache_node_tag(public_tags,replacement[dense])))
         end
-        _replace_mesh_cache_locked!(mesh,new_class)
+        _replace_mesh_cache_locked!(mesh,new_class;preserve_visibility=public_tags!==nothing)
         cached=mesh
     end
     isempty(records) && return nothing
@@ -84,7 +84,7 @@ function _mixed_remove_duplicate_elements!(model,cached,pairs,records,caller)
     end
     if changed
         mesh,class=_mixed_select_columns(cached,class,selections)
-        _replace_mesh_cache_locked!(mesh,class)
+        _replace_mesh_cache_locked!(mesh,class;preserve_visibility=class.public_tags!==nothing)
         cached=mesh
     end
     for (dim,tag,record) in records

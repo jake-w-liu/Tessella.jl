@@ -1189,7 +1189,7 @@ Upstream primary pointer minima are not public-tag minima. Native original
 source-column ordinal ranking is consistent across eligible terminal caps and
 interior shared laterals; saved upstream products are checked for existence of
 one global rank rather than pinned to one process's free connectivity.
-The next increment extends the actual source certificate to arbitrary-length
+Verified and pushed `5479d73` extends the actual source certificate to arbitrary-length
 one-cell-wide recombined B4 strips, with at least five source Quads. One
 terminal mean per original cell supplies a certified seven-cell fan; earlier
 intervals remain whole Hex8 cells. Checked capacities, shared boundary sheets
@@ -1197,14 +1197,38 @@ and actual primary/support carriers use the same dynamic-grid interface.
 For M source cells and N intervals, the family counts are 2M Tet4,
 M(N-1) Hex8 and 5M Pyr5; primary and quadratic node counts are
 2(M+1)(N+1)+M and (12M+6)N+14M+3. The implementation and its permanent
-geometry/API, strict differential and resource checks are being completed in
+geometry/API, strict differential and resource checks passed in
 `C:/tmp/tessella_nonew_b4_strip`, from verified and pushed `9806d5b`.
-B1 categories, free B4 propagation, other source topologies, transformed products, mixed roots and
+Both supported runtimes passed 1,311,533 package assertions, the strict replay
+passed 206 cases, and all 14 resource gates passed 101,383,766 actual checks.
+The current free B4 increment in `C:/tmp/tessella_nonew_b4_free` completes
+physical face propagation before final factory dispatch. An actual retained
+problem emits its certified mean-centered fan in any interval, including
+nonterminal intervals and later factory-eligible masks. Node/cell admission
+reserves `V(N+1)+MN` and `12MN` before level/column allocation. The permanent
+factory/fan/preflight tests pass 58,593 on each supported runtime; complete
+geometry/API/P2, strict and resource release verification remains in progress.
+B1 categories, other source topologies, transformed products, mixed roots and
 shared neighbors/regions remain unfinished phases with precise blockers.
 
-Native curved-CAD P2 placement/refinement, complete higher-dimensional public
-tag lifecycle, remaining meshing algorithms and fields, broad formats/API,
-and UI/postprocessing remain separate unfinished tracks. Unsafe raw native
+The same joint candidate implements geometry-preserving native public label
+plans, Point identity binding before record cleanup and API recombination
+allocation/angle contracts. The combined actual AST scan passes 234 bodies
+on both supported runtimes with no Core.Box. Final joint package, strict and
+resource release checks are pending. Other recombination callers are under
+independent review.
+
+Checked per-entity products and higher generation reuse/OnlyEmpty are being
+implemented in isolated `C:/tmp/tessella_onlyempty_higher`. Repeated 2D Curve
+primary retention and global quadratic elevation of independent discrete
+Curves are independently confirmed unfinished contracts in this track.
+Actual 3D Source/cap/lateral ingestion, generation completion status and
+extruded-region phase priority must follow the pinned independent authority.
+
+Native curved-CAD P2 placement/refinement, remaining higher-dimensional public
+tag lifecycle, duplicate-Point refinement admission, cross-Surface periodicity,
+meshing algorithms and fields, broad formats/API, and UI/postprocessing remain
+unfinished tracks. Unsafe raw native
 P2 fixtures that crash the pinned Gmsh library are recorded oracle gaps.
 
 ## Verification discipline

@@ -276,6 +276,7 @@ function _mixed_refine_support_class(class,mesh,owners,edges,faces,quads;
     result=_mixed_classification(mesh,class.entity,class.entities,node_entities,
         class.boundaries,owners;edge_entities=edges,face_entities=faces,quad_entities=quads)
     class.public_tags===nothing && return result
+    mesh===class.mesh && return _classification_with_public_tags(result,class.public_tags)
     return _classification_with_public_tags(result,
         _cache_public_tags(mesh;authority=class.public_tags.authority))
 end
@@ -284,7 +285,10 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
     caller="API.mesh.refine"
     node_limit=_mixed_refine_limit(max_nodes,"max_nodes")
     cell_limit=_mixed_refine_limit(max_cells,"max_cells")
-    diagnostic=validate(cached)
+    # Point cells are distinct elements even when they reference one vertex.
+    # meshRefine.cpp preserves their identities; other duplicate cells remain
+    # invalid under this operation's existing structural admission contract.
+    diagnostic=validate(cached;reject_duplicate_point_cells=false)
     diagnostic.ok || throw(ArgumentError("$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
     stored_class=_cached_classification_locked(cached)
     _mixed_require_linear_cad(m,stored_class,caller)
@@ -298,10 +302,11 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
     end
     linear,linear_class=_mixed_select_columns(linear,linear_class,
         [collect(axes(b.nodes,2)) for b in linear.blocks];node_order=findall(used))
-    tagged=stored_class!==nothing && stored_class.public_tags!==nothing
+    native_labels=stored_class!==nothing && stored_class.public_tags!==nothing && cached.entity_data===nothing
+    tagged=stored_class!==nothing && stored_class.public_tags!==nothing && !native_labels
     if tagged
         ordering_class=linear_class
-        order=sortperm(linear.entity_data.external_node_tags;
+        order=sortperm(linear_class.public_tags.node_tags;
             by=tag->(ordering_class.node_entities[ordering_class.public_tags.node_indices[tag]],tag),
             alg=Base.Sort.MergeSort)
         linear,linear_class=_mixed_select_columns(linear,linear_class,
@@ -347,7 +352,8 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
                 owners[target][column]=parent_owners[parent]
                 if tagged
                     if target==15
-                        external[target][column]=linear.entity_data.external_element_tags[bi][parent]
+                        external[target][column]=linear_class.public_tags.element_tags[
+                            catalog[bi][3]+parent]
                     else
                         element_max<typemax(Int32) || throw(ArgumentError(
                             "$caller: refined public element tags exceed Int32"))
@@ -375,10 +381,11 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
         assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
             NODE_TAG_MAX[],element_max,node_limit,cell_limit,caller)
         data=quadratic.entity_data
+        public=quadclass.public_tags
         for position in axes(quadratic.coords,2)
-            _dim01_add_node!(assembly,data.external_node_tags[position],
+            _dim01_add_node!(assembly,public.node_tags[position],
                 ntuple(axis->quadratic.coords[axis,position],3),
-                quadclass.node_entities[position],data.node_parametric[position])
+                quadclass.node_entities[position],data===nothing ? nothing : data.node_parametric[position])
         end
         for block in blocks,column in axes(block.nodes,2)
             _dim01_add_cell!(assembly,block.msh,
@@ -390,14 +397,14 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
             Set{Tuple{Int,Int32}}(),falses(length(assembly.nodes)),
             !iszero(OPTIONS["Mesh.Renumber"]),false;
             save_all=!iszero(OPTIONS["Mesh.SaveAll"]),curve_parameter_order=true)
-        diagnostic=validate(plan.mesh)
+        diagnostic=validate(plan.mesh;reject_duplicate_point_cells=false)
         diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*
             join(diagnostic.messages,"; ")))
         positions=Dict{UInt64,Int32}();sizehint!(positions,nnodes(plan.mesh))
         for (position,tag) in enumerate(plan.mesh.entity_data.external_node_tags)
             positions[tag]=Int32(position)
         end
-        mapping=Int32[positions[plan.node_tag_map[tag]] for tag in data.external_node_tags]
+        mapping=Int32[positions[plan.node_tag_map[tag]] for tag in public.node_tags]
         intermediate=_mixed_classification(quadratic,quadclass.entity,quadclass.entities,
             quadclass.node_entities,quadclass.boundaries,owners;
             edge_entities=edges,face_entities=faces,quad_entities=quads)
@@ -410,11 +417,38 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
         return _copy_mesh(plan.mesh)
     end
     refined=MixedMesh(quadratic.coords,blocks;physical_names=cached.physical_names)
-    diagnostic=validate(refined)
+    diagnostic=validate(refined;reject_duplicate_point_cells=false)
     diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*join(diagnostic.messages,"; ")))
     cache=_copy_mesh(refined)
     new_class=stored_class===nothing ? nothing : _mixed_refine_support_class(
         quadclass,cache,owners,edges,faces,quads;node_entities=copy(quadclass.node_entities))
+    if native_labels
+        public=quadclass.public_tags
+        point_labels=UInt64[]
+        for (msh,_,offset,cells,_) in _cache_catalog(quadratic,quadclass)
+            msh==15 || continue
+            for column in axes(cells,2)
+                push!(point_labels,public.element_tags[offset+column])
+            end
+        end
+        count=sum(length(block.tags) for block in cache.blocks if block.msh!=15;init=0)
+        ELEMENT_TAG_MAX[]<=typemax(Int32)-count || throw(ArgumentError(
+            "$caller: refined public element tags exceed Int32"))
+        labels=UInt64[]
+        next=ELEMENT_TAG_MAX[]
+        point_index=0
+        for block in cache.blocks,column in axes(block.nodes,2)
+            if block.msh==15
+                point_index+=1;push!(labels,point_labels[point_index])
+            else
+                next+=1;push!(labels,next)
+            end
+        end
+        table=_cache_public_tags(cache;authority=stored_class.public_tags.authority,
+            node_tags=public.node_tags,element_tags=labels,caller)
+        new_class=_classification_with_public_tags(new_class,table)
+    end
+    _validate_retained_cache_references(m,cached,new_class,caller)
     _replace_mesh_cache_locked!(cache,new_class)
     return refined
 end
